@@ -1,6 +1,6 @@
 # Term layout and the two mechanisms of row 6
 
-Status: measurement and design record for task [#572](https://github.com/fahchen/pbeam/issues/572), a sub-issue of [#553](https://github.com/fahchen/pbeam/issues/553), under epic [#450](https://github.com/fahchen/pbeam/issues/450) and milestone tracker [#38](https://github.com/fahchen/pbeam/issues/38). Row 6 of the [term proposal](term-performance-design-codex-v2.md) is the design. This record changes no runtime code. The immediate atom root is [#553](https://github.com/fahchen/pbeam/issues/553), and the compact term is [#571](https://github.com/fahchen/pbeam/issues/571).
+Status: measurement and design record for task [#572](https://github.com/fahchen/pbeam/issues/572), under epic [#450](https://github.com/fahchen/pbeam/issues/450) and milestone tracker [#38](https://github.com/fahchen/pbeam/issues/38). Row 6 of the [term proposal](term-performance-design-codex-v2.md) is the design. This record changes no runtime code. The compact term is [#571](https://github.com/fahchen/pbeam/issues/571), and the immediate atom root is [#580](https://github.com/fahchen/pbeam/issues/580), whose sub-issues [#591](https://github.com/fahchen/pbeam/issues/591) to [#596](https://github.com/fahchen/pbeam/issues/596) deliver it.
 
 ## 1. The measured layout at `3b3a21d`
 
@@ -242,7 +242,9 @@ The size cost. A `HostTerm` is a `Term` of 40 bytes and an `Arc<AtomTable>` of 8
 
 ### 3.5 The size that the atom mechanism reaches
 
-The atom arm goes from 24 bytes to 4 bytes. `Term` stays 40 bytes and `Option<Term>` stays 40 bytes, because the 32-byte `Binary` arm holds the size. The mechanism alone does not reach the 16-byte target of row 6. It removes the last arm above 8 bytes other than `Binary`, so the compact term then reaches 16 bytes.
+The atom arm goes from 24 bytes to 4 bytes. Without the compact term of section 4, `Term` stays 40 bytes and `Option<Term>` stays 40 bytes, because the 32-byte `Binary` arm holds the size. The mechanism alone does not reach the 16-byte target of row 6. It removes the last arm above 8 bytes other than `Binary`, so the compact term then reaches 16 bytes.
+
+The order of the two mechanisms changes the number that each one reaches. With the compact term of section 4 in place, `Term` is 32 bytes and the 24-byte atom arm is the largest arm. The atom mechanism then takes `Term` from 32 bytes to 16 bytes. Task [#580](https://github.com/fahchen/pbeam/issues/580) owns that mechanism, and its sub-issues [#591](https://github.com/fahchen/pbeam/issues/591) to [#596](https://github.com/fahchen/pbeam/issues/596) deliver it. Section 8 records the size that the compact term reaches alone.
 
 ### 3.6 The alternatives that this design rejects
 
@@ -257,7 +259,7 @@ The atom arm goes from 24 bytes to 4 bytes. `Term` stays 40 bytes and `Option<Te
 
 ## 4. The design of the compact term
 
-The mechanism boxes the 32-byte binary descriptor behind one pointer, as the representation section of the proposal asks: "Box the binary descriptor in the layout comparison" (`docs/term-performance-design-codex-v2.md`). `Term::Binary` then holds one `Arc` to the view, and the view keeps the bytes, the bit offset, the size, and the packed bytes that `src/term/binary.rs:44-60` holds today.
+The mechanism boxes the 32-byte binary descriptor behind one pointer, as the representation section of the proposal asks: "Box the binary descriptor in the layout comparison" (`docs/term-performance-design-codex-v2.md`). Task [#571](https://github.com/fahchen/pbeam/issues/571) realizes the pointer as the `Binary` handle of the implementation: `Binary` is one `Arc` to a private `BinaryView`, as `Tuple`, `Fun`, `Map`, and `ConsRef` are one `Arc` to their payload. `Term::Binary` keeps the `Binary` handle, and the view keeps the bytes, the bit offset, the size, and the packed bytes that `src/term/binary.rs:44-60` held before the change. Section 8 records the outcome.
 
 The model of section 1 gives the sizes. After the binary move, `Binary` is 8 bytes, so every compound arm is at most 8 bytes and `Nil` is 0. With the immediate atom of section 3, the largest arm is 8 bytes and the discriminant is 8 bytes, which is 16 bytes. `Option<Term>` is also 16 bytes.
 
@@ -269,7 +271,7 @@ The model of section 1 gives the sizes. After the binary move, `Binary` is 8 byt
 | `Cons`, `Tuple`, `Map`, `Fun`, `MatchContext` | 8 |
 | `Nil` | 0 |
 
-The design departs from the proposal sketch in these places. PBeam keeps the separate `Fun`, `Map`, `Tuple`, `Cons`, and `MatchContext` arms, each one an 8-byte handle, and the sketch merges them into `Boxed(Arc<Object>)`. Both reach 16 bytes. The sketch adds `Float(f64)`, and PBeam has no float term: an unsupported numeric path keeps its current error, as the acceptance of [#553](https://github.com/fahchen/pbeam/issues/553) requires. The `Small(i64)` arm of the sketch is the `Integer(i64)` arm of PBeam.
+The design departs from the proposal sketch in these places. PBeam keeps the separate `Fun`, `Map`, `Tuple`, `Cons`, and `MatchContext` arms, each one an 8-byte handle, and the sketch merges them into `Boxed(Arc<Object>)`. Both reach 16 bytes. The sketch adds `Float(f64)`, and PBeam has no float term: an unsupported numeric path keeps its current error, as the acceptance of [#580](https://github.com/fahchen/pbeam/issues/580) requires. The `Small(i64)` arm of the sketch is the `Integer(i64)` arm of PBeam.
 
 The model measures the arm sizes and the enum size only. It does not measure the cost of the move. A binary root then pays one allocation for the view and one dependent load for each read of the descriptor. Row 6 states the requirement: "Measure the added binary-view allocation and indirection."
 
@@ -293,7 +295,7 @@ The gate is measured on the full Terra path, not on an isolated loop. The floor 
 
 ## 6. The split of row 6
 
-Row 6 holds two independent mechanisms, so it splits, as the rule of the proposal asks. [#553](https://github.com/fahchen/pbeam/issues/553) owns the immediate atom root and records the term and slot sizes. [#571](https://github.com/fahchen/pbeam/issues/571) owns the compact term and the 16-byte target, and its start size is the size that [#553](https://github.com/fahchen/pbeam/issues/553) records. [#572](https://github.com/fahchen/pbeam/issues/572), this record, blocks both, because each mechanism uses the consumer list and the measurement plan of this document. Native sub-issue links express the order.
+Row 6 holds two independent mechanisms, so it splits, as the rule of the proposal asks. [#571](https://github.com/fahchen/pbeam/issues/571) owns the compact term and delivers it first: `Term` falls from 40 bytes to 32 bytes, and section 8 records that result. [#580](https://github.com/fahchen/pbeam/issues/580) owns the immediate atom root, and its sub-issues [#591](https://github.com/fahchen/pbeam/issues/591) to [#596](https://github.com/fahchen/pbeam/issues/596) deliver it: the atom arm falls to 4 bytes and `Term` falls from 32 bytes to 16 bytes. The title of row 6 is the 16-byte term, so the two tasks are the two halves of one target, and the owner decided on 2026-10-14 that the compact term lands on its own result and the atom mechanism lands the rest. [#572](https://github.com/fahchen/pbeam/issues/572), this record, blocked both at the design step, because each mechanism uses the consumer list and the measurement plan of this document. Native sub-issue links express the order.
 
 ## 7. The baseline numbers of this record
 
@@ -326,3 +328,67 @@ The Terra Counter example, release build, from `bash scripts/terra_latency.sh re
 | control run, `3b3a21d` | `{ 6.94 18.96 18.36 }` | 0.29 s | 0.021 s | 0.030 s | 0.015 s | 0.027 s | 62080 KB |
 
 The resident set size of the release process is 62080 KB, which is 60.6 MiB, for a full scene of the control run. The method is a wrapper that samples `ps -o rss` of the `pbeam` process every 50 ms and keeps the maximum. The number is not the live guest bytes and it is not an upper bound of them. It can be above the live bytes, because the allocator keeps freed memory, and because the loaded BEAM code, the binary, and the allocator arenas are part of the resident set. It can be below a short peak, because a sample every 50 ms does not see a peak between two samples. The sample is supporting evidence only, as section 5 states, and it cannot establish a 20 percent reduction of the live bytes. The control run is a single run, and its four keys carry the variance of a single sample. The record keeps the discarded run only to show why the bound of the measurement plan matters.
+
+## 8. The outcome of the compact term of [#571](https://github.com/fahchen/pbeam/issues/571)
+
+Task [#571](https://github.com/fahchen/pbeam/issues/571) implements the compact term of section 4 on branch `perf/571-compact-term`, on top of `origin/main` at `35c410e6`. The implementation makes `Binary` the one-pointer handle: the private `BinaryView` keeps the bytes, the bit offset, the size, and the packed bytes, and `Binary` is one `Arc` to it. The public `Term::Binary(Binary)` variant and every call site stay unchanged.
+
+The sizes at the pinned `rustc 1.99.0 (b940084d7 2026-09-28)`, host Darwin 27.0.0 arm64, Apple M1 Max, from `RUSTC_BOOTSTRAP=1 mise exec -- cargo rustc --locked --lib -- -Zprint-type-sizes`:
+
+| Type | At `35c410e6`, bytes | At the branch head, bytes |
+| --- | --- | --- |
+| `Term` | 40 | 32 |
+| `Option<Term>` | 40 | 32 |
+| `Binary` | 32 | 8 |
+| `BinaryView` | no separate type | 32 |
+| `Atom` | 24 | 24 |
+| `MatchState` | 40 | 16 |
+| `Operand` | 40 | 32 |
+| `Instruction` | 136 | 112 |
+| `StackSlot` | 40 | 32 |
+
+The arm sizes at the branch head are `Binary` 8, `Atom` 24, `Integer`, `Cons`, `Tuple`, `Map`, `Pid`, `Port`, `Reference`, `Fun`, and `MatchContext` 8, and `Nil` 0. `Term` is 32 bytes because the 24-byte `Atom` arm is the largest arm and the discriminant is 8 bytes. The task does not reach the 16-byte target of row 6. Only the immediate atom root of [#580](https://github.com/fahchen/pbeam/issues/580) takes the largest arm to 8 bytes and `Term` to 16 bytes, and its sub-issues [#591](https://github.com/fahchen/pbeam/issues/591) to [#596](https://github.com/fahchen/pbeam/issues/596) deliver it.
+
+The added allocation and the indirection, from `mise run bench-term`. Each allocation row is the exact count of the counting allocator of `tests/term/data_structure_costs.rs` for one call:
+
+| Operation | Allocations | Note |
+| --- | --- | --- |
+| `Binary::from(bytes)`, with the byte vector owned by the caller | 2 | the array of the bytes and the view descriptor |
+| a copy of a `Binary` handle | 0 | one reference count |
+| `bits` of a byte-aligned range | 1 | one view descriptor |
+| `bits` of a range whose first bit is not on a byte boundary | 3 | the view descriptor, the vector of the packed bits, and its `Arc` |
+| one read of the size through the handle, at `35c410e6` | 0.813 ns | the fields of the inline descriptor; three rounds 0.813, 0.814, 0.813 |
+| one read of the size through the handle, at the branch head | 0.877 ns | one pointer load before the fields; three rounds 0.878, 0.877, 0.877 |
+
+The read harness sets the handle pointer with `black_box` inside the timed loop, so the compiler cannot move the read of the view out of the loop. The release assembly of `prints_the_cost_of_a_binary_view` keeps the loop: the counter `0x30d40` (200000) decrements in the loop, and the body loads the handle, takes the view pointer with `ldr x12, [x12]`, and reads `packed` with `ldr x13, [x12, #0x28]`, `size` with `ldr x13, [x12, #0x20]`, and the byte pointer and its length with `ldp x12, x14, [x12, #0x10]`. The three read rounds run at a one-minute load of 7.88 to 8.48, and each value is the minimum of nine timed runs of one harness call.
+
+The boxed descriptor adds one allocation for each binary handle against the inline descriptor of the previous layout. The live-byte walk counts 32 bytes of the descriptor for each distinct handle and excludes the 16-byte `Arc` header, as it excludes the header of every shared container (section 5).
+
+The deep copy of a 100 KB binary is slower at the branch head, and the record states the sign. One pair is one invocation of `mise run bench-term` on `35c410e6` and one invocation on the branch head, next to each other in one quiet window; each value is the minimum of nine calls inside one test process. The four pairs are 1748.834 and 1812.000 ns, 1632.166 and 1750.250 ns, 1640.000 and 1745.000 ns, and 1630.000 and 1747.916 ns, so the branch head is from 3.6 to 7.2 percent slower in every pair. `arc_clone_drop_binary_102400` is 9.952, 9.952, and 9.939 ns at `35c410e6` and 9.612, 9.609, and 9.612 ns at the branch head, so a copy of the smaller handle is about 3.4 percent faster.
+
+The peak live bytes of one Terra scene, from 30 runs of `mise run bench-live-bytes` for each revision, at a one-minute load of 6.13 to 6.76:
+
+| Revision | Samples | Peak live bytes | Peak resident set size |
+| --- | --- | --- | --- |
+| `35c410e6` | 30 | 24096 in each run | 3992 KB median, 3904 to 4032 KB |
+| the branch head | 30 | 20192 in each run | 3968 KB median, 3888 to 4032 KB |
+
+The reduction is 3904 bytes, or 16.20 percent of 24096 bytes, and the spread of the samples is 0 bytes in both revisions.
+
+The end-to-end Terra path, from `bash scripts/terra_latency.sh release`, with one before run and one after run next to each other in each round. Each revision contributes 42 runs, and the table keeps the 30 runs of each revision with a one-minute load of at most 12, as section 5 requires; the load rejects 12 runs of each revision.
+
+| Metric | `35c410e6`: min, median, p95 | the branch head: min, median, p95 |
+| --- | --- | --- |
+| First frame | 0.34 s, 0.37 s, 0.81 s | 0.33 s, 0.37 s, 0.86 s |
+| Key `j` | 0.015 s, 0.022 s, 0.032 s | 0.014 s, 0.021 s, 0.035 s |
+| Key `j` | 0.014 s, 0.026 s, 0.032 s | 0.014 s, 0.022 s, 0.030 s |
+| Key `k` | 0.015 s, 0.022 s, 0.029 s | 0.014 s, 0.023 s, 0.031 s |
+| Key `q` | 0.015 s, 0.022 s, 0.030 s | 0.015 s, 0.022 s, 0.034 s |
+
+The one-minute load of the 84 runs is 3.23 to 31.34. The ratio of the median of the after runs to the median of the before runs is 1.000 for the first frame and 0.955, 0.830, 1.045, and 0.978 for the four keys. The key latency has a resolution of 1 ms, so a key median carries that step.
+
+The floor loop at 200000 iterations, from `mise run bench-dispatch`, load `{ 6.45 6.73 4.81 }` for both runs. The `call_only` floor loop of `dispatch_probe` is 120.7 ns at `35c410e6` and 117.9 ns at the branch head; the `call_ext_only` floor loop is 274.3 ns and 250.8 ns; the loop plus `gc_bif '+'` is 189.7 ns and 187.9 ns; the loop plus the `bif` of `tuple_size/1` is 191.6 ns and 186.9 ns; the loop plus the `bif` of `element/2` is 195.4 ns and 190.7 ns; the loop plus the `bif` of `hd/1` is 194.6 ns and 190.8 ns; and the loop plus the `bif` of `map_get/2` on a 1000-key map is 261.2 ns and 251.1 ns.
+
+The gate of row 6 fails on its numbers. The end-to-end Terra time does not gain 10 percent: the median of the first frame is 0.37 s in both revisions, and the four keys move between 17.0 percent faster and 4.5 percent slower. The peak-live-byte reduction is 16.20 percent, below the 20 percent bound. The time does not regress by more than 10 percent: the largest increase of a key median is 4.5 percent.
+
+The owner decided on 2026-10-14 that the title of row 6 is reached when `size_of::<Term>()` is 16 bytes, that the compact term is the first half of that target, and that the compact term lands on this result. The row stays open for the immediate atom of [#580](https://github.com/fahchen/pbeam/issues/580), whose sub-issues [#591](https://github.com/fahchen/pbeam/issues/591) to [#596](https://github.com/fahchen/pbeam/issues/596) take `Term` from 32 bytes to 16 bytes.

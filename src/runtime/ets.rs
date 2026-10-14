@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use crate::term::{LiveBytes, ProcessId, Reference, Term, internal_hash};
+use crate::term::{Atom, AtomTable, LiveBytes, ProcessId, Reference, Term, internal_hash};
 
 /// The number of slots of the first segment of a hash table, which a new
 /// table has (`FIRST_SEGSZ`, `erl_db_hash.c:164-165`).
@@ -147,7 +147,8 @@ impl EtsTables {
     /// ```rust,ignore
     /// let mut tables = EtsTables::default();
     /// let mut table = Table::new(ProcessId(0), Access::Public, 1);
-    /// table.insert(vec![Term::static_atom("k"), Term::tuple(vec![Term::Integer(1)])]);
+    /// let atoms = AtomTable::new();
+    /// table.insert(&atoms, vec![Term::static_atom("k"), Term::tuple(vec![Term::Integer(1)])]);
     /// tables.create(Reference(1), None, table);
     /// let mut live = LiveBytes::new();
     /// tables.account_terms(&mut live);
@@ -202,11 +203,12 @@ impl EtsTables {
     /// ```
     pub(super) fn table(
         &mut self,
+        atoms: &AtomTable,
         id: &Term,
         caller: ProcessId,
         operation: Operation,
     ) -> Option<&mut Table> {
-        let (id, _) = self.find(id)?;
+        let (id, _) = self.find(atoms, id)?;
         let table = self.tables.get_mut(&id)?;
         let allowed = table.owner == caller
             || matches!(
@@ -227,13 +229,14 @@ impl EtsTables {
     /// ```rust,ignore
     /// let mut tables = EtsTables::default();
     /// tables.create(Reference(0), Some("ac_tab"), Table::new(ProcessId(0), Access::Private, 1));
-    /// assert!(tables.find(&Term::static_atom("ac_tab")).is_some_and(|(id, _)| id == Reference(0)));
-    /// assert!(tables.find(&Term::Reference(Reference(1))).is_none());
-    /// assert!(tables.find(&Term::Integer(1)).is_none());
+    /// let atoms = AtomTable::new();
+    /// assert!(tables.find(&atoms, &Term::static_atom("ac_tab")).is_some_and(|(id, _)| id == Reference(0)));
+    /// assert!(tables.find(&atoms, &Term::Reference(Reference(1))).is_none());
+    /// assert!(tables.find(&atoms, &Term::Integer(1)).is_none());
     /// ```
-    pub(super) fn find(&self, id: &Term) -> Option<(Reference, &Table)> {
+    pub(super) fn find(&self, atoms: &AtomTable, id: &Term) -> Option<(Reference, &Table)> {
         let id = match id {
-            Term::Atom(name) => *self.names.get(name.name())?,
+            Term::Atom(name) => *self.names.get(atoms.name_of(name))?,
             Term::Reference(id) => *id,
             _ => return None,
         };
@@ -261,10 +264,15 @@ impl EtsTables {
     /// ```rust,ignore
     /// let mut tables = EtsTables::default();
     /// tables.create(Reference(0), Some("ac_tab"), Table::new(ProcessId(1), Access::Public, 1));
-    /// assert_eq!(tables.delete_owned(ProcessId(1), 100), Some(68));
+    /// assert_eq!(tables.delete_owned(&AtomTable::new(), ProcessId(1), 100), Some(68));
     /// assert!(!tables.name_in_use("ac_tab"));
     /// ```
-    pub(super) fn delete_owned(&mut self, owner: ProcessId, mut reds: i32) -> Option<i32> {
+    pub(super) fn delete_owned(
+        &mut self,
+        atoms: &AtomTable,
+        owner: ProcessId,
+        mut reds: i32,
+    ) -> Option<i32> {
         loop {
             if let Some(segments) = self.freeing.get_mut(&owner) {
                 while let Some(segment) = segments.pop() {
@@ -289,7 +297,7 @@ impl EtsTables {
             };
             let table = self.tables.remove(&id).expect("an owned table is live");
             self.names.retain(|_, named| *named != id);
-            self.freeing.insert(owner, table.segment_reductions());
+            self.freeing.insert(owner, table.segment_reductions(atoms));
         }
     }
 }
@@ -339,14 +347,15 @@ impl Table {
     ///
     /// ```rust,ignore
     /// let mut table = Table::new(ProcessId(0), Access::Public, 1);
-    /// table.insert(vec![Term::static_atom("k"), Term::Integer(1)]);
-    /// table.insert(vec![Term::static_atom("k"), Term::Integer(2)]);
-    /// assert_eq!(table.object(&Term::static_atom("k")), Some(&[Term::static_atom("k"), Term::Integer(2)][..]));
+    /// let atoms = AtomTable::new();
+    /// table.insert(&atoms, vec![Term::static_atom("k"), Term::Integer(1)]);
+    /// table.insert(&atoms, vec![Term::static_atom("k"), Term::Integer(2)]);
+    /// assert_eq!(table.object(&atoms, &Term::static_atom("k")), Some(&[Term::static_atom("k"), Term::Integer(2)][..]));
     /// ```
-    pub(super) fn insert(&mut self, object: Vec<Term>) {
+    pub(super) fn insert(&mut self, atoms: &AtomTable, object: Vec<Term>) {
         let (found, hash) = {
             let key = self.key(&object);
-            let hash = stored_hash(key);
+            let hash = stored_hash(atoms, key);
             (self.position(hash, key), hash)
         };
         let slot = match found {
@@ -368,12 +377,13 @@ impl Table {
     ///
     /// ```rust,ignore
     /// let mut table = Table::new(ProcessId(0), Access::Public, 1);
-    /// assert_eq!(table.object(&Term::static_atom("k")), None);
-    /// table.insert(vec![Term::static_atom("k")]);
-    /// assert_eq!(table.object(&Term::static_atom("k")), Some(&[Term::static_atom("k")][..]));
+    /// let atoms = AtomTable::new();
+    /// assert_eq!(table.object(&atoms, &Term::static_atom("k")), None);
+    /// table.insert(&atoms, vec![Term::static_atom("k")]);
+    /// assert_eq!(table.object(&atoms, &Term::static_atom("k")), Some(&[Term::static_atom("k")][..]));
     /// ```
-    pub(super) fn object(&self, key: &Term) -> Option<&[Term]> {
-        let slot = self.position(stored_hash(key), key)?;
+    pub(super) fn object(&self, atoms: &AtomTable, key: &Term) -> Option<&[Term]> {
+        let slot = self.position(stored_hash(atoms, key), key)?;
         Some(self.object_of(slot).as_slice())
     }
 
@@ -389,7 +399,8 @@ impl Table {
     ///
     /// ```rust,ignore
     /// let mut table = Table::new(ProcessId(0), Access::Public, 1);
-    /// table.insert(vec![Term::Integer(1), Term::Integer(2)]);
+    /// let atoms = AtomTable::new();
+    /// table.insert(&atoms, vec![Term::Integer(1), Term::Integer(2)]);
     /// assert!(table.allocated_bytes() > 0);
     /// ```
     pub(super) fn allocated_bytes(&self) -> usize {
@@ -414,7 +425,8 @@ impl Table {
     ///
     /// ```rust,ignore
     /// let mut table = Table::new(ProcessId(0), Access::Public, 1);
-    /// table.insert(vec![Term::static_atom("k")]);
+    /// let atoms = AtomTable::new();
+    /// table.insert(&atoms, vec![Term::static_atom("k")]);
     /// assert_eq!(table.position(stored_hash(&Term::static_atom("k")), &Term::static_atom("k")), Some(0));
     /// ```
     fn position(&self, hash: u64, key: &Term) -> Option<usize> {
@@ -429,7 +441,8 @@ impl Table {
     ///
     /// ```rust,ignore
     /// let mut table = Table::new(ProcessId(0), Access::Public, 1);
-    /// table.insert(vec![Term::static_atom("k")]);
+    /// let atoms = AtomTable::new();
+    /// table.insert(&atoms, vec![Term::static_atom("k")]);
     /// assert_eq!(table.object_of(0), &vec![Term::static_atom("k")]);
     /// ```
     fn object_of(&self, slot: usize) -> &Vec<Term> {
@@ -444,7 +457,8 @@ impl Table {
     ///
     /// ```rust,ignore
     /// let mut table = Table::new(ProcessId(0), Access::Public, 1);
-    /// table.insert(vec![Term::static_atom("k")]);
+    /// let atoms = AtomTable::new();
+    /// table.insert(&atoms, vec![Term::static_atom("k")]);
     /// assert_eq!(table.object_count(), 1);
     /// ```
     fn object_count(&self) -> usize {
@@ -483,13 +497,14 @@ impl Table {
     ///
     /// ```rust,ignore
     /// let mut table = Table::new(ProcessId(0), Access::Public, 1);
-    /// table.insert(vec![Term::static_atom("k")]);
-    /// table.delete(&Term::static_atom("missing"));
-    /// table.delete(&Term::static_atom("k"));
-    /// assert_eq!(table.object(&Term::static_atom("k")), None);
+    /// let atoms = AtomTable::new();
+    /// table.insert(&atoms, vec![Term::static_atom("k")]);
+    /// table.delete(&atoms, &Term::static_atom("missing"));
+    /// table.delete(&atoms, &Term::static_atom("k"));
+    /// assert_eq!(table.object(&atoms, &Term::static_atom("k")), None);
     /// ```
-    pub(super) fn delete(&mut self, key: &Term) {
-        let hash = stored_hash(key);
+    pub(super) fn delete(&mut self, atoms: &AtomTable, key: &Term) {
+        let hash = stored_hash(atoms, key);
         let Some(slot) = self.position(hash, key) else {
             return;
         };
@@ -551,15 +566,16 @@ impl Table {
     ///
     /// ```rust,ignore
     /// let mut table = Table::new(ProcessId(0), Access::Public, 1);
-    /// table.insert(vec![Term::Integer(1)]);
-    /// assert_eq!(table.segment_reductions(), vec![33]);
+    /// let atoms = AtomTable::new();
+    /// table.insert(&atoms, vec![Term::Integer(1)]);
+    /// assert_eq!(table.segment_reductions(&atoms), vec![33]);
     /// ```
-    fn segment_reductions(&self) -> Vec<i32> {
+    fn segment_reductions(&self, atoms: &AtomTable) -> Vec<i32> {
         let mask = self.buckets.next_power_of_two() - 1;
         let mut segments = vec![SEGMENT_REDUCTIONS; segment(self.segment_slots() - 1) + 1];
         for object in self.objects.iter().flatten() {
             // `HashValue` is a `UWord`, so the key hash fits.
-            let mut slot = stored_hash(self.key(object)) as usize & mask;
+            let mut slot = stored_hash(atoms, self.key(object)) as usize & mask;
             if slot >= self.buckets {
                 slot &= mask >> 1;
             }
@@ -604,7 +620,8 @@ impl Table {
     ///
     /// ```rust,ignore
     /// let mut table = Table::new(ProcessId(0), Access::Public, 1);
-    /// table.insert(vec![Term::static_atom("k")]);
+    /// let atoms = AtomTable::new();
+    /// table.insert(&atoms, vec![Term::static_atom("k")]);
     /// assert_eq!(table.live_objects(), vec![vec![Term::static_atom("k")]]);
     /// ```
     pub(super) fn live_objects(&self) -> Vec<Vec<Term>> {
@@ -617,7 +634,8 @@ impl Table {
     ///
     /// ```rust,ignore
     /// let mut table = Table::new(ProcessId(0), Access::Public, 1);
-    /// table.insert(vec![Term::static_atom("k")]);
+    /// let atoms = AtomTable::new();
+    /// table.insert(&atoms, vec![Term::static_atom("k")]);
     /// assert_eq!(table.slot_count(), 1);
     /// ```
     pub(super) fn slot_count(&self) -> usize {
@@ -791,15 +809,17 @@ impl KeyIndex {
 
 /// Return the stored hash of an ETS key: the ERTS key hash ([`key_hash`])
 /// shifted one bit right, as `MAKE_HASH` gives the `hvalue` of an ERTS hash
-/// table entry (`erl_db_hash.c:279-282`).
+/// table entry (`erl_db_hash.c:279-282`). `atoms` owns the name of an atom
+/// key.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(stored_hash(&Term::Integer(1)), key_hash(&Term::Integer(1)) >> 1);
+/// let atoms = AtomTable::new();
+/// assert_eq!(stored_hash(&atoms, &Term::Integer(1)), key_hash(&atoms, &Term::Integer(1)) >> 1);
 /// ```
-fn stored_hash(key: &Term) -> u64 {
-    key_hash(key) >> 1
+fn stored_hash(atoms: &AtomTable, key: &Term) -> u64 {
+    key_hash(atoms, key) >> 1
 }
 
 /// Return the segment of the slot `slot`: the first segment has the slots
@@ -819,34 +839,38 @@ fn segment(slot: usize) -> usize {
 
 /// Return the hash of an ETS key before the shift (`MAKE_HASH`,
 /// `erl_db_hash.c:279-282`): the atom table hash of an atom, else the ERTS
-/// internal hash.
+/// internal hash. `atoms` owns the name of an atom key.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(key_hash(&Term::static_atom("a")), 0x61);
-/// assert_eq!(key_hash(&Term::Integer(1)), 7938660269479274665);
+/// let atoms = AtomTable::new();
+/// assert_eq!(key_hash(&atoms, &Term::static_atom("a")), 0x61);
+/// assert_eq!(key_hash(&atoms, &Term::Integer(1)), 7938660269479274665);
 /// ```
-fn key_hash(key: &Term) -> u64 {
+fn key_hash(atoms: &AtomTable, key: &Term) -> u64 {
     match key {
-        Term::Atom(atom) => atom_hash(atom.name()),
+        Term::Atom(atom) => atom_hash(atoms, atom),
         _ => internal_hash(key),
     }
 }
 
-/// Return the atom table hash of the atom text `name`, as `atom_hash`
-/// (`atom.c:83-105`) gives it: the `hashpjw` hash of the UTF-8 bytes. A
-/// two-byte UTF-8 sequence for a Latin-1 character hashes as the low byte
-/// of that character.
+/// Return the atom table hash of `atom`, as `atom_hash` (`atom.c:83-105`)
+/// gives it: the `hashpjw` hash of the UTF-8 bytes of the name, which this
+/// function reads from `atoms`. A two-byte UTF-8 sequence for a Latin-1
+/// character hashes as the low byte of that character.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(atom_hash("ab"), 0x672);
-/// assert_eq!(atom_hash("\u{e9}"), 0xe9);
+/// let mut atoms = AtomTable::new();
+/// let ab = atoms.put("ab").unwrap();
+/// let e_acute = atoms.put("\u{e9}").unwrap();
+/// assert_eq!(atom_hash(&atoms, &ab), 0x672);
+/// assert_eq!(atom_hash(&atoms, &e_acute), 0xe9);
 /// ```
-fn atom_hash(name: &str) -> u64 {
-    let mut bytes = name.bytes().peekable();
+fn atom_hash(atoms: &AtomTable, atom: &Atom) -> u64 {
+    let mut bytes = atoms.name_of(atom).bytes().peekable();
     let mut hash: u64 = 0;
     while let Some(mut byte) = bytes.next() {
         if byte & 0xFE == 0xC2

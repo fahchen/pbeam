@@ -273,10 +273,10 @@ pub(super) fn open_port(
     name: &Term,
     settings: &Term,
 ) -> Result<BifResult, BeamError> {
-    let Some(settings) = port_settings(settings)? else {
+    let Some(settings) = port_settings(&context.scheduler.atoms, settings)? else {
         return Ok(Value(Term::static_atom("badopt")));
     };
-    let Some(path) = spawn_executable(name)? else {
+    let Some(path) = spawn_executable(&context.scheduler.atoms, name)? else {
         return Ok(Value(Term::static_atom("badarg")));
     };
     if !settings.binary {
@@ -333,7 +333,7 @@ pub(super) fn open_port(
 ///
 /// An option that ERTS accepts and PBeam does not support returns a runtime
 /// error, also when a later element is not valid.
-fn port_settings(settings: &Term) -> Result<Option<PortSettings>, BeamError> {
+fn port_settings(atoms: &AtomTable, settings: &Term) -> Result<Option<PortSettings>, BeamError> {
     let Some(elements) = settings.proper_list() else {
         return Ok(None);
     };
@@ -380,7 +380,7 @@ fn port_settings(settings: &Term) -> Result<Option<PortSettings>, BeamError> {
             }
             _ => return Ok(None),
         };
-        return Err(unsupported_option(option.name()));
+        return Err(unsupported_option(atoms.name_of(option)));
     }
     if result.streams.stderr_to_stdout && !result.streams.use_stdio {
         return Ok(None);
@@ -433,7 +433,7 @@ fn port_args(args: &Term) -> Option<Vec<Vec<u8>>> {
 /// # Errors
 ///
 /// The port kinds `spawn`, `spawn_driver`, and `fd` return a runtime error.
-fn spawn_executable(name: &Term) -> Result<Option<Vec<u8>>, BeamError> {
+fn spawn_executable(atoms: &AtomTable, name: &Term) -> Result<Option<Vec<u8>>, BeamError> {
     let Term::Tuple(elements) = name else {
         return Ok(None);
     };
@@ -444,7 +444,7 @@ fn spawn_executable(name: &Term) -> Result<Option<Vec<u8>>, BeamError> {
         [Term::Atom(kind), ..] if matches!(kind.name(), "spawn" | "spawn_driver" | "fd") => {
             Err(error(format!(
                 "unsupported open_port/2 port kind {}: see \"Ports\" in docs/erts-differences.md",
-                kind.name()
+                atoms.name_of(kind)
             )))
         }
         _ => Ok(None),
@@ -734,7 +734,8 @@ pub(super) fn prepare_loading(
         return Ok(BifResult::badarg());
     };
     let scheduler = &mut *context.scheduler;
-    match code::prepare(bytes, module.name(), &mut scheduler.atoms) {
+    let module_name = scheduler.atoms.name_of(module).to_owned();
+    match code::prepare(bytes, &module_name, &mut scheduler.atoms) {
         Ok(prepared) => {
             let reference = scheduler.make_ref()?;
             scheduler.code.prepare(reference, prepared);
@@ -745,8 +746,7 @@ pub(super) fn prepare_loading(
             Term::static_atom("badfile"),
         ]))),
         Err(PrepareError::Unsupported(cause)) => Err(error(format!(
-            "erts_internal:prepare_loading/2 cannot load module {}: {cause}",
-            module.name()
+            "erts_internal:prepare_loading/2 cannot load module {module_name}: {cause}"
         ))),
     }
 }

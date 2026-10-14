@@ -91,7 +91,7 @@ fn count_one() {
 /// ```rust,ignore
 /// assert!(allocations() < usize::MAX);
 /// ```
-fn allocations() -> usize {
+pub(super) fn allocations() -> usize {
     ALLOCATIONS.with(Cell::get)
 }
 
@@ -201,7 +201,7 @@ fn map_of(keys: i64) -> Term {
             (0..keys)
                 .map(|key| (Term::Integer(key), Term::Integer(key)))
                 .collect(),
-            &crate::term::test_atoms(),
+            &crate::term::test_atom_table(),
         )
         .unwrap(),
     )

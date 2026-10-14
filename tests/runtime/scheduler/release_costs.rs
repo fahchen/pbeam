@@ -224,7 +224,7 @@ fn map() -> Term {
             (0..MAP_KEYS as i64)
                 .map(|key| (Term::Integer(key), Term::Integer(key)))
                 .collect(),
-            &crate::term::test_atoms(),
+            &crate::term::test_atom_table(),
         )
         .expect("the integer keys of a map"),
     )

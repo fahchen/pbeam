@@ -15,9 +15,7 @@ pub use atom::AtomTable;
 pub use atom::HostTerm;
 pub(crate) use atom::MAX_ATOM_CHARACTERS;
 #[cfg(test)]
-pub(crate) use atom::test_atom;
-#[cfg(test)]
-pub(crate) use atom::test_atoms;
+pub(crate) use atom::{test_atom, test_atom_table};
 pub use binary::Binary;
 pub use fun::Fun;
 pub(crate) use fun::{Lambda, Target};

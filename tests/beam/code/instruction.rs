@@ -40,16 +40,17 @@ fn rejects_invalid_operands_and_code_headers() {
     assert!(read_operand(&[], &mut 0, 0).is_err());
     assert!(read_value(&[0x03], &mut 0, &[]).is_err());
     assert!(read_value(&[0x12], &mut 0, &[]).is_err());
-    assert!(parse_code(&[], &[], &[], &[], &[], &[]).is_err());
-    assert!(parse_code(&[0; 20], &[], &[], &[], &[], &[]).is_err());
+    assert!(parse_code(&[], &AtomTable::new(), &[], &[], &[], &[], &[]).is_err());
+    assert!(parse_code(&[0; 20], &AtomTable::new(), &[], &[], &[], &[], &[]).is_err());
     assert!(
         parse_code(
             &[0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            &AtomTable::new(),
             &[],
             &[],
             &[],
             &[],
-            &[],
+            &[]
         )
         .is_err()
     );
@@ -119,22 +120,60 @@ fn rejects_unsupported_select_val_forms() {
         code
     };
 
-    assert!(parse_code(&code(&[59, 3, 21, 39]), &[], &[], &[], &[], &[]).is_err());
-    assert!(parse_code(&code(&[59, 3, 21, 23, 16]), &[], &[], &[], &[], &[]).is_err());
+    assert!(
+        parse_code(
+            &code(&[59, 3, 21, 39]),
+            &AtomTable::new(),
+            &[],
+            &[],
+            &[],
+            &[],
+            &[]
+        )
+        .is_err()
+    );
+    assert!(
+        parse_code(
+            &code(&[59, 3, 21, 23, 16]),
+            &AtomTable::new(),
+            &[],
+            &[],
+            &[],
+            &[],
+            &[]
+        )
+        .is_err()
+    );
     // A register as a selection value, with two items present.
     assert!(
-        parse_code(&code(&[59, 3, 21, 23, 32, 3, 21]), &[], &[], &[], &[], &[])
-            .unwrap_err()
-            .to_string()
-            .contains("unsupported BEAM selection value")
+        parse_code(
+            &code(&[59, 3, 21, 23, 32, 3, 21]),
+            &AtomTable::new(),
+            &[],
+            &[],
+            &[],
+            &[],
+            &[]
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("unsupported BEAM selection value")
     );
     // A count larger than the remaining bytes fails before any allocation.
     for opcode in [59, 60] {
         assert!(
-            parse_code(&code(&[opcode, 3, 21, 23, 32, 3]), &[], &[], &[], &[], &[])
-                .unwrap_err()
-                .to_string()
-                .contains("exceeds code chunk")
+            parse_code(
+                &code(&[opcode, 3, 21, 23, 32, 3]),
+                &AtomTable::new(),
+                &[],
+                &[],
+                &[],
+                &[],
+                &[]
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("exceeds code chunk")
         );
     }
 }
@@ -146,7 +185,7 @@ fn decodes_build_stacktrace_without_operands() {
     let mut code = vec![0, 0, 0, 16];
     code.extend([0; 16]);
     code.extend([0x40, 0x23, 0x03, 0xA0, 0x03]);
-    let (instructions, _) = parse_code(&code, &[], &[], &[], &[], &[]).unwrap();
+    let (instructions, _) = parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[]).unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -165,7 +204,7 @@ fn decodes_raise_with_a_raw_stack_trace_and_a_reason() {
     let mut code = vec![0, 0, 0, 16];
     code.extend([0; 16]);
     code.extend([0x6C, 0x23, 0x13, 0x6C, 0x04, 0x02, 0x03]);
-    let (instructions, _) = parse_code(&code, &[], &[], &[], &[], &[]).unwrap();
+    let (instructions, _) = parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[]).unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -193,7 +232,7 @@ fn decodes_the_error_path_instructions() {
     code.extend([
         0x48, 0x03, 0x48, 0x04, 0x4A, 0x03, 0x49, 0x6B, 0x03, 0xB4, 0x03, 0xA1, 0x4A, 0x02, 0x03,
     ]);
-    let (instructions, _) = parse_code(&code, &[], &[], &[], &[], &[]).unwrap();
+    let (instructions, _) = parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[]).unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -246,6 +285,7 @@ fn decodes_try_and_catch_instructions_with_a_y_register() {
             0x6A, 0x04, // try_case y0
             0x3F, 0x04, // catch_end y0
         ]),
+        &AtomTable::new(),
         &[],
         &[],
         &[],
@@ -276,10 +316,18 @@ fn decodes_try_and_catch_instructions_with_a_y_register() {
     ));
     // An X register cannot hold a catch tag.
     assert!(
-        parse_code(&code(&[0x68, 0x03, 0x75]), &[], &[], &[], &[], &[])
-            .unwrap_err()
-            .to_string()
-            .contains("unexpected BEAM operand tag 3")
+        parse_code(
+            &code(&[0x68, 0x03, 0x75]),
+            &AtomTable::new(),
+            &[],
+            &[],
+            &[],
+            &[],
+            &[]
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("unexpected BEAM operand tag 3")
     );
 }
 
@@ -302,6 +350,7 @@ fn decodes_nif_start_at_the_entry_of_the_function_of_the_func_info_before_it() {
             0x02, 0x12, 0x22, 0x20, // func_info prim_tty write_nif 2
             0xB3, // nif_start
         ]),
+        &table,
         &atoms,
         &[],
         &[],
@@ -329,6 +378,7 @@ fn decodes_nif_start_at_the_entry_of_the_function_of_the_func_info_before_it() {
             0x40, 0x12, 0x03, // move prim_tty x0
             0xB3, // nif_start
         ]),
+        &table,
         &atoms,
         &[],
         &[],
@@ -348,7 +398,7 @@ fn decodes_nif_start_at_the_entry_of_the_function_of_the_func_info_before_it() {
         ] if name == "write_nif"
     ));
     assert_eq!(
-        parse_code(&code(&[0xB3]), &atoms, &[], &[], &[], &[])
+        parse_code(&code(&[0xB3]), &table, &atoms, &[], &[], &[], &[])
             .unwrap_err()
             .to_string(),
         "BEAM nif_start has no func_info before it"
@@ -376,6 +426,7 @@ fn decodes_bif0_and_bif1_into_one_bif_instruction_with_its_fail_label() {
             0x09, 0x10, 0x53, // bif0 node/0 x5
             0x0A, 0x35, 0x00, 0x03, 0x13, // bif1 f3 node/1 x0 x1
         ]),
+        &AtomTable::new(),
         &[],
         &imports,
         &[],
@@ -411,7 +462,7 @@ fn decodes_bif0_and_bif1_into_one_bif_instruction_with_its_fail_label() {
     ));
     for bif in [&[0x09, 0x20, 0x03][..], &[0x0A, 0x05, 0x20, 0x03, 0x03]] {
         assert!(
-            parse_code(&code(bif), &[], &imports, &[], &[], &[])
+            parse_code(&code(bif), &AtomTable::new(), &[], &imports, &[], &[], &[])
                 .unwrap_err()
                 .to_string()
                 .contains("BEAM BIF import index 2 out of range")
@@ -422,10 +473,18 @@ fn decodes_bif0_and_bif1_into_one_bif_instruction_with_its_fail_label() {
     // gave before the instruction carried an identity.
     let imports = vec![("lists".to_owned(), "node".to_owned(), 0)];
     assert!(
-        parse_code(&code(&[0x09, 0x00, 0x53]), &[], &imports, &[], &[], &[])
-            .unwrap_err()
-            .to_string()
-            .contains("unsupported BIF lists:node/0")
+        parse_code(
+            &code(&[0x09, 0x00, 0x53]),
+            &AtomTable::new(),
+            &[],
+            &imports,
+            &[],
+            &[],
+            &[]
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("unsupported BIF lists:node/0")
     );
 }
 
@@ -445,7 +504,8 @@ fn decodes_bif2_into_a_bif_instruction_with_its_fail_label() {
         ("erlang".to_owned(), "element".to_owned(), 2),
         ("erlang".to_owned(), "element".to_owned(), 2),
     ];
-    let (instructions, _) = parse_code(&code, &[], &imports, &[], &[], &[]).unwrap();
+    let (instructions, _) =
+        parse_code(&code, &AtomTable::new(), &[], &imports, &[], &[], &[]).unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -480,7 +540,7 @@ fn decodes_is_ne_exact_with_its_fail_label() {
     // Bytes of `user_drv:server/3` in the pinned `user_drv.beam`:
     // {test,is_ne_exact,{f,157},[{x,0},{x,3}]}
     code.extend([0x2C, 0x0D, 0x9D, 0x03, 0x33, 0x03]);
-    let (instructions, _) = parse_code(&code, &[], &[], &[], &[], &[]).unwrap();
+    let (instructions, _) = parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[]).unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -509,7 +569,9 @@ fn selects_the_classified_operand_form_of_is_eq_exact() {
         code.extend([0; 16]);
         code.extend_from_slice(stream);
         code.push(0x03);
-        parse_code(&code, &atoms, &[], &[], &[], &[]).unwrap().0
+        parse_code(&code, &AtomTable::new(), &atoms, &[], &[], &[], &[])
+            .unwrap()
+            .0
     };
     // {test,is_eq_exact,{f,3},[{x,0},{integer,0}]}: the floor-loop shape.
     assert!(matches!(
@@ -592,7 +654,7 @@ fn decodes_is_ge_with_a_typed_register() {
     // Bytes of `group_probe:kind/1` in `fixtures/group/group_probe.beam`:
     // {test,is_ge,{f,22},[{tr,{x,1},{t_integer,{0,16777215}}},{integer,2}]}
     code.extend([0x28, 0x0D, 0x16, 0x57, 0x13, 0x20, 0x21, 0x03]);
-    let (instructions, _) = parse_code(&code, &[], &[], &[], &[], &[]).unwrap();
+    let (instructions, _) = parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[]).unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -617,7 +679,7 @@ fn decodes_the_is_lt_is_integer_and_is_boolean_tests_of_the_compare_probe_fixtur
     let mut code = vec![0, 0, 0, 16];
     code.extend([0; 16]);
     code.extend([&next[..], &width, &is_integer, &is_boolean, &[0x03]].concat());
-    let (instructions, _) = parse_code(&code, &[], &[], &[], &[], &[]).unwrap();
+    let (instructions, _) = parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[]).unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -654,7 +716,7 @@ fn decodes_the_is_eq_test_of_the_compare_probe_fixture() {
     let mut code = vec![0, 0, 0, 16];
     code.extend([0; 16]);
     code.extend([&is_eq[..], &[0x03]].concat());
-    let (instructions, _) = parse_code(&code, &[], &[], &[], &[], &[]).unwrap();
+    let (instructions, _) = parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[]).unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -676,7 +738,7 @@ fn decodes_the_is_ne_test_of_the_compare_probe_fixture() {
     let mut code = vec![0, 0, 0, 16];
     code.extend([0; 16]);
     code.extend([&is_ne[..], &[0x03]].concat());
-    let (instructions, _) = parse_code(&code, &[], &[], &[], &[], &[]).unwrap();
+    let (instructions, _) = parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[]).unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -699,7 +761,7 @@ fn decodes_the_bs_start_match3_test_of_the_binary_match_probe_fixture() {
     let mut code = vec![0, 0, 0, 16];
     code.extend([0; 16]);
     code.extend([&bs_start_match3[..], &[0x03]].concat());
-    let (instructions, _) = parse_code(&code, &[], &[], &[], &[], &[]).unwrap();
+    let (instructions, _) = parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[]).unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -745,7 +807,7 @@ fn decodes_the_binary_match_instructions_of_is_usascii() {
     code.extend([0; 16]);
     code.extend(parts.concat());
     code.push(0x03);
-    let (instructions, _) = parse_code(&code, &atoms, &[], &[], &[], &[]).unwrap();
+    let (instructions, _) = parse_code(&code, &table, &atoms, &[], &[], &[], &[]).unwrap();
     assert!(
         matches!(
             instructions.as_slice(),
@@ -825,7 +887,7 @@ fn decodes_the_bs_match_commands_of_the_bs_match_probe_fixture() {
     code.extend([0; 16]);
     code.extend(parts.concat());
     code.push(0x03);
-    let (instructions, _) = parse_code(&code, &atoms, &[], &[], &[], &[]).unwrap();
+    let (instructions, _) = parse_code(&code, &table, &atoms, &[], &[], &[], &[]).unwrap();
     assert!(
         matches!(
             instructions.as_slice(),
@@ -896,7 +958,7 @@ fn decodes_the_bs_start_match4_bs_get_binary2_and_bs_get_tail_instructions_of_bs
         code.push(0x03);
         code
     };
-    let (instructions, _) = parse_code(&code(&parts), &atoms, &[], &[], &[], &[]).unwrap();
+    let (instructions, _) = parse_code(&code(&parts), &table, &atoms, &[], &[], &[], &[]).unwrap();
     assert!(
         matches!(
             instructions.as_slice(),
@@ -937,6 +999,7 @@ fn decodes_the_bs_start_match4_bs_get_binary2_and_bs_get_tail_instructions_of_bs
     assert_eq!(
         parse_code(
             &code(&[&[0xAA, 0x12, 0x20, 0x03, 0x03]]),
+            &table,
             &atoms,
             &[],
             &[],
@@ -1065,7 +1128,7 @@ fn decodes_the_fconv_instruction_of_the_float_test_probe_fixture() {
     let mut code = vec![0, 0, 0, 16];
     code.extend([0; 16]);
     code.extend([&fconv[..], &[0x03]].concat());
-    let (instructions, _) = parse_code(&code, &[], &[], &[], &[], &[]).unwrap();
+    let (instructions, _) = parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[]).unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -1085,7 +1148,7 @@ fn decodes_the_is_float_test_of_the_float_test_probe_fixture() {
     let mut code = vec![0, 0, 0, 16];
     code.extend([0; 16]);
     code.extend([&is_float[..], &[0x03]].concat());
-    let (instructions, _) = parse_code(&code, &[], &[], &[], &[], &[]).unwrap();
+    let (instructions, _) = parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[]).unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -1107,7 +1170,7 @@ fn decodes_the_is_bitstr_test_of_the_bitstr_probe_fixture() {
     let mut code = vec![0, 0, 0, 16];
     code.extend([0; 16]);
     code.extend([&is_bitstr[..], &[0x03]].concat());
-    let (instructions, _) = parse_code(&code, &[], &[], &[], &[], &[]).unwrap();
+    let (instructions, _) = parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[]).unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -1129,7 +1192,7 @@ fn decodes_the_get_tl_instruction_of_the_io_start_probe_fixture() {
     let mut code = vec![0, 0, 0, 16];
     code.extend([0; 16]);
     code.extend([&get_tl[..], &[0x03]].concat());
-    let (instructions, _) = parse_code(&code, &[], &[], &[], &[], &[]).unwrap();
+    let (instructions, _) = parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[]).unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -1172,7 +1235,7 @@ fn decodes_the_put_map_exact_instruction_of_the_io_start_probe_fixture() {
     let mut code = vec![0, 0, 0, 16];
     code.extend([0; 16]);
     code.extend([&put_map_exact[..], &[0x03]].concat());
-    let (instructions, _) = parse_code(&code, &atoms, &[], &[], &[], &[]).unwrap();
+    let (instructions, _) = parse_code(&code, &table, &atoms, &[], &[], &[], &[]).unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -1222,7 +1285,7 @@ fn decodes_the_has_map_fields_tests_of_the_map_probe_fixture() {
     let mut code = vec![0, 0, 0, 16];
     code.extend([0; 16]);
     code.extend([&pair[..], &key[..], &[0x03]].concat());
-    let (instructions, _) = parse_code(&code, &atoms, &[], &[], &[], &[]).unwrap();
+    let (instructions, _) = parse_code(&code, &table, &atoms, &[], &[], &[], &[]).unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -1251,7 +1314,7 @@ fn rejects_malformed_has_map_fields_key_lists() {
         let mut code = vec![0, 0, 0, 16];
         code.extend([0; 16]);
         code.extend([&[OPCODE_HAS_MAP_FIELDS, 0x35, 0x03], operands].concat());
-        parse_code(&code, &[], &[], &[], &[], &[])
+        parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[])
             .unwrap_err()
             .to_string()
     };
@@ -1281,7 +1344,7 @@ fn decodes_the_list_record_and_receive_wait_instructions_of_pinned_gen_statem() 
         0xA1, // call/3: raw_raise
         0x03,
     ]);
-    let (instructions, _) = parse_code(&code, &[], &[], &[], &[], &[]).unwrap();
+    let (instructions, _) = parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[]).unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -1339,7 +1402,7 @@ fn decodes_the_apply_instructions_of_pinned_gen_statem() {
         0x71, 0x10, 0xB0, // terminate/7: {apply_last,1,11}
         0x03,
     ]);
-    let (instructions, _) = parse_code(&code, &[], &[], &[], &[], &[]).unwrap();
+    let (instructions, _) = parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[]).unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -1363,7 +1426,7 @@ fn decodes_the_apply_instructions_of_pinned_gen_statem() {
     ));
     // `apply_last` without its deallocate operand is truncated.
     code.truncate(code.len() - 2);
-    assert!(parse_code(&code, &[], &[], &[], &[], &[]).is_err());
+    assert!(parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[]).is_err());
 }
 
 #[test]
@@ -1389,7 +1452,8 @@ fn decodes_gc_bif1_and_gc_bif2_of_the_arith_probe_fixture_into_a_bif_instruction
         ("erlang".to_owned(), "div".to_owned(), 2),
         ("erlang".to_owned(), "-".to_owned(), 1),
     ];
-    let (instructions, _) = parse_code(&code, &[], &imports, &[], &[], &[]).unwrap();
+    let (instructions, _) =
+        parse_code(&code, &AtomTable::new(), &[], &imports, &[], &[], &[]).unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -1421,7 +1485,7 @@ fn decodes_gc_bif1_and_gc_bif2_of_the_arith_probe_fixture_into_a_bif_instruction
     ));
     // Without its destination and the end, the instruction is truncated.
     code.truncate(code.len() - 2);
-    assert!(parse_code(&code, &[], &imports, &[], &[], &[]).is_err());
+    assert!(parse_code(&code, &AtomTable::new(), &[], &imports, &[], &[], &[]).is_err());
 }
 
 #[test]
@@ -1438,7 +1502,8 @@ fn decodes_gc_bif3_of_the_binary_part_probe_fixture_into_a_bif_instruction() {
     code.extend([0; 16]);
     code.extend([&guard[..], &body, &[0x03]].concat());
     let imports = vec![("erlang".to_owned(), "binary_part".to_owned(), 3)];
-    let (instructions, _) = parse_code(&code, &[], &imports, &[], &[], &[]).unwrap();
+    let (instructions, _) =
+        parse_code(&code, &AtomTable::new(), &[], &imports, &[], &[], &[]).unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -1466,7 +1531,7 @@ fn decodes_gc_bif3_of_the_binary_part_probe_fixture_into_a_bif_instruction() {
     ));
     // Without its destination and the end, the instruction is truncated.
     code.truncate(code.len() - 3);
-    assert!(parse_code(&code, &[], &imports, &[], &[], &[]).is_err());
+    assert!(parse_code(&code, &AtomTable::new(), &[], &imports, &[], &[], &[]).is_err());
 }
 
 #[test]
@@ -1490,8 +1555,17 @@ fn decodes_the_fun_instructions_of_the_fun_probe_fixture() {
         (lambda(3, 121, 0), 0),
         (lambda(4, 112, 1), 1),
     ];
-    let parse =
-        |instructions: &[u8]| parse_code(&code(instructions), &atoms, &[], &[], &lambdas, &[]);
+    let parse = |instructions: &[u8]| {
+        parse_code(
+            &code(instructions),
+            &AtomTable::new(),
+            &atoms,
+            &[],
+            &[],
+            &lambdas,
+            &[],
+        )
+    };
     // `tests/integration/fixture_opcodes.rs` checks that
     // `fixtures/funs/fun_probe.beam` has these bytes.
     let make_pair = [0xAB, 0x40, 0x03, 0x17, 0x10, 0x03]; // make_pair/1: make_fun3 4 x0 [x0]
@@ -1564,7 +1638,7 @@ fn joins_a_fun_call_in_a_tail_position_as_the_erts_loader() {
         0x12, 0x00, 0x13, // deallocate 0, return
         0x03,
     ]);
-    let (instructions, _) = parse_code(&code, &[], &[], &[], &[], &[]).unwrap();
+    let (instructions, _) = parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[]).unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -1604,7 +1678,9 @@ fn turns_a_call_of_erlang_hibernate_into_the_erts_hibernate_instruction() {
         code.extend_from_slice(bytes);
         code.push(0x03);
         let imports = [("erlang".to_owned(), "hibernate".to_owned(), 0)];
-        parse_code(&code, &[], &imports, &[], &[], &[]).unwrap().0
+        parse_code(&code, &AtomTable::new(), &[], &imports, &[], &[], &[])
+            .unwrap()
+            .0
     };
     assert!(matches!(
         decode(&[0x07, 0x00, 0x00]).as_slice(), // call_ext 0 import 0
@@ -1639,7 +1715,9 @@ fn turns_a_call_of_erlang_yield_into_the_erts_yield_instruction() {
         code.extend_from_slice(bytes);
         code.push(0x03);
         let imports = [("erlang".to_owned(), "yield".to_owned(), 0)];
-        parse_code(&code, &[], &imports, &[], &[], &[]).unwrap().0
+        parse_code(&code, &AtomTable::new(), &[], &imports, &[], &[], &[])
+            .unwrap()
+            .0
     };
     assert!(matches!(
         decode(&[0x07, 0x00, 0x00]).as_slice(), // call_ext 0 import 0
@@ -1678,7 +1756,7 @@ fn puts_a_test_yield_after_the_entry_label_of_each_function() {
     ]);
     let mut table = AtomTable::new();
     let atoms = ["preempt_probe", "body"].map(|name| table.put(name).unwrap());
-    let (instructions, _) = parse_code(&code, &atoms, &[], &[], &[], &[]).unwrap();
+    let (instructions, _) = parse_code(&code, &table, &atoms, &[], &[], &[], &[]).unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -1703,7 +1781,9 @@ fn puts_the_deallocate_and_the_return_of_a_tail_call_after_call_ext() {
         code.extend_from_slice(bytes);
         code.push(0x03);
         let imports = [("erlang".to_owned(), "whereis".to_owned(), 1)];
-        parse_code(&code, &[], &imports, &[], &[], &[]).unwrap().0
+        parse_code(&code, &AtomTable::new(), &[], &imports, &[], &[], &[])
+            .unwrap()
+            .0
     };
     let whereis = |instruction: &Instruction, tail: bool, size: u32| {
         matches!(
@@ -1751,7 +1831,7 @@ fn decodes_the_is_function_tests_of_the_fun_probe_fixture() {
         0x73, 0x0D, 0x64, 0x03, 0x13, // is_function2 f100 x0 x1
         0x03,
     ]);
-    let (instructions, _) = parse_code(&code, &[], &[], &[], &[], &[]).unwrap();
+    let (instructions, _) = parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[]).unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -1793,7 +1873,7 @@ fn rejects_a_put_tuple2_without_an_element_list() {
     let mut code = vec![0, 0, 0, 16];
     code.extend([0; 16]);
     code.extend([OPCODE_PUT_TUPLE2, 0x03, 0x27]);
-    assert!(parse_code(&code, &[], &[], &[], &[], &[]).is_err());
+    assert!(parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[]).is_err());
 }
 
 #[test]
@@ -2473,20 +2553,25 @@ fn records_the_decoded_form_layout() {
         println!("| {name} | {} |", arm_field_bytes(instruction));
     }
 
-    assert_eq!(size_of::<Instruction>(), 136, "the size of `Instruction`");
-    assert_eq!(size_of::<Operand>(), 40, "the size of `Operand`");
-    assert_eq!(size_of::<Term>(), 40, "the size of `Term`");
+    assert_eq!(size_of::<Instruction>(), 112, "the size of `Instruction`");
+    assert_eq!(size_of::<Operand>(), 32, "the size of `Operand`");
+    assert_eq!(size_of::<Term>(), 32, "the size of `Term`");
     assert_eq!(size_of::<String>(), 24, "the size of `String`");
     assert_eq!(size_of::<Vec<Operand>>(), 24, "the size of `Vec<Operand>`");
     // The arm that sets the size of `Instruction`, and the arm of the floor
     // loop. The plan records `BinaryGetBinary` at 132 bytes and `Bif` at 124
     // bytes at the baseline revision; step 4 removed the two `String` fields
-    // from `Bif`.
+    // from `Bif`. The boxed binary view of task [#571] takes `Term` from 40
+    // bytes to 32, and the two `Operand` fields and the `Term` field of
+    // `BinaryGetBinary` then lose 24 bytes. `Bif` holds the arguments of the
+    // call in one `Term` slot, so it loses the 8 bytes of one `Term`.
+    //
+    // [#571]: https://github.com/fahchen/pbeam/issues/571
     assert_eq!(
         arm_field_bytes(&arms[0].1),
-        132,
+        108,
         "the fields of `BinaryGetBinary`"
     );
-    assert_eq!(arm_field_bytes(&arms[3].1), 72, "the fields of `Bif`");
-    assert_eq!(arm_field_bytes(&arms[6].1), 80, "the fields of `Move`");
+    assert_eq!(arm_field_bytes(&arms[3].1), 64, "the fields of `Bif`");
+    assert_eq!(arm_field_bytes(&arms[6].1), 64, "the fields of `Move`");
 }

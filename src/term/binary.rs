@@ -32,6 +32,13 @@
 //! does not implement `binary:referenced_byte_size/1`, which reports the
 //! size of the whole array of a sub-binary, so no code reads the size of
 //! the array.
+//!
+//! [`Binary`] is one `Arc` to a [`BinaryView`], so a binary term is one
+//! pointer and holds no descriptor of its own. A copy of a term then copies
+//! one pointer instead of the four words of the view, and a read of the
+//! offset, the size, or the packed bytes follows one dependent load.
+//! `Term::Binary` is 8 bytes, so every compound arm of `Term` is at most 8
+//! bytes (`docs/term-layout-design.md` section 4).
 
 use std::{fmt, ops::Deref, sync::Arc};
 
@@ -43,7 +50,7 @@ use super::Term;
 /// bytes of the source binary of the view, so a sub-binary keeps the offset
 /// of its bits. The last copy that drops releases the array.
 #[derive(Clone)]
-pub struct Binary {
+struct BinaryView {
     /// The array of the bytes of the source binary, from its first byte.
     bytes: Arc<Vec<u8>>,
     /// The offset in bits of the first bit of this binary in the array.
@@ -58,6 +65,14 @@ pub struct Binary {
     packed: Option<Arc<Vec<u8>>>,
 }
 
+/// One BEAM binary term: one `Arc` to the [`BinaryView`] that holds its
+/// bytes, its bit offset, its size, and its packed bytes. The handle is one
+/// pointer, so a binary term is 8 bytes and a copy of the term increments
+/// one reference count. A read of a field of the view follows the pointer,
+/// which is the one dependent load that the boxed descriptor adds.
+#[derive(Clone)]
+pub struct Binary(Arc<BinaryView>);
+
 impl Binary {
     /// Return the shared array of the bytes. Two binaries that return one
     /// array keep their bytes in one place.
@@ -70,7 +85,7 @@ impl Binary {
     /// ```
     #[cfg(test)]
     pub(crate) fn bytes(&self) -> &Arc<Vec<u8>> {
-        &self.bytes
+        &self.0.bytes
     }
 
     /// Return the shared array of the bytes for the live-byte walk. Two
@@ -83,7 +98,37 @@ impl Binary {
     /// assert_eq!(bytes.backing().len(), 2);
     /// ```
     pub(super) fn backing(&self) -> &Arc<Vec<u8>> {
-        &self.bytes
+        &self.0.bytes
+    }
+
+    /// Return whether the two handles own one view. Two handles that share
+    /// one view share one descriptor allocation, so the live-byte walk
+    /// counts that allocation once.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let bytes = Binary::from(b"ab".to_vec());
+    /// assert!(bytes.same_view(&bytes.clone()));
+    /// assert!(!bytes.same_view(&Binary::from(b"ab".to_vec())));
+    /// ```
+    pub(super) fn same_view(&self, other: &Binary) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
+    /// Return the bytes of the view descriptor that this handle owns: the
+    /// size of the fields behind the pointer. The number excludes the header
+    /// of the `Arc`, as the accounting of task
+    /// [#559](https://github.com/fahchen/pbeam/issues/559) excludes it.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let bytes = Binary::from(b"abc".to_vec());
+    /// assert_eq!(bytes.view_bytes(), std::mem::size_of::<usize>() * 4);
+    /// ```
+    pub(super) fn view_bytes(&self) -> usize {
+        std::mem::size_of::<BinaryView>()
     }
 
     /// Return the bytes of the backing array of this binary, and of the
@@ -102,7 +147,7 @@ impl Binary {
     /// assert!(bytes.bits(4, 12).allocated_bytes() > bytes.allocated_bytes());
     /// ```
     pub(crate) fn allocated_bytes(&self) -> usize {
-        self.bytes.capacity() + self.packed.as_ref().map_or(0, |packed| packed.capacity())
+        self.0.bytes.capacity() + self.0.packed.as_ref().map_or(0, |packed| packed.capacity())
     }
 
     /// Return the packed bits of a view whose size is not a whole number of
@@ -116,7 +161,7 @@ impl Binary {
     /// ```
     #[cfg(test)]
     pub(crate) fn packed(&self) -> Option<&Arc<Vec<u8>>> {
-        self.packed.as_ref()
+        self.0.packed.as_ref()
     }
 
     /// Return the packed array of a view whose offset is not on a byte
@@ -128,7 +173,7 @@ impl Binary {
     /// assert!(Binary::from(&[0xC3]).bits(4, 8).packed_backing().is_some());
     /// ```
     pub(super) fn packed_backing(&self) -> Option<&Arc<Vec<u8>>> {
-        self.packed.as_ref()
+        self.0.packed.as_ref()
     }
 
     /// Return the bits from the bit position `start` to the bit position
@@ -155,30 +200,31 @@ impl Binary {
     ///
     /// Panic when a bit position is outside the bits of this binary.
     pub(crate) fn bits(&self, start: usize, end: usize) -> Binary {
+        let view = &self.0;
         assert!(
-            start <= end && end <= self.size,
+            start <= end && end <= view.size,
             "the bit range {start}..{end} is outside the binary"
         );
-        let offset = self.offset + start;
+        let offset = view.offset + start;
         let size = end - start;
         let packed = (!offset.is_multiple_of(BITS_PER_BYTE)).then(|| {
             let first = byte(offset);
             // The segment can end in the byte after its last whole byte, so
             // the bits include that byte. `pack_bits` reads one byte past the
             // slice, and the last byte of the array has no byte after it.
-            let end = (first + size.div_ceil(BITS_PER_BYTE) + 1).min(self.bytes.len());
+            let end = (first + size.div_ceil(BITS_PER_BYTE) + 1).min(view.bytes.len());
             Arc::new(pack_bits(
-                &self.bytes[first..end],
+                &view.bytes[first..end],
                 offset % BITS_PER_BYTE,
                 size,
             ))
         });
-        Binary {
-            bytes: Arc::clone(&self.bytes),
+        Binary(Arc::new(BinaryView {
+            bytes: Arc::clone(&view.bytes),
             offset,
             size,
             packed,
-        }
+        }))
     }
 
     /// Return whether the two binaries keep their bytes in one array, as two
@@ -193,7 +239,7 @@ impl Binary {
     /// assert!(!bytes.same_bytes(&Binary::from(b"ab".to_vec())));
     /// ```
     pub fn same_bytes(&self, other: &Binary) -> bool {
-        Arc::ptr_eq(&self.bytes, &other.bytes)
+        Arc::ptr_eq(&self.0.bytes, &other.0.bytes)
     }
 
     /// Take the bytes of this binary as an owned vector. The function moves
@@ -207,19 +253,15 @@ impl Binary {
     /// let bytes = Binary::from(b"ab".to_vec());
     /// assert_eq!(bytes.take_bytes(), b"ab".to_vec());
     /// ```
-    pub(crate) fn take_bytes(mut self) -> Vec<u8> {
-        // The array moves out only when the view is all of it. A sub-binary
-        // gives only its own bytes, also when it owns the array of its
-        // source.
-        let whole = self.offset == 0 && self.size == self.bytes.len() * BITS_PER_BYTE;
-        if self.packed.is_none()
-            && whole
-            && Arc::strong_count(&self.bytes) == 1
-            && let Some(bytes) = Arc::into_inner(std::mem::take(&mut self.bytes))
-        {
-            return bytes;
+    pub(crate) fn take_bytes(self) -> Vec<u8> {
+        // The view moves out only when this binary owns the descriptor, and
+        // the array of the view moves out only when the view owns it. A
+        // shared descriptor copies the bytes of the view, because another
+        // holder keeps the descriptor and its array.
+        match Arc::try_unwrap(self.0) {
+            Ok(view) => view.take_bytes(),
+            Err(view) => view.bytes_of_view().to_vec(),
         }
-        self.to_bytes()
     }
 
     /// Return the bytes of this binary as an owned vector. A size that is
@@ -241,6 +283,41 @@ impl Binary {
         // drops. `take_bytes` moves the array out when the caller owns the
         // binary.
         self[..].to_vec()
+    }
+}
+
+impl BinaryView {
+    /// Take the bytes of this view as an owned vector. The array moves out
+    /// only when this view is all of it, and only when this view is its last
+    /// holder.
+    fn take_bytes(mut self) -> Vec<u8> {
+        // A sub-binary gives only its own bytes, also when it owns the array
+        // of its source.
+        let whole = self.offset == 0 && self.size == self.bytes.len() * BITS_PER_BYTE;
+        if self.packed.is_none()
+            && whole
+            && Arc::strong_count(&self.bytes) == 1
+            && let Some(bytes) = Arc::into_inner(std::mem::take(&mut self.bytes))
+        {
+            return bytes;
+        }
+        self.bytes_of_view().to_vec()
+    }
+
+    /// Return the bytes of this view, as [`Binary`] derefs to them.
+    fn bytes_of_view(&self) -> &[u8] {
+        match &self.packed {
+            Some(packed) => packed,
+            // The offset is on a byte boundary, so the view is the bytes from
+            // the byte of the offset to the last byte of the size. A size of
+            // 0 gives no byte, also at the end of the array.
+            None if self.size == 0 => &[],
+            None => {
+                let first = byte(self.offset);
+                let end = self.bytes.len().min(byte(self.offset + self.size - 1) + 1);
+                &self.bytes[first..end]
+            }
+        }
     }
 }
 
@@ -279,7 +356,7 @@ impl PartialEq for Binary {
         // A view of one array with the same offset and length has the same
         // bytes. Each other pair compares the bytes, so the size of the
         // array does not change the result.
-        (self.same_bytes(other) && self.offset == other.offset && self.size == other.size)
+        (self.same_bytes(other) && self.0.offset == other.0.offset && self.0.size == other.0.size)
             || self[..] == other[..]
     }
 }
@@ -331,18 +408,7 @@ impl Deref for Binary {
     /// bitstring holds them (`erl_bits.h`). No supported path forms such a
     /// binary yet.
     fn deref(&self) -> &[u8] {
-        match &self.packed {
-            Some(packed) => packed,
-            // The offset is on a byte boundary, so the view is the bytes from
-            // the byte of the offset to the last byte of the size. A size of
-            // 0 gives no byte, also at the end of the array.
-            None if self.size == 0 => &[],
-            None => {
-                let first = byte(self.offset);
-                let end = self.bytes.len().min(byte(self.offset + self.size - 1) + 1);
-                &self.bytes[first..end]
-            }
-        }
+        self.0.bytes_of_view()
     }
 }
 
@@ -388,12 +454,12 @@ impl From<Vec<u8>> for Binary {
     /// ```
     fn from(bytes: Vec<u8>) -> Self {
         let size = bytes.len() * BITS_PER_BYTE;
-        Binary {
+        Binary(Arc::new(BinaryView {
             bytes: Arc::new(bytes),
             offset: 0,
             size,
             packed: None,
-        }
+        }))
     }
 }
 

@@ -248,24 +248,28 @@ impl AtomTable {
             .map(Arc::as_ref)
     }
 
-    /// Return the name of `atom` through [`AtomTable::name`] and the index of
-    /// the atom. The order rule reads each name with this function.
+    /// Return the name of `atom` from this table. Read it with
+    /// [`AtomTable::name`] at the index of the atom.
+    ///
+    /// An atom term holds an index of the table that owns it, so an index
+    /// that this table does not hold is a broken invariant and not a value.
     ///
     /// # Panics
     ///
-    /// Panic when the index of `atom` is outside this table. A term holds
-    /// only atoms of its owning table, so such an index is an invariant
-    /// error.
+    /// This function panics when this table does not hold the index of
+    /// `atom`. The message names the index.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// let table = AtomTable::new();
-    /// assert_eq!(table.atom_name(&Atom::from_static("ok").unwrap()), "ok");
+    /// let ok = table.get("ok").unwrap();
+    /// assert_eq!(table.name_of(&ok), "ok");
     /// ```
-    pub(crate) fn atom_name(&self, atom: &Atom) -> &str {
-        self.name(atom.index())
-            .expect("an atom term holds an index of its owning table")
+    pub(crate) fn name_of(&self, atom: &Atom) -> &str {
+        let index = atom.index();
+        self.name(index)
+            .unwrap_or_else(|| panic!("atom index {index} is outside the atom table"))
     }
 
     /// Return the term of `source` with every atom of its source table
@@ -638,12 +642,8 @@ impl HostTerm {
 
 #[cfg(test)]
 thread_local! {
-    /// The atom table of the unit tests in one test thread. The table is
-    /// leaked, so [`test_atoms`] returns a borrow with the `'static`
-    /// lifetime that `thread_local!` cannot give a guard over an owned
-    /// value.
-    static TEST_ATOMS: &'static std::cell::RefCell<AtomTable> =
-        Box::leak(Box::new(std::cell::RefCell::new(AtomTable::new())));
+    /// The atom table of the unit tests in one test thread.
+    static TEST_ATOMS: std::cell::RefCell<AtomTable> = std::cell::RefCell::new(AtomTable::new());
 }
 
 /// Return the atom term of a name for a unit test. A static name gets its
@@ -664,23 +664,19 @@ pub(crate) fn test_atom(name: &str) -> Term {
     Term::Atom(atom.expect("a test makes fewer atoms than ATOM_LIMIT"))
 }
 
-/// Return a borrow of the atom table of the unit tests in this thread. Pass
-/// it as the owning table of a term that [`test_atom`] built, so the order
-/// rule reads each name through [`AtomTable::name`].
-///
-/// Make every atom of the call before the call. The borrow ends at the end
-/// of the statement that uses it, and a call of [`test_atom`] during the
-/// borrow panics.
+/// Return a copy of the atom table of the unit tests in this thread. A test
+/// that builds a program by hand uses it as the table of the run, so the
+/// atoms of [`test_atom`] keep their index in the run table.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let map = Map::from_pairs(vec![(test_atom("ok"), Term::nil())], &test_atoms());
-/// assert_eq!(map.unwrap().len(), 1);
+/// let atoms = test_atom_table();
+/// assert_eq!(atoms.name(test_atom("ok").index()), Some("ok"));
 /// ```
 #[cfg(test)]
-pub(crate) fn test_atoms() -> std::cell::Ref<'static, AtomTable> {
-    TEST_ATOMS.with(|table| table.borrow())
+pub(crate) fn test_atom_table() -> AtomTable {
+    TEST_ATOMS.with(|table| table.borrow().clone())
 }
 
 #[cfg(test)]

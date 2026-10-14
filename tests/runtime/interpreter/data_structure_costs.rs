@@ -29,7 +29,7 @@ use crate::{
         persistent_term::PersistentTerms,
         process::{Frame, ProcessState, StackSlot},
     },
-    term::{Atom, Binary, Fun, Map, ProcessId, Term, internal_hash},
+    term::{Atom, AtomTable, Binary, Fun, Map, ProcessId, Term, internal_hash},
 };
 
 /// The number of timed runs of one operation. The report gives the minimum
@@ -134,13 +134,13 @@ fn module_of(functions: u32) -> BeamModule {
 }
 
 /// Return an ETS set table of `objects` objects, keyed by an integer.
-fn table_of(objects: usize) -> Table {
+fn table_of(atoms: &AtomTable, objects: usize) -> Table {
     let mut table = Table::new(ProcessId(0), Access::Public, 1);
     for index in 0..objects {
-        table.insert(vec![
-            Term::Integer(index as i64),
-            Term::Integer(index as i64),
-        ]);
+        table.insert(
+            atoms,
+            vec![Term::Integer(index as i64), Term::Integer(index as i64)],
+        );
     }
     table
 }
@@ -298,6 +298,7 @@ struct StrideModel<const ARM: usize> {
 /// Print the size of every structure of the runtime inventory.
 #[test]
 fn prints_the_size_of_every_structure() {
+    let atoms = AtomTable::new();
     // The term representations.
     report_size::<Term>("term");
     report_size::<Option<Term>>("option_term");
@@ -355,7 +356,7 @@ fn prints_the_size_of_every_structure() {
     for objects in [1usize, 10, 100, 1000] {
         report_bytes(
             &format!("ets_key_index_{objects}"),
-            table_of(objects).index_bytes(),
+            table_of(&atoms, objects).index_bytes(),
         );
     }
 }
@@ -363,13 +364,14 @@ fn prints_the_size_of_every_structure() {
 /// Print the cost of every derivation that the audit names.
 #[test]
 fn prints_the_cost_of_every_derivation() {
+    let atoms = AtomTable::new();
     let tuple_1000 = tuple_of(1000);
     let tuple_32 = tuple_of(32);
     let module = module_of(1000);
-    let table_1000 = table_of(1000);
-    let table_100 = table_of(100);
-    let table_10 = table_of(10);
-    let table_1 = table_of(1);
+    let table_1000 = table_of(&atoms, 1000);
+    let table_100 = table_of(&atoms, 100);
+    let table_10 = table_of(&atoms, 10);
+    let table_1 = table_of(&atoms, 1);
 
     // The owner's first candidate: the element count of a tuple. The count
     // is a field of the element vector, so the read is a pointer chase and
@@ -480,7 +482,7 @@ fn prints_the_cost_of_every_derivation() {
             measure(ETS_OPERATIONS, || {
                 let mut hits = 0u64;
                 for _ in 0..ETS_OPERATIONS {
-                    if black_box(table.object(black_box(&key))).is_some() {
+                    if black_box(table.object(&atoms, black_box(&key))).is_some() {
                         hits += 1;
                     }
                 }
@@ -555,10 +557,10 @@ fn prints_the_cost_of_every_derivation() {
         "ets_insert_miss_1000",
         measure_with(
             ETS_OPERATIONS,
-            || table_of(1000),
+            || table_of(&atoms, 1000),
             |table| {
                 for round in 0..ETS_OPERATIONS {
-                    table.insert(vec![Term::Integer(-1 - round as i64), Term::Nil]);
+                    table.insert(&atoms, vec![Term::Integer(-1 - round as i64), Term::Nil]);
                 }
                 ETS_OPERATIONS as u64
             },
@@ -575,10 +577,10 @@ fn prints_the_cost_of_every_derivation() {
             &format!("ets_insert_{objects}"),
             measure_with(
                 ETS_OPERATIONS,
-                || table_of(objects),
+                || table_of(&atoms, objects),
                 |table| {
                     for round in 0..ETS_OPERATIONS {
-                        table.insert(vec![Term::Integer(-1 - round as i64), Term::Nil]);
+                        table.insert(&atoms, vec![Term::Integer(-1 - round as i64), Term::Nil]);
                     }
                     ETS_OPERATIONS as u64
                 },
@@ -588,10 +590,10 @@ fn prints_the_cost_of_every_derivation() {
             &format!("ets_delete_{objects}"),
             measure_with(
                 ETS_OPERATIONS,
-                || table_of(objects + ETS_OPERATIONS),
+                || table_of(&atoms, objects + ETS_OPERATIONS),
                 |table| {
                     for round in 0..ETS_OPERATIONS {
-                        table.delete(&Term::Integer((objects + round) as i64));
+                        table.delete(&atoms, &Term::Integer((objects + round) as i64));
                     }
                     ETS_OPERATIONS as u64
                 },
@@ -623,26 +625,26 @@ fn prints_the_cost_of_every_derivation() {
     let pairs_1000: Vec<(Term, Term)> = (0..1000)
         .map(|key| (Term::Integer(key), Term::Integer(key)))
         .collect();
-    let map_1000 = Map::from_pairs(pairs_1000, &crate::term::test_atoms()).unwrap();
+    let map_1000 = Map::from_pairs(pairs_1000, &crate::term::test_atom_table()).unwrap();
     let flat_32 = Map::from_pairs(
         (0..32)
             .map(|key| (Term::Integer(key), Term::Integer(key)))
             .collect(),
-        &crate::term::test_atoms(),
+        &crate::term::test_atom_table(),
     )
     .unwrap();
     let flat_4 = Map::from_pairs(
         (0..4)
             .map(|key| (Term::Integer(key), Term::Integer(key)))
             .collect(),
-        &crate::term::test_atoms(),
+        &crate::term::test_atom_table(),
     )
     .unwrap();
     let flat_2 = Map::from_pairs(
         (0..2)
             .map(|key| (Term::Integer(key), Term::Integer(key)))
             .collect(),
-        &crate::term::test_atoms(),
+        &crate::term::test_atom_table(),
     )
     .unwrap();
     for (name, map, key) in [

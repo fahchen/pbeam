@@ -614,7 +614,10 @@ impl BeamProgram {
         arguments: Vec<Term>,
     ) -> Result<BifResult, BeamError> {
         let resolved = resolve(module, name, arguments.len() as u32);
-        self.call_bif(scheduler, module, name, resolved, &arguments)
+        match resolved {
+            Some(id) => self.bif_slice(scheduler, id, &arguments),
+            None => self.named_bif(scheduler, module, name, &arguments),
+        }
     }
 
     /// Run the BIF of an external call or an apply.
@@ -660,7 +663,7 @@ impl BeamProgram {
     /// let error = program.named_bif(&mut scheduler, "erlang", "date", &[]).unwrap_err();
     /// assert_eq!(error.to_string(), "unresolved external MFA erlang:date/0");
     /// ```
-    fn named_bif(
+    pub(super) fn named_bif(
         &self,
         scheduler: &mut Scheduler,
         module: &str,

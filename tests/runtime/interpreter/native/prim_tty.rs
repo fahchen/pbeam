@@ -44,7 +44,7 @@ fn gives_the_tcsetattr_errno_and_keeps_no_owner() {
     let options = Term::Map(
         Map::from_pairs(
             vec![(Term::static_atom("input"), Term::static_atom("raw"))],
-            &crate::term::test_atoms(),
+            &crate::term::test_atom_table(),
         )
         .unwrap(),
     );

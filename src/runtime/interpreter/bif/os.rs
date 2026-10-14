@@ -100,7 +100,7 @@ pub(super) fn set_signal(
     let Term::Atom(signal) = signal else {
         return Ok(BifResult::badarg());
     };
-    let Some(number) = signal::signal_number(signal.name()) else {
+    let Some(number) = signal::signal_number(scheduler.atoms.name_of(signal)) else {
         return Ok(BifResult::badarg());
     };
     for &operation in operations {

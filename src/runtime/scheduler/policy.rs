@@ -31,7 +31,7 @@ use crate::{
         process::{Frame, ProcessState, Start},
         signal::Signal,
     },
-    term::{Atom, Map, ProcessId, Term, print_term},
+    term::{Atom, AtomTable, Map, ProcessId, Term, print_term},
 };
 
 /// The largest number of reductions of one call of the policy code. A
@@ -175,7 +175,11 @@ impl Scheduler {
                 "unsupported pbeam_cap:enter_runtime/2 in a boot process that is not the root process: see \"Boot authority\" in docs/erts-differences.md",
             ));
         }
-        let initial_call = (module.name().to_owned(), function.name().to_owned(), 0);
+        let initial_call = (
+            self.atoms.name_of(module).to_owned(),
+            self.atoms.name_of(function).to_owned(),
+            0,
+        );
         let requester = self.requester(super::ROOT, None, &initial_call)?;
         self.current_process_mut().policy_reply = None;
         let policy = self
@@ -254,7 +258,7 @@ impl Scheduler {
         if !live {
             return Ok(Err(Denied));
         }
-        let initial_call = self.code.initial_call_names(&initial_call)?;
+        let initial_call = self.code.initial_call_names(&self.atoms, &initial_call)?;
         let requester = self.requester(id, parent, &initial_call)?;
         self.current_process_mut().policy_reply = None;
         let policy = self.policy.as_mut().expect("the policy process lives");
@@ -419,7 +423,7 @@ impl Scheduler {
         match policy.call.take().expect("a call runs") {
             PolicyCall::Initial => {
                 policy.initial = Some(match end {
-                    PolicyEnd::Returned(value) => initial_capabilities(&value)
+                    PolicyEnd::Returned(value) => initial_capabilities(&self.atoms, &value)
                         .ok_or_else(|| format!("initial/1 returned {}", text(&value))),
                     PolicyEnd::Raised(reason) => {
                         Err(format!("initial/1 exited with {}", text(&reason)))
@@ -431,7 +435,7 @@ impl Scheduler {
             }
             PolicyCall::Grant(requester) => {
                 let capability = match end {
-                    PolicyEnd::Returned(value) => granted(&value),
+                    PolicyEnd::Returned(value) => granted(&self.atoms, &value),
                     PolicyEnd::Raised(_) | PolicyEnd::Overrun => None,
                 };
                 // A requester that exited drops the signal.
@@ -534,9 +538,11 @@ impl Scheduler {
 /// assert_eq!(initial_capabilities(&Term::nil()), Some(vec![]));
 /// assert_eq!(initial_capabilities(&Term::static_atom("all")), None);
 /// ```
-fn initial_capabilities(value: &Term) -> Option<Vec<Capability>> {
+fn initial_capabilities(atoms: &AtomTable, value: &Term) -> Option<Vec<Capability>> {
     let capabilities = value.proper_list()?;
-    capabilities.map(capability::capability).collect()
+    capabilities
+        .map(|capability| capability::capability(atoms, capability))
+        .collect()
 }
 
 /// Read the value of `grant/3`: the capability of `{grant, Capability}`,
@@ -547,13 +553,13 @@ fn initial_capabilities(value: &Term) -> Option<Vec<Capability>> {
 /// ```rust,ignore
 /// assert_eq!(granted(&Term::static_atom("deny")), None);
 /// ```
-fn granted(value: &Term) -> Option<Capability> {
+fn granted(atoms: &AtomTable, value: &Term) -> Option<Capability> {
     let Term::Tuple(elements) = value else {
         return None;
     };
     match elements.as_ref() {
         [Term::Atom(grant), capability] if grant.name() == "grant" => {
-            capability::capability(capability)
+            capability::capability(atoms, capability)
         }
         _ => None,
     }

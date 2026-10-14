@@ -159,9 +159,9 @@ enum Step {
 ///
 /// ```rust,ignore
 /// let list = |values: &[i64]| Term::list_from(values.iter().map(|value| Term::Integer(*value)));
-/// let result = subtract(&mut process, &test_atoms(), &list(&[1, 2, 1, 3]), &list(&[1, 3]))?;
+/// let result = subtract(&mut process, &test_atom_table(), &list(&[1, 2, 1, 3]), &list(&[1, 3]))?;
 /// assert!(matches!(result, BifResult::Value(value) if value == list(&[2, 1])));
-/// assert!(matches!(subtract(&mut process, &test_atoms(), &Term::Integer(1), &Term::nil())?, BifResult::Raise { .. }));
+/// assert!(matches!(subtract(&mut process, &test_atom_table(), &Term::Integer(1), &Term::nil())?, BifResult::Raise { .. }));
 /// ```
 ///
 /// # Errors
@@ -199,9 +199,9 @@ pub(super) fn subtract(
 /// # Examples
 ///
 /// ```rust,ignore
-/// let BifResult::TrapBif { arguments, .. } = subtract(&mut process, &test_atoms(), &long, &other)? else { unreachable!() };
+/// let BifResult::TrapBif { arguments, .. } = subtract(&mut process, &test_atom_table(), &long, &other)? else { unreachable!() };
 /// process.fcalls = 4000;
-/// let result = continue_trap(&mut process, &test_atoms(), &arguments)?;
+/// let result = continue_trap(&mut process, &test_atom_table(), &arguments)?;
 /// ```
 ///
 /// # Errors

@@ -8,7 +8,7 @@ use super::{
 };
 use crate::error::{BeamError, error};
 use crate::runtime::{BifId, resolve_bif};
-use crate::term::{Atom, Lambda, Term};
+use crate::term::{Atom, AtomTable, Lambda, Term};
 use std::num::NonZeroU64;
 
 const CODE_HEADER_SIZE: usize = WORD_SIZE * 5;
@@ -1543,12 +1543,13 @@ fn test_operands(left: &Operand, right: &Operand) -> Option<(TestOperand, TestOp
 /// let mut code = vec![0, 0, 0, 16]; // sub-size
 /// code.extend_from_slice(&[0; 16]); // instruction set, opcode max, labels, functions
 /// code.push(0x03); // end
-/// let (instructions, labels) = parse_code(&code, &[], &[], &[], &[], &[])?;
+/// let (instructions, labels) = parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[])?;
 /// assert_eq!(labels, 0);
 /// assert!(matches!(instructions.as_slice(), [Instruction::End]));
 /// ```
 pub(super) fn parse_code(
     data: &[u8],
+    atom_table: &AtomTable,
     atoms: &[Atom],
     imports: &[(String, String, u32)],
     literals: &[Option<Term>],
@@ -1595,12 +1596,10 @@ pub(super) fn parse_code(
             }
             OPCODE_FUNCTION_INFO => {
                 function_info_count += 1;
-                let module = atom_at(atoms, read_operand(data, &mut cursor, TAG_ATOM)? as usize)?
-                    .name()
-                    .to_owned();
-                let name = atom_at(atoms, read_operand(data, &mut cursor, TAG_ATOM)? as usize)?
-                    .name()
-                    .to_owned();
+                let module_index = read_operand(data, &mut cursor, TAG_ATOM)? as usize;
+                let module = atom_table.name_of(atom_at(atoms, module_index)?).to_owned();
+                let name_index = read_operand(data, &mut cursor, TAG_ATOM)? as usize;
+                let name = atom_table.name_of(atom_at(atoms, name_index)?).to_owned();
                 let arity = read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32;
                 function = Some((name.clone(), arity, instructions.len() + 1));
                 Instruction::FunctionInfo {

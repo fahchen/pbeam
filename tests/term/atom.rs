@@ -464,3 +464,16 @@ fn compares_a_shared_term_with_a_memory() {
     };
     assert_eq!(left, right);
 }
+
+#[test]
+#[should_panic(expected = "atom index 1150 is outside the atom table")]
+fn rejects_the_read_of_an_atom_index_outside_the_table() {
+    // An atom term holds an index of the table that owns it. An index that
+    // the table does not hold is a broken invariant, so the read fails.
+    let table = AtomTable::new();
+    let atom = Atom {
+        index: 1150,
+        name: Arc::from("outside"),
+    };
+    table.name_of(&atom);
+}

@@ -103,11 +103,12 @@ fn truncates_a_long_atu8_name_to_255_characters_like_erts() {
 
 #[test]
 fn rejects_invalid_export_tables_and_indices() {
-    let atoms = [AtomTable::new().put("constant").unwrap()];
-    assert!(parse_exports(&[], &[]).is_err());
-    assert!(parse_exports(&[0, 0, 0, 1], &[]).is_err());
+    let mut table = AtomTable::new();
+    let atoms = [table.put("constant").unwrap()];
+    assert!(parse_exports(&[], &[], &table).is_err());
+    assert!(parse_exports(&[0, 0, 0, 1], &[], &table).is_err());
     let exports = [0, 0, 0, 1, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 1];
-    assert!(parse_exports(&exports, &atoms).is_err());
+    assert!(parse_exports(&exports, &atoms, &table).is_err());
 }
 
 #[test]

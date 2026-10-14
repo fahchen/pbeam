@@ -14,7 +14,7 @@ use crate::{
         ets::{Access, Table},
         process::{ProcessState, Start, tests::frame},
     },
-    term::{Atom, AtomTable, Lambda, ProcessId, Reference, test_atom, test_atoms},
+    term::{Atom, AtomTable, Lambda, ProcessId, Reference, test_atom, test_atom_table},
 };
 
 /// Return the initial capabilities of the default policy.
@@ -59,7 +59,7 @@ fn program_of(instructions: Vec<Instruction>, exports: HashMap<(String, u32), u3
                     .expect("the fixture module loads"),
             ),
         )]),
-        atoms: Arc::new(AtomTable::new()),
+        atoms: Arc::new(test_atom_table()),
     }
 }
 
@@ -876,7 +876,9 @@ fn updates_and_reads_maps_and_reports_unsupported_map_operands() {
             .into_iter()
             .map(|(key, value)| (test_atom(key), Term::Integer(value)))
             .collect();
-        Operand::Value(Term::Map(Map::from_pairs(pairs, &test_atoms()).unwrap()))
+        Operand::Value(Term::Map(
+            Map::from_pairs(pairs, &test_atom_table()).unwrap(),
+        ))
     };
     let run = |body: Vec<Instruction>| make_program(body, 0).execute("fixture", "main", &[]);
     // Replace an existing key, then read it back.
@@ -960,7 +962,7 @@ fn tests_map_keys_with_has_map_fields_and_writes_no_register() {
                 (test_atom("input"), test_atom("cooked")),
                 (Term::Integer(1), test_atom("one")),
             ],
-            &test_atoms(),
+            &test_atom_table(),
         )
         .unwrap(),
     ));
@@ -1117,7 +1119,11 @@ fn keeps_a_destination_register_when_a_map_change_fails() {
     );
     // A map source in another register with a missing key.
     let map = Operand::Value(Term::Map(
-        Map::from_pairs(vec![(Term::Integer(1), Term::Integer(1))], &test_atoms()).unwrap(),
+        Map::from_pairs(
+            vec![(Term::Integer(1), Term::Integer(1))],
+            &test_atom_table(),
+        )
+        .unwrap(),
     ));
     assert_eq!(
         run(
@@ -1135,7 +1141,11 @@ fn keeps_a_built_map_when_a_same_register_change_fails() {
     // and the failing `put_map_exact` then takes that map, puts it back, and
     // jumps to its fail label.
     let source = Term::Map(
-        Map::from_pairs(vec![(Term::Integer(1), Term::Integer(1))], &test_atoms()).unwrap(),
+        Map::from_pairs(
+            vec![(Term::Integer(1), Term::Integer(1))],
+            &test_atom_table(),
+        )
+        .unwrap(),
     );
     let build = |source: Term| {
         vec![
@@ -1174,7 +1184,7 @@ fn keeps_a_built_map_when_a_same_register_change_fails() {
                     (Term::Integer(1), Term::Integer(1)),
                     (Term::Integer(3), Term::Integer(3)),
                 ],
-                &test_atoms(),
+                &test_atom_table(),
             )
             .unwrap()
         )
@@ -1222,8 +1232,11 @@ fn keeps_a_key_or_value_in_the_destination_slot() {
             vec![
                 Instruction::Move(
                     Operand::Value(Term::Map(
-                        Map::from_pairs(vec![(Term::Integer(1), Term::Integer(0))], &test_atoms())
-                            .unwrap(),
+                        Map::from_pairs(
+                            vec![(Term::Integer(1), Term::Integer(0))],
+                            &test_atom_table(),
+                        )
+                        .unwrap(),
                     )),
                     Operand::X(0),
                 ),
@@ -1245,7 +1258,11 @@ fn keeps_a_key_or_value_in_the_destination_slot() {
     };
     let expected = || {
         Term::Map(
-            Map::from_pairs(vec![(Term::Integer(1), Term::Integer(9))], &test_atoms()).unwrap(),
+            Map::from_pairs(
+                vec![(Term::Integer(1), Term::Integer(9))],
+                &test_atom_table(),
+            )
+            .unwrap(),
         )
     };
     // The key is the term that the destination register held.
@@ -1271,7 +1288,7 @@ fn reports_a_maps_merge_result_key_that_the_map_form_does_not_support() {
     // A flatmap accepts the integer 2^59, and a hashmap does not yet.
     let pairs = |keys: std::ops::RangeInclusive<i64>| {
         let pairs = keys.map(|key| (Term::Integer(key), Term::Integer(0)));
-        Term::Map(Map::from_pairs(pairs.collect(), &test_atoms()).unwrap())
+        Term::Map(Map::from_pairs(pairs.collect(), &test_atom_table()).unwrap())
     };
     let merge = make_program(
         vec![
@@ -1371,7 +1388,7 @@ fn runs_maps_keys_as_a_bif_and_reports_unsupported_arguments() {
             .into_iter()
             .map(|key| (key, Term::Integer(0)))
             .collect();
-        Term::Map(Map::from_pairs(pairs, &test_atoms()).unwrap())
+        Term::Map(Map::from_pairs(pairs, &test_atom_table()).unwrap())
     };
     let atom = Term::static_atom;
     // ERTS 29.1.1: maps:keys(#{a => V, 2 => V, 1 => V}) is [1,2,a].
@@ -1401,7 +1418,7 @@ fn runs_a_table_bif_before_a_loaded_module_that_exports_the_same_mfa() {
         vec![
             Instruction::Move(
                 Operand::Value(Term::Map(
-                    Map::from_pairs(Vec::new(), &test_atoms()).unwrap(),
+                    Map::from_pairs(Vec::new(), &test_atom_table()).unwrap(),
                 )),
                 Operand::X(0),
             ),
@@ -3216,18 +3233,9 @@ fn applies_erlang_apply_3_as_the_i_apply_instruction() {
         Term::list_from(vec![test_atom("x"); 1023]),
     );
     body.push(erlang_call("apply", 3, true));
-    let mut program = apply_targets_program(body);
-    // The atoms of the `undef` frame come from the atom table of the run.
-    assert_eq!(
-        program
-            .execute("fixture", "main", &[])
-            .unwrap_err()
-            .to_string(),
-        "atom table does not hold fixture"
-    );
-    for name in ["fixture", "missing"] {
-        Arc::get_mut(&mut program.atoms).unwrap().put(name).unwrap();
-    }
+    let program = apply_targets_program(body);
+    // The atoms of the `undef` frame come from the atom table of the run,
+    // which holds the atoms of the hand-built code.
     assert_eq!(
         program
             .execute("fixture", "main", &[])
@@ -3247,6 +3255,22 @@ fn applies_erlang_apply_3_as_the_i_apply_instruction() {
     assert_eq!(
         run_with_apply_targets(body).unwrap_err().to_string(),
         "root process exited with {system_limit,[]}"
+    );
+}
+
+#[test]
+fn applies_a_pbeam_bif_through_the_name_path() {
+    // `pbeam_cap:revoke/2` is a PBeam BIF and no `bif.tab` entry, so an
+    // `apply` reaches it through the name path of `call_mfa`. A holder that
+    // is not a pid gives `badarg`.
+    let mut body = vec![
+        Instruction::Move(atom("x"), Operand::X(0)),
+        Instruction::Move(atom("env"), Operand::X(1)),
+    ];
+    body.extend(apply_body(2, atom("pbeam_cap"), atom("revoke")));
+    assert_eq!(
+        run_with_apply_targets(body).unwrap_err().to_string(),
+        BADARG_EXIT
     );
 }
 
@@ -4004,7 +4028,11 @@ fn shares_the_stored_term_of_a_persistent_term() {
     scheduler.schedule_next().unwrap();
     let key = Term::tuple(vec![Term::Integer(7)]);
     let value = Term::Map(
-        Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))], &test_atoms()).unwrap(),
+        Map::from_pairs(
+            vec![(Term::Integer(1), Term::Integer(2))],
+            &test_atom_table(),
+        )
+        .unwrap(),
     );
     program
         .bif(

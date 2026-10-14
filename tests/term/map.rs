@@ -3,14 +3,14 @@ use std::{hint::black_box, rc::Rc, sync::Arc, time::Instant};
 use super::{
     Child, Direction, Drain, HAMT_MAX_LEVEL, Hamt, Insert, Map, Node, Repr, encode_path, map_hash,
 };
-use crate::term::{AtomTable, Reference, Term, internal_hash, test_atom as atom, test_atoms};
+use crate::term::{AtomTable, Reference, Term, internal_hash, test_atom as atom, test_atom_table};
 
 fn integers(keys: impl IntoIterator<Item = i64>) -> Map {
     Map::from_pairs(
         keys.into_iter()
             .map(|key| (Term::Integer(key), atom("v")))
             .collect(),
-        &test_atoms(),
+        &test_atom_table(),
     )
     .unwrap()
 }
@@ -179,13 +179,13 @@ fn rejects_list_and_tuple_keys_with_unsupported_elements() {
         assert_eq!(map_hash(&key), None);
         let mut flat = integers([1]);
         assert_eq!(
-            flat.insert(key.clone(), atom("v"), &test_atoms()),
+            flat.insert(key.clone(), atom("v"), &test_atom_table()),
             Err(key.clone())
         );
         assert_eq!(keys(&flat), list(&[1]));
         let mut hash = integers(1..=33);
         assert_eq!(
-            hash.insert(key.clone(), atom("v"), &test_atoms()),
+            hash.insert(key.clone(), atom("v"), &test_atom_table()),
             Err(key.clone())
         );
         assert_eq!(hash.len(), 33);
@@ -221,7 +221,7 @@ fn hashes_improper_list_keys_with_their_tail_as_erts() {
             .chain((1..=26).map(int))
             .map(|key| (key, atom("v")))
             .collect(),
-        &test_atoms(),
+        &test_atom_table(),
     )
     .unwrap();
     assert_eq!(
@@ -271,10 +271,10 @@ fn becomes_a_hashmap_with_the_erts_order_above_32_keys() {
     let mut map = integers(1..=32);
     assert_eq!(keys(&map), list(&(1..=32).collect::<Vec<_>>()));
     // Replacing a value in a full flatmap keeps the flatmap.
-    map.insert(Term::Integer(32), Term::Integer(0), &test_atoms())
+    map.insert(Term::Integer(32), Term::Integer(0), &test_atom_table())
         .unwrap();
     assert_eq!(keys(&map), list(&(1..=32).collect::<Vec<_>>()));
-    map.insert(Term::Integer(33), atom("v"), &test_atoms())
+    map.insert(Term::Integer(33), atom("v"), &test_atom_table())
         .unwrap();
     assert_eq!(map.len(), 33);
     // ERTS 29.1.1: maps:keys of 1..33.
@@ -286,7 +286,7 @@ fn becomes_a_hashmap_with_the_erts_order_above_32_keys() {
         ])
     );
     assert_eq!(map.get(&Term::Integer(32)), Some(&Term::Integer(0)));
-    map.insert(Term::Integer(33), Term::Integer(1), &test_atoms())
+    map.insert(Term::Integer(33), Term::Integer(1), &test_atom_table())
         .unwrap();
     assert_eq!(map.get(&Term::Integer(33)), Some(&Term::Integer(1)));
     assert_eq!(map.len(), 33);
@@ -365,30 +365,31 @@ fn puts_atom_keys_in_a_hashmap_and_rejects_large_integers() {
     let a = atom("a");
     // The 33rd key turns a flatmap with an atom key into a hashmap.
     let mut map = integers(1..=31);
-    map.insert(a.clone(), a.clone(), &test_atoms()).unwrap();
-    map.insert(Term::Integer(33), a.clone(), &test_atoms())
+    map.insert(a.clone(), a.clone(), &test_atom_table())
+        .unwrap();
+    map.insert(Term::Integer(33), a.clone(), &test_atom_table())
         .unwrap();
     assert_eq!(map.len(), 33);
     assert_eq!(map.get(&a), Some(&a));
     assert_eq!(map.get(&atom("b")), None);
     // An atom key goes into a hashmap.
     let mut map = integers(1..=33);
-    map.insert(a.clone(), Term::Integer(1), &test_atoms())
+    map.insert(a.clone(), Term::Integer(1), &test_atom_table())
         .unwrap();
-    map.insert(a.clone(), Term::Integer(2), &test_atoms())
+    map.insert(a.clone(), Term::Integer(2), &test_atom_table())
         .unwrap();
     assert_eq!(map.len(), 34);
     assert_eq!(map.get(&a), Some(&Term::Integer(2)));
     // A hashmap has no hash for an integer outside the small-integer range yet.
     assert_eq!(
-        map.insert(Term::Integer(1 << 59), a.clone(), &test_atoms()),
+        map.insert(Term::Integer(1 << 59), a.clone(), &test_atom_table()),
         Err(Term::Integer(1 << 59))
     );
     let mut map = integers(1..=31);
-    map.insert(Term::Integer(1 << 59), a.clone(), &test_atoms())
+    map.insert(Term::Integer(1 << 59), a.clone(), &test_atom_table())
         .unwrap();
     assert_eq!(
-        map.insert(Term::Integer(33), a, &test_atoms()),
+        map.insert(Term::Integer(33), a, &test_atom_table()),
         Err(Term::Integer(1 << 59))
     );
     assert_eq!(map.len(), 32);
@@ -440,16 +441,16 @@ fn copies_a_shared_form_before_a_change() {
     change(|map| {
         map.update(
             vec![(Insert::Set, Term::Integer(1), atom("w"))],
-            &test_atoms(),
+            &test_atom_table(),
         )
         .unwrap()
     });
     change(|map| {
-        map.insert(Term::Integer(2), atom("w"), &test_atoms())
+        map.insert(Term::Integer(2), atom("w"), &test_atom_table())
             .unwrap()
     });
     change(|map| {
-        map.insert(Term::Integer(-1), atom("w"), &test_atoms())
+        map.insert(Term::Integer(-1), atom("w"), &test_atom_table())
             .unwrap()
     });
 
@@ -458,7 +459,7 @@ fn copies_a_shared_form_before_a_change() {
     let flat = integers(1..=32);
     let mut grown = flat.clone();
     grown
-        .insert(Term::Integer(33), atom("v"), &test_atoms())
+        .insert(Term::Integer(33), atom("v"), &test_atom_table())
         .unwrap();
     assert_eq!((flat.len(), flat.is_hashmap()), (32, false));
     assert_eq!((grown.len(), grown.is_hashmap()), (33, true));
@@ -507,13 +508,13 @@ fn copies_only_the_hashmap_nodes_on_the_path_of_a_change() {
         assert_eq!(copy.get(&Term::Integer(key)), Some(&atom("w")));
     };
     change(500, 28, |map, key| {
-        map.insert(key, atom("w"), &test_atoms()).unwrap()
+        map.insert(key, atom("w"), &test_atom_table()).unwrap()
     });
     change(2000, 29, |map, key| {
-        map.insert(key, atom("w"), &test_atoms()).unwrap()
+        map.insert(key, atom("w"), &test_atom_table()).unwrap()
     });
     change(500, 28, |map, key| {
-        map.update(vec![(Insert::Set, key, atom("w"))], &test_atoms())
+        map.update(vec![(Insert::Set, key, atom("w"))], &test_atom_table())
             .unwrap()
     });
 }
@@ -541,7 +542,7 @@ fn drains_the_pairs_of_a_map_only_from_the_last_copy() {
     // of the nodes that it holds alone, and the last holder of a shared node takes its pairs.
     let mut map = integers(1..=1000);
     let mut copy = map.clone();
-    copy.insert(Term::Integer(2000), atom("w"), &test_atoms())
+    copy.insert(Term::Integer(2000), atom("w"), &test_atom_table())
         .unwrap();
     map.drain_into(&mut pending);
     assert_eq!(pending.len(), 2 * 6);
@@ -560,7 +561,7 @@ fn sorts_pairs_by_the_flatmap_key_order() {
         (Term::static_atom("value"), Term::Integer(2)),
         (Term::Integer(7), Term::Integer(3)),
     ];
-    Map::sort_pairs(&mut pairs, &test_atoms()).unwrap();
+    Map::sort_pairs(&mut pairs, &test_atom_table()).unwrap();
     let sorted: Vec<_> = pairs.iter().map(|(key, _)| key.clone()).collect();
     assert_eq!(
         sorted,
@@ -586,7 +587,7 @@ fn sorts_pairs_by_the_flatmap_key_order() {
         ),
         (Term::static_atom("abs"), Term::Integer(5)),
     ];
-    Map::sort_pairs(&mut compound, &test_atoms()).unwrap();
+    Map::sort_pairs(&mut compound, &test_atom_table()).unwrap();
     let values: Vec<_> = compound.iter().map(|(_, value)| value.clone()).collect();
     assert_eq!(values, [5, 4, 3, 2, 1].map(Term::Integer));
     let mut references = vec![
@@ -594,7 +595,7 @@ fn sorts_pairs_by_the_flatmap_key_order() {
         (Term::Reference(Reference(2)), Term::Integer(2)),
     ];
     assert!(
-        Map::sort_pairs(&mut references, &test_atoms())
+        Map::sort_pairs(&mut references, &test_atom_table())
             .unwrap_err()
             .to_string()
             .contains("unsupported term order of two references")
@@ -619,7 +620,7 @@ fn builds_the_same_map_from_pairs_in_any_order() {
 fn splits_a_leaf_into_nodes_until_the_hashes_differ() {
     let leaf = |key: i64| (key as u64, Term::Integer(key), Term::Integer(key));
     // 0x101 and 0x201 select the same slot at levels 0 and 1, and slots 1 and 2 at level 2.
-    let child = Node::split(0, leaf(0x201), leaf(0x101), &test_atoms());
+    let child = Node::split(0, leaf(0x201), leaf(0x101), &test_atom_table());
     let (bitmap, children) = node_of(&child);
     assert_eq!((bitmap, children.len()), (0b10, 1));
     let (bitmap, children) = node_of(&children[0]);
@@ -651,7 +652,7 @@ fn keeps_keys_with_equal_hashes_in_a_collision_child() {
         HAMT_MAX_LEVEL,
         (0x5, key(2), Term::Integer(2)),
         (0x5, key(1), Term::Integer(1)),
-        &test_atoms(),
+        &test_atom_table(),
     );
     assert!(matches!(
         &child,
@@ -665,13 +666,13 @@ fn keeps_keys_with_equal_hashes_in_a_collision_child() {
             1,
             (0x5, key(3), Term::Integer(0)),
             (0x5, key(2), Term::Integer(2)),
-            &test_atoms(),
+            &test_atom_table(),
         )],
     };
     let mut hamt = Hamt { root, size: 2 };
-    hamt.insert(0x5, key(1), Term::Integer(1), &test_atoms());
-    hamt.insert(0x5, key(3), Term::Integer(3), &test_atoms());
-    hamt.insert(0x15, key(4), Term::Integer(4), &test_atoms());
+    hamt.insert(0x5, key(1), Term::Integer(1), &test_atom_table());
+    hamt.insert(0x5, key(3), Term::Integer(3), &test_atom_table());
+    hamt.insert(0x15, key(4), Term::Integer(4), &test_atom_table());
     assert_eq!(hamt.size, 4);
     // The only collision child is at level 16, as an ERTS collision node is.
     let mut nodes = vec![(0, &hamt.root)];
@@ -711,16 +712,16 @@ fn keeps_keys_with_equal_hashes_in_a_collision_child() {
     let second = Term::list_from(list(&[161, 92, 65, 50, 231, 24, 153, 137]));
     assert_eq!(map_hash(&first), map_hash(&second));
     let mut map = integers(1..=32);
-    map.insert(first.clone(), Term::Integer(1), &test_atoms())
+    map.insert(first.clone(), Term::Integer(1), &test_atom_table())
         .unwrap();
-    map.insert(second.clone(), Term::Integer(2), &test_atoms())
+    map.insert(second.clone(), Term::Integer(2), &test_atom_table())
         .unwrap();
-    map.insert(second.clone(), Term::Integer(3), &test_atoms())
+    map.insert(second.clone(), Term::Integer(3), &test_atom_table())
         .unwrap();
     assert_eq!(map.len(), 34);
     map.update(
         vec![(Insert::Set, first.clone(), Term::Integer(4))],
-        &test_atoms(),
+        &test_atom_table(),
     )
     .unwrap();
     assert_eq!(map.get(&first), Some(&Term::Integer(4)));
@@ -731,7 +732,7 @@ fn keeps_keys_with_equal_hashes_in_a_collision_child() {
 fn identity(keys: Vec<Term>) -> Map {
     Map::from_pairs(
         keys.into_iter().map(|key| (key.clone(), key)).collect(),
-        &test_atoms(),
+        &test_atom_table(),
     )
     .unwrap()
 }
@@ -879,7 +880,7 @@ fn counts_a_repeated_new_key_one_time_for_the_map_form() {
             (Insert::Add, added.clone(), atom("first")),
             (Insert::Add, added.clone(), atom("second")),
         ],
-        &test_atoms(),
+        &test_atom_table(),
     )
     .unwrap();
     assert_eq!(map.len(), 32);
@@ -915,7 +916,7 @@ fn counts_the_steps_of_the_erts_hashmap_merge() {
     let second = Term::list_from(list(&[161, 92, 65, 50, 231, 24, 153, 137]));
     let with = |key: &Term| {
         let mut map = range(1, 32);
-        map.insert(key.clone(), Term::Integer(1), &test_atoms())
+        map.insert(key.clone(), Term::Integer(1), &test_atom_table())
             .unwrap();
         map
     };
@@ -934,7 +935,7 @@ fn counts_the_steps_of_the_erts_hashmap_merge() {
     let changed = |map: &Map, keys: &[i64]| {
         let mut copy = map.clone();
         for key in keys {
-            copy.insert(Term::Integer(*key), atom("x"), &test_atoms())
+            copy.insert(Term::Integer(*key), atom("x"), &test_atom_table())
                 .unwrap();
         }
         copy
@@ -1009,7 +1010,7 @@ fn records_the_map_operation_cost() {
         (1..=MAP_COST_KEYS)
             .map(|key| (Term::Integer(key), Term::Integer(key)))
             .collect(),
-        &test_atoms(),
+        &test_atom_table(),
     )
     .unwrap();
     println!(
@@ -1046,7 +1047,7 @@ fn records_the_map_operation_cost() {
                 copy.insert(
                     Term::Integer(MAP_COST_KEYS + 1 + key as i64),
                     Term::Integer(1),
-                    &test_atoms(),
+                    &test_atom_table(),
                 )
                 .unwrap();
                 sum += black_box(copy.len() as i64);
@@ -1066,14 +1067,14 @@ fn records_the_map_operation_cost() {
             let mut sum = 0;
             for key in 0..MAP_COST_ROUNDS {
                 let mut pairs = vec![(Term::Integer(1 + key as i64), Term::Integer(2))];
-                Map::sort_pairs(&mut pairs, &test_atoms()).unwrap();
+                Map::sort_pairs(&mut pairs, &test_atom_table()).unwrap();
                 let mut map = hashmap.clone();
                 map.update(
                     pairs
                         .into_iter()
                         .map(|(key, value)| (Insert::Set, key, value))
                         .collect(),
-                    &test_atoms(),
+                    &test_atom_table(),
                 )
                 .unwrap();
                 sum += black_box(map.len() as i64);
@@ -1199,7 +1200,9 @@ const PUT_COST_ROUNDS: usize = if cfg!(debug_assertions) { 20 } else { 200 };
 /// holds the key of the probe. The maps are built once, before the timer.
 fn put_maps(pairs: &[(Term, Term)]) -> Vec<Map> {
     (0..PUT_COST_ROUNDS)
-        .map(|_| Map::from_pairs(pairs.to_vec(), &test_atoms()).expect("the probe keys are valid"))
+        .map(|_| {
+            Map::from_pairs(pairs.to_vec(), &test_atom_table()).expect("the probe keys are valid")
+        })
         .collect()
 }
 
@@ -1254,7 +1257,7 @@ fn prints_the_cost_of_a_map_put() {
         put_cost(&format!("put_owned_{keys}"), &pairs, |map| {
             map.update(
                 vec![(Insert::Add, probe.clone(), Term::Integer(9))],
-                &test_atoms(),
+                &test_atom_table(),
             )
             .expect("the probe key is valid");
             map.len() as i64
@@ -1266,7 +1269,7 @@ fn prints_the_cost_of_a_map_put() {
             let mut copy = map.clone();
             copy.update(
                 vec![(Insert::Add, probe.clone(), Term::Integer(9))],
-                &test_atoms(),
+                &test_atom_table(),
             )
             .expect("the probe key is valid");
             copy.len() as i64
@@ -1319,13 +1322,13 @@ fn drains_the_pairs_of_a_collision_child_in_batches() {
             1,
             (0x5, key(3), Term::Integer(0)),
             (0x5, key(2), Term::Integer(2)),
-            &test_atoms(),
+            &test_atom_table(),
         )],
     };
     let mut hamt = Hamt { root, size: 2 };
-    hamt.insert(0x5, key(1), Term::Integer(1), &test_atoms());
-    hamt.insert(0x5, key(3), Term::Integer(3), &test_atoms());
-    hamt.insert(0x15, key(4), Term::Integer(4), &test_atoms());
+    hamt.insert(0x5, key(1), Term::Integer(1), &test_atom_table());
+    hamt.insert(0x5, key(3), Term::Integer(3), &test_atom_table());
+    hamt.insert(0x15, key(4), Term::Integer(4), &test_atom_table());
     let mut map = Map {
         repr: Some(Repr::Hash(hamt).into()),
     };
@@ -1403,7 +1406,7 @@ fn counts_a_collision_child_in_the_walk() {
         HAMT_MAX_LEVEL,
         (0x5, key(2), Term::Integer(2)),
         (0x5, key(1), Term::Integer(1)),
-        &test_atoms(),
+        &test_atom_table(),
     );
     let root = Node {
         bitmap: 1 << 5,
@@ -1433,7 +1436,7 @@ fn counts_the_terms_of_the_values_of_a_drain() {
             Term::Integer(0),
             Term::list_from((0..width as i64).map(Term::Integer)),
         )],
-        &test_atoms(),
+        &test_atom_table(),
     )
     .unwrap();
     let drain = Drain::take(&mut map).expect("the only holder takes the form");

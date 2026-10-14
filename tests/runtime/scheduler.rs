@@ -391,7 +391,7 @@ fn frees_the_name_of_a_process_when_it_exits() {
         .spawn(Start::Entry(frame()), vec![], false, false, false, None)
         .unwrap()
         .unwrap();
-    let name = atom("pbeam_probe_reg");
+    let name = Term::Atom(scheduler.atoms.put("pbeam_probe_reg").unwrap());
     assert_eq!(scheduler.whereis("pbeam_probe_reg"), None);
     assert!(scheduler.register(&name, &Term::Pid(child)));
     assert!(!scheduler.register(&name, &Term::Pid(ProcessId(0))));
@@ -1141,7 +1141,7 @@ fn moves_the_pairs_of_a_map_in_batches() {
             (1..=200)
                 .map(|key| (Term::Integer(key), Term::Integer(key)))
                 .collect(),
-            &crate::term::test_atoms(),
+            &crate::term::test_atom_table(),
         )
         .unwrap(),
     );
@@ -1440,8 +1440,12 @@ fn counts_the_persistent_terms_the_ets_objects_and_the_timer_messages() {
         .persistent_terms
         .put(&atom("key"), &Term::tuple(vec![Term::Integer(1)]));
     assert!(scheduler.live_bytes() > before);
+    let key = Term::Atom(scheduler.atoms.put("key").unwrap());
     let mut table = Table::new(ProcessId(1), Access::Public, 1);
-    table.insert(vec![atom("key"), Term::tuple(vec![Term::Integer(2)])]);
+    table.insert(
+        &scheduler.atoms,
+        vec![key, Term::tuple(vec![Term::Integer(2)])],
+    );
     scheduler.ets.create(Reference(1), None, table);
     assert!(scheduler.live_bytes() > before);
     scheduler.timers.start(
@@ -1467,7 +1471,7 @@ fn counts_the_bytes_of_the_release_work_list() {
         (0..4 * RELEASE_BATCH as i64)
             .map(|key| (Term::Integer(key), atom("v")))
             .collect(),
-        &crate::term::test_atoms(),
+        &crate::term::test_atom_table(),
     )
     .unwrap();
     scheduler
@@ -1659,7 +1663,7 @@ fn counts_the_terms_of_a_map_drain_that_is_the_only_item() {
             Term::Integer(0),
             Term::list_from((0..width as i64).map(Term::Integer)),
         )],
-        &crate::term::test_atoms(),
+        &crate::term::test_atom_table(),
     )
     .unwrap();
     let drain = crate::term::MapDrain::take(&mut map).expect("the only holder takes the form");

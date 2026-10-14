@@ -53,7 +53,7 @@ fn counts_a_flat_map_and_walks_its_pairs() {
             (Term::Integer(1), Term::tuple(vec![Term::Integer(2)])),
             (Term::Integer(3), Term::Integer(4)),
         ],
-        &crate::term::test_atoms(),
+        &crate::term::test_atom_table(),
     )
     .unwrap();
     let term = Term::Map(map);
@@ -65,7 +65,7 @@ fn counts_a_flat_map_and_walks_its_pairs() {
                 (Term::Integer(1), Term::Integer(2)),
                 (Term::Integer(3), Term::Integer(4)),
             ],
-            &crate::term::test_atoms(),
+            &crate::term::test_atom_table(),
         )
         .unwrap(),
     );
@@ -77,7 +77,7 @@ fn counts_a_hash_map_and_walks_its_nodes() {
     let pairs: Vec<_> = (0..40)
         .map(|key| (Term::Integer(key), Term::tuple(vec![Term::Integer(key)])))
         .collect();
-    let map = Map::from_pairs(pairs, &crate::term::test_atoms()).unwrap();
+    let map = Map::from_pairs(pairs, &crate::term::test_atom_table()).unwrap();
     assert!(bytes(&Term::Map(map)) > 40 * size_of::<Term>());
 }
 
@@ -106,9 +106,9 @@ fn counts_a_binary_backing_and_a_packed_view() {
         bytes(&twice),
         2 * size_of::<Term>() + bytes(&Term::Binary(packed.clone()))
     );
-    // A second packed view of one backing array adds only its own packed
-    // array: the backing array of the view that the walk reaches first is
-    // already counted.
+    // A second packed view of one backing array adds its own view
+    // descriptor and its own packed array: the backing array of the view
+    // that the walk reaches first is already counted.
     let other = source.bits(12, 20);
     let backing = source.backing().capacity();
     let packed_bytes = packed.packed_backing().unwrap().capacity();
@@ -116,7 +116,7 @@ fn counts_a_binary_backing_and_a_packed_view() {
     let views = Term::tuple(vec![Term::Binary(packed), Term::Binary(other)]);
     assert_eq!(
         bytes(&views),
-        2 * size_of::<Term>() + backing + packed_bytes + other_bytes
+        2 * size_of::<Term>() + 2 * source.view_bytes() + backing + packed_bytes + other_bytes
     );
 }
 
@@ -164,7 +164,7 @@ fn counts_a_node_that_two_hash_maps_share_once() {
     let pairs: Vec<_> = (0..40)
         .map(|key| (Term::Integer(key), Term::Integer(key)))
         .collect();
-    let first = Map::from_pairs(pairs, &crate::term::test_atoms()).unwrap();
+    let first = Map::from_pairs(pairs, &crate::term::test_atom_table()).unwrap();
     let mut second = first.clone();
     // A change through one copy copies only the nodes on the path of the
     // key, so the two maps share the other nodes.
@@ -172,7 +172,7 @@ fn counts_a_node_that_two_hash_maps_share_once() {
         .insert(
             Term::Integer(1000),
             Term::Integer(1000),
-            &crate::term::test_atoms(),
+            &crate::term::test_atom_table(),
         )
         .unwrap();
     let term = Term::tuple(vec![Term::Map(first), Term::Map(second)]);

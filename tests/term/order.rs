@@ -5,7 +5,7 @@ use std::{
 
 use super::super::{
     Atom, AtomTable, Binary, Fun, Lambda, Map, MatchState, PortId, ProcessId, Reference, Term,
-    test_atom as atom, test_atoms,
+    test_atom as atom, test_atom_table,
 };
 
 #[test]
@@ -14,11 +14,11 @@ fn panics_for_a_match_context() {
     // The interpreter gives a runtime error before a match context can
     // reach a term operation.
     let _ = Term::MatchContext(Arc::new(MatchState::new(Binary::from(b"a"))))
-        .compare(&Term::Integer(1), &test_atoms());
+        .compare(&Term::Integer(1), &test_atom_table());
 }
 
 fn map(pairs: Vec<(Term, Term)>) -> Term {
-    Term::Map(Map::from_pairs(pairs, &test_atoms()).unwrap())
+    Term::Map(Map::from_pairs(pairs, &test_atom_table()).unwrap())
 }
 
 /// Return a fun of a lambda of `module` with an index, an old unique
@@ -52,7 +52,7 @@ fn orders_terms_of_different_types_by_type() {
     for (index, left) in sorted.iter().enumerate() {
         for (other, right) in sorted.iter().enumerate() {
             assert_eq!(
-                left.compare(right, &test_atoms()).unwrap(),
+                left.compare(right, &test_atom_table()).unwrap(),
                 index.cmp(&other)
             );
         }
@@ -181,7 +181,7 @@ fn orders_nested_terms_as_pinned_erts() {
     ];
     for (left, right, order) in pairs {
         assert_eq!(
-            left.compare(&right, &test_atoms()).unwrap(),
+            left.compare(&right, &test_atom_table()).unwrap(),
             order,
             "{left:?} and {right:?}"
         );
@@ -189,7 +189,7 @@ fn orders_nested_terms_as_pinned_erts() {
     let deep = |levels| (0..levels).fold(Term::nil(), |inner, _| Term::list_from(vec![inner]));
     assert_eq!(
         deep(1_000_000)
-            .compare(&deep(999_999), &test_atoms())
+            .compare(&deep(999_999), &test_atom_table())
             .unwrap(),
         Greater
     );
@@ -242,7 +242,7 @@ fn orders_improper_lists_by_elements_then_tails_as_pinned_erts() {
     ];
     for (left, right, order) in pairs {
         assert_eq!(
-            left.compare(&right, &test_atoms()).unwrap(),
+            left.compare(&right, &test_atom_table()).unwrap(),
             order,
             "{left:?} and {right:?}"
         );
@@ -285,7 +285,7 @@ fn orders_local_funs_by_fun_entry_then_free_variables() {
     ];
     for (left, right, order) in pairs {
         assert_eq!(
-            left.compare(&right, &test_atoms()).unwrap(),
+            left.compare(&right, &test_atom_table()).unwrap(),
             order,
             "{left:?} and {right:?}"
         );
@@ -337,7 +337,7 @@ fn orders_external_funs_by_mfa_and_after_local_funs() {
     ];
     for (left, right, order) in pairs {
         assert_eq!(
-            left.compare(&right, &test_atoms()).unwrap(),
+            left.compare(&right, &test_atom_table()).unwrap(),
             order,
             "{left:?} and {right:?}"
         );
@@ -351,14 +351,16 @@ fn rejects_the_order_of_two_different_references() {
     let pair = Term::tuple(vec![atom("a"), Term::Reference(Reference(1))]);
     let other = Term::tuple(vec![atom("a"), Term::Reference(Reference(2))]);
     assert_eq!(
-        pair.compare(&other, &test_atoms()).unwrap_err().to_string(),
+        pair.compare(&other, &test_atom_table())
+            .unwrap_err()
+            .to_string(),
         "unsupported term order of two references Reference(Reference(1)) and \
          Reference(Reference(2))"
     );
     let earlier = Term::tuple(vec![atom("a"), Term::Reference(Reference(2))]);
     assert_eq!(
         Term::tuple(vec![atom("b"), Term::Reference(Reference(1))])
-            .compare(&earlier, &test_atoms())
+            .compare(&earlier, &test_atom_table())
             .unwrap(),
         Greater
     );
@@ -375,17 +377,19 @@ fn orders_ports_by_number_between_funs_and_pids() {
         static_atom("reverse"),
         1,
     ));
-    assert_eq!(three.compare(&ten, &test_atoms()).unwrap(), Less);
-    assert_eq!(three.compare(&three, &test_atoms()).unwrap(), Equal);
-    assert_eq!(reverse.compare(&three, &test_atoms()).unwrap(), Less);
+    assert_eq!(three.compare(&ten, &test_atom_table()).unwrap(), Less);
+    assert_eq!(three.compare(&three, &test_atom_table()).unwrap(), Equal);
+    assert_eq!(reverse.compare(&three, &test_atom_table()).unwrap(), Less);
     assert_eq!(
         three
-            .compare(&Term::Pid(ProcessId(1)), &test_atoms())
+            .compare(&Term::Pid(ProcessId(1)), &test_atom_table())
             .unwrap(),
         Less
     );
     assert_eq!(
-        three.compare(&Term::tuple(vec![]), &test_atoms()).unwrap(),
+        three
+            .compare(&Term::tuple(vec![]), &test_atom_table())
+            .unwrap(),
         Less
     );
 }

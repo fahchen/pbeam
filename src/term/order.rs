@@ -111,7 +111,7 @@ fn compare_pair<'a>(
             Ordering::Equal
         }
         (Term::Integer(left), Term::Integer(right)) => left.cmp(right),
-        (Term::Atom(left), Term::Atom(right)) => atoms.atom_name(left).cmp(atoms.atom_name(right)),
+        (Term::Atom(left), Term::Atom(right)) => atoms.name_of(left).cmp(atoms.name_of(right)),
         (Term::Binary(left), Term::Binary(right)) => left.cmp(right),
         (Term::Pid(left), Term::Pid(right)) => left.0.cmp(&right.0),
         (Term::Port(left), Term::Port(right)) => left.0.cmp(&right.0),

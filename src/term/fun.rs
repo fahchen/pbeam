@@ -113,8 +113,8 @@ impl Lambda {
     /// ```
     fn compare(&self, other: &Lambda, atoms: &AtomTable) -> Ordering {
         atoms
-            .atom_name(&self.module)
-            .cmp(atoms.atom_name(&other.module))
+            .name_of(&self.module)
+            .cmp(atoms.name_of(&other.module))
             .then(self.index.cmp(&other.index))
             .then(self.old_unique.cmp(&other.old_unique))
     }
@@ -212,13 +212,9 @@ impl Target {
                     arity: other_arity,
                 },
             ) => atoms
-                .atom_name(module)
-                .cmp(atoms.atom_name(other_module))
-                .then(
-                    atoms
-                        .atom_name(function)
-                        .cmp(atoms.atom_name(other_function)),
-                )
+                .name_of(module)
+                .cmp(atoms.name_of(other_module))
+                .then(atoms.name_of(function).cmp(atoms.name_of(other_function)))
                 .then(arity.cmp(other_arity)),
             (Target::Local(_), Target::External { .. }) => Ordering::Less,
             (Target::External { .. }, Target::Local(_)) => Ordering::Greater,
