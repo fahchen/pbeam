@@ -50,18 +50,30 @@ struct Step<'a>(&'a Term, &'a Term);
 
 impl Term {
     /// Compare two terms in the ERTS term order with a work stack, so a deep
-    /// term does not recurse. Return the result of the first pair that is
-    /// not equal, in the order that ERTS compares the pairs.
+    /// term does not recurse.
+    ///
+    /// The pair of the two terms is compared first with no work stack, so a
+    /// pair that the comparison decides allocates nothing. Only a pair that
+    /// the comparison does not decide pushes the pairs of its elements: two
+    /// cons cells, two tuples of equal size, two maps of equal size, and two
+    /// funs that the own entries do not order. The loop then drains the stack
+    /// in the order that ERTS compares the pairs, and returns the result of
+    /// the first pair that is not equal.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// use std::cmp::Ordering;
     ///
+    /// // The types decide this pair, so the comparison allocates nothing.
     /// assert_eq!(Term::Integer(1).compare(&Term::static_atom("a"), &atoms)?, Ordering::Less);
     /// let short = Term::list_from([Term::static_atom("b")]);
     /// let long = Term::list_from([Term::static_atom("a"), Term::static_atom("z")]);
     /// assert_eq!(short.compare(&long, &atoms)?, Ordering::Greater);
+    /// // Two equal tuples push the pair of each element, and the loop then
+    /// // returns Equal.
+    /// let tuple = Term::tuple(vec![Term::static_atom("a"), Term::Integer(1)]);
+    /// assert_eq!(tuple.compare(&tuple, &atoms)?, Ordering::Equal);
     /// assert!(Term::Reference(Reference(1)).compare(&Term::Reference(Reference(2)), &atoms).is_err());
     /// ```
     ///
@@ -70,7 +82,16 @@ impl Term {
     /// Return a runtime error when the result depends on the order of two
     /// different references.
     pub(crate) fn compare(&self, other: &Term, atoms: &AtomTable) -> Result<Ordering, BeamError> {
-        let mut steps = vec![Step(self, other)];
+        // The pair of the two terms is compared first, with no work stack. A
+        // pair that the comparison decides needs no stack and allocates
+        // nothing; only a pair that the comparison does not decide pushes the
+        // pairs of its elements, and the loop then drains them in the order of
+        // the comparison.
+        let mut steps = Vec::new();
+        let order = compare_pair(self, other, &mut steps, atoms)?;
+        if order.is_ne() {
+            return Ok(order);
+        }
         while let Some(Step(left, right)) = steps.pop() {
             let order = compare_pair(left, right, &mut steps, atoms)?;
             if order.is_ne() {

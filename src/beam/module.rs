@@ -366,7 +366,11 @@ fn resolve(
             ..
         } => {
             resolve_branch(fail_label, jump_targets)?;
-            for (_, target) in choices {
+            let targets = match choices {
+                code::SelectValueChoices::Linear(choices)
+                | code::SelectValueChoices::Ordered(choices) => choices,
+            };
+            for (_, target) in targets {
                 resolve_branch(target, jump_targets)?;
             }
         }

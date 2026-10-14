@@ -9,6 +9,7 @@ use super::{
 use crate::error::{BeamError, error};
 use crate::runtime::{BifId, resolve_bif};
 use crate::term::{Atom, AtomTable, Lambda, Term};
+use std::cmp::Ordering;
 use std::num::NonZeroU64;
 
 const CODE_HEADER_SIZE: usize = WORD_SIZE * 5;
@@ -167,6 +168,131 @@ const OPCODE_RECV_MARKER_BIND: u8 = 173;
 const OPCODE_RECV_MARKER_CLEAR: u8 = 174;
 const OPCODE_RECV_MARKER_RESERVE: u8 = 175;
 const OPCODE_RECV_MARKER_USE: u8 = 176;
+
+/// The largest choice list that keeps the linear walk of
+/// [`Instruction::SelectValue`].
+///
+/// The value is 32. It is a measured estimate between the two end-to-end
+/// points of the task: the ordered form loses 13.276 ns for each iteration at
+/// 16 choices, net of the 2-choice control, and wins 458.005 ns at 256 choices
+/// (`tests/integration/select_val.rs`). The only micro-measurement point
+/// between them is 32 choices, where the linear walk costs 152.053 ns in the
+/// worst case and the ordered search costs 34.172 ns, against 78.440 ns and
+/// 27.791 ns at 16. No end-to-end probe covers 17 to 32 choices, so the bound
+/// is an estimate, and a later session can pin it with end-to-end probes at 32
+/// and 64 choices.
+///
+/// The pinned ERTS uses 10 (`erts/emulator/beam/emu/generators.tab:240-254`,
+/// OTP 29.1.1). Its ordered search compares one encoded value at a time, which
+/// costs less than the `Term::compare` call of PBeam, so the crossover of ERTS
+/// sits below the crossover of PBeam. ERTS reaches that generator only when a
+/// jump table does not fit, and it special-cases two values with
+/// `i_select_val2` (`erts/emulator/beam/emu/ops.tab:159-169`, OTP 29.1.1).
+/// PBeam has no jump table, and it keeps the linear form for two values.
+///
+/// `docs/interpreter-dispatch-measurements.md` records the numbers.
+pub(crate) const SELECT_VALUE_LINEAR_LIMIT: usize = 32;
+
+/// The prepared choice list of [`Instruction::SelectValue`].
+///
+/// The decoder builds this form one time at load time. A selection with at
+/// most [`SELECT_VALUE_LINEAR_LIMIT`] choices keeps the encoded order in
+/// [`SelectValueChoices::Linear`], and the interpreter walks it. A larger
+/// selection goes into [`SelectValueChoices::Ordered`], where the choices
+/// are sorted by the ERTS term order, and the interpreter searches them
+/// with a binary search.
+///
+/// The ERTS loader takes the same two forms in the generator that serves a
+/// choice list that a jump table does not fit, and after its two-value special
+/// case. It selects `i_select_val_lins` for 3 to 10 values and
+/// `i_select_val_bins` above that, and it sorts the encoded values with
+/// `beam_load_sort_select_vals`
+/// (`erts/emulator/beam/emu/generators.tab:214-268` and
+/// `erts/emulator/beam/beam_transform_helpers.c:135-140`, OTP 29.1.1). PBeam
+/// sorts by [`Term::compare`] instead of the encoded value. It sorts and
+/// searches with the same order, so the selected clause agrees.
+///
+/// # Invariant
+///
+/// [`SelectValueChoices::Ordered`] holds the choices in the order of
+/// [`Term::compare`] and holds each distinct choice one time. A choice list
+/// with two equal choices, with two choices that have no term order, or with
+/// at most [`SELECT_VALUE_LINEAR_LIMIT`] choices stays
+/// [`SelectValueChoices::Linear`], so the linear walk keeps the
+/// first-match result that ERTS gives.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let atoms = AtomTable::new();
+/// let choices = vec![(Term::Integer(1), 7), (Term::Integer(2), 8)];
+/// assert!(matches!(
+///     prepare_select_value_choices(choices, &atoms),
+///     SelectValueChoices::Linear(_)
+/// ));
+/// ```
+#[derive(Debug, Clone)]
+pub(crate) enum SelectValueChoices {
+    /// The choices of the stream in the encoded order. The list holds at
+    /// most [`SELECT_VALUE_LINEAR_LIMIT`] entries.
+    Linear(Vec<(Term, u32)>),
+    /// The choices in the order of [`Term::compare`]. The list holds more
+    /// than [`SELECT_VALUE_LINEAR_LIMIT`] entries, and each entry is
+    /// distinct and comparable with each other entry.
+    Ordered(Vec<(Term, u32)>),
+}
+
+/// Build the prepared form of a choice list for [`Instruction::SelectValue`].
+///
+/// Return [`SelectValueChoices::Linear`] with the choices in the encoded
+/// order when the list holds at most [`SELECT_VALUE_LINEAR_LIMIT`] entries,
+/// when two choices are equal, or when two choices have no term order.
+/// Otherwise return [`SelectValueChoices::Ordered`] with the choices sorted
+/// by [`Term::compare`] and free of duplicates.
+///
+/// The Erlang compiler emits distinct choices, and this function still
+/// detects a duplicate, because ERTS gives the first matching clause and a
+/// sorted list would lose that order.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let atoms = AtomTable::new();
+/// let choices: Vec<(Term, u32)> = (0..33)
+///     .map(|value| (Term::Integer(value as i64), value as u32))
+///     .collect();
+/// let SelectValueChoices::Ordered(ordered) = prepare_select_value_choices(choices, &atoms) else {
+///     panic!("33 distinct choices take the ordered form");
+/// };
+/// assert!(ordered[0].0.compare(&ordered[1].0, &atoms)?.is_lt());
+/// ```
+pub(crate) fn prepare_select_value_choices(
+    choices: Vec<(Term, u32)>,
+    atoms: &AtomTable,
+) -> SelectValueChoices {
+    if choices.len() <= SELECT_VALUE_LINEAR_LIMIT {
+        return SelectValueChoices::Linear(choices);
+    }
+    let mut ordered = choices.clone();
+    let mut failure = None;
+    ordered.sort_by(|(left, _), (right, _)| {
+        left.compare(right, atoms).unwrap_or_else(|error| {
+            failure.get_or_insert(error);
+            Ordering::Equal
+        })
+    });
+    let distinct = failure.is_none()
+        && ordered.windows(2).all(|pair| {
+            pair[0].0 != pair[1].0
+                && !matches!(pair[0].0.compare(&pair[1].0, atoms), Ok(Ordering::Equal))
+        });
+    if distinct {
+        SelectValueChoices::Ordered(ordered)
+    } else {
+        SelectValueChoices::Linear(choices)
+    }
+}
+
 #[derive(Debug, Clone)]
 /// An instruction that the parser can read from a BEAM `Code` chunk.
 ///
@@ -637,12 +763,16 @@ pub(crate) enum Instruction {
     },
     /// Jumps to the label of the first matching choice, or to `fail_label`.
     ///
+    /// `choices` holds the prepared form of the loader: the encoded order
+    /// for a small list, and the ERTS term order for a large list. See
+    /// [`SelectValueChoices`].
+    ///
     /// Erlang: `f(1) -> one; f(2) -> two; f(_) -> many.` compiles to
     /// `{select_val,{x,0},{f,16},{list,[{integer,1},{f,15},{integer,2},{f,14}]}}`.
     SelectValue {
         value: Operand,
         fail_label: u32,
-        choices: Vec<(Term, u32)>,
+        choices: SelectValueChoices,
     },
     /// Copies the value of each key in a map to its destination register, or
     /// jumps to `fail_label` when a key is missing. `pairs` holds each key
@@ -1665,7 +1795,7 @@ pub(super) fn parse_code(
                 Instruction::SelectValue {
                     value,
                     fail_label,
-                    choices,
+                    choices: prepare_select_value_choices(choices, atom_table),
                 }
             }
             OPCODE_SELECT_TUPLE_ARITY => {

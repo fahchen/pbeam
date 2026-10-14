@@ -398,6 +398,10 @@ name = "root_exit"
 path = "tests/integration/root_exit.rs"
 
 [[test]]
+name = "select_val"
+path = "tests/integration/select_val.rs"
+
+[[test]]
 name = "signal"
 path = "tests/integration/signal.rs"
 
