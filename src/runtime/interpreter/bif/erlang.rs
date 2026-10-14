@@ -115,7 +115,7 @@ pub(super) fn process_flag(
     let value = value.as_deref();
     let process = context.scheduler.current_process_mut();
     Ok(match flag {
-        Term::Atom(flag) if flag.index() == Atom::static_index("trap_exit") => {
+        Term::Atom(flag) if flag.is_static("trap_exit") => {
             let old = Term::static_atom(&process.trap_exit.to_string());
             match value {
                 Some("true") => process.trap_exit = true,
@@ -124,7 +124,7 @@ pub(super) fn process_flag(
             }
             Value(old)
         }
-        Term::Atom(flag) if flag.index() == Atom::static_index("message_queue_data") => {
+        Term::Atom(flag) if flag.is_static("message_queue_data") => {
             let old = Term::static_atom(if process.off_heap_message_queue {
                 "off_heap"
             } else {
@@ -137,7 +137,7 @@ pub(super) fn process_flag(
             }
             Value(old)
         }
-        Term::Atom(flag) if flag.index() == Atom::static_index("error_handler") => {
+        Term::Atom(flag) if flag.is_static("error_handler") => {
             // `process_flag_2` takes an atom for `error_handler` and gives
             // `badarg` for each other value (`bif.c:2045-2051`), and
             // `erts_proc_set_error_handler` returns the old handler
@@ -165,18 +165,16 @@ pub(super) fn process_flag(
             if UNSUPPORTED_PROCESS_FLAGS.contains(&context.scheduler.atoms.name_of(flag)) =>
         {
             let small = term.small_integer();
-            let valid = match flag.index() {
-                _ if flag.is_one_of(&["async_dist", "sensitive", "monitor_nodes"]) => {
-                    matches!(value, Some("true" | "false"))
-                }
-                index if index == Atom::static_index("priority") => {
-                    matches!(value, Some("low" | "normal" | "high" | "max"))
-                }
-                index if index == Atom::static_index("save_calls") => {
-                    small.is_some_and(|calls| (0..=10_000).contains(&calls))
-                }
-                index if index == Atom::static_index("max_heap_size") => true,
-                _ => small.is_some_and(|size| size >= 0),
+            let valid = if flag.is_one_of(&["async_dist", "sensitive", "monitor_nodes"]) {
+                matches!(value, Some("true" | "false"))
+            } else if flag.is_static("priority") {
+                matches!(value, Some("low" | "normal" | "high" | "max"))
+            } else if flag.is_static("save_calls") {
+                small.is_some_and(|calls| (0..=10_000).contains(&calls))
+            } else {
+                // The name `max_heap_size` takes every value. Each other name
+                // needs a small integer that is not negative.
+                flag.is_static("max_heap_size") || small.is_some_and(|size| size >= 0)
             };
             if !valid {
                 return Ok(BifResult::badarg());
@@ -186,7 +184,7 @@ pub(super) fn process_flag(
                 context.scheduler.atoms.name_of(flag)
             )));
         }
-        Term::Tuple(elements) if matches!(elements.as_ref(), [Term::Atom(tag), _] if tag.index() == Atom::static_index("monitor_nodes")) =>
+        Term::Tuple(elements) if matches!(elements.as_ref(), [Term::Atom(tag), _] if tag.is_static("monitor_nodes")) =>
         {
             return Err(error(
                 "unsupported erlang:process_flag/2 flag {monitor_nodes, Options}",
@@ -392,7 +390,7 @@ fn unsupported_system_flag_value(name: &str, atoms: &AtomTable, value: &Term) ->
     let small = value.small_integer();
     let cpu = |cpu: &Term| match cpu {
         Term::Tuple(elements) => {
-            matches!(elements.as_ref(), [Term::Atom(tag), _, _, _, _, _, _] if tag.index() == Atom::static_index("cpu"))
+            matches!(elements.as_ref(), [Term::Atom(tag), _, _, _, _, _, _] if tag.is_static("cpu"))
         }
         _ => false,
     };
@@ -791,8 +789,8 @@ pub(super) fn demonitor(
     let (mut flush, mut info) = (false, false);
     for option in options {
         match option {
-            Term::Atom(atom) if atom.index() == Atom::static_index("flush") => flush = true,
-            Term::Atom(atom) if atom.index() == Atom::static_index("info") => info = true,
+            Term::Atom(atom) if atom.is_static("flush") => flush = true,
+            Term::Atom(atom) if atom.is_static("info") => info = true,
             _ => return BifResult::badarg(),
         }
     }
@@ -870,9 +868,7 @@ pub(super) fn monitor(
         ("process", target) => local_name(target).map(|name| Ok(MonitorTarget::ProcessName(name))),
         ("port", Term::Port(_)) => Some(Err(unsupported_port("erlang:monitor/2,3"))),
         ("port", target) => local_name(target).map(|name| Ok(MonitorTarget::PortName(name))),
-        ("time_offset", Term::Atom(service))
-            if service.index() == Atom::static_index("clock_service") =>
-        {
+        ("time_offset", Term::Atom(service)) if service.is_static("clock_service") => {
             // ponytail: no time offset service yet; add it when a measured path monitors it.
             Some(Err(error("unsupported time_offset monitor")))
         }
@@ -913,27 +909,20 @@ fn monitor_options(options: &Term) -> Option<MonitorOptions> {
     };
     for option in options {
         match option {
-            Term::Atom(option) if option.index() == Atom::static_index("priority") => {
-                result.priority = true
-            }
+            Term::Atom(option) if option.is_static("priority") => result.priority = true,
             Term::Tuple(pair) => match pair.as_ref() {
-                [Term::Atom(key), Term::Atom(mode)]
-                    if key.index() == Atom::static_index("alias") =>
-                {
-                    result.alias = Some(match mode.index() {
-                        index if index == Atom::static_index("explicit_unalias") => {
-                            AliasMode::ExplicitUnalias
-                        }
-                        index if index == Atom::static_index("demonitor") => AliasMode::Demonitor,
-                        index if index == Atom::static_index("reply_demonitor") => {
-                            AliasMode::ReplyDemonitor
-                        }
-                        _ => return None,
+                [Term::Atom(key), Term::Atom(mode)] if key.is_static("alias") => {
+                    result.alias = Some(if mode.is_static("explicit_unalias") {
+                        AliasMode::ExplicitUnalias
+                    } else if mode.is_static("demonitor") {
+                        AliasMode::Demonitor
+                    } else if mode.is_static("reply_demonitor") {
+                        AliasMode::ReplyDemonitor
+                    } else {
+                        return None;
                     });
                 }
-                [Term::Atom(key), tag] if key.index() == Atom::static_index("tag") => {
-                    result.tag = tag.clone()
-                }
+                [Term::Atom(key), tag] if key.is_static("tag") => result.tag = tag.clone(),
                 _ => return None,
             },
             _ => return None,
@@ -1048,17 +1037,13 @@ pub(super) fn spawn_opt(
     let mut spawn_options = SpawnOptions::default();
     for option in options {
         match option {
-            Term::Atom(option) if option.index() == Atom::static_index("link") => {
-                spawn_options.link = true
-            }
-            Term::Atom(option) if option.index() == Atom::static_index("monitor") => {
-                spawn_options.monitor = true
-            }
-            Term::Tuple(option) if matches!(option.as_ref(), [Term::Atom(name), _] if name.index() == Atom::static_index("message_queue_data")) =>
+            Term::Atom(option) if option.is_static("link") => spawn_options.link = true,
+            Term::Atom(option) if option.is_static("monitor") => spawn_options.monitor = true,
+            Term::Tuple(option) if matches!(option.as_ref(), [Term::Atom(name), _] if name.is_static("message_queue_data")) =>
             {
                 spawn_options.off_heap_message_queue = match &option[1] {
-                    Term::Atom(value) if value.index() == Atom::static_index("on_heap") => false,
-                    Term::Atom(value) if value.index() == Atom::static_index("off_heap") => true,
+                    Term::Atom(value) if value.is_static("on_heap") => false,
+                    Term::Atom(value) if value.is_static("off_heap") => true,
                     _ => return Ok(BifResult::badarg()),
                 };
             }
@@ -1667,17 +1652,17 @@ pub(super) fn atom_to_binary(atoms: &AtomTable, term: &Term, encoding: &Term) ->
     let (Term::Atom(atom), Term::Atom(encoding)) = (term, encoding) else {
         return BifResult::badarg();
     };
-    match encoding.index() {
-        _ if encoding.is_one_of(&["utf8", "unicode"]) => {
-            Value(Term::binary(atoms.name_of(atom).as_bytes().to_vec()))
-        }
-        index if index == Atom::static_index("latin1") => atoms
+    if encoding.is_one_of(&["utf8", "unicode"]) {
+        Value(Term::binary(atoms.name_of(atom).as_bytes().to_vec()))
+    } else if encoding.is_static("latin1") {
+        atoms
             .name_of(atom)
             .chars()
             .map(|character| u8::try_from(u32::from(character)).ok())
             .collect::<Option<Vec<u8>>>()
-            .map_or_else(BifResult::badarg, |bytes| Value(Term::binary(bytes))),
-        _ => BifResult::badarg(),
+            .map_or_else(BifResult::badarg, |bytes| Value(Term::binary(bytes)))
+    } else {
+        BifResult::badarg()
     }
 }
 
@@ -1761,12 +1746,10 @@ pub(super) fn list_to_atom(atoms: &mut AtomTable, term: &Term) -> Result<BifResu
 /// `AtomTable::put`.
 pub(super) fn system_info(atoms: &mut AtomTable, item: &Term) -> Result<BifResult, BeamError> {
     match item {
-        Term::Atom(atom) if atom.index() == Atom::static_index("os_type") => {
-            Ok(Value(Term::tuple(vec![
-                Term::Atom(atoms.put("unix")?),
-                Term::Atom(atoms.put(&host::os_flavor())?),
-            ])))
-        }
+        Term::Atom(atom) if atom.is_static("os_type") => Ok(Value(Term::tuple(vec![
+            Term::Atom(atoms.put("unix")?),
+            Term::Atom(atoms.put(&host::os_flavor())?),
+        ]))),
         _ => Err(error(format!(
             "unsupported erlang:system_info/1 argument {}",
             debug_term(item, atoms)
@@ -2212,9 +2195,7 @@ pub(super) fn send3(
     let mut connect = true;
     for option in options {
         match option {
-            Term::Atom(option) if option.index() == Atom::static_index("noconnect") => {
-                connect = false
-            }
+            Term::Atom(option) if option.is_static("noconnect") => connect = false,
             Term::Atom(option) if option.is_one_of(&["nosuspend", "priority"]) => {}
             _ => return Ok(BifResult::badarg()),
         }
@@ -2547,7 +2528,7 @@ fn is_process_info_item(atoms: &AtomTable, item: &Term) -> bool {
     match item {
         Term::Atom(name) => PROCESS_INFO_ITEMS.contains(&atoms.name_of(name)),
         Term::Tuple(elements) => {
-            matches!(elements.as_ref(), [Term::Atom(key), _] if key.index() == Atom::static_index("dictionary"))
+            matches!(elements.as_ref(), [Term::Atom(key), _] if key.is_static("dictionary"))
         }
         _ => false,
     }
@@ -3047,25 +3028,24 @@ pub(super) fn get_module_info(
     {
         return Ok(BifResult::badarg());
     }
-    match key.index() {
-        index if index == Atom::static_index("module") => Ok(Value(module.clone())),
-        _ if key.is_one_of(&[
-            "md5",
-            "exports",
-            "functions",
-            "nifs",
-            "attributes",
-            "compile",
-            "native_addresses",
-            "native",
-        ]) =>
-        {
-            Err(error(format!(
-                "erlang:get_module_info/2 key {} is not implemented",
-                key.name()
-            )))
-        }
-        _ => Ok(BifResult::badarg()),
+    if key.is_static("module") {
+        Ok(Value(module.clone()))
+    } else if key.is_one_of(&[
+        "md5",
+        "exports",
+        "functions",
+        "nifs",
+        "attributes",
+        "compile",
+        "native_addresses",
+        "native",
+    ]) {
+        Err(error(format!(
+            "erlang:get_module_info/2 key {} is not implemented",
+            key.name()
+        )))
+    } else {
+        Ok(BifResult::badarg())
     }
 }
 
@@ -3242,15 +3222,19 @@ fn timer_options(options: &Term) -> Option<(bool, bool)> {
         let [Term::Atom(name), Term::Atom(value)] = fields.as_ref() else {
             return None;
         };
-        let value = match value.index() {
-            index if index == Atom::static_index("true") => true,
-            index if index == Atom::static_index("false") => false,
-            _ => return None,
+        let value = if value.is_static("true") {
+            true
+        } else if value.is_static("false") {
+            false
+        } else {
+            return None;
         };
-        match name.index() {
-            index if index == Atom::static_index("async") => asynchronous = value,
-            index if index == Atom::static_index("info") => info = value,
-            _ => return None,
+        if name.is_static("async") {
+            asynchronous = value;
+        } else if name.is_static("info") {
+            info = value;
+        } else {
+            return None;
         }
     }
     Some((asynchronous, info))
@@ -3317,14 +3301,11 @@ pub(super) fn halt(
         match option {
             Term::Tuple(pair) => match pair.as_ref() {
                 [Term::Atom(name), Term::Atom(value)]
-                    if name.index() == Atom::static_index("flush")
-                        && value.is_one_of(&["true", "false"]) =>
+                    if name.is_static("flush") && value.is_one_of(&["true", "false"]) =>
                 {
-                    flush = value.index() == Atom::static_index("true");
+                    flush = value.is_static("true");
                 }
-                [Term::Atom(name), value]
-                    if name.index() == Atom::static_index("flush_timeout") =>
-                {
+                [Term::Atom(name), value] if name.is_static("flush_timeout") => {
                     match value.small_integer() {
                         Some(value @ 0..) => timeout = Some(value & i64::from(u32::MAX)),
                         _ => return Ok(BifResult::badarg()),
@@ -3344,7 +3325,7 @@ pub(super) fn halt(
                 BeamError::Halt(code)
             }
         }
-        Term::Atom(abort) if abort.index() == Atom::static_index("abort") => {
+        Term::Atom(abort) if abort.is_static("abort") => {
             error("unsupported erlang:halt/2 with abort: PBeam writes no core dump")
         }
         _ if is_slogan(status) => {

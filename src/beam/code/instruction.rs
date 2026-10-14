@@ -1735,15 +1735,15 @@ pub(super) fn parse_code(
                     .is_some_and(|first| first & COMPACT_TAG_MASK == TAG_ATOM)
                 {
                     let atom = atom_at(atoms, read_operand(data, &mut cursor, TAG_ATOM)? as usize)?;
-                    match atom.index() {
-                        index if index == Atom::static_index("no_fail") => Some(0),
-                        index if index == Atom::static_index("resume") => None,
-                        _ => {
-                            return Err(error(format!(
-                                "unsupported BEAM bs_start_match4 fail operand {}",
-                                atom.name()
-                            )));
-                        }
+                    if atom.is_static("no_fail") {
+                        Some(0)
+                    } else if atom.is_static("resume") {
+                        None
+                    } else {
+                        return Err(error(format!(
+                            "unsupported BEAM bs_start_match4 fail operand {}",
+                            atom.name()
+                        )));
                     }
                 } else {
                     Some(read_operand(data, &mut cursor, TAG_LABEL)? as u32)
@@ -1783,8 +1783,7 @@ pub(super) fn parse_code(
                 // ERTS loads the size `all` as `i_bs_get_binary_all2` (JIT
                 // jit/arm/ops.tab:999-1000). The pinned compiler makes it
                 // only with `no_ssa_opt`.
-                if matches!(&size, Operand::Value(Term::Atom(all)) if all.index() == Atom::static_index("all"))
-                {
+                if matches!(&size, Operand::Value(Term::Atom(all)) if all.is_static("all")) {
                     Instruction::Unsupported(opcode)
                 } else {
                     Instruction::BinaryGetBinary {
@@ -2396,72 +2395,64 @@ fn read_binary_match_commands(
     let mut items = 0;
     while items < item_count {
         let name = atom_at(atoms, read_operand(data, cursor, TAG_ATOM)? as usize)?;
-        let (command, operand_count) = match name.index() {
-            index if index == Atom::static_index("ensure_at_least") => {
-                let size = read_operand(data, cursor, TAG_UNSIGNED)?;
-                let unit = NonZeroU64::new(read_operand(data, cursor, TAG_UNSIGNED)?)
-                    .ok_or_else(|| error("BEAM bs_match ensure_at_least has unit 0"))?;
-                (BinaryMatchCommand::EnsureAtLeast { size, unit }, 2)
-            }
-            index if index == Atom::static_index("ensure_exactly") => {
-                let size = read_operand(data, cursor, TAG_UNSIGNED)?;
-                (BinaryMatchCommand::EnsureExactly { size }, 1)
-            }
-            _ if name.is_one_of(&["integer", "binary"]) => {
-                let kind = name.name();
-                let _live = read_operand(data, cursor, TAG_UNSIGNED)?;
-                let flags = read_move_operand(data, cursor, atoms, literals)?;
-                let size = read_operand(data, cursor, TAG_UNSIGNED)?
-                    .checked_mul(read_operand(data, cursor, TAG_UNSIGNED)?)
-                    .ok_or_else(|| error(format!("BEAM bs_match {kind} size overflow")))?;
-                let destination = read_register(data, cursor)?;
-                let Some(flags) = (match &flags {
-                    Operand::Value(flags) => flags.proper_list(),
-                    _ => None,
-                }) else {
-                    return Err(error(format!(
-                        "unsupported BEAM bs_match {kind} flags {flags:?}"
-                    )));
-                };
-                let has = |names: &[&str]| {
-                    flags
-                        .clone()
-                        .any(|flag| matches!(flag, Term::Atom(atom) if atom.is_one_of(names)))
-                };
-                let command = if name.index() == Atom::static_index("integer") {
-                    BinaryMatchCommand::Integer {
-                        size,
-                        little: has(&["little", "native"]),
-                        signed: has(&["signed"]),
-                        destination,
-                    }
-                } else {
-                    BinaryMatchCommand::Binary { size, destination }
-                };
-                (command, 5)
-            }
-            index if index == Atom::static_index("get_tail") => {
-                let _live = read_operand(data, cursor, TAG_UNSIGNED)?;
-                let _unit = read_operand(data, cursor, TAG_UNSIGNED)?;
-                let destination = read_register(data, cursor)?;
-                (BinaryMatchCommand::GetTail { destination }, 3)
-            }
-            index if index == Atom::static_index("=:=") => {
-                let _live = read_move_operand(data, cursor, atoms, literals)?;
-                let size = read_operand(data, cursor, TAG_UNSIGNED)?;
-                let value = read_operand(data, cursor, TAG_UNSIGNED)?;
-                (BinaryMatchCommand::Equal { size, value }, 3)
-            }
-            index if index == Atom::static_index("skip") => {
-                let size = read_operand(data, cursor, TAG_UNSIGNED)?;
-                (BinaryMatchCommand::Skip { size }, 1)
-            }
-            _ => {
+        let (command, operand_count) = if name.is_static("ensure_at_least") {
+            let size = read_operand(data, cursor, TAG_UNSIGNED)?;
+            let unit = NonZeroU64::new(read_operand(data, cursor, TAG_UNSIGNED)?)
+                .ok_or_else(|| error("BEAM bs_match ensure_at_least has unit 0"))?;
+            (BinaryMatchCommand::EnsureAtLeast { size, unit }, 2)
+        } else if name.is_static("ensure_exactly") {
+            let size = read_operand(data, cursor, TAG_UNSIGNED)?;
+            (BinaryMatchCommand::EnsureExactly { size }, 1)
+        } else if name.is_one_of(&["integer", "binary"]) {
+            let kind = name.name();
+            let _live = read_operand(data, cursor, TAG_UNSIGNED)?;
+            let flags = read_move_operand(data, cursor, atoms, literals)?;
+            let size = read_operand(data, cursor, TAG_UNSIGNED)?
+                .checked_mul(read_operand(data, cursor, TAG_UNSIGNED)?)
+                .ok_or_else(|| error(format!("BEAM bs_match {kind} size overflow")))?;
+            let destination = read_register(data, cursor)?;
+            let Some(flags) = (match &flags {
+                Operand::Value(flags) => flags.proper_list(),
+                _ => None,
+            }) else {
                 return Err(error(format!(
-                    "unsupported BEAM bs_match command {}",
-                    name.name()
+                    "unsupported BEAM bs_match {kind} flags {flags:?}"
                 )));
-            }
+            };
+            let has = |names: &[&str]| {
+                flags
+                    .clone()
+                    .any(|flag| matches!(flag, Term::Atom(atom) if atom.is_one_of(names)))
+            };
+            let command = if name.is_static("integer") {
+                BinaryMatchCommand::Integer {
+                    size,
+                    little: has(&["little", "native"]),
+                    signed: has(&["signed"]),
+                    destination,
+                }
+            } else {
+                BinaryMatchCommand::Binary { size, destination }
+            };
+            (command, 5)
+        } else if name.is_static("get_tail") {
+            let _live = read_operand(data, cursor, TAG_UNSIGNED)?;
+            let _unit = read_operand(data, cursor, TAG_UNSIGNED)?;
+            let destination = read_register(data, cursor)?;
+            (BinaryMatchCommand::GetTail { destination }, 3)
+        } else if name.is_static("=:=") {
+            let _live = read_move_operand(data, cursor, atoms, literals)?;
+            let size = read_operand(data, cursor, TAG_UNSIGNED)?;
+            let value = read_operand(data, cursor, TAG_UNSIGNED)?;
+            (BinaryMatchCommand::Equal { size, value }, 3)
+        } else if name.is_static("skip") {
+            let size = read_operand(data, cursor, TAG_UNSIGNED)?;
+            (BinaryMatchCommand::Skip { size }, 1)
+        } else {
+            return Err(error(format!(
+                "unsupported BEAM bs_match command {}",
+                name.name()
+            )));
         };
         commands.push(command);
         items += 1 + operand_count;
@@ -2515,7 +2506,7 @@ fn read_binary_segments(
             let segment = read_operand(data, cursor, TAG_UNSIGNED)?;
             let unit = read_operand(data, cursor, TAG_UNSIGNED)?;
             let flags = read_move_operand(data, cursor, atoms, literals)?;
-            if kind.index() == Atom::static_index("string") {
+            if kind.is_static("string") {
                 let offset = read_operand(data, cursor, TAG_UNSIGNED)?;
                 let length = read_operand(data, cursor, TAG_INTEGER)?;
                 return usize::try_from(offset)
@@ -2529,16 +2520,12 @@ fn read_binary_segments(
             let size = read_move_operand(data, cursor, atoms, literals)?;
             Ok(match &size {
                 Operand::Value(Term::Atom(size))
-                    if kind.index() == Atom::static_index("binary")
-                        && unit == 8
-                        && size.index() == Atom::static_index("all") =>
+                    if kind.is_static("binary") && unit == 8 && size.is_static("all") =>
                 {
                     BinarySegment::BinaryAll { segment, source }
                 }
                 Operand::Value(Term::Atom(size))
-                    if kind.index() == Atom::static_index("append")
-                        && index == 0
-                        && size.index() == Atom::static_index("all") =>
+                    if kind.is_static("append") && index == 0 && size.is_static("all") =>
                 {
                     BinarySegment::Append {
                         segment,
@@ -2546,16 +2533,14 @@ fn read_binary_segments(
                         source,
                     }
                 }
-                _ if kind.index() == Atom::static_index("integer") => BinarySegment::Integer {
+                _ if kind.is_static("integer") => BinarySegment::Integer {
                     segment,
                     unit,
                     little: is_little_endian(&flags),
                     source,
                     size,
                 },
-                _ if kind.index() == Atom::static_index("utf8") => {
-                    BinarySegment::Utf8 { segment, source }
-                }
+                _ if kind.is_static("utf8") => BinarySegment::Utf8 { segment, source },
                 _ => BinarySegment::Unsupported(kind),
             })
         })
