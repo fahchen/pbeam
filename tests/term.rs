@@ -86,7 +86,7 @@ fn clones_compares_formats_and_drops_deep_terms_without_recursion() {
     assert_eq!(term, copy);
     assert_ne!(term, deep(999_999));
     assert!(debug_term(&copy, &test_atom_table()).starts_with(
-        "Fun(Local(Lambda { module: Atom { index: 971 }, index: 0, \
+        "Fun(Local(Lambda { module: Atom(\"lists\"), index: 0, \
          old_unique: 7, label: 53, arity: 1 }), [Map([(Atom(\"k\"), List([Integer(1), Tuple([Fun("
     ));
     drop(term);
@@ -264,6 +264,25 @@ fn prints_an_atom_index_without_a_table_and_a_name_with_one() {
     let term = Term::static_atom("undef");
     assert_eq!(format!("{term:?}"), "Atom(725)");
     assert_eq!(debug_term(&term, &AtomTable::new()), "Atom(\"undef\")");
+}
+
+#[test]
+fn prints_the_module_and_the_function_name_of_a_fun_target() {
+    // A bare atom term carries no table, so `Debug` writes the index of the
+    // module and the function of an external fun. `debug_term` reads both
+    // names through the table, and a local fun reads the name of its module.
+    let table = test_atom_table();
+    let atom_of = |name| super::Atom::from_static(name).unwrap();
+    let external = Term::Fun(Fun::external(atom_of("lists"), atom_of("get"), 1));
+    assert_eq!(
+        debug_term(&external, &table),
+        "Fun(External { module: Atom(\"lists\"), function: Atom(\"get\"), arity: 1 }, [])"
+    );
+    let local = fun(0, vec![]);
+    assert_eq!(
+        debug_term(&local, &table),
+        "Fun(Local(Lambda { module: Atom(\"lists\"), index: 0, old_unique: 7, label: 53, arity: 1 }), [])"
+    );
 }
 
 #[test]

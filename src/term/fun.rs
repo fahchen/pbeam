@@ -16,7 +16,7 @@
 //! takes the `Arc` out of the `Option` and calls `Arc::into_inner` (see
 //! [`Fun::take_last`]). Each other reader finds the thing.
 
-use std::{cmp::Ordering, sync::Arc};
+use std::{cmp::Ordering, fmt, sync::Arc};
 
 use super::{Atom, AtomTable, Term};
 
@@ -165,6 +165,46 @@ pub(crate) enum Target {
         function: Atom,
         arity: u32,
     },
+}
+
+/// Write the `Debug` text of a target with a table, so an external fun writes
+/// the module and the function name and a local fun writes the module name of
+/// its lambda. The derived `Debug` of a target writes the atom index, because
+/// a bare atom term carries no table.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let atoms = AtomTable::new();
+/// let module = atoms.put("lists")?;
+/// let target = Target::External { module, function: module, arity: 1 };
+/// assert!(debug_target(&target, &atoms).starts_with("External { module: \"lists\""));
+/// ```
+pub(crate) fn debug_target(
+    target: &Target,
+    atoms: &AtomTable,
+    out: &mut impl fmt::Write,
+) -> fmt::Result {
+    match target {
+        Target::Local(lambda) => {
+            let module = atoms.name_of(&lambda.module);
+            write!(
+                out,
+                "Local(Lambda {{ module: Atom(\"{module}\"), index: {}, old_unique: {}, label: {}, arity: {} }})",
+                lambda.index, lambda.old_unique, lambda.label, lambda.arity
+            )
+        }
+        Target::External {
+            module,
+            function,
+            arity,
+        } => write!(
+            out,
+            "External {{ module: Atom(\"{}\"), function: Atom(\"{}\"), arity: {arity} }}",
+            atoms.name_of(module),
+            atoms.name_of(function)
+        ),
+    }
 }
 
 impl Target {
