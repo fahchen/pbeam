@@ -16,7 +16,6 @@ use super::BifResult::{Raise, Value};
 use super::*;
 use crate::runtime::host::filename_encoding;
 use crate::runtime::time;
-use crate::term::Atom;
 
 bifs! {
     atomics:add/3 => unsupported,
@@ -97,7 +96,7 @@ bifs! {
     erlang:adler32/2 => unsupported,
     erlang:adler32_combine/3 => unsupported,
     erlang:alias/1 => unsupported,
-    erlang:and/2 as ErlangAnd2 => |_, [left, right]| Ok(match (left, right) { (Term::Atom(left), Term::Atom(right)) if left.is_one_of(&["true", "false"]) && right.is_one_of(&["true", "false"]) => Value(Term::static_atom(if left.index() == Atom::static_index("true") && right.index() == Atom::static_index("true") { "true" } else { "false" })), _ => BifResult::badarg() }),
+    erlang:and/2 as ErlangAnd2 => |_, [left, right]| Ok(match (left, right) { (Term::Atom(left), Term::Atom(right)) if left.is_one_of(&["true", "false"]) && right.is_one_of(&["true", "false"]) => Value(Term::static_atom(if left.is_static("true") && right.is_static("true") { "true" } else { "false" })), _ => BifResult::badarg() }),
     erlang:append/2 => unsupported,
     erlang:append_element/2 => unsupported,
     erlang:atom_to_binary/2 as ErlangAtomToBinary2 => |cx, [term, encoding]| Ok(erlang::atom_to_binary(&cx.scheduler.atoms, term, encoding)),
@@ -150,7 +149,7 @@ bifs! {
     erlang:dt_get_tag_data/0 => unsupported,
     erlang:dt_prepend_vm_tag_data/1 => unsupported,
     erlang:dt_put_tag/1 => unsupported,
-    erlang:dt_restore_tag/1 as ErlangDtRestoreTag1 => |_, [tag]| Ok(match tag { Term::Atom(atom) if atom.index() == Atom::static_index("true") => Value(Term::static_atom("true")), _ => BifResult::badarg() }),
+    erlang:dt_restore_tag/1 as ErlangDtRestoreTag1 => |_, [tag]| Ok(match tag { Term::Atom(atom) if atom.is_static("true") => Value(Term::static_atom("true")), _ => BifResult::badarg() }),
     erlang:dt_spread_tag/1 as ErlangDtSpreadTag1 => |_, [flag]| Ok(match flag { Term::Atom(atom) if atom.is_one_of(&["true", "false"]) => Value(Term::static_atom("true")), _ => BifResult::badarg() }),
     erlang:element/2 as ErlangElement2 => |_, [index, tuple]| Ok(erlang::element(index, tuple)),
     erlang:erase/0 => unsupported,
@@ -261,7 +260,7 @@ bifs! {
     erlang:nodes/0 => unsupported,
     erlang:nodes/1 => unsupported,
     erlang:nodes/2 => unsupported,
-    erlang:not/1 as ErlangNot1 => |_, [term]| Ok(match term { Term::Atom(atom) if atom.index() == Atom::static_index("true") => Value(Term::static_atom("false")), Term::Atom(atom) if atom.index() == Atom::static_index("false") => Value(Term::static_atom("true")), _ => BifResult::badarg() }),
+    erlang:not/1 as ErlangNot1 => |_, [term]| Ok(match term { Term::Atom(atom) if atom.is_static("true") => Value(Term::static_atom("false")), Term::Atom(atom) if atom.is_static("false") => Value(Term::static_atom("true")), _ => BifResult::badarg() }),
     erlang:now/0 => unsupported,
     erlang:or/2 => unsupported,
     erlang:phash/2 => unsupported,

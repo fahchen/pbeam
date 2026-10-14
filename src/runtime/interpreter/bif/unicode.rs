@@ -14,7 +14,7 @@ use crate::runtime::scheduler::CONTEXT_REDS;
 use crate::runtime::unicode::{
     Utf8Output, Utf8State, analyze_utf8, build_utf8, code_points, is_incomplete, utf8_need,
 };
-use crate::term::{Atom, AtomTable, debug_term};
+use crate::term::{AtomTable, debug_term};
 
 /// The loop steps for each reduction (`LOOP_FACTOR`, `erl_unicode.c:48`).
 const LOOP_FACTOR: i64 = 10;
@@ -108,7 +108,7 @@ pub(super) fn characters_to_binary(
     atoms: &AtomTable,
 ) -> Result<BifResult, BeamError> {
     let latin1 = match encoding {
-        Term::Atom(encoding) if encoding.index() == Atom::static_index("latin1") => true,
+        Term::Atom(encoding) if encoding.is_static("latin1") => true,
         Term::Atom(encoding) if encoding.is_one_of(&["unicode", "utf8"]) => false,
         // ponytail: ERTS traps each other encoding to `unicode:characters_to_binary_int/2`; see "Chardata conversion" in docs/erts-differences.md.
         _ => {
@@ -170,8 +170,7 @@ fn utf8_turn(
     mut left: i64,
     encoding: &Term,
 ) -> Result<BifResult, BeamError> {
-    let latin1 =
-        matches!(encoding, Term::Atom(name) if name.index() == Atom::static_index("latin1"));
+    let latin1 = matches!(encoding, Term::Atom(name) if name.is_static("latin1"));
     let start = left;
     let (rest, failed) = build_utf8(chardata, &mut left, latin1, &mut output);
     cost_to_proc(process, start - left);
@@ -282,7 +281,7 @@ pub(super) fn characters_to_list(
     encoding: &Term,
 ) -> Result<BifResult, BeamError> {
     let latin1 = match encoding {
-        Term::Atom(encoding) if encoding.index() == Atom::static_index("latin1") => true,
+        Term::Atom(encoding) if encoding.is_static("latin1") => true,
         Term::Atom(encoding) if encoding.is_one_of(&["unicode", "utf8"]) => false,
         _ => {
             return Ok(Trap {

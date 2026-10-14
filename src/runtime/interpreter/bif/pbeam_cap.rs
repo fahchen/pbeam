@@ -6,7 +6,6 @@
 use super::BifResult::Value;
 use super::*;
 use crate::runtime::capability::{CapabilityKind, Denied};
-use crate::term::Atom;
 
 /// Run `pbeam_cap:revoke(Pid, Kind)`: revoke the copies of the capability
 /// kind `Kind` that the caller gave to the process `Pid` at spawn, and
@@ -214,7 +213,7 @@ pub(super) fn serve(
     let (Term::Pid(pid), Term::Atom(kind)) = (pid, kind) else {
         return Ok(BifResult::badarg());
     };
-    if kind.index() != Atom::static_index("io") {
+    if !kind.is_static("io") {
         return Ok(BifResult::badarg());
     }
     if scheduler.current_process().security.is_boot() && !scheduler.serve_io(*pid) {

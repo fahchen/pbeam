@@ -14,7 +14,7 @@ use crate::runtime::{
     host::output::IovecWrite,
     scheduler::Flushed,
 };
-use crate::term::{Atom, ProcessId};
+use crate::term::ProcessId;
 
 mod binary;
 mod erlang;
@@ -952,7 +952,7 @@ impl BeamProgram {
                 bytes.clone().to_bytes(),
                 *characters as usize,
                 rest,
-                encoding.index() == Atom::static_index("latin1"),
+                encoding.is_static("latin1"),
             ),
             ("erlang", "characters_to_list_trap_2", [result, Term::Integer(remaining)]) => {
                 unicode::finish_trap(
@@ -996,7 +996,7 @@ impl BeamProgram {
                 "erts_internal",
                 "iolist_to_iovec_continue",
                 [Term::Atom(phase), arg, term, stack],
-            ) if phase.index() == Atom::static_index("size")
+            ) if phase.is_static("size")
                 && let Some(stack) = stack.proper_list() =>
             {
                 iolist::iovec_size(process, arg, term, &stack.collect::<Vec<_>>())
@@ -1022,7 +1022,7 @@ impl BeamProgram {
                 "erts_internal",
                 "list_to_bitstring_continue",
                 [Term::Atom(phase), arg, term, stack, Term::Integer(size)],
-            ) if phase.index() == Atom::static_index("size")
+            ) if phase.is_static("size")
                 && let Some(stack) = stack.proper_list() =>
             {
                 let reds_left = process.bif_reductions_left()? as i64;
