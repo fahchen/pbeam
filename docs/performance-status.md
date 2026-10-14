@@ -19,6 +19,7 @@ The table holds the headline numbers of the whole programme. Each row names its 
 
 | Headline number | Value | Revision | Session or run group | Load or run rule | Source |
 | --- | --- | --- | --- | --- | --- |
+| The `select_val` probe with 256 choices, 200000 iterations | 690.1 ns, from 1028.5 ns | `915590af` before, after on the branch `perf/545-select-val` | One interleaved session of three rounds, each number the minimum of nine probe runs inside one invocation | One-minute load 5.93 to 7.46 | Issue [#545](https://github.com/fahchen/pbeam/issues/545) and the record |
 | Local `call_only` floor loop, 200000 iterations | 117.9 ns | `ddb32f6e` | The interleaved check session, the minimum of three rounds, and each round is the minimum of nine probe runs inside one invocation | One-minute load 26.15, 29.92, and 25.70 on the three rounds | [#600](https://github.com/fahchen/pbeam/pull/600) and `docs/interpreter-dispatch-measurements.md` |
 | Position `call_only` floor loop, 200000 iterations | 117.8 ns | `ddb32f6e` | The same interleaved check session | The same three rounds | [#600](https://github.com/fahchen/pbeam/pull/600) and the record |
 | Local `call_only` floor loop of the after-revision of #585, 200000 iterations | 118.4 ns | `d54e6a4` | The same interleaved check session | The same three rounds | [#600](https://github.com/fahchen/pbeam/pull/600) and the record |
@@ -40,6 +41,36 @@ The step 0 numbers and the `ddb32f6e` numbers come from two different sessions. 
 ## Entries
 
 Each entry is one landed change or one change that is not landed. The entries are newest first.
+
+### 2026-10-15 01:10 JST - The `select_val` dispatch decision, task [#545](https://github.com/fahchen/pbeam/issues/545), branch `perf/545-select-val`
+
+The change adds a prepared form of the `select_val` choice list. The decoder builds it one time at load time. A list of at most 10 choices keeps the encoded order and the linear walk of every earlier revision. A larger list is sorted by the ERTS term order and the interpreter binary-searches it. The bound of 10 mirrors the pinned ERTS loader, which keeps `i_select_val_lins` for at most 10 values and selects `i_select_val_bins` above that (`erts/emulator/beam/emu/generators.tab:240-249`, OTP 29.1.1), and which sorts the values one time with `beam_load_sort_select_vals` (`erts/emulator/beam/beam_transform_helpers.c:135-140`). A duplicate choice keeps the linear form, so the first-match result of ERTS is preserved. The measured before revision is `915590af`, the head of `origin/main` that the branch starts from.
+
+The shape distribution comes from `escript /tmp/select_val_histogram.escript fixtures <OTP lib dir> <Elixir lib dir>` on the pinned ERTS: 1777 BEAM files and 24568 `select_val` instructions, of which 82.82 percent hold 1 to 4 choices, 8.36 percent hold 5 to 8, 5.16 percent hold 9 to 16, 2.15 percent hold 17 to 32, 0.77 percent hold 33 to 64, and 0.75 percent hold 65 or more. Only 1482 instructions, or 6.03 percent, hold more than 10 choices.
+
+The micro-measurement is `select_val_scan_*` and `select_val_binary_search_*` of `tests/runtime/interpreter/data_structure_costs.rs`. Each number is the minimum of three release invocations, each invocation the minimum of nine timed runs of 100000 operations, at a one-minute load of 4.39 to 6.04. The value is the last choice, which is the worst case of the linear walk.
+
+| Choices | Linear walk, ns for one operation | Ordered binary search, ns for one operation | Ordered divided by linear |
+| --- | --- | --- | --- |
+| 4 | 18.406 | 48.389 | 2.63 |
+| 16 | 71.506 | 116.112 | 1.62 |
+| 32 | 143.559 | 139.566 | 0.97 |
+| 64 | 287.053 | 161.795 | 0.56 |
+| 128 | 573.910 | 186.013 | 0.32 |
+| 256 | 1147.505 | 207.167 | 0.18 |
+
+The end-to-end measurement is `tests/integration/select_val.rs` on the fixture `fixtures/dispatch/select_val_probe.erl`. `ordered_loop/2` runs a `select_val` with 256 choices one time for each iteration, and `linear_loop/2` is the control with a 2-choice `select_val`. The session interleaves the two revisions in one worktree: the production change of `src/` is held as a patch, reverted for the before build, and applied again for the after build. Each number is the minimum of nine probe runs inside one invocation of the release test, and the number divides the run by the 200000 iterations.
+
+| Round | Before `915590af`, ns for each iteration | After, ns for each iteration | Before control, ns for each iteration | After control, ns for each iteration | One-minute load, before / after |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 1028.460 | 690.426 | 506.796 | 502.918 | `{ 5.93 6.19 5.16 }` / `{ 7.46 6.53 5.30 }` |
+| 2 | 1031.265 | 690.100 | 505.763 | 503.001 | `{ 7.10 6.47 5.28 }` / `{ 6.32 6.32 5.24 }` |
+| 3 | 1029.549 | 692.073 | 507.709 | 504.956 | `{ 7.43 6.57 5.34 }` / `{ 7.40 6.58 5.35 }` |
+| Minimum | 1028.460 | 690.100 | 505.763 | 502.918 | Not applicable to a minimum |
+
+The 256-choice shape falls 338.360 ns, or 32.9 percent, and the control falls 2.845 ns, or 0.6 percent, so the gain is about 119 times the run-to-run noise of the session.
+
+Source: the section "The `select_val` dispatch decision of task [#545](https://github.com/fahchen/pbeam/issues/545)" of `docs/interpreter-dispatch-measurements.md` and the task branch. Known limits: the ordered form is slower than the linear walk below about 32 choices in the worst case, because `Term::compare` allocates a work vector for each comparison, and the pinned ERTS uses the binary form above 10 choices; the 11-to-32 buckets hold 1109 of the 1482 instructions above the bound, and `docs/backlog.md` records the removal of the allocation as the trigger to re-measure the bound. The fixture measures one large shape, so no number here covers a `select_val` with 6878 choices.
 
 ### 2026-10-14 23:40 JST - Store only the atom index in the atom term, task [#596](https://github.com/fahchen/pbeam/issues/596), pull request [#619](https://github.com/fahchen/pbeam/pull/619) - Landed as `e0d9cbe5`
 

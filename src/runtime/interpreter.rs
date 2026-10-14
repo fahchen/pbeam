@@ -9,7 +9,8 @@ use crate::{
     beam::{
         BeamModule, NameId,
         code::{
-            self, BinaryMatchCommand, BinarySegment, Instruction, Operand, TestKind, TestOperand,
+            self, BinaryMatchCommand, BinarySegment, Instruction, Operand, SelectValueChoices,
+            TestKind, TestOperand,
         },
     },
     error::{BeamError, error},
@@ -20,6 +21,7 @@ use crate::{
 };
 use std::{
     borrow::{Borrow, Cow},
+    cmp::Ordering,
     collections::HashMap,
     rc::Rc,
     sync::Arc,
@@ -1556,11 +1558,26 @@ impl BeamProgram {
                     fail_label,
                     choices,
                 } => {
-                    let value = read_ref(process, value)?;
-                    let target = choices
-                        .iter()
-                        .find(|(choice, _)| choice == value)
-                        .map_or(*fail_label, |(_, label)| *label);
+                    // The loader prepared the choices: a small list keeps the
+                    // encoded order, and a large list is sorted by the term
+                    // order. The linear arm is the walk that PBeam always
+                    // ran. The ordered arm binary-searches the sorted list,
+                    // as ERTS `select_val_bins.select` does over its sorted
+                    // values (`emu/select_instrs.tab:57-88`, OTP 29.1.1).
+                    let target = match choices {
+                        SelectValueChoices::Linear(choices) => {
+                            let value = read_ref(process, value)?;
+                            choices
+                                .iter()
+                                .find(|(choice, _)| choice == value)
+                                .map_or(*fail_label, |(_, label)| *label)
+                        }
+                        SelectValueChoices::Ordered(choices) => {
+                            let (process, atoms) = scheduler.current_process_and_atoms();
+                            let value = read_ref(process, value)?;
+                            select_value_ordered(value, choices, atoms)?.unwrap_or(*fail_label)
+                        }
+                    };
                     cursor.position = label_position(target)?;
                 }
                 Instruction::PutList {
@@ -3347,6 +3364,55 @@ fn label_position(target: u32) -> Result<usize, BeamError> {
         return Err(error("missing BEAM label 0"));
     }
     Ok(target as usize)
+}
+
+/// Return the label of the choice that equals `value` in the ordered choice
+/// list of [`Instruction::SelectValue`], or `None` when no choice equals it.
+///
+/// The list is sorted by [`Term::compare`], so a binary search over the list
+/// visits about `log2(len)` choices instead of all of them. The comparison
+/// is the table-aware term order, so two atoms compare by name and not by
+/// atom index.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let atoms = AtomTable::new();
+/// let choices = vec![
+///     (Term::static_atom("a"), 3),
+///     (Term::static_atom("b"), 4),
+/// ];
+/// assert_eq!(
+///     select_value_ordered(&Term::static_atom("b"), &choices, &atoms)?,
+///     Some(4)
+/// );
+/// assert_eq!(
+///     select_value_ordered(&Term::static_atom("c"), &choices, &atoms)?,
+///     None
+/// );
+/// ```
+///
+/// # Errors
+///
+/// Return a runtime error when the value and a choice have no ERTS term
+/// order, as two different references have none. The interpreter reports
+/// that error and does not panic.
+fn select_value_ordered(
+    value: &Term,
+    choices: &[(Term, u32)],
+    atoms: &AtomTable,
+) -> Result<Option<u32>, BeamError> {
+    let mut low = 0;
+    let mut high = choices.len();
+    while low < high {
+        let middle = low + (high - low) / 2;
+        match value.compare(&choices[middle].0, atoms)? {
+            Ordering::Less => high = middle,
+            Ordering::Greater => low = middle + 1,
+            Ordering::Equal => return Ok(Some(choices[middle].1)),
+        }
+    }
+    Ok(None)
 }
 
 /// Read a copy of an operand from the process registers or the active

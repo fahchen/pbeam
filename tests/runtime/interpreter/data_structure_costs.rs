@@ -17,7 +17,7 @@
 
 use std::{collections::HashMap, hint::black_box, mem::size_of, time::Instant};
 
-use super::{code_table, function_at_label, write_operand};
+use super::{code_table, function_at_label, select_value_ordered, write_operand};
 use crate::{
     beam::{
         BeamModule,
@@ -43,6 +43,12 @@ const OPERATIONS: usize = 100_000;
 /// form walks the object vector of the table, and of the other operation
 /// that costs more than a field read.
 const ETS_OPERATIONS: usize = 200;
+
+/// The choice counts of the `select_val` micro-measurement, in the order of
+/// the buckets of the measured distribution of issue #545: the linear walk
+/// at 4 and 16 choices, and the large shapes at 32, 64, 128, and 256
+/// choices.
+const SELECT_VAL_SHAPES: [usize; 6] = [4, 16, 32, 64, 128, 256];
 
 /// Print one measured line: the name of the operation and the nanosecond for
 /// each operation.
@@ -677,7 +683,15 @@ fn prints_the_cost_of_every_derivation() {
 
     // The linear choice scan of `select_val`. The interpreter compares the
     // value with each choice in order, with the exact equality of `Term`.
-    for choices in [4usize, 16, 64] {
+    //
+    // The ordered choice search of `select_val` (issue #545) sorts the
+    // choices by the term order and binary-searches them with
+    // `Term::compare`. The list is already in the term order, and the value
+    // is the last choice: that is the worst case of the linear walk and the
+    // `Greater` case of the binary search. The shapes cover the linear walk
+    // and the large shapes above the 10-choice bound.
+    let atoms = AtomTable::new();
+    for choices in SELECT_VAL_SHAPES {
         let list: Vec<(Term, u32)> = (0..choices)
             .map(|index| (Term::Integer(index as i64), index as u32))
             .collect();
@@ -689,6 +703,22 @@ fn prints_the_cost_of_every_derivation() {
                 for _ in 0..OPERATIONS {
                     sum += black_box(list.iter().find(|(choice, _)| choice == black_box(&value)))
                         .map_or(0, |(_, label)| *label) as u64;
+                }
+                sum
+            }),
+        );
+        report(
+            &format!("select_val_binary_search_{choices}"),
+            measure(OPERATIONS, || {
+                let mut sum = 0u64;
+                for _ in 0..OPERATIONS {
+                    sum += black_box(select_value_ordered(
+                        black_box(&value),
+                        black_box(&list),
+                        &atoms,
+                    ))
+                    .unwrap()
+                    .unwrap_or(0) as u64;
                 }
                 sum
             }),

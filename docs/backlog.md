@@ -93,6 +93,14 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a combined form that measures a gain of at least 10 percent on the local floor loop against the two separate instructions, with the session control of its own revision.
 - **Source:** task #517 and the step 9 measurement of `docs/interpreter-dispatch-measurements.md`.
 
+### Compare two terms of a `select_val` choice without a fresh work vector
+
+- **Reason:** the ordered search of `select_val` uses `Term::compare`, and that function allocates a work vector for every call, so the ordered form is slower than the linear walk below about 32 choices.
+- **Evidence:** task #545 measured the two forms at the pinned revision in `tests/runtime/interpreter/data_structure_costs.rs`: the linear walk costs 18.406, 71.506, 143.559, 287.053, 573.910, and 1147.505 ns for 4, 16, 32, 64, 128, and 256 choices, and the ordered binary search costs 48.389, 116.112, 139.566, 161.795, 186.013, and 207.167 ns. Every call of `Term::compare` builds `vec![Step(self, other)]` (`src/term/order.rs:73`), so one comparison of two integers costs about 25 ns against about 4.5 ns for the exact equality of `Term`. The pinned ERTS selects its binary form above 10 choices (`erts/emulator/beam/emu/generators.tab:240-249`), and the bound of the PBeam loader follows it, so a `select_val` in the 11-to-32 choice range now pays the allocation.
+- **Option:** hold the first comparisons in an array in the frame of `Term::compare`, as `Term::eq` does after #548 (`src/term.rs:630`), and use the heap vector only above it. The bound of the linear `select_val` form then follows a re-measurement instead of the pinned ERTS alone.
+- **Trigger:** a measured `select_val` with 11 to 32 choices in a hot path, or a decision to set the PBeam bound from a measurement.
+- **Source:** task #545 and the section "The `select_val` dispatch decision of task #545" of `docs/interpreter-dispatch-measurements.md`.
+
 ## Runtime
 
 ### Model the process heap for GC reductions and the message copy cost

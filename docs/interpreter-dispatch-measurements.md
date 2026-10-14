@@ -489,3 +489,64 @@ Step 7 ([#515](https://github.com/fahchen/pbeam/issues/515)) merged as `c6cfb3a`
 Step 9 ([#517](https://github.com/fahchen/pbeam/issues/517)) adds combined instructions for the two measured pair shapes, `test` with `gc_bif` and `gc_bif` with `call_only`. Its gate is a floor loop at or below 150 ns for each iteration, and the target for the Terra key latency at that point is at most 10 ms, against the measured 0.018 s to 0.039 s of section 3.
 
 Step 8 ([#516](https://github.com/fahchen/pbeam/issues/516)) is skipped. The gate of that step needs at least a 10 percent gain on the floor loop and at most 32 bytes for each instruction. The step 6 estimate is 5.0 percent under the memory-system proxy, which is below the gate, and the 816-byte slot range of the floor loop is below 1.3 percent of the smaller L1 data cache of the host. The step number does not change, and step 9 follows step 7 without it. Step 9 keeps a blocked-by link to step 8, and that link is stale while step 8 is skipped.
+
+## The `select_val` dispatch decision of task [#545](https://github.com/fahchen/pbeam/issues/545)
+
+This section answers the question of issue [#545](https://github.com/fahchen/pbeam/issues/545): how does the interpreter select the clause of a `select_val` instruction, given the shape of the choice list that real code produces? The measured revision is `915590af`, the head of `origin/main` that the branch of the task starts from, and the environment is the one of "The environment of the numbers" above.
+
+The instruction has two prepared forms, and the decoder of the loader builds one of them one time at load time. A list of at most `SELECT_VALUE_LINEAR_LIMIT` choices keeps the encoded order, and the interpreter walks it with the exact equality of `Term`. The linear walk is the behaviour of every earlier revision. A larger list is sorted by the ERTS term order `Term::compare`, and the interpreter binary-searches it. The bound of 10 mirrors the pinned ERTS: the loader reserves a place for a sentinel and takes `align = 1` when the list holds at most 10 values, which selects `i_select_val_lins`, and it selects `i_select_val_bins` above that (`erts/emulator/beam/emu/generators.tab:240-249`, OTP 29.1.1). ERTS sorts the values one time at load time with `beam_load_sort_select_vals` (`erts/emulator/beam/beam_transform_helpers.c:135-140`).
+
+### The shape distribution
+
+The command is `escript /tmp/select_val_histogram.escript fixtures <OTP lib dir> <Elixir lib dir>`, run from the repository root on the pinned ERTS. The run reads each BEAM file with `beam_disasm:file/1` and counts the pairs of every `select_val` instruction. The first run is the tree without the fixture of this task: 1777 files and 24568 instructions.
+
+| Choices | Instructions | Share |
+| --- | --- | --- |
+| 1 to 4 | 20346 | 82.82 percent |
+| 5 to 8 | 2055 | 8.36 percent |
+| 9 to 16 | 1267 | 5.16 percent |
+| 17 to 32 | 527 | 2.15 percent |
+| 33 to 64 | 189 | 0.77 percent |
+| 65 and more | 184 | 0.75 percent |
+
+The distribution is dominated by small lists: 82.82 percent of the instructions hold at most 4 choices, and 91.18 percent hold at most 8. Only 1482 instructions, or 6.03 percent, hold more than 10 choices, so the two-form change touches about one instruction in seventeen. The largest single list holds 6878 choices.
+
+The fixture of this task, `fixtures/dispatch/select_val_probe.erl`, adds one `select_val` with 256 choices in `bucket/1` and one with 2 choices in `digit/1`. The second run of the same command reads 1778 files and 24570 instructions, with 20347 in the 1-to-4 bucket and 185 in the 65-and-more bucket. The fixture covers the 65-and-more bucket, which holds the lists whose linear walk costs the most.
+
+### The micro-measurement
+
+The measurement is `select_val_scan_*` and `select_val_binary_search_*` of `tests/runtime/interpreter/data_structure_costs.rs`. It measures the model of each search arm on an integer list that is already in the term order, with the last choice as the value. The value is the worst case of the linear walk and the `Greater` case of the binary search. Each number is the minimum of three release invocations of the test, each invocation the minimum of nine timed runs of 100000 operations, and the one-minute load of the three invocations is 4.39 to 6.04.
+
+| Choices | Linear walk, ns for one operation | Ordered binary search, ns for one operation | Ordered divided by linear |
+| --- | --- | --- | --- |
+| 4 | 18.406 | 48.389 | 2.63 |
+| 16 | 71.506 | 116.112 | 1.62 |
+| 32 | 143.559 | 139.566 | 0.97 |
+| 64 | 287.053 | 161.795 | 0.56 |
+| 128 | 573.910 | 186.013 | 0.32 |
+| 256 | 1147.505 | 207.167 | 0.18 |
+
+The ordered search is slower below about 32 choices and faster above it. The cause is `Term::compare`: it builds the work vector `vec![Step(self, other)]` for every call (`src/term/order.rs:73`), so one comparison of two integers costs about 25 ns against about 4.5 ns for the exact equality of `Term`. A `select_val` value is usually not the last choice, so the average linear walk is about half of the column above and the crossover of the average case is between 64 and 128 choices.
+
+The issue quotes the linear scan at `912b322` as 85.073 ns, 343.375 ns, and 1417.017 ns for 4, 16, and 64 choices. Those numbers are historical: [#548](https://github.com/fahchen/pbeam/pull/548) removed the pair-stack allocation of `Term::eq` between that revision and this one, so the same model now costs 18.406 ns, 71.506 ns, and 287.053 ns. The production change of this task does not touch the linear walk, so its micro number is the same before and after the change.
+
+### The end-to-end measurement
+
+The probe is `fixtures/dispatch/select_val_probe.erl`, and the harness is `tests/integration/select_val.rs`. `ordered_loop/2` runs the 256-choice `select_val` of `bucket/1` one time for each iteration, and `linear_loop/2` is the control: the same loop shape with a 2-choice `select_val` and with `rem 3` in the place of `band 255`. Each number is the minimum of nine runs of the probe inside one invocation of `cargo test --release --test select_val`, and the number divides the run by the 200000 iterations.
+
+The session interleaves the two revisions in one worktree. The production change of `src/` is held as a patch, reverted for the before build, and applied again for the after build. The two revisions therefore share the fixture, the harness, the host, and the hour, but a rebuild separates the two builds of a round, and no second worktree exists. The task could not run the two revisions as two detached checkouts.
+
+| Round | Before `915590af`, ns for each iteration | After, ns for each iteration | Before control, ns for each iteration | After control, ns for each iteration | One-minute load, before / after |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 1028.460 | 690.426 | 506.796 | 502.918 | `{ 5.93 6.19 5.16 }` / `{ 7.46 6.53 5.30 }` |
+| 2 | 1031.265 | 690.100 | 505.763 | 503.001 | `{ 7.10 6.47 5.28 }` / `{ 6.32 6.32 5.24 }` |
+| 3 | 1029.549 | 692.073 | 507.709 | 504.956 | `{ 7.43 6.57 5.34 }` / `{ 7.40 6.58 5.35 }` |
+| Minimum | 1028.460 | 690.100 | 505.763 | 502.918 | |
+
+The 256-choice probe falls from 1028.460 ns to 690.100 ns for each iteration, a fall of 338.360 ns or 32.9 percent. The control falls from 505.763 ns to 502.918 ns, a fall of 2.845 ns or 0.6 percent, so the run-to-run noise of this session is about 3 ns and the fall of the probe is 119 times the control. Every round is below the one-minute load of 12 that this document uses. The pinned ERTS answers the same probes in 7.82 ns to 8.63 ns for each iteration, so PBeam stays far above ERTS on this shape, and the fall of the probe closes about 338 ns of that gap.
+
+### The decision
+
+The change lands. The end-to-end gain on the shape that the change owns is outside the run-to-run noise of its own session, by a factor of about 119 against the control of that session. The runtime result of the two forms is the same as the result of the linear walk: the fixture of this task checks `bucket/1` for every value from -1 to 257 and both loops against the pinned ERTS, and a duplicate choice keeps the linear form.
+
+The change has two measured limits. First, the ordered form is slower than the linear walk below about 32 choices, because `Term::compare` allocates a work vector for each comparison, and the pinned ERTS uses the binary form above 10 choices. The bound of 10 follows the pinned ERTS and not the crossover of PBeam, so a `select_val` in the 11-to-32 choice range pays about 45 ns more for each run at 16 choices in the worst case and about the same cost at 32 choices, and the 11-to-32 buckets hold 1109 of the 1482 instructions above the bound. `docs/backlog.md` records the removal of the allocation as the trigger to re-measure the bound. Second, the fixture measures one large shape, and the tail of the distribution holds other shapes; no number here covers a `select_val` with 6878 choices.
