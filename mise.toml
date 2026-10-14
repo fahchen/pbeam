@@ -106,6 +106,18 @@ arg "<name>" help="The directory of the example in examples/, such as hello_worl
 '''
 run = 'bash scripts/example.sh "$usage_name" ${usage_erts:+--erts} ${usage_policy:+--policy "$usage_policy"}'
 
+[tasks.example-release]
+description = "Build the release pbeam binary, build an example, and run it on that binary"
+quiet = true
+usage = '''
+flag "--policy <module>" help="Run the pbeam binary in boot mode (--boot) with this policy module of the example, such as Elixir.RestrictedGuest.Policy"
+arg "<name>" help="The directory of the example in examples/, such as hello_world"
+'''
+run = '''
+cargo build --locked --release --bin pbeam
+PBEAM_BIN=$(pwd)/target/release/pbeam bash scripts/example.sh "$usage_name" ${usage_policy:+--policy "$usage_policy"}
+'''
+
 [tasks.bench-dispatch]
 description = "Measure the interpreter dispatch baseline on a release build and write target/dispatch-baseline.txt"
 run = "bash scripts/dispatch_baseline.sh"
