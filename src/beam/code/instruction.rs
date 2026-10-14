@@ -172,10 +172,13 @@ const OPCODE_RECV_MARKER_USE: u8 = 176;
 /// The largest choice list that keeps the linear walk of
 /// [`Instruction::SelectValue`].
 ///
-/// ERTS uses the same bound: the loader reserves a place for a sentinel and
-/// takes `align = 1` when the list holds at most 10 values, which selects
-/// `i_select_val_lins`, and it selects `i_select_val_bins` above that
-/// (`erts/emulator/beam/emu/generators.tab:240-249`, OTP 29.1.1).
+/// ERTS uses the same bound in the `select_val` generator that serves a
+/// choice list that a jump table does not fit (`erts/emulator/beam/emu/ops.tab:159-169`
+/// and `emu/generators.tab:214-254`, OTP 29.1.1). That generator special-cases
+/// two values with `i_select_val2`, reserves a place for a sentinel and takes
+/// `align = 1` for 3 to 10 values, which selects `i_select_val_lins`
+/// (`generators.tab:221-253`), and selects `i_select_val_bins` above 10.
+/// PBeam has no jump table, and it keeps the linear form for two values.
 ///
 /// The bound stays at 10 after the compare fast path of `Term::compare`. The
 /// linear form wins on the average walk below about 16 choices, because the
@@ -199,11 +202,15 @@ pub(crate) const SELECT_VALUE_LINEAR_LIMIT: usize = 10;
 /// are sorted by the ERTS term order, and the interpreter searches them
 /// with a binary search.
 ///
-/// The ERTS loader takes the same two forms. It selects `i_select_val_lins`
-/// for a list of at most 10 values and `i_select_val_bins` above that, and
-/// it sorts the values with `beam_load_sort_select_vals`
-/// (`erts/emulator/beam/emu/generators.tab:240-268` and
-/// `erts/emulator/beam/beam_transform_helpers.c:135-140`, OTP 29.1.1).
+/// The ERTS loader takes the same two forms in the generator that serves a
+/// choice list that a jump table does not fit, and after its two-value special
+/// case. It selects `i_select_val_lins` for 3 to 10 values and
+/// `i_select_val_bins` above that, and it sorts the encoded values with
+/// `beam_load_sort_select_vals`
+/// (`erts/emulator/beam/emu/generators.tab:214-268` and
+/// `erts/emulator/beam/beam_transform_helpers.c:135-140`, OTP 29.1.1). PBeam
+/// sorts by [`Term::compare`] instead of the encoded value. It sorts and
+/// searches with the same order, so the selected clause agrees.
 ///
 /// # Invariant
 ///
