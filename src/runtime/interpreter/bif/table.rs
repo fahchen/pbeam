@@ -572,3 +572,71 @@ bifs! {
     unicode:characters_to_binary/2 as UnicodeCharactersToBinary2 => |cx, [chardata, encoding]| { let (process, atoms) = cx.scheduler.current_process_and_atoms(); unicode::characters_to_binary(process, chardata, encoding, atoms) },
     unicode:characters_to_list/2 as UnicodeCharactersToList2 => |cx, [chardata, encoding]| unicode::characters_to_list(cx.scheduler.current_process_mut(), chardata, encoding),
 }
+
+/// Return whether a BIF identity is in the measured leaf set that the
+/// borrowed argument lane runs (see `docs/bif-argument-borrow-design.md`).
+///
+/// A leaf body reads its arguments as references and takes no scheduler,
+/// so it cannot change the process that holds them. Every other body stays
+/// on the owned lane. The identities of this function and of the arms of
+/// [`dispatch_leaf`] are the same.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(is_leaf(BifId::ErlangPlus2));
+/// assert!(!is_leaf(BifId::ErlangByteSize1));
+/// ```
+pub(in crate::runtime::interpreter) fn is_leaf(id: BifId) -> bool {
+    matches!(
+        id,
+        BifId::ErlangPlus2
+            | BifId::ErlangMinus2
+            | BifId::ErlangTupleSize1
+            | BifId::ErlangElement2
+            | BifId::ErlangHd1
+            | BifId::ErlangMapGet2
+    )
+}
+
+/// Run a leaf BIF with borrowed arguments. This function takes no
+/// scheduler, so its bodies cannot change the process that holds the
+/// arguments.
+///
+/// The identities of the arms are the identities of [`is_leaf`]. Each arm
+/// body is the body of the same entry of the `bifs!` table, and its
+/// context pattern is `_`, so the body reads no scheduler. An identity
+/// that the leaf lane does not hold reports the unresolved MFA error of
+/// its entry, as the fallback arm of `dispatch` does.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let left = Term::Integer(1);
+/// let right = Term::Integer(2);
+/// let sum = dispatch_leaf(BifId::ErlangPlus2, &[&left, &right])?;
+/// assert!(matches!(sum, BifResult::Value(Term::Integer(3))));
+/// ```
+pub(in crate::runtime::interpreter) fn dispatch_leaf(
+    id: BifId,
+    arguments: &[&Term],
+) -> Result<BifResult, BeamError> {
+    match (id, arguments) {
+        (BifId::ErlangPlus2, &[left, right]) => erlang::arith("+", left, right, i64::checked_add),
+        (BifId::ErlangMinus2, &[left, right]) => erlang::arith("-", left, right, i64::checked_sub),
+        (BifId::ErlangTupleSize1, &[term]) => Ok(match term {
+            Term::Tuple(elements) => Value(Term::Integer(elements.len() as i64)),
+            _ => BifResult::badarg(),
+        }),
+        (BifId::ErlangElement2, &[index, tuple]) => Ok(erlang::element(index, tuple)),
+        (BifId::ErlangHd1, &[list]) => Ok(match list.list_head() {
+            Some(head) => Value(head.clone()),
+            None => BifResult::badarg(),
+        }),
+        (BifId::ErlangMapGet2, &[key, map]) => Ok(maps::get(key, map)),
+        (id, _) => {
+            let (module, name, _) = mfa(id);
+            Err(unresolved_mfa(module, name, arguments.len()))
+        }
+    }
+}
