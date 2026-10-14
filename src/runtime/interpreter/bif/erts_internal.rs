@@ -15,7 +15,7 @@ use crate::runtime::{
     signal::Signal,
     unicode::native_filename,
 };
-use crate::term::{Atom, PortId};
+use crate::term::PortId;
 
 /// Run `erts_internal:group_leader(Leader, Target)`, which
 /// `erlang:group_leader/2` in `erlang.beam` calls, as
@@ -352,37 +352,33 @@ fn port_settings(atoms: &AtomTable, settings: &Term) -> Result<Option<PortSettin
                 let Term::Atom(option) = &pair[0] else {
                     return Ok(None);
                 };
-                match option.index() {
-                    index if index == Atom::static_index("args") => {
-                        let Some(args) = port_args(atoms, &pair[1]) else {
-                            return Ok(None);
-                        };
-                        result.args = args;
-                        continue;
-                    }
-                    _ if option.is_one_of(&UNSUPPORTED_TUPLE_OPTIONS) => option,
-                    _ => return Ok(None),
+                if option.is_static("args") {
+                    let Some(args) = port_args(atoms, &pair[1]) else {
+                        return Ok(None);
+                    };
+                    result.args = args;
+                    continue;
+                } else if option.is_one_of(&UNSUPPORTED_TUPLE_OPTIONS) {
+                    option
+                } else {
+                    return Ok(None);
                 }
             }
             Term::Atom(option) => {
-                match option.index() {
-                    index if index == Atom::static_index("use_stdio") => {
-                        result.streams.use_stdio = true;
-                    }
-                    index if index == Atom::static_index("nouse_stdio") => {
-                        result.streams.use_stdio = false;
-                    }
-                    index if index == Atom::static_index("stderr_to_stdout") => {
-                        result.streams.stderr_to_stdout = true;
-                    }
-                    index if index == Atom::static_index("binary") => result.binary = true,
-                    index if index == Atom::static_index("exit_status") => {
-                        result.exit_status = true
-                    }
-                    _ if option.is_one_of(&UNSUPPORTED_ATOM_OPTIONS) => {
-                        return Err(unsupported_option(option.name()));
-                    }
-                    _ => return Ok(None),
+                if option.is_static("use_stdio") {
+                    result.streams.use_stdio = true;
+                } else if option.is_static("nouse_stdio") {
+                    result.streams.use_stdio = false;
+                } else if option.is_static("stderr_to_stdout") {
+                    result.streams.stderr_to_stdout = true;
+                } else if option.is_static("binary") {
+                    result.binary = true;
+                } else if option.is_static("exit_status") {
+                    result.exit_status = true
+                } else if option.is_one_of(&UNSUPPORTED_ATOM_OPTIONS) {
+                    return Err(unsupported_option(option.name()));
+                } else {
+                    return Ok(None);
                 }
                 continue;
             }
@@ -447,7 +443,7 @@ fn spawn_executable(atoms: &AtomTable, name: &Term) -> Result<Option<Vec<u8>>, B
         return Ok(None);
     };
     match elements.as_ref() {
-        [Term::Atom(kind), name] if kind.index() == Atom::static_index("spawn_executable") => {
+        [Term::Atom(kind), name] if kind.is_static("spawn_executable") => {
             Ok(native_name(atoms, name, false))
         }
         [Term::Atom(kind), ..] if kind.is_one_of(&["spawn", "spawn_driver", "fd"]) => {

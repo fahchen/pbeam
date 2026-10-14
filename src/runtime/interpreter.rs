@@ -142,12 +142,17 @@ impl ExceptionClass {
     /// ```
     fn from_term(term: &Term) -> Option<Self> {
         match term {
-            Term::Atom(atom) => match atom.index() {
-                index if index == Atom::static_index("error") => Some(ExceptionClass::Error),
-                index if index == Atom::static_index("exit") => Some(ExceptionClass::Exit),
-                index if index == Atom::static_index("throw") => Some(ExceptionClass::Throw),
-                _ => None,
-            },
+            Term::Atom(atom) => {
+                if atom.is_static("error") {
+                    Some(ExceptionClass::Error)
+                } else if atom.is_static("exit") {
+                    Some(ExceptionClass::Exit)
+                } else if atom.is_static("throw") {
+                    Some(ExceptionClass::Throw)
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }
