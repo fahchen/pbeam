@@ -491,10 +491,10 @@ pub(super) fn error_1(context: &mut BifContext<'_>, reason: &Term) -> Result<Bif
 /// `{Module, Function, Arity, Location}` for each other term
 /// (`erts_build_mfa_item`, `utils.c:3448-3455`).
 ///
-/// PBeam keeps no line table and no caller frames (row "Exception stack
-/// trace" in `docs/erts-differences.md`), so the stack trace is only this
-/// frame, with the location `[]`. OTP code such as `re:ucompile/2` and
-/// `unicode:fake_stacktrace/3` matches this first frame.
+/// The caller frames follow, as `mfa_stacktrace` gathers them. PBeam keeps
+/// no line table (row "Exception stack trace" in
+/// `docs/erts-differences.md`), so each location is `[]`. OTP code such as
+/// `re:ucompile/2` and `unicode:fake_stacktrace/3` matches the first frame.
 ///
 /// # Examples
 ///
