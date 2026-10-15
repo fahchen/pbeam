@@ -279,12 +279,14 @@ fn install_registers(process: &mut ProcessState, build: fn() -> Term) {
 /// ```rust,ignore
 /// let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![]);
 /// install_dictionary(&mut process, dictionary_terms);
-/// assert_eq!(process.dictionary.len(), DICTIONARY_ENTRIES);
+/// assert_eq!(process.dictionary.pairs().count(), DICTIONARY_ENTRIES);
 /// ```
 fn install_dictionary(process: &mut ProcessState, _build: fn() -> Term) {
-    process.dictionary = (0..DICTIONARY_ENTRIES as i64)
-        .map(|key| (Term::Integer(key), Term::Integer(key)))
-        .collect();
+    for key in 0..DICTIONARY_ENTRIES as i64 {
+        process
+            .dictionary
+            .put(Term::Integer(key), Term::Integer(key));
+    }
 }
 
 /// Fill the mailbox of `process` with [`MAILBOX_MESSAGES`] messages.

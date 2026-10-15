@@ -362,6 +362,10 @@ name = "persistent_term"
 path = "tests/integration/persistent_term.rs"
 
 [[test]]
+name = "process_dict"
+path = "tests/integration/process_dict.rs"
+
+[[test]]
 name = "policy"
 path = "tests/integration/policy.rs"
 
