@@ -587,6 +587,22 @@ impl Map {
         matches!(**self.arc(), Repr::Hash(_))
     }
 
+    /// Return the pairs of a flatmap in flatmap key order, or `None` for a
+    /// hashmap.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let map = Map::from_pairs(vec![(Term::Integer(1), Term::Integer(2))], &AtomTable::new())?;
+    /// assert_eq!(map.flat_pairs(), Some(&[(Term::Integer(1), Term::Integer(2))][..]));
+    /// ```
+    pub(crate) fn flat_pairs(&self) -> Option<&[(Term, Term)]> {
+        match &**self.arc() {
+            Repr::Flat(pairs) => Some(pairs),
+            Repr::Hash(_) => None,
+        }
+    }
+
     /// Return the flatmap pairs or the hashmap root, so that the ERTS
     /// internal hash reads the map in its ERTS layout.
     ///
@@ -1577,7 +1593,11 @@ impl Node {
 ///
 /// Return a runtime error when the order depends on two different
 /// references, which have no PBeam term order.
-fn flatmap_order(left: &Term, right: &Term, atoms: &AtomTable) -> Result<Ordering, BeamError> {
+pub(crate) fn flatmap_order(
+    left: &Term,
+    right: &Term,
+    atoms: &AtomTable,
+) -> Result<Ordering, BeamError> {
     match (left, right) {
         (Term::Atom(left), Term::Atom(right)) => Ok(left.index().cmp(&right.index())),
         _ => left.compare(right, atoms),

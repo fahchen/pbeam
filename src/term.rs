@@ -23,7 +23,7 @@ pub(crate) use hash::internal_hash;
 use list::{Cons, ConsRef};
 pub(crate) use live_bytes::LiveBytes;
 pub use map::Map;
-pub(crate) use map::{Direction, Drain as MapDrain, Insert, from_list_units};
+pub(crate) use map::{Direction, Drain as MapDrain, Insert, flatmap_order, from_list_units};
 pub use match_context::MatchState;
 pub(crate) use match_context::{segment_equals, segment_integer};
 pub(crate) use print::print_term;
