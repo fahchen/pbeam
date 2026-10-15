@@ -8,7 +8,7 @@ use super::{
 };
 use crate::error::{BeamError, error};
 use crate::runtime::{BifId, resolve_bif};
-use crate::term::{Atom, AtomTable, Lambda, Term};
+use crate::term::{Atom, AtomTable, Lambda, Term, flatmap_order};
 use std::cmp::Ordering;
 use std::num::NonZeroU64;
 
@@ -774,7 +774,8 @@ pub(crate) enum Instruction {
     },
     /// Copies the value of each key in a map to its destination register, or
     /// jumps to `fail_label` when a key is missing. `pairs` holds each key
-    /// and its destination.
+    /// and its destination. The loader sorts two or more pairs in flatmap
+    /// key order (see [`sort_map_key_pairs`]).
     ///
     /// Encoding: opcode, fail label, map operand, extended list, item count,
     /// then key and destination operands in turn. Example:
@@ -2121,7 +2122,10 @@ pub(super) fn parse_code(
             OPCODE_GET_MAP_ELEMENTS => Instruction::GetMapElements {
                 fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
                 map: read_move_operand(data, &mut cursor, atoms, literals)?,
-                pairs: read_operand_pairs(data, &mut cursor, atoms, literals)?,
+                pairs: sort_map_key_pairs(
+                    read_operand_pairs(data, &mut cursor, atoms, literals)?,
+                    atom_table,
+                )?,
             },
             OPCODE_HAS_MAP_FIELDS => {
                 let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
@@ -2485,6 +2489,50 @@ fn read_operand_pairs(
         let second = read_move_operand(data, cursor, atoms, literals)?;
         pairs.push((first, second));
     }
+    Ok(pairs)
+}
+
+/// Sort the key and destination pairs of `get_map_elements` in flatmap key
+/// order, as the ERTS loader does (`beam_load_map_key_sort`,
+/// `beam_transform_helpers.c:53-115`, with `erts_cmp_flatmap_keys`; JIT
+/// `jit/arm/ops.tab:1190-1197`). The run loop then finds all keys in one
+/// walk of a flatmap. One pair stays as it is. With more pairs, each key
+/// must be a literal: ERTS loads no `get_map_elements` with a register key
+/// among other keys. A literal key that PBeam does not support yet sorts
+/// first, so that the run loop reports it at its first comparison.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let pairs = vec![(Operand::Value(Term::Integer(2)), Operand::X(0)), (Operand::Value(Term::Integer(1)), Operand::X(1))];
+/// let sorted = sort_map_key_pairs(pairs, &AtomTable::new())?;
+/// assert!(matches!(sorted[0], (Operand::Value(Term::Integer(1)), Operand::X(1))));
+/// ```
+///
+/// # Errors
+///
+/// Return an error for a register key among other keys.
+fn sort_map_key_pairs(
+    mut pairs: Vec<(Operand, Operand)>,
+    atoms: &AtomTable,
+) -> Result<Vec<(Operand, Operand)>, BeamError> {
+    if pairs.len() < 2 {
+        return Ok(pairs);
+    }
+    if pairs
+        .iter()
+        .any(|(key, _)| matches!(key, Operand::X(_) | Operand::Y(_)))
+    {
+        return Err(error(
+            "unsupported BEAM get_map_elements: a register key among other keys",
+        ));
+    }
+    pairs.sort_by(|(left, _), (right, _)| match (left, right) {
+        (Operand::Value(left), Operand::Value(right)) => {
+            flatmap_order(left, right, atoms).unwrap_or(Ordering::Equal)
+        }
+        _ => matches!(left, Operand::Value(_)).cmp(&matches!(right, Operand::Value(_))),
+    });
     Ok(pairs)
 }
 

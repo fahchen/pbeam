@@ -15,6 +15,7 @@ const BINARY_KEY_PROBE: &[u8] = include_bytes!("../../fixtures/map/binary_key_pr
 const MAP_SIZE_PROBE: &[u8] = include_bytes!("../../fixtures/map/map_size_probe.beam");
 const TUPLE_KEY_PROBE: &[u8] = include_bytes!("../../fixtures/map/tuple_key_probe.beam");
 const MAP_SHARE_PROBE: &[u8] = include_bytes!("../../fixtures/map/map_share_probe.beam");
+const MAP_ELEMENTS_PROBE: &[u8] = include_bytes!("../../fixtures/map/map_elements_probe.beam");
 
 /// The numbers `N` of the binary keys `<<"kNN">>`, 1 to 33, in the order of a hashmap of these 33
 /// keys under the pinned ERTS.
@@ -229,6 +230,37 @@ fn tests_map_keys_with_has_map_fields_like_erts() {
     assert_eq!(
         erl_reference("io:format(\"~p~n\", [map_probe:fields()])"),
         b"[both,none,none,none,found,missing,missing]\n"
+    );
+}
+
+#[test]
+fn gets_map_elements_into_the_source_register_like_erts() {
+    // `pick/1` gets four keys of the map in `x0` into `x0` to `x3`, and
+    // `same/1` keeps the map in `x0` for its fail path.
+    let program = BeamProgram::load(&[MAP_ELEMENTS_PROBE]).unwrap();
+    let atom = |name: &str| atom(&program, name);
+    let found = |path: &str| Term::tuple(vec![atom("t"), atom(path), atom("one"), atom("nil")]);
+    assert_eq!(
+        program
+            .execute("map_elements_probe", "main", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![
+            found("p"),
+            found("q"),
+            atom("missing"),
+            atom("missing"),
+            atom("missing"),
+            found("p"),
+            atom("missing"),
+            Term::tuple(vec![atom("t"), atom("p"), Term::Integer(4)]),
+            Term::tuple(vec![atom("missing"), Term::Integer(1)]),
+        ])
+    );
+
+    assert_eq!(
+        erl_reference("io:format(\"~w~n\", [map_elements_probe:main()])"),
+        b"[{t,p,one,nil},{t,q,one,nil},missing,missing,missing,{t,p,one,nil},missing,{t,p,4},{missing,1}]\n"
     );
 }
 
