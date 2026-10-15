@@ -497,10 +497,10 @@ fn wakes_a_waiting_process_and_stops_receive_timers_at_cancel_and_exit() {
 
     assert!(scheduler.set_receive_timer(1_000_000_000, &Term::Integer(1), 3));
     scheduler.cancel_receive_timer();
-    assert_eq!(scheduler.timers.wait_time(1_000_000_000), None);
+    assert!(!scheduler.timers.active());
     assert!(scheduler.set_receive_timer(1_000_000_000, &Term::Integer(1), 3));
     scheduler.finish_current(atom("normal"), None);
-    assert_eq!(scheduler.timers.wait_time(1_000_000_000), None);
+    assert!(!scheduler.timers.active());
 }
 
 #[test]
@@ -568,8 +568,9 @@ fn rejects_receive_timeouts_as_erts_set_proc_timer_term() {
     assert!(scheduler.set_receive_timer(end - 1_000_000, &Term::Integer(1), 0));
     assert_eq!(
         scheduler.current_process_mut().receive_timer,
+        // Start number 0 is the time correction check timer.
         ReceiveTimer::Set {
-            key: (9_223_372_036_000, 0),
+            key: (9_223_372_036_000, 1),
             resume: 0
         }
     );

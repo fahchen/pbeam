@@ -2,6 +2,8 @@
 //! conversion of `erlang:monotonic_time/1` and `os:system_time/1`, the
 //! date of a POSIX time, and the POSIX time of a UTC date.
 
+use num_bigint::Sign;
+
 use crate::term::{SMALL_INTEGER_MIN, Term};
 
 /// The native time unit, `ERTS_MONOTONIC_TIME_UNIT`: 1000000000 parts of a
@@ -61,9 +63,9 @@ pub(super) enum TimeValue {
 /// `nano_seconds`, and the integers 1, 1000, 1000000, and 1000000000 give
 /// the value divided by the unit, with the offset in the unit. Because
 /// `value` is not negative and the offset is a multiple of one second, the
-/// result is the floor. `perf_counter` and each other positive integer
-/// trap. Zero, a negative integer, and each other term give
-/// [`TimeValue::Badarg`].
+/// result is the floor. `perf_counter` and each other positive integer,
+/// also a bignum, trap (`erl_time_sup.c:2333-2345`). Zero, a negative
+/// integer, and each other term give [`TimeValue::Badarg`].
 ///
 /// # Examples
 ///
@@ -100,6 +102,7 @@ pub(super) fn time_unit_conversion(value: i64, offset_multiplier: i64, unit: &Te
         }
         Term::Integer(unit @ (1 | 1_000 | 1_000_000 | 1_000_000_000)) => *unit,
         Term::Integer(unit) if *unit > 0 => return TimeValue::Trap(native),
+        Term::BigInt(unit) if unit.sign() == Sign::Plus => return TimeValue::Trap(native),
         _ => return TimeValue::Badarg,
     };
     let divisor = TIME_UNIT / per_second;
