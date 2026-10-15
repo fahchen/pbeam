@@ -261,6 +261,20 @@ fn decodes_build_stacktrace_without_operands() {
 }
 
 #[test]
+fn skips_test_heap_and_init_yregs() {
+    // `{test_heap,3,1}`, `{init_yregs,{list,[{y,0},{y,1}]}}`, and `return`
+    // decode to `Return` only.
+    let mut code = vec![0, 0, 0, 16];
+    code.extend([0; 16]);
+    code.extend([0x10, 0x30, 0x10, 0xAC, 0x17, 0x20, 0x04, 0x14, 0x13, 0x03]);
+    let (instructions, _) = parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[]).unwrap();
+    assert!(matches!(
+        instructions.as_slice(),
+        [Instruction::Return, Instruction::End]
+    ));
+}
+
+#[test]
 fn decodes_raise_with_a_raw_stack_trace_and_a_reason() {
     // `raise_probe:rethrow/1` ends with `{bif,raise,{f,0},[{x,2},{x,1}],{x,0}}`,
     // which `beam_asm` writes as `raise x2 x1`. ERTS also loads other
