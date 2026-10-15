@@ -24,12 +24,12 @@ At most 45 minutes, 40 tool calls, and about 25k output tokens. Truncate every t
    - Terra key press: use the CPU time of `pbeam` from `ps` over the keys, raw. Do not apply an idle correction: one 10 ms tick becomes a large error.
    - Count the host processes that start during each run. Reject and repeat a round where a run starts more than 2000 processes.
    - Record the one-minute load (not the five-minute column), the session start and end time, and a raw file for each run under the session scratch directory.
-5. Remove the worktree.
+5. Save the prototype diff outside the worktree: `git diff > <session scratch>/spike-<n>.patch`. Check that the patch is not empty. Then remove the worktree with `git worktree remove --force`.
 
 ## Return
 
 - `go` or `no-go`, with one sentence of reason.
 - A table: shape, before, after, change, rounds, load range, raw file paths.
-- The prototype diff path (save `git diff` to a scratch file) so that the implementer can start from it.
+- The path of the saved prototype patch, so that the implementer can start from it.
 
 Go only when the targeted shape gains clearly beyond the spread of the rounds and no other shape regresses beyond it. A gain that only a special probe shows is no-go.
