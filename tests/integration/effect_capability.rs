@@ -35,7 +35,7 @@ const INVENTORY: &str = include_str!("../../docs/effect-inventory.md");
 /// Each capability of the column "Capability" of the effect inventory, as
 /// `(entry, kind:operation)`, with the `effect_probe` function that calls
 /// the entry once.
-const PROBES: [(&str, &str, &str); 46] = [
+const PROBES: [(&str, &str, &str); 49] = [
     ("erlang:exit/2", "process:exit_other", "exit_other"),
     ("erlang:link/1", "process:link", "link"),
     ("erlang:monitor/2", "process:monitor", "monitor2"),
@@ -81,6 +81,13 @@ const PROBES: [(&str, &str, &str); 46] = [
     ),
     ("erts_internal:port_close/1", "port:close", "port_close"),
     ("erts_internal:port_info/1", "port:inspect", "port_info"),
+    (
+        "erts_internal:port_control/3",
+        "port:command",
+        "port_control",
+    ),
+    ("erlang:port_set_data/2", "port:command", "port_set_data"),
+    ("erlang:port_get_data/1", "port:inspect", "port_get_data"),
     ("os:getenv/1", "env:read", "getenv"),
     ("os:set_signal/2", "signal:handle", "handle_signal"),
     ("os:set_signal/2", "signal:ignore", "ignore_signal"),
@@ -253,7 +260,7 @@ fn only(names: &[&str]) -> Constraint {
 
 /// Each entry that the column "Capability" of the effect inventory marks
 /// `ambient`. `effect_probe:ambient/0` calls each entry once.
-const AMBIENT: [&str; 29] = [
+const AMBIENT: [&str; 31] = [
     "erlang:cancel_timer/2",
     "erlang:demonitor/1",
     "erlang:demonitor/2",
@@ -274,6 +281,8 @@ const AMBIENT: [&str; 29] = [
     "ets:insert/2",
     "ets:lookup/2",
     "ets:lookup_element/4",
+    "ets:match/2",
+    "ets:match/3",
     "ets:member/2",
     "ets:new/2",
     "ets:whereis/1",

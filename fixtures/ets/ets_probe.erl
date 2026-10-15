@@ -1,6 +1,8 @@
 -module(ets_probe).
 -export([new/0, owner_exit/0, insert/0, lookup/0, lookup_loop/0, insert_loop/0,
-         access/0, main/0, env/0, bag/0, info/0, unsupported/1, own/2]).
+         access/0, main/0, env/0, bag/0, info/0, match/0, match_deep/0,
+         match_write_concurrency/0, unsupported/1,
+         own/2, write/1]).
 
 %% ets:new/2 return values and badarg cases (erl_db.c:2555-2840).
 new() ->
@@ -185,9 +187,153 @@ info() ->
      [catch_error(fun() -> ets:info(Table, Item) end)
       || {Table, Item} <- [{T, bogus}, {T, 1}, {1, type}, {{T}, type}]]].
 
+%% ets:match/2,3 on set, bag, and duplicate_bag tables (erl_db.c:3771-3818;
+%% erl_db_hash.c:1835-1971, 2161-2307, 3177-3320).
+match() ->
+    T = ets:new(ets_probe, []),
+    true = ets:insert(T, [{a, 1}, {b, 2}, {c, 3}, {1, x}, {2, y}, {"s", z},
+                          {{1, 2}, v}, {<<"b">>, f}, {3, three}, {4, 4}]),
+    M = ets:new(ets_probe, []),
+    true = ets:insert(M, [{m, #{a => 1, b => 2}}, {n, #{a => 1}}, {o, [a]}]),
+    [ets:match(T, '$1'),
+     ets:match(T, {'$1', '$2'}),
+     ets:match(T, {'$2', '$1'}),
+     ets:match(T, {'$5', '_'}),
+     ets:match(T, {'$0', '$1'}),
+     ets:match(T, {'$1', '$1'}),
+     ets:match(T, {a, '$1'}),
+     ets:match(T, {a, '_'}),
+     ets:match(T, {<<"b">>, '$1'}),
+     ets:match(T, {missing, '$1'}),
+     ets:match(T, {'_', 3}),
+     ets:match(T, {'$1', ['$2' | '_']}),
+     ets:match(T, foo),
+     ets:match(T, {'_'}),
+     ets:match(T, {'$_', '_'}),
+     ets:match(T, {'$01', '_'}),
+     ets:match(M, {m, #{a => '$1'}}),
+     ets:match(M, {'$1', #{a => 1}}),
+     ets:match(M, {'$1', #{b => '_'}}),
+     ets:match(M, {'_', #{c => '_'}}),
+     ets:match(T, {[$s], '$1'}),
+     ets:match(T, '_'),
+     ets:match(T, {{'$1', 2}, '_'}),
+     ets:match(T, {[$t | '_'], '_'}),
+     match(T, {'_', nomatch}, 1),
+     ets:match(T, {['$1' | '_'], '_'}),
+     [match(T, Pattern, Limit)
+      || {Pattern, Limit} <- [{{'$1', '_'}, 3}, {{'$1', '_'}, 100},
+                              {{missing, '_'}, 2}, {foo, 1}, {{a, '$1'}, 1}]],
+     [catch_error(fun() -> ets:match(Table, Pattern) end)
+      || {Table, Pattern} <- [{T, #{'$1' => a}}, {T, {'_', #{'_' => a}}},
+                              {ets_probe_missing, '_'}, {1, '_'}]],
+     [catch_error(fun() -> ets:match(Table, '_', Limit) end)
+      || {Table, Limit} <- [{T, 0}, {T, -1}, {T, a}, {T, id(1 bsl 60)},
+                            {ets_probe_missing, 1}]],
+     catch_error(fun() -> ets:match(T, #{'$1' => a}, 1) end),
+     match_float(),
+     [match_bag(Type) || Type <- [bag, duplicate_bag]],
+     match_large(),
+     match_resumed(),
+     match_private(),
+     match_deleted()].
+
+match(T, Pattern, Limit) ->
+    case ets:match(T, Pattern, Limit) of
+        {Matches, {Table, Slot, Chunk, Program, Rest, Size}} ->
+            {Matches, Table =:= T, Slot, Chunk, is_reference(Program), Rest, Size};
+        Result -> Result
+    end.
+
+%% Floats compare exactly: 1 and 1.0, and 0.0 and -0.0, are different
+%% (erl_db_util.c:4160-4165).
+match_float() ->
+    T = ets:new(ets_probe, []),
+    true = ets:insert(T, [{1, 1.0}, {1.0, 1}, {2.0, 2.0}, {-0.0, z}, {0.0, y}]),
+    [ets:match(T, {'$1', '$1'}), ets:match(T, {1.0, '$1'}), ets:match(T, {'$1', 1}),
+     ets:match(T, {-0.0, '$1'}), ets:match(T, {'$1', 1.0})].
+
+match_bag(Type) ->
+    T = ets:new(ets_probe, [Type]),
+    true = ets:insert(T, [{k, 1}, {k, 2}, {j, 1}, {k, 1, x}, {j, 2}, {k, 1}]),
+    [ets:match(T, '$1'),
+     ets:match(T, {k, '$1'}),
+     ets:match(T, {'$1', 1}),
+     ets:match(T, {k, '_', '$1'}),
+     match(T, {k, '$1'}, 1),
+     match(T, '$1', 2)].
+
+%% A match of more than 1000 objects traps, and the result keeps the order
+%% of the buckets (erl_db_hash.c:1938-1950, 2264-2307).
+match_large() ->
+    T = ets:new(ets_probe, [public]),
+    true = ets:insert(T, [{I, I * 2} || I <- seq(5000)]),
+    true = ets:delete(T, 7),
+    All = ets:match(T, {'$1', '$2'}),
+    {Chunk, _} = ets:match(T, {'$1', '_'}, 2000),
+    [length(All), take(5, All), checksum(All, 0), length(Chunk), checksum(Chunk, 0)].
+
+%% After a trap, the rest of ets:match/3 is in reverse order
+%% (erl_db_hash.c:2380-2388).
+match_resumed() ->
+    T = ets:new(ets_probe, [duplicate_bag]),
+    true = ets:insert(T, [{K, V} || K <- seq(500), V <- seq(10)]),
+    {Matches, {_, Slot, Chunk, _, Rest, Size}} = ets:match(T, {'$1', '$2'}, 1001),
+    [length(Matches), checksum(Matches, 0), Slot, Chunk, Rest, Size].
+
+%% A pattern 1000000 tuples deep matches an object of the same depth, as
+%% the work stack of db_match_compile and the match program let it
+%% (erl_db_util.c:1700-2100).
+match_deep() ->
+    T = ets:new(ets_probe, []),
+    true = ets:insert(T, {k, nest(1000000, x)}),
+    ets:match(T, {k, nest(1000000, '$1')}).
+
+nest(0, Term) -> Term;
+nest(N, Term) -> nest(N - 1, {Term}).
+
+%% With one scheduler, a table has no fine locks, so write_concurrency
+%% does not change the traversal order (erl_db.c:2656-2657;
+%% erl_db_util.h:388-389; erl_db_hash.c:1023-1030, 539-554).
+match_write_concurrency() ->
+    T = ets:new(ets_probe, [set, {write_concurrency, true}]),
+    true = ets:insert(T, [{I} || I <- seq(300)]),
+    All = ets:match(T, {'$1'}),
+    [length(All), take(6, All), checksum(All, 0)].
+
+take(0, _) -> [];
+take(N, [X | Xs]) -> [X | take(N - 1, Xs)].
+
+%% An order-sensitive checksum of the keys of a match result.
+checksum([], Sum) -> Sum;
+checksum([[Key | _] | Rest], Sum) -> checksum(Rest, (Sum * 31 + Key) rem 1000000007).
+
+%% The owner exit deletes the table while the match traps, and the next
+%% turn raises badarg (erl_db.c:3883-3897).
+match_deleted() ->
+    Owner = start([public]),
+    true = ets:insert(tid(Owner), [{I} || I <- seq(50000)]),
+    element(1, Owner) ! stop,
+    catch_error(fun() -> ets:match(tid(Owner), '$1') end).
+
+match_private() ->
+    Owner = start([private]),
+    Result = catch_error(fun() -> ets:match(tid(Owner), '_') end),
+    stopped = stop(Owner),
+    Result.
+
 %% Calls that ERTS runs and PBeam does not support yet.
 unsupported(Case) ->
     case Case of
+        match_1 ->
+            T = ets:new(ets_probe, []),
+            true = ets:insert(T, [{a}, {b}]),
+            ets:match(element(2, ets:match(T, '$1', 1)));
+        match_changed ->
+            T = ets:new(ets_probe, [public]),
+            true = ets:insert(T, [{I} || I <- seq(5000)]),
+            spawn(?MODULE, write, [T]) ! go,
+            ets:match(T, '$1');
         info_size -> ets:info(ets:new(ets_probe, []), size);
         info_binary -> ets:info(ets:new(ets_probe, []), binary);
         info_reference -> ets:info(make_ref(), type);
@@ -199,6 +345,12 @@ unsupported(Case) ->
             T = ets:new(ets_probe, []),
             true = ets:insert(T, {k, v}),
             ets:lookup_element(T, k, 1 bsl 32, d)
+    end.
+
+%% Insert one object into the table T when the message go comes.
+write(T) ->
+    receive
+        go -> ets:insert(T, {x})
     end.
 
 start(Options) ->

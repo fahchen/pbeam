@@ -12,7 +12,14 @@ const ETS_PROBE: &[u8] = include_bytes!("../../fixtures/ets/ets_probe.beam");
 /// Run `ets_probe:Function()` under the pinned ERTS and return its `~w`
 /// output.
 fn reference(function: &str) -> Vec<u8> {
+    reference_with(&[], function)
+}
+
+/// Run `ets_probe:Function()` under the pinned ERTS with the emulator
+/// arguments `arguments` and return its `~w` output.
+fn reference_with(arguments: &[&str], function: &str) -> Vec<u8> {
     let output = Command::new("erl")
+        .args(arguments)
         .args([
             "-noshell",
             "-pa",
@@ -320,6 +327,93 @@ fn keeps_the_objects_of_one_key_in_bag_tables_as_pinned_erts() {
 }
 
 #[test]
+fn matches_patterns_in_set_and_bag_tables_as_pinned_erts() {
+    // `ets_probe:match/0` runs ets:match/2,3 on a set, a bag, and a
+    // duplicate_bag table (erl_db.c:3771-3818). The matches come in the
+    // reverse order of the traversal: the buckets from 0 up, and each
+    // bucket chain in order (erl_db_hash.c:1835-1971, 2174-2185). '$$'
+    // gives the variables in the order of their numbers
+    // (erl_db_util.c:4664-4684). A bound key reads only its bucket
+    // (erl_db_hash.c:3247-3290). ets:match/3 splits the matches over the
+    // limit into the rest of the continuation (erl_db_hash.c:2187-2262). A
+    // map key that is a variable or '_', a bad table, and a bad limit raise
+    // badarg. The match of 4999 objects traps, and its result is the same.
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let result = program.execute("ets_probe", "match", &[]).unwrap();
+    let expected = "[[[{{1,2},v}],[{4,4}],[{3,three}],[{[115],z}],[{2,y}],[{<<98>>,f}],[{1,x}],[{c,3}],[{b,2}],[{a,1}]],[[{1,2},v],[4,4],[3,three],[[115],z],[2,y],[<<98>>,f],[1,x],[c,3],[b,2],[a,1]],[[v,{1,2}],[4,4],[three,3],[z,[115]],[y,2],[f,<<98>>],[x,1],[3,c],[2,b],[1,a]],[[{1,2}],[4],[3],[[115]],[2],[<<98>>],[1],[c],[b],[a]],[[{1,2},v],[4,4],[3,three],[[115],z],[2,y],[<<98>>,f],[1,x],[c,3],[b,2],[a,1]],[[4]],[[1]],[[]],[[f]],[],[[]],[],[],[],[],[],[[1]],[[n],[m]],[[m]],[],[[z]],[[],[],[],[],[],[],[],[],[],[]],[[1]],[],'$end_of_table',[[115]],[{[[c],[b],[a]],true,50,3,true,[],0},{[[{1,2}],[4],[3],[[115]],[2],[<<98>>],[1],[c],[b],[a]],'$end_of_table'},'$end_of_table','$end_of_table',{[[1]],'$end_of_table'}],[{error,badarg},{error,badarg},{error,badarg},{error,badarg}],[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}],{error,badarg},[[[2.0]],[[1]],[[1.0]],[[z]],[[1]]],[[[[{j,1}],[{j,2}],[{k,1}],[{k,2}],[{k,1,x}]],[[1],[2]],[[j],[k]],[[x]],{[[2]],true,-1,1,true,[[1]],1},{[[{k,2}],[{k,1,x}]],true,54,2,true,[[{j,1}],[{j,2}],[{k,1}]],3}],[[[{j,1}],[{j,2}],[{k,1}],[{k,2}],[{k,1,x}],[{k,1}]],[[1],[2],[1]],[[j],[k],[k]],[[x]],{[[1]],true,-1,1,true,[[1],[2]],2},{[[{k,1,x}],[{k,1}]],true,54,2,true,[[{j,1}],[{j,2}],[{k,1}],[{k,2}]],4}]],[4999,[[4085,8170],[127,254],[4820,9640],[3793,7586],[82,164]],687245333,2000,506731475],[1001,3950707,1303,1001,[[367,2],[367,3],[367,4],[367,5],[367,6],[367,7],[367,8],[367,9],[367,10]],9],{error,badarg},{error,badarg}]";
+    assert_eq!(text(&result.term, program.atoms()), expected);
+    assert_eq!(
+        String::from_utf8(reference("match")).unwrap(),
+        format!("{expected}\n")
+    );
+}
+
+#[test]
+fn matches_a_deep_pattern_as_pinned_erts() {
+    // `ets_probe:match_deep/0` matches a pattern 1000000 tuples deep. The
+    // compile and the match use a work stack, as db_match_compile does
+    // (erl_db_util.c:1700-2100), so the Rust stack does not overflow.
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let result = program.execute("ets_probe", "match_deep", &[]).unwrap();
+    assert_eq!(text(&result.term, program.atoms()), "[[x]]");
+    assert_eq!(reference("match_deep"), b"[[x]]\n");
+}
+
+#[test]
+fn ignores_write_concurrency_in_a_match_as_pinned_erts_with_one_scheduler() {
+    // PBeam has one scheduler. ERTS with one scheduler makes no table with
+    // fine locks (erl_db.c:2656-2657; erl_db_util.h:388-389), so a
+    // traversal steps one bucket at a time (erl_db_hash.c:1023-1030,
+    // 539-554) also with {write_concurrency, true}.
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let result = program
+        .execute("ets_probe", "match_write_concurrency", &[])
+        .unwrap();
+    let expected = "[300,[[141],[194],[257],[87],[278],[137]],870028092]";
+    assert_eq!(text(&result.term, program.atoms()), expected);
+    assert_eq!(
+        String::from_utf8(reference_with(&["+S", "1"], "match_write_concurrency")).unwrap(),
+        format!("{expected}\n")
+    );
+}
+
+/// Return the `~w` text of `term`, for the terms of `ets_probe:match/0`.
+fn text(term: &Term, atoms: &pbeam_runtime::AtomTable) -> String {
+    let join = |terms: &[Term]| {
+        terms
+            .iter()
+            .map(|term| text(term, atoms))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    match term {
+        Term::Atom(atom)
+            if atoms
+                .name_of(atom)
+                .starts_with(|c: char| c.is_ascii_lowercase()) =>
+        {
+            atoms.name_of(atom).to_owned()
+        }
+        Term::Atom(atom) => format!("'{}'", atoms.name_of(atom)),
+        Term::Integer(value) => value.to_string(),
+        Term::Float(value) => format!("{value:?}"),
+        Term::Binary(bytes) => format!(
+            "<<{}>>",
+            bytes
+                .iter()
+                .map(u8::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        _ if let Some(terms) = term.proper_list() => {
+            format!("[{}]", join(&terms.cloned().collect::<Vec<_>>()))
+        }
+        Term::Tuple(terms) => format!("{{{}}}", join(terms)),
+        other => panic!("unexpected term {other:?}"),
+    }
+}
+
+#[test]
 fn gives_the_table_type_as_pinned_erts() {
     // `ets_probe:info/0` reads the item type of a set and a bag table
     // (erl_db.c:5457-5469). A free name gives undefined before the item
@@ -369,6 +463,10 @@ fn rejects_tables_that_pbeam_cannot_model() {
         ("heir_data", "new/2 heir ProcessId("),
         ("keypos", "insert/2 in a table with key position 0"),
         ("index", "lookup_element/4 index 4294967296 with position 0"),
+        (
+            "match_changed",
+            "match/2,3 on a table that changed while the match trapped",
+        ),
     ] {
         let message = format!("unsupported ets:{detail}");
         let case = Term::Atom(program.atom(case).unwrap());
@@ -380,4 +478,11 @@ fn rejects_tables_that_pbeam_cannot_model() {
             "expected {message}, got {error}"
         );
     }
+    // ets:match/1 reads the continuation of ets:match/3, and PBeam does not
+    // run it yet.
+    let case = Term::Atom(program.atom("match_1").unwrap());
+    let error = program
+        .execute("ets_probe", "unsupported", &[program.host_term(case)])
+        .unwrap_err();
+    assert_eq!(error.to_string(), "unresolved external MFA ets:match/1");
 }

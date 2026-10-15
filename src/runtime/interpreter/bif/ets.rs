@@ -2,6 +2,7 @@
 
 use super::BifResult::Value;
 use super::*;
+use crate::runtime::ets::pattern::Pattern;
 use crate::runtime::ets::{Access, Operation, Table, TableType};
 use crate::term::Reference;
 
@@ -920,4 +921,330 @@ pub(super) fn info(
 fn is_lock_count(locks: &[Term]) -> bool {
     matches!(locks, [Term::Atom(tag), Term::Integer(count)]
         if tag.is_static("debug_hash_fixed_number_of_locks") && LOCKS.contains(count))
+}
+
+/// The most objects that one turn of a match reads before it can trap
+/// (`MAX_SELECT_CHUNK_ITERATIONS`, `erl_db_hash.c:2161`).
+const MATCH_ITERATIONS: i64 = 1000;
+
+/// Run `ets:match(Table, Pattern)` or, with `Some(Limit)`,
+/// `ets:match(Table, Pattern, Limit)`, as `ets_match_2` and `ets_match_3`
+/// (`erl_db.c:3771-3818`) do with the match specification
+/// `[{Pattern, [], ['$$']}]`. The checks keep the ERTS order:
+///
+/// 1. A table that does not exist or that the caller cannot read raises
+///    `badarg` (`erl_db.c:769-912`).
+/// 2. A limit that is not a small integer above 0 raises `badarg`
+///    (`erl_db.c:3803-3807`).
+/// 3. A pattern that does not compile raises `badarg`
+///    (`erl_db_hash.c:3296-3310`): see [`Pattern::compile`].
+///
+/// Then [`match_turn`] reads the table.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = match_objects(&mut context, &table, &test_atom("$1"), None)?;
+/// assert!(matches!(result, BifResult::Value(_)));
+/// assert!(matches!(match_objects(&mut context, &table, &test_atom("_"), Some(&Term::Integer(0)))?, BifResult::Raise { .. }));
+/// ```
+///
+/// # Errors
+///
+/// None in the first turn. See [`match_turn`].
+pub(super) fn match_objects(
+    context: &mut BifContext<'_>,
+    table: &Term,
+    pattern: &Term,
+    limit: Option<&Term>,
+) -> Result<BifResult, BeamError> {
+    let caller = context.scheduler.current_process_mut().id;
+    let atoms = &context.scheduler.atoms;
+    let Some(id) = context.scheduler.ets.find(atoms, table).map(|(id, _)| id) else {
+        return Ok(BifResult::badarg());
+    };
+    let Some(table) =
+        context
+            .scheduler
+            .ets
+            .table(atoms, &Term::Reference(id), caller, Operation::Read)
+    else {
+        return Ok(BifResult::badarg());
+    };
+    let chunk = match limit.map(Term::small_integer) {
+        None => 0,
+        Some(Some(chunk)) if chunk > 0 => chunk as usize,
+        Some(_) => return Ok(BifResult::badarg()),
+    };
+    let Some(compiled) = Pattern::compile(atoms, pattern) else {
+        return Ok(BifResult::badarg());
+    };
+    // A key position below 1 compares as a large unsigned number with the
+    // arity of the pattern (`db_getkey`, `erl_db_util.c:3940-3960`).
+    let keypos = usize::try_from(table.keypos())
+        .ok()
+        .filter(|&keypos| keypos > 0)
+        .unwrap_or(usize::MAX);
+    let nothing = if compiled.matches_nothing(keypos) {
+        true
+    } else if let Some(key) = compiled.bound_key(keypos) {
+        match table.key_bucket(atoms, key) {
+            Some(bucket) => {
+                let mut state = MatchState::new(chunk, table.writes());
+                let mut iterations = MATCH_ITERATIONS;
+                state.read(&compiled, table.chain(bucket), &mut iterations);
+                return match_end(context, id, state, -1, iterations);
+            }
+            None => true,
+        }
+    } else {
+        false
+    };
+    if nothing {
+        return Ok(Value(if chunk > 0 {
+            Term::static_atom("$end_of_table")
+        } else {
+            Term::nil()
+        }));
+    }
+    let state = MatchState::new(chunk, table.writes());
+    match_turn(context, id, pattern, &compiled, 0, state)
+}
+
+/// Run the trap export `ets:select_trap/7` of a match: the table reference,
+/// the pattern, the next bucket, the limit or 0, the matches so far, the
+/// number of matches, and the change count of the table. ERTS traps to
+/// `ets:select_trap/1` with a tuple that holds a magic reference to the
+/// compiled pattern (`erl_db.c:3883-3930`; `erl_db_hash.c:2264-2307`), and
+/// PBeam compiles the pattern again in each turn. The compile reads only
+/// the pattern, so its work does not grow with the table.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = match_trap(&mut context, id, &pattern, 300, MatchState::new(0, 1000))?;
+/// assert!(matches!(result, BifResult::Value(_) | BifResult::TrapBif { .. }));
+/// ```
+///
+/// # Errors
+///
+/// See [`match_turn`].
+pub(super) fn match_trap(
+    context: &mut BifContext<'_>,
+    id: Reference,
+    pattern: &Term,
+    bucket: usize,
+    state: MatchState,
+) -> Result<BifResult, BeamError> {
+    let caller = context.scheduler.current_process_mut().id;
+    let atoms = &context.scheduler.atoms;
+    let Some(table) =
+        context
+            .scheduler
+            .ets
+            .table(atoms, &Term::Reference(id), caller, Operation::Read)
+    else {
+        return Ok(BifResult::badarg());
+    };
+    if table.writes() != state.writes {
+        // ponytail: ERTS fixes the table; see "ETS tables" in docs/erts-differences.md.
+        return Err(error(
+            "unsupported ets:match/2,3 on a table that changed while the match trapped",
+        ));
+    }
+    let compiled = Pattern::compile(atoms, pattern).expect("the first turn compiled the pattern");
+    match_turn(context, id, pattern, &compiled, bucket, state)
+}
+
+/// The state of a match across its turns.
+pub(super) struct MatchState {
+    /// The limit of `ets:match/3`, or 0 for `ets:match/2`.
+    pub(super) chunk: usize,
+    /// The list of the matches so far, the last match first, as
+    /// `select_chunk_on_match_res` (`erl_db_hash.c:2174-2185`) puts each
+    /// match before the earlier ones.
+    pub(super) matches: Term,
+    /// The number of matches so far.
+    pub(super) got: usize,
+    /// The change count of the table in the first turn.
+    pub(super) writes: u64,
+    /// Whether a trap came before this turn. Then the rest of `ets:match/3`
+    /// is built from the front of the matches, so it is in reverse order
+    /// (`erl_db_hash.c:2380-2388`).
+    pub(super) resumed: bool,
+}
+
+impl MatchState {
+    /// Return the state of a match with no match yet.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(MatchState::new(0, 0).got, 0);
+    /// ```
+    fn new(chunk: usize, writes: u64) -> MatchState {
+        MatchState {
+            chunk,
+            matches: Term::nil(),
+            got: 0,
+            writes,
+            resumed: false,
+        }
+    }
+
+    /// Match each object of `objects` with `pattern` and use one iteration
+    /// for each object (`erl_db_hash.c:1900-1916`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// state.read(&pattern, table.chain(0), &mut iterations);
+    /// ```
+    fn read<'a>(
+        &mut self,
+        pattern: &Pattern,
+        objects: impl Iterator<Item = &'a [Term]>,
+        iterations: &mut i64,
+    ) {
+        for object in objects {
+            if let Some(found) = pattern.run(object) {
+                self.matches = Term::cons(found, std::mem::replace(&mut self.matches, Term::nil()));
+                self.got += 1;
+            }
+            *iterations -= 1;
+        }
+    }
+}
+
+/// Read the buckets of the table `id` from `bucket` up, as `match_traverse`
+/// and `match_traverse_continue` (`erl_db_hash.c:1835-2071`) do. An empty
+/// bucket uses no iteration. After each bucket the turn ends when it was
+/// the last bucket, or when the matches reach the limit of
+/// `ets:match/3`. Else, when the turn used its 1000 iterations, the call
+/// uses all reductions and traps to `ets:select_trap/7` with the next
+/// bucket ([`match_trap`]). A bucket is never split across turns, so a
+/// trap keeps the position and no turn reads a bucket again.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = match_turn(&mut context, id, &pattern, &compiled, 0, MatchState::new(0, 0))?;
+/// assert!(matches!(result, BifResult::Value(_)));
+/// ```
+///
+/// # Errors
+///
+/// None. The result type is the one of the BIF bodies.
+fn match_turn(
+    context: &mut BifContext<'_>,
+    id: Reference,
+    pattern: &Term,
+    compiled: &Pattern,
+    mut bucket: usize,
+    mut state: MatchState,
+) -> Result<BifResult, BeamError> {
+    let table = context
+        .scheduler
+        .ets
+        .find(&context.scheduler.atoms, &Term::Reference(id));
+    let (_, table) = table.expect("the caller found the table");
+    let mut iterations = MATCH_ITERATIONS;
+    loop {
+        state.read(compiled, table.chain(bucket), &mut iterations);
+        bucket += 1;
+        if bucket == table.bucket_count() {
+            return match_end(context, id, state, -1, iterations);
+        }
+        if state.chunk > 0 && state.got >= state.chunk {
+            return match_end(context, id, state, bucket as i64, iterations);
+        }
+        if iterations <= 0 {
+            context
+                .scheduler
+                .current_process_mut()
+                .bump_all_reductions();
+            return Ok(BifResult::TrapBif {
+                module: "ets",
+                function: "select_trap",
+                arguments: vec![
+                    Term::Reference(id),
+                    pattern.clone(),
+                    Term::Integer(bucket as i64),
+                    Term::Integer(state.chunk as i64),
+                    state.matches,
+                    Term::Integer(state.got as i64),
+                    Term::Integer(state.writes as i64),
+                ],
+            });
+        }
+    }
+}
+
+/// End a match whose next bucket is `next`, or -1 after the last bucket,
+/// with `iterations` left, as `select_chunk_on_loop_ended` and
+/// `select_chunk_continue_on_loop_ended` (`erl_db_hash.c:2187-2262`,
+/// `2364-2409`) do. The call uses one reduction for each iteration. Then:
+///
+/// - `ets:match/2` returns the matches.
+/// - `ets:match/3` keeps the first matches of the list over the limit as
+///   the rest. It returns the other matches and the continuation
+///   `{Table, Next, Limit, Program, Rest, RestSize}` when there is a rest
+///   or a next bucket, else `{Matches, '$end_of_table'}`, or
+///   `'$end_of_table'` with no match. ERTS puts a magic reference to the
+///   compiled pattern in `Program`, and PBeam puts a new reference there.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = match_end(&mut context, id, MatchState::new(1, 0), -1, 1000)?;
+/// assert!(matches!(result, BifResult::Value(value) if value == Term::static_atom("$end_of_table")));
+/// ```
+///
+/// # Errors
+///
+/// Return a runtime error when the references of the run are used up.
+fn match_end(
+    context: &mut BifContext<'_>,
+    id: Reference,
+    state: MatchState,
+    next: i64,
+    iterations: i64,
+) -> Result<BifResult, BeamError> {
+    let reductions = i32::try_from(MATCH_ITERATIONS - iterations).unwrap_or(i32::MAX);
+    context
+        .scheduler
+        .current_process_mut()
+        .bump_reductions(reductions);
+    if state.chunk == 0 {
+        return Ok(Value(state.matches));
+    }
+    let mut matches = state.matches;
+    let mut rest = Vec::new();
+    for _ in state.chunk..state.got {
+        let (head, tail) = matches.cons_cell().expect("the list holds each match");
+        rest.push(head.clone());
+        matches = tail.clone();
+    }
+    if state.resumed {
+        rest.reverse();
+    }
+    if !rest.is_empty() || next >= 0 {
+        let program = context.scheduler.make_ref()?;
+        let size = rest.len() as i64;
+        let continuation = Term::tuple(vec![
+            Term::Reference(id),
+            Term::Integer(next),
+            Term::Integer(state.chunk as i64),
+            Term::Reference(program),
+            Term::list_from(rest),
+            Term::Integer(size),
+        ]);
+        return Ok(Value(Term::tuple(vec![matches, continuation])));
+    }
+    let end = Term::static_atom("$end_of_table");
+    Ok(Value(if matches.is_nil() {
+        end
+    } else {
+        Term::tuple(vec![matches, end])
+    }))
 }
