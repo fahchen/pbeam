@@ -54,12 +54,11 @@ fn runs_the_is_float_test_as_pinned_erts() {
 }
 
 #[test]
-fn loads_the_float_register_instructions_and_stops_when_one_runs() {
+fn runs_the_float_register_instructions_of_a_division() {
     // `float_test_probe:half/1` divides with `fconv`, `fmove`, and `fdiv`,
     // as `string` and `erl_scan` do. ERTS loads these instructions with
     // their float registers (emu ops.tab:1329-1343; JIT
-    // jit/arm/ops.tab:1118-1130). PBeam has no float term, so the run stops
-    // at the first one, `fconv` (opcode 97).
+    // jit/arm/ops.tab:1118-1130), and `half(8)` is `4.0`.
     let erlang = pinned_beam("erlang");
     let lists = pinned_beam("lists");
     let string = pinned_beam("string");
@@ -73,9 +72,9 @@ fn loads_the_float_register_instructions_and_stops_when_one_runs() {
                 "half",
                 &[program.host_term(Term::Integer(8))],
             )
-            .unwrap_err()
-            .to_string(),
-        "unsupported BEAM opcode 97"
+            .unwrap()
+            .term,
+        Term::Float(4.0)
     );
     let reference = Command::new("erl")
         .args([
@@ -139,14 +138,11 @@ fn raises_badarith_when_fconv_gets_a_term_that_is_not_a_number() {
 }
 
 #[test]
-fn stops_at_a_float_register_instruction_before_the_fconv_that_raises_badarith() {
+fn raises_badarith_at_the_fconv_after_a_float_register_instruction() {
     // ERTS runs `fconv` of the integer 8 and `fmove` of the float literal
     // 2.0 to a float register, then raises `error:badarith` at the `fconv`
     // of `a` (emu float_instrs.tab:38-52; JIT `emit_fconv_shared` in
-    // jit/arm/instr_float.cpp:96-135). PBeam has no float register, so the
-    // run stops at the first instruction: `fconv` (opcode 97) of
-    // `divide(8, a)` and `fmove` (opcode 96) of `two_over(a)`. `divide(a, 8)`
-    // raises at the first `fconv`, so it gives `badarith` as in ERTS.
+    // jit/arm/instr_float.cpp:96-135).
     let erlang = pinned_beam("erlang");
     let program = BeamProgram::load(&[&erlang, FLOAT_TEST_PROBE]).unwrap();
     let a = Term::Atom(program.atom("a").unwrap());
@@ -174,16 +170,16 @@ fn stops_at_a_float_register_instruction_before_the_fconv_that_raises_badarith()
                     program.host_term(a.clone()),
                 ],
             )
-            .unwrap_err()
-            .to_string(),
-        "unsupported BEAM opcode 97"
+            .unwrap()
+            .term,
+        Term::Atom(program.atom("badarith").unwrap())
     );
     assert_eq!(
         program
             .execute("float_test_probe", "two_over", &[program.host_term(a)])
-            .unwrap_err()
-            .to_string(),
-        "unsupported BEAM opcode 96"
+            .unwrap()
+            .term,
+        Term::Atom(program.atom("badarith").unwrap())
     );
     let reference = Command::new("erl")
         .args([

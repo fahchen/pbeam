@@ -7,9 +7,11 @@ use crate::runtime::scheduler::CONTEXT_REDS;
 /// Run `lists:keyfind/3`: return the first tuple in `list` whose element at
 /// the 1-based `position` equals `key`, or `false`, as ERTS `keyfind` does
 /// (`erl_bif_lists.c:1294-1381`). Elements that are not tuples, and tuples
-/// with fewer than `position` elements, do not match. ERTS compares numbers
-/// with `==`; PBeam has only integers, so exact equality gives the same
-/// result. An improper `list` gives a tuple that comes before its tail, and
+/// with fewer than `position` elements, do not match. ERTS compares a small
+/// integer key with exact equality, or with a float element as C compares
+/// the key cast to a float, so `9007199254740993` finds
+/// `9007199254740992.0`. Each other key that is not an immediate compares
+/// with `==` (`erl_bif_lists.c:1311-1375`). An improper `list` gives a tuple that comes before its tail, and
 /// raises `badarg` when no tuple matches. A `position` that is not a small
 /// integer or is below 1, and a `list` that is not a list, raise `badarg`.
 ///
@@ -66,6 +68,28 @@ pub(super) fn keymember(
     }
 }
 
+/// Return true when a key of `lists:keyfind/3` matches a tuple element, as
+/// ERTS `keyfind` compares them (`erl_bif_lists.c:1311-1375`): a small
+/// integer key matches an equal integer or a float equal to the key cast to
+/// a float, and each other key matches an element that is equal in
+/// arithmetic comparison.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(key_equal(&Term::Integer(1), &Term::Float(1.0)));
+/// assert!(key_equal(&Term::Integer(9007199254740993), &Term::Float(9007199254740992.0)));
+/// assert!(key_equal(&Term::Float(1.0), &Term::Integer(1)));
+/// assert!(!key_equal(&Term::Integer(1), &Term::Integer(2)));
+/// ```
+fn key_equal(key: &Term, element: &Term) -> bool {
+    match (key.small_integer(), element) {
+        (Some(key), Term::Float(element)) => key as f64 == *element,
+        (Some(_), _) => key == element,
+        (None, _) => key.arith_eq(element),
+    }
+}
+
 /// Search `list` for a tuple with `key` at `position`, as ERTS `keyfind`
 /// does for the export `lists:function/3` that it traps to
 /// (`erl_bif_lists.c:1301-1381`).
@@ -92,7 +116,7 @@ fn key_search(
     };
     let max_iter = 10 * CONTEXT_REDS as usize;
     let found = elements.by_ref().take(max_iter).find(
-        |element| matches!(element, Term::Tuple(elements) if elements.get(index) == Some(key)),
+        |element| matches!(element, Term::Tuple(elements) if elements.get(index).is_some_and(|element| key_equal(key, element))),
     );
     let rest = elements.rest();
     match found {

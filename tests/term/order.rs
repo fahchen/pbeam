@@ -393,3 +393,30 @@ fn orders_ports_by_number_between_funs_and_pids() {
         Less
     );
 }
+
+#[test]
+fn orders_an_integer_before_a_float_in_exact_comparison() {
+    // `exact_fall_through` orders the number types (`utils.c:2457-2459`),
+    // and `erts_float_exact_sortable` orders -0.0 before 0.0.
+    let atoms = test_atom_table();
+    assert_eq!(
+        Term::Float(1.0)
+            .compare_exact(&Term::Integer(2), &atoms)
+            .unwrap(),
+        Greater
+    );
+    assert_eq!(
+        Term::Integer(2)
+            .compare_exact(&Term::Float(1.0), &atoms)
+            .unwrap(),
+        Less
+    );
+    assert_eq!(
+        Term::Float(-0.0)
+            .compare_exact(&Term::Float(0.0), &atoms)
+            .unwrap(),
+        Less
+    );
+    assert_eq!(Term::Float(1.0).float(), Some(1.0));
+    assert_eq!(Term::Integer(1).float(), None);
+}
