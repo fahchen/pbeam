@@ -10,7 +10,11 @@ use std::{
 
 use super::time::MONOTONIC_BEGIN;
 use crate::runtime::host::clock;
+
+mod correction;
+
 use crate::term::{Atom, LiveBytes, ProcessId, Reference, Term};
+use correction::{Correction, HOST_CHECK};
 
 /// Native time units in one clock tick of 1 ms, as
 /// `ERTS_MONOTONIC_TO_CLKTCKS` divides with `SYS_CLOCK_RESOLUTION 1`
@@ -21,29 +25,6 @@ const UNITS_PER_TICK: i64 = 1_000_000;
 /// largest 64-bit multiple of one second (`erl_time.h:237-239`,
 /// `sys/unix/erl_unix_sys.h:172-173`), in ticks.
 const MONOTONIC_END_TICKS: i64 = i64::MAX / MONOTONIC_BEGIN * MONOTONIC_BEGIN / UNITS_PER_TICK;
-
-/// The ERTS `small_diff` of the time offset check in nanoseconds: one tenth
-/// of `large_diff`, which is `50 * monotonic_time_unit / resolution` and at
-/// least 500 microseconds (`erl_time_sup.c:1156-1167`). `resolution` is the
-/// lower of the OS system and OS monotonic time resolutions. Each host
-/// resolution of 100000 Hz or more gives the 500-microsecond floor (measured
-/// on the pinned host: 1000000 Hz for `os_system_time_source`).
-const SMALL_DIFF: i64 = 50_000;
-
-/// The internal monotonic time of the first time offset check:
-/// `ERTS_SHORT_TIME_CORRECTION_CHECK / 10` after the start
-/// (`erl_time_sup.c:318`, `923`).
-const FIRST_CHECK: i64 = MONOTONIC_BEGIN + 1_500_000_000;
-
-/// The interval to the next time offset check after a check that changes
-/// the offset: `ERTS_SHORT_TIME_CORRECTION_CHECK`, 15 seconds
-/// (`erl_time_sup.c:318`, `718-722`).
-const SHORT_CHECK: i64 = 15_000_000_000;
-
-/// The interval to the next time offset check after a check with no
-/// change: `ERTS_LONG_TIME_CORRECTION_CHECK`, 60 seconds
-/// (`erl_time_sup.c:317`, `702`, `824`).
-const LONG_CHECK: i64 = 60_000_000_000;
 
 /// The position of a timer in the queue: its end tick, then its start
 /// number.
@@ -92,13 +73,14 @@ pub(super) enum Receiver {
 pub(super) struct Timers {
     /// The run start, at the internal monotonic time `MONOTONIC_BEGIN`.
     start: Instant,
-    /// The time offset of the run: the OS system time at the run start
-    /// minus `MONOTONIC_BEGIN`, as ERTS sets it at the emulator start
-    /// (`erl_time_sup.c:1244-1249`). It follows a step of the OS system
-    /// time, as in the `multi_time_warp` mode (`Timers::correct_time_offset`).
-    time_offset: i64,
-    /// The internal monotonic time of the next time offset check.
-    next_check: i64,
+    /// The time offset and the time correction of the run, as ERTS sets
+    /// them at the emulator start (`erl_time_sup.c:1240-1270`).
+    correction: Correction,
+    /// The key of the internal timer of the time correction check, as the
+    /// ERTS `parmon.timer` in the timer wheel of the scheduler
+    /// (`erl_time_sup.c:772-776`, `827-831`, `944-950`). It is not in
+    /// `queue`, so it does not keep a run alive.
+    check: TimerKey,
     /// Active timers by key.
     queue: BTreeMap<TimerKey, Timer>,
     /// The key of each active BIF timer by its reference, as the ERTS
@@ -118,28 +100,22 @@ impl Timers {
     /// assert!(timers.now() >= 1_000_000_000);
     /// ```
     pub(super) fn new() -> Self {
+        let start = Instant::now();
+        let correction = Correction::new(HOST_CHECK, clock::system_time());
+        // `late_init_time_correction` sets the first check timer at the
+        // scheduler start (`erl_time_sup.c:913-950`).
+        let now = correction.monotonic_time(os_monotonic_time(start));
+        let check = Self::check_position(now, correction.first_timeout());
         Self {
-            start: Instant::now(),
-            time_offset: clock::system_time() - MONOTONIC_BEGIN,
-            next_check: FIRST_CHECK,
+            start,
+            correction,
+            check: (check, 0),
             queue: BTreeMap::new(),
             bif_timers: HashMap::new(),
-            next: 0,
+            next: 1,
         }
     }
 
-    /// Return the internal monotonic time of the run: `MONOTONIC_BEGIN`
-    /// plus the nanoseconds since the run start. `Instant` reads
-    /// `CLOCK_UPTIME_RAW` on macOS, which is the
-    /// `os_monotonic_time_source` of the pinned ERTS, and
-    /// `CLOCK_MONOTONIC` on other Unix hosts.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// let timers = Timers::new();
-    /// assert!(timers.now() <= timers.now());
-    /// ```
     /// Count the guest terms that the timer service holds: the message of
     /// each active BIF timer. A receive timer holds no term.
     ///
@@ -164,15 +140,28 @@ impl Timers {
         }
     }
 
+    /// Return the internal monotonic time of the run: the Erlang monotonic
+    /// time from the OS monotonic time with the time correction of the run,
+    /// as `erts_get_monotonic_time` (`erl_time_sup.c:385-412`, `780-787`).
+    /// `Instant` reads `CLOCK_UPTIME_RAW` on macOS, which is the
+    /// `os_monotonic_time_source` of the pinned ERTS, and
+    /// `CLOCK_MONOTONIC` on other Unix hosts.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let timers = Timers::new();
+    /// assert!(timers.now() <= timers.now());
+    /// ```
     pub(super) fn now(&self) -> i64 {
-        i64::try_from(self.start.elapsed().as_nanos())
-            .unwrap_or(i64::MAX)
-            .saturating_add(MONOTONIC_BEGIN)
+        self.correction
+            .monotonic_time(os_monotonic_time(self.start))
     }
 
     /// Return the Erlang system time of the run in nanoseconds: the
     /// internal monotonic time plus the time offset, as `system_time_1`
-    /// adds them (`erl_time_sup.c:2527-2535`).
+    /// adds them (`erl_time_sup.c:2527-2535`). The call reads the offset
+    /// and does not change it.
     ///
     /// # Examples
     ///
@@ -181,46 +170,31 @@ impl Timers {
     /// // 2023-11-14 and later.
     /// assert!(timers.system_time() > 1_700_000_000_000_000_000);
     /// ```
-    pub(super) fn system_time(&mut self) -> i64 {
-        self.correct_time_offset(self.now(), clock::system_time)
+    pub(super) fn system_time(&self) -> i64 {
+        self.now().saturating_add(self.correction.time_offset())
     }
 
-    /// Return the Erlang system time at the internal monotonic time `now`.
-    /// Before the next time offset check is due, read the existing offset,
-    /// as `system_time_1` does (`erl_time_sup.c:2527-2535`). When the check
-    /// is due, do the check of the `multi_time_warp` mode with the OS system
-    /// time from `os_time`, as `check_time_offset` does
-    /// (`erl_time_sup.c:789-817`), one time for all missed checks. When the
-    /// Erlang system time differs from the OS system time by more than
-    /// `2 * SMALL_DIFF`, the time offset becomes the OS system time minus
-    /// `now` (`time_offset -= sdiff`), and the next check is
-    /// `SHORT_CHECK` later. Otherwise the next check is `LONG_CHECK` later.
-    /// The Erlang monotonic time does not change. ERTS does the check from a
-    /// scheduler timer at the due time; PBeam reads the OS system time at
-    /// the first call after it (`docs/erts-differences.md`, "Clocks", #691).
+    /// Do the time correction check with the OS clocks from `os_times`, and
+    /// set the next check timer, as `check_time_offset` and
+    /// `check_time_correction` do at their end (`erl_time_sup.c:772-776`,
+    /// `824-831`). The next check starts after each timer that is active,
+    /// so it has the next start number.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut timers = Timers::new();
-    /// let now = 2_500_000_000;
-    /// let base = now + timers.time_offset;
-    /// assert_eq!(timers.correct_time_offset(now, || base + 100_001), base + 100_001);
+    /// timers.check_time(|| (1_500_000_000, 1_500_000_000));
     /// ```
-    pub(super) fn correct_time_offset(&mut self, now: i64, os_time: impl FnOnce() -> i64) -> i64 {
-        if now >= self.next_check {
-            let sdiff = now
-                .saturating_add(self.time_offset)
-                .saturating_sub(os_time());
-            let interval = if (-2 * SMALL_DIFF..=2 * SMALL_DIFF).contains(&sdiff) {
-                LONG_CHECK
-            } else {
-                self.time_offset = self.time_offset.saturating_sub(sdiff);
-                SHORT_CHECK
-            };
-            self.next_check = now.saturating_add(interval);
-        }
-        now.saturating_add(self.time_offset)
+    fn check_time(&mut self, os_times: impl FnMut() -> (i64, i64)) {
+        let (now, msec) = self.correction.check(os_times);
+        self.check = (Self::check_position(now, msec), self.next);
+        self.next += 1;
+    }
+
+    /// Return the end tick of the check timer `msec` milliseconds after the
+    /// time `now`, as `get_timeout_pos` (`erl_time_sup.c:440-448`).
+    fn check_position(now: i64, msec: i64) -> i64 {
+        Self::timeout_position(now, msec).unwrap_or(MONOTONIC_END_TICKS)
     }
 
     /// Return the end tick of a timer of `msec` milliseconds that starts at
@@ -289,7 +263,7 @@ impl Timers {
     /// ```rust,ignore
     /// let key = timers.start(1100, Timer::Receive(ProcessId(0)));
     /// timers.cancel(key);
-    /// assert_eq!(timers.wait_time(1_000_000_000), None);
+    /// assert!(!timers.active());
     /// ```
     pub(super) fn cancel(&mut self, key: TimerKey) {
         self.remove(key);
@@ -332,7 +306,8 @@ impl Timers {
     /// Remove and return the first timer when it is due at the time `now`:
     /// its end tick is at or before `now div 1000000`, as
     /// `erts_bump_timers` bumps to `ERTS_MONOTONIC_TO_CLKTCKS(curr_time)`
-    /// (`time.c:820`).
+    /// (`time.c:820`). Before it, do each time correction check that is due
+    /// and comes first in end and start order, with the OS clocks of now.
     ///
     /// # Examples
     ///
@@ -342,29 +317,74 @@ impl Timers {
     /// assert_eq!(timers.pop_due(1_100_000_000), Some(Timer::Receive(ProcessId(0))));
     /// ```
     pub(super) fn pop_due(&mut self, now: i64) -> Option<Timer> {
+        let start = self.start;
+        self.pop_due_with(now, || (os_monotonic_time(start), clock::system_time()))
+    }
+
+    /// Do [`Self::pop_due`] with the OS clocks from `os_times`, which gives
+    /// the OS monotonic time and the OS system time.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(timers.pop_due_with(2_500_000_000, || (1_500_000_000, os_stime)), None);
+    /// ```
+    fn pop_due_with(
+        &mut self,
+        now: i64,
+        mut os_times: impl FnMut() -> (i64, i64),
+    ) -> Option<Timer> {
+        let tick = now / UNITS_PER_TICK;
+        while self.check.0 <= tick
+            && self
+                .queue
+                .first_key_value()
+                .is_none_or(|(key, _)| self.check < *key)
+        {
+            self.check_time(&mut os_times);
+        }
         let (&key, _) = self.queue.first_key_value()?;
-        if key.0 > now / UNITS_PER_TICK {
+        if key.0 > tick {
             return None;
         }
         self.remove(key)
     }
 
-    /// Return the time from `now` until the first timer is due, or `None`
-    /// when no timer is active. A timer that is due gives zero.
+    /// Return true when a timer other than the time correction check is
+    /// active. Only such a timer keeps an idle run alive.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(!Timers::new().active());
+    /// ```
+    pub(super) fn active(&self) -> bool {
+        !self.queue.is_empty()
+    }
+
+    /// Return the time from `now` until the first timer or the time
+    /// correction check is due. A timer that is due gives zero.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// timers.start(1100, Timer::Receive(ProcessId(0)));
-    /// assert_eq!(timers.wait_time(1_099_000_000), Some(Duration::from_millis(1)));
-    /// assert_eq!(timers.wait_time(1_200_000_000), Some(Duration::ZERO));
+    /// assert_eq!(timers.wait_time(1_099_000_000), Duration::from_millis(1));
+    /// assert_eq!(timers.wait_time(1_200_000_000), Duration::ZERO);
     /// ```
-    pub(super) fn wait_time(&self, now: i64) -> Option<Duration> {
-        let (&(end, _), _) = self.queue.first_key_value()?;
-        Some(Duration::from_nanos(
-            u64::try_from(end * UNITS_PER_TICK - now).unwrap_or(0),
-        ))
+    pub(super) fn wait_time(&self, now: i64) -> Duration {
+        let (end, _) = self
+            .queue
+            .first_key_value()
+            .map_or(self.check, |(&key, _)| key.min(self.check));
+        Duration::from_nanos(u64::try_from(end * UNITS_PER_TICK - now).unwrap_or(0))
     }
+}
+
+/// Return the OS monotonic time of the run: the nanoseconds since the run
+/// start `start`.
+fn os_monotonic_time(start: Instant) -> i64 {
+    i64::try_from(start.elapsed().as_nanos()).unwrap_or(i64::MAX)
 }
 
 #[cfg(test)]
