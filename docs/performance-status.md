@@ -57,7 +57,7 @@ The loader skips `test_heap` and `init_yregs`, as it skips `line`, and the `Noop
 | `test_heap` loop probe, 20000000 iterations, user CPU seconds, median of 8 rounds | 4.82 | 4.64 | -3.7 percent | One-minute load 1.85 to 3.95 |
 | `call_ext_only` floor loop, 200000 iterations, ns, median of 6 rounds | 259.75 | 265.05 | Inside the noise: both revisions show the two modes near 258 and 266 | One-minute load 2.87 to 3.21 |
 | `call_only` floor loop, 200000 iterations, ns, median of 6 rounds | 104.40 | 105.85 | Inside the noise: both revisions span 102.2 to 106.5 | The same rounds |
-| Terra key press, CPU ms for each key, 60 keys, median of 8 rounds | 23.0 | 23.0 | No change that the session can resolve: before 15.5 to 26.7, after 13.7 to 26.5 | One-minute load 1.54 to 12.33 |
+| Terra key press, CPU ms for each key, 60 keys, median of 7 rounds | 23.0 | 24.167 | No change that the session can resolve: before 17.0 to 26.7, after 19.8 to 26.5 | One-minute load 1.54 to 3.62. Round 7 is dropped: its after run started with a load of 12.33 and two build processes |
 
 The probe loop runs seven instructions for each iteration before the change and six after it, so the gain is on the shape that the change targets. The floor loops have no `test_heap`. The Terra key press runs 6.4 percent of its instructions as `Noop`, but the spread of the CPU time for each key is larger than the expected gain.
 

@@ -978,17 +978,17 @@ One interleaved session on 2026-10-15 from 13:49 to 14:10 JST, on an Apple M1 Ma
 | 7 | before, after | Terra 3.27, 12.33; probe 1.85, 3.95 | 15.500 / 13.667 | 5.24 / 4.60 |
 | 8 | after, before | Terra 3.23, 2.88; probe 3.71, 3.57 | 17.000 / 20.000 | 5.14 / 4.63 |
 
-The load of the after run of Terra round 7 rose to 12.33 during the round, after the idle check at its start, so that pair is weak. The Terra rounds 1 and 2 ran before the probe rounds, the Terra rounds 3 to 8 ran after a pause for the load, and the probe rounds ran last.
+The medians and ranges below do not use the Terra pair of round 7. The script checked the load and the build processes only at the start of a round. The after run of that round started with a one-minute load of 12.33 and two `cargo`, `rustc`, or `nextest` processes (`busy 2` in the session log), which breaks the rule of the session. The load rose from 3.27 to 12.33 during the before run of the same round, so the before run is also not reliable. The probe pair of round 7 started with no such process and a load below 4, so it stays. The Terra rounds 1 and 2 ran before the probe rounds, the Terra rounds 3 to 8 ran after a pause for the load, and the probe rounds ran last.
 
 | Shape | Before median | After median | Before range | After range |
 | --- | --- | --- | --- | --- |
 | `call_ext_only` floor, ns | 259.75 | 265.05 | 258.0 to 266.0 | 253.7 to 266.6 |
 | `call_only` floor, ns | 104.40 | 105.85 | 102.4 to 106.5 | 102.2 to 106.3 |
-| Terra CPU ms for each key | 23.0 | 23.0 | 15.5 to 26.7 | 13.7 to 26.5 |
+| Terra CPU ms for each key, 7 rounds | 23.0 | 24.167 | 17.0 to 26.7 | 19.8 to 26.5 |
 | `test_heap` loop probe, user s | 4.82 | 4.64 | 4.80 to 5.24 | 4.59 to 4.74 |
 
 ### The decision
 
-The change lands. The probe that runs one `test_heap` in each iteration is 3.7 percent faster at the median, and the two ranges do not overlap. The floor loops have no `test_heap` or `init_yregs`, and both revisions show the same two modes, so the session shows no regression. The Terra CPU time for each key spreads by more than 10 ms in each revision. The expected gain is the dispatch of 16,114 of 253,558 instructions, which is below that spread, so the session cannot resolve it. The change also removes one `Instruction` variant and one arm of the run loop.
+The change lands. The probe that runs one `test_heap` in each iteration is 3.7 percent faster at the median, and the two ranges do not overlap. The floor loops have no `test_heap` or `init_yregs`, and both revisions show the same two modes, so the session shows no regression. The Terra CPU time for each key spreads by more than 6 ms in each revision. The expected gain is the dispatch of 16,114 of 253,558 instructions, which is below that spread, so the session cannot resolve it. The change also removes one `Instruction` variant and one arm of the run loop.
 
 The raw files of each run are in the session scratch directory of the task, `scratchpad/634-skip-noop/raw/`, with the names `floor-r<round>-<revision>.txt`, `terra-r<round>-<revision>.log`, and `probe-r<round>-<revision>.txt`, and the session log is `scratchpad/634-skip-noop/session.txt`.
