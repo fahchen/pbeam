@@ -57,7 +57,11 @@ pub enum Term {
     /// A float: an IEEE 754 binary64 value that is finite, as an ERTS float
     /// is (`FLOAT_DEF`, `erl_term.h`). ERTS never makes an infinity or a NaN
     /// term: each operation that would give one raises `badarith` or
-    /// `badarg`. `0.0` and `-0.0` are two terms: they are equal in
+    /// `badarg`. The finite value is a runtime-produced form, not a type
+    /// invariant: the loader and each runtime operation make only finite
+    /// floats. A caller that builds a term, such as an argument of
+    /// `BeamProgram::host_term`, must pass a finite value; the term order
+    /// and the float text panic on a NaN. `0.0` and `-0.0` are two terms: they are equal in
     /// arithmetic comparison and different in exact comparison.
     Float(f64),
     /// The empty list `[]`.
