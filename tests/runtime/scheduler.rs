@@ -57,7 +57,7 @@ fn keeps_the_current_process_in_the_table_and_out_of_the_run_queue() {
     assert_eq!(current(&mut scheduler), ProcessId(0));
     assert!(scheduler.processes.contains_key(&ProcessId(0)));
     let (child, monitor) = scheduler
-        .spawn(Start::Entry(frame()), vec![], false, false, false, None)
+        .spawn(Start::Entry(frame()), vec![], None, false, false, None)
         .unwrap()
         .unwrap();
     assert_eq!((child, monitor), (ProcessId(1), None));
@@ -98,7 +98,14 @@ fn makes_no_capability_copies_in_a_run_that_skips_the_checks() {
     assert!(!checked.skips_checks());
     checked.start(frame(), vec![], Vec::new()).unwrap();
     checked.schedule_next().unwrap();
-    let spawn = checked.spawn(Start::Entry(frame()), vec![], true, true, false, None);
+    let spawn = checked.spawn(
+        Start::Entry(frame()),
+        vec![],
+        Some(Term::static_atom("DOWN")),
+        true,
+        false,
+        None,
+    );
     assert_eq!(spawn.unwrap().err(), Some(Denied));
     assert_eq!(
         checked.revoke_given(ProcessId(9), CapabilityKind::Env),
@@ -111,7 +118,14 @@ fn makes_no_capability_copies_in_a_run_that_skips_the_checks() {
     scheduler.start(frame(), vec![], Vec::new()).unwrap();
     scheduler.schedule_next().unwrap();
     let (child, monitor) = scheduler
-        .spawn(Start::Entry(frame()), vec![], true, true, false, None)
+        .spawn(
+            Start::Entry(frame()),
+            vec![],
+            Some(Term::static_atom("DOWN")),
+            true,
+            false,
+            None,
+        )
         .unwrap()
         .unwrap();
     assert_eq!(child, ProcessId(1));
@@ -129,7 +143,7 @@ fn switches_out_to_the_end_of_the_run_queue_with_a_new_budget() {
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
     scheduler
-        .spawn(Start::Entry(frame()), vec![], false, false, false, None)
+        .spawn(Start::Entry(frame()), vec![], None, false, false, None)
         .unwrap()
         .unwrap();
     scheduler.current_process_mut().fcalls = -1;
@@ -152,11 +166,18 @@ fn sends_down_and_exit_signals_and_records_the_root_result() {
     scheduler.schedule_next().unwrap();
     scheduler.current_process_mut().trap_exit = true;
     let (monitored, monitor) = scheduler
-        .spawn(Start::Entry(frame()), vec![], true, false, false, None)
+        .spawn(
+            Start::Entry(frame()),
+            vec![],
+            Some(Term::static_atom("DOWN")),
+            false,
+            false,
+            None,
+        )
         .unwrap()
         .unwrap();
     let (linked, _) = scheduler
-        .spawn(Start::Entry(frame()), vec![], false, true, false, None)
+        .spawn(Start::Entry(frame()), vec![], None, true, false, None)
         .unwrap()
         .unwrap();
     scheduler.park_current();
@@ -201,7 +222,7 @@ fn ends_the_run_only_after_the_exit_of_the_root_process_completes() {
         scheduler.start(frame(), vec![], allow_all()).unwrap();
         scheduler.schedule_next().unwrap();
         let (child, _) = scheduler
-            .spawn(Start::Entry(frame()), vec![], false, true, false, None)
+            .spawn(Start::Entry(frame()), vec![], None, true, false, None)
             .unwrap()
             .unwrap();
         scheduler.current_process_mut().fcalls = fcalls;
@@ -228,7 +249,7 @@ fn links_and_unlinks_processes_and_ignores_normal_exit_without_trap_exit() {
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     scheduler.schedule_next().unwrap();
     let (child, _) = scheduler
-        .spawn(Start::Entry(frame()), vec![], false, false, false, None)
+        .spawn(Start::Entry(frame()), vec![], None, false, false, None)
         .unwrap()
         .unwrap();
     assert!(scheduler.link(child));
@@ -281,7 +302,7 @@ fn ends_a_linked_process_and_rejects_counter_overflow() {
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     scheduler.schedule_next().unwrap();
     scheduler
-        .spawn(Start::Entry(frame()), vec![], false, true, false, None)
+        .spawn(Start::Entry(frame()), vec![], None, true, false, None)
         .unwrap()
         .unwrap();
     scheduler.park_current();
@@ -307,7 +328,7 @@ fn ends_a_linked_process_and_rejects_counter_overflow() {
     // first spawn.
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     scheduler.schedule_next().unwrap();
-    let spawn = scheduler.spawn(Start::Entry(frame()), vec![], false, false, false, None);
+    let spawn = scheduler.spawn(Start::Entry(frame()), vec![], None, false, false, None);
     assert!(spawn.is_err());
     assert!(scheduler.make_ref().is_err());
 }
@@ -320,7 +341,7 @@ fn sends_the_pending_monitor_signal_before_a_demonitor_signal() {
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     scheduler.schedule_next().unwrap();
     let (child, _) = scheduler
-        .spawn(Start::Entry(frame()), vec![], false, false, false, None)
+        .spawn(Start::Entry(frame()), vec![], None, false, false, None)
         .unwrap()
         .unwrap();
     let reference = scheduler
@@ -388,7 +409,7 @@ fn frees_the_name_of_a_process_when_it_exits() {
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     scheduler.schedule_next().unwrap();
     let (child, _) = scheduler
-        .spawn(Start::Entry(frame()), vec![], false, false, false, None)
+        .spawn(Start::Entry(frame()), vec![], None, false, false, None)
         .unwrap()
         .unwrap();
     let name = Term::Atom(scheduler.atoms.put("pbeam_probe_reg").unwrap());
@@ -421,7 +442,14 @@ fn deletes_the_tables_of_a_process_when_it_exits() {
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     scheduler.schedule_next().unwrap();
     let (child, monitor) = scheduler
-        .spawn(Start::Entry(frame()), vec![], true, false, false, None)
+        .spawn(
+            Start::Entry(frame()),
+            vec![],
+            Some(Term::static_atom("DOWN")),
+            false,
+            false,
+            None,
+        )
         .unwrap()
         .unwrap();
     scheduler.park_current();
@@ -652,7 +680,7 @@ fn runs_other_processes_while_a_dirty_write_waits_and_resumes_it_after() {
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
     scheduler
-        .spawn(Start::Entry(frame()), vec![], false, false, false, None)
+        .spawn(Start::Entry(frame()), vec![], None, false, false, None)
         .unwrap()
         .unwrap();
     scheduler.start_dirty_write(dirty_write(fd, b"later"), true);
@@ -742,7 +770,14 @@ fn start_dirty_writers(
     let references = (1..=count)
         .map(|_| {
             let (_, reference) = scheduler
-                .spawn(Start::Entry(frame()), vec![], true, false, false, None)
+                .spawn(
+                    Start::Entry(frame()),
+                    vec![],
+                    Some(Term::static_atom("DOWN")),
+                    false,
+                    false,
+                    None,
+                )
                 .unwrap()
                 .unwrap();
             reference.unwrap()
@@ -1686,7 +1721,7 @@ fn removes_the_accept_of_a_process_that_exits_with_its_port_monitor_signal_pendi
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     scheduler.schedule_next().unwrap();
     let (child, _) = scheduler
-        .spawn(Start::Entry(frame()), vec![], false, false, false, None)
+        .spawn(Start::Entry(frame()), vec![], None, false, false, None)
         .unwrap()
         .unwrap();
     let mut tcp = Inet::new(SocketType::Stream);

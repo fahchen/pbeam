@@ -9,7 +9,12 @@ start(Module, Function) ->
 %% start_clean.boot and then -eval (init.erl:1192-1217). Flags are the boot
 %% flags of the command line, as init:parse_boot_args/1 gives them
 %% (init.erl:1668-1709): a list of {Flag, Values}, with each value a
-%% binary. The boot process traps exits (init.erl:1197). It registers the
+%% binary. The boot first starts the pinned erts_code_purger, which
+%% registers itself, as ERTS starts it as a system process next to init
+%% (erl_init.c:2550-2557, erts_code_purger.erl:36-39). code_server asks it
+%% to finish the load of a module with an -on_load function
+%% (code_server.erl:1360-1362). The boot process traps exits
+%% (init.erl:1197). It registers the
 %% init request process with the flags after {noshell, []}, as for
 %% erl -noshell. It starts erl_prim_loader with the code path of the pa and
 %% pz flags (init.erl:1200-1202). With a root flag, it then sets the code
@@ -27,6 +32,7 @@ start(Module, Function) ->
 %% pbeam_cap:enter_runtime/2 return ok and have no effect. ERTS has no
 %% pbeam_cap module.
 start(Module, Function, Flags) ->
+    _ = spawn(erts_code_purger, start, []),
     process_flag(trap_exit, true),
     Init = spawn(?MODULE, init, [self(), [{noshell, []} | Flags]]),
     true = register(init, Init),

@@ -686,14 +686,7 @@ fn shared_last_release_measurement(shape: &Shape) -> Measurement {
         "the root process runs"
     );
     let (child, _) = scheduler
-        .spawn(
-            Start::Entry(frame()),
-            vec![graph],
-            false,
-            false,
-            false,
-            None,
-        )
+        .spawn(Start::Entry(frame()), vec![graph], None, false, false, None)
         .expect("the spawn runs")
         .expect("the spawn is permitted");
     assert_ne!(child, ProcessId(0));

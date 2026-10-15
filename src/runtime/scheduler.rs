@@ -1954,14 +1954,15 @@ impl Scheduler {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let (pid, monitor) = scheduler.spawn(Start::Entry(frame), vec![], true, false, false, None)?.unwrap();
+    /// let down = Some(Term::static_atom("DOWN"));
+    /// let (pid, monitor) = scheduler.spawn(Start::Entry(frame), vec![], down, false, false, None)?.unwrap();
     /// assert!(monitor.is_some());
     /// ```
     pub(super) fn spawn(
         &mut self,
         start: Start,
         arguments: Vec<Term>,
-        monitor: bool,
+        monitor: Option<Term>,
         link: bool,
         off_heap_message_queue: bool,
         restrictions: Option<&[Restriction]>,
@@ -1984,7 +1985,7 @@ impl Scheduler {
         } else {
             check(true, Operation::Spawn, Some(module.as_bytes()))
                 .and_then(|()| check(link, Operation::Link, None))
-                .and_then(|()| check(monitor, Operation::Monitor, None))
+                .and_then(|()| check(monitor.is_some(), Operation::Monitor, None))
                 .and_then(|()| parent.delegate(restrictions))
         };
         let copies = match copies {
@@ -2001,7 +2002,7 @@ impl Scheduler {
         let parent = self.current_process_mut().id;
         child.parent = Some(parent);
         child.group_leader = self.current_process_mut().group_leader;
-        let reference = if monitor {
+        let reference = if let Some(tag) = monitor {
             let reference = self.make_ref()?;
             child.monitored_by.push(TargetMonitor::Process(Monitor {
                 watcher: parent,
@@ -2012,7 +2013,7 @@ impl Scheduler {
                     kind: "process",
                     target: Some(child.id),
                     item: Term::Pid(child.id),
-                    tag: Term::static_atom("DOWN"),
+                    tag,
                 }),
                 alias: None,
             };

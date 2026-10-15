@@ -172,6 +172,11 @@ impl BeamProgram {
     /// Load BEAM files into one program. Module names must be unique. The
     /// atom table starts with the 1150 static atoms. Each module, in the
     /// given order, puts its `AtU8` atoms and then its `LitT` atoms into it.
+    /// A module with an `-on_load` function is the error `the start module
+    /// M has an -on_load function, which PBeam runs only for a module that
+    /// loads in the run`. The ERTS boot runs the function of each such
+    /// module that the boot script loads (`init.erl:1381-1403`, `1857-1880`),
+    /// and the start set of PBeam has no boot script.
     ///
     /// # Examples
     ///
@@ -185,6 +190,11 @@ impl BeamProgram {
         for bytes in modules {
             let module = code::parse(bytes, &mut atoms)?;
             let name = module.name.clone();
+            if module.on_load.is_some() {
+                return Err(error(format!(
+                    "the start module {name} has an -on_load function, which PBeam runs only for a module that loads in the run"
+                )));
+            }
             if loaded.insert(name.clone(), Rc::new(module)).is_some() {
                 return Err(error(format!("duplicate BEAM module {name}")));
             }
@@ -2115,8 +2125,14 @@ impl BeamProgram {
     /// its export, which costs no reduction (`emit_call_bif_shared` in
     /// `jit/arm/instr_bif.cpp:721-789`). A call of `erlang:load_nif/2` runs
     /// as the `i_load_nif` instruction with the module of the current frame
-    /// (`jit/arm/ops.tab:615-623`, `emu/ops.tab:854-862`). Return the
-    /// outcome when the process stops.
+    /// (`jit/arm/ops.tab:615-623`, `emu/ops.tab:854-862`). A call of
+    /// `erlang:call_on_load_function/1` runs as the
+    /// `i_call_on_load_function` instruction (`jit/arm/ops.tab:630-641`,
+    /// `jit/arm/instr_bif.cpp:994-1031`): it calls the `-on_load` function
+    /// of the module in `x0` as a body call, also in a tail call, which
+    /// then continues at the `Deallocate` and the `Return` after it. A
+    /// module with no code that waits for its function raises `badarg`.
+    /// Return the outcome when the process stops.
     ///
     /// # Examples
     ///
@@ -2165,6 +2181,23 @@ impl BeamProgram {
                 let caller = scheduler.code.module_by_id(module_id)?.name.clone();
                 let result = native::load_nif(scheduler, &caller)?;
                 self.finish_bif(scheduler, result, false)
+            }
+            ImportKind::CallOnLoadFunction => {
+                let module = read_x_register(&process.registers, 0)?.clone();
+                let frame = match &module {
+                    Term::Atom(module) => {
+                        let name = scheduler.atoms.name_of(module).to_owned();
+                        scheduler.code.on_load_frame(&name)?
+                    }
+                    _ => None,
+                };
+                match frame {
+                    Some(frame) => {
+                        enter_frame(scheduler.current_process_mut(), frame, false);
+                        Ok(None)
+                    }
+                    None => self.finish_bif(scheduler, BifResult::badarg(), false),
+                }
             }
             ImportKind::Bif { bif, heavy } => {
                 if !heavy && light_bif_switch(process) {
@@ -2903,8 +2936,10 @@ fn enter_export(
 struct SpawnOptions {
     /// Link the new process to the caller (`SPO_LINK`).
     link: bool,
-    /// Monitor the new process and return `{Pid, Reference}` (`SPO_MONITOR`).
-    monitor: bool,
+    /// The tag of the `DOWN` message of a monitor of the new process, or
+    /// `None` with no monitor. With a monitor, the spawn returns
+    /// `{Pid, Reference}` (`SPO_MONITOR`).
+    monitor: Option<Term>,
     /// Start the new process with the `message_queue_data` flag `off_heap`
     /// (`SPO_OFF_HEAP_MSGQ`), else `on_heap`.
     off_heap_message_queue: bool,

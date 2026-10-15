@@ -172,7 +172,7 @@ fn load_reference(function: &str, file: &str) -> String {
             "fixtures/code",
             "-eval",
             &format!(
-                "{{ok, Code}} = file:read_file(\"fixtures/code/{file}.beam\"), \
+                "{{ok, Code}} = file:read_file(\"{file}.beam\"), \
                  io:format(\"~w~n\", [load_probe:{function}(Code)]), halt()."
             ),
         ])
@@ -185,8 +185,8 @@ fn load_reference(function: &str, file: &str) -> String {
     String::from_utf8(reference.stdout).unwrap()
 }
 
-/// Return the `~w` text of a term of atoms, tuples, and lists. The atom
-/// names come from `atoms`, the table that owns the term.
+/// Return the `~w` text of a term of atoms, integers, tuples, and lists.
+/// The atom names come from `atoms`, the table that owns the term.
 fn text(term: &Term, atoms: &AtomTable) -> String {
     let join = |terms: &[Term]| {
         terms
@@ -197,6 +197,7 @@ fn text(term: &Term, atoms: &AtomTable) -> String {
     };
     match term {
         Term::Atom(atom) => atoms.name_of(atom).to_owned(),
+        Term::Integer(value) => value.to_string(),
         _ if let Some(terms) = term.proper_list() => {
             format!("[{}]", join(&terms.cloned().collect::<Vec<_>>()))
         }
@@ -214,7 +215,10 @@ fn loads_a_module_from_its_bytes_as_pinned_erts() {
     // of the run, so `list_to_atom/1` gives the same atom.
     let expected = "{{false,false},{module,load_target},{true,true},load_target_value,true}\n";
     assert_eq!(load_run("load", LOAD_TARGET), expected);
-    assert_eq!(load_reference("load", "load_target"), expected);
+    assert_eq!(
+        load_reference("load", "fixtures/code/load_target"),
+        expected
+    );
     assert_eq!(load_program().atom("load_target_value"), None);
 }
 
@@ -243,7 +247,10 @@ fn calls_an_import_before_and_after_the_load_of_its_module_as_pinned_erts() {
         calls(after)
     );
     assert_eq!(load_run("late", LOAD_TARGET), expected);
-    assert_eq!(load_reference("late", "load_target"), expected);
+    assert_eq!(
+        load_reference("late", "fixtures/code/load_target"),
+        expected
+    );
 }
 
 #[test]
@@ -254,7 +261,10 @@ fn finishes_prepared_code_as_pinned_erts() {
     let expected = "[true,{duplicated,[load_target]},{duplicated,[load_target,load_target]},\
                     false,ok,ok,true,load_target_value,{error,badarg}]\n";
     assert_eq!(load_run("prepared", LOAD_TARGET), expected);
-    assert_eq!(load_reference("prepared", "load_target"), expected);
+    assert_eq!(
+        load_reference("prepared", "fixtures/code/load_target"),
+        expected
+    );
 }
 
 #[test]
@@ -269,7 +279,10 @@ fn rejects_bad_code_and_arguments_as_pinned_erts() {
                     {error,badfile},{error,badarg},{error,badarg},{error,badarg},{error,badarg},\
                     {error,badarg},{error,badarg},{error,badarg},{error,badarg},false,false]\n";
     assert_eq!(load_run("errors", LOAD_TARGET), expected);
-    assert_eq!(load_reference("errors", "load_target"), expected);
+    assert_eq!(
+        load_reference("errors", "fixtures/code/load_target"),
+        expected
+    );
 }
 
 #[test]
@@ -279,7 +292,10 @@ fn switches_out_the_caller_of_erlang_finish_loading_as_pinned_erts() {
     // sends its message first.
     let expected = "[{module,load_target},spawned,loaded]\n";
     assert_eq!(load_run("order", LOAD_TARGET), expected);
-    assert_eq!(load_reference("order", "load_target"), expected);
+    assert_eq!(
+        load_reference("order", "fixtures/code/load_target"),
+        expected
+    );
 }
 
 #[test]
@@ -300,7 +316,7 @@ fn stops_the_run_for_code_replacement() {
         "erlang:finish_loading/1 cannot replace the loaded module load_target"
     );
     assert_eq!(
-        load_reference("replace", "load_target"),
+        load_reference("replace", "fixtures/code/load_target"),
         "[{module,load_target},{module,load_target}]\n"
     );
 }
@@ -343,26 +359,107 @@ fn compares_the_module_name_of_code_load() {
 }
 
 #[test]
-fn stops_the_run_for_a_module_with_an_on_load_function() {
-    // ERTS loads the module, `erlang:finish_loading/1` returns
-    // `{on_load, [load_on_load]}`, and the module waits for its
-    // `-on_load` function (`beam_load.c:239-241`, `beam_bif_load.c:738-755`).
-    // The PBeam loader does not decode the `on_load` instruction.
+fn loads_a_module_with_an_on_load_function_as_pinned_erts() {
+    // `erlang:finish_loading/1` returns `{on_load, [load_on_load]}`
+    // (`beam_bif_load.c:484-504`), so `erlang:load_module/2` returns
+    // `{error, on_load}` (`erlang.erl:7513-7528`), and the module waits for
+    // its `-on_load` function: `erlang:module_loaded/1` gives `false`
+    // (`beam_bif_load.c:738-755`).
     let program = load_program();
+    let result = program
+        .execute(
+            "load_probe",
+            "on_load",
+            &[program.host_term(Term::binary(LOAD_ON_LOAD.to_vec()))],
+        )
+        .unwrap();
+    let expected = load_reference("on_load", "fixtures/code/load_on_load");
+    assert_eq!(expected, "[{error,on_load},false]\n");
+    assert_eq!(
+        format!("{}\n", text(&result.term, result.atoms())),
+        expected
+    );
+}
+
+#[test]
+fn runs_the_on_load_steps_of_the_code_server_as_pinned_erts() {
+    // `load_probe:on_load_steps/2` runs the steps of `code_server` and
+    // `erts_code_purger` (code_server.erl:1348-1352, 1386-1398;
+    // erts_code_purger.erl:166-167): `erlang:finish_loading/1` gives
+    // `{on_load, [Module]}` and hides the exports, a group with the module
+    // raises `system_limit` (`beam_bif_load.c:395-408`),
+    // `erlang:call_on_load_function/1` runs the function as the
+    // `i_call_on_load_function` instruction and raises `badarg` through
+    // `apply/3` (`jit/arm/ops.tab:630-641`, `beam_bif_load.c:793-817`), and
+    // `erlang:finish_after_on_load/2` keeps or drops the code
+    // (`beam_bif_load.c:819-941`). After `false`, the code stays until a
+    // purge, so the function runs again and `false` gives `true` again.
+    let program = load_program();
+    for module in ["on_load_ok", "on_load_error", "on_load_crash"] {
+        let path = format!("fixtures/code_server/{module}");
+        let code = std::fs::read(format!("{path}.beam")).unwrap();
+        let result = program
+            .execute(
+                "load_probe",
+                module,
+                &[program.host_term(Term::binary(code))],
+            )
+            .unwrap();
+        assert_eq!(
+            format!("{}\n", text(&result.term, result.atoms())),
+            load_reference(module, &path),
+            "{module}"
+        );
+    }
+}
+
+#[test]
+fn stops_the_run_when_the_code_of_a_dropped_on_load_function_is_kept() {
+    // ERTS makes the code current with exports that call the error handler
+    // (`beam_bif_load.c:887-897`). PBeam has no such export state.
+    let program = load_program();
+    let code = std::fs::read("fixtures/code_server/on_load_ok.beam").unwrap();
     assert_eq!(
         program
             .execute(
                 "load_probe",
-                "on_load",
-                &[program.host_term(Term::binary(LOAD_ON_LOAD.to_vec()))]
+                "keep_after_drop",
+                &[program.host_term(Term::binary(code))]
             )
             .unwrap_err()
             .to_string(),
-        "erts_internal:prepare_loading/2 cannot load module load_on_load: \
-         unsupported BEAM opcode 149"
+        "erlang:finish_after_on_load/2 cannot keep the code of on_load_ok after its \
+         exports were dropped"
     );
+}
+
+#[test]
+fn stops_the_run_for_a_module_that_the_loader_cannot_decode() {
+    // ERTS loads the module (row "Code loading" of docs/erts-differences.md).
+    let program = load_program();
+    let code = include_bytes!("../../fixtures/code/load_unsupported.beam");
     assert_eq!(
-        load_reference("on_load", "load_on_load"),
-        "[{error,on_load},false]\n"
+        program
+            .execute(
+                "load_probe",
+                "unsupported",
+                &[program.host_term(Term::binary(code.to_vec()))]
+            )
+            .unwrap_err()
+            .to_string(),
+        "erts_internal:prepare_loading/2 cannot load module load_unsupported: \
+         unsupported BEAM opcode 141"
+    );
+}
+
+#[test]
+fn stops_for_a_start_module_with_an_on_load_function() {
+    // The ERTS boot runs the `-on_load` function of each module that the
+    // boot script loads (init.erl:1381-1403, 1857-1880). The start set of
+    // PBeam has no boot script.
+    assert_eq!(
+        BeamProgram::load(&[LOAD_ON_LOAD]).unwrap_err().to_string(),
+        "the start module load_on_load has an -on_load function, which PBeam \
+         runs only for a module that loads in the run"
     );
 }
