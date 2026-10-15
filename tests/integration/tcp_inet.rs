@@ -1,5 +1,5 @@
 use std::{
-    net::{SocketAddr, TcpStream},
+    net::{SocketAddr, TcpStream, UdpSocket},
     path::{Path, PathBuf},
     process::Command,
     sync::{
@@ -20,6 +20,8 @@ use common::pinned_beam;
 const TCP_PROBE: &[u8] = include_bytes!("../../fixtures/tcp/tcp_probe.beam");
 
 const TCP_ACCEPT: &[u8] = include_bytes!("../../fixtures/tcp/tcp_accept.beam");
+
+const UDP_PROBE: &[u8] = include_bytes!("../../fixtures/tcp/udp_probe.beam");
 
 /// The pinned OTP modules that the probes call: `erlang` has
 /// `open_port/2`, `port_control/3`, `port_close/1`, and `port_info/1`,
@@ -71,10 +73,10 @@ fn text(term: &Term, atoms: &AtomTable) -> String {
     }
 }
 
-/// Load the probe with the pinned modules of [`MODULES`].
+/// Load the probes with the pinned modules of [`MODULES`].
 fn load() -> BeamProgram {
     let beams: Vec<Vec<u8>> = MODULES.iter().map(|module| pinned_beam(module)).collect();
-    let mut all: Vec<&[u8]> = vec![TCP_PROBE, TCP_ACCEPT];
+    let mut all: Vec<&[u8]> = vec![TCP_PROBE, TCP_ACCEPT, UDP_PROBE];
     all.extend(beams.iter().map(Vec::as_slice));
     BeamProgram::load(&all).unwrap()
 }
@@ -88,6 +90,27 @@ fn load() -> BeamProgram {
 /// assert_runs("data", "[undefined,true,...]");
 /// ```
 fn assert_runs(function: &str, expected: &str) {
+    assert_eq!(
+        erts_text("tcp_probe", function),
+        expected,
+        "ERTS {function}"
+    );
+    assert_eq!(
+        pbeam_text("tcp_probe", function),
+        expected,
+        "PBeam {function}"
+    );
+}
+
+/// Return the `~w` text of `Module:Function()` on the pinned ERTS with one
+/// scheduler.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(erts_text("tcp_probe", "enabled"), "[1,0,0,0,0,4,10,0,0,0,4]");
+/// ```
+fn erts_text(module: &str, function: &str) -> String {
     let reference = Command::new("erl")
         .args([
             "+S",
@@ -96,22 +119,25 @@ fn assert_runs(function: &str, expected: &str) {
             "-pa",
             "fixtures/tcp",
             "-eval",
-            &format!("io:format(\"~w~n\", [tcp_probe:{function}()]), halt()."),
+            &format!("io:format(\"~w~n\", [{module}:{function}()]), halt()."),
         ])
         .output()
         .unwrap();
     assert!(reference.status.success(), "{reference:?}");
-    assert_eq!(
-        String::from_utf8_lossy(&reference.stdout),
-        format!("{expected}\n"),
-        "ERTS {function}"
-    );
-    let result = load().execute("tcp_probe", function, &[]).unwrap();
-    assert_eq!(
-        text(&result.term, result.atoms()),
-        expected,
-        "PBeam {function}"
-    );
+    let text = String::from_utf8(reference.stdout).unwrap();
+    text.strip_suffix('\n').unwrap().to_owned()
+}
+
+/// Return the `~w` text of `Module:Function()` on PBeam.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(pbeam_text("tcp_probe", "enabled"), "[1,0,0,0,0,4,10,0,0,0,4]");
+/// ```
+fn pbeam_text(module: &str, function: &str) -> String {
+    let result = load().execute(module, function, &[]).unwrap();
+    text(&result.term, result.atoms())
 }
 
 #[test]
@@ -179,10 +205,10 @@ fn keeps_the_port_data_and_names_the_driver_as_pinned_erts() {
 fn stops_the_run_for_each_tcp_inet_part_that_is_not_implemented() {
     let program = load();
     for (case, message) in [
-        ("udp", "unsupported open_port/2 driver udp_inet"),
+        ("sctp", "unsupported open_port/2 driver sctp_inet"),
         (
             "list",
-            "unsupported open_port/2 settings of a tcp_inet port other than [binary]",
+            "unsupported open_port/2 settings of an inet driver port other than [binary]",
         ),
         (
             "command",
@@ -236,9 +262,127 @@ fn stops_the_open_of_a_tcp_inet_port_in_a_run_with_a_policy() {
         .unwrap_err()
         .to_string();
     assert!(
-        error.starts_with("unsupported tcp_inet port in a run with a policy"),
+        error.starts_with("unsupported inet driver port in a run with a policy"),
         "{error}"
     );
+}
+
+#[test]
+fn gives_the_host_name_of_a_udp_inet_port_as_pinned_erts() {
+    // The requests of `inet_config:set_hostname/0` (inet_config.erl:223-231)
+    // in the order of a trace on pinned ERTS: `OPEN` (inet_drv.c:14577-14636),
+    // `SETOPTS`, `BIND`, `GETHOSTNAME` (inet_drv.c:11219-11233), `GETOPTS`
+    // of `linger`, and `SUBSCRIBE`, which `prim_inet:close/1` sends. The
+    // reply of `GETHOSTNAME` is `[1 | Name]` with the name of the host.
+    let host = String::from_utf8(Command::new("hostname").output().unwrap().stdout).unwrap();
+    let name: Vec<String> = host
+        .trim_end()
+        .bytes()
+        .map(|byte| byte.to_string())
+        .collect();
+    let expected = format!(
+        "[[[1],[1],[1]],true,[1,{}],[[1,3,0,0,0,0,0,0,0,0],[1,1,0,0,0,0]],{{'EXIT',port,normal}}]",
+        name.join(",")
+    );
+    assert_eq!(erts_text("udp_probe", "host_name"), expected, "ERTS");
+    assert_eq!(pbeam_text("udp_probe", "host_name"), expected, "PBeam");
+}
+
+#[test]
+fn gives_the_open_and_listen_errors_of_a_udp_inet_port_as_pinned_erts() {
+    // `packet_inet_ctl` checks the size, the family, the type, and then the
+    // protocol (inet_drv.c:14577-14636), and replies `exbadport` to
+    // `LISTEN` of a socket that is not SCTP (inet_drv.c:14846-14858). A
+    // stream socket with the UDP protocol gives the errno of the host.
+    let expected = erts_text("udp_probe", "open");
+    let prototype = if cfg!(target_vendor = "apple") {
+        "eprototype"
+    } else {
+        "eprotonosupport"
+    };
+    let bytes: Vec<String> = prototype.bytes().map(|byte| byte.to_string()).collect();
+    assert!(
+        expected.contains(&format!("[0,{}]", bytes.join(","))),
+        "{expected}"
+    );
+    assert_eq!(pbeam_text("udp_probe", "open"), expected, "PBeam");
+}
+
+#[test]
+fn stops_the_run_for_each_udp_inet_part_that_is_not_implemented() {
+    let program = load();
+    for (case, message) in [
+        ("stream", "unsupported udp_inet type 1"),
+        ("seqpacket", "unsupported udp_inet type 3"),
+        ("sctp", "unsupported udp_inet protocol 3"),
+        ("accept", "unsupported udp_inet request 26"),
+    ] {
+        let argument = Term::Atom(program.atom(case).unwrap());
+        let error = program
+            .execute("udp_probe", "unsupported", &[program.host_term(argument)])
+            .unwrap_err()
+            .to_string();
+        assert!(error.starts_with(message), "{case}: {error}");
+    }
+}
+
+#[test]
+fn stops_the_run_at_a_datagram_on_an_active_udp_inet_port() {
+    // ERTS reads an active datagram socket (`sock_select(desc, FD_READ, 1)`,
+    // inet_drv.c:14619-14621) and sends each datagram to the owner as
+    // `{udp, Socket, Address, Port, Data}` in `list` mode. PBeam does not
+    // read it: the ready socket stops the run.
+    let erts = with_datagrams(|port| {
+        let output = Command::new("erl")
+            .args(["+S", "1", "-noshell", "-pa", "fixtures/tcp", "-eval"])
+            .arg(format!(
+                "io:format(\"~w~n\", [udp_probe:active({port})]), halt()."
+            ))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8_lossy(&output.stdout)
+            .trim_end()
+            .to_owned()
+    });
+    assert_eq!(erts, "{udp,port,{127,0,0,1},true,[104,105]}", "ERTS");
+    let error = with_datagrams(|port| {
+        let program = load();
+        let port = Term::Integer(port.into());
+        program
+            .execute("udp_probe", "active", &[program.host_term(port)])
+            .unwrap_err()
+            .to_string()
+    });
+    assert!(
+        error.starts_with("unsupported udp_inet datagram receive: see \"udp_inet ports\""),
+        "{error}"
+    );
+}
+
+/// Run `run` with a free UDP port of `127.0.0.1`, and send the datagram
+/// `"hi"` to that port every 2 ms until `run` returns.
+fn with_datagrams<T>(run: impl FnOnce(u16) -> T) -> T {
+    let port = UdpSocket::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let stop = Arc::new(AtomicBool::new(false));
+    let sender = {
+        let stop = Arc::clone(&stop);
+        thread::spawn(move || {
+            let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+            while !stop.load(Ordering::SeqCst) {
+                let _ = socket.send_to(b"hi", ("127.0.0.1", port));
+                thread::sleep(Duration::from_millis(2));
+            }
+        })
+    };
+    let result = run(port);
+    stop.store(true, Ordering::SeqCst);
+    sender.join().unwrap();
+    result
 }
 
 /// A client of the test: it reads `"Port Count"` from the file `path` and

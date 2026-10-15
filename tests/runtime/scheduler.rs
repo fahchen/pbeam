@@ -1780,7 +1780,7 @@ fn counts_the_terms_of_a_map_drain_that_is_the_only_item() {
 fn removes_the_accept_of_a_process_that_exits_with_its_port_monitor_signal_pending() {
     use crate::runtime::port::{
         Driver, Ports,
-        tcp_inet::{Acceptor, TcpInet},
+        inet::{Acceptor, Inet, SocketType},
     };
     // At exit, a monitor signal that the process did not handle runs the
     // monitor (erl_proc_sig_queue.c:7347-7355; inet_drv.c:12732-12771).
@@ -1798,7 +1798,7 @@ fn removes_the_accept_of_a_process_that_exits_with_its_port_monitor_signal_pendi
         )
         .unwrap()
         .unwrap();
-    let mut tcp = TcpInet::new();
+    let mut tcp = Inet::new(SocketType::Stream);
     tcp.acceptors.push_back(Acceptor {
         id: 0,
         caller: child,
@@ -1806,7 +1806,7 @@ fn removes_the_accept_of_a_process_that_exits_with_its_port_monitor_signal_pendi
         timer: None,
     });
     let listen = scheduler
-        .open_port(b"tcp_inet".to_vec(), Driver::TcpInet(tcp))
+        .open_port(b"tcp_inet".to_vec(), Driver::Inet(tcp))
         .unwrap();
     scheduler.park_current();
     scheduler.schedule_next().unwrap();
@@ -1818,6 +1818,6 @@ fn removes_the_accept_of_a_process_that_exits_with_its_port_monitor_signal_pendi
     scheduler.send_signal(None, child, signal).unwrap();
     scheduler.finish_current(atom("normal"), None);
     let ports = scheduler.resources.borrow_mut::<Ports>();
-    let port = ports.get_mut(listen).unwrap().tcp_inet_mut().unwrap();
+    let port = ports.get_mut(listen).unwrap().inet_mut().unwrap();
     assert!(port.acceptors.is_empty());
 }
