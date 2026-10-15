@@ -584,8 +584,8 @@ This section answers the question of issue [#625](https://github.com/fahchen/pbe
 
 | Session | What | Time | One-minute load, before / after | Raw record |
 | --- | --- | --- | --- | --- |
-| K1 | Time profile of 100 keys, line-table build | 09:28:39 | 3.12 / 3.80 | `prof2.trace`, `prof2.attr.txt` |
-| K2 | Time profile of 100 keys, line-table build | 09:48:48 | 1.48 / 1.85 | `prof3.trace`, `prof3.attr.txt` |
+| K1 | Time profile of 100 keys, line-table build | 09:28:39 | 3.12 / 3.80 | `prof2.trace`, `prof2.attr.txt`, `prof2.attr-all.txt` |
+| K2 | Time profile of 100 keys, line-table build | 09:48:48 | 1.48 / 1.85 | `prof3.trace`, `prof3.attr.txt`, `prof3.attr-all.txt` |
 | P | CPU time for each key, plain and line-table builds, 4 runs of 60 keys, no profiler | 09:46:31 to 09:48:44 | 1.06 to 1.44 | `pristine.log`, `lt.log`, `pristine2.log`, `lt2.log` |
 | N | Instruction counts of 10 keys | 09:50:43 | 1.79 / 1.73 | `count2.txt` |
 | F1 | Time profile of the floor loop for 8 s, line-table build | 09:40:23 | 1.58 / 1.65 | `floor-tp.trace`, `floor-tp.attr.txt` |
@@ -605,12 +605,12 @@ The ranked parts of one key press. A part is exclusive: each sample belongs to o
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | Process table lookup: `SipHash` of `ProcessId` in `Scheduler::processes` | 7.40 | 26.5 percent | 6.68 | 26.1 percent | `b8c71940` |
 | 2 | Allocation: `malloc`, `free`, and `realloc` | 3.27 | 11.7 percent | 3.05 | 11.9 percent | `b8c71940` |
-| 3 | Instruction bodies of the kinds that rows 6 to 11 do not name | 2.89 | 10.4 percent | 3.02 | 11.8 percent | `b8c71940` |
+| 3 | Instruction bodies that rows 6, 7, 9, 10, 11, and 13 do not hold | 2.97 | 10.6 percent | 3.07 | 12.0 percent | `b8c71940` |
 | 4 | Term clone and drop: the `Arc` counts and the nested drop | 2.83 | 10.1 percent | 2.42 | 9.5 percent | `b8c71940` |
-| 5 | Code table lookup: the module map, the function name table, the export map, the module identity map, and the label map | 1.97 | 7.1 percent | 1.65 | 6.5 percent | `b8c71940` |
+| 5 | Code table lookup: the module map, the function name table, the export map, the module identity map, and the label map | 1.98 | 7.1 percent | 1.65 | 6.5 percent | `b8c71940` |
 | 6 | Instruction body: `Move` | 1.95 | 7.0 percent | 1.61 | 6.3 percent | `b8c71940` |
 | 7 | Instruction body: `GetMapElements` | 1.59 | 5.7 percent | 1.32 | 5.2 percent | `b8c71940` |
-| 8 | Other: memory copy, other hash maps, and samples whose unwind lost the frame of `run` | 1.47 | 5.3 percent | 1.38 | 5.4 percent | `b8c71940` |
+| 8 | Other: memory copy, other hash maps, and samples whose unwind lost the frame of `run` | 1.51 | 5.4 percent | 1.42 | 5.6 percent | `b8c71940` |
 | 9 | Instruction fetch and dispatch: the head of the run loop | 1.33 | 4.8 percent | 1.35 | 5.3 percent | `b8c71940` |
 | 10 | Instruction body: `CallExternal`, without its lookups | 1.22 | 4.4 percent | 1.26 | 4.9 percent | `b8c71940` |
 | 11 | Instruction body: `Return` | 0.69 | 2.5 percent | 0.45 | 1.8 percent | `b8c71940` |
@@ -618,7 +618,7 @@ The ranked parts of one key press. A part is exclusive: each sample belongs to o
 | 13 | Instruction body: `CallFun` | 0.43 | 1.5 percent | 0.44 | 1.7 percent | `b8c71940` |
 | 14 | IO: the `prim_tty` NIF and the system calls | 0.10 | 0.4 percent | 0.20 | 0.8 percent | `b8c71940` |
 
-K1 has 2,792 samples (27.9 ms for each key, against 27.8 ms of CPU time from `ps`), and K2 has 2,555 samples (25.6 ms, against 25.6 ms). The two sessions differ by at most 1.4 percentage points in each row.
+K1 has 2,792 samples (27.9 ms for each key, against 27.8 ms of CPU time from `ps`), and K2 has 2,555 samples (25.6 ms, against 25.6 ms). The rows hold every sample: the K1 column sums to 2,792 samples and the K2 column to 2,555 samples (`prof2.attr-all.txt` and `prof3.attr-all.txt`, which print every part). The rank follows K1. The two sessions differ by at most 1.4 percentage points in each row.
 
 The instruction kinds, inclusive of their lookups, allocations, and term work. The executions come from session N, and the time comes from K1.
 
@@ -644,7 +644,7 @@ The instruction kinds, inclusive of their lookups, allocations, and term work. T
 
 ### One `call_ext_only` floor iteration
 
-Session F1 ran 153 runs of 200,000 iterations in 8 s, which is 261.4 ns for each iteration (the best run is 255.1 ns). One iteration retires four instructions: `TestYield`, which the loader writes after the entry label, `test is_eq_exact`, `gc_bif '-'`, and `call_ext_only`. The ns of a part is its share of the 8,051 samples times 261.4 ns.
+Session F1 ran 153 runs of 200,000 iterations in 8 s, which is 261.4 ns for each iteration (the best run is 255.1 ns). One iteration retires four instructions: `TestYield`, which the loader writes after the entry label, `test is_eq_exact`, `gc_bif '-'`, and `call_ext_only`. The ns of a part is its share of the 8,051 samples times 261.4 ns, and the rows hold every sample.
 
 | Rank | Part | ns for each iteration | Share | Revision | Session | Load | Raw record |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -657,6 +657,7 @@ Session F1 ran 153 runs of 200,000 iterations in 8 s, which is 261.4 ns for each
 | 7 | Instruction bodies of `test` and `TestYield` | 8.1 | 3.1 percent | `b8c71940` | F1 | 1.58 | `floor-tp.attr.txt` |
 | 8 | Term clone and drop | 0.8 | 0.3 percent | `b8c71940` | F1 | 1.58 | `floor-tp.attr.txt` |
 | 9 | Allocation | 0.1 | 0.0 percent | `b8c71940` | F1 | 1.58 | `floor-tp.attr.txt` |
+| 10 | IO: system calls outside the run loop | 0.4 | 0.1 percent | `b8c71940` | F1 | 1.58 | `floor-tp.attr.txt` |
 
 **The lookups of one external call, and why each runs.** The iteration makes 12 hash lookups and up to 6 string compares:
 
