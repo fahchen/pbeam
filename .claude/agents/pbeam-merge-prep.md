@@ -14,13 +14,13 @@ At most 30 minutes, 25 tool calls, and about 8k output tokens.
 
 ## Steps
 
-1. Run `git fetch origin`, so that `origin/<branch>` and `origin/main` are current. Then create a worktree with a local branch that tracks the PR branch: `git worktree add -B <branch> .claude/worktrees/merge-<pr> origin/<branch>`.
+1. Run `git fetch origin`, so that `origin/<branch>` and `origin/main` are current. Then create a worktree on a new local branch: `git worktree add -b merge-<pr> .claude/worktrees/merge-<pr> origin/<branch>`. Do not reuse or reset the local PR branch: another worktree can hold it, and it can hold commits that are not pushed.
 2. `git merge --no-edit origin/main`. Never rebase, amend, or force-push.
 3. Resolve conflicts:
    - Two sections or entries added at the same place in a document: keep both. Put the section of `main` first in a measurement document. In a list ordered newest first, put the entry that merges later first.
    - Any conflict in `src/` or `tests/`: stop and report it. Do not guess.
 4. Run `mise run check-brief`. It retries the known pty flake by itself.
-5. Push with `git push origin <branch>` (never `--force`). Remove the worktree.
+5. Push with `git push origin HEAD:<branch>` (never `--force`). Remove the worktree and delete the local branch `merge-<pr>`.
 
 ## Return
 
