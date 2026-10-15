@@ -398,6 +398,10 @@ name = "preempt"
 path = "tests/integration/preempt.rs"
 
 [[test]]
+name = "priority"
+path = "tests/integration/priority.rs"
+
+[[test]]
 name = "prim_file_read"
 path = "tests/integration/prim_file_read.rs"
 
