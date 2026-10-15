@@ -71,6 +71,7 @@ fn traps_for_perf_counter_another_positive_unit_and_a_negative_value() {
         atom("perf_counter"),
         Term::Integer(3),
         Term::Integer(i64::MAX),
+        Term::from_bigint(num_bigint::BigInt::from(1_u8) << 70_u32),
     ] {
         assert_eq!(
             time_unit_conversion(1_000_000_000, 1, &unit),
@@ -95,6 +96,7 @@ fn rejects_zero_a_negative_integer_and_each_other_term() {
         Term::Integer(0),
         Term::Integer(-1),
         Term::Integer(i64::MIN),
+        Term::from_bigint(-(num_bigint::BigInt::from(1_u8) << 70_u32)),
         Term::static_atom("ok"),
         Term::tuple(vec![]),
         Term::nil(),

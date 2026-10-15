@@ -102,6 +102,10 @@ name = "bignum"
 path = "tests/integration/bignum.rs"
 
 [[test]]
+name = "rand"
+path = "tests/integration/rand.rs"
+
+[[test]]
 name = "atom_to_binary"
 path = "tests/integration/atom_to_binary.rs"
 
@@ -156,6 +160,10 @@ path = "tests/integration/body_bif.rs"
 [[test]]
 name = "bs_create_bin"
 path = "tests/integration/bs_create_bin.rs"
+
+[[test]]
+name = "bit_size"
+path = "tests/integration/bit_size.rs"
 
 [[test]]
 name = "byte_size"
@@ -360,6 +368,10 @@ path = "tests/integration/otp_io.rs"
 [[test]]
 name = "persistent_term"
 path = "tests/integration/persistent_term.rs"
+
+[[test]]
+name = "process_dict"
+path = "tests/integration/process_dict.rs"
 
 [[test]]
 name = "policy"

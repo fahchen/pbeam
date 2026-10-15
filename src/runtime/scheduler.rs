@@ -869,7 +869,7 @@ impl Scheduler {
         self.release
             .push(Release::Mailbox(std::mem::take(&mut process.mailbox)));
         self.release
-            .push(Release::Dictionary(std::mem::take(&mut process.dictionary)));
+            .push(Release::Dictionary(process.dictionary.take_entries()));
         self.release
             .push(Release::Monitors(std::mem::take(&mut process.monitors)));
     }

@@ -497,10 +497,10 @@ fn wakes_a_waiting_process_and_stops_receive_timers_at_cancel_and_exit() {
 
     assert!(scheduler.set_receive_timer(1_000_000_000, &Term::Integer(1), 3));
     scheduler.cancel_receive_timer();
-    assert_eq!(scheduler.timers.wait_time(1_000_000_000), None);
+    assert!(!scheduler.timers.active());
     assert!(scheduler.set_receive_timer(1_000_000_000, &Term::Integer(1), 3));
     scheduler.finish_current(atom("normal"), None);
-    assert_eq!(scheduler.timers.wait_time(1_000_000_000), None);
+    assert!(!scheduler.timers.active());
 }
 
 #[test]
@@ -568,8 +568,9 @@ fn rejects_receive_timeouts_as_erts_set_proc_timer_term() {
     assert!(scheduler.set_receive_timer(end - 1_000_000, &Term::Integer(1), 0));
     assert_eq!(
         scheduler.current_process_mut().receive_timer,
+        // Start number 0 is the time correction check timer.
         ReceiveTimer::Set {
-            key: (9_223_372_036_000, 0),
+            key: (9_223_372_036_000, 1),
             resume: 0
         }
     );
@@ -974,7 +975,7 @@ fn moves_the_containers_of_an_exiting_process_to_the_release_work_list() {
         let process = scheduler.processes.get_mut(&id).unwrap();
         process.frames[0].stack = vec![StackSlot::Term(marker(2))];
         process.mailbox.push(marker(3));
-        process.dictionary.push((Term::Integer(4), marker(5)));
+        process.dictionary.put(Term::Integer(4), marker(5));
         process.pending_bif = Some(PendingBif {
             module: "erlang",
             function: "length",
@@ -1037,9 +1038,7 @@ fn releases_the_terms_of_every_container_of_an_exiting_process() {
             StackSlot::Term(stack.clone()),
         ];
         process.mailbox.push(message.clone());
-        process
-            .dictionary
-            .push((Term::Integer(9), dictionary.clone()));
+        process.dictionary.put(Term::Integer(9), dictionary.clone());
         process.pending_bif = Some(PendingBif {
             module: "erlang",
             function: "length",
@@ -1489,7 +1488,7 @@ fn counts_the_bytes_of_the_release_work_list() {
             .map(|number| StackSlot::Term(marker(number as i64)))
             .collect();
         process.mailbox.push(marker(3));
-        process.dictionary.push((Term::Integer(4), marker(5)));
+        process.dictionary.put(Term::Integer(4), marker(5));
         process.pending_bif = Some(PendingBif {
             module: "erlang",
             function: "length",
