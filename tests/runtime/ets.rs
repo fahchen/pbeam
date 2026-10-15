@@ -1,5 +1,6 @@
 use super::{
-    Access, EMPTY, EtsTables, KeyIndex, Table, TableType, atom_hash, key_hash, stored_hash,
+    Access, EMPTY, EtsTables, KeyIndex, Table, TableType, atom_hash, key_hash, object_hash,
+    stored_hash,
 };
 use crate::term::{Atom, AtomTable, Map, ProcessId, Reference, Term, test_atom_table};
 
@@ -363,6 +364,32 @@ fn keeps_the_objects_of_a_bag_key_in_insertion_order_across_deletes() {
     };
     assert_eq!(objects(1), vec![object(1, 7), object(1, 8), object(1, 9)]);
     assert_eq!(objects(2), vec![object(2, 1)]);
+}
+
+#[test]
+fn hashes_bag_objects_whose_changing_elements_cancelled_under_rotate_and_xor() {
+    // The objects `{7, I, 0 x 63, I}` had one hash for each `I` when the
+    // object hash was a rotate by 5 and an XOR of the element hashes: the
+    // two `I` elements are 64 rotations apart and cancel. A list insert of
+    // these objects then compared each object with all earlier objects in
+    // one turn. Each object must now have its own hash, and the list insert
+    // must give the ERTS counts of one insert after another.
+    const OBJECTS: i64 = 10_000;
+    let object = |value| {
+        let mut object = vec![Term::Integer(7), Term::Integer(value)];
+        object.extend(std::iter::repeat_n(Term::Integer(0), 63));
+        object.push(Term::Integer(value));
+        object
+    };
+    let objects: Vec<Vec<Term>> = (0..OBJECTS).map(object).collect();
+    let hashes: std::collections::HashSet<u64> =
+        objects.iter().map(|object| object_hash(object)).collect();
+    assert_eq!(hashes.len(), objects.len());
+
+    let atoms = AtomTable::new();
+    let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Bag);
+    let counts = table.insert_all(&atoms, objects);
+    assert_eq!(counts, (0..OBJECTS as usize).collect::<Vec<_>>());
 }
 
 #[test]

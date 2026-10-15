@@ -2,6 +2,7 @@
 //! processes of a run share one store.
 
 use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hasher};
 
 use crate::term::{Atom, AtomTable, LiveBytes, ProcessId, Reference, Term, internal_hash};
 
@@ -452,9 +453,11 @@ impl Table {
     /// [`BagWalk`]: the objects of the list that it added, and the objects
     /// of the key that were in the table, which it walks only as far as
     /// ERTS compares them. A hash of the whole object finds an exactly
-    /// equal one. The work is then linear in the objects of the list and
-    /// in the walked objects, and the counts stay the ERTS ones. Each
-    /// other table type compares nothing.
+    /// equal one. The expected work is then linear in the objects of the
+    /// list and in the walked objects, and the counts stay the ERTS ones.
+    /// Only objects with equal 64-bit hashes ([`object_hash`]) are
+    /// compared, so the work is quadratic only when many different objects
+    /// of one key have one hash. Each other table type compares nothing.
     ///
     /// # Examples
     ///
@@ -488,8 +491,8 @@ impl Table {
                 }
             };
             let walk = &mut walks[index];
-            let object_hash = object_hash(atoms, &object);
-            let count = match walk.find(self, atoms, object_hash, &object) {
+            let object_hash = object_hash(&object);
+            let count = match walk.find(self, object_hash, &object) {
                 Some(count) => count,
                 None => {
                     let count = walk.added + walk.walked;
@@ -902,15 +905,9 @@ impl BagWalk {
     /// ```rust,ignore
     /// let mut walk = BagWalk::new(Term::Integer(1), EMPTY);
     /// let object = vec![Term::Integer(1)];
-    /// assert_eq!(walk.find(&table, &atoms, object_hash(&atoms, &object), &object), None);
+    /// assert_eq!(walk.find(&table, object_hash(&object), &object), None);
     /// ```
-    fn find(
-        &mut self,
-        table: &Table,
-        atoms: &AtomTable,
-        hash: u64,
-        object: &[Term],
-    ) -> Option<usize> {
+    fn find(&mut self, table: &Table, hash: u64, object: &[Term]) -> Option<usize> {
         let place = |seen: &HashMap<u64, Vec<(Place, usize)>>| {
             seen.get(&hash)?
                 .iter()
@@ -924,7 +921,7 @@ impl BagWalk {
                 self.cursor = table.older[slot];
                 self.walked += 1;
                 let candidate = table.object_of(slot);
-                let candidate_hash = object_hash(atoms, candidate);
+                let candidate_hash = object_hash(candidate);
                 self.seen
                     .entry(candidate_hash)
                     .or_default()
@@ -1128,19 +1125,26 @@ impl KeyIndex {
     }
 }
 
-/// Return a hash of the whole object `object` from the hash of each
-/// element ([`key_hash`]). Two exactly equal objects have equal hashes, so
-/// [`BagWalk`] compares only the objects with the hash of the object.
+/// Return a hash of the whole object `object`: the standard SipHash
+/// ([`DefaultHasher`]) of the ERTS internal hash of each element
+/// ([`internal_hash`]), in element order. Two exactly equal objects have
+/// equal hashes, so [`BagWalk`] compares only the objects with the hash of
+/// the object. SipHash mixes each element hash into the full state, so two
+/// elements that change together do not cancel, as they did with a rotate
+/// and XOR of the element hashes.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let atoms = AtomTable::new();
 /// let object = [Term::Integer(1), Term::Integer(2)];
-/// assert_eq!(object_hash(&atoms, &object), object_hash(&atoms, &object.clone()));
+/// assert_eq!(object_hash(&object), object_hash(&object.clone()));
 /// ```
-fn object_hash(atoms: &AtomTable, object: &[Term]) -> u64 {
-    (object.iter()).fold(0, |hash, term| hash.rotate_left(5) ^ key_hash(atoms, term))
+fn object_hash(object: &[Term]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for term in object {
+        hasher.write_u64(internal_hash(term));
+    }
+    hasher.finish()
 }
 
 /// Return the stored hash of an ETS key: the ERTS key hash ([`key_hash`])
