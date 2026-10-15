@@ -56,6 +56,19 @@ fn binary_part_probe_has_the_gc_bif3_bytes() {
 }
 
 #[test]
+fn is_integer_probe_has_the_bif3_bytes() {
+    assert_in_fixture(
+        "fixtures/is_integer/is_integer_probe.beam",
+        &[
+            // guard/3: bif3 f12 is_integer/3 x0 x1 x2 x0
+            &[0xB9, 0xC5, 0x10, 0x03, 0x13, 0x23, 0x03],
+            // body/3: bif3 f0 is_integer/3 y0 y2 x0 x0
+            &[0xB9, 0x05, 0x10, 0x04, 0x24, 0x03, 0x03],
+        ],
+    );
+}
+
+#[test]
 fn binary_match_probe_has_the_binary_match_bytes() {
     assert_in_fixture(
         "fixtures/binary_match/binary_match_probe.beam",

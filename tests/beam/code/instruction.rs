@@ -1679,6 +1679,70 @@ fn decodes_gc_bif3_of_the_binary_part_probe_fixture_into_a_bif_instruction() {
 }
 
 #[test]
+fn decodes_bif3_of_the_is_integer_probe_fixture_into_a_bif_instruction() {
+    // `tests/integration/fixture_opcodes.rs` checks that
+    // `fixtures/is_integer/is_integer_probe.beam` has these bytes.
+    // guard/3: bif3 f12 is_integer/3 x0 x1 x2 x0
+    let guard = [0xB9, 0xC5, 0x10, 0x03, 0x13, 0x23, 0x03];
+    // body/3: bif3 f0 is_integer/3 y0 y2 x0 x0
+    let body = [0xB9, 0x05, 0x10, 0x04, 0x24, 0x03, 0x03];
+    let mut code = vec![0, 0, 0, 16];
+    code.extend([0; 16]);
+    code.extend([&guard[..], &body, &[0x03]].concat());
+    // The instructions name import 1, as in the fixture.
+    let imports = vec![
+        ("erlang".to_owned(), "binary_part".to_owned(), 3),
+        ("erlang".to_owned(), "is_integer".to_owned(), 3),
+    ];
+    let (instructions, _) =
+        parse_code(&code, &AtomTable::new(), &[], &imports, &[], &[], &[]).unwrap();
+    assert!(matches!(
+        instructions.as_slice(),
+        [
+            Instruction::Bif {
+                fail_label: 12,
+                bif: BifId::ErlangIsInteger3,
+                arguments: guard_arguments,
+                destination: Operand::X(0),
+            },
+            Instruction::Bif {
+                fail_label: 0,
+                bif: BifId::ErlangIsInteger3,
+                arguments: body_arguments,
+                destination: Operand::X(0),
+            },
+            Instruction::End,
+        ] if matches!(
+                guard_arguments.as_slice(),
+                [Operand::X(0), Operand::X(1), Operand::X(2)]
+            )
+            && matches!(
+                body_arguments.as_slice(),
+                [Operand::Y(0), Operand::Y(2), Operand::X(0)]
+            )
+    ));
+    // ERTS loads the destination of `i_bif3` only as an X or Y register
+    // (`d` in jit/arm/ops.tab:836), so the integer 0 as destination fails.
+    let mut literal_destination = code.clone();
+    literal_destination[20 + 6] = 0x01;
+    assert!(
+        parse_code(
+            &literal_destination,
+            &AtomTable::new(),
+            &[],
+            &imports,
+            &[],
+            &[],
+            &[]
+        )
+        .is_err()
+    );
+    // Without its destination and the end, the instruction is truncated.
+    code.truncate(code.len() - 2);
+    assert!(parse_code(&code, &AtomTable::new(), &[], &imports, &[], &[], &[]).is_err());
+}
+
+#[test]
 fn decodes_the_fun_instructions_of_the_fun_probe_fixture() {
     let code = |instructions: &[u8]| {
         let mut code = vec![0, 0, 0, 16];

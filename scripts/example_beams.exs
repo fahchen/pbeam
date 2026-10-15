@@ -13,13 +13,10 @@
 defmodule ExampleBeams do
   # Each module of the pinned OTP and Elixir that the PBeam loader does not load, with the load error. The loader stops at the first instruction that it cannot decode (src/beam/code/instruction.rs, skip_unsupported_instruction). The test runs_the_called_modules_of_an_example_on_demand_as_pinned_erts of tests/feature/example.rs loads each file with the pbeam binary and compares the error. Remove a module when the loader learns its instruction.
   @not_loaded %{
-    :calendar => "unsupported BEAM opcode 185 (bif3)",
     :crypto => "unsupported BEAM opcode 149 (on_load)",
     :elixir_errors => "unsupported BEAM opcode 132 (bs_match_string)",
     :eval_bits => "unsupported BEAM opcode 118 (bs_get_float2)",
     :file_io_server => "unsupported BEAM opcode 141 (bs_skip_utf16)",
-    :inet_db => "unsupported BEAM opcode 185 (bif3)",
-    :io_lib_fread => "unsupported BEAM opcode 185 (bif3)",
     :rand => "unsupported BEAM opcode 102 (fnegate)",
     :shell_docs => "unsupported BEAM opcode 132 (bs_match_string)",
     IEx.Evaluator => "unsupported BEAM opcode 132 (bs_match_string)"
