@@ -438,7 +438,7 @@ fn insert_after_compares(table: &mut Table, atoms: &AtomTable, object: Vec<Term>
         compared += 1;
         slot = table.older[slot];
     }
-    table.add(hash, object, newest);
+    table.add(atoms, hash, object, newest);
     compared
 }
 
@@ -480,4 +480,80 @@ fn counts_the_compares_of_a_bag_list_insert_as_one_insert_after_another() {
     assert_eq!(table.insert_all(&atoms, objects), expected);
     assert_eq!(expected, vec![2, 5, 0, 0, 5, 6, 0, 1, 3]);
     assert_eq!(table.live_objects(), one_by_one.live_objects());
+}
+
+/// Return the keys of each bucket chain of `table`, bucket 0 first.
+fn chains(table: &Table) -> Vec<Vec<Term>> {
+    (0..table.bucket_count())
+        .map(|bucket| {
+            table
+                .chain(bucket)
+                .map(|object| object[0].clone())
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn keeps_the_erts_bucket_chains_through_splits_and_joins() {
+    // The reference model is the ERTS chain list: a new key goes to the end
+    // of its bucket (erl_db_hash.c:1384-1393, 1447-1452), a split keeps the
+    // order of both chains (erl_db_hash.c:3690-3740), and a join puts the
+    // chain of the top bucket after the chain of its low bucket
+    // (erl_db_hash.c:3743-3818). The table must give the same chains.
+    let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
+    let atoms = test_atom_table();
+    let mut model: Vec<Vec<Term>> = vec![Vec::new(); 256];
+    let bucket = |buckets: usize, key: &Term| {
+        let mask = buckets.next_power_of_two() - 1;
+        let slot = stored_hash(&atoms, key) as usize & mask;
+        if slot >= buckets {
+            slot & (mask >> 1)
+        } else {
+            slot
+        }
+    };
+    let mut insert = |table: &mut Table, model: &mut Vec<Vec<Term>>, key: i64| {
+        let key = Term::Integer(key);
+        table.insert(&atoms, vec![key.clone()]);
+        let index = bucket(model.len(), &key);
+        model[index].push(key);
+        if model.iter().map(Vec::len).sum::<usize>() > model.len() {
+            let to = model.len();
+            let mask = (to + 1).next_power_of_two() - 1;
+            let from = to & (mask >> 1);
+            let (high, low) = model[from]
+                .drain(..)
+                .partition(|key| stored_hash(&atoms, key) as usize & mask == to);
+            model[from] = low;
+            model.push(high);
+        }
+    };
+    for key in 0..6000 {
+        insert(&mut table, &mut model, key);
+    }
+    assert_eq!(chains(&table), model);
+    for key in 0..5000 {
+        let key = Term::Integer(key);
+        table.delete(&atoms, &key);
+        let index = bucket(model.len(), &key);
+        model[index].retain(|kept| *kept != key);
+        while model.len() > table.bucket_count() {
+            let source = model.pop().unwrap();
+            let target = model.len() & ((model.len() + 1).next_power_of_two() - 1) >> 1;
+            model[target].extend(source);
+        }
+    }
+    assert!(table.bucket_count() < 6000);
+    assert_eq!(chains(&table), model);
+    for key in 10_000..12_000 {
+        insert(&mut table, &mut model, key);
+    }
+    assert_eq!(chains(&table), model);
+    let key = Term::Integer(10_000);
+    assert_eq!(
+        table.key_bucket(&atoms, &key),
+        Some(bucket(model.len(), &key))
+    );
+    assert_eq!(table.key_bucket(&atoms, &Term::Integer(0)), None);
 }

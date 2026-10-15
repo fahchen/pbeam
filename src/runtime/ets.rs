@@ -1,6 +1,8 @@
 //! ETS tables of the node, as the ERTS table store (`erl_db.c`). All
 //! processes of a run share one store.
 
+pub(super) mod pattern;
+
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hasher};
 
@@ -78,6 +80,21 @@ pub(super) struct Table {
     /// The stored key hash of each key to the slot of its newest object.
     /// Look up a key through this index, not by a walk of the slots.
     index: KeyIndex,
+    /// The slot of the newest object of the first key of each active bucket
+    /// of the ERTS hash table, or `EMPTY` for an empty bucket. The bucket
+    /// chain (`BUCKET`, `erl_db_hash.c:186-190`) holds the keys in this
+    /// order, and the objects of one key are contiguous from the newest to
+    /// the oldest. A traversal reads the buckets from 0 up and each chain
+    /// in order (`match_traverse`, `erl_db_hash.c:1835-1971`).
+    heads: Vec<usize>,
+    /// For the newest object of each key, the slot of the newest object of
+    /// the next key in its bucket chain, or `EMPTY` for the last key. Each
+    /// other slot holds `EMPTY`.
+    next: Vec<usize>,
+    /// The number of changes to the objects of the table. A trapped match
+    /// keeps it, so its next turn can see a change that came between the
+    /// turns.
+    writes: u64,
     /// The number of active buckets of the ERTS hash table (`nactive`). It
     /// gives the number of slots and the slot of each key, so the exit of
     /// the owner frees the same segments with the same objects as ERTS. A
@@ -371,6 +388,9 @@ impl Table {
             free: Vec::new(),
             older: Vec::new(),
             index: KeyIndex::default(),
+            heads: vec![EMPTY; FIRST_SEGMENT_SLOTS],
+            next: Vec::new(),
+            writes: 0,
             buckets: FIRST_SEGMENT_SLOTS,
         }
     }
@@ -433,12 +453,13 @@ impl Table {
         let newest = match (found, self.table_type) {
             (Some(slot), TableType::Set) => {
                 self.objects[slot] = Some(object);
+                self.writes += 1;
                 return;
             }
             (Some(newest), _) => newest,
             (None, _) => EMPTY,
         };
-        self.add(hash, object, newest);
+        self.add(atoms, hash, object, newest);
     }
 
     /// Add each object of `objects` in list order, as a list insert puts
@@ -497,7 +518,7 @@ impl Table {
                 None => {
                     let count = walk.added + walk.walked;
                     let newest = self.position(hash, &walk.key).unwrap_or(EMPTY);
-                    let slot = self.add(hash, object, newest);
+                    let slot = self.add(atoms, hash, object, newest);
                     walk.seen
                         .entry(object_hash)
                         .or_default()
@@ -514,8 +535,11 @@ impl Table {
     /// Put `object` into a new slot as the newest object of its key, whose
     /// stored key hash is `hash`, before the object in the slot `newest`, or
     /// as the only object of its key when `newest` is `EMPTY`. Return the
-    /// slot. A new object that makes the objects more than the buckets
-    /// splits one bucket (`erl_db_hash.c:1453-1461`).
+    /// slot. A new key goes to the end of its bucket chain, and a new object
+    /// of a key takes the place of the newest object of the key in the chain
+    /// (`erl_db_hash.c:1384-1393`, `1447-1452`). A new object that makes the
+    /// objects more than the buckets splits one bucket
+    /// (`erl_db_hash.c:1453-1461`). `atoms` owns the name of each atom key.
     ///
     /// # Examples
     ///
@@ -523,19 +547,160 @@ impl Table {
     /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
     /// let atoms = AtomTable::new();
     /// let key = Term::Integer(1);
-    /// assert_eq!(table.add(stored_hash(&atoms, &key), vec![key], EMPTY), 0);
+    /// assert_eq!(table.add(&atoms, stored_hash(&atoms, &key), vec![key], EMPTY), 0);
     /// ```
-    fn add(&mut self, hash: u64, object: Vec<Term>, newest: usize) -> usize {
+    fn add(&mut self, atoms: &AtomTable, hash: u64, object: Vec<Term>, newest: usize) -> usize {
         let slot = self.allocate();
         self.objects[slot] = Some(object);
         self.older[slot] = newest;
+        self.writes += 1;
+        let bucket = self.bucket(hash);
         if newest == EMPTY {
             self.index.insert(hash, slot);
+            let last = self.chain_keys(bucket).last().unwrap_or(EMPTY);
+            self.link(bucket, last, slot);
         } else {
             self.index.replace(hash, newest, slot);
+            let before = self.key_before(bucket, newest);
+            self.next[slot] = std::mem::replace(&mut self.next[newest], EMPTY);
+            self.link(bucket, before, slot);
         }
-        self.buckets = self.buckets.max(self.object_count());
+        if self.object_count() > self.buckets {
+            self.split(atoms);
+        }
         slot
+    }
+
+    /// Return the bucket of the stored key hash `hash`: the hash under the
+    /// size mask, or under the half mask when that bucket is not active
+    /// (`hash_to_ix`, `erl_db_hash.c:199-209`). The size mask is one less
+    /// than the power of two that holds the buckets
+    /// (`erl_db_hash.c:3675-3681`, `3776-3779`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
+    /// assert_eq!(table.bucket(0x1ff), 0xff);
+    /// ```
+    fn bucket(&self, hash: u64) -> usize {
+        let mask = self.buckets.next_power_of_two() - 1;
+        // `HashValue` is a `UWord`, so the key hash fits.
+        let bucket = hash as usize & mask;
+        if bucket >= self.buckets {
+            bucket & (mask >> 1)
+        } else {
+            bucket
+        }
+    }
+
+    /// Return the slot of the newest object of each key in the chain of the
+    /// bucket `bucket`, in chain order.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
+    /// assert_eq!(table.chain_keys(0).count(), 0);
+    /// ```
+    fn chain_keys(&self, bucket: usize) -> impl Iterator<Item = usize> + '_ {
+        links(self.heads[bucket], &self.next)
+    }
+
+    /// Return the slot of the key before the key whose newest object is in
+    /// the slot `slot` in the chain of the bucket `bucket`, or `EMPTY` when
+    /// it is the first key. The caller makes sure that the chain holds it.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
+    /// let atoms = AtomTable::new();
+    /// table.insert(&atoms, vec![Term::Integer(1)]);
+    /// assert_eq!(table.key_before(table.bucket(stored_hash(&atoms, &Term::Integer(1))), 0), EMPTY);
+    /// ```
+    fn key_before(&self, bucket: usize, slot: usize) -> usize {
+        let mut before = EMPTY;
+        for key in self.chain_keys(bucket) {
+            if key == slot {
+                return before;
+            }
+            before = key;
+        }
+        unreachable!("a bucket chain holds each of its keys")
+    }
+
+    /// Make the key slot `slot` follow the key slot `before` in the chain of
+    /// the bucket `bucket`, or make it the first key when `before` is
+    /// `EMPTY`. The caller sets the link of `slot` itself.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// table.link(0, EMPTY, 3);
+    /// assert_eq!(table.heads[0], 3);
+    /// ```
+    fn link(&mut self, bucket: usize, before: usize, slot: usize) {
+        if before == EMPTY {
+            self.heads[bucket] = slot;
+        } else {
+            self.next[before] = slot;
+        }
+    }
+
+    /// Split one bucket into the new top bucket, as `grow`
+    /// (`erl_db_hash.c:3648-3740`) does: each key of the low bucket whose
+    /// hash under the new size mask is the new bucket goes to the new
+    /// bucket, and both chains keep their order. `atoms` owns the name of
+    /// each atom key.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// table.split(&atoms);
+    /// assert_eq!(table.buckets, 257);
+    /// ```
+    fn split(&mut self, atoms: &AtomTable) {
+        let to = self.buckets;
+        self.buckets += 1;
+        self.heads.push(EMPTY);
+        let mask = self.buckets.next_power_of_two() - 1;
+        let from = to & (mask >> 1);
+        let keys: Vec<usize> = self.chain_keys(from).collect();
+        let (mut low, mut high) = (EMPTY, EMPTY);
+        self.heads[from] = EMPTY;
+        for slot in keys {
+            self.next[slot] = EMPTY;
+            let hash = stored_hash(atoms, self.key(self.object_of(slot)));
+            if hash as usize & mask == to {
+                self.link(to, high, slot);
+                high = slot;
+            } else {
+                self.link(from, low, slot);
+                low = slot;
+            }
+        }
+    }
+
+    /// Join the top bucket into its low bucket, as `shrink`
+    /// (`erl_db_hash.c:3743-3818`) does: the chain of the top bucket goes to
+    /// the end of the chain of the low bucket.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// table.join();
+    /// assert_eq!(table.buckets, 4351);
+    /// ```
+    fn join(&mut self) {
+        let source = self.buckets - 1;
+        let target = source & (self.buckets.next_power_of_two() - 1) >> 1;
+        self.buckets = source;
+        let chain = self.heads.pop().expect("an active bucket has a head");
+        if chain != EMPTY {
+            let last = self.chain_keys(target).last().unwrap_or(EMPTY);
+            self.link(target, last, chain);
+        }
     }
 
     /// Return the elements of the newest object with a key that is exactly
@@ -582,9 +747,71 @@ impl Table {
         objects
     }
 
+    /// Return the number of active buckets, as `NACTIVE` (`erl_db_hash.c:179`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Table::new(ProcessId(0), Access::Public, 1, TableType::Set).bucket_count(), 256);
+    /// ```
+    pub(super) fn bucket_count(&self) -> usize {
+        self.buckets
+    }
+
+    /// Return the elements of each object in the chain of the bucket
+    /// `bucket`, in chain order: the keys in chain order, and the objects of
+    /// each key from the newest to the oldest, as a traversal reads them
+    /// (`match_traverse`, `erl_db_hash.c:1897-1918`). The caller makes sure
+    /// that the bucket is active.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Bag);
+    /// let atoms = AtomTable::new();
+    /// table.insert(&atoms, vec![Term::Integer(1), Term::Integer(1)]);
+    /// table.insert(&atoms, vec![Term::Integer(1), Term::Integer(2)]);
+    /// let bucket = table.key_bucket(&atoms, &Term::Integer(1)).unwrap();
+    /// assert_eq!(table.chain(bucket).map(|object| object[1].clone()).collect::<Vec<_>>(), [Term::Integer(2), Term::Integer(1)]);
+    /// ```
+    pub(super) fn chain(&self, bucket: usize) -> impl Iterator<Item = &[Term]> + '_ {
+        self.chain_keys(bucket).flat_map(|newest| {
+            links(newest, &self.older).map(|slot| self.object_of(slot).as_slice())
+        })
+    }
+
+    /// Return the bucket of `key` when the table holds an object with a key
+    /// that is exactly equal to it, else `None`, as `analyze_pattern`
+    /// (`erl_db_hash.c:3262-3276`) finds the bucket of a bound key.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
+    /// assert_eq!(table.key_bucket(&AtomTable::new(), &Term::Integer(1)), None);
+    /// ```
+    pub(super) fn key_bucket(&self, atoms: &AtomTable, key: &Term) -> Option<usize> {
+        let hash = stored_hash(atoms, key);
+        self.position(hash, key).map(|_| self.bucket(hash))
+    }
+
+    /// Return the number of changes to the objects of the table.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
+    /// table.insert(&AtomTable::new(), vec![Term::Integer(1)]);
+    /// assert_eq!(table.writes(), 1);
+    /// ```
+    pub(super) fn writes(&self) -> u64 {
+        self.writes
+    }
+
     /// Return the bytes of the container arrays of the table: the slot array
     /// of the objects, the free-slot array, and the element array of each
-    /// stored object, and the array of the older slot of each slot. The number excludes the header of the `Vec` of each
+    /// stored object, the array of the older slot of each slot, the head of
+    /// each bucket chain, and the next key of each slot. The number excludes the header of the `Vec` of each
     /// array, as the accounting of task
     /// [#559](https://github.com/fahchen/pbeam/issues/559) excludes it. An
     /// object of immediate elements owns its element array, so the number is
@@ -600,7 +827,11 @@ impl Table {
     /// ```
     pub(super) fn allocated_bytes(&self) -> usize {
         self.objects.capacity() * std::mem::size_of::<Option<Vec<Term>>>()
-            + (self.free.capacity() + self.older.capacity()) * std::mem::size_of::<usize>()
+            + (self.free.capacity()
+                + self.older.capacity()
+                + self.heads.capacity()
+                + self.next.capacity())
+                * std::mem::size_of::<usize>()
             + self
                 .objects
                 .iter()
@@ -676,6 +907,7 @@ impl Table {
             None => {
                 self.objects.push(None);
                 self.older.push(EMPTY);
+                self.next.push(EMPTY);
                 self.objects.len() - 1
             }
         }
@@ -706,6 +938,11 @@ impl Table {
             return;
         };
         self.index.remove(hash, newest);
+        self.writes += 1;
+        let bucket = self.bucket(hash);
+        let before = self.key_before(bucket, newest);
+        let after = std::mem::replace(&mut self.next[newest], EMPTY);
+        self.link(bucket, before, after);
         let mut slot = newest;
         while slot != EMPTY {
             self.objects[slot] = None;
@@ -716,7 +953,7 @@ impl Table {
             if self.object_count() >= self.shrink_limit() {
                 break;
             }
-            self.buckets -= 1;
+            self.join();
         }
     }
 
@@ -772,15 +1009,9 @@ impl Table {
     /// assert_eq!(table.segment_reductions(&atoms), vec![33]);
     /// ```
     fn segment_reductions(&self, atoms: &AtomTable) -> Vec<i32> {
-        let mask = self.buckets.next_power_of_two() - 1;
         let mut segments = vec![SEGMENT_REDUCTIONS; segment(self.segment_slots() - 1) + 1];
         for object in self.objects.iter().flatten() {
-            // `HashValue` is a `UWord`, so the key hash fits.
-            let mut slot = stored_hash(atoms, self.key(object)) as usize & mask;
-            if slot >= self.buckets {
-                slot &= mask >> 1;
-            }
-            segments[segment(slot)] += 1;
+            segments[segment(self.bucket(stored_hash(atoms, self.key(object))))] += 1;
         }
         segments
     }
@@ -1160,6 +1391,21 @@ fn object_hash(object: &[Term]) -> u64 {
 /// ```
 fn stored_hash(atoms: &AtomTable, key: &Term) -> u64 {
     key_hash(atoms, key) >> 1
+}
+
+/// Return the slots of a linked chain from the slot `first`, where `links`
+/// holds the next slot of each slot and `EMPTY` ends the chain.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(links(0, &[2, EMPTY, 1]).collect::<Vec<_>>(), [0, 2, 1]);
+/// assert_eq!(links(EMPTY, &[]).count(), 0);
+/// ```
+fn links(first: usize, links: &[usize]) -> impl Iterator<Item = usize> + '_ {
+    std::iter::successors((first != EMPTY).then_some(first), |&slot| {
+        Some(links[slot]).filter(|&next| next != EMPTY)
+    })
 }
 
 /// Return the segment of the slot `slot`: the first segment has the slots
