@@ -123,26 +123,47 @@ fn counts_the_message_of_an_active_bif_timer() {
 }
 
 #[test]
-fn moves_the_time_offset_to_the_os_system_time_after_a_step_as_check_time_offset() {
+fn moves_the_time_offset_to_the_os_system_time_at_a_due_check_as_check_time_offset() {
     let mut timers = Timers::new();
-    let now = 2_000_000_000;
-    let base = now + timers.time_offset;
-    // A drift of at most 2 * small_diff (100 us) keeps the offset.
-    assert_eq!(timers.correct_time_offset(now, base + 100_000), base);
-    assert_eq!(timers.correct_time_offset(now, base - 100_000), base);
-    assert_eq!(timers.time_offset, base - now);
-    // A step forward past the limit sets the offset to the OS system time.
+    let offset = timers.time_offset;
+    let hour = 3_600_000_000_000;
+    // No check before 1.5 s: the call reads the existing offset.
+    let early = 2_499_999_999;
     assert_eq!(
-        timers.correct_time_offset(now, base + 100_001),
-        base + 100_001
+        timers.correct_time_offset(early, || unreachable!()),
+        early + offset
     );
-    assert_eq!(timers.time_offset, base + 100_001 - now);
-    // A step backward of one hour moves the offset back.
-    let back = base - 3_600_000_000_000;
-    assert_eq!(timers.correct_time_offset(now, back), back);
+    // The first due check sees a step forward and sets the offset.
+    let first = 2_500_000_000;
     assert_eq!(
-        timers.correct_time_offset(now + 1_000, back + 1_000),
-        back + 1_000
+        timers.correct_time_offset(first, || first + offset + hour),
+        first + offset + hour
     );
-    assert_eq!(timers.time_offset, back - now);
+    let offset = offset + hour;
+    assert_eq!(timers.time_offset, offset);
+    // After a change, the next check is 15 s later.
+    let short = first + 15_000_000_000;
+    assert_eq!(
+        timers.correct_time_offset(short - 1, || unreachable!()),
+        short - 1 + offset
+    );
+    // A drift of 2 * small_diff (100 us) keeps the offset.
+    assert_eq!(
+        timers.correct_time_offset(short, || short + offset + 100_000),
+        short + offset
+    );
+    // After a check with no change, the next check is 60 s later.
+    let long = short + 60_000_000_000;
+    assert_eq!(
+        timers.correct_time_offset(long - 1, || unreachable!()),
+        long - 1 + offset
+    );
+    // A late call does one check: a step backward past the limit.
+    let late = long + 10 * 60_000_000_000;
+    assert_eq!(
+        timers.correct_time_offset(late, || late + offset - 100_001),
+        late + offset - 100_001
+    );
+    assert_eq!(timers.time_offset, offset - 100_001);
+    assert_eq!(timers.next_check, late + 15_000_000_000);
 }

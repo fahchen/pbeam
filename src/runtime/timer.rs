@@ -30,6 +30,21 @@ const MONOTONIC_END_TICKS: i64 = i64::MAX / MONOTONIC_BEGIN * MONOTONIC_BEGIN / 
 /// on the pinned host: 1000000 Hz for `os_system_time_source`).
 const SMALL_DIFF: i64 = 50_000;
 
+/// The internal monotonic time of the first time offset check:
+/// `ERTS_SHORT_TIME_CORRECTION_CHECK / 10` after the start
+/// (`erl_time_sup.c:318`, `923`).
+const FIRST_CHECK: i64 = MONOTONIC_BEGIN + 1_500_000_000;
+
+/// The interval to the next time offset check after a check that changes
+/// the offset: `ERTS_SHORT_TIME_CORRECTION_CHECK`, 15 seconds
+/// (`erl_time_sup.c:318`, `718-722`).
+const SHORT_CHECK: i64 = 15_000_000_000;
+
+/// The interval to the next time offset check after a check with no
+/// change: `ERTS_LONG_TIME_CORRECTION_CHECK`, 60 seconds
+/// (`erl_time_sup.c:317`, `702`, `824`).
+const LONG_CHECK: i64 = 60_000_000_000;
+
 /// The position of a timer in the queue: its end tick, then its start
 /// number.
 pub(super) type TimerKey = (i64, u64);
@@ -82,6 +97,8 @@ pub(super) struct Timers {
     /// (`erl_time_sup.c:1244-1249`). It follows a step of the OS system
     /// time, as in the `multi_time_warp` mode (`Timers::correct_time_offset`).
     time_offset: i64,
+    /// The internal monotonic time of the next time offset check.
+    next_check: i64,
     /// Active timers by key.
     queue: BTreeMap<TimerKey, Timer>,
     /// The key of each active BIF timer by its reference, as the ERTS
@@ -104,6 +121,7 @@ impl Timers {
         Self {
             start: Instant::now(),
             time_offset: clock::system_time() - MONOTONIC_BEGIN,
+            next_check: FIRST_CHECK,
             queue: BTreeMap::new(),
             bif_timers: HashMap::new(),
             next: 0,
@@ -164,29 +182,41 @@ impl Timers {
     /// assert!(timers.system_time() > 1_700_000_000_000_000_000);
     /// ```
     pub(super) fn system_time(&mut self) -> i64 {
-        self.correct_time_offset(self.now(), clock::system_time())
+        self.correct_time_offset(self.now(), clock::system_time)
     }
 
-    /// Return the Erlang system time at the internal monotonic time `now`
-    /// after the time offset check of the `multi_time_warp` mode with the
-    /// OS system time `os_time`, as `check_time_offset` does
-    /// (`erl_time_sup.c:789-817`). When the Erlang system time differs from
-    /// `os_time` by more than `2 * SMALL_DIFF`, the time offset becomes
-    /// `os_time - now` (`time_offset -= sdiff`), so the Erlang system time
-    /// is `os_time`. The Erlang monotonic time does not change.
+    /// Return the Erlang system time at the internal monotonic time `now`.
+    /// Before the next time offset check is due, read the existing offset,
+    /// as `system_time_1` does (`erl_time_sup.c:2527-2535`). When the check
+    /// is due, do the check of the `multi_time_warp` mode with the OS system
+    /// time from `os_time`, as `check_time_offset` does
+    /// (`erl_time_sup.c:789-817`), one time for all missed checks. When the
+    /// Erlang system time differs from the OS system time by more than
+    /// `2 * SMALL_DIFF`, the time offset becomes the OS system time minus
+    /// `now` (`time_offset -= sdiff`), and the next check is
+    /// `SHORT_CHECK` later. Otherwise the next check is `LONG_CHECK` later.
+    /// The Erlang monotonic time does not change.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// let mut timers = Timers::new();
-    /// let base = 2_000_000_000 + timers.time_offset;
-    /// assert_eq!(timers.correct_time_offset(2_000_000_000, base + 100_000), base);
-    /// assert_eq!(timers.correct_time_offset(2_000_000_000, base + 100_001), base + 100_001);
+    /// let now = 2_500_000_000;
+    /// let base = now + timers.time_offset;
+    /// assert_eq!(timers.correct_time_offset(now, || base + 100_001), base + 100_001);
     /// ```
-    pub(super) fn correct_time_offset(&mut self, now: i64, os_time: i64) -> i64 {
-        let sdiff = now.saturating_add(self.time_offset).saturating_sub(os_time);
-        if !(-2 * SMALL_DIFF..=2 * SMALL_DIFF).contains(&sdiff) {
-            self.time_offset = self.time_offset.saturating_sub(sdiff);
+    pub(super) fn correct_time_offset(&mut self, now: i64, os_time: impl FnOnce() -> i64) -> i64 {
+        if now >= self.next_check {
+            let sdiff = now
+                .saturating_add(self.time_offset)
+                .saturating_sub(os_time());
+            let interval = if (-2 * SMALL_DIFF..=2 * SMALL_DIFF).contains(&sdiff) {
+                LONG_CHECK
+            } else {
+                self.time_offset = self.time_offset.saturating_sub(sdiff);
+                SHORT_CHECK
+            };
+            self.next_check = now.saturating_add(interval);
         }
         now.saturating_add(self.time_offset)
     }
