@@ -23,7 +23,7 @@ At most 20 minutes, 25 tool calls, and about 10k output tokens.
 3. If the idea can pay under another condition, add one entry to `docs/backlog.md` with reason, evidence, and trigger.
 4. Run `mise run check-brief`. Commit (`docs: ...`). Push.
 5. Open a PR of at most 25 lines with `Closes #<n>` only when the issue allows a not-landed result; else `Refs #<n>`. Label `documentation`.
-6. Run the Codex review once (`~/.local/share/pbeam-scratch/codex_review_branch.sh origin/<branch> origin/main <body file>`) and fix only wrong facts.
+6. Run the Codex review once (`~/.local/share/pbeam-scratch/codex_review_branch.sh origin/<branch> origin/main <body file>`) and fix only wrong facts in a new commit. Then run `mise run check-brief` and push again.
 
 ## Return
 

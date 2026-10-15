@@ -30,7 +30,7 @@ At most 90 minutes, 120 tool calls, and about 60k output tokens. Truncate tool o
 4. Write the record in `docs/performance/<issue>.md` (performance tasks), at most 60 lines: entry heading, one table, decision, known gaps. Do not edit `docs/performance-status.md`.
 5. Run `mise run check-brief` before each commit. It retries the known pty flake by itself.
 6. Push. Open the PR with `.github/pull_request_template.md`. Keep the body under 50 lines: Closes, epic, tracker, decisions with ERTS citations, commands, result table, known gaps. Every claim in the body must match the record.
-7. Run the Codex review once: `~/.local/share/pbeam-scratch/codex_review_branch.sh origin/<branch> origin/main <body file>`. Fix real findings in new commits. Set the board Status to In Review.
+7. Run the Codex review once: `~/.local/share/pbeam-scratch/codex_review_branch.sh origin/<branch> origin/main <body file>`. Fix real findings in new commits, run `mise run check-brief`, and push again. Set the board Status to In Review.
 
 ## Return
 
