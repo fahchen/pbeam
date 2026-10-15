@@ -1030,3 +1030,48 @@ pub(super) fn list_to_integer(list: &Term, base: &Term) -> BifResult {
         Value(Term::tuple(vec![Term::Integer(value), rest.clone()]))
     }
 }
+
+/// Run `erts_internal:scheduler_wall_time(Enable)`, which
+/// `kernel_refc:init/1` calls with `false` (`kernel_refc.erl:52-54`,
+/// `141-142`), as `erts_internal_scheduler_wall_time_1` (`bif.c:5306-5315`)
+/// does: each term other than `true` disables the scheduler wall time, and
+/// the BIF gives the old state. PBeam never enables it, so the old state
+/// is `false`. `erts_sched_wall_time_request` makes a reference, and each
+/// scheduler sends it to the caller; the scheduler of the caller sends it
+/// before the BIF returns (`erl_process.c:1382-1421`, `1209-1340`). PBeam
+/// has one scheduler, so it sends the reference one time. The BIF then
+/// traps to `erts_internal:await_sched_wall_time_modifications(Ref,
+/// Result)`, which receives `Ref` one time for each scheduler and returns
+/// `Result` (`erts_internal.erl:756-774`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = scheduler_wall_time(context, &Term::static_atom("false"))?;
+/// assert!(matches!(result, BifResult::Trap { .. }));
+/// assert!(scheduler_wall_time(context, &Term::static_atom("true")).is_err());
+/// ```
+///
+/// # Errors
+///
+/// Return a runtime error for `true`: PBeam has no scheduler wall time. A
+/// reference after the last one gives the error of `make_ref`.
+pub(super) fn scheduler_wall_time(
+    context: &mut BifContext<'_>,
+    enable: &Term,
+) -> Result<BifResult, BeamError> {
+    if matches!(enable, Term::Atom(atom) if atom.is_static("true")) {
+        return Err(error(
+            "unsupported erts_internal:scheduler_wall_time(true): see \"Scheduling\" in docs/erts-differences.md",
+        ));
+    }
+    let scheduler = &mut *context.scheduler;
+    let reference = Term::Reference(scheduler.make_ref()?);
+    let caller = scheduler.current_process_mut().id;
+    scheduler.deliver(caller, reference.clone());
+    Ok(BifResult::Trap {
+        module: "erts_internal",
+        function: "await_sched_wall_time_modifications",
+        arguments: vec![reference, Term::static_atom("false")],
+    })
+}

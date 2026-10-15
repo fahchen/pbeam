@@ -1,7 +1,7 @@
 -module(timer_probe).
 -export([receive_after/0, timeout_values/0, receive_limits/0, start_timer/0,
          cancel_timer/0, receiver_exit/0, order/0, timer_limits/0,
-         send_after/3, wait/0, id/1]).
+         send_after/3, wait/0, id/1, send_after_timer/0]).
 
 %% Return the argument. A call through ?MODULE stops the compiler from
 %% folding a constant timeout or argument.
@@ -142,3 +142,27 @@ timer_limits() ->
 
 left_big(L) when is_integer(L), L > 4294967200 -> ok;
 left_big(L) -> L.
+
+%% erlang:send_after/3 sends Msg, not {timeout, Ref, Msg}
+%% (erl_hl_timer.c:2566-2581, 1824), with the checks, the reference, and the
+%% timer of erlang:start_timer/3.
+send_after_timer() ->
+    Self = self(),
+    R1 = erlang:send_after(?MODULE:id(60), Self, a),
+    R2 = erlang:send_after(?MODULE:id(30), Self, b),
+    M1 = receive X -> X end,
+    M2 = receive Y -> Y end,
+    A = left(erlang:cancel_timer(erlang:send_after(200, Self, c), [])),
+    _ = erlang:send_after(30, timer_probe_after, named),
+    true = register(timer_probe_after, Self),
+    B = receive named -> named after 1000 -> missing end,
+    true = unregister(timer_probe_after),
+    Bad = [after_bad(T, To)
+           || {T, To} <- [{-1, Self}, {foo, Self}, {10, "name"}, {10, 1},
+                          {10, {timer_probe, node()}}]],
+    [is_reference(R1), is_reference(R2), M1, M2, A, B, wait(0), Bad].
+
+after_bad(Time, To) ->
+    try erlang:send_after(Time, To, x)
+    catch Class:Reason -> {Class, Reason}
+    end.
