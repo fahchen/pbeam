@@ -35,7 +35,7 @@ const INVENTORY: &str = include_str!("../../docs/effect-inventory.md");
 /// Each capability of the column "Capability" of the effect inventory, as
 /// `(entry, kind:operation)`, with the `effect_probe` function that calls
 /// the entry once.
-const PROBES: [(&str, &str, &str); 49] = [
+const PROBES: [(&str, &str, &str); 50] = [
     ("erlang:exit/2", "process:exit_other", "exit_other"),
     ("erlang:link/1", "process:link", "link"),
     ("erlang:monitor/2", "process:monitor", "monitor2"),
@@ -43,6 +43,7 @@ const PROBES: [(&str, &str, &str); 49] = [
     ("erlang:send/2", "process:send", "send2"),
     ("erlang:send/3", "process:send", "send3"),
     ("erlang:start_timer/3", "process:send", "start_timer"),
+    ("erlang:send_after/3", "process:send", "send_after"),
     ("erlang:process_info/2", "process:inspect", "process_info"),
     (
         "erlang:is_process_alive/1",
@@ -260,7 +261,7 @@ fn only(names: &[&str]) -> Constraint {
 
 /// Each entry that the column "Capability" of the effect inventory marks
 /// `ambient`. `effect_probe:ambient/0` calls each entry once.
-const AMBIENT: [&str; 35] = [
+const AMBIENT: [&str; 36] = [
     "erlang:cancel_timer/2",
     "erlang:demonitor/1",
     "erlang:demonitor/2",
@@ -280,6 +281,7 @@ const AMBIENT: [&str; 35] = [
     "erlang:unregister/1",
     "erlang:whereis/1",
     "erts_internal:prepare_loading/2",
+    "ets:delete/1",
     "ets:delete/2",
     "ets:info/2",
     "ets:insert/2",
@@ -428,7 +430,7 @@ fn calls_each_ambient_and_later_entry_with_no_capability() {
     let expected = "[true,true,false,true,true,true,integer,integer,integer,date_time,unix,\
                     nonode@nohost,nonode@nohost,[],[nonode@nohost],1,true,{error,badfile},false,\
                     effect_probe_ambient_atom,ok,effect_probe_ambient,true,[{key,value}],value,\
-                    true,true,set,reference,atom,2,ok,1,error,ok,error,ok]";
+                    true,true,set,reference,true,atom,2,ok,1,error,ok,error,ok]";
     assert_eq!(run_text(&program, "ambient", &Grants(vec![])), expected);
     assert_eq!(erts_with_stand_in("ambient"), format!("{expected}\n"));
 }

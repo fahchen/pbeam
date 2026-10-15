@@ -180,3 +180,50 @@ fn runs_erlang_start_timer_and_cancel_timer_as_pinned_erts() {
         b"[[true,true,none,[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}]],[true,false,ok,ok,ok,true,ok,false,ok,false,false,false,none,[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}]],[false,false,named,none],[[1,2,3,4,40,50,60],recv,bif],[ok,ok,{error,badarg},{error,badarg}]]\n"
     );
 }
+
+#[test]
+fn runs_erlang_send_after_as_pinned_erts() {
+    // `send_after_3` gives `setup_bif_timer` the `wrap` 0, so each timer
+    // sends `Msg`: the timer of 30 ms sends `b` before the timer of 60 ms
+    // sends `a` (`erl_hl_timer.c:2566-2581`, `1824`). `cancel_timer/2`
+    // gives the time left of its reference, and a name timer finds the
+    // process with the name when it expires. A time that is not a
+    // non-negative integer and a receiver that is not a pid or an atom
+    // raise `badarg` (`erl_hl_timer.c:1814-1815`).
+    let erlang = pinned_beam("erlang");
+    let program = BeamProgram::load(&[&erlang, TIMER_PROBE]).unwrap();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    let badarg = Term::tuple(vec![atom("error"), atom("badarg")]);
+    assert_eq!(
+        program
+            .execute("timer_probe", "send_after_timer", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![
+            atom("true"),
+            atom("true"),
+            atom("b"),
+            atom("a"),
+            atom("true"),
+            atom("named"),
+            atom("none"),
+            Term::list_from(vec![badarg; 5]),
+        ])
+    );
+    let reference = Command::new("erl")
+        .args([
+            "-noshell",
+            "-pa",
+            "fixtures/timer",
+            "-eval",
+            "io:format(\"~w~n\", [timer_probe:send_after_timer()]), halt().",
+        ])
+        .output()
+        .unwrap();
+    assert!(reference.status.success());
+    assert!(reference.stderr.is_empty());
+    assert_eq!(
+        reference.stdout,
+        b"[true,true,b,a,true,named,none,[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}]]\n"
+    );
+}

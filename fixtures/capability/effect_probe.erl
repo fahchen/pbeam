@@ -38,6 +38,7 @@
     send2/0,
     send3/0,
     start_timer/0,
+    send_after/0,
     process_info/0,
     is_process_alive/0,
     is_alive_request/0,
@@ -206,6 +207,8 @@ send2() -> attempt(fun() -> erlang:send(self(), ping) end).
 send3() -> attempt(fun() -> erlang:send(self(), ping, []) end).
 
 start_timer() -> attempt(fun() -> erlang:start_timer(0, self(), ping) end).
+
+send_after() -> attempt(fun() -> erlang:send_after(0, self(), ping) end).
 
 %% The process inspection and group leader entries. A call for the caller
 %% has no check, so each probe calls them for a child.
@@ -413,6 +416,7 @@ ambient() ->
         ets:delete(Name, key),
         ets:info(Name, type),
         reference(ets:whereis(Name)),
+        ets:delete(ets:new(effect_probe_deleted, [])),
         atom(file:native_name_encoding()),
         byte_size(prim_file:internal_name2native("a")),
         element(1, prim_file:read_file_info("/")),

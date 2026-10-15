@@ -286,8 +286,9 @@ pub(super) fn insert(
 /// inserts all objects when it takes the table, so another process sees
 /// them at once. When the owner exit deletes the table during step 3, a
 /// later call raises `badarg`, as ERTS does after it cancels the insert
-/// (`erl_db.c:2232-2248`, `5082-5086`). PBeam has no `ets:delete/1`, which
-/// in ERTS first completes the insert, so that the insert returns `true`.
+/// (`erl_db.c:2232-2248`, `5082-5086`). `ets:delete/1` in ERTS first
+/// completes the insert, so that the insert returns `true`, and PBeam
+/// returns a runtime error there ([`delete_table`]).
 ///
 /// # Examples
 ///
@@ -821,6 +822,98 @@ pub(super) fn delete(context: &mut BifContext<'_>, table: &Term, key: &Term) -> 
     };
     table.delete(&context.scheduler.atoms, key);
     Value(Term::static_atom("true"))
+}
+
+/// Run `ets:delete(Table)`, as ERTS `ets_delete_1` (`erl_db.c:3006-3082`)
+/// does:
+///
+/// - A table that does not exist or that the caller cannot write raises
+///   `badarg` (`DB_WRITE`, `erl_db.c:3021`). Each process can delete a
+///   `public` table, and only the owner can delete another table.
+/// - The table loses its name and its reference at once, so no process
+///   finds it again (`erl_db.c:3053-3061`). The delete disables the heir,
+///   so no process gets the table or an `ETS-TRANSFER` message
+///   (`erl_db.c:3056-3058`). PBeam has no table fixation to free.
+/// - Then the caller frees the segments as [`delete_trap`] does.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = delete_table(&mut context, &table)?;
+/// assert!(matches!(result, BifResult::Value(value) if value == test_atom("true")));
+/// assert!(matches!(delete_table(&mut context, &table)?, BifResult::Raise { .. }));
+/// ```
+///
+/// # Errors
+///
+/// Return a runtime error when a list insert into the table traps: ERTS
+/// first completes the insert, so that the insert returns `true`
+/// (`erl_db.c:2232-2244`, `3021-3029`), and PBeam does not do this help.
+/// Also return the errors of [`delete_trap`].
+pub(super) fn delete_table(
+    context: &mut BifContext<'_>,
+    table: &Term,
+) -> Result<BifResult, BeamError> {
+    let caller = context.scheduler.current_process_mut().id;
+    let scheduler = &mut *context.scheduler;
+    if scheduler
+        .ets
+        .table(&scheduler.atoms, table, caller, Operation::Write)
+        .is_none()
+    {
+        return Ok(BifResult::badarg());
+    }
+    let (id, _) =
+        (scheduler.ets.find(&scheduler.atoms, table)).expect("the caller found the table");
+    if scheduler.traps_ets_insert(id) {
+        return Err(error(
+            "unsupported ets:delete/1 of a table that a trapped insert uses: see \"ETS tables\" in docs/erts-differences.md",
+        ));
+    }
+    scheduler.ets.delete_table(id, caller);
+    delete_trap(context)
+}
+
+/// Free the segments of the table that `ets:delete/1` deleted, as
+/// `free_table_continue` and `ets_delete_trap` (`erl_db.c:5378-5426`) do.
+/// The work starts with the reductions that are left in the turn
+/// (`ERTS_BIF_REDS_LEFT`). Each segment, from the top segment down, uses 32
+/// reductions and 1 for each object in it (`erl_db_hash.c:3140-3149`). When
+/// the reductions are less than 0 after a segment, the call uses all
+/// reductions and traps to the internal export `ets:delete_trap/0`, which
+/// continues in the next turn (`erl_db.c:3064-3077`). Else the call uses
+/// the reductions of the segments and returns `true`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = delete_trap(&mut context)?;
+/// assert!(matches!(result, BifResult::Value(value) if value == test_atom("true")));
+/// ```
+///
+/// # Errors
+///
+/// See [`ProcessState::bif_reductions_left`] for a negative budget.
+pub(super) fn delete_trap(context: &mut BifContext<'_>) -> Result<BifResult, BeamError> {
+    let process = context.scheduler.current_process_mut();
+    let caller = process.id;
+    let left = i32::try_from(process.bif_reductions_left()?).unwrap_or(i32::MAX);
+    let Some(rest) = context.scheduler.ets.free_segments(caller, left) else {
+        context
+            .scheduler
+            .current_process_mut()
+            .bump_all_reductions();
+        return Ok(BifResult::TrapBif {
+            module: "ets",
+            function: "delete_trap",
+            arguments: Vec::new(),
+        });
+    };
+    context
+        .scheduler
+        .current_process_mut()
+        .bump_reductions(left - rest);
+    Ok(Value(Term::static_atom("true")))
 }
 
 /// Run `ets:info(Table, Item)`, as ERTS `ets_info_2` (`erl_db.c:4523-4579`)

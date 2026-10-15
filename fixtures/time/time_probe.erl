@@ -1,6 +1,8 @@
 -module(time_probe).
 -export([monotonic/0, system/0, units/0, convert/0, perf_counter/0, posix/0,
-         local_badarg/0, local/0, local_check/0, leap_check/0]).
+         local_badarg/0, local/0, local_check/0, leap_check/0,
+         wall_time/0, wall_time_on/0, wall_time_order/0, wall_time_reds/0,
+         ping/1]).
 
 %% The Erlang monotonic time at the emulator start in `native`
 %% (`erlang:system_info(start_time)` on the pinned ERTS).
@@ -143,3 +145,38 @@ lt(A, B) -> {false, A, B}.
 %% Return the argument. An integer above 2^31 - 1 goes through id/1, so it
 %% is an instruction operand and not a literal term.
 id(X) -> X.
+
+%% erts_internal:scheduler_wall_time/1, as kernel_refc:init/1 calls it with
+%% false (kernel_refc.erl:52-54, 141-142). Each term other than true
+%% disables the scheduler wall time and gives the old state
+%% (bif.c:5306-5315).
+wall_time() ->
+    [erts_internal:scheduler_wall_time(X) || X <- [false, foo, 1, false]].
+
+%% erts_internal:scheduler_wall_time/1 with true, which enables it.
+wall_time_on() ->
+    erts_internal:scheduler_wall_time(true).
+
+%% erts_internal:scheduler_wall_time/1 traps to a receive of the reply of
+%% each scheduler (bif.c:5313-5314, erts_internal.erl:759-774), so a
+%% process that the caller spawned runs before the call returns.
+wall_time_order() ->
+    receive after 1 -> ok end,
+    spawn(?MODULE, ping, [self()]),
+    A = erts_internal:scheduler_wall_time(false),
+    B = receive ping -> ping after 0 -> none end,
+    [A, B].
+
+%% The reductions between two reads of process_info/2 around
+%% erts_internal:scheduler_wall_time(false): the BIF sends a reference to
+%% the caller and traps to await_sched_wall_time_modifications/2, which
+%% receives it once for each scheduler (bif.c:5306-5315,
+%% erl_process.c:1382-1421, erts_internal.erl:756-774).
+wall_time_reds() ->
+    {reductions, R0} = process_info(self(), reductions),
+    false = erts_internal:scheduler_wall_time(false),
+    {reductions, R1} = process_info(self(), reductions),
+    R1 - R0.
+
+%% Send ping to Pid.
+ping(Pid) -> Pid ! ping.

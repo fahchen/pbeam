@@ -132,6 +132,34 @@ fn conjoins_booleans_as_pinned_erts() {
 }
 
 #[test]
+fn disjoins_booleans_as_pinned_erts() {
+    // `io_start_probe:ors/0` runs `bif` `erlang:or/2` and `erlang:xor/2`
+    // with fail label 0 and through the `apply` instruction. Two booleans
+    // give the result, and each other term raises `badarg`
+    // (`erl_bif_op.c:58-82`).
+    let program = BeamProgram::load(&[IO_START_PROBE]).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let atoms = |names: &[&str]| Term::list_from(names.iter().map(|name| atom(name)));
+    let expected = vec![
+        atoms(&["true", "true", "true", "false"]),
+        atoms(&["false", "true", "true", "false"]),
+        atoms(&["badarg"; 4]),
+        atoms(&["badarg"; 2]),
+        atom("true"),
+        atom("false"),
+        atom("badarg"),
+    ];
+    assert_eq!(
+        program.execute("io_start_probe", "ors", &[]).unwrap().term,
+        Term::list_from(expected)
+    );
+    assert_eq!(
+        reference("ors"),
+        b"[[true,true,true,false],[false,true,true,false],[badarg,badarg,badarg,badarg],[badarg,badarg],true,false,badarg]\n"
+    );
+}
+
+#[test]
 fn finds_key_members_as_pinned_erts() {
     // `io_start_probe:keymembers/0` runs `lists:keymember/3` with `call_ext`,
     // as `user_sup:get_user/1` (user_sup.erl:121-122) does, and through the
