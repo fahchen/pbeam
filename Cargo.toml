@@ -13,7 +13,7 @@ libc = "0.2"
 num-bigint = "0.5"
 num-integer = "0.1"
 num-traits = "0.2"
-socket2 = "0.6"
+socket2 = { version = "0.6", features = ["all"] }
 
 [build-dependencies]
 cc = "1"

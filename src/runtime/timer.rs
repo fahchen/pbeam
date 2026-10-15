@@ -13,7 +13,7 @@ use crate::runtime::host::clock;
 
 mod correction;
 
-use crate::term::{Atom, LiveBytes, ProcessId, Reference, Term};
+use crate::term::{Atom, LiveBytes, PortId, ProcessId, Reference, Term};
 use correction::{Correction, HOST_CHECK};
 
 /// Native time units in one clock tick of 1 ms, as
@@ -46,6 +46,15 @@ pub(super) enum Timer {
         /// The message, `{timeout, Reference, Msg}`, which
         /// `setup_bif_timer` makes at the start (`erl_hl_timer.c:1825`).
         message: Term,
+    },
+    /// The timer of an accept of `caller` on the listen port `port`, which
+    /// `INET_REQ_ACCEPT` starts with a timeout (`driver_set_timer` and
+    /// `add_multi_timer`, inet_drv.c:12180-12230).
+    Accept {
+        /// The listen port.
+        port: PortId,
+        /// The process that waits in the accept queue.
+        caller: ProcessId,
     },
 }
 
