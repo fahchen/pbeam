@@ -230,7 +230,7 @@ The key latency is `bash scripts/terra_latency.sh`, three release runs at a load
 
 ### The share
 
-The share uses the conservative form: (max(`Arc` clones, `Arc` drops) × the largest `Arc` cost + max(`Rc` clones, `Rc` drops) × the largest `Rc` cost) / time. The time of a key is the shortest key of all runs, and the count of a key is the largest key block. Each choice makes the share larger.
+The share is an estimate for the counted sites at cache-resident costs, and not an upper bound. It uses this form: (max(`Arc` clones, `Arc` drops) × the largest `Arc` cost + max(`Rc` clones, `Rc` drops) × the largest `Rc` cost) / time. The time of a key is the shortest key of all runs, and the count of a key is the largest key block. Each choice makes the share larger. The sites that the patch does not count (section 5) and a cold count line can make the real share larger.
 
 | Item | Count | Time | Time of the changes | Share |
 | --- | --- | --- | --- | --- |
@@ -242,13 +242,13 @@ The share uses the conservative form: (max(`Arc` clones, `Arc` drops) × the lar
 | Release start and first frame | 678235 `Arc`, 37563 `Rc` | 0.34 s | 7.685 ms | 2.3 percent |
 | Debug start and first frame | 678235 `Arc`, 37563 `Rc` | 1.13 s | 23.416 ms | 2.1 percent |
 
-The atomic part of the release key press is the `Arc` count times the bare `Arc` cost less the bare `Rc` cost: 84892 × (9.475 − 3.821) ns = 0.480 ms, or 3.4 percent of the 14 ms key. A change to non-atomic counts can save at most that part. At opt-level 0 the bare `Arc` pair measured below the bare `Rc` pair, so the debug build shows no atomic part.
+The atomic part of the release key press is the `Arc` count times the bare `Arc` cost less the bare `Rc` cost: 84892 × (9.475 − 3.821) ns = 0.480 ms, or an estimated 3.4 percent of the 14 ms key for the counted sites at cache-resident costs. A change to non-atomic counts can save about that part of the counted sites. At opt-level 0 the bare `Arc` pair measured below the bare `Rc` pair, so the debug build shows no atomic part.
 
 The micro costs are uncontended and the count line is in the cache. A count line that is cold in the Terra redraw costs more, so the shares can be low by that cache effect. The largest costs, the largest counts, and the shortest key make the shares larger, which offsets a part of that effect.
 
 ### The decision
 
-Every share is below the 20 percent gate, and every share is below half of the gate. The floor loop makes no `Arc` change, so step 10 has no floor-loop gain to take. The release key press spends at most 7.4 percent in the counts, and at most 3.4 percent in the atomic part of the counts. Thus the task keeps `Arc` and proposes no ownership-path change. Step 10 ([#518](https://github.com/fahchen/pbeam/issues/518)) has no measured reason to start. The owner decides its state.
+Every share is below the 20 percent gate, and every share is below half of the gate. The floor loop makes no `Arc` change, so step 10 has no floor-loop gain to take. For the counted sites at cache-resident costs, the release key press spends an estimated 7.4 percent in the counts, and an estimated 3.4 percent in the atomic part of the counts. The uncounted sites add about 1 to 2 percent more counts (section 5), so the estimate stays below half of the gate. Thus the task keeps `Arc` and proposes no ownership-path change. Step 10 ([#518](https://github.com/fahchen/pbeam/issues/518)) has no measured reason to start. The owner decides its state.
 
 ## 1. The cumulative effect on the floor shapes
 
@@ -584,7 +584,7 @@ The task left open two parts of the loop. The per-iteration `scheduler.current_p
 
 ### Step 10, task [#544](https://github.com/fahchen/pbeam/issues/544)
 
-The task decided to keep `Arc`. The floor loop makes 0 `Arc` changes for each iteration, and the conservative share of the counts is 7.4 percent of the shortest release key press and 2.5 percent of the shortest debug key press, below the 20 percent gate of the plan. The task decided to count with a temporary patch and not with `dtrace` or `lldb`, because the host enables System Integrity Protection, the release build inlines `Arc::clone` and its drop, and a breakpoint at each change stops the process for each hit. It left open the sites that the patch does not count, which section 5 names.
+The task decided to keep `Arc`. The floor loop makes 0 `Arc` changes for each iteration, and the estimated share of the counted sites at cache-resident costs is 7.4 percent of the shortest release key press and 2.5 percent of the shortest debug key press, below the 20 percent gate of the plan. The task decided to count with a temporary patch and not with `dtrace` or `lldb`, because the host enables System Integrity Protection, the release build inlines `Arc::clone` and its drop, and a breakpoint at each change stops the process for each hit. It left open the sites that the patch does not count, which section 5 names.
 
 ## 5. Known gaps
 
@@ -600,7 +600,7 @@ The task decided to keep `Arc`. The floor loop makes 0 `Arc` changes for each it
 
 ## 6. What comes next
 
-Step 10 ([#518](https://github.com/fahchen/pbeam/issues/518)) has no measured reason to start: task [#544](https://github.com/fahchen/pbeam/issues/544) measured 0 `Arc` changes for each floor-loop iteration and a share of at most 7.4 percent of a release key press, below the 20 percent gate. The owner decides the state of the step.
+Step 10 ([#518](https://github.com/fahchen/pbeam/issues/518)) has no measured reason to start: task [#544](https://github.com/fahchen/pbeam/issues/544) measured 0 `Arc` changes for each floor-loop iteration and an estimated share of 7.4 percent of a release key press for the counted sites at cache-resident costs, below the 20 percent gate. The owner decides the state of the step.
 
 Step 7 ([#515](https://github.com/fahchen/pbeam/issues/515)) merged as `c6cfb3a` ([#535](https://github.com/fahchen/pbeam/pull/535)) and removed the two measured allocations on the drop path: the placeholder handle of `Map::drain_into` and the unconditional work vector of `Term::drop`. Its acceptance is the drop cost of an immediate, a tuple, a shared map, and a deep list, before and after, with no drop regression and no map operation regression above 2 percent. Its blocked-by link to step 6 is satisfied, because step 6 is merged as `d36f686`.
 
