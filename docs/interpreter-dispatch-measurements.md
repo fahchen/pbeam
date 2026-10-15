@@ -140,6 +140,116 @@ Measured estimate of the memory-system difference of the two record strides, as 
 
 The decision of the step follows the step 8 gate of the plan: a compact form must give at least 10 percent on the floor loop and must measure at most 32 bytes for each instruction. The 5.0 percent estimate is below the gate, and the 816-byte range of the floor loop is below 1.3 percent of the smaller L1 data cache of the host, so the loop is taken to be cache-resident. The step therefore keeps the decoded form and skips step 8. The residency is an assumption, and the host has no hardware counter to confirm it.
 
+## Step 10: the reference-count share
+
+Task [#544](https://github.com/fahchen/pbeam/issues/544) measures the count of the reference-count changes on the hot path, and the share of the time that they take. Step 10 ([#518](https://github.com/fahchen/pbeam/issues/518)) has a 20 percent gate in the plan (`docs/interpreter-dispatch-plan.md:152`): "If counts remain below the gate, keep `Arc` and report the remaining dispatch cost." Task [#544](https://github.com/fahchen/pbeam/issues/544) states the same falsifier: if the counts stay below 20 percent of loop time, stop and report the ceiling. Step 9 closed without an implementation, so the baseline is the current `main`.
+
+The measured revision is `a4072f1`, the head of `origin/main` at the time of the runs. All numbers of this section come from one session on 2026-10-15 from 08:29 to 08:33 JST, on the host of the environment table, at a one-minute load of 1.46 to 4.21. The floor-shape counts are the exception: a rerun at 08:48 JST recorded them with a revision and load header (`target/arc-probe-floor-rerun.txt`), and its rows are the same as the rows of the first run (`target/arc-probe-floor.txt`, which has no header). No other `cargo`, `rustc`, or `nextest` process ran at the start of each run.
+
+### The method
+
+A temporary counting patch adds four process-wide counters: the `Arc` clones and the `Arc` drops of a `Term` handle, and the `Rc` clones and the `Rc` drops of the module handle of the run-loop cursor. The patch is not committed, and the pull request of the task holds it. It adds no `unsafe`. It counts these sites:
+
+- `Clone for Term` and `Drop for Term` (`src/term.rs:572`, `src/term.rs:517`), when the term holds an `Arc`: a binary, a match context, and a tuple, a list cell, a fun, or a map whose `Arc` is still present.
+- `Term::take_nested` and `Term::take_group` (`src/term.rs:443`, `src/term.rs:476`), which release the `Arc` of a tuple, a list cell, a fun, or a map and leave no `Arc` for the later drop. Thus the drop of one handle counts one time.
+- The `Rc` clone of `Cursor::new` (`src/runtime/interpreter.rs:2775`), once for each entry of the run loop, and the `Rc` clone and drop of `Cursor::refresh` (`src/runtime/interpreter.rs:2798`) when the active module changes. The drop of the cursor counts one `Rc` drop.
+
+The run loop gives each change to the instruction kind that ran when the change happened. A change outside the run loop goes to the row `<outside the run loop>`. Two consumers read the counters:
+
+- A temporary test in `tests/integration/dispatch_baseline.rs` runs each floor shape at 20000 and 200000 iterations on the release build and prints the rows. The count for each iteration is the count at 200000 less the count at 20000, divided by 180000.
+- The `read_nif` of `prim_tty` writes the rows to the file of `PBEAM_ARC_PROBE` at each non-empty read of the terminal. Thus a block of the file holds the work from the read of one key to the read of the next key. The block holds the work of the key and of its idle time of 2 s (`KEY_GAP`, `scripts/terra_latency.py:33`), so each block is an upper bound for its key. The last key, `q`, has no block, because no read follows it.
+
+The time and the cost numbers come from the clean tree of `a4072f1` in the same session, before the patch. The patched build is slower, so this section uses no latency of the patched build.
+
+### The count for each instruction of the floor shapes
+
+The rows are the release build of `a4072f1` with the counting patch, at 200000 iterations. The record is `target/arc-probe-floor-rerun.txt`, from 2026-10-15 08:48:52 JST, at a load of `{ 4.61 7.20 7.23 }` before and after the run. Each shape retires the same 4 instructions for each iteration: `TestYield`, `TestExactEqualOperands`, `Bif` (`gc_bif '-'`), and the call.
+
+| Shape | Instruction kind | Runs at 200000 | `Arc` clones | `Arc` drops | `Rc` clones | `Rc` drops |
+| --- | --- | --- | --- | --- | --- | --- |
+| `call_ext_only`, `dispatch_probe` | `TestYield` | 200001 | 0 | 0 | 0 | 0 |
+| | `TestExactEqualOperands` | 200001 | 0 | 0 | 0 | 0 |
+| | `Bif` | 200000 | 0 | 0 | 0 | 0 |
+| | `CallExternal` | 200000 | 0 | 0 | 0 | 0 |
+| | `<outside the run loop>` | — | 0 | 0 | 51 | 51 |
+| `call_only`, `dispatch_probe` | `TestYield` | 200001 | 0 | 0 | 0 | 0 |
+| | `TestExactEqualOperands` | 200001 | 0 | 0 | 0 | 0 |
+| | `Bif` | 200000 | 0 | 0 | 0 | 0 |
+| | `CallOnly` | 200000 | 0 | 0 | 0 | 0 |
+| | `<outside the run loop>` | — | 0 | 0 | 51 | 51 |
+| `call_only`, position probe | `TestYield` | 200001 | 0 | 0 | 0 | 0 |
+| | `TestExactEqualOperands` | 200001 | 0 | 0 | 0 | 0 |
+| | `Bif` | 200000 | 0 | 0 | 0 | 0 |
+| | `CallOnly` | 200000 | 0 | 0 | 0 | 0 |
+| | `<outside the run loop>` | — | 0 | 0 | 51 | 51 |
+
+At 20000 iterations each shape gives the same rows with 0 `Arc` changes and 6 `Rc` pairs outside the run loop. Thus each floor shape makes 0 `Arc` clones and 0 `Arc` drops for each iteration, and (51 − 6) / 180000 = 0.00025 `Rc` pairs for each iteration. The `Rc` pairs are the `Cursor::new` of each entry of the run loop after a yield, and not work of an iteration. Every value of the loop is an immediate integer, and an atom holds only its index since [#619](https://github.com/fahchen/pbeam/pull/619), so no term of the loop holds a reference count. The result agrees with the static reading of the four handlers and with the attribution above, which says that the floor loop performs no `Arc` clone.
+
+### The count for each Terra key press
+
+The release and the debug builds of the patch give the same rows in every block. The raw files are `target/arc-probe-terra.txt` (release, load `{ 2.10 2.72 4.33 }`) and `target/arc-probe-terra-debug.txt` (debug, load `{ 1.93 2.67 4.29 }`).
+
+| Block | Instructions | `Arc` clones | `Arc` drops | `Rc` clones | `Rc` drops |
+| --- | --- | --- | --- | --- | --- |
+| Start and first frame, to the read of the first key | 1718917 | 483480 | 678235 | 37563 | 37562 |
+| Key `j` | 259688 | 76371 | 84892 | 23807 | 23807 |
+| Key `j` | 253558 | 74381 | 81986 | 23734 | 23734 |
+| Key `k` | 253558 | 74381 | 81986 | 23734 | 23734 |
+
+One key press makes about 0.33 `Arc` drops for each instruction. The instruction kinds with the most changes in the first key block:
+
+| Instruction kind | Runs | `Arc` clones | `Arc` drops | `Rc` clones | `Rc` drops |
+| --- | --- | --- | --- | --- | --- |
+| `Move` | 87727 | 51761 | 39035 | 0 | 0 |
+| `CallExternal` | 11560 | 6592 | 7910 | 10612 | 10612 |
+| `CallFun` | 3556 | 4716 | 6103 | 3544 | 3544 |
+| `Deallocate` | 4214 | 0 | 10629 | 0 | 0 |
+| `GetMapElements` | 10381 | 4556 | 2927 | 0 | 0 |
+| `PutTuple` | 4507 | 659 | 3945 | 0 | 0 |
+| `GetList` | 2347 | 1939 | 3327 | 0 | 0 |
+| `CallLast` | 2249 | 0 | 3174 | 0 | 0 |
+| `Return` | 14739 | 0 | 0 | 9592 | 9592 |
+
+`Move` makes 68 percent of the `Arc` clones of the key. The `Rc` pairs come from `Cursor::refresh` at a call into another module and at a return.
+
+### The cost of one change and the time of the loop and of a key
+
+Measured on the clean tree of `a4072f1` in the same session. The release costs are `mise run bench-term`, the record is `target/term-costs.txt`, and the load is `{ 2.44 2.73 4.57 }`. The debug costs are the same test at opt-level 0, which is the profile of the debug `pbeam` binary, and the record is `target/term-costs-debug.txt` at a load of `{ 2.33 2.70 4.55 }`. Each cost is the minimum of 9 timed runs.
+
+| Cost of one clone and drop | Release | Opt-level 0 |
+| --- | --- | --- |
+| `Arc` of one term, the largest of the six payload kinds of `prints_the_cost_of_a_term_operation` (a 1000-key map in each column) | 11.111 ns | 33.734 ns |
+| `Arc` of a tuple | 9.600 ns | 25.129 ns |
+| `Rc` of one term, the largest of the measured payload kinds | 3.962 ns, the fun payload of `prints_the_cost_of_a_fun_payload`, the largest of five kinds (tuple, binary, list cell, fun payload, map payload) | 14.269 ns, the tuple, the largest of three kinds (tuple, binary, list cell), because only `prints_the_cost_of_a_term_operation` ran at opt-level 0 |
+| Bare `Arc` | 9.475 ns | 12.145 ns |
+| Bare `Rc` | 3.821 ns | 13.016 ns |
+
+The floor loop is `mise run bench-dispatch` at a load of `{ 1.46 2.56 4.61 }`, the record is `target/dispatch-baseline.txt`, and each number is the minimum of nine runs of one probe at 200000 iterations: `call_ext_only` 257.8 ns, local `call_only` 101.9 ns, and the position shape 102.2 ns.
+
+The key latency is `bash scripts/terra_latency.sh`, three release runs at a load of `{ 4.21 3.16 4.67 }` to `{ 3.48 3.06 4.60 }` and three debug runs at a load of `{ 3.16 3.01 4.55 }` to `{ 2.39 2.85 4.46 }`. The record is `target/terra-latency-544.txt`. The release keys are 0.014 s to 0.039 s, and the release first frame is 0.34 s to 0.56 s. The debug keys are 0.130 s to 0.156 s, and the debug first frame is 1.13 s to 1.31 s.
+
+### The share
+
+The share is an estimate for the counted sites at cache-resident costs, and not an upper bound. It uses this form: (max(`Arc` clones, `Arc` drops) × the largest `Arc` cost + max(`Rc` clones, `Rc` drops) × the largest `Rc` cost) / time. The time of a key is the shortest key of all runs, and the count of a key is the largest key block. Each choice makes the share larger. The sites that the patch does not count (section 5) and a cold count line can make the real share larger.
+
+| Item | Count | Time | Time of the changes | Share |
+| --- | --- | --- | --- | --- |
+| `call_ext_only` floor loop, one iteration | 0 `Arc`, 0.00025 `Rc` | 257.8 ns | 0.001 ns | 0.0004 percent |
+| `call_only` floor loop, one iteration | 0 `Arc`, 0.00025 `Rc` | 101.9 ns | 0.001 ns | 0.001 percent |
+| Position floor loop, one iteration | 0 `Arc`, 0.00025 `Rc` | 102.2 ns | 0.001 ns | 0.001 percent |
+| Release key press | 84892 `Arc`, 23807 `Rc` | 14 ms | 1.038 ms | 7.4 percent |
+| Debug key press | 84892 `Arc`, 23807 `Rc` | 130 ms | 3.203 ms | 2.5 percent |
+| Release start and first frame | 678235 `Arc`, 37563 `Rc` | 0.34 s | 7.685 ms | 2.3 percent |
+| Debug start and first frame | 678235 `Arc`, 37563 `Rc` | 1.13 s | 23.416 ms | 2.1 percent |
+
+The atomic part of the release key press is the `Arc` count times the bare `Arc` cost less the bare `Rc` cost: 84892 × (9.475 − 3.821) ns = 0.480 ms, or an estimated 3.4 percent of the 14 ms key for the counted sites at cache-resident costs. A change to non-atomic counts can save about that part of the counted sites. At opt-level 0 the bare `Arc` pair measured below the bare `Rc` pair, so the debug build shows no atomic part.
+
+The micro costs are uncontended and the count line is in the cache. A count line that is cold in the Terra redraw costs more, so the shares can be low by that cache effect. The largest costs, the largest counts, and the shortest key make the shares larger, which offsets a part of that effect.
+
+### The decision
+
+Every share is below the 20 percent gate, and every share is below half of the gate. The floor loop makes no `Arc` change, so step 10 has no floor-loop gain to take. For the counted sites at cache-resident costs, the release key press spends an estimated 7.4 percent in the counts, and an estimated 3.4 percent in the atomic part of the counts. The uncounted sites add about 1 to 2 percent more counts (section 5), so the estimate stays below half of the gate. Thus the task keeps `Arc` and proposes no ownership-path change. Step 10 ([#518](https://github.com/fahchen/pbeam/issues/518)) has no measured reason to start. The owner decides its state.
+
 ## 1. The cumulative effect on the floor shapes
 
 The number in each cell is nanosecond for each iteration, and the ratio in each cell is that number divided by the pinned ERTS number that the step's own pull request pairs with it. The aggregation rule of each column, and the revision of its run:
@@ -472,6 +582,10 @@ The task removed the per-iteration comparison of the active module from the run 
 
 The task left open two parts of the loop. The per-iteration `scheduler.current_process_mut()` lookup is the process state and not the cursor. The pre-body `cursor.commit` has no measured floor-loop share, and the task keeps it, because the plan commits the position before each body call.
 
+### Step 10, task [#544](https://github.com/fahchen/pbeam/issues/544)
+
+The task decided to keep `Arc`. The floor loop makes 0 `Arc` changes for each iteration, and the estimated share of the counted sites at cache-resident costs is 7.4 percent of the shortest release key press and 2.5 percent of the shortest debug key press, below the 20 percent gate of the plan. The task decided to count with a temporary patch and not with `dtrace` or `lldb`, because the host enables System Integrity Protection, the release build inlines `Arc::clone` and its drop, and a breakpoint at each change stops the process for each hit. It left open the sites that the patch does not count, which section 5 names.
+
 ## 5. Known gaps
 
 - `Instruction::CallExternal` of a pure BIF still builds one `Vec<Term>` (`src/runtime/interpreter.rs:3182`, `call_arguments`). The measured set of step 5 is the `bif` instruction, and no step owns this path.
@@ -481,8 +595,12 @@ The task left open two parts of the loop. The per-iteration `scheduler.current_p
 - The repository has no Terra benchmark. The 5.0 percent estimate of step 6 is the memory-system difference of the two record strides at the estimated size of one redraw stream, and it is not a measurement of the redraw.
 - The run-to-run noise is about 10 percent at 200000 iterations. A single column of a summary table therefore carries that noise, and a change inside it is not a measured effect.
 - The end-to-end measurement of section 3 is one run of each mode, and not a minimum of several runs.
+- The count of step 10 does not include these `Arc` and `Rc` changes: the `Arc` of the binary sub-views (`src/term/binary.rs:276`, `src/term/binary.rs:431`, `src/term/binary.rs:451`), the child nodes of a map that `Arc::make_mut` copies, the `Arc<str>` of an atom name, the `Arc<AtomTable>`, a direct clone of a `ConsRef`, a `Tuple`, a `Binary`, a `Map`, or a fun that does not go through `Term::clone`, the `Arc::clone` of the match context in `any_match_context` (`src/runtime/interpreter.rs:3604`) and the drop of the returned `Arc<MatchState>`, the `Binary` clone of `MatchState::new(bytes.clone())` (`src/runtime/interpreter.rs:1355`), the release of the child nodes of a map through `Arc::into_inner` in `Map::drain_into` (`src/term/map.rs:320`, `src/term/map.rs:860`), the `Arc::downgrade` of the dirty IO `Claim` (`src/runtime/dirty_io.rs:207`) and the drop of that `Weak` after the call, and the three `Rc<BeamModule>` clones in `mfa_stacktrace` (`src/runtime/interpreter.rs:4655`, one for each stack frame), in `load_nif` (`src/runtime/interpreter/native.rs:227`), and in `error/2` (`src/runtime/interpreter/bif/erlang.rs:516`). The line numbers are at `a4072f1`. Instruction handlers reach the three `Rc` clones: the `error/2` BIF calls `mfa_stacktrace` (`src/runtime/interpreter/bif/erlang.rs:533`), and `CallExternal` reaches `load_nif`. The match-context clone runs at each binary-match instruction: the first key block runs about 940 of them (`BinaryMatch` 212, `BinaryGetPosition` 210, `BinaryGetUtf8` 199, `BinaryMatchStart` 115, `BinarySetPosition` 104, `BinaryGetTail` 97), against 84892 counted `Arc` drops. These sites add an estimated 1 to 2 percent more counts to a key press, which does not change the decision. The trigger to count them is a key-press share of 10 percent or more, half of the gate.
+- The cost of one change in step 10 is a micro-measurement with a cache-resident count line. The shares of the Terra key press do not include the cost of a cold count line.
 
 ## 6. What comes next
+
+Step 10 ([#518](https://github.com/fahchen/pbeam/issues/518)) has no measured reason to start: task [#544](https://github.com/fahchen/pbeam/issues/544) measured 0 `Arc` changes for each floor-loop iteration and an estimated share of 7.4 percent of a release key press for the counted sites at cache-resident costs, below the 20 percent gate. The owner decides the state of the step.
 
 Step 7 ([#515](https://github.com/fahchen/pbeam/issues/515)) merged as `c6cfb3a` ([#535](https://github.com/fahchen/pbeam/pull/535)) and removed the two measured allocations on the drop path: the placeholder handle of `Map::drain_into` and the unconditional work vector of `Term::drop`. Its acceptance is the drop cost of an immediate, a tuple, a shared map, and a deep list, before and after, with no drop regression and no map operation regression above 2 percent. Its blocked-by link to step 6 is satisfied, because step 6 is merged as `d36f686`.
 
