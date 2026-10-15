@@ -50,9 +50,9 @@ The step 0 numbers and the `ddb32f6e` numbers come from two different sessions. 
 
 Each entry is one landed change or one change that is not landed. The entries are newest first.
 
-### 2026-10-15 14:10 JST - Skip `test_heap` and `init_yregs` at load, task [#634](https://github.com/fahchen/pbeam/issues/634), pull request [#637](https://github.com/fahchen/pbeam/pull/637)
+### 2026-10-15 14:10 JST - Skip `test_heap` and `init_yregs` at load, task [#634](https://github.com/fahchen/pbeam/issues/634), pull request [#637](https://github.com/fahchen/pbeam/pull/637) - Not landed
 
-The loader skips `test_heap` and `init_yregs`, as it skips `line`, and the `Noop` instruction is removed. The run loop dispatches nothing for the two opcodes. One interleaved session on 2026-10-15 from 13:49 to 14:10 JST measures the before revision `b8c71940` and the after revision `0b67d5b9` with release builds, in rotated order. Section "The loader skip of `test_heap` and `init_yregs`, task #634" of `docs/interpreter-dispatch-measurements.md` holds the rounds, the load, and the raw files.
+The change would make the loader skip `test_heap` and `init_yregs`, as it skips `line`, and would remove the `Noop` instruction. The change is not landed, because only the targeted probe shows a gain, and the three shapes that the acceptance of task #634 names show no resolvable gain. The owner delegated the decision on 2026-10-15. Pull request #637 reverts the code and keeps only this record. One interleaved session on 2026-10-15 from 13:49 to 14:10 JST measures the before revision `b8c71940` and the after revision `0b67d5b9` with release builds, in rotated order. Section "The loader skip of `test_heap` and `init_yregs`, task #634" of `docs/interpreter-dispatch-measurements.md` holds the rounds, the load, and the raw files.
 
 | Shape | Before `b8c71940` | After `0b67d5b9` | Change | Rule and load |
 | --- | --- | --- | --- | --- |
@@ -61,7 +61,7 @@ The loader skips `test_heap` and `init_yregs`, as it skips `line`, and the `Noop
 | `call_only` floor loop, 200000 iterations, ns, median of 6 rounds | 104.40 | 105.85 | Inside the noise: both revisions span 102.2 to 106.5 | The same rounds |
 | Terra key press, CPU ms for each key, 60 keys, median of 7 rounds | 23.0 | 24.167 | No change that the session can resolve: before 17.0 to 26.7, after 19.8 to 26.5 | One-minute load 1.54 to 3.62. Round 7 is dropped: its after run started with a load of 12.33 and two build processes |
 
-The probe loop runs seven instructions for each iteration before the change and six after it, so the gain is on the shape that the change targets. The floor loops have no `test_heap`. The Terra key press runs 6.4 percent of its instructions as `Noop`, but the spread of the CPU time for each key is larger than the expected gain. The three shapes that the acceptance of task #634 names, `call_ext_only`, `call_only`, and the Terra key press, show no resolvable gain, so only the targeted probe supports the landing. The `call_ext_only` median moves by 2.0 percent because more after rounds than before rounds fall in the mode near 266 ns. Six rounds cannot show if a code layout change causes this shift, so it stays open.
+The probe loop runs seven instructions for each iteration before the change and six after it, so the gain is on the shape that the change targets. The floor loops have no `test_heap`. The Terra key press runs 6.4 percent of its instructions as `Noop`, but the spread of the CPU time for each key is larger than the expected gain. The three shapes that the acceptance of task #634 names, `call_ext_only`, `call_only`, and the Terra key press, show no resolvable gain. Only the targeted probe shows a gain, and the probe is not a committed fixture. The `call_ext_only` median moves by 2.0 percent because more after rounds than before rounds fall in the mode near 266 ns. Six rounds cannot show if a code layout change causes this shift, so it stays open.
 
 ### 2026-10-15 13:00 JST - Call an import through a resolved export target, task [#628](https://github.com/fahchen/pbeam/issues/628), pull request [#636](https://github.com/fahchen/pbeam/pull/636)
 
