@@ -764,7 +764,11 @@ impl BeamProgram {
                     let value = read_any(process, source)?;
                     write(process, destination, value)?;
                 }
-                Instruction::Allocate { stack_size } => process.allocate(*stack_size as usize),
+                Instruction::Allocate { stack_size } => {
+                    current_frame(process)
+                        .stack
+                        .resize_with(*stack_size as usize, || StackSlot::Empty);
+                }
                 Instruction::Deallocate { stack_size } => {
                     let stack = &mut current_frame(process).stack;
                     if stack.len() != *stack_size as usize {
@@ -798,7 +802,7 @@ impl BeamProgram {
                     check_local_call_arguments(&process.registers, *arity)?;
                     let frame = code_table::frame_at(module, *function, *target, *arity)?;
                     cursor.position = frame.next_instruction;
-                    process.replace_frame(frame);
+                    *current_frame(process) = frame;
                 }
                 Instruction::CallLast {
                     arity,
@@ -812,7 +816,7 @@ impl BeamProgram {
                     check_local_call_arguments(&process.registers, *arity)?;
                     let frame = code_table::frame_at(module, *function, *target, *arity)?;
                     cursor.position = frame.next_instruction;
-                    process.replace_frame(frame);
+                    *current_frame(process) = frame;
                 }
                 Instruction::TestArity {
                     fail_label,
@@ -2687,7 +2691,7 @@ fn loads_modules(scheduler: &Scheduler) -> bool {
 /// ```
 fn enter_frame(process: &mut ProcessState, frame: Frame, tail: bool) {
     if tail {
-        process.replace_frame(frame);
+        *current_frame(process) = frame;
     } else {
         process.frames.push(frame);
     }
@@ -2944,7 +2948,7 @@ fn release_frame(process: &mut ProcessState, deallocate: u32) -> Result<(), Beam
 /// ```
 fn return_from_frame(process: &mut ProcessState) -> Result<Option<Outcome>, BeamError> {
     read_ref(process, &Operand::X(0)).map_err(|_| error("return before setting x0"))?;
-    process.pop_frame();
+    process.frames.pop();
     if !process.frames.is_empty() {
         return Ok(None);
     }

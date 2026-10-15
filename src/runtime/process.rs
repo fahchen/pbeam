@@ -78,13 +78,6 @@ pub(super) enum Start {
     },
 }
 
-/// The maximum number of free Y-register storages of a process.
-const FREE_STACKS: usize = 8;
-
-/// The maximum capacity, in slots, of a free Y-register storage. A larger
-/// storage is dropped when its frame is released.
-const FREE_STACK_SLOTS: usize = 32;
-
 /// One Y register of a frame.
 #[derive(Clone, Debug)]
 pub(super) enum StackSlot {
@@ -216,13 +209,6 @@ pub(super) struct ProcessState {
     pub(super) id: ProcessId,
     /// Call stack. The last frame is the active function.
     pub(super) frames: Vec<Frame>,
-    /// The empty Y-register storage of released frames, at most
-    /// [`FREE_STACKS`] entries of at most [`FREE_STACK_SLOTS`] slots each.
-    /// `allocate` takes storage from it, so that a call does not allocate
-    /// the storage again. ERTS keeps the Y registers on the process stack
-    /// and `allocate` only moves the stack pointer
-    /// (`jit/arm/instr_common.cpp:206-229`).
-    free_stacks: Vec<Vec<StackSlot>>,
     /// The module and the function of a `Start::Undefined` start until the
     /// process first runs. The process then has no frame, and the arity is
     /// the number of argument registers.
@@ -450,7 +436,6 @@ impl ProcessState {
         Self {
             id,
             frames,
-            free_stacks: Vec::new(),
             undefined_start,
             registers: arguments.into_iter().map(Some).collect(),
             mailbox: Mailbox::default(),
@@ -645,7 +630,6 @@ impl ProcessState {
     /// ```
     pub(super) fn allocated_bytes(&self) -> usize {
         let mut bytes = self.frames.capacity() * std::mem::size_of::<Frame>()
-            + self.free_stacks.capacity() * std::mem::size_of::<Vec<StackSlot>>()
             + self.registers.capacity() * std::mem::size_of::<Option<Term>>()
             + self.dictionary_bytes()
             + self.pending_bif_bytes()
@@ -658,75 +642,7 @@ impl ProcessState {
         for frame in &self.frames {
             bytes += frame.allocated_bytes();
         }
-        for stack in &self.free_stacks {
-            bytes += stack.capacity() * std::mem::size_of::<StackSlot>();
-        }
         bytes
-    }
-
-    /// Give the active frame `size` Y registers, as the ERTS `allocate` does.
-    /// A frame with no storage takes the storage of a released frame when
-    /// one is free.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// process.allocate(2);
-    /// assert_eq!(process.frames.last().unwrap().stack.len(), 2);
-    /// ```
-    pub(super) fn allocate(&mut self, size: usize) {
-        let frame = self
-            .frames
-            .last_mut()
-            .expect("a running process has an active frame");
-        if frame.stack.capacity() == 0
-            && let Some(stack) = self.free_stacks.pop()
-        {
-            frame.stack = stack;
-        }
-        frame.stack.resize_with(size, || StackSlot::Empty);
-    }
-
-    /// Replace the active frame with `frame` for a tail call, and keep the
-    /// Y-register storage of the replaced frame for a later `allocate`.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// process.replace_frame(code_table::frame_at(module, function, target, arity)?);
-    /// ```
-    pub(super) fn replace_frame(&mut self, frame: Frame) {
-        let current = self
-            .frames
-            .last_mut()
-            .expect("a running process has an active frame");
-        let replaced = std::mem::replace(current, frame);
-        self.free_stack(replaced.stack);
-    }
-
-    /// Pop the active frame, and keep its Y-register storage for a later
-    /// `allocate`.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// process.pop_frame();
-    /// ```
-    pub(super) fn pop_frame(&mut self) {
-        if let Some(frame) = self.frames.pop() {
-            self.free_stack(frame.stack);
-        }
-    }
-
-    /// Keep the storage `stack` of a released frame, empty, when it is not
-    /// too large and the free list has space. Else drop it.
-    fn free_stack(&mut self, mut stack: Vec<StackSlot>) {
-        if (1..=FREE_STACK_SLOTS).contains(&stack.capacity())
-            && self.free_stacks.len() < FREE_STACKS
-        {
-            stack.clear();
-            self.free_stacks.push(stack);
-        }
     }
 
     /// Return the bytes of the process dictionary of `put/2` and `get/1`: the
