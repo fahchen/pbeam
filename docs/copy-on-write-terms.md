@@ -295,7 +295,7 @@ The task #503 commits the harness of the epic checkpoint: `scripts/terra_latency
 
 ### Terra Counter checkpoint (#450)
 
-The session ran on 2026-10-15 from 20:50:06 to 21:30:12 JST. The one-minute load at the start of each run was 2.16 to 9.03. No `cargo`, `rustc`, or `nextest` process ran during a run. The session interleaves the two revisions: odd rounds run main first, and even rounds run the pre-epic revision first. Main is `b90085da`. The pre-epic revision is `856764f6`. Each run starts the Terra Counter example on an 80 by 24 pseudo-terminal and sends the keys `j`, `j`, `k`, and `q` 2 s apart. The key value is the time from each of `j`, `j`, and `k` to the first byte after it; `q` is not in the value. All 84 runs quit cleanly. Each cell is median / minimum / maximum.
+The session ran on 2026-10-15 from 20:50:06 to 21:30:12 JST. The one-minute load at the start of each run was 2.16 to 9.03. No `cargo`, `rustc`, or `nextest` process ran during a run. The session interleaves the two revisions: odd rounds run main first, and even rounds run the pre-epic revision first. Main is `b90085da`. The pre-epic revision is `856764f6`. Each run starts the Terra Counter example on an 80 by 24 pseudo-terminal and sends the keys `j`, `j`, `k`, and `q` at least 2 s apart: the harness waits 2 s after the previous key and then for a quiet window of the output, so the gap is about 2.4 s or longer. The key value is the time from each of `j`, `j`, and `k` to the first byte after it; `q` is not in the value. All 84 runs quit cleanly. Each cell is median / minimum / maximum.
 
 | Build | Revision | Rounds | First frame (s) | Key latency (s) |
 | --- | --- | --- | --- | --- |
@@ -312,7 +312,7 @@ The harness `scripts/terra_latency.py` of main measures both trees through the `
 - PBeam run: `python3 -u <main>/scripts/terra_latency.py mise exec -- env PBEAM_BIN=<tree>/target/<release|debug>/pbeam bash scripts/example.sh terra_counter --no-build`.
 - ERTS run: `python3 -u <main>/scripts/terra_latency.py mise exec -- bash scripts/example.sh terra_counter --erts --no-build`.
 
-The release key latency of main (7 ms median, 19 ms maximum) meets the bound of at most 10 ms of #506 at the median. The floor loops of main (`call_only` 31.4 ns, `call_ext_only` 35.7 ns after #632, landed as `e3c75c73` before `b90085da`; see `docs/performance-status.md`) meet the bound of at most 150 ns of #506. Known gap: the final target of at most 5 ms for each key in section 8 of `docs/interpreter-dispatch-plan.md` is not reached. The pinned ERTS stays at about 1 ms.
+The release key latency of main (7 ms median, 19 ms maximum) meets the bound of at most 10 ms of #506 at the median, and the maximum is above the bound. Decision (2026-10-15, by the agent under the owner delegation of that day): #506 reads its key-latency bound as the median of the session, as the earlier key-latency records of this document and of `docs/performance-status.md` report medians; the 19 ms maximum is a known gap. The floor loops of main (`call_only` 31.4 ns, `call_ext_only` 35.7 ns after #632, landed as `e3c75c73` before `b90085da`; see `docs/performance-status.md`) meet the bound of at most 150 ns of #506. Known gap: the final target of at most 5 ms for each key in section 8 of `docs/interpreter-dispatch-plan.md` is not reached. The pinned ERTS stays at about 1 ms.
 
 ### Benchmark module
 
