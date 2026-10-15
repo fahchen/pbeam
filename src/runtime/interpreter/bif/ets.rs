@@ -870,7 +870,7 @@ pub(super) fn delete_table(
             "unsupported ets:delete/1 of a table that a trapped insert uses: see \"ETS tables\" in docs/erts-differences.md",
         ));
     }
-    scheduler.ets.delete_table(&scheduler.atoms, id, caller);
+    scheduler.ets.delete_table(id, caller);
     delete_trap(context)
 }
 

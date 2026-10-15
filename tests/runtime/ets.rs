@@ -1,20 +1,19 @@
 use super::{
     Access, EMPTY, EtsTables, KeyIndex, Table, TableType, atom_hash, key_hash, object_hash,
-    stored_hash,
+    segment, stored_hash,
 };
 use crate::term::{Atom, AtomTable, Map, ProcessId, Reference, Term, test_atom_table};
 
 #[test]
 fn deletes_only_the_tables_of_the_owner() {
     let mut tables = EtsTables::default();
-    let atoms = test_atom_table();
     let table = |owner| Table::new(ProcessId(owner), Access::Protected, 1, TableType::Set);
     tables.create(Reference(0), None, table(1));
     tables.create(Reference(1), Some("ets_probe_owned"), table(1));
     tables.create(Reference(2), Some("ets_probe_named"), table(2));
     tables.create(Reference(3), None, table(2));
 
-    assert_eq!(tables.delete_owned(&atoms, ProcessId(1), 100), Some(36));
+    assert_eq!(tables.delete_owned(ProcessId(1), 100), Some(36));
     assert!(!tables.name_in_use("ets_probe_owned"));
     assert!(tables.name_in_use("ets_probe_named"));
     let mut live: Vec<_> = tables.tables.keys().copied().collect();
@@ -23,9 +22,59 @@ fn deletes_only_the_tables_of_the_owner() {
 }
 
 #[test]
-fn finds_a_named_table_of_each_access_mode() {
+fn frees_a_large_deleted_table_in_bounded_turns() {
     let mut tables = EtsTables::default();
     let atoms = test_atom_table();
+    let mut table = Table::new(ProcessId(1), Access::Public, 1, TableType::Set);
+    let count = 40_000;
+    for key in 0..count {
+        table.insert(&atoms, vec![Term::Integer(key)]);
+    }
+    let mut per_segment = vec![0; segment(table.segment_slots() - 1) + 1];
+    for key in 0..count {
+        per_segment[segment(table.bucket(stored_hash(&atoms, &Term::Integer(key))))] += 1;
+    }
+    let largest = *per_segment.iter().max().expect("a table has a segment");
+    tables.create(Reference(0), Some("ets_probe_large"), table);
+    tables.delete_table(Reference(0), ProcessId(1));
+    assert!(!tables.name_in_use("ets_probe_large"));
+    assert!(tables.tables.is_empty());
+
+    let live = |tables: &EtsTables| {
+        tables
+            .freeing
+            .get(&ProcessId(1))
+            .map_or(0, |freeing| freeing.table.objects.iter().flatten().count())
+    };
+    let budget = 4000;
+    let mut left = live(&tables);
+    let mut segments = tables.freeing[&ProcessId(1)].segments;
+    let mut traps = 0;
+    assert_eq!(left, per_segment.iter().sum::<usize>());
+    loop {
+        let rest = tables.free_segments(ProcessId(1), budget);
+        let now = live(&tables);
+        let freed = left - now;
+        assert!(freed > 0);
+        assert!(freed <= usize::try_from(budget).expect("the budget is positive") + largest);
+        left = now;
+        if let Some(rest) = rest {
+            assert!((0..budget).contains(&rest));
+            break;
+        }
+        traps += 1;
+        let next = tables.freeing[&ProcessId(1)].segments;
+        assert!(next < segments);
+        segments = next;
+    }
+    assert!(traps >= 3, "{traps} traps");
+    assert_eq!(left, 0);
+    assert!(tables.freeing.is_empty());
+}
+
+#[test]
+fn finds_a_named_table_of_each_access_mode() {
+    let mut tables = EtsTables::default();
     tables.create(
         Reference(0),
         None,
@@ -38,7 +87,7 @@ fn finds_a_named_table_of_each_access_mode() {
     );
     assert_eq!(tables.whereis("ets_probe_private"), Some(Reference(1)));
     assert_eq!(tables.whereis("ets_probe_missing"), None);
-    assert_eq!(tables.delete_owned(&atoms, ProcessId(1), 100), Some(36));
+    assert_eq!(tables.delete_owned(ProcessId(1), 100), Some(36));
     assert_eq!(tables.whereis("ets_probe_private"), None);
 }
 

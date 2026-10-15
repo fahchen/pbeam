@@ -40,12 +40,25 @@ pub(super) struct EtsTables {
     tables: HashMap<Reference, Table>,
     /// The table reference of each named table by its name.
     names: HashMap<String, Reference>,
-    /// The table that the exit of each owner frees, by owner, when the exit
-    /// switched out in it: the reductions of each segment that is not free
-    /// yet, the top segment last. ERTS keeps the table in the yield state of
-    /// `erts_db_process_exiting` (`erl_db.c:5033-5041`, `5133-5143`). The
-    /// table has no name and no reference at that time.
-    freeing: HashMap<ProcessId, Vec<i32>>,
+    /// The table that each process frees, by process, when the free
+    /// switched out or trapped in it: the exit of the owner
+    /// (`erl_db.c:5033-5041`, `5133-5143`) or `ets:delete/1`
+    /// (`erl_db.c:3064-3077`). The table has no name and no reference at
+    /// that time.
+    freeing: HashMap<ProcessId, Freeing>,
+}
+
+/// A deleted table and the count of its segments that are not free yet. ERTS
+/// frees the segments from the top segment down and keeps the position in
+/// the table (`erl_db_hash.c:3140-3149`), so a later turn continues at the
+/// next segment and does not walk a free segment again.
+#[derive(Debug)]
+pub(super) struct Freeing {
+    /// The table. Its free segments hold no object.
+    table: Table,
+    /// The count of the segments that are not free, so the top segment that
+    /// is not free is `segments - 1`.
+    segments: usize,
 }
 
 /// One ETS hash table: a `set`, a `bag`, or a `duplicate_bag` table.
@@ -323,15 +336,10 @@ impl EtsTables {
     /// ```rust,ignore
     /// let mut tables = EtsTables::default();
     /// tables.create(Reference(0), Some("ac_tab"), Table::new(ProcessId(1), Access::Public, 1, TableType::Set));
-    /// assert_eq!(tables.delete_owned(&AtomTable::new(), ProcessId(1), 100), Some(68));
+    /// assert_eq!(tables.delete_owned(ProcessId(1), 100), Some(68));
     /// assert!(!tables.name_in_use("ac_tab"));
     /// ```
-    pub(super) fn delete_owned(
-        &mut self,
-        atoms: &AtomTable,
-        owner: ProcessId,
-        mut reds: i32,
-    ) -> Option<i32> {
+    pub(super) fn delete_owned(&mut self, owner: ProcessId, mut reds: i32) -> Option<i32> {
         loop {
             if self.freeing.contains_key(&owner) {
                 reds = self.free_segments(owner, reds)?;
@@ -350,14 +358,14 @@ impl EtsTables {
             };
             let table = self.tables.remove(&id).expect("an owned table is live");
             self.names.retain(|_, named| *named != id);
-            self.freeing.insert(owner, table.segment_reductions(atoms));
+            self.freeing.insert(owner, Freeing::new(table));
         }
     }
 
     /// Delete the table `id` and its name, as `ets:delete/1`
     /// (`erl_db.c:3053-3061`) does before it frees the table, and keep the
-    /// reductions of its segments under the process `caller`, which then
-    /// owns the table (`erl_db.c:3031-3051`). [`EtsTables::free_segments`]
+    /// table under the process `caller`, which then owns the table
+    /// (`erl_db.c:3031-3051`). [`EtsTables::free_segments`]
     /// frees them. The caller makes sure that the table is live.
     ///
     /// # Examples
@@ -365,21 +373,21 @@ impl EtsTables {
     /// ```rust,ignore
     /// let mut tables = EtsTables::default();
     /// tables.create(Reference(0), Some("ac_tab"), Table::new(ProcessId(1), Access::Public, 1, TableType::Set));
-    /// tables.delete_table(&AtomTable::new(), Reference(0), ProcessId(2));
+    /// tables.delete_table(Reference(0), ProcessId(2));
     /// assert!(!tables.name_in_use("ac_tab"));
     /// assert_eq!(tables.free_segments(ProcessId(2), 100), Some(68));
     /// ```
-    pub(super) fn delete_table(&mut self, atoms: &AtomTable, id: Reference, caller: ProcessId) {
+    pub(super) fn delete_table(&mut self, id: Reference, caller: ProcessId) {
         let table = self.tables.remove(&id).expect("a deleted table is live");
         self.names.retain(|_, named| *named != id);
-        self.freeing.insert(caller, table.segment_reductions(atoms));
+        self.freeing.insert(caller, Freeing::new(table));
     }
 
     /// Free the segments that the table of `owner` keeps, from the top
     /// segment down, with `reds` reductions left, as
     /// `db_free_table_continue_hash` (`erl_db_hash.c:3140-3149`) does: each
-    /// segment uses its reductions, and the work stops when the reductions
-    /// are less than 0 after a segment. Return the reductions that are left
+    /// segment frees its objects and uses its reductions, and the work stops
+    /// when the reductions are less than 0 after a segment. Return the reductions that are left
     /// when each segment is free, or `None` when segments remain.
     ///
     /// # Examples
@@ -387,19 +395,74 @@ impl EtsTables {
     /// ```rust,ignore
     /// let mut tables = EtsTables::default();
     /// tables.create(Reference(0), None, Table::new(ProcessId(1), Access::Public, 1, TableType::Set));
-    /// tables.delete_table(&AtomTable::new(), Reference(0), ProcessId(1));
+    /// tables.delete_table(Reference(0), ProcessId(1));
     /// assert_eq!(tables.free_segments(ProcessId(1), 10), None);
     /// assert_eq!(tables.free_segments(ProcessId(1), 100), Some(100));
     /// ```
     pub(super) fn free_segments(&mut self, owner: ProcessId, mut reds: i32) -> Option<i32> {
-        let segments = self.freeing.get_mut(&owner)?;
-        while let Some(segment) = segments.pop() {
+        let freeing = self.freeing.get_mut(&owner)?;
+        while let Some(segment) = freeing.free_segment() {
             reds -= segment;
             if reds < 0 {
                 return None;
             }
         }
         self.freeing.remove(&owner);
+        Some(reds)
+    }
+}
+
+impl Freeing {
+    /// Return the free state of the deleted table `table`, with each of its
+    /// segments not free yet.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let freeing = Freeing::new(Table::new(ProcessId(1), Access::Public, 1, TableType::Set));
+    /// assert_eq!(freeing.segments, 1);
+    /// ```
+    fn new(table: Table) -> Freeing {
+        let segments = segment(table.segment_slots() - 1) + 1;
+        Freeing { table, segments }
+    }
+
+    /// Free the objects of the top segment that is not free yet and return
+    /// its reductions: 32, and 1 for each object in the segment
+    /// (`erl_db_hash.c:3141`, `3468-3530`). Return `None` when each segment
+    /// is free. The walk reads only the bucket chains of the segment, so the
+    /// work of one segment grows with its objects only.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
+    /// table.insert(&AtomTable::new(), vec![Term::Integer(1)]);
+    /// let mut freeing = Freeing::new(table);
+    /// assert_eq!(freeing.free_segment(), Some(33));
+    /// assert_eq!(freeing.free_segment(), None);
+    /// ```
+    fn free_segment(&mut self) -> Option<i32> {
+        self.segments = self.segments.checked_sub(1)?;
+        let first = match self.segments {
+            0 => 0,
+            later => FIRST_SEGMENT_SLOTS + (later - 1) * SEGMENT_SLOTS,
+        };
+        let last = (FIRST_SEGMENT_SLOTS + self.segments * SEGMENT_SLOTS).min(self.table.buckets);
+        let table = &mut self.table;
+        let mut reds = SEGMENT_REDUCTIONS;
+        for bucket in first..last {
+            let mut key = std::mem::replace(&mut table.heads[bucket], EMPTY);
+            while key != EMPTY {
+                let mut slot = key;
+                key = table.next[key];
+                while slot != EMPTY {
+                    table.objects[slot] = None;
+                    slot = table.older[slot];
+                    reds += 1;
+                }
+            }
+        }
         Some(reds)
     }
 }
@@ -1033,30 +1096,6 @@ impl Table {
         } else {
             0
         }
-    }
-
-    /// Return the reductions that the exit of the owner uses for each
-    /// segment of the table, the top segment last: 32, and 1 for each object
-    /// in the segment (`erl_db_hash.c:3141`, `3468-3530`). An object is in
-    /// the slot of its key hash under the size mask, or under the half mask
-    /// when that slot is not active (`hash_to_ix`, `erl_db_hash.c:199-209`).
-    /// The size mask is one less than the power of two that holds the
-    /// buckets (`erl_db_hash.c:3675-3681`, `3776-3779`).
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
-    /// let atoms = AtomTable::new();
-    /// table.insert(&atoms, vec![Term::Integer(1)]);
-    /// assert_eq!(table.segment_reductions(&atoms), vec![33]);
-    /// ```
-    fn segment_reductions(&self, atoms: &AtomTable) -> Vec<i32> {
-        let mut segments = vec![SEGMENT_REDUCTIONS; segment(self.segment_slots() - 1) + 1];
-        for object in self.objects.iter().flatten() {
-            segments[segment(self.bucket(stored_hash(atoms, self.key(object))))] += 1;
-        }
-        segments
     }
 
     /// Return the key of `object`: its element at the key position.

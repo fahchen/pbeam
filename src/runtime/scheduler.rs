@@ -2527,7 +2527,7 @@ impl Scheduler {
         // count (`erl_db.c:5044-5045`, `5118`; `erl_process.c:14360-14366`).
         let deleted = reds > 0 && {
             let left = self.current_process_mut().fcalls;
-            let rest = self.ets.delete_owned(&self.atoms, id, left);
+            let rest = self.ets.delete_owned(id, left);
             if let Some(rest) = rest {
                 self.current_process_mut().bump_reductions(left - rest);
             }
