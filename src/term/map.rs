@@ -1424,7 +1424,7 @@ impl Hamt {
                 Child::Collision(pairs) => {
                     match pairs.binary_search_by(|(existing, _)| {
                         existing
-                            .compare(&key, atoms)
+                            .compare_exact(&key, atoms)
                             .expect("supported map keys have a term order")
                     }) {
                         Ok(index) => pairs[index].1 = value,
@@ -1541,7 +1541,7 @@ impl Node {
         let mut child = if depth == HAMT_MAX_LEVEL {
             let order = first
                 .1
-                .compare(&second.1, atoms)
+                .compare_exact(&second.1, atoms)
                 .expect("supported map keys have a term order");
             let (low, high) = if order == Ordering::Less {
                 (first, second)
@@ -1573,7 +1573,8 @@ impl Node {
 
 /// Compare two flatmap keys in the flatmap key order, as
 /// `erts_cmp_flatmap_keys` does (`erl_utils.h:267-272`): two atoms compare
-/// by atom index, and each other two keys compare in the term order. Thus
+/// by atom index, and each other two keys compare in the exact term order
+/// ([`Term::compare_exact`]). Thus
 /// an atom in a list compares by name.
 ///
 /// # Examples
@@ -1587,6 +1588,8 @@ impl Node {
 /// let list = |atom: &Term| Term::list_from([atom.clone()]);
 /// assert_eq!(flatmap_order(&list(&true_), &list(&abs_path), &atoms)?, Ordering::Greater);
 /// assert_eq!(flatmap_order(&Term::Integer(1), &true_, &atoms)?, Ordering::Less);
+/// // An integer is less than a float in the exact order.
+/// assert_eq!(flatmap_order(&Term::Float(1.0), &Term::Integer(2), &atoms)?, Ordering::Greater);
 /// ```
 ///
 /// # Errors
@@ -1600,7 +1603,7 @@ pub(crate) fn flatmap_order(
 ) -> Result<Ordering, BeamError> {
     match (left, right) {
         (Term::Atom(left), Term::Atom(right)) => Ok(left.index().cmp(&right.index())),
-        _ => left.compare(right, atoms),
+        _ => left.compare_exact(right, atoms),
     }
 }
 
@@ -1693,7 +1696,8 @@ fn encode_path(elements: Vec<usize>) -> Result<i64, BeamError> {
 /// `(index << 6) | 0xB`, a small integer as its word `(value << 4) | 0xF`, and
 /// a list key that is not empty with the list path of `make_internal_hash`,
 /// also an improper list whose tail is an atom, a small integer, or a
-/// supported tuple. A tuple key hashes with the tuple path
+/// supported tuple. A float key hashes with the float path
+/// (`erl_term_hashing.c:2193-2202`). A tuple key hashes with the tuple path
 /// (`erl_term_hashing.c:1878-1893`): its type and arity, then its elements.
 /// A binary key hashes with the binary path of `make_internal_hash`. A
 /// binary in a list or a tuple key is not supported yet.
@@ -1709,6 +1713,7 @@ fn encode_path(elements: Vec<usize>) -> Result<i64, BeamError> {
 /// assert_eq!(map_hash(&Term::Integer(1 << 59)), None);
 /// assert_eq!(map_hash(&Term::tuple(vec![])), Some(4510301282025278020));
 /// assert_eq!(map_hash(&Term::binary(vec![])), Some(10873612744977862784));
+/// assert!(map_hash(&Term::Float(1.0)).is_some());
 /// assert_eq!(map_hash(&Term::list_from([Term::binary(vec![])])), None);
 /// assert_eq!(map_hash(&Term::tuple(vec![Term::binary(vec![])])), None);
 /// let improper = |tail| Term::cons(Term::Integer(1), tail);
@@ -1719,12 +1724,12 @@ fn map_hash(key: &Term) -> Option<u64> {
     match key {
         // An immediate key or a binary needs no walk, so the check
         // allocates nothing.
-        Term::Atom(_) | Term::Nil | Term::Binary(_) => {}
+        Term::Atom(_) | Term::Nil | Term::Binary(_) | Term::Float(_) => {}
         Term::Cons(_) | Term::Tuple(_) => {
             let mut pending = vec![key];
             while let Some(term) = pending.pop() {
                 match term {
-                    Term::Atom(_) | Term::Nil => {}
+                    Term::Atom(_) | Term::Nil | Term::Float(_) => {}
                     Term::Cons(cell) => pending.extend([&cell.tail, &cell.head]),
                     Term::Tuple(elements) => pending.extend(elements.iter()),
                     _ => {

@@ -10,6 +10,7 @@
 //! | --- | --- |
 //! | atom | the name, in quotes when it is not a Latin-1 lowercase letter followed by Latin-1 letters, digits, and `_` |
 //! | integer | decimal, for example `-7` |
+//! | float | `%.6e`, for example `1.500000e+00` |
 //! | proper list of bytes that are not control characters | `"..."` with `\n` and `"` escaped |
 //! | other list | `[1,2|x]` |
 //! | tuple | `{a,{b}}` |
@@ -68,6 +69,11 @@ pub(crate) fn print_term(term: &Term, atoms: &AtomTable) -> Vec<u8> {
         match term {
             Term::Atom(atom) => print_atom(atoms.name_of(atom), &mut text),
             Term::Integer(value) => text.extend_from_slice(value.to_string().as_bytes()),
+            // `PRINT_DOUBLE(res, fn, arg, 'e', 6, 0, ff.fd)`
+            // (`erl_printf_term.c:596-600`): six digits after the point.
+            Term::Float(value) => {
+                text.extend_from_slice(&crate::term::float_text::scientific(*value, 6))
+            }
             Term::Nil => text.extend_from_slice(b"[]"),
             Term::Cons(_)
                 if let Some(elements) = term.proper_list()

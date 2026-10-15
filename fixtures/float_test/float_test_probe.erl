@@ -1,8 +1,8 @@
 -module(float_test_probe).
 -export([kinds/0, kind/1, half/1, halves/0, divide/2, two_over/1]).
 
-%% Run the is_float test on one term of each kind that PBeam has. PBeam has
-%% no float term, so each test fails. lists:concat/1 runs the is_float test
+%% Run the is_float test on one term of each kind that is not a float, so
+%% each test fails. lists:concat/1 runs the is_float test
 %% on each element in lists:thing_to_list/1 (lists.erl:1283-1286), as
 %% logger_olp:reset_restart_flag/1 does (logger_olp.erl:467-468).
 kinds() ->
@@ -19,8 +19,7 @@ kind(_) -> other.
 %% `string.beam` and `erl_scan.beam`.
 half(X) -> X / 2.
 
-%% Run half/1 on one term of each kind that PBeam has and that is not a
-%% number. The `fconv` instruction raises badarith for each one.
+%% Run half/1 on one term of each kind that is not a number. The `fconv` instruction raises badarith for each one.
 halves() ->
     Terms = [a, "s", {t}, [], [a | b], <<"b">>, #{k => v}, self(), make_ref(),
              fun kinds/0],

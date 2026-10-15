@@ -379,9 +379,10 @@ fn unique_units(
                 loop_steps(units, 1, 1);
                 end += 1;
             }
-            // hxnodecmpkey: the term order of the keys (`erl_map.c:1160-1169`).
+            // hxnodecmpkey: the exact term order of the keys
+            // (`CMP_TERM`, `erl_map.c:1160-1169`).
             let mut by_key =
-                |a: &HxNode, b: &HxNode| keys[a.position].compare(keys[b.position], atoms);
+                |a: &HxNode, b: &HxNode| keys[a.position].compare_exact(keys[b.position], atoms);
             qsort_units(&mut nodes[index..end], index, units, &mut by_key)?;
             while index < end {
                 loop_steps(units, 1, 1);

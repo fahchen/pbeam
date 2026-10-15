@@ -151,9 +151,10 @@ enum Step {
 /// [`Subtract::length`], [`Subtract::naive_left`],
 /// [`Subtract::naive_right`], [`Subtract::set_build`], and
 /// [`Subtract::set_finish`] state. When the budget ends before the work,
-/// the BIF traps to its export with the state (see [`continue_trap`]). PBeam
-/// terms have no float, so the term order of the set stages and the exact
-/// equality of the naive stages agree.
+/// the BIF traps to its export with the state (see [`continue_trap`]). The
+/// set stages use the exact term order (`CMP_TERM`,
+/// `erl_bif_lists.c:460`), so they agree with the exact equality of the
+/// naive stages, and `[1.0] -- [1]` is `[1.0]`.
 ///
 /// # Examples
 ///
@@ -539,7 +540,7 @@ impl Subtract {
         let (mut low, mut high) = (0, self.set.len());
         while low < high {
             let middle = (low + high) / 2;
-            match self.set[middle].0.compare(value, atoms)? {
+            match self.set[middle].0.compare_exact(value, atoms)? {
                 Ordering::Less => low = middle + 1,
                 Ordering::Greater => high = middle,
                 Ordering::Equal => return Ok(Ok(middle)),
