@@ -1843,7 +1843,9 @@ fn removes_a_reply_demonitor_port_monitor_from_the_port_at_the_alias_message() {
         alias: Some(AliasMode::ReplyDemonitor),
         ..no_options()
     };
-    let alias = scheduler.monitor(MonitorTarget::Port(port), options).unwrap();
+    let alias = scheduler
+        .monitor(MonitorTarget::Port(port), options)
+        .unwrap();
     let signal = Signal::AliasMessage {
         alias,
         message: atom("reply"),
