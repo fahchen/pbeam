@@ -1736,7 +1736,9 @@ fn b2l_start(
     }
     process.bump_reductions(((length - 1) / B2L_BYTES_PER_REDUCTION + 1) as i32);
     Ok(Value(b2l_cons(
-        &binary[offset..offset + length],
+        binary,
+        offset,
+        offset + length,
         Term::nil(),
     )))
 }
@@ -1771,7 +1773,7 @@ pub(super) fn b2l_chunk(
     let size = ((reds_left + 1) * B2L_BYTES_PER_REDUCTION).min(remaining);
     process.bump_reductions(((size - 1) / B2L_BYTES_PER_REDUCTION + 1) as i32);
     let rest = remaining - size;
-    let list = b2l_cons(&binary[offset + rest..offset + remaining], tail);
+    let list = b2l_cons(binary, offset + rest, offset + remaining, tail);
     if rest == 0 {
         return Value(list);
     }
@@ -1787,12 +1789,22 @@ pub(super) fn b2l_chunk(
     }
 }
 
-/// Return the list of the bytes `bytes` in front of the list `tail`, as
-/// ERTS `erts_bin_bytes_to_list` does.
-fn b2l_cons(bytes: &[u8], tail: Term) -> Term {
-    bytes.iter().rev().fold(tail, |tail, byte| {
-        Term::cons(Term::Integer(i64::from(*byte)), tail)
-    })
+/// Return the list of the bytes from byte `start` to byte `end` of
+/// `binary` in front of the list `tail`, as ERTS `erts_bin_bytes_to_list`
+/// does. [`Binary::byte_runs`] reads the range from the chunks of a binary
+/// that an append built and does not join them, so one call does O(chunks)
+/// work plus one cons for each byte of the range, and the reductions of the
+/// caller pay for the bytes.
+pub(super) fn b2l_cons(binary: &Binary, start: usize, end: usize, tail: Term) -> Term {
+    binary
+        .byte_runs(start, end)
+        .into_iter()
+        .rev()
+        .fold(tail, |tail, run| {
+            run.iter().rev().fold(tail, |tail, byte| {
+                Term::cons(Term::Integer(i64::from(*byte)), tail)
+            })
+        })
 }
 
 /// Run `erlang:integer_to_list/1`: return the decimal characters of an

@@ -493,6 +493,52 @@ impl Binary {
         }
     }
 
+    /// Return the runs of the bytes from byte `start` to byte `end` of this
+    /// binary, in order, for a reader of one byte range. A view that an
+    /// append built gives the part of each chunk in the range and does not
+    /// join its chunks, as [`Binary::deref`] does at its first read. The call
+    /// copies no byte: it walks the list of chunks up to the end of the
+    /// range, so it does O(chunks) work and touches only the bytes of the
+    /// range. Each other view gives one run of its bytes.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let binary = Binary::from_chunks(vec![Arc::new(b"ab".to_vec()), Arc::new(b"cd".to_vec())]);
+    /// assert_eq!(binary.byte_runs(1, 3), vec![&b"b"[..], &b"c"[..]]);
+    /// ```
+    pub(crate) fn byte_runs(&self, start: usize, end: usize) -> Vec<&[u8]> {
+        let Some(chunks) = &self.0.chunks else {
+            return vec![&self[start..end]];
+        };
+        let mut runs = Vec::new();
+        let mut first = 0;
+        for chunk in chunks.iter() {
+            if first >= end {
+                break;
+            }
+            let last = first + chunk.len();
+            if last > start {
+                runs.push(&chunk[start.max(first) - first..end.min(last) - first]);
+            }
+            first = last;
+        }
+        runs
+    }
+
+    /// Return whether a view that an append built joined its chunks in one
+    /// array, for the tests of the readers that must not join them.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(!Binary::from(b"ab".to_vec()).is_joined());
+    /// ```
+    #[cfg(test)]
+    pub(crate) fn is_joined(&self) -> bool {
+        self.0.flat.get().is_some()
+    }
+
     /// Build the binary of `chunks` in order. The view keeps the arrays and
     /// copies no byte of them, so a later append can share each one. One
     /// chunk gives a view of that array with no chunk list.
