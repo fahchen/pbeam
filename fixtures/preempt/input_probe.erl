@@ -57,11 +57,15 @@ inputs() ->
      %% improper list of 100 objects, a list of 100 objects with an atom at
      %% position 50, lists for a table that the caller cannot write, and a
      %% list for a table that does not exist. A list of 16000 or more
-     %% objects traps.
+     %% objects traps. {bag, N} and {duplicate_bag, N} insert the objects
+     %% {1, 1}..{1, N} of one key, and a bag insert of a list always copies
+     %% the list. {bag_new, 100} and {bag_equal, 100} insert {1, 101} and
+     %% {1, 50} into a bag with the objects {1, 1}..{1, 100}.
      {ets_insert,
       [object, nil, one, {list, 2}, {list, 3}, {list, 8}, {list, 100}, {list, 1000},
        {list, 10000}, {list, 15000}, {list, 16000}, improper, bad, {protected, 100},
-       {protected, 40000}, {missing, 100}]},
+       {protected, 40000}, {missing, 100}, {bag, 2}, {bag, 100}, {bag, 400},
+       {duplicate_bag, 100}, {bag_new, 100}, {bag_equal, 100}]},
      %% The number of persistent terms of the node. The numbers go up,
      %% because no BIF of PBeam erases a persistent term.
      {persistent_term_get, [0, 1, 100, 1000, 4000, 10000]},
@@ -100,6 +104,7 @@ inputs() ->
 %% The inputs of the BIFs that trap, for longs/1.
 long_inputs() ->
     [{maps_merge, {{1, 40000}, {20000, 60000}}}, {ets_insert, {list, 16000}},
+     {ets_insert, {bag, 400}},
      {persistent_term_get, 10000}, {iolist_size, {ones, 100000}},
      {iolist_to_iovec, {ones, 100000}}, {iolist_to_iovec, {bins, 1995}},
      {iolist_to_binary, {ones, 100000}}, {iolist_to_binary, {bins, 1995}},
@@ -118,6 +123,9 @@ pairs(Key, Key) -> [{Key, Key}];
 pairs(First, Last) ->
     Middle = (First + Last) div 2,
     pairs(First, Middle) ++ pairs(Middle + 1, Last).
+
+%% The objects {1, 1}..{1, Count} of one key.
+one_key(Count) -> [{1, Value} || {Value, _} <- pairs(1, Count)].
 
 %% The keys First..Last.
 keys(First, Last) -> [Key || {Key, _} <- pairs(First, Last)].
@@ -173,6 +181,12 @@ arg(none, _) -> none.
 %% A public table of the caller, or a protected table of another process.
 table({protected, _}) -> element(2, owned_table(protected));
 table({missing, _}) -> missing;
+table({bag, _}) -> ets:new(input, [public, bag]);
+table({duplicate_bag, _}) -> ets:new(input, [public, duplicate_bag]);
+table({Bag, Count}) when Bag =:= bag_new; Bag =:= bag_equal ->
+    Table = ets:new(input, [public, bag]),
+    true = ets:insert(Table, one_key(Count)),
+    Table;
 table(_) -> ets:new(input, [public]).
 
 owned_table(Access) ->
@@ -187,6 +201,9 @@ owner(Collector, Access) ->
 objects(object) -> {1, 1};
 objects(nil) -> [];
 objects(one) -> [{1, 1}];
+objects({bag_new, Count}) -> {1, Count + 1};
+objects({bag_equal, Count}) -> {1, Count div 2};
+objects({Bag, Count}) when Bag =:= bag; Bag =:= duplicate_bag -> one_key(Count);
 objects({_, Count}) -> pairs(1, Count);
 objects(improper) -> pairs(1, 100) ++ x;
 objects(bad) -> pairs(1, 49) ++ [x | pairs(51, 100)].

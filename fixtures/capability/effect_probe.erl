@@ -390,6 +390,7 @@ ambient() ->
         ets:lookup_element(Name, key, 2, none),
         ets:member(Name, key),
         ets:delete(Name, key),
+        ets:info(Name, type),
         reference(ets:whereis(Name)),
         atom(file:native_name_encoding()),
         byte_size(prim_file:internal_name2native("a")),

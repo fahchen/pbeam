@@ -3,6 +3,9 @@
 /fixtures/hello/_build/
 /fixtures/hello/cover/
 /fixtures/hello/tmp/
+/examples/plug_hello/_build/
+/examples/plug_hello/cover/
+/examples/plug_hello/deps/
 
 # Agent scratch files. Skills under .agents/skills/ stay tracked.
 /.agents/.handoff/

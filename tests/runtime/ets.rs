@@ -1,11 +1,14 @@
-use super::{Access, EMPTY, EtsTables, Table, atom_hash, key_hash, stored_hash};
+use super::{
+    Access, EMPTY, EtsTables, KeyIndex, Table, TableType, atom_hash, key_hash, object_hash,
+    stored_hash,
+};
 use crate::term::{Atom, AtomTable, Map, ProcessId, Reference, Term, test_atom_table};
 
 #[test]
 fn deletes_only_the_tables_of_the_owner() {
     let mut tables = EtsTables::default();
     let atoms = test_atom_table();
-    let table = |owner| Table::new(ProcessId(owner), Access::Protected, 1);
+    let table = |owner| Table::new(ProcessId(owner), Access::Protected, 1, TableType::Set);
     tables.create(Reference(0), None, table(1));
     tables.create(Reference(1), Some("ets_probe_owned"), table(1));
     tables.create(Reference(2), Some("ets_probe_named"), table(2));
@@ -26,12 +29,12 @@ fn finds_a_named_table_of_each_access_mode() {
     tables.create(
         Reference(0),
         None,
-        Table::new(ProcessId(1), Access::Public, 1),
+        Table::new(ProcessId(1), Access::Public, 1, TableType::Set),
     );
     tables.create(
         Reference(1),
         Some("ets_probe_private"),
-        Table::new(ProcessId(1), Access::Private, 1),
+        Table::new(ProcessId(1), Access::Private, 1, TableType::Set),
     );
     assert_eq!(tables.whereis("ets_probe_private"), Some(Reference(1)));
     assert_eq!(tables.whereis("ets_probe_missing"), None);
@@ -41,7 +44,7 @@ fn finds_a_named_table_of_each_access_mode() {
 
 #[test]
 fn deletes_only_the_object_with_an_exactly_equal_key() {
-    let mut table = Table::new(ProcessId(0), Access::Public, 2);
+    let mut table = Table::new(ProcessId(0), Access::Public, 2, TableType::Set);
     let atoms = test_atom_table();
     let object = |value, key| vec![Term::Integer(value), key];
     let tuple = |value| Term::tuple(vec![Term::Integer(value)]);
@@ -58,7 +61,7 @@ fn deletes_only_the_object_with_an_exactly_equal_key() {
 
 #[test]
 fn finds_no_key_in_an_empty_table() {
-    let table = Table::new(ProcessId(0), Access::Public, 1);
+    let table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
     let atoms = test_atom_table();
     assert_eq!(table.object(&atoms, &Term::Integer(1)), None);
     assert_eq!(table.object(&atoms, &Term::static_atom("ok")), None);
@@ -66,7 +69,7 @@ fn finds_no_key_in_an_empty_table() {
 
 #[test]
 fn replaces_an_object_in_its_slot_and_frees_a_deleted_slot() {
-    let mut table = Table::new(ProcessId(0), Access::Public, 1);
+    let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
     let atoms = test_atom_table();
     for key in 0..10 {
         table.insert(&atoms, vec![Term::Integer(key), Term::Integer(key)]);
@@ -103,7 +106,7 @@ fn replaces_an_object_in_its_slot_and_frees_a_deleted_slot() {
 
 #[test]
 fn finds_a_key_after_a_delete_shifts_its_probe_cluster() {
-    let mut table = Table::new(ProcessId(0), Access::Public, 1);
+    let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
     let atoms = test_atom_table();
     // The stored hashes of 0, 3, 5, and 16 give the index slot 6, so the four
     // entries form one probe cluster at the index slots 6, 7, 0, and 1.
@@ -151,7 +154,7 @@ fn finds_a_key_after_a_delete_shifts_its_probe_cluster() {
 
 #[test]
 fn finds_a_key_after_a_delete_does_not_move_a_blocked_entry() {
-    let mut table = Table::new(ProcessId(0), Access::Public, 1);
+    let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
     let atoms = test_atom_table();
     // The keys 0 and 3 hash to index slot 6 and the key 22 hashes to index
     // slot 7. The cluster is 0 at 6, 22 at 7, and 3 at 0.
@@ -178,7 +181,7 @@ fn finds_a_key_after_a_delete_does_not_move_a_blocked_entry() {
 
 #[test]
 fn finds_and_keeps_a_key_of_each_shape() {
-    let mut table = Table::new(ProcessId(0), Access::Public, 1);
+    let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
     let atoms = test_atom_table();
     let keys = vec![
         Term::static_atom("undefined"),
@@ -217,7 +220,7 @@ fn finds_and_keeps_a_key_of_each_shape() {
 
 #[test]
 fn keeps_every_key_through_growth_and_a_delete_wave() {
-    let mut table = Table::new(ProcessId(0), Access::Public, 1);
+    let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
     let atoms = test_atom_table();
     for key in 0..200 {
         table.insert(&atoms, vec![Term::Integer(key)]);
@@ -249,7 +252,7 @@ fn keeps_every_key_through_growth_and_a_delete_wave() {
 #[test]
 fn counts_the_objects_of_the_tables() {
     let mut tables = EtsTables::default();
-    let mut table = Table::new(ProcessId(0), Access::Public, 1);
+    let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
     let mut atoms = test_atom_table();
     let key = atoms.put("k").unwrap();
     table.insert(
@@ -265,7 +268,7 @@ fn counts_the_objects_of_the_tables() {
 #[test]
 fn counts_the_object_array_of_immediate_elements() {
     let mut tables = EtsTables::default();
-    let mut table = Table::new(ProcessId(0), Access::Public, 1);
+    let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
     let atoms = test_atom_table();
     table.insert(&atoms, vec![Term::Integer(1), Term::Integer(2)]);
     let object = table.allocated_bytes();
@@ -327,4 +330,154 @@ fn hashes_a_non_atom_key_with_the_internal_hash() {
         key_hash(&atoms, &Term::binary(vec![])),
         10_873_612_744_977_862_784
     );
+}
+
+#[test]
+fn keeps_the_objects_of_a_bag_key_in_insertion_order_across_deletes() {
+    // A bag key keeps its objects from the oldest to the newest, and a
+    // delete frees each slot of the key. The next objects reuse the free
+    // slots, last in first out, and still come in insertion order. A key
+    // that shares no slot with the deleted key keeps its objects.
+    let atoms = AtomTable::new();
+    let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Bag);
+    let object = |key, value| vec![Term::Integer(key), Term::Integer(value)];
+    let mut insert = |object| table.insert_all(&atoms, vec![object])[0];
+    for value in 1..=3 {
+        assert_eq!(insert(object(1, value)), value as usize - 1);
+    }
+    assert_eq!(insert(object(2, 1)), 0);
+    assert_eq!(insert(object(1, 2)), 1);
+    table.delete(&atoms, &Term::Integer(1));
+    assert!(table.objects(&atoms, &Term::Integer(1)).is_empty());
+    assert_eq!(table.slot_count(), 4);
+    for value in [7, 8, 9] {
+        assert_eq!(
+            table.insert_all(&atoms, vec![object(1, value)]),
+            vec![value as usize - 7]
+        );
+    }
+    assert_eq!(table.slot_count(), 4);
+    let objects = |key| -> Vec<Vec<Term>> {
+        (table.objects(&atoms, &Term::Integer(key)).into_iter())
+            .map(<[Term]>::to_vec)
+            .collect()
+    };
+    assert_eq!(objects(1), vec![object(1, 7), object(1, 8), object(1, 9)]);
+    assert_eq!(objects(2), vec![object(2, 1)]);
+}
+
+#[test]
+fn hashes_bag_objects_whose_changing_elements_cancelled_under_rotate_and_xor() {
+    // The objects `{7, I, 0 x 63, I}` had one hash for each `I` when the
+    // object hash was a rotate by 5 and an XOR of the element hashes: the
+    // two `I` elements are 64 rotations apart and cancel. A list insert of
+    // these objects then compared each object with all earlier objects in
+    // one turn. Each object must now have its own hash, and the list insert
+    // must give the ERTS counts of one insert after another.
+    const OBJECTS: i64 = 10_000;
+    let object = |value| {
+        let mut object = vec![Term::Integer(7), Term::Integer(value)];
+        object.extend(std::iter::repeat_n(Term::Integer(0), 63));
+        object.push(Term::Integer(value));
+        object
+    };
+    let objects: Vec<Vec<Term>> = (0..OBJECTS).map(object).collect();
+    let hashes: std::collections::HashSet<u64> =
+        objects.iter().map(|object| object_hash(object)).collect();
+    assert_eq!(hashes.len(), objects.len());
+
+    let atoms = AtomTable::new();
+    let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Bag);
+    let counts = table.insert_all(&atoms, objects);
+    assert_eq!(counts, (0..OBJECTS as usize).collect::<Vec<_>>());
+}
+
+#[test]
+fn keeps_equal_objects_in_a_duplicate_bag() {
+    let atoms = AtomTable::new();
+    let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::DuplicateBag);
+    let object = vec![Term::Integer(5)];
+    assert_eq!(
+        table.insert_all(&atoms, vec![object.clone(), object.clone()]),
+        vec![0, 0]
+    );
+    assert_eq!(table.objects(&atoms, &object[0]).len(), 2);
+    assert_eq!(table.table_type().name(), "duplicate_bag");
+    assert_eq!(TableType::Bag.name(), "bag");
+    assert_eq!(TableType::Set.name(), "set");
+}
+
+#[test]
+fn replaces_the_slot_of_an_index_entry_after_a_probe() {
+    // The hashes 1 and 9 have one home slot in the first 8 slots, so the
+    // entry of 9 is one slot after its home slot.
+    let mut index = KeyIndex::default();
+    index.insert(1, 0);
+    index.insert(9, 1);
+    index.replace(9, 1, 5);
+    assert_eq!(index.find(9, |slot| slot == 5), Some(5));
+    assert_eq!(index.find(1, |slot| slot == 0), Some(0));
+}
+
+/// Add `object` to the `bag` table `table` as ERTS adds one object
+/// (`erl_db_hash.c:1422-1452`), and return the number of objects that the
+/// insert compared with `object` and found not exactly equal. The insert
+/// compares `object` with each object of its key, from the newest to the
+/// oldest, and an exactly equal object stops it with no change. This is
+/// the reference model of `Table::insert_all`.
+fn insert_after_compares(table: &mut Table, atoms: &AtomTable, object: Vec<Term>) -> usize {
+    let key = table.key(&object);
+    let hash = stored_hash(atoms, key);
+    let newest = table.position(hash, key).unwrap_or(EMPTY);
+    let mut compared = 0;
+    let mut slot = newest;
+    while slot != EMPTY {
+        if *table.object_of(slot) == object {
+            return compared;
+        }
+        compared += 1;
+        slot = table.older[slot];
+    }
+    table.add(hash, object, newest);
+    compared
+}
+
+#[test]
+fn counts_the_compares_of_a_bag_list_insert_as_one_insert_after_another() {
+    // `insert_all` must give the counts and the objects that one insert
+    // after another gives: objects that were in the table, objects that the
+    // list added, an equal object in each part, and a new key.
+    let atoms = AtomTable::new();
+    let object = |key, value| vec![Term::Integer(key), Term::Integer(value)];
+    let filled = || {
+        let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Bag);
+        for value in 1..=5 {
+            insert_after_compares(&mut table, &atoms, object(1, value));
+        }
+        insert_after_compares(&mut table, &atoms, object(2, 1));
+        table
+    };
+    let list = [
+        (1, 3),
+        (1, 6),
+        (1, 6),
+        (2, 1),
+        (1, 1),
+        (1, 7),
+        (3, 1),
+        (1, 6),
+        (1, 4),
+    ];
+    let mut one_by_one = filled();
+    let expected: Vec<usize> = (list.iter())
+        .map(|(key, value)| insert_after_compares(&mut one_by_one, &atoms, object(*key, *value)))
+        .collect();
+    let mut table = filled();
+    let objects = list
+        .iter()
+        .map(|(key, value)| object(*key, *value))
+        .collect();
+    assert_eq!(table.insert_all(&atoms, objects), expected);
+    assert_eq!(expected, vec![2, 5, 0, 0, 5, 6, 0, 1, 3]);
+    assert_eq!(table.live_objects(), one_by_one.live_objects());
 }

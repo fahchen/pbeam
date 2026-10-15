@@ -835,8 +835,9 @@ impl BeamProgram {
     ///   copy that remain ([`persistent_term::put_trap`]). ERTS traps to
     ///   `persistent_term:put_common_trap/3` with a magic reference to the
     ///   copy state (`erl_bif_persistent.c:176-177`, `650-651`).
-    /// - `ets:insert/4`, with the table reference, the objects, the units
-    ///   done, and the key position ([`ets::insert_list`]). ERTS traps to
+    /// - `ets:insert/6`, with the table reference, the objects, the units
+    ///   done, the key position, the steps of a `bag` insert or `false`, and
+    ///   the state of the check ([`ets::insert_list`]). ERTS traps to
     ///   `ets:insert/2` with a magic reference to the YCF state
     ///   (`erl_db.c:2297-2332`).
     /// - `erts_internal:list_to_bitstring_continue/5`, with the phase and the
@@ -883,11 +884,22 @@ impl BeamProgram {
                 objects,
                 Term::Integer(done),
                 Term::Integer(keypos),
+                bag,
+                check,
             ],
         ) = (module, function, arguments.as_slice())
         {
             let mut context = BifContext { scheduler };
-            return ets::insert_list(&mut context, *id, objects, *done as usize, *keypos as i32);
+            let bag = bag.is_list().then(|| bag.clone());
+            return ets::insert_list(
+                &mut context,
+                *id,
+                objects,
+                *done as usize,
+                *keypos as i32,
+                bag,
+                ets::Check::from_term(check),
+            );
         }
         // The copy phase takes the result bytes out of the owned trap
         // arguments, so that no turn copies the bytes of an earlier turn
