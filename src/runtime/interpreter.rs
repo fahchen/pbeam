@@ -2471,13 +2471,37 @@ impl BeamProgram {
             return Ok(raise(process, ExceptionClass::Error, badarg));
         }
         let arity = arguments.len() as u32;
-        {
-            let process = scheduler.current_process_mut();
-            for (index, argument) in (0..).zip(arguments) {
-                write(process, &Operand::X(index), argument)?;
-            }
+        let start = self.is_start_apply(scheduler)?;
+        let process = scheduler.current_process_mut();
+        for (index, argument) in (0..).zip(arguments) {
+            write(process, &Operand::X(index), argument)?;
         }
-        self.call_mfa(scheduler, &module, &name, arity, tail)
+        process.start_apply = start;
+        let outcome = self.call_mfa(scheduler, &module, &name, arity, tail);
+        scheduler.current_process_mut().start_apply = false;
+        outcome
+    }
+
+    /// Return `true` when this apply is the first apply of a process that
+    /// starts at `erlang:apply/3`, as the ERTS `beam_run_process` start runs it
+    /// (`erl_process.c:12616-12624`). An apply that a fun of
+    /// `erlang:apply/3` makes later is a tail apply of the `erlang.beam`
+    /// body, and its frame stays in the stack trace.
+    ///
+    /// # Errors
+    ///
+    /// An initial call that the code table does not resolve is a runtime
+    /// invariant error.
+    fn is_start_apply(&self, scheduler: &mut Scheduler) -> Result<bool, BeamError> {
+        let process = scheduler.current_process_mut();
+        if std::mem::replace(&mut process.applied, true) {
+            return Ok(false);
+        }
+        let initial_call = process.initial_call.clone();
+        let (module, function, arity) = scheduler
+            .code
+            .initial_call_names(&scheduler.atoms, &initial_call)?;
+        Ok((module.as_str(), function.as_str(), arity) == ("erlang", "apply", 3))
     }
 
     /// Run `erlang:apply(Fun, Arguments)` with the arguments in `x0` and
@@ -2575,13 +2599,17 @@ impl BeamProgram {
             Target::External {
                 module, function, ..
             } if tail
-                && (
-                    scheduler.atoms.name_of(module),
-                    scheduler.atoms.name_of(function),
-                ) == ("erlang", "error")
-                && matches!(arity, 1..=3) =>
+                && matches!(
+                    (
+                        scheduler.atoms.name_of(module),
+                        scheduler.atoms.name_of(function),
+                        arity,
+                    ),
+                    ("erlang", "error", 1..=3) | ("erlang", "exit" | "throw", 1)
+                ) =>
             {
-                return self.tail_call_error(scheduler, arity);
+                let function = function.clone();
+                return self.tail_call_error(scheduler, function, arity);
             }
             Target::External {
                 module, function, ..
@@ -2603,7 +2631,8 @@ impl BeamProgram {
     }
 
     /// Run a tail call of the fun `fun erlang:error/1`,
-    /// `fun erlang:error/2`, or `fun erlang:error/3`, with the arity
+    /// `fun erlang:error/2`, `fun erlang:error/3`, `fun erlang:exit/1`, or
+    /// `fun erlang:throw/1`, with the name `function` and the arity
     /// `arity`. ERTS
     /// `i_call_fun_last` removes the frame before it calls the fun
     /// (`emit_i_call_fun2_last` in `jit/arm/instr_fun.cpp:425-455`). Only an
@@ -2623,20 +2652,27 @@ impl BeamProgram {
     ///
     /// ```rust,ignore
     /// // `tail(F) -> F(r, [a]).` as the start of a process.
-    /// let outcome = program.tail_call_error(&mut scheduler, 2)?;
+    /// let outcome = program.tail_call_error(&mut scheduler, error, 2)?;
     /// // The process exits with {r, [{Module, tail, 1, []}]}.
     /// assert!(matches!(outcome, Some(Outcome::Exit { .. })));
     /// ```
     fn tail_call_error(
         &self,
         scheduler: &mut Scheduler,
+        function: Atom,
         arity: u32,
     ) -> Result<Option<Outcome>, BeamError> {
+        // The guard of the call admits only `error/1,2,3`, `exit/1`, and
+        // `throw/1`, so the class follows from the name.
+        let class = match scheduler.atoms.name_of(&function) {
+            "exit" => ExceptionClass::Exit,
+            "throw" => ExceptionClass::Throw,
+            _ => ExceptionClass::Error,
+        };
         let process = scheduler.current_process_mut();
         process.frames.pop();
         if !process.frames.is_empty() {
             let module = Atom::from_static("erlang").expect("erlang is a static atom");
-            let function = Atom::from_static("error").expect("error is a static atom");
             return self.call_mfa(scheduler, &module, &function, arity, false);
         }
         let reason = read(process, &Operand::X(0))?;
@@ -2657,12 +2693,7 @@ impl BeamProgram {
         ]);
         let process = scheduler.current_process_mut();
         let stacktrace = Term::list_from(vec![frame]);
-        Ok(raise_with_stacktrace(
-            process,
-            ExceptionClass::Error,
-            reason,
-            stacktrace,
-        ))
+        Ok(raise_with_stacktrace(process, class, reason, stacktrace))
     }
 
     /// Finish a BIF or NIF call with its result, as the ERTS `nif_bif.epilogue`
@@ -5299,7 +5330,9 @@ fn frame_function<'a>(
 /// `{Module, Function, Arity, []}`, as `erts_build_mfa_item` gives a
 /// frame without arguments (`utils.c:3448-3455`). PBeam keeps no line
 /// table, so each location is `[]` (row "Exception stack trace" of
-/// `docs/erts-differences.md`).
+/// `docs/erts-differences.md`). While the first apply of a start at
+/// `erlang:apply/3` runs, the first frame of the process is not in the
+/// stack trace.
 ///
 /// # Examples
 ///
@@ -5327,10 +5360,17 @@ fn mfa_stacktrace(scheduler: &mut Scheduler, skip: usize) -> Result<Vec<Term>, B
     frames.dedup_by(|frame, previous| {
         frame.module_id == previous.module_id && frame.next_instruction == previous.next_instruction
     });
-    let mut stacktrace = Vec::with_capacity(frames.len());
-    for frame in frames {
+    let count = frames.len();
+    let mut stacktrace = Vec::with_capacity(count);
+    for (index, frame) in frames.into_iter().enumerate() {
         let module = Rc::clone(scheduler.code.module_by_id(frame.module_id)?);
         let (_, function, arity) = frame_function(&module, &frame)?;
+        // The first apply of a start at `erlang:apply/3` is a body apply
+        // with no frame in ERTS, so `apply_bif_error_adjustment` does not
+        // keep the `erlang.beam` frame (`beam_common.c:1355-1366`).
+        if index + 1 == count && scheduler.current_process().start_apply {
+            continue;
+        }
         // A loaded module put the names of its function info into the atom
         // table of the run, so each name is present.
         let atom = |name: &str| {

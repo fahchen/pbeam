@@ -52,6 +52,22 @@ fn fixture_instructions(
     instructions
 }
 
+/// Return [`program_of`] with the names of each `func_info` in the atom
+/// table of the run, as the loader puts them. The stack trace of
+/// `erlang:exit/1` and `erlang:throw/1` reads them.
+fn program_with_names(
+    instructions: Vec<Instruction>,
+    exports: HashMap<(String, u32), u32>,
+) -> BeamProgram {
+    for instruction in &instructions {
+        if let Instruction::FunctionInfo { module, name, .. } = instruction {
+            test_atom(module);
+            test_atom(name);
+        }
+    }
+    program_of(instructions, exports)
+}
+
 /// Return a program of the fixture module with `instructions` and
 /// `exports`. The loader resolves each branch label and each call label of
 /// the stream when it builds the module.
@@ -132,7 +148,7 @@ fn run_with_child(body: Vec<Instruction>) -> Result<Term, crate::BeamError> {
         erlang_call("exit", 1, true),
     ];
     let exports = HashMap::from([(("main".into(), 0), 2), (("child".into(), 1), 11)]);
-    program_of(fixture_instructions(0, body, extra), exports)
+    program_with_names(fixture_instructions(0, body, extra), exports)
         .execute("fixture", "main", &[])
         .map(|host| host.term)
 }
@@ -321,13 +337,11 @@ fn exits_the_process_with_an_uncaught_badfun() {
 #[test]
 fn reports_process_exits_and_link_exits() {
     let error = |body| run_with_child(body).unwrap_err().to_string();
-    assert!(
-        error(vec![
-            Instruction::Move(atom("boom"), Operand::X(0)),
-            erlang_call("exit", 1, false),
-        ])
-        .contains("root process exited with boom")
-    );
+    let exit = error(vec![
+        Instruction::Move(atom("boom"), Operand::X(0)),
+        erlang_call("exit", 1, false),
+    ]);
+    assert!(exit.contains("root process exited with boom"), "{exit}");
     assert!(
         error(vec![
             Instruction::Move(atom("undef"), Operand::X(0)),
@@ -3243,7 +3257,7 @@ fn apply_targets_program(body: Vec<Instruction>) -> BeamProgram {
         (("id".into(), 3), 12),
         (("last".into(), 2), 13),
     ]);
-    program_of(fixture_instructions(0, body, extra), exports)
+    program_with_names(fixture_instructions(0, body, extra), exports)
 }
 
 /// Return the body that moves the module and the function name of an
