@@ -1146,7 +1146,7 @@ fn update_flat(
 ) -> Result<Convert, Term> {
     let mut added: Vec<&Term> = Vec::new();
     for ((kind, key, _), hash) in operations.iter().zip(&hashes) {
-        if hash.is_none() && !matches!(key, Term::Integer(_)) {
+        if hash.is_none() && !key.is_integer() {
             return Err(key.clone());
         }
         match kind {

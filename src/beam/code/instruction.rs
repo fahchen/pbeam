@@ -13,11 +13,6 @@ use std::cmp::Ordering;
 use std::num::NonZeroU64;
 
 const CODE_HEADER_SIZE: usize = WORD_SIZE * 5;
-/// The first byte of an integer operand with 9 or more payload bytes: size
-/// code 7, the sign and extended flags, and `TAG_INTEGER`. Its value is
-/// outside the 64-bit signed range, so ERTS loads it as a bignum.
-const HUGE_INTEGER_FIRST_BYTE: u8 =
-    0b1110_0000 | COMPACT_SIGN_FLAG | COMPACT_EXTENDED_FLAG | TAG_INTEGER;
 const CODE_HEADER_SUB_SIZE: u32 = 16;
 const INSTRUCTION_SET_ERLANG: u32 = 0;
 const CODE_LABEL_COUNT_OFFSET: usize = WORD_SIZE * 3;
@@ -1645,16 +1640,14 @@ pub(crate) enum BinarySegment {
 ///
 /// `Value` holds a supported immediate term. `X` uses compact register tag 3,
 /// and `Y` uses compact register tag 4. For example, `move x0, y0` is encoded
-/// as `[0x40, 0x03, 0x04]`. `UnsupportedInteger` is an integer operand with 9
-/// or more payload bytes, such as `{integer,18446744073709551616}`, encoded
-/// as `[0xF9, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0]`. ERTS loads it as a
-/// bignum literal. PBeam has no bignum term, so the module loads and the
-/// instruction fails only when it reads the operand.
+/// as `[0x40, 0x03, 0x04]`. An integer operand with 9 or more payload
+/// bytes, such as `{integer,18446744073709551616}`, encoded as
+/// `[0xF9, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0]`, is a `Value` that holds a
+/// [`Term::BigInt`], as ERTS loads it as a bignum literal.
 #[derive(Debug, Clone)]
 pub(crate) enum Operand {
     Value(Term),
     UnsupportedLiteral(usize),
-    UnsupportedInteger,
     X(u32),
     Y(u32),
 }
@@ -1680,14 +1673,13 @@ pub(crate) enum TestOperand {
 ///
 /// ```rust,ignore
 /// assert!(matches!(classify_test_operand(&Operand::X(0)), Some(TestOperand::X(0))));
-/// assert!(classify_test_operand(&Operand::UnsupportedInteger).is_none());
 /// ```
 fn classify_test_operand(operand: &Operand) -> Option<TestOperand> {
     match operand {
         Operand::X(index) => Some(TestOperand::X(*index)),
         Operand::Y(index) => Some(TestOperand::Y(*index)),
         Operand::Value(value) => Some(TestOperand::Value(value.clone())),
-        Operand::UnsupportedLiteral(_) | Operand::UnsupportedInteger => None,
+        Operand::UnsupportedLiteral(_) => None,
     }
 }
 
@@ -3301,10 +3293,6 @@ fn read_move_operand(
         .get(*cursor)
         .ok_or_else(|| error("truncated BEAM operand"))?;
     match first & COMPACT_TAG_MASK {
-        TAG_INTEGER if first == HUGE_INTEGER_FIRST_BYTE => {
-            skip_operand(data, cursor)?;
-            Ok(Operand::UnsupportedInteger)
-        }
         TAG_INTEGER | TAG_ATOM => Ok(Operand::Value(read_value(data, cursor, atoms)?)),
         TAG_LITERAL => {
             let subtag = read_integer(data, cursor, TAG_LITERAL)?;

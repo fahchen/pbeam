@@ -4111,7 +4111,7 @@ fn rejects_integer_conversions_of_a_bignum_with_no_reductions_left() {
         assert_eq!(
             error.to_string(),
             format!(
-                "unsupported erlang:{name}/1 of 576460752303423488 with 0 reductions left: \
+                "unsupported erlang:{name}/1 of a bignum of 60 bits with 0 reductions left: \
                  ERTS runs it on a dirty CPU scheduler"
             )
         );

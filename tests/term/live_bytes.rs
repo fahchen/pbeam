@@ -196,3 +196,14 @@ fn walks_a_long_list_without_recursion() {
     live.term(&list);
     assert_eq!(live.bytes(), 200_000 * size_of::<Cons>());
 }
+
+#[test]
+fn counts_a_bignum_once_for_its_copies() {
+    let big = Term::from_bigint(num_bigint::BigInt::from(1) << 200);
+    let one = bytes(&big);
+    assert_eq!(one, size_of::<num_bigint::BigInt>() + 4 * size_of::<u64>());
+    // Two copies of one bignum share one `Arc`, and the tuple array is one
+    // more allocation.
+    let shared = Term::tuple(vec![big.clone(), big]);
+    assert_eq!(bytes(&shared), 2 * size_of::<Term>() + one);
+}

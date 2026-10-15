@@ -60,19 +60,14 @@ fn tells_whether_a_term_is_an_integer_in_a_range_like_erts() {
 }
 
 #[test]
-fn stops_at_a_bignum_bound() {
-    // ERTS compares a bignum bound (`erl_bif_guard.c:347-348`). PBeam has no
-    // bignum: the run stops when `move` reads the operand 2^70 (row
-    // "Integer range" of `docs/erts-differences.md`).
+fn compares_a_bignum_bound() {
+    // ERTS compares a bignum bound (`erl_bif_guard.c:347-348`), and so does
+    // PBeam: 5 is from 0 to 2^70.
     let program = BeamProgram::load(&[IS_INTEGER_PROBE]).unwrap();
-    let error = program
+    let term = program
         .execute("is_integer_probe", "big", &[])
-        .unwrap_err()
-        .to_string();
-    assert_eq!(
-        error,
-        "unsupported BEAM integer operand outside the 64-bit range: needs a bignum"
-    );
-
+        .unwrap()
+        .term;
+    assert_eq!(term, Term::Atom(program.atom("true").unwrap()));
     assert_eq!(erl_reference("is_integer_probe:big()"), "true\n");
 }

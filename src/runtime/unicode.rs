@@ -90,7 +90,9 @@ pub(super) fn utf8_need(chardata: &Term, latin1: bool) -> Option<usize> {
         };
         *frame = rest;
         match element {
-            Term::Integer(_) if element.small_integer().is_none() => return Some(cost),
+            Term::Integer(_) | Term::BigInt(_) if element.small_integer().is_none() => {
+                return Some(cost);
+            }
             Term::Integer(_) => cost += 1,
             Term::Binary(bytes) => cost += binary_cost(bytes),
             _ if element.is_list() => frames.push(element),
@@ -170,7 +172,7 @@ pub(super) fn build_utf8(
                     break (Term::cons(rest, after.clone()), error);
                 }
             }
-            Term::Integer(_) => {
+            Term::Integer(_) | Term::BigInt(_) => {
                 let character = element
                     .small_integer()
                     .filter(|&value| output.leftover.is_empty() && (!latin1 || value <= 255))
