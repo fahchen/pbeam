@@ -150,5 +150,10 @@ fn reads_the_erlang_system_time_near_the_os_system_time_as_pinned_erts() {
     // `system_time_1` adds the time offset to the monotonic time
     // (`erl_time_sup.c:2527-2535`), and the offset is the OS system time
     // at the start (`erl_time_sup.c:1244-1249`).
-    assert_eq!(assert_matches_erts("clock"), "{true,true,{error,badarg}}");
+    // A positive bignum unit traps to `erlang:convert_time_unit/3`, and a
+    // negative bignum unit raises `badarg` (`erl_time_sup.c:2333-2345`).
+    assert_eq!(
+        assert_matches_erts("clock"),
+        "{true,true,{error,badarg},true,true,1770887431076116955136,{error,badarg}}"
+    );
 }

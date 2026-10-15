@@ -41,12 +41,18 @@ invalid() ->
      ?CAUSE(rand:uniform(-1)), ?CAUSE(rand:uniform(1.5))].
 
 %% `erlang:system_time/1` against the OS system time, and its exception
-%% for a unit that is not valid.
+%% for a unit that is not valid. A positive bignum unit traps to
+%% `erlang:convert_time_unit/3`, and a negative bignum unit is not valid.
 clock() ->
     Erlang = erlang:system_time(nanosecond),
     Os = os:system_time(nanosecond),
+    Big = 1 bsl 70,
+    System = erlang:system_time(Big),
     {abs(Os - Erlang) < 1000000000, is_integer(erlang:system_time(second)),
-     try erlang:system_time(foo) catch Class:Reason -> {Class, Reason} end}.
+     try erlang:system_time(foo) catch Class:Reason -> {Class, Reason} end,
+     is_integer(System) andalso System > 0, erlang:monotonic_time(Big) < 0,
+     erlang:convert_time_unit(1500000000, nanosecond, Big),
+     try erlang:system_time(-Big) catch BigClass:BigReason -> {BigClass, BigReason} end}.
 
 draws(Range) ->
     [rand:uniform(Range) || _ <- lists:seq(1, 20)].
