@@ -15,7 +15,7 @@ use crate::{
     },
     runtime::{
         capability::{AllowAll, Capability, Policy},
-        ets::{Access, Table},
+        ets::{Access, Table, TableType},
         import_kind,
         process::{ProcessState, Start, tests::frame},
     },
@@ -4130,9 +4130,11 @@ fn shares_the_stored_term_of_an_ets_lookup() {
     scheduler.schedule_next().unwrap();
     let owner = scheduler.current_process_mut().id;
     let id = Term::Reference(Reference(0));
-    scheduler
-        .ets
-        .create(Reference(0), None, Table::new(owner, Access::Public, 1));
+    scheduler.ets.create(
+        Reference(0),
+        None,
+        Table::new(owner, Access::Public, 1, TableType::Set),
+    );
     // A list for the value: the element of the looked-up object shares the
     // cons cell of the inserted term.
     let value = Term::list_from([Term::Integer(2), Term::Integer(3)]);
@@ -4152,6 +4154,62 @@ fn shares_the_stored_term_of_an_ets_lookup() {
         panic!("the stored object is a tuple");
     };
     assert!(value.shares_storage_with(&elements[1]));
+}
+
+#[test]
+fn resumes_a_list_insert_without_a_walk_of_the_checked_objects() {
+    // The YCF state of `ets_insert_2_list_check` keeps the list cell that it
+    // reads (`erl_db.c:1812-1827`), so a resume does not check an object
+    // again. The objects here are not good: a resume that walks or checks
+    // the whole list again panics or raises `badarg`.
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let owner = scheduler.current_process_mut().id;
+    let id = Term::Reference(Reference(0));
+    scheduler.ets.create(
+        Reference(0),
+        None,
+        Table::new(owner, Access::Public, 1, TableType::Bag),
+    );
+    let object = Term::tuple(vec![Term::Integer(1)]);
+    let rest = Term::list_from([object.clone(), object]);
+    let objects = Term::list_with_tail(vec![Term::Integer(7)], rest.clone());
+    // A budget of 0 checks one object and yields after it.
+    scheduler.current_process_mut().fcalls = 0;
+    let arguments = vec![
+        id.clone(),
+        objects,
+        Term::Integer(1),
+        Term::Integer(1),
+        Term::nil(),
+        Term::tuple(vec![rest.clone()]),
+    ];
+    let result = program
+        .bif_trap(&mut scheduler, "ets", "insert", arguments)
+        .unwrap();
+    let BifResult::TrapBif { arguments, .. } = result else {
+        panic!("the check did not yield");
+    };
+    let (_, unchecked) = rest.cons_cell().unwrap();
+    assert_eq!(arguments[2], Term::Integer(2));
+    assert_eq!(arguments[5], Term::tuple(vec![unchecked.clone()]));
+    // After the insert, only the steps remain: a resume does not read the
+    // objects, which are not a list here.
+    scheduler.current_process_mut().fcalls = 1;
+    let arguments = vec![
+        id,
+        Term::Integer(7),
+        Term::Integer(5),
+        Term::Integer(1),
+        Term::list_from([Term::Integer(1), Term::Integer(2)]),
+        Term::Integer(2),
+    ];
+    let result = program
+        .bif_trap(&mut scheduler, "ets", "insert", arguments)
+        .unwrap();
+    assert!(matches!(result, BifResult::Value(value) if value == Term::static_atom("true")));
 }
 
 #[test]

@@ -271,20 +271,99 @@ fn reads_the_application_environment_from_ac_tab_as_pinned_erts() {
 }
 
 #[test]
+fn keeps_the_objects_of_one_key_in_bag_tables_as_pinned_erts() {
+    // `ets_probe:bag/0` fills a `bag`, a `duplicate_bag`, and a `[bag, set]`
+    // table, which is a bag (erl_db.c:2599-2611). A new object goes before
+    // the other objects of its key, and a lookup reverses the chain, so the
+    // objects come in insertion order (erl_db_hash.c:1447-1490). A bag keeps
+    // no second object that is exactly equal to one in the table, also in
+    // one list insert (erl_db_hash.c:1422-1442). lookup_element/4 gives the
+    // list of the elements, and an index above the size of one object
+    // raises badarg (erl_db_hash.c:1563-1580). delete/2 removes each object
+    // of the key (erl_db_hash.c:1613-1664).
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    let int = Term::Integer;
+    let k = |value| Term::tuple(vec![atom("k"), int(value)]);
+    let results = |table_type, objects: Vec<Term>, elements: Vec<i64>| {
+        Term::list_from(vec![
+            atom(table_type),
+            Term::list_from(objects),
+            Term::list_from(elements.into_iter().map(int)),
+            atom("d"),
+            Term::tuple(vec![atom("error"), atom("badarg")]),
+            atom("true"),
+            atom("true"),
+            Term::nil(),
+            atom("false"),
+            Term::list_from(vec![Term::tuple(vec![atom("j"), int(1)])]),
+        ])
+    };
+    let kx = Term::tuple(vec![atom("k"), int(4), atom("x")]);
+    let bag = || results("bag", vec![k(1), k(2), k(3), kx.clone()], vec![1, 2, 3, 4]);
+    let duplicate_bag = results(
+        "duplicate_bag",
+        vec![k(1), k(2), k(1), k(3), k(2), kx.clone(), k(3)],
+        vec![1, 2, 1, 3, 2, 4, 3],
+    );
+    assert_eq!(
+        program.execute("ets_probe", "bag", &[]).unwrap().term,
+        Term::list_from(vec![bag(), duplicate_bag, bag()])
+    );
+    let bag =
+        "[bag,[{k,1},{k,2},{k,3},{k,4,x}],[1,2,3,4],d,{error,badarg},true,true,[],false,[{j,1}]]";
+    let duplicate_bag = "[duplicate_bag,[{k,1},{k,2},{k,1},{k,3},{k,2},{k,4,x},{k,3}],[1,2,1,3,2,4,3],d,{error,badarg},true,true,[],false,[{j,1}]]";
+    assert_eq!(
+        String::from_utf8(reference("bag")).unwrap(),
+        format!("[{bag},{duplicate_bag},{bag}]\n")
+    );
+}
+
+#[test]
+fn gives_the_table_type_as_pinned_erts() {
+    // `ets_probe:info/0` reads the item type of a set and a bag table
+    // (erl_db.c:5457-5469). A free name gives undefined before the item
+    // check (erl_db.c:4544-4547). An unknown item, an item that is not an
+    // atom, and a table that is not an atom or a reference raise badarg.
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    let badarg = || Term::tuple(vec![atom("error"), atom("badarg")]);
+    assert_eq!(
+        program.execute("ets_probe", "info", &[]).unwrap().term,
+        Term::list_from(vec![
+            atom("set"),
+            atom("bag"),
+            atom("undefined"),
+            atom("undefined"),
+            Term::list_from(vec![badarg(); 4]),
+        ])
+    );
+    assert_eq!(
+        reference("info"),
+        b"[set,bag,undefined,undefined,[{error,badarg},{error,badarg},{error,badarg},{error,badarg}]]\n"
+    );
+}
+
+#[test]
 fn rejects_tables_that_pbeam_cannot_model() {
-    // ERTS 29.1.1 makes each of these tables: the types bag, bag,
-    // duplicate_bag, and ordered_set, and two set tables whose heir is a
-    // live process other than the caller. PBeam supports only set tables
-    // without such a heir. ERTS
+    // ERTS 29.1.1 gives the size of a table, the binary item, and badarg
+    // for a reference that is not a table, and it makes an ordered_set
+    // table and two set tables whose heir is a live process other than the
+    // caller. PBeam gives only the type item of ets:info/2, keeps no record
+    // of a deleted table, and supports only hash tables without such a
+    // heir. ERTS
     // aborts the emulator for an insert with the key position 0 (status
     // 134, `Invalid tag in make_internal_hash`) and crashes for a found key
     // and an index that becomes 0 (status 139). This is the "ETS tables"
     // row in `docs/erts-differences.md`.
     let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
     for (case, detail) in [
-        ("bag", "new/2 table type bag"),
-        ("set_after_bag", "new/2 table type bag"),
-        ("duplicate_bag", "new/2 table type duplicate_bag"),
+        ("info_size", "info/2 item size"),
+        ("info_binary", "info/2 item binary"),
+        (
+            "info_reference",
+            "info/2 of a reference that is not a live table",
+        ),
         ("ordered_set", "new/2 table type ordered_set"),
         ("heir", "new/2 heir ProcessId("),
         ("heir_data", "new/2 heir ProcessId("),

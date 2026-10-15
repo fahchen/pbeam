@@ -118,7 +118,13 @@ const COSTS: &[(&str, &[Cost])] = &[
     // 15000 objects is more than the budget, and stops at 0. A bad object
     // stops the check, and a table that the caller cannot write stops the
     // insert, after a removal of the copies with 1 unit for each object. A
-    // table that does not exist costs nothing.
+    // table that does not exist costs nothing. A `bag` insert uses one more
+    // unit for each object that it compares (`erl_db_hash.c:1422-1442`):
+    // `n` units for `n` objects of the key in the table, or up to an
+    // exactly equal object. A list insert into a `bag` always copies the
+    // list (`erl_db.c:2002-2014`), and the YCF counter yields only after
+    // the step of one object, so `{bag,400}` uses more units than its
+    // budget before each trap. A `duplicate_bag` compares nothing.
     (
         "ets_insert",
         &[
@@ -138,6 +144,12 @@ const COSTS: &[(&str, &[Cost])] = &[
             ("{protected,100}", 12),
             ("{protected,40000}", 15000),
             ("{missing,100}", 0),
+            ("{bag,2}", 1),
+            ("{bag,100}", 668),
+            ("{bag,400}", 10128),
+            ("{duplicate_bag,100}", 37),
+            ("{bag_new,100}", 12),
+            ("{bag_equal,100}", 6),
         ],
     ),
     // One reduction for each persistent term, and a trap at the end of the
@@ -329,6 +341,21 @@ const LONGS: &[(&str, &[(&str, i64)])] = &[
             ("b", 1334),
             ("a", 1),
             ("b", 998),
+        ],
+    ),
+    // Each `ets:insert/2` of the 400 objects of one key into a `bag` traps:
+    // the first insert compares 79800 objects, and each later insert finds
+    // an exactly equal object for each object.
+    (
+        "ets_insert",
+        &[
+            ("b", 1334),
+            ("a", 1),
+            ("b", 2001),
+            ("a", 1),
+            ("b", 1334),
+            ("a", 1),
+            ("b", 331),
         ],
     ),
     // 10000 reductions for each `persistent_term:get/0` of 10000 terms.

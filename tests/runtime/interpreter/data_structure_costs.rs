@@ -24,7 +24,7 @@ use crate::{
         code::{Instruction, Operand},
     },
     runtime::{
-        ets::{Access, EtsTables, Table},
+        ets::{Access, EtsTables, Table, TableType},
         mailbox::Mailbox,
         persistent_term::PersistentTerms,
         process::{Frame, ProcessState, StackSlot},
@@ -142,7 +142,7 @@ fn module_of(functions: u32) -> BeamModule {
 
 /// Return an ETS set table of `objects` objects, keyed by an integer.
 fn table_of(atoms: &AtomTable, objects: usize) -> Table {
-    let mut table = Table::new(ProcessId(0), Access::Public, 1);
+    let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
     for index in 0..objects {
         table.insert(
             atoms,
