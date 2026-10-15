@@ -24,7 +24,7 @@ use crate::{
     runtime::{
         port::{
             Driver, Port, Ports,
-            tcp_inet::{Acceptor, OK, TcpInet, errno_name, try_reply},
+            inet::{Acceptor, Inet, OK, errno_name, try_reply},
         },
         signal::Signal,
         timer::{Timer, Timers},
@@ -207,7 +207,7 @@ impl Scheduler {
     /// ```rust,ignore
     /// scheduler.tcp_stop(listen, tcp);
     /// ```
-    pub(super) fn tcp_stop(&mut self, listen: PortId, tcp: TcpInet) {
+    pub(super) fn tcp_stop(&mut self, listen: PortId, tcp: Inet) {
         for acceptor in tcp.acceptors {
             self.end_accept(listen, acceptor);
             let status = error_status(Term::static_atom("closed"));
@@ -223,7 +223,7 @@ impl Scheduler {
     /// `None` when the port closed or the caller is not in the queue.
     fn remove_acceptor(&mut self, listen: PortId, caller: ProcessId) -> Option<Acceptor> {
         let ports = self.resources.borrow_mut::<Ports>();
-        let tcp = ports.get_mut(listen).and_then(Port::tcp_inet_mut)?;
+        let tcp = ports.get_mut(listen).and_then(Port::inet_mut)?;
         let position = tcp
             .acceptors
             .iter()
@@ -257,8 +257,8 @@ impl Scheduler {
     /// inet_drv.c:11795-11858), and return its number. The owner waits in
     /// the accept, so it exists: the IO poll runs only when no process can
     /// run, and an exiting process leaves the queue before it ends.
-    fn open_accepted(&mut self, owner: ProcessId, accepted: TcpInet) -> Result<PortId, BeamError> {
-        self.open_port_for(owner, b"tcp_inet".to_vec(), Driver::TcpInet(accepted))
+    fn open_accepted(&mut self, owner: ProcessId, accepted: Inet) -> Result<PortId, BeamError> {
+        self.open_port_for(owner, b"tcp_inet".to_vec(), Driver::Inet(accepted))
     }
 }
 
@@ -277,10 +277,10 @@ impl Scheduler {
 }
 
 /// Return the descriptor of the open `tcp_inet` port `id`.
-fn tcp_inet(ports: &mut Ports, id: PortId) -> &mut TcpInet {
+fn tcp_inet(ports: &mut Ports, id: PortId) -> &mut Inet {
     ports
         .get_mut(id)
-        .and_then(Port::tcp_inet_mut)
+        .and_then(Port::inet_mut)
         .expect("the port of an accept is an open tcp_inet port")
 }
 
