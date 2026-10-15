@@ -35,7 +35,7 @@ use std::{collections::HashSet, fmt, sync::Arc};
 /// The smallest ERTS small integer on a 64-bit system: -(2^59).
 pub(crate) const SMALL_INTEGER_MIN: i64 = -(1 << 59);
 /// The largest ERTS small integer on a 64-bit system: 2^59 - 1.
-const SMALL_INTEGER_MAX: i64 = (1 << 59) - 1;
+pub(crate) const SMALL_INTEGER_MAX: i64 = (1 << 59) - 1;
 /// The largest number of elements in a tuple: 2^24 - 1
 /// (`ERTS_MAX_TUPLE_SIZE` and `MAX_ARITYVAL` in `erl_term.h:322-323`).
 pub(crate) const MAX_TUPLE_SIZE: usize = (1 << 24) - 1;

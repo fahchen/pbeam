@@ -451,6 +451,10 @@ name = "timer"
 path = "tests/integration/timer.rs"
 
 [[test]]
+name = "type_test"
+path = "tests/integration/type_test.rs"
+
+[[test]]
 name = "undef"
 path = "tests/integration/undef.rs"
 
