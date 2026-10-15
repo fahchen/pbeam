@@ -16,6 +16,44 @@ clean() {
   }'
 }
 
+# Under host load, the pinned ERTS process `erl_child_setup` can stop with error 32 (EPIPE) in this pty test (issue #642).
+flake=restores_the_terminal_before_the_result_of_terra_counter_as_interactive_erts
+flake_message='erl_child_setup: failed with error 32'
+
+# Succeed only when the test task is the only failed task, the nextest final status list after `Summary` holds no failure other than one FAIL of the flaky test, and the test output names the known message.
+# The list also holds SLOW lines, which are not failures.
+only_known_flake() {
+  [[ "$(clean <"$log" | sed -n 's/^\[\([^]]*\)\] ERROR task failed$/\1/p')" == test ]] || return 1
+  clean <"$log" | awk -v name="$flake" -v message="$flake_message" '
+    index($0, "[test] ") != 1 { next }
+    { line = substr($0, 8) }
+    index(line, message) { named = 1 }
+    line ~ /^ +Summary \[/ { final = 1; next }
+    final && line ~ /^ +[A-Z]/ && line !~ /^ +SLOW / {
+      failures++
+      n = split(line, field, " ")
+      flaky = field[1] == "FAIL" && field[n - 1] == "pbeam-runtime::example" && field[n] == name
+    }
+    END { exit !(named && failures == 1 && flaky) }'
+}
+
+# Run the flaky test once more, alone, with the arguments of scripts/test.sh, and check the coverage again.
+# --no-clean keeps the profile files of the full run, so the report merges the full run and this run.
+retry_flake() {
+  echo "check: retried $flake after \`$flake_message\`" | tee -a "$log"
+  CARGO_LLVM_COV_TARGET_DIR=target/llvm-cov-target cargo llvm-cov nextest --locked --workspace --all-features --no-clean \
+    --status-level slow --final-status-level slow --no-fail-fast \
+    --cobertura --output-path target/coverage.xml -E "test(=$flake)" 2>&1 | sed 's/^/[retry] /' >>"$log" &&
+    mise exec -- elixir scripts/check_coverage.exs target/coverage.xml 2>&1 | sed 's/^/[retry] /' >>"$log"
+}
+
+if ((status != 0)) && only_known_flake; then
+  retry_flake
+  status=$?
+  # The failure report below prints the output of each task that has this line.
+  ((status == 0)) || echo '[retry] ERROR task failed' >>"$log"
+fi
+
 if ((status == 0)); then
   echo 'check: pass'
   clean <"$log" | grep -o 'Application line coverage: .*'
