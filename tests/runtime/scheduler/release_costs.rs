@@ -37,7 +37,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::{LinkId, RELEASE_BATCH, Release, Scheduler, Turn};
+use super::{LinkId, RELEASE_BATCH, Release, Scheduler, StartFlags, Turn};
 use crate::{
     runtime::signal::Signal,
     runtime::{
@@ -691,7 +691,7 @@ fn shared_last_release_measurement(shape: &Shape) -> Measurement {
             vec![graph],
             false,
             false,
-            false,
+            StartFlags::default(),
             None,
         )
         .expect("the spawn runs")

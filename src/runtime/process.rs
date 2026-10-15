@@ -212,6 +212,71 @@ pub(super) enum InitialCall {
     },
 }
 
+/// The priority of a process, from `PRIORITY_MAX` to `PRIORITY_LOW`
+/// (`erl_process.h:124-127`). A process starts with `normal`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum Priority {
+    /// `max`: runs before each other priority.
+    Max,
+    /// `high`: runs before `normal` and `low`.
+    High,
+    /// `normal`: the start priority.
+    #[default]
+    Normal,
+    /// `low`: shares the `normal` queue, at a lower rate.
+    Low,
+}
+
+impl Priority {
+    /// Return the priority of the atom name `name`, or `None` for a name
+    /// that is not a priority (`erts_set_process_priority`,
+    /// `erl_process.c:9460-9466`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Priority::from_name("max"), Some(Priority::Max));
+    /// assert_eq!(Priority::from_name("foo"), None);
+    /// ```
+    pub(super) fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "max" => Some(Self::Max),
+            "high" => Some(Self::High),
+            "normal" => Some(Self::Normal),
+            "low" => Some(Self::Low),
+            _ => None,
+        }
+    }
+
+    /// Return the atom name of the priority (`erts_get_process_priority`,
+    /// `erl_process.c:9443-9453`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Priority::Low.name(), "low");
+    /// ```
+    pub(super) fn name(self) -> &'static str {
+        match self {
+            Self::Max => "max",
+            Self::High => "high",
+            Self::Normal => "normal",
+            Self::Low => "low",
+        }
+    }
+}
+
+/// The process flags that the spawn options set at the start of a process
+/// (`erts_parse_spawn_opts`, `erl_process.c:12222-12434`).
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct StartFlags {
+    /// The `message_queue_data` flag is `off_heap` (`SPO_OFF_HEAP_MSGQ`),
+    /// else `on_heap`.
+    pub(super) off_heap_message_queue: bool,
+    /// The priority of the option `{priority, Level}` (`SPO_PRIORITY`).
+    pub(super) priority: Priority,
+}
+
 /// The execution state and mailbox of one process.
 #[derive(Debug)]
 pub(super) struct ProcessState {
@@ -265,6 +330,9 @@ pub(super) struct ProcessState {
     /// (`FS_OFF_HEAP_MSGQ`), false for `on_heap`. PBeam has no process heap,
     /// so the flag does not change where the messages are kept.
     pub(super) off_heap_message_queue: bool,
+    /// The priority of the process (`ERTS_PSFLGS_USR_PRIO`). The scheduler
+    /// puts the process into the run queue of this priority.
+    pub(super) priority: Priority,
     /// The link tree (`ERTS_P_LINKS`): processes and ports linked to this
     /// process, by pid or port, with the identifier of an unlink that waits for its
     /// acknowledgment, or 0 for an active link (`ErtsILink.unlinking`). A
@@ -473,6 +541,7 @@ impl ProcessState {
             receive_timer: ReceiveTimer::None,
             trap_exit: false,
             off_heap_message_queue: false,
+            priority: Priority::Normal,
             links: MonitorLinkTree::default(),
             monitors: MonitorLinkTree::default(),
             monitored_by: Vec::new(),
@@ -564,6 +633,9 @@ impl ProcessState {
     ///   name.
     /// - `message_queue_len` gives `{message_queue_len, Messages}`: the
     ///   caller counts the messages as `mq_len` (`erl_bif_info.c:1742-1754`).
+    /// - `priority` gives `{priority, Level}`, the priority that
+    ///   `process_flag/2` or the spawn option set
+    ///   (`erts_get_process_priority`, `erl_process.c:9443-9453`).
     /// - `reductions` gives `{reductions, N}`: the reduction total and
     ///   `current`, the reductions of the current turn when the process runs
     ///   (`erl_bif_info.c:2114-2121`).
@@ -597,6 +669,7 @@ impl ProcessState {
             ("registered_name", Some(registered)) => Term::Atom(registered.clone()),
             ("registered_name", None) => return Ok(Some(Term::nil())),
             ("message_queue_len", _) => Term::Integer(messages as i64),
+            ("priority", _) => Term::static_atom(self.priority.name()),
             ("reductions", _) => Term::Integer(
                 i64::try_from(self.reductions + current)
                     .map_err(|_| error("the reduction total exceeds the PBeam integer range"))?,
