@@ -1,4 +1,4 @@
-use std::{collections::HashMap, rc::Rc, sync::Arc};
+use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
 
 use super::bif::{BIFS, BifId, BifResult, resolve, resolve_calls};
 use super::{
@@ -8,10 +8,14 @@ use super::{
 };
 use crate::{
     BeamModule, Map, Term,
-    beam::code::{BinaryMatchCommand, Instruction, Operand, TestKind, TestOperand},
+    beam::{
+        Import,
+        code::{BinaryMatchCommand, Instruction, Operand, TestKind, TestOperand},
+    },
     runtime::{
         capability::{AllowAll, Capability, Policy},
         ets::{Access, Table},
+        import_kind,
         process::{ProcessState, Start, tests::frame},
     },
     term::{Atom, AtomTable, Lambda, ProcessId, Reference, debug_term, test_atom, test_atom_table},
@@ -55,7 +59,7 @@ fn program_of(instructions: Vec<Instruction>, exports: HashMap<(String, u32), u3
         modules: HashMap::from([(
             "fixture".into(),
             Rc::new(
-                BeamModule::new("fixture".into(), exports, instructions)
+                BeamModule::new("fixture".into(), exports, fixture_imports(), instructions)
                     .expect("the fixture module loads"),
             ),
         )]),
@@ -70,15 +74,45 @@ fn make_program(body: Vec<Instruction>, function_arity: u32) -> BeamProgram {
     )
 }
 
-fn erlang_call(name: &str, arity: u32, tail: bool) -> Instruction {
+thread_local! {
+    /// The import table of each hand-built fixture module of this test
+    /// thread. [`external`] adds an MFA that no entry holds, so an index that
+    /// it gave stays valid for each later module of the thread.
+    static FIXTURE_IMPORTS: RefCell<Vec<Import>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Return the import table of a hand-built fixture module: each MFA that
+/// [`external`] gave an index on this test thread.
+fn fixture_imports() -> Vec<Import> {
+    FIXTURE_IMPORTS.with_borrow(Clone::clone)
+}
+
+/// Return the `call_ext` of `module:name/arity` in a hand-built fixture
+/// module, whose import table [`fixture_imports`] gives.
+fn external(module: &str, name: &str, arity: u32, tail: bool, deallocate: u32) -> Instruction {
+    let import = FIXTURE_IMPORTS.with_borrow_mut(|imports| {
+        let found = imports.iter().position(|import| {
+            (import.module.as_str(), import.name.as_str(), import.arity) == (module, name, arity)
+        });
+        found.unwrap_or_else(|| {
+            imports.push(Import {
+                module: module.into(),
+                name: name.into(),
+                arity,
+                kind: import_kind(module, name, arity),
+            });
+            imports.len() - 1
+        })
+    });
     Instruction::CallExternal {
-        arity,
-        module: "erlang".into(),
-        name: name.into(),
-        bif: resolve("erlang", name, arity),
+        import: u32::try_from(import).expect("a test makes fewer than 2^32 imports"),
         tail,
-        deallocate: 0,
+        deallocate,
     }
+}
+
+fn erlang_call(name: &str, arity: u32, tail: bool) -> Instruction {
+    external("erlang", name, arity, tail, 0)
 }
 
 fn atom(name: &str) -> Operand {
@@ -632,14 +666,7 @@ fn calls_a_module_export_without_a_bif_search() {
     // run then reaches the export lookup with no search of `BIFS`.
     let body = vec![
         Instruction::Move(Operand::Value(Term::Integer(1)), Operand::X(0)),
-        Instruction::CallExternal {
-            arity: 1,
-            module: "fixture".into(),
-            name: "guest".into(),
-            bif: resolve("fixture", "guest", 1),
-            tail: false,
-            deallocate: 0,
-        },
+        external("fixture", "guest", 1, false, 0),
         Instruction::Return,
     ];
     let extra = vec![
@@ -778,7 +805,7 @@ fn prints_a_non_ascii_module_and_function_name_in_a_call_path_error() {
         Instruction::End,
     ];
     let exports = HashMap::from([(("mäin".into(), 0), 2)]);
-    let module = BeamModule::new("mäin_module".into(), exports, instructions)
+    let module = BeamModule::new("mäin_module".into(), exports, Vec::new(), instructions)
         .expect("the fixture module loads");
     let mut program = BeamProgram {
         modules: HashMap::from([("mäin_module".into(), Rc::new(module))]),
@@ -1294,14 +1321,7 @@ fn reports_a_maps_merge_result_key_that_the_map_form_does_not_support() {
         vec![
             Instruction::Move(Operand::Value(pairs(1 << 59..=1 << 59)), Operand::X(0)),
             Instruction::Move(Operand::Value(pairs(1..=32)), Operand::X(1)),
-            Instruction::CallExternal {
-                arity: 2,
-                module: "maps".into(),
-                name: "merge".into(),
-                bif: resolve("maps", "merge", 2),
-                tail: true,
-                deallocate: 0,
-            },
+            external("maps", "merge", 2, true, 0),
             Instruction::Return,
         ],
         0,
@@ -1320,14 +1340,7 @@ fn reports_a_maps_from_list_key_that_the_map_form_does_not_support() {
     let from_list = make_program(
         vec![
             Instruction::Move(Operand::Value(Term::list_from(vec![pair])), Operand::X(0)),
-            Instruction::CallExternal {
-                arity: 1,
-                module: "maps".into(),
-                name: "from_list".into(),
-                bif: resolve("maps", "from_list", 1),
-                tail: true,
-                deallocate: 0,
-            },
+            external("maps", "from_list", 1, true, 0),
             Instruction::Return,
         ],
         0,
@@ -1347,14 +1360,7 @@ fn reports_a_maps_put_key_that_the_map_form_does_not_support() {
             Instruction::Move(Operand::Value(Term::Map(Map::new())), Operand::X(0)),
             Instruction::Move(Operand::Value(Term::Integer(0)), Operand::X(1)),
             Instruction::Move(Operand::Value(Term::Map(Map::new())), Operand::X(2)),
-            Instruction::CallExternal {
-                arity: 3,
-                module: "maps".into(),
-                name: "put".into(),
-                bif: resolve("maps", "put", 3),
-                tail: true,
-                deallocate: 0,
-            },
+            external("maps", "put", 3, true, 0),
             Instruction::Return,
         ],
         0,
@@ -1369,14 +1375,7 @@ fn runs_maps_keys_as_a_bif_and_reports_unsupported_arguments() {
         make_program(
             vec![
                 Instruction::Move(Operand::Value(argument), Operand::X(0)),
-                Instruction::CallExternal {
-                    arity: 1,
-                    module: "maps".into(),
-                    name: "keys".into(),
-                    bif: resolve("maps", "keys", 1),
-                    tail: true,
-                    deallocate: 0,
-                },
+                external("maps", "keys", 1, true, 0),
                 Instruction::Return,
             ],
             0,
@@ -1422,14 +1421,7 @@ fn runs_a_table_bif_before_a_loaded_module_that_exports_the_same_mfa() {
                 )),
                 Operand::X(0),
             ),
-            Instruction::CallExternal {
-                arity: 1,
-                module: "maps".into(),
-                name: "keys".into(),
-                bif: resolve("maps", "keys", 1),
-                tail: true,
-                deallocate: 0,
-            },
+            external("maps", "keys", 1, true, 0),
             Instruction::Return,
         ],
         0,
@@ -1440,6 +1432,7 @@ fn runs_a_table_bif_before_a_loaded_module_that_exports_the_same_mfa() {
             BeamModule::new(
                 "maps".into(),
                 HashMap::from([(("keys".into(), 1), 1)]),
+                Vec::new(),
                 vec![
                     Instruction::FunctionInfo {
                         module: "maps".into(),
@@ -1469,14 +1462,7 @@ fn never_runs_the_stub_of_a_table_bif_that_pbeam_does_not_implement() {
             Instruction::Move(atom("a"), Operand::X(0)),
             Instruction::Move(Operand::Value(Term::Integer(1)), Operand::X(1)),
             Instruction::Move(Operand::Value(Term::nil()), Operand::X(2)),
-            Instruction::CallExternal {
-                arity: 3,
-                module: "lists".into(),
-                name: "keysearch".into(),
-                bif: resolve("lists", "keysearch", 3),
-                tail: true,
-                deallocate: 0,
-            },
+            external("lists", "keysearch", 3, true, 0),
             Instruction::Return,
         ],
         0,
@@ -1487,6 +1473,7 @@ fn never_runs_the_stub_of_a_table_bif_that_pbeam_does_not_implement() {
             BeamModule::new(
                 "lists".into(),
                 HashMap::from([(("keysearch".into(), 3), 1)]),
+                Vec::new(),
                 vec![
                     Instruction::FunctionInfo {
                         module: "lists".into(),
@@ -1556,14 +1543,7 @@ fn converts_unicode_chardata_and_rejects_other_encodings() {
             vec![
                 Instruction::Move(Operand::Value(chardata), Operand::X(0)),
                 Instruction::Move(Operand::Value(Term::static_atom(encoding)), Operand::X(1)),
-                Instruction::CallExternal {
-                    arity: 2,
-                    module: "unicode".into(),
-                    name: "characters_to_binary".into(),
-                    bif: resolve("unicode", "characters_to_binary", 2),
-                    tail: true,
-                    deallocate: 0,
-                },
+                external("unicode", "characters_to_binary", 2, true, 0),
                 Instruction::Return,
             ],
             0,
@@ -2054,14 +2034,7 @@ fn rejects_call_stack_and_return_errors() {
         make_program(
             vec![
                 Instruction::Allocate { stack_size: 1 },
-                Instruction::CallExternal {
-                    arity: 0,
-                    module: "absent".into(),
-                    name: "run".into(),
-                    bif: resolve("absent", "run", 0),
-                    tail: true,
-                    deallocate: 0
-                }
+                external("absent", "run", 0, true, 0)
             ],
             0
         )
@@ -2120,6 +2093,7 @@ fn keeps_the_error_text_of_a_bad_label_entry_and_register() {
         BeamModule::new(
             "fixture".into(),
             HashMap::from([(("main".into(), 0), 2)]),
+            Vec::new(),
             fixture_instructions(0, body, Vec::new()),
         )
         .unwrap_err()
@@ -2176,7 +2150,7 @@ fn keeps_the_error_text_of_a_call_with_no_function_info() {
         },
     ];
     assert_eq!(
-        BeamModule::new("fixture".into(), HashMap::new(), instructions)
+        BeamModule::new("fixture".into(), HashMap::new(), Vec::new(), instructions)
             .unwrap_err()
             .to_string(),
         "entry label 7 has no function info"
@@ -2185,7 +2159,7 @@ fn keeps_the_error_text_of_a_call_with_no_function_info() {
 
 #[test]
 fn rejects_unresolved_exports_and_function_labels() {
-    let module = BeamModule::new("external".into(), HashMap::new(), vec![])
+    let module = BeamModule::new("external".into(), HashMap::new(), Vec::new(), vec![])
         .expect("the fixture module loads");
     let program = BeamProgram {
         modules: HashMap::from([("external".into(), Rc::new(module))]),
@@ -2208,6 +2182,7 @@ fn rejects_unresolved_exports_and_function_labels() {
     let module = BeamModule::new(
         "fixture".into(),
         HashMap::new(),
+        Vec::new(),
         vec![
             Instruction::FunctionInfo {
                 module: "other".into(),
@@ -2282,17 +2257,7 @@ fn gives_an_invariant_error_for_a_match_context_outside_binary_matching() {
         escape
     );
     // An external call to a loaded function also checks its arguments.
-    assert_eq!(
-        run(vec![Instruction::CallExternal {
-            arity: 1,
-            module: "fixture".into(),
-            name: "child".into(),
-            bif: resolve("fixture", "child", 1),
-            tail: false,
-            deallocate: 0,
-        }]),
-        escape
-    );
+    assert_eq!(run(vec![external("fixture", "child", 1, false, 0)]), escape);
     assert_eq!(
         run(vec![Instruction::BinaryMatchResume {
             source: atom("a"),
@@ -3038,6 +3003,7 @@ fn traps_a_tail_called_demonitor_flush_into_erts_internal() {
             BeamModule::new(
                 "erts_internal".into(),
                 HashMap::from([(("flush_monitor_messages".into(), 3), 2)]),
+                Vec::new(),
                 vec![
                     Instruction::FunctionInfo {
                         module: "erts_internal".into(),
@@ -3349,14 +3315,7 @@ fn call_ext_with(module: &str, name: &str, arguments: Vec<Term>) -> Result<Term,
             Instruction::Move(Operand::Value(argument), Operand::X(register))
         })
         .collect();
-    body.push(Instruction::CallExternal {
-        arity,
-        module: module.into(),
-        name: name.into(),
-        bif: resolve(module, name, arity),
-        tail: true,
-        deallocate: 0,
-    });
+    body.push(external(module, name, arity, true, 0));
     body.push(Instruction::Return);
     make_program(body, 0)
         .execute("fixture", "main", &[])
@@ -4173,10 +4132,10 @@ fn loop_body(module: &BeamModule, function: &str) -> Vec<usize> {
 }
 
 /// The bytes of the heap operands of the instructions of `slots`: the
-/// argument vector of a `Bif` and the two names of a `CallExternal`. The
-/// first number counts the operands that the instruction reads, and the
-/// second counts the storage that the loader allocated for them. Every other
-/// operand lives inside the 136-byte slot of its instruction.
+/// argument vector of a `Bif`. The first number counts the operands that
+/// the instruction reads, and the second counts the storage that the loader
+/// allocated for them. Every other operand lives inside the slot of its
+/// instruction.
 ///
 /// # Examples
 ///
@@ -4188,16 +4147,9 @@ fn heap_operand_bytes(module: &BeamModule, slots: &[usize]) -> (usize, usize) {
     let mut read = 0;
     let mut allocated = 0;
     for index in slots {
-        match &module.instructions[*index] {
-            Instruction::Bif { arguments, .. } => {
-                read += arguments.len() * std::mem::size_of::<Operand>();
-                allocated += arguments.capacity() * std::mem::size_of::<Operand>();
-            }
-            Instruction::CallExternal { module, name, .. } => {
-                read += module.len() + name.len();
-                allocated += module.capacity() + name.capacity();
-            }
-            _ => {}
+        if let Instruction::Bif { arguments, .. } = &module.instructions[*index] {
+            read += arguments.len() * std::mem::size_of::<Operand>();
+            allocated += arguments.capacity() * std::mem::size_of::<Operand>();
         }
     }
     (read, allocated)

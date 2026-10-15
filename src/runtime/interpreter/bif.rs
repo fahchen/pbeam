@@ -1142,6 +1142,40 @@ pub(super) fn is_heavy_bif(module: &str, name: &str, arity: u32) -> bool {
     HEAVY_BIFS.contains(&(module, name, arity))
 }
 
+/// Return the call that a `call_ext` of the import `module:name/arity`
+/// makes. The loader calls this one time for each import, as the ERTS
+/// loader transforms the `call_ext` of each import one time
+/// (`jit/arm/ops.tab:615-714`), so a call compares no name. The checks
+/// keep the order of the removed checks of the call: `erlang:load_nif/2`
+/// before the BIFs, and `erlang:apply/2,3`, which are not BIFs, at the
+/// export.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(import_kind("erlang", "apply", 3), ImportKind::Apply);
+/// assert_eq!(import_kind("erlang", "put", 2), ImportKind::Bif { bif: resolve("erlang", "put", 2), heavy: true });
+/// assert_eq!(import_kind("lists", "reverse", 1), ImportKind::Export);
+/// ```
+pub(crate) fn import_kind(module: &str, name: &str, arity: u32) -> ImportKind {
+    match (module, name, arity) {
+        ("erlang", "apply", 2) => ImportKind::ApplyFun,
+        ("erlang", "apply", 3) => ImportKind::Apply,
+        ("erlang", "load_nif", 2) => ImportKind::LoadNif,
+        _ => {
+            let bif = resolve(module, name, arity);
+            if bif.is_some() || is_pbeam_bif(module, name, arity) {
+                ImportKind::Bif {
+                    bif,
+                    heavy: is_heavy_bif(module, name, arity),
+                }
+            } else {
+                ImportKind::Export
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "../../../tests/runtime/interpreter/bif.rs"]
 mod tests;

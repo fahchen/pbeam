@@ -7,6 +7,7 @@ use std::{
 use super::code::{self, Instruction, Operand};
 use crate::{
     error::{BeamError, error},
+    runtime::BifId,
     term::{AtomTable, Term},
 };
 
@@ -146,6 +147,10 @@ pub struct BeamModule {
     /// name and its arity. The name itself stays in the name table of the
     /// module tables.
     pub(crate) exports: HashMap<(NameId, u32), u32>,
+    /// The imports of the module, in the order of its `ImpT` chunk. A
+    /// [`Instruction::CallExternal`] names its import by the index in this
+    /// vector.
+    pub(crate) imports: Vec<Import>,
     pub(crate) instructions: Vec<Instruction>,
     /// The side tables of `instructions`, which the loader builds once (see
     /// [`ModuleTables`]).
@@ -182,6 +187,43 @@ pub(crate) struct FunctionStart {
     pub(crate) function: usize,
     /// The index of the first instruction after the label.
     pub(crate) start: usize,
+}
+
+/// One import of a module: an entry of its `ImpT` chunk, and the call that
+/// a `call_ext` of the entry makes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Import {
+    pub(crate) module: String,
+    pub(crate) name: String,
+    pub(crate) arity: u32,
+    /// The call of the MFA, which the loader decides one time for the
+    /// import, so that a call compares no name.
+    pub(crate) kind: ImportKind,
+}
+
+/// The call that a `call_ext` of an import makes. The ERTS loader turns a
+/// `call_ext` of `erlang:apply/2`, `erlang:apply/3`, `erlang:load_nif/2`, or
+/// a BIF into another instruction, and keeps the `call_ext` of each other
+/// MFA, which calls through the export entry of the MFA
+/// (`jit/arm/ops.tab:615-714`). The loader of PBeam turns the calls of
+/// `erlang:hibernate/0` and `erlang:yield/0` into instructions, so they
+/// have no kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ImportKind {
+    /// `erlang:apply/2`, which runs as `i_apply_fun`.
+    ApplyFun,
+    /// `erlang:apply/3`, which runs as `i_apply`.
+    Apply,
+    /// `erlang:load_nif/2`, which runs as `i_load_nif` with the module of
+    /// the caller.
+    LoadNif,
+    /// A BIF. `bif` is the `bif.tab` entry, or `None` for a PBeam BIF.
+    /// `heavy` marks a heavy BIF, which ERTS calls through its export with
+    /// no reduction cost.
+    Bif { bif: Option<BifId>, heavy: bool },
+    /// The code of a module, which the call enters through the export of
+    /// the MFA.
+    Export,
 }
 
 impl ModuleTables {
@@ -411,7 +453,7 @@ fn resolve_branch(target: &mut u32, jump_targets: &LabelMap<usize>) -> Result<()
 }
 
 impl BeamModule {
-    /// Return the module `name` with `exports` and the decoded
+    /// Return the module `name` with `exports`, `imports`, and the decoded
     /// `instructions`, and build the side tables of the stream. Each export
     /// name goes into the name table of the module, so its name lives in one
     /// place. Each branch label and each call label becomes the resolved
@@ -420,12 +462,13 @@ impl BeamModule {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let module = BeamModule::new("fixture".into(), HashMap::new(), vec![Instruction::End])?;
+    /// let module = BeamModule::new("fixture".into(), HashMap::new(), Vec::new(), vec![Instruction::End])?;
     /// assert!(module.tables.jump_targets.is_empty());
     /// ```
     pub(crate) fn new(
         name: String,
         exports: HashMap<(String, u32), u32>,
+        imports: Vec<Import>,
         mut instructions: Vec<Instruction>,
     ) -> Result<Self, BeamError> {
         let mut tables = ModuleTables::build(&name, &mut instructions, NameTable::default())?;
@@ -437,6 +480,7 @@ impl BeamModule {
             name,
             id: ModuleId::next(),
             exports,
+            imports,
             instructions,
             tables,
         })

@@ -7,7 +7,7 @@ use super::{
 };
 use crate::{
     beam::{
-        BeamModule, NameId,
+        BeamModule, Import, ImportKind, NameId,
         code::{
             self, BinaryMatchCommand, BinarySegment, Instruction, Operand, SelectValueChoices,
             TestKind, TestOperand,
@@ -36,7 +36,7 @@ pub(super) use code_table::CodeTable;
 
 use bif::{
     BifArguments, BifId, BifResult, MAX_BORROWED_ARGUMENTS, OwnedBifArguments, dispatch_leaf,
-    is_function, is_heavy_bif, is_leaf, is_pbeam_bif, mfa, resolve, send,
+    is_function, is_leaf, is_pbeam_bif, mfa, resolve, send,
 };
 use bits::BitWriter;
 
@@ -859,10 +859,7 @@ impl BeamProgram {
                     cursor.position = label_position(target)?;
                 }
                 Instruction::CallExternal {
-                    arity,
-                    module,
-                    name,
-                    bif,
+                    import,
                     tail,
                     deallocate,
                 } => {
@@ -871,7 +868,7 @@ impl BeamProgram {
                     // has none, and the parser writes 0 for it.
                     let deallocate = tail.then_some(*deallocate);
                     if let Some(outcome) =
-                        self.call_external(scheduler, module, name, *bif, *arity, deallocate)?
+                        self.call_external(scheduler, module, *import, deallocate)?
                     {
                         return Ok(outcome);
                     }
@@ -1953,13 +1950,15 @@ impl BeamProgram {
         }
     }
 
-    /// Call `module:name/arity` with the arguments in the X registers, as
-    /// `call_ext` does. A tail call first checks that the frame has
-    /// `deallocate` Y registers, then replaces the frame. A tail call of
-    /// `erlang:apply/2` or `erlang:apply/3` releases the Y registers before
-    /// the apply, as the ERTS loader makes `i_apply_fun_last` and
-    /// `i_apply_last` (`jit/arm/ops.tab:649-657`), so an exception of the
-    /// apply does not see the catch tags of the frame.
+    /// Call the import `import` of `code` with the arguments in the X
+    /// registers, as `call_ext` does. The import holds the MFA and the call
+    /// that the loader decided for it, so the call compares no name. A tail
+    /// call first checks that the frame has `deallocate` Y registers, then
+    /// replaces the frame. A tail call of `erlang:apply/2` or
+    /// `erlang:apply/3` releases the Y registers before the apply, as the
+    /// ERTS loader makes `i_apply_fun_last` and `i_apply_last`
+    /// (`jit/arm/ops.tab:649-657`), so an exception of the apply does not
+    /// see the catch tags of the frame.
     ///
     /// A BIF runs as a body call also in a tail call, and the process then
     /// continues at the `Deallocate` and the `Return` that the loader puts
@@ -1979,25 +1978,33 @@ impl BeamProgram {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// // `erlang:exit/1` in a tail call with no catch tag exits the process.
-    /// let outcome = program.call_external(&mut scheduler, "erlang", "exit", 1, true, 0)?;
+    /// // Import 0 of `code` is `erlang:exit/1`. A tail call with no catch
+    /// // tag exits the process.
+    /// let outcome = program.call_external(&mut scheduler, &code, 0, Some(0))?;
     /// assert!(matches!(outcome, Some(Outcome::Exit { result: None, .. })));
     /// // A tail call from a frame with one Y register must deallocate it.
-    /// assert!(program.call_external(&mut scheduler, "erlang", "self", 0, true, 0).is_err());
+    /// assert!(program.call_external(&mut scheduler, &code, 0, Some(0)).is_err());
     /// ```
     fn call_external(
         &self,
         scheduler: &mut Scheduler,
-        module: &str,
-        name: &str,
-        bif: Option<BifId>,
-        arity: u32,
+        code: &BeamModule,
+        import: u32,
         deallocate: Option<u32>,
     ) -> Result<Option<Outcome>, BeamError> {
+        // The loader checks each import index against the import table.
+        let index = import as usize;
+        let Import {
+            module,
+            name,
+            arity,
+            kind,
+        } = &code.imports[index];
+        let arity = *arity;
         let tail = deallocate.is_some();
         let process = scheduler.current_process_mut();
         match deallocate {
-            Some(deallocate) if matches!((module, name, arity), ("erlang", "apply", 2 | 3)) => {
+            Some(deallocate) if matches!(kind, ImportKind::ApplyFun | ImportKind::Apply) => {
                 release_frame(process, deallocate)?;
             }
             Some(deallocate) if deallocate as usize != current_frame(process).stack.len() => {
@@ -2005,23 +2012,25 @@ impl BeamProgram {
             }
             _ => {}
         }
-        if (module, name, arity) == ("erlang", "load_nif", 2) {
-            let module_id = current_frame(process).module_id;
-            let caller = scheduler.code.module_by_id(module_id)?.name.clone();
-            let result = native::load_nif(scheduler, &caller)?;
-            return self.finish_bif(scheduler, result, false);
-        }
-        if bif.is_some() || is_pbeam_bif(module, name, arity) {
-            if !is_heavy_bif(module, name, arity) && light_bif_switch(process) {
-                return Ok(Some(Outcome::Yield));
+        match *kind {
+            ImportKind::LoadNif => {
+                let module_id = current_frame(process).module_id;
+                let caller = scheduler.code.module_by_id(module_id)?.name.clone();
+                let result = native::load_nif(scheduler, &caller)?;
+                self.finish_bif(scheduler, result, false)
             }
-            let arguments = call_arguments(&process.registers, arity)?;
-            let result = self.call_bif(scheduler, module, name, bif, &arguments)?;
-            return self.finish_bif(scheduler, result, false);
+            ImportKind::Bif { bif, heavy } => {
+                if !heavy && light_bif_switch(process) {
+                    return Ok(Some(Outcome::Yield));
+                }
+                let arguments = call_arguments(&process.registers, arity)?;
+                let result = self.call_bif(scheduler, module, name, bif, &arguments)?;
+                self.finish_bif(scheduler, result, false)
+            }
+            ImportKind::ApplyFun => self.apply_fun(scheduler, tail),
+            ImportKind::Apply => self.apply_mfa(scheduler, tail),
+            ImportKind::Export => self.call_export(scheduler, module, name, arity, tail),
         }
-        // The loader classified the import, and an import that is not a BIF
-        // reaches the export lookup with no search of `BIFS`.
-        self.call_export(scheduler, module, name, arity, tail)
     }
 
     /// Call `module:name/arity` through its export with the arguments in

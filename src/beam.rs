@@ -2,4 +2,4 @@ pub(crate) mod code;
 mod module;
 
 pub use module::BeamModule;
-pub(crate) use module::{ModuleId, NameId};
+pub(crate) use module::{Import, ImportKind, ModuleId, NameId};

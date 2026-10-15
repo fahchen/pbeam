@@ -136,7 +136,8 @@ fn module_of(functions: u32) -> BeamModule {
         instructions.push(Instruction::Label(index));
     }
     instructions.push(Instruction::End);
-    BeamModule::new("audit".into(), HashMap::new(), instructions).expect("the fixture module loads")
+    BeamModule::new("audit".into(), HashMap::new(), Vec::new(), instructions)
+        .expect("the fixture module loads")
 }
 
 /// Return an ETS set table of `objects` objects, keyed by an integer.
