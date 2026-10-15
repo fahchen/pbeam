@@ -2111,6 +2111,31 @@ pub(in crate::runtime::interpreter) fn is_function(term: &Term, arity: &Term) ->
     Value(Term::static_atom(if matches { "true" } else { "false" }))
 }
 
+/// Run `erlang:is_integer/3`: return `true` when `term` is an integer from
+/// `low` to `high`, both included, as ERTS `is_integer_3`
+/// (`erl_bif_guard.c:337-349`) does. A `low` or `high` that is not an
+/// integer raises `badarg`, also when `term` is not an integer. A `term`
+/// that is not an integer gives `false`. In a guard, the `bif3` instruction
+/// goes to its fail label instead of the raise. PBeam has no bignum, so a
+/// bignum argument cannot occur (row "Integer range" of
+/// `docs/erts-differences.md`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let (zero, ten) = (Term::Integer(0), Term::Integer(10));
+/// assert!(matches!(is_integer_3(&Term::Integer(5), &zero, &ten), BifResult::Value(value) if value == Term::static_atom("true")));
+/// assert!(matches!(is_integer_3(&Term::static_atom("foo"), &zero, &ten), BifResult::Value(value) if value == Term::static_atom("false")));
+/// assert!(matches!(is_integer_3(&Term::Integer(5), &Term::static_atom("a"), &ten), BifResult::Raise { .. }));
+/// ```
+pub(super) fn is_integer_3(term: &Term, low: &Term, high: &Term) -> BifResult {
+    let (&Term::Integer(low), &Term::Integer(high)) = (low, high) else {
+        return BifResult::badarg();
+    };
+    let within = matches!(term, &Term::Integer(term) if low <= term && term <= high);
+    Value(Term::static_atom(if within { "true" } else { "false" }))
+}
+
 /// Send `message` to `to` and return the message, as ERTS `erl_send`
 /// (`bif.c:2845-2908`) does for the `send` instruction and for
 /// `erlang:send/2` (`send_2`, `bif.c:2801-2804`). A local send then uses

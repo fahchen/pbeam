@@ -204,7 +204,7 @@ bifs! {
     erlang:is_function/1 as ErlangIsFunction1 => |_, [term]| Ok(Value(Term::static_atom(if matches!(term, Term::Fun(_)) { "true" } else { "false" }))),
     erlang:is_function/2 as ErlangIsFunction2 => |_, [term, arity]| Ok(erlang::is_function(term, arity)),
     erlang:is_integer/1 => unsupported,
-    erlang:is_integer/3 => unsupported,
+    erlang:is_integer/3 as ErlangIsInteger3 => |_, [term, low, high]| Ok(erlang::is_integer_3(term, low, high)),
     erlang:is_list/1 => unsupported,
     erlang:is_map/1 => unsupported,
     erlang:is_map_key/2 as ErlangIsMapKey2 => |_, [key, map]| Ok(maps::is_key(key, map)),
