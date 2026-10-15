@@ -560,12 +560,13 @@ macro_rules! bifs {
         /// Return the identity of the BIF `module:name/arity`, or `None`
         /// when the MFA is not a `bif.tab` entry of [`BIFS`].
         ///
-        /// The loader calls this once for each `bif` instruction and once
-        /// for each `call_ext` instruction that is not `hibernate/0` or
-        /// `yield/0`, and it stores the identity in the instruction, as the
-        /// ERTS loader binds the import of a BIF to the BIF (`emu_load.c`).
-        /// A `call_mfa` of an `apply` calls it once for each call. A run
-        /// then compares no name and searches no table.
+        /// The loader calls this once for each `bif` instruction, which
+        /// stores the identity in the instruction, and once for each import
+        /// through `import_kind`, which stores the identity in the
+        /// `ImportKind::Bif` of the import. The ERTS loader binds the
+        /// import of a BIF to the BIF in the same way (`emu_load.c`). A
+        /// `call_mfa` of an `apply` calls it once for each call. A run then
+        /// searches no table for a resolved BIF.
         ///
         /// # Examples
         ///
@@ -1145,7 +1146,9 @@ pub(super) fn is_heavy_bif(module: &str, name: &str, arity: u32) -> bool {
 /// Return the call that a `call_ext` of the import `module:name/arity`
 /// makes. The loader calls this one time for each import, as the ERTS
 /// loader transforms the `call_ext` of each import one time
-/// (`jit/arm/ops.tab:615-714`), so a call compares no name. The checks
+/// (`jit/arm/ops.tab:615-714`), so a call does not classify its MFA. A
+/// PBeam BIF has no [`BifId`], so its call still matches the name in
+/// `BeamProgram::named_bif`. The checks
 /// keep the order of the removed checks of the call: `erlang:load_nif/2`
 /// before the BIFs, and `erlang:apply/2,3`, which are not BIFs, at the
 /// export.

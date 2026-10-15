@@ -68,9 +68,10 @@ impl LoadedModule {
 /// its MFA. The slot then keeps the target for the whole run, because no
 /// operation of the run removes a module or changes its code (see
 /// [`CodeTable`]). A call that finds no export keeps the slot empty, so a
-/// later call finds a module that loads after it, as the load changes the
-/// address of the ERTS export entry. The slots belong to the run and not to
-/// the shared code, because each run loads its own modules.
+/// later call finds a module that loads after it, as the load sets the code
+/// address in the ERTS export entry (`jit/asm_load.c:1194`). The slots
+/// belong to the run and not to the shared code, because each run loads
+/// its own modules.
 pub(in crate::runtime) type ImportTargets = Rc<[Cell<Option<ExportTarget>>]>;
 
 /// The function that the export of an MFA enters: the parts of the

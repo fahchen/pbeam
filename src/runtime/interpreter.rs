@@ -1991,8 +1991,10 @@ impl BeamProgram {
     /// // tag exits the process.
     /// let outcome = program.call_external(&mut scheduler, &code, &targets, 0, Some(0))?;
     /// assert!(matches!(outcome, Some(Outcome::Exit { result: None, .. })));
-    /// // A tail call from a frame with one Y register must deallocate it.
-    /// assert!(program.call_external(&mut scheduler, &code, &targets, 0, Some(0)).is_err());
+    /// // Import 1 of `code` is `erlang:self/0`. A tail call that
+    /// // deallocates no Y register from a frame with one Y register is an
+    /// // error.
+    /// assert!(program.call_external(&mut scheduler, &code, &targets, 1, Some(0)).is_err());
     /// ```
     fn call_external(
         &self,

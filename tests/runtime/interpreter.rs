@@ -661,9 +661,9 @@ fn rejects_invalid_tuple_access_receives_and_bifs() {
 
 #[test]
 fn calls_a_module_export_without_a_bif_search() {
-    // A `call_ext` of module code holds the classification of its import,
-    // and that classification is `None` for an MFA that is not a BIF. The
-    // run then reaches the export lookup with no search of `BIFS`.
+    // A `call_ext` of module code holds only the index of its import, and
+    // the loader classifies an MFA that is not a BIF as `ImportKind::Export`.
+    // The run then reaches the export lookup with no search of `BIFS`.
     let body = vec![
         Instruction::Move(Operand::Value(Term::Integer(1)), Operand::X(0)),
         external("fixture", "guest", 1, false, 0),
@@ -760,7 +760,7 @@ fn keeps_the_export_target_of_an_import_after_its_first_call() {
 fn keeps_no_export_target_for_an_import_with_no_export() {
     // A call of a module that the run does not load finds no export, so the
     // slot stays empty and a later call looks up the export again, as the
-    // load of the module changes the address of the ERTS export entry
+    // load of the module sets the code address in the ERTS export entry
     // (`jit/asm_load.c:1180-1196`). A run with no code server stops at the
     // call (see `undefined_function`).
     let absent = external("absent", "run", 0, false, 0);
