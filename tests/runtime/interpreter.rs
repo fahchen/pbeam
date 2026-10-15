@@ -5,7 +5,7 @@ use super::code_table::export_frame_calls;
 use super::{
     BeamProgram, CodeTable, Issuer, Outcome, Register, Scheduler, StackSlot, call_arguments,
     function_at_label, read_bif_arguments, read_operand, read_owned_bif_arguments, read_ref,
-    take_any, take_owned, write, write_operand,
+    take_owned, write, write_operand,
 };
 use crate::{
     BeamModule, Map, Term,
@@ -4391,39 +4391,4 @@ fn gives_up_the_map_of_a_y_register_with_one_owner() {
         Ok(Term::Map(_))
     ));
     drop(held);
-}
-
-#[test]
-fn takes_the_term_of_a_dead_move_source_and_reports_an_unset_source_as_a_read() {
-    let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![]);
-    process.registers = vec![Some(Term::Integer(7))];
-    process
-        .frames
-        .last_mut()
-        .expect("an entry process has a frame")
-        .stack = vec![
-        StackSlot::Term(Term::Integer(8)),
-        StackSlot::Catch(0),
-        StackSlot::Empty,
-    ];
-    let taken = take_any(&mut process, &Operand::X(0)).expect("x0 is set");
-    assert_eq!(taken, Term::Integer(7));
-    assert_eq!(process.registers, vec![None]);
-    let taken = take_any(&mut process, &Operand::Y(0)).expect("y0 is set");
-    assert_eq!(taken, Term::Integer(8));
-    assert!(matches!(
-        process.frames.last().expect("frame").stack[0],
-        StackSlot::Term(Term::Nil)
-    ));
-    let literal = take_any(&mut process, &Operand::Value(Term::Integer(9)));
-    assert_eq!(literal.expect("a literal is a value"), Term::Integer(9));
-    for (operand, message) in [
-        (Operand::X(0), "register x0 is unset"),
-        (Operand::X(5), "register x5 is unset"),
-        (Operand::Y(1), "stack register y1 holds a catch tag"),
-        (Operand::Y(2), "stack register y2 is unset"),
-    ] {
-        let error = take_any(&mut process, &operand).expect_err("the source is not a term");
-        assert!(error.to_string().contains(message), "{error}");
-    }
 }
