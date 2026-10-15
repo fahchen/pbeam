@@ -413,21 +413,29 @@ impl TcpInet {
                     self.active = value;
                     true
                 }
-                0 => self.set_socket(0, false, |socket| socket.set_reuse_address(value != 0)),
-                1 => self.set_socket(1, false, |socket| socket.set_keepalive(value != 0)),
-                10 => self.set_socket(10, false, |socket| socket.set_tcp_nodelay(value != 0)),
+                0 => self.set_socket(libc::SO_REUSEADDR, false, |socket| {
+                    socket.set_reuse_address(value != 0)
+                }),
+                1 => self.set_socket(libc::SO_KEEPALIVE, false, |socket| {
+                    socket.set_keepalive(value != 0)
+                }),
+                10 => self.set_socket(libc::TCP_NODELAY, false, |socket| {
+                    socket.set_tcp_nodelay(value != 0)
+                }),
                 3 => {
                     let [s3, s2, s1, s0, rest @ ..] = request else {
                         return Ok(error_reply("einval"));
                     };
                     request = rest;
                     let linger = linger_time(value, u32::from_be_bytes([*s3, *s2, *s1, *s0]))?;
-                    self.set_socket(3, false, |socket| socket.set_linger(linger))
+                    self.set_socket(libc::SO_LINGER, false, |socket| socket.set_linger(linger))
                 }
                 8 => self.set_priority(value),
-                9 => self.set_socket(9, true, |socket| socket.set_tos_v4(value as u32)),
-                46 => self.set_socket(46, true, |socket| socket.set_ttl_v4(value as u32)),
-                43 => self.set_socket(43, true, |socket| socket.set_recv_tos_v4(value != 0)),
+                9 => self.set_socket(libc::IP_TOS, true, |socket| socket.set_tos_v4(value as u32)),
+                46 => self.set_socket(libc::IP_TTL, true, |socket| socket.set_ttl_v4(value as u32)),
+                43 => self.set_socket(libc::IP_RECVTOS, true, |socket| {
+                    socket.set_recv_tos_v4(value != 0)
+                }),
                 47 if value != 0 => return Err(error(RECVTTL_ON)),
                 // PBeam never sets `IP_RECVTTL`, so a socket has it off.
                 47 => self.socket.is_some(),
@@ -453,19 +461,19 @@ impl TcpInet {
         Ok(vec![OK])
     }
 
-    /// Run `set` on the socket of the option `option` (see
-    /// [`set_option`]). Return `false` when `propagate` is true and the
+    /// Run `set` on the socket of the option with the socket constant
+    /// `kind`, such as `IP_TOS` (see [`set_option`]). Return `false` when `propagate` is true and the
     /// socket is missing or `set` fails, else `true`.
     fn set_socket(
         &self,
-        option: u8,
+        kind: c_int,
         propagate: bool,
         set: impl FnOnce(&Socket) -> io::Result<()>,
     ) -> bool {
         let result = self
             .socket
             .as_ref()
-            .map(|socket| set_option(socket, option, propagate, set));
+            .map(|socket| set_option(socket, kind, propagate, set));
         !propagate || matches!(result, Some(Ok(())))
     }
 
@@ -565,14 +573,6 @@ const RECVTTL_ON: &str =
 /// `SO_LINGER`, which xnu reads in clock ticks.
 const LINGER_TIME: &str = "unsupported tcp_inet option linger with a time: see \"tcp_inet ports\" in docs/erts-differences.md";
 
-/// The option code of `priority` (`INET_OPT_PRIORITY`).
-#[cfg(target_os = "linux")]
-const PRIORITY: u8 = 8;
-
-/// The option code of `tos` (`INET_OPT_TOS`).
-#[cfg(target_os = "linux")]
-const TOS: u8 = 9;
-
 /// The flag bits that xnu gives for an option that is on: `SO_REUSEADDR`,
 /// `SO_KEEPALIVE`, and `TF_NODELAY` (see [`getsockopt_value`]).
 const APPLE_SO_REUSEADDR: i32 = 4;
@@ -624,7 +624,7 @@ fn linger_time(on: i32, seconds: u32) -> Result<Option<Duration>, BeamError> {
 /// # Examples
 ///
 /// ```rust,ignore
-/// set_option(&socket, 1, false, |socket| socket.set_keepalive(true))?;
+/// set_option(&socket, libc::SO_KEEPALIVE, false, |socket| socket.set_keepalive(true))?;
 /// ```
 ///
 /// # Errors
@@ -633,25 +633,20 @@ fn linger_time(on: i32, seconds: u32) -> Result<Option<Duration>, BeamError> {
 #[cfg(not(target_os = "linux"))]
 fn set_option(
     socket: &Socket,
-    _option: u8,
+    _kind: c_int,
     _propagate: bool,
     set: impl FnOnce(&Socket) -> io::Result<()>,
 ) -> io::Result<()> {
     set(socket)
 }
 
-/// Set an option with `set`, as `setopt_prio_tos_trick` does
-/// (inet_drv.c:6769-6830): read `priority` and `tos` first, and set them
-/// again after the option, because Linux changes `priority` when `tos`
-/// changes. A `tos` option keeps its new value, and a `priority` option
-/// sets nothing again. With `propagate`, a failed set of `tos` again is
-/// the result, and a failed set of `priority` again is the result unless
-/// it fails with `EPERM`.
+/// Set an option with `set`, as `setopt_prio_tos_trick` does on the
+/// socket (see [`prio_tos_trick`]).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// set_option(&socket, 9, true, |socket| socket.set_tos_v4(16))?;
+/// set_option(&socket, libc::IP_TOS, true, |socket| socket.set_tos_v4(16))?;
 /// ```
 ///
 /// # Errors
@@ -660,30 +655,68 @@ fn set_option(
 #[cfg(target_os = "linux")]
 fn set_option(
     socket: &Socket,
-    option: u8,
+    kind: c_int,
     propagate: bool,
     set: impl FnOnce(&Socket) -> io::Result<()>,
 ) -> io::Result<()> {
-    let priority = socket.priority();
-    let tos = socket.tos_v4();
-    set(socket)?;
-    if option == PRIORITY {
+    prio_tos_trick(
+        kind,
+        propagate,
+        (socket.priority(), socket.tos_v4()),
+        || set(socket),
+        |tos| socket.set_tos_v4(tos),
+        |priority| socket.set_priority(priority),
+    )
+}
+
+/// Run `setopt_prio_tos_trick` (inet_drv.c:6773-6827) with `saved`, the
+/// `getsockopt` results of `SO_PRIORITY` and `IP_TOS` before `set`: run
+/// `set`, and then set `tos` with `set_tos` and `priority` with
+/// `set_priority` again, because Linux changes `priority` when `tos`
+/// changes. ERTS compares only the socket constant `kind`, not the level
+/// (inet_drv.c:6798-6799): an option with the constant of `IP_TOS`, such
+/// as `TCP_NODELAY`, does not set `tos` again, and an option with the
+/// constant of `SO_PRIORITY` sets nothing again. A saved value whose
+/// `getsockopt` failed is not set again. With `propagate`, a failed set of
+/// `tos` again is the result and stops the set of `priority`, and a failed
+/// set of `priority` again is the result unless it fails with `EPERM`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// prio_tos_trick(libc::IP_TTL, true, (Ok(0), Ok(16)), set, set_tos, set_priority)?;
+/// ```
+///
+/// # Errors
+///
+/// The error of `set`, and with `propagate` the error of a set again.
+#[cfg(target_os = "linux")]
+fn prio_tos_trick(
+    kind: c_int,
+    propagate: bool,
+    saved: (io::Result<u32>, io::Result<u32>),
+    set: impl FnOnce() -> io::Result<()>,
+    set_tos: impl FnOnce(u32) -> io::Result<()>,
+    set_priority: impl FnOnce(u32) -> io::Result<()>,
+) -> io::Result<()> {
+    let (priority, tos) = saved;
+    set()?;
+    if kind == libc::SO_PRIORITY {
         return Ok(());
     }
-    let tos = tos.ok().filter(|_| option != TOS);
-    let restored = tos.map_or(Ok(()), |tos| socket.set_tos_v4(tos));
-    if propagate {
-        restored?;
-    }
-    let restored = priority.map_or(Ok(()), |priority| socket.set_priority(priority));
-    let ignored = |failure: &io::Error| !propagate || failure.raw_os_error() == Some(libc::EPERM);
-    restored.or_else(|failure| {
-        if ignored(&failure) {
-            Ok(())
-        } else {
-            Err(failure)
+    if let (true, Ok(tos)) = (kind != libc::IP_TOS, tos) {
+        let restored = set_tos(tos);
+        if propagate {
+            restored?;
         }
-    })
+    }
+    let Ok(priority) = priority else {
+        return Ok(());
+    };
+    match set_priority(priority) {
+        Err(failure) if propagate && failure.raw_os_error() != Some(libc::EPERM) => Err(failure),
+        _ => Ok(()),
+    }
 }
 
 /// Return the `GETOPTS` value of `priority`. Without `SO_PRIORITY`, as on
@@ -727,7 +760,9 @@ impl TcpInet {
     /// 1, inet_drv.c:7389-7398).
     #[cfg(target_os = "linux")]
     fn set_priority(&self, value: i32) -> bool {
-        self.set_socket(PRIORITY, true, |socket| socket.set_priority(value as u32))
+        self.set_socket(libc::SO_PRIORITY, true, |socket| {
+            socket.set_priority(value as u32)
+        })
     }
 }
 
@@ -840,3 +875,7 @@ fn getsockopt_value(on: bool, bit: i32) -> i32 {
 
 /// True on macOS and the other Apple hosts.
 const APPLE: bool = cfg!(target_vendor = "apple");
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "../../../tests/runtime/port/tcp_inet.rs"]
+mod tests;
