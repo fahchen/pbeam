@@ -3243,10 +3243,14 @@ fn map_values<'a>(
 /// return false when the map does not hold a key. A flatmap is walked once,
 /// because the loader sorts the pairs in flatmap key order. A hashmap finds
 /// each key in turn. Each value is written when its key is found, so a
-/// missing key can leave the earlier destinations written; the compiler
-/// treats these destinations as undefined on the fail path
-/// (`clobber_map_vals`, `beam_validator.erl:1302-1320`). As in ERTS, a
-/// flatmap never matches an empty key list.
+/// missing key can leave the earlier destinations written. These partial
+/// writes match `beam_jit_get_map_elements`, but not the inline JIT path
+/// (`jit/arm/instr_map.cpp:439-462`), which finds the keys from last to
+/// first. Compiled code cannot see the difference: on the fail path the
+/// validator marks an initialized destination as `any`
+/// (`clobber_map_vals`, `beam_validator.erl:1311-1319`). An empty key list
+/// matches every map, as in the inline JIT path
+/// (`jit/arm/instr_map.cpp:404-415, 464`).
 ///
 /// # Examples
 ///
@@ -3279,7 +3283,7 @@ fn get_map_elements(
             next = wanted.next();
         }
     }
-    Ok(!pairs.is_empty() && next.is_none())
+    Ok(next.is_none())
 }
 
 /// Raise an exception with the stack trace `[]` in the process, as

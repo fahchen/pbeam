@@ -1078,7 +1078,7 @@ fn updates_and_reads_maps_and_reports_unsupported_map_operands() {
 }
 
 #[test]
-fn gets_map_elements_of_a_hashmap_and_matches_no_empty_key_list_of_a_flatmap() {
+fn gets_map_elements_of_a_hashmap_and_matches_an_empty_key_list_of_each_map() {
     let integers = |count: i64| {
         Operand::Value(Term::Map(
             Map::from_pairs(
@@ -1118,10 +1118,9 @@ fn gets_map_elements_of_a_hashmap_and_matches_no_empty_key_list_of_a_flatmap() {
     // A hashmap finds each key in turn.
     assert_eq!(run(integers(40), &[2, 40]), Term::Integer(-2));
     assert_eq!(run(integers(40), &[2, 41]), test_atom("missing"));
-    // ERTS `beam_jit_get_map_elements` matches an empty key list for a
-    // hashmap, and never for a flatmap.
+    // The ERTS JIT matches an empty key list for each map.
     assert_eq!(run(integers(40), &[]), test_atom("none"));
-    assert_eq!(run(integers(2), &[]), test_atom("missing"));
+    assert_eq!(run(integers(2), &[]), test_atom("none"));
 }
 
 #[test]
