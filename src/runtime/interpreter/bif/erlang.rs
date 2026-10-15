@@ -675,7 +675,11 @@ fn raise_with_args(
     let depth = context.scheduler.backtrace_depth;
     let mut frames = mfa_stacktrace(context.scheduler, 0)?;
     frames.truncate(depth.max(1));
-    frames[0] = Term::tuple(vec![module, function, args, location]);
+    // The apply of the first frame of a process that starts at
+    // `erlang:apply/2,3` gives no frame, as in ERTS.
+    if let Some(first) = frames.first_mut() {
+        *first = Term::tuple(vec![module, function, args, location]);
+    }
     Ok(BifResult::RaiseWithStacktrace {
         class,
         reason: reason.clone(),

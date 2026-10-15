@@ -5,7 +5,7 @@
 %% The fixture has no line table, so ERTS gives each frame of this module
 %% the location []. stack/1 drops the frames of the erl -eval caller.
 main() ->
-    [cases(throw), cases(exit)].
+    [cases(throw), cases(exit), apply_initial()].
 
 cases(Class) ->
     [try_stack(fun() -> raise(Class, r) end),
@@ -42,6 +42,17 @@ catch_value(Class) ->
 
 initial_call(Class) ->
     {_, Ref} = spawn_monitor(?MODULE, root, [fun_of(Class)]),
+    receive {'DOWN', Ref, process, _, Reason} -> Reason end.
+
+%% A process that starts at erlang:apply/3 has no frame of apply/3, so
+%% the error BIFs give an empty stack trace (beam_common.c:1355-1366).
+apply_initial() ->
+    [down(erlang, apply, [erlang, throw, [x]]),
+     down(erlang, apply, [erlang, apply, [erlang, throw, [x]]]),
+     down(erlang, apply, [erlang, error, [x]])].
+
+down(M, F, A) ->
+    {_, Ref} = spawn_monitor(M, F, A),
     receive {'DOWN', Ref, process, _, Reason} -> Reason end.
 
 %% The fun call is the last call of the only frame of the process.

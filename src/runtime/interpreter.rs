@@ -5306,7 +5306,8 @@ fn frame_function<'a>(
 /// `{Module, Function, Arity, []}`, as `erts_build_mfa_item` gives a
 /// frame without arguments (`utils.c:3448-3455`). PBeam keeps no line
 /// table, so each location is `[]` (row "Exception stack trace" of
-/// `docs/erts-differences.md`).
+/// `docs/erts-differences.md`). The first frame of a process that starts
+/// at `erlang:apply/2,3` is not in the stack trace.
 ///
 /// # Examples
 ///
@@ -5334,10 +5335,19 @@ fn mfa_stacktrace(scheduler: &mut Scheduler, skip: usize) -> Result<Vec<Term>, B
     frames.dedup_by(|frame, previous| {
         frame.module_id == previous.module_id && frame.next_instruction == previous.next_instruction
     });
-    let mut stacktrace = Vec::with_capacity(frames.len());
-    for frame in frames {
+    let count = frames.len();
+    let mut stacktrace = Vec::with_capacity(count);
+    for (index, frame) in frames.into_iter().enumerate() {
         let module = Rc::clone(scheduler.code.module_by_id(frame.module_id)?);
         let (_, function, arity) = frame_function(&module, &frame)?;
+        // A process that starts at `erlang:apply/2,3` keeps the frame of the
+        // `erlang.beam` body as its first frame. In ERTS that export runs
+        // the apply BIF with no frame and no continuation pointer of the
+        // body, so no stack trace has it (`apply_bif_error_adjustment`,
+        // `beam_common.c:1355-1366`).
+        if index + 1 == count && module.name == "erlang" && function == "apply" {
+            continue;
+        }
         // A loaded module put the names of its function info into the atom
         // table of the run, so each name is present.
         let atom = |name: &str| {
