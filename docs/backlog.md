@@ -64,14 +64,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** the start time of Terra Counter, or of another example, is slower than on `main` after the start set of #448. #448 gives the PBeam run the start set of the build and loads each other module on demand, so it decodes fewer modules at the start and each on-demand module at its first call.
 - **Source:** #448, `docs/code-loading.md` section 8 (Q9).
 
-### Drop a shared map without a fresh empty handle
-
-- `Map::drain_into` replaces `self.repr` with a fresh `Arc<Repr::Flat(Vec::new())>` before `Arc::into_inner` (`src/term/map.rs:503`). The replacement allocates a handle also when another map holds the value, so the drop of one of several copies of a map term pays one allocation that the drop of a shared tuple does not.
-- **Evidence:** on `a6b838c`, release build, the drop of a shared `Map` term takes 32.3 ns and the drop of a shared tuple takes 11.2 ns, each the minimum of 27 runs. The difference of about 21 ns is the cost of the allocation.
-- **Option:** hold the `Arc` in an `Option` field, as `Term::Tuple`, `Term::Cons`, and `Term::Fun` do: the drop takes the `Arc` out of the `Option` and calls `Arc::into_inner`, and each other reader finds the map. `Map` then needs no replacement handle.
-- **Trigger:** a measured path where the drop of a shared map costs time, or a change of the map representation.
-- **Source:** epic checkpoint measurement on #450; recorded on #503.
-
 ### Build the large tuple tree for a retained-version consumer
 
 - **Reason:** no consumer in this repository updates a tuple of more than 32 slots while an old version stays reachable.
