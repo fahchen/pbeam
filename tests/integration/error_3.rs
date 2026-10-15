@@ -16,7 +16,10 @@ const ERROR_3_PROBE: &[u8] = include_bytes!("../../fixtures/error_3/error_3_prob
 /// the stack trace of `erlang:error/2` (`bif.c:1462-1503`,
 /// `beam_common.c:1030-1051`). The pinned `io:format/2` raises `badarg`
 /// with the cause `{device, foo}` for a device that replies `{error, foo}`
-/// (`io.erl:203-207`).
+/// (`io.erl:203-207`). A tail call of `fun erlang:error/3` removes the
+/// frame of the caller first, and as the initial call it gives the frame of
+/// the initial call with its arity (`beam_common.c:1245-1253`). A tail
+/// `apply/3` keeps the frame of the caller (`beam_common.c:1345-1431`).
 const EXPECTED: &str = "[{error,r,[{error_3_probe,'-main/0-fun-9-',[a],[]},\
 {error_3_probe,try_stack,1,[]},{error_3_probe,main,0,[]},{error_3_probe,uncaught,0,[]}]},\
 {error,r,[{error_3_probe,'-main/0-fun-8-',[a],[{error_info,#{cause=>c}}]},\
@@ -40,17 +43,25 @@ const EXPECTED: &str = "[{error,r,[{error_3_probe,'-main/0-fun-9-',[a],[]},\
 {error,badarg,[{io,format,[\"x~w\",[1]],\
 [{error_info,#{cause=>{device,foo},module=>erl_stdlib_errors}}]},\
 {error_3_probe,try_stack,1,[]},{error_3_probe,device_error,0,[]},\
-{error_3_probe,main,0,[]},{error_3_probe,uncaught,0,[]}]}]";
+{error_3_probe,main,0,[]},{error_3_probe,uncaught,0,[]}]},\
+{error,r,[{error_3_probe,try_stack,[a],[{error_info,#{fun_tail=>1}}]},\
+{error_3_probe,tail_calls,0,[]},{error_3_probe,main,0,[]},{error_3_probe,uncaught,0,[]}]},\
+{error,r,[{error_3_probe,apply_tail,[a],[{error_info,#{apply_tail=>1}}]},\
+{error_3_probe,try_stack,1,[]},{error_3_probe,tail_calls,0,[]},\
+{error_3_probe,main,0,[]},{error_3_probe,uncaught,0,[]}]},\
+{r,[{error_3_probe,root,0,[{error_info,#{root=>1}}]}]}]";
 
 #[test]
 fn builds_the_stack_trace_of_erlang_error_3_as_pinned_erts() {
+    // The run removes the default logger handler, so the error report of
+    // the exit of `root/0` does not go to the output.
     let reference = Command::new("erl")
         .args([
             "-noshell",
             "-pa",
             "fixtures/error_3",
             "-eval",
-            "{'EXIT', R} = (catch error_3_probe:uncaught()), io:format(\"~s~n\", [erts_internal:term_to_string(R, 100000)]), halt().",
+            "logger:remove_handler(default), {'EXIT', R} = (catch error_3_probe:uncaught()), io:format(\"~s~n\", [erts_internal:term_to_string(R, 100000)]), halt().",
         ])
         .output()
         .unwrap();

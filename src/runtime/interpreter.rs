@@ -39,7 +39,7 @@ use code_table::{ExportTarget, ImportTargets};
 
 use bif::{
     BifArguments, BifId, BifResult, MAX_BORROWED_ARGUMENTS, OwnedBifArguments, dispatch_leaf,
-    is_function, is_leaf, is_pbeam_bif, mfa, resolve, send,
+    error_info_location, is_function, is_leaf, is_pbeam_bif, mfa, resolve, send,
 };
 use bits::BitWriter;
 
@@ -2569,7 +2569,7 @@ impl BeamProgram {
                     scheduler.atoms.name_of(module),
                     scheduler.atoms.name_of(function),
                 ) == ("erlang", "error")
-                && matches!(arity, 1 | 2) =>
+                && matches!(arity, 1..=3) =>
             {
                 return self.tail_call_error(scheduler, arity);
             }
@@ -2592,8 +2592,9 @@ impl BeamProgram {
         Ok(None)
     }
 
-    /// Run a tail call of the fun `fun erlang:error/1` or
-    /// `fun erlang:error/2`, with the arity `arity`. ERTS
+    /// Run a tail call of the fun `fun erlang:error/1`,
+    /// `fun erlang:error/2`, or `fun erlang:error/3`, with the arity
+    /// `arity`. ERTS
     /// `i_call_fun_last` removes the frame before it calls the fun
     /// (`emit_i_call_fun2_last` in `jit/arm/instr_fun.cpp:425-455`). Only an
     /// apply puts the calling function back for an error BIF
@@ -2601,7 +2602,10 @@ impl BeamProgram {
     /// first frame of the stack trace is the function of the caller frame.
     /// With no caller frame, the first frame is the initial call of the
     /// process with its arity, and the arguments are not in it
-    /// (`build_stacktrace`, `beam_common.c:1245-1248`). The tail call has
+    /// (`build_stacktrace`, `beam_common.c:1245-1248`). For
+    /// `fun erlang:error/3`, the location of that frame is the
+    /// `error_info` location of the options, as `erlang:error/3` gives it
+    /// (`get_error_info_from_exc`, `beam_common.c:1253`). The tail call has
     /// already released the Y registers of the frame, so the frame holds no
     /// catch tag. Return the outcome when the process exits.
     ///
@@ -2626,6 +2630,11 @@ impl BeamProgram {
             return self.call_mfa(scheduler, &module, &function, arity, false);
         }
         let reason = read(process, &Operand::X(0))?;
+        let location = if arity == 3 {
+            error_info_location(read_ref(process, &Operand::X(2))?)
+        } else {
+            Term::nil()
+        };
         let initial_call = process.initial_call.clone();
         let (module, function, arity) = scheduler
             .code
@@ -2634,7 +2643,7 @@ impl BeamProgram {
             Term::Atom(scheduler.atoms.put(&module)?),
             Term::Atom(scheduler.atoms.put(&function)?),
             Term::Integer(arity as i64),
-            Term::nil(),
+            location,
         ]);
         let process = scheduler.current_process_mut();
         let stacktrace = Term::list_from(vec![frame]);

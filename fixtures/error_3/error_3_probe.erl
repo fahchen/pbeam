@@ -1,5 +1,5 @@
 -module(error_3_probe).
--export([main/0, uncaught/0, device/0]).
+-export([main/0, uncaught/0, device/0, root/0]).
 
 %% The fixture has no line table, so ERTS gives each frame of this module
 %% the location [] or [{error_info, Map}]. stack/1 drops the file and line
@@ -16,9 +16,32 @@ main() ->
      try_stack(fun() -> erlang:error(r, [a], [{error_info, #{}, x}]) end),
      try_stack(fun() -> erlang:error(r, [a], bad) end),
      try_stack(fun() -> body(id([b])) end),
-     device_error()].
+     device_error() | tail_calls()].
 
 id(X) -> X.
+
+%% A tail call of erlang:error/3 through a fun or through apply/3 with a
+%% variable module and function, and through a fun as the initial call of
+%% a process (beam_common.c:1245-1253, 1345-1431).
+tail_calls() ->
+    [try_stack(fun() -> fun_tail(fun erlang:error/3) end),
+     try_stack(fun() -> apply_tail(erlang, error) end),
+     initial_call()].
+
+fun_tail(F) ->
+    F(r, [a], [{error_info, #{fun_tail => 1}}]).
+
+apply_tail(M, F) ->
+    apply(M, F, [r, [a], [{error_info, #{apply_tail => 1}}]]).
+
+initial_call() ->
+    {_, Ref} = spawn_monitor(?MODULE, root, []),
+    receive {'DOWN', Ref, process, _, Reason} -> Reason end.
+
+%% The fun call is the last call of the only frame of the process.
+root() ->
+    F = id(fun erlang:error/3),
+    F(r, [a], [{error_info, #{root => 1}}]).
 
 %% The root process exits with the result of main/0, so the run gives its
 %% text.

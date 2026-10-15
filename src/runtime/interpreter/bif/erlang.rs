@@ -547,6 +547,24 @@ pub(super) fn error_3(
     args: &Term,
     options: &Term,
 ) -> Result<BifResult, BeamError> {
+    raise_with_args(context, reason, args, error_info_location(options))
+}
+
+/// Return the location of the first frame of the stack trace of
+/// `erlang:error(Reason, Args, Options)`, as ERTS `error_3`
+/// (`bif.c:1462-1503`) reads `Options`: `[{error_info, Map}]` of the last
+/// element when `Options` is a proper list that is not empty and each
+/// element is `{error_info, Map}` with a map `Map`, else `[]`. The tail
+/// call of the fun `fun erlang:error/3` also uses it.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // [{error_info, #{a => 1}}, {error_info, #{b => 2}}] gives [{error_info, #{b => 2}}].
+/// assert_eq!(error_info_location(&options), Term::list_from(vec![last]));
+/// assert_eq!(error_info_location(&Term::static_atom("bad")), Term::nil());
+/// ```
+pub(in crate::runtime::interpreter) fn error_info_location(options: &Term) -> Term {
     let error_info = options
         .proper_list()
         .and_then(|mut options| {
@@ -560,8 +578,7 @@ pub(super) fn error_3(
             })
         })
         .flatten();
-    let location = Term::list_from(error_info);
-    raise_with_args(context, reason, args, location)
+    Term::list_from(error_info)
 }
 
 /// Raise an exception of class `error` with `Reason` and the stack trace of
