@@ -1124,7 +1124,7 @@ A scratch probe build of `4fc08860` counted the moves from a register on 60 Terr
 | Dead X source, a take | 26,428 | 18,173 |
 | Dead Y source, a take | 15,567 | 9,299 |
 
-Of the 79,119 moves from a register, 42,000 (53 percent) have a dead source. Of the 46,835 moves of a boxed term, 27,472 (59 percent) are takes, so the change removes 27,472 increments and 27,472 decrements for each key press. The count supported a prototype, so the gate measured it.
+Of the 79,119 moves from a register, 41,995 (53 percent) have a dead source. Of the 46,835 moves of a boxed term, 27,472 (59 percent) are takes, so the change removes 27,472 increments and 27,472 decrements for each key press. The count supported a prototype, so the gate measured it.
 
 ### The session
 
