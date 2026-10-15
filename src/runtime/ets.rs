@@ -454,6 +454,92 @@ impl Table {
             }
             (None, _) => EMPTY,
         };
+        self.add(hash, object, newest);
+        compared
+    }
+
+    /// Add each object of `objects` in list order, as a list insert puts
+    /// them, and return the number of objects that the insert of each
+    /// object compared, as [`Table::insert`] gives it for each object in
+    /// turn.
+    ///
+    /// In a `bag` table, ERTS compares an object with each object of its
+    /// key up to an exactly equal one, so a list of `n` objects of one key
+    /// can do `n * (n - 1) / 2` compares (`erl_db_hash.c:1422-1442`). PBeam
+    /// puts the whole list into the table at once (the BIF `insert_list`),
+    /// so it gets each count with less work. For each key it keeps a
+    /// [`BagWalk`]: the objects of the list that it added, and the objects
+    /// of the key that were in the table, which it walks only as far as
+    /// ERTS compares them. A hash of the whole object finds an exactly
+    /// equal one. The work is then linear in the objects of the list and
+    /// in the walked objects, and the counts stay the ERTS ones. Each
+    /// other table type compares nothing.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Bag);
+    /// let atoms = AtomTable::new();
+    /// let object = |value| vec![Term::Integer(1), Term::Integer(value)];
+    /// table.insert(&atoms, object(1));
+    /// assert_eq!(table.insert_all(&atoms, vec![object(2), object(1), object(3)]), vec![1, 1, 2]);
+    /// ```
+    pub(super) fn insert_all(&mut self, atoms: &AtomTable, objects: Vec<Vec<Term>>) -> Vec<usize> {
+        if self.table_type != TableType::Bag {
+            return (objects.into_iter())
+                .map(|object| self.insert(atoms, object))
+                .collect();
+        }
+        let mut walks: HashMap<u64, Vec<BagWalk>> = HashMap::new();
+        let mut counts = Vec::with_capacity(objects.len());
+        for object in objects {
+            let hash = stored_hash(atoms, self.key(&object));
+            let walks = walks.entry(hash).or_default();
+            let index = match (walks.iter()).position(|walk| walk.key == *self.key(&object)) {
+                Some(index) => index,
+                None => {
+                    let key = self.key(&object).clone();
+                    let cursor = self.position(hash, &key).unwrap_or(EMPTY);
+                    walks.push(BagWalk::new(key, cursor));
+                    walks.len() - 1
+                }
+            };
+            let walk = &mut walks[index];
+            let object_hash = object_hash(atoms, &object);
+            let count = match walk.find(self, atoms, object_hash, &object) {
+                Some(count) => count,
+                None => {
+                    let count = walk.added + walk.walked;
+                    let newest = self.position(hash, &walk.key).unwrap_or(EMPTY);
+                    let slot = self.add(hash, object, newest);
+                    walk.seen
+                        .entry(object_hash)
+                        .or_default()
+                        .push((Place::Added(walk.added), slot));
+                    walk.added += 1;
+                    count
+                }
+            };
+            counts.push(count);
+        }
+        counts
+    }
+
+    /// Put `object` into a new slot as the newest object of its key, whose
+    /// stored key hash is `hash`, before the object in the slot `newest`, or
+    /// as the only object of its key when `newest` is `EMPTY`. Return the
+    /// slot. A new object that makes the objects more than the buckets
+    /// splits one bucket (`erl_db_hash.c:1453-1461`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
+    /// let atoms = AtomTable::new();
+    /// let key = Term::Integer(1);
+    /// assert_eq!(table.add(stored_hash(&atoms, &key), vec![key], EMPTY), 0);
+    /// ```
+    fn add(&mut self, hash: u64, object: Vec<Term>, newest: usize) -> usize {
         let slot = self.allocate();
         self.objects[slot] = Some(object);
         self.older[slot] = newest;
@@ -463,7 +549,7 @@ impl Table {
             self.index.replace(hash, newest, slot);
         }
         self.buckets = self.buckets.max(self.object_count());
-        compared
+        slot
     }
 
     /// Return the elements of the newest object with a key that is exactly
@@ -772,6 +858,107 @@ impl Table {
     }
 }
 
+/// Where an object of a [`BagWalk`] is in the chain of its key.
+#[derive(Debug, Clone, Copy)]
+enum Place {
+    /// The list insert added it as the object with this 0-based number.
+    Added(usize),
+    /// It was in the table, at this 0-based position from the newest object
+    /// that was in the table.
+    Walked(usize),
+}
+
+/// The state of one key in [`Table::insert_all`] of a `bag` table.
+#[derive(Debug)]
+struct BagWalk {
+    /// The key.
+    key: Term,
+    /// The next slot of the objects that were in the table, or `EMPTY`
+    /// when the walk read each of them.
+    cursor: usize,
+    /// The number of objects of the key that were in the table and that the
+    /// walk read.
+    walked: usize,
+    /// The number of objects of the key that the list insert added.
+    added: usize,
+    /// Each added or walked object by the hash of the whole object
+    /// ([`object_hash`]), with its place and its slot.
+    seen: HashMap<u64, Vec<(Place, usize)>>,
+}
+
+impl BagWalk {
+    /// Return the walk of the key `key` whose newest object in the table is
+    /// in the slot `cursor`, or `EMPTY` for a new key.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let walk = BagWalk::new(Term::Integer(1), EMPTY);
+    /// assert_eq!((walk.walked, walk.added), (0, 0));
+    /// ```
+    fn new(key: Term, cursor: usize) -> BagWalk {
+        BagWalk {
+            key,
+            cursor,
+            walked: 0,
+            added: 0,
+            seen: HashMap::new(),
+        }
+    }
+
+    /// Return the number of objects that ERTS compares before it finds an
+    /// object that is exactly equal to `object`, whose hash is `hash`, or
+    /// `None` when the key has no such object. The chain of the key has the
+    /// added objects first, the newest first, and then the objects that
+    /// were in the table. An added object is never equal to another object
+    /// of the chain, so the first equal object is the only one. The walk
+    /// reads the objects that were in the table only up to the equal one.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut walk = BagWalk::new(Term::Integer(1), EMPTY);
+    /// let object = vec![Term::Integer(1)];
+    /// assert_eq!(walk.find(&table, &atoms, object_hash(&atoms, &object), &object), None);
+    /// ```
+    fn find(
+        &mut self,
+        table: &Table,
+        atoms: &AtomTable,
+        hash: u64,
+        object: &[Term],
+    ) -> Option<usize> {
+        let place = |seen: &HashMap<u64, Vec<(Place, usize)>>| {
+            seen.get(&hash)?
+                .iter()
+                .find(|(_, slot)| table.object_of(*slot) == object)
+                .map(|(place, _)| *place)
+        };
+        let place = place(&self.seen).or_else(|| {
+            while self.cursor != EMPTY {
+                let slot = self.cursor;
+                let walked = self.walked;
+                self.cursor = table.older[slot];
+                self.walked += 1;
+                let candidate = table.object_of(slot);
+                let candidate_hash = object_hash(atoms, candidate);
+                self.seen
+                    .entry(candidate_hash)
+                    .or_default()
+                    .push((Place::Walked(walked), slot));
+                if candidate == object {
+                    return Some(Place::Walked(walked));
+                }
+            }
+            None
+        })?;
+        Some(match place {
+            Place::Added(number) => self.added - 1 - number,
+            Place::Walked(position) => self.added + position,
+        })
+    }
+}
+
 /// The key index of one `set` table: the stored hash of each key to the slot
 /// of its object in [`Table::objects`].
 ///
@@ -956,6 +1143,21 @@ impl KeyIndex {
         self.slots[hole] = EMPTY;
         self.len -= 1;
     }
+}
+
+/// Return a hash of the whole object `object` from the hash of each
+/// element ([`key_hash`]). Two exactly equal objects have equal hashes, so
+/// [`BagWalk`] compares only the objects with the hash of the object.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let atoms = AtomTable::new();
+/// let object = [Term::Integer(1), Term::Integer(2)];
+/// assert_eq!(object_hash(&atoms, &object), object_hash(&atoms, &object.clone()));
+/// ```
+fn object_hash(atoms: &AtomTable, object: &[Term]) -> u64 {
+    (object.iter()).fold(0, |hash, term| hash.rotate_left(5) ^ key_hash(atoms, term))
 }
 
 /// Return the stored hash of an ETS key: the ERTS key hash ([`key_hash`])

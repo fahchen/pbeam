@@ -385,3 +385,43 @@ fn replaces_the_slot_of_an_index_entry_after_a_probe() {
     assert_eq!(index.find(9, |slot| slot == 5), Some(5));
     assert_eq!(index.find(1, |slot| slot == 0), Some(0));
 }
+
+#[test]
+fn counts_the_compares_of_a_bag_list_insert_as_one_insert_after_another() {
+    // `insert_all` must give the counts and the objects that one `insert`
+    // after another gives: objects that were in the table, objects that the
+    // list added, an equal object in each part, and a new key.
+    let atoms = AtomTable::new();
+    let object = |key, value| vec![Term::Integer(key), Term::Integer(value)];
+    let filled = || {
+        let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Bag);
+        for value in 1..=5 {
+            table.insert(&atoms, object(1, value));
+        }
+        table.insert(&atoms, object(2, 1));
+        table
+    };
+    let list = [
+        (1, 3),
+        (1, 6),
+        (1, 6),
+        (2, 1),
+        (1, 1),
+        (1, 7),
+        (3, 1),
+        (1, 6),
+        (1, 4),
+    ];
+    let mut one_by_one = filled();
+    let expected: Vec<usize> = (list.iter())
+        .map(|(key, value)| one_by_one.insert(&atoms, object(*key, *value)))
+        .collect();
+    let mut table = filled();
+    let objects = list
+        .iter()
+        .map(|(key, value)| object(*key, *value))
+        .collect();
+    assert_eq!(table.insert_all(&atoms, objects), expected);
+    assert_eq!(expected, vec![2, 5, 0, 0, 5, 6, 0, 1, 3]);
+    assert_eq!(table.live_objects(), one_by_one.live_objects());
+}

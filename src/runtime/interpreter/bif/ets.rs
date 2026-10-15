@@ -490,7 +490,7 @@ impl Units {
 
 /// Put each object of `tuples` into `table`, which has the key position
 /// `keypos`, and return the number of objects that the insert of each
-/// object compared ([`Table::insert`]). `atoms` owns the name of an atom key
+/// object compared ([`Table::insert_all`]). `atoms` owns the name of an atom key
 /// of an object.
 ///
 /// # Examples
@@ -517,10 +517,8 @@ fn put_objects(
             "unsupported ets:insert/2 in a table with key position 0",
         ));
     }
-    Ok(tuples
-        .iter()
-        .map(|elements| table.insert(atoms, elements.to_vec()))
-        .collect())
+    let objects = tuples.iter().map(|elements| elements.to_vec()).collect();
+    Ok(table.insert_all(atoms, objects))
 }
 
 /// Return the tuples of `objects` when each one has at least `keypos`
