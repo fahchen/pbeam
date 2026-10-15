@@ -458,6 +458,18 @@ impl Scheduler {
                     .push(TargetMonitor::Tty(tty));
                 2
             }
+            Signal::PortMonitor { port, reference } => {
+                let monitor = TargetMonitor::Port { port, reference };
+                self.handled(id, node).monitored_by.push(monitor);
+                2
+            }
+            Signal::PortDemonitor { port, reference } => {
+                let monitor = TargetMonitor::Port { port, reference };
+                let monitors = &mut self.handled(id, node).monitored_by;
+                let before = monitors.len();
+                monitors.retain(|target| *target != monitor);
+                1 + i32::from(monitors.len() < before)
+            }
             Signal::Demonitor { watcher, reference } => {
                 let monitor = TargetMonitor::Process(Monitor { watcher, reference });
                 let monitors = &mut self.handled(id, node).monitored_by;
@@ -733,6 +745,10 @@ impl Scheduler {
                 Signal::TtyMonitor { tty } => {
                     count += 4;
                     self.resources.borrow_mut::<Ttys>().monitor_down(id, tty);
+                }
+                Signal::PortMonitor { port, reference: _ } => {
+                    count += 4;
+                    self.tcp_monitor_down(port, id);
                 }
                 Signal::Link { from } => {
                     let exit = Signal::Exit {

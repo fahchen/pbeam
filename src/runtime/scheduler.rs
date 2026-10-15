@@ -1034,6 +1034,7 @@ impl Scheduler {
                         self.deliver(target, message);
                     }
                 }
+                Timer::Accept { port, caller } => self.tcp_accept_timeout(port, caller),
             }
         }
     }
@@ -2687,6 +2688,9 @@ impl Scheduler {
                             TargetMonitor::Tty(tty) => {
                                 self.resources.borrow_mut::<Ttys>().monitor_down(id, tty);
                             }
+                            TargetMonitor::Port { port, reference: _ } => {
+                                self.tcp_monitor_down(port, id);
+                            }
                         }
                         done += 1;
                         reds -= 1;
@@ -2728,6 +2732,7 @@ mod policy;
 mod ports;
 mod process_table;
 mod signals;
+mod tcp_inet;
 
 pub(super) use policy::PolicyEnd;
 use policy::PolicyProcess;
