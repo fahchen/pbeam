@@ -18,8 +18,9 @@ const THROW_EXIT_PROBE: &[u8] = include_bytes!("../../fixtures/throw_exit/throw_
 /// caller first, a tail `apply/3` keeps it (`beam_common.c:1345-1431`), and
 /// as the initial call the frame is the initial call with its arity
 /// (`beam_common.c:1245-1248`). `catch` gives the bare reason of `exit/1`.
-/// A process that starts at `erlang:apply/3` runs the apply BIF with no
-/// frame, so `throw/1` and `error/1` give an empty stack trace
+/// A process that starts at `erlang:apply/3` runs its first apply with no
+/// frame, so `throw/1` and `error/1` give an empty stack trace. A later
+/// tail apply of the `erlang.beam` body of `apply/2,3` keeps its frame
 /// (`beam_common.c:1355-1366`).
 const EXPECTED: &str = "[[{throw,r,[{throw_exit_probe,raise,2,[]},\
 {throw_exit_probe,try_stack,1,[]},{throw_exit_probe,cases,1,[]},\
@@ -41,7 +42,8 @@ c,{{nocatch,i},[{throw_exit_probe,root,1,[]}]}],\
 {exit,a,[{throw_exit_probe,apply_tail,2,[]},{throw_exit_probe,try_stack,1,[]},\
 {throw_exit_probe,cases,1,[]},{throw_exit_probe,main,0,[]},{throw_exit_probe,uncaught,0,[]}]},\
 {'EXIT',c},i],\
-[{{nocatch,x},[]},{{nocatch,x},[]},{x,[]}]]";
+[{{nocatch,x},[]},{{nocatch,x},[]},{x,[]},{x,[{erlang,apply,3,[]}]},\
+{{nocatch,x},[{erlang,apply,2,[]}]}]]";
 
 #[test]
 fn builds_the_stack_trace_of_erlang_throw_1_and_exit_1_as_pinned_erts() {

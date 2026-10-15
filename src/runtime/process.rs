@@ -356,6 +356,15 @@ pub(super) struct ProcessState {
     /// requester map of `initial/1` and `grant/3`. The code table resolves
     /// the names of an entry start when a reader needs them.
     pub(super) initial_call: InitialCall,
+    /// `true` after the first `erlang:apply/3` of the process. A start at
+    /// `erlang:apply/3` runs the `call_ext_only` of its `erlang.beam` body
+    /// as that first apply.
+    pub(super) applied: bool,
+    /// `true` while the first apply of a start at `erlang:apply/3` runs. ERTS
+    /// starts the process at `beam_run_process`, a body apply with no frame
+    /// (`erl_process.c:12616-12624`), so the stack trace of a BIF that this
+    /// apply calls does not hold the first frame of the process.
+    pub(super) start_apply: bool,
     /// The answer of the policy process to the `pbeam_cap:request/2` call
     /// of the process: `true` for a grant and `false` for a denial, or
     /// `None` while the call waits. The grant signal sets it, and the call
@@ -481,6 +490,8 @@ impl ProcessState {
             security: SecurityContext::default(),
             parent: None,
             initial_call,
+            applied: false,
+            start_apply: false,
             policy_reply: None,
         }
     }

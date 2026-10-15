@@ -44,12 +44,15 @@ initial_call(Class) ->
     {_, Ref} = spawn_monitor(?MODULE, root, [fun_of(Class)]),
     receive {'DOWN', Ref, process, _, Reason} -> Reason end.
 
-%% A process that starts at erlang:apply/3 has no frame of apply/3, so
-%% the error BIFs give an empty stack trace (beam_common.c:1355-1366).
+%% A process that starts at erlang:apply/3 runs its first apply with no
+%% frame, so the error BIFs give an empty stack trace. A later tail apply of
+%% the erlang.beam body keeps its frame (beam_common.c:1355-1366).
 apply_initial() ->
     [down(erlang, apply, [erlang, throw, [x]]),
      down(erlang, apply, [erlang, apply, [erlang, throw, [x]]]),
-     down(erlang, apply, [erlang, error, [x]])].
+     down(erlang, apply, [erlang, error, [x]]),
+     down(erlang, apply, [erlang, apply, [fun erlang:apply/3, [erlang, error, [x]]]]),
+     down(erlang, apply, [fun erlang:throw/1, [x]])].
 
 down(M, F, A) ->
     {_, Ref} = spawn_monitor(M, F, A),
