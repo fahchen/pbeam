@@ -1326,6 +1326,44 @@ fn appends_with_private_append_segments_as_pinned_erts() {
 }
 
 #[test]
+fn uses_no_reduction_for_a_private_append_as_the_pinned_erts_on_arm64() {
+    // `reds/1` gives the reductions between two `process_info/2` calls
+    // around a loop that appends 1024 bytes N times with a
+    // `private_append` segment: 1 for each of the N + 1 calls of the loop,
+    // 1 for the second `process_info/2` call, and 1 for the call of the
+    // loop from `reds/1`. `erts_bs_private_append_checked` calls
+    // `BUMP_REDS` when it grows the buffer (erl_bits.c:1974, 2010), but
+    // the arm JIT enters the runtime without `Update::eReductions`
+    // (jit/arm/instr_bs.cpp:1876-1880), so the bump is lost. The x86 JIT
+    // keeps the bump (jit/x86/instr_bs.cpp:1578-1584, 2116-2131), so the
+    // reference run is only on an arm64 host (row "Binary construction"
+    // of `docs/erts-differences.md`).
+    // (N, size of the result, reductions)
+    let results = [
+        (1, 1024, 4),
+        (10, 10_240, 13),
+        (100, 102_400, 103),
+        (300, 307_200, 303),
+    ];
+    let program = BeamProgram::load(&[BS_CREATE_BIN_WRITABLE_PROBE]).unwrap();
+    for (n, size, reductions) in results {
+        assert_eq!(
+            run_writable(&program, "reds", &[Term::Integer(n)]),
+            Ok(Term::tuple(vec![
+                Term::Integer(size),
+                Term::Integer(reductions)
+            ])),
+            "reds({n})"
+        );
+    }
+    #[cfg(target_arch = "aarch64")]
+    assert_eq!(
+        reference("[bs_create_bin_writable_probe:reds(N) || N <- [1, 10, 100, 300]]"),
+        "[{1024,4},{10240,13},{102400,103},{307200,303}]\n"
+    );
+}
+
+#[test]
 fn builds_float_segments_and_raises_their_failures_as_pinned_erts() {
     // A float segment of 32 or 64 bits converts a small integer with one C
     // cast and a bignum through a double, and a value too large for 32

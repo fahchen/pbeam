@@ -1,5 +1,5 @@
 -module(bs_create_bin_writable_probe).
--export([bytes/1, chunks/1, floats/1, sizes/1, shared/1, float_bad/1, float_size/2, append_float/3, bits/1, cause/2, ints/1]).
+-export([bytes/1, chunks/1, floats/1, sizes/1, shared/1, float_bad/1, float_size/2, append_float/3, bits/1, cause/2, ints/1, reds/1]).
 
 %% A loop that appends one byte: bs_init_writable and an integer segment
 %% after a private_append segment.
@@ -65,3 +65,14 @@ ints(List) -> ints(List, <<>>).
 
 ints([], Acc) -> Acc;
 ints([X | T], Acc) -> ints(T, <<Acc/binary, X:8>>).
+
+%% The reductions of a loop that appends 1024 bytes N times, between two
+%% process_info/2 calls.
+reds(N) ->
+    {reductions, R0} = process_info(self(), reductions),
+    B = kilobytes(N, <<>>),
+    {reductions, R1} = process_info(self(), reductions),
+    {byte_size(B), R1 - R0}.
+
+kilobytes(0, Acc) -> Acc;
+kilobytes(N, Acc) -> kilobytes(N - 1, <<Acc/binary, 0:8192>>).

@@ -5031,9 +5031,11 @@ fn write_binary_parts(
 /// takes the binary out of `source`, so the binary has one owner when no
 /// other term holds it, and writes the new bytes in its array
 /// (`Binary::append_in_place`). Else it builds a new binary that shares
-/// the old arrays (`Binary::concat`). ERTS charges reductions only when it
-/// grows the buffer; PBeam charges none (row "Binary construction" of
-/// `docs/erts-differences.md`).
+/// the old arrays (`Binary::concat`). PBeam charges no reduction. ERTS
+/// calls `BUMP_REDS` when it grows the buffer (erl_bits.c:1974, 2010), but
+/// the arm JIT drops that bump (jit/arm/instr_bs.cpp:1876-1880), so the
+/// pinned ERTS on arm64 also charges none. The x86 JIT keeps the bump (row
+/// "Binary construction" of `docs/erts-differences.md`).
 ///
 /// # Examples
 ///
