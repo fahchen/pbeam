@@ -966,6 +966,19 @@ impl BeamProgram {
                     // before. The loader gives a `bif` instruction at most
                     // `MAX_BORROWED_ARGUMENTS` arguments, so each lane
                     // covers every `bif` instruction.
+                    //
+                    // `erlang:'+'/2` and `erlang:'-'/2` of two integers with
+                    // an integer result run here, with no BIF call, as
+                    // `emit_i_plus` and `emit_i_minus` add or subtract two
+                    // small integers inline and call the BIF for each other
+                    // case (`jit/arm/instr_arith.cpp:145-205`, `:334-392`).
+                    // No `length/1` trap state can be pending at these two
+                    // identities: the trap runs its own instruction again
+                    // before any other instruction of the process.
+                    if let Some(value) = small_integer_arith(process, *bif, arguments) {
+                        write(process, destination, value)?;
+                        continue;
+                    }
                     let result = if let Some(state) = process.length_trap.take() {
                         self.bif_trap(scheduler, "erlang", "length", state)?
                     } else if is_leaf(*bif) {
@@ -3852,6 +3865,43 @@ fn function_at_label(module: &BeamModule, target: u32) -> Result<Function, BeamE
             module.name
         ))),
     }
+}
+
+/// Return the sum or the difference of a `bif` instruction of
+/// `erlang:'+'/2` or `erlang:'-'/2` when both operands are integers and the
+/// result is an integer, or `None` for each other case. A `None` call goes
+/// through the BIF path, which gives the value, the exception, or the
+/// runtime error of each other case, as `emit_i_plus` and `emit_i_minus`
+/// call the BIF for each case that is not inline
+/// (`jit/arm/instr_arith.cpp:171-204`, `:360-391`). An integer of PBeam is
+/// 64 bits wide, so the inline range is the 64-bit range, not the 60-bit
+/// small range of ERTS. The results from 2^59 to 2^63 - 1 and from -(2^63)
+/// to -(2^59) - 1 are the same values as the ERTS bignums (row "Integer
+/// range" of `docs/erts-differences.md`). An operand that is unset or a
+/// match context gives `None`, so the BIF path reports its error.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let operands = [Operand::Value(Term::Integer(1)), Operand::Value(Term::Integer(2))];
+/// assert_eq!(small_integer_arith(&process, BifId::ErlangPlus2, &operands), Some(Term::Integer(3)));
+/// assert_eq!(small_integer_arith(&process, BifId::ErlangMul2, &operands), None);
+/// ```
+fn small_integer_arith(process: &ProcessState, bif: BifId, operands: &[Operand]) -> Option<Term> {
+    let (BifId::ErlangPlus2 | BifId::ErlangMinus2, [left, right]) = (bif, operands) else {
+        return None;
+    };
+    let (Ok(Term::Integer(left)), Ok(Term::Integer(right))) =
+        (read_any_ref(process, left), read_any_ref(process, right))
+    else {
+        return None;
+    };
+    let result = if bif == BifId::ErlangPlus2 {
+        left.checked_add(*right)
+    } else {
+        left.checked_sub(*right)
+    };
+    result.map(Term::Integer)
 }
 
 /// Read the argument operands of a leaf `bif` instruction into a borrowed
