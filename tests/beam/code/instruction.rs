@@ -2524,7 +2524,6 @@ fn arm_field_bytes(instruction: &Instruction) -> usize {
         Instruction::ReceiveMarkerClear(field_0) => size_of_val(field_0),
         Instruction::NifStart { name, arity } => size_of_val(name) + size_of_val(arity),
         Instruction::TestYield => 0,
-        Instruction::Noop => 0,
         Instruction::Return => 0,
         Instruction::End => 0,
     }

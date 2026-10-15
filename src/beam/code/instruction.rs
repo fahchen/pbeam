@@ -1406,11 +1406,6 @@ pub(crate) enum Instruction {
     ///
     /// Erlang: `a() -> ok.` loads as `Label(2)`, `TestYield`, and the body.
     TestYield,
-    /// An instruction that has no runtime effect, such as `test_heap` or
-    /// `init_yregs`.
-    ///
-    /// Erlang: `g(X) -> {X, X}.` compiles to `{test_heap,3,1}` first.
-    Noop,
     /// Returns the value in `x0` from the active function. It costs one
     /// reduction, and the process switches out after the return when the
     /// budget is then less than 0 (`emit_dispatch_return` in
@@ -2260,9 +2255,18 @@ pub(super) fn parse_code(
                 instructions.insert(entry, Instruction::NifStart { name, arity });
                 continue;
             }
+            // `test_heap` makes room on the process heap, and `init_yregs`
+            // writes NIL to Y registers so that the garbage collector reads
+            // valid terms (`emit_test_heap` and `emit_init_yregs` in
+            // `jit/arm/instr_common.cpp:231-234,424-509`). The `Arc` term
+            // graph has no process heap and no collector. The BEAM validator
+            // gives such a Y register no term (`beam_validator.erl:429-436`),
+            // so no instruction reads its value. The loader skips both
+            // opcodes, as it skips `line`, and the run loop dispatches
+            // nothing for them.
             OPCODE_TEST_HEAP | OPCODE_INIT_YREGS => {
                 skip_unsupported_instruction(opcode, data, &mut cursor)?;
-                Instruction::Noop
+                continue;
             }
             OPCODE_PUT_LIST => Instruction::PutList {
                 head: read_move_operand(data, &mut cursor, atoms, literals)?,

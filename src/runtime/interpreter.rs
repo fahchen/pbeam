@@ -1910,7 +1910,7 @@ impl BeamProgram {
                         None => write(process, &Operand::X(0), Term::static_atom("badarg"))?,
                     }
                 }
-                Instruction::Noop | Instruction::Label(_) => {}
+                Instruction::Label(_) => {}
                 Instruction::TestYield => {
                     // `emit_i_test_yield` (`jit/arm/instr_common.cpp:3097-3119`).
                     process.fcalls -= 1;
