@@ -12,7 +12,10 @@ use super::super::time::{MONOTONIC_BEGIN, TIME_UNIT};
 /// the OS monotonic time resolutions (`erl_time_sup.c:1156-1160`). Measured
 /// on the pinned macOS host: 1000000 for `os_system_time_source`
 /// (`CLOCK_REALTIME`) and 23809523 for `os_monotonic_time_source`
-/// (`CLOCK_UPTIME_RAW`).
+/// (`CLOCK_UPTIME_RAW`). On Linux both clocks have a resolution of 1 ns;
+/// `LARGE_DIFF` then takes its floor of 500 µs, the same value as with this
+/// resolution, and the Linux check uses no drift constant. A Linux host with
+/// a clock resolution below 100 kHz would get a larger `SMALL_DIFF` in ERTS.
 const RESOLUTION: i64 = 1_000_000;
 
 /// `large_diff`: `50 * monotonic_time_unit / resolution`, at least 500

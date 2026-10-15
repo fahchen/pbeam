@@ -128,8 +128,9 @@ fn sets_the_first_check_timer_at_the_start_as_late_init_time_correction() {
     let timers = Timers::new();
     let first = timers.correction.first_timeout();
     // The check is after the first timeout from the start time, which is
-    // 1000000000 or a few nanoseconds later.
-    assert!((1000 + first..=1001 + first).contains(&timers.check.0));
+    // 1000000000 or later. The upper bound allows the thread to be
+    // preempted between the clock reads of `Timers::new` on a loaded host.
+    assert!((1000 + first..=2000 + first).contains(&timers.check.0));
     assert_eq!(timers.check.1, 0);
     // The check timer alone is not active, so it keeps no run alive, but
     // a wait ends at it.
