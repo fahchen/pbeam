@@ -21,7 +21,7 @@ At most 30 minutes, 25 tool calls, and about 8k output tokens.
    - A conflict in any other file (source, tests, fixtures, scripts, build or tool configuration, agents, skills): run `git merge --abort`, stop, and report the files. Do not guess.
    - Stage each resolved file (`git add <file>`) and check that no conflict marker stays (`git diff --check`, `rg -n '^(<<<<<<<|>>>>>>>)'`).
 4. Run `mise run check-brief`. It retries the known pty flake by itself. If it fails, stop and report.
-5. If step 3 resolved conflicts, complete the merge with `git commit --no-edit`. Check that `HEAD` is a merge commit with `origin/main` as a parent.
+5. If step 3 resolved conflicts, complete the merge with `git commit --no-edit`. Then check that `git merge-base --is-ancestor origin/main HEAD` succeeds; a fast-forward or an already-current branch also passes.
 6. Push with `git push origin HEAD:<branch>` (never `--force`). Remove the worktree and delete the local branch `merge-<pr>`.
 
 ## Return
