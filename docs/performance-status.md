@@ -52,7 +52,7 @@ Each entry is one landed change or one change that is not landed. The entries ar
 
 ### 2026-10-15 18:45 JST - Take the source term of a move whose source is dead, task [#631](https://github.com/fahchen/pbeam/issues/631), pull request [#641](https://github.com/fahchen/pbeam/pull/641) - Not landed
 
-The change marks a `move` whose source register no later instruction reads at load time, and the interpreter takes the term out of the source with no reference count change. On a Terra key press, 27,472 of the 46,835 moves of a boxed term have a dead source. The change is **Not landed**: its target, the CPU time of a Terra key press, shows no gain beyond the session noise, and the floor shapes fall by 0.4 to 3.6 percent only. Commit `c58b8789` reverts commit `4fc08860` of pull request [#641](https://github.com/fahchen/pbeam/pull/641), and `docs/backlog.md` keeps the change with a trigger.
+The change marks a `move` whose source register no later instruction reads at load time, and the interpreter takes the term out of the source with no reference count change. On a Terra key press, 27,472 of the 46,835 moves of a boxed term have a dead source. The change is **Not landed**: its target, the CPU time of a Terra key press, shows no gain beyond the session noise. The floor shapes run no `move` in their loop, so their falls of 0.4 to 3.6 percent do not come from the change. A probe of a boxed move gives about 1.6 ns for each take with a warm cache, or about 0.04 ms (0.3 percent) for each key press. Commit `c58b8789` reverts commit `4fc08860` of pull request [#641](https://github.com/fahchen/pbeam/pull/641), and `docs/backlog.md` keeps the change with a trigger.
 
 One interleaved session on 2026-10-15 from 18:21:44 to 18:25:28 JST, before `e93523c3` and after `4fc08860`. The floor rows are the minimum of six rounds in rotated order, with a one-minute load of 3.74 to 4.15. The Terra row is rounds 2 to 8 of a second interleaved session of 60 keys from 18:25:34 to 18:43:07 JST, with a one-minute load of 2.49 to 7.34 and the raw CPU time of `pbeam`. The session checked for `cargo`, `rustc`, and `nextest` processes only before each run, and a build of other work probably overlapped round 1 of `4fc08860`, so the entry leaves out the round 1 pair. The source is the section "The source term of a move whose source is dead, task #631" of `docs/interpreter-dispatch-measurements.md`.
 
@@ -62,9 +62,10 @@ One interleaved session on 2026-10-15 from 18:21:44 to 18:25:28 JST, before `e93
 | Local `call_only` floor loop, 200000 iterations | 42.3 ns | 41.8 ns | -1.2 percent |
 | Position `call_only` floor loop, 200000 iterations | 42.3 ns | 41.7 ns | -1.4 percent |
 | `call_only` plus the `bif` of `map_get/2` on a 1000-key map | 105.4 ns | 101.6 ns | -3.6 percent |
+| Probe of a boxed move, `boxed` minus `small` time for each iteration, two takes | 2.9 ns | -0.3 ns | -3.2 ns |
 | CPU time for each release Terra key press, rounds 2 to 8 | 14.857 ms | 15.048 ms | +1.3 percent at the mean, -1.1 percent at the median |
 
-The Terra rounds of one binary span 11.667 ms to 16.500 ms. The `## Current state` table does not change.
+The probe row comes from a third interleaved session from 19:01:16 to 19:03:59 JST, with a one-minute load of 1.68 to 3.22: the minimum of 6 rounds of a `boxed` loop with two moves of a tuple, minus the same loop with a small integer. The Terra rounds of one binary span 11.667 ms to 16.500 ms. The `## Current state` table does not change.
 
 ### 2026-10-15 16:35 JST - Fetch the map elements in one walk with no allocation, task [#629](https://github.com/fahchen/pbeam/issues/629), pull request [#639](https://github.com/fahchen/pbeam/pull/639)
 

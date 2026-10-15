@@ -111,7 +111,7 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 ### Take the source term of a move whose source is dead
 
 - **Reason:** task #631 measured a `move` that takes the term out of a dead source register with no reference count change. The release Terra key press showed no gain beyond the noise of the session, so the change did not land.
-- **Evidence:** commit `4fc08860` of pull request [#641](https://github.com/fahchen/pbeam/pull/641) marks a `move` whose source register no later instruction reads at load time. 27,472 of the 46,835 moves of a boxed term of a Terra key press have a dead source. The floor shapes fell by 0.4 to 3.6 percent.
+- **Evidence:** commit `4fc08860` of pull request [#641](https://github.com/fahchen/pbeam/pull/641) marks a `move` whose source register no later instruction reads at load time. 27,472 of the 46,835 moves of a boxed term of a Terra key press have a dead source. A probe of a boxed move gave about 1.6 ns for each take with a warm cache, or about 0.04 ms (0.3 percent) for each key press. The floor shapes run no `move` in their loop, so they do not measure the change.
 - **Trigger:** a measured workload where moves of boxed terms hold a clear share of the time, or a Terra CPU harness that resolves a change below 1 ms for each key.
 - **Source:** section "The source term of a move whose source is dead, task #631" of `docs/interpreter-dispatch-measurements.md`.
 
