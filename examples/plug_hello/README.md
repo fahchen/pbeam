@@ -11,7 +11,7 @@ The build fetches the dependencies of `mix.lock` from Hex and compiles them. The
 `mise run check` runs the gates of this example:
 
 - `mise run lint` runs `mix format --check-formatted` in this directory.
-- `scripts/test.sh` installs Hex and rebar3 when they are missing, and runs `mix deps.get --check-locked`. It then runs `mix test --cover --warnings-as-errors`, which compiles with warnings as errors, runs the tests, and requires 100% line coverage (`test_coverage` in `mix.exs`). One test sends a request over TCP to the Bandit listener that the application starts.
+- `scripts/test.sh` installs Hex and rebar3 when they are missing, and runs `mix deps.get --check-locked`. It then runs `MIX_ENV=test mix compile --warnings-as-errors`, which compiles the application code with warnings as errors, because `mix test --warnings-as-errors` does not pass the flag to that compile. Then `mix test --cover --warnings-as-errors` runs the tests with warnings as errors in the test files, and requires 100% line coverage (`test_coverage` in `mix.exs`). One test sends a request over TCP to the Bandit listener that the application starts.
 - `scripts/test.sh` then runs `MIX_ENV=prod mix release --overwrite`. The release of the pinned Elixir and OTP goes to `target/examples/plug_hello/`, which is not committed. A run needs only that directory.
 
 ## Run on the pinned ERTS

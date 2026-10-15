@@ -3,12 +3,13 @@ set -euo pipefail
 
 (cd fixtures/hello && mix test --cover --warnings-as-errors)
 # The Plug and Bandit example fetches the dependencies of its mix.lock from Hex, so the check installs Hex and rebar3 (for telemetry) when they are missing.
-# The test compiles with warnings as errors and requires 100% coverage. The release build writes the compiled output to target/examples/plug_hello/.
+# `mix test --warnings-as-errors` does not pass the flag to the compile of the application code, so the check compiles the application first with warnings as errors. The test requires 100% coverage. The release build writes the compiled output to target/examples/plug_hello/.
 (
   cd examples/plug_hello
   mix local.hex --force --if-missing
   mix local.rebar --force --if-missing
   mix deps.get --check-locked
+  MIX_ENV='test' mix compile --warnings-as-errors
   mix test --cover --warnings-as-errors
   MIX_ENV=prod mix release --overwrite
 )
