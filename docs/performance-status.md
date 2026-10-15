@@ -44,6 +44,19 @@ The step 0 numbers and the `ddb32f6e` numbers come from two different sessions. 
 
 Each entry is one landed change or one change that is not landed. The entries are newest first.
 
+### 2026-10-15 14:10 JST - Skip `test_heap` and `init_yregs` at load, task [#634](https://github.com/fahchen/pbeam/issues/634), branch `perf/634-skip-noop`
+
+The loader skips `test_heap` and `init_yregs`, as it skips `line`, and the `Noop` instruction is removed. The run loop dispatches nothing for the two opcodes. One interleaved session on 2026-10-15 from 13:49 to 14:10 JST measures the before revision `b8c71940` and the after revision `0b67d5b9` with release builds, in rotated order. Section "The loader skip of `test_heap` and `init_yregs`, task #634" of `docs/interpreter-dispatch-measurements.md` holds the rounds, the load, and the raw files.
+
+| Shape | Before `b8c71940` | After `0b67d5b9` | Change | Rule and load |
+| --- | --- | --- | --- | --- |
+| `test_heap` loop probe, 20000000 iterations, user CPU seconds, median of 8 rounds | 4.82 | 4.64 | -3.7 percent | One-minute load 1.85 to 3.95 |
+| `call_ext_only` floor loop, 200000 iterations, ns, median of 6 rounds | 259.75 | 265.05 | Inside the noise: both revisions show the two modes near 258 and 266 | One-minute load 2.87 to 3.21 |
+| `call_only` floor loop, 200000 iterations, ns, median of 6 rounds | 104.40 | 105.85 | Inside the noise: both revisions span 102.2 to 106.5 | The same rounds |
+| Terra key press, CPU ms for each key, 60 keys, median of 8 rounds | 23.0 | 23.0 | No change that the session can resolve: before 15.5 to 26.7, after 13.7 to 26.5 | One-minute load 1.54 to 12.33 |
+
+The probe loop runs seven instructions for each iteration before the change and six after it, so the gain is on the shape that the change targets. The floor loops have no `test_heap`. The Terra key press runs 6.4 percent of its instructions as `Noop`, but the spread of the CPU time for each key is larger than the expected gain.
+
 ### 2026-10-15 01:10 JST - The `select_val` dispatch decision, task [#545](https://github.com/fahchen/pbeam/issues/545), pull request [#622](https://github.com/fahchen/pbeam/pull/622) - Landed as `8659710f`
 
 The change adds a prepared form of the `select_val` choice list and removes the work-vector allocation of the term comparison that the ordered form uses. The decoder builds the prepared form one time at load time. A list of at most `SELECT_VALUE_LINEAR_LIMIT` choices keeps the encoded order and the linear walk of every earlier revision. A larger list is sorted by the ERTS term order and the interpreter binary-searches it. A duplicate choice keeps the linear form, so the first-match result of ERTS is preserved. The measured before revision is `915590af`, the head of `origin/main` that the branch starts from.

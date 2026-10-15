@@ -566,3 +566,54 @@ The compare fast path lands. It removes the work-vector allocation of `Term::com
 The pinned ERTS uses 10 (`erts/emulator/beam/emu/generators.tab:240-254`, OTP 29.1.1). Its ordered search compares one encoded value at a time, which costs less than the `Term::compare` call of PBeam, so the crossover of ERTS sits below the crossover of PBeam.
 
 No end-to-end probe covers 17 to 32 choices, so the bound of 32 is an estimate. A later session can pin the bound with end-to-end probes at 32 and 64 choices, and `docs/backlog.md` records that gap with its trigger. The fixture also measures only the 256-choice shape, the 16-choice shape, and the 2-choice control, so no number here covers a `select_val` with 6878 choices.
+
+## The loader skip of `test_heap` and `init_yregs`, task [#634](https://github.com/fahchen/pbeam/issues/634)
+
+### The change
+
+The loader decoded `test_heap` and `init_yregs` to `Instruction::Noop`, and the run loop dispatched it with no effect. The attribution of task #625 ([PR #626](https://github.com/fahchen/pbeam/pull/626)) counts 16,114 `Noop` instructions in one release Terra key press, 6.4 percent of its 253,558 instructions. The loader now skips the two opcodes as it skips `line`, and the `Noop` variant is removed. The labels resolve to instruction indexes after the decode, so each label stays correct. The loader keeps no line table, so no line or stack trace position moves.
+
+In the pinned ERTS, `test_heap` makes room on the process heap and can start a garbage collection, and `init_yregs` writes NIL to Y registers so that the collector reads valid terms (`emit_test_heap` and `emit_init_yregs` in `erts/emulator/beam/jit/arm/instr_common.cpp:231-234,424-509`, OTP 29.1.1). The compiler emits `init_yregs` after `allocate` for the Y registers that are not yet defined, and before a call for the Y registers that the rest of the function does not use (`cg_alloc` and `kill_yregs` in `lib/compiler/src/beam_ssa_codegen.erl:2101-2119,2693-2701`). The BEAM validator gives such a Y register the `initialized` tag and no term (`lib/compiler/src/beam_validator.erl:429-436`). The `Arc` term graph has no process heap and no collector, so neither opcode has an effect in PBeam.
+
+### The session
+
+One interleaved session on 2026-10-15 from 13:49 to 14:10 JST, on an Apple M1 Max with 10 CPUs. The before revision is `b8c71940`, the head of `origin/main`. The after revision is `0b67d5b9` on the branch `perf/634-skip-noop`. Each revision has its own release target directory. Each round runs the two revisions in rotated order. A round starts only when the one-minute load is below 12 and no `cargo`, `rustc`, or `nextest` process runs.
+
+- The floor loops: the test `records_the_interpreter_dispatch_baseline` of the release `dispatch_baseline` binary, run with `--exact --nocapture --test-threads=1`. Each value is the minimum of nine probe runs inside one invocation.
+- The Terra key press: 60 `j` and `k` keys to `bash scripts/example.sh terra_counter --no-build` with `PBEAM_BIN` set to the release `pbeam` of the revision, 0.5 s apart. The value is the CPU time of the `pbeam` process over the key phase, less the idle CPU rate, divided by 60.
+- The `test_heap` loop probe: `loop(0, A) -> A; loop(N, _) -> loop(N - 1, [N]).` with 20000000 iterations. Each iteration runs `TestYield`, `is_eq_exact`, `gc_bif`, `test_heap`, `put_list`, `swap`, and `call_only`. The value is the user CPU time of `/usr/bin/time -p` for one run of the release `pbeam`.
+
+| Round | Order | One-minute load | `call_ext_only` ns, before / after | `call_only` ns, before / after |
+| --- | --- | --- | --- | --- |
+| 1 | before, after | 3.14, 3.21 | 266.0 / 258.5 | 105.8 / 102.2 |
+| 2 | after, before | 3.12, 3.12 | 258.7 / 266.6 | 103.0 / 106.0 |
+| 3 | before, after | 2.95, 2.95 | 258.0 / 265.3 | 105.7 / 105.7 |
+| 4 | after, before | 2.87, 2.88 | 258.7 / 253.7 | 103.1 / 102.2 |
+| 5 | before, after | 2.88, 2.89 | 260.8 / 264.8 | 102.4 / 106.3 |
+| 6 | after, before | 2.89, 2.90 | 266.0 / 265.8 | 106.5 / 106.0 |
+
+| Round | Order | One-minute load | Terra CPU ms for each key, before / after | Probe user s, before / after |
+| --- | --- | --- | --- | --- |
+| 1 | before, after | Terra 2.83, 2.70; probe 2.94, 2.86 | 20.333 / 26.500 | 4.81 / 4.74 |
+| 2 | after, before | Terra 3.62, 2.45; probe 2.79, 2.81 | 25.833 / 26.167 | 4.82 / 4.66 |
+| 3 | before, after | Terra 1.82, 1.99; probe 2.66, 2.53 | 26.667 / 21.833 | 4.82 / 4.63 |
+| 4 | after, before | Terra 1.88, 1.87; probe 2.41, 2.30 | 23.000 / 19.833 | 4.81 / 4.59 |
+| 5 | before, after | Terra 1.54, 1.60; probe 2.19, 2.10 | 25.167 / 24.167 | 4.83 / 4.65 |
+| 6 | after, before | Terra 1.96, 1.71; probe 2.01, 1.93 | 23.000 / 26.500 | 4.80 / 4.66 |
+| 7 | before, after | Terra 3.27, 12.33; probe 1.85, 3.95 | 15.500 / 13.667 | 5.24 / 4.60 |
+| 8 | after, before | Terra 3.23, 2.88; probe 3.71, 3.57 | 17.000 / 20.000 | 5.14 / 4.63 |
+
+The load of the after run of Terra round 7 rose to 12.33 during the round, after the idle check at its start, so that pair is weak. The Terra rounds 1 and 2 ran before the probe rounds, the Terra rounds 3 to 8 ran after a pause for the load, and the probe rounds ran last.
+
+| Shape | Before median | After median | Before range | After range |
+| --- | --- | --- | --- | --- |
+| `call_ext_only` floor, ns | 259.75 | 265.05 | 258.0 to 266.0 | 253.7 to 266.6 |
+| `call_only` floor, ns | 104.40 | 105.85 | 102.4 to 106.5 | 102.2 to 106.3 |
+| Terra CPU ms for each key | 23.0 | 23.0 | 15.5 to 26.7 | 13.7 to 26.5 |
+| `test_heap` loop probe, user s | 4.82 | 4.64 | 4.80 to 5.24 | 4.59 to 4.74 |
+
+### The decision
+
+The change lands. The probe that runs one `test_heap` in each iteration is 3.7 percent faster at the median, and the two ranges do not overlap. The floor loops have no `test_heap` or `init_yregs`, and both revisions show the same two modes, so the session shows no regression. The Terra CPU time for each key spreads by more than 10 ms in each revision. The expected gain is the dispatch of 16,114 of 253,558 instructions, which is below that spread, so the session cannot resolve it. The change also removes one `Instruction` variant and one arm of the run loop.
+
+The raw files of each run are in the session scratch directory of the task, `scratchpad/634-skip-noop/raw/`, with the names `floor-r<round>-<revision>.txt`, `terra-r<round>-<revision>.log`, and `probe-r<round>-<revision>.txt`, and the session log is `scratchpad/634-skip-noop/session.txt`.
