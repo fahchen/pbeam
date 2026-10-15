@@ -1020,7 +1020,8 @@ fn read_value(data: &[u8], cursor: &mut usize, atoms: &[Atom]) -> Result<Term, B
 /// `{integer,18446744073709551616}` is
 /// `[0xF9, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0]`. A value whose magnitude
 /// keeps two leading zero bytes is not normalized, and ERTS rejects the
-/// file (`beam_file.c:2186-2202`).
+/// file (`beam_file.c:2186-2202`). ERTS also rejects a value with more than
+/// `BIG_ARITY_MAX` digits.
 ///
 /// # Examples
 ///
@@ -1044,6 +1045,11 @@ fn read_huge_integer(data: &[u8], cursor: &mut usize) -> Result<Term, BeamError>
     *cursor = end;
     if value.magnitude().bits() <= (count as u64 - 2) * 8 {
         return Err(error("BEAM integer operand is not normalized"));
+    }
+    // `bytes_to_big` gives no term for more digits than a bignum holds, and
+    // `marshal_integer` fails (`beam_file.c:2210-2211`).
+    if !fits_big_arity(&value) {
+        return Err(error("BEAM integer operand exceeds BIG_ARITY_MAX digits"));
     }
     Ok(Term::from_bigint(value))
 }

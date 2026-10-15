@@ -22,6 +22,8 @@
 
 use std::{mem::size_of, sync::Arc};
 
+use num_bigint::BigInt;
+
 use super::{
     Binary, Fun, Map, Term,
     fun::FunThing,
@@ -54,6 +56,7 @@ enum Shared {
     Binary(Arc<Vec<u8>>),
     Fun(Arc<FunThing>),
     Match(Arc<MatchState>),
+    BigInt(Arc<BigInt>),
 }
 
 /// Return true when one owner only holds the container of `term`, so the
@@ -73,10 +76,10 @@ fn owned_once(term: &Term) -> bool {
         Term::Map(map) => Arc::strong_count(map.arc()) == 1,
         Term::Fun(fun) => Arc::strong_count(fun.arc()) == 1,
         Term::MatchContext(state) => Arc::strong_count(state) == 1,
+        Term::BigInt(value) => Arc::strong_count(value) == 1,
         Term::Atom(_)
         | Term::Binary(_)
         | Term::Integer(_)
-        | Term::BigInt(_)
         | Term::Float(_)
         | Term::Nil
         | Term::Pid(_)
@@ -97,6 +100,7 @@ impl Shared {
             (Shared::Binary(left), Shared::Binary(right)) => Arc::ptr_eq(left, right),
             (Shared::Fun(left), Shared::Fun(right)) => Arc::ptr_eq(left, right),
             (Shared::Match(left), Shared::Match(right)) => Arc::ptr_eq(left, right),
+            (Shared::BigInt(left), Shared::BigInt(right)) => Arc::ptr_eq(left, right),
             _ => false,
         }
     }
@@ -205,9 +209,9 @@ impl LiveBytes {
                 Term::Binary(binary) => self.binary(binary),
                 Term::Fun(fun) => self.fun(fun, unique),
                 Term::MatchContext(state) => self.match_context(state, unique),
+                Term::BigInt(value) => self.bigint(value, unique),
                 Term::Atom(_)
                 | Term::Integer(_)
-                | Term::BigInt(_)
                 | Term::Float(_)
                 | Term::Nil
                 | Term::Pid(_)
@@ -336,6 +340,16 @@ impl LiveBytes {
         }
         self.bytes += size_of::<MatchState>();
         self.binary(state.binary());
+    }
+
+    /// Count the value of the bignum `value` and its digit array. Two terms
+    /// that share one `Arc` count it once. A bignum holds no term, so the walk
+    /// does not recurse here.
+    fn bigint(&mut self, value: &Arc<BigInt>, unique: bool) {
+        if !unique && !self.fresh(Shared::BigInt(Arc::clone(value))) {
+            return;
+        }
+        self.bytes += size_of::<BigInt>() + value.iter_u64_digits().len() * size_of::<u64>();
     }
 }
 

@@ -119,6 +119,23 @@ fn reads_only_supported_move_literals() {
     let padded = [0xF9, 0x00, 0, 0, 0xFF, 0, 0, 0, 0, 0, 0];
     assert!(read_move_operand(&padded, &mut 0, &[], &literals).is_err());
     assert!(read_move_operand(&[0xF9, 0x7F], &mut 0, &[], &literals).is_err());
+    // `1 bsl 4194240` needs 524281 two's complement bytes, so the extra
+    // byte count is 524272: the unsigned operand [0x38, 0x07, 0xFF, 0xF0].
+    // It has one bit more than `BIG_ARITY_MAX` digits hold, and
+    // `bytes_to_big` fails (`beam_file.c:2210-2211`). `1 bsl 4194240 - 1`
+    // fits and loads.
+    let operand = |first: u8, rest: u8| {
+        let mut bytes = vec![0xF9, 0x38, 0x07, 0xFF, 0xF0, first];
+        bytes.resize(bytes.len() + 524_280, rest);
+        bytes
+    };
+    let error = read_move_operand(&operand(0x01, 0x00), &mut 0, &[], &literals).unwrap_err();
+    assert!(error.to_string().contains("BIG_ARITY_MAX"), "{error}");
+    let limit = (num_bigint::BigInt::from(1) << 4_194_240) - 1;
+    assert!(matches!(
+        read_move_operand(&operand(0x00, 0xFF), &mut 0, &[], &literals).unwrap(),
+        Operand::Value(value) if value == Term::from_bigint(limit)
+    ));
     assert!(read_move_operand(&[0x47, 0x20], &mut 0, &[], &literals).is_err());
     assert!(read_move_operand(&[0x27, 0x00], &mut 0, &[], &literals).is_err());
     assert!(read_move_operand(&[0x06], &mut 0, &[], &literals).is_err());
