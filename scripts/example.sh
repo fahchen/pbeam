@@ -43,8 +43,10 @@ while [[ $# -gt 0 ]]; do
 done
 [[ $erts == false || ${#policy[@]} -eq 0 ]] || fail 'the ERTS run has no policy: give --policy without --erts'
 [[ $name =~ ^[a-z][a-z0-9_]*$ ]] || fail "the name $name is not a lowercase name such as hello_world"
+# The boot modules that pbeam_boot starts, and the modules that these modules start with a module name in a variable, for example the child modules of a supervisor. The imports chunks do not give these modules. The start set of the pbeam run is these modules, the example modules, pbeam_boot.beam, the preloaded modules of ERTS, and the consolidated protocols (scripts/example_beams.exs). The pbeam run gives the code path of the ERTS run with --pa and the root directory of the pinned OTP with --root, so error_handler and code_server load each other module on demand.
+boot_modules="erlang prim_tty proc_lib application application_controller lists os unicode gen_event gen prim_tty_sighandler erl_signal_handler standard_error file_server supervisor_bridge user_sup user_drv group gen_statem io io_lib io_lib_format proplists queue gen_server logger logger_config edlin edlin_key logger_server logger_simple_h logger_sup supervisor logger_std_h logger_h_common logger_olp logger_proxy logger_handler_watcher logger_formatter maps init erts_internal erl_prim_loader prim_file error_handler"
 sources=(examples/"$name"/*.ex)
-[[ -e ${sources[0]} ]] || fail "examples/$name has no .ex file"
+[[ -e ${sources[0]} || -f examples/$name/mix.exs ]] || fail "examples/$name has no .ex file and no mix.exs"
 
 entry=Elixir.
 IFS=_ read -ra words <<<"$name"
@@ -78,6 +80,38 @@ run() {
   step "Build pbeam and run ${entry#Elixir.}.main/0 with $# BEAM files"
   exec cargo run --quiet --locked --bin pbeam -- ${policy[@]+"${policy[@]}"} pbeam_boot start "$entry" main --root "$root" ${options[@]+"${options[@]}"} -- "$@"
 }
+
+# A release example is a Mix project, examples/<name>/mix.exs, with a release that the build writes into target/examples/<name>/. The entry is main/0 of the Erlang module <name>_run of examples/<name>/<name>_run.erl. The build runs `mix release` and compiles the entry and pbeam_boot.erl into target/examples/<name>/pbeam/. The code path of the run is that directory, each lib/*/ebin directory of the release, and releases/<version>/consolidated last, so that the consolidated protocols come first. The start set of the pbeam run is the entry, pbeam_boot.beam, and the files of the boot modules of the pinned OTP. Both runs get RELEASE_ROOT and RELEASE_SYS_CONFIG as bin/<name> sets them. The run does not read the boot script of the release (docs/erts-differences.md, row "Boot").
+if [[ -f examples/$name/mix.exs ]]; then
+  [[ ${#policy[@]} -eq 0 ]] || fail 'a release example has no policy: give no --policy'
+  release=target/examples/$name
+  output=$release/pbeam
+  entry=${name}_run
+  [[ -f examples/$name/$entry.erl ]] || fail "examples/$name has no $entry.erl"
+  if [[ $build == true ]]; then
+    # The output of mix goes to stderr, so that stdout has only the output of the run.
+    step "Build the release of examples/$name"
+    (cd "examples/$name" && mix deps.get --check-locked && MIX_ENV=prod mix release --overwrite) >&2
+    mkdir -p "$output"
+    step "Compile examples/$name/$entry.erl and examples/hello_world/pbeam_boot.erl"
+    erlc +deterministic -o "$output" "examples/$name/$entry.erl" examples/hello_world/pbeam_boot.erl
+  fi
+  [[ -f $output/$entry.beam && -f $release/releases/start_erl.data ]] || fail "$release has no build. Build the example first: run the script without --no-build"
+  version=$(cut -d' ' -f2 "$release/releases/start_erl.data")
+  paths=("$output" "$release"/lib/*/ebin "$release/releases/$version/consolidated")
+  RELEASE_ROOT=$(cd "$release" && pwd -P)
+  RELEASE_SYS_CONFIG=$RELEASE_ROOT/releases/$version/sys
+  export RELEASE_ROOT RELEASE_SYS_CONFIG
+  [[ $erts == false ]] || run
+  # code:which/1 gives preloaded for a preloaded module, such as init, so its file is in the ebin directory of erts.
+  read -ra boot_list <<<"$boot_modules"
+  start_list=$(erl -noshell -eval '[io:put_chars([F, $\n]) || A <- init:get_plain_arguments(), F <- [case code:which(list_to_atom(A)) of preloaded -> filename:join([code:lib_dir(erts), "ebin", A ++ ".beam"]); P -> P end], filelib:is_regular(F)], halt().' -extra "${boot_list[@]}")
+  start=("$output/$entry.beam" "$output/pbeam_boot.beam")
+  while IFS= read -r item; do
+    start+=("$item")
+  done <<<"$start_list"
+  run "${start[@]}"
+fi
 
 # With --no-build, run the last build with the lists that it wrote: the start set of BEAM files, and the code path directories. A policy run loads each other module of the run before the entry: the boot gate denies a message of a runtime process to a boot process (docs/capability-security-migration.md), so a policy run gives the whole list of the build.
 if [[ $build == false ]]; then
@@ -133,8 +167,6 @@ for beam in "$work"/*.beam; do
   [[ $file == pbeam_boot.beam ]] || examples+=("$output/$file")
 done
 
-# The boot modules that pbeam_boot starts, and the modules that these modules start with a module name in a variable, for example the child modules of a supervisor. The imports chunks do not give these modules. The start set of the pbeam run is these modules, the example modules, pbeam_boot.beam, the preloaded modules of ERTS, and the consolidated protocols (scripts/example_beams.exs). The pbeam run gives the code path of the ERTS run with --pa and the root directory of the pinned OTP with --root, so error_handler and code_server load each other module on demand.
-boot_modules="erlang prim_tty proc_lib application application_controller lists os unicode gen_event gen prim_tty_sighandler erl_signal_handler standard_error file_server supervisor_bridge user_sup user_drv group gen_statem io io_lib io_lib_format proplists queue gen_server logger logger_config edlin edlin_key logger_server logger_simple_h logger_sup supervisor logger_std_h logger_h_common logger_olp logger_proxy logger_handler_watcher logger_formatter maps init erts_internal erl_prim_loader prim_file error_handler"
 # A command substitution, not a process substitution, so that set -e stops the run when the command fails. The script prints one line for each start module (`pbeam <file>`), one line for each other called module (`called <file>`), and then one line for each code path directory of the ERTS run (`erts <directory>`).
 step "Consolidate the Elixir protocols and find the start set of the pbeam run"
 called_list=$(elixir scripts/example_beams.exs "$consolidated" "$work/pbeam.unloaded" "$boot_modules" "${examples[@]}" "$output/pbeam_boot.beam")
