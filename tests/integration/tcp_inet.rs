@@ -341,7 +341,9 @@ fn stops_the_run_at_a_datagram_on_an_active_udp_inet_port() {
             .output()
             .unwrap();
         assert!(output.status.success(), "{output:?}");
-        String::from_utf8_lossy(&output.stdout).trim_end().to_owned()
+        String::from_utf8_lossy(&output.stdout)
+            .trim_end()
+            .to_owned()
     });
     assert_eq!(erts, "{udp,port,{127,0,0,1},true,[104,105]}", "ERTS");
     let error = with_datagrams(|port| {

@@ -214,9 +214,9 @@ impl Ports {
     /// assert!(ports.receiving(fd));
     /// ```
     pub(super) fn receiving(&self, fd: c_int) -> bool {
-        self.by_id.values().any(|port| {
-            matches!(&port.driver, Driver::Inet(inet) if inet.receive_fd() == Some(fd))
-        })
+        self.by_id
+            .values()
+            .any(|port| matches!(&port.driver, Driver::Inet(inet) if inet.receive_fd() == Some(fd)))
     }
 
     /// Read the fd `fd` that the IO poll found ready, and return its port
