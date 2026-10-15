@@ -248,7 +248,9 @@ fn raises_terminated_in_the_entry_after_a_failed_stdout_write() {
     // log event modules before the caller gets `DOWN`. Thus the run also
     // loads `LOG_EVENT_MODULES`. Without them, it stops with
     // `unresolved external MFA logger_backend:log_allowed/3` (measured).
-    // PBeam gives the stack trace `[]` (row "Exception stack trace").
+    // PBeam gives the first frame of `erlang:error/3` with the
+    // `error_info` location and no `file` and `line`, and no frame of
+    // `erl_eval` or `init` (row "Exception stack trace").
     let io = elixir_io_path();
     let mut beams = hello_beams("Elixir.Hello", &io);
     beams.extend(LOG_EVENT_MODULES.map(pinned_beam_path));
@@ -277,7 +279,7 @@ fn raises_terminated_in_the_entry_after_a_failed_stdout_write() {
         &pbeam,
         (
             "",
-            "pbeam: root process exited with {terminated,[]}\n",
+            "pbeam: root process exited with {terminated,[{io,put_chars,[standard_io,[<<\"Hello, world!\">>,10]],[{error_info,#{cause=>{io,terminated},module=>erl_stdlib_errors}}]}]}\n",
             Some(1),
         ),
     );

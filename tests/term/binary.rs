@@ -416,3 +416,50 @@ fn merges_a_sub_binary_prefix_of_an_append_in_one_leaf() {
     // The take of an append copies its bytes.
     assert_eq!(result.take_bytes(), vec![0b0011_0000, 0xFF]);
 }
+
+#[test]
+fn appends_in_place_only_to_a_binary_that_one_handle_owns() {
+    // A `private_append` writes in the buffer of a writable binary
+    // (`erl_bits.c:1963-1981`). PBeam writes in the array only when one
+    // handle owns the view and the array, so no other term sees the bytes.
+    let mut binary = Binary::from(b"ab".to_vec());
+    let start = Arc::as_ptr(binary.bytes());
+    assert!(binary.append_in_place(b"c"));
+    assert_eq!(
+        (&*binary, Arc::as_ptr(binary.bytes())),
+        (&b"abc"[..], start)
+    );
+    assert_eq!(binary.len(), 3);
+
+    // A copy shares the view, so the append keeps both binaries unchanged.
+    let copy = binary.clone();
+    assert!(!binary.append_in_place(b"d"));
+    assert_eq!((&*binary, &*copy), (&b"abc"[..], &b"abc"[..]));
+    drop(copy);
+
+    // A sub-binary is a part of its array, so the append does not write in it.
+    let mut part = Binary::from(b"abcd".to_vec()).bits(0, 16);
+    assert!(!part.append_in_place(b"z"));
+    assert_eq!(&*part, b"ab");
+    let mut tail = Binary::from(b"abcd".to_vec()).bits(8, 32);
+    assert!(!tail.append_in_place(b"z"));
+    assert_eq!(&*tail, b"bcd");
+
+    // A view that an append built joins its arrays in one array one time,
+    // and then appends in that array.
+    let large = Binary::from(vec![1; APPEND_LEAF]);
+    let mut built = Binary::concat(&large, &[2]);
+    assert!(built.append_in_place(&[3]));
+    let joined = Arc::as_ptr(built.bytes());
+    assert!(built.append_in_place(&[4]));
+    assert_eq!(Arc::as_ptr(built.bytes()), joined);
+    assert_eq!(built.len(), APPEND_LEAF + 3);
+    assert_eq!(&built[APPEND_LEAF..], &[2, 3, 4]);
+
+    // A joined array that another handle holds stays unchanged.
+    let shared = Binary::concat(&large, &[2]);
+    let _flat = Arc::clone(shared.flat_backing());
+    let mut shared = shared;
+    assert!(!shared.append_in_place(&[3]));
+    assert_eq!(shared.len(), APPEND_LEAF + 1);
+}

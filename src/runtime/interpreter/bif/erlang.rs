@@ -491,10 +491,10 @@ pub(super) fn error_1(context: &mut BifContext<'_>, reason: &Term) -> Result<Bif
 /// `{Module, Function, Arity, Location}` for each other term
 /// (`erts_build_mfa_item`, `utils.c:3448-3455`).
 ///
-/// PBeam keeps no line table and no caller frames (row "Exception stack
-/// trace" in `docs/erts-differences.md`), so the stack trace is only this
-/// frame, with the location `[]`. OTP code such as `re:ucompile/2` and
-/// `unicode:fake_stacktrace/3` matches this first frame.
+/// The caller frames follow, as `mfa_stacktrace` gathers them. PBeam keeps
+/// no line table (row "Exception stack trace" in
+/// `docs/erts-differences.md`), so each location is `[]`. OTP code such as
+/// `re:ucompile/2` and `unicode:fake_stacktrace/3` matches the first frame.
 ///
 /// # Examples
 ///
@@ -513,6 +513,82 @@ pub(super) fn error_2(
     context: &mut BifContext<'_>,
     reason: &Term,
     args: &Term,
+) -> Result<BifResult, BeamError> {
+    raise_with_args(context, reason, args, Term::nil())
+}
+
+/// Run `erlang:error(Reason, Args, Options)` as ERTS `error_3`
+/// (`bif.c:1462-1503`) does: raise an exception of class `error` with
+/// `Reason`, as `erlang:error(Reason, Args)` does. When `Options` is a
+/// proper list that is not empty and each element is `{error_info, Map}`
+/// with a map `Map`, the location of the first frame is
+/// `[{error_info, Map}]` of the last element (`save_stacktrace`,
+/// `beam_common.c:1030-1051`). ERTS puts `{file, File}` and `{line, Line}`
+/// before it (`erts_build_mfa_item`, `utils.c:3430-3445`); PBeam keeps no
+/// line table. For each other `Options` term, the location is `[]`, and the
+/// BIF does not raise `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // In `tail/1`: erlang:error(r, [a], [{error_info, #{}}]).
+/// let result = error_3(context, &Term::static_atom("r"), &args, &options)?;
+/// // The stack trace is [{Module, tail, [a], [{error_info, #{}}]} | Callers].
+/// assert!(matches!(result, BifResult::RaiseWithStacktrace { .. }));
+/// ```
+///
+/// # Errors
+///
+/// A caller instruction with no `func_info` before it is a runtime
+/// invariant error.
+pub(super) fn error_3(
+    context: &mut BifContext<'_>,
+    reason: &Term,
+    args: &Term,
+    options: &Term,
+) -> Result<BifResult, BeamError> {
+    raise_with_args(context, reason, args, error_info_location(options))
+}
+
+/// Return the location of the first frame of the stack trace of
+/// `erlang:error(Reason, Args, Options)`, as ERTS `error_3`
+/// (`bif.c:1462-1503`) reads `Options`: `[{error_info, Map}]` of the last
+/// element when `Options` is a proper list that is not empty and each
+/// element is `{error_info, Map}` with a map `Map`, else `[]`. The tail
+/// call of the fun `fun erlang:error/3` also uses it.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // [{error_info, #{a => 1}}, {error_info, #{b => 2}}] gives [{error_info, #{b => 2}}].
+/// assert_eq!(error_info_location(&options), Term::list_from(vec![last]));
+/// assert_eq!(error_info_location(&Term::static_atom("bad")), Term::nil());
+/// ```
+pub(in crate::runtime::interpreter) fn error_info_location(options: &Term) -> Term {
+    let error_info = options
+        .proper_list()
+        .and_then(|mut options| {
+            options.try_fold(None, |_, option| match option {
+                Term::Tuple(pair)
+                    if matches!(pair.as_ref(), [Term::Atom(tag), Term::Map(_)] if tag.is_static("error_info")) =>
+                {
+                    Some(Some(option.clone()))
+                }
+                _ => None,
+            })
+        })
+        .flatten();
+    Term::list_from(error_info)
+}
+
+/// Raise an exception of class `error` with `Reason` and the stack trace of
+/// the frames of the process, whose first frame holds `Args` and
+/// `Location`, for `erlang:error/2` and `erlang:error/3`.
+fn raise_with_args(
+    context: &mut BifContext<'_>,
+    reason: &Term,
+    args: &Term,
+    location: Term,
 ) -> Result<BifResult, BeamError> {
     let module_id = current_frame(context.scheduler.current_process_mut()).module_id;
     let module = Rc::clone(context.scheduler.code.module_by_id(module_id)?);
@@ -534,7 +610,7 @@ pub(super) fn error_2(
     let depth = context.scheduler.backtrace_depth;
     let mut frames = mfa_stacktrace(context.scheduler, 0)?;
     frames.truncate(depth.max(1));
-    frames[0] = Term::tuple(vec![module, function, args, Term::nil()]);
+    frames[0] = Term::tuple(vec![module, function, args, location]);
     Ok(BifResult::RaiseWithStacktrace {
         class: ExceptionClass::Error,
         reason: reason.clone(),
