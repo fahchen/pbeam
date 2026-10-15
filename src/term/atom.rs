@@ -444,6 +444,7 @@ impl AtomTable {
                     }
                     Term::Binary(_)
                     | Term::Integer(_)
+                    | Term::BigInt(_)
                     | Term::Float(_)
                     | Term::Nil
                     | Term::Pid(_)

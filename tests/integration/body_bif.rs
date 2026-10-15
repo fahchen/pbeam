@@ -134,19 +134,17 @@ fn negates_integers_in_body_position_as_pinned_erts() {
 }
 
 #[test]
-fn reports_a_negation_outside_the_integer_range() {
-    // ERTS makes the bignum 2^63 for `-(-(2^63))` (`erl_arith.c:524-531`).
-    // PBeam has no bignum term and returns a runtime error (row "Integer
-    // range" in `docs/erts-differences.md`).
+fn makes_a_bignum_for_a_negation_outside_the_integer_range() {
+    // ERTS makes the bignum 2^63 for `-(-(2^63))` (`erl_arith.c:524-531`),
+    // and so does PBeam.
     let program = BeamProgram::load(&[BODY_BIF_PROBE]).unwrap();
-    let error = program
+    let term = program
         .execute("body_bif_probe", "neg_overflow", &[])
-        .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("unsupported erlang:-/1 result of -9223372036854775808: needs a bignum"),
-        "{error}"
+        .unwrap()
+        .term;
+    assert_eq!(
+        term,
+        Term::BigInt(std::sync::Arc::new("9223372036854775808".parse().unwrap()))
     );
     assert_eq!(reference("neg_overflow()"), b"9223372036854775808\n");
 }

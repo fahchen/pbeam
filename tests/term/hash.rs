@@ -27,6 +27,10 @@ fn map(pairs: impl IntoIterator<Item = (Term, Term)>) -> Term {
     )
 }
 
+fn big(sign: i64, shift: u32) -> Term {
+    Term::from_bigint(num_bigint::BigInt::from(sign) << shift)
+}
+
 fn improper(cells: Vec<Term>, tail: Term) -> Term {
     Term::list_with_tail(cells, tail)
 }
@@ -119,6 +123,15 @@ fn hashes_each_term_kind_as_pinned_erts() {
         (
             Term::Reference(Reference(0xF55F_5681_5BA8_8196)),
             11474811932501652611,
+        ),
+        // Bignums of one, two, three, and four 64-bit digits.
+        (Term::Integer(1 << 62), 2820654030469875806),
+        (big(1, 64), 1273177175058809839),
+        (big(-1, 64), 773736285751472253),
+        (big(1, 128), 9267933053641204122),
+        (
+            Term::from_bigint((num_bigint::BigInt::from(1) << 192u32) + 7),
+            15715561134050055630,
         ),
     ];
     for (term, hash) in cases {

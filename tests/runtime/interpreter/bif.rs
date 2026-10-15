@@ -210,7 +210,7 @@ fn the_leaf_lane_matches_the_owned_dispatch_for_each_leaf_identity() {
         assert!(is_leaf(id), "{module}:{name}/{arity} must be a leaf");
         assert_eq!(mfa(id), (module, name, arity));
         let borrowed: Vec<&Term> = terms.iter().collect();
-        let leaf_result = dispatch_leaf(id, &borrowed).expect("the leaf lane runs");
+        let leaf_result = dispatch_leaf(id, &borrowed, &mut 0).expect("the leaf lane runs");
         let mut scheduler = Scheduler::new(AtomTable::new());
         let mut context = BifContext {
             scheduler: &mut scheduler,
@@ -231,7 +231,7 @@ fn the_leaf_lane_matches_the_owned_dispatch_for_each_leaf_identity() {
 #[test]
 fn dispatch_leaf_reports_an_identity_that_the_leaf_lane_does_not_hold() {
     assert!(!is_leaf(BifId::ErlangByteSize1));
-    let error = dispatch_leaf(BifId::ErlangByteSize1, &[&Term::Integer(1)])
+    let error = dispatch_leaf(BifId::ErlangByteSize1, &[&Term::Integer(1)], &mut 0)
         .expect_err("a non-leaf identity has no leaf arm");
     assert_eq!(
         error.to_string(),
@@ -248,7 +248,7 @@ fn the_leaf_lane_keeps_the_guard_failure_of_each_leaf() {
         (BifId::ErlangHd1, Term::Nil),
     ];
     for (id, argument) in cases {
-        let leaf = dispatch_leaf(id, &[&argument]).expect("the leaf lane runs");
+        let leaf = dispatch_leaf(id, &[&argument], &mut 0).expect("the leaf lane runs");
         assert!(matches!(&leaf, BifResult::Raise { .. }));
         let mut scheduler = Scheduler::new(AtomTable::new());
         let mut context = BifContext {

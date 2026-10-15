@@ -102,37 +102,28 @@ fn calls_the_arithmetic_bifs_externally_as_pinned_erts() {
     assert_eq!(reference("externals"), b"[3,-2,badarith]\n");
 }
 
+/// Return the integer of decimal `text` in its canonical form.
+fn integer(text: &str) -> Term {
+    match text.parse::<i64>() {
+        Ok(value) => Term::Integer(value),
+        Err(_) => Term::BigInt(std::sync::Arc::new(text.parse().unwrap())),
+    }
+}
+
 #[test]
-fn reports_a_result_outside_the_integer_range() {
+fn makes_a_bignum_for_a_result_outside_the_integer_range() {
     // ERTS makes a bignum for a result outside the 64-bit signed range
-    // (`erl_arith.c:378-384`, `erl_arith.c:134-142`). PBeam has no bignum term and returns a
-    // runtime error (row "Integer range" in `docs/erts-differences.md`).
+    // (`erl_arith.c:378-384`, `erl_arith.c:134-142`), and so does PBeam.
     let program = BeamProgram::load(&[ARITH_PROBE]).unwrap();
-    for (function, message, erts) in [
-        (
-            "plus_overflow",
-            "unsupported erlang:+/2 result of 9223372036854775807 and 1: needs a bignum",
-            &b"9223372036854775808\n"[..],
-        ),
-        (
-            "minus_overflow",
-            "unsupported erlang:-/2 result of -9223372036854775808 and 1: needs a bignum",
-            b"-9223372036854775809\n",
-        ),
-        (
-            "times_overflow",
-            "unsupported erlang:*/2 result of 9223372036854775807 and 2: needs a bignum",
-            b"18446744073709551614\n",
-        ),
-        (
-            "div_overflow",
-            "unsupported erlang:div/2 result of -9223372036854775808 and -1: needs a bignum",
-            b"9223372036854775808\n",
-        ),
+    for (function, erts) in [
+        ("plus_overflow", "9223372036854775808"),
+        ("minus_overflow", "-9223372036854775809"),
+        ("times_overflow", "18446744073709551614"),
+        ("div_overflow", "9223372036854775808"),
     ] {
-        let error = program.execute("arith_probe", function, &[]).unwrap_err();
-        assert!(error.to_string().contains(message), "{error}");
-        assert_eq!(reference(function), erts);
+        let term = program.execute("arith_probe", function, &[]).unwrap().term;
+        assert_eq!(term, integer(erts), "{function}");
+        assert_eq!(reference(function), format!("{erts}\n").into_bytes());
     }
 }
 
@@ -142,23 +133,25 @@ fn loads_integer_operands_outside_the_integer_range() {
     // `arith_probe:below_big/1` has `is_lt`, each with the operand
     // `{integer,18446744073709551616}`, as `bsl` in
     // `net:shortest_matching_prefix/3` (net.erl:865) has. ERTS loads the
-    // operand as a bignum literal. PBeam has no bignum term: the module
-    // loads, and only an instruction that reads the operand returns a
-    // runtime error (row "Integer range" in `docs/erts-differences.md`).
+    // operand as a bignum literal (`marshal_integer`,
+    // `beam_file.c:2134-2215`), and so does PBeam.
     let program = BeamProgram::load(&[ARITH_PROBE]).unwrap();
-    for (function, erts) in [
-        ("big_operand", &b"18446744073709551617\n"[..]),
-        ("big_guard", b"below\n"),
-    ] {
-        let error = program.execute("arith_probe", function, &[]).unwrap_err();
-        assert!(
-            error.to_string().contains(
-                "unsupported BEAM integer operand outside the 64-bit range: needs a bignum"
-            ),
-            "{error}"
-        );
-        assert_eq!(reference(function), erts);
-    }
+    assert_eq!(
+        program
+            .execute("arith_probe", "big_operand", &[])
+            .unwrap()
+            .term,
+        integer("18446744073709551617")
+    );
+    assert_eq!(reference("big_operand"), b"18446744073709551617\n");
+    assert_eq!(
+        program
+            .execute("arith_probe", "big_guard", &[])
+            .unwrap()
+            .term,
+        Term::Atom(program.atom("below").unwrap())
+    );
+    assert_eq!(reference("big_guard"), b"below\n");
 }
 
 #[test]
