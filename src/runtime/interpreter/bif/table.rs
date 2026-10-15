@@ -16,6 +16,7 @@ use super::BifResult::{Raise, Value};
 use super::*;
 use crate::runtime::host::filename_encoding;
 use crate::runtime::time;
+use integer::{Arith, Bitwise};
 
 bifs! {
     atomics:add/3 => unsupported,
@@ -75,12 +76,12 @@ bifs! {
     erl_debugger:whereis/0 => unsupported,
     erl_debugger:xregs_count/1 => unsupported,
     erlang:"!"/2 => unsupported,
-    erlang:"*"/2 as ErlangMul2 => |_, [left, right]| erlang::arith("*", left, right, i64::checked_mul, |l, r| l * r),
+    erlang:"*"/2 as ErlangMul2 => |cx, [left, right]| Ok(integer::charge(cx.scheduler, integer::arith(Arith::Times, left, right))),
     erlang:"+"/1 => unsupported,
-    erlang:"+"/2 as ErlangPlus2 => |_, [left, right]| erlang::arith("+", left, right, i64::checked_add, |l, r| l + r),
+    erlang:"+"/2 as ErlangPlus2 => |cx, [left, right]| Ok(integer::charge(cx.scheduler, integer::arith(Arith::Plus, left, right))),
     erlang:"++"/2 as ErlangAppend2 => |cx, [left, right]| erlang::append(cx.scheduler.current_process_mut(), left, right),
-    erlang:"-"/1 as ErlangMinus1 => |cx, [term]| erlang::negate(cx.scheduler.current_process_mut(), term),
-    erlang:"-"/2 as ErlangMinus2 => |_, [left, right]| erlang::arith("-", left, right, i64::checked_sub, |l, r| l - r),
+    erlang:"-"/1 as ErlangMinus1 => |cx, [term]| Ok(integer::charge(cx.scheduler, integer::negate(term))),
+    erlang:"-"/2 as ErlangMinus2 => |cx, [left, right]| Ok(integer::charge(cx.scheduler, integer::arith(Arith::Minus, left, right))),
     erlang:"--"/2 as ErlangSubtract2 => |cx, [left, right]| { let (process, atoms) = cx.scheduler.current_process_and_atoms(); subtract::subtract(process, atoms, left, right) },
     erlang:"/"/2 as ErlangDivide2 => |_, [left, right]| Ok(erlang::float_arith(left, right, |l, r| l / r)),
     erlang:"/="/2 as ErlangNotEqual2 => |_, [left, right]| Ok(Value(Term::static_atom(if left.arith_eq(right) { "false" } else { "true" }))),
@@ -91,7 +92,7 @@ bifs! {
     erlang:"=="/2 as ErlangEqual2 => |_, [left, right]| Ok(Value(Term::static_atom(if left.arith_eq(right) { "true" } else { "false" }))),
     erlang:">"/2 => unsupported,
     erlang:">="/2 as ErlangGreaterEqual2 => |cx, [left, right]| Ok(Value(Term::static_atom(if left.compare(right, &cx.scheduler.atoms)?.is_ge() { "true" } else { "false" }))),
-    erlang:abs/1 as ErlangAbs1 => |_, [term]| erlang::abs(term),
+    erlang:abs/1 as ErlangAbs1 => |_, [term]| Ok(integer::abs(term)),
     erlang:adler32/1 => unsupported,
     erlang:adler32/2 => unsupported,
     erlang:adler32_combine/3 => unsupported,
@@ -101,7 +102,7 @@ bifs! {
     erlang:append_element/2 => unsupported,
     erlang:atom_to_binary/2 as ErlangAtomToBinary2 => |cx, [term, encoding]| Ok(erlang::atom_to_binary(&cx.scheduler.atoms, term, encoding)),
     erlang:atom_to_list/1 as ErlangAtomToList1 => |cx, [term]| Ok(erlang::atom_to_list(&cx.scheduler.atoms, term)),
-    erlang:band/2 as ErlangBand2 => |cx, [left, right]| Ok(erlang::band(cx.scheduler.current_process_mut(), left, right)),
+    erlang:band/2 as ErlangBand2 => |cx, [left, right]| Ok(integer::charge(cx.scheduler, integer::bitwise(Bitwise::And, left, right))),
     erlang:binary_part/2 => unsupported,
     erlang:binary_part/3 as ErlangBinaryPart3 => |_, [binary, start, length]| Ok(erlang::binary_part(binary, start, length)),
     erlang:binary_to_atom/2 => unsupported,
@@ -113,12 +114,12 @@ bifs! {
     erlang:binary_to_term/2 => unsupported,
     erlang:bit_size/1 => unsupported,
     erlang:bitstring_to_list/1 => unsupported,
-    erlang:bnot/1 => unsupported,
-    erlang:bor/2 => unsupported,
-    erlang:bsl/2 => unsupported,
-    erlang:bsr/2 => unsupported,
+    erlang:bnot/1 as ErlangBnot1 => |cx, [term]| Ok(integer::charge(cx.scheduler, integer::bnot(term))),
+    erlang:bor/2 as ErlangBor2 => |cx, [left, right]| Ok(integer::charge(cx.scheduler, integer::bitwise(Bitwise::Or, left, right))),
+    erlang:bsl/2 as ErlangBsl2 => |cx, [left, right]| Ok(integer::charge(cx.scheduler, integer::shift(left, right, false))),
+    erlang:bsr/2 as ErlangBsr2 => |cx, [left, right]| Ok(integer::charge(cx.scheduler, integer::shift(left, right, true))),
     erlang:bump_reductions/1 as ErlangBumpReductions1 => |cx, [reductions]| Ok(erlang::bump_reductions(cx.scheduler, reductions)),
-    erlang:bxor/2 => unsupported,
+    erlang:bxor/2 as ErlangBxor2 => |cx, [left, right]| Ok(integer::charge(cx.scheduler, integer::bitwise(Bitwise::Xor, left, right))),
     erlang:byte_size/1 as ErlangByteSize1 => |_, [term]| Ok(erlang::byte_size(term)),
     erlang:call_on_load_function/1 => unsupported,
     erlang:cancel_timer/1 => unsupported,
@@ -143,7 +144,7 @@ bifs! {
     erlang:dist_ctrl_put_data/2 => unsupported,
     erlang:dist_ctrl_set_opt/3 => unsupported,
     erlang:dist_get_stat/1 => unsupported,
-    erlang:div/2 as ErlangDiv2 => |_, [left, right]| erlang::int_div(left, right),
+    erlang:div/2 as ErlangDiv2 => |cx, [left, right]| Ok(integer::charge(cx.scheduler, integer::div_rem(left, right, false))),
     erlang:dt_append_vm_tag_data/1 => unsupported,
     erlang:dt_get_tag/0 => unsupported,
     erlang:dt_get_tag_data/0 => unsupported,
@@ -203,7 +204,7 @@ bifs! {
     erlang:is_float/1 as ErlangIsFloat1 => |_, [term]| Ok(Value(Term::static_atom(if matches!(term, Term::Float(_)) { "true" } else { "false" }))),
     erlang:is_function/1 as ErlangIsFunction1 => |_, [term]| Ok(Value(Term::static_atom(if matches!(term, Term::Fun(_)) { "true" } else { "false" }))),
     erlang:is_function/2 as ErlangIsFunction2 => |_, [term, arity]| Ok(erlang::is_function(term, arity)),
-    erlang:is_integer/1 => unsupported,
+    erlang:is_integer/1 as ErlangIsInteger1 => |_, [term]| Ok(Value(Term::static_atom(if term.is_integer() { "true" } else { "false" }))),
     erlang:is_integer/3 as ErlangIsInteger3 => |_, [term, low, high]| Ok(erlang::is_integer_3(term, low, high)),
     erlang:is_list/1 => unsupported,
     erlang:is_map/1 => unsupported,
@@ -284,7 +285,7 @@ bifs! {
     erlang:ref_to_list/1 => unsupported,
     erlang:register/2 as ErlangRegister2 => |cx, [name, id]| match id { Term::Port(_) => Err(unsupported_port("erlang:register/2")), _ => Ok(if cx.scheduler.register(name, id) { Value(Term::static_atom("true")) } else { BifResult::badarg() }) },
     erlang:registered/0 => unsupported,
-    erlang:rem/2 as ErlangRem2 => |_, [left, right]| erlang::int_rem(left, right),
+    erlang:rem/2 as ErlangRem2 => |cx, [left, right]| Ok(integer::charge(cx.scheduler, integer::div_rem(left, right, true))),
     erlang:resume_process/1 => unsupported,
     erlang:round/1 => unsupported,
     erlang:self/0 as ErlangSelf0 => |cx, []| Ok(Value(Term::Pid(cx.scheduler.current_process_mut().id))),
@@ -607,27 +608,34 @@ pub(in crate::runtime::interpreter) fn is_leaf(id: BifId) -> bool {
 /// body is the body of the same entry of the `bifs!` table, and its
 /// context pattern is `_`, so the body reads no scheduler. An identity
 /// that the leaf lane does not hold reports the unresolved MFA error of
-/// its entry, as the fallback arm of `dispatch` does.
+/// its entry, as the fallback arm of `dispatch` does. A bignum operation
+/// of `+` or `-` writes its reductions to `reductions`, and the caller
+/// charges them to the process.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// let left = Term::Integer(1);
 /// let right = Term::Integer(2);
-/// let sum = dispatch_leaf(BifId::ErlangPlus2, &[&left, &right])?;
+/// let mut reductions = 0;
+/// let sum = dispatch_leaf(BifId::ErlangPlus2, &[&left, &right], &mut reductions)?;
 /// assert!(matches!(sum, BifResult::Value(Term::Integer(3))));
+/// assert_eq!(reductions, 0);
 /// ```
 pub(in crate::runtime::interpreter) fn dispatch_leaf(
     id: BifId,
     arguments: &[&Term],
+    reductions: &mut i32,
 ) -> Result<BifResult, BeamError> {
     match (id, arguments) {
-        (BifId::ErlangPlus2, &[left, right]) => {
-            erlang::arith("+", left, right, i64::checked_add, |l, r| l + r)
-        }
-        (BifId::ErlangMinus2, &[left, right]) => {
-            erlang::arith("-", left, right, i64::checked_sub, |l, r| l - r)
-        }
+        (BifId::ErlangPlus2, &[left, right]) => Ok(integer::charged(
+            reductions,
+            integer::arith(Arith::Plus, left, right),
+        )),
+        (BifId::ErlangMinus2, &[left, right]) => Ok(integer::charged(
+            reductions,
+            integer::arith(Arith::Minus, left, right),
+        )),
         (BifId::ErlangTupleSize1, &[term]) => Ok(match term {
             Term::Tuple(elements) => Value(Term::Integer(elements.len() as i64)),
             _ => BifResult::badarg(),

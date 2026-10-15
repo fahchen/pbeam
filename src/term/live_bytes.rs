@@ -76,6 +76,7 @@ fn owned_once(term: &Term) -> bool {
         Term::Atom(_)
         | Term::Binary(_)
         | Term::Integer(_)
+        | Term::BigInt(_)
         | Term::Float(_)
         | Term::Nil
         | Term::Pid(_)
@@ -206,6 +207,7 @@ impl LiveBytes {
                 Term::MatchContext(state) => self.match_context(state, unique),
                 Term::Atom(_)
                 | Term::Integer(_)
+                | Term::BigInt(_)
                 | Term::Float(_)
                 | Term::Nil
                 | Term::Pid(_)

@@ -16,7 +16,7 @@ use crate::{
     error::{BeamError, error},
     term::{
         Atom, AtomTable, Binary, Fun, HostTerm, Insert, Map, MatchState, Target, Term, debug_term,
-        print_term, segment_equals, segment_integer,
+        low_64_bits, print_term, segment_equals, segment_integer,
     },
 };
 use std::{
@@ -967,8 +967,8 @@ impl BeamProgram {
                     // `MAX_BORROWED_ARGUMENTS` arguments, so each lane
                     // covers every `bif` instruction.
                     //
-                    // `erlang:'+'/2` and `erlang:'-'/2` of two integers with
-                    // an integer result run here, with no BIF call, as
+                    // `erlang:'+'/2` and `erlang:'-'/2` of two small
+                    // integers run here, with no BIF call, as
                     // `emit_i_plus` and `emit_i_minus` add or subtract two
                     // small integers inline and call the BIF for each other
                     // case (`jit/arm/instr_arith.cpp:145-205`, `:334-392`).
@@ -998,7 +998,11 @@ impl BeamProgram {
                         let size =
                             values.with(|terms| match_context_byte_size(*bif, arguments, terms))?;
                         debug_assert_eq!(size, None);
-                        values.with(|terms| dispatch_leaf(*bif, terms))?
+                        let mut reductions = 0;
+                        let result =
+                            values.with(|terms| dispatch_leaf(*bif, terms, &mut reductions))?;
+                        scheduler.current_process_mut().bump_reductions(reductions);
+                        result
                     } else {
                         let values = read_owned_bif_arguments(process, arguments)?;
                         cursor.commit(process);
@@ -1114,7 +1118,7 @@ impl BeamProgram {
                         TestKind::Bitstring => matches!(value, Term::Binary(_)),
                         TestKind::Map => matches!(value, Term::Map(_)),
                         TestKind::Function => matches!(value, Term::Fun(_)),
-                        TestKind::Integer => matches!(value, Term::Integer(_)),
+                        TestKind::Integer => value.is_integer(),
                         // `is_float` passes only for a boxed term with the
                         // `HEADER_FLONUM` header (emu `instrs.tab:951-955`,
                         // `erl_term.h:484-485`; JIT `emit_is_float` in
@@ -1564,11 +1568,9 @@ impl BeamProgram {
                 // `emit_fconv_shared` in jit/arm/instr_float.cpp:96-135). An
                 // integer converts to the nearest float, as the C cast does.
                 Instruction::FloatConvert { source, register } => {
-                    let value = match read_ref(process, source)? {
-                        Term::Integer(value) => Some(*value as f64),
-                        Term::Float(value) => Some(*value),
-                        _ => None,
-                    };
+                    // A bignum that `big_to_double` cannot convert raises
+                    // `badarith` too (`emit_fconv_shared`).
+                    let value = read_ref(process, source)?.number_float();
                     if let Some(value) = value {
                         write_float_register(process, *register, value);
                     } else {
@@ -3282,7 +3284,7 @@ fn register_of(operand: &Operand) -> Option<Register> {
     match operand {
         Operand::X(index) => Some(Register::X(*index)),
         Operand::Y(index) => Some(Register::Y(*index)),
-        Operand::Value(_) | Operand::UnsupportedLiteral(_) | Operand::UnsupportedInteger => None,
+        Operand::Value(_) | Operand::UnsupportedLiteral(_) => None,
     }
 }
 
@@ -4022,17 +4024,16 @@ fn function_at_label(module: &BeamModule, target: u32) -> Result<Function, BeamE
 }
 
 /// Return the sum or the difference of a `bif` instruction of
-/// `erlang:'+'/2` or `erlang:'-'/2` when both operands are integers and the
-/// result is an integer, or `None` for each other case. A `None` call goes
-/// through the BIF path, which gives the value, the exception, or the
-/// runtime error of each other case, as `emit_i_plus` and `emit_i_minus`
-/// call the BIF for each case that is not inline
-/// (`jit/arm/instr_arith.cpp:171-204`, `:360-391`). An integer of PBeam is
-/// 64 bits wide, so the inline range is the 64-bit range, not the 60-bit
-/// small range of ERTS. The results from 2^59 to 2^63 - 1 and from -(2^63)
-/// to -(2^59) - 1 are the same values as the ERTS bignums (row "Integer
-/// range" of `docs/erts-differences.md`). An operand that is unset or a
-/// match context gives `None`, so the BIF path reports its error.
+/// `erlang:'+'/2` or `erlang:'-'/2` when both operands are ERTS small
+/// integers, or `None` for each other case. A `None` call goes through the
+/// BIF path, which gives the value, the exception, the reductions of a
+/// bignum operand, or the runtime error of each other case, as
+/// `emit_i_plus` and `emit_i_minus` add or subtract two small integers
+/// inline and call the BIF for each other case
+/// (`jit/arm/instr_arith.cpp:171-204`, `:360-391`). The inline sum of two
+/// small integers costs no reduction, also when it is a bignum. An operand
+/// that is unset or a match context gives `None`, so the BIF path reports
+/// its error.
 ///
 /// # Examples
 ///
@@ -4040,22 +4041,21 @@ fn function_at_label(module: &BeamModule, target: u32) -> Result<Function, BeamE
 /// let operands = [Operand::Value(Term::Integer(1)), Operand::Value(Term::Integer(2))];
 /// assert_eq!(small_integer_arith(&process, BifId::ErlangPlus2, &operands), Some(Term::Integer(3)));
 /// assert_eq!(small_integer_arith(&process, BifId::ErlangMul2, &operands), None);
+/// let big = [Operand::Value(Term::Integer(1 << 59)), Operand::Value(Term::Integer(1))];
+/// assert_eq!(small_integer_arith(&process, BifId::ErlangPlus2, &big), None);
 /// ```
 fn small_integer_arith(process: &ProcessState, bif: BifId, operands: &[Operand]) -> Option<Term> {
     let (BifId::ErlangPlus2 | BifId::ErlangMinus2, [left, right]) = (bif, operands) else {
         return None;
     };
-    let (Ok(Term::Integer(left)), Ok(Term::Integer(right))) =
-        (read_any_ref(process, left), read_any_ref(process, right))
-    else {
-        return None;
-    };
-    let result = if bif == BifId::ErlangPlus2 {
-        left.checked_add(*right)
+    let left = read_any_ref(process, left).ok()?.small_integer()?;
+    let right = read_any_ref(process, right).ok()?.small_integer()?;
+    // Two small integers fit 61 bits, so the i64 result is exact.
+    Some(Term::Integer(if bif == BifId::ErlangPlus2 {
+        left + right
     } else {
-        left.checked_sub(*right)
-    };
-    result.map(Term::Integer)
+        left - right
+    }))
 }
 
 /// Read the argument operands of a leaf `bif` instruction into a borrowed
@@ -4428,14 +4428,9 @@ impl BinaryPart<'_> {
     /// integer.
     fn type_failure(&self) -> Option<BinarySegmentFailure> {
         match self {
-            BinaryPart::Integer { segment, value, .. } if !matches!(value, Term::Integer(_)) => {
-                Some(BinarySegmentFailure::badarg(
-                    *segment,
-                    "integer",
-                    "type",
-                    value.clone(),
-                ))
-            }
+            BinaryPart::Integer { segment, value, .. } if !value.is_integer() => Some(
+                BinarySegmentFailure::badarg(*segment, "integer", "type", value.clone()),
+            ),
             _ => None,
         }
     }
@@ -4797,6 +4792,24 @@ fn create_binary(
                 little,
                 ..
             } => writer.push_integer(*value, *bits, *little),
+            // A segment keeps the low bits of the two's complement value
+            // (`erts_new_bs_put_integer`, `erl_bits.c`), so a segment of at
+            // most 64 bits takes the low 64 bits of a bignum.
+            BinaryPart::Integer {
+                value: Term::BigInt(value),
+                bits,
+                little,
+                ..
+            } if *bits <= 64 => writer.push_integer(low_64_bits(value), *bits, *little),
+            BinaryPart::Integer {
+                value: Term::BigInt(_),
+                bits,
+                ..
+            } => {
+                return Err(error(format!(
+                    "unsupported bs_create_bin integer segment of {bits} bits of a bignum"
+                )));
+            }
             BinaryPart::Integer { .. } => return Ok(Err(integer_type_failure(&parts, index))),
             BinaryPart::Utf8(code_point) => {
                 writer.push_bytes(code_point.encode_utf8(&mut [0; 4]).as_bytes());
@@ -5026,9 +5039,6 @@ fn read_operand<'a>(
         Operand::UnsupportedLiteral(index) => {
             Err(error(format!("unsupported BEAM literal index {index}")))
         }
-        Operand::UnsupportedInteger => Err(error(
-            "unsupported BEAM integer operand outside the 64-bit range: needs a bignum",
-        )),
         Operand::X(index) => read_x_register(registers, *index),
         Operand::Y(index) => read_y_register(stack, *index),
     }
@@ -5068,7 +5078,7 @@ fn write_operand(
             }
             stack[index] = StackSlot::Term(value);
         }
-        Operand::Value(_) | Operand::UnsupportedInteger => {
+        Operand::Value(_) => {
             return Err(error("invalid BEAM move destination"));
         }
     }

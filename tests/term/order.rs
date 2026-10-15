@@ -417,6 +417,13 @@ fn orders_an_integer_before_a_float_in_exact_comparison() {
             .unwrap(),
         Less
     );
+    // A bignum is an integer too: it comes before each float.
+    let big = Term::from_bigint(num_bigint::BigInt::from(1) << 64u32);
+    assert_eq!(
+        Term::Float(1.0e300).compare_exact(&big, &atoms).unwrap(),
+        Greater
+    );
+    assert_eq!(big.compare_exact(&Term::Float(1.0), &atoms).unwrap(), Less);
     assert_eq!(Term::Float(1.0).float(), Some(1.0));
     assert_eq!(Term::Integer(1).float(), None);
 }

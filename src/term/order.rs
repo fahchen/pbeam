@@ -44,6 +44,9 @@
 
 use std::cmp::Ordering;
 
+use num_bigint::{BigInt, Sign};
+use num_traits::FromPrimitive;
+
 use super::{AtomTable, Term, match_context::MATCH_CONTEXT_ESCAPE};
 use crate::error::{BeamError, error};
 
@@ -186,6 +189,17 @@ fn compare_pair<'a>(
             Ordering::Equal
         }
         (Term::Integer(left), Term::Integer(right)) => left.cmp(right),
+        // A big integer is outside the i64 range, so its sign orders it
+        // against an i64 (`SMALL_BIG`, `BIG_SMALL`, `utils.c`).
+        (Term::BigInt(left), Term::BigInt(right)) => left.cmp(right),
+        (Term::BigInt(big), Term::Integer(_)) => big_sign_order(big),
+        (Term::Integer(_), Term::BigInt(big)) => big_sign_order(big).reverse(),
+        (Term::BigInt(big), Term::Float(float)) if !exact => compare_big_float(big, *float),
+        (Term::Float(float), Term::BigInt(big)) if !exact => {
+            compare_big_float(big, *float).reverse()
+        }
+        (Term::BigInt(_), Term::Float(_)) => Ordering::Less,
+        (Term::Float(_), Term::BigInt(_)) => Ordering::Greater,
         (Term::Float(left), Term::Float(right)) if exact => {
             exact_sortable(*left).cmp(&exact_sortable(*right))
         }
@@ -302,6 +316,42 @@ pub(crate) fn compare_integer_float(integer: i64, float: f64) -> Ordering {
     })
 }
 
+/// Return the order of a big integer against each `i64`: greater for a
+/// positive one and less for a negative one.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(big_sign_order(&(BigInt::from(1) << 64)), Ordering::Greater);
+/// ```
+fn big_sign_order(big: &BigInt) -> Ordering {
+    if big.sign() == Sign::Minus {
+        Ordering::Less
+    } else {
+        Ordering::Greater
+    }
+}
+
+/// Compare a big integer with a float by their mathematical values, as
+/// `erts_cmp_compound` does for `BIG_FLOAT` (`utils.c:2401-2430`). ERTS
+/// compares the sizes first and then the float as a bignum
+/// (`double_to_big`), which gives the exact order. The big integer is
+/// outside the i64 range, so a float with a fractional part is inside it
+/// and the whole part of the float decides the order.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let big = BigInt::from(1) << 64;
+/// assert_eq!(compare_big_float(&big, 18446744073709551616.0), Ordering::Equal);
+/// assert_eq!(compare_big_float(&big, 1.5), Ordering::Greater);
+/// assert_eq!(compare_big_float(&-big, 1.0e300), Ordering::Less);
+/// ```
+pub(crate) fn compare_big_float(big: &BigInt, float: f64) -> Ordering {
+    let whole = BigInt::from_f64(float.trunc()).expect("a float term is finite");
+    big.cmp(&whole)
+}
+
 /// Return the pairs of a map, sorted by the term order of the keys.
 ///
 /// # Examples
@@ -332,7 +382,7 @@ fn sorted_pairs<'a>(map: &'a super::Map, atoms: &AtomTable) -> Vec<(&'a Term, &'
 /// ```
 fn type_rank(term: &Term) -> u8 {
     match term {
-        Term::Integer(_) | Term::Float(_) => 0,
+        Term::Integer(_) | Term::BigInt(_) | Term::Float(_) => 0,
         Term::Atom(_) => 1,
         Term::Reference(_) => 2,
         Term::Fun(_) => 3,

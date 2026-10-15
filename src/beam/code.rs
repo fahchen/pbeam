@@ -1,10 +1,12 @@
 use std::collections::HashMap;
 
+use num_bigint::{BigInt, Sign};
+
 use super::module::{BeamModule, Import};
 use crate::{
     error::{BeamError, error},
     runtime::import_kind,
-    term::{Atom, AtomTable, Fun, Lambda, MAX_ATOM_CHARACTERS, Map, Term},
+    term::{Atom, AtomTable, Fun, Lambda, MAX_ATOM_CHARACTERS, Map, Term, fits_big_arity},
 };
 
 const WORD_SIZE: usize = 4;
@@ -34,6 +36,11 @@ const TAG_REGISTER: u8 = 3;
 const TAG_Y_REGISTER: u8 = 4;
 const TAG_LABEL: u8 = 5;
 const TAG_LITERAL: u8 = 7;
+/// The first byte of an integer operand with 9 or more payload bytes: size
+/// code 7, the sign and extended flags, and `TAG_INTEGER`. Its value is
+/// outside the 64-bit signed range, so ERTS loads it as a bignum.
+const HUGE_INTEGER_FIRST_BYTE: u8 =
+    0b1110_0000 | COMPACT_SIGN_FLAG | COMPACT_EXTENDED_FLAG | TAG_INTEGER;
 const LIST_SUBTAG: i128 = 1;
 const ETF_VERSION: u8 = 131;
 /// `NEW_FLOAT_EXT`, an IEEE 754 binary64 float in 8 big-endian bytes, such
@@ -44,6 +51,12 @@ const ETF_SMALL_INTEGER_EXT: u8 = 97;
 /// `[98, 255, 255, 255, 255]`.
 const ETF_INTEGER_EXT: u8 = 98;
 const ETF_SMALL_TUPLE_EXT: u8 = 104;
+/// `SMALL_BIG_EXT`: a bignum with a one-byte digit count, a sign byte, and
+/// little-endian bytes, such as `1 bsl 64` as
+/// `[110, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]` (`external.c:4457-4497`).
+const ETF_SMALL_BIG_EXT: u8 = 110;
+/// `LARGE_BIG_EXT`: a bignum with a four-byte big-endian byte count.
+const ETF_LARGE_BIG_EXT: u8 = 111;
 const ETF_NIL_EXT: u8 = 106;
 const ETF_STRING_EXT: u8 = 107;
 const ETF_LIST_EXT: u8 = 108;
@@ -187,8 +200,9 @@ const FIRST_LABEL_NUMBER: u32 = 1;
 /// `opcode_max` is not checked. The parser rejects duplicate chunk IDs. It
 /// supports only the listed instructions and compact operand forms. `LitT`
 /// supports uncompressed tables. A literal loads as a value only when every
-/// nested tag is listed; another tag, such as a bignum (`SMALL_BIG_EXT`, 110,
-/// as `1 bsl 64` is `[110, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]`), or a map key
+/// nested tag is listed, such as a bignum (`SMALL_BIG_EXT`, 110, as
+/// `1 bsl 64` is `[110, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]`, and
+/// `LARGE_BIG_EXT`, 111); another tag, or a map key
 /// that `Map` does not support yet, makes the literal unsupported, and
 /// execution fails only if an instruction uses it. `[a|[b]]` and `[a,b]`
 /// give the same list, a `list_term` whose tail is not a list gives an
@@ -205,8 +219,8 @@ const FIRST_LABEL_NUMBER: u32 = 1;
 /// sign-extends the payload of `large(1)` only, so `{integer,-1}` is
 /// `[0x19, 0xFF, 0xFF]` and `{integer,-101714049538469044}` is `[0xD9]`
 /// followed by its eight two's-complement bytes. The `short` and `extended`
-/// forms are never negative. A payload of more than 8 bytes (a bignum) is an
-/// error. Bit fields are shown from high bit to low bit. Other
+/// forms are never negative. A payload of 9 or more bytes is a bignum
+/// constant (see [`read_huge_integer`]). Bit fields are shown from high bit to low bit. Other
 /// chunk payloads and padding byte values are ignored. The `ImpT` chunk maps
 /// external call indexes to module/function/arity. The executor supports only
 /// the listed instructions.
@@ -752,7 +766,8 @@ fn read_external_term(
 ) -> Result<Option<Term>, BeamError> {
     let mut partial = Vec::new();
     loop {
-        let mut term = match take(data, cursor, 1)?[0] {
+        let tag = take(data, cursor, 1)?[0];
+        let mut term = match tag {
             ETF_BINARY_EXT => {
                 let size = read_u32(take(data, cursor, WORD_SIZE)?)? as usize;
                 Term::binary(take(data, cursor, size)?.to_vec())
@@ -804,6 +819,24 @@ fn read_external_term(
                 Term::Float(value)
             }
             ETF_SMALL_INTEGER_EXT => Term::Integer(i64::from(take(data, cursor, 1)?[0])),
+            ETF_SMALL_BIG_EXT | ETF_LARGE_BIG_EXT => {
+                let count = if tag == ETF_SMALL_BIG_EXT {
+                    usize::from(take(data, cursor, 1)?[0])
+                } else {
+                    read_u32(take(data, cursor, WORD_SIZE)?)? as usize
+                };
+                // Any sign byte but 0 is negative, and leading zero bytes
+                // are stripped (`external.c:4471-4486`).
+                let negative = take(data, cursor, 1)?[0] != 0;
+                let magnitude = BigInt::from_bytes_le(Sign::Plus, take(data, cursor, count)?);
+                let value = if negative { -magnitude } else { magnitude };
+                // `bytes_to_big` gives no term for more digits than a bignum
+                // holds, and `dec_term` fails.
+                if !fits_big_arity(&value) {
+                    return Err(error("BEAM bignum literal exceeds BIG_ARITY_MAX digits"));
+                }
+                Term::from_bigint(value)
+            }
             ETF_INTEGER_EXT => {
                 let bytes = take(data, cursor, WORD_SIZE)?;
                 Term::Integer(i64::from(i32::from_be_bytes([
@@ -962,6 +995,7 @@ fn read_value(data: &[u8], cursor: &mut usize, atoms: &[Atom]) -> Result<Term, B
         .get(*cursor)
         .ok_or_else(|| error("truncated BEAM operand"))?;
     match first_byte & COMPACT_TAG_MASK {
+        TAG_INTEGER if first_byte == HUGE_INTEGER_FIRST_BYTE => read_huge_integer(data, cursor),
         TAG_INTEGER => {
             let payload = read_operand(data, cursor, TAG_INTEGER)?;
             Ok(Term::Integer(sign_extend(first_byte, payload)))
@@ -977,6 +1011,41 @@ fn read_value(data: &[u8], cursor: &mut usize, atoms: &[Atom]) -> Result<Term, B
             "unsupported constant operand tag {unsupported_tag}"
         ))),
     }
+}
+
+/// Read an integer operand with 9 or more payload bytes: the first byte
+/// [`HUGE_INTEGER_FIRST_BYTE`], the byte count minus 9 as an unsigned
+/// operand, and the bytes, big-endian in two's complement. ERTS loads the
+/// value as a bignum literal (`marshal_integer`, `beam_file.c:2134-2215`):
+/// `{integer,18446744073709551616}` is
+/// `[0xF9, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0]`. A value whose magnitude
+/// keeps two leading zero bytes is not normalized, and ERTS rejects the
+/// file (`beam_file.c:2186-2202`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut cursor = 0;
+/// let term = read_huge_integer(&[0xF9, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0], &mut cursor)?;
+/// assert_eq!(term, Term::from_bigint(BigInt::from(1) << 64));
+/// assert_eq!(cursor, 11);
+/// ```
+fn read_huge_integer(data: &[u8], cursor: &mut usize) -> Result<Term, BeamError> {
+    *cursor += 1;
+    let count = usize::try_from(read_operand(data, cursor, TAG_UNSIGNED)?)
+        .ok()
+        .and_then(|count| count.checked_add(9))
+        .ok_or_else(|| error("BEAM integer operand size overflow"))?;
+    let end = cursor
+        .checked_add(count)
+        .filter(|&end| end <= data.len())
+        .ok_or_else(|| error("truncated BEAM integer operand"))?;
+    let value = BigInt::from_signed_bytes_be(&data[*cursor..end]);
+    *cursor = end;
+    if value.magnitude().bits() <= (count as u64 - 2) * 8 {
+        return Err(error("BEAM integer operand is not normalized"));
+    }
+    Ok(Term::from_bigint(value))
 }
 
 /// Return the signed value of a `TAG_INTEGER` payload, as ERTS

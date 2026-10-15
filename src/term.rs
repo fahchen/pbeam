@@ -3,6 +3,7 @@ mod binary;
 pub(crate) mod float_text;
 mod fun;
 mod hash;
+mod integer;
 mod list;
 mod live_bytes;
 mod map;
@@ -21,6 +22,7 @@ pub use binary::Binary;
 pub use fun::Fun;
 pub(crate) use fun::{Lambda, Target, debug_target};
 pub(crate) use hash::internal_hash;
+pub(crate) use integer::{MAX_BIG_DIGITS, fits_big_arity, low_64_bits};
 use list::{Cons, ConsRef};
 pub(crate) use live_bytes::LiveBytes;
 pub use map::Map;
@@ -30,6 +32,7 @@ pub(crate) use match_context::{segment_equals, segment_integer};
 pub(crate) use print::print_term;
 use tuple::Tuple;
 
+use num_bigint::BigInt;
 use std::{collections::HashSet, fmt, sync::Arc};
 
 /// The smallest ERTS small integer on a 64-bit system: -(2^59).
@@ -53,7 +56,19 @@ pub enum Term {
     /// array, and a sub-binary keeps the array and the offset of its bytes
     /// (`docs/portable-beam-spec.md:97`).
     Binary(Binary),
+    /// An integer in the signed 64-bit range. PBeam keeps each integer in
+    /// this range here, also the ERTS bignums from 2^59 to 2^63 - 1 and from
+    /// -(2^63) to -(2^59) - 1; [`Term::small_integer`] tells the ERTS small
+    /// integers apart.
     Integer(i64),
+    /// An integer outside the signed 64-bit range, which ERTS keeps as a
+    /// bignum (`POS_BIG_SUBTAG`, `NEG_BIG_SUBTAG`, `erl_term.h`). Copies
+    /// share the value. The form is canonical: each runtime operation makes
+    /// an integer in the 64-bit range as [`Term::Integer`], so `=:=` and the
+    /// hash compare the value. The canonical form is a runtime-produced form,
+    /// not a type invariant: a caller that builds a term uses
+    /// [`Term::from_bigint`].
+    BigInt(Arc<BigInt>),
     /// A float: an IEEE 754 binary64 value that is finite, as an ERTS float
     /// is (`FLOAT_DEF`, `erl_term.h`). ERTS never makes an infinity or a NaN
     /// term: each operation that would give one raises `badarith` or
@@ -118,6 +133,10 @@ pub enum Term {
 #[allow(dead_code)]
 trait TermIsSendAndSync: Send + Sync {}
 impl TermIsSendAndSync for Term {}
+
+/// Check at compile time that a term stays 16 bytes: a bignum is one
+/// pointer to its shared value, as each other boxed term is.
+const _: () = assert!(std::mem::size_of::<Term>() == 16);
 
 /// The number of pairs that the work stack of `Term::eq` holds in the frame
 /// of the comparison. The stack allocates only when a comparison holds more
@@ -603,6 +622,7 @@ impl Clone for Term {
             Term::Binary(bytes) => Term::Binary(bytes.clone()),
             Term::Float(value) => Term::Float(*value),
             Term::Integer(value) => Term::Integer(*value),
+            Term::BigInt(value) => Term::BigInt(Arc::clone(value)),
             Term::Nil => Term::Nil,
             Term::Cons(cell) => Term::Cons(cell.clone()),
             Term::Tuple(elements) => Term::Tuple(elements.clone()),
@@ -750,6 +770,13 @@ impl Term {
                 (Term::Atom(left), Term::Atom(right)) => left == right,
                 (Term::Binary(left), Term::Binary(right)) => left == right,
                 (Term::Integer(left), Term::Integer(right)) => left == right,
+                (Term::BigInt(left), Term::BigInt(right)) => left == right,
+                (Term::BigInt(big), Term::Float(float))
+                | (Term::Float(float), Term::BigInt(big))
+                    if arith =>
+                {
+                    order::compare_big_float(big, *float).is_eq()
+                }
                 // Exact equality compares the bits, so `0.0 =:= -0.0` is
                 // false (`eq`, `utils.c:1422-1433`). A float term is never
                 // a NaN, so equal bits are the only equal floats.
@@ -932,6 +959,7 @@ fn write_debug(term: &Term, atoms: Option<&AtomTable>, out: &mut impl fmt::Write
             },
             Term::Binary(bytes) => write!(out, "Binary({bytes:?})")?,
             Term::Integer(value) => write!(out, "Integer({value:?})")?,
+            Term::BigInt(value) => write!(out, "Integer({value})")?,
             Term::Float(value) => write!(out, "Float({value:?})")?,
             Term::Pid(pid) => write!(out, "Pid({pid:?})")?,
             Term::Port(port) => write!(out, "Port({port:?})")?,

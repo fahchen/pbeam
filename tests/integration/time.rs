@@ -109,25 +109,21 @@ fn converts_the_time_unit_in_the_pinned_erlang_beam() {
 }
 
 #[test]
-fn reports_the_perf_counter_product_outside_the_integer_range() {
+fn converts_the_perf_counter_time_through_a_bignum_product() {
     // `erlang:monotonic_time(perf_counter)` traps to
     // `erlang:convert_time_unit(Time, 1000000000, perf_counter)`, which
     // multiplies 1000000000 and the time (`erlang.erl:5333-5335`). The
-    // product is a bignum on ERTS. PBeam has no bignum term and returns a
-    // runtime error (row "Integer range" in `docs/erts-differences.md`).
+    // product is a bignum, and the quotient is the time again.
     let program = program();
-    let error = program
+    let Term::Integer(time) = program
         .execute("time_probe", "perf_counter", &[])
-        .unwrap_err();
-    let message = error.to_string();
-    let time = message
-        .split("unsupported erlang:*/2 result of 1000000000 and ")
-        .nth(1)
-        .and_then(|rest| rest.strip_suffix(": needs a bignum"))
-        .unwrap_or_else(|| panic!("{message}"));
+        .unwrap()
+        .term
+    else {
+        panic!("perf_counter gives an integer");
+    };
     // The time is the `native` monotonic time, at most 10 s after the start.
     let first_seconds = -576_460_752_000_000_000..-576_460_742_000_000_000;
-    let time: i64 = time.parse().unwrap();
     assert!(first_seconds.contains(&time), "{time}");
     // ERTS returns the time in the `perf_counter` unit, 1000000000.
     let erts = reference("perf_counter");

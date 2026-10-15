@@ -160,11 +160,11 @@ fn puts_literal_atoms_into_the_table_in_byte_order() {
         "Tuple([Atom(\"pbeam_lit_b\"), Map([(Atom(\"pbeam_lit_b\"), Integer(2)), \
          (Atom(\"pbeam_lit_a\"), Integer(1))])])"
     );
-    // [pbeam_x, 1 bsl 64, pbeam_y]: the atoms after the unsupported SMALL_BIG_EXT are not
-    // created.
+    // [pbeam_x, <pid>, pbeam_y]: the atoms after the unsupported
+    // NEW_PID_EXT (88) are not created.
     let mut unsupported = vec![131, 108, 0, 0, 0, 3, 119, 7];
     unsupported.extend(b"pbeam_x");
-    unsupported.extend([110, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 119, 7]);
+    unsupported.extend([88, 119, 7]);
     unsupported.extend(b"pbeam_y");
     unsupported.push(106);
     assert_eq!(read_literal(&unsupported, &mut atoms).unwrap(), None);
@@ -195,8 +195,33 @@ fn reads_nested_literals_and_marks_unsupported_tags_at_any_depth() {
         Some(Term::Float(1.0))
     );
     assert!(read(&mut atoms, &[131, 70, 127, 240, 0, 0, 0, 0, 0, 0]).is_err());
-    // SMALL_BIG_EXT (110) 5 inside a tuple, inside a list, and as a list tail.
-    let bignum = [110, 1, 0, 5];
+    // SMALL_BIG_EXT (110) and LARGE_BIG_EXT (111) load as integers in
+    // their canonical form (`external.c:4457-4497`): 5 is a small integer,
+    // each sign byte but 0 is negative, leading zero bytes are stripped, and
+    // a value of more than `BIG_ARITY_MAX` digits is an error.
+    let big = |sign: i32, shift: u32| Term::from_bigint(num_bigint::BigInt::from(sign) << shift);
+    assert_eq!(
+        read(&mut atoms, &[131, 110, 1, 0, 5]).unwrap(),
+        Some(Term::Integer(5))
+    );
+    assert_eq!(
+        read(&mut atoms, &[131, 110, 0, 1]).unwrap(),
+        Some(Term::Integer(0))
+    );
+    let two_64 = [131, 110, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0];
+    assert_eq!(read(&mut atoms, &two_64).unwrap(), Some(big(1, 64)));
+    let negative = [131, 110, 9, 2, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+    assert_eq!(read(&mut atoms, &negative).unwrap(), Some(big(-1, 64)));
+    let mut large = vec![131, 111, 0, 0, 1, 1, 0];
+    large.extend([0; 256]);
+    large.push(1);
+    assert_eq!(read(&mut atoms, &large).unwrap(), Some(big(1, 2048)));
+    let mut huge = vec![131, 111, 0, 8, 0, 1, 0];
+    huge.extend([0; 524_288]);
+    huge.push(1);
+    assert!(read(&mut atoms, &huge).is_err());
+    // NEW_PID_EXT (88) inside a tuple, inside a list, and as a list tail.
+    let bignum = [88, 1, 0, 5];
     assert_eq!(
         read(&mut atoms, &[&[131, 104, 1][..], &bignum].concat()).unwrap(),
         None

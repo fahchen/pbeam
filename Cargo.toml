@@ -10,6 +10,9 @@ autotests = false
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 libc = "0.2"
+num-bigint = "0.5"
+num-integer = "0.1"
+num-traits = "0.2"
 
 [build-dependencies]
 cc = "1"
@@ -92,6 +95,10 @@ path = "tests/integration/alias.rs"
 [[test]]
 name = "arith"
 path = "tests/integration/arith.rs"
+
+[[test]]
+name = "bignum"
+path = "tests/integration/bignum.rs"
 
 [[test]]
 name = "atom_to_binary"

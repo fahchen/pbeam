@@ -99,16 +99,26 @@ fn reads_only_supported_move_literals() {
         Operand::Value(values) if values.is_nil()
     ));
     // erlc 29.1.1 writes {integer,18446744073709551616} as 0xF9, the
-    // extra byte count 0, and nine payload bytes. It loads as an
-    // operand that fails when it runs; a short payload is malformed.
+    // extra byte count 0, and nine payload bytes. It loads as a bignum,
+    // as ERTS `marshal_integer` (`beam_file.c:2134-2215`) loads it; a
+    // short payload is malformed, and so is a payload with two leading
+    // zero bytes of magnitude.
     let mut cursor = 0;
     let huge = [0xF9, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0];
     assert!(matches!(
         read_move_operand(&huge, &mut cursor, &[], &literals).unwrap(),
-        Operand::UnsupportedInteger
+        Operand::Value(value) if value == Term::from_bigint(num_bigint::BigInt::from(1) << 64)
     ));
     assert_eq!(cursor, huge.len());
+    let negative = [0xF9, 0x00, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0];
+    assert!(matches!(
+        read_move_operand(&negative, &mut 0, &[], &literals).unwrap(),
+        Operand::Value(value) if value == Term::from_bigint(-(num_bigint::BigInt::from(1) << 64u32))
+    ));
     assert!(read_move_operand(&huge[..10], &mut 0, &[], &literals).is_err());
+    let padded = [0xF9, 0x00, 0, 0, 0xFF, 0, 0, 0, 0, 0, 0];
+    assert!(read_move_operand(&padded, &mut 0, &[], &literals).is_err());
+    assert!(read_move_operand(&[0xF9, 0x7F], &mut 0, &[], &literals).is_err());
     assert!(read_move_operand(&[0x47, 0x20], &mut 0, &[], &literals).is_err());
     assert!(read_move_operand(&[0x27, 0x00], &mut 0, &[], &literals).is_err());
     assert!(read_move_operand(&[0x06], &mut 0, &[], &literals).is_err());
@@ -698,14 +708,16 @@ fn selects_the_classified_operand_form_of_is_eq_exact() {
             Instruction::End,
         ]
     ));
-    // An operand that needs a bignum keeps the generic form.
+    // An unsupported literal keeps the generic form.
+    assert!(super::classify_test_operand(&Operand::UnsupportedLiteral(0)).is_none());
+    // A bignum operand is a value, so the form is classified.
     assert!(matches!(
         parse(&[0x2B, 0x35, 0x03, 0xF9, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0]).as_slice(),
         [
-            Instruction::TestExactEqual {
+            Instruction::TestExactEqualOperands {
                 fail_label: 3,
-                left: Operand::X(0),
-                right: Operand::UnsupportedInteger,
+                left: TestOperand::X(0),
+                right: TestOperand::Value(Term::BigInt(_)),
             },
             Instruction::End,
         ]

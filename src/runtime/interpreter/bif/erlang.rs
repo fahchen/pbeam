@@ -1514,9 +1514,8 @@ pub(super) fn integer_to_binary_2(
 ///
 /// A small integer costs no reduction. A bignum costs one reduction for each
 /// 16 digits of [`big_integer_estimate`] (`bif.c:3283-3299`,
-/// `binary.c:92-108`). In the PBeam integer range, a bignum is from 2^59 to
-/// 2^63 - 1 or from -2^63 to -2^59 - 1. It costs 1 in base 10 and 4 in
-/// base 2.
+/// `binary.c:92-108`). A bignum from 2^59 to 2^63 - 1 costs 1 in base 10
+/// and 4 in base 2.
 ///
 /// # Examples
 ///
@@ -1545,20 +1544,30 @@ fn integer_digits(
 ) -> Result<Option<String>, BeamError> {
     /// `DIGITS_PER_RED` (`bif.c:3283`, `binary.c:92`).
     const DIGITS_PER_RED: usize = 16;
-    let Term::Integer(value) = term else {
+    if !term.is_integer() {
         return Ok(None);
-    };
+    }
     if term.small_integer().is_none() {
-        let cost = big_integer_estimate(*value, base) / DIGITS_PER_RED;
+        let value = term.bigint().expect("the term is an integer");
+        let cost =
+            big_integer_estimate(value.bits(), value.sign() == num_bigint::Sign::Minus, base)
+                / DIGITS_PER_RED;
         if cost > process.bif_reductions_left()? {
             // ponytail: no dirty scheduler; see "Scheduling" in docs/erts-differences.md.
             return Err(error(format!(
-                "unsupported erlang:{name} of {value} with {} reductions left: ERTS runs it on a dirty CPU scheduler",
+                "unsupported erlang:{name} of a bignum of {} bits with {} reductions left: ERTS runs it on a dirty CPU scheduler",
+                value.bits(),
                 process.fcalls
             )));
         }
         process.bump_reductions(cost as i32);
     }
+    let Term::Integer(value) = term else {
+        // `erts_big_to_list` writes a digit above 9 as an upper-case letter,
+        // as `Sint_to_buf` does.
+        let value = term.bigint().expect("the term is an integer");
+        return Ok(Some(value.to_str_radix(base).to_ascii_uppercase()));
+    };
     let mut magnitude = value.unsigned_abs();
     let mut digits = Vec::new();
     loop {
@@ -1585,13 +1594,13 @@ fn integer_digits(
 /// # Examples
 ///
 /// ```rust,ignore
-/// // 2^59: lg 59, 60 / 3.32193 + 1 = 19.06, then the null byte.
-/// assert_eq!(big_integer_estimate(1 << 59, 10), 20);
-/// assert_eq!(big_integer_estimate(i64::MIN, 10), 22);
+/// // 2^59 has 60 bits: lg 59, 60 / 3.32193 + 1 = 19.06, then the null byte.
+/// assert_eq!(big_integer_estimate(60, false, 10), 20);
+/// assert_eq!(big_integer_estimate(64, true, 10), 22);
 /// // 2^63 - 1 in base 2: lg 62, 63 / 1.0 + 1 = 64, then the null byte.
-/// assert_eq!(big_integer_estimate(i64::MAX, 2), 65);
+/// assert_eq!(big_integer_estimate(63, false, 2), 65);
 /// ```
-fn big_integer_estimate(value: i64, base: u32) -> usize {
+fn big_integer_estimate(bits: u64, negative: bool, base: u32) -> usize {
     /// `lg2_lookup` (`big.c:4087-4092`): the rounded `log2` of each base
     /// from 2 to 36.
     #[allow(clippy::approx_constant, reason = "ERTS uses these rounded values")]
@@ -1601,9 +1610,9 @@ fn big_integer_estimate(value: i64, base: u32) -> usize {
         4.52356, 4.58496, 4.64386, 4.70044, 4.75489, 4.80735, 4.85798, 4.90689, 4.9542, 5.0,
         5.04439, 5.08746, 5.12928, 5.16993,
     ];
-    let lg = u64::BITS - 1 - value.unsigned_abs().leading_zeros();
-    let digits = (f64::from(lg + 1) / LG2_LOOKUP[base as usize - 2] + 1.0) as usize;
-    digits + usize::from(value < 0) + 1
+    // `lg + 1` is the number of bits of the magnitude.
+    let digits = (bits as f64 / LG2_LOOKUP[base as usize - 2] + 1.0) as usize;
+    digits + usize::from(negative) + 1
 }
 
 /// Run `erlang:atom_to_list/1`: return the Unicode code points of the atom
@@ -1757,36 +1766,6 @@ pub(super) fn system_info(atoms: &mut AtomTable, item: &Term) -> Result<BifResul
     }
 }
 
-/// Run `erlang:'+'/2`, `erlang:'-'/2`, or `erlang:'*'/2`: [`int_arith`]
-/// with `operation` for two integers, else [`float_arith`] with
-/// `float_operation`, as `erts_mixed_plus`, `erts_mixed_minus`, and
-/// `erts_mixed_times` (`erl_arith.c:358-508`, `erl_arith.c:571-714`,
-/// `erl_arith.c:716-913`) do.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// let sum = arith("+", &Term::Integer(1), &Term::Float(0.5), i64::checked_add, |l, r| l + r)?;
-/// assert!(matches!(sum, BifResult::Value(Term::Float(1.5))));
-/// ```
-///
-/// # Errors
-///
-/// Return the runtime error of [`int_arith`].
-pub(super) fn arith(
-    name: &str,
-    left: &Term,
-    right: &Term,
-    operation: fn(i64, i64) -> Option<i64>,
-    float_operation: fn(f64, f64) -> f64,
-) -> Result<BifResult, BeamError> {
-    if let (Term::Integer(_), Term::Integer(_)) = (left, right) {
-        int_arith(name, left, right, operation)
-    } else {
-        Ok(float_arith(left, right, float_operation))
-    }
-}
-
 /// Run a float operation on two numbers, at least one a float, or on the
 /// two integers of `erlang:'/'/2`: convert each integer to the nearest
 /// float, as the C cast and `big_to_double` do, and run `operation`. A
@@ -1801,7 +1780,7 @@ pub(super) fn arith(
 /// assert!(matches!(float_arith(&Term::Integer(1), &Term::Integer(0), |l, r| l / r), BifResult::Raise { .. }));
 /// ```
 pub(super) fn float_arith(left: &Term, right: &Term, operation: fn(f64, f64) -> f64) -> BifResult {
-    let (Some(left), Some(right)) = (number_to_float(left), number_to_float(right)) else {
+    let (Some(left), Some(right)) = (left.number_float(), right.number_float()) else {
         return BifResult::badarith();
     };
     let result = operation(left, right);
@@ -1809,22 +1788,6 @@ pub(super) fn float_arith(left: &Term, right: &Term, operation: fn(f64, f64) -> 
         Value(Term::Float(result))
     } else {
         BifResult::badarith()
-    }
-}
-
-/// Return a number as a float: an integer converts to the nearest float.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// assert_eq!(number_to_float(&Term::Integer(3)), Some(3.0));
-/// assert_eq!(number_to_float(&Term::static_atom("a")), None);
-/// ```
-pub(super) fn number_to_float(term: &Term) -> Option<f64> {
-    match term {
-        Term::Integer(value) => Some(*value as f64),
-        Term::Float(value) => Some(*value),
-        _ => None,
     }
 }
 
@@ -1839,210 +1802,10 @@ pub(super) fn number_to_float(term: &Term) -> Option<f64> {
 /// assert!(matches!(to_float(&Term::static_atom("a")), BifResult::Raise { .. }));
 /// ```
 pub(super) fn to_float(term: &Term) -> BifResult {
-    match number_to_float(term) {
+    match term.number_float() {
         Some(value) => Value(Term::Float(value)),
         None => BifResult::badarg(),
     }
-}
-
-/// Run `erlang:abs/1`: return the absolute value of a number, as ERTS
-/// `abs_1` (`erl_bif_guard.c:57-105`) does. `abs(-0.0)` is `0.0`. Each
-/// other term raises `badarg`.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// assert!(matches!(abs(&Term::Integer(-3))?, BifResult::Value(Term::Integer(3))));
-/// assert!(matches!(abs(&Term::Float(-0.0))?, BifResult::Value(Term::Float(value)) if value.is_sign_positive()));
-/// assert!(abs(&Term::Integer(i64::MIN)).is_err());
-/// ```
-///
-/// # Errors
-///
-/// Return a runtime error for `-(2^63)`, whose absolute value is outside the
-/// `i64` range, where ERTS makes a bignum.
-pub(super) fn abs(term: &Term) -> Result<BifResult, BeamError> {
-    match term {
-        // ponytail: a result outside i64 needs a bignum term; see "Integer range" in docs/erts-differences.md.
-        Term::Integer(value) => value
-            .checked_abs()
-            .map(|value| Value(Term::Integer(value)))
-            .ok_or_else(|| error("unsupported erlang:abs/1 result of -2^63: needs a bignum")),
-        Term::Float(value) => Ok(Value(Term::Float(value.abs()))),
-        _ => Ok(BifResult::badarg()),
-    }
-}
-
-/// Run `erlang:'+'/2`, `erlang:'-'/2`, `erlang:'*'/2`, `erlang:'div'/2`, or
-/// `erlang:'rem'/2` on two integers with `operation`, the checked `i64` sum, difference,
-/// product, or quotient, or the remainder, as ERTS `erts_mixed_plus`,
-/// `erts_mixed_minus`, `stimes_2`, `intdiv_2`, and `rem_2`
-/// (`erl_arith.c:370-389`, `erl_arith.c:585-602`, `erl_arith.c:117-143`,
-/// `erl_arith.c:145-161`) do for two integers. The JIT runs `*` with
-/// `emit_i_mul_add`, `div` with `emit_i_int_div` and `emit_div_rem`, and
-/// `rem` with `emit_i_rem` (`jit/arm/instr_arith.cpp:542`,
-/// `jit/arm/instr_arith.cpp:968`, `jit/arm/instr_arith.cpp:1067`,
-/// `jit/arm/instr_arith.cpp:1078`) with the same results. An operand that is
-/// not an integer raises `badarith`, also a float for `div` and `rem`
-/// (`erl_arith.c:127-161`). A result outside the `i64` range gives a runtime error,
-/// where ERTS makes a bignum. The `rem` operation never returns `None`, so
-/// `rem` never gives this error (see [`int_rem`]).
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// let sum = int_arith("+", &Term::Integer(1), &Term::Integer(2), i64::checked_add)?;
-/// assert!(matches!(sum, BifResult::Value(Term::Integer(3))));
-/// let product = int_arith("*", &Term::Integer(-3), &Term::Integer(4), i64::checked_mul)?;
-/// assert!(matches!(product, BifResult::Value(Term::Integer(-12))));
-/// let atom = Term::static_atom("a");
-/// assert!(matches!(int_arith("-", &atom, &Term::Integer(1), i64::checked_sub)?, BifResult::Raise { .. }));
-/// assert!(int_arith("+", &Term::Integer(i64::MAX), &Term::Integer(1), i64::checked_add).is_err());
-/// ```
-pub(super) fn int_arith(
-    name: &str,
-    left: &Term,
-    right: &Term,
-    operation: fn(i64, i64) -> Option<i64>,
-) -> Result<BifResult, BeamError> {
-    let (Term::Integer(left), Term::Integer(right)) = (left, right) else {
-        return Ok(BifResult::badarith());
-    };
-    // ponytail: a result outside i64 needs a bignum term; see "Integer range" in docs/erts-differences.md.
-    let result = operation(*left, *right).ok_or_else(|| {
-        error(format!(
-            "unsupported erlang:{name}/2 result of {left} and {right}: needs a bignum"
-        ))
-    })?;
-    Ok(Value(Term::Integer(result)))
-}
-
-/// Run `erlang:'div'/2`: return the integer quotient of `left` and `right`,
-/// truncated toward zero, as ERTS `intdiv_2` (`erl_arith.c:127-143`) does.
-/// A `right` of `0` raises `badarith` before the operand types are checked
-/// (`erl_arith.c:131-133`), so `a div 0` raises `badarith` too. Each other
-/// case runs as [`arith`].
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// let quotient = int_div(&Term::Integer(-7), &Term::Integer(2))?;
-/// assert!(matches!(quotient, BifResult::Value(Term::Integer(-3))));
-/// assert!(matches!(int_div(&Term::Integer(1), &Term::Integer(0))?, BifResult::Raise { .. }));
-/// assert!(int_div(&Term::Integer(i64::MIN), &Term::Integer(-1)).is_err());
-/// ```
-pub(super) fn int_div(left: &Term, right: &Term) -> Result<BifResult, BeamError> {
-    if *right == Term::Integer(0) {
-        return Ok(BifResult::badarith());
-    }
-    int_arith("div", left, right, i64::checked_div)
-}
-
-/// Run `erlang:'rem'/2`: return the integer remainder of `left` and `right`,
-/// with the sign of `left`, as ERTS `rem_2` (`erl_arith.c:145-161`) and the
-/// JIT `emit_i_rem` (`jit/arm/instr_arith.cpp:1078-1087`) do. A `right` of
-/// `0` raises `badarith` before the operand types are checked
-/// (`erl_arith.c:149-151`), so `a rem 0` raises `badarith` too. Each other
-/// case runs as [`arith`]. `i64::MIN rem -1` gives `0`, as the bignum path
-/// `erts_int_div_rem` (`erl_arith.c:1172`) does, so no result leaves the
-/// `i64` range.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// let remainder = int_rem(&Term::Integer(-7), &Term::Integer(3))?;
-/// assert!(matches!(remainder, BifResult::Value(Term::Integer(-1))));
-/// let remainder = int_rem(&Term::Integer(i64::MIN), &Term::Integer(-1))?;
-/// assert!(matches!(remainder, BifResult::Value(Term::Integer(0))));
-/// assert!(matches!(int_rem(&Term::static_atom("a"), &Term::Integer(0))?, BifResult::Raise { .. }));
-/// ```
-pub(super) fn int_rem(left: &Term, right: &Term) -> Result<BifResult, BeamError> {
-    if *right == Term::Integer(0) {
-        return Ok(BifResult::badarith());
-    }
-    int_arith("rem", left, right, |left, right| {
-        Some(left.wrapping_rem(right))
-    })
-}
-
-/// The reductions that ERTS `bump_reds_linear` (`erl_arith.c:56-72`) uses
-/// for a bignum operation in the PBeam integer range: a bignum of one
-/// 64-bit digit needs fewer than `ERTS_ARITH_WORDS_PER_REDUCTION` (16,
-/// `global.h:1041`) heap words, so it costs `0 / 16 + 1`.
-const BIGNUM_OPERATION_REDUCTIONS: i32 = 1;
-
-/// Run `erlang:'-'/1`: return the negation of an integer, as ERTS
-/// `sminus_1` and `erts_unary_minus` (`erl_arith.c:107-110`,
-/// `erl_arith.c:509-567`) do. The JIT `gc_bif` `-`/1 calls the same
-/// `erts_unary_minus` for each operand that it does not negate inline
-/// (`jit/arm/instr_arith.cpp:224`, `280`). A small integer costs no
-/// reduction, also when its negation is the bignum 2^59. A bignum operand
-/// costs 1 reduction (`erl_arith.c:537-551`). An operand that is not a
-/// number raises `badarith`. A float negates with no reduction, and its
-/// negation is finite (`erl_arith.c:552-558`).
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// process.fcalls = 10;
-/// assert!(matches!(negate(&mut process, &Term::Integer(5))?, BifResult::Value(Term::Integer(-5))));
-/// assert_eq!(process.fcalls, 10);
-/// negate(&mut process, &Term::Integer(1 << 59))?;
-/// assert_eq!(process.fcalls, 9);
-/// assert!(matches!(negate(&mut process, &Term::static_atom("a"))?, BifResult::Raise { .. }));
-/// assert!(negate(&mut process, &Term::Integer(i64::MIN)).is_err());
-/// ```
-///
-/// # Errors
-///
-/// Return a runtime error for `-(2^63)`, whose negation is outside the
-/// `i64` range, where ERTS makes a bignum.
-pub(super) fn negate(process: &mut ProcessState, term: &Term) -> Result<BifResult, BeamError> {
-    let value = match term {
-        Term::Integer(value) => value,
-        Term::Float(value) => return Ok(Value(Term::Float(-value))),
-        _ => return Ok(BifResult::badarith()),
-    };
-    // ponytail: a result outside i64 needs a bignum term; see "Integer range" in docs/erts-differences.md.
-    let result = value.checked_neg().ok_or_else(|| {
-        error(format!(
-            "unsupported erlang:-/1 result of {value}: needs a bignum"
-        ))
-    })?;
-    if term.small_integer().is_none() {
-        process.bump_reductions(BIGNUM_OPERATION_REDUCTIONS);
-    }
-    Ok(Value(Term::Integer(result)))
-}
-
-/// Run `erlang:'band'/2`: return the bitwise and of two integers, as ERTS
-/// `band_2` and `erts_band` (`erl_arith.c:164-170`,
-/// `erl_arith.c:1252-1278`) do. The JIT `gc_bif` `band` calls the same
-/// `erts_band` for operands that are not both small integers
-/// (`jit/arm/instr_arith.cpp:1168`, `1236`). Two small integers cost no
-/// reduction. A bignum operand costs 1 reduction, also when the result is
-/// a small integer (`erl_arith.c:1276`). An operand that is not an integer
-/// raises `badarith`. The result of two `i64` values is an `i64` value.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// process.fcalls = 10;
-/// let result = band(&mut process, &Term::Integer(12), &Term::Integer(10));
-/// assert!(matches!(result, BifResult::Value(Term::Integer(8))));
-/// assert_eq!(process.fcalls, 10);
-/// band(&mut process, &Term::Integer(1 << 59), &Term::Integer(-1));
-/// assert_eq!(process.fcalls, 9);
-/// assert!(matches!(band(&mut process, &Term::Integer(1), &Term::static_atom("a")), BifResult::Raise { .. }));
-/// ```
-pub(super) fn band(process: &mut ProcessState, left: &Term, right: &Term) -> BifResult {
-    let (Term::Integer(left_value), Term::Integer(right_value)) = (left, right) else {
-        return BifResult::badarith();
-    };
-    if left.small_integer().is_none() || right.small_integer().is_none() {
-        process.bump_reductions(BIGNUM_OPERATION_REDUCTIONS);
-    }
-    Value(Term::Integer(left_value & right_value))
 }
 
 /// Convert `value`, a time in the native unit, to `unit` with
@@ -2235,9 +1998,8 @@ pub(in crate::runtime::interpreter) fn is_function(term: &Term, arity: &Term) ->
 /// (`erl_bif_guard.c:337-349`) does. A `low` or `high` that is not an
 /// integer raises `badarg`, also when `term` is not an integer. A `term`
 /// that is not an integer gives `false`. In a guard, the `bif3` instruction
-/// goes to its fail label instead of the raise. PBeam has no bignum, so a
-/// bignum argument cannot occur (row "Integer range" of
-/// `docs/erts-differences.md`).
+/// goes to its fail label instead of the raise. Each argument can be a
+/// bignum, and the bounds compare by value.
 ///
 /// # Examples
 ///
@@ -2248,10 +2010,11 @@ pub(in crate::runtime::interpreter) fn is_function(term: &Term, arity: &Term) ->
 /// assert!(matches!(is_integer_3(&Term::Integer(5), &Term::static_atom("a"), &ten), BifResult::Raise { .. }));
 /// ```
 pub(super) fn is_integer_3(term: &Term, low: &Term, high: &Term) -> BifResult {
-    let (&Term::Integer(low), &Term::Integer(high)) = (low, high) else {
+    if !low.is_integer() || !high.is_integer() {
         return BifResult::badarg();
-    };
-    let within = matches!(term, &Term::Integer(term) if low <= term && term <= high);
+    }
+    let within = term.integer_order(low).is_some_and(|order| order.is_ge())
+        && term.integer_order(high).is_some_and(|order| order.is_le());
     Value(Term::static_atom(if within { "true" } else { "false" }))
 }
 
