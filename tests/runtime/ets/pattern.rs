@@ -1,4 +1,4 @@
-use super::{Node, Pattern, variable};
+use super::{Pattern, variable};
 use crate::term::{AtomTable, Term, test_atom_table};
 
 fn atom(atoms: &mut AtomTable, name: &str) -> Term {
@@ -38,7 +38,7 @@ fn matches_lists_maps_and_ground_tuples() {
     );
     assert_eq!(pattern.run(&[Term::list_from([Term::Integer(5)])]), None);
     assert_eq!(pattern.run(&[Term::nil()]), None);
-    // A tuple with no variable stays a tuple node at the root, so it has a
+    // A tuple with no variable stays a tuple step at the root, so it has a
     // bound key and its size.
     let ground = Pattern::compile(&atoms, &Term::tuple(vec![one.clone(), Term::nil()])).unwrap();
     assert_eq!(ground.bound_key(1), Some(&one));
@@ -47,10 +47,17 @@ fn matches_lists_maps_and_ground_tuples() {
     let nested =
         Pattern::compile(&atoms, &Term::tuple(vec![Term::tuple(vec![one.clone()])])).unwrap();
     assert!(nested.bound_key(1).is_some());
-    let map =
-        Term::Map(crate::term::Map::from_pairs(vec![(one.clone(), variable)], &atoms).unwrap());
+    let map = Term::Map(
+        crate::term::Map::from_pairs(vec![(one.clone(), variable.clone())], &atoms).unwrap(),
+    );
     let pattern = Pattern::compile(&atoms, &map).unwrap();
     assert!(pattern.matches_nothing(1));
     assert_eq!(pattern.run(std::slice::from_ref(&one)), None);
-    assert!(!Node::Compare(0).matches(&one, &mut [None]));
+    let twice = Term::tuple(vec![variable.clone(), variable.clone()]);
+    let pattern = Pattern::compile(&atoms, &twice).unwrap();
+    assert_eq!(pattern.run(&[one.clone(), Term::Integer(2)]), None);
+    assert_eq!(
+        pattern.run(&[one.clone(), one.clone()]),
+        Some(Term::list_from([one]))
+    );
 }

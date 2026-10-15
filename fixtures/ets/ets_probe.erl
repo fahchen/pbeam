@@ -1,6 +1,7 @@
 -module(ets_probe).
 -export([new/0, owner_exit/0, insert/0, lookup/0, lookup_loop/0, insert_loop/0,
-         access/0, main/0, env/0, bag/0, info/0, match/0, unsupported/1,
+         access/0, main/0, env/0, bag/0, info/0, match/0, match_deep/0,
+         unsupported/1,
          own/2, write/1]).
 
 %% ets:new/2 return values and badarg cases (erl_db.c:2555-2840).
@@ -279,6 +280,17 @@ match_resumed() ->
     true = ets:insert(T, [{K, V} || K <- seq(500), V <- seq(10)]),
     {Matches, {_, Slot, Chunk, _, Rest, Size}} = ets:match(T, {'$1', '$2'}, 1001),
     [length(Matches), checksum(Matches, 0), Slot, Chunk, Rest, Size].
+
+%% A pattern 1000000 tuples deep matches an object of the same depth, as
+%% the work stack of db_match_compile and the match program let it
+%% (erl_db_util.c:1700-2100).
+match_deep() ->
+    T = ets:new(ets_probe, []),
+    true = ets:insert(T, {k, nest(1000000, x)}),
+    ets:match(T, {k, nest(1000000, '$1')}).
+
+nest(0, Term) -> Term;
+nest(N, Term) -> nest(N - 1, {Term}).
 
 take(0, _) -> [];
 take(N, [X | Xs]) -> [X | take(N - 1, Xs)].

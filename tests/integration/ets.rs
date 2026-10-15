@@ -341,6 +341,17 @@ fn matches_patterns_in_set_and_bag_tables_as_pinned_erts() {
     );
 }
 
+#[test]
+fn matches_a_deep_pattern_as_pinned_erts() {
+    // `ets_probe:match_deep/0` matches a pattern 1000000 tuples deep. The
+    // compile and the match use a work stack, as db_match_compile does
+    // (erl_db_util.c:1700-2100), so the Rust stack does not overflow.
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let result = program.execute("ets_probe", "match_deep", &[]).unwrap();
+    assert_eq!(text(&result.term, program.atoms()), "[[x]]");
+    assert_eq!(reference("match_deep"), b"[[x]]\n");
+}
+
 /// Return the `~w` text of `term`, for the terms of `ets_probe:match/0`.
 fn text(term: &Term, atoms: &pbeam_runtime::AtomTable) -> String {
     let join = |terms: &[Term]| {

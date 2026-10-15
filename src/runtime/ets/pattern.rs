@@ -6,20 +6,30 @@
 
 use crate::term::{AtomTable, Term};
 
-/// A compiled match pattern: the tree of the pattern, and the number of its
-/// variables.
+/// A compiled match pattern: the pattern, its flat code, and the number of
+/// its variables. As `db_match_compile` (`erl_db_util.c:1700-2100`) does,
+/// the compile and the match use a work stack and no recursion, so a pattern
+/// of any depth compiles, matches, and drops.
 #[derive(Debug)]
 pub(in crate::runtime) struct Pattern {
-    /// The tree of the whole pattern.
-    root: Node,
+    /// The whole pattern.
+    term: Term,
+    /// One step for each part of the pattern, in the order of a depth-first
+    /// walk from the left.
+    code: Vec<Step>,
+    /// For a tuple pattern, whether each element has no variable, no `'_'`,
+    /// and no map (`db_is_fully_bound`, `erl_db_util.c:3962-4000`).
+    ground: Vec<bool>,
     /// The number of different variables of the pattern.
     variables: usize,
 }
 
-/// One part of a compiled pattern, as one `dmc_one_term` instruction
-/// (`erl_db_util.c:4060-4180`) matches it.
+/// One step of a compiled pattern, as one `dmc_one_term` instruction
+/// (`erl_db_util.c:4060-4180`) matches it. Each step matches the term at the
+/// top of the work stack, and a step of a tuple, a cons cell, or a map puts
+/// the parts of the term on the stack for the next steps.
 #[derive(Debug)]
-enum Node {
+enum Step {
     /// `'_'` (`matchSkip`): each term matches.
     Skip,
     /// The first place of a variable (`matchBind`): each term matches, and
@@ -30,21 +40,17 @@ enum Node {
     /// A later place of a variable (`matchCmp`): the term must be exactly
     /// equal to the value of the variable with this index.
     Compare(usize),
-    /// A term with no variable (`matchEq`, `matchEqBin`, `matchEqRef`, and
-    /// the other constant instructions): the term must be exactly equal to
-    /// it.
+    /// A term that is not a tuple, a list cell, a map, or a variable
+    /// (`matchEq` and the other constant instructions): the term must be
+    /// exactly equal to it.
     Constant(Term),
-    /// A tuple (`matchPushT`): a tuple of the same size whose elements
-    /// match.
-    Tuple(Vec<Node>),
-    /// The cons cells of a list (`matchPushL` for each cell): a list with
-    /// the same number of cells whose heads match the nodes and whose last
-    /// tail matches the last node. One node holds the whole spine, so a long
-    /// list compiles and matches in a loop.
-    List(Vec<Node>, Box<Node>),
-    /// A map (`matchPushM` and `matchKey`): a map that has each key, with a
-    /// value that matches. The map can have other keys.
-    Map(Vec<(Term, Node)>),
+    /// A tuple of this size (`matchPushT`). Its elements come next.
+    Tuple(usize),
+    /// A cons cell (`matchPushL`). Its head comes next, then its tail.
+    Cons,
+    /// A map that has each of these keys (`matchPushM` and `matchKey`). The
+    /// map can have other keys. The values of the keys come next.
+    Map(Vec<Term>),
 }
 
 impl Pattern {
@@ -60,7 +66,7 @@ impl Pattern {
     ///
     /// ```rust,ignore
     /// let pattern = Pattern::compile(&atoms, &Term::tuple(vec![atom("$2"), atom("$1")])).unwrap();
-    /// assert_eq!(pattern.run(&atoms, &[Term::Integer(1), Term::Integer(2)]), Some(Term::list_from([Term::Integer(2), Term::Integer(1)])));
+    /// assert_eq!(pattern.run(&[Term::Integer(1), Term::Integer(2)]), Some(Term::list_from([Term::Integer(2), Term::Integer(1)])));
     /// assert!(Pattern::compile(&atoms, &map_with_key(atom("_"))).is_none());
     /// ```
     pub(in crate::runtime) fn compile(atoms: &AtomTable, pattern: &Term) -> Option<Pattern> {
@@ -69,19 +75,63 @@ impl Pattern {
         numbers.sort_unstable();
         numbers.dedup();
         let mut bound = vec![false; numbers.len()];
-        let root = match (compile_node(atoms, pattern, &numbers, &mut bound)?, pattern) {
-            // The root stays a tuple node, so the key and the size of a
-            // tuple pattern stay known.
-            (Node::Constant(_), Term::Tuple(elements)) => Node::Tuple(
-                elements
-                    .iter()
-                    .map(|element| Node::Constant(element.clone()))
-                    .collect(),
-            ),
-            (root, _) => root,
+        let mut code = Vec::new();
+        let mut stack = vec![pattern];
+        while let Some(term) = stack.pop() {
+            if is_skip(atoms, term) {
+                code.push(Step::Skip);
+                continue;
+            }
+            if let Some(number) = variable(atoms, term) {
+                let index = numbers
+                    .binary_search(&number)
+                    .expect("the walk collected each variable");
+                code.push(if bound[index] {
+                    Step::Compare(index)
+                } else {
+                    Step::Bind(index)
+                });
+                bound[index] = true;
+                continue;
+            }
+            match term {
+                Term::Tuple(elements) => {
+                    code.push(Step::Tuple(elements.len()));
+                    stack.extend(elements.iter().rev());
+                }
+                Term::Cons(_) => {
+                    let (head, tail) = term.cons_cell().expect("a cons term is a cell");
+                    code.push(Step::Cons);
+                    stack.push(tail);
+                    stack.push(head);
+                }
+                Term::Map(map) => {
+                    let mut keys = Vec::new();
+                    let mut values = Vec::new();
+                    for (key, value) in map.iter() {
+                        if is_skip(atoms, key) || variable(atoms, key).is_some() {
+                            return None;
+                        }
+                        keys.push(key.clone());
+                        values.push(value);
+                    }
+                    code.push(Step::Map(keys));
+                    stack.extend(values.into_iter().rev());
+                }
+                _ => code.push(Step::Constant(term.clone())),
+            }
+        }
+        let ground = match pattern {
+            Term::Tuple(elements) => elements
+                .iter()
+                .map(|element| fully_bound(atoms, element))
+                .collect(),
+            _ => Vec::new(),
         };
         Some(Pattern {
-            root,
+            term: pattern.clone(),
+            code,
+            ground,
             variables: numbers.len(),
         })
     }
@@ -98,19 +148,62 @@ impl Pattern {
     /// assert_eq!(pattern.run(&[Term::Integer(1)]), Some(Term::nil()));
     /// ```
     pub(in crate::runtime) fn run(&self, object: &[Term]) -> Option<Term> {
+        let whole;
         let mut values = vec![None; self.variables];
-        let matched = match &self.root {
-            Node::Tuple(nodes) => {
-                nodes.len() == object.len()
-                    && nodes
-                        .iter()
-                        .zip(object)
-                        .all(|(node, term)| node.matches(term, &mut values))
+        let mut terms: Vec<&Term> = Vec::new();
+        let mut code = self.code.iter();
+        match self.code.first() {
+            // The object is a tuple, so a tuple pattern reads its elements
+            // with no new tuple.
+            Some(Step::Tuple(size)) => {
+                if *size != object.len() {
+                    return None;
+                }
+                code.next();
+                terms.extend(object.iter().rev());
             }
-            Node::Skip => true,
-            node => node.matches(&Term::tuple(object.to_vec()), &mut values),
-        };
-        matched.then(|| Term::list_from(values.into_iter().flatten()))
+            _ => {
+                whole = Term::tuple(object.to_vec());
+                terms.push(&whole);
+            }
+        }
+        for step in code {
+            let term = terms.pop().expect("each step has a term");
+            match step {
+                Step::Skip => {}
+                Step::Bind(index) => values[*index] = Some(term.clone()),
+                Step::Compare(index) => {
+                    if values[*index].as_ref() != Some(term) {
+                        return None;
+                    }
+                }
+                Step::Constant(constant) => {
+                    if constant != term {
+                        return None;
+                    }
+                }
+                Step::Tuple(size) => match term {
+                    Term::Tuple(elements) if elements.len() == *size => {
+                        terms.extend(elements.iter().rev());
+                    }
+                    _ => return None,
+                },
+                Step::Cons => {
+                    let (head, tail) = term.cons_cell()?;
+                    terms.push(tail);
+                    terms.push(head);
+                }
+                Step::Map(keys) => {
+                    let Term::Map(map) = term else {
+                        return None;
+                    };
+                    for key in keys.iter().rev() {
+                        terms.push(map.get(key)?);
+                    }
+                }
+            }
+        }
+        Some(Term::list_from(values.into_iter().flatten()))
     }
 
     /// Return the element at the 1-based key position `keypos` of the
@@ -127,12 +220,14 @@ impl Pattern {
     /// assert_eq!(pattern.bound_key(2), None);
     /// ```
     pub(in crate::runtime) fn bound_key(&self, keypos: usize) -> Option<&Term> {
-        let Node::Tuple(nodes) = &self.root else {
+        let Term::Tuple(elements) = &self.term else {
             return None;
         };
-        match nodes.get(keypos.checked_sub(1)?)? {
-            Node::Constant(key) => Some(key),
-            _ => None,
+        let index = keypos.checked_sub(1)?;
+        if *self.ground.get(index)? {
+            elements.get(index)
+        } else {
+            None
         }
     }
 
@@ -148,64 +243,10 @@ impl Pattern {
     /// assert!(!Pattern::compile(&atoms, &atom("$1")).unwrap().matches_nothing(1));
     /// ```
     pub(in crate::runtime) fn matches_nothing(&self, keypos: usize) -> bool {
-        match &self.root {
-            Node::Skip | Node::Bind(_) => false,
-            Node::Tuple(nodes) => nodes.len() < keypos,
+        match self.code.first() {
+            Some(Step::Skip | Step::Bind(_)) => false,
+            Some(Step::Tuple(size)) => *size < keypos,
             _ => true,
-        }
-    }
-}
-
-impl Node {
-    /// Match `term` and set the value of each variable that the node binds
-    /// in `values`.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// let mut values = vec![None];
-    /// assert!(Node::Bind(0).matches(&Term::Integer(1), &mut values));
-    /// assert!(!Node::Compare(0).matches(&Term::Integer(2), &mut values));
-    /// ```
-    fn matches(&self, term: &Term, values: &mut [Option<Term>]) -> bool {
-        match self {
-            Node::Skip => true,
-            Node::Bind(index) => {
-                values[*index] = Some(term.clone());
-                true
-            }
-            Node::Compare(index) => values[*index].as_ref() == Some(term),
-            Node::Constant(constant) => constant == term,
-            Node::Tuple(nodes) => match term {
-                Term::Tuple(elements) => {
-                    nodes.len() == elements.len()
-                        && nodes
-                            .iter()
-                            .zip(elements.iter())
-                            .all(|(node, element)| node.matches(element, values))
-                }
-                _ => false,
-            },
-            Node::List(heads, tail) => {
-                let mut term = term;
-                for head in heads {
-                    let Some((term_head, term_tail)) = term.cons_cell() else {
-                        return false;
-                    };
-                    if !head.matches(term_head, values) {
-                        return false;
-                    }
-                    term = term_tail;
-                }
-                tail.matches(term, values)
-            }
-            Node::Map(pairs) => match term {
-                Term::Map(map) => pairs.iter().all(|(key, node)| {
-                    map.get(key)
-                        .is_some_and(|value| node.matches(value, values))
-                }),
-                _ => false,
-            },
         }
     }
 }
@@ -277,92 +318,32 @@ fn collect_variables(atoms: &AtomTable, term: &Term, numbers: &mut Vec<i32>) {
     }
 }
 
-/// Compile `term` with the sorted variable numbers `numbers`. `bound` marks
-/// each variable that an earlier place binds. Return `None` for a map key
-/// that is a variable or `'_'`.
+/// Return `true` when `term` has no variable, no `'_'`, and no map
+/// (`db_is_fully_bound`, `erl_db_util.c:3962-4000`). The walk uses a work
+/// stack, so a term of any depth gives a result.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let node = compile_node(&atoms, &atom("$1"), &[1], &mut vec![false]);
-/// assert!(matches!(node, Some(Node::Bind(0))));
+/// assert!(fully_bound(&atoms, &Term::tuple(vec![atom("a")])));
+/// assert!(!fully_bound(&atoms, &Term::tuple(vec![atom("_")])));
 /// ```
-fn compile_node(
-    atoms: &AtomTable,
-    term: &Term,
-    numbers: &[i32],
-    bound: &mut [bool],
-) -> Option<Node> {
-    if is_skip(atoms, term) {
-        return Some(Node::Skip);
-    }
-    if let Some(number) = variable(atoms, term) {
-        let index = numbers
-            .binary_search(&number)
-            .expect("the walk collected each variable");
-        let node = if bound[index] {
-            Node::Compare(index)
-        } else {
-            Node::Bind(index)
-        };
-        bound[index] = true;
-        return Some(node);
-    }
-    let node = match term {
-        Term::Tuple(elements) => Node::Tuple(
-            elements
-                .iter()
-                .map(|element| compile_node(atoms, element, numbers, bound))
-                .collect::<Option<_>>()?,
-        ),
-        Term::Cons(_) => {
-            let mut heads = Vec::new();
-            let mut rest = term;
-            while let Some((head, tail)) = rest.cons_cell() {
-                heads.push(compile_node(atoms, head, numbers, bound)?);
-                rest = tail;
+fn fully_bound(atoms: &AtomTable, term: &Term) -> bool {
+    let mut stack = vec![term];
+    while let Some(term) = stack.pop() {
+        match term {
+            Term::Tuple(elements) => stack.extend(elements.iter()),
+            Term::Cons(_) => {
+                let (head, tail) = term.cons_cell().expect("a cons term is a cell");
+                stack.push(tail);
+                stack.push(head);
             }
-            Node::List(heads, Box::new(compile_node(atoms, rest, numbers, bound)?))
+            Term::Map(_) => return false,
+            _ if is_skip(atoms, term) || variable(atoms, term).is_some() => return false,
+            _ => {}
         }
-        Term::Map(map) => Node::Map(
-            map.iter()
-                .map(|(key, value)| {
-                    if is_skip(atoms, key) || variable(atoms, key).is_some() {
-                        return None;
-                    }
-                    Some((key.clone(), compile_node(atoms, value, numbers, bound)?))
-                })
-                .collect::<Option<_>>()?,
-        ),
-        _ => return Some(Node::Constant(term.clone())),
-    };
-    Some(constant(node, term))
-}
-
-/// Return `node` as one constant when it has no variable, no `'_'`, and no
-/// map, so the bound key of a pattern is one term. `term` is the term of the
-/// node.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// let node = constant(Node::Tuple(vec![Node::Constant(atom("a"))]), &Term::tuple(vec![atom("a")]));
-/// assert!(matches!(node, Node::Constant(_)));
-/// ```
-fn constant(node: Node, term: &Term) -> Node {
-    let ground = match &node {
-        Node::Tuple(nodes) => nodes.iter().all(|node| matches!(node, Node::Constant(_))),
-        Node::List(heads, tail) => {
-            heads.iter().all(|node| matches!(node, Node::Constant(_)))
-                && matches!(**tail, Node::Constant(_))
-        }
-        _ => false,
-    };
-    if ground {
-        Node::Constant(term.clone())
-    } else {
-        node
     }
+    true
 }
 
 #[cfg(test)]
