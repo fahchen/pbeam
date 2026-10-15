@@ -9,7 +9,7 @@
 //! is the bytes of the error name, for example `[0 | "eaddrinuse"]`
 //! (`ctl_reply` and `ctl_error`, inet_drv.c:2240-2283). PBeam runs these
 //! requests of `INET_REQ_*` (inet_int.hrl:76-105) for an IPv4 TCP socket
-//! of a `tcp_inet` port, and the requests but `PEER` and `ACCEPT` for an
+//! of a `tcp_inet` port, and the requests but `ACCEPT` for an
 //! IPv4 UDP socket of a `udp_inet` port:
 //!
 //! | Request | Code | Bytes | OK reply |
@@ -43,8 +43,8 @@
 //! A `udp_inet` port runs the requests of `packet_inet_ctl`, which runs
 //! `OPEN`, replies `exbadport` to `LISTEN`, and gives each other request
 //! to `inet_ctl` (inet_drv.c:14564-14892). It reads no datagram: the
-//! socket is not in the idle wait (row "udp_inet ports" of
-//! `docs/erts-differences.md`).
+//! socket of an active port is in the idle wait, and a ready socket stops
+//! the run (row "udp_inet ports" of `docs/erts-differences.md`).
 
 use std::{collections::VecDeque, ffi::c_int, io, os::fd::AsRawFd, time::Duration};
 
