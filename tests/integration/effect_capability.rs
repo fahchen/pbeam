@@ -35,7 +35,7 @@ const INVENTORY: &str = include_str!("../../docs/effect-inventory.md");
 /// Each capability of the column "Capability" of the effect inventory, as
 /// `(entry, kind:operation)`, with the `effect_probe` function that calls
 /// the entry once.
-const PROBES: [(&str, &str, &str); 46] = [
+const PROBES: [(&str, &str, &str); 49] = [
     ("erlang:exit/2", "process:exit_other", "exit_other"),
     ("erlang:link/1", "process:link", "link"),
     ("erlang:monitor/2", "process:monitor", "monitor2"),
@@ -81,6 +81,13 @@ const PROBES: [(&str, &str, &str); 46] = [
     ),
     ("erts_internal:port_close/1", "port:close", "port_close"),
     ("erts_internal:port_info/1", "port:inspect", "port_info"),
+    (
+        "erts_internal:port_control/3",
+        "port:command",
+        "port_control",
+    ),
+    ("erlang:port_set_data/2", "port:command", "port_set_data"),
+    ("erlang:port_get_data/1", "port:inspect", "port_get_data"),
     ("os:getenv/1", "env:read", "getenv"),
     ("os:set_signal/2", "signal:handle", "handle_signal"),
     ("os:set_signal/2", "signal:ignore", "ignore_signal"),

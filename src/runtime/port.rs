@@ -1,15 +1,19 @@
 //! The ports of the node, as the ERTS port table (`erl_ptab.c`) holds the
 //! ports of the spawn driver (`sys/unix/sys_drivers.c`). The scheduler
 //! keeps them as the `Ports` value of its `Resources`, and all processes of
-//! a run share them. PBeam has only `spawn_executable` ports.
+//! a run share them. PBeam has `spawn_executable` ports and `tcp_inet`
+//! driver ports (see [`tcp_inet`]).
+
+pub(super) mod tcp_inet;
 
 use std::{collections::BTreeMap, ffi::c_int};
 
 use super::host::spawn::Child;
 use crate::{
     error::{BeamError, error},
-    term::{PortId, ProcessId},
+    term::{PortId, ProcessId, Term},
 };
+use tcp_inet::TcpInet;
 
 /// The open ports of the node, by port number, and the number of the next
 /// port. A port leaves the table when it closes, as `kill_port` removes it
@@ -22,9 +26,8 @@ pub(super) struct Ports {
     next: u64,
 }
 
-/// One port of `open_port({spawn_executable, Name}, Settings)`: the ERTS
-/// `Port` (`erl_port.h`) with the data of the spawn driver
-/// (`ErtsSysDriverData`, `sys_drivers.c:108-121`).
+/// One open port: the ERTS `Port` (`erl_port.h`) with the data of its
+/// driver.
 #[derive(Debug)]
 pub(super) struct Port {
     /// The connected process, which gets the messages of the port
@@ -34,22 +37,44 @@ pub(super) struct Port {
     /// other link or unlink of a port, and the exit of the owner closes the
     /// port. Thus an open port always has its link to the owner.
     pub(super) owner: ProcessId,
-    /// The native bytes of the program path, as `port_info/1` gives them in
-    /// `name` (`erl_bif_info.c:3767-3776`).
+    /// The native bytes of the program path or of the driver name, as
+    /// `port_info/1` gives them in `name` (`erl_bif_info.c:3767-3776`).
     pub(super) name: Vec<u8>,
+    /// The term of `erlang:port_set_data/2`, `undefined` at the open
+    /// (`erl_bif_port.c:646`). The port owns a copy of the term; it goes
+    /// with the port when the port closes.
+    pub(super) data: Term,
+    /// The bytes that the port sent to the owner (`bytes_in`).
+    pub(super) input: u64,
+    /// The bytes that the port wrote to the child (`bytes_out`).
+    pub(super) output: u64,
+    /// The driver of the port and its data.
+    pub(super) driver: Driver,
+}
+
+/// The driver of a port and the data of the driver.
+#[derive(Debug)]
+pub(super) enum Driver {
+    /// A port of `open_port({spawn_executable, Name}, Settings)`.
+    Spawn(Spawn),
+    /// A port of `open_port({spawn_driver, "tcp_inet"}, [binary])`.
+    TcpInet(TcpInet),
+}
+
+/// The data of the spawn driver (`ErtsSysDriverData`,
+/// `sys_drivers.c:108-121`).
+#[derive(Debug)]
+pub(super) struct Spawn {
     /// True with the `exit_status` option: the port sends
     /// `{Port, {exit_status, Status}}` before it closes at the end of file.
     pub(super) exit_status: bool,
-    /// The started program and the parent ends of its pipes.
+    /// The started program and the parent ends of its pipes. Dropping the
+    /// port closes the pipes.
     pub(super) child: Child,
     /// True after the output pipe gave its end of file, while the port
     /// waits for the exit status of the child (`dd->alive == 1`,
     /// `sys_drivers.c:1232-1240`).
     pub(super) end_of_file: bool,
-    /// The bytes that the port sent to the owner (`bytes_in`).
-    pub(super) input: u64,
-    /// The bytes that the port wrote to the child (`bytes_out`).
-    pub(super) output: u64,
 }
 
 /// What the IO poll found on one fd of a port.
@@ -57,7 +82,8 @@ pub(super) struct Port {
 pub(super) enum PortEvent {
     /// The child wrote these bytes.
     Data(Vec<u8>),
-    /// The output pipe gave its end of file.
+    /// The output pipe of a port without `exit_status` gave its end of
+    /// file.
     EndOfFile,
     /// The child exited with this exit status, or `None` when the host
     /// reaped the child (see [`Child::read_status`]).
@@ -123,8 +149,9 @@ impl Ports {
     }
 
     /// Return the fds that the IO poll waits for: the output pipe of each
-    /// port before its end of file, and then its status pipe. Only a port
-    /// with `exit_status` stays open after its end of file.
+    /// spawn port before its end of file, and then its status pipe. Only a
+    /// port with `exit_status` stays open after its end of file. A
+    /// `tcp_inet` port has no fd in the wait.
     ///
     /// # Examples
     ///
@@ -134,12 +161,10 @@ impl Ports {
     pub(super) fn wait_fds(&self) -> Vec<c_int> {
         self.by_id
             .values()
-            .map(|port| {
-                if port.end_of_file {
-                    port.child.status_fd()
-                } else {
-                    port.child.output_fd()
-                }
+            .filter_map(|port| match &port.driver {
+                Driver::Spawn(spawn) if spawn.end_of_file => Some(spawn.child.status_fd()),
+                Driver::Spawn(spawn) => Some(spawn.child.output_fd()),
+                Driver::TcpInet(_) => None,
             })
             .collect()
     }
@@ -149,6 +174,9 @@ impl Ports {
     /// (`sys_drivers.c:1267-1347`). Return `None` when no port waits for
     /// the fd, and when the read of the output pipe fails, for example with
     /// `EINTR`: the port then waits again (`sys_drivers.c:1340-1342`).
+    /// The end of file of a port with `exit_status` also returns `None`:
+    /// the port then waits for the exit status of the child (`dd->alive ==
+    /// 1`, `sys_drivers.c:1232-1240`).
     ///
     /// # Examples
     ///
@@ -156,14 +184,26 @@ impl Ports {
     /// assert_eq!(ports.read(fd), Some((PortId(0), PortEvent::Data(b"hi".to_vec()))));
     /// ```
     pub(super) fn read(&mut self, fd: c_int) -> Option<(PortId, PortEvent)> {
-        let (&id, port) = self.by_id.iter_mut().find(|(_, port)| {
-            port.child.output_fd() == fd || (port.end_of_file && port.child.status_fd() == fd)
-        })?;
-        if port.end_of_file {
-            return Some((id, PortEvent::ExitStatus(port.child.read_status())));
+        let (id, spawn) = self
+            .by_id
+            .iter_mut()
+            .find_map(|(&id, port)| match &mut port.driver {
+                Driver::Spawn(spawn)
+                    if spawn.child.output_fd() == fd
+                        || (spawn.end_of_file && spawn.child.status_fd() == fd) =>
+                {
+                    Some((id, spawn))
+                }
+                _ => None,
+            })?;
+        if spawn.end_of_file {
+            return Some((id, PortEvent::ExitStatus(spawn.child.read_status())));
         }
-        let bytes = port.child.read_output().ok()?;
-        let event = if bytes.is_empty() {
+        let bytes = spawn.child.read_output().ok()?;
+        let event = if bytes.is_empty() && spawn.exit_status {
+            spawn.end_of_file = true;
+            return None;
+        } else if bytes.is_empty() {
             PortEvent::EndOfFile
         } else {
             PortEvent::Data(bytes)

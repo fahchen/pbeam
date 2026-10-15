@@ -7,6 +7,7 @@ use crate::runtime::host;
 use crate::runtime::interpreter::DEFAULT_ERROR_HANDLER;
 use crate::runtime::interpreter::code_table::Finish;
 use crate::runtime::local_node;
+use crate::runtime::port::Ports;
 use crate::runtime::process::LinkId;
 use crate::runtime::process::{Flush, TimerReference};
 use crate::runtime::scheduler::{AliasMode, CONTEXT_REDS, Flushed, MonitorOptions, MonitorTarget};
@@ -3394,4 +3395,70 @@ fn is_slogan(status: &Term) -> bool {
     // The rest is `[]` after the last element of a proper list, and a cons
     // cell after 1023 elements of a longer list.
     characters && elements.rest().is_list()
+}
+
+/// Run `erlang:port_set_data(Port, Data)`, as `port_set_data_2` does
+/// (`erl_bif_port.c:687-724`): the open port keeps a copy of `Data`, and
+/// the BIF returns `true`. A term that is not an open port raises `badarg`;
+/// an atom names no port, because PBeam registers no port. The BIF is not
+/// a port signal, so it does not trap. After the port check, a caller
+/// without a `port` capability with `command` that permits the name of the
+/// port gets `error:capability_denied`, and the data stays.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = port_set_data(scheduler, &Term::Port(port), &Term::static_atom("inet_tcp"))?;
+/// assert_eq!(result, BifResult::Value(Term::static_atom("true")));
+/// ```
+///
+/// # Errors
+///
+/// The atom `capability_denied` in a full atom table.
+pub(super) fn port_set_data(
+    scheduler: &mut Scheduler,
+    port: &Term,
+    data: &Term,
+) -> Result<BifResult, BeamError> {
+    let Some(id) = erts_internal::open_port_id(scheduler, port) else {
+        return Ok(BifResult::badarg());
+    };
+    if let Some(denied) = erts_internal::port_denial(scheduler, id, Operation::Command)? {
+        return Ok(denied);
+    }
+    let ports = scheduler.resources.borrow_mut::<Ports>();
+    ports.get_mut(id).expect("the port is open").data = data.clone();
+    Ok(BifResult::Value(Term::static_atom("true")))
+}
+
+/// Run `erlang:port_get_data(Port)`, as `port_get_data_1` does
+/// (`erl_bif_port.c:726-751`): return the data of `port_set_data/2` of the
+/// open port, or `undefined` before it. A term that is not an open port
+/// raises `badarg`. After the port check, a caller without a `port`
+/// capability with `inspect` that permits the name of the port gets
+/// `error:capability_denied`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = port_get_data(scheduler, &Term::Port(port))?;
+/// assert_eq!(result, BifResult::Value(Term::static_atom("undefined")));
+/// ```
+///
+/// # Errors
+///
+/// The atom `capability_denied` in a full atom table.
+pub(super) fn port_get_data(
+    scheduler: &mut Scheduler,
+    port: &Term,
+) -> Result<BifResult, BeamError> {
+    let Some(id) = erts_internal::open_port_id(scheduler, port) else {
+        return Ok(BifResult::badarg());
+    };
+    if let Some(denied) = erts_internal::port_denial(scheduler, id, Operation::Inspect)? {
+        return Ok(denied);
+    }
+    let ports = scheduler.resources.borrow_mut::<Ports>();
+    let data = ports.get(id).expect("the port is open").data.clone();
+    Ok(BifResult::Value(data))
 }

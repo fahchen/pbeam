@@ -12,23 +12,23 @@ use super::{LinkId, Scheduler};
 use crate::{
     error::{BeamError, error},
     runtime::{
-        host::spawn::Child,
-        port::{Port, PortEvent, Ports},
+        port::{Driver, Port, PortEvent, Ports},
         signal::Signal,
     },
     term::{PortId, ProcessId, Term},
 };
 
 impl Scheduler {
-    /// Open a port for the program `child`, owned by and linked to the
-    /// current process, as `erts_internal_open_port_2` does
+    /// Open a port with the name `name` and the driver `driver`, owned by
+    /// and linked to the current process, as `erts_internal_open_port_2` does
     /// (`erl_bif_port.c:60-130`). The link goes into both the port and the
     /// link tree of the process at once, as `erts_link_tree_insert` does.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let port = scheduler.open_port(b"/bin/sh".to_vec(), true, child)?;
+    /// let spawn = Spawn { exit_status: true, child, end_of_file: false };
+    /// let port = scheduler.open_port(b"/bin/sh".to_vec(), Driver::Spawn(spawn))?;
     /// assert_eq!(port, PortId(0));
     /// ```
     ///
@@ -38,18 +38,16 @@ impl Scheduler {
     pub(in crate::runtime) fn open_port(
         &mut self,
         name: Vec<u8>,
-        exit_status: bool,
-        child: Child,
+        driver: Driver,
     ) -> Result<PortId, BeamError> {
         let owner = self.current_process_mut().id;
         let port = Port {
             owner,
             name,
-            exit_status,
-            child,
-            end_of_file: false,
+            data: Term::static_atom("undefined"),
             input: 0,
             output: 0,
+            driver,
         };
         let id = self.resources.borrow_mut::<Ports>().insert(port)?;
         self.current_process_mut().links.insert(LinkId::Port(id), 0);
@@ -92,7 +90,6 @@ impl Scheduler {
                 port.input += bytes.len() as u64;
                 self.deliver(owner, port_message(id, "data", Term::binary(bytes)));
             }
-            PortEvent::EndOfFile if port.exit_status => port.end_of_file = true,
             PortEvent::EndOfFile => self.close_port(id, Term::static_atom("normal")),
             PortEvent::ExitStatus(Some(status)) => {
                 let status = Term::Integer(status.into());
