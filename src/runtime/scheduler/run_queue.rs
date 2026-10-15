@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 use crate::{runtime::process::Priority, term::ProcessId};
 
@@ -8,13 +8,15 @@ const RESCHEDULE_LOW: u8 = 8;
 
 /// The process run queue of the scheduler, as the process part of the ERTS
 /// `ErtsRunQueue` (`erl_process.h`): one queue for `max`, one for `high`,
-/// and one that `normal` and `low` processes share. Each entry of the
-/// shared queue holds the `schedule_count` of its process.
+/// and one that `normal` and `low` processes share. The `schedule_count`
+/// of each `low` process in the shared queue is in `low`; a `normal`
+/// process has the count 1, so it needs no entry.
 #[derive(Debug, Default)]
 pub(super) struct RunQueue {
     max: VecDeque<ProcessId>,
     high: VecDeque<ProcessId>,
-    normal: VecDeque<(ProcessId, u8)>,
+    normal: VecDeque<ProcessId>,
+    low: HashMap<ProcessId, u8>,
 }
 
 impl RunQueue {
@@ -32,8 +34,11 @@ impl RunQueue {
         match priority {
             Priority::Max => self.max.push_back(id),
             Priority::High => self.high.push_back(id),
-            Priority::Normal => self.normal.push_back((id, 1)),
-            Priority::Low => self.normal.push_back((id, RESCHEDULE_LOW)),
+            Priority::Normal => self.normal.push_back(id),
+            Priority::Low => {
+                self.normal.push_back(id);
+                self.low.insert(id, RESCHEDULE_LOW);
+            }
         }
     }
 
@@ -57,14 +62,23 @@ impl RunQueue {
         if let Some(id) = self.high.pop_front() {
             return Some(id);
         }
+        // A queue with no `low` process takes its head, as the count 1 of
+        // each `normal` process gives.
+        if self.low.is_empty() {
+            return self.normal.pop_front();
+        }
         loop {
+            let id = *self.normal.front()?;
             let last = self.normal.len() == 1;
-            let (_, count) = self.normal.front_mut()?;
-            *count -= 1;
-            if *count == 0 || last {
-                return self.normal.pop_front().map(|(id, _)| id);
+            if let Some(count) = self.low.get_mut(&id) {
+                *count -= 1;
+                if *count > 0 && !last {
+                    self.normal.rotate_left(1);
+                    continue;
+                }
+                self.low.remove(&id);
             }
-            self.normal.rotate_left(1);
+            return self.normal.pop_front();
         }
     }
 
@@ -78,12 +92,7 @@ impl RunQueue {
     /// ```
     #[cfg(test)]
     pub(super) fn ids(&self) -> Vec<ProcessId> {
-        let normal = self.normal.iter().map(|(id, _)| *id);
-        self.max
-            .iter()
-            .chain(&self.high)
-            .copied()
-            .chain(normal)
-            .collect()
+        let queues = self.max.iter().chain(&self.high).chain(&self.normal);
+        queues.copied().collect()
     }
 }
