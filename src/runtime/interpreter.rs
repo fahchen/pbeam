@@ -2026,11 +2026,20 @@ impl BeamProgram {
                 Instruction::Unsupported(opcode) => {
                     return Err(error(format!("unsupported BEAM opcode {opcode}")));
                 }
+                // ERTS `i_func_info` raises class `error` with the reason
+                // `function_clause` (`emit_i_func_info_shared` in
+                // `jit/arm/beam_asm_module.cpp:484-497`; emu
+                // `beam_emu.c:575-580`). See [`function_clause`].
                 Instruction::FunctionInfo {
                     module,
                     name,
                     arity,
-                } => return Err(error(format!("function clause {module}:{name}/{arity}"))),
+                } => {
+                    if let Some(outcome) = function_clause(scheduler, module, name, *arity)? {
+                        return Ok(outcome);
+                    }
+                    cursor.refresh(scheduler)?;
+                }
             }
         }
     }
@@ -4902,6 +4911,66 @@ fn raise_binary_failure(
     ))
 }
 
+/// Raise `error:function_clause` for the function `name/arity` of `module`
+/// at its `func_info`, as ERTS `i_func_info` does: it sets the reason and
+/// the current MFA (`emit_i_func_info_shared` in
+/// `jit/arm/beam_asm_module.cpp:484-497`). The first frame of the stack
+/// trace is `{Module, Function, Args, []}`, where `Args` is the list of
+/// the `arity` argument registers (`save_stacktrace`,
+/// `beam_common.c:1011-1024`; `make_arglist`, `beam_common.c:1186-1195`).
+/// The next frames are the frames of the callers, as in `erlang:error/2`:
+/// the function has no frame of its own yet, so its caller is the next
+/// frame. The stack trace keeps at most `backtrace_depth` frames, and one
+/// frame for the depth 0 (`beam_common.c:884-885`). PBeam keeps no line
+/// table, so each location is `[]` (row "Exception stack trace" of
+/// `docs/erts-differences.md`). Return the outcome when the process exits.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // x0 = x, x1 = 1 at the func_info of `pick/2`.
+/// let outcome = function_clause(scheduler, "probe", "pick", 2)?;
+/// // The stack trace starts with {Module, pick, [x, 1], []}.
+/// ```
+///
+/// # Errors
+///
+/// An argument register that is not set or holds a match context, or a
+/// caller frame with no `func_info` before its instruction, is a runtime
+/// invariant error.
+fn function_clause(
+    scheduler: &mut Scheduler,
+    module: &str,
+    name: &str,
+    arity: u32,
+) -> Result<Option<Outcome>, BeamError> {
+    let arguments = call_arguments(&scheduler.current_process().registers, arity)?;
+    let depth = scheduler.backtrace_depth.max(1);
+    let atom = |name: &str| {
+        scheduler
+            .atoms
+            .get(name)
+            .map(Term::Atom)
+            .ok_or_else(|| error(format!("invariant error: atom table does not hold {name}")))
+    };
+    let current = Term::tuple(vec![
+        atom(module)?,
+        atom(name)?,
+        Term::list_from(arguments),
+        Term::nil(),
+    ]);
+    // The active frame is the frame of the function, at its entry or at a
+    // jump to its `func_info`, so the caller frames start below it.
+    let mut frames = vec![current];
+    frames.extend(mfa_stacktrace(scheduler, 1)?.into_iter().take(depth - 1));
+    Ok(raise_with_stacktrace(
+        scheduler.current_process_mut(),
+        ExceptionClass::Error,
+        Term::static_atom("function_clause"),
+        Term::list_from(frames),
+    ))
+}
+
 /// Return the module atom, the function atom, and the arity of the function
 /// that holds the last instruction that the active frame ran, from the
 /// `func_info` before it. ERTS finds the function of a code address in the
@@ -4971,17 +5040,19 @@ fn frame_function<'a>(
 }
 
 /// Return the stack trace frames of the current process, from the active
-/// frame to the first frame, as ERTS `build_stacktrace` walks the saved
-/// continuation pointers of an exception (`beam_common.c:1205-1292`). Each
-/// frame is `{Module, Function, Arity, []}`, as `erts_build_mfa_item` gives
-/// a frame without arguments (`utils.c:3448-3455`). PBeam keeps no line
+/// frame to the first frame, without the `skip` newest frames, as ERTS
+/// `build_stacktrace` walks the saved continuation pointers of an
+/// exception (`beam_common.c:1205-1292`). Adjacent frames at the same
+/// return position give one frame. Each frame is
+/// `{Module, Function, Arity, []}`, as `erts_build_mfa_item` gives a
+/// frame without arguments (`utils.c:3448-3455`). PBeam keeps no line
 /// table, so each location is `[]` (row "Exception stack trace" of
 /// `docs/erts-differences.md`).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let frames = mfa_stacktrace(&mut scheduler)?;
+/// let frames = mfa_stacktrace(&mut scheduler, 0)?;
 /// assert_eq!(frames.len(), scheduler.current_process().frames.len());
 /// ```
 ///
@@ -4989,14 +5060,21 @@ fn frame_function<'a>(
 ///
 /// A module that the code table does not hold, or an instruction with no
 /// `func_info` before it, is a runtime invariant error.
-fn mfa_stacktrace(scheduler: &mut Scheduler) -> Result<Vec<Term>, BeamError> {
-    let frames: Vec<Frame> = scheduler
+fn mfa_stacktrace(scheduler: &mut Scheduler, skip: usize) -> Result<Vec<Term>, BeamError> {
+    let mut frames: Vec<Frame> = scheduler
         .current_process()
         .frames
         .iter()
         .rev()
+        .skip(skip)
         .cloned()
         .collect();
+    // ERTS records one frame for each run of equal continuation pointers,
+    // so a recursion gives one frame (`gather_stacktrace`,
+    // `beam_common.c:817-834`).
+    frames.dedup_by(|frame, previous| {
+        frame.module_id == previous.module_id && frame.next_instruction == previous.next_instruction
+    });
     let mut stacktrace = Vec::with_capacity(frames.len());
     for frame in frames {
         let module = Rc::clone(scheduler.code.module_by_id(frame.module_id)?);

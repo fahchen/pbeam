@@ -532,7 +532,7 @@ pub(super) fn error_2(
     // (`bif.c:1626-1637`). `error_handler:crash/1` calls `tl/1` on this
     // stack trace (`error_handler.erl:172-178`).
     let depth = context.scheduler.backtrace_depth;
-    let mut frames = mfa_stacktrace(context.scheduler)?;
+    let mut frames = mfa_stacktrace(context.scheduler, 0)?;
     frames.truncate(depth.max(1));
     frames[0] = Term::tuple(vec![module, function, args, Term::nil()]);
     Ok(BifResult::RaiseWithStacktrace {
