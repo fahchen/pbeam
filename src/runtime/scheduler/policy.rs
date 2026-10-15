@@ -493,7 +493,7 @@ impl Scheduler {
     /// assert!(scheduler.policy_current().is_some());
     /// ```
     fn policy_current(&self) -> Option<&PolicyProcess> {
-        let current = self.current_process?;
+        let current = self.processes.current_id()?;
         self.policy.as_ref().filter(|policy| policy.id == current)
     }
 
