@@ -1,6 +1,6 @@
 -module(ets_probe).
 -export([new/0, owner_exit/0, insert/0, lookup/0, lookup_loop/0, insert_loop/0,
-         access/0, main/0, env/0, unsupported/1, own/2]).
+         access/0, main/0, env/0, bag/0, info/0, unsupported/1, own/2]).
 
 %% ets:new/2 return values and badarg cases (erl_db.c:2555-2840).
 new() ->
@@ -152,12 +152,45 @@ env() ->
      ets:insert(ac_tab, {{env, ets_probe, key}, value}),
      application:get_env(ets_probe, key, default)].
 
+%% bag and duplicate_bag tables, and [bag, set], which makes a bag
+%% (erl_db.c:2599-2611; erl_db_hash.c:1384-1664).
+bag() ->
+    [bag(Options) || Options <- [[bag], [duplicate_bag], [bag, set]]].
+
+bag(Options) ->
+    T = ets:new(ets_probe, Options),
+    true = ets:insert(T, {k, 1}),
+    true = ets:insert(T, {k, 2}),
+    true = ets:insert(T, {k, 1}),
+    true = ets:insert(T, [{k, 3}, {k, 2}, {k, 4, x}, {k, 3}]),
+    true = ets:insert(T, [{j, 1}]),
+    [ets:info(T, type),
+     ets:lookup(T, k),
+     ets:lookup_element(T, k, 2, d),
+     ets:lookup_element(T, missing, 3, d),
+     catch_error(fun() -> ets:lookup_element(T, k, 3, d) end),
+     ets:member(T, k),
+     ets:delete(T, k),
+     ets:lookup(T, k),
+     ets:member(T, k),
+     ets:lookup(T, j)].
+
+%% ets:info/2 for the item type (erl_db.c:4523-4579, 5447-5469).
+info() ->
+    T = ets:new(ets_probe, []),
+    [ets:info(T, type),
+     ets:info(ets:new(ets_probe, [public, bag]), type),
+     ets:info(ets_probe_missing, type),
+     ets:info(ets_probe_missing, bogus),
+     [catch_error(fun() -> ets:info(Table, Item) end)
+      || {Table, Item} <- [{T, bogus}, {T, 1}, {1, type}, {{T}, type}]]].
+
 %% Calls that ERTS runs and PBeam does not support yet.
 unsupported(Case) ->
     case Case of
-        bag -> ets:new(ets_probe, [bag]);
-        set_after_bag -> ets:new(ets_probe, [bag, set]);
-        duplicate_bag -> ets:new(ets_probe, [duplicate_bag]);
+        info_size -> ets:info(ets:new(ets_probe, []), size);
+        info_binary -> ets:info(ets:new(ets_probe, []), binary);
+        info_reference -> ets:info(make_ref(), type);
         ordered_set -> ets:new(ets_probe, [ordered_set]);
         heir -> ets:new(ets_probe, [{heir, element(1, start([]))}]);
         heir_data -> ets:new(ets_probe, [{heir, element(1, start([])), data}]);

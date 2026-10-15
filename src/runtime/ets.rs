@@ -29,7 +29,8 @@ const INITIAL_INDEX_SLOTS: usize = 8;
 /// reference that `make_btid` (`erl_db.c:2811`) gives it, also a named
 /// table, and finds a named table by its atom in the meta name table. An
 /// atom name is unique in one atom table, so its text identifies it, as in
-/// `Scheduler::names`. PBeam supports only `set` tables.
+/// `Scheduler::names`. PBeam supports `set`, `bag`, and `duplicate_bag`
+/// tables.
 #[derive(Debug, Default)]
 pub(super) struct EtsTables {
     /// Each live table by its table reference.
@@ -44,11 +45,14 @@ pub(super) struct EtsTables {
     freeing: HashMap<ProcessId, Vec<i32>>,
 }
 
-/// One ETS `set` table.
+/// One ETS hash table: a `set`, a `bag`, or a `duplicate_bag` table.
 #[derive(Debug)]
 pub(super) struct Table {
     /// The process that owns the table, as `tb->common.owner`.
     owner: ProcessId,
+    /// The table type, as `tb->common.status & (DB_SET | DB_BAG |
+    /// DB_DUPLICATE_BAG)`.
+    table_type: TableType,
     /// Which other processes can read and write the table.
     access: Access,
     /// The 1-based key position, as the C `int` `tb->common.keypos`
@@ -63,8 +67,15 @@ pub(super) struct Table {
     objects: Vec<Option<Vec<Term>>>,
     /// The free slots, last in first out, so a later insert reuses them.
     free: Vec<usize>,
-    /// The stored key hash of each key to its slot. Look up a key through
-    /// this index, not by a walk of the slots.
+    /// For each allocated slot, the slot of the next older object with the
+    /// same key, or `EMPTY` for the oldest object of its key. A `set` table
+    /// has one object for each key, so each live slot holds `EMPTY`. The
+    /// objects of one key are a chain from the newest to the oldest object,
+    /// as the ERTS hash chain of a bag puts a new object before the other
+    /// objects of its key (`erl_db_hash.c:1447-1452`).
+    older: Vec<usize>,
+    /// The stored key hash of each key to the slot of its newest object.
+    /// Look up a key through this index, not by a walk of the slots.
     index: KeyIndex,
     /// The number of active buckets of the ERTS hash table (`nactive`). It
     /// gives the number of slots and the slot of each key, so the exit of
@@ -77,6 +88,36 @@ pub(super) struct Table {
     /// locks (`erl_db.c:2656-2657`; `erl_db_util.h:388-389`), so the object
     /// count of these decisions is exact.
     buckets: usize,
+}
+
+/// The type of a hash table: the part of `tb->common.status` that
+/// `ets:new/2` sets from its type option (`erl_db.c:2599-2611`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TableType {
+    /// `DB_SET`: one object for each key.
+    Set,
+    /// `DB_BAG`: objects with one key that are not exactly equal.
+    Bag,
+    /// `DB_DUPLICATE_BAG`: objects with one key, also exactly equal ones.
+    DuplicateBag,
+}
+
+impl TableType {
+    /// Return the name of the type, as `ets:info(Table, type)` gives it
+    /// (`table_info`, `erl_db.c:5457-5469`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(TableType::DuplicateBag.name(), "duplicate_bag");
+    /// ```
+    pub(super) fn name(self) -> &'static str {
+        match self {
+            TableType::Set => "set",
+            TableType::Bag => "bag",
+            TableType::DuplicateBag => "duplicate_bag",
+        }
+    }
 }
 
 /// The access mode of a table: `tb->common.status & (DB_PUBLIC |
@@ -112,7 +153,7 @@ impl EtsTables {
     /// ```rust,ignore
     /// let mut tables = EtsTables::default();
     /// assert!(!tables.name_in_use("ac_tab"));
-    /// tables.create(Reference(0), Some("ac_tab"), Table::new(ProcessId(0), Access::Public, 1));
+    /// tables.create(Reference(0), Some("ac_tab"), Table::new(ProcessId(0), Access::Public, 1, TableType::Set));
     /// assert!(tables.name_in_use("ac_tab"));
     /// ```
     pub(super) fn name_in_use(&self, name: &str) -> bool {
@@ -126,8 +167,8 @@ impl EtsTables {
     ///
     /// ```rust,ignore
     /// let mut tables = EtsTables::default();
-    /// tables.create(Reference(0), None, Table::new(ProcessId(0), Access::Protected, 1));
-    /// tables.create(Reference(1), Some("ac_tab"), Table::new(ProcessId(0), Access::Public, 1));
+    /// tables.create(Reference(0), None, Table::new(ProcessId(0), Access::Protected, 1, TableType::Set));
+    /// tables.create(Reference(1), Some("ac_tab"), Table::new(ProcessId(0), Access::Public, 1, TableType::Set));
     /// assert!(tables.name_in_use("ac_tab"));
     /// ```
     pub(super) fn create(&mut self, id: Reference, name: Option<&str>, table: Table) {
@@ -146,7 +187,7 @@ impl EtsTables {
     ///
     /// ```rust,ignore
     /// let mut tables = EtsTables::default();
-    /// let mut table = Table::new(ProcessId(0), Access::Public, 1);
+    /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
     /// let atoms = AtomTable::new();
     /// table.insert(&atoms, vec![Term::static_atom("k"), Term::tuple(vec![Term::Integer(1)])]);
     /// tables.create(Reference(1), None, table);
@@ -174,7 +215,7 @@ impl EtsTables {
     ///
     /// ```rust,ignore
     /// let mut tables = EtsTables::default();
-    /// tables.create(Reference(0), Some("logger"), Table::new(ProcessId(0), Access::Private, 1));
+    /// tables.create(Reference(0), Some("logger"), Table::new(ProcessId(0), Access::Private, 1, TableType::Set));
     /// assert_eq!(tables.whereis("logger"), Some(Reference(0)));
     /// assert_eq!(tables.whereis("missing"), None);
     /// ```
@@ -194,7 +235,7 @@ impl EtsTables {
     ///
     /// ```rust,ignore
     /// let mut tables = EtsTables::default();
-    /// tables.create(Reference(0), Some("ac_tab"), Table::new(ProcessId(0), Access::Protected, 1));
+    /// tables.create(Reference(0), Some("ac_tab"), Table::new(ProcessId(0), Access::Protected, 1, TableType::Set));
     /// let name = Term::static_atom("ac_tab");
     /// assert!(tables.table(&name, ProcessId(1), Operation::Read).is_some());
     /// assert!(tables.table(&name, ProcessId(1), Operation::Write).is_none());
@@ -228,7 +269,7 @@ impl EtsTables {
     ///
     /// ```rust,ignore
     /// let mut tables = EtsTables::default();
-    /// tables.create(Reference(0), Some("ac_tab"), Table::new(ProcessId(0), Access::Private, 1));
+    /// tables.create(Reference(0), Some("ac_tab"), Table::new(ProcessId(0), Access::Private, 1, TableType::Set));
     /// let atoms = AtomTable::new();
     /// assert!(tables.find(&atoms, &Term::static_atom("ac_tab")).is_some_and(|(id, _)| id == Reference(0)));
     /// assert!(tables.find(&atoms, &Term::Reference(Reference(1))).is_none());
@@ -263,7 +304,7 @@ impl EtsTables {
     ///
     /// ```rust,ignore
     /// let mut tables = EtsTables::default();
-    /// tables.create(Reference(0), Some("ac_tab"), Table::new(ProcessId(1), Access::Public, 1));
+    /// tables.create(Reference(0), Some("ac_tab"), Table::new(ProcessId(1), Access::Public, 1, TableType::Set));
     /// assert_eq!(tables.delete_owned(&AtomTable::new(), ProcessId(1), 100), Some(68));
     /// assert!(!tables.name_in_use("ac_tab"));
     /// ```
@@ -303,22 +344,31 @@ impl EtsTables {
 }
 
 impl Table {
-    /// Return an empty table that the process `owner` owns, with the access
-    /// mode `access` and the truncated key position `keypos`.
+    /// Return an empty table of the type `table_type` that the process
+    /// `owner` owns, with the access mode `access` and the truncated key
+    /// position `keypos`.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let table = Table::new(ProcessId(0), Access::Protected, 1);
+    /// let table = Table::new(ProcessId(0), Access::Protected, 1, TableType::Bag);
     /// assert_eq!(table.keypos(), 1);
+    /// assert_eq!(table.table_type(), TableType::Bag);
     /// ```
-    pub(super) fn new(owner: ProcessId, access: Access, keypos: i32) -> Table {
+    pub(super) fn new(
+        owner: ProcessId,
+        access: Access,
+        keypos: i32,
+        table_type: TableType,
+    ) -> Table {
         Table {
             owner,
+            table_type,
             access,
             keypos,
             objects: Vec::new(),
             free: Vec::new(),
+            older: Vec::new(),
             index: KeyIndex::default(),
             buckets: FIRST_SEGMENT_SLOTS,
         }
@@ -329,54 +379,101 @@ impl Table {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(Table::new(ProcessId(0), Access::Public, 2).keypos(), 2);
+    /// assert_eq!(Table::new(ProcessId(0), Access::Public, 2, TableType::Set).keypos(), 2);
     /// ```
     pub(super) fn keypos(&self) -> i32 {
         self.keypos
     }
 
-    /// Add the object with the elements `object`. An object with an exactly
-    /// equal key replaces the old object, as `db_put_hash`
-    /// (`erl_db_hash.c:1384-1410`) does in a `set` table. A new key that
-    /// makes the objects more than the buckets splits one bucket
-    /// (`erl_db_hash.c:1349-1354`). The buckets are never fewer than the
-    /// objects, so one split is enough. The caller makes sure that the key
-    /// position is at least 1 and at most the size of the object.
+    /// Return the table type.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut table = Table::new(ProcessId(0), Access::Public, 1);
-    /// let atoms = AtomTable::new();
-    /// table.insert(&atoms, vec![Term::static_atom("k"), Term::Integer(1)]);
-    /// table.insert(&atoms, vec![Term::static_atom("k"), Term::Integer(2)]);
-    /// assert_eq!(table.object(&atoms, &Term::static_atom("k")), Some(&[Term::static_atom("k"), Term::Integer(2)][..]));
+    /// let table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
+    /// assert_eq!(table.table_type(), TableType::Set);
     /// ```
-    pub(super) fn insert(&mut self, atoms: &AtomTable, object: Vec<Term>) {
+    pub(super) fn table_type(&self) -> TableType {
+        self.table_type
+    }
+
+    /// Add the object with the elements `object`, as `db_put_hash`
+    /// (`erl_db_hash.c:1384-1462`) does, and return the objects that the
+    /// insert compared with `object` and found not exactly equal.
+    ///
+    /// - In a `set` table, an object with an exactly equal key replaces the
+    ///   old object (`erl_db_hash.c:1396-1411`).
+    /// - In a `bag` table, the insert compares `object` with each object of
+    ///   its key, from the newest to the oldest, and an exactly equal object
+    ///   stops it with no change (`erl_db_hash.c:1422-1442`). Each object
+    ///   that is not equal counts.
+    /// - In a `duplicate_bag` table, the insert compares nothing.
+    ///
+    /// A new object goes before the other objects of its key, so a lookup
+    /// that reads the chain from the end gives the insertion order
+    /// (`erl_db_hash.c:1447-1452`). A new object that makes the objects more
+    /// than the buckets splits one bucket (`erl_db_hash.c:1453-1461`). The
+    /// buckets are never fewer than the objects, so one split is enough. The
+    /// caller makes sure that the key position is at least 1 and at most
+    /// the size of the object.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Bag);
+    /// let atoms = AtomTable::new();
+    /// assert_eq!(table.insert(&atoms, vec![Term::static_atom("k"), Term::Integer(1)]), 0);
+    /// assert_eq!(table.insert(&atoms, vec![Term::static_atom("k"), Term::Integer(2)]), 1);
+    /// assert_eq!(table.insert(&atoms, vec![Term::static_atom("k"), Term::Integer(1)]), 1);
+    /// assert_eq!(table.objects(&atoms, &Term::static_atom("k")).len(), 2);
+    /// ```
+    pub(super) fn insert(&mut self, atoms: &AtomTable, object: Vec<Term>) -> usize {
         let (found, hash) = {
             let key = self.key(&object);
             let hash = stored_hash(atoms, key);
             (self.position(hash, key), hash)
         };
-        let slot = match found {
-            Some(slot) => {
+        let mut compared = 0;
+        let newest = match (found, self.table_type) {
+            (Some(slot), TableType::Set) => {
                 self.objects[slot] = Some(object);
-                return;
+                return 0;
             }
-            None => self.allocate(),
+            (Some(newest), table_type) => {
+                if table_type == TableType::Bag {
+                    let mut slot = newest;
+                    while slot != EMPTY {
+                        if *self.object_of(slot) == object {
+                            return compared;
+                        }
+                        compared += 1;
+                        slot = self.older[slot];
+                    }
+                }
+                newest
+            }
+            (None, _) => EMPTY,
         };
+        let slot = self.allocate();
         self.objects[slot] = Some(object);
-        self.index.insert(hash, slot);
+        self.older[slot] = newest;
+        if newest == EMPTY {
+            self.index.insert(hash, slot);
+        } else {
+            self.index.replace(hash, newest, slot);
+        }
         self.buckets = self.buckets.max(self.object_count());
+        compared
     }
 
-    /// Return the elements of the object with a key that is exactly equal to
-    /// `key`, or `None` when the table has no such object.
+    /// Return the elements of the newest object with a key that is exactly
+    /// equal to `key`, or `None` when the table has no such object. A `set`
+    /// table has at most one such object.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut table = Table::new(ProcessId(0), Access::Public, 1);
+    /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
     /// let atoms = AtomTable::new();
     /// assert_eq!(table.object(&atoms, &Term::static_atom("k")), None);
     /// table.insert(&atoms, vec![Term::static_atom("k")]);
@@ -387,9 +484,35 @@ impl Table {
         Some(self.object_of(slot).as_slice())
     }
 
+    /// Return the elements of each object with a key that is exactly equal
+    /// to `key`, in insertion order, as `get_term_list` and `build_term_list`
+    /// (`erl_db_hash.c:1469-1490`) give them: the walk reads the chain from
+    /// the newest object and puts each object before the earlier ones.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::DuplicateBag);
+    /// let atoms = AtomTable::new();
+    /// table.insert(&atoms, vec![Term::static_atom("k"), Term::Integer(1)]);
+    /// table.insert(&atoms, vec![Term::static_atom("k"), Term::Integer(1)]);
+    /// assert_eq!(table.objects(&atoms, &Term::static_atom("k")).len(), 2);
+    /// assert!(table.objects(&atoms, &Term::static_atom("j")).is_empty());
+    /// ```
+    pub(super) fn objects(&self, atoms: &AtomTable, key: &Term) -> Vec<&[Term]> {
+        let mut objects = Vec::new();
+        let mut slot = self.position(stored_hash(atoms, key), key).unwrap_or(EMPTY);
+        while slot != EMPTY {
+            objects.push(self.object_of(slot).as_slice());
+            slot = self.older[slot];
+        }
+        objects.reverse();
+        objects
+    }
+
     /// Return the bytes of the container arrays of the table: the slot array
     /// of the objects, the free-slot array, and the element array of each
-    /// stored object. The number excludes the header of the `Vec` of each
+    /// stored object, and the array of the older slot of each slot. The number excludes the header of the `Vec` of each
     /// array, as the accounting of task
     /// [#559](https://github.com/fahchen/pbeam/issues/559) excludes it. An
     /// object of immediate elements owns its element array, so the number is
@@ -398,14 +521,14 @@ impl Table {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut table = Table::new(ProcessId(0), Access::Public, 1);
+    /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
     /// let atoms = AtomTable::new();
     /// table.insert(&atoms, vec![Term::Integer(1), Term::Integer(2)]);
     /// assert!(table.allocated_bytes() > 0);
     /// ```
     pub(super) fn allocated_bytes(&self) -> usize {
         self.objects.capacity() * std::mem::size_of::<Option<Vec<Term>>>()
-            + self.free.capacity() * std::mem::size_of::<usize>()
+            + (self.free.capacity() + self.older.capacity()) * std::mem::size_of::<usize>()
             + self
                 .objects
                 .iter()
@@ -424,7 +547,7 @@ impl Table {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut table = Table::new(ProcessId(0), Access::Public, 1);
+    /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
     /// let atoms = AtomTable::new();
     /// table.insert(&atoms, vec![Term::static_atom("k")]);
     /// assert_eq!(table.position(stored_hash(&Term::static_atom("k")), &Term::static_atom("k")), Some(0));
@@ -440,7 +563,7 @@ impl Table {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut table = Table::new(ProcessId(0), Access::Public, 1);
+    /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
     /// let atoms = AtomTable::new();
     /// table.insert(&atoms, vec![Term::static_atom("k")]);
     /// assert_eq!(table.object_of(0), &vec![Term::static_atom("k")]);
@@ -456,7 +579,7 @@ impl Table {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut table = Table::new(ProcessId(0), Access::Public, 1);
+    /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
     /// let atoms = AtomTable::new();
     /// table.insert(&atoms, vec![Term::static_atom("k")]);
     /// assert_eq!(table.object_count(), 1);
@@ -471,7 +594,7 @@ impl Table {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut table = Table::new(ProcessId(0), Access::Public, 1);
+    /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
     /// assert_eq!(table.allocate(), 0);
     /// assert_eq!(table.allocate(), 1);
     /// ```
@@ -480,23 +603,25 @@ impl Table {
             Some(slot) => slot,
             None => {
                 self.objects.push(None);
+                self.older.push(EMPTY);
                 self.objects.len() - 1
             }
         }
     }
 
-    /// Remove the object with a key that is exactly equal to `key`, as
-    /// `db_erase_hash` (`erl_db_hash.c:1613-1664`) does in a `set` table. A
-    /// key that the table does not hold changes nothing. The slot of the
-    /// object becomes free, and a later insert reuses it. A removed object
-    /// joins the top bucket into its low bucket, up to 5 times, while the
-    /// objects are fewer than the shrink limit (`try_shrink` and `shrink`,
-    /// `erl_db_hash.c:757-762`, `3743-3818`).
+    /// Remove each object with a key that is exactly equal to `key`, as
+    /// `db_erase_hash` (`erl_db_hash.c:1613-1664`) does. A key that the
+    /// table does not hold changes nothing. The slot of each object becomes
+    /// free, and a later insert reuses it. A removal joins the top bucket
+    /// into its low bucket, up to 5 times, while the objects are fewer than
+    /// the shrink limit (`try_shrink` and `shrink`, `erl_db_hash.c:757-762`,
+    /// `3743-3818`). ERTS tries the shrink once after it removes all objects
+    /// of the key (`erl_db_hash.c:1653-1660`).
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut table = Table::new(ProcessId(0), Access::Public, 1);
+    /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
     /// let atoms = AtomTable::new();
     /// table.insert(&atoms, vec![Term::static_atom("k")]);
     /// table.delete(&atoms, &Term::static_atom("missing"));
@@ -505,12 +630,16 @@ impl Table {
     /// ```
     pub(super) fn delete(&mut self, atoms: &AtomTable, key: &Term) {
         let hash = stored_hash(atoms, key);
-        let Some(slot) = self.position(hash, key) else {
+        let Some(newest) = self.position(hash, key) else {
             return;
         };
-        self.objects[slot] = None;
-        self.free.push(slot);
-        self.index.remove(hash, slot);
+        self.index.remove(hash, newest);
+        let mut slot = newest;
+        while slot != EMPTY {
+            self.objects[slot] = None;
+            self.free.push(slot);
+            slot = std::mem::replace(&mut self.older[slot], EMPTY);
+        }
         for _ in 0..RESIZE_STEPS {
             if self.object_count() >= self.shrink_limit() {
                 break;
@@ -529,7 +658,7 @@ impl Table {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(Table::new(ProcessId(0), Access::Public, 1).segment_slots(), 256);
+    /// assert_eq!(Table::new(ProcessId(0), Access::Public, 1, TableType::Set).segment_slots(), 256);
     /// ```
     fn segment_slots(&self) -> usize {
         FIRST_SEGMENT_SLOTS
@@ -543,7 +672,7 @@ impl Table {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(Table::new(ProcessId(0), Access::Public, 1).shrink_limit(), 0);
+    /// assert_eq!(Table::new(ProcessId(0), Access::Public, 1, TableType::Set).shrink_limit(), 0);
     /// ```
     fn shrink_limit(&self) -> usize {
         let slots = self.segment_slots();
@@ -565,7 +694,7 @@ impl Table {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut table = Table::new(ProcessId(0), Access::Public, 1);
+    /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
     /// let atoms = AtomTable::new();
     /// table.insert(&atoms, vec![Term::Integer(1)]);
     /// assert_eq!(table.segment_reductions(&atoms), vec![33]);
@@ -589,7 +718,7 @@ impl Table {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let table = Table::new(ProcessId(0), Access::Public, 2);
+    /// let table = Table::new(ProcessId(0), Access::Public, 2, TableType::Set);
     /// assert_eq!(table.key(&[Term::static_atom("v"), Term::static_atom("k")]), &Term::static_atom("k"));
     /// ```
     fn key<'a>(&self, object: &'a [Term]) -> &'a Term {
@@ -607,7 +736,7 @@ impl Table {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(Table::new(ProcessId(0), Access::Public, 1).index_bytes(), 0);
+    /// assert_eq!(Table::new(ProcessId(0), Access::Public, 1, TableType::Set).index_bytes(), 0);
     /// ```
     pub(super) fn index_bytes(&self) -> usize {
         self.index.hashes.capacity() * std::mem::size_of::<u64>()
@@ -619,7 +748,7 @@ impl Table {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut table = Table::new(ProcessId(0), Access::Public, 1);
+    /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
     /// let atoms = AtomTable::new();
     /// table.insert(&atoms, vec![Term::static_atom("k")]);
     /// assert_eq!(table.live_objects(), vec![vec![Term::static_atom("k")]]);
@@ -633,7 +762,7 @@ impl Table {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut table = Table::new(ProcessId(0), Access::Public, 1);
+    /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
     /// let atoms = AtomTable::new();
     /// table.insert(&atoms, vec![Term::static_atom("k")]);
     /// assert_eq!(table.slot_count(), 1);
@@ -755,6 +884,28 @@ impl KeyIndex {
             self.slots[slot] = object;
             self.len += 1;
         }
+    }
+
+    /// Set the object slot of the entry with the stored hash `hash` and the
+    /// object slot `old` to `new`. A new object of a bag key becomes the
+    /// head of the chain of its key, as `*bp = q` does in `db_put_hash`
+    /// (`erl_db_hash.c:1451-1452`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut index = KeyIndex::default();
+    /// index.insert(7, 0);
+    /// index.replace(7, 0, 3);
+    /// assert_eq!(index.find(7, |_| true), Some(3));
+    /// ```
+    fn replace(&mut self, hash: u64, old: usize, new: usize) {
+        let mask = self.slots.len() - 1;
+        let mut entry = hash as usize & mask;
+        while self.slots[entry] != old {
+            entry = (entry + 1) & mask;
+        }
+        self.slots[entry] = new;
     }
 
     /// Remove the entry with the stored hash `hash` and the object slot

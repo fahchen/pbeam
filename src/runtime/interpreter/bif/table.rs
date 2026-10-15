@@ -442,7 +442,7 @@ bifs! {
     ets:first_lookup/1 => unsupported,
     ets:give_away/3 => unsupported,
     ets:info/1 => unsupported,
-    ets:info/2 => unsupported,
+    ets:info/2 as EtsInfo2 => |cx, [table, item]| ets::info(cx, table, item),
     ets:insert/2 as EtsInsert2 => |cx, [table, objects]| ets::insert(cx, table, objects),
     ets:insert_new/2 => unsupported,
     ets:internal_delete_all/2 => unsupported,

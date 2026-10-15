@@ -7,7 +7,7 @@ use crate::runtime::host::input::{Readiness, wait_readable};
 use crate::runtime::host::output::{IovecWrite, IovecWritten};
 use crate::term::test_atom;
 use crate::{
-    runtime::ets::{Access, Table},
+    runtime::ets::{Access, Table, TableType},
     runtime::process::{
         Origin, OriginMonitor, PendingBif, ProcessState, ReceiveTimer, StackSlot, Start,
         TimerReference,
@@ -431,7 +431,7 @@ fn deletes_the_tables_of_a_process_when_it_exits() {
     scheduler.ets.create(
         table,
         Some("ets_probe_owned"),
-        Table::new(child, Access::Protected, 1),
+        Table::new(child, Access::Protected, 1, TableType::Set),
     );
     assert!(scheduler.ets.name_in_use("ets_probe_owned"));
     scheduler.finish_current(atom("normal"), None);
@@ -1441,7 +1441,7 @@ fn counts_the_persistent_terms_the_ets_objects_and_the_timer_messages() {
         .put(&atom("key"), &Term::tuple(vec![Term::Integer(1)]));
     assert!(scheduler.live_bytes() > before);
     let key = Term::Atom(scheduler.atoms.put("key").unwrap());
-    let mut table = Table::new(ProcessId(1), Access::Public, 1);
+    let mut table = Table::new(ProcessId(1), Access::Public, 1, TableType::Set);
     table.insert(
         &scheduler.atoms,
         vec![key, Term::tuple(vec![Term::Integer(2)])],

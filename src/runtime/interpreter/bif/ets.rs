@@ -2,7 +2,7 @@
 
 use super::BifResult::Value;
 use super::*;
-use crate::runtime::ets::{Access, Operation, Table};
+use crate::runtime::ets::{Access, Operation, Table, TableType};
 use crate::term::Reference;
 
 /// The fewest and the most locks that the hidden option
@@ -11,7 +11,7 @@ use crate::term::Reference;
 /// `erl_db.c:65-66`).
 const LOCKS: std::ops::RangeInclusive<i64> = 1..=32768;
 
-/// Run `ets:new(Name, Options)`: make a `set` table that the calling process
+/// Run `ets:new(Name, Options)`: make a hash table that the calling process
 /// owns, and return `Name` for a named table or a new table reference for
 /// another table, as ERTS `ets_new_2` (`erl_db.c:2555-2840`) does.
 ///
@@ -36,9 +36,10 @@ const LOCKS: std::ops::RangeInclusive<i64> = 1..=32768;
 /// 4. A name that a live named table has raises `badarg`
 ///    (`erl_db.c:2821-2831`).
 ///
-/// Then the final type `bag`, `duplicate_bag`, or `ordered_set`, and a heir
-/// that is a live process other than the caller, give a runtime error: ERTS
-/// makes such a table, and PBeam cannot model it yet. A heir that is not
+/// Then the final type `ordered_set`, and a heir that is a live process
+/// other than the caller, give a runtime error: ERTS makes such a table, and
+/// PBeam cannot model it yet. The final type `set`, `bag`, or
+/// `duplicate_bag` gives a hash table of that type. A heir that is not
 /// alive acts as `none`, as `set_heir` (`erl_db.c:5319-5337`) does. A heir
 /// that is the caller also acts as `none`: at the owner exit, ERTS gives the
 /// table to no process when the heir is the owner (`erl_db.c:5076-5078`),
@@ -56,12 +57,12 @@ const LOCKS: std::ops::RangeInclusive<i64> = 1..=32768;
 /// assert!(matches!(result, BifResult::Value(Term::Reference(_))));
 /// let result = new(&mut context, &test_atom("ac_tab"), &Term::list_from(vec![test_atom("bogus")]))?;
 /// assert!(matches!(result, BifResult::Raise { .. }));
-/// assert!(new(&mut context, &test_atom("ac_tab"), &Term::list_from(vec![test_atom("bag")])).is_err());
+/// assert!(new(&mut context, &test_atom("ac_tab"), &Term::list_from(vec![test_atom("ordered_set")])).is_err());
 /// ```
 ///
 /// # Errors
 ///
-/// Return a runtime error for a table type other than `set`, and for a heir
+/// Return a runtime error for the table type `ordered_set`, and for a heir
 /// that is a live process other than the caller.
 pub(super) fn new(
     context: &mut BifContext<'_>,
@@ -71,7 +72,7 @@ pub(super) fn new(
     let (Term::Atom(name), Some(options)) = (name, options.proper_list()) else {
         return Ok(BifResult::badarg());
     };
-    let mut table_type = "set".to_owned();
+    let mut table_type = Some(TableType::Set);
     let mut named = false;
     let mut access = Access::Protected;
     let mut keypos = 1;
@@ -80,8 +81,12 @@ pub(super) fn new(
     for option in options {
         match option {
             Term::Atom(atom) => {
-                if atom.is_one_of(&["bag", "duplicate_bag", "ordered_set"]) {
-                    table_type = context.scheduler.atoms.name_of(atom).to_owned();
+                if atom.is_static("bag") {
+                    table_type = Some(TableType::Bag);
+                } else if atom.is_static("duplicate_bag") {
+                    table_type = Some(TableType::DuplicateBag);
+                } else if atom.is_static("ordered_set") {
+                    table_type = None;
                 } else if atom.is_static("named_table") {
                     named = true;
                 } else if atom.is_static("public") {
@@ -124,7 +129,7 @@ pub(super) fn new(
             _ => return Ok(BifResult::badarg()),
         }
     }
-    if (table_type == "ordered_set" && explicit_locks)
+    if (table_type.is_none() && explicit_locks)
         || (named
             && context
                 .scheduler
@@ -133,12 +138,10 @@ pub(super) fn new(
     {
         return Ok(BifResult::badarg());
     }
-    if table_type != "set" {
-        // ponytail: only set tables; see "ETS tables" in docs/erts-differences.md.
-        return Err(error(format!(
-            "unsupported ets:new/2 table type {table_type}"
-        )));
-    }
+    let Some(table_type) = table_type else {
+        // ponytail: no ordered_set tables; see "ETS tables" in docs/erts-differences.md.
+        return Err(error("unsupported ets:new/2 table type ordered_set"));
+    };
     let owner = context.scheduler.current_process_mut().id;
     if let Some(heir) = heir
         && heir != owner
@@ -152,21 +155,22 @@ pub(super) fn new(
     context.scheduler.ets.create(
         table,
         name.map(|name| context.scheduler.atoms.name_of(name)),
-        Table::new(owner, access, keypos),
+        Table::new(owner, access, keypos, table_type),
     );
     Ok(Value(name.map_or(Term::Reference(table), |name| {
         Term::Atom(name.clone())
     })))
 }
 
-/// Run `ets:insert(Table, Objects)` on a `set` table and return `true`, as
-/// ERTS `ets_insert_2` (`erl_db.c:2341-2381`) does. `Objects` is one tuple
-/// or a list of tuples. An object with a key that is exactly equal to the key
-/// of an object in the table replaces that object, also an earlier object of
-/// the same list (`erl_db_hash.c:1387-1402`).
+/// Run `ets:insert(Table, Objects)` and return `true`, as ERTS
+/// `ets_insert_2` (`erl_db.c:2341-2381`) does. `Objects` is one tuple or a
+/// list of tuples, and each object goes into the table as [`Table::insert`]
+/// puts it, also after an earlier object of the same list.
 ///
-/// One tuple, `[]`, and a list of one tuple cost no reduction in a `set`
-/// table (`erl_db.c:2349-2380`). A table that does not exist or that the
+/// One tuple and a list of one tuple cost one reduction for each 8 objects
+/// that a `bag` insert compares, and no reduction in another table
+/// (`erl_db.c:2375-2379`, `erl_db_hash.c:1422-1442`). `[]` costs no
+/// reduction (`erl_db.c:2349-2353`). A table that does not exist or that the
 /// caller cannot write raises `badarg` (`erl_db.c:769-798`). A term that is
 /// not a tuple, and a tuple with fewer elements than the key position, raise
 /// `badarg`. ERTS compares the unsigned size with the C `int` key position,
@@ -199,8 +203,8 @@ pub(super) fn insert(
         let Some((id, found)) = context.scheduler.ets.find(&context.scheduler.atoms, table) else {
             return Ok(BifResult::badarg());
         };
-        let keypos = found.keypos();
-        return insert_list(context, id, objects, 0, keypos);
+        let (keypos, bag) = (found.keypos(), found.table_type() == TableType::Bag);
+        return insert_list(context, id, objects, 0, keypos, bag.then(Term::nil));
     }
     let caller = context.scheduler.current_process_mut().id;
     let Some(table) =
@@ -219,7 +223,14 @@ pub(super) fn insert(
     let Some(tuples) = valid_objects(objects, keypos) else {
         return Ok(BifResult::badarg());
     };
-    put_objects(&context.scheduler.atoms, table, &tuples, keypos)?;
+    let compared = put_objects(&context.scheduler.atoms, table, &tuples, keypos)?;
+    let compared: usize = compared.iter().sum();
+    // `consumed_reds / ITERATIONS_PER_RED` (`erl_db.c:2379`).
+    let reductions = i32::try_from(compared / 8).unwrap_or(i32::MAX);
+    context
+        .scheduler
+        .current_process_mut()
+        .bump_reductions(reductions);
     Ok(Value(Term::static_atom("true")))
 }
 
@@ -233,8 +244,9 @@ pub(super) fn insert(
 /// 1. The check: one unit for each object up to the first bad object
 ///    (`ets_insert_2_list_check`, `erl_db.c:1812-1827`). A bad object, or a
 ///    tail that is not `[]` after the last object, raises `badarg`.
-/// 2. When the units that remain are at least the number of objects
-///    (`can_insert_without_yield`, `erl_db.c:2002-2014`), the caller must
+/// 2. When the table is not a `bag` and the units that remain are at least
+///    the number of objects (`can_insert_without_yield`,
+///    `erl_db.c:2002-2014`), the caller must
 ///    be able to write the table, and the objects go into it with two units
 ///    for each object and no trap (`erl_db.c:1845-1859`, `2050-2071`). The
 ///    cost can then be more than the budget, and `BUMP_REDS` stops at 0.
@@ -246,14 +258,24 @@ pub(super) fn insert(
 ///    each object, and the call raises `badarg` (`erl_db.c:1863-1873`,
 ///    `2077-2089`).
 ///
+/// In a `bag` table, the insert of each object uses one more unit for each
+/// object that it compares (`erl_db.c:1934-1940`, `erl_db_hash.c:1422-1442`)
+/// in one step, and the YCF counter yields only after a step: first 1 unit
+/// for the loop, then `1 + n` units for the insert of an object that
+/// compares `n` objects. The `input_probe` cost of a 400-object `bag` insert
+/// matches ERTS only in this order. `bag` is `None` for another table, and else the list
+/// of the steps of the insert that remain: `[]` before the insert and after
+/// a failed copy.
+///
 /// The call bumps one reduction for each 8 units that it used
 /// (`erl_db.c:2197`, `2306`). When the unit that uses the last of the
 /// budget, or the first unit for a budget of 0, is not the last unit, the
 /// call uses all reductions and traps to its export with `done` after that
 /// unit (`erl_db.c:2297-2332`). ERTS traps to `ets:insert/2` with a magic
 /// reference to the YCF state, and PBeam traps to the internal export
-/// `ets:insert/4` with the table reference, the objects, `done`, and the key
-/// position. `done` counts the units of the check, the copy, and the
+/// `ets:insert/5` with the table reference, the objects, `done`, the key
+/// position, and the steps of a `bag` insert, or `false` for another table.
+/// `done` counts the units of the check, the copy, and the
 /// insert, and after a failed copy the units of the removal from
 /// `4 * count`. ERTS takes a table lock and inserts each object in step 3, and
 /// another process that uses the table helps to complete the insert. PBeam
@@ -269,7 +291,7 @@ pub(super) fn insert(
 /// process.fcalls = 10;
 /// let objects = Term::list_from(vec![Term::tuple(vec![test_atom("k")]); 8]);
 /// // 8 units of the check and 16 units of the insert: 3 reductions.
-/// assert!(matches!(insert_list(&mut context, id, &objects, 0, 1)?, BifResult::Value(_)));
+/// assert!(matches!(insert_list(&mut context, id, &objects, 0, 1, None)?, BifResult::Value(_)));
 /// assert_eq!(context.scheduler.current_process_mut().fcalls, 7);
 /// ```
 ///
@@ -284,6 +306,7 @@ pub(super) fn insert_list(
     objects: &Term,
     mut done: usize,
     keypos: i32,
+    mut bag: Option<Term>,
 ) -> Result<BifResult, BeamError> {
     /// `ITERATIONS_PER_RED` (`erl_db.c:2152`).
     const ITERATIONS_PER_RED: i64 = 8;
@@ -291,7 +314,11 @@ pub(super) fn insert_list(
     let elements: Vec<&Term> = elements.collect();
     let count = elements.len();
     let table = Term::Reference(id);
-    let insert_phase = 2 * count < done && done <= 4 * count;
+    let inserting = |bag: &Option<Term>| bag.as_ref().is_some_and(|steps| !steps.is_nil());
+    let insert_phase = match &bag {
+        Some(_) => inserting(&bag),
+        None => 2 * count < done && done <= 4 * count,
+    };
     if insert_phase
         && context
             .scheduler
@@ -308,7 +335,10 @@ pub(super) fn insert_list(
     let tuples = valid_objects(elements.iter().copied(), keypos).filter(|_| tail.is_none());
     // After a failed copy, the units of the removal of the copies follow
     // `4 * count`, and a removal that yields leaves `done` above it.
-    let mut removal = done > 4 * count;
+    let mut removal = match &bag {
+        Some(_) => done > 2 * count && !inserting(&bag),
+        None => done > 4 * count,
+    };
     // `None` when the call yields, else the result of the call.
     let result = 'work: {
         if done <= count {
@@ -324,7 +354,7 @@ pub(super) fn insert_list(
             let Some(tuples) = &tuples else {
                 break 'work Some(BifResult::badarg());
             };
-            if count as i64 <= units.left {
+            if bag.is_none() && count as i64 <= units.left {
                 let Some(table) = context.scheduler.ets.table(
                     &context.scheduler.atoms,
                     &table,
@@ -338,7 +368,7 @@ pub(super) fn insert_list(
                 break 'work Some(Value(Term::static_atom("true")));
             }
         }
-        if done <= 2 * count {
+        if done <= 2 * count && !inserting(&bag) {
             if !units.run(&mut done, 2 * count) {
                 break 'work None;
             }
@@ -350,13 +380,23 @@ pub(super) fn insert_list(
             ) {
                 Some(table) => {
                     let tuples = tuples.expect("the check of a copied list found no bad object");
-                    put_objects(&context.scheduler.atoms, table, &tuples, keypos)?;
+                    let compared = put_objects(&context.scheduler.atoms, table, &tuples, keypos)?;
+                    if bag.is_some() {
+                        let steps = compared.into_iter().flat_map(|compared| {
+                            [Term::Integer(1), Term::Integer(1 + compared as i64)]
+                        });
+                        bag = Some(Term::list_from(steps));
+                    }
                 }
                 None => (removal, done) = (true, 4 * count),
             }
         }
         if !removal {
-            if !units.run(&mut done, 4 * count) {
+            let finished = match &mut bag {
+                Some(steps) => units.run_steps(&mut done, steps),
+                None => units.run(&mut done, 4 * count),
+            };
+            if !finished {
                 break 'work None;
             }
             break 'work Some(Value(Term::static_atom("true")));
@@ -376,6 +416,7 @@ pub(super) fn insert_list(
             objects.clone(),
             Term::Integer(done as i64),
             Term::Integer(i64::from(keypos)),
+            bag.unwrap_or_else(|| Term::static_atom("false")),
         ],
     }))
 }
@@ -414,16 +455,49 @@ impl Units {
         self.left -= units;
         true
     }
+
+    /// Use the steps of the list `steps`, each a number of units, and
+    /// return true. When a step makes the counter 0 or less and it is not
+    /// the last step, as `YCF_CONSUME_REDS` does (`erl_db.c:1939`), stop
+    /// after that step, keep the steps that remain in `steps`, and return
+    /// false: the call yields there. `done` counts the units of each step.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let (mut units, mut done) = (Units { left: 3 }, 0);
+    /// let mut steps = Term::list_from([Term::Integer(4), Term::Integer(1)]);
+    /// assert!(!units.run_steps(&mut done, &mut steps));
+    /// assert_eq!((done, units.left), (4, -1));
+    /// ```
+    fn run_steps(&mut self, done: &mut usize, steps: &mut Term) -> bool {
+        loop {
+            let (step, rest) = steps.cons_cell().expect("a bag insert has a step");
+            let step = step.small_integer().expect("a step is a small integer");
+            *done += step as usize;
+            self.left -= step;
+            let last = rest.is_nil();
+            *steps = rest.clone();
+            if last {
+                return true;
+            }
+            if self.left <= 0 {
+                return false;
+            }
+        }
+    }
 }
 
 /// Put each object of `tuples` into `table`, which has the key position
-/// `keypos`. `atoms` owns the name of an atom key of an object.
+/// `keypos`, and return the number of objects that the insert of each
+/// object compared ([`Table::insert`]). `atoms` owns the name of an atom key
+/// of an object.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// let object = vec![test_atom("k")];
-/// put_objects(&atoms, &mut table, &[&object], 1)?;
+/// assert_eq!(put_objects(&atoms, &mut table, &[&object], 1)?, vec![0]);
 /// assert!(table.object(&atoms, &test_atom("k")).is_some());
 /// ```
 ///
@@ -436,17 +510,17 @@ fn put_objects(
     table: &mut Table,
     tuples: &[&[Term]],
     keypos: i32,
-) -> Result<(), BeamError> {
+) -> Result<Vec<usize>, BeamError> {
     if keypos == 0 && !tuples.is_empty() {
         // ponytail: ERTS aborts here; see "ETS tables" in docs/erts-differences.md.
         return Err(error(
             "unsupported ets:insert/2 in a table with key position 0",
         ));
     }
-    for elements in tuples {
-        table.insert(atoms, elements.to_vec());
-    }
-    Ok(())
+    Ok(tuples
+        .iter()
+        .map(|elements| table.insert(atoms, elements.to_vec()))
+        .collect())
 }
 
 /// Return the tuples of `objects` when each one has at least `keypos`
@@ -476,17 +550,19 @@ fn valid_objects<'a>(
         .collect()
 }
 
-/// Run `ets:lookup_element(Table, Key, Index, Default)` on a `set` table, as
-/// ERTS `ets_lookup_element_4` (`erl_db.c:2972-3001`) does: return the
-/// element at `Index` of the object with the key `Key`, or `Default` when
-/// the table has no object with that key.
+/// Run `ets:lookup_element(Table, Key, Index, Default)`, as ERTS
+/// `ets_lookup_element_4` (`erl_db.c:2972-3001`) and
+/// `db_get_element_hash` (`erl_db_hash.c:1544-1608`) do: return the element
+/// at `Index` of the object with the key `Key` in a `set` table, the list of
+/// the elements at `Index` of the objects with the key in insertion order in
+/// another table, or `Default` when the table has no object with that key.
 ///
 /// A table that does not exist or that the caller cannot read raises
 /// `badarg` first. Then an index that is not a small integer or that is
 /// below 1 raises `badarg`. ERTS gives the index to `db_get_element` as a C
 /// `int` (`erl_db_util.h:151-155`), so only its low 32 bits count. For a
-/// found object, a negative or too large position raises `badarg`
-/// (`erl_db_hash.c:1563-1566`).
+/// found key, a negative position, or a position above the size of one of
+/// its objects, raises `badarg` (`erl_db_hash.c:1563-1580`).
 ///
 /// # Examples
 ///
@@ -521,9 +597,10 @@ pub(super) fn lookup_element(
     let Some(index) = index.small_integer().filter(|index| *index >= 1) else {
         return Ok(BifResult::badarg());
     };
-    let Some(object) = table.object(&context.scheduler.atoms, key) else {
+    let objects = table.objects(&context.scheduler.atoms, key);
+    if objects.is_empty() {
         return Ok(Value(default.clone()));
-    };
+    }
     let position = index as i32;
     if position == 0 {
         // ponytail: ERTS crashes here; see "ETS tables" in docs/erts-differences.md.
@@ -531,16 +608,24 @@ pub(super) fn lookup_element(
             "unsupported ets:lookup_element/4 index {index} with position 0"
         )));
     }
-    Ok(usize::try_from(position)
-        .ok()
-        .and_then(|position| object.get(position - 1))
-        .map_or_else(BifResult::badarg, |element| Value(element.clone())))
+    let elements: Option<Vec<Term>> = objects
+        .iter()
+        .map(|object| {
+            let position = usize::try_from(position).ok()?;
+            object.get(position - 1).cloned()
+        })
+        .collect();
+    Ok(match (elements, table.table_type()) {
+        (None, _) => BifResult::badarg(),
+        (Some(mut elements), TableType::Set) => Value(elements.remove(0)),
+        (Some(elements), _) => Value(Term::list_from(elements)),
+    })
 }
 
-/// Run `ets:lookup(Table, Key)` on a `set` table, as ERTS `ets_lookup_2`
-/// (`erl_db.c:2877-2900`) and `db_get_hash` (`erl_db_hash.c:1492-1516`) do:
-/// return `[Object]` for the object with a key that is exactly equal to
-/// `Key`, or `[]`. A table that does not exist or that the caller cannot
+/// Run `ets:lookup(Table, Key)`, as ERTS `ets_lookup_2`
+/// (`erl_db.c:2877-2900`) and `db_get_hash` (`erl_db_hash.c:1469-1516`) do:
+/// return the list of the objects with a key that is exactly equal to
+/// `Key`, in insertion order, or `[]`. A `set` table has at most one. A table that does not exist or that the caller cannot
 /// read raises `badarg` (`erl_db.c:769-912`).
 ///
 /// # Examples
@@ -560,13 +645,15 @@ pub(super) fn lookup(context: &mut BifContext<'_>, table: &Term, key: &Term) -> 
     else {
         return BifResult::badarg();
     };
-    let object = table
-        .object(&context.scheduler.atoms, key)
-        .map(|object| Term::tuple(object.to_vec()));
-    Value(Term::list_from(object))
+    let objects = table.objects(&context.scheduler.atoms, key);
+    Value(Term::list_from(
+        objects
+            .into_iter()
+            .map(|object| Term::tuple(object.to_vec())),
+    ))
 }
 
-/// Run `ets:member(Table, Key)` on a `set` table, as ERTS `ets_member_2`
+/// Run `ets:member(Table, Key)`, as ERTS `ets_member_2`
 /// (`erl_db.c:2905-2928`) and `db_member_hash` (`erl_db_hash.c:1518-1542`)
 /// do: return `true` when the table has an object with a key that is
 /// exactly equal to `Key`, else `false`. A table that does not exist or that
@@ -593,10 +680,10 @@ pub(super) fn member(context: &mut BifContext<'_>, table: &Term, key: &Term) -> 
     Value(Term::static_atom(if found { "true" } else { "false" }))
 }
 
-/// Run `ets:delete(Table, Key)` on a `set` table and return `true`, as ERTS
-/// `ets_delete_2` (`erl_db.c:3328-3349`) and `db_erase_hash`
-/// (`erl_db_hash.c:1613-1664`) do. The object with a key that is exactly
-/// equal to `Key` goes out of the table. A key that the table does not hold
+/// Run `ets:delete(Table, Key)` and return `true`, as ERTS `ets_delete_2`
+/// (`erl_db.c:3328-3349`) and `db_erase_hash` (`erl_db_hash.c:1613-1664`)
+/// do. Each object with a key that is exactly equal to `Key` goes out of the
+/// table. A key that the table does not hold
 /// also returns `true`. A table that does not exist or that the caller
 /// cannot write raises `badarg` (`erl_db.c:769-912`).
 ///
@@ -619,6 +706,90 @@ pub(super) fn delete(context: &mut BifContext<'_>, table: &Term, key: &Term) -> 
     };
     table.delete(&context.scheduler.atoms, key);
     Value(Term::static_atom("true"))
+}
+
+/// Run `ets:info(Table, Item)`, as ERTS `ets_info_2` (`erl_db.c:4523-4579`)
+/// does, for the item `type`: return `set`, `bag`, or `duplicate_bag`
+/// (`table_info`, `erl_db.c:5457-5469`). The item `binary` traps before the
+/// table lookup (`erl_db.c:4541-4542`). Then the lookup asks only for
+/// `DB_INFO` (`erl_db_util.h:451`), which each process has. A free name
+/// gives `undefined` (`erl_db.c:4544-4547`), and a term that is not an atom
+/// or a reference raises `badarg`. After the lookup, an item that
+/// `table_info` (`erl_db.c:5447-5625`) does not know raises `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = info(&mut context, &table, &test_atom("type"))?;
+/// assert!(matches!(result, BifResult::Value(value) if value == test_atom("set")));
+/// let result = info(&mut context, &test_atom("missing"), &test_atom("type"))?;
+/// assert!(matches!(result, BifResult::Value(value) if value == test_atom("undefined")));
+/// assert!(info(&mut context, &table, &test_atom("size")).is_err());
+/// ```
+///
+/// # Errors
+///
+/// Return a runtime error for the item `binary` and for each other item
+/// that ERTS knows. Also return a runtime error for a reference that is not
+/// a live table: ERTS gives `undefined` for the reference of a deleted
+/// table and raises `badarg` for another reference, and PBeam keeps no
+/// record of a deleted table.
+pub(super) fn info(
+    context: &mut BifContext<'_>,
+    table: &Term,
+    item: &Term,
+) -> Result<BifResult, BeamError> {
+    /// The items of `table_info` other than `type` (`erl_db.c:5454-5622`).
+    const ITEMS: [&str; 19] = [
+        "size",
+        "memory",
+        "owner",
+        "heir",
+        "protection",
+        "write_concurrency",
+        "read_concurrency",
+        "name",
+        "keypos",
+        "node",
+        "named_table",
+        "compressed",
+        "id",
+        "decentralized_counters",
+        "data",
+        "fixed",
+        "safe_fixed",
+        "safe_fixed_monotonic_time",
+        "stats",
+    ];
+    let is_item = |name| matches!(item, Term::Atom(atom) if atom.is_static(name));
+    if is_item("binary") {
+        // ponytail: info/2 gives only the type; see "ETS tables" in docs/erts-differences.md.
+        return Err(error("unsupported ets:info/2 item binary"));
+    }
+    let atoms = &context.scheduler.atoms;
+    let Some((_, found)) = context.scheduler.ets.find(atoms, table) else {
+        return match table {
+            Term::Atom(_) => Ok(Value(Term::static_atom("undefined"))),
+            // ponytail: no record of a deleted table; see "ETS tables" in docs/erts-differences.md.
+            Term::Reference(_) => Err(error(
+                "unsupported ets:info/2 of a reference that is not a live table",
+            )),
+            _ => Ok(BifResult::badarg()),
+        };
+    };
+    if is_item("type") {
+        return Ok(Value(Term::static_atom(found.table_type().name())));
+    }
+    match item {
+        Term::Atom(atom) if ITEMS.contains(&atoms.name_of(atom)) => {
+            // ponytail: info/2 gives only the type; see "ETS tables" in docs/erts-differences.md.
+            Err(error(format!(
+                "unsupported ets:info/2 item {}",
+                atoms.name_of(atom)
+            )))
+        }
+        _ => Ok(BifResult::badarg()),
+    }
 }
 
 /// Return whether `{Tag, Count}` is the hidden lock option

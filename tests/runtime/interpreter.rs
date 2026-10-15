@@ -15,7 +15,7 @@ use crate::{
     },
     runtime::{
         capability::{AllowAll, Capability, Policy},
-        ets::{Access, Table},
+        ets::{Access, Table, TableType},
         import_kind,
         process::{ProcessState, Start, tests::frame},
     },
@@ -4130,9 +4130,11 @@ fn shares_the_stored_term_of_an_ets_lookup() {
     scheduler.schedule_next().unwrap();
     let owner = scheduler.current_process_mut().id;
     let id = Term::Reference(Reference(0));
-    scheduler
-        .ets
-        .create(Reference(0), None, Table::new(owner, Access::Public, 1));
+    scheduler.ets.create(
+        Reference(0),
+        None,
+        Table::new(owner, Access::Public, 1, TableType::Set),
+    );
     // A list for the value: the element of the looked-up object shares the
     // cons cell of the inserted term.
     let value = Term::list_from([Term::Integer(2), Term::Integer(3)]);
