@@ -1,6 +1,7 @@
 -module(io_start_probe).
 -export([lists/0, maps/0, map_keys/0, merge/0, atoms/0, atom_limit/0, system/0,
-         system_other/0, otp_release/0, format/0, nots/0, keymembers/0, ands/0]).
+         system_other/0, otp_release/0, format/0, nots/0, keymembers/0, ands/0,
+         ors/0]).
 
 %% `bif` `erlang:tl/1` with fail label 0, as group:init/1 (group.erl:136)
 %% runs it, and in a guard. `get_tl`, as proc_lib:trans_init/3
@@ -196,3 +197,18 @@ ands() ->
 
 and_guard(X) when (X and true) =:= false -> false;
 and_guard(_) -> other.
+
+%% `bif` `erlang:or/2` and `erlang:xor/2` with fail label 0, and through the
+%% `apply` instruction, as the kernel start calls `erlang:or/2`. Two booleans
+%% give the result; each other term raises badarg, and both arguments are
+%% evaluated (erl_bif_op.c:58-82).
+ors() ->
+    [[id(L) or id(R) || L <- [true, false], R <- [true, false]],
+     [id(L) xor id(R) || L <- [true, false], R <- [true, false]],
+     [try id(L) or id(R) catch error:E1 -> E1 end
+      || {L, R} <- [{true, foo}, {foo, true}, {false, 1}, {[], false}]],
+     [try id(L) xor id(R) catch error:E2 -> E2 end
+      || {L, R} <- [{true, foo}, {foo, false}]],
+     apply(erlang, id('or'), [id(false), id(true)]),
+     apply(erlang, id('xor'), [id(true), id(true)]),
+     try apply(erlang, id('or'), [id(true), id(x)]) catch error:E3 -> E3 end].

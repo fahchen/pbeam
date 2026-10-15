@@ -35,7 +35,7 @@ pub(super) type TimerKey = (i64, u64);
 pub(super) enum Timer {
     /// The receive timer of a process, which `wait_timeout` starts.
     Receive(ProcessId),
-    /// A BIF timer, which `erlang:start_timer/3` starts. It sends `message`
+    /// A BIF timer, which `erlang:start_timer/3` or `erlang:send_after/3` starts. It sends `message`
     /// to `receiver` when it expires (`bif_timer_timeout`,
     /// `erl_hl_timer.c:1146-1203`).
     Bif {
@@ -43,8 +43,9 @@ pub(super) enum Timer {
         reference: Reference,
         /// The process that gets the message.
         receiver: Receiver,
-        /// The message, `{timeout, Reference, Msg}`, which
-        /// `setup_bif_timer` makes at the start (`erl_hl_timer.c:1825`).
+        /// The message, `{timeout, Reference, Msg}` of `start_timer/3` or
+        /// `Msg` of `send_after/3`, which `setup_bif_timer` makes at the
+        /// start (`erl_hl_timer.c:1824`).
         message: Term,
     },
     /// The timer of an accept of `caller` on the listen port `port`, which

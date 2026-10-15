@@ -452,6 +452,10 @@ fn rejects_tables_that_pbeam_cannot_model() {
     // row in `docs/erts-differences.md`.
     let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
     for (case, detail) in [
+        (
+            "delete_inserting",
+            "delete/1 of a table that a trapped insert uses",
+        ),
         ("info_size", "info/2 item size"),
         ("info_binary", "info/2 item binary"),
         (
@@ -485,4 +489,91 @@ fn rejects_tables_that_pbeam_cannot_model() {
         .execute("ets_probe", "unsupported", &[program.host_term(case)])
         .unwrap_err();
     assert_eq!(error.to_string(), "unresolved external MFA ets:match/1");
+}
+
+#[test]
+fn deletes_tables_as_pinned_erts() {
+    // `ets:delete/1` asks for `DB_WRITE` (`erl_db.c:3021`): each process can
+    // delete a `public` table, and only the owner can delete another table.
+    // The table loses its name and its reference at once
+    // (`erl_db.c:3053-3061`), so a later call raises `badarg`, and the name
+    // is free again. Each other term raises `badarg`.
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    let badarg = Term::tuple(vec![atom("error"), atom("badarg")]);
+    let owner = Term::tuple(vec![atom("k"), atom("owner")]);
+    assert_eq!(
+        program
+            .execute("ets_probe", "delete_table", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![
+            atom("true"),
+            badarg.clone(),
+            badarg.clone(),
+            atom("true"),
+            atom("undefined"),
+            atom("ets_probe_named"),
+            atom("true"),
+            badarg.clone(),
+            atom("stopped"),
+            badarg.clone(),
+            Term::list_from(vec![owner]),
+            atom("stopped"),
+            Term::list_from(vec![badarg; 4]),
+        ])
+    );
+    assert_eq!(
+        reference("delete_table"),
+        b"[true,{error,badarg},{error,badarg},true,undefined,ets_probe_named,true,{error,badarg},stopped,{error,badarg},[{k,owner}],stopped,[{error,badarg},{error,badarg},{error,badarg},{error,badarg}]]\n"
+    );
+}
+
+#[test]
+fn traps_the_delete_of_a_large_table_as_pinned_erts() {
+    // Each segment uses 32 reductions and 1 for each object
+    // (`erl_db_hash.c:3140-3149`). The small table frees in the turn of
+    // the caller, so the spawned process has not run. The table of 50000
+    // objects needs more reductions than the turn has, so the delete traps
+    // to `ets:delete_trap` (`erl_db.c:3064-3077`, `5378-5397`), and the
+    // spawned process sends `ping` before the delete returns. One ERTS
+    // scheduler gives the same order.
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    assert_eq!(
+        program
+            .execute("ets_probe", "delete_trap", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![atom("true"), atom("none"), atom("true"), atom("ping")])
+    );
+    assert_eq!(
+        reference_with(&["+S", "1"], "delete_trap"),
+        b"[true,none,true,ping]\n"
+    );
+}
+
+#[test]
+fn frees_the_owned_tables_of_a_killed_deleter_in_owned_list_order_as_pinned_erts() {
+    // `ets_probe:delete_order/0` kills a process while its `ets:delete/1` of
+    // a large table traps. The exit frees the owned list from its head
+    // (`erl_db.c:5055-5096`). The large table of the process keeps its
+    // position after the small table, and a public table of another owner
+    // goes to the end of the list (`erl_db.c:628-650`, `3031-3051`). So in
+    // both cases a lookup of the small table raises `badarg` in the first
+    // loop, before the `DOWN` message. One ERTS scheduler gives the same
+    // loops.
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let pair = |first, down| Term::tuple(vec![Term::Integer(first), Term::Integer(down)]);
+    assert_eq!(
+        program
+            .execute("ets_probe", "delete_order", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![pair(1, 10), pair(1, 9)])
+    );
+    assert_eq!(
+        reference_with(&["+S", "1"], "delete_order"),
+        b"[{1,10},{1,9}]\n"
+    );
 }
