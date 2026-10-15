@@ -840,6 +840,11 @@ impl BeamProgram {
     ///   the state of the check ([`ets::insert_list`]). ERTS traps to
     ///   `ets:insert/2` with a magic reference to the YCF state
     ///   (`erl_db.c:2297-2332`).
+    /// - `ets:select_trap/7`, with the table reference, the pattern, the
+    ///   next bucket, the limit, the matches so far, their number, and the
+    ///   change count of the table ([`ets::match_trap`]). ERTS traps to
+    ///   `ets:select_trap/1` with a tuple that holds a magic reference to the
+    ///   compiled pattern (`erl_db_hash.c:2264-2307`).
     /// - `erts_internal:list_to_bitstring_continue/5`, with the phase and the
     ///   walk state of `erlang:iolist_to_binary/1` and `erlang:list_to_binary/1`
     ///   ([`iolist::l2b_size`], [`iolist::l2b_copy`]). ERTS traps to
@@ -900,6 +905,30 @@ impl BeamProgram {
                 bag,
                 ets::Check::from_term(check),
             );
+        }
+        if let (
+            "ets",
+            "select_trap",
+            [
+                Term::Reference(id),
+                pattern,
+                Term::Integer(bucket),
+                Term::Integer(chunk),
+                matches,
+                Term::Integer(got),
+                Term::Integer(writes),
+            ],
+        ) = (module, function, arguments.as_slice())
+        {
+            let state = ets::MatchState {
+                chunk: *chunk as usize,
+                matches: matches.clone(),
+                got: *got as usize,
+                writes: *writes as u64,
+                resumed: true,
+            };
+            let mut context = BifContext { scheduler };
+            return ets::match_trap(&mut context, *id, pattern, *bucket as usize, state);
         }
         // The copy phase takes the result bytes out of the owned trap
         // arguments, so that no turn copies the bytes of an earlier turn
