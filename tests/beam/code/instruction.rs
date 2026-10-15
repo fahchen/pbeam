@@ -3,11 +3,11 @@ use super::{
     FloatOperation, OPCODE_BIF0, OPCODE_BS_GET_INTEGER2, OPCODE_BS_GET_UTF16, OPCODE_BS_GET_UTF32,
     OPCODE_FADD, OPCODE_FCONV, OPCODE_FDIV, OPCODE_FMOVE, OPCODE_FMUL, OPCODE_FNEGATE, OPCODE_FSUB,
     OPCODE_GET_MAP_ELEMENTS, OPCODE_GET_RECORD_ELEMENTS, OPCODE_GET_TL, OPCODE_HAS_MAP_FIELDS,
-    OPCODE_INIT_YREGS, OPCODE_IS_ANY_NATIVE_RECORD, OPCODE_PUT_MAP_ASSOC, OPCODE_PUT_MAP_EXACT,
-    OPCODE_PUT_RECORD, OPCODE_PUT_TUPLE2, OPCODE_TEST_EXACT_EQ, OPCODE_TEST_HEAP,
-    OPCODE_TEST_IS_ATOM, OPCODE_TEST_IS_BINARY, OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP,
-    OPCODE_TEST_IS_PID, OPCODE_TEST_IS_PORT, OPCODE_TEST_TAGGED_TUPLE, SELECT_VALUE_LINEAR_LIMIT,
-    parse_code, prepare_select_value_choices, read_binary_match_commands, read_binary_segments,
+    OPCODE_INIT_YREGS, OPCODE_PUT_MAP_ASSOC, OPCODE_PUT_MAP_EXACT, OPCODE_PUT_RECORD,
+    OPCODE_PUT_TUPLE2, OPCODE_TEST_EXACT_EQ, OPCODE_TEST_HEAP, OPCODE_TEST_IS_ATOM,
+    OPCODE_TEST_IS_BINARY, OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP, OPCODE_TEST_IS_PID,
+    OPCODE_TEST_IS_PORT, OPCODE_TEST_TAGGED_TUPLE, SELECT_VALUE_LINEAR_LIMIT, parse_code,
+    prepare_select_value_choices, read_binary_match_commands, read_binary_segments,
     read_move_operand, read_operand_pairs, read_pair_count, read_record_updates, skip_allocation,
     skip_counted_operands, skip_integer_payload, skip_operand, skip_unsupported_instruction,
     sort_map_key_pairs, test_kind, unsupported_opcode_operand_count,
@@ -799,6 +799,50 @@ fn decodes_the_is_lt_is_integer_and_is_boolean_tests_of_the_compare_probe_fixtur
             Instruction::End,
         ]
     ));
+}
+
+#[test]
+fn decodes_is_any_native_record_with_a_register_source_as_the_erts_loader() {
+    // `is_any_native_record Fail Src` (genop.tab:722-724) loads only with an
+    // x or a y register source (emu `ops.tab:1631`; JIT
+    // `jit/arm/ops.tab:1400`). A typed register (`[0x57, 0x03, 0x00]`) is
+    // its register.
+    let parse = |stream: &[u8]| {
+        let mut code = vec![0, 0, 0, 16];
+        code.extend([0; 16]);
+        code.extend(stream);
+        code.push(0x03);
+        parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[])
+    };
+    let (instructions, _) = parse(&[
+        0xBA, 0x55, 0x03, 0xBA, 0x65, 0x14, 0xBA, 0x75, 0x57, 0x23, 0x00,
+    ])
+    .unwrap();
+    assert!(matches!(
+        instructions.as_slice(),
+        [
+            Instruction::Test {
+                kind: TestKind::AnyNativeRecord,
+                fail_label: 5,
+                value: Operand::X(0),
+            },
+            Instruction::Test {
+                kind: TestKind::AnyNativeRecord,
+                fail_label: 6,
+                value: Operand::Y(1),
+            },
+            Instruction::Test {
+                kind: TestKind::AnyNativeRecord,
+                fail_label: 7,
+                value: Operand::X(2),
+            },
+            Instruction::End,
+        ]
+    ));
+    assert_eq!(
+        parse(&[0xBA, 0x55, 0x01]).unwrap_err().to_string(),
+        "BEAM is_any_native_record source is not a register"
+    );
 }
 
 #[test]
@@ -2237,7 +2281,6 @@ fn skips_pinned_module_instruction_operands_and_rejects_truncation() {
         (OPCODE_BS_GET_UTF16, 5),
         (OPCODE_BS_GET_UTF32, 5),
         (OPCODE_BS_GET_INTEGER2, 7),
-        (OPCODE_IS_ANY_NATIVE_RECORD, 2),
     ] {
         assert_eq!(unsupported_opcode_operand_count(opcode), Some(count));
     }

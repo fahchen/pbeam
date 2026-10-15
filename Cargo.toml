@@ -350,6 +350,10 @@ name = "order"
 path = "tests/integration/order.rs"
 
 [[test]]
+name = "pretty"
+path = "tests/feature/pretty.rs"
+
+[[test]]
 name = "otp_io"
 path = "tests/integration/otp_io.rs"
 
