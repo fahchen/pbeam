@@ -597,7 +597,14 @@ The raw records are in the scratch directory of the session (`/private/tmp/claud
 
 One key press runs 253,558 BEAM instructions. The number is the same for each key after the first key, in session N and in the earlier record of #544. The CPU time of one key is 24.5 ms to 27.8 ms over sessions P, K1, and K2, so one instruction costs about 97 ns to 110 ns on average. The time from the key to the first byte of the answer has a median of 27.1 ms to 30.0 ms.
 
-By instruction count, the Terra render modules (`Terra.Renderer.Grid`, `Terra.Renderer`, `Terra.Width`, `Terra.Theme`, `Terra.View`, and `Terra.Renderer.Style`) run 162,226 instructions (64.0 percent), the Elixir and OTP library modules (`Enum`, `Map`, `String`, `Keyword`, `unicode`, and others) run 87,237 (34.4 percent), and the input and output path (`prim_tty`, `user_drv`, `group`, `io`, `gen_statem`, the Terra terminal and input modules, and others) runs 3,805 (1.5 percent). The profile gives time by instruction kind and not by guest module, so the render share of the time is not measured. The native IO part, which is the `prim_tty` NIF and the system calls, is 0.4 percent to 0.8 percent of the time.
+By instruction count, the four groups of modules sum to the 253,558 instructions of one key (the module counter of the second report of `count2.txt`; the Elixir modules carry the prefix `Elixir.`):
+
+- The Terra render modules run 162,226 instructions (64.0 percent): `Terra.Renderer.Grid`, `Terra.Renderer`, `Terra.Width`, `Terra.Theme`, `Terra.View`, and `Terra.Renderer.Style`.
+- The Elixir and OTP library modules run 87,237 instructions (34.4 percent): `Enum`, `Map`, `String`, `unicode`, `unicode_util`, `Keyword`, `Range`, `maps`, `lists`, `String.Chars`, `Access`, `Enumerable.List`, `Enumerable`, and `String.Chars.Integer`.
+- The input and output path and the OTP process modules run 3,817 instructions (1.5 percent): `gen_statem`, `group`, `user_drv`, `prim_tty`, `gen_server`, `io_lib_format`, `io`, `Terra.Input`, `gen`, `Terra.Input.Parser`, `io_lib`, `Terra.Terminal.Owner`, `queue`, `file`, `GenServer`, `IO`, `Terra.Terminal.ANSI`, `Terra.Input.TTY`, `Process`, `Terra.Terminal.TTY`, and `Terra.Terminal`.
+- The application modules run 278 instructions (0.1 percent): `Terra.Runtime` and `Counter`.
+
+The profile gives time by instruction kind and not by guest module, so the render share of the time is not measured. The native IO part, which is the `prim_tty` NIF and the system calls, is 0.4 percent to 0.8 percent of the time.
 
 The ranked parts of one key press. A part is exclusive: each sample belongs to one part. The ms of a part is its samples divided by the 100 keys of the session, because each sample stands for 1 ms.
 
