@@ -127,7 +127,7 @@ fn reports_the_bytes_of_the_process_containers_and_its_terms() {
     // walk.
     process
         .dictionary
-        .push((Term::Integer(2), Term::tuple(vec![Term::Integer(3)])));
+        .put(Term::Integer(2), Term::tuple(vec![Term::Integer(3)]));
     assert!(process.dictionary_bytes() > 0);
     process.mailbox.push(Term::tuple(vec![Term::Integer(4)]));
     let mut frame = frame();

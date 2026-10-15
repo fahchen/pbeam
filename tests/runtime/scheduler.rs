@@ -975,7 +975,7 @@ fn moves_the_containers_of_an_exiting_process_to_the_release_work_list() {
         let process = scheduler.processes.get_mut(&id).unwrap();
         process.frames[0].stack = vec![StackSlot::Term(marker(2))];
         process.mailbox.push(marker(3));
-        process.dictionary.push((Term::Integer(4), marker(5)));
+        process.dictionary.put(Term::Integer(4), marker(5));
         process.pending_bif = Some(PendingBif {
             module: "erlang",
             function: "length",
@@ -1038,9 +1038,7 @@ fn releases_the_terms_of_every_container_of_an_exiting_process() {
             StackSlot::Term(stack.clone()),
         ];
         process.mailbox.push(message.clone());
-        process
-            .dictionary
-            .push((Term::Integer(9), dictionary.clone()));
+        process.dictionary.put(Term::Integer(9), dictionary.clone());
         process.pending_bif = Some(PendingBif {
             module: "erlang",
             function: "length",
@@ -1490,7 +1488,7 @@ fn counts_the_bytes_of_the_release_work_list() {
             .map(|number| StackSlot::Term(marker(number as i64)))
             .collect();
         process.mailbox.push(marker(3));
-        process.dictionary.push((Term::Integer(4), marker(5)));
+        process.dictionary.put(Term::Integer(4), marker(5));
         process.pending_bif = Some(PendingBif {
             module: "erlang",
             function: "length",

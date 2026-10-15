@@ -1,5 +1,7 @@
+mod dictionary;
 mod tree;
 
+pub(super) use dictionary::Dictionary;
 pub(super) use tree::{MonitorLinkTree, TimerReference, WalkPosition};
 
 use super::{
@@ -274,9 +276,9 @@ pub(super) struct ProcessState {
     /// process starts as its own group leader, as `init` does in ERTS; a
     /// spawned process gets the group leader of its parent.
     pub(super) group_leader: ProcessId,
-    /// Process dictionary of `put/2` and `get/1`, as key and value pairs in
-    /// insertion order. Keys compare with exact equality (`=:=`).
-    pub(super) dictionary: Vec<(Term, Term)>,
+    /// Process dictionary, as the ERTS linear hash table of
+    /// `erl_process_dict.c`. Keys compare with exact equality (`=:=`).
+    pub(super) dictionary: Dictionary,
     /// Name that `erlang:register/2` gave this process, as
     /// `common.u.alive.reg` in ERTS.
     pub(super) registered_name: Option<Atom>,
@@ -458,7 +460,7 @@ impl ProcessState {
             monitors: MonitorLinkTree::default(),
             monitored_by: Vec::new(),
             group_leader: id,
-            dictionary: Vec::new(),
+            dictionary: Dictionary::default(),
             registered_name: None,
             error_handler: None,
             fcalls: 0,
@@ -651,20 +653,20 @@ impl ProcessState {
         bytes
     }
 
-    /// Return the bytes of the process dictionary of `put/2` and `get/1`: the
-    /// capacity of the pair array times the size of one pair. The number
-    /// excludes the header of the `Vec`, as the accounting of task
+    /// Return the bytes of the process dictionary: the capacity of its pair,
+    /// chain, and bucket arrays times the size of one item. The number
+    /// excludes the headers of the arrays, as the accounting of task
     /// [#559](https://github.com/fahchen/pbeam/issues/559) excludes it.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame), vec![]);
-    /// process.dictionary.push((Term::Integer(1), Term::Integer(2)));
+    /// process.dictionary.put(Term::Integer(1), Term::Integer(2));
     /// assert!(process.dictionary_bytes() > 0);
     /// ```
     pub(super) fn dictionary_bytes(&self) -> usize {
-        self.dictionary.capacity() * std::mem::size_of::<(Term, Term)>()
+        self.dictionary.allocated_bytes()
     }
 
     /// Return the bytes of the argument vector of the pending BIF call of the
@@ -734,10 +736,7 @@ impl ProcessState {
         for register in self.registers.iter().flatten() {
             live.term(register);
         }
-        for (key, value) in &self.dictionary {
-            live.term(key);
-            live.term(value);
-        }
+        self.dictionary.account(live);
         if let Some(reason) = &self.exiting {
             live.term(reason);
         }
