@@ -5024,10 +5024,12 @@ fn frame_function<'a>(
 }
 
 /// Return the stack trace frames of the current process, from the active
-/// frame to the first frame, without the `skip` newest frames, as ERTS `build_stacktrace` walks the saved
-/// continuation pointers of an exception (`beam_common.c:1205-1292`). Each
-/// frame is `{Module, Function, Arity, []}`, as `erts_build_mfa_item` gives
-/// a frame without arguments (`utils.c:3448-3455`). PBeam keeps no line
+/// frame to the first frame, without the `skip` newest frames, as ERTS
+/// `build_stacktrace` walks the saved continuation pointers of an
+/// exception (`beam_common.c:1205-1292`). Adjacent frames at the same
+/// return position give one frame. Each frame is
+/// `{Module, Function, Arity, []}`, as `erts_build_mfa_item` gives a
+/// frame without arguments (`utils.c:3448-3455`). PBeam keeps no line
 /// table, so each location is `[]` (row "Exception stack trace" of
 /// `docs/erts-differences.md`).
 ///
@@ -5043,7 +5045,7 @@ fn frame_function<'a>(
 /// A module that the code table does not hold, or an instruction with no
 /// `func_info` before it, is a runtime invariant error.
 fn mfa_stacktrace(scheduler: &mut Scheduler, skip: usize) -> Result<Vec<Term>, BeamError> {
-    let frames: Vec<Frame> = scheduler
+    let mut frames: Vec<Frame> = scheduler
         .current_process()
         .frames
         .iter()
@@ -5051,6 +5053,12 @@ fn mfa_stacktrace(scheduler: &mut Scheduler, skip: usize) -> Result<Vec<Term>, B
         .skip(skip)
         .cloned()
         .collect();
+    // ERTS records one frame for each run of equal continuation pointers,
+    // so a recursion gives one frame (`gather_stacktrace`,
+    // `beam_common.c:817-834`).
+    frames.dedup_by(|frame, previous| {
+        frame.module_id == previous.module_id && frame.next_instruction == previous.next_instruction
+    });
     let mut stacktrace = Vec::with_capacity(frames.len());
     for frame in frames {
         let module = Rc::clone(scheduler.code.module_by_id(frame.module_id)?);

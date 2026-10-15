@@ -9,7 +9,9 @@ main() ->
     {[try_stack(fun() -> lists:nth(id(5), [a]) end),
       try_stack(fun() -> pick(id(x), 1) end),
       try_stack(fun() -> ?MODULE:pick(id(x), 2) end),
-      try_stack(fun() -> body(id(x)) end)],
+      try_stack(fun() -> body(id(x)) end),
+      try_stack(fun() -> recurse(id(3), pick) end),
+      try_stack(fun() -> recurse(id(3), error) end)],
      [catch_stack(fun() -> lists:nth(id(5), [a]) end),
       catch_stack(fun() -> pick(id(x), 1) end),
       catch_stack(fun() -> ?MODULE:pick(id(x), 2) end)],
@@ -24,6 +26,14 @@ pick(b, N) when N > 0 -> N.
 body(X) ->
     Y = ?MODULE:pick(X, 3),
     id(Y).
+
+%% ERTS records one frame for each run of equal continuation pointers, so
+%% the frames of the recursion give one recurse/2 frame.
+recurse(0, pick) -> pick(id(x), 5);
+recurse(0, error) -> erlang:error(r, [a]);
+recurse(N, How) ->
+    V = recurse(N - 1, How),
+    {V}.
 
 uncaught() ->
     pick(id(x), 4).

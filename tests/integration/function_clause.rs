@@ -78,6 +78,16 @@ fn raises_function_clause_with_the_arguments_and_the_caller_frames_as_pinned_ert
         probe("try_stack", 1),
         probe("main", 0),
     ]);
+    // ERTS records one frame for the equal return positions of the
+    // recursion (`beam_common.c:817-834`).
+    let recursion = |first: Term| {
+        list(vec![
+            first,
+            probe("recurse", 2),
+            probe("try_stack", 1),
+            probe("main", 0),
+        ])
+    };
     assert_eq!(
         program
             .execute("function_clause_probe", "main", &[])
@@ -89,6 +99,20 @@ fn raises_function_clause_with_the_arguments_and_the_caller_frames_as_pinned_ert
                 caught(pick(1)),
                 caught(pick(2)),
                 tuple(vec![atom("error"), atom("function_clause"), body]),
+                tuple(vec![
+                    atom("error"),
+                    atom("function_clause"),
+                    recursion(pick(5)),
+                ]),
+                tuple(vec![
+                    atom("error"),
+                    atom("r"),
+                    recursion(frame(
+                        "function_clause_probe",
+                        "recurse",
+                        list(vec![atom("a")]),
+                    )),
+                ]),
             ]),
             list(vec![exit(nth()), exit(pick(1)), exit(pick(2))]),
             tuple(vec![atom("function_clause"), list(vec![pick(4)])]),
@@ -104,6 +128,12 @@ fn raises_function_clause_with_the_arguments_and_the_caller_frames_as_pinned_ert
          {function_clause_probe,try_stack,1,[]},{function_clause_probe,main,0,[]}]},\
          {error,function_clause,[{function_clause_probe,pick,[x,3],[]},\
          {function_clause_probe,body,1,[]},{function_clause_probe,try_stack,1,[]},\
+         {function_clause_probe,main,0,[]}]},\
+         {error,function_clause,[{function_clause_probe,pick,[x,5],[]},\
+         {function_clause_probe,recurse,2,[]},{function_clause_probe,try_stack,1,[]},\
+         {function_clause_probe,main,0,[]}]},\
+         {error,r,[{function_clause_probe,recurse,[a],[]},\
+         {function_clause_probe,recurse,2,[]},{function_clause_probe,try_stack,1,[]},\
          {function_clause_probe,main,0,[]}]}],\
          [{'EXIT',{function_clause,[{lists,nth_1,[4,[]],[]},\
          {function_clause_probe,catch_stack,1,[]},{function_clause_probe,main,0,[]}]}},\
