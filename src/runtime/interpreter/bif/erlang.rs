@@ -1972,7 +1972,8 @@ pub(super) fn element(index: &Term, tuple: &Term) -> BifResult {
 /// Run `erlang:is_function/2`: return `true` when `term` is a fun of
 /// `arity` arguments, as ERTS `erl_is_function` (`erl_bif_op.c:237-267`)
 /// does. An `arity` that is negative or not an integer raises `badarg`. A
-/// non-negative arity that no fun has gives `false`. The `is_function2`
+/// non-negative arity that no fun has gives `false`, also a positive bignum
+/// (`erl_bif_op.c:244-256`). The `is_function2`
 /// instruction runs the same check and passes only when it returns `true`
 /// (`jit/arm/instr_common.cpp:1266-1283`).
 ///
@@ -1985,8 +1986,12 @@ pub(super) fn element(index: &Term, tuple: &Term) -> BifResult {
 /// assert!(matches!(is_function(&Term::static_atom("notfun"), &Term::Integer(-1)), BifResult::Raise { .. }));
 /// ```
 pub(in crate::runtime::interpreter) fn is_function(term: &Term, arity: &Term) -> BifResult {
-    let &Term::Integer(arity) = arity else {
-        return BifResult::badarg();
+    let arity = match arity {
+        &Term::Integer(arity) => arity,
+        Term::BigInt(value) if value.sign() != num_bigint::Sign::Minus => {
+            return Value(Term::static_atom("false"));
+        }
+        _ => return BifResult::badarg(),
     };
     if arity < 0 {
         return BifResult::badarg();

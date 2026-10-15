@@ -2,12 +2,14 @@
 -export([bif/0, funs/0, applies/0, guard/0, arity/0, record/0]).
 
 %% One term of each kind. 576460752303423488 (2^59) is an ERTS bignum and
-%% a PBeam inline integer. The port runs `/usr/bin/true`.
+%% a PBeam inline integer. 2^64 and -(2^64) are bignums on both. The port
+%% runs `/usr/bin/true`.
 terms() ->
     Port = open_port({spawn_executable, <<"/usr/bin/true">>}, [binary]),
     [id(a), id(true), id(1), id(576460752303423488), id(1.5), id(<<1>>), id(<<>>),
      id([]), id([1]), id([1 | 2]), id({}), id({a, 1}), id(#{}), id(#{a => 1}),
-     self(), Port, make_ref(), fun() -> ok end, fun erlang:is_atom/1].
+     self(), Port, make_ref(), fun() -> ok end, fun erlang:is_atom/1,
+     id(1 bsl 64), id(-(1 bsl 64))].
 
 %% The type-test BIFs of arity 1 that this probe calls through each form.
 names() ->
@@ -54,7 +56,8 @@ function_guard(_, _) -> no.
 %% `is_function/2` in a body, through a fun, and through `apply/3`.
 arity() ->
     Args = [{fun() -> ok end, 0}, {fun() -> ok end, 1}, {fun erlang:is_atom/1, 1},
-            {a, 0}, {fun() -> ok end, -1}, {a, -1}, {a, x}, {a, 1.0}],
+            {a, 0}, {fun() -> ok end, -1}, {a, -1}, {a, x}, {a, 1.0},
+            {fun() -> ok end, 1 bsl 64}, {a, 1 bsl 64}, {a, -(1 bsl 64)}],
     [[catched(fun() -> is_function(id(F), id(A)) end),
       catched(fun() -> (id(fun erlang:is_function/2))(F, A) end),
       catched(fun() -> apply(erlang, id(is_function), [F, A]) end)]
@@ -65,7 +68,7 @@ arity() ->
 record() ->
     Args = [[{a, 1}, a], [{a, 1}, b], [{}, a], [x, a], [{a, 1}, 1],
             [{a, 1}, a, 2], [{a, 1}, a, 3], [{a, 1}, a, x], [{a, 1}, 1, 2],
-            [{a, 1}, a, 2.0], [x, a, -1]]
+            [{a, 1}, a, 2.0], [x, a, -1], [{a, 1}, a, 1 bsl 64]]
         %% The bounds of the small integer range of a size, made at run time,
         %% because a literal above 2^31 is a bignum in the literal table.
         ++ [[{a, 1}, a, S] || S <- small_bounds()],

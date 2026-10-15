@@ -209,7 +209,7 @@ bifs! {
     erlang:is_list/1 as ErlangIsList1 => |_, [term]| Ok(Value(Term::static_atom(if term.is_list() { "true" } else { "false" }))),
     erlang:is_map/1 as ErlangIsMap1 => |_, [term]| Ok(Value(Term::static_atom(if matches!(term, Term::Map(_)) { "true" } else { "false" }))),
     erlang:is_map_key/2 as ErlangIsMapKey2 => |_, [key, map]| Ok(maps::is_key(key, map)),
-    erlang:is_number/1 as ErlangIsNumber1 => |_, [term]| Ok(Value(Term::static_atom(if matches!(term, Term::Integer(_) | Term::Float(_)) { "true" } else { "false" }))),
+    erlang:is_number/1 as ErlangIsNumber1 => |_, [term]| Ok(Value(Term::static_atom(if term.is_integer() || matches!(term, Term::Float(_)) { "true" } else { "false" }))),
     erlang:is_pid/1 as ErlangIsPid1 => |_, [term]| Ok(Value(Term::static_atom(if matches!(term, Term::Pid(_)) { "true" } else { "false" }))),
     erlang:is_port/1 as ErlangIsPort1 => |_, [term]| Ok(Value(Term::static_atom(if matches!(term, Term::Port(_)) { "true" } else { "false" }))),
     erlang:is_process_alive/1 as ErlangIsProcessAlive1 => |cx, [pid]| erlang::is_process_alive(cx, pid),
