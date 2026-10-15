@@ -44,7 +44,7 @@ The step 0 numbers and the `ddb32f6e` numbers come from two different sessions. 
 
 Each entry is one landed change or one change that is not landed. The entries are newest first.
 
-### 2026-10-15 14:10 JST - Skip `test_heap` and `init_yregs` at load, task [#634](https://github.com/fahchen/pbeam/issues/634), branch `perf/634-skip-noop`
+### 2026-10-15 14:10 JST - Skip `test_heap` and `init_yregs` at load, task [#634](https://github.com/fahchen/pbeam/issues/634), pull request [#637](https://github.com/fahchen/pbeam/pull/637)
 
 The loader skips `test_heap` and `init_yregs`, as it skips `line`, and the `Noop` instruction is removed. The run loop dispatches nothing for the two opcodes. One interleaved session on 2026-10-15 from 13:49 to 14:10 JST measures the before revision `b8c71940` and the after revision `0b67d5b9` with release builds, in rotated order. Section "The loader skip of `test_heap` and `init_yregs`, task #634" of `docs/interpreter-dispatch-measurements.md` holds the rounds, the load, and the raw files.
 
