@@ -340,16 +340,20 @@ fn keeps_the_objects_of_a_bag_key_in_insertion_order_across_deletes() {
     let atoms = AtomTable::new();
     let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Bag);
     let object = |key, value| vec![Term::Integer(key), Term::Integer(value)];
+    let mut insert = |object| table.insert_all(&atoms, vec![object])[0];
     for value in 1..=3 {
-        assert_eq!(table.insert(&atoms, object(1, value)), value as usize - 1);
+        assert_eq!(insert(object(1, value)), value as usize - 1);
     }
-    assert_eq!(table.insert(&atoms, object(2, 1)), 0);
-    assert_eq!(table.insert(&atoms, object(1, 2)), 1);
+    assert_eq!(insert(object(2, 1)), 0);
+    assert_eq!(insert(object(1, 2)), 1);
     table.delete(&atoms, &Term::Integer(1));
     assert!(table.objects(&atoms, &Term::Integer(1)).is_empty());
     assert_eq!(table.slot_count(), 4);
     for value in [7, 8, 9] {
-        assert_eq!(table.insert(&atoms, object(1, value)), value as usize - 7);
+        assert_eq!(
+            table.insert_all(&atoms, vec![object(1, value)]),
+            vec![value as usize - 7]
+        );
     }
     assert_eq!(table.slot_count(), 4);
     let objects = |key| -> Vec<Vec<Term>> {
@@ -366,8 +370,10 @@ fn keeps_equal_objects_in_a_duplicate_bag() {
     let atoms = AtomTable::new();
     let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::DuplicateBag);
     let object = vec![Term::Integer(5)];
-    assert_eq!(table.insert(&atoms, object.clone()), 0);
-    assert_eq!(table.insert(&atoms, object.clone()), 0);
+    assert_eq!(
+        table.insert_all(&atoms, vec![object.clone(), object.clone()]),
+        vec![0, 0]
+    );
     assert_eq!(table.objects(&atoms, &object[0]).len(), 2);
     assert_eq!(table.table_type().name(), "duplicate_bag");
     assert_eq!(TableType::Bag.name(), "bag");
@@ -386,9 +392,32 @@ fn replaces_the_slot_of_an_index_entry_after_a_probe() {
     assert_eq!(index.find(1, |slot| slot == 0), Some(0));
 }
 
+/// Add `object` to the `bag` table `table` as ERTS adds one object
+/// (`erl_db_hash.c:1422-1452`), and return the number of objects that the
+/// insert compared with `object` and found not exactly equal. The insert
+/// compares `object` with each object of its key, from the newest to the
+/// oldest, and an exactly equal object stops it with no change. This is
+/// the reference model of `Table::insert_all`.
+fn insert_after_compares(table: &mut Table, atoms: &AtomTable, object: Vec<Term>) -> usize {
+    let key = table.key(&object);
+    let hash = stored_hash(atoms, key);
+    let newest = table.position(hash, key).unwrap_or(EMPTY);
+    let mut compared = 0;
+    let mut slot = newest;
+    while slot != EMPTY {
+        if *table.object_of(slot) == object {
+            return compared;
+        }
+        compared += 1;
+        slot = table.older[slot];
+    }
+    table.add(hash, object, newest);
+    compared
+}
+
 #[test]
 fn counts_the_compares_of_a_bag_list_insert_as_one_insert_after_another() {
-    // `insert_all` must give the counts and the objects that one `insert`
+    // `insert_all` must give the counts and the objects that one insert
     // after another gives: objects that were in the table, objects that the
     // list added, an equal object in each part, and a new key.
     let atoms = AtomTable::new();
@@ -396,9 +425,9 @@ fn counts_the_compares_of_a_bag_list_insert_as_one_insert_after_another() {
     let filled = || {
         let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Bag);
         for value in 1..=5 {
-            table.insert(&atoms, object(1, value));
+            insert_after_compares(&mut table, &atoms, object(1, value));
         }
-        table.insert(&atoms, object(2, 1));
+        insert_after_compares(&mut table, &atoms, object(2, 1));
         table
     };
     let list = [
@@ -414,7 +443,7 @@ fn counts_the_compares_of_a_bag_list_insert_as_one_insert_after_another() {
     ];
     let mut one_by_one = filled();
     let expected: Vec<usize> = (list.iter())
-        .map(|(key, value)| one_by_one.insert(&atoms, object(*key, *value)))
+        .map(|(key, value)| insert_after_compares(&mut one_by_one, &atoms, object(*key, *value)))
         .collect();
     let mut table = filled();
     let objects = list

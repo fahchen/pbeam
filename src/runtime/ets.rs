@@ -397,16 +397,13 @@ impl Table {
         self.table_type
     }
 
-    /// Add the object with the elements `object`, as `db_put_hash`
-    /// (`erl_db_hash.c:1384-1462`) does, and return the objects that the
-    /// insert compared with `object` and found not exactly equal.
+    /// Add the object with the elements `object` to a `set` or a
+    /// `duplicate_bag` table, as `db_put_hash` (`erl_db_hash.c:1384-1462`)
+    /// does. Such an insert compares no object. A `bag` insert compares
+    /// objects, so it goes through [`Table::insert_all`].
     ///
     /// - In a `set` table, an object with an exactly equal key replaces the
     ///   old object (`erl_db_hash.c:1396-1411`).
-    /// - In a `bag` table, the insert compares `object` with each object of
-    ///   its key, from the newest to the oldest, and an exactly equal object
-    ///   stops it with no change (`erl_db_hash.c:1422-1442`). Each object
-    ///   that is not equal counts.
     /// - In a `duplicate_bag` table, the insert compares nothing.
     ///
     /// A new object goes before the other objects of its key, so a lookup
@@ -420,48 +417,32 @@ impl Table {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Bag);
+    /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::DuplicateBag);
     /// let atoms = AtomTable::new();
-    /// assert_eq!(table.insert(&atoms, vec![Term::static_atom("k"), Term::Integer(1)]), 0);
-    /// assert_eq!(table.insert(&atoms, vec![Term::static_atom("k"), Term::Integer(2)]), 1);
-    /// assert_eq!(table.insert(&atoms, vec![Term::static_atom("k"), Term::Integer(1)]), 1);
+    /// table.insert(&atoms, vec![Term::static_atom("k"), Term::Integer(1)]);
+    /// table.insert(&atoms, vec![Term::static_atom("k"), Term::Integer(1)]);
     /// assert_eq!(table.objects(&atoms, &Term::static_atom("k")).len(), 2);
     /// ```
-    pub(super) fn insert(&mut self, atoms: &AtomTable, object: Vec<Term>) -> usize {
+    pub(super) fn insert(&mut self, atoms: &AtomTable, object: Vec<Term>) {
         let (found, hash) = {
             let key = self.key(&object);
             let hash = stored_hash(atoms, key);
             (self.position(hash, key), hash)
         };
-        let mut compared = 0;
         let newest = match (found, self.table_type) {
             (Some(slot), TableType::Set) => {
                 self.objects[slot] = Some(object);
-                return 0;
+                return;
             }
-            (Some(newest), table_type) => {
-                if table_type == TableType::Bag {
-                    let mut slot = newest;
-                    while slot != EMPTY {
-                        if *self.object_of(slot) == object {
-                            return compared;
-                        }
-                        compared += 1;
-                        slot = self.older[slot];
-                    }
-                }
-                newest
-            }
+            (Some(newest), _) => newest,
             (None, _) => EMPTY,
         };
         self.add(hash, object, newest);
-        compared
     }
 
     /// Add each object of `objects` in list order, as a list insert puts
     /// them, and return the number of objects that the insert of each
-    /// object compared, as [`Table::insert`] gives it for each object in
-    /// turn.
+    /// object compared, as one insert after another gives it.
     ///
     /// In a `bag` table, ERTS compares an object with each object of its
     /// key up to an exactly equal one, so a list of `n` objects of one key
@@ -481,14 +462,16 @@ impl Table {
     /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Bag);
     /// let atoms = AtomTable::new();
     /// let object = |value| vec![Term::Integer(1), Term::Integer(value)];
-    /// table.insert(&atoms, object(1));
+    /// table.insert_all(&atoms, vec![object(1)]);
     /// assert_eq!(table.insert_all(&atoms, vec![object(2), object(1), object(3)]), vec![1, 1, 2]);
     /// ```
     pub(super) fn insert_all(&mut self, atoms: &AtomTable, objects: Vec<Vec<Term>>) -> Vec<usize> {
         if self.table_type != TableType::Bag {
-            return (objects.into_iter())
-                .map(|object| self.insert(atoms, object))
-                .collect();
+            let count = objects.len();
+            for object in objects {
+                self.insert(atoms, object);
+            }
+            return vec![0; count];
         }
         let mut walks: HashMap<u64, Vec<BagWalk>> = HashMap::new();
         let mut counts = Vec::with_capacity(objects.len());
