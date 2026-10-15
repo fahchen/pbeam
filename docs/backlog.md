@@ -115,6 +115,14 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a measured workload where moves of boxed terms hold a clear share of the time, or a Terra CPU harness that resolves a change below 1 ms for each key.
 - **Source:** the measurement record of `docs/performance/631.md`.
 
+### Defer the drop of a large dead value out of the instruction path
+
+- **Reason:** task #633 split the time of the input and output path of a release Terra key press. Its largest single mechanism is the `write` call of one `get_tuple_element` of `gen_server` (position 2219 of the loaded code), about 32 µs to 34 µs two times for each key, and its probable cause is the drop of the old value of the register. A write that releases the last reference of a large value runs the drop of `Term` (`src/term.rs:517`) over each node of that value inside the instruction. ERTS pays nothing at that write: `get_tuple_element` loads one word (`erts/emulator/beam/jit/arm/instr_common.cpp:378-388`), and a minor collection copies only the live terms (`do_minor`, `erts/emulator/beam/erl_gc.c:1639`, `:1677`) and frees the young heap as one block (`erl_gc.c:1831`).
+- **Option:** when a register write releases the last reference of a compound value, the process keeps the value in a list of dead values, and the scheduler drops the list when no process can run, before it waits for input. The accepted `Arc` graph of terms and `Term: Send + Sync` stay. No value or ordering that a process can see changes, because a dead value has no other reference.
+- **Evidence:** the measured drop is about 63 µs to 69 µs for each key at position 2219 of `gen_server` in sessions T and U, about 0.5 percent of the run loop time of a key. The record does not measure the drops at other writes or in the modules outside the input and output group, so this figure is not an upper bound. The change moves the drop time out of the key latency, but it does not remove CPU time.
+- **Trigger:** a measured workload where the drop of dead values at a register write takes a large part of its CPU time or of its latency, for example a probe that gives a drop row at or above 5 percent of a key press.
+- **Source:** the measurement record of `docs/performance/633.md`.
+
 ## Runtime
 
 ### Model the process heap for GC reductions and the message copy cost
