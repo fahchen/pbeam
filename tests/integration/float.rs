@@ -225,3 +225,18 @@ fn formats_floats_with_io_lib_as_pinned_erts() {
     assert!(output.status.success(), "{output:?}");
     assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
 }
+
+#[test]
+fn matches_large_select_val_choices_exactly_as_pinned_erts() {
+    // A `select_val` of more than 32 choices takes the ordered form. ERTS
+    // matches each choice exactly (`emu/select_instrs.tab:57-88`), so an
+    // integer never matches a float choice, a float never matches an
+    // integer choice, and `-0.0` does not match the `+0.0` choice.
+    let program = program();
+    assert_text(
+        &program,
+        "select",
+        "[[nomatch,nomatch,i5,i0,nomatch,nomatch,nomatch],\
+         [nomatch,nomatch,f7,nomatch,f0,nomatch,nomatch]]",
+    );
+}

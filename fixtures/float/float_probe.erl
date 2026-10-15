@@ -1,6 +1,6 @@
 -module(float_probe).
 -export([literals/0, arith/0, registers/2, register_errors/0, compare/0,
-         keys/0, to_text/0, text_errors/0, format/0, id/1, show/1]).
+         keys/0, select/0, to_text/0, text_errors/0, format/0, id/1, show/1]).
 
 %% Return the term unchanged. The calls through id/1 keep the compiler from
 %% folding the operations at compile time.
@@ -107,6 +107,106 @@ to_text() ->
 
 text(F, O) ->
     try float_to_binary(F, O) catch error:R -> R end.
+
+%% A `select_val` of more than 32 choices takes the ordered form, which
+%% binary-searches the sorted choices. ERTS matches each choice exactly, as
+%% `=:=` does: an integer never matches a float choice, a float never
+%% matches an integer choice, and `-0.0` does not match a `+0.0` choice.
+select() ->
+    [[int_choice(id(V)) || V <- [1.0, 5.0, 5, 0, 0.0, -0.0, 40.0]],
+     [float_choice(id(V)) || V <- [1, 7, 7.0, 0, 0.0, -0.0, 40]]].
+
+int_choice(V) ->
+    case V of
+        0 -> i0;
+        1 -> i1;
+        2 -> i2;
+        3 -> i3;
+        4 -> i4;
+        5 -> i5;
+        6 -> i6;
+        7 -> i7;
+        8 -> i8;
+        9 -> i9;
+        10 -> i10;
+        11 -> i11;
+        12 -> i12;
+        13 -> i13;
+        14 -> i14;
+        15 -> i15;
+        16 -> i16;
+        17 -> i17;
+        18 -> i18;
+        19 -> i19;
+        20 -> i20;
+        21 -> i21;
+        22 -> i22;
+        23 -> i23;
+        24 -> i24;
+        25 -> i25;
+        26 -> i26;
+        27 -> i27;
+        28 -> i28;
+        29 -> i29;
+        30 -> i30;
+        31 -> i31;
+        32 -> i32;
+        33 -> i33;
+        34 -> i34;
+        35 -> i35;
+        36 -> i36;
+        37 -> i37;
+        38 -> i38;
+        39 -> i39;
+        40 -> i40;
+        _ -> nomatch
+    end.
+
+float_choice(V) ->
+    case V of
+        +0.0 -> f0;
+        1.0 -> f1;
+        2.0 -> f2;
+        3.0 -> f3;
+        4.0 -> f4;
+        5.0 -> f5;
+        6.0 -> f6;
+        7.0 -> f7;
+        8.0 -> f8;
+        9.0 -> f9;
+        10.0 -> f10;
+        11.0 -> f11;
+        12.0 -> f12;
+        13.0 -> f13;
+        14.0 -> f14;
+        15.0 -> f15;
+        16.0 -> f16;
+        17.0 -> f17;
+        18.0 -> f18;
+        19.0 -> f19;
+        20.0 -> f20;
+        21.0 -> f21;
+        22.0 -> f22;
+        23.0 -> f23;
+        24.0 -> f24;
+        25.0 -> f25;
+        26.0 -> f26;
+        27.0 -> f27;
+        28.0 -> f28;
+        29.0 -> f29;
+        30.0 -> f30;
+        31.0 -> f31;
+        32.0 -> f32;
+        33.0 -> f33;
+        34.0 -> f34;
+        35.0 -> f35;
+        36.0 -> f36;
+        37.0 -> f37;
+        38.0 -> f38;
+        39.0 -> f39;
+        40.0 -> f40;
+        _ -> nomatch
+    end.
 
 %% float_to_list/2 and float_to_binary/2 raise badarg for a term that is
 %% not a float, an option that is not valid, and a text of 256 bytes or

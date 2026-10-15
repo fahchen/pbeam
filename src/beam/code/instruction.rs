@@ -256,7 +256,9 @@ pub(crate) enum SelectValueChoices {
 /// order when the list holds at most [`SELECT_VALUE_LINEAR_LIMIT`] entries,
 /// when two choices are equal, or when two choices have no term order.
 /// Otherwise return [`SelectValueChoices::Ordered`] with the choices sorted
-/// by [`Term::compare`] and free of duplicates.
+/// by [`Term::compare_exact`] and free of duplicates. ERTS matches each
+/// choice exactly, so the order puts `1` and `1.0` apart, and `-0.0` and
+/// `0.0` apart (`emu/select_instrs.tab:57-88`).
 ///
 /// The Erlang compiler emits distinct choices, and this function still
 /// detects a duplicate, because ERTS gives the first matching clause and a
@@ -272,7 +274,7 @@ pub(crate) enum SelectValueChoices {
 /// let SelectValueChoices::Ordered(ordered) = prepare_select_value_choices(choices, &atoms) else {
 ///     panic!("33 distinct choices take the ordered form");
 /// };
-/// assert!(ordered[0].0.compare(&ordered[1].0, &atoms)?.is_lt());
+/// assert!(ordered[0].0.compare_exact(&ordered[1].0, &atoms)?.is_lt());
 /// ```
 pub(crate) fn prepare_select_value_choices(
     choices: Vec<(Term, u32)>,
@@ -284,7 +286,7 @@ pub(crate) fn prepare_select_value_choices(
     let mut ordered = choices.clone();
     let mut failure = None;
     ordered.sort_by(|(left, _), (right, _)| {
-        left.compare(right, atoms).unwrap_or_else(|error| {
+        left.compare_exact(right, atoms).unwrap_or_else(|error| {
             failure.get_or_insert(error);
             Ordering::Equal
         })
@@ -292,7 +294,10 @@ pub(crate) fn prepare_select_value_choices(
     let distinct = failure.is_none()
         && ordered.windows(2).all(|pair| {
             pair[0].0 != pair[1].0
-                && !matches!(pair[0].0.compare(&pair[1].0, atoms), Ok(Ordering::Equal))
+                && !matches!(
+                    pair[0].0.compare_exact(&pair[1].0, atoms),
+                    Ok(Ordering::Equal)
+                )
         });
     if distinct {
         SelectValueChoices::Ordered(ordered)

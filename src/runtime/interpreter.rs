@@ -1639,8 +1639,8 @@ impl BeamProgram {
                     choices,
                 } => {
                     // The loader prepared the choices: a small list keeps the
-                    // encoded order, and a large list is sorted by the term
-                    // order. The linear arm is the walk that PBeam always
+                    // encoded order, and a large list is sorted by the exact
+                    // term order. The linear arm is the walk that PBeam always
                     // ran. The ordered arm binary-searches the sorted list,
                     // as ERTS `select_val_bins.select` does over its sorted
                     // values (`emu/select_instrs.tab:57-88`, OTP 29.1.1).
@@ -3558,10 +3558,12 @@ fn label_position(target: u32) -> Result<usize, BeamError> {
 /// Return the label of the choice that equals `value` in the ordered choice
 /// list of [`Instruction::SelectValue`], or `None` when no choice equals it.
 ///
-/// The list is sorted by [`Term::compare`], so a binary search over the list
-/// visits about `log2(len)` choices instead of all of them. The comparison
-/// is the table-aware term order, so two atoms compare by name and not by
-/// atom index.
+/// The list is sorted by [`Term::compare_exact`], so a binary search over
+/// the list visits about `log2(len)` choices instead of all of them. The
+/// comparison is the table-aware exact term order, so two atoms compare by
+/// name and not by atom index, and a value equals a choice only when the two
+/// are exactly equal, as in the linear walk: `1` does not match `1.0`, and
+/// `-0.0` does not match `0.0`.
 ///
 /// # Examples
 ///
@@ -3595,7 +3597,7 @@ fn select_value_ordered(
     let mut high = choices.len();
     while low < high {
         let middle = low + (high - low) / 2;
-        match value.compare(&choices[middle].0, atoms)? {
+        match value.compare_exact(&choices[middle].0, atoms)? {
             Ordering::Less => high = middle,
             Ordering::Greater => low = middle + 1,
             Ordering::Equal => return Ok(Some(choices[middle].1)),
