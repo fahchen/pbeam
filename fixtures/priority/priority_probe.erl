@@ -1,5 +1,6 @@
 -module(priority_probe).
--export([orders/0, lows/0, wakes/0, flags/0, spawns/0, worker/4, sleeper/1]).
+-export([orders/0, lows/0, wakes/0, exits/0, flags/0, spawns/0, worker/4, sleeper/1,
+         exiter/2, ticker/1]).
 
 %% Each worker sets its priority in its first turn. Then it sends its tag
 %% to the parent and yields, N times. With one scheduler, the arrival
@@ -19,6 +20,44 @@ lows() ->
      race([{l, low}, {n, normal}], 12),
      race([{l1, low}, {l2, low}, {n, normal}], 12),
      race([{l, low}], 3)].
+
+%% The parent monitors a process 5000 more times, and the process exits.
+%% Each 'DOWN' message uses 1 reduction of the exit after the process
+%% leaves the process table, so the exit switches out once and continues
+%% in its next turn at its own priority. The number of ticks of a normal
+%% ticker before the last 'DOWN' message shows where the exit continues.
+exits() -> [{Priority, exit_ticks(Priority)} || Priority <- [low, normal, max]].
+
+exit_ticks(Priority) ->
+    Parent = self(),
+    {Exiter, _} = spawn_monitor(?MODULE, exiter, [Parent, Priority]),
+    receive {ready, Exiter} -> ok end,
+    monitors(Exiter, 5000),
+    Ticker = spawn(?MODULE, ticker, [Parent]),
+    Exiter ! go,
+    Ticks = ticks(5001, 0),
+    exit(Ticker, kill),
+    flush_ticks(),
+    Ticks.
+
+exiter(Parent, Priority) ->
+    process_flag(priority, Priority),
+    Parent ! {ready, self()},
+    receive go -> ok end.
+
+monitors(_, 0) -> ok;
+monitors(Pid, N) -> _ = erlang:monitor(process, Pid), monitors(Pid, N - 1).
+
+ticker(Parent) -> Parent ! tick, erlang:yield(), ticker(Parent).
+
+ticks(0, N) -> N;
+ticks(Downs, N) ->
+    receive
+        tick -> ticks(Downs, N + 1);
+        {'DOWN', _, process, _, normal} -> ticks(Downs - 1, N)
+    end.
+
+flush_ticks() -> receive tick -> flush_ticks() after 0 -> ok end.
 
 %% A message to a waiting max process puts it in the max queue. The
 %% sender continues its turn, and the max process runs at the next switch.

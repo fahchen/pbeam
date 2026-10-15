@@ -33,6 +33,11 @@ const RESULTS: &[(&str, &str)] = &[
          {l2,1},{n,4},{l1,1},{l2,1},{l1,1},{l2,1},{l1,1},{l2,1},{l1,1},{l2,1},{l1,1},{l2,1},\
          {l1,1},{l2,1},{l1,1},{l2,1},{l1,1},{l2,1},{l1,1},{l2,1},{l1,1},{l2,1}],[{l,3}]]",
     ),
+    // An exit that sends more `DOWN` messages than one budget permits
+    // continues after the process table at the priority of the process: a
+    // `low` exit waits for turns of the `normal` ticker and the parent, and
+    // a `max` exit runs before them.
+    ("exits", "[{low,21},{normal,1},{max,0}]"),
     // A message wakes a `max` process, but the sender continues its turn.
     ("wakes", "[high,max,high_after,normal,max,normal_after]"),
     (
