@@ -2332,6 +2332,27 @@ impl Scheduler {
         let Some(monitor) = self.remove_origin_monitor(watcher, reference) else {
             return false;
         };
+        self.end_monitor(watcher, reference, &monitor);
+        true
+    }
+
+    /// Remove the monitor `reference` of `watcher`, which left the monitor
+    /// tree of `watcher`, from its target. A monitor of a process sends a
+    /// demonitor signal to it (`bif.c:512-514`). A monitor of a port leaves
+    /// the port, as `erts_port_demonitor` does (io.c:2839-2870).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let monitor = scheduler.remove_origin_monitor(watcher, reference).unwrap();
+    /// scheduler.end_monitor(watcher, reference, &monitor);
+    /// ```
+    pub(super) fn end_monitor(
+        &mut self,
+        watcher: ProcessId,
+        reference: Reference,
+        monitor: &OriginMonitor,
+    ) {
         if let (Some(target), "process") = (monitor.target, monitor.kind) {
             let demonitor = Signal::Demonitor { watcher, reference };
             // A target that does not exist drops the signal.
@@ -2340,7 +2361,6 @@ impl Scheduler {
         if let Term::Port(port) = monitor.item {
             self.demonitor_port(port, reference);
         }
-        true
     }
 
     /// Remove the monitor `reference` from the monitor tree of the process

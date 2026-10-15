@@ -1712,3 +1712,38 @@ fn removes_the_accept_of_a_process_that_exits_with_its_port_monitor_signal_pendi
     let port = ports.get_mut(listen).unwrap().inet_mut().unwrap();
     assert!(port.acceptors.is_empty());
 }
+
+#[test]
+fn removes_a_reply_demonitor_port_monitor_from_the_port_at_the_alias_message() {
+    use super::{AliasMode, signals::HandlingPoint};
+    use crate::runtime::port::{
+        Driver, Ports,
+        inet::{Inet, SocketType},
+    };
+    // The first message through a `reply_demonitor` alias removes its port
+    // monitor from the port too (erl_proc_sig_queue.c:6101-6107).
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let id = current(&mut scheduler);
+    let tcp = Inet::new(SocketType::Stream);
+    let port = scheduler
+        .open_port(b"tcp_inet".to_vec(), Driver::Inet(tcp))
+        .unwrap();
+    let options = MonitorOptions {
+        alias: Some(AliasMode::ReplyDemonitor),
+        ..no_options()
+    };
+    let alias = scheduler.monitor(MonitorTarget::Port(port), options).unwrap();
+    let signal = Signal::AliasMessage {
+        alias,
+        message: atom("reply"),
+    };
+    scheduler.send_signal(None, id, signal).unwrap();
+    scheduler
+        .handle_signals(id, 100, 100, HandlingPoint::ScheduleIn)
+        .unwrap();
+    assert!(scheduler.processes[&id].monitors.get(&alias).is_none());
+    let ports = scheduler.resources.borrow_mut::<Ports>();
+    assert!(ports.get_mut(port).unwrap().monitors.is_empty());
+}
