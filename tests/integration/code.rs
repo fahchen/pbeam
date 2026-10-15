@@ -219,6 +219,34 @@ fn loads_a_module_from_its_bytes_as_pinned_erts() {
 }
 
 #[test]
+fn calls_an_import_before_and_after_the_load_of_its_module_as_pinned_erts() {
+    // Each `call_ext` names the export entry of its import, which the ERTS
+    // loader patches into the code (`jit/asm_load.c:1198-1206`). Before the
+    // load, the entry calls the error handler of the process
+    // (`call_error_handler`, `beam_common.c:1294-1342`), here
+    // `load_probe:undefined_function/3`. The load sets the address of each
+    // exported function, so the same `call_ext_only`, `call_ext`, and
+    // `call_ext_last` sites then run `load_target:value/0`. The undefined
+    // `load_target:missing/0` calls the handler again after the load.
+    // `erlang:apply/2,3` call through the export as well.
+    let before = "{undefined,load_target,value,[]}";
+    let missing = "{undefined,load_target,missing,[]}";
+    let after = "load_target_value";
+    let calls = |value: &str| {
+        format!(
+            "[{value},{value},[{value}],{value},{missing},{missing},{value},{missing},{value},[[{value}]]]"
+        )
+    };
+    let expected = format!(
+        "{{{},{{module,load_target}},{}}}\n",
+        calls(before),
+        calls(after)
+    );
+    assert_eq!(load_run("late", LOAD_TARGET), expected);
+    assert_eq!(load_reference("late", "load_target"), expected);
+}
+
+#[test]
 fn finishes_prepared_code_as_pinned_erts() {
     // A prepared value is a reference. Two prepared values of one module
     // give `{duplicated, Modules}` (`beam_bif_load.c:429-441`), and a

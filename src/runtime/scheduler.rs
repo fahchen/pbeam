@@ -1,6 +1,5 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    rc::Rc,
     time::Duration,
 };
 
@@ -16,7 +15,7 @@ use super::{
         output::IovecWrite,
         signal,
     },
-    interpreter::CodeTable,
+    interpreter::{CodeTable, LoadedModule},
     local_node,
     mailbox::Mailbox,
     persistent_term::PersistentTerms,
@@ -32,7 +31,6 @@ use super::{
     tty::Ttys,
 };
 use crate::{
-    beam::BeamModule,
     error::{BeamError, error},
     term::{
         Atom, AtomTable, Group, LiveBytes, MapDrain, ProcessId, Reference, SMALL_INTEGER_MIN, Term,
@@ -1454,25 +1452,25 @@ impl Scheduler {
     }
 
     /// Return the module of the active frame of the current process from
-    /// the code table of the run.
+    /// the code table of the run, with the export targets of its imports.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(scheduler.current_module()?.name, "process_probe");
+    /// assert_eq!(scheduler.current_module()?.code.name, "process_probe");
     /// ```
     ///
     /// # Errors
     ///
     /// An identity that no loaded module has is a runtime invariant error.
-    pub(super) fn current_module(&self) -> Result<&Rc<BeamModule>, BeamError> {
+    pub(super) fn current_module(&self) -> Result<&LoadedModule, BeamError> {
         // ponytail: only the run loop calls this, for a process with an active frame.
         let frame = self
             .current_process
             .and_then(|id| self.processes.get(&id))
             .and_then(|process| process.frames.last())
             .expect("the current process has an active frame");
-        self.code.module_by_id(frame.module_id)
+        self.code.loaded_by_id(frame.module_id)
     }
 
     /// Return the process `id` of the process table, also the current

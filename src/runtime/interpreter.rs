@@ -21,6 +21,7 @@ use crate::{
 };
 use std::{
     borrow::{Borrow, Cow},
+    cell::Cell,
     cmp::Ordering,
     collections::HashMap,
     rc::Rc,
@@ -32,7 +33,9 @@ mod bits;
 mod code_table;
 mod native;
 
-pub(super) use code_table::CodeTable;
+pub(super) use code_table::{CodeTable, LoadedModule};
+
+use code_table::{ExportTarget, ImportTargets};
 
 use bif::{
     BifArguments, BifId, BifResult, MAX_BORROWED_ARGUMENTS, OwnedBifArguments, dispatch_leaf,
@@ -868,7 +871,7 @@ impl BeamProgram {
                     // has none, and the parser writes 0 for it.
                     let deallocate = tail.then_some(*deallocate);
                     if let Some(outcome) =
-                        self.call_external(scheduler, module, *import, deallocate)?
+                        self.call_external(scheduler, module, &cursor.imports, *import, deallocate)?
                     {
                         return Ok(outcome);
                     }
@@ -1952,13 +1955,19 @@ impl BeamProgram {
 
     /// Call the import `import` of `code` with the arguments in the X
     /// registers, as `call_ext` does. The import holds the MFA and the call
-    /// that the loader decided for it, so the call compares no name. A tail
-    /// call first checks that the frame has `deallocate` Y registers, then
-    /// replaces the frame. A tail call of `erlang:apply/2` or
-    /// `erlang:apply/3` releases the Y registers before the apply, as the
-    /// ERTS loader makes `i_apply_fun_last` and `i_apply_last`
-    /// (`jit/arm/ops.tab:649-657`), so an exception of the apply does not
-    /// see the catch tags of the frame.
+    /// that the loader decided for it, so the call compares no name. A call
+    /// of module code enters the export target in the slot of the import in
+    /// `targets`, and makes no lookup by name, as `call_ext` branches
+    /// through the export entry that the loader patched into the code
+    /// (`emit_i_call_ext` and `emit_i_call_ext_only` in
+    /// `jit/arm/instr_call.cpp:150-164`; `jit/asm_load.c:1198-1206`). An
+    /// empty slot looks up the export by name and keeps a found target in
+    /// the slot (see [`ImportTargets`]). A tail call first checks that the
+    /// frame has `deallocate` Y registers, then replaces the frame. A tail
+    /// call of `erlang:apply/2` or `erlang:apply/3` releases the Y registers
+    /// before the apply, as the ERTS loader makes `i_apply_fun_last` and
+    /// `i_apply_last` (`jit/arm/ops.tab:649-657`), so an exception of the
+    /// apply does not see the catch tags of the frame.
     ///
     /// A BIF runs as a body call also in a tail call, and the process then
     /// continues at the `Deallocate` and the `Return` that the loader puts
@@ -1980,19 +1989,21 @@ impl BeamProgram {
     /// ```rust,ignore
     /// // Import 0 of `code` is `erlang:exit/1`. A tail call with no catch
     /// // tag exits the process.
-    /// let outcome = program.call_external(&mut scheduler, &code, 0, Some(0))?;
+    /// let outcome = program.call_external(&mut scheduler, &code, &targets, 0, Some(0))?;
     /// assert!(matches!(outcome, Some(Outcome::Exit { result: None, .. })));
     /// // A tail call from a frame with one Y register must deallocate it.
-    /// assert!(program.call_external(&mut scheduler, &code, 0, Some(0)).is_err());
+    /// assert!(program.call_external(&mut scheduler, &code, &targets, 0, Some(0)).is_err());
     /// ```
     fn call_external(
         &self,
         scheduler: &mut Scheduler,
         code: &BeamModule,
+        targets: &[Cell<Option<ExportTarget>>],
         import: u32,
         deallocate: Option<u32>,
     ) -> Result<Option<Outcome>, BeamError> {
-        // The loader checks each import index against the import table.
+        // The loader checks each import index against the import table, and
+        // the code table makes one slot for each import.
         let index = import as usize;
         let Import {
             module,
@@ -2029,7 +2040,19 @@ impl BeamProgram {
             }
             ImportKind::ApplyFun => self.apply_fun(scheduler, tail),
             ImportKind::Apply => self.apply_mfa(scheduler, tail),
-            ImportKind::Export => self.call_export(scheduler, module, name, arity, tail),
+            ImportKind::Export => {
+                let slot = &targets[index];
+                if let Some(target) = slot.get() {
+                    return enter_export(process, target.frame(), arity, tail);
+                }
+                match scheduler.code.export_frame(module, name, arity)? {
+                    Some(frame) => {
+                        slot.set(Some(ExportTarget::of(&frame)));
+                        enter_export(scheduler.current_process_mut(), frame, arity, tail)
+                    }
+                    None => self.undefined_function(scheduler, module, name, arity, tail),
+                }
+            }
         }
     }
 
@@ -2134,12 +2157,7 @@ impl BeamProgram {
             _ => {}
         }
         match scheduler.code.export_frame(module, name, arity)? {
-            Some(frame) => {
-                let process = scheduler.current_process_mut();
-                check_remote_call_arguments(&process.registers, arity)?;
-                enter_frame(process, frame, tail);
-                Ok(None)
-            }
+            Some(frame) => enter_export(scheduler.current_process_mut(), frame, arity, tail),
             None => self.undefined_function(scheduler, module, name, arity, tail),
         }
     }
@@ -2677,6 +2695,32 @@ fn enter_frame(process: &mut ProcessState, frame: Frame, tail: bool) {
     }
 }
 
+/// Enter `frame`, the frame of an export of arity `arity`, with the
+/// arguments in the X registers, as a remote call does. A tail call
+/// replaces the active frame, and a body call pushes the frame.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let frame = scheduler.code.mfa_frame("fixture", "main", 0)?;
+/// assert!(enter_export(&mut process, frame, 0, false)?.is_none());
+/// ```
+///
+/// # Errors
+///
+/// An argument register that is not set, or that holds a match context, is
+/// a runtime error, as [`check_remote_call_arguments`] gives it.
+fn enter_export(
+    process: &mut ProcessState,
+    frame: Frame,
+    arity: u32,
+    tail: bool,
+) -> Result<Option<Outcome>, BeamError> {
+    check_remote_call_arguments(&process.registers, arity)?;
+    enter_frame(process, frame, tail);
+    Ok(None)
+}
+
 /// The spawn options that this runtime supports, as the flags of ERTS
 /// `ErlSpawnOpts`, and the PBeam option `{capabilities, Map}`.
 #[derive(Default)]
@@ -2784,6 +2828,8 @@ fn create_process(
 struct Cursor {
     /// The code of the active frame.
     module: Rc<BeamModule>,
+    /// The export targets of the imports of `module` in this run.
+    imports: ImportTargets,
     /// The index of the next instruction in `module.instructions`.
     position: usize,
 }
@@ -2798,16 +2844,18 @@ impl Cursor {
     /// assert_eq!(cursor.position, 0);
     /// ```
     fn new(scheduler: &mut Scheduler) -> Result<Self, BeamError> {
-        let module = Rc::clone(scheduler.current_module()?);
+        let LoadedModule { code, imports } = scheduler.current_module()?.clone();
         Ok(Cursor {
-            module,
+            module: code,
+            imports,
             position: active_position(scheduler),
         })
     }
 
     /// Replace the position with the position of the active frame. Replace
-    /// the code too when the active frame is in another module, which the
-    /// integer identity of the two modules decides.
+    /// the code and its import targets too when the active frame is in
+    /// another module, which the integer identity of the two modules
+    /// decides.
     ///
     /// # Examples
     ///
@@ -2821,7 +2869,9 @@ impl Cursor {
             (frame.module_id, frame.next_instruction)
         };
         if module_id != self.module.id {
-            self.module = Rc::clone(scheduler.current_module()?);
+            let loaded = scheduler.current_module()?;
+            self.module = Rc::clone(&loaded.code);
+            self.imports = Rc::clone(&loaded.imports);
         }
         self.position = position;
         Ok(())

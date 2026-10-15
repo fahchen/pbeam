@@ -693,6 +693,86 @@ fn calls_a_module_export_without_a_bif_search() {
     );
 }
 
+/// Run `fixture:main/0` of `program` in a new scheduler and return the
+/// scheduler and the result of the run, so that a test reads the code table
+/// of the run.
+fn run_in_scheduler(program: &BeamProgram) -> (Scheduler, Result<(), crate::BeamError>) {
+    let mut scheduler = Scheduler::without_checks((*program.atoms).clone());
+    scheduler.code = CodeTable::new(program.modules.clone());
+    let result = program.run_root(
+        &mut scheduler,
+        "fixture",
+        "main",
+        &[],
+        Issuer::Unchecked,
+        &mut None,
+    );
+    (scheduler, result)
+}
+
+/// Return the export target of the import `import` of `fixture` in the
+/// code table of a run, as the start of the frame that it creates.
+fn import_target(scheduler: &Scheduler, import: &Instruction) -> Option<usize> {
+    let Instruction::CallExternal { import, .. } = import else {
+        panic!("not a call_ext: {import:?}");
+    };
+    let module = scheduler.code.get("fixture").expect("fixture is loaded");
+    let loaded = scheduler.code.loaded_by_id(module.id).unwrap();
+    loaded.imports[*import as usize]
+        .get()
+        .map(|target| target.frame().next_instruction)
+}
+
+#[test]
+fn keeps_the_export_target_of_an_import_after_its_first_call() {
+    // The ERTS loader patches the export entry of each import into the code
+    // (`jit/asm_load.c:1198-1206`), and `call_ext` branches through it
+    // (`jit/arm/instr_call.cpp:150-164`). The first call of an import of
+    // module code finds the export and keeps it in the slot of the import,
+    // so the second call reads the slot. Each of the two calls enters
+    // `guest/1`, which starts after label 11.
+    let guest = external("fixture", "guest", 1, false, 0);
+    let body = vec![
+        Instruction::Move(Operand::Value(Term::Integer(1)), Operand::X(0)),
+        guest.clone(),
+        guest.clone(),
+        Instruction::Return,
+    ];
+    let extra = vec![
+        Instruction::FunctionInfo {
+            module: "fixture".into(),
+            name: "guest".into(),
+            arity: 1,
+        },
+        Instruction::Label(11),
+        Instruction::Return,
+    ];
+    let exports = HashMap::from([(("main".into(), 0), 2), (("guest".into(), 1), 11)]);
+    let program = program_of(fixture_instructions(0, body, extra), exports);
+    let module = &program.modules["fixture"];
+    let start = module.tables.jump_targets[&11];
+    let (scheduler, result) = run_in_scheduler(&program);
+    result.unwrap();
+    assert_eq!(import_target(&scheduler, &guest), Some(start));
+}
+
+#[test]
+fn keeps_no_export_target_for_an_import_with_no_export() {
+    // A call of a module that the run does not load finds no export, so the
+    // slot stays empty and a later call looks up the export again, as the
+    // load of the module changes the address of the ERTS export entry
+    // (`jit/asm_load.c:1180-1196`). A run with no code server stops at the
+    // call (see `undefined_function`).
+    let absent = external("absent", "run", 0, false, 0);
+    let program = make_program(vec![absent.clone(), Instruction::Return], 0);
+    let (scheduler, result) = run_in_scheduler(&program);
+    assert_eq!(
+        result.unwrap_err().to_string(),
+        "unresolved external MFA absent:run/0"
+    );
+    assert_eq!(import_target(&scheduler, &absent), None);
+}
+
 #[test]
 fn rejects_missing_modules_exports_and_function_arities() {
     let program = make_program(vec![Instruction::Return], 0);
