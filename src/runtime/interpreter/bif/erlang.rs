@@ -1589,6 +1589,212 @@ pub(super) fn split_binary(binary: &Term, position: &Term) -> BifResult {
     }
 }
 
+/// The bytes of a chunk of `erlang:binary_to_list/1,3` for each reduction,
+/// as ERTS `ERTS_B2L_BYTES_PER_REDUCTION` (`binary.c:182`).
+const B2L_BYTES_PER_REDUCTION: usize = 256;
+
+/// The budget of a call of `erlang:binary_to_list/1,3` that runs in one
+/// chunk after a short budget, as ERTS `B2L_MIN_EXEC_REDS`
+/// (`binary.c:38`).
+const B2L_MIN_EXEC_REDS: usize = CONTEXT_REDS as usize / 4;
+
+/// The budget at or below which `erlang:binary_to_list/1,3` switches out
+/// before a short binary, as ERTS `B2L_RESCHED_REDS` (`binary.c:39`).
+const B2L_RESCHED_REDS: usize = CONTEXT_REDS as usize / 40;
+
+/// Run `erlang:binary_to_list/1`, as ERTS `binary_to_list_1`
+/// (`binary.c:306-352`): `<<>>` gives `[]`, and a term that is not a
+/// binary, or a bitstring that is not a whole number of bytes, raises
+/// `badarg`. [`b2l_start`] makes the list.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let list = binary_to_list_1(&mut scheduler, &Term::binary(vec![1, 2]))?;
+/// assert!(matches!(list, BifResult::Value(codes) if codes == Term::list_from([1, 2].map(Term::Integer))));
+/// ```
+///
+/// # Errors
+///
+/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
+/// negative budget.
+pub(super) fn binary_to_list_1(
+    scheduler: &mut Scheduler,
+    term: &Term,
+) -> Result<BifResult, BeamError> {
+    match term {
+        Term::Binary(binary) if binary.bit_size() == 0 => Ok(Value(Term::nil())),
+        Term::Binary(binary) if binary.bit_size() % 8 == 0 => {
+            let size = binary.bit_size() / 8;
+            b2l_start(
+                scheduler,
+                "binary_to_list",
+                vec![term.clone()],
+                binary,
+                0,
+                size,
+                size,
+            )
+        }
+        _ => Ok(BifResult::badarg()),
+    }
+}
+
+/// Run `erlang:binary_to_list/3`, as ERTS `binary_to_list_3`
+/// (`binary.c:354-411`): the bytes from the 1-based position `start` to
+/// `stop`. A term that is not a binary, a bitstring that is not a whole
+/// number of bytes, a position that is not an integer, and a position
+/// outside `1 =< start =< stop =< byte_size(Binary)` raise `badarg`. A
+/// bignum position is above each byte size. ERTS decides on one chunk with
+/// the size of the whole binary, not of the part (`binary.c:385-398`), and
+/// [`b2l_start`] does the same.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let list = binary_to_list_3(&mut scheduler, &Term::binary(vec![1, 2, 3]), &Term::Integer(2), &Term::Integer(3))?;
+/// assert!(matches!(list, BifResult::Value(codes) if codes == Term::list_from([2, 3].map(Term::Integer))));
+/// ```
+///
+/// # Errors
+///
+/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
+/// negative budget.
+pub(super) fn binary_to_list_3(
+    scheduler: &mut Scheduler,
+    term: &Term,
+    start: &Term,
+    stop: &Term,
+) -> Result<BifResult, BeamError> {
+    let (Term::Binary(binary), Term::Integer(first), Term::Integer(last)) = (term, start, stop)
+    else {
+        return Ok(BifResult::badarg());
+    };
+    let bits = binary.bit_size();
+    let size = (bits / 8) as i64;
+    if bits % 8 != 0 || *first < 1 || *last > size || last < first {
+        return Ok(BifResult::badarg());
+    }
+    let arguments = vec![term.clone(), start.clone(), stop.clone()];
+    let length = (last - first + 1) as usize;
+    b2l_start(
+        scheduler,
+        "binary_to_list",
+        arguments,
+        binary,
+        *first as usize - 1,
+        length,
+        size as usize,
+    )
+}
+
+/// Start the list of the `length` bytes at `offset` of `binary`, of `size`
+/// bytes, for `erlang:<bif>` with `arguments`, as ERTS `binary_to_list`
+/// does (`binary.c:258-290`, `329-351`). A binary of fewer than 256 bytes
+/// for each reduction left is one chunk. A binary of fewer than
+/// `B2L_MIN_EXEC_REDS * 256` bytes is also one chunk with a budget of 1000.
+/// With 100 or fewer reductions left, it first switches out: the call
+/// uses the rest of its budget as virtual reductions and runs again from
+/// the start in the next turn (`ERTS_BIF_YIELD1`, `ERTS_BIF_YIELD3`). One
+/// chunk costs one reduction for each 256 bytes. Each other binary goes
+/// to [`b2l_chunk`].
+///
+/// # Errors
+///
+/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
+/// negative budget.
+fn b2l_start(
+    scheduler: &mut Scheduler,
+    bif: &'static str,
+    arguments: Vec<Term>,
+    binary: &Binary,
+    offset: usize,
+    length: usize,
+    size: usize,
+) -> Result<BifResult, BeamError> {
+    let process = scheduler.current_process_mut();
+    let reds_left = process.bif_reductions_left()?;
+    let short = size < B2L_MIN_EXEC_REDS * B2L_BYTES_PER_REDUCTION;
+    if size >= reds_left * B2L_BYTES_PER_REDUCTION && !short {
+        return Ok(b2l_chunk(
+            process,
+            binary,
+            offset,
+            length,
+            Term::nil(),
+            reds_left,
+        ));
+    }
+    if size >= reds_left * B2L_BYTES_PER_REDUCTION && reds_left <= B2L_RESCHED_REDS {
+        let fcalls = process.fcalls;
+        scheduler.vbump_reductions(fcalls);
+        return Ok(BifResult::TrapBif {
+            module: "erlang",
+            function: bif,
+            arguments,
+        });
+    }
+    process.bump_reductions(((length - 1) / B2L_BYTES_PER_REDUCTION + 1) as i32);
+    Ok(Value(b2l_cons(
+        &binary[offset..offset + length],
+        Term::nil(),
+    )))
+}
+
+/// Make the list of the last chunk of the `remaining` bytes at `offset` of
+/// the binary `binary` in front of the list `tail`, with the budget
+/// `reds_left`, as ERTS `binary_to_list_chunk` does (`binary.c:201-256`):
+/// the chunk has `(reds_left + 1) * 256` bytes or fewer, and costs one
+/// reduction for each 256 bytes. When bytes remain, the call traps to the
+/// export `erts_internal:binary_to_list_continue`, which continues with
+/// the budget of the next turn (`binary.c:292-304`). ERTS keeps the state
+/// in a magic reference, and PBeam keeps the binary, the offset, the
+/// remaining bytes, and the list so far as terms. The trap disables the
+/// garbage collection of the process in ERTS, and a return after it can
+/// switch out for a pending collection; PBeam has no process heap, so the
+/// last chunk returns its list.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let list = b2l_chunk(&mut process, &Binary::from(vec![1, 2]), 0, 2, Term::nil(), 4000);
+/// assert!(matches!(list, BifResult::Value(codes) if codes == Term::list_from([1, 2].map(Term::Integer))));
+/// ```
+pub(super) fn b2l_chunk(
+    process: &mut ProcessState,
+    binary: &Binary,
+    offset: usize,
+    remaining: usize,
+    tail: Term,
+    reds_left: usize,
+) -> BifResult {
+    let size = ((reds_left + 1) * B2L_BYTES_PER_REDUCTION).min(remaining);
+    process.bump_reductions(((size - 1) / B2L_BYTES_PER_REDUCTION + 1) as i32);
+    let rest = remaining - size;
+    let list = b2l_cons(&binary[offset + rest..offset + remaining], tail);
+    if rest == 0 {
+        return Value(list);
+    }
+    BifResult::TrapBif {
+        module: "erts_internal",
+        function: "binary_to_list_continue",
+        arguments: vec![
+            Term::Binary(binary.clone()),
+            Term::Integer(offset as i64),
+            Term::Integer(rest as i64),
+            list,
+        ],
+    }
+}
+
+/// Return the list of the bytes `bytes` in front of the list `tail`, as
+/// ERTS `erts_bin_bytes_to_list` does.
+fn b2l_cons(bytes: &[u8], tail: Term) -> Term {
+    bytes.iter().rev().fold(tail, |tail, byte| {
+        Term::cons(Term::Integer(i64::from(*byte)), tail)
+    })
+}
+
 /// Run `erlang:integer_to_list/1`: return the decimal characters of an
 /// integer, as ERTS `integer_to_list_1` and `integer_to_list`
 /// (`bif.c:3266-3339`) do. A term that is not an integer raises `badarg`.
