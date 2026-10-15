@@ -119,6 +119,14 @@ fn gives_the_reply_bytes_of_each_request_as_pinned_erts() {
 }
 
 #[test]
+fn gives_the_getsockopt_value_of_an_option_that_is_on_as_pinned_erts() {
+    // `GETOPTS` gives the value of `getsockopt` as is (inet_drv.c:9727-9750):
+    // the flag bit of the option on macOS, 1 on Linux.
+    let on = if cfg!(target_vendor = "apple") { 4 } else { 1 };
+    assert_runs("enabled", &format!("[1,0,0,0,0,{on},10,0,0,0,{on}]"));
+}
+
+#[test]
 fn keeps_the_port_data_and_names_the_driver_as_pinned_erts() {
     // The data starts as `undefined` (erl_bif_port.c:646). A port of the
     // spawn driver has data, and its control rejects each command other than

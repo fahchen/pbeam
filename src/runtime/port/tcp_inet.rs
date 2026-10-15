@@ -290,10 +290,10 @@ impl TcpInet {
                 35 => socket.map(|_| self.send_timeout_close),
                 0 => socket
                     .and_then(|socket| socket.reuse_address().ok())
-                    .map(i32::from),
+                    .map(getsockopt_value),
                 10 => socket
                     .and_then(|socket| socket.tcp_nodelay().ok())
-                    .map(i32::from),
+                    .map(getsockopt_value),
                 3 => {
                     if let Some(linger) = socket.and_then(|socket| socket.linger().ok()) {
                         // `linger` needs 4 more bytes (inet_drv.c:9749).
@@ -392,4 +392,23 @@ fn unsupported(what: &str, code: u8) -> BeamError {
     error(format!(
         "unsupported tcp_inet {what} {code}: see \"tcp_inet ports\" in docs/erts-differences.md"
     ))
+}
+
+/// Give the value that `getsockopt` returns for `reuseaddr` or `nodelay`,
+/// which `GETOPTS` puts in its reply as is (inet_drv.c:9727-9750). macOS
+/// gives the flag bit of the option for an option that is on: `so_options &
+/// SO_REUSEADDR` and `t_flags & TF_NODELAY` in xnu `sogetoptlock` and
+/// `tcp_ctloutput`, both 4. Linux gives 1 (`sk_reuse` and `!!(nonagle &
+/// TCP_NAGLE_OFF)`). `socket2` gives only a boolean, so this function maps
+/// it back.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(getsockopt_value(false), 0);
+/// assert_eq!(getsockopt_value(true), if cfg!(target_vendor = "apple") { 4 } else { 1 });
+/// ```
+fn getsockopt_value(on: bool) -> i32 {
+    const ON: i32 = if cfg!(target_vendor = "apple") { 4 } else { 1 };
+    i32::from(on) * ON
 }

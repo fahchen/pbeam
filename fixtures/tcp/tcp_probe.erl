@@ -1,5 +1,5 @@
 -module(tcp_probe).
--export([control/0, data/0, unsupported/1]).
+-export([control/0, data/0, enabled/0, unsupported/1]).
 
 %% The requests of the tcp_inet driver that prim_inet sends for
 %% gen_tcp:listen/2, inet:sockname/1, inet:getopts/2, and gen_tcp:close/1
@@ -71,6 +71,17 @@ shared() ->
     true = port_close(S2),
     true = port_close(S1),
     Result.
+
+%% The GETOPTS reply of reuseaddr and nodelay when they are on: the value
+%% of getsockopt, which macOS gives as the flag bit of the option (4) and
+%% Linux as 1 (inet_drv.c:9727-9750).
+enabled() ->
+    P = open_port({spawn_driver, "tcp_inet"}, [binary]),
+    [1] = control(P, 1, [1, 1, 1]),
+    [1] = control(P, 7, [0,0,0,0,1, 10,0,0,0,1]),
+    Reply = control(P, 8, [0, 10]),
+    true = port_close(P),
+    Reply.
 
 %% The port data, the port information, and the port names of a tcp_inet
 %% port, and a port of the spawn driver, whose control rejects each command
