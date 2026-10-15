@@ -1,5 +1,6 @@
 -module(type_test_probe).
--export([bif/0, funs/0, applies/0, guard/0, arity/0, record/0]).
+-export([bif/0, funs/0, applies/0, guard/0, arity/0, record/0,
+         record_guard/0]).
 
 %% One term of each kind. 576460752303423488 (2^59) is an ERTS bignum and
 %% a PBeam inline integer. 2^64 and -(2^64) are bignums on both. The port
@@ -52,6 +53,14 @@ guard() ->
 
 function_guard(T, A) when is_function(T, A) -> yes;
 function_guard(_, _) -> no.
+
+%% `is_record/1` in a guard compiles to the `is_any_native_record` test
+%% instruction (genop.tab:722-724).
+record_guard() ->
+    [native_record(T) || T <- terms()].
+
+native_record(T) when is_record(T) -> yes;
+native_record(_) -> no.
 
 %% `is_function/2` in a body, through a fun, and through `apply/3`.
 arity() ->
