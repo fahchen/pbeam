@@ -851,6 +851,11 @@ impl BeamProgram {
     ///   ([`iolist::l2b_size`], [`iolist::l2b_copy`]). ERTS traps to
     ///   `erts_internal:list_to_bitstring_continue/1` with a magic reference
     ///   to the walk state (`erl_iolist.c:53-55`, `764-835`).
+    /// - `erts_internal:binary_to_list_continue/4`, with the binary, the
+    ///   offset, the bytes that remain, and the list so far of
+    ///   `erlang:binary_to_list/1,3` ([`erlang::b2l_chunk`]). ERTS traps to
+    ///   `erts_internal:binary_to_list_continue/1` with a magic reference to
+    ///   the state (`binary.c:41-53`, `292-304`).
     /// - `erlang:binary_find_trap/3`, with the subject, the search state, and
     ///   the pattern of `binary:match/2` or `binary:split/2,3`
     ///   ([`binary::find_trap`]). ERTS traps to the same export with magic references to the search state
@@ -1060,6 +1065,26 @@ impl BeamProgram {
                     &stack.collect::<Vec<_>>(),
                     iovec.cloned().collect(),
                     merged.clone().to_bytes(),
+                ))
+            }
+            (
+                "erts_internal",
+                "binary_to_list_continue",
+                [
+                    Term::Binary(binary),
+                    Term::Integer(offset),
+                    Term::Integer(remaining),
+                    list,
+                ],
+            ) => {
+                let reds_left = process.bif_reductions_left()?;
+                Ok(erlang::b2l_chunk(
+                    process,
+                    binary,
+                    *offset as usize,
+                    *remaining as usize,
+                    list.clone(),
+                    reds_left,
                 ))
             }
             (
