@@ -121,3 +121,28 @@ fn counts_the_message_of_an_active_bif_timer() {
     timers.account_terms(&mut live);
     assert!(live.bytes() > 0);
 }
+
+#[test]
+fn moves_the_time_offset_to_the_os_system_time_after_a_step_as_check_time_offset() {
+    let mut timers = Timers::new();
+    let now = 2_000_000_000;
+    let base = now + timers.time_offset;
+    // A drift of at most 2 * small_diff (100 us) keeps the offset.
+    assert_eq!(timers.correct_time_offset(now, base + 100_000), base);
+    assert_eq!(timers.correct_time_offset(now, base - 100_000), base);
+    assert_eq!(timers.time_offset, base - now);
+    // A step forward past the limit sets the offset to the OS system time.
+    assert_eq!(
+        timers.correct_time_offset(now, base + 100_001),
+        base + 100_001
+    );
+    assert_eq!(timers.time_offset, base + 100_001 - now);
+    // A step backward of one hour moves the offset back.
+    let back = base - 3_600_000_000_000;
+    assert_eq!(timers.correct_time_offset(now, back), back);
+    assert_eq!(
+        timers.correct_time_offset(now + 1_000, back + 1_000),
+        back + 1_000
+    );
+    assert_eq!(timers.time_offset, back - now);
+}

@@ -22,6 +22,14 @@ const UNITS_PER_TICK: i64 = 1_000_000;
 /// `sys/unix/erl_unix_sys.h:172-173`), in ticks.
 const MONOTONIC_END_TICKS: i64 = i64::MAX / MONOTONIC_BEGIN * MONOTONIC_BEGIN / UNITS_PER_TICK;
 
+/// The ERTS `small_diff` of the time offset check in nanoseconds: one tenth
+/// of `large_diff`, which is `50 * monotonic_time_unit / resolution` and at
+/// least 500 microseconds (`erl_time_sup.c:1156-1167`). `resolution` is the
+/// lower of the OS system and OS monotonic time resolutions. Each host
+/// resolution of 100000 Hz or more gives the 500-microsecond floor (measured
+/// on the pinned host: 1000000 Hz for `os_system_time_source`).
+const SMALL_DIFF: i64 = 50_000;
+
 /// The position of a timer in the queue: its end tick, then its start
 /// number.
 pub(super) type TimerKey = (i64, u64);
@@ -71,8 +79,8 @@ pub(super) struct Timers {
     start: Instant,
     /// The time offset of the run: the OS system time at the run start
     /// minus `MONOTONIC_BEGIN`, as ERTS sets it at the emulator start
-    /// (`erl_time_sup.c:1244-1249`). PBeam has no time correction, so the
-    /// offset does not change in the run.
+    /// (`erl_time_sup.c:1244-1249`). It follows a step of the OS system
+    /// time, as in the `multi_time_warp` mode (`Timers::correct_time_offset`).
     time_offset: i64,
     /// Active timers by key.
     queue: BTreeMap<TimerKey, Timer>,
@@ -155,8 +163,32 @@ impl Timers {
     /// // 2023-11-14 and later.
     /// assert!(timers.system_time() > 1_700_000_000_000_000_000);
     /// ```
-    pub(super) fn system_time(&self) -> i64 {
-        self.now().saturating_add(self.time_offset)
+    pub(super) fn system_time(&mut self) -> i64 {
+        self.correct_time_offset(self.now(), clock::system_time())
+    }
+
+    /// Return the Erlang system time at the internal monotonic time `now`
+    /// after the time offset check of the `multi_time_warp` mode with the
+    /// OS system time `os_time`, as `check_time_offset` does
+    /// (`erl_time_sup.c:789-817`). When the Erlang system time differs from
+    /// `os_time` by more than `2 * SMALL_DIFF`, the time offset becomes
+    /// `os_time - now` (`time_offset -= sdiff`), so the Erlang system time
+    /// is `os_time`. The Erlang monotonic time does not change.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut timers = Timers::new();
+    /// let base = 2_000_000_000 + timers.time_offset;
+    /// assert_eq!(timers.correct_time_offset(2_000_000_000, base + 100_000), base);
+    /// assert_eq!(timers.correct_time_offset(2_000_000_000, base + 100_001), base + 100_001);
+    /// ```
+    pub(super) fn correct_time_offset(&mut self, now: i64, os_time: i64) -> i64 {
+        let sdiff = now.saturating_add(self.time_offset).saturating_sub(os_time);
+        if !(-2 * SMALL_DIFF..=2 * SMALL_DIFF).contains(&sdiff) {
+            self.time_offset = self.time_offset.saturating_sub(sdiff);
+        }
+        now.saturating_add(self.time_offset)
     }
 
     /// Return the end tick of a timer of `msec` milliseconds that starts at
