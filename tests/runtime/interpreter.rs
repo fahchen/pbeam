@@ -1078,6 +1078,52 @@ fn updates_and_reads_maps_and_reports_unsupported_map_operands() {
 }
 
 #[test]
+fn gets_map_elements_of_a_hashmap_and_matches_an_empty_key_list_of_each_map() {
+    let integers = |count: i64| {
+        Operand::Value(Term::Map(
+            Map::from_pairs(
+                (1..=count)
+                    .map(|key| (Term::Integer(key), Term::Integer(-key)))
+                    .collect(),
+                &test_atom_table(),
+            )
+            .unwrap(),
+        ))
+    };
+    let run = |map: Operand, keys: &[i64]| {
+        let pairs = keys
+            .iter()
+            .zip(0..)
+            .map(|(key, index)| (Operand::Value(Term::Integer(*key)), Operand::X(index)))
+            .collect();
+        make_program(
+            vec![
+                Instruction::Move(atom("none"), Operand::X(0)),
+                Instruction::GetMapElements {
+                    fail_label: 3,
+                    map,
+                    pairs,
+                },
+                Instruction::Return,
+                Instruction::Label(3),
+                Instruction::Move(atom("missing"), Operand::X(0)),
+                Instruction::Return,
+            ],
+            0,
+        )
+        .execute("fixture", "main", &[])
+        .unwrap()
+        .term
+    };
+    // A hashmap finds each key in turn.
+    assert_eq!(run(integers(40), &[2, 40]), Term::Integer(-2));
+    assert_eq!(run(integers(40), &[2, 41]), test_atom("missing"));
+    // The ERTS JIT matches an empty key list for each map.
+    assert_eq!(run(integers(40), &[]), test_atom("none"));
+    assert_eq!(run(integers(2), &[]), test_atom("none"));
+}
+
+#[test]
 fn tests_map_keys_with_has_map_fields_and_writes_no_register() {
     let map = Operand::Value(Term::Map(
         Map::from_pairs(

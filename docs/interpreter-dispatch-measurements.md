@@ -1096,3 +1096,123 @@ The raw records are the session logs `session.txt` and `alloc-session.txt` and t
 - The session does not resolve a change of less than about 0.5 ms for each key on the Terra key press.
 - The record does not find the cause of the floor cost: the code layout of the run loop or the layout of `ProcessState`.
 - The record does not split the 11.7 percent of allocation of a Terra key press by allocation site.
+
+## The map elements in one walk, task [#629](https://github.com/fahchen/pbeam/issues/629)
+
+This section records the gate of task [#629](https://github.com/fahchen/pbeam/issues/629), from the attribution of task [#625](https://github.com/fahchen/pbeam/issues/625). That attribution measured `GetMapElements` at 5.2 to 5.7 percent of a release Terra key press as body and at 9.3 percent inclusive. The arm collected the values in a `Vec<&Term>`, copied them into a `Vec<Term>`, and searched a flatmap once for each key. `map_hash` allocated a vector also for an atom, `[]`, or a small integer key.
+
+### The change
+
+The change has two commits. `3c83cf88` lets `map_hash` start its walk only for a list or a tuple key, so an atom, `[]`, a small integer, or a binary key allocates nothing. `028221a9` sorts two or more pairs of `get_map_elements` in flatmap key order in the loader, as the ERTS loader does (`beam_load_map_key_sort`, `beam_transform_helpers.c:53-115`; JIT `jit/arm/ops.tab:1190-1197`). The arm keeps one copy of the map handle, walks a flatmap once, and writes each value when it finds the key, as `beam_jit_get_map_elements` does (`beam_jit_common.cpp:706-767`). A hashmap finds each key in turn.
+
+### The session
+
+The before revision is `e93523c3`, the head of `origin/main` that the branch starts from. The after revision is `028221a9`. Each revision is a `git archive` of its commit, built with `cargo build --locked --release --bin pbeam` and `cargo test --locked --release --test dispatch_baseline --no-run` in its own target directory. One session on 2026-10-15 (JST) runs the two revisions in rotated order in each round. The floor numbers come from the test `records_the_interpreter_dispatch_baseline` (`--exact --nocapture --test-threads=1`), and each number is the minimum of nine probe runs inside one invocation. The map shapes come from a scratch module `gme_probe`, compiled with the pinned `erlc` and run with `/usr/bin/time -p pbeam gme_probe <shape> -- gme_probe.beam`. Each run makes 3000000 iterations of one `get_map_elements` of three atom keys: `flat` reads a flatmap of 6 atom keys, and `hash` reads a hashmap of 43 keys. The value is the user CPU time of the process. The Terra numbers come from the scratch key driver of the #628 record: 60 keys to the release `terra_counter` example, with the raw CPU time of `pbeam` from `ps` and no idle correction. A second session of eight Terra rounds follows the first session.
+
+| Part | Rounds | Time (JST) | One-minute load | Raw record |
+| --- | --- | --- | --- | --- |
+| Floor shapes | 6 | 16:19:36 to 16:19:50 | 2.41 to 2.53 | `floor-r<round>-<revision>.txt` |
+| Map shapes | 6 | 16:19:51 to 16:20:09 | 2.30 to 2.64 | `micro-<shape>-r<round>-<revision>.txt` |
+| Terra keys, first session | 4 | 16:20:09 to 16:24:45 | 1.36 to 2.51 before each run | `terra-r<round>-<revision>.log` |
+| Terra keys, second session | 8 | 16:25:04 to 16:34:15 | 1.06 to 2.49 before each run | `terra2-r<round>-<revision>.log` |
+
+No `cargo`, `rustc`, or `nextest` process ran during the sessions. The session logs are `session.txt` and `session-terra2.txt`. The raw files are in the scratch directory of the task and are not committed.
+
+### The results
+
+Each floor value is the minimum over the six rounds, in ns for each iteration of 200000 iterations, with the range of the six rounds. Each map value is the minimum over the six rounds, in s of user CPU time for 3000000 iterations, with the range.
+
+| Shape | Before `e93523c3` | After `028221a9` | Change |
+| --- | --- | --- | --- |
+| `flat` map shape, three keys of a 6-key flatmap | 0.75 s (0.75 to 0.76) | 0.53 s (0.53 to 0.54) | -29.3 percent |
+| `hash` map shape, three keys of a 43-key hashmap | 0.92 s (0.92 to 0.94) | 0.59 s (0.59 to 0.60) | -35.9 percent |
+| `call_only` plus the `bif` of `map_get/2` on a 1000-key map | 102.4 ns (102.4 to 105.6) | 88.1 ns (88.1 to 88.4) | -14.0 percent |
+| `call_ext_only` floor loop | 47.7 ns (47.7 to 47.8) | 47.6 ns (47.6 to 47.7) | -0.2 percent |
+| `call_only` floor loop | 42.4 ns (42.4 to 43.6) | 42.1 ns (42.1 to 43.0) | -0.7 percent |
+| Position `call_only` floor loop | 42.4 ns (42.4 to 43.8) | 42.1 ns (42.1 to 42.9) | -0.7 percent |
+| `call_only` plus `gc_bif '+'` | 67.3 ns (67.3 to 67.8) | 66.9 ns (66.9 to 67.2) | -0.6 percent |
+| `call_only` plus the `bif` of `tuple_size/1` | 69.3 ns (69.3 to 69.4) | 68.3 ns (68.3 to 69.7) | -1.4 percent |
+| `call_only` plus the `bif` of `element/2` | 70.0 ns (70.0 to 70.6) | 69.6 ns (69.6 to 69.8) | -0.6 percent |
+| `call_only` plus the `bif` of `hd/1` | 69.3 ns (69.3 to 69.4) | 68.8 ns (68.8 to 69.3) | -0.7 percent |
+
+| Terra round | Before `e93523c3`, ms of CPU time for each key | After `028221a9`, ms of CPU time for each key |
+| --- | --- | --- |
+| Second session, rounds 1 to 8 | 14.333, 15.667, 16.333, 16.500, 16.333, 16.000, 16.000, 16.000 | 15.833, 15.000, 12.667, 16.333, 15.333, 15.333, 16.167, 13.667 |
+| Second session, mean of 8 rounds | 15.896 | 15.042 |
+| Second session, median of 8 rounds | 16.000 | 15.333 |
+| First session, rounds 1 to 4 | 16.167, 14.833, 16.500, 15.667 | 16.167, 15.667, 13.000, 15.667 |
+| First session, mean of 4 rounds | 15.792 | 15.125 |
+
+Each run answered each of the 60 keys. The two map shapes fall by about 73 ns and 110 ns for each iteration, and the ranges of the two revisions do not overlap. The `map_get/2` shape on a 1000-key hashmap falls by 14.3 ns, because its key hash no longer allocates. The other floor shapes do not change beyond the spread of their rounds.
+
+In the second session the CPU time for each key falls by 0.854 ms, or 5.4 percent, at the mean, and by 0.667 ms, or 4.2 percent, at the median. The after round is below the before round in six of the eight rounds. The ranges of the two revisions overlap (14.333 to 16.500 ms before, 12.667 to 16.333 ms after), so this session does not resolve the Terra change: a Welch t test gives t = 1.68 and p = 0.12, and a paired t test of the rounds gives t = 1.54 and p = 0.17. The first session agrees: -0.667 ms, or -4.2 percent, at the mean of four rounds.
+
+### The decision
+
+The change lands. Both map shapes and the `map_get/2` shape fall by more than the spread of their rounds, and no floor shape becomes slower. The Terra mean falls in both sessions, but the fall is not significant. The ERTS behavior stays: the loader refuses a register key among other keys, as the ERTS loader does, and an empty key list matches each map, as the inline JIT path does (`jit/arm/instr_map.cpp:404-415, 464`).
+
+### Known gaps
+
+- The Terra ranges of the two revisions overlap, and the 0.854 ms fall is not significant (p = 0.12). The CPU time from `ps` has a resolution of 10 ms, about 0.17 ms for each key over 60 keys.
+- The sessions do not check the other processes of the host, as session s2 of task #627 did. They check only the load and the absence of `cargo`, `rustc`, and `nextest`.
+- The map shapes use the user CPU time of `/usr/bin/time`, with a resolution of 10 ms over about 0.5 s to 0.9 s.
+- `has_map_fields` keeps its own search of each key, because the task covers only `get_map_elements`.
+- The loader keeps each key as an `Operand`, so the arm reads each key through `read_ref` for each comparison. ERTS also stores the hash of each key in the instruction; PBeam computes the hash of each key of a hashmap at each run.
+
+## Two small integers in the `gc_bif` arm, task [#632](https://github.com/fahchen/pbeam/issues/632)
+
+This section records the gate of task [#632](https://github.com/fahchen/pbeam/issues/632), proposal 6 of the attribution of task [#625](https://github.com/fahchen/pbeam/issues/625). Before the change, each `gc_bif` of `erlang:'+'/2` or `erlang:'-'/2` went through the BIF call path of the `Bif` arm: the leaf check, the borrowed argument read, the match-context size check, the identity dispatch, and the result match. ERTS adds or subtracts two small integers with a small result inline and calls the BIF for each other case (`emit_i_plus` and `emit_i_minus`, `erts/emulator/beam/jit/arm/instr_arith.cpp:145-205` and `:334-392`, OTP 29.1.1).
+
+### The change
+
+Commit `e35f6637` adds `small_integer_arith` before the BIF call path of the `Bif` arm. When the identity is `erlang:'+'/2` or `erlang:'-'/2`, both operands are integers, and the checked 64-bit operation gives a result, the arm writes the result and goes to the next instruction. Each other case, such as an operand that is not an integer, an unset operand, or a result outside the 64-bit range, takes the present BIF path, which gives the same value, the same `badarith`, the same jump to the fail label, or the same runtime error as before. The inline range is the 64-bit range of a PBeam integer, not the 60-bit small range of ERTS, because the results from 2^59 to 2^63 - 1 and from -(2^63) to -(2^59) - 1 are the same values as the ERTS bignums (row "Integer range" of `docs/erts-differences.md`).
+
+### The session
+
+The before revision is `e93523c3`, the head of `origin/main` that the branch starts from. The after revision is `e35f6637`. Each revision is a `git archive` of its commit, built with `cargo build --locked --release --bin pbeam` and `cargo test --locked --release --test dispatch_baseline --no-run` in its own target directory. The session ran on 2026-10-15 from 15:18:06 to 15:21:53 JST on the host of "The environment of the numbers", with no other `cargo`, `rustc`, or `nextest` process. The floor rows run `records_the_interpreter_dispatch_baseline --exact --nocapture --test-threads=1`, eight rounds in rotated order from 15:18:06 to 15:18:27 JST, with the one-minute load 2.37 to 2.52. Each round is the minimum of nine probe runs inside one invocation. The Terra rows are three rounds of 60 keys in rotated order from 15:18:27 to 15:21:53 JST, with the one-minute load 1.59 to 2.37 before each run, and the raw CPU time of `pbeam` with no idle correction. Each idle window of the six runs held no CPU tick.
+
+| Shape | Before `e93523c3`, minimum of 8 rounds | After `e35f6637`, minimum of 8 rounds | Change |
+| --- | --- | --- | --- |
+| `call_ext_only` floor loop, 200000 iterations | 47.7 ns (rounds 47.7 to 49.0) | 35.7 ns (rounds 35.7 to 36.6) | -12.0 ns, -25.2 percent |
+| `call_only` floor loop, 200000 iterations | 42.4 ns (42.4 to 43.5) | 31.4 ns (31.4 to 32.1) | -11.0 ns, -25.9 percent |
+| Position `call_only` floor loop, 200000 iterations | 42.4 ns (42.4 to 44.1) | 31.5 ns (31.5 to 31.9) | -10.9 ns, -25.7 percent |
+| `call_only` plus `gc_bif '+'`, 200000 iterations | 67.2 ns (67.2 to 67.6) | 53.8 ns (53.8 to 57.7) | -19.9 percent |
+| `call_only` plus the `bif` of `tuple_size/1` | 69.2 ns (69.2 to 69.4) | 57.8 ns (57.8 to 59.2) | -16.5 percent |
+| `call_only` plus the `bif` of `element/2` | 69.9 ns (69.9 to 71.9) | 62.1 ns (62.1 to 62.2) | -11.2 percent |
+| `call_only` plus the `bif` of `hd/1` | 69.2 ns (69.2 to 71.4) | 60.2 ns (60.2 to 60.3) | -13.0 percent |
+| `call_only` plus the `bif` of `map_get/2` on a 1000-key map | 101.9 ns (101.9 to 105.4) | 102.0 ns (102.0 to 110.4) | +0.1 percent |
+
+| Terra round | Before `e93523c3`, ms of CPU time for each key | After `e35f6637`, ms of CPU time for each key |
+| --- | --- | --- |
+| Round 1 | 16.000 | 15.000 |
+| Round 2 | 16.500 | 15.500 |
+| Round 3 | 16.000 | 16.000 |
+| Mean of 3 rounds | 16.167 | 15.500 |
+
+Each floor loop holds one `gc_bif '-'` for its counter, and each floor row falls by 10.9 ns to 12.0 ns, with no overlap of the ranges of the eight rounds. The record does not confirm that the removal of the BIF call of this `gc_bif '-'` causes all of the fall, and two rows of the same session do not agree with that cause. The `gc_bif '+'` row adds a second inline instruction to the `call_only` loop (a `gc_bif '+'` of `{x,1}` and `{integer,1}`), and the cost of that addition falls only from 24.8 ns (67.2 ns - 42.4 ns) to 22.4 ns (53.8 ns - 31.4 ns). The `map_get/2` row holds the same `gc_bif '-'` and does not fall. Thus an inline `gc_bif '+'` still costs about 22 ns, and a part of the floor fall possibly comes from the code layout or the branch prediction of a loop of two instructions. No profile or isolation run of this session splits the fall. The attribution of task #625 measured 37.1 ns for the BIF call path of `gc_bif '-'` at `b8c71940`, before tasks #627 and #628 removed the process lookups and the name lookups of the iteration.
+
+The CPU time for each key falls by 0.667 ms, or 4.1 percent, at the mean of the three rounds. The ranges of the two revisions touch at 16.000 ms. The resolution of the CPU time of `ps` is 10 ms, or about 0.17 ms for each key over 60 keys, and the CPU times of the two revisions differ by 6, 6, and 0 ticks. The attribution of task #625 expected 2.3 to 2.5 percent of a key press.
+
+A second Terra session ran the same two binaries, with eight rounds of 60 keys in rotated order, on 2026-10-15 from 15:30:42 to 15:39:53 JST, with the one-minute load 1.11 to 2.26 before each run and no `cargo`, `rustc`, or `nextest` process. Each idle window of the 16 runs held no CPU tick.
+
+| Terra session 2 | Before `e93523c3`, ms of CPU time for each key | After `e35f6637`, ms of CPU time for each key |
+| --- | --- | --- |
+| Rounds 1 to 8 | 15.333, 15.833, 14.667, 16.167, 16.167, 14.000, 15.667, 15.333 | 13.333, 15.500, 16.000, 14.000, 16.000, 16.667, 13.167, 15.500 |
+| Mean of 8 rounds | 15.396 | 15.021 |
+| Median of 8 rounds | 15.500 | 15.500 |
+| Range of 8 rounds | 14.000 to 16.167 | 13.167 to 16.667 |
+
+The mean falls by 0.375 ms, or 2.4 percent, the medians are the same, and the ranges of the two revisions overlap from 14.000 ms to 16.167 ms. Thus the Terra key press shows no change beyond the noise of the two sessions, and the record does not give a Terra result for this change.
+
+The raw records are the session logs `session.txt` and `session2.txt` and the files `floor-r<round>-<revision>.txt`, `terra-r<round>-<revision>.log`, and `terra2-r<round>-<revision>.log`, which stay outside the repository.
+
+### The decision
+
+The change lands. The floor shape that the task targets falls by 25 percent with no overlap of the rounds, and no shape is slower beyond the spread of its rounds. The cause of the floor fall is not confirmed (below). The Terra key press shows no change beyond noise (below).
+
+### Known gaps
+
+- The record does not confirm the cause of the fall of the floor rows. The `gc_bif '+'` row and the `map_get/2` row do not agree with a fall of 11 ns to 12 ns for each removed BIF call, and no profile or isolation run splits the fall.
+- The `map_get/2` row does not show the fall of its `gc_bif '-'`, and the record does not show the cause.
+- The Terra key press shows no change beyond noise. The first session (three rounds) and the second session (eight rounds) have overlapping ranges, and the medians of the second session are the same.
+- PBeam has no float term, so a float argument stops the run when the float literal is read, before the `gc_bif` (row "Float terms" of `docs/erts-differences.md`). The fixture `arith_probe:float_plus/0` records this; ERTS returns `3.5`.

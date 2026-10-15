@@ -1,7 +1,7 @@
 -module(arith_probe).
 -export([arith/0, guards/0, externals/0, plus_overflow/0, minus_overflow/0,
          big_operand/0, big_guard/0, neg/1, times/0, int_div/0,
-         times_overflow/0, div_overflow/0]).
+         times_overflow/0, div_overflow/0, small_bounds/0, float_plus/0]).
 
 %% `gc_bif` `erlang:'+'/2` and `erlang:'-'/2` with fail label 0, as
 %% io_lib_format:build_bin/2 (io_lib_format.erl:133),
@@ -93,3 +93,22 @@ down(X) when X - 1 >= 0 -> {down, X - 1};
 down(_) -> other.
 
 id(X) -> X.
+
+%% `gc_bif` `erlang:'+'/2` and `erlang:'-'/2` at each bound of the ERTS
+%% small integer, -(2^59) to 2^59 - 1. ERTS adds or subtracts two small
+%% integers with a small result inline (`emit_i_plus` and `emit_i_minus`,
+%% jit/arm/instr_arith.cpp:145-205 and :334-392) and calls the BIF for a
+%% bignum result or a bignum operand.
+small_bounds() ->
+    [id(576460752303423486) + id(1),
+     id(576460752303423487) + id(1),
+     id(576460752303423487) - id(-1),
+     id(-576460752303423487) - id(1),
+     id(-576460752303423488) - id(1),
+     id(-576460752303423488) + id(-1),
+     id(576460752303423488) + id(-1),
+     id(-576460752303423489) - id(-1)].
+
+%% `gc_bif` `erlang:'+'/2` with a float argument. ERTS calls the BIF, which
+%% adds the float.
+float_plus() -> id(1.5) + id(2).
