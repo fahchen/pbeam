@@ -101,6 +101,13 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a session that can run end-to-end probes at 32 and 64 choices, or a measured `select_val` with 17 to 32 choices in a hot path.
 - **Source:** task #545 and the section "The `select_val` dispatch decision of task [#545](https://github.com/fahchen/pbeam/issues/545)" of `docs/interpreter-dispatch-measurements.md`.
 
+### Reuse the Y register storage of a released frame
+
+- **Reason:** task #630 measured a free list of slot arrays for `allocate`. The release Terra key press showed no gain beyond the noise of the session, and the floor loops without `allocate` were 1.4 ns to 1.8 ns slower, so the change did not land.
+- **Evidence:** a body-call probe with two `allocate` instructions in each iteration was 22 percent faster (0.76 s to 0.59 s for 3000000 iterations). The measured commit is `1c344478` of PR branch `perf/630-frame-pool`.
+- **Trigger:** a measured workload that spends a large part of its time in body calls with Y registers, or a change of the run loop that removes the floor cost of the variant.
+- **Source:** task #630 and the section "The Y register storage of a released frame, task [#630](https://github.com/fahchen/pbeam/issues/630)" of `docs/interpreter-dispatch-measurements.md`.
+
 ## Runtime
 
 ### Model the process heap for GC reductions and the message copy cost
