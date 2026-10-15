@@ -1,15 +1,17 @@
 #[path = "../common/mod.rs"]
 mod common;
 
-use std::process::Command;
+use std::{process::Command, sync::Arc};
 
 use common::pinned_beam;
+use num_bigint::BigInt;
 use pbeam_runtime::{BeamProgram, Term};
 
 const BINARY_MATCH_PROBE: &[u8] =
     include_bytes!("../../fixtures/binary_match/binary_match_probe.beam");
 const BS_MATCH_PROBE: &[u8] = include_bytes!("../../fixtures/binary_match/bs_match_probe.beam");
 const BS_GET_PROBE: &[u8] = include_bytes!("../../fixtures/binary_match/bs_get_probe.beam");
+const BS_FLOAT_PROBE: &[u8] = include_bytes!("../../fixtures/binary_match/bs_float_probe.beam");
 const MATCH_COPY_PROBE: &[u8] = include_bytes!("../../fixtures/binary_match/match_copy_probe.beam");
 
 /// Evaluate an expression on the pinned ERTS with `binary_match_probe` in
@@ -756,5 +758,237 @@ fn shares_a_match_context_that_move_copies_as_pinned_erts() {
         )),
         b"[[],[97,98],[97,233,98],[8364,128512,122],[97,incomplete],[incomplete],\
 [invalid],[invalid],[invalid],[invalid],[invalid]]\n"
+    );
+}
+
+/// Run `bs_float_probe:Function` with each argument list, and return the
+/// results or the text of each error.
+fn bs_float_each(function: &str, calls: &[Vec<Term>]) -> Vec<Result<Term, String>> {
+    let program = BeamProgram::load(&[BS_FLOAT_PROBE]).unwrap();
+    calls
+        .iter()
+        .map(|arguments| {
+            let imported = arguments
+                .iter()
+                .cloned()
+                .map(|term| program.host_term(term))
+                .collect::<Vec<_>>();
+            program
+                .execute("bs_float_probe", function, &imported)
+                .map(|host| host.term)
+                .map_err(|error| error.to_string())
+        })
+        .collect()
+}
+
+/// The calls `Function(Bin, N)` of each binary and size.
+fn float_calls(cases: &[(&[u8], Term)]) -> Vec<Vec<Term>> {
+    cases
+        .iter()
+        .map(|(bytes, size)| vec![Term::binary(bytes.to_vec()), size.clone()])
+        .collect()
+}
+
+/// The result `{F, Rest}` of a float segment.
+fn float_rest(value: f64, rest: &[u8]) -> Result<Term, String> {
+    Ok(Term::tuple(vec![
+        Term::Float(value),
+        Term::binary(rest.to_vec()),
+    ]))
+}
+
+#[test]
+fn runs_bs_get_float2_of_each_size_and_endianness_as_pinned_erts() {
+    // `bs_float_probe:big/2`, `little/2`, and `native/2` run
+    // `bs_get_float2` with the size in a register. A size of 0 gives 0.0
+    // and reads no bits. A size that is not 16, 32, or 64, a size that is
+    // not a non-negative integer, fewer bits than the size, an infinity,
+    // and a NaN fail (`erts_bs_get_float_2`, erl_bits.c:549-611;
+    // `emit_bs_get_field_size`, jit/arm/instr_bs.cpp:38-116). A 16-bit
+    // segment is a half-precision float. `native` is the byte order of the
+    // host, which is little endian on each host that PBeam has. 2^64 and
+    // -2^64 are bignums, and 2^59 is an ERTS bignum; each fails.
+    let short = Ok(Term::Atom(
+        BeamProgram::load(&[BS_FLOAT_PROBE])
+            .unwrap()
+            .atom("short")
+            .unwrap(),
+    ));
+    let bignum = |value: BigInt| Term::BigInt(Arc::new(value));
+    let big: [(&[u8], Term); 22] = [
+        (&[64, 9, 33, 251, 84, 68, 45, 24, 7], Term::Integer(64)),
+        (&[63, 192, 0, 0], Term::Integer(32)),
+        (&[60, 0, 1], Term::Integer(16)),
+        (&[1, 2], Term::Integer(0)),
+        (&[1, 2, 3], Term::Integer(24)),
+        (&[1, 2], Term::Integer(32)),
+        (&[1, 2, 3, 4], Term::Integer(-1)),
+        (&[1, 2, 3, 4], Term::Nil),
+        (&[1, 2, 3, 4], Term::Float(1.0)),
+        (&[127, 128, 0, 0], Term::Integer(32)),
+        (&[127, 192, 0, 0], Term::Integer(32)),
+        (&[124, 0], Term::Integer(16)),
+        (&[126, 0], Term::Integer(16)),
+        (&[255, 240, 0, 0, 0, 0, 0, 0], Term::Integer(64)),
+        (&[127, 248, 0, 0, 0, 0, 0, 1], Term::Integer(64)),
+        (&[0, 1], Term::Integer(16)),
+        (&[123, 255], Term::Integer(16)),
+        (&[128, 0], Term::Integer(16)),
+        (&[1, 2, 3, 4], Term::Integer(i64::MAX)),
+        (&[1, 2, 3, 4], bignum(BigInt::from(1u8) << 64u32)),
+        (&[1, 2, 3, 4], bignum(-(BigInt::from(1u8) << 64u32))),
+        (&[1, 2, 3, 4], Term::Integer(1 << 59)),
+    ];
+    assert_eq!(
+        bs_float_each("big", &float_calls(&big)),
+        [
+            float_rest(std::f64::consts::PI, &[7]),
+            float_rest(1.5, &[]),
+            float_rest(1.0, &[1]),
+            float_rest(0.0, &[1, 2]),
+            short.clone(),
+            short.clone(),
+            short.clone(),
+            short.clone(),
+            short.clone(),
+            short.clone(),
+            short.clone(),
+            short.clone(),
+            short.clone(),
+            short.clone(),
+            short.clone(),
+            float_rest(5.960464477539063e-8, &[]),
+            float_rest(65504.0, &[]),
+            float_rest(-0.0, &[]),
+            short.clone(),
+            short.clone(),
+            short.clone(),
+            short.clone(),
+        ]
+    );
+    assert_eq!(
+        reference(
+            "[bs_float_probe:big(B, N) || {B, N} <- [{<<64,9,33,251,84,68,45,24,7>>,64}, \
+             {<<63,192,0,0>>,32}, {<<60,0,1>>,16}, {<<1,2>>,0}, {<<1,2,3>>,24}, {<<1,2>>,32}, \
+             {<<1,2,3,4>>,-1}, {<<1,2,3,4>>,[]}, {<<1,2,3,4>>,1.0}, {<<127,128,0,0>>,32}, \
+             {<<127,192,0,0>>,32}, {<<124,0>>,16}, {<<126,0>>,16}, {<<255,240,0,0,0,0,0,0>>,64}, \
+             {<<127,248,0,0,0,0,0,1>>,64},              {<<0,1>>,16}, {<<123,255>>,16}, {<<128,0>>,16}, {<<1,2,3,4>>,1 bsl 63 - 1}, \
+             {<<1,2,3,4>>,1 bsl 64}, {<<1,2,3,4>>,-(1 bsl 64)}, {<<1,2,3,4>>,1 bsl 59}]]"
+        ),
+        b"[{3.141592653589793,<<7>>},{1.5,<<>>},{1.0,<<1>>},{0.0,<<1,2>>},short,short,short,\
+short,short,short,short,short,short,short,short,{5.960464477539063e-8,<<>>},{65504.0,<<>>},\
+{-0.0,<<>>},short,short,short,short]\n"
+    );
+    let little: [(&[u8], Term); 4] = [
+        (&[0, 0, 192, 63], Term::Integer(32)),
+        (&[0, 60], Term::Integer(16)),
+        (&[24, 45, 68, 84, 251, 33, 9, 64], Term::Integer(64)),
+        (&[0, 0, 128, 127], Term::Integer(32)),
+    ];
+    let expected = [
+        float_rest(1.5, &[]),
+        float_rest(1.0, &[]),
+        float_rest(std::f64::consts::PI, &[]),
+        short.clone(),
+    ];
+    assert_eq!(bs_float_each("little", &float_calls(&little)), expected);
+    assert_eq!(bs_float_each("native", &float_calls(&little)), expected);
+    let little_erts = "[{<<0,0,192,63>>,32}, {<<0,60>>,16}, {<<24,45,68,84,251,33,9,64>>,64}, \
+                       {<<0,0,128,127>>,32}]";
+    for function in ["little", "native"] {
+        assert_eq!(
+            reference(&format!(
+                "[bs_float_probe:{function}(B, N) || {{B, N}} <- {little_erts}]"
+            )),
+            b"[{1.5,<<>>},{1.0,<<>>},{3.141592653589793,<<>>},short]\n"
+        );
+    }
+}
+
+#[test]
+fn runs_bs_get_float2_with_a_unit_a_literal_size_and_an_unaligned_position_as_pinned_erts() {
+    // `bs_float_probe:units/2` has unit 16, so the size is N * 16 bits.
+    // `half/1` has the literal size 16. `huge/1` has the literal size 2^64,
+    // which is not a small integer, so it jumps to the fail label
+    // (`emit_bs_get_field_size`, jit/arm/instr_bs.cpp:58-86).
+    // `unaligned/1` skips 4 bits with `bs_match` and then reads 32 bits.
+    let short = Ok(Term::Atom(
+        BeamProgram::load(&[BS_FLOAT_PROBE])
+            .unwrap()
+            .atom("short")
+            .unwrap(),
+    ));
+    let units: [(&[u8], Term); 4] = [
+        (&[63, 192, 0, 0], Term::Integer(2)),
+        (&[1, 2, 3, 4, 5, 6], Term::Integer(3)),
+        (&[64, 9, 33, 251, 84, 68, 45, 24], Term::Integer(4)),
+        (&[1], Term::Integer(0)),
+    ];
+    assert_eq!(
+        bs_float_each("units", &float_calls(&units)),
+        [
+            float_rest(1.5, &[]),
+            short.clone(),
+            float_rest(std::f64::consts::PI, &[]),
+            float_rest(0.0, &[1]),
+        ]
+    );
+    assert_eq!(
+        reference(
+            "[bs_float_probe:units(B, N) || {B, N} <- [{<<63,192,0,0>>,2}, {<<1,2,3,4,5,6>>,3}, \
+             {<<64,9,33,251,84,68,45,24>>,4}, {<<1>>,0}]]"
+        ),
+        b"[{1.5,<<>>},short,{3.141592653589793,<<>>},{0.0,<<1>>}]\n"
+    );
+    let half = [vec![Term::binary(vec![60, 0])], vec![Term::binary(vec![1])]];
+    assert_eq!(
+        bs_float_each("half", &half),
+        [float_rest(1.0, &[]), short.clone()]
+    );
+    assert_eq!(
+        reference("[bs_float_probe:half(B) || B <- [<<60,0>>, <<1>>]]"),
+        b"[{1.0,<<>>},short]\n"
+    );
+    let huge = [vec![Term::binary(vec![60, 0])], vec![Term::binary(vec![])]];
+    assert_eq!(bs_float_each("huge", &huge), [short.clone(), short.clone()]);
+    assert_eq!(
+        reference("[bs_float_probe:huge(B) || B <- [<<60,0>>, <<>>]]"),
+        b"[short,short]\n"
+    );
+    let unaligned = [
+        vec![Term::binary(vec![3, 252, 0, 0, 0])],
+        vec![Term::binary(vec![7, 248, 0, 0, 0])],
+    ];
+    assert_eq!(
+        bs_float_each("unaligned", &unaligned),
+        [Ok(Term::Float(1.5)), short]
+    );
+    assert_eq!(
+        reference("[bs_float_probe:unaligned(B) || B <- [<<3,252,0,0,0>>, <<7,248,0,0,0>>]]"),
+        b"[1.5,short]\n"
+    );
+}
+
+#[test]
+fn runs_erl_parse_of_a_term_with_a_binary_into_eval_bits_and_stops_at_bs_init_writable() {
+    // `bs_float_probe:parse/0` parses the tokens of
+    // `{short, <<1, 2:16, "xy", 1.5/float>>}.`. `erl_parse:normalise/1` builds
+    // each binary with `eval_bits:expr_grp/3` (erl_parse.yrl:1960-1966),
+    // which the loader now loads. `eval_bits:expr_grp/3` starts with
+    // `bs_init_writable` (opcode 133), which PBeam does not run yet, so the
+    // run stops there. The modules are the pinned OTP modules that the call
+    // reaches.
+    let modules = ["erl_parse", "eval_bits", "erl_anno", "lists", "erl_scan"].map(pinned_beam);
+    let mut beams: Vec<&[u8]> = modules.iter().map(Vec::as_slice).collect();
+    beams.push(BS_FLOAT_PROBE);
+    let program = BeamProgram::load(&beams).unwrap();
+    let result = program
+        .execute("bs_float_probe", "parse", &[])
+        .map(|host| host.term)
+        .map_err(|error| error.to_string());
+    assert_eq!(result, Err("unsupported BEAM opcode 133".into()));
+    assert_eq!(
+        reference("bs_float_probe:parse()"),
+        b"{ok,{short,<<1,0,2,120,121,63,248,0,0,0,0,0,0>>}}\n"
     );
 }

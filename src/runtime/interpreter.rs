@@ -1467,6 +1467,31 @@ impl BeamProgram {
                         None => cursor.position = label_position(*fail_label)?,
                     }
                 }
+                // ERTS `i_bs_get_float2` checks the size as
+                // `i_bs_get_binary2` does, then reads the float or jumps to
+                // `Fail` (`emit_i_bs_get_float2` in
+                // jit/arm/instr_bs.cpp:578-610; `erts_bs_get_float_2` in
+                // erl_bits.c:549-611). A size that is not a small
+                // non-negative integer, such as a literal bignum, jumps to
+                // `Fail` (`emit_bs_get_field_size`, jit/arm/
+                // instr_bs.cpp:58-86), as `binary_field_size` gives `None`.
+                Instruction::BinaryGetFloat {
+                    fail_label,
+                    context,
+                    size,
+                    unit,
+                    little,
+                    destination,
+                } => {
+                    let (process, atoms) = scheduler.current_process_and_atoms();
+                    let state = match_context(process, context, atoms)?;
+                    let value = binary_field_size(read_ref(process, size)?, *unit)
+                        .and_then(|bits| state.get_float(bits, *little));
+                    match value {
+                        Some(value) => write(process, destination, Term::Float(value))?,
+                        None => cursor.position = label_position(*fail_label)?,
+                    }
+                }
                 // ERTS `i_bs_get_position` writes `sb->start` as a small
                 // integer (emu ops.tab:1274-1277, bs_instrs.tab:1125-1129).
                 Instruction::BinaryGetPosition {

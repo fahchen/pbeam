@@ -50,6 +50,12 @@ const OPCODE_SELECT_TUPLE_ARITY: u8 = 60;
 const OPCODE_JUMP: u8 = 61;
 const OPCODE_CATCH: u8 = 62;
 const OPCODE_CATCH_END: u8 = 63;
+/// `bs_get_float2 Fail Ctx Live Size Unit Flags Dst` (genop.tab:448).
+const OPCODE_BS_GET_FLOAT2: u8 = 118;
+/// The `little` flag of a segment (`BSF_LITTLE`, erl_bits.h:462).
+const BSF_LITTLE: u64 = 2;
+/// The `native` flag of a segment (`BSF_NATIVE`, erl_bits.h:465).
+const BSF_NATIVE: u64 = 16;
 /// `bs_get_binary2 Fail Ctx Live Size Unit Flags Dst` (genop.tab:449).
 const OPCODE_BS_GET_BINARY2: u8 = 119;
 const OPCODE_BS_SKIP_BITS2: u8 = 120;
@@ -1197,6 +1203,38 @@ pub(crate) enum Instruction {
         unit: u64,
         destination: Operand,
     },
+    /// Reads a float of `Size * unit` bits from the match context in
+    /// `context` and writes it to `destination`, or jumps to `fail_label`
+    /// (`bs_get_float2`, opcode 118). `size` is a register or a literal.
+    /// `little` is `true` for a little-endian segment.
+    ///
+    /// Encoding: opcode, fail label, context, unsigned live count, size,
+    /// unsigned unit, unsigned flags, destination register. The decoder
+    /// skips the live count. It reads the `little` flag (2) and the
+    /// `native` flag (16) of the flags (`BSF_LITTLE` and `BSF_NATIVE` in
+    /// erl_bits.h:462-465), and gives a native segment the byte order of
+    /// the host, as the ERTS loader does (`$NativeEndian` in
+    /// `gen.get_float2`, generators.tab:57-71). Example:
+    /// `bs_float_probe:little/2` has
+    /// `[0x76, 0x65, 0x57, 0x03, 0x20, 0x13, 0x10, 0x20, 0x13]`: fail label
+    /// 6, the typed register `x0`, live count 2, size `x1`, unit 1, the
+    /// flags 2 (`little`), and the destination `x1`. A literal size that
+    /// is not a small integer, such as the bignum 2^64, stays in `size`:
+    /// ERTS loads it as `i_bs_get_float2` (jit/arm/ops.tab:1009-1010, `s`
+    /// includes literals per beam_makeops:163) and jumps to the fail label
+    /// at run time (`emit_bs_get_field_size`, jit/arm/instr_bs.cpp:58-86).
+    ///
+    /// Erlang: `<<F:N/float-little, Rest/binary>>` compiles to
+    /// `{test,bs_get_float2,{f,6},2,[{tr,{x,0},...},{x,1},1,{field_flags,[little]}],{x,1}}`
+    /// for `F`.
+    BinaryGetFloat {
+        fail_label: u32,
+        context: Operand,
+        size: Operand,
+        unit: u64,
+        little: bool,
+        destination: Operand,
+    },
     /// Writes the bit position of the match context in `context` to
     /// `destination` as an integer (`bs_get_position`, opcode 167).
     ///
@@ -2006,6 +2044,28 @@ pub(super) fn parse_code(
                         unit,
                         destination,
                     }
+                }
+            }
+            OPCODE_BS_GET_FLOAT2 => {
+                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let context = read_move_operand(data, &mut cursor, atoms, literals)?;
+                skip_live_registers(data, &mut cursor)?;
+                let size = read_move_operand(data, &mut cursor, atoms, literals)?;
+                let unit = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
+                let flags = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
+                let little = if flags & BSF_NATIVE != 0 {
+                    cfg!(target_endian = "little")
+                } else {
+                    flags & BSF_LITTLE != 0
+                };
+                let destination = read_register(data, &mut cursor)?;
+                Instruction::BinaryGetFloat {
+                    fail_label,
+                    context,
+                    size,
+                    unit,
+                    little,
+                    destination,
                 }
             }
             OPCODE_BS_GET_POSITION => {
