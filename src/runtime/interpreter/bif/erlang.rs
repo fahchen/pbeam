@@ -54,6 +54,7 @@ pub(super) fn node(term: &Term, atoms: &AtomTable) -> Result<BifResult, BeamErro
 /// `true` or `false`. With options, the result holds `{Node, Info}`, and
 /// `Info` maps `connection_id` to `undefined` and `node_type` to `known`
 /// or `this` for each key that is `true`. Each other term raises `badarg`.
+/// A result of more than 10 nodes costs one reduction for each 10 nodes.
 ///
 /// # Examples
 ///
@@ -115,6 +116,13 @@ pub(super) fn nodes(
     }
     if this {
         names.push((local_node(), "this"));
+    }
+    // ERTS charges one reduction for each 10 nodes of a result of more than
+    // 10 nodes (`dist.c:6465-6468`).
+    if names.len() > 10 {
+        scheduler
+            .current_process_mut()
+            .bump_reductions((names.len() / 10) as i32);
     }
     let atoms = &scheduler.atoms;
     Value(Term::list_from(names.into_iter().map(|(name, kind)| {

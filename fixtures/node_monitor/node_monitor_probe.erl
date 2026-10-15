@@ -27,7 +27,8 @@ main() ->
         [{n1@h, #{node_type => known}}, {foo, #{node_type => known}},
          {n2@h, #{node_type => known}}, {nonode@nohost, #{node_type => this}}],
         [n1@h, foo, n2@h, nonode@nohost],
-        [nonode@nohost], [], []
+        [nonode@nohost], [], [],
+        3
     ],
     case results() of
         Expected -> ok;
@@ -102,8 +103,20 @@ results() ->
         nodes(id([this, known])),
         nodes(id(this)),
         nodes(id([visible, hidden, connected])),
-        nodes(id(connected), #{node_type => true})
+        nodes(id(connected), #{node_type => true}),
+        nodes_reductions()
     ].
+
+%% Return the reductions of `nodes(known)` with 31 nodes less the
+%% reductions of `nodes(this)`: one reduction for each 10 nodes.
+nodes_reductions() ->
+    [{a, list_to_atom("r" ++ integer_to_list(I) ++ "@h")} ! x || I <- lists:seq(1, 27)],
+    {reductions, A} = process_info(self(), reductions),
+    _ = nodes(id(known)),
+    {reductions, B} = process_info(self(), reductions),
+    _ = nodes(id(this)),
+    {reductions, C} = process_info(self(), reductions),
+    (B - A) - (C - B).
 
 flag(Flag, Value) ->
     try process_flag(id(Flag), id(Value)) catch Class:Reason -> {Class, Reason} end.
