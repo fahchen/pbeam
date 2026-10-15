@@ -2,9 +2,9 @@
 //! ports of the spawn driver (`sys/unix/sys_drivers.c`). The scheduler
 //! keeps them as the `Ports` value of its `Resources`, and all processes of
 //! a run share them. PBeam has `spawn_executable` ports and `tcp_inet`
-//! driver ports (see [`tcp_inet`]).
+//! driver ports (see [`inet`]).
 
-pub(super) mod tcp_inet;
+pub(super) mod inet;
 
 use std::{collections::BTreeMap, ffi::c_int};
 
@@ -13,7 +13,7 @@ use crate::{
     error::{BeamError, error},
     term::{PortId, ProcessId, Term},
 };
-use tcp_inet::TcpInet;
+use inet::Inet;
 
 /// The open ports of the node, by port number, and the number of the next
 /// port. A port leaves the table when it closes, as `kill_port` removes it
@@ -57,8 +57,9 @@ pub(super) struct Port {
 pub(super) enum Driver {
     /// A port of `open_port({spawn_executable, Name}, Settings)`.
     Spawn(Spawn),
-    /// A port of `open_port({spawn_driver, "tcp_inet"}, [binary])`.
-    TcpInet(TcpInet),
+    /// A port of `open_port({spawn_driver, "tcp_inet"}, [binary])` or of
+    /// `open_port({spawn_driver, "udp_inet"}, [binary])`.
+    Inet(Inet),
 }
 
 /// The data of the spawn driver (`ErtsSysDriverData`,
@@ -151,7 +152,7 @@ impl Ports {
     /// Return the fds that the IO poll waits for: the output pipe of each
     /// spawn port before its end of file, and then its status pipe. Only a
     /// port with `exit_status` stays open after its end of file. A
-    /// `tcp_inet` port has no fd in the wait.
+    /// `tcp_inet` or `udp_inet` port has no fd in the wait.
     ///
     /// # Examples
     ///
@@ -164,7 +165,7 @@ impl Ports {
             .filter_map(|port| match &port.driver {
                 Driver::Spawn(spawn) if spawn.end_of_file => Some(spawn.child.status_fd()),
                 Driver::Spawn(spawn) => Some(spawn.child.output_fd()),
-                Driver::TcpInet(_) => None,
+                Driver::Inet(_) => None,
             })
             .collect()
     }

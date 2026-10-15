@@ -1,5 +1,6 @@
-//! The `tcp_inet` port driver of `inet_drv.c`, which `prim_inet` opens
-//! with `open_port({spawn_driver, "tcp_inet"}, [binary])`
+//! The `tcp_inet` and `udp_inet` port drivers of `inet_drv.c`, which
+//! `prim_inet` opens with `open_port({spawn_driver, "tcp_inet"}, [binary])`
+//! and `open_port({spawn_driver, "udp_inet"}, [binary])`
 //! (prim_inet.erl:99-112) and drives with `erlang:port_control/3`.
 //!
 //! Each request is `port_control(Port, Request + 16#03f1a300, Bytes)`
@@ -7,17 +8,25 @@
 //! reply is `[1 | Data]` for OK and `[0 | Name]` for an error, where `Name`
 //! is the bytes of the error name, for example `[0 | "eaddrinuse"]`
 //! (`ctl_reply` and `ctl_error`, inet_drv.c:2240-2283). PBeam runs these
-//! requests of `INET_REQ_*` (inet_int.hrl:76-105) for an IPv4 TCP socket:
+//! requests of `INET_REQ_*` (inet_int.hrl:76-105) for an IPv4 TCP socket
+//! of a `tcp_inet` port and an IPv4 UDP socket of a `udp_inet` port:
 //!
 //! | Request | Code | Bytes | OK reply |
 //! | --- | --- | --- | --- |
-//! | `OPEN` | 1 | `[Family, Type, Protocol]`, `[1, 1, 1]` | `[1]` |
+//! | `OPEN` | 1 | `[Family, Type, Protocol]`, `[1, 1, 1]` or `[1, 2, 2]` | `[1]` |
 //! | `NAME` | 5 | `[]` | `[1, 1, P1, P0, A, B, C, D]` |
 //! | `BIND` | 6 | `[1, P1, P0, A, B, C, D]` | `[1, P1, P0]` |
 //! | `SETOPTS` | 7 | `[Option, V3, V2, V1, V0, ...]` | `[1]` |
 //! | `GETOPTS` | 8 | `[Option, ...]` | `[1, Option, V3, V2, V1, V0, ...]` |
+//! | `GETHOSTNAME` | 12 | `[]` | `[1 \| Name]` |
 //! | `SUBSCRIBE` | 24 | `[1, ...]` | `[1, 1, 0, 0, 0, 0, ...]` |
 //! | `LISTEN` | 27 | `[B1, B0]` | `[1]` |
+//!
+//! A `udp_inet` port runs the requests of `packet_inet_ctl`, which runs
+//! `OPEN`, replies `exbadport` to `LISTEN`, and gives each other request
+//! to `inet_ctl` (inet_drv.c:14564-14892). It reads no datagram: the
+//! socket is not in the idle wait (row "udp_inet ports" of
+//! `docs/erts-differences.md`).
 //!
 //! `P1, P0` is the port number and `B1, B0` the backlog, big-endian; each
 //! option value is a big-endian 32-bit integer. The options are those of
@@ -34,7 +43,7 @@ use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use crate::{
     error::{BeamError, error},
-    runtime::host::errno::errno_id,
+    runtime::host::{errno::errno_id, host_name},
 };
 
 /// The number that `prim_inet` adds to each request code
@@ -54,6 +63,17 @@ const ERROR: u8 = 0;
 /// The family code of IPv4 (`INET_AF_INET`, inet_int.hrl:31).
 const AF_INET: u8 = 1;
 
+/// The socket type of a port: the driver that `open_port/2` names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::runtime) enum SocketType {
+    /// A `tcp_inet` port, with a `SOCK_STREAM` socket (`tcp_inet_start`,
+    /// inet_drv.c:10891-10935).
+    Stream,
+    /// A `udp_inet` port, with a `SOCK_DGRAM` socket (`udp_inet_start`,
+    /// inet_drv.c:14515-14520).
+    Datagram,
+}
+
 /// The state of the socket of a port (`INET_STATE_*`, inet_drv.c).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
@@ -65,11 +85,14 @@ enum State {
     Listening,
 }
 
-/// The descriptor of one `tcp_inet` port (`tcp_descriptor`), as
-/// `prep_tcp_inet_start` and `inet_start` make it
-/// (inet_drv.c:10891-10987, 11726-11784).
+/// The descriptor of one `tcp_inet` port (`tcp_descriptor`) or `udp_inet`
+/// port (`udp_descriptor`), as `prep_tcp_inet_start`, `packet_inet_start`,
+/// and `inet_start` make it (inet_drv.c:10891-10987, 11726-11784,
+/// 14496-14520).
 #[derive(Debug)]
-pub(in crate::runtime) struct TcpInet {
+pub(in crate::runtime) struct Inet {
+    /// The socket type of the driver.
+    socket_type: SocketType,
     /// The non-blocking host socket that `OPEN` makes, or `None` before it.
     /// The port owns it; dropping the port closes it.
     socket: Option<Socket>,
@@ -97,18 +120,21 @@ pub(in crate::runtime) enum Control {
     Badarg,
 }
 
-impl TcpInet {
-    /// Return the descriptor of a new port: no socket, `list` mode,
-    /// passive, and an infinite send timeout.
+impl Inet {
+    /// Return the descriptor of a new port of `socket_type`: no socket,
+    /// `list` mode, passive, and an infinite send timeout.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut port = TcpInet::new();
+    /// let mut port = Inet::new(SocketType::Stream);
     /// assert_eq!(port.control(0x03f1_a301, &[1, 1, 1])?, Control::Reply(vec![1]));
+    /// let mut port = Inet::new(SocketType::Datagram);
+    /// assert_eq!(port.control(0x03f1_a301, &[1, 2, 2])?, Control::Reply(vec![1]));
     /// ```
-    pub(in crate::runtime) fn new() -> TcpInet {
-        TcpInet {
+    pub(in crate::runtime) fn new(socket_type: SocketType) -> Inet {
+        Inet {
+            socket_type,
             socket: None,
             state: State::Closed,
             mode: 0,
@@ -119,8 +145,8 @@ impl TcpInet {
     }
 
     /// Run the request `command` with the bytes `request`, as
-    /// `tcp_inet_ctl` and `inet_ctl` do (inet_drv.c:10988-11409,
-    /// 11952-12062).
+    /// `tcp_inet_ctl`, `packet_inet_ctl`, and `inet_ctl` do
+    /// (inet_drv.c:10988-11409, 11952-12062, 14564-14892).
     ///
     /// # Examples
     ///
@@ -142,48 +168,84 @@ impl TcpInet {
             6 => self.bind(request)?,
             7 => self.set_options(request)?,
             8 => self.get_options(request)?,
+            12 => get_host_name(request),
             24 => return Ok(subscribe(request)),
-            27 => self.listen(request),
-            other => {
-                return Err(error(format!(
-                    "unsupported tcp_inet request {other}: see \"tcp_inet ports\" in docs/erts-differences.md"
-                )));
-            }
+            27 if self.socket_type == SocketType::Stream => self.listen(request),
+            // `LISTEN` is only for an SCTP socket (inet_drv.c:14846-14858).
+            27 => error_reply("exbadport"),
+            other => return Err(self.unsupported("request", other)),
         };
         Ok(Control::Reply(reply))
     }
 
-    /// Run `INET_REQ_OPEN` with `[Family, Type, Protocol]`
-    /// (inet_drv.c:11961-12000), and make the non-blocking socket as
-    /// `inet_ctl_open` does (inet_drv.c:5119-5221).
+    /// Return the runtime error of a `what` code that PBeam does not run.
+    fn unsupported(&self, what: &str, code: impl std::fmt::Display) -> BeamError {
+        let driver = self.socket_type.driver();
+        error(format!(
+            "unsupported {driver} {what} {code}: see \"{driver} ports\" in docs/erts-differences.md"
+        ))
+    }
+
+    /// Run `INET_REQ_OPEN` with `[Family, Type, Protocol]`, as
+    /// `tcp_inet_ctl` (inet_drv.c:11961-12000) and `packet_inet_ctl`
+    /// (inet_drv.c:14577-14636) do, and make the non-blocking socket as
+    /// `inet_ctl_open` does (inet_drv.c:5119-5221). A `tcp_inet` port takes
+    /// only the stream type. A `udp_inet` port checks the type (stream,
+    /// datagram, or seqpacket) before the protocol (default, UDP, or SCTP).
+    /// The host makes the socket, so a stream socket with the UDP protocol
+    /// gives the errno of the host, for example `eprototype`. The stream
+    /// type with the default protocol, the seqpacket type, and the SCTP
+    /// protocol return a runtime error.
     fn open(&mut self, request: &[u8]) -> Result<Vec<u8>, BeamError> {
         let &[family, kind, protocol] = request else {
             return Ok(error_reply("einval"));
         };
         match family {
             AF_INET => {}
-            2 | 5 => return Err(unsupported("family", family)),
+            2 | 5 => return Err(self.unsupported("family", family)),
             _ => return Ok(error_reply("eafnosupport")),
         }
-        if kind != 1 {
-            return Ok(error_reply("einval"));
-        }
-        let protocol = match protocol {
-            0 => None,
-            1 => Some(Protocol::TCP),
-            4 => return Err(unsupported("protocol", protocol)),
-            _ => return Ok(error_reply("eprotonosupport")),
+        let (socket_type, protocol) = match self.socket_type {
+            SocketType::Stream => {
+                if kind != 1 {
+                    return Ok(error_reply("einval"));
+                }
+                match protocol {
+                    0 => (Type::STREAM, None),
+                    1 => (Type::STREAM, Some(Protocol::TCP)),
+                    4 => return Err(self.unsupported("protocol", protocol)),
+                    _ => return Ok(error_reply("eprotonosupport")),
+                }
+            }
+            SocketType::Datagram => {
+                let socket_type = match kind {
+                    1 => Type::STREAM,
+                    2 => Type::DGRAM,
+                    3 => return Err(self.unsupported("type", kind)),
+                    _ => return Ok(error_reply("einval")),
+                };
+                let protocol = match protocol {
+                    0 if kind == 1 => return Err(self.unsupported("type", kind)),
+                    0 => None,
+                    2 => Some(Protocol::UDP),
+                    3 => return Err(self.unsupported("protocol", protocol)),
+                    _ => return Ok(error_reply("eprotonosupport")),
+                };
+                (socket_type, protocol)
+            }
         };
         if self.state != State::Closed {
             return Ok(error_reply("exbadseq"));
         }
-        Ok(reply(self.open_socket(protocol), |()| vec![OK]))
+        Ok(reply(self.open_socket(socket_type, protocol), |()| {
+            vec![OK]
+        }))
     }
 
-    /// Make the non-blocking IPv4 stream socket of `protocol`.
+    /// Make the non-blocking IPv4 socket of `socket_type` and `protocol`.
     /// `SET_NONBLOCKING` ignores its result (inet_drv.c:5212).
-    fn open_socket(&mut self, protocol: Option<Protocol>) -> io::Result<()> {
-        let socket = Socket::new(Domain::IPV4, Type::STREAM, protocol)?;
+    fn open_socket(&mut self, socket_type: Type, protocol: Option<Protocol>) -> io::Result<()> {
+        let socket = Socket::new(Domain::IPV4, socket_type, protocol)?;
         let _ = socket.set_nonblocking(true);
         self.socket = Some(socket);
         self.state = State::Open;
@@ -217,7 +279,7 @@ impl TcpInet {
         let (&tag, address) = request.split_first().expect("a request of 2 bytes");
         match tag {
             AF_INET => {}
-            2..=5 => return Err(unsupported("bind address family", tag)),
+            2..=5 => return Err(self.unsupported("bind address family", tag)),
             _ => return Ok(error_reply("eafnosupport")),
         }
         let &[p1, p0, a, b, c, d, ..] = address else {
@@ -257,7 +319,7 @@ impl TcpInet {
                 30 if self.socket.is_some() => self.send_timeout = value,
                 35 if self.socket.is_some() => self.send_timeout_close = value,
                 30 | 35 => {}
-                &other => return Err(unsupported("option", other)),
+                &other => return Err(self.unsupported("option", other)),
             }
         }
         Ok(vec![OK])
@@ -307,7 +369,7 @@ impl TcpInet {
                     }
                     continue;
                 }
-                other => return Err(unsupported("option", other)),
+                other => return Err(self.unsupported("option", other)),
             };
             if let Some(value) = value {
                 reply.push(option);
@@ -332,6 +394,16 @@ impl TcpInet {
             vec![OK]
         })
     }
+}
+
+/// Run `INET_REQ_GETHOSTNAME` (inet_drv.c:11219-11233): the name of the
+/// host, as `gethostname` gives it ([`host_name`]). A request with bytes
+/// gives `einval`.
+fn get_host_name(request: &[u8]) -> Vec<u8> {
+    if !request.is_empty() {
+        return error_reply("einval");
+    }
+    [&[OK][..], &host_name()].concat()
 }
 
 /// The runtime error of `{active, N}`.
@@ -387,11 +459,15 @@ fn errno_reply(failure: &io::Error) -> Vec<u8> {
     error_reply(&errno_id(errno))
 }
 
-/// Return the runtime error of a `what` code that PBeam does not run.
-fn unsupported(what: &str, code: u8) -> BeamError {
-    error(format!(
-        "unsupported tcp_inet {what} {code}: see \"tcp_inet ports\" in docs/erts-differences.md"
-    ))
+impl SocketType {
+    /// Return the driver name of the socket type, which the runtime errors
+    /// name.
+    fn driver(self) -> &'static str {
+        match self {
+            SocketType::Stream => "tcp_inet",
+            SocketType::Datagram => "udp_inet",
+        }
+    }
 }
 
 /// Give the value that `getsockopt` returns for `reuseaddr` or `nodelay`,

@@ -6,7 +6,7 @@
 //! external programs that `open_port/2` starts, and the file information
 //! that the `prim_file` NIFs read.
 
-use std::{ffi::CStr, sync::OnceLock};
+use std::sync::OnceLock;
 
 pub(crate) mod clock;
 pub(crate) mod environment;
@@ -37,19 +37,48 @@ pub(crate) mod terminal;
 /// assert_eq!(os_flavor(), "linux");
 /// ```
 pub(crate) fn os_flavor() -> String {
-    // SAFETY: `utsname` is a C struct of `c_char` arrays, so all zeros is a
-    // valid value. `uname` writes only into the struct that the pointer
-    // gives, and each name that it writes ends with a NUL byte. When `uname`
-    // fails, the zeros of `sysname` give an empty NUL-terminated string. So
-    // `CStr::from_ptr` reads inside `sysname`.
-    let sysname = unsafe {
-        let mut name: libc::utsname = std::mem::zeroed();
-        libc::uname(&raw mut name);
-        CStr::from_ptr(name.sysname.as_ptr()).to_bytes().to_vec()
-    };
-    sysname
+    name_bytes(&uname().sysname)
         .into_iter()
         .map(|byte| char::from(byte.to_ascii_lowercase()))
+        .collect()
+}
+
+/// Return the name of the host, which the `GETHOSTNAME` request of
+/// `inet_drv.c` reads with `gethostname` (inet_drv.c:11219-11233): the
+/// `uname` node name. macOS and Linux give `gethostname` and the node name
+/// from the same kernel value (`kern.hostname` on macOS, the UTS name on
+/// Linux), so the bytes are the same. A failure of `uname` gives an empty
+/// name, as for [`os_flavor`].
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // `hostname` prints `philz-m1`.
+/// assert_eq!(host_name(), b"philz-m1");
+/// ```
+pub(crate) fn host_name() -> Vec<u8> {
+    name_bytes(&uname().nodename)
+}
+
+/// Return the `uname` names of the host. A failure of `uname` leaves each
+/// name empty.
+fn uname() -> libc::utsname {
+    // SAFETY: `utsname` is a C struct of `c_char` arrays, so all zeros is a
+    // valid value. `uname` writes only into the struct that the pointer
+    // gives.
+    unsafe {
+        let mut name: libc::utsname = std::mem::zeroed();
+        libc::uname(&raw mut name);
+        name
+    }
+}
+
+/// Return the bytes of a `uname` name before its first NUL byte, or all
+/// bytes of a name without a NUL byte.
+fn name_bytes(name: &[libc::c_char]) -> Vec<u8> {
+    name.iter()
+        .map(|&byte| byte.to_ne_bytes()[0])
+        .take_while(|&byte| byte != 0)
         .collect()
 }
 
