@@ -66,7 +66,7 @@ One interleaved session on 2026-10-15 from 15:18:06 to 15:21:53 JST, before `e93
 | Position `call_only` floor loop, 200000 iterations | 42.4 ns | 31.5 ns | -25.7 percent |
 | CPU time for each release Terra key press | 16.167 ms | 15.500 ms | -4.1 percent |
 
-The ranges of the eight floor rounds do not overlap. Of the added BIF shapes, `gc_bif '+'`, `tuple_size/1`, `element/2`, and `hd/1` fall by 11.2 to 19.9 percent, and `map_get/2` moves by +0.1 percent, inside the spread of its rounds. The Terra ranges touch at 16.000 ms, and the resolution of `ps` is about 0.17 ms for each key, so the Terra number has a weak bound.
+The ranges of the eight floor rounds do not overlap, but the record does not confirm that the removed BIF call causes all of the floor fall. Of the added BIF shapes, `gc_bif '+'`, `tuple_size/1`, `element/2`, and `hd/1` fall by 11.2 to 19.9 percent, and `map_get/2` moves by +0.1 percent, inside the spread of its rounds. The Terra ranges touch at 16.000 ms, and the resolution of `ps` is about 0.17 ms for each key, so the Terra number has a weak bound.
 
 ### 2026-10-15 13:00 JST - Call an import through a resolved export target, task [#628](https://github.com/fahchen/pbeam/issues/628), pull request [#636](https://github.com/fahchen/pbeam/pull/636)
 

@@ -1025,7 +1025,7 @@ The before revision is `e93523c3`, the head of `origin/main` that the branch sta
 | Round 3 | 16.000 | 16.000 |
 | Mean of 3 rounds | 16.167 | 15.500 |
 
-Each floor loop holds one `gc_bif '-'` for its counter, so each floor row falls by 10.9 ns to 12.0 ns, and the ranges of the eight rounds do not overlap. The `gc_bif '+'` row holds two inline instructions and falls by 13.4 ns. The attribution of task #625 measured 37.1 ns for the BIF call path of `gc_bif '-'` at `b8c71940`, before tasks #627 and #628 removed the process lookups and the name lookups of the iteration. The `map_get/2` row does not fall, although its loop also holds a `gc_bif '-'`.
+Each floor loop holds one `gc_bif '-'` for its counter, and each floor row falls by 10.9 ns to 12.0 ns, with no overlap of the ranges of the eight rounds. The record does not confirm that the removal of the BIF call of this `gc_bif '-'` causes all of the fall, and two rows of the same session do not agree with that cause. The `gc_bif '+'` row adds a second inline instruction to the `call_only` loop (a `gc_bif '+'` of `{x,1}` and `{integer,1}`), and the cost of that addition falls only from 24.8 ns (67.2 ns - 42.4 ns) to 22.4 ns (53.8 ns - 31.4 ns). The `map_get/2` row holds the same `gc_bif '-'` and does not fall. Thus an inline `gc_bif '+'` still costs about 22 ns, and a part of the floor fall possibly comes from the code layout or the branch prediction of a loop of two instructions. No profile or isolation run of this session splits the fall. The attribution of task #625 measured 37.1 ns for the BIF call path of `gc_bif '-'` at `b8c71940`, before tasks #627 and #628 removed the process lookups and the name lookups of the iteration.
 
 The CPU time for each key falls by 0.667 ms, or 4.1 percent, at the mean of the three rounds. The ranges of the two revisions touch at 16.000 ms. The resolution of the CPU time of `ps` is 10 ms, or about 0.17 ms for each key over 60 keys, so the Terra number has a weak bound. The attribution of task #625 expected 2.3 to 2.5 percent of a key press.
 
@@ -1033,10 +1033,11 @@ The raw records are the session log `session.txt` and the files `floor-r<round>-
 
 ### The decision
 
-The change lands. The floor shape that the task targets falls by 25 percent with no overlap of the rounds, and no shape is slower beyond the spread of its rounds.
+The change lands. The floor shape that the task targets falls by 25 percent with no overlap of the rounds, and no shape is slower beyond the spread of its rounds. The cause of the floor fall is not confirmed (below).
 
 ### Known gaps
 
+- The record does not confirm the cause of the fall of the floor rows. The `gc_bif '+'` row and the `map_get/2` row do not agree with a fall of 11 ns to 12 ns for each removed BIF call, and no profile or isolation run splits the fall.
 - The `map_get/2` row does not show the fall of its `gc_bif '-'`, and the record does not show the cause.
 - The Terra rows are three rounds near the resolution of `ps`, so the 0.667 ms fall has a weak bound.
 - PBeam has no float term, so a float argument stops the run when the float literal is read, before the `gc_bif` (row "Float terms" of `docs/erts-differences.md`). The fixture `arith_probe:float_plus/0` records this; ERTS returns `3.5`.
