@@ -59,7 +59,7 @@ The loader skips `test_heap` and `init_yregs`, as it skips `line`, and the `Noop
 | `call_only` floor loop, 200000 iterations, ns, median of 6 rounds | 104.40 | 105.85 | Inside the noise: both revisions span 102.2 to 106.5 | The same rounds |
 | Terra key press, CPU ms for each key, 60 keys, median of 7 rounds | 23.0 | 24.167 | No change that the session can resolve: before 17.0 to 26.7, after 19.8 to 26.5 | One-minute load 1.54 to 3.62. Round 7 is dropped: its after run started with a load of 12.33 and two build processes |
 
-The probe loop runs seven instructions for each iteration before the change and six after it, so the gain is on the shape that the change targets. The floor loops have no `test_heap`. The Terra key press runs 6.4 percent of its instructions as `Noop`, but the spread of the CPU time for each key is larger than the expected gain.
+The probe loop runs seven instructions for each iteration before the change and six after it, so the gain is on the shape that the change targets. The floor loops have no `test_heap`. The Terra key press runs 6.4 percent of its instructions as `Noop`, but the spread of the CPU time for each key is larger than the expected gain. The three shapes that the acceptance of task #634 names, `call_ext_only`, `call_only`, and the Terra key press, show no resolvable gain, so only the targeted probe supports the landing. The `call_ext_only` median moves by 2.0 percent because more after rounds than before rounds fall in the mode near 266 ns. Six rounds cannot show if a code layout change causes this shift, so it stays open.
 
 ### 2026-10-15 12:20 JST - Get the current process with no hash, task [#627](https://github.com/fahchen/pbeam/issues/627), branch `perf/627-process-slot`
 
