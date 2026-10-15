@@ -552,3 +552,28 @@ fn traps_the_delete_of_a_large_table_as_pinned_erts() {
         b"[true,none,true,ping]\n"
     );
 }
+
+#[test]
+fn frees_the_owned_tables_of_a_killed_deleter_in_owned_list_order_as_pinned_erts() {
+    // `ets_probe:delete_order/0` kills a process while its `ets:delete/1` of
+    // a large table traps. The exit frees the owned list from its head
+    // (`erl_db.c:5055-5096`). The large table of the process keeps its
+    // position after the small table, and a public table of another owner
+    // goes to the end of the list (`erl_db.c:628-650`, `3031-3051`). So in
+    // both cases a lookup of the small table raises `badarg` in the first
+    // loop, before the `DOWN` message. One ERTS scheduler gives the same
+    // loops.
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let pair = |first, down| Term::tuple(vec![Term::Integer(first), Term::Integer(down)]);
+    assert_eq!(
+        program
+            .execute("ets_probe", "delete_order", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![pair(1, 10), pair(1, 9)])
+    );
+    assert_eq!(
+        reference_with(&["+S", "1"], "delete_order"),
+        b"[{1,10},{1,9}]\n"
+    );
+}

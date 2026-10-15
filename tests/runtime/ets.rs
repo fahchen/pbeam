@@ -43,12 +43,12 @@ fn frees_a_large_deleted_table_in_bounded_turns() {
     let live = |tables: &EtsTables| {
         tables
             .freeing
-            .get(&ProcessId(1))
+            .get(&Reference(0))
             .map_or(0, |freeing| freeing.table.objects.iter().flatten().count())
     };
     let budget = 4000;
     let mut left = live(&tables);
-    let mut segments = tables.freeing[&ProcessId(1)].segments;
+    let mut segments = tables.freeing[&Reference(0)].segments;
     let mut traps = 0;
     assert_eq!(left, per_segment.iter().sum::<usize>());
     loop {
@@ -63,7 +63,7 @@ fn frees_a_large_deleted_table_in_bounded_turns() {
             break;
         }
         traps += 1;
-        let next = tables.freeing[&ProcessId(1)].segments;
+        let next = tables.freeing[&Reference(0)].segments;
         assert!(next < segments);
         segments = next;
     }

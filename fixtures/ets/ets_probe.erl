@@ -2,6 +2,7 @@
 -export([new/0, owner_exit/0, insert/0, lookup/0, lookup_loop/0, insert_loop/0,
          access/0, main/0, env/0, bag/0, info/0, match/0, match_deep/0,
          match_write_concurrency/0, delete_table/0, delete_trap/0,
+         delete_order/0, deleter/2,
          unsupported/1, insert_all/2, ping/1,
          own/2, write/1]).
 
@@ -91,6 +92,53 @@ delete_trap() ->
     C = ets:delete(Large),
     D = receive ping -> ping after 0 -> none end,
     [A, B, C, D].
+
+%% The exit of a process that a trapped ets:delete/1 kills frees its owned
+%% tables from the head of its owned list (erl_db.c:5055-5096). The deleted
+%% table keeps its position in the list (erl_db.c:3031-3051), so an older
+%% table goes first. A public table of another owner goes to the end of the
+%% list (save_owned_table, erl_db.c:628-650), so a newer table goes first.
+%% Each case gives the loop where a lookup of the small table first raises
+%% badarg and the loop where the DOWN message arrives. Run with +S 1.
+delete_order() ->
+    Other = ets:new(ets_probe, [public]),
+    true = ets:insert(Other, [{I} || I <- seq(50000)]),
+    [kill_deleter(own), kill_deleter(Other)].
+
+%% Make a small table, then delete the table Table, or a new large table
+%% for own.
+deleter(Parent, Table) ->
+    Small = ets:new(ets_probe, [public]),
+    true = ets:insert(Small, {k}),
+    Large = case Table of
+                own ->
+                    T = ets:new(ets_probe, [public]),
+                    true = ets:insert(T, [{I} || I <- seq(50000)]),
+                    T;
+                _ -> Table
+            end,
+    Parent ! {small, Small},
+    ets:delete(Large).
+
+kill_deleter(Table) ->
+    Pid = spawn(?MODULE, deleter, [self(), Table]),
+    Monitor = monitor(process, Pid),
+    Small = receive {small, S} -> S end,
+    exit(Pid, kill),
+    order_loop(Small, Monitor, 0, undefined).
+
+order_loop(_, _, 2000, Gone) -> {Gone, nodown};
+order_loop(Small, Monitor, I, Gone) ->
+    Now = case Gone of
+              undefined ->
+                  try ets:lookup(Small, k), undefined
+                  catch error:badarg -> I
+                  end;
+              _ -> Gone
+          end,
+    receive {'DOWN', Monitor, _, _, _} -> {Now, I}
+    after 0 -> erlang:yield(), order_loop(Small, Monitor, I + 1, Now)
+    end.
 
 %% Send ping to Pid.
 ping(Pid) -> Pid ! ping.
