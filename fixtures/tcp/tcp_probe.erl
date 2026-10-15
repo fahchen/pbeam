@@ -139,6 +139,7 @@ unsupported(any) -> control(opened(), 6, [3, 0, 0]);
 unsupported(dontroute) -> control(opened(), 7, [2, 0, 0, 0, 1]);
 unsupported(recvttl) -> control(opened(), 7, [47, 0, 0, 0, 1]);
 unsupported(linger) -> linger();
+unsupported(linger_off) -> control(opened(), 7, [3, 0, 0, 0, 0, 0, 0, 0, 5]);
 unsupported(active_n) -> control(opened(), 7, [22, 0, 0, 0, 3, 0, 1]);
 unsupported(getopt) -> control(opened(), 8, [2]);
 unsupported(connect) -> control(opened(), 3, []);

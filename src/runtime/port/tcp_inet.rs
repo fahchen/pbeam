@@ -559,11 +559,11 @@ const ACTIVE_CONNECTED: &str = "unsupported tcp_inet option active on a connecte
 const RECVTTL_ON: &str =
     "unsupported tcp_inet option recvttl true: see \"tcp_inet ports\" in docs/erts-differences.md";
 
-/// The runtime error of a `linger` time on macOS, where `socket2` sets
-/// `SO_LINGER_SEC` and ERTS sets `SO_LINGER`, which xnu reads in clock
-/// ticks.
-#[cfg(target_vendor = "apple")]
-const LINGER_ON: &str = "unsupported tcp_inet option linger true on macOS: see \"tcp_inet ports\" in docs/erts-differences.md";
+/// The runtime error of a `linger` time that `socket2` cannot set as ERTS
+/// does: a time with `linger` off, which `SO_LINGER` keeps, and on macOS
+/// each time, where `socket2` sets `SO_LINGER_SEC` and ERTS sets
+/// `SO_LINGER`, which xnu reads in clock ticks.
+const LINGER_TIME: &str = "unsupported tcp_inet option linger with a time: see \"tcp_inet ports\" in docs/erts-differences.md";
 
 /// The option code of `priority` (`INET_OPT_PRIORITY`).
 #[cfg(target_os = "linux")]
@@ -579,24 +579,23 @@ const APPLE_SO_REUSEADDR: i32 = 4;
 const APPLE_SO_KEEPALIVE: i32 = 8;
 const APPLE_TF_NODELAY: i32 = 4;
 
-/// Return the time of `linger` for `SETOPTS`: `None` when `on` is 0, else
-/// `seconds`.
+/// Return the time of `linger` for `SETOPTS`: `None` when `on` is 0 and
+/// `seconds` is 0.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(linger_time(0, 5)?, None);
+/// assert_eq!(linger_time(0, 0)?, None);
 /// ```
 ///
 /// # Errors
 ///
-/// A time when `on` is not 0 on macOS (see [`LINGER_ON`]).
+/// Each other time (see [`LINGER_TIME`]).
 #[cfg(target_vendor = "apple")]
-fn linger_time(on: i32, _seconds: u32) -> Result<Option<Duration>, BeamError> {
-    if on != 0 {
-        return Err(error(LINGER_ON));
-    }
-    Ok(None)
+fn linger_time(on: i32, seconds: u32) -> Result<Option<Duration>, BeamError> {
+    (on == 0 && seconds == 0)
+        .then_some(None)
+        .ok_or_else(|| error(LINGER_TIME))
 }
 
 /// Return the time of `linger` for `SETOPTS`: `None` when `on` is 0, else
@@ -607,9 +606,16 @@ fn linger_time(on: i32, _seconds: u32) -> Result<Option<Duration>, BeamError> {
 /// ```rust,ignore
 /// assert_eq!(linger_time(1, 5)?, Some(Duration::from_secs(5)));
 /// ```
+///
+/// # Errors
+///
+/// A time that is not 0 when `on` is 0 (see [`LINGER_TIME`]).
 #[cfg(not(target_vendor = "apple"))]
 fn linger_time(on: i32, seconds: u32) -> Result<Option<Duration>, BeamError> {
-    Ok((on != 0).then(|| Duration::from_secs(seconds.into())))
+    let time = (on != 0).then(|| Duration::from_secs(seconds.into()));
+    (on != 0 || seconds == 0)
+        .then_some(time)
+        .ok_or_else(|| error(LINGER_TIME))
 }
 
 /// Set an option with `set`, as `inet_setopt` does without `SO_PRIORITY`

@@ -159,7 +159,7 @@ fn stops_the_run_for_a_linger_time_on_macos() {
         .unwrap_err()
         .to_string();
     assert!(
-        error.starts_with("unsupported tcp_inet option linger true on macOS"),
+        error.starts_with("unsupported tcp_inet option linger with a time"),
         "{error}"
     );
 }
@@ -193,6 +193,11 @@ fn stops_the_run_for_each_tcp_inet_part_that_is_not_implemented() {
         ("any", "unsupported tcp_inet bind address family 3"),
         ("dontroute", "unsupported tcp_inet option 2"),
         ("recvttl", "unsupported tcp_inet option recvttl true"),
+        // ERTS keeps the time of `{linger, {false, 5}}` (inet_drv.c:7362-7370).
+        (
+            "linger_off",
+            "unsupported tcp_inet option linger with a time",
+        ),
         (
             "active_n",
             "unsupported tcp_inet option active with a count",
