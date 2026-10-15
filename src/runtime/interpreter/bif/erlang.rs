@@ -15,7 +15,8 @@ use crate::runtime::signal::Signal;
 use crate::runtime::time::{self, TimeValue};
 use crate::runtime::timer::{Receiver, Timer, Timers};
 use crate::term::{
-    Atom, AtomTable, Fun, MAX_ATOM_CHARACTERS, MAX_TUPLE_SIZE, ProcessId, Reference, debug_term,
+    Atom, AtomTable, Fun, MAX_ATOM_CHARACTERS, MAX_TUPLE_SIZE, ProcessId, Reference,
+    SMALL_INTEGER_MAX, SMALL_INTEGER_MIN, debug_term,
 };
 
 /// Run `erlang:node/1`: return the node of a pid. A term that is not a pid
@@ -2228,6 +2229,45 @@ pub(in crate::runtime::interpreter) fn is_function(term: &Term, arity: &Term) ->
         return BifResult::badarg();
     }
     let matches = matches!(term, Term::Fun(fun) if i64::from(fun.target().arity()) == arity);
+    Value(Term::static_atom(if matches { "true" } else { "false" }))
+}
+
+/// Run `erlang:is_record/2` (`size` is `None`) and `erlang:is_record/3`:
+/// return `true` when `term` is a tuple whose first element is the atom
+/// `name`, and whose size is `size` when `size` is given, as ERTS
+/// `is_record_2` and `is_record_3` (`erl_bif_op.c:293-350`) do. A `name`
+/// that is not an atom raises `badarg`. A `size` that is an atom selects
+/// the native-record test, and a `size` that is not an atom and not an ERTS
+/// small integer (-(2^59) to 2^59 - 1) raises `badarg`. PBeam has no native
+/// record term, so the native-record test gives `false` (row
+/// "Unimplemented instructions" of `docs/erts-differences.md`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // {a, 1}
+/// assert!(matches!(is_record(&pair, &Term::static_atom("a"), Some(&Term::Integer(2))), BifResult::Value(value) if value == Term::static_atom("true")));
+/// assert!(matches!(is_record(&pair, &Term::Integer(1), None), BifResult::Raise { .. }));
+/// ```
+pub(in crate::runtime::interpreter) fn is_record(
+    term: &Term,
+    name: &Term,
+    size: Option<&Term>,
+) -> BifResult {
+    if !matches!(name, Term::Atom(_)) {
+        return BifResult::badarg();
+    }
+    let size = match size {
+        None => None,
+        Some(Term::Atom(_)) => return Value(Term::static_atom("false")),
+        Some(&Term::Integer(size)) if (SMALL_INTEGER_MIN..=SMALL_INTEGER_MAX).contains(&size) => {
+            Some(size)
+        }
+        Some(_) => return BifResult::badarg(),
+    };
+    let matches = matches!(term, Term::Tuple(tuple)
+        if tuple.first() == Some(name)
+            && size.is_none_or(|size| i64::try_from(tuple.len()) == Ok(size)));
     Value(Term::static_atom(if matches { "true" } else { "false" }))
 }
 
