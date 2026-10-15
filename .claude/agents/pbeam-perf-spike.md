@@ -14,7 +14,7 @@ At most 45 minutes, 40 tool calls, and about 25k output tokens. Truncate every t
 
 ## Steps
 
-1. Read the task issue and its evidence (`mise run issue <n>`). Name the targeted shape and the expected gain.
+1. Read the task issue: `mise run issue <n> Outcome Evidence Acceptance` (the command prints only the sections that you name). Name the targeted shape and the expected gain.
 2. Create one detached worktree from `origin/main` under `.claude/worktrees/spike-<n>`. Make the smallest prototype that shows the effect. Do not write tests or docs. Do not commit to a pushed branch.
 3. Build two release binaries (before = `origin/main`, after = prototype) into separate target directories. Keep the binaries.
 4. Run one interleaved session. Rules:

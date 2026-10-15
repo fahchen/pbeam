@@ -14,7 +14,7 @@ At most 30 minutes, 25 tool calls, and about 8k output tokens.
 
 ## Steps
 
-1. Create a worktree of the PR branch from `origin/<branch>` under `.claude/worktrees/merge-<pr>`.
+1. Run `git fetch origin`, so that `origin/<branch>` and `origin/main` are current. Then create a worktree of the PR branch from `origin/<branch>` under `.claude/worktrees/merge-<pr>`.
 2. `git merge --no-edit origin/main`. Never rebase, amend, or force-push.
 3. Resolve conflicts:
    - Two sections or entries added at the same place in a document: keep both. Put the section of `main` first in a measurement document. In a list ordered newest first, put the entry that merges later first.
