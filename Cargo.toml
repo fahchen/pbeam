@@ -158,6 +158,10 @@ name = "bs_create_bin"
 path = "tests/integration/bs_create_bin.rs"
 
 [[test]]
+name = "bit_size"
+path = "tests/integration/bit_size.rs"
+
+[[test]]
 name = "byte_size"
 path = "tests/integration/byte_size.rs"
 
