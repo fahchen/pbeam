@@ -256,16 +256,15 @@ fn adds_and_subtracts_at_each_bound_of_the_small_integer_as_pinned_erts() {
 #[test]
 fn stops_at_the_float_argument_of_an_addition() {
     // ERTS adds a float argument in the BIF that `emit_i_plus` calls
-    // (`jit/arm/instr_arith.cpp:190-201`). PBeam has no float term, so the
-    // run stops when it reads the float literal, before the `gc_bif`
-    // (row "Float terms" in `docs/erts-differences.md`).
+    // (`jit/arm/instr_arith.cpp:190-201`), as `erts_mixed_plus` does
+    // (`erl_arith.c:358-508`).
     let program = BeamProgram::load(&[ARITH_PROBE]).unwrap();
-    let error = program
-        .execute("arith_probe", "float_plus", &[])
-        .unwrap_err();
-    assert!(
-        error.to_string().contains("unsupported BEAM literal index"),
-        "{error}"
+    assert_eq!(
+        program
+            .execute("arith_probe", "float_plus", &[])
+            .unwrap()
+            .term,
+        Term::Float(3.5)
     );
     assert_eq!(reference("float_plus"), b"3.5\n");
 }

@@ -10,8 +10,8 @@ use crate::{
 const WORD_SIZE: usize = 4;
 mod instruction;
 pub(crate) use instruction::{
-    BinaryMatchCommand, BinarySegment, Instruction, Operand, SelectValueChoices, TestKind,
-    TestOperand,
+    BinaryMatchCommand, BinarySegment, FloatOperation, Instruction, Operand, SelectValueChoices,
+    TestKind, TestOperand,
 };
 
 const CHUNK_ALIGNMENT: usize = WORD_SIZE;
@@ -36,6 +36,9 @@ const TAG_LABEL: u8 = 5;
 const TAG_LITERAL: u8 = 7;
 const LIST_SUBTAG: i128 = 1;
 const ETF_VERSION: u8 = 131;
+/// `NEW_FLOAT_EXT`, an IEEE 754 binary64 float in 8 big-endian bytes, such
+/// as `1.5` as `[70, 63, 248, 0, 0, 0, 0, 0, 0]` (`external.c:4651-4673`).
+const ETF_NEW_FLOAT_EXT: u8 = 70;
 const ETF_SMALL_INTEGER_EXT: u8 = 97;
 /// `INTEGER_EXT`, a 32-bit big-endian signed integer, such as `-1` as
 /// `[98, 255, 255, 255, 255]`.
@@ -190,7 +193,7 @@ const FIRST_LABEL_NUMBER: u32 = 1;
 /// execution fails only if an instruction uses it. `[a|[b]]` and `[a,b]`
 /// give the same list, a `list_term` whose tail is not a list gives an
 /// improper list such as `[a|b]`, and a `list_term` of length 0 gives its
-/// tail. `[97, 1]` is the integer 1, and
+/// tail. `[70, 63, 248, 0, 0, 0, 0, 0, 0]` is the float 1.5, `[97, 1]` is the integer 1, and
 /// `[98, 255, 255, 255, 255]` is `-1`. On a 64-bit ERTS each `INTEGER_EXT`
 /// value is a small integer (`dec_term`, `external.c:4435-4447`). A
 /// map literal is a flatmap up to 32 pairs and a hashmap above 32 pairs, in
@@ -788,6 +791,17 @@ fn read_external_term(
                     function.clone(),
                     u32::from(arity),
                 ))
+            }
+            ETF_NEW_FLOAT_EXT => {
+                let bytes: [u8; 8] = take(data, cursor, 8)?
+                    .try_into()
+                    .expect("take returns 8 bytes");
+                // `dec_term` rejects a float that is not finite
+                // (`external.c:4666-4668`).
+                let value = Some(f64::from_be_bytes(bytes))
+                    .filter(|value| value.is_finite())
+                    .ok_or_else(|| error("invalid BEAM float literal"))?;
+                Term::Float(value)
             }
             ETF_SMALL_INTEGER_EXT => Term::Integer(i64::from(take(data, cursor, 1)?[0])),
             ETF_INTEGER_EXT => {

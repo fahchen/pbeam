@@ -188,16 +188,23 @@ fn reads_nested_literals_and_marks_unsupported_tags_at_any_depth() {
         read(&mut atoms, &[131, 104, 2, 119, 2, b'o', b'k', 106]).unwrap(),
         Some(Term::tuple(vec![Term::static_atom("ok"), Term::nil()]))
     );
-    // NEW_FLOAT_EXT (70) 1.0 inside a tuple, inside a list, and as a list tail.
-    let float = [70, 63, 240, 0, 0, 0, 0, 0, 0];
+    // NEW_FLOAT_EXT (70) 1.0 loads; an infinity is an error, as `dec_term`
+    // rejects it (`external.c:4666-4668`).
     assert_eq!(
-        read(&mut atoms, &[&[131, 104, 1][..], &float].concat()).unwrap(),
+        read(&mut atoms, &[131, 70, 63, 240, 0, 0, 0, 0, 0, 0]).unwrap(),
+        Some(Term::Float(1.0))
+    );
+    assert!(read(&mut atoms, &[131, 70, 127, 240, 0, 0, 0, 0, 0, 0]).is_err());
+    // SMALL_BIG_EXT (110) 5 inside a tuple, inside a list, and as a list tail.
+    let bignum = [110, 1, 0, 5];
+    assert_eq!(
+        read(&mut atoms, &[&[131, 104, 1][..], &bignum].concat()).unwrap(),
         None
     );
     assert_eq!(
         read(
             &mut atoms,
-            &[&[131, 108, 0, 0, 0, 1][..], &float, &[106]].concat()
+            &[&[131, 108, 0, 0, 0, 1][..], &bignum, &[106]].concat()
         )
         .unwrap(),
         None
@@ -205,7 +212,7 @@ fn reads_nested_literals_and_marks_unsupported_tags_at_any_depth() {
     assert_eq!(
         read(
             &mut atoms,
-            &[&[131, 108, 0, 0, 0, 1, 106][..], &float].concat()
+            &[&[131, 108, 0, 0, 0, 1, 106][..], &bignum].concat()
         )
         .unwrap(),
         None

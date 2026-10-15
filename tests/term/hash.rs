@@ -320,3 +320,20 @@ fn hashes_a_port_as_pinned_erts() {
     // 40, so its word is 0x287.
     assert_eq!(internal_hash(&Term::Port(PortId(0x28))), 589508649189025146);
 }
+
+#[test]
+fn hashes_a_float_as_pinned_erts() {
+    // `make_internal_hash` mixes `IHASH_TYPE_FLOAT` and the bits of the
+    // float (`erl_term_hashing.c:2193-2202`). ERTS 29.1.1 gives these values
+    // with `erts_debug:get_internal_state({internal_hash, Term})`.
+    let hashes = [1.0, -0.0, 0.0, 2.5].map(|value| internal_hash(&Term::Float(value)));
+    assert_eq!(
+        hashes,
+        [
+            1378904917976523826,
+            12330998780720423744,
+            13198493423301380071,
+            3606456034818785087
+        ]
+    );
+}

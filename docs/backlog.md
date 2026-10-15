@@ -25,13 +25,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ## Term and loader
 
-### Add float terms
-
-- PBeam has no float term. After #183 (PR #189), the loader accepts `fmove`, `fconv`, `fadd`, `fsub`, `fmul`, and `fdiv`, but each one stops the run with `unsupported BEAM opcode N` when it runs. The only exception is `fconv` of a term that is not a number, which raises `badarith`. `fnegate` is a load error. A float literal stops the run with `unsupported BEAM literal index N` when an instruction reads it. Each BIF that makes or reads a float, such as `erlang:'/'/2`, `erlang:float/1`, and `erlang:float_to_list/1`, stops with `unresolved external MFA`. `is_float` (#167) always fails, because no term is a float. The "Float terms" row of `docs/erts-differences.md` records this.
-- The work: a float `Term` variant with the ERTS term order and the `==` arithmetic equality (`1 == 1.0`), float registers and the six instructions with `fnegate`, float literals in the loader, the float BIFs, the ERTS float text in `print_term` (#6), and the ERTS internal hash of a float (`erl_term_hashing.c`).
-- **Trigger:** a measured path runs float arithmetic or reads a float literal, for example a `/` operator in a consumer program.
-- **Source:** owner question on PR #189 (#183).
-
 ### Add bitstring terms
 
 - PBeam has no bitstring term whose size is not a multiple of 8 bits, so `is_bitstr` passes only for a binary. The loader keeps a `BIT_BINARY_EXT` literal as an unsupported literal, so `byte_size(<<1:3>>)` stops with `unsupported BEAM literal index N`. ERTS gives `1` (`erl_bif_guard.c:376-393`). The "Bitstring terms" row records this.

@@ -1,13 +1,13 @@
 use super::super::{read_integer, read_integer_after_first, read_operand, read_value};
 use super::{
-    OPCODE_BIF0, OPCODE_BS_GET_INTEGER2, OPCODE_BS_GET_UTF16, OPCODE_BS_GET_UTF32,
+    FloatOperation, OPCODE_BIF0, OPCODE_BS_GET_INTEGER2, OPCODE_BS_GET_UTF16, OPCODE_BS_GET_UTF32,
     OPCODE_BS_INIT_WRITABLE, OPCODE_FADD, OPCODE_FCONV, OPCODE_FDIV, OPCODE_FMOVE, OPCODE_FMUL,
-    OPCODE_FSUB, OPCODE_GET_MAP_ELEMENTS, OPCODE_GET_RECORD_ELEMENTS, OPCODE_GET_TL,
-    OPCODE_HAS_MAP_FIELDS, OPCODE_INIT_YREGS, OPCODE_IS_ANY_NATIVE_RECORD, OPCODE_PUT_MAP_ASSOC,
-    OPCODE_PUT_MAP_EXACT, OPCODE_PUT_RECORD, OPCODE_PUT_TUPLE2, OPCODE_TEST_EXACT_EQ,
-    OPCODE_TEST_HEAP, OPCODE_TEST_IS_ATOM, OPCODE_TEST_IS_BINARY, OPCODE_TEST_IS_LIST,
-    OPCODE_TEST_IS_MAP, OPCODE_TEST_IS_PID, OPCODE_TEST_IS_PORT, OPCODE_TEST_TAGGED_TUPLE,
-    SELECT_VALUE_LINEAR_LIMIT, parse_code, prepare_select_value_choices,
+    OPCODE_FNEGATE, OPCODE_FSUB, OPCODE_GET_MAP_ELEMENTS, OPCODE_GET_RECORD_ELEMENTS,
+    OPCODE_GET_TL, OPCODE_HAS_MAP_FIELDS, OPCODE_INIT_YREGS, OPCODE_IS_ANY_NATIVE_RECORD,
+    OPCODE_PUT_MAP_ASSOC, OPCODE_PUT_MAP_EXACT, OPCODE_PUT_RECORD, OPCODE_PUT_TUPLE2,
+    OPCODE_TEST_EXACT_EQ, OPCODE_TEST_HEAP, OPCODE_TEST_IS_ATOM, OPCODE_TEST_IS_BINARY,
+    OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP, OPCODE_TEST_IS_PID, OPCODE_TEST_IS_PORT,
+    OPCODE_TEST_TAGGED_TUPLE, SELECT_VALUE_LINEAR_LIMIT, parse_code, prepare_select_value_choices,
     read_binary_match_commands, read_binary_segments, read_move_operand, read_operand_pairs,
     read_pair_count, read_record_updates, skip_allocation, skip_counted_operands,
     skip_integer_payload, skip_operand, skip_unsupported_instruction, sort_map_key_pairs,
@@ -1201,6 +1201,7 @@ fn decodes_the_fconv_instruction_of_the_float_test_probe_fixture() {
         [
             Instruction::FloatConvert {
                 source: Operand::X(0),
+                register: 0,
             },
             Instruction::End,
         ]
@@ -2130,11 +2131,6 @@ fn skips_pinned_module_instruction_operands_and_rejects_truncation() {
         (OPCODE_BS_GET_UTF32, 5),
         (OPCODE_BS_GET_INTEGER2, 7),
         (OPCODE_IS_ANY_NATIVE_RECORD, 2),
-        (OPCODE_FMOVE, 2),
-        (OPCODE_FADD, 4),
-        (OPCODE_FSUB, 4),
-        (OPCODE_FMUL, 4),
-        (OPCODE_FDIV, 4),
     ] {
         assert_eq!(unsupported_opcode_operand_count(opcode), Some(count));
     }
@@ -2634,7 +2630,29 @@ fn arm_field_bytes(instruction: &Instruction) -> usize {
             destination,
             segments,
         } => size_of_val(fail_label) + size_of_val(destination) + size_of_val(segments),
-        Instruction::FloatConvert { source } => size_of_val(source),
+        Instruction::FloatConvert { source, register } => {
+            size_of_val(source) + size_of_val(register)
+        }
+        Instruction::FloatLoad { source, register } => size_of_val(source) + size_of_val(register),
+        Instruction::FloatStore {
+            register,
+            destination,
+        } => size_of_val(register) + size_of_val(destination),
+        Instruction::FloatArith {
+            operation,
+            left,
+            right,
+            destination,
+        } => {
+            size_of_val(operation)
+                + size_of_val(left)
+                + size_of_val(right)
+                + size_of_val(destination)
+        }
+        Instruction::FloatNegate {
+            source,
+            destination,
+        } => size_of_val(source) + size_of_val(destination),
         Instruction::Send => 0,
         Instruction::RemoveMessage => 0,
         Instruction::LoopReceive {
@@ -2770,4 +2788,76 @@ fn records_the_decoded_form_layout() {
     );
     assert_eq!(arm_field_bytes(&arms[3].1), 48, "the fields of `Bif`");
     assert_eq!(arm_field_bytes(&arms[6].1), 32, "the fields of `Move`");
+}
+
+#[test]
+fn decodes_the_float_register_instructions_of_the_float_probe_fixture() {
+    // `float_probe:registers/2` in `fixtures/float/float_probe.beam` has
+    // `{fmove,{x,0},{fr,0}}`, `{fmove,{fr,2},{x,0}}`, `fadd`, `fsub`,
+    // `fmul`, `fdiv`, and `fnegate` with the fail label 0.
+    let float = |opcode, operands: &[u8]| [&[opcode][..], operands].concat();
+    let arith = [0x05, 0x27, 0x00, 0x27, 0x10, 0x27, 0x20];
+    let mut body = [
+        float(OPCODE_FMOVE, &[0x03, 0x27, 0x00]),
+        float(OPCODE_FMOVE, &[0x27, 0x20, 0x03]),
+        float(OPCODE_FADD, &arith),
+        float(OPCODE_FSUB, &arith),
+        float(OPCODE_FMUL, &arith),
+        float(OPCODE_FDIV, &arith),
+        float(OPCODE_FNEGATE, &[0x05, 0x27, 0x00, 0x27, 0x60]),
+    ]
+    .concat();
+    body.push(0x03);
+    let mut code = vec![0, 0, 0, 16];
+    code.extend([0; 16]);
+    code.extend(&body);
+    let (instructions, _) = parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[]).unwrap();
+    assert!(matches!(
+        instructions.as_slice(),
+        [
+            Instruction::FloatLoad {
+                source: Operand::X(0),
+                register: 0,
+            },
+            Instruction::FloatStore {
+                register: 2,
+                destination: Operand::X(0),
+            },
+            Instruction::FloatArith {
+                operation: FloatOperation::Add,
+                left: 0,
+                right: 1,
+                destination: 2,
+            },
+            Instruction::FloatArith {
+                operation: FloatOperation::Subtract,
+                ..
+            },
+            Instruction::FloatArith {
+                operation: FloatOperation::Multiply,
+                ..
+            },
+            Instruction::FloatArith {
+                operation: FloatOperation::Divide,
+                ..
+            },
+            Instruction::FloatNegate {
+                source: 0,
+                destination: 6,
+            },
+            Instruction::End,
+        ]
+    ));
+    // ERTS loads the float arithmetic only with the fail label 0, and each
+    // operand must be a float register.
+    for bad in [
+        float(OPCODE_FADD, &[0x15, 0x27, 0x00, 0x27, 0x10, 0x27, 0x20]),
+        float(OPCODE_FADD, &[0x05, 0x03, 0x27, 0x10, 0x27, 0x20]),
+    ] {
+        let mut code = vec![0, 0, 0, 16];
+        code.extend([0; 16]);
+        code.extend(&bad);
+        code.push(0x03);
+        assert!(parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[]).is_err());
+    }
 }

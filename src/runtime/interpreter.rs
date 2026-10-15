@@ -9,8 +9,8 @@ use crate::{
     beam::{
         BeamModule, Import, ImportKind, NameId,
         code::{
-            self, BinaryMatchCommand, BinarySegment, Instruction, Operand, SelectValueChoices,
-            TestKind, TestOperand,
+            self, BinaryMatchCommand, BinarySegment, FloatOperation, Instruction, Operand,
+            SelectValueChoices, TestKind, TestOperand,
         },
     },
     error::{BeamError, error},
@@ -1118,9 +1118,8 @@ impl BeamProgram {
                         // `is_float` passes only for a boxed term with the
                         // `HEADER_FLONUM` header (emu `instrs.tab:951-955`,
                         // `erl_term.h:484-485`; JIT `emit_is_float` in
-                        // `jit/arm/instr_common.cpp:1229-1245`). PBeam has no
-                        // float term, so the test fails for each term.
-                        TestKind::Float => false,
+                        // `jit/arm/instr_common.cpp:1229-1245`).
+                        TestKind::Float => matches!(value, Term::Float(_)),
                         TestKind::Boolean => {
                             matches!(value, Term::Atom(atom) if atom.is_one_of(&["true", "false"]))
                         }
@@ -1251,9 +1250,8 @@ impl BeamProgram {
                 // (erl_utils.h:132-133). `EQ_SPEC` (erl_utils.h:137-147) and
                 // `erts_cmp_compound(A, B, 0, 1)` (utils.c:1658) compare in
                 // the arithmetic order, which differs from exact equality
-                // only for a float (`1 == 1.0` is true). PBeam has no float
-                // term, so exact equality gives the ERTS result. The
-                // float-term task must change this arm.
+                // only for a float (`1 == 1.0` is true, and
+                // `0.0 == -0.0` is true).
                 Instruction::TestEqual {
                     fail_label,
                     left,
@@ -1264,7 +1262,13 @@ impl BeamProgram {
                     left,
                     right,
                 } => {
-                    if read_ref(process, left)? != read_ref(process, right)? {
+                    let (left, right) = (read_ref(process, left)?, read_ref(process, right)?);
+                    let arith = matches!(instruction, Instruction::TestEqual { .. });
+                    if !(if arith {
+                        left.arith_eq(right)
+                    } else {
+                        left == right
+                    }) {
                         cursor.position = label_position(*fail_label)?;
                     }
                 }
@@ -1285,14 +1289,17 @@ impl BeamProgram {
                 // ERTS `is_ne` (emu instrs.tab:1115-1119, JIT
                 // instr_common.cpp:2081-2105) runs `CMP_NE_ACTION`
                 // (erl_utils.h:134-135) with `EQ_SPEC` in the arithmetic
-                // order. As for `is_eq`, exact equality gives the ERTS
-                // result while PBeam has no float term.
+                // order, as `is_eq` does.
                 Instruction::TestNotEqual {
                     fail_label,
                     left,
                     right,
+                } => {
+                    if read_ref(process, left)?.arith_eq(read_ref(process, right)?) {
+                        cursor.position = label_position(*fail_label)?;
+                    }
                 }
-                | Instruction::TestExactNotEqual {
+                Instruction::TestExactNotEqual {
                     fail_label,
                     left,
                     right,
@@ -1554,18 +1561,77 @@ impl BeamProgram {
                 // ERTS `fconv` converts a small integer, a bignum, or a float
                 // to a float register, and raises `badarith` for each other
                 // term (emu float_instrs.tab:38-52; JIT `emit_fconv` and
-                // `emit_fconv_shared` in jit/arm/instr_float.cpp:96-135).
-                // PBeam has no float register and no float or bignum term,
-                // so an integer stops the run.
-                Instruction::FloatConvert { source } => {
-                    if let Term::Integer(_) = read_ref(process, source)? {
-                        return Err(error("unsupported BEAM opcode 97"));
+                // `emit_fconv_shared` in jit/arm/instr_float.cpp:96-135). An
+                // integer converts to the nearest float, as the C cast does.
+                Instruction::FloatConvert { source, register } => {
+                    let value = match read_ref(process, source)? {
+                        Term::Integer(value) => Some(*value as f64),
+                        Term::Float(value) => Some(*value),
+                        _ => None,
+                    };
+                    if let Some(value) = value {
+                        write_float_register(process, *register, value);
+                    } else {
+                        let badarith = Term::static_atom("badarith");
+                        if let Some(outcome) = raise(process, ExceptionClass::Error, badarith) {
+                            return Ok(outcome);
+                        }
+                        cursor.refresh(scheduler)?;
                     }
-                    let badarith = Term::static_atom("badarith");
-                    if let Some(outcome) = raise(process, ExceptionClass::Error, badarith) {
-                        return Ok(outcome);
+                }
+                // `fload` reads a float term (JIT `emit_fload`,
+                // jit/arm/instr_float.cpp:71-79). The compiler moves only a
+                // float, which beam_validator checks.
+                Instruction::FloatLoad { source, register } => {
+                    let value = read_ref(process, source)?
+                        .float()
+                        .ok_or_else(|| error("fmove of a term that is not a float"))?;
+                    write_float_register(process, *register, value);
+                }
+                // `fstore` makes a float term (JIT `emit_fstore`,
+                // jit/arm/instr_float.cpp:81-94).
+                Instruction::FloatStore {
+                    register,
+                    destination,
+                } => {
+                    let value = read_float_register(process, *register)?;
+                    write(process, destination, Term::Float(value))?;
+                }
+                // A result that is not finite raises `badarith`
+                // (`emit_check_float_error`, jit/arm/instr_float.cpp:33-53).
+                Instruction::FloatArith {
+                    operation,
+                    left,
+                    right,
+                    destination,
+                } => {
+                    let left = read_float_register(process, *left)?;
+                    let right = read_float_register(process, *right)?;
+                    let value = match operation {
+                        FloatOperation::Add => left + right,
+                        FloatOperation::Subtract => left - right,
+                        FloatOperation::Multiply => left * right,
+                        FloatOperation::Divide => left / right,
+                    };
+                    if value.is_finite() {
+                        write_float_register(process, *destination, value);
+                    } else {
+                        let badarith = Term::static_atom("badarith");
+                        if let Some(outcome) = raise(process, ExceptionClass::Error, badarith) {
+                            return Ok(outcome);
+                        }
+                        cursor.refresh(scheduler)?;
                     }
-                    cursor.refresh(scheduler)?;
+                }
+                // The negation of a finite float is finite, so `fnegate`
+                // has no error (`emit_i_fnegate`,
+                // jit/arm/instr_float.cpp:222-234).
+                Instruction::FloatNegate {
+                    source,
+                    destination,
+                } => {
+                    let value = -read_float_register(process, *source)?;
+                    write_float_register(process, *destination, value);
                 }
                 Instruction::SelectValue {
                     value,
@@ -3820,6 +3886,43 @@ fn debug_operand(operand: &Operand, atoms: &AtomTable) -> String {
         Operand::Value(value) => format!("Value({})", debug_term(value, atoms)),
         other => format!("{other:?}"),
     }
+}
+
+/// Write a float register. The float registers grow as necessary.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// write_float_register(&mut process, 2, 1.5);
+/// assert_eq!(read_float_register(&process, 2)?, 1.5);
+/// ```
+fn write_float_register(process: &mut ProcessState, register: u32, value: f64) {
+    let index = register as usize;
+    if index >= process.float_registers.len() {
+        process.float_registers.resize(index + 1, 0.0);
+    }
+    process.float_registers[index] = value;
+}
+
+/// Read a float register.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// write_float_register(&mut process, 0, -2.5);
+/// assert_eq!(read_float_register(&process, 0)?, -2.5);
+/// ```
+///
+/// # Errors
+///
+/// A register that no instruction wrote is a runtime invariant error: the
+/// compiler writes each float register before it reads it.
+fn read_float_register(process: &ProcessState, register: u32) -> Result<f64, BeamError> {
+    process
+        .float_registers
+        .get(register as usize)
+        .copied()
+        .ok_or_else(|| error(format!("float register fr{register} has no value")))
 }
 
 /// Write a value to an X register or a Y register of the active frame.

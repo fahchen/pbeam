@@ -1,5 +1,6 @@
 mod atom;
 mod binary;
+pub(crate) mod float_text;
 mod fun;
 mod hash;
 mod list;
@@ -53,6 +54,12 @@ pub enum Term {
     /// (`docs/portable-beam-spec.md:97`).
     Binary(Binary),
     Integer(i64),
+    /// A float: an IEEE 754 binary64 value that is finite, as an ERTS float
+    /// is (`FLOAT_DEF`, `erl_term.h`). ERTS never makes an infinity or a NaN
+    /// term: each operation that would give one raises `badarith` or
+    /// `badarg`. `0.0` and `-0.0` are two terms: they are equal in
+    /// arithmetic comparison and different in exact comparison.
+    Float(f64),
     /// The empty list `[]`.
     Nil,
     /// A cons cell of a list: a head and a tail, for example `[1 | T]`. A
@@ -67,8 +74,8 @@ pub enum Term {
     Tuple(Tuple),
     /// A BEAM map: a flatmap up to 32 keys and a hashmap above 32 keys, as
     /// in ERTS. `Map` keeps each map in its canonical form, so two maps with
-    /// the same pairs are equal. A key is a binary, an atom, a small integer,
-    /// `[]`, a list or a tuple whose elements are atoms, small integers,
+    /// the same pairs are equal. A key is a binary, an atom, a float, a small integer,
+    /// `[]`, a list or a tuple whose elements are atoms, floats, small integers,
     /// `[]`, or such lists or tuples, or an improper list of such elements
     /// whose tail is an atom, a small integer, or such a tuple; a flatmap
     /// also accepts any integer. Top-level atom keys are ordered by their
@@ -590,6 +597,7 @@ impl Clone for Term {
         match self {
             Term::Atom(atom) => Term::Atom(atom.clone()),
             Term::Binary(bytes) => Term::Binary(bytes.clone()),
+            Term::Float(value) => Term::Float(*value),
             Term::Integer(value) => Term::Integer(*value),
             Term::Nil => Term::Nil,
             Term::Cons(cell) => Term::Cons(cell.clone()),
@@ -625,8 +633,60 @@ impl PartialEq for Term {
     /// ```rust,ignore
     /// assert_eq!(Term::list_from([Term::Integer(1)]), Term::list_from([Term::Integer(1)]));
     /// assert_ne!(Term::nil(), Term::tuple(vec![]));
+    /// assert_ne!(Term::Float(0.0), Term::Float(-0.0));
+    /// assert_ne!(Term::Integer(1), Term::Float(1.0));
     /// ```
     fn eq(&self, other: &Self) -> bool {
+        self.equal(other, false)
+    }
+}
+
+impl Eq for Term {}
+
+impl Term {
+    /// Return true when `self` and `other` are equal in arithmetic
+    /// comparison, as `==` is (`eq` with `exact = 0` in `erts_cmp_compound`,
+    /// `utils.c:2355-2470`). An integer and a float are equal when they
+    /// have the same value, and `0.0` and `-0.0` are equal. Map keys
+    /// compare exactly and map values compare arithmetically, as
+    /// `erts_cmp_compound` does (`utils.c:2506-2533`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(Term::Integer(1).arith_eq(&Term::Float(1.0)));
+    /// assert!(Term::Float(0.0).arith_eq(&Term::Float(-0.0)));
+    /// assert!(!Term::Integer(1).arith_eq(&Term::Float(1.5)));
+    /// ```
+    pub(crate) fn arith_eq(&self, other: &Term) -> bool {
+        self.equal(other, true)
+    }
+
+    /// Return the value of a float term, or `None` for each other term.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Term::Float(1.5).float(), Some(1.5));
+    /// assert_eq!(Term::Integer(1).float(), None);
+    /// ```
+    pub(crate) fn float(&self) -> Option<f64> {
+        match self {
+            Term::Float(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    /// Compare two terms for exact equality, or for arithmetic equality when
+    /// `arith` is true. See [`PartialEq::eq`] and [`Term::arith_eq`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(Term::Integer(2).equal(&Term::Float(2.0), true));
+    /// assert!(!Term::Integer(2).equal(&Term::Float(2.0), false));
+    /// ```
+    fn equal(&self, other: &Term, arith: bool) -> bool {
         let mut pairs = EqStack::new();
         let mut left = self;
         let mut right = other;
@@ -667,17 +727,36 @@ impl PartialEq for Term {
                     }
                 }
                 (Term::Map(left), Term::Map(right)) => {
+                    let mut keys_equal = true;
                     for ((left_key, left_value), (right_key, right_value)) in
                         left.iter().zip(right.iter())
                     {
-                        pairs.push(left_key, right_key);
+                        if arith {
+                            // Map keys compare exactly also in arithmetic
+                            // comparison, so `#{1 => a} == #{1.0 => a}` is
+                            // false.
+                            keys_equal &= left_key == right_key;
+                        } else {
+                            pairs.push(left_key, right_key);
+                        }
                         pairs.push(left_value, right_value);
                     }
-                    left.len() == right.len()
+                    keys_equal && left.len() == right.len()
                 }
                 (Term::Atom(left), Term::Atom(right)) => left == right,
                 (Term::Binary(left), Term::Binary(right)) => left == right,
                 (Term::Integer(left), Term::Integer(right)) => left == right,
+                // Exact equality compares the bits, so `0.0 =:= -0.0` is
+                // false (`eq`, `utils.c:1422-1433`). A float term is never
+                // a NaN, so equal bits are the only equal floats.
+                (Term::Float(left), Term::Float(right)) if arith => left == right,
+                (Term::Float(left), Term::Float(right)) => left.to_bits() == right.to_bits(),
+                (Term::Integer(integer), Term::Float(float))
+                | (Term::Float(float), Term::Integer(integer))
+                    if arith =>
+                {
+                    order::compare_integer_float(*integer, *float).is_eq()
+                }
                 (Term::Pid(left), Term::Pid(right)) => left == right,
                 (Term::Port(left), Term::Port(right)) => left == right,
                 (Term::Reference(left), Term::Reference(right)) => left == right,
@@ -699,11 +778,6 @@ impl PartialEq for Term {
             }
         }
     }
-}
-
-impl Eq for Term {}
-
-impl Term {
     /// Return true when `self` and `other` hold the same value. The
     /// comparison remembers each pair of shared compounds that it decided,
     /// so a term that holds one subtree more than once takes time in the
@@ -854,6 +928,7 @@ fn write_debug(term: &Term, atoms: Option<&AtomTable>, out: &mut impl fmt::Write
             },
             Term::Binary(bytes) => write!(out, "Binary({bytes:?})")?,
             Term::Integer(value) => write!(out, "Integer({value:?})")?,
+            Term::Float(value) => write!(out, "Float({value:?})")?,
             Term::Pid(pid) => write!(out, "Pid({pid:?})")?,
             Term::Port(port) => write!(out, "Port({port:?})")?,
             Term::Reference(reference) => write!(out, "Reference({reference:?})")?,

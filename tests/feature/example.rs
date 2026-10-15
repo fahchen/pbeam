@@ -346,7 +346,7 @@ fn runs_the_called_modules_of_an_example_on_demand_as_pinned_erts() {
                 "file_io_server",
                 "unsupported BEAM opcode 141 (bs_skip_utf16)"
             ),
-            ("rand", "unsupported BEAM opcode 102 (fnegate)"),
+            ("rand", "unsupported BEAM opcode 118 (bs_get_float2)"),
             (
                 "shell_docs",
                 "unsupported BEAM opcode 132 (bs_match_string)"

@@ -21,6 +21,7 @@ mod erlang;
 mod erts_internal;
 mod ets;
 mod file;
+mod float;
 mod io_service;
 mod iolist;
 mod lists;
@@ -491,7 +492,7 @@ impl OwnedBifArguments {
 ///
 /// ```rust,ignore
 /// bifs! {
-///     erlang:"+"/2 as ErlangPlus2 => |_, [left, right]| erlang::arith("+", left, right, i64::checked_add),
+///     erlang:"+"/2 as ErlangPlus2 => |_, [left, right]| erlang::arith("+", left, right, i64::checked_add, |l, r| l + r),
 ///     erlang:self/0 as ErlangSelf0 => |cx, []| Ok(Value(Term::Pid(cx.scheduler.current_process_mut().id))),
 ///     lists:keyfind/3 => unsupported,
 /// }
