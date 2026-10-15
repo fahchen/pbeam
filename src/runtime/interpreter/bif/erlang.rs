@@ -3284,7 +3284,8 @@ pub(super) fn get_module_info(
 ///   (`erl_process_lock.c:970-984`). The timer of a pid goes into the timer
 ///   tree of the process (`erl_hl_timer.c:1832-1858`).
 ///
-/// When the timer expires, `Dest` gets `{timeout, Reference, Msg}`.
+/// When the timer expires, `Dest` gets `{timeout, Reference, Msg}`
+/// (`wrap` `!0`, `erl_hl_timer.c:1824`).
 ///
 /// # Examples
 ///
@@ -3305,6 +3306,57 @@ pub(super) fn start_timer(
     time: &Term,
     receiver: &Term,
     message: &Term,
+) -> Result<BifResult, BeamError> {
+    bif_timer(context, time, receiver, message, true)
+}
+
+/// Run `erlang:send_after(Time, Dest, Msg)`, as ERTS `send_after_3`
+/// (`erl_hl_timer.c:2566-2581`) does: the same checks, capability check,
+/// reference, and timer as [`start_timer`], but `setup_bif_timer` gets
+/// `wrap` 0, so `Dest` gets `Msg` when the timer expires
+/// (`erl_hl_timer.c:1824`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = send_after(&mut context, &Term::Integer(100), &Term::Pid(pid), &msg)?;
+/// assert!(matches!(result, BifResult::Value(Term::Reference(_))));
+/// let result = send_after(&mut context, &Term::Integer(10), &Term::Integer(1), &msg)?;
+/// assert!(matches!(result, BifResult::Raise { .. }));
+/// ```
+///
+/// # Errors
+///
+/// The errors of [`start_timer`].
+pub(super) fn send_after(
+    context: &mut BifContext<'_>,
+    time: &Term,
+    receiver: &Term,
+    message: &Term,
+) -> Result<BifResult, BeamError> {
+    bif_timer(context, time, receiver, message, false)
+}
+
+/// Start the BIF timer of [`start_timer`] and [`send_after`], as
+/// `setup_bif_timer` (`erl_hl_timer.c:1804-1871`) does. `wrap` makes the
+/// message `{timeout, Reference, Msg}`, and else the message is `Msg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = bif_timer(&mut context, &Term::Integer(100), &Term::Pid(pid), &msg, false)?;
+/// assert!(matches!(result, BifResult::Value(Term::Reference(_))));
+/// ```
+///
+/// # Errors
+///
+/// The errors of [`start_timer`].
+fn bif_timer(
+    context: &mut BifContext<'_>,
+    time: &Term,
+    receiver: &Term,
+    message: &Term,
+    wrap: bool,
 ) -> Result<BifResult, BeamError> {
     let scheduler = &mut *context.scheduler;
     let end = match *time {
@@ -3338,11 +3390,15 @@ pub(super) fn start_timer(
         {
             process.bif_timers.insert(TimerReference(reference), ());
         }
-        let message = Term::tuple(vec![
-            Term::static_atom("timeout"),
-            Term::Reference(reference),
-            message.clone(),
-        ]);
+        let message = if wrap {
+            Term::tuple(vec![
+                Term::static_atom("timeout"),
+                Term::Reference(reference),
+                message.clone(),
+            ])
+        } else {
+            message.clone()
+        };
         scheduler.timers.start(
             end,
             Timer::Bif {

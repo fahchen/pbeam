@@ -1022,3 +1022,32 @@ pub(super) fn list_to_integer(list: &Term, base: &Term) -> BifResult {
         Value(Term::tuple(vec![Term::Integer(value), rest.clone()]))
     }
 }
+
+/// Run `erts_internal:scheduler_wall_time(Enable)`, which
+/// `kernel_refc:init/1` calls with `false` (`kernel_refc.erl:52-54`,
+/// `141-142`), as `erts_internal_scheduler_wall_time_1` (`bif.c:5306-5315`)
+/// does: each term other than `true` disables the scheduler wall time, and
+/// the BIF returns the old state. PBeam never enables it, so the old state
+/// is `false`. ERTS then waits for the reply of each scheduler
+/// (`await_sched_wall_time_modifications`), which sends the caller no
+/// message that it can see.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = scheduler_wall_time(&Term::static_atom("false"))?;
+/// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.is_static("false")));
+/// assert!(scheduler_wall_time(&Term::static_atom("true")).is_err());
+/// ```
+///
+/// # Errors
+///
+/// Return a runtime error for `true`: PBeam has no scheduler wall time.
+pub(super) fn scheduler_wall_time(enable: &Term) -> Result<BifResult, BeamError> {
+    if matches!(enable, Term::Atom(atom) if atom.is_static("true")) {
+        return Err(error(
+            "unsupported erts_internal:scheduler_wall_time(true): see \"Scheduling\" in docs/erts-differences.md",
+        ));
+    }
+    Ok(Value(Term::static_atom("false")))
+}

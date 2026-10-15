@@ -1,7 +1,8 @@
 -module(ets_probe).
 -export([new/0, owner_exit/0, insert/0, lookup/0, lookup_loop/0, insert_loop/0,
          access/0, main/0, env/0, bag/0, info/0, match/0, match_deep/0,
-         match_write_concurrency/0, unsupported/1,
+         match_write_concurrency/0, delete_table/0, delete_trap/0,
+         unsupported/1, insert_all/2, ping/1,
          own/2, write/1]).
 
 %% ets:new/2 return values and badarg cases (erl_db.c:2555-2840).
@@ -49,6 +50,53 @@ owner_exit() ->
      catch_error(fun() -> ets:new(ets_probe_heir, [named_table]) end),
      stop(Heir),
      ets:new(ets_probe_heir, [named_table])].
+
+%% ets:delete/1 (erl_db.c:3006-3082). The table loses its name and its
+%% reference at once. Each process can delete a public table, and only the
+%% owner can delete another table. Each other term raises badarg.
+delete_table() ->
+    T = ets:new(ets_probe, []),
+    true = ets:insert(T, {k, v}),
+    ets_probe_named = ets:new(ets_probe_named, [named_table]),
+    Public = start([public]),
+    Protected = start([protected]),
+    [ets:delete(T),
+     catch_error(fun() -> ets:lookup(T, k) end),
+     catch_error(fun() -> ets:delete(T) end),
+     ets:delete(ets_probe_named),
+     ets:info(ets_probe_named, type),
+     ets:new(ets_probe_named, [named_table]),
+     ets:delete(tid(Public)),
+     catch_error(fun() -> ets:insert(tid(Public), {k, v}) end),
+     stop(Public),
+     catch_error(fun() -> ets:delete(tid(Protected)) end),
+     ets:lookup(tid(Protected), k),
+     stop(Protected),
+     [catch_error(fun() -> ets:delete(Table) end)
+      || Table <- [ets_probe_missing, make_ref(), 1, "t"]]].
+
+%% A delete of a small table frees its segments in the turn of the caller.
+%% A delete of a table with 50000 objects uses more reductions than a turn
+%% has, so it traps (erl_db.c:3064-3077, 5378-5397), and a process that the
+%% caller spawned runs before the delete returns. Run with +S 1.
+delete_trap() ->
+    Small = ets:new(ets_probe, []),
+    true = ets:insert(Small, {k}),
+    Large = ets:new(ets_probe, []),
+    true = ets:insert(Large, [{I} || I <- seq(50000)]),
+    receive after 1 -> ok end,
+    spawn(?MODULE, ping, [self()]),
+    A = ets:delete(Small),
+    B = receive ping -> ping after 0 -> none end,
+    C = ets:delete(Large),
+    D = receive ping -> ping after 0 -> none end,
+    [A, B, C, D].
+
+%% Send ping to Pid.
+ping(Pid) -> Pid ! ping.
+
+%% Insert the list of objects Objects into the table T.
+insert_all(T, Objects) -> ets:insert(T, Objects).
 
 %% ets:insert/2 on a set table (erl_db.c:2341-2381, erl_db.c:1812-1827).
 insert() ->
@@ -334,6 +382,11 @@ unsupported(Case) ->
             true = ets:insert(T, [{I} || I <- seq(5000)]),
             spawn(?MODULE, write, [T]) ! go,
             ets:match(T, '$1');
+        delete_inserting ->
+            T = ets:new(ets_probe, [public]),
+            spawn(?MODULE, insert_all, [T, [{I} || I <- seq(400000)]]),
+            true = ets:insert(ets:new(ets_probe, []), [{I} || I <- seq(40000)]),
+            ets:delete(T);
         info_size -> ets:info(ets:new(ets_probe, []), size);
         info_binary -> ets:info(ets:new(ets_probe, []), binary);
         info_reference -> ets:info(make_ref(), type);

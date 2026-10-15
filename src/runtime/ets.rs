@@ -333,14 +333,8 @@ impl EtsTables {
         mut reds: i32,
     ) -> Option<i32> {
         loop {
-            if let Some(segments) = self.freeing.get_mut(&owner) {
-                while let Some(segment) = segments.pop() {
-                    reds -= segment;
-                    if reds < 0 {
-                        return None;
-                    }
-                }
-                self.freeing.remove(&owner);
+            if self.freeing.contains_key(&owner) {
+                reds = self.free_segments(owner, reds)?;
                 if reds == 0 {
                     return None;
                 }
@@ -358,6 +352,55 @@ impl EtsTables {
             self.names.retain(|_, named| *named != id);
             self.freeing.insert(owner, table.segment_reductions(atoms));
         }
+    }
+
+    /// Delete the table `id` and its name, as `ets:delete/1`
+    /// (`erl_db.c:3053-3061`) does before it frees the table, and keep the
+    /// reductions of its segments under the process `caller`, which then
+    /// owns the table (`erl_db.c:3031-3051`). [`EtsTables::free_segments`]
+    /// frees them. The caller makes sure that the table is live.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut tables = EtsTables::default();
+    /// tables.create(Reference(0), Some("ac_tab"), Table::new(ProcessId(1), Access::Public, 1, TableType::Set));
+    /// tables.delete_table(&AtomTable::new(), Reference(0), ProcessId(2));
+    /// assert!(!tables.name_in_use("ac_tab"));
+    /// assert_eq!(tables.free_segments(ProcessId(2), 100), Some(68));
+    /// ```
+    pub(super) fn delete_table(&mut self, atoms: &AtomTable, id: Reference, caller: ProcessId) {
+        let table = self.tables.remove(&id).expect("a deleted table is live");
+        self.names.retain(|_, named| *named != id);
+        self.freeing.insert(caller, table.segment_reductions(atoms));
+    }
+
+    /// Free the segments that the table of `owner` keeps, from the top
+    /// segment down, with `reds` reductions left, as
+    /// `db_free_table_continue_hash` (`erl_db_hash.c:3140-3149`) does: each
+    /// segment uses its reductions, and the work stops when the reductions
+    /// are less than 0 after a segment. Return the reductions that are left
+    /// when each segment is free, or `None` when segments remain.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut tables = EtsTables::default();
+    /// tables.create(Reference(0), None, Table::new(ProcessId(1), Access::Public, 1, TableType::Set));
+    /// tables.delete_table(&AtomTable::new(), Reference(0), ProcessId(1));
+    /// assert_eq!(tables.free_segments(ProcessId(1), 10), None);
+    /// assert_eq!(tables.free_segments(ProcessId(1), 100), Some(100));
+    /// ```
+    pub(super) fn free_segments(&mut self, owner: ProcessId, mut reds: i32) -> Option<i32> {
+        let segments = self.freeing.get_mut(&owner)?;
+        while let Some(segment) = segments.pop() {
+            reds -= segment;
+            if reds < 0 {
+                return None;
+            }
+        }
+        self.freeing.remove(&owner);
+        Some(reds)
     }
 }
 

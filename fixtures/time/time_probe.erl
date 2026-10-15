@@ -1,6 +1,7 @@
 -module(time_probe).
 -export([monotonic/0, system/0, units/0, convert/0, perf_counter/0, posix/0,
-         local_badarg/0, local/0, local_check/0, leap_check/0]).
+         local_badarg/0, local/0, local_check/0, leap_check/0,
+         wall_time/0, wall_time_on/0]).
 
 %% The Erlang monotonic time at the emulator start in `native`
 %% (`erlang:system_info(start_time)` on the pinned ERTS).
@@ -143,3 +144,14 @@ lt(A, B) -> {false, A, B}.
 %% Return the argument. An integer above 2^31 - 1 goes through id/1, so it
 %% is an instruction operand and not a literal term.
 id(X) -> X.
+
+%% erts_internal:scheduler_wall_time/1, as kernel_refc:init/1 calls it with
+%% false (kernel_refc.erl:52-54, 141-142). Each term other than true
+%% disables the scheduler wall time and gives the old state
+%% (bif.c:5306-5315).
+wall_time() ->
+    [erts_internal:scheduler_wall_time(X) || X <- [false, foo, 1, false]].
+
+%% erts_internal:scheduler_wall_time/1 with true, which enables it.
+wall_time_on() ->
+    erts_internal:scheduler_wall_time(true).
