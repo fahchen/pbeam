@@ -274,7 +274,8 @@ impl TcpInet {
     /// each option code with its value in order. A socket option whose
     /// `getsockopt` fails, also without a socket, is not in the reply, and
     /// `send_timeout` and `send_timeout_close` are not in it before `OPEN`.
-    /// A reply of more than 64 KiB gives `einval`.
+    /// A reply of more than 64 KiB gives `einval`, also when only the last
+    /// 4 bytes of `linger` exceed it.
     fn get_options(&self, request: &[u8]) -> Result<Vec<u8>, BeamError> {
         let mut reply = vec![OK];
         for &option in request {
@@ -295,6 +296,10 @@ impl TcpInet {
                     .map(i32::from),
                 3 => {
                     if let Some(linger) = socket.and_then(|socket| socket.linger().ok()) {
+                        // `linger` needs 4 more bytes (inet_drv.c:9749).
+                        if reply.len() + 9 > MAX_OPT_BUFFER {
+                            return Ok(error_reply("einval"));
+                        }
                         let (on, seconds) = linger.map_or((0, 0), |time| (1, time.as_secs()));
                         reply.push(option);
                         reply.extend(i32::to_be_bytes(on));
