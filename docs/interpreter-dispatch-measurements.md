@@ -697,7 +697,7 @@ The code table lookups run because `Instruction::CallExternal` still holds the m
 
 ### The +15.5 percent shift of `call_ext_only` at `e0d9cbe5`
 
-Session C1 measures the kept spin probe of the two revisions in four interleaved rounds. Each cell is the median of the four rounds of the revision. The ns comes from the run of the probe inside the recording. The instructions and cycles for each iteration come from the fixed counters: the cycles of the covered time, times the mean ns of the run, times the measured frequency (3.19 GHz to 3.22 GHz). Counter 4 has no name in the export.
+Session C1 measures the kept spin probe of the two revisions in four interleaved rounds. Each cell is the median of the four rounds of the revision. The ns comes from the run of the probe inside the recording. The instructions and cycles for each iteration come from the fixed counters of the covered time: the frequency is the cycles divided by the covered ns (3.19 GHz to 3.22 GHz), the cycles for each iteration are the mean ns of the run times that frequency, and the instructions for each iteration are the instructions for each cycle times the cycles for each iteration. Counter 4 has no name in the export.
 
 | Number | `6fd1b3db` | `e0d9cbe5` | Change |
 | --- | --- | --- | --- |
