@@ -66,6 +66,9 @@ open() ->
 unsupported(stream) -> open_with([1, 1, 0]);
 unsupported(seqpacket) -> open_with([1, 3, 0]);
 unsupported(sctp) -> open_with([1, 2, 3]);
+unsupported(command) ->
+    P = open_port({spawn_driver, "udp_inet"}, [binary]),
+    erlang:port_command(P, <<"x">>);
 unsupported(accept) ->
     P = open_port({spawn_driver, "udp_inet"}, [binary]),
     [1] = control(P, 1, [1, 2, 2]),

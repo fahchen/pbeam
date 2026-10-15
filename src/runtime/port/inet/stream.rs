@@ -373,8 +373,8 @@ impl Inet {
     ///
     /// # Errors
     ///
-    /// A tag that is not the reference bytes of `term_to_binary/2` with
-    /// `[local]`, a send while a send waits for the queue (ERTS suspends the
+    /// The output of a `udp_inet` port, a tag that is not the reference
+    /// bytes of `term_to_binary/2` with `[local]`, a send while a send waits for the queue (ERTS suspends the
     /// caller of a busy port), a send that would wait with a `send_timeout`
     /// other than `infinity` and 0, and a send with `delay_send`.
     pub(in crate::runtime) fn send(
@@ -383,6 +383,9 @@ impl Inet {
         caller: ProcessId,
         seed: u32,
     ) -> Result<Output, BeamError> {
+        if self.socket_type == SocketType::Datagram {
+            return Err(self.unsupported("output", "of erlang:port_command/2"));
+        }
         let header = bytes
             .split_first_chunk::<2>()
             .and_then(|(&size, rest)| rest.split_at_checked(usize::from(u16::from_be_bytes(size))));
@@ -446,8 +449,10 @@ impl Inet {
                 Ok(written) => written,
                 Err(failure) if blocked(&failure) => break,
                 Err(_) => {
+                    // A reply of this step goes before the end of the socket.
                     let sender = self.stream.busy.take();
-                    return self.send_failed(sender);
+                    events.extend(self.send_failed(sender));
+                    return events;
                 }
             };
             self.stream.output.drain(..written);

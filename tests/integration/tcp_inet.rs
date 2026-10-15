@@ -315,6 +315,10 @@ fn stops_the_run_for_each_udp_inet_part_that_is_not_implemented() {
         ("seqpacket", "unsupported udp_inet type 3"),
         ("sctp", "unsupported udp_inet protocol 3"),
         ("accept", "unsupported udp_inet request 26"),
+        (
+            "command",
+            "unsupported udp_inet output of erlang:port_command/2",
+        ),
     ] {
         let argument = Term::Atom(program.atom(case).unwrap());
         let error = program
