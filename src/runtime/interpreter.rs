@@ -3207,9 +3207,9 @@ fn register_of(operand: &Operand) -> Option<Register> {
     }
 }
 
-/// Borrow the value of each key in the map of a `get_map_elements` or
-/// `has_map_fields` instruction, or return `None` at the first key that the
-/// map does not hold. The read copies neither the map nor a value.
+/// Borrow the value of each key in the map of a `has_map_fields`
+/// instruction, or return `None` at the first key that the map does not
+/// hold. The read copies neither the map nor a value.
 ///
 /// # Examples
 ///
@@ -3224,7 +3224,7 @@ fn register_of(operand: &Operand) -> Option<Register> {
 /// # Errors
 ///
 /// Return a runtime error when the source is not a map. The compiler puts an
-/// `is_map` test before each of these instructions.
+/// `is_map` test before this instruction.
 fn map_values<'a>(
     process: &'a ProcessState,
     map: &'a Operand,
