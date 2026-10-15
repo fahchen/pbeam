@@ -9,6 +9,7 @@ use std::{
 };
 
 use super::time::MONOTONIC_BEGIN;
+use crate::runtime::host::clock;
 use crate::term::{Atom, LiveBytes, ProcessId, Reference, Term};
 
 /// Native time units in one clock tick of 1 ms, as
@@ -68,6 +69,11 @@ pub(super) enum Receiver {
 pub(super) struct Timers {
     /// The run start, at the internal monotonic time `MONOTONIC_BEGIN`.
     start: Instant,
+    /// The time offset of the run: the OS system time at the run start
+    /// minus `MONOTONIC_BEGIN`, as ERTS sets it at the emulator start
+    /// (`erl_time_sup.c:1244-1249`). PBeam has no time correction, so the
+    /// offset does not change in the run.
+    time_offset: i64,
     /// Active timers by key.
     queue: BTreeMap<TimerKey, Timer>,
     /// The key of each active BIF timer by its reference, as the ERTS
@@ -89,6 +95,7 @@ impl Timers {
     pub(super) fn new() -> Self {
         Self {
             start: Instant::now(),
+            time_offset: clock::system_time() - MONOTONIC_BEGIN,
             queue: BTreeMap::new(),
             bif_timers: HashMap::new(),
             next: 0,
@@ -135,6 +142,21 @@ impl Timers {
         i64::try_from(self.start.elapsed().as_nanos())
             .unwrap_or(i64::MAX)
             .saturating_add(MONOTONIC_BEGIN)
+    }
+
+    /// Return the Erlang system time of the run in nanoseconds: the
+    /// internal monotonic time plus the time offset, as `system_time_1`
+    /// adds them (`erl_time_sup.c:2527-2535`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let timers = Timers::new();
+    /// // 2023-11-14 and later.
+    /// assert!(timers.system_time() > 1_700_000_000_000_000_000);
+    /// ```
+    pub(super) fn system_time(&self) -> i64 {
+        self.now().saturating_add(self.time_offset)
     }
 
     /// Return the end tick of a timer of `msec` milliseconds that starts at
