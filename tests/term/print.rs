@@ -53,6 +53,10 @@ fn prints_pids_and_references_as_pinned_erts() {
     // The pid data holds the number in its low 28 bits and the serial
     // above them (`erl_term.h:646-656`).
     assert_eq!(print_term(&Term::Pid(ProcessId(0)), &atoms), b"<0.0.0>");
+    // A bignum prints its decimal digits, in the text and in `Debug`.
+    let big = Term::from_bigint(-(num_bigint::BigInt::from(1) << 64u32));
+    assert_eq!(print_term(&big, &atoms), b"-18446744073709551616");
+    assert_eq!(format!("{big:?}"), "Integer(-18446744073709551616)");
     assert_eq!(
         print_term(&Term::Pid(ProcessId(1 << 28)), &atoms),
         b"<0.0.1>"

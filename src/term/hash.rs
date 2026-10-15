@@ -22,6 +22,8 @@
 //! so PBeam mixes the word `(module index << 40) | (function index << 20) |
 //! arity` in its place. Equal external funs give equal words.
 
+use num_bigint::Sign;
+
 use super::{
     Fun, Map, PortId, ProcessId, Reference, Target, Term,
     map::{Child, Form, Node},
@@ -108,8 +110,9 @@ enum Shape<'a> {
     Tuple(&'a [Term]),
     Map(&'a Map),
     Binary(&'a [u8]),
-    /// An integer outside the small-integer range.
-    Bignum(i64),
+    /// An integer outside the small-integer range: its sign and its
+    /// magnitude in 64-bit digits, least significant first.
+    Bignum(bool, Vec<u64>),
     /// The bits of a float.
     Float(u64),
     Reference(Reference),
@@ -139,8 +142,12 @@ fn shape(term: &Term) -> Shape<'_> {
             Some(small) => {
                 Shape::Immediate(((small as u64) << IMMED1_TAG_BITS) | SMALL_INTEGER_TAG)
             }
-            None => Shape::Bignum(*value),
+            None => Shape::Bignum(*value < 0, vec![value.unsigned_abs()]),
         },
+        Term::BigInt(value) => Shape::Bignum(
+            value.sign() == Sign::Minus,
+            value.magnitude().to_u64_digits(),
+        ),
         Term::Float(value) => Shape::Float(value.to_bits()),
         Term::Tuple(elements) => Shape::Tuple(elements),
         Term::Map(map) => Shape::Map(map),
@@ -506,15 +513,24 @@ impl State {
                 self.mix_beta(bytes.len() as u64 * 8);
                 self.mix_bytes(bytes);
             }
-            Shape::Bignum(value) => {
-                // The magnitude of a 64-bit value is one 64-bit bignum digit.
-                let sign = if value < 0 {
+            Shape::Bignum(negative, digits) => {
+                // ERTS mixes the sign and the number of 64-bit digits, then
+                // the digits two at a time, and a last odd digit
+                // (`erl_term_hashing.c:2101-2127`).
+                let sign = if negative {
                     TYPE_NEG_BIGNUM
                 } else {
                     TYPE_POS_BIGNUM
                 };
-                self.mix_alpha(pair(sign, 1));
-                self.mix_beta(value.unsigned_abs());
+                self.mix_alpha(pair(sign, digits.len() as u64));
+                let (pairs, rest) = digits.as_chunks::<2>();
+                for [low, high] in pairs {
+                    self.mix_alpha(*low);
+                    self.mix_beta(*high);
+                }
+                if let [last] = rest {
+                    self.mix_beta(*last);
+                }
             }
             Shape::Float(bits) => {
                 // `IHASH_MIX_BETA_2F32(ff.fw[0], ff.fw[1])` joins the two

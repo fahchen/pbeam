@@ -22,6 +22,7 @@ mod erts_internal;
 mod ets;
 mod file;
 mod float;
+mod integer;
 mod io_service;
 mod iolist;
 mod lists;

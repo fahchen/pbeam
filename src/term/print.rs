@@ -69,6 +69,7 @@ pub(crate) fn print_term(term: &Term, atoms: &AtomTable) -> Vec<u8> {
         match term {
             Term::Atom(atom) => print_atom(atoms.name_of(atom), &mut text),
             Term::Integer(value) => text.extend_from_slice(value.to_string().as_bytes()),
+            Term::BigInt(value) => text.extend_from_slice(value.to_string().as_bytes()),
             // `PRINT_DOUBLE(res, fn, arg, 'e', 6, 0, ff.fd)`
             // (`erl_printf_term.c:596-600`): six digits after the point.
             Term::Float(value) => {

@@ -14,7 +14,7 @@ const TYPE_TEST_PROBE: &[u8] = include_bytes!("../../fixtures/type_test/type_tes
 const PASSED: &str = "[[is_atom],[is_atom,is_boolean],[is_number],[is_number],\
     [is_float,is_number],[is_binary,is_bitstring],[is_binary,is_bitstring],[is_list],[is_list],\
     [is_list],[is_tuple],[is_tuple],[is_map],[is_map],[is_pid],[is_port],[is_reference],\
-    [is_function],[is_function]]";
+    [is_function],[is_function],[is_number],[is_number]]";
 
 /// Return a term as `io:format("~w")` prints it, for the atoms, lists, and
 /// tuples of the probe results. Each atom name comes from `atoms`, the
@@ -83,7 +83,8 @@ fn assert_runs(call: &str, expected: &str) {
 fn runs_each_type_test_bif_in_a_body_through_a_fun_and_through_apply_as_pinned_erts() {
     // `bif/0` runs each BIF as a `bif` instruction with the fail label 0,
     // `funs/0` calls `fun erlang:F/1`, and `applies/0` calls `apply/3`
-    // (`erl_bif_op.c:133-357`). 2^59 is an ERTS bignum and a number. `[1|2]`
+    // (`erl_bif_op.c:133-357`). 2^59 is an ERTS bignum and a number, and so
+    // are 2^64 and -(2^64), which are bignums on PBeam too. `[1|2]`
     // is a list for `is_list/1`, which tests the cons tag. No term is a
     // native record, so `erlang:is_record/1` gives `false` for each term.
     for call in ["bif()", "funs()", "applies()"] {
@@ -95,7 +96,7 @@ fn runs_each_type_test_bif_in_a_body_through_a_fun_and_through_apply_as_pinned_e
 fn runs_is_function_2_with_a_fail_label_in_a_guard_as_pinned_erts() {
     // A bad arity raises `badarg` (`erl_bif_op.c:244-256`), so the `bif`
     // instruction goes to its fail label. Only the arity-0 fun passes.
-    let mut rows = vec!["[no,no,no]"; 19];
+    let mut rows = vec!["[no,no,no]"; 21];
     rows[17] = "[yes,no,no]";
     assert_runs("guard()", &format!("[{}]", rows.join(",")));
 }
@@ -103,12 +104,15 @@ fn runs_is_function_2_with_a_fail_label_in_a_guard_as_pinned_erts() {
 #[test]
 fn runs_is_function_2_in_a_body_through_a_fun_and_through_apply_as_pinned_erts() {
     // A negative arity or an arity that is not an integer raises `badarg`
-    // (`erl_bif_op.c:244-256`), also for a term that is not a fun.
+    // (`erl_bif_op.c:244-256`), also for a term that is not a fun. A
+    // positive bignum arity gives `false`, and a negative bignum arity
+    // raises `badarg`.
     assert_runs(
         "arity()",
-        "[[true,true,true],[false,false,false],[true,true,true],[false,false,false],\
-         [{error,badarg},{error,badarg},{error,badarg}],[{error,badarg},{error,badarg},{error,badarg}],\
-         [{error,badarg},{error,badarg},{error,badarg}],[{error,badarg},{error,badarg},{error,badarg}]]",
+        "[[true,true,true],[false,false,false],[true,true,true],\
+         [false,false,false],[{error,badarg},{error,badarg},{error,badarg}],[{error,badarg},{error,badarg},{error,badarg}],\
+         [{error,badarg},{error,badarg},{error,badarg}],[{error,badarg},{error,badarg},{error,badarg}],[false,false,false],\
+         [false,false,false],[{error,badarg},{error,badarg},{error,badarg}]]",
     );
 }
 
@@ -117,15 +121,15 @@ fn runs_is_record_2_and_3_in_a_body_through_a_fun_and_through_apply_as_pinned_er
     // A name that is not an atom raises `badarg` (`erl_bif_op.c:297-299`,
     // `328-330`). An atom size selects the native-record test, which gives
     // `false` (`erl_bif_op.c:332-338`). A float size and a size outside the small
-    // integer range raise `badarg` (`erl_bif_op.c:347-348`). The compiler emits `erlang:is_record/3` in a
+    // integer range raise `badarg` (`erl_bif_op.c:347-348`), also a bignum size. The compiler emits `erlang:is_record/3` in a
     // body as `call_ext`, which runs the BIF through its export.
     assert_runs(
         "record()",
-        "[[true,true,true],[false,false,false],[false,false,false],[false,false,false],\
-         [{error,badarg},{error,badarg},{error,badarg}],[true,true,true],[false,false,false],\
-         [false,false,false],[{error,badarg},{error,badarg},{error,badarg}],\
-         [{error,badarg},{error,badarg},{error,badarg}],[false,false,false],\
-         [{error,badarg},{error,badarg},{error,badarg}],[false,false,false],\
-         [false,false,false],[{error,badarg},{error,badarg},{error,badarg}]]",
+        "[[true,true,true],[false,false,false],[false,false,false],\
+         [false,false,false],[{error,badarg},{error,badarg},{error,badarg}],[true,true,true],\
+         [false,false,false],[false,false,false],[{error,badarg},{error,badarg},{error,badarg}],\
+         [{error,badarg},{error,badarg},{error,badarg}],[false,false,false],[{error,badarg},{error,badarg},{error,badarg}],\
+         [{error,badarg},{error,badarg},{error,badarg}],[false,false,false],[false,false,false],\
+         [{error,badarg},{error,badarg},{error,badarg}]]",
     );
 }
