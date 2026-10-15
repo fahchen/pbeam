@@ -1032,12 +1032,14 @@ The change does not land. The CPU time for each release Terra key press, which i
 
 The body-call probe shows that the free list removes most of the cost of a frame allocation. But the Terra key press spends too little of its time in frame allocations for the gain to show. The 11.7 percent of allocation in the attribution of task #625 thus includes more than the slot arrays of frames.
 
-Two variants outside the session, built from the working tree, did not remove the floor cost. A variant that keeps the slot array in the frame at a tail call, with `#[inline]` on the three new methods, measured 45.7 ns on the `call_only` floor loop in three runs, against 42.4 ns of `e93523c3`. A variant that changes only `allocate` and the return, so that the floor loop runs the same source as `e93523c3`, measured 45.4 ns. The floor cost is thus an effect of the code generation of the run loop, not work that the floor loop does.
+In `1c344478`, `call_only`, `call_last`, and the tail call of `enter_frame` call `replace_frame`, which puts the slot array of the released frame in the free list. Thus the code of the free list runs in each iteration of the three floor loops.
 
-The raw records are the session logs `session.txt` and `alloc-session.txt` and the files `floor-r<round>-<revision>.txt`, `terra-r<round>-<revision>.log`, and `alloc-r<round>-<revision>.txt` of the two sessions, and the files of the variant probes, which stay outside the repository.
+Two variants of the working tree tried to remove the floor cost. Their probes ran on 2026-10-15 from 17:28:25 to 17:29:35 JST, outside the measurement rule: no load is recorded, and each variant has only three runs. Each run pairs the variant with a run of `e93523c3`, and the numbers are the minimum of the `call_only` floor loop of 200000 iterations. A variant that keeps the slot array in the frame at a tail call, with `#[inline]` on the three new methods, measured 45.7 ns (`p4-wip.txt` to `p6-wip.txt`), against 42.4 ns of `e93523c3` (`p4-e93523c3.txt` to `p6-e93523c3.txt`). A variant that changes only `allocate` and the return measured 45.4 ns (`p7-wipc.txt` to `p9-wipc.txt`), against 42.5 ns of `e93523c3` (`p7-e93523c3.txt` to `p9-e93523c3.txt`). In this variant, the floor loops run the interpreter source of `e93523c3`, but `ProcessState` has the new field `free_stacks`. The files `p1-wip.txt` to `p3-wip.txt` measure an earlier state of the working tree that the record does not keep, and the record does not use them. The floor cost stays when the floor loop runs the interpreter source of `e93523c3`. The cause, the code layout of the run loop or the layout of `ProcessState`, is not found.
+
+The raw records are the session logs `session.txt` and `alloc-session.txt` and the files `floor-r<round>-<revision>.txt`, `terra-r<round>-<revision>.log`, and `alloc-r<round>-<revision>.txt` of the two sessions, and the files `p<run>-<variant>.txt` of the variant probes, which stay outside the repository.
 
 ### Known gaps
 
 - The session does not resolve a change of less than about 0.5 ms for each key on the Terra key press.
-- The record does not find the part of the run loop code generation that makes the floor loops slower.
+- The record does not find the cause of the floor cost: the code layout of the run loop or the layout of `ProcessState`.
 - The record does not split the 11.7 percent of allocation of a Terra key press by allocation site.
