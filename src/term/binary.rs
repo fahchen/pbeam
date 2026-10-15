@@ -408,6 +408,50 @@ impl Binary {
         Binary::from_chunks(chunks)
     }
 
+    /// Append `suffix` to this binary in place and return true, when this
+    /// handle is the only owner of its view and of its array, as an ERTS
+    /// `private_append` to a writable binary writes in its buffer
+    /// (`erts_bs_private_append_checked`, `erl_bits.c:1963-1981`). The
+    /// array grows as a `Vec` grows, so a loop of appends copies each byte
+    /// a constant number of times on average. A unique view that an append
+    /// built joins its arrays in one array one time, and later appends then
+    /// write in that array. Return false, and keep the bytes, when another
+    /// handle shares the view or the array, or when the view is a part of
+    /// its array. The caller then builds a new binary.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut bytes = Binary::from(b"ab".to_vec());
+    /// assert!(bytes.append_in_place(b"c"));
+    /// let copy = bytes.clone();
+    /// assert!(!bytes.append_in_place(b"d"));
+    /// assert_eq!(&*copy, b"abc");
+    /// ```
+    pub(crate) fn append_in_place(&mut self, suffix: &[u8]) -> bool {
+        let Some(view) = Arc::get_mut(&mut self.0) else {
+            return false;
+        };
+        if view.offset != 0 || view.packed.is_some() {
+            return false;
+        }
+        if view.chunks.is_some() {
+            let joined = Arc::clone(view.flat_backing());
+            view.chunks = None;
+            view.flat = OnceLock::new();
+            view.bytes = joined;
+        }
+        if view.size != view.bytes.len() * BITS_PER_BYTE {
+            return false;
+        }
+        let Some(bytes) = Arc::get_mut(&mut view.bytes) else {
+            return false;
+        };
+        bytes.extend_from_slice(suffix);
+        view.size = bytes.len() * BITS_PER_BYTE;
+        true
+    }
+
     /// Return the arrays that hold the bytes of this binary, in order. The
     /// function shares the arrays of a view that an append built, and the
     /// whole array of a view that is all of it. It copies the bytes of a
