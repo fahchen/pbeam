@@ -45,22 +45,28 @@ pub(super) fn node(term: &Term, atoms: &AtomTable) -> Result<BifResult, BeamErro
 /// Run `erlang:nodes(NodeTypes)` and `erlang:nodes(NodeTypes, Options)` as
 /// ERTS `nodes` does (`dist.c:6261-6476`) on a node that is not alive.
 /// `NodeTypes` is one node type or a proper list of them: `visible`,
-/// `hidden`, `connected`, `this`, and `known`. Only `this` and `known`
-/// give the local node `nonode@nohost`, because PBeam has no connection
-/// and keeps no entry of another node. `Options` (`None` for `nodes/1`) is
-/// a map of the keys `connection_id` and `node_type`, each `true` or
-/// `false`. With options, the result holds `{Node, Info}`, and `Info` maps
-/// `connection_id` to `undefined` and `node_type` to `this` for each key
-/// that is `true`. Each other term raises `badarg`.
+/// `hidden`, `connected`, `this`, and `known`. PBeam has no connection, so
+/// `visible`, `hidden`, and `connected` give no node. `this` and `known`
+/// give the local node `nonode@nohost` last. Before it, `known` gives the
+/// not connected entry of each node that a send used, from the oldest to
+/// the newest (see `Scheduler::known_nodes`). `Options` (`None` for
+/// `nodes/1`) is a map of the keys `connection_id` and `node_type`, each
+/// `true` or `false`. With options, the result holds `{Node, Info}`, and
+/// `Info` maps `connection_id` to `undefined` and `node_type` to `known`
+/// or `this` for each key that is `true`. Each other term raises `badarg`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(nodes(&Term::static_atom("this"), None, &atoms), Value(Term::list_from([local_node()])));
-/// assert_eq!(nodes(&Term::static_atom("visible"), None, &atoms), Value(Term::nil()));
-/// assert!(matches!(nodes(&Term::Integer(1), None, &atoms), BifResult::Raise { .. }));
+/// assert_eq!(nodes(&Term::static_atom("this"), None, scheduler), Value(Term::list_from([local_node()])));
+/// assert_eq!(nodes(&Term::static_atom("visible"), None, scheduler), Value(Term::nil()));
+/// assert!(matches!(nodes(&Term::Integer(1), None, scheduler), BifResult::Raise { .. }));
 /// ```
-pub(super) fn nodes(node_types: &Term, options: Option<&Term>, atoms: &AtomTable) -> BifResult {
+pub(super) fn nodes(
+    node_types: &Term,
+    options: Option<&Term>,
+    scheduler: &mut Scheduler,
+) -> BifResult {
     let one = Term::list_from([node_types.clone()]);
     let node_types = if matches!(node_types, Term::Atom(_)) {
         &one
@@ -70,42 +76,65 @@ pub(super) fn nodes(node_types: &Term, options: Option<&Term>, atoms: &AtomTable
     let Some(node_types) = node_types.proper_list() else {
         return BifResult::badarg();
     };
-    let mut this = false;
+    let (mut this, mut known) = (false, false);
     for node_type in node_types {
         match node_type {
-            Term::Atom(name) if name.is_one_of(&["this", "known"]) => this = true,
+            Term::Atom(name) if name.is_static("this") => this = true,
+            Term::Atom(name) if name.is_static("known") => (this, known) = (true, true),
             Term::Atom(name) if name.is_one_of(&["visible", "hidden", "connected"]) => {}
             _ => return BifResult::badarg(),
         }
     }
-    let info = match options {
-        None => None,
+    let (mut connection_id, mut node_type) = (false, false);
+    match options {
+        None => {}
         Some(Term::Map(options)) => {
-            let mut info = Vec::new();
             for (option, value) in options.iter() {
-                let entry = match option {
-                    Term::Atom(name) if name.is_static("connection_id") => "undefined",
-                    Term::Atom(name) if name.is_static("node_type") => "this",
+                let flag = match option {
+                    Term::Atom(name) if name.is_static("connection_id") => &mut connection_id,
+                    Term::Atom(name) if name.is_static("node_type") => &mut node_type,
                     _ => return BifResult::badarg(),
                 };
-                match value {
-                    Term::Atom(value) if value.is_static("true") => {
-                        info.push((option.clone(), Term::static_atom(entry)));
-                    }
-                    Term::Atom(value) if value.is_static("false") => {}
+                *flag = match value {
+                    Term::Atom(value) if value.is_static("true") => true,
+                    Term::Atom(value) if value.is_static("false") => false,
                     _ => return BifResult::badarg(),
-                }
+                };
             }
-            // ponytail: each key is an atom, so `from_pairs` cannot fail.
-            Some(Map::from_pairs(info, atoms).expect("atom keys fit each map form"))
         }
         Some(_) => return BifResult::badarg(),
-    };
-    Value(match (this, info) {
-        (false, _) => Term::nil(),
-        (true, None) => Term::list_from([local_node()]),
-        (true, Some(info)) => Term::list_from([Term::tuple(vec![local_node(), Term::Map(info)])]),
-    })
+    }
+    let mut names: Vec<(Term, &str)> = Vec::new();
+    if known {
+        names.extend(
+            scheduler
+                .known_nodes()
+                .into_iter()
+                .map(|name| (Term::Atom(name), "known")),
+        );
+    }
+    if this {
+        names.push((local_node(), "this"));
+    }
+    let atoms = &scheduler.atoms;
+    Value(Term::list_from(names.into_iter().map(|(name, kind)| {
+        if options.is_none() {
+            return name;
+        }
+        let mut info = Vec::new();
+        if connection_id {
+            info.push((
+                Term::static_atom("connection_id"),
+                Term::static_atom("undefined"),
+            ));
+        }
+        if node_type {
+            info.push((Term::static_atom("node_type"), Term::static_atom(kind)));
+        }
+        // ponytail: each key is an atom, so `from_pairs` cannot fail.
+        let info = Map::from_pairs(info, atoms).expect("atom keys fit each map form");
+        Term::tuple(vec![name, Term::Map(info)])
+    })))
 }
 
 /// The flags of ERTS `process_flag_2` (`bif.c:2028-2237`) that need a
@@ -2893,8 +2922,8 @@ enum Destination<'a> {
     /// process has drops the message. The caller reads the name through the
     /// owning atom table.
     NodeName(&'a Atom),
-    /// `{Name, Node}` with another node.
-    Remote,
+    /// `{Name, Node}` with another node, as an atom.
+    Remote(&'a Atom),
     /// A port.
     Port,
 }
@@ -2911,7 +2940,7 @@ enum Destination<'a> {
 /// ```rust,ignore
 /// assert!(matches!(destination(&Term::Pid(pid)), Some(Destination::Pid(_))));
 /// let remote = Term::tuple(vec![Term::static_atom("name"), Term::static_atom("a@b")]);
-/// assert!(matches!(destination(&remote), Some(Destination::Remote)));
+/// assert!(matches!(destination(&remote), Some(Destination::Remote(_))));
 /// assert!(destination(&Term::Integer(1)).is_none());
 /// ```
 fn destination(to: &Term) -> Option<Destination<'_>> {
@@ -2924,7 +2953,7 @@ fn destination(to: &Term) -> Option<Destination<'_>> {
             [Term::Atom(name), node @ Term::Atom(_)] if *node == local_node() => {
                 Destination::NodeName(name)
             }
-            [Term::Atom(_), Term::Atom(_)] => Destination::Remote,
+            [Term::Atom(_), Term::Atom(node)] => Destination::Remote(node),
             _ => return None,
         },
         _ => return None,
@@ -2959,7 +2988,10 @@ fn destination(to: &Term) -> Option<Destination<'_>> {
 /// - `{Name, Node}` with the local node gives the message to the registered
 ///   process, or drops it when no process has the name. Another node drops
 ///   the message and gives [`Sent::NoConnect`], as ERTS does on a node that
-///   is not alive (`remote_send`, `bif.c:2397-2400`).
+///   is not alive (`remote_send`, `bif.c:2397-2400`). The send finds or
+///   makes the not connected dist entry of the node first
+///   (`bif.c:2656-2666`), which `erlang:nodes/1,2` gives as `known` (see
+///   `Scheduler::send_to_remote_node`).
 ///
 /// # Examples
 ///
@@ -3001,7 +3033,10 @@ fn deliver_to(
             }
         }
         Destination::NodeName(atom) => scheduler.whereis(scheduler.atoms.name_of(atom)),
-        Destination::Remote => return Ok(Ok(Sent::NoConnect)),
+        Destination::Remote(node) => {
+            scheduler.send_to_remote_node(node);
+            return Ok(Ok(Sent::NoConnect));
+        }
         Destination::Port => return Err(unsupported_port(bif)),
     };
     if let Some(target) = target {

@@ -17,7 +17,17 @@ main() ->
         [{nonode@nohost, #{connection_id => undefined, node_type => this}}],
         [{nonode@nohost, #{}}], [],
         {error, badarg}, {error, badarg}, {error, badarg}, {error, badarg},
-        {error, badarg}, {error, badarg}
+        {error, badarg}, {error, badarg},
+        x, noconnect, ok, y,
+        [n1@h, foo, n2@h, nonode@nohost],
+        [{n1@h, #{connection_id => undefined, node_type => known}},
+         {foo, #{connection_id => undefined, node_type => known}},
+         {n2@h, #{connection_id => undefined, node_type => known}},
+         {nonode@nohost, #{connection_id => undefined, node_type => this}}],
+        [{n1@h, #{node_type => known}}, {foo, #{node_type => known}},
+         {n2@h, #{node_type => known}}, {nonode@nohost, #{node_type => this}}],
+        [n1@h, foo, n2@h, nonode@nohost],
+        [nonode@nohost], [], []
     ],
     case results() of
         Expected -> ok;
@@ -78,7 +88,21 @@ results() ->
         nodes2(this, #{1 => true}),
         nodes2(this, []),
         nodes2(foo, #{}),
-        nodes2([], x)
+        nodes2([], x),
+        %% A send to another node makes a not connected entry that `known`
+        %% gives, from the oldest to the newest. A second send to `n1@h`
+        %% does not move its entry.
+        {a, id(n1@h)} ! x,
+        erlang:send({a, id(foo)}, x, [noconnect]),
+        erlang:send({a, id(n2@h)}, x, []),
+        {a, id(n1@h)} ! y,
+        nodes(id(known)),
+        nodes(id(known), #{node_type => true, connection_id => true}),
+        nodes(id(known), #{node_type => true}),
+        nodes(id([this, known])),
+        nodes(id(this)),
+        nodes(id([visible, hidden, connected])),
+        nodes(id(connected), #{node_type => true})
     ].
 
 flag(Flag, Value) ->
