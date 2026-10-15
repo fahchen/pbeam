@@ -356,6 +356,51 @@ impl MatchState {
         self.bytes.len() * 8 - self.position()
     }
 
+    /// Read a float segment of `size` bits at the position and move the
+    /// position past it, as `erts_bs_get_float_2` does
+    /// (`erl_bits.c:549-611`). `little` reads the bytes of the segment from
+    /// the last to the first. A size of 0 gives 0.0 and keeps the position.
+    /// A 16-bit segment is an IEEE 754 half-precision float. Return `None`
+    /// and keep the position when fewer than `size` bits remain, for a size
+    /// that is not 0, 16, 32, or 64, and for an infinity or a NaN, as
+    /// `ERTS_FP_ERROR_THOROUGH` fails it.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let context = MatchState::new(Binary::from(&[0x3C, 0x00, 0x7C, 0x00][..]));
+    /// assert_eq!(context.get_float(0, false), Some(0.0));
+    /// assert_eq!(context.get_float(16, false), Some(1.0));
+    /// assert_eq!(context.get_float(16, false), None);
+    /// assert_eq!(context.position(), 16);
+    /// ```
+    pub(crate) fn get_float(&self, size: u64, little: bool) -> Option<f64> {
+        if size == 0 {
+            return Some(0.0);
+        }
+        let start = self.position();
+        let size = usize::try_from(size)
+            .ok()
+            .filter(|&size| size <= self.remaining_bits() && matches!(size, 16 | 32 | 64))?;
+        let mut bytes = segment_bits(&self.bytes, start, size);
+        if little {
+            bytes.reverse();
+        }
+        let raw = bytes
+            .iter()
+            .fold(0_u64, |raw, &byte| raw << 8 | u64::from(byte));
+        let value = match size {
+            16 => half_float(raw as u16),
+            32 => f64::from(f32::from_bits(raw as u32)),
+            _ => f64::from_bits(raw),
+        };
+        if !value.is_finite() {
+            return None;
+        }
+        self.skip(size as u64)?;
+        Some(value)
+    }
+
     /// Read one UTF-8 character at the position and move the position
     /// past it, as `erts_bs_get_utf8` does (`erl_bits.c:2128-2221`). The
     /// position can be at any bit. Return `None` and keep the position for
@@ -496,6 +541,29 @@ pub(crate) fn segment_integer(bits: &[u8], size: usize, little: bool, signed: bo
             .checked_add(i64::from(part))?;
     }
     Some(value)
+}
+
+/// Return the value of the IEEE 754 half-precision float `half`, as
+/// `FP16_TO_FP64` converts it (`erl_bits.c:45-53`): 1 sign bit, 5 exponent
+/// bits, and 10 fraction bits.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(half_float(0x3C00), 1.0);
+/// assert_eq!(half_float(0x0001), 2f64.powi(-24));
+/// assert_eq!(half_float(0x7C00), f64::INFINITY);
+/// assert!(half_float(0x7E00).is_nan());
+/// ```
+fn half_float(half: u16) -> f64 {
+    let sign = if half & 0x8000 == 0 { 1.0 } else { -1.0 };
+    let fraction = f64::from(half & 0x03FF);
+    sign * match i32::from((half >> 10) & 0x1F) {
+        0 => fraction * 2_f64.powi(-24),
+        0x1F if fraction == 0.0 => f64::INFINITY,
+        0x1F => f64::NAN,
+        exponent => (1024.0 + fraction) * 2_f64.powi(exponent - 25),
+    }
 }
 
 /// Return `true` when the `size` bits that `read_bits` gave are the

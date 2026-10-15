@@ -388,6 +388,7 @@ fn resolve(
         | Instruction::TestTaggedTuple { fail_label, .. }
         | Instruction::BinaryMatchStart { fail_label, .. }
         | Instruction::BinaryGetBinary { fail_label, .. }
+        | Instruction::BinaryGetFloat { fail_label, .. }
         | Instruction::BinaryGetUtf8 { fail_label, .. }
         | Instruction::BinaryMatch { fail_label, .. }
         | Instruction::BinaryCreate { fail_label, .. }
