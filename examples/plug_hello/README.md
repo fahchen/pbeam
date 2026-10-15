@@ -55,7 +55,7 @@ mise run example plug_hello
 The run does not serve the page yet. It stops at the first gap of epic #651 and prints this error, with exit status 1:
 
 ```text
-pbeam: erts_internal:prepare_loading/2 cannot load module eval_bits: unsupported BEAM opcode 118
+pbeam: unsupported BEAM opcode 133
 ```
 
-Step 1 calls `erl_parse:parse_term/1`, which calls `eval_bits` for each binary of `sys.config`. The PBeam loader does not load `bs_get_float2` (opcode 118) yet (#678). Issue #652 lists the next stops in order.
+Step 1 calls `erl_parse:parse_term/1`, which calls `eval_bits:expr_grp/3` for each binary of `sys.config`. `eval_bits:expr_grp/3` starts with `bs_init_writable` (opcode 133), which PBeam does not run yet (#681). Issue #652 lists the next stops in order.

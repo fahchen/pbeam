@@ -74,10 +74,12 @@ fn rejects_an_unsupported_io_device_with_a_function_clause_error() {
         )
         .unwrap_err();
 
-    assert!(
-        error
-            .to_string()
-            .contains("function clause Elixir.IO:puts/2")
+    // The `func_info` of `IO.puts/2` raises `error:function_clause` with the
+    // arguments in the first frame (`beam_common.c:1011-1024`). PBeam keeps
+    // no line table, so the location is `[]`.
+    assert_eq!(
+        error.to_string(),
+        "root process exited with {function_clause,[{'Elixir.IO',puts,[7,<<\"message\">>],[]}]}"
     );
 }
 

@@ -1062,6 +1062,86 @@ fn decodes_the_bs_match_commands_of_the_bs_match_probe_fixture() {
 }
 
 #[test]
+fn decodes_each_operand_of_the_bs_get_float2_instructions_of_bs_float_probe() {
+    // `bs_float_probe:big/2`, `little/2`, `native/2`, `units/2`, and
+    // `half/1` have `bs_get_float2` with the flags 0, 2 (`little`), and 16
+    // (`native`), the unit 16, and the literal size 16. The fixture has the
+    // typed register `x0`; the plain `x0` decodes the same way. A native
+    // segment has the byte order of the host (`$NativeEndian`,
+    // generators.tab:57-71).
+    let parts: [&[u8]; 5] = [
+        &[0x76, 0x35, 0x03, 0x20, 0x13, 0x10, 0x00, 0x13],
+        &[0x76, 0x65, 0x03, 0x20, 0x13, 0x10, 0x20, 0x13],
+        &[0x76, 0x95, 0x03, 0x20, 0x13, 0x10, 0x08, 0x10, 0x13],
+        &[0x76, 0xC5, 0x03, 0x20, 0x13, 0x08, 0x10, 0x00, 0x13],
+        &[0x76, 0xF5, 0x03, 0x10, 0x09, 0x10, 0x10, 0x00, 0x13],
+    ];
+    let table = AtomTable::new();
+    let mut code = vec![0, 0, 0, 16];
+    code.extend([0; 16]);
+    code.extend(parts.concat());
+    code.push(0x03);
+    let (instructions, _) = parse_code(&code, &table, &[], &[], &[], &[], &[]).unwrap();
+    let floats: Vec<_> = instructions
+        .iter()
+        .filter(|instruction| !matches!(instruction, Instruction::End))
+        .map(|instruction| match instruction {
+            Instruction::BinaryGetFloat {
+                fail_label,
+                context: Operand::X(0),
+                size,
+                unit,
+                little,
+                destination: Operand::X(1),
+            } => (*fail_label, size.clone(), *unit, *little),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(floats.len(), 5);
+    let sizes: Vec<_> = floats
+        .iter()
+        .map(|(label, size, unit, little)| (*label, matches!(size, Operand::X(1)), *unit, *little))
+        .collect();
+    assert_eq!(
+        sizes,
+        [
+            (3, true, 1, false),
+            (6, true, 1, true),
+            (9, true, 1, cfg!(target_endian = "little")),
+            (12, true, 16, false),
+            (15, false, 1, false),
+        ]
+    );
+    assert!(matches!(&floats[4].1, Operand::Value(Term::Integer(16))));
+    // A literal size that is not a small integer, such as 2^64, stays a
+    // `bs_get_float2` operand, as ERTS loads it (jit/arm/ops.tab:1009-1010);
+    // the run fails it.
+    let mut code = vec![0, 0, 0, 16];
+    code.extend([0; 16]);
+    code.extend([
+        0x76, 0x35, 0x03, 0x20, 0xF9, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0,
+    ]);
+    code.extend([0x10, 0x00, 0x13, 0x03]);
+    let (instructions, _) = parse_code(&code, &table, &[], &[], &[], &[], &[]).unwrap();
+    assert!(
+        matches!(
+            instructions.as_slice(),
+            [
+                Instruction::BinaryGetFloat {
+                    fail_label: 3,
+                    size: Operand::Value(Term::BigInt(size)),
+                    unit: 1,
+                    little: false,
+                    ..
+                },
+                Instruction::End
+            ] if size.to_string() == "18446744073709551616"
+        ),
+        "{instructions:?}"
+    );
+}
+
+#[test]
 fn decodes_the_bs_start_match4_bs_get_binary2_and_bs_get_tail_instructions_of_bs_get_probe() {
     // `tests/integration/fixture_opcodes.rs` checks that
     // `fixtures/binary_match/bs_get_probe.beam` has the first four parts.
@@ -2678,6 +2758,21 @@ fn arm_field_bytes(instruction: &Instruction) -> usize {
                 + size_of_val(context)
                 + size_of_val(size)
                 + size_of_val(unit)
+                + size_of_val(destination)
+        }
+        Instruction::BinaryGetFloat {
+            fail_label,
+            context,
+            size,
+            unit,
+            little,
+            destination,
+        } => {
+            size_of_val(fail_label)
+                + size_of_val(context)
+                + size_of_val(size)
+                + size_of_val(unit)
+                + size_of_val(little)
                 + size_of_val(destination)
         }
         Instruction::BinaryGetPosition {
