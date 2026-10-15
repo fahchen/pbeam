@@ -114,14 +114,15 @@ fn gives_the_reply_bytes_of_each_request_as_pinned_erts() {
     // also counts the second 4 bytes of each `linger` (inet_drv.c:9749).
     assert_runs(
         "control",
-        "[[[0,101,98,97,100,102],[0,101,120,98,97,100,112,111,114,116],[0,101,120,98,97,100,112,111,114,116],[0,101,105,110,118,97,108],[1],[1,24,0,0,0,1,22,0,0,0,0],[1]],[[0,101,105,110,118,97,108],[0,101,97,102,110,111,115,117,112,112,111,114,116],[0,101,105,110,118,97,108],[0,101,112,114,111,116,111,110,111,115,117,112,112,111,114,116],[1],[0,101,120,98,97,100,115,101,113]],[[1],[1,24,0,0,0,1,22,0,0,0,2,30,0,0,117,48,35,0,0,0,1,0,0,0,0,0,10,0,0,0,0,3,0,0,0,0,0,0,0,0],65536,[0,101,105,110,118,97,108],65530,[0,101,105,110,118,97,108]],[1,1,0,0,0,0,0,0],[[0,101,105,110,118,97,108],[0,101,97,102,110,111,115,117,112,112,111,114,116],[0,101,105,110,118,97,108]],true,true,[[0,101,105,110,118,97,108],[1],[0,101,120,98,97,100,112,111,114,116],[0,101,120,98,97,100,115,101,113]],[[1,1,0,0,0,0],[1,1,0,0,0,0,1,0,0,0,0],[1],{error,badarg},true,[]],[[1],[0,101,97,100,100,114,105,110,117,115,101]],[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}],[[1],true],[{'EXIT',port,normal},{'EXIT',port,normal},{'EXIT',port,normal}]]",
+        "[[[0,101,98,97,100,102],[0,101,120,98,97,100,112,111,114,116],[0,101,120,98,97,100,112,111,114,116],[0,101,105,110,118,97,108],[1],[1,24,0,0,0,1,22,0,0,0,0],[1]],[[0,101,105,110,118,97,108],[0,101,97,102,110,111,115,117,112,112,111,114,116],[0,101,105,110,118,97,108],[0,101,112,114,111,116,111,110,111,115,117,112,112,111,114,116],[1],[0,101,120,98,97,100,115,101,113]],[[1],[1,24,0,0,0,1,22,0,0,0,2,30,0,0,117,48,35,0,0,0,1,0,0,0,0,0,10,0,0,0,0,3,0,0,0,0,0,0,0,0],65536,[0,101,105,110,118,97,108],65530,[0,101,105,110,118,97,108]],[1,1,0,0,0,0,0,0],[[0,101,105,110,118,97,108],[0,101,97,102,110,111,115,117,112,112,111,114,116],[0,101,105,110,118,97,108]],true,true,[[0,101,105,110,118,97,108],[1],[0,101,120,98,97,100,112,111,114,116],[0,101,120,98,97,100,115,101,113]],[[1,1,0,0,0,0],[1,1,0,0,0,0,1,0,0,0,0],[1],{error,badarg},true,[]],[[1],[0,101,97,100,100,114,105,110,117,115,101]],[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}],true,[{'EXIT',port,normal},{'EXIT',port,normal},{'EXIT',port,normal},{'EXIT',port,normal}]]",
     );
 }
 
 #[test]
 fn keeps_the_port_data_and_names_the_driver_as_pinned_erts() {
     // The data starts as `undefined` (erl_bif_port.c:646). A port of the
-    // spawn driver has data, but no control (io.c:4029-4030).
+    // spawn driver has data, and its control rejects each command other than
+    // `0x04c76a00` (sys_drivers.c:731-756).
     assert_runs(
         "data",
         "[undefined,true,{inet_tcp,[1,<<120>>]},[{name,[116,99,112,95,105,110,101,116]},{input,0},{output,0},{os_pid,undefined}],[{error,badarg},{error,badarg},{error,badarg},{error,badarg}],[[116,99,112,95,105,110,101,116],[116,99,112,95,105,110,101,116]],[undefined,true,cat,{error,badarg}],[{'EXIT',port,normal},{'EXIT',port,normal},{'EXIT',port,normal},{'EXIT',port,normal}]]",
@@ -151,6 +152,12 @@ fn stops_the_run_for_each_tcp_inet_part_that_is_not_implemented() {
         ),
         ("getopt", "unsupported tcp_inet option 1"),
         ("accept", "unsupported tcp_inet request 26"),
+        // ERTS replies `[]` and sets the exit state of the port
+        // (sys_drivers.c:731-756).
+        (
+            "spawn_control",
+            "unsupported erlang:port_control/3 command 16#04c76a00 on a spawn port",
+        ),
     ] {
         let argument = Term::Atom(program.atom(case).unwrap());
         let error = program

@@ -48,17 +48,33 @@ control() ->
     true = port_close(Q),
     Badarg = [control(Q, 5, []), control(P, -1 - ?MAGIC, []), control(P, 1 bsl 32 - ?MAGIC, []),
               control(P, 5, foo), control(P, 5, [256]), control(foo, 5, [])],
-    %% A wait with an open tcp_inet port, and a bind of the free port.
+    %% A wait with an open tcp_inet port.
     receive after 1 -> ok end,
     true = port_close(P),
-    R = open_port({spawn_driver, "tcp_inet"}, [binary]),
-    Free = [control(R, 1, [1, 1, 1]), control(R, 6, [1, P1, P0, 127, 0, 0, 1]) =:= [1, P1, P0]],
-    true = port_close(R),
     [Before, Open, Options, Unbound, Bind, P1 * 256 + P0 > 0, Name, Listen, Subscribe, Used,
-     Badarg, Free, flush()].
+     Badarg, shared(), flush()].
+
+%% A bind of a port that is not 0: with reuseaddr, a second socket binds
+%% the wildcard address on the port of a first socket that does not
+%% listen, which keeps the port, and the reply gives that port.
+shared() ->
+    Open = fun() ->
+                   S = open_port({spawn_driver, "tcp_inet"}, [binary]),
+                   [1] = control(S, 1, [1, 1, 1]),
+                   [1] = control(S, 7, [0, 0, 0, 0, 1]),
+                   S
+           end,
+    S1 = Open(),
+    [1, P1, P0] = control(S1, 6, [1, 0, 0, 127, 0, 0, 1]),
+    S2 = Open(),
+    Result = control(S2, 6, [1, P1, P0, 0, 0, 0, 0]) =:= [1, P1, P0],
+    true = port_close(S2),
+    true = port_close(S1),
+    Result.
 
 %% The port data, the port information, and the port names of a tcp_inet
-%% port, and a port of the spawn driver, which has no control.
+%% port, and a port of the spawn driver, whose control rejects each command
+%% other than 16#04c76a00 (sys_drivers.c:731-756).
 data() ->
     process_flag(trap_exit, true),
     P = open_port({spawn_driver, "tcp_inet"}, [binary]),
@@ -105,7 +121,10 @@ unsupported(keepalive) -> control(opened(), 7, [1, 0, 0, 0, 1]);
 unsupported(active_n) -> control(opened(), 7, [22, 0, 0, 0, 3, 0, 1]);
 unsupported(getopt) -> control(opened(), 8, [1]);
 unsupported(accept) -> control(opened(), 26, []);
-unsupported(policy) -> open_port({spawn_driver, "tcp_inet"}, [binary]).
+unsupported(policy) -> open_port({spawn_driver, "tcp_inet"}, [binary]);
+unsupported(spawn_control) ->
+    S = open_port({spawn_executable, "/bin/cat"}, [binary]),
+    erlang:port_control(S, 16#04c76a00, <<0:512>>).
 
 opened() ->
     P = open_port({spawn_driver, "tcp_inet"}, [binary]),

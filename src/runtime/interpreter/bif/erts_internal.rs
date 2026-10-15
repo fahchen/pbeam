@@ -697,15 +697,23 @@ pub(super) fn port_close(
     Ok(signals_return(scheduler, port, Term::static_atom("true")))
 }
 
+/// The only command that the control of the spawn driver runs
+/// (`ERTS_SPAWN_DRV_CONTROL_MAGIC_NUMBER`, sys.h:1467).
+const SPAWN_CONTROL: u32 = 0x04c7_6a00;
+
 /// Run `erts_internal:port_control(Port, Operation, Data)`, which
 /// `erlang:port_control/3` calls, as `erts_internal_port_control_3` and
 /// `erts_port_control` do (`erl_bif_port.c:322-376`, `io.c:4268-4420`):
 /// run the request `Operation` of the driver of an open port with the
 /// bytes of the iodata `Data`, use 40 reductions, and return the reply as
 /// a list of bytes. A term that is not an open port, an `Operation` that is
-/// not an integer from 0 to 2^32 - 1, data that is not iodata, a port of
-/// the spawn driver, which has no control (io.c:4029-4030), and a request
-/// that the driver rejects give the atom `badarg` and use no reductions.
+/// not an integer from 0 to 2^32 - 1, data that is not iodata, and a
+/// request that the driver rejects give the atom `badarg` and use no
+/// reductions. The control of the spawn driver, `spawn_control`
+/// (sys_drivers.c:241, 731-756), rejects each command other than
+/// `ERTS_SPAWN_DRV_CONTROL_MAGIC_NUMBER` (`0x04c76a00`, sys.h:1467). That
+/// command, which `erl_child_setup` sends when the program exits, sets the
+/// exit state of the port in ERTS; PBeam does not run it.
 /// The result traps to `erlang:bif_handle_signals_return/2` when the
 /// caller has incoming signals. After the argument checks, a caller
 /// without a `port` capability with `command` that permits the name of the
@@ -721,8 +729,8 @@ pub(super) fn port_close(
 /// # Errors
 ///
 /// A request of the `tcp_inet` driver that PBeam does not run (see
-/// [`TcpInet::control`]), and the atom `capability_denied` in a full atom
-/// table.
+/// [`TcpInet::control`]), the command `0x04c76a00` on a port of the spawn
+/// driver, and the atom `capability_denied` in a full atom table.
 pub(super) fn port_control(
     context: &mut BifContext<'_>,
     port: &Term,
@@ -746,6 +754,11 @@ pub(super) fn port_control(
     let ports = scheduler.resources.borrow_mut::<Ports>();
     let reply = match &mut ports.get_mut(id).expect("the port is open").driver {
         Driver::TcpInet(driver) => driver.control(command, &bytes)?,
+        Driver::Spawn(_) if command == SPAWN_CONTROL => {
+            return Err(error(
+                "unsupported erlang:port_control/3 command 16#04c76a00 on a spawn port: see \"Ports\" in docs/erts-differences.md",
+            ));
+        }
         Driver::Spawn(_) => Control::Badarg,
     };
     let result = match reply {
