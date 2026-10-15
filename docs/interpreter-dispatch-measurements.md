@@ -994,3 +994,49 @@ The profile script subtracts the CPU rate of a 3 s idle window from the key wind
 - The `hd/1` shape is 1.1 percent slower, and the record does not show the cause.
 - The record does not split the fall of the `call_ext_only` shape by part.
 - The `ModuleId` lookup of `Cursor::refresh` for a call into another module stays, as the attribution of task #625 expected.
+
+## Two small integers in the `gc_bif` arm, task [#632](https://github.com/fahchen/pbeam/issues/632)
+
+This section records the gate of task [#632](https://github.com/fahchen/pbeam/issues/632), proposal 6 of the attribution of task [#625](https://github.com/fahchen/pbeam/issues/625). Before the change, each `gc_bif` of `erlang:'+'/2` or `erlang:'-'/2` went through the BIF call path of the `Bif` arm: the leaf check, the borrowed argument read, the match-context size check, the identity dispatch, and the result match. ERTS adds or subtracts two small integers with a small result inline and calls the BIF for each other case (`emit_i_plus` and `emit_i_minus`, `erts/emulator/beam/jit/arm/instr_arith.cpp:145-205` and `:334-392`, OTP 29.1.1).
+
+### The change
+
+Commit `e35f6637` adds `small_integer_arith` before the BIF call path of the `Bif` arm. When the identity is `erlang:'+'/2` or `erlang:'-'/2`, both operands are integers, and the checked 64-bit operation gives a result, the arm writes the result and goes to the next instruction. Each other case, such as an operand that is not an integer, an unset operand, or a result outside the 64-bit range, takes the present BIF path, which gives the same value, the same `badarith`, the same jump to the fail label, or the same runtime error as before. The inline range is the 64-bit range of a PBeam integer, not the 60-bit small range of ERTS, because the results from 2^59 to 2^63 - 1 and from -(2^63) to -(2^59) - 1 are the same values as the ERTS bignums (row "Integer range" of `docs/erts-differences.md`).
+
+### The session
+
+The before revision is `e93523c3`, the head of `origin/main` that the branch starts from. The after revision is `e35f6637`. Each revision is a `git archive` of its commit, built with `cargo build --locked --release --bin pbeam` and `cargo test --locked --release --test dispatch_baseline --no-run` in its own target directory. The session ran on 2026-10-15 from 15:18:06 to 15:21:53 JST on the host of "The environment of the numbers", with no other `cargo`, `rustc`, or `nextest` process. The floor rows run `records_the_interpreter_dispatch_baseline --exact --nocapture --test-threads=1`, eight rounds in rotated order from 15:18:06 to 15:18:27 JST, with the one-minute load 2.37 to 2.52. Each round is the minimum of nine probe runs inside one invocation. The Terra rows are three rounds of 60 keys in rotated order from 15:18:27 to 15:21:53 JST, with the one-minute load 1.59 to 2.37 before each run, and the raw CPU time of `pbeam` with no idle correction. Each idle window of the six runs held no CPU tick.
+
+| Shape | Before `e93523c3`, minimum of 8 rounds | After `e35f6637`, minimum of 8 rounds | Change |
+| --- | --- | --- | --- |
+| `call_ext_only` floor loop, 200000 iterations | 47.7 ns (rounds 47.7 to 49.0) | 35.7 ns (rounds 35.7 to 36.6) | -12.0 ns, -25.2 percent |
+| `call_only` floor loop, 200000 iterations | 42.4 ns (42.4 to 43.5) | 31.4 ns (31.4 to 32.1) | -11.0 ns, -25.9 percent |
+| Position `call_only` floor loop, 200000 iterations | 42.4 ns (42.4 to 44.1) | 31.5 ns (31.5 to 31.9) | -10.9 ns, -25.7 percent |
+| `call_only` plus `gc_bif '+'`, 200000 iterations | 67.2 ns (67.2 to 67.6) | 53.8 ns (53.8 to 57.7) | -19.9 percent |
+| `call_only` plus the `bif` of `tuple_size/1` | 69.2 ns (69.2 to 69.4) | 57.8 ns (57.8 to 59.2) | -16.5 percent |
+| `call_only` plus the `bif` of `element/2` | 69.9 ns (69.9 to 71.9) | 62.1 ns (62.1 to 62.2) | -11.2 percent |
+| `call_only` plus the `bif` of `hd/1` | 69.2 ns (69.2 to 71.4) | 60.2 ns (60.2 to 60.3) | -13.0 percent |
+| `call_only` plus the `bif` of `map_get/2` on a 1000-key map | 101.9 ns (101.9 to 105.4) | 102.0 ns (102.0 to 110.4) | +0.1 percent |
+
+| Terra round | Before `e93523c3`, ms of CPU time for each key | After `e35f6637`, ms of CPU time for each key |
+| --- | --- | --- |
+| Round 1 | 16.000 | 15.000 |
+| Round 2 | 16.500 | 15.500 |
+| Round 3 | 16.000 | 16.000 |
+| Mean of 3 rounds | 16.167 | 15.500 |
+
+Each floor loop holds one `gc_bif '-'` for its counter, so each floor row falls by 10.9 ns to 12.0 ns, and the ranges of the eight rounds do not overlap. The `gc_bif '+'` row holds two inline instructions and falls by 13.4 ns. The attribution of task #625 measured 37.1 ns for the BIF call path of `gc_bif '-'` at `b8c71940`, before tasks #627 and #628 removed the process lookups and the name lookups of the iteration. The `map_get/2` row does not fall, although its loop also holds a `gc_bif '-'`.
+
+The CPU time for each key falls by 0.667 ms, or 4.1 percent, at the mean of the three rounds. The ranges of the two revisions touch at 16.000 ms. The resolution of the CPU time of `ps` is 10 ms, or about 0.17 ms for each key over 60 keys, so the Terra number has a weak bound. The attribution of task #625 expected 2.3 to 2.5 percent of a key press.
+
+The raw records are the session log `session.txt` and the files `floor-r<round>-<revision>.txt` and `terra-r<round>-<revision>.log`, which stay outside the repository.
+
+### The decision
+
+The change lands. The floor shape that the task targets falls by 25 percent with no overlap of the rounds, and no shape is slower beyond the spread of its rounds.
+
+### Known gaps
+
+- The `map_get/2` row does not show the fall of its `gc_bif '-'`, and the record does not show the cause.
+- The Terra rows are three rounds near the resolution of `ps`, so the 0.667 ms fall has a weak bound.
+- PBeam has no float term, so a float argument stops the run when the float literal is read, before the `gc_bif` (row "Float terms" of `docs/erts-differences.md`). The fixture `arith_probe:float_plus/0` records this; ERTS returns `3.5`.
