@@ -8,7 +8,7 @@ use crate::runtime::interpreter::DEFAULT_ERROR_HANDLER;
 use crate::runtime::interpreter::code_table::Finish;
 use crate::runtime::local_node;
 use crate::runtime::port::Ports;
-use crate::runtime::process::{Flush, TimerReference};
+use crate::runtime::process::{Flush, Priority, TimerReference};
 use crate::runtime::process::{LinkId, ProcessState};
 use crate::runtime::scheduler::{AliasMode, CONTEXT_REDS, Flushed, MonitorOptions, MonitorTarget};
 use crate::runtime::signal::Signal;
@@ -146,10 +146,9 @@ pub(super) fn nodes(
 }
 
 /// The flags of ERTS `process_flag_2` (`bif.c:2028-2237`) that need a
-/// subsystem that PBeam does not have: the error handler, priorities,
-/// schedulers, the garbage collector, tracing, and saved calls.
+/// subsystem that PBeam does not have: the error handler, schedulers,
+/// the garbage collector, tracing, and saved calls.
 const UNSUPPORTED_PROCESS_FLAGS: &[&str] = &[
-    "priority",
     "scheduler",
     "fullsweep_after",
     "min_heap_size",
@@ -266,7 +265,7 @@ fn boolean_flag(flag: &mut bool, value: Option<&str>) -> BifResult {
 
 /// Run `erlang:process_flag(Flag, Value)` as ERTS `process_flag_2`
 /// (`bif.c:2028-2237`) does for the flags `trap_exit`, `async_dist`,
-/// `message_queue_data`, `error_handler`, `monitor_nodes`, and
+/// `message_queue_data`, `error_handler`, `priority`, `monitor_nodes`, and
 /// `{monitor_nodes, Options}`: set the flag of the calling process and
 /// return the old value. `trap_exit` and `async_dist` take `true` or
 /// `false` (`bif.c:2032-2044`), and the start value of `async_dist` is
@@ -280,16 +279,18 @@ fn boolean_flag(flag: &mut bool, value: Option<&str>) -> BifResult {
 /// module that the export entry calls for a function that a module does not
 /// export (`process_flag_2`, `bif.c:2045-2051`;
 /// `erts_proc_set_error_handler`, `erl_process.h:2432-2446`); its start
-/// value is the atom `error_handler`. Each other value raises `badarg`. A
+/// value is the atom `error_handler`. `priority` takes `max`, `high`,
+/// `normal`, or `low` (`bif.c:2052-2056`; `erts_set_process_priority`,
+/// `erl_process.c:9456-9547`), and its start value is `normal`. The
+/// scheduler reads the new priority when the process next goes into the
+/// run queue. Each other value raises `badarg`. A
 /// flag that ERTS does not know raises `badarg`, also a tuple that is not
 /// `{monitor_nodes, Options}`. PBeam has no distribution, so `async_dist`
 /// has no other effect and a node monitor never gets a message.
 ///
 /// Each flag of `UNSUPPORTED_PROCESS_FLAGS` except `max_heap_size` first
 /// checks its value as ERTS does, and raises `badarg` for a value that is
-/// not valid: `sensitive` takes a boolean, `priority` takes `low`,
-/// `normal`, `high`, or `max` (`erts_set_process_priority`,
-/// `erl_process.c:9460-9466`), `save_calls` takes a small integer from 0 to
+/// not valid: `sensitive` takes a boolean, `save_calls` takes a small integer from 0 to
 /// 10000 (`process_flag_aux`, `bif.c:1907-1915`), and `scheduler`,
 /// `fullsweep_after`, `min_heap_size`, and `min_bin_vheap_size` take a small
 /// integer of 0 or more.
@@ -307,7 +308,9 @@ fn boolean_flag(flag: &mut bool, value: Option<&str>) -> BifResult {
 /// let old = process_flag(&mut context, &Term::static_atom("error_handler"), &Term::static_atom("lists"))?;
 /// assert!(matches!(old, BifResult::Value(Term::Atom(atom)) if atom.is_static("error_handler"));
 /// assert!(matches!(process_flag(&mut context, &foo, &Term::static_atom("true"))?, BifResult::Raise { .. }));
-/// assert!(process_flag(&mut context, &Term::static_atom("priority"), &Term::static_atom("high")).is_err());
+/// let old = process_flag(&mut context, &Term::static_atom("priority"), &Term::static_atom("high"))?;
+/// assert!(matches!(old, BifResult::Value(Term::Atom(atom)) if atom.is_static("normal"));
+/// assert!(process_flag(&mut context, &Term::static_atom("sensitive"), &Term::static_atom("true")).is_err());
 /// ```
 ///
 /// # Errors
@@ -379,14 +382,19 @@ pub(super) fn process_flag(
             context.scheduler.current_process_mut().error_handler = handler;
             Value(old)
         }
+        Term::Atom(flag) if flag.is_static("priority") => {
+            let Some(priority) = value.and_then(Priority::from_name) else {
+                return Ok(BifResult::badarg());
+            };
+            let old = std::mem::replace(&mut process.priority, priority);
+            Value(Term::static_atom(old.name()))
+        }
         Term::Atom(flag)
             if UNSUPPORTED_PROCESS_FLAGS.contains(&context.scheduler.atoms.name_of(flag)) =>
         {
             let small = term.small_integer();
             let valid = if flag.is_static("sensitive") {
                 matches!(value, Some("true" | "false"))
-            } else if flag.is_static("priority") {
-                matches!(value, Some("low" | "normal" | "high" | "max"))
             } else if flag.is_static("save_calls") {
                 small.is_some_and(|calls| (0..=10_000).contains(&calls))
             } else {
@@ -1364,8 +1372,11 @@ pub(super) fn spawn_link(
 /// the result is `{Pid, Reference}`, else `Pid`. The option
 /// `{message_queue_data, on_heap | off_heap}` sets the start value of the
 /// `message_queue_data` flag of the new process, and the last such option
-/// wins (`erl_process.c:12305-12319`). `options` that are not a proper list,
-/// and a `message_queue_data` option with another value, raise `badarg`, as
+/// wins (`erl_process.c:12305-12319`). The option `{priority, Level}` sets
+/// the start priority of the new process, else it is `normal`
+/// (`erl_process.c:12246`, `12275-12287`). `options` that are not a proper
+/// list, and a `message_queue_data` or `priority` option with another
+/// value, raise `badarg`, as
 /// `erts_parse_spawn_opts` (`erl_process.c:12222-12434`) does. The PBeam
 /// option `{capabilities, Map}` restricts the capabilities of the new process
 /// (see `capability::restrictions`), and the last such option wins. A `Map`
@@ -1398,11 +1409,27 @@ pub(super) fn spawn_opt(
             Term::Atom(option) if option.is_static("monitor") => spawn_options.monitor = true,
             Term::Tuple(option) if matches!(option.as_ref(), [Term::Atom(name), _] if name.is_static("message_queue_data")) =>
             {
-                spawn_options.off_heap_message_queue = match &option[1] {
+                spawn_options.flags.off_heap_message_queue = match &option[1] {
                     Term::Atom(value) if value.is_static("on_heap") => false,
                     Term::Atom(value) if value.is_static("off_heap") => true,
                     _ => return Ok(BifResult::badarg()),
                 };
+            }
+            Term::Tuple(option) if matches!(option.as_ref(), [Term::Atom(name), _] if name.is_static("priority")) =>
+            {
+                // `erts_parse_spawn_opts` takes `max`, `high`, `normal`, or
+                // `low`, and gives `badarg` for each other value
+                // (`erl_process.c:12275-12287`).
+                let priority = match &option[1] {
+                    Term::Atom(value) => {
+                        Priority::from_name(context.scheduler.atoms.name_of(value))
+                    }
+                    _ => None,
+                };
+                let Some(priority) = priority else {
+                    return Ok(BifResult::badarg());
+                };
+                spawn_options.flags.priority = priority;
             }
             Term::Tuple(option) if matches!(option.as_ref(), [Term::Atom(name), _] if context.scheduler.atoms.name_of(name) == "capabilities") =>
             {
