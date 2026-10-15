@@ -1497,6 +1497,29 @@ pub(super) fn binary_part(binary: &Term, start: &Term, length: &Term) -> BifResu
     ))
 }
 
+/// Run `erlang:bit_size/1`: return the number of bits of a binary, as
+/// ERTS `bit_size_1` (`erl_bif_guard.c:354-371`) and the JIT
+/// `emit_bif_bit_size` (`jit/arm/instr_guard_bifs.cpp:336-441`) do. A term
+/// that is not a bitstring raises `badarg`. In a guard, the `gc_bif`
+/// instruction goes to its fail label instead. PBeam has no bitstring that
+/// is not a binary (row "Bitstring terms" of `docs/erts-differences.md`),
+/// so the size is 8 times the byte size. The size comes from the view, so
+/// a binary that an append built is not joined.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let hello = Term::binary(b"hello".to_vec());
+/// assert!(matches!(bit_size(&hello), BifResult::Value(Term::Integer(40))));
+/// assert!(matches!(bit_size(&Term::static_atom("foo")), BifResult::Raise { .. }));
+/// ```
+pub(super) fn bit_size(term: &Term) -> BifResult {
+    match term {
+        Term::Binary(bytes) => Value(Term::Integer(bytes.bit_size() as i64)),
+        _ => BifResult::badarg(),
+    }
+}
+
 /// Run `erlang:byte_size/1`: return the number of bytes of a binary, as
 /// ERTS `byte_size_1` (`erl_bif_guard.c:376-393`) and the JIT
 /// `emit_bif_byte_size` (`jit/arm/instr_guard_bifs.cpp:438-509`) do. A

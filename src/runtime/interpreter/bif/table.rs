@@ -112,7 +112,7 @@ bifs! {
     erlang:binary_to_list/3 => unsupported,
     erlang:binary_to_term/1 => unsupported,
     erlang:binary_to_term/2 => unsupported,
-    erlang:bit_size/1 => unsupported,
+    erlang:bit_size/1 as ErlangBitSize1 => |_, [term]| Ok(erlang::bit_size(term)),
     erlang:bitstring_to_list/1 => unsupported,
     erlang:bnot/1 as ErlangBnot1 => |cx, [term]| Ok(integer::charge(cx.scheduler, integer::bnot(term))),
     erlang:bor/2 as ErlangBor2 => |cx, [left, right]| Ok(integer::charge(cx.scheduler, integer::bitwise(Bitwise::Or, left, right))),
