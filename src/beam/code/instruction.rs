@@ -1223,7 +1223,9 @@ pub(crate) enum Instruction {
     /// `bs_float_probe:little/2` has
     /// `[0x76, 0x65, 0x57, 0x03, 0x20, 0x13, 0x10, 0x20, 0x13]`: fail label
     /// 6, the typed register `x0`, live count 2, size `x1`, unit 1, the
-    /// flags 2 (`little`), and the destination `x1`.
+    /// flags 2 (`little`), and the destination `x1`. A literal size that
+    /// PBeam cannot hold, such as a bignum, decodes as `Instruction::Jump`
+    /// to the fail label.
     ///
     /// Erlang: `<<F:N/float-little, Rest/binary>>` compiles to
     /// `{test,bs_get_float2,{f,6},2,[{tr,{x,0},...},{x,1},1,{field_flags,[little]}],{x,1}}`
@@ -2062,13 +2064,25 @@ pub(super) fn parse_code(
                 } else {
                     flags & BSF_LITTLE != 0
                 };
-                Instruction::BinaryGetFloat {
-                    fail_label,
-                    context,
+                let destination = read_register(data, &mut cursor)?;
+                // ERTS loads a literal size that is not a small integer,
+                // such as a bignum, as `jump Fail` (JIT
+                // jit/arm/ops.tab:1009-1012). PBeam has no term for such a
+                // literal.
+                if matches!(
                     size,
-                    unit,
-                    little,
-                    destination: read_register(data, &mut cursor)?,
+                    Operand::UnsupportedInteger | Operand::UnsupportedLiteral(_)
+                ) {
+                    Instruction::Jump(fail_label)
+                } else {
+                    Instruction::BinaryGetFloat {
+                        fail_label,
+                        context,
+                        size,
+                        unit,
+                        little,
+                        destination,
+                    }
                 }
             }
             OPCODE_BS_GET_POSITION => {

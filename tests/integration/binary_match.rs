@@ -812,7 +812,7 @@ fn runs_bs_get_float2_of_each_size_and_endianness_as_pinned_erts() {
             .atom("short")
             .unwrap(),
     ));
-    let big: [(&[u8], Term); 18] = [
+    let big: [(&[u8], Term); 19] = [
         (&[64, 9, 33, 251, 84, 68, 45, 24, 7], Term::Integer(64)),
         (&[63, 192, 0, 0], Term::Integer(32)),
         (&[60, 0, 1], Term::Integer(16)),
@@ -827,6 +827,7 @@ fn runs_bs_get_float2_of_each_size_and_endianness_as_pinned_erts() {
         (&[124, 0], Term::Integer(16)),
         (&[126, 0], Term::Integer(16)),
         (&[255, 240, 0, 0, 0, 0, 0, 0], Term::Integer(64)),
+        (&[127, 248, 0, 0, 0, 0, 0, 1], Term::Integer(64)),
         (&[0, 1], Term::Integer(16)),
         (&[123, 255], Term::Integer(16)),
         (&[128, 0], Term::Integer(16)),
@@ -849,6 +850,7 @@ fn runs_bs_get_float2_of_each_size_and_endianness_as_pinned_erts() {
             short.clone(),
             short.clone(),
             short.clone(),
+            short.clone(),
             float_rest(5.960464477539063e-8, &[]),
             float_rest(65504.0, &[]),
             float_rest(-0.0, &[]),
@@ -861,10 +863,10 @@ fn runs_bs_get_float2_of_each_size_and_endianness_as_pinned_erts() {
              {<<63,192,0,0>>,32}, {<<60,0,1>>,16}, {<<1,2>>,0}, {<<1,2,3>>,24}, {<<1,2>>,32}, \
              {<<1,2,3,4>>,-1}, {<<1,2,3,4>>,[]}, {<<1,2,3,4>>,1.0}, {<<127,128,0,0>>,32}, \
              {<<127,192,0,0>>,32}, {<<124,0>>,16}, {<<126,0>>,16}, {<<255,240,0,0,0,0,0,0>>,64}, \
-             {<<0,1>>,16}, {<<123,255>>,16}, {<<128,0>>,16}, {<<1,2,3,4>>,1 bsl 63 - 1}]]"
+             {<<127,248,0,0,0,0,0,1>>,64},              {<<0,1>>,16}, {<<123,255>>,16}, {<<128,0>>,16}, {<<1,2,3,4>>,1 bsl 63 - 1}]]"
         ),
         b"[{3.141592653589793,<<7>>},{1.5,<<>>},{1.0,<<1>>},{0.0,<<1,2>>},short,short,short,\
-short,short,short,short,short,short,short,{5.960464477539063e-8,<<>>},{65504.0,<<>>},\
+short,short,short,short,short,short,short,short,{5.960464477539063e-8,<<>>},{65504.0,<<>>},\
 {-0.0,<<>>},short]\n"
     );
     let little: [(&[u8], Term); 4] = [

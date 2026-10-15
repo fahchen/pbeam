@@ -1040,6 +1040,22 @@ fn decodes_each_operand_of_the_bs_get_float2_instructions_of_bs_float_probe() {
         ]
     );
     assert!(matches!(&floats[4].1, Operand::Value(Term::Integer(16))));
+    // A literal size that is not a small integer, such as 2^64, loads as
+    // `jump Fail` (JIT jit/arm/ops.tab:1009-1012).
+    let mut code = vec![0, 0, 0, 16];
+    code.extend([0; 16]);
+    code.extend([
+        0x76, 0x35, 0x03, 0x20, 0xF9, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0,
+    ]);
+    code.extend([0x10, 0x00, 0x13, 0x03]);
+    let (instructions, _) = parse_code(&code, &table, &[], &[], &[], &[], &[]).unwrap();
+    assert!(
+        matches!(
+            instructions.as_slice(),
+            [Instruction::Jump(3), Instruction::End]
+        ),
+        "{instructions:?}"
+    );
 }
 
 #[test]
