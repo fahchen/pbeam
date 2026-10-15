@@ -6,7 +6,7 @@ GitHub Issues and their native dependencies define task ownership, order, and st
 
 ## Baseline and sequence
 
-Start implementation only after M2 acceptance. The owner decision of 2026-10-09 sets the milestone order: M4 Tooling and examples, M5 Interactive host I/O, M6 Capability security, M7 Linked native calls, M8 Embedded application, M9 Pinned Terra scenario, and M10 Multiple schedulers. This security work is M6. It runs in parallel with M5. Issues #7–#23 keep their numbers, and their titles use the new milestone tags. Record the order with native issue dependencies when the implementation tasks are approved.
+Start implementation only after M2 acceptance. The owner decisions of 2026-10-15 set the milestone order: M5 Interactive host I/O, M11 Serve HTTP with Plug and Bandit, M7 Linked native calls, M8 Embedded application, M9 Pinned Terra scenario, M6 Capability security, and M10 Multiple schedulers. This security work is M6. It is postponed until after M9. The landed capability checks of epic #305 stay, and M7 to M9 keep the accepted security contracts. Issues #7–#23 keep their numbers, and their titles use the new milestone tags. Record the order with native issue dependencies when the implementation tasks are approved.
 
 The current toolchain pins OTP 29.1.1 in `mise.toml`. The discussion's OTP 28 example is not the implementation baseline. Recheck the pinned version before implementation. Capture M2's accepted command, output, errors, native entry paths, module set, and platform evidence as the migration baseline.
 
