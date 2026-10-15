@@ -116,6 +116,59 @@ fn reports_the_bytes_of_the_frame_slots() {
 }
 
 #[test]
+fn reuses_the_y_register_storage_of_a_released_frame() {
+    let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![]);
+    let empty = process.allocated_bytes();
+    process.allocate(3);
+    let storage = process.frames[0].stack.as_ptr();
+    let allocated = process.allocated_bytes();
+    assert!(allocated > empty);
+    // A tail call keeps the storage of the replaced frame, empty, and counts
+    // it in the bytes of the process.
+    process.frames[0].stack[0] = StackSlot::Term(Term::Integer(1));
+    process.replace_frame(frame());
+    assert!(process.frames[0].stack.is_empty());
+    assert_eq!(process.free_stacks.len(), 1);
+    assert!(process.free_stacks[0].is_empty());
+    assert!(process.allocated_bytes() >= allocated);
+    // The next `allocate` takes it, with each slot empty.
+    process.allocate(2);
+    assert_eq!(process.frames[0].stack.as_ptr(), storage);
+    assert!(matches!(
+        process.frames[0].stack[..],
+        [StackSlot::Empty, StackSlot::Empty]
+    ));
+    assert!(process.free_stacks.is_empty());
+    // A return keeps the storage too.
+    process.pop_frame();
+    assert!(process.frames.is_empty());
+    assert_eq!(process.free_stacks.len(), 1);
+    process.pop_frame();
+    assert_eq!(process.free_stacks.len(), 1);
+}
+
+#[test]
+fn bounds_the_free_y_register_storage() {
+    let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![]);
+    // A frame with no storage and a frame with a storage of more than 32
+    // slots give nothing to the free list.
+    process.pop_frame();
+    process.frames.push(frame());
+    process.allocate(33);
+    process.pop_frame();
+    assert!(process.free_stacks.is_empty());
+    // The free list keeps at most 8 storages.
+    for _ in 0..9 {
+        process.frames.push(frame());
+        process.allocate(1);
+    }
+    for _ in 0..9 {
+        process.pop_frame();
+    }
+    assert_eq!(process.free_stacks.len(), 8);
+}
+
+#[test]
 fn reports_the_bytes_of_the_process_containers_and_its_terms() {
     let mut process =
         ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![Term::Integer(1)]);
