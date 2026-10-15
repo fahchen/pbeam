@@ -260,7 +260,7 @@ fn only(names: &[&str]) -> Constraint {
 
 /// Each entry that the column "Capability" of the effect inventory marks
 /// `ambient`. `effect_probe:ambient/0` calls each entry once.
-const AMBIENT: [&str; 31] = [
+const AMBIENT: [&str; 32] = [
     "erlang:cancel_timer/2",
     "erlang:demonitor/1",
     "erlang:demonitor/2",
@@ -271,6 +271,7 @@ const AMBIENT: [&str; 31] = [
     "erlang:node/1",
     "erlang:register/2",
     "erlang:system_info/1",
+    "erlang:system_time/1",
     "erlang:universaltime_to_localtime/1",
     "erlang:unlink/1",
     "erlang:unregister/1",
@@ -421,7 +422,7 @@ fn calls_each_ambient_and_later_entry_with_no_capability() {
     // The root process holds no capability, so no policy can permit the
     // calls: each `ambient` and `later` entry has no check.
     let program = program();
-    let expected = "[true,true,false,true,true,true,integer,integer,date_time,unix,\
+    let expected = "[true,true,false,true,true,true,integer,integer,integer,date_time,unix,\
                     nonode@nohost,nonode@nohost,true,{error,badfile},false,\
                     effect_probe_ambient_atom,ok,effect_probe_ambient,true,[{key,value}],value,\
                     true,true,set,reference,atom,2,ok,1,error,ok,error,ok]";

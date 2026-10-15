@@ -102,6 +102,10 @@ name = "bignum"
 path = "tests/integration/bignum.rs"
 
 [[test]]
+name = "rand"
+path = "tests/integration/rand.rs"
+
+[[test]]
 name = "atom_to_binary"
 path = "tests/integration/atom_to_binary.rs"
 

@@ -623,12 +623,14 @@ impl BeamProgram {
                 }
                 Turn::Done => {}
                 Turn::Idle => {
+                    // The wait ends at the next time correction check, but
+                    // that check alone does not keep a run alive.
                     let wait = scheduler.timers.wait_time(scheduler.timers.now());
-                    if !scheduler.wait_events(wait)? {
-                        match wait {
-                            Some(wait) => std::thread::sleep(wait),
-                            None => break,
+                    if !scheduler.wait_events(Some(wait))? {
+                        if !scheduler.timers.active() {
+                            break;
                         }
+                        std::thread::sleep(wait);
                     }
                 }
             }

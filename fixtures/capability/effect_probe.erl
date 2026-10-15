@@ -392,6 +392,7 @@ ambient() ->
         erlang:unregister(Name),
         integer(erlang:monotonic_time(nanosecond)),
         integer(os:system_time(second)),
+        integer(erlang:system_time(second)),
         date_time(erlang:universaltime_to_localtime({{2026, 10, 11}, {12, 0, 0}})),
         element(1, erlang:system_info(os_type)),
         erlang:node(),
