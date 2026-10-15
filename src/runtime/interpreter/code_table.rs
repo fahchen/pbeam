@@ -415,7 +415,9 @@ impl CodeTable {
     }
 
     /// Create the frame for the function at an entry label of the loaded
-    /// module `module`.
+    /// module `module`, or of the code of `module` that waits for its
+    /// `-on_load` function. A fun of that code runs before the code becomes
+    /// the loaded code, as an ERTS fun entry points to the code itself.
     ///
     /// # Examples
     ///
@@ -433,7 +435,10 @@ impl CodeTable {
         label: u32,
         arity: u32,
     ) -> Result<Frame, BeamError> {
-        frame(self.module(module)?, label, arity)
+        match self.on_load.get(module) {
+            Some(waiting) => frame(&waiting.code, label, arity),
+            None => frame(self.module(module)?, label, arity),
+        }
     }
 
     /// Keep the prepared code `module` under `reference` until
