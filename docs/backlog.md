@@ -108,6 +108,13 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a measured workload that spends a large part of its time in body calls with Y registers, or a change of the run loop that removes the floor cost of the variant.
 - **Source:** task #630 and the section "The Y register storage of a released frame, task [#630](https://github.com/fahchen/pbeam/issues/630)" of `docs/interpreter-dispatch-measurements.md`.
 
+### Take the source term of a move whose source is dead
+
+- **Reason:** task #631 measured a `move` that takes the term out of a dead source register with no reference count change. The release Terra key press showed no gain beyond the noise of the session, so the change did not land.
+- **Evidence:** commit `4fc08860` of branch `perf/631-move-take` marks a `move` whose source register no later instruction reads at load time. 27,472 of the 46,835 moves of a boxed term of a Terra key press have a dead source. The floor shapes fell by 0.4 to 3.6 percent.
+- **Trigger:** a measured workload where moves of boxed terms hold a clear share of the time, or a Terra CPU harness that resolves a change below 1 ms for each key.
+- **Source:** section "The source term of a move whose source is dead, task #631" of `docs/interpreter-dispatch-measurements.md`.
+
 ## Runtime
 
 ### Model the process heap for GC reductions and the message copy cost
@@ -314,12 +321,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - In interactive mode, a bundle is a read-only code path root. `prim_file` reads a path under this root from the bundle, not from the host file system. Thus `erl_prim_loader` and `code_server` run the pinned code path search on a bundle as on a directory (design section 13 of `docs/code-loading.md`). The bundle format does not exist yet, so no task can define the root or its paths now.
 - **Trigger:** the bundle format of [#15](https://github.com/fahchen/pbeam/issues/15) lands.
 - **Source:** design `code-loading.md` of Suikou review 01a1282e, accepted by the owner on 2026-10-11 (#441).
-
-### Take the source term of a move whose source is dead
-
-- Commit `4fc08860` of branch `perf/631-move-take` (task #631) marks a `move` whose source register no later instruction reads at load time, and the interpreter takes the term out of the source with no reference count change. 27,472 of the 46,835 moves of a boxed term of a Terra key press have a dead source. The interleaved session showed no Terra gain beyond the session noise, and the floor shapes fell by 0.4 to 3.6 percent, so the change did not land.
-- **Trigger:** a measured workload where moves of boxed terms hold a clear share of the time, or a Terra CPU harness that resolves a change below 1 ms for each key.
-- **Source:** section "The source term of a move whose source is dead, task #631" of `docs/interpreter-dispatch-measurements.md`.
 
 ## Exceptions
 
