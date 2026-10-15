@@ -1131,7 +1131,7 @@ impl BeamProgram {
                         // with the `_TAG_HEADER_RECORD` header (emu
                         // `instrs.tab:1323-1327`; JIT
                         // `emit_is_any_native_record` in
-                        // `jit/arm/instr_records.cpp:30-46`;
+                        // `jit/arm/instr_records.cpp:30-45`;
                         // `erl_term.h:139`, `167`). PBeam has no native record
                         // term, so the test fails for each term.
                         TestKind::AnyNativeRecord => false,
