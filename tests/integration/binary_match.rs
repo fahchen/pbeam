@@ -1,9 +1,10 @@
 #[path = "../common/mod.rs"]
 mod common;
 
-use std::process::Command;
+use std::{process::Command, sync::Arc};
 
 use common::pinned_beam;
+use num_bigint::BigInt;
 use pbeam_runtime::{BeamProgram, Term};
 
 const BINARY_MATCH_PROBE: &[u8] =
@@ -805,14 +806,16 @@ fn runs_bs_get_float2_of_each_size_and_endianness_as_pinned_erts() {
     // and a NaN fail (`erts_bs_get_float_2`, erl_bits.c:549-611;
     // `emit_bs_get_field_size`, jit/arm/instr_bs.cpp:38-116). A 16-bit
     // segment is a half-precision float. `native` is the byte order of the
-    // host, which is little endian on each host that PBeam has.
+    // host, which is little endian on each host that PBeam has. 2^64 and
+    // -2^64 are bignums, and 2^59 is an ERTS bignum; each fails.
     let short = Ok(Term::Atom(
         BeamProgram::load(&[BS_FLOAT_PROBE])
             .unwrap()
             .atom("short")
             .unwrap(),
     ));
-    let big: [(&[u8], Term); 19] = [
+    let bignum = |value: BigInt| Term::BigInt(Arc::new(value));
+    let big: [(&[u8], Term); 22] = [
         (&[64, 9, 33, 251, 84, 68, 45, 24, 7], Term::Integer(64)),
         (&[63, 192, 0, 0], Term::Integer(32)),
         (&[60, 0, 1], Term::Integer(16)),
@@ -832,6 +835,9 @@ fn runs_bs_get_float2_of_each_size_and_endianness_as_pinned_erts() {
         (&[123, 255], Term::Integer(16)),
         (&[128, 0], Term::Integer(16)),
         (&[1, 2, 3, 4], Term::Integer(i64::MAX)),
+        (&[1, 2, 3, 4], bignum(BigInt::from(1u8) << 64u32)),
+        (&[1, 2, 3, 4], bignum(-(BigInt::from(1u8) << 64u32))),
+        (&[1, 2, 3, 4], Term::Integer(1 << 59)),
     ];
     assert_eq!(
         bs_float_each("big", &float_calls(&big)),
@@ -855,6 +861,9 @@ fn runs_bs_get_float2_of_each_size_and_endianness_as_pinned_erts() {
             float_rest(65504.0, &[]),
             float_rest(-0.0, &[]),
             short.clone(),
+            short.clone(),
+            short.clone(),
+            short.clone(),
         ]
     );
     assert_eq!(
@@ -863,11 +872,12 @@ fn runs_bs_get_float2_of_each_size_and_endianness_as_pinned_erts() {
              {<<63,192,0,0>>,32}, {<<60,0,1>>,16}, {<<1,2>>,0}, {<<1,2,3>>,24}, {<<1,2>>,32}, \
              {<<1,2,3,4>>,-1}, {<<1,2,3,4>>,[]}, {<<1,2,3,4>>,1.0}, {<<127,128,0,0>>,32}, \
              {<<127,192,0,0>>,32}, {<<124,0>>,16}, {<<126,0>>,16}, {<<255,240,0,0,0,0,0,0>>,64}, \
-             {<<127,248,0,0,0,0,0,1>>,64},              {<<0,1>>,16}, {<<123,255>>,16}, {<<128,0>>,16}, {<<1,2,3,4>>,1 bsl 63 - 1}]]"
+             {<<127,248,0,0,0,0,0,1>>,64},              {<<0,1>>,16}, {<<123,255>>,16}, {<<128,0>>,16}, {<<1,2,3,4>>,1 bsl 63 - 1}, \
+             {<<1,2,3,4>>,1 bsl 64}, {<<1,2,3,4>>,-(1 bsl 64)}, {<<1,2,3,4>>,1 bsl 59}]]"
         ),
         b"[{3.141592653589793,<<7>>},{1.5,<<>>},{1.0,<<1>>},{0.0,<<1,2>>},short,short,short,\
 short,short,short,short,short,short,short,short,{5.960464477539063e-8,<<>>},{65504.0,<<>>},\
-{-0.0,<<>>},short]\n"
+{-0.0,<<>>},short,short,short,short]\n"
     );
     let little: [(&[u8], Term); 4] = [
         (&[0, 0, 192, 63], Term::Integer(32)),
@@ -898,8 +908,10 @@ short,short,short,short,short,short,short,short,{5.960464477539063e-8,<<>>},{655
 #[test]
 fn runs_bs_get_float2_with_a_unit_a_literal_size_and_an_unaligned_position_as_pinned_erts() {
     // `bs_float_probe:units/2` has unit 16, so the size is N * 16 bits.
-    // `half/1` has the literal size 16. `unaligned/1` skips 4 bits with
-    // `bs_match` and then reads 32 bits.
+    // `half/1` has the literal size 16. `huge/1` has the literal size 2^64,
+    // which is not a small integer, so it jumps to the fail label
+    // (`emit_bs_get_field_size`, jit/arm/instr_bs.cpp:58-86).
+    // `unaligned/1` skips 4 bits with `bs_match` and then reads 32 bits.
     let short = Ok(Term::Atom(
         BeamProgram::load(&[BS_FLOAT_PROBE])
             .unwrap()
@@ -936,6 +948,12 @@ fn runs_bs_get_float2_with_a_unit_a_literal_size_and_an_unaligned_position_as_pi
     assert_eq!(
         reference("[bs_float_probe:half(B) || B <- [<<60,0>>, <<1>>]]"),
         b"[{1.0,<<>>},short]\n"
+    );
+    let huge = [vec![Term::binary(vec![60, 0])], vec![Term::binary(vec![])]];
+    assert_eq!(bs_float_each("huge", &huge), [short.clone(), short.clone()]);
+    assert_eq!(
+        reference("[bs_float_probe:huge(B) || B <- [<<60,0>>, <<>>]]"),
+        b"[short,short]\n"
     );
     let unaligned = [
         vec![Term::binary(vec![3, 252, 0, 0, 0])],

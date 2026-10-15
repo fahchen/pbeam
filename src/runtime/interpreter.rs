@@ -1471,9 +1471,10 @@ impl BeamProgram {
                 // `i_bs_get_binary2` does, then reads the float or jumps to
                 // `Fail` (`emit_i_bs_get_float2` in
                 // jit/arm/instr_bs.cpp:578-610; `erts_bs_get_float_2` in
-                // erl_bits.c:549-611). The loader jumps to `Fail` for a
-                // literal size that is not a small integer (jit/arm/
-                // ops.tab:1009-1012), which `binary_field_size` also fails.
+                // erl_bits.c:549-611). A size that is not a small
+                // non-negative integer, such as a literal bignum, jumps to
+                // `Fail` (`emit_bs_get_field_size`, jit/arm/
+                // instr_bs.cpp:58-86), as `binary_field_size` gives `None`.
                 Instruction::BinaryGetFloat {
                     fail_label,
                     context,

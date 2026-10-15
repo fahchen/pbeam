@@ -1069,8 +1069,9 @@ fn decodes_each_operand_of_the_bs_get_float2_instructions_of_bs_float_probe() {
         ]
     );
     assert!(matches!(&floats[4].1, Operand::Value(Term::Integer(16))));
-    // A literal size that is not a small integer, such as 2^64, loads as
-    // `jump Fail` (JIT jit/arm/ops.tab:1009-1012).
+    // A literal size that is not a small integer, such as 2^64, stays a
+    // `bs_get_float2` operand, as ERTS loads it (jit/arm/ops.tab:1009-1010);
+    // the run fails it.
     let mut code = vec![0, 0, 0, 16];
     code.extend([0; 16]);
     code.extend([
@@ -1081,7 +1082,16 @@ fn decodes_each_operand_of_the_bs_get_float2_instructions_of_bs_float_probe() {
     assert!(
         matches!(
             instructions.as_slice(),
-            [Instruction::Jump(3), Instruction::End]
+            [
+                Instruction::BinaryGetFloat {
+                    fail_label: 3,
+                    size: Operand::Value(Term::BigInt(size)),
+                    unit: 1,
+                    little: false,
+                    ..
+                },
+                Instruction::End
+            ] if size.to_string() == "18446744073709551616"
         ),
         "{instructions:?}"
     );

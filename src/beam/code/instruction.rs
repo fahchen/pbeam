@@ -1219,8 +1219,10 @@ pub(crate) enum Instruction {
     /// `[0x76, 0x65, 0x57, 0x03, 0x20, 0x13, 0x10, 0x20, 0x13]`: fail label
     /// 6, the typed register `x0`, live count 2, size `x1`, unit 1, the
     /// flags 2 (`little`), and the destination `x1`. A literal size that
-    /// PBeam cannot hold, such as a bignum, decodes as `Instruction::Jump`
-    /// to the fail label.
+    /// is not a small integer, such as the bignum 2^64, stays in `size`:
+    /// ERTS loads it as `i_bs_get_float2` (jit/arm/ops.tab:1009-1010, `s`
+    /// includes literals per beam_makeops:163) and jumps to the fail label
+    /// at run time (`emit_bs_get_field_size`, jit/arm/instr_bs.cpp:58-86).
     ///
     /// Erlang: `<<F:N/float-little, Rest/binary>>` compiles to
     /// `{test,bs_get_float2,{f,6},2,[{tr,{x,0},...},{x,1},1,{field_flags,[little]}],{x,1}}`
@@ -2057,24 +2059,13 @@ pub(super) fn parse_code(
                     flags & BSF_LITTLE != 0
                 };
                 let destination = read_register(data, &mut cursor)?;
-                // ERTS loads a literal size that is not a small integer,
-                // such as a bignum, as `jump Fail` (JIT
-                // jit/arm/ops.tab:1009-1012). PBeam has no term for such a
-                // literal.
-                if matches!(
+                Instruction::BinaryGetFloat {
+                    fail_label,
+                    context,
                     size,
-                    Operand::UnsupportedInteger | Operand::UnsupportedLiteral(_)
-                ) {
-                    Instruction::Jump(fail_label)
-                } else {
-                    Instruction::BinaryGetFloat {
-                        fail_label,
-                        context,
-                        size,
-                        unit,
-                        little,
-                        destination,
-                    }
+                    unit,
+                    little,
+                    destination,
                 }
             }
             OPCODE_BS_GET_POSITION => {

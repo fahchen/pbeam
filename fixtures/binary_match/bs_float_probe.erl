@@ -1,5 +1,5 @@
 -module(bs_float_probe).
--export([big/2, little/2, native/2, units/2, half/1, unaligned/1, parse/0]).
+-export([big/2, little/2, native/2, units/2, half/1, huge/1, unaligned/1, parse/0]).
 
 %% bs_get_float2 with the size in a register: big endian, little endian,
 %% and native endian. A size of 0 gives 0.0 and reads no bits. A size that
@@ -34,6 +34,16 @@ units(Bin, N) when is_binary(Bin) ->
 half(Bin) when is_binary(Bin) ->
     case Bin of
         <<F:16/float, Rest/binary>> -> {F, Rest};
+        _ -> short
+    end.
+
+%% bs_get_float2 with the literal size 2^64, which is not a small integer.
+%% The size is a bound variable, so erl_lint does not warn "bad float bit
+%% size"; the compiler folds it to a literal operand.
+huge(Bin) when is_binary(Bin) ->
+    Size = 1 bsl 64,
+    case Bin of
+        <<F:Size/float, Rest/binary>> -> {F, Rest};
         _ -> short
     end.
 
