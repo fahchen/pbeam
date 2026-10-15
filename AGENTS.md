@@ -79,7 +79,7 @@ Whenever direction or a solution changes, update the affected task bodies, accep
 
 - Set development tool versions in `mise.toml`; local and CI setup must use those pins rather than duplicating version settings in commands or fixture projects.
 - Use these compact `mise` tasks in development loops. They print results and failures, not full logs. `mise run check` stays the merge gate. `mise run <task> --help` shows the arguments.
-  - `mise run check-brief`: run `mise run check`. Print the result and the coverage line, or the failure. The full log is in `target/check.log`.
+  - `mise run check-brief`: run `mise run check`. Print the result and the coverage line, or the failure. The full log is in `target/check.log`. When the only failure is the known `erl_child_setup: failed with error 32` failure of the pty test `restores_the_terminal_before_the_result_of_terra_counter_as_interactive_erts`, the task runs that test once more alone, checks the coverage again, and prints `check: retried <test>`.
   - `mise run test-focus [cargo test arguments] [-- <harness arguments>]`: run selected Rust tests, for example `--test order -- --nocapture`. `--test <name>` selects one target of `tests/feature/` or `tests/integration/`. `--lib` selects the unit tests.
   - `mise run erts-eval [--pa <dir>] '<expressions>'`: evaluate on the pinned OTP as `erl -eval` does. Print the value or `exception <class>: <reason>`. The evaluating process traps exits, as with `erl -eval`. Exit signals arrive as `{'EXIT', From, Reason}` messages. Only `exit(self(), kill)` stops the runtime.
   - `mise run disasm <module | file.beam> [name/arity]...`: print the `beam_disasm` instructions without `{line,_}`.
