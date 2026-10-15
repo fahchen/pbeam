@@ -227,8 +227,8 @@ text_errors() ->
      try float_to_binary(id(1.0), [{scientific, 300}]) catch error:R12 -> R12 end,
      try float_to_list(id(a)) catch error:R10 -> R10 end].
 
-%% The text of io_lib:format/2 for floats. `~p` stops at the instruction
-%% `is_any_native_record` in io_lib_pretty, which PBeam does not run yet.
+%% The text of io_lib:format/2 for floats with `~w`, `~f`, `~e`, and
+%% `~g`.
 format() ->
     lists:flatten(
       io_lib:format("~w ~w ~w ~w ~w ~f ~.2f ~e ~.3e ~g ~.3g ~g~n",

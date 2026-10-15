@@ -102,6 +102,15 @@ fn runs_is_function_2_with_a_fail_label_in_a_guard_as_pinned_erts() {
 }
 
 #[test]
+fn runs_is_record_1_in_a_guard_as_pinned_erts() {
+    // `is_record/1` in a guard is the `is_any_native_record` instruction,
+    // which jumps to its fail label unless the term is a native record
+    // (emu `instrs.tab:1323-1327`; JIT `jit/arm/instr_records.cpp:30-46`).
+    // No term of `terms/0` is a native record.
+    assert_runs("record_guard()", &format!("[{}]", vec!["no"; 21].join(",")));
+}
+
+#[test]
 fn runs_is_function_2_in_a_body_through_a_fun_and_through_apply_as_pinned_erts() {
     // A negative arity or an arity that is not an integer raises `badarg`
     // (`erl_bif_op.c:244-256`), also for a term that is not a fun. A

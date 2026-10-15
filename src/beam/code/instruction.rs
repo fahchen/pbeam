@@ -1532,6 +1532,14 @@ pub(crate) enum TestKind {
     /// compiles to `{test,is_boolean,{f,12},[{x,0}]}`, as the guard of
     /// `standard_error:check_valid_opts/1` (standard_error.erl:236) does.
     Boolean,
+    /// `is_any_native_record`, opcode 186 (genop.tab:722-724). Example:
+    /// `[0xBA, 0x55, 0x03]` fails to label 5 unless `x0` is a native
+    /// record. Erlang: `kind(T) when is_record(T) -> record;` compiles to
+    /// `{test,is_record,{f,5},[{x,0}]}`, as the guard of
+    /// `io_lib:write1/4` (io_lib.erl:843) and of
+    /// `io_lib_pretty:print_length/7` (io_lib_pretty.erl:938) does. PBeam
+    /// has no native record term, so the test fails for each term.
+    AnyNativeRecord,
 }
 
 /// One command of `bs_match` (genop.tab:685-696).
@@ -2334,6 +2342,20 @@ pub(super) fn parse_code(
                     value,
                 }
             }
+            OPCODE_IS_ANY_NATIVE_RECORD => {
+                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let value = read_move_operand(data, &mut cursor, atoms, literals)?;
+                // ERTS loads the source only from an x or a y register (emu
+                // `ops.tab:1631`; JIT `jit/arm/ops.tab:1400`).
+                if !matches!(value, Operand::X(_) | Operand::Y(_)) {
+                    return Err(error("BEAM is_any_native_record source is not a register"));
+                }
+                Instruction::Test {
+                    kind: TestKind::AnyNativeRecord,
+                    fail_label,
+                    value,
+                }
+            }
             OPCODE_TEST_IS_FUNCTION2 => Instruction::TestFunctionArity {
                 fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
                 value: read_move_operand(data, &mut cursor, atoms, literals)?,
@@ -2897,8 +2919,6 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         OPCODE_BS_SKIP_BITS2 => Some(5),
         // `bs_get_integer2` is in `io_lib`.
         OPCODE_BS_GET_INTEGER2 => Some(7),
-        // `is_any_native_record` is in `io_lib`.
-        OPCODE_IS_ANY_NATIVE_RECORD => Some(2),
         // `bs_get_utf16` and `bs_get_utf32` are in `unicode`.
         OPCODE_BS_GET_UTF16 | OPCODE_BS_GET_UTF32 => Some(5),
         OPCODE_BS_SKIP_UTF8 => Some(4),

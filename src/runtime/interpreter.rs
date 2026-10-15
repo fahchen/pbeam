@@ -1127,6 +1127,14 @@ impl BeamProgram {
                         TestKind::Boolean => {
                             matches!(value, Term::Atom(atom) if atom.is_one_of(&["true", "false"]))
                         }
+                        // `is_any_native_record` passes only for a boxed term
+                        // with the `_TAG_HEADER_RECORD` header (emu
+                        // `instrs.tab:1323-1327`; JIT
+                        // `emit_is_any_native_record` in
+                        // `jit/arm/instr_records.cpp:30-46`;
+                        // `erl_term.h:139`, `167`). PBeam has no native record
+                        // term, so the test fails for each term.
+                        TestKind::AnyNativeRecord => false,
                     };
                     if !passed {
                         cursor.position = label_position(*fail_label)?;
