@@ -1,7 +1,7 @@
 -module(ets_probe).
 -export([new/0, owner_exit/0, insert/0, lookup/0, lookup_loop/0, insert_loop/0,
          access/0, main/0, env/0, bag/0, info/0, match/0, match_deep/0,
-         unsupported/1,
+         match_write_concurrency/0, unsupported/1,
          own/2, write/1]).
 
 %% ets:new/2 return values and badarg cases (erl_db.c:2555-2840).
@@ -291,6 +291,15 @@ match_deep() ->
 
 nest(0, Term) -> Term;
 nest(N, Term) -> nest(N - 1, {Term}).
+
+%% With one scheduler, a table has no fine locks, so write_concurrency
+%% does not change the traversal order (erl_db.c:2656-2657;
+%% erl_db_util.h:388-389; erl_db_hash.c:1023-1030, 539-554).
+match_write_concurrency() ->
+    T = ets:new(ets_probe, [set, {write_concurrency, true}]),
+    true = ets:insert(T, [{I} || I <- seq(300)]),
+    All = ets:match(T, {'$1'}),
+    [length(All), take(6, All), checksum(All, 0)].
 
 take(0, _) -> [];
 take(N, [X | Xs]) -> [X | take(N - 1, Xs)].

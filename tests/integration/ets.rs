@@ -12,7 +12,14 @@ const ETS_PROBE: &[u8] = include_bytes!("../../fixtures/ets/ets_probe.beam");
 /// Run `ets_probe:Function()` under the pinned ERTS and return its `~w`
 /// output.
 fn reference(function: &str) -> Vec<u8> {
+    reference_with(&[], function)
+}
+
+/// Run `ets_probe:Function()` under the pinned ERTS with the emulator
+/// arguments `arguments` and return its `~w` output.
+fn reference_with(arguments: &[&str], function: &str) -> Vec<u8> {
     let output = Command::new("erl")
+        .args(arguments)
         .args([
             "-noshell",
             "-pa",
@@ -350,6 +357,24 @@ fn matches_a_deep_pattern_as_pinned_erts() {
     let result = program.execute("ets_probe", "match_deep", &[]).unwrap();
     assert_eq!(text(&result.term, program.atoms()), "[[x]]");
     assert_eq!(reference("match_deep"), b"[[x]]\n");
+}
+
+#[test]
+fn ignores_write_concurrency_in_a_match_as_pinned_erts_with_one_scheduler() {
+    // PBeam has one scheduler. ERTS with one scheduler makes no table with
+    // fine locks (erl_db.c:2656-2657; erl_db_util.h:388-389), so a
+    // traversal steps one bucket at a time (erl_db_hash.c:1023-1030,
+    // 539-554) also with {write_concurrency, true}.
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let result = program
+        .execute("ets_probe", "match_write_concurrency", &[])
+        .unwrap();
+    let expected = "[300,[[141],[194],[257],[87],[278],[137]],870028092]";
+    assert_eq!(text(&result.term, program.atoms()), expected);
+    assert_eq!(
+        String::from_utf8(reference_with(&["+S", "1"], "match_write_concurrency")).unwrap(),
+        format!("{expected}\n")
+    );
 }
 
 /// Return the `~w` text of `term`, for the terms of `ets_probe:match/0`.
