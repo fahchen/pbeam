@@ -1286,4 +1286,3 @@ The change does not land. Its target is the Terra key press, and the two session
 - The probe of a boxed move measures a take with a warm cache only. It does not measure a take of a term whose reference count is not in the cache, which is the case that the samples of #625 can hold.
 - The probe time for each iteration includes the start of `pbeam` and the load of the module. This part is the same for the two revisions, and the `boxed` minus `small` difference removes it.
 - The count comes from a scratch probe build, not from the measured binary.
-||||||| 94e29971

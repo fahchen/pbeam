@@ -68,7 +68,6 @@ One interleaved session on 2026-10-15 from 18:21:44 to 18:25:28 JST, before `e93
 | CPU time for each release Terra key press, rounds 2 to 8 | 14.857 ms | 15.048 ms | +1.3 percent at the mean, -1.1 percent at the median |
 
 The probe row comes from a third interleaved session from 19:01:16 to 19:03:59 JST, with a one-minute load of 1.68 to 3.22: the minimum of 6 rounds of a `boxed` loop with two moves of a tuple, minus the same loop with a small integer. The Terra rounds of one binary span 11.667 ms to 16.500 ms. The `## Current state` table does not change.
-||||||| 94e29971
 
 ### 2026-10-15 15:30 JST - Add two small integers in the `gc_bif` arm, task [#632](https://github.com/fahchen/pbeam/issues/632), pull request [#638](https://github.com/fahchen/pbeam/pull/638)
 
