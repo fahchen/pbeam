@@ -584,13 +584,12 @@ impl Binary {
         }
         // The index adds one word for each chunk to the walk that sums the
         // size of the chunks, so it adds no walk of the chunks.
-        let ends = chunks
-            .iter()
-            .scan(0, |end, chunk| {
-                *end += chunk.len();
-                Some(*end)
-            })
-            .collect::<Vec<_>>();
+        let mut ends = Vec::with_capacity(chunks.len());
+        let mut end = 0;
+        for chunk in &chunks {
+            end += chunk.len();
+            ends.push(end);
+        }
         let size = ends.last().copied().unwrap_or(0) * BITS_PER_BYTE;
         Binary(Arc::new(BinaryView {
             bytes: Arc::new(Vec::new()),
