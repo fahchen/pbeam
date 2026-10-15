@@ -995,6 +995,59 @@ The profile script subtracts the CPU rate of a 3 s idle window from the key wind
 - The record does not split the fall of the `call_ext_only` shape by part.
 - The `ModuleId` lookup of `Cursor::refresh` for a call into another module stays, as the attribution of task #625 expected.
 
+## The loader skip of `test_heap` and `init_yregs`, task [#634](https://github.com/fahchen/pbeam/issues/634)
+
+### The change
+
+The loader decoded `test_heap` and `init_yregs` to `Instruction::Noop`, and the run loop dispatched it with no effect. The attribution of task #625 ([PR #626](https://github.com/fahchen/pbeam/pull/626)) counts 16,114 `Noop` instructions in one release Terra key press, 6.4 percent of its 253,558 instructions. The change makes the loader skip the two opcodes as it skips `line`, and removes the `Noop` variant. The labels resolve to instruction indexes after the decode, so each label stays correct. The loader keeps no line table, so no line or stack trace position moves.
+
+In the pinned ERTS, `test_heap` makes room on the process heap and can start a garbage collection, and `init_yregs` writes NIL to Y registers so that the collector reads valid terms (`emit_test_heap` and `emit_init_yregs` in `erts/emulator/beam/jit/arm/instr_common.cpp:231-234,424-509`, OTP 29.1.1). The compiler emits `init_yregs` after `allocate` for the Y registers that are not yet defined, and before a call for the Y registers that the rest of the function does not use (`cg_alloc` and `kill_yregs` in `lib/compiler/src/beam_ssa_codegen.erl:2101-2119,2693-2701`). The BEAM validator gives such a Y register the `initialized` tag and no term (`lib/compiler/src/beam_validator.erl:429-436`). The `Arc` term graph has no process heap and no collector, so neither opcode has an effect in PBeam.
+
+### The session
+
+One interleaved session on 2026-10-15 from 13:49 to 14:10 JST, on an Apple M1 Max with 10 CPUs. The before revision is `b8c71940`, the head of `origin/main`. The after revision is `0b67d5b9` on the branch `perf/634-skip-noop`. Each revision has its own release target directory. Each round runs the two revisions in rotated order. A round starts only when the one-minute load is below 12 and no `cargo`, `rustc`, or `nextest` process runs.
+
+- The floor loops: the test `records_the_interpreter_dispatch_baseline` of the release `dispatch_baseline` binary, run with `--exact --nocapture --test-threads=1`. Each value is the minimum of nine probe runs inside one invocation.
+- The Terra key press: 60 `j` and `k` keys to `bash scripts/example.sh terra_counter --no-build` with `PBEAM_BIN` set to the release `pbeam` of the revision, 0.5 s apart. The value is the CPU time of the `pbeam` process over the key phase, less the idle CPU rate, divided by 60.
+- The `test_heap` loop probe: `loop(0, A) -> A; loop(N, _) -> loop(N - 1, [N]).` with 20000000 iterations. Each iteration runs `TestYield`, `is_eq_exact`, `gc_bif`, `test_heap`, `put_list`, `swap`, and `call_only`. The value is the user CPU time of `/usr/bin/time -p` for one run of the release `pbeam`.
+
+| Round | Order | One-minute load | `call_ext_only` ns, before / after | `call_only` ns, before / after |
+| --- | --- | --- | --- | --- |
+| 1 | before, after | 3.14, 3.21 | 266.0 / 258.5 | 105.8 / 102.2 |
+| 2 | after, before | 3.12, 3.12 | 258.7 / 266.6 | 103.0 / 106.0 |
+| 3 | before, after | 2.95, 2.95 | 258.0 / 265.3 | 105.7 / 105.7 |
+| 4 | after, before | 2.87, 2.88 | 258.7 / 253.7 | 103.1 / 102.2 |
+| 5 | before, after | 2.88, 2.89 | 260.8 / 264.8 | 102.4 / 106.3 |
+| 6 | after, before | 2.89, 2.90 | 266.0 / 265.8 | 106.5 / 106.0 |
+
+| Round | Order | One-minute load | Terra CPU ms for each key, before / after | Probe user s, before / after |
+| --- | --- | --- | --- | --- |
+| 1 | before, after | Terra 2.83, 2.70; probe 2.94, 2.86 | 20.333 / 26.500 | 4.81 / 4.74 |
+| 2 | after, before | Terra 3.62, 2.45; probe 2.79, 2.81 | 25.833 / 26.167 | 4.82 / 4.66 |
+| 3 | before, after | Terra 1.82, 1.99; probe 2.66, 2.53 | 26.667 / 21.833 | 4.82 / 4.63 |
+| 4 | after, before | Terra 1.88, 1.87; probe 2.41, 2.30 | 23.000 / 19.833 | 4.81 / 4.59 |
+| 5 | before, after | Terra 1.54, 1.60; probe 2.19, 2.10 | 25.167 / 24.167 | 4.83 / 4.65 |
+| 6 | after, before | Terra 1.96, 1.71; probe 2.01, 1.93 | 23.000 / 26.500 | 4.80 / 4.66 |
+| 7 | before, after | Terra 3.27, 12.33; probe 1.85, 3.95 | 15.500 / 13.667 | 5.24 / 4.60 |
+| 8 | after, before | Terra 3.23, 2.88; probe 3.71, 3.57 | 17.000 / 20.000 | 5.14 / 4.63 |
+
+The medians and ranges below do not use the Terra pair of round 7. The script checked the load and the build processes only at the start of a round. The after run of that round started with a one-minute load of 12.33 and two `cargo`, `rustc`, or `nextest` processes (`busy 2` in the session log), which breaks the rule of the session. The load rose from 3.27 to 12.33 during the before run of the same round, so the before run is also not reliable. The probe pair of round 7 started with no such process and a load below 4, so it stays. The Terra rounds 1 and 2 ran before the probe rounds, the Terra rounds 3 to 8 ran after a pause for the load, and the probe rounds ran last.
+
+| Shape | Before median | After median | Before range | After range |
+| --- | --- | --- | --- | --- |
+| `call_ext_only` floor, ns | 259.75 | 265.05 | 258.0 to 266.0 | 253.7 to 266.6 |
+| `call_only` floor, ns | 104.40 | 105.85 | 102.4 to 106.5 | 102.2 to 106.3 |
+| Terra CPU ms for each key, 7 rounds | 23.0 | 24.167 | 17.0 to 26.7 | 19.8 to 26.5 |
+| `test_heap` loop probe, user s | 4.82 | 4.64 | 4.80 to 5.24 | 4.59 to 4.74 |
+
+### The decision
+
+Only the targeted probe shows a gain. The three shapes that the acceptance of task #634 names, `call_ext_only`, `call_only`, and the Terra CPU time for each key, show no gain that the session can resolve. The probe that runs one `test_heap` in each iteration is 3.7 percent faster at the median, and the two ranges do not overlap. The probe source is the one line above, and the probe is not a committed fixture. The floor loops have no `test_heap` or `init_yregs`, and both revisions show the same two modes, near 258 ns and near 266 ns for `call_ext_only`. The share of the two modes is not the same: four of the six before rounds are in the low mode, and four of the six after rounds are in the high mode. This moves the `call_ext_only` median by 2.0 percent, from 259.75 ns to 265.05 ns. Six rounds cannot show if this shift comes from the code layout of the after build or from noise, so the shift stays open. The Terra CPU time for each key spreads by more than 6 ms in each revision. The expected gain is the dispatch of 16,114 of 253,558 instructions, which is below that spread, so the session cannot resolve it. The change also removes one `Instruction` variant and one arm of the run loop.
+
+The change is not landed. The owner delegated the decision on 2026-10-15. The reason is that only the targeted probe, which is not a committed fixture, shows a gain, and the three acceptance shapes `call_ext_only`, `call_only`, and the Terra CPU time for each key show no resolvable gain. Pull request [#637](https://github.com/fahchen/pbeam/pull/637) reverts the code and test commits and keeps only this record. The loader on `main` still decodes the two opcodes to `Instruction::Noop`.
+
+The raw files of each run are in the session scratch directory of the task, `scratchpad/634-skip-noop/raw/`, with the names `floor-r<round>-<revision>.txt`, `terra-r<round>-<revision>.log`, and `probe-r<round>-<revision>.txt`, and the session log is `scratchpad/634-skip-noop/session.txt`.
+
 ## The Y register storage of a released frame, task [#630](https://github.com/fahchen/pbeam/issues/630)
 
 This section records the gate of task [#630](https://github.com/fahchen/pbeam/issues/630), a proposal of the attribution of task [#625](https://github.com/fahchen/pbeam/issues/625). Each body call gives its frame a new slot array at `allocate`, and the return frees it. ERTS keeps the Y registers on the process stack, with no separate slot array. `allocate` first checks the free space of the heap and the stack, which can start a garbage collection (`emit_gc_test`, `erts/emulator/beam/jit/arm/instr_common.cpp:137-155` and `:211` at `OTP-29.1.1`). Then it reserves the Y registers by moving the stack pointer `E`, and `deallocate` only moves `E` back (`emit_allocate_heap` and `emit_deallocate`, `instr_common.cpp:206-229`). The proposal expected about 3 percent of the CPU time for each release Terra key press.

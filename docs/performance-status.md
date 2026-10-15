@@ -99,6 +99,19 @@ One interleaved session on 2026-10-15 from 17:20:30 to 17:27:45 JST, before `e93
 | CPU time for each release Terra key press | 15.667 ms | 15.472 ms | -1.2 percent, ranges overlap |
 | Body-call probe, user CPU time of 3000000 iterations, median of 8 rounds | 0.76 s | 0.59 s | -22 percent |
 
+### 2026-10-15 14:10 JST - Skip `test_heap` and `init_yregs` at load, task [#634](https://github.com/fahchen/pbeam/issues/634), pull request [#637](https://github.com/fahchen/pbeam/pull/637) - Not landed
+
+The change would make the loader skip `test_heap` and `init_yregs`, as it skips `line`, and would remove the `Noop` instruction. The change is not landed, because only the targeted probe shows a gain, and the three shapes that the acceptance of task #634 names show no resolvable gain. The owner delegated the decision on 2026-10-15. Pull request #637 reverts the code and keeps only this record. One interleaved session on 2026-10-15 from 13:49 to 14:10 JST measures the before revision `b8c71940` and the after revision `0b67d5b9` with release builds, in rotated order. Section "The loader skip of `test_heap` and `init_yregs`, task #634" of `docs/interpreter-dispatch-measurements.md` holds the rounds, the load, and the raw files.
+
+| Shape | Before `b8c71940` | After `0b67d5b9` | Change | Rule and load |
+| --- | --- | --- | --- | --- |
+| `test_heap` loop probe, 20000000 iterations, user CPU seconds, median of 8 rounds | 4.82 | 4.64 | -3.7 percent | One-minute load 1.85 to 3.95 |
+| `call_ext_only` floor loop, 200000 iterations, ns, median of 6 rounds | 259.75 | 265.05 | +2.0 percent; cause unresolved: both revisions show the two modes near 258 and 266, with a different share | One-minute load 2.87 to 3.21 |
+| `call_only` floor loop, 200000 iterations, ns, median of 6 rounds | 104.40 | 105.85 | Inside the noise: both revisions span 102.2 to 106.5 | The same rounds |
+| Terra key press, CPU ms for each key, 60 keys, median of 7 rounds | 23.0 | 24.167 | No change that the session can resolve: before 17.0 to 26.7, after 19.8 to 26.5 | One-minute load 1.54 to 3.62. Round 7 is dropped: its after run started with a load of 12.33 and two build processes |
+
+The probe loop runs seven instructions for each iteration before the change and six after it, so the gain is on the shape that the change targets. The floor loops have no `test_heap`. The Terra key press runs 6.4 percent of its instructions as `Noop`, but the spread of the CPU time for each key is larger than the expected gain. The three shapes that the acceptance of task #634 names, `call_ext_only`, `call_only`, and the Terra key press, show no resolvable gain. Only the targeted probe shows a gain, and the probe is not a committed fixture. The `call_ext_only` median moves by 2.0 percent because more after rounds than before rounds fall in the mode near 266 ns. Six rounds cannot show if a code layout change causes this shift, so it stays open.
+
 ### 2026-10-15 13:00 JST - Call an import through a resolved export target, task [#628](https://github.com/fahchen/pbeam/issues/628), pull request [#636](https://github.com/fahchen/pbeam/pull/636)
 
 The loader keeps the imports of a module with the call that it decides for each import, and `Instruction::CallExternal` holds the import index. The code table of a run keeps the export target of each import of each loaded module after the first call that finds it, so a later `call_ext` of an export in module code makes no lookup by name and compares no name. A call of a PBeam BIF, which has no `BifId`, still matches its name. A call that finds no export keeps the slot empty, so a module that loads later is found by the next call.
