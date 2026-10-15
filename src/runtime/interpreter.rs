@@ -1567,6 +1567,14 @@ impl BeamProgram {
                 // in jit/arm/instr_bs.cpp:1002-1019;
                 // `beam_jit_bs_construct_fail_info` in
                 // jit/beam_jit_common.cpp:911-1010).
+                // ERTS `bs_init_writable` reads a size hint in `x0` and
+                // writes a new writable binary with no byte to `x0`
+                // (`erts_bs_init_writable`, erl_bits.c:2020-2049; JIT
+                // jit/arm/instr_bs.cpp:985-1000). A new binary has one owner,
+                // so a `private_append` can write in its array.
+                Instruction::BinaryInitWritable => {
+                    write(process, &Operand::X(0), Term::binary(Vec::new()))?;
+                }
                 Instruction::BinaryCreate {
                     fail_label,
                     destination,
@@ -4420,9 +4428,10 @@ fn binary_match(
 struct BinarySegmentFailure {
     /// The segment number of the compiler.
     segment: u64,
-    /// The segment operation: `binary`, `integer`, or `utf8`.
+    /// The segment operation: `binary`, `float`, `integer`, or `utf8`.
     operation: &'static str,
-    /// The failed check: `type`, `unit`, or `size`.
+    /// The failed check: `type`, `unit`, or `size`, or for a `float`
+    /// segment also `no_float` or `invalid`.
     info: &'static str,
     /// The term that failed the check.
     value: Term,
@@ -4463,16 +4472,29 @@ enum BinaryPart<'a> {
         fixed: bool,
     },
     Utf8(char),
+    /// A `float` segment with its term and its size in bits.
+    Float {
+        segment: u64,
+        value: Term,
+        bits: u64,
+        little: bool,
+    },
 }
 
 impl BinaryPart<'_> {
     /// Return the `type` failure of an `integer` part whose term is not an
-    /// integer.
+    /// integer, or the failure of a `float` part (see `float_segment_bits`).
     fn type_failure(&self) -> Option<BinarySegmentFailure> {
         match self {
             BinaryPart::Integer { segment, value, .. } if !value.is_integer() => Some(
                 BinarySegmentFailure::badarg(*segment, "integer", "type", value.clone()),
             ),
+            BinaryPart::Float {
+                segment,
+                value,
+                bits,
+                ..
+            } => float_segment_bits(*segment, value, *bits).err(),
             _ => None,
         }
     }
@@ -4482,10 +4504,57 @@ impl BinaryPart<'_> {
         match self {
             BinaryPart::Bytes(bytes, _) => !bytes.is_empty(),
             BinaryPart::Shared(binary, _) => !binary.is_empty(),
-            BinaryPart::Integer { bits, .. } => *bits > 0,
+            BinaryPart::Integer { bits, .. } | BinaryPart::Float { bits, .. } => *bits > 0,
             BinaryPart::Utf8(_) => true,
         }
     }
+}
+
+/// Return the IEEE 754 bits of the term of a `float` segment of `bits`
+/// bits in the low bits of the result, or its failure, as
+/// `erts_bs_put_float` checks it (erl_bits.c:1340-1452). A size other than
+/// 16, 32, or 64 fails with `invalid` and the size. A term that is not a
+/// number fails with `type`, and a bignum that `big_to_double` cannot
+/// convert fails with `no_float`. A small integer converts with one C cast
+/// to the float of the size, and a bignum converts to a double first. A
+/// value too large for 32 bits gives an infinity, as the C cast does, and
+/// ERTS gives no error. PBeam does not write 16-bit floats yet (row
+/// "Binary construction" of `docs/erts-differences.md`), so a number of
+/// such a segment gives `None`, which the caller changes into a runtime
+/// error.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(float_segment_bits(1, &Term::Float(1.5), 64), Ok(Some(0x3FF8_0000_0000_0000)));
+/// assert_eq!(float_segment_bits(1, &Term::Integer(-3), 32), Ok(Some(0xC040_0000)));
+/// assert!(float_segment_bits(1, &Term::static_atom("a"), 64).is_err());
+/// ```
+fn float_segment_bits(
+    segment: u64,
+    value: &Term,
+    bits: u64,
+) -> Result<Option<i64>, BinarySegmentFailure> {
+    let fail = |info, term| BinarySegmentFailure::badarg(segment, "float", info, term);
+    if !matches!(bits, 16 | 32 | 64) {
+        return Err(fail("invalid", Term::Integer(bits as i64)));
+    }
+    let number = match (value.small_integer(), value) {
+        (Some(small), _) => Ok(small),
+        (None, Term::Float(float)) => Err(*float),
+        (None, Term::Integer(_) | Term::BigInt(_)) => match value.number_float() {
+            Some(float) => Err(float),
+            None => return Err(fail("no_float", value.clone())),
+        },
+        _ => return Err(fail("type", value.clone())),
+    };
+    Ok(match (bits, number) {
+        (64, Ok(small)) => Some((small as f64).to_bits() as i64),
+        (64, Err(float)) => Some(float.to_bits() as i64),
+        (32, Ok(small)) => Some(i64::from((small as f32).to_bits())),
+        (32, Err(float)) => Some(i64::from((float as f32).to_bits())),
+        _ => None,
+    })
 }
 
 /// Return the size in bits of an `integer` segment, or the exception
@@ -4567,7 +4636,9 @@ fn shared_append_arrays(parts: &[BinaryPart<'_>]) -> Option<Vec<(Arc<Vec<u8>>, u
                     arrays.push((chunk, *reductions));
                 }
             }
-            BinaryPart::Integer { .. } | BinaryPart::Utf8(_) => return None,
+            BinaryPart::Integer { .. } | BinaryPart::Utf8(_) | BinaryPart::Float { .. } => {
+                return None;
+            }
         }
     }
     Some(arrays)
@@ -4709,6 +4780,7 @@ fn create_binary(
 ) -> Result<Result<Term, BinarySegmentFailure>, BeamError> {
     let mut parts = Vec::with_capacity(segments.len());
     let mut append = None;
+    let mut private = None;
     for segment in segments {
         match segment {
             BinarySegment::String(text) => {
@@ -4729,6 +4801,35 @@ fn create_binary(
                 unit,
                 source,
             } => append = Some((*segment, *unit, read(process, source)?)),
+            BinarySegment::PrivateAppend { source } => private = Some(source),
+            BinarySegment::Float {
+                segment,
+                unit,
+                little,
+                source,
+                size,
+            } => {
+                // The size pass checks the size of a `float` segment as the
+                // size of an `integer` segment (jit/arm/instr_bs.cpp:
+                // 1493-1505, 1639-1689).
+                let fixed = matches!(size, Operand::Value(Term::Integer(literal)) if (0..1 << 56).contains(literal));
+                let size = read(process, size)?;
+                let bits = match integer_segment_bits(fixed, &size, *unit) {
+                    Ok(bits) => bits,
+                    Err(reason) => {
+                        return Ok(Err(BinarySegmentFailure {
+                            reason,
+                            ..BinarySegmentFailure::badarg(*segment, "float", "size", size)
+                        }));
+                    }
+                };
+                parts.push(BinaryPart::Float {
+                    segment: *segment,
+                    value: read(process, source)?,
+                    bits,
+                    little: *little,
+                });
+            }
             BinarySegment::Integer {
                 segment,
                 unit,
@@ -4778,7 +4879,9 @@ fn create_binary(
             }
         }
     }
-    let mut writer = BitWriter::default();
+    if let Some(source) = private {
+        return private_append(process, source, &parts);
+    }
     let mut prefix = None;
     if let Some((segment, unit, mut value)) = append {
         let Term::Binary(start) = &mut value else {
@@ -4794,8 +4897,15 @@ fn create_binary(
         if !parts.iter().any(BinaryPart::has_bits) {
             // The construct pass still checks the term of each `integer`
             // segment of size 0 (erl_bits.c:934-936).
-            if let Some(index) = parts.iter().position(|part| part.type_failure().is_some()) {
-                return Ok(Err(integer_type_failure(&parts, index)));
+            if let Some((index, failure)) = parts
+                .iter()
+                .enumerate()
+                .find_map(|(index, part)| Some((index, part.type_failure()?)))
+            {
+                return Ok(Err(match parts[index] {
+                    BinaryPart::Integer { .. } => integer_type_failure(&parts, index),
+                    _ => failure,
+                }));
             }
             return Ok(Ok(Term::Binary(start.clone())));
         }
@@ -4821,6 +4931,38 @@ fn create_binary(
         }
         return Ok(Ok(Term::Binary(Binary::concat_arrays(start, chunks))));
     }
+    let bytes = match write_binary_parts(process, &parts)? {
+        Ok(bytes) => bytes,
+        Err(failure) => return Ok(Err(failure)),
+    };
+    Ok(Ok(match &prefix {
+        Some(start) => Term::Binary(Binary::concat(start, &bytes)),
+        None => Term::binary(bytes),
+    }))
+}
+
+/// Run the construct pass of `bs_create_bin` over `parts` and return the
+/// bytes that the parts write, or the failure of the first part in the
+/// order of `integer_type_failure`. A `string` or `binary` part uses its
+/// reductions. A `float` part writes the bits of `float_segment_bits`, as
+/// `erts_bs_put_float` writes them (erl_bits.c:1454-1520).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let parts = [BinaryPart::Utf8('a')];
+/// assert_eq!(write_binary_parts(&mut process, &parts)?, Ok(b"a".to_vec()));
+/// ```
+///
+/// # Errors
+///
+/// A bignum `integer` part of more than 64 bits, a 16-bit `float` part, or
+/// bytes whose size in bits is not a multiple of 8 is a runtime error.
+fn write_binary_parts(
+    process: &mut ProcessState,
+    parts: &[BinaryPart<'_>],
+) -> Result<Result<Vec<u8>, BinarySegmentFailure>, BeamError> {
+    let mut writer = BitWriter::default();
     for (index, part) in parts.iter().enumerate() {
         match part {
             BinaryPart::Bytes(bytes, reductions) => {
@@ -4855,21 +4997,80 @@ fn create_binary(
                     "unsupported bs_create_bin integer segment of {bits} bits of a bignum"
                 )));
             }
-            BinaryPart::Integer { .. } => return Ok(Err(integer_type_failure(&parts, index))),
+            BinaryPart::Integer { .. } => return Ok(Err(integer_type_failure(parts, index))),
             BinaryPart::Utf8(code_point) => {
                 writer.push_bytes(code_point.encode_utf8(&mut [0; 4]).as_bytes());
             }
+            BinaryPart::Float {
+                segment,
+                value,
+                bits,
+                little,
+            } => match float_segment_bits(*segment, value, *bits) {
+                Ok(Some(float)) => writer.push_integer(float, *bits, *little),
+                Ok(None) => {
+                    return Err(error("unsupported bs_create_bin float segment of 16 bits"));
+                }
+                Err(failure) => return Ok(Err(failure)),
+            },
         }
     }
-    match writer.into_bytes() {
-        Ok(bytes) => Ok(Ok(match &prefix {
-            Some(start) => Term::Binary(Binary::concat(start, &bytes)),
-            None => Term::binary(bytes),
-        })),
-        Err(bits) => Err(error(format!(
+    writer.into_bytes().map(Ok).map_err(|bits| {
+        error(format!(
             "unsupported bs_create_bin result: a bitstring of {bits} bits, which is not a binary"
-        ))),
+        ))
+    })
+}
+
+/// Run a `bs_create_bin` whose first segment is `private_append`, as ERTS
+/// `erts_bs_private_append_checked` does (erl_bits.c:1928-2018; JIT
+/// jit/arm/instr_bs.cpp:1865-1881). The segment has no check, and the
+/// other segments write after the bytes of the writable binary in
+/// `source`. ERTS changes the size of that binary term in place, so the
+/// result is also the term of `source` (erl_bits.c:1978, 2017). PBeam
+/// takes the binary out of `source`, so the binary has one owner when no
+/// other term holds it, and writes the new bytes in its array
+/// (`Binary::append_in_place`). Else it builds a new binary that shares
+/// the old arrays (`Binary::concat`). PBeam charges no reduction. ERTS
+/// calls `BUMP_REDS` when it grows the buffer (erl_bits.c:1974, 2010), but
+/// the arm JIT drops that bump (jit/arm/instr_bs.cpp:1876-1880), so the
+/// pinned ERTS on arm64 also charges none. The x86 JIT keeps the bump (row
+/// "Binary construction" of `docs/erts-differences.md`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // <<Acc/binary, 3:8>> with Acc = <<1,2>> in x1
+/// let parts = [BinaryPart::Integer { segment: 2, value: Term::Integer(3), bits: 8, little: false, fixed: true }];
+/// assert_eq!(private_append(&mut process, &Operand::X(1), &parts)?, Ok(Term::binary(vec![1, 2, 3])));
+/// ```
+///
+/// # Errors
+///
+/// A term in `source` that is not a binary is a runtime invariant error,
+/// because the compiler gives this segment only a binary that
+/// `bs_init_writable` made. The errors of `write_binary_parts` also apply.
+fn private_append(
+    process: &mut ProcessState,
+    source: &Operand,
+    parts: &[BinaryPart<'_>],
+) -> Result<Result<Term, BinarySegmentFailure>, BeamError> {
+    let bytes = match write_binary_parts(process, parts)? {
+        Ok(bytes) => bytes,
+        Err(failure) => return Ok(Err(failure)),
+    };
+    let mut value = read(process, source)?;
+    let Term::Binary(binary) = &mut value else {
+        return Err(error(format!(
+            "bs_create_bin private_append segment holds a term that is not a binary: {value:?}"
+        )));
+    };
+    write(process, source, Term::Nil)?;
+    if !binary.append_in_place(&bytes) {
+        *binary = Binary::concat(binary, &bytes);
     }
+    write(process, source, value.clone())?;
+    Ok(Ok(value))
 }
 
 /// Raise the exception of a failed `bs_create_bin` segment in the current

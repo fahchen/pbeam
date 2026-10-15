@@ -10,6 +10,8 @@ const BS_CREATE_BIN_ALLOC_PROBE: &[u8] =
     include_bytes!("../../fixtures/bs_create_bin/bs_create_bin_alloc_probe.beam");
 const BS_CREATE_BIN_INTEGER_PROBE: &[u8] =
     include_bytes!("../../fixtures/bs_create_bin/bs_create_bin_integer_probe.beam");
+const BS_CREATE_BIN_WRITABLE_PROBE: &[u8] =
+    include_bytes!("../../fixtures/bs_create_bin/bs_create_bin_writable_probe.beam");
 const BS_CREATE_BIN_ALLOC_LIMIT: &[u8] =
     include_bytes!("../../fixtures/bs_create_bin/bs_create_bin_alloc_limit.beam");
 
@@ -1230,5 +1232,310 @@ fn stops_at_a_bitstring_that_is_not_a_binary() {
     assert_eq!(
         reference("bs_create_bin_integer_probe:nibble(1)"),
         "<<1:4>>\n"
+    );
+}
+
+/// Run `bs_create_bin_writable_probe:Function` with its arguments, and give
+/// the runtime error as text.
+fn run_writable(program: &BeamProgram, function: &str, arguments: &[Term]) -> Result<Term, String> {
+    let arguments = arguments
+        .iter()
+        .cloned()
+        .map(|term| program.host_term(term))
+        .collect::<Vec<_>>();
+    program
+        .execute("bs_create_bin_writable_probe", function, &arguments)
+        .map(|host| host.term)
+        .map_err(|error| error.to_string())
+}
+
+#[test]
+fn appends_with_private_append_segments_as_pinned_erts() {
+    // Each loop starts with `bs_init_writable` and appends with a
+    // `private_append` segment and an `integer`, `binary`, or `float`
+    // segment, as erlc compiles `<<Acc/binary, X:8>>` in a loop.
+    // `sizes/1` reads the size of each step, and `shared/1` keeps each step
+    // in a list, which makes the compiler use an `append` segment.
+    let program = BeamProgram::load(&[BS_CREATE_BIN_WRITABLE_PROBE]).unwrap();
+    let binary = |bytes: &[u8]| Term::binary(bytes.to_vec());
+    let int = Term::Integer;
+    let list = |items: Vec<Term>| Term::list_from(items);
+    let big = Term::BigInt(std::sync::Arc::new(num_bigint::BigInt::from(1u128 << 80)));
+    let float_bytes = [
+        &[63, 248, 0, 0, 0, 0, 0, 0][..],
+        &[64, 0, 0, 0, 0, 0, 0, 0],
+        &[128, 0, 0, 0, 0, 0, 0, 0],
+        &[68, 240, 0, 0, 0, 0, 0, 0],
+    ]
+    .concat();
+    let cases: Vec<(&str, Vec<Term>, Term)> = vec![
+        ("bytes", vec![int(5)], binary(&[5, 4, 3, 2, 1])),
+        ("bytes", vec![int(0)], binary(&[])),
+        (
+            "chunks",
+            vec![list(vec![binary(&[1, 2]), binary(&[]), binary(&[3])])],
+            binary(&[1, 2, 3]),
+        ),
+        (
+            "floats",
+            vec![list(vec![
+                Term::Float(1.5),
+                int(2),
+                Term::Float(-0.0),
+                big.clone(),
+            ])],
+            binary(&float_bytes),
+        ),
+        (
+            "sizes",
+            vec![int(3)],
+            Term::tuple(vec![binary(&[3, 2, 1]), list(vec![int(3), int(2), int(1)])]),
+        ),
+        (
+            "shared",
+            vec![int(3)],
+            Term::tuple(vec![
+                binary(&[3, 2, 1]),
+                list(vec![binary(&[3, 2]), binary(&[3]), binary(&[])]),
+            ]),
+        ),
+    ];
+    let results: Vec<_> = cases
+        .iter()
+        .map(|(function, arguments, _)| run_writable(&program, function, arguments))
+        .collect();
+    let expected: Vec<_> = cases.iter().map(|(_, _, term)| Ok(term.clone())).collect();
+    assert_eq!(results, expected);
+    assert_eq!(
+        run_writable(&program, "bytes", &[int(100_000)]).map(|term| match &term {
+            Term::Binary(bytes) => bytes.len(),
+            other => panic!("not a binary: {other:?}"),
+        }),
+        Ok(100_000)
+    );
+    assert_eq!(
+        reference(
+            "begin M = bs_create_bin_writable_probe, \
+             [M:bytes(5), M:bytes(0), M:chunks([<<1,2>>, <<>>, <<3>>]), \
+             M:floats([1.5, 2, -0.0, 1 bsl 80]), M:sizes(3), M:shared(3), \
+             byte_size(M:bytes(100000))] end"
+        ),
+        "[<<5,4,3,2,1>>,<<>>,<<1,2,3>>,<<63,248,0,0,0,0,0,0,64,0,0,0,0,0,0,0,128,0,0,0,0,0,0,0,\
+         68,240,0,0,0,0,0,0>>,{<<3,2,1>>,[3,2,1]},{<<3,2,1>>,[<<3,2>>,<<3>>,<<>>]},100000]\n"
+    );
+}
+
+#[test]
+fn uses_no_reduction_for_a_private_append_as_the_pinned_erts_on_arm64() {
+    // `reds/1` gives the reductions between two `process_info/2` calls
+    // around a loop that appends 1024 bytes N times with a
+    // `private_append` segment: 1 for each of the N + 1 calls of the loop,
+    // 1 for the second `process_info/2` call, and 1 for the call of the
+    // loop from `reds/1`. `erts_bs_private_append_checked` calls
+    // `BUMP_REDS` when it grows the buffer (erl_bits.c:1974, 2010), but
+    // the arm JIT enters the runtime without `Update::eReductions`
+    // (jit/arm/instr_bs.cpp:1876-1880), so the bump is lost. The x86 JIT
+    // keeps the bump (jit/x86/instr_bs.cpp:1578-1584, 2116-2131), so the
+    // reference run is only on an arm64 host (row "Binary construction"
+    // of `docs/erts-differences.md`).
+    // (N, size of the result, reductions)
+    let results = [
+        (1, 1024, 4),
+        (10, 10_240, 13),
+        (100, 102_400, 103),
+        (300, 307_200, 303),
+    ];
+    let program = BeamProgram::load(&[BS_CREATE_BIN_WRITABLE_PROBE]).unwrap();
+    for (n, size, reductions) in results {
+        assert_eq!(
+            run_writable(&program, "reds", &[Term::Integer(n)]),
+            Ok(Term::tuple(vec![
+                Term::Integer(size),
+                Term::Integer(reductions)
+            ])),
+            "reds({n})"
+        );
+    }
+    #[cfg(target_arch = "aarch64")]
+    assert_eq!(
+        reference("[bs_create_bin_writable_probe:reds(N) || N <- [1, 10, 100, 300]]"),
+        "[{1024,4},{10240,13},{102400,103},{307200,303}]\n"
+    );
+}
+
+#[test]
+fn builds_float_segments_and_raises_their_failures_as_pinned_erts() {
+    // A float segment of 32 or 64 bits converts a small integer with one C
+    // cast and a bignum through a double, and a value too large for 32
+    // bits gives an infinity (erl_bits.c:1340-1452). The size checks are
+    // the size checks of an `integer` segment, and the construct pass fails
+    // with `invalid`, `type`, or `no_float`.
+    let program = BeamProgram::load(&[BS_CREATE_BIN_WRITABLE_PROBE]).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let binary = |bytes: &[u8]| Term::binary(bytes.to_vec());
+    let int = Term::Integer;
+    let huge = Term::BigInt(std::sync::Arc::new(
+        num_bigint::BigInt::from(1u8) << 1100u32,
+    ));
+    let limit = Term::BigInt(std::sync::Arc::new(num_bigint::BigInt::from(1u128 << 70)));
+    let cause = |reason: &str, segment: i64, info: &str, value: Term| {
+        Term::tuple(vec![
+            atom(reason),
+            Term::tuple(vec![int(segment), atom("float"), atom(info), value]),
+        ])
+    };
+    let caught = |function: &str, arguments: Vec<Term>| {
+        run_writable(
+            &program,
+            "cause",
+            &[atom(function), Term::list_from(arguments)],
+        )
+    };
+    let results = [
+        run_writable(&program, "float_size", &[Term::Float(1.5), int(32)]),
+        run_writable(&program, "float_size", &[int(-3), int(32)]),
+        run_writable(&program, "float_size", &[Term::Float(1.0e300), int(32)]),
+        run_writable(&program, "float_size", &[Term::Float(3.0e38), int(32)]),
+        run_writable(
+            &program,
+            "float_size",
+            &[
+                Term::BigInt(std::sync::Arc::new(num_bigint::BigInt::from(1u128 << 80))),
+                int(32),
+            ],
+        ),
+        run_writable(&program, "float_size", &[int(1 << 62), int(64)]),
+        run_writable(
+            &program,
+            "append_float",
+            &[binary(&[1]), Term::Float(1.5), int(64)],
+        ),
+        caught("float_size", vec![Term::Float(1.5), int(8)]),
+        caught("float_size", vec![Term::Float(1.5), int(-1)]),
+        caught("float_size", vec![Term::Float(1.5), Term::nil()]),
+        caught("float_size", vec![huge.clone(), int(64)]),
+        caught("float_bad", vec![Term::nil()]),
+        caught("float_size", vec![Term::Float(1.5), limit.clone()]),
+        caught("append_float", vec![binary(&[1]), Term::Float(1.5), int(0)]),
+        caught("append_float", vec![binary(&[1]), Term::nil(), int(64)]),
+    ];
+    // The failures make the atoms `invalid` and `no_float`, so the expected
+    // terms read them after the runs.
+    assert_eq!(
+        results,
+        [
+            Ok(binary(&[63, 192, 0, 0])),
+            Ok(binary(&[192, 64, 0, 0])),
+            Ok(binary(&[127, 128, 0, 0])),
+            Ok(binary(&[127, 97, 177, 230])),
+            Ok(binary(&[103, 128, 0, 0])),
+            Ok(binary(&[67, 208, 0, 0, 0, 0, 0, 0])),
+            Ok(binary(&[1, 63, 248, 0, 0, 0, 0, 0, 0])),
+            Ok(cause("badarg", 1, "invalid", int(8))),
+            Ok(cause("badarg", 1, "size", int(-1))),
+            Ok(cause("badarg", 1, "size", Term::nil())),
+            Ok(cause("badarg", 1, "no_float", huge)),
+            Ok(cause("badarg", 1, "type", Term::nil())),
+            Ok(cause("system_limit", 1, "size", limit)),
+            Ok(cause("badarg", 2, "invalid", int(0))),
+            Ok(cause("badarg", 2, "type", Term::nil())),
+        ]
+    );
+    assert_eq!(
+        reference(
+            "begin M = bs_create_bin_writable_probe, \
+             [M:float_size(1.5, 32), M:float_size(-3, 32), M:float_size(1.0e300, 32), \
+             M:float_size(3.0e38, 32), M:float_size(1 bsl 80, 32), M:float_size(1 bsl 62, 64), \
+             M:append_float(<<1>>, 1.5, 64), M:cause(float_size, [1.5, 8]), \
+             M:cause(float_size, [1.5, -1]), M:cause(float_size, [1.5, []]), \
+             M:cause(float_size, [1 bsl 1100, 64]) =:= {badarg, {1, float, no_float, 1 bsl 1100}}, \
+             M:cause(float_bad, [[]]), M:cause(float_size, [1.5, 1 bsl 70]), \
+             M:cause(append_float, [<<1>>, 1.5, 0]), M:cause(append_float, [<<1>>, [], 64])] end"
+        ),
+        "[<<63,192,0,0>>,<<192,64,0,0>>,<<127,128,0,0>>,<<127,97,177,230>>,<<103,128,0,0>>,\
+         <<67,208,0,0,0,0,0,0>>,<<1,63,248,0,0,0,0,0,0>>,{badarg,{1,float,invalid,8}},\
+         {badarg,{1,float,size,-1}},{badarg,{1,float,size,[]}},true,{badarg,{1,float,type,[]}},\
+         {system_limit,{1,float,size,1180591620717411303424}},{badarg,{2,float,invalid,0}},\
+         {badarg,{2,float,type,[]}}]\n"
+    );
+}
+
+#[test]
+fn stops_at_a_16_bit_float_and_at_a_private_append_of_a_bitstring() {
+    // PBeam does not write 16-bit floats, and has no bitstring that is not
+    // a binary, so these runs stop with a runtime error where ERTS gives a
+    // binary.
+    let program = BeamProgram::load(&[BS_CREATE_BIN_WRITABLE_PROBE]).unwrap();
+    assert_eq!(
+        [
+            run_writable(
+                &program,
+                "float_size",
+                &[Term::Integer(1), Term::Integer(16)]
+            ),
+            run_writable(&program, "bits", &[Term::Integer(2)]),
+        ],
+        [
+            Err("unsupported bs_create_bin float segment of 16 bits".into()),
+            Err(
+                "unsupported bs_create_bin result: a bitstring of 4 bits, which is not a binary"
+                    .into()
+            ),
+        ]
+    );
+    assert_eq!(
+        reference(
+            "[bs_create_bin_writable_probe:float_size(1, 16), bs_create_bin_writable_probe:bits(2)]"
+        ),
+        "[<<60,0>>,<<33>>]\n"
+    );
+}
+
+#[test]
+fn raises_the_failure_of_a_segment_after_a_private_append_as_pinned_erts() {
+    // `ints/1` appends each integer of a list with a `private_append`
+    // segment and an `integer` segment. The `integer` segment fails in the
+    // construct pass, before the append writes in the binary.
+    let program = BeamProgram::load(&[BS_CREATE_BIN_WRITABLE_PROBE]).unwrap();
+    let ints = |items: Vec<Term>| {
+        run_writable(
+            &program,
+            "cause",
+            &[
+                Term::Atom(program.atom("ints").unwrap()),
+                Term::list_from(vec![Term::list_from(items)]),
+            ],
+        )
+    };
+    let result = ints(vec![Term::Integer(1), Term::nil()]);
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    assert_eq!(
+        [
+            result,
+            run_writable(
+                &program,
+                "ints",
+                &[Term::list_from(vec![Term::Integer(1), Term::Integer(2)])]
+            )
+        ],
+        [
+            Ok(Term::tuple(vec![
+                atom("badarg"),
+                Term::tuple(vec![
+                    Term::Integer(2),
+                    atom("integer"),
+                    atom("type"),
+                    Term::nil()
+                ]),
+            ])),
+            Ok(Term::binary(vec![1, 2])),
+        ]
+    );
+    assert_eq!(
+        reference(
+            "[bs_create_bin_writable_probe:cause(ints, [[1, []]]), \
+             bs_create_bin_writable_probe:ints([1, 2])]"
+        ),
+        "[{badarg,{2,integer,type,[]}},<<1,2>>]\n"
     );
 }
