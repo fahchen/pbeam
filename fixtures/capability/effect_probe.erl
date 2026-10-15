@@ -9,6 +9,9 @@
     port_command/0,
     port_close/0,
     port_info/0,
+    port_control/0,
+    port_set_data/0,
+    port_get_data/0,
     getenv/0,
     handle_signal/0,
     ignore_signal/0,
@@ -114,6 +117,20 @@ port_close() ->
 port_info() ->
     Port = cat(),
     attempt(fun() -> erlang:port_info(Port) end).
+
+%% A port of the spawn driver has no control, so a permitted call raises
+%% badarg (io.c:4029-4030).
+port_control() ->
+    Port = cat(),
+    attempt(fun() -> erlang:port_control(Port, 1, []) end).
+
+port_set_data() ->
+    Port = cat(),
+    attempt(fun() -> erlang:port_set_data(Port, data) end).
+
+port_get_data() ->
+    Port = cat(),
+    attempt(fun() -> erlang:port_get_data(Port) end).
 
 getenv() -> attempt(fun() -> os:getenv("PBEAM_EFFECT_PROBE") end).
 
