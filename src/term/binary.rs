@@ -62,13 +62,10 @@ struct BinaryView {
     /// chunks of its prefix, so an append copies no old payload byte. The
     /// view keeps the chunks in order, and their bytes are the bytes of the
     /// view.
-    chunks: Option<Arc<Vec<Arc<Vec<u8>>>>>,
+    chunks: Option<Arc<Chunks>>,
     /// The bytes of `chunks` joined in one array, built at the first read
     /// that needs the contiguous bytes. `None` until such a read.
     flat: OnceLock<Arc<Vec<u8>>>,
-    /// The byte offset of the end of each chunk of `chunks`, in order, built
-    /// at the first ranged read of the chunks. `None` until such a read.
-    chunk_ends: OnceLock<Vec<usize>>,
     /// The offset in bits of the first bit of this binary in the array.
     offset: usize,
     /// The number of bits of this binary.
@@ -79,6 +76,26 @@ struct BinaryView {
     /// array with no copy. The `Arc` keeps a copy of such a binary O(1), as
     /// a copy of a byte-aligned binary is.
     packed: Option<Arc<Vec<u8>>>,
+}
+
+/// The chunks of a view that an append built, in order, and their index. The
+/// index is in this allocation and not in [`BinaryView`], so a view that no
+/// append built keeps its descriptor size.
+struct Chunks {
+    /// The chunks, each one an immutable array.
+    arrays: Vec<Arc<Vec<u8>>>,
+    /// The byte offset of the end of each chunk, in order, built at the first
+    /// ranged read of the chunks. `None` until such a read.
+    ends: OnceLock<Vec<usize>>,
+}
+
+impl Deref for Chunks {
+    type Target = Vec<Arc<Vec<u8>>>;
+
+    /// Return the chunks in order.
+    fn deref(&self) -> &Self::Target {
+        &self.arrays
+    }
 }
 
 /// One BEAM binary term: one `Arc` to the [`BinaryView`] that holds its
@@ -136,7 +153,7 @@ impl Binary {
     /// assert!(Binary::from(b"ab".to_vec()).chunk_backing().is_none());
     /// ```
     #[cfg(test)]
-    pub(super) fn chunk_backing(&self) -> Option<&Arc<Vec<Arc<Vec<u8>>>>> {
+    fn chunk_backing(&self) -> Option<&Arc<Chunks>> {
         self.0.chunks.as_ref()
     }
 
@@ -294,7 +311,6 @@ impl Binary {
             bytes: Arc::clone(flat),
             chunks: None,
             flat: OnceLock::new(),
-            chunk_ends: OnceLock::new(),
             offset,
             size,
             packed,
@@ -458,7 +474,6 @@ impl Binary {
             let joined = Arc::clone(view.flat_backing());
             view.chunks = None;
             view.flat = OnceLock::new();
-            view.chunk_ends = OnceLock::new();
             view.bytes = joined;
         }
         if view.size != view.bytes.len() * BITS_PER_BYTE {
@@ -503,7 +518,7 @@ impl Binary {
     /// append built gives the part of each chunk in the range and does not
     /// join its chunks, as [`Binary::deref`] does at its first read. The call
     /// copies no byte. It finds the first and the last chunk of the range
-    /// with binary searches of the chunk index ([`BinaryView::chunk_ends`]),
+    /// with binary searches of the chunk index ([`Chunks::ends`]),
     /// so it does O(log chunks) work to find the range. It then does O(1)
     /// work for each chunk in the range and one allocation of the list of
     /// runs, and touches only the chunks and the bytes of the range. The
@@ -520,7 +535,7 @@ impl Binary {
         let Some(chunks) = &self.0.chunks else {
             return vec![&self[start..end]];
         };
-        let ends = self.0.chunk_ends(chunks);
+        let ends = chunks.ends();
         chunk_span(ends, start, end)
             .map(|index| {
                 let chunk = &chunks[index];
@@ -561,7 +576,6 @@ impl Binary {
                 bytes: Arc::clone(chunk),
                 chunks: None,
                 flat: OnceLock::new(),
-                chunk_ends: OnceLock::new(),
                 offset: 0,
                 size,
                 packed: None,
@@ -570,9 +584,11 @@ impl Binary {
         let size = chunks.iter().map(|chunk| chunk.len()).sum::<usize>() * BITS_PER_BYTE;
         Binary(Arc::new(BinaryView {
             bytes: Arc::new(Vec::new()),
-            chunks: Some(Arc::new(chunks)),
+            chunks: Some(Arc::new(Chunks {
+                arrays: chunks,
+                ends: OnceLock::new(),
+            })),
             flat: OnceLock::new(),
-            chunk_ends: OnceLock::new(),
             offset: 0,
             size,
             packed: None,
@@ -616,24 +632,6 @@ impl BinaryView {
                 Arc::new(bytes)
             }),
         }
-    }
-
-    /// Return the byte offset of the end of each chunk of `chunks`, the
-    /// chunks of this view, in order. The first call builds the index in
-    /// O(chunks) and the view keeps it, as it keeps `flat`. The append that
-    /// built this view already did O(chunks) work, because it copied the
-    /// chunk list of its prefix, so the index adds O(1) work for each chunk
-    /// that the append copied. Each later call is O(1).
-    fn chunk_ends(&self, chunks: &[Arc<Vec<u8>>]) -> &[usize] {
-        self.chunk_ends.get_or_init(|| {
-            chunks
-                .iter()
-                .scan(0, |end, chunk| {
-                    *end += chunk.len();
-                    Some(*end)
-                })
-                .collect()
-        })
     }
 
     /// Return the bytes of this view, as [`Binary`] derefs to them.
@@ -775,6 +773,26 @@ impl From<&[u8]> for Binary {
     }
 }
 
+impl Chunks {
+    /// Return the byte offset of the end of each chunk, in order. The first
+    /// call builds the index in O(chunks) and keeps it, as a view keeps its
+    /// joined array. The append that built the chunks already did O(chunks)
+    /// work, because it copied the chunk list of its prefix, so the index
+    /// adds O(1) work for each chunk that the append copied. Each later call
+    /// is O(1).
+    fn ends(&self) -> &[usize] {
+        self.ends.get_or_init(|| {
+            self.arrays
+                .iter()
+                .scan(0, |end, chunk| {
+                    *end += chunk.len();
+                    Some(*end)
+                })
+                .collect()
+        })
+    }
+}
+
 /// Return the indexes of the chunks that hold the bytes from byte `start` to
 /// byte `end`, from the byte offset of the end of each chunk, in order. Two
 /// binary searches find the first and the last chunk, so the call is
@@ -804,7 +822,6 @@ impl From<Vec<u8>> for Binary {
             bytes: Arc::new(bytes),
             chunks: None,
             flat: OnceLock::new(),
-            chunk_ends: OnceLock::new(),
             offset: 0,
             size,
             packed: None,
