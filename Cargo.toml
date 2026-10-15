@@ -484,3 +484,7 @@ path = "tests/integration/unique_integer.rs"
 [[test]]
 name = "user_drv"
 path = "tests/integration/user_drv.rs"
+
+[[test]]
+name = "error_3"
+path = "tests/integration/error_3.rs"
