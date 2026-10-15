@@ -1795,8 +1795,7 @@ pub(super) fn b2l_chunk(
 /// that an append built and does not join them. One call does O(log
 /// chunks) work to find the chunks of the range, O(1) work for each chunk of
 /// the range, and one cons for each byte of the range, and the reductions of
-/// the caller pay for the bytes. The first call on a binary also builds its
-/// chunk index once, which is O(chunks).
+/// the caller pay for the bytes.
 pub(super) fn b2l_cons(binary: &Binary, start: usize, end: usize, tail: Term) -> Term {
     binary
         .byte_runs(start, end)

@@ -84,9 +84,10 @@ struct BinaryView {
 struct Chunks {
     /// The chunks, each one an immutable array.
     arrays: Vec<Arc<Vec<u8>>>,
-    /// The byte offset of the end of each chunk, in order, built at the first
-    /// ranged read of the chunks. `None` until such a read.
-    ends: OnceLock<Vec<usize>>,
+    /// The byte offset of the end of each chunk, in order. The view builds
+    /// the index with the chunk list, in the same walk of the chunks that
+    /// sums their size, so a ranged read does no O(chunks) work.
+    ends: Vec<usize>,
 }
 
 impl Deref for Chunks {
@@ -518,12 +519,12 @@ impl Binary {
     /// append built gives the part of each chunk in the range and does not
     /// join its chunks, as [`Binary::deref`] does at its first read. The call
     /// copies no byte. It finds the first and the last chunk of the range
-    /// with binary searches of the chunk index ([`Chunks::ends`]),
+    /// with binary searches of the chunk index (`Chunks::ends`),
     /// so it does O(log chunks) work to find the range. It then does O(1)
     /// work for each chunk in the range and one allocation of the list of
-    /// runs, and touches only the chunks and the bytes of the range. The
-    /// first ranged read of a view also builds the chunk index once, which
-    /// is O(chunks). Each other view gives one run of its bytes.
+    /// runs, and touches only the chunks and the bytes of the range. The view
+    /// builds the chunk index when it is made, so no read builds it. Each
+    /// other view gives one run of its bytes.
     ///
     /// # Examples
     ///
@@ -535,7 +536,7 @@ impl Binary {
         let Some(chunks) = &self.0.chunks else {
             return vec![&self[start..end]];
         };
-        let ends = chunks.ends();
+        let ends = &chunks.ends;
         chunk_span(ends, start, end)
             .map(|index| {
                 let chunk = &chunks[index];
@@ -581,12 +582,21 @@ impl Binary {
                 packed: None,
             }));
         }
-        let size = chunks.iter().map(|chunk| chunk.len()).sum::<usize>() * BITS_PER_BYTE;
+        // The index adds one word for each chunk to the walk that sums the
+        // size of the chunks, so it adds no walk of the chunks.
+        let ends = chunks
+            .iter()
+            .scan(0, |end, chunk| {
+                *end += chunk.len();
+                Some(*end)
+            })
+            .collect::<Vec<_>>();
+        let size = ends.last().copied().unwrap_or(0) * BITS_PER_BYTE;
         Binary(Arc::new(BinaryView {
             bytes: Arc::new(Vec::new()),
             chunks: Some(Arc::new(Chunks {
                 arrays: chunks,
-                ends: OnceLock::new(),
+                ends,
             })),
             flat: OnceLock::new(),
             offset: 0,
@@ -770,26 +780,6 @@ impl From<&[u8]> for Binary {
     /// ```
     fn from(bytes: &[u8]) -> Self {
         Binary::from(bytes.to_vec())
-    }
-}
-
-impl Chunks {
-    /// Return the byte offset of the end of each chunk, in order. The first
-    /// call builds the index in O(chunks) and keeps it, as a view keeps its
-    /// joined array. The append that built the chunks already did O(chunks)
-    /// work, because it copied the chunk list of its prefix, so the index
-    /// adds O(1) work for each chunk that the append copied. Each later call
-    /// is O(1).
-    fn ends(&self) -> &[usize] {
-        self.ends.get_or_init(|| {
-            self.arrays
-                .iter()
-                .scan(0, |end, chunk| {
-                    *end += chunk.len();
-                    Some(*end)
-                })
-                .collect()
-        })
     }
 }
 
