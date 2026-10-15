@@ -172,7 +172,7 @@ Task #459 made the sharing of this section the behavior of the code and implemen
 - The unit tests `sends_a_message_that_shares_the_term_of_the_sender` (`tests/runtime/scheduler.rs`), `shares_the_stored_term_of_an_ets_lookup`, and `shares_the_stored_term_of_a_persistent_term` (`tests/runtime/interpreter.rs`) use `Term::shares_storage_with` on the real code paths: `Scheduler::send_message`, `ets:insert/2` and `ets:lookup/2`, and `persistent_term:put/2` and `persistent_term:get/1`. Each test fails when `Term::clone` copies a compound term again.
 - This task changes no return value, no exception, no message, and no reduction count. The reduction differences that `docs/erts-differences.md` already records stay: PBeam counts no send copy reduction (row "Message copy"), and `maps:merge/2` of a map that came from a send, ETS, or `persistent_term` uses a different number of steps than on ERTS (row "Map merge reductions"). The property tests and the binary-match tests do not change.
 
-The epic checkpoint benchmark of the Terra Counter is not recorded here. The session that landed #459 runs under a file sandbox that denies `/dev/ptmx`, so no pseudo-terminal starts. The harness and the exact commands wait in the PR of #459.
+The epic checkpoint benchmark of the Terra Counter is in [Terra Counter checkpoint (#450)](#terra-counter-checkpoint-450).
 
 ## Needless clones
 
@@ -291,7 +291,28 @@ At `31f765b` and at the merge of #460, `Fun` is the largest variant, because `Te
 
 The design run of 2026-10-11 on main (revision not recorded; this task did not run it again): start the Terra Counter example in a PTY, wait 20 s, send the keys `j`, `j`, `k`, and `q` 2 s apart, and record the time from each key to the first output after it. The output came 0.13, 0.16, 0.17, and 0.21 s after the four keys. Before #427, each output came seconds after its key. The PTY script of this run is not in the repository.
 
-The task #503 commits the harness of the epic checkpoint: `scripts/terra_latency.py` starts the command on a fresh 80 by 24 pseudo-terminal and reports the time to the first frame and the time from each of the keys `j`, `j`, `k`, and `q` to the first byte after the key. `scripts/terra_latency.sh` builds what is missing, measures the debug build, the release build, and the pinned ERTS, and appends each result with its revision, its time, and the host load to `target/terra-latency.txt`. The checkpoint measurement is in the comment on [#450](https://github.com/fahchen/pbeam/issues/450). The harness reports the time of the read that shows the first frame, and not the end of the quiet window. The earlier scratch script reported the end of the quiet window, so its first frame times are about 0.4 s too high (measured at `a6b838c`: pinned ERTS 0.60 s against 0.19 to 0.20 s, and the debug build 6.09 to 6.10 s against 5.57 to 5.68 s).
+The task #503 commits the harness of the epic checkpoint: `scripts/terra_latency.py` starts the command on a fresh 80 by 24 pseudo-terminal and reports the time to the first frame and the time from each of the keys `j`, `j`, `k`, and `q` to the first byte after the key. `scripts/terra_latency.sh` builds what is missing, measures the debug build, the release build, and the pinned ERTS, and appends each result with its revision, its time, and the host load to `target/terra-latency.txt`. The checkpoint measurement is in [Terra Counter checkpoint (#450)](#terra-counter-checkpoint-450) and in the comment on [#450](https://github.com/fahchen/pbeam/issues/450). The harness reports the time of the read that shows the first frame, and not the end of the quiet window. The earlier scratch script reported the end of the quiet window, so its first frame times are about 0.4 s too high (measured at `a6b838c`: pinned ERTS 0.60 s against 0.19 to 0.20 s, and the debug build 6.09 to 6.10 s against 5.57 to 5.68 s).
+
+### Terra Counter checkpoint (#450)
+
+The session ran on 2026-10-15 from 20:50:06 to 21:30:12 JST. The one-minute load at the start of each run was 2.16 to 9.03. No `cargo`, `rustc`, or `nextest` process ran during a run. The session interleaves the two revisions: odd rounds run main first, and even rounds run the pre-epic revision first. Main is `b90085da`. The pre-epic revision is `856764f6`. Each run starts the Terra Counter example on an 80 by 24 pseudo-terminal and sends the keys `j`, `j`, `k`, and `q` 2 s apart. The key value is the time from each of `j`, `j`, and `k` to the first byte after it; `q` is not in the value. All 84 runs quit cleanly. Each cell is median / minimum / maximum.
+
+| Build | Revision | Rounds | First frame (s) | Key latency (s) |
+| --- | --- | --- | --- | --- |
+| release | main `b90085da` | 30 | 0.29 / 0.24 / 0.53 | 0.007 / 0.006 / 0.019 |
+| release | pre-epic `856764f6` | 30 | 0.62 / 0.49 / 0.76 | 0.156 / 0.144 / 0.271 |
+| debug | main `b90085da` | 6 | 0.65 / 0.62 / 0.96 | 0.060 / 0.058 / 0.086 |
+| debug | pre-epic `856764f6` | 6 | 2.17 / 2.10 / 2.47 | 0.841 / 0.785 / 0.859 |
+| pinned ERTS | main tree | 6 | 0.22 / 0.19 / 0.25 | 0.001 / 0.001 / 0.005 |
+| pinned ERTS | pre-epic tree | 6 | 0.21 / 0.18 / 0.22 | 0.001 / 0.001 / 0.009 |
+
+The harness `scripts/terra_latency.py` of main measures both trees through the `scripts/example.sh` of each tree, because `856764f6` has no harness. The `scripts/example.sh` of `856764f6` accepts `PBEAM_BIN` and `--no-build`. The commands in each tree:
+
+- Build: `cargo build --locked`, `cargo build --locked --release`, and `mise run example terra_counter --erts </dev/null`.
+- PBeam run: `python3 -u scripts/terra_latency.py mise exec -- env PBEAM_BIN=<tree>/target/<release|debug>/pbeam bash scripts/example.sh terra_counter --no-build`.
+- ERTS run: `python3 -u scripts/terra_latency.py mise exec -- bash scripts/example.sh terra_counter --erts --no-build`.
+
+The release key latency of main (7 ms median, 19 ms maximum) meets the bound of at most 10 ms of #506 at the median. The floor loops of main (`call_only` 42.4 ns, `call_ext_only` 47.7 ns, see `docs/performance-status.md`) meet the bound of at most 150 ns of #506. Known gap: the final target of at most 5 ms for each key in section 8 of `docs/interpreter-dispatch-plan.md` is not reached. The pinned ERTS stays at about 1 ms.
 
 ### Benchmark module
 
