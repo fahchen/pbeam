@@ -195,7 +195,9 @@ impl Timers {
     /// `2 * SMALL_DIFF`, the time offset becomes the OS system time minus
     /// `now` (`time_offset -= sdiff`), and the next check is
     /// `SHORT_CHECK` later. Otherwise the next check is `LONG_CHECK` later.
-    /// The Erlang monotonic time does not change.
+    /// The Erlang monotonic time does not change. ERTS does the check from a
+    /// scheduler timer at the due time; PBeam reads the OS system time at
+    /// the first call after it (`docs/erts-differences.md`, "Clocks", #691).
     ///
     /// # Examples
     ///
