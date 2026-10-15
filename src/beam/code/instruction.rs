@@ -386,14 +386,12 @@ pub(crate) enum Instruction {
     /// Erlang: `d(X) -> lists:reverse(X).` compiles to
     /// `{call_ext_only,1,{extfunc,lists,reverse,1}}`.
     CallExternal {
-        arity: u32,
-        module: String,
-        name: String,
-        /// The BIF of the MFA when the import names a `bif.tab` entry. The
-        /// parser resolves it, as the ERTS loader binds the import of a BIF
-        /// to the BIF (`emu_load.c`), so a call that is not a BIF searches
-        /// no table. `None` is a call of module code and of a PBeam BIF.
-        bif: Option<BifId>,
+        /// The index of the import in [`BeamModule::imports`], which holds
+        /// the MFA and the call that the loader decided for it. The arity
+        /// of the call is the arity of the import.
+        ///
+        /// [`BeamModule::imports`]: crate::beam::BeamModule
+        import: u32,
         tail: bool,
         deallocate: u32,
     },
@@ -2305,17 +2303,13 @@ pub(super) fn parse_code(
                 instructions.push(match (module.as_str(), name.as_str(), arity) {
                     ("erlang", "hibernate", 0) => Instruction::Hibernate,
                     ("erlang", "yield", 0) => Instruction::Yield,
-                    _ => {
-                        let bif = resolve_bif(module, name, arity);
-                        Instruction::CallExternal {
-                            arity,
-                            module: module.clone(),
-                            name: name.clone(),
-                            bif,
-                            tail: opcode != OPCODE_CALL_EXT,
-                            deallocate,
-                        }
-                    }
+                    // An import index of the `ImpT` chunk is below 2^32,
+                    // so the cast keeps every value.
+                    _ => Instruction::CallExternal {
+                        import: index as u32,
+                        tail: opcode != OPCODE_CALL_EXT,
+                        deallocate,
+                    },
                 });
                 if opcode == OPCODE_CALL_EXT_LAST {
                     instructions.push(Instruction::Deallocate {

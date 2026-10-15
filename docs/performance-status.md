@@ -19,6 +19,8 @@ The table holds the headline numbers of the whole programme. Each row names its 
 
 | Headline number | Value | Revision | Session or run group | Load or run rule | Source |
 | --- | --- | --- | --- | --- | --- |
+| External `call_ext_only` floor loop, 200000 iterations | 122.5 ns, from 257.0 ns | `b8c71940` before, `8e1b44b4` after | One interleaved session of eight rounds, each number the minimum of nine probe runs inside one invocation | One-minute load 2.03 to 2.48 | Issue [#628](https://github.com/fahchen/pbeam/issues/628) and the record |
+| CPU time for each release Terra key press, 60 keys | 24.188 ms, from 25.896 ms | `b8c71940` before, `8e1b44b4` after | A second interleaved session of eight rounds, the mean of the raw CPU time with no idle correction | One-minute load 1.09 to 1.97 | Issue [#628](https://github.com/fahchen/pbeam/issues/628) and the record |
 | `call_ext_only` floor loop, 200000 iterations | 149.3 ns, from 257.1 ns | `b8c71940` before, after on the branch `perf/627-process-slot` (`ef77e031`) | One interleaved session of eight rounds and two builds, each number the minimum of nine probe runs inside one invocation and the minimum of the eight rounds | One-minute load 2.40 to 2.97 | Issue [#627](https://github.com/fahchen/pbeam/issues/627) and the record |
 | Local `call_only` floor loop, 200000 iterations, task #627 | 42.2 ns, from 102.5 ns | `b8c71940` before, after on the branch `perf/627-process-slot` (`ef77e031`) | The same interleaved session and the same rule | The same loads | Issue [#627](https://github.com/fahchen/pbeam/issues/627) and the record |
 | Position `call_only` floor loop, 200000 iterations, task #627 | 42.1 ns, from 102.5 ns | `b8c71940` before, after on the branch `perf/627-process-slot` (`ef77e031`) | The same interleaved session and the same rule | The same loads | Issue [#627](https://github.com/fahchen/pbeam/issues/627) and the record |
@@ -60,6 +62,21 @@ The loader skips `test_heap` and `init_yregs`, as it skips `line`, and the `Noop
 | Terra key press, CPU ms for each key, 60 keys, median of 7 rounds | 23.0 | 24.167 | No change that the session can resolve: before 17.0 to 26.7, after 19.8 to 26.5 | One-minute load 1.54 to 3.62. Round 7 is dropped: its after run started with a load of 12.33 and two build processes |
 
 The probe loop runs seven instructions for each iteration before the change and six after it, so the gain is on the shape that the change targets. The floor loops have no `test_heap`. The Terra key press runs 6.4 percent of its instructions as `Noop`, but the spread of the CPU time for each key is larger than the expected gain. The three shapes that the acceptance of task #634 names, `call_ext_only`, `call_only`, and the Terra key press, show no resolvable gain, so only the targeted probe supports the landing. The `call_ext_only` median moves by 2.0 percent because more after rounds than before rounds fall in the mode near 266 ns. Six rounds cannot show if a code layout change causes this shift, so it stays open.
+
+### 2026-10-15 13:00 JST - Call an import through a resolved export target, task [#628](https://github.com/fahchen/pbeam/issues/628), pull request [#636](https://github.com/fahchen/pbeam/pull/636)
+
+The loader keeps the imports of a module with the call that it decides for each import, and `Instruction::CallExternal` holds the import index. The code table of a run keeps the export target of each import of each loaded module after the first call that finds it, so a later `call_ext` of an export in module code makes no lookup by name and compares no name. A call of a PBeam BIF, which has no `BifId`, still matches its name. A call that finds no export keeps the slot empty, so a module that loads later is found by the next call.
+
+One interleaved session on 2026-10-15 from 12:51:44 to 12:55:58 JST, before `b8c71940` and after `8e1b44b4`. The floor rows are the minimum of eight rounds in rotated order, and each round is the minimum of nine probe runs inside one invocation; the one-minute load is 2.03 to 2.48. The Terra row comes from a second interleaved session on 2026-10-15 from 13:06:37 to 13:15:49 JST with the same two binaries. It is the mean of eight rounds of 60 keys in rotated order, with the raw CPU time of `pbeam` and no idle correction; the one-minute load is 1.09 to 1.97. The source is the section "The resolved export target of an import, task #628" of `docs/interpreter-dispatch-measurements.md`.
+
+| Shape | Before `b8c71940` | After `8e1b44b4` | Change |
+| --- | --- | --- | --- |
+| `call_ext_only` floor loop, 200000 iterations | 257.0 ns | 122.5 ns | -52.3 percent |
+| Local `call_only` floor loop, 200000 iterations | 102.0 ns | 102.1 ns | +0.1 percent |
+| Position `call_only` floor loop, 200000 iterations | 101.8 ns | 102.0 ns | +0.2 percent |
+| CPU time for each release Terra key press | 25.896 ms | 24.188 ms | -6.6 percent |
+
+The medians of the two `call_only` rows move by +0.7 percent. Of the added BIF shapes, `hd/1` moves by +1.1 percent and `tuple_size/1` by -2.0 percent at the minimum, and the ranges of the eight rounds of these two shapes do not overlap. The `hd/1` shape is thus a measured regression, probably from code layout, because the change does not touch the `bif` path. The Terra ranges of the eight rounds overlap (22.667 to 27.333 ms before, 21.500 to 25.167 ms after), and the after round is below the before round in six of the eight rounds, so the Terra number is weaker than the floor number. The first session of three rounds gave 26.833 ms and 24.278 ms with no idle correction (-9.5 percent); its reported 23.718 ms came from an idle correction of one 10 ms tick of `ps`, which the record now rejects.
 
 ### 2026-10-15 12:20 JST - Get the current process with no hash, task [#627](https://github.com/fahchen/pbeam/issues/627), branch `perf/627-process-slot`
 

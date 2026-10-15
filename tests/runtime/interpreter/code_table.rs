@@ -22,6 +22,7 @@ fn fixture() -> CodeTable {
     let module = BeamModule::new(
         "fixture".into(),
         HashMap::new(),
+        Vec::new(),
         vec![
             Instruction::FunctionInfo {
                 module: "fixture".into(),

@@ -942,6 +942,59 @@ The cheaper hasher of the issue, alone, was not built: the slot design is small,
 - The session measures only the floor shapes and the Terra key press. It does not measure a workload with many processes, where the table holds more slots and the lookup by pid is more frequent.
 - The free list gives a slot again to a new process, so the table does not shrink after many processes exit. The `Vec` holds one `Option<ProcessState>` for each slot that was ever in use at the same time.
 
+## The resolved export target of an import, task [#628](https://github.com/fahchen/pbeam/issues/628)
+
+This section records the gate of task [#628](https://github.com/fahchen/pbeam/issues/628), proposal 2 of the attribution of task [#625](https://github.com/fahchen/pbeam/issues/625). Before the change, each `call_ext` of module code compared its module, function, and arity with `erlang:apply/2,3`, `erlang:load_nif/2`, and the two small BIF tables, and then looked up the module by name, the function name, the export key, and the entry label. ERTS resolves each import to an export entry one time at load time and branches through the entry (`erts/emulator/beam/jit/asm_load.c:1198-1206`, `erts/emulator/beam/export.c:204-217`, `erts/emulator/beam/jit/arm/instr_call.cpp:150-164`, OTP 29.1.1).
+
+The change has two commits. `6595dcc8` keeps the `ImpT` entries of a module in `BeamModule::imports`, with the call that the loader decides for each entry, and `Instruction::CallExternal` holds the import index. `8e1b44b4` gives each import of each loaded module of a run a slot in the code table. The first call that finds the export keeps its target in the slot, and each later call reads the slot and makes no lookup by name. A call of a BIF with a `BifId` compares no name; a call of a PBeam BIF has no `BifId` and still matches its name in `named_bif`. A call that finds no export keeps the slot empty, so the next call finds a module that loaded after it. The fast path also reuses the process of the call and makes no second process table lookup.
+
+### The session
+
+The before revision is `b8c71940`, the head of `origin/main` that the branch starts from. The after revision is `8e1b44b4`. Each revision is a `git archive` of its commit, built with `cargo build --locked --release --bin pbeam` and `cargo test --locked --release --test dispatch_baseline --no-run` in its own target directory. The session ran on 2026-10-15 from 12:51:44 to 12:55:58 JST on the host of "The environment of the numbers", with no other `cargo`, `rustc`, or `nextest` process. The floor rows run `records_the_interpreter_dispatch_baseline --exact --nocapture --test-threads=1`, eight rounds in rotated order, and each value is the minimum of nine probe runs inside one invocation. The Terra rows send 60 `j` and `k` keys at a gap of 0.5 s to the release Terra Counter (`PBEAM_BIN=<bin> bash scripts/example.sh terra_counter --no-build`). The one-minute load is 2.03 to 2.48 for the floor rounds and 1.36 to 2.22 for the three Terra rounds of this session. A second interleaved session on 2026-10-15 from 13:06:37 to 13:15:49 JST ran eight Terra rounds of each revision in rotated order with the same two binaries, at a one-minute load of 1.09 to 1.97. Each Terra value is the raw CPU time of the `pbeam` process over the key window divided by the answered keys, with no idle correction (see "The idle correction of the Terra rows").
+
+| Shape | Before `b8c71940`, minimum of 8 rounds | After `8e1b44b4`, minimum of 8 rounds | Change |
+| --- | --- | --- | --- |
+| `call_ext_only` floor loop, 200000 iterations | 257.0 ns (rounds 257.0 to 258.9) | 122.5 ns (rounds 122.5 to 126.0) | -134.5 ns, -52.3 percent |
+| `call_only` floor loop, 200000 iterations | 102.0 ns (102.0 to 103.0) | 102.1 ns (102.1 to 107.9) | +0.1 percent |
+| Position `call_only` floor loop, 200000 iterations | 101.8 ns (101.8 to 103.0) | 102.0 ns (102.0 to 103.9) | +0.2 percent |
+| `call_only` plus `gc_bif '+'`, 200000 iterations | 156.7 ns | 157.5 ns | +0.5 percent |
+| `call_only` plus the `bif` of `tuple_size/1` | 177.1 ns | 173.6 ns | -2.0 percent |
+| `call_only` plus the `bif` of `element/2` | 157.0 ns | 157.4 ns | +0.3 percent |
+| `call_only` plus the `bif` of `hd/1` | 154.1 ns | 155.8 ns | +1.1 percent |
+| `call_only` plus the `bif` of `map_get/2` on a 1000-key map | 189.4 ns | 187.9 ns | -0.8 percent |
+
+| Terra round | Before `b8c71940`, ms of CPU time for each key | After `8e1b44b4`, ms of CPU time for each key |
+| --- | --- | --- |
+| Second session, round 1 | 27.000 | 21.500 |
+| Second session, round 2 | 24.167 | 24.667 |
+| Second session, round 3 | 27.000 | 24.667 |
+| Second session, round 4 | 26.000 | 23.667 |
+| Second session, round 5 | 26.000 | 24.333 |
+| Second session, round 6 | 22.667 | 25.167 |
+| Second session, round 7 | 27.333 | 25.000 |
+| Second session, round 8 | 27.000 | 24.500 |
+| Second session, mean of 8 rounds | 25.896 | 24.188 |
+| Second session, median of 8 rounds | 26.500 | 24.583 |
+| First session, rounds 1 to 3 | 27.500, 27.000, 26.000 | 22.500, 25.167, 25.167 |
+| First session, mean of 3 rounds | 26.833 | 24.278 |
+
+The `call_ext_only` shape falls by 134.5 ns for each iteration, and the two ranges of the eight rounds do not overlap. The attribution of task #625 expected about 50 ns to 60 ns from the lookups by name, plus a part of the 13.8 percent of the `CallExternal` body. The change also removes the name compares, the classification scans, and the second process table lookup of the call. This record does not split the 134.5 ns between those parts. The shapes with no external call move by -2.0 to +1.1 percent at the minimum, and some move outside the spread of the rounds in both directions. The ranges of the eight rounds do not overlap for `hd/1` (154.1 to 155.1 ns before, 155.8 to 156.9 ns after, +1.1 percent) and for `tuple_size/1` (177.1 to 178.6 ns before, 173.6 to 176.5 ns after, -2.0 percent), and for `map_get/2` they touch only at 189.4 ns. The `hd/1` shape is a measured regression of 1.7 ns. The change does not touch the `bif` instruction, so the cause is probably code layout. The medians of the eight rounds also move: `call_only` from 102.35 ns to 103.10 ns and position `call_only` from 102.25 ns to 102.95 ns, each +0.7 percent, which the minimums hide.
+
+In the second session the CPU time for each key falls by 1.708 ms, or 6.6 percent, at the mean of the eight rounds, and by 1.917 ms, or 7.2 percent, at the median. The ranges of the two revisions overlap, and the after round is below the before round in six of the eight rounds. The expected gain of the attribution was 1.2 ms to 1.4 ms for each key. The resolution of the CPU time of `ps` is 10 ms, or about 0.17 ms for each key over 60 keys, so the Terra number is weaker than the floor number.
+
+The raw records are the session logs `session.txt` and `session-terra2.txt` and the files `floor-r<round>-<revision>.txt`, `terra-r<round>-<revision>.log`, and `terra2-r<round>-<revision>.log` of the two sessions, which stay outside the repository.
+
+### The idle correction of the Terra rows
+
+The profile script subtracts the CPU rate of a 3 s idle window from the key window. The idle window holds 0 or 1 tick of 10 ms of `ps`, so one tick changes the result for each key by about 1.7 ms. In the first session one tick in the idle window of round 2 of `8e1b44b4` (`idle cpu 0.0100 s over 3.02 s`) moved that round from 25.167 ms to 23.488 ms, and the reported after mean from 24.278 ms to 23.718 ms. Round 4 of `8e1b44b4` of the second session had the same tick, which moved it from 23.667 ms to 21.993 ms. The record thus uses the raw CPU time with no idle correction for each Terra row.
+
+### Known gaps
+
+- The Terra ranges of the two revisions overlap in the second session (22.667 to 27.333 ms before, 21.500 to 25.167 ms after), so the 1.708 ms fall has a weak bound.
+- The `hd/1` shape is 1.1 percent slower, and the record does not show the cause.
+- The record does not split the fall of the `call_ext_only` shape by part.
+- The `ModuleId` lookup of `Cursor::refresh` for a call into another module stays, as the attribution of task #625 expected.
+
 ## The loader skip of `test_heap` and `init_yregs`, task [#634](https://github.com/fahchen/pbeam/issues/634)
 
 ### The change

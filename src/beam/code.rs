@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 
-use super::module::BeamModule;
+use super::module::{BeamModule, Import};
 use crate::{
     error::{BeamError, error},
+    runtime::import_kind,
     term::{Atom, AtomTable, Fun, Lambda, MAX_ATOM_CHARACTERS, Map, Term},
 };
 
@@ -397,7 +398,16 @@ fn decode(
             lambda.label()
         )));
     }
-    BeamModule::new(name, exports, instructions)
+    let imports = imports
+        .into_iter()
+        .map(|(module, name, arity)| Import {
+            kind: import_kind(&module, &name, arity),
+            module,
+            name,
+            arity,
+        })
+        .collect();
+    BeamModule::new(name, exports, imports, instructions)
 }
 
 /// Read the atoms of an `AtU8` chunk and put each one, in chunk order, into

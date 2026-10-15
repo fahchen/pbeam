@@ -1869,13 +1869,10 @@ fn puts_the_deallocate_and_the_return_of_a_tail_call_after_call_ext() {
         matches!(
             instruction,
             Instruction::CallExternal {
-                arity: 1,
-                module,
-                name,
-                bif: Some(BifId::ErlangWhereis1),
+                import: 0,
                 tail: found,
                 deallocate
-            } if module == "erlang" && name == "whereis" && *found == tail && *deallocate == size
+            } if *found == tail && *deallocate == size
         )
     };
     let call = decode(&[0x07, 0x10, 0x00]); // call_ext 1 import 0
@@ -2285,20 +2282,10 @@ fn arm_field_bytes(instruction: &Instruction) -> usize {
             target,
         } => size_of_val(arity) + size_of_val(function) + size_of_val(target),
         Instruction::CallExternal {
-            arity,
-            module,
-            name,
-            bif,
+            import,
             tail,
             deallocate,
-        } => {
-            size_of_val(arity)
-                + size_of_val(module)
-                + size_of_val(name)
-                + size_of_val(bif)
-                + size_of_val(tail)
-                + size_of_val(deallocate)
-        }
+        } => size_of_val(import) + size_of_val(tail) + size_of_val(deallocate),
         Instruction::Hibernate => 0,
         Instruction::Yield => 0,
         Instruction::Apply {
@@ -2591,10 +2578,7 @@ fn records_the_decoded_form_layout() {
         (
             "`CallExternal`",
             Instruction::CallExternal {
-                arity: 1,
-                module: "dispatch_probe".to_owned(),
-                name: "floor_ext_loop".to_owned(),
-                bif: None,
+                import: 0,
                 tail: true,
                 deallocate: 0,
             },
