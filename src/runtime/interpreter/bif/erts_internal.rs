@@ -13,7 +13,7 @@ use crate::runtime::{
     },
     port::{
         Driver, Ports, Spawn,
-        tcp_inet::{Control, TcpInet},
+        inet::{Control, Inet, SocketType},
     },
     signal::Signal,
     unicode::native_filename,
@@ -328,9 +328,9 @@ pub(super) fn open_port(
 
 /// Open the port of `{spawn_driver, Name}` with the driver name `driver`
 /// and the settings `settings`, as `open_port` and `erts_open_driver` do
-/// (`erl_bif_port.c:1043-1062`, `io.c:323-560`): open a `tcp_inet` port,
-/// owned by and linked to the caller, and return it. The `tcp_inet` driver
-/// has no init ack, so the BIF returns the port, not a reference
+/// (`erl_bif_port.c:1043-1062`, `io.c:323-560`): open a `tcp_inet` or
+/// `udp_inet` port, owned by and linked to the caller, and return it. These
+/// drivers have no init ack, so the BIF returns the port, not a reference
 /// (erlang.erl:7985-7993).
 ///
 /// # Examples
@@ -342,21 +342,25 @@ pub(super) fn open_port(
 ///
 /// # Errors
 ///
-/// A driver other than `tcp_inet`, a setting other than `binary`, a port
-/// without `binary`, and a run with a policy return a runtime error: no
-/// capability kind permits a network effect yet (row "tcp_inet ports" of
-/// `docs/erts-differences.md`).
+/// A driver other than `tcp_inet` and `udp_inet`, a setting other than
+/// `binary`, a port without `binary`, and a run with a policy return a
+/// runtime error: no capability kind permits a network effect yet (rows
+/// "tcp_inet ports" and "udp_inet ports" of `docs/erts-differences.md`).
 fn open_driver_port(
     context: &mut BifContext<'_>,
     driver: Vec<u8>,
     settings: &PortSettings,
 ) -> Result<BifResult, BeamError> {
-    if driver != b"tcp_inet" {
-        return Err(error(format!(
-            "unsupported open_port/2 driver {}: see \"tcp_inet ports\" in docs/erts-differences.md",
-            String::from_utf8_lossy(&driver)
-        )));
-    }
+    let socket_type = match driver.as_slice() {
+        b"tcp_inet" => SocketType::Stream,
+        b"udp_inet" => SocketType::Datagram,
+        _ => {
+            return Err(error(format!(
+                "unsupported open_port/2 driver {}: see \"tcp_inet ports\" in docs/erts-differences.md",
+                String::from_utf8_lossy(&driver)
+            )));
+        }
+    };
     let only_binary = matches!(
         settings,
         PortSettings {
@@ -371,16 +375,16 @@ fn open_driver_port(
     );
     if !only_binary {
         return Err(error(
-            "unsupported open_port/2 settings of a tcp_inet port other than [binary]: see \"tcp_inet ports\" in docs/erts-differences.md",
+            "unsupported open_port/2 settings of an inet driver port other than [binary]: see \"tcp_inet ports\" in docs/erts-differences.md",
         ));
     }
     let scheduler = &mut *context.scheduler;
     if !scheduler.skips_checks() {
         return Err(error(
-            "unsupported tcp_inet port in a run with a policy: no capability permits a network effect: see \"tcp_inet ports\" in docs/erts-differences.md",
+            "unsupported inet driver port in a run with a policy: no capability permits a network effect: see \"tcp_inet ports\" in docs/erts-differences.md",
         ));
     }
-    let port = scheduler.open_port(driver, Driver::TcpInet(TcpInet::new()))?;
+    let port = scheduler.open_port(driver, Driver::Inet(Inet::new(socket_type)))?;
     Ok(Value(Term::Port(port)))
 }
 
@@ -729,7 +733,7 @@ const SPAWN_CONTROL: u32 = 0x04c7_6a00;
 /// # Errors
 ///
 /// A request of the `tcp_inet` driver that PBeam does not run (see
-/// [`TcpInet::control`]), the command `0x04c76a00` on a port of the spawn
+/// [`Inet::control`]), the command `0x04c76a00` on a port of the spawn
 /// driver, and the atom `capability_denied` in a full atom table.
 pub(super) fn port_control(
     context: &mut BifContext<'_>,
@@ -752,7 +756,7 @@ pub(super) fn port_control(
         return Ok(denied);
     }
     let ports = scheduler.resources.borrow_mut::<Ports>();
-    let reply = match ports.get_mut(id).expect("the port is open").tcp_inet_mut() {
+    let reply = match ports.get_mut(id).expect("the port is open").inet_mut() {
         Some(driver) => driver.control(command, &bytes)?,
         None if command == SPAWN_CONTROL => {
             return Err(error(
@@ -840,7 +844,7 @@ pub(super) fn port_info(context: &mut BifContext<'_>, port: &Term) -> Result<Bif
             let item = |name, value| Term::tuple(vec![Term::static_atom(name), value]);
             let os_pid = match &port.driver {
                 Driver::Spawn(spawn) => Term::Integer(spawn.child.os_pid.into()),
-                Driver::TcpInet(_) => Term::static_atom("undefined"),
+                Driver::Inet(_) => Term::static_atom("undefined"),
             };
             let links = vec![Term::Pid(port.owner)];
             Term::list_from(vec![

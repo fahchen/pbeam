@@ -1,10 +1,10 @@
 //! The ports of the node, as the ERTS port table (`erl_ptab.c`) holds the
 //! ports of the spawn driver (`sys/unix/sys_drivers.c`). The scheduler
 //! keeps them as the `Ports` value of its `Resources`, and all processes of
-//! a run share them. PBeam has `spawn_executable` ports and `tcp_inet`
-//! driver ports (see [`tcp_inet`]).
+//! a run share them. PBeam has `spawn_executable` ports and `tcp_inet` and `udp_inet`
+//! driver ports (see [`inet`]).
 
-pub(super) mod tcp_inet;
+pub(super) mod inet;
 
 use std::{collections::BTreeMap, ffi::c_int};
 
@@ -13,7 +13,7 @@ use crate::{
     error::{BeamError, error},
     term::{PortId, ProcessId, Term},
 };
-use tcp_inet::TcpInet;
+use inet::Inet;
 
 /// The open ports of the node, by port number, and the number of the next
 /// port. A port leaves the table when it closes, as `kill_port` removes it
@@ -57,8 +57,9 @@ pub(super) struct Port {
 pub(super) enum Driver {
     /// A port of `open_port({spawn_executable, Name}, Settings)`.
     Spawn(Spawn),
-    /// A port of `open_port({spawn_driver, "tcp_inet"}, [binary])`.
-    TcpInet(TcpInet),
+    /// A port of `open_port({spawn_driver, "tcp_inet"}, [binary])` or of
+    /// `open_port({spawn_driver, "udp_inet"}, [binary])`.
+    Inet(Inet),
 }
 
 /// The data of the spawn driver (`ErtsSysDriverData`,
@@ -91,17 +92,17 @@ pub(super) enum PortEvent {
 }
 
 impl Port {
-    /// Return the descriptor of a `tcp_inet` port, or `None` for a port of
+    /// Return the descriptor of a `tcp_inet` or `udp_inet` port, or `None` for a port of
     /// the spawn driver.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert!(port.tcp_inet_mut().is_some());
+    /// assert!(port.inet_mut().is_some());
     /// ```
-    pub(super) fn tcp_inet_mut(&mut self) -> Option<&mut TcpInet> {
+    pub(super) fn inet_mut(&mut self) -> Option<&mut Inet> {
         match &mut self.driver {
-            Driver::TcpInet(tcp) => Some(tcp),
+            Driver::Inet(tcp) => Some(tcp),
             Driver::Spawn(_) => None,
         }
     }
@@ -168,7 +169,7 @@ impl Ports {
     /// Return the fds that the IO poll waits for: the output pipe of each
     /// spawn port before its end of file, and then its status pipe, and the
     /// socket of each `tcp_inet` listen port with a caller in its accept
-    /// queue. Only a port with `exit_status` stays open after its end of
+    /// queue, and the socket of each active `udp_inet` port. Only a port with `exit_status` stays open after its end of
     /// file.
     ///
     /// # Examples
@@ -182,7 +183,7 @@ impl Ports {
             .filter_map(|port| match &port.driver {
                 Driver::Spawn(spawn) if spawn.end_of_file => Some(spawn.child.status_fd()),
                 Driver::Spawn(spawn) => Some(spawn.child.output_fd()),
-                Driver::TcpInet(tcp) => tcp.accept_fd(),
+                Driver::Inet(inet) => inet.accept_fd().or_else(|| inet.receive_fd()),
             })
             .collect()
     }
@@ -199,9 +200,23 @@ impl Ports {
         self.by_id
             .iter()
             .find_map(|(&id, port)| match &port.driver {
-                Driver::TcpInet(tcp) if tcp.accept_fd() == Some(fd) => Some(id),
+                Driver::Inet(tcp) if tcp.accept_fd() == Some(fd) => Some(id),
                 _ => None,
             })
+    }
+
+    /// Return whether an active `udp_inet` port waits for a datagram on the
+    /// fd `fd`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(ports.receiving(fd));
+    /// ```
+    pub(super) fn receiving(&self, fd: c_int) -> bool {
+        self.by_id
+            .values()
+            .any(|port| matches!(&port.driver, Driver::Inet(inet) if inet.receive_fd() == Some(fd)))
     }
 
     /// Read the fd `fd` that the IO poll found ready, and return its port
