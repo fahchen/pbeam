@@ -326,15 +326,17 @@ enum ExitPhase {
 }
 
 /// A scheduler on one OS thread. A process runs until it waits, exits, or
-/// switches out at an ERTS switch point. It follows the ERTS model: the
-/// process table holds every live process, also an exiting one,
-/// `current_process` names the running process, and the run queue holds
-/// only processes that wait for a turn. A process can be in the run queue
-/// for Erlang work or only to handle its signals.
+/// switches out at an ERTS switch point. It follows the ERTS model. The
+/// process table holds every live process, also an exiting one, and the
+/// slot of the running process. The run queue holds only processes that
+/// wait for a turn. A process can be in the run queue for Erlang work or
+/// only to handle its signals.
 #[derive(Debug)]
 pub(super) struct Scheduler {
-    /// All live processes, including the current process.
-    processes: HashMap<ProcessId, ProcessState>,
+    /// All live processes, including the current process, and the slot of
+    /// the current process, like `current_process` in the ERTS scheduler
+    /// data.
+    processes: ProcessTable,
     /// The processes that left the process table in their exit and switched
     /// out before the end of their exit, as ERTS keeps a process in the
     /// `ERTS_PSFLG_FREE` state (`erl_process.c:14469`, `14814-14816`), with
@@ -345,9 +347,6 @@ pub(super) struct Scheduler {
     /// Processes that wait for a turn, in run order. The current process is
     /// not in this queue, as in ERTS.
     runnable: VecDeque<ProcessId>,
-    /// The process that runs now, like `current_process` in the ERTS
-    /// scheduler data.
-    current_process: Option<ProcessId>,
     /// Number for the next process identifier.
     next_process_id: u64,
     /// Number for the next reference.
@@ -461,10 +460,9 @@ impl Scheduler {
         resources.put(Ttys::default());
         resources.put(Ports::default());
         Scheduler {
-            processes: HashMap::new(),
+            processes: ProcessTable::default(),
             freed: HashMap::new(),
             runnable: VecDeque::new(),
-            current_process: None,
             next_process_id: ROOT.0 + 1,
             next_reference: 0,
             unique: 0,
@@ -633,7 +631,7 @@ impl Scheduler {
     /// ```
     fn insert(&mut self, process: ProcessState) {
         let id = process.id;
-        self.processes.insert(id, process);
+        self.processes.insert(process);
         self.enqueue(id);
     }
 
@@ -654,7 +652,7 @@ impl Scheduler {
     /// scheduler.enqueue(child);
     /// ```
     fn enqueue(&mut self, id: ProcessId) {
-        let current = self.current_process == Some(id);
+        let current = self.processes.current_id() == Some(id);
         let process = self.processes.get_mut(&id).expect("the process is alive");
         let idle_dirty = process.dirty_running() && !process.mailbox.has_control_signals();
         if !process.in_run_queue && !current && !idle_dirty {
@@ -954,8 +952,7 @@ impl Scheduler {
             self.handle_dirty_signals(id)?;
             return Ok(Turn::Done);
         }
-        self.current_process = Some(id);
-        let process = self.current_process_mut();
+        let process = self.processes.set_current(id);
         process.in_run_queue = false;
         process.fcalls = CONTEXT_REDS;
         if let Some(reason) = process.exiting.clone() {
@@ -1194,10 +1191,11 @@ impl Scheduler {
     /// ```
     pub(super) fn start_dirty_write(&mut self, write: IovecWrite, tail: bool) {
         let call = self.dirty_io.next_call();
-        let id = self
-            .current_process
+        let process = self
+            .processes
+            .current_mut()
             .expect("the scheduler has a current process");
-        let process = self.processes.get_mut(&id).expect("the process is alive");
+        let id = process.id;
         let record = process.dirty_write.insert(DirtyWrite {
             call,
             tail,
@@ -1402,8 +1400,8 @@ impl Scheduler {
     /// ```
     pub(super) fn current_process(&self) -> &ProcessState {
         // ponytail: only the run loop calls this, after `schedule_next` returned a process.
-        self.current_process
-            .and_then(|id| self.processes.get(&id))
+        self.processes
+            .current()
             .expect("the scheduler has a current process")
     }
 
@@ -1417,8 +1415,8 @@ impl Scheduler {
     /// ```
     pub(super) fn current_process_mut(&mut self) -> &mut ProcessState {
         // ponytail: only the run loop calls this, after `schedule_next` returned a process.
-        self.current_process
-            .and_then(|id| self.processes.get_mut(&id))
+        self.processes
+            .current_mut()
             .expect("the scheduler has a current process")
     }
 
@@ -1441,12 +1439,9 @@ impl Scheduler {
     /// assert_eq!(atoms.name(506), Some("ok"));
     /// ```
     pub(super) fn current_process_and_atoms(&mut self) -> (&mut ProcessState, &AtomTable) {
-        let id = self
-            .current_process
-            .expect("the scheduler has a current process");
         let process = self
             .processes
-            .get_mut(&id)
+            .current_mut()
             .expect("the scheduler has a current process");
         (process, &self.atoms)
     }
@@ -1466,8 +1461,8 @@ impl Scheduler {
     pub(super) fn current_module(&self) -> Result<&LoadedModule, BeamError> {
         // ponytail: only the run loop calls this, for a process with an active frame.
         let frame = self
-            .current_process
-            .and_then(|id| self.processes.get(&id))
+            .processes
+            .current()
             .and_then(|process| process.frames.last())
             .expect("the current process has an active frame");
         self.code.loaded_by_id(frame.module_id)
@@ -1566,11 +1561,10 @@ impl Scheduler {
     fn schedule_out(&mut self) -> &mut ProcessState {
         let used = self.current_reductions();
         self.virtual_reductions = 0;
-        let id = self
-            .current_process
-            .take()
+        let process = self
+            .processes
+            .take_current()
             .expect("the scheduler has a current process");
-        let process = self.processes.get_mut(&id).expect("the process is alive");
         process.reductions += used;
         process
     }
@@ -2732,10 +2726,12 @@ fn named_item(name: &Atom) -> Term {
 
 mod policy;
 mod ports;
+mod process_table;
 mod signals;
 
 pub(super) use policy::PolicyEnd;
 use policy::PolicyProcess;
+use process_table::ProcessTable;
 pub(super) use signals::{Flushed, HandlingPoint, Received};
 
 #[cfg(test)]
