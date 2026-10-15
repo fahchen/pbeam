@@ -970,23 +970,38 @@ fn runs_bs_get_float2_with_a_unit_a_literal_size_and_an_unaligned_position_as_pi
 }
 
 #[test]
-fn runs_erl_parse_of_a_term_with_a_binary_into_eval_bits_and_stops_at_bs_init_writable() {
+fn runs_erl_parse_of_a_term_with_a_binary_through_eval_bits_as_pinned_erts() {
     // `bs_float_probe:parse/0` parses the tokens of
     // `{short, <<1, 2:16, "xy", 1.5/float>>}.`. `erl_parse:normalise/1` builds
     // each binary with `eval_bits:expr_grp/3` (erl_parse.yrl:1960-1966),
-    // which the loader now loads. `eval_bits:expr_grp/3` starts with
-    // `bs_init_writable` (opcode 133), which PBeam does not run yet, so the
-    // run stops there. The modules are the pinned OTP modules that the call
-    // reaches.
-    let modules = ["erl_parse", "eval_bits", "erl_anno", "lists", "erl_scan"].map(pinned_beam);
+    // which starts with `bs_init_writable` and appends each field with a
+    // `private_append` segment. The 1.5 field is a `float` segment of 64
+    // bits. The modules are the pinned OTP modules that the call reaches.
+    let modules = [
+        "erl_parse",
+        "eval_bits",
+        "erl_bits",
+        "erl_anno",
+        "lists",
+        "erl_scan",
+    ]
+    .map(pinned_beam);
     let mut beams: Vec<&[u8]> = modules.iter().map(Vec::as_slice).collect();
     beams.push(BS_FLOAT_PROBE);
     let program = BeamProgram::load(&beams).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let result = program
         .execute("bs_float_probe", "parse", &[])
         .map(|host| host.term)
         .map_err(|error| error.to_string());
-    assert_eq!(result, Err("unsupported BEAM opcode 133".into()));
+    let binary = Term::binary(vec![1, 0, 2, 120, 121, 63, 248, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(
+        result,
+        Ok(Term::tuple(vec![
+            atom("ok"),
+            Term::tuple(vec![atom("short"), binary]),
+        ]))
+    );
     assert_eq!(
         reference("bs_float_probe:parse()"),
         b"{ok,{short,<<1,0,2,120,121,63,248,0,0,0,0,0,0>>}}\n"

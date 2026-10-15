@@ -1,17 +1,16 @@
 use super::super::{read_integer, read_integer_after_first, read_operand, read_value};
 use super::{
     FloatOperation, OPCODE_BIF0, OPCODE_BS_GET_INTEGER2, OPCODE_BS_GET_UTF16, OPCODE_BS_GET_UTF32,
-    OPCODE_BS_INIT_WRITABLE, OPCODE_FADD, OPCODE_FCONV, OPCODE_FDIV, OPCODE_FMOVE, OPCODE_FMUL,
-    OPCODE_FNEGATE, OPCODE_FSUB, OPCODE_GET_MAP_ELEMENTS, OPCODE_GET_RECORD_ELEMENTS,
-    OPCODE_GET_TL, OPCODE_HAS_MAP_FIELDS, OPCODE_INIT_YREGS, OPCODE_IS_ANY_NATIVE_RECORD,
-    OPCODE_PUT_MAP_ASSOC, OPCODE_PUT_MAP_EXACT, OPCODE_PUT_RECORD, OPCODE_PUT_TUPLE2,
-    OPCODE_TEST_EXACT_EQ, OPCODE_TEST_HEAP, OPCODE_TEST_IS_ATOM, OPCODE_TEST_IS_BINARY,
-    OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP, OPCODE_TEST_IS_PID, OPCODE_TEST_IS_PORT,
-    OPCODE_TEST_TAGGED_TUPLE, SELECT_VALUE_LINEAR_LIMIT, parse_code, prepare_select_value_choices,
-    read_binary_match_commands, read_binary_segments, read_move_operand, read_operand_pairs,
-    read_pair_count, read_record_updates, skip_allocation, skip_counted_operands,
-    skip_integer_payload, skip_operand, skip_unsupported_instruction, sort_map_key_pairs,
-    test_kind, unsupported_opcode_operand_count,
+    OPCODE_FADD, OPCODE_FCONV, OPCODE_FDIV, OPCODE_FMOVE, OPCODE_FMUL, OPCODE_FNEGATE, OPCODE_FSUB,
+    OPCODE_GET_MAP_ELEMENTS, OPCODE_GET_RECORD_ELEMENTS, OPCODE_GET_TL, OPCODE_HAS_MAP_FIELDS,
+    OPCODE_INIT_YREGS, OPCODE_IS_ANY_NATIVE_RECORD, OPCODE_PUT_MAP_ASSOC, OPCODE_PUT_MAP_EXACT,
+    OPCODE_PUT_RECORD, OPCODE_PUT_TUPLE2, OPCODE_TEST_EXACT_EQ, OPCODE_TEST_HEAP,
+    OPCODE_TEST_IS_ATOM, OPCODE_TEST_IS_BINARY, OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP,
+    OPCODE_TEST_IS_PID, OPCODE_TEST_IS_PORT, OPCODE_TEST_TAGGED_TUPLE, SELECT_VALUE_LINEAR_LIMIT,
+    parse_code, prepare_select_value_choices, read_binary_match_commands, read_binary_segments,
+    read_move_operand, read_operand_pairs, read_pair_count, read_record_updates, skip_allocation,
+    skip_counted_operands, skip_integer_payload, skip_operand, skip_unsupported_instruction,
+    sort_map_key_pairs, test_kind, unsupported_opcode_operand_count,
 };
 use crate::{
     beam::code::{
@@ -2235,7 +2234,6 @@ fn skips_pinned_module_instruction_operands_and_rejects_truncation() {
         (OPCODE_PUT_RECORD, 6),
         (OPCODE_PUT_TUPLE2, 2),
         (OPCODE_INIT_YREGS, 1),
-        (OPCODE_BS_INIT_WRITABLE, 0),
         (OPCODE_BS_GET_UTF16, 5),
         (OPCODE_BS_GET_UTF32, 5),
         (OPCODE_BS_GET_INTEGER2, 7),
@@ -2357,10 +2355,10 @@ fn reads_bs_create_bin_segments_and_rejects_malformed_lists() {
             BinarySegment::BinaryAll { segment: 2, source: Operand::X(0) },
         ] if text == b"count: "
     ));
-    // {atom,binary} of unit 1 and size all; {atom,binary} of unit 8 and
+    // {atom,binary} of unit 3 and size all; {atom,binary} of unit 8 and
     // size 8.
     for segment in [
-        [0x22, 0x20, 0x10, 0x02, 0x03, 0x32],
+        [0x22, 0x20, 0x30, 0x02, 0x03, 0x32],
         [0x22, 0x20, 0x80, 0x02, 0x03, 0x81],
     ] {
         let mut bytes = vec![0x17, 0x60];
@@ -2749,6 +2747,7 @@ fn arm_field_bytes(instruction: &Instruction) -> usize {
             context,
             commands,
         } => size_of_val(fail_label) + size_of_val(context) + size_of_val(commands),
+        Instruction::BinaryInitWritable => 0,
         Instruction::BinaryCreate {
             fail_label,
             destination,

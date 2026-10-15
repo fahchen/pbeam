@@ -3,9 +3,9 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
 use super::bif::{BIFS, BifId, BifResult, resolve, resolve_calls};
 use super::code_table::export_frame_calls;
 use super::{
-    BeamProgram, CodeTable, Issuer, Outcome, Register, Scheduler, StackSlot, call_arguments,
-    function_at_label, read_bif_arguments, read_operand, read_owned_bif_arguments, read_ref,
-    take_owned, write, write_operand,
+    BeamProgram, BinaryPart, CodeTable, Issuer, Outcome, Register, Scheduler, StackSlot,
+    call_arguments, function_at_label, private_append, read, read_bif_arguments, read_operand,
+    read_owned_bif_arguments, read_ref, take_owned, write, write_operand,
 };
 use crate::{
     BeamModule, Map, Term,
@@ -4495,4 +4495,45 @@ fn gives_up_the_map_of_a_y_register_with_one_owner() {
         Ok(Term::Map(_))
     ));
     drop(held);
+}
+
+#[test]
+fn writes_a_private_append_in_the_array_of_a_binary_with_one_owner() {
+    // ERTS changes the size of the writable binary term in place
+    // (erl_bits.c:1978, 2017), so the source register holds the result.
+    // PBeam writes in the array when the source register owns the only
+    // reference, and builds a new binary when another term shares it.
+    let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![]);
+    let parts = [BinaryPart::Utf8('z')];
+    write(&mut process, &Operand::X(0), Term::binary(b"a".to_vec())).unwrap();
+    let start = match read_ref(&process, &Operand::X(0)).unwrap() {
+        Term::Binary(binary) => Arc::as_ptr(binary.bytes()),
+        other => panic!("not a binary: {other:?}"),
+    };
+    let result = private_append(&mut process, &Operand::X(0), &parts).unwrap();
+    assert_eq!(result, Ok(Term::binary(b"az".to_vec())));
+    let Ok(Term::Binary(appended)) = &result else {
+        unreachable!()
+    };
+    assert_eq!(Arc::as_ptr(appended.bytes()), start);
+    assert_eq!(
+        read(&process, &Operand::X(0)).unwrap(),
+        Term::binary(b"az".to_vec())
+    );
+    drop(result);
+
+    // A shared binary keeps its bytes.
+    let held = read(&process, &Operand::X(0)).unwrap();
+    let result = private_append(&mut process, &Operand::X(0), &parts).unwrap();
+    assert_eq!(result, Ok(Term::binary(b"azz".to_vec())));
+    assert_eq!(held, Term::binary(b"az".to_vec()));
+
+    // The compiler gives the segment only a binary, so another term is a
+    // runtime invariant error.
+    write(&mut process, &Operand::X(0), Term::Integer(1)).unwrap();
+    let error = private_append(&mut process, &Operand::X(0), &parts).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "bs_create_bin private_append segment holds a term that is not a binary: Integer(1)"
+    );
 }

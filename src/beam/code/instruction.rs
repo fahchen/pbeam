@@ -1296,6 +1296,20 @@ pub(crate) enum Instruction {
         context: Operand,
         commands: Vec<BinaryMatchCommand>,
     },
+    /// Makes an empty writable binary in `x0` (`bs_init_writable`, opcode
+    /// 133). ERTS reads the size of the buffer from `x0`, 1024 bytes when
+    /// it is not a small integer that is not negative
+    /// (`erts_bs_init_writable`, erl_bits.c:2020-2049), and keeps no other
+    /// register live (JIT `emit_bs_init_writable`,
+    /// jit/arm/instr_bs.cpp:985-1000). The size is a capacity hint, so the
+    /// binary has no byte.
+    ///
+    /// Encoding: the opcode alone, `[0x85]`.
+    ///
+    /// Erlang: `bytes(N) -> bytes(N, <<>>).` with a loop that appends to
+    /// the accumulator compiles to `{move,{integer,256},{x,0}}` and
+    /// `bs_init_writable`.
+    BinaryInitWritable,
     /// Builds a binary from `segments` in order and writes it to
     /// `destination` (`bs_create_bin`, opcode 177). A `binary` segment with
     /// a term that is not a binary jumps to `fail_label`, or raises
@@ -1645,6 +1659,26 @@ pub(crate) enum BinarySegment {
         unit: u64,
         source: Operand,
     },
+    /// A `private_append` segment of size `all`, the first segment: the
+    /// writable binary in `source`, which the compiler makes with
+    /// `bs_init_writable` and gives to no other term
+    /// (`beam_ssa_private_append`). ERTS writes the later segments in its
+    /// buffer (`erts_bs_private_append_checked`, erl_bits.c:1928-2018).
+    /// Example: `[0x92, 0x10, 0x10, 0x02, 0x13, 0x52]` is
+    /// `{atom,private_append},1,1,nil,{x,1},{atom,all}` when atom 9 is
+    /// `private_append` and atom 5 is `all`.
+    PrivateAppend { source: Operand },
+    /// A `float` segment: the number in `source`, in `size` times `unit`
+    /// bits. The flags give the byte order as for an `integer` segment.
+    /// Example: `[0xA2, 0x10, 0x10, 0x02, 0x03, 0x13]` is
+    /// `{atom,float},1,1,nil,{x,0},{x,1}` when atom 10 is `float`.
+    Float {
+        segment: u64,
+        unit: u64,
+        little: bool,
+        source: Operand,
+        size: Operand,
+    },
     /// An `integer` segment: the integer in `source`, in `size` times
     /// `unit` bits. `little` is true when the flags hold `little` or
     /// `native`: the JIT loads `native` as `little` (`bs_get_flags`,
@@ -1665,10 +1699,10 @@ pub(crate) enum BinarySegment {
     /// `{atom,utf8},1,0,nil,{x,0},{atom,undefined}` when atom 8 is `utf8`
     /// and atom 9 is `undefined`.
     Utf8 { segment: u64, source: Operand },
-    /// A segment that PBeam does not run yet: a `float`, `utf16`, `utf32`,
-    /// or `private_append` segment, an `append`
-    /// segment that is not the first segment or has a size other than
-    /// `all`, or a `binary` segment with another size or unit. It holds
+    /// A segment that PBeam does not run yet: a `utf16` or `utf32` segment,
+    /// an `append` or `private_append` segment that is not the first
+    /// segment or has a size other than `all`, or a `binary` segment with
+    /// another size or a unit other than 1, 2, 4, or 8. It holds
     /// the segment type. Example: `[0x42, 0x20, 0x80, 0x02, 0x03, 0x81]` is
     /// `{atom,binary},2,8,nil,{x,0},{integer,8}` when atom 4 is `binary`.
     Unsupported(Atom),
@@ -2103,6 +2137,7 @@ pub(super) fn parse_code(
                     commands,
                 }
             }
+            OPCODE_BS_INIT_WRITABLE => Instruction::BinaryInitWritable,
             OPCODE_BS_CREATE_BIN => {
                 let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
                 skip_allocation(data, &mut cursor)?;
@@ -2844,7 +2879,9 @@ fn read_binary_segments(
             let size = read_move_operand(data, cursor, atoms, literals)?;
             Ok(match &size {
                 Operand::Value(Term::Atom(size))
-                    if kind.is_static("binary") && unit == 8 && size.is_static("all") =>
+                    if kind.is_static("binary")
+                        && matches!(unit, 1 | 2 | 4 | 8)
+                        && size.is_static("all") =>
                 {
                     BinarySegment::BinaryAll { segment, source }
                 }
@@ -2858,6 +2895,18 @@ fn read_binary_segments(
                     }
                 }
                 _ if kind.is_static("integer") => BinarySegment::Integer {
+                    segment,
+                    unit,
+                    little: is_little_endian(&flags),
+                    source,
+                    size,
+                },
+                Operand::Value(Term::Atom(size))
+                    if kind.is_static("private_append") && index == 0 && size.is_static("all") =>
+                {
+                    BinarySegment::PrivateAppend { source }
+                }
+                _ if kind.is_static("float") => BinarySegment::Float {
                     segment,
                     unit,
                     little: is_little_endian(&flags),
@@ -2977,7 +3026,6 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         OPCODE_PUT_RECORD => Some(6),
         OPCODE_PUT_TUPLE2 => Some(2),
         OPCODE_INIT_YREGS => Some(1),
-        OPCODE_BS_INIT_WRITABLE => Some(0),
         _ => None,
     }
 }
