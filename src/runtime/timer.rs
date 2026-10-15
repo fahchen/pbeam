@@ -56,6 +56,13 @@ pub(super) enum Timer {
         /// The process that waits in the accept queue.
         caller: ProcessId,
     },
+    /// The timer of the receive on the connected port `port`, which
+    /// `TCP_REQ_RECV` starts with a timeout (`add_multi_timer`,
+    /// inet_drv.c:12313-12315).
+    SocketReceive {
+        /// The connected port.
+        port: PortId,
+    },
 }
 
 /// The receiver of a BIF timer message.
@@ -165,6 +172,19 @@ impl Timers {
     pub(super) fn now(&self) -> i64 {
         self.correction
             .monotonic_time(os_monotonic_time(self.start))
+    }
+
+    /// Return the time offset in nanoseconds, as `erts_get_time_offset`
+    /// reads it (`erl_time_sup.c`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let timers = Timers::new();
+    /// assert_eq!(timers.time_offset(), timers.time_offset());
+    /// ```
+    pub(super) fn time_offset(&self) -> i64 {
+        self.correction.time_offset()
     }
 
     /// Return the Erlang system time of the run in nanoseconds: the

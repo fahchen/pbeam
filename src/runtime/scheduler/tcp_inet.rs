@@ -33,10 +33,10 @@ use crate::{
 };
 
 /// The atom of the messages of an accept.
-const INET_ASYNC: &str = "inet_async";
+pub(super) const INET_ASYNC: &str = "inet_async";
 
 /// The timeout of an accept without end (`INET_INFINITY`).
-const INFINITY: u32 = u32::MAX;
+pub(super) const INFINITY: u32 = u32::MAX;
 
 impl Scheduler {
     /// Run `INET_REQ_ACCEPT` of the current process on the listen port
@@ -208,6 +208,14 @@ impl Scheduler {
     /// scheduler.tcp_stop(listen, tcp);
     /// ```
     pub(super) fn tcp_stop(&mut self, listen: PortId, tcp: Inet) {
+        if let Some(receiver) = tcp.stream.receiver {
+            if let Some(timer) = receiver.timer {
+                self.timers.cancel(timer);
+            }
+            let status = error_status(Term::static_atom("closed"));
+            let message = self.async_message(listen, receiver.id, status);
+            self.deliver(receiver.caller, message);
+        }
         for acceptor in tcp.acceptors {
             self.end_accept(listen, acceptor);
             let status = error_status(Term::static_atom("closed"));
@@ -265,7 +273,7 @@ impl Scheduler {
 impl Scheduler {
     /// Return the message `{inet_async, L, Ref, Status}` of the listen port
     /// `listen`. The `ACCEPT` that the message ends made the atom.
-    fn async_message(&self, listen: PortId, id: u16, status: Term) -> Term {
+    pub(super) fn async_message(&self, listen: PortId, id: u16, status: Term) -> Term {
         let atom = self.atoms.get(INET_ASYNC).expect("an accept made the atom");
         Term::tuple(vec![
             Term::Atom(atom),
@@ -295,6 +303,6 @@ fn ok_port(port: PortId) -> Term {
 }
 
 /// Return the status `{error, Reason}`.
-fn error_status(reason: Term) -> Term {
+pub(super) fn error_status(reason: Term) -> Term {
     Term::tuple(vec![Term::static_atom("error"), reason])
 }

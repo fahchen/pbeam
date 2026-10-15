@@ -11,6 +11,7 @@ use super::{
     dirty_io::{Claim, Completion, DirtyIo},
     ets::EtsTables,
     host::{
+        self,
         input::{self, Readiness},
         output::IovecWrite,
         signal,
@@ -33,7 +34,8 @@ use super::{
 use crate::{
     error::{BeamError, error},
     term::{
-        Atom, AtomTable, Group, LiveBytes, MapDrain, ProcessId, Reference, SMALL_INTEGER_MIN, Term,
+        Atom, AtomTable, Group, LiveBytes, MapDrain, PortId, ProcessId, Reference,
+        SMALL_INTEGER_MIN, Term, external::block_hash,
     },
 };
 
@@ -262,6 +264,8 @@ pub(super) enum MonitorTarget {
     /// The `port` type with a registered name, or with
     /// `{Name, nonode@nohost}`.
     PortName(Atom),
+    /// The `port` type with a port.
+    Port(PortId),
 }
 
 /// The options of `erlang:monitor/3`, after the BIF checked them as ERTS
@@ -355,6 +359,10 @@ pub(super) struct Scheduler {
     /// (`erl_bif_unique.c:574`, `812`): the number of
     /// `erlang:unique_integer/0` calls so far.
     unique: u64,
+    /// The seed of the hash of `term_to_binary/2` with `local`
+    /// (`local_node_hash`, external.c:134), which the first such call
+    /// computes (see [`Scheduler::local_node_hash`]).
+    local_node_hash: std::cell::OnceCell<u32>,
     /// Return value or exit reason of the root process. The root process
     /// records it when its exit starts, and the run ends only after the
     /// exit completes ([`Self::root_exited`]).
@@ -466,6 +474,7 @@ impl Scheduler {
             next_process_id: ROOT.0 + 1,
             next_reference: 0,
             unique: 0,
+            local_node_hash: std::cell::OnceCell::new(),
             root_result: None,
             names: HashMap::new(),
             persistent_terms: PersistentTerms::default(),
@@ -1035,6 +1044,7 @@ impl Scheduler {
                     }
                 }
                 Timer::Accept { port, caller } => self.tcp_accept_timeout(port, caller),
+                Timer::SocketReceive { port } => self.tcp_receive_timeout(port),
             }
         }
     }
@@ -1079,6 +1089,7 @@ impl Scheduler {
         let selected = self.resources.borrow_mut::<Ttys>().input_selected();
         let dirty = self.dirty_io.running();
         let ports = self.resources.borrow_mut::<Ports>().wait_fds();
+        let writes = self.resources.borrow_mut::<Ports>().write_fds();
         let fds: Vec<_> = [
             selected.then_some(libc::STDIN_FILENO),
             dirty.then(|| self.dirty_io.wake_fd()),
@@ -1088,10 +1099,10 @@ impl Scheduler {
         .flatten()
         .chain(ports)
         .collect();
-        if fds.is_empty() {
+        if fds.is_empty() && writes.is_empty() {
             return Ok(false);
         }
-        let readiness = input::wait_readable(&fds, timeout);
+        let (readiness, writable) = input::wait(&fds, &writes, timeout);
         if dirty
             && matches!(&readiness, Readiness::Ready(ready) if ready.contains(&self.dirty_io.wake_fd()))
         {
@@ -1115,6 +1126,9 @@ impl Scheduler {
         }
         for fd in readiness.into_ready() {
             self.port_ready(fd)?;
+        }
+        for fd in writable {
+            self.port_writable(fd)?;
         }
         Ok(true)
     }
@@ -2214,6 +2228,10 @@ impl Scheduler {
             reference = reference.pid_reference();
             self.alias_owners.insert(reference, watcher);
         }
+        let target_port = match target {
+            MonitorTarget::Port(port) => Some(port),
+            _ => None,
+        };
         let (kind, id, item) = match target {
             MonitorTarget::Process(id) => ("process", Some(id), Term::Pid(id)),
             MonitorTarget::ProcessName(name) => {
@@ -2221,6 +2239,7 @@ impl Scheduler {
                 ("process", id, named_item(&name))
             }
             MonitorTarget::PortName(name) => ("port", None, named_item(&name)),
+            MonitorTarget::Port(port) => ("port", None, Term::Port(port)),
         };
         if id == Some(watcher) {
             return Ok(reference);
@@ -2241,13 +2260,37 @@ impl Scheduler {
         self.current_process_mut()
             .monitors
             .insert(reference, origin);
-        match id {
-            Some(id) if kind == "process" => {
+        match (id, target_port) {
+            (Some(id), _) if kind == "process" => {
                 self.send_monitor(id, Monitor { watcher, reference });
             }
+            (_, Some(port)) if self.monitor_port(port, watcher, reference) => {}
             _ => self.send_monitor_down(None, watcher, reference, Term::static_atom("noproc")),
         }
         Ok(reference)
+    }
+
+    /// Return the seed of the hash of `term_to_binary/2` with `local`, as
+    /// `erts_late_init_external` computes it once for the node
+    /// (external.c:136-198): the block hash of the time offset (8 bytes,
+    /// little-endian), the host name, and the OS pid in decimal, with the
+    /// low 32 bits of the monotonic time as its start value.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(scheduler.local_node_hash(), scheduler.local_node_hash());
+    /// ```
+    pub(in crate::runtime) fn local_node_hash(&self) -> u32 {
+        *self.local_node_hash.get_or_init(|| {
+            let node = [
+                &self.timers.time_offset().to_le_bytes()[..],
+                &host::host_name(),
+                std::process::id().to_string().as_bytes(),
+            ]
+            .concat();
+            block_hash(&node, self.timers.now() as u32)
+        })
     }
 
     /// Remove a monitor that the current process holds, as the ERTS
@@ -2275,6 +2318,9 @@ impl Scheduler {
             let demonitor = Signal::Demonitor { watcher, reference };
             // A target that does not exist drops the signal.
             let _ = self.send_signal(Some(watcher), target, demonitor);
+        }
+        if let Term::Port(port) = monitor.item {
+            self.demonitor_port(port, reference);
         }
         true
     }
@@ -2637,7 +2683,7 @@ impl Scheduler {
                                 let _ = self.send_signal(Some(id), linked, exit);
                             }
                             LinkId::Process(_) => {}
-                            LinkId::Port(port) => self.port_link_exit(port, id),
+                            LinkId::Port(port) => self.port_link_exit(port, id, &reason),
                         }
                         reds -= 1;
                     }
@@ -2668,6 +2714,13 @@ impl Scheduler {
                             };
                             // A target that does not exist drops the signal.
                             let _ = self.send_signal(Some(id), *target, demonitor);
+                        }
+                        if let Some(OriginMonitor {
+                            item: Term::Port(port),
+                            ..
+                        }) = &origin.monitor
+                        {
+                            self.demonitor_port(*port, reference);
                         }
                         reds -= 1;
                     }
@@ -2733,6 +2786,7 @@ mod ports;
 mod process_table;
 mod signals;
 mod tcp_inet;
+mod tcp_stream;
 
 pub(super) use policy::PolicyEnd;
 use policy::PolicyProcess;

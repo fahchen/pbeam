@@ -606,7 +606,9 @@ pub(super) fn open_port_id(scheduler: &mut Scheduler, port: &Term) -> Option<Por
 /// output count, use 40 reductions, and return `true`. A failed write
 /// closes the port with the `erl_errno_id` atom of the failure as its
 /// reason, for example `epipe`, as `driver_failure_posix` does
-/// (`sys_drivers.c:1180-1184`). A term that is not an open port, or `Data`
+/// (`sys_drivers.c:1180-1184`). On a `tcp_inet` port, the driver runs the
+/// output with its `inet_reply` message (see `Scheduler::tcp_send`). A term
+/// that is not an open port, or `Data`
 /// that is not iodata, gives the atom `badarg`. The result traps to
 /// `erlang:bif_handle_signals_return/2` when the caller has incoming
 /// signals. After these checks, a caller without a `port` capability with
@@ -621,8 +623,9 @@ pub(super) fn open_port_id(scheduler: &mut Scheduler, port: &Term) -> Option<Por
 ///
 /// # Errors
 ///
-/// An `OptionList` other than `[]` returns a runtime error. A new atom in a
-/// full atom table gives the error of `AtomTable::put`.
+/// An `OptionList` other than `[]` and an output of a `tcp_inet` port that
+/// PBeam does not run return a runtime error. A new atom in a full atom
+/// table gives the error of `AtomTable::put`.
 pub(super) fn port_command(
     context: &mut BifContext<'_>,
     port: &Term,
@@ -648,9 +651,9 @@ pub(super) fn port_command(
     let ports = scheduler.resources.borrow_mut::<Ports>();
     let port_state = ports.get_mut(id).expect("the port is open");
     let Driver::Spawn(spawn) = &mut port_state.driver else {
-        return Err(error(
-            "unsupported erlang:port_command/2 on a tcp_inet port: see \"tcp_inet ports\" in docs/erts-differences.md",
-        ));
+        port_state.output += bytes.len() as u64;
+        scheduler.tcp_send(id, &bytes)?;
+        return Ok(signals_return(scheduler, port, Term::static_atom("true")));
     };
     match spawn.child.write_input(&bytes) {
         Ok(()) => port_state.output += bytes.len() as u64,
@@ -768,6 +771,7 @@ pub(super) fn port_control(
     let reply = match reply {
         Control::Reply(reply) => reply,
         Control::Accept(timeout) => scheduler.tcp_accept(id, timeout)?,
+        Control::Receive { timeout, length } => scheduler.tcp_receive(id, timeout, length)?,
         Control::Badarg => {
             return Ok(signals_return(scheduler, port, Term::static_atom("badarg")));
         }
