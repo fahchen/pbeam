@@ -566,3 +566,41 @@ The compare fast path lands. It removes the work-vector allocation of `Term::com
 The pinned ERTS uses 10 (`erts/emulator/beam/emu/generators.tab:240-254`, OTP 29.1.1). Its ordered search compares one encoded value at a time, which costs less than the `Term::compare` call of PBeam, so the crossover of ERTS sits below the crossover of PBeam.
 
 No end-to-end probe covers 17 to 32 choices, so the bound of 32 is an estimate. A later session can pin the bound with end-to-end probes at 32 and 64 choices, and `docs/backlog.md` records that gap with its trigger. The fixture also measures only the 256-choice shape, the 16-choice shape, and the 2-choice control, so no number here covers a `select_val` with 6878 choices.
+
+## The resolved export target of an import, task [#628](https://github.com/fahchen/pbeam/issues/628)
+
+This section records the gate of task [#628](https://github.com/fahchen/pbeam/issues/628), proposal 2 of the attribution of task [#625](https://github.com/fahchen/pbeam/issues/625). Before the change, each `call_ext` of module code compared its module, function, and arity with `erlang:apply/2,3`, `erlang:load_nif/2`, and the two small BIF tables, and then looked up the module by name, the function name, the export key, and the entry label. ERTS resolves each import to an export entry one time at load time and branches through the entry (`erts/emulator/beam/jit/asm_load.c:1198-1206`, `erts/emulator/beam/export.c:204-217`, `erts/emulator/beam/jit/arm/instr_call.cpp:150-164`, OTP 29.1.1).
+
+The change has two commits. `6595dcc8` keeps the `ImpT` entries of a module in `BeamModule::imports`, with the call that the loader decides for each entry, and `Instruction::CallExternal` holds the import index. `8e1b44b4` gives each import of each loaded module of a run a slot in the code table. The first call that finds the export keeps its target in the slot, and each later call reads the slot and makes no lookup by name. A call that finds no export keeps the slot empty, so the next call finds a module that loaded after it. The fast path also reuses the process of the call and makes no second process table lookup.
+
+### The session
+
+The before revision is `b8c71940`, the head of `origin/main` that the branch starts from. The after revision is `8e1b44b4`. Each revision is a `git archive` of its commit, built with `cargo build --locked --release --bin pbeam` and `cargo test --locked --release --test dispatch_baseline --no-run` in its own target directory. The session ran on 2026-10-15 from 12:51:44 to 12:55:58 JST on the host of "The environment of the numbers", with no other `cargo`, `rustc`, or `nextest` process. The floor rows run `records_the_interpreter_dispatch_baseline --exact --nocapture --test-threads=1`, eight rounds in rotated order, and each value is the minimum of nine probe runs inside one invocation. The Terra rows send 60 `j` and `k` keys at a gap of 0.5 s to the release Terra Counter (`PBEAM_BIN=<bin> bash scripts/example.sh terra_counter --no-build`), three rounds in rotated order, and each value is the CPU time of the `pbeam` process over the key window, less the idle rate, divided by the answered keys. The one-minute load is 2.03 to 2.48 for the floor rounds and 1.36 to 2.22 for the Terra rounds.
+
+| Shape | Before `b8c71940`, minimum of 8 rounds | After `8e1b44b4`, minimum of 8 rounds | Change |
+| --- | --- | --- | --- |
+| `call_ext_only` floor loop, 200000 iterations | 257.0 ns (rounds 257.0 to 258.9) | 122.5 ns (rounds 122.5 to 126.0) | -134.5 ns, -52.3 percent |
+| `call_only` floor loop, 200000 iterations | 102.0 ns (102.0 to 103.0) | 102.1 ns (102.1 to 107.9) | +0.1 percent |
+| Position `call_only` floor loop, 200000 iterations | 101.8 ns (101.8 to 103.0) | 102.0 ns (102.0 to 103.9) | +0.2 percent |
+| `call_only` plus `gc_bif '+'`, 200000 iterations | 156.7 ns | 157.5 ns | +0.5 percent |
+| `call_only` plus the `bif` of `tuple_size/1` | 177.1 ns | 173.6 ns | -2.0 percent |
+| `call_only` plus the `bif` of `element/2` | 157.0 ns | 157.4 ns | +0.3 percent |
+| `call_only` plus the `bif` of `hd/1` | 154.1 ns | 155.8 ns | +1.1 percent |
+| `call_only` plus the `bif` of `map_get/2` on a 1000-key map | 189.4 ns | 187.9 ns | -0.8 percent |
+
+| Terra round | Before `b8c71940`, ms of CPU time for each key | After `8e1b44b4`, ms of CPU time for each key |
+| --- | --- | --- |
+| 1 | 27.500 | 22.500 |
+| 2 | 27.000 | 23.488 |
+| 3 | 26.000 | 25.167 |
+| Mean | 26.833 | 23.718 |
+
+The `call_ext_only` shape falls by 134.5 ns for each iteration, and the two ranges of the eight rounds do not overlap. The attribution of task #625 expected about 50 ns to 60 ns from the lookups by name, plus a part of the 13.8 percent of the `CallExternal` body. The change also removes the name compares, the classification scans, and the second process table lookup of the call. This record does not split the 134.5 ns between those parts. The shapes with no external call move by -2.0 to +1.1 percent, inside the spread of the rounds of one revision. The CPU time for each key falls by 3.1 ms, or 11.6 percent, at the mean of the three rounds, and every after round is below every before round. The expected gain of the attribution was 1.2 ms to 1.4 ms for each key. The resolution of the CPU time of `ps` is 10 ms, or about 0.17 ms for each key over 60 keys, and three rounds do not bound the spread of the Terra rows well, so the Terra number is weaker than the floor number.
+
+The raw records are the session log `session.txt` and the files `floor-r<round>-<revision>.txt` and `terra-r<round>-<revision>.log` of the session, which stay outside the repository.
+
+### Known gaps
+
+- The Terra rows hold three rounds of each revision. The difference of the means is 3.1 ms, and the largest spread of one revision over its rounds is 2.7 ms.
+- The record does not split the fall of the `call_ext_only` shape by part.
+- The `ModuleId` lookup of `Cursor::refresh` for a call into another module stays, as the attribution of task #625 expected.
