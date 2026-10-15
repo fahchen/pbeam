@@ -994,3 +994,52 @@ The profile script subtracts the CPU rate of a 3 s idle window from the key wind
 - The `hd/1` shape is 1.1 percent slower, and the record does not show the cause.
 - The record does not split the fall of the `call_ext_only` shape by part.
 - The `ModuleId` lookup of `Cursor::refresh` for a call into another module stays, as the attribution of task #625 expected.
+
+## The Y register storage of a released frame, task [#630](https://github.com/fahchen/pbeam/issues/630)
+
+This section records the gate of task [#630](https://github.com/fahchen/pbeam/issues/630), a proposal of the attribution of task [#625](https://github.com/fahchen/pbeam/issues/625). Each body call gives its frame a new slot array at `allocate`, and the return frees it. ERTS keeps the Y registers on the process stack, with no separate slot array. `allocate` first checks the free space of the heap and the stack, which can start a garbage collection (`emit_gc_test`, `erts/emulator/beam/jit/arm/instr_common.cpp:137-155` and `:211` at `OTP-29.1.1`). Then it reserves the Y registers by moving the stack pointer `E`, and `deallocate` only moves `E` back (`emit_allocate_heap` and `emit_deallocate`, `instr_common.cpp:206-229`). The proposal expected about 3 percent of the CPU time for each release Terra key press.
+
+The measured change is commit `1c344478` of the branch `perf/630-frame-pool`. A process keeps up to 8 empty slot arrays of at most 32 slots in a free list. A return and a tail call put the slot array of the released frame in the list, and the `allocate` of a frame with no slot array takes one from it. The live bytes of the process count the list. The change keeps the `Arc` graph of terms and changes no value. Commit `00e3f44e` reverts it, because the gate below shows no gain on the shape that the change targets.
+
+### The session
+
+The before revision is `e93523c3`, the head of `origin/main` that the branch starts from. The after revision is `1c344478`. Each revision is a `git archive` of its commit, built with `cargo build --locked --release --bin pbeam` and `cargo test --locked --release --test dispatch_baseline --no-run` in its own target directory. One interleaved session ran on 2026-10-15 from 17:20:30 to 17:27:45 JST on an Apple M1 Max with 10 CPUs: eight rounds of `records_the_interpreter_dispatch_baseline --exact --nocapture --test-threads=1`, then six rounds of 60 keys of `terra_counter` with the release `pbeam`, each round in rotated order. The one-minute load is 1.02 to 2.93, and no other `cargo`, `rustc`, or `nextest` process ran. Each floor round is the minimum of nine probe runs inside one invocation.
+
+| Shape | Before `e93523c3`, minimum of 8 rounds | After `1c344478`, minimum of 8 rounds | Change |
+| --- | --- | --- | --- |
+| `call_ext_only` floor loop, 200000 iterations | 47.7 ns (rounds 47.7 to 56.8) | 49.1 ns (49.1 to 49.4) | +1.4 ns, +2.9 percent |
+| `call_only` floor loop, 200000 iterations | 42.4 ns (42.4 to 43.6) | 44.2 ns (44.2 to 44.5) | +1.8 ns, +4.2 percent |
+| Position `call_only` floor loop, 200000 iterations | 42.4 ns (42.4 to 43.6) | 44.2 ns (44.2 to 44.5) | +1.8 ns, +4.2 percent |
+
+| Terra round | Before `e93523c3`, ms of CPU time for each key | After `1c344478`, ms of CPU time for each key |
+| --- | --- | --- |
+| Round 1 | 16.000 | 15.500 |
+| Round 2 | 16.167 | 14.000 |
+| Round 3 | 14.167 | 15.833 |
+| Round 4 | 14.667 | 16.000 |
+| Round 5 | 16.500 | 15.667 |
+| Round 6 | 16.500 | 15.833 |
+| Mean of 6 rounds | 15.667 | 15.472 |
+| Median of 6 rounds | 16.083 | 15.750 |
+
+The Terra rows are the raw CPU time of `pbeam` for each key, with no idle correction. The idle correction changes only round 1 of `e93523c3`, to 14.319 ms. One tick of 10 ms of `ps` is 0.167 ms for each key.
+
+A second interleaved session on 2026-10-15 from 17:30:55 to 17:31:07 JST runs a body-call probe with the same two binaries: `loop(N) -> _ = f(N), loop(N - 1).`, `f(N) -> _ = g(N), N.`, and `g(N) -> {N}.`, 3000000 iterations, each with two `allocate` instructions, one return of a frame with Y registers, and one `call_last`. It has eight rounds in rotated order, and the one-minute load is 3.50 to 3.83. The user CPU time of the run is 0.75 s to 0.78 s before (median 0.76 s) and 0.58 s to 0.59 s after (median 0.59 s), which is 22 percent less, or about 57 ns for each iteration.
+
+### The decision
+
+The change does not land. The CPU time for each release Terra key press, which is the shape that the change targets, falls by 0.195 ms (1.2 percent) at the mean and by 0.333 ms (2.1 percent) at the median. That is one or two ticks of `ps`, the ranges of the two revisions overlap (14.167 to 16.500 ms before, 14.000 to 16.000 ms after), and the after round is below the before round in four of six rounds. The expected 3 percent is about 0.47 ms, and the session does not show it. The three floor loops, which have no `allocate`, are slower by 1.4 ns to 1.8 ns, and the ranges of the `call_only` rows do not overlap.
+
+The body-call probe shows that the free list removes most of the cost of a frame allocation. But the Terra key press spends too little of its time in frame allocations for the gain to show. The 11.7 percent of allocation in the attribution of task #625 thus includes more than the slot arrays of frames.
+
+In `1c344478`, `call_only`, `call_last`, and the tail call of `enter_frame` call `replace_frame`, which puts the slot array of the released frame in the free list. Thus the code of the free list runs in each iteration of the three floor loops.
+
+Two variants of the working tree tried to remove the floor cost. Their probes ran on 2026-10-15 from 17:28:25 to 17:29:35 JST, outside the measurement rule: no load is recorded, and each variant has only three runs. Each run pairs the variant with a run of `e93523c3`, and the numbers are the minimum of the `call_only` floor loop of 200000 iterations. A variant that keeps the slot array in the frame at a tail call, with `#[inline]` on the three new methods, measured 45.7 ns (`p4-wip.txt` to `p6-wip.txt`), against 42.4 ns of `e93523c3` (`p4-e93523c3.txt` to `p6-e93523c3.txt`). A variant that changes only `allocate` and the return measured 45.4 ns (`p7-wipc.txt` to `p9-wipc.txt`), against 42.5 ns of `e93523c3` (`p7-e93523c3.txt` to `p9-e93523c3.txt`). In this variant, the floor loops run the interpreter source of `e93523c3`, but `ProcessState` has the new field `free_stacks`. The files `p1-wip.txt` to `p3-wip.txt` measure an earlier state of the working tree that the record does not keep, and the record does not use them. The floor cost stays when the floor loop runs the interpreter source of `e93523c3`. The cause, the code layout of the run loop or the layout of `ProcessState`, is not found.
+
+The raw records are the session logs `session.txt` and `alloc-session.txt` and the files `floor-r<round>-<revision>.txt`, `terra-r<round>-<revision>.log`, and `alloc-r<round>-<revision>.txt` of the two sessions, and the files `p<run>-<variant>.txt` of the variant probes, which stay outside the repository.
+
+### Known gaps
+
+- The session does not resolve a change of less than about 0.5 ms for each key on the Terra key press.
+- The record does not find the cause of the floor cost: the code layout of the run loop or the layout of `ProcessState`.
+- The record does not split the 11.7 percent of allocation of a Terra key press by allocation site.

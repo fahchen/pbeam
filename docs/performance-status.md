@@ -50,6 +50,20 @@ The step 0 numbers and the `ddb32f6e` numbers come from two different sessions. 
 
 Each entry is one landed change or one change that is not landed. The entries are newest first.
 
+### 2026-10-15 17:30 JST - Reuse the Y register storage of a released frame, task [#630](https://github.com/fahchen/pbeam/issues/630), pull request [#640](https://github.com/fahchen/pbeam/pull/640) - Not landed
+
+The change keeps up to 8 empty slot arrays of at most 32 slots for each process, from the frames that a return or a tail call releases, and the `allocate` of a frame with no slot array takes one of them. It does not land: the CPU time for each release Terra key press, which is the shape that the change targets, shows no fall beyond the noise of the session, and the floor loops, which have no `allocate`, are slower. A body-call probe with two `allocate` instructions in each iteration is 22 percent faster.
+
+One interleaved session on 2026-10-15 from 17:20:30 to 17:27:45 JST, before `e93523c3` and after `1c344478` (reverted by `00e3f44e`). The floor rows are the minimum of eight rounds in rotated order, and each round is the minimum of nine probe runs inside one invocation. The Terra row is the mean of six rounds of 60 keys in rotated order, with the raw CPU time of `pbeam` and no idle correction. The one-minute load is 1.02 to 2.93. The body-call row comes from a second interleaved session on 2026-10-15 from 17:30:55 to 17:31:07 JST, with the same two binaries, eight rounds in rotated order, and a one-minute load of 3.50 to 3.83. The source is the section "The Y register storage of a released frame, task #630" of `docs/interpreter-dispatch-measurements.md`.
+
+| Shape | Before `e93523c3` | After `1c344478` | Change |
+| --- | --- | --- | --- |
+| `call_ext_only` floor loop, 200000 iterations | 47.7 ns | 49.1 ns | +2.9 percent |
+| Local `call_only` floor loop, 200000 iterations | 42.4 ns | 44.2 ns | +4.2 percent |
+| Position `call_only` floor loop, 200000 iterations | 42.4 ns | 44.2 ns | +4.2 percent |
+| CPU time for each release Terra key press | 15.667 ms | 15.472 ms | -1.2 percent, ranges overlap |
+| Body-call probe, user CPU time of 3000000 iterations, median of 8 rounds | 0.76 s | 0.59 s | -22 percent |
+
 ### 2026-10-15 13:00 JST - Call an import through a resolved export target, task [#628](https://github.com/fahchen/pbeam/issues/628), pull request [#636](https://github.com/fahchen/pbeam/pull/636)
 
 The loader keeps the imports of a module with the call that it decides for each import, and `Instruction::CallExternal` holds the import index. The code table of a run keeps the export target of each import of each loaded module after the first call that finds it, so a later `call_ext` of an export in module code makes no lookup by name and compares no name. A call of a PBeam BIF, which has no `BifId`, still matches its name. A call that finds no export keeps the slot empty, so a module that loads later is found by the next call.
