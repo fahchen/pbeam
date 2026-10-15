@@ -336,7 +336,6 @@ fn runs_the_called_modules_of_an_example_on_demand_as_pinned_erts() {
             ),
             ("HashDict", "no BEAM file in the code path"),
             ("HashSet", "no BEAM file in the code path"),
-            ("calendar", "unsupported BEAM opcode 185 (bif3)"),
             ("crypto", "unsupported BEAM opcode 149 (on_load)"),
             (
                 "elixir_errors",
@@ -347,8 +346,6 @@ fn runs_the_called_modules_of_an_example_on_demand_as_pinned_erts() {
                 "file_io_server",
                 "unsupported BEAM opcode 141 (bs_skip_utf16)"
             ),
-            ("inet_db", "unsupported BEAM opcode 185 (bif3)"),
-            ("io_lib_fread", "unsupported BEAM opcode 185 (bif3)"),
             ("rand", "unsupported BEAM opcode 102 (fnegate)"),
             (
                 "shell_docs",

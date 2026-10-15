@@ -62,6 +62,8 @@ const OPCODE_BS_SKIP_BITS2: u8 = 120;
 const OPCODE_BS_GET_INTEGER2: u8 = 117;
 /// `gc_bif3 Fail Live Bif Arg1 Arg2 Arg3 Dst` (genop.tab:533).
 const OPCODE_GC_BIF3: u8 = 152;
+/// `bif3 Lbl Bif Arg1 Arg2 Arg3 Reg` (genop.tab:716-720).
+const OPCODE_BIF3: u8 = 185;
 /// `is_any_native_record Fail Src` (genop.tab:724).
 const OPCODE_IS_ANY_NATIVE_RECORD: u8 = 186;
 /// `fmove Src Dst` (genop.tab:410). ERTS loads it as `fstore` or `fload`
@@ -445,14 +447,14 @@ pub(crate) enum Instruction {
         deallocate: u32,
     },
     /// Calls a BIF through `bif0` (opcode 9), `bif1` (opcode 10), `bif2`
-    /// (opcode 11), `gc_bif1` (opcode 124), `gc_bif2` (opcode 125), or
-    /// `gc_bif3` (opcode 152) and writes its value to a register. `bif0` has no fail label and decodes with `fail_label` 0.
+    /// (opcode 11), `bif3` (opcode 185), `gc_bif1` (opcode 124), `gc_bif2`
+    /// (opcode 125), or `gc_bif3` (opcode 152) and writes its value to a register. `bif0` has no fail label and decodes with `fail_label` 0.
     /// With fail label 0, a BIF failure raises its exception; with another
     /// fail label, it jumps to the label.
     ///
     /// Encoding: `bif0` has opcode, import index, destination register;
-    /// `bif1` and `bif2` have opcode, fail label, import index, one or two
-    /// arguments, destination register. `gc_bif1`, `gc_bif2`, and `gc_bif3`
+    /// `bif1`, `bif2`, and `bif3` have opcode, fail label, import index, one,
+    /// two, or three arguments, destination register. `gc_bif1`, `gc_bif2`, and `gc_bif3`
     /// have opcode, fail label, live register count, import index, one, two,
     /// or three arguments, destination register. The live count tells the ERTS garbage collector which X
     /// registers hold terms; PBeam has no process heap and does not keep it.
@@ -474,7 +476,11 @@ pub(crate) enum Instruction {
     /// `fixtures/binary_part/binary_part_probe.beam` has
     /// `[0x98, 0xD5, 0x30, 0x00, 0x03, 0x13, 0x23, 0x03]`, which calls import 0
     /// (`erlang:binary_part/3`) with fail label 13, live count 3, `x0`, `x1`,
-    /// and `x2`, and writes `x0`.
+    /// and `x2`, and writes `x0`. `is_integer_probe:guard/3` in
+    /// `fixtures/is_integer/is_integer_probe.beam` has
+    /// `[0xB9, 0xC5, 0x10, 0x03, 0x13, 0x23, 0x03]`, which calls import 1
+    /// (`erlang:is_integer/3`) with fail label 12, `x0`, `x1`, and `x2`, and
+    /// writes `x0`.
     ///
     /// Erlang: `h() -> self().` compiles to `{bif,self,{f,0},[],{x,0}}`, and
     /// `node(Pid) =:= node()` in `io:io_request/2` compiles to
@@ -496,7 +502,12 @@ pub(crate) enum Instruction {
     /// `{gc_bif,length,{f,0},3,[{tr,{x,2},...}],{x,2}}`. The guard
     /// `when binary_part(Binary, Start, Length) =:= <<"ell">>` of
     /// `binary_part_probe:guard/3` compiles to
-    /// `{gc_bif,binary_part,{f,13},3,[{x,0},{x,1},{x,2}],{x,0}}`.
+    /// `{gc_bif,binary_part,{f,13},3,[{x,0},{x,1},{x,2}],{x,0}}`. The
+    /// guard `when is_integer(Term, Low, High)` of
+    /// `is_integer_probe:guard/3` compiles to
+    /// `{bif,is_integer,{f,12},[{x,0},{x,1},{x,2}],{x,0}}`, as the compiler
+    /// emits a BIF of arity 3 that does no garbage collection as `bif3`
+    /// (`beam_asm.erl:650`; `beam_ssa_codegen.erl:2970`).
     Bif {
         /// Label to jump to when the BIF fails, or 0 to raise the exception.
         fail_label: u32,
@@ -2344,14 +2355,15 @@ pub(super) fn parse_code(
                     destination: read_register(data, &mut cursor)?,
                 }
             }
-            OPCODE_BIF1 | OPCODE_BIF2 | OPCODE_GC_BIF1 | OPCODE_GC_BIF2 | OPCODE_GC_BIF3 => {
+            OPCODE_BIF1 | OPCODE_BIF2 | OPCODE_BIF3 | OPCODE_GC_BIF1 | OPCODE_GC_BIF2
+            | OPCODE_GC_BIF3 => {
                 let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
                 if matches!(opcode, OPCODE_GC_BIF1 | OPCODE_GC_BIF2 | OPCODE_GC_BIF3) {
                     skip_live_registers(data, &mut cursor)?;
                 }
                 let argument_count = match opcode {
                     OPCODE_BIF1 | OPCODE_GC_BIF1 => 1,
-                    OPCODE_GC_BIF3 => 3,
+                    OPCODE_BIF3 | OPCODE_GC_BIF3 => 3,
                     _ => 2,
                 };
                 let bif = bif_import(
