@@ -1738,7 +1738,9 @@ pub(super) fn list_to_atom(atoms: &mut AtomTable, term: &Term) -> Result<BifResu
 /// `"unix"` (`sys/unix/sys.c:835`) and the OS flavor of the host. ERTS makes
 /// both atoms at emulator start (`os_info_init` in
 /// `erl_bif_info.c:6418-6440`); PBeam puts them into the atom table of the
-/// run at this call.
+/// run at this call. The item `otp_release` returns `ERLANG_OTP_RELEASE` as
+/// a string (`erl_bif_info.c:3231-3234`); `build.rs` takes it from the
+/// `erlang` pin in `mise.toml`.
 ///
 /// # Examples
 ///
@@ -1747,7 +1749,7 @@ pub(super) fn list_to_atom(atoms: &mut AtomTable, term: &Term) -> Result<BifResu
 /// let os_type = system_info(&mut atoms, &Term::static_atom("os_type"))?;
 /// // macOS: {unix, darwin}.
 /// assert!(matches!(os_type, BifResult::Value(Term::Tuple(_))));
-/// assert!(system_info(&mut atoms, &Term::static_atom("otp_release")).is_err());
+/// assert!(system_info(&mut atoms, &Term::static_atom("wordsize")).is_err());
 /// ```
 ///
 /// # Errors
@@ -1761,6 +1763,11 @@ pub(super) fn system_info(atoms: &mut AtomTable, item: &Term) -> Result<BifResul
             Term::Atom(atoms.put("unix")?),
             Term::Atom(atoms.put(&host::os_flavor())?),
         ]))),
+        Term::Atom(atom) if atoms.name_of(atom) == "otp_release" => Ok(Value(Term::list_from(
+            env!("PBEAM_OTP_RELEASE")
+                .bytes()
+                .map(|byte| Term::Integer(i64::from(byte))),
+        ))),
         _ => Err(error(format!(
             "unsupported erlang:system_info/1 argument {}",
             debug_term(item, atoms)
