@@ -126,6 +126,10 @@ name = "bif_costs"
 path = "tests/integration/bif_costs.rs"
 
 [[test]]
+name = "binary_to_list"
+path = "tests/integration/binary_to_list.rs"
+
+[[test]]
 name = "bifs"
 path = "tests/integration/bifs.rs"
 
