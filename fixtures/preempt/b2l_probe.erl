@@ -57,8 +57,26 @@ inputs() ->
      {three, 2000000, 1000001, 2000000}, {three, 3000000, 2, 2999999}].
 
 delta(Input, Opts) ->
-    Pid = spawn_opt(?MODULE, measure, [self(), Input, arg(Input)], Opts),
-    receive {Pid, Delta} -> Delta end.
+    collect(spawn_opt(?MODULE, measure, [self(), Input, arg(Input)], [monitor | Opts])).
+
+%% Wait for the report of a monitored worker. The worker reports after it
+%% checks its result, so a wrong result or a crash of the worker stops the
+%% collector with an error. After an ok report, wait for the normal exit of
+%% the worker, so that no 'DOWN' message stays in the mailbox.
+collect({Pid, Ref}) ->
+    receive
+        {Pid, {ok, Delta}} -> receive {'DOWN', Ref, process, Pid, normal} -> Delta end;
+        {Pid, {error, What}} -> error({check, What});
+        {'DOWN', Ref, process, Pid, Reason} -> error({worker, Reason})
+    end.
+
+%% Report the reduction delta after the check of the result.
+report(Collector, Delta, Input, Arg, Result) ->
+    Report = try check(Input, Arg, Result) of
+                 ok -> {ok, Delta}
+             catch Class:Reason -> {error, {Class, Reason}}
+             end,
+    Collector ! {self(), Report}.
 
 arg(none) -> none;
 arg({one, N}) -> bytes(N);
@@ -78,8 +96,8 @@ measure(Collector, Input, Arg) ->
     erlang:yield(),
     Before = ?REDS,
     Result = run(Input, Arg),
-    Collector ! {self(), ?REDS - Before},
-    check(Input, Arg, Result).
+    Delta = ?REDS - Before,
+    report(Collector, Delta, Input, Arg, Result).
 
 run(none, _) -> [];
 run({one, _}, Binary) -> binary_to_list(Binary);
@@ -103,8 +121,7 @@ lows(Opts) ->
         K <- [101, 100, 0]].
 
 low_delta(Input, K, Opts) ->
-    Pid = spawn_opt(?MODULE, measure_low, [self(), Input, arg(Input), K], Opts),
-    receive {Pid, Delta} -> Delta end.
+    collect(spawn_opt(?MODULE, measure_low, [self(), Input, arg(Input), K], [monitor | Opts])).
 
 %% The budget after the bump is 3998 - (3996 - K) - 1 - 1 = K, with 1 for
 %% bump_reductions/1 and 1 for the call of run/2.
@@ -113,8 +130,8 @@ measure_low(Collector, Input, Arg, K) ->
     Before = ?REDS,
     erlang:bump_reductions(3996 - K),
     Result = run(Input, Arg),
-    Collector ! {self(), ?REDS - Before},
-    check(Input, Arg, Result).
+    Delta = ?REDS - Before,
+    report(Collector, Delta, Input, Arg, Result).
 
 %% The text of ~p for binaries, which io_lib_pretty:printable_bin/5 checks
 %% with binary_to_list/1,3, as one binary with a line for each binary.
