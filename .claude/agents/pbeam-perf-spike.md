@@ -23,8 +23,9 @@ At most 45 minutes, 40 tool calls, and about 25k output tokens. Truncate every t
    - Floor shapes: the test `records_the_interpreter_dispatch_baseline` of the `dispatch_baseline` target, run from the built test binary with `--exact --nocapture --test-threads=1`.
    - Terra key press: use the CPU time of `pbeam` from `ps` over the keys, raw. Do not apply an idle correction: one 10 ms tick becomes a large error.
    - Count the host processes that start during each run. Reject and repeat a round where a run starts more than 2000 processes.
+   - Before and after each run, list the `erl`, `beam.smp`, and `python3` processes. Only the resident ones that ran before the session (for example the Suikou server) may run. Wait while any other such workload runs.
    - Record the one-minute load (not the five-minute column), the session start and end time, and a raw file for each run under the session scratch directory.
-5. Save the prototype diff outside the worktree: `git diff > <session scratch>/spike-<n>.patch`. Check that the patch is not empty. Then remove the worktree with `git worktree remove --force`.
+5. Save the prototype outside the worktree, with new files: `git add -A && git diff --cached > <session scratch>/spike-<n>.patch`. Check that `git apply --stat <patch>` lists every changed and new file. Then remove the worktree with `git worktree remove --force`.
 
 ## Return
 
