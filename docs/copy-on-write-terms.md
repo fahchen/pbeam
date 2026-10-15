@@ -306,13 +306,13 @@ The session ran on 2026-10-15 from 20:50:06 to 21:30:12 JST. The one-minute load
 | pinned ERTS | main tree | 6 | 0.22 / 0.19 / 0.25 | 0.001 / 0.001 / 0.005 |
 | pinned ERTS | pre-epic tree | 6 | 0.21 / 0.18 / 0.22 | 0.001 / 0.001 / 0.009 |
 
-The harness `scripts/terra_latency.py` of main measures both trees through the `scripts/example.sh` of each tree, because `856764f6` has no harness. The `scripts/example.sh` of `856764f6` accepts `PBEAM_BIN` and `--no-build`. The commands in each tree:
+The harness `scripts/terra_latency.py` of main measures both trees through the `scripts/example.sh` of each tree, because `856764f6` has no harness. The `scripts/example.sh` of `856764f6` accepts `PBEAM_BIN` and `--no-build`. The commands run in each tree, with `<main>` the main tree:
 
 - Build: `cargo build --locked`, `cargo build --locked --release`, and `mise run example terra_counter --erts </dev/null`.
-- PBeam run: `python3 -u scripts/terra_latency.py mise exec -- env PBEAM_BIN=<tree>/target/<release|debug>/pbeam bash scripts/example.sh terra_counter --no-build`.
-- ERTS run: `python3 -u scripts/terra_latency.py mise exec -- bash scripts/example.sh terra_counter --erts --no-build`.
+- PBeam run: `python3 -u <main>/scripts/terra_latency.py mise exec -- env PBEAM_BIN=<tree>/target/<release|debug>/pbeam bash scripts/example.sh terra_counter --no-build`.
+- ERTS run: `python3 -u <main>/scripts/terra_latency.py mise exec -- bash scripts/example.sh terra_counter --erts --no-build`.
 
-The release key latency of main (7 ms median, 19 ms maximum) meets the bound of at most 10 ms of #506 at the median. The floor loops of main (`call_only` 42.4 ns, `call_ext_only` 47.7 ns, see `docs/performance-status.md`) meet the bound of at most 150 ns of #506. Known gap: the final target of at most 5 ms for each key in section 8 of `docs/interpreter-dispatch-plan.md` is not reached. The pinned ERTS stays at about 1 ms.
+The release key latency of main (7 ms median, 19 ms maximum) meets the bound of at most 10 ms of #506 at the median. The floor loops of main (`call_only` 31.4 ns, `call_ext_only` 35.7 ns after #632, landed as `e3c75c73` before `b90085da`; see `docs/performance-status.md`) meet the bound of at most 150 ns of #506. Known gap: the final target of at most 5 ms for each key in section 8 of `docs/interpreter-dispatch-plan.md` is not reached. The pinned ERTS stays at about 1 ms.
 
 ### Benchmark module
 
