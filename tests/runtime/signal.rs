@@ -2,7 +2,7 @@
 
 use super::Signal;
 use crate::runtime::process::LinkId;
-use crate::term::{ProcessId, Reference, Term};
+use crate::term::{PortId, ProcessId, Reference, Term};
 
 /// Return a term of one integer, for a test that tells terms apart.
 ///
@@ -114,6 +114,14 @@ fn takes_no_term_of_a_signal_that_holds_none() {
             reference: Reference(1),
         },
         Signal::TtyMonitor { tty: Reference(1) },
+        Signal::PortMonitor {
+            port: PortId(1),
+            reference: Reference(1),
+        },
+        Signal::PortDemonitor {
+            port: PortId(1),
+            reference: Reference(1),
+        },
         Signal::Demonitor {
             watcher: ProcessId(1),
             reference: Reference(1),

@@ -1673,3 +1673,42 @@ fn counts_the_terms_of_a_map_drain_that_is_the_only_item() {
         "the walk counts the list that the value of the map holds"
     );
 }
+
+#[test]
+fn removes_the_accept_of_a_process_that_exits_with_its_port_monitor_signal_pending() {
+    use crate::runtime::port::{
+        Driver, Ports,
+        tcp_inet::{Acceptor, TcpInet},
+    };
+    // At exit, a monitor signal that the process did not handle runs the
+    // monitor (erl_proc_sig_queue.c:7347-7355; inet_drv.c:12732-12771).
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let (child, _) = scheduler
+        .spawn(Start::Entry(frame()), vec![], false, false, false, None)
+        .unwrap()
+        .unwrap();
+    let mut tcp = TcpInet::new();
+    tcp.acceptors.push_back(Acceptor {
+        id: 0,
+        caller: child,
+        monitor: Reference(7),
+        timer: None,
+    });
+    let listen = scheduler
+        .open_port(b"tcp_inet".to_vec(), Driver::TcpInet(tcp))
+        .unwrap();
+    scheduler.park_current();
+    scheduler.schedule_next().unwrap();
+    assert_eq!(current(&mut scheduler), child);
+    let signal = Signal::PortMonitor {
+        port: listen,
+        reference: Reference(7),
+    };
+    scheduler.send_signal(None, child, signal).unwrap();
+    scheduler.finish_current(atom("normal"), None);
+    let ports = scheduler.resources.borrow_mut::<Ports>();
+    let port = ports.get_mut(listen).unwrap().tcp_inet_mut().unwrap();
+    assert!(port.acceptors.is_empty());
+}
