@@ -237,7 +237,8 @@ impl EtsTables {
     /// assert!(live.bytes() > 0);
     /// ```
     pub(super) fn account_terms(&self, live: &mut LiveBytes) {
-        for table in self.tables.values() {
+        let freeing = self.freeing.values().map(|freeing| &freeing.table);
+        for table in self.tables.values().chain(freeing) {
             live.add(table.allocated_bytes());
             for object in table.objects.iter().flatten() {
                 for term in object {

@@ -329,6 +329,33 @@ fn counts_the_object_array_of_immediate_elements() {
 }
 
 #[test]
+fn counts_a_deleted_table_until_each_segment_is_free() {
+    let mut tables = EtsTables::default();
+    let mut table = Table::new(ProcessId(1), Access::Public, 1, TableType::Set);
+    let atoms = test_atom_table();
+    for key in 0..2000 {
+        table.insert(
+            &atoms,
+            vec![Term::Integer(key), Term::tuple(vec![Term::Integer(key)])],
+        );
+    }
+    tables.create(Reference(0), None, table);
+    let bytes = |tables: &EtsTables| {
+        let mut live = crate::term::LiveBytes::new();
+        tables.account_terms(&mut live);
+        live.bytes()
+    };
+    let before = bytes(&tables);
+    tables.delete_table(Reference(0), ProcessId(1));
+    assert_eq!(bytes(&tables), before);
+    assert_eq!(tables.free_segments(ProcessId(1), 100), None);
+    let during = bytes(&tables);
+    assert!(0 < during && during < before, "{during} of {before}");
+    assert!(tables.free_segments(ProcessId(1), i32::MAX).is_some());
+    assert_eq!(bytes(&tables), 0);
+}
+
+#[test]
 fn hashes_an_atom_key_by_the_name_as_pinned_erts() {
     // `atom_hash` (`atom.c:82-105`) gives the `hvalue` of an atom, and
     // `MAKE_HASH` (`erl_db_hash.c:277-282`) shifts it one bit right for the
