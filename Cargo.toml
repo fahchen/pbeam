@@ -423,6 +423,10 @@ name = "signal_queue"
 path = "tests/integration/signal_queue.rs"
 
 [[test]]
+name = "function_clause"
+path = "tests/integration/function_clause.rs"
+
+[[test]]
 name = "stack_trace"
 path = "tests/integration/stack_trace.rs"
 
