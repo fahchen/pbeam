@@ -116,14 +116,16 @@ fn runs_is_function_2_in_a_body_through_a_fun_and_through_apply_as_pinned_erts()
 fn runs_is_record_2_and_3_in_a_body_through_a_fun_and_through_apply_as_pinned_erts() {
     // A name that is not an atom raises `badarg` (`erl_bif_op.c:297-299`,
     // `328-330`). An atom size selects the native-record test, which gives
-    // `false` (`erl_bif_op.c:332-338`). A float size raises `badarg`
-    // (`erl_bif_op.c:347-348`). The compiler emits `erlang:is_record/3` in a
+    // `false` (`erl_bif_op.c:332-338`). A float size and a size outside the small
+    // integer range raise `badarg` (`erl_bif_op.c:347-348`). The compiler emits `erlang:is_record/3` in a
     // body as `call_ext`, which runs the BIF through its export.
     assert_runs(
         "record()",
         "[[true,true,true],[false,false,false],[false,false,false],[false,false,false],\
          [{error,badarg},{error,badarg},{error,badarg}],[true,true,true],[false,false,false],\
          [false,false,false],[{error,badarg},{error,badarg},{error,badarg}],\
-         [{error,badarg},{error,badarg},{error,badarg}],[false,false,false]]",
+         [{error,badarg},{error,badarg},{error,badarg}],[false,false,false],\
+         [{error,badarg},{error,badarg},{error,badarg}],[false,false,false],\
+         [false,false,false],[{error,badarg},{error,badarg},{error,badarg}]]",
     );
 }

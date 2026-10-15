@@ -65,11 +65,19 @@ arity() ->
 record() ->
     Args = [[{a, 1}, a], [{a, 1}, b], [{}, a], [x, a], [{a, 1}, 1],
             [{a, 1}, a, 2], [{a, 1}, a, 3], [{a, 1}, a, x], [{a, 1}, 1, 2],
-            [{a, 1}, a, 2.0], [x, a, -1]],
+            [{a, 1}, a, 2.0], [x, a, -1]]
+        %% The bounds of the small integer range of a size, made at run time,
+        %% because a literal above 2^31 is a bignum in the literal table.
+        ++ [[{a, 1}, a, S] || S <- small_bounds()],
     [[catched(fun() -> body_record(A) end),
       catched(fun() -> apply(id(fun_record(length(A))), A) end),
       catched(fun() -> apply(erlang, id(is_record), A) end)]
      || A <- Args].
+
+%% 2^59, 2^59 - 1, -2^59, and -2^59 - 1.
+small_bounds() ->
+    Max = id(536870912) * id(1073741824),
+    [Max, Max - 1, -Max, -Max - 1].
 
 body_record([T, N]) -> erlang:is_record(id(T), id(N));
 body_record([T, N, S]) -> erlang:is_record(id(T), id(N), id(S)).
