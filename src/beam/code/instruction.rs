@@ -2261,7 +2261,10 @@ pub(super) fn parse_code(
             // `jit/arm/instr_common.cpp:231-234,424-509`). The `Arc` term
             // graph has no process heap and no collector. The BEAM validator
             // gives such a Y register no term (`beam_validator.erl:429-436`),
-            // so no instruction reads its value. The loader skips both
+            // so no instruction uses its value, except a stack-trim `move`
+            // that copies it (`beam_validator.erl:2503-2508`). PBeam keeps
+            // its existing error for that copy, as `docs/erts-differences.md`
+            // records. The loader skips both
             // opcodes, as it skips `line`, and the run loop dispatches
             // nothing for them.
             OPCODE_TEST_HEAP | OPCODE_INIT_YREGS => {
