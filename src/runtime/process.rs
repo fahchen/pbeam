@@ -4,6 +4,8 @@ mod tree;
 pub(super) use dictionary::Dictionary;
 pub(super) use tree::{MonitorLinkTree, TimerReference, WalkPosition};
 
+use std::collections::BTreeMap;
+
 use super::{
     capability::SecurityContext, dirty_io::Claim, host::output::IovecWritten, mailbox::Mailbox,
     scheduler::AliasMode, timer::TimerKey,
@@ -265,6 +267,15 @@ pub(super) struct ProcessState {
     /// (`FS_OFF_HEAP_MSGQ`), false for `on_heap`. PBeam has no process heap,
     /// so the flag does not change where the messages are kept.
     pub(super) off_heap_message_queue: bool,
+    /// True when the `async_dist` flag is set (`F_ASYNC_DIST`,
+    /// `erl_process.h:1656`). PBeam has no distribution, so the flag has no
+    /// other effect.
+    pub(super) async_dist: bool,
+    /// The node monitors of the process (`ERTS_MON_TYPE_NODES`): the count
+    /// of each by the bits of its options (`erts_monitor_nodes`,
+    /// `dist.c:6731-6845`). PBeam has no distribution, so a node monitor
+    /// never gets a message.
+    pub(super) node_monitors: BTreeMap<u8, u64>,
     /// The link tree (`ERTS_P_LINKS`): processes and ports linked to this
     /// process, by pid or port, with the identifier of an unlink that waits for its
     /// acknowledgment, or 0 for an active link (`ErtsILink.unlinking`). A
@@ -473,6 +484,8 @@ impl ProcessState {
             receive_timer: ReceiveTimer::None,
             trap_exit: false,
             off_heap_message_queue: false,
+            async_dist: false,
+            node_monitors: BTreeMap::new(),
             links: MonitorLinkTree::default(),
             monitors: MonitorLinkTree::default(),
             monitored_by: Vec::new(),

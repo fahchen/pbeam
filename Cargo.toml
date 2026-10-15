@@ -354,6 +354,10 @@ name = "module_info"
 path = "tests/integration/module_info.rs"
 
 [[test]]
+name = "node_monitor"
+path = "tests/integration/node_monitor.rs"
+
+[[test]]
 name = "nif_error"
 path = "tests/integration/nif_error.rs"
 
