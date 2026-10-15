@@ -1027,17 +1027,28 @@ The before revision is `e93523c3`, the head of `origin/main` that the branch sta
 
 Each floor loop holds one `gc_bif '-'` for its counter, and each floor row falls by 10.9 ns to 12.0 ns, with no overlap of the ranges of the eight rounds. The record does not confirm that the removal of the BIF call of this `gc_bif '-'` causes all of the fall, and two rows of the same session do not agree with that cause. The `gc_bif '+'` row adds a second inline instruction to the `call_only` loop (a `gc_bif '+'` of `{x,1}` and `{integer,1}`), and the cost of that addition falls only from 24.8 ns (67.2 ns - 42.4 ns) to 22.4 ns (53.8 ns - 31.4 ns). The `map_get/2` row holds the same `gc_bif '-'` and does not fall. Thus an inline `gc_bif '+'` still costs about 22 ns, and a part of the floor fall possibly comes from the code layout or the branch prediction of a loop of two instructions. No profile or isolation run of this session splits the fall. The attribution of task #625 measured 37.1 ns for the BIF call path of `gc_bif '-'` at `b8c71940`, before tasks #627 and #628 removed the process lookups and the name lookups of the iteration.
 
-The CPU time for each key falls by 0.667 ms, or 4.1 percent, at the mean of the three rounds. The ranges of the two revisions touch at 16.000 ms. The resolution of the CPU time of `ps` is 10 ms, or about 0.17 ms for each key over 60 keys, so the Terra number has a weak bound. The attribution of task #625 expected 2.3 to 2.5 percent of a key press.
+The CPU time for each key falls by 0.667 ms, or 4.1 percent, at the mean of the three rounds. The ranges of the two revisions touch at 16.000 ms. The resolution of the CPU time of `ps` is 10 ms, or about 0.17 ms for each key over 60 keys, and the CPU times of the two revisions differ by 6, 6, and 0 ticks. The attribution of task #625 expected 2.3 to 2.5 percent of a key press.
 
-The raw records are the session log `session.txt` and the files `floor-r<round>-<revision>.txt` and `terra-r<round>-<revision>.log`, which stay outside the repository.
+A second Terra session ran the same two binaries, with eight rounds of 60 keys in rotated order, on 2026-10-15 from 15:30:42 to 15:39:53 JST, with the one-minute load 1.11 to 2.26 before each run and no `cargo`, `rustc`, or `nextest` process. Each idle window of the 16 runs held no CPU tick.
+
+| Terra session 2 | Before `e93523c3`, ms of CPU time for each key | After `e35f6637`, ms of CPU time for each key |
+| --- | --- | --- |
+| Rounds 1 to 8 | 15.333, 15.833, 14.667, 16.167, 16.167, 14.000, 15.667, 15.333 | 13.333, 15.500, 16.000, 14.000, 16.000, 16.667, 13.167, 15.500 |
+| Mean of 8 rounds | 15.396 | 15.021 |
+| Median of 8 rounds | 15.500 | 15.500 |
+| Range of 8 rounds | 14.000 to 16.167 | 13.167 to 16.667 |
+
+The mean falls by 0.375 ms, or 2.4 percent, the medians are the same, and the ranges of the two revisions overlap from 14.000 ms to 16.167 ms. Thus the Terra key press shows no change beyond the noise of the two sessions, and the record does not give a Terra result for this change.
+
+The raw records are the session logs `session.txt` and `session2.txt` and the files `floor-r<round>-<revision>.txt`, `terra-r<round>-<revision>.log`, and `terra2-r<round>-<revision>.log`, which stay outside the repository.
 
 ### The decision
 
-The change lands. The floor shape that the task targets falls by 25 percent with no overlap of the rounds, and no shape is slower beyond the spread of its rounds. The cause of the floor fall is not confirmed (below).
+The change lands. The floor shape that the task targets falls by 25 percent with no overlap of the rounds, and no shape is slower beyond the spread of its rounds. The cause of the floor fall is not confirmed (below). The Terra key press shows no change beyond noise (below).
 
 ### Known gaps
 
 - The record does not confirm the cause of the fall of the floor rows. The `gc_bif '+'` row and the `map_get/2` row do not agree with a fall of 11 ns to 12 ns for each removed BIF call, and no profile or isolation run splits the fall.
 - The `map_get/2` row does not show the fall of its `gc_bif '-'`, and the record does not show the cause.
-- The Terra rows are three rounds near the resolution of `ps`, so the 0.667 ms fall has a weak bound.
+- The Terra key press shows no change beyond noise. The first session (three rounds) and the second session (eight rounds) have overlapping ranges, and the medians of the second session are the same.
 - PBeam has no float term, so a float argument stops the run when the float literal is read, before the `gc_bif` (row "Float terms" of `docs/erts-differences.md`). The fixture `arith_probe:float_plus/0` records this; ERTS returns `3.5`.
