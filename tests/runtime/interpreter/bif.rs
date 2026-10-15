@@ -21,8 +21,9 @@ use super::{
 };
 use crate::{
     beam::ImportKind,
+    runtime::process::{ProcessState, Start},
     runtime::scheduler::Scheduler,
-    term::{AtomTable, Map, Term},
+    term::{Atom, AtomTable, Binary, Map, ProcessId, Term},
 };
 use std::{hint::black_box, time::Instant};
 
@@ -258,4 +259,60 @@ fn the_leaf_lane_keeps_the_guard_failure_of_each_leaf() {
             .expect("the owned dispatch runs");
         assert_eq!(format!("{leaf:?}"), format!("{owned:?}"));
     }
+}
+
+/// Assert that `erlang:binary_to_list/1,3` read a binary that an append
+/// built from its chunks and do not join them. The range of one byte that
+/// `binary_to_list(Bin, 1, 1)` reads and the chunks of a call of
+/// `binary_to_list/1` that traps give the bytes of the binary in order, as
+/// ERTS `binary_to_list_chunk` does (`binary.c:201-256`).
+#[test]
+fn binary_to_list_reads_the_chunks_of_an_appended_binary_with_no_join() {
+    let mut binary = Binary::from(vec![7]);
+    let mut bytes = vec![7_u8];
+    for step in 1..3_000_u32 {
+        let suffix = vec![(step % 251) as u8; 1_000];
+        binary = Binary::concat(&binary, &suffix);
+        bytes.extend(&suffix);
+    }
+    assert!(binary.chunks().len() > 100);
+    let first = super::erlang::b2l_cons(&binary, 0, 1, Term::nil());
+    assert_eq!(first, Term::list_from([Term::Integer(7)]));
+    assert!(!binary.is_joined());
+
+    let start = Start::Undefined {
+        module: Atom::from_static("erlang").unwrap(),
+        function: Atom::from_static("binary_to_list").unwrap(),
+    };
+    let mut process = ProcessState::new(ProcessId(1), start, vec![]);
+    let mut result =
+        super::erlang::b2l_chunk(&mut process, &binary, 0, bytes.len(), Term::nil(), 4_000);
+    let mut turns = 1;
+    while let BifResult::TrapBif { arguments, .. } = result {
+        let [
+            Term::Binary(source),
+            Term::Integer(offset),
+            Term::Integer(rest),
+            list,
+        ] = arguments.as_slice()
+        else {
+            panic!("the trap keeps the binary, the offset, the rest, and the list");
+        };
+        result = super::erlang::b2l_chunk(
+            &mut process,
+            source,
+            *offset as usize,
+            *rest as usize,
+            list.clone(),
+            4_000,
+        );
+        turns += 1;
+    }
+    assert!(turns > 1);
+    let BifResult::Value(list) = result else {
+        panic!("the last chunk returns the list");
+    };
+    let codes = bytes.iter().map(|byte| Term::Integer(i64::from(*byte)));
+    assert_eq!(list, Term::list_from(codes));
+    assert!(!binary.is_joined());
 }

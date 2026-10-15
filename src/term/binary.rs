@@ -62,7 +62,7 @@ struct BinaryView {
     /// chunks of its prefix, so an append copies no old payload byte. The
     /// view keeps the chunks in order, and their bytes are the bytes of the
     /// view.
-    chunks: Option<Arc<Vec<Arc<Vec<u8>>>>>,
+    chunks: Option<Arc<Chunks>>,
     /// The bytes of `chunks` joined in one array, built at the first read
     /// that needs the contiguous bytes. `None` until such a read.
     flat: OnceLock<Arc<Vec<u8>>>,
@@ -76,6 +76,27 @@ struct BinaryView {
     /// array with no copy. The `Arc` keeps a copy of such a binary O(1), as
     /// a copy of a byte-aligned binary is.
     packed: Option<Arc<Vec<u8>>>,
+}
+
+/// The chunks of a view that an append built, in order, and their index. The
+/// index is in this allocation and not in [`BinaryView`], so a view that no
+/// append built keeps its descriptor size.
+struct Chunks {
+    /// The chunks, each one an immutable array.
+    arrays: Vec<Arc<Vec<u8>>>,
+    /// The byte offset of the end of each chunk, in order. The view builds
+    /// the index with the chunk list, in the same walk of the chunks that
+    /// sums their size, so a ranged read does no O(chunks) work.
+    ends: Vec<usize>,
+}
+
+impl Deref for Chunks {
+    type Target = Vec<Arc<Vec<u8>>>;
+
+    /// Return the chunks in order.
+    fn deref(&self) -> &Self::Target {
+        &self.arrays
+    }
 }
 
 /// One BEAM binary term: one `Arc` to the [`BinaryView`] that holds its
@@ -133,7 +154,7 @@ impl Binary {
     /// assert!(Binary::from(b"ab".to_vec()).chunk_backing().is_none());
     /// ```
     #[cfg(test)]
-    pub(super) fn chunk_backing(&self) -> Option<&Arc<Vec<Arc<Vec<u8>>>>> {
+    fn chunk_backing(&self) -> Option<&Arc<Chunks>> {
         self.0.chunks.as_ref()
     }
 
@@ -493,6 +514,52 @@ impl Binary {
         }
     }
 
+    /// Return the runs of the bytes from byte `start` to byte `end` of this
+    /// binary, in order, for a reader of one byte range. A view that an
+    /// append built gives the part of each chunk in the range and does not
+    /// join its chunks, as [`Binary::deref`] does at its first read. The call
+    /// copies no byte. It finds the first and the last chunk of the range
+    /// with binary searches of the chunk index (`Chunks::ends`),
+    /// so it does O(log chunks) work to find the range. It then does O(1)
+    /// work for each chunk in the range and one allocation of the list of
+    /// runs, and touches only the chunks and the bytes of the range. The view
+    /// builds the chunk index when it is made, so no read builds it. Each
+    /// other view gives one run of its bytes.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let binary = Binary::from_chunks(vec![Arc::new(b"ab".to_vec()), Arc::new(b"cd".to_vec())]);
+    /// assert_eq!(binary.byte_runs(1, 3), vec![&b"b"[..], &b"c"[..]]);
+    /// ```
+    pub(crate) fn byte_runs(&self, start: usize, end: usize) -> Vec<&[u8]> {
+        let Some(chunks) = &self.0.chunks else {
+            return vec![&self[start..end]];
+        };
+        let ends = &chunks.ends;
+        chunk_span(ends, start, end)
+            .map(|index| {
+                let chunk = &chunks[index];
+                let last = ends[index];
+                let first = last - chunk.len();
+                &chunk[start.max(first) - first..end.min(last) - first]
+            })
+            .collect()
+    }
+
+    /// Return whether a view that an append built joined its chunks in one
+    /// array, for the tests of the readers that must not join them.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(!Binary::from(b"ab".to_vec()).is_joined());
+    /// ```
+    #[cfg(test)]
+    pub(crate) fn is_joined(&self) -> bool {
+        self.0.flat.get().is_some()
+    }
+
     /// Build the binary of `chunks` in order. The view keeps the arrays and
     /// copies no byte of them, so a later append can share each one. One
     /// chunk gives a view of that array with no chunk list.
@@ -515,10 +582,21 @@ impl Binary {
                 packed: None,
             }));
         }
-        let size = chunks.iter().map(|chunk| chunk.len()).sum::<usize>() * BITS_PER_BYTE;
+        // The index adds one word for each chunk to the walk that sums the
+        // size of the chunks, so it adds no walk of the chunks.
+        let mut ends = Vec::with_capacity(chunks.len());
+        let mut end = 0;
+        for chunk in &chunks {
+            end += chunk.len();
+            ends.push(end);
+        }
+        let size = ends.last().copied().unwrap_or(0) * BITS_PER_BYTE;
         Binary(Arc::new(BinaryView {
             bytes: Arc::new(Vec::new()),
-            chunks: Some(Arc::new(chunks)),
+            chunks: Some(Arc::new(Chunks {
+                arrays: chunks,
+                ends,
+            })),
             flat: OnceLock::new(),
             offset: 0,
             size,
@@ -702,6 +780,19 @@ impl From<&[u8]> for Binary {
     fn from(bytes: &[u8]) -> Self {
         Binary::from(bytes.to_vec())
     }
+}
+
+/// Return the indexes of the chunks that hold the bytes from byte `start` to
+/// byte `end`, from the byte offset of the end of each chunk, in order. Two
+/// binary searches find the first and the last chunk, so the call is
+/// O(log chunks). An empty range gives no chunk.
+fn chunk_span(ends: &[usize], start: usize, end: usize) -> std::ops::Range<usize> {
+    if start >= end {
+        return 0..0;
+    }
+    let first = ends.partition_point(|&last| last <= start);
+    let last = ends.partition_point(|&last| last < end) + 1;
+    first..last
 }
 
 impl From<Vec<u8>> for Binary {
