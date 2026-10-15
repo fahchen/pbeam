@@ -328,11 +328,11 @@ enum ExitPhase {
 }
 
 /// A scheduler on one OS thread. A process runs until it waits, exits, or
-/// switches out at an ERTS switch point. It follows the ERTS model: the
+/// switches out at an ERTS switch point. It follows the ERTS model. The
 /// process table holds every live process, also an exiting one, and the
-/// slot of the running process, and the run queue holds
-/// only processes that wait for a turn. A process can be in the run queue
-/// for Erlang work or only to handle its signals.
+/// slot of the running process. The run queue holds only processes that
+/// wait for a turn. A process can be in the run queue for Erlang work or
+/// only to handle its signals.
 #[derive(Debug)]
 pub(super) struct Scheduler {
     /// All live processes, including the current process, and the slot of
