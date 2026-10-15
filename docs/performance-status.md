@@ -19,6 +19,9 @@ The table holds the headline numbers of the whole programme. Each row names its 
 
 | Headline number | Value | Revision | Session or run group | Load or run rule | Source |
 | --- | --- | --- | --- | --- | --- |
+| `call_ext_only` floor loop, 200000 iterations | 149.3 ns, from 257.1 ns | `b8c71940` before, after on the branch `perf/627-process-slot` (`ef77e031`) | One interleaved session of eight rounds and two builds, each number the minimum of nine probe runs inside one invocation and the minimum of the eight rounds | One-minute load 2.40 to 2.97 | Issue [#627](https://github.com/fahchen/pbeam/issues/627) and the record |
+| Local `call_only` floor loop, 200000 iterations, task #627 | 42.2 ns, from 102.5 ns | `b8c71940` before, after on the branch `perf/627-process-slot` (`ef77e031`) | The same interleaved session and the same rule | The same loads | Issue [#627](https://github.com/fahchen/pbeam/issues/627) and the record |
+| CPU time for each release Terra key press, 60 keys | 17.94 ms, from 25.28 ms (mean of three runs) | `b8c71940` before, after on the branch `perf/627-process-slot` (`ef77e031`) | The same interleaved session, three rounds of 60 keys for each build, raw CPU time of the key window from `ps` | One-minute load 1.14 to 2.40 before each run | Issue [#627](https://github.com/fahchen/pbeam/issues/627) and the record |
 | The `select_val` probe with 256 choices, 200000 iterations | 526.2 ns, from 984.2 ns | `915590af` before, after on the branch `perf/545-select-val`, landed as `8659710f` | One interleaved session of three rounds and three builds, each number the minimum of nine probe runs inside one invocation | One-minute load 3.28 to 7.20 | Issue [#545](https://github.com/fahchen/pbeam/issues/545) and the record |
 | The `select_val` probe with 16 choices, 200000 iterations | 500.2 ns; the bound of 32 keeps the linear form, so the value is the linear row of the session | `915590af` before, after on the branch `perf/545-select-val`, landed as `8659710f` | The same interleaved session and the same rule; the ordered rows of the session measure the bound of 10 and do not apply to the landed change | The same loads | Issue [#545](https://github.com/fahchen/pbeam/issues/545) and the record |
 | The `select_val` linear bound, `SELECT_VALUE_LINEAR_LIMIT` | 32 | The branch `perf/545-select-val`, landed as `8659710f` | One estimate between the two end-to-end points of the interleaved session and the micro-measurement point at 32 choices | One-minute load 3.28 to 7.20 | Issue [#545](https://github.com/fahchen/pbeam/issues/545) and the record |
@@ -43,6 +46,21 @@ The step 0 numbers and the `ddb32f6e` numbers come from two different sessions. 
 ## Entries
 
 Each entry is one landed change or one change that is not landed. The entries are newest first.
+
+### 2026-10-15 12:20 JST - Get the current process with no hash, task [#627](https://github.com/fahchen/pbeam/issues/627), branch `perf/627-process-slot`
+
+The change keeps each live process in a slot of the process table, with an index from the pid to the slot, and keeps the slot of the current process in the table. A read of the current process then makes no hash, as the pinned ERTS reads the current process through a pointer (`erl_process.h:698`, OTP 29.1.1). Only a lookup of a process by its pid hashes the pid. The measured before revision is `b8c71940`, the head of `origin/main` that the branch starts from, and the after revision is `ef77e031`, the commit of the change.
+
+| Shape | Before `b8c71940` | After `ef77e031` | Change |
+| --- | --- | --- | --- |
+| `call_ext_only` floor loop, ns for each of 200000 iterations | 257.1 | 149.3 | −107.8 ns, −41.9 percent |
+| Local `call_only` floor loop, ns for each of 200000 iterations | 102.5 | 42.2 | −60.3 ns, −58.8 percent |
+| Position `call_only` floor loop, ns for each of 200000 iterations | 102.5 | 42.1 | −60.4 ns, −58.9 percent |
+| CPU time for each release Terra key press, mean of three runs of 60 keys | 25.28 ms | 17.94 ms | −7.33 ms, −29.0 percent |
+
+One session interleaves the two release builds on 2026-10-15 from 11:55:04 to 11:59:08 JST, with a rotated order in each round and no other `cargo`, `rustc`, or `nextest` process. The floor part has eight rounds at a one-minute load of 2.40 to 2.97, and each floor number is the minimum of nine probe runs inside one invocation and the minimum of the eight rounds. The key part has three rounds at a one-minute load of 1.14 to 2.40 before each run. The ranges of the two revisions do not overlap for any floor shape or added row, and every after key run (17.50 to 18.50 ms) is below every before key run (22.33 to 26.83 ms).
+
+Source: the section "The current process with no hash, task [#627](https://github.com/fahchen/pbeam/issues/627)" of `docs/interpreter-dispatch-measurements.md`. Known limits: the CPU time comes from `ps` with a resolution of 10 ms, or about 0.17 ms for each key over 60 keys; the session does not measure a workload with many processes.
 
 ### 2026-10-15 01:10 JST - The `select_val` dispatch decision, task [#545](https://github.com/fahchen/pbeam/issues/545), pull request [#622](https://github.com/fahchen/pbeam/pull/622) - Landed as `8659710f`
 
