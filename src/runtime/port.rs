@@ -1,7 +1,7 @@
 //! The ports of the node, as the ERTS port table (`erl_ptab.c`) holds the
 //! ports of the spawn driver (`sys/unix/sys_drivers.c`). The scheduler
 //! keeps them as the `Ports` value of its `Resources`, and all processes of
-//! a run share them. PBeam has `spawn_executable` ports and `tcp_inet`
+//! a run share them. PBeam has `spawn_executable` ports and `tcp_inet` and `udp_inet`
 //! driver ports (see [`inet`]).
 
 pub(super) mod inet;
@@ -91,6 +91,23 @@ pub(super) enum PortEvent {
     ExitStatus(Option<i32>),
 }
 
+impl Port {
+    /// Return the descriptor of a `tcp_inet` or `udp_inet` port, or `None` for a port of
+    /// the spawn driver.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(port.inet_mut().is_some());
+    /// ```
+    pub(super) fn inet_mut(&mut self) -> Option<&mut Inet> {
+        match &mut self.driver {
+            Driver::Inet(tcp) => Some(tcp),
+            Driver::Spawn(_) => None,
+        }
+    }
+}
+
 impl Ports {
     /// Put `port` into the table with the next port number, and return the
     /// number.
@@ -150,9 +167,10 @@ impl Ports {
     }
 
     /// Return the fds that the IO poll waits for: the output pipe of each
-    /// spawn port before its end of file, and then its status pipe. Only a
-    /// port with `exit_status` stays open after its end of file. A
-    /// `tcp_inet` or `udp_inet` port has no fd in the wait.
+    /// spawn port before its end of file, and then its status pipe, and the
+    /// socket of each `tcp_inet` listen port with a caller in its accept
+    /// queue. Only a port with `exit_status` stays open after its end of
+    /// file.
     ///
     /// # Examples
     ///
@@ -165,9 +183,26 @@ impl Ports {
             .filter_map(|port| match &port.driver {
                 Driver::Spawn(spawn) if spawn.end_of_file => Some(spawn.child.status_fd()),
                 Driver::Spawn(spawn) => Some(spawn.child.output_fd()),
-                Driver::Inet(_) => None,
+                Driver::Inet(tcp) => tcp.accept_fd(),
             })
             .collect()
+    }
+
+    /// Return the `tcp_inet` listen port that waits for a connection on the
+    /// fd `fd`, or `None`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(ports.accepting(fd), Some(PortId(0)));
+    /// ```
+    pub(super) fn accepting(&self, fd: c_int) -> Option<PortId> {
+        self.by_id
+            .iter()
+            .find_map(|(&id, port)| match &port.driver {
+                Driver::Inet(tcp) if tcp.accept_fd() == Some(fd) => Some(id),
+                _ => None,
+            })
     }
 
     /// Read the fd `fd` that the IO poll found ready, and return its port

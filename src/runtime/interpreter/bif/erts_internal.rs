@@ -756,24 +756,26 @@ pub(super) fn port_control(
         return Ok(denied);
     }
     let ports = scheduler.resources.borrow_mut::<Ports>();
-    let reply = match &mut ports.get_mut(id).expect("the port is open").driver {
-        Driver::Inet(driver) => driver.control(command, &bytes)?,
-        Driver::Spawn(_) if command == SPAWN_CONTROL => {
+    let reply = match ports.get_mut(id).expect("the port is open").inet_mut() {
+        Some(driver) => driver.control(command, &bytes)?,
+        None if command == SPAWN_CONTROL => {
             return Err(error(
                 "unsupported erlang:port_control/3 command 16#04c76a00 on a spawn port: see \"Ports\" in docs/erts-differences.md",
             ));
         }
-        Driver::Spawn(_) => Control::Badarg,
+        None => Control::Badarg,
     };
-    let result = match reply {
-        Control::Reply(reply) => {
-            scheduler
-                .current_process_mut()
-                .bump_reductions(PORT_REDUCTIONS);
-            Term::list_from(reply.into_iter().map(|byte| Term::Integer(byte.into())))
+    let reply = match reply {
+        Control::Reply(reply) => reply,
+        Control::Accept(timeout) => scheduler.tcp_accept(id, timeout)?,
+        Control::Badarg => {
+            return Ok(signals_return(scheduler, port, Term::static_atom("badarg")));
         }
-        Control::Badarg => Term::static_atom("badarg"),
     };
+    scheduler
+        .current_process_mut()
+        .bump_reductions(PORT_REDUCTIONS);
+    let result = Term::list_from(reply.into_iter().map(|byte| Term::Integer(byte.into())));
     Ok(signals_return(scheduler, port, result))
 }
 

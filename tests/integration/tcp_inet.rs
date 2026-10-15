@@ -1,4 +1,14 @@
-use std::process::Command;
+use std::{
+    net::{SocketAddr, TcpStream},
+    path::{Path, PathBuf},
+    process::Command,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
+    time::Duration,
+};
 
 use pbeam_runtime::{AllowAll, AtomTable, BeamProgram, Term};
 
@@ -9,12 +19,15 @@ use common::pinned_beam;
 
 const TCP_PROBE: &[u8] = include_bytes!("../../fixtures/tcp/tcp_probe.beam");
 
+const TCP_ACCEPT: &[u8] = include_bytes!("../../fixtures/tcp/tcp_accept.beam");
+
 const UDP_PROBE: &[u8] = include_bytes!("../../fixtures/tcp/udp_probe.beam");
 
-/// The pinned OTP modules that the probe calls: `erlang` has
+/// The pinned OTP modules that the probes call: `erlang` has
 /// `open_port/2`, `port_control/3`, `port_close/1`, and `port_info/1`,
-/// which call the `erts_internal` port BIFs.
-const MODULES: [&str; 2] = ["erlang", "lists"];
+/// which call the `erts_internal` port BIFs, and `prim_inet` makes the
+/// requests of `gen_tcp` (prim_inet.erl).
+const MODULES: [&str; 3] = ["erlang", "lists", "prim_inet"];
 
 /// Return a term as `io:format("~w")` prints it, for the atoms, integers,
 /// binaries, lists, and tuples of the probe results. An atom that does not
@@ -63,7 +76,7 @@ fn text(term: &Term, atoms: &AtomTable) -> String {
 /// Load the probes with the pinned modules of [`MODULES`].
 fn load() -> BeamProgram {
     let beams: Vec<Vec<u8>> = MODULES.iter().map(|module| pinned_beam(module)).collect();
-    let mut all: Vec<&[u8]> = vec![TCP_PROBE, UDP_PROBE];
+    let mut all: Vec<&[u8]> = vec![TCP_PROBE, TCP_ACCEPT, UDP_PROBE];
     all.extend(beams.iter().map(Vec::as_slice));
     BeamProgram::load(&all).unwrap()
 }
@@ -153,6 +166,31 @@ fn gives_the_getsockopt_value_of_an_option_that_is_on_as_pinned_erts() {
 }
 
 #[test]
+#[cfg(not(target_vendor = "apple"))]
+fn sets_a_linger_time_as_pinned_erts() {
+    // `SETOPTS` of `linger` takes the time after the flag, and `GETOPTS`
+    // gives both (inet_drv.c:7360-7385, 9749-9752).
+    assert_runs("linger", "[[1],[1,3,0,0,0,1,0,0,0,5]]");
+}
+
+#[test]
+#[cfg(target_vendor = "apple")]
+fn stops_the_run_for_a_linger_time_on_macos() {
+    // `socket2` sets `SO_LINGER_SEC` on macOS, and ERTS sets `SO_LINGER`,
+    // which xnu reads in clock ticks.
+    let program = load();
+    let argument = Term::Atom(program.atom("linger").unwrap());
+    let error = program
+        .execute("tcp_probe", "unsupported", &[program.host_term(argument)])
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.starts_with("unsupported tcp_inet option linger with a time"),
+        "{error}"
+    );
+}
+
+#[test]
 fn keeps_the_port_data_and_names_the_driver_as_pinned_erts() {
     // The data starts as `undefined` (erl_bif_port.c:646). A port of the
     // spawn driver has data, and its control rejects each command other than
@@ -179,13 +217,19 @@ fn stops_the_run_for_each_tcp_inet_part_that_is_not_implemented() {
         ("inet6", "unsupported tcp_inet family 2"),
         ("mptcp", "unsupported tcp_inet protocol 4"),
         ("any", "unsupported tcp_inet bind address family 3"),
-        ("keepalive", "unsupported tcp_inet option 1"),
+        ("dontroute", "unsupported tcp_inet option 2"),
+        ("recvttl", "unsupported tcp_inet option recvttl true"),
+        // ERTS keeps the time of `{linger, {false, 5}}` (inet_drv.c:7362-7370).
+        (
+            "linger_off",
+            "unsupported tcp_inet option linger with a time",
+        ),
         (
             "active_n",
             "unsupported tcp_inet option active with a count",
         ),
-        ("getopt", "unsupported tcp_inet option 1"),
-        ("accept", "unsupported tcp_inet request 26"),
+        ("getopt", "unsupported tcp_inet option 2"),
+        ("connect", "unsupported tcp_inet request 3"),
         // ERTS replies `[]` and sets the exit state of the port
         // (sys_drivers.c:731-756).
         (
@@ -280,4 +324,134 @@ fn stops_the_run_for_each_udp_inet_part_that_is_not_implemented() {
             .to_string();
         assert!(error.starts_with(message), "{case}: {error}");
     }
+}
+
+/// A client of the test: it reads `"Port Count"` from the file `path` and
+/// connects to `Port` on `127.0.0.1` until it has `Count` connections, and
+/// then writes `Count` to the file of [`acknowledgement`]. It keeps each connection open until `stop`, and returns the local port of
+/// each connection in order.
+fn client(path: PathBuf, stop: Arc<AtomicBool>) -> thread::JoinHandle<Vec<u16>> {
+    thread::spawn(move || {
+        let ack = acknowledgement(&path);
+        let temporary = PathBuf::from(format!("{}.ack.tmp", path.display()));
+        let mut streams = Vec::new();
+        while !stop.load(Ordering::SeqCst) {
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            if let Some((port, count)) = text.trim().split_once(' ') {
+                let address = SocketAddr::from(([127, 0, 0, 1], port.parse().unwrap()));
+                while streams.len() < count.parse().unwrap() {
+                    streams.push(TcpStream::connect(address).unwrap());
+                }
+                std::fs::write(&temporary, count).unwrap();
+                std::fs::rename(&temporary, &ack).unwrap();
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        streams
+            .iter()
+            .map(|stream| stream.local_addr().unwrap().port())
+            .collect()
+    })
+}
+
+/// Run `run` with a client of the test on the file `path`, and return the
+/// result of `run` with each `{peer,P}` of a client port replaced by
+/// `{peer,client_N}`, where N counts from 1 in connection order.
+fn with_client(path: &Path, run: impl FnOnce() -> String) -> String {
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(acknowledgement(path));
+    let stop = Arc::new(AtomicBool::new(false));
+    let handle = client(path.to_path_buf(), Arc::clone(&stop));
+    let mut result = run();
+    stop.store(true, Ordering::SeqCst);
+    for (index, port) in handle.join().unwrap().into_iter().enumerate() {
+        result = result.replace(
+            &format!("{{peer,{port}}}"),
+            &format!("{{peer,client_{}}}", index + 1),
+        );
+    }
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(acknowledgement(path));
+    result
+}
+
+/// Return the file where the client of the test writes `Count` after its
+/// connections up to `Count`.
+fn acknowledgement(path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.ack", path.display()))
+}
+
+#[test]
+fn accepts_in_many_processes_on_one_listen_socket_as_pinned_erts() {
+    // Each connection goes to the first acceptor in the queue; an acceptor
+    // that exits leaves it (inet_drv.c:12144-12258, 12732-12771,
+    // 13461-13590). A timeout, the close of the listen socket, and the
+    // options that `prim_inet:accept_opts/3` copies give the same values
+    // (prim_inet.erl:488-535; inet_drv.c:11859-11890, 12547-12599).
+    let directory = std::env::temp_dir();
+    let erts_path = directory.join(format!("pbeam-tcp-accept-erts-{}", std::process::id()));
+    let erts = with_client(&erts_path, || {
+        let output = Command::new("erl")
+            .args(["+S", "1", "-noshell", "-pa", "fixtures/tcp", "-eval"])
+            .arg(format!(
+                "io:format(\"~w~n\", [tcp_accept:main(\"{}\")]), halt().",
+                erts_path.display()
+            ))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8_lossy(&output.stdout)
+            .trim_end()
+            .to_owned()
+    });
+    let pbeam_path = directory.join(format!("pbeam-tcp-accept-pbeam-{}", std::process::id()));
+    let pbeam = with_client(&pbeam_path, || {
+        let program = load();
+        let path = Term::list_from(
+            pbeam_path
+                .display()
+                .to_string()
+                .bytes()
+                .map(|byte| Term::Integer(byte.into())),
+        );
+        let result = program
+            .execute("tcp_accept", "main", &[program.host_term(path)])
+            .unwrap();
+        text(&result.term, result.atoms())
+    });
+    let options = "{ok,[{active,false},{nodelay,true},{keepalive,true},{delay_send,true},{priority,0},{linger,{false,0}},{reuseaddr,true},{tos,16},{ttl,33},{recvtos,true},{recvttl,false},{mode,binary},{send_timeout,30000},{send_timeout_close,true}]}";
+    let accepted =
+        |client: u8| format!("[ok,true,{{peer,client_{client}}},true,[true,true,true],{options}]");
+    let expected = format!(
+        "[[[[0,101,105,110,118,97,108],[0,101,110,111,116,99,111,110,110],[0,101,105,110,118,97,108]],[[0,101,105,110,118,97,108],[0,101,110,111,116,99,111,110,110],[1,1,0,0,0,0,8,0,0,0,0,9,0,0,0,0,31,0,0,0,0,43,0,0,0,0,46,0,0,0,64,47,0,0,0,0],[0,101,105,110,118,97,108]],[[0,101,105,110,118,97,108],[0,101,105,110,118,97,108]]],[{options},{{error,enotconn}},{{error,timeout}}],{{error,timeout}},{},{},{},[{{error,closed}},{{error,closed}}],[['EXIT',port,normal]]]",
+        accepted(1),
+        accepted(2),
+        accepted(3),
+    );
+    assert_eq!(erts, expected, "ERTS");
+    assert_eq!(pbeam, expected, "PBeam");
+}
+
+#[test]
+fn stops_the_run_for_an_active_mode_on_an_accepted_socket() {
+    // Task #668 adds the data messages of an active socket
+    // (inet_drv.c:7530-7560, 13461).
+    let path = std::env::temp_dir().join(format!("pbeam-tcp-active-{}", std::process::id()));
+    let error = with_client(&path, || {
+        let program = load();
+        let argument = Term::list_from(
+            path.display()
+                .to_string()
+                .bytes()
+                .map(|byte| Term::Integer(byte.into())),
+        );
+        program
+            .execute("tcp_accept", "active", &[program.host_term(argument)])
+            .unwrap_err()
+            .to_string()
+    });
+    assert!(
+        error.starts_with("unsupported tcp_inet option active on a connected socket"),
+        "{error}"
+    );
 }

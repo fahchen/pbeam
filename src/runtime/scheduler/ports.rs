@@ -41,6 +41,28 @@ impl Scheduler {
         driver: Driver,
     ) -> Result<PortId, BeamError> {
         let owner = self.current_process_mut().id;
+        self.open_port_for(owner, name, driver)
+    }
+
+    /// Open a port with the name `name` and the driver `driver`, owned by
+    /// and linked to the process `owner`, which exists (see
+    /// [`Self::open_port`]).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let port = scheduler.open_port_for(owner, b"tcp_inet".to_vec(), driver)?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The port number overflows.
+    pub(super) fn open_port_for(
+        &mut self,
+        owner: ProcessId,
+        name: Vec<u8>,
+        driver: Driver,
+    ) -> Result<PortId, BeamError> {
         let port = Port {
             owner,
             name,
@@ -50,7 +72,10 @@ impl Scheduler {
             driver,
         };
         let id = self.resources.borrow_mut::<Ports>().insert(port)?;
-        self.current_process_mut().links.insert(LinkId::Port(id), 0);
+        self.process_mut(owner)
+            .expect("the owner of a port exists")
+            .links
+            .insert(LinkId::Port(id), 0);
         Ok(id)
     }
 
@@ -80,6 +105,9 @@ impl Scheduler {
     /// `os:set_signal(sigchld, ignore)`.
     pub(in crate::runtime) fn port_ready(&mut self, fd: libc::c_int) -> Result<(), BeamError> {
         let ports = self.resources.borrow_mut::<Ports>();
+        if let Some(listen) = ports.accepting(fd) {
+            return self.tcp_accept_ready(listen);
+        }
         let Some((id, event)) = ports.read(fd) else {
             return Ok(());
         };
@@ -107,8 +135,8 @@ impl Scheduler {
 
     /// Close the open port `id` with the exit reason `reason`, as
     /// `erts_deliver_port_exit` and `terminate_port` do
-    /// (`io.c:3698-3790`, `3841-3950`): the port leaves the table, and its
-    /// pipes close. The owner, which has the only link to the port, gets a
+    /// (`io.c:3698-3790`, `3841-3950`): the port leaves the table, its
+    /// driver stops (see [`Self::stop_port`]), and its pipes close. The owner, which has the only link to the port, gets a
     /// link exit signal from the port with the reason (`link_port_exit`,
     /// `io.c:3802-3813`).
     ///
@@ -123,6 +151,8 @@ impl Scheduler {
             .borrow_mut::<Ports>()
             .remove(id)
             .expect("the port to close is open");
+        let owner = port.owner;
+        self.stop_port(id, port);
         let exit = Signal::Exit {
             from: LinkId::Port(id),
             reason,
@@ -131,7 +161,24 @@ impl Scheduler {
             alias: None,
         };
         // An owner that does not exist drops the signal.
-        let _ = self.send_signal(None, port.owner, exit);
+        let _ = self.send_signal(None, owner, exit);
+    }
+
+    /// Stop the driver of the port `id` that left the table, as the `stop`
+    /// callback of the driver does: a `tcp_inet` listen port ends each
+    /// accept that waits (see [`Self::tcp_stop`]). Dropping the port closes
+    /// its pipes or its socket.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let port = ports.remove(id).unwrap();
+    /// scheduler.stop_port(id, port);
+    /// ```
+    fn stop_port(&mut self, id: PortId, port: Port) {
+        if let Driver::Inet(tcp) = port.driver {
+            self.tcp_stop(id, tcp);
+        }
     }
 
     /// Send the link exit signal of the exiting process `from` to the port
@@ -150,7 +197,8 @@ impl Scheduler {
     pub(in crate::runtime) fn port_link_exit(&mut self, id: PortId, from: ProcessId) {
         let ports = self.resources.borrow_mut::<Ports>();
         if ports.get(id).is_some_and(|port| port.owner == from) {
-            ports.remove(id);
+            let port = ports.remove(id).expect("the port is open");
+            self.stop_port(id, port);
         }
     }
 }

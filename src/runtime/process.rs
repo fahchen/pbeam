@@ -132,6 +132,14 @@ pub(super) enum TargetMonitor {
     /// A monitor that the TTY resource with this reference holds
     /// (`ERTS_MON_TYPE_RESOURCE`, `erl_nif.c:3957-3989`).
     Tty(Reference),
+    /// A monitor that a port holds (`ERTS_MON_TYPE_PORT`): the listen port
+    /// of an accept that waits.
+    Port {
+        /// The port that holds the monitor.
+        port: PortId,
+        /// The reference of the monitor.
+        reference: Reference,
+    },
 }
 
 /// An entry of the monitor tree of a process (`ERTS_P_MONITORS`): the
