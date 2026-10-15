@@ -204,7 +204,8 @@ pub(super) fn insert(
             return Ok(BifResult::badarg());
         };
         let (keypos, bag) = (found.keypos(), found.table_type() == TableType::Bag);
-        return insert_list(context, id, objects, 0, keypos, bag.then(Term::nil));
+        let check = Check::Rest(objects.clone());
+        return insert_list(context, id, objects, 0, keypos, bag.then(Term::nil), check);
     }
     let caller = context.scheduler.current_process_mut().id;
     let Some(table) =
@@ -273,9 +274,11 @@ pub(super) fn insert(
 /// call uses all reductions and traps to its export with `done` after that
 /// unit (`erl_db.c:2297-2332`). ERTS traps to `ets:insert/2` with a magic
 /// reference to the YCF state, and PBeam traps to the internal export
-/// `ets:insert/5` with the table reference, the objects, `done`, the key
-/// position, and the steps of a `bag` insert, or `false` for another table.
-/// `done` counts the units of the check, the copy, and the
+/// `ets:insert/6` with the table reference, the objects, `done`, the key
+/// position, the steps of a `bag` insert, or `false` for another table, and
+/// the [`Check`]. A resume reads only the part of the list that the check
+/// did not read, and after the check it does not read the list again
+/// before the insert. `done` counts the units of the check, the copy, and the
 /// insert, and after a failed copy the units of the removal from
 /// `4 * count`. ERTS takes a table lock and inserts each object in step 3, and
 /// another process that uses the table helps to complete the insert. PBeam
@@ -291,7 +294,8 @@ pub(super) fn insert(
 /// process.fcalls = 10;
 /// let objects = Term::list_from(vec![Term::tuple(vec![test_atom("k")]); 8]);
 /// // 8 units of the check and 16 units of the insert: 3 reductions.
-/// assert!(matches!(insert_list(&mut context, id, &objects, 0, 1, None)?, BifResult::Value(_)));
+/// let check = Check::Rest(objects.clone());
+/// assert!(matches!(insert_list(&mut context, id, &objects, 0, 1, None, check)?, BifResult::Value(_)));
 /// assert_eq!(context.scheduler.current_process_mut().fcalls, 7);
 /// ```
 ///
@@ -307,14 +311,18 @@ pub(super) fn insert_list(
     mut done: usize,
     keypos: i32,
     mut bag: Option<Term>,
+    mut check: Check,
 ) -> Result<BifResult, BeamError> {
     /// `ITERATIONS_PER_RED` (`erl_db.c:2152`).
     const ITERATIONS_PER_RED: i64 = 8;
-    let (elements, tail) = objects.list_cells().expect("a list insert has a list");
-    let elements: Vec<&Term> = elements.collect();
-    let count = elements.len();
     let table = Term::Reference(id);
     let inserting = |bag: &Option<Term>| bag.as_ref().is_some_and(|steps| !steps.is_nil());
+    // The number of objects is known only after the check. Until then,
+    // `done` takes its place, so that each test of a later phase is false.
+    let mut count = match check {
+        Check::Rest(_) => done,
+        Check::Done(count) => count,
+    };
     let insert_phase = match &bag {
         Some(_) => inserting(&bag),
         None => 2 * count < done && done <= 4 * count,
@@ -332,7 +340,13 @@ pub(super) fn insert_list(
     let caller = process.id;
     let budget = ITERATIONS_PER_RED * process.bif_reductions_left()? as i64;
     let mut units = Units { left: budget };
-    let tuples = valid_objects(elements.iter().copied(), keypos).filter(|_| tail.is_none());
+    // The tuples of the checked list, for the insert. The walk is part of
+    // the units of the insert.
+    let tuples = || -> Vec<&[Term]> {
+        (objects.list_iter().expect("a list insert has a list"))
+            .map(|object| valid_object(object, keypos).expect("the check found each object good"))
+            .collect()
+    };
     // After a failed copy, the units of the removal of the copies follow
     // `4 * count`, and a removal that yields leaves `done` above it.
     let mut removal = match &bag {
@@ -341,19 +355,12 @@ pub(super) fn insert_list(
     };
     // `None` when the call yields, else the result of the call.
     let result = 'work: {
-        if done <= count {
-            let check_end = match &tuples {
-                Some(_) => count,
-                None => (elements.iter())
-                    .position(|object| valid_objects([*object], keypos).is_none())
-                    .map_or(count, |index| index + 1),
-            };
-            if !units.run(&mut done, check_end) {
-                break 'work None;
+        if let Check::Rest(rest) = &mut check {
+            match units.check(&mut done, rest, keypos) {
+                None => break 'work None,
+                Some(false) => break 'work Some(BifResult::badarg()),
+                Some(true) => (count, check) = (done, Check::Done(done)),
             }
-            let Some(tuples) = &tuples else {
-                break 'work Some(BifResult::badarg());
-            };
             if bag.is_none() && count as i64 <= units.left {
                 let Some(table) = context.scheduler.ets.table(
                     &context.scheduler.atoms,
@@ -363,7 +370,7 @@ pub(super) fn insert_list(
                 ) else {
                     break 'work Some(BifResult::badarg());
                 };
-                put_objects(&context.scheduler.atoms, table, tuples, keypos)?;
+                put_objects(&context.scheduler.atoms, table, &tuples(), keypos)?;
                 units.left -= 2 * count as i64;
                 break 'work Some(Value(Term::static_atom("true")));
             }
@@ -379,8 +386,7 @@ pub(super) fn insert_list(
                 Operation::Write,
             ) {
                 Some(table) => {
-                    let tuples = tuples.expect("the check of a copied list found no bad object");
-                    let compared = put_objects(&context.scheduler.atoms, table, &tuples, keypos)?;
+                    let compared = put_objects(&context.scheduler.atoms, table, &tuples(), keypos)?;
                     if bag.is_some() {
                         let steps = compared.into_iter().flat_map(|compared| {
                             [Term::Integer(1), Term::Integer(1 + compared as i64)]
@@ -417,8 +423,57 @@ pub(super) fn insert_list(
             Term::Integer(done as i64),
             Term::Integer(i64::from(keypos)),
             bag.unwrap_or_else(|| Term::static_atom("false")),
+            check.into_term(),
         ],
     }))
+}
+
+/// How far the check of a list insert ([`insert_list`]) went, as the YCF
+/// state of `ets_insert_2_list_check` keeps the list cell that it reads
+/// (`erl_db.c:1812-1827`). A resume continues from there, so no turn walks
+/// the checked objects again.
+pub(super) enum Check {
+    /// The check runs. The term is the part of the list that it did not
+    /// read: a cons cell, `[]` after the last object, or another term after
+    /// a bad object or as the tail of an improper list, which raises
+    /// `badarg`.
+    Rest(Term),
+    /// The check found each object good. The number is the number of
+    /// objects.
+    Done(usize),
+}
+
+impl Check {
+    /// Return the trap argument of the check: `{Rest}` or the number of
+    /// objects. [`Check::from_term`] reads it back.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Check::Done(2).into_term(), Term::Integer(2));
+    /// assert_eq!(Check::Rest(Term::nil()).into_term(), Term::tuple(vec![Term::nil()]));
+    /// ```
+    fn into_term(self) -> Term {
+        match self {
+            Check::Rest(rest) => Term::tuple(vec![rest]),
+            Check::Done(count) => Term::Integer(count as i64),
+        }
+    }
+
+    /// Read the trap argument that [`Check::into_term`] gives.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(matches!(Check::from_term(&Term::Integer(2)), Check::Done(2)));
+    /// assert!(matches!(Check::from_term(&Term::tuple(vec![Term::nil()])), Check::Rest(_)));
+    /// ```
+    pub(super) fn from_term(term: &Term) -> Check {
+        match term {
+            Term::Tuple(elements) => Check::Rest(elements[0].clone()),
+            count => Check::Done(count.small_integer().expect("a trap keeps the count") as usize),
+        }
+    }
 }
 
 /// The YCF reduction counter of a call (`YCF_NR_OF_REDS_LEFT`): the units
@@ -454,6 +509,53 @@ impl Units {
         *done = end;
         self.left -= units;
         true
+    }
+
+    /// Check the objects of the list `rest` with one unit for each object,
+    /// up to the first bad object, as `ets_insert_2_list_check`
+    /// (`erl_db.c:1812-1827`) does, and as [`Units::run`] counts the units.
+    /// Read at most the objects that the units allow. Return `Some(true)`
+    /// when each object is good and the list is proper, `Some(false)` for a
+    /// bad object or an improper tail, and `None` when the call yields:
+    /// `rest` then keeps the part of the list that remains.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let (mut units, mut done) = (Units { left: 1 }, 0);
+    /// let mut rest = Term::list_from(vec![Term::tuple(vec![test_atom("k")]); 2]);
+    /// assert_eq!(units.check(&mut done, &mut rest, 1), None);
+    /// assert_eq!((done, units.left), (1, 0));
+    /// ```
+    fn check(&mut self, done: &mut usize, rest: &mut Term, keypos: i32) -> Option<bool> {
+        let limit = self.left.max(1);
+        let mut walked = 0;
+        let good = loop {
+            let Some((object, tail)) = rest.cons_cell() else {
+                break rest.is_nil();
+            };
+            if walked == limit {
+                break true;
+            }
+            walked += 1;
+            let good = valid_object(object, keypos).is_some();
+            // A term that is not a list keeps the bad object for a resume.
+            *rest = if good {
+                tail.clone()
+            } else {
+                Term::static_atom("badarg")
+            };
+            if !good {
+                break false;
+            }
+        };
+        *done += walked as usize;
+        if walked >= limit {
+            self.left -= limit;
+            return None;
+        }
+        self.left -= walked;
+        Some(good)
     }
 
     /// Use the steps of the list `steps`, each a number of units, and
@@ -538,14 +640,28 @@ fn valid_objects<'a>(
     objects: impl IntoIterator<Item = &'a Term>,
     keypos: i32,
 ) -> Option<Vec<&'a [Term]>> {
-    let keypos = i64::from(keypos) as u64;
     objects
         .into_iter()
-        .map(|object| match object {
-            Term::Tuple(elements) if elements.len() as u64 >= keypos => Some(elements.as_ref()),
-            _ => None,
-        })
+        .map(|object| valid_object(object, keypos))
         .collect()
+}
+
+/// Return the elements of `object` when it is a tuple with at least
+/// `keypos` elements, as [`valid_objects`] checks each object.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(valid_object(&Term::tuple(vec![test_atom("k")]), 1).is_some());
+/// assert!(valid_object(&test_atom("k"), 1).is_none());
+/// ```
+fn valid_object(object: &Term, keypos: i32) -> Option<&[Term]> {
+    match object {
+        Term::Tuple(elements) if elements.len() as u64 >= i64::from(keypos) as u64 => {
+            Some(elements.as_ref())
+        }
+        _ => None,
+    }
 }
 
 /// Run `ets:lookup_element(Table, Key, Index, Default)`, as ERTS
