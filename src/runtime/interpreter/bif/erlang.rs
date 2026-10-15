@@ -1792,9 +1792,11 @@ pub(super) fn b2l_chunk(
 /// Return the list of the bytes from byte `start` to byte `end` of
 /// `binary` in front of the list `tail`, as ERTS `erts_bin_bytes_to_list`
 /// does. [`Binary::byte_runs`] reads the range from the chunks of a binary
-/// that an append built and does not join them, so one call does O(chunks)
-/// work plus one cons for each byte of the range, and the reductions of the
-/// caller pay for the bytes.
+/// that an append built and does not join them. One call does O(log
+/// chunks) work to find the chunks of the range, O(1) work for each chunk of
+/// the range, and one cons for each byte of the range, and the reductions of
+/// the caller pay for the bytes. The first call on a binary also builds its
+/// chunk index once, which is O(chunks).
 pub(super) fn b2l_cons(binary: &Binary, start: usize, end: usize, tail: Term) -> Term {
     binary
         .byte_runs(start, end)

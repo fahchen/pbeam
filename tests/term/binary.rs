@@ -463,3 +463,27 @@ fn appends_in_place_only_to_a_binary_that_one_handle_owns() {
     assert!(!shared.append_in_place(&[3]));
     assert_eq!(shared.len(), APPEND_LEAF + 1);
 }
+
+#[test]
+fn reads_a_byte_range_of_an_appended_binary_from_the_chunks_of_the_range() {
+    let chunks = (0..1000u32)
+        .map(|index| Arc::new(index.to_be_bytes().to_vec()))
+        .collect::<Vec<_>>();
+    let binary = Binary::from_chunks(chunks);
+    assert!(binary.0.chunk_ends.get().is_none());
+
+    // The first ranged read builds the chunk index, and the view keeps it.
+    assert_eq!(binary.byte_runs(3999, 4000), vec![&[231u8][..]]);
+    let index = binary.0.chunk_ends.get().unwrap().as_ptr();
+    assert_eq!(binary.byte_runs(5, 10), vec![&[0u8, 0, 1][..], &[0, 0][..]]);
+    assert_eq!(binary.0.chunk_ends.get().unwrap().as_ptr(), index);
+    assert!(!binary.is_joined());
+
+    // A range near the end visits only the chunks of the range.
+    let ends = binary.0.chunk_ends.get().unwrap();
+    assert_eq!(chunk_span(ends, 3998, 3999), 999..1000);
+    assert_eq!(chunk_span(ends, 3995, 4000), 998..1000);
+    assert_eq!(chunk_span(ends, 4, 8), 1..2);
+    assert_eq!(chunk_span(ends, 7, 7), 0..0);
+    assert!(binary.byte_runs(7, 7).is_empty());
+}
