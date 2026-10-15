@@ -33,7 +33,8 @@ host_name() ->
 
 %% The errors of OPEN, GETHOSTNAME, and LISTEN (inet_drv.c:11219-11233,
 %% 14577-14636, 14846-14858). A stream socket with the UDP protocol gives
-%% the errno of socket/3 of the host.
+%% the errno of socket/3 of the host. A datagram socket has no
+%% send_timeout and send_timeout_close (inet_drv.c:7099-7120, 9236-9255).
 open() ->
     process_flag(trap_exit, true),
     P = open_port({spawn_driver, "udp_inet"}, [binary]),
@@ -41,7 +42,8 @@ open() ->
     Before = [C(12, [1]), C(12, []) =:= C(12, []), C(27, [0, 5])],
     Open = [C(1, [1, 2]), C(1, [9, 2, 2]), C(1, [1, 9, 9]), C(1, [1, 2, 9]),
             C(1, [1, 1, 2]), C(1, [1, 2, 0]), C(1, [1, 2, 2])],
-    After = [C(27, [0, 5]), C(27, [])],
+    After = [C(27, [0, 5]), C(27, []), C(7, [30,0,0,0,1, 35,0,0,0,1]),
+             C(8, [30, 35])],
     true = erlang:port_close(P),
     [Before, Open, After].
 

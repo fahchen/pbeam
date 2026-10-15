@@ -305,7 +305,8 @@ impl Inet {
     /// failed `setsockopt` of `reuseaddr` and `nodelay` does not fail the
     /// request (`propagate` is 0), also without a socket. `send_timeout`
     /// and `send_timeout_close` change only a stream socket, so they change
-    /// nothing before `OPEN` (inet_drv.c:7099-7120).
+    /// nothing before `OPEN` and nothing on a `udp_inet` port
+    /// (inet_drv.c:7099-7120).
     fn set_options(&mut self, mut request: &[u8]) -> Result<Vec<u8>, BeamError> {
         while let [option, v3, v2, v1, v0, rest @ ..] = request {
             let value = i32::from_be_bytes([*v3, *v2, *v1, *v0]);
@@ -316,13 +317,20 @@ impl Inet {
                 22 => self.active = value,
                 0 => self.with_socket(|socket| socket.set_reuse_address(value != 0)),
                 10 => self.with_socket(|socket| socket.set_tcp_nodelay(value != 0)),
-                30 if self.socket.is_some() => self.send_timeout = value,
-                35 if self.socket.is_some() => self.send_timeout_close = value,
+                30 if self.has_stream_socket() => self.send_timeout = value,
+                35 if self.has_stream_socket() => self.send_timeout_close = value,
                 30 | 35 => {}
                 &other => return Err(self.unsupported("option", other)),
             }
         }
         Ok(vec![OK])
+    }
+
+    /// Return whether the port has a socket of the stream type, the only type
+    /// that has `send_timeout` and `send_timeout_close` (inet_drv.c:7099-7120,
+    /// 9236-9255).
+    fn has_stream_socket(&self) -> bool {
+        self.socket.is_some() && self.socket_type == SocketType::Stream
     }
 
     /// Run `set` on the socket, and ignore its result and a missing socket.
@@ -348,8 +356,8 @@ impl Inet {
             let value = match option {
                 24 => Some(self.mode),
                 22 => Some(self.active),
-                30 => socket.map(|_| self.send_timeout),
-                35 => socket.map(|_| self.send_timeout_close),
+                30 => self.has_stream_socket().then_some(self.send_timeout),
+                35 => self.has_stream_socket().then_some(self.send_timeout_close),
                 0 => socket
                     .and_then(|socket| socket.reuse_address().ok())
                     .map(getsockopt_value),
