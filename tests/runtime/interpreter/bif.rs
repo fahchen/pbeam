@@ -1,21 +1,26 @@
 //! The measurement of the two small tables that the run scans.
 //!
 //! The run searches no `BIFS` entry: the loader stores the identity of a BIF
-//! in the instruction. Two linear scans stay on the path of an external
-//! call, [`PBEAM_BIFS`](super::PBEAM_BIFS) with 5 entries and
-//! [`HEAVY_BIFS`](super::HEAVY_BIFS) with 7 entries. This measurement bounds
-//! the cost of each scan. The `call_ext_only` shape of
-//! `tests/integration/dispatch_baseline.rs` cannot bound it: the spread of
-//! that shape over the runs of one revision is larger than one scan.
+//! in the instruction or in the import. Two linear scans classify each import
+//! when the module loads ([`import_kind`](super::import_kind)),
+//! [`PBEAM_BIFS`](super::PBEAM_BIFS) with 5 entries and
+//! [`HEAVY_BIFS`](super::HEAVY_BIFS) with 7 entries, and an external call
+//! reads the result. This measurement bounds the cost of each scan. Before
+//! task [#628](https://github.com/fahchen/pbeam/issues/628), each external
+//! call ran them. The `call_ext_only` shape of
+//! `tests/integration/dispatch_baseline.rs` could not bound them: the spread
+//! of that shape over the runs of one revision is larger than one scan.
 //!
 //! Run `cargo test --release --lib -- bif::tests -- --nocapture` and read
 //! the `SCAN` lines. The test asserts no time, because the load of the host
 //! changes it.
 
 use super::{
-    BifContext, BifId, BifResult, dispatch_leaf, is_heavy_bif, is_leaf, is_pbeam_bif, mfa, resolve,
+    BifContext, BifId, BifResult, dispatch_leaf, import_kind, is_heavy_bif, is_leaf, is_pbeam_bif,
+    mfa, resolve,
 };
 use crate::{
+    beam::ImportKind,
     runtime::scheduler::Scheduler,
     term::{AtomTable, Map, Term},
 };
@@ -66,14 +71,12 @@ fn measure_heavy(module: &str, name: &str, arity: u32) -> f64 {
     start.elapsed().as_nanos() as f64 / CALLS as f64
 }
 
-/// Print the cost of each scan for the shape that reads it.
+/// Print the cost of each scan for the import that reads it.
 ///
 /// The `call_ext_only` shape of `tests/integration/dispatch_baseline.rs`
-/// calls `dispatch_probe:floor_ext_loop/1`, which is module code, so the run
-/// reads `is_pbeam_bif` with an MFA of a guest module and no entry matches.
-/// A `call_ext` of a BIF reads `is_heavy_bif` instead, because the identity
-/// of the entry is already in the instruction and `is_pbeam_bif` does not
-/// run for it.
+/// calls `dispatch_probe:floor_ext_loop/1`, which is module code, so the
+/// loader reads `is_pbeam_bif` with an MFA of a guest module and no entry
+/// matches. The import of a BIF of `BIFS` reads `is_heavy_bif` too.
 #[test]
 fn prints_the_cost_of_the_two_classification_scans() {
     println!(
@@ -96,6 +99,49 @@ fn prints_the_cost_of_the_two_classification_scans() {
         "SCAN is_pbeam_bif(pbeam_cap:serve/2) {:.2} ns",
         measure_pbeam("pbeam_cap", "serve", 2)
     );
+}
+
+/// Assert the call that the loader decides for each kind of import, in the
+/// order of the checks of the removed call-time classification:
+/// `erlang:load_nif/2` before the BIFs, `erlang:apply/2,3` apart from the
+/// BIFs, and a heavy BIF apart from a light BIF (`jit/arm/ops.tab:615-714`).
+#[test]
+fn classifies_each_kind_of_import() {
+    let cases = [
+        (("erlang", "apply", 2), ImportKind::ApplyFun),
+        (("erlang", "apply", 3), ImportKind::Apply),
+        (("erlang", "load_nif", 2), ImportKind::LoadNif),
+        (
+            ("erlang", "whereis", 1),
+            ImportKind::Bif {
+                bif: Some(BifId::ErlangWhereis1),
+                heavy: false,
+            },
+        ),
+        (
+            ("erlang", "put", 2),
+            ImportKind::Bif {
+                bif: resolve("erlang", "put", 2),
+                heavy: true,
+            },
+        ),
+        (
+            ("pbeam_cap", "serve", 2),
+            ImportKind::Bif {
+                bif: None,
+                heavy: false,
+            },
+        ),
+        (("lists", "reverse", 1), ImportKind::Export),
+    ];
+    for ((module, name, arity), kind) in cases {
+        assert_eq!(
+            import_kind(module, name, arity),
+            kind,
+            "{module}:{name}/{arity}"
+        );
+    }
+    assert!(resolve("erlang", "put", 2).is_some());
 }
 
 /// Assert that the leaf lane and the owned dispatch agree on each leaf

@@ -129,6 +129,7 @@ fn floor_module() -> Rc<BeamModule> {
         BeamModule::new(
             "fixture".into(),
             HashMap::from([(("floor_loop".into(), 1), 1)]),
+            Vec::new(),
             vec![
                 Instruction::FunctionInfo {
                     module: "fixture".into(),
@@ -368,7 +369,8 @@ fn prints_the_cost_of_every_instruction_part() {
     // adds one more clone-and-drop pair. The `cursor_module_reset` row gives
     // the cost of that reset alone, so a reader can subtract it.
     let other = Rc::new(
-        BeamModule::new("other".into(), HashMap::new(), vec![]).expect("the fixture module loads"),
+        BeamModule::new("other".into(), HashMap::new(), Vec::new(), vec![])
+            .expect("the fixture module loads"),
     );
     assert_ne!(other.id, module_id);
     report(

@@ -1,14 +1,40 @@
 use super::function_at_label;
 use crate::{
-    beam::{BeamModule, ModuleId},
+    beam::{BeamModule, ModuleId, NameId},
     error::{BeamError, error},
     runtime::process::{Frame, InitialCall},
     term::{AtomTable, Reference},
 };
 use std::{
+    cell::Cell,
     collections::{HashMap, HashSet},
     rc::Rc,
 };
+
+#[cfg(test)]
+thread_local! {
+    /// The number of calls of [`CodeTable::export_frame`] on this test
+    /// thread.
+    ///
+    /// A call that reads the resolved export target of its import gives the
+    /// same value as a lookup by name, so a test of the fast path reads this
+    /// counter. The counter is per thread, because the test harness runs the
+    /// tests of one binary on parallel threads.
+    static EXPORT_FRAME_CALLS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Return the number of calls of [`CodeTable::export_frame`] on this test
+/// thread.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let before = export_frame_calls();
+/// ```
+#[cfg(test)]
+pub(in crate::runtime::interpreter) fn export_frame_calls() -> usize {
+    EXPORT_FRAME_CALLS.with(Cell::get)
+}
 
 /// The code table of one run, as the ERTS module table with the export
 /// table of the active code index (`module.c`, `export.c`). Every module
@@ -22,8 +48,9 @@ pub(in crate::runtime) struct CodeTable {
     /// and each run shares them through the `Rc`.
     modules: HashMap<String, Rc<BeamModule>>,
     /// The loaded modules by their identity, for a frame that names its
-    /// module by [`ModuleId`] and not by name.
-    by_id: HashMap<ModuleId, Rc<BeamModule>>,
+    /// module by [`ModuleId`] and not by name, with the export targets of
+    /// the imports of each module in this run.
+    by_id: HashMap<ModuleId, LoadedModule>,
     /// The prepared code of `erts_internal:prepare_loading/2` by its
     /// reference, as the magic binary of the ERTS loader state
     /// (`beam_bif_load.c:250-265`). `erlang:finish_loading/1` takes an
@@ -31,6 +58,89 @@ pub(in crate::runtime) struct CodeTable {
     /// until the run ends; ERTS frees it when the garbage collector frees
     /// the last copy of the reference.
     prepared: HashMap<Reference, BeamModule>,
+}
+
+/// A loaded module of one run and the export target of each of its imports
+/// in that run.
+#[derive(Debug, Clone)]
+pub(in crate::runtime) struct LoadedModule {
+    /// The code of the module, which the runs of the program share.
+    pub(in crate::runtime) code: Rc<BeamModule>,
+    /// The export target of each import of the module, by the index of the
+    /// import in [`BeamModule::imports`].
+    pub(in crate::runtime) imports: ImportTargets,
+}
+
+impl LoadedModule {
+    /// Return the loaded module of `code`, with no resolved import.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let loaded = LoadedModule::new(Rc::clone(&module));
+    /// assert_eq!(loaded.imports.len(), module.imports.len());
+    /// ```
+    fn new(code: Rc<BeamModule>) -> Self {
+        let imports = code.imports.iter().map(|_| Cell::new(None)).collect();
+        LoadedModule { code, imports }
+    }
+}
+
+/// The export target of each import of one module in one run, as the ERTS
+/// loader patches the export entry of each import into the code
+/// (`jit/asm_load.c:1198-1206`). A `call_ext` reads its slot and makes no
+/// lookup by name. A slot is empty until the first call finds the export of
+/// its MFA. The slot then keeps the target for the whole run, because no
+/// operation of the run removes a module or changes its code (see
+/// [`CodeTable`]). A call that finds no export keeps the slot empty, so a
+/// later call finds a module that loads after it, as the load sets the code
+/// address in the ERTS export entry (`jit/asm_load.c:1194`). The slots
+/// belong to the run and not to the shared code, because each run loads
+/// its own modules.
+pub(in crate::runtime) type ImportTargets = Rc<[Cell<Option<ExportTarget>>]>;
+
+/// The function that the export of an MFA enters: the parts of the
+/// [`Frame`] that [`CodeTable::export_frame`] creates.
+#[derive(Debug, Clone, Copy)]
+pub(in crate::runtime) struct ExportTarget {
+    module_id: ModuleId,
+    function: NameId,
+    start: usize,
+}
+
+impl ExportTarget {
+    /// Return the target of the export frame `frame`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let frame = code.mfa_frame("fixture", "main", 0)?;
+    /// assert_eq!(ExportTarget::of(&frame).frame().next_instruction, frame.next_instruction);
+    /// ```
+    pub(in crate::runtime) fn of(frame: &Frame) -> Self {
+        ExportTarget {
+            module_id: frame.module_id,
+            function: frame.function,
+            start: frame.next_instruction,
+        }
+    }
+
+    /// Create a new frame at the start of the function.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let target = ExportTarget::of(&code.mfa_frame("fixture", "main", 0)?);
+    /// assert!(target.frame().stack.is_empty());
+    /// ```
+    pub(in crate::runtime) fn frame(self) -> Frame {
+        Frame {
+            module_id: self.module_id,
+            function: self.function,
+            next_instruction: self.start,
+            stack: Vec::new(),
+        }
+    }
 }
 
 /// The result of [`CodeTable::finish`].
@@ -57,7 +167,7 @@ impl CodeTable {
     pub(in crate::runtime) fn new(modules: HashMap<String, Rc<BeamModule>>) -> Self {
         let by_id = modules
             .values()
-            .map(|module| (module.id, Rc::clone(module)))
+            .map(|module| (module.id, LoadedModule::new(Rc::clone(module))))
             .collect();
         CodeTable {
             modules,
@@ -83,6 +193,27 @@ impl CodeTable {
         &self,
         id: ModuleId,
     ) -> Result<&Rc<BeamModule>, BeamError> {
+        self.loaded_by_id(id).map(|loaded| &loaded.code)
+    }
+
+    /// Return the loaded module of `id` with the export targets of its
+    /// imports.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let module = code.get("erlang").unwrap();
+    /// assert_eq!(code.loaded_by_id(module.id)?.code.name, "erlang");
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// An identity that no loaded module of the run has is a runtime
+    /// invariant error.
+    pub(in crate::runtime) fn loaded_by_id(
+        &self,
+        id: ModuleId,
+    ) -> Result<&LoadedModule, BeamError> {
         self.by_id.get(&id).ok_or_else(|| {
             error(format!(
                 "invariant error: no loaded module has identity {id:?}"
@@ -220,6 +351,8 @@ impl CodeTable {
         function: &str,
         arity: u32,
     ) -> Result<Option<Frame>, BeamError> {
+        #[cfg(test)]
+        EXPORT_FRAME_CALLS.with(|calls| calls.set(calls.get() + 1));
         self.get(module)
             .and_then(|loaded| {
                 loaded
@@ -354,7 +487,9 @@ impl CodeTable {
     /// A module that is loaded already is the runtime error
     /// `erlang:finish_loading/1 cannot replace the loaded module M`. ERTS
     /// makes the current code old and loads the new code
-    /// (`beam_load.c:258-262`). PBeam has no old code.
+    /// (`beam_load.c:258-262`). PBeam has no old code. This error also
+    /// keeps each filled [`ImportTargets`] slot valid: an operation that
+    /// replaces or removes code must empty the slots that name that code.
     pub(in crate::runtime) fn finish(
         &mut self,
         references: &[Reference],
@@ -382,7 +517,8 @@ impl CodeTable {
                 .remove(reference)
                 .expect("checked by prepared_names");
             let module = Rc::new(module);
-            self.by_id.insert(module.id, Rc::clone(&module));
+            self.by_id
+                .insert(module.id, LoadedModule::new(Rc::clone(&module)));
             self.modules.insert(name, module);
         }
         Ok(Finish::Loaded)

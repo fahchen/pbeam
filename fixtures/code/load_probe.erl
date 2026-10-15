@@ -1,5 +1,6 @@
 -module(load_probe).
--export([load/1, prepared/1, errors/1, replace/1, on_load/1, order/1, constraint/1]).
+-export([load/1, prepared/1, errors/1, replace/1, on_load/1, order/1, constraint/1, late/1,
+         undefined_function/3]).
 
 %% Load load_target from its BEAM bytes with erlang:load_module/2
 %% (erlang.erl:7513-7528), then call it. Read erlang:module_loaded/1 and
@@ -81,6 +82,54 @@ constraint(Code) ->
     catch
         error:capability_denied -> denied
     end.
+
+%% Run the same external calls before and after the load of load_target.
+%% Each call_ext names an export entry, which the ERTS loader patches into
+%% the code (jit/asm_load.c:1198-1206). Before the load, the entry of each
+%% function calls the error handler of the process
+%% (call_error_handler, beam_common.c:1294-1342). The load sets the address
+%% of the entries of the exported functions, so the same call sites then run
+%% load_target code. load_target:missing/0 stays undefined after the load.
+%% This module is the error handler of the calls, so the run needs no code
+%% server. erlang:apply/2,3 call through the export too.
+late(Code) ->
+    Before = handled(fun calls/0),
+    Loaded = erlang:load_module(load_target, Code),
+    After = handled(fun calls/0),
+    {Before, Loaded, After}.
+
+handled(Fun) ->
+    Old = erlang:process_flag(error_handler, load_probe),
+    Result = Fun(),
+    erlang:process_flag(error_handler, Old),
+    Result.
+
+calls() ->
+    [ext_only(), ext_only(), ext_body(), ext_last(), missing(), missing(),
+     apply_mfa(load_target, value, []), apply_mfa(load_target, missing, []),
+     apply_fun(fun load_target:value/0, []), [apply_mfa_body(load_target, value, [])]].
+
+ext_only() -> load_target:value().
+
+ext_body() -> [load_target:value()].
+
+ext_last() ->
+    _ = id(a),
+    load_target:value().
+
+missing() -> load_target:missing().
+
+apply_mfa(Module, Function, Arguments) -> erlang:apply(Module, Function, Arguments).
+
+apply_mfa_body(Module, Function, Arguments) -> [erlang:apply(Module, Function, Arguments)].
+
+apply_fun(Fun, Arguments) -> erlang:apply(Fun, Arguments).
+
+id(X) -> X.
+
+%% The error handler of late/1: return the call that has no export.
+undefined_function(Module, Function, Arguments) ->
+    {undefined, Module, Function, Arguments}.
 
 catch_error(Fun) ->
     try Fun() catch Class:Reason -> {Class, Reason} end.

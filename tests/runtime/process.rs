@@ -16,6 +16,7 @@ thread_local! {
     static MODULE: Rc<BeamModule> = Rc::new(BeamModule::new(
         "fixture".into(),
         HashMap::new(),
+        Vec::new(),
         vec![
             Instruction::FunctionInfo {
                 module: "fixture".into(),
