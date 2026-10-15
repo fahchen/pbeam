@@ -181,6 +181,21 @@ impl Binary {
         std::mem::size_of::<BinaryView>()
     }
 
+    /// Return the number of bits of this binary. The size comes from the
+    /// view, so a binary that an append built keeps its chunks and does not
+    /// join them, as [`Binary::deref`] does at its first read.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let bytes = Binary::from(b"abc".to_vec());
+    /// assert_eq!(bytes.bit_size(), 24);
+    /// assert_eq!(bytes.bits(4, 12).bit_size(), 8);
+    /// ```
+    pub(crate) fn bit_size(&self) -> usize {
+        self.0.size
+    }
+
     /// Return the bytes of the backing array of this binary, and of the
     /// packed array of a view whose offset is not on a byte boundary: the
     /// capacity of each array. The number excludes the header of the `Arc`

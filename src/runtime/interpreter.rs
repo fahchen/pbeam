@@ -990,15 +990,15 @@ impl BeamProgram {
                         // the read errors leave the run.
                         cursor.commit(process);
                         let values = read_bif_arguments(process, arguments)?;
-                        // No leaf identity is `byte_size/1`, so the
-                        // byte-size case of `match_context_byte_size`
-                        // cannot apply. The call still reports a match
-                        // context in a leaf argument, as the owned lane
-                        // does. The assertion holds the two facts together,
+                        // No leaf identity is `bit_size/1` or
+                        // `byte_size/1`, so the size case of
+                        // `match_context_size` cannot apply. The call
+                        // still reports a match context in a leaf
+                        // argument, as the owned lane does. The assertion holds the two facts together,
                         // so an identity that joins the leaf set without
                         // this case fails a test.
                         let size =
-                            values.with(|terms| match_context_byte_size(*bif, arguments, terms))?;
+                            values.with(|terms| match_context_size(*bif, arguments, terms))?;
                         debug_assert_eq!(size, None);
                         let mut reductions = 0;
                         let result =
@@ -1009,7 +1009,7 @@ impl BeamProgram {
                         let values = read_owned_bif_arguments(process, arguments)?;
                         cursor.commit(process);
                         let size =
-                            values.with(|terms| match_context_byte_size(*bif, arguments, terms))?;
+                            values.with(|terms| match_context_size(*bif, arguments, terms))?;
                         match size {
                             Some(size) => BifResult::Value(size),
                             None => values.with(|terms| self.bif_slice(scheduler, *bif, terms))?,
@@ -3854,11 +3854,13 @@ fn check_known_position(context: &MatchState, operand: &Operand) -> Result<(), B
     }
 }
 
-/// Return the `byte_size/1` result of a match context in `values`, the
-/// argument values of the BIF `module:name`, or `None` for each other BIF
-/// or argument. The BEAM validator lets `byte_size/1` get a match context
-/// (`validate_bif_sources`, beam_validator.erl:1649-1654), and ERTS gives
-/// the bits from its position to its end in bytes, rounded up
+/// Return the `bit_size/1` or `byte_size/1` result of a match context in
+/// `values`, the argument values of the BIF `module:name`, or `None` for
+/// each other BIF or argument. The BEAM validator lets these two BIFs get
+/// a match context (`validate_bif_sources`, beam_validator.erl:1649-1654).
+/// ERTS gives the bits from its position to its end
+/// (`emit_bif_bit_size`, jit/arm/instr_guard_bifs.cpp:336-441; ops.tab:
+/// 785-787), and for `byte_size/1` the same bits in bytes, rounded up
 /// (`emit_bif_byte_size`, jit/arm/instr_guard_bifs.cpp:458-509; ops.tab:
 /// 789-790). `Terra.Input.Parser.decode_codepoint/1` reads the size of its
 /// match context with it.
@@ -3875,22 +3877,27 @@ fn check_known_position(context: &MatchState, operand: &Operand) -> Result<(), B
 /// let context = Arc::new(MatchState::new(b"abc"));
 /// context.skip(4);
 /// let values = [Term::MatchContext(context)];
-/// let size = match_context_byte_size(BifId::ErlangByteSize1, &[Operand::X(0)], &values)?;
+/// let size = match_context_size(BifId::ErlangByteSize1, &[Operand::X(0)], &values)?;
 /// assert_eq!(size, Some(Term::Integer(3)));
-/// assert!(match_context_byte_size(BifId::ErlangHd1, &[Operand::X(0)], &values).is_err());
+/// assert!(match_context_size(BifId::ErlangHd1, &[Operand::X(0)], &values).is_err());
 /// ```
-fn match_context_byte_size<T: Borrow<Term>>(
+fn match_context_size<T: Borrow<Term>>(
     bif: BifId,
     arguments: &[Operand],
     values: &[T],
 ) -> Result<Option<Term>, BeamError> {
-    if bif == BifId::ErlangByteSize1
+    if matches!(bif, BifId::ErlangBitSize1 | BifId::ErlangByteSize1)
         && let [value] = values
         && let Term::MatchContext(context) = Borrow::<Term>::borrow(value)
     {
         check_known_position(context, &arguments[0])?;
         let bits = context.remaining_bits();
-        return Ok(Some(Term::Integer(bits.div_ceil(8) as i64)));
+        let size = if bif == BifId::ErlangBitSize1 {
+            bits
+        } else {
+            bits.div_ceil(8)
+        };
+        return Ok(Some(Term::Integer(size as i64)));
     }
     match values
         .iter()
