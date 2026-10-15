@@ -846,6 +846,11 @@ impl BeamProgram {
     ///   change count of the table ([`ets::match_trap`]). ERTS traps to
     ///   `ets:select_trap/1` with a tuple that holds a magic reference to the
     ///   compiled pattern (`erl_db_hash.c:2264-2307`).
+    /// - `ets:delete_trap/0`, which frees the segments of the table that
+    ///   `ets:delete/1` deleted ([`ets::delete_trap`]). The segments that
+    ///   remain stay in the ETS store under the caller. ERTS traps to
+    ///   `ets:delete_trap/1` with a bignum that holds the table pointer
+    ///   (`erl_db.c:3064-3077`, `5378-5397`).
     /// - `erts_internal:list_to_bitstring_continue/5`, with the phase and the
     ///   walk state of `erlang:iolist_to_binary/1` and `erlang:list_to_binary/1`
     ///   ([`iolist::l2b_size`], [`iolist::l2b_copy`]). ERTS traps to
@@ -935,6 +940,9 @@ impl BeamProgram {
             };
             let mut context = BifContext { scheduler };
             return ets::match_trap(&mut context, *id, pattern, *bucket as usize, state);
+        }
+        if let ("ets", "delete_trap", []) = (module, function, arguments.as_slice()) {
+            return ets::delete_trap(&mut BifContext { scheduler });
         }
         // The copy phase takes the result bytes out of the owned trap
         // arguments, so that no turn copies the bytes of an earlier turn
