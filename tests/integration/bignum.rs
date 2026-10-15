@@ -166,7 +166,7 @@ fn charges_bignum_operations_as_pinned_erts() {
     // each value is the reductions of a fun call that runs one operation.
     assert_eq!(
         assert_matches_erts("costs"),
-        "[3,4,3,4,4,5,4,4,11,3,5,3,4,4,4,4,4,4,3,4,4,4,4,3,6]"
+        "[3,4,3,4,4,5,4,4,11,3,5,3,4,4,4,4,4,4,3,4,4,4,4,3,6,4,4]"
     );
 }
 
@@ -176,6 +176,16 @@ fn writes_binary_segments_of_bignums_as_pinned_erts() {
         assert_matches_erts("segments"),
         "[<<0,0,0,0,0,0,0,5>>,<<255>>,<<2,1>>]"
     );
+}
+
+#[test]
+fn raises_the_errors_of_bignum_sizes_as_pinned_erts() {
+    // A positive bignum size of an `integer` segment raises `system_limit`
+    // and a negative one `badarg` (`BSC_REASON_DEPENDS`,
+    // `jit/beam_jit_common.cpp:968-975`). A BIF raises `badarg` with no cause.
+    let erts = assert_matches_erts("sizes");
+    assert!(erts.starts_with("[{error,system_limit,{1,integer,size,18446744073709551616}},"));
+    assert!(erts.ends_with(",{error,badarg,none}]"));
 }
 
 #[test]

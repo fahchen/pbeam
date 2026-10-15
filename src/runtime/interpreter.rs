@@ -4465,6 +4465,8 @@ impl BinaryPart<'_> {
 /// assert_eq!(integer_segment_bits(false, &Term::Integer(3), 8), Ok(24));
 /// assert_eq!(integer_segment_bits(false, &Term::Integer(-1), 1), Err("badarg"));
 /// assert_eq!(integer_segment_bits(false, &Term::Integer(1 << 52), 8), Err("system_limit"));
+/// let size = Term::from_bigint(BigInt::from(1u128 << 64));
+/// assert_eq!(integer_segment_bits(false, &size, 1), Err("system_limit"));
 /// ```
 fn integer_segment_bits(fixed: bool, size: &Term, unit: u64) -> Result<u64, &'static str> {
     match (size.small_integer(), size) {
@@ -4473,6 +4475,7 @@ fn integer_segment_bits(fixed: bool, size: &Term, unit: u64) -> Result<u64, &'st
         }
         (Some(bits), _) if bits >= 0 => Err("system_limit"),
         (None, Term::Integer(bits)) if *bits >= 0 => Err("system_limit"),
+        (None, Term::BigInt(bits)) if bits.sign() == num_bigint::Sign::Plus => Err("system_limit"),
         _ => Err("badarg"),
     }
 }

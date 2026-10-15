@@ -1,9 +1,10 @@
 -module(bignum_probe).
 -export([literals/0, arith/0, compare/0, floats/0, text/0, bits/0, limits/0,
-         splitmix/0, costs/0, segments/0, wide_segment/0]).
+         splitmix/0, costs/0, segments/0, sizes/0, wide_segment/0]).
 
 -define(REDS, element(2, process_info(self(), reductions))).
 -define(TRY(Expr), try Expr catch error:Reason -> Reason end).
+-define(CAUSE(Expr), try Expr catch Class:Reason:Stack -> {Class, Reason, cause(Stack)} end).
 -define(MASK(Bits), ((1 bsl (Bits)) - 1)).
 -define(BSL(Bits, X, N), (((X) band ?MASK((Bits) - (N))) bsl (N))).
 
@@ -107,6 +108,7 @@ exsss_next(S0, S1) ->
 %% bump_reds_quadratic in erl_arith.c:56-86).
 costs() ->
     A = id(18446744073709551616), Small = id(5), Big = id(1) bsl 640, M = id(1 bsl 60), Big14 = id(1) bsl 832,
+    MinSmall = id(-576460752303423488),
     [cost(fun() -> Small + Small end), cost(fun() -> A + Small end),
      cost(fun() -> A + 0 end), cost(fun() -> Big + Big end), cost(fun() -> A * A end),
      cost(fun() -> Big14 + 1 end), cost(fun() -> Big14 - 1 end), cost(fun() -> 1 - Big14 end),
@@ -115,7 +117,8 @@ costs() ->
      cost(fun() -> Big bxor 1 end), cost(fun() -> bnot A end), cost(fun() -> A bsl 1 end),
      cost(fun() -> Small bsl 64 end), cost(fun() -> Small bsl 3 end), cost(fun() -> Big bsr 1 end),
      cost(fun() -> bnot M end), cost(fun() -> -A end), cost(fun() -> -Big end), cost(fun() -> abs(Big) end),
-     cost(fun() -> id(9223372036854775807) + Small end)].
+     cost(fun() -> id(9223372036854775807) + Small end),
+     cost(fun() -> MinSmall div -1 end), cost(fun() -> MinSmall rem -1 end)].
 
 cost(Fun) ->
     R0 = ?REDS,
@@ -127,6 +130,24 @@ cost(Fun) ->
 segments() ->
     A = id(18446744073709551616),
     [<<(A + 5):64>>, <<(-A - 1):8>>, <<(A + 16#0102):16/little>>].
+
+%% A bignum as a segment size or a size argument. A positive bignum size of
+%% an `integer` segment raises system_limit, and a negative one badarg
+%% (jit/beam_jit_common.cpp:968-975). Each BIF raises badarg.
+sizes() ->
+    B = id(18446744073709551616),
+    [?CAUSE(<<1:(id(B))>>), ?CAUSE(<<(id(B)):(id(B))>>), ?CAUSE(<<1:(id(B))/little>>),
+     ?CAUSE(<<1:(id(B))/unit:8>>), ?CAUSE(<<1:(id(-B))>>),
+     ?CAUSE(element(B, {a})), ?CAUSE(element(-B, {a})), ?CAUSE(binary_part(<<1>>, B, 1)),
+     ?CAUSE(binary_part(<<1>>, 0, B)), ?CAUSE(list_to_binary([B])),
+     ?CAUSE(integer_to_binary(1, B)), ?CAUSE(split_binary(<<1>>, B))].
+
+cause([{_, _, _, Info} | _]) -> cause_of(Info);
+cause(_) -> none.
+
+cause_of([{error_info, #{cause := Cause}} | _]) -> Cause;
+cause_of([_ | Rest]) -> cause_of(Rest);
+cause_of([]) -> none.
 
 %% A segment of more than 64 bits of a bignum.
 wide_segment() ->

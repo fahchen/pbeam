@@ -66,8 +66,11 @@ pub enum Term {
     /// share the value. The form is canonical: each runtime operation makes
     /// an integer in the 64-bit range as [`Term::Integer`], so `=:=` and the
     /// hash compare the value. The canonical form is a runtime-produced form,
-    /// not a type invariant: a caller that builds a term uses
-    /// [`Term::from_bigint`].
+    /// not a type invariant: the loader and each runtime operation make only
+    /// values outside the 64-bit range. A caller that builds a term, such as
+    /// an argument of `BeamProgram::execute`, must keep the form: it passes
+    /// a value outside the signed 64-bit range here and each other integer
+    /// as [`Term::Integer`]. A `Term::BigInt` of `5` is not `=:=` to `5`.
     BigInt(Arc<BigInt>),
     /// A float: an IEEE 754 binary64 value that is finite, as an ERTS float
     /// is (`FLOAT_DEF`, `erl_term.h`). ERTS never makes an infinity or a NaN

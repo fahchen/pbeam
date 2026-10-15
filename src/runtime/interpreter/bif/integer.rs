@@ -245,8 +245,12 @@ fn arith_reductions(op: Arith, left: &Term, right: &Term) -> i32 {
 /// so `a div 0` raises `badarith` too. An operand that is not an integer,
 /// also a float, raises `badarith`.
 ///
-/// Two small integers cost no reduction, except `-(2^59) div -1`, whose
-/// quotient is a bignum. A bignum division costs [`quadratic`] of
+/// Two small integers cost no reduction, except `-(2^59) div -1` and
+/// `-(2^59) rem -1`, which cost 1, as the `div` and `rem` instructions of
+/// the arm64 and x86_64 JIT charge them. A direct call of `erlang:'rem'/2`
+/// in ERTS (`rem_2`, `erl_arith.c:152-156`) charges 0 for `-(2^59) rem -1`;
+/// PBeam charges 1 on each path (row "Integer division reductions" of
+/// `docs/erts-differences.md`). A bignum division costs [`quadratic`] of
 /// `size(left) - size(right) + 1` and `size(right)`, but only when the
 /// magnitude of `left` is above the magnitude of `right`; a small `left`
 /// with a bignum `right` gives `0` and `left` with no cost, except
@@ -275,8 +279,11 @@ pub(super) fn div_rem(left: &Term, right: &Term, remainder: bool) -> Charged {
         };
         if let Some(value) = value {
             let value = Term::Integer(value);
-            let reductions = if is_small(left) && is_small(right) && (remainder || is_small(&value))
-            {
+            // `-(2^59) div -1` and `-(2^59) rem -1` leave the JIT inline
+            // division for `erts_int_div_rem` (jit/arm/instr_arith.cpp:759,
+            // 822; jit/x86/instr_arith.cpp:531, 612), which charges 1.
+            let min_by_minus_one = *left_value == MIN_SMALL && *right_value == -1;
+            let reductions = if is_small(left) && is_small(right) && !min_by_minus_one {
                 0
             } else {
                 div_rem_reductions(left, right)
@@ -299,7 +306,7 @@ pub(super) fn div_rem(left: &Term, right: &Term, remainder: bool) -> Charged {
 }
 
 /// Return the reductions of `erts_int_div_rem` (`erl_arith.c:1172-1250`)
-/// for two integers that are not both small, or for `-(2^59) div -1`.
+/// for two integers that are not both small, or for `-(2^59)` and `-1`.
 fn div_rem_reductions(left: &Term, right: &Term) -> i32 {
     match (left.small_integer(), right.small_integer()) {
         (Some(value), None) if value != MIN_SMALL => 0,
