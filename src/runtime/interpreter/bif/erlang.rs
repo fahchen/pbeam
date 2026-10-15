@@ -2213,7 +2213,9 @@ pub(super) fn list_to_atom(atoms: &mut AtomTable, term: &Term) -> Result<BifResu
 /// `erl_bif_info.c:6418-6440`); PBeam puts them into the atom table of the
 /// run at this call. The item `otp_release` returns `ERLANG_OTP_RELEASE` as
 /// a string (`erl_bif_info.c:3231-3234`); `build.rs` takes it from the
-/// `erlang` pin in `mise.toml`.
+/// `erlang` pin in `mise.toml`. The item `schedulers` returns
+/// `erts_no_schedulers` (`erl_bif_info.c:3257-3260`), which is 1: PBeam has
+/// one scheduler, as ERTS with `erl +S 1`.
 ///
 /// # Examples
 ///
@@ -2241,6 +2243,7 @@ pub(super) fn system_info(atoms: &mut AtomTable, item: &Term) -> Result<BifResul
                 .bytes()
                 .map(|byte| Term::Integer(i64::from(byte))),
         ))),
+        Term::Atom(atom) if atoms.name_of(atom) == "schedulers" => Ok(Value(Term::Integer(1))),
         _ => Err(error(format!(
             "unsupported erlang:system_info/1 argument {}",
             debug_term(item, atoms)

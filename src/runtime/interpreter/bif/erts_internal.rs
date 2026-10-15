@@ -1032,33 +1032,42 @@ pub(super) fn list_to_integer(list: &Term, base: &Term) -> BifResult {
 /// `141-142`), as `erts_internal_scheduler_wall_time_1` (`bif.c:5306-5315`)
 /// does: each term other than `true` disables the scheduler wall time, and
 /// the BIF gives the old state. PBeam never enables it, so the old state
-/// is `false`. ERTS traps to `await_sched_wall_time_modifications/2`, which
-/// waits in a receive for the reply of each scheduler, so the caller
-/// switches out and the processes in the run queue run first
-/// (`bif.c:5313-5314`, `erts_internal.erl:759-774`). PBeam traps to the
-/// internal export `erts_internal:await_sched_wall_time_modifications/1`,
-/// which switches the caller out once and then returns `false`.
+/// is `false`. `erts_sched_wall_time_request` makes a reference, and each
+/// scheduler sends it to the caller; the scheduler of the caller sends it
+/// before the BIF returns (`erl_process.c:1382-1421`, `1209-1340`). PBeam
+/// has one scheduler, so it sends the reference one time. The BIF then
+/// traps to `erts_internal:await_sched_wall_time_modifications(Ref,
+/// Result)`, which receives `Ref` one time for each scheduler and returns
+/// `Result` (`erts_internal.erl:756-774`).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = scheduler_wall_time(&Term::static_atom("false"))?;
-/// assert!(matches!(result, BifResult::TrapBif { .. }));
-/// assert!(scheduler_wall_time(&Term::static_atom("true")).is_err());
+/// let result = scheduler_wall_time(context, &Term::static_atom("false"))?;
+/// assert!(matches!(result, BifResult::Trap { .. }));
+/// assert!(scheduler_wall_time(context, &Term::static_atom("true")).is_err());
 /// ```
 ///
 /// # Errors
 ///
-/// Return a runtime error for `true`: PBeam has no scheduler wall time.
-pub(super) fn scheduler_wall_time(enable: &Term) -> Result<BifResult, BeamError> {
+/// Return a runtime error for `true`: PBeam has no scheduler wall time. A
+/// reference after the last one gives the error of `make_ref`.
+pub(super) fn scheduler_wall_time(
+    context: &mut BifContext<'_>,
+    enable: &Term,
+) -> Result<BifResult, BeamError> {
     if matches!(enable, Term::Atom(atom) if atom.is_static("true")) {
         return Err(error(
             "unsupported erts_internal:scheduler_wall_time(true): see \"Scheduling\" in docs/erts-differences.md",
         ));
     }
-    Ok(BifResult::TrapBif {
+    let scheduler = &mut *context.scheduler;
+    let reference = Term::Reference(scheduler.make_ref()?);
+    let caller = scheduler.current_process_mut().id;
+    scheduler.deliver(caller, reference.clone());
+    Ok(BifResult::Trap {
         module: "erts_internal",
         function: "await_sched_wall_time_modifications",
-        arguments: vec![Term::static_atom("false")],
+        arguments: vec![reference, Term::static_atom("false")],
     })
 }

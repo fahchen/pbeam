@@ -415,7 +415,7 @@ bifs! {
     erts_internal:purge_module/2 => unsupported,
     erts_internal:request_system_task/3 => unsupported,
     erts_internal:request_system_task/4 => unsupported,
-    erts_internal:scheduler_wall_time/1 as ErtsInternalSchedulerWallTime1 => |_, [enable]| erts_internal::scheduler_wall_time(enable),
+    erts_internal:scheduler_wall_time/1 as ErtsInternalSchedulerWallTime1 => |cx, [enable]| erts_internal::scheduler_wall_time(cx, enable),
     erts_internal:spawn_request/4 => unsupported,
     erts_internal:spawn_system_process/3 => unsupported,
     erts_internal:suspend_process/2 => unsupported,

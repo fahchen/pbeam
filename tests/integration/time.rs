@@ -13,7 +13,14 @@ const TIME_PROBE: &[u8] = include_bytes!("../../fixtures/time/time_probe.beam");
 
 /// Run `time_probe:Function()` on the pinned ERTS and return its `~w` output.
 fn reference(function: &str) -> Vec<u8> {
+    reference_with(&[], function)
+}
+
+/// Run `time_probe:Function()` on the pinned ERTS with the emulator flags
+/// `flags` and return its printed result.
+fn reference_with(flags: &[&str], function: &str) -> Vec<u8> {
     let reference = Command::new("erl")
+        .args(flags)
         .args([
             "-noshell",
             "-pa",
@@ -32,7 +39,8 @@ fn reference(function: &str) -> Vec<u8> {
 /// trap, and the probe.
 fn program() -> BeamProgram {
     let erlang = pinned_beam("erlang");
-    BeamProgram::load(&[&erlang, TIME_PROBE]).unwrap()
+    let erts_internal = pinned_beam("erts_internal");
+    BeamProgram::load(&[&erlang, &erts_internal, TIME_PROBE]).unwrap()
 }
 
 #[test]
@@ -320,6 +328,20 @@ fn disables_the_scheduler_wall_time_as_pinned_erts() {
         order
     );
     assert_eq!(reference("wall_time_order"), b"[false,ping]\n");
+    // The BIF sends one reference to the caller for the one scheduler and
+    // traps to `erts_internal:await_sched_wall_time_modifications/2`, which
+    // receives it (`erl_process.c:1382-1421`, `erts_internal.erl:756-774`).
+    // The reductions between the two `process_info/2` reads are those of
+    // the pinned ERTS with one scheduler.
+    let reds = reference_with(&["+S", "1"], "wall_time_reds");
+    assert_eq!(reds, b"12\n");
+    assert_eq!(
+        program
+            .execute("time_probe", "wall_time_reds", &[])
+            .unwrap()
+            .term,
+        Term::Integer(12)
+    );
     let error = program
         .execute("time_probe", "wall_time_on", &[])
         .unwrap_err();
