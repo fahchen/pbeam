@@ -166,7 +166,7 @@ fn read_filename_encoding() -> FilenameEncoding {
         if locale.is_null() {
             return FilenameEncoding::Latin1;
         }
-        let utf8 = CStr::from_ptr(libc::nl_langinfo_l(libc::CODESET, locale)) == c"UTF-8";
+        let utf8 = std::ffi::CStr::from_ptr(libc::nl_langinfo_l(libc::CODESET, locale)) == c"UTF-8";
         libc::freelocale(locale);
         utf8
     };
