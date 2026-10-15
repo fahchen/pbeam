@@ -483,6 +483,64 @@ pub(super) fn error_1(context: &mut BifContext<'_>, reason: &Term) -> Result<Bif
     error_2(context, reason, &Term::static_atom("true"))
 }
 
+/// Run `erlang:exit(Reason)` as ERTS `exit_1` (`bif.c:1536-1540`) does:
+/// raise an exception of class `exit` with `Reason`. The stack trace is the
+/// stack trace of [`error_1`]: ERTS `save_stacktrace` saves it for each
+/// class, and the first frame is the function that calls the BIF, with its
+/// arity (`beam_common.c:454`, `880-935`). An uncaught `exit` exits the
+/// process with `Reason` alone.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // In `tail/1`: exit(r).
+/// let result = exit_1(context, &Term::static_atom("r"))?;
+/// // The stack trace is [{Module, tail, 1, []}].
+/// assert!(matches!(result, BifResult::RaiseWithStacktrace { class: ExceptionClass::Exit, .. }));
+/// ```
+///
+/// # Errors
+///
+/// A caller instruction with no `func_info` before it is a runtime
+/// invariant error.
+pub(super) fn exit_1(context: &mut BifContext<'_>, reason: &Term) -> Result<BifResult, BeamError> {
+    raise_with_args(
+        context,
+        ExceptionClass::Exit,
+        reason,
+        &Term::static_atom("true"),
+        Term::nil(),
+    )
+}
+
+/// Run `erlang:throw(Reason)` as ERTS `throw_1` (`bif.c:4132-4136`) does:
+/// raise an exception of class `throw` with `Reason`, with the stack trace
+/// of [`exit_1`]. An uncaught `throw` exits the process with
+/// `{{nocatch, Reason}, Stacktrace}`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // In `tail/1`: throw(r).
+/// let result = throw_1(context, &Term::static_atom("r"))?;
+/// // The stack trace is [{Module, tail, 1, []}].
+/// assert!(matches!(result, BifResult::RaiseWithStacktrace { class: ExceptionClass::Throw, .. }));
+/// ```
+///
+/// # Errors
+///
+/// A caller instruction with no `func_info` before it is a runtime
+/// invariant error.
+pub(super) fn throw_1(context: &mut BifContext<'_>, reason: &Term) -> Result<BifResult, BeamError> {
+    raise_with_args(
+        context,
+        ExceptionClass::Throw,
+        reason,
+        &Term::static_atom("true"),
+        Term::nil(),
+    )
+}
+
 /// Run `erlang:error(Reason, Args)` as ERTS `error_2` (`bif.c:1448-1454`)
 /// does: raise an exception of class `error` with `Reason`. ERTS puts
 /// `Args` in the first frame of the stack trace, the frame of the function
@@ -514,7 +572,7 @@ pub(super) fn error_2(
     reason: &Term,
     args: &Term,
 ) -> Result<BifResult, BeamError> {
-    raise_with_args(context, reason, args, Term::nil())
+    raise_with_args(context, ExceptionClass::Error, reason, args, Term::nil())
 }
 
 /// Run `erlang:error(Reason, Args, Options)` as ERTS `error_3`
@@ -547,7 +605,13 @@ pub(super) fn error_3(
     args: &Term,
     options: &Term,
 ) -> Result<BifResult, BeamError> {
-    raise_with_args(context, reason, args, error_info_location(options))
+    raise_with_args(
+        context,
+        ExceptionClass::Error,
+        reason,
+        args,
+        error_info_location(options),
+    )
 }
 
 /// Return the location of the first frame of the stack trace of
@@ -581,11 +645,12 @@ pub(in crate::runtime::interpreter) fn error_info_location(options: &Term) -> Te
     Term::list_from(error_info)
 }
 
-/// Raise an exception of class `error` with `Reason` and the stack trace of
-/// the frames of the process, whose first frame holds `Args` and
-/// `Location`, for `erlang:error/2` and `erlang:error/3`.
+/// Raise an exception of `class` with `Reason` and the stack trace of the
+/// frames of the process, whose first frame holds `Args` and `Location`,
+/// for `erlang:error/1,2,3`, `erlang:exit/1`, and `erlang:throw/1`.
 fn raise_with_args(
     context: &mut BifContext<'_>,
+    class: ExceptionClass,
     reason: &Term,
     args: &Term,
     location: Term,
@@ -612,7 +677,7 @@ fn raise_with_args(
     frames.truncate(depth.max(1));
     frames[0] = Term::tuple(vec![module, function, args, location]);
     Ok(BifResult::RaiseWithStacktrace {
-        class: ExceptionClass::Error,
+        class,
         reason: reason.clone(),
         stacktrace: Term::list_from(frames),
     })

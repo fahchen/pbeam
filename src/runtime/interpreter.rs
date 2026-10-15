@@ -2575,13 +2575,17 @@ impl BeamProgram {
             Target::External {
                 module, function, ..
             } if tail
-                && (
-                    scheduler.atoms.name_of(module),
-                    scheduler.atoms.name_of(function),
-                ) == ("erlang", "error")
-                && matches!(arity, 1..=3) =>
+                && matches!(
+                    (
+                        scheduler.atoms.name_of(module),
+                        scheduler.atoms.name_of(function),
+                        arity,
+                    ),
+                    ("erlang", "error", 1..=3) | ("erlang", "exit" | "throw", 1)
+                ) =>
             {
-                return self.tail_call_error(scheduler, arity);
+                let function = function.clone();
+                return self.tail_call_error(scheduler, function, arity);
             }
             Target::External {
                 module, function, ..
@@ -2603,7 +2607,8 @@ impl BeamProgram {
     }
 
     /// Run a tail call of the fun `fun erlang:error/1`,
-    /// `fun erlang:error/2`, or `fun erlang:error/3`, with the arity
+    /// `fun erlang:error/2`, `fun erlang:error/3`, `fun erlang:exit/1`, or
+    /// `fun erlang:throw/1`, with the name `function` and the arity
     /// `arity`. ERTS
     /// `i_call_fun_last` removes the frame before it calls the fun
     /// (`emit_i_call_fun2_last` in `jit/arm/instr_fun.cpp:425-455`). Only an
@@ -2623,20 +2628,27 @@ impl BeamProgram {
     ///
     /// ```rust,ignore
     /// // `tail(F) -> F(r, [a]).` as the start of a process.
-    /// let outcome = program.tail_call_error(&mut scheduler, 2)?;
+    /// let outcome = program.tail_call_error(&mut scheduler, error, 2)?;
     /// // The process exits with {r, [{Module, tail, 1, []}]}.
     /// assert!(matches!(outcome, Some(Outcome::Exit { .. })));
     /// ```
     fn tail_call_error(
         &self,
         scheduler: &mut Scheduler,
+        function: Atom,
         arity: u32,
     ) -> Result<Option<Outcome>, BeamError> {
+        // The guard of the call admits only `error/1,2,3`, `exit/1`, and
+        // `throw/1`, so the class follows from the name.
+        let class = match scheduler.atoms.name_of(&function) {
+            "exit" => ExceptionClass::Exit,
+            "throw" => ExceptionClass::Throw,
+            _ => ExceptionClass::Error,
+        };
         let process = scheduler.current_process_mut();
         process.frames.pop();
         if !process.frames.is_empty() {
             let module = Atom::from_static("erlang").expect("erlang is a static atom");
-            let function = Atom::from_static("error").expect("error is a static atom");
             return self.call_mfa(scheduler, &module, &function, arity, false);
         }
         let reason = read(process, &Operand::X(0))?;
@@ -2657,12 +2669,7 @@ impl BeamProgram {
         ]);
         let process = scheduler.current_process_mut();
         let stacktrace = Term::list_from(vec![frame]);
-        Ok(raise_with_stacktrace(
-            process,
-            ExceptionClass::Error,
-            reason,
-            stacktrace,
-        ))
+        Ok(raise_with_stacktrace(process, class, reason, stacktrace))
     }
 
     /// Finish a BIF or NIF call with its result, as the ERTS `nif_bif.epilogue`
