@@ -872,3 +872,72 @@ Tasks 1 to 6 follow the order of the measured share, and tasks 7 and 8 cover the
 - The sub-split of the code table lookups of the floor iteration comes from a second grouping of the same samples and overlaps.
 - The cause of the shift at `e0d9cbe5` is attributed to back-end stall cycles, and the event and the source line stay unknown, because the counter names and an own event selection are not available without root.
 - The counting probe, the module time probe, and the scratch drivers are not committed. The proposals above own any committed measurement; proposal 7 starts from the module time probe.
+
+## The current process with no hash, task [#627](https://github.com/fahchen/pbeam/issues/627)
+
+This section records the gate of issue [#627](https://github.com/fahchen/pbeam/issues/627). The attribution of task [#625](https://github.com/fahchen/pbeam/issues/625) ([PR #626](https://github.com/fahchen/pbeam/pull/626)) measured the `SipHash` lookup of the process table at 26.1 to 26.5 percent of a release Terra key press and at 32.1 percent of a `call_ext_only` floor iteration. The run loop looked up the current process by its pid once for each instruction, and again in the call paths.
+
+### The change
+
+The process table (`src/runtime/scheduler/process_table.rs`) keeps each live process in a slot of a `Vec<Option<ProcessState>>`, with a free list of slots and a `HashMap<ProcessId, usize>` index from the pid to the slot. The table also keeps the slot of the current process in the place of the `current_process` pid of the scheduler. A read of the current process is one bounds check and two `Option` checks, and it does not hash. Only a lookup of a process by its pid, such as a send, a link, or a monitor, hashes the pid. The pinned ERTS keeps the current process as a pointer in the scheduler data (`current_process`, `erts/emulator/beam/erl_process.h:698`, OTP 29.1.1), and the JIT keeps it in a register (`c_p`, `erts/emulator/beam/jit/arm/beam_asm.hpp:86`). The slot takes the place of that pointer.
+
+A process cannot leave the table while it is the current process, and the table asserts it: the scheduler switches the process out before the removal (`Scheduler::finish_current`). Thus a slot that a new process uses again cannot become the current process by mistake. The only iteration of the table is `Scheduler::live_bytes`, which adds the bytes of each process, so the order of the slots is not observable. `erlang:processes/0` and `erts_internal:processes_next/1` stay unsupported (`src/runtime/interpreter/bif/table.rs`), so no BIF exposes an order of the table.
+
+### The session
+
+Two sessions on 2026-10-15 (JST) interleave the before revision `b8c71940`, the head of `origin/main`, and the after revision `ef77e031`, the commit of the change on the branch `perf/627-process-slot`. Each revision has its own release build in its own target directory. The floor numbers come from the test `records_the_interpreter_dispatch_baseline` of `tests/integration/dispatch_baseline.rs` (`--exact --nocapture --test-threads=1`), and each number is the minimum of nine probe runs inside one invocation. The key numbers come from a scratch key driver, which follows `scripts/terra_latency.py`: it starts `PBEAM_BIN=<binary> bash scripts/example.sh terra_counter --no-build` on a pseudo-terminal of 80 by 24, sends 60 keys `j` and `k` in turn every 0.5 s, and reads the CPU time of the `pbeam` process with `ps` before and after the keys. The CPU time for each key is the raw CPU time of the key window divided by 60, with no idle correction. The two revisions run the same compiled example modules. Each session rotates the order of the two revisions in each round, and before each round it waits for a one-minute load below 12 and for no `cargo`, `rustc`, or `nextest` process. No such process ran in any round.
+
+Session s2 measures the Terra key press again, because the key rounds of session s1 did not check the other processes of the host. In s1, the pid of `pbeam` goes from 29300 (round 3, before) to 49589 (round 3, after), so the host started about 20000 processes during round 3. Session s2 also waits for no `erl`, `beam`, or `python` process other than the resident ones, and it records the pid change across each run. It rejects a round and runs it again when a run starts more than 2000 processes or when such a process is present before or after the run. A run without other host work starts 246 to 610 processes. Session s2 rejected one round: its before run started 2539 processes and measured 24.00 ms for each key, below each accepted before run.
+
+| Part | Rounds | Time (JST) | One-minute load | Raw record |
+| --- | --- | --- | --- | --- |
+| Floor shapes | 8 | 11:55:04 to 11:55:41 | 2.40 to 2.97 | `s1-floor-r<round>-<revision>.txt` |
+| Terra keys, s1, replaced by s2 | 3 | 11:55:41 to 11:59:08 | 1.14 to 2.40 before each run | `s1-key-r<round>-<revision>.log` |
+| Terra keys, s2, with the host-process check | 3 accepted, 1 rejected | 12:08:34 to 12:13:10 | 1.11 to 1.44 before each run | `s2-key-r<round>-<revision>.log`; the rejected round is in `rejected/` |
+
+The session logs are `s1-session.txt` and `s2-session.txt`. The raw files are in the scratch directory of the task and are not committed.
+
+### The floor shapes
+
+Each value is the minimum over the eight rounds of the session, in ns for each iteration of 200000 iterations. The range is the minimum and the maximum of the eight rounds.
+
+| Shape | Before `b8c71940` | After `ef77e031` | Change |
+| --- | --- | --- | --- |
+| `call_ext_only` in `dispatch_probe` | 257.1 (257.1 to 260.2) | 149.3 (149.3 to 150.8) | −107.8 ns, −41.9 percent |
+| `call_only` in `dispatch_probe` | 102.5 (102.5 to 103.2) | 42.2 (42.2 to 42.4) | −60.3 ns, −58.8 percent |
+| `call_only` in `dispatch_position_probe` | 102.5 (102.5 to 103.1) | 42.1 (42.1 to 42.2) | −60.4 ns, −58.9 percent |
+| `call_only` plus `gc_bif '+'` | 157.0 | 67.1 | −89.9 ns, −57.3 percent |
+| `call_only` plus `tuple_size/1` | 176.9 | 68.8 | −108.1 ns, −61.1 percent |
+| `call_only` plus `element/2` | 157.6 | 69.6 | −88.0 ns, −55.8 percent |
+| `call_only` plus `hd/1` | 155.0 | 68.9 | −86.1 ns, −55.5 percent |
+| `call_only` plus `map_get/2` on a 1000-key map | 189.1 | 101.7 | −87.4 ns, −46.2 percent |
+
+The ranges of the two revisions do not overlap for any shape. Each probe result equals the result of the pinned ERTS in each round, because the test asserts it.
+
+### The Terra key press
+
+The gate value comes from session s2.
+
+| Round of s2 | Before `b8c71940`, ms of CPU for each key | After `ef77e031`, ms of CPU for each key | Median first-byte latency, before / after |
+| --- | --- | --- | --- |
+| 1 | 26.00 | 17.33 | 27.90 / 18.21 ms |
+| 2 | 26.33 | 18.33 | 27.28 / 19.39 ms |
+| 3 | 26.33 | 18.33 | 28.41 / 19.43 ms |
+| Mean | 26.22 | 18.00 | 27.86 / 19.01 ms |
+
+Each run answered each of the 60 keys. The mean CPU time for each key falls by 8.22 ms, or 31.4 percent. Every after run is below every before run: the highest after run is 18.33 ms, and the lowest before run is 26.00 ms.
+
+Session s1 gave 26.67, 26.83, and 22.33 ms before and 17.83, 17.50, and 18.50 ms after, with means of 25.28 ms and 17.94 ms. Its round 3 ran while the host started about 20000 processes, and its before value of 22.33 ms is the low outlier. Rounds 1 and 2 of s1 (26.67 and 26.83 ms before, 17.83 and 17.50 ms after) agree with s2. The rejected round of s2 shows the same effect: other host work lowers the CPU time of the before revision.
+
+### The decision
+
+The change lands. It removes the hash of the current-process lookup, which was the target of the task, and every measured shape becomes faster by more than the spread of its rounds. The measured gain is larger than the estimate of the #625 proposal (about 70 ns to 80 ns for each `call_ext_only` iteration and about 6 ms for each key). The record does not attribute the part above the estimate.
+
+The cheaper hasher of the issue, alone, was not built: the slot design is small, it needs no `unsafe`, and it removes the hash instead of making it cheaper. The lookup of another process by its pid keeps the standard `SipHash` hasher of `HashMap`; this task does not measure that lookup.
+
+### Known gaps
+
+- The CPU time comes from `ps`, which has a resolution of 10 ms; over 60 keys that is about 0.17 ms for each key. The key latency stays bimodal, as in the record of #625.
+- The host-process check of session s2 sees only the start of processes and the `erl`, `beam`, and `python` processes before and after each run. It does not see other work of a resident process during a run.
+- The session measures only the floor shapes and the Terra key press. It does not measure a workload with many processes, where the table holds more slots and the lookup by pid is more frequent.
+- The free list gives a slot again to a new process, so the table does not shrink after many processes exit. The `Vec` holds one `Option<ProcessState>` for each slot that was ever in use at the same time.
