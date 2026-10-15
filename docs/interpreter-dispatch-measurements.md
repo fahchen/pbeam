@@ -1024,7 +1024,7 @@ The before revision is `e93523c3`, the head of `origin/main` that the branch sta
 
 The Terra rows are the raw CPU time of `pbeam` for each key, with no idle correction. The idle correction changes only round 1 of `e93523c3`, to 14.319 ms. One tick of 10 ms of `ps` is 0.167 ms for each key.
 
-A second interleaved session on 2026-10-15 from 17:30:55 to 17:31:07 JST runs a body-call probe with the same two binaries: `loop(N) -> _ = f(N), loop(N - 1).`, `f(N) -> _ = g(N), N.`, and `g(N) -> {N}.`, 3000000 iterations, each with two `allocate` instructions, one return of a frame with Y registers, and one `call_last`. It has eight rounds in rotated order, and the one-minute load is 3.04 to 3.08. The user CPU time of the run is 0.75 s to 0.78 s before (median 0.76 s) and 0.58 s to 0.59 s after (median 0.59 s), which is 22 percent less, or about 57 ns for each iteration.
+A second interleaved session on 2026-10-15 from 17:30:55 to 17:31:07 JST runs a body-call probe with the same two binaries: `loop(N) -> _ = f(N), loop(N - 1).`, `f(N) -> _ = g(N), N.`, and `g(N) -> {N}.`, 3000000 iterations, each with two `allocate` instructions, one return of a frame with Y registers, and one `call_last`. It has eight rounds in rotated order, and the one-minute load is 3.50 to 3.83. The user CPU time of the run is 0.75 s to 0.78 s before (median 0.76 s) and 0.58 s to 0.59 s after (median 0.59 s), which is 22 percent less, or about 57 ns for each iteration.
 
 ### The decision
 
