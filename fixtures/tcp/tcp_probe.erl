@@ -1,5 +1,5 @@
 -module(tcp_probe).
--export([control/0, data/0, enabled/0, unsupported/1]).
+-export([control/0, data/0, enabled/0, linger/0, unsupported/1]).
 
 %% The requests of the tcp_inet driver that prim_inet sends for
 %% gen_tcp:listen/2, inet:sockname/1, inet:getopts/2, and gen_tcp:close/1
@@ -83,6 +83,14 @@ enabled() ->
     true = port_close(P),
     Reply.
 
+%% A linger time: SETOPTS and GETOPTS of linger on (inet_drv.c:7360-7385,
+%% 9749-9752).
+linger() ->
+    P = opened(),
+    Reply = [control(P, 7, [3, 0, 0, 0, 1, 0, 0, 0, 5]), control(P, 8, [3])],
+    true = port_close(P),
+    Reply.
+
 %% The port data, the port information, and the port names of a tcp_inet
 %% port, and a port of the spawn driver, whose control rejects each command
 %% other than 16#04c76a00 (sys_drivers.c:731-756).
@@ -128,10 +136,12 @@ unsupported(command) -> port_command(opened(), <<"x">>);
 unsupported(inet6) -> control(open_port({spawn_driver, "tcp_inet"}, [binary]), 1, [2, 1, 1]);
 unsupported(mptcp) -> control(open_port({spawn_driver, "tcp_inet"}, [binary]), 1, [1, 1, 4]);
 unsupported(any) -> control(opened(), 6, [3, 0, 0]);
-unsupported(keepalive) -> control(opened(), 7, [1, 0, 0, 0, 1]);
+unsupported(dontroute) -> control(opened(), 7, [2, 0, 0, 0, 1]);
+unsupported(recvttl) -> control(opened(), 7, [47, 0, 0, 0, 1]);
+unsupported(linger) -> linger();
 unsupported(active_n) -> control(opened(), 7, [22, 0, 0, 0, 3, 0, 1]);
-unsupported(getopt) -> control(opened(), 8, [1]);
-unsupported(accept) -> control(opened(), 26, []);
+unsupported(getopt) -> control(opened(), 8, [2]);
+unsupported(connect) -> control(opened(), 3, []);
 unsupported(policy) -> open_port({spawn_driver, "tcp_inet"}, [binary]);
 unsupported(spawn_control) ->
     S = open_port({spawn_executable, "/bin/cat"}, [binary]),

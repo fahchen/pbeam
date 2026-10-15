@@ -19,7 +19,7 @@ use super::{
     capability::{Capability, CapabilityId},
     process::LinkId,
 };
-use crate::term::{ProcessId, Reference, Term};
+use crate::term::{PortId, ProcessId, Reference, Term};
 
 /// A non-message signal in the signal queue of a process.
 #[derive(Debug, PartialEq)]
@@ -94,6 +94,29 @@ pub(super) enum Signal {
     TtyMonitor {
         /// The reference of the TTY resource.
         tty: Reference,
+    },
+    /// `ERTS_SIG_Q_OP_MONITOR` of a port monitor: `driver_monitor_process`
+    /// (`io.c`) in `INET_REQ_ACCEPT` monitors the caller for the listen
+    /// port `port` (inet_drv.c:12172, 12198, 12214). The receiver adds the
+    /// target monitor for 2 (`erl_proc_sig_queue.c:6544-6562`). At exit it
+    /// runs the monitor of the port (`tcp_inet_process_exit`,
+    /// inet_drv.c:12732-12771).
+    PortMonitor {
+        /// The port that holds the monitor.
+        port: PortId,
+        /// The reference of the monitor.
+        reference: Reference,
+    },
+    /// `ERTS_SIG_Q_OP_DEMONITOR` of a port monitor: the port removed its
+    /// monitor at the end of an accept (`driver_demonitor_process`). The
+    /// receiver removes the target monitor; the cost is 1, and 1 more when
+    /// the monitor was there (`erl_proc_sig_queue.c:6564-6633`). At exit it
+    /// is dropped.
+    PortDemonitor {
+        /// The port that removed the monitor.
+        port: PortId,
+        /// The reference of the monitor.
+        reference: Reference,
     },
     /// `ERTS_SIG_Q_OP_DEMONITOR`: the watcher removed its monitor of the
     /// receiver. The receiver removes the target monitor; the cost is 1, and
@@ -271,6 +294,14 @@ impl Signal {
                 reference: _,
             }
             | Signal::TtyMonitor { tty: _ }
+            | Signal::PortMonitor {
+                port: _,
+                reference: _,
+            }
+            | Signal::PortDemonitor {
+                port: _,
+                reference: _,
+            }
             | Signal::Demonitor {
                 watcher: _,
                 reference: _,
