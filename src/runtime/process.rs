@@ -215,6 +215,11 @@ pub(super) struct ProcessState {
     pub(super) undefined_start: Option<(Atom, Atom)>,
     /// X registers. All frames of the process share them.
     pub(super) registers: Vec<Option<Term>>,
+    /// Float registers, which `fmove`, `fconv`, and the float arithmetic
+    /// instructions read and write. They grow as necessary. The compiler
+    /// writes a float register before each read in one function, and no
+    /// call keeps a value in one, as in ERTS.
+    pub(super) float_registers: Vec<f64>,
     /// The signal queue: messages, receive markers, and signals, with the
     /// receive save pointer.
     pub(super) mailbox: Mailbox,
@@ -438,6 +443,7 @@ impl ProcessState {
             frames,
             undefined_start,
             registers: arguments.into_iter().map(Some).collect(),
+            float_registers: Vec::new(),
             mailbox: Mailbox::default(),
             waiting: false,
             in_run_queue: false,

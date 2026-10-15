@@ -62,6 +62,9 @@ const TYPE_EXTERNAL_FUN: u64 = 14;
 const TYPE_NEG_BIGNUM: u64 = 15;
 const TYPE_POS_BIGNUM: u64 = 16;
 const TYPE_LOCAL_REF: u64 = 17;
+/// `IHASH_TYPE_FLOAT`, after the three external types 18 to 20
+/// (`erl_term_hashing.c:1653-1657`).
+const TYPE_FLOAT: u64 = 21;
 
 /// The MurmurHash3 multipliers (`IHASH_C1`, `IHASH_C2`).
 const C1: u64 = 0x87C3_7B91_1142_53D5;
@@ -107,6 +110,8 @@ enum Shape<'a> {
     Binary(&'a [u8]),
     /// An integer outside the small-integer range.
     Bignum(i64),
+    /// The bits of a float.
+    Float(u64),
     Reference(Reference),
     Fun(&'a Fun),
 }
@@ -136,6 +141,7 @@ fn shape(term: &Term) -> Shape<'_> {
             }
             None => Shape::Bignum(*value),
         },
+        Term::Float(value) => Shape::Float(value.to_bits()),
         Term::Tuple(elements) => Shape::Tuple(elements),
         Term::Map(map) => Shape::Map(map),
         Term::Binary(bytes) => Shape::Binary(bytes),
@@ -509,6 +515,14 @@ impl State {
                 };
                 self.mix_alpha(pair(sign, 1));
                 self.mix_beta(value.unsigned_abs());
+            }
+            Shape::Float(bits) => {
+                // `IHASH_MIX_BETA_2F32(ff.fw[0], ff.fw[1])` joins the two
+                // 32-bit words of the double, low word first on a
+                // little-endian host, which gives the bits of the float
+                // (`erl_term_hashing.c:2193-2202`).
+                self.mix_alpha(TYPE_FLOAT);
+                self.mix_beta(bits);
             }
             Shape::Reference(reference) => {
                 let [number_0, number_1, number_2] = reference.numbers().map(u64::from);

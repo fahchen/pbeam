@@ -239,3 +239,15 @@ fn reads_the_name_from_the_given_table() {
     assert_eq!(other.name(named.index()), Some("pbeam_other"));
     assert_eq!(print_term(&Term::Atom(named), &other), b"pbeam_other");
 }
+
+#[test]
+fn prints_a_float_with_six_digits_as_pinned_erts() {
+    // `erlang:display/1` prints a float with `%.6e`
+    // (`erl_printf_term.c:596-600`). ERTS 29.1.1 prints `1.500000e+00`,
+    // `-0.000000e+00`, and `1.000000e+300`.
+    let floats = Term::list_from([1.5, -0.0, 1.0e300].map(Term::Float));
+    assert_eq!(
+        print_term(&floats, &AtomTable::new()),
+        b"[1.500000e+00,-0.000000e+00,1.000000e+300]"
+    );
+}

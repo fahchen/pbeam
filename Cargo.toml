@@ -231,6 +231,10 @@ name = "find_executable"
 path = "tests/integration/find_executable.rs"
 
 [[test]]
+name = "float"
+path = "tests/integration/float.rs"
+
+[[test]]
 name = "float_test"
 path = "tests/integration/float_test.rs"
 

@@ -84,6 +84,12 @@ const OPCODE_FMUL: u8 = 100;
 /// `fdiv Fail A B Dst` (genop.tab:415). ERTS loads it as `i_fdiv` (emu
 /// ops.tab:1332; JIT jit/arm/ops.tab:1121).
 const OPCODE_FDIV: u8 = 101;
+/// `fnegate Fail A Dst` (genop.tab:416). ERTS loads it as `i_fnegate` (emu
+/// ops.tab:1333; JIT jit/arm/ops.tab:1122).
+const OPCODE_FNEGATE: u8 = 102;
+/// The extended operand subtag of a float register, `{fr, N}`
+/// (`beam_asm.erl`, `TAG_z` value 2).
+const FLOAT_REGISTER_SUBTAG: i128 = 2;
 const OPCODE_GC_BIF1: u8 = 124;
 const OPCODE_GC_BIF2: u8 = 125;
 /// `bs_get_tail Ctx Dst Live` (genop.tab:591-593).
@@ -250,7 +256,9 @@ pub(crate) enum SelectValueChoices {
 /// order when the list holds at most [`SELECT_VALUE_LINEAR_LIMIT`] entries,
 /// when two choices are equal, or when two choices have no term order.
 /// Otherwise return [`SelectValueChoices::Ordered`] with the choices sorted
-/// by [`Term::compare`] and free of duplicates.
+/// by [`Term::compare_exact`] and free of duplicates. ERTS matches each
+/// choice exactly, so the order puts `1` and `1.0` apart, and `-0.0` and
+/// `0.0` apart (`emu/select_instrs.tab:57-88`).
 ///
 /// The Erlang compiler emits distinct choices, and this function still
 /// detects a duplicate, because ERTS gives the first matching clause and a
@@ -266,7 +274,7 @@ pub(crate) enum SelectValueChoices {
 /// let SelectValueChoices::Ordered(ordered) = prepare_select_value_choices(choices, &atoms) else {
 ///     panic!("33 distinct choices take the ordered form");
 /// };
-/// assert!(ordered[0].0.compare(&ordered[1].0, &atoms)?.is_lt());
+/// assert!(ordered[0].0.compare_exact(&ordered[1].0, &atoms)?.is_lt());
 /// ```
 pub(crate) fn prepare_select_value_choices(
     choices: Vec<(Term, u32)>,
@@ -278,7 +286,7 @@ pub(crate) fn prepare_select_value_choices(
     let mut ordered = choices.clone();
     let mut failure = None;
     ordered.sort_by(|(left, _), (right, _)| {
-        left.compare(right, atoms).unwrap_or_else(|error| {
+        left.compare_exact(right, atoms).unwrap_or_else(|error| {
             failure.get_or_insert(error);
             Ordering::Equal
         })
@@ -286,7 +294,10 @@ pub(crate) fn prepare_select_value_choices(
     let distinct = failure.is_none()
         && ordered.windows(2).all(|pair| {
             pair[0].0 != pair[1].0
-                && !matches!(pair[0].0.compare(&pair[1].0, atoms), Ok(Ordering::Equal))
+                && !matches!(
+                    pair[0].0.compare_exact(&pair[1].0, atoms),
+                    Ok(Ordering::Equal)
+                )
         });
     if distinct {
         SelectValueChoices::Ordered(ordered)
@@ -994,8 +1005,8 @@ pub(crate) enum Instruction {
         right: TestOperand,
     },
     /// Jumps to `fail_label` when the operands are not equal in the ERTS
-    /// arithmetic order (`is_eq`, opcode 41). PBeam has no float term, so the
-    /// test gives the same result as exact equality.
+    /// arithmetic order (`is_eq`, opcode 41): `1` equals `1.0`, and `0.0`
+    /// equals `-0.0`.
     ///
     /// Encoding: opcode, fail label, two operands. A typed register (extended
     /// subtag 5) reads as its register. Example: `compare_probe:eq/2` in
@@ -1012,8 +1023,8 @@ pub(crate) enum Instruction {
         right: Operand,
     },
     /// Jumps to `fail_label` when the operands are equal in the ERTS
-    /// arithmetic order (`is_ne`, opcode 42). PBeam has no float term, so the
-    /// test gives the same result as exact inequality.
+    /// arithmetic order (`is_ne`, opcode 42), as for
+    /// [`Instruction::TestEqual`].
     ///
     /// Encoding: opcode, fail label, two operands. A typed register (extended
     /// subtag 5) reads as its register. Example: `compare_probe:ne/2` in
@@ -1280,18 +1291,47 @@ pub(crate) enum Instruction {
         segments: Vec<BinarySegment>,
     },
     /// Converts `source` to a float in a float register (`fconv`, opcode
-    /// 97). ERTS raises `error:badarith` for a term that is not a number.
-    /// PBeam has no float register, so an integer source returns the runtime
-    /// error `unsupported BEAM opcode 97`.
+    /// 97). An integer converts to the nearest float, a float stays the
+    /// same, and each other term raises `error:badarith` (emu
+    /// float_instrs.tab:38-52; JIT `emit_fconv`, jit/arm/instr_float.cpp:96-135).
     ///
-    /// Encoding: opcode, source, float register (extended subtag 2). The
-    /// decoder skips the float register. Example: `float_test_probe:half/1`
-    /// in `fixtures/float_test/float_test_probe.beam` has `[0x61, 0x03, 0x27,
+    /// Encoding: opcode, source, float register (extended subtag 2, then
+    /// the register number). Example: `float_test_probe:half/1` in
+    /// `fixtures/float_test/float_test_probe.beam` has `[0x61, 0x03, 0x27,
     /// 0x00]`, which converts `x0` to `fr0`.
     ///
     /// Erlang: `half(X) -> X / 2.` compiles to `{fconv,{x,0},{fr,0}}`, as
     /// the `/` operators of `string` and `erl_scan` do.
-    FloatConvert { source: Operand },
+    FloatConvert { source: Operand, register: u32 },
+    /// Moves a float term to a float register (`fmove`, opcode 96, which
+    /// ERTS loads as `fload`). The compiler moves only a float: a type test
+    /// or a float literal comes first. Example: `[0x60, 0x03, 0x27, 0x00]`
+    /// is `{fmove,{x,0},{fr,0}}` in `float_probe:registers/2`.
+    FloatLoad { source: Operand, register: u32 },
+    /// Moves a float register to an X or a Y register as a float term
+    /// (`fmove`, opcode 96, which ERTS loads as `fstore`). Example:
+    /// `[0x60, 0x27, 0x20, 0x03]` is `{fmove,{fr,2},{x,0}}` in
+    /// `float_probe:registers/2`.
+    FloatStore { register: u32, destination: Operand },
+    /// Adds, subtracts, multiplies, or divides two float registers into a
+    /// float register (`fadd`, `fsub`, `fmul`, `fdiv`, opcodes 98 to 101).
+    /// A result that is not finite raises `error:badarith` (JIT
+    /// `emit_float_instr` and `emit_i_fdiv`, jit/arm/instr_float.cpp:137-205).
+    /// The fail label is always 0: ERTS loads only that form (emu
+    /// ops.tab:1329-1332). Example: `[0x62, 0x05, 0x27, 0x00, 0x27, 0x10,
+    /// 0x27, 0x20]` is `{bif,fadd,{f,0},[{fr,0},{fr,1}],{fr,2}}` in
+    /// `float_probe:registers/2`.
+    FloatArith {
+        operation: FloatOperation,
+        left: u32,
+        right: u32,
+        destination: u32,
+    },
+    /// Negates a float register into a float register (`fnegate`, opcode
+    /// 102). The fail label is always 0. Example: `[0x66, 0x05, 0x27, 0x00,
+    /// 0x27, 0x60]` is `{bif,fnegate,{f,0},[{fr,0}],{fr,6}}` in
+    /// `float_probe:registers/2`.
+    FloatNegate { source: u32, destination: u32 },
     /// Sends `x1` to the destination in `x0`, then writes the message to
     /// `x0`. The destination is a pid, a registered name, `{Name, Node}`, or
     /// a reference. A name that no process has, a tuple that is not two
@@ -1489,7 +1529,7 @@ pub(crate) enum TestKind {
     /// `float_test_probe:kind/1` fails to label 5 unless `x0` is a float.
     /// Erlang: `kind(Term) when is_float(Term) -> float;` compiles to
     /// `{test,is_float,{f,5},[{x,0}]}`, as `lists:thing_to_list/1`
-    /// (lists.erl:1283-1286) does. PBeam has no float term.
+    /// (lists.erl:1283-1286) does.
     Float,
     /// `is_boolean`, opcode 114. Example: `[0x72, 0xC5, 0x03]` in
     /// `compare_probe:kind/1` fails to label 12 unless `x0` is the atom
@@ -1854,8 +1894,49 @@ pub(super) fn parse_code(
             }
             OPCODE_FCONV => {
                 let source = read_move_operand(data, &mut cursor, atoms, literals)?;
-                skip_operands(data, &mut cursor, 1)?;
-                Instruction::FloatConvert { source }
+                let register = read_float_register(data, &mut cursor)?;
+                Instruction::FloatConvert { source, register }
+            }
+            OPCODE_FMOVE => {
+                if is_float_register(data, cursor)? {
+                    let register = read_float_register(data, &mut cursor)?;
+                    let destination = read_register(data, &mut cursor)?;
+                    Instruction::FloatStore {
+                        register,
+                        destination,
+                    }
+                } else {
+                    let source = read_move_operand(data, &mut cursor, atoms, literals)?;
+                    let register = read_float_register(data, &mut cursor)?;
+                    Instruction::FloatLoad { source, register }
+                }
+            }
+            OPCODE_FADD | OPCODE_FSUB | OPCODE_FMUL | OPCODE_FDIV => {
+                read_zero_fail_label(data, &mut cursor)?;
+                let left = read_float_register(data, &mut cursor)?;
+                let right = read_float_register(data, &mut cursor)?;
+                let destination = read_float_register(data, &mut cursor)?;
+                let operation = match opcode {
+                    OPCODE_FADD => FloatOperation::Add,
+                    OPCODE_FSUB => FloatOperation::Subtract,
+                    OPCODE_FMUL => FloatOperation::Multiply,
+                    _ => FloatOperation::Divide,
+                };
+                Instruction::FloatArith {
+                    operation,
+                    left,
+                    right,
+                    destination,
+                }
+            }
+            OPCODE_FNEGATE => {
+                read_zero_fail_label(data, &mut cursor)?;
+                let source = read_float_register(data, &mut cursor)?;
+                let destination = read_float_register(data, &mut cursor)?;
+                Instruction::FloatNegate {
+                    source,
+                    destination,
+                }
             }
             OPCODE_BS_START_MATCH3 => {
                 let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
@@ -2845,11 +2926,6 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         OPCODE_PUT_TUPLE2 => Some(2),
         OPCODE_INIT_YREGS => Some(1),
         OPCODE_BS_INIT_WRITABLE => Some(0),
-        // The float-register instructions are in `string` and `erl_scan`.
-        // PBeam has no float term, so each one stops the run. `fconv`
-        // decodes as `Instruction::FloatConvert`.
-        OPCODE_FMOVE => Some(2),
-        OPCODE_FADD | OPCODE_FSUB | OPCODE_FMUL | OPCODE_FDIV => Some(4),
         _ => None,
     }
 }
@@ -3135,6 +3211,74 @@ fn read_register(data: &[u8], cursor: &mut usize) -> Result<Operand, BeamError> 
         )),
         _ => Err(error(format!("unsupported BEAM register tag {tag}"))),
     }
+}
+
+/// The operation of an [`Instruction::FloatArith`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum FloatOperation {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+}
+
+/// Return true when the next operand is a float register (extended subtag
+/// 2), and leave the cursor in place.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(is_float_register(&[0x27, 0x00], 0)?);
+/// assert!(!is_float_register(&[0x03], 0)?);
+/// ```
+fn is_float_register(data: &[u8], cursor: usize) -> Result<bool, BeamError> {
+    let first = *data
+        .get(cursor)
+        .ok_or_else(|| error("truncated BEAM operand"))?;
+    if first & COMPACT_TAG_MASK != TAG_LITERAL {
+        return Ok(false);
+    }
+    let mut peek = cursor;
+    Ok(read_integer(data, &mut peek, TAG_LITERAL)? == FLOAT_REGISTER_SUBTAG)
+}
+
+/// Read a float register operand `{fr, N}`: extended subtag 2, then the
+/// register number as an unsigned operand.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut cursor = 0;
+/// assert_eq!(read_float_register(&[0x27, 0x20], &mut cursor)?, 2);
+/// assert_eq!(cursor, 2);
+/// ```
+///
+/// # Errors
+///
+/// An operand that is not a float register is an error.
+fn read_float_register(data: &[u8], cursor: &mut usize) -> Result<u32, BeamError> {
+    is_float_register(data, *cursor)?
+        .then_some(())
+        .ok_or_else(|| error("expected a BEAM float register operand"))?;
+    read_integer(data, cursor, TAG_LITERAL)?;
+    u32::try_from(read_operand(data, cursor, TAG_UNSIGNED)?)
+        .map_err(|_| error("BEAM float register number is too large"))
+}
+
+/// Read the fail label of a float arithmetic instruction, which must be 0,
+/// as the only form that ERTS loads (emu ops.tab:1329-1333).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut cursor = 0;
+/// read_zero_fail_label(&[0x05], &mut cursor)?;
+/// assert!(read_zero_fail_label(&[0x15], &mut 0).is_err());
+/// ```
+fn read_zero_fail_label(data: &[u8], cursor: &mut usize) -> Result<(), BeamError> {
+    (read_operand(data, cursor, TAG_LABEL)? == 0)
+        .then_some(())
+        .ok_or_else(|| error("unsupported BEAM float instruction with a fail label"))
 }
 
 /// Read one supported source operand for a `move` instruction.

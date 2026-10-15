@@ -1758,8 +1758,124 @@ pub(super) fn system_info(atoms: &mut AtomTable, item: &Term) -> Result<BifResul
     }
 }
 
+/// Run `erlang:'+'/2`, `erlang:'-'/2`, or `erlang:'*'/2`: [`int_arith`]
+/// with `operation` for two integers, else [`float_arith`] with
+/// `float_operation`, as `erts_mixed_plus`, `erts_mixed_minus`, and
+/// `erts_mixed_times` (`erl_arith.c:358-508`, `erl_arith.c:571-714`,
+/// `erl_arith.c:716-913`) do.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let sum = arith("+", &Term::Integer(1), &Term::Float(0.5), i64::checked_add, |l, r| l + r)?;
+/// assert!(matches!(sum, BifResult::Value(Term::Float(1.5))));
+/// ```
+///
+/// # Errors
+///
+/// Return the runtime error of [`int_arith`].
+pub(super) fn arith(
+    name: &str,
+    left: &Term,
+    right: &Term,
+    operation: fn(i64, i64) -> Option<i64>,
+    float_operation: fn(f64, f64) -> f64,
+) -> Result<BifResult, BeamError> {
+    if let (Term::Integer(_), Term::Integer(_)) = (left, right) {
+        int_arith(name, left, right, operation)
+    } else {
+        Ok(float_arith(left, right, float_operation))
+    }
+}
+
+/// Run a float operation on two numbers, at least one a float, or on the
+/// two integers of `erlang:'/'/2`: convert each integer to the nearest
+/// float, as the C cast and `big_to_double` do, and run `operation`. A
+/// result that is not finite raises `badarith` (`ERTS_FP_ERROR`,
+/// `erl_arith.c:487`, `erl_arith.c:1125`), as does an operand that is not a
+/// number.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(float_arith(&Term::Integer(7), &Term::Integer(2), |l, r| l / r), BifResult::Value(Term::Float(3.5))));
+/// assert!(matches!(float_arith(&Term::Integer(1), &Term::Integer(0), |l, r| l / r), BifResult::Raise { .. }));
+/// ```
+pub(super) fn float_arith(left: &Term, right: &Term, operation: fn(f64, f64) -> f64) -> BifResult {
+    let (Some(left), Some(right)) = (number_to_float(left), number_to_float(right)) else {
+        return BifResult::badarith();
+    };
+    let result = operation(left, right);
+    if result.is_finite() {
+        Value(Term::Float(result))
+    } else {
+        BifResult::badarith()
+    }
+}
+
+/// Return a number as a float: an integer converts to the nearest float.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(number_to_float(&Term::Integer(3)), Some(3.0));
+/// assert_eq!(number_to_float(&Term::static_atom("a")), None);
+/// ```
+pub(super) fn number_to_float(term: &Term) -> Option<f64> {
+    match term {
+        Term::Integer(value) => Some(*value as f64),
+        Term::Float(value) => Some(*value),
+        _ => None,
+    }
+}
+
+/// Run `erlang:float/1`: return an integer as the nearest float and a float
+/// as it is, as ERTS `float_1` (`erl_bif_guard.c:107-133`) does. Each other
+/// term raises `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(to_float(&Term::Integer(-3)), BifResult::Value(Term::Float(-3.0))));
+/// assert!(matches!(to_float(&Term::static_atom("a")), BifResult::Raise { .. }));
+/// ```
+pub(super) fn to_float(term: &Term) -> BifResult {
+    match number_to_float(term) {
+        Some(value) => Value(Term::Float(value)),
+        None => BifResult::badarg(),
+    }
+}
+
+/// Run `erlang:abs/1`: return the absolute value of a number, as ERTS
+/// `abs_1` (`erl_bif_guard.c:57-105`) does. `abs(-0.0)` is `0.0`. Each
+/// other term raises `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(abs(&Term::Integer(-3))?, BifResult::Value(Term::Integer(3))));
+/// assert!(matches!(abs(&Term::Float(-0.0))?, BifResult::Value(Term::Float(value)) if value.is_sign_positive()));
+/// assert!(abs(&Term::Integer(i64::MIN)).is_err());
+/// ```
+///
+/// # Errors
+///
+/// Return a runtime error for `-(2^63)`, whose absolute value is outside the
+/// `i64` range, where ERTS makes a bignum.
+pub(super) fn abs(term: &Term) -> Result<BifResult, BeamError> {
+    match term {
+        // ponytail: a result outside i64 needs a bignum term; see "Integer range" in docs/erts-differences.md.
+        Term::Integer(value) => value
+            .checked_abs()
+            .map(|value| Value(Term::Integer(value)))
+            .ok_or_else(|| error("unsupported erlang:abs/1 result of -2^63: needs a bignum")),
+        Term::Float(value) => Ok(Value(Term::Float(value.abs()))),
+        _ => Ok(BifResult::badarg()),
+    }
+}
+
 /// Run `erlang:'+'/2`, `erlang:'-'/2`, `erlang:'*'/2`, `erlang:'div'/2`, or
-/// `erlang:'rem'/2` with `operation`, the checked `i64` sum, difference,
+/// `erlang:'rem'/2` on two integers with `operation`, the checked `i64` sum, difference,
 /// product, or quotient, or the remainder, as ERTS `erts_mixed_plus`,
 /// `erts_mixed_minus`, `stimes_2`, `intdiv_2`, and `rem_2`
 /// (`erl_arith.c:370-389`, `erl_arith.c:585-602`, `erl_arith.c:117-143`,
@@ -1768,23 +1884,23 @@ pub(super) fn system_info(atoms: &mut AtomTable, item: &Term) -> Result<BifResul
 /// `rem` with `emit_i_rem` (`jit/arm/instr_arith.cpp:542`,
 /// `jit/arm/instr_arith.cpp:968`, `jit/arm/instr_arith.cpp:1067`,
 /// `jit/arm/instr_arith.cpp:1078`) with the same results. An operand that is
-/// not a number raises `badarith`. PBeam has no float term, so each number
-/// is an integer. A result outside the `i64` range gives a runtime error,
+/// not an integer raises `badarith`, also a float for `div` and `rem`
+/// (`erl_arith.c:127-161`). A result outside the `i64` range gives a runtime error,
 /// where ERTS makes a bignum. The `rem` operation never returns `None`, so
 /// `rem` never gives this error (see [`int_rem`]).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let sum = arith("+", &Term::Integer(1), &Term::Integer(2), i64::checked_add)?;
+/// let sum = int_arith("+", &Term::Integer(1), &Term::Integer(2), i64::checked_add)?;
 /// assert!(matches!(sum, BifResult::Value(Term::Integer(3))));
-/// let product = arith("*", &Term::Integer(-3), &Term::Integer(4), i64::checked_mul)?;
+/// let product = int_arith("*", &Term::Integer(-3), &Term::Integer(4), i64::checked_mul)?;
 /// assert!(matches!(product, BifResult::Value(Term::Integer(-12))));
 /// let atom = Term::static_atom("a");
-/// assert!(matches!(arith("-", &atom, &Term::Integer(1), i64::checked_sub)?, BifResult::Raise { .. }));
-/// assert!(arith("+", &Term::Integer(i64::MAX), &Term::Integer(1), i64::checked_add).is_err());
+/// assert!(matches!(int_arith("-", &atom, &Term::Integer(1), i64::checked_sub)?, BifResult::Raise { .. }));
+/// assert!(int_arith("+", &Term::Integer(i64::MAX), &Term::Integer(1), i64::checked_add).is_err());
 /// ```
-pub(super) fn arith(
+pub(super) fn int_arith(
     name: &str,
     left: &Term,
     right: &Term,
@@ -1820,7 +1936,7 @@ pub(super) fn int_div(left: &Term, right: &Term) -> Result<BifResult, BeamError>
     if *right == Term::Integer(0) {
         return Ok(BifResult::badarith());
     }
-    arith("div", left, right, i64::checked_div)
+    int_arith("div", left, right, i64::checked_div)
 }
 
 /// Run `erlang:'rem'/2`: return the integer remainder of `left` and `right`,
@@ -1845,7 +1961,7 @@ pub(super) fn int_rem(left: &Term, right: &Term) -> Result<BifResult, BeamError>
     if *right == Term::Integer(0) {
         return Ok(BifResult::badarith());
     }
-    arith("rem", left, right, |left, right| {
+    int_arith("rem", left, right, |left, right| {
         Some(left.wrapping_rem(right))
     })
 }
@@ -1863,7 +1979,8 @@ const BIGNUM_OPERATION_REDUCTIONS: i32 = 1;
 /// (`jit/arm/instr_arith.cpp:224`, `280`). A small integer costs no
 /// reduction, also when its negation is the bignum 2^59. A bignum operand
 /// costs 1 reduction (`erl_arith.c:537-551`). An operand that is not a
-/// number raises `badarith`. PBeam has no float term.
+/// number raises `badarith`. A float negates with no reduction, and its
+/// negation is finite (`erl_arith.c:552-558`).
 ///
 /// # Examples
 ///
@@ -1882,8 +1999,10 @@ const BIGNUM_OPERATION_REDUCTIONS: i32 = 1;
 /// Return a runtime error for `-(2^63)`, whose negation is outside the
 /// `i64` range, where ERTS makes a bignum.
 pub(super) fn negate(process: &mut ProcessState, term: &Term) -> Result<BifResult, BeamError> {
-    let Term::Integer(value) = term else {
-        return Ok(BifResult::badarith());
+    let value = match term {
+        Term::Integer(value) => value,
+        Term::Float(value) => return Ok(Value(Term::Float(-value))),
+        _ => return Ok(BifResult::badarith()),
     };
     // ponytail: a result outside i64 needs a bignum term; see "Integer range" in docs/erts-differences.md.
     let result = value.checked_neg().ok_or_else(|| {
