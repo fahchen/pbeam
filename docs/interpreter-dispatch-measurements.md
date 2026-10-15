@@ -1043,15 +1043,15 @@ Each floor value is the minimum over the six rounds, in ns for each iteration of
 
 Each run answered each of the 60 keys. The two map shapes fall by about 73 ns and 110 ns for each iteration, and the ranges of the two revisions do not overlap. The `map_get/2` shape on a 1000-key hashmap falls by 14.3 ns, because its key hash no longer allocates. The other floor shapes do not change beyond the spread of their rounds.
 
-In the second session the CPU time for each key falls by 0.854 ms, or 5.4 percent, at the mean, and by 0.667 ms, or 4.2 percent, at the median. The after round is below the before round in six of the eight rounds. The ranges of the two revisions overlap (14.333 to 16.500 ms before, 12.667 to 16.333 ms after), so the Terra number has a weak bound. The first session agrees: -0.667 ms, or -4.2 percent, at the mean of four rounds.
+In the second session the CPU time for each key falls by 0.854 ms, or 5.4 percent, at the mean, and by 0.667 ms, or 4.2 percent, at the median. The after round is below the before round in six of the eight rounds. The ranges of the two revisions overlap (14.333 to 16.500 ms before, 12.667 to 16.333 ms after), so this session does not resolve the Terra change: a Welch t test gives t = 1.68 and p = 0.12, and a paired t test of the rounds gives t = 1.54 and p = 0.17. The first session agrees: -0.667 ms, or -4.2 percent, at the mean of four rounds.
 
 ### The decision
 
-The change lands. Both map shapes and the `map_get/2` shape fall by more than the spread of their rounds, no floor shape becomes slower, and the Terra mean falls in both sessions. The ERTS behavior stays: the loader refuses a register key among other keys, as the ERTS loader does, and a flatmap does not match an empty key list, as `beam_jit_get_map_elements` does.
+The change lands. Both map shapes and the `map_get/2` shape fall by more than the spread of their rounds, and no floor shape becomes slower. The Terra mean falls in both sessions, but the fall is not significant. The ERTS behavior stays: the loader refuses a register key among other keys, as the ERTS loader does, and an empty key list matches each map, as the inline JIT path does (`jit/arm/instr_map.cpp:404-415, 464`).
 
 ### Known gaps
 
-- The Terra ranges of the two revisions overlap, so the 0.854 ms fall has a weak bound. The CPU time from `ps` has a resolution of 10 ms, about 0.17 ms for each key over 60 keys.
+- The Terra ranges of the two revisions overlap, and the 0.854 ms fall is not significant (p = 0.12). The CPU time from `ps` has a resolution of 10 ms, about 0.17 ms for each key over 60 keys.
 - The sessions do not check the other processes of the host, as session s2 of task #627 did. They check only the load and the absence of `cargo`, `rustc`, and `nextest`.
 - The map shapes use the user CPU time of `/usr/bin/time`, with a resolution of 10 ms over about 0.5 s to 0.9 s.
 - `has_map_fields` keeps its own search of each key, because the task covers only `get_map_elements`.

@@ -63,9 +63,9 @@ One interleaved session on 2026-10-15 from 16:19:34 to 16:24:45 JST, before `e93
 | `call_only` plus `map_get/2` on a 1000-key map, 200000 iterations | 102.4 ns | 88.1 ns | -14.0 percent |
 | `call_ext_only` floor loop, 200000 iterations | 47.7 ns | 47.6 ns | -0.2 percent |
 | Local `call_only` floor loop, 200000 iterations | 42.4 ns | 42.1 ns | -0.7 percent |
-| CPU time for each release Terra key press | 15.896 ms | 15.042 ms | -5.4 percent |
+| CPU time for each release Terra key press | 15.896 ms | 15.042 ms | -5.4 percent, not significant (Welch t = 1.68, p = 0.12 over 8 rounds) |
 
-The ranges of the six rounds do not overlap for the three map rows. No other floor shape becomes slower. The Terra ranges of the eight rounds overlap (14.333 to 16.500 ms before, 12.667 to 16.333 ms after), and the after round is below the before round in six of the eight rounds, so the Terra number is weaker than the map numbers. The first session of four rounds gave 15.792 ms and 15.125 ms (-4.2 percent).
+The ranges of the six rounds do not overlap for the three map rows. No other floor shape becomes slower. The Terra ranges of the eight rounds overlap (14.333 to 16.500 ms before, 12.667 to 16.333 ms after), and the after round is below the before round in six of the eight rounds, so this session does not resolve the Terra change: a Welch t test gives t = 1.68 and p = 0.12, and a paired t test of the rounds gives t = 1.54 and p = 0.17. The first session of four rounds gave 15.792 ms and 15.125 ms (-4.2 percent).
 
 ### 2026-10-15 13:00 JST - Call an import through a resolved export target, task [#628](https://github.com/fahchen/pbeam/issues/628), pull request [#636](https://github.com/fahchen/pbeam/pull/636)
 
