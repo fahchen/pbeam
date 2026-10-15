@@ -527,3 +527,14 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Risk:** the default leak period is 100 ms. A program that ends slowly on a loaded CI runner can make a test fail at random.
 - **Trigger:** a new `LEAK` in a nextest run, or an owner decision to gate leaks.
 - **Source:** PR for #330.
+
+## Future features
+
+### Suspend, save, and resume any process
+
+- **Idea:** stop any process at a safe point and write its whole state to a portable form: the registers, the stack frames with their code positions, the message queue, the process dictionary, the links and monitors, and the module versions that the process runs. Include a dump of the instruction code of those module versions, so that the saved state does not depend on the code path of the run that resumes it. Later, resume the process in the same run or in another `pbeam` run.
+- **Why PBeam can do this:** the interpreter keeps the state of a process in safe Rust values (the `Arc` graph of terms, and frames with a module id and an instruction index), not in native stack frames or JIT code. The one scheduler gives a safe point at each switch-out.
+- **ERTS:** ERTS has no such feature. `erlang:suspend_process/1,2` and `sys:suspend/1` stop a process only in the same node, and `erlang:hibernate/3` drops the stack. A saved process is a PBeam extension, so it must stay out of the ERTS-compatible path: give it its own API with a capability check.
+- **Open questions:** the identity of pids, references, ports, and timers after a resume; the resources that cannot move (ports, sockets, NIF resources, and ETS tables that the process does not own); a check that the saved code matches; and the capabilities that a saved state carries.
+- **Trigger:** an owner decision after M10, or a consumer such as live migration of a process, debugging, or a test that replays a run.
+- **Source:** owner request in chat, 2026-10-16.
