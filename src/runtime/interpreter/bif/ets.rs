@@ -1068,6 +1068,10 @@ pub(super) struct MatchState {
     pub(super) got: usize,
     /// The change count of the table in the first turn.
     pub(super) writes: u64,
+    /// Whether a trap came before this turn. Then the rest of `ets:match/3`
+    /// is built from the front of the matches, so it is in reverse order
+    /// (`erl_db_hash.c:2380-2388`).
+    pub(super) resumed: bool,
 }
 
 impl MatchState {
@@ -1084,6 +1088,7 @@ impl MatchState {
             matches: Term::nil(),
             got: 0,
             writes,
+            resumed: false,
         }
     }
 
@@ -1219,6 +1224,9 @@ fn match_end(
         let (head, tail) = matches.cons_cell().expect("the list holds each match");
         rest.push(head.clone());
         matches = tail.clone();
+    }
+    if state.resumed {
+        rest.reverse();
     }
     if !rest.is_empty() || next >= 0 {
         let program = context.scheduler.make_ref()?;

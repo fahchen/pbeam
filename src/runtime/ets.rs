@@ -679,8 +679,8 @@ impl Table {
     }
 
     /// Join the top bucket into its low bucket, as `shrink`
-    /// (`erl_db_hash.c:3743-3818`) does: the chain of the top bucket goes to
-    /// the end of the chain of the low bucket.
+    /// (`erl_db_hash.c:3743-3818`) does: the chain of the top bucket goes
+    /// before the chain of the low bucket (`erl_db_hash.c:3795-3808`).
     ///
     /// # Examples
     ///
@@ -694,8 +694,12 @@ impl Table {
         self.buckets = source;
         let chain = self.heads.pop().expect("an active bucket has a head");
         if chain != EMPTY {
-            let last = self.chain_keys(target).last().unwrap_or(EMPTY);
-            self.link(target, last, chain);
+            let low = std::mem::replace(&mut self.heads[target], chain);
+            let last = self
+                .chain_keys(target)
+                .last()
+                .expect("the top chain has a key");
+            self.next[last] = low;
         }
     }
 

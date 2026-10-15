@@ -233,6 +233,7 @@ match() ->
      match_float(),
      [match_bag(Type) || Type <- [bag, duplicate_bag]],
      match_large(),
+     match_resumed(),
      match_private(),
      match_deleted()].
 
@@ -270,6 +271,14 @@ match_large() ->
     All = ets:match(T, {'$1', '$2'}),
     {Chunk, _} = ets:match(T, {'$1', '_'}, 2000),
     [length(All), take(5, All), checksum(All, 0), length(Chunk), checksum(Chunk, 0)].
+
+%% After a trap, the rest of ets:match/3 is in reverse order
+%% (erl_db_hash.c:2380-2388).
+match_resumed() ->
+    T = ets:new(ets_probe, [duplicate_bag]),
+    true = ets:insert(T, [{K, V} || K <- seq(500), V <- seq(10)]),
+    {Matches, {_, Slot, Chunk, _, Rest, Size}} = ets:match(T, {'$1', '$2'}, 1001),
+    [length(Matches), checksum(Matches, 0), Slot, Chunk, Rest, Size].
 
 take(0, _) -> [];
 take(N, [X | Xs]) -> [X | take(N - 1, Xs)].

@@ -499,7 +499,7 @@ fn keeps_the_erts_bucket_chains_through_splits_and_joins() {
     // The reference model is the ERTS chain list: a new key goes to the end
     // of its bucket (erl_db_hash.c:1384-1393, 1447-1452), a split keeps the
     // order of both chains (erl_db_hash.c:3690-3740), and a join puts the
-    // chain of the top bucket after the chain of its low bucket
+    // chain of the top bucket before the chain of its low bucket
     // (erl_db_hash.c:3743-3818). The table must give the same chains.
     let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
     let atoms = test_atom_table();
@@ -541,7 +541,8 @@ fn keeps_the_erts_bucket_chains_through_splits_and_joins() {
         while model.len() > table.bucket_count() {
             let source = model.pop().unwrap();
             let target = model.len() & ((model.len() + 1).next_power_of_two() - 1) >> 1;
-            model[target].extend(source);
+            let low = std::mem::replace(&mut model[target], source);
+            model[target].extend(low);
         }
     }
     assert!(table.bucket_count() < 6000);

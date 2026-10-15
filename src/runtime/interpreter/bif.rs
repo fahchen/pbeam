@@ -925,6 +925,7 @@ impl BeamProgram {
                 matches: matches.clone(),
                 got: *got as usize,
                 writes: *writes as u64,
+                resumed: true,
             };
             let mut context = BifContext { scheduler };
             return ets::match_trap(&mut context, *id, pattern, *bucket as usize, state);
