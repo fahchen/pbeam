@@ -19,6 +19,8 @@ The table holds the headline numbers of the whole programme. Each row names its 
 
 | Headline number | Value | Revision | Session or run group | Load or run rule | Source |
 | --- | --- | --- | --- | --- | --- |
+| `call_ext_only` floor loop, 200000 iterations, task #632 | 35.7 ns, from 47.7 ns | `e93523c3` before, `e35f6637` after | One interleaved session of eight rounds, each number the minimum of nine probe runs inside one invocation and the minimum of the eight rounds | One-minute load 2.37 to 2.52 | Issue [#632](https://github.com/fahchen/pbeam/issues/632) and the record |
+| Local `call_only` floor loop, 200000 iterations, task #632 | 31.4 ns, from 42.4 ns | `e93523c3` before, `e35f6637` after | The same interleaved session and the same rule | The same loads | Issue [#632](https://github.com/fahchen/pbeam/issues/632) and the record |
 | External `call_ext_only` floor loop, 200000 iterations | 122.5 ns, from 257.0 ns | `b8c71940` before, `8e1b44b4` after | One interleaved session of eight rounds, each number the minimum of nine probe runs inside one invocation | One-minute load 2.03 to 2.48 | Issue [#628](https://github.com/fahchen/pbeam/issues/628) and the record |
 | CPU time for each release Terra key press, 60 keys | 24.188 ms, from 25.896 ms | `b8c71940` before, `8e1b44b4` after | A second interleaved session of eight rounds, the mean of the raw CPU time with no idle correction | One-minute load 1.09 to 1.97 | Issue [#628](https://github.com/fahchen/pbeam/issues/628) and the record |
 | `call_ext_only` floor loop, 200000 iterations | 149.3 ns, from 257.1 ns | `b8c71940` before, after on the branch `perf/627-process-slot` (`ef77e031`) | One interleaved session of eight rounds and two builds, each number the minimum of nine probe runs inside one invocation and the minimum of the eight rounds | One-minute load 2.40 to 2.97 | Issue [#627](https://github.com/fahchen/pbeam/issues/627) and the record |
@@ -49,6 +51,22 @@ The step 0 numbers and the `ddb32f6e` numbers come from two different sessions. 
 ## Entries
 
 Each entry is one landed change or one change that is not landed. The entries are newest first.
+
+### 2026-10-15 15:30 JST - Add two small integers in the `gc_bif` arm, task [#632](https://github.com/fahchen/pbeam/issues/632), pull request [#638](https://github.com/fahchen/pbeam/pull/638)
+
+The `Bif` arm computes `erlang:'+'/2` and `erlang:'-'/2` of two integers with an integer result at once, with no BIF call. Each other case takes the present BIF path with the same value, exception, fail-label jump, or runtime error, as `emit_i_plus` and `emit_i_minus` add two small integers inline and call the BIF for each other case (`erts/emulator/beam/jit/arm/instr_arith.cpp:145-205` and `:334-392`, OTP 29.1.1).
+
+One interleaved session on 2026-10-15 from 15:18:06 to 15:21:53 JST, before `e93523c3` and after `e35f6637`. The floor rows are the minimum of eight rounds in rotated order, and each round is the minimum of nine probe runs inside one invocation; the one-minute load is 2.37 to 2.52. The Terra rows are the means of 60 keys in rotated order, with the raw CPU time of `pbeam` and no idle correction: three rounds in the first session, with the one-minute load 1.59 to 2.37, and eight rounds in a second session of the same binaries from 15:30:42 to 15:39:53 JST, with the one-minute load 1.11 to 2.26. The source is the section "Two small integers in the `gc_bif` arm, task #632" of `docs/interpreter-dispatch-measurements.md`.
+
+| Shape | Before `e93523c3` | After `e35f6637` | Change |
+| --- | --- | --- | --- |
+| `call_ext_only` floor loop, 200000 iterations | 47.7 ns | 35.7 ns | -25.2 percent |
+| Local `call_only` floor loop, 200000 iterations | 42.4 ns | 31.4 ns | -25.9 percent |
+| Position `call_only` floor loop, 200000 iterations | 42.4 ns | 31.5 ns | -25.7 percent |
+| CPU time for each release Terra key press, session 1, 3 rounds | 16.167 ms | 15.500 ms | -4.1 percent, ranges touch |
+| CPU time for each release Terra key press, session 2, 8 rounds | 15.396 ms (median 15.500 ms) | 15.021 ms (median 15.500 ms) | -2.4 percent, ranges overlap |
+
+The ranges of the eight floor rounds do not overlap, but the record does not confirm that the removed BIF call causes all of the floor fall. Of the added BIF shapes, `gc_bif '+'`, `tuple_size/1`, `element/2`, and `hd/1` fall by 11.2 to 19.9 percent, and `map_get/2` moves by +0.1 percent, inside the spread of its rounds. The Terra key press shows no change beyond noise: the medians of the second session are the same, the ranges overlap, and the resolution of `ps` is about 0.17 ms for each key. Thus the current-state table has no Terra row for this change.
 
 ### 2026-10-15 16:35 JST - Fetch the map elements in one walk with no allocation, task [#629](https://github.com/fahchen/pbeam/issues/629), pull request [#639](https://github.com/fahchen/pbeam/pull/639)
 
