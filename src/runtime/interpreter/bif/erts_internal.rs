@@ -1027,16 +1027,19 @@ pub(super) fn list_to_integer(list: &Term, base: &Term) -> BifResult {
 /// `kernel_refc:init/1` calls with `false` (`kernel_refc.erl:52-54`,
 /// `141-142`), as `erts_internal_scheduler_wall_time_1` (`bif.c:5306-5315`)
 /// does: each term other than `true` disables the scheduler wall time, and
-/// the BIF returns the old state. PBeam never enables it, so the old state
-/// is `false`. ERTS then waits for the reply of each scheduler
-/// (`await_sched_wall_time_modifications`), which sends the caller no
-/// message that it can see.
+/// the BIF gives the old state. PBeam never enables it, so the old state
+/// is `false`. ERTS traps to `await_sched_wall_time_modifications/2`, which
+/// waits in a receive for the reply of each scheduler, so the caller
+/// switches out and the processes in the run queue run first
+/// (`bif.c:5313-5314`, `erts_internal.erl:759-774`). PBeam traps to the
+/// internal export `erts_internal:await_sched_wall_time_modifications/1`,
+/// which switches the caller out once and then returns `false`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// let result = scheduler_wall_time(&Term::static_atom("false"))?;
-/// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.is_static("false")));
+/// assert!(matches!(result, BifResult::TrapBif { .. }));
 /// assert!(scheduler_wall_time(&Term::static_atom("true")).is_err());
 /// ```
 ///
@@ -1049,5 +1052,9 @@ pub(super) fn scheduler_wall_time(enable: &Term) -> Result<BifResult, BeamError>
             "unsupported erts_internal:scheduler_wall_time(true): see \"Scheduling\" in docs/erts-differences.md",
         ));
     }
-    Ok(Value(Term::static_atom("false")))
+    Ok(BifResult::TrapBif {
+        module: "erts_internal",
+        function: "await_sched_wall_time_modifications",
+        arguments: vec![Term::static_atom("false")],
+    })
 }

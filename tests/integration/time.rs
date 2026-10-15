@@ -305,6 +305,21 @@ fn disables_the_scheduler_wall_time_as_pinned_erts() {
         falses
     );
     assert_eq!(reference("wall_time"), b"[false,false,false,false]\n");
+    // The call traps to a receive of the reply of each scheduler
+    // (`bif.c:5313-5314`, `erts_internal.erl:759-774`), so the spawned
+    // process sends `ping` before the call returns.
+    let order = Term::list_from(vec![
+        Term::Atom(program.atom("false").unwrap()),
+        Term::Atom(program.atom("ping").unwrap()),
+    ]);
+    assert_eq!(
+        program
+            .execute("time_probe", "wall_time_order", &[])
+            .unwrap()
+            .term,
+        order
+    );
+    assert_eq!(reference("wall_time_order"), b"[false,ping]\n");
     let error = program
         .execute("time_probe", "wall_time_on", &[])
         .unwrap_err();

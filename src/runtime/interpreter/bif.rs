@@ -846,6 +846,11 @@ impl BeamProgram {
     ///   change count of the table ([`ets::match_trap`]). ERTS traps to
     ///   `ets:select_trap/1` with a tuple that holds a magic reference to the
     ///   compiled pattern (`erl_db_hash.c:2264-2307`).
+    /// - `erts_internal:await_sched_wall_time_modifications/1`, with the old
+    ///   state, which it returns ([`erts_internal::scheduler_wall_time`]).
+    ///   ERTS traps to the Erlang function
+    ///   `erts_internal:await_sched_wall_time_modifications/2`, which waits
+    ///   for a reply of each scheduler (`erts_internal.erl:759-774`).
     /// - `ets:delete_trap/0`, which frees the segments of the table that
     ///   `ets:delete/1` deleted ([`ets::delete_trap`]). The segments that
     ///   remain stay in the ETS store under the caller. ERTS traps to
@@ -1102,6 +1107,9 @@ impl BeamProgram {
                         arguments: arguments.clone(),
                     },
                 })
+            }
+            ("erts_internal", "await_sched_wall_time_modifications", [result]) => {
+                Ok(BifResult::Value(result.clone()))
             }
             ("pbeam_cap", "await_grant", []) => pbeam_cap::await_grant(scheduler),
             ("erts_internal", "await_exit", []) => Ok(match scheduler.await_exit()? {

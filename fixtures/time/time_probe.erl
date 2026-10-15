@@ -1,7 +1,7 @@
 -module(time_probe).
 -export([monotonic/0, system/0, units/0, convert/0, perf_counter/0, posix/0,
          local_badarg/0, local/0, local_check/0, leap_check/0,
-         wall_time/0, wall_time_on/0]).
+         wall_time/0, wall_time_on/0, wall_time_order/0, ping/1]).
 
 %% The Erlang monotonic time at the emulator start in `native`
 %% (`erlang:system_info(start_time)` on the pinned ERTS).
@@ -155,3 +155,16 @@ wall_time() ->
 %% erts_internal:scheduler_wall_time/1 with true, which enables it.
 wall_time_on() ->
     erts_internal:scheduler_wall_time(true).
+
+%% erts_internal:scheduler_wall_time/1 traps to a receive of the reply of
+%% each scheduler (bif.c:5313-5314, erts_internal.erl:759-774), so a
+%% process that the caller spawned runs before the call returns.
+wall_time_order() ->
+    receive after 1 -> ok end,
+    spawn(?MODULE, ping, [self()]),
+    A = erts_internal:scheduler_wall_time(false),
+    B = receive ping -> ping after 0 -> none end,
+    [A, B].
+
+%% Send ping to Pid.
+ping(Pid) -> Pid ! ping.
