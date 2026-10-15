@@ -1078,8 +1078,8 @@ pub(super) fn spawn_opt(
 
 /// Run `erlang:put/2`: set the value of `key` in the process dictionary of
 /// the calling process. Return the old value, or `undefined` for a new key,
-/// as ERTS `pd_hash_put` (`erl_process_dict.c`) does. Keys compare with
-/// exact equality.
+/// as ERTS `pd_hash_put` (`erl_process_dict.c:628-760`) does. Keys compare
+/// with exact equality.
 ///
 /// # Examples
 ///
@@ -1090,19 +1090,13 @@ pub(super) fn spawn_opt(
 /// ```
 pub(super) fn put(context: &mut BifContext<'_>, key: &Term, value: &Term) -> BifResult {
     let dictionary = &mut context.scheduler.current_process_mut().dictionary;
-    let old = match dictionary.iter_mut().find(|(other, _)| other == key) {
-        Some((_, old)) => std::mem::replace(old, value.clone()),
-        None => {
-            dictionary.push((key.clone(), value.clone()));
-            Term::static_atom("undefined")
-        }
-    };
-    Value(old)
+    Value(or_undefined(dictionary.put(key.clone(), value.clone())))
 }
 
 /// Run `erlang:get/1`: return the value of `key` in the process dictionary
-/// of the calling process, or `undefined` when the key has no value. Keys
-/// compare with exact equality.
+/// of the calling process, or `undefined` when the key has no value, as ERTS
+/// `erts_pd_hash_get` (`erl_process_dict.c:463-498`) does. Keys compare with
+/// exact equality.
 ///
 /// # Examples
 ///
@@ -1114,15 +1108,107 @@ pub(super) fn put(context: &mut BifContext<'_>, key: &Term, value: &Term) -> Bif
 /// ```
 pub(super) fn get(context: &mut BifContext<'_>, key: &Term) -> BifResult {
     let dictionary = &context.scheduler.current_process_mut().dictionary;
-    Value(
+    Value(or_undefined(dictionary.get(key).cloned()))
+}
+
+/// Run `erlang:get/0`: return the `{Key, Value}` pairs of the process
+/// dictionary of the calling process, in the order of ERTS `pd_hash_get_all`
+/// (`erl_process_dict.c:578-626`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// put(&mut context, &Term::Integer(1), &Term::Integer(2));
+/// // get_all(&mut context) is [{1,2}].
+/// ```
+pub(super) fn get_all(context: &mut BifContext<'_>) -> BifResult {
+    let dictionary = &context.scheduler.current_process_mut().dictionary;
+    Value(Term::list_from(dictionary.pairs().map(|(key, value)| {
+        Term::tuple(vec![key.clone(), value.clone()])
+    })))
+}
+
+/// Run `erlang:get_keys/0`: return the keys of the process dictionary of the
+/// calling process, in the order of ERTS `pd_hash_get_all_keys`
+/// (`erl_process_dict.c:508-539`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// put(&mut context, &Term::Integer(1), &Term::Integer(2));
+/// // get_keys(&mut context) is [1].
+/// ```
+pub(super) fn get_keys(context: &mut BifContext<'_>) -> BifResult {
+    let dictionary = &context.scheduler.current_process_mut().dictionary;
+    Value(Term::list_from(
+        dictionary.pairs().map(|(key, _)| key.clone()),
+    ))
+}
+
+/// Run `erlang:get_keys/1`: return the keys whose value is exactly equal to
+/// `value`, in the order of ERTS `pd_hash_get_keys`
+/// (`erl_process_dict.c:542-575`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// put(&mut context, &Term::Integer(1), &Term::Integer(2));
+/// // get_keys_of(&mut context, &Term::Integer(2)) is [1].
+/// ```
+pub(super) fn get_keys_of(context: &mut BifContext<'_>, value: &Term) -> BifResult {
+    let dictionary = &context.scheduler.current_process_mut().dictionary;
+    Value(Term::list_from(
         dictionary
-            .iter()
-            .find(|(other, _)| other == key)
-            .map_or_else(
-                || Term::static_atom("undefined"),
-                |(_, value)| value.clone(),
-            ),
-    )
+            .pairs()
+            .filter(|(_, other)| other == value)
+            .map(|(key, _)| key.clone()),
+    ))
+}
+
+/// Run `erlang:erase/0`: remove all pairs of the process dictionary of the
+/// calling process and return them as `get/0` does, as ERTS `erase_0`
+/// (`erl_process_dict.c:363-371`) does.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// put(&mut context, &Term::Integer(1), &Term::Integer(2));
+/// // erase_all(&mut context) is [{1,2}], and the dictionary is empty.
+/// ```
+pub(super) fn erase_all(context: &mut BifContext<'_>) -> BifResult {
+    let dictionary = &mut context.scheduler.current_process_mut().dictionary;
+    Value(Term::list_from(
+        dictionary
+            .erase_all()
+            .into_iter()
+            .map(|(key, value)| Term::tuple(vec![key, value])),
+    ))
+}
+
+/// Run `erlang:erase/1`: remove `key` from the process dictionary of the
+/// calling process and return its value, or `undefined`, as ERTS
+/// `pd_hash_erase` (`erl_process_dict.c:385-436`) does.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// put(&mut context, &Term::Integer(1), &Term::Integer(2));
+/// assert!(matches!(erase(&mut context, &Term::Integer(1)), BifResult::Value(Term::Integer(2))));
+/// ```
+pub(super) fn erase(context: &mut BifContext<'_>, key: &Term) -> BifResult {
+    let dictionary = &mut context.scheduler.current_process_mut().dictionary;
+    Value(or_undefined(dictionary.erase(key)))
+}
+
+/// Return `value`, or `undefined` for no value.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(or_undefined(None), Term::Atom(atom) if atom.is_static("undefined")));
+/// ```
+fn or_undefined(value: Option<Term>) -> Term {
+    value.unwrap_or_else(|| Term::static_atom("undefined"))
 }
 
 /// Run `erlang:'++'/2`: append `right` to the proper list `left`, as ERTS
