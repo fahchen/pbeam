@@ -216,3 +216,56 @@ fn multiplies_and_divides_integers_as_pinned_erts() {
           badarith,badarith,badarith,badarith]\n"
     );
 }
+
+#[test]
+fn adds_and_subtracts_at_each_bound_of_the_small_integer_as_pinned_erts() {
+    // `arith_probe:small_bounds/0` runs `gc_bif2` `erlang:'+'/2` and
+    // `erlang:'-'/2` at -(2^59) and 2^59 - 1. ERTS adds two small integers
+    // with a small result inline and calls the BIF for a bignum result or a
+    // bignum operand (`emit_i_plus` and `emit_i_minus`,
+    // `jit/arm/instr_arith.cpp:145-205` and `:334-392`). The `Bif` arm of
+    // PBeam adds each pair of 64-bit integers with a 64-bit result inline,
+    // and the values are the same on each side of each bound.
+    let program = BeamProgram::load(&[ARITH_PROBE]).unwrap();
+    let expected: Vec<Term> = [
+        576_460_752_303_423_487,
+        576_460_752_303_423_488,
+        576_460_752_303_423_488,
+        -576_460_752_303_423_488,
+        -576_460_752_303_423_489,
+        -576_460_752_303_423_489,
+        576_460_752_303_423_487,
+        -576_460_752_303_423_488,
+    ]
+    .map(Term::Integer)
+    .into();
+    assert_eq!(
+        program
+            .execute("arith_probe", "small_bounds", &[])
+            .unwrap()
+            .term,
+        Term::list_from(expected)
+    );
+    assert_eq!(
+        reference("small_bounds"),
+        b"[576460752303423487,576460752303423488,576460752303423488,-576460752303423488,\
+          -576460752303423489,-576460752303423489,576460752303423487,-576460752303423488]\n"
+    );
+}
+
+#[test]
+fn stops_at_the_float_argument_of_an_addition() {
+    // ERTS adds a float argument in the BIF that `emit_i_plus` calls
+    // (`jit/arm/instr_arith.cpp:190-201`). PBeam has no float term, so the
+    // run stops when it reads the float literal, before the `gc_bif`
+    // (row "Float terms" in `docs/erts-differences.md`).
+    let program = BeamProgram::load(&[ARITH_PROBE]).unwrap();
+    let error = program
+        .execute("arith_probe", "float_plus", &[])
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("unsupported BEAM literal index"),
+        "{error}"
+    );
+    assert_eq!(reference("float_plus"), b"3.5\n");
+}

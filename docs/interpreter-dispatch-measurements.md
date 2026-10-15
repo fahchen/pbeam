@@ -995,6 +995,59 @@ The profile script subtracts the CPU rate of a 3 s idle window from the key wind
 - The record does not split the fall of the `call_ext_only` shape by part.
 - The `ModuleId` lookup of `Cursor::refresh` for a call into another module stays, as the attribution of task #625 expected.
 
+## The loader skip of `test_heap` and `init_yregs`, task [#634](https://github.com/fahchen/pbeam/issues/634)
+
+### The change
+
+The loader decoded `test_heap` and `init_yregs` to `Instruction::Noop`, and the run loop dispatched it with no effect. The attribution of task #625 ([PR #626](https://github.com/fahchen/pbeam/pull/626)) counts 16,114 `Noop` instructions in one release Terra key press, 6.4 percent of its 253,558 instructions. The change makes the loader skip the two opcodes as it skips `line`, and removes the `Noop` variant. The labels resolve to instruction indexes after the decode, so each label stays correct. The loader keeps no line table, so no line or stack trace position moves.
+
+In the pinned ERTS, `test_heap` makes room on the process heap and can start a garbage collection, and `init_yregs` writes NIL to Y registers so that the collector reads valid terms (`emit_test_heap` and `emit_init_yregs` in `erts/emulator/beam/jit/arm/instr_common.cpp:231-234,424-509`, OTP 29.1.1). The compiler emits `init_yregs` after `allocate` for the Y registers that are not yet defined, and before a call for the Y registers that the rest of the function does not use (`cg_alloc` and `kill_yregs` in `lib/compiler/src/beam_ssa_codegen.erl:2101-2119,2693-2701`). The BEAM validator gives such a Y register the `initialized` tag and no term (`lib/compiler/src/beam_validator.erl:429-436`). The `Arc` term graph has no process heap and no collector, so neither opcode has an effect in PBeam.
+
+### The session
+
+One interleaved session on 2026-10-15 from 13:49 to 14:10 JST, on an Apple M1 Max with 10 CPUs. The before revision is `b8c71940`, the head of `origin/main`. The after revision is `0b67d5b9` on the branch `perf/634-skip-noop`. Each revision has its own release target directory. Each round runs the two revisions in rotated order. A round starts only when the one-minute load is below 12 and no `cargo`, `rustc`, or `nextest` process runs.
+
+- The floor loops: the test `records_the_interpreter_dispatch_baseline` of the release `dispatch_baseline` binary, run with `--exact --nocapture --test-threads=1`. Each value is the minimum of nine probe runs inside one invocation.
+- The Terra key press: 60 `j` and `k` keys to `bash scripts/example.sh terra_counter --no-build` with `PBEAM_BIN` set to the release `pbeam` of the revision, 0.5 s apart. The value is the CPU time of the `pbeam` process over the key phase, less the idle CPU rate, divided by 60.
+- The `test_heap` loop probe: `loop(0, A) -> A; loop(N, _) -> loop(N - 1, [N]).` with 20000000 iterations. Each iteration runs `TestYield`, `is_eq_exact`, `gc_bif`, `test_heap`, `put_list`, `swap`, and `call_only`. The value is the user CPU time of `/usr/bin/time -p` for one run of the release `pbeam`.
+
+| Round | Order | One-minute load | `call_ext_only` ns, before / after | `call_only` ns, before / after |
+| --- | --- | --- | --- | --- |
+| 1 | before, after | 3.14, 3.21 | 266.0 / 258.5 | 105.8 / 102.2 |
+| 2 | after, before | 3.12, 3.12 | 258.7 / 266.6 | 103.0 / 106.0 |
+| 3 | before, after | 2.95, 2.95 | 258.0 / 265.3 | 105.7 / 105.7 |
+| 4 | after, before | 2.87, 2.88 | 258.7 / 253.7 | 103.1 / 102.2 |
+| 5 | before, after | 2.88, 2.89 | 260.8 / 264.8 | 102.4 / 106.3 |
+| 6 | after, before | 2.89, 2.90 | 266.0 / 265.8 | 106.5 / 106.0 |
+
+| Round | Order | One-minute load | Terra CPU ms for each key, before / after | Probe user s, before / after |
+| --- | --- | --- | --- | --- |
+| 1 | before, after | Terra 2.83, 2.70; probe 2.94, 2.86 | 20.333 / 26.500 | 4.81 / 4.74 |
+| 2 | after, before | Terra 3.62, 2.45; probe 2.79, 2.81 | 25.833 / 26.167 | 4.82 / 4.66 |
+| 3 | before, after | Terra 1.82, 1.99; probe 2.66, 2.53 | 26.667 / 21.833 | 4.82 / 4.63 |
+| 4 | after, before | Terra 1.88, 1.87; probe 2.41, 2.30 | 23.000 / 19.833 | 4.81 / 4.59 |
+| 5 | before, after | Terra 1.54, 1.60; probe 2.19, 2.10 | 25.167 / 24.167 | 4.83 / 4.65 |
+| 6 | after, before | Terra 1.96, 1.71; probe 2.01, 1.93 | 23.000 / 26.500 | 4.80 / 4.66 |
+| 7 | before, after | Terra 3.27, 12.33; probe 1.85, 3.95 | 15.500 / 13.667 | 5.24 / 4.60 |
+| 8 | after, before | Terra 3.23, 2.88; probe 3.71, 3.57 | 17.000 / 20.000 | 5.14 / 4.63 |
+
+The medians and ranges below do not use the Terra pair of round 7. The script checked the load and the build processes only at the start of a round. The after run of that round started with a one-minute load of 12.33 and two `cargo`, `rustc`, or `nextest` processes (`busy 2` in the session log), which breaks the rule of the session. The load rose from 3.27 to 12.33 during the before run of the same round, so the before run is also not reliable. The probe pair of round 7 started with no such process and a load below 4, so it stays. The Terra rounds 1 and 2 ran before the probe rounds, the Terra rounds 3 to 8 ran after a pause for the load, and the probe rounds ran last.
+
+| Shape | Before median | After median | Before range | After range |
+| --- | --- | --- | --- | --- |
+| `call_ext_only` floor, ns | 259.75 | 265.05 | 258.0 to 266.0 | 253.7 to 266.6 |
+| `call_only` floor, ns | 104.40 | 105.85 | 102.4 to 106.5 | 102.2 to 106.3 |
+| Terra CPU ms for each key, 7 rounds | 23.0 | 24.167 | 17.0 to 26.7 | 19.8 to 26.5 |
+| `test_heap` loop probe, user s | 4.82 | 4.64 | 4.80 to 5.24 | 4.59 to 4.74 |
+
+### The decision
+
+Only the targeted probe shows a gain. The three shapes that the acceptance of task #634 names, `call_ext_only`, `call_only`, and the Terra CPU time for each key, show no gain that the session can resolve. The probe that runs one `test_heap` in each iteration is 3.7 percent faster at the median, and the two ranges do not overlap. The probe source is the one line above, and the probe is not a committed fixture. The floor loops have no `test_heap` or `init_yregs`, and both revisions show the same two modes, near 258 ns and near 266 ns for `call_ext_only`. The share of the two modes is not the same: four of the six before rounds are in the low mode, and four of the six after rounds are in the high mode. This moves the `call_ext_only` median by 2.0 percent, from 259.75 ns to 265.05 ns. Six rounds cannot show if this shift comes from the code layout of the after build or from noise, so the shift stays open. The Terra CPU time for each key spreads by more than 6 ms in each revision. The expected gain is the dispatch of 16,114 of 253,558 instructions, which is below that spread, so the session cannot resolve it. The change also removes one `Instruction` variant and one arm of the run loop.
+
+The change is not landed. The owner delegated the decision on 2026-10-15. The reason is that only the targeted probe, which is not a committed fixture, shows a gain, and the three acceptance shapes `call_ext_only`, `call_only`, and the Terra CPU time for each key show no resolvable gain. Pull request [#637](https://github.com/fahchen/pbeam/pull/637) reverts the code and test commits and keeps only this record. The loader on `main` still decodes the two opcodes to `Instruction::Noop`.
+
+The raw files of each run are in the session scratch directory of the task, `scratchpad/634-skip-noop/raw/`, with the names `floor-r<round>-<revision>.txt`, `terra-r<round>-<revision>.log`, and `probe-r<round>-<revision>.txt`, and the session log is `scratchpad/634-skip-noop/session.txt`.
+
 ## The Y register storage of a released frame, task [#630](https://github.com/fahchen/pbeam/issues/630)
 
 This section records the gate of task [#630](https://github.com/fahchen/pbeam/issues/630), a proposal of the attribution of task [#625](https://github.com/fahchen/pbeam/issues/625). Each body call gives its frame a new slot array at `allocate`, and the return frees it. ERTS keeps the Y registers on the process stack, with no separate slot array. `allocate` first checks the free space of the heap and the stack, which can start a garbage collection (`emit_gc_test`, `erts/emulator/beam/jit/arm/instr_common.cpp:137-155` and `:211` at `OTP-29.1.1`). Then it reserves the Y registers by moving the stack pointer `E`, and `deallocate` only moves `E` back (`emit_allocate_heap` and `emit_deallocate`, `instr_common.cpp:206-229`). The proposal expected about 3 percent of the CPU time for each release Terra key press.
@@ -1106,6 +1159,64 @@ The change lands. Both map shapes and the `map_get/2` shape fall by more than th
 - `has_map_fields` keeps its own search of each key, because the task covers only `get_map_elements`.
 - The loader keeps each key as an `Operand`, so the arm reads each key through `read_ref` for each comparison. ERTS also stores the hash of each key in the instruction; PBeam computes the hash of each key of a hashmap at each run.
 
+## Two small integers in the `gc_bif` arm, task [#632](https://github.com/fahchen/pbeam/issues/632)
+
+This section records the gate of task [#632](https://github.com/fahchen/pbeam/issues/632), proposal 6 of the attribution of task [#625](https://github.com/fahchen/pbeam/issues/625). Before the change, each `gc_bif` of `erlang:'+'/2` or `erlang:'-'/2` went through the BIF call path of the `Bif` arm: the leaf check, the borrowed argument read, the match-context size check, the identity dispatch, and the result match. ERTS adds or subtracts two small integers with a small result inline and calls the BIF for each other case (`emit_i_plus` and `emit_i_minus`, `erts/emulator/beam/jit/arm/instr_arith.cpp:145-205` and `:334-392`, OTP 29.1.1).
+
+### The change
+
+Commit `e35f6637` adds `small_integer_arith` before the BIF call path of the `Bif` arm. When the identity is `erlang:'+'/2` or `erlang:'-'/2`, both operands are integers, and the checked 64-bit operation gives a result, the arm writes the result and goes to the next instruction. Each other case, such as an operand that is not an integer, an unset operand, or a result outside the 64-bit range, takes the present BIF path, which gives the same value, the same `badarith`, the same jump to the fail label, or the same runtime error as before. The inline range is the 64-bit range of a PBeam integer, not the 60-bit small range of ERTS, because the results from 2^59 to 2^63 - 1 and from -(2^63) to -(2^59) - 1 are the same values as the ERTS bignums (row "Integer range" of `docs/erts-differences.md`).
+
+### The session
+
+The before revision is `e93523c3`, the head of `origin/main` that the branch starts from. The after revision is `e35f6637`. Each revision is a `git archive` of its commit, built with `cargo build --locked --release --bin pbeam` and `cargo test --locked --release --test dispatch_baseline --no-run` in its own target directory. The session ran on 2026-10-15 from 15:18:06 to 15:21:53 JST on the host of "The environment of the numbers", with no other `cargo`, `rustc`, or `nextest` process. The floor rows run `records_the_interpreter_dispatch_baseline --exact --nocapture --test-threads=1`, eight rounds in rotated order from 15:18:06 to 15:18:27 JST, with the one-minute load 2.37 to 2.52. Each round is the minimum of nine probe runs inside one invocation. The Terra rows are three rounds of 60 keys in rotated order from 15:18:27 to 15:21:53 JST, with the one-minute load 1.59 to 2.37 before each run, and the raw CPU time of `pbeam` with no idle correction. Each idle window of the six runs held no CPU tick.
+
+| Shape | Before `e93523c3`, minimum of 8 rounds | After `e35f6637`, minimum of 8 rounds | Change |
+| --- | --- | --- | --- |
+| `call_ext_only` floor loop, 200000 iterations | 47.7 ns (rounds 47.7 to 49.0) | 35.7 ns (rounds 35.7 to 36.6) | -12.0 ns, -25.2 percent |
+| `call_only` floor loop, 200000 iterations | 42.4 ns (42.4 to 43.5) | 31.4 ns (31.4 to 32.1) | -11.0 ns, -25.9 percent |
+| Position `call_only` floor loop, 200000 iterations | 42.4 ns (42.4 to 44.1) | 31.5 ns (31.5 to 31.9) | -10.9 ns, -25.7 percent |
+| `call_only` plus `gc_bif '+'`, 200000 iterations | 67.2 ns (67.2 to 67.6) | 53.8 ns (53.8 to 57.7) | -19.9 percent |
+| `call_only` plus the `bif` of `tuple_size/1` | 69.2 ns (69.2 to 69.4) | 57.8 ns (57.8 to 59.2) | -16.5 percent |
+| `call_only` plus the `bif` of `element/2` | 69.9 ns (69.9 to 71.9) | 62.1 ns (62.1 to 62.2) | -11.2 percent |
+| `call_only` plus the `bif` of `hd/1` | 69.2 ns (69.2 to 71.4) | 60.2 ns (60.2 to 60.3) | -13.0 percent |
+| `call_only` plus the `bif` of `map_get/2` on a 1000-key map | 101.9 ns (101.9 to 105.4) | 102.0 ns (102.0 to 110.4) | +0.1 percent |
+
+| Terra round | Before `e93523c3`, ms of CPU time for each key | After `e35f6637`, ms of CPU time for each key |
+| --- | --- | --- |
+| Round 1 | 16.000 | 15.000 |
+| Round 2 | 16.500 | 15.500 |
+| Round 3 | 16.000 | 16.000 |
+| Mean of 3 rounds | 16.167 | 15.500 |
+
+Each floor loop holds one `gc_bif '-'` for its counter, and each floor row falls by 10.9 ns to 12.0 ns, with no overlap of the ranges of the eight rounds. The record does not confirm that the removal of the BIF call of this `gc_bif '-'` causes all of the fall, and two rows of the same session do not agree with that cause. The `gc_bif '+'` row adds a second inline instruction to the `call_only` loop (a `gc_bif '+'` of `{x,1}` and `{integer,1}`), and the cost of that addition falls only from 24.8 ns (67.2 ns - 42.4 ns) to 22.4 ns (53.8 ns - 31.4 ns). The `map_get/2` row holds the same `gc_bif '-'` and does not fall. Thus an inline `gc_bif '+'` still costs about 22 ns, and a part of the floor fall possibly comes from the code layout or the branch prediction of a loop of two instructions. No profile or isolation run of this session splits the fall. The attribution of task #625 measured 37.1 ns for the BIF call path of `gc_bif '-'` at `b8c71940`, before tasks #627 and #628 removed the process lookups and the name lookups of the iteration.
+
+The CPU time for each key falls by 0.667 ms, or 4.1 percent, at the mean of the three rounds. The ranges of the two revisions touch at 16.000 ms. The resolution of the CPU time of `ps` is 10 ms, or about 0.17 ms for each key over 60 keys, and the CPU times of the two revisions differ by 6, 6, and 0 ticks. The attribution of task #625 expected 2.3 to 2.5 percent of a key press.
+
+A second Terra session ran the same two binaries, with eight rounds of 60 keys in rotated order, on 2026-10-15 from 15:30:42 to 15:39:53 JST, with the one-minute load 1.11 to 2.26 before each run and no `cargo`, `rustc`, or `nextest` process. Each idle window of the 16 runs held no CPU tick.
+
+| Terra session 2 | Before `e93523c3`, ms of CPU time for each key | After `e35f6637`, ms of CPU time for each key |
+| --- | --- | --- |
+| Rounds 1 to 8 | 15.333, 15.833, 14.667, 16.167, 16.167, 14.000, 15.667, 15.333 | 13.333, 15.500, 16.000, 14.000, 16.000, 16.667, 13.167, 15.500 |
+| Mean of 8 rounds | 15.396 | 15.021 |
+| Median of 8 rounds | 15.500 | 15.500 |
+| Range of 8 rounds | 14.000 to 16.167 | 13.167 to 16.667 |
+
+The mean falls by 0.375 ms, or 2.4 percent, the medians are the same, and the ranges of the two revisions overlap from 14.000 ms to 16.167 ms. Thus the Terra key press shows no change beyond the noise of the two sessions, and the record does not give a Terra result for this change.
+
+The raw records are the session logs `session.txt` and `session2.txt` and the files `floor-r<round>-<revision>.txt`, `terra-r<round>-<revision>.log`, and `terra2-r<round>-<revision>.log`, which stay outside the repository.
+
+### The decision
+
+The change lands. The floor shape that the task targets falls by 25 percent with no overlap of the rounds, and no shape is slower beyond the spread of its rounds. The cause of the floor fall is not confirmed (below). The Terra key press shows no change beyond noise (below).
+
+### Known gaps
+
+- The record does not confirm the cause of the fall of the floor rows. The `gc_bif '+'` row and the `map_get/2` row do not agree with a fall of 11 ns to 12 ns for each removed BIF call, and no profile or isolation run splits the fall.
+- The `map_get/2` row does not show the fall of its `gc_bif '-'`, and the record does not show the cause.
+- The Terra key press shows no change beyond noise. The first session (three rounds) and the second session (eight rounds) have overlapping ranges, and the medians of the second session are the same.
+- PBeam has no float term, so a float argument stops the run when the float literal is read, before the `gc_bif` (row "Float terms" of `docs/erts-differences.md`). The fixture `arith_probe:float_plus/0` records this; ERTS returns `3.5`.
+
 ## The source term of a move whose source is dead, task [#631](https://github.com/fahchen/pbeam/issues/631)
 
 This section records the gate of task [#631](https://github.com/fahchen/pbeam/issues/631), proposal 5 of the attribution of task [#625](https://github.com/fahchen/pbeam/issues/625). A `move` from a register copies its term, so a move of a boxed term increments a reference count, and the later write of the dead source decrements it. ERTS copies one word for a `move` (`emit_i_move`, `erts/emulator/beam/jit/arm/instr_common.cpp:516-519`, OTP 29.1.1). The change does not land.
@@ -1175,3 +1286,4 @@ The change does not land. Its target is the Terra key press, and the two session
 - The probe of a boxed move measures a take with a warm cache only. It does not measure a take of a term whose reference count is not in the cache, which is the case that the samples of #625 can hold.
 - The probe time for each iteration includes the start of `pbeam` and the load of the module. This part is the same for the two revisions, and the `boxed` minus `small` difference removes it.
 - The count comes from a scratch probe build, not from the measured binary.
+||||||| 94e29971
