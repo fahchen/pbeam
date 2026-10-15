@@ -1503,7 +1503,8 @@ pub(super) fn binary_part(binary: &Term, start: &Term, length: &Term) -> BifResu
 /// that is not a bitstring raises `badarg`. In a guard, the `gc_bif`
 /// instruction goes to its fail label instead. PBeam has no bitstring that
 /// is not a binary (row "Bitstring terms" of `docs/erts-differences.md`),
-/// so the size is 8 times the byte size.
+/// so the size is 8 times the byte size. The size comes from the view, so
+/// a binary that an append built is not joined.
 ///
 /// # Examples
 ///
@@ -1514,7 +1515,7 @@ pub(super) fn binary_part(binary: &Term, start: &Term, length: &Term) -> BifResu
 /// ```
 pub(super) fn bit_size(term: &Term) -> BifResult {
     match term {
-        Term::Binary(bytes) => Value(Term::Integer(bytes.len() as i64 * 8)),
+        Term::Binary(bytes) => Value(Term::Integer(bytes.bit_size() as i64)),
         _ => BifResult::badarg(),
     }
 }
