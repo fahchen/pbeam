@@ -333,6 +333,14 @@ pub(crate) enum Instruction {
     ///
     /// Erlang: `a() -> ok.` compiles to `{move,{atom,ok},{x,0}}`.
     Move(Operand, Operand),
+    /// A `move` from an X or Y register that no later instruction reads
+    /// before it writes the register again. The interpreter takes the term
+    /// out of the source register, so the move does not change a reference
+    /// count. The loader marks it ([`take_dead_move_sources`]).
+    ///
+    /// Erlang: `f(A, B) -> g(B), A.` moves `{x,1}` to `{x,0}` before
+    /// `{call,1,...}`, and the call reads only `x0`.
+    MoveTake(Operand, Operand),
     /// Calls a local function and continues after it returns.
     ///
     /// `function` is the index of the function in the function table of the
@@ -2390,6 +2398,7 @@ pub(super) fn parse_code(
                     return Err(error("invalid BEAM code terminator or function count"));
                 }
                 instructions.push(Instruction::End);
+                take_dead_move_sources(&mut instructions, imports);
                 return Ok((instructions, number_of_labels));
             }
             _ => {
@@ -3130,6 +3139,209 @@ fn read_move_operand(
         }
         TAG_REGISTER | TAG_Y_REGISTER => read_register(data, cursor),
         tag => Err(error(format!("unsupported move operand tag {tag}"))),
+    }
+}
+
+/// Mark each `move` whose source register is dead after it as a
+/// [`Instruction::MoveTake`].
+///
+/// ERTS copies one word for a `move` (`emit_i_move`,
+/// `erts/emulator/beam/jit/arm/instr_common.cpp:516-519`), so the source
+/// keeps its value. Here a copy changes a reference count, and a take does
+/// not. A take is correct only when no later instruction reads the source
+/// register before it writes it again. Also the implicit reads count: the
+/// argument registers of a call, of `undef`, and of a `function_clause`.
+/// The analysis follows one straight path. It stops with "live" at each
+/// instruction that can branch, raise, or read registers that are not its
+/// operands.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut code = vec![
+///     Instruction::Move(Operand::X(1), Operand::X(0)),
+///     Instruction::Call { arity: 1, function: 0, target: 2 },
+/// ];
+/// take_dead_move_sources(&mut code, &[]);
+/// assert!(matches!(code[0], Instruction::MoveTake(Operand::X(1), Operand::X(0))));
+/// ```
+fn take_dead_move_sources(instructions: &mut [Instruction], imports: &[(String, String, u32)]) {
+    for position in 0..instructions.len() {
+        let Instruction::Move(source, _) = &instructions[position] else {
+            continue;
+        };
+        if source_is_dead(source, &instructions[position + 1..], imports)
+            && let Instruction::Move(source, destination) =
+                std::mem::replace(&mut instructions[position], Instruction::Noop)
+        {
+            instructions[position] = Instruction::MoveTake(source, destination);
+        }
+    }
+}
+
+/// The effect of one instruction on the register that a `move` read.
+enum RegisterUse {
+    /// The instruction does not touch the register.
+    Unused,
+    /// The instruction can read the register, or the analysis does not
+    /// know the instruction.
+    Read,
+    /// The register is dead after the instruction: it writes the register
+    /// before it reads it, or it ends the register's lifetime.
+    Dead,
+}
+
+/// Tell whether the source register of a `move` is dead on the straight
+/// path of `following`.
+///
+/// An X register at or above the arity of a call is dead after the call:
+/// the call reads only `x0` to `x(Arity-1)`, also for `undef` and
+/// `function_clause`. The BEAM validator keeps only `x0` after a body call
+/// (`schedule_out(0, ...)`, `lib/compiler/src/beam_validator.erl:1229-1257`)
+/// and no register after a tail call or `return` (`verify_return`,
+/// `kill_state`, lines 1204-1224 and 1584-1586). After `return`, only `x0`
+/// is live. A Y register is dead after `deallocate` or a tail
+/// call that deallocates the frame, and `trim` moves it to a lower index.
+/// A non-tail call stops the analysis of a Y register, because a `catch`
+/// handler of the same frame can read it after an exception.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let following = [Instruction::Move(Operand::X(2), Operand::X(0))];
+/// assert!(source_is_dead(&Operand::X(0), &following, &[]));
+/// assert!(!source_is_dead(&Operand::X(2), &following, &[]));
+/// ```
+fn source_is_dead(
+    source: &Operand,
+    following: &[Instruction],
+    imports: &[(String, String, u32)],
+) -> bool {
+    if !matches!(source, Operand::X(_) | Operand::Y(_)) {
+        return false;
+    }
+    let mut register = source.clone();
+    for instruction in following {
+        let effect = match (instruction, &mut register) {
+            (Instruction::Label(_) | Instruction::Noop, _) => RegisterUse::Unused,
+            (Instruction::Move(read, written), register) => access(register, &[read], &[written]),
+            (Instruction::Swap(left, right), register) => access(register, &[left, right], &[]),
+            (Instruction::GetList { source, head, tail }, register) => {
+                access(register, &[source], &[head, tail])
+            }
+            (
+                Instruction::GetHead {
+                    source,
+                    destination,
+                }
+                | Instruction::GetTail {
+                    source,
+                    destination,
+                }
+                | Instruction::GetTupleElement {
+                    tuple: source,
+                    destination,
+                    ..
+                },
+                register,
+            ) => access(register, &[source], &[destination]),
+            (
+                Instruction::PutList {
+                    head,
+                    tail,
+                    destination,
+                },
+                register,
+            ) => access(register, &[head, tail], &[destination]),
+            (
+                Instruction::PutTuple {
+                    elements,
+                    destination,
+                },
+                register,
+            ) => access(
+                register,
+                &elements.iter().collect::<Vec<_>>(),
+                &[destination],
+            ),
+            (
+                Instruction::Call { arity, .. }
+                | Instruction::CallLast { arity, .. }
+                | Instruction::CallOnly { arity, .. },
+                Operand::X(index),
+            ) => dead_unless(*index < *arity),
+            (Instruction::CallExternal { import, .. }, Operand::X(index)) => dead_unless(
+                imports
+                    .get(*import as usize)
+                    .is_none_or(|(_, _, arity)| *index < *arity),
+            ),
+            (Instruction::Return, Operand::X(index)) => dead_unless(*index == 0),
+            (Instruction::Allocate { .. } | Instruction::Deallocate { .. }, Operand::X(_)) => {
+                RegisterUse::Unused
+            }
+            (Instruction::Trim { .. }, Operand::X(_)) => RegisterUse::Unused,
+            (
+                Instruction::Deallocate { .. }
+                | Instruction::CallLast { .. }
+                | Instruction::CallExternal { tail: true, .. },
+                Operand::Y(_),
+            ) => RegisterUse::Dead,
+            (Instruction::Trim { count, .. }, Operand::Y(index)) => match index.checked_sub(*count)
+            {
+                Some(trimmed) => {
+                    *index = trimmed;
+                    RegisterUse::Unused
+                }
+                None => RegisterUse::Dead,
+            },
+            _ => RegisterUse::Read,
+        };
+        match effect {
+            RegisterUse::Unused => {}
+            RegisterUse::Read => return false,
+            RegisterUse::Dead => return true,
+        }
+    }
+    false
+}
+
+/// The effect of an instruction that reads `reads` first and then writes
+/// `writes`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(access(&Operand::X(0), &[&Operand::X(1)], &[&Operand::X(0)]), RegisterUse::Dead));
+/// ```
+fn access(register: &Operand, reads: &[&Operand], writes: &[&Operand]) -> RegisterUse {
+    let same = |operand: &&Operand| match (*operand, register) {
+        (Operand::X(left), Operand::X(right)) | (Operand::Y(left), Operand::Y(right)) => {
+            left == right
+        }
+        _ => false,
+    };
+    if reads.iter().any(same) {
+        RegisterUse::Read
+    } else if writes.iter().any(same) {
+        RegisterUse::Dead
+    } else {
+        RegisterUse::Unused
+    }
+}
+
+/// [`RegisterUse::Read`] when the instruction reads the register, else
+/// [`RegisterUse::Dead`].
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(dead_unless(false), RegisterUse::Dead));
+/// ```
+fn dead_unless(read: bool) -> RegisterUse {
+    if read {
+        RegisterUse::Read
+    } else {
+        RegisterUse::Dead
     }
 }
 

@@ -10,7 +10,7 @@ use super::{
     parse_code, prepare_select_value_choices, read_binary_match_commands, read_binary_segments,
     read_move_operand, read_operand_pairs, read_pair_count, read_record_updates, skip_allocation,
     skip_counted_operands, skip_integer_payload, skip_operand, skip_unsupported_instruction,
-    test_kind, unsupported_opcode_operand_count,
+    take_dead_move_sources, test_kind, unsupported_opcode_operand_count,
 };
 use crate::{
     beam::code::{
@@ -2245,7 +2245,9 @@ fn arm_field_bytes(instruction: &Instruction) -> usize {
             name,
             arity,
         } => size_of_val(module) + size_of_val(name) + size_of_val(arity),
-        Instruction::Move(field_0, field_1) => size_of_val(field_0) + size_of_val(field_1),
+        Instruction::Move(field_0, field_1) | Instruction::MoveTake(field_0, field_1) => {
+            size_of_val(field_0) + size_of_val(field_1)
+        }
         Instruction::Call {
             arity,
             function,
@@ -2628,4 +2630,200 @@ fn records_the_decoded_form_layout() {
     );
     assert_eq!(arm_field_bytes(&arms[3].1), 48, "the fields of `Bif`");
     assert_eq!(arm_field_bytes(&arms[6].1), 32, "the fields of `Move`");
+}
+
+/// Run the dead-source analysis on a `move` of `source` to `y9` and the
+/// instructions after it, and tell whether the move takes its source.
+fn takes(source: Operand, following: Vec<Instruction>) -> bool {
+    let mut code = vec![Instruction::Move(source, Operand::Y(9))];
+    code.extend(following);
+    take_dead_move_sources(&mut code, &[("m".into(), "f".into(), 1)]);
+    matches!(code[0], Instruction::MoveTake(_, Operand::Y(9)))
+}
+
+#[test]
+fn takes_an_x_move_source_only_when_no_later_instruction_reads_it() {
+    let x = Operand::X;
+    let call = |arity| Instruction::Call {
+        arity,
+        function: 0,
+        target: 1,
+    };
+    // An overwrite before a read, also through labels and data moves.
+    for following in [
+        vec![
+            Instruction::Label(3),
+            Instruction::Noop,
+            Instruction::Move(x(2), x(1)),
+        ],
+        vec![Instruction::Swap(x(2), x(3)), Instruction::Move(x(2), x(1))],
+        vec![Instruction::GetList {
+            source: x(2),
+            head: x(1),
+            tail: x(3),
+        }],
+        vec![Instruction::GetHead {
+            source: x(2),
+            destination: x(1),
+        }],
+        vec![Instruction::GetTail {
+            source: x(2),
+            destination: x(1),
+        }],
+        vec![Instruction::GetTupleElement {
+            tuple: x(2),
+            index: 0,
+            destination: x(1),
+        }],
+        vec![Instruction::PutList {
+            head: x(2),
+            tail: x(3),
+            destination: x(1),
+        }],
+        vec![Instruction::PutTuple {
+            elements: vec![x(2)],
+            destination: x(1),
+        }],
+        vec![
+            Instruction::Allocate { stack_size: 1 },
+            Instruction::Deallocate { stack_size: 1 },
+            Instruction::Trim {
+                count: 1,
+                remaining: 0,
+            },
+            Instruction::Move(x(0), x(1)),
+        ],
+        // A call reads only the registers below its arity.
+        vec![call(1)],
+        vec![Instruction::CallLast {
+            arity: 1,
+            function: 0,
+            target: 1,
+            deallocate: 1,
+        }],
+        vec![Instruction::CallOnly {
+            arity: 0,
+            function: 0,
+            target: 1,
+        }],
+        vec![Instruction::CallExternal {
+            import: 0,
+            tail: false,
+            deallocate: 0,
+        }],
+        // After `return`, only `x0` is live.
+        vec![Instruction::Return],
+    ] {
+        assert!(takes(x(1), following.clone()), "{following:?}");
+    }
+    // A read first, an instruction that can branch, raise, or read other
+    // registers, or the end of the code keeps the source.
+    for following in [
+        vec![Instruction::Move(x(1), x(1))],
+        vec![Instruction::Swap(x(2), x(1))],
+        vec![Instruction::GetList {
+            source: x(1),
+            head: x(2),
+            tail: x(3),
+        }],
+        vec![Instruction::PutTuple {
+            elements: vec![x(2), x(1)],
+            destination: x(1),
+        }],
+        vec![call(2)],
+        vec![Instruction::CallExternal {
+            import: 7,
+            tail: false,
+            deallocate: 0,
+        }],
+        vec![Instruction::Jump(3), Instruction::Move(x(2), x(1))],
+        vec![Instruction::FunctionInfo {
+            module: "m".into(),
+            name: "f".into(),
+            arity: 2,
+        }],
+        vec![Instruction::Raise {
+            trace: x(2),
+            value: x(3),
+        }],
+        vec![],
+    ] {
+        assert!(!takes(x(1), following.clone()), "{following:?}");
+    }
+    assert!(!takes(x(0), vec![Instruction::Return]));
+    assert!(!takes(x(0), vec![call(1)]));
+    assert!(!takes(
+        x(0),
+        vec![Instruction::CallExternal {
+            import: 0,
+            tail: true,
+            deallocate: 0
+        }]
+    ));
+    assert!(!takes(
+        Operand::Value(Term::Nil),
+        vec![Instruction::Move(x(2), x(1))]
+    ));
+}
+
+#[test]
+fn takes_a_y_move_source_only_until_the_frame_ends_or_a_call_can_raise() {
+    let y = Operand::Y;
+    for following in [
+        vec![
+            Instruction::Deallocate { stack_size: 2 },
+            Instruction::Return,
+        ],
+        vec![Instruction::CallLast {
+            arity: 1,
+            function: 0,
+            target: 1,
+            deallocate: 2,
+        }],
+        vec![Instruction::CallExternal {
+            import: 0,
+            tail: true,
+            deallocate: 2,
+        }],
+        vec![Instruction::Move(Operand::X(0), y(1))],
+        vec![Instruction::Trim {
+            count: 2,
+            remaining: 0,
+        }],
+        vec![
+            Instruction::Trim {
+                count: 1,
+                remaining: 1,
+            },
+            Instruction::Move(Operand::X(0), y(0)),
+        ],
+    ] {
+        assert!(takes(y(1), following.clone()), "{following:?}");
+    }
+    for following in [
+        vec![
+            Instruction::Call {
+                arity: 0,
+                function: 0,
+                target: 1,
+            },
+            Instruction::Deallocate { stack_size: 2 },
+        ],
+        vec![Instruction::CallExternal {
+            import: 0,
+            tail: false,
+            deallocate: 0,
+        }],
+        vec![Instruction::Allocate { stack_size: 3 }],
+        vec![
+            Instruction::Trim {
+                count: 1,
+                remaining: 1,
+            },
+            Instruction::Move(y(0), Operand::X(0)),
+        ],
+        vec![Instruction::Return],
+    ] {
+        assert!(!takes(y(1), following.clone()), "{following:?}");
+    }
 }

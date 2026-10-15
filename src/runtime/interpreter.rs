@@ -764,6 +764,14 @@ impl BeamProgram {
                     let value = read_any(process, source)?;
                     write(process, destination, value)?;
                 }
+                // The loader marks a `move` whose source no later
+                // instruction reads (`take_dead_move_sources`). The source
+                // gives its term to the destination, and no reference count
+                // changes.
+                Instruction::MoveTake(source, destination) => {
+                    let value = take_any(process, source)?;
+                    write(process, destination, value)?;
+                }
                 Instruction::Allocate { stack_size } => {
                     current_frame(process)
                         .stack
@@ -3594,6 +3602,36 @@ fn read_y_register(stack: &[StackSlot], index: u32) -> Result<&Term, BeamError> 
 /// ```
 fn read_any(process: &ProcessState, operand: &Operand) -> Result<Term, BeamError> {
     read_any_ref(process, operand).cloned()
+}
+
+/// Take the term out of the X or Y register of a `move` whose source is
+/// dead. The X register becomes unset, and the Y register keeps `[]`. An
+/// unset register gives the error of [`read_any`].
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// write(&mut process, &Operand::X(0), Term::Integer(1))?;
+/// assert_eq!(take_any(&mut process, &Operand::X(0))?, Term::Integer(1));
+/// assert!(take_any(&mut process, &Operand::X(0)).is_err());
+/// ```
+fn take_any(process: &mut ProcessState, operand: &Operand) -> Result<Term, BeamError> {
+    let taken = match operand {
+        Operand::X(index) => process
+            .registers
+            .get_mut(*index as usize)
+            .and_then(Option::take),
+        Operand::Y(index) => match process
+            .frames
+            .last_mut()
+            .and_then(|frame| frame.stack.get_mut(*index as usize))
+        {
+            Some(StackSlot::Term(term)) => Some(std::mem::replace(term, Term::Nil)),
+            _ => None,
+        },
+        _ => None,
+    };
+    taken.map_or_else(|| read_any(process, operand), Ok)
 }
 
 /// Borrow an operand from the process registers or the active frame, also
