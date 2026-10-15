@@ -513,7 +513,7 @@ fn keeps_the_erts_bucket_chains_through_splits_and_joins() {
             slot
         }
     };
-    let mut insert = |table: &mut Table, model: &mut Vec<Vec<Term>>, key: i64| {
+    let insert = |table: &mut Table, model: &mut Vec<Vec<Term>>, key: i64| {
         let key = Term::Integer(key);
         table.insert(&atoms, vec![key.clone()]);
         let index = bucket(model.len(), &key);

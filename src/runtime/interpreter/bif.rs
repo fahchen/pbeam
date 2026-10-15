@@ -906,8 +906,28 @@ impl BeamProgram {
                 ets::Check::from_term(check),
             );
         }
-        if (module, function) == ("ets", "select_trap") {
-            return ets::match_trap(&mut BifContext { scheduler }, &arguments);
+        if let (
+            "ets",
+            "select_trap",
+            [
+                Term::Reference(id),
+                pattern,
+                Term::Integer(bucket),
+                Term::Integer(chunk),
+                matches,
+                Term::Integer(got),
+                Term::Integer(writes),
+            ],
+        ) = (module, function, arguments.as_slice())
+        {
+            let state = ets::MatchState {
+                chunk: *chunk as usize,
+                matches: matches.clone(),
+                got: *got as usize,
+                writes: *writes as u64,
+            };
+            let mut context = BifContext { scheduler };
+            return ets::match_trap(&mut context, *id, pattern, *bucket as usize, state);
         }
         // The copy phase takes the result bytes out of the owned trap
         // arguments, so that no turn copies the bytes of an earlier turn

@@ -215,6 +215,10 @@ match() ->
      ets:match(M, {'$1', #{b => '_'}}),
      ets:match(M, {'_', #{c => '_'}}),
      ets:match(T, {[$s], '$1'}),
+     ets:match(T, '_'),
+     ets:match(T, {{'$1', 2}, '_'}),
+     ets:match(T, {[$t | '_'], '_'}),
+     match(T, {'_', nomatch}, 1),
      ets:match(T, {['$1' | '_'], '_'}),
      [match(T, Pattern, Limit)
       || {Pattern, Limit} <- [{{'$1', '_'}, 3}, {{'$1', '_'}, 100},
@@ -226,6 +230,7 @@ match() ->
       || {Table, Limit} <- [{T, 0}, {T, -1}, {T, a}, {T, id(1 bsl 60)},
                             {ets_probe_missing, 1}]],
      catch_error(fun() -> ets:match(T, #{'$1' => a}, 1) end),
+     match_float(),
      [match_bag(Type) || Type <- [bag, duplicate_bag]],
      match_large(),
      match_private(),
@@ -237,6 +242,14 @@ match(T, Pattern, Limit) ->
             {Matches, Table =:= T, Slot, Chunk, is_reference(Program), Rest, Size};
         Result -> Result
     end.
+
+%% Floats compare exactly: 1 and 1.0, and 0.0 and -0.0, are different
+%% (erl_db_util.c:4160-4165).
+match_float() ->
+    T = ets:new(ets_probe, []),
+    true = ets:insert(T, [{1, 1.0}, {1.0, 1}, {2.0, 2.0}, {-0.0, z}, {0.0, y}]),
+    [ets:match(T, {'$1', '$1'}), ets:match(T, {1.0, '$1'}), ets:match(T, {'$1', 1}),
+     ets:match(T, {-0.0, '$1'}), ets:match(T, {'$1', 1.0})].
 
 match_bag(Type) ->
     T = ets:new(ets_probe, [Type]),

@@ -1022,7 +1022,7 @@ pub(super) fn match_objects(
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = match_trap(&mut context, &[Term::Reference(id), pattern, Term::Integer(300), Term::Integer(0), Term::nil(), Term::Integer(0), Term::Integer(1000)])?;
+/// let result = match_trap(&mut context, id, &pattern, 300, MatchState::new(0, 1000))?;
 /// assert!(matches!(result, BifResult::Value(_) | BifResult::TrapBif { .. }));
 /// ```
 ///
@@ -1031,58 +1031,43 @@ pub(super) fn match_objects(
 /// See [`match_turn`].
 pub(super) fn match_trap(
     context: &mut BifContext<'_>,
-    arguments: &[Term],
+    id: Reference,
+    pattern: &Term,
+    bucket: usize,
+    state: MatchState,
 ) -> Result<BifResult, BeamError> {
-    let [
-        Term::Reference(id),
-        pattern,
-        Term::Integer(bucket),
-        Term::Integer(chunk),
-        matches,
-        Term::Integer(got),
-        Term::Integer(writes),
-    ] = arguments
-    else {
-        unreachable!("a match trap keeps its arguments");
-    };
     let caller = context.scheduler.current_process_mut().id;
     let atoms = &context.scheduler.atoms;
     let Some(table) =
         context
             .scheduler
             .ets
-            .table(atoms, &Term::Reference(*id), caller, Operation::Read)
+            .table(atoms, &Term::Reference(id), caller, Operation::Read)
     else {
         return Ok(BifResult::badarg());
     };
-    if table.writes() != *writes as u64 {
+    if table.writes() != state.writes {
         // ponytail: ERTS fixes the table; see "ETS tables" in docs/erts-differences.md.
         return Err(error(
             "unsupported ets:match/2,3 on a table that changed while the match trapped",
         ));
     }
     let compiled = Pattern::compile(atoms, pattern).expect("the first turn compiled the pattern");
-    let state = MatchState {
-        chunk: *chunk as usize,
-        matches: matches.clone(),
-        got: *got as usize,
-        writes: *writes as u64,
-    };
-    match_turn(context, *id, pattern, &compiled, *bucket as usize, state)
+    match_turn(context, id, pattern, &compiled, bucket, state)
 }
 
 /// The state of a match across its turns.
-struct MatchState {
+pub(super) struct MatchState {
     /// The limit of `ets:match/3`, or 0 for `ets:match/2`.
-    chunk: usize,
+    pub(super) chunk: usize,
     /// The list of the matches so far, the last match first, as
     /// `select_chunk_on_match_res` (`erl_db_hash.c:2174-2185`) puts each
     /// match before the earlier ones.
-    matches: Term,
+    pub(super) matches: Term,
     /// The number of matches so far.
-    got: usize,
+    pub(super) got: usize,
     /// The change count of the table in the first turn.
-    writes: u64,
+    pub(super) writes: u64,
 }
 
 impl MatchState {

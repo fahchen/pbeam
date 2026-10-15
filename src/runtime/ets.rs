@@ -620,14 +620,10 @@ impl Table {
     /// assert_eq!(table.key_before(table.bucket(stored_hash(&atoms, &Term::Integer(1))), 0), EMPTY);
     /// ```
     fn key_before(&self, bucket: usize, slot: usize) -> usize {
-        let mut before = EMPTY;
-        for key in self.chain_keys(bucket) {
-            if key == slot {
-                return before;
-            }
-            before = key;
-        }
-        unreachable!("a bucket chain holds each of its keys")
+        self.chain_keys(bucket)
+            .take_while(|&key| key != slot)
+            .last()
+            .unwrap_or(EMPTY)
     }
 
     /// Make the key slot `slot` follow the key slot `before` in the chain of

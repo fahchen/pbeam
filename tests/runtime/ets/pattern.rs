@@ -51,6 +51,6 @@ fn matches_lists_maps_and_ground_tuples() {
         Term::Map(crate::term::Map::from_pairs(vec![(one.clone(), variable)], &atoms).unwrap());
     let pattern = Pattern::compile(&atoms, &map).unwrap();
     assert!(pattern.matches_nothing(1));
-    assert_eq!(pattern.run(&[one.clone()]), None);
-    assert!(matches!(Node::Compare(0).matches(&one, &mut [None]), false));
+    assert_eq!(pattern.run(std::slice::from_ref(&one)), None);
+    assert!(!Node::Compare(0).matches(&one, &mut [None]));
 }
