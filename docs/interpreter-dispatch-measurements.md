@@ -1105,3 +1105,59 @@ The change lands. Both map shapes and the `map_get/2` shape fall by more than th
 - The map shapes use the user CPU time of `/usr/bin/time`, with a resolution of 10 ms over about 0.5 s to 0.9 s.
 - `has_map_fields` keeps its own search of each key, because the task covers only `get_map_elements`.
 - The loader keeps each key as an `Operand`, so the arm reads each key through `read_ref` for each comparison. ERTS also stores the hash of each key in the instruction; PBeam computes the hash of each key of a hashmap at each run.
+
+## The source term of a move whose source is dead, task [#631](https://github.com/fahchen/pbeam/issues/631)
+
+This section records the gate of task [#631](https://github.com/fahchen/pbeam/issues/631), proposal 5 of the attribution of task [#625](https://github.com/fahchen/pbeam/issues/625). A `move` from a register copies its term, so a move of a boxed term increments a reference count, and the later write of the dead source decrements it. ERTS copies one word for a `move` (`emit_i_move`, `erts/emulator/beam/jit/arm/instr_common.cpp:516-519`, OTP 29.1.1). The change does not land.
+
+### The change
+
+Commit `4fc08860` adds `Instruction::MoveTake`. The loader marks a `move` from an X or Y register when no later instruction on its straight path reads the register before a write that ends it. A call ends an X register at or above its arity, and `return` ends each X register except `x0`, as the BEAM validator keeps only `x0` after a body call and no register after a tail call or `return` (`schedule_out(0, ...)`, `verify_return`, and `kill_state`, `lib/compiler/src/beam_validator.erl:1204-1257` and `1584-1586`). `deallocate` and a tail call end a Y register, and `trim` moves it to a lower index. The analysis stops with "live" at each instruction that can branch, raise, or read registers that are not its operands, so the implicit reads keep their registers: the arguments of a `func_info` failure, the argument lists of `undef` and `badarity`, the stack traces, the `catch` handlers, and the start arity of an undefined initial call. A non-tail call stops the analysis of a Y register, because a `catch` handler of the same frame can read it after an exception. The interpreter takes the term out of a marked source with no reference count change. `mise run check-brief` passed with 16978 of 16978 application lines, and the error-reason tests and the pinned ERTS comparisons passed unchanged.
+
+### The count
+
+A scratch probe build of `4fc08860` counted the moves from a register on 60 Terra key presses (59 key intervals). For each key press:
+
+| Move | Count | Boxed term |
+| --- | --- | --- |
+| Live source, a copy | 37,124 | 19,363 |
+| Dead X source, a take | 26,428 | 18,173 |
+| Dead Y source, a take | 15,567 | 9,299 |
+
+Of the 79,119 moves from a register, 42,000 (53 percent) have a dead source. Of the 46,835 moves of a boxed term, 27,472 (59 percent) are takes, so the change removes 27,472 increments and 27,472 decrements for each key press. The count supported a prototype, so the gate measured it.
+
+### The session
+
+The before revision is `e93523c3`, the head of `origin/main` that the branch starts from. The after revision is `4fc08860`. Each revision is a `git archive` of its commit, built with `cargo build --release --locked` and `cargo test --release --locked --test dispatch_baseline --no-run` in its own target directory. The first session ran on 2026-10-15 from 18:21:44 to 18:25:28 JST on the host of the earlier records (Apple M1 Max, 10 CPUs). The floor rows are 6 rounds in rotated order, each the minimum of nine probe runs inside one invocation, with a one-minute load of 3.74 to 4.15. The Terra rows are 3 rounds of 60 keys in rotated order, with a one-minute load of 2.54 to 3.76. A second session of 8 Terra rounds ran from 18:25:34 to 18:43:07 JST with the same binaries and a one-minute load of 2.50 to 7.34. It waited from 18:26:43 to 18:35:39 for builds of other work to stop. No `cargo`, `rustc`, or `nextest` process ran during a measured run. The Terra rows are the raw CPU time of `pbeam` with no idle correction; each idle window held 0 ticks.
+
+| Shape | Before `e93523c3`, minimum of 6 rounds | After `4fc08860`, minimum of 6 rounds | Change |
+| --- | --- | --- | --- |
+| `call_ext_only` floor loop, 200000 iterations | 47.7 ns (rounds 47.7 to 47.8) | 47.5 ns (47.5 to 47.7) | -0.4 percent |
+| `call_only` floor loop, 200000 iterations | 42.3 ns (42.3 to 43.1) | 41.8 ns (41.8 to 42.5) | -1.2 percent |
+| Position `call_only` floor loop, 200000 iterations | 42.3 ns (42.3 to 43.4) | 41.7 ns (41.7 to 42.5) | -1.4 percent |
+| `call_only` plus `gc_bif '+'` | 67.2 ns | 66.6 ns | -0.9 percent |
+| `call_only` plus the `bif` of `tuple_size/1` | 69.2 ns | 68.6 ns | -0.9 percent |
+| `call_only` plus the `bif` of `element/2` | 69.8 ns | 69.3 ns | -0.7 percent |
+| `call_only` plus the `bif` of `hd/1` | 69.1 ns | 68.5 ns | -0.9 percent |
+| `call_only` plus the `bif` of `map_get/2` on a 1000-key map | 105.4 ns (105.4 to 105.6) | 101.6 ns (101.6 to 103.6) | -3.6 percent |
+
+| Terra round | Before `e93523c3`, ms of CPU time for each key | After `4fc08860`, ms of CPU time for each key |
+| --- | --- | --- |
+| First session, rounds 1 to 3 | 14.167, 15.667, 16.500 | 16.500, 14.000, 14.500 |
+| First session, mean of 3 rounds | 15.445 | 15.000 |
+| Second session, rounds 1 to 8 | 12.833, 15.500, 16.000, 13.667, 16.500, 14.333, 16.333, 11.667 | 7.500, 14.667, 15.833, 15.333, 15.667, 16.000, 14.667, 13.167 |
+| Second session, mean of 8 rounds | 14.604 | 14.104 |
+| Second session, median of 8 rounds | 14.917 | 15.000 |
+| Second session, mean of rounds 2 to 8 | 14.857 | 15.048 |
+
+The raw records are the session logs `session.txt` and `session-terra2.txt` and the files `floor-r<round>-<revision>.txt`, `terra-r<round>-<revision>.log`, and `terra2-r<round>-<revision>.log`, which stay outside the repository.
+
+### The decision
+
+The change does not land. Its target is the Terra key press, and the two sessions show no gain beyond the session noise. The rounds of one binary span 11.667 ms to 16.500 ms. The mean of the second session falls by 0.500 ms, but round 1 of `4fc08860` (7.500 ms, 0.45 s of CPU time for 60 keys) is an outlier. Without it the after mean is 0.191 ms higher, and the medians differ by +0.083 ms. The floor shapes are all lower after the change, by 0.2 ns to 3.8 ns, and only the `map_get/2` shape, which moves a boxed map, falls by more than 1.5 percent. A fall of 2 ns to 4 ns for each boxed take gives 0.06 ms to 0.11 ms for the 27,472 takes of a key press, or less than 1 percent of 14.6 ms, which is below the resolution of the Terra harness. The attribution of task #625 gave 5.9 percent of the key press to the clone and the drop of `Move`. The measured fall is much smaller: in the samples of #625 the `Arc` count operations probably also hold the cache misses of the term loads, and a take keeps those loads. A static analysis of about 210 lines of loader code and comments, which each new instruction must keep correct, does not pay for a gain that the gate cannot show. Commit `c58b8789` reverts the change, and `docs/backlog.md` keeps it with a trigger.
+
+### Known gaps
+
+- The Terra harness cannot resolve a change below about 1 ms for each key, so the record does not bound the Terra effect of the change.
+- The record does not measure the time of one take against one copy directly. The 2 ns to 4 ns estimate comes from the floor shapes.
+- The count comes from a scratch probe build, not from the measured binary.

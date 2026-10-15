@@ -50,6 +50,22 @@ The step 0 numbers and the `ddb32f6e` numbers come from two different sessions. 
 
 Each entry is one landed change or one change that is not landed. The entries are newest first.
 
+### 2026-10-15 18:45 JST - Not landed: take the source term of a move whose source is dead, task [#631](https://github.com/fahchen/pbeam/issues/631), branch `perf/631-move-take`
+
+The change marks a `move` whose source register no later instruction reads at load time, and the interpreter takes the term out of the source with no reference count change. On a Terra key press, 27,472 of the 46,835 moves of a boxed term have a dead source. The change is **Not landed**: its target, the CPU time of a Terra key press, shows no gain beyond the session noise, and the floor shapes fall by 0.4 to 3.6 percent only. Commit `c58b8789` reverts commit `4fc08860` on the branch, and `docs/backlog.md` keeps the change with a trigger.
+
+One interleaved session on 2026-10-15 from 18:21:44 to 18:25:28 JST, before `e93523c3` and after `4fc08860`. The floor rows are the minimum of six rounds in rotated order, with a one-minute load of 3.74 to 4.15. The Terra row is the mean of a second interleaved session of eight rounds of 60 keys from 18:25:34 to 18:43:07 JST, with a one-minute load of 2.50 to 7.34 and the raw CPU time of `pbeam`. The source is the section "The source term of a move whose source is dead, task #631" of `docs/interpreter-dispatch-measurements.md`.
+
+| Shape | Before `e93523c3` | After `4fc08860` | Change |
+| --- | --- | --- | --- |
+| `call_ext_only` floor loop, 200000 iterations | 47.7 ns | 47.5 ns | -0.4 percent |
+| Local `call_only` floor loop, 200000 iterations | 42.3 ns | 41.8 ns | -1.2 percent |
+| Position `call_only` floor loop, 200000 iterations | 42.3 ns | 41.7 ns | -1.4 percent |
+| `call_only` plus the `bif` of `map_get/2` on a 1000-key map | 105.4 ns | 101.6 ns | -3.6 percent |
+| CPU time for each release Terra key press | 14.604 ms | 14.104 ms | -3.4 percent at the mean, +0.6 percent at the median |
+
+The Terra rounds of one binary span 11.667 ms to 16.500 ms. Round 1 of `4fc08860` (7.500 ms) is an outlier, and without it the after mean is 1.3 percent higher than the before mean. The `## Current state` table does not change.
+
 ### 2026-10-15 16:35 JST - Fetch the map elements in one walk with no allocation, task [#629](https://github.com/fahchen/pbeam/issues/629), pull request [#639](https://github.com/fahchen/pbeam/pull/639)
 
 The loader sorts two or more pairs of `get_map_elements` in flatmap key order, as the ERTS loader does. The arm keeps one copy of the map handle, walks a flatmap once, and writes each value when it finds the key, with no intermediate vector. `map_hash` allocates nothing for an atom, `[]`, a small integer, or a binary key.
