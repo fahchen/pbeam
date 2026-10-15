@@ -8,7 +8,8 @@
 %% that prim_inet:accept_opts/3 copies (prim_inet.erl:502-518).
 %%
 %% The probe writes "Port Count" to the file Path when a client of the
-%% test must make connections up to Count. Each result gives the port of a
+%% test must make connections up to Count, and waits until the client
+%% writes Count to the file Path.ack after its connections. Each result gives the port of a
 %% peer as {peer, P}, which the test compares with the port of its client.
 %% The probe traps exits, as the process of `erl -eval` does.
 
@@ -46,7 +47,6 @@ main(Path) ->
     Second = result(A3),
     %% A pending connection with no acceptor: the accept is at once.
     connect(Path, Port, 3),
-    receive after 200 -> ok end,
     {ok, S} = prim_inet:accept(L, 0, ?FAMILY),
     Third = accepted(L, S),
     %% The close of the listen socket ends each accept that waits.
@@ -109,9 +109,11 @@ accepted(L, S) ->
 result(Pid) ->
     receive {Pid, Result} -> Result after 3000 -> missing end.
 
-%% Ask the client of the test for connections up to Count.
+%% Ask the client of the test for connections up to Count, and wait until
+%% the client has made them.
 connect(Path, Port, Count) ->
-    Script = "printf '%s %s\\n' \"$1\" \"$2\" > \"$3.tmp\" && mv \"$3.tmp\" \"$3\"",
+    Script = "printf '%s %s\\n' \"$1\" \"$2\" > \"$3.tmp\" && mv \"$3.tmp\" \"$3\" && "
+             "until [ \"$(cat \"$3.ack\" 2>/dev/null)\" = \"$2\" ]; do sleep 0.01; done",
     Shell = open_port({spawn_executable, "/bin/sh"},
                       [binary, exit_status,
                        {args, ["-c", Script, "sh", integer_to_list(Port),

@@ -242,11 +242,13 @@ fn stops_the_open_of_a_tcp_inet_port_in_a_run_with_a_policy() {
 }
 
 /// A client of the test: it reads `"Port Count"` from the file `path` and
-/// connects to `Port` on `127.0.0.1` until it has `Count` connections. It
-/// keeps each connection open until `stop`, and returns the local port of
+/// connects to `Port` on `127.0.0.1` until it has `Count` connections, and
+/// then writes `Count` to the file of [`acknowledgement`]. It keeps each connection open until `stop`, and returns the local port of
 /// each connection in order.
 fn client(path: PathBuf, stop: Arc<AtomicBool>) -> thread::JoinHandle<Vec<u16>> {
     thread::spawn(move || {
+        let ack = acknowledgement(&path);
+        let temporary = PathBuf::from(format!("{}.ack.tmp", path.display()));
         let mut streams = Vec::new();
         while !stop.load(Ordering::SeqCst) {
             let text = std::fs::read_to_string(&path).unwrap_or_default();
@@ -255,6 +257,8 @@ fn client(path: PathBuf, stop: Arc<AtomicBool>) -> thread::JoinHandle<Vec<u16>> 
                 while streams.len() < count.parse().unwrap() {
                     streams.push(TcpStream::connect(address).unwrap());
                 }
+                std::fs::write(&temporary, count).unwrap();
+                std::fs::rename(&temporary, &ack).unwrap();
             }
             thread::sleep(Duration::from_millis(2));
         }
@@ -270,6 +274,7 @@ fn client(path: PathBuf, stop: Arc<AtomicBool>) -> thread::JoinHandle<Vec<u16>> 
 /// `{peer,client_N}`, where N counts from 1 in connection order.
 fn with_client(path: &Path, run: impl FnOnce() -> String) -> String {
     let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(acknowledgement(path));
     let stop = Arc::new(AtomicBool::new(false));
     let handle = client(path.to_path_buf(), Arc::clone(&stop));
     let mut result = run();
@@ -281,7 +286,14 @@ fn with_client(path: &Path, run: impl FnOnce() -> String) -> String {
         );
     }
     let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(acknowledgement(path));
     result
+}
+
+/// Return the file where the client of the test writes `Count` after its
+/// connections up to `Count`.
+fn acknowledgement(path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.ack", path.display()))
 }
 
 #[test]
