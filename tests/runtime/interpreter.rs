@@ -1,6 +1,7 @@
 use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
 
 use super::bif::{BIFS, BifId, BifResult, resolve, resolve_calls};
+use super::code_table::export_frame_calls;
 use super::{
     BeamProgram, CodeTable, Issuer, Outcome, Register, Scheduler, StackSlot, call_arguments,
     function_at_label, read_bif_arguments, read_operand, read_owned_bif_arguments, read_ref,
@@ -723,21 +724,18 @@ fn import_target(scheduler: &Scheduler, import: &Instruction) -> Option<usize> {
         .map(|target| target.frame().next_instruction)
 }
 
-#[test]
-fn keeps_the_export_target_of_an_import_after_its_first_call() {
-    // The ERTS loader patches the export entry of each import into the code
-    // (`jit/asm_load.c:1198-1206`), and `call_ext` branches through it
-    // (`jit/arm/instr_call.cpp:150-164`). The first call of an import of
-    // module code finds the export and keeps it in the slot of the import,
-    // so the second call reads the slot. Each of the two calls enters
-    // `guest/1`, which starts after label 11.
+/// Run `fixture:main/0`, which calls the export `fixture:guest/1` through
+/// one import `calls` times. Return the scheduler of the run, the start of
+/// `guest/1`, and the number of calls of `CodeTable::export_frame` in the
+/// run.
+fn run_guest_calls(calls: usize) -> (Scheduler, usize, usize) {
     let guest = external("fixture", "guest", 1, false, 0);
-    let body = vec![
-        Instruction::Move(Operand::Value(Term::Integer(1)), Operand::X(0)),
-        guest.clone(),
-        guest.clone(),
-        Instruction::Return,
-    ];
+    let mut body = vec![Instruction::Move(
+        Operand::Value(Term::Integer(1)),
+        Operand::X(0),
+    )];
+    body.extend(std::iter::repeat_n(guest, calls));
+    body.push(Instruction::Return);
     let extra = vec![
         Instruction::FunctionInfo {
             module: "fixture".into(),
@@ -749,11 +747,29 @@ fn keeps_the_export_target_of_an_import_after_its_first_call() {
     ];
     let exports = HashMap::from([(("main".into(), 0), 2), (("guest".into(), 1), 11)]);
     let program = program_of(fixture_instructions(0, body, extra), exports);
-    let module = &program.modules["fixture"];
-    let start = module.tables.jump_targets[&11];
+    let start = program.modules["fixture"].tables.jump_targets[&11];
+    let before = export_frame_calls();
     let (scheduler, result) = run_in_scheduler(&program);
     result.unwrap();
+    (scheduler, start, export_frame_calls() - before)
+}
+
+#[test]
+fn keeps_the_export_target_of_an_import_after_its_first_call() {
+    // The ERTS loader patches the export entry of each import into the code
+    // (`jit/asm_load.c:1198-1206`), and `call_ext` branches through it
+    // (`jit/arm/instr_call.cpp:150-164`). The first call of an import of
+    // module code finds the export and keeps it in the slot of the import,
+    // so the second call reads the slot and makes no lookup by name. Each
+    // of the two calls enters `guest/1`, which starts after label 11.
+    let guest = external("fixture", "guest", 1, false, 0);
+    let (_, _, one_call) = run_guest_calls(1);
+    let (scheduler, start, two_calls) = run_guest_calls(2);
     assert_eq!(import_target(&scheduler, &guest), Some(start));
+    assert_eq!(
+        two_calls, one_call,
+        "the second call of an import must read its slot with no export lookup"
+    );
 }
 
 #[test]

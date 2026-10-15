@@ -11,6 +11,31 @@ use std::{
     rc::Rc,
 };
 
+#[cfg(test)]
+thread_local! {
+    /// The number of calls of [`CodeTable::export_frame`] on this test
+    /// thread.
+    ///
+    /// A call that reads the resolved export target of its import gives the
+    /// same value as a lookup by name, so a test of the fast path reads this
+    /// counter. The counter is per thread, because the test harness runs the
+    /// tests of one binary on parallel threads.
+    static EXPORT_FRAME_CALLS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Return the number of calls of [`CodeTable::export_frame`] on this test
+/// thread.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let before = export_frame_calls();
+/// ```
+#[cfg(test)]
+pub(in crate::runtime::interpreter) fn export_frame_calls() -> usize {
+    EXPORT_FRAME_CALLS.with(Cell::get)
+}
+
 /// The code table of one run, as the ERTS module table with the export
 /// table of the active code index (`module.c`, `export.c`). Every module
 /// lookup of the run reads it. A run starts with the modules of the
@@ -326,6 +351,8 @@ impl CodeTable {
         function: &str,
         arity: u32,
     ) -> Result<Option<Frame>, BeamError> {
+        #[cfg(test)]
+        EXPORT_FRAME_CALLS.with(|calls| calls.set(calls.get() + 1));
         self.get(module)
             .and_then(|loaded| {
                 loaded
