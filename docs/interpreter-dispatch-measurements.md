@@ -566,3 +566,155 @@ The compare fast path lands. It removes the work-vector allocation of `Term::com
 The pinned ERTS uses 10 (`erts/emulator/beam/emu/generators.tab:240-254`, OTP 29.1.1). Its ordered search compares one encoded value at a time, which costs less than the `Term::compare` call of PBeam, so the crossover of ERTS sits below the crossover of PBeam.
 
 No end-to-end probe covers 17 to 32 choices, so the bound of 32 is an estimate. A later session can pin the bound with end-to-end probes at 32 and 64 choices, and `docs/backlog.md` records that gap with its trigger. The fixture also measures only the 256-choice shape, the 16-choice shape, and the 2-choice control, so no number here covers a `select_val` with 6878 choices.
+
+## The attribution of the Terra key press and of the external call at `b8c71940` (task [#625](https://github.com/fahchen/pbeam/issues/625))
+
+This section answers the question of issue [#625](https://github.com/fahchen/pbeam/issues/625): where does one release Terra Counter key press spend its time, where does one `call_ext_only` floor iteration spend its time, and what causes the +15.5 percent shift of the `call_ext_only` floor loop that starts at `e0d9cbe5`? The measured runtime revision is `b8c71940`, the head of `origin/main` at the time of the sessions. The host is the host of "The environment of the numbers". All sessions ran on 2026-10-15 (JST), with no other `cargo`, `rustc`, or `nextest` process and a one-minute load below 4 in each session.
+
+### The method
+
+- **The release binary and its line tables.** The time profiles use a second release build of `b8c71940` with line tables only (`CARGO_PROFILE_RELEASE_DEBUG=line-tables-only`, `CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO=packed`), so that `atos -i` can give each sampled address its inlined functions and its source line. The `__text` section of that build is 1,563,644 bytes, against 1,563,068 bytes for the plain release build (+576 bytes, 0.04 percent). Four interleaved runs of 60 keys give 27.2 ms and 24.8 ms of CPU time for each key on the plain build, and 27.3 ms and 24.5 ms on the line-table build. The two builds are thus equal inside the noise of the method.
+- **The key driver.** A scratch driver, which follows `scripts/terra_latency.py`, starts the example `terra_counter` on a pseudo-terminal of 80 by 24, waits for the first frame, and sends `j` and `k` in turn every 0.5 s. It records the CPU time of the `pbeam` process with `ps -o time` before and after the keys, after an idle window of 3 s that measured no idle CPU time. Each answer is one write of 16 bytes.
+- **The time profile.** `xctrace record --template 'Time Profiler' --attach <pid>` samples the process each 1 ms during 100 keys. `xctrace export` gives each sample with its backtrace. A scratch script gives each sample to exactly one part: it expands each frame with `atos -i` and takes the innermost frame that it recognizes, in this order: a frame inside `BeamProgram::run` (`src/runtime/interpreter.rs:658-1987`) is an instruction body, and the arm of `run` that holds the line gives the instruction kind; an allocator frame is an allocation; a `SipHash` or `hashbrown` frame is a hash lookup, and the key type and the first PBeam caller give the map; a `Term` clone or drop frame or an `Arc` count frame is a term clone and drop; a `memcmp` frame is a memory compare. A frame in `src/runtime/interpreter/bif*` marks the BIF path, and a frame of `prim_tty` or a system call marks the IO path.
+- **The instruction counts.** The counting probe of task [#544](https://github.com/fahchen/pbeam/issues/544), with one added counter for each module of the active cursor, runs on a scratch copy of `b8c71940`. It reports the counts at each read of the terminal, so one report is the work of one key. The probe is not committed.
+- **The floor iteration.** A scratch crate links `pbeam-runtime` of `b8c71940` with line tables and runs `dispatch_probe:floor_ext_loop(200000)` again and again for 8 s under the same Time Profiler. Its ns for each iteration is the 8 s divided by the iterations of the session.
+- **The hardware counters.** `xctrace record --template 'CPU Counters'` records the kept spin probe binaries of `6fd1b3db` and `e0d9cbe5` (the probe of the earlier interleaved session) in four interleaved rounds of 5 s. The command line gives only the guided mode "CPU Bottlenecks". Its export holds the fixed counters (cycles and retired instructions), eight more counters with no name in the export, and four fractions for each 1 ms. Three calibration programs fixed the order of the four fractions: a multiply chain gave 70.7 percent to the second fraction (instruction processing), 4 MB of straight-line code gave 73.6 percent to the third fraction (instruction delivery), and a random branch to two functions gave 65.1 percent to the third and 24.3 percent to the fourth fraction (discarded work). The order is thus useful, processing, delivery, and discarded.
+
+### The sessions
+
+| Session | What | Time | One-minute load, before / after | Raw record |
+| --- | --- | --- | --- | --- |
+| K1 | Time profile of 100 keys, line-table build | 09:28:39 | 3.12 / 3.80 | `prof2.trace`, `prof2.attr.txt` |
+| K2 | Time profile of 100 keys, line-table build | 09:48:48 | 1.48 / 1.85 | `prof3.trace`, `prof3.attr.txt` |
+| P | CPU time for each key, plain and line-table builds, 4 runs of 60 keys, no profiler | 09:46:31 to 09:48:44 | 1.06 to 1.44 | `pristine.log`, `lt.log`, `pristine2.log`, `lt2.log` |
+| N | Instruction counts of 10 keys | 09:50:43 | 1.79 / 1.73 | `count2.txt` |
+| F1 | Time profile of the floor loop for 8 s, line-table build | 09:40:23 | 1.58 / 1.65 | `floor-tp.trace`, `floor-tp.attr.txt` |
+| C1 | CPU Counters, `6fd1b3db` and `e0d9cbe5`, 4 interleaved rounds | 09:36:50 to 09:38:11 | 2.17 to 2.67 | `cc/r<round>-<revision>.trace`, `cc/summary.txt` |
+
+The raw records are in the scratch directory of the session (`/private/tmp/claude-501/-Users-fahchen-PersonalProjects-pbeam/b5d5ab72-9169-48c7-bb96-89c4c337b9e9/scratchpad/625/raw/`), and the repository does not keep them. The harness `bash scripts/terra_latency.sh release` measured 0.032 s, 0.024 s, 0.030 s, and 0.031 s for the four keys at `b8c71940` at 09:25:42 with a load of 2.05, so the key latency of this revision is in the range of the earlier records.
+
+### One key press
+
+One key press runs 253,558 BEAM instructions. The number is the same for each key after the first key, in session N and in the earlier record of #544. The CPU time of one key is 24.5 ms to 27.8 ms over sessions P, K1, and K2, so one instruction costs about 97 ns to 110 ns on average. The time from the key to the first byte of the answer has a median of 27.1 ms to 30.0 ms.
+
+By instruction count, the Terra render modules (`Terra.Renderer.Grid`, `Terra.Renderer`, `Terra.Width`, `Terra.Theme`, `Terra.View`, and `Terra.Renderer.Style`) run 162,226 instructions (64.0 percent), the Elixir and OTP library modules (`Enum`, `Map`, `String`, `Keyword`, `unicode`, and others) run 87,237 (34.4 percent), and the input and output path (`prim_tty`, `user_drv`, `group`, `io`, `gen_statem`, the Terra terminal and input modules, and others) runs 3,805 (1.5 percent). The profile gives time by instruction kind and not by guest module, so the render share of the time is not measured. The native IO part, which is the `prim_tty` NIF and the system calls, is 0.4 percent to 0.8 percent of the time.
+
+The ranked parts of one key press. A part is exclusive: each sample belongs to one part. The ms of a part is its samples divided by the 100 keys of the session, because each sample stands for 1 ms.
+
+| Rank | Part | K1 ms for each key | K1 share | K2 ms for each key | K2 share | Revision |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | Process table lookup: `SipHash` of `ProcessId` in `Scheduler::processes` | 7.40 | 26.5 percent | 6.68 | 26.1 percent | `b8c71940` |
+| 2 | Allocation: `malloc`, `free`, and `realloc` | 3.27 | 11.7 percent | 3.05 | 11.9 percent | `b8c71940` |
+| 3 | Instruction bodies of the kinds that rows 6 to 11 do not name | 2.89 | 10.4 percent | 3.02 | 11.8 percent | `b8c71940` |
+| 4 | Term clone and drop: the `Arc` counts and the nested drop | 2.83 | 10.1 percent | 2.42 | 9.5 percent | `b8c71940` |
+| 5 | Code table lookup: the module map, the function name table, the export map, the module identity map, and the label map | 1.97 | 7.1 percent | 1.65 | 6.5 percent | `b8c71940` |
+| 6 | Instruction body: `Move` | 1.95 | 7.0 percent | 1.61 | 6.3 percent | `b8c71940` |
+| 7 | Instruction body: `GetMapElements` | 1.59 | 5.7 percent | 1.32 | 5.2 percent | `b8c71940` |
+| 8 | Other: memory copy, other hash maps, and samples whose unwind lost the frame of `run` | 1.47 | 5.3 percent | 1.38 | 5.4 percent | `b8c71940` |
+| 9 | Instruction fetch and dispatch: the head of the run loop | 1.33 | 4.8 percent | 1.35 | 5.3 percent | `b8c71940` |
+| 10 | Instruction body: `CallExternal`, without its lookups | 1.22 | 4.4 percent | 1.26 | 4.9 percent | `b8c71940` |
+| 11 | Instruction body: `Return` | 0.69 | 2.5 percent | 0.45 | 1.8 percent | `b8c71940` |
+| 12 | BIF call path and BIF bodies | 0.65 | 2.3 percent | 0.63 | 2.5 percent | `b8c71940` |
+| 13 | Instruction body: `CallFun` | 0.43 | 1.5 percent | 0.44 | 1.7 percent | `b8c71940` |
+| 14 | IO: the `prim_tty` NIF and the system calls | 0.10 | 0.4 percent | 0.20 | 0.8 percent | `b8c71940` |
+
+K1 has 2,792 samples (27.9 ms for each key, against 27.8 ms of CPU time from `ps`), and K2 has 2,555 samples (25.6 ms, against 25.6 ms). The two sessions differ by at most 1.4 percentage points in each row.
+
+The instruction kinds, inclusive of their lookups, allocations, and term work. The executions come from session N, and the time comes from K1.
+
+| Instruction kind | Executions for each key | ms for each key | Share | ns for each execution (computed) |
+| --- | --- | --- | --- | --- |
+| The head of the run loop, for each instruction | 253,558 | 6.61 | 23.7 percent | 26 |
+| `CallExternal` | 11,489 | 4.93 | 17.7 percent | 429 |
+| `Move` | 86,934 | 3.93 | 14.1 percent | 45 |
+| `GetMapElements` | 10,379 | 2.59 | 9.3 percent | 250 |
+| `Return` | 14,600 | 1.43 | 5.1 percent | 98 |
+| `CallFun` | 3,555 | 1.40 | 5.0 percent | 394 |
+| `Allocate` | 10,718 | 0.69 | 2.5 percent | 64 |
+| `PutTuple` | 4,482 | 0.66 | 2.4 percent | 147 |
+| `PutMapExact` | 478 | 0.50 | 1.8 percent | 1,046 |
+| `Bif` | 3,124 | 0.45 | 1.6 percent | 144 |
+| Outside the run loop, or a sample whose unwind lost the frame of `run` | — | 1.11 | 4.0 percent | — |
+
+**The hash lookups, by map and key (K1; K2 agrees inside 1 percentage point).** The process table `processes: HashMap<ProcessId, ProcessState>` (`src/runtime/scheduler.rs:339`) uses the default `RandomState`, so each lookup hashes the `u64` of the identity with `SipHash`. `Scheduler::current_process_mut` (`src/runtime/scheduler.rs:1420-1425`) gives 530 samples (5.30 ms), `Scheduler::current_module` (`src/runtime/scheduler.rs:1468-1475`) 70 samples, the key compare 67 samples, and `Scheduler::current_process_and_atoms` 22 samples. The head of the run loop calls `current_process_mut` once for each instruction (`src/runtime/interpreter.rs:735`), and the hash lookups of the head are 502 samples, or 5.02 ms for each key and about 19.8 ns for each instruction. The call, return, and BIF paths call it again. The release build folds the hash function of `ProcessId` with other functions into one symbol, so a profile without line tables shows it as `<deduplicated_symbol>`. The code table lookups are smaller: the module map by name (`src/runtime/interpreter/code_table.rs:147`) 58 samples, the module map by `ModuleId` (`code_table.rs:86`, from `Cursor::refresh` and `current_module`) 52 samples, the export map by `(NameId, arity)` (`code_table.rs:228`) 47 samples, the function name table (`src/beam/module.rs:124`) 24 samples, the atom table 8 samples, and the label map 5 samples.
+
+**The allocations, by instruction kind (K1).** `GetMapElements` 85 samples (3.0 percent; `map_values` collects a `Vec<&Term>` and the arm collects a `Vec<Term>`, `src/runtime/interpreter.rs:1123-1126` and `3166-3176`, and `map_hash` allocates `vec![key]` for each key of a hashmap, `src/term/map.rs:1702`), `Allocate` 50 samples (1.8 percent; each frame grows a new `Vec<StackSlot>`, `src/runtime/interpreter.rs:764-768`), `CallExternal` 42 samples (1.5 percent; the release of the replaced frame and the argument `Vec<Term>` of a BIF), `Move` 33 samples (1.2 percent; the free of the last reference of the overwritten term), `PutTuple` 31 samples (1.1 percent; a tuple is `Arc<Vec<Term>>`, `src/term/tuple.rs:24`, so it takes two allocations), and `CallFun` 22 samples (0.8 percent).
+
+**The term clone and drop, by instruction kind (K1).** `Move` 165 samples (5.9 percent of the key press; the clone of the source in `read_any`, `src/runtime/interpreter.rs:3534-3536`, and the drop of the old value in `write_operand`, `src/runtime/interpreter.rs:4782-4808`), `Deallocate` 20 samples, `CallExternal` 18 samples, `GetTupleElement` 17 samples, and `GetMapElements` 13 samples. The probe of #544 counts 74,381 `Arc` clones and 81,986 drops for each key.
+
+### One `call_ext_only` floor iteration
+
+Session F1 ran 153 runs of 200,000 iterations in 8 s, which is 261.4 ns for each iteration (the best run is 255.1 ns). One iteration retires four instructions: `TestYield`, which the loader writes after the entry label, `test is_eq_exact`, `gc_bif '-'`, and `call_ext_only`. The ns of a part is its share of the 8,051 samples times 261.4 ns.
+
+| Rank | Part | ns for each iteration | Share | Revision | Session | Load | Raw record |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | Process table lookup: 7 `SipHash` lookups of `ProcessId` | 83.9 | 32.1 percent | `b8c71940` | F1 | 1.58 | `floor-tp.attr.txt` |
+| 2 | Code table lookup by name: the module map, the function name table, the export map, the name compares, and the label map | 59.8 | 22.9 percent | `b8c71940` | F1 | 1.58 | `floor-tp.attr.txt` |
+| 3 | BIF call path of `gc_bif '-'`: `read_bif_arguments`, `BifArguments::with`, `dispatch_leaf`, and the result | 37.1 | 14.2 percent | `b8c71940` | F1 | 1.58 | `floor-tp.attr.txt` |
+| 4 | Instruction body of `CallExternal`, without its lookups: the name classification, the argument check, the frame creation, and `enter_frame` | 36.2 | 13.8 percent | `b8c71940` | F1 | 1.58 | `floor-tp.attr.txt` |
+| 5 | Other: samples whose unwind lost the frame of `run`, memory copy, and other hash maps | 22.3 | 8.5 percent | `b8c71940` | F1 | 1.58 | `floor-tp.attr.txt` |
+| 6 | Instruction fetch and dispatch: the head of the run loop | 12.8 | 4.9 percent | `b8c71940` | F1 | 1.58 | `floor-tp.attr.txt` |
+| 7 | Instruction bodies of `test` and `TestYield` | 8.1 | 3.1 percent | `b8c71940` | F1 | 1.58 | `floor-tp.attr.txt` |
+| 8 | Term clone and drop | 0.8 | 0.3 percent | `b8c71940` | F1 | 1.58 | `floor-tp.attr.txt` |
+| 9 | Allocation | 0.1 | 0.0 percent | `b8c71940` | F1 | 1.58 | `floor-tp.attr.txt` |
+
+**The lookups of one external call, and why each runs.** The iteration makes 11 hash lookups and up to 6 string compares:
+
+- Four process table lookups in the head of the run loop, one for each instruction (`src/runtime/interpreter.rs:735`). The loop cannot keep `&mut ProcessState` across an arm that needs `&mut Scheduler`, so it gets the process again for each instruction.
+- One process table lookup in `call_external` (`src/runtime/interpreter.rs:1998`), one in `call_export` (`src/runtime/interpreter.rs:2129`), and one in `Cursor::refresh` (`src/runtime/interpreter.rs:2811`). The refresh finds the same module, so it makes no `ModuleId` lookup.
+- One `SipHash` lookup of the module name `"dispatch_probe"` in `CodeTable::modules`, a `HashMap<String, Rc<BeamModule>>` (`src/runtime/interpreter/code_table.rs:223` and `147`), with a byte compare of the key.
+- One `SipHash` lookup of the function name `"floor_ext_loop"` in the name table of the module, a `HashMap<String, NameId>` (`src/runtime/interpreter/code_table.rs:227`, `src/beam/module.rs:198-200` and `124`), with a byte compare of the key.
+- One `SipHash` lookup of `(NameId, arity)` in `BeamModule::exports` (`src/runtime/interpreter/code_table.rs:228`).
+- One FNV-1a lookup of the entry label in `function_starts` (`src/runtime/interpreter.rs:3779`, through `frame`, `src/runtime/interpreter/code_table.rs:410`).
+- The string compares of the module, the name, and the arity with `("erlang", "apply", 2 | 3)` for a tail call (`src/runtime/interpreter.rs:2000`), with `("erlang", "load_nif", 2)` (`src/runtime/interpreter.rs:2008`), with the 5 entries of `PBEAM_BIFS` (`src/runtime/interpreter.rs:2014`, `src/runtime/interpreter/bif.rs:1107-1108`), and with `("erlang", "apply", 2)` and `("erlang", "apply", 3)` in `call_export` (`src/runtime/interpreter.rs:2122-2123`).
+
+The code table lookups run because `Instruction::CallExternal` still holds the module name and the function name of its import, a decision of step 4 that this record keeps unchanged ("Step 4" in section 4). The approximate split of the 59.8 ns from the key types of F1: the export map about 24 ns, the module map about 13 ns, the function name table about 9 ns, the name compares about 13 ns, and the label map about 3 ns. These sub-numbers come from a second grouping of the same samples, so they overlap and their sum is not the row.
+
+**The pinned ERTS.** ERTS resolves each import to an export entry one time at load time. The loader puts each exported function into the export table (`erts/emulator/beam/jit/asm_load.c:1180-1196`), then gets the export entry of each import with `erts_export_put` and patches the entry into the code (`asm_load.c:1198-1206`; `erts_export_put` is `erts/emulator/beam/export.c:204-217`, and it makes the entry when no module defines the function yet). `call_ext_only` moves the entry into `ARG1` and branches to the address of the active code index in the entry (`emit_i_call_ext_only`, `erts/emulator/beam/jit/arm/instr_call.cpp:157-164`; `emit_setup_dispatchable_call`, `erts/emulator/beam/jit/arm/beam_asm.hpp:388-403`). A later load of the module changes the address in the entry, so the call needs no lookup at run time. ERTS keeps the current process in a register for the whole time slice, so it also makes no process lookup. The pinned ERTS runs the same loop in about 2.4 ns for each iteration ("The floor shapes and the added rows before and after").
+
+### The +15.5 percent shift of `call_ext_only` at `e0d9cbe5`
+
+Session C1 measures the kept spin probe of the two revisions in four interleaved rounds. Each cell is the median of the four rounds of the revision. The ns comes from the run of the probe inside the recording. The instructions and cycles for each iteration come from the fixed counters: the cycles of the covered time, times the mean ns of the run, times the measured frequency (3.19 GHz to 3.22 GHz). Counter 4 has no name in the export.
+
+| Number | `6fd1b3db` | `e0d9cbe5` | Change |
+| --- | --- | --- | --- |
+| Best ns for each iteration | 225.45 | 258.85 | +33.40 (+14.8 percent) |
+| Mean ns for each iteration | 227.30 | 259.05 | +31.75 (+14.0 percent) |
+| Cycles for each iteration | 728.2 | 832.4 | +104.2 (+14.3 percent) |
+| Retired instructions for each iteration | 2,935.0 | 2,903.1 | −31.9 (−1.1 percent) |
+| Instructions for each cycle | 4.04 | 3.48 | −0.56 (−13.8 percent) |
+| Useful fraction | 54.4 percent | 46.8 percent | −7.6 points |
+| Instruction processing fraction | 41.9 percent | 49.1 percent | +7.2 points |
+| Instruction delivery fraction | 2.4 percent | 1.9 percent | −0.5 points |
+| Discarded fraction | 1.15 percent | 2.05 percent | +0.9 points |
+| Counter 4 for each iteration | 304.2 | 408.4 | +104.3 (+34.3 percent) |
+
+The result attributes the shift to the back end of the core, and not to more work. The revision `e0d9cbe5` retires 1.1 percent fewer instructions for each iteration and takes 104 more cycles. Counter 4 equals the processing fraction times the cycles in both revisions (0.419 × 728.2 = 305, and 0.491 × 832.4 = 409), so it counts the cycles of the instruction processing bottleneck, and it grows by the same 104 cycles. The front end (the delivery fraction falls) and the branch prediction (the discarded fraction grows by 0.9 points, which is about 9 cycles) do not explain the shift. The added cycles are thus stall cycles of the execution back end, such as a load that waits for a store, a load that misses the L1 data cache, or a longer dependency chain.
+
+The earlier `sample` profiles of the same binaries (`sample-6fd1b3db.txt` and `sample-e0d9cbe5.txt` of the earlier interleaved session, the share of each function times the ns of the run) spread the added time over many functions: `BeamProgram::run` +9.9 ns, `hash_one::<&str>` +4.2 ns, `Cursor::refresh` +4.0 ns, `read_bif_arguments` +3.4 ns, `call_external` +3.1 ns, `read_test_operand` +2.9 ns, `CodeTable::export_frame` +2.4 ns, `call_export` +2.3 ns, `code_table::frame` +1.9 ns, `Term::eq` +1.5 ns, and `function_at_label` −3.5 ns. The change of the term from 32 bytes to 16 bytes reaches most of these functions, but `hash_one::<&str>` and `Cursor::refresh` read no term, so the record does not name one function as the cause.
+
+The exact event stays unknown. The command line of `xctrace` records only the guided mode, its export does not name counters 2 to 9, and an own selection of the events of the core (for example the L1 data cache misses or the retired mispredicted branches) needs the `kperf` interface, which needs root on this host. The shift is thus attributed to back-end stall cycles with the same instruction count, and its source line is not identified.
+
+### The proposed tasks
+
+Each proposal is for one part at or above 5 percent of the key press or of the floor iteration. Each gate is the same: an interleaved session of the before and the after revision (`call_ext_only`, `call_only`, and the CPU time for each key of the key driver, each with revision, session, load, and raw record), no change of any value (the check gate and the pinned ERTS comparisons pass unchanged), no new `unsafe`, and the accepted `Arc` graph of terms with `Term: Send + Sync`.
+
+1. **Get the current process with no hash (key press 26.1 to 26.5 percent; floor 32.1 percent).** Design: keep the processes in a slab, `Vec<Option<ProcessState>>`, with a free list of slots and a `HashMap<ProcessId, usize>` index for a lookup by identity, and keep the slot of the current process beside `current_process` (`src/runtime/scheduler.rs:339` and `1405-1475`). `current_process_mut` then reads the slot with one bounds check, and only a lookup of another process by identity (a send, a link, a monitor) hashes. A smaller first step is a cheap mixer for the `ProcessId` keys, such as the FNV-1a mixer of `LabelMap` (`src/beam/module.rs:20-46`). Expected gain: about 6 ms for each key and about 70 ns to 80 ns for each floor iteration, if a slot read costs about 1 ns against the measured 11 ns to 12 ns of one lookup.
+2. **Call an import through a resolved export slot (floor 22.9 percent and a part of the 13.8 percent of the `CallExternal` body; key press 6.5 to 7.1 percent).** Design: the loader gives `Instruction::CallExternal` (`src/beam/code/instruction.rs:388`) an import index into a per-module import table that holds the names, the arity, and the classification that `call_external` now computes with string compares at each call (`erlang:apply/2,3`, `erlang:load_nif/2`, a PBeam BIF, a heavy BIF; `src/runtime/interpreter.rs:2000-2016`, `2122-2123`). The code table of the run keeps a resolved target for each import of each loaded module: the target module handle and its `FunctionStart`, or "not loaded", which goes to `undefined_function` as now. `CodeTable::finish` invalidates the resolved targets when it loads a module, as the ERTS load changes the address of the export entry. The cursor holds the handle of the module and its import slots, so the call reads a slot and makes no hash and no compare (`src/runtime/interpreter.rs:861-878`, `1988-2031`, `2114-2133`; `src/runtime/interpreter/code_table.rs:217-232`). Expected gain: about 50 ns to 60 ns for each floor iteration and about 1.5 ms to 2 ms for each key. The gate adds the tests of the error handler, of a module that loads after the first call, and of `erlang:apply/2,3`.
+3. **Fetch the map elements in one walk with no allocation (key press: `GetMapElements` 5.2 to 5.7 percent of body, 9.3 percent inclusive).** Design: the arm (`src/runtime/interpreter.rs:1119-1132`) clones the handle of the map one time, so that a destination can be the source register, and writes each value when it finds the key, as `beam_jit_get_map_elements` does (`erts/emulator/beam/jit/beam_jit_common.cpp:706-767`), with no `Vec<&Term>` and no `Vec<Term>`. For a flatmap, the walk goes over the keys of the map one time, because the ERTS loader sorts the pairs of the instruction (`get_map_elements` with `map_key_sort`, `erts/emulator/beam/jit/arm/ops.tab:1190-1197`); the PBeam loader must then keep the pairs in the order of the flatmap keys. For a hashmap, the loader computes the hash of each literal key one time, as ERTS keeps it in the instruction. `map_hash` (`src/term/map.rs:1698-1713`) returns at once for an atom, `[]`, and a small integer, so that it allocates no `vec![key]`. Expected gain: most of the 2.59 ms of the kind, against 250 ns for each execution now.
+4. **Remove the avoidable allocations of the instruction path (key press 11.7 to 11.9 percent).** Design, in addition to task 3: keep the Y register storage of a released frame in a small pool of the process and give it to the next `Allocate` (`src/runtime/interpreter.rs:764-768`, `2663-2669`; `Frame::stack`, `src/runtime/process.rs:49-60`), and store a tuple as one allocation, `Arc<[Term]>`, in place of `Arc<Vec<Term>>` (`src/term/tuple.rs:24`). The tuple change keeps the `Arc` graph. Expected gain: about 3 percent of the key press from the frame storage and up to 1 percent from the tuple, measured by the allocation rows of `Allocate`, `Deallocate`, `Return`, `CallLast`, `CallExternal`, and `PutTuple`. This task can split into one sub-issue for each change.
+5. **Make `Move` cheaper (key press: term clone and drop 9.5 to 10.1 percent, of which `Move` is 5.9 percent; `Move` body 6.3 to 7.0 percent).** Design: first count, with the counting probe, the moves whose source register the next instructions overwrite before they read it, and the moves into an X register that the file already holds. Then the loader marks a move with a dead source, and the arm takes the term out of the source register with no `Arc` increment and no decrement (`src/runtime/interpreter.rs:760-763`, `3534-3536`). `write_operand` stops the `registers.resize` for each X write (`src/runtime/interpreter.rs:4794`) when the process gives its X register file the size of the largest X register of the loaded code at the start. ERTS copies one word for a `move` (`emit_i_move`, `erts/emulator/beam/jit/arm/instr_common.cpp:516-519`). Expected gain: up to the 5.9 percent of the clone and drop of `Move` and a part of its 7.0 percent body; the count of the first step sets the number.
+6. **Run the small-integer `gc_bif` arithmetic in the arm (floor 14.2 percent; key press 2.3 to 2.5 percent).** Design: the `Bif` arm (`src/runtime/interpreter.rs:941-1030`) computes `'-'` and `'+'` of two small integers at once, and every other case, such as a bignum result, takes the present BIF path, as `emit_i_minus` and `emit_i_plus` handle a small result inline (`erts/emulator/beam/jit/arm/instr_arith.cpp:145`, `334`). Expected gain: most of the 37.1 ns of the floor iteration. This proposal is only for the floor loop, because the key press spends 2.3 percent in the BIF path.
+
+The order of the proposals is the order of the measured share. Tasks 1 and 2 also remove or change the functions that hold a net +12.4 ns of the +32.4 ns of the shift of `e0d9cbe5` in the `sample` profiles above: `hash_one::<&str>`, `Cursor::refresh`, `call_external`, `CodeTable::export_frame`, `call_export`, `code_table::frame`, `function_at_label`, and `hash_one::<&(NameId, u32)>`.
+
+### Known gaps
+
+- The time profile samples each 1 ms. A leaf function can lose the frame of its caller in the unwind, so 4.0 percent of the key press samples and 5.9 percent of the floor samples do not reach the frame of `run`, and a small number of allocation samples show an implausible caller. Rows 8 and 5 of the two tables hold them.
+- The profiles use the line-table build. Its code is 576 bytes longer than the plain release build, and the CPU time for each key of the two builds agrees inside the noise of session P (27.2 ms and 24.8 ms against 27.3 ms and 24.5 ms), so the record uses the line-table profile for the plain build.
+- The CPU time comes from `ps`, which has a resolution of 10 ms; over 60 keys that is about 0.17 ms for each key.
+- The key latency is bimodal in each session: the minimum is 12.9 ms to 17.4 ms and the median is 27.1 ms to 30.0 ms. The record does not explain it.
+- The render share of the time is not measured; the record gives the render share of the instruction count only.
+- The sub-split of the code table lookups of the floor iteration comes from a second grouping of the same samples and overlaps.
+- The cause of the shift at `e0d9cbe5` is attributed to back-end stall cycles, and the event and the source line stay unknown, because the counter names and an own event selection are not available without root.
+- The counting probe and the scratch drivers are not committed. The proposals above own any committed measurement.
