@@ -53,7 +53,7 @@ The step 0 numbers and the `ddb32f6e` numbers come from two different sessions. 
 
 Each entry is one landed change or one change that is not landed. The entries are newest first.
 
-### 2026-10-15 15:30 JST - Add two small integers in the `gc_bif` arm, task [#632](https://github.com/fahchen/pbeam/issues/632)
+### 2026-10-15 15:30 JST - Add two small integers in the `gc_bif` arm, task [#632](https://github.com/fahchen/pbeam/issues/632), pull request [#638](https://github.com/fahchen/pbeam/pull/638)
 
 The `Bif` arm computes `erlang:'+'/2` and `erlang:'-'/2` of two integers with an integer result at once, with no BIF call. Each other case takes the present BIF path with the same value, exception, fail-label jump, or runtime error, as `emit_i_plus` and `emit_i_minus` add two small integers inline and call the BIF for each other case (`erts/emulator/beam/jit/arm/instr_arith.cpp:145-205` and `:334-392`, OTP 29.1.1).
 
