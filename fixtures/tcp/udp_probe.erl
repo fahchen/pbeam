@@ -1,5 +1,5 @@
 -module(udp_probe).
--export([host_name/0, open/0, unsupported/1]).
+-export([active/1, host_name/0, open/0, unsupported/1]).
 
 %% The requests of the udp_inet driver that inet_config:set_hostname/0
 %% sends through inet_udp:open(0, []), inet:gethostname/1, and
@@ -31,8 +31,23 @@ host_name() ->
     Exit = receive {'EXIT', P, Reason} -> {'EXIT', port, Reason} after 100 -> none end,
     [Replies, P1 * 256 + P0 > 0, Name, Rest, Exit].
 
-%% The errors of OPEN, GETHOSTNAME, and LISTEN (inet_drv.c:11219-11233,
-%% 14577-14636, 14846-14858). A stream socket with the UDP protocol gives
+%% The first datagram of an active socket on 127.0.0.1 and the port Port
+%% (inet_drv.c:14619-14621). The test sends the datagrams. The result
+%% gives the port of the sender as `true` when it is above 0.
+active(Port) ->
+    P = open_port({spawn_driver, "udp_inet"}, [binary]),
+    C = fun(Request, Bytes) -> control(P, Request, Bytes) end,
+    [1] = C(1, [1, 2, 2]),
+    [1] = C(7, [22, [0, 0, 0, 1]]),
+    [1 | _] = C(6, [1, [Port bsr 8, Port band 255], 127, 0, 0, 1]),
+    receive
+        {udp, P, Address, From, Data} -> {udp, port, Address, From > 0, Data}
+    after 5000 -> timeout
+    end.
+
+%% The errors of OPEN, GETHOSTNAME, LISTEN, and PEER (inet_drv.c:11219-11233,
+%% 11272-11300, 14577-14636, 14846-14858). PEER of a socket that is not
+%% connected gives enotconn. A stream socket with the UDP protocol gives
 %% the errno of socket/3 of the host. A datagram socket has no
 %% send_timeout and send_timeout_close (inet_drv.c:7099-7120, 9236-9255).
 open() ->
@@ -43,7 +58,7 @@ open() ->
     Open = [C(1, [1, 2]), C(1, [9, 2, 2]), C(1, [1, 9, 9]), C(1, [1, 2, 9]),
             C(1, [1, 1, 2]), C(1, [1, 2, 0]), C(1, [1, 2, 2])],
     After = [C(27, [0, 5]), C(27, []), C(7, [30,0,0,0,1, 35,0,0,0,1, 31,0,0,0,1]),
-             C(8, [30, 35, 31])],
+             C(8, [30, 35, 31]), C(4, [])],
     true = erlang:port_close(P),
     [Before, Open, After].
 

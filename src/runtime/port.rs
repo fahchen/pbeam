@@ -169,7 +169,7 @@ impl Ports {
     /// Return the fds that the IO poll waits for: the output pipe of each
     /// spawn port before its end of file, and then its status pipe, and the
     /// socket of each `tcp_inet` listen port with a caller in its accept
-    /// queue. Only a port with `exit_status` stays open after its end of
+    /// queue, and the socket of each active `udp_inet` port. Only a port with `exit_status` stays open after its end of
     /// file.
     ///
     /// # Examples
@@ -183,7 +183,7 @@ impl Ports {
             .filter_map(|port| match &port.driver {
                 Driver::Spawn(spawn) if spawn.end_of_file => Some(spawn.child.status_fd()),
                 Driver::Spawn(spawn) => Some(spawn.child.output_fd()),
-                Driver::Inet(tcp) => tcp.accept_fd(),
+                Driver::Inet(inet) => inet.accept_fd().or_else(|| inet.receive_fd()),
             })
             .collect()
     }
@@ -203,6 +203,20 @@ impl Ports {
                 Driver::Inet(tcp) if tcp.accept_fd() == Some(fd) => Some(id),
                 _ => None,
             })
+    }
+
+    /// Return whether an active `udp_inet` port waits for a datagram on the
+    /// fd `fd`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(ports.receiving(fd));
+    /// ```
+    pub(super) fn receiving(&self, fd: c_int) -> bool {
+        self.by_id.values().any(|port| {
+            matches!(&port.driver, Driver::Inet(inet) if inet.receive_fd() == Some(fd))
+        })
     }
 
     /// Read the fd `fd` that the IO poll found ready, and return its port

@@ -280,6 +280,21 @@ impl Inet {
         (!self.acceptors.is_empty()).then(|| socket.as_raw_fd())
     }
 
+    /// Return the fd of an active datagram socket, which ERTS reads for
+    /// datagrams (`sock_select(desc, FD_READ, 1)`, inet_drv.c:14619-14621),
+    /// else `None`. PBeam reads no datagram: a ready fd stops the run with
+    /// [`DATAGRAM_RECEIVE`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(port.receive_fd(), None);
+    /// ```
+    pub(in crate::runtime) fn receive_fd(&self) -> Option<c_int> {
+        let socket = self.socket.as_ref()?;
+        (self.socket_type == SocketType::Datagram && self.active != 0).then(|| socket.as_raw_fd())
+    }
+
     /// Run the request `command` with the bytes `request`, as
     /// `tcp_inet_ctl`, `packet_inet_ctl`, and `inet_ctl` do
     /// (inet_drv.c:10988-11409, 11952-12062, 14564-14892).
@@ -300,7 +315,7 @@ impl Inet {
     ) -> Result<Control, BeamError> {
         let reply = match command.wrapping_sub(MAGIC) {
             1 => self.open(request)?,
-            4 if self.socket_type == SocketType::Stream => self.peer(),
+            4 => self.peer(),
             5 => self.name(),
             6 => self.bind(request)?,
             7 => self.set_options(request)?,
@@ -640,6 +655,11 @@ impl Inet {
         })
     }
 }
+
+/// The runtime error of a datagram that arrives on an active `udp_inet`
+/// socket (see [`Inet::receive_fd`]).
+pub(in crate::runtime) const DATAGRAM_RECEIVE: &str =
+    "unsupported udp_inet datagram receive: see \"udp_inet ports\" in docs/erts-differences.md";
 
 /// The runtime error of `{active, N}`.
 const ACTIVE_N: &str = "unsupported tcp_inet option active with a count: see \"tcp_inet ports\" in docs/erts-differences.md";

@@ -1,5 +1,5 @@
 use std::{
-    net::{SocketAddr, TcpStream},
+    net::{SocketAddr, TcpStream, UdpSocket},
     path::{Path, PathBuf},
     process::Command,
     sync::{
@@ -324,6 +324,63 @@ fn stops_the_run_for_each_udp_inet_part_that_is_not_implemented() {
             .to_string();
         assert!(error.starts_with(message), "{case}: {error}");
     }
+}
+
+#[test]
+fn stops_the_run_at_a_datagram_on_an_active_udp_inet_port() {
+    // ERTS reads an active datagram socket (`sock_select(desc, FD_READ, 1)`,
+    // inet_drv.c:14619-14621) and sends each datagram to the owner as
+    // `{udp, Socket, Address, Port, Data}` in `list` mode. PBeam does not
+    // read it: the ready socket stops the run.
+    let erts = with_datagrams(|port| {
+        let output = Command::new("erl")
+            .args(["+S", "1", "-noshell", "-pa", "fixtures/tcp", "-eval"])
+            .arg(format!(
+                "io:format(\"~w~n\", [udp_probe:active({port})]), halt()."
+            ))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8_lossy(&output.stdout).trim_end().to_owned()
+    });
+    assert_eq!(erts, "{udp,port,{127,0,0,1},true,[104,105]}", "ERTS");
+    let error = with_datagrams(|port| {
+        let program = load();
+        let port = Term::Integer(port.into());
+        program
+            .execute("udp_probe", "active", &[program.host_term(port)])
+            .unwrap_err()
+            .to_string()
+    });
+    assert!(
+        error.starts_with("unsupported udp_inet datagram receive: see \"udp_inet ports\""),
+        "{error}"
+    );
+}
+
+/// Run `run` with a free UDP port of `127.0.0.1`, and send the datagram
+/// `"hi"` to that port every 2 ms until `run` returns.
+fn with_datagrams<T>(run: impl FnOnce(u16) -> T) -> T {
+    let port = UdpSocket::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let stop = Arc::new(AtomicBool::new(false));
+    let sender = {
+        let stop = Arc::clone(&stop);
+        thread::spawn(move || {
+            let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+            while !stop.load(Ordering::SeqCst) {
+                let _ = socket.send_to(b"hi", ("127.0.0.1", port));
+                thread::sleep(Duration::from_millis(2));
+            }
+        })
+    };
+    let result = run(port);
+    stop.store(true, Ordering::SeqCst);
+    sender.join().unwrap();
+    result
 }
 
 /// A client of the test: it reads `"Port Count"` from the file `path` and
