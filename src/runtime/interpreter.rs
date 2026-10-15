@@ -1133,16 +1133,17 @@ impl BeamProgram {
                     fail_label,
                     map,
                     pairs,
-                } => match map_values(process, map, pairs.iter().map(|(key, _)| key))? {
-                    Some(values) => {
-                        // The destinations store the values, so they get copies.
-                        let values: Vec<Term> = values.into_iter().cloned().collect();
-                        for ((_, destination), value) in pairs.iter().zip(values) {
-                            write(process, destination, value)?;
-                        }
+                } => {
+                    let Term::Map(map) = read_ref(process, map)? else {
+                        return Err(error("BEAM get_map_elements source is not a map"));
+                    };
+                    // A destination can be the source register, so the arm
+                    // keeps one copy of the map handle.
+                    let map = map.clone();
+                    if !get_map_elements(process, &map, pairs)? {
+                        cursor.position = label_position(*fail_label)?;
                     }
-                    None => cursor.position = label_position(*fail_label)?,
-                },
+                }
                 // ERTS loads `has_map_fields` as `get_map_elements` with
                 // scratch destinations (`generators.tab:230-253`).
                 Instruction::HasMapFields {
@@ -3219,9 +3220,9 @@ fn register_of(operand: &Operand) -> Option<Register> {
     }
 }
 
-/// Borrow the value of each key in the map of a `get_map_elements` or
-/// `has_map_fields` instruction, or return `None` at the first key that the
-/// map does not hold. The read copies neither the map nor a value.
+/// Borrow the value of each key in the map of a `has_map_fields`
+/// instruction, or return `None` at the first key that the map does not
+/// hold. The read copies neither the map nor a value.
 ///
 /// # Examples
 ///
@@ -3236,7 +3237,7 @@ fn register_of(operand: &Operand) -> Option<Register> {
 /// # Errors
 ///
 /// Return a runtime error when the source is not a map. The compiler puts an
-/// `is_map` test before each of these instructions.
+/// `is_map` test before this instruction.
 fn map_values<'a>(
     process: &'a ProcessState,
     map: &'a Operand,
@@ -3248,6 +3249,54 @@ fn map_values<'a>(
     keys.into_iter()
         .map(|key| Ok(map.get(read_ref(process, key)?)))
         .collect()
+}
+
+/// Write the value of each key of `pairs` to its destination, as ERTS
+/// `beam_jit_get_map_elements` does (`beam_jit_common.cpp:706-767`), and
+/// return false when the map does not hold a key. A flatmap is walked once,
+/// because the loader sorts the pairs in flatmap key order. A hashmap finds
+/// each key in turn. Each value is written when its key is found, so a
+/// missing key can leave the earlier destinations written. These partial
+/// writes match `beam_jit_get_map_elements`, but not the inline JIT path
+/// (`jit/arm/instr_map.cpp:439-462`), which finds the keys from last to
+/// first. Compiled code cannot see the difference: on the fail path the
+/// validator marks an initialized destination as `any`
+/// (`clobber_map_vals`, `beam_validator.erl:1311-1319`). An empty key list
+/// matches every map, as in the inline JIT path
+/// (`jit/arm/instr_map.cpp:404-415, 464`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let pairs = vec![(Operand::Value(Term::Integer(1)), Operand::X(0))];
+/// assert!(get_map_elements(&mut process, &map, &pairs)?);
+/// ```
+fn get_map_elements(
+    process: &mut ProcessState,
+    map: &Map,
+    pairs: &[(Operand, Operand)],
+) -> Result<bool, BeamError> {
+    let Some(entries) = map.flat_pairs() else {
+        for (key, destination) in pairs {
+            let Some(value) = map.get(read_ref(process, key)?) else {
+                return Ok(false);
+            };
+            write(process, destination, value.clone())?;
+        }
+        return Ok(true);
+    };
+    let mut wanted = pairs.iter();
+    let mut next = wanted.next();
+    for (key, value) in entries {
+        let Some((wanted_key, destination)) = next else {
+            break;
+        };
+        if key == read_ref(process, wanted_key)? {
+            write(process, destination, value.clone())?;
+            next = wanted.next();
+        }
+    }
+    Ok(next.is_none())
 }
 
 /// Raise an exception with the stack trace `[]` in the process, as

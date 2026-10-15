@@ -2,14 +2,15 @@ use super::super::{read_integer, read_integer_after_first, read_operand, read_va
 use super::{
     OPCODE_BIF0, OPCODE_BS_GET_INTEGER2, OPCODE_BS_GET_UTF16, OPCODE_BS_GET_UTF32,
     OPCODE_BS_INIT_WRITABLE, OPCODE_FADD, OPCODE_FCONV, OPCODE_FDIV, OPCODE_FMOVE, OPCODE_FMUL,
-    OPCODE_FSUB, OPCODE_GET_RECORD_ELEMENTS, OPCODE_GET_TL, OPCODE_HAS_MAP_FIELDS,
-    OPCODE_INIT_YREGS, OPCODE_IS_ANY_NATIVE_RECORD, OPCODE_PUT_MAP_ASSOC, OPCODE_PUT_MAP_EXACT,
-    OPCODE_PUT_RECORD, OPCODE_PUT_TUPLE2, OPCODE_TEST_EXACT_EQ, OPCODE_TEST_HEAP,
-    OPCODE_TEST_IS_ATOM, OPCODE_TEST_IS_BINARY, OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP,
-    OPCODE_TEST_IS_PID, OPCODE_TEST_IS_PORT, OPCODE_TEST_TAGGED_TUPLE, SELECT_VALUE_LINEAR_LIMIT,
-    parse_code, prepare_select_value_choices, read_binary_match_commands, read_binary_segments,
-    read_move_operand, read_operand_pairs, read_pair_count, read_record_updates, skip_allocation,
-    skip_counted_operands, skip_integer_payload, skip_operand, skip_unsupported_instruction,
+    OPCODE_FSUB, OPCODE_GET_MAP_ELEMENTS, OPCODE_GET_RECORD_ELEMENTS, OPCODE_GET_TL,
+    OPCODE_HAS_MAP_FIELDS, OPCODE_INIT_YREGS, OPCODE_IS_ANY_NATIVE_RECORD, OPCODE_PUT_MAP_ASSOC,
+    OPCODE_PUT_MAP_EXACT, OPCODE_PUT_RECORD, OPCODE_PUT_TUPLE2, OPCODE_TEST_EXACT_EQ,
+    OPCODE_TEST_HEAP, OPCODE_TEST_IS_ATOM, OPCODE_TEST_IS_BINARY, OPCODE_TEST_IS_LIST,
+    OPCODE_TEST_IS_MAP, OPCODE_TEST_IS_PID, OPCODE_TEST_IS_PORT, OPCODE_TEST_TAGGED_TUPLE,
+    SELECT_VALUE_LINEAR_LIMIT, parse_code, prepare_select_value_choices,
+    read_binary_match_commands, read_binary_segments, read_move_operand, read_operand_pairs,
+    read_pair_count, read_record_updates, skip_allocation, skip_counted_operands,
+    skip_integer_payload, skip_operand, skip_unsupported_instruction, sort_map_key_pairs,
     test_kind, unsupported_opcode_operand_count,
 };
 use crate::{
@@ -1372,6 +1373,83 @@ fn decodes_the_has_map_fields_tests_of_the_map_probe_fixture() {
                 if first.is_static("input") && second.is_static("output")
         ) && matches!(register_keys.as_slice(), [Operand::X(0)])
     ));
+}
+
+#[test]
+fn sorts_get_map_elements_keys_in_flatmap_key_order_like_the_erts_loader() {
+    let atoms = AtomTable::new();
+    let destinations = |pairs: Vec<(Operand, Operand)>| {
+        sort_map_key_pairs(pairs, &atoms).map(|pairs| {
+            pairs
+                .into_iter()
+                .map(|(_, destination)| match destination {
+                    Operand::X(index) => index,
+                    _ => panic!("each destination is an X register"),
+                })
+                .collect::<Vec<_>>()
+        })
+    };
+    let key = Operand::Value;
+    // pick/1 of `fixtures/map/map_elements_probe.erl`:
+    // {list,[nil,{x,0},{atom,true},{x,3},{atom,abs_path},{x,2},{integer,1},{x,1}]}.
+    // An integer comes before an atom, an atom before `[]`, and `true` has a
+    // lower atom index than `abs_path`.
+    assert_eq!(
+        destinations(vec![
+            (key(Term::nil()), Operand::X(0)),
+            (key(Term::static_atom("true")), Operand::X(3)),
+            (key(Term::static_atom("abs_path")), Operand::X(2)),
+            (key(Term::Integer(1)), Operand::X(1)),
+        ])
+        .unwrap(),
+        [1, 3, 2, 0]
+    );
+    // One pair can have a register key.
+    assert_eq!(
+        destinations(vec![(Operand::X(1), Operand::X(0))]).unwrap(),
+        [0]
+    );
+    // A literal key that PBeam does not support yet comes first.
+    assert_eq!(
+        destinations(vec![
+            (key(Term::Integer(1)), Operand::X(0)),
+            (Operand::UnsupportedLiteral(0), Operand::X(1)),
+        ])
+        .unwrap(),
+        [1, 0]
+    );
+    // ERTS loads no register key among other keys.
+    assert!(
+        destinations(vec![
+            (key(Term::Integer(1)), Operand::X(0)),
+            (Operand::Y(0), Operand::X(1)),
+        ])
+        .unwrap_err()
+        .to_string()
+        .contains("a register key among other keys")
+    );
+    // {get_map_elements,{f,3},{x,0},{list,[{x,1},{x,0},{integer,2},{x,1}]}}
+    // does not load.
+    let mut code = vec![0, 0, 0, 16];
+    code.extend([0; 16]);
+    code.extend([
+        OPCODE_GET_MAP_ELEMENTS,
+        0x35,
+        0x03,
+        0x17,
+        0x40,
+        0x13,
+        0x03,
+        0x21,
+        0x13,
+        0x03,
+    ]);
+    assert!(
+        parse_code(&code, &atoms, &[], &[], &[], &[], &[])
+            .unwrap_err()
+            .to_string()
+            .contains("a register key among other keys")
+    );
 }
 
 #[test]

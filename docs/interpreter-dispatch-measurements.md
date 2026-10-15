@@ -995,6 +995,117 @@ The profile script subtracts the CPU rate of a 3 s idle window from the key wind
 - The record does not split the fall of the `call_ext_only` shape by part.
 - The `ModuleId` lookup of `Cursor::refresh` for a call into another module stays, as the attribution of task #625 expected.
 
+## The Y register storage of a released frame, task [#630](https://github.com/fahchen/pbeam/issues/630)
+
+This section records the gate of task [#630](https://github.com/fahchen/pbeam/issues/630), a proposal of the attribution of task [#625](https://github.com/fahchen/pbeam/issues/625). Each body call gives its frame a new slot array at `allocate`, and the return frees it. ERTS keeps the Y registers on the process stack, with no separate slot array. `allocate` first checks the free space of the heap and the stack, which can start a garbage collection (`emit_gc_test`, `erts/emulator/beam/jit/arm/instr_common.cpp:137-155` and `:211` at `OTP-29.1.1`). Then it reserves the Y registers by moving the stack pointer `E`, and `deallocate` only moves `E` back (`emit_allocate_heap` and `emit_deallocate`, `instr_common.cpp:206-229`). The proposal expected about 3 percent of the CPU time for each release Terra key press.
+
+The measured change is commit `1c344478` of the branch `perf/630-frame-pool`. A process keeps up to 8 empty slot arrays of at most 32 slots in a free list. A return and a tail call put the slot array of the released frame in the list, and the `allocate` of a frame with no slot array takes one from it. The live bytes of the process count the list. The change keeps the `Arc` graph of terms and changes no value. Commit `00e3f44e` reverts it, because the gate below shows no gain on the shape that the change targets.
+
+### The session
+
+The before revision is `e93523c3`, the head of `origin/main` that the branch starts from. The after revision is `1c344478`. Each revision is a `git archive` of its commit, built with `cargo build --locked --release --bin pbeam` and `cargo test --locked --release --test dispatch_baseline --no-run` in its own target directory. One interleaved session ran on 2026-10-15 from 17:20:30 to 17:27:45 JST on an Apple M1 Max with 10 CPUs: eight rounds of `records_the_interpreter_dispatch_baseline --exact --nocapture --test-threads=1`, then six rounds of 60 keys of `terra_counter` with the release `pbeam`, each round in rotated order. The one-minute load is 1.02 to 2.93, and no other `cargo`, `rustc`, or `nextest` process ran. Each floor round is the minimum of nine probe runs inside one invocation.
+
+| Shape | Before `e93523c3`, minimum of 8 rounds | After `1c344478`, minimum of 8 rounds | Change |
+| --- | --- | --- | --- |
+| `call_ext_only` floor loop, 200000 iterations | 47.7 ns (rounds 47.7 to 56.8) | 49.1 ns (49.1 to 49.4) | +1.4 ns, +2.9 percent |
+| `call_only` floor loop, 200000 iterations | 42.4 ns (42.4 to 43.6) | 44.2 ns (44.2 to 44.5) | +1.8 ns, +4.2 percent |
+| Position `call_only` floor loop, 200000 iterations | 42.4 ns (42.4 to 43.6) | 44.2 ns (44.2 to 44.5) | +1.8 ns, +4.2 percent |
+
+| Terra round | Before `e93523c3`, ms of CPU time for each key | After `1c344478`, ms of CPU time for each key |
+| --- | --- | --- |
+| Round 1 | 16.000 | 15.500 |
+| Round 2 | 16.167 | 14.000 |
+| Round 3 | 14.167 | 15.833 |
+| Round 4 | 14.667 | 16.000 |
+| Round 5 | 16.500 | 15.667 |
+| Round 6 | 16.500 | 15.833 |
+| Mean of 6 rounds | 15.667 | 15.472 |
+| Median of 6 rounds | 16.083 | 15.750 |
+
+The Terra rows are the raw CPU time of `pbeam` for each key, with no idle correction. The idle correction changes only round 1 of `e93523c3`, to 14.319 ms. One tick of 10 ms of `ps` is 0.167 ms for each key.
+
+A second interleaved session on 2026-10-15 from 17:30:55 to 17:31:07 JST runs a body-call probe with the same two binaries: `loop(N) -> _ = f(N), loop(N - 1).`, `f(N) -> _ = g(N), N.`, and `g(N) -> {N}.`, 3000000 iterations, each with two `allocate` instructions, one return of a frame with Y registers, and one `call_last`. It has eight rounds in rotated order, and the one-minute load is 3.50 to 3.83. The user CPU time of the run is 0.75 s to 0.78 s before (median 0.76 s) and 0.58 s to 0.59 s after (median 0.59 s), which is 22 percent less, or about 57 ns for each iteration.
+
+### The decision
+
+The change does not land. The CPU time for each release Terra key press, which is the shape that the change targets, falls by 0.195 ms (1.2 percent) at the mean and by 0.333 ms (2.1 percent) at the median. That is one or two ticks of `ps`, the ranges of the two revisions overlap (14.167 to 16.500 ms before, 14.000 to 16.000 ms after), and the after round is below the before round in four of six rounds. The expected 3 percent is about 0.47 ms, and the session does not show it. The three floor loops, which have no `allocate`, are slower by 1.4 ns to 1.8 ns, and the ranges of the `call_only` rows do not overlap.
+
+The body-call probe shows that the free list removes most of the cost of a frame allocation. But the Terra key press spends too little of its time in frame allocations for the gain to show. The 11.7 percent of allocation in the attribution of task #625 thus includes more than the slot arrays of frames.
+
+In `1c344478`, `call_only`, `call_last`, and the tail call of `enter_frame` call `replace_frame`, which puts the slot array of the released frame in the free list. Thus the code of the free list runs in each iteration of the three floor loops.
+
+Two variants of the working tree tried to remove the floor cost. Their probes ran on 2026-10-15 from 17:28:25 to 17:29:35 JST, outside the measurement rule: no load is recorded, and each variant has only three runs. Each run pairs the variant with a run of `e93523c3`, and the numbers are the minimum of the `call_only` floor loop of 200000 iterations. A variant that keeps the slot array in the frame at a tail call, with `#[inline]` on the three new methods, measured 45.7 ns (`p4-wip.txt` to `p6-wip.txt`), against 42.4 ns of `e93523c3` (`p4-e93523c3.txt` to `p6-e93523c3.txt`). A variant that changes only `allocate` and the return measured 45.4 ns (`p7-wipc.txt` to `p9-wipc.txt`), against 42.5 ns of `e93523c3` (`p7-e93523c3.txt` to `p9-e93523c3.txt`). In this variant, the floor loops run the interpreter source of `e93523c3`, but `ProcessState` has the new field `free_stacks`. The files `p1-wip.txt` to `p3-wip.txt` measure an earlier state of the working tree that the record does not keep, and the record does not use them. The floor cost stays when the floor loop runs the interpreter source of `e93523c3`. The cause, the code layout of the run loop or the layout of `ProcessState`, is not found.
+
+The raw records are the session logs `session.txt` and `alloc-session.txt` and the files `floor-r<round>-<revision>.txt`, `terra-r<round>-<revision>.log`, and `alloc-r<round>-<revision>.txt` of the two sessions, and the files `p<run>-<variant>.txt` of the variant probes, which stay outside the repository.
+
+### Known gaps
+
+- The session does not resolve a change of less than about 0.5 ms for each key on the Terra key press.
+- The record does not find the cause of the floor cost: the code layout of the run loop or the layout of `ProcessState`.
+- The record does not split the 11.7 percent of allocation of a Terra key press by allocation site.
+
+## The map elements in one walk, task [#629](https://github.com/fahchen/pbeam/issues/629)
+
+This section records the gate of task [#629](https://github.com/fahchen/pbeam/issues/629), from the attribution of task [#625](https://github.com/fahchen/pbeam/issues/625). That attribution measured `GetMapElements` at 5.2 to 5.7 percent of a release Terra key press as body and at 9.3 percent inclusive. The arm collected the values in a `Vec<&Term>`, copied them into a `Vec<Term>`, and searched a flatmap once for each key. `map_hash` allocated a vector also for an atom, `[]`, or a small integer key.
+
+### The change
+
+The change has two commits. `3c83cf88` lets `map_hash` start its walk only for a list or a tuple key, so an atom, `[]`, a small integer, or a binary key allocates nothing. `028221a9` sorts two or more pairs of `get_map_elements` in flatmap key order in the loader, as the ERTS loader does (`beam_load_map_key_sort`, `beam_transform_helpers.c:53-115`; JIT `jit/arm/ops.tab:1190-1197`). The arm keeps one copy of the map handle, walks a flatmap once, and writes each value when it finds the key, as `beam_jit_get_map_elements` does (`beam_jit_common.cpp:706-767`). A hashmap finds each key in turn.
+
+### The session
+
+The before revision is `e93523c3`, the head of `origin/main` that the branch starts from. The after revision is `028221a9`. Each revision is a `git archive` of its commit, built with `cargo build --locked --release --bin pbeam` and `cargo test --locked --release --test dispatch_baseline --no-run` in its own target directory. One session on 2026-10-15 (JST) runs the two revisions in rotated order in each round. The floor numbers come from the test `records_the_interpreter_dispatch_baseline` (`--exact --nocapture --test-threads=1`), and each number is the minimum of nine probe runs inside one invocation. The map shapes come from a scratch module `gme_probe`, compiled with the pinned `erlc` and run with `/usr/bin/time -p pbeam gme_probe <shape> -- gme_probe.beam`. Each run makes 3000000 iterations of one `get_map_elements` of three atom keys: `flat` reads a flatmap of 6 atom keys, and `hash` reads a hashmap of 43 keys. The value is the user CPU time of the process. The Terra numbers come from the scratch key driver of the #628 record: 60 keys to the release `terra_counter` example, with the raw CPU time of `pbeam` from `ps` and no idle correction. A second session of eight Terra rounds follows the first session.
+
+| Part | Rounds | Time (JST) | One-minute load | Raw record |
+| --- | --- | --- | --- | --- |
+| Floor shapes | 6 | 16:19:36 to 16:19:50 | 2.41 to 2.53 | `floor-r<round>-<revision>.txt` |
+| Map shapes | 6 | 16:19:51 to 16:20:09 | 2.30 to 2.64 | `micro-<shape>-r<round>-<revision>.txt` |
+| Terra keys, first session | 4 | 16:20:09 to 16:24:45 | 1.36 to 2.51 before each run | `terra-r<round>-<revision>.log` |
+| Terra keys, second session | 8 | 16:25:04 to 16:34:15 | 1.06 to 2.49 before each run | `terra2-r<round>-<revision>.log` |
+
+No `cargo`, `rustc`, or `nextest` process ran during the sessions. The session logs are `session.txt` and `session-terra2.txt`. The raw files are in the scratch directory of the task and are not committed.
+
+### The results
+
+Each floor value is the minimum over the six rounds, in ns for each iteration of 200000 iterations, with the range of the six rounds. Each map value is the minimum over the six rounds, in s of user CPU time for 3000000 iterations, with the range.
+
+| Shape | Before `e93523c3` | After `028221a9` | Change |
+| --- | --- | --- | --- |
+| `flat` map shape, three keys of a 6-key flatmap | 0.75 s (0.75 to 0.76) | 0.53 s (0.53 to 0.54) | -29.3 percent |
+| `hash` map shape, three keys of a 43-key hashmap | 0.92 s (0.92 to 0.94) | 0.59 s (0.59 to 0.60) | -35.9 percent |
+| `call_only` plus the `bif` of `map_get/2` on a 1000-key map | 102.4 ns (102.4 to 105.6) | 88.1 ns (88.1 to 88.4) | -14.0 percent |
+| `call_ext_only` floor loop | 47.7 ns (47.7 to 47.8) | 47.6 ns (47.6 to 47.7) | -0.2 percent |
+| `call_only` floor loop | 42.4 ns (42.4 to 43.6) | 42.1 ns (42.1 to 43.0) | -0.7 percent |
+| Position `call_only` floor loop | 42.4 ns (42.4 to 43.8) | 42.1 ns (42.1 to 42.9) | -0.7 percent |
+| `call_only` plus `gc_bif '+'` | 67.3 ns (67.3 to 67.8) | 66.9 ns (66.9 to 67.2) | -0.6 percent |
+| `call_only` plus the `bif` of `tuple_size/1` | 69.3 ns (69.3 to 69.4) | 68.3 ns (68.3 to 69.7) | -1.4 percent |
+| `call_only` plus the `bif` of `element/2` | 70.0 ns (70.0 to 70.6) | 69.6 ns (69.6 to 69.8) | -0.6 percent |
+| `call_only` plus the `bif` of `hd/1` | 69.3 ns (69.3 to 69.4) | 68.8 ns (68.8 to 69.3) | -0.7 percent |
+
+| Terra round | Before `e93523c3`, ms of CPU time for each key | After `028221a9`, ms of CPU time for each key |
+| --- | --- | --- |
+| Second session, rounds 1 to 8 | 14.333, 15.667, 16.333, 16.500, 16.333, 16.000, 16.000, 16.000 | 15.833, 15.000, 12.667, 16.333, 15.333, 15.333, 16.167, 13.667 |
+| Second session, mean of 8 rounds | 15.896 | 15.042 |
+| Second session, median of 8 rounds | 16.000 | 15.333 |
+| First session, rounds 1 to 4 | 16.167, 14.833, 16.500, 15.667 | 16.167, 15.667, 13.000, 15.667 |
+| First session, mean of 4 rounds | 15.792 | 15.125 |
+
+Each run answered each of the 60 keys. The two map shapes fall by about 73 ns and 110 ns for each iteration, and the ranges of the two revisions do not overlap. The `map_get/2` shape on a 1000-key hashmap falls by 14.3 ns, because its key hash no longer allocates. The other floor shapes do not change beyond the spread of their rounds.
+
+In the second session the CPU time for each key falls by 0.854 ms, or 5.4 percent, at the mean, and by 0.667 ms, or 4.2 percent, at the median. The after round is below the before round in six of the eight rounds. The ranges of the two revisions overlap (14.333 to 16.500 ms before, 12.667 to 16.333 ms after), so this session does not resolve the Terra change: a Welch t test gives t = 1.68 and p = 0.12, and a paired t test of the rounds gives t = 1.54 and p = 0.17. The first session agrees: -0.667 ms, or -4.2 percent, at the mean of four rounds.
+
+### The decision
+
+The change lands. Both map shapes and the `map_get/2` shape fall by more than the spread of their rounds, and no floor shape becomes slower. The Terra mean falls in both sessions, but the fall is not significant. The ERTS behavior stays: the loader refuses a register key among other keys, as the ERTS loader does, and an empty key list matches each map, as the inline JIT path does (`jit/arm/instr_map.cpp:404-415, 464`).
+
+### Known gaps
+
+- The Terra ranges of the two revisions overlap, and the 0.854 ms fall is not significant (p = 0.12). The CPU time from `ps` has a resolution of 10 ms, about 0.17 ms for each key over 60 keys.
+- The sessions do not check the other processes of the host, as session s2 of task #627 did. They check only the load and the absence of `cargo`, `rustc`, and `nextest`.
+- The map shapes use the user CPU time of `/usr/bin/time`, with a resolution of 10 ms over about 0.5 s to 0.9 s.
+- `has_map_fields` keeps its own search of each key, because the task covers only `get_map_elements`.
+- The loader keeps each key as an `Operand`, so the arm reads each key through `read_ref` for each comparison. ERTS also stores the hash of each key in the instruction; PBeam computes the hash of each key of a hashmap at each run.
+
 ## Two small integers in the `gc_bif` arm, task [#632](https://github.com/fahchen/pbeam/issues/632)
 
 This section records the gate of task [#632](https://github.com/fahchen/pbeam/issues/632), proposal 6 of the attribution of task [#625](https://github.com/fahchen/pbeam/issues/625). Before the change, each `gc_bif` of `erlang:'+'/2` or `erlang:'-'/2` went through the BIF call path of the `Bif` arm: the leaf check, the borrowed argument read, the match-context size check, the identity dispatch, and the result match. ERTS adds or subtracts two small integers with a small result inline and calls the BIF for each other case (`emit_i_plus` and `emit_i_minus`, `erts/emulator/beam/jit/arm/instr_arith.cpp:145-205` and `:334-392`, OTP 29.1.1).
