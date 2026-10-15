@@ -145,7 +145,7 @@ fn raises_system_limit_above_the_largest_bignum_as_pinned_erts() {
     // `BIG_ARITY_MAX` is 2^16 - 1 digits of 64 bits (`erl_term.h:465-466`).
     assert_eq!(
         assert_matches_erts("limits"),
-        "[1,system_limit,system_limit,system_limit,system_limit]"
+        "[1,system_limit,system_limit,1,system_limit,system_limit,system_limit,system_limit]"
     );
 }
 
@@ -166,7 +166,7 @@ fn charges_bignum_operations_as_pinned_erts() {
     // each value is the reductions of a fun call that runs one operation.
     assert_eq!(
         assert_matches_erts("costs"),
-        "[3,4,3,4,4,11,3,5,3,4,4,4,4,4,4,3,4,4,4,4,3,6]"
+        "[3,4,3,4,4,5,4,4,11,3,5,3,4,4,4,4,4,4,3,4,4,4,4,3,6]"
     );
 }
 

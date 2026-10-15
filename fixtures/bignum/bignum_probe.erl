@@ -74,8 +74,8 @@ bits() ->
 
 %% Results above the largest bignum raise system_limit.
 limits() ->
-    One = id(1),
-    [(One bsl 4194239) bsr 4194239, ?TRY(One bsl 4194240), ?TRY(One bsl 100000000),
+    One = id(1), Top = (One bsl 4194239) - 1 + (One bsl 4194239),
+    [(One bsl 4194239) bsr 4194239, ?TRY(bnot Top), ?TRY(Top bxor id(-1)), (Top band id(-1)) bsr 4194239, ?TRY(One bsl 4194240), ?TRY(One bsl 100000000),
      ?TRY((One bsl 2100000) * (One bsl 2100000)),
      ?TRY((One bsl 4194239) + (One bsl 4194239))].
 
@@ -106,9 +106,10 @@ exsss_next(S0, S1) ->
 %% The reductions of bignum operations (bump_reds_linear and
 %% bump_reds_quadratic in erl_arith.c:56-86).
 costs() ->
-    A = id(18446744073709551616), Small = id(5), Big = id(1) bsl 640, M = id(1 bsl 60),
+    A = id(18446744073709551616), Small = id(5), Big = id(1) bsl 640, M = id(1 bsl 60), Big14 = id(1) bsl 832,
     [cost(fun() -> Small + Small end), cost(fun() -> A + Small end),
      cost(fun() -> A + 0 end), cost(fun() -> Big + Big end), cost(fun() -> A * A end),
+     cost(fun() -> Big14 + 1 end), cost(fun() -> Big14 - 1 end), cost(fun() -> 1 - Big14 end),
      cost(fun() -> Big * Big end), cost(fun() -> A * 1 end), cost(fun() -> Big div A end),
      cost(fun() -> A div Big end), cost(fun() -> A rem 3 end), cost(fun() -> A bor 1 end),
      cost(fun() -> Big bxor 1 end), cost(fun() -> bnot A end), cost(fun() -> A bsl 1 end),

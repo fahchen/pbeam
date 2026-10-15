@@ -168,8 +168,8 @@ fn big_result(value: BigInt) -> BifResult {
 ///
 /// Two small integers cost no reduction, also when the result is a bignum
 /// (`erl_arith.c:378-385`). With a bignum operand, `+` and `-` cost
-/// [`linear`] of `max(size) + 2` words (`erl_arith.c:434-447`, `636-648`),
-/// and `*` costs [`quadratic`] of the two sizes (`erl_arith.c:856`). An
+/// [`linear`] of `max(size) + 2` and `max(size) + 1` words
+/// (`erl_arith.c:434-447`, `636-648`), and `*` costs [`quadratic`] of the two sizes (`erl_arith.c:856`). An
 /// operand that ERTS returns at once costs nothing: `0 + B`, `B + 0`,
 /// `B - 0`, `0 * B`, `1 * B`, and their mirrors for `*`
 /// (`erl_arith.c:396-423`, `631-633`, `785-817`).
@@ -229,7 +229,10 @@ fn arith_reductions(op: Arith, left: &Term, right: &Term) -> i32 {
     match op {
         Arith::Plus if small(left, &[0]) || small(right, &[0]) => 0,
         Arith::Minus if small(right, &[0]) => 0,
-        Arith::Plus | Arith::Minus => linear(digits(left).max(digits(right)) + 2),
+        // `+` charges the heap words `max(size) + 2`, and `-` charges
+        // `max(size) + 1` (`erl_arith.c:437-442`, `639-644`).
+        Arith::Plus => linear(digits(left).max(digits(right)) + 2),
+        Arith::Minus => linear(digits(left).max(digits(right)) + 1),
         Arith::Times if small(left, &[0, 1]) || small(right, &[0, 1]) => 0,
         Arith::Times => quadratic(digits(left), digits(right)),
     }
@@ -328,7 +331,9 @@ fn magnitude_order(left: &Term, right: &Term) -> Ordering {
 /// `erts_band`, `erts_bor`, and `erts_bxor` (`erl_arith.c:164-188`,
 /// `1252-1337`) do. Two small integers cost no reduction. A bignum operand
 /// costs [`linear`] of `max(size) + 2` words, also when the result is a
-/// small integer. An operand that is not an integer raises `badarith`.
+/// small integer. An operand that is not an integer raises `badarith`, and
+/// a result above `BIG_ARITY_MAX` digits raises `system_limit`
+/// (`erl_arith.c:1332-1335`).
 ///
 /// # Examples
 ///
@@ -363,13 +368,14 @@ pub(super) fn bitwise(op: Bitwise, left: &Term, right: &Term) -> Charged {
         Bitwise::Or => left_value.as_ref() | right_value.as_ref(),
         Bitwise::Xor => left_value.as_ref() ^ right_value.as_ref(),
     };
-    (Value(Term::from_bigint(value)), reductions())
+    (big_result(value), reductions())
 }
 
 /// Run `erlang:'bnot'/1`: the bitwise complement `-N - 1`, as `bnot_1`
 /// (`erl_arith.c:329-349`) does. A small integer costs no reduction, and a
 /// bignum costs [`linear`] of `size + 2` words. An operand that is not an
-/// integer raises `badarith`.
+/// integer raises `badarith`, and a result above `BIG_ARITY_MAX` digits
+/// raises `system_limit` (`erl_arith.c:1350-1353`).
 ///
 /// # Examples
 ///
@@ -385,10 +391,7 @@ pub(super) fn bnot(term: &Term) -> Charged {
     let Some(value) = term.bigint() else {
         return (BifResult::badarith(), 0);
     };
-    (
-        Value(Term::from_bigint(!value.into_owned())),
-        linear(digits(term) + 2),
-    )
+    (big_result(!value.into_owned()), linear(digits(term) + 2))
 }
 
 /// Run `erlang:'bsl'/2` (`right_shift` false) or `erlang:'bsr'/2`
