@@ -2,6 +2,8 @@
 
 This document is the measurement record of the interpreter dispatch work. It is not a task tracker. GitHub Issues are the source of task status, and epic [#506](https://github.com/fahchen/pbeam/issues/506) holds the steps, their links, and their state. The plan is `docs/interpreter-dispatch-plan.md`.
 
+The sections of this document stay as the measurement records of the earlier tasks. A new task does not add a section to this document. It writes its measurement record in its own entry file in `docs/performance/`, as the rules in `docs/performance-status.md` state.
+
 The document collects the numbers that the merged pull requests of steps 0 to 6 report. The text names the revision and the source of each number. Every number is either measured or estimated, and the text says which one.
 
 Baseline revision: `078c119` (2026-10-12). Current revision: `a0104b4`, the head of `origin/main` at the time of the cursor measurement of task [#550](https://github.com/fahchen/pbeam/issues/550). The runtime code of `a0104b4` equals the code of `c2f0341`, the revision of the attribution below, except for `src/term.rs` of [#548](https://github.com/fahchen/pbeam/pull/548), which removed the pair-stack allocation of `Term::eq`. Thus the floor-loop numbers of the earlier sections belong to their own revisions, and the section on the cursor re-measures the floor loop at `a0104b4`.

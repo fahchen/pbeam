@@ -55,7 +55,7 @@ Write `docs/agents/knowledge.md` and `docs/agents/improvements.md` only through 
 5. Record decisions made during implementation: the choice, alternatives, rationale, tradeoffs, limitations, and supporting evidence. Explain departures from the issue/specification and update the affected source. State explicitly when no new decisions were necessary.
 6. Record exact verification commands and results, including acceptance evidence and known gaps. Stop for review after opening the PR; do not auto-merge or proceed with dependent implementation.
 7. Keep every commit atomic and independently reviewable: make each one a cohesive change with its relevant verification, and do not mix unrelated work. Do not add functions, fields, or configuration without a current consumer, unless an explicit architectural decision records the need, alternatives, and tradeoffs.
-8. Add one entry to `docs/performance-status.md` in the same pull request that lands a measured optimization.
+8. Add one file to `docs/performance/` in the same pull request that lands a measured optimization. `docs/performance-status.md` gives the name, the content, and the rules of the file.
 
 Keep affected issues current as work progresses: scope, dependencies, blockers, decisions, PR links, verification, and remaining work. Add PR links to task issues and epic PR lists. Synchronize milestone/epic issue bullets after accepted work. Close tasks only after merge and acceptance verification; close epics and milestone trackers only after their required children and checkpoints are accepted. Keep GitHub milestone state consistent with its tracking issue.
 
@@ -79,7 +79,7 @@ Whenever direction or a solution changes, update the affected task bodies, accep
 
 - Set development tool versions in `mise.toml`; local and CI setup must use those pins rather than duplicating version settings in commands or fixture projects.
 - Use these compact `mise` tasks in development loops. They print results and failures, not full logs. `mise run check` stays the merge gate. `mise run <task> --help` shows the arguments.
-  - `mise run check-brief`: run `mise run check`. Print the result and the coverage line, or the failure. The full log is in `target/check.log`.
+  - `mise run check-brief`: run `mise run check`. Print the result and the coverage line, or the failure. The full log is in `target/check.log`. When the only failure is the known `erl_child_setup: failed with error 32` failure of the pty test `restores_the_terminal_before_the_result_of_terra_counter_as_interactive_erts`, the task runs that test once more alone, checks the coverage again, and prints `check: retried <test>`.
   - `mise run test-focus [cargo test arguments] [-- <harness arguments>]`: run selected Rust tests, for example `--test order -- --nocapture`. `--test <name>` selects one target of `tests/feature/` or `tests/integration/`. `--lib` selects the unit tests.
   - `mise run erts-eval [--pa <dir>] '<expressions>'`: evaluate on the pinned OTP as `erl -eval` does. Print the value or `exception <class>: <reason>`. The evaluating process traps exits, as with `erl -eval`. Exit signals arrive as `{'EXIT', From, Reason}` messages. Only `exit(self(), kill)` stops the runtime.
   - `mise run disasm <module | file.beam> [name/arity]...`: print the `beam_disasm` instructions without `{line,_}`.
