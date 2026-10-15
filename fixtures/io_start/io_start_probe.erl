@@ -1,6 +1,6 @@
 -module(io_start_probe).
 -export([lists/0, maps/0, map_keys/0, merge/0, atoms/0, atom_limit/0, system/0,
-         system_other/0, format/0, nots/0, keymembers/0, ands/0]).
+         system_other/0, otp_release/0, format/0, nots/0, keymembers/0, ands/0]).
 
 %% `bif` `erlang:tl/1` with fail label 0, as group:init/1 (group.erl:136)
 %% runs it, and in a guard. `get_tl`, as proc_lib:trans_init/3
@@ -127,9 +127,14 @@ dup(N, C) -> [C | dup(N - 1, C)].
 system() ->
     [os:type(), erlang:system_info(id(os_type))].
 
-%% A `erlang:system_info/1` item that the start path does not use.
-system_other() ->
+%% `erlang:system_info(otp_release)`, as elixir:parse_otp_release/0
+%% (elixir.erl:127-129 of Elixir v1.20.4) runs it.
+otp_release() ->
     erlang:system_info(id(otp_release)).
+
+%% A `erlang:system_info/1` item that PBeam does not support.
+system_other() ->
+    erlang:system_info(id(wordsize)).
 
 %% `io_lib:bformat/2`, as user_drv:init_shell/2 (user_drv.erl:374) runs it
 %% with the empty slogan of `-noshell` (user_drv.erl:271-273).

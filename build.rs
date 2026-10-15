@@ -39,6 +39,8 @@ const SOURCES: [&str; 19] = [
 /// ```
 fn main() {
     println!("cargo:rerun-if-changed=vendor/pcre2");
+    println!("cargo:rerun-if-changed=mise.toml");
+    println!("cargo:rustc-env=PBEAM_OTP_RELEASE={}", otp_release());
     cc::Build::new()
         .files(
             SOURCES
@@ -50,4 +52,26 @@ fn main() {
         .opt_level(2)
         .warnings(false)
         .compile("pcre2");
+}
+
+/// Return the OTP release of the pinned ERTS: the major part of the
+/// `erlang` version in `mise.toml`. OTP takes `ERLANG_OTP_RELEASE` from
+/// `OTP_VERSION` in the same way (`make/configure.ac:204`), so `29.1.1`
+/// gives `29`.
+///
+/// ```text
+/// erlang = "29.1.1"  # in mise.toml, gives 29
+/// ```
+fn otp_release() -> String {
+    let pins = std::fs::read_to_string("mise.toml").expect("read mise.toml");
+    let version = pins
+        .lines()
+        .find_map(|line| line.strip_prefix("erlang = \""))
+        .expect("mise.toml pins erlang");
+    let release = version.split(['.', '"']).next().unwrap_or_default();
+    assert!(
+        !release.is_empty() && release.bytes().all(|byte| byte.is_ascii_digit()),
+        "unexpected erlang pin {version}"
+    );
+    release.to_owned()
 }

@@ -416,10 +416,39 @@ fn returns_the_host_os_type_as_pinned_erts() {
 }
 
 #[test]
+fn returns_the_otp_release_as_pinned_erts() {
+    // `io_start_probe:otp_release/0` runs `erlang:system_info(otp_release)`,
+    // as `elixir:parse_otp_release/0` (elixir.erl:127-129 of Elixir v1.20.4)
+    // does. ERTS returns `ERLANG_OTP_RELEASE` as a string
+    // (`erl_bif_info.c:3231-3234`), the major part of `OTP_VERSION`
+    // (`make/configure.ac:204`). PBeam takes it from the `erlang` pin in
+    // `mise.toml`, and the ERTS reference checks it.
+    let program = BeamProgram::load(&[IO_START_PROBE]).unwrap();
+    let result = program
+        .execute("io_start_probe", "otp_release", &[])
+        .unwrap();
+    let release = format!(
+        "[{}]\n",
+        result
+            .term
+            .proper_list()
+            .unwrap()
+            .map(|character| match character {
+                Term::Integer(character) => character.to_string(),
+                other => panic!("otp_release must be a string, not {other:?}"),
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    assert_eq!(reference("otp_release"), release.into_bytes());
+    assert_eq!(reference("otp_release"), b"[50,57]\n");
+}
+
+#[test]
 fn rejects_other_system_info_items() {
-    // `io_start_probe:system_other/0` runs `erlang:system_info(otp_release)`.
-    // ERTS returns the release as a string; PBeam supports only `os_type`
-    // and returns a runtime error.
+    // `io_start_probe:system_other/0` runs `erlang:system_info(wordsize)`.
+    // ERTS returns the word size; PBeam supports only `os_type` and
+    // `otp_release` and returns a runtime error.
     let program = BeamProgram::load(&[IO_START_PROBE]).unwrap();
     let error = program
         .execute("io_start_probe", "system_other", &[])
@@ -429,8 +458,8 @@ fn rejects_other_system_info_items() {
         error.contains("unsupported erlang:system_info/1 argument"),
         "{error}"
     );
-    assert!(error.contains("otp_release"), "{error}");
-    assert_eq!(reference("system_other"), b"[50,57]\n");
+    assert!(error.contains("wordsize"), "{error}");
+    assert_eq!(reference("system_other"), b"8\n");
 }
 
 #[test]
