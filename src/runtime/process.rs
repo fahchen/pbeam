@@ -70,10 +70,11 @@ pub(super) struct Frame {
 pub(super) enum Start {
     /// The entry frame of an exported function.
     Entry(Frame),
-    /// A function that its loaded module does not export, a BIF, or a start
+    /// A BIF, a function that its loaded module does not export, or a start
     /// with more than 1023 arguments. When the process first runs, it raises
     /// `system_limit` for more than 1023 arguments, as the `apply` of ERTS
-    /// does. Else it calls the export entry: the BIF, or the error handler.
+    /// does. Else it calls the export entry, and thus the BIF or the error
+    /// handler.
     Undefined {
         /// The module of the start MFA.
         module: Atom,

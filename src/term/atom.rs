@@ -1,7 +1,8 @@
 //! Atoms and the atom table, as in ERTS OTP 29.1.1 (`atom.c`, `index.c`).
 //!
 //! ERTS gives each atom an index in one atom table for each emulator. The
-//! table starts with the 1150 static atoms (`init_atom_table`). A loaded
+//! table starts with the 1150 static atoms (`init_atom_table`). PBeam then
+//! puts the preloaded atoms that ERTS makes at emulator start. A loaded
 //! module puts its `AtU8` atoms and then its `LitT` atoms. An atom that
 //! exists keeps its index. A new atom gets the next index. ERTS never frees
 //! or reuses an index. The atom word is `(index << 6) | 0xB`, so a flatmap
@@ -25,7 +26,7 @@ use std::{
     },
 };
 
-use static_names::STATIC_ATOM_NAMES;
+use static_names::{STATIC_ATOM_COUNT, STATIC_ATOM_NAMES};
 
 use crate::{
     error::{BeamError, error},
@@ -47,6 +48,56 @@ static STATIC_INDICES: LazyLock<HashMap<&'static str, u32>> = LazyLock::new(|| {
         .map(|(index, name)| (name, index))
         .collect()
 });
+
+/// Declare the preloaded atoms: the list of their names, and one constant
+/// [`Atom`] for each name. The atom at position `i` of the list has index
+/// `STATIC_ATOM_COUNT + i` in each atom table.
+macro_rules! preloaded_atoms {
+    ($($constant:ident = $name:literal,)*) => {
+        /// The preloaded atom names, in index order after the static atoms.
+        static PRELOADED_ATOM_NAMES: [&str; [$($name),*].len()] = [$($name),*];
+
+        impl Atom {
+            preloaded_atoms!(@const 0; $($constant = $name,)*);
+        }
+    };
+    (@const $position:expr;) => {};
+    (@const $position:expr; $constant:ident = $name:literal, $($rest:tt)*) => {
+        #[doc = concat!("The preloaded atom `", $name, "`.")]
+        pub(crate) const $constant: Atom = Atom {
+            index: STATIC_ATOM_COUNT as u32 + $position,
+        };
+        preloaded_atoms!(@const $position + 1; $($rest)*);
+    };
+}
+
+// The atoms that ERTS makes at emulator start, before a user process runs,
+// and that a PBeam runtime path uses with a fixed name. Each atom table puts
+// them after the static atoms, so a path uses the constant and does not put
+// the name at each call.
+preloaded_atoms! {
+    // `os_info_init` (`erl_bif_info.c:6418-6440`).
+    UNIX = "unix",
+    // `inet_init` of the inet driver (`inet_drv.c:4554-4574`).
+    TCP = "tcp",
+    INET_ASYNC = "inet_async",
+    INET_REPLY = "inet_reply",
+    TCP_CLOSED = "tcp_closed",
+    TCP_ERROR = "tcp_error",
+    EMPTY_OUT_Q = "empty_out_q",
+    // `load` of the `prim_file` NIF library (`prim_file_nif.c:243-267`).
+    READ = "read",
+    WRITE = "write",
+    READ_WRITE = "read_write",
+    DEVICE = "device",
+    DIRECTORY = "directory",
+    REGULAR = "regular",
+    SYMLINK = "symlink",
+    OTHER = "other",
+    FILE_INFO = "file_info",
+    // `load` of the `prim_tty` NIF library (`prim_tty_nif.c:186`, `1267-1268`).
+    EBADF = "ebadf",
+}
 
 /// An atom term: its index in the atom table of one program.
 ///
@@ -183,7 +234,7 @@ pub struct AtomTable {
 
 impl AtomTable {
     /// Return a table with the 1150 static atoms at indices 0 to 1149, as
-    /// `init_atom_table` makes it.
+    /// `init_atom_table` makes it, and then the preloaded atoms.
     ///
     /// # Examples
     ///
@@ -192,13 +243,15 @@ impl AtomTable {
     /// assert_eq!(table.get("false"), Atom::from_static("false"));
     /// ```
     pub fn new() -> Self {
-        let mut indices = HashMap::with_capacity(STATIC_ATOM_NAMES.len());
-        let mut names = Vec::with_capacity(STATIC_ATOM_NAMES.len());
-        for (index, &name) in STATIC_ATOM_NAMES.iter().enumerate() {
+        let count = STATIC_ATOM_NAMES.len() + PRELOADED_ATOM_NAMES.len();
+        let mut indices = HashMap::with_capacity(count);
+        let mut names = Vec::with_capacity(count);
+        let preloaded = STATIC_ATOM_NAMES.iter().chain(&PRELOADED_ATOM_NAMES);
+        for (index, &name) in preloaded.enumerate() {
             let name: Arc<str> = Arc::from(name);
             indices.insert(
                 Arc::clone(&name),
-                u32::try_from(index).expect("STATIC_ATOM_NAMES fits in u32"),
+                u32::try_from(index).expect("the preloaded atoms fit in u32"),
             );
             names.push(name);
         }
@@ -217,7 +270,7 @@ impl AtomTable {
     /// ```rust,ignore
     /// let mut table = AtomTable::new();
     /// let zeta = table.put("pbeam_zeta")?;
-    /// assert_eq!(zeta.index, 1150);
+    /// assert_eq!(zeta.index, 1167);
     /// assert_eq!(table.put("pbeam_zeta")?, zeta);
     /// assert_eq!(table.put("ok")?.index, 506);
     /// ```

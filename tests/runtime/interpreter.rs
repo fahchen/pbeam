@@ -2953,8 +2953,8 @@ fn puts_a_new_atom_into_the_atom_table_of_the_run() {
     // ERTS has one atom table for each emulator, and
     // `erlang:list_to_atom/1` gives a new atom the next index
     // (`erts_atom_put`). A run starts with a copy of the table of the
-    // loaded modules, so `pbeam_alpha` gets index 1151 after
-    // `pbeam_zeta` (1150). The table of the loaded modules does not
+    // loaded modules, so `pbeam_alpha` gets index 1168 after
+    // `pbeam_zeta` (1167). The table of the loaded modules does not
     // change, so each run gives the same index.
     let mut program = make_program(
         vec![
@@ -2977,7 +2977,7 @@ fn puts_a_new_atom_into_the_atom_table_of_the_run() {
             .put("pbeam_zeta")
             .unwrap()
             .index(),
-        1150
+        1167
     );
     for _ in 0..2 {
         let result = program.execute("fixture", "main", &[]).unwrap();
@@ -2985,7 +2985,7 @@ fn puts_a_new_atom_into_the_atom_table_of_the_run() {
             panic!("the run returns the atom pbeam_alpha");
         };
         assert_eq!(result.atoms().name_of(alpha), "pbeam_alpha");
-        assert_eq!(alpha.index(), 1151);
+        assert_eq!(alpha.index(), 1168);
     }
     assert_eq!(program.atom("pbeam_alpha"), None);
 }
