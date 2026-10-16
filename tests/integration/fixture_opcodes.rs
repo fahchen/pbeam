@@ -218,6 +218,17 @@ fn float_test_probe_has_the_fconv_and_is_float_bytes() {
 }
 
 #[test]
+fn type_test_probe_has_the_is_number_bytes() {
+    assert_in_fixture(
+        "fixtures/type_test/type_test_probe.beam",
+        &[
+            // number/1: is_number f27 x0
+            &[0x2F, 0x0D, 0x1B, 0x03],
+        ],
+    );
+}
+
+#[test]
 fn fun_probe_has_the_fun_bytes() {
     assert_in_fixture(
         "fixtures/funs/fun_probe.beam",

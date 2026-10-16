@@ -1629,6 +1629,14 @@ pub(crate) enum TestKind {
     /// `{test,is_float,{f,5},[{x,0}]}`, as `lists:thing_to_list/1`
     /// (lists.erl:1283-1286) does.
     Float,
+    /// `is_number`, opcode 47. Example: `[0x2F, 0x0D, 0x1B, 0x03]` in
+    /// `type_test_probe:number/1` fails to label 27 unless `x0` is an
+    /// integer or a float. Erlang: `number(T) when is_number(T) -> yes;`
+    /// compiles to `{test,is_number,{f,27},[{x,0}]}`, as the first clause
+    /// of `telemetry:execute/3` (telemetry.erl:188) does. The test passes
+    /// for a bignum, because `is_integer` covers it (emu
+    /// `instrs.tab:999-1003`; JIT `jit/arm/instr_common.cpp:1403-1444`).
+    Number,
     /// `is_boolean`, opcode 114. Example: `[0x72, 0xC5, 0x03]` in
     /// `compare_probe:kind/1` fails to label 12 unless `x0` is the atom
     /// `true` or `false`. Erlang: `kind(X) when is_boolean(X) -> boolean;`
@@ -2521,6 +2529,7 @@ pub(super) fn parse_code(
             | OPCODE_TEST_IS_FUNCTION
             | OPCODE_TEST_IS_INTEGER
             | OPCODE_TEST_IS_FLOAT
+            | OPCODE_TEST_IS_NUMBER
             | OPCODE_TEST_IS_BOOLEAN => {
                 let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
                 let value = read_move_operand(data, &mut cursor, atoms, literals)?;
@@ -2750,6 +2759,7 @@ fn test_kind(opcode: u8) -> Result<TestKind, BeamError> {
         OPCODE_TEST_IS_FUNCTION => Ok(TestKind::Function),
         OPCODE_TEST_IS_INTEGER => Ok(TestKind::Integer),
         OPCODE_TEST_IS_FLOAT => Ok(TestKind::Float),
+        OPCODE_TEST_IS_NUMBER => Ok(TestKind::Number),
         OPCODE_TEST_IS_BOOLEAN => Ok(TestKind::Boolean),
         _ => Err(error(format!("unsupported BEAM type-test opcode {opcode}"))),
     }
@@ -3127,8 +3137,7 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         OPCODE_BIF0 => Some(2),
         OPCODE_TEST_EXACT_EQ => Some(3),
         OPCODE_TEST_TAGGED_TUPLE => Some(4),
-        OPCODE_TEST_IS_NUMBER
-        | OPCODE_TEST_IS_ATOM
+        OPCODE_TEST_IS_ATOM
         | OPCODE_TEST_IS_PID
         | OPCODE_TEST_IS_BINARY
         | OPCODE_TEST_IS_LIST

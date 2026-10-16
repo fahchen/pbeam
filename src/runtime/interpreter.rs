@@ -1167,6 +1167,12 @@ impl BeamProgram {
                         // `erl_term.h:484-485`; JIT `emit_is_float` in
                         // `jit/arm/instr_common.cpp:1229-1245`).
                         TestKind::Float => matches!(value, Term::Float(_)),
+                        // `is_number` passes for a small integer, a bignum,
+                        // and a float (emu `instrs.tab:999-1003`:
+                        // `is_not_integer(Src) && is_not_float(Src)`; JIT
+                        // `emit_is_number` in
+                        // `jit/arm/instr_common.cpp:1403-1444`).
+                        TestKind::Number => value.is_integer() || matches!(value, Term::Float(_)),
                         TestKind::Boolean => {
                             matches!(value, Term::Atom(atom) if atom.is_one_of(&["true", "false"]))
                         }
