@@ -68,6 +68,36 @@ pub(super) fn keymember(
     }
 }
 
+/// Run `lists:keysearch/3`: return `{value, Tuple}` when [`keyfind`]
+/// finds a tuple, else the result of [`keyfind`], as ERTS
+/// `lists_keysearch_3` does (`erl_bif_lists.c:1279-1292`). Thus `false`
+/// comes when no tuple matches, the arguments that [`keyfind`] does not
+/// accept raise `badarg`, and a trap goes to the export of
+/// `lists:keysearch/3`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let entry = Term::tuple(vec![Term::static_atom("ok"), Term::Integer(1)]);
+/// let found = keysearch(&mut process, &Term::static_atom("ok"), &Term::Integer(1), &Term::list_from(vec![entry.clone()]));
+/// assert!(matches!(found, BifResult::Value(value) if value == Term::tuple(vec![Term::static_atom("value"), entry])));
+/// let missing = keysearch(&mut process, &Term::Integer(1), &Term::Integer(1), &Term::nil());
+/// assert!(matches!(missing, BifResult::Value(Term::Atom(atom)) if atom.is_static("false"));
+/// ```
+pub(super) fn keysearch(
+    process: &mut ProcessState,
+    key: &Term,
+    position: &Term,
+    list: &Term,
+) -> BifResult {
+    match key_search(process, "keysearch", key, position, list) {
+        Value(found @ Term::Tuple(_)) => {
+            Value(Term::tuple(vec![Term::static_atom("value"), found]))
+        }
+        result => result,
+    }
+}
+
 /// Return true when a key of `lists:keyfind/3` matches a tuple element, as
 /// ERTS `keyfind` compares them (`erl_bif_lists.c:1311-1375`): a small
 /// integer key matches an equal integer or a float equal to the key cast to

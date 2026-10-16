@@ -465,6 +465,7 @@ Each row is a BIF entry of `BIFS` that has a body.
 | `io:printable_range/0` | `none` | `none` | `pure` | `inline` | Gives `latin1`. | `O(1)` | `src/runtime/interpreter/bif/table.rs` |
 | `lists:keyfind/3` | `process.self` | `none` | `run` | `inline`, `trap` | Finds the first tuple with a key. Costs no reduction. After 40000 elements, it uses the budget of the caller, traps to its export, and continues in the next turn. | `O(n)` | `src/runtime/interpreter/bif/lists.rs` |
 | `lists:keymember/3` | `process.self` | `none` | `run` | `inline`, `trap` | Tells whether a tuple has a key. Costs and traps as `lists:keyfind/3`. | `O(n)` | `src/runtime/interpreter/bif/lists.rs` |
+| `lists:keysearch/3` | `process.self` | `none` | `run` | `inline`, `trap` | Gives `{value, Tuple}` for the first tuple with a key, or `false`. Costs and traps as `lists:keyfind/3`. | `O(n)` | `src/runtime/interpreter/bif/lists.rs` |
 | `lists:member/2` | `process.self` | `none` | `run` | `inline`, `trap` | Tells whether a list has an element. Uses one reduction of the budget of the caller for each 16 compared elements. At the end of the budget, it traps to its export and continues in the next turn. | `O(n)` | `src/runtime/interpreter/bif/lists.rs` |
 | `lists:reverse/2` | `process.self` | `none` | `run` | `inline`, `trap` | Reverses a list onto a tail. Uses one reduction of the budget of the caller for each 60 elements. At the end of the budget, it traps to its export and continues in the next turn. | `O(n)` | `src/runtime/interpreter/bif/lists.rs` |
 | `maps:find/2` | `none` | `none` | `pure` | `inline` | Gives `{ok, Value}` or `error`. | `O(n)` | `src/runtime/interpreter/bif/maps.rs` |
@@ -506,7 +507,6 @@ Each entry is a BIF entry of `BIFS` with the form `unsupported`. A call gives th
 - `erts_literal_area_collector`: `release_area_switch/0`, `send_copy_request/3`
 - `erts_trace_cleaner`: `check/0`, `send_trace_clean_signal/1`
 - `ets`: `delete_object/2`, `first/1`, `first_lookup/1`, `give_away/3`, `info/1`, `insert_new/2`, `internal_delete_all/2`, `internal_request_all/0`, `internal_select_delete/2`, `is_compiled_ms/1`, `last/1`, `last_lookup/1`, `lookup_element/3`, `match/1`, `match_object/1`, `match_object/2`, `match_object/3`, `match_spec_compile/1`, `match_spec_run_r/3`, `next/2`, `next_lookup/2`, `prev/2`, `prev_lookup/2`, `rename/2`, `safe_fixtable/2`, `select/1`, `select/2`, `select/3`, `select_count/2`, `select_replace/2`, `select_reverse/1`, `select_reverse/2`, `select_reverse/3`, `setopts/2`, `slot/2`, `take/2`, `update_counter/3`, `update_counter/4`, `update_element/3`, `update_element/4`
-- `lists`: `keysearch/3`
 - `maps`: `get/2`, `is_key/2`, `update/3`, `values/1`
 - `math`: `acos/1`, `acosh/1`, `asin/1`, `asinh/1`, `atan/1`, `atan2/2`, `atanh/1`, `ceil/1`, `cos/1`, `cosh/1`, `erf/1`, `erfc/1`, `exp/1`, `floor/1`, `fmod/2`, `log/1`, `log10/1`, `log2/1`, `pow/2`, `sin/1`, `sinh/1`, `sqrt/1`, `tan/1`, `tanh/1`
 - `os`: `env/0`, `getpid/0`, `perf_counter/0`, `putenv/2`, `system_time/0`, `timestamp/0`, `unsetenv/1`

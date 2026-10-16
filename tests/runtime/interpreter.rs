@@ -1640,22 +1640,22 @@ fn never_runs_the_stub_of_a_table_bif_that_pbeam_does_not_implement() {
             Instruction::Move(atom("a"), Operand::X(0)),
             Instruction::Move(Operand::Value(Term::Integer(1)), Operand::X(1)),
             Instruction::Move(Operand::Value(Term::nil()), Operand::X(2)),
-            external("lists", "keysearch", 3, true, 0),
+            external("maps", "update", 3, true, 0),
             Instruction::Return,
         ],
         0,
     );
     program.modules.insert(
-        "lists".into(),
+        "maps".into(),
         Rc::new(
             BeamModule::new(
-                "lists".into(),
-                HashMap::from([(("keysearch".into(), 3), 1)]),
+                "maps".into(),
+                HashMap::from([(("update".into(), 3), 1)]),
                 Vec::new(),
                 vec![
                     Instruction::FunctionInfo {
-                        module: "lists".into(),
-                        name: "keysearch".into(),
+                        module: "maps".into(),
+                        name: "update".into(),
                         arity: 3,
                     },
                     Instruction::Label(1),
@@ -1666,14 +1666,14 @@ fn never_runs_the_stub_of_a_table_bif_that_pbeam_does_not_implement() {
             .expect("the fixture module loads"),
         ),
     );
-    // `lists:keysearch/3` is in the ERTS 29.1.1 `bif.tab`. ERTS runs the
-    // BIF, so the BEAM stub body of the loaded `lists` module must not run.
+    // `maps:update/3` is in the ERTS 29.1.1 `bif.tab`. ERTS runs the
+    // BIF, so the BEAM stub body of the loaded `maps` module must not run.
     assert_eq!(
         program
             .execute("fixture", "main", &[])
             .unwrap_err()
             .to_string(),
-        "unresolved external MFA lists:keysearch/3"
+        "unresolved external MFA maps:update/3"
     );
     // `is_bif` finds an entry with a binary search.
     // Strictly increasing: sorted for a binary search, with no duplicate entry.
