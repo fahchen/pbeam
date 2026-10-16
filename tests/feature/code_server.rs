@@ -235,34 +235,128 @@ fn loads_an_on_load_module_through_a_hibernated_erts_code_purger_as_pinned_erts(
 }
 
 #[test]
-fn stops_when_code_server_purges_the_code_of_a_failed_on_load_function() {
-    // On the pinned ERTS, `erts_code_purger` purges the code of a failed
-    // `-on_load` function with `erts_internal:purge_module/2`, and the load
-    // gives `{error, on_load_failure}` (code_server.erl:1360-1368;
-    // erts_code_purger.erl:166-182). PBeam has no code purge yet.
-    // The crash of the on_load process can add an error report after the
-    // result.
+fn purges_the_code_of_a_failed_on_load_function_as_pinned_erts() {
+    // `erts_code_purger` purges the code of a failed `-on_load` function with
+    // `erts_internal:purge_module/2`, and the load gives
+    // `{error, on_load_failure}` (code_server.erl:1360-1368;
+    // erts_code_purger.erl:166-182). A later call loads the module again,
+    // and its function fails again. The crash of the on_load process can
+    // add an error report after the result on ERTS.
+    let expected = "[{error,on_load_failure},false,{error,undef},false]\n";
     let erts = run(&mut erts_probe(
         ON_LOAD_PROBE,
         "on_load_server_probe",
         "failure",
         &[],
     ));
+    assert!(erts.starts_with(expected), "{erts}");
+    assert_eq!(
+        run(&mut pbeam_probe(
+            ON_LOAD_PROBE,
+            "on_load_server_probe",
+            "failure",
+            &[]
+        )),
+        expected
+    );
+}
+
+#[test]
+fn kills_a_process_in_the_code_of_a_failed_on_load_function_as_pinned_erts() {
+    // The `check_process_code` request finds the process in the code, and
+    // `erts_code_purger` kills it before it purges the code
+    // (erts_code_purger.erl:166-182, 249-265; beam_bif_load.c:1149-1185).
+    let erts = run(&mut erts_probe(
+        ON_LOAD_PROBE,
+        "on_load_server_probe",
+        "killed",
+        &[],
+    ));
     assert!(
-        erts.starts_with("[{error,on_load_failure},false,{error,undef},false]\n"),
+        erts.starts_with("[{error,on_load_failure},false,false]\n"),
         "{erts}"
     );
-    let output = pbeam_probe(ON_LOAD_PROBE, "on_load_server_probe", "failure", &[])
-        .env("TERM", "dumb")
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        !output.status.success()
-            && stderr == "pbeam: unresolved external MFA erts_internal:purge_module/2\n",
-        "{output:?}"
+    assert_eq!(
+        run(&mut pbeam_probe(
+            ON_LOAD_PROBE,
+            "on_load_server_probe",
+            "killed",
+            &[]
+        )),
+        "[{error,on_load_failure},false,false]\n"
     );
+}
+
+#[test]
+fn checks_the_arguments_of_the_bifs_of_erts_code_purger_as_pinned_erts() {
+    // The argument checks and results of `erts_internal:purge_module/2`
+    // from a process that is not `erts_code_purger`,
+    // `erts_internal:request_system_task/3`, `erts_internal:processes_next/1`,
+    // and `erlang:system_info(outstanding_system_requests_limit)`
+    // (beam_bif_load.c:2090-2092; erl_process.c:11309-11492;
+    // erl_ptab.c:1472-1534; erl_init.c:1354).
+    let erts = run(&mut erts_probe(
+        ON_LOAD_PROBE,
+        "on_load_server_probe",
+        "system_tasks",
+        &[],
+    ));
+    assert!(erts.contains("[none,true,2],\n {error,notsup}]"), "{erts}");
+    assert_eq!(
+        run(&mut pbeam_probe(
+            ON_LOAD_PROBE,
+            "on_load_server_probe",
+            "system_tasks",
+            &[]
+        )),
+        erts
+    );
+}
+
+#[test]
+fn checks_the_arguments_of_erts_internal_purge_module_from_erts_code_purger() {
+    // PBeam only: PBeam lets the process registered as `erts_code_purger`
+    // call the BIF, and the probe takes the name. The results follow
+    // `erts_internal_purge_module_2` (beam_bif_load.c:2094-2098, 2108-2110,
+    // 2122-2126, 2231-2233, 2328-2336). The last load runs the on_load
+    // function through the real `erts_code_purger` again.
+    assert_eq!(
+        run(&mut pbeam_probe(
+            ON_LOAD_PROBE,
+            "on_load_server_probe",
+            "fake_purger",
+            &[]
+        )),
+        "[[{on_load,[on_load_error]},\n  true,\n  {error,badarg},\n  {error,badarg},\n  \
+         {error,badarg},\n  false,true,\n  {error,badarg},\n  {error,badarg},\n  true,\n  \
+         {error,badarg},\n  false],\n {error,on_load_failure}]\n"
+    );
+}
+
+#[test]
+fn stops_for_the_purge_operations_that_pbeam_does_not_support() {
+    for (function, message) in [
+        (
+            "purge_loaded",
+            "pbeam: erts_internal:purge_module/2 found no on_load code of lists\n",
+        ),
+        (
+            "purge_prepare",
+            "pbeam: unsupported erts_internal:purge_module/2 operation prepare\n",
+        ),
+        (
+            "gc_task",
+            "pbeam: unsupported erts_internal:request_system_task/3 request garbage_collect\n",
+        ),
+    ] {
+        let output = pbeam_probe(ON_LOAD_PROBE, "on_load_server_probe", function, &[])
+            .env("TERM", "dumb")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success() && stderr == message, "{output:?}");
+    }
 }
 
 #[test]

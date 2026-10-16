@@ -4,6 +4,7 @@ use super::BifResult::Value;
 use super::erlang::signals_return;
 use super::*;
 use crate::beam::code::PrepareError;
+use crate::runtime::scheduler::PTAB_SIZE;
 use crate::runtime::{
     capability::{CapabilityKind, Operation},
     host::{
@@ -1250,4 +1251,220 @@ pub(super) fn scheduler_wall_time(
         function: "await_sched_wall_time_modifications",
         arguments: vec![reference, Term::static_atom("false")],
     })
+}
+
+/// The indices of the ERTS process table that `erts_internal:processes_next/1`
+/// reads for each pid that it can give, and for one reduction
+/// (`ERTS_PTAB_REDS_MULTIPLIER`, `erl_ptab.c:1470`).
+const PTAB_REDS_MULTIPLIER: u64 = 25;
+
+/// Run `erts_internal:processes_next(Index)`, which `erlang:processes_next/1`
+/// of `erlang.beam` calls, as `erts_ptab_processes_next`
+/// (`erl_ptab.c:1472-1534`, `bif.c:4107-4118`) does. The call gives at most
+/// one pid for each reduction left, and at least one. It reads 25 indices
+/// of the table for each such pid, from `Index`, and returns
+/// `{Next, Pids}`: the pids of the processes at these indices in the index
+/// order of the ERTS table, also an exiting process, and the index after
+/// the read. It stops after the last pid that it can give. It charges 1
+/// reduction for each 25 indices that it read, and 1 more. `Index` equal
+/// to the size of the table gives `none`. An `Index` that is not a small
+/// integer, or that is more than the size of the table, raises `badarg`. A
+/// process that is not a boot process does not get the pid of the policy
+/// process, as for `erlang:processes/0`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = processes_next(&mut scheduler, &Term::Integer(0))?;
+/// assert!(matches!(result, BifResult::Value(Term::Tuple(_))));
+/// ```
+///
+/// # Errors
+///
+/// A budget of the current process that is less than 0.
+pub(super) fn processes_next(
+    scheduler: &mut Scheduler,
+    first: &Term,
+) -> Result<BifResult, BeamError> {
+    let Some(first) = (match first {
+        Term::Integer(first) => u64::try_from(*first).ok(),
+        _ => None,
+    }) else {
+        return Ok(BifResult::badarg());
+    };
+    let max_pids = scheduler.current_process().bif_reductions_left()?.max(1) as u64;
+    let limit = PTAB_SIZE.min(first.saturating_add(max_pids * PTAB_REDS_MULTIPLIER));
+    if first > limit {
+        return Ok(BifResult::badarg());
+    }
+    if first == limit {
+        return Ok(Value(Term::static_atom("none")));
+    }
+    let hidden = super::erlang::hidden_policy(scheduler);
+    let mut pids = Vec::new();
+    let mut next = limit;
+    for (index, id) in scheduler.ptab_indexed(first, limit) {
+        if Some(id) != hidden {
+            pids.push(Term::Pid(id));
+        }
+        if pids.len() as u64 == max_pids {
+            next = index + 1;
+            break;
+        }
+    }
+    let scanned = (next - first) / PTAB_REDS_MULTIPLIER + 1;
+    scheduler
+        .current_process_mut()
+        .bump_reductions(scanned as i32);
+    Ok(Value(Term::tuple(vec![
+        Term::Integer(next as i64),
+        Term::list_from(pids),
+    ])))
+}
+
+/// Run `erts_internal:request_system_task(Pid, Priority, Request)` for the
+/// request `{check_process_code, RequestId, Module}`, which
+/// `erts_code_purger` sends to each process (`erts_code_purger.erl:342-344`),
+/// as `request_system_task` (`erl_process.c:11309-11492`) checks its
+/// arguments. The BIF returns `ok`, and the caller gets the message
+/// `{check_process_code, RequestId, Result}`. `Result` is `true` when the
+/// process `Pid` has a frame in the old code of `Module`, as
+/// `check_process_code` (`beam_bif_load.c:1149-1212`) looks at the
+/// instruction pointer and the continuation pointers of the stack, and
+/// else `false`. A pid of no process, or of an exiting process, gives
+/// `false` (`erl_process.c:11425-11433`, `11478-11483`).
+///
+/// A `Pid` that is not a pid, a `Priority` that is not `max`, `high`,
+/// `normal`, `low`, or `inherit`, and a `Request` that is not a tuple of 2
+/// to 4 elements with a known request type raise `badarg`, and so does a
+/// `check_process_code` request with a `Module` that is not an atom. ERTS
+/// runs the check when the process `Pid` next runs; PBeam runs it at once
+/// (row "Code loading" of `docs/erts-differences.md`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let request = Term::tuple(vec![Term::static_atom("check_process_code"), tag, module]);
+/// let result = request_system_task(&mut scheduler, &pid, &Term::static_atom("normal"), &request)?;
+/// assert!(matches!(result, BifResult::Value(_)));
+/// ```
+///
+/// # Errors
+///
+/// The request types `garbage_collect` and `system_task_test` give the
+/// runtime error `unsupported erts_internal:request_system_task/3 request
+/// R`.
+pub(super) fn request_system_task(
+    scheduler: &mut Scheduler,
+    target: &Term,
+    priority: &Term,
+    request: &Term,
+) -> Result<BifResult, BeamError> {
+    let Term::Pid(target) = target else {
+        return Ok(BifResult::badarg());
+    };
+    let Term::Atom(priority) = priority else {
+        return Ok(BifResult::badarg());
+    };
+    if !priority.is_one_of(&["max", "high", "normal", "low", "inherit"]) {
+        return Ok(BifResult::badarg());
+    }
+    let Term::Tuple(elements) = request else {
+        return Ok(BifResult::badarg());
+    };
+    let [Term::Atom(kind), id, arguments @ ..] = elements.as_ref() else {
+        return Ok(BifResult::badarg());
+    };
+    if arguments.len() > 2 {
+        return Ok(BifResult::badarg());
+    }
+    // `system_task_test` is not a static atom: ERTS compares its name
+    // (`erl_process.c:11447`).
+    if kind.is_static("garbage_collect") || scheduler.atoms.name_of(kind) == "system_task_test" {
+        return Err(error(format!(
+            "unsupported erts_internal:request_system_task/3 request {}",
+            scheduler.atoms.name_of(kind)
+        )));
+    }
+    let (true, [Term::Atom(module), ..]) = (kind.is_static("check_process_code"), arguments) else {
+        return Ok(BifResult::badarg());
+    };
+    let old = scheduler.code.old_code(scheduler.atoms.name_of(module));
+    let refers = scheduler
+        .live_process(*target)
+        .zip(old)
+        .is_some_and(|(process, old)| process.frames.iter().any(|frame| frame.module_id == old));
+    let caller = scheduler.current_process().id;
+    let reply = Term::tuple(vec![
+        Term::Atom(kind.clone()),
+        id.clone(),
+        Term::static_atom(if refers { "true" } else { "false" }),
+    ]);
+    scheduler.send_message(caller, caller, reply);
+    Ok(Value(Term::static_atom("ok")))
+}
+
+/// Run `erts_internal:purge_module(Module, Operation)` for the operations
+/// that `erts_code_purger` runs after a failed `-on_load` function
+/// (`erts_code_purger.erl:166-182`), as `erts_internal_purge_module_2`
+/// (`beam_bif_load.c:2088-2337`) does. A caller that is not the process
+/// registered as `erts_code_purger` raises `notsup`. A `Module` that is not
+/// an atom, and an `Operation` that is not `prepare`, `prepare_on_load`,
+/// `abort`, or `complete`, raise `badarg`.
+///
+/// - `prepare_on_load` makes the code that waits for the `-on_load`
+///   function of `Module` the old code of the module and returns `true`
+///   after the caller switches out. It returns `false` for a module that
+///   the run does not have, and raises `badarg` while a purge runs.
+/// - `complete` removes the old code and returns `true`. It raises
+///   `badarg` when no purge of `Module` runs.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let prepared = purge_module(&mut scheduler, &module, &Term::static_atom("prepare_on_load"))?;
+/// assert!(matches!(prepared, BifResult::YieldReturn(_)));
+/// ```
+///
+/// # Errors
+///
+/// `prepare` and `abort` give the runtime error `unsupported
+/// erts_internal:purge_module/2 operation O`: PBeam has no old code
+/// outside the purge of a failed `-on_load` function. `prepare_on_load`
+/// gives the error of [`CodeTable::prepare_on_load_purge`].
+pub(super) fn purge_module(
+    scheduler: &mut Scheduler,
+    module: &Term,
+    operation: &Term,
+) -> Result<BifResult, BeamError> {
+    let purger = scheduler.whereis("erts_code_purger");
+    if purger != Some(scheduler.current_process().id) {
+        return Ok(BifResult::Raise {
+            class: ExceptionClass::Error,
+            reason: Term::static_atom("notsup"),
+        });
+    }
+    let (Term::Atom(module), Term::Atom(operation)) = (module, operation) else {
+        return Ok(BifResult::badarg());
+    };
+    let name = scheduler.atoms.name_of(module).to_owned();
+    if operation.is_one_of(&["prepare", "abort"]) {
+        return Err(error(format!(
+            "unsupported erts_internal:purge_module/2 operation {}",
+            scheduler.atoms.name_of(operation)
+        )));
+    }
+    if operation.is_static("prepare_on_load") {
+        return Ok(match scheduler.code.prepare_on_load_purge(&name)? {
+            // ERTS suspends the caller until all schedulers see the purge
+            // (`beam_bif_load.c:2169-2185`).
+            Some(true) => BifResult::YieldReturn(Term::static_atom("true")),
+            Some(false) => Value(Term::static_atom("false")),
+            None => BifResult::badarg(),
+        });
+    }
+    if operation.is_static("complete") && scheduler.code.complete_purge(&name) {
+        return Ok(Value(Term::static_atom("true")));
+    }
+    Ok(BifResult::badarg())
 }
