@@ -298,14 +298,14 @@ impl Scheduler {
         reason: &Term,
     ) -> Result<(), BeamError> {
         let ports = self.resources.borrow_mut::<Ports>();
-        let Some(port) = ports.get(id).filter(|port| port.owner == from) else {
-            return Ok(());
-        };
-        check_flush(port, reason)?;
-        let mut port = ports.remove(id).expect("the port is open");
-        let monitors = std::mem::take(&mut port.monitors);
-        self.port_monitors_down(&monitors, reason);
-        self.stop_port(id, port);
+        let owned = ports.get(id).filter(|port| port.owner == from);
+        owned.map_or(Ok(()), |port| check_flush(port, reason))?;
+        if owned.is_some() {
+            let mut port = ports.remove(id).expect("the port is open");
+            let monitors = std::mem::take(&mut port.monitors);
+            self.port_monitors_down(&monitors, reason);
+            self.stop_port(id, port);
+        }
         Ok(())
     }
 }
