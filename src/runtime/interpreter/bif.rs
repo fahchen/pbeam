@@ -16,6 +16,7 @@ use crate::runtime::{
 };
 use crate::term::ProcessId;
 
+mod atomics;
 mod binary;
 mod erlang;
 mod erts_internal;

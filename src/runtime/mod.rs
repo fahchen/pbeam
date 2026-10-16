@@ -1,3 +1,4 @@
+mod atomics;
 mod buffers;
 mod capability;
 mod dirty_io;

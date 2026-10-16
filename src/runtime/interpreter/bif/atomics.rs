@@ -1,0 +1,361 @@
+//! Bodies of the `atomics` BIFs and of the `erts_internal:atomics_new/2`
+//! BIF that makes an atomic array. The preloaded `counters` module of the
+//! node calls them in its default `atomics` mode
+//! (`erts/preloaded/src/counters.erl:100-247`).
+
+use num_bigint::{BigInt, Sign};
+use num_traits::ToPrimitive;
+
+use super::BifResult::Value;
+use super::*;
+use crate::runtime::atomics::{ATOMIC_BYTES, Array};
+use crate::term::Map;
+
+/// The bit of the encoded options of `atomics:new/2` that selects signed
+/// atomics (`?OPT_SIGNED`, `atomics.erl:63`; `OPT_SIGNED`,
+/// `erl_bif_atomics.c:54`).
+const OPT_SIGNED: u64 = 1;
+
+/// Run `erts_internal:atomics_new(Size, Options)`: make the atomic array
+/// and return its reference, as `erts_internal_atomics_new_2`
+/// (`erl_bif_atomics.c:56-89`) does. `Options` is the encoded options of
+/// `atomics:new/2`, and bit 0 selects the signed range.
+///
+/// The checks keep the ERTS order, so PBeam raises the same exception for
+/// each call:
+///
+/// 1. A `Size` that is not a non-negative integer raises `badarg`, and a
+///    positive integer above the machine word raises `system_limit`
+///    (`term_to_UWord`, `big.c:3564-3605`).
+/// 2. A `Size` of 0 raises `badarg` (`erl_bif_atomics.c:67-69`).
+/// 3. `Options` gives these two exceptions in the same way
+///    (`erl_bif_atomics.c:70-72`).
+/// 4. A `Size` above the machine word divided by the bytes of an atomic
+///    raises `system_limit` (`erl_bif_atomics.c:74-75`).
+/// 5. An allocation that fails raises `system_limit`
+///    (`erl_bif_atomics.c:77-88`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // `atomics:new(1, [])` encodes the signed option as 1.
+/// let result = new(&mut scheduler, &Term::Integer(1), &Term::Integer(1))?;
+/// assert!(matches!(result, BifResult::Value(Term::Reference(_))));
+/// ```
+///
+/// # Errors
+///
+/// A full reference counter gives the error of [`Scheduler::make_ref`].
+pub(super) fn new(
+    scheduler: &mut Scheduler,
+    size: &Term,
+    options: &Term,
+) -> Result<BifResult, BeamError> {
+    let size = match to_uword(size) {
+        Ok(size) => size,
+        Err(exception) => return Ok(exception),
+    };
+    if size == 0 {
+        return Ok(BifResult::badarg());
+    }
+    let options = match to_uword(options) {
+        Ok(options) => options,
+        Err(exception) => return Ok(exception),
+    };
+    if size > u64::MAX / ATOMIC_BYTES {
+        return Ok(system_limit());
+    }
+    // PBeam runs on 64-bit hosts, and the check above keeps the size of the
+    // array in `usize`.
+    let id = scheduler.make_ref()?;
+    if !scheduler
+        .atomics
+        .create(id, options & OPT_SIGNED == OPT_SIGNED, size as usize)
+    {
+        return Ok(system_limit());
+    }
+    Ok(Value(Term::Reference(id)))
+}
+
+/// Run `atomics:get(Ref, Ix)`: return the value of the atomic at the index,
+/// as `atomics_get_2` (`erl_bif_atomics.c:162-171`) does. A reference that
+/// is not the reference of an array and an index that is not an atomic of
+/// the array raise `badarg` (`get_ref_ix`, `erl_bif_atomics.c:104-110`). A
+/// signed array gives a signed integer, and an unsigned array gives a
+/// non-negative integer (`bld_atomic`, `erl_bif_atomics.c:125-146`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // `counters:get(Ref, 1)` of an empty array gives 0.
+/// assert_eq!(get(&mut scheduler, &reference, &Term::Integer(1))?, BifResult::Value(Term::Integer(0)));
+/// ```
+///
+/// # Errors
+///
+/// A full atom table gives the error of [`Term::from_bigint`].
+pub(super) fn get(
+    scheduler: &mut Scheduler,
+    reference: &Term,
+    index: &Term,
+) -> Result<BifResult, BeamError> {
+    let Some(array) = scheduler.atomics.array(reference) else {
+        return Ok(BifResult::badarg());
+    };
+    let Some(position) = position(array, index) else {
+        return Ok(BifResult::badarg());
+    };
+    Ok(Value(value(array.signed(), array.get(position))))
+}
+
+/// Run `atomics:put(Ref, Ix, Value)`: write `Value` to the atomic at the
+/// index, as `atomics_put_3` (`erl_bif_atomics.c:148-160`) does.
+///
+/// A reference that is not the reference of an array, an index that is not
+/// an atomic of the array, and a value outside the range of the array raise
+/// `badarg`: a signed array takes the signed 64-bit range, and an unsigned
+/// array the unsigned one (`get_ref_ix` and `get_value`,
+/// `erl_bif_atomics.c:104-117`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // `counters:put(Ref, 1, -1)` on a signed array gives ok.
+/// let result = put(&mut scheduler, &reference, &Term::Integer(1), &Term::Integer(-1))?;
+/// assert!(matches!(result, BifResult::Value(Term::Atom(_))));
+/// ```
+pub(super) fn put(
+    scheduler: &mut Scheduler,
+    reference: &Term,
+    index: &Term,
+    value: &Term,
+) -> Result<BifResult, BeamError> {
+    let Some(array) = scheduler.atomics.array_mut(reference) else {
+        return Ok(BifResult::badarg());
+    };
+    let Some(position) = position(array, index) else {
+        return Ok(BifResult::badarg());
+    };
+    let Some(bits) = value_bits(array.signed(), value) else {
+        return Ok(BifResult::badarg());
+    };
+    array.set(position, bits);
+    Ok(Value(Term::static_atom("ok")))
+}
+
+/// Run `atomics:add(Ref, Ix, Incr)`: add `Incr` to the atomic at the index,
+/// as `atomics_add_3` (`erl_bif_atomics.c:173-185`) does. The result wraps
+/// around at 64 bits.
+///
+/// A reference that is not the reference of an array, an index that is not
+/// an atomic of the array, and an increment outside the signed and the
+/// unsigned 64-bit ranges raise `badarg` (`get_ref_ix` and `get_incr`,
+/// `erl_bif_atomics.c:104-110`, `119-123`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // `counters:add(Ref, 1, 1)` gives ok on each signed and unsigned array.
+/// let result = add(&mut scheduler, &reference, &Term::Integer(1), &Term::Integer(1))?;
+/// assert!(matches!(result, BifResult::Value(Term::Atom(_))));
+/// ```
+pub(super) fn add(
+    scheduler: &mut Scheduler,
+    reference: &Term,
+    index: &Term,
+    increment: &Term,
+) -> Result<BifResult, BeamError> {
+    let Some(array) = scheduler.atomics.array_mut(reference) else {
+        return Ok(BifResult::badarg());
+    };
+    let Some(position) = position(array, index) else {
+        return Ok(BifResult::badarg());
+    };
+    let Some(bits) = increment_bits(increment) else {
+        return Ok(BifResult::badarg());
+    };
+    array.add(position, bits);
+    Ok(Value(Term::static_atom("ok")))
+}
+
+/// Run `atomics:info(Ref)`: return the information map of the array, as
+/// `atomics_info_1` (`erl_bif_atomics.c:229-268`) does. The map holds the
+/// keys `max`, `min`, `size`, and `memory`, and `memory` is the memory of
+/// the array in bytes. A reference that is not the reference of an array
+/// raises `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // `counters:info(Ref)` of one signed atomic holds
+/// // `#{max => 9223372036854775807, memory => 48, min => -9223372036854775808, size => 1}`.
+/// assert!(matches!(info(&mut scheduler, &reference)?, BifResult::Value(Term::Map(_))));
+/// ```
+pub(super) fn info(scheduler: &mut Scheduler, reference: &Term) -> Result<BifResult, BeamError> {
+    let Some(array) = scheduler.atomics.array(reference) else {
+        return Ok(BifResult::badarg());
+    };
+    let (min, max) = if array.signed() {
+        (Term::Integer(i64::MIN), Term::Integer(i64::MAX))
+    } else {
+        (Term::Integer(0), Term::from_bigint(BigInt::from(u64::MAX)))
+    };
+    let pairs = vec![
+        (Term::static_atom("max"), max),
+        (Term::static_atom("memory"), Term::Integer(array.memory())),
+        (Term::static_atom("min"), min),
+        (Term::static_atom("size"), Term::Integer(array.len() as i64)),
+    ];
+    // ponytail: each key is a static atom, so `from_pairs` cannot fail.
+    let map = Map::from_pairs(pairs, &scheduler.atoms).expect("static atom keys fit each map form");
+    Ok(Value(Term::Map(map)))
+}
+
+/// Return the machine word of `term`, as ERTS `term_to_UWord` gives it
+/// (`big.c:3564-3605`, which is `term_to_Uint` on a 64-bit machine). The
+/// error is the exception of the failure: `badarg` for a term that is not a
+/// non-negative integer, and `system_limit` for a positive integer above
+/// the machine word.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(to_uword(&Term::Integer(2)), Ok(2));
+/// assert!(matches!(to_uword(&Term::Integer(-1)), Err(BifResult::Raise { .. })));
+/// ```
+fn to_uword(term: &Term) -> Result<u64, BifResult> {
+    match term {
+        Term::Integer(value) => u64::try_from(*value).map_err(|_| BifResult::badarg()),
+        // `big_sign` (`big.c:3584-3587`): a negative integer of any size
+        // raises `badarg`, and a positive integer above the machine word
+        // raises `system_limit` (`big.c:3588-3591`).
+        Term::BigInt(value) if value.sign() == Sign::Minus => Err(BifResult::badarg()),
+        Term::BigInt(value) => value.to_u64().ok_or_else(system_limit),
+        _ => Err(BifResult::badarg()),
+    }
+}
+
+/// Return the `error:system_limit` exception, which ERTS raises with
+/// `BIF_ERROR(p, SYSTEM_LIMIT)` for a size above the limit of the machine.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(system_limit(), BifResult::Raise { .. }));
+/// ```
+fn system_limit() -> BifResult {
+    BifResult::Raise {
+        class: ExceptionClass::Error,
+        reason: Term::static_atom("system_limit"),
+    }
+}
+
+/// Return the position of the atomic that `index` names, or `None` when the
+/// index is not an atomic of `array`.
+///
+/// `get_ref_ix` (`erl_bif_atomics.c:104-110`) makes the machine word of the
+/// term, subtracts one, and checks the result against the size. ERTS raises
+/// `badarg` for each failure, so the reason of [`to_uword`] does not show.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // The index 2 of an array of two atomics is its last position, 1.
+/// assert_eq!(position(&array, &Term::Integer(2)), Some(1));
+/// assert_eq!(position(&array, &Term::Integer(0)), None);
+/// ```
+fn position(array: &Array, index: &Term) -> Option<usize> {
+    let index = to_uword(index).ok()?.checked_sub(1)?;
+    (index < array.len() as u64).then_some(index as usize)
+}
+
+/// Return the bits of the value `term` for an array, as `get_value`
+/// (`erl_bif_atomics.c:112-117`) reads it: a signed array takes the signed
+/// 64-bit range, and an unsigned array the unsigned one. `None` gives
+/// `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(value_bits(true, &Term::Integer(-1)), Some(-1));
+/// assert_eq!(value_bits(false, &Term::Integer(-1)), None);
+/// ```
+fn value_bits(signed: bool, term: &Term) -> Option<i64> {
+    if signed {
+        signed_bits(term)
+    } else {
+        unsigned_bits(term)
+    }
+}
+
+/// Return the bits of the increment `term`, as `get_incr`
+/// (`erl_bif_atomics.c:119-123`) reads it: the signed range or the unsigned
+/// range. `None` gives `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(increment_bits(&Term::Integer(-1)), Some(-1));
+/// assert_eq!(increment_bits(&Term::static_atom("x")), None);
+/// ```
+fn increment_bits(term: &Term) -> Option<i64> {
+    signed_bits(term).or_else(|| unsigned_bits(term))
+}
+
+/// Return the signed 64-bit value of `term`, as `term_to_Sint64`
+/// (`big.c:3696-3730`) gives it: a signed integer of the range fits, and
+/// each other term fails.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(signed_bits(&Term::Integer(i64::MIN)), Some(i64::MIN));
+/// assert_eq!(signed_bits(&Term::static_atom("x")), None);
+/// ```
+fn signed_bits(term: &Term) -> Option<i64> {
+    match term {
+        Term::Integer(value) => Some(*value),
+        _ => None,
+    }
+}
+
+/// Return the bits of the unsigned 64-bit value of `term`, as
+/// `term_to_Uint64` (`big.c:3613-3644`) gives it: a non-negative integer of
+/// the range fits, and each other term fails.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(unsigned_bits(&Term::Integer(1)), Some(1));
+/// assert_eq!(unsigned_bits(&Term::Integer(-1)), None);
+/// ```
+fn unsigned_bits(term: &Term) -> Option<i64> {
+    match term {
+        Term::Integer(value) => u64::try_from(*value).ok().map(|value| value as i64),
+        Term::BigInt(value) => value.to_u64().map(|value| value as i64),
+        _ => None,
+    }
+}
+
+/// Return the term of the bits of an atomic, as `bld_atomic`
+/// (`erl_bif_atomics.c:125-146`) builds it: a signed array gives the bits
+/// as a signed integer, and an unsigned array gives them as a non-negative
+/// integer.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(value(true, -1), Term::Integer(-1));
+/// assert_eq!(value(false, -1), Term::from_bigint(BigInt::from(u64::MAX)));
+/// ```
+fn value(signed: bool, bits: i64) -> Term {
+    if signed {
+        Term::Integer(bits)
+    } else {
+        Term::from_bigint(BigInt::from(bits as u64))
+    }
+}
+
+#[cfg(test)]
+#[path = "../../../../tests/runtime/interpreter/bif/atomics.rs"]
+mod tests;

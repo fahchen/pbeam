@@ -4,6 +4,7 @@ use std::{
 };
 
 use super::{
+    atomics::AtomicArrays,
     buffers::Buffers,
     capability::{
         Capability, CapabilityId, CapabilityKind, Delegations, Denied, Operation, Restriction,
@@ -385,6 +386,9 @@ pub(super) struct Scheduler {
     pub(super) persistent_terms: PersistentTerms,
     /// ETS tables of the node. All processes of the run share them.
     pub(super) ets: EtsTables,
+    /// Atomic arrays of the node, which the `atomics` module and the
+    /// `counters` module use. All processes of the run share them.
+    pub(super) atomics: AtomicArrays,
     /// Typed values of the node, one value of each type, such as the
     /// compiled regular expressions in `RegexCodes` and the TTY resources
     /// in `Ttys`. All processes of the run share them.
@@ -493,6 +497,7 @@ impl Scheduler {
             names: HashMap::new(),
             persistent_terms: PersistentTerms::default(),
             ets: EtsTables::default(),
+            atomics: AtomicArrays::default(),
             resources,
             atoms,
             code: CodeTable::default(),
