@@ -88,6 +88,27 @@ fn finds_a_byte_in_the_queue_of_the_buffer() {
 }
 
 #[test]
+fn finds_a_byte_after_a_partial_read_and_across_the_queue() {
+    let mut buffer = Buffer::default();
+    buffer.write(&[b"ab\n"]);
+    // The search starts at the bytes that remain: the front element holds
+    // "b\n" after the read of one byte, so the search finds the newline at 1.
+    assert_eq!(buffer.copying_read(1), Some(b"a".to_vec()));
+    assert_eq!(buffer.peek_head(), Some(b"b\n".to_vec()));
+    assert_eq!(buffer.find_byte_index(b'\n'), Some(1));
+    assert!(buffer.skip(2));
+    // The search of an element other than the front one counts the bytes of
+    // each element before it (prim_buffer_nif.c:460-480).
+    let first = vec![b'a'; 2000];
+    let second = vec![b'x'; 2000];
+    buffer.write(&[&first]);
+    buffer.write(&[&second]);
+    assert_eq!(buffer.size(), 4000);
+    assert_eq!(buffer.find_byte_index(b'a'), Some(0));
+    assert_eq!(buffer.find_byte_index(b'x'), Some(2000));
+}
+
+#[test]
 fn flushes_the_accumulator_into_the_queue() {
     let mut buffer = Buffer::default();
     buffer.write(&[b"ab"]);
