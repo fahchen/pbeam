@@ -441,6 +441,31 @@ impl CodeTable {
         }
     }
 
+    /// Return the code of `module` that waits for its `-on_load` function,
+    /// else the loaded module `module`. `erlang:load_nif/2` from an on_load
+    /// function checks the functions of the waiting code, as ERTS
+    /// `erts_load_nif` takes the `on_load` instance of the module
+    /// (`beam/erl_nif.c:4764-4770`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(code.waiting_or_loaded("on_load_ok")?.name, "on_load_ok");
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`CodeTable::module`].
+    pub(in crate::runtime) fn waiting_or_loaded(
+        &self,
+        module: &str,
+    ) -> Result<&Rc<BeamModule>, BeamError> {
+        match self.on_load.get(module) {
+            Some(waiting) => Ok(&waiting.code),
+            None => self.module(module),
+        }
+    }
+
     /// Keep the prepared code `module` under `reference` until
     /// [`CodeTable::finish`] loads it.
     ///

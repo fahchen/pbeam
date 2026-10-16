@@ -18,6 +18,12 @@ const CODE_SERVER_PROBE: &str = "fixtures/code_server/code_server_probe";
 /// The probe of the modules with an `-on_load` function.
 const ON_LOAD_PROBE: &str = "fixtures/code_server/on_load_server_probe";
 
+/// The probe of `crypto:strong_rand_bytes/1`.
+const CRYPTO_PROBE: &str = "fixtures/code_server/crypto_probe";
+
+/// The stand-in `crypto` module that loads the `crypto` NIF library.
+const CRYPTO_STAND_IN: &str = "fixtures/crypto/crypto";
+
 /// The code path directory of the runs. It has `code_server_target.beam`,
 /// which no run loads at its start.
 const CODE_PATH: &str = "fixtures/code_server";
@@ -132,6 +138,72 @@ fn loads_a_module_with_an_on_load_function_through_code_server_as_pinned_erts() 
             &[]
         )),
         erts
+    );
+}
+
+#[test]
+fn loads_crypto_and_runs_strong_rand_bytes_as_pinned_erts() {
+    // The first call loads `crypto` on demand. Its `-on_load` function
+    // checks `erlang:system_info(build_type)` and loads the NIF library with
+    // the load info `{302, LibBin, false}` (crypto.erl:4432-4510).
+    // `strong_rand_bytes_nif/1` gives a binary of the size, and `badarg`
+    // with the NIF frame for a size that is not an unsigned C int or that
+    // is above `INT_MAX` (rand.c:26-50).
+    let erts = run(&mut erts_probe(CRYPTO_PROBE, "crypto_probe", "main", &[]));
+    assert_eq!(
+        erts,
+        "[opt,<<>>,\n \
+         [0,1,16,1024],\n \
+         [true,true],\n \
+         [{error,badarg,{crypto,strong_rand_bytes_nif,[-1],[]}},\n  \
+         {error,badarg,{crypto,strong_rand_bytes_nif,[2147483648],[]}},\n  \
+         {error,badarg,{crypto,strong_rand_bytes_nif,[18446744073709551616],[]}},\n  \
+         {error,badarg,{crypto,strong_rand_bytes_nif,[1.0],[]}},\n  \
+         {error,badarg,{crypto,strong_rand_bytes_nif,[a],[]}},\n  \
+         {error,badarg,{crypto,strong_rand_bytes_nif,[<<1>>],[]}}]]\n"
+    );
+    assert_eq!(
+        run(&mut pbeam_probe(CRYPTO_PROBE, "crypto_probe", "main", &[])),
+        erts
+    );
+}
+
+#[test]
+fn checks_the_crypto_load_info_as_pinned_erts() {
+    // The stand-in `crypto` module defines each function of the `crypto`
+    // NIF library and loads it with each load info. A failed check of the
+    // load callback gives its line in crypto.c (crypto.c:204-218, 286-288;
+    // erl_nif.c:4980-4986). The pinned ERTS has no FIPS support, so
+    // `FipsMode` `true` gives the veto 287 (fips.c:59-60).
+    let veto = |line| format!("{{error,{{load,\"Library load-call unsuccessful ({line}).\"}}}}");
+    let vetoes: Vec<_> = [205, 208, 211, 214, 217, 287].map(veto).into();
+    let expected = format!("[{}]\n", vetoes.join(",\n "));
+    let fips = format!("[{}]\n", veto(287));
+    for (function, expected) in [
+        ("load_info", expected.as_str()),
+        ("load_ok", "[ok]\n"),
+        ("load_fips", fips.as_str()),
+    ] {
+        let erts = run(&mut erts_probe(CRYPTO_STAND_IN, "crypto", function, &[]));
+        assert_eq!(erts, expected);
+        let pbeam = run(&mut pbeam_probe(CRYPTO_STAND_IN, "crypto", function, &[]));
+        assert_eq!(pbeam, erts);
+    }
+}
+
+#[test]
+fn stops_with_a_runtime_error_for_an_unsupported_crypto_nif() {
+    // PBeam links only `strong_rand_bytes_nif/1` of the `crypto` library.
+    // ERTS gives the OpenSSL version from `info_lib/0`.
+    let output = pbeam_probe(CRYPTO_PROBE, "crypto_probe", "info_lib", &[])
+        .env("TERM", "dumb")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        !output.status.success() && stderr.contains("crypto:info_lib/0 NIF is not supported"),
+        "{stderr}"
     );
 }
 
