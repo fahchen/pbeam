@@ -108,6 +108,9 @@ const OPCODE_BS_GET_UTF8: u8 = 138;
 const OPCODE_BS_SKIP_UTF8: u8 = 139;
 const OPCODE_BS_GET_UTF16: u8 = 140;
 const OPCODE_BS_GET_UTF32: u8 = 142;
+/// `on_load` (`genop.tab:520`), which has no operands. It marks the
+/// function of the last label as the `-on_load` function of the module.
+const OPCODE_ON_LOAD: u8 = 149;
 const OPCODE_LINE: u8 = 153;
 const OPCODE_CALL_LAST: u8 = 5;
 const OPCODE_BIF0: u8 = 9;
@@ -1787,7 +1790,13 @@ fn test_operands(left: &Operand, right: &Operand) -> Option<(TestOperand, TestOp
     }
 }
 
-/// Decode the `Code` header and instruction stream.
+/// Decode the `Code` header and instruction stream. Return the
+/// instructions, the number of labels, and the label of the `-on_load`
+/// function. The `on_load` instruction (opcode 149, no operands) emits no
+/// instruction: it marks the last label before it, as the ERTS loader keeps
+/// the current label as the `on_load` entry
+/// (`jit/arm/beam_asm_module.cpp:561-563`). The compiler puts it after the
+/// entry label of the function. An `on_load` before any label is an error.
 ///
 /// # Examples
 ///
@@ -1795,9 +1804,10 @@ fn test_operands(left: &Operand, right: &Operand) -> Option<(TestOperand, TestOp
 /// let mut code = vec![0, 0, 0, 16]; // sub-size
 /// code.extend_from_slice(&[0; 16]); // instruction set, opcode max, labels, functions
 /// code.push(0x03); // end
-/// let (instructions, labels) = parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[])?;
-/// assert_eq!(labels, 0);
+/// let (instructions, labels, on_load) = parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[])?;
+/// assert_eq!((labels, on_load), (0, None));
 /// assert!(matches!(instructions.as_slice(), [Instruction::End]));
+/// // [label 1, func_info, label 2, on_load] gives Some(2).
 /// ```
 pub(super) fn parse_code(
     data: &[u8],
@@ -1807,7 +1817,7 @@ pub(super) fn parse_code(
     literals: &[Option<Term>],
     lambdas: &[(Lambda, usize)],
     strings: &[u8],
-) -> Result<(Vec<Instruction>, u32), BeamError> {
+) -> Result<(Vec<Instruction>, u32, Option<u32>), BeamError> {
     if data.len() < CODE_HEADER_SIZE
         || read_u32(&data[..WORD_SIZE])? != CODE_HEADER_SUB_SIZE
         || read_u32(&data[WORD_SIZE..WORD_SIZE * 2])? != INSTRUCTION_SET_ERLANG
@@ -1822,6 +1832,7 @@ pub(super) fn parse_code(
     let mut instructions = Vec::new();
     let mut function_info_count = 0;
     let mut function = None;
+    let mut on_load = None;
     loop {
         let opcode = *data
             .get(cursor)
@@ -1844,6 +1855,18 @@ pub(super) fn parse_code(
                     instructions.push(Instruction::TestYield);
                     *entry += 2;
                 }
+                continue;
+            }
+            OPCODE_ON_LOAD => {
+                let label = instructions
+                    .iter()
+                    .rev()
+                    .find_map(|instruction| match instruction {
+                        Instruction::Label(label) => Some(*label),
+                        _ => None,
+                    });
+                on_load =
+                    Some(label.ok_or_else(|| error("BEAM on_load instruction has no label"))?);
                 continue;
             }
             OPCODE_FUNCTION_INFO => {
@@ -2596,7 +2619,7 @@ pub(super) fn parse_code(
                     return Err(error("invalid BEAM code terminator or function count"));
                 }
                 instructions.push(Instruction::End);
-                return Ok((instructions, number_of_labels));
+                return Ok((instructions, number_of_labels, on_load));
             }
             _ => {
                 skip_unsupported_instruction(opcode, data, &mut cursor)?;

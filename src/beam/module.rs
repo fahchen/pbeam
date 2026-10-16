@@ -155,6 +155,11 @@ pub struct BeamModule {
     /// The side tables of `instructions`, which the loader builds once (see
     /// [`ModuleTables`]).
     pub(crate) tables: ModuleTables,
+    /// The entry label of the `-on_load` function, from the `on_load`
+    /// instruction (`genop.tab:520`), or `None`. `erlang:finish_loading/1`
+    /// keeps the exports of such a module hidden until
+    /// `erlang:finish_after_on_load/2` (`beam_load.c:259-330`).
+    pub(crate) on_load: Option<u32>,
 }
 
 /// The side tables that the loader builds from the instruction stream of one
@@ -217,6 +222,9 @@ pub(crate) enum ImportKind {
     /// `erlang:load_nif/2`, which runs as `i_load_nif` with the module of
     /// the caller.
     LoadNif,
+    /// `erlang:call_on_load_function/1`, which runs as
+    /// `i_call_on_load_function` (`jit/arm/ops.tab:630-641`).
+    CallOnLoadFunction,
     /// A BIF. `bif` is the `bif.tab` entry, or `None` for a PBeam BIF.
     /// `heavy` marks a heavy BIF, which ERTS calls through its export with
     /// no reduction cost.
@@ -484,6 +492,7 @@ impl BeamModule {
             imports,
             instructions,
             tables,
+            on_load: None,
         })
     }
 

@@ -58,6 +58,25 @@ pub(in crate::runtime) struct CodeTable {
     /// until the run ends; ERTS frees it when the garbage collector frees
     /// the last copy of the reference.
     prepared: HashMap<Reference, BeamModule>,
+    /// The code of each module that `erlang:finish_loading/1` loaded with an
+    /// `-on_load` function, by module name, as the ERTS `on_load` instance
+    /// of the module (`beam_load.c:305-313`). The code is in `by_id`, so
+    /// that its on_load function runs, but not in `modules`: the module is
+    /// not loaded, and its exports stay hidden until
+    /// [`CodeTable::finish_after_on_load`] keeps the code.
+    on_load: HashMap<String, OnLoadCode>,
+}
+
+/// The code of a module that waits for its `-on_load` function.
+#[derive(Debug)]
+struct OnLoadCode {
+    /// The new code of the module.
+    code: Rc<BeamModule>,
+    /// `true` while the exports wait for the code, as the deferred address of
+    /// each ERTS export entry (`jit/asm_load.c:1188-1195`).
+    /// `erlang:finish_after_on_load(Module, false)` clears it
+    /// (`beam_bif_load.c:918-937`).
+    deferred: bool,
 }
 
 /// A loaded module of one run and the export target of each of its imports
@@ -148,6 +167,10 @@ impl ExportTarget {
 pub(in crate::runtime) enum Finish {
     /// Each module is in the code table now.
     Loaded,
+    /// The one module of the list has an `-on_load` function. Its code waits
+    /// for the function, and its exports stay hidden
+    /// (`beam_bif_load.c:484-504`).
+    OnLoad(String),
     /// The list names one module more than one time. The names are the
     /// modules of the second and later entries, in the reverse order of the
     /// list, as `exception_list` (`beam_bif_load.c:322-337`) gives them.
@@ -173,6 +196,7 @@ impl CodeTable {
             modules,
             by_id,
             prepared: HashMap::new(),
+            on_load: HashMap::new(),
         }
     }
 
@@ -391,7 +415,9 @@ impl CodeTable {
     }
 
     /// Create the frame for the function at an entry label of the loaded
-    /// module `module`.
+    /// module `module`, or of the code of `module` that waits for its
+    /// `-on_load` function. A fun of that code runs before the code becomes
+    /// the loaded code, as an ERTS fun entry points to the code itself.
     ///
     /// # Examples
     ///
@@ -409,7 +435,10 @@ impl CodeTable {
         label: u32,
         arity: u32,
     ) -> Result<Frame, BeamError> {
-        frame(self.module(module)?, label, arity)
+        match self.on_load.get(module) {
+            Some(waiting) => frame(&waiting.code, label, arity),
+            None => frame(self.module(module)?, label, arity),
+        }
     }
 
     /// Keep the prepared code `module` under `reference` until
@@ -472,7 +501,10 @@ impl CodeTable {
     /// [`CodeTable::prepared_names`] for the same `references`, so each
     /// reference has prepared code. A module that the list names more than
     /// one time gives [`Finish::Duplicated`]. Else each module goes into
-    /// the code table, and its prepared entry ends.
+    /// the code table, and its prepared entry ends. A module with an
+    /// `-on_load` function waits for its function and gives
+    /// [`Finish::OnLoad`]. The caller gives such a module only in a list of
+    /// one module (`beam_bif_load.c:395-408`).
     ///
     /// # Examples
     ///
@@ -484,7 +516,8 @@ impl CodeTable {
     ///
     /// # Errors
     ///
-    /// A module that is loaded already is the runtime error
+    /// A module that is loaded already, or that waits for its `-on_load`
+    /// function, is the runtime error
     /// `erlang:finish_loading/1 cannot replace the loaded module M`. ERTS
     /// makes the current code old and loads the new code
     /// (`beam_load.c:258-262`). PBeam has no old code. This error also
@@ -506,7 +539,10 @@ impl CodeTable {
             duplicated.reverse();
             return Ok(Finish::Duplicated(duplicated));
         }
-        if let Some(name) = names.iter().find(|name| self.modules.contains_key(*name)) {
+        if let Some(name) = names
+            .iter()
+            .find(|name| self.modules.contains_key(*name) || self.on_load.contains_key(*name))
+        {
             return Err(error(format!(
                 "erlang:finish_loading/1 cannot replace the loaded module {name}"
             )));
@@ -519,9 +555,110 @@ impl CodeTable {
             let module = Rc::new(module);
             self.by_id
                 .insert(module.id, LoadedModule::new(Rc::clone(&module)));
+            if module.on_load.is_some() {
+                let code = OnLoadCode {
+                    code: module,
+                    deferred: true,
+                };
+                self.on_load.insert(name.clone(), code);
+                return Ok(Finish::OnLoad(name));
+            }
             self.modules.insert(name, module);
         }
         Ok(Finish::Loaded)
+    }
+
+    /// Return `true` when the prepared code of a reference of `references`
+    /// has an `-on_load` function, as `erts_has_code_on_load`
+    /// (`beam_load.c:336-349`) does. Each reference must have prepared code
+    /// (see [`CodeTable::prepared_names`]).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(code.prepared_on_load(&[on_load_reference]));
+    /// assert!(!code.prepared_on_load(&[plain_reference]));
+    /// ```
+    pub(in crate::runtime) fn prepared_on_load(&self, references: &[Reference]) -> bool {
+        references.iter().any(|reference| {
+            self.prepared
+                .get(reference)
+                .is_some_and(|module| module.on_load.is_some())
+        })
+    }
+
+    /// Return the frame of the `-on_load` function of the module `name` while
+    /// its code waits for the function, else `None`, as
+    /// `get_on_load_address` (`jit/arm/instr_bif.cpp:994-1008`) does. The
+    /// function runs also after `erlang:finish_after_on_load(Module, false)`,
+    /// because ERTS keeps the code until the purge.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let frame = code.on_load_frame("on_load_ok")?.unwrap();
+    /// assert!(code.on_load_frame("lists")?.is_none());
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// An on_load function with an arity that is not 0 gives the error of
+    /// [`frame`].
+    pub(in crate::runtime) fn on_load_frame(&self, name: &str) -> Result<Option<Frame>, BeamError> {
+        self.on_load
+            .get(name)
+            .and_then(|waiting| {
+                waiting
+                    .code
+                    .on_load
+                    .map(|label| frame(&waiting.code, label, 0))
+            })
+            .transpose()
+    }
+
+    /// Keep or drop the code of the module `name` after its `-on_load`
+    /// function, as `finish_after_on_load_2` (`beam_bif_load.c:819-941`)
+    /// does. Return `false`, and change nothing, when no code of `name`
+    /// waits for its function. With `keep`, the code becomes the loaded
+    /// code of the module, and its exports become visible. Without `keep`,
+    /// the exports no longer wait for the code, and the code stays until a
+    /// purge, as in ERTS. Else return `true`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(code.finish_after_on_load("on_load_ok", true)?);
+    /// assert!(code.get("on_load_ok").is_some());
+    /// assert!(!code.finish_after_on_load("on_load_ok", true)?);
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// `keep` after an earlier call without `keep` gives the runtime error
+    /// `erlang:finish_after_on_load/2 cannot keep the code of M after its
+    /// exports were dropped`. ERTS then makes the code current with exports
+    /// that call the error handler (`beam_bif_load.c:887-897`), and PBeam has
+    /// no such export state.
+    pub(in crate::runtime) fn finish_after_on_load(
+        &mut self,
+        name: &str,
+        keep: bool,
+    ) -> Result<bool, BeamError> {
+        let Some(waiting) = self.on_load.get_mut(name) else {
+            return Ok(false);
+        };
+        if !keep {
+            waiting.deferred = false;
+            return Ok(true);
+        }
+        if !waiting.deferred {
+            return Err(error(format!(
+                "erlang:finish_after_on_load/2 cannot keep the code of {name} after its exports were dropped"
+            )));
+        }
+        let waiting = self.on_load.remove(name).expect("checked above");
+        self.modules.insert(name.to_owned(), waiting.code);
+        Ok(true)
     }
 }
 

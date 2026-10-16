@@ -19,6 +19,9 @@ use common::pinned_beam_path;
 /// The probe that writes the code server results.
 const CODE_SERVER_PROBE: &str = "fixtures/code_server/code_server_probe";
 
+/// The probe of the modules with an `-on_load` function.
+const ON_LOAD_PROBE: &str = "fixtures/code_server/on_load_server_probe";
+
 /// The code path directory of the runs. It has `code_server_target.beam`,
 /// which no run loads at its start.
 const CODE_PATH: &str = "fixtures/code_server";
@@ -69,6 +72,94 @@ fn starts_code_server_and_loads_a_module_from_the_code_path_as_pinned_erts() {
         "{erts}"
     );
     assert_eq!(run(&mut pbeam(&[])), erts);
+}
+
+#[test]
+fn loads_a_module_with_an_on_load_function_through_code_server_as_pinned_erts() {
+    // `code:ensure_loaded/1` loads `on_load_ok`, and a call loads
+    // `on_load_call` on demand through `error_handler`
+    // (error_handler.erl:85-98; code.erl:581-600). `erlang:finish_loading/1`
+    // gives `{on_load, [Module]}`, `code_server` runs the function in a new
+    // process, and `erts_code_purger` makes the code current
+    // (code_server.erl:1348-1365, 1386-1403; erts_code_purger.erl:166-170).
+    let erts = run(&mut erts_probe(
+        ON_LOAD_PROBE,
+        "on_load_server_probe",
+        "main",
+        &[],
+    ));
+    assert_eq!(
+        erts,
+        "[[false,{module,on_load_ok},true,on_load_ok_value,{module,on_load_ok}],\n \
+         [false,on_load_call_value,true]]\n"
+    );
+    assert_eq!(
+        run(&mut pbeam_probe(
+            ON_LOAD_PROBE,
+            "on_load_server_probe",
+            "main",
+            &[]
+        )),
+        erts
+    );
+}
+
+#[test]
+fn loads_an_on_load_module_through_a_hibernated_erts_code_purger_as_pinned_erts() {
+    // After 60 seconds with no request, `erts_code_purger` calls
+    // `erlang:hibernate(erts_code_purger, wait_for_request, [])`
+    // (erts_code_purger.erl:40-45). The probe does not wait 60 seconds: it
+    // starts a process that makes the same call, lets it run to the call with
+    // one scheduler, and registers it as `erts_code_purger`. `code_server` then
+    // sends `finish_after_on_load` to it, and the process wakes and replies
+    // (erts_code_purger.erl:55-59, 166-170).
+    let erts = run(&mut erts_probe(
+        ON_LOAD_PROBE,
+        "on_load_server_probe",
+        "hibernated",
+        &[],
+    ));
+    assert_eq!(erts, "[{module,on_load_ok},on_load_ok_value,true]\n");
+    assert_eq!(
+        run(&mut pbeam_probe(
+            ON_LOAD_PROBE,
+            "on_load_server_probe",
+            "hibernated",
+            &[]
+        )),
+        erts
+    );
+}
+
+#[test]
+fn stops_when_code_server_purges_the_code_of_a_failed_on_load_function() {
+    // On the pinned ERTS, `erts_code_purger` purges the code of a failed
+    // `-on_load` function with `erts_internal:purge_module/2`, and the load
+    // gives `{error, on_load_failure}` (code_server.erl:1360-1368;
+    // erts_code_purger.erl:166-182). PBeam has no code purge yet.
+    // The crash of the on_load process can add an error report after the
+    // result.
+    let erts = run(&mut erts_probe(
+        ON_LOAD_PROBE,
+        "on_load_server_probe",
+        "failure",
+        &[],
+    ));
+    assert!(
+        erts.starts_with("[{error,on_load_failure},false,{error,undef},false]\n"),
+        "{erts}"
+    );
+    let output = pbeam_probe(ON_LOAD_PROBE, "on_load_server_probe", "failure", &[])
+        .env("TERM", "dumb")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success()
+            && stderr == "pbeam: unresolved external MFA erts_internal:purge_module/2\n",
+        "{output:?}"
+    );
 }
 
 #[test]
@@ -157,6 +248,18 @@ fn root() -> &'static Path {
 /// let output = run(&mut erts(&["--mode", "embedded"]));
 /// ```
 fn erts(flags: &[&str]) -> Command {
+    erts_probe(CODE_SERVER_PROBE, "code_server_probe", "main", flags)
+}
+
+/// Return the command of `module:function()` of the probe file `probe` on
+/// the pinned ERTS, as [`erts`] gives it.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let output = run(&mut erts_probe(ON_LOAD_PROBE, "on_load_server_probe", "main", &[]));
+/// ```
+fn erts_probe(probe: &str, module: &str, function: &str, flags: &[&str]) -> Command {
     let mut command = Command::new("erl");
     command.args([
         "+S",
@@ -175,8 +278,8 @@ fn erts(flags: &[&str]) -> Command {
     command.args([
         "-eval",
         &format!(
-            "{{module, _}} = code:load_abs(\"{CODE_SERVER_PROBE}\"), \
-             code_server_probe:main(), halt()."
+            "{{module, _}} = code:load_abs(\"{probe}\"), \
+             {module}:{function}(), halt()."
         ),
     ]);
     command
@@ -191,14 +294,26 @@ fn erts(flags: &[&str]) -> Command {
 /// let output = run(&mut pbeam(&["--mode", "embedded"]));
 /// ```
 fn pbeam(flags: &[&str]) -> Command {
+    pbeam_probe(CODE_SERVER_PROBE, "code_server_probe", "main", flags)
+}
+
+/// Return the command of `module:function()` of the probe file `probe` on
+/// the `pbeam` binary, as [`pbeam`] gives it.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let output = run(&mut pbeam_probe(ON_LOAD_PROBE, "on_load_server_probe", "main", &[]));
+/// ```
+fn pbeam_probe(probe: &str, module: &str, function: &str, flags: &[&str]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_pbeam"));
     command
-        .args(["pbeam_boot", "start", "code_server_probe", "main", "--root"])
+        .args(["pbeam_boot", "start", module, function, "--root"])
         .arg(root())
         .args(["--pa", CODE_PATH])
         .args(flags)
         .arg("--")
-        .arg(format!("{CODE_SERVER_PROBE}.beam"))
+        .arg(format!("{probe}.beam"))
         .arg(boot_beam())
         .args(
             BOOT_MODULES
