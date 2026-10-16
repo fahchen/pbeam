@@ -371,6 +371,10 @@ name = "map"
 path = "tests/integration/map.rs"
 
 [[test]]
+name = "maps_math"
+path = "tests/integration/maps_math.rs"
+
+[[test]]
 name = "module_info"
 path = "tests/integration/module_info.rs"
 

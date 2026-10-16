@@ -1581,6 +1581,111 @@ fn reports_a_maps_put_key_that_the_map_form_does_not_support() {
 }
 
 #[test]
+fn runs_maps_update_as_a_bif_and_names_a_key_that_the_map_does_not_hold() {
+    // ERTS `maps_update_3` sets the value of a key that the map holds, and
+    // raises `{badkey, Key}` and `{badmap, Map}` for the other cases
+    // (`erl_map.c:2036-2103`, `2241-2253`).
+    let map = |pairs: Vec<(i64, &str)>| {
+        let pairs = pairs
+            .into_iter()
+            .map(|(key, value)| (Term::Integer(key), test_atom(value)))
+            .collect();
+        Operand::Value(Term::Map(
+            Map::from_pairs(pairs, &test_atom_table()).unwrap(),
+        ))
+    };
+    let update = |key: Term, value: Term, map: Operand| {
+        make_program(
+            vec![
+                Instruction::Move(Operand::Value(key), Operand::X(0)),
+                Instruction::Move(Operand::Value(value), Operand::X(1)),
+                Instruction::Move(map, Operand::X(2)),
+                external("maps", "update", 3, true, 0),
+                Instruction::Return,
+            ],
+            0,
+        )
+        .execute("fixture", "main", &[])
+    };
+    let updated = update(
+        Term::Integer(2),
+        test_atom("b"),
+        map(vec![(1, "a"), (2, "a")]),
+    );
+    assert_eq!(
+        updated.unwrap().term,
+        Term::Map(
+            Map::from_pairs(
+                vec![
+                    (Term::Integer(1), test_atom("a")),
+                    (Term::Integer(2), test_atom("b"))
+                ],
+                &test_atom_table()
+            )
+            .unwrap()
+        )
+    );
+    let missing = update(Term::Integer(9), test_atom("b"), map(vec![(1, "a")]))
+        .unwrap_err()
+        .to_string();
+    assert!(missing.contains("{badkey,9}"), "{missing}");
+    let empty = update(Term::Integer(9), test_atom("b"), map(vec![]))
+        .unwrap_err()
+        .to_string();
+    assert!(empty.contains("{badkey,9}"), "{empty}");
+    let not_a_map = update(
+        Term::Integer(1),
+        test_atom("b"),
+        Operand::Value(Term::Integer(1)),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(not_a_map.contains("{badmap,1}"), "{not_a_map}");
+    // A map key is not a key of a PBeam map, so the BIF reports the key as
+    // an absent key, as ERTS does for a key that the map does not hold.
+    let map_key = update(
+        Term::Map(Map::new()),
+        test_atom("b"),
+        Operand::Value(Term::Map(Map::new())),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(map_key.contains("{badkey"), "{map_key}");
+}
+
+#[test]
+fn runs_maps_values_as_a_bif_and_raises_badmap_for_a_term_that_is_not_a_map() {
+    // ERTS `maps_values_1` gives the values of a map in map order, and
+    // raises `{badmap, Map}` for a term that is not a map
+    // (`erl_map.c:2262-2310`).
+    let values = |argument: Term| {
+        make_program(
+            vec![
+                Instruction::Move(Operand::Value(argument), Operand::X(0)),
+                external("maps", "values", 1, true, 0),
+                Instruction::Return,
+            ],
+            0,
+        )
+        .execute("fixture", "main", &[])
+    };
+    let map = |pairs: Vec<(i64, &str)>| {
+        let pairs = pairs
+            .into_iter()
+            .map(|(key, value)| (Term::Integer(key), test_atom(value)))
+            .collect();
+        Term::Map(Map::from_pairs(pairs, &test_atom_table()).unwrap())
+    };
+    assert_eq!(
+        values(map(vec![(2, "b"), (1, "a")])).unwrap().term,
+        Term::list_from(vec![test_atom("a"), test_atom("b")])
+    );
+    assert_eq!(values(map(vec![])).unwrap().term, Term::nil());
+    let not_a_map = values(Term::Integer(1)).unwrap_err().to_string();
+    assert!(not_a_map.contains("{badmap,1}"), "{not_a_map}");
+}
+
+#[test]
 fn runs_maps_keys_as_a_bif_and_reports_unsupported_arguments() {
     let keys = |argument: Term| {
         make_program(
@@ -1673,22 +1778,22 @@ fn never_runs_the_stub_of_a_table_bif_that_pbeam_does_not_implement() {
             Instruction::Move(atom("a"), Operand::X(0)),
             Instruction::Move(Operand::Value(Term::Integer(1)), Operand::X(1)),
             Instruction::Move(Operand::Value(Term::nil()), Operand::X(2)),
-            external("maps", "update", 3, true, 0),
+            external("atomics", "add", 3, true, 0),
             Instruction::Return,
         ],
         0,
     );
     program.modules.insert(
-        "maps".into(),
+        "atomics".into(),
         Rc::new(
             BeamModule::new(
-                "maps".into(),
-                HashMap::from([(("update".into(), 3), 1)]),
+                "atomics".into(),
+                HashMap::from([(("add".into(), 3), 1)]),
                 Vec::new(),
                 vec![
                     Instruction::FunctionInfo {
-                        module: "maps".into(),
-                        name: "update".into(),
+                        module: "atomics".into(),
+                        name: "add".into(),
                         arity: 3,
                     },
                     Instruction::Label(1),
@@ -1699,14 +1804,15 @@ fn never_runs_the_stub_of_a_table_bif_that_pbeam_does_not_implement() {
             .expect("the fixture module loads"),
         ),
     );
-    // `maps:update/3` is in the ERTS 29.1.1 `bif.tab`. ERTS runs the
-    // BIF, so the BEAM stub body of the loaded `maps` module must not run.
+    // `atomics:add/3` is in the ERTS 29.1.1 `bif.tab`, and the PBeam table
+    // marks it `unsupported`. ERTS runs the BIF, so the BEAM stub body of
+    // the loaded `atomics` module must not run.
     assert_eq!(
         program
             .execute("fixture", "main", &[])
             .unwrap_err()
             .to_string(),
-        "unresolved external MFA maps:update/3"
+        "unresolved external MFA atomics:add/3"
     );
     // `is_bif` finds an entry with a binary search.
     // Strictly increasing: sorted for a binary search, with no duplicate entry.

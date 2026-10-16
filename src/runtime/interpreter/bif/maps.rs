@@ -695,6 +695,94 @@ pub(super) fn take(key: &Term, map: &Term, atoms: &AtomTable) -> BifResult {
     ]))
 }
 
+/// Run `maps:update/3`: return the map with an existing key set to the
+/// value, as ERTS `maps_update_3` does with `erts_maps_update`
+/// (`erl_map.c:2036-2103`, `2241-2253`). The map keeps its form and the
+/// order of its keys. A key that the map does not hold raises
+/// `error:{badkey, Key}`, and a term that is not a map raises
+/// `error:{badmap, Map}`. A key that the PBeam map form does not support is
+/// not in the map, so it raises `error:{badkey, Key}` too (row "Map keys"
+/// in `docs/erts-differences.md`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let map = Term::Map(Map::from_pairs(vec![(test_atom("a"), Term::Integer(1))], &test_atom_table())?);
+/// let updated = Term::Map(Map::from_pairs(vec![(test_atom("a"), Term::Integer(2))], &test_atom_table())?);
+/// assert!(matches!(update(&test_atom("a"), &Term::Integer(2), &map, &test_atom_table()), BifResult::Value(value) if value == updated));
+/// assert!(matches!(update(&test_atom("b"), &Term::Integer(2), &map, &test_atom_table()), BifResult::Raise { .. }));
+/// assert!(matches!(update(&test_atom("a"), &Term::Integer(2), &test_atom("foo"), &test_atom_table()), BifResult::Raise { .. }));
+/// ```
+pub(super) fn update(key: &Term, value: &Term, map: &Term, atoms: &AtomTable) -> BifResult {
+    let Term::Map(entries) = map else {
+        return error_with("badmap", map);
+    };
+    let mut entries = entries.clone();
+    match entries.update(vec![(Insert::Set, key.clone(), value.clone())], atoms) {
+        Ok(()) => Value(Term::Map(entries)),
+        Err(key) => error_with("badkey", &key),
+    }
+}
+
+/// Run `maps:values/1`: return the values of a map in map order, as ERTS
+/// `maps_values_1` does (`erl_map.c:2262-2310`). A term that is not a map
+/// raises `error:{badmap, Map}`.
+///
+/// ERTS runs the BIF as YCF code with 15 units for each reduction
+/// (`erl_map.c:2299`; [`run_units`]), as `maps:keys/1` does. The loop of
+/// `maps_values_1_helper` takes one unit for each key of a hashmap and no
+/// unit for a flatmap (`erl_map.c:2262-2293`), and the loop of
+/// `hashmap_values` takes one unit for each key (`erl_map.c:2844-2879`). A
+/// yield traps to the export `maps:values_trap/2` with the map and the
+/// units done, which continues with no cost in the next turn. ERTS traps to
+/// `maps:values/1` with a magic reference to the YCF state.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let map = Term::Map(Map::from_pairs(vec![(Term::Integer(1), test_atom("a")), (Term::Integer(2), test_atom("b"))], &test_atom_table())?);
+/// let values = Term::list_from([test_atom("a"), test_atom("b")]);
+/// assert!(matches!(values(&mut process, &map, 0)?, BifResult::Value(result) if result == values));
+/// assert!(matches!(values(&mut process, &Term::Integer(1), 0)?, BifResult::Raise { .. }));
+/// ```
+///
+/// # Errors
+///
+/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
+/// negative budget.
+pub(super) fn values(
+    process: &mut ProcessState,
+    map: &Term,
+    done: usize,
+) -> Result<BifResult, BeamError> {
+    /// `iterations_per_red` of `maps_values_1` (`erl_map.c:2299`).
+    const PER_REDUCTION: usize = 15;
+    let Term::Map(entries) = map else {
+        return Ok(error_with("badmap", map));
+    };
+    let units = vec![
+        1;
+        if entries.is_hashmap() {
+            entries.len()
+        } else {
+            0
+        }
+    ];
+    match run_units(process, PER_REDUCTION, &units, done)? {
+        YcfTurn::Done(reductions) => {
+            process.bump_reductions(reductions);
+            Ok(Value(Term::list_from(
+                entries.iter().map(|(_, value)| value.clone()),
+            )))
+        }
+        YcfTurn::Yield(done) => Ok(BifResult::TrapBif {
+            module: "maps",
+            function: "values_trap",
+            arguments: vec![map.clone(), Term::Integer(done as i64)],
+        }),
+    }
+}
+
 /// Return the `error:{Tag, Term}` exception, as ERTS `BIF_ERROR` with
 /// `BADMAP` or `BADKEY` and `fvalue` set to the term.
 ///
