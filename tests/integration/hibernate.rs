@@ -158,6 +158,17 @@ fn runs_erlang_hibernate_3_as_the_pinned_erts_bif() {
             atom("normal"),
         ])
     );
+    // A BIF as the MFA: the wake-up calls the BIF, not its BEAM stub.
+    // A wake-up into `erlang:hibernate/3` hibernates again.
+    assert_eq!(
+        run("bif"),
+        Term::tuple(vec![
+            atom("woke"),
+            atom("normal"),
+            atom("again"),
+            atom("normal")
+        ])
+    );
     // `proc_lib:hibernate/3` wakes in `proc_lib:wake_up/3`.
     assert_eq!(
         run("proc_lib"),
@@ -174,7 +185,7 @@ fn runs_erlang_hibernate_3_as_the_pinned_erts_bif() {
             "-pa",
             "fixtures/hibernate",
             "-eval",
-            "logger:set_primary_config(level, none), io:format(\"~w~n\", [[hibernate3_probe:F() || F <- [queued, later, dropped, undef, killed, errors, wide, applied, proc_lib, purger]]]), halt().",
+            "logger:set_primary_config(level, none), io:format(\"~w~n\", [[hibernate3_probe:F() || F <- [queued, later, dropped, undef, killed, errors, wide, applied, bif, proc_lib, purger]]]), halt().",
         ])
         .output()
         .unwrap();
@@ -182,6 +193,6 @@ fn runs_erlang_hibernate_3_as_the_pinned_erts_bif() {
     assert!(reference.stderr.is_empty());
     assert_eq!(
         reference.stdout,
-        b"[{{queued,early,0},normal},{waiting,{message_queue_len,0},{later,wake,0},normal},{boom,none},{undef,[{hibernate3_probe,missing,[1,2],[]}]},{waiting,stop},[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,system_limit},{error,system_limit},{error,badarg}],{undef,256},{{apply,wake,0},normal,{'fun',wake,0},normal},{{proc_lib,wake,0},normal},{{reply,true},{reply,true}}]\n"
+        b"[{{queued,early,0},normal},{waiting,{message_queue_len,0},{later,wake,0},normal},{boom,none},{undef,[{hibernate3_probe,missing,[1,2],[]}]},{waiting,stop},[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,system_limit},{error,system_limit},{error,badarg}],{undef,256},{{apply,wake,0},normal,{'fun',wake,0},normal},{woke,normal,again,normal},{{proc_lib,wake,0},normal},{{reply,true},{reply,true}}]\n"
     );
 }

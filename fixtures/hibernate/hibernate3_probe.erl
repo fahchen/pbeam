@@ -1,5 +1,5 @@
 -module(hibernate3_probe).
--export([queued/0, later/0, dropped/0, undef/0, killed/0, errors/0, wide/0, applied/0, id/1, proc_lib/0, purger/0, woke/2, crash/0, wait_for_request/1]).
+-export([queued/0, later/0, dropped/0, undef/0, killed/0, errors/0, wide/0, applied/0, bif/0, id/1, proc_lib/0, purger/0, woke/2, crash/0, wait_for_request/1]).
 
 %% The function that a hibernated process calls when it wakes: it sends the
 %% first message in its queue and the queue length to Parent.
@@ -93,6 +93,20 @@ applied() ->
     P2 ! wake,
     B = receive {'fun', _, _} = Q2 -> Q2 end,
     {A, down(R1), B, down(R2)}.
+
+%% A BIF as the MFA: the wake-up calls the BIF, not its BEAM stub.
+bif() ->
+    Self = self(),
+    {Pid, Ref} = spawn_monitor(fun() -> erlang:hibernate(erlang, send, [Self, woke]) end),
+    Pid ! wake,
+    R = receive woke -> woke end,
+    D = down(Ref),
+    %% The wake-up calls erlang:hibernate/3 again. The message `wake` stays
+    %% in the queue, so the second call does not wait.
+    {P2, R2} = spawn_monitor(fun() -> erlang:hibernate(erlang, hibernate, [erlang, send, [Self, again]]) end),
+    P2 ! wake,
+    A = receive again -> again end,
+    {R, D, A, down(R2)}.
 
 id(X) -> X.
 
