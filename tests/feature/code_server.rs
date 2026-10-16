@@ -45,11 +45,14 @@ const CODE_SERVER_MODULES: [&str; 12] = [
 /// addition to `BOOT_MODULES` and `CODE_SERVER_MODULES`: the
 /// `application_master` of `kernel`, the `kernel_sup` children and the
 /// modules that they call, `c` of `c:erlangrc/0`, and `prim_inet`, a
-/// preloaded module of ERTS. In embedded mode, `code_server` loads no module
-/// on demand (code.erl:601-602), so the run must hold them, as the
-/// `primLoad` commands of `start_clean.boot` load them in ERTS
+/// preloaded module of ERTS. On Linux, `inet_config:init/0` of the
+/// `inet_db` start calls `inet:gethostbyname/1` for the host name when the
+/// domain is empty (inet_config.erl:112-134), and the `native` lookup calls
+/// `inet_gethost_native` (inet.erl:3813). In embedded mode, `code_server`
+/// loads no module on demand (code.erl:601-602), so the run must hold them,
+/// as the `primLoad` commands of `start_clean.boot` load them in ERTS
 /// (init.erl:1335-1346).
-const KERNEL_START_MODULES: [&str; 20] = [
+const KERNEL_START_MODULES: [&str; 21] = [
     "application_master",
     "c",
     "erl_distribution",
@@ -60,6 +63,7 @@ const KERNEL_START_MODULES: [&str; 20] = [
     "inet",
     "inet_config",
     "inet_db",
+    "inet_gethost_native",
     "inet_parse",
     "inet_udp",
     "kernel",
