@@ -13,6 +13,7 @@ use crate::{
     error::{BeamError, error},
     runtime::{
         port::{Driver, Port, PortEvent, Ports, inet},
+        process::MonitorLinkTree,
         signal::Signal,
     },
     term::{PortId, ProcessId, Reference, Term},
@@ -63,9 +64,11 @@ impl Scheduler {
         name: Vec<u8>,
         driver: Driver,
     ) -> Result<PortId, BeamError> {
+        let mut links = MonitorLinkTree::default();
+        links.insert(owner, ());
         let port = Port {
             owner,
-            links: [owner].into(),
+            links,
             name,
             data: Term::static_atom("undefined"),
             input: 0,
@@ -228,7 +231,9 @@ impl Scheduler {
         } else {
             reason
         };
-        for linked in links {
+        // `erts_deliver_port_exit` walks the link tree in post-order
+        // (`io.c:3922-3925`, `erl_rbtree.h:1343-1458`).
+        for (linked, ()) in links.post_order() {
             let exit = Signal::Exit {
                 from: LinkId::Port(id),
                 reason: reason.clone(),
@@ -237,7 +242,7 @@ impl Scheduler {
                 alias: None,
             };
             // A linked process that does not exist drops the signal.
-            let _ = self.send_signal(None, linked, exit);
+            let _ = self.send_signal(None, *linked, exit);
         }
         self.port_monitors_down(&monitors, &reason);
         if let Some(port) = port {
@@ -262,7 +267,7 @@ impl Scheduler {
         let port = self.resources.borrow_mut::<Ports>().get_mut(id);
         let port = port.expect("the port of a driver exit is open");
         let owner = port.owner;
-        if port.links.remove(&owner) {
+        if port.links.remove(&owner).is_some() {
             // An owner that does not exist drops the signal.
             let _ = self.send_signal(None, owner, Signal::PortUnlink { port: id });
         }
@@ -299,7 +304,7 @@ impl Scheduler {
                 .expect("the current process gets the exit signal");
             return true;
         };
-        port.links.insert(current);
+        port.links.insert(current, ());
         self.current_process_mut().links.insert(LinkId::Port(id), 0);
         true
     }
@@ -321,7 +326,7 @@ impl Scheduler {
         }
         self.current_process_mut().links.remove(&LinkId::Port(id));
         if let Some(port) = self.resources.borrow_mut::<Ports>().get_mut(id) {
-            port.links.remove(&current);
+            let _ = port.links.remove(&current);
         }
     }
 
@@ -341,7 +346,7 @@ impl Scheduler {
     pub(in crate::runtime) fn connect_port(&mut self, id: PortId, pid: ProcessId) -> bool {
         let port = self.resources.borrow_mut::<Ports>().get_mut(id);
         let port = port.expect("the port to connect is open");
-        if !port.links.contains(&pid) {
+        if port.links.get(&pid).is_none() {
             let link = Signal::PortLink { port: id };
             if self.send_signal(None, pid, link).is_err() {
                 return false;
@@ -349,7 +354,7 @@ impl Scheduler {
         }
         let port = self.resources.borrow_mut::<Ports>().get_mut(id);
         let port = port.expect("the port to connect is open");
-        port.links.insert(pid);
+        port.links.insert(pid, ());
         port.owner = pid;
         true
     }
@@ -449,7 +454,7 @@ impl Scheduler {
         // A port that closed sent its link exit signal to `from`, and a port
         // without the link drops the signal (`io.c:2187-2190`).
         let closes = port.is_some_and(|port| {
-            port.links.remove(&from)
+            port.links.remove(&from).is_some()
                 && (*reason != Term::static_atom("normal") || port.owner == from)
         });
         if closes {

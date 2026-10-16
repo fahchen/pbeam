@@ -845,24 +845,19 @@ fn links_and_connects_a_port_as_pinned_erts() {
 }
 
 #[test]
-fn stops_the_run_for_the_links_of_a_port_with_two_links() {
-    // ERTS gives the links in the reversed post-order of a red-black tree
-    // (erl_monitor_link.c:91-233; erl_rbtree.h:1343-1458;
-    // erl_bif_info.c:3676-3696).
-    let program = load();
-    for item in ["all", "links"] {
-        let argument = program.host_term(Term::Atom(program.atom(item).unwrap()));
-        let error = program
-            .execute("tcp_active", "many_links", &[argument])
-            .unwrap_err()
-            .to_string();
-        assert!(
-            error.starts_with(
-                "unsupported erlang:port_info links of a port with more than one link"
-            ),
-            "{item}: {error}"
-        );
-    }
+fn gives_the_links_of_a_port_in_the_order_of_the_pinned_erts_tree() {
+    // ERTS keeps the links in its red-black tree (`ml_cmp_keys`,
+    // erl_monitor_link.c:91-233), walks it in post-order
+    // (erl_rbtree.h:1343-1458), and conses each pid to the front
+    // (erl_bif_info.c:3676-3696), so the order of the item depends on the
+    // shape of the tree after each link and unlink. Each list of the result
+    // gives the position of the linked process in the spawn order of the
+    // probe, with the owner first. The last list is the order of the link
+    // exit signals of a port that closes, which is the same walk
+    // (`erts_deliver_port_exit`, io.c:3922-3925).
+    let expected = "[[[1],[1,2],[2,3,1],[2,3,4,1],[2,4,5,3,1],[2,4,5,1],[2,5,6,4,1],[4,5,6,1],[4,5,6,1,3],[4,6,1,3],[4,6,2,3,1],[2,4,3,1]],[[1],[1,6],[5,6,1],[5,6,1,4],[4,5,1],[4,5,1,3],[4,5,2,3,1],[4,5,6,2,3,1],[5,6,2,3,1],[2,6,3,1],[2,4,6,3,1],[3,4,6,1]],[2,4,3,1],[3,4,2]]";
+    assert_eq!(erts_text("tcp_active", "link_orders"), expected, "ERTS");
+    assert_eq!(pbeam_text("tcp_active", "link_orders"), expected, "PBeam");
 }
 
 #[test]

@@ -6,12 +6,9 @@
 
 pub(super) mod inet;
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    ffi::c_int,
-};
+use std::{collections::BTreeMap, ffi::c_int};
 
-use super::host::spawn::Child;
+use super::{host::spawn::Child, process::MonitorLinkTree};
 use crate::{
     error::{BeamError, error},
     term::{PortId, ProcessId, Reference, Term},
@@ -37,16 +34,21 @@ pub(super) struct Port {
     /// (`ERTS_PORT_GET_CONNECTED`): the process that opened the port, or
     /// the process of the last `erlang:port_connect/2` (io.c:2355-2400).
     pub(super) owner: ProcessId,
-    /// The processes that have a link to the port (`ERTS_P_LINKS`), in pid
-    /// order. ERTS keeps them in a red-black tree in pid order, and
-    /// `port_info/2` gives them in a different order (see "Ports" in
-    /// `docs/erts-differences.md`). `open_port/2` links the owner
-    /// (`erl_bif_port.c:92-100`), and `link/1`, `unlink/1`, and
-    /// `erlang:port_connect/2` change the set. `link/1` and `unlink/1`
-    /// change both sides at once. `erlang:port_connect/2` adds the side of
-    /// the port, and the new owner adds its side when it handles the link
-    /// signal.
-    pub(super) links: BTreeSet<ProcessId>,
+    /// The processes that have a link to the port (`ERTS_P_LINKS`), as the
+    /// ERTS link tree: the same red-black tree as the links of a process,
+    /// with the key order `ml_cmp_keys` (`erl_monitor_link.c:91-233`), the
+    /// insert, delete, and rebalance steps of `erl_rbtree.h`, and the
+    /// post-order walk of `foreach_unordered__` (`erl_rbtree.h:1343-1458`).
+    /// Thus the tree has the ERTS shape after each sequence of links and
+    /// unlinks: the `links` item of `erlang:port_info/1,2` conses the walk
+    /// to the front (`erl_bif_info.c:3676-3696`), and the close of the port
+    /// sends the link exit signals in the walk order (`io.c:3922-3925`).
+    /// `open_port/2` links the owner (`erl_bif_port.c:92-100`), and
+    /// `link/1`, `unlink/1`, and `erlang:port_connect/2` change the set.
+    /// `link/1` and `unlink/1` change both sides at once.
+    /// `erlang:port_connect/2` adds the side of the port, and the new owner
+    /// adds its side when it handles the link signal.
+    pub(super) links: MonitorLinkTree<ProcessId, ()>,
     /// The native bytes of the program path or of the driver name, as
     /// `port_info/1` gives them in `name` (`erl_bif_info.c:3767-3776`).
     pub(super) name: Vec<u8>,
