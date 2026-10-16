@@ -9,6 +9,14 @@
 %%
 %% The fixture has no line table, so ERTS gives each frame of this module
 %% the location [].
+%%
+%% In the C locale the first strtod attempt of a text with a comma reads the
+%% sign and the digits before the comma only. A prefix of 309 digits or more
+%% overflows an infinity, and ERTS rejects a result that is not finite
+%% before the second attempt (sys_float.c:109-124), so the call raises
+%% badarg whatever the full text is worth: 309 nines raise badarg, and 308
+%% nines give 1.0. Adjacent string literals hold each count of nines without
+%% a call to a BIF.
 main() ->
     results(["1.0", "1,5", "-1.5", "+1.0", "-0.0", "0.0", "1.5E3", "1.0e10",
              "1.0e+3", "0001.500", "1.0e-320", "1.0e-400", "0.0e-400", "0.1",
@@ -20,7 +28,19 @@ main() ->
              [$1, $., $0 | foo], [1.0], [4851, 700], abc,
              [$1, $., $0, 0, 120], [$1, $., $0, 0], [$1, 0, $., $0], [0],
              [0, $1, $., $0], [$1, $., $5, 0, 255], [$1, $., $0, 0, 4851],
-             [$1, $., $5, $e, 0, $5], [0, 0], [$1, $., $0, 0, 0, $0]]).
+             [$1, $., $5, $e, 0, $5], [0, 0], [$1, $., $0, 0, 0, $0],
+             "9999999999999999999999999999999999999999999999999999999999999999"
+             "9999999999999999999999999999999999999999999999999999999999999999"
+             "9999999999999999999999999999999999999999999999999999999999999999"
+             "9999999999999999999999999999999999999999999999999999999999999999"
+             "9999999999999999999999999999999999999999999999999999"
+             ",5e-308",
+             "9999999999999999999999999999999999999999999999999999999999999999"
+             "9999999999999999999999999999999999999999999999999999999999999999"
+             "9999999999999999999999999999999999999999999999999999999999999999"
+             "9999999999999999999999999999999999999999999999999999999999999999"
+             "99999999999999999999999999999999999999999999999999999"
+             ",5e-309"]).
 
 %% The root process exits with the result of main/0, so the run gives its
 %% text.

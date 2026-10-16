@@ -63,12 +63,17 @@ fn skip_digits(text: &[u8], index: usize) -> Option<usize> {
 /// text. ERTS converts the text with the `strtod` of the host C library,
 /// first with the radix character of the current locale, and, when
 /// `strtod` stops before the end, again with the other radix character in
-/// place of the point (`sys_float.c:109-124`). PBeam reads the text with
-/// the Rust float parse instead, which rounds to the nearest double as
-/// `strtod` does, and it reads a comma as a point, which gives the ERTS
-/// result in each locale: `list_to_float("1,5")` gives `1.5` and
-/// `list_to_float("1.5")` gives `1.5`. ERTS rejects a value that is not
-/// finite, so a text that overflows an infinity raises `badarg`
+/// place of the point (`sys_float.c:109-124`). ERTS rejects a result that
+/// is not finite after each attempt (`sys_float.c:111-113` and
+/// `sys_float.c:121-123`), so in the C locale the first attempt of a text
+/// with a comma reads the sign and the digits before the comma only. That
+/// prefix of 309 digits or more overflows an infinity, and the call then
+/// raises `badarg` before the second attempt, whatever the full text is
+/// worth. PBeam reads the text with the Rust float parse instead, which
+/// rounds to the nearest double as `strtod` does, and it reads a comma as a
+/// point, which gives the ERTS result in each locale:
+/// `list_to_float("1,5")` gives `1.5` and `list_to_float("1.5")` gives
+/// `1.5`. A text that overflows an infinity raises `badarg`
 /// (`sys_float.c:111-113`); `list_to_float("1.0e-400")` gives `0.0`, as the
 /// branch of `sys_float.c:130-132` gives it.
 ///
@@ -85,6 +90,9 @@ fn skip_digits(text: &[u8], index: usize) -> Option<usize> {
 /// assert_eq!(text_to_float(b"1"), None);
 /// assert_eq!(text_to_float(b"1.5e400"), None);
 /// assert_eq!(text_to_float(b"1.0\x00x"), Some(1.0));
+/// let nines = "9".repeat(309);
+/// assert_eq!(text_to_float(format!("{nines},5e-309").as_bytes()), None);
+/// assert_eq!(text_to_float(format!("{},5e-308", &nines[..308]).as_bytes()), Some(1.0));
 /// ```
 fn text_to_float(text: &[u8]) -> Option<f64> {
     let end = text
@@ -98,6 +106,16 @@ fn text_to_float(text: &[u8]) -> Option<f64> {
         Some(b'.' | b',') => index,
         _ => return None,
     };
+    if text[radix] == b',' {
+        // The first `strtod` call of ERTS runs with the radix character of
+        // the current locale, so in the C locale it reads the sign and the
+        // digits before the comma only, and ERTS rejects a result that is
+        // not finite before the second attempt (`sys_float.c:109-124`).
+        let prefix: f64 = std::str::from_utf8(&text[..radix]).ok()?.parse().ok()?;
+        if !prefix.is_finite() {
+            return None;
+        }
+    }
     index = skip_digits(text, index + 1)?;
     if matches!(text.get(index), Some(b'e' | b'E')) {
         let sign = usize::from(matches!(text.get(index + 1), Some(b'+' | b'-')));
