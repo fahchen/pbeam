@@ -38,7 +38,9 @@ call_ext() ->
      try_stack(fun() -> body(member, a) end),
      try_stack(fun() -> body(reverse, a) end),
      try_stack(fun() -> body(get, a) end),
-     try_stack(fun() -> body(system_time, a) end)].
+     try_stack(fun() -> body(system_time, a) end),
+     try_stack(fun() -> body(call_on_load_function, a) end),
+     try_stack(fun() -> body(load_nif, 1) end)].
 
 body(atom_to_list, X) -> _ = atom_to_list(X), ok;
 body(list_to_atom, X) -> _ = list_to_atom(X), ok;
@@ -47,7 +49,9 @@ body(list_to_tuple, X) -> _ = list_to_tuple(X), ok;
 body(member, X) -> _ = lists:member(x, X), ok;
 body(reverse, X) -> _ = lists:reverse(X, []), ok;
 body(get, X) -> _ = maps:get(k, X), ok;
-body(system_time, X) -> _ = os:system_time(X), ok.
+body(system_time, X) -> _ = os:system_time(X), ok;
+body(call_on_load_function, X) -> _ = erlang:call_on_load_function(X), ok;
+body(load_nif, X) -> _ = erlang:load_nif(X, []), ok.
 
 %% A call_ext_only and a call_ext_last of a BIF.
 tail_calls() ->

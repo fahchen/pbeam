@@ -2246,6 +2246,12 @@ impl BeamProgram {
                 let module_id = current_frame(process).module_id;
                 let caller = scheduler.code.module_by_id(module_id)?.name.clone();
                 let result = native::load_nif(scheduler, &caller)?;
+                // The `load_nif/2` and `call_on_load_function/1`
+                // instructions raise with the BIF frame, as each BIF does
+                // (`jit/arm/instr_bif.cpp:994-1067`).
+                let process = scheduler.current_process_mut();
+                let arguments = call_arguments(&process.registers, arity)?;
+                let result = bif_error(scheduler, module, name, arguments, result, 0)?;
                 self.finish_bif(scheduler, result, false)
             }
             ImportKind::CallOnLoadFunction => {
@@ -2262,7 +2268,12 @@ impl BeamProgram {
                         enter_frame(scheduler.current_process_mut(), frame, false);
                         Ok(None)
                     }
-                    None => self.finish_bif(scheduler, BifResult::badarg(), false),
+                    None => {
+                        let arguments = vec![module];
+                        let badarg = BifResult::badarg();
+                        let result = bif_error(scheduler, "erlang", name, arguments, badarg, 0)?;
+                        self.finish_bif(scheduler, result, false)
+                    }
                 }
             }
             ImportKind::Bif { bif, heavy } => {
