@@ -616,7 +616,7 @@ impl BeamProgram {
                         Outcome::Hibernate => scheduler.hibernate_current(),
                         Outcome::Yield => scheduler.yield_current(),
                         Outcome::Exit { reason, result } => {
-                            scheduler.finish_current(reason, result)
+                            scheduler.finish_current(reason, result)?
                         }
                         Outcome::DirtyWrite { write, tail } => {
                             scheduler.start_dirty_write(write, tail)

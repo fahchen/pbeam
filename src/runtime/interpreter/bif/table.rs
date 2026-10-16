@@ -316,7 +316,7 @@ bifs! {
     erlang:system_time/0 => unsupported,
     erlang:system_time/1 as ErlangSystemTime1 => |cx, [unit]| Ok(erlang::convert_time(cx.scheduler.timers.system_time(), 0, unit)),
     erlang:term_to_binary/1 => unsupported,
-    erlang:term_to_binary/2 => unsupported,
+    erlang:term_to_binary/2 as ErlangTermToBinary2 => |cx, [term, options]| erlang::term_to_binary_2(cx, term, options),
     erlang:term_to_iovec/1 => unsupported,
     erlang:term_to_iovec/2 => unsupported,
     erlang:throw/1 as ErlangThrow1 => |cx, [reason]| erlang::throw_1(cx, reason),

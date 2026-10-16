@@ -97,10 +97,35 @@ pub(crate) fn read(fd: c_int, size: usize) -> Result<Vec<u8>, c_int> {
 /// assert_eq!(wait_readable(&[1000], Some(Duration::ZERO)), Readiness::Invalid);
 /// ```
 pub(crate) fn wait_readable(fds: &[c_int], timeout: Option<Duration>) -> Readiness {
-    let limit = fds.iter().max().map_or(0, |fd| fd + 1);
+    wait(fds, &[], timeout).0
+}
+
+/// Wait as [`wait_readable`] does, also until a `write` of one of
+/// `writable` does not block, as the ERTS poll waits for the write select
+/// of a driver (`driver_select` with `ERL_DRV_WRITE`,
+/// `erl_check_io.c:1236-1465`). Return the read readiness of `fds` and the
+/// fds of `writable` that are ready for write; an `Invalid` wait gives no
+/// write fd.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // fd 1 is a pipe with space.
+/// assert_eq!(wait(&[], &[1], None), (Readiness::Pending, vec![1]));
+/// ```
+pub(crate) fn wait(
+    fds: &[c_int],
+    writable: &[c_int],
+    timeout: Option<Duration>,
+) -> (Readiness, Vec<c_int>) {
+    let limit = fds.iter().chain(writable).max().map_or(0, |fd| fd + 1);
     let mut sets = FdSets::new(limit);
     for &fd in fds {
         sets.set(fd);
+    }
+    let mut writes = FdSets::new(limit);
+    for &fd in writable {
+        writes.set(fd);
     }
     // `select` takes microseconds; round up, so the wait does not end
     // before a timer end.
@@ -115,22 +140,37 @@ pub(crate) fn wait_readable(fds: &[c_int], timeout: Option<Duration>) -> Readine
         .as_mut()
         .map_or(std::ptr::null_mut(), |time| &raw mut *time);
     // SAFETY: `select` reads and writes the bits of the fds below `limit`
-    // in `sets`, which holds them, and reads `time`, which is null or points
-    // to `timeval`. It reads no other set.
+    // in `sets` and `writes`, which hold them, and reads `time`, which is
+    // null or points to `timeval`. It reads no other set.
     let count = unsafe {
         select(
             limit,
             sets.0.as_mut_ptr(),
-            std::ptr::null_mut(),
+            writes.0.as_mut_ptr(),
             std::ptr::null_mut(),
             time,
         )
     };
+    let ready_writes = || {
+        writable
+            .iter()
+            .copied()
+            .filter(|&fd| writes.is_set(fd))
+            .collect()
+    };
     match count {
-        1.. => Readiness::Ready(fds.iter().copied().filter(|&fd| sets.is_set(fd)).collect()),
-        0 => Readiness::Pending,
-        _ if errno() == libc::EINTR => Readiness::Pending,
-        _ => Readiness::Invalid,
+        1.. => {
+            let reads: Vec<_> = fds.iter().copied().filter(|&fd| sets.is_set(fd)).collect();
+            let readiness = if reads.is_empty() {
+                Readiness::Pending
+            } else {
+                Readiness::Ready(reads)
+            };
+            (readiness, ready_writes())
+        }
+        0 => (Readiness::Pending, Vec::new()),
+        _ if errno() == libc::EINTR => (Readiness::Pending, Vec::new()),
+        _ => (Readiness::Invalid, Vec::new()),
     }
 }
 

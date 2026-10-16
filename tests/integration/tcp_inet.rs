@@ -1,4 +1,5 @@
 use std::{
+    io::{Read, Write},
     net::{SocketAddr, TcpStream, UdpSocket},
     path::{Path, PathBuf},
     process::Command,
@@ -22,6 +23,8 @@ const TCP_PROBE: &[u8] = include_bytes!("../../fixtures/tcp/tcp_probe.beam");
 const TCP_ACCEPT: &[u8] = include_bytes!("../../fixtures/tcp/tcp_accept.beam");
 
 const UDP_PROBE: &[u8] = include_bytes!("../../fixtures/tcp/udp_probe.beam");
+
+const TCP_TRANSFER: &[u8] = include_bytes!("../../fixtures/tcp/tcp_transfer.beam");
 
 /// The pinned OTP modules that the probes call: `erlang` has
 /// `open_port/2`, `port_control/3`, `port_close/1`, and `port_info/1`,
@@ -76,7 +79,7 @@ fn text(term: &Term, atoms: &AtomTable) -> String {
 /// Load the probes with the pinned modules of [`MODULES`].
 fn load() -> BeamProgram {
     let beams: Vec<Vec<u8>> = MODULES.iter().map(|module| pinned_beam(module)).collect();
-    let mut all: Vec<&[u8]> = vec![TCP_PROBE, TCP_ACCEPT, UDP_PROBE];
+    let mut all: Vec<&[u8]> = vec![TCP_PROBE, TCP_ACCEPT, UDP_PROBE, TCP_TRANSFER];
     all.extend(beams.iter().map(Vec::as_slice));
     BeamProgram::load(&all).unwrap()
 }
@@ -210,10 +213,6 @@ fn stops_the_run_for_each_tcp_inet_part_that_is_not_implemented() {
             "list",
             "unsupported open_port/2 settings of an inet driver port other than [binary]",
         ),
-        (
-            "command",
-            "unsupported erlang:port_command/2 on a tcp_inet port",
-        ),
         ("inet6", "unsupported tcp_inet family 2"),
         ("mptcp", "unsupported tcp_inet protocol 4"),
         ("any", "unsupported tcp_inet bind address family 3"),
@@ -316,6 +315,10 @@ fn stops_the_run_for_each_udp_inet_part_that_is_not_implemented() {
         ("seqpacket", "unsupported udp_inet type 3"),
         ("sctp", "unsupported udp_inet protocol 3"),
         ("accept", "unsupported udp_inet request 26"),
+        (
+            "command",
+            "unsupported udp_inet output of erlang:port_command/2",
+        ),
     ] {
         let argument = Term::Atom(program.atom(case).unwrap());
         let error = program
@@ -482,7 +485,7 @@ fn accepts_in_many_processes_on_one_listen_socket_as_pinned_erts() {
     let accepted =
         |client: u8| format!("[ok,true,{{peer,client_{client}}},true,[true,true,true],{options}]");
     let expected = format!(
-        "[[[[0,101,105,110,118,97,108],[0,101,110,111,116,99,111,110,110],[0,101,105,110,118,97,108]],[[0,101,105,110,118,97,108],[0,101,110,111,116,99,111,110,110],[1,1,0,0,0,0,8,0,0,0,0,9,0,0,0,0,31,0,0,0,0,43,0,0,0,0,46,0,0,0,64,47,0,0,0,0],[0,101,105,110,118,97,108]],[[0,101,105,110,118,97,108],[0,101,105,110,118,97,108]]],[{options},{{error,enotconn}},{{error,timeout}}],{{error,timeout}},{},{},{},[{{error,closed}},{{error,closed}}],[['EXIT',port,normal]]]",
+        "[[[[0,101,105,110,118,97,108],[0,101,110,111,116,99,111,110,110],[0,101,105,110,118,97,108]],[[0,101,105,110,118,97,108],[0,101,110,111,116,99,111,110,110],[1,1,0,0,0,0,8,0,0,0,0,9,0,0,0,0,31,0,0,0,0,43,0,0,0,0,46,0,0,0,64,47,0,0,0,0],[0,101,105,110,118,97,108]],[[0,101,105,110,118,97,108],[0,101,105,110,118,97,108]]],[{options},{{error,enotconn}},{{error,timeout}}],{{error,timeout}},{},{},{},[{{error,closed}},{{error,closed}}],[['EXIT',port,normal],['EXIT',port,normal],['DOWN',ref,port,port,normal],[inet_async,port,0,{{error,closed}}]]]",
         accepted(1),
         accepted(2),
         accepted(3),
@@ -513,4 +516,228 @@ fn stops_the_run_for_an_active_mode_on_an_accepted_socket() {
         error.starts_with("unsupported tcp_inet option active on a connected socket"),
         "{error}"
     );
+}
+
+/// A client of the test that runs the commands of `tcp_transfer`: it reads
+/// `"Step Command"` from the file `path`, runs each new step once, and then
+/// writes `Step` to the file of [`acknowledgement`]. `connect Port` makes a
+/// connection to `Port` on `127.0.0.1`, and each other command acts on the
+/// last connection: `send Text` writes `Text`, `read Count` reads `Count`
+/// bytes, `close` closes, and `reset` closes with `linger` 0, so the peer
+/// gets a reset. It returns the bytes of each `read` in order.
+fn command_client(path: PathBuf, stop: Arc<AtomicBool>) -> thread::JoinHandle<Vec<Vec<u8>>> {
+    thread::spawn(move || {
+        let ack = acknowledgement(&path);
+        let temporary = PathBuf::from(format!("{}.ack.tmp", path.display()));
+        let mut streams: Vec<TcpStream> = Vec::new();
+        let mut reads = Vec::new();
+        let mut done = String::new();
+        while !stop.load(Ordering::SeqCst) {
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            if let Some((step, command)) = text.trim_end().split_once(' ')
+                && step != done
+            {
+                let (verb, argument) = command.split_once(' ').unwrap_or((command, ""));
+                match verb {
+                    "connect" => {
+                        let address = SocketAddr::from(([127, 0, 0, 1], argument.parse().unwrap()));
+                        streams.push(TcpStream::connect(address).unwrap());
+                    }
+                    "send" => streams
+                        .last_mut()
+                        .unwrap()
+                        .write_all(argument.as_bytes())
+                        .unwrap(),
+                    "read" => {
+                        let mut bytes = vec![0; argument.parse().unwrap()];
+                        streams.last_mut().unwrap().read_exact(&mut bytes).unwrap();
+                        reads.push(bytes);
+                    }
+                    "close" => drop(streams.pop()),
+                    "reset" => {
+                        let stream = streams.pop().unwrap();
+                        socket2::SockRef::from(&stream)
+                            .set_linger(Some(Duration::ZERO))
+                            .unwrap();
+                    }
+                    other => panic!("unknown command {other}"),
+                }
+                std::fs::write(&temporary, step).unwrap();
+                std::fs::rename(&temporary, &ack).unwrap();
+                done = step.to_owned();
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        reads
+    })
+}
+
+/// Run `tcp_transfer:Function(Path)` on the pinned ERTS and on PBeam, each
+/// with a [`command_client`], and return the `~w` text and the reads of
+/// the client of each run.
+fn transfer_runs(function: &str) -> [(String, Vec<Vec<u8>>); 2] {
+    let directory = std::env::temp_dir();
+    let id = std::process::id();
+    let run = |name: &str, run: &dyn Fn(&Path) -> String| {
+        let path = directory.join(format!("pbeam-tcp-{function}-{name}-{id}"));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(acknowledgement(&path));
+        let stop = Arc::new(AtomicBool::new(false));
+        let handle = command_client(path.clone(), Arc::clone(&stop));
+        let text = run(&path);
+        stop.store(true, Ordering::SeqCst);
+        let reads = handle.join().unwrap();
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(acknowledgement(&path));
+        (text, reads)
+    };
+    let erts = run("erts", &|path| {
+        let output = Command::new("erl")
+            .args(["+S", "1", "-noshell", "-pa", "fixtures/tcp", "-eval"])
+            .arg(format!(
+                "io:format(\"~w~n\", [tcp_transfer:{function}(\"{}\")]), halt().",
+                path.display()
+            ))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8_lossy(&output.stdout)
+            .trim_end()
+            .to_owned()
+    });
+    let pbeam = run("pbeam", &|path| {
+        let program = load();
+        let result = program
+            .execute(
+                "tcp_transfer",
+                function,
+                &[program.host_term(path_term(path))],
+            )
+            .unwrap();
+        text(&result.term, result.atoms())
+    });
+    [erts, pbeam]
+}
+
+/// Return the file name `path` as a list of bytes.
+fn path_term(path: &Path) -> Term {
+    Term::list_from(
+        path.display()
+            .to_string()
+            .bytes()
+            .map(|byte| Term::Integer(byte.into())),
+    )
+}
+
+/// Return the 8 MiB that `tcp_transfer:double/2` makes from 16 bytes.
+fn big() -> Vec<u8> {
+    b"0123456789abcdef".repeat(1 << 19)
+}
+
+#[test]
+fn receives_and_sends_in_passive_mode_as_pinned_erts() {
+    // `TCP_REQ_RECV` of a length and of 0, its timeout, `ealready`, list
+    // mode, the output queue and the wait of a send for the low watermark,
+    // `GETSTAT`, and the end of file of the peer (prim_inet.erl:575-624,
+    // 808-824; inet_drv.c:10732-10800, 12268-12325, 12657-12731,
+    // 12783-12847, 13042-13240, 13736-13850, 14234-14370).
+    let bytes = |text: &str| {
+        text.bytes()
+            .map(|byte| byte.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let stats = "{ok,[{recv_oct,14},{recv_cnt,6},{recv_max,5},{recv_avg,2},{recv_dvi,0},{send_oct,8388616},{send_cnt,4},{send_max,8388608},{send_avg,2097154},{send_pend,0}]}";
+    let expected = format!(
+        "[{{error,enotconn}},[{{ok,<<{abc}>>}},{{ok,<<{defgh}>>}},{{error,timeout}}],[{{error,timeout}},{{ok,<<120>>}},{{ok,<<121>>}}],{{error,ealready}},{{ok,<<{ok}>>}},{{ok,[{hi}]}},[[0,{einval}],[0,{enomem}],badarg,[]],[ok,ok],ok,true,ok,{stats},[{{error,closed}},{{error,enotconn}},{{error,closed}},{{error,enotconn}},{stats}],einval,[['EXIT',port,normal],['DOWN',ref,port,port,normal],[inet_async,port,0,{{error,closed}}]]]",
+        abc = bytes("abc"),
+        defgh = bytes("defgh"),
+        ok = bytes("ok"),
+        hi = bytes("hi"),
+        einval = bytes("einval"),
+        enomem = bytes("enomem"),
+    );
+    let mut tail = big();
+    tail.extend(b"tail");
+    for (name, (text, reads)) in ["ERTS", "PBeam"].into_iter().zip(transfer_runs("main")) {
+        assert_eq!(text, expected, "{name}");
+        assert!(reads == [b"pong".to_vec(), tail.clone()], "{name} reads");
+    }
+}
+
+#[test]
+fn ends_the_socket_at_a_reset_of_the_peer_as_pinned_erts() {
+    // A failed write closes the socket: the next send and the next
+    // receive give `closed` once (inet_drv.c:13613-13734, 12278-12289,
+    // 12672-12686).
+    let expected = "[{error,timeout},[{error,closed},{error,enotconn},{error,closed},{error,enotconn},{ok,[{send_pend,0}]}],[{error,closed},{error,closed},{error,enotconn},{error,enotconn}],[]]";
+    for (name, (text, _)) in ["ERTS", "PBeam"].into_iter().zip(transfer_runs("reset")) {
+        assert_eq!(text, expected, "{name}");
+    }
+}
+
+#[test]
+fn ends_a_waiting_send_and_receive_at_the_close_of_the_peer_as_pinned_erts() {
+    // `tcp_recv_closed` replies `closed` to the send that waits and ends
+    // the receive (inet_drv.c:12783-12847).
+    for (name, (text, _)) in ["ERTS", "PBeam"]
+        .into_iter()
+        .zip(transfer_runs("busy_close"))
+    {
+        assert_eq!(text, "[{error,closed},{error,closed}]", "{name}");
+    }
+}
+
+#[test]
+fn stops_the_run_for_each_receive_and_send_part_that_is_not_implemented() {
+    for (case, message) in [
+        ("length", "unsupported tcp_inet receive length -1"),
+        (
+            "header",
+            "unsupported tcp_inet output header other than term_to_binary(Ref, [local])",
+        ),
+        ("delay_send", "unsupported tcp_inet output with delay_send"),
+        (
+            "send_timeout",
+            "unsupported tcp_inet output to a busy port with a send_timeout",
+        ),
+        ("busy", "unsupported tcp_inet output to a busy port"),
+        (
+            "subscribe",
+            "unsupported tcp_inet request 24 with queued output",
+        ),
+        (
+            "port_close",
+            "unsupported close of a tcp_inet port with queued output",
+        ),
+        (
+            "owner_exit",
+            "unsupported close of a tcp_inet port with queued output",
+        ),
+        (
+            "term",
+            "unsupported erlang:term_to_binary/2 other than an ordinary reference with [local]",
+        ),
+    ] {
+        let path = std::env::temp_dir().join(format!(
+            "pbeam-tcp-unsupported-{case}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(acknowledgement(&path));
+        let stop = Arc::new(AtomicBool::new(false));
+        let handle = command_client(path.clone(), Arc::clone(&stop));
+        let program = load();
+        let arguments = [
+            program.host_term(path_term(&path)),
+            program.host_term(Term::Atom(program.atom(case).unwrap())),
+        ];
+        let error = program
+            .execute("tcp_transfer", "unsupported", &arguments)
+            .unwrap_err()
+            .to_string();
+        stop.store(true, Ordering::SeqCst);
+        handle.join().unwrap();
+        assert!(error.starts_with(message), "{case}: {error}");
+    }
 }

@@ -18,7 +18,7 @@ use num_bigint::BigInt;
 
 use crate::term::{
     Atom, AtomTable, Fun, MAX_ATOM_CHARACTERS, MAX_TUPLE_SIZE, ProcessId, Reference,
-    SMALL_INTEGER_MAX, SMALL_INTEGER_MIN, debug_term,
+    SMALL_INTEGER_MAX, SMALL_INTEGER_MIN, debug_term, external,
 };
 
 /// Run `erlang:node/1`: return the node of a pid. A term that is not a pid
@@ -1231,7 +1231,7 @@ pub(super) fn monitor(
     let target = match (context.scheduler.atoms.name_of(kind), target) {
         ("process", Term::Pid(id)) => Some(Ok(MonitorTarget::Process(*id))),
         ("process", target) => local_name(target).map(|name| Ok(MonitorTarget::ProcessName(name))),
-        ("port", Term::Port(_)) => Some(Err(unsupported_port("erlang:monitor/2,3"))),
+        ("port", Term::Port(port)) => Some(Ok(MonitorTarget::Port(*port))),
         ("port", target) => local_name(target).map(|name| Ok(MonitorTarget::PortName(name))),
         ("time_offset", Term::Atom(service)) if service.is_static("clock_service") => {
             // ponytail: no time offset service yet; add it when a measured path monitors it.
@@ -4216,4 +4216,39 @@ pub(super) fn port_get_data(
     let ports = scheduler.resources.borrow_mut::<Ports>();
     let data = ports.get(id).expect("the port is open").data.clone();
     Ok(BifResult::Value(data))
+}
+
+/// Run `erlang:term_to_binary(Term, [local])` for an ordinary reference, as
+/// `term_to_binary_2` does with `DFLAG_LOCAL_EXT` (external.c:1499,
+/// 1565-1590): the `LOCAL_EXT` bytes of the reference with the hash of the
+/// node (see [`external::local_reference`]).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let local = Term::list_from(vec![Term::static_atom("local")]);
+/// let result = term_to_binary_2(&mut context, &Term::Reference(reference), &local)?;
+/// ```
+///
+/// # Errors
+///
+/// Each other term and each other option list, which PBeam does not encode
+/// yet.
+pub(super) fn term_to_binary_2(
+    context: &mut BifContext<'_>,
+    term: &Term,
+    options: &Term,
+) -> Result<BifResult, BeamError> {
+    let local = Term::list_from(vec![Term::static_atom("local")]);
+    match term {
+        Term::Reference(reference) if *options == local && !reference.is_pid_reference() => {
+            let seed = context.scheduler.local_node_hash();
+            Ok(Value(Term::binary(external::local_reference(
+                *reference, seed,
+            ))))
+        }
+        _ => Err(error(
+            "unsupported erlang:term_to_binary/2 other than an ordinary reference with [local]: see \"External term format\" in docs/erts-differences.md",
+        )),
+    }
 }

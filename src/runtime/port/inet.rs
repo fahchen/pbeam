@@ -46,6 +46,8 @@
 //! socket of an active port is in the idle wait, and a ready socket stops
 //! the run (row "udp_inet ports" of `docs/erts-differences.md`).
 
+mod stream;
+
 use std::{collections::VecDeque, ffi::c_int, io, os::fd::AsRawFd, time::Duration};
 
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
@@ -58,6 +60,8 @@ use crate::{
     },
     term::{ProcessId, Reference},
 };
+use stream::Stream;
+pub(in crate::runtime) use stream::{Event, Output, Receiver};
 
 /// The number that `prim_inet` adds to each request code
 /// (`ERTS_INET_DRV_CONTROL_MAGIC_NUMBER`, prim_inet.erl:2969).
@@ -160,6 +164,8 @@ pub(in crate::runtime) struct Inet {
     op_ref: u16,
     /// The callers that wait for a connection, in arrival order.
     pub(in crate::runtime) acceptors: VecDeque<Acceptor>,
+    /// The receive and send state of a connected socket.
+    pub(in crate::runtime) stream: Box<Stream>,
 }
 
 /// The result of a request.
@@ -174,6 +180,15 @@ pub(in crate::runtime) enum Control {
     /// milliseconds, `u32::MAX` for `infinity`. The scheduler runs it, as
     /// it makes a port, a monitor, and a timer.
     Accept(u32),
+    /// A valid `TCP_REQ_RECV` with this timeout in milliseconds,
+    /// `u32::MAX` for `infinity`, and this length. The scheduler runs it,
+    /// as it makes an async reference, a timer, and messages.
+    Receive {
+        /// The timeout.
+        timeout: u32,
+        /// The length, 0 for the bytes of one read.
+        length: usize,
+    },
 }
 
 impl Inet {
@@ -200,6 +215,7 @@ impl Inet {
             delay_send: false,
             op_ref: 0,
             acceptors: VecDeque::new(),
+            stream: Box::new(Stream::new(stream::BUFFER)),
         }
     }
 
@@ -222,6 +238,7 @@ impl Inet {
             mode: self.mode,
             send_timeout: self.send_timeout,
             send_timeout_close: self.send_timeout_close,
+            stream: Box::new(Stream::new(self.stream.buffer)),
             ..Inet::new(SocketType::Stream)
         }
     }
@@ -320,12 +337,17 @@ impl Inet {
             6 => self.bind(request)?,
             7 => self.set_options(request)?,
             8 => self.get_options(request)?,
+            11 => return Ok(self.statistics(request)),
             12 => get_host_name(request),
+            24 if self.has_output() => {
+                return Err(self.unsupported("request", "24 with queued output"));
+            }
             24 => return Ok(subscribe(request)),
             26 if self.socket_type == SocketType::Stream => return Ok(self.accept(request)),
             27 if self.socket_type == SocketType::Stream => self.listen(request),
             // `LISTEN` is only for an SCTP socket (inet_drv.c:14846-14858).
             27 => error_reply("exbadport"),
+            42 if self.socket_type == SocketType::Stream => return self.receive_request(request),
             other => return Err(self.unsupported("request", other)),
         };
         Ok(Control::Reply(reply))
