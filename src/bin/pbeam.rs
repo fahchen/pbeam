@@ -89,7 +89,8 @@ struct Cli {
 /// # Examples
 ///
 /// ```rust,ignore
-/// // $ pbeam pbeam_boot start boot_probe main -- pbeam_boot.beam boot_probe.beam erlang.beam ...
+/// // $ root=$(erl -noshell -eval 'io:put_chars(code:root_dir()), halt().')
+/// // $ pbeam pbeam_boot start boot_probe main --root "$root" -- pbeam_boot.beam boot_probe.beam erlang.beam ...
 /// // Hello, world!
 /// ```
 fn main() -> ExitCode {
