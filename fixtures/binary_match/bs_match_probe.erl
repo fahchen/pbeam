@@ -1,6 +1,8 @@
 -module(bs_match_probe).
 -export([unsigned/1, flagged/1, wide/1, prefix/1, skip/1, binaries/1, bits/1,
-         tail/1, bit_tail/1, unaligned_utf8/1]).
+         tail/1, bit_tail/1, unaligned_utf8/1, match_string/1,
+         match_string_offset/1, skip_size/2, skip_size_bits/2, get_size/2,
+         get_size_flagged/2]).
 
 %% The integer command: unsigned big-endian integers below, at, and above
 %% one byte, also at positions that are not byte-aligned, and a size with a
@@ -52,3 +54,39 @@ bit_tail(_) -> false.
 %% and bs_get_utf8 then reads the character at that position.
 unaligned_utf8(<<_:4, C/utf8, _/bits>>) -> C;
 unaligned_utf8(_) -> false.
+
+%% The string command of a match: a string of 104 bits, which is above the
+%% 64-bit value of a `=:=` command, at the start and at the bit offset 4.
+match_string(<<"icrosoft.icon", Rest/binary>>) -> Rest;
+match_string(_) -> false.
+
+match_string_offset(<<_:4, "icrosoft.icon", Rest/binary>>) -> Rest;
+match_string_offset(_) -> false.
+
+%% The skip command of a match with a variable size of 8-bit units and of
+%% bits, which a command list cannot hold.
+skip_size(Bin, Size) when is_binary(Bin) ->
+    case Bin of
+        <<_:Size/unit:8, Rest/binary>> -> Rest;
+        _ -> false
+    end.
+
+skip_size_bits(Bin, Size) when is_binary(Bin) ->
+    case Bin of
+        <<_:Size, Rest/binary>> -> Rest;
+        _ -> false
+    end.
+
+%% The integer command of a match with a variable size, without and with
+%% the flags `little` and `signed`.
+get_size(Bin, Size) when is_binary(Bin) ->
+    case Bin of
+        <<X:Size, Rest/binary>> -> {X, Rest};
+        _ -> false
+    end.
+
+get_size_flagged(Bin, Size) when is_binary(Bin) ->
+    case Bin of
+        <<X:Size/little-signed, Rest/binary>> -> {X, Rest};
+        _ -> false
+    end.

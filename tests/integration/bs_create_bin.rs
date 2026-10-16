@@ -1,5 +1,6 @@
-use std::process::Command;
+use std::{process::Command, sync::Arc};
 
+use num_bigint::BigInt;
 use pbeam_runtime::{AtomTable, BeamProgram, Map, Term};
 
 const BS_CREATE_BIN_PROBE: &[u8] =
@@ -217,10 +218,10 @@ fn uses_one_reduction_for_each_1024_bytes_of_a_binary_segment() {
 }
 
 #[test]
-fn stops_at_a_segment_type_that_is_not_implemented() {
-    // `utf16/1` is `<<"b", X/utf16>>`: a string segment and a utf16
-    // segment. ERTS gives `<<98,0,7>>`. PBeam stops at the utf16 segment
-    // (row "Binary construction").
+fn builds_a_utf16_segment_after_a_string_segment_as_pinned_erts() {
+    // `utf16/1` is `<<"b", X/utf16>>`: a `string` segment, then a `utf16`
+    // segment that writes `0` and `X` in big-endian order. ERTS gives
+    // `<<98,0,7>>`.
     let program = BeamProgram::load(&[BS_CREATE_BIN_PROBE]).unwrap();
     assert_eq!(
         program
@@ -229,9 +230,9 @@ fn stops_at_a_segment_type_that_is_not_implemented() {
                 "utf16",
                 &[program.host_term(Term::Integer(7))],
             )
-            .unwrap_err()
-            .to_string(),
-        "unsupported bs_create_bin segment utf16"
+            .unwrap()
+            .term,
+        Term::binary(vec![98, 0, 7])
     );
     assert_eq!(reference("bs_create_bin_probe:utf16(7)"), "<<98,0,7>>\n");
 }
@@ -1537,5 +1538,356 @@ fn raises_the_failure_of_a_segment_after_a_private_append_as_pinned_erts() {
              bs_create_bin_writable_probe:ints([1, 2])]"
         ),
         "[{badarg,{2,integer,type,[]}},<<1,2>>]\n"
+    );
+}
+const BS_CREATE_BIN_UTF_PROBE: &[u8] =
+    include_bytes!("../../fixtures/bs_create_bin/bs_create_bin_utf_probe.beam");
+
+/// Run `bs_create_bin_utf_probe:Function/N` with each call of arguments and
+/// return the results.
+fn run_utf(program: &BeamProgram, function: &str, calls: &[Vec<Term>]) -> Vec<Term> {
+    calls
+        .iter()
+        .map(|arguments| {
+            let imported: Vec<_> = arguments
+                .iter()
+                .cloned()
+                .map(|term| program.host_term(term))
+                .collect();
+            program
+                .execute("bs_create_bin_utf_probe", function, &imported)
+                .unwrap()
+                .term
+        })
+        .collect()
+}
+
+#[test]
+fn builds_utf16_and_utf32_segments_as_pinned_erts() {
+    // A `utf16` segment writes two bytes for a code point below 0x10000 and
+    // four bytes for each other one, in the byte order of the flags
+    // (`erts_bs_put_utf16`, erl_bits.c:1221-1282; `am_utf16` in
+    // jit/arm/instr_bs.cpp:1751-1765, 2407-2427). A `utf32` segment writes
+    // the code point as a 32-bit integer, as an `integer` segment of 32
+    // bits does (jit/arm/instr_bs.cpp:2428-2452).
+    let program = BeamProgram::load(&[BS_CREATE_BIN_UTF_PROBE]).unwrap();
+    let binary = |bytes: &[u8]| Term::binary(bytes.to_vec());
+    let face = Term::Integer(0x1F600);
+    let calls: Vec<Vec<Term>> = vec![
+        vec![Term::Integer(65)],
+        vec![face.clone()],
+        vec![Term::Integer(0)],
+    ];
+    assert_eq!(
+        run_utf(&program, "utf16", &calls),
+        [
+            binary(&[0, 65]),
+            binary(&[216, 61, 222, 0]),
+            binary(&[0, 0]),
+        ]
+    );
+    assert_eq!(
+        run_utf(
+            &program,
+            "utf16_little",
+            &[vec![Term::Integer(65)], vec![face.clone()]]
+        ),
+        [binary(&[65, 0]), binary(&[61, 216, 0, 222])]
+    );
+    // The `native` flag gives the byte order of the host, as the ERTS
+    // loader reads it (`$NativeEndian`, generators.tab).
+    assert_eq!(
+        run_utf(
+            &program,
+            "utf16_native",
+            &[vec![Term::Integer(65)], vec![face.clone()]]
+        ),
+        [
+            binary(if cfg!(target_endian = "little") {
+                &[65, 0]
+            } else {
+                &[0, 65]
+            }),
+            binary(&[61, 216, 0, 222]),
+        ]
+    );
+    assert_eq!(
+        run_utf(
+            &program,
+            "utf32",
+            &[vec![face.clone()], vec![Term::Integer(65)]]
+        ),
+        [binary(&[0, 1, 246, 0]), binary(&[0, 0, 0, 65])]
+    );
+    assert_eq!(
+        run_utf(&program, "utf32_little", &[vec![face.clone()]]),
+        [binary(&[0, 246, 1, 0])]
+    );
+    assert_eq!(
+        run_utf(&program, "utf32_native", &[vec![face.clone()]]),
+        [binary(if cfg!(target_endian = "little") {
+            &[0, 246, 1, 0]
+        } else {
+            &[0, 1, 246, 0]
+        })]
+    );
+    // A utf16 or utf32 segment after other segments, also at a bit offset
+    // that is not a multiple of 8.
+    assert_eq!(
+        run_utf(
+            &program,
+            "utf16_between",
+            &[vec![Term::Integer(65)], vec![face.clone()]]
+        ),
+        [binary(b"a\x00Ab"), binary(b"a\xD8=\xDE\x00b")]
+    );
+    assert_eq!(
+        run_utf(&program, "utf32_between", &[vec![face.clone()]]),
+        [binary(b"a\x00\x01\xF6\x00b")]
+    );
+    assert_eq!(
+        run_utf(
+            &program,
+            "utf16_bits",
+            &[vec![Term::Integer(65)], vec![face.clone()]]
+        ),
+        [binary(&[0, 4, 16]), binary(&[13, 131, 221, 224, 0])]
+    );
+    assert_eq!(
+        run_utf(&program, "utf32_bits", &[vec![face.clone()]]),
+        [binary(&[0, 0, 0x1F, 0x60, 0])]
+    );
+    assert_eq!(
+        run_utf(
+            &program,
+            "mixed",
+            &[
+                vec![face.clone(), Term::Integer(8)],
+                vec![Term::Integer(65), Term::Integer(8)],
+            ]
+        ),
+        [binary(&[1, 216, 61, 222, 0]), binary(&[1, 0, 65])]
+    );
+    assert_eq!(
+        run_utf(
+            &program,
+            "append_utf16",
+            &[
+                vec![Term::binary(vec![97]), Term::Integer(65)],
+                vec![Term::binary(Vec::new()), face.clone()],
+            ]
+        ),
+        [binary(&[97, 0, 65]), binary(&[216, 61, 222, 0])]
+    );
+    assert_eq!(
+        reference(
+            "begin P = bs_create_bin_utf_probe, F = 16#1F600, \
+             [P:utf16(65), P:utf16(F), P:utf16(0), P:utf16_little(65), \
+             P:utf16_little(F), P:utf16_native(65), P:utf32(F), P:utf32(65), \
+             P:utf32_little(F), P:utf32_native(F), P:utf16_between(65), \
+             P:utf32_between(F), P:utf16_bits(65), P:utf16_bits(F), \
+             P:utf32_bits(F), P:mixed(F, 8), P:mixed(65, 8), \
+             P:append_utf16(<<97>>, 65), P:append_utf16(<<>>, F)] end"
+        ),
+        "[<<0,65>>,<<216,61,222,0>>,<<0,0>>,<<65,0>>,<<61,216,0,222>>,\
+         <<65,0>>,<<0,1,246,0>>,<<0,0,0,65>>,<<0,246,1,0>>,<<0,246,1,0>>,\
+         <<97,0,65,98>>,<<97,0,1,246,0,98>>,<<0,4,16>>,<<13,131,221,224,0>>,\
+         <<0,0,31,96,0>>,<<1,216,61,222,0>>,<<1,0,65>>,<<97,0,65>>,\
+         <<216,61,222,0>>]\n"
+    );
+}
+
+/// A failing call of `bs_create_bin_utf_probe`: the function, the
+/// arguments, the segment, the operation, the info, and the value of the
+/// `error_info` cause.
+type UtfFailureCase<'a> = (&'a str, Vec<Term>, i64, &'a str, &'a str, Term);
+
+#[test]
+fn raises_the_erts_error_info_for_utf16_and_utf32_segments() {
+    // A `utf16` segment fails at the construct pass for a term that is not
+    // a code point from 0 to 16#10FFFF outside 16#D800 to 16#DFFF, with
+    // the cause `{Segment, utf16, type, Value}` (`erts_bs_put_utf16`,
+    // erl_bits.c:1231-1237; jit/arm/instr_bs.cpp:2418-2425). A `utf32`
+    // segment fails at the size pass, with the cause
+    // `{Segment, utf32, type, Value}` (jit/arm/instr_bs.cpp:1766-1799).
+    // The size pass runs over each segment before the construct pass, so
+    // `ordered(other, -1)` fails on the size of the `integer` segment 2 and
+    // `ordered(other, 8)` fails on the term of the `utf16` segment 1.
+    let program = BeamProgram::load(&[BS_CREATE_BIN_UTF_PROBE]).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let int = Term::Integer;
+    let other = atom("other");
+    let bignum = Term::BigInt(Arc::new(BigInt::from(1u8) << 64u32));
+    let cases: Vec<UtfFailureCase> = vec![
+        ("utf16", vec![int(-1)], 1, "utf16", "type", int(-1)),
+        ("utf16", vec![int(0xD800)], 1, "utf16", "type", int(0xD800)),
+        ("utf16", vec![int(0xDFFF)], 1, "utf16", "type", int(0xDFFF)),
+        (
+            "utf16",
+            vec![int(0x11_0000)],
+            1,
+            "utf16",
+            "type",
+            int(0x11_0000),
+        ),
+        (
+            "utf16",
+            vec![other.clone()],
+            1,
+            "utf16",
+            "type",
+            other.clone(),
+        ),
+        (
+            "utf16",
+            vec![bignum.clone()],
+            1,
+            "utf16",
+            "type",
+            bignum.clone(),
+        ),
+        ("utf16_little", vec![int(-1)], 1, "utf16", "type", int(-1)),
+        ("utf32", vec![int(-1)], 1, "utf32", "type", int(-1)),
+        ("utf32", vec![int(0xD800)], 1, "utf32", "type", int(0xD800)),
+        ("utf32", vec![int(0xDFFF)], 1, "utf32", "type", int(0xDFFF)),
+        (
+            "utf32",
+            vec![int(0x11_0000)],
+            1,
+            "utf32",
+            "type",
+            int(0x11_0000),
+        ),
+        (
+            "utf32",
+            vec![other.clone()],
+            1,
+            "utf32",
+            "type",
+            other.clone(),
+        ),
+        (
+            "utf32",
+            vec![bignum.clone()],
+            1,
+            "utf32",
+            "type",
+            bignum.clone(),
+        ),
+        (
+            "utf32_little",
+            vec![int(0x11_0000)],
+            1,
+            "utf32",
+            "type",
+            int(0x11_0000),
+        ),
+        (
+            "ordered",
+            vec![other.clone(), int(8)],
+            1,
+            "utf16",
+            "type",
+            other.clone(),
+        ),
+        (
+            "ordered",
+            vec![other.clone(), int(-1)],
+            2,
+            "integer",
+            "size",
+            int(-1),
+        ),
+        (
+            "ordered",
+            vec![other.clone(), other.clone()],
+            2,
+            "integer",
+            "size",
+            other.clone(),
+        ),
+        (
+            "ordered",
+            vec![int(0x41), int(-1)],
+            2,
+            "integer",
+            "size",
+            int(-1),
+        ),
+        // A size of 0x110000 bits passes the size pass, so the construct
+        // pass fails for the `utf16` term first.
+        (
+            "ordered",
+            vec![other.clone(), int(0x11_0000)],
+            1,
+            "utf16",
+            "type",
+            other.clone(),
+        ),
+    ];
+    let caught = |function: &str, arity: usize, cause: Term| {
+        let error_info = Map::from_pairs(
+            vec![
+                (atom("cause"), cause),
+                (atom("function"), atom("format_bs_fail")),
+                (atom("module"), atom("erl_erts_errors")),
+            ],
+            program.atoms(),
+        )
+        .unwrap();
+        let frame = Term::tuple(vec![
+            atom("bs_create_bin_utf_probe"),
+            atom(function),
+            Term::Integer(arity as i64),
+            Term::list_from(vec![Term::tuple(vec![
+                atom("error_info"),
+                Term::Map(error_info),
+            ])]),
+        ]);
+        Term::tuple(vec![atom("error"), atom("badarg"), frame])
+    };
+    for (function, arguments, segment, operation, info, value) in &cases {
+        let cause = Term::tuple(vec![
+            int(*segment),
+            atom(operation),
+            atom(info),
+            value.clone(),
+        ]);
+        assert_eq!(
+            run_utf(
+                &program,
+                "call",
+                &[vec![atom(function), Term::list_from(arguments.clone())]]
+            ),
+            [caught(function, arguments.len(), cause)],
+            "{function} {arguments:?}"
+        );
+    }
+}
+
+#[test]
+fn stops_at_a_binary_segment_of_a_size_in_a_register() {
+    // `binary_sized/2` is `<<X:Size/binary>>`: a `binary` segment of a size
+    // that is not `all`. The loader keeps it as an unsupported segment, so
+    // the run stops (row "Binary construction"). ERTS gives the prefix of
+    // the size.
+    let program = BeamProgram::load(&[BS_CREATE_BIN_PROBE]).unwrap();
+    assert_eq!(
+        program
+            .execute(
+                "bs_create_bin_probe",
+                "binary_sized",
+                &[
+                    program.host_term(Term::binary(vec![1, 2, 3])),
+                    program.host_term(Term::Integer(2)),
+                ],
+            )
+            .unwrap_err()
+            .to_string(),
+        "unsupported bs_create_bin segment binary"
+    );
+    assert_eq!(
+        reference("bs_create_bin_probe:binary_sized(<<1,2,3>>, 2)"),
+        "<<1,2>>\n"
     );
 }

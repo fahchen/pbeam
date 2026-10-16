@@ -280,3 +280,65 @@ fn map_probe_has_the_has_map_fields_bytes() {
         ],
     );
 }
+
+#[test]
+fn bs_match_probe_has_the_bs_match_string_bs_skip_bits2_and_bs_get_integer2_bytes() {
+    assert_in_fixture(
+        "fixtures/binary_match/bs_match_probe.beam",
+        &[
+            // match_string/1: bs_match_string f37 x0 104 (offset 0)
+            &[0x84, 0x0D, 0x25, 0x03, 0x08, 0x68, 0x00],
+            // match_string_offset/1: bs_match_string f40 x0 104 (offset 0)
+            &[0x84, 0x0D, 0x28, 0x03, 0x08, 0x68, 0x00],
+            // skip_size/2: bs_skip_bits2 f43 {tr,x0,3} x1 8 0
+            &[0x78, 0x0D, 0x2B, 0x57, 0x03, 0x30, 0x13, 0x80, 0x00],
+            // skip_size_bits/2: bs_skip_bits2 f46 {tr,x0,3} x1 1 0
+            &[0x78, 0x0D, 0x2E, 0x57, 0x03, 0x30, 0x13, 0x10, 0x00],
+            // get_size/2: bs_get_integer2 f49 2 {tr,x0,3} x1 1 0 x1
+            &[
+                0x75, 0x0D, 0x31, 0x57, 0x03, 0x30, 0x20, 0x13, 0x10, 0x00, 0x13,
+            ],
+            // get_size_flagged/2: bs_get_integer2 f52 2 {tr,x0,3} x1 1
+            // {literal,[little,signed]} x1
+            &[
+                0x75, 0x0D, 0x34, 0x57, 0x03, 0x30, 0x20, 0x13, 0x10, 0x60, 0x13,
+            ],
+        ],
+    );
+}
+
+#[test]
+fn bs_utf_probe_has_the_bs_skip_utf8_bytes() {
+    assert_in_fixture(
+        "fixtures/binary_match/bs_utf_probe.beam",
+        &[
+            // skip8/1: bs_skip_utf8 f47 {tr,x0,1} 1 0
+            &[0x8B, 0x0D, 0x2F, 0x57, 0x03, 0x10, 0x10, 0x00],
+        ],
+    );
+}
+
+#[test]
+fn bs_create_bin_utf_probe_has_the_utf16_and_utf32_segment_bytes() {
+    assert_in_fixture(
+        "fixtures/bs_create_bin/bs_create_bin_utf_probe.beam",
+        &[
+            // utf16/1: bs_create_bin f0 0 1 16 x0 {list,[{atom,utf16},1,0,
+            // nil,{x,0},{atom,undefined}]}
+            &[
+                0xB1, 0x05, 0x00, 0x10, 0x08, 0x10, 0x03, 0x17, 0x60, 0x22, 0x10, 0x00, 0x02, 0x03,
+                0x32,
+            ],
+            // utf16_little/1: the flags are the literal list [little]
+            &[
+                0xB1, 0x05, 0x00, 0x10, 0x08, 0x10, 0x03, 0x17, 0x60, 0x22, 0x10, 0x00, 0x47, 0x00,
+                0x03, 0x32,
+            ],
+            // utf32/1: the atom utf32 with the unit 0 and the size undefined
+            &[
+                0xB1, 0x05, 0x00, 0x10, 0x08, 0x20, 0x03, 0x17, 0x60, 0x62, 0x10, 0x00, 0x02, 0x03,
+                0x32,
+            ],
+        ],
+    );
+}

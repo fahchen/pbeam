@@ -56,6 +56,8 @@ const OPCODE_BS_GET_FLOAT2: u8 = 118;
 const BSF_LITTLE: u64 = 2;
 /// The `native` flag of a segment (`BSF_NATIVE`, erl_bits.h:465).
 const BSF_NATIVE: u64 = 16;
+/// The `signed` flag of a segment (`BSF_SIGNED`, erl_bits.h:463).
+const BSF_SIGNED: u64 = 4;
 /// `bs_get_binary2 Fail Ctx Live Size Unit Flags Dst` (genop.tab:449).
 const OPCODE_BS_GET_BINARY2: u8 = 119;
 const OPCODE_BS_SKIP_BITS2: u8 = 120;
@@ -181,6 +183,8 @@ const OPCODE_PUT_RECORD: u8 = 189;
 const OPCODE_MAKE_FUN3: u8 = 171;
 /// `bs_match Fail Ctx {commands,Commands}` (genop.tab:685-696).
 const OPCODE_BS_MATCH: u8 = 182;
+/// `bs_match_string Fail Ctx Bits Val` (genop.tab:488).
+const OPCODE_BS_MATCH_STRING: u8 = 132;
 const OPCODE_UPDATE_RECORD: u8 = 181;
 const OPCODE_RECV_MARKER_BIND: u8 = 173;
 const OPCODE_RECV_MARKER_CLEAR: u8 = 174;
@@ -1244,6 +1248,38 @@ pub(crate) enum Instruction {
         little: bool,
         destination: Operand,
     },
+    /// Reads an integer of `Size * unit` bits from the match context in
+    /// `context` and writes it to `destination`, or jumps to `fail_label`
+    /// (`bs_get_integer2`, opcode 117). `size` is a register or a literal.
+    /// `little` is `true` for a little-endian segment and `signed` for a
+    /// signed segment.
+    ///
+    /// Encoding: opcode, fail label, context, unsigned live count, size,
+    /// unsigned unit, unsigned flags, destination register. The decoder
+    /// skips the live count. It reads the `little` flag (2), the `native`
+    /// flag (16), and the `signed` flag (4) (`BSF_LITTLE`, `BSF_NATIVE`,
+    /// and `BSF_SIGNED` in erl_bits.h:461-465), and gives a native segment
+    /// the byte order of the host, as the ERTS loader does. ERTS loads a
+    /// small fixed size below 64 bits as a `bs_match` integer command and
+    /// each other size as `i_bs_get_integer2`
+    /// (`emit_bs_get_integer2`, jit/arm/instr_bs.cpp:312-358). Both read
+    /// the same bits. Example: `bs_match_probe:get_size/2` has
+    /// `[0x75, 0x0D, 0x31, 0x57, 0x03, 0x30, 0x20, 0x13, 0x10, 0x00,
+    /// 0x13]`: fail label 49, the typed register `x0`, live count 2, size
+    /// `x1`, unit 1, flags 0, and the destination `x1`.
+    ///
+    /// Erlang: `<<Value:N/integer, Rest/binary>>` compiles to
+    /// `{test,bs_get_integer2,{f,3},2,[{tr,{x,0},...},{x,1},1,{field_flags,[]}],{x,1}}`
+    /// for `Value`.
+    BinaryGetInteger {
+        fail_label: u32,
+        context: Operand,
+        size: Operand,
+        unit: u64,
+        little: bool,
+        signed: bool,
+        destination: Operand,
+    },
     /// Writes the bit position of the match context in `context` to
     /// `destination` as an integer (`bs_get_position`, opcode 167).
     ///
@@ -1270,23 +1306,46 @@ pub(crate) enum Instruction {
     /// Erlang: the second clause of `prim_tty:is_usascii/1` starts with
     /// `{bs_set_position,{x,0},{x,1}}`.
     BinarySetPosition { context: Operand, position: Operand },
+    /// Moves the position of the match context in `context` by `size *
+    /// unit` bits, or jumps to `fail_label` (`bs_skip_bits2`, opcode 120).
+    /// `size` is a register or a literal.
+    ///
+    /// Encoding: opcode, fail label, context, size, unsigned unit, unsigned
+    /// flags. The decoder skips the flags, as the ERTS loader does
+    /// (jit/arm/ops.tab:1018-1019). Example: `bs_match_probe:skip_size/2`
+    /// has `[0x78, 0x0D, 0x2B, 0x57, 0x03, 0x30, 0x13, 0x80, 0x00]`: fail
+    /// label 43, the typed register `x0`, the size `x1`, unit 8, and flags
+    /// 0.
+    ///
+    /// Erlang: `<<_:N/unit:8, Rest/binary>>` compiles to
+    /// `{test,bs_skip_bits2,{f,3},[{tr,{x,0},...},{tr,{x,1},...},8,{field_flags,[]}]}`.
+    BinarySkipBits {
+        fail_label: u32,
+        context: Operand,
+        size: Operand,
+        unit: u64,
+    },
     /// Reads one UTF-8 character from the match context in `context` and
-    /// writes its code point to `destination`, or jumps to `fail_label`
-    /// (`bs_get_utf8`, opcode 138).
+    /// writes its code point to `destination` (`bs_get_utf8`, opcode 138),
+    /// or skips it when `destination` is `None` (`bs_skip_utf8`, opcode
+    /// 139), or jumps to `fail_label`.
     ///
     /// Encoding: opcode, fail label, context, unsigned live count, unsigned
-    /// flags, destination register. The decoder skips the live count and
-    /// the flags, as the ERTS loader does (emu `ops.tab:1286`). Example:
+    /// flags, and the destination register for `bs_get_utf8`. The decoder
+    /// skips the live count and the flags, as the ERTS loader does (emu
+    /// `ops.tab:1286-1289`). Example:
     /// `binary_match_probe:is_usascii/1` has `[0x8A, 0x0D, 0x10, 0x57,
     /// 0x03, 0x10, 0x20, 0x00, 0x23]`, which reads a character from the
     /// typed register `x0` to `x2` or fails to label 16.
     ///
     /// Erlang: `<<Char/utf8, T/binary>>` compiles to
-    /// `{test,bs_get_utf8,{f,16},[{tr,{x,0},...},2,{field_flags,[]},{x,2}]}`.
+    /// `{test,bs_get_utf8,{f,16},[{tr,{x,0},...},2,{field_flags,[]},{x,2}]}`,
+    /// and `<<_/utf8, T/binary>>` to
+    /// `{test,bs_skip_utf8,{f,3},[{tr,{x,0},...},1,{field_flags,[]}]}`.
     BinaryGetUtf8 {
         fail_label: u32,
         context: Operand,
-        destination: Operand,
+        destination: Option<Operand>,
     },
     /// Reads one UTF-16 character from the match context in `context`
     /// (`bs_get_utf16`, opcode 140), or skips it when `destination` is
@@ -1346,6 +1405,30 @@ pub(crate) enum Instruction {
         fail_label: u32,
         context: Operand,
         commands: Vec<BinaryMatchCommand>,
+    },
+    /// Compares the `bits` bits after the position of the match context in
+    /// `context` with the first `bits` bits of `text`, moves the position
+    /// past them, or jumps to `fail_label` (`bs_match_string`, opcode
+    /// 132).
+    ///
+    /// Encoding: opcode, fail label, context, unsigned `Bits`, unsigned
+    /// offset of the string in the `StrT` chunk. The string has
+    /// `(Bits + 7) / 8` bytes (beam_disasm.erl:1189-1197). Example:
+    /// `bs_match_probe:match_string/1` has `[0x84, 0x0D, 0x25, 0x03, 0x08,
+    /// 0x68, 0x00]`: fail label 37, the register `x0`, 104 bits, and the
+    /// string at the offset 0 of the `StrT` chunk.
+    ///
+    /// Erlang: a string above 64 bits in a binary pattern, such as
+    /// `<<"dobe.photoshop", Rest/binary>>`, compiles to
+    /// `{test,bs_match_string,{f,3},[{tr,{x,0},...},112,{string,<<"dobe.photoshop">>}]}`.
+    /// The compiler writes the instruction for such a string, because a
+    /// `{:commands,_}` list holds the value of a `=:=` command in one word
+    /// (beam_ssa_pre_codegen.erl:631-637; beam_ssa_codegen.erl:2858-2862).
+    BinaryMatchString {
+        fail_label: u32,
+        context: Operand,
+        bits: u64,
+        text: Vec<u8>,
     },
     /// Makes an empty writable binary in `x0` (`bs_init_writable`, opcode
     /// 133). ERTS reads the size of the buffer from `x0`, 1024 bytes when
@@ -1766,11 +1849,38 @@ pub(crate) enum BinarySegment {
     /// `{atom,utf8},1,0,nil,{x,0},{atom,undefined}` when atom 8 is `utf8`
     /// and atom 9 is `undefined`.
     Utf8 { segment: u64, source: Operand },
-    /// A segment that PBeam does not run yet: a `utf16` or `utf32` segment,
-    /// an `append` or `private_append` segment that is not the first
-    /// segment or has a size other than `all`, or a `binary` segment with
-    /// another size or a unit other than 1, 2, 4, or 8. It holds
-    /// the segment type. Example: `[0x42, 0x20, 0x80, 0x02, 0x03, 0x81]` is
+    /// A `utf16` segment: the UTF-16 code units of the code point in
+    /// `source`. The compiler writes the unit 0 and the size `undefined`.
+    /// ERTS writes two bytes for a code point below 0x10000 and four bytes
+    /// for each other one, in the byte order of the flags
+    /// (`erts_bs_put_utf16`, erl_bits.c:1221-1282; `am_utf16` in
+    /// jit/arm/instr_bs.cpp:1751-1765, 2407-2427). Example:
+    /// `[0x22, 0x10, 0x00, 0x02, 0x03, 0x32]` is
+    /// `{atom,utf16},1,0,nil,{x,0},{atom,undefined}` when atom 2 is
+    /// `utf16`, atom 0 is `nil`, and atom 3 is `undefined`.
+    Utf16 {
+        segment: u64,
+        little: bool,
+        source: Operand,
+    },
+    /// A `utf32` segment: the code point in `source` as a 32-bit integer
+    /// in the byte order of the flags. The compiler writes the unit 0 and
+    /// the size `undefined`. ERTS checks the value at the size pass and
+    /// writes the integer at the construct pass (`am_utf32` in
+    /// jit/arm/instr_bs.cpp:1766-1799, 2428-2452). Example:
+    /// `[0x62, 0x10, 0x00, 0x02, 0x03, 0x32]` is
+    /// `{atom,utf32},1,0,nil,{x,0},{atom,undefined}` when atom 6 is
+    /// `utf32`.
+    Utf32 {
+        segment: u64,
+        little: bool,
+        source: Operand,
+    },
+    /// A segment that PBeam does not run yet: an `append` or
+    /// `private_append` segment that is not the first segment or has a size
+    /// other than `all`, or a `binary` segment with another size or a unit
+    /// other than 1, 2, 4, or 8. It holds the segment type. Example:
+    /// `[0x42, 0x20, 0x80, 0x02, 0x03, 0x81]` is
     /// `{atom,binary},2,8,nil,{x,0},{integer,8}` when atom 4 is `binary`.
     Unsupported(Atom),
 }
@@ -2184,6 +2294,36 @@ pub(super) fn parse_code(
                     destination,
                 }
             }
+            OPCODE_BS_GET_INTEGER2 => {
+                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let context = read_move_operand(data, &mut cursor, atoms, literals)?;
+                skip_live_registers(data, &mut cursor)?;
+                let size = read_move_operand(data, &mut cursor, atoms, literals)?;
+                let unit = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
+                let (little, signed) = read_segment_flags(data, &mut cursor)?;
+                Instruction::BinaryGetInteger {
+                    fail_label,
+                    context,
+                    size,
+                    unit,
+                    little,
+                    signed,
+                    destination: read_register(data, &mut cursor)?,
+                }
+            }
+            OPCODE_BS_SKIP_BITS2 => {
+                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let context = read_move_operand(data, &mut cursor, atoms, literals)?;
+                let size = read_move_operand(data, &mut cursor, atoms, literals)?;
+                let unit = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
+                let _flags = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
+                Instruction::BinarySkipBits {
+                    fail_label,
+                    context,
+                    size,
+                    unit,
+                }
+            }
             OPCODE_BS_GET_POSITION => {
                 let context = read_move_operand(data, &mut cursor, atoms, literals)?;
                 let destination = read_register(data, &mut cursor)?;
@@ -2197,15 +2337,19 @@ pub(super) fn parse_code(
                 context: read_move_operand(data, &mut cursor, atoms, literals)?,
                 position: read_move_operand(data, &mut cursor, atoms, literals)?,
             },
-            OPCODE_BS_GET_UTF8 => {
+            OPCODE_BS_GET_UTF8 | OPCODE_BS_SKIP_UTF8 => {
                 let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
                 let context = read_move_operand(data, &mut cursor, atoms, literals)?;
                 skip_live_registers(data, &mut cursor)?;
                 let _flags = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
+                let destination = match opcode {
+                    OPCODE_BS_GET_UTF8 => Some(read_register(data, &mut cursor)?),
+                    _ => None,
+                };
                 Instruction::BinaryGetUtf8 {
                     fail_label,
                     context,
-                    destination: read_register(data, &mut cursor)?,
+                    destination,
                 }
             }
             OPCODE_BS_GET_UTF16 | OPCODE_BS_SKIP_UTF16 | OPCODE_BS_GET_UTF32
@@ -2245,6 +2389,17 @@ pub(super) fn parse_code(
                     fail_label,
                     context,
                     commands,
+                }
+            }
+            OPCODE_BS_MATCH_STRING => {
+                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let context = read_move_operand(data, &mut cursor, atoms, literals)?;
+                let bits = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
+                Instruction::BinaryMatchString {
+                    fail_label,
+                    context,
+                    bits,
+                    text: read_segment_string(data, &mut cursor, strings, bits)?,
                 }
             }
             OPCODE_BS_INIT_WRITABLE => Instruction::BinaryInitWritable,
@@ -3040,6 +3195,16 @@ fn read_binary_segments(
                     size,
                 },
                 _ if kind.is_static("utf8") => BinarySegment::Utf8 { segment, source },
+                _ if kind.is_static("utf16") => BinarySegment::Utf16 {
+                    segment,
+                    little: is_little_endian(&flags),
+                    source,
+                },
+                _ if kind.is_static("utf32") => BinarySegment::Utf32 {
+                    segment,
+                    little: is_little_endian(&flags),
+                    source,
+                },
                 _ => BinarySegment::Unsupported(kind),
             })
         })
@@ -3094,8 +3259,8 @@ fn read_record_updates(
 ///
 /// ```rust,ignore
 /// let mut cursor = 0;
-/// skip_unsupported_instruction(OPCODE_BS_SKIP_UTF8, &[0, 0, 0, 0], &mut cursor)?;
-/// assert_eq!(cursor, 4);
+/// skip_unsupported_instruction(OPCODE_TEST_HEAP, &[0, 0], &mut cursor)?;
+/// assert_eq!(cursor, 2);
 /// ```
 fn skip_unsupported_instruction(
     opcode: u8,
@@ -3124,15 +3289,12 @@ fn skip_unsupported_instruction(
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(unsupported_opcode_operand_count(OPCODE_BS_SKIP_UTF8), Some(4));
+/// assert_eq!(unsupported_opcode_operand_count(OPCODE_TEST_HEAP), Some(2));
+/// assert_eq!(unsupported_opcode_operand_count(OPCODE_BS_SKIP_UTF8), None);
 /// assert_eq!(unsupported_opcode_operand_count(255), None);
 /// ```
 fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
     match opcode {
-        OPCODE_BS_SKIP_BITS2 => Some(5),
-        // `bs_get_integer2` is in `io_lib`.
-        OPCODE_BS_GET_INTEGER2 => Some(7),
-        OPCODE_BS_SKIP_UTF8 => Some(4),
         OPCODE_TEST_HEAP => Some(2),
         OPCODE_BIF0 => Some(2),
         OPCODE_TEST_EXACT_EQ => Some(3),
@@ -3203,12 +3365,77 @@ fn skip_live_registers(data: &[u8], cursor: &mut usize) -> Result<(), BeamError>
 /// assert_eq!(read_little_flag(&[0x08, 0x10], &mut 0)?, cfg!(target_endian = "little"));
 /// ```
 fn read_little_flag(data: &[u8], cursor: &mut usize) -> Result<bool, BeamError> {
+    read_operand(data, cursor, TAG_UNSIGNED).map(read_flag_byte_order)
+}
+
+/// Read the unsigned `Flags` operand of a segment and return its byte order
+/// and its sign, as the ERTS loader does. The `native` flag (16) gives the
+/// byte order of the host, as `$NativeEndian` does in the ERTS loader
+/// (generators.tab); otherwise the `little` flag (2) decides, and the
+/// `signed` flag (4) gives a signed segment (`BSF_LITTLE`, `BSF_SIGNED`,
+/// and `BSF_NATIVE` in erl_bits.h:461-465).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(read_segment_flags(&[0x45], &mut 0)?, (false, true));
+/// assert_eq!(read_segment_flags(&[0x00], &mut 0)?, (false, false));
+/// assert_eq!(
+///     read_segment_flags(&[0x08, 0x10], &mut 0)?,
+///     (cfg!(target_endian = "little"), false)
+/// );
+/// ```
+fn read_segment_flags(data: &[u8], cursor: &mut usize) -> Result<(bool, bool), BeamError> {
     let flags = read_operand(data, cursor, TAG_UNSIGNED)?;
-    Ok(if flags & BSF_NATIVE != 0 {
+    Ok((read_flag_byte_order(flags), flags & BSF_SIGNED != 0))
+}
+
+/// Return the byte order of the segment flags `flags`: `true` for a
+/// little-endian segment.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(read_flag_byte_order(2));
+/// assert_eq!(read_flag_byte_order(16), cfg!(target_endian = "little"));
+/// assert!(!read_flag_byte_order(0));
+/// ```
+fn read_flag_byte_order(flags: u64) -> bool {
+    if flags & BSF_NATIVE != 0 {
         cfg!(target_endian = "little")
     } else {
         flags & BSF_LITTLE != 0
-    })
+    }
+}
+
+/// Read the string of a `bs_match_string` instruction at the cursor: the
+/// unsigned byte offset of the string in the `StrT` chunk. The string has
+/// `(Bits + 7) / 8` bytes (`beam_disasm.erl:1189-1197`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(read_segment_string(&[0x00], &mut 0, b"count: ", 16)?, b"co".to_vec());
+/// assert!(read_segment_string(&[0x00], &mut 0, b"count: ", 64).is_err());
+/// ```
+///
+/// # Errors
+///
+/// A string that ends after the `StrT` chunk is an error.
+fn read_segment_string(
+    data: &[u8],
+    cursor: &mut usize,
+    strings: &[u8],
+    bits: u64,
+) -> Result<Vec<u8>, BeamError> {
+    let offset = read_operand(data, cursor, TAG_UNSIGNED)?;
+    let length = bits.div_ceil(8);
+    usize::try_from(offset)
+        .ok()
+        .zip(usize::try_from(length).ok())
+        .and_then(|(offset, length)| strings.get(offset..offset.checked_add(length)?))
+        .map(<[u8]>::to_vec)
+        .ok_or_else(|| error("BEAM bs_match_string is outside the StrT chunk"))
 }
 
 /// Skip the `Alloc` operand of `bs_create_bin`: a `u` heap word count or an

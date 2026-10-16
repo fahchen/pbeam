@@ -2503,7 +2503,7 @@ fn gives_an_invariant_error_for_a_match_context_outside_binary_matching() {
         run(vec![Instruction::BinaryGetUtf8 {
             fail_label: 1,
             context: atom("a"),
-            destination: Operand::X(1),
+            destination: Some(Operand::X(1)),
         }]),
         "invariant error: Value(Atom(\"a\")) holds Atom(\"a\"), not a match context"
     );
@@ -2546,7 +2546,7 @@ fn shares_a_match_context_that_an_instruction_copies_to_another_register() {
             Instruction::BinaryGetUtf8 {
                 fail_label: 1,
                 context: to.clone(),
-                destination: Operand::X(2),
+                destination: Some(Operand::X(2)),
             },
             Instruction::BinaryGetPosition {
                 context: Operand::X(0),
@@ -2561,7 +2561,7 @@ fn shares_a_match_context_that_an_instruction_copies_to_another_register() {
             Instruction::BinaryGetUtf8 {
                 fail_label: 1,
                 context: to,
-                destination: Operand::X(4),
+                destination: Some(Operand::X(4)),
             },
             Instruction::PutTuple {
                 destination: Operand::X(0),

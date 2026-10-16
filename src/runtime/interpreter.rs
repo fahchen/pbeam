@@ -1549,6 +1549,44 @@ impl BeamProgram {
                         None => cursor.position = label_position(*fail_label)?,
                     }
                 }
+                // ERTS `i_bs_get_integer2` checks the size, then reads the
+                // integer of that size and moves the position, or jumps to
+                // `Fail` when fewer bits remain
+                // (`emit_bs_get_integer2`, jit/arm/instr_bs.cpp:312-358;
+                // `erts_bs_get_integer_2`, erl_bits.c:170-398). A size that
+                // is not a small non-negative integer, such as a literal
+                // bignum, jumps to `Fail` (`emit_bs_get_field_size`,
+                // jit/arm/instr_bs.cpp:58-86), as `binary_field_size` gives
+                // `None`. ERTS loads a small fixed size below 64 bits as a
+                // `bs_match` integer command, which reads the same bits.
+                Instruction::BinaryGetInteger {
+                    fail_label,
+                    context,
+                    size,
+                    unit,
+                    little,
+                    signed,
+                    destination,
+                } => {
+                    let (process, atoms) = scheduler.current_process_and_atoms();
+                    let state = match_context(process, context, atoms)?;
+                    let bits = binary_field_size(read_ref(process, size)?, *unit)
+                        .and_then(|bits| state.read_bits(bits).map(|read| (bits as usize, read)));
+                    match bits {
+                        Some((bits, read)) => {
+                            let value = segment_integer(&read, bits, *little, *signed).ok_or_else(
+                                || {
+                                    error(
+                                        "unsupported bs_get_integer2 integer outside the 64-bit \
+                                         range: needs a bignum",
+                                    )
+                                },
+                            )?;
+                            write(process, destination, Term::Integer(value))?;
+                        }
+                        None => cursor.position = label_position(*fail_label)?,
+                    }
+                }
                 // ERTS `i_bs_get_position` writes `sb->start` as a small
                 // integer (emu ops.tab:1274-1277, bs_instrs.tab:1125-1129).
                 Instruction::BinaryGetPosition {
@@ -1577,10 +1615,34 @@ impl BeamProgram {
                         }
                     }
                 }
+                // ERTS `i_bs_skip_bits2` checks the size as
+                // `i_bs_get_binary2` does, and then moves the position, or
+                // jumps to `Fail` when the size is not a small non-negative
+                // integer, when `size * unit` overflows, and when fewer
+                // bits remain (emu bs_instrs.tab:260-283; JIT
+                // `emit_i_bs_skip_bits2`, jit/arm/instr_bs.cpp:474-500).
+                // `binary_field_size` gives the same two size failures.
+                Instruction::BinarySkipBits {
+                    fail_label,
+                    context,
+                    size,
+                    unit,
+                } => {
+                    let (process, atoms) = scheduler.current_process_and_atoms();
+                    let state = match_context(process, context, atoms)?;
+                    let skipped = binary_field_size(read_ref(process, size)?, *unit)
+                        .and_then(|bits| state.advance(bits));
+                    if skipped.is_none() {
+                        cursor.position = label_position(*fail_label)?;
+                    }
+                }
                 // ERTS `i_bs_get_utf8` reads a byte below 128 directly and
                 // else calls `erts_bs_get_utf8`, which fails for each
                 // invalid form (emu ops.tab:1286-1287, bs_instrs.tab:958-981;
                 // erl_bits.c:2128-2221). Both paths give the same result.
+                // `bs_skip_utf8` loads as the same instruction without a
+                // destination (emu ops.tab:1289), so it reads the character
+                // and drops it.
                 Instruction::BinaryGetUtf8 {
                     fail_label,
                     context,
@@ -1590,7 +1652,9 @@ impl BeamProgram {
                     let code_point = match_context(process, context, atoms)?.get_utf8();
                     match code_point {
                         Some(code_point) => {
-                            write(process, destination, Term::Integer(code_point.into()))?;
+                            if let Some(destination) = destination {
+                                write(process, destination, Term::Integer(code_point.into()))?;
+                            }
                         }
                         None => cursor.position = label_position(*fail_label)?,
                     }
@@ -1637,6 +1701,23 @@ impl BeamProgram {
                 } => {
                     let (process, atoms) = scheduler.current_process_and_atoms();
                     if !binary_match(process, context, commands, atoms)? {
+                        cursor.position = label_position(*fail_label)?;
+                    }
+                }
+                // ERTS `i_bs_match_string` compares the bits of the segment
+                // with the string and jumps to `Fail` when fewer bits
+                // remain or when the bits differ, in both cases with no
+                // move of the position (emu bs_instrs.tab:1004-1027; JIT
+                // `emit_i_bs_match_string`, jit/arm/instr_bs.cpp:191-234).
+                Instruction::BinaryMatchString {
+                    fail_label,
+                    context,
+                    bits,
+                    text,
+                } => {
+                    let (process, atoms) = scheduler.current_process_and_atoms();
+                    let state = match_context(process, context, atoms)?;
+                    if !state.match_string(*bits, text) {
                         cursor.position = label_position(*fail_label)?;
                     }
                 }
@@ -4717,7 +4798,8 @@ fn binary_match(
 struct BinarySegmentFailure {
     /// The segment number of the compiler.
     segment: u64,
-    /// The segment operation: `binary`, `float`, `integer`, or `utf8`.
+    /// The segment operation: `binary`, `float`, `integer`, `utf8`,
+    /// `utf16`, or `utf32`.
     operation: &'static str,
     /// The failed check: `type`, `unit`, or `size`, or for a `float`
     /// segment also `no_float` or `invalid`.
@@ -4761,6 +4843,19 @@ enum BinaryPart<'a> {
         fixed: bool,
     },
     Utf8(char),
+    /// A `utf16` segment with its term and its byte order. ERTS checks the
+    /// term at the construct pass, so the part keeps it.
+    Utf16 {
+        segment: u64,
+        value: Term,
+        little: bool,
+    },
+    /// A `utf32` segment with its code point and its byte order. ERTS
+    /// checks the value at the size pass, so the part keeps the code point.
+    Utf32 {
+        code_point: u32,
+        little: bool,
+    },
     /// A `float` segment with its term and its size in bits.
     Float {
         segment: u64,
@@ -4794,7 +4889,7 @@ impl BinaryPart<'_> {
             BinaryPart::Bytes(bytes, _) => !bytes.is_empty(),
             BinaryPart::Shared(binary, _) => !binary.is_empty(),
             BinaryPart::Integer { bits, .. } | BinaryPart::Float { bits, .. } => *bits > 0,
-            BinaryPart::Utf8(_) => true,
+            BinaryPart::Utf8(_) | BinaryPart::Utf16 { .. } | BinaryPart::Utf32 { .. } => true,
         }
     }
 }
@@ -4928,6 +5023,7 @@ fn shared_append_arrays(parts: &[BinaryPart<'_>]) -> Option<Vec<(Arc<Vec<u8>>, u
             BinaryPart::Integer { .. } | BinaryPart::Utf8(_) | BinaryPart::Float { .. } => {
                 return None;
             }
+            BinaryPart::Utf16 { .. } | BinaryPart::Utf32 { .. } => return None,
         }
     }
     Some(arrays)
@@ -5160,6 +5256,43 @@ fn create_binary(
                 };
                 parts.push(BinaryPart::Utf8(code_point));
             }
+            BinarySegment::Utf16 {
+                segment,
+                little,
+                source,
+            } => {
+                // ERTS computes the size of a `utf16` segment from the term
+                // with no check and without reading the bit offset
+                // (`am_utf16`, jit/arm/instr_bs.cpp:1751-1765), and
+                // `erts_bs_put_utf16` then fails at the construct pass for
+                // a term outside the range, with the cause
+                // `{Segment, utf16, type, Value}`
+                // (erl_bits.c:1231-1237; jit/arm/instr_bs.cpp:2418-2425).
+                parts.push(BinaryPart::Utf16 {
+                    segment: *segment,
+                    value: read(process, source)?,
+                    little: *little,
+                });
+            }
+            BinarySegment::Utf32 {
+                segment,
+                little,
+                source,
+            } => {
+                // ERTS checks the value at the size pass and fails with the
+                // cause `{Segment, utf32, type, Value}`
+                // (`am_utf32`, jit/arm/instr_bs.cpp:1766-1799).
+                let value = read(process, source)?;
+                let Some(code_point) = utf_segment_code_point(&value) else {
+                    return Ok(Err(BinarySegmentFailure::badarg(
+                        *segment, "utf32", "type", value,
+                    )));
+                };
+                parts.push(BinaryPart::Utf32 {
+                    code_point,
+                    little: *little,
+                });
+            }
             BinarySegment::Unsupported(kind) => {
                 return Err(error(format!(
                     "unsupported bs_create_bin segment {}",
@@ -5230,6 +5363,28 @@ fn create_binary(
     }))
 }
 
+/// Return the code point of a `utf16` or `utf32` segment of the term
+/// `value`, or `None` for each term that ERTS fails: a term that is not an
+/// integer, a bignum, a negative value, a value above 0x10FFFF, and a
+/// surrogate (`erts_bs_put_utf16`, erl_bits.c:1221-1237; `am_utf32`,
+/// jit/arm/instr_bs.cpp:1782-1796).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(utf_segment_code_point(&Term::Integer(0x1F600)), Some(0x1F600));
+/// assert_eq!(utf_segment_code_point(&Term::Integer(-1)), None);
+/// assert_eq!(utf_segment_code_point(&Term::Integer(0xD800)), None);
+/// assert_eq!(utf_segment_code_point(&Term::static_atom("a")), None);
+/// ```
+fn utf_segment_code_point(value: &Term) -> Option<u32> {
+    let Term::Integer(value) = value else {
+        return None;
+    };
+    let code_point = u32::try_from(*value).ok()?;
+    (!(0xD800..=0xDFFF).contains(&code_point) && code_point <= 0x0010_FFFF).then_some(code_point)
+}
+
 /// Run the construct pass of `bs_create_bin` over `parts` and return the
 /// bytes that the parts write, or the failure of the first part in the
 /// order of `integer_type_failure`. A `string` or `binary` part uses its
@@ -5289,6 +5444,31 @@ fn write_binary_parts(
             BinaryPart::Integer { .. } => return Ok(Err(integer_type_failure(parts, index))),
             BinaryPart::Utf8(code_point) => {
                 writer.push_bytes(code_point.encode_utf8(&mut [0; 4]).as_bytes());
+            }
+            BinaryPart::Utf16 {
+                segment,
+                value,
+                little,
+            } => match utf_segment_code_point(value) {
+                Some(code_point) if code_point < 0x1_0000 => {
+                    writer.push_integer(i64::from(code_point), 16, *little);
+                }
+                Some(code_point) => {
+                    let value = code_point - 0x1_0000;
+                    writer.push_integer(i64::from(0xD800 | (value >> 10)), 16, *little);
+                    writer.push_integer(i64::from(0xDC00 | (value & 0x3FF)), 16, *little);
+                }
+                None => {
+                    return Ok(Err(BinarySegmentFailure::badarg(
+                        *segment,
+                        "utf16",
+                        "type",
+                        value.clone(),
+                    )));
+                }
+            },
+            BinaryPart::Utf32 { code_point, little } => {
+                writer.push_integer(i64::from(*code_point), 32, *little);
             }
             BinaryPart::Float {
                 segment,
