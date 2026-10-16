@@ -187,7 +187,7 @@ bifs! {
     erlang:halt/2 as ErlangHalt2 => |cx, [status, options]| erlang::halt(cx.scheduler, status, options),
     erlang:has_prepared_code_on_load/1 => unsupported,
     erlang:hd/1 as ErlangHd1 => |_, [list]| Ok(match list.list_head() { Some(head) => Value(head.clone()), None => BifResult::badarg() }),
-    erlang:hibernate/3 => unsupported,
+    erlang:hibernate/3 as ErlangHibernate3 => |_, [module, function, arguments]| Ok(erlang::hibernate(module, function, arguments)),
     erlang:insert_element/3 => unsupported,
     erlang:integer_to_binary/1 as ErlangIntegerToBinary1 => |cx, [term]| erlang::integer_to_binary(cx.scheduler.current_process_mut(), term),
     erlang:integer_to_binary/2 as ErlangIntegerToBinary2 => |cx, [term, base]| erlang::integer_to_binary_2(cx.scheduler.current_process_mut(), term, base),
