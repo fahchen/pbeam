@@ -381,7 +381,7 @@ pub(crate) fn read(mut file: &File, size: u64) -> Result<Vec<u8>, c_int> {
 
 /// Write all of `bytes` to `file`, as `write_nif` with `efile_writev`
 /// (`prim_file_nif.c:688-710`, `unix_prim_file.c:343-394`) does, again on
-/// `EINTR` and after a partial write.
+/// `EINTR` and after a partial write, until a write gives 0 bytes.
 ///
 /// # Examples
 ///
@@ -392,8 +392,17 @@ pub(crate) fn read(mut file: &File, size: u64) -> Result<Vec<u8>, c_int> {
 /// # Errors
 ///
 /// The `errno` of a failed write.
-pub(crate) fn write(mut file: &File, bytes: &[u8]) -> Result<(), c_int> {
-    file.write_all(bytes).map_err(os_errno)
+pub(crate) fn write(mut file: &File, mut bytes: &[u8]) -> Result<(), c_int> {
+    while !bytes.is_empty() {
+        match file.write(bytes) {
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(os_errno(error)),
+            // `efile_writev` stops at a write of 0 bytes and gives the bytes
+            // that it wrote (unix_prim_file.c:382-390).
+            Ok(written) => bytes = if written == 0 { &[] } else { &bytes[written..] },
+        }
+    }
+    Ok(())
 }
 
 /// Move the position of `file` to `offset` from `from`, and return the new
