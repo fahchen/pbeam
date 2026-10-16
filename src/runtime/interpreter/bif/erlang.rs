@@ -2907,7 +2907,10 @@ pub(super) fn trunc(term: &Term) -> BifResult {
 /// small integer range gives a small integer, and each other value gives a
 /// bignum of the exact integral value of the double. [`Term::from_bigint`]
 /// keeps each integer in the signed 64-bit range as [`Term::Integer`], as
-/// each PBeam operation does, so `2^59` gives the bignum form of ERTS.
+/// each PBeam operation does, so `2^59` is the value of the ERTS bignum in
+/// the PBeam form of an integer above the small integer range:
+/// [`Term::small_integer`] gives `None` for it, as ERTS gives no small
+/// integer.
 ///
 /// The value is finite: ERTS makes no infinity or NaN term, and PBeam makes
 /// none.
