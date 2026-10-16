@@ -162,6 +162,9 @@ pub(super) struct Busy {
     /// charged and the object is not in the table yet, as the counter of
     /// the YCF loop can yield between the two (`erl_db.c:1936-1940`).
     looped: bool,
+    /// The walk of each key of a `bag` insert ([`Table::insert_all`]),
+    /// which the steps share ([`Table::insert_bag`]).
+    walks: HashMap<u64, Vec<BagWalk>>,
 }
 
 impl Busy {
@@ -186,6 +189,7 @@ impl Busy {
             found: false,
             inserted: 0,
             looped: false,
+            walks: HashMap::new(),
         }
     }
 
@@ -840,9 +844,16 @@ impl Table {
                     }
                 }
                 // The copy of the object goes into the table in its step
-                // (`db_put_dbterm`, `erl_db.c:1934-1940`).
+                // (`db_put_dbterm`, `erl_db.c:1934-1940`). A `bag` insert
+                // keeps the walk of each key for its other objects, so its
+                // work stays that of one list insert.
                 let object = std::mem::take(&mut busy.objects[busy.inserted]);
-                let compared = self.insert_all(atoms, vec![object])[0];
+                let compared = if self.table_type == TableType::Bag {
+                    self.insert_bag(atoms, object, &mut busy.walks)
+                } else {
+                    self.insert(atoms, object);
+                    0
+                };
                 busy.looped = false;
                 busy.inserted += 1;
                 left -= 1 + compared as i64;
@@ -895,38 +906,61 @@ impl Table {
             return vec![0; count];
         }
         let mut walks: HashMap<u64, Vec<BagWalk>> = HashMap::new();
-        let mut counts = Vec::with_capacity(objects.len());
-        for object in objects {
-            let hash = stored_hash(atoms, self.key(&object));
-            let walks = walks.entry(hash).or_default();
-            let index = match (walks.iter()).position(|walk| walk.key == *self.key(&object)) {
-                Some(index) => index,
-                None => {
-                    let key = self.key(&object).clone();
-                    let cursor = self.position(hash, &key).unwrap_or(EMPTY);
-                    walks.push(BagWalk::new(key, cursor));
-                    walks.len() - 1
-                }
-            };
-            let walk = &mut walks[index];
-            let object_hash = object_hash(&object);
-            let count = match walk.find(self, object_hash, &object) {
-                Some(count) => count,
-                None => {
-                    let count = walk.added + walk.walked;
-                    let newest = self.position(hash, &walk.key).unwrap_or(EMPTY);
-                    let slot = self.add(atoms, hash, object, newest);
-                    walk.seen
-                        .entry(object_hash)
-                        .or_default()
-                        .push((Place::Added(walk.added), slot));
-                    walk.added += 1;
-                    count
-                }
-            };
-            counts.push(count);
+        objects
+            .into_iter()
+            .map(|object| self.insert_bag(atoms, object, &mut walks))
+            .collect()
+    }
+
+    /// Add the object `object` of a `bag` table and return the number of
+    /// objects that its insert compared, as the steps of one list insert
+    /// give it ([`Table::insert_all`]). The walk of each key stays in
+    /// `walks` across the objects of the list, so one list insert does the
+    /// work of ERTS and not that work for each object.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Bag);
+    /// let atoms = AtomTable::new();
+    /// let mut walks = HashMap::new();
+    /// let object = vec![Term::Integer(1), Term::Integer(2)];
+    /// assert_eq!(table.insert_bag(&atoms, object.clone(), &mut walks), 0);
+    /// assert_eq!(table.insert_bag(&atoms, object, &mut walks), 1);
+    /// ```
+    fn insert_bag(
+        &mut self,
+        atoms: &AtomTable,
+        object: Vec<Term>,
+        walks: &mut HashMap<u64, Vec<BagWalk>>,
+    ) -> usize {
+        let hash = stored_hash(atoms, self.key(&object));
+        let walks = walks.entry(hash).or_default();
+        let index = match (walks.iter()).position(|walk| walk.key == *self.key(&object)) {
+            Some(index) => index,
+            None => {
+                let key = self.key(&object).clone();
+                let cursor = self.position(hash, &key).unwrap_or(EMPTY);
+                walks.push(BagWalk::new(key, cursor));
+                walks.len() - 1
+            }
+        };
+        let walk = &mut walks[index];
+        let object_hash = object_hash(&object);
+        match walk.find(self, object_hash, &object) {
+            Some(count) => count,
+            None => {
+                let count = walk.added + walk.walked;
+                let newest = self.position(hash, &walk.key).unwrap_or(EMPTY);
+                let slot = self.add(atoms, hash, object, newest);
+                walk.seen
+                    .entry(object_hash)
+                    .or_default()
+                    .push((Place::Added(walk.added), slot));
+                walk.added += 1;
+                count
+            }
         }
-        counts
     }
 
     /// Put `object` into a new slot as the newest object of its key, whose
