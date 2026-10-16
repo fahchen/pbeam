@@ -1,7 +1,7 @@
 -module(io_start_probe).
 -export([lists/0, maps/0, map_keys/0, merge/0, atoms/0, atom_limit/0, system/0,
-         system_other/0, otp_release/0, format/0, nots/0, keymembers/0, ands/0,
-         ors/0]).
+         system_other/0, otp_release/0, endian/0, format/0, nots/0,
+         keymembers/0, ands/0, ors/0]).
 
 %% `bif` `erlang:tl/1` with fail label 0, as group:init/1 (group.erl:136)
 %% runs it, and in a guard. `get_tl`, as proc_lib:trans_init/3
@@ -132,6 +132,11 @@ system() ->
 %% (elixir.erl:127-129 of Elixir v1.20.4) runs it.
 otp_release() ->
     erlang:system_info(id(otp_release)).
+
+%% `erlang:system_info(endian)`, as elixir:check_endianness/0
+%% (elixir.erl:33-41 of Elixir v1.20.4) runs it.
+endian() ->
+    erlang:system_info(id(endian)).
 
 %% A `erlang:system_info/1` item that PBeam does not support.
 system_other() ->
