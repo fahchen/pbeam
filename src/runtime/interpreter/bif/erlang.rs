@@ -2472,7 +2472,9 @@ pub(super) fn list_to_atom(atoms: &mut AtomTable, term: &Term) -> Result<BifResu
 /// a string (`erl_bif_info.c:3231-3234`); `build.rs` takes it from the
 /// `erlang` pin in `mise.toml`. The item `schedulers` returns
 /// `erts_no_schedulers` (`erl_bif_info.c:3257-3260`), which is 1: PBeam has
-/// one scheduler, as ERTS with `erl +S 1`.
+/// one scheduler, as ERTS with `erl +S 1`. The item `build_type` returns
+/// `opt`, the result of an ERTS build without a debug or other special
+/// build flag (`erl_bif_info.c:2799-2824`).
 ///
 /// # Examples
 ///
@@ -2501,6 +2503,9 @@ pub(super) fn system_info(atoms: &mut AtomTable, item: &Term) -> Result<BifResul
                 .map(|byte| Term::Integer(i64::from(byte))),
         ))),
         Term::Atom(atom) if atoms.name_of(atom) == "schedulers" => Ok(Value(Term::Integer(1))),
+        Term::Atom(atom) if atoms.name_of(atom) == "build_type" => {
+            Ok(Value(Term::Atom(atoms.put("opt")?)))
+        }
         _ => Err(error(format!(
             "unsupported erlang:system_info/1 argument {}",
             debug_term(item, atoms)
