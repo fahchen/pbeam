@@ -200,6 +200,11 @@ fn runs_erlang_hibernate_3_as_the_pinned_erts_bif() {
     // which serves each later request.
     let reply = pair(atom("reply"), atom("true"));
     assert_eq!(run("purger"), pair(reply.clone(), reply));
+    // The wake-up and the start at `erlang:apply/3` apply the MFA as
+    // `beam_run_process` does, so the `erlang:apply/3` body of
+    // `erlang.beam` costs no reduction (`bif.c:1426-1427`,
+    // `erl_process.c:12616-12624`).
+    assert_eq!(run("reductions"), Term::list_from([2, 1, 1].map(int)));
 
     let reference = Command::new("erl")
         .args([
@@ -207,7 +212,7 @@ fn runs_erlang_hibernate_3_as_the_pinned_erts_bif() {
             "-pa",
             "fixtures/hibernate",
             "-eval",
-            "logger:set_primary_config(level, none), io:format(\"~w~n\", [[hibernate3_probe:F() || F <- [queued, later, dropped, undef, killed, errors, wide, raised, applied, bif, proc_lib, purger]]]), halt().",
+            "logger:set_primary_config(level, none), io:format(\"~w~n\", [[hibernate3_probe:F() || F <- [queued, later, dropped, undef, killed, errors, wide, raised, applied, bif, proc_lib, purger, reductions]]]), halt().",
         ])
         .output()
         .unwrap();
@@ -215,6 +220,6 @@ fn runs_erlang_hibernate_3_as_the_pinned_erts_bif() {
     assert!(reference.stderr.is_empty());
     assert_eq!(
         reference.stdout,
-        b"[{{queued,early,0},normal},{waiting,{message_queue_len,0},{later,wake,0},normal},{boom,none},{undef,[{hibernate3_probe,missing,[1,2],[]}]},{waiting,stop},[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,system_limit},{error,system_limit},{error,badarg}],{undef,256},[{boom,[]},{{nocatch,t},[]},x,{failed,[{hibernate3_probe,fail,[n]}]},{failed,[{hibernate3_probe,fail,[n]},{hibernate3_probe,nested,1}]}],{{apply,wake,0},normal,{'fun',wake,0},normal},{woke,normal,again,normal,stop,applied,normal},{{proc_lib,wake,0},normal},{{reply,true},{reply,true}}]\n"
+        b"[{{queued,early,0},normal},{waiting,{message_queue_len,0},{later,wake,0},normal},{boom,none},{undef,[{hibernate3_probe,missing,[1,2],[]}]},{waiting,stop},[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,system_limit},{error,system_limit},{error,badarg}],{undef,256},[{boom,[]},{{nocatch,t},[]},x,{failed,[{hibernate3_probe,fail,[n]}]},{failed,[{hibernate3_probe,fail,[n]},{hibernate3_probe,nested,1}]}],{{apply,wake,0},normal,{'fun',wake,0},normal},{woke,normal,again,normal,stop,applied,normal},{{proc_lib,wake,0},normal},{{reply,true},{reply,true}},[2,1,1]]\n"
     );
 }

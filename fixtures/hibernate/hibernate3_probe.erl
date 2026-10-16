@@ -1,5 +1,5 @@
 -module(hibernate3_probe).
--export([queued/0, later/0, dropped/0, undef/0, killed/0, errors/0, wide/0, raised/0, fail/1, nested/1, applied/0, bif/0, id/1, proc_lib/0, purger/0, woke/2, crash/0, wait_for_request/1]).
+-export([queued/0, later/0, dropped/0, undef/0, killed/0, errors/0, wide/0, raised/0, fail/1, nested/1, applied/0, bif/0, id/1, proc_lib/0, purger/0, woke/2, crash/0, wait_for_request/1, reductions/0, counted/1, started/0]).
 
 %% The function that a hibernated process calls when it wakes: it sends the
 %% first message in its queue and the queue length to Parent.
@@ -142,6 +142,29 @@ bif() ->
     {R, D, A, D2, down(R3), B, down(R4)}.
 
 id(X) -> X.
+
+%% The reductions from before the call to the first call after the wake-up,
+%% with a message in the queue, as the exit reason. Then the reductions of
+%% the first call of a process that starts at erlang:apply/3 and of a
+%% process that starts at the function. The wake-up and the start at
+%% erlang:apply/3 do not run the erlang:apply/3 body of erlang.beam.
+reductions() ->
+    {_, R1} = spawn_monitor(fun() -> self() ! wake, hibernate_counted() end),
+    {_, R2} = spawn_monitor(erlang, apply, [?MODULE, started, []]),
+    {_, R3} = spawn_monitor(?MODULE, started, []),
+    [down(R) || R <- [R1, R2, R3]].
+
+hibernate_counted() ->
+    {reductions, R0} = process_info(self(), reductions),
+    erlang:hibernate(?MODULE, counted, [R0]).
+
+counted(R0) ->
+    {reductions, R1} = process_info(self(), reductions),
+    exit(R1 - R0).
+
+started() ->
+    {reductions, R} = process_info(self(), reductions),
+    exit(R).
 
 catch_error(F) ->
     try F() catch C:R -> {C, R} end.

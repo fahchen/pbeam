@@ -2475,6 +2475,14 @@ impl BeamProgram {
         let arity = arguments.len() as u32;
         let start = self.is_start_apply(scheduler)?;
         let process = scheduler.current_process_mut();
+        if start {
+            // ERTS applies this MFA from `beam_run_process`
+            // (`erl_process.c:12616-12624`, `bif.c:1426-1427`) and does not
+            // enter the `erlang:apply/3` body of `erlang.beam`. Thus the
+            // `TestYield` of that body costs no reduction, and the apply
+            // gives back the reduction that it used.
+            process.fcalls += 1;
+        }
         for (index, argument) in (0..).zip(arguments) {
             write(process, &Operand::X(index), argument)?;
         }
