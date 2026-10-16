@@ -646,7 +646,8 @@ impl Scheduler {
     /// `handle_altact_msg` (`erl_proc_sig_queue.c:6009-6221`) does. An
     /// active alias puts the message in the place of the signal for 1. A
     /// `reply_demonitor` alias ends, and its monitor ends with a demonitor
-    /// signal to the target (`erl_proc_sig_queue.c:6047-6070`). A reference
+    /// signal to a process target or its removal from a port target
+    /// (`erl_proc_sig_queue.c:6047-6107`). A reference
     /// that is not an active alias drops the message for 2. Return the extra
     /// signal count.
     ///
@@ -671,14 +672,10 @@ impl Scheduler {
         if mode == AliasMode::ReplyDemonitor
             && let Some(origin) = process.monitors.remove(&alias)
             && let Some(monitor) = origin.monitor
-            && let Some(target) = monitor.target
         {
-            let demonitor = Signal::Demonitor {
-                watcher: id,
-                reference: alias,
-            };
-            // A target that does not exist drops the signal.
-            let _ = self.send_signal(Some(id), target, demonitor);
+            // The target of a process or a port monitor also loses it
+            // (`erl_proc_sig_queue.c:6064-6107`).
+            self.end_monitor(id, alias, &monitor);
         }
         let process = self.processes.get_mut(&id).expect("the process is alive");
         process.mailbox.convert(walk, node, message);

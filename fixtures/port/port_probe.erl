@@ -1,6 +1,6 @@
 -module(port_probe).
 -export([exit_status/0, output/0, command/0, close/0, owner_exit/0, epipe/0, errors/0,
-         nul_name/0, sigchld_ignored/0, unsupported/1, terminal/0, high_fd/0, costs/1, measure/2]).
+         nul_name/0, sigchld_ignored/0, monitor/0, unsupported/1, terminal/0, high_fd/0, costs/1, measure/2]).
 
 %% Each result replaces a port with the atom port, because the port numbers
 %% of ERTS and PBeam differ.
@@ -331,9 +331,37 @@ unsupported(send_options) ->
 unsupported(bang) ->
     cat() ! {self(), close};
 unsupported(unlink) ->
-    unlink(cat());
-unsupported(monitor) ->
-    monitor(port, cat()).
+    unlink(cat()).
+
+%% A monitor of a port: the DOWN message at port_close/1, noproc for a
+%% port that closed, the exit reason of the owner, and no DOWN message
+%% after demonitor/1 or after the exit of the watcher.
+monitor() ->
+    process_flag(trap_exit, true),
+    P = cat(),
+    R = monitor(port, P),
+    true = port_close(P),
+    Closed = down(R, P),
+    R2 = monitor(port, P),
+    Noproc = down(R2, P),
+    Q = cat(),
+    R3 = monitor(port, Q),
+    R4 = monitor(port, Q),
+    true = demonitor(R4),
+    {W, WRef} = spawn_monitor(fun() -> monitor(port, Q) end),
+    receive {'DOWN', WRef, process, W, normal} -> ok end,
+    Self = self(),
+    Pid = spawn(fun() -> Port = cat(), Self ! {port, Port}, receive stop -> exit(boom) end end),
+    O = receive {port, X} -> X end,
+    R5 = monitor(port, O),
+    Pid ! stop,
+    Owner = down(R5, O),
+    true = port_close(Q),
+    Demonitored = down(R3, Q),
+    [Closed, Noproc, Owner, Demonitored, flush()].
+
+down(R, P) ->
+    receive {'DOWN', R, port, P, Reason} -> Reason after 1000 -> missing end.
 
 cat() ->
     open_port({spawn_executable, sh()}, [binary, {args, ["-c", "cat"]}]).

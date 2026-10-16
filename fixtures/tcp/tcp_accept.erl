@@ -56,6 +56,15 @@ main(Path) ->
     Closed = [result(A4), result(A5)],
     [Pid ! stop || Pid <- [A1, A3]],
     ok = prim_inet:close(S),
+    %% The close of a port sends its link exit signal and its DOWN message,
+    %% and then the stop of the driver ends the accept that waits
+    %% (io.c:3922-3948, 3746).
+    {ok, L2} = prim_inet:open(tcp, inet, stream),
+    {ok, _} = prim_inet:bind(L2, {127, 0, 0, 1}, 0),
+    ok = prim_inet:listen(L2, 5),
+    _ = monitor(port, L2),
+    {ok, _} = prim_inet:async_accept(L2, -1),
+    true = erlang:port_close(L2),
     [Raw, Listen, Timeout, First, Second, Third, Closed, flush()].
 
 %% An active mode on an accepted socket, whose data delivery PBeam does not
@@ -124,7 +133,7 @@ connect(Path, Port, Count) ->
 flush() ->
     receive
         Message when is_tuple(Message) ->
-            [[if is_port(E) -> port; is_pid(E) -> pid; true -> E end
+            [[if is_port(E) -> port; is_pid(E) -> pid; is_reference(E) -> ref; true -> E end
               || E <- tuple_to_list(Message)] | flush()]
     after 0 -> []
     end.

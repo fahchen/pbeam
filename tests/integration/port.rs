@@ -176,6 +176,17 @@ fn gives_the_port_name_before_the_first_byte_0_as_pinned_erts() {
 }
 
 #[test]
+fn monitors_a_port_as_pinned_erts() {
+    // A port that closes sends `{'DOWN', Ref, port, Port, Reason}` with its
+    // exit reason to each monitor, after its link exit signal; a port that
+    // is not open gives `noproc` (io.c:3922-3936; bif.c:758-981).
+    assert_runs(
+        "monitor()",
+        "[normal,noproc,boom,normal,[{'EXIT',port,normal},{'EXIT',port,normal}]]",
+    );
+}
+
+#[test]
 fn stops_the_run_for_each_port_part_that_is_not_implemented() {
     let program = load();
     for (case, message) in [
@@ -194,7 +205,6 @@ fn stops_the_run_for_each_port_part_that_is_not_implemented() {
         ("send_options", "unsupported erlang:send/3 with a port"),
         ("bang", "unsupported erlang:send/2 with a port"),
         ("unlink", "unsupported erlang:unlink/1 with a port"),
-        ("monitor", "unsupported erlang:monitor/2,3 with a port"),
     ] {
         let argument = Term::Atom(program.atom(case).unwrap());
         let error = program

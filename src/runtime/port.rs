@@ -11,7 +11,7 @@ use std::{collections::BTreeMap, ffi::c_int};
 use super::host::spawn::Child;
 use crate::{
     error::{BeamError, error},
-    term::{PortId, ProcessId, Term},
+    term::{PortId, ProcessId, Reference, Term},
 };
 use inet::Inet;
 
@@ -50,6 +50,11 @@ pub(super) struct Port {
     pub(super) output: u64,
     /// The driver of the port and its data.
     pub(super) driver: Driver,
+    /// The monitors of processes on the port, from `erlang:monitor(port,
+    /// Port)`, as the watcher and the monitor reference, in creation
+    /// order. The close of the port sends the `DOWN` message of each
+    /// (`erts_port_task_handle_exit`, io.c).
+    pub(super) monitors: Vec<(ProcessId, Reference)>,
 }
 
 /// The driver of a port and the data of the driver.
@@ -183,9 +188,65 @@ impl Ports {
             .filter_map(|port| match &port.driver {
                 Driver::Spawn(spawn) if spawn.end_of_file => Some(spawn.child.status_fd()),
                 Driver::Spawn(spawn) => Some(spawn.child.output_fd()),
-                Driver::Inet(inet) => inet.accept_fd().or_else(|| inet.receive_fd()),
+                Driver::Inet(inet) => inet
+                    .accept_fd()
+                    .or_else(|| inet.receive_fd())
+                    .or_else(|| inet.stream_receive_fd()),
             })
             .collect()
+    }
+
+    /// Return the fd of each `tcp_inet` port with queued output, which the
+    /// idle wait selects for write (`sock_select(desc, FD_WRITE, 1)`,
+    /// inet_drv.c:13846).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(ports.write_fds().is_empty());
+    /// ```
+    pub(super) fn write_fds(&self) -> Vec<c_int> {
+        self.by_id
+            .values()
+            .filter_map(|port| match &port.driver {
+                Driver::Inet(inet) => inet.send_fd(),
+                Driver::Spawn(_) => None,
+            })
+            .collect()
+    }
+
+    /// Return the `tcp_inet` port whose socket is `fd` and has a receive
+    /// that waits, or `None`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(ports.stream_receiving(fd), Some(port));
+    /// ```
+    pub(super) fn stream_receiving(&self, fd: c_int) -> Option<PortId> {
+        self.inet_port(fd, Inet::stream_receive_fd)
+    }
+
+    /// Return the `tcp_inet` port whose socket is `fd` and has queued
+    /// output, or `None`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(ports.sending(fd), Some(port));
+    /// ```
+    pub(super) fn sending(&self, fd: c_int) -> Option<PortId> {
+        self.inet_port(fd, Inet::send_fd)
+    }
+
+    /// Return the inet port for which `select` gives `fd`.
+    fn inet_port(&self, fd: c_int, select: impl Fn(&Inet) -> Option<c_int>) -> Option<PortId> {
+        self.by_id
+            .iter()
+            .find_map(|(&id, port)| match &port.driver {
+                Driver::Inet(inet) if select(inet) == Some(fd) => Some(id),
+                _ => None,
+            })
     }
 
     /// Return the `tcp_inet` listen port that waits for a connection on the
