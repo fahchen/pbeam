@@ -5,9 +5,9 @@ use super::{
     OPCODE_GET_MAP_ELEMENTS, OPCODE_GET_RECORD_ELEMENTS, OPCODE_GET_TL, OPCODE_HAS_MAP_FIELDS,
     OPCODE_INIT_YREGS, OPCODE_PUT_MAP_ASSOC, OPCODE_PUT_MAP_EXACT, OPCODE_PUT_RECORD,
     OPCODE_PUT_TUPLE2, OPCODE_TEST_EXACT_EQ, OPCODE_TEST_HEAP, OPCODE_TEST_IS_ATOM,
-    OPCODE_TEST_IS_BINARY, OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP, OPCODE_TEST_IS_PID,
-    OPCODE_TEST_IS_PORT, OPCODE_TEST_TAGGED_TUPLE, SELECT_VALUE_LINEAR_LIMIT, parse_code,
-    prepare_select_value_choices, read_binary_match_commands, read_binary_segments,
+    OPCODE_TEST_IS_BINARY, OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP, OPCODE_TEST_IS_NUMBER,
+    OPCODE_TEST_IS_PID, OPCODE_TEST_IS_PORT, OPCODE_TEST_TAGGED_TUPLE, SELECT_VALUE_LINEAR_LIMIT,
+    parse_code, prepare_select_value_choices, read_binary_match_commands, read_binary_segments,
     read_move_operand, read_operand_pairs, read_pair_count, read_record_updates, skip_allocation,
     skip_counted_operands, skip_integer_payload, skip_operand, skip_unsupported_instruction,
     sort_map_key_pairs, test_kind, unsupported_opcode_operand_count,
@@ -1465,6 +1465,29 @@ fn decodes_the_is_float_test_of_the_float_test_probe_fixture() {
 }
 
 #[test]
+fn decodes_the_is_number_test_of_the_type_test_probe_fixture() {
+    // `tests/integration/fixture_opcodes.rs` checks that
+    // `fixtures/type_test/type_test_probe.beam` has these bytes.
+    let is_number = [0x2F, 0x0D, 0x1B, 0x03]; // number/1: is_number f27 x0
+    let mut code = vec![0, 0, 0, 16];
+    code.extend([0; 16]);
+    code.extend([&is_number[..], &[0x03]].concat());
+    let (instructions, _, _) =
+        parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[]).unwrap();
+    assert!(matches!(
+        instructions.as_slice(),
+        [
+            Instruction::Test {
+                kind: TestKind::Number,
+                fail_label: 27,
+                value: Operand::X(0),
+            },
+            Instruction::End,
+        ]
+    ));
+}
+
+#[test]
 fn decodes_the_is_bitstr_test_of_the_bitstr_probe_fixture() {
     // `tests/integration/fixture_opcodes.rs` checks that
     // `fixtures/bitstr/bitstr_probe.beam` has these bytes.
@@ -2328,6 +2351,14 @@ fn maps_supported_type_tests_and_rejects_unknown_opcodes() {
     assert!(test_kind(OPCODE_TEST_IS_PID).is_ok());
     assert!(matches!(test_kind(OPCODE_TEST_IS_PORT), Ok(TestKind::Port)));
     assert_eq!(unsupported_opcode_operand_count(OPCODE_TEST_IS_PORT), None);
+    assert!(matches!(
+        test_kind(OPCODE_TEST_IS_NUMBER),
+        Ok(TestKind::Number)
+    ));
+    assert_eq!(
+        unsupported_opcode_operand_count(OPCODE_TEST_IS_NUMBER),
+        None
+    );
     assert!(test_kind(OPCODE_TEST_IS_LIST).is_ok());
     assert!(test_kind(OPCODE_TEST_IS_BINARY).is_ok());
     assert!(test_kind(255).is_err());
