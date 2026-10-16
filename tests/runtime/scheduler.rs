@@ -201,9 +201,9 @@ fn sends_down_and_exit_signals_and_records_the_root_result() {
     scheduler.park_current();
 
     scheduler.schedule_next().unwrap();
-    scheduler.finish_current(atom("normal"), None);
+    scheduler.finish_current(atom("normal"), None).unwrap();
     scheduler.schedule_next().unwrap();
-    scheduler.finish_current(atom("boom"), None);
+    scheduler.finish_current(atom("boom"), None).unwrap();
 
     // The root process waits, so it handles both signals at schedule-in,
     // and the messages give it Erlang work.
@@ -223,7 +223,9 @@ fn sends_down_and_exit_signals_and_records_the_root_result() {
             Term::tuple(vec![atom("EXIT"), Term::Pid(linked), atom("boom")]),
         ]
     );
-    scheduler.finish_current(atom("normal"), Some(atom("ok")));
+    scheduler
+        .finish_current(atom("normal"), Some(atom("ok")))
+        .unwrap();
     assert!(scheduler.processes.is_empty());
     assert_eq!(scheduler.into_run_result().0, Some(Ok(atom("ok"))));
 }
@@ -251,7 +253,9 @@ fn ends_the_run_only_after_the_exit_of_the_root_process_completes() {
             .unwrap()
             .unwrap();
         scheduler.current_process_mut().fcalls = fcalls;
-        scheduler.finish_current(atom("normal"), Some(atom("ok")));
+        scheduler
+            .finish_current(atom("normal"), Some(atom("ok")))
+            .unwrap();
         assert!(!scheduler.root_exited());
         let signals =
             |scheduler: &Scheduler| scheduler.processes[&child].mailbox.has_control_signals();
@@ -316,7 +320,7 @@ fn links_and_unlinks_processes_and_ignores_normal_exit_without_trap_exit() {
             .get(&LinkId::Process(ProcessId(0))),
         Some(&0)
     );
-    scheduler.finish_current(atom("normal"), None);
+    scheduler.finish_current(atom("normal"), None).unwrap();
 
     // The root process handles the acknowledgment of the old unlink,
     // which leaves the new link, and then the normal exit signal, which
@@ -346,7 +350,7 @@ fn ends_a_linked_process_and_rejects_counter_overflow() {
         .unwrap();
     scheduler.park_current();
     scheduler.schedule_next().unwrap();
-    scheduler.finish_current(atom("boom"), None);
+    scheduler.finish_current(atom("boom"), None).unwrap();
     // The link exit signal ends the root process, which does not trap
     // exits, with the reason of the child.
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Done);
@@ -355,7 +359,9 @@ fn ends_a_linked_process_and_rejects_counter_overflow() {
     let mut scheduler = test_scheduler();
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     scheduler.schedule_next().unwrap();
-    scheduler.finish_current(atom("boom"), Some(atom("ok")));
+    scheduler
+        .finish_current(atom("boom"), Some(atom("ok")))
+        .unwrap();
     assert_eq!(scheduler.into_run_result().0, Some(Err(atom("boom"))));
 
     let mut scheduler = Scheduler {
@@ -480,7 +486,7 @@ fn frees_the_name_of_a_process_when_it_exits() {
     scheduler.park_current();
 
     scheduler.schedule_next().unwrap();
-    scheduler.finish_current(atom("normal"), None);
+    scheduler.finish_current(atom("normal"), None).unwrap();
     assert_eq!(scheduler.whereis("pbeam_probe_reg"), None);
     assert!(scheduler.register(&name, &Term::Pid(ProcessId(0))));
     assert_eq!(scheduler.whereis("pbeam_probe_reg"), Some(ProcessId(0)));
@@ -522,7 +528,7 @@ fn deletes_the_tables_of_a_process_when_it_exits() {
         Table::new(child, Access::Protected, 1, TableType::Set),
     );
     assert!(scheduler.ets.name_in_use("ets_probe_owned"));
-    scheduler.finish_current(atom("normal"), None);
+    scheduler.finish_current(atom("normal"), None).unwrap();
 
     assert!(!scheduler.ets.name_in_use("ets_probe_owned"));
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
@@ -587,7 +593,7 @@ fn wakes_a_waiting_process_and_stops_receive_timers_at_cancel_and_exit() {
     scheduler.cancel_receive_timer();
     assert!(!scheduler.timers.active());
     assert!(scheduler.set_receive_timer(1_000_000_000, &Term::Integer(1), 3));
-    scheduler.finish_current(atom("normal"), None);
+    scheduler.finish_current(atom("normal"), None).unwrap();
     assert!(!scheduler.timers.active());
 }
 
@@ -628,7 +634,7 @@ fn continues_the_exit_timer_walk_at_its_next_timer() {
     };
     // 100 reductions for the exit and 80 for each of two timers.
     process.fcalls = 260;
-    scheduler.finish_current(atom("normal"), None);
+    scheduler.finish_current(atom("normal"), None).unwrap();
     check(&mut scheduler, 2);
     // A new turn has 4000 reductions, which pay for 50 timers.
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Done);
@@ -1099,7 +1105,7 @@ fn moves_the_containers_of_an_exiting_process_to_the_release_work_list() {
         );
     }
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
-    scheduler.finish_current(atom("normal"), None);
+    scheduler.finish_current(atom("normal"), None).unwrap();
     let items: Vec<&Release> = scheduler.release.iter().collect();
     assert_eq!(items.len(), 8, "the exit moves eight containers");
     assert!(matches!(items[0], Release::Terms(_)));
@@ -1170,7 +1176,7 @@ fn releases_the_terms_of_every_container_of_an_exiting_process() {
         );
     }
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
-    scheduler.finish_current(atom("normal"), None);
+    scheduler.finish_current(atom("normal"), None).unwrap();
     release_all(&mut scheduler);
     assert!(
         scheduler.release.is_empty(),
@@ -1200,7 +1206,7 @@ fn releases_the_terms_of_an_exiting_process_at_each_later_step() {
     let terms: Vec<Term> = (0..2 * RELEASE_BATCH as i64).map(Term::Integer).collect();
     scheduler.start(frame(), terms, allow_all()).unwrap();
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
-    scheduler.finish_current(atom("normal"), None);
+    scheduler.finish_current(atom("normal"), None).unwrap();
     assert!(matches!(
         scheduler.release.iter().last(),
         Some(Release::Monitors(_))
@@ -1227,7 +1233,7 @@ fn keeps_the_shared_child_of_a_released_graph_alive() {
     drop(shared);
     scheduler.start(frame(), vec![graph], allow_all()).unwrap();
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
-    scheduler.finish_current(atom("normal"), None);
+    scheduler.finish_current(atom("normal"), None).unwrap();
     release_all(&mut scheduler);
     assert_eq!(held, marker(11), "the shared child keeps its value");
 }
@@ -1248,7 +1254,7 @@ fn moves_the_pairs_of_a_map_in_batches() {
     );
     scheduler.start(frame(), vec![map], allow_all()).unwrap();
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
-    scheduler.finish_current(atom("normal"), None);
+    scheduler.finish_current(atom("normal"), None).unwrap();
     scheduler.drain_release(RELEASE_BATCH);
     assert!(
         scheduler
@@ -1269,7 +1275,7 @@ fn releases_a_deep_chain_through_the_batches_without_a_stack_overflow() {
     let deep = (0..100_000).fold(Term::Nil, |inner, _| Term::tuple(vec![inner]));
     scheduler.start(frame(), vec![deep], allow_all()).unwrap();
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
-    scheduler.finish_current(atom("normal"), None);
+    scheduler.finish_current(atom("normal"), None).unwrap();
     release_all(&mut scheduler);
     assert!(scheduler.release.is_empty());
 }
@@ -1297,7 +1303,7 @@ fn moves_the_array_of_a_wide_tuple_in_batches() {
     let wide = Term::tuple((0..width as i64).map(Term::Integer).collect());
     scheduler.start(frame(), vec![wide], allow_all()).unwrap();
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
-    scheduler.finish_current(atom("normal"), None);
+    scheduler.finish_current(atom("normal"), None).unwrap();
     assert!(
         scheduler
             .release
@@ -1333,7 +1339,7 @@ fn moves_the_free_variables_of_a_fun_in_batches() {
     let fun = Term::Fun(Fun::new(Lambda::new(module, 0, 7, 53, 1), free));
     scheduler.start(frame(), vec![fun], allow_all()).unwrap();
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
-    scheduler.finish_current(atom("normal"), None);
+    scheduler.finish_current(atom("normal"), None).unwrap();
     scheduler.drain_release(RELEASE_BATCH);
     let group = scheduler
         .release
@@ -1366,7 +1372,7 @@ fn releases_the_empty_containers_of_a_process_that_has_no_frame() {
     );
     scheduler.insert(process);
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
-    scheduler.finish_current(atom("normal"), None);
+    scheduler.finish_current(atom("normal"), None).unwrap();
     assert!(matches!(
         scheduler.release.iter().last(),
         Some(Release::Monitors(_))
@@ -1390,7 +1396,7 @@ fn moves_the_slots_of_one_frame_in_batches() {
             .collect();
     }
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
-    scheduler.finish_current(atom("normal"), None);
+    scheduler.finish_current(atom("normal"), None).unwrap();
     scheduler.drain_release(RELEASE_BATCH);
     assert!(
         scheduler
@@ -1428,7 +1434,7 @@ fn moves_the_monitors_of_an_exiting_process_in_batches() {
         }
     }
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
-    scheduler.finish_current(atom("normal"), None);
+    scheduler.finish_current(atom("normal"), None).unwrap();
     scheduler.drain_release(1);
     assert!(
         scheduler
@@ -1465,7 +1471,7 @@ fn moves_the_terms_of_a_discarded_signal_to_the_release_work_list() {
             normal_kills: false,
             alias: None,
         });
-    scheduler.finish_current(atom("normal"), None);
+    scheduler.finish_current(atom("normal"), None).unwrap();
     assert!(
         scheduler
             .release
@@ -1489,7 +1495,7 @@ fn keeps_the_pending_work_of_a_skewed_chain_in_chunks() {
     });
     scheduler.start(frame(), vec![chain], allow_all()).unwrap();
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
-    scheduler.finish_current(atom("normal"), None);
+    scheduler.finish_current(atom("normal"), None).unwrap();
     let mut longest = 0;
     while !scheduler.release.is_empty() {
         longest = longest.max(scheduler.release.len());
@@ -1612,7 +1618,7 @@ fn counts_the_bytes_of_the_release_work_list() {
         );
     }
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
-    scheduler.finish_current(atom("normal"), None);
+    scheduler.finish_current(atom("normal"), None).unwrap();
     // Every item of the list waits here, so the walk reads each kind of item.
     assert!(
         scheduler.live_bytes() > 0,
@@ -1686,7 +1692,7 @@ fn counts_the_arena_of_a_mailbox_across_the_drain_steps() {
         });
         process.mailbox.reserve_marker();
     }
-    scheduler.finish_current(atom("normal"), None);
+    scheduler.finish_current(atom("normal"), None).unwrap();
     // One batch moves part of the mailbox, so the arena of the item that
     // waits holds nodes whose queue links point at the removed nodes.
     scheduler.drain_release(RELEASE_BATCH);
@@ -1727,7 +1733,7 @@ fn counts_the_storage_of_the_containers_across_the_drain_steps() {
         .unwrap()
         .registers[0] = Some(tuple);
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
-    scheduler.finish_current(atom("normal"), None);
+    scheduler.finish_current(atom("normal"), None).unwrap();
     // One step moves the element array to a group of terms, which keeps the
     // capacity of that array.
     scheduler.drain_release(RELEASE_BATCH);
@@ -1816,8 +1822,45 @@ fn removes_the_accept_of_a_process_that_exits_with_its_port_monitor_signal_pendi
         reference: Reference(7),
     };
     scheduler.send_signal(None, child, signal).unwrap();
-    scheduler.finish_current(atom("normal"), None);
+    scheduler.finish_current(atom("normal"), None).unwrap();
     let ports = scheduler.resources.borrow_mut::<Ports>();
     let port = ports.get_mut(listen).unwrap().inet_mut().unwrap();
     assert!(port.acceptors.is_empty());
+}
+
+#[test]
+fn removes_a_reply_demonitor_port_monitor_from_the_port_at_the_alias_message() {
+    use super::{AliasMode, signals::HandlingPoint};
+    use crate::runtime::port::{
+        Driver, Ports,
+        inet::{Inet, SocketType},
+    };
+    // The first message through a `reply_demonitor` alias removes its port
+    // monitor from the port too (erl_proc_sig_queue.c:6101-6107).
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let id = current(&mut scheduler);
+    let tcp = Inet::new(SocketType::Stream);
+    let port = scheduler
+        .open_port(b"tcp_inet".to_vec(), Driver::Inet(tcp))
+        .unwrap();
+    let options = MonitorOptions {
+        alias: Some(AliasMode::ReplyDemonitor),
+        ..no_options()
+    };
+    let alias = scheduler
+        .monitor(MonitorTarget::Port(port), options)
+        .unwrap();
+    let signal = Signal::AliasMessage {
+        alias,
+        message: atom("reply"),
+    };
+    scheduler.send_signal(None, id, signal).unwrap();
+    scheduler
+        .handle_signals(id, 100, 100, HandlingPoint::ScheduleIn)
+        .unwrap();
+    assert!(scheduler.processes[&id].monitors.get(&alias).is_none());
+    let ports = scheduler.resources.borrow_mut::<Ports>();
+    assert!(ports.get_mut(port).unwrap().monitors.is_empty());
 }

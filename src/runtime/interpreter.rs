@@ -626,7 +626,7 @@ impl BeamProgram {
                         Outcome::Hibernate => scheduler.hibernate_current(),
                         Outcome::Yield => scheduler.yield_current(),
                         Outcome::Exit { reason, result } => {
-                            scheduler.finish_current(reason, result)
+                            scheduler.finish_current(reason, result)?
                         }
                         Outcome::DirtyWrite { write, tail } => {
                             scheduler.start_dirty_write(write, tail)
@@ -2508,6 +2508,14 @@ impl BeamProgram {
         let arity = arguments.len() as u32;
         let start = self.is_start_apply(scheduler)?;
         let process = scheduler.current_process_mut();
+        if start {
+            // ERTS applies this MFA from `beam_run_process`
+            // (`erl_process.c:12616-12624`, `bif.c:1426-1427`) and does not
+            // enter the `erlang:apply/3` body of `erlang.beam`. Thus the
+            // `TestYield` of that body costs no reduction, and the apply
+            // gives back the reduction that it used.
+            process.fcalls += 1;
+        }
         for (index, argument) in (0..).zip(arguments) {
             write(process, &Operand::X(index), argument)?;
         }
@@ -2517,11 +2525,12 @@ impl BeamProgram {
         outcome
     }
 
-    /// Return `true` when this apply is the first apply of a process that
-    /// starts at `erlang:apply/3`, as the ERTS `beam_run_process` start runs it
-    /// (`erl_process.c:12616-12624`). An apply that a fun of
-    /// `erlang:apply/3` makes later is a tail apply of the `erlang.beam`
-    /// body, and its frame stays in the stack trace.
+    /// Return `true` when this apply is a body apply with no frame, as the
+    /// ERTS `beam_run_process` runs it: the first apply of a process that
+    /// starts at `erlang:apply/3` (`erl_process.c:12616-12624`), and the
+    /// apply of the wake-up of `erlang:hibernate/3` (`bif.c:1403-1427`). An
+    /// apply that a fun of `erlang:apply/3` makes later is a tail apply of
+    /// the `erlang.beam` body, and its frame stays in the stack trace.
     ///
     /// # Errors
     ///
@@ -2529,8 +2538,8 @@ impl BeamProgram {
     /// invariant error.
     fn is_start_apply(&self, scheduler: &mut Scheduler) -> Result<bool, BeamError> {
         let process = scheduler.current_process_mut();
-        if std::mem::replace(&mut process.applied, true) {
-            return Ok(false);
+        if let Some(frameless) = process.frameless_apply.replace(false) {
+            return Ok(frameless);
         }
         let initial_call = process.initial_call.clone();
         let (module, function, arity) = scheduler
@@ -2831,6 +2840,28 @@ impl BeamProgram {
                 result: None,
             })),
             BifResult::DirtyWrite(write) => Ok(Some(Outcome::DirtyWrite { write, tail })),
+            BifResult::Hibernate {
+                module,
+                function,
+                arguments,
+            } => {
+                // `hibernate_3` drops the stack and the catches, puts the
+                // arguments of `apply/3` into the argument registers, and
+                // traps to `beam_run_process` (`bif.c:1403-1427`), which
+                // applies them after the wake-up. PBeam gives the process
+                // the first frame of `erlang:apply/3` of `erlang.beam`,
+                // whose `i_apply_only` is that apply, as a spawn of
+                // `erlang:apply/3` does. That apply has no frame, as the
+                // start apply of such a spawn, so the stack trace of a BIF
+                // that it calls does not hold the `erlang.beam` frame.
+                let frame = scheduler.code.mfa_frame("erlang", "apply", 3)?;
+                let process = scheduler.current_process_mut();
+                process.frames.clear();
+                process.frames.push(frame);
+                process.frameless_apply = Some(true);
+                process.registers = vec![Some(module), Some(function), Some(arguments)];
+                Ok(Some(Outcome::Hibernate))
+            }
         }
     }
 }

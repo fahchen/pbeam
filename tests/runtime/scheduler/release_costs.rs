@@ -646,7 +646,9 @@ fn exit_measurement(shape: &Shape) -> Measurement {
     );
     (shape.queue)(&mut scheduler, ProcessId(0));
     let start = Instant::now();
-    scheduler.finish_current(Term::static_atom("normal"), None);
+    scheduler
+        .finish_current(Term::static_atom("normal"), None)
+        .unwrap();
     let exit = start.elapsed();
     let (maximum, total, batches, peak) = drain(&mut scheduler);
     let peak = peak.max(held(&scheduler));
@@ -699,7 +701,9 @@ fn shared_last_release_measurement(shape: &Shape) -> Measurement {
     assert_ne!(child, ProcessId(0));
     // The root process exits first and drops one holder of the graph. Its own
     // release work is not part of the measured release.
-    scheduler.finish_current(Term::static_atom("normal"), None);
+    scheduler
+        .finish_current(Term::static_atom("normal"), None)
+        .unwrap();
     drain(&mut scheduler);
     assert_eq!(
         scheduler.schedule_next().expect("the step runs"),
@@ -707,7 +711,9 @@ fn shared_last_release_measurement(shape: &Shape) -> Measurement {
         "the child process runs"
     );
     let start = Instant::now();
-    scheduler.finish_current(Term::static_atom("normal"), None);
+    scheduler
+        .finish_current(Term::static_atom("normal"), None)
+        .unwrap();
     let exit = start.elapsed();
     let (maximum, total, batches, peak) = drain(&mut scheduler);
     let peak = peak.max(held(&scheduler));

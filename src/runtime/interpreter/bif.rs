@@ -110,6 +110,19 @@ pub(super) enum BifResult {
     /// its caller finds that a signal ended the caller (`bif.c:1708-1710`,
     /// `5482-5483`).
     Exited(Term),
+    /// The calling process hibernates, as `hibernate_3` does
+    /// (`bif.c:1366-1427`): it drops its stack and its catches, waits for a
+    /// message when its queue has none (`erts_hibernate`,
+    /// `beam_common.c:1568-1602`), and then calls `apply(module, function,
+    /// arguments)` with an empty stack (`beam_run_process`).
+    Hibernate {
+        /// Module of the call after the wake-up, an atom.
+        module: Term,
+        /// Function of the call after the wake-up, an atom.
+        function: Term,
+        /// Arguments of the call after the wake-up, a proper list.
+        arguments: Term,
+    },
 }
 
 impl BifResult {
