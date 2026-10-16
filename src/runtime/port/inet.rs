@@ -439,6 +439,7 @@ impl Inet {
         let _ = socket.set_nonblocking(true);
         self.socket = Some(socket);
         self.state = State::Open;
+        self.stream.ended = false;
         Ok(())
     }
 
