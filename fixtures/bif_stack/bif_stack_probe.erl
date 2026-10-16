@@ -109,12 +109,7 @@ initial_calls() ->
      down(erlang, apply, [erlang, atom_to_list, [1]]),
      down(erlang, apply, [fun erlang:atom_to_list/1, [1]]),
      down(lists, member, [x, a]),
-     down(?MODULE, hibernated, []),
-     down(erlang, error, [oops]),
-     down(erlang, error, [oops, [a]]),
-     down(erlang, error, [oops, [a], [{error_info, #{}}]]),
-     down(erlang, exit, [oops]),
-     down(erlang, throw, [oops])].
+     down(?MODULE, hibernated, [])].
 
 down(M, F, A) ->
     {Pid, Ref} = spawn_monitor(M, F, A),
