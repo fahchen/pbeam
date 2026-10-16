@@ -78,6 +78,7 @@
     inspect_names/0,
     module_loaded/0,
     get_module_info/0,
+    get_module_info_1/0,
     finish_loading/0,
     code_names/0,
     code_badarg/0,
@@ -388,6 +389,10 @@ module_loaded() -> attempt(fun() -> erlang:module_loaded(?MODULE) end).
 
 get_module_info() -> attempt(fun() -> erlang:get_module_info(?MODULE, module) end).
 
+%% `erlang:get_module_info/1` checks the `code` capability with `inspect`
+%% for the module name before it builds the pair list of `module_info/0`.
+get_module_info_1() -> attempt(fun() -> erlang:get_module_info(?MODULE) end).
+
 finish_loading() -> attempt(fun() -> erlang:finish_loading([]) end).
 
 %% One call of each ambient and later entry, which has no capability check. A
@@ -404,8 +409,10 @@ ambient() ->
         erlang:register(Name, Self),
         erlang:whereis(Name) =:= Self,
         erlang:unregister(Name),
+        integer(erlang:monotonic_time()),
         integer(erlang:monotonic_time(nanosecond)),
         integer(os:system_time(second)),
+        integer(erlang:system_time()),
         integer(erlang:system_time(second)),
         date_time(erlang:universaltime_to_localtime({{2026, 10, 11}, {12, 0, 0}})),
         element(1, erlang:system_info(os_type)),
