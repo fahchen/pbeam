@@ -424,6 +424,7 @@ ambient() ->
         element(1, re:compile("a", [])),
         Table,
         ets:insert(Name, {key, value}),
+        ets:insert_new(Name, {key, value}),
         ets:lookup(Name, key),
         ets:lookup_element(Name, key, 2, none),
         ets:member(Name, key),

@@ -152,6 +152,49 @@ const COSTS: &[(&str, &[Cost])] = &[
             ("{bag_equal,100}", 6),
         ],
     ),
+    // `ets:insert_new/2` costs as `ets:insert/2`, and its list insert walks
+    // the objects up to the first key that the table holds, with one unit
+    // for each object (`erl_db.c:1829-1842`, `1909-1925`). A found key ends
+    // the call with no insert, after the removal of the copies in a list
+    // that copies (`erl_db.c:2091-2098`). One object costs no reduction
+    // (`erl_db_hash.c:1396-1428`).
+    (
+        "ets_insert_new",
+        &[
+            ("object", 0),
+            ("old_object", 0),
+            ("nil", 0),
+            ("one", 0),
+            ("{list,2}", 1),
+            ("{list,3}", 1),
+            ("{list,8}", 4),
+            ("{list,100}", 50),
+            ("{list,1000}", 500),
+            ("{list,10000}", 3997),
+            ("{list,15000}", 3997),
+            ("{list,16000}", 10000),
+            ("improper", 12),
+            ("bad", 6),
+            ("{protected,100}", 12),
+            ("{protected,40000}", 15000),
+            ("{missing,100}", 0),
+            ("{old,2,2}", 0),
+            ("{old,100,1}", 12),
+            ("{old,100,50}", 18),
+            ("{old,100,100}", 25),
+            ("{old,1000,1000}", 250),
+            ("{old,16000,1}", 6000),
+            ("{old,16000,8000}", 7000),
+            ("{old,16000,16000}", 8000),
+            ("{old,24000,24000}", 12000),
+            ("{bag,2}", 1),
+            ("{bag,100}", 681),
+            ("{bag,400}", 10173),
+            ("{duplicate_bag,100}", 50),
+            ("{bag_old,100}", 43),
+            ("bag_old", 0),
+        ],
+    ),
     // One reduction for each persistent term, and a trap at the end of the
     // budget (`erl_bif_persistent.c:324-356`, `805-900`).
     (
@@ -358,6 +401,37 @@ const LONGS: &[(&str, &[(&str, i64)])] = &[
             ("b", 331),
         ],
     ),
+    // 10000 reductions for the first `ets:insert_new/2` of 16000 objects, and
+    // 6000 for each later call, which finds the first key.
+    (
+        "ets_insert_new",
+        &[
+            ("b", 1334),
+            ("a", 1),
+            ("b", 667),
+            ("a", 1),
+            ("b", 667),
+            ("a", 1),
+            ("b", 2332),
+        ],
+    ),
+    // 8000 reductions for each `ets:insert_new/2` that finds the last key of
+    // 16000 objects.
+    (
+        "ets_insert_new",
+        &[
+            ("b", 1334),
+            ("a", 1),
+            ("b", 1334),
+            ("a", 1),
+            ("b", 1334),
+            ("a", 1),
+            ("b", 998),
+        ],
+    ),
+    // The first `ets:insert_new/2` of 400 objects of one key into a `bag`
+    // traps, and each later call finds the key at the first object.
+    ("ets_insert_new", &[("b", 1334), ("a", 3), ("b", 3666)]),
     // 10000 reductions for each `persistent_term:get/0` of 10000 terms.
     (
         "persistent_term_get",

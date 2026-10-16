@@ -854,6 +854,9 @@ impl BeamProgram {
     ///   the state of the check ([`ets::insert_list`]). ERTS traps to
     ///   `ets:insert/2` with a magic reference to the YCF state
     ///   (`erl_db.c:2297-2332`).
+    /// - `ets:insert_new/7`, with the arguments of `ets:insert/6` and the
+    ///   [`ets::New`] state. ERTS traps to `ets:insert_new/2` in the same
+    ///   way.
     /// - `ets:select_trap/7`, with the table reference, the pattern, the
     ///   next bucket, the limit, the matches so far, their number, and the
     ///   change count of the table ([`ets::match_trap`]). ERTS traps to
@@ -911,7 +914,7 @@ impl BeamProgram {
     ) -> Result<BifResult, BeamError> {
         if let (
             "ets",
-            "insert",
+            "insert" | "insert_new",
             [
                 Term::Reference(id),
                 objects,
@@ -919,20 +922,18 @@ impl BeamProgram {
                 Term::Integer(keypos),
                 bag,
                 check,
+                new @ ..,
             ],
         ) = (module, function, arguments.as_slice())
         {
             let mut context = BifContext { scheduler };
-            let bag = bag.is_list().then(|| bag.clone());
-            return ets::insert_list(
-                &mut context,
-                *id,
-                objects,
-                *done as usize,
-                *keypos as i32,
-                bag,
-                ets::Check::from_term(check),
-            );
+            let state = ets::ListState {
+                done: *done as usize,
+                bag: bag.is_list().then(|| bag.clone()),
+                check: ets::Check::from_term(check),
+                new: new.first().map_or(ets::New::No, ets::New::from_term),
+            };
+            return ets::insert_list(&mut context, *id, objects, *keypos as i32, state);
         }
         if let (
             "ets",
