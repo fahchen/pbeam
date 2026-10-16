@@ -289,11 +289,7 @@ fn raises_system_limit_for_a_spawn_with_more_than_1023_arguments() {
             Term::list_from(vec![Term::tuple(vec![
                 atom("erlang"),
                 atom("apply"),
-                Term::list_from(vec![
-                    atom(module),
-                    atom("missing"),
-                    arguments(1024),
-                ]),
+                Term::list_from(vec![atom(module), atom("missing"), arguments(1024)]),
                 Term::list_from(vec![Term::tuple(vec![
                     atom("error_info"),
                     Term::Map(
@@ -307,7 +303,10 @@ fn raises_system_limit_for_a_spawn_with_more_than_1023_arguments() {
             ])]),
         ])
     };
-    assert_eq!(down("undef_target", 1024).term, system_limit("undef_target"));
+    assert_eq!(
+        down("undef_target", 1024).term,
+        system_limit("undef_target")
+    );
     // `missing` is not a loaded module.
     assert_eq!(down("missing", 1024).term, system_limit("missing"));
 
