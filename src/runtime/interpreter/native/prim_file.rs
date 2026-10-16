@@ -1,19 +1,31 @@
 //! Native bindings of the `prim_file` NIFs (`erts/emulator/nifs/common/prim_file_nif.c`).
 //!
+//! A file resource of `open_nif/2` is a reference to a host `File` in the
+//! `Files` value of the node resources, as a TTY resource of `prim_tty` is.
+//!
 //! The bindings have no capability check yet: the `file` kind of the
 //! capability security migration adds it (row "Capability checks" of
 //! `docs/erts-differences.md`). ERTS runs each of these NIFs on a dirty IO
-//! scheduler (`prim_file_nif.c:196`, `200-201`, `207`, `212`). PBeam runs
+//! scheduler (`prim_file_nif.c:179-182`, `185`, `196`, `200-201`, `207`,
+//! `212`). PBeam runs
 //! them on the scheduler thread, so a host call that waits stops all
 //! processes until it returns (row "Dirty IO" of
 //! `docs/erts-differences.md`).
 
 use super::*;
-use crate::runtime::host::{
-    errno::errno_id,
-    file::{self, FileInfo, FileType},
+use crate::runtime::{
+    files::Files,
+    host::{
+        errno::errno_id,
+        file::{self, FileInfo, FileType, OpenModes},
+    },
+    signal::Signal,
 };
-use std::ffi::{CStr, c_int};
+use std::{
+    ffi::{CStr, c_int},
+    fs::File,
+    io::SeekFrom,
+};
 
 /// The functions of the ERTS `prim_file` NIF library, as `(name, arity)` in
 /// the order of `nif_funcs` (`prim_file_nif.c:177-219`). `erlang:load_nif/2`
@@ -67,9 +79,14 @@ pub(super) const FUNCTIONS: [(&str, u32); 33] = [
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!((BINDINGS[0].name, BINDINGS[0].arity), ("get_cwd_nif", 0));
+/// assert_eq!((BINDINGS[0].name, BINDINGS[0].arity), ("close_nif", 1));
 /// ```
 pub(super) const BINDINGS: &[Binding] = &[
+    Binding {
+        name: "close_nif",
+        arity: 1,
+        run: |scheduler, arguments| close_nif(scheduler, &arguments[0]),
+    },
     Binding {
         name: "get_cwd_nif",
         arity: 0,
@@ -79,6 +96,11 @@ pub(super) const BINDINGS: &[Binding] = &[
         name: "list_dir_nif",
         arity: 1,
         run: |scheduler, arguments| list_dir_nif(&mut scheduler.atoms, &arguments[0]),
+    },
+    Binding {
+        name: "open_nif",
+        arity: 2,
+        run: |scheduler, arguments| open_nif(scheduler, &arguments[0], &arguments[1]),
     },
     Binding {
         name: "read_file_nif",
@@ -95,7 +117,29 @@ pub(super) const BINDINGS: &[Binding] = &[
         arity: 1,
         run: |scheduler, arguments| read_link_nif(&mut scheduler.atoms, &arguments[0]),
     },
+    Binding {
+        name: "read_nif",
+        arity: 2,
+        run: |scheduler, arguments| read_nif(scheduler, &arguments[0], &arguments[1]),
+    },
+    Binding {
+        name: "seek_nif",
+        arity: 3,
+        run: |scheduler, arguments| {
+            seek_nif(scheduler, &arguments[0], &arguments[1], &arguments[2])
+        },
+    },
+    Binding {
+        name: "write_nif",
+        arity: 2,
+        run: |scheduler, arguments| write_nif(scheduler, &arguments[0], &arguments[1]),
+    },
 ];
+
+/// The most elements of the iovec of one `write_nif/2` call, as the
+/// `max_elements` argument of `enif_inspect_iovec` in `write_nif_impl`
+/// (`prim_file_nif.c:694`).
+const WRITE_MAX_ELEMENTS: usize = 64;
 
 /// The smallest file time that `build_file_info` gives, in seconds since
 /// 1970: `{{1902,1,1},{0,0,0}}` (`EFILE_MIN_FILETIME`,
@@ -106,6 +150,302 @@ const MIN_FILETIME: i64 = -2_145_916_800;
 /// 1970: `{{9999,12,31},{23,59,59}}` (`EFILE_MAX_FILETIME`,
 /// `prim_file_nif.h:102-105`).
 const MAX_FILETIME: i64 = 253_402_300_799;
+
+/// Run `prim_file:open_nif(Path, Modes)`, as the ERTS NIF `open_nif`
+/// (`prim_file_nif.c:572-593`) does on Unix:
+///
+/// 1. `Modes` that is not a list raises `error:badarg`.
+/// 2. The modes of [`translate_modelist`].
+/// 3. A `Path` that [`marshal_path`] does not accept gives
+///    `{error, einval}`.
+/// 4. [`file::open`] opens the path. A failed open gives `{error, Errno}`.
+/// 5. Else the result is `{ok, Ref}` with a new file resource, and the
+///    resource monitors the caller (`create_ref_or_error_tuple`,
+///    `prim_file_nif.c:541-570`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let read = Term::list_from(vec![Term::Atom(scheduler.atoms.put("read")?)]);
+/// // {ok, Ref}
+/// let result = open_nif(&mut scheduler, &Term::binary(b"/dev/null\0".to_vec()), &read)?;
+/// // {error, eisdir}
+/// let result = open_nif(&mut scheduler, &Term::binary(b"/\0".to_vec()), &read)?;
+/// ```
+///
+/// # Errors
+///
+/// A full reference counter gives the error of `Scheduler::make_ref`. A new
+/// result atom in a full atom table gives the error of `AtomTable::put`.
+fn open_nif(scheduler: &mut Scheduler, path: &Term, modes: &Term) -> Result<BifResult, BeamError> {
+    if !modes.is_list() {
+        return Ok(BifResult::badarg());
+    }
+    let modes = translate_modelist(&scheduler.atoms, modes);
+    let atoms = &mut scheduler.atoms;
+    let Some(path) = marshal_path(path) else {
+        return error_tuple(atoms, "einval");
+    };
+    let file = match file::open(path, modes) {
+        Ok(file) => file,
+        Err(errno) => return error_tuple(atoms, &errno_id(errno)),
+    };
+    let reference = scheduler.make_ref()?;
+    scheduler
+        .resources
+        .borrow_mut::<Files>()
+        .insert(reference, file);
+    let caller = scheduler.current_process_mut().id;
+    scheduler
+        .send_signal(None, caller, Signal::FileMonitor { file: reference })
+        .expect("the caller is alive");
+    Ok(BifResult::Value(Term::tuple(vec![
+        Term::static_atom("ok"),
+        Term::Reference(reference),
+    ])))
+}
+
+/// Return the open modes of the list `modes`, as `efile_translate_modelist`
+/// (`prim_file_nif.c:500-539`) does: the atoms `read`, `write`,
+/// `exclusive`, `append`, `sync`, `skip_type_check`, and `directory` set
+/// their mode, and each other element is ignored, also the tail of an
+/// improper list. `append` and `exclusive` add `write`, and modes with
+/// neither `read` nor `write` add `read`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let append = Term::list_from(vec![Term::static_atom("append")]);
+/// assert!(translate_modelist(&atoms, &append).write);
+/// ```
+fn translate_modelist(atoms: &AtomTable, modes: &Term) -> OpenModes {
+    let mut open = OpenModes::default();
+    for mode in modes.list_iter().into_iter().flatten() {
+        let Term::Atom(mode) = mode else {
+            continue;
+        };
+        match atoms.name_of(mode) {
+            "read" => open.read = true,
+            "write" => open.write = true,
+            "exclusive" => open.exclusive = true,
+            "append" => open.append = true,
+            "sync" => open.sync = true,
+            "skip_type_check" => open.skip_type_check = true,
+            "directory" => open.directory = true,
+            _ => {}
+        }
+    }
+    if open.append || open.exclusive {
+        open.write = true;
+    } else if !open.read && !open.write {
+        open.read = true;
+    }
+    open
+}
+
+/// Run `prim_file:close_nif(Fd)`, as the ERTS NIF `close_nif`
+/// (`prim_file_nif.c:618-647`) does: a term that is not a file resource
+/// raises `error:badarg`, a closed resource gives `{error, einval}`, and
+/// else the binding closes the host file and gives `ok`.
+///
+/// PBeam closes the host file with the drop of its `File`, which ignores
+/// the result of `close`, so a failed `close` gives `ok`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(close_nif(&mut scheduler, &fd)?, BifResult::Value(Term::Atom(_))));
+/// // {error, einval}
+/// assert!(matches!(close_nif(&mut scheduler, &fd)?, BifResult::Value(Term::Tuple(_))));
+/// ```
+///
+/// # Errors
+///
+/// The atom `einval` in a full atom table gives the error of
+/// `AtomTable::put`.
+fn close_nif(scheduler: &mut Scheduler, fd: &Term) -> Result<BifResult, BeamError> {
+    let Term::Reference(reference) = fd else {
+        return Ok(BifResult::badarg());
+    };
+    match scheduler
+        .resources
+        .borrow_mut::<Files>()
+        .get_mut(*reference)
+    {
+        None => Ok(BifResult::badarg()),
+        Some(None) => error_tuple(&mut scheduler.atoms, "einval"),
+        Some(file) => {
+            *file = None;
+            Ok(BifResult::Value(Term::static_atom("ok")))
+        }
+    }
+}
+
+/// Run `operation` on the open host file of the file resource `fd`, as
+/// `file_handle_wrapper` (`prim_file_nif.c:315-357`) does: a term that is
+/// not a file resource raises `error:badarg`, and a closed resource gives
+/// `{error, einval}`, before `operation` reads its arguments.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = file_handle_wrapper(&mut scheduler, &fd, |_file, _atoms| Ok(BifResult::Value(Term::nil())))?;
+/// ```
+///
+/// # Errors
+///
+/// The error of `operation`. The atom `einval` in a full atom table gives
+/// the error of `AtomTable::put`.
+fn file_handle_wrapper(
+    scheduler: &mut Scheduler,
+    fd: &Term,
+    operation: impl FnOnce(&File, &mut AtomTable) -> Result<BifResult, BeamError>,
+) -> Result<BifResult, BeamError> {
+    let Term::Reference(reference) = fd else {
+        return Ok(BifResult::badarg());
+    };
+    match scheduler
+        .resources
+        .borrow_mut::<Files>()
+        .get_mut(*reference)
+    {
+        None => Ok(BifResult::badarg()),
+        Some(None) => error_tuple(&mut scheduler.atoms, "einval"),
+        Some(Some(file)) => operation(file, &mut scheduler.atoms),
+    }
+}
+
+/// Run `prim_file:read_nif(Fd, Size)`, as the ERTS NIF `read_nif_impl`
+/// (`prim_file_nif.c:649-686`) does after [`file_handle_wrapper`]: a `Size`
+/// that is not a number raises `error:badarg`, and a float, an integer
+/// outside the `Sint64` range, or a negative integer gives
+/// `{error, einval}`. Else [`file::read`] reads at most `Size` bytes. The
+/// result is `eof` for 0 bytes, `{ok, Bytes}`, or `{error, Errno}`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // {ok, <<"ab">>}
+/// let result = read_nif(&mut scheduler, &fd, &Term::Integer(2))?;
+/// // {error, einval}
+/// let result = read_nif(&mut scheduler, &fd, &Term::Integer(-1))?;
+/// ```
+///
+/// # Errors
+///
+/// A new result atom in a full atom table gives the error of
+/// `AtomTable::put`.
+fn read_nif(scheduler: &mut Scheduler, fd: &Term, size: &Term) -> Result<BifResult, BeamError> {
+    file_handle_wrapper(scheduler, fd, |file, atoms| {
+        let size = match size {
+            Term::Integer(size) => u64::try_from(*size).ok(),
+            Term::BigInt(_) | Term::Float(_) => None,
+            _ => return Ok(BifResult::badarg()),
+        };
+        let Some(size) = size else {
+            return error_tuple(atoms, "einval");
+        };
+        match file::read(file, size) {
+            Ok(bytes) if bytes.is_empty() => Ok(BifResult::Value(Term::static_atom("eof"))),
+            result => ok_tuple(atoms, result.map(Term::binary)),
+        }
+    })
+}
+
+/// Run `prim_file:write_nif(Fd, IOVec)`, as the ERTS NIF `write_nif_impl`
+/// (`prim_file_nif.c:688-710`) does after [`file_handle_wrapper`]: the
+/// first [`WRITE_MAX_ELEMENTS`] elements of `IOVec` must be binaries and be
+/// followed by a list, as `enif_inspect_iovec` (`erl_nif.c:4107-4166`,
+/// `4342-4356`) checks, else the call raises `error:badarg` and writes
+/// nothing. [`file::write`] then writes their bytes. A failed write gives
+/// `{error, Errno}`. Else the result is `ok` when the rest of the list is
+/// `[]`, and `{continue, Rest}` for the rest of a longer list.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let iovec = Term::list_from(vec![Term::binary(b"ab".to_vec())]);
+/// assert!(matches!(write_nif(&mut scheduler, &fd, &iovec)?, BifResult::Value(Term::Atom(_))));
+/// assert!(matches!(write_nif(&mut scheduler, &fd, &Term::binary(vec![]))?, BifResult::Raise { .. }));
+/// ```
+///
+/// # Errors
+///
+/// A new result atom in a full atom table gives the error of
+/// `AtomTable::put`.
+fn write_nif(scheduler: &mut Scheduler, fd: &Term, iovec: &Term) -> Result<BifResult, BeamError> {
+    file_handle_wrapper(scheduler, fd, |file, atoms| {
+        let mut bytes = Vec::new();
+        let mut rest = iovec;
+        let mut elements = 0;
+        while let Some((element, tail)) = rest.cons_cell() {
+            let Term::Binary(binary) = element else {
+                return Ok(BifResult::badarg());
+            };
+            bytes.extend_from_slice(binary);
+            rest = tail;
+            elements += 1;
+            if elements >= WRITE_MAX_ELEMENTS {
+                break;
+            }
+        }
+        if !rest.is_list() {
+            return Ok(BifResult::badarg());
+        }
+        if let Err(errno) = file::write(file, &bytes) {
+            return error_tuple(atoms, &errno_id(errno));
+        }
+        Ok(BifResult::Value(if rest.is_nil() {
+            Term::static_atom("ok")
+        } else {
+            Term::tuple(vec![Term::Atom(atoms.put("continue")?), rest.clone()])
+        }))
+    })
+}
+
+/// Run `prim_file:seek_nif(Fd, Mark, Offset)`, as the ERTS NIF
+/// `seek_nif_impl` (`prim_file_nif.c:782-806`) does after
+/// [`file_handle_wrapper`]: an `Offset` that is not an integer in the
+/// `Sint64` range raises `error:badarg`, and then a `Mark` that is not
+/// `bof`, `cur`, or `eof` too. Else [`file::seek`] moves the position. The
+/// result is `{ok, Position}` or `{error, Errno}`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // {ok, 0}
+/// let result = seek_nif(&mut scheduler, &fd, &Term::Atom(scheduler.atoms.put("bof")?), &Term::Integer(0))?;
+/// ```
+///
+/// # Errors
+///
+/// A new result atom in a full atom table gives the error of
+/// `AtomTable::put`.
+fn seek_nif(
+    scheduler: &mut Scheduler,
+    fd: &Term,
+    mark: &Term,
+    offset: &Term,
+) -> Result<BifResult, BeamError> {
+    file_handle_wrapper(scheduler, fd, |file, atoms| {
+        let Term::Integer(offset) = *offset else {
+            return Ok(BifResult::badarg());
+        };
+        let from = match mark {
+            Term::Atom(mark) => match atoms.name_of(mark) {
+                // `SeekFrom::Start` gives the bits of `offset` to `lseek`
+                // as `off_t`, so a negative offset stays negative.
+                "bof" => SeekFrom::Start(offset.cast_unsigned()),
+                "cur" => SeekFrom::Current(offset),
+                "eof" => SeekFrom::End(offset),
+                _ => return Ok(BifResult::badarg()),
+            },
+            _ => return Ok(BifResult::badarg()),
+        };
+        let position = file::seek(file, from).map(|position| Term::Integer(position.cast_signed()));
+        ok_tuple(atoms, position)
+    })
+}
 
 /// Run `prim_file:read_info_nif(Path, FollowLinks)`, as the ERTS NIF
 /// `read_info_nif` (`prim_file_nif.c:1019-1038`) does on Unix:

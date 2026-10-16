@@ -8,7 +8,7 @@
 //! the one place that applies a signal to its receiver.
 
 use super::{
-    Flush, LinkId, Monitor, ProcessState, RECEIVE_FETCH_REDUCTIONS, Release,
+    Files, Flush, LinkId, Monitor, ProcessState, RECEIVE_FETCH_REDUCTIONS, Release,
     SIGNAL_HANDLING_REDUCTIONS, Scheduler, TargetMonitor, Ttys,
 };
 use crate::{
@@ -458,6 +458,12 @@ impl Scheduler {
                     .push(TargetMonitor::Tty(tty));
                 2
             }
+            Signal::FileMonitor { file } => {
+                self.handled(id, node)
+                    .monitored_by
+                    .push(TargetMonitor::File(file));
+                2
+            }
             Signal::PortLink { port } => {
                 let links = &mut self.handled(id, node).links;
                 if links.get(&LinkId::Port(port)).is_none() {
@@ -761,6 +767,10 @@ impl Scheduler {
                 Signal::TtyMonitor { tty } => {
                     count += 4;
                     self.resources.borrow_mut::<Ttys>().monitor_down(id, tty);
+                }
+                Signal::FileMonitor { file } => {
+                    count += 4;
+                    self.resources.borrow_mut::<Files>().monitor_down(file);
                 }
                 Signal::PortMonitor { port, reference: _ } => {
                     count += 4;

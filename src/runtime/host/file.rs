@@ -1,12 +1,15 @@
 //! Read host files, their information, directories, symbolic links, and the
-//! current directory, as the ERTS `prim_file` NIF library reads them on Unix
-//! (`nifs/unix/unix_prim_file.c`).
+//! current directory, and open, read, write, and seek host files, as the
+//! ERTS `prim_file` NIF library does on Unix (`nifs/unix/unix_prim_file.c`).
 
 use std::{
     ffi::{CStr, OsStr, c_int},
-    fs::{self, File},
-    io::{self, Read},
-    os::unix::ffi::{OsStrExt, OsStringExt},
+    fs::{self, File, OpenOptions},
+    io::{self, Read, Seek, SeekFrom, Write},
+    os::unix::{
+        ffi::{OsStrExt, OsStringExt},
+        fs::OpenOptionsExt,
+    },
     path::Path,
 };
 
@@ -256,6 +259,147 @@ pub(crate) fn get_cwd() -> Result<Vec<u8>, c_int> {
         .map_err(os_errno)?
         .into_os_string()
         .into_vec())
+}
+
+/// The modes of an open, as the `efile_modes_t` flags of
+/// `efile_translate_modelist` (`prim_file_nif.c:500-539`). An open has
+/// `read`, `write`, or both.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct OpenModes {
+    /// `EFILE_MODE_READ`.
+    pub(crate) read: bool,
+    /// `EFILE_MODE_WRITE`.
+    pub(crate) write: bool,
+    /// `EFILE_MODE_APPEND`.
+    pub(crate) append: bool,
+    /// `EFILE_MODE_EXCLUSIVE`.
+    pub(crate) exclusive: bool,
+    /// `EFILE_MODE_SYNC`.
+    pub(crate) sync: bool,
+    /// `EFILE_MODE_SKIP_TYPE_CHECK`.
+    pub(crate) skip_type_check: bool,
+    /// `EFILE_MODE_DIRECTORY`.
+    pub(crate) directory: bool,
+}
+
+/// Open the file at `path` with `modes`, as `efile_open`
+/// (`unix_prim_file.c:173-226`) does:
+///
+/// 1. The flags of `get_flags` (`unix_prim_file.c:142-171`): `O_RDONLY`
+///    for `read` alone, `O_WRONLY | O_CREAT | O_TRUNC` for `write` alone,
+///    and `O_RDWR | O_CREAT` for both. `append` removes `O_TRUNC` and adds
+///    `O_APPEND`, `exclusive` adds `O_EXCL`, `sync` adds `O_SYNC`, and
+///    `directory` adds `O_DIRECTORY`.
+/// 2. `open` with the mode `0777` for `directory`, else `0666`, again on
+///    `EINTR`. A failed call gives its `errno`.
+/// 3. Without `skip_type_check` and `directory`, a directory gives `EISDIR`
+///    (`open_file_is_dir`, `unix_prim_file.c:126-140`).
+///
+/// PBeam opens the file with `O_CLOEXEC` too, as [`read_file`] does.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let read = OpenModes { read: true, ..OpenModes::default() };
+/// assert!(open(c"/dev/null", read).is_ok());
+/// assert_eq!(open(c"/", read).err(), Some(libc::EISDIR));
+/// ```
+///
+/// # Errors
+///
+/// The `errno` of `open`, or `EISDIR` for a directory.
+pub(crate) fn open(path: &CStr, modes: OpenModes) -> Result<File, c_int> {
+    let mut options = OpenOptions::new();
+    if !modes.write {
+        options.read(true);
+    } else if !modes.read {
+        options.write(true).create(true).truncate(!modes.append);
+    } else {
+        options.read(true).write(true).create(true);
+    }
+    // The standard library adds `O_CREAT | O_EXCL` for `create_new`.
+    options.append(modes.append).create_new(modes.exclusive);
+    let mut flags = 0;
+    if modes.sync {
+        flags |= libc::O_SYNC;
+    }
+    if modes.directory {
+        flags |= libc::O_DIRECTORY;
+    }
+    options
+        .custom_flags(flags)
+        .mode(if modes.directory { 0o777 } else { 0o666 });
+    let file = options.open(host_path(path)).map_err(os_errno)?;
+    if !modes.skip_type_check
+        && !modes.directory
+        && file.metadata().is_ok_and(|metadata| metadata.is_dir())
+    {
+        return Err(libc::EISDIR);
+    }
+    Ok(file)
+}
+
+/// Read at most `size` bytes of `file`, as `read_nif` with `efile_readv`
+/// (`prim_file_nif.c:649-686`, `unix_prim_file.c:292-341`) does: the
+/// buffer of `size` bytes first, then reads until the buffer is full or a
+/// read gives 0 bytes, again on `EINTR`. The result keeps only the bytes
+/// that it read, as `enif_realloc_binary` does.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(read(&File::open("/dev/null")?, 10), Ok(vec![]));
+/// ```
+///
+/// # Errors
+///
+/// `ENOMEM` when the buffer cannot be allocated, as `enif_alloc_binary`
+/// gives it, or the `errno` of a failed read, also after some bytes.
+pub(crate) fn read(file: &File, size: u64) -> Result<Vec<u8>, c_int> {
+    let mut contents = Vec::new();
+    usize::try_from(size)
+        .ok()
+        .and_then(|size| contents.try_reserve_exact(size).ok())
+        .ok_or(libc::ENOMEM)?;
+    file.take(size)
+        .read_to_end(&mut contents)
+        .map_err(os_errno)?;
+    contents.shrink_to_fit();
+    Ok(contents)
+}
+
+/// Write all of `bytes` to `file`, as `write_nif` with `efile_writev`
+/// (`prim_file_nif.c:688-710`, `unix_prim_file.c:343-394`) does, again on
+/// `EINTR` and after a partial write.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(write(&OpenOptions::new().write(true).open("/dev/null")?, b"x"), Ok(()));
+/// ```
+///
+/// # Errors
+///
+/// The `errno` of a failed write.
+pub(crate) fn write(mut file: &File, bytes: &[u8]) -> Result<(), c_int> {
+    file.write_all(bytes).map_err(os_errno)
+}
+
+/// Move the position of `file` to `offset` from `from`, and return the new
+/// position, as `efile_seek` (`unix_prim_file.c:508-540`) does with
+/// `lseek`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(seek(&file, SeekFrom::Start(0)), Ok(0));
+/// ```
+///
+/// # Errors
+///
+/// The `errno` of `lseek`, for example `EINVAL` for a negative position.
+pub(crate) fn seek(mut file: &File, from: SeekFrom) -> Result<u64, c_int> {
+    file.seek(from).map_err(os_errno)
 }
 
 /// Return the host path of the bytes of `path`.

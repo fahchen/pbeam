@@ -1,6 +1,7 @@
 mod capability;
 mod dirty_io;
 mod ets;
+mod files;
 mod host;
 mod interpreter;
 mod mailbox;

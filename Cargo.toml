@@ -61,6 +61,10 @@ name = "host_signal"
 path = "tests/feature/host_signal.rs"
 
 [[test]]
+name = "file_io"
+path = "tests/feature/file_io.rs"
+
+[[test]]
 name = "io_device"
 path = "tests/feature/io_device.rs"
 
@@ -524,3 +528,7 @@ path = "tests/integration/error_3.rs"
 [[test]]
 name = "throw_exit"
 path = "tests/integration/throw_exit.rs"
+
+[[test]]
+name = "prim_file"
+path = "tests/integration/prim_file.rs"

@@ -10,6 +10,7 @@ use super::{
     },
     dirty_io::{Claim, Completion, DirtyIo},
     ets::EtsTables,
+    files::Files,
     host::{
         self,
         input::{self, Readiness},
@@ -476,6 +477,7 @@ impl Scheduler {
         let mut resources = Resources::default();
         resources.put(RegexCodes::default());
         resources.put(Ttys::default());
+        resources.put(Files::default());
         resources.put(Ports::default());
         Scheduler {
             processes: ProcessTable::default(),
@@ -2889,6 +2891,9 @@ impl Scheduler {
                             ),
                             TargetMonitor::Tty(tty) => {
                                 self.resources.borrow_mut::<Ttys>().monitor_down(id, tty);
+                            }
+                            TargetMonitor::File(file) => {
+                                self.resources.borrow_mut::<Files>().monitor_down(file);
                             }
                             TargetMonitor::Port { port, reference: _ } => {
                                 self.tcp_monitor_down(port, id);
