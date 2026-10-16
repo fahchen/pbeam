@@ -53,7 +53,7 @@ struct Binding {
 
 /// The load callback of a static NIF library: it takes the load info and
 /// returns the veto of the callback.
-type LoadCallback = fn(&Term) -> Result<i32, BeamError>;
+type LoadCallback = fn(&Term) -> i32;
 
 /// The static NIF library of one module. ERTS finds a static library by the
 /// module name (`is_static_nif_module` in `beam/erl_nif.c:5324-5331`).
@@ -299,7 +299,7 @@ pub(super) fn load_nif(scheduler: &mut Scheduler, caller: &str) -> Result<BifRes
             return load_nif_error(&mut scheduler.atoms, "bad_lib", &text);
         }
     }
-    let veto = library.load.map_or(Ok(0), |load| load(&arguments[1]))?;
+    let veto = library.load.map_or(0, |load| load(&arguments[1]));
     if veto != 0 {
         let text = format!("Library load-call unsuccessful ({veto}).");
         return load_nif_error(&mut scheduler.atoms, "load", &text);

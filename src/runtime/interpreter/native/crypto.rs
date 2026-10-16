@@ -111,47 +111,41 @@ pub(super) const BINDINGS: &[Binding] = &[Binding {
 /// load passes, else the `crypto.c` line of the failed check. ERTS then
 /// gives `{error, {load, "Library load-call unsuccessful (Veto)."}}`
 /// (`beam/erl_nif.c:4980-4986`). The load info is `{302, LibPath,
-/// FipsMode}` (`crypto.c:205-218`). ERTS enters FIPS mode only for
-/// `FipsMode` `true` (`crypto.c:286-288`, `enable_fips_mode` in `info.c`),
-/// and a `FipsMode` that is not a boolean gives the veto 287.
+/// FipsMode}` (`crypto.c:205-218`). The check of `FipsMode` passes only
+/// for `false` (`crypto.c:286-288`): the pinned ERTS has no FIPS support,
+/// so `enable_fips_mode` gives `false` for `true` (`fips.c:59-60`), and
+/// `true` or a term that is not a boolean gives the veto 287.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// let info = Term::tuple(vec![Term::Integer(302), Term::binary(vec![]), Term::static_atom("false")]);
-/// assert_eq!(load(&info)?, 0);
-/// assert_eq!(load(&Term::Integer(302))?, 205);
+/// assert_eq!(load(&info), 0);
+/// assert_eq!(load(&Term::Integer(302)), 205);
 /// ```
-///
-/// # Errors
-///
-/// `FipsMode` `true` gives a runtime error: PBeam has no FIPS mode.
-pub(super) fn load(load_info: &Term) -> Result<i32, BeamError> {
+pub(super) fn load(load_info: &Term) -> i32 {
     let Term::Tuple(elements) = load_info else {
-        return Ok(205);
+        return 205;
     };
     let [version, path, fips_mode] = &elements[..] else {
-        return Ok(208);
+        return 208;
     };
     let version = match version {
         Term::Integer(version) => i32::try_from(*version).ok(),
         _ => None,
     };
     let Some(version) = version else {
-        return Ok(211);
+        return 211;
     };
     if version != 302 {
-        return Ok(214);
+        return 214;
     }
     if !matches!(path, Term::Binary(path) if path.bit_size() % 8 == 0) {
-        return Ok(217);
+        return 217;
     }
     match fips_mode {
-        Term::Atom(atom) if atom.is_static("false") => Ok(0),
-        Term::Atom(atom) if atom.is_static("true") => Err(error(
-            "crypto FIPS mode is not supported: erlang:load_nif/2 of crypto has FipsMode true",
-        )),
-        _ => Ok(287),
+        Term::Atom(atom) if atom.is_static("false") => 0,
+        _ => 287,
     }
 }
 

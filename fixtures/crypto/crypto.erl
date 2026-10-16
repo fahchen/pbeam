@@ -20,8 +20,8 @@ load_ok() ->
     load_info([7]).
 
 %% Write the result of the load info with FipsMode true. The pinned ERTS
-%% has no FIPS support and gives the veto 287; PBeam stops with a runtime
-%% error.
+%% has no FIPS support (fips.c:59-60), so its load callback gives the
+%% veto 287.
 load_fips() ->
     load_info([8]).
 

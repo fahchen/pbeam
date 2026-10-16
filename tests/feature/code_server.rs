@@ -142,11 +142,17 @@ fn checks_the_crypto_load_info_as_pinned_erts() {
     // The stand-in `crypto` module defines each function of the `crypto`
     // NIF library and loads it with each load info. A failed check of the
     // load callback gives its line in crypto.c (crypto.c:204-218, 286-288;
-    // erl_nif.c:4980-4986).
+    // erl_nif.c:4980-4986). The pinned ERTS has no FIPS support, so
+    // `FipsMode` `true` gives the veto 287 (fips.c:59-60).
     let veto = |line| format!("{{error,{{load,\"Library load-call unsuccessful ({line}).\"}}}}");
     let vetoes: Vec<_> = [205, 208, 211, 214, 217, 287].map(veto).into();
     let expected = format!("[{}]\n", vetoes.join(",\n "));
-    for (function, expected) in [("load_info", expected.as_str()), ("load_ok", "[ok]\n")] {
+    let fips = format!("[{}]\n", veto(287));
+    for (function, expected) in [
+        ("load_info", expected.as_str()),
+        ("load_ok", "[ok]\n"),
+        ("load_fips", fips.as_str()),
+    ] {
         let erts = run(&mut erts_probe(CRYPTO_STAND_IN, "crypto", function, &[]));
         assert_eq!(erts, expected);
         let pbeam = run(&mut pbeam_probe(CRYPTO_STAND_IN, "crypto", function, &[]));
@@ -155,36 +161,19 @@ fn checks_the_crypto_load_info_as_pinned_erts() {
 }
 
 #[test]
-fn stops_with_a_runtime_error_for_an_unsupported_crypto_nif_or_fips_mode() {
+fn stops_with_a_runtime_error_for_an_unsupported_crypto_nif() {
     // PBeam links only `strong_rand_bytes_nif/1` of the `crypto` library.
     // ERTS gives the OpenSSL version from `info_lib/0`.
-    // PBeam has no FIPS mode, so the load info with `FipsMode` `true` stops
-    // the run.
-    for (probe, module, function, text) in [
-        (
-            CRYPTO_PROBE,
-            "crypto_probe",
-            "info_lib",
-            "crypto:info_lib/0 NIF is not supported",
-        ),
-        (
-            CRYPTO_STAND_IN,
-            "crypto",
-            "load_fips",
-            "crypto FIPS mode is not supported",
-        ),
-    ] {
-        let output = pbeam_probe(probe, module, function, &[])
-            .env("TERM", "dumb")
-            .stdin(Stdio::null())
-            .output()
-            .unwrap();
-        let stderr = String::from_utf8(output.stderr).unwrap();
-        assert!(
-            !output.status.success() && stderr.contains(text),
-            "{stderr}"
-        );
-    }
+    let output = pbeam_probe(CRYPTO_PROBE, "crypto_probe", "info_lib", &[])
+        .env("TERM", "dumb")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        !output.status.success() && stderr.contains("crypto:info_lib/0 NIF is not supported"),
+        "{stderr}"
+    );
 }
 
 #[test]
