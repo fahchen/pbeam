@@ -1990,7 +1990,7 @@ fn drops_the_link_exit_signal_of_a_process_that_the_port_does_not_link() {
     let links = &scheduler.processes[&child].links;
     assert_eq!(links.get(&LinkId::Port(port)), Some(&0));
     let killed = Term::static_atom("killed");
-    scheduler.port_link_exit(port, child, &killed).unwrap();
+    scheduler.port_link_exit(port, child, &killed);
     let ports = scheduler.resources.borrow_mut::<Ports>();
     assert!(ports.get(port).is_some());
 }

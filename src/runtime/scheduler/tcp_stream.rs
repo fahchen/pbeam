@@ -18,12 +18,12 @@ use crate::{
     error::BeamError,
     runtime::{
         port::{
-            Port, Ports,
+            Driver, Port, Ports,
             inet::{Event, Inet, OK, Output, Receiver},
         },
         timer::{Timer, Timers},
     },
-    term::{PortId, Term},
+    term::{PortId, ProcessId, Term},
 };
 
 /// The atom of the messages of a send.
@@ -102,9 +102,9 @@ impl Scheduler {
         Ok(vec![OK])
     }
 
-    /// End the receive of the timer on the port `port` with `{error,
-    /// timeout}` (`tcp_inet_recv_timeout`, inet_drv.c:11941-11949). A port
-    /// that closed changes nothing.
+    /// End the receive of the timer on the port `port`, open or closing,
+    /// with `{error, timeout}` (`tcp_inet_recv_timeout`,
+    /// inet_drv.c:11941-11949). A port that terminated changes nothing.
     ///
     /// # Examples
     ///
@@ -156,7 +156,8 @@ impl Scheduler {
 
     /// Run the output `bytes` of the current process on the `tcp_inet`
     /// port `port` (`tcp_inet_commandv`, inet_drv.c:12657-12731). A header
-    /// that is too short closes the port with the reason `einval`.
+    /// that is too short fails the port with the reason `einval`
+    /// (`driver_failure_posix`, io.c:7267-7270).
     ///
     /// # Examples
     ///
@@ -179,14 +180,20 @@ impl Scheduler {
         let tcp = stream(self.resources.borrow_mut::<Ports>(), port);
         match tcp.send(bytes, caller, seed)? {
             Output::Sent(events) => self.deliver_events(port, events),
-            Output::Failed => self.close_port(port, Term::static_atom("einval")),
+            Output::Failed => {
+                self.fail_port(port, Term::static_atom("einval"));
+                Ok(())
+            }
         }
     }
 
     /// Send the messages `events` of the port `port`, and cancel the timer
     /// of each receive that ends. The messages of active mode go to the
     /// owner of the port (`erl_drv_output_term`), and [`Event::Exit`]
-    /// closes the port (see [`Self::driver_exit`]).
+    /// closes the port (see [`Self::driver_exit`]). A port in the
+    /// `CLOSING` state sends no message (see [`Self::port_deliver`]), its
+    /// end terminates it (io.c:7206-7207), and so does an empty queue after
+    /// the events (see [`Self::tcp_flushed`]).
     pub(super) fn deliver_events(
         &mut self,
         port: PortId,
@@ -206,7 +213,7 @@ impl Scheduler {
                         Err(name) => error_status(Term::Atom(self.atoms.put(&name)?)),
                     };
                     let message = self.async_message(port, receiver.id, status);
-                    self.deliver(receiver.caller, message);
+                    self.port_deliver(port, receiver.caller, message);
                 }
                 Event::Replied { sender, result } => {
                     let status = match result {
@@ -220,7 +227,7 @@ impl Scheduler {
                         status,
                         Term::Reference(sender.tag),
                     ]);
-                    self.deliver(sender.caller, message);
+                    self.port_deliver(port, sender.caller, message);
                 }
                 Event::Data(bytes) => {
                     let tcp = stream(self.resources.borrow_mut::<Ports>(), port);
@@ -232,13 +239,47 @@ impl Scheduler {
                     let reason = Term::Atom(self.atoms.put(&name)?);
                     self.deliver_active(port, "tcp_error", Some(reason))?;
                 }
+                Event::EmptyQueue(subscribers) => {
+                    let tag = Term::Atom(self.atoms.put("empty_out_q")?);
+                    let message = Term::tuple(vec![tag, Term::Port(port)]);
+                    for subscriber in subscribers {
+                        self.port_deliver(port, subscriber, message.clone());
+                    }
+                }
                 Event::Exit(reason) => {
                     let reason = Term::Atom(self.atoms.put(&reason)?);
-                    self.driver_exit(port, reason)?;
+                    self.driver_exit(port, reason);
                 }
             }
         }
+        self.tcp_flushed(port);
         Ok(())
+    }
+
+    /// Terminate the port `port` in the `CLOSING` state when its queue is
+    /// empty after a step of its driver (`erts_port_driver_callback_epilogue`,
+    /// erl_port.h:807-810). The stop of the driver sends no message, and
+    /// dropping the driver closes the socket after the kernel sends the
+    /// written bytes (`tcp_inet_stop`, inet_drv.c:11895-11920). An open
+    /// port and a port that terminated change nothing.
+    fn tcp_flushed(&mut self, port: PortId) {
+        let ports = self.resources.borrow_mut::<Ports>();
+        let flushed = ports.get(port).is_some_and(|item| {
+            item.closing && matches!(&item.driver, Driver::Inet(tcp) if !tcp.has_output())
+        });
+        if flushed {
+            let item = ports.remove(port).expect("the flushed port is closing");
+            self.stop_port(port, item);
+        }
+    }
+
+    /// Send `message` of the port `port` to `to`, or drop it when the port
+    /// is in the `CLOSING` state, as `erl_drv_send_term` and
+    /// `erl_drv_output_term` do (io.c:6212-6227, 6277-6278).
+    fn port_deliver(&mut self, port: PortId, to: ProcessId, message: Term) {
+        if !self.resources.borrow_mut::<Ports>().closing(port) {
+            self.deliver(to, message);
+        }
     }
 
     /// Send `{Tag, S}`, or `{Tag, S, Value}` with `value`, of the port
@@ -256,15 +297,15 @@ impl Scheduler {
             .get(port)
             .expect("the port of a message is open")
             .owner;
-        self.deliver(owner, message);
+        self.port_deliver(port, owner, message);
         Ok(())
     }
 }
 
-/// Return the descriptor of the open `tcp_inet` port `id`.
+/// Return the descriptor of the `tcp_inet` port `id`, open or closing.
 fn stream(ports: &mut Ports, id: PortId) -> &mut Inet {
     ports
         .get_mut(id)
         .and_then(Port::inet_mut)
-        .expect("the port of a receive or a send is an open tcp_inet port")
+        .expect("the port of a receive or a send is an open or closing tcp_inet port")
 }

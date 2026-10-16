@@ -786,7 +786,7 @@ impl Scheduler {
                     let _ = self.send_signal(Some(id), from, ack);
                 }
                 Signal::PortLink { port } => {
-                    self.port_link_exit(port, id, &Term::static_atom("noproc"))?;
+                    self.port_link_exit(port, id, &Term::static_atom("noproc"));
                 }
                 Signal::GroupLeader {
                     requester,
