@@ -106,7 +106,8 @@ add_to_kernel(Init, Server, Res) ->
 %% The init request process. It traps exits (init.erl:588), links to each
 %% kernel process that starts with {ok, Pid} and keeps it in the kernel list,
 %% the last started first (init.erl:768-772), and answers the requests of
-%% request/4. For init:stop/0 it runs stop/4 (init.erl:536, 788-789). It
+%% request/4. For init:stop/0 it runs stop/4 (init.erl:536, 788-789). When
+%% a kernel process exits, it runs terminate/3 (init.erl:783-787). It
 %% keeps other messages in its mailbox.
 init(Boot, Flags) ->
     process_flag(trap_exit, true),
@@ -120,6 +121,9 @@ init_loop(Boot, Flags, Kernel, Loaded) ->
             init_loop(Boot, Flags, [{Server, Pid} | Kernel], Loaded);
         {stop, stop} ->
             stop(Boot, Kernel, Flags, Loaded);
+        {'EXIT', Pid, Reason} ->
+            terminate(Pid, Kernel, Reason),
+            init_loop(Boot, Flags, Kernel, Loaded);
         {From, get_arguments = Request} ->
             init_loop(Boot, Flags, Kernel, request(From, Request, Flags, Loaded));
         {From, {get_argument, _} = Request} ->
@@ -129,6 +133,25 @@ init_loop(Boot, Flags, Kernel, Loaded) ->
         {From, {ensure_loaded, _} = Request} ->
             init_loop(Boot, Flags, Kernel, request(From, Request, Flags, Loaded))
     end.
+
+%% Halt the node when a kernel process exits, as init:terminate/3 does
+%% (init.erl:1139-1148): wait 500 ms for the error printouts, then call
+%% halt/1 with the text "Kernel pid terminated (Name) (Reason)"
+%% (init.erl:665-679). The exit of another linked process changes nothing.
+terminate(Pid, Kernel, Reason) ->
+    case lists:keyfind(Pid, 2, Kernel) of
+        {Name, Pid} ->
+            receive after 500 -> ok end,
+            halt("Kernel pid terminated" ++ things_to_string([Name, Reason]));
+        false ->
+            false
+    end.
+
+%% init.erl:665-669.
+things_to_string([X | Rest]) ->
+    " (" ++ erts_internal:term_to_string(X, 32768) ++ ")" ++ things_to_string(Rest);
+things_to_string([]) ->
+    "".
 
 %% Answer an init request and return the loaded list. get_arguments and
 %% {get_argument, Arg} give the values as strings (init.erl:816-819).

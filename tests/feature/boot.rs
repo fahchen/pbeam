@@ -16,6 +16,7 @@ use common::{pinned_beam, pinned_beam_path};
 
 const BOOT_PROBE: &str = "fixtures/boot/boot_probe.beam";
 const KERNEL_APP_PROBE: &str = "fixtures/boot/kernel_app_probe.beam";
+const KERNEL_EXIT_PROBE: &str = "fixtures/boot/kernel_exit_probe.beam";
 const LOGGER_BOOT_PROBE: &[u8] = include_bytes!("../../fixtures/boot/logger_boot_probe.beam");
 const INIT_STOP_PROBE: &[u8] = include_bytes!("../../fixtures/boot/init_stop_probe.beam");
 const BOOT_SOURCE: &str = "examples/hello_world/pbeam_boot.erl";
@@ -407,6 +408,67 @@ fn starts_the_kernel_application_as_pinned_erts() {
                 output.status.code()
             ),
             (expected.into(), "".into(), Some(0)),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn halts_when_a_kernel_process_exits_as_init_does() {
+    // `kernel_exit_probe:main/0` kills `erl_prim_loader`, a kernel process
+    // of `init`. `init` waits 500 ms and halts with the text
+    // `Kernel pid terminated (Name) (Reason)`, which
+    // `erts_internal:term_to_string/2` makes (init.erl:665-679, 783-787,
+    // 1139-1148). PBeam does not run that BIF, so the run stops there with
+    // status 1 (row "Boot" of docs/erts-differences.md). The ERTS run
+    // writes its crash dump to `/dev/null`.
+    let mut erts = Command::new("erl");
+    erts.args([
+        "+S",
+        "1",
+        "-noshell",
+        "-boot",
+        "start_clean",
+        "-pa",
+        "fixtures/boot",
+        "-eval",
+        "kernel_exit_probe:main().",
+    ])
+    .env("ERL_CRASH_DUMP", "/dev/null");
+    let mut pbeam = Command::new(env!("CARGO_BIN_EXE_pbeam"));
+    pbeam
+        .args(["pbeam_boot", "start", "kernel_exit_probe", "main", "--root"])
+        .arg(otp_root())
+        .args(["--", KERNEL_EXIT_PROBE])
+        .args(BOOT_MODULES.map(pinned_beam_path))
+        .arg(boot_beam());
+    let expected = [
+        (
+            "ERTS",
+            &mut erts,
+            "Kernel pid terminated (erl_prim_loader) (killed)\r\n\
+             \r\nCrash dump is being written to: /dev/null...done\r\n",
+        ),
+        (
+            "PBeam",
+            &mut pbeam,
+            "pbeam: unresolved external MFA erts_internal:term_to_string/2\n",
+        ),
+    ];
+    for (name, command, stderr) in expected {
+        let output = command
+            .env("TERM", "dumb")
+            .env("LC_ALL", "C.UTF-8")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(
+            (
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+                output.status.code()
+            ),
+            ("".into(), stderr.into(), Some(1)),
             "{name}"
         );
     }
