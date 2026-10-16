@@ -643,7 +643,7 @@ impl Scheduler {
     /// ```rust,ignore
     /// scheduler.insert(ProcessState::new(ProcessId(1), Start::Entry(frame), vec![]));
     /// ```
-    fn insert(&mut self, process: ProcessState) {
+    pub(super) fn insert(&mut self, process: ProcessState) {
         let id = process.id;
         self.processes.insert(process);
         self.enqueue(id);

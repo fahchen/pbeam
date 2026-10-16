@@ -4195,50 +4195,52 @@ const PTAB_DELETED_PER_RED: usize = 10;
 const PTAB_CONSES_PER_RED: usize = 75;
 
 /// The state of an `erlang:processes/0` call, which the call keeps across
-/// its traps to `erts_internal:ptab_list_continue/5`, as the
+/// its traps to `erts_internal:ptab_list_continue/7`, as the
 /// `ErtsPTabListBifData` of `erts_ptab_list` (`erl_ptab.c:746-780`) does.
+/// Each list is a term that a trap moves to its arguments and a resume
+/// moves back, so that no turn copies the state.
 pub(super) struct PtabList {
     /// The next table index to read, `-1` before the call takes its
     /// snapshot, and [`PTAB_SIZE`] after it read the table.
     pub(super) tix: i64,
     /// The pids of the snapshot that the call did not read yet, in index
     /// order.
-    pub(super) rest: Vec<ProcessId>,
-    /// The pids of the result: the pids that the call found in the table,
-    /// then the deleted pids.
-    pub(super) found: Vec<ProcessId>,
+    pub(super) rest: Term,
+    /// The pids that the call found in the table, the last found first.
+    pub(super) found: Term,
     /// The pids of the snapshot that exited before the call read their
-    /// chunk, which the call did not add to the result yet.
-    pub(super) gone: Vec<ProcessId>,
-    /// The cells of the result that the call did not build yet, or `-1`
-    /// before the call starts to build the result.
+    /// chunk, the last first. They come after the found pids in the result.
+    pub(super) gone: Term,
+    /// The pids of `gone` that the step through the deleted pids did not
+    /// charge yet.
+    pub(super) deleted: i64,
+    /// The cells of the result that the call did not build yet: the pids of
+    /// `found` and `gone`.
     pub(super) pid_ix: i64,
+    /// The cells of the result that the call built: the last pids of the
+    /// result, in order.
+    pub(super) result: Term,
 }
 
 impl PtabList {
     /// Return the state as the arguments of the trap export.
     fn into_arguments(self) -> Vec<Term> {
-        let pids = |ids: Vec<ProcessId>| Term::list_from(ids.into_iter().map(Term::Pid));
         vec![
             Term::Integer(self.tix),
-            pids(self.rest),
-            pids(self.found),
-            pids(self.gone),
+            self.rest,
+            self.found,
+            self.gone,
+            Term::Integer(self.deleted),
             Term::Integer(self.pid_ix),
+            self.result,
         ]
     }
+}
 
-    /// Return the pids of the list `term` of the trap arguments.
-    pub(super) fn pids(term: &Term) -> Vec<ProcessId> {
-        term.proper_list()
-            .into_iter()
-            .flatten()
-            .filter_map(|pid| {
-                let Term::Pid(id) = pid else { return None };
-                Some(*id)
-            })
-            .collect()
-    }
+#[cfg(test)]
+thread_local! {
+    /// The list cells that [`ptab_list`] read or built since the last reset.
+    pub(super) static PTAB_CELLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Run `erlang:processes/0`: return the pid of each process that exists
@@ -4260,10 +4262,12 @@ impl PtabList {
 pub(super) fn processes(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
     let state = PtabList {
         tix: -1,
-        rest: Vec::new(),
-        found: Vec::new(),
-        gone: Vec::new(),
-        pid_ix: -1,
+        rest: Term::Nil,
+        found: Term::Nil,
+        gone: Term::Nil,
+        deleted: 0,
+        pid_ix: 0,
+        result: Term::Nil,
     };
     if scheduler.current_process().bif_reductions_left()? < PTAB_CHUNK_REDS {
         return Ok(ptab_list_trap(scheduler, state));
@@ -4319,21 +4323,30 @@ pub(super) fn ptab_list(
         } else {
             scheduler.policy_id()
         };
-        state.rest = scheduler.process_ids();
-        state.rest.retain(|id| Some(*id) != hidden);
-        state.rest.sort_by_key(|id| id.0 % PTAB_SIZE);
-        state.rest.reverse();
+        let mut ids = scheduler.process_ids();
+        ids.retain(|id| Some(*id) != hidden);
+        ids.sort_by_key(|id| id.0 % PTAB_SIZE);
+        state.rest = Term::list_from(ids.into_iter().map(Term::Pid));
         state.tix = 0;
     }
     loop {
         let left = scheduler.current_process().bif_reductions_left()?;
         let have = if state.tix < PTAB_SIZE as i64 {
             let end = (state.tix as u64 + PTAB_CHUNK).min(PTAB_SIZE);
-            while let Some(id) = state.rest.pop_if(|id| id.0 % PTAB_SIZE < end) {
-                match scheduler.process(id) {
-                    Some(_) => state.found.push(id),
-                    None => state.gone.push(id),
-                }
+            while let Some((&Term::Pid(id), tail)) = state.rest.cons_cell()
+                && id.0 % PTAB_SIZE < end
+            {
+                state.rest = tail.clone();
+                #[cfg(test)]
+                PTAB_CELLS.set(PTAB_CELLS.get() + 1);
+                let list = if scheduler.process(id).is_some() {
+                    &mut state.found
+                } else {
+                    state.deleted += 1;
+                    &mut state.gone
+                };
+                *list = Term::cons(Term::Pid(id), std::mem::replace(list, Term::Nil));
+                state.pid_ix += 1;
             }
             let reds = (end - state.tix as u64) / PTAB_INDICES_PER_RED;
             state.tix = end as i64;
@@ -4345,30 +4358,44 @@ pub(super) fn ptab_list(
             } else {
                 have
             }
-        } else if state.pid_ix < 0 {
+        } else if state.deleted > 0 {
             let max = left.min(PTAB_CHUNK_REDS);
             let (mut reds, mut taken) = (0, 0);
-            while reds < max && taken < state.gone.len() {
+            while reds < max && taken < state.deleted as usize {
                 taken += 1;
                 reds += 1 + usize::from(taken % PTAB_DELETED_PER_RED == 0);
             }
-            state.found.extend(state.gone.drain(..taken));
-            if state.gone.is_empty() {
-                state.pid_ix = state.found.len() as i64;
-            }
+            state.deleted -= taken as i64;
             scheduler.current_process_mut().bump_reductions(reds as i32);
             left.saturating_sub(reds)
         } else {
+            // The result cells come from the end of the result to its
+            // start: the gone pids, the last first, then the found pids, as
+            // `ptab_list_bif_engine` conses its pid array from the end
+            // (`erl_ptab.c:1201-1254`).
             let conses = (PTAB_CONSES_PER_RED * left).min(state.pid_ix as usize);
+            for _ in 0..conses {
+                let list = if state.gone.is_nil() {
+                    &mut state.found
+                } else {
+                    &mut state.gone
+                };
+                let (pid, tail) = list
+                    .cons_cell()
+                    .expect("the result has a pid for each cell");
+                let pid = pid.clone();
+                *list = tail.clone();
+                #[cfg(test)]
+                PTAB_CELLS.set(PTAB_CELLS.get() + 1);
+                state.result = Term::cons(pid, std::mem::replace(&mut state.result, Term::Nil));
+            }
             state.pid_ix -= conses as i64;
             let reds = conses / PTAB_CONSES_PER_RED;
             scheduler.current_process_mut().bump_reductions(reds as i32);
             left - reds
         };
-        if state.pid_ix == 0 {
-            return Ok(Value(Term::list_from(
-                state.found.into_iter().map(Term::Pid),
-            )));
+        if state.tix == PTAB_SIZE as i64 && state.deleted == 0 && state.pid_ix == 0 {
+            return Ok(Value(state.result));
         }
         if have == 0 {
             return Ok(ptab_list_trap(scheduler, state));
