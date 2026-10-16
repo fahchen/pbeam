@@ -5,7 +5,7 @@
 use std::{
     ffi::{CStr, OsStr, c_int},
     fs::{self, File, OpenOptions},
-    io::{self, Read, Seek, SeekFrom, Write},
+    io::{self, IoSlice, Read, Seek, SeekFrom, Write},
     os::unix::{
         ffi::{OsStrExt, OsStringExt},
         fs::OpenOptionsExt,
@@ -379,27 +379,54 @@ pub(crate) fn read(mut file: &File, size: u64) -> Result<Vec<u8>, c_int> {
     Ok(contents)
 }
 
-/// Write all of `bytes` to `file`, as `write_nif` with `efile_writev`
-/// (`prim_file_nif.c:688-710`, `unix_prim_file.c:343-394`) does, again on
-/// `EINTR` and after a partial write, until a write gives 0 bytes.
+/// Write all bytes of `buffers` to `file`, as `write_nif` with
+/// `efile_writev` (`prim_file_nif.c:688-710`, `unix_prim_file.c:343-394`)
+/// does: `writev` of the buffers, again on `EINTR` and after a partial
+/// write, until all bytes are written or a write gives 0 bytes. The
+/// buffers refer to the bytes of the binaries, as the iovec of
+/// `enif_inspect_iovec` does, so the write copies no byte.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(write(&OpenOptions::new().write(true).open("/dev/null")?, b"x"), Ok(()));
+/// let mut buffers = [IoSlice::new(b"a"), IoSlice::new(b"b")];
+/// assert_eq!(write(&OpenOptions::new().write(true).open("/dev/null")?, &mut buffers), Ok(()));
 /// ```
 ///
 /// # Errors
 ///
 /// The `errno` of a failed write.
-pub(crate) fn write(mut file: &File, mut bytes: &[u8]) -> Result<(), c_int> {
-    while !bytes.is_empty() {
-        match file.write(bytes) {
+pub(crate) fn write(file: &File, buffers: &mut [IoSlice<'_>]) -> Result<(), c_int> {
+    write_vectored(file, buffers).map_err(os_errno)
+}
+
+/// Write all bytes of `buffers` to `writer` with `Write::write_vectored`,
+/// again on `EINTR` and after a partial write, until all bytes are written
+/// or a write gives 0 bytes, as the loop of `efile_writev`
+/// (`unix_prim_file.c:360-394`) does.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut buffers = [IoSlice::new(b"ab")];
+/// write_vectored(&mut Vec::new(), &mut buffers)?;
+/// ```
+///
+/// # Errors
+///
+/// The error of a failed write.
+fn write_vectored(mut writer: impl Write, mut buffers: &mut [IoSlice<'_>]) -> io::Result<()> {
+    let mut more = true;
+    while more && !buffers.is_empty() {
+        match writer.write_vectored(buffers) {
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(error) => return Err(os_errno(error)),
-            // `efile_writev` stops at a write of 0 bytes and gives the bytes
-            // that it wrote (unix_prim_file.c:382-390).
-            Ok(written) => bytes = if written == 0 { &[] } else { &bytes[written..] },
+            Err(error) => return Err(error),
+            Ok(written) => {
+                // `efile_writev` stops at a write of 0 bytes and gives the
+                // bytes that it wrote (unix_prim_file.c:382-390).
+                more = written > 0;
+                IoSlice::advance_slices(&mut buffers, written);
+            }
         }
     }
     Ok(())
@@ -451,3 +478,7 @@ fn host_path(path: &CStr) -> &Path {
 fn os_errno(error: io::Error) -> c_int {
     error.raw_os_error().unwrap_or(libc::ENOMEM)
 }
+
+#[cfg(test)]
+#[path = "../../../tests/runtime/host/file.rs"]
+mod tests;

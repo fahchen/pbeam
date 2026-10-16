@@ -24,7 +24,7 @@ use crate::runtime::{
 use std::{
     ffi::{CStr, c_int},
     fs::File,
-    io::SeekFrom,
+    io::{IoSlice, SeekFrom},
 };
 
 /// The functions of the ERTS `prim_file` NIF library, as `(name, arity)` in
@@ -350,7 +350,7 @@ fn read_nif(scheduler: &mut Scheduler, fd: &Term, size: &Term) -> Result<BifResu
 /// first [`WRITE_MAX_ELEMENTS`] elements of `IOVec` must be binaries and be
 /// followed by a list, as `enif_inspect_iovec` (`erl_nif.c:4107-4166`,
 /// `4342-4356`) checks, else the call raises `error:badarg` and writes
-/// nothing. [`file::write`] then writes their bytes. A failed write gives
+/// nothing. [`file::write`] then writes their bytes with no copy. A failed write gives
 /// `{error, Errno}`. Else the result is `ok` when the rest of the list is
 /// `[]`, and `{continue, Rest}` for the rest of a longer list.
 ///
@@ -368,14 +368,18 @@ fn read_nif(scheduler: &mut Scheduler, fd: &Term, size: &Term) -> Result<BifResu
 /// `AtomTable::put`.
 fn write_nif(scheduler: &mut Scheduler, fd: &Term, iovec: &Term) -> Result<BifResult, BeamError> {
     file_handle_wrapper(scheduler, fd, |file, atoms| {
-        let mut bytes = Vec::new();
+        let mut buffers = Vec::new();
         let mut rest = iovec;
         let mut elements = 0;
         while let Some((element, tail)) = rest.cons_cell() {
             let Term::Binary(binary) = element else {
                 return Ok(BifResult::badarg());
             };
-            bytes.extend_from_slice(binary);
+            // `examine_iovec_term` gives no iovec entry for an empty binary
+            // (erl_nif.c:4123-4155).
+            if !binary.is_empty() {
+                buffers.push(IoSlice::new(binary));
+            }
             rest = tail;
             elements += 1;
             if elements >= WRITE_MAX_ELEMENTS {
@@ -390,7 +394,7 @@ fn write_nif(scheduler: &mut Scheduler, fd: &Term, iovec: &Term) -> Result<BifRe
         } else {
             Term::tuple(vec![Term::Atom(atoms.put("continue")?), rest.clone()])
         };
-        value_or_error(atoms, file::write(file, &bytes).map(|()| value))
+        value_or_error(atoms, file::write(file, &mut buffers).map(|()| value))
     })
 }
 
