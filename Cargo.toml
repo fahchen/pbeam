@@ -231,6 +231,10 @@ name = "effect_capability"
 path = "tests/integration/effect_capability.rs"
 
 [[test]]
+name = "erlang_bifs"
+path = "tests/integration/erlang_bifs.rs"
+
+[[test]]
 name = "error_path"
 path = "tests/integration/error_path.rs"
 
@@ -369,6 +373,10 @@ path = "tests/integration/logger_start.rs"
 [[test]]
 name = "map"
 path = "tests/integration/map.rs"
+
+[[test]]
+name = "maps_math"
+path = "tests/integration/maps_math.rs"
 
 [[test]]
 name = "module_info"
