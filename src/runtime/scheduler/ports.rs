@@ -214,6 +214,31 @@ impl Scheduler {
         Ok(())
     }
 
+    /// Close the open port `id` with the reason `reason` from its driver,
+    /// as `driver_exit` does (io.c:7228-7249): the port first unlinks its
+    /// owner (`unlink_proc`, io.c:2889-2909), so only the other linked
+    /// processes get the link exit signal.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.driver_exit(port, Term::static_atom("normal"))?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The error of [`Self::close_port`].
+    pub(super) fn driver_exit(&mut self, id: PortId, reason: Term) -> Result<(), BeamError> {
+        let port = self.resources.borrow_mut::<Ports>().get_mut(id);
+        let port = port.expect("the port of a driver exit is open");
+        let owner = port.owner;
+        port.links.remove(&owner);
+        if let Some(process) = self.process_mut(owner) {
+            process.links.remove(&LinkId::Port(id));
+        }
+        self.close_port(id, reason)
+    }
+
     /// Link the current process to the port `id`, as `link_opt` does for a
     /// port (`bif.c:186-232`), and return false when the port is not open
     /// and the process does not trap exits (`noproc`). A trapping process

@@ -1,5 +1,5 @@
 //! The receive and send state of a connected socket of a `tcp_inet` port
-//! in passive mode with `{packet, raw}`, as `tcp_descriptor` keeps it
+//! in passive and active mode with `{packet, raw}`, as `tcp_descriptor` keeps it
 //! (inet_drv.c:1308, 1050-1064, 12268-12325, 12657-12731, 12783-12890,
 //! 12967-13240, 13613-13852, 14234-14370).
 //!
@@ -20,6 +20,12 @@
 //! for write. A send while the queue holds 8192 bytes or more
 //! (`INET_HIGH_WATERMARK`) waits for its reply until the queue holds 4096
 //! bytes or fewer (`INET_LOW_WATERMARK`).
+//!
+//! In active mode (`true` or `once`), each read of at most the buffer
+//! size gives `{tcp, S, Data}` to the owner, and `once` becomes `false`
+//! after one message. The end of the connection gives `{tcp_error, S,
+//! Reason}` for a failed read, then `{tcp_closed, S}`, and the port ends
+//! (inet_drv.c:3987-4095, 12783-12890, 13042-13128, 13613-13662).
 
 use std::{
     collections::VecDeque,
@@ -76,9 +82,21 @@ pub(in crate::runtime) struct Sender {
     pub(in crate::runtime) tag: Reference,
 }
 
-/// A message that a step of the driver sends.
+/// A message that a step of the driver sends, or the end of the port.
 #[derive(Debug, PartialEq, Eq)]
 pub(in crate::runtime) enum Event {
+    /// `{tcp, S, Data}` to the owner in active mode (`tcp_message`,
+    /// inet_drv.c:3987-4015).
+    Data(Vec<u8>),
+    /// `{tcp_closed, S}` to the owner in active mode, once for the port
+    /// (`tcp_closed_message`, inet_drv.c:4058-4074).
+    Closed,
+    /// `{tcp_error, S, Reason}` to the owner in active mode
+    /// (`tcp_error_message`, inet_drv.c:4079-4095).
+    Error(String),
+    /// The port ends with this reason, `normal` or an error name, as
+    /// `driver_exit` does (io.c:7228-7249). It is the last event.
+    Exit(String),
     /// `{inet_async, S, Ref, {ok, Data}}` or `{inet_async, S, Ref, {error,
     /// Reason}}` of the receive of `receiver`.
     Received {
@@ -180,6 +198,8 @@ pub(in crate::runtime) struct Stream {
     /// The next receive gives `{error, closed}`
     /// (`TCP_ADDF_DELAYED_CLOSE_RECV`).
     closed_receive: bool,
+    /// The port sent `{tcp_closed, S}` (`TCP_ADDF_CLOSE_SENT`).
+    closed_sent: bool,
     /// The counts of `GETSTAT`.
     statistics: Statistics,
 }
@@ -204,6 +224,7 @@ impl Stream {
             busy: None,
             closed_send: false,
             closed_receive: false,
+            closed_sent: false,
             statistics: Statistics::default(),
         }
     }
@@ -226,8 +247,7 @@ impl Inet {
     /// Check `TCP_REQ_RECV` with `[T3, T2, T1, T0, N3, N2, N1, N0]`
     /// (inet_drv.c:12268-12307): a socket that is not connected gives
     /// `closed` once after a failed send, else `enotconn`; an active socket
-    /// and a request that is not 8 bytes give `einval` (PBeam has no
-    /// connected active socket yet); a length above 64
+    /// and a request that is not 8 bytes give `einval`; a length above 64
     /// MiB gives `enomem`; and a receive that waits gives `ealready`.
     ///
     /// # Errors
@@ -320,8 +340,32 @@ impl Inet {
         self.end_receive(Err("timeout".to_owned()))
     }
 
+    /// Deliver the bytes of the input buffer to the owner of a socket that
+    /// became active, as `tcp_recv` (`read`, for `once`) and `tcp_deliver`
+    /// do after `SETOPTS` (inet_drv.c:11131-11148, 13042-13060). Without
+    /// `read`, an empty buffer and a buffer that waits for more bytes give
+    /// no message.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(port.activate(false), vec![Event::Data(vec![1, 2])]);
+    /// ```
+    pub(in crate::runtime) fn activate(&mut self, read: bool) -> Vec<Event> {
+        let stream = &self.stream;
+        if read {
+            self.receive(0)
+        } else if stream.input_size == 0 || stream.remain > 0 || stream.filled == 0 {
+            Vec::new()
+        } else {
+            self.deliver(stream.filled)
+        }
+    }
+
     /// Give the first `length` bytes of the buffer to the receive, as
-    /// `tcp_deliver` does in passive mode (inet_drv.c:13042-13128). When
+    /// `tcp_deliver` does (inet_drv.c:13042-13128), or to the owner as
+    /// `{tcp, S, Data}` in active mode, which then becomes passive for
+    /// `once` (`tcp_reply_data`, inet_drv.c:4278-4303). When
     /// the receive takes all the filled bytes, the buffer itself becomes
     /// the data, shrunk to `length`, and the port has no buffer
     /// (`tcp_clear_input`). Else the receive gets a copy of the `length`
@@ -343,7 +387,15 @@ impl Inet {
             data
         };
         stream.remain = 0;
-        self.end_receive(Ok(data))
+        match self.active {
+            0 => self.end_receive(Ok(data)),
+            active => {
+                if active == 2 {
+                    self.active = 0;
+                }
+                vec![Event::Data(data)]
+            }
+        }
     }
 
     /// Return the message of the end of the receive that waits, or no
@@ -363,14 +415,45 @@ impl Inet {
     /// does (inet_drv.c:12849-12890): a send that waits gets `{error,
     /// closed}` and its queue goes, the socket closes, and the receive gets
     /// `{error, closed}` or the error name. After the end of file without a
-    /// send that waits, the next send gives `{error, closed}`.
+    /// send that waits, the next send gives `{error, closed}`. In active
+    /// mode, the owner gets `{tcp_error, S, Reason}` for a failed read and
+    /// then `{tcp_closed, S}`, and the port ends with the reason `normal` or
+    /// the error name (inet_drv.c:12836-12844, 12870-12877).
     fn receive_ended(&mut self, failure: Option<io::Error>) -> Vec<Event> {
         let failure = failure.filter(|failure| failure.kind() != io::ErrorKind::ConnectionReset);
-        let reason = failure.as_ref().map_or("closed".to_owned(), errno_name);
+        let name = failure.as_ref().map(errno_name);
         let mut events = self.end_busy();
         self.stream.closed_send |= events.is_empty() && failure.is_none();
+        if self.active != 0 {
+            events.extend(name.clone().map(Event::Error));
+            return self.active_end(events, None, name.unwrap_or("normal".to_owned()));
+        }
+        let reason = name.unwrap_or("closed".to_owned());
         self.close_socket();
         events.extend(self.end_receive(Err(reason)));
+        events
+    }
+
+    /// Add `{tcp_closed, S}` once for the port, then `reply`, and then the
+    /// end of the port with `reason` to `events`, as an active socket does
+    /// at the end of its connection (`tcp_closed_message` and
+    /// `driver_exit`), and drop the input buffer (`tcp_clear_input`).
+    fn active_end(
+        &mut self,
+        mut events: Vec<Event>,
+        reply: Option<Event>,
+        reason: String,
+    ) -> Vec<Event> {
+        let stream = &mut self.stream;
+        stream.input = Vec::new();
+        stream.filled = 0;
+        stream.input_size = 0;
+        stream.remain = 0;
+        if !std::mem::replace(&mut stream.closed_sent, true) {
+            events.push(Event::Closed);
+        }
+        events.extend(reply);
+        events.push(Event::Exit(reason));
         events
     }
 
@@ -505,8 +588,18 @@ impl Inet {
     /// `tcp_send_or_shutdown_error` do (inet_drv.c:13613-13734): the
     /// receive that waits and the send of `sender` get `{error, closed}`,
     /// or the next send gives `{error, closed}` without a send; the socket
-    /// closes, and the next receive gives `{error, closed}`.
+    /// closes, and the next receive gives `{error, closed}`. In active mode,
+    /// the owner gets `{tcp_closed, S}`, then the send of `sender` gets
+    /// `{error, closed}`, and the port ends with the reason `normal`
+    /// (inet_drv.c:13648-13662).
     fn send_failed(&mut self, sender: Option<Sender>) -> Vec<Event> {
+        if self.active != 0 {
+            let reply = sender.map(|sender| Event::Replied {
+                sender,
+                result: Err("closed".to_owned()),
+            });
+            return self.active_end(Vec::new(), reply, "normal".to_owned());
+        }
         let mut events = self.end_receive(Err("closed".to_owned()));
         match sender {
             Some(sender) => events.push(Event::Replied {
@@ -521,11 +614,12 @@ impl Inet {
     }
 
     /// Return the fd of a connected stream socket with a receive that
-    /// waits (`sock_select(desc, FD_READ, 1)`, inet_drv.c:12317), else
-    /// `None`.
+    /// waits (`sock_select(desc, FD_READ, 1)`, inet_drv.c:12317) or in
+    /// active mode (inet_drv.c:7966), else `None`.
     pub(in crate::runtime) fn stream_receive_fd(&self) -> Option<c_int> {
         let socket = self.socket.as_ref()?;
-        (self.socket_type == SocketType::Stream && self.stream.receiver.is_some())
+        let active = self.active != 0 && self.state == State::Connected;
+        (self.socket_type == SocketType::Stream && (self.stream.receiver.is_some() || active))
             .then(|| socket.as_raw_fd())
     }
 

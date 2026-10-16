@@ -30,11 +30,11 @@ main(Path) ->
     Handler = spawn(fun() -> process_flag(trap_exit, true), handler(Parent) end),
     Other = spawn(fun() -> Parent ! {self(), gen_tcp:controlling_process(S, self())} end),
     NotOwner = receive {Other, NotOwnerResult} -> NotOwnerResult end,
-    Before = [erlang:port_info(S, connected) =:= {connected, self()}, lists:member(S, links(self()))],
+    Before = [erlang:port_info(S, connected) =:= {connected, self()},
+              erlang:port_info(S, links) =:= {links, [self()]}],
     Moved = gen_tcp:controlling_process(S, Handler),
     After = [erlang:port_info(S, connected) =:= {connected, Handler},
              erlang:port_info(S, links) =:= {links, [Handler]},
-             lists:member(S, links(self())), lists:member(S, links(Handler)),
              gen_tcp:controlling_process(S, Handler), prim_inet:getopts(S, [active])],
     Handler ! {go, S},
     Queued = receive {handler, QueuedMessage} -> QueuedMessage after 3000 -> missing end,
@@ -146,7 +146,8 @@ handler(Parent) ->
             Parent ! {handler, message(S)},
             ok = prim_inet:setopts(S, [{active, once}]),
             Parent ! {handler, message(S)},
-            Parent ! {handler, receive Exit -> Exit after 3000 -> missing end}
+            %% The port unlinks its owner before its exit (io.c:7238-7239).
+            Parent ! {handler, receive Exit -> Exit after 500 -> none end}
     end.
 
 message(S) ->
@@ -162,10 +163,6 @@ message0(S) ->
 
 c(F) ->
     try F() catch Class:Reason -> {Class, Reason} end.
-
-links(Pid) ->
-    {links, Links} = process_info(Pid, links),
-    Links.
 
 connection(Path) ->
     {ok, L} = prim_inet:open(tcp, inet, stream),

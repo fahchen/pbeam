@@ -1864,3 +1864,43 @@ fn removes_a_reply_demonitor_port_monitor_from_the_port_at_the_alias_message() {
     let ports = scheduler.resources.borrow_mut::<Ports>();
     assert!(ports.get_mut(port).unwrap().monitors.is_empty());
 }
+
+#[test]
+fn sends_the_messages_of_an_active_socket_to_the_owner_and_ends_the_port() {
+    use crate::runtime::port::{
+        Driver, Ports,
+        inet::{Event, Inet, SocketType},
+    };
+    use socket2::{Domain, Socket, Type};
+    // `tcp_error_message`, `tcp_closed_message`, and `driver_exit`
+    // (inet_drv.c:4058-4095, 12870-12877; io.c:7228-7249).
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let id = current(&mut scheduler);
+    let (local, _peer) = Socket::pair(Domain::UNIX, Type::STREAM, None).unwrap();
+    let tcp = Inet::new(SocketType::Stream).copy(local);
+    let port = scheduler
+        .open_port(b"tcp_inet".to_vec(), Driver::Inet(tcp))
+        .unwrap();
+    let events = vec![
+        Event::Error("etimedout".to_owned()),
+        Event::Closed,
+        Event::Exit("etimedout".to_owned()),
+    ];
+    scheduler.deliver_events(port, events).unwrap();
+    let mut name = |text| Term::Atom(scheduler.atoms.put(text).unwrap());
+    let (tcp_error, etimedout, tcp_closed) =
+        (name("tcp_error"), name("etimedout"), name("tcp_closed"));
+    let error = Term::tuple(vec![tcp_error, Term::Port(port), etimedout]);
+    let closed = Term::tuple(vec![tcp_closed, Term::Port(port)]);
+    assert_eq!(messages(&scheduler, id.0), [error, closed]);
+    assert!(
+        scheduler
+            .resources
+            .borrow_mut::<Ports>()
+            .get(port)
+            .is_none()
+    );
+    assert!(scheduler.processes[&id].links.is_empty());
+}

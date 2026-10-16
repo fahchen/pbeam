@@ -497,30 +497,6 @@ fn accepts_in_many_processes_on_one_listen_socket_as_pinned_erts() {
     assert_eq!(pbeam, expected, "PBeam");
 }
 
-#[test]
-fn stops_the_run_for_an_active_mode_on_an_accepted_socket() {
-    // Task #668 adds the data messages of an active socket
-    // (inet_drv.c:7530-7560, 13461).
-    let path = std::env::temp_dir().join(format!("pbeam-tcp-active-{}", std::process::id()));
-    let error = with_client(&path, || {
-        let program = load();
-        let argument = Term::list_from(
-            path.display()
-                .to_string()
-                .bytes()
-                .map(|byte| Term::Integer(byte.into())),
-        );
-        program
-            .execute("tcp_accept", "active", &[program.host_term(argument)])
-            .unwrap_err()
-            .to_string()
-    });
-    assert!(
-        error.starts_with("unsupported tcp_inet option active on a connected socket"),
-        "{error}"
-    );
-}
-
 /// A client of the test that runs the commands of `tcp_transfer`: it reads
 /// `"Step Command"` from the file `path`, runs each new step once, and then
 /// writes `Step` to the file of [`acknowledgement`]. `connect Port` makes a
@@ -749,6 +725,47 @@ fn stops_the_run_for_each_receive_and_send_part_that_is_not_implemented() {
 }
 
 #[test]
+fn delivers_in_active_once_mode_and_moves_the_owner_as_pinned_erts() {
+    // `{active, once}` reads in the setopts and in the IO poll, and
+    // `gen_tcp:controlling_process/2` moves the socket and its queued
+    // message (inet.erl:4595-4660; inet_drv.c:3987-4077, 7940-7990,
+    // 11111-11148, 12783-12847, 13042-13128).
+    let expected = "[[ok,{tcp,<<97,98,99>>},{ok,[{active,false}]}],[{ok,[{active,false}]},ok,{ok,[{active,once}]}],{error,not_owner},[true,true],ok,[true,true,ok,{ok,[{active,once}]}],{tcp,<<100,101,102>>},{tcp,<<103,104,105>>},[tcp_closed,none],[undefined,{error,closed}],[]]";
+    for (name, (text, _)) in ["ERTS", "PBeam"]
+        .into_iter()
+        .zip(client_runs("tcp_active", "main"))
+    {
+        assert_eq!(text, expected, "{name}");
+    }
+}
+
+#[test]
+fn delivers_each_read_in_active_mode_as_pinned_erts() {
+    let expected =
+        "[ok,{tcp,<<120>>},{tcp,<<121>>},{ok,[{active,true}]},[none,{ok,<<122>>}],{tcp,[119]},[]]";
+    for (name, (text, _)) in ["ERTS", "PBeam"]
+        .into_iter()
+        .zip(client_runs("tcp_active", "active"))
+    {
+        assert_eq!(text, expected, "{name}");
+    }
+}
+
+#[test]
+fn ends_the_port_at_the_close_of_the_peer_in_active_mode_as_pinned_erts() {
+    // `tcp_recv_closed` sends `{tcp_closed, S}`, and `driver_exit` unlinks
+    // the owner and closes the port with the reason `normal`, also in the
+    // reply of a setopts (inet_drv.c:12836-12844; io.c:7228-7249).
+    let expected = "[ok,{tcp,<<98,121,101>>},ok,[[tcp_closed,port]],undefined]";
+    for (name, (text, _)) in ["ERTS", "PBeam"]
+        .into_iter()
+        .zip(client_runs("tcp_active", "closed"))
+    {
+        assert_eq!(text, expected, "{name}");
+    }
+}
+
+#[test]
 fn links_and_connects_a_port_as_pinned_erts() {
     // link/1, unlink/1, erlang:port_connect/2, and erlang:port_info/2 with a
     // port (bif.c:186-232, 1252-1287; erl_bif_port.c:438-595; io.c:2160-2190,
@@ -766,6 +783,34 @@ fn stops_the_run_for_a_port_info_item_that_is_not_implemented() {
         .to_string();
     assert!(
         error.starts_with("unsupported erlang:port_info/2 item memory"),
+        "{error}"
+    );
+}
+
+#[test]
+fn stops_the_run_for_an_active_count() {
+    // `{active, N}` and its `tcp_passive` message (inet_drv.c:1551-1559,
+    // 6975-6995) are not on the path of Thousand Island.
+    let path = std::env::temp_dir().join(format!("pbeam-tcp-active-count-{}", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(acknowledgement(&path));
+    let stop = Arc::new(AtomicBool::new(false));
+    let handle = command_client(path.clone(), Arc::clone(&stop));
+    let program = load();
+    let arguments = [
+        program.host_term(path_term(&path)),
+        program.host_term(Term::Atom(program.atom("count").unwrap())),
+    ];
+    let error = program
+        .execute("tcp_active", "unsupported", &arguments)
+        .unwrap_err()
+        .to_string();
+    stop.store(true, Ordering::SeqCst);
+    handle.join().unwrap();
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(acknowledgement(&path));
+    assert!(
+        error.starts_with("unsupported tcp_inet option active with a count"),
         "{error}"
     );
 }

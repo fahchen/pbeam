@@ -151,7 +151,8 @@ pub(in crate::runtime) struct Inet {
     /// The option `mode`: 0 for `list` (the start value), 1 for `binary`.
     mode: i32,
     /// The option `active`: 0 for `false` (the start value), 1 for `true`,
-    /// and 2 for `once`.
+    /// and 2 for `once`. A delivery in `once` mode sets it to 0
+    /// (`INET_CHECK_ACTIVE_TO_PASSIVE`, inet_drv.c:1551-1559).
     active: i32,
     /// The option `send_timeout` in milliseconds, -1 for `infinity` (the
     /// start value, `INET_INFINITY`).
@@ -180,6 +181,16 @@ pub(in crate::runtime) enum Control {
     /// milliseconds, `u32::MAX` for `infinity`. The scheduler runs it, as
     /// it makes a port, a monitor, and a timer.
     Accept(u32),
+    /// A valid `SETOPTS` that made a connected socket active, as
+    /// `inet_set_opts` returns 1 or 2 (inet_drv.c:7949-7981): the reply is
+    /// `[1]` after the scheduler delivers the data. With `read`, the change
+    /// to `once` reads the socket (`tcp_recv`), else the change to `true`
+    /// delivers the bytes of the input buffer (`tcp_deliver`)
+    /// (inet_drv.c:11131-11148).
+    Active {
+        /// The port reads the socket.
+        read: bool,
+    },
     /// A valid `TCP_REQ_RECV` with this timeout in milliseconds,
     /// `u32::MAX` for `infinity`, and this length. The scheduler runs it,
     /// as it makes an async reference, a timer, and messages.
@@ -335,7 +346,11 @@ impl Inet {
             4 => self.peer(),
             5 => self.name(),
             6 => self.bind(request)?,
-            7 => self.set_options(request)?,
+            7 => {
+                let old = self.active;
+                let reply = self.set_options(request)?;
+                return Ok(self.set_active_result(old, reply));
+            }
             8 => self.get_options(request)?,
             11 => return Ok(self.statistics(request)),
             12 => get_host_name(request),
@@ -520,9 +535,6 @@ impl Inet {
                     true
                 }
                 22 if value == 3 => return Err(error(ACTIVE_N)),
-                22 if value != 0 && self.state == State::Connected => {
-                    return Err(error(ACTIVE_CONNECTED));
-                }
                 22 => {
                     self.active = value;
                     true
@@ -573,6 +585,19 @@ impl Inet {
             }
         }
         Ok(vec![OK])
+    }
+
+    /// Return the result of a `SETOPTS` with the reply `reply` that changed
+    /// the option `active` from `old`: [`Control::Active`] when a connected
+    /// socket became active, else the reply (inet_drv.c:7949-7981). PBeam
+    /// runs no `{active, N}`, so only `once` reads.
+    fn set_active_result(&self, old: i32, reply: Vec<u8>) -> Control {
+        if reply != [OK] || old != 0 || self.active == 0 || self.state != State::Connected {
+            return Control::Reply(reply);
+        }
+        Control::Active {
+            read: self.active == 2,
+        }
     }
 
     /// Return whether the port has a socket of the stream type, the only type
@@ -685,10 +710,6 @@ pub(in crate::runtime) const DATAGRAM_RECEIVE: &str =
 
 /// The runtime error of `{active, N}`.
 const ACTIVE_N: &str = "unsupported tcp_inet option active with a count: see \"tcp_inet ports\" in docs/erts-differences.md";
-
-/// The runtime error of an active mode on a connected socket, whose data
-/// delivery PBeam does not run.
-const ACTIVE_CONNECTED: &str = "unsupported tcp_inet option active on a connected socket: see \"tcp_inet ports\" in docs/erts-differences.md";
 
 /// The runtime error of `{recvttl, true}`: `socket2` has no `IP_RECVTTL`
 /// call.

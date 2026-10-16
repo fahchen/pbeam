@@ -772,6 +772,7 @@ pub(super) fn port_control(
         Control::Reply(reply) => reply,
         Control::Accept(timeout) => scheduler.tcp_accept(id, timeout)?,
         Control::Receive { timeout, length } => scheduler.tcp_receive(id, timeout, length)?,
+        Control::Active { read } => scheduler.tcp_activate(id, read)?,
         Control::Badarg => {
             return Ok(signals_return(scheduler, port, Term::static_atom("badarg")));
         }
