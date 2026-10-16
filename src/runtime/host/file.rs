@@ -1,12 +1,15 @@
 //! Read host files, their information, directories, symbolic links, and the
-//! current directory, as the ERTS `prim_file` NIF library reads them on Unix
-//! (`nifs/unix/unix_prim_file.c`).
+//! current directory, and open, read, write, and seek host files, as the
+//! ERTS `prim_file` NIF library does on Unix (`nifs/unix/unix_prim_file.c`).
 
 use std::{
     ffi::{CStr, OsStr, c_int},
-    fs::{self, File},
-    io::{self, Read},
-    os::unix::ffi::{OsStrExt, OsStringExt},
+    fs::{self, File, OpenOptions},
+    io::{self, IoSlice, Read, Seek, SeekFrom, Write},
+    os::unix::{
+        ffi::{OsStrExt, OsStringExt},
+        fs::OpenOptionsExt,
+    },
     path::Path,
 };
 
@@ -258,6 +261,238 @@ pub(crate) fn get_cwd() -> Result<Vec<u8>, c_int> {
         .into_vec())
 }
 
+/// The modes of an open, as the `efile_modes_t` flags of
+/// `efile_translate_modelist` (`prim_file_nif.c:500-539`). An open has
+/// `read`, `write`, or both.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct OpenModes {
+    /// `EFILE_MODE_READ`.
+    pub(crate) read: bool,
+    /// `EFILE_MODE_WRITE`.
+    pub(crate) write: bool,
+    /// `EFILE_MODE_APPEND`.
+    pub(crate) append: bool,
+    /// `EFILE_MODE_EXCLUSIVE`.
+    pub(crate) exclusive: bool,
+    /// `EFILE_MODE_SYNC`.
+    pub(crate) sync: bool,
+    /// `EFILE_MODE_SKIP_TYPE_CHECK`.
+    pub(crate) skip_type_check: bool,
+    /// `EFILE_MODE_DIRECTORY`.
+    pub(crate) directory: bool,
+}
+
+/// Open the file at `path` with `modes`, as `efile_open`
+/// (`unix_prim_file.c:173-226`) does:
+///
+/// 1. The flags of `get_flags` (`unix_prim_file.c:142-171`): `O_RDONLY`
+///    for `read` alone, `O_WRONLY | O_CREAT | O_TRUNC` for `write` alone,
+///    and `O_RDWR | O_CREAT` for both. `append` removes `O_TRUNC` and adds
+///    `O_APPEND`, `exclusive` adds `O_EXCL`, `sync` adds `O_SYNC`, and
+///    `directory` adds `O_DIRECTORY`.
+/// 2. `open` with the mode `0777` for `directory`, else `0666`, again on
+///    `EINTR`. A failed call gives its `errno`.
+/// 3. Without `skip_type_check` and `directory`, a directory gives `EISDIR`
+///    (`open_file_is_dir`, `unix_prim_file.c:126-140`).
+///
+/// PBeam opens the file with `O_CLOEXEC` too, as [`read_file`] does.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let read = OpenModes { read: true, ..OpenModes::default() };
+/// assert!(open(c"/dev/null", read).is_ok());
+/// assert_eq!(open(c"/", read).err(), Some(libc::EISDIR));
+/// ```
+///
+/// # Errors
+///
+/// The `errno` of `open`, or `EISDIR` for a directory.
+pub(crate) fn open(path: &CStr, modes: OpenModes) -> Result<File, c_int> {
+    let mut options = OpenOptions::new();
+    if !modes.write {
+        options.read(true);
+    } else if !modes.read {
+        options.write(true).create(true).truncate(!modes.append);
+    } else {
+        options.read(true).write(true).create(true);
+    }
+    // The standard library adds `O_CREAT | O_EXCL` for `create_new`.
+    options.append(modes.append).create_new(modes.exclusive);
+    let mut flags = 0;
+    if modes.sync {
+        flags |= libc::O_SYNC;
+    }
+    if modes.directory {
+        flags |= libc::O_DIRECTORY;
+    }
+    options
+        .custom_flags(flags)
+        .mode(if modes.directory { 0o777 } else { 0o666 });
+    let file = options.open(host_path(path)).map_err(os_errno)?;
+    if !modes.skip_type_check
+        && !modes.directory
+        && file.metadata().is_ok_and(|metadata| metadata.is_dir())
+    {
+        return Err(libc::EISDIR);
+    }
+    Ok(file)
+}
+
+/// Read at most `size` bytes of `file`, as `read_nif` with `efile_readv`
+/// (`prim_file_nif.c:649-686`, `unix_prim_file.c:292-341`) does: the
+/// buffer of `size` bytes first, then reads until the buffer is full or a
+/// read gives 0 bytes, again on `EINTR`. A `size` of 0 reads once into an
+/// empty buffer, so a file without read access gives `EBADF`. The result keeps only the bytes
+/// that it read, as `enif_realloc_binary` does.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(read(&File::open("/dev/null")?, 10), Ok(vec![]));
+/// ```
+///
+/// # Errors
+///
+/// `ENOMEM` when the buffer cannot be allocated, as `enif_alloc_binary`
+/// gives it, or the `errno` of a failed read, also after some bytes.
+pub(crate) fn read(mut file: &File, size: u64) -> Result<Vec<u8>, c_int> {
+    if size == 0 {
+        // `readv` with one empty buffer still checks the descriptor, so a
+        // file without read access gives `EBADF`.
+        return loop {
+            match file.read(&mut []) {
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                result => break result.map(|_| Vec::new()).map_err(os_errno),
+            }
+        };
+    }
+    let mut contents = Vec::new();
+    usize::try_from(size)
+        .ok()
+        .and_then(|size| contents.try_reserve_exact(size).ok())
+        .ok_or(libc::ENOMEM)?;
+    file.take(size)
+        .read_to_end(&mut contents)
+        .map_err(os_errno)?;
+    contents.shrink_to_fit();
+    Ok(contents)
+}
+
+/// Write all bytes of `buffers` to `file`, as `write_nif` with
+/// `efile_writev` (`prim_file_nif.c:688-710`, `unix_prim_file.c:343-394`)
+/// does with [`write_vectored`]. The
+/// buffers refer to the bytes of the binaries, as the iovec of
+/// `enif_inspect_iovec` does, so the write copies no byte.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut buffers = [IoSlice::new(b"a"), IoSlice::new(b"b")];
+/// assert_eq!(write(&OpenOptions::new().write(true).open("/dev/null")?, &mut buffers), Ok(()));
+/// ```
+///
+/// # Errors
+///
+/// The `errno` of a failed write.
+pub(crate) fn write(file: &File, buffers: &mut [IoSlice<'_>]) -> Result<(), c_int> {
+    write_vectored(file, buffers, FALLBACK_RW_LENGTH).map_err(os_errno)
+}
+
+/// The largest write of the fallback of `efile_writev` after `EINVAL`, as
+/// `FALLBACK_RW_LENGTH` (`unix_prim_file.c:48`): macOS gives `EINVAL` for a
+/// `write` of more than 2 GB.
+const FALLBACK_RW_LENGTH: usize = (1 << 31) - 1;
+
+/// Write all bytes of `buffers` to `writer` with `Write::write_vectored`,
+/// as the loop of `efile_writev` (`unix_prim_file.c:343-394`) does:
+///
+/// 1. `writev` of the buffers. When it gives `EINVAL`, one `write` of the
+///    first buffer, and when that gives `EINVAL` too for a buffer of more
+///    than `fallback_length` bytes, one `write` of its first
+///    `fallback_length` bytes (`unix_prim_file.c:360-376`).
+/// 2. After a partial write, the same again with the bytes after the
+///    written bytes, and again on `EINTR`, until all bytes are written or a
+///    write gives 0 bytes.
+///
+/// `write` passes [`FALLBACK_RW_LENGTH`] as `fallback_length`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut buffers = [IoSlice::new(b"ab")];
+/// write_vectored(&mut Vec::new(), &mut buffers, FALLBACK_RW_LENGTH)?;
+/// ```
+///
+/// # Errors
+///
+/// The error of a failed write.
+fn write_vectored(
+    mut writer: impl Write,
+    mut buffers: &mut [IoSlice<'_>],
+    fallback_length: usize,
+) -> io::Result<()> {
+    let invalid = |error: &io::Error| error.raw_os_error() == Some(libc::EINVAL);
+    let mut more = true;
+    while more && !buffers.is_empty() {
+        let result = match writer.write_vectored(buffers) {
+            Err(error) if invalid(&error) => match writer.write(&buffers[0]) {
+                Err(error) if invalid(&error) && buffers[0].len() > fallback_length => {
+                    writer.write(&buffers[0][..fallback_length])
+                }
+                result => result,
+            },
+            result => result,
+        };
+        match result {
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+            Ok(written) => {
+                // `efile_writev` stops at a write of 0 bytes and gives the
+                // bytes that it wrote (unix_prim_file.c:382-390).
+                more = written > 0;
+                IoSlice::advance_slices(&mut buffers, written);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Close `file`, as `efile_close` (`unix_prim_file.c:246-265`) does: one
+/// `close`, with no new call on `EINTR`, because `close` either always
+/// closes the descriptor or leaves it undefined.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(close(File::open("/dev/null")?), Ok(()));
+/// ```
+///
+/// # Errors
+///
+/// The `errno` of a failed `close`, for example `EIO` for a write that an
+/// NFS server rejects at the close.
+pub(crate) fn close(file: File) -> Result<(), c_int> {
+    nix::unistd::close(file).map_err(|errno| errno as c_int)
+}
+
+/// Move the position of `file` to `offset` from `from`, and return the new
+/// position, as `efile_seek` (`unix_prim_file.c:508-540`) does with
+/// `lseek`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(seek(&file, SeekFrom::Start(0)), Ok(0));
+/// ```
+///
+/// # Errors
+///
+/// The `errno` of `lseek`, for example `EINVAL` for a negative position.
+pub(crate) fn seek(mut file: &File, from: SeekFrom) -> Result<u64, c_int> {
+    file.seek(from).map_err(os_errno)
+}
+
 /// Return the host path of the bytes of `path`.
 fn host_path(path: &CStr) -> &Path {
     Path::new(OsStr::from_bytes(path.to_bytes()))
@@ -269,3 +504,7 @@ fn host_path(path: &CStr) -> &Path {
 fn os_errno(error: io::Error) -> c_int {
     error.raw_os_error().unwrap_or(libc::ENOMEM)
 }
+
+#[cfg(test)]
+#[path = "../../../tests/runtime/host/file.rs"]
+mod tests;

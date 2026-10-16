@@ -312,12 +312,19 @@ const AMBIENT: [&str; 40] = [
 
 /// Each entry that the column "Capability" of the effect inventory marks
 /// `later`: it has no check until its named task adds one.
-/// `effect_probe:ambient/0` also calls each entry once.
-const LATER: [&str; 4] = [
+/// `effect_probe:ambient/0` also calls each entry once, except
+/// `prim_file:read_nif/2`: a file with a read mode needs the `prim_buffer`
+/// NIFs, which PBeam does not link yet (#733).
+const LATER: [&str; 9] = [
+    "prim_file:close_nif/1",
     "prim_file:get_cwd_nif/0",
     "prim_file:list_dir_nif/1",
+    "prim_file:open_nif/2",
     "prim_file:read_file_nif/1",
     "prim_file:read_link_nif/1",
+    "prim_file:read_nif/2",
+    "prim_file:seek_nif/3",
+    "prim_file:write_nif/2",
 ];
 
 /// Return the entry and the cell of the column "Capability" of each row of
@@ -440,7 +447,7 @@ fn calls_each_ambient_and_later_entry_with_no_capability() {
     let expected = "[true,true,false,true,true,true,integer,integer,integer,date_time,unix,\
                     nonode@nohost,nonode@nohost,[],[nonode@nohost],1,true,{error,badfile},{error,badarg},false,false,true,\
                     effect_probe_ambient_atom,ok,effect_probe_ambient,true,false,[{key,value}],value,\
-                    true,true,set,reference,true,atom,2,ok,1,error,ok,error,ok]";
+                    true,true,set,reference,true,atom,2,ok,1,error,ok,error,ok,error,[ok,{ok,0},ok]]";
     assert_eq!(run_text(&program, "ambient", &Grants(vec![])), expected);
     assert_eq!(erts_with_stand_in("ambient"), format!("{expected}\n"));
 }

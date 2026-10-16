@@ -114,6 +114,7 @@ fn takes_no_term_of_a_signal_that_holds_none() {
             reference: Reference(1),
         },
         Signal::TtyMonitor { tty: Reference(1) },
+        Signal::FileMonitor { file: Reference(1) },
         Signal::PortMonitor {
             port: PortId(1),
             reference: Reference(1),

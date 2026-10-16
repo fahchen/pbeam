@@ -439,8 +439,17 @@ ambient() ->
         element(1, prim_file:read_file("/")),
         element(1, prim_file:list_dir("/")),
         element(1, prim_file:read_link("/")),
-        element(1, prim_file:get_cwd())
+        element(1, prim_file:get_cwd()),
+        element(1, prim_file:open("/", [read])),
+        null_write()
     ].
+
+%% Open /dev/null in write mode, write, move the position, and close it
+%% with prim_file. A write-only file keeps no prim_buffer read buffer
+%% (prim_file.erl:512-527).
+null_write() ->
+    {ok, Fd} = prim_file:open("/dev/null", [write]),
+    [prim_file:write(Fd, <<>>), prim_file:position(Fd, 0), prim_file:close(Fd)].
 
 %% Guard tests, so the compiler does not call a BIF.
 integer(Term) when is_integer(Term) -> integer;
