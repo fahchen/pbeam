@@ -391,6 +391,12 @@ fn reads_writes_seeks_and_closes_a_file_resource_as_erts() {
         text(&mut scheduler, |s| read_nif(s, &write_only, &size)),
         "Value(Tuple([Atom(\"error\"), Atom(\"ebadf\")]))"
     );
+    // A read of 0 bytes reads the host file too (unix_prim_file.c:292-341).
+    let empty = Term::Integer(0);
+    assert_eq!(
+        text(&mut scheduler, |s| read_nif(s, &write_only, &empty)),
+        "Value(Tuple([Atom(\"error\"), Atom(\"ebadf\")]))"
+    );
     assert_eq!(std::fs::read(&file).unwrap(), b"");
     std::fs::remove_dir_all(&directory).unwrap();
 }

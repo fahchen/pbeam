@@ -342,7 +342,8 @@ pub(crate) fn open(path: &CStr, modes: OpenModes) -> Result<File, c_int> {
 /// Read at most `size` bytes of `file`, as `read_nif` with `efile_readv`
 /// (`prim_file_nif.c:649-686`, `unix_prim_file.c:292-341`) does: the
 /// buffer of `size` bytes first, then reads until the buffer is full or a
-/// read gives 0 bytes, again on `EINTR`. The result keeps only the bytes
+/// read gives 0 bytes, again on `EINTR`. A `size` of 0 reads once into an
+/// empty buffer, so a file without read access gives `EBADF`. The result keeps only the bytes
 /// that it read, as `enif_realloc_binary` does.
 ///
 /// # Examples
@@ -355,7 +356,17 @@ pub(crate) fn open(path: &CStr, modes: OpenModes) -> Result<File, c_int> {
 ///
 /// `ENOMEM` when the buffer cannot be allocated, as `enif_alloc_binary`
 /// gives it, or the `errno` of a failed read, also after some bytes.
-pub(crate) fn read(file: &File, size: u64) -> Result<Vec<u8>, c_int> {
+pub(crate) fn read(mut file: &File, size: u64) -> Result<Vec<u8>, c_int> {
+    if size == 0 {
+        // `readv` with one empty buffer still checks the descriptor, so a
+        // file without read access gives `EBADF`.
+        return loop {
+            match file.read(&mut []) {
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                result => break result.map(|_| Vec::new()).map_err(os_errno),
+            }
+        };
+    }
     let mut contents = Vec::new();
     usize::try_from(size)
         .ok()
