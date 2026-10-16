@@ -304,6 +304,14 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** the bundle format of [#15](https://github.com/fahchen/pbeam/issues/15) lands.
 - **Source:** design `code-loading.md` of Suikou review 01a1282e, accepted by the owner on 2026-10-11 (#441).
 
+### Hold the part of the result of a YCF map BIF across a yield
+
+- `maps:keys/1` and `maps:values/1` (`src/runtime/interpreter/bif/maps.rs`) take the whole unit vector before the walk, and the last call of the trap chain builds the whole result list with no yield inside it. ERTS keeps the iterator and the part of the result in the trap state and checks the budget inside the loop (`erl_map.c:2848-2878`, `utils.c:3733-3819`).
+- **Evidence:** the Codex review of PR #753. A map of N keys allocates a unit vector of N entries at each call, also at each resume, and the build of the result of a large map is one O(N) step that no reduction covers.
+- **Risk:** the one scheduler thread runs the build of a large map without a switch.
+- **Trigger:** a measured path with a map of about 100000 keys or more, or a task that changes the YCF trap state of these BIFs.
+- **Source:** Codex review of PR #753 (#750).
+
 ## Exceptions
 
 ### Give the `error_info` cause of BIF errors
