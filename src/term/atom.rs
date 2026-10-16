@@ -41,6 +41,12 @@ const ATOM_LIMIT: usize = 1 << 20;
 /// in `atom.h`).
 pub(crate) const MAX_ATOM_CHARACTERS: usize = 255;
 
+/// The largest number of bytes of an atom name that a UTF-8 conversion
+/// accepts (`MAX_ATOM_SZ_LIMIT`, the theoretical byte limit, in `atom.h`).
+/// Four bytes hold each character, and a longer binary raises
+/// `system_limit` before ERTS verifies its encoding (`atom.c:281-285`).
+pub(crate) const MAX_ATOM_SZ_LIMIT: usize = 4 * MAX_ATOM_CHARACTERS;
+
 /// The index of each static atom, made once for the process.
 static STATIC_INDICES: LazyLock<HashMap<&'static str, u32>> = LazyLock::new(|| {
     (0..)

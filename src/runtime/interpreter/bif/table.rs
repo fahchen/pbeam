@@ -105,7 +105,7 @@ bifs! {
     erlang:band/2 as ErlangBand2 => |cx, [left, right]| Ok(integer::charge(cx.scheduler, integer::bitwise(Bitwise::And, left, right))),
     erlang:binary_part/2 => unsupported,
     erlang:binary_part/3 as ErlangBinaryPart3 => |_, [binary, start, length]| Ok(erlang::binary_part(binary, start, length)),
-    erlang:binary_to_atom/2 => unsupported,
+    erlang:binary_to_atom/2 as ErlangBinaryToAtom2 => |cx, [binary, encoding]| erlang::binary_to_atom(&mut cx.scheduler.atoms, binary, encoding),
     erlang:binary_to_existing_atom/2 => unsupported,
     erlang:binary_to_float/1 => unsupported,
     erlang:binary_to_list/1 as ErlangBinaryToList1 => |cx, [binary]| erlang::binary_to_list_1(cx.scheduler, binary),

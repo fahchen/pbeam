@@ -18,8 +18,8 @@ use crate::runtime::timer::{Receiver, Timer, Timers};
 use num_bigint::BigInt;
 
 use crate::term::{
-    Atom, AtomTable, Fun, MAX_ATOM_CHARACTERS, MAX_TUPLE_SIZE, ProcessId, Reference,
-    SMALL_INTEGER_MAX, SMALL_INTEGER_MIN, debug_term, external,
+    Atom, AtomTable, Fun, MAX_ATOM_CHARACTERS, MAX_ATOM_SZ_LIMIT, MAX_TUPLE_SIZE, ProcessId,
+    Reference, SMALL_INTEGER_MAX, SMALL_INTEGER_MIN, debug_term, external,
 };
 
 /// Run `erlang:node/1`: return the node of a pid. A term that is not a pid
@@ -2491,6 +2491,88 @@ pub(super) fn list_to_atom(atoms: &mut AtomTable, term: &Term) -> Result<BifResu
     Ok(Value(Term::Atom(atoms.put(&name)?)))
 }
 
+/// Run `erlang:binary_to_atom/2`: return the atom whose name a binary
+/// holds, and put a new atom into the atom table of the run, as ERTS
+/// `binary_to_atom` (`erl_unicode.c:1962-2033`) does with
+/// `erts_atom_put_index` (`atom.c:230-334`). With `latin1`, one byte is one
+/// character, and the name holds the UTF-8 bytes of the code points, so
+/// `<<255>>` gives the atom `'ÿ'`. With `utf8` or `unicode`, the binary
+/// holds the UTF-8 bytes of the name.
+///
+/// An argument that is not a byte-aligned binary, an encoding that is not
+/// `latin1`, `utf8`, or `unicode`, and a byte string that the encoding does
+/// not accept — an invalid UTF-8 sequence, an overlong form, or a UTF-8
+/// encoded surrogate — raise `badarg`. More than 255 bytes with `latin1`,
+/// more than `MAX_ATOM_SZ_LIMIT` bytes with `utf8` or `unicode`
+/// (`atom.c:281-285`), and a name of more than 255 characters raise
+/// `system_limit`. ERTS stops the UTF-8 analysis at the 255th character
+/// (`erl_unicode.c:1260-1263`), so 255 accepted characters and more bytes
+/// raise `system_limit`, also when the bytes after them are not valid
+/// UTF-8, and the byte limit raises `system_limit` also when the encoding
+/// does not accept the binary.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut atoms = AtomTable::new();
+/// let ok = binary_to_atom(&mut atoms, &Term::binary(b"ok".to_vec()), &Term::static_atom("utf8"))?;
+/// assert!(matches!(ok, BifResult::Value(atom) if atom == Term::static_atom("ok")));
+/// let y = binary_to_atom(&mut atoms, &Term::binary(vec![255]), &Term::static_atom("latin1"))?;
+/// assert!(matches!(y, BifResult::Value(Term::Atom(atom)) if atoms.name_of(&atom) == "ÿ"));
+/// assert!(matches!(binary_to_atom(&mut atoms, &Term::binary(vec![255]), &Term::static_atom("utf8"))?, BifResult::Raise { .. }));
+/// assert!(matches!(binary_to_atom(&mut atoms, &Term::binary(b"ok".to_vec()), &Term::static_atom("foo"))?, BifResult::Raise { .. }));
+/// ```
+///
+/// # Errors
+///
+/// A new atom in a full atom table gives the error of `AtomTable::put`,
+/// where ERTS stops the emulator.
+pub(super) fn binary_to_atom(
+    atoms: &mut AtomTable,
+    binary: &Term,
+    encoding: &Term,
+) -> Result<BifResult, BeamError> {
+    let (Term::Binary(bytes), Term::Atom(encoding)) = (binary, encoding) else {
+        return Ok(BifResult::badarg());
+    };
+    if bytes.bit_size() % 8 != 0 {
+        return Ok(BifResult::badarg());
+    }
+    let system_limit = || Raise {
+        class: ExceptionClass::Error,
+        reason: Term::static_atom("system_limit"),
+    };
+    let name = if encoding.is_static("latin1") {
+        if bytes.len() > MAX_ATOM_CHARACTERS {
+            return Ok(system_limit());
+        }
+        bytes
+            .iter()
+            .map(|&byte| char::from(byte))
+            .collect::<String>()
+    } else if encoding.is_one_of(&["utf8", "unicode"]) {
+        if bytes.len() > MAX_ATOM_SZ_LIMIT {
+            return Ok(system_limit());
+        }
+        let valid = std::str::from_utf8(bytes).unwrap_or_else(|invalid| {
+            std::str::from_utf8(&bytes[..invalid.valid_up_to()]).expect("a valid UTF-8 prefix")
+        });
+        let characters = valid.chars().count();
+        if characters > MAX_ATOM_CHARACTERS
+            || (characters == MAX_ATOM_CHARACTERS && valid.len() < bytes.len())
+        {
+            return Ok(system_limit());
+        }
+        if valid.len() < bytes.len() {
+            return Ok(BifResult::badarg());
+        }
+        valid.to_owned()
+    } else {
+        return Ok(BifResult::badarg());
+    };
+    Ok(Value(Term::Atom(atoms.put(&name)?)))
+}
+
 /// The byte order of the target, the result of `erlang:system_info(endian)`.
 #[cfg(target_endian = "big")]
 const ENDIAN: &str = "big";
@@ -4630,3 +4712,7 @@ pub(super) fn term_to_binary_2(
         )),
     }
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/runtime/interpreter/bif/erlang.rs"]
+mod tests;

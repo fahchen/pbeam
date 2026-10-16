@@ -16,7 +16,7 @@ mod tuple;
 pub use atom::Atom;
 pub use atom::AtomTable;
 pub use atom::HostTerm;
-pub(crate) use atom::MAX_ATOM_CHARACTERS;
+pub(crate) use atom::{MAX_ATOM_CHARACTERS, MAX_ATOM_SZ_LIMIT};
 #[cfg(test)]
 pub(crate) use atom::{test_atom, test_atom_table};
 pub use binary::Binary;
