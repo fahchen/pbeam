@@ -105,6 +105,33 @@ fn loads_a_module_with_an_on_load_function_through_code_server_as_pinned_erts() 
 }
 
 #[test]
+fn loads_an_on_load_module_through_a_hibernated_erts_code_purger_as_pinned_erts() {
+    // After 60 seconds with no request, `erts_code_purger` calls
+    // `erlang:hibernate(erts_code_purger, wait_for_request, [])`
+    // (erts_code_purger.erl:40-45). The probe does not wait 60 seconds: it
+    // starts a process that makes the same call, lets it run to the call with
+    // one scheduler, and registers it as `erts_code_purger`. `code_server` then
+    // sends `finish_after_on_load` to it, and the process wakes and replies
+    // (erts_code_purger.erl:55-59, 166-170).
+    let erts = run(&mut erts_probe(
+        ON_LOAD_PROBE,
+        "on_load_server_probe",
+        "hibernated",
+        &[],
+    ));
+    assert_eq!(erts, "[{module,on_load_ok},on_load_ok_value,true]\n");
+    assert_eq!(
+        run(&mut pbeam_probe(
+            ON_LOAD_PROBE,
+            "on_load_server_probe",
+            "hibernated",
+            &[]
+        )),
+        erts
+    );
+}
+
+#[test]
 fn stops_when_code_server_purges_the_code_of_a_failed_on_load_function() {
     // On the pinned ERTS, `erts_code_purger` purges the code of a failed
     // `-on_load` function with `erts_internal:purge_module/2`, and the load
