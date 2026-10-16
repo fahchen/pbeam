@@ -3,7 +3,7 @@ use crate::{
     beam::{BeamModule, ModuleId, NameId},
     error::{BeamError, error},
     runtime::process::{Frame, InitialCall},
-    term::{AtomTable, Reference},
+    term::{AtomTable, Lambda, Reference},
 };
 use std::{
     cell::Cell,
@@ -424,9 +424,7 @@ impl CodeTable {
     }
 
     /// Create the frame for the function at an entry label of the loaded
-    /// module `module`, or of the code of `module` that waits for its
-    /// `-on_load` function. A fun of that code runs before the code becomes
-    /// the loaded code, as an ERTS fun entry points to the code itself.
+    /// module `module`.
     ///
     /// # Examples
     ///
@@ -444,10 +442,49 @@ impl CodeTable {
         label: u32,
         arity: u32,
     ) -> Result<Frame, BeamError> {
-        match self.on_load.get(module) {
-            Some(waiting) => frame(&waiting.code, label, arity),
-            None => frame(self.module(module)?, label, arity),
-        }
+        frame(self.module(module)?, label, arity)
+    }
+
+    /// Create the frame of the code that a call of the local fun `lambda`
+    /// with `arity` arguments enters, as `call_fun` finds the code of a fun
+    /// (`beam_common.c:1604-1731`). The ERTS fun entry of the lambda holds
+    /// the address that the loader of the code sets for the `FunT` entry of
+    /// the same module, index, and arity (`erl_fun.c:48-53`), so the call
+    /// enters the entry that the loaded code of the module name of the fun
+    /// holds with the index of the fun. The code can wait for its `-on_load`
+    /// function, because a fun of that code runs before the code becomes the
+    /// loaded code. The entry must have the old unique value of the fun: ERTS
+    /// keys the address of the entry by the module checksum and the index and
+    /// the arity (`erl_fun.c:79-85`), and PBeam has no code replacement and
+    /// no checksum in a fun, so the old unique value, a field of the module
+    /// MD5 (`beam_asm.erl:251-262`), identifies the code of the fun. Return
+    /// `None` when the code holds no such entry, so that the caller raises
+    /// `error:{badfun, Fun}` (`beam_common.c:1697-1706`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(code.fun_frame("fixture", &lambda, 1)?.map(|frame| frame.module_id), Some(module.id));
+    /// assert_eq!(code.fun_frame("fixture", &other_lambda, 1)?, None);
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`CodeTable::waiting_or_loaded`] and [`frame`].
+    pub(in crate::runtime) fn fun_frame(
+        &self,
+        module: &str,
+        lambda: &Lambda,
+        arity: u32,
+    ) -> Result<Option<Frame>, BeamError> {
+        let loaded = self.waiting_or_loaded(module)?;
+        loaded
+            .tables
+            .fun_entries
+            .get(&lambda.index())
+            .filter(|entry| entry.old_unique == lambda.old_unique())
+            .map(|entry| frame(loaded, entry.label, arity))
+            .transpose()
     }
 
     /// Return the code of `module` that waits for its `-on_load` function,

@@ -18,6 +18,10 @@ const CODE_SERVER_PROBE: &str = "fixtures/code_server/code_server_probe";
 /// The probe of the modules with an `-on_load` function.
 const ON_LOAD_PROBE: &str = "fixtures/code_server/on_load_server_probe";
 
+/// The probe of the fun entries of the code of a failed `-on_load`
+/// function.
+const FUN_ENTRY_PROBE: &str = "fixtures/code_server/fun_entry_probe";
+
 /// The probe of `crypto:strong_rand_bytes/1`.
 const CRYPTO_PROBE: &str = "fixtures/code_server/crypto_probe";
 
@@ -310,6 +314,58 @@ fn keeps_a_process_that_left_the_code_of_a_failed_on_load_function_as_pinned_ert
             &[]
         )),
         erts
+    );
+}
+
+#[test]
+fn raises_badfun_for_the_funs_of_removed_code_as_pinned_erts() {
+    // The -on_load function of the first version of fun_entry_send sends two
+    // funs of its code to the probe and fails, so erts_code_purger removes
+    // the code (code_server.erl:1360-1368). A load of the second version of
+    // the same module name gives the entry of the first fun another old
+    // unique value and leaves no entry for the index of the second fun, so
+    // the call of each fun enters no code and raises error:{badfun, Fun}
+    // (beam_common.c:1626-1630, 1697-1706).
+    let expected = "[{error,{badfun,fun_term}},{error,{badfun,fun_term}}]\n";
+    let erts = run(&mut erts_probe(
+        FUN_ENTRY_PROBE,
+        "fun_entry_probe",
+        "stale",
+        &[],
+    ));
+    assert!(erts.starts_with(expected), "{erts}");
+    assert_eq!(
+        run(&mut pbeam_probe(
+            FUN_ENTRY_PROBE,
+            "fun_entry_probe",
+            "stale",
+            &[]
+        )),
+        expected
+    );
+}
+
+#[test]
+fn calls_the_funs_of_identical_reloaded_code_as_pinned_erts() {
+    // A load of the code that made the funs, while the probe holds no
+    // name, makes the code current again. The entry of each fun is then in
+    // the loaded code, so the call enters the function of its lambda.
+    let expected = "[{version_one,first},{version_one,second}]\n";
+    let erts = run(&mut erts_probe(
+        FUN_ENTRY_PROBE,
+        "fun_entry_probe",
+        "identical",
+        &[],
+    ));
+    assert!(erts.starts_with(expected), "{erts}");
+    assert_eq!(
+        run(&mut pbeam_probe(
+            FUN_ENTRY_PROBE,
+            "fun_entry_probe",
+            "identical",
+            &[]
+        )),
+        expected
     );
 }
 

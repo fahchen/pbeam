@@ -76,6 +76,32 @@ impl Lambda {
         &self.module
     }
 
+    /// Return the index of the lambda in the `FunT` chunk, as the loader
+    /// keeps it in the `index` field of the `ErlFunEntry` of the lambda
+    /// (`jit/asm_load.c:1218-1222`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Lambda::new(atom, 3, 1, 53, 1).index(), 3);
+    /// ```
+    pub(crate) fn index(&self) -> i32 {
+        self.index
+    }
+
+    /// Return the old unique value of the `FunT` entry, as the loader keeps
+    /// it in the `old_uniq` field of the `ErlFunEntry` of the lambda
+    /// (`jit/asm_load.c:1218-1222`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Lambda::new(atom, 0, 7, 53, 1).old_unique(), 7);
+    /// ```
+    pub(crate) fn old_unique(&self) -> i32 {
+        self.old_unique
+    }
+
     /// Return the entry label of the code of the lambda.
     ///
     /// # Examples
