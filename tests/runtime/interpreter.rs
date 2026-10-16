@@ -4469,6 +4469,49 @@ fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
             "ets:{function}/2 did not run again"
         );
     }
+    // A short list insert that the units cover runs `can_insert_without_yield`
+    // (`erl_db.c:2002-2014`), also in the turn that follows a trap in the
+    // take of the table (`erl_db.c:1963-1994`).
+    scheduler.current_process_mut().fcalls = 1;
+    busy(&mut scheduler);
+    let result = program
+        .bif_trap(
+            &mut scheduler,
+            "ets",
+            "insert",
+            vec![
+                id.clone(),
+                Term::list_from([object.clone(), object.clone()]),
+                Term::Integer(2),
+                Term::Integer(1),
+                Term::static_atom("false"),
+                Term::Integer(2),
+            ],
+        )
+        .unwrap();
+    assert!(
+        matches!(result, BifResult::TrapBif { .. }),
+        "the short list insert did not complete the insert of the other process"
+    );
+    let result = program
+        .bif_trap(
+            &mut scheduler,
+            "ets",
+            "insert",
+            vec![
+                id.clone(),
+                Term::list_from([object.clone(), object.clone()]),
+                Term::Integer(2),
+                Term::Integer(1),
+                Term::static_atom("false"),
+                Term::Integer(2),
+            ],
+        )
+        .unwrap();
+    assert!(
+        matches!(result, BifResult::Value(value) if value == Term::static_atom("true")),
+        "the short list insert did not take the objects without a copy"
+    );
     // A list insert that ended in another turn gives its result to the
     // process that started it, also after the table went away
     // (`erl_db.c:2142-2150`, `2223-2244`).

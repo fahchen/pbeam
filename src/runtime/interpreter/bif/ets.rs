@@ -559,33 +559,43 @@ pub(super) fn insert_list(
                 Some(false) => break 'work Some(BifResult::badarg()),
                 Some(true) => (count, check) = (done, Check::Done(done)),
             }
-            if bag.is_none() && count as i64 <= units.left {
-                // A second call completes the list insert that holds the
-                // table busy before it takes it, also without a copy of the
-                // objects (`erl_db.c:2050-2055`).
-                if let Take::Help = help_busy(&mut *context, &table)? {
-                    break 'work None;
-                }
-                let Some(table) = context.scheduler.ets.table(
-                    &context.scheduler.atoms,
-                    &table,
-                    caller,
-                    Operation::Write,
-                ) else {
-                    break 'work Some(BifResult::badarg());
-                };
-                let tuples = tuples();
-                if !matches!(new, New::No) {
-                    let held = first_held(&context.scheduler.atoms, table, &tuples, keypos)?;
-                    units.left -= held.unwrap_or(count) as i64;
-                    if held.is_some() {
-                        break 'work Some(Value(Term::static_atom("false")));
-                    }
-                }
-                put_objects(&context.scheduler.atoms, table, &tuples, keypos)?;
-                units.left -= 2 * count as i64;
-                break 'work Some(Value(Term::static_atom("true")));
+        }
+        // `can_insert_without_yield` (`erl_db.c:2002-2014`): the check is
+        // done, and a table that is not a `bag` whose objects the units
+        // cover takes them with no copy and no trap (`erl_db.c:2050-2071`).
+        // A call that traps in the take of the table then runs the same
+        // branch in its next turn (`erl_db.c:1963-1994`).
+        if matches!(check, Check::Done(_))
+            && bag.is_none()
+            && done == count
+            && count as i64 <= units.left
+            && !locked
+        {
+            // A second call completes the list insert that holds the
+            // table busy before it takes it, also without a copy of the
+            // objects (`erl_db.c:2050-2055`).
+            if let Take::Help = help_busy(&mut *context, &table)? {
+                break 'work None;
             }
+            let Some(table) = context.scheduler.ets.table(
+                &context.scheduler.atoms,
+                &table,
+                caller,
+                Operation::Write,
+            ) else {
+                break 'work Some(BifResult::badarg());
+            };
+            let tuples = tuples();
+            if !matches!(new, New::No) {
+                let held = first_held(&context.scheduler.atoms, table, &tuples, keypos)?;
+                units.left -= held.unwrap_or(count) as i64;
+                if held.is_some() {
+                    break 'work Some(Value(Term::static_atom("false")));
+                }
+            }
+            put_objects(&context.scheduler.atoms, table, &tuples, keypos)?;
+            units.left -= 2 * count as i64;
+            break 'work Some(Value(Term::static_atom("true")));
         }
         let mut took = false;
         if done <= 2 * count && !inserting(&bag) && !locked {
