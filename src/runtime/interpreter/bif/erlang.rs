@@ -1408,11 +1408,12 @@ pub(super) fn spawn_link(
 /// the start priority of the new process, else it is `normal`
 /// (`erl_process.c:12246`, `12275-12287`). `options` that are not a proper
 /// list, and a `message_queue_data` or `priority` option with another
-/// value, raise `badarg`, as
-/// `erts_parse_spawn_opts` (`erl_process.c:12222-12434`) does. The PBeam
+/// value, raise `badarg` with the `error_info` cause `badopt`, as
+/// `erts_parse_spawn_opts` (`erl_process.c:12222-12434`) and
+/// `spawn_opt_4` (`bif.c:1040-1051`) do. The PBeam
 /// option `{capabilities, Map}` restricts the capabilities of the new process
 /// (see `capability::restrictions`), and the last such option wins. A `Map`
-/// that is not valid raises `badarg`. Any other option gives a runtime
+/// that is not valid raises the same `badarg`. Any other option gives a runtime
 /// error. After the options, a `module` or `function` that is not an atom
 /// raises `badarg`, as in `spawn/3`.
 ///
@@ -1432,7 +1433,7 @@ pub(super) fn spawn_opt(
     options: &Term,
 ) -> Result<BifResult, BeamError> {
     let Some(options) = options.proper_list() else {
-        return Ok(BifResult::badarg());
+        return Ok(BifResult::badopt());
     };
     let mut spawn_options = SpawnOptions::default();
     for option in options {
@@ -1444,7 +1445,7 @@ pub(super) fn spawn_opt(
             Term::Tuple(option) if matches!(option.as_ref(), [Term::Atom(name), _] if name.is_static("monitor")) =>
             {
                 let Some(monitor) = monitor_options(&option[1]) else {
-                    return Ok(BifResult::badarg());
+                    return Ok(BifResult::badopt());
                 };
                 if monitor.alias.is_some() || monitor.priority {
                     return Err(error(format!(
@@ -1459,7 +1460,7 @@ pub(super) fn spawn_opt(
                 spawn_options.flags.off_heap_message_queue = match &option[1] {
                     Term::Atom(value) if value.is_static("on_heap") => false,
                     Term::Atom(value) if value.is_static("off_heap") => true,
-                    _ => return Ok(BifResult::badarg()),
+                    _ => return Ok(BifResult::badopt()),
                 };
             }
             Term::Tuple(option) if matches!(option.as_ref(), [Term::Atom(name), _] if name.is_static("priority")) =>
@@ -1474,7 +1475,7 @@ pub(super) fn spawn_opt(
                     _ => None,
                 };
                 let Some(priority) = priority else {
-                    return Ok(BifResult::badarg());
+                    return Ok(BifResult::badopt());
                 };
                 spawn_options.flags.priority = priority;
             }
@@ -1483,7 +1484,7 @@ pub(super) fn spawn_opt(
                 let Some(restrictions) =
                     capability::restrictions(&context.scheduler.atoms, &option[1])
                 else {
-                    return Ok(BifResult::badarg());
+                    return Ok(BifResult::badopt());
                 };
                 spawn_options.capabilities = Some(restrictions);
             }

@@ -50,6 +50,17 @@ pub(super) enum BifResult {
         /// Reason of the exception, without a stack trace.
         reason: Term,
     },
+    /// The BIF raises `error:Reason` with the extended error information
+    /// `cause`, as `BIF_ERROR(p, Reason | EXF_HAS_EXT_INFO)` with
+    /// `p->fvalue = Cause` does. The location of the BIF frame gets
+    /// `#{cause => Cause, module => Module}` (`save_stacktrace`,
+    /// `beam_common.c:993-1002`).
+    ErrorWithCause {
+        /// Reason of the exception, without a stack trace.
+        reason: Term,
+        /// The `cause` of the `error_info` map.
+        cause: Term,
+    },
     /// The BIF raises an exception with this stack trace in the calling
     /// process, as `erlang:error/2` does with the frame of its caller
     /// (`EXC_ERROR_2`, `beam_common.c:478-495`) and `erlang:raise/3` does
@@ -138,6 +149,22 @@ impl BifResult {
         BifResult::Raise {
             class: ExceptionClass::Error,
             reason: Term::static_atom("badarg"),
+        }
+    }
+
+    /// Return the `error:badarg` exception with the `error_info` cause
+    /// `badopt`, which ERTS `spawn_opt_4` raises for an option that
+    /// `erts_parse_spawn_opts` rejects (`bif.c:1040-1051`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(matches!(BifResult::badopt(), BifResult::ErrorWithCause { .. }));
+    /// ```
+    pub(super) fn badopt() -> BifResult {
+        BifResult::ErrorWithCause {
+            reason: Term::static_atom("badarg"),
+            cause: Term::static_atom("badopt"),
         }
     }
 

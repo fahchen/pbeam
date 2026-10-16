@@ -55,12 +55,23 @@ fn resolves_calls_into_each_pinned_otp_io_module() {
     // runs, so `whereis(user_drv)` gives `undefined`, and
     // `process_info(undefined, dictionary)` raises `badarg`
     // (`user_drv.erl:159-162`). The pinned ERTS run without `user_drv`
-    // (`-nouser`) below gives the same `error:badarg`.
-    for function in ["group_call", "user_drv_call"] {
+    // (`-nouser`) below gives the same `error:badarg` and the same frames.
+    // ERTS gives the frames of the OTP modules a `file` and `line`
+    // location, and PBeam gives `[]` (row "Exception stack trace" of
+    // `docs/erts-differences.md`).
+    let bif_frame = "{erlang,process_info,[undefined,dictionary],\
+                     [{error_info,#{module=>erl_erts_errors}}]}";
+    for (function, callers) in [
+        (
+            "group_call",
+            "{user_drv,whereis_group,0,[]},{group,whereis_shell,0,[]}",
+        ),
+        ("user_drv_call", "{user_drv,whereis_group,0,[]}"),
+    ] {
         let error = program.execute("otp_io_calls", function, &[]).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "root process exited with {badarg,[]}",
+            format!("root process exited with {{badarg,[{bif_frame},{callers}]}}"),
             "{function}"
         );
     }
@@ -71,13 +82,18 @@ fn resolves_calls_into_each_pinned_otp_io_module() {
             "-pa",
             "fixtures/otp_io",
             "-eval",
-            "io:format(standard_error, \"~w~n\", [[try otp_io_calls:F() of V -> {ok, V} catch C:R -> {C, R} end || F <- [group_call, user_drv_call]]]), halt().",
+            "io:format(standard_error, \"~w~n\", [[try otp_io_calls:F() of V -> {ok, V} catch C:R:S -> {C, R, [{M, Fn, A} || {M, Fn, A, _} <- S, M =/= erl_eval, M =/= init]} end || F <- [group_call, user_drv_call]]]), halt().",
         ])
         .output()
         .unwrap();
     assert!(reference.status.success());
     assert!(reference.stdout.is_empty());
-    assert_eq!(reference.stderr, b"[{error,badarg},{error,badarg}]\n");
+    assert_eq!(
+        reference.stderr,
+        b"[{error,badarg,[{erlang,process_info,[undefined,dictionary]},\
+{user_drv,whereis_group,0},{group,whereis_shell,0}]},\
+{error,badarg,[{erlang,process_info,[undefined,dictionary]},{user_drv,whereis_group,0}]}]\n"
+    );
 
     // `prim_tty:ansi_regexp/0` resolves inside the loaded `prim_tty` module
     // and returns its literal binary without reaching any unresolved call.

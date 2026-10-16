@@ -683,8 +683,21 @@ impl BeamProgram {
         let process = scheduler.current_process_mut();
         if let Some((module, function)) = process.undefined_start.take() {
             let outcome = if process.registers.len() > APPLY_MAX_ARGUMENTS {
-                let system_limit = Term::static_atom("system_limit");
-                raise(process, ExceptionClass::Error, system_limit)
+                // ERTS `apply` raises `system_limit` at the 1024th element
+                // of the argument list, before it looks up the export
+                // (`beam_common.c:1503-1513`). The registers then hold the
+                // module, the function, and the list
+                // (`beam_common.c:1455-1459`), so the stack trace is the one
+                // frame `{erlang, apply, [Module, Function, Arguments],
+                // [{error_info, ...}]}`.
+                let arity = process.registers.len() as u32;
+                let arguments = call_arguments(&process.registers, arity)?;
+                let call = vec![
+                    Term::Atom(module),
+                    Term::Atom(function),
+                    Term::list_from(arguments),
+                ];
+                self.apply_error(scheduler, call, "system_limit", true)?
             } else {
                 let arity = process.registers.len() as u32;
                 // The start of a process is a tail call of the MFA from the
@@ -723,6 +736,9 @@ impl BeamProgram {
             tail,
         }) = scheduler.current_process_mut().pending_bif.take()
         {
+            // ponytail: an error after the trap keeps the stack trace `[]`;
+            // see the backlog entry "Give the stack trace of a BIF error
+            // after a trap".
             let result = self.bif_trap(scheduler, module, function, arguments)?;
             if let Some(outcome) = self.finish_bif(scheduler, result, tail)? {
                 return Ok(outcome);
@@ -902,10 +918,15 @@ impl BeamProgram {
                     let name = read(process, &Operand::X(arity.saturating_add(1)))?;
                     // ERTS `fixed_apply` (`beam_common.c`) raises `badarg`
                     // when the module or the function name is not an atom.
+                    // It raises with the BIF frame of `erlang:apply/3` and
+                    // the arguments `[Module, Function, Args]`
+                    // (`fixed_apply`, `beam_common.c:1529-1551`).
                     let (Term::Atom(module), Term::Atom(name)) = (&module, &name) else {
-                        if let Some(outcome) =
-                            raise(process, ExceptionClass::Error, Term::static_atom("badarg"))
-                        {
+                        let arguments = call_arguments(&process.registers, *arity)?;
+                        let call = vec![module, name, Term::list_from(arguments)];
+                        let raised =
+                            bif_error(scheduler, "erlang", "apply", call, BifResult::badarg(), 0)?;
+                        if let Some(outcome) = self.finish_bif(scheduler, raised, false)? {
                             return Ok(outcome);
                         }
                         cursor.refresh(scheduler)?;
@@ -1035,11 +1056,24 @@ impl BeamProgram {
                             cursor.commit(process);
                             return Ok(Outcome::Yield);
                         }
-                        BifResult::Raise { .. } if *fail_label != 0 => {
+                        BifResult::Raise { .. } | BifResult::ErrorWithCause { .. }
+                            if *fail_label != 0 =>
+                        {
                             cursor.position = label_position(*fail_label)?
                         }
-                        BifResult::Raise { class, reason } => {
-                            if let Some(outcome) = raise(process, class, reason) {
+                        raised @ (BifResult::Raise { .. } | BifResult::ErrorWithCause { .. }) => {
+                            // The BIF wrote no destination, so the operands
+                            // still hold the arguments of the call, also the
+                            // list of a `length/1` trap
+                            // (`save_stacktrace`, `beam_common.c:1005`).
+                            let values = arguments
+                                .iter()
+                                .map(|argument| read(process, argument))
+                                .collect::<Result<_, _>>()?;
+                            let (module_name, name, _) = mfa(*bif);
+                            let raised =
+                                bif_error(scheduler, module_name, name, values, raised, 0)?;
+                            if let Some(outcome) = self.finish_bif(scheduler, raised, false)? {
                                 return Ok(outcome);
                             }
                             cursor.refresh(scheduler)?;
@@ -2225,6 +2259,12 @@ impl BeamProgram {
                 let module_id = current_frame(process).module_id;
                 let caller = scheduler.code.module_by_id(module_id)?.name.clone();
                 let result = native::load_nif(scheduler, &caller)?;
+                // The `load_nif/2` and `call_on_load_function/1`
+                // instructions raise with the BIF frame, as each BIF does
+                // (`jit/arm/instr_bif.cpp:994-1067`).
+                let process = scheduler.current_process_mut();
+                let arguments = call_arguments(&process.registers, arity)?;
+                let result = bif_error(scheduler, module, name, arguments, result, 0)?;
                 self.finish_bif(scheduler, result, false)
             }
             ImportKind::CallOnLoadFunction => {
@@ -2241,7 +2281,12 @@ impl BeamProgram {
                         enter_frame(scheduler.current_process_mut(), frame, false);
                         Ok(None)
                     }
-                    None => self.finish_bif(scheduler, BifResult::badarg(), false),
+                    None => {
+                        let arguments = vec![module];
+                        let badarg = BifResult::badarg();
+                        let result = bif_error(scheduler, "erlang", name, arguments, badarg, 0)?;
+                        self.finish_bif(scheduler, result, false)
+                    }
                 }
             }
             ImportKind::Bif { bif, heavy } => {
@@ -2250,6 +2295,11 @@ impl BeamProgram {
                 }
                 let arguments = call_arguments(&process.registers, arity)?;
                 let result = self.call_bif(scheduler, module, name, bif, &arguments)?;
+                // The loader turns `call_ext_last` and `call_ext_only` of a
+                // BIF into a body call and a return
+                // (`jit/arm/ops.tab:709-714`), so the frame of the caller
+                // is in the stack trace.
+                let result = bif_error(scheduler, module, name, arguments, result, 0)?;
                 self.finish_bif(scheduler, result, false)
             }
             ImportKind::ApplyFun => self.apply_fun(scheduler, tail),
@@ -2326,6 +2376,25 @@ impl BeamProgram {
                     };
                     self.named_bif(scheduler, &module_name, &name, &arguments)?
                 }
+            };
+            // A tail apply or a tail fun call removed the frame of the
+            // caller in ERTS, so its return address is in the function
+            // before it.
+            let result = if matches!(
+                result,
+                BifResult::Raise { .. } | BifResult::ErrorWithCause { .. }
+            ) {
+                let (module_name, name) = {
+                    let atoms = &scheduler.atoms;
+                    (
+                        atoms.name_of(module).to_owned(),
+                        atoms.name_of(name).to_owned(),
+                    )
+                };
+                let skip = usize::from(tail);
+                bif_error(scheduler, &module_name, &name, arguments, result, skip)?
+            } else {
+                result
             };
             return self.finish_bif(scheduler, result, tail);
         }
@@ -2516,18 +2585,15 @@ impl BeamProgram {
             let process = scheduler.current_process_mut();
             call_arguments(&process.registers, 3)?
         };
+        let start = self.is_start_apply(scheduler)?;
         let (module, name, arguments, proper) = loop {
             // Each wrong form raises the same `badarg`, so one pattern checks
             // the function, the module, and the list.
             let [Term::Atom(module), Term::Atom(name), list] = &mut call[..] else {
-                let badarg = Term::static_atom("badarg");
-                let process = scheduler.current_process_mut();
-                return Ok(raise(process, ExceptionClass::Error, badarg));
+                return self.apply_error(scheduler, call, "badarg", start);
             };
             let Some((arguments, proper)) = list.list_elements() else {
-                let badarg = Term::static_atom("badarg");
-                let process = scheduler.current_process_mut();
-                return Ok(raise(process, ExceptionClass::Error, badarg));
+                return self.apply_error(scheduler, call, "badarg", start);
             };
             let is_apply = {
                 let atoms = &scheduler.atoms;
@@ -2539,17 +2605,12 @@ impl BeamProgram {
             call = arguments;
         };
         if arguments.len() > APPLY_MAX_ARGUMENTS {
-            let system_limit = Term::static_atom("system_limit");
-            let process = scheduler.current_process_mut();
-            return Ok(raise(process, ExceptionClass::Error, system_limit));
+            return self.apply_error(scheduler, call, "system_limit", start);
         }
         if !proper {
-            let badarg = Term::static_atom("badarg");
-            let process = scheduler.current_process_mut();
-            return Ok(raise(process, ExceptionClass::Error, badarg));
+            return self.apply_error(scheduler, call, "badarg", start);
         }
         let arity = arguments.len() as u32;
-        let start = self.is_start_apply(scheduler)?;
         let process = scheduler.current_process_mut();
         if start {
             // ERTS applies this MFA from `beam_run_process`
@@ -2568,17 +2629,38 @@ impl BeamProgram {
         outcome
     }
 
-    /// Return `true` when this apply is a body apply with no frame, as the
-    /// ERTS `beam_run_process` runs it: the first apply of a process that
-    /// starts at `erlang:apply/3` (`erl_process.c:12616-12624`), and the
-    /// apply of the wake-up of `erlang:hibernate/3` (`bif.c:1403-1427`). An
-    /// apply that a fun of `erlang:apply/3` makes later is a tail apply of
-    /// the `erlang.beam` body, and its frame stays in the stack trace.
+    /// Raise the error `reason` of `erlang:apply/3` with the arguments
+    /// `call`, as ERTS `apply` raises it with the BIF frame of
+    /// `erlang:apply/3` and the arguments in the registers
+    /// (`beam_common.c:1434-1527`; `save_stacktrace`,
+    /// `beam_common.c:903-1005`). In a start apply, the first frame of the
+    /// process is not in the stack trace, as the apply has no frame in
+    /// ERTS. Return the outcome when the process exits.
     ///
-    /// # Errors
+    /// # Examples
     ///
-    /// An initial call that the code table does not resolve is a runtime
-    /// invariant error.
+    /// ```rust,ignore
+    /// // `erlang:apply(1, f, [])` raises badarg with the first frame
+    /// // {erlang, apply, [1, f, []], [{error_info, #{module => erl_erts_errors}}]}.
+    /// let outcome = program.apply_error(&mut scheduler, call, "badarg", false)?;
+    /// ```
+    fn apply_error(
+        &self,
+        scheduler: &mut Scheduler,
+        call: Vec<Term>,
+        reason: &'static str,
+        start: bool,
+    ) -> Result<Option<Outcome>, BeamError> {
+        let raised = BifResult::Raise {
+            class: ExceptionClass::Error,
+            reason: Term::static_atom(reason),
+        };
+        scheduler.current_process_mut().start_apply = start;
+        let raised = bif_error(scheduler, "erlang", "apply", call, raised, 0);
+        scheduler.current_process_mut().start_apply = false;
+        self.finish_bif(scheduler, raised?, false)
+    }
+
     fn is_start_apply(&self, scheduler: &mut Scheduler) -> Result<bool, BeamError> {
         let process = scheduler.current_process_mut();
         if let Some(frameless) = process.frameless_apply.replace(false) {
@@ -2617,17 +2699,24 @@ impl BeamProgram {
     ) -> Result<Option<Outcome>, BeamError> {
         let process = scheduler.current_process_mut();
         let list = read(process, &Operand::X(1))?;
-        let Some((arguments, proper)) = list.list_elements() else {
-            let badarg = Term::static_atom("badarg");
-            return Ok(raise(process, ExceptionClass::Error, badarg));
+        // ERTS `apply_fun` raises with the BIF frame of `erlang:apply/2`
+        // and its two arguments (`beam_common.c:1734-1762`).
+        let (arguments, failure) = match list.list_elements() {
+            None => (Vec::new(), Some("badarg")),
+            Some((arguments, _)) if arguments.len() > APPLY_FUN_MAX_ARGUMENTS => {
+                (Vec::new(), Some("system_limit"))
+            }
+            Some((_, false)) => (Vec::new(), Some("badarg")),
+            Some((arguments, true)) => (arguments, None),
         };
-        if arguments.len() > APPLY_FUN_MAX_ARGUMENTS {
-            let system_limit = Term::static_atom("system_limit");
-            return Ok(raise(process, ExceptionClass::Error, system_limit));
-        }
-        if !proper {
-            let badarg = Term::static_atom("badarg");
-            return Ok(raise(process, ExceptionClass::Error, badarg));
+        if let Some(reason) = failure {
+            let call = vec![read(process, &Operand::X(0))?, list];
+            let raised = BifResult::Raise {
+                class: ExceptionClass::Error,
+                reason: Term::static_atom(reason),
+            };
+            let raised = bif_error(scheduler, "erlang", "apply", call, raised, 0)?;
+            return self.finish_bif(scheduler, raised, false);
         }
         let arity = arguments.len() as u32;
         // The arguments replace the fun in x0, so the call reads the fun first.
@@ -2832,6 +2921,9 @@ impl BeamProgram {
                 Ok(Some(Outcome::Yield))
             }
             BifResult::Raise { class, reason } => Ok(raise(process, class, reason)),
+            BifResult::ErrorWithCause { reason, .. } => {
+                Ok(raise(process, ExceptionClass::Error, reason))
+            }
             BifResult::RaiseWithStacktrace {
                 class,
                 reason,
@@ -5388,7 +5480,6 @@ fn raise_at_entry(
     class: ExceptionClass,
     reason: Term,
 ) -> Result<Option<Outcome>, BeamError> {
-    let depth = scheduler.backtrace_depth.max(1);
     let atom = |name: &str| {
         scheduler
             .atoms
@@ -5404,14 +5495,118 @@ fn raise_at_entry(
     ]);
     // The active frame is the frame of the function, at its entry or at a
     // jump to its `func_info`, so the caller frames start below it.
-    let mut frames = vec![current];
-    frames.extend(mfa_stacktrace(scheduler, 1)?.into_iter().take(depth - 1));
+    let stacktrace = stacktrace_from(scheduler, current, 1)?;
     Ok(raise_with_stacktrace(
         scheduler.current_process_mut(),
         class,
         reason,
-        Term::list_from(frames),
+        stacktrace,
     ))
+}
+
+/// Return the stack trace that starts with `first` and continues with the
+/// caller frames of [`mfa_stacktrace`] without the `skip` newest frames.
+/// It holds at most `backtrace_depth` frames, and one frame for the depth
+/// 0, as `save_stacktrace` keeps the current function and at most
+/// `MAX(erts_backtrace_depth - 1, 0)` code addresses
+/// (`beam_common.c:884-885`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let stacktrace = stacktrace_from(&mut scheduler, frame.clone(), 0)?;
+/// // [Frame, {Module, Function, Arity, []} | Callers]
+/// ```
+///
+/// # Errors
+///
+/// A module that the code table does not hold, or an instruction with no
+/// `func_info` before it, is a runtime invariant error.
+fn stacktrace_from(scheduler: &mut Scheduler, first: Term, skip: usize) -> Result<Term, BeamError> {
+    let depth = scheduler.backtrace_depth.max(1);
+    let mut frames = vec![first];
+    frames.extend(mfa_stacktrace(scheduler, skip)?.into_iter().take(depth - 1));
+    Ok(Term::list_from(frames))
+}
+
+/// Give the exception of the BIF `module:name` with `arguments` the stack
+/// trace of ERTS, and return each other result unchanged. ERTS
+/// `save_stacktrace` puts the frame `{Module, Name, Arguments, Location}`
+/// of the BIF first, then the function that called the BIF, then the
+/// continuation pointers of the stack (`beam_common.c:903-1005`,
+/// `1051-1055`). The location is `[{error_info, #{module => Format}}]`
+/// for a BIF of a module that has a format module, with the `cause` of an
+/// [`BifResult::ErrorWithCause`] in the map (`beam_common.c:939-1002`),
+/// and else `[]`. `skip` is 1 when a tail call of the BIF has removed the
+/// frame of the calling function in ERTS, so that the return address is in
+/// the caller of that function, and else 0. The error BIFs
+/// `erlang:error/1,2,3`, `erlang:exit/1`, and `erlang:throw/1` give their
+/// own stack trace (`beam_common.c:907-924`) as
+/// [`BifResult::RaiseWithStacktrace`], so they keep it.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = bif_error(&mut scheduler, "erlang", "atom_to_list", vec![Term::Integer(1)], BifResult::badarg(), 0)?;
+/// // {erlang, atom_to_list, [1], [{error_info, #{module => erl_erts_errors}}]}
+/// // is the first frame.
+/// assert!(matches!(result, BifResult::RaiseWithStacktrace { .. }));
+/// ```
+///
+/// # Errors
+///
+/// A full atom table, a module that the code table does not hold, or an
+/// instruction with no `func_info` before it, is a runtime error.
+fn bif_error(
+    scheduler: &mut Scheduler,
+    module: &str,
+    name: &str,
+    arguments: Vec<Term>,
+    result: BifResult,
+    skip: usize,
+) -> Result<BifResult, BeamError> {
+    let (class, reason, cause) = match result {
+        BifResult::Raise { class, reason } => (class, reason, None),
+        BifResult::ErrorWithCause { reason, cause } => (ExceptionClass::Error, reason, Some(cause)),
+        result => return Ok(result),
+    };
+    // The format modules of `save_stacktrace` (`beam_common.c:939-991`).
+    let format = match module {
+        "atomics" | "counters" | "erlang" | "erts_internal" | "persistent_term" => {
+            Some("erl_erts_errors")
+        }
+        "code" | "os" => Some("erl_kernel_errors"),
+        "binary" | "ets" | "lists" | "maps" | "math" | "re" | "unicode" => {
+            Some("erl_stdlib_errors")
+        }
+        _ => None,
+    };
+    let location = match format {
+        Some(format) => {
+            let mut pairs = vec![(Term::static_atom("module"), Term::static_atom(format))];
+            if let Some(cause) = cause {
+                pairs.push((Term::static_atom("cause"), cause));
+            }
+            // ponytail: each map form holds atom keys, so `from_pairs` cannot fail.
+            let map =
+                Map::from_pairs(pairs, &scheduler.atoms).expect("atom keys fit each map form");
+            let error_info = Term::tuple(vec![Term::static_atom("error_info"), Term::Map(map)]);
+            Term::list_from(vec![error_info])
+        }
+        None => Term::nil(),
+    };
+    let frame = Term::tuple(vec![
+        Term::Atom(scheduler.atoms.put(module)?),
+        Term::Atom(scheduler.atoms.put(name)?),
+        Term::list_from(arguments),
+        location,
+    ]);
+    let stacktrace = stacktrace_from(scheduler, frame, skip)?;
+    Ok(BifResult::RaiseWithStacktrace {
+        class,
+        reason,
+        stacktrace,
+    })
 }
 
 /// Return the module atom, the function atom, and the arity of the function
@@ -5504,7 +5699,8 @@ fn frame_function<'a>(
 /// # Errors
 ///
 /// A module that the code table does not hold, or an instruction with no
-/// `func_info` before it, is a runtime invariant error.
+/// `func_info` before it, is a runtime invariant error. A full atom table
+/// gives the error of `AtomTable::put`.
 fn mfa_stacktrace(scheduler: &mut Scheduler, skip: usize) -> Result<Vec<Term>, BeamError> {
     let mut frames: Vec<Frame> = scheduler
         .current_process()
@@ -5531,19 +5727,9 @@ fn mfa_stacktrace(scheduler: &mut Scheduler, skip: usize) -> Result<Vec<Term>, B
         if index + 1 == count && scheduler.current_process().start_apply {
             continue;
         }
-        // A loaded module put the names of its function info into the atom
-        // table of the run, so each name is present.
-        let atom = |name: &str| {
-            Term::Atom(
-                scheduler
-                    .atoms
-                    .get(name)
-                    .expect("a loaded module put its names in the atom table"),
-            )
-        };
         stacktrace.push(Term::tuple(vec![
-            atom(&module.name),
-            atom(function),
+            Term::Atom(scheduler.atoms.put(&module.name)?),
+            Term::Atom(scheduler.atoms.put(function)?),
             Term::Integer(arity.into()),
             Term::nil(),
         ]));
