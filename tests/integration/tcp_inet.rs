@@ -26,14 +26,17 @@ const UDP_PROBE: &[u8] = include_bytes!("../../fixtures/tcp/udp_probe.beam");
 
 const TCP_TRANSFER: &[u8] = include_bytes!("../../fixtures/tcp/tcp_transfer.beam");
 
+const TCP_ACTIVE: &[u8] = include_bytes!("../../fixtures/tcp/tcp_active.beam");
+
 /// The pinned OTP modules that the probes call: `erlang` has
 /// `open_port/2`, `port_control/3`, `port_close/1`, and `port_info/1`,
 /// which call the `erts_internal` port BIFs, and `prim_inet` makes the
-/// requests of `gen_tcp` (prim_inet.erl).
+/// requests of `gen_tcp` (prim_inet.erl). `gen_tcp:controlling_process/2`
+/// calls `inet_db:lookup_socket/1` and `inet:tcp_controlling_process/2`.
+const MODULES: [&str; 6] = ["erlang", "lists", "prim_inet", "gen_tcp", "inet", "inet_db"];
+
 /// A policy module whose `initial/1` gives no capability.
 const PROCESSES_POLICY: &[u8] = include_bytes!("../../fixtures/processes/processes_policy.beam");
-
-const MODULES: [&str; 3] = ["erlang", "lists", "prim_inet"];
 
 /// Return a term as `io:format("~w")` prints it, for the atoms, integers,
 /// binaries, lists, and tuples of the probe results. An atom that does not
@@ -82,7 +85,7 @@ fn text(term: &Term, atoms: &AtomTable) -> String {
 /// Load the probes with the pinned modules of [`MODULES`].
 fn load() -> BeamProgram {
     let beams: Vec<Vec<u8>> = MODULES.iter().map(|module| pinned_beam(module)).collect();
-    let mut all: Vec<&[u8]> = vec![TCP_PROBE, TCP_ACCEPT, UDP_PROBE, TCP_TRANSFER];
+    let mut all: Vec<&[u8]> = vec![TCP_PROBE, TCP_ACCEPT, UDP_PROBE, TCP_TRANSFER, TCP_ACTIVE];
     all.extend(beams.iter().map(Vec::as_slice));
     BeamProgram::load(&all).unwrap()
 }
@@ -497,30 +500,6 @@ fn accepts_in_many_processes_on_one_listen_socket_as_pinned_erts() {
     assert_eq!(pbeam, expected, "PBeam");
 }
 
-#[test]
-fn stops_the_run_for_an_active_mode_on_an_accepted_socket() {
-    // Task #668 adds the data messages of an active socket
-    // (inet_drv.c:7530-7560, 13461).
-    let path = std::env::temp_dir().join(format!("pbeam-tcp-active-{}", std::process::id()));
-    let error = with_client(&path, || {
-        let program = load();
-        let argument = Term::list_from(
-            path.display()
-                .to_string()
-                .bytes()
-                .map(|byte| Term::Integer(byte.into())),
-        );
-        program
-            .execute("tcp_accept", "active", &[program.host_term(argument)])
-            .unwrap_err()
-            .to_string()
-    });
-    assert!(
-        error.starts_with("unsupported tcp_inet option active on a connected socket"),
-        "{error}"
-    );
-}
-
 /// A client of the test that runs the commands of `tcp_transfer`: it reads
 /// `"Step Command"` from the file `path`, runs each new step once, and then
 /// writes `Step` to the file of [`acknowledgement`]. `connect Port` makes a
@@ -579,10 +558,17 @@ fn command_client(path: PathBuf, stop: Arc<AtomicBool>) -> thread::JoinHandle<Ve
 /// with a [`command_client`], and return the `~w` text and the reads of
 /// the client of each run.
 fn transfer_runs(function: &str) -> [(String, Vec<Vec<u8>>); 2] {
+    client_runs("tcp_transfer", function)
+}
+
+/// Run `Module:Function(Path)` on the pinned ERTS and on PBeam, each with a
+/// [`command_client`], and return the `~w` text and the reads of the client
+/// of each run.
+fn client_runs(module: &str, function: &str) -> [(String, Vec<Vec<u8>>); 2] {
     let directory = std::env::temp_dir();
     let id = std::process::id();
     let run = |name: &str, run: &dyn Fn(&Path) -> String| {
-        let path = directory.join(format!("pbeam-tcp-{function}-{name}-{id}"));
+        let path = directory.join(format!("pbeam-{module}-{function}-{name}-{id}"));
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(acknowledgement(&path));
         let stop = Arc::new(AtomicBool::new(false));
@@ -598,7 +584,7 @@ fn transfer_runs(function: &str) -> [(String, Vec<Vec<u8>>); 2] {
         let output = Command::new("erl")
             .args(["+S", "1", "-noshell", "-pa", "fixtures/tcp", "-eval"])
             .arg(format!(
-                "io:format(\"~w~n\", [tcp_transfer:{function}(\"{}\")]), halt().",
+                "io:format(\"~w~n\", [{module}:{function}(\"{}\")]), halt().",
                 path.display()
             ))
             .output()
@@ -611,11 +597,7 @@ fn transfer_runs(function: &str) -> [(String, Vec<Vec<u8>>); 2] {
     let pbeam = run("pbeam", &|path| {
         let program = load();
         let result = program
-            .execute(
-                "tcp_transfer",
-                function,
-                &[program.host_term(path_term(path))],
-            )
+            .execute(module, function, &[program.host_term(path_term(path))])
             .unwrap();
         text(&result.term, result.atoms())
     });
@@ -743,6 +725,133 @@ fn stops_the_run_for_each_receive_and_send_part_that_is_not_implemented() {
         handle.join().unwrap();
         assert!(error.starts_with(message), "{case}: {error}");
     }
+}
+
+#[test]
+fn delivers_in_active_once_mode_and_moves_the_owner_as_pinned_erts() {
+    // `{active, once}` reads in the setopts and in the IO poll, and
+    // `gen_tcp:controlling_process/2` moves the socket and its queued
+    // message (inet.erl:4595-4660; inet_drv.c:3987-4077, 7940-7990,
+    // 11111-11148, 12783-12847, 13042-13128).
+    let expected = "[[ok,{tcp,<<97,98,99>>},{ok,[{active,false}]}],[{ok,[{active,false}]},ok,{ok,[{active,once}]}],{error,not_owner},[true,true],ok,[true,true,ok,{ok,[{active,once}]}],{tcp,<<100,101,102>>},{tcp,<<103,104,105>>},[tcp_closed,none],[undefined,{error,closed}],[]]";
+    for (name, (text, _)) in ["ERTS", "PBeam"]
+        .into_iter()
+        .zip(client_runs("tcp_active", "main"))
+    {
+        assert_eq!(text, expected, "{name}");
+    }
+}
+
+#[test]
+fn delivers_each_read_in_active_mode_as_pinned_erts() {
+    let expected =
+        "[ok,{tcp,<<120>>},{tcp,<<121>>},{ok,[{active,true}]},[none,{ok,<<122>>}],{tcp,[119]},[]]";
+    for (name, (text, _)) in ["ERTS", "PBeam"]
+        .into_iter()
+        .zip(client_runs("tcp_active", "active"))
+    {
+        assert_eq!(text, expected, "{name}");
+    }
+}
+
+#[test]
+fn ends_the_port_at_the_close_of_the_peer_in_active_mode_as_pinned_erts() {
+    // `tcp_recv_closed` sends `{tcp_closed, S}`, and `driver_exit` unlinks
+    // the owner and closes the port with the reason `normal`, also in the
+    // reply of a setopts (inet_drv.c:12836-12844; io.c:7228-7249).
+    let expected = "[ok,{tcp,<<98,121,101>>},ok,[[tcp_closed,port]],undefined]";
+    for (name, (text, _)) in ["ERTS", "PBeam"]
+        .into_iter()
+        .zip(client_runs("tcp_active", "closed"))
+    {
+        assert_eq!(text, expected, "{name}");
+    }
+}
+
+#[test]
+fn ends_the_port_at_activation_after_a_passive_close_as_pinned_erts() {
+    // A passive recv closes the socket at the end of file. A later
+    // `{active, once}` or `{active, true}` sends `{tcp_closed, S}`, skips
+    // the next options, and `driver_exit` closes the port with the reason
+    // `normal` (inet_drv.c:7001-7011, 12783-12847; io.c:7228-7249).
+    let expected = "[[{error,closed},[1],tcp_closed,{error,einval},undefined,[]],[{error,closed},ok,tcp_closed,{error,einval},undefined,[]]]";
+    for (name, (text, _)) in ["ERTS", "PBeam"]
+        .into_iter()
+        .zip(client_runs("tcp_active", "passive_closed"))
+    {
+        assert_eq!(text, expected, "{name}");
+    }
+}
+
+#[test]
+fn links_and_connects_a_port_as_pinned_erts() {
+    // link/1, unlink/1, erlang:port_connect/2, and erlang:port_info/2 with a
+    // port (bif.c:186-232, 1252-1287; erl_bif_port.c:438-595; io.c:2160-2190,
+    // 2355-2400, 3869-3872).
+    let expected = "[[true,noproc],true,[true,true],true,true,true,{error,badarg},[true,true],[true],[true,{name,[116,99,112,95,105,110,101,116]},undefined],[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}],[killed,undefined],[true,noproc,{error,noproc}],[]]";
+    assert_eq!(erts_text("tcp_active", "links"), expected, "ERTS");
+    assert_eq!(pbeam_text("tcp_active", "links"), expected, "PBeam");
+}
+
+#[test]
+fn stops_the_run_for_the_links_of_a_port_with_two_links() {
+    // ERTS gives the links in the reversed post-order of a red-black tree
+    // (erl_monitor_link.c:91-233; erl_rbtree.h:1343-1458;
+    // erl_bif_info.c:3676-3696).
+    let program = load();
+    for item in ["all", "links"] {
+        let argument = program.host_term(Term::Atom(program.atom(item).unwrap()));
+        let error = program
+            .execute("tcp_active", "many_links", &[argument])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with(
+                "unsupported erlang:port_info links of a port with more than one link"
+            ),
+            "{item}: {error}"
+        );
+    }
+}
+
+#[test]
+fn stops_the_run_for_a_port_info_item_that_is_not_implemented() {
+    let error = load()
+        .execute("tcp_active", "unsupported_item", &[])
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.starts_with("unsupported erlang:port_info/2 item memory"),
+        "{error}"
+    );
+}
+
+#[test]
+fn stops_the_run_for_an_active_count() {
+    // `{active, N}` and its `tcp_passive` message (inet_drv.c:1551-1559,
+    // 6975-6995) are not on the path of Thousand Island.
+    let path = std::env::temp_dir().join(format!("pbeam-tcp-active-count-{}", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(acknowledgement(&path));
+    let stop = Arc::new(AtomicBool::new(false));
+    let handle = command_client(path.clone(), Arc::clone(&stop));
+    let program = load();
+    let arguments = [
+        program.host_term(path_term(&path)),
+        program.host_term(Term::Atom(program.atom("count").unwrap())),
+    ];
+    let error = program
+        .execute("tcp_active", "unsupported", &arguments)
+        .unwrap_err()
+        .to_string();
+    stop.store(true, Ordering::SeqCst);
+    handle.join().unwrap();
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(acknowledgement(&path));
+    assert!(
+        error.starts_with("unsupported tcp_inet option active with a count"),
+        "{error}"
+    );
 }
 
 #[test]

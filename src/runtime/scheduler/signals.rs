@@ -458,6 +458,19 @@ impl Scheduler {
                     .push(TargetMonitor::Tty(tty));
                 2
             }
+            Signal::PortLink { port } => {
+                let links = &mut self.handled(id, node).links;
+                if links.get(&LinkId::Port(port)).is_none() {
+                    links.insert(LinkId::Port(port), 0);
+                }
+                0
+            }
+            Signal::PortUnlink { port } => {
+                let links = &mut self.handled(id, node).links;
+                let link = LinkId::Port(port);
+                let removed = links.get(&link) == Some(&0) && links.remove(&link).is_some();
+                4 * i32::from(removed)
+            }
             Signal::PortMonitor { port, reference } => {
                 let monitor = TargetMonitor::Port { port, reference };
                 self.handled(id, node).monitored_by.push(monitor);
@@ -689,7 +702,9 @@ impl Scheduler {
     /// Return true when no signal is left. The process is out of the
     /// process table. A monitor signal gives a monitor down signal `noproc`
     /// to its watcher, a link signal gives a link exit signal `noproc` to
-    /// its sender, an unlink signal gives an unlink acknowledgment, and the
+    /// its sender, a link signal of a port closes the port with `noproc`
+    /// (see [`Self::port_link_exit`]), an unlink signal gives an unlink
+    /// acknowledgment, and the
     /// group-leader, is-alive, and process-info requests reply `badarg`,
     /// `false`, and `undefined`. A TTY monitor signal runs its TTY monitor.
     /// A revocation signal sends the revocation on to the downstream copies:
@@ -704,13 +719,17 @@ impl Scheduler {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert!(scheduler.handle_exit_signals(&mut process, 3850));
+    /// assert!(scheduler.handle_exit_signals(&mut process, 3850)?);
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// The error of [`Self::port_link_exit`].
     pub(in crate::runtime) fn handle_exit_signals(
         &mut self,
         process: &mut ProcessState,
         reds: i32,
-    ) -> bool {
+    ) -> Result<bool, BeamError> {
         let id = process.id;
         let limit = SIGNAL_COUNT_FACTOR * reds;
         let mut count = 0;
@@ -766,6 +785,9 @@ impl Scheduler {
                     // A process that does not exist drops the signal.
                     let _ = self.send_signal(Some(id), from, ack);
                 }
+                Signal::PortLink { port } => {
+                    self.port_link_exit(port, id, &Term::static_atom("noproc"))?;
+                }
                 Signal::GroupLeader {
                     requester,
                     reference,
@@ -791,7 +813,7 @@ impl Scheduler {
             }
         }
         process.mailbox.end_walk(walk);
-        !process.mailbox.has_middle()
+        Ok(!process.mailbox.has_middle())
     }
 
     /// Make messages ready for `loop_rec` of the current process at the end

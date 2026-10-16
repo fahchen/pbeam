@@ -65,6 +65,7 @@ impl Scheduler {
     ) -> Result<PortId, BeamError> {
         let port = Port {
             owner,
+            links: [owner].into(),
             name,
             data: Term::static_atom("undefined"),
             input: 0,
@@ -166,12 +167,12 @@ impl Scheduler {
 
     /// Close the open port `id` with the exit reason `reason`, as
     /// `erts_deliver_port_exit` and `terminate_port` do
-    /// (`io.c:3698-3790`, `3841-3950`): the port leaves the table, the
-    /// owner, which has the only link to the port, gets a link exit signal
-    /// from the port with the reason (`link_port_exit`, `io.c:3802-3813`),
-    /// each monitor of the port gets its `DOWN` signal, and then the
-    /// driver stops (see [`Self::stop_port`]) and the pipes of the port
-    /// close.
+    /// (`io.c:3698-3790`, `3841-3950`): the port leaves the table, each
+    /// process linked to the port gets a link exit signal from the port
+    /// with the reason, `killed` for `kill` (`link_port_exit`,
+    /// `io.c:3802-3813`), each monitor of the port gets its `DOWN` signal,
+    /// and then the driver stops (see [`Self::stop_port`]) and the pipes of
+    /// the port close.
     ///
     /// # Examples
     ///
@@ -191,19 +192,138 @@ impl Scheduler {
         let ports = self.resources.borrow_mut::<Ports>();
         check_flush(ports.get(id).expect("the port to close is open"), &reason)?;
         let mut port = ports.remove(id).expect("the port to close is open");
-        let monitors = std::mem::take(&mut port.monitors);
-        let exit = Signal::Exit {
-            from: LinkId::Port(id),
-            reason: reason.clone(),
-            linked: true,
-            normal_kills: false,
-            alias: None,
+        let reason = if reason == Term::static_atom("kill") {
+            Term::static_atom("killed")
+        } else {
+            reason
         };
-        // An owner that does not exist drops the signal.
-        let _ = self.send_signal(None, port.owner, exit);
+        for linked in std::mem::take(&mut port.links) {
+            let exit = Signal::Exit {
+                from: LinkId::Port(id),
+                reason: reason.clone(),
+                linked: true,
+                normal_kills: false,
+                alias: None,
+            };
+            // A linked process that does not exist drops the signal.
+            let _ = self.send_signal(None, linked, exit);
+        }
+        let monitors = std::mem::take(&mut port.monitors);
         self.port_monitors_down(&monitors, &reason);
         self.stop_port(id, port);
         Ok(())
+    }
+
+    /// Close the open port `id` with the reason `reason` from its driver,
+    /// as `driver_exit` does (io.c:7228-7249): the port first unlinks its
+    /// owner (`unlink_proc`, io.c:2889-2909), so only the other linked
+    /// processes get the link exit signal. The owner removes its side of
+    /// the link when it handles the unlink signal [`Signal::PortUnlink`],
+    /// after a link signal that `erlang:port_connect/2` queued before.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.driver_exit(port, Term::static_atom("normal"))?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The error of [`Self::close_port`].
+    pub(super) fn driver_exit(&mut self, id: PortId, reason: Term) -> Result<(), BeamError> {
+        let port = self.resources.borrow_mut::<Ports>().get_mut(id);
+        let port = port.expect("the port of a driver exit is open");
+        let owner = port.owner;
+        if port.links.remove(&owner) {
+            // An owner that does not exist drops the signal.
+            let _ = self.send_signal(None, owner, Signal::PortUnlink { port: id });
+        }
+        self.close_port(id, reason)
+    }
+
+    /// Link the current process to the port `id`, as `link_opt` does for a
+    /// port (`bif.c:186-232`), and return false when the port is not open
+    /// and the process does not trap exits (`noproc`). A trapping process
+    /// gets the link exit signal `noproc` from a port that is not open. A
+    /// link that exists changes nothing.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(scheduler.link_port(port));
+    /// ```
+    pub(in crate::runtime) fn link_port(&mut self, id: PortId) -> bool {
+        let current = self.current_process_mut().id;
+        let ports = self.resources.borrow_mut::<Ports>();
+        let Some(port) = ports.get_mut(id) else {
+            if !self.current_process_mut().trap_exit {
+                return false;
+            }
+            let exit = Signal::Exit {
+                from: LinkId::Port(id),
+                reason: Term::static_atom("noproc"),
+                linked: true,
+                normal_kills: false,
+                alias: None,
+            };
+            self.current_process_mut().links.insert(LinkId::Port(id), 0);
+            self.send_signal(None, current, exit)
+                .expect("the current process gets the exit signal");
+            return true;
+        };
+        port.links.insert(current);
+        self.current_process_mut().links.insert(LinkId::Port(id), 0);
+        true
+    }
+
+    /// Unlink the current process from the port `id`, as `unlink_1` does
+    /// for a port (`bif.c:1252-1287`). The port runs the unlink at once, so
+    /// both sides of the link go at once. A port without a link to the
+    /// process changes nothing.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.unlink_port(port);
+    /// ```
+    pub(in crate::runtime) fn unlink_port(&mut self, id: PortId) {
+        let current = self.current_process_mut().id;
+        if self.current_process_mut().links.get(&LinkId::Port(id)) != Some(&0) {
+            return;
+        }
+        self.current_process_mut().links.remove(&LinkId::Port(id));
+        if let Some(port) = self.resources.borrow_mut::<Ports>().get_mut(id) {
+            port.links.remove(&current);
+        }
+    }
+
+    /// Make `pid` the owner of the open port `id`, as the BIF operation of
+    /// `set_port_connected` does (io.c:2355-2400): a port without a link to
+    /// `pid` adds the link and sends the link signal [`Signal::PortLink`],
+    /// and the old owner keeps its link. Return false when `pid` does not
+    /// exist, as the link signal to it fails (`ERTS_PORT_OP_DROPPED`). A
+    /// process that exits before it handles the signal closes the port
+    /// with `noproc`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(scheduler.connect_port(port, handler));
+    /// ```
+    pub(in crate::runtime) fn connect_port(&mut self, id: PortId, pid: ProcessId) -> bool {
+        let port = self.resources.borrow_mut::<Ports>().get_mut(id);
+        let port = port.expect("the port to connect is open");
+        if !port.links.contains(&pid) {
+            let link = Signal::PortLink { port: id };
+            if self.send_signal(None, pid, link).is_err() {
+                return false;
+            }
+        }
+        let port = self.resources.borrow_mut::<Ports>().get_mut(id);
+        let port = port.expect("the port to connect is open");
+        port.links.insert(pid);
+        port.owner = pid;
+        true
     }
 
     /// Send the `DOWN` signal of each monitor of `monitors` on a port that
@@ -275,11 +395,15 @@ impl Scheduler {
 
     /// Send the link exit signal of the exiting process `from` to the port
     /// `id`, as `erts_proc_exit_handle_link` and `call_deliver_port_exit`
-    /// do (`erl_process.c:14084-14099`, `io.c:2164-2209`): when the
-    /// process is the owner, which has the only link to the port, the link
-    /// goes, and the port closes, also for the reason `normal`
-    /// (`io.c:3876-3879`). The port then has no link, so the close sends no
-    /// signal. A port that closed changes nothing.
+    /// do (`erl_process.c:14084-14099`, `io.c:2160-2190`): the link goes,
+    /// and the port closes with the reason (see [`Self::close_port`]),
+    /// except for the reason `normal` from a process that is not the owner
+    /// (`erts_deliver_port_exit`, `io.c:3869-3872`). A port that closed
+    /// changes nothing. A port without a link to `from` drops the signal
+    /// (`ERTS_PORT_OP_DROPPED`, `io.c:2187-2190`): the process can have its
+    /// side of the link alone, when it runs `link/1` and `unlink/1` with
+    /// the port before it handles the link signal of
+    /// `erlang:port_connect/2`.
     ///
     /// # Examples
     ///
@@ -297,14 +421,15 @@ impl Scheduler {
         from: ProcessId,
         reason: &Term,
     ) -> Result<(), BeamError> {
-        let ports = self.resources.borrow_mut::<Ports>();
-        let owned = ports.get(id).filter(|port| port.owner == from);
-        owned.map_or(Ok(()), |port| check_flush(port, reason))?;
-        if owned.is_some() {
-            let mut port = ports.remove(id).expect("the port is open");
-            let monitors = std::mem::take(&mut port.monitors);
-            self.port_monitors_down(&monitors, reason);
-            self.stop_port(id, port);
+        let port = self.resources.borrow_mut::<Ports>().get_mut(id);
+        // A port that closed sent its link exit signal to `from`, and a port
+        // without the link drops the signal (`io.c:2187-2190`).
+        let closes = port.is_some_and(|port| {
+            port.links.remove(&from)
+                && (*reason != Term::static_atom("normal") || port.owner == from)
+        });
+        if closes {
+            self.close_port(id, reason.clone())?;
         }
         Ok(())
     }

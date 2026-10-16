@@ -12,7 +12,7 @@ use crate::runtime::{
         spawn::{self, SpawnError, Streams},
     },
     port::{
-        Driver, Ports, Spawn,
+        Driver, Port, Ports, Spawn,
         inet::{Control, Inet, SocketType},
     },
     signal::Signal,
@@ -775,6 +775,7 @@ pub(super) fn port_control(
         Control::Reply(reply) => reply,
         Control::Accept(timeout) => scheduler.tcp_accept(id, timeout)?,
         Control::Receive { timeout, length } => scheduler.tcp_receive(id, timeout, length)?,
+        Control::Active { read } => scheduler.tcp_activate(id, read)?,
         Control::Badarg => {
             return Ok(signals_return(scheduler, port, Term::static_atom("badarg")));
         }
@@ -816,7 +817,7 @@ pub(super) fn port_denial(
 /// {id, Number}, {connected, Owner}, {input, Bytes}, {output, Bytes},
 /// {os_pid, OsPid}]` (`ERTS_PORT_INFO_1_ITEMS`, `erl_port.h:100-108`). The
 /// name is the list of the bytes of the program path, `links` holds the
-/// owner, and `id` is the port number. A port
+/// owner, and `id` is the port number (see [`port_item`]). A port
 /// that closed and an atom give `undefined`; each other term gives the atom
 /// `badarg`. The result traps to `erlang:bif_handle_signals_return/2` when
 /// the caller has incoming signals. For an open port, a caller without a
@@ -832,7 +833,8 @@ pub(super) fn port_denial(
 ///
 /// # Errors
 ///
-/// The atom `capability_denied` in a full atom table.
+/// A port with more than one link (see [`port_item`]), and the atom
+/// `capability_denied` in a full atom table.
 pub(super) fn port_info(context: &mut BifContext<'_>, port: &Term) -> Result<BifResult, BeamError> {
     let scheduler = &mut *context.scheduler;
     let info = match (port, open_port_id(scheduler, port)) {
@@ -843,44 +845,195 @@ pub(super) fn port_info(context: &mut BifContext<'_>, port: &Term) -> Result<Bif
             scheduler
                 .current_process_mut()
                 .bump_reductions(PORT_REDUCTIONS);
-            let port = scheduler
-                .resources
-                .borrow_mut::<Ports>()
-                .get(id)
-                .expect("the port is open");
-            let item = |name, value| Term::tuple(vec![Term::static_atom(name), value]);
-            let os_pid = match &port.driver {
-                Driver::Spawn(spawn) => Term::Integer(spawn.child.os_pid.into()),
-                Driver::Inet(_) => Term::static_atom("undefined"),
-            };
-            let links = vec![Term::Pid(port.owner)];
-            Term::list_from(vec![
-                item(
-                    "name",
-                    Term::list_from(port.name.iter().map(|&byte| Term::Integer(byte.into()))),
-                ),
-                item("links", Term::list_from(links)),
-                item(
-                    "id",
-                    Term::Integer(id.0.try_into().expect("a port number below 2^63")),
-                ),
-                item("connected", Term::Pid(port.owner)),
-                item(
-                    "input",
-                    Term::Integer(port.input.try_into().expect("an input count below 2^63")),
-                ),
-                item(
-                    "output",
-                    Term::Integer(port.output.try_into().expect("an output count below 2^63")),
-                ),
-                item("os_pid", os_pid),
-            ])
+            let ports = scheduler.resources.borrow_mut::<Ports>();
+            let port = ports.get(id).expect("the port is open");
+            Term::list_from(
+                PORT_INFO_ITEMS
+                    .iter()
+                    .map(|&name| port_item(id, port, name))
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
         }
         (Term::Port(_) | Term::Atom(_), None) => Term::static_atom("undefined"),
         (_, None) => Term::static_atom("badarg"),
     };
     Ok(signals_return(scheduler, port, info))
 }
+
+/// The items of `port_info/1`, in order (`ERTS_PORT_INFO_1_ITEMS`,
+/// `erl_port.h:100-108`).
+const PORT_INFO_ITEMS: [&str; 7] = [
+    "name",
+    "links",
+    "id",
+    "connected",
+    "input",
+    "output",
+    "os_pid",
+];
+
+/// The items of `port_info/2` that PBeam does not give yet
+/// (`erts_bld_port_info`, `erl_bif_info.c:3654-3830`).
+const OTHER_PORT_ITEMS: [&str; 7] = [
+    "registered_name",
+    "memory",
+    "monitors",
+    "monitored_by",
+    "parallelism",
+    "queue_size",
+    "locking",
+];
+
+/// Return the item `{Name, Value}` of the open port `port` with the number
+/// `id`, as `erts_bld_port_info` builds it (`erl_bif_info.c:3654-3830`),
+/// for a name of [`PORT_INFO_ITEMS`]. The
+/// name is the list of the bytes of the program path or driver name,
+/// `links` holds the linked process of a port with zero or one link, and
+/// `id` is the port number.
+///
+/// # Errors
+///
+/// The `links` item of a port with more than one link. ERTS gives the
+/// links in the reversed post-order of a red-black tree, which depends on
+/// the shape of the tree (`erl_monitor_link.c:91-233`,
+/// `erl_rbtree.h:1343-1458`, `erl_bif_info.c:3676-3696`); PBeam does not
+/// keep that shape: see "Ports" in `docs/erts-differences.md`.
+fn port_item(id: PortId, port: &Port, name: &str) -> Result<Term, BeamError> {
+    let value = match name {
+        "name" => Term::list_from(port.name.iter().map(|&byte| Term::Integer(byte.into()))),
+        "links" if port.links.len() > 1 => {
+            return Err(error(
+                "unsupported erlang:port_info links of a port with more than one link: see \"Ports\" in docs/erts-differences.md",
+            ));
+        }
+        "links" => Term::list_from(port.links.iter().map(|&pid| Term::Pid(pid))),
+        "id" => Term::Integer(id.0.try_into().expect("a port number below 2^63")),
+        "connected" => Term::Pid(port.owner),
+        "input" => Term::Integer(port.input.try_into().expect("an input count below 2^63")),
+        "output" => Term::Integer(port.output.try_into().expect("an output count below 2^63")),
+        // The last item, `os_pid`.
+        _ => match &port.driver {
+            Driver::Spawn(spawn) => Term::Integer(spawn.child.os_pid.into()),
+            Driver::Inet(_) => Term::static_atom("undefined"),
+        },
+    };
+    Ok(Term::tuple(vec![Term::static_atom(name), value]))
+}
+
+/// Run `erts_internal:port_info(Port, Item)`, which `erlang:port_info/2`
+/// calls, as `erts_internal_port_info_2` and `erts_port_info` do
+/// (`erl_bif_port.c:543-595`, `erl_bif_info.c:3654-3830`): for an open
+/// port, use 40 reductions (`ERTS_PORT_REDS_INFO`) and return the item of
+/// [`port_item`]; an item that is not an item name gives the atom
+/// `badarg` before the capability check. A port that closed and an atom give `undefined`, and each
+/// other term gives the atom `badtype`. The result traps to
+/// `erlang:bif_handle_signals_return/2` when the caller has incoming
+/// signals. For an open port, a caller without a `port` capability with
+/// `inspect` that permits the program path of the port gets
+/// `error:capability_denied`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = port_info_item(&mut context, &Term::Port(port), &Term::static_atom("connected"))?;
+/// ```
+///
+/// # Errors
+///
+/// An item of [`OTHER_PORT_ITEMS`], the `links` item of a port with more
+/// than one link (see [`port_item`]), and the atom `capability_denied` in a
+/// full atom table.
+pub(super) fn port_info_item(
+    context: &mut BifContext<'_>,
+    port: &Term,
+    item: &Term,
+) -> Result<BifResult, BeamError> {
+    let scheduler = &mut *context.scheduler;
+    let info = match (port, open_port_id(scheduler, port)) {
+        (_, Some(id)) => {
+            let name = match item {
+                Term::Atom(name) => scheduler.atoms.name_of(name).to_owned(),
+                _ => String::new(),
+            };
+            let name = name.as_str();
+            if !PORT_INFO_ITEMS.contains(&name) && !OTHER_PORT_ITEMS.contains(&name) {
+                return Ok(signals_return(scheduler, port, Term::static_atom("badarg")));
+            }
+            if let Some(denied) = port_denial(scheduler, id, Operation::Inspect)? {
+                return Ok(denied);
+            }
+            if OTHER_PORT_ITEMS.contains(&name) {
+                return Err(error(format!(
+                    "unsupported erlang:port_info/2 item {name}: see \"Ports\" in docs/erts-differences.md"
+                )));
+            }
+            scheduler
+                .current_process_mut()
+                .bump_reductions(PORT_REDUCTIONS);
+            let ports = scheduler.resources.borrow_mut::<Ports>();
+            let port = ports.get(id).expect("the port is open");
+            port_item(id, port, name)?
+        }
+        (Term::Port(_) | Term::Atom(_), None) => Term::static_atom("undefined"),
+        (_, None) => Term::static_atom("badtype"),
+    };
+    Ok(signals_return(scheduler, port, info))
+}
+
+/// Run `erts_internal:port_connect(Port, Pid)`, which
+/// `erlang:port_connect/2` calls, as `erts_internal_port_connect_2` and
+/// `erts_port_connect` do (`erl_bif_port.c:438-484`, io.c:2355-2470):
+/// make the local pid `pid` the owner of the open port `port` and link
+/// them (see [`Scheduler::connect_port`]), use 20 reductions
+/// (`ERTS_PORT_REDS_CONNECT`), and return `true`. Each process may connect
+/// a port, not only its owner. A port that is not open, an atom, a `pid`
+/// that is not a pid, and a pid of a process that does not exist give the
+/// atom `badarg`, which `erlang:port_connect/2` raises. The result traps to
+/// `erlang:bif_handle_signals_return/2` when the caller has incoming
+/// signals. For an open port and a pid, a caller without a `port`
+/// capability with `command` that permits the program path of the port
+/// gets `error:capability_denied`, and so does a runtime process that
+/// connects the port to a boot process.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = port_connect(&mut context, &Term::Port(port), &Term::Pid(handler))?;
+/// ```
+///
+/// # Errors
+///
+/// The atom `capability_denied` in a full atom table.
+pub(super) fn port_connect(
+    context: &mut BifContext<'_>,
+    port: &Term,
+    pid: &Term,
+) -> Result<BifResult, BeamError> {
+    let scheduler = &mut *context.scheduler;
+    let result = match (open_port_id(scheduler, port), pid) {
+        (Some(id), &Term::Pid(pid)) => {
+            // The runtime to boot gate denies a boot process as the new
+            // owner, as for `link/1` and `send/2` (see [`boot_denial`]).
+            let boot = boot_denial(scheduler, pid)?;
+            if let Some(denied) = port_denial(scheduler, id, Operation::Command)?.or(boot) {
+                return Ok(denied);
+            }
+            let connected = scheduler.connect_port(id, pid);
+            if connected {
+                scheduler
+                    .current_process_mut()
+                    .bump_reductions(CONNECT_REDUCTIONS);
+            }
+            Term::static_atom(if connected { "true" } else { "badarg" })
+        }
+        _ => Term::static_atom("badarg"),
+    };
+    Ok(signals_return(scheduler, port, result))
+}
+
+/// The reductions of a port connect (`ERTS_PORT_REDS_CONNECT`,
+/// `CONTEXT_REDS / 200`, erl_port.h:371).
+const CONNECT_REDUCTIONS: i32 = 20;
 
 /// Run `erts_internal:prepare_loading(Module, Code)`, which
 /// `erlang:prepare_loading/2` calls, as `erts_internal_prepare_loading_2`

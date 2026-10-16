@@ -1864,3 +1864,133 @@ fn removes_a_reply_demonitor_port_monitor_from_the_port_at_the_alias_message() {
     let ports = scheduler.resources.borrow_mut::<Ports>();
     assert!(ports.get_mut(port).unwrap().monitors.is_empty());
 }
+
+#[test]
+fn sends_the_messages_of_an_active_socket_to_the_owner_and_ends_the_port() {
+    use super::signals::HandlingPoint;
+    use crate::runtime::port::{
+        Driver, Ports,
+        inet::{Event, Inet, SocketType},
+    };
+    use socket2::{Domain, Socket, Type};
+    // `tcp_error_message`, `tcp_closed_message`, and `driver_exit`
+    // (inet_drv.c:4058-4095, 12870-12877; io.c:7228-7249).
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let id = current(&mut scheduler);
+    let (local, _peer) = Socket::pair(Domain::UNIX, Type::STREAM, None).unwrap();
+    let tcp = Inet::new(SocketType::Stream).copy(local);
+    let port = scheduler
+        .open_port(b"tcp_inet".to_vec(), Driver::Inet(tcp))
+        .unwrap();
+    let events = vec![
+        Event::Error("etimedout".to_owned()),
+        Event::Closed,
+        Event::Exit("etimedout".to_owned()),
+    ];
+    scheduler.deliver_events(port, events).unwrap();
+    let mut name = |text| Term::Atom(scheduler.atoms.put(text).unwrap());
+    let (tcp_error, etimedout, tcp_closed) =
+        (name("tcp_error"), name("etimedout"), name("tcp_closed"));
+    let error = Term::tuple(vec![tcp_error, Term::Port(port), etimedout]);
+    let closed = Term::tuple(vec![tcp_closed, Term::Port(port)]);
+    assert_eq!(messages(&scheduler, id.0), [error, closed]);
+    assert!(
+        scheduler
+            .resources
+            .borrow_mut::<Ports>()
+            .get(port)
+            .is_none()
+    );
+    scheduler
+        .handle_signals(id, 100, 100, HandlingPoint::ScheduleIn)
+        .unwrap();
+    assert!(scheduler.processes[&id].links.is_empty());
+}
+
+#[test]
+fn unlinks_the_new_owner_after_its_queued_link_signal_at_a_driver_exit() {
+    use super::signals::HandlingPoint;
+    use crate::runtime::port::{
+        Driver,
+        inet::{Event, Inet, SocketType},
+    };
+    use socket2::{Domain, Socket, Type};
+    // `erlang:port_connect/2` queues the link signal (io.c:2355-2380), and
+    // `driver_exit` then queues the unlink signal of `unlink_proc`
+    // (io.c:2889-2909, 7228-7249). The new owner handles them in order and
+    // keeps no link to the closed port.
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let (child, _) = scheduler
+        .spawn(
+            Start::Entry(frame()),
+            vec![],
+            None,
+            false,
+            StartFlags::default(),
+            None,
+        )
+        .unwrap()
+        .unwrap();
+    let (local, _peer) = Socket::pair(Domain::UNIX, Type::STREAM, None).unwrap();
+    let tcp = Inet::new(SocketType::Stream).copy(local);
+    let port = scheduler
+        .open_port(b"tcp_inet".to_vec(), Driver::Inet(tcp))
+        .unwrap();
+    assert!(scheduler.connect_port(port, child));
+    let events = vec![Event::Exit("normal".to_owned())];
+    scheduler.deliver_events(port, events).unwrap();
+    scheduler
+        .handle_signals(child, 100, 100, HandlingPoint::ScheduleIn)
+        .unwrap();
+    let links = &scheduler.processes[&child].links;
+    assert!(links.get(&LinkId::Port(port)).is_none());
+}
+
+#[test]
+fn drops_the_link_exit_signal_of_a_process_that_the_port_does_not_link() {
+    use super::signals::HandlingPoint;
+    use crate::runtime::port::{
+        Driver, Ports,
+        inet::{Inet, SocketType},
+    };
+    use socket2::{Domain, Socket, Type};
+    // `erlang:port_connect/2` queues the link signal (io.c:2355-2380). The
+    // new owner runs `link/1` and `unlink/1` with the port before it
+    // handles the signal, so only its own side of the link stays. The port
+    // then drops the link exit signal of the owner (io.c:2187-2190).
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let (child, _) = scheduler
+        .spawn(
+            Start::Entry(frame()),
+            vec![],
+            None,
+            false,
+            StartFlags::default(),
+            None,
+        )
+        .unwrap()
+        .unwrap();
+    let (local, _peer) = Socket::pair(Domain::UNIX, Type::STREAM, None).unwrap();
+    let tcp = Inet::new(SocketType::Stream).copy(local);
+    let port = scheduler
+        .open_port(b"tcp_inet".to_vec(), Driver::Inet(tcp))
+        .unwrap();
+    assert!(scheduler.connect_port(port, child));
+    let ports = scheduler.resources.borrow_mut::<Ports>();
+    assert!(ports.get_mut(port).unwrap().links.remove(&child));
+    scheduler
+        .handle_signals(child, 100, 100, HandlingPoint::ScheduleIn)
+        .unwrap();
+    let links = &scheduler.processes[&child].links;
+    assert_eq!(links.get(&LinkId::Port(port)), Some(&0));
+    let killed = Term::static_atom("killed");
+    scheduler.port_link_exit(port, child, &killed).unwrap();
+    let ports = scheduler.resources.borrow_mut::<Ports>();
+    assert!(ports.get(port).is_some());
+}

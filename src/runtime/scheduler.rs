@@ -2898,7 +2898,7 @@ impl Scheduler {
                     ExitPhase::Signals
                 }
                 ExitPhase::Signals => {
-                    if !self.handle_exit_signals(&mut process, reds) {
+                    if !self.handle_exit_signals(&mut process, reds)? {
                         self.switch_out_freed(process, ExitPhase::Signals);
                         return Ok(());
                     }

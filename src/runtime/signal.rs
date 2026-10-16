@@ -95,6 +95,25 @@ pub(super) enum Signal {
         /// The reference of the TTY resource.
         tty: Reference,
     },
+    /// `ERTS_SIG_Q_OP_LINK` from a port: `erlang:port_connect/2` linked
+    /// the port `port` to the receiver (io.c:2355-2380). The receiver adds
+    /// the link unless it has one; the cost is 0. At exit it gives a link
+    /// exit signal `noproc` to the port (`erl_proc_sig_queue.c:7363-7368`).
+    PortLink {
+        /// The port that linked.
+        port: PortId,
+    },
+    /// `ERTS_SIG_Q_OP_UNLINK` from a port: `unlink_proc` (io.c:2889-2909)
+    /// in `driver_exit` (io.c:7228-7249) unlinked the port `port` from its
+    /// owner. The receiver removes the link to the port unless it is
+    /// unlinking; the cost is 4 when it removes the link
+    /// (`erl_proc_sig_queue.c:6698-6713`). The port closed, so it drops
+    /// the acknowledgment (`erl_proc_sig_queue.c:6718-6724`). At exit the
+    /// signal has no effect (`erl_proc_sig_queue.c:7369-7378`).
+    PortUnlink {
+        /// The port that unlinked.
+        port: PortId,
+    },
     /// `ERTS_SIG_Q_OP_MONITOR` of a port monitor: `driver_monitor_process`
     /// (`io.c`) in `INET_REQ_ACCEPT` monitors the caller for the listen
     /// port `port` (inet_drv.c:12172, 12198, 12214). The receiver adds the
@@ -294,6 +313,8 @@ impl Signal {
                 reference: _,
             }
             | Signal::TtyMonitor { tty: _ }
+            | Signal::PortLink { port: _ }
+            | Signal::PortUnlink { port: _ }
             | Signal::PortMonitor {
                 port: _,
                 reference: _,

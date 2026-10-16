@@ -1,5 +1,5 @@
 -module(tcp_accept).
--export([active/1, main/1]).
+-export([main/1]).
 
 %% Accepts on one listen socket with several acceptors, as gen_tcp:accept/1,2
 %% calls them: inet_tcp:accept/1,2 calls prim_inet:accept/2,3 with the
@@ -66,18 +66,6 @@ main(Path) ->
     {ok, _} = prim_inet:async_accept(L2, -1),
     true = erlang:port_close(L2),
     [Raw, Listen, Timeout, First, Second, Third, Closed, flush()].
-
-%% An active mode on an accepted socket, whose data delivery PBeam does not
-%% run yet.
-active(Path) ->
-    process_flag(trap_exit, true),
-    {ok, L} = prim_inet:open(tcp, inet, stream),
-    {ok, _} = prim_inet:bind(L, {127, 0, 0, 1}, 0),
-    ok = prim_inet:listen(L, 5),
-    {ok, {_, Port}} = prim_inet:sockname(L),
-    connect(Path, Port, 1),
-    {ok, S} = prim_inet:accept(L, ?FAMILY),
-    prim_inet:setopts(S, [{active, once}]).
 
 %% The reply bytes of ACCEPT and PEER on a socket that does not listen.
 raw() ->

@@ -971,10 +971,13 @@ pub(super) fn raise(depth: usize, class: &Term, reason: &Term, stacktrace: &Term
     }
 }
 
-/// Run `erlang:link(Pid)` for a local pid, as ERTS `link_opt`
-/// (`bif.c:136-186`, `411-423`) does through [`Scheduler::link`]: return
-/// `true`, or raise `noproc` for a process that does not exist or exits
-/// when the caller does not trap exits.
+/// Run `erlang:link(Id)` for a local pid or port, as ERTS `link_opt`
+/// (`bif.c:136-232`, `411-423`) does through [`Scheduler::link`] and
+/// [`Scheduler::link_port`]: return `true`, or raise `noproc` for a process
+/// that does not exist or exits, or a port that is not open, when the
+/// caller does not trap exits. A caller that traps exits gets `{'EXIT',
+/// Port, noproc}` from a port that is not open. Each other term raises
+/// `badarg`.
 ///
 /// The caller needs a `process` capability that permits `link`, also for
 /// its own pid. Without it, the call raises `error:capability_denied` and
@@ -986,22 +989,33 @@ pub(super) fn raise(depth: usize, class: &Term, reason: &Term, stacktrace: &Term
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(matches!(link(scheduler, child)?, BifResult::Value(Term::Atom(atom)) if atom.is_static("true"));
-/// assert!(matches!(link(scheduler, dead)?, BifResult::Raise { .. }));
+/// assert!(matches!(link(scheduler, &Term::Pid(child))?, BifResult::Value(Term::Atom(atom)) if atom.is_static("true"));
+/// assert!(matches!(link(scheduler, &Term::Pid(dead))?, BifResult::Raise { .. }));
 /// ```
 ///
 /// # Errors
 ///
 /// A new `capability_denied` atom in a full atom table gives the error of
 /// `AtomTable::put`.
-pub(super) fn link(scheduler: &mut Scheduler, target: ProcessId) -> Result<BifResult, BeamError> {
+pub(super) fn link(scheduler: &mut Scheduler, target: &Term) -> Result<BifResult, BeamError> {
+    let target = match *target {
+        Term::Pid(pid) => LinkId::Process(pid),
+        Term::Port(port) => LinkId::Port(port),
+        _ => return Ok(BifResult::badarg()),
+    };
     if let Some(denied) = denial(scheduler, CapabilityKind::Process, Operation::Link, None)? {
         return Ok(denied);
     }
-    if let Some(denied) = boot_denial(scheduler, target)? {
-        return Ok(denied);
-    }
-    Ok(if scheduler.link(target) {
+    let linked = match target {
+        LinkId::Process(target) => {
+            if let Some(denied) = boot_denial(scheduler, target)? {
+                return Ok(denied);
+            }
+            scheduler.link(target)
+        }
+        LinkId::Port(port) => scheduler.link_port(port),
+    };
+    Ok(if linked {
         Value(Term::static_atom("true"))
     } else {
         Raise {
