@@ -24,6 +24,7 @@ use crate::runtime::{
 };
 
 mod crypto;
+mod prim_buffer;
 mod prim_file;
 mod prim_tty;
 
@@ -95,7 +96,8 @@ struct Library {
 ///
 /// ```rust,ignore
 /// assert_eq!(LIBRARIES[0].module, "crypto");
-/// assert_eq!(LIBRARIES[1].module, "prim_file");
+/// assert_eq!(LIBRARIES[1].module, "prim_buffer");
+/// assert_eq!(LIBRARIES[2].module, "prim_file");
 /// ```
 const LIBRARIES: &[Library] = &[
     Library {
@@ -104,6 +106,13 @@ const LIBRARIES: &[Library] = &[
         bindings: crypto::BINDINGS,
         load: Some(crypto::load),
         unbound_fails: true,
+    },
+    Library {
+        module: "prim_buffer",
+        functions: &prim_buffer::FUNCTIONS,
+        bindings: prim_buffer::BINDINGS,
+        load: None,
+        unbound_fails: false,
     },
     Library {
         module: "prim_file",

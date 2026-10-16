@@ -4,6 +4,7 @@ use std::{
 };
 
 use super::{
+    buffers::Buffers,
     capability::{
         Capability, CapabilityId, CapabilityKind, Delegations, Denied, Operation, Restriction,
         SecurityContext, Source,
@@ -478,6 +479,7 @@ impl Scheduler {
         resources.put(RegexCodes::default());
         resources.put(Ttys::default());
         resources.put(Files::default());
+        resources.put(Buffers::default());
         resources.put(Ports::default());
         Scheduler {
             processes: ProcessTable::default(),

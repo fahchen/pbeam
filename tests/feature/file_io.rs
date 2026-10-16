@@ -18,8 +18,9 @@ use common::pinned_beam_path;
 const FILE_IO_PROBE: &str = "fixtures/boot/file_io_probe.beam";
 
 /// The pinned OTP modules that the probe calls in addition to the boot
-/// modules: `file` for the calls of the probe and `filename` for its paths.
-const PROBE_MODULES: [&str; 2] = ["file", "filename"];
+/// modules: `file` for the calls of the probe, `filename` for its paths,
+/// and `prim_buffer` for the read buffer of a file with a read mode.
+const PROBE_MODULES: [&str; 3] = ["file", "filename", "prim_buffer"];
 
 #[test]
 fn opens_writes_positions_and_closes_a_file_as_pinned_erts() {
@@ -31,10 +32,27 @@ fn opens_writes_positions_and_closes_a_file_as_pinned_erts() {
     // errors come from `open` (`eexist`, `enotdir`, `enoent`), from the
     // directory check of `efile_open` (`eisdir`), and from `lseek`
     // (`einval`), as unix_prim_file.c:173-226 and 508-540 give them.
+    //
+    // A file with a read mode then holds a read buffer of
+    // `prim_buffer:new/0` (`prim_file.erl:516-517`), and `file:read_line/1`,
+    // `file:read/2`, and `file:position/2` run the `prim_buffer` NIFs
+    // `find_byte_index/2`, `write/2`, `size/1`, `read/2` (`copying_read/2`
+    // and `peek_head/1`), `skip/2`, and `wipe/1`. `io:get_line/2` reads a
+    // line of the file `utf16.txt` with the encoding `{utf16, little}`, and
+    // an append-only open keeps a read buffer too.
+    //
+    // `file:consult/1` then reads the terms of
+    // `fixtures/boot/file_io_probe_terms.config` through the same read
+    // buffer, and the file `fixtures/boot/file_io_probe_bad.config` gives
+    // the parse error of `erl_parse` for its second term.
     let expected = "[ok,\n {ok,<<\"ab\\ncd\\n\">>},\n ok,\n {ok,2},\n ok,\n {ok,13},\n \
         {error,einval},\n ok,ok,\n {ok,<<\"fiXYZ\\nsecond\\n\">>},\n ok,\n \
         {ok,<<\"fiXYZ\\nsecond\\ntail\\n\">>},\n {error,eexist},\n {error,eisdir},\n \
-        {error,enotdir},\n {error,enoent}]\n";
+        {error,enotdir},\n {error,enoent},\n {ok,\"fiXYZ\\n\"},\n {ok,\"se\"},\n \
+        {ok,\"cond\\ntail\\n\"},\n {ok,18},\n eof,ok,ok,\"abc\\n\",eof,ok,ok,\n \
+        {ok,25},\n ok,\n \
+        {ok,[{plug_hello,[{port,4004},{enabled,true}]},[atom,<<\"binary\">>,15]]},\n \
+        {error,{1,erl_parse,[\"syntax error before: \",\"'.'\"]}}]\n";
     for (name, mut command) in [("ERTS", erts()), ("PBeam", pbeam())] {
         let directory =
             std::env::temp_dir().join(format!("pbeam-file-io-{}-{name}", std::process::id()));
@@ -46,6 +64,14 @@ fn opens_writes_positions_and_closes_a_file_as_pinned_erts() {
             stderr,
         } = command
             .env("FILE_IO_PROBE_PATH", directory.join("scratch.txt"))
+            .env(
+                "FILE_IO_PROBE_TERMS",
+                "fixtures/boot/file_io_probe_terms.config",
+            )
+            .env(
+                "FILE_IO_PROBE_BAD_TERMS",
+                "fixtures/boot/file_io_probe_bad.config",
+            )
             .env("TERM", "dumb")
             .env("LC_ALL", "C.UTF-8")
             .output()

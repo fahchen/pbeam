@@ -442,6 +442,8 @@ ambient() ->
         element(1, prim_file:get_cwd()),
         element(1, prim_file:open("/", [read])),
         null_write(),
+        null_read(),
+        buffer(),
         erts_internal:processes_next(1048576),
         attempt(fun() -> erts_internal:purge_module(effect_probe_missing, complete) end),
         erts_internal:request_system_task(Self, normal, {check_process_code, Name, lists}),
@@ -454,6 +456,35 @@ ambient() ->
 null_write() ->
     {ok, Fd} = prim_file:open("/dev/null", [write]),
     [prim_file:write(Fd, <<>>), prim_file:position(Fd, 0), prim_file:close(Fd)].
+
+%% Open /dev/null in read mode, read its end, and close it with prim_file.
+%% A file with a read mode keeps a read buffer of prim_buffer, and
+%% prim_file:read/2 runs prim_file:read_nif/2 (prim_file.erl:162-204,
+%% 516-517).
+null_read() ->
+    {ok, Fd} = prim_file:open("/dev/null", [read]),
+    [prim_file:read(Fd, 1), prim_file:close(Fd)].
+
+%% Each NIF of prim_buffer, the read buffer of a file with a read mode
+%% (prim_file.erl:516-517): new/0, size/1, write/2, find_byte_index/2,
+%% read/2 with copying_read/2 and peek_head/1, wipe/1 with skip/2, and the
+%% lock of try_lock/1 and unlock/1.
+buffer() ->
+    Small = prim_buffer:new(),
+    prim_buffer:write(Small, [<<"0123456789\n">>]),
+    Large = prim_buffer:new(),
+    prim_buffer:write(Large, [<<"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx">>]),
+    [
+        prim_buffer:size(Small),
+        prim_buffer:read(Small, 2),
+        prim_buffer:find_byte_index(Small, $\n),
+        prim_buffer:size(Small),
+        prim_buffer:wipe(Small),
+        prim_buffer:size(Small),
+        prim_buffer:read(Large, 100),
+        prim_buffer:try_lock(Large),
+        prim_buffer:unlock(Large)
+    ].
 
 %% Guard tests, so the compiler does not call a BIF.
 integer(Term) when is_integer(Term) -> integer;
