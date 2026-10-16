@@ -116,12 +116,12 @@ pub(super) enum BifResult {
     /// `beam_common.c:1568-1602`), and then calls `apply(module, function,
     /// arguments)` with an empty stack (`beam_run_process`).
     Hibernate {
-        /// Module of the call after the wake-up.
-        module: Atom,
-        /// Function of the call after the wake-up.
-        function: Atom,
-        /// Arguments of the call after the wake-up, in `x0` onwards.
-        arguments: Vec<Term>,
+        /// Module of the call after the wake-up, an atom.
+        module: Term,
+        /// Function of the call after the wake-up, an atom.
+        function: Term,
+        /// Arguments of the call after the wake-up, a proper list.
+        arguments: Term,
     },
 }
 

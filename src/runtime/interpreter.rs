@@ -695,18 +695,6 @@ impl BeamProgram {
                 return Ok(outcome);
             }
         }
-        // The wake-up from `erlang:hibernate/3` runs `apply/3` of its MFA
-        // from `beam_run_process` with an empty stack (`bif.c:1426`), so a
-        // BIF goes to the BIF and a return ends the process. The check of
-        // `hibernate_3` allows at most 256 arguments, below
-        // `APPLY_MAX_ARGUMENTS`.
-        let process = scheduler.current_process_mut();
-        if let Some((module, function)) = process.wake_call.take() {
-            let arity = process.registers.len() as u32;
-            if let Some(outcome) = self.call_mfa(scheduler, &module, &function, arity, false)? {
-                return Ok(outcome);
-            }
-        }
         // A NIF call that ran on a dirty IO thread returns its result or
         // raises its exception, as `dirty_nif_finalizer` and
         // `dirty_nif_exception` do (`erl_nif.c:3386-3435`).
@@ -2740,11 +2728,9 @@ impl BeamProgram {
         tail: bool,
     ) -> Result<Option<Outcome>, BeamError> {
         let process = scheduler.current_process_mut();
-        // The value goes to `x0` with no frame too: the wake-up from
-        // `erlang:hibernate/3` can call a BIF with an empty stack.
         match result {
             BifResult::Value(value) => {
-                write_operand(&Operand::X(0), value, &mut process.registers, &mut [])?;
+                write(process, &Operand::X(0), value)?;
                 if tail {
                     return_from_frame(process)
                 } else {
@@ -2752,7 +2738,7 @@ impl BeamProgram {
                 }
             }
             BifResult::YieldReturn(value) => {
-                write_operand(&Operand::X(0), value, &mut process.registers, &mut [])?;
+                write(process, &Operand::X(0), value)?;
                 if tail {
                     // The process exits at its next run when it returned
                     // from its last frame.
@@ -2819,11 +2805,16 @@ impl BeamProgram {
             } => {
                 // `hibernate_3` drops the stack and the catches, puts the
                 // arguments of `apply/3` into the argument registers, and
-                // traps to `beam_run_process` (`bif.c:1403-1427`). `run`
-                // applies the MFA when the process runs again.
+                // traps to `beam_run_process` (`bif.c:1403-1427`), which
+                // applies them after the wake-up. PBeam gives the process
+                // the first frame of `erlang:apply/3` of `erlang.beam`,
+                // whose `i_apply_only` is that apply, as a spawn of
+                // `erlang:apply/3` does.
+                let frame = scheduler.code.mfa_frame("erlang", "apply", 3)?;
+                let process = scheduler.current_process_mut();
                 process.frames.clear();
-                process.registers = arguments.into_iter().map(Some).collect();
-                process.wake_call = Some((module, function));
+                process.frames.push(frame);
+                process.registers = vec![Some(module), Some(function), Some(arguments)];
                 Ok(Some(Outcome::Hibernate))
             }
         }

@@ -159,15 +159,17 @@ fn runs_erlang_hibernate_3_as_the_pinned_erts_bif() {
         ])
     );
     // A BIF as the MFA: the wake-up calls the BIF, not its BEAM stub.
-    // A wake-up into `erlang:hibernate/3` hibernates again.
+    // A wake-up into `erlang:hibernate/3` hibernates again. A BIF that
+    // raises ends the process, and `erlang:apply/3` applies its MFA.
     assert_eq!(
         run("bif"),
-        Term::tuple(vec![
-            atom("woke"),
-            atom("normal"),
-            atom("again"),
-            atom("normal")
-        ])
+        Term::tuple(
+            [
+                "woke", "normal", "again", "normal", "stop", "applied", "normal"
+            ]
+            .map(atom)
+            .to_vec()
+        )
     );
     // `proc_lib:hibernate/3` wakes in `proc_lib:wake_up/3`.
     assert_eq!(
@@ -193,6 +195,6 @@ fn runs_erlang_hibernate_3_as_the_pinned_erts_bif() {
     assert!(reference.stderr.is_empty());
     assert_eq!(
         reference.stdout,
-        b"[{{queued,early,0},normal},{waiting,{message_queue_len,0},{later,wake,0},normal},{boom,none},{undef,[{hibernate3_probe,missing,[1,2],[]}]},{waiting,stop},[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,system_limit},{error,system_limit},{error,badarg}],{undef,256},{{apply,wake,0},normal,{'fun',wake,0},normal},{woke,normal,again,normal},{{proc_lib,wake,0},normal},{{reply,true},{reply,true}}]\n"
+        b"[{{queued,early,0},normal},{waiting,{message_queue_len,0},{later,wake,0},normal},{boom,none},{undef,[{hibernate3_probe,missing,[1,2],[]}]},{waiting,stop},[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,system_limit},{error,system_limit},{error,badarg}],{undef,256},{{apply,wake,0},normal,{'fun',wake,0},normal},{woke,normal,again,normal,stop,applied,normal},{{proc_lib,wake,0},normal},{{reply,true},{reply,true}}]\n"
     );
 }

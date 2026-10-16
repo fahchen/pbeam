@@ -3142,18 +3142,16 @@ const MAX_ARG: i64 = 255;
 /// assert!(matches!(hibernate(&Term::Integer(1), &module, &Term::nil()), BifResult::Raise { .. }));
 /// ```
 pub(super) fn hibernate(module: &Term, function: &Term, arguments: &Term) -> BifResult {
-    let (Term::Atom(module), Term::Atom(function)) = (module, function) else {
+    let (Term::Atom(_), Term::Atom(_)) = (module, function) else {
         return BifResult::badarg();
     };
     let limit = MAX_ARG as usize + 1;
-    let mut cells = arguments.list_iter();
-    let elements: Vec<Term> = cells
-        .as_mut()
-        .map(|cells| cells.by_ref().take(limit).cloned().collect())
-        .unwrap_or_default();
-    let rest = cells.as_ref().map_or(arguments, |cells| cells.rest());
+    let (count, rest) = match arguments.list_iter() {
+        Some(mut cells) => (cells.by_ref().take(limit).count(), cells.rest()),
+        None => (0, arguments),
+    };
     if !rest.is_nil() {
-        let reason = if elements.len() == limit {
+        let reason = if count == limit {
             "system_limit"
         } else {
             "badarg"
@@ -3166,7 +3164,7 @@ pub(super) fn hibernate(module: &Term, function: &Term, arguments: &Term) -> Bif
     BifResult::Hibernate {
         module: module.clone(),
         function: function.clone(),
-        arguments: elements,
+        arguments: arguments.clone(),
     }
 }
 

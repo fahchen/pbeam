@@ -290,11 +290,6 @@ pub(super) struct ProcessState {
     /// process first runs. The process then has no frame, and the arity is
     /// the number of argument registers.
     pub(super) undefined_start: Option<(Atom, Atom)>,
-    /// The module and the function that the process applies with an empty
-    /// stack when it runs again after `erlang:hibernate/3`, as
-    /// `beam_run_process` does (`bif.c:1426`). The arguments are the X
-    /// registers.
-    pub(super) wake_call: Option<(Atom, Atom)>,
     /// X registers. All frames of the process share them.
     pub(super) registers: Vec<Option<Term>>,
     /// Float registers, which `fmove`, `fconv`, and the float arithmetic
@@ -545,7 +540,6 @@ impl ProcessState {
             id,
             frames,
             undefined_start,
-            wake_call: None,
             registers: arguments.into_iter().map(Some).collect(),
             float_registers: Vec::new(),
             mailbox: Mailbox::default(),

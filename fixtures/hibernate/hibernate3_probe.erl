@@ -106,7 +106,14 @@ bif() ->
     {P2, R2} = spawn_monitor(fun() -> erlang:hibernate(erlang, hibernate, [erlang, send, [Self, again]]) end),
     P2 ! wake,
     A = receive again -> again end,
-    {R, D, A, down(R2)}.
+    D2 = down(R2),
+    %% A BIF that raises, and erlang:apply/3 as the MFA.
+    {P3, R3} = spawn_monitor(fun() -> erlang:hibernate(erlang, exit, [stop]) end),
+    P3 ! wake,
+    {P4, R4} = spawn_monitor(fun() -> erlang:hibernate(erlang, apply, [erlang, send, [Self, applied]]) end),
+    P4 ! wake,
+    B = receive applied -> applied end,
+    {R, D, A, D2, down(R3), B, down(R4)}.
 
 id(X) -> X.
 
