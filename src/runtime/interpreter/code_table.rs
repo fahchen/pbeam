@@ -453,9 +453,12 @@ impl CodeTable {
     /// enters the entry that the loaded code of the module name of the fun
     /// holds with the index of the fun. The code can wait for its `-on_load`
     /// function, because a fun of that code runs before the code becomes the
-    /// loaded code. The entry must have the old unique value of the fun: the
-    /// entry of other code holds no address for it. Return `None` when the
-    /// code holds no such entry, so that the caller raises
+    /// loaded code. The entry must have the old unique value of the fun: ERTS
+    /// keys the address of the entry by the module checksum and the index and
+    /// the arity (`erl_fun.c:79-85`), and PBeam has no code replacement and
+    /// no checksum in a fun, so the old unique value, a field of the module
+    /// MD5 (`beam_asm.erl:251-262`), identifies the code of the fun. Return
+    /// `None` when the code holds no such entry, so that the caller raises
     /// `error:{badfun, Fun}` (`beam_common.c:1697-1706`).
     ///
     /// # Examples
