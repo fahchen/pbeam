@@ -12,6 +12,7 @@ const BINARY_MATCH_PROBE: &[u8] =
 const BS_MATCH_PROBE: &[u8] = include_bytes!("../../fixtures/binary_match/bs_match_probe.beam");
 const BS_GET_PROBE: &[u8] = include_bytes!("../../fixtures/binary_match/bs_get_probe.beam");
 const BS_FLOAT_PROBE: &[u8] = include_bytes!("../../fixtures/binary_match/bs_float_probe.beam");
+const BS_UTF_PROBE: &[u8] = include_bytes!("../../fixtures/binary_match/bs_utf_probe.beam");
 const MATCH_COPY_PROBE: &[u8] = include_bytes!("../../fixtures/binary_match/match_copy_probe.beam");
 
 /// Evaluate an expression on the pinned ERTS with `binary_match_probe` in
@@ -1005,5 +1006,176 @@ fn runs_erl_parse_of_a_term_with_a_binary_through_eval_bits_as_pinned_erts() {
     assert_eq!(
         reference("bs_float_probe:parse()"),
         b"{ok,{short,<<1,0,2,120,121,63,248,0,0,0,0,0,0>>}}\n"
+    );
+}
+
+/// Run `bs_utf_probe:Function(Bin)` with each binary, and return the
+/// results.
+fn bs_utf_each(function: &str, binaries: &[Vec<u8>]) -> Vec<Term> {
+    let program = BeamProgram::load(&[BS_UTF_PROBE]).unwrap();
+    binaries
+        .iter()
+        .map(|bytes| {
+            let argument = program.host_term(Term::binary(bytes.clone()));
+            program
+                .execute("bs_utf_probe", function, &[argument])
+                .unwrap()
+                .term
+        })
+        .collect()
+}
+
+/// Reverse the bytes of each whole code unit of `width` bytes and drop the
+/// bytes after the last whole unit, as the ERTS run of the fixture makes
+/// the little-endian binaries.
+fn little_units(binaries: &[Vec<u8>], width: usize) -> Vec<Vec<u8>> {
+    binaries
+        .iter()
+        .map(|bytes| {
+            bytes
+                .chunks_exact(width)
+                .flat_map(|unit| unit.iter().rev().copied())
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn runs_the_utf16_and_utf32_match_instructions_as_pinned_erts() {
+    // `bs_get_utf16` and `bs_skip_utf16` call `erts_bs_get_utf16`
+    // (erl_bits.c:2223-2285; jit/arm/instr_bs.cpp:905-934). A unit that is
+    // not a surrogate is one character, and a high and a low surrogate are
+    // one character. A lone surrogate and fewer than 16 bits fail.
+    // `bs_get_utf32` and `bs_skip_utf32` read a 32-bit integer and fail for
+    // a surrogate or a value above 16#10FFFF, with the position moved back
+    // (jit/arm/ops.tab:1086-1095, instr_bs.cpp:936-983). The expected
+    // values are the results of the pinned ERTS.
+    let program = BeamProgram::load(&[BS_UTF_PROBE]).unwrap();
+    let short = Term::Atom(program.atom("short").unwrap());
+    let int = Term::Atom(program.atom("int").unwrap());
+    let pair = |code_point: i64, rest: &[u8]| {
+        Term::tuple(vec![Term::Integer(code_point), Term::binary(rest.to_vec())])
+    };
+    let rest = |bytes: &[u8]| Term::binary(bytes.to_vec());
+    let big16: Vec<Vec<u8>> = [
+        &[0, 65, 1][..],
+        &[216, 61, 222, 0, 7],
+        &[216, 0, 220, 0],
+        &[219, 255, 223, 255],
+        &[215, 255],
+        &[224, 0],
+        &[255, 255],
+        &[216, 61],
+        &[216, 61, 0, 65],
+        &[216, 61, 222],
+        &[220, 0, 0, 0],
+        &[0],
+        &[],
+    ]
+    .map(<[u8]>::to_vec)
+    .to_vec();
+    let little16 = little_units(&big16, 2);
+    let values16 = [65, 0x1F600, 0x10000, 0x10FFFF, 0xD7FF, 0xE000, 0xFFFF];
+    let mut big_results: Vec<_> = values16
+        .iter()
+        .zip([&[1][..], &[7], &[], &[], &[], &[], &[]])
+        .map(|(&code_point, tail)| pair(code_point, tail))
+        .collect();
+    big_results.extend([short.clone(), short.clone(), short.clone()]);
+    big_results.extend([short.clone(), short.clone(), short.clone()]);
+    let mut little_results: Vec<_> = values16
+        .iter()
+        .map(|&code_point| pair(code_point, &[]))
+        .collect();
+    little_results.extend(vec![short.clone(); 6]);
+    assert_eq!(bs_utf_each("get16", &big16), big_results);
+    assert_eq!(bs_utf_each("get16_little", &little16), little_results);
+    assert_eq!(bs_utf_each("get16_native", &little16), little_results);
+    let mut skipped = vec![rest(&[1]), rest(&[7])];
+    skipped.extend(vec![rest(&[]); 5]);
+    skipped.extend(vec![short.clone(); 6]);
+    assert_eq!(bs_utf_each("skip16", &big16), skipped);
+    let mut skipped_little = vec![rest(&[]); 7];
+    skipped_little.extend(vec![short.clone(); 6]);
+    assert_eq!(bs_utf_each("skip16_little", &little16), skipped_little);
+
+    let big32: Vec<Vec<u8>> = [
+        &[0, 0, 0, 65, 1][..],
+        &[0, 1, 246, 0],
+        &[0, 16, 255, 255],
+        &[0, 0, 215, 255],
+        &[0, 0, 224, 0],
+        &[0, 17, 0, 0],
+        &[0, 0, 216, 0],
+        &[0, 0, 223, 255],
+        &[255, 255, 255, 255],
+        &[0, 0, 0],
+        &[],
+    ]
+    .map(<[u8]>::to_vec)
+    .to_vec();
+    let little32 = little_units(&big32, 4);
+    let values32 = [65, 0x1F600, 0x10FFFF, 0xD7FF, 0xE000];
+    let mut big_results = vec![pair(65, &[1])];
+    big_results.extend(
+        values32[1..]
+            .iter()
+            .map(|&code_point| pair(code_point, &[])),
+    );
+    big_results.extend(vec![short.clone(); 6]);
+    let mut little_results: Vec<_> = values32
+        .iter()
+        .map(|&code_point| pair(code_point, &[]))
+        .collect();
+    little_results.extend(vec![short.clone(); 6]);
+    assert_eq!(bs_utf_each("get32", &big32), big_results);
+    assert_eq!(bs_utf_each("get32_little", &little32), little_results);
+    assert_eq!(bs_utf_each("get32_native", &little32), little_results);
+    let mut skipped = vec![rest(&[1])];
+    skipped.extend(vec![rest(&[]); 4]);
+    skipped.extend(vec![short.clone(); 6]);
+    assert_eq!(bs_utf_each("skip32", &big32), skipped);
+    let mut skipped_little = vec![rest(&[]); 5];
+    skipped_little.extend(vec![short.clone(); 6]);
+    assert_eq!(bs_utf_each("skip32_little", &little32), skipped_little);
+    // The next clause of `retract32/1` reads the same 32 bits as an
+    // integer after `bs_get_utf32` fails.
+    let mut retracted = big_results[..5].to_vec();
+    retracted.extend(
+        [0x110000, 0xD800, 0xDFFF, 0xFFFF_FFFF]
+            .map(|value: i64| Term::tuple(vec![int.clone(), Term::Integer(value), rest(&[])])),
+    );
+    retracted.extend([short.clone(), short.clone()]);
+    assert_eq!(bs_utf_each("retract32", &big32), retracted);
+
+    // A segment at the bit offset 4: `<<15:4, C/utf16, 0:4, 9>>` and the
+    // same for `utf32`.
+    let offset16: Vec<Vec<u8>> = [
+        &[240, 4, 16, 9][..],
+        &[253, 131, 221, 224, 0, 9],
+        &[253, 131, 208],
+        &[253, 192, 0],
+    ]
+    .map(<[u8]>::to_vec)
+    .to_vec();
+    assert_eq!(
+        bs_utf_each("offset16", &offset16),
+        [
+            pair(65, &[9]),
+            pair(0x1F600, &[9]),
+            short.clone(),
+            short.clone()
+        ]
+    );
+    let offset32: Vec<Vec<u8>> = [
+        &[240, 0, 31, 96, 0, 9][..],
+        &[240, 1, 16, 0, 0],
+        &[240, 4, 16],
+    ]
+    .map(<[u8]>::to_vec)
+    .to_vec();
+    assert_eq!(
+        bs_utf_each("offset32", &offset32),
+        [pair(0x1F600, &[9]), short.clone(), short]
     );
 }

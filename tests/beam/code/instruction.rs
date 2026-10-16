@@ -1,7 +1,7 @@
 use super::super::{read_integer, read_integer_after_first, read_operand, read_value};
 use super::{
-    FloatOperation, OPCODE_BIF0, OPCODE_BS_GET_INTEGER2, OPCODE_BS_GET_UTF16, OPCODE_BS_GET_UTF32,
-    OPCODE_FADD, OPCODE_FCONV, OPCODE_FDIV, OPCODE_FMOVE, OPCODE_FMUL, OPCODE_FNEGATE, OPCODE_FSUB,
+    FloatOperation, OPCODE_BIF0, OPCODE_BS_GET_INTEGER2, OPCODE_BS_SKIP_UTF8, OPCODE_FADD,
+    OPCODE_FCONV, OPCODE_FDIV, OPCODE_FMOVE, OPCODE_FMUL, OPCODE_FNEGATE, OPCODE_FSUB,
     OPCODE_GET_MAP_ELEMENTS, OPCODE_GET_RECORD_ELEMENTS, OPCODE_GET_TL, OPCODE_HAS_MAP_FIELDS,
     OPCODE_INIT_YREGS, OPCODE_PUT_MAP_ASSOC, OPCODE_PUT_MAP_EXACT, OPCODE_PUT_RECORD,
     OPCODE_PUT_TUPLE2, OPCODE_TEST_EXACT_EQ, OPCODE_TEST_HEAP, OPCODE_TEST_IS_ATOM,
@@ -1066,6 +1066,76 @@ fn decodes_the_bs_match_commands_of_the_bs_match_probe_fixture() {
             )
         ),
         "{instructions:?}"
+    );
+}
+
+#[test]
+fn decodes_each_operand_of_the_utf16_and_utf32_instructions_of_bs_utf_probe() {
+    // `bs_utf_probe` has `bs_get_utf16` and `bs_get_utf32` with the flags 0,
+    // 2 (`little`), and 16 (`native`), and `bs_skip_utf16` and
+    // `bs_skip_utf32` with the flags 0 and 2 (genop.tab:504-508). A native
+    // segment has the byte order of the host (`$NativeEndian`,
+    // generators.tab). The fixture has the typed register `x0`.
+    let parts: [&[u8]; 10] = [
+        &[0x8C, 0x35, 0x57, 0x03, 0x10, 0x10, 0x00, 0x13],
+        &[0x8C, 0x65, 0x57, 0x03, 0x10, 0x10, 0x20, 0x13],
+        &[0x8C, 0x95, 0x57, 0x03, 0x10, 0x10, 0x08, 0x10, 0x13],
+        &[0x8E, 0xC5, 0x57, 0x03, 0x10, 0x10, 0x00, 0x13],
+        &[0x8E, 0xF5, 0x57, 0x03, 0x10, 0x10, 0x20, 0x13],
+        &[0x8E, 0x0D, 0x12, 0x57, 0x03, 0x10, 0x10, 0x08, 0x10, 0x13],
+        &[0x8D, 0x0D, 0x15, 0x57, 0x03, 0x10, 0x10, 0x00],
+        &[0x8D, 0x0D, 0x18, 0x57, 0x03, 0x10, 0x10, 0x20],
+        &[0x8F, 0x0D, 0x1B, 0x57, 0x03, 0x10, 0x10, 0x00],
+        &[0x8F, 0x0D, 0x1E, 0x57, 0x03, 0x10, 0x10, 0x20],
+    ];
+    let table = AtomTable::new();
+    let mut code = vec![0, 0, 0, 16];
+    code.extend([0; 16]);
+    code.extend(parts.concat());
+    code.push(0x03);
+    let (instructions, _, _) = parse_code(&code, &table, &[], &[], &[], &[], &[]).unwrap();
+    let decoded: Vec<_> = instructions
+        .iter()
+        .filter(|instruction| !matches!(instruction, Instruction::End))
+        .map(|instruction| match instruction {
+            Instruction::BinaryGetUtf16 {
+                fail_label,
+                context: Operand::X(0),
+                little,
+                destination,
+            } => (16, *fail_label, *little, destination),
+            Instruction::BinaryGetUtf32 {
+                fail_label,
+                context: Operand::X(0),
+                little,
+                destination,
+            } => (32, *fail_label, *little, destination),
+            other => panic!("{other:?}"),
+        })
+        // `Operand` has no `PartialEq`: a destination is `Some(true)` for
+        // `x1`.
+        .map(|(width, label, little, destination)| {
+            let x1 = destination
+                .as_ref()
+                .map(|operand| matches!(operand, Operand::X(1)));
+            (width, label, little, x1)
+        })
+        .collect();
+    let native = cfg!(target_endian = "little");
+    assert_eq!(
+        decoded,
+        [
+            (16, 3, false, Some(true)),
+            (16, 6, true, Some(true)),
+            (16, 9, native, Some(true)),
+            (32, 12, false, Some(true)),
+            (32, 15, true, Some(true)),
+            (32, 18, native, Some(true)),
+            (16, 21, false, None),
+            (16, 24, true, None),
+            (32, 27, false, None),
+            (32, 30, true, None),
+        ]
     );
 }
 
@@ -2296,8 +2366,7 @@ fn skips_pinned_module_instruction_operands_and_rejects_truncation() {
         (OPCODE_PUT_RECORD, 6),
         (OPCODE_PUT_TUPLE2, 2),
         (OPCODE_INIT_YREGS, 1),
-        (OPCODE_BS_GET_UTF16, 5),
-        (OPCODE_BS_GET_UTF32, 5),
+        (OPCODE_BS_SKIP_UTF8, 4),
         (OPCODE_BS_GET_INTEGER2, 7),
     ] {
         assert_eq!(unsupported_opcode_operand_count(opcode), Some(count));
@@ -2306,7 +2375,7 @@ fn skips_pinned_module_instruction_operands_and_rejects_truncation() {
 
     let mut cursor = 0;
     assert!(skip_unsupported_instruction(255, &[], &mut cursor).is_err());
-    assert!(skip_unsupported_instruction(OPCODE_BS_GET_UTF16, &[0], &mut cursor).is_err());
+    assert!(skip_unsupported_instruction(OPCODE_BS_SKIP_UTF8, &[0], &mut cursor).is_err());
     assert!(skip_counted_operands(&[0x10], &mut 0).is_err());
     assert!(skip_counted_operands(&[0x20], &mut 0).is_err());
 }
@@ -2803,6 +2872,23 @@ fn arm_field_bytes(instruction: &Instruction) -> usize {
             context,
             destination,
         } => size_of_val(fail_label) + size_of_val(context) + size_of_val(destination),
+        Instruction::BinaryGetUtf16 {
+            fail_label,
+            context,
+            little,
+            destination,
+        }
+        | Instruction::BinaryGetUtf32 {
+            fail_label,
+            context,
+            little,
+            destination,
+        } => {
+            size_of_val(fail_label)
+                + size_of_val(context)
+                + size_of_val(little)
+                + size_of_val(destination)
+        }
         Instruction::BinaryMatch {
             fail_label,
             context,
