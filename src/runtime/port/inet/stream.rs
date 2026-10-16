@@ -159,9 +159,12 @@ impl Statistics {
 pub(in crate::runtime) struct Stream {
     /// The size of the buffer of a receive of length 0 (`bufsz`).
     pub(super) buffer: usize,
-    /// The bytes that the socket gave and no receive took yet (`i_buf`
-    /// from `i_ptr_start` to `i_ptr`).
+    /// The input buffer (`i_buf`), zeroed once when the receive allocates
+    /// it, empty without a buffer. The reads write into it after `filled`.
     input: Vec<u8>,
+    /// The bytes at the start of `input` that the socket gave and no
+    /// receive took yet (`i_ptr_start` to `i_ptr`).
+    filled: usize,
     /// The size of the input buffer, 0 without a buffer (`i_bufsz`).
     input_size: usize,
     /// The bytes that the receive of a length still needs (`i_remain`).
@@ -193,6 +196,7 @@ impl Stream {
         Stream {
             buffer,
             input: Vec::new(),
+            filled: 0,
             input_size: 0,
             remain: 0,
             receiver: None,
@@ -202,6 +206,19 @@ impl Stream {
             closed_receive: false,
             statistics: Statistics::default(),
         }
+    }
+
+    /// Make the input buffer hold at least `length` bytes, as
+    /// `tcp_expand_buffer` does (inet_drv.c:11631-11662). The bytes start at
+    /// the start of the buffer, so the used space before them is 0. A
+    /// larger allocation keeps the filled bytes and zeroes only the new
+    /// bytes.
+    fn expand(&mut self, length: usize) {
+        if self.input.len() < length {
+            self.input.reserve_exact(length - self.input.len());
+            self.input.resize(length, 0);
+        }
+        self.input_size = self.input_size.max(length);
     }
 }
 
@@ -250,41 +267,43 @@ impl Inet {
     pub(in crate::runtime) fn receive(&mut self, length: usize) -> Vec<Event> {
         let stream = &mut self.stream;
         let read = if stream.input_size == 0 {
-            stream.input_size = if length > 0 { length } else { stream.buffer };
+            let size = if length > 0 { length } else { stream.buffer };
+            stream.input = vec![0; size];
+            stream.input_size = size;
             stream.remain = length;
-            stream.input_size
+            size
         } else if length > 0 {
-            if stream.input.len() >= length {
+            if stream.filled >= length {
                 return self.deliver(length);
             }
-            stream.input_size = length;
-            stream.remain = length - stream.input.len();
+            stream.expand(length);
+            stream.remain = length - stream.filled;
             stream.remain
         } else if stream.remain == 0 {
-            if !stream.input.is_empty() {
-                let length = stream.input.len();
+            if stream.filled > 0 {
+                let length = stream.filled;
                 return self.deliver(length);
             }
-            stream.input_size - stream.input.len()
+            stream.input_size - stream.filled
         } else {
             stream.remain
         };
         let mut socket = self.socket.as_ref().expect("a connected port has a socket");
-        let mut bytes = vec![0; read];
-        let count = match socket.read(&mut bytes) {
+        let start = stream.filled;
+        let count = match socket.read(&mut stream.input[start..start + read]) {
             Ok(count) if count > 0 => count,
             Err(failure) if failure.kind() == io::ErrorKind::WouldBlock => return Vec::new(),
             result => return self.receive_ended(result.err()),
         };
         let stream = &mut self.stream;
-        stream.input.extend_from_slice(&bytes[..count]);
+        stream.filled += count;
         if stream.remain > 0 {
             stream.remain -= count;
             if stream.remain > 0 {
                 return Vec::new();
             }
         }
-        self.deliver(self.stream.input.len())
+        self.deliver(self.stream.filled)
     }
 
     /// End the receive that waits with `timeout`, as
@@ -302,15 +321,28 @@ impl Inet {
     }
 
     /// Give the first `length` bytes of the buffer to the receive, as
-    /// `tcp_deliver` does in passive mode (inet_drv.c:13042-13128).
+    /// `tcp_deliver` does in passive mode (inet_drv.c:13042-13128). When
+    /// the receive takes all the filled bytes, the buffer itself becomes
+    /// the data, shrunk to `length`, and the port has no buffer
+    /// (`tcp_clear_input`). Else the receive gets a copy of the `length`
+    /// bytes, and the bytes after them move to the start of the buffer.
     fn deliver(&mut self, length: usize) -> Vec<Event> {
         let stream = &mut self.stream;
         stream.statistics.input(length as u64);
-        let data: Vec<u8> = stream.input.drain(..length).collect();
-        stream.remain = 0;
-        if stream.input.is_empty() {
+        let data = if length == stream.filled {
+            let mut data = std::mem::take(&mut stream.input);
+            data.truncate(length);
+            data.shrink_to_fit();
+            stream.filled = 0;
             stream.input_size = 0;
-        }
+            data
+        } else {
+            let data = stream.input[..length].to_vec();
+            stream.input.copy_within(length..stream.filled, 0);
+            stream.filled -= length;
+            data
+        };
+        stream.remain = 0;
         self.end_receive(Ok(data))
     }
 
@@ -360,7 +392,8 @@ impl Inet {
     fn close_socket(&mut self) {
         self.socket = None;
         self.state = State::Closed;
-        self.stream.input.clear();
+        self.stream.input = Vec::new();
+        self.stream.filled = 0;
         self.stream.input_size = 0;
         self.stream.remain = 0;
         self.stream.output.clear();
@@ -569,3 +602,7 @@ fn blocked(failure: &io::Error) -> bool {
         io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
     )
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/runtime/port/inet/stream.rs"]
+mod tests;
