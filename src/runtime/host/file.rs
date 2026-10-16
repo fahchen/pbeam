@@ -405,6 +405,24 @@ pub(crate) fn write(mut file: &File, mut bytes: &[u8]) -> Result<(), c_int> {
     Ok(())
 }
 
+/// Close `file`, as `efile_close` (`unix_prim_file.c:246-265`) does: one
+/// `close`, with no new call on `EINTR`, because `close` either always
+/// closes the descriptor or leaves it undefined.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(close(File::open("/dev/null")?), Ok(()));
+/// ```
+///
+/// # Errors
+///
+/// The `errno` of a failed `close`, for example `EIO` for a write that an
+/// NFS server rejects at the close.
+pub(crate) fn close(file: File) -> Result<(), c_int> {
+    nix::unistd::close(file).map_err(|errno| errno as c_int)
+}
+
 /// Move the position of `file` to `offset` from `from`, and return the new
 /// position, as `efile_seek` (`unix_prim_file.c:508-540`) does with
 /// `lseek`.

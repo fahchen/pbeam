@@ -248,10 +248,8 @@ fn translate_modelist(atoms: &AtomTable, modes: &Term) -> OpenModes {
 /// raises `error:badarg`, a closed resource gives `{error, einval}`, and
 /// else the binding removes the monitor of the resource on its owner
 /// (`enif_demonitor_process`, `prim_file_nif.c:633`), closes the host
-/// file, and gives `ok`.
-///
-/// PBeam closes the host file with the drop of its `File`, which ignores
-/// the result of `close`, so a failed `close` gives `ok`.
+/// file with [`file::close`], and gives `ok`, or `{error, Errno}` for a
+/// failed `close`.
 ///
 /// # Examples
 ///
@@ -272,9 +270,10 @@ fn close_nif(scheduler: &mut Scheduler, fd: &Term) -> Result<BifResult, BeamErro
     match scheduler.resources.borrow_mut::<Files>().close(*reference) {
         None => Ok(BifResult::badarg()),
         Some(None) => error_tuple(&mut scheduler.atoms, "einval"),
-        Some(Some(owner)) => {
+        Some(Some((file, owner))) => {
             scheduler.demonitor_file(owner, *reference);
-            Ok(BifResult::Value(Term::static_atom("ok")))
+            let closed = file::close(file).map(|()| Term::static_atom("ok"));
+            value_or_error(&mut scheduler.atoms, closed)
         }
     }
 }
@@ -386,14 +385,12 @@ fn write_nif(scheduler: &mut Scheduler, fd: &Term, iovec: &Term) -> Result<BifRe
         if !rest.is_list() {
             return Ok(BifResult::badarg());
         }
-        if let Err(errno) = file::write(file, &bytes) {
-            return error_tuple(atoms, &errno_id(errno));
-        }
-        Ok(BifResult::Value(if rest.is_nil() {
+        let value = if rest.is_nil() {
             Term::static_atom("ok")
         } else {
             Term::tuple(vec![Term::Atom(atoms.put("continue")?), rest.clone()])
-        }))
+        };
+        value_or_error(atoms, file::write(file, &bytes).map(|()| value))
     })
 }
 
@@ -613,11 +610,34 @@ fn get_cwd_nif(atoms: &mut AtomTable) -> Result<BifResult, BeamError> {
 /// A new error atom in a full atom table gives the error of
 /// `AtomTable::put`.
 fn ok_tuple(atoms: &mut AtomTable, result: Result<Term, c_int>) -> Result<BifResult, BeamError> {
+    value_or_error(
+        atoms,
+        result.map(|value| Term::tuple(vec![Term::static_atom("ok"), value])),
+    )
+}
+
+/// Return the value of `Ok`, or the [`error_tuple`] of the `errno` of
+/// `Err`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // ok
+/// let result = value_or_error(&mut atoms, Ok(Term::static_atom("ok")))?;
+/// // {error, eio}
+/// let result = value_or_error(&mut atoms, Err(libc::EIO))?;
+/// ```
+///
+/// # Errors
+///
+/// A new error atom in a full atom table gives the error of
+/// `AtomTable::put`.
+fn value_or_error(
+    atoms: &mut AtomTable,
+    result: Result<Term, c_int>,
+) -> Result<BifResult, BeamError> {
     match result {
-        Ok(value) => Ok(BifResult::Value(Term::tuple(vec![
-            Term::static_atom("ok"),
-            value,
-        ]))),
+        Ok(value) => Ok(BifResult::Value(value)),
         Err(errno) => error_tuple(atoms, &errno_id(errno)),
     }
 }

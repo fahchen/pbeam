@@ -53,27 +53,27 @@ impl Files {
             .map(|file| file.as_ref().map(|(file, _)| file))
     }
 
-    /// Close the file resource `reference`, as `close_nif`
-    /// (`prim_file_nif.c:618-647`) does, and return the owner of the
-    /// resource: `None` for a reference that is not a file resource, and
-    /// `Some(None)` for a closed resource.
+    /// Mark the file resource `reference` closed, as `close_nif`
+    /// (`prim_file_nif.c:618-647`) does, and return its host file and its
+    /// owner, which the caller closes: `None` for a reference that is not a
+    /// file resource, and `Some(None)` for a closed resource.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// files.insert(Reference(0), file, ProcessId(1));
-    /// assert_eq!(files.close(Reference(0)), Some(Some(ProcessId(1))));
-    /// assert_eq!(files.close(Reference(0)), Some(None));
+    /// assert!(matches!(files.close(Reference(0)), Some(Some((_, ProcessId(1))))));
+    /// assert!(matches!(files.close(Reference(0)), Some(None)));
     /// ```
-    pub(super) fn close(&mut self, reference: Reference) -> Option<Option<ProcessId>> {
-        let file = self.by_reference.get_mut(&reference)?;
-        Some(file.take().map(|(_, owner)| owner))
+    pub(super) fn close(&mut self, reference: Reference) -> Option<Option<(File, ProcessId)>> {
+        Some(self.by_reference.get_mut(&reference)?.take())
     }
 
     /// Run the monitor of the file resource `reference` on its owner after
     /// the owner exits, as `owner_death_callback` and `delayed_close_nif`
     /// (`prim_file_nif.c:362-375`, `377-405`) do: close the host file when
-    /// the resource is still open. The owner is the only process that the
+    /// the resource is still open, and ignore the result of `close`, as
+    /// `delayed_close_nif` does. The owner is the only process that the
     /// resource monitors.
     ///
     /// # Examples

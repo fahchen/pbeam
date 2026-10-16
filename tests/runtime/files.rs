@@ -10,7 +10,7 @@ fn closes_an_open_file_resource_when_its_owner_exits() {
     // A resource that `close_nif/1` closed stays closed.
     files.monitor_down(Reference(0));
     assert!(matches!(files.get(Reference(0)), Some(None)));
-    assert_eq!(files.close(Reference(0)), Some(None));
+    assert!(matches!(files.close(Reference(0)), Some(None)));
     assert!(files.get(Reference(1)).is_none());
     assert!(files.close(Reference(1)).is_none());
 }
