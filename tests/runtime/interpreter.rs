@@ -4433,6 +4433,7 @@ fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
                 Term::Integer(0),
             ],
         ),
+        ("delete", vec![id.clone(), Term::Integer(5)]),
         ("insert", vec![id.clone(), object.clone()]),
         ("insert_new", vec![id.clone(), object.clone()]),
         // A list of two objects takes the table without a copy
@@ -4468,8 +4469,37 @@ fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
             "ets:{function}/2 did not run again"
         );
     }
+    // A list insert that ended in another turn gives its result to the
+    // process that started it, also after the table went away
+    // (`erl_db.c:2142-2150`, `2223-2244`).
+    scheduler.ets.delete_table(Reference(0), caller);
+    scheduler.current_process_mut().insert_result = Some(Term::static_atom("true"));
+    let result = program
+        .bif_trap(
+            &mut scheduler,
+            "ets",
+            "insert",
+            vec![
+                id.clone(),
+                Term::Integer(7),
+                Term::Integer(5),
+                Term::Integer(1),
+                Term::static_atom("false"),
+                Term::Integer(2),
+            ],
+        )
+        .unwrap();
+    assert!(
+        matches!(result, BifResult::Value(value) if value == Term::static_atom("true")),
+        "the process did not read the result of the insert that ended"
+    );
     // The process that runs the insert takes its own table: the steps of
     // the walk and of the insert are its own (`erl_db.c:2077-2107`).
+    scheduler.ets.create(
+        Reference(0),
+        None,
+        Table::new(caller, Access::Public, 1, TableType::Set),
+    );
     scheduler.current_process_mut().fcalls = 1;
     scheduler
         .ets

@@ -28,11 +28,6 @@ fn bounds_the_work_of_one_turn_of_a_busy_list_insert() {
     );
     assert_eq!(table.live_objects().len(), 10);
     assert!(table.busy.is_none());
-    assert_eq!(
-        table.take_ended(ProcessId(0)),
-        Some(Term::static_atom("true"))
-    );
-    assert_eq!(table.take_ended(ProcessId(0)), None);
 }
 
 #[test]

@@ -134,11 +134,6 @@ pub(super) struct Table {
     /// completes the insert first (`handle_lacking_permission`,
     /// `erl_db.c:769-798`).
     pub(super) busy: Option<Busy>,
-    /// The result of each list insert that ended, until the process that
-    /// started it reads it, as `ctx->return_value` (`erl_db.c:2180-2184`,
-    /// `2232-2244`). Another process, or the process itself, may end the
-    /// insert of a busy table.
-    ended: Vec<(ProcessId, Term)>,
 }
 
 /// A list insert that took a table and did not finish in its turn, as the
@@ -435,6 +430,7 @@ impl EtsTables {
     /// tables.create(Reference(0), None, Table::new(ProcessId(0), Access::Public, 1, TableType::Set));
     /// assert!(tables.table_by_id(Reference(0)).is_some());
     /// ```
+    #[cfg(test)]
     pub(super) fn table_by_id(&mut self, id: Reference) -> Option<&mut Table> {
         self.tables.get_mut(&id)
     }
@@ -658,7 +654,6 @@ impl Table {
             buckets: FIRST_SEGMENT_SLOTS,
             owned: 0,
             busy: None,
-            ended: Vec::new(),
         }
     }
 
@@ -727,21 +722,6 @@ impl Table {
             (None, _) => EMPTY,
         };
         self.add(atoms, hash, object, newest);
-    }
-
-    /// Remove and return the result of the list insert that ended for the
-    /// process `owner`, as the driver reads `ctx->return_value`
-    /// (`erl_db.c:2239-2244`).
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
-    /// assert_eq!(table.take_ended(ProcessId(0)), None);
-    /// ```
-    pub(super) fn take_ended(&mut self, owner: ProcessId) -> Option<Term> {
-        let index = (self.ended.iter()).position(|(ended, _)| *ended == owner)?;
-        Some(self.ended.remove(index).1)
     }
 
     /// Run up to `units` units of the steps of the list insert that took
@@ -817,9 +797,8 @@ impl Table {
             }
         }
         let result = busy.end();
-        match &result {
-            Some(value) => self.ended.push((busy.owner, value.clone())),
-            None => self.busy = Some(busy),
+        if result.is_none() {
+            self.busy = Some(busy);
         }
         (units - left, result)
     }

@@ -52,17 +52,29 @@ fn step_inserting(
     }) {
         return Ok((0, None));
     }
-    let Some(inserting) = scheduler.ets.busy(&scheduler.atoms, &Term::Reference(id)) else {
-        // The insert ended in another turn: the process that started it
-        // reads the result, as the driver reads `ctx->return_value`
-        // (`erl_db.c:2239-2244`).
-        let table = scheduler
-            .ets
-            .table_by_id(id)
-            .expect("the caller found the table");
-        return Ok((0, mine.and_then(|caller| table.take_ended(caller))));
-    };
-    Ok(inserting.step_busy(&scheduler.atoms, units))
+    // The table of the caller has the list insert that it did not finish:
+    // the step of a call of the table, or the completion of the insert,
+    // clears it (`erl_db.c:2185-2195`).
+    let inserting = scheduler
+        .ets
+        .busy(&scheduler.atoms, &Term::Reference(id))
+        .expect("the caller found the busy insert");
+    let owner = inserting
+        .busy
+        .as_ref()
+        .expect("the caller found the busy insert")
+        .owner;
+    let (used, result) = inserting.step_busy(&scheduler.atoms, units);
+    if let Some(value) = result {
+        // The state of the insert lives with the process that started it,
+        // so the result stays for it after the table goes away, and the
+        // process reads it in its next turn (`erl_db.c:2142-2150`,
+        // `2232-2244`).
+        if let Some(process) = scheduler.process_mut(owner) {
+            process.insert_result = Some(value);
+        }
+    }
+    Ok((used, None))
 }
 
 /// What a process that takes a table finds on it, as
@@ -502,19 +514,31 @@ pub(super) fn insert_list(
         Check::Done(count) => count,
     };
     let locked = matches!(new, New::Locked { .. });
-    let insert_phase = locked
+    // Step 3 of the call is the walk of `ets:insert_new/2` and the insert
+    // of the objects, one step for each object (`erl_db.c:2072-2110`). A
+    // plain `ets:insert/2` marks it with the units that the copies and the
+    // insert of the objects used, a `bag` with the steps that remain, and
+    // `ets:insert_new/2` with [`New::Locked`].
+    let global = locked
         || match &bag {
             Some(_) => inserting(&bag),
-            None => 2 * count < done && done <= 4 * count,
+            None => 2 * count < done && done < 4 * count,
         };
-    if insert_phase
-        && context
+    if global {
+        // The insert ended in another turn: the process reads its result,
+        // as the driver reads `ctx->return_value`, also after the table
+        // went away (`erl_db.c:2223-2244`).
+        if let Some(result) = context.scheduler.current_process_mut().insert_result.take() {
+            return Ok(Value(result));
+        }
+        if context
             .scheduler
             .ets
             .find(&context.scheduler.atoms, &table)
             .is_none()
-    {
-        return Ok(BifResult::badarg());
+        {
+            return Ok(BifResult::badarg());
+        }
     }
     let process = context.scheduler.current_process_mut();
     let caller = process.id;
@@ -608,15 +632,15 @@ pub(super) fn insert_list(
                 None => done = 4 * count,
             }
         }
-        if took || locked || inserting(&bag) {
+        if took || global {
             // The steps of the insert that the table took: the walk and
             // the insert of the objects, one step for each object
             // (`erl_db.c:1927-1949`, `2091-2107`). The call traps between
             // the objects, and its next turn runs the steps that remain.
-            let (used, result) = step_inserting(&mut *context, &table, units.left, Some(caller))?;
+            let (used, _) = step_inserting(&mut *context, &table, units.left, Some(caller))?;
             done += used as usize;
             units.left -= used;
-            match result {
+            match context.scheduler.current_process_mut().insert_result.take() {
                 Some(value) => break 'work Some(Value(value)),
                 None => break 'work None,
             }
@@ -1150,18 +1174,29 @@ pub(super) fn member(
 /// assert!(matches!(result, BifResult::Value(value) if value == test_atom("true")));
 /// assert!(matches!(delete(&mut context, &Term::nil(), &test_atom("k")), BifResult::Raise { .. }));
 /// ```
-pub(super) fn delete(context: &mut BifContext<'_>, table: &Term, key: &Term) -> BifResult {
+pub(super) fn delete(
+    context: &mut BifContext<'_>,
+    table: &Term,
+    key: &Term,
+) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
+    if let Take::Help = help_busy(&mut *context, table)? {
+        return Ok(BifResult::TrapBif {
+            module: "ets",
+            function: "delete",
+            arguments: vec![table.clone(), key.clone()],
+        });
+    }
     let Some(table) =
         context
             .scheduler
             .ets
             .table(&context.scheduler.atoms, table, caller, Operation::Write)
     else {
-        return BifResult::badarg();
+        return Ok(BifResult::badarg());
     };
     table.delete(&context.scheduler.atoms, key);
-    Value(Term::static_atom("true"))
+    Ok(Value(Term::static_atom("true")))
 }
 
 /// Run `ets:delete(Table)`, as ERTS `ets_delete_1` (`erl_db.c:3006-3082`)

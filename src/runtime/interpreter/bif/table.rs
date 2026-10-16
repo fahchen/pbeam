@@ -437,7 +437,7 @@ bifs! {
     erts_trace_cleaner:check/0 => unsupported,
     erts_trace_cleaner:send_trace_clean_signal/1 => unsupported,
     ets:delete/1 as EtsDelete1 => |cx, [table]| ets::delete_table(cx, table),
-    ets:delete/2 as EtsDelete2 => |cx, [table, key]| Ok(ets::delete(cx, table, key)),
+    ets:delete/2 as EtsDelete2 => |cx, [table, key]| ets::delete(cx, table, key),
     ets:delete_object/2 => unsupported,
     ets:first/1 => unsupported,
     ets:first_lookup/1 => unsupported,

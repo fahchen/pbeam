@@ -993,6 +993,7 @@ impl BeamProgram {
             let result = match function {
                 "lookup" => ets::lookup(&mut context, table, key)?,
                 "member" => ets::member(&mut context, table, key)?,
+                "delete" => ets::delete(&mut context, table, key)?,
                 "insert_new" => ets::insert_new(&mut context, table, key)?,
                 _ => ets::insert(&mut context, table, key)?,
             };
