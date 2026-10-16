@@ -29,11 +29,8 @@ use crate::{
         signal::Signal,
         timer::{Timer, Timers},
     },
-    term::{PortId, ProcessId, Term},
+    term::{Atom, PortId, ProcessId, Term},
 };
-
-/// The atom of the messages of an accept.
-pub(super) const INET_ASYNC: &str = "inet_async";
 
 /// The timeout of an accept without end (`INET_INFINITY`).
 pub(super) const INFINITY: u32 = u32::MAX;
@@ -64,8 +61,6 @@ impl Scheduler {
         listen: PortId,
         timeout: u32,
     ) -> Result<Vec<u8>, BeamError> {
-        // `inet_init` makes the atom when the driver loads (inet_drv.c).
-        self.atoms.put(INET_ASYNC)?;
         let caller = self.current_process_mut().id;
         let tcp = tcp_inet(self.resources.borrow_mut::<Ports>(), listen);
         if tcp.acceptors.is_empty()
@@ -277,11 +272,10 @@ impl Scheduler {
 
 impl Scheduler {
     /// Return the message `{inet_async, L, Ref, Status}` of the listen port
-    /// `listen`. The `ACCEPT` that the message ends made the atom.
+    /// `listen`.
     pub(super) fn async_message(&self, listen: PortId, id: u16, status: Term) -> Term {
-        let atom = self.atoms.get(INET_ASYNC).expect("an accept made the atom");
         Term::tuple(vec![
-            Term::Atom(atom),
+            Term::Atom(Atom::INET_ASYNC),
             Term::Port(listen),
             Term::Integer(id.into()),
             status,

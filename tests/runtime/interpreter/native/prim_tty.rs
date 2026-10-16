@@ -25,8 +25,8 @@ fn gives_ebadf_for_an_fd_that_is_not_open() {
     // `ENOTTY` (prim_tty_nif.c:272-277). No fd layout of a child
     // process reaches this result for fds 0, 1, and 2, because Rust and
     // ERTS open `/dev/null` on a closed standard fd.
-    let mut atoms = AtomTable::new();
-    let result = isatty_fd(&mut atoms, -1).unwrap();
+    let atoms = AtomTable::new();
+    let result = isatty_fd(-1);
     assert!(
         matches!(&result, BifResult::Value(Term::Atom(atom)) if atoms.name_of(atom) == "ebadf"),
         "{result:?}"

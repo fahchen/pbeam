@@ -172,7 +172,8 @@ impl ExceptionClass {
 
 impl BeamProgram {
     /// Load BEAM files into one program. Module names must be unique. The
-    /// atom table starts with the 1150 static atoms. Each module, in the
+    /// atom table starts with the 1150 static atoms and the preloaded
+    /// atoms. Each module, in the
     /// given order, puts its `AtU8` atoms and then its `LitT` atoms into it.
     /// A module with an `-on_load` function is the error `the start module
     /// M has an -on_load function, which PBeam runs only for a module that
