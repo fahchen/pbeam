@@ -999,6 +999,15 @@ impl BeamProgram {
             };
             return Ok(result);
         }
+        if let ("ets", "match", [table, pattern]) = (module, function, arguments.as_slice()) {
+            let mut context = BifContext { scheduler };
+            return ets::match_objects(&mut context, table, pattern, None);
+        }
+        if let ("ets", "match", [table, pattern, limit]) = (module, function, arguments.as_slice())
+        {
+            let mut context = BifContext { scheduler };
+            return ets::match_objects(&mut context, table, pattern, Some(limit));
+        }
         if let ("ets", "lookup_element", [table, key, index, default]) =
             (module, function, arguments.as_slice())
         {

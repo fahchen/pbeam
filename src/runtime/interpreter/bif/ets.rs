@@ -1437,6 +1437,16 @@ pub(super) fn match_objects(
     limit: Option<&Term>,
 ) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
+    if let Take::Help = help_busy(&mut *context, table)? {
+        return Ok(BifResult::TrapBif {
+            module: "ets",
+            function: "match",
+            arguments: match limit {
+                Some(limit) => vec![table.clone(), pattern.clone(), limit.clone()],
+                None => vec![table.clone(), pattern.clone()],
+            },
+        });
+    }
     let atoms = &context.scheduler.atoms;
     let Some(id) = context.scheduler.ets.find(atoms, table).map(|(id, _)| id) else {
         return Ok(BifResult::badarg());
@@ -1515,6 +1525,21 @@ pub(super) fn match_trap(
     state: MatchState,
 ) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
+    if let Take::Help = help_busy(&mut *context, &Term::Reference(id))? {
+        return Ok(BifResult::TrapBif {
+            module: "ets",
+            function: "select_trap",
+            arguments: vec![
+                Term::Reference(id),
+                pattern.clone(),
+                Term::Integer(bucket as i64),
+                Term::Integer(state.chunk as i64),
+                state.matches.clone(),
+                Term::Integer(state.got as i64),
+                Term::Integer(state.writes as i64),
+            ],
+        });
+    }
     let atoms = &context.scheduler.atoms;
     let Some(table) =
         context

@@ -4512,6 +4512,85 @@ fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
         matches!(result, BifResult::Value(value) if value == Term::static_atom("true")),
         "the short list insert did not take the objects without a copy"
     );
+    // `ets:match/2,3` completes the insert of the busy table before it
+    // reads the objects, so it sees each of them (`erl_db.c:769-787`).
+    scheduler.current_process_mut().fcalls = 1;
+    busy(&mut scheduler);
+    let pattern = Term::static_atom("_");
+    let result = program
+        .bif(
+            &mut scheduler,
+            "ets",
+            "match",
+            vec![id.clone(), pattern.clone()],
+        )
+        .unwrap();
+    assert!(
+        matches!(result, BifResult::TrapBif { .. }),
+        "ets:match/2 did not complete the insert of the other process"
+    );
+    let result = program
+        .bif_trap(
+            &mut scheduler,
+            "ets",
+            "match",
+            vec![id.clone(), pattern.clone()],
+        )
+        .unwrap();
+    assert!(matches!(
+        result,
+        BifResult::Value(_) | BifResult::Raise { .. }
+    ));
+    // `ets:match/3` with a limit does the same.
+    scheduler.current_process_mut().fcalls = 1;
+    busy(&mut scheduler);
+    let result = program
+        .bif(
+            &mut scheduler,
+            "ets",
+            "match",
+            vec![id.clone(), pattern.clone(), Term::Integer(10)],
+        )
+        .unwrap();
+    assert!(
+        matches!(result, BifResult::TrapBif { .. }),
+        "ets:match/3 did not complete the insert of the other process"
+    );
+    let result = program
+        .bif_trap(
+            &mut scheduler,
+            "ets",
+            "match",
+            vec![id.clone(), pattern.clone(), Term::Integer(10)],
+        )
+        .unwrap();
+    assert!(matches!(
+        result,
+        BifResult::Value(_) | BifResult::Raise { .. }
+    ));
+    // The resume of `ets:match/3` does the same (`ets:select_trap/7`).
+    scheduler.current_process_mut().fcalls = 1;
+    busy(&mut scheduler);
+    let result = program
+        .bif_trap(
+            &mut scheduler,
+            "ets",
+            "select_trap",
+            vec![
+                id.clone(),
+                pattern,
+                Term::Integer(0),
+                Term::Integer(0),
+                Term::nil(),
+                Term::Integer(0),
+                Term::Integer(0),
+            ],
+        )
+        .unwrap();
+    assert!(
+        matches!(result, BifResult::TrapBif { .. }),
+        "ets:select_trap/7 did not complete the insert of the other process"
+    );
     // A list insert that ended in another turn gives its result to the
     // process that started it, also after the table went away
     // (`erl_db.c:2142-2150`, `2223-2244`).

@@ -778,10 +778,12 @@ impl Table {
         }
 
         if busy.found {
-            // The copies of the objects go away, one unit for each object.
+            // The copy of each object goes away, one unit for each object
+            // (`ets_insert_2_list_destroy_copied_dbterms`, `erl_db.c:1863-1873`).
             while busy.inserted < busy.objects.len() && (first || left > 0) {
                 first = false;
                 left -= 1;
+                std::mem::take(&mut busy.objects[busy.inserted]);
                 busy.inserted += 1;
             }
         } else {
@@ -790,7 +792,9 @@ impl Table {
             // that a `bag` insert compares (`erl_db_hash.c:1422-1442`).
             while busy.inserted < busy.objects.len() && (first || left > 0) {
                 first = false;
-                let object = busy.objects[busy.inserted].clone();
+                // The copy of the object goes into the table in its step
+                // (`db_put_dbterm`, `erl_db.c:1934-1940`).
+                let object = std::mem::take(&mut busy.objects[busy.inserted]);
                 let compared = self.insert_all(atoms, vec![object])[0];
                 busy.inserted += 1;
                 left -= 2 + compared as i64;
