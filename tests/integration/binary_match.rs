@@ -1147,6 +1147,19 @@ fn runs_the_utf16_and_utf32_match_instructions_as_pinned_erts() {
     );
     retracted.extend([short.clone(), short.clone()]);
     assert_eq!(bs_utf_each("retract32", &big32), retracted);
+    // A `bs_get_utf16` that fails keeps the position, so the next clause of
+    // `retract16/1` reads the same 16 bits as an integer: a lone low
+    // surrogate, a high surrogate with no low one, and a high surrogate at
+    // the end (erl_bits.c:2266-2282).
+    let retract16: Vec<Vec<u8>> = vec![vec![220, 0], vec![216, 61, 0, 65], vec![216, 61]];
+    assert_eq!(
+        bs_utf_each("retract16", &retract16),
+        vec![
+            Term::tuple(vec![int.clone(), Term::Integer(56320), rest(&[])]),
+            Term::tuple(vec![int.clone(), Term::Integer(55357), rest(&[0, 65])]),
+            Term::tuple(vec![int.clone(), Term::Integer(55357), rest(&[])]),
+        ]
+    );
 
     // A segment at the bit offset 4: `<<15:4, C/utf16, 0:4, 9>>` and the
     // same for `utf32`.
