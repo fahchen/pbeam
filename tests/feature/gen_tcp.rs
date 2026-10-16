@@ -2,6 +2,7 @@ use std::{
     io::{BufRead, BufReader, Read, Write},
     net::TcpStream,
     process::{Command, Stdio},
+    sync::mpsc,
     thread,
     time::Duration,
 };
@@ -80,15 +81,35 @@ fn with_client(name: &str, command: &mut Command) -> (String, String, Option<i32
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
+    // A run that does not end, or a client that fails while the probe waits
+    // in `gen_tcp:accept/1`, kills the child, so the test reports the
+    // failure and does not hang.
+    let pid = child.id();
+    let (done, finished) = mpsc::channel::<()>();
+    let watchdog = thread::spawn(move || {
+        if finished.recv_timeout(Duration::from_secs(60)).is_err() {
+            kill(pid);
+        }
+    });
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
     let mut first = String::new();
     stdout.read_line(&mut first).unwrap();
-    let client = first
-        .trim_end()
-        .parse::<u16>()
-        .map(|port| thread::spawn(move || client(port)));
+    let client = first.trim_end().parse::<u16>().map(|port| {
+        thread::spawn(move || {
+            let result = client(port);
+            if result.is_err() {
+                kill(pid);
+            }
+            result
+        })
+    });
+    if client.is_err() {
+        kill(pid);
+    }
     let mut rest = String::new();
     stdout.read_to_string(&mut rest).unwrap();
+    let _ = done.send(());
+    watchdog.join().unwrap();
     let output = child.wait_with_output().unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     let result = match client {
@@ -102,6 +123,11 @@ fn with_client(name: &str, command: &mut Command) -> (String, String, Option<i32
         );
     }
     (rest, stderr, output.status.code())
+}
+
+/// Kill the process `pid` with `SIGKILL`.
+fn kill(pid: u32) {
+    let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
 }
 
 /// Connect twice to `port`. On the first connection, read each text of the
