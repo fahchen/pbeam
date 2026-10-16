@@ -1373,6 +1373,16 @@ pub(super) fn info(
         // ponytail: info/2 gives only the type; see "ETS tables" in docs/erts-differences.md.
         return Err(error("unsupported ets:info/2 item binary"));
     }
+    // `ets:info/2` asks for `DB_INFO`, so a busy table completes its list
+    // insert first, and the call runs again in a later turn
+    // (`erl_db.c:769-798`, `4549-4555`).
+    if let Take::Help = help_busy(&mut *context, table)? {
+        return Ok(BifResult::TrapBif {
+            module: "ets",
+            function: "info",
+            arguments: vec![table.clone(), item.clone()],
+        });
+    }
     let atoms = &context.scheduler.atoms;
     let Some((_, found)) = context.scheduler.ets.find(atoms, table) else {
         return match table {

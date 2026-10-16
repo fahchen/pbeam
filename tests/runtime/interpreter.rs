@@ -4421,6 +4421,7 @@ fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
             false,
         ));
     };
+    let type_atom = program.atom("type").expect("the atom type exists");
     let arguments = [
         ("lookup", vec![id.clone(), Term::Integer(5)]),
         ("member", vec![id.clone(), Term::Integer(5)]),
@@ -4434,6 +4435,7 @@ fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
             ],
         ),
         ("delete", vec![id.clone(), Term::Integer(5)]),
+        ("info", vec![id.clone(), Term::Atom(type_atom)]),
         ("insert", vec![id.clone(), object.clone()]),
         ("insert_new", vec![id.clone(), object.clone()]),
         // A list of two objects takes the table without a copy

@@ -1008,6 +1008,10 @@ impl BeamProgram {
             let mut context = BifContext { scheduler };
             return ets::match_objects(&mut context, table, pattern, Some(limit));
         }
+        if let ("ets", "info", [table, item]) = (module, function, arguments.as_slice()) {
+            let mut context = BifContext { scheduler };
+            return ets::info(&mut context, table, item);
+        }
         if let ("ets", "lookup_element", [table, key, index, default]) =
             (module, function, arguments.as_slice())
         {
