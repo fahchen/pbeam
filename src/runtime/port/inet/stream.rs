@@ -200,6 +200,10 @@ pub(in crate::runtime) struct Stream {
     closed_receive: bool,
     /// The port sent `{tcp_closed, S}` (`TCP_ADDF_CLOSE_SENT`).
     closed_sent: bool,
+    /// The connection ended and the socket closed: `INET_STATE_CLOSED`
+    /// with the `stype` `SOCK_STREAM` of `OPEN`, which a port without
+    /// `OPEN` does not have (inet_drv.c:5215, 10925).
+    pub(super) ended: bool,
     /// The counts of `GETSTAT`.
     statistics: Statistics,
 }
@@ -225,6 +229,7 @@ impl Stream {
             closed_send: false,
             closed_receive: false,
             closed_sent: false,
+            ended: false,
             statistics: Statistics::default(),
         }
     }
@@ -344,7 +349,9 @@ impl Inet {
     /// became active, as `tcp_recv` (`read`, for `once`) and `tcp_deliver`
     /// do after `SETOPTS` (inet_drv.c:11131-11148, 13042-13060). Without
     /// `read`, an empty buffer and a buffer that waits for more bytes give
-    /// no message.
+    /// no message. A socket whose connection ended gives `{tcp_closed, S}`
+    /// once, and the port ends with the reason `normal`
+    /// (inet_drv.c:7001-7011).
     ///
     /// # Examples
     ///
@@ -353,6 +360,9 @@ impl Inet {
     /// ```
     pub(in crate::runtime) fn activate(&mut self, read: bool) -> Vec<Event> {
         let stream = &self.stream;
+        if stream.ended {
+            return self.active_end(Vec::new(), None, "normal".to_owned());
+        }
         if read {
             self.receive(0)
         } else if stream.input_size == 0 || stream.remain > 0 || stream.filled == 0 {
@@ -475,6 +485,7 @@ impl Inet {
     fn close_socket(&mut self) {
         self.socket = None;
         self.state = State::Closed;
+        self.stream.ended = true;
         self.stream.input = Vec::new();
         self.stream.filled = 0;
         self.stream.input_size = 0;

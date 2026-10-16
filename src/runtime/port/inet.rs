@@ -537,6 +537,11 @@ impl Inet {
                 22 if value == 3 => return Err(error(ACTIVE_N)),
                 22 => {
                     self.active = value;
+                    // The end of the port skips the next options
+                    // (inet_drv.c:7001-7011).
+                    if value != 0 && self.stream.ended {
+                        break;
+                    }
                     true
                 }
                 0 => self.set_socket(libc::SO_REUSEADDR, false, |socket| {
@@ -589,10 +594,14 @@ impl Inet {
 
     /// Return the result of a `SETOPTS` with the reply `reply` that changed
     /// the option `active` from `old`: [`Control::Active`] when a connected
-    /// socket became active, else the reply (inet_drv.c:7949-7981). PBeam
-    /// runs no `{active, N}`, so only `once` reads.
+    /// socket became active or a socket whose connection ended is active,
+    /// else the reply (inet_drv.c:7001-7011, 7949-7981). PBeam runs no
+    /// `{active, N}`, so only `once` reads.
     fn set_active_result(&self, old: i32, reply: Vec<u8>) -> Control {
-        if reply != [OK] || old != 0 || self.active == 0 || self.state != State::Connected {
+        let ended = self.stream.ended && self.active != 0;
+        if reply != [OK]
+            || !ended && (old != 0 || self.active == 0 || self.state != State::Connected)
+        {
             return Control::Reply(reply);
         }
         Control::Active {

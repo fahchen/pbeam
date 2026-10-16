@@ -1,5 +1,5 @@
 -module(tcp_active).
--export([main/1, active/1, closed/1, links/0, unsupported/2, unsupported_item/0]).
+-export([main/1, active/1, closed/1, passive_closed/1, links/0, unsupported/2, unsupported_item/0]).
 
 %% Delivers the data of an accepted socket in active mode, as
 %% inet:setopts/2 calls prim_inet:setopts/2, and gives the socket to a
@@ -79,6 +79,29 @@ closed(Path) ->
     Messages = flush(),
     ok = prim_inet:close(L),
     [Set, Data, Again, Messages, erlang:port_info(S, connected)].
+
+%% A passive recv reads the end of file and closes the socket. A later
+%% {active, once} or {active, true} sends {tcp_closed, S}, skips the next
+%% options, and the port exits with the reason normal
+%% (inet_drv.c:7001-7011).
+passive_closed(Path) ->
+    process_flag(trap_exit, true),
+    %% prim_inet:setopts/2 puts active last, so the first SETOPTS of
+    %% {active, once} and then {tos, 1} goes to the port directly
+    %% (prim_inet.erl:1028, 2972-2975).
+    SetOnce = fun(S) -> erlang:port_control(S, 16#03f1a307, [22, 0, 0, 0, 2, 9, 0, 0, 0, 1]) end,
+    SetTrue = fun(S) -> prim_inet:setopts(S, [{active, true}]) end,
+    [ended(Path, 1, SetOnce, once), ended(Path, 3, SetTrue, true)].
+
+ended(Path, Step, Setopts, Active) ->
+    {L, S} = connection(Path, Step),
+    step(Path, Step + 1, "close"),
+    Recv = prim_inet:recv(S, 0, 1000),
+    Set = Setopts(S),
+    Closed = message(S),
+    Again = prim_inet:setopts(S, [{active, Active}]),
+    ok = prim_inet:close(L),
+    [Recv, Set, Closed, Again, erlang:port_info(S, connected), flush()].
 
 %% link/1, unlink/1, erlang:port_connect/2, and erlang:port_info/2 with a
 %% port.
@@ -172,12 +195,15 @@ c(F) ->
     try F() catch Class:Reason -> {Class, Reason} end.
 
 connection(Path) ->
+    connection(Path, 1).
+
+connection(Path, Step) ->
     {ok, L} = prim_inet:open(tcp, inet, stream),
     ok = prim_inet:setopts(L, [binary, {active, false}]),
     {ok, _} = prim_inet:bind(L, {127, 0, 0, 1}, 0),
     ok = prim_inet:listen(L, 5),
     {ok, {_, Port}} = prim_inet:sockname(L),
-    step(Path, 1, ["connect ", integer_to_list(Port)]),
+    step(Path, Step, ["connect ", integer_to_list(Port)]),
     {ok, S} = prim_inet:accept(L, 5000, []),
     {L, S}.
 
