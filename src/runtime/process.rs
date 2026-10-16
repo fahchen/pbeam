@@ -435,10 +435,14 @@ pub(super) struct ProcessState {
     /// requester map of `initial/1` and `grant/3`. The code table resolves
     /// the names of an entry start when a reader needs them.
     pub(super) initial_call: InitialCall,
-    /// `true` after the first `erlang:apply/3` of the process. A start at
-    /// `erlang:apply/3` runs the `call_ext_only` of its `erlang.beam` body
-    /// as that first apply.
-    pub(super) applied: bool,
+    /// Whether the next `erlang:apply/3` of the process is a body apply with
+    /// no frame, as ERTS runs it from `beam_run_process`. `None` before the
+    /// first apply: a start at `erlang:apply/3` runs the `call_ext_only` of
+    /// its `erlang.beam` body as that apply. The wake-up of
+    /// `erlang:hibernate/3` sets `Some(true)`, because ERTS also applies its
+    /// MFA from `beam_run_process` (`bif.c:1403-1427`). Each other apply
+    /// sets `Some(false)`.
+    pub(super) frameless_apply: Option<bool>,
     /// `true` while the first apply of a start at `erlang:apply/3` runs. ERTS
     /// starts the process at `beam_run_process`, a body apply with no frame
     /// (`erl_process.c:12616-12624`), so the stack trace of a BIF that this
@@ -572,7 +576,7 @@ impl ProcessState {
             security: SecurityContext::default(),
             parent: None,
             initial_call,
-            applied: false,
+            frameless_apply: None,
             start_apply: false,
             policy_reply: None,
         }
