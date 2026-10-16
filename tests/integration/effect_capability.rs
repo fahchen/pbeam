@@ -267,7 +267,8 @@ fn only(names: &[&str]) -> Constraint {
 
 /// Each entry that the column "Capability" of the effect inventory marks
 /// `ambient`. `effect_probe:ambient/0` calls each entry once.
-const AMBIENT: [&str; 43] = [
+const AMBIENT: [&str; 44] = [
+    "erlang:binary_to_atom/2",
     "erlang:cancel_timer/1",
     "erlang:cancel_timer/2",
     "erlang:demonitor/1",
@@ -457,7 +458,7 @@ fn calls_each_ambient_and_later_entry_with_no_capability() {
     // The root process holds no capability, so no policy can permit the
     // calls: each `ambient` and `later` entry has no check.
     let program = program();
-    let expected = "[true,true,false,true,true,true,integer,integer,integer,date_time,unix,nonode@nohost,nonode@nohost,[],[nonode@nohost],1,true,{error,badfile},{error,badarg},false,false,true,effect_probe_ambient_atom,ok,effect_probe_ambient,true,false,[{key,value}],value,true,true,set,reference,true,atom,2,ok,1,error,ok,error,ok,error,[ok,{ok,0},ok],[eof,ok],[11,<<48,49>>,{ok,8},9,ok,0,<<120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120>>,acquired,ok],none,{error,notsup},ok,false]";
+    let expected = "[true,true,false,true,true,true,integer,integer,integer,date_time,unix,nonode@nohost,nonode@nohost,[],[nonode@nohost],1,true,{error,badfile},{error,badarg},false,false,true,effect_probe_ambient_atom,effect_probe_ambient_binary,ok,effect_probe_ambient,true,false,[{key,value}],value,true,true,set,reference,true,atom,2,ok,1,error,ok,error,ok,error,[ok,{ok,0},ok],[eof,ok],[11,<<48,49>>,{ok,8},9,ok,0,<<120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120>>,acquired,ok],none,{error,notsup},ok,false]";
     assert_eq!(run_text(&program, "ambient", &Grants(vec![])), expected);
     assert_eq!(erts_with_stand_in("ambient"), format!("{expected}\n"));
 }

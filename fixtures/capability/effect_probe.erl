@@ -421,6 +421,7 @@ ambient() ->
         erlang:cancel_timer(make_ref()),
         is_list(erlang:processes()),
         erlang:list_to_atom("effect_probe_ambient_atom"),
+        erlang:binary_to_atom(<<"effect_probe_ambient_binary">>, utf8),
         element(1, re:compile("a", [])),
         Table,
         ets:insert(Name, {key, value}),
