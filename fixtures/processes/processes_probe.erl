@@ -1,5 +1,5 @@
 -module(processes_probe).
--export([main/0, alone/0, wait/0, reductions/0, exited/1]).
+-export([main/0, alone/0, wait/0, reductions/0, exited/1, churn/0]).
 
 %% Return the erlang:processes/0 and process_info(Pid, group_leader)
 %% results that do not depend on the other processes of the node:
@@ -58,3 +58,35 @@ exited(Left) ->
     Ps = processes(),
     Keeper ! stop,
     {lists:member(Child, Ps), lists:last(Ps) =:= Child}.
+
+%% Call processes/0 with 60 reductions in the turn, so that the call
+%% traps after the first chunk, while other processes spawn and exit
+%% during its traps. Return the names of the known pids of the result, in
+%% result order. The caller is in the first chunk. Keeper, Gone, and
+%% Churner exist at the start and are in the second chunk. Churner exits,
+%% and then Gone, a process of high priority that Churner releases. Both
+%% exit before the call reads the second chunk, so they come after the
+%% found pids, in the order of their exits, not in index order. Late and
+%% LateGone start during the call, so they are not in the result
+%% (erl_ptab.c:996-1170).
+churn() ->
+    Self = self(),
+    [receive {'DOWN', Ref, process, Pid, normal} -> ok end
+     || {Pid, Ref} <- [spawn_monitor(fun() -> ok end) || _ <- lists:seq(1, 1000)]],
+    erlang:yield(),
+    erlang:bump_reductions(3940),
+    Keeper = spawn(?MODULE, wait, []),
+    Gone = spawn_opt(fun() -> receive go -> ok end end, [{priority, high}]),
+    Churner = spawn(fun() ->
+                        Late = spawn(?MODULE, wait, []),
+                        LateGone = spawn(fun() -> ok end),
+                        Gone ! go,
+                        Self ! {late, Late, LateGone}
+                    end),
+    Ps = processes(),
+    receive {late, Late, LateGone} -> ok end,
+    Keeper ! stop,
+    Late ! stop,
+    Names = [{Self, self}, {Keeper, keeper}, {Gone, gone}, {Churner, churner},
+             {Late, late}, {LateGone, late_gone}],
+    [Name || P <- Ps, {Q, Name} <- Names, P =:= Q].

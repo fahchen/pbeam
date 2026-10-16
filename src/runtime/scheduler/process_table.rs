@@ -10,14 +10,42 @@
 //! slot of the current process takes the place of the pointer, and only a
 //! lookup by pid hashes the pid.
 //!
-//! The table does not give an order of its processes. Its only iteration,
+//! The slots do not give an order of the processes. Their only iteration,
 //! [`ProcessTable::values`], adds the live bytes of each process, and that
-//! sum does not depend on the order.
+//! sum does not depend on the order. The table also keeps the pids in the
+//! index order of the ERTS process table, for the reads of
+//! `erlang:processes/0` (see [`ProcessTable::list_chunk`]).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ops::Index;
 
+use super::PTAB_SIZE;
 use crate::{runtime::process::ProcessState, term::ProcessId};
+
+/// An `erlang:processes/0` call that reads the table, as the invocation
+/// entry of the deleted list of ERTS (`ptlbdp->bif_invocation`,
+/// `erl_ptab.c:922-951`).
+#[derive(Debug)]
+struct Reader {
+    /// The insert serial at the start of the call, as the invocation
+    /// interval: the call lists only a process with a smaller serial
+    /// (`erl_ptab.c:1000-1003`, `1108`).
+    start: u64,
+    /// The first table index that the call did not read.
+    tix: u64,
+    /// One entry for each process that left the table since the start of
+    /// the call, the oldest first, as the deleted list
+    /// (`save_deleted_element`, `erl_ptab.c:643-672`): the pid of a process
+    /// that was in the table at the start and left it before the call read
+    /// its index (`erl_ptab.c:1102-1135`), and `None` for each other
+    /// process.
+    deleted: VecDeque<Option<ProcessId>>,
+}
+
+/// Return the index of the pid `id` in the ERTS process table.
+fn table_index(id: ProcessId) -> u64 {
+    id.0 % PTAB_SIZE
+}
 
 /// The live processes of a scheduler and its current process.
 ///
@@ -36,6 +64,16 @@ pub(super) struct ProcessTable {
     /// The slot of the process that runs now, like `current_process` in the
     /// ERTS scheduler data.
     current: Option<usize>,
+    /// The insert serial of each live process, in the index order of the
+    /// ERTS process table, as the `started_interval` of each element of
+    /// `ptab->r.o.tab` (`erl_ptab.c:996-1015`).
+    order: BTreeMap<(u64, ProcessId), u64>,
+    /// The insert serial of the next process, as the interval of the ERTS
+    /// table (`erts_ptab_interval`).
+    serial: u64,
+    /// The `erlang:processes/0` calls that read the table now, by the pid
+    /// of the caller.
+    readers: HashMap<ProcessId, Reader>,
 }
 
 impl ProcessTable {
@@ -67,6 +105,8 @@ impl ProcessTable {
         };
         let old = self.index.insert(id, slot);
         assert!(old.is_none(), "each process has a new pid");
+        self.order.insert((table_index(id), id), self.serial);
+        self.serial += 1;
     }
 
     /// Remove the process `id` and return it. Return `None` when no process
@@ -91,7 +131,100 @@ impl ProcessTable {
             "the current process switches out before it leaves the table"
         );
         self.free.push(slot);
+        let ix = table_index(*id);
+        let serial = self
+            .order
+            .remove(&(ix, *id))
+            .expect("each live process has an index");
+        // ERTS saves a deleted element only while a read is in progress
+        // (`erl_ptab.c:688-692`, `722-728`).
+        self.readers.remove(id);
+        for reader in self.readers.values_mut() {
+            let gone = serial < reader.start && ix >= reader.tix;
+            reader.deleted.push_back(gone.then_some(*id));
+        }
         self.slots[slot].take()
+    }
+
+    /// Start an `erlang:processes/0` read of the table by the process
+    /// `reader`: a process that enters the table after this start is not in
+    /// the result.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// table.start_list(ProcessId(0));
+    /// ```
+    pub(super) fn start_list(&mut self, reader: ProcessId) {
+        let start = Reader {
+            start: self.serial,
+            tix: 0,
+            deleted: VecDeque::new(),
+        };
+        self.readers.insert(reader, start);
+    }
+
+    /// Return the pid of each process with a table index from the first
+    /// index that the read of `reader` did not read up to `end`, in index
+    /// order, when the process was in the table at the start of the read.
+    /// The read then continues at `end`. The work is in proportion to the
+    /// processes of these indices.
+    ///
+    /// # Panics
+    ///
+    /// Panic when `reader` does not read the table.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(table.list_chunk(ProcessId(0), 1000).collect::<Vec<_>>(), vec![ProcessId(0)]);
+    /// ```
+    pub(super) fn list_chunk(
+        &mut self,
+        reader: ProcessId,
+        end: u64,
+    ) -> impl Iterator<Item = ProcessId> + '_ {
+        let reader = self
+            .readers
+            .get_mut(&reader)
+            .expect("the process reads the table");
+        let start = reader.start;
+        let tix = std::mem::replace(&mut reader.tix, end);
+        self.order
+            .range((tix, ProcessId(0))..(end, ProcessId(0)))
+            .filter(move |(_, serial)| **serial < start)
+            .map(|((_, id), _)| *id)
+    }
+
+    /// Return the entries of the processes that left the table during the
+    /// read of `reader`, the oldest first (see [`Reader::deleted`]).
+    ///
+    /// # Panics
+    ///
+    /// Panic when `reader` does not read the table.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(table.list_deleted(ProcessId(0)).pop_front(), None);
+    /// ```
+    pub(super) fn list_deleted(&mut self, reader: ProcessId) -> &mut VecDeque<Option<ProcessId>> {
+        &mut self
+            .readers
+            .get_mut(&reader)
+            .expect("the process reads the table")
+            .deleted
+    }
+
+    /// End the read of `reader`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// table.end_list(ProcessId(0));
+    /// ```
+    pub(super) fn end_list(&mut self, reader: ProcessId) {
+        self.readers.remove(&reader);
     }
 
     /// Return the process `id`, or `None` when no process has the pid.

@@ -10,6 +10,7 @@ use crate::runtime::local_node;
 use crate::runtime::port::Ports;
 use crate::runtime::process::{Flush, Priority, TimerReference};
 use crate::runtime::process::{LinkId, ProcessState};
+use crate::runtime::scheduler::PTAB_SIZE;
 use crate::runtime::scheduler::{AliasMode, CONTEXT_REDS, Flushed, MonitorOptions, MonitorTarget};
 use crate::runtime::signal::Signal;
 use crate::runtime::time::{self, TimeValue};
@@ -4172,10 +4173,6 @@ pub(super) fn port_get_data(
     Ok(BifResult::Value(data))
 }
 
-/// Indices of the ERTS process table: the default process limit
-/// (`erl_process.c`, `ERTS_DEFAULT_MAX_PROCESSES`), which `processes/0`
-/// reads in full.
-const PTAB_SIZE: u64 = 1 << 20;
 /// Indices of a chunk of the table that `processes/0` reads in one step
 /// (`ERTS_PTAB_LIST_BIF_TAB_CHUNK_SIZE`, `erl_ptab.c:43`).
 const PTAB_CHUNK: u64 = 1000;
@@ -4195,25 +4192,23 @@ const PTAB_DELETED_PER_RED: usize = 10;
 const PTAB_CONSES_PER_RED: usize = 75;
 
 /// The state of an `erlang:processes/0` call, which the call keeps across
-/// its traps to `erts_internal:ptab_list_continue/7`, as the
-/// `ErtsPTabListBifData` of `erts_ptab_list` (`erl_ptab.c:746-780`) does.
+/// its traps to `erts_internal:ptab_list_continue/5`, as the
+/// `ErtsPTabListBifData` of `erl_ptab.c:120-135`. The process table keeps
+/// the start of the read and the processes that leave the table during it
+/// (see [`Scheduler::ptab_list_start`]).
+///
 /// Each list is a term that a trap moves to its arguments and a resume
 /// moves back, so that no turn copies the state.
 pub(super) struct PtabList {
-    /// The next table index to read, `-1` before the call takes its
-    /// snapshot, and [`PTAB_SIZE`] after it read the table.
+    /// The next table index to read: `-1` before the call starts its read,
+    /// [`PTAB_SIZE`] while the call steps through the deleted processes,
+    /// and [`PTAB_SIZE`] + 1 while it builds the result.
     pub(super) tix: i64,
-    /// The pids of the snapshot that the call did not read yet, in index
-    /// order.
-    pub(super) rest: Term,
     /// The pids that the call found in the table, the last found first.
     pub(super) found: Term,
-    /// The pids of the snapshot that exited before the call read their
-    /// chunk, the last first. They come after the found pids in the result.
+    /// The pids that exited before the call read their index, the last
+    /// first. They come after the found pids in the result.
     pub(super) gone: Term,
-    /// The pids of `gone` that the step through the deleted pids did not
-    /// charge yet.
-    pub(super) deleted: i64,
     /// The cells of the result that the call did not build yet: the pids of
     /// `found` and `gone`.
     pub(super) pid_ix: i64,
@@ -4227,10 +4222,8 @@ impl PtabList {
     fn into_arguments(self) -> Vec<Term> {
         vec![
             Term::Integer(self.tix),
-            self.rest,
             self.found,
             self.gone,
-            Term::Integer(self.deleted),
             Term::Integer(self.pid_ix),
             self.result,
         ]
@@ -4239,14 +4232,15 @@ impl PtabList {
 
 #[cfg(test)]
 thread_local! {
-    /// The list cells that [`ptab_list`] read or built since the last reset.
+    /// The table entries and the list cells that [`ptab_list`] read or
+    /// built since the last reset.
     pub(super) static PTAB_CELLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Run `erlang:processes/0`: return the pid of each process that exists
-/// when the call takes its snapshot, also an exiting process, as
+/// when the call starts its read, also an exiting process, as
 /// `erts_ptab_list` (`erl_ptab.c:746-780`, `888-1280`) lists the process
-/// table. A call with fewer than 40 reductions traps before the snapshot
+/// table. A call with fewer than 40 reductions traps before the start
 /// (`erl_ptab.c:766-768`). See [`ptab_list`] for the steps.
 ///
 /// # Examples
@@ -4262,10 +4256,8 @@ thread_local! {
 pub(super) fn processes(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
     let state = PtabList {
         tix: -1,
-        rest: Term::Nil,
         found: Term::Nil,
         gone: Term::Nil,
-        deleted: 0,
         pid_ix: 0,
         result: Term::Nil,
     };
@@ -4288,23 +4280,32 @@ fn ptab_list_trap(scheduler: &mut Scheduler, state: PtabList) -> BifResult {
     }
 }
 
+/// Cons `pid` onto `list` and count the new cell of the result.
+fn ptab_list_push(list: &mut Term, pid_ix: &mut i64, pid: ProcessId) {
+    *list = Term::cons(Term::Pid(pid), std::mem::replace(list, Term::Nil));
+    *pid_ix += 1;
+}
+
 /// Continue an `erlang:processes/0` call with `state`, as
 /// `ptab_list_bif_engine` does (`erl_ptab.c:888-1280`), until the call
 /// returns its result or uses its reductions and traps.
 ///
-/// - The snapshot has the pid of each process of the table, in the index
-///   order of the ERTS table: the pid number modulo [`PTAB_SIZE`]. A
-///   process that is not a boot process does not get the pid of the policy
-///   process, so that it cannot send a signal to it (section "Policy
-///   module, policy process, and policy table" of
-///   `docs/capability-security-migration.md`). A process that starts after
-///   the snapshot is not in the result.
-/// - Each chunk of 1000 indices costs 1 reduction for each 25 indices. The
-///   call reads the next chunk only when it has the reductions for it
-///   (`erl_ptab.c:1022-1037`). A pid of the snapshot whose process exited
-///   before the call read its chunk goes to the deleted pids.
-/// - The deleted pids come after the found pids, and each costs 1
-///   reduction, and 1 more for each 10 (`erl_ptab.c:1046-1170`).
+/// - The start of the read marks the processes of the table. A process
+///   that enters the table after the start is not in the result
+///   (`erl_ptab.c:1000-1003`). A process that is not a boot process does
+///   not get the pid of the policy process, so that it cannot send a signal
+///   to it (section "Policy module, policy process, and policy table" of
+///   `docs/capability-security-migration.md`).
+/// - Each turn reads the next chunks of 1000 indices of the table, in the
+///   index order of the ERTS table: the pid number modulo [`PTAB_SIZE`].
+///   Each chunk costs 1 reduction for each 25 indices. The call reads the
+///   next chunk only when it has the reductions for it
+///   (`erl_ptab.c:1022-1037`). The first chunk is in the first turn.
+/// - Each process that leaves the table during the read costs 1
+///   reduction, and 1 more for each 10, in a step of at most 40
+///   reductions (`erl_ptab.c:1046-1170`). A marked process that left the
+///   table before the call read its index comes after the found pids, in
+///   the order of the exits.
 /// - The result costs 1 reduction for each 75 cells (`erl_ptab.c:1201-1254`).
 ///
 /// Row "BIF arguments" of `docs/erts-differences.md`
@@ -4317,36 +4318,25 @@ pub(super) fn ptab_list(
     scheduler: &mut Scheduler,
     mut state: PtabList,
 ) -> Result<BifResult, BeamError> {
+    let hidden = if scheduler.current_process().security.is_boot() {
+        None
+    } else {
+        scheduler.policy_id()
+    };
     if state.tix < 0 {
-        let hidden = if scheduler.current_process().security.is_boot() {
-            None
-        } else {
-            scheduler.policy_id()
-        };
-        let mut ids = scheduler.process_ids();
-        ids.retain(|id| Some(*id) != hidden);
-        ids.sort_by_key(|id| id.0 % PTAB_SIZE);
-        state.rest = Term::list_from(ids.into_iter().map(Term::Pid));
+        scheduler.ptab_list_start();
         state.tix = 0;
     }
     loop {
         let left = scheduler.current_process().bif_reductions_left()?;
         let have = if state.tix < PTAB_SIZE as i64 {
             let end = (state.tix as u64 + PTAB_CHUNK).min(PTAB_SIZE);
-            while let Some((&Term::Pid(id), tail)) = state.rest.cons_cell()
-                && id.0 % PTAB_SIZE < end
-            {
-                state.rest = tail.clone();
+            for id in scheduler.ptab_list_chunk(end) {
                 #[cfg(test)]
                 PTAB_CELLS.set(PTAB_CELLS.get() + 1);
-                let list = if scheduler.process(id).is_some() {
-                    &mut state.found
-                } else {
-                    state.deleted += 1;
-                    &mut state.gone
-                };
-                *list = Term::cons(Term::Pid(id), std::mem::replace(list, Term::Nil));
-                state.pid_ix += 1;
+                if Some(id) != hidden {
+                    ptab_list_push(&mut state.found, &mut state.pid_ix, id);
+                }
             }
             let reds = (end - state.tix as u64) / PTAB_INDICES_PER_RED;
             state.tix = end as i64;
@@ -4358,14 +4348,27 @@ pub(super) fn ptab_list(
             } else {
                 have
             }
-        } else if state.deleted > 0 {
+        } else if state.tix == PTAB_SIZE as i64 {
             let max = left.min(PTAB_CHUNK_REDS);
             let (mut reds, mut taken) = (0, 0);
-            while reds < max && taken < state.deleted as usize {
+            let deleted = scheduler.ptab_list_deleted();
+            while reds < max
+                && let Some(entry) = deleted.pop_front()
+            {
+                #[cfg(test)]
+                PTAB_CELLS.set(PTAB_CELLS.get() + 1);
                 taken += 1;
                 reds += 1 + usize::from(taken % PTAB_DELETED_PER_RED == 0);
+                if let Some(id) = entry
+                    && Some(id) != hidden
+                {
+                    ptab_list_push(&mut state.gone, &mut state.pid_ix, id);
+                }
             }
-            state.deleted -= taken as i64;
+            if deleted.is_empty() {
+                scheduler.ptab_list_end();
+                state.tix += 1;
+            }
             scheduler.current_process_mut().bump_reductions(reds as i32);
             left.saturating_sub(reds)
         } else {
@@ -4394,7 +4397,7 @@ pub(super) fn ptab_list(
             scheduler.current_process_mut().bump_reductions(reds as i32);
             left - reds
         };
-        if state.tix == PTAB_SIZE as i64 && state.deleted == 0 && state.pid_ix == 0 {
+        if state.tix > PTAB_SIZE as i64 && state.pid_ix == 0 {
             return Ok(Value(state.result));
         }
         if have == 0 {

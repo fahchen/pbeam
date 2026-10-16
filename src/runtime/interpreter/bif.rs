@@ -865,7 +865,7 @@ impl BeamProgram {
     ///   the pattern of `binary:match/2` or `binary:split/2,3`
     ///   ([`binary::find_trap`]). ERTS traps to the same export with magic references to the search state
     ///   and to the compiled pattern (`erl_bif_binary.c:75-77`, `1935-1952`).
-    /// - `erts_internal:ptab_list_continue/7`, with the state of an
+    /// - `erts_internal:ptab_list_continue/5`, with the state of an
     ///   `erlang:processes/0` call ([`erlang::ptab_list`]). ERTS traps to
     ///   `erts_internal:ptab_list_continue/2` with the result so far and a
     ///   magic reference to the state (`erl_ptab.c:770-780`).
@@ -977,10 +977,8 @@ impl BeamProgram {
             "ptab_list_continue",
             [
                 Term::Integer(tix),
-                rest,
                 found,
                 gone,
-                Term::Integer(deleted),
                 Term::Integer(pid_ix),
                 result,
             ],
@@ -988,10 +986,8 @@ impl BeamProgram {
         {
             let state = erlang::PtabList {
                 tix: *tix,
-                rest: std::mem::replace(rest, Term::Nil),
                 found: std::mem::replace(found, Term::Nil),
                 gone: std::mem::replace(gone, Term::Nil),
-                deleted: *deleted,
                 pid_ix: *pid_ix,
                 result: std::mem::replace(result, Term::Nil),
             };

@@ -131,3 +131,42 @@ fn charges_and_traps_for_the_process_table_as_pinned_erts() {
     assert_eq!(exited(60), pair("true", "true"));
     assert_eq!(exited(20), pair("false", "false"));
 }
+
+#[test]
+fn lists_the_processes_that_spawn_and_exit_during_a_trapped_read_as_pinned_erts() {
+    // `processes/0` traps after its first chunk while other processes
+    // spawn and exit. The result has each process of the start: the found
+    // pids in index order, then the pids that exited before the read got
+    // to their chunk, in the order of their exits. A process that starts
+    // during the read is not in it, also when it exits (erl_ptab.c:996-1170).
+    let probe = "io:format(\"~w~n\", [processes_probe:churn()]), halt().";
+    let reference = Command::new("erl")
+        .args([
+            "+S",
+            "1",
+            "-noshell",
+            "-pa",
+            "fixtures/processes",
+            "-eval",
+            probe,
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        (reference.stdout.as_slice(), reference.stderr.as_slice()),
+        (&b"[self,keeper,churner,gone]\n"[..], &b""[..])
+    );
+
+    let erlang = pinned_beam("erlang");
+    let lists = pinned_beam("lists");
+    let program = BeamProgram::load(&[&erlang, &lists, PROCESSES_PROBE]).unwrap();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    let names = ["self", "keeper", "churner", "gone"];
+    assert_eq!(
+        program
+            .execute("processes_probe", "churn", &[])
+            .unwrap()
+            .term,
+        Term::list_from(names.map(atom))
+    );
+}

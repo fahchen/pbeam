@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     time::Duration,
 };
 
@@ -48,6 +48,12 @@ pub(super) const CONTEXT_REDS: i32 = 4000;
 /// The pid of the root process, `<0.0.0>`. The launcher makes the root
 /// process with it, also after it made the policy process.
 const ROOT: ProcessId = ProcessId(0);
+
+/// Indices of the ERTS process table: the default process limit
+/// (`erl_process.c`, `ERTS_DEFAULT_MAX_PROCESSES`). The index of a pid is
+/// its number modulo this size, and `erlang:processes/0` reads the
+/// table in this index order.
+pub(super) const PTAB_SIZE: u64 = 1 << 20;
 
 /// The reductions that `erts_do_exit_process` bumps when a process starts
 /// its exit (`erl_process.c:14229`).
@@ -1488,20 +1494,67 @@ impl Scheduler {
         self.code.loaded_by_id(frame.module_id)
     }
 
-    /// Return the pid of each process of the process table, also the
-    /// current process and an exiting process, in ascending pid order, as
-    /// `erlang:processes/0` lists the process table in index order
-    /// (`erts_ptab_list`, `erl_ptab.c:1006-1180`).
+    /// Start an `erlang:processes/0` read of the process table by the
+    /// current process, as `ptab_list_bif_engine` adds its invocation to
+    /// the deleted list (`erl_ptab.c:922-951`).
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(scheduler.process_ids(), vec![ProcessId(0), ProcessId(2)]);
+    /// scheduler.ptab_list_start();
     /// ```
-    pub(super) fn process_ids(&self) -> Vec<ProcessId> {
-        let mut ids: Vec<ProcessId> = self.processes.values().map(|process| process.id).collect();
-        ids.sort_unstable();
-        ids
+    pub(super) fn ptab_list_start(&mut self) {
+        let id = self.current_process().id;
+        self.processes.start_list(id);
+    }
+
+    /// Return the pid of each process of the next indices of the
+    /// `erlang:processes/0` read of the current process, up to `end`, also
+    /// the current process and an exiting process, in the index order of
+    /// the ERTS table, when the process was in the table at the start of
+    /// the read (`erl_ptab.c:996-1017`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(scheduler.ptab_list_chunk(1000).collect::<Vec<_>>(), vec![ProcessId(0)]);
+    /// ```
+    pub(super) fn ptab_list_chunk(&mut self, end: u64) -> impl Iterator<Item = ProcessId> + '_ {
+        let id = self.current_process().id;
+        self.processes.list_chunk(id, end)
+    }
+
+    /// Return the entries of the processes that left the table during the
+    /// `erlang:processes/0` read of the current process, the oldest first:
+    /// the pid of a process that the read lists, else `None`
+    /// (`erl_ptab.c:1046-1170`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(scheduler.ptab_list_deleted().pop_front(), None);
+    /// ```
+    pub(super) fn ptab_list_deleted(&mut self) -> &mut VecDeque<Option<ProcessId>> {
+        let id = self.current_process().id;
+        self.processes.list_deleted(id)
+    }
+
+    /// Remove the process `id` from the process table, as its exit does.
+    #[cfg(test)]
+    pub(super) fn remove_process(&mut self, id: ProcessId) {
+        self.processes.remove(&id);
+    }
+
+    /// End the `erlang:processes/0` read of the current process.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.ptab_list_end();
+    /// ```
+    pub(super) fn ptab_list_end(&mut self) {
+        let id = self.current_process().id;
+        self.processes.end_list(id);
     }
 
     /// Return the process `id` of the process table, also the current

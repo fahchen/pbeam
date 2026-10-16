@@ -338,85 +338,97 @@ fn ptab_state(arguments: Vec<Term>) -> super::erlang::PtabList {
     let Ok(
         [
             Term::Integer(tix),
-            rest,
             found,
             gone,
-            Term::Integer(deleted),
             Term::Integer(pid_ix),
             result,
         ],
-    ) = <[Term; 7]>::try_from(arguments)
+    ) = <[Term; 5]>::try_from(arguments)
     else {
-        panic!("the trap has the seven arguments of the state");
+        panic!("the trap has the five arguments of the state");
     };
     super::erlang::PtabList {
         tix,
-        rest,
         found,
         gone,
-        deleted,
         pid_ix,
         result,
     }
 }
 
-/// Assert that each turn of `erlang:processes/0` reads and builds only the
-/// list cells that its budget pays for. A turn reads at most one chunk of
-/// 1000 indices of the table, and builds at most 75 result cells for each
-/// reduction (`erl_ptab.c:1006-1037`, `1201-1254`). It does not copy the
-/// state of the call, which is in proportion to the number of processes.
+/// Assert that each turn of `erlang:processes/0`, also the first, reads and
+/// builds only the table entries and list cells that its budget pays for.
+/// A turn reads at most one chunk of 1000 indices of the table, and builds
+/// at most 75 result cells for each reduction (`erl_ptab.c:1006-1037`,
+/// `1201-1254`). It does not read the whole table at the start, and it
+/// does not copy the state of the call, which is in proportion to the
+/// number of processes.
 #[test]
 fn each_turn_of_processes_touches_only_the_cells_of_its_budget() {
     use super::erlang::{PTAB_CELLS, processes, ptab_list};
     let count = 10_000;
-    let mut scheduler = ptab_scheduler(count, 4_000);
+    let mut scheduler = ptab_scheduler(count, 50);
+    PTAB_CELLS.set(0);
     let mut result = processes(&mut scheduler).unwrap();
     let mut turns = 0;
-    while let BifResult::TrapBif { arguments, .. } = result {
+    let list = loop {
+        assert!(PTAB_CELLS.get() <= 1_000 + 75 * 50);
+        let arguments = match result {
+            BifResult::TrapBif { arguments, .. } => arguments,
+            BifResult::Value(list) => break list,
+            _ => panic!("the call traps or returns its result"),
+        };
         let state = ptab_state(arguments);
         scheduler.current_process_mut().fcalls = 50;
         PTAB_CELLS.set(0);
         result = ptab_list(&mut scheduler, state).unwrap();
-        assert!(PTAB_CELLS.get() <= 1_000 + 75 * 50);
         turns += 1;
-    }
-    assert!(turns > 900);
-    let BifResult::Value(list) = result else {
-        panic!("the call returns its result");
     };
+    assert!(turns > 900);
     assert_eq!(
         list,
         Term::list_from((0..count).map(|id| Term::Pid(ProcessId(id))))
     );
 }
 
-/// Assert that a step through the deleted pids that charges 1 reduction
-/// more than the budget traps, as ERTS clamps the reductions that remain at
-/// zero (`erl_ptab.c:1176-1180`). Ten deleted pids cost 11 reductions with
-/// a budget of 10. The deleted pids come after the found pids, in index
-/// order.
+/// Assert that `erlang:processes/0` steps through each process that left
+/// the table during the read. A process that was in the table at the
+/// start and left it before the call read its index comes after the found
+/// pids, in the order of the exits. A process that entered the table after
+/// the start is not in the result, but its exit costs a reduction
+/// (`erl_ptab.c:1046-1170`). A step that charges 1 reduction more than the
+/// budget traps, as ERTS clamps the reductions that remain at zero
+/// (`erl_ptab.c:1176-1180`): ten exits cost 11 reductions with a budget of
+/// 10.
 #[test]
 fn processes_traps_when_the_deleted_pids_use_more_than_the_budget() {
-    use super::erlang::{PtabList, ptab_list};
-    let mut scheduler = ptab_scheduler(1, 10);
-    let pids = |ids: Vec<u64>| Term::list_from(ids.into_iter().map(|id| Term::Pid(ProcessId(id))));
-    let state = PtabList {
-        tix: 1 << 20,
-        rest: Term::Nil,
-        found: pids(vec![0]),
-        gone: pids((100..110).rev().collect()),
-        deleted: 10,
-        pid_ix: 11,
-        result: Term::Nil,
+    use super::erlang::{processes, ptab_list};
+    let mut scheduler = ptab_scheduler(1, 50);
+    let start = || Start::Undefined {
+        module: Atom::from_static("erlang").unwrap(),
+        function: Atom::from_static("ok").unwrap(),
     };
+    for id in 1001..1010 {
+        scheduler.insert(ProcessState::new(ProcessId(id), start(), vec![]));
+    }
+    let BifResult::TrapBif { arguments, .. } = processes(&mut scheduler).unwrap() else {
+        panic!("the call traps after the first chunk");
+    };
+    scheduler.insert(ProcessState::new(ProcessId(2000), start(), vec![]));
+    for id in (1001..1010).rev().chain([2000]) {
+        scheduler.remove_process(ProcessId(id));
+    }
+    let mut state = ptab_state(arguments);
+    state.tix = 1 << 20;
+    scheduler.current_process_mut().fcalls = 10;
     let BifResult::TrapBif { arguments, .. } = ptab_list(&mut scheduler, state).unwrap() else {
         panic!("the call traps");
     };
     let state = ptab_state(arguments);
-    assert_eq!(state.deleted, 0);
+    assert_eq!(state.tix, (1 << 20) + 1);
     scheduler.current_process_mut().fcalls = 4_000;
     let result = ptab_list(&mut scheduler, state).unwrap();
-    let mut ids = vec![0];
-    ids.extend(100..110);
-    assert!(matches!(result, BifResult::Value(list) if list == pids(ids)));
+    let ids = [0].into_iter().chain((1001..1010).rev());
+    let pids = Term::list_from(ids.map(|id| Term::Pid(ProcessId(id))));
+    assert!(matches!(result, BifResult::Value(list) if list == pids));
 }
