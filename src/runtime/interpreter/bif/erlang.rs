@@ -2463,6 +2463,13 @@ pub(super) fn list_to_atom(atoms: &mut AtomTable, term: &Term) -> Result<BifResu
     Ok(Value(Term::Atom(atoms.put(&name)?)))
 }
 
+/// The byte order of the target, the result of `erlang:system_info(endian)`.
+#[cfg(target_endian = "big")]
+const ENDIAN: &str = "big";
+/// The byte order of the target, the result of `erlang:system_info(endian)`.
+#[cfg(target_endian = "little")]
+const ENDIAN: &str = "little";
+
 /// Run `erlang:system_info/1`. The item `os_type` returns `{unix, Flavor}`,
 /// as ERTS `system_info_1` (`erl_bif_info.c:3026-3027`) does with `os_type`
 /// `"unix"` (`sys/unix/sys.c:835`) and the OS flavor of the host. ERTS makes
@@ -2474,7 +2481,10 @@ pub(super) fn list_to_atom(atoms: &mut AtomTable, term: &Term) -> Result<BifResu
 /// `erts_no_schedulers` (`erl_bif_info.c:3257-3260`), which is 1: PBeam has
 /// one scheduler, as ERTS with `erl +S 1`. The item `build_type` returns
 /// `opt`, the result of an ERTS build without a debug or other special
-/// build flag (`erl_bif_info.c:2799-2824`).
+/// build flag (`erl_bif_info.c:2799-2824`). The item `endian` returns
+/// `big` on a big-endian build and `little` on each other build
+/// (`erl_bif_info.c:3101-3106`); PBeam takes the byte order of its own
+/// target, as ERTS takes `WORDS_BIGENDIAN` of its build.
 ///
 /// # Examples
 ///
@@ -2505,6 +2515,9 @@ pub(super) fn system_info(atoms: &mut AtomTable, item: &Term) -> Result<BifResul
         Term::Atom(atom) if atoms.name_of(atom) == "schedulers" => Ok(Value(Term::Integer(1))),
         Term::Atom(atom) if atoms.name_of(atom) == "build_type" => {
             Ok(Value(Term::Atom(atoms.put("opt")?)))
+        }
+        Term::Atom(atom) if atoms.name_of(atom) == "endian" => {
+            Ok(Value(Term::Atom(atoms.put(ENDIAN)?)))
         }
         _ => Err(error(format!(
             "unsupported erlang:system_info/1 argument {}",

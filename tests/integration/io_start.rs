@@ -473,6 +473,22 @@ fn returns_the_otp_release_as_pinned_erts() {
 }
 
 #[test]
+fn returns_the_endian_as_pinned_erts() {
+    // `io_start_probe:endian/0` runs `erlang:system_info(endian)`, as
+    // `elixir:check_endianness/0` (elixir.erl:33-41 of Elixir v1.20.4) does.
+    // ERTS returns `little` on a build without `WORDS_BIGENDIAN`
+    // (`erl_bif_info.c:3101-3106`), as on each pinned host.
+    let program = BeamProgram::load(&[IO_START_PROBE]).unwrap();
+    let result = program.execute("io_start_probe", "endian", &[]).unwrap();
+    let Term::Atom(endian) = &result.term else {
+        panic!("system_info(endian) must return an atom");
+    };
+    let endian = format!("{}\n", result.atoms().name_of(endian));
+    assert_eq!(reference("endian"), endian.into_bytes());
+    assert_eq!(reference("endian"), b"little\n");
+}
+
+#[test]
 fn rejects_other_system_info_items() {
     // `io_start_probe:system_other/0` runs `erlang:system_info(wordsize)`.
     // ERTS returns the word size; PBeam supports only `os_type` and
