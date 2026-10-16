@@ -312,10 +312,19 @@ const AMBIENT: [&str; 40] = [
 
 /// Each entry that the column "Capability" of the effect inventory marks
 /// `later`: it has no check until its named task adds one.
-/// `effect_probe:ambient/0` also calls each entry once, except
-/// `prim_file:read_nif/2`: a file with a read mode needs the `prim_buffer`
-/// NIFs, which PBeam does not link yet (#733).
-const LATER: [&str; 9] = [
+/// `effect_probe:ambient/0` also calls each entry once. `null_read/0` and
+/// `buffer/0` call the `prim_buffer` entries, and `buffer/0` calls
+/// `peek_head/1` and `copying_read/2` through `prim_buffer:read/2`.
+const LATER: [&str; 18] = [
+    "prim_buffer:copying_read/2",
+    "prim_buffer:find_byte_index/2",
+    "prim_buffer:new/0",
+    "prim_buffer:peek_head/1",
+    "prim_buffer:size/1",
+    "prim_buffer:skip/2",
+    "prim_buffer:try_lock/1",
+    "prim_buffer:unlock/1",
+    "prim_buffer:write/2",
     "prim_file:close_nif/1",
     "prim_file:get_cwd_nif/0",
     "prim_file:list_dir_nif/1",
@@ -383,7 +392,8 @@ fn inventory_marked(value: &str) -> BTreeSet<&'static str> {
 fn program() -> BeamProgram {
     let erlang = pinned_beam("erlang");
     let prim_file = pinned_beam("prim_file");
-    BeamProgram::load(&[&erlang, &prim_file, PRIM_TTY, EFFECT_PROBE]).unwrap()
+    let prim_buffer = pinned_beam("prim_buffer");
+    BeamProgram::load(&[&erlang, &prim_file, &prim_buffer, PRIM_TTY, EFFECT_PROBE]).unwrap()
 }
 
 /// Run `effect_probe:Function()` with `policy`.
@@ -444,10 +454,7 @@ fn calls_each_ambient_and_later_entry_with_no_capability() {
     // The root process holds no capability, so no policy can permit the
     // calls: each `ambient` and `later` entry has no check.
     let program = program();
-    let expected = "[true,true,false,true,true,true,integer,integer,integer,date_time,unix,\
-                    nonode@nohost,nonode@nohost,[],[nonode@nohost],1,true,{error,badfile},{error,badarg},false,false,true,\
-                    effect_probe_ambient_atom,ok,effect_probe_ambient,true,false,[{key,value}],value,\
-                    true,true,set,reference,true,atom,2,ok,1,error,ok,error,ok,error,[ok,{ok,0},ok]]";
+    let expected = "[true,true,false,true,true,true,integer,integer,integer,date_time,unix,nonode@nohost,nonode@nohost,[],[nonode@nohost],1,true,{error,badfile},{error,badarg},false,false,true,effect_probe_ambient_atom,ok,effect_probe_ambient,true,false,[{key,value}],value,true,true,set,reference,true,atom,2,ok,1,error,ok,error,ok,error,[ok,{ok,0},ok],[eof,ok],[11,<<48,49>>,{ok,8},9,ok,0,<<120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120>>,acquired,ok]]";
     assert_eq!(run_text(&program, "ambient", &Grants(vec![])), expected);
     assert_eq!(erts_with_stand_in("ambient"), format!("{expected}\n"));
 }
@@ -958,7 +965,8 @@ fn keeps_the_persistent_terms_after_a_denied_put() {
 }
 
 /// Return a term as `io:format("~w")` prints it, for the atoms, the
-/// integers, and the tuples of the terminal probe results.
+/// integers, the binaries, and the tuples of the terminal and buffer probe
+/// results.
 ///
 /// The atom names come from `atoms`, the table that owns the term.
 ///
@@ -966,6 +974,7 @@ fn keeps_the_persistent_terms_after_a_denied_put() {
 ///
 /// ```rust,ignore
 /// assert_eq!(text(&Term::list_from(vec![Term::static_atom("ok")]), &atoms), "[ok]");
+/// assert_eq!(text(&Term::binary(b"ab".to_vec()), &atoms), "<<97,98>>");
 /// ```
 fn text(term: &Term, atoms: &AtomTable) -> String {
     let join = |terms: &[Term]| {
@@ -978,6 +987,14 @@ fn text(term: &Term, atoms: &AtomTable) -> String {
     match term {
         Term::Atom(atom) => atoms.name_of(atom).to_owned(),
         Term::Integer(integer) => integer.to_string(),
+        Term::Binary(bytes) => format!(
+            "<<{}>>",
+            bytes
+                .iter()
+                .map(u8::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
         _ if let Some(terms) = term.proper_list() => {
             format!("[{}]", join(&terms.cloned().collect::<Vec<_>>()))
         }
