@@ -443,7 +443,11 @@ ambient() ->
         element(1, prim_file:open("/", [read])),
         null_write(),
         null_read(),
-        buffer()
+        buffer(),
+        erts_internal:processes_next(1048576),
+        attempt(fun() -> erts_internal:purge_module(effect_probe_missing, complete) end),
+        erts_internal:request_system_task(Self, normal, {check_process_code, Name, lists}),
+        receive {check_process_code, Name, Refers} -> Refers end
     ].
 
 %% Open /dev/null in write mode, write, move the position, and close it

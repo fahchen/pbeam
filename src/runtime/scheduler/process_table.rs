@@ -447,6 +447,27 @@ impl ProcessTable {
         self.slots.iter().flatten()
     }
 
+    /// Return the index and the pid of each process in the table, also an
+    /// exiting process, with an index from `start` up to `end`, in the index
+    /// order of the ERTS table, as `erts_ptab_processes_next` reads the
+    /// elements of the table (`erl_ptab.c:1514-1521`). The work is in
+    /// proportion to the processes of these indices.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(table.indexed(0, 25).collect::<Vec<_>>(), vec![(0, ProcessId(0))]);
+    /// ```
+    pub(super) fn indexed(
+        &self,
+        start: u64,
+        end: u64,
+    ) -> impl Iterator<Item = (u64, ProcessId)> + '_ {
+        self.order
+            .range((start, ProcessId(0))..(end, ProcessId(0)))
+            .map(|((index, id), _)| (*index, *id))
+    }
+
     /// Return whether the table has no process.
     ///
     /// # Examples

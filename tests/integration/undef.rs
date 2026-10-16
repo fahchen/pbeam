@@ -4,7 +4,7 @@ mod common;
 use std::process::Command;
 
 use common::pinned_beam;
-use pbeam_runtime::{BeamProgram, Term};
+use pbeam_runtime::{AtomTable, BeamProgram, Map, Term};
 
 const UNDEF_PROBE: &[u8] = include_bytes!("../../fixtures/undef/undef_probe.beam");
 const UNDEF_TARGET: &[u8] = include_bytes!("../../fixtures/undef/undef_target.beam");
@@ -280,13 +280,35 @@ fn raises_system_limit_for_a_spawn_with_more_than_1023_arguments() {
             ])]),
         ])
     );
-    // PBeam gives the stack trace `[]` (row "Exception stack trace"). ERTS
-    // gives `[{erlang, apply, [Module, missing, Args], ErrorInfo}]`, so the
-    // reference compares only the reason.
-    let system_limit = Term::tuple(vec![atom("system_limit"), Term::nil()]);
-    assert_eq!(down("undef_target", 1024).term, system_limit);
+    // The raise gives the stack trace of the ERTS `apply`
+    // (`beam_common.c:1455-1459`, `1503-1513`): one frame with the module,
+    // the function, and the argument list of the call.
+    let system_limit = |module: &str| {
+        Term::tuple(vec![
+            atom("system_limit"),
+            Term::list_from(vec![Term::tuple(vec![
+                atom("erlang"),
+                atom("apply"),
+                Term::list_from(vec![atom(module), atom("missing"), arguments(1024)]),
+                Term::list_from(vec![Term::tuple(vec![
+                    atom("error_info"),
+                    Term::Map(
+                        Map::from_pairs(
+                            vec![(atom("module"), atom("erl_erts_errors"))],
+                            &AtomTable::new(),
+                        )
+                        .unwrap(),
+                    ),
+                ])]),
+            ])]),
+        ])
+    };
+    assert_eq!(
+        down("undef_target", 1024).term,
+        system_limit("undef_target")
+    );
     // `missing` is not a loaded module.
-    assert_eq!(down("missing", 1024).term, system_limit);
+    assert_eq!(down("missing", 1024).term, system_limit("missing"));
 
     let reference = Command::new("erl")
         .args([

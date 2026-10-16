@@ -76,16 +76,47 @@ fn adds_the_stack_trace_to_a_caught_error() {
         b"undef [{erlang,nif_error,[undef]},{exception_probe,stub,0}]\n"
     );
 
-    // PBeam records no stack frames, so the stack trace is empty. This is
-    // the "Exception stack trace" row in `docs/erts-differences.md`.
+    // PBeam gives the same two first frames (row "Exception stack trace"
+    // in `docs/erts-differences.md`).
     let program = BeamProgram::load(&[EXCEPTION_PROBE]).unwrap();
     let atom = |name: &str| atom(&program, name);
+    let caught = program
+        .execute("exception_probe", "catch_stub", &[])
+        .unwrap()
+        .term;
+    let Term::Tuple(exit) = &caught else {
+        panic!("catch gives a tuple, got {caught:?}");
+    };
+    let Term::Tuple(reason) = &exit[1] else {
+        panic!("the reason is {{undef, Stack}}, got {caught:?}");
+    };
+    let frames: Vec<Term> = reason[1]
+        .proper_list()
+        .unwrap()
+        .take(2)
+        .map(|frame| match frame {
+            Term::Tuple(items) => Term::tuple(items[..3].to_vec()),
+            other => other.clone(),
+        })
+        .collect();
     assert_eq!(
-        program
-            .execute("exception_probe", "catch_stub", &[])
-            .unwrap()
-            .term,
-        pair(atom("EXIT"), pair(atom("undef"), Term::nil()))
+        (&exit[0], &reason[0], frames),
+        (
+            &atom("EXIT"),
+            &atom("undef"),
+            vec![
+                Term::tuple(vec![
+                    atom("erlang"),
+                    atom("nif_error"),
+                    Term::list_from(vec![atom("undef")]),
+                ]),
+                Term::tuple(vec![
+                    atom("exception_probe"),
+                    atom("stub"),
+                    Term::Integer(0)
+                ]),
+            ]
+        )
     );
 }
 

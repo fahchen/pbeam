@@ -1408,11 +1408,12 @@ pub(super) fn spawn_link(
 /// the start priority of the new process, else it is `normal`
 /// (`erl_process.c:12246`, `12275-12287`). `options` that are not a proper
 /// list, and a `message_queue_data` or `priority` option with another
-/// value, raise `badarg`, as
-/// `erts_parse_spawn_opts` (`erl_process.c:12222-12434`) does. The PBeam
+/// value, raise `badarg` with the `error_info` cause `badopt`, as
+/// `erts_parse_spawn_opts` (`erl_process.c:12222-12434`) and
+/// `spawn_opt_4` (`bif.c:1040-1051`) do. The PBeam
 /// option `{capabilities, Map}` restricts the capabilities of the new process
 /// (see `capability::restrictions`), and the last such option wins. A `Map`
-/// that is not valid raises `badarg`. Any other option gives a runtime
+/// that is not valid raises the same `badarg`. Any other option gives a runtime
 /// error. After the options, a `module` or `function` that is not an atom
 /// raises `badarg`, as in `spawn/3`.
 ///
@@ -1432,7 +1433,7 @@ pub(super) fn spawn_opt(
     options: &Term,
 ) -> Result<BifResult, BeamError> {
     let Some(options) = options.proper_list() else {
-        return Ok(BifResult::badarg());
+        return Ok(BifResult::badopt());
     };
     let mut spawn_options = SpawnOptions::default();
     for option in options {
@@ -1444,7 +1445,7 @@ pub(super) fn spawn_opt(
             Term::Tuple(option) if matches!(option.as_ref(), [Term::Atom(name), _] if name.is_static("monitor")) =>
             {
                 let Some(monitor) = monitor_options(&option[1]) else {
-                    return Ok(BifResult::badarg());
+                    return Ok(BifResult::badopt());
                 };
                 if monitor.alias.is_some() || monitor.priority {
                     return Err(error(format!(
@@ -1459,7 +1460,7 @@ pub(super) fn spawn_opt(
                 spawn_options.flags.off_heap_message_queue = match &option[1] {
                     Term::Atom(value) if value.is_static("on_heap") => false,
                     Term::Atom(value) if value.is_static("off_heap") => true,
-                    _ => return Ok(BifResult::badarg()),
+                    _ => return Ok(BifResult::badopt()),
                 };
             }
             Term::Tuple(option) if matches!(option.as_ref(), [Term::Atom(name), _] if name.is_static("priority")) =>
@@ -1474,7 +1475,7 @@ pub(super) fn spawn_opt(
                     _ => None,
                 };
                 let Some(priority) = priority else {
-                    return Ok(BifResult::badarg());
+                    return Ok(BifResult::badopt());
                 };
                 spawn_options.flags.priority = priority;
             }
@@ -1483,7 +1484,7 @@ pub(super) fn spawn_opt(
                 let Some(restrictions) =
                     capability::restrictions(&context.scheduler.atoms, &option[1])
                 else {
-                    return Ok(BifResult::badarg());
+                    return Ok(BifResult::badopt());
                 };
                 spawn_options.capabilities = Some(restrictions);
             }
@@ -2544,6 +2545,11 @@ pub(super) fn system_info(atoms: &mut AtomTable, item: &Term) -> Result<BifResul
             Ok(Value(Term::static_atom("opt")))
         }
         Term::Atom(atom) if atoms.name_of(atom) == "endian" => Ok(Value(Term::static_atom(ENDIAN))),
+        // `2 * erts_no_schedulers` (`erl_init.c:1354`), and PBeam has one
+        // scheduler. `erlang:system_flag/2` cannot change it in PBeam.
+        Term::Atom(atom) if atom.is_static("outstanding_system_requests_limit") => {
+            Ok(Value(Term::Integer(2)))
+        }
         _ => Err(error(format!(
             "unsupported erlang:system_info/1 argument {}",
             debug_term(item, atoms)
@@ -4456,6 +4462,25 @@ fn ptab_list_push(list: &mut Term, pid_ix: &mut i64, pid: ProcessId) {
     *pid_ix += 1;
 }
 
+/// Return the pid of the policy process when the current process is not a
+/// boot process, else `None`: a read of the process table by a process
+/// that is not a boot process does not give the pid of the policy process
+/// (section "Policy module, policy process, and policy table" of
+/// `docs/capability-security-migration.md`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(hidden_policy(&scheduler), scheduler.policy_id());
+/// ```
+pub(super) fn hidden_policy(scheduler: &Scheduler) -> Option<ProcessId> {
+    if scheduler.current_process().security.is_boot() {
+        None
+    } else {
+        scheduler.policy_id()
+    }
+}
+
 /// Continue an `erlang:processes/0` call with `state`, as
 /// `ptab_list_bif_engine` does (`erl_ptab.c:888-1280`), until the call
 /// returns its result or uses its reductions and traps.
@@ -4488,11 +4513,7 @@ pub(super) fn ptab_list(
     scheduler: &mut Scheduler,
     mut state: PtabList,
 ) -> Result<BifResult, BeamError> {
-    let hidden = if scheduler.current_process().security.is_boot() {
-        None
-    } else {
-        scheduler.policy_id()
-    };
+    let hidden = hidden_policy(scheduler);
     if state.tix < 0 {
         scheduler.ptab_list_start();
         state.tix = 0;
