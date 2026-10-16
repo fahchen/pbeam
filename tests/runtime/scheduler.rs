@@ -1928,7 +1928,7 @@ fn unlinks_the_new_owner_after_its_queued_link_signal_at_a_driver_exit() {
         .spawn(
             Start::Entry(frame()),
             vec![],
-            false,
+            None,
             false,
             StartFlags::default(),
             None,
