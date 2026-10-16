@@ -13,6 +13,11 @@
 %% raw_file_io_raw.erl, prim_file.erl). In write mode, prim_file keeps no
 %% read buffer, so no prim_buffer NIF runs (prim_file.erl:512-527). The
 %% append open gives write too, because append alone keeps a read buffer.
+%%
+%% A file with a read mode keeps a read buffer of prim_buffer:new/0
+%% (prim_file.erl:516-517). file:read/2, file:read_line/1, and
+%% file:position/2 read, search, and wipe that buffer, and io:get_line/2
+%% reads a line of a file with the encoding {utf16, little}.
 main() ->
     Path = os:getenv("FILE_IO_PROBE_PATH"),
     Dir = filename:dirname(Path),
@@ -35,6 +40,26 @@ main() ->
     IsDir = file:open(Dir, [write]),
     NotDir = file:open(filename:join(Path, "x"), [write]),
     Missing = file:write_file(filename:join([Dir, "missing", "x"]), <<>>),
+    {ok, Reader} = file:open(Path, [read]),
+    Line1 = file:read_line(Reader),
+    Chunk = file:read(Reader, 2),
+    ChunkRest = file:read(Reader, 100),
+    ReadPosition = file:position(Reader, cur),
+    ReadEof = file:read(Reader, 1),
+    CloseReader = file:close(Reader),
+    Utf16Path = filename:join(Dir, "utf16.txt"),
+    Utf16Write = file:write_file(Utf16Path, <<"a", 0, "b", 0, "c", 0, "\n", 0>>),
+    {ok, Utf16} = file:open(Utf16Path, [read, {encoding, {utf16, little}}]),
+    Utf16Line = io:get_line(Utf16, ""),
+    Utf16Eof = io:get_line(Utf16, ""),
+    Utf16Close = file:close(Utf16),
+    {ok, Appender} = file:open(Path, [append]),
+    AppendOnly = file:write(Appender, <<"append\n">>),
+    AppendPosition = file:position(Appender, cur),
+    AppendClose = file:close(Appender),
     io:format("~p~n", [[First, Read1, Write, Position, Iodata, End, Negative,
                         Close, Again, Read2, Appended, Read3, Exclusive, IsDir,
-                        NotDir, Missing]]).
+                        NotDir, Missing, Line1, Chunk, ChunkRest, ReadPosition,
+                        ReadEof, CloseReader, Utf16Write, Utf16Line, Utf16Eof,
+                        Utf16Close, AppendOnly, AppendPosition,
+                        AppendClose]]).
