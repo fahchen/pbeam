@@ -217,7 +217,9 @@ impl Scheduler {
     /// Close the open port `id` with the reason `reason` from its driver,
     /// as `driver_exit` does (io.c:7228-7249): the port first unlinks its
     /// owner (`unlink_proc`, io.c:2889-2909), so only the other linked
-    /// processes get the link exit signal.
+    /// processes get the link exit signal. The owner removes its side of
+    /// the link when it handles the unlink signal [`Signal::PortUnlink`],
+    /// after a link signal that `erlang:port_connect/2` queued before.
     ///
     /// # Examples
     ///
@@ -232,9 +234,9 @@ impl Scheduler {
         let port = self.resources.borrow_mut::<Ports>().get_mut(id);
         let port = port.expect("the port of a driver exit is open");
         let owner = port.owner;
-        port.links.remove(&owner);
-        if let Some(process) = self.process_mut(owner) {
-            process.links.remove(&LinkId::Port(id));
+        if port.links.remove(&owner) {
+            // An owner that does not exist drops the signal.
+            let _ = self.send_signal(None, owner, Signal::PortUnlink { port: id });
         }
         self.close_port(id, reason)
     }

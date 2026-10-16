@@ -1867,6 +1867,7 @@ fn removes_a_reply_demonitor_port_monitor_from_the_port_at_the_alias_message() {
 
 #[test]
 fn sends_the_messages_of_an_active_socket_to_the_owner_and_ends_the_port() {
+    use super::signals::HandlingPoint;
     use crate::runtime::port::{
         Driver, Ports,
         inet::{Event, Inet, SocketType},
@@ -1902,5 +1903,49 @@ fn sends_the_messages_of_an_active_socket_to_the_owner_and_ends_the_port() {
             .get(port)
             .is_none()
     );
+    scheduler
+        .handle_signals(id, 100, 100, HandlingPoint::ScheduleIn)
+        .unwrap();
     assert!(scheduler.processes[&id].links.is_empty());
+}
+
+#[test]
+fn unlinks_the_new_owner_after_its_queued_link_signal_at_a_driver_exit() {
+    use super::signals::HandlingPoint;
+    use crate::runtime::port::{
+        Driver,
+        inet::{Event, Inet, SocketType},
+    };
+    use socket2::{Domain, Socket, Type};
+    // `erlang:port_connect/2` queues the link signal (io.c:2355-2380), and
+    // `driver_exit` then queues the unlink signal of `unlink_proc`
+    // (io.c:2889-2909, 7228-7249). The new owner handles them in order and
+    // keeps no link to the closed port.
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let (child, _) = scheduler
+        .spawn(
+            Start::Entry(frame()),
+            vec![],
+            false,
+            false,
+            StartFlags::default(),
+            None,
+        )
+        .unwrap()
+        .unwrap();
+    let (local, _peer) = Socket::pair(Domain::UNIX, Type::STREAM, None).unwrap();
+    let tcp = Inet::new(SocketType::Stream).copy(local);
+    let port = scheduler
+        .open_port(b"tcp_inet".to_vec(), Driver::Inet(tcp))
+        .unwrap();
+    assert!(scheduler.connect_port(port, child));
+    let events = vec![Event::Exit("normal".to_owned())];
+    scheduler.deliver_events(port, events).unwrap();
+    scheduler
+        .handle_signals(child, 100, 100, HandlingPoint::ScheduleIn)
+        .unwrap();
+    let links = &scheduler.processes[&child].links;
+    assert!(links.get(&LinkId::Port(port)).is_none());
 }

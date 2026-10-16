@@ -465,6 +465,12 @@ impl Scheduler {
                 }
                 0
             }
+            Signal::PortUnlink { port } => {
+                let links = &mut self.handled(id, node).links;
+                let link = LinkId::Port(port);
+                let removed = links.get(&link) == Some(&0) && links.remove(&link).is_some();
+                4 * i32::from(removed)
+            }
             Signal::PortMonitor { port, reference } => {
                 let monitor = TargetMonitor::Port { port, reference };
                 self.handled(id, node).monitored_by.push(monitor);
