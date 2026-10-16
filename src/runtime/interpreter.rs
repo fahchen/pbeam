@@ -683,8 +683,21 @@ impl BeamProgram {
         let process = scheduler.current_process_mut();
         if let Some((module, function)) = process.undefined_start.take() {
             let outcome = if process.registers.len() > APPLY_MAX_ARGUMENTS {
-                let system_limit = Term::static_atom("system_limit");
-                raise(process, ExceptionClass::Error, system_limit)
+                // ERTS `apply` raises `system_limit` at the 1024th element
+                // of the argument list, before it looks up the export
+                // (`beam_common.c:1503-1513`). The registers then hold the
+                // module, the function, and the list
+                // (`beam_common.c:1455-1459`), so the stack trace is the one
+                // frame `{erlang, apply, [Module, Function, Arguments],
+                // [{error_info, ...}]}`.
+                let arity = process.registers.len() as u32;
+                let arguments = call_arguments(&process.registers, arity)?;
+                let call = vec![
+                    Term::Atom(module),
+                    Term::Atom(function),
+                    Term::list_from(arguments),
+                ];
+                self.apply_error(scheduler, call, "system_limit", true)?
             } else {
                 let arity = process.registers.len() as u32;
                 // The start of a process is a tail call of the MFA from the

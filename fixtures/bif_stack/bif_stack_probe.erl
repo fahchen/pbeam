@@ -107,13 +107,17 @@ fun_body(F) ->
 fun_tail(F) ->
     F(1).
 
-%% The initial call of a process is a BIF, or erlang:apply/3 of a BIF.
+%% The initial call of a process is a BIF, or erlang:apply/3 of a BIF. More
+%% than 1023 arguments raise system_limit with the frame
+%% {erlang, apply, [M, F, Arguments], ...}, as the apply of the start does
+%% (beam_common.c:1455-1459, 1503-1513).
 initial_calls() ->
     [down(erlang, atom_to_list, [1]),
      down(erlang, apply, [erlang, atom_to_list, [1]]),
      down(erlang, apply, [fun erlang:atom_to_list/1, [1]]),
      down(lists, member, [x, a]),
-     down(?MODULE, hibernated, [])].
+     down(?MODULE, hibernated, []),
+     down(lists, foo, lists:seq(1, 1100))].
 
 down(M, F, A) ->
     {Pid, Ref} = spawn_monitor(M, F, A),
