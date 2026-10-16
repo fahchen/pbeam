@@ -869,7 +869,7 @@ const PORT_INFO_ITEMS: [&str; 7] = [
 
 /// The items of `port_info/2` that PBeam does not give yet
 /// (`erts_bld_port_info`, `erl_bif_info.c:3654-3830`).
-const OTHER_PORT_ITEMS: [&str; 8] = [
+const OTHER_PORT_ITEMS: [&str; 7] = [
     "registered_name",
     "memory",
     "monitors",
@@ -877,7 +877,6 @@ const OTHER_PORT_ITEMS: [&str; 8] = [
     "parallelism",
     "queue_size",
     "locking",
-    "queue_data",
 ];
 
 /// Return the item `{Name, Value}` of the open port `port` with the number
