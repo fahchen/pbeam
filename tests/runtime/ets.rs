@@ -33,6 +33,19 @@ fn bounds_the_work_of_one_turn_of_a_busy_list_insert() {
     );
     assert_eq!(table.live_objects().len(), 10);
     assert!(table.busy.is_none());
+
+    // A walk that finds a key of the table frees the copies, and the
+    // counter yields after the loop unit of the last copy, so the next
+    // turn gives the result `false` (`erl_db.c:1863-1873`, `1909-1925`).
+    let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
+    table.insert_all(&atoms, vec![vec![Term::Integer(1)]]);
+    table.busy = Some(Busy::new(ProcessId(0), vec![vec![Term::Integer(1)]], true));
+    assert_eq!(table.step_busy(&atoms, 2), (2, None));
+    assert_eq!(
+        table.step_busy(&atoms, 2),
+        (0, Some(Term::static_atom("false")))
+    );
+    assert!(table.busy.is_none());
 }
 
 #[test]

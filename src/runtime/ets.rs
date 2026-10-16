@@ -767,7 +767,12 @@ impl Table {
         if busy.walk {
             while busy.walked < busy.objects.len() && (first || left > 0) {
                 first = false;
+                // The counter consumes the loop unit of the step and yields
+                // before the key of the object (`erl_db.c:1916-1923`).
                 left -= 1;
+                if left <= 0 {
+                    break;
+                }
                 let key = &busy.objects[busy.walked][self.keypos as usize - 1];
                 if self.object(atoms, key).is_some() {
                     busy.found = true;
@@ -787,12 +792,24 @@ impl Table {
         if busy.found {
             // The copy of each object goes away, one unit for each object
             // (`ets_insert_2_list_destroy_copied_dbterms`, `erl_db.c:1863-1873`).
+            // The counter yields after the loop unit of a step and before
+            // the copy goes away, as it does in the loop of the insert
+            // (`erl_db.c:1936-1940`).
             while busy.inserted < busy.objects.len() && (first || left > 0) {
                 first = false;
-                left -= 1;
+                if !busy.looped {
+                    left -= 1;
+                    busy.looped = true;
+                    if left <= 0 {
+                        exhausted = true;
+                        break;
+                    }
+                }
                 std::mem::take(&mut busy.objects[busy.inserted]);
+                busy.looped = false;
                 busy.inserted += 1;
             }
+            exhausted = exhausted || left <= 0;
         } else {
             // The objects go into the table, one unit for the loop of the
             // step and one for the object, and one more for each object

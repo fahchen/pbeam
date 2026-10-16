@@ -630,10 +630,16 @@ pub(super) fn insert_list(
                         tuples.iter().map(|object| object.to_vec()).collect(),
                         walk,
                     ));
-                    new = New::Locked {
-                        walk: 0,
-                        found: false,
-                    };
+                    // The call keeps its own BIF: `ets:insert_new/2` marks
+                    // the steps of the walk and the insert with
+                    // [`New::Locked`], and `ets:insert/2` with the units
+                    // that its copy and its steps used.
+                    if matches!(new, New::Unlocked) {
+                        new = New::Locked {
+                            walk: 0,
+                            found: false,
+                        };
+                    }
                     if bag.is_some() {
                         bag = Some(Term::list_from([Term::Integer(0)]));
                     }
