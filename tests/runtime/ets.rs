@@ -18,13 +18,18 @@ fn bounds_the_work_of_one_turn_of_a_busy_list_insert() {
     assert_eq!(table.step_busy(&atoms, 7), (0, None));
     let objects = (0..10).map(|value| vec![Term::Integer(value)]).collect();
     table.busy = Some(Busy::new(ProcessId(0), objects, false));
-    assert_eq!(table.step_busy(&atoms, 7), (8, None));
-    assert_eq!(table.live_objects().len(), 4);
+    // The counter yields after the loop unit of a step (`erl_db.c:1936-1940`),
+    // so 7 units put three objects in and charge the loop unit of the
+    // fourth.
+    assert_eq!(table.step_busy(&atoms, 7), (7, None));
+    assert_eq!(table.live_objects().len(), 3);
     assert_eq!(table.step_busy(&atoms, 2), (2, None));
-    assert_eq!(table.live_objects().len(), 5);
+    assert_eq!(table.live_objects().len(), 4);
+    // The loop unit of the fifth object is already charged, so this turn
+    // puts six objects in with 11 units.
     assert_eq!(
         table.step_busy(&atoms, 100),
-        (10, Some(Term::static_atom("true")))
+        (11, Some(Term::static_atom("true")))
     );
     assert_eq!(table.live_objects().len(), 10);
     assert!(table.busy.is_none());

@@ -158,6 +158,10 @@ pub(super) struct Busy {
     /// The number of objects that are in the table, or whose copy went
     /// away after the walk found a key.
     inserted: usize,
+    /// True when the loop unit of the step of the object `inserted` is
+    /// charged and the object is not in the table yet, as the counter of
+    /// the YCF loop can yield between the two (`erl_db.c:1936-1940`).
+    looped: bool,
 }
 
 impl Busy {
@@ -181,6 +185,7 @@ impl Busy {
             walked: 0,
             found: false,
             inserted: 0,
+            looped: false,
         }
     }
 
@@ -196,7 +201,8 @@ impl Busy {
     /// assert_eq!(busy.end(), Some(Term::static_atom("true")));
     /// ```
     fn end(&mut self) -> Option<Term> {
-        let ended = self.inserted == self.objects.len() && (self.found || !self.walk);
+        let ended =
+            self.inserted == self.objects.len() && !self.looped && (self.found || !self.walk);
         ended.then(|| Term::static_atom(if self.found { "false" } else { "true" }))
     }
 }
@@ -753,6 +759,7 @@ impl Table {
             return (0, None);
         };
         let mut left = units;
+        let mut exhausted = false;
         // The counter of ERTS can be 0 or less at the start of a step, and
         // the step runs then: `YCF_CONSUME_REDS` yields after it
         // (`erl_db.c:1939`, `2152-2176`).
@@ -789,18 +796,35 @@ impl Table {
         } else {
             // The objects go into the table, one unit for the loop of the
             // step and one for the object, and one more for each object
-            // that a `bag` insert compares (`erl_db_hash.c:1422-1442`).
+            // that a `bag` insert compares (`erl_db_hash.c:1422-1442`). The
+            // counter yields after the loop unit and before the object, and
+            // after the insert of the object (`erl_db.c:1936-1940`), so a
+            // turn can charge the loop unit of an object that it does not
+            // put into the table.
             while busy.inserted < busy.objects.len() && (first || left > 0) {
                 first = false;
+                if !busy.looped {
+                    left -= 1;
+                    busy.looped = true;
+                    if left <= 0 {
+                        exhausted = true;
+                        break;
+                    }
+                }
                 // The copy of the object goes into the table in its step
                 // (`db_put_dbterm`, `erl_db.c:1934-1940`).
                 let object = std::mem::take(&mut busy.objects[busy.inserted]);
                 let compared = self.insert_all(atoms, vec![object])[0];
+                busy.looped = false;
                 busy.inserted += 1;
-                left -= 2 + compared as i64;
+                left -= 1 + compared as i64;
             }
+            // A turn that uses the last of the budget ends the insert in
+            // its next turn, as the trapped YCF call uninstalls the state
+            // then (`erl_db.c:2180-2196`, `2297-2332`).
+            exhausted = exhausted || left <= 0;
         }
-        let result = busy.end();
+        let result = if exhausted { None } else { busy.end() };
         if result.is_none() {
             self.busy = Some(busy);
         }
