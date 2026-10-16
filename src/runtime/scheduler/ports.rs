@@ -296,10 +296,12 @@ impl Scheduler {
     }
 
     /// Make `pid` the owner of the open port `id`, as the BIF operation of
-    /// `set_port_connected` does (io.c:2355-2400): the port links to `pid`
-    /// when it has no link to it, and the old owner keeps its link. Return
-    /// false when `pid` does not exist, as the link signal to it fails
-    /// (`ERTS_PORT_OP_DROPPED`).
+    /// `set_port_connected` does (io.c:2355-2400): a port without a link to
+    /// `pid` adds the link and sends the link signal [`Signal::PortLink`],
+    /// and the old owner keeps its link. Return false when `pid` does not
+    /// exist, as the link signal to it fails (`ERTS_PORT_OP_DROPPED`). A
+    /// process that exits before it handles the signal closes the port
+    /// with `noproc`.
     ///
     /// # Examples
     ///
@@ -307,11 +309,14 @@ impl Scheduler {
     /// assert!(scheduler.connect_port(port, handler));
     /// ```
     pub(in crate::runtime) fn connect_port(&mut self, id: PortId, pid: ProcessId) -> bool {
-        if self.live_process(pid).is_none() {
-            return false;
+        let port = self.resources.borrow_mut::<Ports>().get_mut(id);
+        let port = port.expect("the port to connect is open");
+        if !port.links.contains(&pid) {
+            let link = Signal::PortLink { port: id };
+            if self.send_signal(None, pid, link).is_err() {
+                return false;
+            }
         }
-        let process = self.process_mut(pid).expect("the process is alive");
-        process.links.insert(LinkId::Port(id), 0);
         let port = self.resources.borrow_mut::<Ports>().get_mut(id);
         let port = port.expect("the port to connect is open");
         port.links.insert(pid);

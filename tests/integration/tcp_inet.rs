@@ -770,7 +770,7 @@ fn links_and_connects_a_port_as_pinned_erts() {
     // link/1, unlink/1, erlang:port_connect/2, and erlang:port_info/2 with a
     // port (bif.c:186-232, 1252-1287; erl_bif_port.c:438-595; io.c:2160-2190,
     // 2355-2400, 3869-3872).
-    let expected = "[true,true,[true,true],true,true,true,{error,badarg},true,[true,true],[true,{name,[116,99,112,95,105,110,101,116]},undefined],[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}],[killed,undefined],[true,noproc,{error,noproc}],[]]";
+    let expected = "[[true,noproc],true,true,[true,true],true,true,true,{error,badarg},[true,true],[true,true],[true,{name,[116,99,112,95,105,110,101,116]},undefined],[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}],[killed,undefined],[true,noproc,{error,noproc}],[]]";
     assert_eq!(erts_text("tcp_active", "links"), expected, "ERTS");
     assert_eq!(pbeam_text("tcp_active", "links"), expected, "PBeam");
 }

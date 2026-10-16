@@ -101,7 +101,7 @@ links() ->
     Open = erlang:port_info(S, links) =:= {links, [Parent]},
     DeadConnect = c(fun() -> erlang:port_connect(S, Linker) end),
     Live = spawn(fun() -> receive stop -> ok end end),
-    Connected = erlang:port_connect(S, Live),
+    Connected = [erlang:port_connect(S, self()), erlang:port_connect(S, Live)],
     Owner = [erlang:port_info(S, connected) =:= {connected, Live},
              erlang:port_info(S, links) =:= {links, lists:sort([Parent, Live])}
              orelse erlang:port_info(S, links)],
@@ -122,7 +122,14 @@ links() ->
             c(fun() -> process_flag(trap_exit, false), link(S) end)],
     process_flag(trap_exit, true),
     _ = Killer,
-    [Linked, Two, Unlinked, One, Relinked, Open, DeadConnect, Connected, Owner, Infos, Errors, Exits, Dead,
+    %% A link signal to a process that a kill ends first closes the port
+    %% with noproc (erl_proc_sig_queue.c:7363-7368).
+    {ok, S2} = prim_inet:open(tcp, inet, stream),
+    Victim = spawn(fun() -> receive stop -> ok end end),
+    exit(Victim, kill),
+    Killed = [erlang:port_connect(S2, Victim),
+              receive {'EXIT', S2, KilledReason} -> KilledReason after 3000 -> missing end],
+    [Killed, Linked, Two, Unlinked, One, Relinked, Open, DeadConnect, Connected, Owner, Infos, Errors, Exits, Dead,
      flush()].
 
 %% Each part that PBeam does not run yet.
