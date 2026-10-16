@@ -35,6 +35,9 @@ const TCP_ACTIVE: &[u8] = include_bytes!("../../fixtures/tcp/tcp_active.beam");
 /// calls `inet_db:lookup_socket/1` and `inet:tcp_controlling_process/2`.
 const MODULES: [&str; 6] = ["erlang", "lists", "prim_inet", "gen_tcp", "inet", "inet_db"];
 
+/// A policy module whose `initial/1` gives no capability.
+const PROCESSES_POLICY: &[u8] = include_bytes!("../../fixtures/processes/processes_policy.beam");
+
 /// Return a term as `io:format("~w")` prints it, for the atoms, integers,
 /// binaries, lists, and tuples of the probe results. An atom that does not
 /// start with a lowercase letter is quoted. Each atom name comes from
@@ -847,6 +850,32 @@ fn stops_the_run_for_an_active_count() {
     let _ = std::fs::remove_file(acknowledgement(&path));
     assert!(
         error.starts_with("unsupported tcp_inet option active with a count"),
+        "{error}"
+    );
+}
+
+#[test]
+fn stops_the_open_of_an_inet_port_in_a_runtime_process_of_a_boot_run() {
+    // In boot mode, the root process is a boot process and can open an inet
+    // port. After `pbeam_cap:enter_runtime/2`, it is a runtime process, and
+    // no capability permits a network effect, so the open stops the run.
+    let beams: Vec<Vec<u8>> = MODULES.iter().map(|module| pinned_beam(module)).collect();
+    let mut all: Vec<&[u8]> = vec![TCP_PROBE, PROCESSES_POLICY];
+    all.extend(beams.iter().map(Vec::as_slice));
+    let program = BeamProgram::load(&all).unwrap();
+    let argument = Term::Atom(program.atom("runtime").unwrap());
+    let error = program
+        .execute_with_policy_module(
+            "tcp_probe",
+            "unsupported",
+            &[program.host_term(argument)],
+            "processes_policy",
+            true,
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.starts_with("unsupported inet driver port in a run with a policy"),
         "{error}"
     );
 }

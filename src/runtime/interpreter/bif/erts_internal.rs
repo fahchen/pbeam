@@ -343,9 +343,12 @@ pub(super) fn open_port(
 /// # Errors
 ///
 /// A driver other than `tcp_inet` and `udp_inet`, a setting other than
-/// `binary`, a port without `binary`, and a run with a policy return a
-/// runtime error: no capability kind permits a network effect yet (rows
-/// "tcp_inet ports" and "udp_inet ports" of `docs/erts-differences.md`).
+/// `binary`, a port without `binary`, and an open by a runtime process in
+/// a run with a policy return a runtime error: no capability kind permits a
+/// network effect yet (rows "tcp_inet ports" and "udp_inet ports" of
+/// `docs/erts-differences.md`). A boot process opens the port, because the
+/// boot authority passes each check (row "Boot authority"), as the kernel
+/// start opens a `udp_inet` port in `inet_config:set_hostname/0`.
 fn open_driver_port(
     context: &mut BifContext<'_>,
     driver: Vec<u8>,
@@ -379,7 +382,7 @@ fn open_driver_port(
         ));
     }
     let scheduler = &mut *context.scheduler;
-    if !scheduler.skips_checks() {
+    if !scheduler.skips_checks() && !scheduler.current_process().security.is_boot() {
         return Err(error(
             "unsupported inet driver port in a run with a policy: no capability permits a network effect: see \"tcp_inet ports\" in docs/erts-differences.md",
         ));

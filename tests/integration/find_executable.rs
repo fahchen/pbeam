@@ -1,7 +1,7 @@
 use std::{
     env,
     fs::{self, File, FileTimes, Permissions},
-    os::unix::{fs::PermissionsExt, fs::symlink, net::UnixListener},
+    os::unix::{ffi::OsStrExt, fs::PermissionsExt, fs::symlink, net::UnixListener},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     time::{Duration, UNIX_EPOCH},
@@ -14,7 +14,7 @@ mod boot;
 #[path = "../common/mod.rs"]
 mod common;
 
-use boot::{BOOT_MODULES, boot_beam};
+use boot::{BOOT_MODULES, boot_beam, otp_root};
 use common::pinned_beam;
 
 const FIND_EXECUTABLE_PROBE: &[u8] =
@@ -192,6 +192,13 @@ fn isolated_find_executable() {
     modules.extend([FIND_EXECUTABLE_PROBE, boot.as_slice()]);
     let program = BeamProgram::load(&modules).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    // The boot needs the flag `{root, [Root]}`, as the `pbeam` binary gives
+    // it for `--root` (row "Boot" of docs/erts-differences.md).
+    let root = Term::binary(otp_root().as_os_str().as_bytes().to_vec());
+    let flags = Term::list_from(vec![Term::tuple(vec![
+        atom("root"),
+        Term::list_from(vec![root]),
+    ])]);
     let main = program
         .execute(
             "pbeam_boot",
@@ -199,6 +206,7 @@ fn isolated_find_executable() {
             &[
                 program.host_term(atom("find_executable_probe")),
                 program.host_term(atom("main")),
+                program.host_term(flags),
             ],
         )
         .unwrap();

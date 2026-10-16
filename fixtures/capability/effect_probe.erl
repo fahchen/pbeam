@@ -418,6 +418,8 @@ ambient() ->
         erts_internal:prepare_loading(effect_probe_missing, <<"FOR1">>),
         attempt(fun() -> erlang:finish_after_on_load(effect_probe_missing, true) end),
         erlang:cancel_timer(make_ref(), []),
+        erlang:cancel_timer(make_ref()),
+        is_list(erlang:processes()),
         erlang:list_to_atom("effect_probe_ambient_atom"),
         element(1, re:compile("a", [])),
         Table,

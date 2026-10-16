@@ -16,7 +16,7 @@ mod boot;
 #[path = "../common/mod.rs"]
 mod common;
 
-use boot::{BOOT_MODULES, boot_beam};
+use boot::{BOOT_MODULES, boot_beam, otp_root};
 use common::pinned_beam_path;
 
 const TTY_RESTORE_PROBE: &str = "fixtures/tty_restore/tty_restore_probe.beam";
@@ -157,6 +157,8 @@ fn pbeam(function: &str) -> Command {
             "start",
             "tty_restore_probe",
             function,
+            "--root",
+            otp_root().to_str().unwrap(),
             "--",
             TTY_RESTORE_PROBE,
         ])

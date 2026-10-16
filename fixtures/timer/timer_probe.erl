@@ -1,6 +1,6 @@
 -module(timer_probe).
 -export([receive_after/0, timeout_values/0, receive_limits/0, start_timer/0,
-         cancel_timer/0, receiver_exit/0, order/0, timer_limits/0,
+         cancel_timer/0, cancel_timer_1/0, receiver_exit/0, order/0, timer_limits/0,
          send_after/3, wait/0, id/1, send_after_timer/0]).
 
 %% Return the argument. A call through ?MODULE stops the compiler from
@@ -98,6 +98,16 @@ cancel_timer() ->
                          {R1, [{abs, true}]}, {R1, [{async, true, x}]},
                          {R1, [{other, true}]}, {foo, [{abs, false}]}]],
     [A, B, C, D, E, F, G, H, I, J, K, L, N, Bad].
+
+%% erlang:cancel_timer/1 is cancel_timer/2 with [] (erl_hl_timer.c:2644-2647).
+cancel_timer_1() ->
+    R = erlang:start_timer(200, self(), x),
+    A = left(erlang:cancel_timer(R)),
+    B = erlang:cancel_timer(R),
+    C = erlang:cancel_timer(make_ref()),
+    D = try erlang:cancel_timer(foo) catch Class:Reason -> {Class, Reason} end,
+    N = wait(300),
+    [A, B, C, D, N].
 
 cancel_bad(Ref, Options) ->
     try erlang:cancel_timer(Ref, Options)

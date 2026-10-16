@@ -143,6 +143,12 @@ unsupported(active_n) -> control(opened(), 7, [22, 0, 0, 0, 3, 0, 1]);
 unsupported(getopt) -> control(opened(), 8, [2]);
 unsupported(connect) -> control(opened(), 3, []);
 unsupported(policy) -> open_port({spawn_driver, "tcp_inet"}, [binary]);
+%% In boot mode, a process that entered the runtime is not a boot process,
+%% so prim_inet:open/3, which gen_udp:open/2 calls through inet_udp, cannot
+%% open a udp_inet port.
+unsupported(runtime) ->
+    ok = pbeam_cap:enter_runtime(?MODULE, guest),
+    prim_inet:open(udp, inet, dgram);
 unsupported(spawn_control) ->
     S = open_port({spawn_executable, "/bin/cat"}, [binary]),
     erlang:port_control(S, 16#04c76a00, <<0:512>>).

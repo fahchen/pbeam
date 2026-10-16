@@ -18,7 +18,7 @@ mod boot;
 #[path = "../common/mod.rs"]
 mod common;
 
-use boot::{BOOT_MODULES, boot_beam};
+use boot::{BOOT_MODULES, boot_beam, otp_root};
 use common::pinned_beam_path;
 
 const PORT_PROBE: &str = "fixtures/port/port_probe.beam";
@@ -108,6 +108,8 @@ fn pbeam() -> Command {
             "start",
             "port_probe",
             "terminal",
+            "--root",
+            otp_root().to_str().unwrap(),
             "--",
             PORT_PROBE,
         ])
