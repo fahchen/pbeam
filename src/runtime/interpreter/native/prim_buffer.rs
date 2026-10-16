@@ -169,7 +169,7 @@ fn peek_head_nif(scheduler: &mut Scheduler, buffer: &Term) -> Result<BifResult, 
         return Ok(BifResult::badarg());
     };
     match buffer.peek_head() {
-        Some(head) => Ok(BifResult::Value(Term::binary(head))),
+        Some(head) => Ok(BifResult::Value(Term::Binary(head))),
         None => Ok(BifResult::badarg()),
     }
 }
@@ -251,7 +251,7 @@ fn write_nif(
             // `examine_iovec_term` gives no iovec entry for an empty binary
             // (erl_nif.c:4123-4155).
             if !binary.is_empty() {
-                elements.push(&binary[..]);
+                elements.push(binary.clone());
             }
             rest = tail;
             count += 1;

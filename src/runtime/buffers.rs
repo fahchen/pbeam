@@ -7,11 +7,14 @@
 
 use std::{collections::HashMap, collections::VecDeque};
 
-use crate::term::Reference;
+use crate::term::{Binary, Reference};
 
 /// The most bytes that the accumulator holds before `write` puts it into
 /// the queue, as `ACCUMULATOR_SIZE` (`prim_buffer_nif.c:34`).
 const ACCUMULATOR_SIZE: usize = 2 << 10;
+
+/// The bits of one byte, as the size of a [`Binary`] is a number of bits.
+const BITS_PER_BYTE: usize = 8;
 
 /// The buffer resources of the node. ERTS frees a buffer resource when no
 /// term refers to it. PBeam has no garbage collection of resources, so it
@@ -54,31 +57,28 @@ impl Buffers {
 }
 
 /// One buffer of `prim_buffer:new/0`, as the `buffer_data_t` of
-/// `prim_buffer_nif.c:58-70`. ERTS copies a queued binary by reference
-/// count; PBeam copies its bytes. The observable size, order, and bytes are
-/// the same.
+/// `prim_buffer_nif.c:58-70`. ERTS holds a queued binary by reference count
+/// and PBeam holds one shared [`Binary`], so neither copies one byte of it
+/// and both release it with its last holder. The observable size, order, and
+/// bytes are the same.
 #[derive(Debug, Default)]
 pub(super) struct Buffer {
     /// The queued binaries, from the front: each element is one binary that
     /// `enqueue_accumulator` or `write` put at the back of the queue
     /// (`erts_ioq_enqv`, `erl_io_queue.c:233-287`). `erts_ioq_enqv` gives
     /// one queue element for each iovec entry that holds bytes, so an empty
-    /// binary is no element, and the accumulator is one element.
-    queue: VecDeque<Vec<u8>>,
-    /// The bytes at the front of the front queue element that a read or a
-    /// skip removed, as the moved `iov_base` of the head entry of ERTS
-    /// (`erl_io_queue.c:365-368`). `deq` keeps them for the front element,
-    /// so a partial read does not copy the bytes that remain. The queue is
-    /// empty here, so the front element always holds at least one byte: ERTS
-    /// removes the element of a dequeue that takes its last byte.
-    consumed: usize,
+    /// binary is no element, and the accumulator is one element. An element
+    /// of a read or a skip that takes a part of it holds the bytes that
+    /// remain, as the head entry of ERTS does after it moves its `iov_base`
+    /// (`erl_io_queue.c:361-369`).
+    queue: VecDeque<Binary>,
     /// The accumulator binary of `combine_small_writes`
     /// (`prim_buffer_nif.c:222-248`): the bytes of the small writes that
     /// are not in the queue yet, with the queue element that ERTS makes for
     /// them. `None` is no accumulator, as `accumulator_present == 0`; a
-    /// `Vec` with no bytes is the accumulator that ERTS keeps after a write
+    /// binary with no bytes is the accumulator that ERTS keeps after a write
     /// of no bytes.
-    accumulator: Option<Vec<u8>>,
+    accumulator: Option<Binary>,
     /// The external lock of `try_lock` and `unlock`
     /// (`prim_buffer_nif.c:489-515`), as `external_lock`. One lock holds
     /// each process of the run, as the one resource of the buffer does.
@@ -109,30 +109,28 @@ impl Buffer {
     ///
     /// ```rust,ignore
     /// let mut buffer = Buffer::default();
-    /// buffer.write(&[b"ab"]);
+    /// buffer.write(&[Binary::from(b"ab".to_vec())]);
     /// assert_eq!(buffer.size(), 2);
     /// ```
-    pub(super) fn write(&mut self, iovec: &[&[u8]]) {
+    pub(super) fn write(&mut self, iovec: &[Binary]) {
         if !self.combine_small_writes(iovec) {
             self.enqueue_accumulator();
-            self.queue.extend(
-                iovec
-                    .iter()
-                    .filter(|binary| !binary.is_empty())
-                    .map(|binary| binary.to_vec()),
-            );
+            self.queue
+                .extend(iovec.iter().filter(|binary| !binary.is_empty()).cloned());
         }
     }
 
     /// Return the first `size` bytes of the buffer and remove them, as
     /// `copying_read_nif` (`prim_buffer_nif.c:302-334`) does: `None` when
-    /// the buffer holds fewer bytes, which raises `error:badarg`.
+    /// the buffer holds fewer bytes, which raises `error:badarg`. ERTS
+    /// copies the bytes into a new binary (`enif_make_new_binary`,
+    /// prim_buffer_nif.c:324), and PBeam copies them into a `Vec`.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// let mut buffer = Buffer::default();
-    /// buffer.write(&[b"abc"]);
+    /// buffer.write(&[Binary::from(b"abc".to_vec())]);
     /// // The read of ERTS gives a copy of the first two bytes.
     /// assert_eq!(buffer.copying_read(2), Some(b"ab".to_vec()));
     /// assert_eq!(buffer.size(), 1);
@@ -145,7 +143,7 @@ impl Buffer {
         let size = size as usize;
         let mut bytes = Vec::with_capacity(size);
         while bytes.len() < size {
-            let head = self.front().expect("the queue holds the bytes");
+            let head = self.queue.front().expect("the queue holds the bytes");
             let needed = size - bytes.len();
             bytes.extend_from_slice(&head[..needed.min(head.len())]);
             self.deq(needed.min(head.len()));
@@ -156,19 +154,22 @@ impl Buffer {
     /// Return the bytes of the front of the queue that remain with no change
     /// to the buffer, as `peek_head_nif` (`prim_buffer_nif.c:366-388`) does:
     /// `None` for a queue of no bytes, which raises `error:badarg`
-    /// (`enif_ioq_peek_head`, `erl_nif.c:4377`).
+    /// (`enif_ioq_peek_head`, `erl_nif.c:4377-4383`). ERTS gives a
+    /// sub-binary of the head entry, which shares its bytes
+    /// (`erl_nif.c:4393-4407`), and PBeam gives a view of the queue element,
+    /// so neither copies a byte.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// let mut buffer = Buffer::default();
-    /// buffer.write(&[b"ab"]);
-    /// assert_eq!(buffer.peek_head(), Some(b"ab".to_vec()));
+    /// buffer.write(&[Binary::from(b"ab".to_vec())]);
+    /// assert_eq!(buffer.peek_head().as_deref(), Some(&b"ab"[..]));
     /// assert_eq!(buffer.size(), 2);
     /// ```
-    pub(super) fn peek_head(&mut self) -> Option<Vec<u8>> {
+    pub(super) fn peek_head(&mut self) -> Option<Binary> {
         self.enqueue_accumulator();
-        self.front().map(<[u8]>::to_vec)
+        self.queue.front().cloned()
     }
 
     /// Remove the first `size` bytes of the buffer, as `skip_nif`
@@ -179,7 +180,7 @@ impl Buffer {
     ///
     /// ```rust,ignore
     /// let mut buffer = Buffer::default();
-    /// buffer.write(&[b"abc"]);
+    /// buffer.write(&[Binary::from(b"abc".to_vec())]);
     /// assert!(buffer.skip(2));
     /// assert_eq!(buffer.size(), 1);
     /// assert!(!buffer.skip(2));
@@ -201,19 +202,14 @@ impl Buffer {
     ///
     /// ```rust,ignore
     /// let mut buffer = Buffer::default();
-    /// buffer.write(&[b"ab\n"]);
+    /// buffer.write(&[Binary::from(b"ab\n".to_vec())]);
     /// assert_eq!(buffer.find_byte_index(b'\n'), Some(2));
     /// assert_eq!(buffer.find_byte_index(b'x'), None);
     /// ```
     pub(super) fn find_byte_index(&mut self, needle: u8) -> Option<u64> {
         self.enqueue_accumulator();
         let mut offset = 0;
-        for (position, binary) in self.queue.iter().enumerate() {
-            let binary = if position == 0 {
-                &binary[self.consumed..]
-            } else {
-                &binary[..]
-            };
+        for binary in &self.queue {
             if let Some(index) = binary.iter().position(|&byte| byte == needle) {
                 return Some((offset + index) as u64);
             }
@@ -267,9 +263,9 @@ impl Buffer {
     ///
     /// ```rust,ignore
     /// let mut buffer = Buffer::default();
-    /// buffer.write(&[b"ab"]);
+    /// buffer.write(&[Binary::from(b"ab".to_vec())]);
     /// buffer.flush();
-    /// assert_eq!(buffer.peek_head(), Some(b"ab".to_vec()));
+    /// assert_eq!(buffer.peek_head().as_deref(), Some(&b"ab"[..]));
     /// ```
     pub(super) fn flush(&mut self) {
         self.enqueue_accumulator();
@@ -292,7 +288,7 @@ impl Buffer {
     /// `false` when the iovec goes into the queue as its own elements: its
     /// bytes are at least half of [`ACCUMULATOR_SIZE`], so the accumulator
     /// does not hold it.
-    fn combine_small_writes(&mut self, iovec: &[&[u8]]) -> bool {
+    fn combine_small_writes(&mut self, iovec: &[Binary]) -> bool {
         let bytes: usize = iovec.iter().map(|binary| binary.len()).sum();
         if self.accumulated_bytes() + bytes >= ACCUMULATOR_SIZE {
             if bytes >= ACCUMULATOR_SIZE / 2 {
@@ -300,52 +296,49 @@ impl Buffer {
             }
             self.enqueue_accumulator();
         }
-        let accumulator = self.accumulator.get_or_insert_with(Vec::new);
+        let mut written = Vec::with_capacity(bytes);
         for binary in iovec {
-            accumulator.extend_from_slice(binary);
+            written.extend_from_slice(binary);
         }
+        self.accumulator = Some(match self.accumulator.take() {
+            Some(accumulator) => Binary::concat(&accumulator, &written),
+            None => Binary::from(written),
+        });
         true
     }
 
     /// Remove the first `size` bytes at the front of the queue, as
     /// `erts_ioq_deq` (`erl_io_queue.c:347-380`) does: it removes the front
-    /// element when the size takes its last byte, and moves the front of the
-    /// front element over the taken bytes of a smaller size.
+    /// element when the size takes its last byte, and the element of a
+    /// smaller size keeps the bytes that remain, as the moved `iov_base` and
+    /// the smaller `iov_len` of the head entry of ERTS give them
+    /// (`erl_io_queue.c:361-369`).
     fn deq(&mut self, size: usize) {
         let mut remaining = size;
         while remaining > 0 {
             let head = self.queue.front().expect("the queue holds the bytes");
-            let bytes = head.len() - self.consumed;
-            if bytes <= remaining {
-                remaining -= bytes;
+            if head.len() <= remaining {
+                remaining -= head.len();
                 self.queue.pop_front();
-                self.consumed = 0;
             } else {
-                self.consumed += remaining;
+                let front = head.bits(remaining * BITS_PER_BYTE, head.bit_size());
+                *self.queue.front_mut().expect("the queue holds the bytes") = front;
                 remaining = 0;
             }
         }
     }
 
-    /// Return the bytes of the queue that remain, as `enif_ioq_size`
-    /// (`erl_nif.c:4363-4366`) gives them: the bytes of each element, less
-    /// the bytes that a read or a skip took from the front element
+    /// Return the bytes of the queue, as `enif_ioq_size`
+    /// (`erl_nif.c:4363-4366`) gives them: the bytes of each element
     /// (`erts_ioq_size`, `erl_io_queue.c:161-169`).
     fn queue_bytes(&self) -> usize {
-        self.queue.iter().map(Vec::len).sum::<usize>() - self.consumed
-    }
-
-    /// Return the bytes of the front of the queue that remain, as
-    /// `enif_ioq_peek` and `enif_ioq_peek_head` give the head entry
-    /// (`erl_nif.c:4377-4405`, `erl_io_queue.c`): `None` for an empty queue.
-    fn front(&self) -> Option<&[u8]> {
-        self.queue.front().map(|binary| &binary[self.consumed..])
+        self.queue.iter().map(|binary| binary.len()).sum::<usize>()
     }
 
     /// Return the bytes of the accumulator, as `accumulated_bytes`
     /// (`prim_buffer_nif.c:64`).
     fn accumulated_bytes(&self) -> usize {
-        self.accumulator.as_ref().map_or(0, Vec::len)
+        self.accumulator.as_ref().map_or(0, |binary| binary.len())
     }
 }
 
