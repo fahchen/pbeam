@@ -4357,7 +4357,7 @@ pub(super) fn ptab_list(
                 state.pid_ix = state.found.len() as i64;
             }
             scheduler.current_process_mut().bump_reductions(reds as i32);
-            left - reds
+            left.saturating_sub(reds)
         } else {
             let conses = (PTAB_CONSES_PER_RED * left).min(state.pid_ix as usize);
             state.pid_ix -= conses as i64;
