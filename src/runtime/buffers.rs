@@ -72,6 +72,11 @@ pub(super) struct Buffer {
     /// remain, as the head entry of ERTS does after it moves its `iov_base`
     /// (`erl_io_queue.c:361-369`).
     queue: VecDeque<Binary>,
+    /// The bytes of `queue`, as the `size` of the IO queue of ERTS
+    /// (`erts_ioq_size`, `erl_io_queue.c:161-169`): `write`, `deq`, and
+    /// `enqueue_accumulator` update it, so `size/1` and the check of a read
+    /// or a skip read no element.
+    bytes: usize,
     /// The accumulator binary of `combine_small_writes`
     /// (`prim_buffer_nif.c:222-248`): the bytes of the small writes that
     /// are not in the queue yet, with the queue element that ERTS makes for
@@ -115,8 +120,9 @@ impl Buffer {
     pub(super) fn write(&mut self, iovec: &[Binary]) {
         if !self.combine_small_writes(iovec) {
             self.enqueue_accumulator();
-            self.queue
-                .extend(iovec.iter().filter(|binary| !binary.is_empty()).cloned());
+            let elements = iovec.iter().filter(|binary| !binary.is_empty());
+            self.bytes += elements.clone().map(|binary| binary.len()).sum::<usize>();
+            self.queue.extend(elements.cloned());
         }
     }
 
@@ -279,6 +285,7 @@ impl Buffer {
         if let Some(accumulator) = self.accumulator.take()
             && !accumulator.is_empty()
         {
+            self.bytes += accumulator.len();
             self.queue.push_back(accumulator);
         }
     }
@@ -319,20 +326,24 @@ impl Buffer {
             let head = self.queue.front().expect("the queue holds the bytes");
             if head.len() <= remaining {
                 remaining -= head.len();
+                self.bytes -= head.len();
                 self.queue.pop_front();
             } else {
                 let front = head.bits(remaining * BITS_PER_BYTE, head.bit_size());
                 *self.queue.front_mut().expect("the queue holds the bytes") = front;
+                self.bytes -= remaining;
                 remaining = 0;
             }
         }
     }
 
     /// Return the bytes of the queue, as `enif_ioq_size`
-    /// (`erl_nif.c:4363-4366`) gives them: the bytes of each element
+    /// (`erl_nif.c:4363-4366`) gives them, from the count that
+    /// [`write`](Self::write), [`deq`](Self::deq), and
+    /// [`enqueue_accumulator`](Self::enqueue_accumulator) keep
     /// (`erts_ioq_size`, `erl_io_queue.c:161-169`).
     fn queue_bytes(&self) -> usize {
-        self.queue.iter().map(|binary| binary.len()).sum::<usize>()
+        self.bytes
     }
 
     /// Return the bytes of the accumulator, as `accumulated_bytes`
