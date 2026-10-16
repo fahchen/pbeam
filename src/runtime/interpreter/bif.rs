@@ -2,8 +2,8 @@
 //!
 //! The `bifs!` table in `table.rs` lists each BIF with its implementation.
 //! The `binary`, `erlang`, `erts_internal`, `ets`, `file`, `iolist`,
-//! `lists`, `maps`, `os`, `re`, and `unicode` modules hold the BIF bodies
-//! that do not fit on one table line.
+//! `lists`, `maps`, `math`, `os`, `re`, and `unicode` modules hold the BIF
+//! bodies that do not fit on one table line.
 //! The `pbeam_cap` module holds the bodies of the PBeam BIFs, which are not
 //! in `bif.tab`. The `io_service` module holds the IO service entry of the
 //! runtime to boot gate.
@@ -27,6 +27,7 @@ mod io_service;
 mod iolist;
 mod lists;
 mod maps;
+mod math;
 mod os;
 mod pbeam_cap;
 mod persistent_term;
@@ -857,10 +858,11 @@ impl BeamProgram {
     /// - `maps:merge_trap/2`, with the merged map and the steps that remain
     ///   ([`maps::merge_trap`]). ERTS traps to `maps:merge_trap/1` with a
     ///   magic reference to the walk state (`erl_map.c:134-136`).
-    /// - `maps:from_list_trap/2` and `maps:keys_trap/2`, with the argument
-    ///   and the YCF units done ([`maps::from_list`], [`maps::keys`]). ERTS
-    ///   traps to `maps:from_list/1` and `maps:keys/1` with a magic
-    ///   reference to the YCF state (`utils.c:3718-3731`).
+    /// - `maps:from_list_trap/2`, `maps:keys_trap/2`, and
+    ///   `maps:values_trap/2`, with the argument and the YCF units done
+    ///   ([`maps::from_list`], [`maps::keys`], [`maps::values`]). ERTS
+    ///   traps to `maps:from_list/1`, `maps:keys/1`, and `maps:values/1`
+    ///   with a magic reference to the YCF state (`utils.c:3718-3731`).
     /// - `maps:from_keys_trap/3`, with the keys, the value, and the YCF
     ///   units done ([`maps::from_keys`]). ERTS traps to `maps:from_keys/2`
     ///   with a magic reference to the YCF state.
@@ -1056,6 +1058,9 @@ impl BeamProgram {
             }
             ("maps", "keys_trap", [map, Term::Integer(done)]) => {
                 maps::keys(process, map, *done as usize)
+            }
+            ("maps", "values_trap", [map, Term::Integer(done)]) => {
+                maps::values(process, map, *done as usize)
             }
             ("persistent_term", "get_all_trap", [all, Term::Integer(entries)]) => Ok(
                 persistent_term::get_all_trap(process, all.clone(), *entries as usize),
