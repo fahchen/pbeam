@@ -986,7 +986,7 @@ impl BeamProgram {
             let mut context = BifContext { scheduler };
             return ets::match_trap(&mut context, *id, pattern, *bucket as usize, state);
         }
-        if let ("ets", "lookup" | "member" | "insert" | "insert_new", [table, key]) =
+        if let ("ets", "lookup" | "member" | "delete" | "insert" | "insert_new", [table, key]) =
             (module, function, arguments.as_slice())
         {
             let mut context = BifContext { scheduler };
