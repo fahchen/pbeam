@@ -1,5 +1,6 @@
 mod atom;
 mod binary;
+pub(crate) mod external;
 pub(crate) mod float_text;
 mod fun;
 mod hash;
