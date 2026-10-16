@@ -1,5 +1,5 @@
 -module(tcp_close).
--export([main/1]).
+-export([main/1, linger_zero/1]).
 
 %% Closes accepted sockets from each side, as gen_tcp:close/1 calls
 %% inet:tcp_close/1 and prim_inet:close/1 (gen_tcp.erl:867-870;
@@ -93,6 +93,24 @@ main(Path) ->
     step(Path, 15, "drain"),
     ok = prim_inet:close(L),
     [Empty, Queued, Closed, Exited, Passive, Active, Shutdown, lists:sort(flush())].
+
+%% With linger {true, 0} and queued output, erlang:port_close/1 sets the
+%% CLOSING state, tcp_inet_flush drops the queue, and the port terminates
+%% with CLOSING set: the stop sends no message to the receive that waits,
+%% and no {empty_out_q, S} (io.c:3659-3721, 3939-3948;
+%% inet_drv.c:12708-12730).
+linger_zero(Path) ->
+    process_flag(trap_exit, true),
+    {L, S} = connection(Path),
+    ok = prim_inet:setopts(S, [{linger, {true, 0}}]),
+    Linger = prim_inet:getopts(S, [linger]),
+    ok = prim_inet:send(S, big()),
+    Size = queued(S),
+    {ok, Ref} = prim_inet:async_recv(S, 0, -1),
+    Closed = erlang:port_close(S),
+    Recv = receive {inet_async, S, Ref, R} -> R after 500 -> none end,
+    ok = prim_inet:close(L),
+    [Linger, Size, Closed, Recv, lists:sort(flush())].
 
 big() -> double(<<"0123456789abcdef">>, 19).
 

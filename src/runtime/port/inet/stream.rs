@@ -700,7 +700,8 @@ impl Inet {
     /// (io.c:3939-3948): the queue holds bytes and `tcp_inet_flush` keeps
     /// them, as `linger` is not `{true, 0}` (`TCP_ADDF_LINGER_ZERO`,
     /// inet_drv.c:12708-12730). With `{true, 0}`, the port terminates at
-    /// once and the close of the socket drops the queue.
+    /// once in the `CLOSING` state, and the close of the socket drops the
+    /// queue.
     ///
     /// # Examples
     ///

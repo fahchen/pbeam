@@ -177,7 +177,8 @@ impl Scheduler {
     /// whose queue holds bytes goes to the `CLOSING` state instead of the
     /// stop (see [`Inet::flushes`]; io.c:3939-3948): its socket writes the
     /// queue, and the port terminates when the queue is empty (see
-    /// `tcp_flushed`).
+    /// `tcp_flushed`). With `linger {true, 0}`, the port terminates at once
+    /// in the `CLOSING` state, so the stop sends no message.
     ///
     /// # Examples
     ///
@@ -209,13 +210,18 @@ impl Scheduler {
     fn exit_port(&mut self, id: PortId, reason: Term, flush: bool) {
         let ports = self.resources.borrow_mut::<Ports>();
         let port = ports.get_mut(id).expect("the port to close is open");
-        let flushes = flush
-            && !port.closing
+        // `erts_deliver_port_exit` sets `CLOSING` for each queue that holds
+        // bytes before `flush_port` (io.c:3939-3948). With `linger {true,
+        // 0}`, `tcp_inet_flush` drops the queue and the port terminates with
+        // `CLOSING` set, so its stop sends no message (io.c:3659-3721).
+        let queued = flush
             && reason != Term::static_atom("kill")
-            && matches!(&port.driver, Driver::Inet(tcp) if tcp.flushes());
+            && matches!(&port.driver, Driver::Inet(tcp) if tcp.has_output());
+        let flushes =
+            queued && !port.closing && matches!(&port.driver, Driver::Inet(tcp) if tcp.flushes());
         let links = std::mem::take(&mut port.links);
         let monitors = std::mem::take(&mut port.monitors);
-        port.closing = flushes;
+        port.closing |= queued;
         let port = (!flushes).then(|| ports.remove(id).expect("the port to close is open"));
         let reason = if reason == Term::static_atom("kill") {
             Term::static_atom("killed")

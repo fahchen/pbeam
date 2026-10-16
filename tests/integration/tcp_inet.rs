@@ -777,6 +777,22 @@ fn delivers_in_active_once_mode_and_moves_the_owner_as_pinned_erts() {
     }
 }
 
+// macOS gives `einval` for each `linger` value other than `{false, 0}`.
+#[cfg(target_os = "linux")]
+#[test]
+fn closes_a_port_with_linger_zero_and_queued_output_as_pinned_erts() {
+    // The close sets `CLOSING` before `tcp_inet_flush` drops the queue, so
+    // the stop of the port sends no message to the receive that waits
+    // (io.c:3659-3721, 3939-3948; inet_drv.c:12708-12730).
+    let expected = "[{ok,[{linger,{true,0}}]},true,true,none,[['EXIT',port,normal]]]";
+    for (name, (text, _)) in ["ERTS", "PBeam"]
+        .into_iter()
+        .zip(client_runs("tcp_close", "linger_zero"))
+    {
+        assert_eq!(text, expected, "{name}");
+    }
+}
+
 #[test]
 fn delivers_each_read_in_active_mode_as_pinned_erts() {
     let expected =
