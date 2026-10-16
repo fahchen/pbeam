@@ -111,6 +111,21 @@ fn runs_is_record_1_in_a_guard_as_pinned_erts() {
 }
 
 #[test]
+fn runs_is_number_in_a_guard_as_pinned_erts() {
+    // `is_number/1` in a guard is the `is_number` test instruction (opcode
+    // 47, `lib/compiler/src/genop.tab:236-238`). It passes for a small
+    // integer, a bignum, and a float, and it jumps to its fail label for
+    // each other term (emu `instrs.tab:999-1003`; JIT
+    // `jit/arm/instr_common.cpp:1403-1444`). Of the terms of `terms/0`,
+    // the integers at index 2, 3, 19, and 20 and the float at index 4
+    // pass.
+    assert_runs(
+        "number_guard()",
+        "[no,no,yes,yes,yes,no,no,no,no,no,no,no,no,no,no,no,no,no,no,yes,yes]",
+    );
+}
+
+#[test]
 fn runs_is_function_2_in_a_body_through_a_fun_and_through_apply_as_pinned_erts() {
     // A negative arity or an arity that is not an integer raises `badarg`
     // (`erl_bif_op.c:244-256`), also for a term that is not a fun. A

@@ -119,6 +119,10 @@ name = "atom_to_binary"
 path = "tests/integration/atom_to_binary.rs"
 
 [[test]]
+name = "binary_to_atom"
+path = "tests/integration/binary_to_atom.rs"
+
+[[test]]
 name = "badarg"
 path = "tests/integration/badarg.rs"
 
