@@ -580,9 +580,13 @@ fn native_name(atoms: &AtomTable, name: &Term, allow_empty: bool) -> Option<Vec<
     native_filename(name, filename_encoding())
 }
 
-/// Return the open port of `port`, as `sig_lookup_port` finds it
-/// (`erl_bif_port.c:133-147`), or `None` for a term that is not a port of
-/// an open port. An atom names no port, because PBeam registers no port.
+/// Return the open port of `port`, or `None` for a term that is not a
+/// port of an open port. A port in the `CLOSING` state is not open: the
+/// BIFs that take this port give `badarg` for it, as the operation of
+/// `erlang:port_command/2`, `erlang:port_close/1`, and
+/// `erlang:port_connect/2` on the port does and as `data_lookup_port`
+/// does not find it (erl_bif_port.c:157-160). An atom names no port,
+/// because PBeam registers no port.
 ///
 /// # Examples
 ///
@@ -591,6 +595,20 @@ fn native_name(atoms: &AtomTable, name: &Term, allow_empty: bool) -> Option<Vec<
 /// assert_eq!(open_port_id(scheduler, &Term::static_atom("foo")), None);
 /// ```
 pub(super) fn open_port_id(scheduler: &mut Scheduler, port: &Term) -> Option<PortId> {
+    let id = found_port_id(scheduler, port)?;
+    (!scheduler.resources.borrow_mut::<Ports>().closing(id)).then_some(id)
+}
+
+/// Return the port of `port` that is open or in the `CLOSING` state, as
+/// `sig_lookup_port` finds it for `erlang:port_info/1,2` and
+/// `erlang:port_control/3` (`erl_bif_port.c:133-148`), or `None`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(found_port_id(scheduler, &Term::Port(port)), Some(port));
+/// ```
+fn found_port_id(scheduler: &mut Scheduler, port: &Term) -> Option<PortId> {
     let Term::Port(id) = port else {
         return None;
     };
@@ -662,7 +680,7 @@ pub(super) fn port_command(
         Ok(()) => port_state.output += bytes.len() as u64,
         Err(errno) => {
             let reason = Term::Atom(scheduler.atoms.put(&errno_id(errno))?);
-            scheduler.close_port(id, reason)?;
+            scheduler.close_port(id, reason);
         }
     }
     Ok(signals_return(scheduler, port, Term::static_atom("true")))
@@ -703,7 +721,7 @@ pub(super) fn port_close(
     scheduler
         .current_process_mut()
         .bump_reductions(PORT_REDUCTIONS);
-    scheduler.close_port(id, Term::static_atom("normal"))?;
+    scheduler.close_port(id, Term::static_atom("normal"));
     Ok(signals_return(scheduler, port, Term::static_atom("true")))
 }
 
@@ -714,9 +732,10 @@ const SPAWN_CONTROL: u32 = 0x04c7_6a00;
 /// Run `erts_internal:port_control(Port, Operation, Data)`, which
 /// `erlang:port_control/3` calls, as `erts_internal_port_control_3` and
 /// `erts_port_control` do (`erl_bif_port.c:322-376`, `io.c:4268-4420`):
-/// run the request `Operation` of the driver of an open port with the
-/// bytes of the iodata `Data`, use 40 reductions, and return the reply as
-/// a list of bytes. A term that is not an open port, an `Operation` that is
+/// run the request `Operation` of the driver of an open port, or of a
+/// port in the `CLOSING` state, with the bytes of the iodata `Data`, use
+/// 40 reductions, and return the reply as a list of bytes. A term that is
+/// not such a port, an `Operation` that is
 /// not an integer from 0 to 2^32 - 1, data that is not iodata, and a
 /// request that the driver rejects give the atom `badarg` and use no
 /// reductions. The control of the spawn driver, `spawn_control`
@@ -752,7 +771,7 @@ pub(super) fn port_control(
         .small_integer()
         .and_then(|value| u32::try_from(value).ok());
     let (Some(id), Some(command), Some(bytes)) = (
-        open_port_id(scheduler, port),
+        found_port_id(scheduler, port),
         command,
         iolist::iodata_bytes(data),
     ) else {
@@ -761,9 +780,10 @@ pub(super) fn port_control(
     if let Some(denied) = port_denial(scheduler, id, Operation::Command)? {
         return Ok(denied);
     }
+    let caller = scheduler.current_process_mut().id;
     let ports = scheduler.resources.borrow_mut::<Ports>();
     let reply = match ports.get_mut(id).expect("the port is open").inet_mut() {
-        Some(driver) => driver.control(command, &bytes)?,
+        Some(driver) => driver.control(command, &bytes, caller)?,
         None if command == SPAWN_CONTROL => {
             return Err(error(
                 "unsupported erlang:port_control/3 command 16#04c76a00 on a spawn port: see \"Ports\" in docs/erts-differences.md",
@@ -813,7 +833,7 @@ pub(super) fn port_denial(
 /// Run `erts_internal:port_info(Port)`, which `erlang:port_info/1` calls, as
 /// `erts_internal_port_info_1` and `erts_port_info` do
 /// (`erl_bif_port.c:486-535`, `erl_bif_info.c:3654-3830`): for an open
-/// port, use 40 reductions and return `[{name, Name}, {links, Links},
+/// port, also in the `CLOSING` state, use 40 reductions and return `[{name, Name}, {links, Links},
 /// {id, Number}, {connected, Owner}, {input, Bytes}, {output, Bytes},
 /// {os_pid, OsPid}]` (`ERTS_PORT_INFO_1_ITEMS`, `erl_port.h:100-108`). The
 /// name is the list of the bytes of the program path, `links` holds the
@@ -837,7 +857,7 @@ pub(super) fn port_denial(
 /// `capability_denied` in a full atom table.
 pub(super) fn port_info(context: &mut BifContext<'_>, port: &Term) -> Result<BifResult, BeamError> {
     let scheduler = &mut *context.scheduler;
-    let info = match (port, open_port_id(scheduler, port)) {
+    let info = match (port, found_port_id(scheduler, port)) {
         (_, Some(id)) => {
             if let Some(denied) = port_denial(scheduler, id, Operation::Inspect)? {
                 return Ok(denied);
@@ -923,7 +943,7 @@ fn port_item(id: PortId, port: &Port, name: &str) -> Result<Term, BeamError> {
 /// Run `erts_internal:port_info(Port, Item)`, which `erlang:port_info/2`
 /// calls, as `erts_internal_port_info_2` and `erts_port_info` do
 /// (`erl_bif_port.c:543-595`, `erl_bif_info.c:3654-3830`): for an open
-/// port, use 40 reductions (`ERTS_PORT_REDS_INFO`) and return the item of
+/// port, also in the `CLOSING` state, use 40 reductions (`ERTS_PORT_REDS_INFO`) and return the item of
 /// [`port_item`]; an item that is not an item name gives the atom
 /// `badarg` before the capability check. A port that closed and an atom give `undefined`, and each
 /// other term gives the atom `badtype`. The result traps to
@@ -949,7 +969,7 @@ pub(super) fn port_info_item(
     item: &Term,
 ) -> Result<BifResult, BeamError> {
     let scheduler = &mut *context.scheduler;
-    let info = match (port, open_port_id(scheduler, port)) {
+    let info = match (port, found_port_id(scheduler, port)) {
         (_, Some(id)) => {
             let name = match item {
                 Term::Atom(name) => scheduler.atoms.name_of(name).to_owned(),

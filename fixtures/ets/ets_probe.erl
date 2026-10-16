@@ -3,7 +3,7 @@
          access/0, main/0, env/0, bag/0, info/0, match/0, match_deep/0,
          match_write_concurrency/0, delete_table/0, delete_trap/0,
          delete_order/0, deleter/2,
-         unsupported/1, insert_all/2, ping/1,
+         insert_new/0, unsupported/1, insert_all/2, ping/1,
          own/2, write/1]).
 
 %% ets:new/2 return values and badarg cases (erl_db.c:2555-2840).
@@ -161,6 +161,39 @@ insert() ->
               {ets_probe_missing, []}, {ets_probe_missing, {a}}, {make_ref(), {a}}]],
      [ets:lookup_element(T, Key, 2, d) || Key <- [k, k2, k3, a]],
      ets:lookup_element(K, k, 1, d)].
+
+%% ets:insert_new/2 in each table type (erl_db.c:2387-2440, erl_db.c:2017-2116,
+%% erl_db_hash.c:1384-1446). An object whose key the table holds is not
+%% inserted, and a list with such an object inserts no object. A key that
+%% is two times in the list only is not in the table, so the list goes in.
+insert_new() ->
+    [insert_new(Type) || Type <- [set, bag, duplicate_bag]] ++ [insert_new_badarg()].
+
+insert_new(Type) ->
+    T = ets:new(ets_probe, [Type]),
+    Results = [ets:insert_new(T, {k, 1}), ets:insert_new(T, {k, 2}),
+               ets:insert_new(T, [{k, 3}]), ets:insert_new(T, []),
+               ets:insert_new(T, [{a, 1}, {b, 1}, {a, 2}, {a, 2}, {a, 1}]),
+               ets:insert_new(T, [{c, 1}, {d, 1}, {k, 4}]),
+               ets:insert_new(T, [{e, 1}, {k, 5}, {f, 1}]),
+               ets:insert_new(T, [{g, 1}, {h, 1}])],
+    {Results, [ets:lookup(T, K) || K <- [k, a, b, c, d, e, f, g, h]]}.
+
+insert_new_badarg() ->
+    T = ets:new(ets_probe, []),
+    K = ets:new(ets_probe, [{keypos, 2}]),
+    true = ets:insert(T, {k, v}),
+    Protected = start([protected]),
+    Errors = [catch_error(fun() -> ets:insert_new(Table, Objects) end)
+              || {Table, Objects} <-
+                     [{T, x}, {T, {}}, {T, [x]}, {T, [{a, 1}, x]}, {T, [{a, 1} | x]},
+                      {T, [{k, 1}, x]}, {T, [{a, 1}, {b, 1} | x]}, {K, {k}}, {K, [{k}]},
+                      {K, [{a, k}, {k}]}, {ets_probe_missing, []},
+                      {ets_probe_missing, {a}}, {ets_probe_missing, [{a}, {b}]},
+                      {make_ref(), {a}}, {tid(Protected), []}, {tid(Protected), {a}},
+                      {tid(Protected), [{a}, {b}]}, {tid(Protected), [{a}, x]}]],
+    stop(Protected),
+    {Errors, [ets:lookup(T, Key) || Key <- [a, b, k]], ets:lookup(K, a)}.
 
 %% ets:lookup_element/4 (erl_db.c:2972-3001, erl_db_hash.c:1544-1604).
 lookup() ->
@@ -442,6 +475,7 @@ unsupported(Case) ->
         heir -> ets:new(ets_probe, [{heir, element(1, start([]))}]);
         heir_data -> ets:new(ets_probe, [{heir, element(1, start([])), data}]);
         keypos -> ets:insert(ets:new(ets_probe, [{keypos, id(1 bsl 32)}]), {a});
+        keypos_new -> ets:insert_new(ets:new(ets_probe, [{keypos, id(1 bsl 32)}]), {a});
         index ->
             T = ets:new(ets_probe, []),
             true = ets:insert(T, {k, v}),

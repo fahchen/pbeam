@@ -28,6 +28,8 @@ const TCP_TRANSFER: &[u8] = include_bytes!("../../fixtures/tcp/tcp_transfer.beam
 
 const TCP_ACTIVE: &[u8] = include_bytes!("../../fixtures/tcp/tcp_active.beam");
 
+const TCP_CLOSE: &[u8] = include_bytes!("../../fixtures/tcp/tcp_close.beam");
+
 /// The pinned OTP modules that the probes call: `erlang` has
 /// `open_port/2`, `port_control/3`, `port_close/1`, and `port_info/1`,
 /// which call the `erts_internal` port BIFs, and `prim_inet` makes the
@@ -85,7 +87,14 @@ fn text(term: &Term, atoms: &AtomTable) -> String {
 /// Load the probes with the pinned modules of [`MODULES`].
 fn load() -> BeamProgram {
     let beams: Vec<Vec<u8>> = MODULES.iter().map(|module| pinned_beam(module)).collect();
-    let mut all: Vec<&[u8]> = vec![TCP_PROBE, TCP_ACCEPT, UDP_PROBE, TCP_TRANSFER, TCP_ACTIVE];
+    let mut all: Vec<&[u8]> = vec![
+        TCP_PROBE,
+        TCP_ACCEPT,
+        UDP_PROBE,
+        TCP_TRANSFER,
+        TCP_ACTIVE,
+        TCP_CLOSE,
+    ];
     all.extend(beams.iter().map(Vec::as_slice));
     BeamProgram::load(&all).unwrap()
 }
@@ -500,13 +509,15 @@ fn accepts_in_many_processes_on_one_listen_socket_as_pinned_erts() {
     assert_eq!(pbeam, expected, "PBeam");
 }
 
-/// A client of the test that runs the commands of `tcp_transfer`: it reads
+/// A client of the test that runs the commands of the probes: it reads
 /// `"Step Command"` from the file `path`, runs each new step once, and then
 /// writes `Step` to the file of [`acknowledgement`]. `connect Port` makes a
 /// connection to `Port` on `127.0.0.1`, and each other command acts on the
 /// last connection: `send Text` writes `Text`, `read Count` reads `Count`
-/// bytes, `close` closes, and `reset` closes with `linger` 0, so the peer
-/// gets a reset. It returns the bytes of each `read` in order.
+/// bytes, `close` closes, `reset` closes with `linger` 0, so the peer
+/// gets a reset, `shutdown` shuts down the write side, and `drain` reads
+/// until the end of file and closes. It returns the bytes of each `read`
+/// and `drain` in order.
 fn command_client(path: PathBuf, stop: Arc<AtomicBool>) -> thread::JoinHandle<Vec<Vec<u8>>> {
     thread::spawn(move || {
         let ack = acknowledgement(&path);
@@ -536,6 +547,16 @@ fn command_client(path: PathBuf, stop: Arc<AtomicBool>) -> thread::JoinHandle<Ve
                         reads.push(bytes);
                     }
                     "close" => drop(streams.pop()),
+                    "shutdown" => streams
+                        .last()
+                        .unwrap()
+                        .shutdown(std::net::Shutdown::Write)
+                        .unwrap(),
+                    "drain" => {
+                        let mut bytes = Vec::new();
+                        streams.pop().unwrap().read_to_end(&mut bytes).unwrap();
+                        reads.push(bytes);
+                    }
                     "reset" => {
                         let stream = streams.pop().unwrap();
                         socket2::SockRef::from(&stream)
@@ -688,18 +709,6 @@ fn stops_the_run_for_each_receive_and_send_part_that_is_not_implemented() {
         ),
         ("busy", "unsupported tcp_inet output to a busy port"),
         (
-            "subscribe",
-            "unsupported tcp_inet request 24 with queued output",
-        ),
-        (
-            "port_close",
-            "unsupported close of a tcp_inet port with queued output",
-        ),
-        (
-            "owner_exit",
-            "unsupported close of a tcp_inet port with queued output",
-        ),
-        (
             "term",
             "unsupported erlang:term_to_binary/2 other than an ordinary reference with [local]",
         ),
@@ -728,6 +737,32 @@ fn stops_the_run_for_each_receive_and_send_part_that_is_not_implemented() {
 }
 
 #[test]
+fn closes_a_connection_from_each_side_as_pinned_erts() {
+    // `prim_inet:close/1` waits for `{empty_out_q, S}` of `SUBSCRIBE`, and
+    // a port closed with queued output writes its queue in the `CLOSING`
+    // state after its exit signals (prim_inet.erl:175-275;
+    // inet_drv.c:10795-10848, 12708-12730; io.c:3922-3948).
+    let expected = "[[{ok,[{linger,{false,0}}]},[1,1,0,0,0,0],ok,undefined],[true,ok,undefined,[['EXIT',pid,normal],['EXIT',port,normal],[empty_out_q,port]]],[[true,normal,normal,true,{links,[]},true,{error,badarg},{error,badarg},{error,badarg},{error,badarg},true,noproc],noproc,undefined],shutdown,[{error,closed},ok,undefined],[normal,ok],[tcp_closed,normal],[]]";
+    for (name, (text, reads)) in ["ERTS", "PBeam"]
+        .into_iter()
+        .zip(client_runs("tcp_close", "main"))
+    {
+        assert_eq!(text, expected, "{name}");
+        // The end of the port at the shutdown of the client drops the queue
+        // (`driver_failure_term`, io.c:7208-7216), so the client gets only
+        // the bytes that the kernel took.
+        let lengths: Vec<usize> = reads.iter().map(Vec::len).collect();
+        assert_eq!(lengths[..4], [2, 1 << 23, 1 << 23, 1 << 23], "{name} reads");
+        assert!(lengths[4] < 1 << 23, "{name} reads");
+        assert!(
+            reads[0] == b"hi" && reads[1..4].iter().all(|read| *read == big()),
+            "{name} reads"
+        );
+        assert!(big().starts_with(&reads[4]), "{name} reads");
+    }
+}
+
+#[test]
 fn delivers_in_active_once_mode_and_moves_the_owner_as_pinned_erts() {
     // `{active, once}` reads in the setopts and in the IO poll, and
     // `gen_tcp:controlling_process/2` moves the socket and its queued
@@ -737,6 +772,22 @@ fn delivers_in_active_once_mode_and_moves_the_owner_as_pinned_erts() {
     for (name, (text, _)) in ["ERTS", "PBeam"]
         .into_iter()
         .zip(client_runs("tcp_active", "main"))
+    {
+        assert_eq!(text, expected, "{name}");
+    }
+}
+
+// macOS gives `einval` for each `linger` value other than `{false, 0}`.
+#[cfg(target_os = "linux")]
+#[test]
+fn closes_a_port_with_linger_zero_and_queued_output_as_pinned_erts() {
+    // The close sets `CLOSING` before `tcp_inet_flush` drops the queue, so
+    // the stop of the port sends no message to the receive that waits
+    // (io.c:3659-3721, 3939-3948; inet_drv.c:12708-12730).
+    let expected = "[{ok,[{linger,{true,0}}]},true,true,none,[['EXIT',port,normal]]]";
+    for (name, (text, _)) in ["ERTS", "PBeam"]
+        .into_iter()
+        .zip(client_runs("tcp_close", "linger_zero"))
     {
         assert_eq!(text, expected, "{name}");
     }

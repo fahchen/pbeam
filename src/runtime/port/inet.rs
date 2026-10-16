@@ -21,13 +21,14 @@
 //! | `SETOPTS` | 7 | `[Option, V3, V2, V1, V0, ...]` | `[1]` |
 //! | `GETHOSTNAME` | 12 | `[]` | `[1 \| Name]` |
 //! | `GETOPTS` | 8 | `[Option, ...]` | `[1, Option, V3, V2, V1, V0, ...]` |
-//! | `SUBSCRIBE` | 24 | `[1, ...]` | `[1, 1, 0, 0, 0, 0, ...]` |
+//! | `SUBSCRIBE` | 24 | `[1, ...]` | `[1, 1, Q3, Q2, Q1, Q0, ...]` |
 //! | `ACCEPT` | 26 | `[T3, T2, T1, T0]` | `[1, R1, R0]` |
 //! | `LISTEN` | 27 | `[B1, B0]` | `[1]` |
 //!
 //! `P1, P0` is the port number, `B1, B0` the backlog, `T3..T0` the timeout
-//! in milliseconds (`16#ffffffff` for `infinity`), and `R1, R0` the async
-//! reference of the accept, big-endian; each option value is a big-endian
+//! in milliseconds (`16#ffffffff` for `infinity`), `Q3..Q0` the size of
+//! the output queue, and `R1, R0` the async reference of the accept,
+//! big-endian; each option value is a big-endian
 //! 32-bit integer. `ACCEPT` replies at once and sends `{inet_async, L, R,
 //! {ok, S}}` or `{inet_async, L, R, {error, Reason}}` later (see
 //! `scheduler/tcp_inet.rs`). The options are those of the listen socket of
@@ -323,14 +324,15 @@ impl Inet {
         (self.socket_type == SocketType::Datagram && self.active != 0).then(|| socket.as_raw_fd())
     }
 
-    /// Run the request `command` with the bytes `request`, as
-    /// `tcp_inet_ctl`, `packet_inet_ctl`, and `inet_ctl` do
+    /// Run the request `command` of the process `caller` with the bytes
+    /// `request`, as `tcp_inet_ctl`, `packet_inet_ctl`, and `inet_ctl` do
     /// (inet_drv.c:10988-11409, 11952-12062, 14564-14892).
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(port.control(0x03f1_a305, &[])?, Control::Reply(b"\0ebadf".to_vec()));
+    /// let reply = port.control(0x03f1_a305, &[], caller)?;
+    /// assert_eq!(reply, Control::Reply(b"\0ebadf".to_vec()));
     /// ```
     ///
     /// # Errors
@@ -340,6 +342,7 @@ impl Inet {
         &mut self,
         command: u32,
         request: &[u8],
+        caller: ProcessId,
     ) -> Result<Control, BeamError> {
         let reply = match command.wrapping_sub(MAGIC) {
             1 => self.open(request)?,
@@ -354,10 +357,7 @@ impl Inet {
             8 => self.get_options(request)?,
             11 => return Ok(self.statistics(request)),
             12 => get_host_name(request),
-            24 if self.has_output() => {
-                return Err(self.unsupported("request", "24 with queued output"));
-            }
-            24 => return Ok(subscribe(request)),
+            24 => return Ok(self.subscribe(request, caller)),
             26 if self.socket_type == SocketType::Stream => return Ok(self.accept(request)),
             27 if self.socket_type == SocketType::Stream => self.listen(request),
             // `LISTEN` is only for an SCTP socket (inet_drv.c:14846-14858).
@@ -907,6 +907,39 @@ fn priority(socket: Option<&Socket>) -> Option<i32> {
 }
 
 impl Inet {
+    /// Run `INET_REQ_SUBSCRIBE` of `caller` (inet_subscribe,
+    /// inet_drv.c:10819-10848; the size check, inet_drv.c:11025-11044):
+    /// give each `subs_empty_out_q` (1) with the size of the queue, 32
+    /// bits. With a size above 0, each code adds `caller` to the
+    /// subscribers, which get `{empty_out_q, S}` when the queue becomes
+    /// empty. A code that is not 1 gives `badarg` and keeps the
+    /// subscriptions of the codes before it, and a reply of more than 64
+    /// KiB is empty.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(port.subscribe(&[1], caller), Control::Reply(vec![1, 1, 0, 0, 0, 0]));
+    /// ```
+    fn subscribe(&mut self, request: &[u8], caller: ProcessId) -> Control {
+        if 1 + request.len() * 5 > MAX_OPT_BUFFER {
+            return Control::Reply(Vec::new());
+        }
+        let size = self.stream.output_size();
+        let mut reply = vec![OK];
+        for &code in request {
+            if code != 1 {
+                return Control::Badarg;
+            }
+            if size > 0 {
+                self.stream.subscribers.push(caller);
+            }
+            reply.push(code);
+            reply.extend((size as u32).to_be_bytes());
+        }
+        Control::Reply(reply)
+    }
+
     /// Run `SETOPTS` of `priority` with the value `value`: without
     /// `SO_PRIORITY`, as on macOS, it changes nothing
     /// (inet_drv.c:7389-7398).
@@ -923,25 +956,6 @@ impl Inet {
             socket.set_priority(value as u32)
         })
     }
-}
-
-/// Run `INET_REQ_SUBSCRIBE` (inet_subscribe, inet_drv.c:10819-10848; the
-/// size check, inet_drv.c:11025-11044): give each `subs_empty_out_q` (1)
-/// with the size of the output queue, which is 0 for a port without
-/// output. A code that is not 1 gives `badarg`, and a reply of more than
-/// 64 KiB is empty.
-fn subscribe(request: &[u8]) -> Control {
-    if 1 + request.len() * 5 > MAX_OPT_BUFFER {
-        return Control::Reply(Vec::new());
-    }
-    let mut reply = vec![OK];
-    for &code in request {
-        if code != 1 {
-            return Control::Badarg;
-        }
-        reply.extend([code, 0, 0, 0, 0]);
-    }
-    Control::Reply(reply)
 }
 
 /// Return `[Family, P1, P0, A, B, C, D]` of an IPv4 address, as

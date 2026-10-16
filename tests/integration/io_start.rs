@@ -190,6 +190,40 @@ fn finds_key_members_as_pinned_erts() {
 }
 
 #[test]
+fn searches_keys_as_pinned_erts() {
+    // `io_start_probe:keysearches/0` runs `lists:keysearch/3`, which
+    // `inet:pi_replace/2` (inet.erl:2721) imports, with `call_ext` and
+    // through the `apply` instruction. It gives `{value, Tuple}` when
+    // `keyfind` finds a tuple, else the `keyfind` result
+    // (`erl_bif_lists.c:1279-1292`). A small integer key matches an equal
+    // float, and a bad position or list raises `badarg`.
+    let program = BeamProgram::load(&[IO_START_PROBE]).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let value = |tuple: Term| Term::tuple(vec![atom("value"), tuple]);
+    let expected = [
+        value(Term::tuple(vec![atom("a"), Term::Integer(1)])),
+        value(Term::tuple(vec![Term::Float(1.0), atom("f")])),
+        atom("false"),
+        atom("false"),
+        atom("false"),
+        atom("badarg"),
+        atom("badarg"),
+        value(Term::tuple(vec![atom("c")])),
+    ];
+    assert_eq!(
+        program
+            .execute("io_start_probe", "keysearches", &[])
+            .unwrap()
+            .term,
+        Term::list_from(expected.to_vec())
+    );
+    assert_eq!(
+        reference("keysearches"),
+        b"[{value,{a,1}},{value,{1.0,f}},false,false,false,badarg,badarg,{value,{c}}]\n"
+    );
+}
+
+#[test]
 fn reads_and_updates_maps_as_pinned_erts() {
     // `io_start_probe:maps/0` runs `bif` `erlang:map_get/2` with fail label
     // 0, as `prim_tty:init/1` (prim_tty.erl:220) and `user_drv:init/1`

@@ -1600,8 +1600,9 @@ impl Scheduler {
     }
 
     /// Return whether a process traps in a list insert of `ets:insert/2`
-    /// into the table `id`: its pending BIF is the internal export
-    /// `ets:insert/6` with the table reference (see `ets::insert_list`).
+    /// or `ets:insert_new/2` into the table `id`: its pending BIF is the
+    /// internal export `ets:insert/6` or `ets:insert_new/7` with the table
+    /// reference (see `ets::insert_list`).
     ///
     /// # Examples
     ///
@@ -1611,7 +1612,8 @@ impl Scheduler {
     pub(super) fn traps_ets_insert(&self, id: Reference) -> bool {
         self.processes.values().any(|process| {
             process.pending_bif.as_ref().is_some_and(|pending| {
-                (pending.module, pending.function) == ("ets", "insert")
+                pending.module == "ets"
+                    && matches!(pending.function, "insert" | "insert_new")
                     && pending.arguments.first() == Some(&Term::Reference(id))
             })
         })
@@ -2828,7 +2830,7 @@ impl Scheduler {
                                 let _ = self.send_signal(Some(id), linked, exit);
                             }
                             LinkId::Process(_) => {}
-                            LinkId::Port(port) => self.port_link_exit(port, id, &reason)?,
+                            LinkId::Port(port) => self.port_link_exit(port, id, &reason),
                         }
                         reds -= 1;
                     }

@@ -119,9 +119,6 @@ unsupported(Path, Case) ->
                 spawn(fun() -> Parent ! sent, prim_inet:send(S, "x") end),
                 receive sent -> ok end,
                 prim_inet:send(S, "y");
-        subscribe -> queue(S), prim_inet:close(S);
-        port_close -> queue(S), erlang:port_close(S);
-        owner_exit -> queue(S), ok;
         term -> term_to_binary(S, [local])
     end.
 

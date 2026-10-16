@@ -168,6 +168,24 @@ fn inserts_objects_as_pinned_erts() {
 }
 
 #[test]
+fn inserts_new_objects_as_pinned_erts() {
+    // `ets_probe:insert_new/0` runs `ets:insert_new/2` in a set, a bag, and
+    // a duplicate_bag table. A key that the table holds gives `false`, and
+    // a list with such a key inserts no object (erl_db.c:2091-2098). A key
+    // that only the list holds two times goes in (erl_db.c:1829-1842). Each
+    // bad object, improper list, missing table, and table of another
+    // process raises `badarg`, and inserts no object (erl_db.c:2387-2440).
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let result = program.execute("ets_probe", "insert_new", &[]).unwrap();
+    let expected = String::from_utf8(reference("insert_new")).unwrap();
+    assert_eq!(
+        format!("{}\n", text(&result.term, result.atoms())),
+        expected
+    );
+    assert!(expected.starts_with("[{[true,false,false,true,true,false,false,true],"));
+}
+
+#[test]
 fn looks_up_elements_as_pinned_erts() {
     // `ets_probe:lookup/0` reads elements and defaults. The key position
     // and the index keep only their low 32 bits (erl_db_util.h:346,
@@ -466,6 +484,7 @@ fn rejects_tables_that_pbeam_cannot_model() {
         ("heir", "new/2 heir ProcessId("),
         ("heir_data", "new/2 heir ProcessId("),
         ("keypos", "insert/2 in a table with key position 0"),
+        ("keypos_new", "insert_new/2 in a table with key position 0"),
         ("index", "lookup_element/4 index 4294967296 with position 0"),
         (
             "match_changed",

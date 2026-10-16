@@ -198,6 +198,48 @@ pub(super) fn insert(
     table: &Term,
     objects: &Term,
 ) -> Result<BifResult, BeamError> {
+    insert_objects(context, table, objects, false)
+}
+
+/// Run `ets:insert_new(Table, Objects)`, as ERTS `ets_insert_new_2`
+/// (`erl_db.c:2387-2440`) does. It costs, checks, and traps as [`insert`]
+/// does, with one difference: when the table holds the key of an object,
+/// no object goes into the table, and the call returns `false`. One tuple
+/// and a list of one tuple then cost no reduction: `db_put_hash` with
+/// `key_clash_fail` stops before it compares an object
+/// (`erl_db_hash.c:1396-1428`). The table holds only the objects of
+/// earlier calls, so a key that only the list holds two times is no clash
+/// (`ets_insert_new_2_list_has_member`, `erl_db.c:1829-1842`), and the
+/// list goes into the table as `ets:insert/2` puts it. [`insert_list`]
+/// gives the units of a longer list.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let object = Term::tuple(vec![test_atom("k"), test_atom("v")]);
+/// assert!(matches!(insert_new(&mut context, &table, &object)?, BifResult::Value(_)));
+/// // `false`: the table holds the key `k`.
+/// assert!(matches!(insert_new(&mut context, &table, &object)?, BifResult::Value(_)));
+/// ```
+///
+/// # Errors
+///
+/// Return the runtime errors of [`insert`].
+pub(super) fn insert_new(
+    context: &mut BifContext<'_>,
+    table: &Term,
+    objects: &Term,
+) -> Result<BifResult, BeamError> {
+    insert_objects(context, table, objects, true)
+}
+
+/// Run [`insert`], or [`insert_new`] when `new` is true.
+fn insert_objects(
+    context: &mut BifContext<'_>,
+    table: &Term,
+    objects: &Term,
+    new: bool,
+) -> Result<BifResult, BeamError> {
     // A cons cell with a tail that is not `[]`: at least two objects, or an
     // improper list.
     if objects.cons_cell().is_some_and(|(_, tail)| !tail.is_nil()) {
@@ -205,8 +247,13 @@ pub(super) fn insert(
             return Ok(BifResult::badarg());
         };
         let (keypos, bag) = (found.keypos(), found.table_type() == TableType::Bag);
-        let check = Check::Rest(objects.clone());
-        return insert_list(context, id, objects, 0, keypos, bag.then(Term::nil), check);
+        let state = ListState {
+            done: 0,
+            bag: bag.then(Term::nil),
+            check: Check::Rest(objects.clone()),
+            new: if new { New::Unlocked } else { New::No },
+        };
+        return insert_list(context, id, objects, keypos, state);
     }
     let caller = context.scheduler.current_process_mut().id;
     let Some(table) =
@@ -225,6 +272,9 @@ pub(super) fn insert(
     let Some(tuples) = valid_objects(objects, keypos) else {
         return Ok(BifResult::badarg());
     };
+    if new && first_held(&context.scheduler.atoms, table, &tuples, keypos)?.is_some() {
+        return Ok(Value(Term::static_atom("false")));
+    }
     let compared = put_objects(&context.scheduler.atoms, table, &tuples, keypos)?;
     let compared: usize = compared.iter().sum();
     // `consumed_reds / ITERATIONS_PER_RED` (`erl_db.c:2379`).
@@ -290,14 +340,27 @@ pub(super) fn insert(
 /// completes the insert, so that the insert returns `true`, and PBeam
 /// returns a runtime error there ([`delete_table`]).
 ///
+/// `new` is [`New::No`] for `ets:insert/2`. For `ets:insert_new/2`
+/// (`erl_db.c:2017-2116`), the call walks the objects up to the first
+/// object whose key the table holds, with one unit for each object
+/// (`ets_insert_new_2_list_has_member`, `erl_db.c:1829-1842`, `1909-1925`),
+/// after it takes the table and before the insert. When it finds such an
+/// object, no object goes into the table, and the call returns `false`: in
+/// step 2 with no more units, and in step 3 after it frees the copies with
+/// one unit for each object (`erl_db.c:2091-2098`). In step 3 PBeam decides
+/// the result when it takes the table, and keeps the units of the walk in
+/// [`New::Locked`]. The call then traps to the internal export
+/// `ets:insert_new/7`, with the state of `new` after the arguments of
+/// `ets:insert/6`. ERTS traps to `ets:insert_new/2` (`erl_db.c:2211`).
+///
 /// # Examples
 ///
 /// ```rust,ignore
 /// process.fcalls = 10;
 /// let objects = Term::list_from(vec![Term::tuple(vec![test_atom("k")]); 8]);
 /// // 8 units of the check and 16 units of the insert: 3 reductions.
-/// let check = Check::Rest(objects.clone());
-/// assert!(matches!(insert_list(&mut context, id, &objects, 0, 1, None, check)?, BifResult::Value(_)));
+/// let state = ListState { done: 0, bag: None, check: Check::Rest(objects.clone()), new: New::No };
+/// assert!(matches!(insert_list(&mut context, id, &objects, 1, state)?, BifResult::Value(_)));
 /// assert_eq!(context.scheduler.current_process_mut().fcalls, 7);
 /// ```
 ///
@@ -310,13 +373,17 @@ pub(super) fn insert_list(
     context: &mut BifContext<'_>,
     id: Reference,
     objects: &Term,
-    mut done: usize,
     keypos: i32,
-    mut bag: Option<Term>,
-    mut check: Check,
+    state: ListState,
 ) -> Result<BifResult, BeamError> {
     /// `ITERATIONS_PER_RED` (`erl_db.c:2152`).
     const ITERATIONS_PER_RED: i64 = 8;
+    let ListState {
+        mut done,
+        mut bag,
+        mut check,
+        mut new,
+    } = state;
     let table = Term::Reference(id);
     let inserting = |bag: &Option<Term>| bag.as_ref().is_some_and(|steps| !steps.is_nil());
     // The number of objects is known only after the check. Until then,
@@ -325,10 +392,12 @@ pub(super) fn insert_list(
         Check::Rest(_) => done,
         Check::Done(count) => count,
     };
-    let insert_phase = match &bag {
-        Some(_) => inserting(&bag),
-        None => 2 * count < done && done <= 4 * count,
-    };
+    let locked = matches!(new, New::Locked { .. });
+    let insert_phase = locked
+        || match &bag {
+            Some(_) => inserting(&bag),
+            None => 2 * count < done && done <= 4 * count,
+        };
     if insert_phase
         && context
             .scheduler
@@ -351,10 +420,11 @@ pub(super) fn insert_list(
     };
     // After a failed copy, the units of the removal of the copies follow
     // `4 * count`, and a removal that yields leaves `done` above it.
-    let mut removal = match &bag {
-        Some(_) => done > 2 * count && !inserting(&bag),
-        None => done > 4 * count,
-    };
+    let mut removal = !locked
+        && match &bag {
+            Some(_) => done > 2 * count && !inserting(&bag),
+            None => done > 4 * count,
+        };
     // `None` when the call yields, else the result of the call.
     let result = 'work: {
         if let Check::Rest(rest) = &mut check {
@@ -372,12 +442,20 @@ pub(super) fn insert_list(
                 ) else {
                     break 'work Some(BifResult::badarg());
                 };
-                put_objects(&context.scheduler.atoms, table, &tuples(), keypos)?;
+                let tuples = tuples();
+                if !matches!(new, New::No) {
+                    let held = first_held(&context.scheduler.atoms, table, &tuples, keypos)?;
+                    units.left -= held.unwrap_or(count) as i64;
+                    if held.is_some() {
+                        break 'work Some(Value(Term::static_atom("false")));
+                    }
+                }
+                put_objects(&context.scheduler.atoms, table, &tuples, keypos)?;
                 units.left -= 2 * count as i64;
                 break 'work Some(Value(Term::static_atom("true")));
             }
         }
-        if done <= 2 * count && !inserting(&bag) {
+        if done <= 2 * count && !inserting(&bag) && !locked {
             if !units.run(&mut done, 2 * count) {
                 break 'work None;
             }
@@ -387,8 +465,20 @@ pub(super) fn insert_list(
                 caller,
                 Operation::Write,
             ) {
-                Some(table) => {
-                    let compared = put_objects(&context.scheduler.atoms, table, &tuples(), keypos)?;
+                Some(table) => 'take: {
+                    let tuples = tuples();
+                    if let New::Unlocked = new {
+                        let held = first_held(&context.scheduler.atoms, table, &tuples, keypos)?;
+                        let walk = held.unwrap_or(count);
+                        new = New::Locked {
+                            walk,
+                            found: held.is_some(),
+                        };
+                        if held.is_some() {
+                            break 'take;
+                        }
+                    }
+                    let compared = put_objects(&context.scheduler.atoms, table, &tuples, keypos)?;
                     if bag.is_some() {
                         let steps = compared.into_iter().flat_map(|compared| {
                             [Term::Integer(1), Term::Integer(1 + compared as i64)]
@@ -398,6 +488,26 @@ pub(super) fn insert_list(
                 }
                 None => (removal, done) = (true, 4 * count),
             }
+        }
+        if let New::Locked { walk, found } = new {
+            // The walk, then the removal of the copies or the insert.
+            let walked = 2 * count + walk;
+            if done < walked && !units.run(&mut done, walked) {
+                break 'work None;
+            }
+            let finished = match &mut bag {
+                _ if found => units.run(&mut done, walked + count),
+                Some(steps) => units.run_steps(&mut done, steps),
+                None => units.run(&mut done, walked + 2 * count),
+            };
+            if !finished {
+                break 'work None;
+            }
+            break 'work Some(Value(Term::static_atom(if found {
+                "false"
+            } else {
+                "true"
+            })));
         }
         if !removal {
             let finished = match &mut bag {
@@ -416,18 +526,93 @@ pub(super) fn insert_list(
     };
     let process = context.scheduler.current_process_mut();
     process.bump_reductions(((budget - units.left) / ITERATIONS_PER_RED) as i32);
-    Ok(result.unwrap_or_else(|| BifResult::TrapBif {
-        module: "ets",
-        function: "insert",
-        arguments: vec![
+    Ok(result.unwrap_or_else(|| {
+        let mut arguments = vec![
             table,
             objects.clone(),
             Term::Integer(done as i64),
             Term::Integer(i64::from(keypos)),
             bag.unwrap_or_else(|| Term::static_atom("false")),
             check.into_term(),
-        ],
+        ];
+        let function = match new.into_term() {
+            Some(new) => {
+                arguments.push(new);
+                "insert_new"
+            }
+            None => "insert",
+        };
+        BifResult::TrapBif {
+            module: "ets",
+            function,
+            arguments,
+        }
     }))
+}
+
+/// The state of a list insert ([`insert_list`]) that a trap keeps.
+pub(super) struct ListState {
+    /// The units that the call used.
+    pub(super) done: usize,
+    /// The steps of a `bag` insert that remain, or `None` for another
+    /// table.
+    pub(super) bag: Option<Term>,
+    /// How far the check went.
+    pub(super) check: Check,
+    /// The `ets:insert_new/2` state.
+    pub(super) new: New,
+}
+
+/// The `ets:insert_new/2` state of a list insert ([`insert_list`]).
+pub(super) enum New {
+    /// The call is `ets:insert/2`.
+    No,
+    /// The call is `ets:insert_new/2`, and it did not take the table.
+    Unlocked,
+    /// The call is `ets:insert_new/2`, and it took the table. `walk` is the
+    /// number of units of the walk for a key that the table holds, and
+    /// `found` is true when the walk found one.
+    Locked { walk: usize, found: bool },
+}
+
+impl New {
+    /// Return the trap argument of the state: `true` before the call takes
+    /// the table, `{Walk, Found}` after, and `None` for `ets:insert/2`.
+    /// [`New::from_term`] reads it back.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(New::Unlocked.into_term(), Some(Term::static_atom("true")));
+    /// assert!(New::No.into_term().is_none());
+    /// ```
+    fn into_term(self) -> Option<Term> {
+        match self {
+            New::No => None,
+            New::Unlocked => Some(Term::static_atom("true")),
+            New::Locked { walk, found } => Some(Term::tuple(vec![
+                Term::Integer(walk as i64),
+                Term::static_atom(if found { "true" } else { "false" }),
+            ])),
+        }
+    }
+
+    /// Read the trap argument that [`New::into_term`] gives.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(matches!(New::from_term(&Term::static_atom("true")), New::Unlocked));
+    /// ```
+    pub(super) fn from_term(term: &Term) -> New {
+        match term {
+            Term::Tuple(elements) => New::Locked {
+                walk: elements[0].small_integer().expect("a trap keeps the walk") as usize,
+                found: elements[1] == Term::static_atom("true"),
+            },
+            _ => New::Unlocked,
+        }
+    }
 }
 
 /// How far the check of a list insert ([`insert_list`]) went, as the YCF
@@ -615,14 +800,65 @@ fn put_objects(
     tuples: &[&[Term]],
     keypos: i32,
 ) -> Result<Vec<usize>, BeamError> {
-    if keypos == 0 && !tuples.is_empty() {
-        // ponytail: ERTS aborts here; see "ETS tables" in docs/erts-differences.md.
-        return Err(error(
-            "unsupported ets:insert/2 in a table with key position 0",
-        ));
-    }
+    check_keypos(tuples, keypos, "insert/2")?;
     let objects = tuples.iter().map(|elements| elements.to_vec()).collect();
     Ok(table.insert_all(atoms, objects))
+}
+
+/// Return the position, from 1, of the first object of `tuples` whose key
+/// `table` holds, or `None`, as `ets_insert_new_2_list_has_member`
+/// (`erl_db.c:1829-1842`, `1909-1925`) looks for it. The table has the key
+/// position `keypos`, and `atoms` owns the name of an atom key.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let object = vec![test_atom("k")];
+/// put_objects(&atoms, &mut table, &[&object], 1)?;
+/// assert_eq!(first_held(&atoms, &table, &[&[test_atom("j")], &object], 1)?, Some(2));
+/// ```
+///
+/// # Errors
+///
+/// Return the runtime error of [`check_keypos`].
+fn first_held(
+    atoms: &AtomTable,
+    table: &Table,
+    tuples: &[&[Term]],
+    keypos: i32,
+) -> Result<Option<usize>, BeamError> {
+    check_keypos(tuples, keypos, "insert_new/2")?;
+    // The check makes the key position at least 1 for each object.
+    let held = (tuples.iter()).position(|elements| {
+        table
+            .object(atoms, &elements[keypos as usize - 1])
+            .is_some()
+    });
+    Ok(held.map(|index| index + 1))
+}
+
+/// Return a runtime error for the objects `tuples` of the BIF `bif` in a
+/// table with the key position 0: ERTS aborts the emulator there (`Invalid
+/// tag in make_internal_hash`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(check_keypos(&[], 0, "insert/2").is_ok());
+/// assert!(check_keypos(&[&[test_atom("k")]], 0, "insert/2").is_err());
+/// ```
+///
+/// # Errors
+///
+/// Return the runtime error for a table with the key position 0.
+fn check_keypos(tuples: &[&[Term]], keypos: i32, bif: &str) -> Result<(), BeamError> {
+    if keypos == 0 && !tuples.is_empty() {
+        // ponytail: ERTS aborts here; see "ETS tables" in docs/erts-differences.md.
+        return Err(error(format!(
+            "unsupported ets:{bif} in a table with key position 0"
+        )));
+    }
+    Ok(())
 }
 
 /// Return the tuples of `objects` when each one has at least `keypos`
