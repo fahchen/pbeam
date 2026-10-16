@@ -1,13 +1,13 @@
 //! Native bindings of the `crypto` NIFs (`lib/crypto/c_src/crypto.c`).
 //!
 //! PBeam links only `strong_rand_bytes_nif/1`, which reads the entropy of
-//! the host from `/dev/urandom`. ERTS reads it with the OpenSSL
+//! the host from `/dev/urandom`, which it opens once. ERTS reads it with the OpenSSL
 //! `RAND_bytes` (`rand.c:26-50`). Each other function of the library gives
 //! the runtime error `crypto:F/A NIF is not supported` (row "NIF stubs" of
 //! `docs/erts-differences.md`).
 
 use super::*;
-use std::{fs::File, io::Read};
+use std::{fs::File, io::Read, sync::OnceLock};
 
 /// The functions of the ERTS `crypto` NIF library, as `(name, arity)` in
 /// the order of `nif_funcs` (`crypto.c:68-145`). `erlang:load_nif/2`
@@ -153,8 +153,8 @@ pub(super) fn load(load_info: &Term) -> i32 {
 /// `strong_rand_bytes_nif` (`rand.c:26-50`) does. A `Bytes` that is not an
 /// unsigned C `int` raises `error:badarg`, and the result is a binary of
 /// `Bytes` random bytes. ERTS returns `false` when it cannot make the
-/// bytes; PBeam returns `false` when it cannot read them from
-/// `/dev/urandom`.
+/// bytes; PBeam returns `false` when it cannot open `/dev/urandom` or
+/// read the bytes from it.
 ///
 /// # Examples
 ///
@@ -174,7 +174,22 @@ fn strong_rand_bytes_nif(size: &Term) -> BifResult {
         return BifResult::badarg();
     };
     let mut bytes = vec![0; size];
-    let read = File::open("/dev/urandom").and_then(|mut file| file.read_exact(&mut bytes));
+    let read = urandom().and_then(|mut file| file.read_exact(&mut bytes));
     let bytes = read.map(|()| Term::binary(bytes));
     BifResult::Value(bytes.unwrap_or(Term::static_atom("false")))
+}
+
+/// Give `/dev/urandom`, which the first call opens and each later call
+/// shares. A failed open is not kept, so the next call opens it again.
+///
+/// # Errors
+///
+/// The error of the open.
+fn urandom() -> std::io::Result<&'static File> {
+    static URANDOM: OnceLock<File> = OnceLock::new();
+    if let Some(file) = URANDOM.get() {
+        return Ok(file);
+    }
+    let file = File::open("/dev/urandom")?;
+    Ok(URANDOM.get_or_init(|| file))
 }
