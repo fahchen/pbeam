@@ -3341,7 +3341,8 @@ pub(super) fn finish_loading(
 /// code that waits for its `-on_load` function. With `true`, the code
 /// becomes the loaded code of the module, and its exports become visible.
 /// With `false`, the code stays until a purge, and the module stays not
-/// loaded. Both return `true`. The `code` capability check of
+/// loaded. Both return `true`, and with `true` the caller first switches
+/// out, as for `erlang:finish_loading/1`. The `code` capability check of
 /// `erlang:finish_loading/1` admitted the module, so this BIF has no
 /// capability check.
 ///
@@ -3370,10 +3371,14 @@ pub(super) fn finish_after_on_load(
         return Ok(BifResult::badarg());
     };
     let name = scheduler.atoms.name_of(module).to_owned();
-    if scheduler.code.finish_after_on_load(&name, keep)? {
-        Ok(Value(Term::static_atom("true")))
-    } else {
+    if !scheduler.code.finish_after_on_load(&name, keep)? {
         Ok(BifResult::badarg())
+    } else if keep {
+        // ERTS suspends the caller until the code is committed
+        // (`beam_bif_load.c:912-916`, `555-566`).
+        Ok(BifResult::YieldReturn(Term::static_atom("true")))
+    } else {
+        Ok(Value(Term::static_atom("true")))
     }
 }
 
