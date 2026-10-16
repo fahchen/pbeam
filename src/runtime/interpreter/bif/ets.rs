@@ -3,7 +3,7 @@
 use super::BifResult::Value;
 use super::*;
 use crate::runtime::ets::pattern::Pattern;
-use crate::runtime::ets::{Access, Operation, Table, TableType};
+use crate::runtime::ets::{Access, Busy, Operation, Table, TableType};
 use crate::term::Reference;
 
 /// The fewest and the most locks that the hidden option
@@ -11,6 +11,110 @@ use crate::term::Reference;
 /// (`DB_WRITE_CONCURRENCY_MIN_LOCKS` and `DB_WRITE_CONCURRENCY_MAX_LOCKS`,
 /// `erl_db.c:65-66`).
 const LOCKS: std::ops::RangeInclusive<i64> = 1..=32768;
+
+/// `ITERATIONS_PER_RED` (`erl_db.c:2152`): the units of one reduction of
+/// the budget of a list insert.
+const ITERATIONS_PER_RED: i64 = 8;
+
+/// Run up to `units` units of the steps of the list insert that took the
+/// table `table`, as `ets_insert_2_list_continue` runs the steps of a
+/// trapped call (`erl_db.c:2173-2197`): the walk of `ets:insert_new/2` and
+/// the insert of the objects, one step for each object. The steps are in
+/// the table, so a call that traps between two objects leaves the position
+/// there, and another process that uses the table runs the steps too
+/// ([`help_busy`]). Return the units that the steps used, and the result
+/// when the insert ended, else `None`.
+///
+/// # Errors
+///
+/// See [`ProcessState::bif_reductions_left`] for a negative budget of the
+/// current process.
+fn step_inserting(
+    context: &mut BifContext<'_>,
+    table: &Term,
+    units: i64,
+    mine: Option<ProcessId>,
+) -> Result<(i64, Option<Term>), BeamError> {
+    let scheduler = &mut *context.scheduler;
+    // The caller of a step found the table: the take of the call, or the
+    // check of its resumption, found it (`erl_db.c:2077-2107`, `2223-2253`).
+    let (id, busy) = scheduler
+        .ets
+        .find(&scheduler.atoms, table)
+        .expect("the caller found the table");
+    // The process that started the insert is the only one that gets its
+    // result: a later insert of the same table takes the table after the
+    // call of the earlier one returned (`erl_db.c:2223-2253`).
+    if mine.is_some_and(|caller| {
+        busy.busy
+            .as_ref()
+            .is_some_and(|inserting| inserting.owner != caller)
+    }) {
+        return Ok((0, None));
+    }
+    let Some(inserting) = scheduler.ets.busy(&scheduler.atoms, &Term::Reference(id)) else {
+        // The insert ended in another turn: the process that started it
+        // reads the result, as the driver reads `ctx->return_value`
+        // (`erl_db.c:2239-2244`).
+        let table = scheduler
+            .ets
+            .table_by_id(id)
+            .expect("the caller found the table");
+        return Ok((0, mine.and_then(|caller| table.take_ended(caller))));
+    };
+    Ok(inserting.step_busy(&scheduler.atoms, units))
+}
+
+/// What a process that takes a table finds on it, as
+/// `handle_lacking_permission` (`erl_db.c:769-798`) sees a table with
+/// `DB_BUSY` (`erl_db.c:2310-2319`).
+enum Take {
+    /// The table runs no list insert.
+    Free,
+    /// The table runs the list insert of the calling process, and it does
+    /// not read the result of an ended one.
+    Mine,
+    /// The table runs the list insert of another process, or holds the
+    /// result of one that its process did not read: this process completes
+    /// the steps, and its own operation runs in a later turn.
+    Help,
+}
+
+/// Complete the list insert that holds the table `table` busy, with the
+/// units of the budget of the current process, as `handle_lacking_permission`
+/// (`erl_db.c:769-798`) runs the continuation of a table that a list insert
+/// took when another process uses it: the process completes the walk and the
+/// insert first, and it charges the units of the work
+/// (`ets_insert_2_list_continuation`, `erl_db.c:2152-2197`). Its own
+/// operation then traps and runs in a later turn (`erl_db.c:782-787`).
+///
+/// # Errors
+///
+/// See [`ProcessState::bif_reductions_left`] for a negative budget of the
+/// current process.
+fn help_busy(context: &mut BifContext<'_>, table: &Term) -> Result<Take, BeamError> {
+    let caller = context.scheduler.current_process_mut().id;
+    let Some((id, found)) = context.scheduler.ets.find(&context.scheduler.atoms, table) else {
+        return Ok(Take::Free);
+    };
+    let Some(started) = found.busy.as_ref() else {
+        return Ok(Take::Free);
+    };
+    if started.owner == caller {
+        return Ok(Take::Mine);
+    }
+    let budget = ITERATIONS_PER_RED
+        * context
+            .scheduler
+            .current_process_mut()
+            .bif_reductions_left()? as i64;
+    let (used, _) = step_inserting(context, &Term::Reference(id), budget, None)?;
+    context
+        .scheduler
+        .current_process_mut()
+        .bump_reductions((used / ITERATIONS_PER_RED) as i32);
+    Ok(Take::Help)
+}
 
 /// Run `ets:new(Name, Options)`: make a hash table that the calling process
 /// owns, and return `Name` for a named table or a new table reference for
@@ -256,6 +360,13 @@ fn insert_objects(
         return insert_list(context, id, objects, keypos, state);
     }
     let caller = context.scheduler.current_process_mut().id;
+    if let Take::Help = help_busy(&mut *context, table)? {
+        return Ok(BifResult::TrapBif {
+            module: "ets",
+            function: if new { "insert_new" } else { "insert" },
+            arguments: vec![table.clone(), objects.clone()],
+        });
+    }
     let Some(table) =
         context
             .scheduler
@@ -331,12 +442,12 @@ fn insert_objects(
 /// did not read, and after the check it does not read the list again
 /// before the insert. `done` counts the units of the check, the copy, and the
 /// insert, and after a failed copy the units of the removal from
-/// `4 * count`. ERTS takes a table lock and inserts each object in step 3, and
-/// another process that uses the table helps to complete the insert. PBeam
-/// inserts all objects when it takes the table, so another process sees
-/// them at once. When the owner exit deletes the table during step 3, a
-/// later call raises `badarg`, as ERTS does after it cancels the insert
-/// (`erl_db.c:2232-2248`, `5082-5086`). `ets:delete/1` in ERTS first
+/// `4 * count`. ERTS takes a table lock and walks and inserts the objects
+/// of step 3 one after another, and the table is busy between the objects,
+/// so another process that uses it completes the walk and the insert first
+/// and charges its own units for them ([`help_busy`]). When the owner exit
+/// deletes the table during step 3, a later call raises `badarg`, as ERTS
+/// does after it cancels the insert (`erl_db.c:2232-2248`, `5082-5086`). `ets:delete/1` in ERTS first
 /// completes the insert, so that the insert returns `true`, and PBeam
 /// returns a runtime error there ([`delete_table`]).
 ///
@@ -376,8 +487,6 @@ pub(super) fn insert_list(
     keypos: i32,
     state: ListState,
 ) -> Result<BifResult, BeamError> {
-    /// `ITERATIONS_PER_RED` (`erl_db.c:2152`).
-    const ITERATIONS_PER_RED: i64 = 8;
     let ListState {
         mut done,
         mut bag,
@@ -418,13 +527,6 @@ pub(super) fn insert_list(
             .map(|object| valid_object(object, keypos).expect("the check found each object good"))
             .collect()
     };
-    // After a failed copy, the units of the removal of the copies follow
-    // `4 * count`, and a removal that yields leaves `done` above it.
-    let mut removal = !locked
-        && match &bag {
-            Some(_) => done > 2 * count && !inserting(&bag),
-            None => done > 4 * count,
-        };
     // `None` when the call yields, else the result of the call.
     let result = 'work: {
         if let Check::Rest(rest) = &mut check {
@@ -434,6 +536,12 @@ pub(super) fn insert_list(
                 Some(true) => (count, check) = (done, Check::Done(done)),
             }
             if bag.is_none() && count as i64 <= units.left {
+                // A second call completes the list insert that holds the
+                // table busy before it takes it, also without a copy of the
+                // objects (`erl_db.c:2050-2055`).
+                if let Take::Help = help_busy(&mut *context, &table)? {
+                    break 'work None;
+                }
                 let Some(table) = context.scheduler.ets.table(
                     &context.scheduler.atoms,
                     &table,
@@ -455,8 +563,21 @@ pub(super) fn insert_list(
                 break 'work Some(Value(Term::static_atom("true")));
             }
         }
+        let mut took = false;
         if done <= 2 * count && !inserting(&bag) && !locked {
             if !units.run(&mut done, 2 * count) {
+                break 'work None;
+            }
+            // The copies are done: the table takes the walk of
+            // `ets:insert_new/2` and the insert of the objects
+            // (`erl_db.c:2072-2110`), and it keeps the copies and the
+            // position of the steps, so a call that traps between two
+            // objects leaves it busy (`erl_db.c:2310-2319`). A list insert
+            // of another process that did not finish first runs here, with
+            // the units of this call, and this call then takes the table in
+            // a later turn (`handle_lacking_permission`, `erl_db.c:769-798`,
+            // `2223-2253`).
+            if let Take::Help = help_busy(&mut *context, &table)? {
                 break 'work None;
             }
             match context.scheduler.ets.table(
@@ -465,59 +586,40 @@ pub(super) fn insert_list(
                 caller,
                 Operation::Write,
             ) {
-                Some(table) => 'take: {
+                Some(taken_table) => {
                     let tuples = tuples();
-                    if let New::Unlocked = new {
-                        let held = first_held(&context.scheduler.atoms, table, &tuples, keypos)?;
-                        let walk = held.unwrap_or(count);
-                        new = New::Locked {
-                            walk,
-                            found: held.is_some(),
-                        };
-                        if held.is_some() {
-                            break 'take;
-                        }
-                    }
-                    let compared = put_objects(&context.scheduler.atoms, table, &tuples, keypos)?;
+                    let walk = matches!(new, New::Unlocked);
+                    let bif = if walk { "insert_new/2" } else { "insert/2" };
+                    check_keypos(&tuples, keypos, bif)?;
+                    taken_table.busy = Some(Busy::new(
+                        caller,
+                        tuples.iter().map(|object| object.to_vec()).collect(),
+                        walk,
+                    ));
+                    new = New::Locked {
+                        walk: 0,
+                        found: false,
+                    };
                     if bag.is_some() {
-                        let steps = compared.into_iter().flat_map(|compared| {
-                            [Term::Integer(1), Term::Integer(1 + compared as i64)]
-                        });
-                        bag = Some(Term::list_from(steps));
+                        bag = Some(Term::list_from([Term::Integer(0)]));
                     }
+                    took = true;
                 }
-                None => (removal, done) = (true, 4 * count),
+                None => done = 4 * count,
             }
         }
-        if let New::Locked { walk, found } = new {
-            // The walk, then the removal of the copies or the insert.
-            let walked = 2 * count + walk;
-            if done < walked && !units.run(&mut done, walked) {
-                break 'work None;
+        if took || locked || inserting(&bag) {
+            // The steps of the insert that the table took: the walk and
+            // the insert of the objects, one step for each object
+            // (`erl_db.c:1927-1949`, `2091-2107`). The call traps between
+            // the objects, and its next turn runs the steps that remain.
+            let (used, result) = step_inserting(&mut *context, &table, units.left, Some(caller))?;
+            done += used as usize;
+            units.left -= used;
+            match result {
+                Some(value) => break 'work Some(Value(value)),
+                None => break 'work None,
             }
-            let finished = match &mut bag {
-                _ if found => units.run(&mut done, walked + count),
-                Some(steps) => units.run_steps(&mut done, steps),
-                None => units.run(&mut done, walked + 2 * count),
-            };
-            if !finished {
-                break 'work None;
-            }
-            break 'work Some(Value(Term::static_atom(if found {
-                "false"
-            } else {
-                "true"
-            })));
-        }
-        if !removal {
-            let finished = match &mut bag {
-                Some(steps) => units.run_steps(&mut done, steps),
-                None => units.run(&mut done, 4 * count),
-            };
-            if !finished {
-                break 'work None;
-            }
-            break 'work Some(Value(Term::static_atom("true")));
         }
         if !units.run(&mut done, 5 * count) {
             break 'work None;
@@ -744,37 +846,6 @@ impl Units {
         self.left -= walked;
         Some(good)
     }
-
-    /// Use the steps of the list `steps`, each a number of units, and
-    /// return true. When a step makes the counter 0 or less and it is not
-    /// the last step, as `YCF_CONSUME_REDS` does (`erl_db.c:1939`), stop
-    /// after that step, keep the steps that remain in `steps`, and return
-    /// false: the call yields there. `done` counts the units of each step.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// let (mut units, mut done) = (Units { left: 3 }, 0);
-    /// let mut steps = Term::list_from([Term::Integer(4), Term::Integer(1)]);
-    /// assert!(!units.run_steps(&mut done, &mut steps));
-    /// assert_eq!((done, units.left), (4, -1));
-    /// ```
-    fn run_steps(&mut self, done: &mut usize, steps: &mut Term) -> bool {
-        loop {
-            let (step, rest) = steps.cons_cell().expect("a bag insert has a step");
-            let step = step.small_integer().expect("a step is a small integer");
-            *done += step as usize;
-            self.left -= step;
-            let last = rest.is_nil();
-            *steps = rest.clone();
-            if last {
-                return true;
-            }
-            if self.left <= 0 {
-                return false;
-            }
-        }
-    }
 }
 
 /// Put each object of `tuples` into `table`, which has the key position
@@ -938,6 +1009,13 @@ pub(super) fn lookup_element(
     default: &Term,
 ) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
+    if let Take::Help = help_busy(&mut *context, table)? {
+        return Ok(BifResult::TrapBif {
+            module: "ets",
+            function: "lookup_element",
+            arguments: vec![table.clone(), key.clone(), index.clone(), default.clone()],
+        });
+    }
     let Some(table) =
         context
             .scheduler
@@ -987,22 +1065,33 @@ pub(super) fn lookup_element(
 /// assert!(matches!(result, BifResult::Value(objects) if objects.proper_list().is_some_and(|objects| objects.count() == 1)));
 /// assert!(matches!(lookup(&mut context, &test_atom("missing"), &test_atom("k")), BifResult::Raise { .. }));
 /// ```
-pub(super) fn lookup(context: &mut BifContext<'_>, table: &Term, key: &Term) -> BifResult {
+pub(super) fn lookup(
+    context: &mut BifContext<'_>,
+    table: &Term,
+    key: &Term,
+) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
+    if let Take::Help = help_busy(&mut *context, table)? {
+        return Ok(BifResult::TrapBif {
+            module: "ets",
+            function: "lookup",
+            arguments: vec![table.clone(), key.clone()],
+        });
+    }
     let Some(table) =
         context
             .scheduler
             .ets
             .table(&context.scheduler.atoms, table, caller, Operation::Read)
     else {
-        return BifResult::badarg();
+        return Ok(BifResult::badarg());
     };
     let objects = table.objects(&context.scheduler.atoms, key);
-    Value(Term::list_from(
+    Ok(Value(Term::list_from(
         objects
             .into_iter()
             .map(|object| Term::tuple(object.to_vec())),
-    ))
+    )))
 }
 
 /// Run `ets:member(Table, Key)`, as ERTS `ets_member_2`
@@ -1018,18 +1107,33 @@ pub(super) fn lookup(context: &mut BifContext<'_>, table: &Term, key: &Term) -> 
 /// assert!(matches!(result, BifResult::Value(value) if value == test_atom("true")));
 /// assert!(matches!(member(&mut context, &Term::Integer(1), &test_atom("k")), BifResult::Raise { .. }));
 /// ```
-pub(super) fn member(context: &mut BifContext<'_>, table: &Term, key: &Term) -> BifResult {
+pub(super) fn member(
+    context: &mut BifContext<'_>,
+    table: &Term,
+    key: &Term,
+) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
+    if let Take::Help = help_busy(&mut *context, table)? {
+        return Ok(BifResult::TrapBif {
+            module: "ets",
+            function: "member",
+            arguments: vec![table.clone(), key.clone()],
+        });
+    }
     let Some(table) =
         context
             .scheduler
             .ets
             .table(&context.scheduler.atoms, table, caller, Operation::Read)
     else {
-        return BifResult::badarg();
+        return Ok(BifResult::badarg());
     };
     let found = table.object(&context.scheduler.atoms, key).is_some();
-    Value(Term::static_atom(if found { "true" } else { "false" }))
+    Ok(Value(Term::static_atom(if found {
+        "true"
+    } else {
+        "false"
+    })))
 }
 
 /// Run `ets:delete(Table, Key)` and return `true`, as ERTS `ets_delete_2`

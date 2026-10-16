@@ -1,8 +1,39 @@
 use super::{
-    Access, EMPTY, EtsTables, KeyIndex, Table, TableType, atom_hash, key_hash, object_hash,
+    Access, Busy, EMPTY, EtsTables, KeyIndex, Table, TableType, atom_hash, key_hash, object_hash,
     segment, stored_hash,
 };
 use crate::term::{Atom, AtomTable, Map, ProcessId, Reference, Term, test_atom_table};
+
+#[test]
+fn bounds_the_work_of_one_turn_of_a_busy_list_insert() {
+    // The steps of a list insert put one object into the table for each two
+    // units, and a step ends between two objects, so one turn puts at most
+    // `units / 2 + 1` objects in (`ets_insert_2_list_insert_db_term_list`,
+    // `erl_db.c:1927-1949`). The position stays in the table, so the next
+    // turn continues where the one before it stopped, and the units of the
+    // last step may go below 0, as the YCF counter does
+    // (`erl_db.c:1939`).
+    let atoms = AtomTable::new();
+    let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
+    assert_eq!(table.step_busy(&atoms, 7), (0, None));
+    let objects = (0..10).map(|value| vec![Term::Integer(value)]).collect();
+    table.busy = Some(Busy::new(ProcessId(0), objects, false));
+    assert_eq!(table.step_busy(&atoms, 7), (8, None));
+    assert_eq!(table.live_objects().len(), 4);
+    assert_eq!(table.step_busy(&atoms, 2), (2, None));
+    assert_eq!(table.live_objects().len(), 5);
+    assert_eq!(
+        table.step_busy(&atoms, 100),
+        (10, Some(Term::static_atom("true")))
+    );
+    assert_eq!(table.live_objects().len(), 10);
+    assert!(table.busy.is_none());
+    assert_eq!(
+        table.take_ended(ProcessId(0)),
+        Some(Term::static_atom("true"))
+    );
+    assert_eq!(table.take_ended(ProcessId(0)), None);
+}
 
 #[test]
 fn deletes_only_the_tables_of_the_owner() {

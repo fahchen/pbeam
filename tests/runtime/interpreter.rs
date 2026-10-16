@@ -15,7 +15,7 @@ use crate::{
     },
     runtime::{
         capability::{AllowAll, Capability, Policy},
-        ets::{Access, Table, TableType},
+        ets::{Access, Busy, Table, TableType},
         import_kind,
         process::{ProcessState, Start, tests::frame},
     },
@@ -4366,21 +4366,172 @@ fn resumes_a_list_insert_without_a_walk_of_the_checked_objects() {
     let (_, unchecked) = rest.cons_cell().unwrap();
     assert_eq!(arguments[2], Term::Integer(2));
     assert_eq!(arguments[5], Term::tuple(vec![unchecked.clone()]));
-    // After the insert, only the steps remain: a resume does not read the
-    // objects, which are not a list here.
+    // The table takes the copies and the position of the steps after the
+    // take (`erl_db.c:2072-2110`), so a resume runs the objects of the
+    // table and does not read the objects of the call, which are not a
+    // list here.
+    let Some(table) = scheduler.ets.table_by_id(Reference(0)) else {
+        panic!("the table is live");
+    };
+    let object = Term::tuple(vec![Term::Integer(1)]);
+    table.busy = Some(Busy::new(
+        owner,
+        vec![vec![object.clone()], vec![object]],
+        false,
+    ));
     scheduler.current_process_mut().fcalls = 1;
     let arguments = vec![
         id,
         Term::Integer(7),
         Term::Integer(5),
         Term::Integer(1),
-        Term::list_from([Term::Integer(1), Term::Integer(2)]),
+        Term::list_from([Term::Integer(0)]),
         Term::Integer(2),
     ];
     let result = program
         .bif_trap(&mut scheduler, "ets", "insert", arguments)
         .unwrap();
     assert!(matches!(result, BifResult::Value(value) if value == Term::static_atom("true")));
+}
+
+#[test]
+fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
+    // `handle_lacking_permission` completes the list insert of a table with
+    // `DB_BUSY` before the operation of the process that uses it, and it
+    // charges the units of the work to that process (`erl_db.c:769-798`,
+    // `2152-2197`). The operation of the process then traps and runs again
+    // in a later turn (`erl_db.c:2223-2253`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let caller = scheduler.current_process_mut().id;
+    let id = Term::Reference(Reference(0));
+    let object = Term::tuple(vec![Term::Integer(5), Term::Integer(6)]);
+    // The table runs the list insert of another process: the walk of its
+    // one object did not finish (`erl_db.c:2310-2319`).
+    let busy = |scheduler: &mut Scheduler| {
+        scheduler
+            .ets
+            .table_by_id(Reference(0))
+            .expect("the table is live")
+            .busy = Some(Busy::new(
+            ProcessId(99),
+            vec![vec![Term::Integer(5)]],
+            false,
+        ));
+    };
+    let arguments = [
+        ("lookup", vec![id.clone(), Term::Integer(5)]),
+        ("member", vec![id.clone(), Term::Integer(5)]),
+        (
+            "lookup_element",
+            vec![
+                id.clone(),
+                Term::Integer(5),
+                Term::Integer(1),
+                Term::Integer(0),
+            ],
+        ),
+        ("insert", vec![id.clone(), object.clone()]),
+        ("insert_new", vec![id.clone(), object.clone()]),
+        // A list of two objects takes the table without a copy
+        // (`erl_db.c:2050-2055`).
+        (
+            "insert",
+            vec![
+                id.clone(),
+                Term::list_from([object.clone(), object.clone()]),
+            ],
+        ),
+    ];
+    let mut table = Table::new(caller, Access::Public, 1, TableType::Set);
+    table.busy = None;
+    scheduler.ets.create(Reference(0), None, table);
+    for (function, arguments) in &arguments {
+        busy(&mut scheduler);
+        let result = program
+            .bif(&mut scheduler, "ets", function, arguments.clone())
+            .unwrap();
+        assert!(
+            matches!(result, BifResult::TrapBif { function: name, .. } if name == *function),
+            "ets:{function}/2 did not complete the insert and run again"
+        );
+    }
+    // The retry of each call runs on a table without a busy insert.
+    for (function, arguments) in &arguments {
+        let result = program
+            .bif_trap(&mut scheduler, "ets", function, arguments.clone())
+            .unwrap();
+        assert!(
+            matches!(result, BifResult::Value(_) | BifResult::Raise { .. }),
+            "ets:{function}/2 did not run again"
+        );
+    }
+    // The process that runs the insert takes its own table: the steps of
+    // the walk and of the insert are its own (`erl_db.c:2077-2107`).
+    scheduler.current_process_mut().fcalls = 1;
+    scheduler
+        .ets
+        .table_by_id(Reference(0))
+        .expect("the table is live")
+        .busy = Some(Busy::new(caller, vec![vec![Term::Integer(5)]], false));
+    let result = program
+        .bif(
+            &mut scheduler,
+            "ets",
+            "lookup",
+            vec![id.clone(), Term::Integer(5)],
+        )
+        .unwrap();
+    assert!(
+        matches!(result, BifResult::Value(_)),
+        "the process that runs the insert found the table busy"
+    );
+    // A list insert that takes the table of another list insert completes
+    // it first, and its own call runs again (`erl_db.c:2077`, `2223-2253`).
+    scheduler.current_process_mut().fcalls = 1;
+    busy(&mut scheduler);
+    let result = program
+        .bif_trap(
+            &mut scheduler,
+            "ets",
+            "insert",
+            vec![
+                id.clone(),
+                Term::list_from([object.clone(), object.clone()]),
+                Term::Integer(0),
+                Term::Integer(1),
+                Term::static_atom("false"),
+                Term::Integer(2),
+            ],
+        )
+        .unwrap();
+    assert!(
+        matches!(result, BifResult::TrapBif { .. }),
+        "the list insert did not complete the insert of the other process"
+    );
+    // A list insert of the same table runs its own steps while another
+    // process holds the table: it reads no result of its own there
+    // (`erl_db.c:2223-2253`).
+    scheduler.current_process_mut().fcalls = 1;
+    busy(&mut scheduler);
+    let result = program
+        .bif_trap(
+            &mut scheduler,
+            "ets",
+            "insert",
+            vec![
+                id,
+                Term::list_from([object.clone(), object]),
+                Term::Integer(4),
+                Term::Integer(1),
+                Term::list_from([Term::Integer(0)]),
+                Term::Integer(2),
+            ],
+        )
+        .unwrap();
+    assert!(matches!(result, BifResult::TrapBif { .. }));
 }
 
 #[test]

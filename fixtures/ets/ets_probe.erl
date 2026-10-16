@@ -3,7 +3,8 @@
          access/0, main/0, env/0, bag/0, info/0, match/0, match_deep/0,
          match_write_concurrency/0, delete_table/0, delete_trap/0,
          delete_order/0, deleter/2,
-         insert_new/0, unsupported/1, insert_all/2, ping/1,
+         insert_new/0, unsupported/1, insert_all/2, ping/1, busy/0, busy_insert/2,
+         busy_helper/2,
          own/2, write/1]).
 
 %% ets:new/2 return values and badarg cases (erl_db.c:2555-2840).
@@ -145,6 +146,68 @@ ping(Pid) -> Pid ! ping.
 
 %% Insert the list of objects Objects into the table T.
 insert_all(T, Objects) -> ets:insert(T, Objects).
+
+%% A list insert of 24000 objects into a table of the caller does its table
+%% work in steps, and the table is busy between the steps
+%% (`ETS_INSERT_2_LIST_GLOBAL`, erl_db.c:2077-2107, 2310-2319). A process
+%% that uses the table then completes the insert with its own reductions
+%% (`handle_lacking_permission`, erl_db.c:769-798), so its lookup finds the
+%% last object, and the insert of the table returns `true` with the
+%% reductions that it did not use (`erl_db.c:2223-2244`). The list is
+%% `{I, I}` for 1 to 24000, which spans at least three turns. Run with +S 1.
+busy() ->
+    [busy_alone(), busy_helped()].
+
+%% The insert of the list with no second process.
+busy_alone() ->
+    Parent = self(),
+    Insert = spawn(?MODULE, busy_insert, [Parent, ets:new(ets_probe, [public])]),
+    receive ready -> ok end,
+    Insert ! go,
+    receive M -> M end.
+
+%% The insert of the list with a process that uses the table while it is
+%% busy, at a higher priority, so it runs before the next turn of the
+%% insert.
+busy_helped() ->
+    Parent = self(),
+    Table = ets:new(ets_probe, [public]),
+    Insert = spawn(?MODULE, busy_insert, [Parent, Table]),
+    receive ready -> ok end,
+    Insert ! go,
+    %% Two turns of the insert: the check and the copy, then the lock of
+    %% the table and the steps of the objects, which leave it busy.
+    erlang:yield(),
+    erlang:yield(),
+    _Helper = spawn_opt(?MODULE, busy_helper, [Parent, Table], [{priority, high}]),
+    A = receive M -> M end,
+    B = receive M2 -> M2 end,
+    [A, B].
+
+%% Insert the list of busy_objects/0 into the table Table, and send the
+%% result and the reductions of the insert to Parent.
+busy_insert(Parent, Table) ->
+    Objects = busy_objects(),
+    Parent ! ready,
+    receive go -> ok end,
+    Before = reductions(),
+    Result = ets:insert(Table, Objects),
+    Parent ! {inserted, Result, reductions() - Before}.
+
+%% Look up the last key of the list that the insert of another process
+%% runs, and send the result and the reductions to Parent.
+busy_helper(Parent, Table) ->
+    Before = reductions(),
+    Result = ets:lookup(Table, 24000),
+    Parent ! {helped, Result, reductions() - Before}.
+
+%% The objects of busy/0 and busy_alone/0: `{I, I}` for I in 1 to 24000.
+busy_objects() ->
+    [{I, I} || I <- seq(24000)].
+
+%% The reductions that the calling process used so far.
+reductions() ->
+    element(2, process_info(self(), reductions)).
 
 %% ets:insert/2 on a set table (erl_db.c:2341-2381, erl_db.c:1812-1827).
 insert() ->
