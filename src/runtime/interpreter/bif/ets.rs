@@ -522,7 +522,7 @@ pub(super) fn insert_list(
     let global = locked
         || match &bag {
             Some(_) => inserting(&bag),
-            None => 2 * count < done && done < 4 * count,
+            None => 2 * count < done && done <= 4 * count,
         };
     if global {
         // The insert ended in another turn: the process reads its result,

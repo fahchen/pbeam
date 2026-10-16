@@ -768,12 +768,17 @@ impl Table {
             while busy.walked < busy.objects.len() && (first || left > 0) {
                 first = false;
                 // The counter consumes the loop unit of the step and yields
-                // before the key of the object (`erl_db.c:1916-1923`).
-                left -= 1;
-                if left <= 0 {
-                    break;
+                // before the key of the object; a turn that yields there
+                // keeps the unit charged (`erl_db.c:1916-1923`).
+                if !busy.looped {
+                    left -= 1;
+                    busy.looped = true;
+                    if left <= 0 {
+                        break;
+                    }
                 }
                 let key = &busy.objects[busy.walked][self.keypos as usize - 1];
+                busy.looped = false;
                 if self.object(atoms, key).is_some() {
                     busy.found = true;
                     break;

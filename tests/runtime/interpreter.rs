@@ -4591,6 +4591,52 @@ fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
         matches!(result, BifResult::TrapBif { .. }),
         "ets:select_trap/7 did not complete the insert of the other process"
     );
+    // A plain list insert that uses the last of its budget on its last
+    // object traps with all units of the insert charged, and it returns
+    // `true` in its next turn (`erl_db.c:1936-1940`, `2180-2196`).
+    scheduler.ets.create(
+        Reference(0),
+        None,
+        Table::new(caller, Access::Public, 1, TableType::Set),
+    );
+    let objects = |key: i64| Term::tuple(vec![Term::Integer(key)]);
+    scheduler
+        .ets
+        .table_by_id(Reference(0))
+        .expect("the table is live")
+        .busy = Some(Busy::new(
+        caller,
+        vec![
+            vec![Term::Integer(1), Term::Integer(1)],
+            vec![Term::Integer(2), Term::Integer(2)],
+        ],
+        false,
+    ));
+    scheduler
+        .ets
+        .table_by_id(Reference(0))
+        .expect("the table is live")
+        .step_busy(&scheduler.atoms.clone(), 4);
+    scheduler.current_process_mut().fcalls = 1;
+    let result = program
+        .bif_trap(
+            &mut scheduler,
+            "ets",
+            "insert",
+            vec![
+                id.clone(),
+                Term::list_from([objects(1), objects(2)]),
+                Term::Integer(8),
+                Term::Integer(1),
+                Term::static_atom("false"),
+                Term::Integer(2),
+            ],
+        )
+        .unwrap();
+    assert!(
+        matches!(result, BifResult::Value(value) if value == Term::static_atom("true")),
+        "the insert that charged all of its units did not return true"
+    );
     // A list insert that ended in another turn gives its result to the
     // process that started it, also after the table went away
     // (`erl_db.c:2142-2150`, `2223-2244`).
