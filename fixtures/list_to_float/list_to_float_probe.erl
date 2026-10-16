@@ -11,11 +11,11 @@
 %% the location [].
 %%
 %% In the C locale the first strtod attempt of a text with a comma reads the
-%% sign and the digits before the comma only. A prefix of 309 digits or more
-%% overflows an infinity, and ERTS rejects a result that is not finite
-%% before the second attempt (sys_float.c:109-124), so the call raises
-%% badarg whatever the full text is worth: 309 nines raise badarg, and 308
-%% nines give 1.0. Adjacent string literals hold each count of nines without
+%% sign and the digits before the comma only. A prefix that overflows an
+%% infinity, such as 309 nines, gives a result that is not finite, and ERTS
+%% rejects it before the second attempt (sys_float.c:109-124). The call
+%% then raises badarg whatever the full text is worth: 309 nines raise
+%% badarg, and 308 nines give 1.0. Adjacent string literals hold each count of nines without
 %% a call to a BIF.
 main() ->
     results(["1.0", "1,5", "-1.5", "+1.0", "-0.0", "0.0", "1.5E3", "1.0e10",

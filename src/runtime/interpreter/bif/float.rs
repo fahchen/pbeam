@@ -66,10 +66,9 @@ fn skip_digits(text: &[u8], index: usize) -> Option<usize> {
 /// place of the point (`sys_float.c:109-124`). ERTS rejects a result that
 /// is not finite after each attempt (`sys_float.c:111-113` and
 /// `sys_float.c:121-123`), so in the C locale the first attempt of a text
-/// with a comma reads the sign and the digits before the comma only. That
-/// prefix of 309 digits or more overflows an infinity, and the call then
-/// raises `badarg` before the second attempt, whatever the full text is
-/// worth. PBeam reads the text with the Rust float parse instead, which
+/// with a comma reads the sign and the digits before the comma only. A
+/// prefix that overflows an infinity, such as 309 nines, then raises
+/// `badarg` before the second attempt, whatever the full text is worth. PBeam reads the text with the Rust float parse instead, which
 /// rounds to the nearest double as `strtod` does, and it reads a comma as a
 /// point, which gives the ERTS result in each locale:
 /// `list_to_float("1,5")` gives `1.5` and `list_to_float("1.5")` gives
