@@ -1949,3 +1949,48 @@ fn unlinks_the_new_owner_after_its_queued_link_signal_at_a_driver_exit() {
     let links = &scheduler.processes[&child].links;
     assert!(links.get(&LinkId::Port(port)).is_none());
 }
+
+#[test]
+fn drops_the_link_exit_signal_of_a_process_that_the_port_does_not_link() {
+    use super::signals::HandlingPoint;
+    use crate::runtime::port::{
+        Driver, Ports,
+        inet::{Inet, SocketType},
+    };
+    use socket2::{Domain, Socket, Type};
+    // `erlang:port_connect/2` queues the link signal (io.c:2355-2380). The
+    // new owner runs `link/1` and `unlink/1` with the port before it
+    // handles the signal, so only its own side of the link stays. The port
+    // then drops the link exit signal of the owner (io.c:2187-2190).
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let (child, _) = scheduler
+        .spawn(
+            Start::Entry(frame()),
+            vec![],
+            None,
+            false,
+            StartFlags::default(),
+            None,
+        )
+        .unwrap()
+        .unwrap();
+    let (local, _peer) = Socket::pair(Domain::UNIX, Type::STREAM, None).unwrap();
+    let tcp = Inet::new(SocketType::Stream).copy(local);
+    let port = scheduler
+        .open_port(b"tcp_inet".to_vec(), Driver::Inet(tcp))
+        .unwrap();
+    assert!(scheduler.connect_port(port, child));
+    let ports = scheduler.resources.borrow_mut::<Ports>();
+    assert!(ports.get_mut(port).unwrap().links.remove(&child));
+    scheduler
+        .handle_signals(child, 100, 100, HandlingPoint::ScheduleIn)
+        .unwrap();
+    let links = &scheduler.processes[&child].links;
+    assert_eq!(links.get(&LinkId::Port(port)), Some(&0));
+    let killed = Term::static_atom("killed");
+    scheduler.port_link_exit(port, child, &killed).unwrap();
+    let ports = scheduler.resources.borrow_mut::<Ports>();
+    assert!(ports.get(port).is_some());
+}

@@ -399,7 +399,11 @@ impl Scheduler {
     /// and the port closes with the reason (see [`Self::close_port`]),
     /// except for the reason `normal` from a process that is not the owner
     /// (`erts_deliver_port_exit`, `io.c:3869-3872`). A port that closed
-    /// changes nothing.
+    /// changes nothing. A port without a link to `from` drops the signal
+    /// (`ERTS_PORT_OP_DROPPED`, `io.c:2187-2190`): the process can have its
+    /// side of the link alone, when it runs `link/1` and `unlink/1` with
+    /// the port before it handles the link signal of
+    /// `erlang:port_connect/2`.
     ///
     /// # Examples
     ///
@@ -418,13 +422,11 @@ impl Scheduler {
         reason: &Term,
     ) -> Result<(), BeamError> {
         let port = self.resources.borrow_mut::<Ports>().get_mut(id);
-        // A port that closed sent its link exit signal to `from`.
+        // A port that closed sent its link exit signal to `from`, and a port
+        // without the link drops the signal (`io.c:2187-2190`).
         let closes = port.is_some_and(|port| {
-            assert!(
-                port.links.remove(&from),
-                "an open port has the link of its linked process"
-            );
-            *reason != Term::static_atom("normal") || port.owner == from
+            port.links.remove(&from)
+                && (*reason != Term::static_atom("normal") || port.owner == from)
         });
         if closes {
             self.close_port(id, reason.clone())?;
