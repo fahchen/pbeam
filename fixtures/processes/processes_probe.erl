@@ -1,5 +1,5 @@
 -module(processes_probe).
--export([main/0, alone/0, wait/0]).
+-export([main/0, alone/0, wait/0, reductions/0, exited/1]).
 
 %% Return the erlang:processes/0 and process_info(Pid, group_leader)
 %% results that do not depend on the other processes of the node:
@@ -29,3 +29,32 @@ alone() ->
 
 wait() ->
     receive stop -> ok end.
+
+%% Return the reductions of one processes/0 call and the two
+%% process_info/2 calls around it. ERTS reads the process table of
+%% 1048576 indices in chunks of 1000 and charges 1 reduction for each 25
+%% indices (erl_ptab.c:42-43, 1022-1023), so the call traps about 10 times.
+reductions() ->
+    {reductions, A} = process_info(self(), reductions),
+    true = is_list(processes()),
+    {reductions, B} = process_info(self(), reductions),
+    B - A.
+
+%% Call processes/0 with about Left reductions in the turn, after the spawn
+%% of a child that exits at once and of a keeper that waits. The 1000
+%% processes before them put both in the second chunk of the table. Return
+%% whether the result has the child, and whether the child is last: a child
+%% that exits before the listing reads its chunk comes after the keeper,
+%% from the list of deleted processes (erl_ptab.c:1052-1170). With fewer than
+%% 40 reductions, the call traps before it reads the table
+%% (erl_ptab.c:766-768), and the child exits before the listing starts.
+exited(Left) ->
+    [receive {'DOWN', Ref, process, Pid, normal} -> ok end
+     || {Pid, Ref} <- [spawn_monitor(fun() -> ok end) || _ <- lists:seq(1, 1000)]],
+    erlang:yield(),
+    erlang:bump_reductions(4000 - Left),
+    Child = spawn(fun() -> ok end),
+    Keeper = spawn(?MODULE, wait, []),
+    Ps = processes(),
+    Keeper ! stop,
+    {lists:member(Child, Ps), lists:last(Ps) =:= Child}.
