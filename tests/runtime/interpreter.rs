@@ -423,6 +423,28 @@ fn spawns_with_link_and_monitor_options_and_rejects_other_options() {
             if matches!(elements.as_ref(), [Term::Pid(_), Term::Reference(_)])
     ));
     assert!(matches!(spawn_opt(vec![]), Ok(Term::Pid(_))));
+    // `{monitor, MonitorOpts}` gives the tag of the `DOWN` message, as
+    // `code_server:schedule_on_load/4` uses it (code_server.erl:1395-1396).
+    let monitor =
+        |options: Vec<Term>| Term::tuple(vec![test_atom("monitor"), Term::list_from(options)]);
+    let tag = Term::tuple(vec![test_atom("tag"), test_atom("on_load_down")]);
+    assert!(matches!(
+        wait_for_abnormal_child(vec![monitor(vec![tag])]),
+        Ok(Term::Tuple(ref elements))
+            if elements.first() == Some(&test_atom("on_load_down"))
+    ));
+    assert!(
+        spawn_opt(vec![monitor(vec![test_atom("bad")])])
+            .unwrap_err()
+            .to_string()
+            .contains("badarg")
+    );
+    assert!(
+        spawn_opt(vec![monitor(vec![test_atom("priority")])])
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported spawn option Tuple")
+    );
     assert!(
         spawn_opt(vec![test_atom("priority")])
             .unwrap_err()

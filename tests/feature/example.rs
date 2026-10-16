@@ -336,7 +336,11 @@ fn runs_the_called_modules_of_an_example_on_demand_as_pinned_erts() {
             ),
             ("HashDict", "no BEAM file in the code path"),
             ("HashSet", "no BEAM file in the code path"),
-            ("crypto", "unsupported BEAM opcode 149 (on_load)"),
+            (
+                "crypto",
+                "the start module crypto has an -on_load function, which PBeam runs only for \
+                 a module that loads in the run (on_load)"
+            ),
             (
                 "elixir_errors",
                 "unsupported BEAM opcode 132 (bs_match_string)"

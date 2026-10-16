@@ -1382,8 +1382,13 @@ pub(super) fn spawn_link(
 /// Run `erlang:spawn_opt/4`, which `erlang:spawn_monitor/3` in `erlang.beam`
 /// calls with the options `[monitor]`: start a process with the spawn
 /// options in `options`, as ERTS `spawn_opt_4` (`bif.c`) does. The option
-/// `link` links the new process and `monitor` monitors it. With `monitor`
-/// the result is `{Pid, Reference}`, else `Pid`. The option
+/// `link` links the new process and `monitor` monitors it. The option
+/// `{monitor, MonitorOpts}` monitors it with the `tag` of `MonitorOpts`,
+/// which `code_server:schedule_on_load/4` gives (code_server.erl:1396), and
+/// `MonitorOpts` that `erlang:monitor/3` rejects raise `badarg`
+/// (`erl_process.c:12406-12418`). An `alias` or `priority` monitor option
+/// gives a runtime error. With a monitor the result is `{Pid, Reference}`,
+/// else `Pid`. The option
 /// `{message_queue_data, on_heap | off_heap}` sets the start value of the
 /// `message_queue_data` flag of the new process, and the last such option
 /// wins (`erl_process.c:12305-12319`). The option `{priority, Level}` sets
@@ -1420,7 +1425,22 @@ pub(super) fn spawn_opt(
     for option in options {
         match option {
             Term::Atom(option) if option.is_static("link") => spawn_options.link = true,
-            Term::Atom(option) if option.is_static("monitor") => spawn_options.monitor = true,
+            Term::Atom(option) if option.is_static("monitor") => {
+                spawn_options.monitor = Some(Term::static_atom("DOWN"));
+            }
+            Term::Tuple(option) if matches!(option.as_ref(), [Term::Atom(name), _] if name.is_static("monitor")) =>
+            {
+                let Some(monitor) = monitor_options(&option[1]) else {
+                    return Ok(BifResult::badarg());
+                };
+                if monitor.alias.is_some() || monitor.priority {
+                    return Err(error(format!(
+                        "unsupported spawn option {}",
+                        debug_term(&Term::Tuple(option.clone()), &context.scheduler.atoms)
+                    )));
+                }
+                spawn_options.monitor = Some(monitor.tag);
+            }
             Term::Tuple(option) if matches!(option.as_ref(), [Term::Atom(name), _] if name.is_static("message_queue_data")) =>
             {
                 spawn_options.flags.off_heap_message_queue = match &option[1] {
@@ -3541,7 +3561,11 @@ pub(super) fn function_exported(
 /// the run, and the BIF returns `ok` after the calling process switches
 /// out: ERTS suspends the caller until the new code is committed and then
 /// returns the value (`beam_bif_load.c:555-566`). An empty list also
-/// returns `ok` this way.
+/// returns `ok` this way. A list of more than one module with an
+/// `-on_load` function raises `system_limit`, after the badarg checks
+/// (`beam_bif_load.c:395-408`). The one module with an `-on_load` function
+/// returns `{on_load, [Module]}` the same way, and its exports stay hidden
+/// until [`finish_after_on_load`] (`beam_bif_load.c:484-504`).
 ///
 /// # Examples
 ///
@@ -3574,6 +3598,12 @@ pub(super) fn finish_loading(
     let Some(names) = scheduler.code.prepared_names(&references) else {
         return Ok(BifResult::badarg());
     };
+    if references.len() > 1 && scheduler.code.prepared_on_load(&references) {
+        return Ok(BifResult::Raise {
+            class: ExceptionClass::Error,
+            reason: Term::static_atom("system_limit"),
+        });
+    }
     if let Some(denied) = denial(scheduler, CapabilityKind::Code, Operation::Load, None)? {
         return Ok(denied);
     }
@@ -3590,6 +3620,10 @@ pub(super) fn finish_loading(
     }
     match scheduler.code.finish(&references, names)? {
         Finish::Loaded => Ok(BifResult::YieldReturn(Term::static_atom("ok"))),
+        Finish::OnLoad(name) => Ok(BifResult::YieldReturn(Term::tuple(vec![
+            Term::static_atom("on_load"),
+            Term::list_from(vec![Term::Atom(scheduler.atoms.put(&name)?)]),
+        ]))),
         Finish::Duplicated(names) => {
             let mut modules = Vec::with_capacity(names.len());
             for name in names {
@@ -3603,6 +3637,54 @@ pub(super) fn finish_loading(
     }
 }
 
+/// Run `erlang:finish_after_on_load(Module, Keep)`, which
+/// `erts_code_purger` calls after the `-on_load` function of `Module`, as
+/// `finish_after_on_load_2` (`beam_bif_load.c:819-941`) does. A `Keep` that
+/// is not `true` or `false` raises `badarg`, and so does a `Module` with no
+/// code that waits for its `-on_load` function. With `true`, the code
+/// becomes the loaded code of the module, and its exports become visible.
+/// With `false`, the code stays until a purge, and the module stays not
+/// loaded. Both return `true`, and with `true` the caller first switches
+/// out, as for `erlang:finish_loading/1`. The `code` capability check of
+/// `erlang:finish_loading/1` admitted the module, so this BIF has no
+/// capability check.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let kept = finish_after_on_load(&mut scheduler, &test_atom("on_load_ok"), &Term::static_atom("true"))?;
+/// assert!(matches!(kept, BifResult::Value(_)));
+/// ```
+///
+/// # Errors
+///
+/// `true` after `false` gives the error of
+/// [`CodeTable::finish_after_on_load`].
+pub(super) fn finish_after_on_load(
+    scheduler: &mut Scheduler,
+    module: &Term,
+    keep: &Term,
+) -> Result<BifResult, BeamError> {
+    let keep = match keep {
+        Term::Atom(atom) if atom.is_static("true") => true,
+        Term::Atom(atom) if atom.is_static("false") => false,
+        _ => return Ok(BifResult::badarg()),
+    };
+    let Term::Atom(module) = module else {
+        return Ok(BifResult::badarg());
+    };
+    let name = scheduler.atoms.name_of(module).to_owned();
+    if !scheduler.code.finish_after_on_load(&name, keep)? {
+        Ok(BifResult::badarg())
+    } else if keep {
+        // ERTS suspends the caller until the code is committed
+        // (`beam_bif_load.c:912-916`, `555-566`).
+        Ok(BifResult::YieldReturn(Term::static_atom("true")))
+    } else {
+        Ok(Value(Term::static_atom("true")))
+    }
+}
+
 /// Run `erlang:module_loaded/1`, as ERTS `module_loaded_1`
 /// (`beam_bif_load.c:738-755`) does: return `true` when `module` has current
 /// code and no `-on_load` function waits to run, and `false` for an atom
@@ -3610,8 +3692,8 @@ pub(super) fn finish_loading(
 /// `badarg`. Then the caller needs a `code` capability that permits
 /// `inspect` for the module name (row "Capability checks" of
 /// `docs/erts-differences.md`), after the atom check and before the code
-/// table lookup. The PBeam loader does not load a module that has an `on_load`
-/// instruction (`unsupported BEAM opcode 149`), so each loaded module counts.
+/// table lookup. A module that waits for its `-on_load` function is not in
+/// the loaded modules of the code table, so it gives `false`.
 ///
 /// # Examples
 ///

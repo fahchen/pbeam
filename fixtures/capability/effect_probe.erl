@@ -416,6 +416,7 @@ ambient() ->
         length(erlang:nodes(this, #{})),
         erlang:function_exported(?MODULE, ambient, 0),
         erts_internal:prepare_loading(effect_probe_missing, <<"FOR1">>),
+        attempt(fun() -> erlang:finish_after_on_load(effect_probe_missing, true) end),
         erlang:cancel_timer(make_ref(), []),
         erlang:list_to_atom("effect_probe_ambient_atom"),
         element(1, re:compile("a", [])),

@@ -396,7 +396,7 @@ fn decode(
         .transpose()?
         .unwrap_or_default();
     let strings = chunks.get(b"StrT".as_slice()).copied().unwrap_or_default();
-    let (instructions, number_of_labels) = instruction::parse_code(
+    let (instructions, number_of_labels, on_load) = instruction::parse_code(
         code, atom_table, &atoms, &imports, &literals, &lambdas, strings,
     )?;
     if let Some(label) = exports
@@ -424,7 +424,9 @@ fn decode(
             arity,
         })
         .collect();
-    BeamModule::new(name, exports, imports, instructions)
+    let mut module = BeamModule::new(name, exports, imports, instructions)?;
+    module.on_load = on_load;
+    Ok(module)
 }
 
 /// Read the atoms of an `AtU8` chunk and put each one, in chunk order, into

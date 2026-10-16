@@ -1,5 +1,7 @@
 -module(load_probe).
 -export([load/1, prepared/1, errors/1, replace/1, on_load/1, order/1, constraint/1, late/1,
+         on_load_ok/1, on_load_error/1, on_load_crash/1, call_on_load/1, unsupported/1,
+         keep_after_drop/1,
          undefined_function/3]).
 
 %% Load load_target from its BEAM bytes with erlang:load_module/2
@@ -130,6 +132,74 @@ id(X) -> X.
 %% The error handler of late/1: return the call that has no export.
 undefined_function(Module, Function, Arguments) ->
     {undefined, Module, Function, Arguments}.
+
+%% Run the on_load steps of code_server and erts_code_purger for the
+%% modules of fixtures/on_load (on_load_steps/2).
+on_load_ok(Code) -> on_load_steps(on_load_ok, Code).
+
+on_load_error(Code) -> on_load_steps(on_load_error, Code).
+
+on_load_crash(Code) -> on_load_steps(on_load_crash, Code).
+
+%% Load Module, which has an -on_load function, from its BEAM bytes, and
+%% run its on_load function in a new process, as code_server does
+%% (code_server.erl:1348-1352, 1386-1398). Then keep or drop the code with
+%% erlang:finish_after_on_load/2, as erts_code_purger does
+%% (erts_code_purger.erl:166-167). Read the module and its export before
+%% and after the steps, with the error handler of late/1, and the error
+%% cases of the BIFs: a group of more than one module, a keep value that
+%% is not a boolean, a module with no on_load function, a module that is
+%% not an atom, and a call of
+%% erlang:call_on_load_function/1 through apply/3 with variable names.
+on_load_steps(Module, Code) ->
+    Prepared = erlang:prepare_loading(Module, Code),
+    Group = catch_error(fun() -> erlang:finish_loading([Prepared, Prepared]) end),
+    Finish = erlang:finish_loading([Prepared]),
+    Pending = on_load_state(Module),
+    BadKeep = catch_error(fun() -> erlang:finish_after_on_load(Module, keep) end),
+    Missing = catch_error(fun() -> erlang:finish_after_on_load(on_load_missing, true) end),
+    NoOnLoad = [catch_error(fun() -> erlang:call_on_load_function(load_probe) end),
+                catch_error(fun() -> erlang:call_on_load_function(id(1)) end),
+                catch_error(fun() -> erlang:finish_after_on_load(id(1), true) end)],
+    Applied = catch_error(fun() -> erlang:apply(id(erlang), id(call_on_load_function), [Module]) end),
+    {Pid, Ref} = spawn_monitor(load_probe, call_on_load, [Module]),
+    Result = receive {'DOWN', Ref, process, Pid, Reason} -> without_locations(Reason) end,
+    Keep = Result =:= ok,
+    Done = erlang:finish_after_on_load(Module, Keep),
+    After = on_load_state(Module),
+    Again = catch_error(fun() -> erlang:finish_after_on_load(Module, Keep) end),
+    Call = catch_error(fun() -> erlang:call_on_load_function(Module) end),
+    {Group, Finish, Pending, BadKeep, Missing, NoOnLoad, Applied, Result, Done, After, Again,
+     Call}.
+
+%% The process of code_server that runs the on_load function
+%% (code_server.erl:1391-1394).
+call_on_load(Module) ->
+    exit(erlang:call_on_load_function(Module)).
+
+%% Drop the code of on_load_ok after its on_load function, and then keep
+%% it. ERTS makes the code current with exports that call the error handler
+%% (beam_bif_load.c:887-897).
+keep_after_drop(Code) ->
+    {on_load, [on_load_ok]} = erlang:finish_loading([erlang:prepare_loading(on_load_ok, Code)]),
+    true = erlang:finish_after_on_load(on_load_ok, false),
+    erlang:finish_after_on_load(on_load_ok, true).
+
+%% Prepare a module with an instruction that the PBeam loader does not
+%% decode.
+unsupported(Code) ->
+    erlang:prepare_loading(load_unsupported, Code).
+
+%% Remove the locations of the stack trace of an exit reason, which PBeam
+%% does not give (row "Exception stack trace" of docs/erts-differences.md).
+without_locations({Reason, Stack}) when is_list(Stack) ->
+    {Reason, [{M, F, A} || {M, F, A, _} <- Stack]};
+without_locations(Reason) ->
+    Reason.
+
+on_load_state(Module) ->
+    [erlang:module_loaded(Module), erlang:function_exported(Module, value, 0),
+     handled(fun() -> Module:value() end)].
 
 catch_error(Fun) ->
     try Fun() catch Class:Reason -> {Class, Reason} end.
