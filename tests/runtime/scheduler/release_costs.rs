@@ -691,7 +691,7 @@ fn shared_last_release_measurement(shape: &Shape) -> Measurement {
         .spawn(
             Start::Entry(frame()),
             vec![graph],
-            false,
+            None,
             false,
             StartFlags::default(),
             None,

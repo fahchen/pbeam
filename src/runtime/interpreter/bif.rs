@@ -1266,7 +1266,7 @@ pub(super) fn is_heavy_bif(module: &str, name: &str, arity: u32) -> bool {
 /// PBeam BIF has no [`BifId`], so its call still matches the name in
 /// `BeamProgram::named_bif`. The checks
 /// keep the order of the removed checks of the call: `erlang:load_nif/2`
-/// before the BIFs, and `erlang:apply/2,3`, which are not BIFs, at the
+/// and `erlang:call_on_load_function/1` before the BIFs, and `erlang:apply/2,3`, which are not BIFs, at the
 /// export.
 ///
 /// # Examples
@@ -1281,6 +1281,7 @@ pub(crate) fn import_kind(module: &str, name: &str, arity: u32) -> ImportKind {
         ("erlang", "apply", 2) => ImportKind::ApplyFun,
         ("erlang", "apply", 3) => ImportKind::Apply,
         ("erlang", "load_nif", 2) => ImportKind::LoadNif,
+        ("erlang", "call_on_load_function", 1) => ImportKind::CallOnLoadFunction,
         _ => {
             let bif = resolve(module, name, arity);
             if bif.is_some() || is_pbeam_bif(module, name, arity) {

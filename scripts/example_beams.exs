@@ -11,9 +11,9 @@
 # The script writes the unloaded list: each called module that the PBeam loader does not load, with its BEAM file and the reason, one line for each module, with a tab between the fields. A called module is a boot module, or a module in the imports chunk of an example BEAM file or of a called module (beam_lib:chunks/2), directly or through other modules. A module of PBeam BIFs, such as pbeam_cap, is not a called module: the pbeam binary runs its functions, and no BEAM file defines it. Each implementation of a called consolidated protocol is also called, because the protocol calls the implementation that it finds at run time. The script does not search the imports of a module that it does not load. A call to an unloaded module stops the pbeam run with the runtime error `unresolved external MFA`, unless the code path has the module: then error_handler loads it on demand. The test runs_the_called_modules_of_an_example_on_demand_as_pinned_erts of tests/feature/example.rs checks this list.
 
 defmodule ExampleBeams do
-  # Each module of the pinned OTP and Elixir that the PBeam loader does not load, with the load error. The loader stops at the first instruction that it cannot decode (src/beam/code/instruction.rs, skip_unsupported_instruction). The test runs_the_called_modules_of_an_example_on_demand_as_pinned_erts of tests/feature/example.rs loads each file with the pbeam binary and compares the error. Remove a module when the loader learns its instruction.
+  # Each module of the pinned OTP and Elixir that the PBeam loader does not load, with the load error. The loader stops at the first instruction that it cannot decode (src/beam/code/instruction.rs, skip_unsupported_instruction). A start module cannot have an -on_load function (BeamProgram::load in src/runtime/interpreter.rs), and a policy run gives the whole list as its start set, so the list keeps crypto. The test runs_the_called_modules_of_an_example_on_demand_as_pinned_erts of tests/feature/example.rs loads each file with the pbeam binary and compares the error. Remove a module when the loader learns its instruction.
   @not_loaded %{
-    :crypto => "unsupported BEAM opcode 149 (on_load)",
+    :crypto => "the start module crypto has an -on_load function, which PBeam runs only for a module that loads in the run (on_load)",
     :elixir_errors => "unsupported BEAM opcode 132 (bs_match_string)",
     :file_io_server => "unsupported BEAM opcode 141 (bs_skip_utf16)",
     :shell_docs => "unsupported BEAM opcode 132 (bs_match_string)",
@@ -23,8 +23,8 @@ defmodule ExampleBeams do
   # Each module of PBeam BIFs that ERTS does not have. No BEAM file defines it: the pbeam binary runs its functions. pbeam_boot calls pbeam_cap:serve/2 and pbeam_cap:enter_runtime/2.
   @pbeam_modules [:pbeam_cap]
 
-  # The modules that ERTS preloads (preloaded/0, lib/sasl/src/systools_make.erl:1582-1589) and that the PBeam loader loads from a BEAM file. The other preloaded modules are PBeam native functions with no BEAM file (erlang, erts_internal, prim_file) or modules that PBeam does not run (erts_dirty_process_signal_handler, erts_literal_area_collector, erts_trace_cleaner, socket_registry, and the ESOCK modules). ERTS preloads init and erl_prim_loader, so code:which/1 gives preloaded for them and the start set resolves their file in the ebin directory of erts.
-  @preloaded [:init, :erl_prim_loader]
+  # The modules that ERTS preloads (preloaded/0, lib/sasl/src/systools_make.erl:1582-1589) and that the PBeam loader loads from a BEAM file. The other preloaded modules are PBeam native functions with no BEAM file (erlang, erts_internal, prim_file) or modules that PBeam does not run (erts_dirty_process_signal_handler, erts_literal_area_collector, erts_trace_cleaner, socket_registry, and the ESOCK modules). ERTS preloads init, erl_prim_loader, and erts_code_purger, so code:which/1 gives preloaded for them and the start set resolves their file in the ebin directory of erts.
+  @preloaded [:init, :erl_prim_loader, :erts_code_purger]
 
   def called(path) do
     {:ok, {_module, [imports: imports]}} = :beam_lib.chunks(path, [:imports])
