@@ -1,5 +1,5 @@
 -module(hibernate3_probe).
--export([queued/0, later/0, dropped/0, undef/0, killed/0, errors/0, wide/0, applied/0, bif/0, id/1, proc_lib/0, purger/0, woke/2, crash/0, wait_for_request/1]).
+-export([queued/0, later/0, dropped/0, undef/0, killed/0, errors/0, wide/0, raised/0, fail/1, nested/1, applied/0, bif/0, id/1, proc_lib/0, purger/0, woke/2, crash/0, wait_for_request/1]).
 
 %% The function that a hibernated process calls when it wakes: it sends the
 %% first message in its queue and the queue length to Parent.
@@ -79,6 +79,32 @@ wide() ->
     Pid ! wake,
     {undef, [{?MODULE, missing, A, []}]} = down(Ref),
     {undef, length(A)}.
+
+%% A raise after the wake-up has no frame of erlang:apply/3 in its stack
+%% trace: a BIF that raises, a function that raises error/2, and a raise
+%% in a nested call. The probe drops the locations of the frames.
+raised() ->
+    [frames(raise(M, F, A))
+     || {M, F, A} <- [{erlang, error, [boom]}, {erlang, throw, [t]},
+                      {erlang, exit, [x]}, {?MODULE, fail, [n]},
+                      {?MODULE, nested, [n]}]].
+
+raise(M, F, A) ->
+    {Pid, Ref} = spawn_monitor(fun() -> erlang:hibernate(M, F, A) end),
+    Pid ! wake,
+    down(Ref).
+
+fail(X) ->
+    erlang:error(failed, [X]).
+
+nested(X) ->
+    ok = ?MODULE:fail(X),
+    ok.
+
+frames({Reason, Stack}) when is_list(Stack) ->
+    {Reason, [{M, F, A} || {M, F, A, _} <- Stack]};
+frames(Reason) ->
+    Reason.
 
 %% The apply instruction and a fun call reach the BIF through its export.
 applied() ->

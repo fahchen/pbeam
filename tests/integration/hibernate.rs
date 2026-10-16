@@ -147,6 +147,26 @@ fn runs_erlang_hibernate_3_as_the_pinned_erts_bif() {
         ])
     );
     assert_eq!(run("wide"), pair(atom("undef"), int(256)));
+    // The wake-up applies its MFA with no frame, so a raise after the
+    // wake-up has no frame of `erlang:apply/3` in its stack trace
+    // (`bif.c:1403-1427`).
+    let probe = |function: &str, arguments: Term| {
+        Term::tuple(vec![atom("hibernate3_probe"), atom(function), arguments])
+    };
+    let failed = probe("fail", Term::list_from([atom("n")]));
+    assert_eq!(
+        run("raised"),
+        Term::list_from([
+            pair(atom("boom"), Term::nil()),
+            pair(pair(atom("nocatch"), atom("t")), Term::nil()),
+            atom("x"),
+            pair(atom("failed"), Term::list_from([failed.clone()])),
+            pair(
+                atom("failed"),
+                Term::list_from([failed, probe("nested", int(1))])
+            ),
+        ])
+    );
     // The `apply` instruction and a fun call reach the BIF through its
     // export.
     assert_eq!(
@@ -187,7 +207,7 @@ fn runs_erlang_hibernate_3_as_the_pinned_erts_bif() {
             "-pa",
             "fixtures/hibernate",
             "-eval",
-            "logger:set_primary_config(level, none), io:format(\"~w~n\", [[hibernate3_probe:F() || F <- [queued, later, dropped, undef, killed, errors, wide, applied, bif, proc_lib, purger]]]), halt().",
+            "logger:set_primary_config(level, none), io:format(\"~w~n\", [[hibernate3_probe:F() || F <- [queued, later, dropped, undef, killed, errors, wide, raised, applied, bif, proc_lib, purger]]]), halt().",
         ])
         .output()
         .unwrap();
@@ -195,6 +215,6 @@ fn runs_erlang_hibernate_3_as_the_pinned_erts_bif() {
     assert!(reference.stderr.is_empty());
     assert_eq!(
         reference.stdout,
-        b"[{{queued,early,0},normal},{waiting,{message_queue_len,0},{later,wake,0},normal},{boom,none},{undef,[{hibernate3_probe,missing,[1,2],[]}]},{waiting,stop},[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,system_limit},{error,system_limit},{error,badarg}],{undef,256},{{apply,wake,0},normal,{'fun',wake,0},normal},{woke,normal,again,normal,stop,applied,normal},{{proc_lib,wake,0},normal},{{reply,true},{reply,true}}]\n"
+        b"[{{queued,early,0},normal},{waiting,{message_queue_len,0},{later,wake,0},normal},{boom,none},{undef,[{hibernate3_probe,missing,[1,2],[]}]},{waiting,stop},[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,system_limit},{error,system_limit},{error,badarg}],{undef,256},[{boom,[]},{{nocatch,t},[]},x,{failed,[{hibernate3_probe,fail,[n]}]},{failed,[{hibernate3_probe,fail,[n]},{hibernate3_probe,nested,1}]}],{{apply,wake,0},normal,{'fun',wake,0},normal},{woke,normal,again,normal,stop,applied,normal},{{proc_lib,wake,0},normal},{{reply,true},{reply,true}}]\n"
     );
 }
