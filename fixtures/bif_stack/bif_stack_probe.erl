@@ -109,7 +109,12 @@ initial_calls() ->
      down(erlang, apply, [erlang, atom_to_list, [1]]),
      down(erlang, apply, [fun erlang:atom_to_list/1, [1]]),
      down(lists, member, [x, a]),
-     down(?MODULE, hibernated, [])].
+     down(?MODULE, hibernated, []),
+     down(erlang, error, [oops]),
+     down(erlang, error, [oops, [a]]),
+     down(erlang, error, [oops, [a], [{error_info, #{}}]]),
+     down(erlang, exit, [oops]),
+     down(erlang, throw, [oops])].
 
 down(M, F, A) ->
     {Pid, Ref} = spawn_monitor(M, F, A),
@@ -128,11 +133,13 @@ spawn_opt_badarg() ->
     {C, R, [{M, F, length(A), L} | S]}.
 
 %% A BIF that traps to its own export raises with the arguments of the
-%% last trap, here the rest of the list.
+%% last trap, here a rest of the list. The length of the rest depends on
+%% the reductions that the caller used before the call, so the case gives
+%% only that the rest is shorter than the list.
 trap() ->
-    L = lists:seq(1, 5000) ++ a,
+    L = lists:seq(1, 100000) ++ a,
     {C, R, [{M, F, [X, Rest], Loc} | S]} = try_stack(fun() -> lists:member(x, L) end),
-    {C, R, [{M, F, [X, count(Rest)], Loc} | S]}.
+    {C, R, [{M, F, [X, count(Rest) < 100000], Loc} | S]}.
 
 count([_ | T]) -> 1 + count(T);
 count(_) -> 0.

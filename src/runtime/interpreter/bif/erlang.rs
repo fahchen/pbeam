@@ -874,6 +874,15 @@ fn raise_with_args(
     args: &Term,
     location: Term,
 ) -> Result<BifResult, BeamError> {
+    // A process that starts at the BIF has no frame, and ERTS gives the
+    // stack trace `[]`: `spawn(erlang, error, [R])` exits with `{R, []}`.
+    if context.scheduler.current_process().frames.is_empty() {
+        return Ok(BifResult::RaiseWithStacktrace {
+            class,
+            reason: reason.clone(),
+            stacktrace: Term::nil(),
+        });
+    }
     let module_id = current_frame(context.scheduler.current_process_mut()).module_id;
     let module = Rc::clone(context.scheduler.code.module_by_id(module_id)?);
     let (module, function, arity) = current_function(context.scheduler, &module)?;
