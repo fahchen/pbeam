@@ -1,5 +1,5 @@
 -module(pbeam_boot).
--export([start/2, start/3, init/2, kernel/1]).
+-export([start/2, start/3, init/2]).
 
 %% Run the boot with no boot flags.
 start(Module, Function) ->
@@ -11,13 +11,17 @@ start(Module, Function) ->
 %% (init.erl:1668-1709): a list of {Flag, Values}, with each value a
 %% binary. The boot process traps exits (init.erl:1197). It registers the
 %% init request process with the flags after {noshell, []}, as for
-%% erl -noshell. It starts erl_prim_loader with the code path of the pa and
-%% pz flags (init.erl:1200-1202). With a root flag, it then sets the code
-%% path of start_clean.boot (init.erl:1323-1332). It then starts the kernel
-%% processes logger
-%% and application_controller in the order of start_clean.boot
-%% (init.erl:1348-1350). It then runs the kernel part of kernel:start/2,
-%% and sets the registered user process as the group leader before it
+%% erl -noshell. It then needs the root flag, as init does: without it, the
+%% boot process exits with no_or_multiple_root_variables (init.erl:1198,
+%% 1226-1232). It starts erl_prim_loader with the code path of the pa and
+%% pz flags (init.erl:1200-1202) and sets the code path of
+%% start_clean.boot (init.erl:1323-1332). It then runs the other commands
+%% of start_clean.boot in their order (init.erl:1335-1361): the
+%% kernelProcess commands of logger and application_controller, the load
+%% of stdlib, application:start_boot/2 of kernel and stdlib, and
+%% c:erlangrc/0. kernel:start/2 then starts kernel_sup and its children
+%% (kernel.erl:35-45, 91-227). The boot starts no kernel process by hand.
+%% It then sets the registered user process as the group leader before it
 %% starts -eval (init.erl:1539-1546). In a pbeam run in boot mode (--boot),
 %% the process then registers the IO servers user and standard_error as IO
 %% services, so that a runtime process can send them the IO requests that
@@ -30,19 +34,28 @@ start(Module, Function, Flags) ->
     process_flag(trap_exit, true),
     Init = spawn(?MODULE, init, [self(), [{noshell, []} | Flags]]),
     true = register(init, Init),
+    Root = get_root(Flags),
     ok = start_prim_loader(Init, path_flags(Flags)),
-    ok = boot_path(get_flag_args(root, Flags), path_flags(Flags)),
+    ok = boot_path(Root, path_flags(Flags)),
     ok = start_in_kernel(Init, logger, logger_server, start_link, []),
     ok = start_in_kernel(Init, application_controller,
                          application_controller, start, [kernel_app()]),
-    Kernel = spawn(?MODULE, kernel, [self()]),
-    receive {Kernel, started} -> ok end,
-    Init ! {self(), kernel, Kernel},
+    ok = application:load(stdlib_app()),
+    ok = application:start_boot(kernel, permanent),
+    ok = application:start_boot(stdlib, permanent),
+    _ = c:erlangrc(),
     group_leader(whereis(user), self()),
     ok = pbeam_cap:serve(whereis(user), io),
     ok = pbeam_cap:serve(whereis(standard_error), io),
     ok = pbeam_cap:enter_runtime(Module, Function),
     Module:Function().
+
+%% init.erl:1226-1232.
+get_root(Flags) ->
+    case get_argument(root, Flags) of
+        {ok, [[Root]]} -> Root;
+        _ -> exit(no_or_multiple_root_variables)
+    end.
 
 %% Start the pinned erl_prim_loader with the path Pa ++ Pz ++ ["."], and
 %% give its link to init (init.erl:1164-1184). PBeam has no -path flag, so
@@ -64,14 +77,10 @@ start_prim_loader(Init, {Pa, Pz}) ->
 %% init does when the boot has no -path flag: set the path to
 %% Pa ++ BootPath ++ Pz, with $ROOT replaced by the root flag
 %% (init.erl:1323-1332, 1417-1442). The default code_path_choice is strict,
-%% so the directories stay as they are (init.erl:645-655, 1450-1451). A boot
-%% without a root flag runs no boot script command: ERTS stops without it
-%% (init.erl:1226-1232).
-boot_path([[Root]], {Pa, Pz}) ->
-    Lib = b2s(Root) ++ "/lib/",
-    erl_prim_loader:set_path(Pa ++ [Lib ++ "kernel-11.0.4/ebin", Lib ++ "stdlib-8.1/ebin"] ++ Pz);
-boot_path([], _) ->
-    ok.
+%% so the directories stay as they are (init.erl:645-655, 1450-1451).
+boot_path(Root, {Pa, Pz}) ->
+    Lib = Root ++ "/lib/",
+    erl_prim_loader:set_path(Pa ++ [Lib ++ "kernel-11.0.4/ebin", Lib ++ "stdlib-8.1/ebin"] ++ Pz).
 
 %% init.erl:1259-1262. The last pa flag comes first.
 path_flags(Flags) ->
@@ -95,43 +104,86 @@ add_to_kernel(Init, Server, Res) ->
     end.
 
 %% The init request process. It traps exits (init.erl:588), links to each
-%% kernel process that starts with {ok, Pid} (init.erl:768-772), and answers
-%% get_arguments and {get_argument, Arg} with the values as strings
-%% (init.erl:816-819). It answers fetch_loaded with the modules that
-%% {ensure_loaded, Module} loaded (init.erl:720-722, 738-750): the boot
-%% loads no module with primLoad, because the pbeam binary loads the start
-%% modules. It answers {ensure_loaded, Module} as init does
-%% (init.erl:730-750): it reads the file of the module through
-%% erl_prim_loader and loads it with erlang:load_module/2. For init:stop/0
-%% it stops the kernel process and halts with status 0 (init.erl:536,
-%% 788-789, 924-945). It keeps other messages in its mailbox.
+%% kernel process that starts with {ok, Pid} and keeps it in the kernel list,
+%% the last started first (init.erl:768-772), and answers the requests of
+%% request/4. For init:stop/0 it runs stop/4 (init.erl:536, 788-789). It
+%% keeps other messages in its mailbox.
 init(Boot, Flags) ->
     process_flag(trap_exit, true),
-    init_loop(Boot, Flags, undefined, []).
+    init_loop(Boot, Flags, [], []).
 
 init_loop(Boot, Flags, Kernel, Loaded) ->
     receive
-        {Boot, started, {_Server, {ok, Pid}}} when is_pid(Pid) ->
+        {Boot, started, {Server, {ok, Pid}}} when is_pid(Pid) ->
             link(Pid),
             Boot ! {self(), ok, Pid},
-            init_loop(Boot, Flags, Kernel, Loaded);
-        {Boot, kernel, Pid} ->
-            init_loop(Boot, Flags, Pid, Loaded);
-        {From, get_arguments} ->
-            From ! {init, get_arguments(Flags)},
-            init_loop(Boot, Flags, Kernel, Loaded);
-        {From, {get_argument, Arg}} ->
-            From ! {init, get_argument(Arg, Flags)},
-            init_loop(Boot, Flags, Kernel, Loaded);
-        {From, fetch_loaded} ->
-            From ! {init, Loaded},
-            init_loop(Boot, Flags, Kernel, Loaded);
-        {From, {ensure_loaded, Module}} ->
-            {Res, Loaded1} = ensure_loaded(Module, Loaded),
-            From ! {init, Res},
-            init_loop(Boot, Flags, Kernel, Loaded1);
+            init_loop(Boot, Flags, [{Server, Pid} | Kernel], Loaded);
         {stop, stop} ->
-            stop(Kernel)
+            stop(Boot, Kernel, Flags, Loaded);
+        {From, get_arguments = Request} ->
+            init_loop(Boot, Flags, Kernel, request(From, Request, Flags, Loaded));
+        {From, {get_argument, _} = Request} ->
+            init_loop(Boot, Flags, Kernel, request(From, Request, Flags, Loaded));
+        {From, fetch_loaded = Request} ->
+            init_loop(Boot, Flags, Kernel, request(From, Request, Flags, Loaded));
+        {From, {ensure_loaded, _} = Request} ->
+            init_loop(Boot, Flags, Kernel, request(From, Request, Flags, Loaded))
+    end.
+
+%% Answer an init request and return the loaded list. get_arguments and
+%% {get_argument, Arg} give the values as strings (init.erl:816-819).
+%% fetch_loaded gives the modules that {ensure_loaded, Module} loaded
+%% (init.erl:720-722, 738-750): the boot loads no module with primLoad,
+%% because the pbeam binary loads the start modules. {ensure_loaded, Module}
+%% reads the file of the module through erl_prim_loader and loads it with
+%% erlang:load_module/2 (init.erl:730-750).
+request(From, get_arguments, Flags, Loaded) ->
+    From ! {init, get_arguments(Flags)},
+    Loaded;
+request(From, {get_argument, Arg}, Flags, Loaded) ->
+    From ! {init, get_argument(Arg, Flags)},
+    Loaded;
+request(From, fetch_loaded, _Flags, Loaded) ->
+    From ! {init, Loaded},
+    Loaded;
+request(From, {ensure_loaded, Module}, _Flags, Loaded) ->
+    {Res, Loaded1} = ensure_loaded(Module, Loaded),
+    From ! {init, Res},
+    Loaded1.
+
+%% Shut down the kernel processes and halt() as init:stop/2 does for
+%% init:stop/0 (init.erl:924-945, 955-962, 981-987). init sends
+%% {'EXIT', BootPid, shutdown} to each kernel process except logger, the
+%% last started first, and waits for its exit (init.erl:1019-1035).
+%% application_controller then stops the running applications, so
+%% kernel_sup shuts down its children. While init waits, it ignores a
+%% stop request, answers the init requests, and keeps the EXIT messages of
+%% other processes (init.erl:1043-1062). The shutdown timer is infinity,
+%% because PBeam has no shutdown_time flag (init.erl:1632-1646). The halt
+%% then stops logger and each other process, in place of kill_all_pids/2
+%% and exit(Logger, kill) (init.erl:960, 1072-1093).
+stop(Boot, [{logger, _} | Kernel], Flags, Loaded) ->
+    stop(Boot, Kernel, Flags, Loaded);
+stop(Boot, [{_Server, Pid} | Kernel], Flags, Loaded) ->
+    Pid ! {'EXIT', Boot, shutdown},
+    stop(Boot, Kernel, Flags, shutdown_loop(Pid, Flags, Loaded));
+stop(_Boot, [], _Flags, _Loaded) ->
+    halt().
+
+shutdown_loop(Pid, Flags, Loaded) ->
+    receive
+        {'EXIT', Pid, _} ->
+            Loaded;
+        {stop, _} ->
+            shutdown_loop(Pid, Flags, Loaded);
+        {From, get_arguments = Request} ->
+            shutdown_loop(Pid, Flags, request(From, Request, Flags, Loaded));
+        {From, {get_argument, _} = Request} ->
+            shutdown_loop(Pid, Flags, request(From, Request, Flags, Loaded));
+        {From, fetch_loaded = Request} ->
+            shutdown_loop(Pid, Flags, request(From, Request, Flags, Loaded));
+        {From, {ensure_loaded, _} = Request} ->
+            shutdown_loop(Pid, Flags, request(From, Request, Flags, Loaded))
     end.
 
 %% Load a module that the run does not hold, as init:ensure_loaded/2 does
@@ -160,19 +212,6 @@ ensure_loaded(Module, Loaded) ->
                     {Error, Loaded}
             end
     end.
-
-%% Stop the kernel process as the stop of the kernel application stops
-%% kernel_sup, then halt() (init.erl:943-945). init shuts down
-%% application_controller, which stops the running applications
-%% (init.erl:955-962). The PBeam boot does not start the kernel application
-%% (see "Boot" in docs/erts-differences.md), so the kernel process stands in
-%% for it. A boot that has not started its kernel process yet halts at once.
-stop(undefined) ->
-    halt();
-stop(Kernel) ->
-    Ref = monitor(process, Kernel),
-    Kernel ! {self(), stop},
-    receive {'DOWN', Ref, process, Kernel, _} -> halt() end.
 
 %% init.erl:1790-1819.
 get_flag_args(F, Flags) -> get_flag_args(F, Flags, []).
@@ -234,62 +273,6 @@ reverse([A, B]) ->
 reverse([A, B | L]) ->
     lists:reverse(L, [B, A]).
 
-%% Do the kernel part of kernel:start/2. Run logger:internal_init_logger/0
-%% (kernel.erl:37). Do not run os:internal_init_cmd_shell/0 (kernel.erl:38):
-%% only os:cmd/1,2 reads the shell that it puts in a persistent term
-%% (os.erl:602, 630-669). Start the kernel_sup children Code (only with a
-%% root flag, see start_code/1), StdError, File, SigSrv, User, and LoggerSup
-%% in the order of kernel.erl:110-168, 188-194, and 222-225 for a node
-%% without -master. File is file_server_2, which
-%% file:read_file_info/1 and os:find_executable/1 call. Then run
-%% erl_signal_handler:start/0 and logger:add_handlers(kernel)
-%% (kernel.erl:41-42). Trap exits, as a supervisor does
-%% (supervisor.erl:950), and stay alive as the link parent of the servers.
-%% At a stop request of init, shut down the children in the reverse order
-%% with their kernel_sup shutdown times (kernel.erl:124-168), as a
-%% supervisor stops its children (supervisor.erl:1574-1597), and exit.
-kernel(Boot) ->
-    process_flag(trap_exit, true),
-    ok = logger:internal_init_logger(),
-    Code = start_code(init:get_argument(root)),
-    {ok, StdError} = standard_error:start_link(),
-    {ok, File} = file_server:start_link(),
-    {ok, SigSrv} = gen_event:start_link({local, erl_signal_server}),
-    {ok, User} = user_sup:start(),
-    {ok, LoggerSup} = logger_sup:start_link(),
-    ok = erl_signal_handler:start(),
-    ok = logger:add_handlers(kernel),
-    Boot ! {self(), started},
-    receive
-        {_Init, stop} ->
-            [shutdown(Pid, Time)
-             || {Pid, Time} <- [{LoggerSup, infinity}, {User, 2000}, {SigSrv, 2000},
-                                {File, 2000}, {StdError, 2000} | Code]]
-    end.
-
-%% Start the code server, the first kernel_sup child (kernel.erl:110-115,
-%% 222), when the boot has a root flag: code:start_link/0 reads it
-%% (code.erl:1686). Return the child for shutdown/2, or no child.
-start_code({ok, _}) ->
-    {ok, Code} = code:start_link(),
-    [{Code, 2000}];
-start_code(error) ->
-    [].
-
-%% Shut down a child as supervisor:shutdown/1 does (supervisor.erl:1627-1656):
-%% send the exit signal shutdown, kill the child when it does not exit in
-%% Time ms, and then remove the link. It writes no shutdown_error report.
-shutdown(Pid, Time) ->
-    Ref = monitor(process, Pid),
-    exit(Pid, shutdown),
-    receive
-        {'DOWN', Ref, process, Pid, _} -> ok
-    after Time ->
-        exit(Pid, kill),
-        receive {'DOWN', Ref, process, Pid, _} -> ok end
-    end,
-    unlink(Pid).
-
 %% The kernel application spec of the pinned start_clean.boot.
 kernel_app() ->
     {application,kernel,
@@ -344,3 +327,38 @@ kernel_app() ->
                   {maxT,infinity},
                   {maxP,infinity},
                   {mod,{kernel,[]}}]}.
+
+%% The stdlib application spec of the pinned start_clean.boot.
+stdlib_app() ->
+    {application,stdlib,
+                 [{description,"ERTS  CXC 138 10"},
+                  {vsn,"8.1"},
+                  {id,[]},
+                  {modules,[argparse,array,base64,beam_lib,binary,c,calendar,
+                            dets,dets_server,dets_sup,dets_utils,dets_v9,dict,
+                            digraph,digraph_utils,edlin,edlin_key,
+                            edlin_context,edlin_expand,edlin_type_suggestion,
+                            epp,eval_bits,erl_abstract_code,erl_anno,erl_bits,
+                            erl_compile,erl_error,erl_eval,erl_expand_records,
+                            erl_features,erl_internal,erl_lint,erl_parse,
+                            erl_posix_msg,erl_pp,erl_scan,erl_stdlib_errors,
+                            erl_tar,error_logger_file_h,error_logger_tty_h,
+                            escript,ets,file_sorter,filelib,filename,gb_trees,
+                            gb_sets,gen,gen_event,gen_fsm,gen_server,
+                            gen_statem,graph,io,io_ansi,io_lib,io_lib_format,
+                            io_lib_fread,io_lib_pretty,json,lists,log_mf_h,
+                            man_docs,maps,math,ms_transform,orddict,ordsets,
+                            otp_internal,peer,pool,proc_lib,proplists,qlc,
+                            qlc_pt,queue,rand,random,re,records,sets,shell,
+                            shell_default,shell_docs,shell_docs_markdown,
+                            slave,sofs,string,supervisor,supervisor_bridge,
+                            sys,timer,unicode,unicode_util,uri_string,
+                            win32reg,zip,zstd]},
+                  {registered,[timer_server,rsh_starter,take_over_monitor,
+                               pool_master,dets]},
+                  {applications,[kernel]},
+                  {optional_applications,[]},
+                  {included_applications,[]},
+                  {env,[]},
+                  {maxT,infinity},
+                  {maxP,infinity}]}.

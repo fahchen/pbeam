@@ -38,10 +38,18 @@ use std::time::Instant;
 
 #[expect(
     dead_code,
+    reason = "this test crate runs the boot module and the modules of the example build"
+)]
+#[path = "../common/boot.rs"]
+mod boot;
+#[expect(
+    dead_code,
     reason = "this test crate keeps the locale and the stdout of the script"
 )]
 #[path = "../common/run.rs"]
 mod run;
+
+use boot::otp_root;
 
 use run::run_with_time_limit;
 
@@ -267,14 +275,6 @@ fn runs_the_called_modules_of_an_example_on_demand_as_pinned_erts() {
         );
     }
 
-    let root_dir = Command::new("erl")
-        .args([
-            "-noshell",
-            "-eval",
-            "io:put_chars(code:root_dir()), halt().",
-        ])
-        .output()
-        .unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_pbeam"));
     command
         .args([
@@ -284,7 +284,7 @@ fn runs_the_called_modules_of_an_example_on_demand_as_pinned_erts() {
             "main",
             "--root",
         ])
-        .arg(String::from_utf8(root_dir.stdout).unwrap().trim_end())
+        .arg(otp_root())
         .current_dir(root);
     for path in paths.lines() {
         command.args(["--pa", path]);
@@ -560,6 +560,8 @@ fn run_restricted_guest(policy: &str, arguments: &[&str]) -> Output {
     command
         .args(["--boot", "--policy", policy])
         .args(arguments)
+        .arg("--root")
+        .arg(otp_root())
         .arg("--")
         .args(beams.lines())
         .arg("fixtures/policy/restricted_guest_probe.beam")

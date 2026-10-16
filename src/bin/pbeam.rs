@@ -50,8 +50,11 @@ struct Cli {
     /// The root directory of the OTP installation, as `erl` gives it to
     /// `init` with `-root DIR`. It has no default. With it, the boot flag
     /// list starts with `{root, [Dir]}`, and the `pbeam_boot` module sets
-    /// the code path of `start_clean.boot` and starts `code_server`, which
-    /// reads the root with `init:get_argument(root)`.
+    /// the code path of `start_clean.boot` and starts the `kernel`
+    /// application, whose `code_server` reads the root with
+    /// `init:get_argument(root)`. `pbeam_boot` needs it, as `init` needs
+    /// `-root`: without it, the boot exits with
+    /// `no_or_multiple_root_variables`.
     #[arg(long, value_name = "DIR")]
     root: Option<OsString>,
     /// The code loading mode, as `erl -mode MODE` gives it. Without it, the

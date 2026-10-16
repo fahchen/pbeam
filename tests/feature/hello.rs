@@ -20,7 +20,7 @@ mod log_event;
 #[path = "../common/run.rs"]
 mod run;
 
-use boot::{BOOT_MODULES, boot_beam};
+use boot::{BOOT_MODULES, boot_beam, otp_root};
 use common::pinned_beam_path;
 use log_event::LOG_EVENT_MODULES;
 use run::{broken_pipe, run_dumb_utf8, run_with_time_limit};
@@ -445,7 +445,15 @@ fn erl_eval(module: &str, function: &str, io: &Path) -> Command {
 fn pbeam_boot(module: &str, function: &str, beams: &[PathBuf]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_pbeam"));
     command
-        .args(["pbeam_boot", "start", module, function, "--"])
+        .args([
+            "pbeam_boot",
+            "start",
+            module,
+            function,
+            "--root",
+            otp_root().to_str().unwrap(),
+            "--",
+        ])
         .args(beams)
         .arg(boot_beam())
         .env_remove("PATH");

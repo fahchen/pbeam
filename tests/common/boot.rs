@@ -5,7 +5,7 @@
 
 use std::{
     fs,
-    path::Path,
+    path::{Path, PathBuf},
     process::{self, Command},
     sync::OnceLock,
 };
@@ -54,6 +54,36 @@ pub fn boot_beam() -> &'static Path {
         fs::rename(Path::new(&directory).join("pbeam_boot.beam"), beam).unwrap();
         fs::remove_dir(&directory).unwrap();
         beam
+    })
+}
+
+/// Return the root directory of the pinned OTP, as `code:root_dir/0` gives
+/// it, from one `erl` run for each test process. `pbeam_boot` needs it as
+/// the `--root` option of the `pbeam` binary, or as the flag `{root, [Root]}`
+/// of `pbeam_boot:start/3`: without it, the boot exits with
+/// `no_or_multiple_root_variables`, as `init` does (init.erl:1226-1232).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(otp_root().join("lib").is_dir());
+/// Command::new(env!("CARGO_BIN_EXE_pbeam"))
+///     .args(["pbeam_boot", "start", "boot_probe", "main", "--root"])
+///     .arg(otp_root());
+/// ```
+pub fn otp_root() -> &'static Path {
+    static ROOT: OnceLock<PathBuf> = OnceLock::new();
+    ROOT.get_or_init(|| {
+        let output = Command::new("erl")
+            .args([
+                "-noshell",
+                "-eval",
+                "io:put_chars(code:root_dir()), halt().",
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        PathBuf::from(String::from_utf8(output.stdout).unwrap())
     })
 }
 

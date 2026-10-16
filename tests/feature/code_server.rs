@@ -1,8 +1,4 @@
-use std::{
-    path::{Path, PathBuf},
-    process::{Command, Output, Stdio},
-    sync::OnceLock,
-};
+use std::process::{Command, Output, Stdio};
 
 #[path = "../common/boot.rs"]
 mod boot;
@@ -13,7 +9,7 @@ mod boot;
 #[path = "../common/mod.rs"]
 mod common;
 
-use boot::{BOOT_MODULES, boot_beam};
+use boot::{BOOT_MODULES, boot_beam, otp_root};
 use common::pinned_beam_path;
 
 /// The probe that writes the code server results.
@@ -42,9 +38,40 @@ const CODE_SERVER_MODULES: [&str; 12] = [
     "epp",
 ];
 
+/// The pinned OTP modules that the kernel start of `pbeam_boot` calls in
+/// addition to `BOOT_MODULES` and `CODE_SERVER_MODULES`: the
+/// `application_master` of `kernel`, the `kernel_sup` children and the
+/// modules that they call, `c` of `c:erlangrc/0`, and `prim_inet`, a
+/// preloaded module of ERTS. In embedded mode, `code_server` loads no module
+/// on demand (code.erl:601-602), so the run must hold them, as the
+/// `primLoad` commands of `start_clean.boot` load them in ERTS
+/// (init.erl:1335-1346).
+const KERNEL_START_MODULES: [&str; 20] = [
+    "application_master",
+    "c",
+    "erl_distribution",
+    "erpc",
+    "file",
+    "global",
+    "global_group",
+    "inet",
+    "inet_config",
+    "inet_db",
+    "inet_parse",
+    "inet_udp",
+    "kernel",
+    "kernel_config",
+    "kernel_refc",
+    "net_kernel",
+    "peer",
+    "prim_inet",
+    "rand",
+    "rpc",
+];
+
 #[test]
 fn starts_code_server_and_loads_a_module_from_the_code_path_as_pinned_erts() {
-    // With `--root`, the kernel process of `pbeam_boot` runs
+    // With `--root`, the kernel start of `pbeam_boot` runs
     // `code:start_link/0` as the first `kernel_sup` child
     // (kernel.erl:110-115), and the boot first sets the code path of the
     // last `path` command of `start_clean.boot` (init.erl:1323-1332).
@@ -124,30 +151,6 @@ fn stops_when_the_start_modules_do_not_hold_the_atom_of_a_boot_flag() {
     );
 }
 
-/// Return the root directory of the pinned OTP, as `code:root_dir/0` gives
-/// it, from one `erl` run for each test process.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// assert!(root().join("lib").is_dir());
-/// ```
-fn root() -> &'static Path {
-    static ROOT: OnceLock<PathBuf> = OnceLock::new();
-    ROOT.get_or_init(|| {
-        let output = Command::new("erl")
-            .args([
-                "-noshell",
-                "-eval",
-                "io:put_chars(code:root_dir()), halt().",
-            ])
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "{output:?}");
-        PathBuf::from(String::from_utf8(output.stdout).unwrap())
-    })
-}
-
 /// Return the command of the probe on the pinned ERTS with the code path
 /// directory and the `erl` flag of each `--mode` flag.
 ///
@@ -194,7 +197,7 @@ fn pbeam(flags: &[&str]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_pbeam"));
     command
         .args(["pbeam_boot", "start", "code_server_probe", "main", "--root"])
-        .arg(root())
+        .arg(otp_root())
         .args(["--pa", CODE_PATH])
         .args(flags)
         .arg("--")
@@ -204,6 +207,7 @@ fn pbeam(flags: &[&str]) -> Command {
             BOOT_MODULES
                 .iter()
                 .chain(&CODE_SERVER_MODULES)
+                .chain(&KERNEL_START_MODULES)
                 .map(|module| pinned_beam_path(module)),
         );
     command

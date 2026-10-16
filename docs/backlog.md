@@ -246,18 +246,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a consumer reads one of these variables or flags, for example `init:get_argument(root)`.
 - **Source:** PR #191 (#185).
 
-### Supervise the boot IO servers as `kernel_sup` does
-
-- `kernel_sup` runs the IO servers with `one_for_all` and intensity 0, so the node halts with `Kernel pid terminated` when one exits. The PBeam boot does not supervise them.
-- **Trigger:** an IO server can exit on a supported path, or an acceptance check needs the halt.
-- **Source:** review of PR #161 (#139).
-
-### Give the boot servers an `application_master` group leader
-
-- Add `erlang:process_info/2` with the `group_leader` item, so that the group leader difference of the boot can be tested.
-- **Trigger:** a path reads the group leader of a boot server.
-- **Source:** review of PR #161 (#139).
-
 ### Model the ERTS timer wheels
 
 - After #150 (PR #172), PBeam keeps one timer list ordered by end time. ERTS uses soon and later wheels and a high-level timer tree, so a timer of 16384 ms or more that moves into a soon slot expires after the timers with the same end that are already in the slot (pinned probe gives `[b,a]`).

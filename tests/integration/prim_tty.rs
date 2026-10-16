@@ -19,7 +19,7 @@ mod boot;
 #[path = "../common/mod.rs"]
 mod common;
 
-use boot::{BOOT_MODULES, boot_beam};
+use boot::{BOOT_MODULES, boot_beam, otp_root};
 use common::{pinned_beam, pinned_beam_path};
 
 const PRIM_TTY_PROBE: &[u8] = include_bytes!("../../fixtures/prim_tty/prim_tty_probe.beam");
@@ -939,6 +939,8 @@ fn writes_hello_world_from_the_pbeam_binary_through_a_prim_tty_writer() {
                 "start",
                 "host_write_probe",
                 "main",
+                "--root",
+                otp_root().to_str().unwrap(),
                 "--",
                 HOST_WRITE_PROBE,
             ])
