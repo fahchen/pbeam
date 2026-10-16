@@ -1378,6 +1378,17 @@ pub(super) fn request_system_task(
     if arguments.len() > 2 {
         return Ok(BifResult::badarg());
     }
+    // A `garbage_collect` request with an argument that is not `minor` or
+    // `major` raises `badarg`, before ERTS schedules the task
+    // (`erl_process.c:11412-11423`).
+    if kind.is_static("garbage_collect") {
+        let [Term::Atom(mode), ..] = arguments else {
+            return Ok(BifResult::badarg());
+        };
+        if !mode.is_one_of(&["minor", "major"]) {
+            return Ok(BifResult::badarg());
+        }
+    }
     // `system_task_test` is not a static atom: ERTS compares its name
     // (`erl_process.c:11447`).
     if kind.is_static("garbage_collect") || scheduler.atoms.name_of(kind) == "system_task_test" {

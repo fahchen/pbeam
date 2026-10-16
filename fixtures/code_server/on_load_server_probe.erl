@@ -118,6 +118,8 @@ system_tasks() ->
                Request(Self, normal, {unknown_task, a, lists}),
                Request(Self, normal, {check_process_code, a}),
                Request(Self, normal, {check_process_code, a, "lists"}),
+               Request(Self, normal, {garbage_collect, a}),
+               Request(Self, normal, {garbage_collect, a, invalid}),
                Next(-1), Next(1048577), Next(1 bsl 64), Next(none)],
     Replies = [Request(Self, inherit, {check_process_code, self_tag, lists}),
                Request(Dead, max, {check_process_code, {dead_tag, 1}, lists, extra}),
