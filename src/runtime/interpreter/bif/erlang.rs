@@ -4171,3 +4171,35 @@ pub(super) fn port_get_data(
     let data = ports.get(id).expect("the port is open").data.clone();
     Ok(BifResult::Value(data))
 }
+
+/// Run `erlang:processes/0`: return the pid of each process that exists,
+/// also an exiting process, as `erts_ptab_list` (`erl_ptab.c:746-780`,
+/// `888-1280`) lists the process table. PBeam gives the pids in ascending
+/// order, which is the index order of the ERTS table for the pids of one
+/// run. ERTS charges reductions for the table indices that it inspects
+/// (`erl_ptab.c:1022-1023`); PBeam charges none (row "BIF arguments" of
+/// `docs/erts-differences.md`). A process that is not a boot process does
+/// not get the pid of the policy process, so that it cannot send a signal
+/// to it (section "Policy module, policy process, and policy table" of
+/// `docs/capability-security-migration.md`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = processes(&mut scheduler);
+/// assert!(matches!(result, BifResult::Value(list) if list.proper_list().is_some()));
+/// ```
+pub(super) fn processes(scheduler: &mut Scheduler) -> BifResult {
+    let hidden = if scheduler.current_process().security.is_boot() {
+        None
+    } else {
+        scheduler.policy_id()
+    };
+    Value(Term::list_from(
+        scheduler
+            .process_ids()
+            .into_iter()
+            .filter(|id| Some(*id) != hidden)
+            .map(Term::Pid),
+    ))
+}

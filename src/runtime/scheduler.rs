@@ -1474,6 +1474,22 @@ impl Scheduler {
         self.code.loaded_by_id(frame.module_id)
     }
 
+    /// Return the pid of each process of the process table, also the
+    /// current process and an exiting process, in ascending pid order, as
+    /// `erlang:processes/0` lists the process table in index order
+    /// (`erts_ptab_list`, `erl_ptab.c:1006-1180`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(scheduler.process_ids(), vec![ProcessId(0), ProcessId(2)]);
+    /// ```
+    pub(super) fn process_ids(&self) -> Vec<ProcessId> {
+        let mut ids: Vec<ProcessId> = self.processes.values().map(|process| process.id).collect();
+        ids.sort_unstable();
+        ids
+    }
+
     /// Return the process `id` of the process table, also the current
     /// process and an exiting process, as `erts_proc_lookup_raw`
     /// (`erl_process_lock.h:1135-1148`) finds it. Return `None` when no

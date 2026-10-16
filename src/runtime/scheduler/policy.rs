@@ -368,6 +368,18 @@ impl Scheduler {
             .is_some_and(|policy| policy.call.is_none())
     }
 
+    /// Return the pid of the policy process, or `None` in a run without a
+    /// policy module.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Scheduler::new(AtomTable::new()).policy_id(), None);
+    /// ```
+    pub(in crate::runtime) fn policy_id(&self) -> Option<ProcessId> {
+        self.policy.as_ref().map(|policy| policy.id)
+    }
+
     /// Return whether the current process is the policy process and runs a
     /// call of the policy code.
     ///

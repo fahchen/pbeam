@@ -646,6 +646,8 @@ impl ProcessState {
     ///   name.
     /// - `message_queue_len` gives `{message_queue_len, Messages}`: the
     ///   caller counts the messages as `mq_len` (`erl_bif_info.c:1742-1754`).
+    /// - `group_leader` gives `{group_leader, Pid}`, the group leader of the
+    ///   process (`erl_bif_info.c:1866-1870`).
     /// - `priority` gives `{priority, Level}`, the priority that
     ///   `process_flag/2` or the spawn option set
     ///   (`erts_get_process_priority`, `erl_process.c:9443-9453`).
@@ -682,6 +684,7 @@ impl ProcessState {
             ("registered_name", Some(registered)) => Term::Atom(registered.clone()),
             ("registered_name", None) => return Ok(Some(Term::nil())),
             ("message_queue_len", _) => Term::Integer(messages as i64),
+            ("group_leader", _) => Term::Pid(self.group_leader),
             ("priority", _) => Term::static_atom(self.priority.name()),
             ("reductions", _) => Term::Integer(
                 i64::try_from(self.reductions + current)
