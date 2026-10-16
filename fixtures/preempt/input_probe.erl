@@ -66,6 +66,20 @@ inputs() ->
        {list, 10000}, {list, 15000}, {list, 16000}, improper, bad, {protected, 100},
        {protected, 40000}, {missing, 100}, {bag, 2}, {bag, 100}, {bag, 400},
        {duplicate_bag, 100}, {bag_new, 100}, {bag_equal, 100}]},
+     %% The inputs of ets_insert plus: an object and a list of objects
+     %% whose key the table holds. {old, N, P} is the list of N objects
+     %% for a table that holds the key P, and the walk for the key of
+     %% {old, 24000, 24000} traps. {bag_old, N} is that list for a
+     %% bag that holds the key N div 2, and bag_old is the object {1, 101}
+     %% for a bag with the objects {1, 1}..{1, 100}. An insert that finds a
+     %% key inserts no object.
+     {ets_insert_new,
+      [object, old_object, nil, one, {list, 2}, {list, 3}, {list, 8}, {list, 100},
+       {list, 1000}, {list, 10000}, {list, 15000}, {list, 16000}, improper, bad,
+       {protected, 100}, {protected, 40000}, {missing, 100}, {old, 2, 2}, {old, 100, 1},
+       {old, 100, 50}, {old, 100, 100}, {old, 1000, 1000}, {old, 16000, 1},
+       {old, 16000, 8000}, {old, 16000, 16000}, {old, 24000, 24000}, {bag, 2}, {bag, 100},
+       {bag, 400}, {duplicate_bag, 100}, {bag_old, 100}, bag_old]},
      %% The number of persistent terms of the node. The numbers go up,
      %% because no BIF of PBeam erases a persistent term.
      {persistent_term_get, [0, 1, 100, 1000, 4000, 10000]},
@@ -104,7 +118,8 @@ inputs() ->
 %% The inputs of the BIFs that trap, for longs/1.
 long_inputs() ->
     [{maps_merge, {{1, 40000}, {20000, 60000}}}, {ets_insert, {list, 16000}},
-     {ets_insert, {bag, 400}},
+     {ets_insert, {bag, 400}}, {ets_insert_new, {list, 16000}},
+     {ets_insert_new, {old, 16000, 16000}}, {ets_insert_new, {bag, 400}},
      {persistent_term_get, 10000}, {iolist_size, {ones, 100000}},
      {iolist_to_iovec, {ones, 100000}}, {iolist_to_iovec, {bins, 1995}},
      {iolist_to_binary, {ones, 100000}}, {iolist_to_binary, {bins, 1995}},
@@ -164,6 +179,7 @@ arg(maps_merge, {First, Second}) -> {map(First), map(Second)};
 arg(map_next, {ordered, Size, Keys}) -> {keys(1, Keys), map({1, Size}), iterator};
 arg(map_next, {Size, Path, Acc}) -> {Path, map({1, Size}), Acc};
 arg(ets_insert, Input) -> {table(Input), objects(Input)};
+arg(ets_insert_new, Input) -> {table(Input), objects(Input)};
 arg(persistent_term_get, _) -> none;
 arg(iolist_size, Name) -> iodata(Name);
 arg(iolist_to_iovec, Name) -> iodata(Name);
@@ -182,12 +198,22 @@ arg(none, _) -> none.
 table({protected, _}) -> element(2, owned_table(protected));
 table({missing, _}) -> missing;
 table({bag, _}) -> ets:new(input, [public, bag]);
+table(old_object) -> holding([public], 1);
+table({old, _, Key}) -> holding([public], Key);
+table({bag_old, Count}) -> holding([public, bag], Count div 2);
+table(bag_old) -> table({bag_new, 100});
 table({duplicate_bag, _}) -> ets:new(input, [public, duplicate_bag]);
 table({Bag, Count}) when Bag =:= bag_new; Bag =:= bag_equal ->
     Table = ets:new(input, [public, bag]),
     true = ets:insert(Table, one_key(Count)),
     Table;
 table(_) -> ets:new(input, [public]).
+
+%% A table with the options Options that holds the object {Key, 0}.
+holding(Options, Key) ->
+    Table = ets:new(input, Options),
+    true = ets:insert(Table, {Key, 0}),
+    Table.
 
 owned_table(Access) ->
     Owner = spawn(?MODULE, owner, [self(), Access]),
@@ -199,6 +225,10 @@ owner(Collector, Access) ->
     receive stop -> ok end.
 
 objects(object) -> {1, 1};
+objects(old_object) -> {1, 1};
+objects(bag_old) -> {1, 101};
+objects({old, Count, _}) -> pairs(1, Count);
+objects({bag_old, Count}) -> pairs(1, Count);
 objects(nil) -> [];
 objects(one) -> [{1, 1}];
 objects({bag_new, Count}) -> {1, Count + 1};
@@ -302,6 +332,10 @@ run(maps_merge, {First, Second}) -> [maps:merge(First, Second)];
 run(map_next, {Path, Map, Acc}) -> [erts_internal:map_next(Path, Map, Acc)];
 run(ets_insert, {Table, Objects}) ->
     [try ets:insert(Table, Objects)
+     catch error:Reason -> Reason
+     end];
+run(ets_insert_new, {Table, Objects}) ->
+    [try ets:insert_new(Table, Objects)
      catch error:Reason -> Reason
      end];
 run(persistent_term_get, _) -> [persistent_term:get()];
