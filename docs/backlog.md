@@ -313,6 +313,13 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a consumer reads the cause of a BIF error, for example the error text of a shell or a logger report, or OTP code that matches the cause.
 - **Source:** [#715](https://github.com/fahchen/pbeam/issues/715).
 
+### Give the stack trace of a BIF error after a trap
+
+- A BIF that traps to a BIF export (`BifResult::TrapBif`) continues through `PendingBif`, and an error after the trap gets the stack trace `[]`. ERTS gives the BIF frame with the arguments in the registers, which are BIF-specific: `lists:member/2` gives the rest of the list (`[x, Rest]`), and `length/1` puts the first list back (`erl_bif_guard.c:243-247`). The PBeam trap arguments are internal continuation state (for example `[Rest, Count]` of `length/1`, three arguments of `erlang:'++'/2`), and a copy of them breaks the owned output of `list_to_bitstring_continue`.
+- **Evidence:** on the pinned ERTS, `lists:member(x, lists:seq(1, 100000) ++ a)` raises `badarg` with the first frame `{lists, member, [x, Rest], [{error_info, #{module => erl_stdlib_errors}}]}`; PBeam gives `[]`. Codex review of PR #736.
+- **Trigger:** a consumer reads the stack trace of a BIF error after a trap.
+- **Source:** [#715](https://github.com/fahchen/pbeam/issues/715).
+
 ### Give caller frames and line locations in stack traces
 
 - PBeam records no line table, so `erlang:error/1,2` gives the frame of its caller with the location `[]` and the frames of the process after it. ERTS records the location of each frame. PBeam matches ERTS only at `backtrace_depth` 0 or 1, and only for code with no line table.

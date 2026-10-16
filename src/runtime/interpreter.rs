@@ -734,12 +734,10 @@ impl BeamProgram {
             tail,
         }) = scheduler.current_process_mut().pending_bif.take()
         {
-            // An error after a trap has the BIF frame with the arguments of
-            // the trap, as ERTS raises it from the trap export of the BIF
-            // (`save_stacktrace`, `beam_common.c:903-1005`).
-            let result = self.bif_trap(scheduler, module, function, arguments.clone())?;
-            let skip = usize::from(tail);
-            let result = bif_error(scheduler, module, function, arguments, result, skip)?;
+            // ponytail: an error after the trap keeps the stack trace `[]`;
+            // see the backlog entry "Give the stack trace of a BIF error
+            // after a trap".
+            let result = self.bif_trap(scheduler, module, function, arguments)?;
             if let Some(outcome) = self.finish_bif(scheduler, result, tail)? {
                 return Ok(outcome);
             }

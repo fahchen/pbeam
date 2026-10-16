@@ -5,7 +5,7 @@
 %% the location []. stack/1 drops the frames of the erl -eval caller.
 main() ->
     [guard_bifs(), gc_bifs(), call_ext(), tail_calls(), applies(), funs(),
-     initial_calls(), spawn_opt_badarg(), trap()].
+     initial_calls(), spawn_opt_badarg(), length_trap()].
 
 id(X) -> X.
 
@@ -132,17 +132,7 @@ spawn_opt_badarg() ->
         try_stack(fun() -> spawn_opt(fun() -> ok end, [{monitor, foo}]) end),
     {C, R, [{M, F, length(A), L} | S]}.
 
-%% A BIF that traps to its own export raises with the arguments of the
-%% last trap, here a rest of the list. The length of the rest depends on
-%% the reductions that the caller used before the call, so the case gives
-%% only that the rest is shorter than the list.
-trap() ->
-    L = lists:seq(1, 100000) ++ a,
-    {C, R, [{M, F, [X, Rest], Loc} | S]} = try_stack(fun() -> lists:member(x, L) end),
-    {C, R, [{M, F, [X, count(Rest) < 100000], Loc} | S]}.
 
-count([_ | T]) -> 1 + count(T);
-count(_) -> 0.
 
 %% The root process exits with the result of main/0, so the run gives its
 %% text.
@@ -154,3 +144,14 @@ try_stack(F) ->
 
 stack([{M, _, _, _} = Frame | S]) when M =/= erl_eval, M =/= init -> [Frame | stack(S)];
 stack(_) -> [].
+
+%% length/1 traps on a long list and raises with the list of the call
+%% (erl_bif_guard.c:243-247). The first frame holds the length of that
+%% list.
+length_trap() ->
+    L = lists:seq(1, 100000) ++ a,
+    {C, R, [{M, F, [List], Loc} | S]} = try_stack(fun() -> length(id(L)) end),
+    {C, R, [{M, F, [count(List)], Loc} | S]}.
+
+count([_ | T]) -> 1 + count(T);
+count(_) -> 0.
