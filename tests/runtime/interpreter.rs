@@ -27,9 +27,31 @@ fn allow_all() -> Vec<Capability> {
     AllowAll.initial()
 }
 
-/// The runtime error of a root process that exits with an uncaught
-/// `error:badarg`. PBeam gives the stack trace `[]`.
-const BADARG_EXIT: &str = "root process exited with {badarg,[]}";
+/// Return the runtime error of a root process whose `fixture:main/0` gets
+/// an uncaught `error:badarg` from the BIF `module:function` with the `%T`
+/// texts `arguments`. ERTS `save_stacktrace` puts the BIF frame with its
+/// arguments and the `error_info` location of the format module `format`
+/// first, then the frame of the caller (`beam_common.c:903-1005`). An
+/// empty `format` gives the location `[]` of a module with no format
+/// module.
+fn bif_badarg_exit(module: &str, function: &str, arguments: &[&str], format: &str) -> String {
+    let location = if format.is_empty() {
+        "[]".to_owned()
+    } else {
+        format!("[{{error_info,#{{module=>{format}}}}}]")
+    };
+    format!(
+        "root process exited with {{badarg,[{{{module},{function},[{}],{location}}},{{fixture,main,0,[]}}]}}",
+        arguments.join(",")
+    )
+}
+
+/// The format module of the BIFs of `erlang` (`beam_common.c:947-948`).
+const ERTS_ERRORS: &str = "erl_erts_errors";
+
+/// The format module of the BIFs of `lists` and `unicode`
+/// (`beam_common.c:972-986`).
+const STDLIB_ERRORS: &str = "erl_stdlib_errors";
 
 /// Return the instructions of `main/function_arity` of the fixture module,
 /// with `body` and `extra` after the two entry labels.
@@ -347,7 +369,10 @@ fn reports_process_exits_and_link_exits() {
             Instruction::Move(atom("undef"), Operand::X(0)),
             erlang_call("nif_error", 1, false),
         ])
-        .contains("root process exited with {undef,[]}")
+        .contains(
+            "root process exited with {undef,[{erlang,nif_error,[undef],\
+             [{error_info,#{module=>erl_erts_errors}}]},{fixture,main,0,[]}]}"
+        )
     );
     let mut body = spawn_link_child(Term::list_from(vec![Term::Integer(1)]));
     body.extend(wait_forever());
@@ -360,7 +385,15 @@ fn reports_process_exits_and_link_exits() {
     body.push(Instruction::Return);
     assert!(matches!(run_with_child(body), Ok(Term::Pid(_))));
     // ERTS 29.1.1: spawn_link(M, F, 1) raises badarg.
-    assert_eq!(error(spawn_link_child(Term::Integer(1))), BADARG_EXIT);
+    assert_eq!(
+        error(spawn_link_child(Term::Integer(1))),
+        bif_badarg_exit(
+            "erlang",
+            "spawn_link",
+            &["fixture", "child", "1"],
+            ERTS_ERRORS
+        )
+    );
     // `erlang:is_alive/0` is not a BIF: it runs the code of the `erlang`
     // module, which this program does not load.
     assert!(
@@ -1738,7 +1771,12 @@ fn converts_unicode_chardata_and_rejects_other_encodings() {
         convert(Term::Integer(1), "unicode")
             .unwrap_err()
             .to_string(),
-        BADARG_EXIT
+        bif_badarg_exit(
+            "unicode",
+            "characters_to_binary",
+            &["1", "unicode"],
+            STDLIB_ERRORS
+        )
     );
     // ERTS 29.1.1: unicode:characters_to_binary([<<"Hello">>, 10], utf8)
     // is <<"Hello\n">>.
@@ -3002,12 +3040,41 @@ fn finds_a_live_catch_tag_after_other_slots_and_skips_a_cleared_tag() {
         Instruction::CatchEnd { register: 1 },
         Instruction::Return,
     ]);
+    // The catch gives {'EXIT', {undef, Stack}}, and the first frame of
+    // Stack is the BIF frame of `erlang:nif_error/1`.
+    let caught = run(body).unwrap().term;
+    let Term::Tuple(exit) = &caught else {
+        panic!("catch gives a tuple");
+    };
+    let Term::Tuple(reason) = &exit[1] else {
+        panic!("the reason is {{undef, Stack}}");
+    };
+    let stack: Vec<Term> = reason[1].proper_list().unwrap().cloned().collect();
+    let error_info = Map::from_pairs(
+        vec![(
+            Term::static_atom("module"),
+            Term::static_atom("erl_erts_errors"),
+        )],
+        &test_atom_table(),
+    )
+    .unwrap();
+    let frame = Term::tuple(vec![
+        Term::static_atom("erlang"),
+        Term::static_atom("nif_error"),
+        Term::list_from(vec![Term::static_atom("undef")]),
+        Term::list_from(vec![Term::tuple(vec![
+            Term::static_atom("error_info"),
+            Term::Map(error_info),
+        ])]),
+    ]);
     assert_eq!(
-        run(body).unwrap().term,
-        Term::tuple(vec![
-            Term::static_atom("EXIT"),
-            Term::tuple(vec![Term::static_atom("undef"), Term::nil()]),
-        ])
+        (&exit[0], &reason[0], &stack[0], stack.len()),
+        (
+            &Term::static_atom("EXIT"),
+            &Term::static_atom("undef"),
+            &frame,
+            2
+        )
     );
     // `try_end` writes `[]` over the tag, so the exception is not caught.
     let mut body = vec![
@@ -3024,7 +3091,7 @@ fn finds_a_live_catch_tag_after_other_slots_and_skips_a_cleared_tag() {
         run(body)
             .unwrap_err()
             .to_string()
-            .contains("root process exited with {undef,[]}")
+            .contains("root process exited with {undef,[{erlang,nif_error,[undef],")
     );
 }
 
@@ -3076,14 +3143,28 @@ fn raises_the_exception_of_a_bif_instruction_and_rejects_a_trap() {
         )
         .execute("fixture", "main", &[])
     };
-    // ERTS 29.1.1: catch element(1, {}) is {'EXIT', {badarg, Stack}}.
-    // PBeam gives the stack trace [].
+    // ERTS 29.1.1: catch element(1, {}) is {'EXIT', {badarg, Stack}},
+    // and the first frame of Stack is the BIF frame
+    // {erlang, element, [1, {}], [{error_info, #{module => erl_erts_errors}}]}.
+    let caught = element(1).unwrap().term;
+    let Term::Tuple(exit) = &caught else {
+        panic!("catch gives a tuple");
+    };
+    let Term::Tuple(reason) = &exit[1] else {
+        panic!("the reason is {{badarg, Stack}}");
+    };
+    let stack: Vec<Term> = reason[1].proper_list().unwrap().cloned().collect();
+    let Term::Tuple(frame) = &stack[0] else {
+        panic!("the first frame is a tuple");
+    };
     assert_eq!(
-        element(1).unwrap().term,
-        Term::tuple(vec![
-            test_atom("EXIT"),
-            Term::tuple(vec![test_atom("badarg"), Term::nil()]),
-        ])
+        (&exit[0], &reason[0], &frame[2], stack.len()),
+        (
+            &test_atom("EXIT"),
+            &test_atom("badarg"),
+            &Term::list_from(vec![Term::Integer(1), Term::tuple(vec![])]),
+            2
+        )
     );
     // Without a catch, the exception exits the process.
     let body = vec![
@@ -3095,7 +3176,7 @@ fn raises_the_exception_of_a_bif_instruction_and_rejects_a_trap() {
             .execute("fixture", "main", &[])
             .unwrap_err()
             .to_string(),
-        BADARG_EXIT
+        bif_badarg_exit("erlang", "element", &["1", "{}"], ERTS_ERRORS)
     );
     // demonitor(Ref, [flush]) of a reference with no monitor traps. No
     // compiler emits it as a `bif` instruction.
@@ -3399,7 +3480,7 @@ fn applies_erlang_apply_3_as_the_i_apply_instruction() {
     body.push(erlang_call("apply", 3, true));
     assert_eq!(
         run_with_apply_targets(body).unwrap_err().to_string(),
-        BADARG_EXIT
+        bif_badarg_exit("erlang", "apply", &["fixture", "id"], ERTS_ERRORS)
     );
     // `apply` copies at most 1023 arguments to the X registers. ERTS
     // raises `undef` for `apply(fixture, missing, L1023)`, because the
@@ -3430,9 +3511,15 @@ fn applies_erlang_apply_3_as_the_i_apply_instruction() {
         Term::list_from(vec![test_atom("x"); 1024]),
     );
     body.push(erlang_call("apply", 3, true));
+    // ERTS 29.1.1 gives the BIF frame
+    // {erlang, apply, [fixture, missing, L1024], [{error_info, #{module => erl_erts_errors}}]}.
     assert_eq!(
         run_with_apply_targets(body).unwrap_err().to_string(),
-        "root process exited with {system_limit,[]}"
+        format!(
+            "root process exited with {{system_limit,[{{erlang,apply,[fixture,missing,[{}]],\
+             [{{error_info,#{{module=>erl_erts_errors}}}}]}},{{fixture,main,0,[]}}]}}",
+            ["x"; 1024].join(",")
+        )
     );
 }
 
@@ -3446,9 +3533,10 @@ fn applies_a_pbeam_bif_through_the_name_path() {
         Instruction::Move(atom("env"), Operand::X(1)),
     ];
     body.extend(apply_body(2, atom("pbeam_cap"), atom("revoke")));
+    // ERTS has no format module for `pbeam_cap`, so the location is `[]`.
     assert_eq!(
         run_with_apply_targets(body).unwrap_err().to_string(),
-        BADARG_EXIT
+        bif_badarg_exit("pbeam_cap", "revoke", &["x", "env"], "")
     );
 }
 
@@ -3457,13 +3545,15 @@ fn rejects_an_apply_with_a_stack_mismatch_and_raises_badarg() {
     let error = |body| run_with_apply_targets(body).unwrap_err().to_string();
     // ERTS 29.1.1 raises `badarg` for `M:F()` with `1` and `f`, or with
     // `m` and `1`.
+    // `fixed_apply` raises with the BIF frame of `erlang:apply/3`
+    // (`beam_common.c:1529-1551`).
     assert_eq!(
         error(apply_body(0, Operand::Value(Term::Integer(1)), atom("f"))),
-        BADARG_EXIT
+        bif_badarg_exit("erlang", "apply", &["1", "f", "[]"], ERTS_ERRORS)
     );
     assert_eq!(
         error(apply_body(0, atom("m"), Operand::Value(Term::Integer(1)))),
-        BADARG_EXIT
+        bif_badarg_exit("erlang", "apply", &["m", "1", "[]"], ERTS_ERRORS)
     );
     // `apply_last` releases the Y registers of the frame, so the count
     // must match the allocated stack, as for `call_last`.
@@ -3606,10 +3696,10 @@ fn appends_lists_as_pinned_erts() {
         append(integers(&[1]), test_atom("x")).unwrap(),
         Term::list_with_tail(vec![Term::Integer(1)], test_atom("x"))
     );
-    for right in [Term::nil(), test_atom("x")] {
+    for (right, text) in [(Term::nil(), "[]"), (test_atom("x"), "x")] {
         assert_eq!(
             append(test_atom("a"), right).unwrap_err().to_string(),
-            BADARG_EXIT
+            bif_badarg_exit("erlang", "'++'", &["a", text], ERTS_ERRORS)
         );
     }
 }
@@ -3693,16 +3783,23 @@ fn finds_key_tuples_as_pinned_erts() {
     // ERTS 29.1.1 raises badarg for the positions 0, -1, x, and the
     // bignum 1 bsl 59, and for the lists a and {a}.
     let one = Term::list_from(vec![tuple(vec![a.clone()])]);
-    for position in [
-        Term::Integer(0),
-        Term::Integer(-1),
-        test_atom("x"),
-        Term::Integer(1 << 59),
+    let exit = |arguments: &[&str]| bif_badarg_exit("lists", "keyfind", arguments, STDLIB_ERRORS);
+    for (position, text) in [
+        (Term::Integer(0), "0"),
+        (Term::Integer(-1), "-1"),
+        (test_atom("x"), "x"),
+        (Term::Integer(1 << 59), "576460752303423488"),
     ] {
-        assert_eq!(badarg(a.clone(), position, one.clone()), BADARG_EXIT);
+        assert_eq!(
+            badarg(a.clone(), position, one.clone()),
+            exit(&["a", text, "[{a}]"])
+        );
     }
-    for list in [a.clone(), tuple(vec![a.clone()])] {
-        assert_eq!(badarg(a.clone(), Term::Integer(1), list), BADARG_EXIT);
+    for (list, text) in [(a.clone(), "a"), (tuple(vec![a.clone()]), "{a}")] {
+        assert_eq!(
+            badarg(a.clone(), Term::Integer(1), list),
+            exit(&["a", "1", text])
+        );
     }
 }
 
@@ -3724,7 +3821,7 @@ fn finds_list_members_as_pinned_erts() {
         member(test_atom("a"), test_atom("x"))
             .unwrap_err()
             .to_string(),
-        BADARG_EXIT
+        bif_badarg_exit("lists", "member", &["a", "x"], STDLIB_ERRORS)
     );
 }
 
@@ -3764,14 +3861,17 @@ fn reads_tuple_elements_as_pinned_erts() {
     assert_eq!(element(Term::Integer(1), one.clone()).unwrap(), a);
     // ERTS 29.1.1 raises badarg for element(0, {a}), element(2, {a}),
     // element(-1, {a}), element(a, {a}), and element(1, [a]).
-    for (index, tuple) in [
-        (Term::Integer(0), one.clone()),
-        (Term::Integer(2), one.clone()),
-        (Term::Integer(-1), one.clone()),
-        (a.clone(), one),
-        (Term::Integer(1), Term::list_from(vec![a])),
+    for (index, tuple, texts) in [
+        (Term::Integer(0), one.clone(), ["0", "{a}"]),
+        (Term::Integer(2), one.clone(), ["2", "{a}"]),
+        (Term::Integer(-1), one.clone(), ["-1", "{a}"]),
+        (a.clone(), one, ["a", "{a}"]),
+        (Term::Integer(1), Term::list_from(vec![a]), ["1", "[a]"]),
     ] {
-        assert_eq!(element(index, tuple).unwrap_err().to_string(), BADARG_EXIT);
+        assert_eq!(
+            element(index, tuple).unwrap_err().to_string(),
+            bif_badarg_exit("erlang", "element", &texts, ERTS_ERRORS)
+        );
     }
 }
 
@@ -3782,7 +3882,7 @@ fn reads_the_tuple_size_as_pinned_erts() {
     assert_eq!(tuple_size(Term::tuple(vec![])).unwrap(), Term::Integer(0));
     assert_eq!(
         tuple_size(test_atom("a")).unwrap_err().to_string(),
-        BADARG_EXIT
+        bif_badarg_exit("erlang", "tuple_size", &["a"], ERTS_ERRORS)
     );
 }
 
@@ -3853,24 +3953,34 @@ fn reads_an_empty_current_stacktrace_of_the_calling_process() {
     // process_info(self(), bogus_item), process_info(self(), 5),
     // process_info(self(), [registered_name, bogus]), and
     // process_info(self(), {bogus, k}).
-    for (process, item) in [
-        (test_atom("a"), test_atom("current_stacktrace")),
-        (test_atom("a"), test_atom("bogus_item")),
-        (Term::Pid(crate::ProcessId(99)), test_atom("bogus_item")),
-        (root(), test_atom("bogus_item")),
-        (root(), Term::Integer(5)),
+    for (process, item, texts) in [
+        (
+            test_atom("a"),
+            test_atom("current_stacktrace"),
+            ["a", "current_stacktrace"],
+        ),
+        (test_atom("a"), test_atom("bogus_item"), ["a", "bogus_item"]),
+        (
+            Term::Pid(crate::ProcessId(99)),
+            test_atom("bogus_item"),
+            ["<0.99.0>", "bogus_item"],
+        ),
+        (root(), test_atom("bogus_item"), ["<0.0.0>", "bogus_item"]),
+        (root(), Term::Integer(5), ["<0.0.0>", "5"]),
         (
             root(),
             Term::list_from(vec![test_atom("registered_name"), test_atom("bogus")]),
+            ["<0.0.0>", "[registered_name,bogus]"],
         ),
         (
             root(),
             Term::tuple(vec![test_atom("bogus"), test_atom("k")]),
+            ["<0.0.0>", "{bogus,k}"],
         ),
     ] {
         assert_eq!(
             process_info(process, item).unwrap_err().to_string(),
-            BADARG_EXIT
+            bif_badarg_exit("erlang", "process_info", &texts, ERTS_ERRORS)
         );
     }
     // ERTS 29.1.1: a process that is not alive gives undefined for each
@@ -3950,12 +4060,22 @@ fn registers_a_name_or_raises_badarg_as_pinned_erts() {
     );
     // ERTS 29.1.1 raises badarg for register(1, self()), register(a, x),
     // and register(a, Pid) with a process that is not alive.
-    for (name, id) in [
-        (Term::Integer(1), root),
-        (test_atom("a"), test_atom("x")),
-        (test_atom("a"), Term::Pid(crate::ProcessId(99))),
+    // ERTS adds the `error_info` causes `none`, `none`, and `notalive`,
+    // which PBeam does not give (row "Exception stack trace" of
+    // `docs/erts-differences.md`).
+    for (name, id, texts) in [
+        (Term::Integer(1), root, ["1", "<0.0.0>"]),
+        (test_atom("a"), test_atom("x"), ["a", "x"]),
+        (
+            test_atom("a"),
+            Term::Pid(crate::ProcessId(99)),
+            ["a", "<0.99.0>"],
+        ),
     ] {
-        assert_eq!(register(name, id).unwrap_err().to_string(), BADARG_EXIT);
+        assert_eq!(
+            register(name, id).unwrap_err().to_string(),
+            bif_badarg_exit("erlang", "register", &texts, ERTS_ERRORS)
+        );
     }
 }
 
@@ -4010,18 +4130,33 @@ fn finds_exported_functions_as_pinned_erts() {
     // atom, and for an arity that is not a small integer: x, the bignum
     // 1 bsl 59, and the bignum -(1 bsl 59) - 1.
     let (erlang, self_name) = (test_atom("erlang"), test_atom("self"));
-    for arguments in [
-        vec![Term::Integer(1), self_name.clone(), Term::Integer(0)],
-        vec![erlang.clone(), Term::Integer(1), Term::Integer(0)],
-        vec![erlang.clone(), self_name.clone(), test_atom("x")],
-        vec![erlang.clone(), self_name.clone(), Term::Integer(1 << 59)],
-        vec![erlang, self_name, Term::Integer(-(1 << 59) - 1)],
+    for (arguments, texts) in [
+        (
+            vec![Term::Integer(1), self_name.clone(), Term::Integer(0)],
+            ["1", "self", "0"],
+        ),
+        (
+            vec![erlang.clone(), Term::Integer(1), Term::Integer(0)],
+            ["erlang", "1", "0"],
+        ),
+        (
+            vec![erlang.clone(), self_name.clone(), test_atom("x")],
+            ["erlang", "self", "x"],
+        ),
+        (
+            vec![erlang.clone(), self_name.clone(), Term::Integer(1 << 59)],
+            ["erlang", "self", "576460752303423488"],
+        ),
+        (
+            vec![erlang, self_name, Term::Integer(-(1 << 59) - 1)],
+            ["erlang", "self", "-576460752303423489"],
+        ),
     ] {
         assert_eq!(
             call_ext_with("erlang", "function_exported", arguments)
                 .unwrap_err()
                 .to_string(),
-            BADARG_EXIT
+            bif_badarg_exit("erlang", "function_exported", &texts, ERTS_ERRORS)
         );
     }
 }
@@ -4571,5 +4706,38 @@ fn writes_a_private_append_in_the_array_of_a_binary_with_one_owner() {
     assert_eq!(
         error.to_string(),
         "bs_create_bin private_append segment holds a term that is not a binary: Integer(1)"
+    );
+}
+
+#[test]
+fn raises_the_reason_of_an_error_with_cause_that_no_call_path_converted() {
+    // A call path that knows the BIF turns `ErrorWithCause` into the stack
+    // trace of ERTS with `bif_error`. Without that step, `finish_bif`
+    // raises `error:Reason` with the stack trace `[]`.
+    let program =
+        BeamProgram::load(&[include_bytes!("../../fixtures/funs/fun_probe.beam")]).unwrap();
+    let label = program.modules["fun_probe"].exports[&(
+        program.modules["fun_probe"]
+            .tables
+            .name_id("tail_wait")
+            .unwrap(),
+        1,
+    )];
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.code = CodeTable::new(program.modules.clone());
+    let frame = scheduler.code.frame("fun_probe", label, 1).unwrap();
+    scheduler
+        .start(frame, vec![Term::Integer(1)], Vec::new())
+        .unwrap();
+    scheduler.schedule_next().unwrap();
+    let outcome = program
+        .finish_bif(&mut scheduler, BifResult::badopt(), false)
+        .unwrap();
+    let Some(Outcome::Exit { reason, .. }) = outcome else {
+        panic!("the process exits: {outcome:?}");
+    };
+    assert_eq!(
+        reason,
+        Term::tuple(vec![Term::static_atom("badarg"), Term::nil()])
     );
 }

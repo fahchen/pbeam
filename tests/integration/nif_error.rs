@@ -29,15 +29,17 @@ fn raises_undef_for_a_local_function_that_calls_nif_error() {
         b"error undef [{erlang,nif_error,[undef]},{nif_error_probe,stub,0}]\n"
     );
 
-    // PBeam exits with the same reason but an empty stack trace. This is the
-    // "Exception stack trace" row in `docs/erts-differences.md`.
+    // PBeam exits with the same reason and the same two first frames, with
+    // the location `[]` for the frame of the probe (row "Exception stack
+    // trace" in `docs/erts-differences.md`).
     let program = BeamProgram::load(&[NIF_ERROR_PROBE]).unwrap();
     let error = program.execute("nif_error_probe", "main", &[]).unwrap_err();
     assert!(
-        error
-            .to_string()
-            .contains("root process exited with {undef,[]}"),
-        "expected an undef exit reason with an empty stack trace, got {error}"
+        error.to_string().starts_with(
+            "root process exited with {undef,[{erlang,nif_error,[undef],\
+             [{error_info,#{module=>erl_erts_errors}}]},{nif_error_probe,stub,0,[]}"
+        ),
+        "expected the nif_error and stub frames first, got {error}"
     );
 }
 

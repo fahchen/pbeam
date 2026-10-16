@@ -306,6 +306,13 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ## Exceptions
 
+### Give the `error_info` cause of BIF errors
+
+- PBeam gives the `error_info` map `#{module => Format}` with no `cause` for each BIF error except `erlang:spawn_opt/4`. ERTS adds `cause => Cause` when the BIF raises with `EXF_HAS_EXT_INFO` (`beam_common.c:993-1002`), for example `none` or `notalive` for `register/2` (`bif.c:2310-2316`), `badopt` for `monitor/3` (`bif.c:988-995`), and the causes of the `ets` BIFs (`erl_db.c:794-931`). `erl_erts_errors:format_error/2` and `erl_stdlib_errors:format_error/2` read the cause to write the error text.
+- **Evidence:** `catch register(1, self())` gives `[{error_info, #{cause => none, module => erl_erts_errors}}]` on the pinned ERTS and `[{error_info, #{module => erl_erts_errors}}]` on PBeam (`registers_a_name_or_raises_badarg_as_pinned_erts` in `tests/runtime/interpreter.rs`).
+- **Trigger:** a consumer reads the cause of a BIF error, for example the error text of a shell or a logger report, or OTP code that matches the cause.
+- **Source:** [#715](https://github.com/fahchen/pbeam/issues/715).
+
 ### Give caller frames and line locations in stack traces
 
 - PBeam records no line table, so `erlang:error/1,2` gives the frame of its caller with the location `[]` and the frames of the process after it. ERTS records the location of each frame. PBeam matches ERTS only at `backtrace_depth` 0 or 1, and only for code with no line table.
