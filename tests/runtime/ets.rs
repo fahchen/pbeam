@@ -36,10 +36,13 @@ fn bounds_the_work_of_one_turn_of_a_busy_list_insert() {
 
     // The copies of a list insert that runs count as the live bytes of the
     // table and of the terms that only they hold.
-    let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
+    let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Bag);
     let mut tables = EtsTables::default();
     let objects = vec![vec![Term::Integer(1)], vec![Term::Integer(2)]];
     table.busy = Some(Busy::new(ProcessId(0), objects, false));
+    // The budget ends the insert with the last object, so the state with
+    // the walk of each key stays for this turn.
+    table.step_busy(&atoms, 4);
     let with_busy = table.allocated_bytes();
     tables.create(Reference(0), None, table);
     let mut live = crate::term::LiveBytes::new();

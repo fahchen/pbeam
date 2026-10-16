@@ -332,6 +332,15 @@ impl EtsTables {
                     live.term(term);
                 }
             }
+            for walk in table
+                .busy
+                .as_ref()
+                .into_iter()
+                .flat_map(|busy| busy.walks.values())
+                .flatten()
+            {
+                live.term(&walk.key);
+            }
         }
     }
 
@@ -1275,6 +1284,26 @@ impl Table {
                         .objects
                         .iter()
                         .map(|object| object.capacity() * std::mem::size_of::<Term>())
+                        .sum::<usize>()
+                    + busy.walks.capacity() * std::mem::size_of::<(u64, Vec<BagWalk>)>()
+                    + busy
+                        .walks
+                        .values()
+                        .map(|walks| {
+                            walks.capacity() * std::mem::size_of::<BagWalk>()
+                                + walks
+                                    .iter()
+                                    .map(|walk| {
+                                        walk.seen
+                                            .values()
+                                            .map(|slots| {
+                                                slots.capacity()
+                                                    * std::mem::size_of::<(Place, usize)>()
+                                            })
+                                            .sum::<usize>()
+                                    })
+                                    .sum::<usize>()
+                        })
                         .sum::<usize>()
             })
     }
