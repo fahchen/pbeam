@@ -15,7 +15,6 @@ defmodule ExampleBeams do
   @not_loaded %{
     :crypto => "the start module crypto has an -on_load function, which PBeam runs only for a module that loads in the run (on_load)",
     :elixir_errors => "unsupported BEAM opcode 132 (bs_match_string)",
-    :file_io_server => "unsupported BEAM opcode 141 (bs_skip_utf16)",
     :shell_docs => "unsupported BEAM opcode 132 (bs_match_string)",
     IEx.Evaluator => "unsupported BEAM opcode 132 (bs_match_string)"
   }

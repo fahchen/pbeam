@@ -106,8 +106,14 @@ const OPCODE_BS_START_MATCH4: u8 = 170;
 /// `bs_get_utf8 Fail Ctx Live Flags Dst` (genop.tab:501).
 const OPCODE_BS_GET_UTF8: u8 = 138;
 const OPCODE_BS_SKIP_UTF8: u8 = 139;
+/// `bs_get_utf16 Fail Ctx Live Flags Dst` (genop.tab:504).
 const OPCODE_BS_GET_UTF16: u8 = 140;
+/// `bs_skip_utf16 Fail Ctx Live Flags` (genop.tab:505).
+const OPCODE_BS_SKIP_UTF16: u8 = 141;
+/// `bs_get_utf32 Fail Ctx Live Flags Dst` (genop.tab:507).
 const OPCODE_BS_GET_UTF32: u8 = 142;
+/// `bs_skip_utf32 Fail Ctx Live Flags` (genop.tab:508).
+const OPCODE_BS_SKIP_UTF32: u8 = 143;
 /// `on_load` (`genop.tab:520`), which has no operands. It marks the
 /// function of the last label as the `-on_load` function of the module.
 const OPCODE_ON_LOAD: u8 = 149;
@@ -1282,6 +1288,48 @@ pub(crate) enum Instruction {
         context: Operand,
         destination: Operand,
     },
+    /// Reads one UTF-16 character from the match context in `context`
+    /// (`bs_get_utf16`, opcode 140), or skips it when `destination` is
+    /// `None` (`bs_skip_utf16`, opcode 141), or jumps to `fail_label`.
+    /// `little` is `true` for a little-endian segment.
+    ///
+    /// Encoding: opcode, fail label, context, unsigned live count,
+    /// unsigned flags, and the destination register for `bs_get_utf16`.
+    /// The decoder skips the live count. It reads the `little` flag (2)
+    /// and the `native` flag (16), and gives a native segment the byte
+    /// order of the host, as the ERTS loader does (jit/arm/ops.tab:1080-
+    /// 1081, `gen.get_utf16` and `gen.skip_utf16` in generators.tab).
+    /// Example: `bs_utf_probe:get16_little/1` has `[0x8C, 0x65, 0x57, 0x03,
+    /// 0x10, 0x10, 0x20, 0x13]`: fail label 6, the typed register `x0`,
+    /// live count 1, flags 2 (`little`), and the destination `x1`.
+    ///
+    /// Erlang: `<<C/utf16-little, Rest/binary>>` compiles to
+    /// `{test,bs_get_utf16,{f,6},[{tr,{x,0},...},1,{field_flags,[little]},{x,1}]}`.
+    BinaryGetUtf16 {
+        fail_label: u32,
+        context: Operand,
+        little: bool,
+        destination: Option<Operand>,
+    },
+    /// Reads one UTF-32 character from the match context in `context`
+    /// (`bs_get_utf32`, opcode 142), or skips it when `destination` is
+    /// `None` (`bs_skip_utf32`, opcode 143), or jumps to `fail_label`.
+    /// `little` is `true` for a little-endian segment.
+    ///
+    /// Encoding: the operands of `bs_get_utf16`. Example:
+    /// `bs_utf_probe:skip32/1` has `[0x8F, 0x0D, 0x1B, 0x57, 0x03, 0x10,
+    /// 0x10, 0x00]`: fail label 27, the typed register `x0`, live count 1,
+    /// and flags 0. ERTS loads it as a 32-bit `bs_get_integer2` and
+    /// `i_bs_validate_unicode_retract` (jit/arm/ops.tab:1086-1095).
+    ///
+    /// Erlang: `<<_/utf32, Rest/binary>>` compiles to
+    /// `{test,bs_skip_utf32,{f,27},[{tr,{x,0},...},1,{field_flags,[]}]}`.
+    BinaryGetUtf32 {
+        fail_label: u32,
+        context: Operand,
+        little: bool,
+        destination: Option<Operand>,
+    },
     /// Runs the commands of `bs_match` (opcode 182) in order on the match
     /// context in `context`. A command that fails jumps to `fail_label`.
     ///
@@ -2117,12 +2165,7 @@ pub(super) fn parse_code(
                 skip_live_registers(data, &mut cursor)?;
                 let size = read_move_operand(data, &mut cursor, atoms, literals)?;
                 let unit = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
-                let flags = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
-                let little = if flags & BSF_NATIVE != 0 {
-                    cfg!(target_endian = "little")
-                } else {
-                    flags & BSF_LITTLE != 0
-                };
+                let little = read_little_flag(data, &mut cursor)?;
                 let destination = read_register(data, &mut cursor)?;
                 Instruction::BinaryGetFloat {
                     fail_label,
@@ -2155,6 +2198,34 @@ pub(super) fn parse_code(
                     fail_label,
                     context,
                     destination: read_register(data, &mut cursor)?,
+                }
+            }
+            OPCODE_BS_GET_UTF16 | OPCODE_BS_SKIP_UTF16 | OPCODE_BS_GET_UTF32
+            | OPCODE_BS_SKIP_UTF32 => {
+                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let context = read_move_operand(data, &mut cursor, atoms, literals)?;
+                skip_live_registers(data, &mut cursor)?;
+                let little = read_little_flag(data, &mut cursor)?;
+                let destination = match opcode {
+                    OPCODE_BS_GET_UTF16 | OPCODE_BS_GET_UTF32 => {
+                        Some(read_register(data, &mut cursor)?)
+                    }
+                    _ => None,
+                };
+                if matches!(opcode, OPCODE_BS_GET_UTF16 | OPCODE_BS_SKIP_UTF16) {
+                    Instruction::BinaryGetUtf16 {
+                        fail_label,
+                        context,
+                        little,
+                        destination,
+                    }
+                } else {
+                    Instruction::BinaryGetUtf32 {
+                        fail_label,
+                        context,
+                        little,
+                        destination,
+                    }
                 }
             }
             OPCODE_BS_MATCH => {
@@ -3013,8 +3084,8 @@ fn read_record_updates(
 ///
 /// ```rust,ignore
 /// let mut cursor = 0;
-/// skip_unsupported_instruction(OPCODE_BS_GET_UTF16, &[0, 0, 0, 0, 0], &mut cursor)?;
-/// assert_eq!(cursor, 5);
+/// skip_unsupported_instruction(OPCODE_BS_SKIP_UTF8, &[0, 0, 0, 0], &mut cursor)?;
+/// assert_eq!(cursor, 4);
 /// ```
 fn skip_unsupported_instruction(
     opcode: u8,
@@ -3043,7 +3114,7 @@ fn skip_unsupported_instruction(
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(unsupported_opcode_operand_count(OPCODE_BS_GET_UTF16), Some(5));
+/// assert_eq!(unsupported_opcode_operand_count(OPCODE_BS_SKIP_UTF8), Some(4));
 /// assert_eq!(unsupported_opcode_operand_count(255), None);
 /// ```
 fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
@@ -3051,8 +3122,6 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         OPCODE_BS_SKIP_BITS2 => Some(5),
         // `bs_get_integer2` is in `io_lib`.
         OPCODE_BS_GET_INTEGER2 => Some(7),
-        // `bs_get_utf16` and `bs_get_utf32` are in `unicode`.
-        OPCODE_BS_GET_UTF16 | OPCODE_BS_GET_UTF32 => Some(5),
         OPCODE_BS_SKIP_UTF8 => Some(4),
         OPCODE_TEST_HEAP => Some(2),
         OPCODE_BIF0 => Some(2),
@@ -3109,6 +3178,28 @@ fn skip_counted_operands(data: &[u8], cursor: &mut usize) -> Result<(), BeamErro
 /// ```
 fn skip_live_registers(data: &[u8], cursor: &mut usize) -> Result<(), BeamError> {
     read_operand(data, cursor, TAG_UNSIGNED).map(|_live_registers| ())
+}
+
+/// Read the unsigned `Flags` operand of a segment and return `true` for a
+/// little-endian segment. The `native` flag (16) gives the byte order of
+/// the host, as `$NativeEndian` does in the ERTS loader (generators.tab);
+/// otherwise the `little` flag (2) decides (`BSF_LITTLE` and `BSF_NATIVE`
+/// in erl_bits.h:462-465).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(read_little_flag(&[0x20], &mut 0)?);
+/// assert!(!read_little_flag(&[0x00], &mut 0)?);
+/// assert_eq!(read_little_flag(&[0x08, 0x10], &mut 0)?, cfg!(target_endian = "little"));
+/// ```
+fn read_little_flag(data: &[u8], cursor: &mut usize) -> Result<bool, BeamError> {
+    let flags = read_operand(data, cursor, TAG_UNSIGNED)?;
+    Ok(if flags & BSF_NATIVE != 0 {
+        cfg!(target_endian = "little")
+    } else {
+        flags & BSF_LITTLE != 0
+    })
 }
 
 /// Skip the `Alloc` operand of `bs_create_bin`: a `u` heap word count or an
