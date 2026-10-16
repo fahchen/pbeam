@@ -183,6 +183,23 @@ pub(crate) struct ModuleTables {
     /// The name and the arity of each function of the module, in stream
     /// order. A `FunctionStart` names its entry in this vector.
     pub(crate) functions: Vec<(NameId, u32)>,
+    /// The fun entry of each `FunT` entry of the module, by the index of the
+    /// entry. A call of a local fun reads it to find the entry that the
+    /// loaded code of the module name of the fun holds
+    /// (`beam_common.c:1697-1706`).
+    pub(crate) fun_entries: HashMap<i32, FunEntry>,
+}
+
+/// The parts of a `FunT` entry of the loaded code that a call of a local fun
+/// compares with the fun, as the loader keeps them in the `ErlFunEntry` of
+/// the entry (`erl_fun.h:31-59`).
+#[derive(Debug)]
+pub(crate) struct FunEntry {
+    /// The old unique value of the entry (`ErlFunEntry.old_uniq`), which the
+    /// compiler takes from the MD5 of the module (`beam_asm.erl:251-262`).
+    pub(crate) old_unique: i32,
+    /// The entry label of the code of the lambda.
+    pub(crate) label: u32,
 }
 
 /// The function that a label starts.
@@ -291,6 +308,7 @@ impl ModuleTables {
         let mut function_starts = LabelMap::default();
         let mut functions: Vec<(NameId, u32)> = Vec::new();
         let mut function: Option<usize> = None;
+        let mut fun_entries = HashMap::new();
         for (index, instruction) in instructions.iter().enumerate() {
             match instruction {
                 Instruction::FunctionInfo {
@@ -311,6 +329,15 @@ impl ModuleTables {
                             start: index + 1,
                         }));
                 }
+                Instruction::MakeFun { lambda, .. } => {
+                    fun_entries.insert(
+                        lambda.index(),
+                        FunEntry {
+                            old_unique: lambda.old_unique(),
+                            label: lambda.label(),
+                        },
+                    );
+                }
                 _ => {}
             }
         }
@@ -319,6 +346,7 @@ impl ModuleTables {
             function_starts,
             names,
             functions,
+            fun_entries,
         };
         for instruction in instructions.iter_mut() {
             resolve(name, instruction, &tables)?;
