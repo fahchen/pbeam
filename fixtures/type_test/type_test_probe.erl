@@ -1,6 +1,6 @@
 -module(type_test_probe).
 -export([bif/0, funs/0, applies/0, guard/0, arity/0, record/0,
-         record_guard/0]).
+         record_guard/0, number_guard/0]).
 
 %% One term of each kind. 576460752303423488 (2^59) is an ERTS bignum and
 %% a PBeam inline integer. 2^64 and -(2^64) are bignums on both. The port
@@ -61,6 +61,15 @@ record_guard() ->
 
 native_record(T) when is_record(T) -> yes;
 native_record(_) -> no.
+
+%% `is_number/1` in a guard compiles to the `is_number` test instruction
+%% (genop.tab:236-238), as the first clause of `telemetry:execute/3`
+%% (telemetry.erl:188) does.
+number_guard() ->
+    [number(T) || T <- terms()].
+
+number(T) when is_number(T) -> yes;
+number(_) -> no.
 
 %% `is_function/2` in a body, through a fun, and through `apply/3`.
 arity() ->

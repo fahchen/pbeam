@@ -1167,6 +1167,12 @@ impl BeamProgram {
                         // `erl_term.h:484-485`; JIT `emit_is_float` in
                         // `jit/arm/instr_common.cpp:1229-1245`).
                         TestKind::Float => matches!(value, Term::Float(_)),
+                        // `is_number` passes for a small integer, a bignum,
+                        // and a float (emu `instrs.tab:999-1003`:
+                        // `is_not_integer(Src) && is_not_float(Src)`; JIT
+                        // `emit_is_number` in
+                        // `jit/arm/instr_common.cpp:1403-1444`).
+                        TestKind::Number => value.is_integer() || matches!(value, Term::Float(_)),
                         TestKind::Boolean => {
                             matches!(value, Term::Atom(atom) if atom.is_one_of(&["true", "false"]))
                         }
@@ -2733,9 +2739,12 @@ impl BeamProgram {
     /// fun of another arity raises `error:{badarity, {Fun, Arguments}}`,
     /// where `Arguments` lists `x0` to `x(arity - 1)`. Else a local fun puts
     /// its free variables in `x(arity)` onwards and enters the code of the
-    /// lambda, and an external fun calls its function as `call_ext` does, so
-    /// a BIF runs as a BIF. A tail call replaces the active frame. Return the
-    /// outcome when the process exits.
+    /// entry that the loaded code of its module name holds, and a local fun
+    /// whose module name holds no entry of the fun raises
+    /// `error:{badfun, Fun}` (`beam_common.c:1697-1706`). An external fun
+    /// calls its function as `call_ext` does, so a BIF runs as a BIF. A tail
+    /// call replaces the active frame. Return the outcome when the process
+    /// exits.
     ///
     /// # Examples
     ///
@@ -2755,8 +2764,8 @@ impl BeamProgram {
         arity: u32,
         tail: bool,
     ) -> Result<Option<Outcome>, BeamError> {
-        let (target, free) = match call {
-            FunCall::Enter { target, free } => (target, free),
+        let (target, free, fun) = match call {
+            FunCall::Enter { target, free, fun } => (target, free, fun),
             FunCall::BadArity(fun) => {
                 let process = scheduler.current_process_mut();
                 let arguments = call_arguments(&process.registers, arity)?;
@@ -2800,7 +2809,18 @@ impl BeamProgram {
         }
         let frame = {
             let module = scheduler.atoms.name_of(lambda.module());
-            scheduler.code.frame(module, lambda.label(), total_arity)?
+            match scheduler.code.fun_frame(module, lambda, total_arity)? {
+                Some(frame) => frame,
+                // The loaded code of the module name of the fun holds no
+                // entry of the fun, so the code of the fun is not loaded and
+                // the call raises `error:{badfun, Fun}`
+                // (`beam_common.c:1697-1706`).
+                None => {
+                    let process = scheduler.current_process_mut();
+                    let reason = Term::tuple(vec![Term::static_atom("badfun"), fun]);
+                    return Ok(raise(process, ExceptionClass::Error, reason));
+                }
+            }
         };
         enter_frame(scheduler.current_process_mut(), frame, tail);
         Ok(None)
@@ -4271,8 +4291,13 @@ fn write(process: &mut ProcessState, operand: &Operand, value: Term) -> Result<(
 /// assert!(matches!(call, FunCall::BadFun(Term::Atom(_))));
 /// ```
 enum FunCall {
-    /// A fun of the called arity: its entry and its free variables.
-    Enter { target: Target, free: Vec<Term> },
+    /// A fun of the called arity: the fun term, its entry, and its free
+    /// variables.
+    Enter {
+        target: Target,
+        free: Vec<Term>,
+        fun: Term,
+    },
     /// A fun of another arity, for the reason `{badarity, {Fun, Arguments}}`.
     BadArity(Term),
     /// A term that is not a fun, for the reason `{badfun, Term}`.
@@ -4294,6 +4319,7 @@ impl FunCall {
             Term::Fun(fun) if fun.target().arity() == arity => FunCall::Enter {
                 target: fun.target().clone(),
                 free: fun.free().to_vec(),
+                fun: Term::Fun(fun.clone()),
             },
             Term::Fun(_) => FunCall::BadArity(fun.clone()),
             _ => FunCall::BadFun(fun.clone()),

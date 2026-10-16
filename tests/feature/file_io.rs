@@ -44,14 +44,17 @@ fn opens_writes_positions_and_closes_a_file_as_pinned_erts() {
     // `file:consult/1` then reads the terms of
     // `fixtures/boot/file_io_probe_terms.config` through the same read
     // buffer, and the file `fixtures/boot/file_io_probe_bad.config` gives
-    // the parse error of `erl_parse` for its second term.
+    // the parse error of `erl_parse` for its second term. The float term
+    // of the third term runs `erlang:list_to_float/1`, which `erl_scan`
+    // calls for a float token (`erl_scan.erl:1969`).
     let expected = "[ok,\n {ok,<<\"ab\\ncd\\n\">>},\n ok,\n {ok,2},\n ok,\n {ok,13},\n \
         {error,einval},\n ok,ok,\n {ok,<<\"fiXYZ\\nsecond\\n\">>},\n ok,\n \
         {ok,<<\"fiXYZ\\nsecond\\ntail\\n\">>},\n {error,eexist},\n {error,eisdir},\n \
         {error,enotdir},\n {error,enoent},\n {ok,\"fiXYZ\\n\"},\n {ok,\"se\"},\n \
         {ok,\"cond\\ntail\\n\"},\n {ok,18},\n eof,ok,ok,\"abc\\n\",eof,ok,ok,\n \
         {ok,25},\n ok,\n \
-        {ok,[{plug_hello,[{port,4004},{enabled,true}]},[atom,<<\"binary\">>,15]]},\n \
+        {ok,[{plug_hello,[{port,4004},{enabled,true}]},\n      \
+        [atom,<<\"binary\">>,15],\n      {timeout,1.5,-2.5}]},\n \
         {error,{1,erl_parse,[\"syntax error before: \",\"'.'\"]}}]\n";
     for (name, mut command) in [("ERTS", erts()), ("PBeam", pbeam())] {
         let directory =
