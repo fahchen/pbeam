@@ -974,7 +974,8 @@ pub(super) fn port_info_item(
 /// `erlang:bif_handle_signals_return/2` when the caller has incoming
 /// signals. For an open port and a pid, a caller without a `port`
 /// capability with `command` that permits the program path of the port
-/// gets `error:capability_denied`.
+/// gets `error:capability_denied`, and so does a runtime process that
+/// connects the port to a boot process.
 ///
 /// # Examples
 ///
@@ -993,7 +994,10 @@ pub(super) fn port_connect(
     let scheduler = &mut *context.scheduler;
     let result = match (open_port_id(scheduler, port), pid) {
         (Some(id), &Term::Pid(pid)) => {
-            if let Some(denied) = port_denial(scheduler, id, Operation::Command)? {
+            // The runtime to boot gate denies a boot process as the new
+            // owner, as for `link/1` and `send/2` (see [`boot_denial`]).
+            let boot = boot_denial(scheduler, pid)?;
+            if let Some(denied) = port_denial(scheduler, id, Operation::Command)?.or(boot) {
                 return Ok(denied);
             }
             let connected = scheduler.connect_port(id, pid);
