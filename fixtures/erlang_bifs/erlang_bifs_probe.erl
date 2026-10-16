@@ -90,9 +90,8 @@ rounding() ->
 %% The text of a pid, the `badarg` of a term that is not a port, and the
 %% `badarg` of a term that is not a pid. The process number varies between
 %% the runs, so the probe gives the characters of the text that do not
-%% vary. A run of the probe reaches no port term: `erlang:ports/0` is not
-%% implemented, so the text of a port is the subject of a unit test of the
-%% runtime.
+%% vary. This probe loads only its own beam, so it reaches no port term:
+%% the text of a port is the subject of a unit test of the runtime.
 terms() ->
     Text = erlang:pid_to_list(self()),
     [text_shape(Text, last_char(Text)), length(Text) > 4,

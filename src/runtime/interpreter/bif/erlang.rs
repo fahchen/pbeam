@@ -3000,7 +3000,8 @@ pub(super) fn make_tuple(size: &Term, value: &Term) -> BifResult {
 /// let updates = Term::list_from([Term::tuple(vec![Term::Integer(1), Term::static_atom("a")])]);
 /// assert!(matches!(make_tuple_3(&Term::Integer(2), &Term::static_atom("x"), &updates), BifResult::Value(Term::Tuple(elements)) if elements[0] == Term::static_atom("a")));
 /// assert!(matches!(make_tuple_3(&Term::Integer(2), &Term::static_atom("x"), &Term::nil()), BifResult::Value(Term::Tuple(elements)) if elements.len() == 2));
-/// assert!(matches!(make_tuple_3(&Term::Integer(1), &Term::static_atom("x"), &updates), BifResult::Raise { .. }));
+/// // The index 1 is outside the tuple of size 0.
+/// assert!(matches!(make_tuple_3(&Term::Integer(0), &Term::static_atom("x"), &updates), BifResult::Raise { .. }));
 /// ```
 pub(super) fn make_tuple_3(size: &Term, value: &Term, updates: &Term) -> BifResult {
     let Some(size) = tuple_size(size) else {

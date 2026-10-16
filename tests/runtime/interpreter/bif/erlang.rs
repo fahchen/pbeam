@@ -1,7 +1,8 @@
 //! Unit tests of `src/runtime/interpreter/bif/erlang.rs` for an argument
-//! that a fixture cannot check on PBeam: the public API of the runtime has
-//! no constructor of a bitstring that is not a whole number of bytes, and a
-//! run of a fixture reaches no port term.
+//! that the fixture probes of their tasks cannot check on PBeam: the public
+//! API of the runtime has no constructor of a bitstring that is not a whole
+//! number of bytes, and a probe that loads only its own beam reaches no port
+//! term, because a port needs `erlang:open_port/2` of `erlang.beam`.
 
 use super::*;
 use crate::term::Binary;
@@ -31,8 +32,9 @@ fn lists_the_text_of_a_pid_and_of_a_port_as_pinned_erts() {
     // pid `<0.5.0>` and the port number 5 is the port `#Port<0.5>`, as the
     // pinned ERTS gives them for `erlang:pid_to_list(erlang:list_to_pid(
     // "<0.5.0>"))` and `erlang:port_to_list(erlang:list_to_port(
-    // "#Port<0.5>"))` (measured with `mise run erts-eval`). A fixture
-    // reaches no port term: `erlang:ports/0` is not implemented.
+    // "#Port<0.5>"))` (measured with `mise run erts-eval`). A probe that
+    // loads only its own beam reaches no port term, because a port needs
+    // `erlang:open_port/2` of `erlang.beam`.
     let atoms = AtomTable::new();
     let characters = |text: &str| {
         Term::list_from(
