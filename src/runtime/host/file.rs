@@ -381,8 +381,7 @@ pub(crate) fn read(mut file: &File, size: u64) -> Result<Vec<u8>, c_int> {
 
 /// Write all bytes of `buffers` to `file`, as `write_nif` with
 /// `efile_writev` (`prim_file_nif.c:688-710`, `unix_prim_file.c:343-394`)
-/// does: `writev` of the buffers, again on `EINTR` and after a partial
-/// write, until all bytes are written or a write gives 0 bytes. The
+/// does with [`write_vectored`]. The
 /// buffers refer to the bytes of the binaries, as the iovec of
 /// `enif_inspect_iovec` does, so the write copies no byte.
 ///
@@ -397,28 +396,55 @@ pub(crate) fn read(mut file: &File, size: u64) -> Result<Vec<u8>, c_int> {
 ///
 /// The `errno` of a failed write.
 pub(crate) fn write(file: &File, buffers: &mut [IoSlice<'_>]) -> Result<(), c_int> {
-    write_vectored(file, buffers).map_err(os_errno)
+    write_vectored(file, buffers, FALLBACK_RW_LENGTH).map_err(os_errno)
 }
 
+/// The largest write of the fallback of `efile_writev` after `EINVAL`, as
+/// `FALLBACK_RW_LENGTH` (`unix_prim_file.c:48`): macOS gives `EINVAL` for a
+/// `write` of more than 2 GB.
+const FALLBACK_RW_LENGTH: usize = (1 << 31) - 1;
+
 /// Write all bytes of `buffers` to `writer` with `Write::write_vectored`,
-/// again on `EINTR` and after a partial write, until all bytes are written
-/// or a write gives 0 bytes, as the loop of `efile_writev`
-/// (`unix_prim_file.c:360-394`) does.
+/// as the loop of `efile_writev` (`unix_prim_file.c:343-394`) does:
+///
+/// 1. `writev` of the buffers. When it gives `EINVAL`, one `write` of the
+///    first buffer, and when that gives `EINVAL` too for a buffer of more
+///    than `fallback_length` bytes, one `write` of its first
+///    `fallback_length` bytes (`unix_prim_file.c:360-376`).
+/// 2. After a partial write, the same again with the bytes after the
+///    written bytes, and again on `EINTR`, until all bytes are written or a
+///    write gives 0 bytes.
+///
+/// `write` passes [`FALLBACK_RW_LENGTH`] as `fallback_length`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// let mut buffers = [IoSlice::new(b"ab")];
-/// write_vectored(&mut Vec::new(), &mut buffers)?;
+/// write_vectored(&mut Vec::new(), &mut buffers, FALLBACK_RW_LENGTH)?;
 /// ```
 ///
 /// # Errors
 ///
 /// The error of a failed write.
-fn write_vectored(mut writer: impl Write, mut buffers: &mut [IoSlice<'_>]) -> io::Result<()> {
+fn write_vectored(
+    mut writer: impl Write,
+    mut buffers: &mut [IoSlice<'_>],
+    fallback_length: usize,
+) -> io::Result<()> {
+    let invalid = |error: &io::Error| error.raw_os_error() == Some(libc::EINVAL);
     let mut more = true;
     while more && !buffers.is_empty() {
-        match writer.write_vectored(buffers) {
+        let result = match writer.write_vectored(buffers) {
+            Err(error) if invalid(&error) => match writer.write(&buffers[0]) {
+                Err(error) if invalid(&error) && buffers[0].len() > fallback_length => {
+                    writer.write(&buffers[0][..fallback_length])
+                }
+                result => result,
+            },
+            result => result,
+        };
+        match result {
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error) => return Err(error),
             Ok(written) => {
