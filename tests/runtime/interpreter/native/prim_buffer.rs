@@ -230,7 +230,7 @@ fn takes_and_releases_the_lock_as_the_nifs_do() {
             BifResult::Raise {
                 class: ExceptionClass::Error,
                 reason: Term::Atom(ref atom),
-            } if scheduler.atoms.name_of(&atom) == "lock_order_violation"
+            } if scheduler.atoms.name_of(atom) == "lock_order_violation"
         ),
         "{violation:?}"
     );
