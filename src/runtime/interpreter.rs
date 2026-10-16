@@ -668,14 +668,32 @@ impl BeamProgram {
         // `apply` raises `system_limit` for more than `APPLY_MAX_ARGUMENTS`
         // arguments, and else a function that the module does not export
         // goes to its export entry when the process first runs. The arity is
-        // the number of argument registers.
+        // the number of argument registers. The wake-up of
+        // `erlang:hibernate/3` runs the same `apply` from `beam_run_process`
+        // (`bif.c:1426`), so its start looks up the export now.
         let process = scheduler.current_process_mut();
         if let Some((module, function)) = process.undefined_start.take() {
-            let outcome = if process.registers.len() > APPLY_MAX_ARGUMENTS {
+            let arity = process.registers.len() as u32;
+            let export = if process.registers.len() > APPLY_MAX_ARGUMENTS {
+                None
+            } else {
+                let atoms = &scheduler.atoms;
+                let (module_name, function_name) =
+                    (atoms.name_of(&module), atoms.name_of(&function));
+                scheduler
+                    .code
+                    .export_frame(module_name, function_name, arity)?
+            };
+            let process = scheduler.current_process_mut();
+            let outcome = if let Some(frame) = export {
+                // The wake-up of `erlang:hibernate/3` applies an exported
+                // function with an empty stack.
+                process.frames.push(frame);
+                None
+            } else if process.registers.len() > APPLY_MAX_ARGUMENTS {
                 let system_limit = Term::static_atom("system_limit");
                 raise(process, ExceptionClass::Error, system_limit)
             } else {
-                let arity = process.registers.len() as u32;
                 // The start of a process is a tail call of the MFA from the
                 // initial function of ERTS (`i_apply_only`,
                 // `erl_process.c:12616`). PBeam starts the process with no
@@ -2798,6 +2816,22 @@ impl BeamProgram {
                 result: None,
             })),
             BifResult::DirtyWrite(write) => Ok(Some(Outcome::DirtyWrite { write, tail })),
+            BifResult::Hibernate {
+                module,
+                function,
+                arguments,
+            } => {
+                // `hibernate_3` drops the stack and the catches, puts the
+                // arguments of `apply/3` into the argument registers, and
+                // traps to `beam_run_process` (`bif.c:1403-1427`). PBeam
+                // keeps the MFA as a start with no frame: `run` looks up its
+                // export when the process runs again, as `apply` does after
+                // the wake-up.
+                process.frames.clear();
+                process.registers = arguments.into_iter().map(Some).collect();
+                process.undefined_start = Some((module, function));
+                Ok(Some(Outcome::Hibernate))
+            }
         }
     }
 }

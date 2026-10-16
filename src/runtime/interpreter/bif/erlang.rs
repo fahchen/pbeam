@@ -3122,6 +3122,54 @@ pub(super) fn unregister(scheduler: &mut Scheduler, name: &Term) -> Result<BifRe
 /// The largest arity of a BEAM function (`MAX_ARG` in `erl_vm.h:54`).
 const MAX_ARG: i64 = 255;
 
+/// Run `erlang:hibernate/3`, as ERTS `hibernate_3` (`bif.c:1366-1390`)
+/// checks its arguments before it drops the stack. A module or a function
+/// that is not an atom raises `badarg`. The check walks at most
+/// `MAX_ARG + 1` (256) cons cells of the arguments: a proper list of up to
+/// 256 elements hibernates, a longer list or a walked tail that is not `[]`
+/// after 256 cells raises `system_limit`, and else a tail that is not `[]`
+/// raises `badarg`. A call with 256 arguments thus hibernates, and `apply`
+/// fails after the wake-up.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let module = Term::static_atom("m");
+/// let arguments = Term::list_from((1..=256).map(Term::Integer));
+/// assert!(matches!(hibernate(&module, &module, &arguments), BifResult::Hibernate { .. }));
+/// let arguments = Term::list_from((1..=257).map(Term::Integer));
+/// assert!(matches!(hibernate(&module, &module, &arguments), BifResult::Raise { .. }));
+/// assert!(matches!(hibernate(&Term::Integer(1), &module, &Term::nil()), BifResult::Raise { .. }));
+/// ```
+pub(super) fn hibernate(module: &Term, function: &Term, arguments: &Term) -> BifResult {
+    let (Term::Atom(module), Term::Atom(function)) = (module, function) else {
+        return BifResult::badarg();
+    };
+    let limit = MAX_ARG as usize + 1;
+    let mut cells = arguments.list_iter();
+    let elements: Vec<Term> = cells
+        .as_mut()
+        .map(|cells| cells.by_ref().take(limit).cloned().collect())
+        .unwrap_or_default();
+    let rest = cells.as_ref().map_or(arguments, |cells| cells.rest());
+    if !rest.is_nil() {
+        let reason = if elements.len() == limit {
+            "system_limit"
+        } else {
+            "badarg"
+        };
+        return Raise {
+            class: ExceptionClass::Error,
+            reason: Term::static_atom(reason),
+        };
+    }
+    BifResult::Hibernate {
+        module: module.clone(),
+        function: function.clone(),
+        arguments: elements,
+    }
+}
+
 /// Run `erlang:make_fun/3`: return the external fun of
 /// `module:function/arity`, as ERTS `make_fun_3` (`bif.c:4467-4485`) does.
 /// The module and the function must be atoms, and the arity must be an

@@ -286,9 +286,12 @@ pub(super) struct ProcessState {
     pub(super) id: ProcessId,
     /// Call stack. The last frame is the active function.
     pub(super) frames: Vec<Frame>,
-    /// The module and the function of a `Start::Undefined` start until the
-    /// process first runs. The process then has no frame, and the arity is
-    /// the number of argument registers.
+    /// The module and the function of a start with no frame: a
+    /// `Start::Undefined` start until the process first runs, or the call
+    /// of `erlang:hibernate/3` until the process wakes up. The process then
+    /// has no frame, and the arity is the number of argument registers. When
+    /// the process runs, it enters the export of the MFA, or it calls the
+    /// error handler when the code table has no such export.
     pub(super) undefined_start: Option<(Atom, Atom)>,
     /// X registers. All frames of the process share them.
     pub(super) registers: Vec<Option<Term>>,
