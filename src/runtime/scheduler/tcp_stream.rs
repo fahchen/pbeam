@@ -155,10 +155,7 @@ impl Scheduler {
         let tcp = stream(self.resources.borrow_mut::<Ports>(), port);
         match tcp.send(bytes, caller, seed)? {
             Output::Sent(events) => self.deliver_events(port, events),
-            Output::Failed => {
-                self.close_port(port, Term::static_atom("einval"));
-                Ok(())
-            }
+            Output::Failed => self.close_port(port, Term::static_atom("einval")),
         }
     }
 

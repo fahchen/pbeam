@@ -659,7 +659,7 @@ pub(super) fn port_command(
         Ok(()) => port_state.output += bytes.len() as u64,
         Err(errno) => {
             let reason = Term::Atom(scheduler.atoms.put(&errno_id(errno))?);
-            scheduler.close_port(id, reason);
+            scheduler.close_port(id, reason)?;
         }
     }
     Ok(signals_return(scheduler, port, Term::static_atom("true")))
@@ -700,7 +700,7 @@ pub(super) fn port_close(
     scheduler
         .current_process_mut()
         .bump_reductions(PORT_REDUCTIONS);
-    scheduler.close_port(id, Term::static_atom("normal"));
+    scheduler.close_port(id, Term::static_atom("normal"))?;
     Ok(signals_return(scheduler, port, Term::static_atom("true")))
 }
 

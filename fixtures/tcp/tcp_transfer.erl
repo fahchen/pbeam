@@ -61,10 +61,13 @@ main(Path) ->
     %% A header that is too short makes the port fail with einval.
     true = erlang:port_command(S, <<"x">>),
     Header = receive {'EXIT', S, Reason} -> Reason after 3000 -> missing end,
-    %% The close of a port ends the receive that waits.
+    %% The close of a port sends its link exit signal and its DOWN message,
+    %% and then the stop of the driver ends the receive that waits
+    %% (io.c:3922-3948, 3746).
     S2 = accept(Path, L, 9),
+    _ = monitor(port, S2),
     [1, _, _] = erlang:port_control(S2, 42 + ?MAGIC, [0, 0, 19, 136, 0, 0, 0, 0]),
-    ok = prim_inet:close(S2),
+    true = erlang:port_close(S2),
     ok = prim_inet:close(L),
     [NotConnected, Receives, Partial, Already, Waited, List, Requests, Sends, Large, Pending > 0,
      Waiting, Stats, Closed, Header, flush()].
@@ -117,6 +120,8 @@ unsupported(Path, Case) ->
                 receive sent -> ok end,
                 prim_inet:send(S, "y");
         subscribe -> queue(S), prim_inet:close(S);
+        port_close -> queue(S), erlang:port_close(S);
+        owner_exit -> queue(S), ok;
         term -> term_to_binary(S, [local])
     end.
 

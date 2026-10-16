@@ -955,7 +955,7 @@ impl Scheduler {
             });
         };
         if let Some((process, phase)) = self.freed.remove(&id) {
-            self.exit_links(process, phase, CONTEXT_REDS);
+            self.exit_links(process, phase, CONTEXT_REDS)?;
             return Ok(Turn::Done);
         }
         if self.processes[&id].dirty_running() {
@@ -966,7 +966,7 @@ impl Scheduler {
         process.in_run_queue = false;
         process.fcalls = CONTEXT_REDS;
         if let Some(reason) = process.exiting.clone() {
-            self.finish_current(reason, None);
+            self.finish_current(reason, None)?;
             return Ok(Turn::Done);
         }
         if process.mailbox.has_control_signals() {
@@ -981,7 +981,7 @@ impl Scheduler {
             if process.fcalls > 0
                 && let Some(reason) = process.exiting.clone()
             {
-                self.finish_current(reason, None);
+                self.finish_current(reason, None)?;
                 return Ok(Turn::Done);
             }
         }
@@ -2544,9 +2544,17 @@ impl Scheduler {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// scheduler.finish_current(Term::static_atom("normal"), Some(result));
+    /// scheduler.finish_current(Term::static_atom("normal"), Some(result))?;
     /// ```
-    pub(super) fn finish_current(&mut self, reason: Term, result: Option<Term>) {
+    ///
+    /// # Errors
+    ///
+    /// The error of [`Self::exit_links`].
+    pub(super) fn finish_current(
+        &mut self,
+        reason: Term,
+        result: Option<Term>,
+    ) -> Result<(), BeamError> {
         let process = self.current_process_mut();
         let id = process.id;
         let mut next = match process.continue_exit.take() {
@@ -2608,7 +2616,7 @@ impl Scheduler {
             process.continue_exit = Some(next);
             process.fcalls = 0;
             self.yield_current();
-            return;
+            return Ok(());
         }
         reds -= FREE_REDUCTIONS;
         self.schedule_out();
@@ -2627,9 +2635,9 @@ impl Scheduler {
         process.exiting = Some(reason);
         if reds <= 0 {
             self.switch_out_freed(process, ExitPhase::Links(None));
-            return;
+            return Ok(());
         }
-        self.exit_links(process, ExitPhase::Links(None), reds);
+        self.exit_links(process, ExitPhase::Links(None), reds)
     }
 
     /// Switch out the freed process `process`, whose exit continues at
@@ -2686,9 +2694,19 @@ impl Scheduler {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// scheduler.exit_links(process, ExitPhase::Links(None), 3850);
+    /// scheduler.exit_links(process, ExitPhase::Links(None), 3850)?;
     /// ```
-    fn exit_links(&mut self, mut process: ProcessState, mut phase: ExitPhase, mut reds: i32) {
+    ///
+    /// # Errors
+    ///
+    /// The close of a port with queued output that the process owns (see
+    /// [`Self::port_link_exit`]).
+    fn exit_links(
+        &mut self,
+        mut process: ProcessState,
+        mut phase: ExitPhase,
+        mut reds: i32,
+    ) -> Result<(), BeamError> {
         let id = process.id;
         let reason = process
             .exiting
@@ -2707,7 +2725,8 @@ impl Scheduler {
                             break;
                         };
                         if reds <= 0 {
-                            return self.switch_out_freed(process, ExitPhase::Links(position));
+                            self.switch_out_freed(process, ExitPhase::Links(position));
+                            return Ok(());
                         }
                         match linked {
                             LinkId::Process(linked) if unlinking == 0 => {
@@ -2723,7 +2742,7 @@ impl Scheduler {
                                 let _ = self.send_signal(Some(id), linked, exit);
                             }
                             LinkId::Process(_) => {}
-                            LinkId::Port(port) => self.port_link_exit(port, id, &reason),
+                            LinkId::Port(port) => self.port_link_exit(port, id, &reason)?,
                         }
                         reds -= 1;
                     }
@@ -2740,7 +2759,8 @@ impl Scheduler {
                             break;
                         };
                         if reds <= 0 {
-                            return self.switch_out_freed(process, ExitPhase::Monitors(position));
+                            self.switch_out_freed(process, ExitPhase::Monitors(position));
+                            return Ok(());
                         }
                         if let Some(OriginMonitor {
                             kind: "process",
@@ -2769,7 +2789,8 @@ impl Scheduler {
                 ExitPhase::TargetMonitors(mut done) => {
                     while let Some(&monitor) = process.monitored_by.get(done) {
                         if reds <= 0 {
-                            return self.switch_out_freed(process, ExitPhase::TargetMonitors(done));
+                            self.switch_out_freed(process, ExitPhase::TargetMonitors(done));
+                            return Ok(());
                         }
                         match monitor {
                             TargetMonitor::Process(monitor) => self.send_monitor_down(
@@ -2792,7 +2813,8 @@ impl Scheduler {
                 }
                 ExitPhase::Signals => {
                     if !self.handle_exit_signals(&mut process, reds) {
-                        return self.switch_out_freed(process, ExitPhase::Signals);
+                        self.switch_out_freed(process, ExitPhase::Signals);
+                        return Ok(());
                     }
                     break;
                 }
@@ -2806,6 +2828,7 @@ impl Scheduler {
         // again. Its terms go to the release work list, so that the walk of a
         // large graph runs in bounded scheduler work and not in this step.
         self.release_process(process);
+        Ok(())
     }
 }
 

@@ -485,7 +485,7 @@ fn accepts_in_many_processes_on_one_listen_socket_as_pinned_erts() {
     let accepted =
         |client: u8| format!("[ok,true,{{peer,client_{client}}},true,[true,true,true],{options}]");
     let expected = format!(
-        "[[[[0,101,105,110,118,97,108],[0,101,110,111,116,99,111,110,110],[0,101,105,110,118,97,108]],[[0,101,105,110,118,97,108],[0,101,110,111,116,99,111,110,110],[1,1,0,0,0,0,8,0,0,0,0,9,0,0,0,0,31,0,0,0,0,43,0,0,0,0,46,0,0,0,64,47,0,0,0,0],[0,101,105,110,118,97,108]],[[0,101,105,110,118,97,108],[0,101,105,110,118,97,108]]],[{options},{{error,enotconn}},{{error,timeout}}],{{error,timeout}},{},{},{},[{{error,closed}},{{error,closed}}],[['EXIT',port,normal]]]",
+        "[[[[0,101,105,110,118,97,108],[0,101,110,111,116,99,111,110,110],[0,101,105,110,118,97,108]],[[0,101,105,110,118,97,108],[0,101,110,111,116,99,111,110,110],[1,1,0,0,0,0,8,0,0,0,0,9,0,0,0,0,31,0,0,0,0,43,0,0,0,0,46,0,0,0,64,47,0,0,0,0],[0,101,105,110,118,97,108]],[[0,101,105,110,118,97,108],[0,101,105,110,118,97,108]]],[{options},{{error,enotconn}},{{error,timeout}}],{{error,timeout}},{},{},{},[{{error,closed}},{{error,closed}}],[['EXIT',port,normal],['EXIT',port,normal],['DOWN',ref,port,port,normal],[inet_async,port,0,{{error,closed}}]]]",
         accepted(1),
         accepted(2),
         accepted(3),
@@ -649,7 +649,7 @@ fn receives_and_sends_in_passive_mode_as_pinned_erts() {
     };
     let stats = "{ok,[{recv_oct,14},{recv_cnt,6},{recv_max,5},{recv_avg,2},{recv_dvi,0},{send_oct,8388616},{send_cnt,4},{send_max,8388608},{send_avg,2097154},{send_pend,0}]}";
     let expected = format!(
-        "[{{error,enotconn}},[{{ok,<<{abc}>>}},{{ok,<<{defgh}>>}},{{error,timeout}}],[{{error,timeout}},{{ok,<<120>>}},{{ok,<<121>>}}],{{error,ealready}},{{ok,<<{ok}>>}},{{ok,[{hi}]}},[[0,{einval}],[0,{enomem}],badarg,[]],[ok,ok],ok,true,ok,{stats},[{{error,closed}},{{error,enotconn}},{{error,closed}},{{error,enotconn}},{stats}],einval,[[inet_async,port,0,{{error,closed}}]]]",
+        "[{{error,enotconn}},[{{ok,<<{abc}>>}},{{ok,<<{defgh}>>}},{{error,timeout}}],[{{error,timeout}},{{ok,<<120>>}},{{ok,<<121>>}}],{{error,ealready}},{{ok,<<{ok}>>}},{{ok,[{hi}]}},[[0,{einval}],[0,{enomem}],badarg,[]],[ok,ok],ok,true,ok,{stats},[{{error,closed}},{{error,enotconn}},{{error,closed}},{{error,enotconn}},{stats}],einval,[['EXIT',port,normal],['DOWN',ref,port,port,normal],[inet_async,port,0,{{error,closed}}]]]",
         abc = bytes("abc"),
         defgh = bytes("defgh"),
         ok = bytes("ok"),
@@ -705,6 +705,14 @@ fn stops_the_run_for_each_receive_and_send_part_that_is_not_implemented() {
         (
             "subscribe",
             "unsupported tcp_inet request 24 with queued output",
+        ),
+        (
+            "port_close",
+            "unsupported close of a tcp_inet port with queued output",
+        ),
+        (
+            "owner_exit",
+            "unsupported close of a tcp_inet port with queued output",
         ),
         (
             "term",

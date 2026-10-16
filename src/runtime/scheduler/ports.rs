@@ -128,11 +128,11 @@ impl Scheduler {
                 port.input += bytes.len() as u64;
                 self.deliver(owner, port_message(id, "data", Term::binary(bytes)));
             }
-            PortEvent::EndOfFile => self.close_port(id, Term::static_atom("normal")),
+            PortEvent::EndOfFile => self.close_port(id, Term::static_atom("normal"))?,
             PortEvent::ExitStatus(Some(status)) => {
                 let status = Term::Integer(status.into());
                 self.deliver(owner, port_message(id, "exit_status", status));
-                self.close_port(id, Term::static_atom("normal"));
+                self.close_port(id, Term::static_atom("normal"))?;
             }
             PortEvent::ExitStatus(None) => {
                 return Err(error(
@@ -166,24 +166,32 @@ impl Scheduler {
 
     /// Close the open port `id` with the exit reason `reason`, as
     /// `erts_deliver_port_exit` and `terminate_port` do
-    /// (`io.c:3698-3790`, `3841-3950`): the port leaves the table, its
-    /// driver stops (see [`Self::stop_port`]), and its pipes close. The owner, which has the only link to the port, gets a
-    /// link exit signal from the port with the reason (`link_port_exit`,
-    /// `io.c:3802-3813`).
+    /// (`io.c:3698-3790`, `3841-3950`): the port leaves the table, the
+    /// owner, which has the only link to the port, gets a link exit signal
+    /// from the port with the reason (`link_port_exit`, `io.c:3802-3813`),
+    /// each monitor of the port gets its `DOWN` signal, and then the
+    /// driver stops (see [`Self::stop_port`]) and the pipes of the port
+    /// close.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// scheduler.close_port(port, Term::static_atom("normal"));
+    /// scheduler.close_port(port, Term::static_atom("normal"))?;
     /// ```
-    pub(in crate::runtime) fn close_port(&mut self, id: PortId, reason: Term) {
-        let port = self
-            .resources
-            .borrow_mut::<Ports>()
-            .remove(id)
-            .expect("the port to close is open");
-        let owner = port.owner;
-        let monitors = self.stop_port(id, port);
+    ///
+    /// # Errors
+    ///
+    /// A reason other than `kill` for a port with queued output (see
+    /// [`check_flush`]).
+    pub(in crate::runtime) fn close_port(
+        &mut self,
+        id: PortId,
+        reason: Term,
+    ) -> Result<(), BeamError> {
+        let ports = self.resources.borrow_mut::<Ports>();
+        check_flush(ports.get(id).expect("the port to close is open"), &reason)?;
+        let mut port = ports.remove(id).expect("the port to close is open");
+        let monitors = std::mem::take(&mut port.monitors);
         let exit = Signal::Exit {
             from: LinkId::Port(id),
             reason: reason.clone(),
@@ -192,8 +200,10 @@ impl Scheduler {
             alias: None,
         };
         // An owner that does not exist drops the signal.
-        let _ = self.send_signal(None, owner, exit);
+        let _ = self.send_signal(None, port.owner, exit);
         self.port_monitors_down(&monitors, &reason);
+        self.stop_port(id, port);
+        Ok(())
     }
 
     /// Send the `DOWN` signal of each monitor of `monitors` on a port that
@@ -244,10 +254,12 @@ impl Scheduler {
             .for_each(|port| port.monitors.retain(|&(_, item)| item != reference));
     }
 
-    /// Stop the driver of the port `id` that left the table, as the `stop`
-    /// callback of the driver does: a `tcp_inet` listen port ends each
-    /// accept that waits (see [`Self::tcp_stop`]). Dropping the port closes
-    /// its pipes or its socket.
+    /// Stop the driver of the port `id` that left the table, after its
+    /// link exit signal and its `DOWN` signals, as `terminate_port` calls
+    /// the `stop` callback of the driver (`io.c:3746`): a `tcp_inet` port
+    /// ends the receive and each accept that waits (see
+    /// [`Self::tcp_stop`]). Dropping the port closes its pipes or its
+    /// socket.
     ///
     /// # Examples
     ///
@@ -255,11 +267,10 @@ impl Scheduler {
     /// let port = ports.remove(id).unwrap();
     /// scheduler.stop_port(id, port);
     /// ```
-    fn stop_port(&mut self, id: PortId, port: Port) -> Vec<(ProcessId, Reference)> {
+    fn stop_port(&mut self, id: PortId, port: Port) {
         if let Driver::Inet(tcp) = port.driver {
             self.tcp_stop(id, tcp);
         }
-        port.monitors
     }
 
     /// Send the link exit signal of the exiting process `from` to the port
@@ -273,21 +284,57 @@ impl Scheduler {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// scheduler.port_link_exit(port, owner, &Term::static_atom("normal"));
+    /// scheduler.port_link_exit(port, owner, &Term::static_atom("normal"))?;
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// A reason other than `kill` for a port with queued output (see
+    /// [`check_flush`]).
     pub(in crate::runtime) fn port_link_exit(
         &mut self,
         id: PortId,
         from: ProcessId,
         reason: &Term,
-    ) {
+    ) -> Result<(), BeamError> {
         let ports = self.resources.borrow_mut::<Ports>();
-        if ports.get(id).is_some_and(|port| port.owner == from) {
-            let port = ports.remove(id).expect("the port is open");
-            let monitors = self.stop_port(id, port);
-            self.port_monitors_down(&monitors, reason);
-        }
+        let Some(port) = ports.get(id).filter(|port| port.owner == from) else {
+            return Ok(());
+        };
+        check_flush(port, reason)?;
+        let mut port = ports.remove(id).expect("the port is open");
+        let monitors = std::mem::take(&mut port.monitors);
+        self.port_monitors_down(&monitors, reason);
+        self.stop_port(id, port);
+        Ok(())
     }
+}
+
+/// Check the close of the port `port` with the exit reason `reason`. With a
+/// reason other than `kill` and queued output, ERTS keeps the port in the
+/// `CLOSING` state and writes the queue before it terminates the port
+/// (`flush_port`, `io.c:3939-3948`). PBeam does not do this yet.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// check_flush(port, &Term::static_atom("normal"))?;
+/// ```
+///
+/// # Errors
+///
+/// A reason other than `kill` for a port with queued output.
+fn check_flush(port: &Port, reason: &Term) -> Result<(), BeamError> {
+    let queued = match &port.driver {
+        Driver::Inet(tcp) => tcp.send_fd().is_some(),
+        Driver::Spawn(_) => false,
+    };
+    if queued && *reason != Term::static_atom("kill") {
+        return Err(error(
+            "unsupported close of a tcp_inet port with queued output: see \"tcp_inet ports\" in docs/erts-differences.md",
+        ));
+    }
+    Ok(())
 }
 
 /// Return the message `{Port, {Tag, Value}}` of the port `id`.
