@@ -491,7 +491,7 @@ fn read_info_nif(
         return error_tuple(atoms, "einval");
     };
     match file::read_info(path, follow_links != 0) {
-        Ok(info) => file_info(atoms, &info),
+        Ok(info) => Ok(file_info(&info)),
         Err(errno) => error_tuple(atoms, &errno_id(errno)),
     }
 }
@@ -698,33 +698,29 @@ fn error_tuple(atoms: &mut AtomTable, reason: &str) -> Result<BifResult, BeamErr
 ///
 /// ```rust,ignore
 /// let info = file::read_info(c"/bin/sh", true).unwrap();
-/// assert!(matches!(file_info(&mut atoms, &info)?, BifResult::Value(Term::Tuple(fields)) if fields.len() == 14));
+/// assert!(matches!(file_info(&info), BifResult::Value(Term::Tuple(fields)) if fields.len() == 14));
 /// ```
-///
-/// # Errors
-///
-/// A new atom in a full atom table gives the error of `AtomTable::put`.
-fn file_info(atoms: &mut AtomTable, info: &FileInfo) -> Result<BifResult, BeamError> {
+fn file_info(info: &FileInfo) -> BifResult {
     let file_type = match info.file_type {
-        FileType::Device => "device",
-        FileType::Directory => "directory",
-        FileType::Regular => "regular",
-        FileType::Symlink => "symlink",
-        FileType::Other => "other",
+        FileType::Device => Atom::DEVICE,
+        FileType::Directory => Atom::DIRECTORY,
+        FileType::Regular => Atom::REGULAR,
+        FileType::Symlink => Atom::SYMLINK,
+        FileType::Other => Atom::OTHER,
     };
     let access = match (info.readable, info.writable) {
-        (true, false) => "read",
-        (false, true) => "write",
-        (true, true) => "read_write",
-        (false, false) => "none",
+        (true, false) => Atom::READ,
+        (false, true) => Atom::WRITE,
+        (true, true) => Atom::READ_WRITE,
+        (false, false) => Atom::from_static("none").expect("none is a static atom"),
     };
     let time = |seconds: i64| Term::Integer(seconds.clamp(MIN_FILETIME, MAX_FILETIME));
     let integer = |value: u32| Term::Integer(value.into());
-    Ok(BifResult::Value(Term::tuple(vec![
-        Term::Atom(atoms.put("file_info")?),
+    BifResult::Value(Term::tuple(vec![
+        Term::Atom(Atom::FILE_INFO),
         Term::Integer(info.size),
-        Term::Atom(atoms.put(file_type)?),
-        Term::Atom(atoms.put(access)?),
+        Term::Atom(file_type),
+        Term::Atom(access),
         time(info.atime),
         time(info.mtime),
         time(info.ctime),
@@ -735,7 +731,7 @@ fn file_info(atoms: &mut AtomTable, info: &FileInfo) -> Result<BifResult, BeamEr
         integer(info.inode),
         integer(info.uid),
         integer(info.gid),
-    ])))
+    ]))
 }
 
 #[cfg(test)]

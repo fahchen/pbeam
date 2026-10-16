@@ -874,6 +874,18 @@ fn raise_with_args(
     args: &Term,
     location: Term,
 ) -> Result<BifResult, BeamError> {
+    // A process that starts at the BIF has no frame. Its tail apply from the
+    // initial function of ERTS (`i_apply_only`, `erl_process.c:12616`) puts
+    // the continuation of `beam_normal_exit` as the caller
+    // (`apply_bif_error_adjustment`, `beam_common.c:1345-1365`), and the stack
+    // trace has no frame.
+    if context.scheduler.current_process_mut().frames.is_empty() {
+        return Ok(BifResult::RaiseWithStacktrace {
+            class,
+            reason: reason.clone(),
+            stacktrace: Term::nil(),
+        });
+    }
     let module_id = current_frame(context.scheduler.current_process_mut()).module_id;
     let module = Rc::clone(context.scheduler.code.module_by_id(module_id)?);
     let (module, function, arity) = current_function(context.scheduler, &module)?;
@@ -2519,7 +2531,7 @@ const ENDIAN: &str = "little";
 pub(super) fn system_info(atoms: &mut AtomTable, item: &Term) -> Result<BifResult, BeamError> {
     match item {
         Term::Atom(atom) if atom.is_static("os_type") => Ok(Value(Term::tuple(vec![
-            Term::Atom(atoms.put("unix")?),
+            Term::Atom(Atom::UNIX),
             Term::Atom(atoms.put(&host::os_flavor())?),
         ]))),
         Term::Atom(atom) if atoms.name_of(atom) == "otp_release" => Ok(Value(Term::list_from(
@@ -2529,11 +2541,9 @@ pub(super) fn system_info(atoms: &mut AtomTable, item: &Term) -> Result<BifResul
         ))),
         Term::Atom(atom) if atoms.name_of(atom) == "schedulers" => Ok(Value(Term::Integer(1))),
         Term::Atom(atom) if atoms.name_of(atom) == "build_type" => {
-            Ok(Value(Term::Atom(atoms.put("opt")?)))
+            Ok(Value(Term::static_atom("opt")))
         }
-        Term::Atom(atom) if atoms.name_of(atom) == "endian" => {
-            Ok(Value(Term::Atom(atoms.put(ENDIAN)?)))
-        }
+        Term::Atom(atom) if atoms.name_of(atom) == "endian" => Ok(Value(Term::static_atom(ENDIAN))),
         _ => Err(error(format!(
             "unsupported erlang:system_info/1 argument {}",
             debug_term(item, atoms)

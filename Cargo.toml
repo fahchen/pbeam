@@ -139,6 +139,10 @@ name = "binary_to_list"
 path = "tests/integration/binary_to_list.rs"
 
 [[test]]
+name = "bif_start"
+path = "tests/integration/bif_start.rs"
+
+[[test]]
 name = "bifs"
 path = "tests/integration/bifs.rs"
 

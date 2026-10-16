@@ -172,7 +172,8 @@ impl ExceptionClass {
 
 impl BeamProgram {
     /// Load BEAM files into one program. Module names must be unique. The
-    /// atom table starts with the 1150 static atoms. Each module, in the
+    /// atom table starts with the 1150 static atoms and the preloaded
+    /// atoms. Each module, in the
     /// given order, puts its `AtU8` atoms and then its `LitT` atoms into it.
     /// A module with an `-on_load` function is the error `the start module
     /// M has an -on_load function, which PBeam runs only for a module that
@@ -657,7 +658,7 @@ impl BeamProgram {
 
     /// Run the current process until it waits for a message, calls
     /// `erlang:hibernate/0`, exits, or switches out. A process with an
-    /// undefined start first calls `undefined_function` with its start MFA.
+    /// undefined start first calls its start MFA through `call_mfa`.
     /// A process with a pending BIF first finishes the BIF call through its
     /// export (see [`PendingBif`]).
     /// A process that switched out at the `return` of its last frame has no
@@ -676,9 +677,9 @@ impl BeamProgram {
         // ERTS starts each process with `i_apply_only` of its MFA
         // (`erl_process.c:12616`; JIT `jit/beam_jit_main.cpp:258`). Its
         // `apply` raises `system_limit` for more than `APPLY_MAX_ARGUMENTS`
-        // arguments, and else a function that the module does not export
-        // goes to its export entry when the process first runs. The arity is
-        // the number of argument registers.
+        // arguments, and else a BIF or a function that the module does not
+        // export goes to its export entry when the process first runs. The
+        // arity is the number of argument registers.
         let process = scheduler.current_process_mut();
         if let Some((module, function)) = process.undefined_start.take() {
             let outcome = if process.registers.len() > APPLY_MAX_ARGUMENTS {
@@ -688,18 +689,12 @@ impl BeamProgram {
                 let arity = process.registers.len() as u32;
                 // The start of a process is a tail call of the MFA from the
                 // initial function of ERTS (`i_apply_only`,
-                // `erl_process.c:12616`). PBeam starts the process with no
-                // frame, so the handler enters as a body call of the first
-                // frame and its `return` ends the process. The names of the
-                // start MFA come from the run table.
-                let (module_name, function_name) = {
-                    let atoms = &scheduler.atoms;
-                    (
-                        atoms.name_of(&module).to_owned(),
-                        atoms.name_of(&function).to_owned(),
-                    )
-                };
-                self.undefined_function(scheduler, &module_name, &function_name, arity, false)?
+                // `erl_process.c:12616`), which goes to the export entry of
+                // the MFA (`beam_common.c:1559-1565`). PBeam starts the
+                // process with no frame, so a BIF or the error handler runs
+                // as a body call of the first frame. The result of the BIF,
+                // or the `return` of the handler, then ends the process.
+                self.call_mfa(scheduler, &module, &function, arity, false)?
             };
             if let Some(outcome) = outcome {
                 return Ok(outcome);
@@ -3033,11 +3028,12 @@ struct SpawnOptions {
 /// `arguments`, as ERTS `erl_create_process` does. Return the pid, or
 /// `{Pid, Reference}` when `options.monitor` is set. A `module` or
 /// `function` that is not an atom, and `arguments` that are not a proper
-/// list, raise `badarg` (`erl_process.c:12490-12492`). A function that a
-/// loaded module does not export starts the process anyway: the process
-/// calls `undefined_function` when it first runs. More than 1023 arguments
-/// also start the process, which then raises `error:system_limit`, as the
-/// `apply` of the ERTS `i_apply_only` start does (`beam_common.c:1501-1513`).
+/// list, raise `badarg` (`erl_process.c:12490-12492`). A BIF, and a
+/// function that a loaded module does not export, start the process with no
+/// frame: the process calls the BIF or `undefined_function` when it first
+/// runs. More than 1023 arguments also start the process, which then raises
+/// `error:system_limit`, as the `apply` of the ERTS `i_apply_only` start
+/// does (`beam_common.c:1501-1513`).
 /// Else a module that is not loaded is the runtime error
 /// `unresolved external MFA M:F/A`. After these checks, a spawn that the
 /// capabilities of the caller do not permit raises
@@ -3074,13 +3070,22 @@ fn create_process(
     // which raises `system_limit` when the process first runs. The `apply`
     // of ERTS checks this limit before it looks up the export, so the module
     // can be not loaded.
-    let export = if arguments.len() > APPLY_MAX_ARGUMENTS {
-        None
-    } else {
+    //
+    // A BIF also gives an undefined start, which runs the BIF when the
+    // process first runs. The export of a BIF calls the BIF, and not the
+    // stub body of the module, which is `erlang:nif_error(undefined)` in
+    // `erlang.beam` (`emu/emu_load.c:704-713`, `jit/arm/ops.tab:917-927`).
+    let export = {
         let atoms = &scheduler.atoms;
-        scheduler
-            .code
-            .export_frame(atoms.name_of(module), atoms.name_of(function), arity)?
+        let (module, function) = (atoms.name_of(module), atoms.name_of(function));
+        if arguments.len() > APPLY_MAX_ARGUMENTS
+            || resolve(module, function, arity).is_some()
+            || is_pbeam_bif(module, function, arity)
+        {
+            None
+        } else {
+            scheduler.code.export_frame(module, function, arity)?
+        }
     };
     let start = match export {
         Some(frame) => Start::Entry(frame),
@@ -4144,7 +4149,9 @@ fn read_float_register(process: &ProcessState, register: u32) -> Result<f64, Bea
         .ok_or_else(|| error(format!("float register fr{register} has no value")))
 }
 
-/// Write a value to an X register or a Y register of the active frame.
+/// Write a value to an X register or a Y register of the active frame. A
+/// process that starts at a BIF has no frame while the BIF runs, and the BIF
+/// writes only X registers.
 ///
 /// # Examples
 ///
@@ -4152,11 +4159,10 @@ fn read_float_register(process: &ProcessState, register: u32) -> Result<f64, Bea
 /// write(&mut process, &Operand::X(0), Term::Integer(1))?;
 /// ```
 fn write(process: &mut ProcessState, operand: &Operand, value: Term) -> Result<(), BeamError> {
-    let stack = &mut process
-        .frames
-        .last_mut()
-        .expect("a running process has an active frame")
-        .stack;
+    let stack = match process.frames.last_mut() {
+        Some(frame) => frame.stack.as_mut_slice(),
+        None => &mut [],
+    };
     write_operand(operand, value, &mut process.registers, stack)
 }
 

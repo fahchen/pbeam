@@ -57,7 +57,7 @@ fn puts_atu8_atoms_into_the_table_in_chunk_order() {
     chunk.extend([0x50, b'a', b'l', b'p', b'h', b'a']);
     let atoms = parse_atoms(&chunk, &mut table).unwrap();
     let indices: Vec<_> = atoms.iter().map(|atom| atom.index()).collect();
-    assert_eq!(indices, [1150, 506, 1151]);
+    assert_eq!(indices, [1167, 506, 1168]);
     assert_eq!(table.name_of(&atoms[2]), "alpha");
     assert_eq!(table.get("zeta"), Some(atoms[0].clone()));
     // A second module gets the same index for an existing atom.
@@ -96,7 +96,7 @@ fn truncates_a_long_atu8_name_to_255_characters_like_erts() {
     }
     let atoms = parse_atoms(&chunk, &mut table).unwrap();
     assert_eq!(table.name_of(&atoms[0]), a255);
-    assert_eq!(atoms[0].index(), 1150);
+    assert_eq!(atoms[0].index(), 1167);
     assert_eq!(atoms[1], atoms[0]);
     assert_eq!(table.get(&a255), Some(atoms[0].clone()));
 }
@@ -149,8 +149,8 @@ fn puts_literal_atoms_into_the_table_in_byte_order() {
     bytes.extend(b"pbeam_lit_b");
     bytes.extend([97, 2]);
     let literal = read_literal(&bytes, &mut atoms).unwrap().unwrap();
-    assert_eq!(atoms.get("pbeam_lit_b").unwrap().index(), 1150);
-    assert_eq!(atoms.get("pbeam_lit_a").unwrap().index(), 1151);
+    assert_eq!(atoms.get("pbeam_lit_b").unwrap().index(), 1167);
+    assert_eq!(atoms.get("pbeam_lit_a").unwrap().index(), 1168);
     let (lit_a, lit_b) = (atom(&atoms, "pbeam_lit_a"), atom(&atoms, "pbeam_lit_b"));
     let pairs = vec![(lit_a, Term::Integer(1)), (lit_b.clone(), Term::Integer(2))];
     let map = Term::Map(Map::from_pairs(pairs, &atoms).unwrap());
@@ -168,7 +168,7 @@ fn puts_literal_atoms_into_the_table_in_byte_order() {
     unsupported.extend(b"pbeam_y");
     unsupported.push(106);
     assert_eq!(read_literal(&unsupported, &mut atoms).unwrap(), None);
-    assert_eq!(atoms.get("pbeam_x").unwrap().index(), 1152);
+    assert_eq!(atoms.get("pbeam_x").unwrap().index(), 1169);
     assert_eq!(atoms.get("pbeam_y"), None);
 }
 

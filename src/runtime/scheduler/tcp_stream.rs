@@ -12,7 +12,7 @@
 
 use super::{
     Scheduler,
-    tcp_inet::{INET_ASYNC, INFINITY, error_status},
+    tcp_inet::{INFINITY, error_status},
 };
 use crate::{
     error::BeamError,
@@ -23,11 +23,8 @@ use crate::{
         },
         timer::{Timer, Timers},
     },
-    term::{PortId, ProcessId, Term},
+    term::{Atom, PortId, ProcessId, Term},
 };
-
-/// The atom of the messages of a send.
-const INET_REPLY: &str = "inet_reply";
 
 impl Scheduler {
     /// Run `TCP_REQ_RECV` of the current process on the connected port
@@ -52,7 +49,6 @@ impl Scheduler {
         timeout: u32,
         length: usize,
     ) -> Result<Vec<u8>, BeamError> {
-        self.atoms.put(INET_ASYNC)?;
         let caller = self.current_process_mut().id;
         let tcp = stream(self.resources.borrow_mut::<Ports>(), port);
         let id = tcp.next_async_id();
@@ -174,7 +170,6 @@ impl Scheduler {
         port: PortId,
         bytes: &[u8],
     ) -> Result<(), BeamError> {
-        self.atoms.put(INET_REPLY)?;
         let caller = self.current_process_mut().id;
         let seed = self.local_node_hash();
         let tcp = stream(self.resources.borrow_mut::<Ports>(), port);
@@ -220,9 +215,8 @@ impl Scheduler {
                         Ok(()) => Term::static_atom("ok"),
                         Err(name) => error_status(Term::Atom(self.atoms.put(&name)?)),
                     };
-                    let atom = self.atoms.get(INET_REPLY).expect("a send made the atom");
                     let message = Term::tuple(vec![
-                        Term::Atom(atom),
+                        Term::Atom(Atom::INET_REPLY),
                         Term::Port(port),
                         status,
                         Term::Reference(sender.tag),
@@ -232,16 +226,16 @@ impl Scheduler {
                 Event::Data(bytes) => {
                     let tcp = stream(self.resources.borrow_mut::<Ports>(), port);
                     let data = tcp.data_term(bytes);
-                    self.deliver_active(port, "tcp", Some(data))?;
+                    self.deliver_active(port, Atom::TCP, Some(data));
                 }
-                Event::Closed => self.deliver_active(port, "tcp_closed", None)?,
+                Event::Closed => self.deliver_active(port, Atom::TCP_CLOSED, None),
                 Event::Error(name) => {
                     let reason = Term::Atom(self.atoms.put(&name)?);
-                    self.deliver_active(port, "tcp_error", Some(reason))?;
+                    self.deliver_active(port, Atom::TCP_ERROR, Some(reason));
                 }
                 Event::EmptyQueue(subscribers) => {
-                    let tag = Term::Atom(self.atoms.put("empty_out_q")?);
-                    let message = Term::tuple(vec![tag, Term::Port(port)]);
+                    let message =
+                        Term::tuple(vec![Term::Atom(Atom::EMPTY_OUT_Q), Term::Port(port)]);
                     for subscriber in subscribers {
                         self.port_deliver(port, subscriber, message.clone());
                     }
@@ -284,13 +278,8 @@ impl Scheduler {
 
     /// Send `{Tag, S}`, or `{Tag, S, Value}` with `value`, of the port
     /// `port` to its owner.
-    fn deliver_active(
-        &mut self,
-        port: PortId,
-        tag: &str,
-        value: Option<Term>,
-    ) -> Result<(), BeamError> {
-        let tag = Term::Atom(self.atoms.put(tag)?);
+    fn deliver_active(&mut self, port: PortId, tag: Atom, value: Option<Term>) {
+        let tag = Term::Atom(tag);
         let message = Term::tuple([tag, Term::Port(port)].into_iter().chain(value).collect());
         let ports = self.resources.borrow_mut::<Ports>();
         let owner = ports
@@ -298,7 +287,6 @@ impl Scheduler {
             .expect("the port of a message is open")
             .owner;
         self.port_deliver(port, owner, message);
-        Ok(())
     }
 }
 

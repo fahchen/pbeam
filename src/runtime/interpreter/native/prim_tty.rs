@@ -173,7 +173,7 @@ fn isatty(scheduler: &mut Scheduler, fd: &Term) -> Result<BifResult, BeamError> 
     if let Some(denied) = check? {
         return Ok(denied);
     }
-    isatty_fd(&mut scheduler.atoms, fd)
+    Ok(isatty_fd(fd))
 }
 
 /// Return the `isatty_nif` result for a host fd (`prim_tty_nif.c:270-278`):
@@ -183,21 +183,16 @@ fn isatty(scheduler: &mut Scheduler, fd: &Term) -> Result<BifResult, BeamError> 
 /// # Examples
 ///
 /// ```rust,ignore
-/// let ebadf = Term::Atom(atoms.put("ebadf")?);
-/// assert!(matches!(isatty_fd(&mut atoms, -1)?, BifResult::Value(term) if term == ebadf));
+/// let ebadf = Term::Atom(Atom::EBADF);
+/// assert!(matches!(isatty_fd(-1), BifResult::Value(term) if term == ebadf));
 /// ```
-///
-/// # Errors
-///
-/// The atom `ebadf` in a full atom table gives the error of
-/// `AtomTable::put`.
-fn isatty_fd(atoms: &mut AtomTable, fd: libc::c_int) -> Result<BifResult, BeamError> {
+fn isatty_fd(fd: libc::c_int) -> BifResult {
     let result = match terminal::check(fd) {
         TerminalCheck::Terminal => Term::static_atom("true"),
         TerminalCheck::NotTerminal => Term::static_atom("false"),
-        TerminalCheck::Error => Term::Atom(atoms.put("ebadf")?),
+        TerminalCheck::Error => Term::Atom(Atom::EBADF),
     };
-    Ok(BifResult::Value(result))
+    BifResult::Value(result)
 }
 
 /// Run `prim_tty:tty_create(Fd)`, as the ERTS NIF `tty_create_nif`
