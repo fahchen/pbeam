@@ -1,4 +1,12 @@
-use std::process::Command;
+use std::{
+    fs::File,
+    io::Read,
+    path::{Path, PathBuf},
+    process::Command,
+    sync::mpsc,
+    thread,
+    time::Duration,
+};
 
 use pbeam_runtime::{BeamProgram, Term};
 
@@ -9,47 +17,83 @@ use common::pinned_beam;
 
 const FILE_OWNER_PROBE: &[u8] = include_bytes!("../../fixtures/prim_file/file_owner_probe.beam");
 
+/// The time that the reader has to see the end of each FIFO.
+const READ_TIME_LIMIT: Duration = Duration::from_secs(10);
+
 #[test]
-fn ends_the_owner_of_an_open_file_resource_as_pinned_erts() {
-    // `file_owner_probe:main/1` opens a file with `prim_file:open/2` in two
-    // processes that exit without a close. ERTS closes each file when its
-    // owner exits (`owner_death_callback`, prim_file_nif.c:377-405), and
-    // PBeam closes it in the exit of the owner, also when the monitor
-    // signal of the resource still waits in the signal queue.
+fn closes_the_file_of_an_owner_that_exits_as_pinned_erts() {
+    // `file_owner_probe:main/3` opens two FIFOs for write with
+    // `prim_file:open/2` in two processes that exit without a close. ERTS
+    // closes each file when its owner exits (`owner_death_callback`,
+    // prim_file_nif.c:377-405), and PBeam closes it in the exit of the
+    // owner, also when the monitor signal of the resource still waits in
+    // the signal queue. The reader of a FIFO gets the end of file only
+    // after the last writer closes it, so a file that stays open stops the
+    // reader and the run.
     let directory = std::env::temp_dir().join(format!("pbeam-file-owner-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir(&directory).unwrap();
-    let path = directory.join("file");
-    let path_text = path.to_str().unwrap();
-    let erlang = pinned_beam("erlang");
-    let prim_file = pinned_beam("prim_file");
-    let program = BeamProgram::load(&[&erlang, &prim_file, FILE_OWNER_PROBE]).unwrap();
-    let normal = Term::Atom(program.atom("normal").unwrap());
-    assert_eq!(
-        program
-            .execute(
-                "file_owner_probe",
-                "main",
-                &[program.host_term(Term::binary(path_text.as_bytes().to_vec()))]
-            )
-            .unwrap()
-            .term,
-        Term::tuple(vec![normal.clone(), normal])
-    );
-
-    let reference = Command::new("erl")
-        .args([
-            "-noshell",
-            "-pa",
-            "fixtures/prim_file",
-            "-eval",
-            &format!("io:format(\"~p~n\", [file_owner_probe:main(<<\"{path_text}\">>)]), halt()."),
-        ])
-        .output()
-        .unwrap();
+    for name in ["PBeam", "ERTS"] {
+        let fifos =
+            ["first", "second", "barrier"].map(|fifo| directory.join(format!("{name}-{fifo}")));
+        for fifo in &fifos {
+            assert!(Command::new("mkfifo").arg(fifo).status().unwrap().success());
+        }
+        let reader = read_each_to_end(fifos.clone());
+        let [first, second, barrier] = fifos.map(|fifo| fifo.to_str().unwrap().to_owned());
+        if name == "PBeam" {
+            // The program is not `Send`, so the run loads it on its thread.
+            let run = thread::spawn(move || {
+                let erlang = pinned_beam("erlang");
+                let prim_file = pinned_beam("prim_file");
+                let program = BeamProgram::load(&[&erlang, &prim_file, FILE_OWNER_PROBE]).unwrap();
+                let arguments = [first, second, barrier]
+                    .map(|path| program.host_term(Term::binary(path.into_bytes())));
+                let normal = Term::Atom(program.atom("normal").unwrap());
+                let result = program
+                    .execute("file_owner_probe", "main", &arguments)
+                    .unwrap();
+                result.term == Term::tuple(vec![normal.clone(), normal])
+            });
+            assert_eq!(reader.recv_timeout(READ_TIME_LIMIT), Ok(()), "{name}");
+            assert!(run.join().unwrap(), "{name}");
+        } else {
+            let eval = format!(
+                "io:format(\"~p~n\", [file_owner_probe:main(<<\"{first}\">>, <<\"{second}\">>, <<\"{barrier}\">>)]), halt()."
+            );
+            let run = thread::spawn(move || {
+                Command::new("erl")
+                    .args(["-noshell", "-pa", "fixtures/prim_file", "-eval", &eval])
+                    .output()
+                    .unwrap()
+            });
+            assert_eq!(reader.recv_timeout(READ_TIME_LIMIT), Ok(()), "{name}");
+            let output = run.join().unwrap();
+            assert_eq!(
+                (output.stdout.as_slice(), output.stderr.as_slice()),
+                (b"{normal,normal}\n".as_slice(), b"".as_slice())
+            );
+        }
+    }
     std::fs::remove_dir_all(&directory).unwrap();
-    assert_eq!(
-        (reference.stdout.as_slice(), reference.stderr.as_slice()),
-        (b"{normal,normal}\n".as_slice(), b"".as_slice())
-    );
+}
+
+/// Open each FIFO of `fifos` for read in order on a new thread and read it
+/// to its end. Return the channel that gets `()` after the last end.
+fn read_each_to_end(fifos: [PathBuf; 3]) -> mpsc::Receiver<()> {
+    let (done, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        for fifo in &fifos {
+            read_to_end(fifo);
+        }
+        let _ = done.send(());
+    });
+    receiver
+}
+
+/// Open the FIFO `fifo` for read, which waits for a writer, and read it
+/// until all writers closed it.
+fn read_to_end(fifo: &Path) {
+    let mut bytes = Vec::new();
+    File::open(fifo).unwrap().read_to_end(&mut bytes).unwrap();
 }
