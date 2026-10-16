@@ -231,6 +231,10 @@ name = "effect_capability"
 path = "tests/integration/effect_capability.rs"
 
 [[test]]
+name = "erlang_bifs"
+path = "tests/integration/erlang_bifs.rs"
+
+[[test]]
 name = "error_path"
 path = "tests/integration/error_path.rs"
 

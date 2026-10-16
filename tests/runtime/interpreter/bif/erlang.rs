@@ -1,9 +1,11 @@
 //! Unit tests of `src/runtime/interpreter/bif/erlang.rs` for an argument
 //! that a fixture cannot check on PBeam: the public API of the runtime has
-//! no constructor of a bitstring that is not a whole number of bytes.
+//! no constructor of a bitstring that is not a whole number of bytes, and a
+//! run of a fixture reaches no port term.
 
 use super::*;
 use crate::term::Binary;
+use crate::{PortId, ProcessId};
 
 #[test]
 fn raises_badarg_for_a_bitstring_that_is_not_a_whole_number_of_bytes() {
@@ -19,5 +21,36 @@ fn raises_badarg_for_a_bitstring_that_is_not_a_whole_number_of_bytes() {
         result,
         BifResult::Raise { class: ExceptionClass::Error, reason }
             if reason == Term::static_atom("badarg")
+    ));
+}
+
+#[test]
+fn lists_the_text_of_a_pid_and_of_a_port_as_pinned_erts() {
+    // `erlang:pid_to_list/1` and `erlang:port_to_list/1` print the term with
+    // `%T` (`term2list_dsprintf`, `bif.c:4442-4457`): the pid data 5 is the
+    // pid `<0.5.0>` and the port number 5 is the port `#Port<0.5>`, as the
+    // pinned ERTS gives them for `erlang:pid_to_list(erlang:list_to_pid(
+    // "<0.5.0>"))` and `erlang:port_to_list(erlang:list_to_port(
+    // "#Port<0.5>"))` (measured with `mise run erts-eval`). A fixture
+    // reaches no port term: `erlang:ports/0` is not implemented.
+    let atoms = AtomTable::new();
+    let characters = |text: &str| {
+        Term::list_from(
+            text.bytes()
+                .map(|byte| Term::Integer(i64::from(byte)))
+                .collect::<Vec<_>>(),
+        )
+    };
+    let pid = pid_to_list(&Term::Pid(ProcessId(5)), &atoms);
+    assert!(matches!(pid, BifResult::Value(value) if value == characters("<0.5.0>")));
+    let port = port_to_list(&Term::Port(PortId(5)), &atoms);
+    assert!(matches!(port, BifResult::Value(value) if value == characters("#Port<0.5>")));
+    assert!(matches!(
+        pid_to_list(&Term::Port(PortId(5)), &atoms),
+        BifResult::Raise { .. }
+    ));
+    assert!(matches!(
+        port_to_list(&Term::Pid(ProcessId(5)), &atoms),
+        BifResult::Raise { .. }
     ));
 }
