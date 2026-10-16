@@ -351,6 +351,10 @@ name = "list_reductions"
 path = "tests/integration/list_reductions.rs"
 
 [[test]]
+name = "list_to_float"
+path = "tests/integration/list_to_float.rs"
+
+[[test]]
 name = "list_to_integer"
 path = "tests/integration/list_to_integer.rs"
 

@@ -225,7 +225,7 @@ bifs! {
     erlang:list_to_binary/1 as ErlangListToBinary1 => |cx, [term]| iolist::list_to_binary(cx.scheduler, term),
     erlang:list_to_bitstring/1 => unsupported,
     erlang:list_to_existing_atom/1 => unsupported,
-    erlang:list_to_float/1 => unsupported,
+    erlang:list_to_float/1 as ErlangListToFloat1 => |_, [list]| Ok(float::from_list(list)),
     erlang:list_to_pid/1 => unsupported,
     erlang:list_to_port/1 => unsupported,
     erlang:list_to_ref/1 => unsupported,
