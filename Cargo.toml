@@ -535,7 +535,6 @@ name = "throw_exit"
 path = "tests/integration/throw_exit.rs"
 
 [[test]]
-[[test]]
 name = "bif_stack"
 path = "tests/integration/bif_stack.rs"
 
