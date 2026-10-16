@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet},
     time::Duration,
 };
 
@@ -1524,19 +1524,31 @@ impl Scheduler {
         self.processes.list_chunk(id, end)
     }
 
-    /// Return the entries of the processes that left the table during the
-    /// `erlang:processes/0` read of the current process, the oldest first:
-    /// the pid of a process that the read lists, else `None`
-    /// (`erl_ptab.c:1046-1170`).
+    /// Step the `erlang:processes/0` read of the current process to the
+    /// next process that left the table during the read, the oldest first.
+    /// Return `None` at the end. Else return the pid when the read lists
+    /// it, and whether the read frees the entry (`erl_ptab.c:1046-1170`).
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(scheduler.ptab_list_deleted().pop_front(), None);
+    /// assert_eq!(scheduler.ptab_list_deleted(), None);
     /// ```
-    pub(super) fn ptab_list_deleted(&mut self) -> &mut VecDeque<Option<ProcessId>> {
+    pub(super) fn ptab_list_deleted(&mut self) -> Option<(Option<ProcessId>, bool)> {
         let id = self.current_process().id;
-        self.processes.list_deleted(id)
+        self.processes.next_deleted(id)
+    }
+
+    /// Return whether the `erlang:processes/0` read of the current process
+    /// stepped through each process that left the table during the read.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(scheduler.ptab_list_deleted_done());
+    /// ```
+    pub(super) fn ptab_list_deleted_done(&self) -> bool {
+        self.processes.deleted_done(self.current_process().id)
     }
 
     /// Remove the process `id` from the process table, as its exit does.

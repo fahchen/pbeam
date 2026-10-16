@@ -33,13 +33,24 @@ struct Reader {
     start: u64,
     /// The first table index that the call did not read.
     tix: u64,
-    /// One entry for each process that left the table since the start of
-    /// the call, the oldest first, as the deleted list
-    /// (`save_deleted_element`, `erl_ptab.c:643-672`): the pid of a process
-    /// that was in the table at the start and left it before the call read
-    /// its index (`erl_ptab.c:1102-1135`), and `None` for each other
-    /// process.
-    deleted: VecDeque<Option<ProcessId>>,
+    /// The position in the deleted list of the next entry that the call
+    /// did not step through, as the place of the invocation entry in the
+    /// ERTS list (`erl_ptab.c:1168-1180`).
+    pos: u64,
+}
+
+/// An entry of the deleted list of the table: a process that left the
+/// table while a call read it (`save_deleted_element`,
+/// `erl_ptab.c:643-672`).
+#[derive(Debug)]
+struct Deleted {
+    /// The pid of the process.
+    id: ProcessId,
+    /// The calls that list the pid: each call that read the table when the
+    /// process left it, when the process was in the table at the start of
+    /// the call and the call did not read its index yet
+    /// (`erl_ptab.c:1102-1135`).
+    listed_by: Vec<ProcessId>,
 }
 
 /// Return the index of the pid `id` in the ERTS process table.
@@ -74,6 +85,11 @@ pub(super) struct ProcessTable {
     /// The `erlang:processes/0` calls that read the table now, by the pid
     /// of the caller.
     readers: HashMap<ProcessId, Reader>,
+    /// The deleted list: the entries that a call did not step through
+    /// yet, the oldest first (`ptab->list.data.deleted`).
+    deleted: VecDeque<Deleted>,
+    /// The position of the first entry of `deleted`.
+    deleted_base: u64,
 }
 
 impl ProcessTable {
@@ -139,10 +155,16 @@ impl ProcessTable {
         // ERTS saves a deleted element only while a read is in progress
         // (`erl_ptab.c:688-692`, `722-728`).
         self.readers.remove(id);
-        for reader in self.readers.values_mut() {
-            let gone = serial < reader.start && ix >= reader.tix;
-            reader.deleted.push_back(gone.then_some(*id));
+        if !self.readers.is_empty() {
+            let listed_by = self
+                .readers
+                .iter()
+                .filter(|(_, reader)| serial < reader.start && ix >= reader.tix)
+                .map(|(reader, _)| *reader)
+                .collect();
+            self.deleted.push_back(Deleted { id: *id, listed_by });
         }
+        self.prune_deleted();
         self.slots[slot].take()
     }
 
@@ -159,7 +181,7 @@ impl ProcessTable {
         let start = Reader {
             start: self.serial,
             tix: 0,
-            deleted: VecDeque::new(),
+            pos: self.deleted_base + self.deleted.len() as u64,
         };
         self.readers.insert(reader, start);
     }
@@ -196,8 +218,12 @@ impl ProcessTable {
             .map(|((_, id), _)| *id)
     }
 
-    /// Return the entries of the processes that left the table during the
-    /// read of `reader`, the oldest first (see [`Reader::deleted`]).
+    /// Step the read of `reader` to the next entry of the deleted list.
+    /// Return `None` at the end of the list. Else return the pid of the
+    /// entry when the read lists it, and whether the read frees the entry:
+    /// no other read must step through it, as ERTS frees the entries
+    /// before the next invocation entry only in the oldest read
+    /// (`erl_ptab.c:1069-1099`, `1137-1143`).
     ///
     /// # Panics
     ///
@@ -206,14 +232,53 @@ impl ProcessTable {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(table.list_deleted(ProcessId(0)).pop_front(), None);
+    /// assert_eq!(table.next_deleted(ProcessId(0)), None);
     /// ```
-    pub(super) fn list_deleted(&mut self, reader: ProcessId) -> &mut VecDeque<Option<ProcessId>> {
-        &mut self
+    pub(super) fn next_deleted(&mut self, reader: ProcessId) -> Option<(Option<ProcessId>, bool)> {
+        let pos = self.readers[&reader].pos;
+        let entry = self.deleted.get((pos - self.deleted_base) as usize)?;
+        let listed = entry.listed_by.contains(&reader).then_some(entry.id);
+        let free = self
             .readers
+            .iter()
+            .all(|(id, other)| *id == reader || other.pos > pos);
+        self.readers
             .get_mut(&reader)
             .expect("the process reads the table")
-            .deleted
+            .pos += 1;
+        self.prune_deleted();
+        Some((listed, free))
+    }
+
+    /// Return whether the read of `reader` stepped through each entry of
+    /// the deleted list.
+    ///
+    /// # Panics
+    ///
+    /// Panic when `reader` does not read the table.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(table.deleted_done(ProcessId(0)));
+    /// ```
+    pub(super) fn deleted_done(&self, reader: ProcessId) -> bool {
+        self.readers[&reader].pos == self.deleted_base + self.deleted.len() as u64
+    }
+
+    /// Drop the entries of the deleted list that each read stepped through.
+    fn prune_deleted(&mut self) {
+        let end = self.deleted_base + self.deleted.len() as u64;
+        let first = self
+            .readers
+            .values()
+            .map(|reader| reader.pos)
+            .min()
+            .unwrap_or(end);
+        while self.deleted_base < first {
+            self.deleted.pop_front();
+            self.deleted_base += 1;
+        }
     }
 
     /// End the read of `reader`.
@@ -225,6 +290,7 @@ impl ProcessTable {
     /// ```
     pub(super) fn end_list(&mut self, reader: ProcessId) {
         self.readers.remove(&reader);
+        self.prune_deleted();
     }
 
     /// Return the process `id`, or `None` when no process has the pid.

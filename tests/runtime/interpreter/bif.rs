@@ -432,3 +432,48 @@ fn processes_traps_when_the_deleted_pids_use_more_than_the_budget() {
     let pids = Term::list_from(ids.map(|id| Term::Pid(ProcessId(id))));
     assert!(matches!(result, BifResult::Value(list) if list == pids));
 }
+
+/// Assert that only the oldest of two `erlang:processes/0` reads pays the
+/// free cost of the processes that left the table during both reads. ERTS
+/// frees a deleted entry only in the read whose invocation entry is first
+/// in the deleted list, up to the next invocation entry
+/// (`erl_ptab.c:1069-1099`, `1137-1143`). Ten exits cost 1 reduction in
+/// the newer read, and 11 in the older read after the newer read ends.
+#[test]
+fn only_the_oldest_processes_read_pays_the_free_cost_of_the_deleted_pids() {
+    use super::erlang::{processes, ptab_list};
+    let mut scheduler = ptab_scheduler(2, 50);
+    let trap = |result| match result {
+        BifResult::TrapBif { arguments, .. } => ptab_state(arguments),
+        _ => panic!("the call traps after the first chunk"),
+    };
+    let older = trap(processes(&mut scheduler).unwrap());
+    scheduler.current_process_mut().fcalls = 0;
+    scheduler.yield_current();
+    scheduler.schedule_next().unwrap();
+    scheduler.current_process_mut().fcalls = 50;
+    let newer = trap(processes(&mut scheduler).unwrap());
+    for id in 1001..=1010 {
+        let start = Start::Undefined {
+            module: Atom::from_static("erlang").unwrap(),
+            function: Atom::from_static("ok").unwrap(),
+        };
+        scheduler.insert(ProcessState::new(ProcessId(id), start, vec![]));
+        scheduler.remove_process(ProcessId(id));
+    }
+    let both = Term::list_from([0, 1].map(|id| Term::Pid(ProcessId(id))));
+    let finish = |scheduler: &mut Scheduler, mut state: super::erlang::PtabList| {
+        state.tix = 1 << 20;
+        scheduler.current_process_mut().fcalls = 4_000;
+        let result = ptab_list(scheduler, state).unwrap();
+        assert!(matches!(result, BifResult::Value(ref list) if *list == both));
+        4_000 - scheduler.current_process().fcalls
+    };
+    assert_eq!(scheduler.current_process().id, ProcessId(1));
+    assert_eq!(finish(&mut scheduler, newer), 1);
+    scheduler.current_process_mut().fcalls = 0;
+    scheduler.yield_current();
+    scheduler.schedule_next().unwrap();
+    assert_eq!(scheduler.current_process().id, ProcessId(0));
+    assert_eq!(finish(&mut scheduler, older), 11);
+}

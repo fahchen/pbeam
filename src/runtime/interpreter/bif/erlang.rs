@@ -4348,8 +4348,8 @@ fn ptab_list_push(list: &mut Term, pid_ix: &mut i64, pid: ProcessId) {
 ///   next chunk only when it has the reductions for it
 ///   (`erl_ptab.c:1022-1037`). The first chunk is in the first turn.
 /// - Each process that leaves the table during the read costs 1
-///   reduction, and 1 more for each 10, in a step of at most 40
-///   reductions (`erl_ptab.c:1046-1170`). A marked process that left the
+///   reduction for each 10, and 1 more when no other read steps through
+///   it, in a step of at most 40 reductions (`erl_ptab.c:1046-1170`). A marked process that left the
 ///   table before the call read its index comes after the found pids, in
 ///   the order of the exits.
 /// - The result costs 1 reduction for each 75 cells (`erl_ptab.c:1201-1254`).
@@ -4397,21 +4397,20 @@ pub(super) fn ptab_list(
         } else if state.tix == PTAB_SIZE as i64 {
             let max = left.min(PTAB_CHUNK_REDS);
             let (mut reds, mut taken) = (0, 0);
-            let deleted = scheduler.ptab_list_deleted();
             while reds < max
-                && let Some(entry) = deleted.pop_front()
+                && let Some((entry, free)) = scheduler.ptab_list_deleted()
             {
                 #[cfg(test)]
                 PTAB_CELLS.set(PTAB_CELLS.get() + 1);
                 taken += 1;
-                reds += 1 + usize::from(taken % PTAB_DELETED_PER_RED == 0);
+                reds += usize::from(taken % PTAB_DELETED_PER_RED == 0) + usize::from(free);
                 if let Some(id) = entry
                     && Some(id) != hidden
                 {
                     ptab_list_push(&mut state.gone, &mut state.pid_ix, id);
                 }
             }
-            if deleted.is_empty() {
+            if scheduler.ptab_list_deleted_done() {
                 scheduler.ptab_list_end();
                 state.tix += 1;
             }
