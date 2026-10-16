@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet},
     time::Duration,
 };
 
@@ -22,7 +22,8 @@ use super::{
     port::Ports,
     process::{
         DirtyWrite, Flush, Frame, LinkId, Monitor, MonitorLinkTree, Origin, OriginMonitor,
-        ProcessState, ReceiveTimer, StackSlot, Start, TargetMonitor, TimerReference, WalkPosition,
+        ProcessState, ReceiveTimer, StackSlot, Start, StartFlags, TargetMonitor, TimerReference,
+        WalkPosition,
     },
     regex_code::RegexCodes,
     resources::Resources,
@@ -344,9 +345,9 @@ pub(super) struct Scheduler {
     /// run queue holds their pids, and each continues its exit in its next
     /// turn.
     freed: HashMap<ProcessId, (ProcessState, ExitPhase)>,
-    /// Processes that wait for a turn, in run order. The current process is
-    /// not in this queue, as in ERTS.
-    runnable: VecDeque<ProcessId>,
+    /// Processes that wait for a turn, in the queue of their priority. The
+    /// current process is not in this queue, as in ERTS.
+    runnable: RunQueue,
     /// Number for the next process identifier.
     next_process_id: u64,
     /// Number for the next reference.
@@ -388,6 +389,9 @@ pub(super) struct Scheduler {
     /// The timers of the run and the run clock. All processes of the run
     /// share them.
     pub(super) timers: Timers,
+    /// The not connected dist entries of the run, which `erlang:nodes/1,2`
+    /// gives with the node type `known`.
+    known_nodes: KnownNodes,
     /// The owner of each reference that `erlang:monitor/3` made with an
     /// alias option: an ERTS pid reference holds the pid of its owner
     /// (`erts_get_pid_of_ref`, `erl_bif_unique.h:279`). The owner keeps the
@@ -462,7 +466,7 @@ impl Scheduler {
         Scheduler {
             processes: ProcessTable::default(),
             freed: HashMap::new(),
-            runnable: VecDeque::new(),
+            runnable: RunQueue::default(),
             next_process_id: ROOT.0 + 1,
             next_reference: 0,
             unique: 0,
@@ -475,6 +479,7 @@ impl Scheduler {
             code: CodeTable::default(),
             nif_libraries: HashSet::new(),
             timers: Timers::new(),
+            known_nodes: KnownNodes::default(),
             alias_owners: HashMap::new(),
             pending_monitor: None,
             next_unlink_id: 1,
@@ -635,8 +640,8 @@ impl Scheduler {
         self.enqueue(id);
     }
 
-    /// Put the process `id` at the end of the run queue, unless it is in the
-    /// run queue or runs now: such a process keeps its place, as
+    /// Put the process `id` at the end of the run queue of its priority
+    /// ([`RunQueue::push`]), unless it is in the run queue or runs now: such a process keeps its place, as
     /// `erts_schedule_process` and `erts_proc_sys_schedule` do
     /// (`erl_proc_sig_queue.h:2063-2088`). A process whose dirty IO call
     /// runs goes to the run queue only when it has signals to handle: its
@@ -657,7 +662,7 @@ impl Scheduler {
         let idle_dirty = process.dirty_running() && !process.mailbox.has_control_signals();
         if !process.in_run_queue && !current && !idle_dirty {
             process.in_run_queue = true;
-            self.runnable.push_back(id);
+            self.runnable.push(id, process.priority);
         }
     }
 
@@ -933,7 +938,7 @@ impl Scheduler {
         // process that this step runs waits for the release of at most
         // [`RELEASE_BATCH`] nodes.
         self.drain_release(RELEASE_BATCH);
-        let Some(id) = self.runnable.pop_front() else {
+        let Some(id) = self.runnable.pop() else {
             // A step that releases work reports `Done`, so that the run loop
             // keeps stepping and the release completes. An `Idle` step would
             // let the loop wait for input while most of a dead graph stays
@@ -1935,8 +1940,8 @@ impl Scheduler {
 
     /// Spawn a child process for the current process and optionally monitor
     /// or link it. `start` gives its entry frame or its undefined start MFA.
-    /// `off_heap_message_queue` sets the start value of its
-    /// `message_queue_data` flag. The link and the monitor go into both
+    /// `flags` gives the start values of its `message_queue_data` flag and
+    /// of its priority. The link and the monitor go into both
     /// processes at once, as `erl_create_process` does, so no signal goes
     /// to the child.
     ///
@@ -1955,7 +1960,7 @@ impl Scheduler {
     ///
     /// ```rust,ignore
     /// let down = Some(Term::static_atom("DOWN"));
-    /// let (pid, monitor) = scheduler.spawn(Start::Entry(frame), vec![], down, false, false, None)?.unwrap();
+    /// let (pid, monitor) = scheduler.spawn(Start::Entry(frame), vec![], down, false, StartFlags::default(), None)?.unwrap();
     /// assert!(monitor.is_some());
     /// ```
     pub(super) fn spawn(
@@ -1964,7 +1969,7 @@ impl Scheduler {
         arguments: Vec<Term>,
         monitor: Option<Term>,
         link: bool,
-        off_heap_message_queue: bool,
+        flags: StartFlags,
         restrictions: Option<&[Restriction]>,
     ) -> Result<Result<(ProcessId, Option<Reference>), Denied>, BeamError> {
         let module = match &start {
@@ -1993,7 +1998,8 @@ impl Scheduler {
             Err(denied) => return Ok(Err(denied)),
         };
         let mut child = ProcessState::new(self.next_pid()?, start, arguments);
-        child.off_heap_message_queue = off_heap_message_queue;
+        child.off_heap_message_queue = flags.off_heap_message_queue;
+        child.priority = flags.priority;
         child.security = if boot {
             SecurityContext::boot()
         } else {
@@ -2578,8 +2584,8 @@ impl Scheduler {
     fn switch_out_freed(&mut self, process: ProcessState, phase: ExitPhase) {
         self.send_pending_monitor();
         let id = process.id;
+        self.runnable.push(id, process.priority);
         self.freed.insert(id, (process, phase));
-        self.runnable.push_back(id);
     }
 
     /// Continue the exit of the process that left the process table at
@@ -2747,15 +2753,19 @@ fn named_item(name: &Atom) -> Term {
     Term::tuple(vec![Term::Atom(name.clone()), local_node()])
 }
 
+mod known_nodes;
 mod policy;
 mod ports;
 mod process_table;
+mod run_queue;
 mod signals;
 mod tcp_inet;
 
+use known_nodes::KnownNodes;
 pub(super) use policy::PolicyEnd;
 use policy::PolicyProcess;
 use process_table::ProcessTable;
+use run_queue::RunQueue;
 pub(super) use signals::{Flushed, HandlingPoint, Received};
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 use super::{
     CONTEXT_REDS, ExitPhase, LinkId, MonitorOptions, MonitorTarget, RELEASE_BATCH, RELEASE_CHUNK,
-    Release, Scheduler, Turn,
+    Release, Scheduler, StartFlags, Turn,
 };
 use crate::runtime::capability::{AllowAll, Capability, CapabilityKind, Denied, Policy};
 use crate::runtime::host::input::{Readiness, wait_readable};
@@ -57,7 +57,14 @@ fn keeps_the_current_process_in_the_table_and_out_of_the_run_queue() {
     assert_eq!(current(&mut scheduler), ProcessId(0));
     assert!(scheduler.processes.contains_key(&ProcessId(0)));
     let (child, monitor) = scheduler
-        .spawn(Start::Entry(frame()), vec![], None, false, false, None)
+        .spawn(
+            Start::Entry(frame()),
+            vec![],
+            None,
+            false,
+            StartFlags::default(),
+            None,
+        )
         .unwrap()
         .unwrap();
     assert_eq!((child, monitor), (ProcessId(1), None));
@@ -65,12 +72,12 @@ fn keeps_the_current_process_in_the_table_and_out_of_the_run_queue() {
     scheduler.park_current();
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
     assert_eq!(current(&mut scheduler), ProcessId(1));
-    assert!(scheduler.runnable.is_empty());
+    assert!(scheduler.runnable.ids().is_empty());
     scheduler.deliver(ProcessId(0), atom("ping"));
     scheduler.deliver(ProcessId(1), atom("self"));
     scheduler.deliver(ProcessId(9), atom("lost"));
 
-    assert_eq!(Vec::from(scheduler.runnable.clone()), vec![ProcessId(0)]);
+    assert_eq!(scheduler.runnable.ids(), vec![ProcessId(0)]);
     assert_eq!(messages(&scheduler, 0), [atom("ping")]);
     assert_eq!(messages(&scheduler, 1), [atom("self")]);
     scheduler.yield_current();
@@ -103,7 +110,7 @@ fn makes_no_capability_copies_in_a_run_that_skips_the_checks() {
         vec![],
         Some(Term::static_atom("DOWN")),
         true,
-        false,
+        StartFlags::default(),
         None,
     );
     assert_eq!(spawn.unwrap().err(), Some(Denied));
@@ -123,7 +130,7 @@ fn makes_no_capability_copies_in_a_run_that_skips_the_checks() {
             vec![],
             Some(Term::static_atom("DOWN")),
             true,
-            false,
+            StartFlags::default(),
             None,
         )
         .unwrap()
@@ -143,15 +150,19 @@ fn switches_out_to_the_end_of_the_run_queue_with_a_new_budget() {
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
     scheduler
-        .spawn(Start::Entry(frame()), vec![], None, false, false, None)
+        .spawn(
+            Start::Entry(frame()),
+            vec![],
+            None,
+            false,
+            StartFlags::default(),
+            None,
+        )
         .unwrap()
         .unwrap();
     scheduler.current_process_mut().fcalls = -1;
     scheduler.yield_current();
-    assert_eq!(
-        Vec::from(scheduler.runnable.clone()),
-        vec![ProcessId(1), ProcessId(0)]
-    );
+    assert_eq!(scheduler.runnable.ids(), vec![ProcessId(1), ProcessId(0)]);
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
     assert_eq!(current(&mut scheduler), ProcessId(1));
     scheduler.yield_current();
@@ -171,13 +182,20 @@ fn sends_down_and_exit_signals_and_records_the_root_result() {
             vec![],
             Some(Term::static_atom("DOWN")),
             false,
-            false,
+            StartFlags::default(),
             None,
         )
         .unwrap()
         .unwrap();
     let (linked, _) = scheduler
-        .spawn(Start::Entry(frame()), vec![], None, true, false, None)
+        .spawn(
+            Start::Entry(frame()),
+            vec![],
+            None,
+            true,
+            StartFlags::default(),
+            None,
+        )
         .unwrap()
         .unwrap();
     scheduler.park_current();
@@ -222,7 +240,14 @@ fn ends_the_run_only_after_the_exit_of_the_root_process_completes() {
         scheduler.start(frame(), vec![], allow_all()).unwrap();
         scheduler.schedule_next().unwrap();
         let (child, _) = scheduler
-            .spawn(Start::Entry(frame()), vec![], None, true, false, None)
+            .spawn(
+                Start::Entry(frame()),
+                vec![],
+                None,
+                true,
+                StartFlags::default(),
+                None,
+            )
             .unwrap()
             .unwrap();
         scheduler.current_process_mut().fcalls = fcalls;
@@ -249,7 +274,14 @@ fn links_and_unlinks_processes_and_ignores_normal_exit_without_trap_exit() {
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     scheduler.schedule_next().unwrap();
     let (child, _) = scheduler
-        .spawn(Start::Entry(frame()), vec![], None, false, false, None)
+        .spawn(
+            Start::Entry(frame()),
+            vec![],
+            None,
+            false,
+            StartFlags::default(),
+            None,
+        )
         .unwrap()
         .unwrap();
     assert!(scheduler.link(child));
@@ -302,7 +334,14 @@ fn ends_a_linked_process_and_rejects_counter_overflow() {
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     scheduler.schedule_next().unwrap();
     scheduler
-        .spawn(Start::Entry(frame()), vec![], None, true, false, None)
+        .spawn(
+            Start::Entry(frame()),
+            vec![],
+            None,
+            true,
+            StartFlags::default(),
+            None,
+        )
         .unwrap()
         .unwrap();
     scheduler.park_current();
@@ -328,7 +367,14 @@ fn ends_a_linked_process_and_rejects_counter_overflow() {
     // first spawn.
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     scheduler.schedule_next().unwrap();
-    let spawn = scheduler.spawn(Start::Entry(frame()), vec![], None, false, false, None);
+    let spawn = scheduler.spawn(
+        Start::Entry(frame()),
+        vec![],
+        None,
+        false,
+        StartFlags::default(),
+        None,
+    );
     assert!(spawn.is_err());
     assert!(scheduler.make_ref().is_err());
 }
@@ -341,7 +387,14 @@ fn sends_the_pending_monitor_signal_before_a_demonitor_signal() {
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     scheduler.schedule_next().unwrap();
     let (child, _) = scheduler
-        .spawn(Start::Entry(frame()), vec![], None, false, false, None)
+        .spawn(
+            Start::Entry(frame()),
+            vec![],
+            None,
+            false,
+            StartFlags::default(),
+            None,
+        )
         .unwrap()
         .unwrap();
     let reference = scheduler
@@ -409,7 +462,14 @@ fn frees_the_name_of_a_process_when_it_exits() {
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     scheduler.schedule_next().unwrap();
     let (child, _) = scheduler
-        .spawn(Start::Entry(frame()), vec![], None, false, false, None)
+        .spawn(
+            Start::Entry(frame()),
+            vec![],
+            None,
+            false,
+            StartFlags::default(),
+            None,
+        )
         .unwrap()
         .unwrap();
     let name = Term::Atom(scheduler.atoms.put("pbeam_probe_reg").unwrap());
@@ -447,7 +507,7 @@ fn deletes_the_tables_of_a_process_when_it_exits() {
             vec![],
             Some(Term::static_atom("DOWN")),
             false,
-            false,
+            StartFlags::default(),
             None,
         )
         .unwrap()
@@ -496,7 +556,7 @@ fn resumes_after_wait_timeout_when_the_timer_expires_after_a_message() {
         ReceiveTimer::Set { resume: 7, .. }
     ));
     scheduler.expire_timers(1_100_000_000);
-    assert_eq!(Vec::from(scheduler.runnable.clone()), vec![ProcessId(0)]);
+    assert_eq!(scheduler.runnable.ids(), vec![ProcessId(0)]);
     assert_eq!(
         scheduler.processes[&ProcessId(0)].receive_timer,
         ReceiveTimer::Expired { resume: 7 }
@@ -647,7 +707,7 @@ fn resumes_a_dirty_write_once_when_it_completes_before_the_next_poll() {
     reader.read_exact(&mut bytes).unwrap();
     assert_eq!(&bytes, b"hi\n");
     wait_completion(&mut scheduler);
-    assert_eq!(Vec::from(scheduler.runnable.clone()), [ProcessId(0)]);
+    assert_eq!(scheduler.runnable.ids(), [ProcessId(0)]);
     assert_eq!(
         scheduler.processes[&ProcessId(0)]
             .dirty_write
@@ -657,7 +717,7 @@ fn resumes_a_dirty_write_once_when_it_completes_before_the_next_poll() {
     );
     // The inbox is empty, and the wait does not wait for the call.
     scheduler.complete_dirty_writes();
-    assert_eq!(Vec::from(scheduler.runnable.clone()), [ProcessId(0)]);
+    assert_eq!(scheduler.runnable.ids(), [ProcessId(0)]);
     assert!(!scheduler.wait_events(None).unwrap());
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
 }
@@ -680,7 +740,14 @@ fn runs_other_processes_while_a_dirty_write_waits_and_resumes_it_after() {
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
     scheduler
-        .spawn(Start::Entry(frame()), vec![], None, false, false, None)
+        .spawn(
+            Start::Entry(frame()),
+            vec![],
+            None,
+            false,
+            StartFlags::default(),
+            None,
+        )
         .unwrap()
         .unwrap();
     scheduler.start_dirty_write(dirty_write(fd, b"later"), true);
@@ -696,7 +763,7 @@ fn runs_other_processes_while_a_dirty_write_waits_and_resumes_it_after() {
             .unwrap()
     );
     scheduler.complete_dirty_writes();
-    assert!(scheduler.runnable.is_empty());
+    assert!(scheduler.runnable.ids().is_empty());
     let reading = std::thread::spawn(move || {
         let mut bytes = Vec::new();
         (&reader).read_to_end(&mut bytes).unwrap();
@@ -705,7 +772,7 @@ fn runs_other_processes_while_a_dirty_write_waits_and_resumes_it_after() {
     wait_completion(&mut scheduler);
     drop(writer);
     assert!(reading.join().unwrap().ends_with(b"later"));
-    assert_eq!(Vec::from(scheduler.runnable.clone()), [ProcessId(0)]);
+    assert_eq!(scheduler.runnable.ids(), [ProcessId(0)]);
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
     assert_eq!(current(&mut scheduler), ProcessId(0));
     assert_eq!(messages(&scheduler, 0), [atom("ping")]);
@@ -775,7 +842,7 @@ fn start_dirty_writers(
                     vec![],
                     Some(Term::static_atom("DOWN")),
                     false,
-                    false,
+                    StartFlags::default(),
                     None,
                 )
                 .unwrap()
@@ -830,12 +897,12 @@ fn handles_the_signals_of_a_dirty_writer_and_drops_its_late_completion() {
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Idle);
     // A message does not put the writer in the run queue.
     scheduler.deliver(ProcessId(1), atom("ping"));
-    assert!(scheduler.runnable.is_empty());
+    assert!(scheduler.runnable.ids().is_empty());
     // A signal does: the turn handles it, and the writer does not run.
     scheduler
         .send_signal(Some(ProcessId(0)), ProcessId(1), kill())
         .unwrap();
-    assert_eq!(Vec::from(scheduler.runnable.clone()), [ProcessId(1)]);
+    assert_eq!(scheduler.runnable.ids(), [ProcessId(1)]);
     let reductions = scheduler.processes[&ProcessId(1)].reductions;
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Done);
     let writer_state = &scheduler.processes[&ProcessId(1)];
@@ -843,7 +910,7 @@ fn handles_the_signals_of_a_dirty_writer_and_drops_its_late_completion() {
     assert!(writer_state.dirty_write.is_none());
     assert_eq!(writer_state.reductions, reductions);
     // The exit runs in the next turn, while the write waits.
-    assert_eq!(Vec::from(scheduler.runnable.clone()), [ProcessId(1)]);
+    assert_eq!(scheduler.runnable.ids(), [ProcessId(1)]);
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Done);
     assert!(!scheduler.processes.contains_key(&ProcessId(1)));
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
@@ -857,7 +924,7 @@ fn handles_the_signals_of_a_dirty_writer_and_drops_its_late_completion() {
     wait_all_completions(&mut scheduler);
     drop(writer);
     assert_eq!(reading.join().unwrap(), bytes);
-    assert!(scheduler.runnable.is_empty());
+    assert!(scheduler.runnable.ids().is_empty());
     assert!(!scheduler.processes.contains_key(&ProcessId(1)));
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Idle);
 }
@@ -880,7 +947,7 @@ fn drops_the_completion_that_arrives_before_the_exit_of_a_killed_dirty_writer() 
     wait_all_completions(&mut scheduler);
     drop(writer);
     assert_eq!(reading.join().unwrap(), bytes);
-    assert_eq!(Vec::from(scheduler.runnable.clone()), [ProcessId(1)]);
+    assert_eq!(scheduler.runnable.ids(), [ProcessId(1)]);
     assert!(scheduler.processes[&ProcessId(1)].dirty_write.is_none());
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Done);
     assert!(!scheduler.processes.contains_key(&ProcessId(1)));
@@ -899,11 +966,11 @@ fn exits_without_the_result_of_a_dirty_write_that_completed_before_a_kill() {
     let mut bytes = [0; 4];
     reader.read_exact(&mut bytes).unwrap();
     wait_all_completions(&mut scheduler);
-    assert_eq!(Vec::from(scheduler.runnable.clone()), [ProcessId(1)]);
+    assert_eq!(scheduler.runnable.ids(), [ProcessId(1)]);
     scheduler
         .send_signal(Some(ProcessId(0)), ProcessId(1), kill())
         .unwrap();
-    assert_eq!(Vec::from(scheduler.runnable.clone()), [ProcessId(1)]);
+    assert_eq!(scheduler.runnable.ids(), [ProcessId(1)]);
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Done);
     assert!(!scheduler.processes.contains_key(&ProcessId(1)));
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
@@ -941,7 +1008,7 @@ fn does_not_run_the_queued_dirty_write_of_a_killed_writer() {
         wait_readable(&[queued_reader.as_raw_fd()], Some(Duration::ZERO)),
         Readiness::Pending
     );
-    let mut runnable = Vec::from(scheduler.runnable.clone());
+    let mut runnable = scheduler.runnable.ids();
     runnable.sort();
     assert_eq!(runnable, (1..=11).map(ProcessId).collect::<Vec<_>>());
 }
@@ -1721,7 +1788,14 @@ fn removes_the_accept_of_a_process_that_exits_with_its_port_monitor_signal_pendi
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     scheduler.schedule_next().unwrap();
     let (child, _) = scheduler
-        .spawn(Start::Entry(frame()), vec![], None, false, false, None)
+        .spawn(
+            Start::Entry(frame()),
+            vec![],
+            None,
+            false,
+            StartFlags::default(),
+            None,
+        )
         .unwrap()
         .unwrap();
     let mut tcp = Inet::new(SocketType::Stream);

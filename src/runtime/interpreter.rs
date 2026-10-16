@@ -1,7 +1,9 @@
 use super::{
     capability::{Policy, Restriction},
     host::output::IovecWrite,
-    process::{DirtyWrite, Frame, PendingBif, ProcessState, ReceiveTimer, StackSlot, Start},
+    process::{
+        DirtyWrite, Frame, PendingBif, ProcessState, ReceiveTimer, StackSlot, Start, StartFlags,
+    },
     scheduler::{PolicyEnd, Received, Scheduler, Turn},
     tty::{InitialMode, Ttys},
 };
@@ -2940,9 +2942,9 @@ struct SpawnOptions {
     /// `None` with no monitor. With a monitor, the spawn returns
     /// `{Pid, Reference}` (`SPO_MONITOR`).
     monitor: Option<Term>,
-    /// Start the new process with the `message_queue_data` flag `off_heap`
-    /// (`SPO_OFF_HEAP_MSGQ`), else `on_heap`.
-    off_heap_message_queue: bool,
+    /// The start values of the `message_queue_data` flag and of the
+    /// priority of the new process.
+    flags: StartFlags,
     /// The restrictions of the capabilities of the new process, or `None` to
     /// give it a copy of each delegable capability of the caller.
     capabilities: Option<Vec<Restriction>>,
@@ -3011,7 +3013,7 @@ fn create_process(
     let SpawnOptions {
         link,
         monitor,
-        off_heap_message_queue,
+        flags,
         capabilities,
     } = options;
     let spawned = scheduler.spawn(
@@ -3019,7 +3021,7 @@ fn create_process(
         arguments,
         monitor,
         link,
-        off_heap_message_queue,
+        flags,
         capabilities.as_deref(),
     );
     let Ok((pid, reference)) = spawned? else {

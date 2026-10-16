@@ -877,10 +877,9 @@ fn rejects_process_flags_as_pinned_erts() {
 fn returns_a_runtime_error_for_a_flag_that_needs_a_missing_subsystem() {
     // `logger_start_probe:unsupported_flag/1`: ERTS gives a value for each
     // flag (`bif.c:5203-5224`, `bif.c:5116-5172`, `bif.c:5081-5106`,
-    // `bif.c:2052-2057`, `bif.c:1907-1915`, `bif.c:2114-2130`,
-    // `bif.c:2212-2226`). PBeam has no time offset service, tracing,
-    // priorities, saved calls, garbage collector, or distribution
-    // (rows "System flags" and "Process flags" in
+    // `bif.c:1907-1915`, `bif.c:2114-2130`). PBeam has no time offset
+    // service, tracing, saved calls, or garbage collector (rows "System
+    // flags" and "Process flags" in
     // `docs/erts-differences.md`).
     let program = load();
     for (case, message, erts) in [
@@ -915,11 +914,6 @@ fn returns_a_runtime_error_for_a_flag_that_needs_a_missing_subsystem() {
             "#{error_logger => true,include_shared_binaries => false,kill => true,size => 0}",
         ),
         (
-            "priority",
-            "unsupported erlang:process_flag/2 flag priority",
-            "normal",
-        ),
-        (
             "save_calls",
             "unsupported erlang:process_flag/2 flag save_calls",
             "0",
@@ -928,11 +922,6 @@ fn returns_a_runtime_error_for_a_flag_that_needs_a_missing_subsystem() {
             "min_heap_size",
             "unsupported erlang:process_flag/2 flag min_heap_size",
             "233",
-        ),
-        (
-            "monitor_nodes",
-            "unsupported erlang:process_flag/2 flag {monitor_nodes, Options}",
-            "0",
         ),
     ] {
         let error = program

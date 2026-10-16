@@ -37,7 +37,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::{LinkId, RELEASE_BATCH, Release, Scheduler, Turn};
+use super::{LinkId, RELEASE_BATCH, Release, Scheduler, StartFlags, Turn};
 use crate::{
     runtime::signal::Signal,
     runtime::{
@@ -686,7 +686,14 @@ fn shared_last_release_measurement(shape: &Shape) -> Measurement {
         "the root process runs"
     );
     let (child, _) = scheduler
-        .spawn(Start::Entry(frame()), vec![graph], None, false, false, None)
+        .spawn(
+            Start::Entry(frame()),
+            vec![graph],
+            None,
+            false,
+            StartFlags::default(),
+            None,
+        )
         .expect("the spawn runs")
         .expect("the spawn is permitted");
     assert_ne!(child, ProcessId(0));

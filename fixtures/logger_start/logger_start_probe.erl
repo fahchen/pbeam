@@ -507,9 +507,8 @@ process_flag() ->
 
 %% A flag that needs a subsystem that PBeam does not have: the time offset,
 %% the trace control word, the sequential tracer, sequential trace tokens,
-%% the heap limit, process priorities, saved calls, the heap size, and node
-%% monitors. ERTS gives volatile, 0, false, true, the old heap limit map
-%% twice, normal, 0, 233, and 0.
+%% the heap limit, saved calls, and the heap size. ERTS gives volatile, 0,
+%% false, true, the old heap limit map twice, 0, and 233.
 unsupported_flag(time_offset) -> erlang:system_flag(time_offset, finalize);
 unsupported_flag(trace_control_word) -> erlang:system_flag(trace_control_word, 0);
 unsupported_flag(sequential_tracer) -> erlang:system_flag(sequential_tracer, self());
@@ -517,10 +516,8 @@ unsupported_flag(reset_seq_trace) -> erlang:system_flag(reset_seq_trace, foo);
 unsupported_flag(max_heap_size) ->
     erlang:system_flag(max_heap_size, #{size => 233, kill => false, other => 1});
 unsupported_flag(max_heap_size_zero) -> erlang:system_flag(max_heap_size, 0);
-unsupported_flag(priority) -> process_flag(priority, normal);
 unsupported_flag(save_calls) -> process_flag(save_calls, 0);
-unsupported_flag(min_heap_size) -> process_flag(min_heap_size, 233);
-unsupported_flag(monitor_nodes) -> process_flag({monitor_nodes, []}, false).
+unsupported_flag(min_heap_size) -> process_flag(min_heap_size, 233).
 
 %% `erlang:error/1` (bif.c:1436-1440) raises class error with its argument
 %% as the reason. `erlang:raise/3` (bif.c:1549-1692) raises the class error

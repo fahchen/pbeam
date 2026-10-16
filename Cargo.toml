@@ -354,6 +354,10 @@ name = "module_info"
 path = "tests/integration/module_info.rs"
 
 [[test]]
+name = "node_monitor"
+path = "tests/integration/node_monitor.rs"
+
+[[test]]
 name = "nif_error"
 path = "tests/integration/nif_error.rs"
 
@@ -400,6 +404,10 @@ path = "tests/integration/port_sigchld.rs"
 [[test]]
 name = "preempt"
 path = "tests/integration/preempt.rs"
+
+[[test]]
+name = "priority"
+path = "tests/integration/priority.rs"
 
 [[test]]
 name = "prim_file_read"

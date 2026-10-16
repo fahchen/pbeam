@@ -8,12 +8,14 @@ use crate::runtime::interpreter::DEFAULT_ERROR_HANDLER;
 use crate::runtime::interpreter::code_table::Finish;
 use crate::runtime::local_node;
 use crate::runtime::port::Ports;
-use crate::runtime::process::LinkId;
-use crate::runtime::process::{Flush, TimerReference};
+use crate::runtime::process::{Flush, Priority, TimerReference};
+use crate::runtime::process::{LinkId, ProcessState};
 use crate::runtime::scheduler::{AliasMode, CONTEXT_REDS, Flushed, MonitorOptions, MonitorTarget};
 use crate::runtime::signal::Signal;
 use crate::runtime::time::{self, TimeValue};
 use crate::runtime::timer::{Receiver, Timer, Timers};
+use num_bigint::BigInt;
+
 use crate::term::{
     Atom, AtomTable, Fun, MAX_ATOM_CHARACTERS, MAX_TUPLE_SIZE, ProcessId, Reference,
     SMALL_INTEGER_MAX, SMALL_INTEGER_MIN, debug_term,
@@ -40,43 +42,255 @@ pub(super) fn node(term: &Term, atoms: &AtomTable) -> Result<BifResult, BeamErro
     }
 }
 
+/// Run `erlang:nodes(NodeTypes)` and `erlang:nodes(NodeTypes, Options)` as
+/// ERTS `nodes` does (`dist.c:6261-6476`) on a node that is not alive.
+/// `NodeTypes` is one node type or a proper list of them: `visible`,
+/// `hidden`, `connected`, `this`, and `known`. PBeam has no connection, so
+/// `visible`, `hidden`, and `connected` give no node. `this` and `known`
+/// give the local node `nonode@nohost` last. Before it, `known` gives the
+/// not connected entry of each node that a send used, from the oldest to
+/// the newest (see `Scheduler::known_nodes`). `Options` (`None` for
+/// `nodes/1`) is a map of the keys `connection_id` and `node_type`, each
+/// `true` or `false`. With options, the result holds `{Node, Info}`, and
+/// `Info` maps `connection_id` to `undefined` and `node_type` to `known`
+/// or `this` for each key that is `true`. Each other term raises `badarg`.
+/// A result of more than 10 nodes costs one reduction for each 10 nodes.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(nodes(&Term::static_atom("this"), None, scheduler), Value(Term::list_from([local_node()])));
+/// assert_eq!(nodes(&Term::static_atom("visible"), None, scheduler), Value(Term::nil()));
+/// assert!(matches!(nodes(&Term::Integer(1), None, scheduler), BifResult::Raise { .. }));
+/// ```
+pub(super) fn nodes(
+    node_types: &Term,
+    options: Option<&Term>,
+    scheduler: &mut Scheduler,
+) -> BifResult {
+    let one = Term::list_from([node_types.clone()]);
+    let node_types = if matches!(node_types, Term::Atom(_)) {
+        &one
+    } else {
+        node_types
+    };
+    let Some(node_types) = node_types.proper_list() else {
+        return BifResult::badarg();
+    };
+    let (mut this, mut known) = (false, false);
+    for node_type in node_types {
+        match node_type {
+            Term::Atom(name) if name.is_static("this") => this = true,
+            Term::Atom(name) if name.is_static("known") => (this, known) = (true, true),
+            Term::Atom(name) if name.is_one_of(&["visible", "hidden", "connected"]) => {}
+            _ => return BifResult::badarg(),
+        }
+    }
+    let (mut connection_id, mut node_type) = (false, false);
+    match options {
+        None => {}
+        Some(Term::Map(options)) => {
+            for (option, value) in options.iter() {
+                let flag = match option {
+                    Term::Atom(name) if name.is_static("connection_id") => &mut connection_id,
+                    Term::Atom(name) if name.is_static("node_type") => &mut node_type,
+                    _ => return BifResult::badarg(),
+                };
+                *flag = match value {
+                    Term::Atom(value) if value.is_static("true") => true,
+                    Term::Atom(value) if value.is_static("false") => false,
+                    _ => return BifResult::badarg(),
+                };
+            }
+        }
+        Some(_) => return BifResult::badarg(),
+    }
+    let mut names: Vec<(Term, &str)> = Vec::new();
+    if known {
+        names.extend(
+            scheduler
+                .known_nodes()
+                .into_iter()
+                .map(|name| (Term::Atom(name), "known")),
+        );
+    }
+    if this {
+        names.push((local_node(), "this"));
+    }
+    // ERTS charges one reduction for each 10 nodes of a result of more than
+    // 10 nodes (`dist.c:6465-6468`).
+    if names.len() > 10 {
+        scheduler
+            .current_process_mut()
+            .bump_reductions((names.len() / 10) as i32);
+    }
+    let atoms = &scheduler.atoms;
+    Value(Term::list_from(names.into_iter().map(|(name, kind)| {
+        if options.is_none() {
+            return name;
+        }
+        let mut info = Vec::new();
+        if connection_id {
+            info.push((
+                Term::static_atom("connection_id"),
+                Term::static_atom("undefined"),
+            ));
+        }
+        if node_type {
+            info.push((Term::static_atom("node_type"), Term::static_atom(kind)));
+        }
+        // ponytail: each key is an atom, so `from_pairs` cannot fail.
+        let info = Map::from_pairs(info, atoms).expect("atom keys fit each map form");
+        Term::tuple(vec![name, Term::Map(info)])
+    })))
+}
+
 /// The flags of ERTS `process_flag_2` (`bif.c:2028-2237`) that need a
-/// subsystem that PBeam does not have: distribution, the error handler,
-/// priorities, schedulers, the garbage collector, tracing, and saved calls.
-/// The tuple `{monitor_nodes, Options}` is also such a flag.
+/// subsystem that PBeam does not have: the error handler, schedulers,
+/// the garbage collector, tracing, and saved calls.
 const UNSUPPORTED_PROCESS_FLAGS: &[&str] = &[
-    "async_dist",
-    "priority",
     "scheduler",
     "fullsweep_after",
     "min_heap_size",
     "min_bin_vheap_size",
     "max_heap_size",
     "sensitive",
-    "monitor_nodes",
     "save_calls",
 ];
 
+/// The option bits of a node monitor, `ERTS_NODES_MON_OPT_*` of ERTS
+/// (`dist.c:6698-6702`): the node type `visible`, the node type `hidden`,
+/// `nodedown_reason`, the info map, and `connection_id`.
+const NODES_MONITOR_VISIBLE: u8 = 1 << 0;
+const NODES_MONITOR_HIDDEN: u8 = 1 << 1;
+const NODES_MONITOR_DOWN_REASON: u8 = 1 << 2;
+const NODES_MONITOR_INFO_MAP: u8 = 1 << 3;
+const NODES_MONITOR_CONNECTION_ID: u8 = 1 << 4;
+
+/// Return the key of a node monitor with `options`, as
+/// `erts_monitor_nodes` makes it (`dist.c:6735-6802`): `[]` gives 0, and a
+/// map gives the info map bit and the bit of each option. The option
+/// `list => true` clears the info map bit, `connection_id` and
+/// `nodedown_reason` take `true` or `false`, and `node_type` takes
+/// `visible`, `hidden`, or `all`. A map key that is not an option, an
+/// option value that is not valid, and a term that is not `[]` or a map
+/// give `None`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(nodes_monitor_key(&Term::nil()), Some(0));
+/// let map = Map::from_pairs(vec![(Term::static_atom("node_type"), Term::static_atom("all"))], &atoms)?;
+/// assert_eq!(nodes_monitor_key(&Term::Map(map)), Some(0b1011));
+/// assert_eq!(nodes_monitor_key(&Term::Integer(1)), None);
+/// ```
+fn nodes_monitor_key(options: &Term) -> Option<u8> {
+    let options = match options {
+        Term::Map(options) => options,
+        _ => return options.is_nil().then_some(0),
+    };
+    let mut key = NODES_MONITOR_INFO_MAP;
+    for (option, value) in options.iter() {
+        let (Term::Atom(option), Term::Atom(value)) = (option, value) else {
+            return None;
+        };
+        let on = value.is_static("true");
+        let boolean = on || value.is_static("false");
+        let node_type = option.is_static("node_type");
+        key = match () {
+            _ if option.is_static("list") && on => key & !NODES_MONITOR_INFO_MAP,
+            _ if option.is_static("connection_id") && boolean => {
+                key | if on { NODES_MONITOR_CONNECTION_ID } else { 0 }
+            }
+            _ if option.is_static("nodedown_reason") && boolean => {
+                key | if on { NODES_MONITOR_DOWN_REASON } else { 0 }
+            }
+            _ if node_type && value.is_static("visible") => key | NODES_MONITOR_VISIBLE,
+            _ if node_type && value.is_static("hidden") => key | NODES_MONITOR_HIDDEN,
+            _ if node_type && value.is_static("all") => {
+                key | NODES_MONITOR_VISIBLE | NODES_MONITOR_HIDDEN
+            }
+            _ => return None,
+        };
+    }
+    Some(key)
+}
+
+/// Set or clear a node monitor of `process` with `options`, as
+/// `erts_monitor_nodes` does (`dist.c:6731-6845`), and return the old count
+/// of the monitor with the same key. `true` adds 1 to the count, and
+/// `false` removes the monitor. A value that is not `true` or `false` and
+/// options that `nodes_monitor_key` rejects raise `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(monitor_nodes(process, &Term::nil(), Some("true")), BifResult::Value(Term::Integer(0))));
+/// assert!(matches!(monitor_nodes(process, &Term::nil(), Some("true")), BifResult::Value(Term::Integer(1))));
+/// assert!(matches!(monitor_nodes(process, &Term::nil(), Some("false")), BifResult::Value(Term::Integer(2))));
+/// ```
+fn monitor_nodes(process: &mut ProcessState, options: &Term, value: Option<&str>) -> BifResult {
+    let (Some(on @ ("true" | "false")), Some(key)) = (value, nodes_monitor_key(options)) else {
+        return BifResult::badarg();
+    };
+    let old = if on == "true" {
+        let count = process.node_monitors.entry(key).or_default();
+        *count += 1;
+        *count - 1
+    } else {
+        process.node_monitors.remove(&key).unwrap_or(0)
+    };
+    Value(Term::from_bigint(BigInt::from(old)))
+}
+
+/// Set a boolean process flag to `value` and return the old value, or raise
+/// `badarg` for a value that is not `true` or `false`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut flag = false;
+/// assert!(matches!(boolean_flag(&mut flag, Some("true")), BifResult::Value(_)));
+/// assert!(flag);
+/// ```
+fn boolean_flag(flag: &mut bool, value: Option<&str>) -> BifResult {
+    let old = Term::static_atom(&flag.to_string());
+    match value {
+        Some("true") => *flag = true,
+        Some("false") => *flag = false,
+        _ => return BifResult::badarg(),
+    }
+    Value(old)
+}
+
 /// Run `erlang:process_flag(Flag, Value)` as ERTS `process_flag_2`
-/// (`bif.c:2028-2237`) does for the flags `trap_exit`,
-/// `message_queue_data`, and `error_handler`: set the flag of the calling
-/// process and return the old value. `trap_exit` takes `true` or `false`.
+/// (`bif.c:2028-2237`) does for the flags `trap_exit`, `async_dist`,
+/// `message_queue_data`, `error_handler`, `priority`, `monitor_nodes`, and
+/// `{monitor_nodes, Options}`: set the flag of the calling process and
+/// return the old value. `trap_exit` and `async_dist` take `true` or
+/// `false` (`bif.c:2032-2044`), and the start value of `async_dist` is
+/// `false`, the value without `+pad true` (`erl_process.c:12552-12553`).
+/// `monitor_nodes` and `{monitor_nodes, Options}` take `true` or `false`
+/// and return the old count of the node monitor (`bif.c:2202-2227`,
+/// `monitor_nodes`).
 /// `message_queue_data` takes `on_heap` or `off_heap`
 /// (`erts_change_message_queue_management`, `erl_message.c:1022-1100`), and
 /// its start value is `on_heap`. `error_handler` takes an atom and sets the
 /// module that the export entry calls for a function that a module does not
 /// export (`process_flag_2`, `bif.c:2045-2051`;
 /// `erts_proc_set_error_handler`, `erl_process.h:2432-2446`); its start
-/// value is the atom `error_handler`. Each other value raises `badarg`. A
+/// value is the atom `error_handler`. `priority` takes `max`, `high`,
+/// `normal`, or `low` (`bif.c:2052-2056`; `erts_set_process_priority`,
+/// `erl_process.c:9456-9547`), and its start value is `normal`. The
+/// scheduler reads the new priority when the process next goes into the
+/// run queue. Each other value raises `badarg`. A
 /// flag that ERTS does not know raises `badarg`, also a tuple that is not
-/// `{monitor_nodes, Options}`.
+/// `{monitor_nodes, Options}`. PBeam has no distribution, so `async_dist`
+/// has no other effect and a node monitor never gets a message.
 ///
 /// Each flag of `UNSUPPORTED_PROCESS_FLAGS` except `max_heap_size` first
 /// checks its value as ERTS does, and raises `badarg` for a value that is
-/// not valid: `async_dist`, `sensitive`, and `monitor_nodes` take a boolean
-/// (`erts_monitor_nodes`, `dist.c:6740-6741`), `priority` takes `low`,
-/// `normal`, `high`, or `max` (`erts_set_process_priority`,
-/// `erl_process.c:9460-9466`), `save_calls` takes a small integer from 0 to
+/// not valid: `sensitive` takes a boolean, `save_calls` takes a small integer from 0 to
 /// 10000 (`process_flag_aux`, `bif.c:1907-1915`), and `scheduler`,
 /// `fullsweep_after`, `min_heap_size`, and `min_bin_vheap_size` take a small
 /// integer of 0 or more.
@@ -94,14 +308,16 @@ const UNSUPPORTED_PROCESS_FLAGS: &[&str] = &[
 /// let old = process_flag(&mut context, &Term::static_atom("error_handler"), &Term::static_atom("lists"))?;
 /// assert!(matches!(old, BifResult::Value(Term::Atom(atom)) if atom.is_static("error_handler"));
 /// assert!(matches!(process_flag(&mut context, &foo, &Term::static_atom("true"))?, BifResult::Raise { .. }));
-/// assert!(process_flag(&mut context, &Term::static_atom("priority"), &Term::static_atom("high")).is_err());
+/// let old = process_flag(&mut context, &Term::static_atom("priority"), &Term::static_atom("high"))?;
+/// assert!(matches!(old, BifResult::Value(Term::Atom(atom)) if atom.is_static("normal"));
+/// assert!(process_flag(&mut context, &Term::static_atom("sensitive"), &Term::static_atom("true")).is_err());
 /// ```
 ///
 /// # Errors
 ///
 /// Each flag of `UNSUPPORTED_PROCESS_FLAGS` gives a runtime error for a
-/// value that passes the check, and `max_heap_size` and
-/// `{monitor_nodes, Options}` give it for each value. ERTS raises `badarg`
+/// value that passes the check, and `max_heap_size` gives it for each
+/// value. ERTS raises `badarg`
 /// for a `scheduler` value above the scheduler count, which PBeam does not
 /// model, and PBeam gives the runtime error.
 pub(super) fn process_flag(
@@ -118,13 +334,16 @@ pub(super) fn process_flag(
     let process = context.scheduler.current_process_mut();
     Ok(match flag {
         Term::Atom(flag) if flag.is_static("trap_exit") => {
-            let old = Term::static_atom(&process.trap_exit.to_string());
-            match value {
-                Some("true") => process.trap_exit = true,
-                Some("false") => process.trap_exit = false,
-                _ => return Ok(BifResult::badarg()),
-            }
-            Value(old)
+            boolean_flag(&mut process.trap_exit, value)
+        }
+        Term::Atom(flag) if flag.is_static("async_dist") => {
+            boolean_flag(&mut process.async_dist, value)
+        }
+        Term::Atom(flag) if flag.is_static("monitor_nodes") => {
+            monitor_nodes(process, &Term::nil(), value)
+        }
+        Term::Tuple(elements) if matches!(elements.as_ref(), [Term::Atom(tag), _] if tag.is_static("monitor_nodes")) => {
+            monitor_nodes(process, &elements[1], value)
         }
         Term::Atom(flag) if flag.is_static("message_queue_data") => {
             let old = Term::static_atom(if process.off_heap_message_queue {
@@ -163,14 +382,19 @@ pub(super) fn process_flag(
             context.scheduler.current_process_mut().error_handler = handler;
             Value(old)
         }
+        Term::Atom(flag) if flag.is_static("priority") => {
+            let Some(priority) = value.and_then(Priority::from_name) else {
+                return Ok(BifResult::badarg());
+            };
+            let old = std::mem::replace(&mut process.priority, priority);
+            Value(Term::static_atom(old.name()))
+        }
         Term::Atom(flag)
             if UNSUPPORTED_PROCESS_FLAGS.contains(&context.scheduler.atoms.name_of(flag)) =>
         {
             let small = term.small_integer();
-            let valid = if flag.is_one_of(&["async_dist", "sensitive", "monitor_nodes"]) {
+            let valid = if flag.is_static("sensitive") {
                 matches!(value, Some("true" | "false"))
-            } else if flag.is_static("priority") {
-                matches!(value, Some("low" | "normal" | "high" | "max"))
             } else if flag.is_static("save_calls") {
                 small.is_some_and(|calls| (0..=10_000).contains(&calls))
             } else {
@@ -185,12 +409,6 @@ pub(super) fn process_flag(
                 "unsupported erlang:process_flag/2 flag {}",
                 context.scheduler.atoms.name_of(flag)
             )));
-        }
-        Term::Tuple(elements) if matches!(elements.as_ref(), [Term::Atom(tag), _] if tag.is_static("monitor_nodes")) =>
-        {
-            return Err(error(
-                "unsupported erlang:process_flag/2 flag {monitor_nodes, Options}",
-            ));
         }
         _ => BifResult::badarg(),
     })
@@ -1159,8 +1377,11 @@ pub(super) fn spawn_link(
 /// else `Pid`. The option
 /// `{message_queue_data, on_heap | off_heap}` sets the start value of the
 /// `message_queue_data` flag of the new process, and the last such option
-/// wins (`erl_process.c:12305-12319`). `options` that are not a proper list,
-/// and a `message_queue_data` option with another value, raise `badarg`, as
+/// wins (`erl_process.c:12305-12319`). The option `{priority, Level}` sets
+/// the start priority of the new process, else it is `normal`
+/// (`erl_process.c:12246`, `12275-12287`). `options` that are not a proper
+/// list, and a `message_queue_data` or `priority` option with another
+/// value, raise `badarg`, as
 /// `erts_parse_spawn_opts` (`erl_process.c:12222-12434`) does. The PBeam
 /// option `{capabilities, Map}` restricts the capabilities of the new process
 /// (see `capability::restrictions`), and the last such option wins. A `Map`
@@ -1208,11 +1429,27 @@ pub(super) fn spawn_opt(
             }
             Term::Tuple(option) if matches!(option.as_ref(), [Term::Atom(name), _] if name.is_static("message_queue_data")) =>
             {
-                spawn_options.off_heap_message_queue = match &option[1] {
+                spawn_options.flags.off_heap_message_queue = match &option[1] {
                     Term::Atom(value) if value.is_static("on_heap") => false,
                     Term::Atom(value) if value.is_static("off_heap") => true,
                     _ => return Ok(BifResult::badarg()),
                 };
+            }
+            Term::Tuple(option) if matches!(option.as_ref(), [Term::Atom(name), _] if name.is_static("priority")) =>
+            {
+                // `erts_parse_spawn_opts` takes `max`, `high`, `normal`, or
+                // `low`, and gives `badarg` for each other value
+                // (`erl_process.c:12275-12287`).
+                let priority = match &option[1] {
+                    Term::Atom(value) => {
+                        Priority::from_name(context.scheduler.atoms.name_of(value))
+                    }
+                    _ => None,
+                };
+                let Some(priority) = priority else {
+                    return Ok(BifResult::badarg());
+                };
+                spawn_options.flags.priority = priority;
             }
             Term::Tuple(option) if matches!(option.as_ref(), [Term::Atom(name), _] if context.scheduler.atoms.name_of(name) == "capabilities") =>
             {
@@ -2743,8 +2980,8 @@ enum Destination<'a> {
     /// process has drops the message. The caller reads the name through the
     /// owning atom table.
     NodeName(&'a Atom),
-    /// `{Name, Node}` with another node.
-    Remote,
+    /// `{Name, Node}` with another node, as an atom.
+    Remote(&'a Atom),
     /// A port.
     Port,
 }
@@ -2761,7 +2998,7 @@ enum Destination<'a> {
 /// ```rust,ignore
 /// assert!(matches!(destination(&Term::Pid(pid)), Some(Destination::Pid(_))));
 /// let remote = Term::tuple(vec![Term::static_atom("name"), Term::static_atom("a@b")]);
-/// assert!(matches!(destination(&remote), Some(Destination::Remote)));
+/// assert!(matches!(destination(&remote), Some(Destination::Remote(_))));
 /// assert!(destination(&Term::Integer(1)).is_none());
 /// ```
 fn destination(to: &Term) -> Option<Destination<'_>> {
@@ -2774,7 +3011,7 @@ fn destination(to: &Term) -> Option<Destination<'_>> {
             [Term::Atom(name), node @ Term::Atom(_)] if *node == local_node() => {
                 Destination::NodeName(name)
             }
-            [Term::Atom(_), Term::Atom(_)] => Destination::Remote,
+            [Term::Atom(_), Term::Atom(node)] => Destination::Remote(node),
             _ => return None,
         },
         _ => return None,
@@ -2809,7 +3046,10 @@ fn destination(to: &Term) -> Option<Destination<'_>> {
 /// - `{Name, Node}` with the local node gives the message to the registered
 ///   process, or drops it when no process has the name. Another node drops
 ///   the message and gives [`Sent::NoConnect`], as ERTS does on a node that
-///   is not alive (`remote_send`, `bif.c:2397-2400`).
+///   is not alive (`remote_send`, `bif.c:2397-2400`). The send finds or
+///   makes the not connected dist entry of the node first
+///   (`bif.c:2656-2666`), which `erlang:nodes/1,2` gives as `known` (see
+///   `Scheduler::send_to_remote_node`).
 ///
 /// # Examples
 ///
@@ -2851,7 +3091,10 @@ fn deliver_to(
             }
         }
         Destination::NodeName(atom) => scheduler.whereis(scheduler.atoms.name_of(atom)),
-        Destination::Remote => return Ok(Ok(Sent::NoConnect)),
+        Destination::Remote(node) => {
+            scheduler.send_to_remote_node(node);
+            return Ok(Ok(Sent::NoConnect));
+        }
         Destination::Port => return Err(unsupported_port(bif)),
     };
     if let Some(target) = target {
