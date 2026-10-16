@@ -1983,7 +1983,7 @@ fn drops_the_link_exit_signal_of_a_process_that_the_port_does_not_link() {
         .unwrap();
     assert!(scheduler.connect_port(port, child));
     let ports = scheduler.resources.borrow_mut::<Ports>();
-    assert!(ports.get_mut(port).unwrap().links.remove(&child));
+    assert!(ports.get_mut(port).unwrap().links.remove(&child).is_some());
     scheduler
         .handle_signals(child, 100, 100, HandlingPoint::ScheduleIn)
         .unwrap();

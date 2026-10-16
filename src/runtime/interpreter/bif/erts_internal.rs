@@ -837,8 +837,8 @@ pub(super) fn port_denial(
 /// port, also in the `CLOSING` state, use 40 reductions and return `[{name, Name}, {links, Links},
 /// {id, Number}, {connected, Owner}, {input, Bytes}, {output, Bytes},
 /// {os_pid, OsPid}]` (`ERTS_PORT_INFO_1_ITEMS`, `erl_port.h:100-108`). The
-/// name is the list of the bytes of the program path, `links` holds the
-/// owner, and `id` is the port number (see [`port_item`]). A port
+/// name is the list of the bytes of the program path, `links` holds each
+/// linked process, and `id` is the port number (see [`port_item`]). A port
 /// that closed and an atom give `undefined`; each other term gives the atom
 /// `badarg`. The result traps to `erlang:bif_handle_signals_return/2` when
 /// the caller has incoming signals. For an open port, a caller without a
@@ -854,8 +854,7 @@ pub(super) fn port_denial(
 ///
 /// # Errors
 ///
-/// A port with more than one link (see [`port_item`]), and the atom
-/// `capability_denied` in a full atom table.
+/// The atom `capability_denied` in a full atom table.
 pub(super) fn port_info(context: &mut BifContext<'_>, port: &Term) -> Result<BifResult, BeamError> {
     let scheduler = &mut *context.scheduler;
     let info = match (port, found_port_id(scheduler, port)) {
@@ -909,25 +908,29 @@ const OTHER_PORT_ITEMS: [&str; 7] = [
 /// `id`, as `erts_bld_port_info` builds it (`erl_bif_info.c:3654-3830`),
 /// for a name of [`PORT_INFO_ITEMS`]. The
 /// name is the list of the bytes of the program path or driver name,
-/// `links` holds the linked process of a port with zero or one link, and
-/// `id` is the port number.
+/// `links` holds each linked process in the ERTS link tree order, and `id`
+/// is the port number.
 ///
-/// # Errors
+/// # Examples
 ///
-/// The `links` item of a port with more than one link. ERTS gives the
-/// links in the reversed post-order of a red-black tree, which depends on
-/// the shape of the tree (`erl_monitor_link.c:91-233`,
-/// `erl_rbtree.h:1343-1458`, `erl_bif_info.c:3676-3696`); PBeam does not
-/// keep that shape: see "Ports" in `docs/erts-differences.md`.
+/// ```rust,ignore
+/// let item = port_item(id, port, "links")?;
+/// ```
 fn port_item(id: PortId, port: &Port, name: &str) -> Result<Term, BeamError> {
     let value = match name {
         "name" => Term::list_from(port.name.iter().map(|&byte| Term::Integer(byte.into()))),
-        "links" if port.links.len() > 1 => {
-            return Err(error(
-                "unsupported erlang:port_info links of a port with more than one link: see \"Ports\" in docs/erts-differences.md",
-            ));
+        // `erts_bld_port_info` conses each entry of the post-order walk to
+        // the front, so the last entry of the walk is the head of the list
+        // (`erl_bif_info.c:3676-3696`, `erl_rbtree.h:1343-1458`).
+        "links" => {
+            let mut links: Vec<Term> = port
+                .links
+                .post_order()
+                .map(|(pid, ())| Term::Pid(*pid))
+                .collect();
+            links.reverse();
+            Term::list_from(links)
         }
-        "links" => Term::list_from(port.links.iter().map(|&pid| Term::Pid(pid))),
         "id" => Term::Integer(id.0.try_into().expect("a port number below 2^63")),
         "connected" => Term::Pid(port.owner),
         "input" => Term::Integer(port.input.try_into().expect("an input count below 2^63")),
@@ -961,8 +964,7 @@ fn port_item(id: PortId, port: &Port, name: &str) -> Result<Term, BeamError> {
 ///
 /// # Errors
 ///
-/// An item of [`OTHER_PORT_ITEMS`], the `links` item of a port with more
-/// than one link (see [`port_item`]), and the atom `capability_denied` in a
+/// An item of [`OTHER_PORT_ITEMS`], and the atom `capability_denied` in a
 /// full atom table.
 pub(super) fn port_info_item(
     context: &mut BifContext<'_>,

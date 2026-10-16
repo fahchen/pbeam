@@ -1,5 +1,5 @@
 -module(tcp_active).
--export([main/1, active/1, closed/1, passive_closed/1, links/0, many_links/1, unsupported/2, unsupported_item/0]).
+-export([main/1, active/1, closed/1, passive_closed/1, links/0, link_orders/0, unsupported/2, unsupported_item/0]).
 
 %% Delivers the data of an accepted socket in active mode, as
 %% inet:setopts/2 calls prim_inet:setopts/2, and gives the socket to a
@@ -105,7 +105,7 @@ ended(Path, Step, Setopts, Active) ->
 
 %% link/1, unlink/1, erlang:port_connect/2, and erlang:port_info/2 with a
 %% port. Each read of the links item is of a port with zero or one link
-%% (see many_links/1).
+%% (see link_orders/0).
 links() ->
     process_flag(trap_exit, true),
     {ok, S} = prim_inet:open(tcp, inet, stream),
@@ -152,16 +152,85 @@ links() ->
     [Killed, Linked, Unlinked, One, Relinked, Open, DeadConnect, Connected, Owner, Infos, Errors, Exits, Dead,
      flush()].
 
-%% The links item of a port with two links, which PBeam does not give yet:
-%% erlang:port_info/1 for all, and erlang:port_info/2 for links.
-many_links(Item) ->
-    {ok, S} = prim_inet:open(tcp, inet, stream),
-    Parent = self(),
-    Linker = spawn(fun() -> Parent ! {self(), link(S)}, receive stop -> ok end end),
-    receive {Linker, true} -> ok end,
-    case Item of
-        all -> erlang:port_info(S);
-        links -> erlang:port_info(S, links)
+%% The links item of a port with several links, after each link and unlink
+%% of the members in a different order, the links item of
+%% erlang:port_info/1, and the order of the link exit signals of a port
+%% that closes. Each list gives the position of the linked process in the
+%% spawn order of the run, with the owner first. The ERTS link tree gives
+%% the order: `ml_cmp_keys` orders the tree (erl_monitor_link.c:91-233),
+%% `foreach_unordered__` walks it (erl_rbtree.h:1343-1458), and
+%% `erts_bld_port_info` conses each entry to the front
+%% (erl_bif_info.c:3676-3696).
+link_orders() ->
+    process_flag(trap_exit, true),
+    {ok, S1} = prim_inet:open(tcp, inet, stream),
+    {ok, S2} = prim_inet:open(tcp, inet, stream),
+    Owner = self(),
+    Members = [Owner | [spawn(fun() -> member(Owner) end) || _ <- lists:seq(1, 6)]],
+    [orders(S1, Members, [{link, 2}, {link, 3}, {link, 4}, {link, 5}, {unlink, 3}, {link, 6},
+                          {unlink, 2}, {link, 3}, {unlink, 5}, {link, 2}, {unlink, 6}]),
+     orders(S2, Members, [{link, 6}, {link, 5}, {link, 4}, {unlink, 6}, {link, 3}, {link, 2},
+                          {link, 6}, {unlink, 4}, {unlink, 5}, {link, 4}, {unlink, 2}]),
+     whole_info_order(S1, Members),
+     exit_order(S1, Members)].
+
+%% The order of the link exit signals of a port that closes
+%% (`erts_deliver_port_exit`, io.c:3869-3872, 3922-3925; `link_port_exit`,
+%% io.c:3808-3819). Each linked member traps exits, reports its exit
+%% signal, and stops.
+exit_order(Port, Members) ->
+    {links, Links} = erlang:port_info(Port, links),
+    Linked = length(Links) - 1,
+    erlang:port_close(Port),
+    %% The probe is the owner, so the port sends it an exit signal too.
+    receive {'EXIT', Port, _} -> ok end,
+    [receive {gone, Member} -> position(Member, Members) end || _ <- lists:seq(1, Linked)].
+
+%% The links item of erlang:port_info/1 gives the item of
+%% erlang:port_info/2.
+whole_info_order(Port, Members) ->
+    {links, Links} = lists:keyfind(links, 1, erlang:port_info(Port)),
+    [position(Link, Members) || Link <- Links].
+
+%% The links order of the port before the operations and after each one.
+orders(Port, Members, Ops) ->
+    [order(Port, Members) | run(Ops, Port, Members)].
+
+run([], _Port, _Members) ->
+    [];
+run([{Op, Index} | Rest], Port, Members) ->
+    Member = lists:nth(Index, Members),
+    Member ! {Op, Port, self()},
+    receive {Member, ok} -> ok end,
+    [order(Port, Members) | run(Rest, Port, Members)].
+
+order(Port, Members) ->
+    {links, Links} = erlang:port_info(Port, links),
+    [position(Link, Members) || Link <- Links].
+
+position(Pid, Members) ->
+    position(Pid, Members, 1).
+
+position(Pid, [Pid | _], Index) ->
+    Index;
+position(Pid, [_ | Rest], Index) ->
+    position(Pid, Rest, Index + 1).
+
+%% A process that links and unlinks a port when the probe asks, and reports
+%% the link exit signal of a port that closes.
+member(Owner) ->
+    process_flag(trap_exit, true),
+    receive
+        {link, Port, From} ->
+            link(Port),
+            From ! {self(), ok},
+            member(Owner);
+        {unlink, Port, From} ->
+            unlink(Port),
+            From ! {self(), ok},
+            member(Owner);
+        {'EXIT', _Port, _Reason} ->
+            Owner ! {gone, self()}
     end.
 
 %% Each part that PBeam does not run yet.
