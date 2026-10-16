@@ -16,7 +16,7 @@ mod boot;
 #[path = "../common/mod.rs"]
 mod common;
 
-use boot::{BOOT_MODULES, boot_beam};
+use boot::{BOOT_MODULES, boot_beam, otp_root};
 use common::pinned_beam_path;
 
 const DIRTY_IO_PROBE: &str = "fixtures/boot/dirty_io_probe.beam";
@@ -367,7 +367,16 @@ fn erts(module: &str, function: &str) -> Command {
 fn pbeam(beam: &str, module: &str, function: &str) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_pbeam"));
     command
-        .args(["pbeam_boot", "start", module, function, "--", beam])
+        .args([
+            "pbeam_boot",
+            "start",
+            module,
+            function,
+            "--root",
+            otp_root().to_str().unwrap(),
+            "--",
+            beam,
+        ])
         .args(BOOT_MODULES.map(pinned_beam_path))
         .arg(boot_beam());
     command

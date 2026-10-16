@@ -10,7 +10,7 @@ mod common;
 
 use std::process::Command;
 
-use boot::{BOOT_MODULES, boot_beam};
+use boot::{BOOT_MODULES, boot_beam, otp_root};
 use common::pinned_beam_path;
 
 /// The probe that writes the `~p` text and the `~w` text of its terms.
@@ -58,7 +58,15 @@ fn formats_terms_with_p_and_w_as_pinned_erts() {
         "pretty_probe:main(), halt().",
     ]));
     let text = run(Command::new(env!("CARGO_BIN_EXE_pbeam"))
-        .args(["pbeam_boot", "start", "pretty_probe", "main", "--"])
+        .args([
+            "pbeam_boot",
+            "start",
+            "pretty_probe",
+            "main",
+            "--root",
+            otp_root().to_str().unwrap(),
+            "--",
+        ])
         .arg(format!("{PRETTY_PROBE}.beam"))
         .arg(boot_beam())
         .args(

@@ -16,7 +16,7 @@ mod boot;
 #[path = "../common/mod.rs"]
 mod common;
 
-use boot::{BOOT_MODULES, boot_beam};
+use boot::{BOOT_MODULES, boot_beam, otp_root};
 use common::pinned_beam_path;
 
 const GET_LINE_PROBE: &str = "fixtures/boot/get_line_probe.beam";
@@ -152,6 +152,8 @@ fn pbeam(function: &str) -> Command {
             "start",
             "get_line_probe",
             function,
+            "--root",
+            otp_root().to_str().unwrap(),
             "--",
             GET_LINE_PROBE,
         ])

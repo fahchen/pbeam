@@ -17,7 +17,7 @@ mod log_event;
 #[path = "../common/run.rs"]
 mod run;
 
-use boot::{BOOT_MODULES, boot_beam};
+use boot::{BOOT_MODULES, boot_beam, otp_root};
 use common::pinned_beam_path;
 use log_event::{LOG_EVENT_MODULES, mask_time};
 use run::run_dumb_utf8;
@@ -59,7 +59,16 @@ fn writes_a_log_event_through_the_default_handler_after_the_boot() {
     );
     let pbeam = run_dumb_utf8(
         Command::new(env!("CARGO_BIN_EXE_pbeam"))
-            .args(["pbeam_boot", "start", "log_probe", "main", "--", LOG_PROBE])
+            .args([
+                "pbeam_boot",
+                "start",
+                "log_probe",
+                "main",
+                "--root",
+                otp_root().to_str().unwrap(),
+                "--",
+                LOG_PROBE,
+            ])
             .args(&beams)
             .args(&events)
             .arg(boot_beam()),

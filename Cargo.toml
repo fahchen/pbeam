@@ -486,6 +486,10 @@ name = "time"
 path = "tests/integration/time.rs"
 
 [[test]]
+name = "processes"
+path = "tests/integration/processes.rs"
+
+[[test]]
 name = "timer"
 path = "tests/integration/timer.rs"
 

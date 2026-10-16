@@ -104,7 +104,8 @@ if [[ -f examples/$name/mix.exs ]]; then
   export RELEASE_ROOT RELEASE_SYS_CONFIG
   [[ $erts == false ]] || run
   # code:which/1 gives preloaded for a preloaded module, such as init, so its file is in the ebin directory of erts.
-  read -ra boot_list <<<"$boot_modules"
+  # pbeam_boot spawns erts_code_purger before init, as erl_init.c does, and the other examples get it from @preloaded of scripts/example_beams.exs.
+  read -ra boot_list <<<"$boot_modules erts_code_purger"
   start_list=$(erl -noshell -eval '[io:put_chars([F, $\n]) || A <- init:get_plain_arguments(), F <- [case code:which(list_to_atom(A)) of preloaded -> filename:join([code:lib_dir(erts), "ebin", A ++ ".beam"]); P -> P end], filelib:is_regular(F)], halt().' -extra "${boot_list[@]}")
   start=("$output/$entry.beam" "$output/pbeam_boot.beam")
   while IFS= read -r item; do
