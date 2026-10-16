@@ -72,6 +72,11 @@ fn skip_digits(text: &[u8], index: usize) -> Option<usize> {
 /// (`sys_float.c:111-113`); `list_to_float("1.0e-400")` gives `0.0`, as the
 /// branch of `sys_float.c:130-132` gives it.
 ///
+/// `list_to_float_1` gives the function a C string, so a zero byte ends
+/// the text and the bytes after it do not count:
+/// `list_to_float([49, 46, 48, 0, 120])` gives `1.0`, and
+/// `list_to_float([49, 0, 46, 48])` raises `badarg` for the text `"1"`.
+///
 /// # Examples
 ///
 /// ```rust,ignore
@@ -79,8 +84,14 @@ fn skip_digits(text: &[u8], index: usize) -> Option<usize> {
 /// assert_eq!(text_to_float(b"1,5"), Some(1.5));
 /// assert_eq!(text_to_float(b"1"), None);
 /// assert_eq!(text_to_float(b"1.5e400"), None);
+/// assert_eq!(text_to_float(b"1.0\x00x"), Some(1.0));
 /// ```
 fn text_to_float(text: &[u8]) -> Option<f64> {
+    let end = text
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(text.len());
+    let text = &text[..end];
     let mut index = usize::from(matches!(text.first(), Some(b'+' | b'-')));
     index = skip_digits(text, index)?;
     let radix = match text.get(index) {

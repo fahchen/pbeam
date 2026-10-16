@@ -69,7 +69,22 @@ const EXPECTED: &str = "[{ok,\"1.0\"},{ok,\"1.5\"},{ok,\"-1.5\"},{ok,\"1.0\"},{o
     oat_probe,results,1,[]},{list_to_float_probe,uncaught,0,[]}]},{error,badarg,[{erlang,list_to_flo\
     at,[abc],[{error_info,#{module=>erl_erts_errors}}]},{list_to_float_probe,result,1,[]},{list_to_f\
     loat_probe,results,1,[]},{list_to_float_probe,results,1,[]},{list_to_float_probe,uncaught,0,[]}]\
-    }]";
+    },{ok,\"1.0\"},{ok,\"1.0\"},{error,badarg,[{erlang,list_to_float,[[49,0,46,48]],[{error_info,#{modul\
+    e=>erl_erts_errors}}]},{list_to_float_probe,result,1,[]},{list_to_float_probe,results,1,[]},{lis\
+    t_to_float_probe,results,1,[]},{list_to_float_probe,uncaught,0,[]}]},{error,badarg,[{erlang,list\
+    _to_float,[[0]],[{error_info,#{module=>erl_erts_errors}}]},{list_to_float_probe,result,1,[]},{li\
+    st_to_float_probe,results,1,[]},{list_to_float_probe,results,1,[]},{list_to_float_probe,uncaught\
+    ,0,[]}]},{error,badarg,[{erlang,list_to_float,[[0,49,46,48]],[{error_info,#{module=>erl_erts_err\
+    ors}}]},{list_to_float_probe,result,1,[]},{list_to_float_probe,results,1,[]},{list_to_float_prob\
+    e,results,1,[]},{list_to_float_probe,uncaught,0,[]}]},{ok,\"1.5\"},{error,badarg,[{erlang,list_to_\
+    float,[[49,46,48,0,4851]],[{error_info,#{module=>erl_erts_errors}}]},{list_to_float_probe,result\
+    ,1,[]},{list_to_float_probe,results,1,[]},{list_to_float_probe,results,1,[]},{list_to_float_prob\
+    e,uncaught,0,[]}]},{error,badarg,[{erlang,list_to_float,[[49,46,53,101,0,53]],[{error_info,#{mod\
+    ule=>erl_erts_errors}}]},{list_to_float_probe,result,1,[]},{list_to_float_probe,results,1,[]},{l\
+    ist_to_float_probe,results,1,[]},{list_to_float_probe,uncaught,0,[]}]},{error,badarg,[{erlang,li\
+    st_to_float,[[0,0]],[{error_info,#{module=>erl_erts_errors}}]},{list_to_float_probe,result,1,[]}\
+    ,{list_to_float_probe,results,1,[]},{list_to_float_probe,results,1,[]},{list_to_float_probe,unca\
+    ught,0,[]}]},{ok,\"1.0\"}]";
 
 #[test]
 fn reads_floats_from_lists_as_pinned_erts() {
