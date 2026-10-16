@@ -45,6 +45,10 @@ name = "example"
 path = "tests/feature/example.rs"
 
 [[test]]
+name = "gen_tcp"
+path = "tests/feature/gen_tcp.rs"
+
+[[test]]
 name = "get_line"
 path = "tests/feature/get_line.rs"
 

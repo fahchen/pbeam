@@ -1,7 +1,7 @@
 -module(io_start_probe).
 -export([lists/0, maps/0, map_keys/0, merge/0, atoms/0, atom_limit/0, system/0,
          system_other/0, otp_release/0, endian/0, format/0, nots/0,
-         keymembers/0, ands/0, ors/0]).
+         keymembers/0, keysearches/0, ands/0, ors/0]).
 
 %% `bif` `erlang:tl/1` with fail label 0, as group:init/1 (group.erl:136)
 %% runs it, and in a guard. `get_tl`, as proc_lib:trans_init/3
@@ -183,6 +183,17 @@ keymembers() ->
      try lists:keymember(a, 1, id(foo)) catch error:R5 -> R5 end,
      try lists:keymember(a, id(0), id(foo)) catch error:R6 -> R6 end,
      apply(lists, id(keymember), [d, 1, L])].
+
+%% lists:keysearch/3, which inet:pi_replace/2 (inet.erl:2721) calls, with
+%% call_ext and through the apply instruction. It runs keyfind and gives
+%% {value, Tuple} for a found tuple (erl_bif_lists.c:1279-1292).
+keysearches() ->
+    L = id([{a, 1}, b, {c}, {1.0, f}]),
+    [lists:keysearch(a, 1, L), lists:keysearch(1, 1, L), lists:keysearch(b, 1, L),
+     lists:keysearch(z, 1, L), lists:keysearch(c, 1, id([])),
+     try lists:keysearch(a, id(0), L) catch error:R1 -> R1 end,
+     try lists:keysearch(a, 1, id(foo)) catch error:R2 -> R2 end,
+     apply(lists, id(keysearch), [c, 1, L])].
 
 id(X) -> X.
 

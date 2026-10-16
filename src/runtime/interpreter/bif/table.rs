@@ -491,7 +491,7 @@ bifs! {
     io:printable_range/0 as IoPrintableRange0 => |_, []| Ok(Value(Term::static_atom("latin1"))),
     lists:keyfind/3 as ListsKeyfind3 => |cx, [key, position, list]| Ok(lists::keyfind(cx.scheduler.current_process_mut(), key, position, list)),
     lists:keymember/3 as ListsKeymember3 => |cx, [key, position, list]| Ok(lists::keymember(cx.scheduler.current_process_mut(), key, position, list)),
-    lists:keysearch/3 => unsupported,
+    lists:keysearch/3 as ListsKeysearch3 => |cx, [key, position, list]| Ok(lists::keysearch(cx.scheduler.current_process_mut(), key, position, list)),
     lists:member/2 as ListsMember2 => |cx, [element, list]| lists::member(cx.scheduler.current_process_mut(), element, list),
     lists:reverse/2 as ListsReverse2 => |cx, [list, tail]| lists::reverse(cx.scheduler.current_process_mut(), list, tail),
     maps:find/2 as MapsFind2 => |_, [key, map]| Ok(maps::find(key, map)),
