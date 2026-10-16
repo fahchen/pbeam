@@ -1952,13 +1952,26 @@ impl BeamProgram {
                     // instruction, so each entry to the function runs the
                     // NIF and returns its result to the caller
                     // (`beam/erl_nif.c:4922-4928`, `5050-5098`). A function
-                    // without a binding runs its BEAM stub body.
+                    // without a binding runs its BEAM stub body. An
+                    // exception of the NIF has the frame of the function
+                    // with its arguments first, as ERTS gives it.
                     let arguments = call_arguments(&process.registers, *arity)?;
                     cursor.commit(process);
-                    if let Some(result) = native::call(scheduler, &module.name, name, &arguments)
-                        && let Some(outcome) = self.finish_bif(scheduler, result?, true)?
-                    {
-                        return Ok(outcome);
+                    if let Some(result) = native::call(scheduler, &module.name, name, &arguments) {
+                        let outcome = match result? {
+                            BifResult::Raise { class, reason } => raise_at_entry(
+                                scheduler,
+                                &module.name,
+                                name,
+                                arguments,
+                                class,
+                                reason,
+                            ),
+                            result => self.finish_bif(scheduler, result, true),
+                        };
+                        if let Some(outcome) = outcome? {
+                            return Ok(outcome);
+                        }
                     }
                     cursor.refresh(scheduler)?;
                 }
@@ -5296,6 +5309,44 @@ fn function_clause(
     arity: u32,
 ) -> Result<Option<Outcome>, BeamError> {
     let arguments = call_arguments(&scheduler.current_process().registers, arity)?;
+    let reason = Term::static_atom("function_clause");
+    raise_at_entry(
+        scheduler,
+        module,
+        name,
+        arguments,
+        ExceptionClass::Error,
+        reason,
+    )
+}
+
+/// Raise an exception at the entry of the function `module:name` with
+/// `arguments`: the stack trace starts with `{Module, Name, Arguments, []}`
+/// and holds at most `backtrace_depth` frames, with the caller frames
+/// below it. A `function_clause` error and an exception of a NIF give this
+/// stack trace, as ERTS `save_stacktrace` keeps the arguments of the
+/// current function (`beam_common.c:880-935`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // x0 = -1 at the entry of `crypto:strong_rand_bytes_nif/1`.
+/// let outcome = raise_at_entry(scheduler, "crypto", "strong_rand_bytes_nif", vec![Term::Integer(-1)], ExceptionClass::Error, badarg)?;
+/// // The stack trace starts with {crypto, strong_rand_bytes_nif, [-1], []}.
+/// ```
+///
+/// # Errors
+///
+/// A name that is not in the atom table, or a caller frame with no
+/// `func_info` before its instruction, is a runtime invariant error.
+fn raise_at_entry(
+    scheduler: &mut Scheduler,
+    module: &str,
+    name: &str,
+    arguments: Vec<Term>,
+    class: ExceptionClass,
+    reason: Term,
+) -> Result<Option<Outcome>, BeamError> {
     let depth = scheduler.backtrace_depth.max(1);
     let atom = |name: &str| {
         scheduler
@@ -5316,8 +5367,8 @@ fn function_clause(
     frames.extend(mfa_stacktrace(scheduler, 1)?.into_iter().take(depth - 1));
     Ok(raise_with_stacktrace(
         scheduler.current_process_mut(),
-        ExceptionClass::Error,
-        Term::static_atom("function_clause"),
+        class,
+        reason,
         Term::list_from(frames),
     ))
 }

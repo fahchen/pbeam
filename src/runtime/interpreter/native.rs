@@ -23,6 +23,7 @@ use crate::runtime::{
     unicode::is_native_filename,
 };
 
+mod crypto;
 mod prim_file;
 mod prim_tty;
 
@@ -50,6 +51,10 @@ struct Binding {
     run: fn(&mut Scheduler, &[Term]) -> Result<BifResult, BeamError>,
 }
 
+/// The load callback of a static NIF library: it takes the load info and
+/// returns the veto of the callback.
+type LoadCallback = fn(&Term) -> Result<i32, BeamError>;
+
 /// The static NIF library of one module. ERTS finds a static library by the
 /// module name (`is_static_nif_module` in `beam/erl_nif.c:5324-5331`).
 ///
@@ -60,6 +65,8 @@ struct Binding {
 ///     module: "prim_tty",
 ///     functions: &prim_tty::FUNCTIONS,
 ///     bindings: prim_tty::BINDINGS,
+///     load: None,
+///     unbound_fails: false,
 /// };
 /// ```
 struct Library {
@@ -71,6 +78,14 @@ struct Library {
     /// The bindings of the functions that PBeam implements, sorted by name,
     /// then by arity.
     bindings: &'static [Binding],
+    /// The load callback of the library, which ERTS runs with the load info
+    /// on the first load (`beam/erl_nif.c:4980-4986`). It returns the veto
+    /// of the callback: 0 loads the library. `None` is a library whose load
+    /// callback returns 0 for each load info.
+    load: Option<LoadCallback>,
+    /// `true` when a function of `functions` without a binding gives a
+    /// runtime error, `false` when it runs its BEAM stub body.
+    unbound_fails: bool,
 }
 
 /// The registered static NIF libraries, sorted by the module name for a
@@ -79,19 +94,30 @@ struct Library {
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(LIBRARIES[0].module, "prim_file");
-/// assert_eq!(LIBRARIES[1].module, "prim_tty");
+/// assert_eq!(LIBRARIES[0].module, "crypto");
+/// assert_eq!(LIBRARIES[1].module, "prim_file");
 /// ```
 const LIBRARIES: &[Library] = &[
+    Library {
+        module: "crypto",
+        functions: &crypto::FUNCTIONS,
+        bindings: crypto::BINDINGS,
+        load: Some(crypto::load),
+        unbound_fails: true,
+    },
     Library {
         module: "prim_file",
         functions: &prim_file::FUNCTIONS,
         bindings: prim_file::BINDINGS,
+        load: None,
+        unbound_fails: false,
     },
     Library {
         module: "prim_tty",
         functions: &prim_tty::FUNCTIONS,
         bindings: prim_tty::BINDINGS,
+        load: None,
+        unbound_fails: false,
     },
 ];
 
@@ -127,10 +153,29 @@ fn binding(module: &str, name: &str, arity: u32) -> Option<&'static Binding> {
     Some(&bindings[index.ok()?])
 }
 
+/// Return the runtime error of `module:name/arity` when the function is in
+/// a library whose functions without a binding fail, such as `crypto`, or
+/// `None` when the function runs its BEAM stub body.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(unbound_error("crypto", "info_lib", 0).is_some());
+/// assert!(unbound_error("prim_file", "open_nif", 2).is_none());
+/// ```
+fn unbound_error(module: &str, name: &str, arity: u32) -> Option<BeamError> {
+    let library = library(module).filter(|library| library.unbound_fails)?;
+    library
+        .functions
+        .contains(&(name, arity))
+        .then(|| error(format!("{module}:{name}/{arity} NIF is not supported")))
+}
+
 /// Run the native binding of `module:name/arity`, with the arity of
 /// `arguments`, for the current process of `scheduler`. Return `None` when
 /// PBeam has no binding for the MFA; the function then runs its BEAM stub
-/// body.
+/// body. A function of a library whose functions without a binding fail,
+/// such as `crypto`, gives the runtime error `M:F/A NIF is not supported`.
 ///
 /// # Examples
 ///
@@ -151,7 +196,10 @@ pub(super) fn call(
     name: &str,
     arguments: &[Term],
 ) -> Option<Result<BifResult, BeamError>> {
-    let binding = binding(module, name, u32::try_from(arguments.len()).ok()?)?;
+    let arity = u32::try_from(arguments.len()).ok()?;
+    let Some(binding) = binding(module, name, arity) else {
+        return unbound_error(module, name, arity).map(Err);
+    };
     Some((binding.run)(scheduler, arguments))
 }
 
@@ -179,12 +227,15 @@ pub(super) fn call(
 ///    M:F/A"}}` (`beam/erl_nif.c:4845-4866`). The loader keeps the `-nifs`
 ///    list only when a function of the module starts with `nif_start`
 ///    (`jit/asm_load.c:651-661`, `beam/erl_nif.c:4700-4704`).
-/// 6. Else the library is loaded, and the result is `ok`. The load callback
-///    of `prim_tty` always returns 0 (`prim_tty_nif.c:1274-1279`).
+/// 6. The load callback of the library runs with `LoadInfo`. A veto that is
+///    not 0 gives `{error, {load, "Library load-call unsuccessful
+///    (Veto)."}}` (`beam/erl_nif.c:4980-4986`). The load callback of
+///    `prim_tty` always returns 0 (`prim_tty_nif.c:1274-1279`). The load
+///    callback of `crypto` checks the load info (`crypto.c:182-357`).
+/// 7. Else the library is loaded, and the result is `ok`.
 ///
 /// An error does not load the library, so the next call gives the same
-/// error. `LoadInfo` goes only to the load callback, which `prim_tty` does
-/// not read.
+/// error. `LoadInfo` goes only to the load callback.
 ///
 /// # Examples
 ///
@@ -201,7 +252,8 @@ pub(super) fn call(
 /// # Errors
 ///
 /// A module without PBeam bindings gives a runtime error that names the
-/// module. A new error atom or a new `capability_denied` atom in a full
+/// module. The load callback of `crypto` gives a runtime error for a
+/// `FipsMode` of `true`. A new error atom or a new `capability_denied` atom in a full
 /// atom table gives the error of `AtomTable::put`.
 pub(super) fn load_nif(scheduler: &mut Scheduler, caller: &str) -> Result<BifResult, BeamError> {
     let arguments = call_arguments(&scheduler.current_process_mut().registers, 2)?;
@@ -224,7 +276,7 @@ pub(super) fn load_nif(scheduler: &mut Scheduler, caller: &str) -> Result<BifRes
             "NIF library already loaded (reload disallowed since OTP 20).",
         );
     }
-    let module = Rc::clone(scheduler.code.module(caller)?);
+    let module = Rc::clone(scheduler.code.waiting_or_loaded(caller)?);
     let instructions = &module.instructions;
     let has_nifs = instructions
         .iter()
@@ -246,6 +298,11 @@ pub(super) fn load_nif(scheduler: &mut Scheduler, caller: &str) -> Result<BifRes
             let text = format!("Function not declared as nif {caller}:{name}/{arity}");
             return load_nif_error(&mut scheduler.atoms, "bad_lib", &text);
         }
+    }
+    let veto = library.load.map_or(Ok(0), |load| load(&arguments[1]))?;
+    if veto != 0 {
+        let text = format!("Library load-call unsuccessful ({veto}).");
+        return load_nif_error(&mut scheduler.atoms, "load", &text);
     }
     scheduler.nif_libraries.insert(caller.to_owned());
     Ok(BifResult::Value(Term::static_atom("ok")))
