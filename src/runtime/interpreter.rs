@@ -1560,6 +1560,41 @@ impl BeamProgram {
                         None => cursor.position = label_position(*fail_label)?,
                     }
                 }
+                // ERTS `i_bs_get_utf16` and `i_bs_skip_utf16` call
+                // `erts_bs_get_utf16` and jump to `Fail` when it gives no
+                // value (jit/arm/instr_bs.cpp:905-934). ERTS loads
+                // `bs_get_utf32` and `bs_skip_utf32` as a 32-bit
+                // `bs_get_integer2` and `i_bs_validate_unicode_retract`
+                // (jit/arm/ops.tab:1086-1095). That integer read writes `Dst`
+                // before the check fails, but the compiler defines `Dst` in
+                // the instruction, so no code reads it at `Fail`.
+                Instruction::BinaryGetUtf16 {
+                    fail_label,
+                    context,
+                    little,
+                    destination,
+                }
+                | Instruction::BinaryGetUtf32 {
+                    fail_label,
+                    context,
+                    little,
+                    destination,
+                } => {
+                    let (process, atoms) = scheduler.current_process_and_atoms();
+                    let state = match_context(process, context, atoms)?;
+                    let code_point = if matches!(instruction, Instruction::BinaryGetUtf16 { .. }) {
+                        state.get_utf16(*little)
+                    } else {
+                        state.get_utf32(*little)
+                    };
+                    match (code_point, destination) {
+                        (Some(code_point), Some(destination)) => {
+                            write(process, destination, Term::Integer(code_point.into()))?;
+                        }
+                        (Some(_), None) => {}
+                        (None, _) => cursor.position = label_position(*fail_label)?,
+                    }
+                }
                 Instruction::BinaryMatch {
                     fail_label,
                     context,

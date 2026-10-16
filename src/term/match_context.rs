@@ -469,6 +469,86 @@ impl MatchState {
             .fetch_add((size * 8) as u64, Ordering::Relaxed);
         Some(code_point)
     }
+
+    /// Read one UTF-16 character at the position and move the position
+    /// past it, as `erts_bs_get_utf16` does (`erl_bits.c:2223-2285`). The
+    /// position can be at any bit. A code unit that is not a surrogate is
+    /// one character. A high surrogate and a low surrogate after it are one
+    /// character. Return `None` and keep the position for fewer than 16
+    /// bits, a low surrogate first, or a high surrogate without a low
+    /// surrogate in the next 16 bits.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(MatchState::new(Binary::from(&[0, 65][..])).get_utf16(false), Some(65));
+    /// assert_eq!(MatchState::new(Binary::from(&[65, 0][..])).get_utf16(true), Some(65));
+    /// let pair = MatchState::new(Binary::from(&[216, 61, 222, 0][..]));
+    /// assert_eq!(pair.get_utf16(false), Some(0x1F600));
+    /// assert_eq!(MatchState::new(Binary::from(&[216, 61][..])).get_utf16(false), None);
+    /// assert_eq!(MatchState::new(Binary::from(&[220, 0][..])).get_utf16(false), None);
+    /// ```
+    pub(crate) fn get_utf16(&self, little: bool) -> Option<u32> {
+        // `erts_bs_get_utf16` copies 32 bits when it has them and else 16.
+        let bits = (self.remaining_bits() / 16).min(2) * 16;
+        let rest = segment_bits(&self.bytes, self.position(), bits);
+        let unit = |index: usize| {
+            let pair = rest.get(index..index + 2)?;
+            let (high, low) = if little {
+                (pair[1], pair[0])
+            } else {
+                (pair[0], pair[1])
+            };
+            Some(u32::from(high) << 8 | u32::from(low))
+        };
+        let first = unit(0)?;
+        let (code_point, size) = match first {
+            0xD800..=0xDBFF => {
+                let second = unit(2).filter(|second| (0xDC00..=0xDFFF).contains(second))?;
+                ((((first & 0x3FF) << 10) | (second & 0x3FF)) + 0x10000, 32)
+            }
+            0xDC00..=0xDFFF => return None,
+            _ => (first, 16),
+        };
+        self.position.fetch_add(size, Ordering::Relaxed);
+        Some(code_point)
+    }
+
+    /// Read one UTF-32 character at the position and move the position
+    /// past it. The position can be at any bit. ERTS reads a 32-bit
+    /// unsigned integer, and `i_bs_validate_unicode_retract` moves the
+    /// position back by 32 bits and fails for a surrogate or a value above
+    /// 0x10FFFF (jit/arm/ops.tab:1086-1095, jit/arm/instr_bs.cpp:936-983).
+    /// Return `None` and keep the position for fewer than 32 bits or for
+    /// such a value.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(MatchState::new(Binary::from(&[0, 1, 246, 0][..])).get_utf32(false), Some(0x1F600));
+    /// assert_eq!(MatchState::new(Binary::from(&[0, 246, 1, 0][..])).get_utf32(true), Some(0x1F600));
+    /// assert_eq!(MatchState::new(Binary::from(&[0, 0, 216, 0][..])).get_utf32(false), None);
+    /// assert_eq!(MatchState::new(Binary::from(&[0, 17, 0, 0][..])).get_utf32(false), None);
+    /// assert_eq!(MatchState::new(Binary::from(&[0, 0, 0][..])).get_utf32(false), None);
+    /// ```
+    pub(crate) fn get_utf32(&self, little: bool) -> Option<u32> {
+        if self.remaining_bits() < 32 {
+            return None;
+        }
+        let bytes: [u8; 4] = segment_bits(&self.bytes, self.position(), 32)
+            .try_into()
+            .ok()?;
+        let code_point = if little {
+            u32::from_le_bytes(bytes)
+        } else {
+            u32::from_be_bytes(bytes)
+        };
+        if (0xD800..=0xDFFF).contains(&code_point) || code_point > 0x0010_FFFF {
+            return None;
+        }
+        self.position.fetch_add(32, Ordering::Relaxed);
+        Some(code_point)
+    }
 }
 
 /// Return `size` bits of `bytes` from the bit offset `start`, packed in

@@ -448,7 +448,7 @@ fn stops_the_run_for_a_module_that_the_loader_cannot_decode() {
             .unwrap_err()
             .to_string(),
         "erts_internal:prepare_loading/2 cannot load module load_unsupported: \
-         unsupported BEAM opcode 141"
+         unsupported BEAM opcode 183"
     );
 }
 
