@@ -288,6 +288,32 @@ fn kills_a_process_in_the_code_of_a_failed_on_load_function_as_pinned_erts() {
 }
 
 #[test]
+fn keeps_a_process_that_left_the_code_of_a_failed_on_load_function_as_pinned_erts() {
+    // The on_load function of `on_load_survive` starts a process that leaves
+    // the code of the module at once, so no frame of the process is in the
+    // code. The `check_process_code` request answers `false` for the
+    // process, and `erts_code_purger` does not kill it
+    // (erts_code_purger.erl:166-182, 249-265). The process runs on after the
+    // purge removed the code.
+    let erts = run(&mut erts_probe(
+        ON_LOAD_PROBE,
+        "on_load_server_probe",
+        "survived",
+        &[],
+    ));
+    assert_eq!(erts, "[{error,on_load_failure},true,[3,2,1]]\n");
+    assert_eq!(
+        run(&mut pbeam_probe(
+            ON_LOAD_PROBE,
+            "on_load_server_probe",
+            "survived",
+            &[]
+        )),
+        erts
+    );
+}
+
+#[test]
 fn checks_the_arguments_of_the_bifs_of_erts_code_purger_as_pinned_erts() {
     // The argument checks and results of `erts_internal:purge_module/2`
     // from a process that is not `erts_code_purger`,

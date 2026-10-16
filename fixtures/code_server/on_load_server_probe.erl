@@ -1,6 +1,7 @@
 -module(on_load_server_probe).
--export([main/0, failure/0, hibernated/0, killed/0, system_tasks/0,
-         fake_purger/0, purge_loaded/0, purge_prepare/0, gc_task/0]).
+-export([main/0, failure/0, hibernated/0, killed/0, survived/0, wait/0,
+         system_tasks/0, fake_purger/0, purge_loaded/0, purge_prepare/0,
+         gc_task/0]).
 
 %% Write the results of code_server for modules with an -on_load function
 %% whose function returns ok, one term on each line. code:ensure_loaded/1
@@ -59,6 +60,33 @@ killed() ->
     Pid = receive {waiting, P} -> P end,
     io:format("~p~n", [[Result, erlang:is_process_alive(Pid),
                         erlang:module_loaded(on_load_spawn)]]).
+
+%% Write the result of a load of on_load_survive, whose on_load function
+%% starts a process that leaves the code of the module. The process has no
+%% frame in the code, so the check_process_code request answers false for
+%% it and erts_code_purger does not kill it (erts_code_purger.erl:166-182,
+%% 249-265). The process runs on, also with an erlang:apply/3 call, after
+%% the purge removed the code (beam_bif_load.c:2249-2262).
+survived() ->
+    true = register(on_load_spawn_probe, self()),
+    Result = code:ensure_loaded(on_load_survive),
+    Pid = receive {waiting, P} -> P end,
+    Alive = erlang:is_process_alive(Pid),
+    Pid ! {apply, self(), lists, reverse, [[1, 2, 3]]},
+    Applied = receive {applied, Pid, Value} -> Value end,
+    io:format("~p~n", [[Result, Alive, Applied]]).
+
+%% Wait for a request of a process that the on_load function of
+%% on_load_survive started. The call of erlang:apply/3 reads the start MFA
+%% of the process, whose code on_load_survive no longer has.
+wait() ->
+    receive
+        {apply, From, Module, Function, Arguments} ->
+            From ! {applied, self(), erlang:apply(Module, Function, Arguments)},
+            wait();
+        stop ->
+            ok
+    end.
 
 %% Write the results of the BIFs that erts_code_purger calls, from a
 %% process that is not erts_code_purger: erts_internal:purge_module/2
