@@ -2545,6 +2545,11 @@ pub(super) fn system_info(atoms: &mut AtomTable, item: &Term) -> Result<BifResul
             Ok(Value(Term::static_atom("opt")))
         }
         Term::Atom(atom) if atoms.name_of(atom) == "endian" => Ok(Value(Term::static_atom(ENDIAN))),
+        // `2 * erts_no_schedulers` (`erl_init.c:1354`), and PBeam has one
+        // scheduler. `erlang:system_flag/2` cannot change it in PBeam.
+        Term::Atom(atom) if atom.is_static("outstanding_system_requests_limit") => {
+            Ok(Value(Term::Integer(2)))
+        }
         _ => Err(error(format!(
             "unsupported erlang:system_info/1 argument {}",
             debug_term(item, atoms)
@@ -4457,6 +4462,25 @@ fn ptab_list_push(list: &mut Term, pid_ix: &mut i64, pid: ProcessId) {
     *pid_ix += 1;
 }
 
+/// Return the pid of the policy process when the current process is not a
+/// boot process, else `None`: a read of the process table by a process
+/// that is not a boot process does not give the pid of the policy process
+/// (section "Policy module, policy process, and policy table" of
+/// `docs/capability-security-migration.md`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(hidden_policy(&scheduler), scheduler.policy_id());
+/// ```
+pub(super) fn hidden_policy(scheduler: &Scheduler) -> Option<ProcessId> {
+    if scheduler.current_process().security.is_boot() {
+        None
+    } else {
+        scheduler.policy_id()
+    }
+}
+
 /// Continue an `erlang:processes/0` call with `state`, as
 /// `ptab_list_bif_engine` does (`erl_ptab.c:888-1280`), until the call
 /// returns its result or uses its reductions and traps.
@@ -4489,11 +4513,7 @@ pub(super) fn ptab_list(
     scheduler: &mut Scheduler,
     mut state: PtabList,
 ) -> Result<BifResult, BeamError> {
-    let hidden = if scheduler.current_process().security.is_boot() {
-        None
-    } else {
-        scheduler.policy_id()
-    };
+    let hidden = hidden_policy(scheduler);
     if state.tix < 0 {
         scheduler.ptab_list_start();
         state.tix = 0;

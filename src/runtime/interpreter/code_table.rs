@@ -40,8 +40,10 @@ pub(in crate::runtime::interpreter) fn export_frame_calls() -> usize {
 /// table of the active code index (`module.c`, `export.c`). Every module
 /// lookup of the run reads it. A run starts with the modules of the
 /// program, and `erlang:finish_loading/1` adds a new module. No operation
-/// removes a module or changes its code, so a module that a lookup gives
-/// stays the code of its name for the whole run.
+/// removes a loaded module or changes its code, so a module that a lookup
+/// gives stays the code of its name for the whole run. Only the purge of
+/// the code of a failed `-on_load` function removes code (see
+/// [`CodeTable::prepare_on_load_purge`]), and no export names that code.
 #[derive(Debug, Default)]
 pub(in crate::runtime) struct CodeTable {
     /// The loaded modules by name. The program owns the start modules too,
@@ -65,6 +67,12 @@ pub(in crate::runtime) struct CodeTable {
     /// not loaded, and its exports stay hidden until
     /// [`CodeTable::finish_after_on_load`] keeps the code.
     on_load: HashMap<String, OnLoadCode>,
+    /// The module name and the code of the purge that
+    /// `erts_internal:purge_module(Module, prepare_on_load)` started, as
+    /// `purge_state.module` and the old code of the ERTS module
+    /// (`beam_bif_load.c:2134-2160`). The code stays in `by_id` until
+    /// [`CodeTable::complete_purge`] removes it, and it is in no other map.
+    purging: Option<(String, Rc<BeamModule>)>,
 }
 
 /// The code of a module that waits for its `-on_load` function.
@@ -197,6 +205,7 @@ impl CodeTable {
             by_id,
             prepared: HashMap::new(),
             on_load: HashMap::new(),
+            purging: None,
         }
     }
 
@@ -684,6 +693,85 @@ impl CodeTable {
         let waiting = self.on_load.remove(name).expect("checked above");
         self.modules.insert(name.to_owned(), waiting.code);
         Ok(true)
+    }
+
+    /// Start the purge of the code of the module `name` after its failed
+    /// `-on_load` function, as `erts_internal:purge_module(Module,
+    /// prepare_on_load)` does (`beam_bif_load.c:2100-2189`): the code that
+    /// waits for the function becomes the old code of the module, which
+    /// [`CodeTable::old_code`] gives. Return `Some(true)` then. Return
+    /// `Some(false)` when the run has no module `name`, and `None`, with no
+    /// change, while a purge runs.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(code.prepare_on_load_purge("on_load_error")?, Some(true));
+    /// assert_eq!(code.prepare_on_load_purge("on_load_error")?, None);
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// A loaded module with no code that waits for its `-on_load` function
+    /// gives the runtime error `erts_internal:purge_module/2 found no
+    /// on_load code of M`: the ERTS assertion `modp->on_load` fails
+    /// (`beam_bif_load.c:2134-2140`).
+    pub(in crate::runtime) fn prepare_on_load_purge(
+        &mut self,
+        name: &str,
+    ) -> Result<Option<bool>, BeamError> {
+        if self.purging.is_some() {
+            return Ok(None);
+        }
+        let Some(waiting) = self.on_load.remove(name) else {
+            if self.modules.contains_key(name) {
+                return Err(error(format!(
+                    "erts_internal:purge_module/2 found no on_load code of {name}"
+                )));
+            }
+            return Ok(Some(false));
+        };
+        self.purging = Some((name.to_owned(), waiting.code));
+        Ok(Some(true))
+    }
+
+    /// Return the identity of the old code of the module `name`, else
+    /// `None`. Only a purge that [`CodeTable::prepare_on_load_purge`]
+    /// started gives a module old code, because PBeam has no code
+    /// replacement.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(code.old_code("lists"), None);
+    /// ```
+    pub(in crate::runtime) fn old_code(&self, name: &str) -> Option<ModuleId> {
+        self.purging
+            .as_ref()
+            .filter(|(purged, _)| purged == name)
+            .map(|(_, code)| code.id)
+    }
+
+    /// Remove the old code of the purge of the module `name`, as
+    /// `erts_internal:purge_module(Module, complete)` does
+    /// (`beam_bif_load.c:2222-2326`). Return `false`, with no change, when
+    /// no purge of `name` runs. The caller must make sure that no process
+    /// has a frame in the code: `erts_code_purger` kills each process that
+    /// refers to it first (`erts_code_purger.erl:166-182`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(code.complete_purge("on_load_error"));
+    /// assert!(!code.complete_purge("on_load_error"));
+    /// ```
+    pub(in crate::runtime) fn complete_purge(&mut self, name: &str) -> bool {
+        if self.old_code(name).is_none() {
+            return false;
+        }
+        let (_, code) = self.purging.take().expect("checked above");
+        self.by_id.remove(&code.id);
+        true
     }
 }
 

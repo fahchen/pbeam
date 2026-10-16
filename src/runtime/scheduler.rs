@@ -1587,6 +1587,23 @@ impl Scheduler {
         self.processes.get(&id)
     }
 
+    /// Return the index and the pid of each process of the table with an
+    /// index from `start` up to `end`, in the index order of the ERTS table
+    /// (see [`ProcessTable::indexed`]).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(scheduler.ptab_indexed(0, 25).next(), Some((0, ProcessId(0))));
+    /// ```
+    pub(super) fn ptab_indexed(
+        &self,
+        start: u64,
+        end: u64,
+    ) -> impl Iterator<Item = (u64, ProcessId)> + '_ {
+        self.processes.indexed(start, end)
+    }
+
     /// Return the process `id` when it does not exit, as `erts_proc_lookup`
     /// (`erl_process_lock.h:1151-1157`) finds it.
     ///
