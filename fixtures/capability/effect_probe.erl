@@ -11,6 +11,7 @@
     port_info/0,
     port_info2/0,
     port_connect/0,
+    port_badargs/0,
     port_control/0,
     port_set_data/0,
     port_get_data/0,
@@ -461,7 +462,17 @@ process_badargs() ->
         badarg(fun() -> erlang:send(id(1), ping) end),
         badarg(fun() -> erlang:send(self(), ping, id([foo])) end),
         badarg(fun() -> erlang:start_timer(-1, self(), ping) end),
-        badarg(fun() -> erlang:start_timer(0, id(1), ping) end)
+        badarg(fun() -> erlang:start_timer(0, id(1), ping) end),
+        badarg(fun() -> erlang:link(id(1)) end)
+    ].
+
+%% The pid and item checks come before the port capability check.
+port_badargs() ->
+    Port = cat(),
+    [
+        badarg(fun() -> erlang:port_connect(Port, id(self)) end),
+        badarg(fun() -> erlang:port_info(Port, id(bad_item)) end),
+        badarg(fun() -> erlang:port_info(Port, id("connected")) end)
     ].
 
 %% Each probe below gives the result of the call and a sign of its effect.

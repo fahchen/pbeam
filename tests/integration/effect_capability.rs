@@ -761,11 +761,25 @@ fn gives_the_erts_results_of_the_permitted_process_operations() {
 fn checks_the_process_arguments_before_the_capability() {
     let program = program();
     let policy = grants(CapabilityKind::Process, &[], Constraint::Any);
-    let badargs = Term::list_from(vec![atom(&program, "badarg"); 8]);
+    let badargs = Term::list_from(vec![atom(&program, "badarg"); 9]);
     assert_eq!(run(&program, "process_badargs", &policy), badargs);
     assert_eq!(
         erts_with_stand_in("process_badargs"),
-        "[badarg,badarg,badarg,badarg,badarg,badarg,badarg,badarg]\n"
+        "[badarg,badarg,badarg,badarg,badarg,badarg,badarg,badarg,badarg]\n"
+    );
+}
+
+#[test]
+fn checks_the_port_arguments_before_the_capability() {
+    // `erlang:port_connect/2` checks the pid, and `erlang:port_info/2` the
+    // item, before the `port` capability (erl_bif_port.c:438-595).
+    let program = program();
+    let policy = grants(CapabilityKind::Port, &[Operation::Spawn], Constraint::Any);
+    let badargs = Term::list_from(vec![atom(&program, "badarg"); 3]);
+    assert_eq!(run(&program, "port_badargs", &policy), badargs);
+    assert_eq!(
+        erts_with_stand_in("port_badargs"),
+        "[badarg,badarg,badarg]\n"
     );
 }
 

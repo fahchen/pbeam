@@ -846,7 +846,7 @@ pub(super) fn port_info(context: &mut BifContext<'_>, port: &Term) -> Result<Bif
             Term::list_from(
                 PORT_INFO_ITEMS
                     .iter()
-                    .map(|&name| port_item(id, port, name).expect("a port_info/1 item")),
+                    .map(|&name| port_item(id, port, name)),
             )
         }
         (Term::Port(_) | Term::Atom(_), None) => Term::static_atom("undefined"),
@@ -882,11 +882,11 @@ const OTHER_PORT_ITEMS: [&str; 8] = [
 
 /// Return the item `{Name, Value}` of the open port `port` with the number
 /// `id`, as `erts_bld_port_info` builds it (`erl_bif_info.c:3654-3830`),
-/// or `None` for a name that is not an item of [`PORT_INFO_ITEMS`]. The
+/// for a name of [`PORT_INFO_ITEMS`]. The
 /// name is the list of the bytes of the program path or driver name,
 /// `links` holds the linked processes in pid order, and `id` is the port
 /// number.
-fn port_item(id: PortId, port: &Port, name: &str) -> Option<Term> {
+fn port_item(id: PortId, port: &Port, name: &str) -> Term {
     let value = match name {
         "name" => Term::list_from(port.name.iter().map(|&byte| Term::Integer(byte.into()))),
         "links" => Term::list_from(port.links.iter().map(|&pid| Term::Pid(pid))),
@@ -894,13 +894,13 @@ fn port_item(id: PortId, port: &Port, name: &str) -> Option<Term> {
         "connected" => Term::Pid(port.owner),
         "input" => Term::Integer(port.input.try_into().expect("an input count below 2^63")),
         "output" => Term::Integer(port.output.try_into().expect("an output count below 2^63")),
-        "os_pid" => match &port.driver {
+        // The last item, `os_pid`.
+        _ => match &port.driver {
             Driver::Spawn(spawn) => Term::Integer(spawn.child.os_pid.into()),
             Driver::Inet(_) => Term::static_atom("undefined"),
         },
-        _ => return None,
     };
-    Some(Term::tuple(vec![Term::static_atom(name), value]))
+    Term::tuple(vec![Term::static_atom(name), value])
 }
 
 /// Run `erts_internal:port_info(Port, Item)`, which `erlang:port_info/2`
@@ -908,7 +908,7 @@ fn port_item(id: PortId, port: &Port, name: &str) -> Option<Term> {
 /// (`erl_bif_port.c:543-595`, `erl_bif_info.c:3654-3830`): for an open
 /// port, use 40 reductions (`ERTS_PORT_REDS_INFO`) and return the item of
 /// [`port_item`]; an item that is not an item name gives the atom
-/// `badarg`. A port that closed and an atom give `undefined`, and each
+/// `badarg` before the capability check. A port that closed and an atom give `undefined`, and each
 /// other term gives the atom `badtype`. The result traps to
 /// `erlang:bif_handle_signals_return/2` when the caller has incoming
 /// signals. For an open port, a caller without a `port` capability with
@@ -933,14 +933,17 @@ pub(super) fn port_info_item(
     let scheduler = &mut *context.scheduler;
     let info = match (port, open_port_id(scheduler, port)) {
         (_, Some(id)) => {
-            if let Some(denied) = port_denial(scheduler, id, Operation::Inspect)? {
-                return Ok(denied);
-            }
             let name = match item {
                 Term::Atom(name) => scheduler.atoms.name_of(name).to_owned(),
                 _ => String::new(),
             };
             let name = name.as_str();
+            if !PORT_INFO_ITEMS.contains(&name) && !OTHER_PORT_ITEMS.contains(&name) {
+                return Ok(signals_return(scheduler, port, Term::static_atom("badarg")));
+            }
+            if let Some(denied) = port_denial(scheduler, id, Operation::Inspect)? {
+                return Ok(denied);
+            }
             if OTHER_PORT_ITEMS.contains(&name) {
                 return Err(error(format!(
                     "unsupported erlang:port_info/2 item {name}: see \"Ports\" in docs/erts-differences.md"
@@ -951,7 +954,7 @@ pub(super) fn port_info_item(
                 .bump_reductions(PORT_REDUCTIONS);
             let ports = scheduler.resources.borrow_mut::<Ports>();
             let port = ports.get(id).expect("the port is open");
-            port_item(id, port, name).unwrap_or(Term::static_atom("badarg"))
+            port_item(id, port, name)
         }
         (Term::Port(_) | Term::Atom(_), None) => Term::static_atom("undefined"),
         (_, None) => Term::static_atom("badtype"),
@@ -969,9 +972,9 @@ pub(super) fn port_info_item(
 /// that is not a pid, and a pid of a process that does not exist give the
 /// atom `badarg`, which `erlang:port_connect/2` raises. The result traps to
 /// `erlang:bif_handle_signals_return/2` when the caller has incoming
-/// signals. For an open port, a caller without a `port` capability with
-/// `command` that permits the program path of the port gets
-/// `error:capability_denied`.
+/// signals. For an open port and a pid, a caller without a `port`
+/// capability with `command` that permits the program path of the port
+/// gets `error:capability_denied`.
 ///
 /// # Examples
 ///
@@ -989,11 +992,11 @@ pub(super) fn port_connect(
 ) -> Result<BifResult, BeamError> {
     let scheduler = &mut *context.scheduler;
     let result = match (open_port_id(scheduler, port), pid) {
-        (Some(id), _) => {
+        (Some(id), &Term::Pid(pid)) => {
             if let Some(denied) = port_denial(scheduler, id, Operation::Command)? {
                 return Ok(denied);
             }
-            let connected = matches!(pid, Term::Pid(pid) if scheduler.connect_port(id, *pid));
+            let connected = scheduler.connect_port(id, pid);
             if connected {
                 scheduler
                     .current_process_mut()
@@ -1001,7 +1004,7 @@ pub(super) fn port_connect(
             }
             Term::static_atom(if connected { "true" } else { "badarg" })
         }
-        (None, _) => Term::static_atom("badarg"),
+        _ => Term::static_atom("badarg"),
     };
     Ok(signals_return(scheduler, port, result))
 }

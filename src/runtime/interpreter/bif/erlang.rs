@@ -997,18 +997,22 @@ pub(super) fn raise(depth: usize, class: &Term, reason: &Term, stacktrace: &Term
 /// A new `capability_denied` atom in a full atom table gives the error of
 /// `AtomTable::put`.
 pub(super) fn link(scheduler: &mut Scheduler, target: &Term) -> Result<BifResult, BeamError> {
+    let target = match *target {
+        Term::Pid(pid) => LinkId::Process(pid),
+        Term::Port(port) => LinkId::Port(port),
+        _ => return Ok(BifResult::badarg()),
+    };
     if let Some(denied) = denial(scheduler, CapabilityKind::Process, Operation::Link, None)? {
         return Ok(denied);
     }
-    let linked = match *target {
-        Term::Pid(target) => {
+    let linked = match target {
+        LinkId::Process(target) => {
             if let Some(denied) = boot_denial(scheduler, target)? {
                 return Ok(denied);
             }
             scheduler.link(target)
         }
-        Term::Port(port) => scheduler.link_port(port),
-        _ => return Ok(BifResult::badarg()),
+        LinkId::Port(port) => scheduler.link_port(port),
     };
     Ok(if linked {
         Value(Term::static_atom("true"))
