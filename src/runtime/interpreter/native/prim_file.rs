@@ -191,11 +191,11 @@ fn open_nif(scheduler: &mut Scheduler, path: &Term, modes: &Term) -> Result<BifR
         Err(errno) => return error_tuple(atoms, &errno_id(errno)),
     };
     let reference = scheduler.make_ref()?;
+    let caller = scheduler.current_process_mut().id;
     scheduler
         .resources
         .borrow_mut::<Files>()
-        .insert(reference, file);
-    let caller = scheduler.current_process_mut().id;
+        .insert(reference, file, caller);
     scheduler
         .send_signal(None, caller, Signal::FileMonitor { file: reference })
         .expect("the caller is alive");
@@ -246,7 +246,9 @@ fn translate_modelist(atoms: &AtomTable, modes: &Term) -> OpenModes {
 /// Run `prim_file:close_nif(Fd)`, as the ERTS NIF `close_nif`
 /// (`prim_file_nif.c:618-647`) does: a term that is not a file resource
 /// raises `error:badarg`, a closed resource gives `{error, einval}`, and
-/// else the binding closes the host file and gives `ok`.
+/// else the binding removes the monitor of the resource on its owner
+/// (`enif_demonitor_process`, `prim_file_nif.c:633`), closes the host
+/// file, and gives `ok`.
 ///
 /// PBeam closes the host file with the drop of its `File`, which ignores
 /// the result of `close`, so a failed `close` gives `ok`.
@@ -267,15 +269,11 @@ fn close_nif(scheduler: &mut Scheduler, fd: &Term) -> Result<BifResult, BeamErro
     let Term::Reference(reference) = fd else {
         return Ok(BifResult::badarg());
     };
-    match scheduler
-        .resources
-        .borrow_mut::<Files>()
-        .get_mut(*reference)
-    {
+    match scheduler.resources.borrow_mut::<Files>().close(*reference) {
         None => Ok(BifResult::badarg()),
         Some(None) => error_tuple(&mut scheduler.atoms, "einval"),
-        Some(file) => {
-            *file = None;
+        Some(Some(owner)) => {
+            scheduler.demonitor_file(owner, *reference);
             Ok(BifResult::Value(Term::static_atom("ok")))
         }
     }
@@ -304,11 +302,7 @@ fn file_handle_wrapper(
     let Term::Reference(reference) = fd else {
         return Ok(BifResult::badarg());
     };
-    match scheduler
-        .resources
-        .borrow_mut::<Files>()
-        .get_mut(*reference)
-    {
+    match scheduler.resources.borrow_mut::<Files>().get(*reference) {
         None => Ok(BifResult::badarg()),
         Some(None) => error_tuple(&mut scheduler.atoms, "einval"),
         Some(Some(file)) => operation(file, &mut scheduler.atoms),
