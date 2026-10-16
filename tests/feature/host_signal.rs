@@ -22,7 +22,7 @@ mod common;
 #[path = "../common/log_event.rs"]
 mod log_event;
 
-use boot::{BOOT_MODULES, boot_beam};
+use boot::{BOOT_MODULES, boot_beam, otp_root};
 use common::pinned_beam_path;
 use log_event::{LOG_EVENT_MODULES, mask_time};
 
@@ -192,6 +192,8 @@ fn pbeam(function: &str) -> Command {
             "start",
             "notify_probe",
             function,
+            "--root",
+            otp_root().to_str().unwrap(),
             "--",
             NOTIFY_PROBE,
         ])

@@ -16,7 +16,7 @@ mod boot;
 #[path = "../common/mod.rs"]
 mod common;
 
-use boot::{BOOT_MODULES, boot_beam};
+use boot::{BOOT_MODULES, boot_beam, otp_root};
 use common::pinned_beam_path;
 
 const IO_DEVICE_PROBE: &str = "fixtures/boot/io_device_probe.beam";
@@ -140,6 +140,8 @@ fn pbeam(function: &str) -> Command {
             "start",
             "io_device_probe",
             function,
+            "--root",
+            otp_root().to_str().unwrap(),
             "--",
             IO_DEVICE_PROBE,
         ])

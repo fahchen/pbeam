@@ -5,11 +5,7 @@
 //! `examples/hello_world` answers `{ensure_loaded, Module}` for the init
 //! process (`init.erl:730-750`).
 
-use std::{
-    path::{Path, PathBuf},
-    process::{Command, Output, Stdio},
-    sync::OnceLock,
-};
+use std::process::{Command, Output, Stdio};
 
 #[path = "../common/boot.rs"]
 mod boot;
@@ -20,7 +16,7 @@ mod boot;
 #[path = "../common/mod.rs"]
 mod common;
 
-use boot::{BOOT_MODULES, boot_beam};
+use boot::{BOOT_MODULES, boot_beam, otp_root};
 use common::pinned_beam_path;
 
 /// The probe that calls a module that the run does not load. The module
@@ -115,30 +111,6 @@ fn charges_the_reductions_of_the_error_handler_path_as_pinned_erts() {
     );
 }
 
-/// Return the root directory of the pinned OTP, as `code:root_dir/0` gives
-/// it, from one `erl` run for each test process.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// assert!(root().join("lib").is_dir());
-/// ```
-fn root() -> &'static Path {
-    static ROOT: OnceLock<PathBuf> = OnceLock::new();
-    ROOT.get_or_init(|| {
-        let output = Command::new("erl")
-            .args([
-                "-noshell",
-                "-eval",
-                "io:put_chars(code:root_dir()), halt().",
-            ])
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "{output:?}");
-        PathBuf::from(String::from_utf8(output.stdout).unwrap())
-    })
-}
-
 /// Return the command of a probe on the pinned ERTS with the code path
 /// directory.
 ///
@@ -176,7 +148,7 @@ fn pbeam(module: &str, function: &str, probes: &[String]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_pbeam"));
     command
         .args(["pbeam_boot", "start", module, function, "--root"])
-        .arg(root())
+        .arg(otp_root())
         .args(["--pa", CODE_PATH])
         .arg("--")
         .args(probes)

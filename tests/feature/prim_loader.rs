@@ -13,7 +13,7 @@ mod boot;
 #[path = "../common/mod.rs"]
 mod common;
 
-use boot::{BOOT_MODULES, boot_beam};
+use boot::{BOOT_MODULES, boot_beam, otp_root};
 use common::pinned_beam_path;
 
 /// The probe that writes the `erl_prim_loader` results.
@@ -50,16 +50,16 @@ const RESULTS_WITHOUT_PA: &str = "[error,error,error,\n \
 #[test]
 fn starts_erl_prim_loader_with_the_code_path_of_pa_as_pinned_erts() {
     // `pbeam --pa d1 --pa d2` gives `pbeam_boot:start/3` the boot flags
-    // `[{pa, [<<"d1">>]}, {pa, [<<"d2">>]}]`, as `init:parse_boot_args/1`
-    // gives them for `erl -pa d1 -pa d2` (init.erl:1668-1709). `pbeam_boot`
-    // starts the pinned `erl_prim_loader` with the path `Pa ++ Pz ++ ["."]`,
-    // with the last `-pa` first (init.erl:1164-1176, 1259-1262). Without
-    // `--pa`, `pbeam_boot:start/2` gives no flags, so the path is `["."]`.
-    // The ERTS boot script then replaces the path with `Pa ++ BootPath ++
-    // Pz`, where `BootPath` is the `lib` directories of `start_clean.boot`
-    // (init.erl:1323-1332). PBeam runs no boot script (row "Boot" of
-    // `docs/erts-differences.md`), so the paths differ after the `-pa`
-    // directories.
+    // `[{root, [Root]}, {pa, [<<"d1">>]}, {pa, [<<"d2">>]}]`, as
+    // `init:parse_boot_args/1` gives them for `erl -pa d1 -pa d2`
+    // (init.erl:1668-1709). `pbeam_boot` starts the pinned
+    // `erl_prim_loader` with the path `Pa ++ Pz ++ ["."]`, with the last
+    // `-pa` first (init.erl:1164-1176, 1259-1262). The last `path` command
+    // of `start_clean.boot` then replaces the path with
+    // `Pa ++ BootPath ++ Pz`, where `BootPath` is the `kernel` and `stdlib`
+    // `ebin` directories of the root (init.erl:1323-1332). The ERTS run
+    // gives `-boot start_clean`, so that its boot path is that of
+    // `pbeam_boot`.
     let directory = env::temp_dir().join(format!("pbeam-prim-loader-{}", process::id()));
     for (file, contents) in [("d1/a.txt", "one"), ("d1/c.txt", "c"), ("d2/a.txt", "two")] {
         let path = directory.join(file);
@@ -68,21 +68,24 @@ fn starts_erl_prim_loader_with_the_code_path_of_pa_as_pinned_erts() {
     }
     let with_pa = ["--pa", "d1", "--pa", "d2"];
     let cases = [
-        (
-            &with_pa[..],
-            RESULTS_WITH_PA,
-            "{ok,[\"d2\",\"d1\",",
-            "{ok,[\"d2\",\"d1\",\".\"]}\n",
-        ),
-        (&[][..], RESULTS_WITHOUT_PA, "{ok,[\"/", "{ok,[\".\"]}\n"),
+        (&with_pa[..], RESULTS_WITH_PA, "{ok,[\"d2\",\"d1\",\n"),
+        (&[][..], RESULTS_WITHOUT_PA, "{ok,[\""),
     ];
-    for (flags, results, erts_path, pbeam_path) in cases {
+    let kernel = otp_root().join("lib/kernel-11.0.4/ebin");
+    let stdlib = otp_root().join("lib/stdlib-8.1/ebin");
+    for (flags, results, erts_path) in cases {
         let erts = run(&mut erts(&directory, flags));
-        let (path, rest) = erts.split_once('\n').unwrap();
-        assert!(path.starts_with(erts_path), "ERTS {flags:?}: {erts}");
-        assert!(rest.ends_with(results), "ERTS {flags:?}: {erts}");
-        let pbeam = run(&mut pbeam(&directory, flags));
-        assert_eq!(pbeam, format!("{pbeam_path}{results}"), "PBeam {flags:?}");
+        assert!(erts.starts_with(erts_path), "ERTS {flags:?}: {erts}");
+        assert!(
+            erts.contains(&format!("\"{}\",", kernel.display())),
+            "ERTS {flags:?}: {erts}"
+        );
+        assert!(
+            erts.contains(&format!("\"{}\"]}}\n", stdlib.display())),
+            "ERTS {flags:?}: {erts}"
+        );
+        assert!(erts.ends_with(results), "ERTS {flags:?}: {erts}");
+        assert_eq!(run(&mut pbeam(&directory, flags)), erts, "PBeam {flags:?}");
     }
     fs::remove_dir_all(&directory).unwrap();
 }
@@ -99,7 +102,7 @@ fn starts_erl_prim_loader_with_the_code_path_of_pa_as_pinned_erts() {
 fn erts(directory: &Path, flags: &[&str]) -> Command {
     let probe = absolute(PRIM_LOADER_PROBE);
     let mut command = Command::new("erl");
-    command.args(["+S", "1", "-noshell"]);
+    command.args(["+S", "1", "-noshell", "-boot", "start_clean"]);
     command.args(
         flags
             .iter()
@@ -127,7 +130,8 @@ fn erts(directory: &Path, flags: &[&str]) -> Command {
 fn pbeam(directory: &Path, flags: &[&str]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_pbeam"));
     command
-        .args(["pbeam_boot", "start", "prim_loader_probe", "main"])
+        .args(["pbeam_boot", "start", "prim_loader_probe", "main", "--root"])
+        .arg(otp_root())
         .args(flags)
         .arg("--")
         .arg(absolute(format!("{PRIM_LOADER_PROBE}.beam")))

@@ -878,6 +878,10 @@ impl BeamProgram {
     ///   the pattern of `binary:match/2` or `binary:split/2,3`
     ///   ([`binary::find_trap`]). ERTS traps to the same export with magic references to the search state
     ///   and to the compiled pattern (`erl_bif_binary.c:75-77`, `1935-1952`).
+    /// - `erts_internal:ptab_list_continue/5`, with the state of an
+    ///   `erlang:processes/0` call ([`erlang::ptab_list`]). ERTS traps to
+    ///   `erts_internal:ptab_list_continue/2` with the result so far and a
+    ///   magic reference to the state (`erl_ptab.c:770-780`).
     /// - `erlang:bif_handle_signals_return/2`, with the process that the BIF
     ///   read and its result: it handles the signals of the caller up to a
     ///   flush signal and returns the result (`bif.c:5452-5495`).
@@ -978,6 +982,29 @@ impl BeamProgram {
                 *size as usize,
                 bytes,
             ));
+        }
+        // A resume takes the lists of the state out of the owned trap
+        // arguments, so that no turn copies them.
+        if let (
+            "erts_internal",
+            "ptab_list_continue",
+            [
+                Term::Integer(tix),
+                found,
+                gone,
+                Term::Integer(pid_ix),
+                result,
+            ],
+        ) = (module, function, arguments.as_mut_slice())
+        {
+            let state = erlang::PtabList {
+                tix: *tix,
+                found: std::mem::replace(found, Term::Nil),
+                gone: std::mem::replace(gone, Term::Nil),
+                pid_ix: *pid_ix,
+                result: std::mem::replace(result, Term::Nil),
+            };
+            return erlang::ptab_list(scheduler, state);
         }
         let (process, atoms) = scheduler.current_process_and_atoms();
         match (module, function, arguments.as_slice()) {

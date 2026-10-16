@@ -108,6 +108,19 @@ fn runs_erlang_start_timer_and_cancel_timer_as_pinned_erts() {
         Term::list_from(vec![atom("true"), atom("true"), atom("none"), badargs(7)])
     );
 
+    // `cancel_timer/1` runs as `cancel_timer/2` with `[]`
+    // (`erl_hl_timer.c:2644-2647`).
+    assert_eq!(
+        run("cancel_timer_1").term,
+        Term::list_from(vec![
+            atom("true"),
+            atom("false"),
+            atom("false"),
+            Term::tuple(vec![atom("error"), atom("badarg")]),
+            atom("none"),
+        ])
+    );
+
     // `cancel_timer/2` gives the time left, `false`, or `ok`, and sends
     // `{cancel_timer, Ref, Result}` with `async` (`erl_hl_timer.c:2078-2147`).
     // A repeated option takes the last value (`erl_hl_timer.c:2364-2394`).
@@ -169,7 +182,7 @@ fn runs_erlang_start_timer_and_cancel_timer_as_pinned_erts() {
             "-pa",
             "fixtures/timer",
             "-eval",
-            "io:format(\"~w~n\", [[timer_probe:F() || F <- [start_timer, cancel_timer, receiver_exit, order, timer_limits]]]), halt().",
+            "io:format(\"~w~n\", [[timer_probe:F() || F <- [start_timer, cancel_timer_1, cancel_timer, receiver_exit, order, timer_limits]]]), halt().",
         ])
         .output()
         .unwrap();
@@ -177,7 +190,7 @@ fn runs_erlang_start_timer_and_cancel_timer_as_pinned_erts() {
     assert!(reference.stderr.is_empty());
     assert_eq!(
         reference.stdout,
-        b"[[true,true,none,[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}]],[true,false,ok,ok,ok,true,ok,false,ok,false,false,false,none,[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}]],[false,false,named,none],[[1,2,3,4,40,50,60],recv,bif],[ok,ok,{error,badarg},{error,badarg}]]\n"
+        b"[[true,true,none,[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}]],[true,false,false,{error,badarg},none],[true,false,ok,ok,ok,true,ok,false,ok,false,false,false,none,[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}]],[false,false,named,none],[[1,2,3,4,40,50,60],recv,bif],[ok,ok,{error,badarg},{error,badarg}]]\n"
     );
 }
 

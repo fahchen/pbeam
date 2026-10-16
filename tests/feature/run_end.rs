@@ -15,7 +15,7 @@ mod common;
 #[path = "../common/run.rs"]
 mod run;
 
-use boot::{BOOT_MODULES, boot_beam};
+use boot::{BOOT_MODULES, boot_beam, otp_root};
 use common::pinned_beam_path;
 use run::run_dumb_utf8;
 
@@ -75,6 +75,8 @@ fn ends_the_run_at_the_root_exit_while_a_timer_stays_active() {
                     "start",
                     "run_end_probe",
                     function,
+                    "--root",
+                    otp_root().to_str().unwrap(),
                     "--",
                     RUN_END_PROBE,
                 ])

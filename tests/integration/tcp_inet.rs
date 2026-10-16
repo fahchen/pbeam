@@ -30,6 +30,9 @@ const TCP_TRANSFER: &[u8] = include_bytes!("../../fixtures/tcp/tcp_transfer.beam
 /// `open_port/2`, `port_control/3`, `port_close/1`, and `port_info/1`,
 /// which call the `erts_internal` port BIFs, and `prim_inet` makes the
 /// requests of `gen_tcp` (prim_inet.erl).
+/// A policy module whose `initial/1` gives no capability.
+const PROCESSES_POLICY: &[u8] = include_bytes!("../../fixtures/processes/processes_policy.beam");
+
 const MODULES: [&str; 3] = ["erlang", "lists", "prim_inet"];
 
 /// Return a term as `io:format("~w")` prints it, for the atoms, integers,
@@ -740,4 +743,30 @@ fn stops_the_run_for_each_receive_and_send_part_that_is_not_implemented() {
         handle.join().unwrap();
         assert!(error.starts_with(message), "{case}: {error}");
     }
+}
+
+#[test]
+fn stops_the_open_of_an_inet_port_in_a_runtime_process_of_a_boot_run() {
+    // In boot mode, the root process is a boot process and can open an inet
+    // port. After `pbeam_cap:enter_runtime/2`, it is a runtime process, and
+    // no capability permits a network effect, so the open stops the run.
+    let beams: Vec<Vec<u8>> = MODULES.iter().map(|module| pinned_beam(module)).collect();
+    let mut all: Vec<&[u8]> = vec![TCP_PROBE, PROCESSES_POLICY];
+    all.extend(beams.iter().map(Vec::as_slice));
+    let program = BeamProgram::load(&all).unwrap();
+    let argument = Term::Atom(program.atom("runtime").unwrap());
+    let error = program
+        .execute_with_policy_module(
+            "tcp_probe",
+            "unsupported",
+            &[program.host_term(argument)],
+            "processes_policy",
+            true,
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.starts_with("unsupported inet driver port in a run with a policy"),
+        "{error}"
+    );
 }
