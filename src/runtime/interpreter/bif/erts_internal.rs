@@ -883,7 +883,8 @@ const OTHER_PORT_ITEMS: [&str; 7] = [
 /// `id`, as `erts_bld_port_info` builds it (`erl_bif_info.c:3654-3830`),
 /// for a name of [`PORT_INFO_ITEMS`]. The
 /// name is the list of the bytes of the program path or driver name,
-/// `links` holds the linked processes in pid order, and `id` is the port
+/// `links` holds the linked processes in pid order (ERTS gives a different
+/// order: see "Ports" in `docs/erts-differences.md`), and `id` is the port
 /// number.
 fn port_item(id: PortId, port: &Port, name: &str) -> Term {
     let value = match name {

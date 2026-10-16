@@ -111,7 +111,7 @@ links() ->
     Parent = self(),
     Linker = spawn(fun() -> Parent ! {self(), link(S)}, receive stop -> ok end end),
     Linked = receive {Linker, LinkResult} -> LinkResult end,
-    Two = erlang:port_info(S, links) =:= {links, lists:sort([Parent, Linker])}
+    Two = erlang:port_info(S, links) =:= {links, [Parent, Linker]}
         orelse erlang:port_info(S, links),
     Unlinked = [unlink(S), unlink(S)],
     One = erlang:port_info(S, links) =:= {links, [Linker]},
@@ -126,7 +126,7 @@ links() ->
     Live = spawn(fun() -> receive stop -> ok end end),
     Connected = [erlang:port_connect(S, self()), erlang:port_connect(S, Live)],
     Owner = [erlang:port_info(S, connected) =:= {connected, Live},
-             erlang:port_info(S, links) =:= {links, lists:sort([Parent, Live])}
+             erlang:port_info(S, links) =:= {links, [Parent, Live]}
              orelse erlang:port_info(S, links)],
     Infos = [erlang:port_info(S, id) =:= {id, element(2, erlang:port_info(S, id))},
              erlang:port_info(S, name), erlang:port_info(no_port, connected)],

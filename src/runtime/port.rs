@@ -38,11 +38,14 @@ pub(super) struct Port {
     /// the process of the last `erlang:port_connect/2` (io.c:2355-2400).
     pub(super) owner: ProcessId,
     /// The processes that have a link to the port (`ERTS_P_LINKS`), in pid
-    /// order, as `port_info/2` gives them in `links`. `open_port/2` links
-    /// the owner (`erl_bif_port.c:92-100`), and `link/1`, `unlink/1`, and
-    /// `erlang:port_connect/2` change the set. Each process of the set has
-    /// the link `LinkId::Port` to the port in its own links, and a change
-    /// changes both sides at once.
+    /// order. ERTS keeps them in a red-black tree in pid order, and
+    /// `port_info/2` gives them in a different order (see "Ports" in
+    /// `docs/erts-differences.md`). `open_port/2` links the owner
+    /// (`erl_bif_port.c:92-100`), and `link/1`, `unlink/1`, and
+    /// `erlang:port_connect/2` change the set. `link/1` and `unlink/1`
+    /// change both sides at once. `erlang:port_connect/2` adds the side of
+    /// the port, and the new owner adds its side when it handles the link
+    /// signal.
     pub(super) links: BTreeSet<ProcessId>,
     /// The native bytes of the program path or of the driver name, as
     /// `port_info/1` gives them in `name` (`erl_bif_info.c:3767-3776`).
