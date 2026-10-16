@@ -1,7 +1,15 @@
 //! Read the host clocks that ERTS reads (`sys/unix/sys_time.c`), and the
 //! local time of the host time zone (`sys/unix/erl_unix_sys.h`).
 
+use std::{sync::LazyLock, time::Instant};
+
 use crate::runtime::time::DateTime;
+
+/// The start of the performance counter of the process, which the first
+/// [`perf_counter`] call sets. ERTS counts from the boot of the host
+/// (`erts_sys_hrtime`, `sys_time.c:1009-1014`), a base that its own
+/// documentation allows to differ between runtime restarts.
+static PERF_COUNTER_START: LazyLock<Instant> = LazyLock::new(Instant::now);
 
 /// Return the OS system time: the host `CLOCK_REALTIME` in nanoseconds
 /// since 1970, as the ERTS `erts_os_system_time` reads it with
@@ -41,6 +49,29 @@ unsafe extern "C" {
     /// macOS `posix2time`: add the leap seconds of the time zone to a POSIX
     /// time. libc 0.2.190 has no binding.
     fn posix2time(time: libc::time_t) -> libc::time_t;
+}
+
+/// Return the performance counter of the host in nanoseconds since
+/// [`PERF_COUNTER_START`], in the unit that `erlang:system_info` calls
+/// `perf_counter`: ERTS reads `erts_sys_hrtime`, which is the
+/// `CLOCK_UPTIME_RAW` time of macOS and the `CLOCK_MONOTONIC` time of other
+/// hosts (`sys_time.c:1009-1014`, `sys/unix/erl_unix_sys.h:218-219`).
+/// `Instant` reads the same clock of the host as that function. ERTS counts
+/// the value from the boot of the host and PBeam counts it from the first
+/// call, a base that ERTS documents as the same only within a runtime
+/// restart (`os:perf_counter/0`).
+///
+/// The counter is exclusive and non-negative, as `os_perf_counter_0`
+/// (`erl_time_sup.c:2601-2605`) gives it.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(perf_counter() <= perf_counter());
+/// assert!(perf_counter() >= 0);
+/// ```
+pub(crate) fn perf_counter() -> i64 {
+    i64::try_from(PERF_COUNTER_START.elapsed().as_nanos()).unwrap_or(i64::MAX)
 }
 
 /// Return the local date and time of `clock`, a POSIX time, in the host

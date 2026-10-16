@@ -16,6 +16,9 @@
     port_set_data/0,
     port_get_data/0,
     getenv/0,
+    env/0,
+    putenv/0,
+    unsetenv/0,
     handle_signal/0,
     ignore_signal/0,
     default_signal/0,
@@ -145,6 +148,12 @@ port_get_data() ->
     attempt(fun() -> erlang:port_get_data(Port) end).
 
 getenv() -> attempt(fun() -> os:getenv("PBEAM_EFFECT_PROBE") end).
+
+env() -> attempt(fun() -> os:env() end).
+
+putenv() -> attempt(fun() -> os:putenv("PBEAM_EFFECT_PROBE", "x") end).
+
+unsetenv() -> attempt(fun() -> os:unsetenv("PBEAM_EFFECT_PROBE") end).
 
 handle_signal() -> attempt(fun() -> os:set_signal(sigusr2, handle) end).
 
@@ -448,7 +457,22 @@ ambient() ->
         erts_internal:processes_next(1048576),
         attempt(fun() -> erts_internal:purge_module(effect_probe_missing, complete) end),
         erts_internal:request_system_task(Self, normal, {check_process_code, Name, lists}),
-        receive {check_process_code, Name, Refers} -> Refers end
+        receive {check_process_code, Name, Refers} -> Refers end,
+        %% The default arity clock BIFs and the host identifiers, each
+        %% reduced to a stable sign by the helpers below.
+        integer(erlang:monotonic_time()),
+        integer(erlang:system_time()),
+        integer(erlang:time_offset()),
+        integer(erlang:time_offset(second)),
+        timestamp(erlang:timestamp()),
+        date(erlang:date()),
+        time(erlang:time()),
+        date_time(erlang:localtime()),
+        date_time(erlang:universaltime()),
+        integer(os:system_time()),
+        timestamp(os:timestamp()),
+        integer(os:perf_counter()),
+        integer(list_to_integer(os:getpid()))
     ].
 
 %% Open /dev/null in write mode, write, move the position, and close it
@@ -496,6 +520,17 @@ atom(_) -> other.
 
 date_time({{_, _, _}, {_, _, _}}) -> date_time;
 date_time(_) -> other.
+
+timestamp({Mega, Sec, Micro}) when is_integer(Mega), is_integer(Sec), is_integer(Micro) ->
+    timestamp;
+timestamp(_) -> other.
+
+date({Year, Month, Day}) when is_integer(Year), is_integer(Month), is_integer(Day) -> date;
+date(_) -> other.
+
+time({Hour, Minute, Second}) when is_integer(Hour), is_integer(Minute), is_integer(Second) ->
+    time;
+time(_) -> other.
 
 %% Permitted process calls that give the same result on ERTS.
 process_permitted() ->
