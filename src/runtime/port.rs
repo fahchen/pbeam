@@ -65,6 +65,15 @@ pub(super) struct Port {
     /// order. The close of the port sends the `DOWN` message of each
     /// (`erts_port_task_handle_exit`, io.c).
     pub(super) monitors: Vec<(ProcessId, Reference)>,
+    /// True in the `CLOSING` state (`ERTS_PORT_SFLG_CLOSING`): the port
+    /// closed with queued output, sent its exit signals, and writes its
+    /// queue until it terminates (io.c:3939-3948). `erlang:port_info/1,2`
+    /// and `erlang:port_control/3` find the port (`sig_lookup_port`,
+    /// erl_bif_port.c:145-148). The other port BIFs give `badarg`, and
+    /// `link/1` and `monitor/2` see a closed port (`data_lookup_port`,
+    /// erl_bif_port.c:157-160; `link_opt`, bif.c:192-196). The driver sends
+    /// no message (io.c:6212-6227).
+    pub(super) closing: bool,
 }
 
 /// The driver of a port and the data of the driver.
@@ -144,6 +153,17 @@ impl Ports {
             .ok_or_else(|| error("port identifier overflow"))?;
         self.by_id.insert(id, port);
         Ok(id)
+    }
+
+    /// Return true when the port `id` is in the `CLOSING` state.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(!ports.closing(PortId(0)));
+    /// ```
+    pub(super) fn closing(&self, id: PortId) -> bool {
+        self.by_id.get(&id).is_some_and(|port| port.closing)
     }
 
     /// Return the open port `id`, or `None` when it closed.

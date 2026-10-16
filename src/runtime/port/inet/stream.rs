@@ -94,6 +94,10 @@ pub(in crate::runtime) enum Event {
     /// `{tcp_error, S, Reason}` to the owner in active mode
     /// (`tcp_error_message`, inet_drv.c:4079-4095).
     Error(String),
+    /// `{empty_out_q, S}` to each of these processes, the subscribers of
+    /// `SUBSCRIBE`, when the queue becomes empty (`send_empty_out_q_msgs`,
+    /// inet_drv.c:10795-10813).
+    EmptyQueue(Vec<ProcessId>),
     /// The port ends with this reason, `normal` or an error name, as
     /// `driver_exit` does (io.c:7228-7249). It is the last event.
     Exit(String),
@@ -193,6 +197,10 @@ pub(in crate::runtime) struct Stream {
     output: VecDeque<u8>,
     /// The send that waits until the queue is small (`INET_F_BUSY`).
     busy: Option<Sender>,
+    /// The callers of `SUBSCRIBE` while the queue held bytes, in call
+    /// order, which get `{empty_out_q, S}` once when the queue becomes
+    /// empty (`empty_out_q_subs`, inet_drv.c:10819-10848).
+    pub(super) subscribers: Vec<ProcessId>,
     /// The next send gives `{error, closed}` (`TCP_ADDF_DELAYED_CLOSE_SEND`).
     closed_send: bool,
     /// The next receive gives `{error, closed}`
@@ -226,12 +234,18 @@ impl Stream {
             receiver: None,
             output: VecDeque::new(),
             busy: None,
+            subscribers: Vec::new(),
             closed_send: false,
             closed_receive: false,
             closed_sent: false,
             ended: false,
             statistics: Statistics::default(),
         }
+    }
+
+    /// Return the size of the queue in bytes (`driver_sizeq`).
+    pub(super) fn output_size(&self) -> usize {
+        self.output.len()
     }
 
     /// Make the input buffer hold at least `length` bytes, as
@@ -439,7 +453,7 @@ impl Inet {
             return self.active_end(events, None, name.unwrap_or("normal".to_owned()));
         }
         let reason = name.unwrap_or("closed".to_owned());
-        self.close_socket();
+        events.extend(self.close_socket());
         events.extend(self.end_receive(Err(reason)));
         events
     }
@@ -467,22 +481,42 @@ impl Inet {
         events
     }
 
-    /// End the send that waits for the queue with `{error, closed}` and
-    /// drop the queue (inet_drv.c:12796-12806).
+    /// End the send that waits for the queue with `{error, closed}` after
+    /// the drop of the queue (inet_drv.c:12790-12800).
     fn end_busy(&mut self) -> Vec<Event> {
         let Some(sender) = self.stream.busy.take() else {
             return Vec::new();
         };
-        self.stream.output.clear();
-        vec![Event::Replied {
+        let mut events = self.clear_output();
+        events.push(Event::Replied {
             sender,
             result: Err("closed".to_owned()),
-        }]
+        });
+        events
+    }
+
+    /// Drop the queue and return `{empty_out_q, S}` for the subscribers, as
+    /// `tcp_clear_output` does (inet_drv.c:11718-11725).
+    fn clear_output(&mut self) -> Vec<Event> {
+        self.stream.output.clear();
+        self.empty_queue()
+    }
+
+    /// Return `{empty_out_q, S}` for the subscribers, which then have no
+    /// subscription, or no message without one (`send_empty_out_q_msgs`,
+    /// inet_drv.c:10795-10813).
+    fn empty_queue(&mut self) -> Vec<Event> {
+        let subscribers = std::mem::take(&mut self.stream.subscribers);
+        (!subscribers.is_empty())
+            .then_some(Event::EmptyQueue(subscribers))
+            .into_iter()
+            .collect()
     }
 
     /// Close the socket and drop the buffers, as `tcp_desc_close` does
-    /// (inet_drv.c:11932-11937, 5053-5080). The port stays open.
-    fn close_socket(&mut self) {
+    /// (inet_drv.c:11932-11937, 5053-5080), and return `{empty_out_q, S}`
+    /// for the subscribers. The port stays open.
+    fn close_socket(&mut self) -> Vec<Event> {
         self.socket = None;
         self.state = State::Closed;
         self.stream.ended = true;
@@ -490,7 +524,7 @@ impl Inet {
         self.stream.filled = 0;
         self.stream.input_size = 0;
         self.stream.remain = 0;
-        self.stream.output.clear();
+        self.clear_output()
     }
 
     /// Run the output `bytes` of the port from `caller`, as
@@ -563,8 +597,9 @@ impl Inet {
 
     /// Write the queue while the socket takes bytes, as `tcp_inet_output`
     /// does (inet_drv.c:14234-14370), and return the messages: the reply of
-    /// the send that waits when the queue holds 4096 bytes or fewer, or the
-    /// end of the socket after a failed write.
+    /// the send that waits when the queue holds 4096 bytes or fewer, then
+    /// `{empty_out_q, S}` when the queue is empty (inet_drv.c:14301-14306),
+    /// or the end of the socket after a failed write.
     pub(in crate::runtime) fn send_ready(&mut self) -> Vec<Event> {
         let mut events = Vec::new();
         while !self.stream.output.is_empty() {
@@ -591,6 +626,9 @@ impl Inet {
                     result: Ok(()),
                 });
             }
+        }
+        if self.stream.output.is_empty() {
+            events.extend(self.empty_queue());
         }
         events
     }
@@ -619,7 +657,7 @@ impl Inet {
             }),
             None => self.stream.closed_send = true,
         }
-        self.close_socket();
+        events.extend(self.close_socket());
         self.stream.closed_receive = true;
         events
     }
@@ -653,8 +691,25 @@ impl Inet {
     }
 
     /// Return true when the queue of the port holds bytes.
-    pub(super) fn has_output(&self) -> bool {
+    pub(in crate::runtime) fn has_output(&self) -> bool {
         !self.stream.output.is_empty()
+    }
+
+    /// Return true when the close of the port with a reason other than
+    /// `kill` keeps the port in the `CLOSING` state to write its queue
+    /// (io.c:3939-3948): the queue holds bytes and `tcp_inet_flush` keeps
+    /// them, as `linger` is not `{true, 0}` (`TCP_ADDF_LINGER_ZERO`,
+    /// inet_drv.c:12708-12730). With `{true, 0}`, the port terminates at
+    /// once and the close of the socket drops the queue.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(!port.flushes());
+    /// ```
+    pub(in crate::runtime) fn flushes(&self) -> bool {
+        let linger = self.socket.as_ref().and_then(|socket| socket.linger().ok());
+        self.has_output() && linger != Some(Some(std::time::Duration::ZERO))
     }
 
     /// Run `INET_REQ_GETSTAT` with the codes `request` (inet_drv.c:10732-10800,

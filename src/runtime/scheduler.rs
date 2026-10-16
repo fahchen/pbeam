@@ -2828,7 +2828,7 @@ impl Scheduler {
                                 let _ = self.send_signal(Some(id), linked, exit);
                             }
                             LinkId::Process(_) => {}
-                            LinkId::Port(port) => self.port_link_exit(port, id, &reason)?,
+                            LinkId::Port(port) => self.port_link_exit(port, id, &reason),
                         }
                         reds -= 1;
                     }
