@@ -1,8 +1,8 @@
 -module(bs_match_probe).
 -export([unsigned/1, flagged/1, wide/1, prefix/1, skip/1, binaries/1, bits/1,
          tail/1, bit_tail/1, unaligned_utf8/1, match_string/1,
-         match_string_offset/1, skip_size/2, skip_size_bits/2, get_size/2,
-         get_size_flagged/2]).
+         match_string_offset/1, match_string_bits/1, skip_size/2,
+         skip_size_bits/2, get_size/2, get_size_flagged/2]).
 
 %% The integer command: unsigned big-endian integers below, at, and above
 %% one byte, also at positions that are not byte-aligned, and a size with a
@@ -62,6 +62,12 @@ match_string(_) -> false.
 
 match_string_offset(<<_:4, "icrosoft.icon", Rest/binary>>) -> Rest;
 match_string_offset(_) -> false.
+
+%% The same string at the bit offset 4 without the check that the tail is a
+%% whole number of bytes, so a binary whose bits are 4 after a multiple of 8
+%% matches.
+match_string_bits(<<_:4, "icrosoft.icon", _/bits>>) -> ok;
+match_string_bits(_) -> false.
 
 %% The skip command of a match with a variable size of 8-bit units and of
 %% bits, which a command list cannot hold.

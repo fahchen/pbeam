@@ -3271,11 +3271,11 @@ fn reads_the_little_signed_and_native_flags_of_a_segment() {
 fn decodes_the_bs_skip_bits2_instructions_of_the_bs_match_probe_fixture() {
     // `tests/integration/fixture_opcodes.rs` checks that
     // `fixtures/binary_match/bs_match_probe.beam` has these bytes.
-    // skip_size/2: bs_skip_bits2 f43 {tr,x0,3} x1 8 0
-    // skip_size_bits/2: bs_skip_bits2 f46 {tr,x0,3} x1 1 0
+    // skip_size/2: bs_skip_bits2 f46 {tr,x0,3} x1 8 0
+    // skip_size_bits/2: bs_skip_bits2 f49 {tr,x0,3} x1 1 0
     let parts: [&[u8]; 2] = [
-        &[0x78, 0x0D, 0x2B, 0x57, 0x03, 0x30, 0x13, 0x80, 0x00],
-        &[0x78, 0x0D, 0x2E, 0x57, 0x03, 0x30, 0x13, 0x10, 0x00],
+        &[0x78, 0x0D, 0x2E, 0x57, 0x03, 0x30, 0x13, 0x80, 0x00],
+        &[0x78, 0x0D, 0x31, 0x57, 0x03, 0x30, 0x13, 0x10, 0x00],
     ];
     let (instructions, _, _) = parse_code(
         &code_with(&parts),
@@ -3292,13 +3292,13 @@ fn decodes_the_bs_skip_bits2_instructions_of_the_bs_match_probe_fixture() {
             instructions.as_slice(),
             [
                 Instruction::BinarySkipBits {
-                    fail_label: 43,
+                    fail_label: 46,
                     context: Operand::X(0),
                     size: Operand::X(1),
                     unit: 8,
                 },
                 Instruction::BinarySkipBits {
-                    fail_label: 46,
+                    fail_label: 49,
                     context: Operand::X(0),
                     size: Operand::X(1),
                     unit: 1,
@@ -3314,15 +3314,15 @@ fn decodes_the_bs_skip_bits2_instructions_of_the_bs_match_probe_fixture() {
 fn decodes_the_bs_get_integer2_instructions_of_the_bs_match_probe_fixture() {
     // `tests/integration/fixture_opcodes.rs` checks that
     // `fixtures/binary_match/bs_match_probe.beam` has these bytes.
-    // get_size/2: bs_get_integer2 f49 2 {tr,x0,3} x1 1 0 x1
-    // get_size_flagged/2: bs_get_integer2 f52 2 {tr,x0,3} x1 1
+    // get_size/2: bs_get_integer2 f52 2 {tr,x0,3} x1 1 0 x1
+    // get_size_flagged/2: bs_get_integer2 f55 2 {tr,x0,3} x1 1
     // {literal,[little,signed]} x1
     let parts: [&[u8]; 2] = [
         &[
-            0x75, 0x0D, 0x31, 0x57, 0x03, 0x30, 0x20, 0x13, 0x10, 0x00, 0x13,
+            0x75, 0x0D, 0x34, 0x57, 0x03, 0x30, 0x20, 0x13, 0x10, 0x00, 0x13,
         ],
         &[
-            0x75, 0x0D, 0x34, 0x57, 0x03, 0x30, 0x20, 0x13, 0x10, 0x60, 0x13,
+            0x75, 0x0D, 0x37, 0x57, 0x03, 0x30, 0x20, 0x13, 0x10, 0x60, 0x13,
         ],
     ];
     let (instructions, _, _) = parse_code(
@@ -3340,7 +3340,7 @@ fn decodes_the_bs_get_integer2_instructions_of_the_bs_match_probe_fixture() {
             instructions.as_slice(),
             [
                 Instruction::BinaryGetInteger {
-                    fail_label: 49,
+                    fail_label: 52,
                     context: Operand::X(0),
                     size: Operand::X(1),
                     unit: 1,
@@ -3349,7 +3349,7 @@ fn decodes_the_bs_get_integer2_instructions_of_the_bs_match_probe_fixture() {
                     destination: Operand::X(1),
                 },
                 Instruction::BinaryGetInteger {
-                    fail_label: 52,
+                    fail_label: 55,
                     context: Operand::X(0),
                     size: Operand::X(1),
                     unit: 1,

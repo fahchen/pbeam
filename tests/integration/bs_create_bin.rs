@@ -1863,6 +1863,27 @@ fn raises_the_erts_error_info_for_utf16_and_utf32_segments() {
             "{function} {arguments:?}"
         );
     }
+    // The same causes from a pinned ERTS run of the same fixture function,
+    // in the order of `cases`.
+    assert_eq!(
+        reference(
+            "[begin {error, badarg, {_, _, _, [{error_info, #{cause := Cause}}]}} = \
+             bs_create_bin_utf_probe:call(F, A), Cause end || {F, A} <- [\
+             {utf16,[-1]},{utf16,[55296]},{utf16,[57343]},{utf16,[1114112]},\
+             {utf16,[other]},{utf16,[1 bsl 64]},{utf16_little,[-1]},\
+             {utf32,[-1]},{utf32,[55296]},{utf32,[57343]},{utf32,[1114112]},\
+             {utf32,[other]},{utf32,[1 bsl 64]},{utf32_little,[1114112]},\
+             {ordered,[other,8]},{ordered,[other,-1]},{ordered,[other,other]},\
+             {ordered,[65,-1]},{ordered,[other,1114112]}]]"
+        ),
+        "[{1,utf16,type,-1},{1,utf16,type,55296},{1,utf16,type,57343},\
+         {1,utf16,type,1114112},{1,utf16,type,other},\
+         {1,utf16,type,18446744073709551616},{1,utf16,type,-1},{1,utf32,type,-1},\
+         {1,utf32,type,55296},{1,utf32,type,57343},{1,utf32,type,1114112},\
+         {1,utf32,type,other},{1,utf32,type,18446744073709551616},\
+         {1,utf32,type,1114112},{1,utf16,type,other},{2,integer,size,-1},\
+         {2,integer,size,other},{2,integer,size,-1},{1,utf16,type,other}]\n"
+    );
 }
 
 #[test]

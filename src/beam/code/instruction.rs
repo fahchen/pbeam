@@ -1264,8 +1264,8 @@ pub(crate) enum Instruction {
     /// each other size as `i_bs_get_integer2`
     /// (`emit_bs_get_integer2`, jit/arm/instr_bs.cpp:312-358). Both read
     /// the same bits. Example: `bs_match_probe:get_size/2` has
-    /// `[0x75, 0x0D, 0x31, 0x57, 0x03, 0x30, 0x20, 0x13, 0x10, 0x00,
-    /// 0x13]`: fail label 49, the typed register `x0`, live count 2, size
+    /// `[0x75, 0x0D, 0x34, 0x57, 0x03, 0x30, 0x20, 0x13, 0x10, 0x00,
+    /// 0x13]`: fail label 52, the typed register `x0`, live count 2, size
     /// `x1`, unit 1, flags 0, and the destination `x1`.
     ///
     /// Erlang: `<<Value:N/integer, Rest/binary>>` compiles to
@@ -1313,8 +1313,8 @@ pub(crate) enum Instruction {
     /// Encoding: opcode, fail label, context, size, unsigned unit, unsigned
     /// flags. The decoder skips the flags, as the ERTS loader does
     /// (jit/arm/ops.tab:1018-1019). Example: `bs_match_probe:skip_size/2`
-    /// has `[0x78, 0x0D, 0x2B, 0x57, 0x03, 0x30, 0x13, 0x80, 0x00]`: fail
-    /// label 43, the typed register `x0`, the size `x1`, unit 8, and flags
+    /// has `[0x78, 0x0D, 0x2E, 0x57, 0x03, 0x30, 0x13, 0x80, 0x00]`: fail
+    /// label 46, the typed register `x0`, the size `x1`, unit 8, and flags
     /// 0.
     ///
     /// Erlang: `<<_:N/unit:8, Rest/binary>>` compiles to

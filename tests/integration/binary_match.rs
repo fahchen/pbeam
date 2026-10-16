@@ -1287,6 +1287,37 @@ fn runs_bs_match_string_at_a_bit_offset_as_pinned_erts() {
         ),
         b"[false,false,false]\n"
     );
+    // `bs_match_probe:match_string_bits/1` matches the same string at the
+    // bit offset 4 without the check of the tail, so a binary with the
+    // string 4 bits after a byte boundary matches. The input is
+    // `<<1:4, "icrosoft.icon", 4:4>>`.
+    let shifted = binary(&[
+        22, 150, 55, 38, 247, 54, 246, 103, 66, 230, 150, 54, 246, 228,
+    ]);
+    let calls = [
+        vec![shifted.clone()],
+        vec![binary(&[
+            22, 150, 55, 38, 247, 54, 246, 103, 66, 230, 150, 54, 20,
+        ])],
+        vec![binary(&[22, 150, 55, 38, 247, 54, 246, 103, 68])],
+        vec![binary(b"")],
+    ];
+    assert_eq!(
+        match_probe_each("match_string_bits", &calls),
+        [
+            Ok(match_probe_atom("ok")),
+            Ok(match_probe_atom("false")),
+            Ok(match_probe_atom("false")),
+            Ok(match_probe_atom("false")),
+        ]
+    );
+    assert_eq!(
+        reference(
+            "[bs_match_probe:match_string_bits(B) || B <- [<<1:4, \"icrosoft.icon\", 4:4>>, \
+             <<1:4, \"icrosoft.ica\", 4:4>>, <<1:4, \"icrosoft\", 4:4>>, <<>>]]"
+        ),
+        b"[ok,false,false,false]\n"
+    );
 }
 
 #[test]
