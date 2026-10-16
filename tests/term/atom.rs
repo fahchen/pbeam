@@ -1,12 +1,15 @@
 use crate::term::Lambda;
 use std::sync::Arc;
 
-use super::{ATOM_LIMIT, Atom, AtomTable, Fun, HostTerm, Map, STATIC_ATOM_NAMES, Target, Term};
+use super::{
+    ATOM_LIMIT, Atom, AtomTable, Fun, HostTerm, Map, PRELOADED_ATOM_NAMES, STATIC_ATOM_NAMES,
+    Target, Term,
+};
 
 #[test]
 fn starts_with_the_erts_static_atoms() {
     let table = AtomTable::new();
-    assert_eq!(table.indices.len(), 1150);
+    assert_eq!(table.indices.len(), 1150 + PRELOADED_ATOM_NAMES.len());
     // ERTS 29.1.1 crash dump: false is 0, ok is 506, get_definition is 1149.
     for (name, index) in [("false", 0), ("true", 1), ("", 5), ("ok", 506)] {
         assert_eq!(table.get(name).unwrap().index, index);
@@ -28,12 +31,12 @@ fn starts_with_the_erts_static_atoms() {
 fn gives_a_new_atom_the_next_index_and_keeps_existing_indices() {
     let mut table = AtomTable::new();
     let zeta = table.put("pbeam_zeta").unwrap();
-    assert_eq!(zeta.index, 1150);
-    assert_eq!(table.put("pbeam_alpha").unwrap().index, 1151);
+    assert_eq!(zeta.index, 1167);
+    assert_eq!(table.put("pbeam_alpha").unwrap().index, 1168);
     assert_eq!(table.put("pbeam_zeta").unwrap(), zeta);
     assert_eq!(table.get("pbeam_zeta"), Some(zeta));
     assert_eq!(table.put("ok").unwrap().index, 506);
-    assert_eq!(table.indices.len(), 1152);
+    assert_eq!(table.indices.len(), 1169);
 }
 
 #[test]
@@ -83,10 +86,10 @@ fn imports_a_fun_between_two_atom_tables() {
     let function_source = source.put("pbeam_host_function").unwrap();
     let module_destination = destination.put("pbeam_host_module").unwrap();
     let function_destination = destination.put("pbeam_host_function").unwrap();
-    assert_eq!(module_source.index(), 1153);
-    assert_eq!(function_source.index(), 1154);
-    assert_eq!(module_destination.index(), 1150);
-    assert_eq!(function_destination.index(), 1151);
+    assert_eq!(module_source.index(), 1170);
+    assert_eq!(function_source.index(), 1171);
+    assert_eq!(module_destination.index(), 1167);
+    assert_eq!(function_destination.index(), 1168);
 
     let local = Term::Fun(Fun::new(
         Lambda::new(module_source.clone(), 0, 1, 53, 1),
@@ -499,11 +502,50 @@ fn is_static_panics_for_a_name_that_is_not_a_static_atom() {
 }
 
 #[test]
-#[should_panic(expected = "atom index 1150 is outside the atom table")]
+#[should_panic(expected = "atom index 1167 is outside the atom table")]
 fn rejects_the_read_of_an_atom_index_outside_the_table() {
     // An atom term holds an index of the table that owns it. An index that
     // the table does not hold is a broken invariant, so the read fails.
     let table = AtomTable::new();
-    let atom = Atom { index: 1150 };
+    let atom = Atom { index: 1167 };
     table.name_of(&atom);
+}
+
+#[test]
+fn preloads_the_fixed_atoms_of_runtime_paths_after_the_static_atoms() {
+    // ERTS makes these atoms at emulator start (`os_info_init`,
+    // `inet_init`, and the `load` of the `prim_file` and `prim_tty` NIF
+    // libraries), so a runtime path uses a constant and puts no name.
+    let mut table = AtomTable::new();
+    let constants = [
+        (Atom::UNIX, "unix"),
+        (Atom::TCP, "tcp"),
+        (Atom::INET_ASYNC, "inet_async"),
+        (Atom::INET_REPLY, "inet_reply"),
+        (Atom::TCP_CLOSED, "tcp_closed"),
+        (Atom::TCP_ERROR, "tcp_error"),
+        (Atom::EMPTY_OUT_Q, "empty_out_q"),
+        (Atom::READ, "read"),
+        (Atom::WRITE, "write"),
+        (Atom::READ_WRITE, "read_write"),
+        (Atom::DEVICE, "device"),
+        (Atom::DIRECTORY, "directory"),
+        (Atom::REGULAR, "regular"),
+        (Atom::SYMLINK, "symlink"),
+        (Atom::OTHER, "other"),
+        (Atom::FILE_INFO, "file_info"),
+        (Atom::EBADF, "ebadf"),
+    ];
+    assert_eq!(constants.len(), PRELOADED_ATOM_NAMES.len());
+    let count = table.indices.len();
+    for (position, (atom, name)) in (1150..).zip(constants) {
+        assert_eq!(atom.index, position);
+        assert_eq!(PRELOADED_ATOM_NAMES[(position - 1150) as usize], name);
+        assert!(Atom::from_static(name).is_none(), "{name} is static");
+        assert_eq!(table.get(name), Some(atom.clone()));
+        assert_eq!(table.name_of(&atom), name);
+        assert_eq!(table.put(name).unwrap(), atom);
+    }
+    assert_eq!(table.indices.len(), count);
+    assert_eq!(table.put("pbeam_zeta").unwrap().index, 1167);
 }
