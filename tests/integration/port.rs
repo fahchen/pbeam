@@ -204,7 +204,6 @@ fn stops_the_run_for_each_port_part_that_is_not_implemented() {
         ("send", "unsupported erlang:send/2 with a port"),
         ("send_options", "unsupported erlang:send/3 with a port"),
         ("bang", "unsupported erlang:send/2 with a port"),
-        ("unlink", "unsupported erlang:unlink/1 with a port"),
     ] {
         let argument = Term::Atom(program.atom(case).unwrap());
         let error = program

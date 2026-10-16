@@ -329,9 +329,7 @@ unsupported(send) ->
 unsupported(send_options) ->
     erlang:send(cat(), {self(), close}, []);
 unsupported(bang) ->
-    cat() ! {self(), close};
-unsupported(unlink) ->
-    unlink(cat()).
+    cat() ! {self(), close}.
 
 %% A monitor of a port: the DOWN message at port_close/1, noproc for a
 %% port that closed, the exit reason of the owner, and no DOWN message

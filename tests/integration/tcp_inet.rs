@@ -26,11 +26,14 @@ const UDP_PROBE: &[u8] = include_bytes!("../../fixtures/tcp/udp_probe.beam");
 
 const TCP_TRANSFER: &[u8] = include_bytes!("../../fixtures/tcp/tcp_transfer.beam");
 
+const TCP_ACTIVE: &[u8] = include_bytes!("../../fixtures/tcp/tcp_active.beam");
+
 /// The pinned OTP modules that the probes call: `erlang` has
 /// `open_port/2`, `port_control/3`, `port_close/1`, and `port_info/1`,
 /// which call the `erts_internal` port BIFs, and `prim_inet` makes the
-/// requests of `gen_tcp` (prim_inet.erl).
-const MODULES: [&str; 3] = ["erlang", "lists", "prim_inet"];
+/// requests of `gen_tcp` (prim_inet.erl). `gen_tcp:controlling_process/2`
+/// calls `inet_db:lookup_socket/1` and `inet:tcp_controlling_process/2`.
+const MODULES: [&str; 6] = ["erlang", "lists", "prim_inet", "gen_tcp", "inet", "inet_db"];
 
 /// Return a term as `io:format("~w")` prints it, for the atoms, integers,
 /// binaries, lists, and tuples of the probe results. An atom that does not
@@ -79,7 +82,7 @@ fn text(term: &Term, atoms: &AtomTable) -> String {
 /// Load the probes with the pinned modules of [`MODULES`].
 fn load() -> BeamProgram {
     let beams: Vec<Vec<u8>> = MODULES.iter().map(|module| pinned_beam(module)).collect();
-    let mut all: Vec<&[u8]> = vec![TCP_PROBE, TCP_ACCEPT, UDP_PROBE, TCP_TRANSFER];
+    let mut all: Vec<&[u8]> = vec![TCP_PROBE, TCP_ACCEPT, UDP_PROBE, TCP_TRANSFER, TCP_ACTIVE];
     all.extend(beams.iter().map(Vec::as_slice));
     BeamProgram::load(&all).unwrap()
 }
@@ -576,10 +579,17 @@ fn command_client(path: PathBuf, stop: Arc<AtomicBool>) -> thread::JoinHandle<Ve
 /// with a [`command_client`], and return the `~w` text and the reads of
 /// the client of each run.
 fn transfer_runs(function: &str) -> [(String, Vec<Vec<u8>>); 2] {
+    client_runs("tcp_transfer", function)
+}
+
+/// Run `Module:Function(Path)` on the pinned ERTS and on PBeam, each with a
+/// [`command_client`], and return the `~w` text and the reads of the client
+/// of each run.
+fn client_runs(module: &str, function: &str) -> [(String, Vec<Vec<u8>>); 2] {
     let directory = std::env::temp_dir();
     let id = std::process::id();
     let run = |name: &str, run: &dyn Fn(&Path) -> String| {
-        let path = directory.join(format!("pbeam-tcp-{function}-{name}-{id}"));
+        let path = directory.join(format!("pbeam-{module}-{function}-{name}-{id}"));
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(acknowledgement(&path));
         let stop = Arc::new(AtomicBool::new(false));
@@ -595,7 +605,7 @@ fn transfer_runs(function: &str) -> [(String, Vec<Vec<u8>>); 2] {
         let output = Command::new("erl")
             .args(["+S", "1", "-noshell", "-pa", "fixtures/tcp", "-eval"])
             .arg(format!(
-                "io:format(\"~w~n\", [tcp_transfer:{function}(\"{}\")]), halt().",
+                "io:format(\"~w~n\", [{module}:{function}(\"{}\")]), halt().",
                 path.display()
             ))
             .output()
@@ -608,11 +618,7 @@ fn transfer_runs(function: &str) -> [(String, Vec<Vec<u8>>); 2] {
     let pbeam = run("pbeam", &|path| {
         let program = load();
         let result = program
-            .execute(
-                "tcp_transfer",
-                function,
-                &[program.host_term(path_term(path))],
-            )
+            .execute(module, function, &[program.host_term(path_term(path))])
             .unwrap();
         text(&result.term, result.atoms())
     });
@@ -740,4 +746,26 @@ fn stops_the_run_for_each_receive_and_send_part_that_is_not_implemented() {
         handle.join().unwrap();
         assert!(error.starts_with(message), "{case}: {error}");
     }
+}
+
+#[test]
+fn links_and_connects_a_port_as_pinned_erts() {
+    // link/1, unlink/1, erlang:port_connect/2, and erlang:port_info/2 with a
+    // port (bif.c:186-232, 1252-1287; erl_bif_port.c:438-595; io.c:2160-2190,
+    // 2355-2400, 3869-3872).
+    let expected = "[true,true,[true,true],true,true,true,{error,badarg},true,[true,true],[true,{name,[116,99,112,95,105,110,101,116]},undefined],[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}],[killed,undefined],[true,noproc,{error,noproc}],[]]";
+    assert_eq!(erts_text("tcp_active", "links"), expected, "ERTS");
+    assert_eq!(pbeam_text("tcp_active", "links"), expected, "PBeam");
+}
+
+#[test]
+fn stops_the_run_for_a_port_info_item_that_is_not_implemented() {
+    let error = load()
+        .execute("tcp_active", "unsupported_item", &[])
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.starts_with("unsupported erlang:port_info/2 item memory"),
+        "{error}"
+    );
 }

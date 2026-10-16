@@ -9,6 +9,8 @@
     port_command/0,
     port_close/0,
     port_info/0,
+    port_info2/0,
+    port_connect/0,
     port_control/0,
     port_set_data/0,
     port_get_data/0,
@@ -118,6 +120,14 @@ port_close() ->
 port_info() ->
     Port = cat(),
     attempt(fun() -> erlang:port_info(Port) end).
+
+port_info2() ->
+    Port = cat(),
+    attempt(fun() -> erlang:port_info(Port, connected) end).
+
+port_connect() ->
+    Port = cat(),
+    attempt(fun() -> erlang:port_connect(Port, self()) end).
 
 %% A port of the spawn driver has no control, so a permitted call raises
 %% badarg (io.c:4029-4030).

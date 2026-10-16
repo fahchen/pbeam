@@ -6,7 +6,10 @@
 
 pub(super) mod inet;
 
-use std::{collections::BTreeMap, ffi::c_int};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ffi::c_int,
+};
 
 use super::host::spawn::Child;
 use crate::{
@@ -31,12 +34,16 @@ pub(super) struct Ports {
 #[derive(Debug)]
 pub(super) struct Port {
     /// The connected process, which gets the messages of the port
-    /// (`ERTS_PORT_GET_CONNECTED`). It is the process that opened the port,
-    /// and the only process that has a link to it (`ERTS_P_LINKS`):
-    /// `open_port/2` makes the link (`erl_bif_port.c:92-100`), PBeam has no
-    /// other link or unlink of a port, and the exit of the owner closes the
-    /// port. Thus an open port always has its link to the owner.
+    /// (`ERTS_PORT_GET_CONNECTED`): the process that opened the port, or
+    /// the process of the last `erlang:port_connect/2` (io.c:2355-2400).
     pub(super) owner: ProcessId,
+    /// The processes that have a link to the port (`ERTS_P_LINKS`), in pid
+    /// order, as `port_info/2` gives them in `links`. `open_port/2` links
+    /// the owner (`erl_bif_port.c:92-100`), and `link/1`, `unlink/1`, and
+    /// `erlang:port_connect/2` change the set. Each process of the set has
+    /// the link `LinkId::Port` to the port in its own links, and a change
+    /// changes both sides at once.
+    pub(super) links: BTreeSet<ProcessId>,
     /// The native bytes of the program path or of the driver name, as
     /// `port_info/1` gives them in `name` (`erl_bif_info.c:3767-3776`).
     pub(super) name: Vec<u8>,
