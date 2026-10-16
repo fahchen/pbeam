@@ -135,6 +135,9 @@ pub(super) enum TargetMonitor {
     /// A monitor that the TTY resource with this reference holds
     /// (`ERTS_MON_TYPE_RESOURCE`, `erl_nif.c:3957-3989`).
     Tty(Reference),
+    /// A monitor that the file resource with this reference holds
+    /// (`ERTS_MON_TYPE_RESOURCE`, `prim_file_nif.c:541-570`).
+    File(Reference),
     /// A monitor that a port holds (`ERTS_MON_TYPE_PORT`): the listen port
     /// of an accept that waits.
     Port {

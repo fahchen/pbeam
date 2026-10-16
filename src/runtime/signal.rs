@@ -95,6 +95,15 @@ pub(super) enum Signal {
         /// The reference of the TTY resource.
         tty: Reference,
     },
+    /// `ERTS_SIG_Q_OP_MONITOR` of a resource monitor: `enif_monitor_process`
+    /// (`erl_nif.c:3957-3989`) in `prim_file:open_nif/2` monitors the caller
+    /// for the file resource (`prim_file_nif.c:541-570`). The receiver adds
+    /// the target monitor for 2, as for [`Signal::TtyMonitor`]. At exit it
+    /// closes the file when it is still open.
+    FileMonitor {
+        /// The reference of the file resource.
+        file: Reference,
+    },
     /// `ERTS_SIG_Q_OP_LINK` from a port: `erlang:port_connect/2` linked
     /// the port `port` to the receiver (io.c:2355-2380). The receiver adds
     /// the link unless it has one; the cost is 0. At exit it gives a link
@@ -313,6 +322,7 @@ impl Signal {
                 reference: _,
             }
             | Signal::TtyMonitor { tty: _ }
+            | Signal::FileMonitor { file: _ }
             | Signal::PortLink { port: _ }
             | Signal::PortUnlink { port: _ }
             | Signal::PortMonitor {

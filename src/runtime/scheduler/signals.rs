@@ -8,7 +8,7 @@
 //! the one place that applies a signal to its receiver.
 
 use super::{
-    Flush, LinkId, Monitor, ProcessState, RECEIVE_FETCH_REDUCTIONS, Release,
+    Files, Flush, LinkId, Monitor, ProcessState, RECEIVE_FETCH_REDUCTIONS, Release,
     SIGNAL_HANDLING_REDUCTIONS, Scheduler, TargetMonitor, Ttys,
 };
 use crate::{
@@ -79,6 +79,28 @@ pub(in crate::runtime) enum Flushed {
 }
 
 impl Scheduler {
+    /// Remove the monitor of the file resource `file` from the target
+    /// monitor list of its owner `owner`, as `enif_demonitor_process` in
+    /// `close_nif` (`prim_file_nif.c:633`) does, when the current process is
+    /// the owner. `prim_file:close/1` calls `close_nif/1` only from the owner
+    /// (`get_fd_data`, prim_file.erl:499-504). A close from another process
+    /// keeps the monitor, and its `Files::monitor_down` at the exit of the
+    /// owner finds the resource closed and does nothing.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.demonitor_file(ProcessId(1), Reference(0));
+    /// ```
+    pub(in crate::runtime) fn demonitor_file(&mut self, owner: ProcessId, file: Reference) {
+        let current = self.current_process_mut();
+        let monitor = TargetMonitor::File(file);
+        let owned = current.id == owner;
+        current
+            .monitored_by
+            .retain(|&entry| !owned || entry != monitor);
+    }
+
     /// Send the signal `signal` to the process `target`, as
     /// `proc_queue_signal` (`erl_proc_sig_queue.c:1076-1252`) does. A pending
     /// monitor signal to the same target goes first, to keep the order of
@@ -458,6 +480,18 @@ impl Scheduler {
                     .push(TargetMonitor::Tty(tty));
                 2
             }
+            Signal::FileMonitor { file } => {
+                // A close before this signal removed the monitor already.
+                let open = matches!(
+                    self.resources.borrow_mut::<Files>().get(file),
+                    Some(Some(_))
+                );
+                let monitors = &mut self.handled(id, node).monitored_by;
+                if open {
+                    monitors.push(TargetMonitor::File(file));
+                }
+                2
+            }
             Signal::PortLink { port } => {
                 let links = &mut self.handled(id, node).links;
                 if links.get(&LinkId::Port(port)).is_none() {
@@ -761,6 +795,10 @@ impl Scheduler {
                 Signal::TtyMonitor { tty } => {
                     count += 4;
                     self.resources.borrow_mut::<Ttys>().monitor_down(id, tty);
+                }
+                Signal::FileMonitor { file } => {
+                    count += 4;
+                    self.resources.borrow_mut::<Files>().monitor_down(file);
                 }
                 Signal::PortMonitor { port, reference: _ } => {
                     count += 4;

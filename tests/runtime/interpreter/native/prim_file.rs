@@ -129,3 +129,274 @@ fn gives_einval_for_a_path_that_is_not_marshaled_as_erts() {
         }
     }
 }
+
+/// Return a new empty scratch directory for the test `name`.
+fn scratch(name: &str) -> std::path::PathBuf {
+    let directory =
+        std::env::temp_dir().join(format!("pbeam-prim-file-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir(&directory).unwrap();
+    directory
+}
+
+/// Return the `Path` argument of a NIF for `path`: its bytes and a NUL.
+fn nif_path(path: &std::path::Path) -> Term {
+    let mut bytes = path.as_os_str().as_encoded_bytes().to_vec();
+    bytes.push(0);
+    Term::binary(bytes)
+}
+
+/// Return the list of the atoms `names`.
+fn atoms(scheduler: &mut Scheduler, names: &[&str]) -> Term {
+    Term::list_from(
+        names
+            .iter()
+            .map(|name| Term::Atom(scheduler.atoms.put(name).unwrap())),
+    )
+}
+
+/// Open `path` with the mode atoms `modes`, and return the file resource.
+fn open(scheduler: &mut Scheduler, path: &std::path::Path, modes: &[&str]) -> Term {
+    let modes = atoms(scheduler, modes);
+    let result = open_nif(scheduler, &nif_path(path), &modes).unwrap();
+    resource(&result)
+}
+
+/// Return the file resource of the result `{ok, Ref}` of `open_nif/2`.
+fn resource(result: &BifResult) -> Term {
+    let BifResult::Value(Term::Tuple(result)) = result else {
+        panic!("the open gives a tuple");
+    };
+    assert!(matches!(result[1], Term::Reference(_)));
+    result[1].clone()
+}
+
+/// Return the `Debug` text of the result of `run` on `scheduler`.
+fn text(
+    scheduler: &mut Scheduler,
+    run: impl FnOnce(&mut Scheduler) -> Result<BifResult, BeamError>,
+) -> String {
+    let result = run(scheduler).unwrap();
+    debug_bif(&result, &scheduler.atoms)
+}
+
+const BADARG: &str = "Raise { class: Error, reason: Atom(\"badarg\") }";
+
+#[test]
+fn opens_files_with_the_modes_and_errors_of_erts() {
+    // `prim_file:open/2` gives each mode list and each encoded path to
+    // `open_nif/2` and catches `error:badarg` (prim_file.erl:146-155), so
+    // these results come from `open_nif` (prim_file_nif.c:500-593) and
+    // `efile_open` (unix_prim_file.c:142-226).
+    let mut scheduler = scheduler();
+    let directory = scratch("open");
+    let file = directory.join("file");
+    std::fs::write(&file, b"ab").unwrap();
+    let path = nif_path(&file);
+    let read = atoms(&mut scheduler, &["read"]);
+    assert_eq!(
+        text(&mut scheduler, |s| open_nif(
+            s,
+            &path,
+            &Term::static_atom("ok")
+        )),
+        BADARG
+    );
+    assert_eq!(
+        text(&mut scheduler, |s| open_nif(
+            s,
+            &Term::binary(b"a".to_vec()),
+            &read
+        )),
+        "Value(Tuple([Atom(\"error\"), Atom(\"einval\")]))"
+    );
+    for (target, modes, expected) in [
+        (
+            directory.join("missing"),
+            vec!["read"],
+            "Value(Tuple([Atom(\"error\"), Atom(\"enoent\")]))",
+        ),
+        (
+            directory.clone(),
+            vec!["read"],
+            "Value(Tuple([Atom(\"error\"), Atom(\"eisdir\")]))",
+        ),
+        (
+            file.clone(),
+            vec!["exclusive"],
+            "Value(Tuple([Atom(\"error\"), Atom(\"eexist\")]))",
+        ),
+        (
+            file.clone(),
+            vec!["directory"],
+            "Value(Tuple([Atom(\"error\"), Atom(\"enotdir\")]))",
+        ),
+        (
+            file.join("x"),
+            vec!["write"],
+            "Value(Tuple([Atom(\"error\"), Atom(\"enotdir\")]))",
+        ),
+    ] {
+        let modes = atoms(&mut scheduler, &modes);
+        let target = nif_path(&target);
+        assert_eq!(
+            text(&mut scheduler, |s| open_nif(s, &target, &modes)),
+            expected
+        );
+    }
+    open(&mut scheduler, &directory, &["directory"]);
+    open(&mut scheduler, &directory, &["skip_type_check"]);
+    open(&mut scheduler, &directory.join("new"), &["exclusive"]);
+    open(&mut scheduler, &file, &["read", "write", "append", "sync"]);
+    // Each element that is not a mode atom is ignored, also the tail of an
+    // improper list, and a list with no mode reads.
+    let ignored = Term::list_with_tail(
+        vec![Term::Integer(1), Term::static_atom("ok")],
+        Term::Integer(2),
+    );
+    let fd = resource(&open_nif(&mut scheduler, &path, &ignored).unwrap());
+    let size = Term::Integer(10);
+    assert_eq!(
+        text(&mut scheduler, |s| read_nif(s, &fd, &size)),
+        "Value(Tuple([Atom(\"ok\"), Binary([97, 98])]))"
+    );
+    std::fs::remove_dir_all(&directory).unwrap();
+}
+
+#[test]
+fn reads_writes_seeks_and_closes_a_file_resource_as_erts() {
+    // `read_nif_impl`, `write_nif_impl`, and `seek_nif_impl`
+    // (prim_file_nif.c:649-710, 782-806) after `file_handle_wrapper`
+    // (prim_file_nif.c:315-357), and `close_nif` (prim_file_nif.c:618-647).
+    let mut scheduler = scheduler();
+    let directory = scratch("handle");
+    let file = directory.join("file");
+    let fd = open(&mut scheduler, &file, &["read", "write"]);
+    let binary = |bytes: &[u8]| Term::binary(bytes.to_vec());
+    let iovec = Term::list_from(vec![binary(b"ab"), binary(b""), binary(b"cd")]);
+    assert_eq!(
+        text(&mut scheduler, |s| write_nif(s, &fd, &iovec)),
+        "Value(Atom(\"ok\"))"
+    );
+    let long = Term::list_from(std::iter::repeat_n(binary(b"z"), 65));
+    assert_eq!(
+        text(&mut scheduler, |s| write_nif(s, &fd, &long)),
+        "Value(Tuple([Atom(\"continue\"), List([Binary([122])])]))"
+    );
+    for bad in [
+        binary(b"x"),
+        Term::list_from(vec![Term::Integer(1)]),
+        Term::list_with_tail(vec![binary(b"x")], binary(b"y")),
+    ] {
+        assert_eq!(text(&mut scheduler, |s| write_nif(s, &fd, &bad)), BADARG);
+    }
+    let mark =
+        |scheduler: &mut Scheduler, name: &str| Term::Atom(scheduler.atoms.put(name).unwrap());
+    let (bof, cur, eof) = (
+        mark(&mut scheduler, "bof"),
+        mark(&mut scheduler, "cur"),
+        mark(&mut scheduler, "eof"),
+    );
+    for (mark, offset, expected) in [
+        (
+            eof.clone(),
+            Term::Integer(0),
+            "Value(Tuple([Atom(\"ok\"), Integer(68)]))",
+        ),
+        (
+            cur.clone(),
+            Term::Integer(-1),
+            "Value(Tuple([Atom(\"ok\"), Integer(67)]))",
+        ),
+        (
+            bof.clone(),
+            Term::Integer(-1),
+            "Value(Tuple([Atom(\"error\"), Atom(\"einval\")]))",
+        ),
+        (bof.clone(), Term::static_atom("ok"), BADARG),
+        (Term::Integer(1), Term::Integer(0), BADARG),
+        (Term::static_atom("ok"), Term::Integer(0), BADARG),
+        (
+            bof.clone(),
+            Term::Integer(1),
+            "Value(Tuple([Atom(\"ok\"), Integer(1)]))",
+        ),
+    ] {
+        assert_eq!(
+            text(&mut scheduler, |s| seek_nif(s, &fd, &mark, &offset)),
+            expected
+        );
+    }
+    for (size, expected) in [
+        (
+            Term::Integer(2),
+            "Value(Tuple([Atom(\"ok\"), Binary([98, 99])]))",
+        ),
+        (Term::Integer(0), "Value(Atom(\"eof\"))"),
+        (Term::static_atom("ok"), BADARG),
+        (
+            Term::Integer(-1),
+            "Value(Tuple([Atom(\"error\"), Atom(\"einval\")]))",
+        ),
+        (
+            Term::Float(1.0),
+            "Value(Tuple([Atom(\"error\"), Atom(\"einval\")]))",
+        ),
+        (
+            Term::Integer(1 << 62),
+            "Value(Tuple([Atom(\"error\"), Atom(\"enomem\")]))",
+        ),
+    ] {
+        assert_eq!(text(&mut scheduler, |s| read_nif(s, &fd, &size)), expected);
+    }
+    assert_eq!(
+        text(&mut scheduler, |s| close_nif(s, &fd)),
+        "Value(Atom(\"ok\"))"
+    );
+    assert_eq!(
+        text(&mut scheduler, |s| close_nif(s, &fd)),
+        "Value(Tuple([Atom(\"error\"), Atom(\"einval\")]))"
+    );
+    let size = Term::Integer(1);
+    // No BEAM code reaches `read_nif/2` without the `prim_buffer` NIFs
+    // (#733), so this call enters through the binding.
+    let read = BINDINGS
+        .iter()
+        .find(|binding| binding.name == "read_nif")
+        .unwrap();
+    let arguments = [fd.clone(), size.clone()];
+    assert_eq!(
+        text(&mut scheduler, |s| (read.run)(s, &arguments)),
+        "Value(Tuple([Atom(\"error\"), Atom(\"einval\")]))"
+    );
+    assert_eq!(
+        text(&mut scheduler, |s| read_nif(s, &fd, &size)),
+        "Value(Tuple([Atom(\"error\"), Atom(\"einval\")]))"
+    );
+    // A term that is not a file resource raises badarg.
+    let other = Term::Reference(scheduler.make_ref().unwrap());
+    for fd in [other, Term::static_atom("ok")] {
+        assert_eq!(text(&mut scheduler, |s| close_nif(s, &fd)), BADARG);
+        assert_eq!(text(&mut scheduler, |s| read_nif(s, &fd, &size)), BADARG);
+    }
+    // A read-only file gives the errno of a write, and a write-only file
+    // the errno of a read.
+    let read_only = open(&mut scheduler, &file, &["read"]);
+    assert_eq!(
+        text(&mut scheduler, |s| write_nif(s, &read_only, &iovec)),
+        "Value(Tuple([Atom(\"error\"), Atom(\"ebadf\")]))"
+    );
+    let write_only = open(&mut scheduler, &file, &["write"]);
+    assert_eq!(
+        text(&mut scheduler, |s| read_nif(s, &write_only, &size)),
+        "Value(Tuple([Atom(\"error\"), Atom(\"ebadf\")]))"
+    );
+    // A read of 0 bytes reads the host file too (unix_prim_file.c:292-341).
+    let empty = Term::Integer(0);
+    assert_eq!(
+        text(&mut scheduler, |s| read_nif(s, &write_only, &empty)),
+        "Value(Tuple([Atom(\"error\"), Atom(\"ebadf\")]))"
+    );
+    assert_eq!(std::fs::read(&file).unwrap(), b"");
+    std::fs::remove_dir_all(&directory).unwrap();
+}
