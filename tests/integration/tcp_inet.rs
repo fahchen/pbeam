@@ -785,9 +785,30 @@ fn links_and_connects_a_port_as_pinned_erts() {
     // link/1, unlink/1, erlang:port_connect/2, and erlang:port_info/2 with a
     // port (bif.c:186-232, 1252-1287; erl_bif_port.c:438-595; io.c:2160-2190,
     // 2355-2400, 3869-3872).
-    let expected = "[[true,noproc],true,true,[true,true],true,true,true,{error,badarg},[true,true],[true,true],[true,{name,[116,99,112,95,105,110,101,116]},undefined],[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}],[killed,undefined],[true,noproc,{error,noproc}],[]]";
+    let expected = "[[true,noproc],true,[true,true],true,true,true,{error,badarg},[true,true],[true],[true,{name,[116,99,112,95,105,110,101,116]},undefined],[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}],[killed,undefined],[true,noproc,{error,noproc}],[]]";
     assert_eq!(erts_text("tcp_active", "links"), expected, "ERTS");
     assert_eq!(pbeam_text("tcp_active", "links"), expected, "PBeam");
+}
+
+#[test]
+fn stops_the_run_for_the_links_of_a_port_with_two_links() {
+    // ERTS gives the links in the reversed post-order of a red-black tree
+    // (erl_monitor_link.c:91-233; erl_rbtree.h:1343-1458;
+    // erl_bif_info.c:3676-3696).
+    let program = load();
+    for item in ["all", "links"] {
+        let argument = program.host_term(Term::Atom(program.atom(item).unwrap()));
+        let error = program
+            .execute("tcp_active", "many_links", &[argument])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with(
+                "unsupported erlang:port_info links of a port with more than one link"
+            ),
+            "{item}: {error}"
+        );
+    }
 }
 
 #[test]

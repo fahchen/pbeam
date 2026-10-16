@@ -814,7 +814,7 @@ pub(super) fn port_denial(
 /// {id, Number}, {connected, Owner}, {input, Bytes}, {output, Bytes},
 /// {os_pid, OsPid}]` (`ERTS_PORT_INFO_1_ITEMS`, `erl_port.h:100-108`). The
 /// name is the list of the bytes of the program path, `links` holds the
-/// owner, and `id` is the port number. A port
+/// owner, and `id` is the port number (see [`port_item`]). A port
 /// that closed and an atom give `undefined`; each other term gives the atom
 /// `badarg`. The result traps to `erlang:bif_handle_signals_return/2` when
 /// the caller has incoming signals. For an open port, a caller without a
@@ -830,7 +830,8 @@ pub(super) fn port_denial(
 ///
 /// # Errors
 ///
-/// The atom `capability_denied` in a full atom table.
+/// A port with more than one link (see [`port_item`]), and the atom
+/// `capability_denied` in a full atom table.
 pub(super) fn port_info(context: &mut BifContext<'_>, port: &Term) -> Result<BifResult, BeamError> {
     let scheduler = &mut *context.scheduler;
     let info = match (port, open_port_id(scheduler, port)) {
@@ -846,7 +847,8 @@ pub(super) fn port_info(context: &mut BifContext<'_>, port: &Term) -> Result<Bif
             Term::list_from(
                 PORT_INFO_ITEMS
                     .iter()
-                    .map(|&name| port_item(id, port, name)),
+                    .map(|&name| port_item(id, port, name))
+                    .collect::<Result<Vec<_>, _>>()?,
             )
         }
         (Term::Port(_) | Term::Atom(_), None) => Term::static_atom("undefined"),
@@ -883,12 +885,24 @@ const OTHER_PORT_ITEMS: [&str; 7] = [
 /// `id`, as `erts_bld_port_info` builds it (`erl_bif_info.c:3654-3830`),
 /// for a name of [`PORT_INFO_ITEMS`]. The
 /// name is the list of the bytes of the program path or driver name,
-/// `links` holds the linked processes in pid order (ERTS gives a different
-/// order: see "Ports" in `docs/erts-differences.md`), and `id` is the port
-/// number.
-fn port_item(id: PortId, port: &Port, name: &str) -> Term {
+/// `links` holds the linked process of a port with zero or one link, and
+/// `id` is the port number.
+///
+/// # Errors
+///
+/// The `links` item of a port with more than one link. ERTS gives the
+/// links in the reversed post-order of a red-black tree, which depends on
+/// the shape of the tree (`erl_monitor_link.c:91-233`,
+/// `erl_rbtree.h:1343-1458`, `erl_bif_info.c:3676-3696`); PBeam does not
+/// keep that shape: see "Ports" in `docs/erts-differences.md`.
+fn port_item(id: PortId, port: &Port, name: &str) -> Result<Term, BeamError> {
     let value = match name {
         "name" => Term::list_from(port.name.iter().map(|&byte| Term::Integer(byte.into()))),
+        "links" if port.links.len() > 1 => {
+            return Err(error(
+                "unsupported erlang:port_info links of a port with more than one link: see \"Ports\" in docs/erts-differences.md",
+            ));
+        }
         "links" => Term::list_from(port.links.iter().map(|&pid| Term::Pid(pid))),
         "id" => Term::Integer(id.0.try_into().expect("a port number below 2^63")),
         "connected" => Term::Pid(port.owner),
@@ -900,7 +914,7 @@ fn port_item(id: PortId, port: &Port, name: &str) -> Term {
             Driver::Inet(_) => Term::static_atom("undefined"),
         },
     };
-    Term::tuple(vec![Term::static_atom(name), value])
+    Ok(Term::tuple(vec![Term::static_atom(name), value]))
 }
 
 /// Run `erts_internal:port_info(Port, Item)`, which `erlang:port_info/2`
@@ -923,7 +937,8 @@ fn port_item(id: PortId, port: &Port, name: &str) -> Term {
 ///
 /// # Errors
 ///
-/// An item of [`OTHER_PORT_ITEMS`], and the atom `capability_denied` in a
+/// An item of [`OTHER_PORT_ITEMS`], the `links` item of a port with more
+/// than one link (see [`port_item`]), and the atom `capability_denied` in a
 /// full atom table.
 pub(super) fn port_info_item(
     context: &mut BifContext<'_>,
@@ -954,7 +969,7 @@ pub(super) fn port_info_item(
                 .bump_reductions(PORT_REDUCTIONS);
             let ports = scheduler.resources.borrow_mut::<Ports>();
             let port = ports.get(id).expect("the port is open");
-            port_item(id, port, name)
+            port_item(id, port, name)?
         }
         (Term::Port(_) | Term::Atom(_), None) => Term::static_atom("undefined"),
         (_, None) => Term::static_atom("badtype"),

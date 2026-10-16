@@ -1,5 +1,5 @@
 -module(tcp_active).
--export([main/1, active/1, closed/1, passive_closed/1, links/0, unsupported/2, unsupported_item/0]).
+-export([main/1, active/1, closed/1, passive_closed/1, links/0, many_links/1, unsupported/2, unsupported_item/0]).
 
 %% Delivers the data of an accepted socket in active mode, as
 %% inet:setopts/2 calls prim_inet:setopts/2, and gives the socket to a
@@ -104,15 +104,14 @@ ended(Path, Step, Setopts, Active) ->
     [Recv, Set, Closed, Again, erlang:port_info(S, connected), flush()].
 
 %% link/1, unlink/1, erlang:port_connect/2, and erlang:port_info/2 with a
-%% port.
+%% port. Each read of the links item is of a port with zero or one link
+%% (see many_links/1).
 links() ->
     process_flag(trap_exit, true),
     {ok, S} = prim_inet:open(tcp, inet, stream),
     Parent = self(),
     Linker = spawn(fun() -> Parent ! {self(), link(S)}, receive stop -> ok end end),
     Linked = receive {Linker, LinkResult} -> LinkResult end,
-    Two = erlang:port_info(S, links) =:= {links, [Parent, Linker]}
-        orelse erlang:port_info(S, links),
     Unlinked = [unlink(S), unlink(S)],
     One = erlang:port_info(S, links) =:= {links, [Linker]},
     Relinked = link(S),
@@ -125,9 +124,7 @@ links() ->
     DeadConnect = c(fun() -> erlang:port_connect(S, Linker) end),
     Live = spawn(fun() -> receive stop -> ok end end),
     Connected = [erlang:port_connect(S, self()), erlang:port_connect(S, Live)],
-    Owner = [erlang:port_info(S, connected) =:= {connected, Live},
-             erlang:port_info(S, links) =:= {links, [Parent, Live]}
-             orelse erlang:port_info(S, links)],
+    Owner = [erlang:port_info(S, connected) =:= {connected, Live}],
     Infos = [erlang:port_info(S, id) =:= {id, element(2, erlang:port_info(S, id))},
              erlang:port_info(S, name), erlang:port_info(no_port, connected)],
     Errors = [c(fun() -> erlang:port_info(S, bad_item) end),
@@ -152,8 +149,20 @@ links() ->
     exit(Victim, kill),
     Killed = [erlang:port_connect(S2, Victim),
               receive {'EXIT', S2, KilledReason} -> KilledReason after 3000 -> missing end],
-    [Killed, Linked, Two, Unlinked, One, Relinked, Open, DeadConnect, Connected, Owner, Infos, Errors, Exits, Dead,
+    [Killed, Linked, Unlinked, One, Relinked, Open, DeadConnect, Connected, Owner, Infos, Errors, Exits, Dead,
      flush()].
+
+%% The links item of a port with two links, which PBeam does not give yet:
+%% erlang:port_info/1 for all, and erlang:port_info/2 for links.
+many_links(Item) ->
+    {ok, S} = prim_inet:open(tcp, inet, stream),
+    Parent = self(),
+    Linker = spawn(fun() -> Parent ! {self(), link(S)}, receive stop -> ok end end),
+    receive {Linker, true} -> ok end,
+    case Item of
+        all -> erlang:port_info(S);
+        links -> erlang:port_info(S, links)
+    end.
 
 %% Each part that PBeam does not run yet.
 unsupported(Path, Case) ->
