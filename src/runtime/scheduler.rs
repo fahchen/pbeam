@@ -397,6 +397,9 @@ pub(super) struct Scheduler {
     /// The timers of the run and the run clock. All processes of the run
     /// share them.
     pub(super) timers: Timers,
+    /// The not connected dist entries of the run, which `erlang:nodes/1,2`
+    /// gives with the node type `known`.
+    known_nodes: KnownNodes,
     /// The owner of each reference that `erlang:monitor/3` made with an
     /// alias option: an ERTS pid reference holds the pid of its owner
     /// (`erts_get_pid_of_ref`, `erl_bif_unique.h:279`). The owner keeps the
@@ -485,6 +488,7 @@ impl Scheduler {
             code: CodeTable::default(),
             nif_libraries: HashSet::new(),
             timers: Timers::new(),
+            known_nodes: KnownNodes::default(),
             alias_owners: HashMap::new(),
             pending_monitor: None,
             next_unlink_id: 1,
@@ -2844,6 +2848,7 @@ fn named_item(name: &Atom) -> Term {
     Term::tuple(vec![Term::Atom(name.clone()), local_node()])
 }
 
+mod known_nodes;
 mod policy;
 mod ports;
 mod process_table;
@@ -2852,6 +2857,7 @@ mod signals;
 mod tcp_inet;
 mod tcp_stream;
 
+use known_nodes::KnownNodes;
 pub(super) use policy::PolicyEnd;
 use policy::PolicyProcess;
 use process_table::ProcessTable;
