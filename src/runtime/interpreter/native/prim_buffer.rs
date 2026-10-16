@@ -148,9 +148,14 @@ fn size_nif(scheduler: &mut Scheduler, buffer: &Term) -> Result<BifResult, BeamE
 
 /// Run `prim_buffer:peek_head(Buffer)`, as the ERTS NIF `peek_head_nif`
 /// (`prim_buffer_nif.c:366-388`) does: the binary at the front of the
-/// queue, with no change to the buffer. A term that is not a buffer
-/// resource, or a buffer with an empty queue
-/// (`enif_ioq_peek_head`, `erl_nif.c:4377-4383`), raises `error:badarg`.
+/// queue, with no change to the buffer. ERTS gives a sub-binary of the head
+/// entry above `ERL_ONHEAP_BINARY_LIMIT` of 64 bytes
+/// (`erl_nif.c:4394-4415`) and copies the bytes of a head entry at or below
+/// that size into an on-heap binary (`erl_nif.c:4417-4423`). PBeam gives a
+/// view of the queue element, which copies no byte, and the bytes and the
+/// order are the same. A term that is not a buffer resource, or a buffer
+/// with an empty queue (`enif_ioq_peek_head`, `erl_nif.c:4377-4383`),
+/// raises `error:badarg`.
 ///
 /// # Examples
 ///

@@ -161,9 +161,11 @@ impl Buffer {
     /// to the buffer, as `peek_head_nif` (`prim_buffer_nif.c:366-388`) does:
     /// `None` for a queue of no bytes, which raises `error:badarg`
     /// (`enif_ioq_peek_head`, `erl_nif.c:4377-4383`). ERTS gives a
-    /// sub-binary of the head entry, which shares its bytes
-    /// (`erl_nif.c:4393-4407`), and PBeam gives a view of the queue element,
-    /// so neither copies a byte.
+    /// sub-binary of the head entry above `ERL_ONHEAP_BINARY_LIMIT` of 64
+    /// bytes, which shares its bytes (`erl_nif.c:4394-4415`), and copies the
+    /// bytes of a head entry at or below that size into an on-heap binary
+    /// (`erl_nif.c:4417-4423`). PBeam gives a view of the queue element, so
+    /// it copies no byte, and the bytes and the order are the same.
     ///
     /// # Examples
     ///

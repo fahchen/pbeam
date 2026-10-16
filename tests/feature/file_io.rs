@@ -40,12 +40,19 @@ fn opens_writes_positions_and_closes_a_file_as_pinned_erts() {
     // and `peek_head/1`), `skip/2`, and `wipe/1`. `io:get_line/2` reads a
     // line of the file `utf16.txt` with the encoding `{utf16, little}`, and
     // an append-only open keeps a read buffer too.
+    //
+    // `file:consult/1` then reads the terms of
+    // `fixtures/boot/file_io_probe_terms.config` through the same read
+    // buffer, and the file `fixtures/boot/file_io_probe_bad.config` gives
+    // the parse error of `erl_parse` for its second term.
     let expected = "[ok,\n {ok,<<\"ab\\ncd\\n\">>},\n ok,\n {ok,2},\n ok,\n {ok,13},\n \
         {error,einval},\n ok,ok,\n {ok,<<\"fiXYZ\\nsecond\\n\">>},\n ok,\n \
         {ok,<<\"fiXYZ\\nsecond\\ntail\\n\">>},\n {error,eexist},\n {error,eisdir},\n \
         {error,enotdir},\n {error,enoent},\n {ok,\"fiXYZ\\n\"},\n {ok,\"se\"},\n \
         {ok,\"cond\\ntail\\n\"},\n {ok,18},\n eof,ok,ok,\"abc\\n\",eof,ok,ok,\n \
-        {ok,25},\n ok]\n";
+        {ok,25},\n ok,\n \
+        {ok,[{plug_hello,[{port,4004},{enabled,true}]},[atom,<<\"binary\">>,15]]},\n \
+        {error,{1,erl_parse,[\"syntax error before: \",\"'.'\"]}}]\n";
     for (name, mut command) in [("ERTS", erts()), ("PBeam", pbeam())] {
         let directory =
             std::env::temp_dir().join(format!("pbeam-file-io-{}-{name}", std::process::id()));
@@ -57,6 +64,14 @@ fn opens_writes_positions_and_closes_a_file_as_pinned_erts() {
             stderr,
         } = command
             .env("FILE_IO_PROBE_PATH", directory.join("scratch.txt"))
+            .env(
+                "FILE_IO_PROBE_TERMS",
+                "fixtures/boot/file_io_probe_terms.config",
+            )
+            .env(
+                "FILE_IO_PROBE_BAD_TERMS",
+                "fixtures/boot/file_io_probe_bad.config",
+            )
             .env("TERM", "dumb")
             .env("LC_ALL", "C.UTF-8")
             .output()

@@ -57,9 +57,11 @@ main() ->
     AppendOnly = file:write(Appender, <<"append\n">>),
     AppendPosition = file:position(Appender, cur),
     AppendClose = file:close(Appender),
+    ConsultTerms = file:consult(os:getenv("FILE_IO_PROBE_TERMS")),
+    ConsultBad = file:consult(os:getenv("FILE_IO_PROBE_BAD_TERMS")),
     io:format("~p~n", [[First, Read1, Write, Position, Iodata, End, Negative,
                         Close, Again, Read2, Appended, Read3, Exclusive, IsDir,
                         NotDir, Missing, Line1, Chunk, ChunkRest, ReadPosition,
                         ReadEof, CloseReader, Utf16Write, Utf16Line, Utf16Eof,
                         Utf16Close, AppendOnly, AppendPosition,
-                        AppendClose]]).
+                        AppendClose, ConsultTerms, ConsultBad]]).
