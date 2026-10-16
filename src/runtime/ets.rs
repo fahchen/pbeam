@@ -317,7 +317,13 @@ impl EtsTables {
         let freeing = self.freeing.values().map(|freeing| &freeing.table);
         for table in self.tables.values().chain(freeing) {
             live.add(table.allocated_bytes());
-            for object in table.objects.iter().flatten() {
+            let stored = table.objects.iter().flatten();
+            let copies = table
+                .busy
+                .as_ref()
+                .into_iter()
+                .flat_map(|busy| &busy.objects);
+            for object in stored.chain(copies) {
                 for term in object {
                     live.term(term);
                 }
@@ -1229,6 +1235,14 @@ impl Table {
                 .flatten()
                 .map(|object| object.capacity() * std::mem::size_of::<Term>())
                 .sum::<usize>()
+            + self.busy.as_ref().map_or(0, |busy| {
+                busy.objects.capacity() * std::mem::size_of::<Vec<Term>>()
+                    + busy
+                        .objects
+                        .iter()
+                        .map(|object| object.capacity() * std::mem::size_of::<Term>())
+                        .sum::<usize>()
+            })
     }
 
     /// Return the slot of the object whose stored key hash is `hash` and whose

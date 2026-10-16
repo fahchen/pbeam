@@ -556,7 +556,15 @@ pub(super) fn insert_list(
         if let Check::Rest(rest) = &mut check {
             match units.check(&mut done, rest, keypos) {
                 None => break 'work None,
-                Some(false) => break 'work Some(BifResult::badarg()),
+                Some(false) => {
+                    // ERTS takes the table before it raises `badarg` for a
+                    // bad object, so a busy table runs its list insert first
+                    // (`erl_db.c:2036-2047`).
+                    if let Take::Help = help_busy(&mut *context, &table)? {
+                        break 'work None;
+                    }
+                    break 'work Some(BifResult::badarg());
+                }
                 Some(true) => (count, check) = (done, Check::Done(done)),
             }
         }

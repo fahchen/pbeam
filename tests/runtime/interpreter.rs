@@ -4591,6 +4591,31 @@ fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
         matches!(result, BifResult::TrapBif { .. }),
         "ets:select_trap/7 did not complete the insert of the other process"
     );
+    // A list whose objects are bad raises `badarg`, and it completes the
+    // list insert of a busy table first, as ERTS takes the table before it
+    // raises the error (`erl_db.c:2036-2047`).
+    scheduler.current_process_mut().fcalls = 1;
+    busy(&mut scheduler);
+    let bad = Term::list_from([Term::Integer(1), Term::Integer(1)]);
+    let result = program
+        .bif(
+            &mut scheduler,
+            "ets",
+            "insert",
+            vec![id.clone(), bad.clone()],
+        )
+        .unwrap();
+    assert!(
+        matches!(result, BifResult::TrapBif { .. }),
+        "the bad list did not complete the insert of the other process"
+    );
+    let result = program
+        .bif_trap(&mut scheduler, "ets", "insert", vec![id.clone(), bad])
+        .unwrap();
+    assert!(
+        matches!(result, BifResult::Raise { .. }),
+        "the bad list did not raise badarg"
+    );
     // A plain list insert that uses the last of its budget on its last
     // object traps with all units of the insert charged, and it returns
     // `true` in its next turn (`erl_db.c:1936-1940`, `2180-2196`).

@@ -34,6 +34,27 @@ fn bounds_the_work_of_one_turn_of_a_busy_list_insert() {
     assert_eq!(table.live_objects().len(), 10);
     assert!(table.busy.is_none());
 
+    // The copies of a list insert that runs count as the live bytes of the
+    // table and of the terms that only they hold.
+    let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
+    let mut tables = EtsTables::default();
+    let objects = vec![vec![Term::Integer(1)], vec![Term::Integer(2)]];
+    table.busy = Some(Busy::new(ProcessId(0), objects, false));
+    let with_busy = table.allocated_bytes();
+    tables.create(Reference(0), None, table);
+    let mut live = crate::term::LiveBytes::new();
+    tables.account_terms(&mut live);
+    let mut plain = EtsTables::default();
+    plain.create(
+        Reference(0),
+        None,
+        Table::new(ProcessId(0), Access::Public, 1, TableType::Set),
+    );
+    let mut empty = crate::term::LiveBytes::new();
+    plain.account_terms(&mut empty);
+    assert!(live.bytes() > empty.bytes());
+    assert!(with_busy > 0);
+
     // A walk that finds a key of the table frees the copies, and the
     // counter yields after the loop unit of the last copy, so the next
     // turn gives the result `false` (`erl_db.c:1863-1873`, `1909-1925`).
