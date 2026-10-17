@@ -384,7 +384,10 @@ fn raises_badarg_for_a_unicode_pattern_that_is_not_chardata() {
 /// Return `{match, Elements}`, as `build_exec_return`
 /// (`erl_bif_re.c:1047-1256`) makes a match.
 fn matched(program: &BeamProgram, elements: Vec<Term>) -> Term {
-    Term::tuple(vec![Term::Atom(program.atom("match").unwrap()), Term::list_from(elements)])
+    Term::tuple(vec![
+        Term::Atom(program.atom("match").unwrap()),
+        Term::list_from(elements),
+    ])
 }
 
 /// Return the offset pair `{From, Length}` of one capture group.
@@ -414,7 +417,10 @@ fn nomatch(program: &BeamProgram) -> Term {
 
 /// Return `{error, Reason}`.
 fn error_term(program: &BeamProgram, reason: &str) -> Term {
-    Term::tuple(vec![Term::Atom(program.atom("error").unwrap()), Term::Atom(program.atom(reason).unwrap())])
+    Term::tuple(vec![
+        Term::Atom(program.atom("error").unwrap()),
+        Term::Atom(program.atom(reason).unwrap()),
+    ])
 }
 
 #[test]
@@ -447,49 +453,52 @@ fn runs_re_run_3_with_the_option_set_as_pinned_erts() {
     // (re_run, erl_bif_re.c:1513-1716).
     let program = program();
     let expected = Term::list_from(vec![
-            matched(&program, vec![pair(1, 1)]),
-            nomatch(&program),
-            nomatch(&program),
-            nomatch(&program),
-            nomatch(&program),
-            matched(&program, vec![codes(b"b")]),
-            matched(&program, vec![bin(b"b"), bin(b"b")]),
-            matched(&program, vec![pair(0, 3)]),
-            nomatch(&program),
-            matched(&program, vec![pair(0, 3)]),
-            matched(&program, vec![pair(0, 3)]),
-            matched(&program, vec![pair(0, 1)]),
-            matched(&program, vec![pair(0, 2)]),
-            matched(&program, vec![pair(3, 1)]),
-            matched(&program, vec![pair(1, 1)]),
-            matched(&program, vec![pair(1, 1)]),
-            matched(&program, vec![pair(1, 1)]),
-            matched(&program, vec![bin(b"b")]),
-            matched(&program, vec![pair(1, 2)]),
-            matched(&program, vec![pair(1, 2)]),
-            matched(&program, vec![bin(b"b"), bin(b"b")]),
-            matched(&program, vec![codes(b"b"), codes(b"b")]),
-            Term::Atom(program.atom("match").unwrap()),
-            matched(&program, vec![pair(1, 1), pair(1, 1)]),
-            nomatch(&program),
-            nomatch(&program),
-            nomatch(&program),
-            error_term(&program, "match_limit"),
-            nomatch(&program),
-            matched(&program, vec![pair(0, 1), pair(1, 1)]),
-            matched(&program, vec![pair(1, 1), pair(-1, 0)]),
-            matched(&program, vec![pair(0, 2)]),
-            Term::Atom(program.atom("match").unwrap()),
-            Term::Atom(program.atom("match").unwrap()),
-            matched(&program, vec![
+        matched(&program, vec![pair(1, 1)]),
+        nomatch(&program),
+        nomatch(&program),
+        nomatch(&program),
+        nomatch(&program),
+        matched(&program, vec![codes(b"b")]),
+        matched(&program, vec![bin(b"b"), bin(b"b")]),
+        matched(&program, vec![pair(0, 3)]),
+        nomatch(&program),
+        matched(&program, vec![pair(0, 3)]),
+        matched(&program, vec![pair(0, 3)]),
+        matched(&program, vec![pair(0, 1)]),
+        matched(&program, vec![pair(0, 2)]),
+        matched(&program, vec![pair(3, 1)]),
+        matched(&program, vec![pair(1, 1)]),
+        matched(&program, vec![pair(1, 1)]),
+        matched(&program, vec![pair(1, 1)]),
+        matched(&program, vec![bin(b"b")]),
+        matched(&program, vec![pair(1, 2)]),
+        matched(&program, vec![pair(1, 2)]),
+        matched(&program, vec![bin(b"b"), bin(b"b")]),
+        matched(&program, vec![codes(b"b"), codes(b"b")]),
+        Term::Atom(program.atom("match").unwrap()),
+        matched(&program, vec![pair(1, 1), pair(1, 1)]),
+        nomatch(&program),
+        nomatch(&program),
+        nomatch(&program),
+        error_term(&program, "match_limit"),
+        nomatch(&program),
+        matched(&program, vec![pair(0, 1), pair(1, 1)]),
+        matched(&program, vec![pair(1, 1), pair(-1, 0)]),
+        matched(&program, vec![pair(0, 2)]),
+        Term::Atom(program.atom("match").unwrap()),
+        Term::Atom(program.atom("match").unwrap()),
+        matched(
+            &program,
+            vec![
                 Term::list_from(vec![pair(1, 1), pair(1, 1)]),
                 Term::list_from(vec![pair(4, 1), pair(4, 1)]),
-            ]),
-            matched(&program, vec![bin(b"b")]),
-            matched(&program, vec![pair(1, 1)]),
-            matched(&program, vec![pair(1, 1), pair(1, 1)]),
-            matched(&program, vec![pair(1, 1), pair(1, 1)]),
-        ]);
+            ],
+        ),
+        matched(&program, vec![bin(b"b")]),
+        matched(&program, vec![pair(1, 1)]),
+        matched(&program, vec![pair(1, 1), pair(1, 1)]),
+        matched(&program, vec![pair(1, 1), pair(1, 1)]),
+    ]);
     let result = program.execute("re_probe", "run", &[]).unwrap().term;
     let result = result.proper_list().unwrap().collect::<Vec<_>>();
     let expected = expected.proper_list().unwrap().collect::<Vec<_>>();
@@ -534,8 +543,14 @@ fn returns_the_capture_shapes_of_a_match_as_pinned_erts() {
             Term::Atom(program.atom("match").unwrap()),
             Term::Atom(program.atom("match").unwrap()),
             Term::Atom(program.atom("match").unwrap()),
-            matched(&program, vec![pair(0, 2), pair(0, 1), pair(1, 1), pair(-1, 0)]),
-            matched(&program, vec![codes(b"ab"), codes(b"a"), codes(b"b"), Term::nil()]),
+            matched(
+                &program,
+                vec![pair(0, 2), pair(0, 1), pair(1, 1), pair(-1, 0)]
+            ),
+            matched(
+                &program,
+                vec![codes(b"ab"), codes(b"a"), codes(b"b"), Term::nil()]
+            ),
             matched(&program, vec![bin(b"ab"), bin(b"a"), bin(b"b"), bin(b"")]),
         ])
     );
@@ -560,25 +575,37 @@ fn runs_a_global_match_as_pinned_erts() {
     assert_eq!(
         program.execute("re_probe", "globals", &[]).unwrap().term,
         Term::list_from(vec![
-            matched(&program, vec![
-                Term::list_from(vec![pair(1, 1)]),
-                Term::list_from(vec![pair(4, 1)]),
-            ]),
-            matched(&program, vec![
-                Term::list_from(vec![pair(0, 3)]),
-                Term::list_from(vec![pair(3, 0)]),
-            ]),
+            matched(
+                &program,
+                vec![
+                    Term::list_from(vec![pair(1, 1)]),
+                    Term::list_from(vec![pair(4, 1)]),
+                ]
+            ),
+            matched(
+                &program,
+                vec![
+                    Term::list_from(vec![pair(0, 3)]),
+                    Term::list_from(vec![pair(3, 0)]),
+                ]
+            ),
             matched(&program, vec![Term::list_from(vec![pair(2, 1)])]),
             nomatch(&program),
-            matched(&program, vec![
-                Term::list_from(vec![bin(b"b")]),
-                Term::list_from(vec![bin(b"b")]),
-            ]),
+            matched(
+                &program,
+                vec![
+                    Term::list_from(vec![bin(b"b")]),
+                    Term::list_from(vec![bin(b"b")]),
+                ]
+            ),
             Term::Atom(program.atom("match").unwrap()),
-            matched(&program, vec![
-                Term::list_from(vec![bin(b"b")]),
-                Term::list_from(vec![bin(b"b")]),
-            ]),
+            matched(
+                &program,
+                vec![
+                    Term::list_from(vec![bin(b"b")]),
+                    Term::list_from(vec![bin(b"b")]),
+                ]
+            ),
         ])
     );
     assert_eq!(
@@ -644,10 +671,7 @@ fn raises_badarg_for_bad_run_options_and_subjects_as_pinned_erts() {
         .iter()
         .map(|&label| format!("{{{label},{{error,badarg}}}}"))
         .collect();
-    assert_eq!(
-        reference("run_errors"),
-        format!("[{}]\n", texts.join(","))
-    );
+    assert_eq!(reference("run_errors"), format!("[{}]\n", texts.join(",")));
 }
 
 #[test]

@@ -95,7 +95,9 @@ fn generate_match_headers() -> PathBuf {
     let calls = |needle: &str| -> Vec<usize> {
         lines
             .iter()
-            .filter(|(line, _)| line.contains(needle) && !line.contains("define") && !line.contains("DBG_FAKE_"))
+            .filter(|(line, _)| {
+                line.contains(needle) && !line.contains("define") && !line.contains("DBG_FAKE_")
+            })
             .map(|&(_, number)| number)
             .collect()
     };
@@ -122,7 +124,9 @@ fn generate_match_headers() -> PathBuf {
             "pcre2_match_memchr_break_cases.gen.h",
             memchr_break
                 .iter()
-                .map(|number| format!("case {number}: goto ERLANG_PCRE2_MATCH_YIELD_LINE_{number};\n"))
+                .map(|number| {
+                    format!("case {number}: goto ERLANG_PCRE2_MATCH_YIELD_LINE_{number};\n")
+                })
                 .collect::<String>(),
         ),
         ("pcre2_match_yield_coverage.gen.h", yield_coverage),

@@ -115,9 +115,7 @@ impl Options {
     /// assert!(options.capture().is_none());
     /// ```
     fn capture(&self) -> Option<(&Term, &Term)> {
-        self.capture
-            .as_ref()
-            .map(|(values, kind)| (values, kind))
+        self.capture.as_ref().map(|(values, kind)| (values, kind))
     }
 }
 
@@ -663,10 +661,7 @@ fn empty_element(kind: ReturnType) -> Term {
 /// let value = error_reason("match_limit");
 /// ```
 fn error_reason(reason: &str) -> Term {
-    Term::tuple(vec![
-        Term::static_atom("error"),
-        Term::static_atom(reason),
-    ])
+    Term::tuple(vec![Term::static_atom("error"), Term::static_atom(reason)])
 }
 
 /// Return the element of one group of a match, as `build_exec_return` makes
@@ -695,11 +690,7 @@ fn capture_element(kind: ReturnType, ovector: &[usize], index: usize, subject: &
             Term::Integer(from as i64),
             Term::Integer((to - from) as i64),
         ]),
-        ReturnType::List => Term::list_from(
-            bytes
-                .iter()
-                .map(|&byte| Term::Integer(byte.into())),
-        ),
+        ReturnType::List => Term::list_from(bytes.iter().map(|&byte| Term::Integer(byte.into()))),
         ReturnType::Binary => Term::binary(bytes.to_vec()),
     }
 }
@@ -850,7 +841,9 @@ pub(super) fn run(
         };
         // A `newline` or `bsr` option must agree with the compiled code
         // (`erl_bif_re.c:1609-1632`).
-        if parsed.newline.is_some_and(|newline| code.newline() != newline)
+        if parsed
+            .newline
+            .is_some_and(|newline| code.newline() != newline)
             || parsed.bsr.is_some_and(|bsr| code.bsr() != bsr)
         {
             return Ok(BifResult::badarg());
@@ -925,12 +918,17 @@ pub(super) fn run(
     let mut data = pcre2::MatchData::new(pairs);
     data.clear_restart();
     let mut limit = loop_limit(
-        i32::try_from(context.scheduler.current_process_mut().bif_reductions_left()?)
-            .expect("a reduction budget fits in i32"),
+        i32::try_from(
+            context
+                .scheduler
+                .current_process_mut()
+                .bif_reductions_left()?,
+        )
+        .expect("a reduction budget fits in i32"),
     );
     data.set_loops_left(limit);
-    let match_context = (parsed.flags & (FLAG_MATCH_LIMIT | FLAG_MATCH_LIMIT_RECURSION) != 0)
-        .then(|| {
+    let match_context =
+        (parsed.flags & (FLAG_MATCH_LIMIT | FLAG_MATCH_LIMIT_RECURSION) != 0).then(|| {
             pcre2::MatchContext::new(
                 (parsed.flags & FLAG_MATCH_LIMIT != 0).then_some(parsed.match_limit),
                 (parsed.flags & FLAG_MATCH_LIMIT_RECURSION != 0)
@@ -972,8 +970,14 @@ pub(super) fn run(
     // the trap to `erlang:re_run_trap/3` does (`erl_bif_re.c:1852-1858`).
     while rc == pcre2::ERROR_LOOP_LIMIT {
         let used = (limit - data.loops_left()) / LOOP_FACTOR;
-        context.scheduler.current_process_mut().bump_reductions(used);
-        context.scheduler.current_process_mut().bump_all_reductions();
+        context
+            .scheduler
+            .current_process_mut()
+            .bump_reductions(used);
+        context
+            .scheduler
+            .current_process_mut()
+            .bump_all_reductions();
         limit = loop_limit(CONTEXT_REDS);
         data.set_loops_left(limit);
         data.clear_restart();
@@ -984,7 +988,10 @@ pub(super) fn run(
     // `badarg` (`erl_bif_re.c:1756-1786`); a bad offset, code, or mode
     // raises it with no charge at all.
     if pcre2::is_utf8_error(rc) || rc == pcre2::ERROR_BADUTFOFFSET {
-        context.scheduler.current_process_mut().bump_all_reductions();
+        context
+            .scheduler
+            .current_process_mut()
+            .bump_all_reductions();
         return Ok(BifResult::badarg());
     }
     if matches!(
