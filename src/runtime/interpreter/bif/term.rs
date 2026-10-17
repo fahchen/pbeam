@@ -58,6 +58,10 @@ const REF_NUMBER_1_MASK: u32 = 0xFFFC_0000;
 const REF_THREAD: u32 = 1;
 /// The largest count of reference numbers (`ERTS_MAX_REF_NUMBERS`).
 const MAX_REFERENCE_NUMBERS: usize = 5;
+/// The largest port number of the local node
+/// (`ERTS_MAX_INTERNAL_PORT_NUMBER`, `erl_node_container_utils.h:250`):
+/// 2^60 - 1 on a 64-bit host (`_PORT_DATA_SIZE`, `erl_term.h:696`).
+const MAX_PORT_NUMBER: u64 = (1 << 60) - 1;
 
 /// The options of `erlang:term_to_binary/2`, as `parse_t2b_opts`
 /// (`external.c:1483-1557`) reads them.
@@ -184,6 +188,13 @@ pub(super) fn term_to_binary_2(
     term: &Term,
     options: &Term,
 ) -> Result<BifResult, BeamError> {
+    let Some(parsed) = parse_options(options) else {
+        return Ok(BifResult::badarg());
+    };
+    // The one-go path of `erts_term_to_binary_int` charges 1 reduction
+    // (`external.c:2520-2530`). See row "External term format" of
+    // `docs/erts-differences.md` for the charge of a larger term.
+    context.scheduler.current_process_mut().bump_reductions(1);
     // The existing `[local]` reference path of `erlang.rs` gives the bytes
     // that `prim_inet:send/3` needs; keep it for that one case.
     let local = Term::list_from(vec![Term::static_atom("local")]);
@@ -192,9 +203,7 @@ pub(super) fn term_to_binary_2(
     {
         return super::erlang::term_to_binary_2(context, term, options);
     }
-    let Some(options) = parse_options(options) else {
-        return Ok(BifResult::badarg());
-    };
+    let options = parsed;
     let scheduler = &mut *context.scheduler;
     let seed = scheduler.local_node_hash();
     let mut body = encode(term, &scheduler.atoms, &options)?;
@@ -203,10 +212,6 @@ pub(super) fn term_to_binary_2(
         body = [&[LOCAL_EXT][..], &hash.to_be_bytes(), &body].concat();
     }
     let bytes = compress_term(&body, options.level);
-    // The one-go path of `erts_term_to_binary_int` charges 1 reduction
-    // (`external.c:2520-2530`). See row "External term format" of
-    // `docs/erts-differences.md` for the charge of a larger term.
-    scheduler.current_process_mut().bump_reductions(1);
     Ok(Value(Term::binary(bytes)))
 }
 
@@ -893,6 +898,9 @@ impl Decoder<'_> {
                 77 => {
                     let count = self.u32()? as usize;
                     let bits = self.u8()?;
+                    if count == 0 || !(1..=8).contains(&bits) {
+                        return Err(DecodeError::Badarg);
+                    }
                     let bytes = self.take(count)?;
                     if bits != 8 {
                         return Err(DecodeError::Unsupported(
@@ -1025,7 +1033,41 @@ impl Decoder<'_> {
             .position(|&byte| byte == 0)
             .unwrap_or(bytes.len());
         let text = std::str::from_utf8(&bytes[..end]).map_err(|_| DecodeError::Badarg)?;
-        let value: f64 = text.parse().map_err(|_| DecodeError::Badarg)?;
+        // `sys_chars_to_double` takes an optional sign, digits, one '.' or
+        // ',', digits, and an optional exponent with no other bytes
+        // (`sys/unix/sys_float.c:74-135`). `strtod` reads either radix
+        // character there, so the parse here reads '.' for both.
+        let syntax = text.as_bytes();
+        let mut index = usize::from(matches!(syntax.first(), Some(b'+' | b'-')));
+        let digits = |index: &mut usize| {
+            let start = *index;
+            while syntax.get(*index).is_some_and(u8::is_ascii_digit) {
+                *index += 1;
+            }
+            *index > start
+        };
+        if !digits(&mut index) || !matches!(syntax.get(index), Some(b'.' | b',')) || {
+            index += 1;
+            !digits(&mut index)
+        } {
+            return Err(DecodeError::Badarg);
+        }
+        if matches!(syntax.get(index), Some(b'e' | b'E')) {
+            index += 1;
+            if matches!(syntax.get(index), Some(b'+' | b'-')) {
+                index += 1;
+            }
+            if !digits(&mut index) {
+                return Err(DecodeError::Badarg);
+            }
+        }
+        if index != syntax.len() {
+            return Err(DecodeError::Badarg);
+        }
+        let value: f64 = text
+            .replace(',', ".")
+            .parse()
+            .map_err(|_| DecodeError::Badarg)?;
         value
             .is_finite()
             .then_some(Term::Float(value))
@@ -1189,6 +1231,9 @@ impl Decoder<'_> {
     ) -> Result<Term, DecodeError> {
         if !self.is_local(sysname, creation) {
             return Err(DecodeError::Unsupported("a port of another node"));
+        }
+        if number > MAX_PORT_NUMBER {
+            return Err(DecodeError::Badarg);
         }
         Ok(Term::Port(crate::term::PortId(number)))
     }

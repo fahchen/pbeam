@@ -178,6 +178,41 @@ fn decodes_the_extended_integer_and_float_forms() {
         decode_with(&mut atoms, &float, false).unwrap(),
         Term::Float(1.5)
     );
+    // A comma is the other radix character that `sys_chars_to_double`
+    // accepts (`sys/unix/sys_float.c:74-135`).
+    let mut comma = vec![99];
+    comma.extend_from_slice(b"1,5");
+    comma.resize(1 + 31, 0);
+    assert_eq!(
+        decode_with(&mut atoms, &comma, false).unwrap(),
+        Term::Float(1.5)
+    );
+    // An exponent with a sign is part of the text that ERTS writes.
+    let mut exponent = vec![99];
+    exponent.extend_from_slice(b"1.5e+00");
+    exponent.resize(1 + 31, 0);
+    assert_eq!(
+        decode_with(&mut atoms, &exponent, false).unwrap(),
+        Term::Float(1.5)
+    );
+    let mut negative_exponent = vec![99];
+    negative_exponent.extend_from_slice(b"1.5E-2");
+    negative_exponent.resize(1 + 31, 0);
+    assert_eq!(
+        decode_with(&mut atoms, &negative_exponent, false).unwrap(),
+        Term::Float(0.015)
+    );
+    // A text without a decimal point, a text without digits after it, an
+    // exponent without digits, and a byte after the text raise badarg.
+    for text in [&b"1"[..], b"1e2", b"1.", b"1.5e", b"1.5x"] {
+        let mut invalid = vec![99];
+        invalid.extend_from_slice(text);
+        invalid.resize(1 + 31, 0);
+        assert!(matches!(
+            decode_with(&mut atoms, &invalid, false),
+            Err(DecodeError::Badarg)
+        ));
+    }
     // A text that is not UTF-8, a text that parses as an infinity, and a
     // `NEW_FLOAT_EXT` of an infinity raise badarg (`external.c:4636-4665`).
     let mut invalid = vec![99];
@@ -250,6 +285,20 @@ fn decodes_the_large_tuple_bitstring_and_guards() {
         decode_with(&mut atoms, &[77, 0, 0, 0, 1, 7, 5], false),
         Err(DecodeError::Unsupported(_))
     ));
+    // A bit count of 0 or 9, and a payload of no bytes, raise badarg
+    // (`external.c:4895-4920`).
+    assert!(matches!(
+        decode_with(&mut atoms, &[77, 0, 0, 0, 1, 9, 5], false),
+        Err(DecodeError::Badarg)
+    ));
+    assert!(matches!(
+        decode_with(&mut atoms, &[77, 0, 0, 0, 1, 0, 5], false),
+        Err(DecodeError::Badarg)
+    ));
+    assert!(matches!(
+        decode_with(&mut atoms, &[77, 0, 0, 0, 0, 8], false),
+        Err(DecodeError::Badarg)
+    ));
     // An empty `LARGE_TUPLE_EXT`, an empty `MAP_EXT`, and a
     // `LIST_EXT` of no cells give `{}`, `#{}`, and the tail.
     assert_eq!(
@@ -317,6 +366,16 @@ fn decodes_each_identifier_tag_and_checks_the_node() {
         decode_with(&mut atoms, &v4_port, false).unwrap(),
         Term::Port(PortId(5))
     );
+    // A port number above 2^60 - 1 raises badarg
+    // (`ERTS_MAX_INTERNAL_PORT_NUMBER`, `erl_node_container_utils.h:250`).
+    let mut big_port = vec![120];
+    big_port.extend(node());
+    big_port.extend_from_slice(&u64::MAX.to_be_bytes());
+    big_port.extend(with_words(&[], &[0]));
+    assert!(matches!(
+        decode_with(&mut atoms, &big_port, false),
+        Err(DecodeError::Badarg)
+    ));
     let mut new_port = vec![89];
     new_port.extend(node());
     new_port.extend(with_words(&[], &[5, 0]));
