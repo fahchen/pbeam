@@ -1,6 +1,6 @@
 use super::{
-    Access, Busy, EMPTY, EtsTables, KeyIndex, Table, TableType, key_hash, object_hash, segment,
-    stored_hash,
+    Access, Busy, EMPTY, EtsTables, FIRST_SEGMENT_SLOTS, Freeing, KeyIndex, Table, TableType,
+    key_hash, object_hash, segment, stored_hash,
 };
 use crate::term::atom_hash;
 use crate::term::{Atom, AtomTable, Map, ProcessId, Reference, Term, test_atom_table};
@@ -1054,6 +1054,28 @@ fn frees_a_clear_after_the_last_unfix() {
     assert_eq!(table.object_count(), 0);
     assert_eq!(table.deleted_objects, 0);
     assert!(table.next_key(&atoms, &Term::Integer(0)).is_none());
+}
+
+#[test]
+fn forgets_the_records_of_a_freed_segment() {
+    // The free of a segment drops the retained records of its buckets, so
+    // their keys do not stay alive until the whole table is free
+    // (`db_free_table_continue_hash`, `erl_db_hash.c:3140-3149`).
+    let atoms = test_atom_table();
+    let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
+    for key in 0..300 {
+        table.insert(&atoms, vec![Term::Integer(key)]);
+    }
+    table.fix(ProcessId(1));
+    let last = (0..300)
+        .map(Term::Integer)
+        .find(|key| table.bucket(stored_hash(&atoms, key)) >= FIRST_SEGMENT_SLOTS)
+        .expect("a key is in the top segment");
+    table.delete(&atoms, &last);
+    assert_eq!(table.retained.len(), 1);
+    let mut freeing = Freeing::new(table);
+    assert!(freeing.free_segment(0).is_some());
+    assert!(freeing.table.retained.is_empty());
 }
 
 #[test]

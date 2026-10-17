@@ -4,7 +4,7 @@
 pub(super) mod pattern;
 
 use std::cmp::Ordering;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{DefaultHasher, Hasher};
 
 use crate::term::atom_hash;
@@ -299,6 +299,19 @@ impl Busy {
         let ended =
             self.inserted == self.objects.len() && !self.looped && (self.found || !self.walk);
         ended.then(|| Term::static_atom(if self.found { "false" } else { "true" }))
+    }
+}
+
+/// Return the bucket of the stored key hash `hash` for a table of `buckets`
+/// buckets, as `hash_to_ix` gives it (`erl_db_hash.c:199-209`).
+fn stored_bucket(hash: u64, buckets: usize) -> usize {
+    let mask = buckets.next_power_of_two() - 1;
+    // `HashValue` is a `UWord`, so the key hash fits.
+    let bucket = hash as usize & mask;
+    if bucket >= buckets {
+        bucket & (mask >> 1)
+    } else {
+        bucket
     }
 }
 
@@ -944,6 +957,7 @@ impl Freeing {
                 }
             }
         }
+        table.forget_retained_segment(first, last);
         Some(reds)
     }
 
@@ -1530,13 +1544,11 @@ impl Table {
     /// of one process counts once, because ERTS keeps one entry with a
     /// count.
     fn fixers(&self) -> Vec<ProcessId> {
-        let mut processes = Vec::new();
+        let mut processes = HashSet::new();
         for fixed in &self.fixed_by {
-            if !processes.contains(fixed) {
-                processes.push(*fixed);
-            }
+            processes.insert(*fixed);
         }
-        processes
+        processes.into_iter().collect()
     }
 
     /// Return the reductions of the exit cleanup of the fixations of
@@ -1693,6 +1705,7 @@ impl Table {
                 }
             }
         }
+        self.forget_retained_segment(first, last);
     }
 
     /// Return the reductions of the free of the segment `index`, as
@@ -2304,13 +2317,20 @@ impl Table {
     /// assert_eq!(table.bucket(0x1ff), 0xff);
     /// ```
     fn bucket(&self, hash: u64) -> usize {
-        let mask = self.buckets.next_power_of_two() - 1;
-        // `HashValue` is a `UWord`, so the key hash fits.
-        let bucket = hash as usize & mask;
-        if bucket >= self.buckets {
-            bucket & (mask >> 1)
-        } else {
-            bucket
+        stored_bucket(hash, self.buckets)
+    }
+
+    /// Drop the retained records of the buckets `first..last`, whose objects
+    /// a segment free removed (`db_free_table_continue_hash`,
+    /// `erl_db_hash.c:3140-3149`).
+    fn forget_retained_segment(&mut self, first: usize, last: usize) {
+        let buckets = self.buckets;
+        let removed = (self.retained.keys())
+            .filter(|hash| (first..last).contains(&stored_bucket(**hash, buckets)))
+            .copied()
+            .collect::<Vec<_>>();
+        for hash in removed {
+            self.retained.remove(&hash);
         }
     }
 
