@@ -1190,6 +1190,20 @@ fn charges_one_reduction_for_a_fixation_that_leaves_the_table_fixed() {
 }
 
 #[test]
+fn unfixes_a_table_that_the_process_did_not_fix() {
+    // A second unfix of a table with no fixation of the process changes
+    // nothing (`unfix_table_locked`, `erl_db.c:1153-1157`).
+    let mut tables = EtsTables::default();
+    tables.create(
+        Reference(0),
+        None,
+        Table::new(ProcessId(2), Access::Public, 1, TableType::Set),
+    );
+    tables.unfix_table(Reference(0), ProcessId(1));
+    assert!(!tables.table_by_id(Reference(0)).unwrap().is_fixed());
+}
+
+#[test]
 fn removes_the_fixations_of_the_exit_in_their_insertion_order() {
     // The exit follows the fixed-table list of the process, which keeps
     // the order of the fixes (`fixed_tabs_insert`, `erl_db.c:135-150`).

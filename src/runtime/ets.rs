@@ -641,13 +641,15 @@ impl EtsTables {
         let table = self.tables.get_mut(&id).expect("an unfixed table is live");
         table.unfix(process);
         if !table.fixed_by.contains(&process) {
-            let empty = {
-                let list = self
-                    .fixed
-                    .get_mut(&process)
-                    .expect("a fixed process has a fixation list");
-                list.retain(|table| *table != id);
-                list.is_empty()
+            // A process that did not fix the table has no list here, and a
+            // second unfix of the last fixation changes nothing
+            // (`unfix_table_locked`, `erl_db.c:1153-1157`).
+            let empty = match self.fixed.get_mut(&process) {
+                Some(list) => {
+                    list.retain(|table| *table != id);
+                    list.is_empty()
+                }
+                None => false,
             };
             if empty {
                 self.fixed.remove(&process);
@@ -1404,7 +1406,12 @@ impl Table {
             self.deleted_objects = 0;
             return;
         }
-        for bucket in 0..self.buckets {
+        let mut buckets = (self.retained.keys())
+            .map(|hash| self.bucket(*hash))
+            .collect::<Vec<_>>();
+        buckets.sort_unstable();
+        buckets.dedup();
+        for bucket in buckets {
             let mut node = self.heads[bucket];
             let mut head = EMPTY;
             let mut previous = EMPTY;
