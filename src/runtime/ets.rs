@@ -3,6 +3,7 @@
 
 pub(super) mod pattern;
 
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hasher};
 
@@ -878,6 +879,11 @@ impl Table {
     /// assert_eq!(table.delete_all_reductions(), 32);
     /// ```
     pub(super) fn delete_all_reductions(&self) -> usize {
+        if self.table_type == TableType::OrderedSet {
+            // The ERTS tree frees one node for each reduction
+            // (`do_free_tree_continue`, `erl_db_tree.c:2877-2904`).
+            return self.object_count();
+        }
         self.segment_slots().div_ceil(SEGMENT_SLOTS) * SEGMENT_REDUCTIONS as usize
             + self.object_count()
     }
@@ -898,7 +904,7 @@ impl Table {
     /// assert_eq!(table.object_arity(&atoms, &Term::static_atom("k")), Some(2));
     /// ```
     pub(super) fn object_arity(&self, atoms: &AtomTable, key: &Term) -> Option<usize> {
-        let slot = self.position(stored_hash(atoms, key), key)?;
+        let slot = self.key_slot(atoms, key)?;
         Some(self.object_of(slot).len())
     }
 
@@ -918,7 +924,7 @@ impl Table {
         key: &Term,
         updates: &[(usize, Term)],
     ) -> bool {
-        let Some(slot) = self.position(stored_hash(atoms, key), key) else {
+        let Some(slot) = self.key_slot(atoms, key) else {
             return false;
         };
         let object = self.objects[slot]
@@ -1086,10 +1092,12 @@ impl Table {
         let (found, hash) = {
             let key = self.key(&object);
             let hash = stored_hash(atoms, key);
-            (self.position(hash, key), hash)
+            (self.key_slot(atoms, key), hash)
         };
         let newest = match (found, self.table_type) {
             (Some(slot), TableType::Set | TableType::OrderedSet) => {
+                let old = stored_hash(atoms, self.key(self.object_of(slot)));
+                self.rekey(slot, old, hash);
                 self.objects[slot] = Some(object);
                 self.writes += 1;
                 return;
@@ -1362,6 +1370,34 @@ impl Table {
         slot
     }
 
+    /// Move the key of the object in the slot `slot` from the stored hash
+    /// `old` to the stored hash `new` in the key index and in the bucket
+    /// chain. An `ordered_set` insert can replace the key of an object by an
+    /// arithmetically equal key with another hash, as `1` and `1.0`
+    /// (`erl_db_tree.c:758-761`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
+    /// let atoms = AtomTable::new();
+    /// table.insert(&atoms, vec![Term::static_atom("k")]);
+    /// table.rekey(0, stored_hash(&atoms, &Term::static_atom("k")), stored_hash(&atoms, &Term::static_atom("k")));
+    /// ```
+    fn rekey(&mut self, slot: usize, old: u64, new: u64) {
+        if old == new {
+            return;
+        }
+        self.index.remove(old, slot);
+        self.index.insert(new, slot);
+        let old_bucket = self.bucket(old);
+        let after = self.next[slot];
+        self.link(old_bucket, self.key_before(old_bucket, slot), after);
+        let new_bucket = self.bucket(new);
+        self.next[slot] = self.heads[new_bucket];
+        self.link(new_bucket, EMPTY, slot);
+    }
+
     /// Return the bucket of the stored key hash `hash`: the hash under the
     /// size mask, or under the half mask when that bucket is not active
     /// (`hash_to_ix`, `erl_db_hash.c:199-209`). The size mask is one less
@@ -1508,7 +1544,7 @@ impl Table {
     /// assert_eq!(table.object(&atoms, &Term::static_atom("k")), Some(&[Term::static_atom("k")][..]));
     /// ```
     pub(super) fn object(&self, atoms: &AtomTable, key: &Term) -> Option<&[Term]> {
-        let slot = self.position(stored_hash(atoms, key), key)?;
+        let slot = self.key_slot(atoms, key)?;
         Some(self.object_of(slot).as_slice())
     }
 
@@ -1529,7 +1565,7 @@ impl Table {
     /// ```
     pub(super) fn objects(&self, atoms: &AtomTable, key: &Term) -> Vec<&[Term]> {
         let mut objects = Vec::new();
-        let mut slot = self.position(stored_hash(atoms, key), key).unwrap_or(EMPTY);
+        let mut slot = self.key_slot(atoms, key).unwrap_or(EMPTY);
         while slot != EMPTY {
             objects.push(self.object_of(slot).as_slice());
             slot = self.older[slot];
@@ -1674,6 +1710,39 @@ impl Table {
     /// table.insert(&atoms, vec![Term::static_atom("k")]);
     /// assert_eq!(table.position(stored_hash(&Term::static_atom("k")), &Term::static_atom("k")), Some(0));
     /// ```
+    /// Return the slot of the object whose key is `key`. A `set` table finds
+    /// the slot by the stored hash of an exactly equal key. An `ordered_set`
+    /// table compares keys with the arithmetic term order, as the ERTS tree
+    /// does: `cmp_key_eq` tests the exact equality first and then compares
+    /// with `CMP` (`erl_db_tree.c:758-761`), so `1` finds the object with
+    /// the key `1.0`. The exact lookup runs first, because an exactly equal
+    /// key has the same stored hash. A walk of the slots then compares each
+    /// key with `Term::compare`. A comparison error continues the walk: the
+    /// order of two different references is the only error
+    /// (`src/term/order.rs`), and a term with another reference is not equal.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::OrderedSet);
+    /// let atoms = AtomTable::new();
+    /// table.insert(&atoms, vec![Term::Integer(1), Term::static_atom("a")]);
+    /// assert_eq!(table.key_slot(&atoms, &Term::Float(1.0)), Some(0));
+    /// assert_eq!(table.key_slot(&atoms, &Term::Integer(2)), None);
+    /// ```
+    fn key_slot(&self, atoms: &AtomTable, key: &Term) -> Option<usize> {
+        if let Some(slot) = self.position(stored_hash(atoms, key), key) {
+            return Some(slot);
+        }
+        if self.table_type != TableType::OrderedSet {
+            return None;
+        }
+        self.objects.iter().enumerate().find_map(|(slot, object)| {
+            let object = object.as_ref()?;
+            matches!(self.key(object).compare(key, atoms), Ok(Ordering::Equal)).then_some(slot)
+        })
+    }
+
     fn position(&self, hash: u64, key: &Term) -> Option<usize> {
         self.index
             .find(hash, |slot| self.key(self.object_of(slot)) == key)
@@ -1752,10 +1821,10 @@ impl Table {
     /// assert_eq!(table.object(&atoms, &Term::static_atom("k")), None);
     /// ```
     pub(super) fn delete(&mut self, atoms: &AtomTable, key: &Term) {
-        let hash = stored_hash(atoms, key);
-        let Some(newest) = self.position(hash, key) else {
+        let Some(newest) = self.key_slot(atoms, key) else {
             return;
         };
+        let hash = stored_hash(atoms, self.key(self.object_of(newest)));
         self.index.remove(hash, newest);
         self.writes += 1;
         let bucket = self.bucket(hash);

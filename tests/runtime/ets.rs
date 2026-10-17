@@ -770,3 +770,73 @@ fn deletes_one_exact_object_from_a_chain() {
     assert!(!table.delete_object(&atoms, &[Term::Integer(9)]));
     assert!(!table.update_elements(&atoms, &Term::Integer(9), &[]));
 }
+
+#[test]
+fn compares_the_keys_of_an_ordered_set_by_the_arithmetic_order() {
+    // `cmp_key_eq` tests the exact equality of a key and then compares with
+    // the arithmetic term order (`erl_db_tree.c:758-761`), so `1` and `1.0`
+    // are one key of an `ordered_set` table, also inside a tuple or a list,
+    // and the value of a map key compares by its mode. The ERTS tree frees
+    // one node for each reduction (`do_free_tree_continue`,
+    // `erl_db_tree.c:2877-2904`).
+    let mut atoms = AtomTable::new();
+    let atom = |atoms: &mut AtomTable, name: &str| Term::Atom(atoms.put(name).unwrap());
+    let (a, b, c) = (
+        atom(&mut atoms, "a"),
+        atom(&mut atoms, "b"),
+        atom(&mut atoms, "c"),
+    );
+    let (t, l, v) = (
+        atom(&mut atoms, "t"),
+        atom(&mut atoms, "l"),
+        atom(&mut atoms, "v"),
+    );
+    let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::OrderedSet);
+    let integer = Term::Integer(1);
+    let float = Term::Float(1.0);
+    table.insert(&atoms, vec![integer.clone(), a.clone()]);
+    assert_eq!(
+        table.object(&atoms, &float),
+        Some(&[integer.clone(), a.clone()][..])
+    );
+    assert_eq!(table.object_arity(&atoms, &float), Some(2));
+    assert!(table.update_elements(&atoms, &float, &[(2, b.clone())]));
+    assert_eq!(
+        table.object(&atoms, &integer),
+        Some(&[integer.clone(), b.clone()][..])
+    );
+    // A replacement moves the stored hash of the key to the hash of the new
+    // key, so a delete removes the index entry of the object.
+    table.insert(&atoms, vec![float.clone(), c.clone()]);
+    assert_eq!(
+        table.object(&atoms, &integer),
+        Some(&[float.clone(), c.clone()][..])
+    );
+    assert_eq!(table.object_count(), 1);
+    // A tuple and a list compare element by element.
+    let tuple = Term::tuple(vec![integer.clone(), t.clone()]);
+    table.insert(&atoms, vec![tuple.clone(), v.clone()]);
+    assert_eq!(
+        table.object(&atoms, &Term::tuple(vec![float.clone(), t.clone()])),
+        Some(&[tuple.clone(), v.clone()][..])
+    );
+    let list = Term::list_from([integer.clone(), l.clone()]);
+    table.insert(&atoms, vec![list.clone(), v.clone()]);
+    assert_eq!(
+        table.object(&atoms, &Term::list_from([float.clone(), l.clone()])),
+        Some(&[list, v.clone()][..])
+    );
+    // A map key compares its keys exactly and its values arithmetically.
+    let map =
+        |value| Term::Map(Map::from_pairs(vec![(a.clone(), value)], &AtomTable::new()).unwrap());
+    table.insert(&atoms, vec![map(integer.clone()), v.clone()]);
+    assert_eq!(
+        table.object(&atoms, &map(float.clone())),
+        Some(&[map(integer.clone()), v.clone()][..])
+    );
+    assert_eq!(table.object_count(), 4);
+    table.delete(&atoms, &float);
+    assert_eq!(table.object(&atoms, &integer), None);
+    assert_eq!(table.object_count(), 3);
+    assert_eq!(table.delete_all_reductions(), 3);
+}

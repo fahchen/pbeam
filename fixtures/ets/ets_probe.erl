@@ -7,7 +7,7 @@
          busy_helper/2,
          own/2, write/1, select/0, match_object/0, iterate/0,
          update_element/0, info_items/0, delete_all/0, select_reductions/0,
-         private_owner/1, ordered_set/0, take/0]).
+         private_owner/1, ordered_set/0, ordered_set_reductions/0, take/0]).
 
 %% ets:new/2 return values and badarg cases (erl_db.c:2555-2840).
 new() ->
@@ -902,7 +902,40 @@ ordered_set() ->
     TakenAgain = ets:take(T, b),
     Deleted = [ets:delete(T, a), ets:info(T, size)],
     Left = ets:info(T, size),
-    [Insert, Lookup, Member, New, Info, Taken, TakenAgain, Deleted, Left].
+    %% An `ordered_set` compares keys with the arithmetic term order
+    %% (`cmp_key_eq`, `erl_db_tree.c:758-761`), so `1` and `1.0` are one
+    %% key, also in a tuple or a list, and map values compare by their mode.
+    true = ets:insert(T, [{1, one}, {{2, a}, two}, {[1, b], list}]),
+    Arithmetic = [ets:lookup(T, 1.0), ets:member(T, 1.0),
+                  ets:insert_new(T, {1.0, other}),
+                  ets:lookup_element(T, 1.0, 2, undefined),
+                  ets:update_element(T, 1.0, {2, updated}),
+                  ets:lookup(T, 1),
+                  ets:take(T, 1.0),
+                  ets:lookup(T, 1),
+                  ets:lookup(T, {2.0, a}),
+                  ets:lookup(T, [1.0, b]),
+                  ets:delete(T, {2.0, a}),
+                  ets:lookup(T, {2, a})],
+    [Insert, Lookup, Member, New, Info, Taken, TakenAgain, Deleted, Left,
+     Arithmetic].
+
+%% The reductions of the single-key operations and of
+%% `ets:internal_delete_all/2` of an `ordered_set` table. The ERTS tree
+%% frees one node for each reduction (`do_free_tree_continue`,
+%% `erl_db_tree.c:2877-2904`), and the single-key operations charge the
+%% reductions of the tree.
+ordered_set_reductions() ->
+    T = ets:new(ets_probe, [ordered_set]),
+    true = ets:insert(T, [{a, 1}, {b, 2}, {c, 3}]),
+    Call = fun(F) -> Before = reductions(), F(), reductions() - Before end,
+    [Call(fun() -> ets:lookup(T, a) end),
+     Call(fun() -> ets:lookup(T, a) end),
+     Call(fun() -> ets:insert(T, {d, 4}) end),
+     Call(fun() -> ets:update_element(T, a, {2, 9}) end),
+     Call(fun() -> ets:take(T, b) end),
+     Call(fun() -> ets:delete(T, a) end),
+     Call(fun() -> ets:internal_delete_all(T, undefined) end)].
 
 %% `ets:take/2` on the three hash table types.
 take() ->

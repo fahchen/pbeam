@@ -653,6 +653,7 @@ fn runs_the_select_and_iteration_bifs_as_pinned_erts() {
         "delete_all",
         "select_reductions",
         "ordered_set",
+        "ordered_set_reductions",
         "take",
     ] {
         assert_probe_matches_erts(&program, function);
