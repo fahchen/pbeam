@@ -539,6 +539,16 @@ fn decodes_each_identifier_tag_and_checks_the_node() {
         decode_with(&mut atoms, &high_ref, false),
         Err(DecodeError::Unsupported(_))
     ));
+    // A zero count is a reference of the scheduler 0, which PBeam cannot
+    // hold, and the decoder still reads its first number
+    // (`external.c:4795-4796`).
+    let mut zero_ref = vec![90, 0, 0];
+    zero_ref.extend(node());
+    zero_ref.extend(with_words(&[], &[0, 0]));
+    assert!(matches!(
+        decode_with(&mut atoms, &zero_ref, false),
+        Err(DecodeError::Unsupported(_))
+    ));
     // A count above five raises badarg (`ERTS_MAX_REF_NUMBERS`,
     // `external.c:4800`).
     let mut six_ref = vec![90, 0, 6];

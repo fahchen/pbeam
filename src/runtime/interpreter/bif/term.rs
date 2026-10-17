@@ -1633,8 +1633,15 @@ impl Decoder<'_> {
             }
             creation
         };
+        // ERTS reads the first reference number even when the count is
+        // zero (`dec_term`, `external.c:4795-4796`).
         let mut numbers = [0u32; 3];
-        for number in numbers.iter_mut().take(count.min(3)) {
+        numbers[0] = self.u32()?;
+        for number in numbers
+            .iter_mut()
+            .skip(1)
+            .take(count.saturating_sub(1).min(2))
+        {
             *number = self.u32()?;
         }
         for _ in 3..count {
