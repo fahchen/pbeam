@@ -270,3 +270,7 @@ pub(super) fn to_binary(float: &Term, options: &Term) -> BifResult {
         None => BifResult::badarg(),
     }
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/runtime/interpreter/bif/float.rs"]
+mod tests;
