@@ -317,7 +317,26 @@ fn adds_the_leap_seconds_of_the_time_zone_as_the_host_erts() {
         "ERTS {tz}"
     );
     assert_ne!(erts.stdout, b"other\n", "ERTS {tz}");
-    assert_printed(name, &pbeam, &erts.stdout);
+    assert_eq!(
+        (pbeam.status.code(), &pbeam.stderr[..]),
+        (Some(0), &b""[..]),
+        "{name} {tz}"
+    );
+    if cfg!(target_os = "macos") {
+        // `posix2time` exists only on macOS, so only there does the path of
+        // `local_time` add the leap seconds and differ from the path of
+        // `local_zone_time`: PBeam gives the value of the ERTS of the host.
+        assert_printed(name, &pbeam, &erts.stdout);
+    } else {
+        // The glibc `gmtime_r` subtracts the leap correction and PBeam
+        // does not (row "Clocks" of `docs/erts-differences.md`), so the
+        // two values can differ there where the two paths of the local
+        // clock cannot. Each run must give a category of the leap handling.
+        assert!(
+            matches!(&pbeam.stdout[..], b"leap\n" | b"same\n"),
+            "{name} {tz}: {pbeam:?}"
+        );
+    }
 }
 
 #[test]
