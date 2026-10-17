@@ -347,7 +347,7 @@ named_errors() ->
     [catch_error(fun() ->
          re:run(<<"abc">>, <<"(?<x>a)">>, [{capture, [Name]}])
      end)
-     || Name <- [[foo], [256]]].
+     || Name <- [[], [foo], [256]]].
 
 %% A global run with several matches, with an empty match, and with an
 %% offset (re.erl:1796-1899).

@@ -908,11 +908,11 @@ fn runs_a_capture_group_name_as_pinned_erts() {
             .execute("re_probe", "named_errors", &[])
             .unwrap()
             .term,
-        Term::list_from(vec![badarg.clone(), badarg])
+        Term::list_from(vec![badarg.clone(), badarg.clone(), badarg])
     );
     assert_eq!(
         reference("named_errors"),
-        "[{error,badarg},{error,badarg}]\n"
+        "[{error,badarg},{error,badarg},{error,badarg}]\n"
     );
 }
 

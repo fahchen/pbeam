@@ -677,9 +677,10 @@ fn build_capture(
 /// Return the field of one element of a capture list, or `None` when
 /// `build_capture` gives `badarg` for it (`erl_bif_re.c:1404-1466`).
 ///
-/// An integer is a group number. An atom, a binary, or a list is a group
-/// name, and its number comes from the name table of `code`. Each other
-/// value gives `badarg`.
+/// An integer is a group number. An atom, a binary, or a nonempty list is
+/// a group name, and its number comes from the name table of `code`. Each
+/// other value gives `badarg`, also `[]` (`is_list` is false for it,
+/// `erl_bif_re.c:1416`).
 ///
 /// # Examples
 ///
@@ -690,11 +691,12 @@ fn build_capture(
 /// // {0, 0}
 /// let field = capture_field(atoms, &code, &Term::static_atom("x")).unwrap();
 /// assert!(capture_field(atoms, &code, &Term::Float(1.0)).is_none());
+/// assert!(capture_field(atoms, &code, &Term::nil()).is_none());
 /// ```
 fn capture_field(atoms: &AtomTable, code: &pcre2::Code, element: &Term) -> Option<Field> {
     match element {
         Term::Atom(atom) => Some(name_field(code, atoms.name_of(atom).as_bytes())),
-        Term::Binary(_) | Term::Nil | Term::Cons(_) => {
+        Term::Binary(_) | Term::Cons(_) => {
             let bytes = iolist::iodata_bytes(element)?;
             Some(name_field(code, &bytes))
         }
@@ -723,22 +725,38 @@ fn name_field(code: &pcre2::Code, name: &[u8]) -> Field {
         .position(|&byte| byte == 0)
         .unwrap_or(name.len());
     let name = &name[..end];
-    let indexes: Vec<i32> = code
+    let entries: Vec<(u32, &[u8])> = code
         .names()
         .into_iter()
         .filter(|(_, entry)| *entry == name)
-        .map(|(number, _)| number as i32)
         .collect();
-    match indexes.as_slice() {
+    match entries.as_slice() {
         [] => Field::Index(-1),
-        [index] => Field::Index(*index),
-        _ => Field::Duplicate(indexes),
+        entries => field_of(entries),
+    }
+}
+
+/// Return the field of the entries of one name in the name table.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // {1, 1}
+/// let field = field_of(&[(1, b"x".as_slice())]);
+/// // {0, 0}
+/// let field = field_of(&[(1, b"x".as_slice()), (2, b"x".as_slice())]);
+/// ```
+fn field_of(entries: &[(u32, &[u8])]) -> Field {
+    match entries {
+        [(number, _)] => Field::Index(*number as i32),
+        _ => Field::Duplicate(entries.iter().map(|&(number, _)| number as i32).collect()),
     }
 }
 
 /// Return the fields of the names of `code`, as the `all_names` case of
 /// `build_capture` (`erl_bif_re.c:1356-1402`) makes them: one field for
-/// each distinct name in the order of the name table.
+/// each distinct name in the order of the name table. One pass groups the
+/// adjacent entries of a duplicate name.
 ///
 /// # Examples
 ///
@@ -748,13 +766,16 @@ fn name_field(code: &pcre2::Code, name: &[u8]) -> Field {
 /// assert_eq!(name_fields(&code).len(), 2);
 /// ```
 fn name_fields(code: &pcre2::Code) -> Vec<Field> {
+    let names = code.names();
     let mut fields = Vec::new();
-    let mut last: Option<&[u8]> = None;
-    for (_, name) in code.names() {
-        if last != Some(name) {
-            fields.push(name_field(code, name));
+    let mut start = 0;
+    while start < names.len() {
+        let mut end = start + 1;
+        while end < names.len() && names[end].1 == names[start].1 {
+            end += 1;
         }
-        last = Some(name);
+        fields.push(field_of(&names[start..end]));
+        start = end;
     }
     fields
 }
