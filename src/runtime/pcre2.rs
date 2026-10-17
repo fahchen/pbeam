@@ -73,10 +73,10 @@ pub(super) const BSR_ANYCRLF: u32 = 2;
 /// `PCRE2_ERROR_BADDATA` (`pcre2.h:395`): `pcre2_get_error_message` does
 /// not know the error code.
 const ERROR_BADDATA: c_int = -29;
-/// `PCRE2_ERROR_NOMATCH` (`pcre2.h:352`): the subject does not match.
-pub(super) const ERROR_NOMATCH: c_int = -1;
 /// `PCRE2_ERROR_BADMAGIC` (`pcre2.h:397`).
 pub(super) const ERROR_BADMAGIC: c_int = -31;
+/// `PCRE2_ERROR_NOMATCH` (`pcre2.h:352`): the subject does not match.
+pub(super) const ERROR_NOMATCH: c_int = -1;
 /// `PCRE2_ERROR_BADMODE` (`pcre2.h:398`).
 pub(super) const ERROR_BADMODE: c_int = -32;
 /// `PCRE2_ERROR_BADOFFSET` (`pcre2.h:399`): the start offset is past the
@@ -178,6 +178,23 @@ unsafe extern "C" {
         general: *mut c_void,
     ) -> i32;
     fn pcre2_serialize_free_8(bytes: *mut u8);
+    fn pcre2_serialize_get_number_of_codes_8(bytes: *const u8) -> i32;
+    fn pcre2_serialize_decode_8(
+        codes: *mut *mut c_void,
+        number_of_codes: i32,
+        bytes: *const u8,
+        general: *mut c_void,
+    ) -> i32;
+    fn pbeam_pcre2_serialized_header_size() -> usize;
+    fn pbeam_pcre2_serialized_tables_size() -> usize;
+    fn pbeam_pcre2_serialized_blocksize_offset() -> usize;
+    fn pbeam_pcre2_serialized_code_size() -> usize;
+    #[cfg(test)]
+    fn pbeam_pcre2_serialized_magic_offset() -> usize;
+    #[cfg(test)]
+    fn pbeam_pcre2_serialized_code_start_offset() -> usize;
+    fn pbeam_pcre2_serialized_number_of_codes_offset() -> usize;
+    fn pbeam_pcre2_serialized_code_is_valid(bytes: *const u8, blocksize: usize) -> c_int;
     fn pcre2_code_free_8(code: *mut c_void);
 }
 
@@ -326,6 +343,110 @@ impl Drop for Code {
         // owns it, so PCRE2 frees it once.
         unsafe { pcre2_code_free_8(self.0.as_ptr()) };
     }
+}
+
+/// What `pcre2_serialize_decode` reports for encoded pattern bytes.
+#[derive(Debug)]
+pub(super) enum Deserialized {
+    /// The compiled code.
+    Code(Code),
+    /// `PCRE2_ERROR_BADMAGIC` or `PCRE2_ERROR_BADMODE`: the bytes came from
+    /// another architecture or another PCRE2 version, so ERTS re-compiles
+    /// the source (`erl_bif_re.c:783-788`).
+    Incompatible,
+    /// Another error, which ERTS reports as `badarg`
+    /// (`erl_bif_re.c:790-795`).
+    Invalid,
+}
+
+/// Decode the bytes of one exported pattern, as `re_import_1`
+/// (`erl_bif_re.c:761-789`) does with `pcre2_serialize_decode`.
+///
+/// ERTS gives PCRE2 no length, so truncated or forged bytes make PCRE2 read
+/// past the binary. PBeam checks the fixed header, the character tables,
+/// and the size of the first code block before the call. The block size
+/// check uses the layout constants that the C shim
+/// `src/runtime/pcre2_serialize_guard.c` reports.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let code = compile(b"a", 0, None, None)?;
+/// let encoded = code.serialize();
+/// assert!(matches!(deserialize(&encoded), Deserialized::Code(_)));
+/// // The first four bytes are the magic number (pcre2_serialize.c:53).
+/// let mut other = encoded;
+/// other[..4].fill(0);
+/// assert!(matches!(deserialize(&other), Deserialized::Incompatible));
+/// assert!(matches!(deserialize(&[]), Deserialized::Invalid));
+/// ```
+pub(super) fn deserialize(encoded: &[u8]) -> Deserialized {
+    // SAFETY: the layout functions read no memory. They return constants of
+    // the PCRE2 build that this crate links.
+    let (header, tables, blocksize_offset, code_size, count_offset) = unsafe {
+        (
+            pbeam_pcre2_serialized_header_size(),
+            pbeam_pcre2_serialized_tables_size(),
+            pbeam_pcre2_serialized_blocksize_offset(),
+            pbeam_pcre2_serialized_code_size(),
+            pbeam_pcre2_serialized_number_of_codes_offset(),
+        )
+    };
+    if encoded.len() < header {
+        return Deserialized::Invalid;
+    }
+    // `pcre2_serialize_decode` reads this field before the magic
+    // (`pcre2_serialize.c:177-180`), so the check keeps the same order.
+    let count = i32::from_ne_bytes(
+        encoded[count_offset..count_offset + 4]
+            .try_into()
+            .expect("the header holds the number of codes"),
+    );
+    if count <= 0 {
+        return Deserialized::Invalid;
+    }
+    // SAFETY: `encoded` is at least as long as the fixed header, which is
+    // all that this function reads (`pcre2_serialize.c:249-259`).
+    let count = unsafe { pcre2_serialize_get_number_of_codes_8(encoded.as_ptr()) };
+    if count == ERROR_BADMAGIC || count == ERROR_BADMODE {
+        return Deserialized::Incompatible;
+    }
+    debug_assert!(count > 0, "a valid header holds a positive code count");
+    let tables_end = header + tables;
+    let blocksize_at = tables_end + blocksize_offset;
+    let word = std::mem::size_of::<usize>();
+    if encoded.len() < blocksize_at + word {
+        return Deserialized::Invalid;
+    }
+    let blocksize = usize::from_ne_bytes(
+        encoded[blocksize_at..blocksize_at + word]
+            .try_into()
+            .expect("the word holds the block size"),
+    );
+    if blocksize <= code_size || blocksize > encoded.len() - tables_end {
+        return Deserialized::Invalid;
+    }
+    // SAFETY: the code block holds at least `code_size` bytes, which is all
+    // that this function reads.
+    let valid =
+        unsafe { pbeam_pcre2_serialized_code_is_valid(encoded[tables_end..].as_ptr(), blocksize) };
+    if valid == 0 {
+        return Deserialized::Invalid;
+    }
+    let mut code = std::ptr::null_mut();
+    // SAFETY: `encoded` holds the table block and a code block of
+    // `blocksize` bytes, which is all that the decode reads. The block
+    // passes the field checks of the decode and the code range check, so
+    // the call allocates no tables that it leaves allocated on an error.
+    // With no general context, PCRE2 allocates the code with the default
+    // allocator, which `pcre2_code_free_8` in `Drop` uses.
+    let decoded = unsafe {
+        pcre2_serialize_decode_8(&raw mut code, 1, encoded.as_ptr(), std::ptr::null_mut())
+    };
+    assert_eq!(decoded, 1, "PCRE2 decode of a checked block");
+    Deserialized::Code(Code(
+        NonNull::new(code).expect("a decoded code is a live pointer"),
+    ))
 }
 
 /// One match state: the `pcre2_match_data` of one `re:run/2,3` call, which
