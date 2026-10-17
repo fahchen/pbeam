@@ -104,7 +104,7 @@ const PRIM_EXTRAS_PROBE: &[u8] = include_bytes!("../../fixtures/prim_file/prim_e
 fn runs_the_write_and_metadata_nifs_of_prim_file_as_pinned_erts() {
     // `prim_extras_probe:main/1` calls `make_dir/1`, `del_dir/1`,
     // `delete/1`, `rename/2`, `make_link/2`, `make_symlink/2`, `altname/1`,
-    // `write_file_info/2,3`, `read_file_info/1,2`, `read_link/1`,
+    // `write_file_info/3`, `read_file_info/1,2`, `read_link/1`,
     // `read_link_info/1`, `read_file/1`, `write_file/2`, `get_cwd/0`, and
     // `set_cwd/1`. Each call reaches the NIF of `prim_file_nif.c` that the
     // binding adds, and `unix_prim_file.c` gives the Unix results. The probe

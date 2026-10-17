@@ -549,5 +549,21 @@ fn changes_names_directories_and_links_with_the_errors_of_erts() {
         )),
         enotsup
     );
+    // The mutable modes exclude the sticky bit (unix_prim_file.c:822).
+    let sticky = directory.join("sticky");
+    std::fs::write(&sticky, b"").unwrap();
+    assert_eq!(
+        text(&mut scheduler, |s| set_permissions_nif(
+            s,
+            &nif_path(&sticky),
+            &Term::Integer(0o1777)
+        )),
+        "Value(Atom(\"ok\"))"
+    );
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(
+        std::fs::metadata(&sticky).unwrap().permissions().mode() & 0o7777,
+        0o777
+    );
     std::fs::remove_dir_all(&directory).unwrap();
 }

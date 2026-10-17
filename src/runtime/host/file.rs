@@ -662,7 +662,9 @@ pub(crate) fn set_cwd(path: &CStr) -> Result<(), c_int> {
 ///
 /// The `errno` of the second failed `chmod`.
 pub(crate) fn set_permissions(path: &CStr, permissions: u32) -> Result<(), c_int> {
-    const MUTABLE_MODES: u32 = 0o7777;
+    // `S_ISUID | S_ISGID | S_IRWXU | S_IRWXG | S_IRWXO`
+    // (unix_prim_file.c:822). The sticky bit is not mutable.
+    const MUTABLE_MODES: u32 = 0o6777;
     let modes = permissions & MUTABLE_MODES;
     let set = |modes| fs::set_permissions(host_path(path), fs::Permissions::from_mode(modes));
     match set(modes) {
