@@ -19,13 +19,13 @@ use crate::runtime::time;
 use integer::{Arith, Bitwise};
 
 bifs! {
-    atomics:add/3 => unsupported,
+    atomics:add/3 as AtomicsAdd3 => |cx, [reference, index, increment]| atomics::add(cx.scheduler, reference, index, increment),
     atomics:add_get/3 => unsupported,
     atomics:compare_exchange/4 => unsupported,
     atomics:exchange/3 => unsupported,
-    atomics:get/2 => unsupported,
-    atomics:info/1 => unsupported,
-    atomics:put/3 => unsupported,
+    atomics:get/2 as AtomicsGet2 => |cx, [reference, index]| atomics::get(cx.scheduler, reference, index),
+    atomics:info/1 as AtomicsInfo1 => |cx, [reference]| atomics::info(cx.scheduler, reference),
+    atomics:put/3 as AtomicsPut3 => |cx, [reference, index, value]| atomics::put(cx.scheduler, reference, index, value),
     binary:at/2 as BinaryAt2 => |_, [subject, index]| Ok(binary::at(subject, index)),
     binary:compile_pattern/1 => unsupported,
     binary:copy/1 as BinaryCopy1 => |cx, [subject]| Ok(binary::copy(cx.scheduler.current_process_mut(), subject, &Term::Integer(1))),
@@ -362,7 +362,7 @@ bifs! {
     erts_debug:size_shared/1 => unsupported,
     erts_debug:unaligned_bitstring/2 => unsupported,
     erts_internal:abort_pending_connection/2 => unsupported,
-    erts_internal:atomics_new/2 => unsupported,
+    erts_internal:atomics_new/2 as ErtsInternalAtomicsNew2 => |cx, [size, options]| atomics::new(cx.scheduler, size, options),
     erts_internal:beamfile_chunk/2 => unsupported,
     erts_internal:beamfile_module_md5/1 => unsupported,
     erts_internal:binary_to_integer/2 => unsupported,

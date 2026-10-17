@@ -1,14 +1,14 @@
 use super::super::{read_integer, read_integer_after_first, read_operand, read_value};
 use super::{
-    FloatOperation, OPCODE_BIF0, OPCODE_BS_GET_INTEGER2, OPCODE_BS_SKIP_UTF8, OPCODE_FADD,
-    OPCODE_FCONV, OPCODE_FDIV, OPCODE_FMOVE, OPCODE_FMUL, OPCODE_FNEGATE, OPCODE_FSUB,
-    OPCODE_GET_MAP_ELEMENTS, OPCODE_GET_RECORD_ELEMENTS, OPCODE_GET_TL, OPCODE_HAS_MAP_FIELDS,
-    OPCODE_INIT_YREGS, OPCODE_PUT_MAP_ASSOC, OPCODE_PUT_MAP_EXACT, OPCODE_PUT_RECORD,
-    OPCODE_PUT_TUPLE2, OPCODE_TEST_EXACT_EQ, OPCODE_TEST_HEAP, OPCODE_TEST_IS_ATOM,
-    OPCODE_TEST_IS_BINARY, OPCODE_TEST_IS_LIST, OPCODE_TEST_IS_MAP, OPCODE_TEST_IS_NUMBER,
-    OPCODE_TEST_IS_PID, OPCODE_TEST_IS_PORT, OPCODE_TEST_TAGGED_TUPLE, SELECT_VALUE_LINEAR_LIMIT,
-    parse_code, prepare_select_value_choices, read_binary_match_commands, read_binary_segments,
-    read_move_operand, read_operand_pairs, read_pair_count, read_record_updates, skip_allocation,
+    FloatOperation, OPCODE_BIF0, OPCODE_FADD, OPCODE_FCONV, OPCODE_FDIV, OPCODE_FMOVE, OPCODE_FMUL,
+    OPCODE_FNEGATE, OPCODE_FSUB, OPCODE_GET_MAP_ELEMENTS, OPCODE_GET_RECORD_ELEMENTS,
+    OPCODE_GET_TL, OPCODE_HAS_MAP_FIELDS, OPCODE_INIT_YREGS, OPCODE_PUT_MAP_ASSOC,
+    OPCODE_PUT_MAP_EXACT, OPCODE_PUT_RECORD, OPCODE_PUT_TUPLE2, OPCODE_TEST_EXACT_EQ,
+    OPCODE_TEST_HEAP, OPCODE_TEST_IS_ATOM, OPCODE_TEST_IS_BINARY, OPCODE_TEST_IS_LIST,
+    OPCODE_TEST_IS_MAP, OPCODE_TEST_IS_NUMBER, OPCODE_TEST_IS_PID, OPCODE_TEST_IS_PORT,
+    OPCODE_TEST_TAGGED_TUPLE, SELECT_VALUE_LINEAR_LIMIT, parse_code, prepare_select_value_choices,
+    read_binary_match_commands, read_binary_segments, read_move_operand, read_operand_pairs,
+    read_pair_count, read_record_updates, read_segment_flags, read_segment_string, skip_allocation,
     skip_counted_operands, skip_integer_payload, skip_operand, skip_unsupported_instruction,
     sort_map_key_pairs, test_kind, unsupported_opcode_operand_count,
 };
@@ -970,7 +970,7 @@ fn decodes_the_binary_match_instructions_of_is_usascii() {
                 Instruction::BinaryGetUtf8 {
                     fail_label: 16,
                     context: Operand::X(0),
-                    destination: Operand::X(2),
+                    destination: Some(Operand::X(2)),
                 },
                 Instruction::BinaryMatch {
                     fail_label: 16,
@@ -2397,8 +2397,6 @@ fn skips_pinned_module_instruction_operands_and_rejects_truncation() {
         (OPCODE_PUT_RECORD, 6),
         (OPCODE_PUT_TUPLE2, 2),
         (OPCODE_INIT_YREGS, 1),
-        (OPCODE_BS_SKIP_UTF8, 4),
-        (OPCODE_BS_GET_INTEGER2, 7),
     ] {
         assert_eq!(unsupported_opcode_operand_count(opcode), Some(count));
     }
@@ -2406,7 +2404,7 @@ fn skips_pinned_module_instruction_operands_and_rejects_truncation() {
 
     let mut cursor = 0;
     assert!(skip_unsupported_instruction(255, &[], &mut cursor).is_err());
-    assert!(skip_unsupported_instruction(OPCODE_BS_SKIP_UTF8, &[0], &mut cursor).is_err());
+    assert!(skip_unsupported_instruction(OPCODE_TEST_HEAP, &[0], &mut cursor).is_err());
     assert!(skip_counted_operands(&[0x10], &mut 0).is_err());
     assert!(skip_counted_operands(&[0x20], &mut 0).is_err());
 }
@@ -2622,8 +2620,12 @@ fn reads_bs_create_bin_segments_and_rejects_malformed_lists() {
                 segment: 4,
                 source: Operand::X(3),
             },
-            BinarySegment::Unsupported(kind),
-        ] if kind.is_static("utf16")
+            BinarySegment::Utf16 {
+                segment: 5,
+                little: false,
+                source: Operand::X(0),
+            },
+        ]
     ));
     // A list of one item, and a string of 7 bytes in a StrT chunk of 5.
     assert!(read(&[0x17, 0x10, 0x12], b"").is_err());
@@ -2891,6 +2893,23 @@ fn arm_field_bytes(instruction: &Instruction) -> usize {
                 + size_of_val(little)
                 + size_of_val(destination)
         }
+        Instruction::BinaryGetInteger {
+            fail_label,
+            context,
+            size,
+            unit,
+            little,
+            signed,
+            destination,
+        } => {
+            size_of_val(fail_label)
+                + size_of_val(context)
+                + size_of_val(size)
+                + size_of_val(unit)
+                + size_of_val(little)
+                + size_of_val(signed)
+                + size_of_val(destination)
+        }
         Instruction::BinaryGetPosition {
             context,
             destination,
@@ -2898,6 +2917,12 @@ fn arm_field_bytes(instruction: &Instruction) -> usize {
         Instruction::BinarySetPosition { context, position } => {
             size_of_val(context) + size_of_val(position)
         }
+        Instruction::BinarySkipBits {
+            fail_label,
+            context,
+            size,
+            unit,
+        } => size_of_val(fail_label) + size_of_val(context) + size_of_val(size) + size_of_val(unit),
         Instruction::BinaryGetUtf8 {
             fail_label,
             context,
@@ -2925,6 +2950,12 @@ fn arm_field_bytes(instruction: &Instruction) -> usize {
             context,
             commands,
         } => size_of_val(fail_label) + size_of_val(context) + size_of_val(commands),
+        Instruction::BinaryMatchString {
+            fail_label,
+            context,
+            bits,
+            text,
+        } => size_of_val(fail_label) + size_of_val(context) + size_of_val(bits) + size_of_val(text),
         Instruction::BinaryInitWritable => 0,
         Instruction::BinaryCreate {
             fail_label,
@@ -3162,4 +3193,305 @@ fn decodes_the_float_register_instructions_of_the_float_probe_fixture() {
         code.push(0x03);
         assert!(parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[]).is_err());
     }
+}
+
+#[test]
+fn decodes_the_bs_match_string_instructions_of_the_bs_match_probe_fixture() {
+    // `tests/integration/fixture_opcodes.rs` checks that
+    // `fixtures/binary_match/bs_match_probe.beam` has these bytes.
+    // match_string/1: bs_match_string f37 x0 104 (offset 0)
+    // match_string_offset/1: bs_match_string f40 x0 104 (offset 0)
+    let parts: [&[u8]; 2] = [
+        &[0x84, 0x0D, 0x25, 0x03, 0x08, 0x68, 0x00],
+        &[0x84, 0x0D, 0x28, 0x03, 0x08, 0x68, 0x00],
+    ];
+    let (instructions, _, _) = parse_code(
+        &code_with(&parts),
+        &AtomTable::new(),
+        &[],
+        &[],
+        &[],
+        &[],
+        b"icrosoft.icon",
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            instructions.as_slice(),
+            [
+                Instruction::BinaryMatchString {
+                    fail_label: 37,
+                    context: Operand::X(0),
+                    bits: 104,
+                    text,
+                },
+                Instruction::BinaryMatchString {
+                    fail_label: 40,
+                    context: Operand::X(0),
+                    bits: 104,
+                    text: second,
+                },
+                Instruction::End,
+            ] if text == b"icrosoft.icon" && second == b"icrosoft.icon"
+        ),
+        "{instructions:?}"
+    );
+}
+
+#[test]
+fn rejects_a_bs_match_string_outside_the_string_chunk() {
+    // A `Bits` whose length byte count leaves the `StrT` chunk is an error,
+    // as the ERTS loader gives.
+    let mut cursor = 0;
+    assert_eq!(
+        read_segment_string(&[0x00], &mut 0, b"count: ", 16).unwrap(),
+        b"co".to_vec()
+    );
+    assert!(read_segment_string(&[0x80, 0x10], &mut cursor, b"count: ", 16).is_err());
+    assert!(read_segment_string(&[0x00], &mut 0, b"count: ", 8 * 8 + 1).is_err());
+    assert!(read_segment_string(&[], &mut 0, b"count: ", 16).is_err());
+}
+
+#[test]
+fn reads_the_little_signed_and_native_flags_of_a_segment() {
+    // `bs_get_integer2` of `get_size_flagged/2` has the flags 6, and
+    // `bs_skip_bits2` and the `bs_get_*` instructions have the flags 0.
+    assert_eq!(read_segment_flags(&[0x60], &mut 0).unwrap(), (true, true));
+    assert_eq!(read_segment_flags(&[0x00], &mut 0).unwrap(), (false, false));
+    assert_eq!(read_segment_flags(&[0x20], &mut 0).unwrap(), (true, false));
+    assert_eq!(read_segment_flags(&[0x40], &mut 0).unwrap(), (false, true));
+    assert_eq!(
+        read_segment_flags(&[0x08, 0x10], &mut 0).unwrap(),
+        (cfg!(target_endian = "little"), false)
+    );
+    assert!(read_segment_flags(&[], &mut 0).is_err());
+}
+
+#[test]
+fn decodes_the_bs_skip_bits2_instructions_of_the_bs_match_probe_fixture() {
+    // `tests/integration/fixture_opcodes.rs` checks that
+    // `fixtures/binary_match/bs_match_probe.beam` has these bytes.
+    // skip_size/2: bs_skip_bits2 f46 {tr,x0,3} x1 8 0
+    // skip_size_bits/2: bs_skip_bits2 f49 {tr,x0,3} x1 1 0
+    let parts: [&[u8]; 2] = [
+        &[0x78, 0x0D, 0x2E, 0x57, 0x03, 0x30, 0x13, 0x80, 0x00],
+        &[0x78, 0x0D, 0x31, 0x57, 0x03, 0x30, 0x13, 0x10, 0x00],
+    ];
+    let (instructions, _, _) = parse_code(
+        &code_with(&parts),
+        &AtomTable::new(),
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            instructions.as_slice(),
+            [
+                Instruction::BinarySkipBits {
+                    fail_label: 46,
+                    context: Operand::X(0),
+                    size: Operand::X(1),
+                    unit: 8,
+                },
+                Instruction::BinarySkipBits {
+                    fail_label: 49,
+                    context: Operand::X(0),
+                    size: Operand::X(1),
+                    unit: 1,
+                },
+                Instruction::End,
+            ]
+        ),
+        "{instructions:?}"
+    );
+}
+
+#[test]
+fn decodes_the_bs_get_integer2_instructions_of_the_bs_match_probe_fixture() {
+    // `tests/integration/fixture_opcodes.rs` checks that
+    // `fixtures/binary_match/bs_match_probe.beam` has these bytes.
+    // get_size/2: bs_get_integer2 f52 2 {tr,x0,3} x1 1 0 x1
+    // get_size_flagged/2: bs_get_integer2 f55 2 {tr,x0,3} x1 1
+    // {literal,[little,signed]} x1
+    let parts: [&[u8]; 2] = [
+        &[
+            0x75, 0x0D, 0x34, 0x57, 0x03, 0x30, 0x20, 0x13, 0x10, 0x00, 0x13,
+        ],
+        &[
+            0x75, 0x0D, 0x37, 0x57, 0x03, 0x30, 0x20, 0x13, 0x10, 0x60, 0x13,
+        ],
+    ];
+    let (instructions, _, _) = parse_code(
+        &code_with(&parts),
+        &AtomTable::new(),
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            instructions.as_slice(),
+            [
+                Instruction::BinaryGetInteger {
+                    fail_label: 52,
+                    context: Operand::X(0),
+                    size: Operand::X(1),
+                    unit: 1,
+                    little: false,
+                    signed: false,
+                    destination: Operand::X(1),
+                },
+                Instruction::BinaryGetInteger {
+                    fail_label: 55,
+                    context: Operand::X(0),
+                    size: Operand::X(1),
+                    unit: 1,
+                    little: true,
+                    signed: true,
+                    destination: Operand::X(1),
+                },
+                Instruction::End,
+            ]
+        ),
+        "{instructions:?}"
+    );
+}
+
+#[test]
+fn decodes_the_bs_skip_utf8_instruction_of_the_bs_utf_probe_fixture() {
+    // `tests/integration/fixture_opcodes.rs` checks that
+    // `fixtures/binary_match/bs_utf_probe.beam` has these bytes.
+    // skip8/1: bs_skip_utf8 f47 {tr,x0,1} 1 0
+    let parts: [&[u8]; 1] = [&[0x8B, 0x0D, 0x2F, 0x57, 0x03, 0x10, 0x10, 0x00]];
+    let (instructions, _, _) = parse_code(
+        &code_with(&parts),
+        &AtomTable::new(),
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            instructions.as_slice(),
+            [
+                Instruction::BinaryGetUtf8 {
+                    fail_label: 47,
+                    context: Operand::X(0),
+                    destination: None,
+                },
+                Instruction::End,
+            ]
+        ),
+        "{instructions:?}"
+    );
+}
+
+#[test]
+fn decodes_the_utf16_and_utf32_segments_of_the_bs_create_bin_utf_probe_fixture() {
+    // `tests/integration/fixture_opcodes.rs` checks that
+    // `fixtures/bs_create_bin/bs_create_bin_utf_probe.beam` has these
+    // bytes, which are the segment lists of `utf16/1`, `utf16_little/1`,
+    // and `utf32/1`.
+    // Atom 0 is `nil`, atom 2 is `utf16`, atom 3 is `undefined`, and atom
+    // 6 is `utf32`. Literal 0 is `[little]`.
+    let atoms: Vec<Atom> = (1..=6)
+        .map(|index| {
+            Atom::from_static(match index {
+                2 => "utf16",
+                3 => "undefined",
+                6 => "utf32",
+                _ => "ok",
+            })
+            .unwrap()
+        })
+        .collect();
+    let literals = [Some(Term::list_from(vec![Term::static_atom("little")]))];
+    let little = [0x17, 0x60, 0x22, 0x10, 0x00, 0x47, 0x00, 0x03, 0x32];
+    let mut cursor = 0;
+    let segments = read_binary_segments(&little, &mut cursor, &atoms, &literals, &[]).unwrap();
+    assert!(
+        matches!(
+            segments.as_slice(),
+            [BinarySegment::Utf16 {
+                segment: 1,
+                little: true,
+                source: Operand::X(0),
+            }]
+        ),
+        "{segments:?}"
+    );
+    let big = [0x17, 0x60, 0x22, 0x10, 0x00, 0x02, 0x03, 0x32];
+    let segments = read_binary_segments(&big, &mut 0, &atoms, &[], &[]).unwrap();
+    assert!(
+        matches!(
+            segments.as_slice(),
+            [BinarySegment::Utf16 {
+                segment: 1,
+                little: false,
+                source: Operand::X(0),
+            }]
+        ),
+        "{segments:?}"
+    );
+    let utf32 = [0x17, 0x60, 0x62, 0x10, 0x00, 0x02, 0x03, 0x32];
+    let segments = read_binary_segments(&utf32, &mut 0, &atoms, &[], &[]).unwrap();
+    assert!(
+        matches!(
+            segments.as_slice(),
+            [BinarySegment::Utf32 {
+                segment: 1,
+                little: false,
+                source: Operand::X(0),
+            }]
+        ),
+        "{segments:?}"
+    );
+}
+
+/// The code chunk of a synthetic module with the instruction bytes `parts`,
+/// the label count 16, and the `int_code_end` instruction.
+fn code_with(parts: &[&[u8]]) -> Vec<u8> {
+    let mut code = vec![0, 0, 0, 16];
+    code.extend([0; 16]);
+    code.extend(parts.concat());
+    code.push(0x03);
+    code
+}
+
+#[test]
+fn keeps_a_known_unsupported_opcode_with_its_operands_skipped() {
+    // `get_record_elements` (188) and `put_record` (189) are the opcodes
+    // that the loader accepts and the runtime cannot execute (row
+    // "Unimplemented instructions"). The skip list holds the operand count
+    // of each opcode, and the two record opcodes also hold an operand
+    // list. `get_record_elements` with the three operands 1, 1, 1 and no
+    // listed operand gives `Instruction::Unsupported`.
+    let parts: [&[u8]; 1] = [&[188, 0x10, 0x10, 0x10, 0x00]];
+    let (instructions, _, _) = parse_code(
+        &code_with(&parts),
+        &AtomTable::new(),
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            instructions.as_slice(),
+            [Instruction::Unsupported(188), Instruction::End]
+        ),
+        "{instructions:?}"
+    );
 }
