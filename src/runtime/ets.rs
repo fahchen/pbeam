@@ -69,8 +69,13 @@ pub(super) struct Freeing {
     /// The table. Its free segments hold no object.
     table: Table,
     /// The count of the segments that are not free, so the top segment that
-    /// is not free is `segments - 1`.
+    /// is not free is `segments - 1`. An `ordered_set` table frees its
+    /// objects one by one, so the count is not used.
     segments: usize,
+    /// The slot where the free of the objects of an `ordered_set` table
+    /// continues, as the work stack of `do_free_tree_continue` remembers the
+    /// nodes (`erl_db_tree.c:2877-2904`).
+    next: usize,
 }
 
 /// One ETS hash table: a `set`, a `bag`, or a `duplicate_bag` table.
@@ -658,7 +663,7 @@ impl EtsTables {
     /// ```
     fn free_table(&mut self, id: Reference, mut reds: i32) -> Option<i32> {
         let freeing = self.freeing.get_mut(&id)?;
-        while let Some(segment) = freeing.free_segment() {
+        while let Some(segment) = freeing.free_segment(reds) {
             reds -= segment;
             if reds < 0 {
                 return None;
@@ -680,15 +685,25 @@ impl Freeing {
     /// assert_eq!(freeing.segments, 1);
     /// ```
     fn new(table: Table) -> Freeing {
-        let segments = segment(table.segment_slots() - 1) + 1;
-        Freeing { table, segments }
+        let segments = if table.table_type == TableType::OrderedSet {
+            1
+        } else {
+            segment(table.segment_slots() - 1) + 1
+        };
+        Freeing {
+            table,
+            segments,
+            next: 0,
+        }
     }
 
-    /// Free the objects of the top segment that is not free yet and return
-    /// its reductions: 32, and 1 for each object in the segment
-    /// (`erl_db_hash.c:3141`, `3468-3530`). Return `None` when each segment
-    /// is free. The walk reads only the bucket chains of the segment, so the
-    /// work of one segment grows with its objects only.
+    /// Free the objects of the table and return their reductions: of the
+    /// top segment that is not free yet of a hash table, with 32 for the
+    /// segment and 1 for each object in it (`erl_db_hash.c:3141`,
+    /// `3468-3530`), or of an `ordered_set` table, with 1 for each object
+    /// (`erl_db_tree.c:2877-2904`). Return `None` when each object is free.
+    /// The walk reads only the bucket chains of the segment, so the work of
+    /// one segment grows with its objects only.
     ///
     /// # Examples
     ///
@@ -696,10 +711,13 @@ impl Freeing {
     /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
     /// table.insert(&AtomTable::new(), vec![Term::Integer(1)]);
     /// let mut freeing = Freeing::new(table);
-    /// assert_eq!(freeing.free_segment(), Some(33));
-    /// assert_eq!(freeing.free_segment(), None);
+    /// assert_eq!(freeing.free_segment(0), Some(33));
+    /// assert_eq!(freeing.free_segment(0), None);
     /// ```
-    fn free_segment(&mut self) -> Option<i32> {
+    fn free_segment(&mut self, budget: i32) -> Option<i32> {
+        if self.table.table_type == TableType::OrderedSet {
+            return self.free_objects(budget);
+        }
         self.segments = self.segments.checked_sub(1)?;
         let first = match self.segments {
             0 => 0,
@@ -721,6 +739,42 @@ impl Freeing {
             }
         }
         Some(reds)
+    }
+
+    /// Free the objects of an `ordered_set` table, one more than the
+    /// reductions `budget` of the turn, as `do_free_tree_continue` frees a
+    /// node for each reduction and returns when the reductions are less
+    /// than 0 (`erl_db_tree.c:2877-2904`). Return the number of objects that
+    /// are free, or `None` when the table holds no object.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::OrderedSet);
+    /// let atoms = AtomTable::new();
+    /// table.insert(&atoms, vec![Term::Integer(1)]);
+    /// table.insert(&atoms, vec![Term::Integer(2)]);
+    /// let mut freeing = Freeing::new(table);
+    /// assert_eq!(freeing.free_objects(0), Some(1));
+    /// assert_eq!(freeing.free_objects(0), Some(1));
+    /// assert_eq!(freeing.free_objects(0), None);
+    /// ```
+    fn free_objects(&mut self, budget: i32) -> Option<i32> {
+        let limit = usize::try_from(budget.max(0))
+            .unwrap_or(0)
+            .saturating_add(1);
+        let mut freed = 0;
+        while freed < limit {
+            let Some(object) = self.table.objects.get(self.next) else {
+                break;
+            };
+            if object.is_some() {
+                self.table.objects[self.next] = None;
+                freed += 1;
+            }
+            self.next += 1;
+        }
+        (freed > 0).then(|| i32::try_from(freed).unwrap_or(i32::MAX))
     }
 }
 

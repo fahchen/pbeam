@@ -590,11 +590,18 @@ fn traps_the_delete_of_a_large_table_as_pinned_erts() {
             .execute("ets_probe", "delete_trap", &[])
             .unwrap()
             .term,
-        Term::list_from(vec![atom("true"), atom("none"), atom("true"), atom("ping")])
+        Term::list_from(vec![
+            atom("true"),
+            atom("none"),
+            atom("true"),
+            atom("ping"),
+            atom("true"),
+            atom("ping"),
+        ])
     );
     assert_eq!(
         reference_with(&["+S", "1"], "delete_trap"),
-        b"[true,none,true,ping]\n"
+        b"[true,none,true,ping,true,ping]\n"
     );
 }
 

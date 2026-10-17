@@ -88,13 +88,18 @@ delete_trap() ->
     true = ets:insert(Small, {k}),
     Large = ets:new(ets_probe, []),
     true = ets:insert(Large, [{I} || I <- seq(50000)]),
+    Ordered = ets:new(ets_probe, [ordered_set]),
+    true = ets:insert(Ordered, [{I} || I <- seq(50000)]),
     receive after 1 -> ok end,
     spawn(?MODULE, ping, [self()]),
     A = ets:delete(Small),
     B = receive ping -> ping after 0 -> none end,
     C = ets:delete(Large),
     D = receive ping -> ping after 0 -> none end,
-    [A, B, C, D].
+    spawn(?MODULE, ping, [self()]),
+    E = ets:delete(Ordered),
+    F = receive ping -> ping after 0 -> none end,
+    [A, B, C, D, E, F].
 
 %% The exit of a process that a trapped ets:delete/1 kills frees its owned
 %% tables from the head of its owned list (erl_db.c:5055-5096). The deleted
@@ -933,6 +938,8 @@ ordered_set() ->
 ordered_set_reductions() ->
     T = ets:new(ets_probe, [ordered_set]),
     true = ets:insert(T, [{a, 1}, {b, 2}, {c, 3}]),
+    D = ets:new(ets_probe, [ordered_set]),
+    true = ets:insert(D, [{a, 1}, {b, 2}, {c, 3}]),
     Call = fun(F) -> Before = reductions(), F(), reductions() - Before end,
     [Call(fun() -> ets:lookup(T, a) end),
      Call(fun() -> ets:lookup(T, a) end),
@@ -940,7 +947,10 @@ ordered_set_reductions() ->
      Call(fun() -> ets:update_element(T, a, {2, 9}) end),
      Call(fun() -> ets:take(T, b) end),
      Call(fun() -> ets:delete(T, a) end),
-     Call(fun() -> ets:internal_delete_all(T, undefined) end)].
+     Call(fun() -> ets:internal_delete_all(T, undefined) end),
+     %% `ets:delete/1` frees one object for each reduction of the tree
+     %% (`do_free_tree_continue`, `erl_db_tree.c:2877-2904`).
+     Call(fun() -> ets:delete(D) end)].
 
 %% `ets:take/2` on the three hash table types.
 take() ->

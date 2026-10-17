@@ -142,6 +142,33 @@ fn frees_a_large_deleted_table_in_bounded_turns() {
 }
 
 #[test]
+fn frees_the_objects_of_an_ordered_set_one_for_each_reduction() {
+    // `do_free_tree_continue` frees one node for each reduction and returns
+    // when the reductions are less than 0 (`erl_db_tree.c:2877-2904`), so a
+    // turn with a budget of 2 frees 3 objects. The ERTS tree charges no
+    // segment.
+    let mut tables = EtsTables::default();
+    let atoms = AtomTable::new();
+    let mut table = Table::new(ProcessId(1), Access::Public, 1, TableType::OrderedSet);
+    for key in 0..5 {
+        table.insert(&atoms, vec![Term::Integer(key)]);
+    }
+    let live = |tables: &EtsTables| {
+        tables
+            .freeing
+            .get(&Reference(0))
+            .map_or(0, |freeing| freeing.table.objects.iter().flatten().count())
+    };
+    tables.create(Reference(0), None, table);
+    tables.delete_table(Reference(0), ProcessId(1));
+    assert_eq!(tables.free_segments(ProcessId(1), 2), None);
+    assert_eq!(live(&tables), 2);
+    assert_eq!(tables.free_segments(ProcessId(1), 2), Some(0));
+    assert_eq!(live(&tables), 0);
+    assert!(tables.freeing.is_empty());
+}
+
+#[test]
 fn finds_a_named_table_of_each_access_mode() {
     let mut tables = EtsTables::default();
     tables.create(
