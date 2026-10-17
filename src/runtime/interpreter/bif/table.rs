@@ -554,7 +554,7 @@ bifs! {
     prim_file:is_translatable/1 => unsupported,
     re:compile/1 => unsupported,
     re:compile/2 as ReCompile2 => |cx, [pattern, options]| re::compile(cx, pattern, options),
-    re:import/1 => unsupported,
+    re:import/1 as ReImport1 => |cx, [exported]| re::import(cx, exported),
     re:inspect/2 => unsupported,
     re:internal_run/4 as ReInternalRun4 => |cx, [subject, pattern, options, first]| re::internal_run(cx, subject, pattern, options, first),
     re:run/2 as ReRun2 => |cx, [subject, pattern]| re::run(cx, subject, pattern, &Term::nil(), true),

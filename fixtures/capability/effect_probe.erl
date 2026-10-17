@@ -444,6 +444,7 @@ ambient() ->
         erlang:binary_to_existing_atom(<<"effect_probe_ambient_binary">>, utf8),
         erlang:list_to_existing_atom("effect_probe_ambient_atom"),
         element(1, re:compile("a", [])),
+        element(1, re:import(element(2, re:compile("a", [export])))),
         Table,
         ets:insert(Name, {key, value}),
         ets:insert_new(Name, {key, value}),
