@@ -670,6 +670,18 @@ macro_rules! bifs {
             id: BifId,
             arguments: &[Term],
         ) -> Result<BifResult, BeamError> {
+            // The cleanup of a fixation on a table that another process
+            // deleted runs when the process runs, and it charges one
+            // reduction for each entry (`erts_schedule_ets_free_fixation`,
+            // `erl_db.c:5263-5301`).
+            let caller = context.scheduler.current_process_mut().id;
+            let pending = context.scheduler.ets.drain_pending(caller);
+            if pending > 0 {
+                context
+                    .scheduler
+                    .current_process_mut()
+                    .bump_reductions(i32::try_from(pending).unwrap_or(i32::MAX));
+            }
             match (id, arguments) {
                 $($(
                     (BifId::$variant, $arguments) $(if $guard)? => {

@@ -5416,6 +5416,30 @@ fn traps_a_select_continuation_that_meets_a_fixed_clear() {
 }
 
 #[test]
+fn charges_a_pending_fixation_cleanup_when_the_process_calls_a_bif() {
+    // The cleanup of a fixation on a table that another process deleted runs
+    // when the process runs, with one reduction for each entry
+    // (`erts_schedule_ets_free_fixation`, `erl_db.c:5263-5301`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let caller = scheduler.current_process_mut().id;
+    scheduler.ets.create(
+        Reference(0),
+        None,
+        Table::new(ProcessId(99), Access::Public, 1, TableType::Set),
+    );
+    scheduler.ets.fix_table(Reference(0), caller);
+    assert_eq!(scheduler.ets.delete_table(Reference(0), ProcessId(99)), 1);
+    scheduler.current_process_mut().fcalls = 10;
+    program
+        .bif(&mut scheduler, "erlang", "self", vec![])
+        .unwrap();
+    assert_eq!(scheduler.current_process_mut().fcalls, 9);
+}
+
+#[test]
 fn helps_a_trapped_insert_from_internal_delete_all() {
     // `ets:internal_delete_all/2` first completes the list insert that
     // holds the table busy (`handle_lacking_permission`, `erl_db.c:769-798`).

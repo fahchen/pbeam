@@ -1384,6 +1384,25 @@ fn charges_one_reduction_for_a_fixation_that_leaves_the_table_fixed() {
 }
 
 #[test]
+fn drains_the_cleanup_of_a_deleted_table_when_the_process_runs() {
+    // The process that fixed a deleted table removes its entry and pays one
+    // reduction when it runs (`erts_schedule_ets_free_fixation`,
+    // `erl_db.c:263-5301`).
+    let mut tables = EtsTables::default();
+    tables.create(
+        Reference(0),
+        None,
+        Table::new(ProcessId(1), Access::Public, 1, TableType::Set),
+    );
+    tables.fix_table(Reference(0), ProcessId(2));
+    assert_eq!(tables.delete_table(Reference(0), ProcessId(1)), 1);
+    assert_eq!(tables.drain_pending(ProcessId(3)), 0);
+    assert_eq!(tables.drain_pending(ProcessId(2)), 1);
+    // The entry is gone, so the exit charges nothing more.
+    assert_eq!(tables.delete_owned(ProcessId(2), 100), Some(100));
+}
+
+#[test]
 fn charges_the_cleanup_of_a_deleted_table_at_the_exit() {
     // A process that fixed a table pays one reduction when its exit cleans
     // the fixation of the deleted table (`proc_cleanup_fixed_table`,

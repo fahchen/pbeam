@@ -64,6 +64,11 @@ pub(super) struct EtsTables {
     fixed_seq: HashMap<(ProcessId, Reference), u64>,
     /// The last insertion number that `fixed` holds.
     next_fix: u64,
+    /// The tables whose deletion leaves the order entry of a process that
+    /// did not delete them, so the process removes the entry and pays one
+    /// reduction when it runs (`erts_schedule_ets_free_fixation`,
+    /// `erl_db.c:5263-5301`).
+    pending: HashMap<ProcessId, Vec<Reference>>,
     /// The compiled match specification of each `ets:select/1`
     /// continuation, by the reference that the continuation holds in place
     /// of the ERTS magic reference (`ets_db_make_match_prog_ref`,
@@ -718,11 +723,31 @@ impl EtsTables {
         for process in fixers {
             if *process == caller {
                 self.forget_fixation(id, *process);
+            } else {
+                // The entry of another process stays until that process runs
+                // and then removes it, or until its exit
+                // (`erts_schedule_ets_free_fixation`, `erl_db.c:5263-5301`).
+                self.pending.entry(*process).or_default().push(id);
             }
-            // The entry of another process stays until its exit, which
-            // charges one reduction for the cleanup of the deleted table
-            // (`erts_schedule_ets_free_fixation`, `erl_db.c:5263-5301`).
         }
+    }
+
+    /// Remove each fixation entry of the pending cleanups of the process
+    /// `process` and return their count, so the caller charges one
+    /// reduction for each (`proc_cleanup_fixed_table`,
+    /// `erl_db.c:4975-5015`). Return 0 when the process has no pending
+    /// cleanup.
+    pub(super) fn drain_pending(&mut self, process: ProcessId) -> usize {
+        if self.pending.is_empty() {
+            return 0;
+        }
+        let Some(ids) = self.pending.remove(&process) else {
+            return 0;
+        };
+        for id in &ids {
+            self.forget_fixation(*id, process);
+        }
+        ids.len()
     }
 
     /// Delete the tables that the process `owner` owns, as
@@ -827,6 +852,7 @@ impl EtsTables {
                 return None;
             }
         }
+        self.pending.remove(&owner);
         Some(reds)
     }
 
