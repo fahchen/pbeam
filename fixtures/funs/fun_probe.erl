@@ -108,7 +108,8 @@ infos() ->
     Const = fun() -> const end,
     Ext = fun lists:reverse/1,
     [erlang:fun_info(Pair, I) || I <- [type, module, name, arity, env, refc, uniq, new_index]] ++
-    [erlang:fun_info(Const, I) || I <- [arity, env]] ++
+    [erlang:fun_info(Const, I) || I <- [type, module, name, arity, env, refc,
+                                       uniq, new_index]] ++
     [erlang:fun_info(Ext, I) || I <- [type, module, name, arity, env, refc, index,
                               new_index, uniq, new_uniq, pid]] ++
     [try erlang:fun_info(id(42), type) catch error:R1 -> R1 end,

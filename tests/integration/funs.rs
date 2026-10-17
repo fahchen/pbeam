@@ -293,10 +293,16 @@ fn gives_fun_information_as_pinned_erts() {
             ]),
         ),
         pair("refc", Term::Integer(1)),
-        pair("uniq", Term::Integer(24_719_064)),
+        pair("uniq", Term::Integer(111_449_314)),
         pair("new_index", Term::Integer(6)),
+        pair("type", atom("local")),
+        pair("module", atom("fun_probe")),
+        pair("name", atom("-infos/0-fun-1-")),
         pair("arity", Term::Integer(0)),
         pair("env", Term::nil()),
+        pair("refc", Term::Integer(1)),
+        pair("uniq", Term::Integer(111_449_314)),
+        pair("new_index", Term::Integer(7)),
         pair("type", atom("external")),
         pair("module", atom("lists")),
         pair("name", atom("reverse")),
@@ -317,8 +323,10 @@ fn gives_fun_information_as_pinned_erts() {
     assert_eq!(
         reference("infos"),
         b"[{type,local},{module,fun_probe},{name,'-infos/0-fun-0-'},\
-          {arity,1},{env,[7,{a,b}]},{refc,1},{uniq,24719064},{new_index,6},\
-          {arity,0},{env,[]},{type,external},{module,lists},{name,reverse},\
+          {arity,1},{env,[7,{a,b}]},{refc,1},{uniq,111449314},{new_index,6},\
+          {type,local},{module,fun_probe},{name,'-infos/0-fun-1-'},\
+          {arity,0},{env,[]},{refc,1},{uniq,111449314},{new_index,7},\
+          {type,external},{module,lists},{name,reverse},\
           {arity,1},{env,[]},{refc,undefined},{index,undefined},\
           {new_index,undefined},{uniq,undefined},{new_uniq,undefined},\
           {pid,undefined},badarg,badarg,badarg,badarg]\n"

@@ -355,6 +355,8 @@ fn raises_badfun_for_the_funs_of_removed_code_as_pinned_erts() {
     // is not loaded is `[]` (`erl_bif_info.c:3998-4001`), also after the
     // code_server purged the module and before a load of another version.
     let expected = "[{error,{badfun,fun_term}},{error,{badfun,fun_term}},\
+                    [{name,'-make_first/1-fun-0-'},\
+                     {name,'-make_second/1-fun-0-'}],\
                     [{name,[]},{name,[]}],[{name,[]},{name,[]}]]\n";
     let erts = run(&mut erts_probe(
         FUN_ENTRY_PROBE,

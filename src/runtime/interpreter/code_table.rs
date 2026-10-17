@@ -511,12 +511,12 @@ impl CodeTable {
 
     /// Return the name of the function that holds the code of `lambda`, as
     /// ERTS `erts_get_fun_mfa` (`erl_fun.c:37-46`) gives it: the function of
-    /// the `func_info` before the entry label of the fun entry. ERTS reads
-    /// the address of the entry in the active code (`erl_fun.c:37-46`), so a
-    /// module that the code table does not hold, and the code that waits for
-    /// its `-on_load` function, give `None` for each fun. The code of a
-    /// lambda takes its free variables before its arguments, so the arity of
-    /// that function is not the arity of the fun (`jit/asm_load.c:1218-1223`),
+    /// the `func_info` before the entry label of the fun entry. A fun of the
+    /// code that waits for its `-on_load` function has the name of its
+    /// function, as `fun_entry_send:init/0` gives it on ERTS, and a module
+    /// that the code table does not hold gives `None`. The code of a lambda
+    /// takes its free variables before its arguments, so the arity of that
+    /// function is not the arity of the fun (`jit/asm_load.c:1218-1223`),
     /// and this function compares no arity.
     ///
     /// # Examples
@@ -535,8 +535,14 @@ impl CodeTable {
         module: &str,
         lambda: &Lambda,
     ) -> Result<Option<String>, BeamError> {
-        let Some(loaded) = self.get(module) else {
-            return Ok(None);
+        let loaded = match self.on_load.get(module) {
+            Some(waiting) => &waiting.code,
+            None => {
+                let Some(loaded) = self.get(module) else {
+                    return Ok(None);
+                };
+                loaded
+            }
         };
         let Some(entry) = loaded
             .tables
