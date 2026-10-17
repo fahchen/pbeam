@@ -385,6 +385,11 @@ fn encode(term: &Term, atoms: &AtomTable, options: &Options) -> Result<Vec<u8>, 
                 out.extend_from_slice(&0u32.to_be_bytes());
             }
             Term::Reference(reference) => {
+                if reference.is_pid_reference() {
+                    return Err(error(
+                        "unsupported erlang:term_to_binary/1,2 of a pid reference: ERTS writes the monitored pid in the alias reference: see \"External term format\" in docs/erts-differences.md",
+                    ));
+                }
                 out.push(90);
                 out.extend_from_slice(&3u16.to_be_bytes());
                 encode_sysname(atoms, options, &mut out);
@@ -1693,8 +1698,13 @@ impl Decoder<'_> {
         let Term::Integer(arity) = items[2] else {
             return Err(DecodeError::Badarg);
         };
-        if arity < 0 || self.safe {
+        if arity < 0 {
             return Err(DecodeError::Badarg);
+        }
+        if self.safe {
+            return Err(DecodeError::Unsupported(
+                "an external fun under the safe option",
+            ));
         }
         if arity > i64::from(u32::MAX) {
             return Err(DecodeError::Unsupported(

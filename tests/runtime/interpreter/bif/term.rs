@@ -676,7 +676,7 @@ fn decodes_the_unsupported_forms_and_local_terms() {
     ));
     assert!(matches!(
         decode_with(&mut atoms, &export, true),
-        Err(DecodeError::Badarg)
+        Err(DecodeError::Unsupported(_))
     ));
     // A local pid holds `NIL_EXT` for the node, and its hash covers the
     // pid bytes (`external.c:3651-3654`, `5250-5255`).
@@ -897,17 +897,20 @@ fn encodes_a_hashmap_in_the_erts_order() {
 #[test]
 fn decodes_a_pid_reference() {
     // A pid reference has the marker bit of its third reference number, and
-    // it round-trips as the same reference (`dec_term`, `external.c:4786-4855`).
-    let atoms = AtomTable::new();
+    // it decodes as the same reference (`dec_term`, `external.c:4786-4855`).
+    // ERTS writes the monitored pid in the alias reference, which PBeam
+    // does not hold, so an encode gives a runtime error.
     let reference = Reference::ordinary(5).unwrap().pid_reference();
-    let body = encode(&Term::Reference(reference), &atoms, &Options::default()).unwrap();
-    let mut input = vec![VERSION_MAGIC];
-    input.extend(body);
-    let mut decode_atoms = AtomTable::new();
+    let mut input = vec![VERSION_MAGIC, 90, 0, 3];
+    input.extend(node());
+    input.extend(with_words(&[], &[0, 5, 1, 0x8000_0000]));
+    let mut atoms = AtomTable::new();
     assert_eq!(
-        decode_full(&mut decode_atoms, &input, false).unwrap(),
+        decode_full(&mut atoms, &input, false).unwrap(),
         Term::Reference(reference)
     );
+    let atoms = AtomTable::new();
+    assert!(encode(&Term::Reference(reference), &atoms, &Options::default()).is_err());
 }
 
 #[test]
