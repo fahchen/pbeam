@@ -1296,8 +1296,10 @@ fn learn_window_bits(window_bits: i32, input: &[u8]) -> Option<i32> {
         return None;
     }
     // The high four bits of the first byte are the window size minus 8
-    // (`inflate.c:539-545`).
-    Some(i32::from(input[0] >> 4) + 8)
+    // (`inflate.c:539-545`). A value above 15 is an invalid header, and
+    // zlib stores it before it raises `data_error`. Clamp it, so that a
+    // reset after that error does not get an invalid zlib-rs window.
+    Some((i32::from(input[0] >> 4) + 8).min(15))
 }
 
 /// Run `zlib:inflateReset/1`, as the ERTS NIF `inflateReset_nif`

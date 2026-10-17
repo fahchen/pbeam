@@ -322,6 +322,7 @@ fn learns_the_window_size_of_an_automatic_header() {
     assert_eq!(learn_window_bits(16, &[0x78, 0x9c]), None);
     assert_eq!(learn_window_bits(0, &[0x1f, 0x8b]), None);
     assert_eq!(learn_window_bits(40, &[0x78, 0x9c]), None);
+    assert_eq!(learn_window_bits(32, &[0x88, 0x1c]), Some(15));
     assert_eq!(learn_window_bits(32, &[0x18, 0x00]), None);
     assert_eq!(learn_window_bits(32, &[0x18]), None);
     assert_eq!(learn_window_bits(-15, &[0x78, 0x9c]), None);
@@ -383,6 +384,45 @@ fn learns_the_window_size_of_a_header_split_across_calls() {
     )
     .unwrap();
     assert_eq!(raise_name(&scheduler, result), "data_error");
+}
+
+#[test]
+fn resets_a_stream_after_an_invalid_window_size() {
+    // `<<0x88, 0x1c>>` names a window of 16, which zlib stores in `wbits`
+    // before it raises `data_error` (`inflate.c:539-545`). A reset gives
+    // `ok`, and the next stream decodes.
+    let mut scheduler = scheduler();
+    let stream = stream(&mut scheduler);
+    let result = inflate_init_nif(
+        &mut scheduler,
+        &stream,
+        &Term::Integer(32),
+        &Term::Integer(2),
+    )
+    .unwrap();
+    assert_eq!(atom_name(&scheduler, result), "ok");
+    enqueue(&mut scheduler, &stream, &[0x88, 0x1c]);
+    let result = inflate_nif(
+        &mut scheduler,
+        &stream,
+        &Term::Integer(1024),
+        &Term::Integer(1024),
+        &Term::Integer(0),
+    )
+    .unwrap();
+    assert_eq!(raise_name(&scheduler, result), "data_error");
+    let result = inflate_reset_nif(&mut scheduler, &stream).unwrap();
+    assert_eq!(atom_name(&scheduler, result), "ok");
+    enqueue(&mut scheduler, &stream, &compress(b"hello"));
+    let result = inflate_nif(
+        &mut scheduler,
+        &stream,
+        &Term::Integer(1024),
+        &Term::Integer(1024),
+        &Term::Integer(0),
+    )
+    .unwrap();
+    assert_eq!(output_bytes(&result), b"hello");
 }
 
 #[test]
