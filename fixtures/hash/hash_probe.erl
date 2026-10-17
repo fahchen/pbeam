@@ -73,6 +73,10 @@ md5_context() ->
      byte_size(erlang:md5_update(C0, list_to_binary(bytes(40000)))),
      binary_to_list(erlang:md5_update(C0, list_to_binary(bytes(56)))),
      binary_to_list(erlang:md5_update(C0, list_to_binary(bytes(64)))),
+     binary_to_list(erlang:md5_update(erlang:md5_update(C0, list_to_binary(bytes(56))),
+                                       list_to_binary(bytes(20)))),
+     binary_to_list(erlang:md5_update(erlang:md5_update(C0, list_to_binary(bytes(56))),
+                                       list_to_binary(bytes(4)))),
      binary_to_list(erlang:md5_final(Fabricated)),
      ?CAUSE(erlang:md5_final(Final)),
      ?CAUSE(erlang:md5_update(Final, <<>>)),
@@ -140,13 +144,15 @@ one(Key, Value) -> #{Key => Value}.
 big_list() ->
     [{1, 2}, {3, 4}, {5, 6}, {7, 8}, {9, 10}, {11, 12}, {13, 14}].
 
-%% The reductions of `erlang:md5/1` of 1000 bytes and of the two term hashes
-%% of a map of 40 keys and a list of 100 bytes. The md5 walk charges one
+%% The reductions of `erlang:md5/1` of 100 bytes and of the two term hashes
+%% of a map of 40 keys and a list of 100 bytes. The md5 input stays below the
+%% byte budget that the caller has at the call, so that the state of the
+%% reduction budget does not change the cost. The md5 walk charges one
 %% reduction for each byte (erl_bif_chksum.c:463-489), and a phash2 hash
 %% charges one reduction for each 64 iterations (erl_term_hashing.c:860-861,
 %% 1565-1570). The costs include the reduction of the calls of the probe.
 reductions() ->
-    Binary = list_to_binary(bytes(1000)),
+    Binary = list_to_binary(bytes(100)),
     Map = big_map(40),
     List = bytes(100),
     [cost(fun() -> erlang:md5(id(Binary)) end),
