@@ -3482,6 +3482,86 @@ pub(super) fn setelement(index: &Term, tuple: &Term, value: &Term) -> BifResult 
     Value(Term::tuple(elements))
 }
 
+/// Run `erlang:fun_info(Fun, Item)`, as ERTS `fun_info_2`
+/// (`erts/emulator/beam/erl_bif_info.c:3911-4008`) does. A local fun gives
+/// `local` for `type`, the defining module for `module`, the function that
+/// holds its lambda for `name`, its arity, its free variables for `env`,
+/// `1` for `refc`, the `Index` field of its `FunT` entry for `new_index`
+/// (`erl_bif_info.c:3954-3957`, which reads the field that the loader puts
+/// in `ErlFunEntry.index`, `jit/asm_load.c:1218-1223`), and the old unique
+/// value of the entry for `uniq` (`erl_bif_info.c:3968-3971`). An external
+/// fun gives `external`, its module, its function, its arity, `[]` for
+/// `env`, and `undefined` for `refc`, `index`, `new_index`, `uniq`,
+/// `new_uniq`, and `pid` (`erl_bif_info.c:3943-3969`,
+/// `erl_bif_info.c:3985-3990`). A term that is not a fun raises `badarg`
+/// (`erl_bif_info.c:3924-3926`), and so does an item that the BIF does not
+/// know, which includes `native` and `native_address`
+/// (`erl_bif_info.c:4003-4004`). A local fun gives a clear runtime error
+/// for `index`, `new_uniq`, and `pid`, because the loader of PBeam keeps
+/// no such value (row "Fun information" of `docs/erts-differences.md`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = fun_info(&mut context, &fun, &test_atom("type"))?;
+/// assert!(matches!(result, BifResult::Value(_)));
+/// ```
+///
+/// # Errors
+///
+/// A module that the code table does not hold is a runtime invariant error.
+/// A full atom table gives the error of `AtomTable::put`.
+pub(super) fn fun_info(
+    context: &mut BifContext<'_>,
+    fun: &Term,
+    what: &Term,
+) -> Result<BifResult, BeamError> {
+    let (Term::Fun(fun), Term::Atom(what)) = (fun, what) else {
+        return Ok(BifResult::badarg());
+    };
+    let item = context.scheduler.atoms.name_of(what);
+    let value = match fun.target() {
+        Target::Local(lambda) => match item {
+            "type" => Term::static_atom("local"),
+            "module" => Term::Atom(lambda.module().clone()),
+            "name" => {
+                let module = context.scheduler.atoms.name_of(lambda.module());
+                match context.scheduler.code.function_name_of(module, lambda)? {
+                    Some(name) => Term::Atom(context.scheduler.atoms.put(&name)?),
+                    None => Term::nil(),
+                }
+            }
+            "arity" => Term::Integer(i64::from(lambda.arity())),
+            "env" => Term::list_from(fun.free().to_vec()),
+            "refc" => Term::Integer(1),
+            "new_index" => Term::Integer(i64::from(lambda.index())),
+            "uniq" => Term::Integer(i64::from(lambda.old_unique())),
+            "index" | "new_uniq" | "pid" => {
+                return Err(error(format!(
+                    "unsupported erlang:fun_info/2 item {item} (see \"Fun information\" in docs/erts-differences.md)"
+                )));
+            }
+            _ => return Ok(BifResult::badarg()),
+        },
+        Target::External {
+            module,
+            function,
+            arity,
+        } => match item {
+            "type" => Term::static_atom("external"),
+            "module" => Term::Atom(module.clone()),
+            "name" => Term::Atom(function.clone()),
+            "arity" => Term::Integer(i64::from(*arity)),
+            "env" => Term::nil(),
+            "refc" | "index" | "new_index" | "uniq" | "new_uniq" | "pid" => {
+                Term::static_atom("undefined")
+            }
+            _ => return Ok(BifResult::badarg()),
+        },
+    };
+    Ok(Value(Term::tuple(vec![Term::Atom(what.clone()), value])))
+}
+
 /// Run `erlang:is_function/2`: return `true` when `term` is a fun of
 /// `arity` arguments, as ERTS `erl_is_function` (`erl_bif_op.c:237-267`)
 /// does. An `arity` that is negative or not an integer raises `badarg`. A

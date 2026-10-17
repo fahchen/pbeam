@@ -1,5 +1,5 @@
 -module(fun_probe).
--export([mfas/0, locals/0, tests/0, applies/0, spawned/0, externals/0, tail_wait/1, id/1]).
+-export([mfas/0, locals/0, tests/0, applies/0, spawned/0, externals/0, infos/0, fun_info_unsupported/1, tail_wait/1, id/1]).
 
 %% erlang:apply/3 and the apply instruction, as proc_lib:init_p_do_apply/3
 %% runs them. apply/3 takes at most 1023 arguments.
@@ -97,6 +97,31 @@ externals() ->
      try erlang:make_fun(M, F, id(a)) catch error:R5 -> R5 end,
      eq(erlang:make_fun(M, F, id(255)), erlang:make_fun(M, F, id(255))),
      (id(fun fun_probe:id/1))(lit), eq(Ext, fun fun_probe:id/1)].
+
+%% erlang:fun_info/2 on a local fun with free variables, a local fun without
+%% free variables, and an external fun, as Elixir.BadArityError asks for the
+%% arity of a fun and Elixir.Agent.Server asks for its module and name.
+infos() ->
+    Tag = {id(a), id(b)},
+    K = id(7),
+    Pair = fun(X) -> {Tag, K, X} end,
+    Const = fun() -> const end,
+    Ext = fun lists:reverse/1,
+    [erlang:fun_info(Pair, I) || I <- [type, module, name, arity, env, refc, uniq, new_index]] ++
+    [erlang:fun_info(Const, I) || I <- [arity, env]] ++
+    [erlang:fun_info(Ext, I) || I <- [type, module, name, arity, env, refc, index,
+                              new_index, uniq, new_uniq, pid]] ++
+    [try erlang:fun_info(id(42), type) catch error:R1 -> R1 end,
+     try erlang:fun_info(Pair, id(bogus)) catch error:R2 -> R2 end,
+     try erlang:fun_info(Pair, native) catch error:R3 -> R3 end,
+     try erlang:fun_info(Ext, native_address) catch error:R4 -> R4 end].
+
+%% The fun_info/2 items that PBeam refuses with a runtime error because the
+%% loader keeps no such value.
+fun_info_unsupported(Item) ->
+    Tag = id(tag),
+    Pair = fun(X) -> {Tag, X} end,
+    erlang:fun_info(Pair, Item).
 
 %% A fun call in a tail position replaces the frame of its caller, as the
 %% ERTS loader makes i_call_fun_last of call_fun, deallocate, and return.

@@ -509,6 +509,43 @@ impl CodeTable {
             .transpose()
     }
 
+    /// Return the name of the function that holds the code of `lambda`, as
+    /// ERTS `erts_get_fun_mfa` gives it: the function of the `func_info`
+    /// before the entry label of the fun entry (`beam_common.c:1229-1236`).
+    /// The code of a lambda takes its free variables before its arguments,
+    /// so the arity of that function is not the arity of the fun
+    /// (`jit/asm_load.c:1218-1223`), and this function compares no arity. A
+    /// fun entry that the loaded code of `module` does not hold gives
+    /// `None`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let name = code.function_name_of("fun_probe", &lambda)?;
+    /// assert_eq!(name.as_deref(), Some("locals"));
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// An entry label that starts no function is a runtime invariant error.
+    pub(in crate::runtime) fn function_name_of(
+        &self,
+        module: &str,
+        lambda: &Lambda,
+    ) -> Result<Option<String>, BeamError> {
+        let loaded = self.waiting_or_loaded(module)?;
+        let Some(entry) = loaded
+            .tables
+            .fun_entries
+            .get(&lambda.index())
+            .filter(|entry| entry.old_unique == lambda.old_unique())
+        else {
+            return Ok(None);
+        };
+        let function = super::function_at_label(loaded, entry.label)?;
+        Ok(Some(loaded.tables.name(function.name).to_owned()))
+    }
+
     /// Return the code of `module` that waits for its `-on_load` function,
     /// else the loaded module `module`. `erlang:load_nif/2` from an on_load
     /// function checks the functions of the waiting code, as ERTS
