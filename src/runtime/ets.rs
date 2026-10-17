@@ -2428,8 +2428,14 @@ impl Table {
             self.next[slot] = std::mem::replace(&mut self.next[node], EMPTY);
             self.link(bucket, before, slot);
         }
-        if self.item_count() > i64::try_from(self.buckets).unwrap_or(i64::MAX) {
+        // `grow` splits up to 5 buckets in one call, until the item counter
+        // is within the growth limit (`erl_db_hash.c:3648-3734`).
+        let mut splits = 0;
+        while self.item_count() > i64::try_from(self.buckets).unwrap_or(i64::MAX)
+            && splits < RESIZE_STEPS
+        {
             self.split(atoms);
+            splits += 1;
         }
         slot
     }

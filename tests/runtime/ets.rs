@@ -1057,6 +1057,22 @@ fn frees_a_clear_after_the_last_unfix() {
 }
 
 #[test]
+fn grows_after_unfix_by_five_splits() {
+    // A fixed table does not grow. The next insert after the unfix splits
+    // up to 5 buckets in one grow call (`erl_db_hash.c:3648-3734`).
+    let atoms = test_atom_table();
+    let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
+    table.fix(ProcessId(0));
+    for key in 0..1000 {
+        table.insert(&atoms, vec![Term::Integer(key)]);
+    }
+    assert_eq!(table.buckets, 256);
+    table.unfix_all(ProcessId(0));
+    table.insert(&atoms, vec![Term::Integer(1000)]);
+    assert_eq!(table.buckets, 261);
+}
+
+#[test]
 fn grows_by_the_item_counter() {
     // A take leaves the item counter below 0, and the growth decision uses
     // the counter, so 257 inserts leave the 256 buckets of the table
