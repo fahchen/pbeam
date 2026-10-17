@@ -816,6 +816,46 @@ fn raises_internal_error_for_an_unexpected_pcre2_error() {
 }
 
 #[test]
+fn matches_a_precompiled_pattern_with_more_pairs_than_the_code() {
+    // The result reads only the offset pairs that the match returned. PCRE2
+    // leaves the other pairs of the match data uninitialized, so a forged
+    // pair count must not widen the read (pcre2_match.c:8586).
+    let program = program();
+    assert_eq!(
+        program
+            .execute("re_probe", "forged_pairs", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![
+            matched(&program, vec![pair(0, 1)]),
+            matched(&program, vec![pair(0, 1)]),
+            matched(&program, vec![pair(0, 1)]),
+        ])
+    );
+    assert_eq!(
+        reference("forged_pairs"),
+        "[{match,[{0,1}]},{match,[{0,1}]},{match,[{0,1}]}]\n"
+    );
+}
+
+#[test]
+fn raises_internal_error_for_a_recursion_loop_after_a_restart() {
+    // The switch of `re_match_trap` lists neither
+    // `PCRE2_ERROR_RECURSELOOP` nor `PCRE2_ERROR_HEAPLIMIT`, so a restart
+    // that gives one raises `internal_error` (`erl_bif_re.c:1860-1905`).
+    // ERTS marks that error `EXF_PANIC` (`error.h:133`) and ends the
+    // runtime, so only PBeam runs this probe.
+    let program = program();
+    assert_eq!(
+        program
+            .execute("re_probe", "recursion_after_restart", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![error_term(&program, "internal_error")])
+    );
+}
+
+#[test]
 fn gives_nomatch_for_a_pattern_that_recurses_without_a_match() {
     // PCRE2 returns `PCRE2_ERROR_RECURSELOOP` for a pattern such as `(?R)`
     // that recurses without a match (`pcre2.h:418`). `re_run` charges one

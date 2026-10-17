@@ -616,7 +616,7 @@ fn exec_return(
         return Term::static_atom("match");
     };
     let rc = rc as usize;
-    let ovector = data.ovector();
+    let ovector = data.ovector(rc);
     let element = |index: usize| capture_element(kind, ovector, index, subject);
     let elements: Vec<Term> = match &capture.groups {
         Groups::All => (0..rc).map(element).collect(),
@@ -630,6 +630,17 @@ fn exec_return(
             .collect(),
     };
     Term::tuple(vec![Term::static_atom("match"), Term::list_from(elements)])
+}
+
+/// Return the `error:internal_error` exception, which ERTS raises with
+/// `EXC_INTERNAL_ERROR` for an unexpected match result
+/// (`erl_bif_re.c:1788-1793`, `1903-1905`). ERTS marks the error
+/// `EXF_PANIC` (`error.h:133`) and ends the runtime.
+fn internal_error() -> BifResult {
+    BifResult::Raise {
+        class: ExceptionClass::Error,
+        reason: Term::static_atom("internal_error"),
+    }
 }
 
 /// Return the element of a capture that the result holds with no bytes: a
@@ -983,6 +994,7 @@ pub(super) fn run(
 
     // A match that uses its loop limit continues with a fresh budget, as
     // the trap to `erlang:re_run_trap/3` does (`erl_bif_re.c:1852-1858`).
+    let mut restarted = false;
     while rc == pcre2::ERROR_LOOP_LIMIT {
         let used = (limit - data.loops_left()) / LOOP_FACTOR;
         context
@@ -998,17 +1010,12 @@ pub(super) fn run(
         data.set_loops_left(limit);
         data.clear_restart();
         rc = data.resume();
+        restarted = true;
     }
-    // A pattern that recursed without a match charges all reductions of
-    // one turn and gives `nomatch` (`erl_bif_re.c:1751-1754`).
-    let used = if rc == pcre2::ERROR_RECURSELOOP {
-        CONTEXT_REDS
-    } else {
-        (limit - data.loops_left()) / LOOP_FACTOR
-    };
     // A bad UTF-8 subject uses the whole budget of the turn and raises
     // `badarg` (`erl_bif_re.c:1756-1786`); a bad offset, code, or mode
-    // raises it with no charge at all.
+    // raises it with no charge at all. The trap handles these codes the
+    // same way (`erl_bif_re.c:1872-1902`).
     if pcre2::is_utf8_error(rc) || rc == pcre2::ERROR_BADUTFOFFSET {
         context
             .scheduler
@@ -1022,25 +1029,29 @@ pub(super) fn run(
     ) {
         return Ok(BifResult::badarg());
     }
-    // Every other negative code raises `internal_error`, as the default case
-    // of `re_run` does (`erl_bif_re.c:1788-1793`). ERTS asserts that PCRE2
-    // does not return one for a live code and a subject that this call
-    // checked, but a build can return another code.
-    if rc < 0
-        && !matches!(
-            rc,
-            pcre2::ERROR_NOMATCH
-                | pcre2::ERROR_MATCHLIMIT
-                | pcre2::ERROR_DEPTHLIMIT
-                | pcre2::ERROR_HEAPLIMIT
-                | pcre2::ERROR_RECURSELOOP
-        )
-    {
-        return Ok(BifResult::Raise {
-            class: ExceptionClass::Error,
-            reason: Term::static_atom("internal_error"),
-        });
+    // The first match lists `HEAPLIMIT` and `RECURSELOOP` also
+    // (`erl_bif_re.c:1720-1753`); the switch of `re_match_trap` lists only
+    // `NOMATCH`, `MATCHLIMIT`, and `RECURSIONLIMIT`
+    // (`erl_bif_re.c:1860-1866`). Each other negative code raises
+    // `internal_error`, and ERTS ends the runtime (`erl_bif_re.c:1788-1793`,
+    // `1903-1905`). ERTS asserts that PCRE2 does not return one for a live
+    // code and a subject that this call checked, but a build can.
+    let expected = matches!(
+        rc,
+        pcre2::ERROR_NOMATCH | pcre2::ERROR_MATCHLIMIT | pcre2::ERROR_DEPTHLIMIT
+    ) || (!restarted
+        && matches!(rc, pcre2::ERROR_HEAPLIMIT | pcre2::ERROR_RECURSELOOP));
+    if rc < 0 && !expected {
+        return Ok(internal_error());
     }
+    // A pattern that recursed without a match charges all reductions of
+    // one turn and gives `nomatch` (`erl_bif_re.c:1751-1754`). A restart
+    // cannot give this code, because the trap gives `internal_error`.
+    let used = if rc == pcre2::ERROR_RECURSELOOP {
+        CONTEXT_REDS
+    } else {
+        (limit - data.loops_left()) / LOOP_FACTOR
+    };
     context
         .scheduler
         .current_process_mut()

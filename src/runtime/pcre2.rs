@@ -360,7 +360,7 @@ impl MatchData {
     ///
     /// ```rust,ignore
     /// let data = MatchData::new(2);
-    /// assert_eq!(data.ovector(), [UNSET, UNSET, UNSET, UNSET]);
+    /// assert_eq!(data.ovector(2), [UNSET, UNSET, UNSET, UNSET]);
     /// ```
     ///
     /// # Panics
@@ -388,26 +388,28 @@ impl MatchData {
         }
     }
 
-    /// Return the ovector of this match data: two offsets, the start and
-    /// the end of the match, for each pair. A slot of a capture group that
-    /// did not take part in the match is [`UNSET`].
+    /// Return the `pairs` offset pairs that PCRE2 wrote into the ovector of
+    /// this match data: two offsets, the start and the end of the match, for
+    /// each pair. A slot of a capture group that did not take part in the
+    /// match is [`UNSET`]. The match returns this count, and PCRE2 leaves
+    /// the other pairs of the allocation uninitialized, so the slice stops
+    /// at the count.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// let data = MatchData::new(1);
-    /// assert_eq!(data.ovector().len(), 2);
+    /// assert_eq!(data.ovector(1).len(), 2);
     /// ```
-    pub(super) fn ovector(&self) -> &[usize] {
+    pub(super) fn ovector(&self, pairs: usize) -> &[usize] {
+        let pairs = pairs.min(self.pairs);
         // SAFETY: `self.data` is a live match data with `self.pairs` pairs,
-        // and PCRE2 owns its ovector, which stays valid until `Drop`. No
-        // other reference to the ovector exists while this slice borrows
-        // the match data.
+        // and PCRE2 owns its ovector, which stays valid until `Drop`.
+        // PCRE2 initialized the first `pairs` pairs of the ovector in the
+        // match that returned `pairs`. No other reference to the ovector
+        // exists while this slice borrows the match data.
         unsafe {
-            std::slice::from_raw_parts(
-                pcre2_get_ovector_pointer_8(self.data.as_ptr()),
-                self.pairs * 2,
-            )
+            std::slice::from_raw_parts(pcre2_get_ovector_pointer_8(self.data.as_ptr()), pairs * 2)
         }
     }
 
@@ -584,7 +586,7 @@ impl Drop for MatchContext {
 /// (`erl_bif_re.c:1712-1716`) does with `pcre2_match`, and return its return
 /// code: the number of capture pairs that the match set, 0 for a match
 /// whose ovector is too small, or a negative `PCRE2_ERROR_*` value. The
-/// offsets of each pair are in `data.ovector()`. The options are the
+/// offsets of each pair are in `data.ovector(rc)`. The options are the
 /// `PCRE2_*` match bits.
 ///
 /// # Examples
@@ -594,7 +596,7 @@ impl Drop for MatchContext {
 /// let mut data = MatchData::new(code.capture_count() as u32 + 1);
 /// data.set_loops_left(i32::MAX);
 /// assert_eq!(execute(&code, &data, None, b"ba", 0, 0), 2);
-/// assert_eq!(data.ovector(), [1, 2, 1, 2]);
+/// assert_eq!(data.ovector(2), [1, 2, 1, 2]);
 /// assert_eq!(execute(&code, &data, None, b"ba", 2, 0), ERROR_NOMATCH);
 /// ```
 pub(super) fn execute(

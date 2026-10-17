@@ -3,7 +3,7 @@
          export/0, unsupported/1, id/1,
          run2/0, run/0, captures/0, globals/0, run_errors/0, reductions/0,
          spot/0, internal_run_first/0, yield/0, yield_charge/0, recursion/0,
-         unexpected_error/0]).
+         unexpected_error/0, forged_pairs/0, recursion_after_restart/0]).
 
 %% prim_tty:init/1 compiles the ANSI regular expression (prim_tty.erl:238).
 %% The fifth element is a reference (erl_bif_re.c:607-609).
@@ -289,6 +289,14 @@ id(X) -> X.
 recursion() ->
     [re:run(<<"x">>, <<"(?R)">>, []), re:run(<<"xx">>, <<"a(?R)">>, [])].
 
+%% A precompiled pattern whose offset pair count is above the pairs of the
+%% code writes only the pairs of the match; the other pairs of the match
+%% data stay uninitialized, so the result reads only the returned pairs.
+forged_pairs() ->
+    {ok, {re_pattern, _, _, _, Ref}} = re:compile(<<"a">>, []),
+    [re:run(<<"a">>, {re_pattern, Count, 0, 0, Ref}, [{capture, all}])
+     || Count <- [1, 3, 100]].
+
 %% An error that PCRE2 returns for a live code raises `internal_error`, as
 %% the default case of re_run does (erl_bif_re.c:1788-1793). The pattern
 %% reaches PCRE2_ERROR_BAD_BACKSLASH_K (pcre2.h:442).
@@ -313,6 +321,14 @@ yield_charge() ->
     Result = re:run(Subject, <<"a*b">>, []),
     {reductions, After} = process_info(self(), reductions),
     {After - Before, Result}.
+
+%% A recursion loop after a restart: the switch of re_match_trap lists
+%% neither PCRE2_ERROR_RECURSELOOP nor PCRE2_ERROR_HEAPLIMIT, so ERTS ends
+%% the runtime (erl_bif_re.c:1860-1905). Only PBeam runs this probe.
+recursion_after_restart() ->
+    [catch_error(fun() ->
+         re:run(dup(600000, $a), <<"a+(?<r>(?&r))">>, [])
+     end)].
 
 %% The fourth argument of re:internal_run/4 must be true or false
 %% (erl_bif_re.c:1805-1816). ERTS does not export the function, so only
