@@ -1,7 +1,15 @@
 //! Read the host clocks that ERTS reads (`sys/unix/sys_time.c`), and the
 //! local time of the host time zone (`sys/unix/erl_unix_sys.h`).
 
+use std::{sync::LazyLock, time::Instant};
+
 use crate::runtime::time::DateTime;
+
+/// The start of the performance counter of the process, which the first
+/// [`perf_counter`] call sets. ERTS counts from the boot of the host
+/// (`erts_sys_hrtime`, `sys_time.c:1009-1014`), a base that its own
+/// documentation allows to differ between runtime restarts.
+static PERF_COUNTER_START: LazyLock<Instant> = LazyLock::new(Instant::now);
 
 /// Return the OS system time: the host `CLOCK_REALTIME` in nanoseconds
 /// since 1970, as the ERTS `erts_os_system_time` reads it with
@@ -43,14 +51,35 @@ unsafe extern "C" {
     fn posix2time(time: libc::time_t) -> libc::time_t;
 }
 
+/// Return the performance counter of the host in nanoseconds since
+/// [`PERF_COUNTER_START`], in the unit that `erlang:system_info` calls
+/// `perf_counter`: ERTS reads `erts_sys_hrtime`, which is the
+/// `CLOCK_UPTIME_RAW` time of macOS and the `CLOCK_MONOTONIC` time of other
+/// hosts (`sys_time.c:1009-1014`, `sys/unix/erl_unix_sys.h:218-219`).
+/// `Instant` reads the same clock of the host as that function. ERTS counts
+/// the value from the boot of the host and PBeam counts it from the first
+/// call, a base that ERTS documents as the same only within a runtime
+/// restart (`os:perf_counter/0`).
+///
+/// The counter is exclusive and non-negative, as `os_perf_counter_0`
+/// (`erl_time_sup.c:2601-2605`) gives it.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(perf_counter() <= perf_counter());
+/// assert!(perf_counter() >= 0);
+/// ```
+pub(crate) fn perf_counter() -> i64 {
+    i64::try_from(PERF_COUNTER_START.elapsed().as_nanos()).unwrap_or(i64::MAX)
+}
+
 /// Return the local date and time of `clock`, a POSIX time, in the host
 /// time zone, as the end of ERTS `univ_to_local`
 /// (`erl_time_sup.c:1822-1848`) does. On macOS, ERTS has `posix2time`
 /// (`HAVE_POSIX2TIME`) and adds the leap seconds of the time zone first. A
-/// glibc host has no `posix2time`. Then `sys_localtime_r` calls `tzset`,
-/// so a change of `TZ` takes effect, and `localtime_r`
-/// (`sys/unix/erl_unix_sys.h:331-343`). Return `None` when `localtime_r`
-/// fails.
+/// glibc host has no `posix2time`. Then `sys_localtime_r` gives the local
+/// time (see [`local_zone_time`]). Return `None` when `localtime_r` fails.
 ///
 /// # Examples
 ///
@@ -63,6 +92,25 @@ pub(crate) fn local_time(clock: i64) -> Option<DateTime> {
     // SAFETY: `posix2time` reads only its argument and the time zone data
     // of the C library.
     let clock = unsafe { posix2time(clock) };
+    local_zone_time(clock)
+}
+
+/// Return the local date and time of `clock`, a POSIX time, in the host
+/// time zone, as ERTS `sys_localtime_r` gives it to `get_localtime`,
+/// `get_date`, and `get_time` (`erl_time_sup.c:1516-1557`). `sys_localtime_r`
+/// calls `tzset`, so a change of `TZ` takes effect, and `localtime_r`
+/// (`sys/unix/erl_unix_sys.h:331-343`). It adds no leap second of the time
+/// zone, unlike the `univ_to_local` path of
+/// `erlang:universaltime_to_localtime/1`, which calls `posix2time` first on
+/// macOS. Return `None` when `localtime_r` fails.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // TZ=EST5EDT,M3.2.0,M11.1.0
+/// assert_eq!(local_zone_time(0), Some((1969, 12, 31, 19, 0, 0)));
+/// ```
+pub(crate) fn local_zone_time(clock: i64) -> Option<DateTime> {
     // SAFETY: all zeros is a valid `tm`. `tzset` changes only the time zone
     // data of the C library, and `localtime_r` reads the time that the
     // first pointer gives and writes only into the struct that the second

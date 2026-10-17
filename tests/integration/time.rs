@@ -302,6 +302,41 @@ fn adds_the_leap_seconds_of_the_time_zone_as_the_host_erts() {
     for (name, output) in run_with_time_zone("leap_check", tz) {
         assert_printed(name, &output, stdout);
     }
+    // `erlang:localtime/0` reads the local time with `sys_localtime_r`
+    // (`get_localtime`, `erl_time_sup.c:1543-1557`), which adds no leap
+    // second (`sys/unix/erl_unix_sys.h:331-343`): the C libraries of the
+    // hosts read the leap seconds of that zone differently, so the local
+    // time is 27 seconds before the UTC time on macOS and the UTC time on
+    // glibc. The check is the value of the ERTS of the same host, and the
+    // ERTS run itself must give `leap` or `same`.
+    let [(erts_name, erts), (name, pbeam)] = run_with_time_zone("leap_local", tz);
+    assert_eq!(erts_name, "ERTS");
+    assert_eq!(
+        (erts.status.code(), &erts.stderr[..]),
+        (Some(0), &b""[..]),
+        "ERTS {tz}"
+    );
+    assert_ne!(erts.stdout, b"other\n", "ERTS {tz}");
+    assert_eq!(
+        (pbeam.status.code(), &pbeam.stderr[..]),
+        (Some(0), &b""[..]),
+        "{name} {tz}"
+    );
+    if cfg!(target_os = "macos") {
+        // `posix2time` exists only on macOS, so only there does the path of
+        // `local_time` add the leap seconds and differ from the path of
+        // `local_zone_time`: PBeam gives the value of the ERTS of the host.
+        assert_printed(name, &pbeam, &erts.stdout);
+    } else {
+        // The glibc `gmtime_r` subtracts the leap correction and PBeam
+        // does not (row "Clocks" of `docs/erts-differences.md`), so the
+        // two values can differ there where the two paths of the local
+        // clock cannot. Each run must give a category of the leap handling.
+        assert!(
+            matches!(&pbeam.stdout[..], b"leap\n" | b"same\n"),
+            "{name} {tz}: {pbeam:?}"
+        );
+    }
 }
 
 #[test]
@@ -359,4 +394,186 @@ fn disables_the_scheduler_wall_time_as_pinned_erts() {
             .contains("unsupported erts_internal:scheduler_wall_time(true)"),
         "{error}"
     );
+}
+
+/// Load the pinned `os.beam`, which runs `os:perf_counter/1`, and the
+/// probe.
+fn os_program() -> BeamProgram {
+    let os = pinned_beam("os");
+    let erlang = pinned_beam("erlang");
+    let erts_internal = pinned_beam("erts_internal");
+    BeamProgram::load(&[&os, &erlang, &erts_internal, TIME_PROBE]).unwrap()
+}
+
+#[test]
+fn gives_the_clock_of_the_default_arity_bifs_as_pinned_erts() {
+    // `clock/0` checks the relations of `erlang:system_time/0`,
+    // `erlang:monotonic_time/0`, `erlang:time_offset/0`, and
+    // `os:system_time/0` of the pinned ERTS (`erl_time_sup.c:2500-2552`,
+    // `2589-2593`). A value of the live clock is compared as its range, its
+    // unit, and its relation to the other calls, and the ERTS run of the
+    // same function gives the same checks.
+    let program = os_program();
+    let truths = Term::list_from(vec![Term::Atom(program.atom("true").unwrap()); 20]);
+    assert_eq!(
+        program.execute("time_probe", "clock", &[]).unwrap().term,
+        truths
+    );
+    assert_eq!(
+        reference("clock"),
+        format!("[{}]\n", ["true"; 20].join(",")).into_bytes()
+    );
+}
+
+#[test]
+fn runs_the_timestamp_bifs_as_pinned_erts() {
+    // `timestamp/0` checks the parts of `erlang:timestamp/0`
+    // (`erl_time_sup.c:2555-2587`) and `os:timestamp/0`
+    // (`erl_bif_os.c:48-59`) and their relation to the system time in
+    // microseconds within 10 ms.
+    let program = os_program();
+    let truths = Term::list_from(vec![Term::Atom(program.atom("true").unwrap()); 10]);
+    assert_eq!(
+        program
+            .execute("time_probe", "timestamp", &[])
+            .unwrap()
+            .term,
+        truths
+    );
+    assert_eq!(
+        reference("timestamp"),
+        format!("[{}]\n", ["true"; 10].join(",")).into_bytes()
+    );
+}
+
+#[test]
+fn raises_badarg_for_a_time_offset_unit_that_is_not_valid_as_pinned_erts() {
+    // Zero, a negative integer, an atom, and a tuple raise `badarg`
+    // (`erl_time_sup.c:2549-2552`, `2268-2350`).
+    let program = os_program();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    assert_eq!(
+        program
+            .execute("time_probe", "time_offset_units", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![Term::tuple(vec![atom("error"), atom("badarg")]); 4])
+    );
+    assert_eq!(
+        reference("time_offset_units"),
+        format!("[{}]\n", ["{error,badarg}"; 4].join(",")).into_bytes()
+    );
+}
+
+#[test]
+fn gives_the_perf_counter_of_the_host_as_pinned_erts() {
+    // `perf()` checks that `os:perf_counter/0` is non-negative, that it
+    // grows across a busy loop, and that `os:perf_counter/1` gives its
+    // floor in seconds (`erl_time_sup.c:2601-2605`,
+    // `lib/kernel/src/os.erl:188-191`). The counter counts from the boot of
+    // the host on ERTS and from the first call of the run on PBeam, a base
+    // that ERTS documents as the same only within a runtime restart, so
+    // only the relations are compared.
+    let program = os_program();
+    let truths = Term::list_from(vec![Term::Atom(program.atom("true").unwrap()); 3]);
+    assert_eq!(
+        program.execute("time_probe", "perf", &[]).unwrap().term,
+        truths
+    );
+    assert_eq!(reference("perf"), b"[true,true,true]\n");
+}
+
+#[test]
+fn gives_the_host_pid_as_pinned_erts() {
+    // `os:getpid/0` gives the decimal digits of the host process identifier
+    // (`erl_bif_os.c:60-69`, `sys/unix/sys.c:934-939`). The probe runs in
+    // the test process, so the value is the identifier of that process.
+    let program = os_program();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    assert_eq!(
+        program.execute("time_probe", "pid", &[]).unwrap().term,
+        Term::list_from(vec![atom("true"); 5])
+    );
+    assert_eq!(reference("pid"), b"[true,true,true,true,true]\n");
+    let digits = std::process::id().to_string();
+    assert_eq!(
+        program
+            .execute("time_probe", "pid_value", &[])
+            .unwrap()
+            .term,
+        Term::list_from(digits.bytes().map(|byte| Term::Integer(byte.into())))
+    );
+}
+
+#[test]
+fn changes_the_environment_copy_as_pinned_erts() {
+    // `environment/0` checks `os:putenv/2`, `os:getenv/1`,
+    // `os:unsetenv/1`, and `os:env/0` (`erl_bif_os.c:82-142`): the set
+    // value, the empty value as `[]`, the removed variable as `false`, the
+    // list of the environment, and `badarg` for a bad name or value. The
+    // key is only this test's, so the change of the environment copy of the
+    // run does not reach another test.
+    let program = os_program();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    let characters =
+        |text: &str| Term::list_from(text.bytes().map(|byte| Term::Integer(byte.into())));
+    let badarg = Term::tuple(vec![atom("error"), atom("badarg")]);
+    let mut expected = vec![
+        Term::tuple(vec![characters("TIME_PROBE_VAR"), characters("value")]),
+        Term::nil(),
+        atom("false"),
+        atom("false"),
+        atom("true"),
+    ];
+    expected.extend(std::iter::repeat_n(badarg, 6));
+    assert_eq!(
+        program
+            .execute("time_probe", "environment", &[])
+            .unwrap()
+            .term,
+        Term::list_from(expected)
+    );
+    // `~w` prints the characters of a string that is an element of another
+    // term as integers, so the reference text holds the code points.
+    let digits = |text: &str| {
+        format!(
+            "[{}]",
+            text.bytes()
+                .map(|byte| byte.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    };
+    let badargs = ["{error,badarg}"; 6].join(",");
+    assert_eq!(
+        reference("environment"),
+        format!(
+            "[{{{},{}}},[],false,false,true,{badargs}]\n",
+            digits("TIME_PROBE_VAR"),
+            digits("value")
+        )
+        .into_bytes()
+    );
+}
+
+#[test]
+fn gives_the_local_time_of_the_host_time_zone_as_the_default_arity_bifs() {
+    // `clock_utc/0` and `clock_jst/0` compare the local clock BIFs with the
+    // UTC BIFs: `erlang:localtime/0`, `erlang:date/0`, and `erlang:time/0`
+    // read the host time zone (`get_localtime`, `get_date`, and `get_time`,
+    // `erl_time_sup.c:1516-1557`), and `erlang:universaltime/0` reads UTC
+    // (`get_universaltime`, `erl_time_sup.c:1559-1583`). The difference of
+    // the two is the offset of the zone. `TZ=UTC0` gives 0 and `TZ=JST-9`
+    // gives 32400, and each of the two calls fails in the other zone.
+    for (tz, utc, jst) in [
+        ("UTC0", &b"ok\n"[..], &b"mismatch\n"[..]),
+        ("JST-9", &b"mismatch\n"[..], &b"ok\n"[..]),
+    ] {
+        for (name, output) in run_with_time_zone("clock_utc", tz) {
+            assert_printed(&format!("{name} clock_utc {tz}"), &output, utc);
+        }
+        for (name, output) in run_with_time_zone("clock_jst", tz) {
+            assert_printed(&format!("{name} clock_jst {tz}"), &output, jst);
+        }
+    }
 }

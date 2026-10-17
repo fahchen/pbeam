@@ -2,6 +2,8 @@
 -export([monotonic/0, system/0, units/0, convert/0, perf_counter/0, posix/0,
          local_badarg/0, local/0, local_check/0, leap_check/0,
          wall_time/0, wall_time_on/0, wall_time_order/0, wall_time_reds/0,
+         clock/0, time_offset_units/0, timestamp/0, perf/0, pid/0, pid_value/0,
+         environment/0, clock_utc/0, clock_jst/0, leap_local/0,
          ping/1]).
 
 %% The Erlang monotonic time at the emulator start in `native`
@@ -53,6 +55,183 @@ relations(N1, N2, [S, Ms, Us, Ns, OS, OMs, OUs, ONs, IS, IMs, IUs, INs], T3) ->
      floor_in(N1, IS, 1000000000, N2), floor_in(N1, IMs, 1000000, N2),
      floor_in(N1, IUs, 1000, N2), floor_in(N1, INs, 1, N2),
      le(T3 * 1000000000, N2 * 3), lt(N1 * 3, (T3 + 1) * 1000000000)].
+
+%% The relations of `erlang:system_time/0`, `erlang:monotonic_time/0`, and
+%% `erlang:time_offset/0` in the native unit (`erl_time_sup.c:2500-2552`):
+%% each unit gives the floor of a native value read before and after it,
+%% the system time is between 2023 and 2096, the monotonic time is at most
+%% 10 s after the start, the offset is positive, the system time is the
+%% monotonic time plus the offset within 10 ms, and the system time of the
+%% run agrees with `os:system_time/0` within 10 ms.
+clock() ->
+    S1 = erlang:system_time(),
+    SUnits = [erlang:system_time(U)
+              || U <- [second, millisecond, microsecond, nanosecond]],
+    S2 = erlang:system_time(),
+    M1 = erlang:monotonic_time(),
+    MUnits = [erlang:monotonic_time(U)
+              || U <- [second, millisecond, microsecond, nanosecond]],
+    M2 = erlang:monotonic_time(),
+    T1 = erlang:time_offset(),
+    TUnits = [erlang:time_offset(U)
+              || U <- [second, millisecond, microsecond, nanosecond]],
+    T2 = erlang:time_offset(),
+    OS = os:system_time(),
+    [in(1700000000000000000, S1, 4000000000000000000),
+     in(1700000000000000000, OS, 4000000000000000000),
+     in(?START, M1, ?START + 10000000000),
+     in(0, T1, 3400000000000000000),
+     le(S1 - 10000000, M1 + T1), le(M1 + T1, S2 + 10000000),
+     le(S1 - 10000000, OS), le(OS, S2 + 10000000)]
+    ++ floors(S1, SUnits, S2) ++ floors(M1, MUnits, M2)
+    ++ floors(T1, TUnits, T2).
+
+%% `floors/3` for the four non-deprecated units of `clock/0`.
+floors(N1, [S, Ms, Us, Ns], N2) ->
+    [floor_in(N1, S, 1000000000, N2), floor_in(N1, Ms, 1000000, N2),
+     floor_in(N1, Us, 1000, N2), floor_in(N1, Ns, 1, N2)].
+
+%% Each unit that `erlang:time_offset/1` does not accept.
+time_offset_units() ->
+    [catch_error(fun() -> erlang:time_offset(U) end) || U <- [0, -1, foo, {}]].
+
+%% The parts of `erlang:timestamp/0` and `os:timestamp/0` (`erl_time_sup.c:2555-2587`,
+%% `erl_bif_os.c:48-59`): each part has the range of its unit, and the
+%% value in microseconds is within 10 ms of `erlang:system_time/1` and
+%% `os:system_time/1` in microseconds.
+timestamp() ->
+    {Mega, Sec, Micro} = erlang:timestamp(),
+    Us = erlang:system_time(microsecond),
+    {OsMega, OsSec, OsMicro} = os:timestamp(),
+    OsUs = os:system_time(microsecond),
+    [in(0, Mega, 4000), in(0, Sec, 999999), in(0, Micro, 999999),
+     in(0, OsMega, 4000), in(0, OsSec, 999999), in(0, OsMicro, 999999),
+     le(Us - 10000, micros({Mega, Sec, Micro})),
+     le(micros({Mega, Sec, Micro}), Us + 10000),
+     le(OsUs - 10000, micros({OsMega, OsSec, OsMicro})),
+     le(micros({OsMega, OsSec, OsMicro}), OsUs + 10000)].
+
+%% The microseconds of `{MegaSecs, Secs, MicroSecs}`.
+micros({Mega, Sec, Micro}) -> (Mega * 1000000 + Sec) * 1000000 + Micro.
+
+%% The host performance counter of `os:perf_counter/0` in the
+%% `perf_counter` unit (`erl_time_sup.c:2601-2605`): it is non-negative and
+%% exclusive across a busy loop, and `os:perf_counter/1` gives its floor in
+%% the `second` unit (`lib/kernel/src/os.erl:188-191`).
+perf() ->
+    P1 = os:perf_counter(),
+    burn(100000),
+    Seconds = os:perf_counter(second),
+    P2 = os:perf_counter(),
+    [in(0, P1, P2), lt(P1, P2), floor_in(P1, Seconds, 1000000000, P2)].
+
+%% The process identifier of the host as a flat string of its digits
+%% (`sys/unix/sys.c:934-939`).
+pid() ->
+    S = os:getpid(),
+    [is_list(S), S =/= [], S =:= integer_to_list(list_to_integer(S)),
+     list_to_integer(S) > 0,
+     S =:= [D || D <- S, D >= $0, D =< $9]].
+
+%% The process identifier of the host itself.
+pid_value() -> os:getpid().
+
+%% Each result of `os:putenv/2`, `os:getenv/1`, `os:unsetenv/1`, and
+%% `os:env/0` on the pinned ERTS, with the bad name and value cases
+%% (`erl_bif_os.c:82-142`, `erl_osenv.c:269-311`).
+environment() ->
+    true = os:putenv("TIME_PROBE_VAR", "value"),
+    Put = find("TIME_PROBE_VAR", os:env()),
+    true = os:putenv("TIME_PROBE_VAR", ""),
+    Empty = os:getenv("TIME_PROBE_VAR"),
+    true = os:unsetenv("TIME_PROBE_VAR"),
+    Missing = find("TIME_PROBE_VAR", os:env()),
+    NotFound = os:getenv("TIME_PROBE_VAR"),
+    [Put, Empty, Missing, NotFound, has_key("PATH", os:env()),
+     catch_error(fun() -> os:putenv("A=B", "x") end),
+     catch_error(fun() -> os:putenv(atom, "x") end),
+     catch_error(fun() -> os:putenv("A", [0]) end),
+     catch_error(fun() -> os:putenv("A", 1) end),
+     catch_error(fun() -> os:unsetenv(1) end),
+     catch_error(fun() -> os:unsetenv("A=B") end)].
+
+%% Print `ok` when the local clock BIFs of the host time zone agree with
+%% `clock_check/1`, and `mismatch` for another time zone. The test gives
+%% the zone as `TZ=UTC0` (offset 0) and `TZ=JST-9` (offset 32400).
+clock_utc() -> clock_check(0).
+
+clock_jst() -> clock_check(32400).
+
+clock_check(Offset) ->
+    Local = erlang:localtime(),
+    Universal = erlang:universaltime(),
+    Date = erlang:date(),
+    Time = erlang:time(),
+    Difference = seconds(Local) - seconds(Universal),
+    Same = seconds({Date, Time}) - seconds(Local),
+    Checks = [in(Offset - 1, Difference, Offset + 1), in(-1, Same, 1)]
+        ++ ranges(Local) ++ ranges(Universal) ++ ranges({Date, Time}),
+    io:put_chars(case all_true(Checks) of
+                     true -> <<"ok\n">>;
+                     false -> <<"mismatch\n">>
+                 end).
+
+%% Whether each check of a list holds.
+all_true([]) -> true;
+all_true([true | Rest]) -> all_true(Rest);
+all_true(_) -> false.
+
+%% The range checks of one date and time.
+ranges({{Y, Mo, D}, {H, Mi, S}}) ->
+    [in(1902, Y, 9999), in(1, Mo, 12), in(1, D, 31), in(0, H, 23),
+     in(0, Mi, 59), in(0, S, 59)].
+
+%% The seconds since 1970-01-01 of a date and time of a year from 1902.
+seconds({{Y, M, D}, {H, Mi, S}}) ->
+    (days(Y) + month_days(Y, M) + D - 1) * 86400 + H * 3600 + Mi * 60 + S.
+
+days(Y) -> days_between(1970, Y).
+
+%% The days from the year `From` to the year `Y`, positive forward.
+days_between(From, Y) when Y > From -> 365 + leap(From) + days_between(From + 1, Y);
+days_between(From, Y) when Y < From -> -days_between(Y, From);
+days_between(_, _) -> 0.
+
+%% The days before the month `M` of the year `Y`: the days of the months
+%% before `M`, and the leap day for a month after February.
+month_days(Y, M) when M > 2 -> leap(Y) + month_days(M);
+month_days(_, M) -> month_days(M).
+
+month_days(1) -> 0;
+month_days(2) -> 31;
+month_days(3) -> 59;
+month_days(4) -> 90;
+month_days(5) -> 120;
+month_days(6) -> 151;
+month_days(7) -> 181;
+month_days(8) -> 212;
+month_days(9) -> 243;
+month_days(10) -> 273;
+month_days(11) -> 304;
+month_days(12) -> 334.
+
+%% The leap day of the year `Y`: 1 for a leap year, else 0.
+leap(Y) ->
+    case (Y rem 4 =:= 0) andalso ((Y rem 100 =/= 0) orelse (Y rem 400 =:= 0)) of
+        true -> 1;
+        false -> 0
+    end.
+
+%% The pair of `Key` of a list of pairs, or `false`.
+find(Key, [{Key, Value} | _]) -> {Key, Value};
+find(Key, [_ | Rest]) -> find(Key, Rest);
+find(_, []) -> false.
+
+has_key(Key, Pairs) -> find(Key, Pairs) =/= false.
+
+%% Take at least one microsecond of host CPU time.
+burn(0) -> ok;
+burn(N) -> burn(N - 1).
 
 %% Each unit that the time BIFs do not accept.
 units() ->
@@ -116,6 +295,21 @@ local_check() ->
     io:put_chars(case local() =:= ?LOCAL of
                      true -> <<"ok\n">>;
                      false -> <<"mismatch\n">>
+                 end).
+
+%% Print the difference of the local time and the UTC time of a time zone
+%% with leap seconds: `get_localtime` reads the local time with
+%% `sys_localtime_r` (`erl_time_sup.c:1543-1557`), which adds no leap second
+%% (`sys/unix/erl_unix_sys.h:331-343`). The C libraries read the leap
+%% seconds of that zone differently: measured on the pinned ERTS, macOS
+%% gives a local time 27 seconds before UTC and glibc gives the UTC time.
+%% The test compares this value with the value of the ERTS of the same
+%% host, and `other` fails that comparison.
+leap_local() ->
+    io:put_chars(case seconds(erlang:localtime()) - seconds(erlang:universaltime()) of
+                     Leap when -28 =< Leap, Leap =< -26 -> <<"leap\n">>;
+                     0 -> <<"same\n">>;
+                     _ -> <<"other\n">>
                  end).
 
 %% Print how the local time of a time zone with leap seconds is found.
