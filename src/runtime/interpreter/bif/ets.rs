@@ -2145,6 +2145,56 @@ fn help_table(context: &mut BifContext<'_>, table: &Term) -> Result<(), BeamErro
 ///
 /// Return the error of [`ProcessState::bif_reductions_left`] when a busy
 /// table cannot finish its list insert in the turn.
+/// Run `ets:safe_fixtable/2` as ERTS `ets_safe_fixtable_2` does
+/// (`erl_db.c:1136-1164`): `true` fixes the table for the caller, `false`
+/// unfixes it, and each of these gives `true`. A second argument that is
+/// not `true` or `false`, and a term that is not a table of the run, raise
+/// `badarg`. ERTS reads the table before it checks the second argument.
+///
+/// PBeam does not keep the ERTS traversal guarantees of a fixed table: a
+/// key that another process deletes between two `ets:next/2` calls ends the
+/// traversal, and a table that grows or shrinks between the calls can skip
+/// or repeat a key (row "ETS tables" of `docs/erts-differences.md`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = safe_fixtable(&mut context, &table, &Term::static_atom("true"))?;
+/// assert!(matches!(result, BifResult::Value(value) if value == Term::static_atom("true")));
+/// ```
+///
+/// # Errors
+///
+/// See [`help_busy`] for a table that a list insert took.
+pub(super) fn safe_fixtable(
+    context: &mut BifContext<'_>,
+    table: &Term,
+    flag: &Term,
+) -> Result<BifResult, BeamError> {
+    let caller = context.scheduler.current_process_mut().id;
+    if let Take::Help = help_busy(&mut *context, table)? {
+        return Ok(BifResult::TrapBif {
+            module: "ets",
+            function: "safe_fixtable",
+            arguments: vec![table.clone(), flag.clone()],
+        });
+    }
+    // ERTS reads the table before it checks the second argument
+    // (`erl_db.c:1146-1161`).
+    let known = context
+        .scheduler
+        .ets
+        .table(&context.scheduler.atoms, table, caller, Operation::Read)
+        .is_some();
+    if !known {
+        return Ok(BifResult::badarg());
+    }
+    if !matches!(flag, Term::Atom(atom) if atom.is_one_of(&["true", "false"])) {
+        return Ok(BifResult::badarg());
+    }
+    Ok(Value(Term::static_atom("true")))
+}
+
 pub(super) fn next(
     context: &mut BifContext<'_>,
     table: &Term,

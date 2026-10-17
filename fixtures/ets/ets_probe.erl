@@ -7,7 +7,8 @@
          busy_helper/2,
          own/2, write/1, select/0, match_object/0, iterate/0,
          update_element/0, info_items/0, delete_all/0, select_reductions/0,
-         private_owner/1, ordered_set/0, ordered_set_reductions/0, take/0]).
+         private_owner/1, ordered_set/0, ordered_set_reductions/0, take/0,
+         safe_fixtable/0]).
 
 %% ets:new/2 return values and badarg cases (erl_db.c:2555-2840).
 new() ->
@@ -217,12 +218,22 @@ busy_iteration() ->
     erlang:yield(),
     erlang:yield(),
     Next = ets:next(Second, 1),
+    %% A third busy table: ets:safe_fixtable/2 completes its insert first
+    %% and then gives true.
+    Third = ets:new(ets_probe, [public]),
+    Insert3 = spawn(?MODULE, busy_insert, [self(), Third]),
+    receive ready -> ok end,
+    Insert3 ! go,
+    erlang:yield(),
+    erlang:yield(),
+    Fixed = ets:safe_fixtable(Third, true),
+    receive {inserted, _, _} -> ok end,
     Info = length(ets:info(Table)),
     Updated = ets:update_element(Table, 1, {2, 9}),
     Deleted = ets:internal_select_delete(Table, [{{'_', '_'}, [false], [true]}]),
     Cleared = ets:internal_delete_all(Table, undefined),
     receive {inserted, _, _} -> ok end,
-    [Taken, Next, Info, Updated, Deleted, Cleared].
+    [Taken, Next, Fixed, Info, Updated, Deleted, Cleared].
 
 %% Insert the list of busy_objects/0 into the table Table, and send the
 %% result and the reductions of the insert to Parent.
@@ -655,6 +666,17 @@ dead() ->
     {Pid, _} = start([]),
     stopped = stop({Pid, x}),
     Pid.
+
+
+%% ets:safe_fixtable/2 results and badarg cases (erl_db.c:1136-1164).
+safe_fixtable() ->
+    T = ets:new(ets_probe_fixtable, [set]),
+    [ets:safe_fixtable(T, true), ets:safe_fixtable(T, true),
+     ets:safe_fixtable(T, false), ets:safe_fixtable(T, false),
+     catch_error(fun() -> ets:safe_fixtable(T, 1) end),
+     catch_error(fun() -> ets:safe_fixtable(T, yes) end),
+     catch_error(fun() -> ets:safe_fixtable(no_such_table, true) end),
+     catch_error(fun() -> ets:safe_fixtable(1, true) end)].
 
 catch_error(Fun) ->
     try Fun() catch error:Reason -> {error, Reason} end.

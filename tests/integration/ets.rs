@@ -670,3 +670,33 @@ fn runs_the_select_and_iteration_bifs_as_pinned_erts() {
         assert_probe_matches_erts(&program, function);
     }
 }
+
+#[test]
+fn returns_the_safe_fixtable_results_of_pinned_erts() {
+    // `ets_safe_fixtable_2` (`erl_db.c:1136-1164`) gives true for `true`
+    // and for `false`, and raises badarg for another second argument and
+    // for a term that is not a table of the run.
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    let badarg = Term::tuple(vec![atom("error"), atom("badarg")]);
+    assert_eq!(
+        program
+            .execute("ets_probe", "safe_fixtable", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![
+            atom("true"),
+            atom("true"),
+            atom("true"),
+            atom("true"),
+            badarg.clone(),
+            badarg.clone(),
+            badarg.clone(),
+            badarg,
+        ])
+    );
+    assert_eq!(
+        reference("safe_fixtable"),
+        b"[true,true,true,true,{error,badarg},{error,badarg},{error,badarg},{error,badarg}]\n"
+    );
+}
