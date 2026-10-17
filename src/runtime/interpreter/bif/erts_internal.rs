@@ -1210,6 +1210,91 @@ pub(super) fn list_to_integer(list: &Term, base: &Term) -> BifResult {
     }
 }
 
+/// Run `erts_internal:binary_to_integer(Binary, Base)`, which
+/// `erlang:binary_to_integer/1,2` call, as
+/// `erts_internal_binary_to_integer_2` with `chars_to_integer`
+/// (`big.c:4162-4256`) do. `Base` must be a small integer from 2 to 36.
+/// `Binary` must hold a whole number of bytes; ERTS copies a bit string
+/// with a bit offset into an aligned buffer (`erl_bits.h:606-633`). The
+/// text reads one optional `-` or `+`, then the digits of the base. An
+/// empty binary, a sign without a digit, a term that is not a binary, a
+/// base outside 2 to 36, and a digit outside the base give the atom
+/// `badarg`; the BIF raises nothing. Leading zeros do not count toward the
+/// digit limit, and a text above `DIGITS_PER_SMALL` digits gives the atom
+/// `big` before ERTS reads a digit, so a digit outside the base of such a
+/// text gives `big`, not `badarg`. `erlang:binary_to_integer/1,2` raise
+/// that `badarg` and read `big` with `big_binary_to_int`
+/// (`erlang.erl:1056-1129`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let binary = Term::binary(b"3FF".to_vec());
+/// assert!(matches!(binary_to_integer(&binary, &Term::Integer(16)), BifResult::Value(Term::Integer(1023))));
+/// let bad = Term::binary(b"1a".to_vec());
+/// assert!(matches!(binary_to_integer(&bad, &Term::Integer(10)), BifResult::Value(Term::Atom(atom)) if atom.is_static("badarg")));
+/// let many = Term::binary(b"123456789012345678".to_vec());
+/// assert!(matches!(binary_to_integer(&many, &Term::Integer(10)), BifResult::Value(Term::Atom(_))));
+/// ```
+pub(super) fn binary_to_integer(binary: &Term, base: &Term) -> BifResult {
+    let badarg = || Value(Term::static_atom("badarg"));
+    let Some(base) = base.small_integer().filter(|base| (2..=36).contains(base)) else {
+        return badarg();
+    };
+    let Term::Binary(bytes) = binary else {
+        return badarg();
+    };
+    if !bytes.bit_size().is_multiple_of(8) {
+        return badarg();
+    }
+    chars_to_integer(bytes, base as u32)
+}
+
+/// Return the integer that the byte text `text` reads as in `base`, as
+/// `chars_to_integer` (`big.c:4162-4229`) gives it. A byte of the base
+/// counts one digit, and `DIGITS_PER_SMALL` gives the count above which
+/// the result is the atom `big`. A text that is empty, that holds no digit
+/// after the sign, or that holds a byte outside the base gives the atom
+/// `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(chars_to_integer(b"-12", 10), BifResult::Value(Term::Integer(-12))));
+/// assert!(matches!(chars_to_integer(b"", 10), BifResult::Value(Term::Atom(_))));
+/// assert!(matches!(chars_to_integer(b"01234567890123456789", 10), BifResult::Value(Term::Atom(_))));
+/// ```
+fn chars_to_integer(text: &[u8], base: u32) -> BifResult {
+    let badarg = || Value(Term::static_atom("badarg"));
+    let Some(first) = text.first() else {
+        return badarg();
+    };
+    let (negative, text) = match first {
+        b'-' => (true, &text[1..]),
+        b'+' => (false, &text[1..]),
+        _ => (false, text),
+    };
+    if text.is_empty() {
+        return badarg();
+    }
+    let zeros = text.iter().take_while(|&&byte| byte == b'0').count();
+    let digits = &text[zeros..];
+    if digits.is_empty() {
+        return Value(Term::Integer(0));
+    }
+    if digits.len() > DIGITS_PER_SMALL[base as usize - 2] as usize {
+        return Value(Term::static_atom("big"));
+    }
+    let mut value = 0_i64;
+    for &byte in digits {
+        let Some(digit) = char::from(byte).to_digit(base) else {
+            return badarg();
+        };
+        value = value * i64::from(base) + i64::from(digit);
+    }
+    Value(Term::Integer(if negative { -value } else { value }))
+}
+
 /// Run `erts_internal:scheduler_wall_time(Enable)`, which
 /// `kernel_refc:init/1` calls with `false` (`kernel_refc.erl:52-54`,
 /// `141-142`), as `erts_internal_scheduler_wall_time_1` (`bif.c:5306-5315`)
@@ -1481,3 +1566,7 @@ pub(super) fn purge_module(
     }
     Ok(BifResult::badarg())
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/runtime/interpreter/bif/erts_internal.rs"]
+mod tests;

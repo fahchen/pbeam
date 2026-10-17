@@ -26,6 +26,25 @@ fn raises_badarg_for_a_bitstring_that_is_not_a_whole_number_of_bytes() {
 }
 
 #[test]
+fn raises_badarg_for_an_existing_atom_of_a_bitstring() {
+    // `erts_get_aligned_binary_bytes` (`erl_unicode.c:1969-1972`) gives NULL
+    // for a term that is not a byte-aligned binary, so
+    // `binary_to_existing_atom/2` raises `badarg`. The pinned ERTS gives
+    // `badarg` (measured with the `bits/0` probe of
+    // `fixtures/existing_atom`). The public API of the runtime has no
+    // constructor of such a bitstring, so this unit test builds it with
+    // `Binary::bits`.
+    let atoms = AtomTable::new();
+    let bitstring = Term::Binary(Binary::from(vec![1]).bits(0, 1));
+    let result = binary_to_existing_atom(&atoms, &bitstring, &Term::static_atom("utf8"));
+    assert!(matches!(
+        result,
+        BifResult::Raise { class: ExceptionClass::Error, reason }
+            if reason == Term::static_atom("badarg")
+    ));
+}
+
+#[test]
 fn lists_the_text_of_a_pid_and_of_a_port_as_pinned_erts() {
     // `erlang:pid_to_list/1` and `erlang:port_to_list/1` print the term with
     // `%T` (`term2list_dsprintf`, `bif.c:4442-4457`): the pid data 5 is the
