@@ -16,10 +16,11 @@ use crate::runtime::signal::Signal;
 use crate::runtime::time::{self, TimeValue};
 use crate::runtime::timer::{Receiver, Timer, Timers};
 use num_bigint::BigInt;
+use num_traits::FromPrimitive;
 
 use crate::term::{
     Atom, AtomTable, Fun, MAX_ATOM_CHARACTERS, MAX_ATOM_SZ_LIMIT, MAX_TUPLE_SIZE, ProcessId,
-    Reference, SMALL_INTEGER_MAX, SMALL_INTEGER_MIN, debug_term, external,
+    Reference, SMALL_INTEGER_MAX, SMALL_INTEGER_MIN, debug_term, external, print_term,
 };
 
 /// Run `erlang:node/1`: return the node of a pid. A term that is not a pid
@@ -2195,6 +2196,112 @@ pub(super) fn integer_to_list(
     Ok(Value(Term::list_from(codes)))
 }
 
+/// Run `erlang:integer_to_list/2`: return the characters of an integer in
+/// `base` as a proper list, as ERTS `integer_to_list_2` and
+/// `integer_to_list` (`bif.c:3266-3311`, `3341-3374`) do. A digit above 9
+/// is an upper-case letter (`Sint_to_buf`, `utils.c:2994-3030`). A first
+/// argument that is not an integer, and a base that is not a small integer
+/// from 2 to 36, raise `badarg`. [`integer_digits`] gives the digits and
+/// charges a bignum.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let list = integer_to_list_2(&mut process, &Term::Integer(-255), &Term::Integer(16))?;
+/// assert!(matches!(list, BifResult::Value(codes) if codes.proper_list().is_some_and(|codes| codes.len() == 4)));
+/// assert!(matches!(integer_to_list_2(&mut process, &Term::Integer(1), &Term::Integer(37))?, BifResult::Raise { .. }));
+/// ```
+///
+/// # Errors
+///
+/// Return the runtime error of [`integer_digits`].
+pub(super) fn integer_to_list_2(
+    process: &mut ProcessState,
+    term: &Term,
+    base: &Term,
+) -> Result<BifResult, BeamError> {
+    // ERTS checks both arguments before the work (`bif.c:3346-3353`). Each
+    // failed check raises `badarg` with no other effect, so the order of the
+    // checks does not change the result.
+    let Some(base) = base
+        .small_integer()
+        .and_then(|base| u32::try_from(base).ok())
+        .filter(|base| (2..=36).contains(base))
+    else {
+        return Ok(BifResult::badarg());
+    };
+    let Some(digits) = integer_digits(process, term, base, "integer_to_list/2")? else {
+        return Ok(BifResult::badarg());
+    };
+    Ok(Value(Term::list_from(
+        digits.bytes().map(|byte| Term::Integer(i64::from(byte))),
+    )))
+}
+
+/// Run `erlang:pid_to_list/1` and `erlang:port_to_list/1`: return the
+/// characters of the text of a pid or a port as a proper list, as ERTS
+/// `pid_to_list_1` and `port_to_list_1` (`bif.c:4505-4517`) do.
+/// `term2list_dsprintf` (`bif.c:4442-4457`) prints the term with `%T`
+/// ([`print_term`]) and turns each byte of the text into an integer
+/// (`buf_to_intlist`, `utils.c:3039-3053`). ERTS prints a pid as
+/// `<0.Number.Serial>` and a port as `#Port<0.Number>`. A term that is not
+/// a pid, for [`pid_to_list`], and a term that is not a port, for
+/// [`port_to_list`], raise `badarg`. `atoms` is the table of the run that
+/// owns `term`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let atoms = AtomTable::new();
+/// let text = pid_to_list(&Term::Pid(pid), &atoms);
+/// assert!(matches!(text, BifResult::Value(codes) if codes.proper_list().is_some_and(|codes| codes.len() > 0)));
+/// assert!(matches!(pid_to_list(&Term::nil(), &atoms), BifResult::Raise { .. }));
+/// ```
+pub(super) fn pid_to_list(term: &Term, atoms: &AtomTable) -> BifResult {
+    match term {
+        Term::Pid(_) => term_text_list(term, atoms),
+        _ => BifResult::badarg(),
+    }
+}
+
+/// Run `erlang:port_to_list/1`, with the text, the checks, and the result
+/// of [`pid_to_list`] for a term that is a port (`bif.c:4512-4517`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let atoms = AtomTable::new();
+/// let text = port_to_list(&Term::Port(port), &atoms);
+/// assert!(matches!(text, BifResult::Value(codes) if codes.proper_list().is_some_and(|codes| codes.len() > 0)));
+/// assert!(matches!(port_to_list(&Term::Pid(pid), &atoms), BifResult::Raise { .. }));
+/// ```
+pub(super) fn port_to_list(term: &Term, atoms: &AtomTable) -> BifResult {
+    match term {
+        Term::Port(_) => term_text_list(term, atoms),
+        _ => BifResult::badarg(),
+    }
+}
+
+/// Return the characters of the `%T` text of `term` as a proper list, the
+/// result of [`pid_to_list`] and [`port_to_list`] for a term of the
+/// accepted kind. [`print_term`] gives the text, and each byte of the text
+/// becomes an integer, as `buf_to_intlist` (`utils.c:3039-3053`) does.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let atoms = AtomTable::new();
+/// // [60, 48, 46, 49, 46, 48, 62] is the text of the pid `<0.1.0>`.
+/// assert!(matches!(term_text_list(&Term::Pid(pid), &atoms), BifResult::Value(codes) if codes.proper_list().is_some_and(|codes| codes.len() == 7)));
+/// ```
+fn term_text_list(term: &Term, atoms: &AtomTable) -> BifResult {
+    Value(Term::list_from(
+        print_term(term, atoms)
+            .into_iter()
+            .map(|byte| Term::Integer(i64::from(byte))),
+    ))
+}
+
 /// Run `erlang:integer_to_binary/1`: return the decimal characters of an
 /// integer as a binary, as ERTS `integer_to_binary_1` and
 /// `integer_to_binary` (`binary.c:80-145`) do. A term that is not an
@@ -2841,6 +2948,110 @@ fn local_clock_seconds() -> i64 {
     host::clock::system_time() / 1_000_000_000
 }
 
+/// Run `erlang:monotonic_time/0`: return the Erlang monotonic time in the
+/// native time unit, as ERTS `monotonic_time_0` (`erl_time_sup.c:2500-2507`)
+/// does. ERTS gives `get_time(esdp) + ERTS_MONOTONIC_OFFSET_NATIVE`, which
+/// is the value of `erlang:monotonic_time(native)` that [`convert_time`]
+/// gives for the internal monotonic time of the run. The call charges no
+/// reduction and raises nothing.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // The internal monotonic time plus the offset of the Erlang monotonic
+/// // time, about -576460752000000000 at the run start.
+/// assert!(matches!(monotonic_time(scheduler), BifResult::Value(Term::Integer(value)) if value < 0));
+/// ```
+pub(super) fn monotonic_time(scheduler: &Scheduler) -> BifResult {
+    convert_time(scheduler.timers.now(), 1, &Term::static_atom("native"))
+}
+
+/// Run `erlang:system_time/0`: return the Erlang system time in the native
+/// time unit, as ERTS `system_time_0` (`erl_time_sup.c:2517-2525`) does.
+/// ERTS gives `get_time(esdp) + get_time_offset()`, which is the value of
+/// `erlang:system_time(native)` that [`convert_time`] gives for the system
+/// time of the run. The call charges no reduction and raises nothing.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // The time of the host clock, about 1.7e18 nanoseconds after 1970.
+/// assert!(matches!(system_time(scheduler), BifResult::Value(Term::Integer(value)) if value > 1_700_000_000_000_000_000));
+/// ```
+pub(super) fn system_time(scheduler: &Scheduler) -> BifResult {
+    Value(Term::Integer(scheduler.timers.system_time()))
+}
+
+/// Run `erlang:trunc/1`, `erlang:floor/1`, `erlang:ceil/1`, and
+/// `erlang:round/1`: return an integer as it is, and a float as the integer
+/// of the rounded value, as ERTS `trunc_1`, `floor_1`, `ceil_1`, and
+/// `round_1` (`erl_bif_guard.c:134-204`) do. Each other term raises
+/// `badarg`. `round` gives the C `round` (`erl_bif_guard.c:202`): the
+/// integer nearest to the value, and away from zero at a halfway case.
+/// [`double_to_integer`] makes the integer from the rounded value.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(round_to_integer(&Term::Integer(-7), f64::floor), BifResult::Value(Term::Integer(-7))));
+/// assert!(matches!(round_to_integer(&Term::Float(-1.5), f64::floor), BifResult::Value(Term::Integer(-2))));
+/// assert!(matches!(round_to_integer(&Term::Float(0.5), f64::round), BifResult::Value(Term::Integer(1))));
+/// assert!(matches!(round_to_integer(&Term::static_atom("a"), f64::ceil), BifResult::Raise { .. }));
+/// ```
+pub(super) fn round_to_integer(term: &Term, round: fn(f64) -> f64) -> BifResult {
+    match term {
+        Term::Integer(_) | Term::BigInt(_) => Value(term.clone()),
+        Term::Float(value) => Value(double_to_integer(round(*value))),
+        _ => BifResult::badarg(),
+    }
+}
+
+/// Run `erlang:trunc/1`: return an integer as it is, and a float as the
+/// integer of the value with the fraction removed, as ERTS `trunc_1`
+/// (`erl_bif_guard.c:134-151`) does. ERTS rounds the value toward zero with
+/// `(f.fd >= 0.0) ? floor(f.fd) : ceil(f.fd)` and then calls
+/// [`double_to_integer`]. Each other term raises `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(trunc(&Term::Float(1.5)), BifResult::Value(Term::Integer(1))));
+/// assert!(matches!(trunc(&Term::Float(-1.5)), BifResult::Value(Term::Integer(-1))));
+/// assert!(matches!(trunc(&Term::nil()), BifResult::Raise { .. }));
+/// ```
+pub(super) fn trunc(term: &Term) -> BifResult {
+    round_to_integer(term, |value| {
+        if value >= 0.0 {
+            value.floor()
+        } else {
+            value.ceil()
+        }
+    })
+}
+
+/// Return the integer term of a rounded float `value`, as ERTS
+/// `double_to_integer` (`erl_bif_guard.c:398-450`) does. A value in the
+/// small integer range gives a small integer, and each other value gives a
+/// bignum of the exact integral value of the double. [`Term::from_bigint`]
+/// keeps each integer in the signed 64-bit range as [`Term::Integer`], as
+/// each PBeam operation does, so `2^59` is the value of the ERTS bignum in
+/// the PBeam form of an integer above the small integer range:
+/// [`Term::small_integer`] gives `None` for it, as ERTS gives no small
+/// integer.
+///
+/// The value is finite: ERTS makes no infinity or NaN term, and PBeam makes
+/// none.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(double_to_integer(1.0), Term::Integer(1)));
+/// assert!(matches!(double_to_integer(1.0e300), Term::BigInt(_)));
+/// ```
+fn double_to_integer(value: f64) -> Term {
+    Term::from_bigint(BigInt::from_f64(value).expect("the float of a term is finite"))
+}
+
 /// Run `erlang:list_to_tuple(List)`: return a tuple with the elements of
 /// the proper list `List`, as `list_to_tuple_1` (`bif.c:3789-3812`) does.
 /// `[]` gives `{}`. A term that is not a proper list, and a list with more
@@ -2881,6 +3092,154 @@ pub(super) fn tuple_to_list(tuple: &Term) -> BifResult {
         Term::Tuple(elements) => Value(Term::list_from(elements.iter().cloned())),
         _ => BifResult::badarg(),
     }
+}
+
+/// Run `erlang:make_tuple/2`: return a tuple of `size` elements, each the
+/// term `value`, as ERTS `make_tuple_2` (`bif.c:3006-3025`) does. `0` gives
+/// `{}`. A `size` that is not a small integer, is negative, or is above
+/// [`MAX_TUPLE_SIZE`] raises `badarg`. The BIF uses no reduction.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(make_tuple(&Term::Integer(0), &Term::static_atom("a")), BifResult::Value(Term::Tuple(elements)) if elements.is_empty()));
+/// assert!(matches!(make_tuple(&Term::Integer(2), &Term::static_atom("a")), BifResult::Value(Term::Tuple(elements)) if elements.len() == 2));
+/// assert!(matches!(make_tuple(&Term::Integer(-1), &Term::static_atom("a")), BifResult::Raise { .. }));
+/// assert!(matches!(make_tuple(&Term::Integer(1 << 59), &Term::static_atom("a")), BifResult::Raise { .. }));
+/// ```
+pub(super) fn make_tuple(size: &Term, value: &Term) -> BifResult {
+    let Some(size) = tuple_size(size) else {
+        return BifResult::badarg();
+    };
+    Value(Term::tuple(vec![value.clone(); size]))
+}
+
+/// Run `erlang:make_tuple/3`: return a tuple of `size` elements, each the
+/// term `value`, with the element at the 1-based index of each
+/// `{Index, Value}` pair of the list `updates` replaced, as ERTS
+/// `make_tuple_3` (`bif.c:3027-3078`) does. A pair that is not a 2-tuple,
+/// and a pair whose index is not a small integer from 1 to `size`, raise
+/// `badarg`, also for `updates` that is not a proper list. A later pair
+/// with the index of an earlier pair wins. A `size` that is not a small
+/// integer, is negative, or is above [`MAX_TUPLE_SIZE`] raises `badarg`.
+/// The BIF uses no reduction.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let updates = Term::list_from([Term::tuple(vec![Term::Integer(1), Term::static_atom("a")])]);
+/// assert!(matches!(make_tuple_3(&Term::Integer(2), &Term::static_atom("x"), &updates), BifResult::Value(Term::Tuple(elements)) if elements[0] == Term::static_atom("a")));
+/// assert!(matches!(make_tuple_3(&Term::Integer(2), &Term::static_atom("x"), &Term::nil()), BifResult::Value(Term::Tuple(elements)) if elements.len() == 2));
+/// // The index 1 is outside the tuple of size 0.
+/// assert!(matches!(make_tuple_3(&Term::Integer(0), &Term::static_atom("x"), &updates), BifResult::Raise { .. }));
+/// ```
+pub(super) fn make_tuple_3(size: &Term, value: &Term, updates: &Term) -> BifResult {
+    let Some(size) = tuple_size(size) else {
+        return BifResult::badarg();
+    };
+    let mut elements = vec![value.clone(); size];
+    let Some(updates) = updates.proper_list() else {
+        return BifResult::badarg();
+    };
+    for update in updates {
+        let Term::Tuple(pair) = update else {
+            return BifResult::badarg();
+        };
+        let [index, value] = &pair[..] else {
+            return BifResult::badarg();
+        };
+        let Some(index) = tuple_index(index.small_integer(), size) else {
+            return BifResult::badarg();
+        };
+        elements[index] = value.clone();
+    }
+    Value(Term::tuple(elements))
+}
+
+/// Run `erlang:insert_element/3`: return the tuple with `value` at the
+/// 1-based `index`, as ERTS `insert_element_3` (`bif.c:3110-3142`) does. An
+/// `index` of `size + 1` appends the value. An `index` that is not a small
+/// integer or is outside the tuple, and a `tuple` that is not a tuple,
+/// raise `badarg`. The BIF uses no reduction.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let tuple = Term::tuple(vec![Term::static_atom("a"), Term::static_atom("b")]);
+/// assert!(matches!(insert_element(&Term::Integer(1), &tuple, &Term::static_atom("c")), BifResult::Value(Term::Tuple(elements)) if elements[0] == Term::static_atom("c")));
+/// assert!(matches!(insert_element(&Term::Integer(4), &tuple, &Term::static_atom("c")), BifResult::Raise { .. }));
+/// ```
+pub(super) fn insert_element(index: &Term, tuple: &Term, value: &Term) -> BifResult {
+    let Term::Tuple(elements) = tuple else {
+        return BifResult::badarg();
+    };
+    let Some(index) = tuple_index(index.small_integer(), elements.len() + 1) else {
+        return BifResult::badarg();
+    };
+    let mut elements = elements.to_vec();
+    elements.insert(index, value.clone());
+    Value(Term::tuple(elements))
+}
+
+/// Run `erlang:delete_element/2`: return the tuple without the element at
+/// the 1-based `index`, as ERTS `delete_element_2` (`bif.c:3144-3180`)
+/// does. An `index` of the only element gives `{}`. An `index` that is not
+/// a small integer or is outside the tuple, and a `tuple` that is not a
+/// tuple, raise `badarg`. The BIF uses no reduction.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let tuple = Term::tuple(vec![Term::static_atom("a"), Term::static_atom("b")]);
+/// assert!(matches!(delete_element(&Term::Integer(1), &tuple), BifResult::Value(Term::Tuple(elements)) if elements[0] == Term::static_atom("b")));
+/// assert!(matches!(delete_element(&Term::Integer(1), &Term::tuple(vec![])), BifResult::Raise { .. }));
+/// ```
+pub(super) fn delete_element(index: &Term, tuple: &Term) -> BifResult {
+    let Term::Tuple(elements) = tuple else {
+        return BifResult::badarg();
+    };
+    let Some(index) = tuple_index(index.small_integer(), elements.len()) else {
+        return BifResult::badarg();
+    };
+    let mut elements = elements.to_vec();
+    elements.remove(index);
+    Value(Term::tuple(elements))
+}
+
+/// Return the 0-based array index of a 1-based tuple index from 1 to
+/// `size`, or `None` for an index that is not a small integer or is outside
+/// that range. ERTS checks a tuple index with `is_not_small` and a range
+/// test (`bif.c:2989-2993`, `3065-3072`, `3158-3162`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(tuple_index(Term::Integer(1).small_integer(), 2), Some(0));
+/// assert_eq!(tuple_index(Term::Integer(3).small_integer(), 2), None);
+/// assert_eq!(tuple_index(Term::static_atom("a").small_integer(), 2), None);
+/// ```
+fn tuple_index(index: Option<i64>, size: usize) -> Option<usize> {
+    usize::try_from(index?)
+        .ok()
+        .filter(|index| (1..=size).contains(index))
+        .map(|index| index - 1)
+}
+
+/// Return the size of a tuple for `erlang:make_tuple/2,3`, or `None` for a
+/// term that is not a small integer from 0 to [`MAX_TUPLE_SIZE`], as ERTS
+/// checks it (`bif.c:3012`, `3035`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(tuple_size(&Term::Integer(0)), Some(0));
+/// assert_eq!(tuple_size(&Term::Integer(-1)), None);
+/// assert_eq!(tuple_size(&Term::Integer(1 << 24)), None);
+/// ```
+fn tuple_size(size: &Term) -> Option<usize> {
+    usize::try_from(size.small_integer()?)
+        .ok()
+        .filter(|size| *size <= MAX_TUPLE_SIZE)
 }
 
 /// Run `erlang:posixtime_to_universaltime/1`: return the UTC date and time
@@ -2965,6 +3324,35 @@ pub(super) fn element(index: &Term, tuple: &Term) -> BifResult {
         .and_then(|index| index.checked_sub(1))
         .and_then(|index| elements.get(index))
         .map_or_else(BifResult::badarg, |element| Value(element.clone()))
+}
+
+/// Run `erlang:setelement/3`: return a copy of `tuple` with `value` at the
+/// 1-based `index`, as ERTS `setelement_3` (`bif.c:2976-3002`) does. The
+/// copy leaves `tuple` as it is. An `index` that is not a small integer or
+/// is outside the tuple, and a `tuple` that is not a tuple, raise `badarg`.
+/// The BIF uses no reduction.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let tuple = Term::tuple(vec![Term::static_atom("a"), Term::static_atom("b")]);
+/// assert!(matches!(setelement(&Term::Integer(1), &tuple, &Term::static_atom("c")), BifResult::Value(Term::Tuple(elements)) if elements[0] == Term::static_atom("c")));
+/// assert!(matches!(setelement(&Term::Integer(0), &tuple, &Term::static_atom("c")), BifResult::Raise { .. }));
+/// assert!(matches!(setelement(&Term::Integer(3), &tuple, &Term::static_atom("c")), BifResult::Raise { .. }));
+/// assert!(matches!(setelement(&Term::Integer(1 << 59), &tuple, &Term::static_atom("c")), BifResult::Raise { .. }));
+/// ```
+pub(super) fn setelement(index: &Term, tuple: &Term, value: &Term) -> BifResult {
+    // ERTS checks the index and the tuple first (`bif.c:2984-2993`), and its
+    // index must be a small integer, so a bignum index raises `badarg`.
+    let Term::Tuple(elements) = tuple else {
+        return BifResult::badarg();
+    };
+    let Some(index) = tuple_index(index.small_integer(), elements.len()) else {
+        return BifResult::badarg();
+    };
+    let mut elements = elements.to_vec();
+    elements[index] = value.clone();
+    Value(Term::tuple(elements))
 }
 
 /// Run `erlang:is_function/2`: return `true` when `term` is a fun of
@@ -4067,6 +4455,70 @@ pub(super) fn get_module_info(
     module: &Term,
     what: &Term,
 ) -> Result<BifResult, BeamError> {
+    get_module_info_key(context, module, what, "get_module_info/2")
+}
+
+/// The pair list that `erlang:get_module_info/1` returns, in the order of
+/// the list (`erl_bif_info.c:5970-5984`): the `BUILD_INFO` calls run from
+/// `md5` to `module` and each prepends its pair, so the first pair of the
+/// list is `module`, and the second pair is the one below.
+const MODULE_INFO_MISSING_KEY: &str = "exports";
+
+/// Run `erlang:get_module_info(Module)`, which `Module:module_info/0`
+/// calls, as ERTS `get_module_info_1` and `module_info_0`
+/// (`erl_bif_info.c:5946-5984`, `6010-6019`) do: return the pair list of
+/// the keys `module`, `exports`, `attributes`, `compile`, and `md5`, with
+/// the value that `erlang:get_module_info/2` gives for each key. A `Module`
+/// that is not an atom or that names no loaded module raises `badarg`. The
+/// caller needs a `code` capability that permits `inspect` for the module
+/// name, as for `erlang:get_module_info/2`.
+///
+/// PBeam can give the pair of the key `module` only: the key `exports`
+/// needs the order of the ERTS export table, and the keys `attributes`,
+/// `compile`, and `md5` need the chunks of the beam file, which the loader
+/// does not keep (row "Module information" of `docs/erts-differences.md`).
+/// Thus the call of a loaded module stops the run with the runtime error
+/// `erlang:get_module_info/1 key exports is not implemented`, as
+/// `erlang:get_module_info/2` stops at a key that it does not implement.
+/// The release `examples/plug_hello` imports this BIF for the
+/// `module_info/0` of each of its modules and calls it nowhere.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // The pair list [{module, lists}, {exports, [... ]}, ...] of ERTS.
+/// let result = get_module_info_1(&mut context, &Term::static_atom("lists"))?;
+/// ```
+///
+/// # Errors
+///
+/// A key that `erlang:get_module_info/2` does not implement gives its
+/// runtime error. A new `capability_denied` atom in a full atom table gives
+/// the error of `AtomTable::put`.
+pub(super) fn get_module_info_1(
+    context: &mut BifContext<'_>,
+    module: &Term,
+) -> Result<BifResult, BeamError> {
+    // The first key of the list holds the checks that each key shares.
+    let key = Term::static_atom("module");
+    match get_module_info_key(context, module, &key, "get_module_info/1")? {
+        // The pair of the key `module` is the first pair of the list. The
+        // rest of the list needs the keys that PBeam cannot give.
+        BifResult::Value(_) => Err(error(format!(
+            "erlang:get_module_info/1 key {MODULE_INFO_MISSING_KEY} is not implemented"
+        ))),
+        other => Ok(other),
+    }
+}
+
+/// Run the key of `erlang:get_module_info/2` that `bif` names, for the
+/// runtime error of a key that PBeam does not implement yet.
+fn get_module_info_key(
+    context: &mut BifContext<'_>,
+    module: &Term,
+    what: &Term,
+    bif: &str,
+) -> Result<BifResult, BeamError> {
     let Term::Atom(name) = module else {
         return Ok(BifResult::badarg());
     };
@@ -4106,7 +4558,7 @@ pub(super) fn get_module_info(
         "native",
     ]) {
         Err(error(format!(
-            "erlang:get_module_info/2 key {} is not implemented",
+            "erlang:{bif} key {} is not implemented",
             context.scheduler.atoms.name_of(key)
         )))
     } else {

@@ -11,8 +11,8 @@ const ERTS_RESULT: &str = "[[persistent_term,counters,atomics,\
     erts_dirty_process_signal_handler,erts_trace_cleaner,erts_literal_area_collector,\
     erl_tracer,erts_internal,erlang,erl_prim_loader,prim_zip,prim_net,prim_socket,\
     socket_registry,zlib,prim_file,prim_inet,prim_eval,prim_buffer,init,erl_init,\
-    erts_code_purger],module_info_probe,module_info_probe,{error,badarg},{error,badarg},\
-    {error,badarg},{error,badarg}]";
+    erts_code_purger],module_info_probe,[{error,badarg},{error,badarg}],\
+    module_info_probe,{error,badarg},{error,badarg},{error,badarg},{error,badarg}]";
 
 /// Return a term as `io:format("~w")` prints it, for the atoms, lists, and
 /// tuples of the probe result.
@@ -50,7 +50,9 @@ fn gives_preloaded_modules_and_module_info_as_pinned_erts() {
     // `erlang:get_module_info/2`, which returns the module for the key
     // `module`, and raises `badarg` for a module that is not an atom or not
     // loaded, and for a term that is not a key (erl_bif_info.c:5918-5945,
-    // 5986-6030). `code:do_start/0` calls `M:module_info(module)` for each
+    // 5986-6030). `erlang:get_module_info/1` raises `badarg` for a module
+    // that is not an atom or not loaded (erl_bif_info.c:5946-5984,
+    // 6010-6019). `code:do_start/0` calls `M:module_info(module)` for each
     // module that `code_server` needs (code.erl:1699-1712).
     let program = BeamProgram::load(&[MODULE_INFO_PROBE]).unwrap();
     let result = program.execute("module_info_probe", "main", &[]).unwrap();
@@ -88,6 +90,24 @@ fn stops_get_module_info_for_a_key_that_pbeam_does_not_implement() {
         .to_string();
     assert!(
         failure.contains("erlang:get_module_info/2 key md5 is not implemented"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn stops_get_module_info_1_for_a_loaded_module() {
+    // ERTS returns the pair list of the keys `module`, `exports`,
+    // `attributes`, `compile`, and `md5` (erl_bif_info.c:5946-5984). PBeam
+    // can give the pair of the key `module` only, so the call of a loaded
+    // module stops the run at the first key that it cannot give (row
+    // "Module information" of docs/erts-differences.md).
+    let program = BeamProgram::load(&[MODULE_INFO_PROBE]).unwrap();
+    let failure = program
+        .execute("module_info_probe", "info", &[])
+        .unwrap_err()
+        .to_string();
+    assert!(
+        failure.contains("erlang:get_module_info/1 key exports is not implemented"),
         "{failure}"
     );
 }
