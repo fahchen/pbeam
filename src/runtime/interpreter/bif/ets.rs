@@ -1908,8 +1908,16 @@ pub(super) fn select_continue(
         return Ok(BifResult::badarg());
     }
     let caller = context.scheduler.current_process_mut().id;
-    // ERTS takes the table with `DB_GET_TABLE` and no trap export, so it
-    // does not help a busy insert here (`erl_db.c:3965`).
+    // ERTS takes the table with `DB_GET_TABLE`, which helps a clear that
+    // does not finish and traps the continuation
+    // (`erl_db.c:89-114`, `769-798`, `3965`).
+    if help_table(&mut *context, table)? {
+        return Ok(BifResult::TrapBif {
+            module: "ets",
+            function: "select",
+            arguments: vec![continuation.clone()],
+        });
+    }
     let atoms = &context.scheduler.atoms;
     let Some(id) = context.scheduler.ets.find(atoms, table).map(|(id, _)| id) else {
         return Ok(BifResult::badarg());

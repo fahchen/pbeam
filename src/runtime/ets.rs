@@ -2639,6 +2639,13 @@ impl Table {
                 .values()
                 .map(|records| records.capacity() * std::mem::size_of::<Retained>())
                 .sum::<usize>()
+            + self.retained_buckets.len()
+                * (std::mem::size_of::<usize>() + std::mem::size_of::<Vec<u64>>())
+            + self
+                .retained_buckets
+                .values()
+                .map(|hashes| hashes.capacity() * std::mem::size_of::<u64>())
+                .sum::<usize>()
             + self
                 .retained
                 .values()

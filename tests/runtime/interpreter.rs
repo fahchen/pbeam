@@ -5373,6 +5373,41 @@ fn traps_a_call_that_meets_a_fixed_clear() {
 }
 
 #[test]
+fn traps_a_select_continuation_that_meets_a_fixed_clear() {
+    // `ets:select/1` takes the table of its continuation with
+    // `DB_GET_TABLE`, which helps a clear that does not finish and traps
+    // (`erl_db.c:89-114`, `769-798`, `3965`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let owner = scheduler.current_process_mut().id;
+    let mut table = Table::new(owner, Access::Public, 1, TableType::Set);
+    for key in 0..300 {
+        table.insert(&scheduler.atoms, vec![Term::Integer(key)]);
+    }
+    table.fix(owner);
+    table.step_clear(&scheduler.atoms, owner, 300, 1);
+    scheduler.ets.create(Reference(0), None, table);
+    let continuation = Term::tuple(vec![
+        Term::Reference(Reference(0)),
+        Term::Integer(0),
+        Term::Integer(1),
+        Term::Reference(Reference(999)),
+        Term::nil(),
+        Term::Integer(1),
+    ]);
+    let result = program
+        .bif(&mut scheduler, "ets", "select", vec![continuation.clone()])
+        .unwrap();
+    assert!(matches!(
+        result,
+        BifResult::TrapBif { function: "select", arguments, .. }
+            if arguments == vec![continuation]
+    ));
+}
+
+#[test]
 fn traps_the_initial_clear_with_the_table_reference() {
     // The clear of a fixed table that does not finish traps with the table
     // reference and the object count, so a reused name cannot resume
