@@ -137,6 +137,35 @@ fn reads_uncompressed_binary_literals() {
 }
 
 #[test]
+fn reads_large_tuple_literals() {
+    // `LARGE_TUPLE_EXT` (tag 105) holds a four-byte element count
+    // (`external.c:4542-4549`), as the literal of a tuple above 255
+    // elements does.
+    let mut atoms = AtomTable::new();
+    let bytes = [131, 105, 0, 0, 0, 3, 97, 1, 97, 2, 97, 3];
+    assert_eq!(
+        read_literal(&bytes, &mut atoms).unwrap(),
+        Some(Term::tuple(vec![
+            Term::Integer(1),
+            Term::Integer(2),
+            Term::Integer(3),
+        ]))
+    );
+    // The empty large tuple is the empty tuple.
+    assert_eq!(
+        read_literal(&[131, 105, 0, 0, 0, 0], &mut atoms).unwrap(),
+        Some(Term::tuple(Vec::new()))
+    );
+    // ERTS rejects a count above `ERTS_MAX_TUPLE_SIZE` (`external.c:6284-6289`).
+    assert_eq!(
+        read_literal(&[131, 105, 1, 0, 0, 0], &mut atoms)
+            .unwrap_err()
+            .to_string(),
+        "BEAM tuple literal exceeds the maximum tuple size"
+    );
+}
+
+#[test]
 fn puts_literal_atoms_into_the_table_in_byte_order() {
     let mut atoms = AtomTable::new();
     // {pbeam_lit_b, #{pbeam_lit_a => 1, pbeam_lit_b => 2}}: ERTS 29.1.1 creates pbeam_lit_b
