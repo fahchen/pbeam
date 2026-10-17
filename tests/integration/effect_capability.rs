@@ -376,7 +376,7 @@ const AMBIENT: [&str; 89] = [
 /// `effect_probe:ambient/0` also calls each entry once. `null_read/0` and
 /// `buffer/0` call the `prim_buffer` entries, and `buffer/0` calls
 /// `peek_head/1` and `copying_read/2` through `prim_buffer:read/2`.
-const LATER: [&str; 18] = [
+const LATER: [&str; 29] = [
     "prim_buffer:copying_read/2",
     "prim_buffer:find_byte_index/2",
     "prim_buffer:new/0",
@@ -386,14 +386,25 @@ const LATER: [&str; 18] = [
     "prim_buffer:try_lock/1",
     "prim_buffer:unlock/1",
     "prim_buffer:write/2",
+    "prim_file:altname_nif/1",
     "prim_file:close_nif/1",
+    "prim_file:del_dir_nif/1",
+    "prim_file:del_file_nif/1",
     "prim_file:get_cwd_nif/0",
     "prim_file:list_dir_nif/1",
+    "prim_file:make_dir_nif/1",
+    "prim_file:make_hard_link_nif/2",
+    "prim_file:make_soft_link_nif/2",
     "prim_file:open_nif/2",
     "prim_file:read_file_nif/1",
     "prim_file:read_link_nif/1",
     "prim_file:read_nif/2",
+    "prim_file:rename_nif/2",
     "prim_file:seek_nif/3",
+    "prim_file:set_cwd_nif/1",
+    "prim_file:set_owner_nif/3",
+    "prim_file:set_permissions_nif/2",
+    "prim_file:set_time_nif/4",
     "prim_file:write_nif/2",
 ];
 
@@ -526,7 +537,7 @@ fn calls_each_ambient_and_later_entry_with_no_capability() {
     // The root process holds no capability, so no policy can permit the
     // calls: each `ambient` and `later` entry has no check.
     let program = program();
-    let expected = "[true,true,false,true,true,true,integer,integer,integer,integer,integer,date_time,unix,nonode@nohost,nonode@nohost,[],[nonode@nohost],1,true,{error,badfile},{error,badarg},false,false,true,effect_probe_ambient_atom,effect_probe_ambient_binary,effect_probe_ambient_binary,effect_probe_ambient_atom,ok,re_pattern,effect_probe_ambient,true,false,[{key,value}],value,true,true,set,true,15,eot,eot,[{key,value}],[{key,value}],eot,true,true,0,2,reference,true,atom,2,ok,1,error,ok,error,ok,error,[ok,{ok,0},ok],[eof,ok],[11,<<48,49>>,{ok,8},9,ok,0,<<120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120>>,acquired,ok],none,{error,notsup},ok,false,reference,ok,1,ok,48,integer,integer,timestamp,date,time,date_time,date_time,integer,timestamp,integer,integer,true,true,true,true,9,false,true,true,true,true,true,true,{error,badarg}]";
+    let expected = "[true,true,false,true,true,true,integer,integer,integer,integer,integer,date_time,unix,nonode@nohost,nonode@nohost,[],[nonode@nohost],1,true,{error,badfile},{error,badarg},false,false,true,effect_probe_ambient_atom,effect_probe_ambient_binary,effect_probe_ambient_binary,effect_probe_ambient_atom,ok,re_pattern,effect_probe_ambient,true,false,[{key,value}],value,true,true,set,true,15,eot,eot,[{key,value}],[{key,value}],eot,true,true,0,2,reference,true,atom,2,ok,1,error,ok,error,ok,error,[ok,{ok,0},ok],[eof,ok],[11,<<48,49>>,{ok,8},9,ok,0,<<120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120>>,acquired,ok],none,{error,notsup},ok,false,reference,ok,1,ok,48,integer,integer,timestamp,date,time,date_time,date_time,integer,timestamp,integer,integer,{error,enotsup},error,error,error,error,error,error,error,ok,ok,ok,true,true,true,true,9,false,true,true,true,true,true,true,{error,badarg}]";
     assert_eq!(run_text(&program, "ambient", &Grants(vec![])), expected);
     assert_eq!(erts_with_stand_in("ambient"), format!("{expected}\n"));
 }
