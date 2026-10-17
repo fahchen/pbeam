@@ -46,6 +46,7 @@ const SOURCES: [&str; 23] = [
 /// ```
 fn main() {
     println!("cargo:rerun-if-changed=vendor/pcre2");
+    println!("cargo:rerun-if-changed=src/runtime/pcre2_serialize_guard.c");
     println!("cargo:rerun-if-changed=mise.toml");
     println!("cargo:rustc-env=PBEAM_OTP_RELEASE={}", otp_release());
     let generated = generate_match_headers();
@@ -55,6 +56,7 @@ fn main() {
                 .iter()
                 .map(|source| format!("vendor/pcre2/{source}")),
         )
+        .file("src/runtime/pcre2_serialize_guard.c")
         .include("vendor/pcre2")
         .include(&generated)
         .define("ERLANG_INTEGRATION", None)
