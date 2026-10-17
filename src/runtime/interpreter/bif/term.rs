@@ -56,6 +56,8 @@ const MAX_REFERENCE: u32 = 1 << 18;
 const REF_NUMBER_1_MASK: u32 = 0xFFFC_0000;
 /// The scheduler number of the references of PBeam (`REF_THREAD`).
 const REF_THREAD: u32 = 1;
+/// The largest count of reference numbers (`ERTS_MAX_REF_NUMBERS`).
+const MAX_REFERENCE_NUMBERS: usize = 5;
 
 /// The options of `erlang:term_to_binary/2`, as `parse_t2b_opts`
 /// (`external.c:1483-1557`) reads them.
@@ -268,7 +270,8 @@ pub(super) fn external_size(atoms: &AtomTable, term: &Term) -> Result<BifResult,
 }
 
 /// Return the external term bytes of `term` without `VERSION_MAGIC`, as
-/// `enc_term` (`external.c:3252-4060`) writes them.
+/// `enc_term` (`external.c:3252-4060`) writes them. The work list holds the
+/// terms that the walk still writes, so a deep term uses no Rust stack.
 ///
 /// # Examples
 ///
@@ -279,119 +282,129 @@ pub(super) fn external_size(atoms: &AtomTable, term: &Term) -> Result<BifResult,
 ///
 /// # Errors
 ///
-/// A local fun, a record, a bitstring, or a match context gives a runtime
-/// error, and a full atom table gives its error.
+/// A local fun, a match context, a bitstring that is not a whole number of
+/// bytes, and a record give a runtime error, and a full atom table gives
+/// its error.
 fn encode(term: &Term, atoms: &AtomTable, options: &Options) -> Result<Vec<u8>, BeamError> {
-    let mut bytes = Vec::new();
-    encode_term(term, atoms, options, &mut bytes)?;
-    Ok(bytes)
-}
-
-/// Write the external term bytes of `term` to `out`.
-///
-/// # Errors
-///
-/// The errors of [`encode`].
-fn encode_term(
-    term: &Term,
-    atoms: &AtomTable,
-    options: &Options,
-    out: &mut Vec<u8>,
-) -> Result<(), BeamError> {
-    match term {
-        Term::Nil => out.push(106),
-        Term::Atom(atom) => encode_atom(atoms.name_of(atom), options, out),
-        Term::Integer(value) => encode_integer(*value, out),
-        Term::BigInt(value) => encode_big(value, out),
-        Term::Float(value) if options.minor == 0 => {
-            out.push(99);
-            let text = float_text::scientific(*value, 17);
-            out.extend_from_slice(&text);
-            out.resize(out.len() + FLOAT_TEXT_SIZE - text.len(), 0);
-        }
-        Term::Float(value) => {
-            out.push(70);
-            out.extend_from_slice(&value.to_bits().to_be_bytes());
-        }
-        Term::Cons(_) => encode_list(term, atoms, options, out)?,
-        Term::Tuple(elements) => {
-            if elements.len() <= 0xff {
-                out.extend_from_slice(&[104, elements.len() as u8]);
-            } else {
-                out.push(105);
-                out.extend_from_slice(&(elements.len() as u32).to_be_bytes());
+    let mut out = Vec::new();
+    let mut pending = vec![term];
+    while let Some(term) = pending.pop() {
+        match term {
+            Term::Nil => out.push(106),
+            Term::Atom(atom) => encode_atom(atoms.name_of(atom), options, &mut out),
+            Term::Integer(value) => encode_integer(*value, &mut out),
+            Term::BigInt(value) => encode_big(value, &mut out),
+            Term::Float(value) if options.minor == 0 => {
+                out.push(99);
+                let text = float_text::scientific(*value, 17);
+                out.extend_from_slice(&text);
+                out.resize(out.len() + FLOAT_TEXT_SIZE - text.len(), 0);
             }
-            for element in elements.iter() {
-                encode_term(element, atoms, options, out)?;
+            Term::Float(value) => {
+                out.push(70);
+                out.extend_from_slice(&value.to_bits().to_be_bytes());
             }
-        }
-        Term::Map(map) => {
-            out.push(116);
-            out.extend_from_slice(&(map.len() as u32).to_be_bytes());
-            let mut pairs: Vec<(&Term, &Term)> = map.iter().collect();
-            if options.deterministic {
-                pairs.sort_by(|(left, _), (right, _)| exact_map_key_order(left, right, atoms));
-            } else if map.len() <= 32 {
-                // A flatmap of ERTS keeps its pairs in descending key order
-                // (`erl_map.c`), while `Map::iter` gives the ascending order.
-                pairs.reverse();
+            Term::Cons(_) => {
+                if let Some(bytes) = list_string(term) {
+                    out.push(107);
+                    out.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
+                    out.extend_from_slice(&bytes);
+                } else {
+                    let mut heads = Vec::new();
+                    let mut walk = term;
+                    while let Some((head, tail)) = walk.cons_cell() {
+                        heads.push(head);
+                        walk = tail;
+                    }
+                    out.push(108);
+                    out.extend_from_slice(&(heads.len() as u32).to_be_bytes());
+                    pending.push(walk);
+                    pending.extend(heads.into_iter().rev());
+                }
             }
-            for (key, value) in pairs {
-                encode_term(key, atoms, options, out)?;
-                encode_term(value, atoms, options, out)?;
+            Term::Tuple(elements) => {
+                if elements.len() <= 0xff {
+                    out.extend_from_slice(&[104, elements.len() as u8]);
+                } else {
+                    out.push(105);
+                    out.extend_from_slice(&(elements.len() as u32).to_be_bytes());
+                }
+                pending.extend(elements.iter().rev());
             }
-        }
-        Term::Binary(binary) => {
-            out.push(109);
-            out.extend_from_slice(&(binary.len() as u32).to_be_bytes());
-            out.extend_from_slice(binary);
-        }
-        Term::Pid(ProcessId(data)) => {
-            out.push(88);
-            encode_sysname(atoms, options, out);
-            out.extend_from_slice(&((data & u64::from(MAX_PID_NUMBER)) as u32).to_be_bytes());
-            out.extend_from_slice(&((data >> PID_NUMBER_BITS) as u32).to_be_bytes());
-            out.extend_from_slice(&0u32.to_be_bytes());
-        }
-        Term::Port(port) => {
-            out.push(120);
-            encode_sysname(atoms, options, out);
-            out.extend_from_slice(&port.0.to_be_bytes());
-            out.extend_from_slice(&0u32.to_be_bytes());
-        }
-        Term::Reference(reference) => {
-            out.push(90);
-            out.extend_from_slice(&3u16.to_be_bytes());
-            encode_sysname(atoms, options, out);
-            out.extend_from_slice(&0u32.to_be_bytes());
-            for number in reference.numbers() {
-                out.extend_from_slice(&number.to_be_bytes());
+            Term::Map(map) => {
+                out.push(116);
+                out.extend_from_slice(&(map.len() as u32).to_be_bytes());
+                let mut pairs: Vec<(&Term, &Term)> = map.iter().collect();
+                if options.deterministic {
+                    pairs.sort_by(|(left, _), (right, _)| exact_map_key_order(left, right, atoms));
+                } else if map.len() <= 32 {
+                    // A flatmap of ERTS keeps its pairs in descending key
+                    // order (`erl_map.c`), while `Map::iter` gives the
+                    // ascending order.
+                    pairs.reverse();
+                }
+                for (key, value) in pairs.into_iter().rev() {
+                    pending.push(value);
+                    pending.push(key);
+                }
             }
-        }
-        Term::Fun(fun) => match fun.target() {
-            Target::External {
-                module,
-                function,
-                arity,
-            } => {
-                out.push(113);
-                encode_atom(atoms.name_of(module), options, out);
-                encode_atom(atoms.name_of(function), options, out);
-                encode_integer(i64::from(*arity), out);
+            Term::Binary(binary) => {
+                if binary.bit_size() % 8 != 0 {
+                    return Err(error(
+                        "unsupported erlang:term_to_binary/1,2 of a bitstring that is not a whole number of bytes: see \"External term format\" in docs/erts-differences.md",
+                    ));
+                }
+                out.push(109);
+                out.extend_from_slice(&(binary.len() as u32).to_be_bytes());
+                out.extend_from_slice(binary);
             }
-            Target::Local(_) => {
+            Term::Pid(ProcessId(data)) => {
+                out.push(88);
+                encode_sysname(atoms, options, &mut out);
+                out.extend_from_slice(&((data & u64::from(MAX_PID_NUMBER)) as u32).to_be_bytes());
+                out.extend_from_slice(&((data >> PID_NUMBER_BITS) as u32).to_be_bytes());
+                out.extend_from_slice(&0u32.to_be_bytes());
+            }
+            Term::Port(port) => {
+                out.push(120);
+                encode_sysname(atoms, options, &mut out);
+                out.extend_from_slice(&port.0.to_be_bytes());
+                out.extend_from_slice(&0u32.to_be_bytes());
+            }
+            Term::Reference(reference) => {
+                out.push(90);
+                out.extend_from_slice(&3u16.to_be_bytes());
+                encode_sysname(atoms, options, &mut out);
+                out.extend_from_slice(&0u32.to_be_bytes());
+                for number in reference.numbers() {
+                    out.extend_from_slice(&number.to_be_bytes());
+                }
+            }
+            Term::Fun(fun) => match fun.target() {
+                Target::External {
+                    module,
+                    function,
+                    arity,
+                } => {
+                    out.push(113);
+                    encode_atom(atoms.name_of(module), options, &mut out);
+                    encode_atom(atoms.name_of(function), options, &mut out);
+                    encode_integer(i64::from(*arity), &mut out);
+                }
+                Target::Local(_) => {
+                    return Err(error(
+                        "unsupported erlang:term_to_binary/1,2 of a local fun: see \"External term format\" in docs/erts-differences.md",
+                    ));
+                }
+            },
+            Term::MatchContext(_) => {
                 return Err(error(
-                    "unsupported erlang:term_to_binary/1,2 of a local fun: see \"External term format\" in docs/erts-differences.md",
+                    "unsupported erlang:term_to_binary/1,2 of a match context: see \"External term format\" in docs/erts-differences.md",
                 ));
             }
-        },
-        Term::MatchContext(_) => {
-            return Err(error(
-                "unsupported erlang:term_to_binary/1,2 of a match context: see \"External term format\" in docs/erts-differences.md",
-            ));
         }
     }
-    Ok(())
+    Ok(out)
 }
 
 /// Compare two map keys in the exact term order of the `deterministic`
@@ -491,38 +504,6 @@ fn encode_big(value: &BigInt, out: &mut Vec<u8>) {
     }
     out.push(u8::from(sign == Sign::Minus));
     out.extend_from_slice(&bytes);
-}
-
-/// Write a list as the `LIST_DEF` branch of `enc_term`
-/// (`external.c:3695-3725`) does: `STRING_EXT` for a proper list of bytes
-/// of at most 65535 elements, else `LIST_EXT` with the number of cons cells,
-/// the cells, and the tail.
-fn encode_list(
-    term: &Term,
-    atoms: &AtomTable,
-    options: &Options,
-    out: &mut Vec<u8>,
-) -> Result<(), BeamError> {
-    if let Some(bytes) = list_string(term) {
-        out.push(107);
-        out.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
-        out.extend_from_slice(&bytes);
-        return Ok(());
-    }
-    let mut count = 0u32;
-    let mut walk = term;
-    while let Some((_, tail)) = walk.cons_cell() {
-        count += 1;
-        walk = tail;
-    }
-    out.push(108);
-    out.extend_from_slice(&count.to_be_bytes());
-    let mut walk = term;
-    while let Some((head, tail)) = walk.cons_cell() {
-        encode_term(head, atoms, options, out)?;
-        walk = tail;
-    }
-    encode_term(walk, atoms, options, out)
 }
 
 /// Return the bytes of a proper list of at most 65535 bytes, or `None` for
@@ -651,6 +632,31 @@ struct Decoder<'a> {
     seed: u32,
 }
 
+/// The container that the decoder walk still fills.
+enum FrameKind {
+    /// A tuple of the remaining elements.
+    Tuple,
+    /// A list of the remaining heads, then its tail.
+    List,
+    /// A map of the remaining 2 * size keys and values.
+    Map,
+    /// An `EXPORT_EXT` of the module, the function, and the arity.
+    Export,
+    /// A `LOCAL_EXT` with its hash and the start of the wrapped term.
+    Local { hash: u32, start: usize },
+}
+
+/// One open container of the decoder walk: its kind, the terms that it still
+/// expects, and the terms that it has.
+struct Frame {
+    /// The kind of the container.
+    kind: FrameKind,
+    /// The number of terms that the container still expects.
+    remaining: usize,
+    /// The terms that the container has, in order.
+    items: Vec<Term>,
+}
+
 impl Decoder<'_> {
     /// Decode `VERSION_MAGIC`, the optional `COMPRESSED` header, and one
     /// term, as `binary2term_prepare` and `dec_term`
@@ -774,126 +780,239 @@ impl Decoder<'_> {
         Ok((out, decompress.total_in() as usize))
     }
 
-    /// Decode one term, as `dec_term` (`external.c:4270-5340`) does.
+    /// Decode one term, as `dec_term` (`external.c:4270-5340`) does. The
+    /// frames hold the containers that the walk still fills, so a deep term
+    /// uses no Rust stack.
     fn term(&mut self) -> Result<Term, DecodeError> {
-        match self.u8()? {
-            97 => Ok(Term::Integer(i64::from(self.u8()?))),
-            98 => Ok(Term::Integer(i64::from(i32::from_be_bytes(
-                self.take(4)?.try_into().expect("four bytes"),
-            )))),
-            99 => self.float_text(),
-            70 => {
-                let bits = u64::from_be_bytes(self.take(8)?.try_into().expect("eight bytes"));
-                let value = f64::from_bits(bits);
-                value
-                    .is_finite()
-                    .then_some(Term::Float(value))
-                    .ok_or(DecodeError::Badarg)
-            }
-            100 => {
-                let length = usize::from(self.u16()?);
-                self.atom(length, true)
-            }
-            115 => {
-                let length = usize::from(self.u8()?);
-                self.atom(length, true)
-            }
-            118 => {
-                let length = usize::from(self.u16()?);
-                self.atom(length, false)
-            }
-            119 => {
-                let length = usize::from(self.u8()?);
-                self.atom(length, false)
-            }
-            106 => Ok(Term::Nil),
-            107 => {
-                let count = usize::from(self.u16()?);
-                let bytes = self.take(count)?;
-                Ok(Term::list_from(
-                    bytes.iter().map(|&byte| Term::Integer(i64::from(byte))),
-                ))
-            }
-            108 => {
-                let count = self.u32()? as usize;
-                if count > self.remaining() {
-                    return Err(DecodeError::Badarg);
+        let mut frames: Vec<Frame> = Vec::new();
+        'parse: loop {
+            let tag = self.u8()?;
+            let mut term = match tag {
+                97 => Term::Integer(i64::from(self.u8()?)),
+                98 => Term::Integer(i64::from(i32::from_be_bytes(
+                    self.take(4)?.try_into().expect("four bytes"),
+                ))),
+                99 => self.float_text()?,
+                70 => {
+                    let bits = u64::from_be_bytes(self.take(8)?.try_into().expect("eight bytes"));
+                    let value = f64::from_bits(bits);
+                    value
+                        .is_finite()
+                        .then_some(Term::Float(value))
+                        .ok_or(DecodeError::Badarg)?
                 }
-                let mut heads = Vec::with_capacity(count);
-                for _ in 0..count {
-                    heads.push(self.term()?);
+                100 => {
+                    let length = usize::from(self.u16()?);
+                    Term::Atom(self.atom(length, true)?)
                 }
-                let tail = self.term()?;
-                let mut list = tail;
-                for head in heads.into_iter().rev() {
-                    list = Term::cons(head, list);
+                115 => {
+                    let length = usize::from(self.u8()?);
+                    Term::Atom(self.atom(length, true)?)
                 }
-                Ok(list)
-            }
-            104 => {
-                let count = usize::from(self.u8()?);
-                self.tuple(count)
-            }
-            105 => {
-                let count = self.u32()? as usize;
-                self.tuple(count)
-            }
-            116 => self.map(),
-            109 => {
-                let count = self.u32()? as usize;
-                Ok(Term::binary(self.take(count)?.to_vec()))
-            }
-            77 => {
-                let count = self.u32()? as usize;
-                let bits = self.u8()?;
-                let bytes = self.take(count)?;
-                if bits != 8 {
-                    return Err(DecodeError::Unsupported(
-                        "a bitstring that is not a whole number of bytes",
-                    ));
+                118 => {
+                    let length = usize::from(self.u16()?);
+                    Term::Atom(self.atom(length, false)?)
                 }
-                Ok(Term::binary(bytes.to_vec()))
-            }
-            110 => {
-                let count = usize::from(self.u8()?);
-                self.big(count)
-            }
-            111 => {
-                let count = self.u32()? as usize;
-                self.big(count)
-            }
-            88 => self.pid(4),
-            103 => self.pid(1),
-            89 => self.port(4),
-            102 => self.port(1),
-            120 => {
-                let sysname = self.sysname()?;
-                let number = self.u64()?;
-                let creation = self.u32()?;
-                self.local_port(sysname, number, creation)
-            }
-            90 => self.reference(4),
-            114 => self.reference(1),
-            101 => self.old_reference(),
-            113 => self.export(),
-            112 => Err(DecodeError::Unsupported("a local fun")),
-            117 => Err(DecodeError::Unsupported("an old local fun")),
-            67 => Err(DecodeError::Unsupported("a record")),
-            121 => {
-                let hash = u32::from_be_bytes(
-                    self.take(4)?
-                        .try_into()
-                        .expect("four bytes of the local hash"),
-                );
-                let start = self.pos;
-                self.local = true;
-                let term = self.term()?;
-                if external::block_hash(&self.input[start..self.pos], self.seed) != hash {
-                    return Err(DecodeError::Badarg);
+                119 => {
+                    let length = usize::from(self.u8()?);
+                    Term::Atom(self.atom(length, false)?)
                 }
-                Ok(term)
+                106 => Term::Nil,
+                107 => {
+                    let count = usize::from(self.u16()?);
+                    let bytes = self.take(count)?;
+                    Term::list_from(bytes.iter().map(|&byte| Term::Integer(i64::from(byte))))
+                }
+                108 => {
+                    let count = self.u32()? as usize;
+                    if count > self.remaining() {
+                        return Err(DecodeError::Badarg);
+                    }
+                    frames.push(Frame {
+                        kind: FrameKind::List,
+                        remaining: count,
+                        items: Vec::with_capacity(count),
+                    });
+                    continue 'parse;
+                }
+                104 => {
+                    let count = usize::from(self.u8()?);
+                    if count > self.remaining() {
+                        return Err(DecodeError::Badarg);
+                    }
+                    if count == 0 {
+                        Term::tuple(vec![])
+                    } else {
+                        frames.push(Frame {
+                            kind: FrameKind::Tuple,
+                            remaining: count,
+                            items: Vec::with_capacity(count),
+                        });
+                        continue 'parse;
+                    }
+                }
+                105 => {
+                    let count = self.u32()? as usize;
+                    if count > MAX_TUPLE_SIZE || count > self.remaining() {
+                        return Err(DecodeError::Badarg);
+                    }
+                    if count == 0 {
+                        Term::tuple(vec![])
+                    } else {
+                        frames.push(Frame {
+                            kind: FrameKind::Tuple,
+                            remaining: count,
+                            items: Vec::with_capacity(count),
+                        });
+                        continue 'parse;
+                    }
+                }
+                116 => {
+                    let count = self.u32()? as usize;
+                    if count
+                        .checked_mul(2)
+                        .is_none_or(|terms| terms > self.remaining())
+                    {
+                        return Err(DecodeError::Badarg);
+                    }
+                    if count == 0 {
+                        self.build_map(Vec::new())?
+                    } else {
+                        frames.push(Frame {
+                            kind: FrameKind::Map,
+                            remaining: count * 2,
+                            items: Vec::with_capacity(count * 2),
+                        });
+                        continue 'parse;
+                    }
+                }
+                109 => {
+                    let count = self.u32()? as usize;
+                    Term::binary(self.take(count)?.to_vec())
+                }
+                77 => {
+                    let count = self.u32()? as usize;
+                    let bits = self.u8()?;
+                    let bytes = self.take(count)?;
+                    if bits != 8 {
+                        return Err(DecodeError::Unsupported(
+                            "a bitstring that is not a whole number of bytes",
+                        ));
+                    }
+                    Term::binary(bytes.to_vec())
+                }
+                110 => {
+                    let count = usize::from(self.u8()?);
+                    self.big(count)?
+                }
+                111 => {
+                    let count = self.u32()? as usize;
+                    self.big(count)?
+                }
+                88 => self.pid(4)?,
+                103 => self.pid(1)?,
+                89 => self.port(4)?,
+                102 => self.port(1)?,
+                120 => {
+                    let sysname = self.sysname()?;
+                    let number = self.u64()?;
+                    let creation = self.u32()?;
+                    self.local_port(sysname, number, creation)?
+                }
+                90 => self.reference(4)?,
+                114 => self.reference(1)?,
+                101 => self.old_reference()?,
+                113 => {
+                    frames.push(Frame {
+                        kind: FrameKind::Export,
+                        remaining: 3,
+                        items: Vec::with_capacity(3),
+                    });
+                    continue 'parse;
+                }
+                112 => return Err(DecodeError::Unsupported("a local fun")),
+                117 => return Err(DecodeError::Unsupported("an old local fun")),
+                67 => return Err(DecodeError::Unsupported("a record")),
+                121 => {
+                    let hash = u32::from_be_bytes(
+                        self.take(4)?
+                            .try_into()
+                            .expect("four bytes of the local hash"),
+                    );
+                    self.local = true;
+                    frames.push(Frame {
+                        kind: FrameKind::Local {
+                            hash,
+                            start: self.pos,
+                        },
+                        remaining: 1,
+                        items: Vec::new(),
+                    });
+                    continue 'parse;
+                }
+                _ => return Err(DecodeError::Badarg),
+            };
+            loop {
+                let Some(frame) = frames.last_mut() else {
+                    return Ok(term);
+                };
+                match frame.kind {
+                    FrameKind::Tuple => {
+                        frame.items.push(term);
+                        frame.remaining -= 1;
+                        if frame.remaining == 0 {
+                            let frame = frames.pop().expect("a tuple frame");
+                            term = Term::tuple(frame.items);
+                            continue;
+                        }
+                        break;
+                    }
+                    FrameKind::List => {
+                        if frame.remaining > 0 {
+                            frame.items.push(term);
+                            frame.remaining -= 1;
+                            if frame.remaining == 0 {
+                                continue 'parse;
+                            }
+                            break;
+                        }
+                        let frame = frames.pop().expect("a list frame");
+                        let mut list = term;
+                        for head in frame.items.into_iter().rev() {
+                            list = Term::cons(head, list);
+                        }
+                        term = list;
+                        continue;
+                    }
+                    FrameKind::Map => {
+                        frame.items.push(term);
+                        frame.remaining -= 1;
+                        if frame.remaining == 0 {
+                            let frame = frames.pop().expect("a map frame");
+                            term = self.build_map(frame.items)?;
+                            continue;
+                        }
+                        break;
+                    }
+                    FrameKind::Export => {
+                        frame.items.push(term);
+                        frame.remaining -= 1;
+                        if frame.remaining == 0 {
+                            let frame = frames.pop().expect("an export frame");
+                            term = self.complete_export(frame.items)?;
+                            continue;
+                        }
+                        break;
+                    }
+                    FrameKind::Local { hash, start } => {
+                        frames.pop();
+                        if external::block_hash(&self.input[start..self.pos], self.seed) != hash {
+                            return Err(DecodeError::Badarg);
+                        }
+                        continue;
+                    }
+                }
             }
-            _ => Err(DecodeError::Badarg),
         }
     }
 
@@ -916,7 +1035,7 @@ impl Decoder<'_> {
     /// Decode an atom of `length` bytes in Latin-1 or UTF-8, as
     /// `dec_term_atom_common` (`external.c:4525-4548`) does. The `safe`
     /// option takes only an atom that the run has.
-    fn atom(&mut self, length: usize, latin1: bool) -> Result<Term, DecodeError> {
+    fn atom(&mut self, length: usize, latin1: bool) -> Result<crate::term::Atom, DecodeError> {
         let bytes = self.take(length)?;
         let name = if latin1 {
             bytes.iter().map(|&byte| char::from(byte)).collect()
@@ -928,46 +1047,25 @@ impl Decoder<'_> {
         if name.chars().count() > MAX_ATOM_CHARACTERS {
             return Err(DecodeError::Badarg);
         }
-        let atom = if self.safe {
-            self.atoms.get(&name).ok_or(DecodeError::Badarg)?
+        if self.safe {
+            self.atoms.get(&name).ok_or(DecodeError::Badarg)
         } else {
-            self.atoms.put(&name).map_err(|_| DecodeError::Badarg)?
-        };
-        Ok(Term::Atom(atom))
+            self.atoms.put(&name).map_err(|_| DecodeError::Badarg)
+        }
     }
 
-    /// Decode a tuple of `count` elements.
-    fn tuple(&mut self, count: usize) -> Result<Term, DecodeError> {
-        if count > MAX_TUPLE_SIZE || count > self.remaining() {
-            return Err(DecodeError::Badarg);
-        }
-        let mut elements = Vec::with_capacity(count);
-        for _ in 0..count {
-            elements.push(self.term()?);
-        }
-        Ok(Term::tuple(elements))
-    }
-
-    /// Decode a map as the `MAP_EXT` case of `dec_term`
-    /// (`external.c:5069-5150`) does. A key that PBeam cannot hold gives a
-    /// runtime error.
-    fn map(&mut self) -> Result<Term, DecodeError> {
-        let count = self.u32()? as usize;
-        if count
-            .checked_mul(2)
-            .is_none_or(|terms| terms > self.remaining())
-        {
-            return Err(DecodeError::Badarg);
-        }
+    /// Build a map of the decoded pair terms as the `MAP_EXT` case of
+    /// `dec_term` (`external.c:5069-5150`) does. A duplicate key raises
+    /// badarg, and a key that PBeam cannot hold gives a runtime error.
+    fn build_map(&mut self, items: Vec<Term>) -> Result<Term, DecodeError> {
+        let count = items.len() / 2;
         let mut pairs = Vec::with_capacity(count);
-        for _ in 0..count {
-            let key = self.term()?;
-            let value = self.term()?;
+        let mut items = items.into_iter();
+        while let (Some(key), Some(value)) = (items.next(), items.next()) {
             pairs.push((key, value));
         }
         let map = crate::term::Map::from_pairs(pairs, self.atoms)
             .map_err(|_| DecodeError::Unsupported("a map with a key that PBeam cannot hold"))?;
-        // ERTS rejects a duplicate key (`dec_term`, `external.c:5069-5150`).
         if map.len() != count {
             return Err(DecodeError::Badarg);
         }
@@ -1000,8 +1098,9 @@ impl Decoder<'_> {
     }
 
     /// Decode the node atom of a pid, port, or reference: `NIL_EXT` for the
-    /// local node inside `LOCAL_EXT`, else an atom (`dec_sysname`,
-    /// `external.c:3110-3122`).
+    /// local node inside `LOCAL_EXT`, else an atom tag (`dec_sysname` and
+    /// `dec_atom`, `external.c:3110-3122`, `4490-4550`). Each other tag
+    /// raises badarg.
     fn sysname(&mut self) -> Result<Option<crate::term::Atom>, DecodeError> {
         if self.peek() == Some(106) {
             if !self.local {
@@ -1010,11 +1109,26 @@ impl Decoder<'_> {
             self.pos += 1;
             return Ok(None);
         }
-        let term = self.term()?;
-        let Term::Atom(atom) = &term else {
-            return Err(DecodeError::Badarg);
+        let atom = match self.u8()? {
+            100 => {
+                let length = usize::from(self.u16()?);
+                self.atom(length, true)?
+            }
+            115 => {
+                let length = usize::from(self.u8()?);
+                self.atom(length, true)?
+            }
+            118 => {
+                let length = usize::from(self.u16()?);
+                self.atom(length, false)?
+            }
+            119 => {
+                let length = usize::from(self.u8()?);
+                self.atom(length, false)?
+            }
+            _ => return Err(DecodeError::Badarg),
         };
-        Ok(Some(atom.clone()))
+        Ok(Some(atom))
     }
 
     /// Return true when `sysname` and `creation` name the local node, as
@@ -1084,6 +1198,9 @@ impl Decoder<'_> {
     /// `tag` is 4 for the 32-bit creation and 1 for the 8-bit creation.
     fn reference(&mut self, tag: u8) -> Result<Term, DecodeError> {
         let count = usize::from(self.u16()?);
+        if count > MAX_REFERENCE_NUMBERS {
+            return Err(DecodeError::Badarg);
+        }
         let sysname = self.sysname()?;
         let creation = if tag == 4 {
             self.u32()?
@@ -1135,22 +1252,17 @@ impl Decoder<'_> {
         ))
     }
 
-    /// Decode an `EXPORT_EXT` as the `EXPORT_EXT` case of `dec_term`
-    /// (`external.c:5004-5047`) does. An external fun holds its module,
-    /// function, and arity, as `erlang:make_fun/3` makes it. The `safe`
-    /// option gives `badarg`, because PBeam does not check that the export
-    /// is active.
-    fn export(&mut self) -> Result<Term, DecodeError> {
-        let module = self.term()?;
-        let Term::Atom(module) = &module else {
+    /// Build the external fun of a decoded `EXPORT_EXT` as its case in
+    /// `dec_term` (`external.c:5004-5047`) does. The `safe` option gives
+    /// badarg, because PBeam does not check that the export is active.
+    fn complete_export(&mut self, items: Vec<Term>) -> Result<Term, DecodeError> {
+        let Term::Atom(module) = &items[0] else {
             return Err(DecodeError::Badarg);
         };
-        let function = self.term()?;
-        let Term::Atom(function) = &function else {
+        let Term::Atom(function) = &items[1] else {
             return Err(DecodeError::Badarg);
         };
-        let count = self.term()?;
-        let Term::Integer(arity) = count else {
+        let Term::Integer(arity) = items[2] else {
             return Err(DecodeError::Badarg);
         };
         if !(0..=i64::from(u32::MAX)).contains(&arity) || self.safe {

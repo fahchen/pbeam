@@ -250,6 +250,28 @@ fn decodes_the_large_tuple_bitstring_and_guards() {
         decode_with(&mut atoms, &[77, 0, 0, 0, 1, 7, 5], false),
         Err(DecodeError::Unsupported(_))
     ));
+    // An empty `LARGE_TUPLE_EXT`, an empty `MAP_EXT`, and a
+    // `LIST_EXT` of no cells give `{}`, `#{}`, and the tail.
+    assert_eq!(
+        decode_with(&mut atoms, &[105, 0, 0, 0, 0], false).unwrap(),
+        Term::tuple(vec![])
+    );
+    let empty = decode_with(&mut atoms, &[116, 0, 0, 0, 0], false).unwrap();
+    assert!(matches!(&empty, Term::Map(map) if map.len() == 0));
+    assert_eq!(
+        decode_with(&mut atoms, &[108, 0, 0, 0, 0, 97, 1], false).unwrap(),
+        Term::Integer(1)
+    );
+    // A small tuple whose count the bytes cannot hold raises badarg.
+    assert!(matches!(
+        decode_with(&mut atoms, &[104, 3, 97, 1], false),
+        Err(DecodeError::Badarg)
+    ));
+    // A tuple above `ERTS_MAX_TUPLE_SIZE` raises badarg.
+    assert!(matches!(
+        decode_with(&mut atoms, &[105, 1, 0, 0, 0], false),
+        Err(DecodeError::Badarg)
+    ));
     // A duplicate map key raises badarg (`external.c:5069-5150`).
     assert!(matches!(
         decode_with(
@@ -391,6 +413,17 @@ fn decodes_each_identifier_tag_and_checks_the_node() {
         decode_with(&mut atoms, &big_old_ref, false),
         Err(DecodeError::Badarg)
     ));
+    // The node atom of a pid takes each atom tag (`dec_sysname`,
+    // `external.c:3110-3122`). Each name here is not the local node.
+    for sysname in [&[100, 0, 1, 97][..], &[115, 1, 97], &[118, 0, 1, 97]] {
+        let mut tagged = vec![88];
+        tagged.extend_from_slice(sysname);
+        tagged.extend(with_words(&[], &[5, 0, 0]));
+        assert!(matches!(
+            decode_with(&mut atoms, &tagged, false),
+            Err(DecodeError::Unsupported(_))
+        ));
+    }
     // A pid number above 2^28 - 1 raises badarg, and a reference whose
     // first number is 2^18 or more raises it too (`external.c:4810-4840`).
     let mut big_pid = vec![88];
@@ -423,6 +456,15 @@ fn decodes_each_identifier_tag_and_checks_the_node() {
     assert!(matches!(
         decode_with(&mut atoms, &pid_ref, false),
         Err(DecodeError::Unsupported(_))
+    ));
+    // A count above five raises badarg (`ERTS_MAX_REF_NUMBERS`,
+    // `external.c:4800`).
+    let mut six_ref = vec![90, 0, 6];
+    six_ref.extend(node());
+    six_ref.extend(with_words(&[], &[0, 1, 1, 0, 0, 0]));
+    assert!(matches!(
+        decode_with(&mut atoms, &six_ref, false),
+        Err(DecodeError::Badarg)
     ));
     // A count above three reads and skips the extra numbers.
     let mut four_ref = vec![90, 0, 4];
@@ -480,6 +522,16 @@ fn decodes_the_unsupported_forms_and_local_terms() {
     ));
     assert!(matches!(
         decode_with(&mut atoms, &[113, 97, 1], false),
+        Err(DecodeError::Badarg)
+    ));
+    let bad_module = vec![113, 97, 1, 119, 3, 97, 98, 115, 97, 1];
+    assert!(matches!(
+        decode_with(&mut atoms, &bad_module, false),
+        Err(DecodeError::Badarg)
+    ));
+    let bad_name = vec![113, 119, 6, 101, 114, 108, 97, 110, 103, 97, 1, 97, 1];
+    assert!(matches!(
+        decode_with(&mut atoms, &bad_name, false),
         Err(DecodeError::Badarg)
     ));
     let bad_function = vec![113, 119, 6, 101, 114, 108, 97, 110, 103, 97, 1];
@@ -629,6 +681,17 @@ fn encodes_the_large_and_unsupported_forms() {
     assert!(encode(&Term::Fun(fun), &atoms, &options).is_err());
     let state = MatchState::new(Binary::from(vec![]));
     assert!(encode(&Term::MatchContext(Arc::new(state)), &atoms, &options).is_err());
+    // A map above 32 pairs keeps the HAMT order of `Map::iter`.
+    let pairs: Vec<(Term, Term)> = (0..40)
+        .map(|value| (Term::Integer(value), Term::Integer(value)))
+        .collect();
+    let large = crate::term::Map::from_pairs(pairs, &atoms).unwrap();
+    let bytes = encode(&Term::Map(large), &atoms, &options).unwrap();
+    assert_eq!(&bytes[..5], [116, 0, 0, 0, 40]);
+    // A bitstring that is not a whole number of bytes has no bytes
+    // (`enc_term` writes `BIT_BINARY_EXT` for it, `external.c:3861-3880`).
+    let partial = Term::Binary(Binary::from(vec![1]).bits(0, 1));
+    assert!(encode(&partial, &atoms, &options).is_err());
     // `deterministic` sorts map keys in exact term order, where an integer
     // is less than a float (`erl_utils.h:267-272`, `utils.c:2121-2130`).
     let pairs: Vec<(Term, Term)> = vec![
@@ -704,4 +767,22 @@ fn term_to_binary_checks_the_options_and_the_local_path() {
     // term (`erlang.rs:5395-5420`).
     let local = Term::list_from(vec![Term::static_atom("local")]);
     assert!(super::erlang::term_to_binary_2(&mut context, &Term::Integer(1), &local).is_err());
+}
+
+#[test]
+fn decodes_and_encodes_a_deep_term_without_a_rust_stack() {
+    // ERTS decodes and encodes a term of any nesting depth (`dec_term` and
+    // `enc_term` keep a work stack, `external.c:4270-4300`, `3280-3340`).
+    let depth = 100_000;
+    let mut bytes = vec![VERSION_MAGIC];
+    for _ in 0..depth {
+        bytes.extend([104, 1]);
+    }
+    bytes.push(106);
+    let mut atoms = AtomTable::new();
+    let term = decode_full(&mut atoms, &bytes, false).unwrap();
+    assert_eq!(
+        encode(&term, &atoms, &Options::default()).unwrap(),
+        bytes[1..]
+    );
 }
