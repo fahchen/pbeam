@@ -980,6 +980,21 @@ fn gives_the_fixation_state_of_an_info_item_as_pinned_erts() {
 }
 
 #[test]
+fn deletes_a_table_that_the_process_fixed_as_pinned_erts() {
+    // The explicit delete of a fixed table removes the fixations and frees
+    // the table (`erl_db.c:3053-3061`, `5304-5318`).
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    assert_eq!(
+        program
+            .execute("ets_probe", "fixtable_delete_table", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![Term::Atom(program.atom("true").unwrap())])
+    );
+    assert_eq!(reference("fixtable_delete_table"), b"[true]\n");
+}
+
+#[test]
 fn deletes_the_key_of_a_fixed_ordered_set_as_pinned_erts() {
     // An ordered_set deletes as usual while fixed, because its traversal is
     // not supported and its compaction moves objects

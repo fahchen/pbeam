@@ -969,6 +969,63 @@ fn frees_the_older_objects_of_a_deleted_bag_key() {
 }
 
 #[test]
+fn counts_one_delete_record_for_each_bucket_of_a_select_delete() {
+    // The select delete adds one delete record for each bucket that it
+    // changes, not for each object (`erl_db_hash.c:2636-2640`).
+    let atoms = test_atom_table();
+    let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Bag);
+    let key = Term::Integer(1);
+    for value in 0..3 {
+        table.insert(&atoms, vec![key.clone(), Term::Integer(value)]);
+    }
+    let other = (100..1000)
+        .map(Term::Integer)
+        .find(|other| {
+            table.bucket(stored_hash(&atoms, other)) != table.bucket(stored_hash(&atoms, &key))
+        })
+        .expect("a table has another bucket");
+    table.insert(&atoms, vec![other.clone(), Term::Integer(0)]);
+    table.fix(ProcessId(0));
+    table.begin_select_delete();
+    for value in 0..3 {
+        assert!(table.delete_object(&atoms, &[key.clone(), Term::Integer(value)]));
+    }
+    assert_eq!(table.fixdels, 1);
+    assert!(table.delete_object(&atoms, &[other, Term::Integer(0)]));
+    assert_eq!(table.fixdels, 2);
+}
+
+#[test]
+fn forgets_the_delete_records_of_a_revived_key() {
+    // A reinserted set key removes its retained entry, and the unfix frees
+    // the delete record with it (`erl_db_hash.c:939-990`).
+    let atoms = test_atom_table();
+    let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
+    let key = Term::Integer(1);
+    table.insert(&atoms, vec![key.clone()]);
+    table.fix(ProcessId(0));
+    table.delete(&atoms, &key);
+    table.insert(&atoms, vec![key.clone()]);
+    table.unfix(ProcessId(0));
+    assert_eq!(table.fixdels, 0);
+    assert_eq!(table.deleted_objects, 0);
+}
+
+#[test]
+fn charges_the_fixations_of_an_explicit_delete() {
+    // The delete charges one reduction for each process that fixed the
+    // table (`free_fixations_locked`, `erl_db.c:3056`).
+    let mut tables = EtsTables::default();
+    let mut table = Table::new(ProcessId(1), Access::Public, 1, TableType::Set);
+    table.fix(ProcessId(2));
+    table.fix(ProcessId(2));
+    table.fix(ProcessId(3));
+    tables.create(Reference(0), None, table);
+    assert_eq!(tables.delete_table(Reference(0), ProcessId(1)), 2);
+    assert_eq!(tables.free_segments(ProcessId(1), 100), Some(68));
+}
+
+#[test]
 fn charges_one_delete_record_for_a_fixed_clear() {
     // A clear of a fixed table adds one delete record, so the exit cleanup
     // of 100 keys costs one for the fixation, 100 for the objects, and one

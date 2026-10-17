@@ -21,7 +21,7 @@
          fixtable_bag_double_delete/0, fixtable_bag_restore/0,
          fixtable_bag_last_live/0, fixtable_bag_skip_deleted/0,
          fixtable_next_live_behind_node/0, fixtable_clear_behind_node/0,
-         fixtable_bag_restore_behind_node/0]).
+         fixtable_bag_restore_behind_node/0, fixtable_delete_table/0]).
 
 %% ets:new/2 return values and badarg cases (erl_db.c:2555-2840).
 new() ->
@@ -1061,6 +1061,14 @@ fixtable_bag_restore_behind_node() ->
     Objects = ets:lookup(T, k),
     ets:safe_fixtable(T, false),
     [Objects].
+
+%% The explicit delete of a table that the process fixed removes the
+%% fixations too (`erl_db.c:3053-3061`).
+fixtable_delete_table() ->
+    T = ets:new(ets_probe_fix_delete_table, [set]),
+    ets:insert(T, {k}),
+    ets:safe_fixtable(T, true),
+    [ets:delete(T)].
 
 catch_error(Fun) ->
     try Fun() catch error:Reason -> {error, Reason} end.

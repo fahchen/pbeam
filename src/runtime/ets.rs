@@ -180,6 +180,10 @@ pub(super) struct Table {
     /// delete of a key, one for a clear, and one for each bucket of a select
     /// delete.
     fixdels: usize,
+    /// The bucket of the last object that the current select delete removed,
+    /// as `select_delete_context_t::last_pseudo_delete`
+    /// (`erl_db_hash.c:2611`), or `EMPTY` before its first removal.
+    select_slot: usize,
     /// For each slot, whether the slot holds a pseudo-deleted object that a
     /// fixation keeps.
     deleted: Vec<bool>,
@@ -674,7 +678,7 @@ impl EtsTables {
     /// assert!(!tables.name_in_use("ac_tab"));
     /// assert_eq!(tables.free_segments(ProcessId(2), 100), Some(68));
     /// ```
-    pub(super) fn delete_table(&mut self, id: Reference, caller: ProcessId) {
+    pub(super) fn delete_table(&mut self, id: Reference, caller: ProcessId) -> usize {
         let mut table = self.tables.remove(&id).expect("a deleted table is live");
         self.names.retain(|_, named| *named != id);
         self.programs.retain(|_, (table, _)| *table != id);
@@ -682,7 +686,13 @@ impl EtsTables {
             table.owner = caller;
             table.owned = self.save_owned();
         }
+        // The delete frees each fixation of the table, with one reduction for
+        // each process that fixed it (`free_fixations_locked`,
+        // `erl_db.c:3056`).
+        let fixations = table.fixation_count();
+        table.fixed_by.clear();
         self.freeing.insert(id, Freeing::new(table));
+        fixations
     }
 
     /// Return the position of the next table that goes into an owned list,
@@ -901,6 +911,7 @@ impl Table {
             fixed_by: Vec::new(),
             retained: Vec::new(),
             fixdels: 0,
+            select_slot: EMPTY,
             deleted: Vec::new(),
             deleted_objects: 0,
         }
@@ -1135,6 +1146,12 @@ impl Table {
         }
     }
 
+    /// Start a select-delete traversal, whose first removal adds a delete
+    /// record for its bucket (`erl_db_hash.c:2611`, `2636-2640`).
+    pub(super) fn begin_select_delete(&mut self) {
+        self.select_slot = EMPTY;
+    }
+
     /// Return whether the slot holds a pseudo-deleted object.
     fn is_deleted(&self, slot: usize) -> bool {
         self.deleted.get(slot).copied().unwrap_or(false)
@@ -1281,6 +1298,11 @@ impl Table {
     /// no live object leaves the bucket chain.
     fn drop_retained(&mut self) {
         if self.retained.is_empty() {
+            // A reinserted key removed its retained entry, and the unfix
+            // frees the delete records that went with it
+            // (`db_unfix_table_hash`, `erl_db_hash.c:939-990`).
+            self.fixdels = 0;
+            self.deleted_objects = 0;
             return;
         }
         for bucket in 0..self.buckets {
@@ -1479,7 +1501,13 @@ impl Table {
                     // (`erl_db_hash.c:2634-2648`).
                     self.mark_deleted(slot);
                     self.deleted_objects += 1;
-                    self.fixdels += 1;
+                    // The select delete adds one delete record for each
+                    // bucket that it changes (`erl_db_hash.c:2636-2640`).
+                    let bucket = self.bucket(hash);
+                    if self.select_slot != bucket {
+                        self.fixdels += 1;
+                        self.select_slot = bucket;
+                    }
                     let node = self
                         .chain_node(hash, &key)
                         .expect("a live key has a chain node");

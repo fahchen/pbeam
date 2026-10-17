@@ -1388,7 +1388,11 @@ pub(super) fn delete_table(
             "unsupported ets:delete/1 of a table that a trapped insert uses: see \"ETS tables\" in docs/erts-differences.md",
         ));
     }
-    scheduler.ets.delete_table(id, caller);
+    let fixations = scheduler.ets.delete_table(id, caller);
+    context
+        .scheduler
+        .current_process_mut()
+        .bump_reductions(i32::try_from(fixations).unwrap_or(i32::MAX));
     delete_trap(context)
 }
 
@@ -2557,6 +2561,7 @@ pub(super) fn internal_select_delete(
         }
     }
     let mut removed = 0;
+    table.begin_select_delete();
     for object in &matches {
         if table.delete_object(atoms, object) {
             removed += 1;
