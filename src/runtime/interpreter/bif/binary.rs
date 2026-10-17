@@ -1233,6 +1233,30 @@ pub(super) fn at(subject: &Term, index: &Term) -> BifResult {
     }
 }
 
+/// Run `binary:last/1` as ERTS `binary_last_1` does
+/// (`erl_bif_binary.c:2311-2333`): return the last byte of the subject as
+/// an integer. A subject that is not a bitstring, and a bitstring of less
+/// than 8 bits, raise `badarg`. PBeam has only binary terms, so the empty
+/// binary is the only subject of less than 8 bits.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // 72
+/// let byte = last(&Term::binary(vec![5, 19, 72]));
+/// assert!(matches!(byte, BifResult::Value(Term::Integer(72))));
+/// assert!(matches!(last(&Term::binary(vec![])), BifResult::Raise { .. }));
+/// ```
+pub(super) fn last(subject: &Term) -> BifResult {
+    let Term::Binary(bytes) = subject else {
+        return BifResult::badarg();
+    };
+    match bytes.last() {
+        Some(byte) => Value(Term::Integer(i64::from(*byte))),
+        None => BifResult::badarg(),
+    }
+}
+
 /// Return the value of a term as an `Uint`, as ERTS `term_to_Uint` gives it
 /// (`erl_utils.c`): an integer that is not negative and that fits in a
 /// 64-bit unsigned word. Return `None` for each other term, which includes a
