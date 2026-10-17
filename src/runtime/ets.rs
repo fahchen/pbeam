@@ -6,7 +6,8 @@ pub(super) mod pattern;
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hasher};
 
-use crate::term::{Atom, AtomTable, LiveBytes, ProcessId, Reference, Term, internal_hash};
+use crate::term::atom_hash;
+use crate::term::{AtomTable, LiveBytes, ProcessId, Reference, Term, internal_hash};
 
 /// The number of slots of the first segment of a hash table, which a new
 /// table has (`FIRST_SEGSZ`, `erl_db_hash.c:164-165`).
@@ -1883,39 +1884,6 @@ fn key_hash(atoms: &AtomTable, key: &Term) -> u64 {
         Term::Atom(atom) => atom_hash(atoms, atom),
         _ => internal_hash(key),
     }
-}
-
-/// Return the atom table hash of `atom`, as `atom_hash` (`atom.c:83-105`)
-/// gives it: the `hashpjw` hash of the UTF-8 bytes of the name, which this
-/// function reads from `atoms`. A two-byte UTF-8 sequence for a Latin-1
-/// character hashes as the low byte of that character.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// let mut atoms = AtomTable::new();
-/// let ab = atoms.put("ab").unwrap();
-/// let e_acute = atoms.put("\u{e9}").unwrap();
-/// assert_eq!(atom_hash(&atoms, &ab), 0x672);
-/// assert_eq!(atom_hash(&atoms, &e_acute), 0xe9);
-/// ```
-fn atom_hash(atoms: &AtomTable, atom: &Atom) -> u64 {
-    let mut bytes = atoms.name_of(atom).bytes().peekable();
-    let mut hash: u64 = 0;
-    while let Some(mut byte) = bytes.next() {
-        if byte & 0xFE == 0xC2
-            && let Some(next) = bytes.next_if(|next| next & 0xC0 == 0x80)
-        {
-            byte = (byte << 6) | (next & 0x3F);
-        }
-        hash = (hash << 4) + u64::from(byte);
-        let high = hash & 0xF000_0000;
-        if high != 0 {
-            hash ^= high >> 24;
-            hash ^= high;
-        }
-    }
-    hash
 }
 
 #[cfg(test)]
