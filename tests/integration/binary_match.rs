@@ -1297,6 +1297,9 @@ fn runs_bs_match_string_at_a_bit_offset_as_pinned_erts() {
     let calls = [
         vec![shifted.clone()],
         vec![binary(&[
+            22, 150, 55, 38, 247, 54, 246, 103, 66, 230, 150, 54, 22, 228,
+        ])],
+        vec![binary(&[
             22, 150, 55, 38, 247, 54, 246, 103, 66, 230, 150, 54, 20,
         ])],
         vec![binary(&[22, 150, 55, 38, 247, 54, 246, 103, 68])],
@@ -1309,14 +1312,16 @@ fn runs_bs_match_string_at_a_bit_offset_as_pinned_erts() {
             Ok(match_probe_atom("false")),
             Ok(match_probe_atom("false")),
             Ok(match_probe_atom("false")),
+            Ok(match_probe_atom("false")),
         ]
     );
     assert_eq!(
         reference(
             "[bs_match_probe:match_string_bits(B) || B <- [<<1:4, \"icrosoft.icon\", 4:4>>, \
-             <<1:4, \"icrosoft.ica\", 4:4>>, <<1:4, \"icrosoft\", 4:4>>, <<>>]]"
+             <<1:4, \"icrosoft.ican\", 4:4>>, <<1:4, \"icrosoft.ica\", 4:4>>, \
+             <<1:4, \"icrosoft\", 4:4>>, <<>>]]"
         ),
-        b"[ok,false,false,false]\n"
+        b"[ok,false,false,false,false]\n"
     );
 }
 
@@ -1408,6 +1413,7 @@ fn runs_bs_get_integer2_as_pinned_erts() {
         vec![bytes(), Term::Integer(-1)],
         vec![bytes(), Term::Integer(1 << 20)],
         vec![bytes(), match_probe_atom("other")],
+        vec![bytes(), Term::BigInt(Arc::new(BigInt::from(1u8) << 64u32))],
         vec![
             Term::binary(vec![1, 0, 0, 0, 0, 0, 0, 0]),
             Term::Integer(64),
@@ -1429,6 +1435,7 @@ fn runs_bs_get_integer2_as_pinned_erts() {
             false_(),
             false_(),
             false_(),
+            false_(),
             Ok(Term::tuple(vec![
                 Term::Integer(1 << 56),
                 Term::binary(Vec::new())
@@ -1440,10 +1447,10 @@ fn runs_bs_get_integer2_as_pinned_erts() {
             "[bs_match_probe:get_size(B, S) || {B, S} <- [{<<18,52,86>>,0},\
              {<<18,52,86>>,8},{<<18,52,86>>,24},{<<18,52,86>>,25},\
              {<<18,52,86>>,-1},{<<18,52,86>>,1 bsl 20},{<<18,52,86>>,other},\
-             {<<1,0,0,0,0,0,0,0>>,64}]]"
+             {<<18,52,86>>,1 bsl 64},{<<1,0,0,0,0,0,0,0>>,64}]]"
         ),
         b"[{0,<<18,52,86>>},{18,<<52,86>>},{1193046,<<>>},false,false,false,false,\
-          {72057594037927936,<<>>}]\n"
+          false,{72057594037927936,<<>>}]\n"
     );
     let calls = [
         vec![bytes(), Term::Integer(0)],
