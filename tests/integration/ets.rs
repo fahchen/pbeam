@@ -670,3 +670,481 @@ fn runs_the_select_and_iteration_bifs_as_pinned_erts() {
         assert_probe_matches_erts(&program, function);
     }
 }
+
+#[test]
+fn returns_the_safe_fixtable_results_of_pinned_erts() {
+    // `ets_safe_fixtable_2` (`erl_db.c:1136-1164`) gives true for `true`
+    // and for `false`, and raises badarg for another second argument and
+    // for a term that is not a table of the run.
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    let badarg = Term::tuple(vec![atom("error"), atom("badarg")]);
+    assert_eq!(
+        program
+            .execute("ets_probe", "safe_fixtable", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![
+            atom("true"),
+            atom("true"),
+            atom("true"),
+            atom("true"),
+            badarg.clone(),
+            badarg.clone(),
+            badarg.clone(),
+            badarg,
+        ])
+    );
+    assert_eq!(
+        reference("safe_fixtable"),
+        b"[true,true,true,true,{error,badarg},{error,badarg},{error,badarg},{error,badarg}]\n"
+    );
+}
+
+#[test]
+fn keeps_a_deleted_key_of_a_fixed_table_for_next_as_pinned_erts() {
+    // A fixed table keeps the key of each deleted object for ets:next/2
+    // (`erl_db_hash.c:49-60`), and an unfixed table gives badarg for a key
+    // that the table does not hold.
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    assert_eq!(
+        program.execute("ets_probe", "fixtable", &[]).unwrap().term,
+        Term::list_from(vec![
+            atom("$end_of_table"),
+            Term::tuple(vec![atom("error"), atom("badarg")]),
+        ])
+    );
+    assert_eq!(reference("fixtable"), b"['$end_of_table',{error,badarg}]\n");
+}
+
+#[test]
+fn continues_a_fixed_traversal_over_deleted_keys_as_pinned_erts() {
+    // Each deleted key follows the deleted key before it, so the walk ends
+    // at the end of the table (`erl_db_hash.c:49-60`).
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    assert_eq!(
+        program
+            .execute("ets_probe", "fixtable_chain", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![atom("$end_of_table")])
+    );
+    assert_eq!(reference("fixtable_chain"), b"['$end_of_table']\n");
+}
+
+#[test]
+fn keeps_the_size_of_a_fixed_table_as_pinned_erts() {
+    // An insert or a delete while the table is fixed does not split or join
+    // a bucket (`erl_db_hash.c:49-60`); the size still counts the objects.
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    assert_eq!(
+        program
+            .execute("ets_probe", "fixtable_resize", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![Term::Integer(10_000), Term::Integer(0)])
+    );
+    assert_eq!(reference("fixtable_resize"), b"[10000,0]\n");
+}
+
+#[test]
+fn gives_the_next_live_key_of_a_fixed_table_as_pinned_erts() {
+    // The ghost of the deleted key holds its successor, so `ets:next/2`
+    // gives the live key after it (`erl_db_hash.c:49-60`).
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    assert_eq!(
+        program
+            .execute("ets_probe", "fixtable_successor", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![Term::Integer(2)])
+    );
+    assert_eq!(reference("fixtable_successor"), b"[2]\n");
+}
+
+/// Return the single-key list that the probe `function` gives, with
+/// `eot` for `'$end_of_table'` and `int` for an integer key.
+fn fixture_fixed(function: &str, expected: Term, text: &[u8]) {
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    assert_eq!(
+        program.execute("ets_probe", function, &[]).unwrap().term,
+        Term::list_from(vec![expected])
+    );
+    assert_eq!(reference(function), text);
+}
+
+#[test]
+fn counts_each_fix_of_a_table_as_pinned_erts() {
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let eot = Term::Atom(program.atom("$end_of_table").unwrap());
+    fixture_fixed("fixtable_fix_count", eot, b"['$end_of_table']\n");
+}
+
+#[test]
+fn gives_a_key_inserted_after_a_fixed_delete_as_pinned_erts() {
+    fixture_fixed("fixtable_insert_after_delete", Term::Integer(2), b"[2]\n");
+}
+
+#[test]
+fn keeps_the_position_of_a_cleared_fixed_table_as_pinned_erts() {
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let eot = Term::Atom(program.atom("$end_of_table").unwrap());
+    fixture_fixed("fixtable_clear", eot, b"['$end_of_table']\n");
+}
+
+#[test]
+fn keeps_the_position_of_a_deleted_object_of_a_fixed_table_as_pinned_erts() {
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let eot = Term::Atom(program.atom("$end_of_table").unwrap());
+    fixture_fixed("fixtable_delete_object", eot, b"['$end_of_table']\n");
+}
+
+#[test]
+fn follows_a_same_bucket_predecessor_of_a_fixed_table_as_pinned_erts() {
+    // The ghost of the deleted key follows its live predecessor, and then
+    // the ghost of a predecessor that the run deleted too
+    // (`erl_db_hash.c:49-60`).
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let eot = Term::Atom(program.atom("$end_of_table").unwrap());
+    assert_eq!(
+        program
+            .execute("ets_probe", "fixtable_same_bucket", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![eot.clone(), eot])
+    );
+    assert_eq!(
+        reference("fixtable_same_bucket"),
+        b"['$end_of_table','$end_of_table']\n"
+    );
+}
+
+#[test]
+fn keeps_the_position_of_a_wide_clear_of_a_fixed_table_as_pinned_erts() {
+    // Each key of a 1000-object table ends its traversal after the clear,
+    // also when the bucket of its ghost is outside the 256 buckets of the
+    // new table.
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    assert_eq!(
+        program
+            .execute("ets_probe", "fixtable_clear_wide", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![Term::Integer(1000)])
+    );
+    assert_eq!(reference("fixtable_clear_wide"), b"[1000]\n");
+}
+
+#[test]
+fn gives_a_key_after_a_live_predecessor_of_a_fixed_table_as_pinned_erts() {
+    // The deleted key follows its live predecessor, so a key that the run
+    // inserts after the predecessor is after the deleted key
+    // (`erl_db_hash.c:49-60`).
+    fixture_fixed(
+        "fixtable_live_after_predecessor",
+        Term::Integer(136),
+        b"[136]\n",
+    );
+}
+
+#[test]
+fn ends_a_fixed_traversal_at_two_ghosts_that_follow_each_other_as_pinned_erts() {
+    // The deleted keys of one bucket follow each other, so the ghost walk
+    // ends at the end of the table (`erl_db_hash.c:49-60`).
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let eot = Term::Atom(program.atom("$end_of_table").unwrap());
+    fixture_fixed("fixtable_cycle", eot, b"['$end_of_table']\n");
+}
+
+#[test]
+fn gives_a_key_inserted_before_the_successor_as_pinned_erts() {
+    // The deleted key keeps its chain node, so a key that the run inserts
+    // into a bucket before the saved successor is the next key
+    // (`erl_db_hash.c:49-60`).
+    fixture_fixed(
+        "fixtable_insert_before_successor",
+        Term::Integer(17),
+        b"[17]\n",
+    );
+}
+
+#[test]
+fn reuses_the_position_of_a_reinserted_key_as_pinned_erts() {
+    // The insert of a deleted key reuses its chain node
+    // (`erl_db_hash.c:49-60`), so the traversal of the key continues after
+    // its old position.
+    fixture_fixed("fixtable_reinsert", Term::Integer(146), b"[146]\n");
+}
+
+#[test]
+fn keeps_the_clear_positions_of_reinserted_keys_as_pinned_erts() {
+    // The clear keeps each chain node, and the reinserted key reuses its
+    // old position, which is before the other deleted key
+    // (`erl_db_hash.c:49-60`).
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let eot = Term::Atom(program.atom("$end_of_table").unwrap());
+    fixture_fixed("fixtable_clear_reinsert", eot, b"['$end_of_table']\n");
+}
+
+#[test]
+fn skips_the_deleted_nodes_of_a_clear_as_pinned_erts() {
+    // The clear keeps the chain nodes of the live keys and skips the nodes
+    // that an earlier delete kept (`erl_db_hash.c:49-60`, `4027-4028`).
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let eot = Term::Atom(program.atom("$end_of_table").unwrap());
+    fixture_fixed("fixtable_clear_after_delete", eot, b"['$end_of_table']\n");
+}
+
+#[test]
+fn reuses_the_bag_node_of_a_reinserted_key_as_pinned_erts() {
+    // The insert of the key reuses its chain node and frees the other
+    // pseudo-deleted objects of the key (`erl_db_hash.c:49-60`).
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    assert_eq!(
+        program
+            .execute("ets_probe", "fixtable_bag_reinsert", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![
+            Term::list_from(vec![Term::tuple(vec![atom("k"), Term::Integer(3)])]),
+            atom("true"),
+            Term::list_from(vec![Term::tuple(vec![atom("j"), Term::Integer(4)])]),
+        ])
+    );
+    assert_eq!(
+        reference("fixtable_bag_reinsert"),
+        b"[[{k,3}],true,[{j,4}]]\n"
+    );
+}
+
+#[test]
+fn keeps_the_buckets_of_a_fixed_table_that_loses_its_objects_as_pinned_erts() {
+    // A select_delete of every object of a fixed table does not join
+    // buckets (`erl_db_hash.c:49-60`).
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    assert_eq!(
+        program
+            .execute("ets_probe", "fixtable_shrink", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![Term::Integer(5000), Term::Integer(0)])
+    );
+    assert_eq!(reference("fixtable_shrink"), b"[5000,0]\n");
+}
+
+#[test]
+fn reuses_the_duplicate_bag_node_of_a_reinserted_key_as_pinned_erts() {
+    // The insert of the key reuses its chain node and frees the other
+    // pseudo-deleted objects of the key (`erl_db_hash.c:49-60`).
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    assert_eq!(
+        program
+            .execute("ets_probe", "fixtable_duplicate_bag_reinsert", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![
+            Term::list_from(vec![Term::tuple(vec![atom("k"), Term::Integer(3)])]),
+            atom("true"),
+            Term::list_from(vec![Term::tuple(vec![atom("j"), Term::Integer(4)])]),
+        ])
+    );
+    assert_eq!(
+        reference("fixtable_duplicate_bag_reinsert"),
+        b"[[{k,3}],true,[{j,4}]]\n"
+    );
+}
+
+#[test]
+fn gives_the_fixation_state_of_an_info_item_as_pinned_erts() {
+    // `fixed` gives whether a process fixed the table, and `safe_fixed` of
+    // an unfixed table gives false (`erl_db.c:5447-5625`).
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    assert_eq!(
+        program
+            .execute("ets_probe", "fixtable_info", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![
+            atom("false"),
+            atom("true"),
+            atom("false"),
+            atom("false"),
+        ])
+    );
+    assert_eq!(reference("fixtable_info"), b"[false,true,false,false]\n");
+}
+
+#[test]
+fn deletes_the_key_of_a_fixed_ordered_set_as_pinned_erts() {
+    // An ordered_set deletes as usual while fixed, because its traversal is
+    // not supported and its compaction moves objects
+    // (`erl_db_hash.c:49-60`; row "ETS tables" of `docs/erts-differences.md`).
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    assert_eq!(
+        program
+            .execute("ets_probe", "fixtable_ordered_set", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![Term::nil(), Term::Integer(0)])
+    );
+    assert_eq!(reference("fixtable_ordered_set"), b"[[],0]\n");
+}
+
+#[test]
+fn stops_at_the_safe_fixed_details_of_a_fixed_table() {
+    // PBeam does not keep the fixations of each process with their times
+    // and counts, so the item returns a runtime error (row "ETS tables" of
+    // `docs/erts-differences.md`).
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let error = program
+        .execute("ets_probe", "fixtable_safe_fixed", &[])
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported ets:info/2 item safe_fixed"),
+        "{error}"
+    );
+}
+
+#[test]
+fn keeps_the_deleted_objects_of_a_bag_key_as_pinned_erts() {
+    // The insert of the key keeps the objects of the deleted key, so a later
+    // insert compares them too, and the lookup gives the live objects
+    // (`erl_db_hash.c:1422-1452`).
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    let object = |value| Term::tuple(vec![atom("k"), Term::Integer(value)]);
+    assert_eq!(
+        program
+            .execute("ets_probe", "fixtable_bag_repeat", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![Term::list_from(vec![object(3), object(4)])])
+    );
+    assert_eq!(reference("fixtable_bag_repeat"), b"[[{k,3},{k,4}]]\n");
+}
+
+#[test]
+fn keeps_a_partially_deleted_bag_object_as_pinned_erts() {
+    // A select_delete of one object of a bag keeps it as a pseudo-deleted
+    // object of the live key (`erl_db_hash.c:2634-2648`).
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    let object = |value| Term::tuple(vec![atom("k"), Term::Integer(value)]);
+    assert_eq!(
+        program
+            .execute("ets_probe", "fixtable_bag_partial", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![
+            Term::Integer(1),
+            Term::list_from(vec![object(1), object(3)]),
+        ])
+    );
+    assert_eq!(reference("fixtable_bag_partial"), b"[1,[{k,1},{k,3}]]\n");
+}
+
+#[test]
+fn counts_a_double_deleted_bag_key_once_as_pinned_erts() {
+    // The delete of the key marks the live object only, so the size is 0
+    // and no slot is counted twice (`erl_db_hash.c:49-60`).
+    fixture_fixed("fixtable_bag_double_delete", Term::Integer(0), b"[0]\n");
+}
+
+#[test]
+fn restores_the_object_of_a_kept_bag_key_as_pinned_erts() {
+    // The insert of the object that a select delete kept restores it and
+    // keeps the insertion order (`erl_db_hash.c:1426-1437`).
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    let object = |value| Term::tuple(vec![atom("k"), Term::Integer(value)]);
+    assert_eq!(
+        program
+            .execute("ets_probe", "fixtable_bag_restore", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![Term::list_from(vec![object(1), object(2)])])
+    );
+    assert_eq!(reference("fixtable_bag_restore"), b"[[{k,1},{k,2}]]\n");
+}
+
+#[test]
+fn keeps_a_bag_key_gone_after_its_last_live_object_as_pinned_erts() {
+    // The second select delete leaves the key without a live object, so the
+    // unfix frees each slot and the lookup gives no object
+    // (`erl_db_hash.c:2634-2648`).
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    assert_eq!(
+        program
+            .execute("ets_probe", "fixtable_bag_last_live", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![Term::nil(), Term::nil()])
+    );
+    assert_eq!(reference("fixtable_bag_last_live"), b"[[],[]]\n");
+}
+
+#[test]
+fn skips_a_pseudo_deleted_object_for_the_newest_live_object_as_pinned_erts() {
+    // The newest live object of the key after the delete skips the
+    // pseudo-deleted object behind it (`erl_db_hash.c:2634-2648`).
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    assert_eq!(
+        program
+            .execute("ets_probe", "fixtable_bag_skip_deleted", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![Term::list_from(vec![Term::tuple(vec![
+            atom("k"),
+            Term::Integer(1),
+        ])])])
+    );
+    assert_eq!(reference("fixtable_bag_skip_deleted"), b"[[{k,1}]]\n");
+}
+
+#[test]
+fn keeps_a_bag_key_with_a_deleted_node_and_a_live_object_as_pinned_erts() {
+    // The chain node of the key is pseudo-deleted, but the key still has a
+    // live object, so the next key passes the key
+    // (`erl_db_hash.c:1147-1200`).
+    fixture_fixed("fixtable_next_live_behind_node", Term::Integer(2), b"[2]\n");
+}
+
+#[test]
+fn clears_the_live_objects_behind_a_deleted_node_as_pinned_erts() {
+    // The clear of a fixed table frees every live object of the key, also
+    // behind a pseudo-deleted chain node (`erl_db_hash.c:4027-4028`).
+    fixture_fixed("fixtable_clear_behind_node", Term::nil(), b"[[]]\n");
+}
+
+#[test]
+fn restores_a_bag_object_behind_a_deleted_node_as_pinned_erts() {
+    // The insert restores the pseudo-deleted object and moves it to the
+    // head of the object list (`erl_db_hash.c:1426-1437`).
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    let object = |value| Term::tuple(vec![atom("k"), Term::Integer(value)]);
+    assert_eq!(
+        program
+            .execute("ets_probe", "fixtable_bag_restore_behind_node", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![Term::list_from(vec![
+            object(1),
+            object(3),
+            object(4),
+            object(2),
+        ])])
+    );
+    assert_eq!(
+        reference("fixtable_bag_restore_behind_node"),
+        b"[[{k,1},{k,3},{k,4},{k,2}]]\n"
+    );
+}

@@ -166,6 +166,34 @@ pub(super) struct Table {
     /// completes the insert first (`handle_lacking_permission`,
     /// `erl_db.c:769-798`).
     pub(super) busy: Option<Busy>,
+    /// The processes that fixed the table with `ets:safe_fixtable(Tab,
+    /// true)`, one entry for each fix. While one exists, the table keeps
+    /// each deleted object as a pseudo-deleted object and does not split or
+    /// join a bucket, as ERTS keeps a fixated table (`erl_db_hash.c:49-60`).
+    fixed_by: Vec<ProcessId>,
+    /// The keys that a process deleted while the table was fixed, with the
+    /// slots of their objects. The objects stay in the table, and their
+    /// chain nodes stay in the bucket chains, until the last unfix.
+    retained: Vec<Retained>,
+    /// For each slot, whether the slot holds a pseudo-deleted object that a
+    /// fixation keeps.
+    deleted: Vec<bool>,
+    /// The number of pseudo-deleted objects, which `object_count` leaves
+    /// out.
+    deleted_objects: usize,
+}
+
+/// A key that a process deleted while the table was fixed: its stored
+/// hash, the key, the slot of its chain node, and each slot that held an
+/// object of the key. The chain node stays in its bucket chain until the
+/// last unfix, as the pseudo-deleted object of a fixed ERTS table does
+/// (`erl_db_hash.c:49-60`).
+#[derive(Debug)]
+struct Retained {
+    hash: u64,
+    key: Term,
+    newest: usize,
+    slots: Vec<usize>,
 }
 
 /// A list insert that took a table and did not finish in its turn, as the
@@ -571,6 +599,11 @@ impl EtsTables {
     /// assert!(!tables.name_in_use("ac_tab"));
     /// ```
     pub(super) fn delete_owned(&mut self, owner: ProcessId, mut reds: i32) -> Option<i32> {
+        // The exit of the process removes its fixations, as
+        // `db_fixation_cleanup` does (`erl_db.c:5031-5144`).
+        for table in self.tables.values_mut() {
+            table.unfix_all(owner);
+        }
         loop {
             let live = (self.tables.iter()).map(|(id, table)| (*id, table));
             let freeing = (self.freeing.iter()).map(|(id, freeing)| (*id, &freeing.table));
@@ -835,6 +868,10 @@ impl Table {
             compressed: false,
             heir: None,
             busy: None,
+            fixed_by: Vec::new(),
+            retained: Vec::new(),
+            deleted: Vec::new(),
+            deleted_objects: 0,
         }
     }
 
@@ -1026,19 +1063,251 @@ impl Table {
     /// ```
     pub(super) fn next_key(&self, atoms: &AtomTable, key: &Term) -> Option<Option<Term>> {
         let hash = stored_hash(atoms, key);
-        let newest = self.position(hash, key)?;
-        let mut bucket = self.bucket(hash);
-        let mut slot = self.next[newest];
+        if self.position(hash, key).is_some() {
+            let node = self
+                .chain_node(hash, key)
+                .expect("a live key has a chain node");
+            return Some(self.next_live_after(self.bucket(hash), self.next[node]));
+        }
+        // A fixed table keeps each deleted key as a pseudo-deleted object,
+        // so a traversal that reads the deleted key continues after it
+        // (`erl_db_hash.c:49-60`).
+        let retained = self
+            .retained
+            .iter()
+            .rev()
+            .find(|retained| retained.hash == hash && retained.key == *key)?;
+        Some(self.next_live_after(self.bucket(retained.hash), self.next[retained.newest]))
+    }
+
+    /// Return the key of the first slot that is not deleted after the slot
+    /// `slot` of the bucket `bucket`, or `None` at the end of the table.
+    fn next_live_after(&self, mut bucket: usize, mut slot: usize) -> Option<Term> {
         loop {
-            if slot != EMPTY {
-                return Some(Some(self.key(self.object_of(slot)).clone()));
+            while slot != EMPTY {
+                if !self.is_deleted(slot) || self.object_chain_has_live(slot) {
+                    return Some(self.key(self.object_of(slot)).clone());
+                }
+                slot = self.next[slot];
             }
             bucket += 1;
             if bucket == self.buckets {
-                return Some(None);
+                return None;
             }
             slot = self.heads[bucket];
         }
+    }
+
+    /// Return whether the slot holds a pseudo-deleted object.
+    fn is_deleted(&self, slot: usize) -> bool {
+        self.deleted.get(slot).copied().unwrap_or(false)
+    }
+
+    /// Return whether the key of the chain node `node` has a live object.
+    fn object_chain_has_live(&self, node: usize) -> bool {
+        links(node, &self.older).any(|slot| !self.is_deleted(slot))
+    }
+
+    /// Return the slot of the chain node of the key with the stored hash
+    /// `hash`: the slot that the bucket chain of the key links, whose
+    /// object is the first object of the key, also when a fixation kept
+    /// that object as a pseudo-deleted object.
+    fn chain_node(&self, hash: u64, key: &Term) -> Option<usize> {
+        let bucket = self.bucket(hash);
+        self.chain_keys(bucket)
+            .find(|&slot| self.key(self.object_of(slot)) == key)
+    }
+
+    /// Mark the slot `slot` as a pseudo-deleted object.
+    fn mark_deleted(&mut self, slot: usize) {
+        if self.deleted.len() <= slot {
+            self.deleted.resize(slot + 1, false);
+        }
+        self.deleted[slot] = true;
+    }
+
+    /// Keep the objects of the key `key` as pseudo-deleted objects, as the
+    /// delete of a fixed ERTS table does (`erl_db_hash.c:49-60`): remove
+    /// the key from the index, mark each live object slot deleted, and keep
+    /// the chain node of the key in its bucket chain. A record of an
+    /// earlier delete of the key takes the new slots.
+    fn retain_key(&mut self, hash: u64, key: &Term, node: usize) {
+        if let Some(index_slot) = self.position(hash, key) {
+            self.index.remove(hash, index_slot);
+        }
+        let mut slot = node;
+        while slot != EMPTY {
+            if !self.is_deleted(slot) {
+                self.mark_deleted(slot);
+                self.deleted_objects += 1;
+            }
+            slot = self.older[slot];
+        }
+        self.retain_record(hash, key, node);
+    }
+
+    /// Set the retained record of the key with the stored hash `hash` to the
+    /// object chain from the chain node `node`, in the order of the objects,
+    /// or add the record. The record of an earlier delete takes the new
+    /// order.
+    fn retain_record(&mut self, hash: u64, key: &Term, node: usize) {
+        let mut slots = Vec::new();
+        let mut slot = node;
+        while slot != EMPTY {
+            slots.push(slot);
+            slot = self.older[slot];
+        }
+        if let Some(record) = self
+            .retained
+            .iter_mut()
+            .rev()
+            .find(|record| record.hash == hash && record.key == *key)
+        {
+            record.slots = slots;
+            record.newest = node;
+        } else {
+            self.retained.push(Retained {
+                hash,
+                key: key.clone(),
+                newest: node,
+                slots,
+            });
+        }
+    }
+
+    /// Return the newest live object of the key after the slot `slot` of
+    /// the object chain, or `None` when the key has no other live object.
+    fn next_live_object(&self, slot: usize) -> Option<usize> {
+        let mut object = self.older[slot];
+        while object != EMPTY {
+            if !self.is_deleted(object) {
+                return Some(object);
+            }
+            object = self.older[object];
+        }
+        None
+    }
+
+    /// Restore the pseudo-deleted object in the slot `slot` as the newest
+    /// object of its key, as the insert of an object that a fixed table
+    /// keeps does (`erl_db_hash.c:1426-1437`): the object becomes live and
+    /// moves to the head of the object chain.
+    fn restore_object(&mut self, slot: usize, hash: u64, key: &Term) {
+        self.deleted[slot] = false;
+        self.deleted_objects -= 1;
+        let node = self
+            .chain_node(hash, key)
+            .expect("a live key has a chain node");
+        if slot != node {
+            let mut previous = node;
+            while self.older[previous] != slot {
+                previous = self.older[previous];
+            }
+            self.older[previous] = self.older[slot];
+            let bucket = self.bucket(hash);
+            let before = self.key_before(bucket, node);
+            self.next[slot] = std::mem::replace(&mut self.next[node], EMPTY);
+            self.older[slot] = node;
+            self.link(bucket, before, slot);
+        }
+        let current = self
+            .position(hash, key)
+            .expect("a key with a pseudo-deleted object is live");
+        self.index.replace(hash, current, slot);
+        self.retain_record(hash, key, slot);
+        self.writes += 1;
+    }
+
+    /// Free each pseudo-deleted object and remove it from its object chain,
+    /// as the last unfix of an ERTS table does (`erl_db_hash.c:49-60`). A
+    /// key whose chain node is pseudo-deleted but that still has a live
+    /// object takes its first live object as the chain node, and a key with
+    /// no live object leaves the bucket chain.
+    fn drop_retained(&mut self) {
+        if self.retained.is_empty() {
+            return;
+        }
+        for bucket in 0..self.buckets {
+            let mut node = self.heads[bucket];
+            let mut head = EMPTY;
+            let mut previous = EMPTY;
+            while node != EMPTY {
+                let next = self.next[node];
+                let mut chain = vec![node];
+                let mut object = self.older[node];
+                while object != EMPTY {
+                    chain.push(object);
+                    object = self.older[object];
+                }
+                let mut live = Vec::new();
+                for object in chain {
+                    if self.is_deleted(object) {
+                        self.objects[object] = None;
+                        self.older[object] = EMPTY;
+                        self.next[object] = EMPTY;
+                        self.free.push(object);
+                    } else {
+                        live.push(object);
+                    }
+                }
+                if let Some(&first) = live.first() {
+                    let mut older = EMPTY;
+                    for &object in live.iter().rev() {
+                        self.older[object] = older;
+                        older = object;
+                    }
+                    if previous == EMPTY {
+                        head = first;
+                    } else {
+                        self.next[previous] = first;
+                    }
+                    previous = first;
+                }
+                node = next;
+            }
+            if previous != EMPTY {
+                self.next[previous] = EMPTY;
+            }
+            self.heads[bucket] = head;
+        }
+        self.retained.clear();
+        self.deleted.clear();
+        self.deleted_objects = 0;
+    }
+
+    /// Fix the table for the process `process`, as `fix_table_locked`
+    /// (`erl_db.c:1150-1152`) does. A second fix by one process changes
+    /// nothing.
+    pub(super) fn fix(&mut self, process: ProcessId) {
+        // Each fix counts, so the matching unfix removes one count
+        // (`erl_db.c:5158-5169`).
+        self.fixed_by.push(process);
+    }
+
+    /// Unfix the table for the process `process`, as `unfix_table_locked`
+    /// (`erl_db.c:1153-1157`) does. The last unfix drops the keys that the
+    /// fixation kept.
+    pub(super) fn unfix(&mut self, process: ProcessId) {
+        if let Some(position) = self.fixed_by.iter().rposition(|fixed| *fixed == process) {
+            self.fixed_by.remove(position);
+        }
+        if self.fixed_by.is_empty() {
+            self.drop_retained();
+        }
+    }
+
+    /// Remove each fixation of the process `process`, as the exit of the
+    /// process does (`db_fixation_cleanup`, `erl_db.c:5207-5211`).
+    pub(super) fn unfix_all(&mut self, process: ProcessId) {
+        self.fixed_by.retain(|fixed| *fixed != process);
+        if self.fixed_by.is_empty() {
+            self.drop_retained();
+        }
+    }
+
+    /// Return whether a process fixed the table.
+    pub(super) fn is_fixed(&self) -> bool {
+        !self.fixed_by.is_empty()
     }
 
     /// Remove all objects of the table, as `db_delete_all_objects_hash`
@@ -1051,11 +1320,27 @@ impl Table {
     /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
     /// let atoms = AtomTable::new();
     /// table.insert(&atoms, vec![Term::static_atom("k")]);
-    /// assert_eq!(table.clear(), 1);
+    /// assert_eq!(table.clear(&atoms), 1);
     /// assert_eq!(table.len(), 0);
     /// ```
-    pub(super) fn clear(&mut self) -> usize {
+    pub(super) fn clear(&mut self, atoms: &AtomTable) -> usize {
         let count = self.object_count();
+        if self.is_fixed() && self.table_type != TableType::OrderedSet {
+            // A fixed table keeps each object as a pseudo-deleted object
+            // and keeps its bucket chains (`erl_db_hash.c:4027-4028`).
+            for bucket in 0..self.buckets {
+                for slot in self.chain_keys(bucket).collect::<Vec<_>>() {
+                    if !self.object_chain_has_live(slot) {
+                        continue;
+                    }
+                    let key = self.key(self.object_of(slot)).clone();
+                    let hash = stored_hash(atoms, &key);
+                    self.retain_key(hash, &key, slot);
+                }
+            }
+            self.writes += 1;
+            return count;
+        }
         self.objects.clear();
         self.free.clear();
         self.older.clear();
@@ -1085,41 +1370,65 @@ impl Table {
     pub(super) fn delete_object(&mut self, atoms: &AtomTable, object: &[Term]) -> bool {
         let key = self.key(object).clone();
         let hash = stored_hash(atoms, &key);
-        let Some(mut slot) = self.position(hash, &key) else {
+        let Some(index_slot) = self.position(hash, &key) else {
             return false;
         };
         let mut previous = EMPTY;
+        let mut slot = index_slot;
         while slot != EMPTY {
-            if self.object_of(slot) == object {
-                let bucket = self.bucket(hash);
-                let next = self.older[slot];
-                if previous == EMPTY {
-                    let after = self.next[slot];
-                    if next == EMPTY {
-                        self.index.remove(hash, slot);
-                        self.link(bucket, self.key_before(bucket, slot), after);
-                    } else {
-                        // The key stays in the chain, and its new newest
-                        // object takes the place of the removed one
-                        // (`select_delete_on_match_res`, erl_db_hash.c:2643-2648).
-                        self.index.replace(hash, slot, next);
-                        self.next[next] = after;
-                        self.link(bucket, self.key_before(bucket, slot), next);
+            if !self.is_deleted(slot) && self.object_of(slot).as_slice() == object {
+                if self.is_fixed() && self.table_type != TableType::OrderedSet {
+                    // The object stays as a pseudo-deleted object of its key
+                    // (`erl_db_hash.c:2634-2648`).
+                    self.mark_deleted(slot);
+                    self.deleted_objects += 1;
+                    let node = self
+                        .chain_node(hash, &key)
+                        .expect("a live key has a chain node");
+                    self.retain_record(hash, &key, node);
+                    if slot == index_slot {
+                        match self.next_live_object(slot) {
+                            Some(next_live) => self.index.replace(hash, slot, next_live),
+                            None => self.index.remove(hash, slot),
+                        }
                     }
-                } else {
-                    self.older[previous] = next;
+                    self.writes += 1;
+                    return true;
                 }
-                self.objects[slot] = None;
-                self.older[slot] = EMPTY;
-                self.next[slot] = EMPTY;
-                self.free.push(slot);
-                self.writes += 1;
+                self.delete_live_object(hash, slot, previous);
                 return true;
             }
             previous = slot;
             slot = self.older[slot];
         }
         false
+    }
+
+    /// Remove the live object in the slot `slot` of the object chain whose
+    /// slot before it is `previous`, as an unfixed table does: unlink it,
+    /// move the chain node when the removed object was the node, and free
+    /// the slot (`erl_db_hash.c:2622-2653`).
+    fn delete_live_object(&mut self, hash: u64, slot: usize, previous: usize) {
+        let bucket = self.bucket(hash);
+        let next = self.older[slot];
+        if previous == EMPTY {
+            let after = self.next[slot];
+            if next == EMPTY {
+                self.index.remove(hash, slot);
+                self.link(bucket, self.key_before(bucket, slot), after);
+            } else {
+                self.index.replace(hash, slot, next);
+                self.next[next] = after;
+                self.link(bucket, self.key_before(bucket, slot), next);
+            }
+        } else {
+            self.older[previous] = next;
+        }
+        self.objects[slot] = None;
+        self.older[slot] = EMPTY;
+        self.next[slot] = EMPTY;
+        self.free.push(slot);
+        self.writes += 1;
     }
 
     /// Join buckets after a `select_delete` traversal, as
@@ -1166,7 +1475,27 @@ impl Table {
             let hash = stored_hash(atoms, key);
             (self.key_slot(atoms, key), hash)
         };
-        let newest = match (found, self.table_type) {
+        if found.is_none() && self.is_fixed() {
+            let key = self.key(&object);
+            if let Some(index) = self
+                .retained
+                .iter()
+                .rposition(|retained| retained.hash == hash && retained.key == *key)
+            {
+                match self.table_type {
+                    TableType::Set | TableType::OrderedSet => self.revive(object, index, hash),
+                    _ => {
+                        // A bag or a duplicate_bag adds the object at the
+                        // retained chain node, as ERTS adds it at the head
+                        // of the object list (`erl_db_hash.c:1447-1452`).
+                        let node = self.retained[index].newest;
+                        self.add(atoms, hash, object, node);
+                    }
+                }
+                return;
+            }
+        }
+        let node = match (found, self.table_type) {
             (Some(slot), TableType::Set | TableType::OrderedSet) => {
                 let old = stored_hash(atoms, self.key(self.object_of(slot)));
                 self.rekey(slot, old, hash);
@@ -1174,10 +1503,27 @@ impl Table {
                 self.writes += 1;
                 return;
             }
-            (Some(newest), _) => newest,
+            (Some(_), _) => self.chain_node(hash, self.key(&object)).unwrap_or(EMPTY),
             (None, _) => EMPTY,
         };
-        self.add(atoms, hash, object, newest);
+        self.add(atoms, hash, object, node);
+    }
+
+    /// Put the object `object` at the chain node of the retained key
+    /// `index`, as the insert of a fixed ERTS table reuses a
+    /// pseudo-deleted object for the same key (`erl_db_hash.c:49-60`): the
+    /// key keeps its place in the bucket chain, and the other objects of
+    /// the retained key are freed.
+    fn revive(&mut self, object: Vec<Term>, index: usize, hash: u64) {
+        let retained = self.retained.remove(index);
+        for slot in &retained.slots {
+            self.deleted[*slot] = false;
+            self.older[*slot] = EMPTY;
+        }
+        self.deleted_objects -= retained.slots.len();
+        self.objects[retained.newest] = Some(object);
+        self.index.insert(hash, retained.newest);
+        self.writes += 1;
     }
 
     /// Run up to `units` units of the steps of the list insert that took
@@ -1375,12 +1721,35 @@ impl Table {
         walks: &mut HashMap<u64, Vec<BagWalk>>,
     ) -> usize {
         let hash = stored_hash(atoms, self.key(&object));
+        if self.is_fixed() && self.position(hash, self.key(&object)).is_none() {
+            let key = self.key(&object).clone();
+            if let Some(index) = self
+                .retained
+                .iter()
+                .rposition(|retained| retained.hash == hash && retained.key == key)
+            {
+                // ERTS compares the new object with each object of the key
+                // that the fixation keeps, and each comparison that is not
+                // equal uses one unit (`erl_db_hash.c:1422-1444`).
+                let compared = self.retained[index]
+                    .slots
+                    .iter()
+                    .take_while(|slot| self.object_of(**slot).as_slice() != object.as_slice())
+                    .count();
+                let node = self.retained[index].newest;
+                self.add(atoms, hash, object, node);
+                return compared;
+            }
+        }
         let walks = walks.entry(hash).or_default();
         let index = match (walks.iter()).position(|walk| walk.key == *self.key(&object)) {
             Some(index) => index,
             None => {
                 let key = self.key(&object).clone();
-                let cursor = self.position(hash, &key).unwrap_or(EMPTY);
+                // ERTS compares the new object with the first object of
+                // the key's list first, and that object stays the chain
+                // node when it is pseudo-deleted (`erl_db_hash.c:1423-1442`).
+                let cursor = self.chain_node(hash, &key).unwrap_or(EMPTY);
                 walks.push(BagWalk::new(key, cursor));
                 walks.len() - 1
             }
@@ -1388,11 +1757,29 @@ impl Table {
         let walk = &mut walks[index];
         let object_hash = object_hash(&object);
         match walk.find(self, object_hash, &object) {
-            Some(count) => count,
+            Some(count) => {
+                if let Some(slot) = walk.seen.get(&object_hash).and_then(|pairs| {
+                    pairs
+                        .iter()
+                        .find(|(_, slot)| self.object_of(*slot).as_slice() == object)
+                        .map(|(_, slot)| *slot)
+                }) && self.is_deleted(slot)
+                {
+                    self.restore_object(slot, hash, &walk.key);
+                    // The restored object is the first object of the key,
+                    // so the next object of the run compares from it
+                    // (`erl_db_hash.c:1431-1435`).
+                    walk.cursor = slot;
+                    walk.walked = 0;
+                    walk.added = 0;
+                    walk.seen.clear();
+                }
+                count
+            }
             None => {
                 let count = walk.added + walk.walked;
-                let newest = self.position(hash, &walk.key).unwrap_or(EMPTY);
-                let slot = self.add(atoms, hash, object, newest);
+                let node = self.chain_node(hash, &walk.key).unwrap_or(EMPTY);
+                let slot = self.add(atoms, hash, object, node);
                 walk.seen
                     .entry(object_hash)
                     .or_default()
@@ -1420,20 +1807,25 @@ impl Table {
     /// let key = Term::Integer(1);
     /// assert_eq!(table.add(&atoms, stored_hash(&atoms, &key), vec![key], EMPTY), 0);
     /// ```
-    fn add(&mut self, atoms: &AtomTable, hash: u64, object: Vec<Term>, newest: usize) -> usize {
+    fn add(&mut self, atoms: &AtomTable, hash: u64, object: Vec<Term>, node: usize) -> usize {
+        let key = self.key(&object).clone();
+        let index_slot = self.position(hash, &key).unwrap_or(EMPTY);
         let slot = self.allocate();
         self.objects[slot] = Some(object);
-        self.older[slot] = newest;
+        self.older[slot] = node;
         self.writes += 1;
         let bucket = self.bucket(hash);
-        if newest == EMPTY {
+        if index_slot == EMPTY {
             self.index.insert(hash, slot);
+        } else {
+            self.index.replace(hash, index_slot, slot);
+        }
+        if node == EMPTY {
             let last = self.chain_keys(bucket).last().unwrap_or(EMPTY);
             self.link(bucket, last, slot);
         } else {
-            self.index.replace(hash, newest, slot);
-            let before = self.key_before(bucket, newest);
-            self.next[slot] = std::mem::replace(&mut self.next[newest], EMPTY);
+            let before = self.key_before(bucket, node);
+            self.next[slot] = std::mem::replace(&mut self.next[node], EMPTY);
             self.link(bucket, before, slot);
         }
         if self.object_count() > self.buckets {
@@ -1556,6 +1948,10 @@ impl Table {
     /// assert_eq!(table.buckets, 257);
     /// ```
     fn split(&mut self, atoms: &AtomTable) {
+        // ERTS does not resize a fixated table (`erl_db_hash.c:49-60`).
+        if self.is_fixed() {
+            return;
+        }
         let to = self.buckets;
         self.buckets += 1;
         self.heads.push(EMPTY);
@@ -1588,6 +1984,10 @@ impl Table {
     /// assert_eq!(table.buckets, 4351);
     /// ```
     fn join(&mut self) {
+        // ERTS does not resize a fixated table (`erl_db_hash.c:49-60`).
+        if self.is_fixed() {
+            return;
+        }
         let source = self.buckets - 1;
         let target = source & (self.buckets.next_power_of_two() - 1) >> 1;
         self.buckets = source;
@@ -1639,7 +2039,9 @@ impl Table {
         let mut objects = Vec::new();
         let mut slot = self.key_slot(atoms, key).unwrap_or(EMPTY);
         while slot != EMPTY {
-            objects.push(self.object_of(slot).as_slice());
+            if !self.is_deleted(slot) {
+                objects.push(self.object_of(slot).as_slice());
+            }
             slot = self.older[slot];
         }
         objects.reverse();
@@ -1674,8 +2076,10 @@ impl Table {
     /// assert_eq!(table.chain(bucket).map(|object| object[1].clone()).collect::<Vec<_>>(), [Term::Integer(2), Term::Integer(1)]);
     /// ```
     pub(super) fn chain(&self, bucket: usize) -> impl Iterator<Item = &[Term]> + '_ {
-        self.chain_keys(bucket).flat_map(|newest| {
-            links(newest, &self.older).map(|slot| self.object_of(slot).as_slice())
+        self.chain_keys(bucket).flat_map(|node| {
+            links(node, &self.older)
+                .filter(|&slot| !self.is_deleted(slot))
+                .map(|slot| self.object_of(slot).as_slice())
         })
     }
 
@@ -1737,6 +2141,14 @@ impl Table {
                 .flatten()
                 .map(|object| object.capacity() * std::mem::size_of::<Term>())
                 .sum::<usize>()
+            + self.fixed_by.capacity() * std::mem::size_of::<ProcessId>()
+            + self.retained.capacity() * std::mem::size_of::<Retained>()
+            + self
+                .retained
+                .iter()
+                .map(|retained| retained.slots.capacity() * std::mem::size_of::<usize>())
+                .sum::<usize>()
+            + self.deleted.capacity() * std::mem::size_of::<bool>()
             + self.busy.as_ref().map_or(0, |busy| {
                 busy.objects.capacity() * std::mem::size_of::<Vec<Term>>()
                     + busy
@@ -1848,7 +2260,7 @@ impl Table {
     /// assert_eq!(table.object_count(), 1);
     /// ```
     fn object_count(&self) -> usize {
-        self.objects.len() - self.free.len()
+        self.objects.len() - self.free.len() - self.deleted_objects
     }
 
     /// Return a slot for a new object: a free slot when the table has one,
@@ -1897,8 +2309,19 @@ impl Table {
             return;
         };
         let hash = stored_hash(atoms, self.key(self.object_of(newest)));
-        self.index.remove(hash, newest);
         self.writes += 1;
+        // An ordered_set has no supported traversal, and its compaction
+        // moves the last object into the freed slot, so a fixed ordered_set
+        // deletes as an unfixed one does (row "ETS tables" of
+        // docs/erts-differences.md).
+        if self.is_fixed() && self.table_type != TableType::OrderedSet {
+            let node = self
+                .chain_node(hash, key)
+                .expect("a live key has a chain node");
+            self.retain_key(hash, key, node);
+            return;
+        }
+        self.index.remove(hash, newest);
         let bucket = self.bucket(hash);
         let before = self.key_before(bucket, newest);
         let after = std::mem::replace(&mut self.next[newest], EMPTY);
@@ -2043,7 +2466,12 @@ impl Table {
     /// assert_eq!(table.live_objects(), vec![vec![Term::static_atom("k")]]);
     /// ```
     pub(super) fn live_objects(&self) -> Vec<Vec<Term>> {
-        self.objects.iter().flatten().cloned().collect()
+        self.objects
+            .iter()
+            .enumerate()
+            .filter(|(slot, _)| !self.is_deleted(*slot))
+            .filter_map(|(_, object)| object.clone())
+            .collect()
     }
 
     /// Return the number of allocated slots, for a test.

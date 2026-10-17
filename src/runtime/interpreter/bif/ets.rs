@@ -1518,12 +1518,21 @@ pub(super) fn info(
         Term::Atom(atom) if atom.is_static("compressed") => boolean_term(found.compressed()),
         Term::Atom(atom) if atom.is_static("id") => Term::Reference(id),
         Term::Atom(atom) if atom.is_static("decentralized_counters") => Term::static_atom("false"),
+        Term::Atom(atom) if atoms.name_of(atom) == "fixed" => boolean_term(found.is_fixed()),
         Term::Atom(atom)
             if matches!(
                 atoms.name_of(atom),
-                "fixed" | "safe_fixed" | "safe_fixed_monotonic_time"
+                "safe_fixed" | "safe_fixed_monotonic_time"
             ) =>
         {
+            if found.is_fixed() {
+                // ponytail: the fixations of each process with their times
+                // and counts; see "ETS tables" in docs/erts-differences.md.
+                return Err(error(format!(
+                    "unsupported ets:info/2 item {} of a fixed table",
+                    atoms.name_of(atom)
+                )));
+            }
             Term::static_atom("false")
         }
         Term::Atom(atom) if matches!(atoms.name_of(atom), "data" | "stats") => {
@@ -2145,6 +2154,63 @@ fn help_table(context: &mut BifContext<'_>, table: &Term) -> Result<(), BeamErro
 ///
 /// Return the error of [`ProcessState::bif_reductions_left`] when a busy
 /// table cannot finish its list insert in the turn.
+/// Run `ets:safe_fixtable/2` as ERTS `ets_safe_fixtable_2` does
+/// (`erl_db.c:1136-1164`): `true` fixes the table for the caller, `false`
+/// unfixes it, and each of these gives `true`. A second argument that is
+/// not `true` or `false`, and a term that is not a table of the run, raise
+/// `badarg`. ERTS reads the table before it checks the second argument.
+///
+/// While a table is fixed, `ets:delete/2` keeps the key of each deleted
+/// object as a ghost, so `ets:next/2` from that key continues the
+/// traversal, and the table does not split or join a bucket
+/// (`erl_db_hash.c:49-60`). The exit of a process removes its fixations.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = safe_fixtable(&mut context, &table, &Term::static_atom("true"))?;
+/// assert!(matches!(result, BifResult::Value(value) if value == Term::static_atom("true")));
+/// ```
+///
+/// # Errors
+///
+/// See [`help_busy`] for a table that a list insert took.
+pub(super) fn safe_fixtable(
+    context: &mut BifContext<'_>,
+    table: &Term,
+    flag: &Term,
+) -> Result<BifResult, BeamError> {
+    let caller = context.scheduler.current_process_mut().id;
+    if let Take::Help = help_busy(&mut *context, table)? {
+        return Ok(BifResult::TrapBif {
+            module: "ets",
+            function: "safe_fixtable",
+            arguments: vec![table.clone(), flag.clone()],
+        });
+    }
+    // ERTS reads the table before it checks the second argument
+    // (`erl_db.c:1146-1161`).
+    let Some(known) =
+        context
+            .scheduler
+            .ets
+            .table(&context.scheduler.atoms, table, caller, Operation::Read)
+    else {
+        return Ok(BifResult::badarg());
+    };
+    let Term::Atom(flag) = flag else {
+        return Ok(BifResult::badarg());
+    };
+    if flag.is_one_of(&["true"]) {
+        known.fix(caller);
+    } else if flag.is_one_of(&["false"]) {
+        known.unfix(caller);
+    } else {
+        return Ok(BifResult::badarg());
+    }
+    Ok(Value(Term::static_atom("true")))
+}
+
 pub(super) fn next(
     context: &mut BifContext<'_>,
     table: &Term,
@@ -2415,7 +2481,7 @@ pub(super) fn internal_delete_all(
     }
     let count = table.len();
     let reductions = table.delete_all_reductions();
-    table.clear();
+    table.clear(&context.scheduler.atoms);
     context
         .scheduler
         .current_process_mut()

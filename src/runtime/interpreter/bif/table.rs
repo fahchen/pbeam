@@ -470,7 +470,7 @@ bifs! {
     ets:prev/2 as EtsPrev2 => |cx, [table, key]| ets::next(cx, table, key),
     ets:prev_lookup/2 => unsupported,
     ets:rename/2 => unsupported,
-    ets:safe_fixtable/2 => unsupported,
+    ets:safe_fixtable/2 as EtsSafeFixtable2 => |cx, [table, flag]| ets::safe_fixtable(cx, table, flag),
     ets:select/1 as EtsSelect1 => |cx, [continuation]| ets::select_continue(cx, continuation),
     ets:select/2 as EtsSelect2 => |cx, [table, spec]| ets::select(cx, table, spec, None),
     ets:select/3 as EtsSelect3 => |cx, [table, spec, limit]| ets::select(cx, table, spec, Some(limit)),
