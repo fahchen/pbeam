@@ -1302,7 +1302,10 @@ pub(super) fn part_3(subject: &Term, position: &Term, length: &Term) -> BifResul
 /// `2^64 - 1` divided by the bit size of the subject raises
 /// `system_limit`, as `erl_bif_binary.c:2423` checks before the copy. The
 /// copy uses one reduction for each 512 bits of the result
-/// (`erl_bif_binary.c:2377`, `2445`).
+/// (`erl_bif_binary.c:2377`, `2445`), and the budget of the turn stops
+/// at 0: a copy whose charge is larger than the remaining budget
+/// charges that budget only (row "Binary copy reductions" of
+/// `docs/erts-differences.md`).
 ///
 /// # Examples
 ///
