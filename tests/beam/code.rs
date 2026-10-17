@@ -157,7 +157,12 @@ fn reads_large_tuple_literals() {
         Some(Term::tuple(Vec::new()))
     );
     // ERTS rejects a count above `ERTS_MAX_TUPLE_SIZE` (`external.c:6284-6289`).
-    assert!(read_literal(&[131, 105, 1, 0, 0, 0], &mut atoms).is_err());
+    assert_eq!(
+        read_literal(&[131, 105, 1, 0, 0, 0], &mut atoms)
+            .unwrap_err()
+            .to_string(),
+        "BEAM tuple literal exceeds the maximum tuple size"
+    );
 }
 
 #[test]
