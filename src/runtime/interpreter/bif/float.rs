@@ -149,6 +149,36 @@ pub(super) fn from_list(list: &Term) -> BifResult {
     }
 }
 
+/// Run `erlang:binary_to_float/1`: return the float that the bytes of a
+/// binary read as, as ERTS `binary_to_float_1` (`bif.c:3727-3756`) gives it
+/// with `do_charbuf_to_float` (`bif.c:3684-3697`). It gives the bytes a NUL
+/// terminator, so a zero byte ends the text and the bytes after it do not
+/// count: `binary_to_float(<<49,46,48,0,120>>)` gives `1.0`. A term that is
+/// not a binary, an empty binary, a bit string that is not a whole number
+/// of bytes, a text that the scan of [`text_to_float`] rejects, and a text
+/// that overflows an infinity raise `badarg` (`bif.c:3729-3755`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let one = Term::binary(b"1.0".to_vec());
+/// assert!(matches!(from_binary(&one), BifResult::Value(Term::Float(value)) if value == 1.0));
+/// assert!(matches!(from_binary(&Term::binary(Vec::new())), BifResult::Raise { .. }));
+/// assert!(matches!(from_binary(&Term::Integer(1)), BifResult::Raise { .. }));
+/// ```
+pub(super) fn from_binary(binary: &Term) -> BifResult {
+    let Term::Binary(bytes) = binary else {
+        return BifResult::badarg();
+    };
+    if bytes.bit_size() == 0 || !bytes.bit_size().is_multiple_of(8) {
+        return BifResult::badarg();
+    }
+    match text_to_float(bytes) {
+        Some(value) => Value(Term::Float(value)),
+        None => BifResult::badarg(),
+    }
+}
+
 /// The text form that the options of `float_to_list/2` select.
 enum Format {
     /// No `short`, `decimals`, or `scientific` option: `%.20e`.
@@ -240,3 +270,7 @@ pub(super) fn to_binary(float: &Term, options: &Term) -> BifResult {
         None => BifResult::badarg(),
     }
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/runtime/interpreter/bif/float.rs"]
+mod tests;

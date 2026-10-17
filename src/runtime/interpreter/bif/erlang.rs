@@ -2542,16 +2542,65 @@ pub(super) fn atom_to_binary(atoms: &AtomTable, term: &Term, encoding: &Term) ->
     }
 }
 
+/// The reason that a list does not give an atom name.
+enum NameError {
+    /// The term is not a proper list of characters: `badarg` in
+    /// `list_to_atom/1` and `list_to_existing_atom/1`.
+    Badarg,
+    /// The list holds more than [`MAX_ATOM_CHARACTERS`] elements:
+    /// `system_limit` in `list_to_atom/1` (`bif.c:3228-3234`) and `badarg`
+    /// in `list_to_existing_atom/1` (`bif.c:3245-3248`).
+    TooLong,
+}
+
+/// Return the name that the code points of `term` give, as
+/// `erts_unicode_list_to_buf` (`utils.c:2862-2925`) writes it for
+/// `list_to_atom_1` and `list_to_existing_atom_1` (`bif.c:3217-3236`,
+/// `3239-3258`). ERTS counts each element before it checks it, so a 256th
+/// element gives [`NameError::TooLong`], also when it is not a character.
+/// ERTS checks the tail after the 255th element, so an improper list of 300
+/// characters gives [`NameError::TooLong`]. An element that is not an
+/// integer in `0..=0x10FFFF` outside `0xD800..=0xDFFF`, a tail that is not
+/// `[]`, and a term that is not a list, give [`NameError::Badarg`].
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(list_name(&Term::nil()), Ok(String::new()));
+/// assert!(list_name(&Term::static_atom("ok")).is_err());
+/// ```
+fn list_name(term: &Term) -> Result<String, NameError> {
+    let Some(mut elements) = term.list_iter() else {
+        return Err(NameError::Badarg);
+    };
+    let mut name = String::new();
+    for (count, element) in elements.by_ref().enumerate() {
+        if count == MAX_ATOM_CHARACTERS {
+            return Err(NameError::TooLong);
+        }
+        let character = match element {
+            Term::Integer(code) => u32::try_from(*code).ok().and_then(char::from_u32),
+            _ => None,
+        };
+        let Some(character) = character else {
+            return Err(NameError::Badarg);
+        };
+        name.push(character);
+    }
+    if !elements.rest().is_nil() {
+        return Err(NameError::Badarg);
+    }
+    Ok(name)
+}
+
 /// Run `erlang:list_to_atom/1`: return the atom whose name has the code
 /// points of a list, and put a new atom into the atom table of the run, as
-/// ERTS `list_to_atom_1` (`bif.c:3217-3236`) does with
-/// `erts_unicode_list_to_buf` (`utils.c:2862-2942`). ERTS counts each
-/// element before it checks it, so a 256th element raises `system_limit`,
-/// also when it is not a character. ERTS checks the tail after the 255th
-/// element, so an improper list of 300 characters raises `system_limit`.
-/// An element that is not an integer in `0..=0x10FFFF` outside
-/// `0xD800..=0xDFFF`, a tail that is not `[]`, and a term that is not a
-/// list, raise `badarg`.
+/// ERTS `list_to_atom_1` (`bif.c:3217-3236`) does. ERTS counts each element
+/// before it checks it, so a 256th element raises `system_limit`, also when
+/// it is not a character. ERTS checks the tail after the 255th element, so
+/// an improper list of 300 characters raises `system_limit`. An element
+/// that is not an integer in `0..=0x10FFFF` outside `0xD800..=0xDFFF`, a
+/// tail that is not `[]`, and a term that is not a list, raise `badarg`.
 ///
 /// # Examples
 ///
@@ -2572,30 +2621,99 @@ pub(super) fn atom_to_binary(atoms: &AtomTable, term: &Term, encoding: &Term) ->
 /// A new atom in a full atom table gives the error of `AtomTable::put`,
 /// where ERTS stops the emulator.
 pub(super) fn list_to_atom(atoms: &mut AtomTable, term: &Term) -> Result<BifResult, BeamError> {
-    let Some(mut elements) = term.list_iter() else {
-        return Ok(BifResult::badarg());
+    match list_name(term) {
+        Ok(name) => Ok(Value(Term::Atom(atoms.put(&name)?))),
+        Err(NameError::TooLong) => Ok(Raise {
+            class: ExceptionClass::Error,
+            reason: Term::static_atom("system_limit"),
+        }),
+        Err(NameError::Badarg) => Ok(BifResult::badarg()),
+    }
+}
+
+/// Run `erlang:list_to_existing_atom/1`: return the atom whose name has the
+/// code points of a list, when the run holds that name, as ERTS
+/// `list_to_existing_atom_1` (`bif.c:3239-3258`) does with
+/// `erts_atom_get` (`atom.c:381-433`). ERTS gives `badarg` for each result
+/// below zero of the name conversion, so a list above the atom limit, a
+/// term that is not a proper list of characters, and a name with no atom
+/// raise `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let atoms = AtomTable::new();
+/// let empty = list_to_existing_atom(&atoms, &Term::nil());
+/// assert!(matches!(empty, BifResult::Value(Term::Atom(atom)) if atoms.name_of(&atom).is_empty()));
+/// let unknown = Term::list_from(vec![Term::Integer(122), Term::Integer(122)]);
+/// assert!(matches!(list_to_existing_atom(&atoms, &unknown), BifResult::Raise { .. }));
+/// ```
+pub(super) fn list_to_existing_atom(atoms: &AtomTable, term: &Term) -> BifResult {
+    match list_name(term).ok().and_then(|name| atoms.get(&name)) {
+        Some(atom) => Value(Term::Atom(atom)),
+        None => BifResult::badarg(),
+    }
+}
+
+/// Run `erlang:binary_to_existing_atom/2`: return the atom whose name a
+/// binary holds, when the run holds that name, as ERTS `binary_to_atom`
+/// with `must_exist` one (`erl_unicode.c:1962-1971`, `1991-1993`,
+/// `2009-2011`, `2025-2028`) does with `erts_atom_get` (`atom.c:381-433`).
+/// With `latin1`, one byte is one character, and the name holds the UTF-8
+/// bytes of the code points, so `<<255>>` gives the atom `'ÿ'`. With
+/// `utf8` or `unicode`, the binary holds the UTF-8 bytes of the name.
+///
+/// An argument that is not a byte-aligned binary, an encoding that is not
+/// `latin1`, `utf8`, or `unicode`, a name with no atom, and a byte string
+/// that `utf8` does not accept, raise `badarg`. ERTS reads no encoding of a
+/// name of a binary above the atom limits, because the lookup of such a
+/// name fails before it is read (`atom.c:392-394`, `412-415`), and it gives
+/// `badarg`, not `system_limit`, for a `latin1` binary above 255 bytes and
+/// a `utf8` binary above `MAX_ATOM_SZ_LIMIT` bytes (`atom.c:409-411`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let atoms = AtomTable::new();
+/// let ok = binary_to_existing_atom(&atoms, &Term::binary(b"ok".to_vec()), &Term::static_atom("utf8"));
+/// assert!(matches!(ok, BifResult::Value(atom) if atom == Term::static_atom("ok")));
+/// let unknown = Term::binary(b"pbeam_zulu".to_vec());
+/// assert!(matches!(binary_to_existing_atom(&atoms, &unknown, &Term::static_atom("utf8")), BifResult::Raise { .. }));
+/// ```
+pub(super) fn binary_to_existing_atom(
+    atoms: &AtomTable,
+    binary: &Term,
+    encoding: &Term,
+) -> BifResult {
+    let (Term::Binary(bytes), Term::Atom(encoding)) = (binary, encoding) else {
+        return BifResult::badarg();
     };
-    let mut name = String::new();
-    for (count, element) in elements.by_ref().enumerate() {
-        if count == MAX_ATOM_CHARACTERS {
-            return Ok(Raise {
-                class: ExceptionClass::Error,
-                reason: Term::static_atom("system_limit"),
-            });
+    if !bytes.bit_size().is_multiple_of(8) {
+        return BifResult::badarg();
+    }
+    let name = if encoding.is_static("latin1") {
+        if bytes.len() > MAX_ATOM_CHARACTERS {
+            return BifResult::badarg();
         }
-        let character = match element {
-            Term::Integer(code) => u32::try_from(*code).ok().and_then(char::from_u32),
-            _ => None,
+        bytes
+            .iter()
+            .map(|&byte| char::from(byte))
+            .collect::<String>()
+    } else if encoding.is_one_of(&["utf8", "unicode"]) {
+        if bytes.len() > MAX_ATOM_SZ_LIMIT {
+            return BifResult::badarg();
+        }
+        let Ok(name) = std::str::from_utf8(bytes) else {
+            return BifResult::badarg();
         };
-        let Some(character) = character else {
-            return Ok(BifResult::badarg());
-        };
-        name.push(character);
+        name.to_owned()
+    } else {
+        return BifResult::badarg();
+    };
+    match atoms.get(&name) {
+        Some(atom) => Value(Term::Atom(atom)),
+        None => BifResult::badarg(),
     }
-    if !elements.rest().is_nil() {
-        return Ok(BifResult::badarg());
-    }
-    Ok(Value(Term::Atom(atoms.put(&name)?)))
 }
 
 /// Run `erlang:binary_to_atom/2`: return the atom whose name a binary

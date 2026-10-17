@@ -123,6 +123,14 @@ name = "binary_to_atom"
 path = "tests/integration/binary_to_atom.rs"
 
 [[test]]
+name = "binary_to_float"
+path = "tests/integration/binary_to_float.rs"
+
+[[test]]
+name = "binary_to_integer"
+path = "tests/integration/binary_to_integer.rs"
+
+[[test]]
 name = "badarg"
 path = "tests/integration/badarg.rs"
 
@@ -153,6 +161,10 @@ path = "tests/integration/bifs.rs"
 [[test]]
 name = "binary_match"
 path = "tests/integration/binary_match.rs"
+
+[[test]]
+name = "binary_module"
+path = "tests/integration/binary_module.rs"
 
 [[test]]
 name = "binary_part"
@@ -269,6 +281,10 @@ path = "tests/integration/fixture_opcodes.rs"
 [[test]]
 name = "find_executable"
 path = "tests/integration/find_executable.rs"
+
+[[test]]
+name = "existing_atom"
+path = "tests/integration/existing_atom.rs"
 
 [[test]]
 name = "float"

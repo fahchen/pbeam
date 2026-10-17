@@ -439,6 +439,8 @@ ambient() ->
         is_list(erlang:processes()),
         erlang:list_to_atom("effect_probe_ambient_atom"),
         erlang:binary_to_atom(<<"effect_probe_ambient_binary">>, utf8),
+        erlang:binary_to_existing_atom(<<"effect_probe_ambient_binary">>, utf8),
+        erlang:list_to_existing_atom("effect_probe_ambient_atom"),
         element(1, re:compile("a", [])),
         Table,
         ets:insert(Name, {key, value}),

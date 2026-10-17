@@ -1,6 +1,8 @@
-//! The BIFs `binary:match/2` and `binary:split/2,3`: the Boyer-Moore and
-//! Aho-Corasick searches of ERTS `erl_bif_binary.c`, with their reduction
-//! budget and their traps, and the match and split results.
+//! The BIFs `binary:match/2`, `binary:matches/2`, and `binary:split/2,3`:
+//! the Boyer-Moore and Aho-Corasick searches of ERTS `erl_bif_binary.c`,
+//! with their reduction budget and their traps, and the match, matches, and
+//! split results. The file also holds `binary:at/2`, `binary:part/2,3`, and
+//! `binary:copy/1,2`.
 
 use super::BifResult::Value;
 use super::*;
@@ -21,6 +23,18 @@ const TRIM_ALL: u8 = 0x04;
 /// `do_match_not_found_result` and `do_match_single_result`,
 /// `erl_bif_binary.c:1559-1560`, `1647-1673`).
 const MATCH: u8 = 0x08;
+/// PBeam only: the search gives the result of `binary:matches/2`, not of
+/// `binary:match/2`. ERTS keeps the result functions of the BIF in the
+/// search context instead (`bf_context_init` with
+/// `do_match_global_result`, `erl_bif_binary.c:1559-1560`, `1672-1733`).
+const MATCHES: u8 = 0x10;
+
+/// The bits of `binary:copy/1,2` that one reduction covers
+/// (`BITSTRING_COPY_LOOP_FACTOR = ERTS_CACHE_LINE_SIZE * 8`,
+/// `erl_bif_binary.c:2377`, `2445`). `ERTS_CACHE_LINE_SIZE` is
+/// `ASSUMED_CACHE_LINE_SIZE` (`erl_alloc.h:242`), which the pinned build
+/// leaves at the default of 64 bytes.
+const COPY_BITS_PER_REDUCTION: u64 = 64 * 8;
 
 /// The search steps for each reduction: `BM_LOOP_FACTOR` and
 /// `AC_LOOP_FACTOR` (`erl_bif_binary.c:635`, `824`), both 10.
@@ -91,18 +105,29 @@ struct Find {
     build: Option<Build>,
 }
 
-/// The state of the result build of a global search, as
-/// `do_split_global_result` keeps it (`erl_bif_binary.c:1835-1933`).
+/// The state of the result build after a global search, as
+/// `BinaryFindAllContext` keeps it (`erl_bif_binary.c:252-310`): the state
+/// of `do_split_global_result` (`erl_bif_binary.c:1835-1933`) or of
+/// `do_match_global_result` (`erl_bif_binary.c:1672-1733`). Both builds
+/// keep their state in the fields `fa->head`, `fa->end_pos`, and
+/// `fa->parts`, so the fields have one meaning for each kind of build.
 struct Build {
-    /// The index of the next match, from the last match down to the first.
+    /// The index of the next match. A split build and the tuple phase of a
+    /// matches build walk down from the last match, and the integer phase
+    /// of a matches build walks up from the first one.
     head: i64,
-    /// The end of the part before the current match.
+    /// The end of the part before the current match of a split build, or
+    /// the phase of a matches build: 0 makes the integers of each match,
+    /// and 1 conses their tuples on the result.
     end_pos: u64,
-    /// The parts so far, from the last part to the first.
+    /// The parts so far of a split build, from the last part to the first,
+    /// or the `{Position, Length}` tuples so far of a matches build, from
+    /// the last tuple to the first.
     parts: Vec<Term>,
 }
 
-/// How a search turn ends (`BFReturn`, `erl_bif_binary.c:245-250`).
+/// How a search of the first match ends (`BFReturn`,
+/// `erl_bif_binary.c:245-250`).
 enum Search {
     /// The search steps of the turn ended (`BF_RESTART`).
     Restart,
@@ -110,7 +135,18 @@ enum Search {
     NotFound,
     /// The first match, as its start and its length.
     Found(u64, u64),
-    /// A global search found matches, which are in [`Find::matches`].
+}
+
+/// How a global search ends (`BFReturn`, `erl_bif_binary.c:245-250`). The
+/// matches of a global search are in [`Find::matches`], so a found search
+/// needs no position.
+enum SearchAll {
+    /// The search steps of the turn ended (`BF_RESTART`).
+    Restart,
+    /// No needle matches (`BF_NOT_FOUND`).
+    NotFound,
+    /// The search found matches, which are in [`Find::matches`]
+    /// (`BF_FOUND`).
     FoundAll,
 }
 
@@ -277,10 +313,10 @@ impl Bm {
     ///
     /// ```rust,ignore
     /// let mut reds = 100;
-    /// assert!(matches!(bm.all(&mut find, b"abxab", &mut reds), Search::FoundAll));
+    /// assert!(matches!(bm.all(&mut find, b"abxab", &mut reds), SearchAll::FoundAll));
     /// assert_eq!(find.matches, [(0, 2), (3, 2)]);
     /// ```
-    fn all(&self, find: &mut Find, haystack: &[u8], reds: &mut u64) -> Search {
+    fn all(&self, find: &mut Find, haystack: &[u8], reds: &mut u64) -> SearchAll {
         let blen = self.needle.len() as i64;
         let len = find.end as i64;
         let mut j = find.pos;
@@ -300,7 +336,7 @@ impl Bm {
             steps = steps.wrapping_sub(1);
             if steps == 0 {
                 find.pos = j;
-                return Search::Restart;
+                return SearchAll::Restart;
             }
             i = self.compare(haystack, j);
             if i < 0 {
@@ -312,9 +348,9 @@ impl Bm {
         }
         *reds = steps;
         if find.matches.is_empty() {
-            Search::NotFound
+            SearchAll::NotFound
         } else {
-            Search::FoundAll
+            SearchAll::FoundAll
         }
     }
 }
@@ -511,16 +547,16 @@ fn ac_first(trie: &[AcNode], find: &mut Find, haystack: &[u8], reds: &mut u64) -
 ///
 /// ```rust,ignore
 /// let mut reds = 100;
-/// assert!(matches!(ac_all(&trie, &mut find, b"abab", &mut reds), Search::FoundAll));
+/// assert!(matches!(ac_all(&trie, &mut find, b"abab", &mut reds), SearchAll::FoundAll));
 /// ```
-fn ac_all(trie: &[AcNode], find: &mut Find, haystack: &[u8], reds: &mut u64) -> Search {
+fn ac_all(trie: &[AcNode], find: &mut Find, haystack: &[u8], reds: &mut u64) -> SearchAll {
     let mut steps = *reds;
     let mut i = find.pos as u64;
     while i < find.end {
         steps = steps.wrapping_sub(1);
         if steps == 0 {
             find.pos = i as i64;
-            return Search::Restart;
+            return SearchAll::Restart;
         }
         find.node = ac_next(trie, find.node, haystack[i as usize]);
         i += 1;
@@ -545,9 +581,9 @@ fn ac_all(trie: &[AcNode], find: &mut Find, haystack: &[u8], reds: &mut u64) -> 
     }
     *reds = steps;
     if find.matches.is_empty() {
-        Search::NotFound
+        SearchAll::NotFound
     } else {
-        Search::FoundAll
+        SearchAll::FoundAll
     }
 }
 
@@ -641,17 +677,23 @@ fn options(options: Option<&Term>, size: u64) -> Option<(u8, u64, u64)> {
 }
 
 /// Return the result of a search with no match, as
-/// `do_split_not_found_result` does (`erl_bif_binary.c:1737-1751`): the
-/// subject in a list, or `[]` for an empty subject with `trim` or
-/// `trim_all`.
+/// `do_match_not_found_result` (`erl_bif_binary.c:1647-1652`) and
+/// `do_split_not_found_result` (`erl_bif_binary.c:1737-1751`) do: `nomatch`
+/// for `binary:match/2`, `[]` for each global match search, and the subject
+/// in a list for `binary:split/2,3`, or `[]` for an empty subject with
+/// `trim` or `trim_all`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// assert_eq!(not_found(0, &Binary::from(&[1, 2][..])), Term::list_from(vec![Term::binary(vec![1, 2])]));
 /// assert_eq!(not_found(TRIM, &Binary::from(&[][..])), Term::nil());
+/// assert_eq!(not_found(MATCHES, &Binary::from(&[1][..])), Term::nil());
 /// ```
 fn not_found(flags: u8, subject: &Binary) -> Term {
+    if flags & MATCHES != 0 {
+        return Term::nil();
+    }
     if flags & (TRIM | TRIM_ALL) != 0 && subject.is_empty() {
         return Term::nil();
     }
@@ -751,12 +793,67 @@ fn split_all(find: &mut Find, subject: &Binary, reds: &mut u64) -> Option<Term> 
     Some(Term::list_from(parts))
 }
 
+/// Build the result of `binary:matches/2` from the matches of the search,
+/// as `do_match_global_result` does (`erl_bif_binary.c:1672-1733`). The
+/// integer phase visits each match once, and then the cons phase visits
+/// each match once from the last match to the first. Each visit uses one
+/// search step before it. When the steps become 0, the build keeps its
+/// state and returns `None`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// find.matches = vec![(1, 2)];
+/// let mut reds = 100;
+/// let one = Term::list_from(vec![Term::tuple(vec![Term::Integer(1), Term::Integer(2)])]);
+/// assert_eq!(match_all(&mut find, &mut reds), Some(one));
+/// ```
+fn match_all(find: &mut Find, reds: &mut u64) -> Option<Term> {
+    let matches = &find.matches;
+    let build = find.build.get_or_insert_with(|| Build {
+        head: 0,
+        end_pos: 0,
+        parts: Vec::new(),
+    });
+    let mut steps = *reds;
+    if build.end_pos == 0 {
+        while (build.head as usize) < matches.len() {
+            steps = steps.wrapping_sub(1);
+            if steps == 0 {
+                return None;
+            }
+            build.head += 1;
+        }
+        build.end_pos = 1;
+        build.head = matches.len() as i64 - 1;
+    }
+    while build.head >= 0 {
+        steps = steps.wrapping_sub(1);
+        if steps == 0 {
+            return None;
+        }
+        let (pos, len) = matches[build.head as usize];
+        build.parts.push(Term::tuple(vec![
+            Term::Integer(pos as i64),
+            Term::Integer(len as i64),
+        ]));
+        build.head -= 1;
+    }
+    *reds = steps;
+    let mut tuples = std::mem::take(&mut build.parts);
+    tuples.reverse();
+    Some(Term::list_from(tuples))
+}
+
 impl Find {
     /// Return the state as the term of a trap: `{Flags, End, Pos, Node,
     /// CandidateNode, CandidateStart, Head, EndPos, Matches, Parts}`. A
     /// missing candidate has the node -1, and a search before its result
     /// build has the head -2. `Matches` holds the start and the length of
-    /// each match in order.
+    /// each match in order. `Head`, `EndPos`, and `Parts` hold the next
+    /// match, the part end, and the parts so far of a `binary:split/2,3`
+    /// build, or the next match, the phase, and the tuples so far of a
+    /// `binary:matches/2` build.
     ///
     /// # Examples
     ///
@@ -830,6 +927,9 @@ impl Find {
             .collect();
         let candidate =
             usize::try_from(integer(candidate)).map(|node| (node, integer(start) as u64));
+        // The kind of the result follows the flags of the state: the parts
+        // of a split build and the tuples of a matches build share the same
+        // fields, and the build function of the kind reads them.
         let build = (integer(head) >= -1).then(|| Build {
             head: integer(head),
             end_pos: integer(end_pos) as u64,
@@ -904,6 +1004,38 @@ pub(super) fn match_2(
     pattern: &Term,
 ) -> Result<BifResult, BeamError> {
     find_first_turn(process, subject, pattern, None, MATCH)
+}
+
+/// Run `binary:matches/2` as ERTS `binary_matches_2` does
+/// (`erl_bif_binary.c:1589-1592`): it is `binary_match` with the flag
+/// `BF_FLAG_GLOBAL` (`erl_bif_binary.c:1554-1571`), so the search keeps
+/// each match that does not overlap a match before it, and the result is
+/// their list of `{Position, Length}` tuples, or `[]` with no match
+/// (`do_match_global_result`, `erl_bif_binary.c:1672-1733`). The same
+/// `badarg` rules as `binary:match/2` apply: a subject that is not a binary
+/// and a pattern that is not valid raise `badarg`. When the search steps or
+/// the result build use all reductions of the turn, the call traps to
+/// `erlang:binary_find_trap/3` ([`find_trap`]).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // [{0, 2}, {2, 2}]
+/// let result = matches_2(&mut process, &Term::binary(b"aaaa".to_vec()), &Term::binary(b"aa".to_vec()))?;
+/// assert!(matches!(result, BifResult::Value(parts) if parts.proper_list().is_some_and(|list| list.len() == 2)));
+/// assert!(matches!(matches_2(&mut process, &Term::binary(b"ab".to_vec()), &Term::binary(vec![]))?, BifResult::Raise { .. }));
+/// ```
+///
+/// # Errors
+///
+/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
+/// negative budget.
+pub(super) fn matches_2(
+    process: &mut ProcessState,
+    subject: &Term,
+    pattern: &Term,
+) -> Result<BifResult, BeamError> {
+    find_first_turn(process, subject, pattern, None, GLOBAL | MATCHES)
 }
 
 /// Check the arguments of `binary:match/2` or `binary:split/2,3`, and run
@@ -1004,7 +1136,8 @@ fn find_trap_result(subject: &Term, find: &Find, pattern: &Term) -> BifResult {
 /// (`erl_bif_binary.c:110-121`, `1433-1538`). The turn has 10 search steps
 /// for each reduction of the budget, and at least 1. A search turn with no
 /// restart bumps one reduction for each 10 steps that it used, and returns
-/// the match result or the parts. A restart returns `None` with no bump.
+/// the match, the match list, or the parts. A restart returns `None` with
+/// no bump.
 ///
 /// # Examples
 ///
@@ -1026,24 +1159,44 @@ fn find_turn(
     let mut reds = initial;
     let bytes: &[u8] = subject;
     let parts = if find.build.is_some() {
-        split_all(find, subject, &mut reds)
+        // A result build in progress continues with the matches that the
+        // search kept: the integers and the tuples of `binary:matches/2`, or
+        // the parts of `binary:split/2,3`.
+        if find.flags & MATCHES != 0 {
+            match_all(find, &mut reds)
+        } else {
+            split_all(find, subject, &mut reds)
+        }
     } else {
-        let search = match (pattern, find.flags & GLOBAL != 0) {
-            (Pattern::Bm(bm), false) => bm.first(find, bytes, &mut reds),
-            (Pattern::Bm(bm), true) => bm.all(find, bytes, &mut reds),
-            (Pattern::Ac(trie), false) => ac_first(trie, find, bytes, &mut reds),
-            (Pattern::Ac(trie), true) => ac_all(trie, find, bytes, &mut reds),
-        };
-        match search {
-            Search::Restart => None,
-            Search::NotFound if find.flags & MATCH != 0 => Some(Term::static_atom("nomatch")),
-            Search::NotFound => Some(not_found(find.flags, subject)),
-            Search::Found(pos, len) if find.flags & MATCH != 0 => Some(Term::tuple(vec![
-                Term::Integer(pos as i64),
-                Term::Integer(len as i64),
-            ])),
-            Search::Found(pos, len) => Some(split_once(find.flags, subject, pos, len)),
-            Search::FoundAll => split_all(find, subject, &mut reds),
+        // `binary:matches/2` and `binary:split/3` with the option `global`
+        // run a global search, and each other search runs a first-match
+        // search.
+        if find.flags & GLOBAL != 0 {
+            let search = match pattern {
+                Pattern::Bm(bm) => bm.all(find, bytes, &mut reds),
+                Pattern::Ac(trie) => ac_all(trie, find, bytes, &mut reds),
+            };
+            match search {
+                SearchAll::Restart => None,
+                SearchAll::NotFound => Some(not_found(find.flags, subject)),
+                SearchAll::FoundAll if find.flags & MATCHES != 0 => match_all(find, &mut reds),
+                SearchAll::FoundAll => split_all(find, subject, &mut reds),
+            }
+        } else {
+            let search = match pattern {
+                Pattern::Bm(bm) => bm.first(find, bytes, &mut reds),
+                Pattern::Ac(trie) => ac_first(trie, find, bytes, &mut reds),
+            };
+            match search {
+                Search::Restart => None,
+                Search::NotFound if find.flags & MATCH != 0 => Some(Term::static_atom("nomatch")),
+                Search::NotFound => Some(not_found(find.flags, subject)),
+                Search::Found(pos, len) if find.flags & MATCH != 0 => Some(Term::tuple(vec![
+                    Term::Integer(pos as i64),
+                    Term::Integer(len as i64),
+                ])),
+                Search::Found(pos, len) => Some(split_once(find.flags, subject, pos, len)),
+            }
         }
     };
     if parts.is_some() {
@@ -1051,6 +1204,145 @@ fn find_turn(
         process.bump_reductions(i32::try_from(used).unwrap_or(i32::MAX));
     }
     Ok(parts)
+}
+
+/// Run `binary:at/2` as ERTS `binary_at_2` does
+/// (`erl_bif_binary.c:2335-2362`): return the byte at the zero-based
+/// position `index` of the subject as an integer. A subject that is not a
+/// bitstring, an index that is not a non-negative integer, and an index at
+/// or after the end of the subject raise `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // 19
+/// let byte = at(&Term::binary(vec![5, 19, 72]), &Term::Integer(1));
+/// assert!(matches!(byte, BifResult::Value(Term::Integer(19))));
+/// assert!(matches!(at(&Term::binary(vec![5]), &Term::Integer(1)), BifResult::Raise { .. }));
+/// ```
+pub(super) fn at(subject: &Term, index: &Term) -> BifResult {
+    let Term::Binary(bytes) = subject else {
+        return BifResult::badarg();
+    };
+    let Some(index) = to_uint(index).and_then(|index| usize::try_from(index).ok()) else {
+        return BifResult::badarg();
+    };
+    match bytes.get(index) {
+        Some(byte) => Value(Term::Integer(i64::from(*byte))),
+        None => BifResult::badarg(),
+    }
+}
+
+/// Return the value of a term as an `Uint`, as ERTS `term_to_Uint` gives it
+/// (`erl_utils.c`): an integer that is not negative and that fits in a
+/// 64-bit unsigned word. Return `None` for each other term, which includes a
+/// negative integer, an integer above 2^64 - 1, and each term that is not an
+/// integer.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(to_uint(&Term::Integer(2)), Some(2));
+/// assert_eq!(to_uint(&Term::Integer(-1)), None);
+/// ```
+fn to_uint(term: &Term) -> Option<u64> {
+    u64::try_from(&*term.bigint()?).ok()
+}
+
+/// Run `binary:part/2` as ERTS `binary_binary_part_2` does
+/// (`erl_bif_binary.c:2026-2041`): take the `{Position, Length}` tuple of
+/// the second argument and give the part of the subject that
+/// [`part_3`] gives. A second argument that is not a tuple of two elements
+/// raises `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // <<2, 3>>
+/// let part = part_2(&Term::binary(vec![1, 2, 3]), &Term::tuple(vec![Term::Integer(1), Term::Integer(2)]));
+/// assert!(matches!(part, BifResult::Value(Term::Binary(bytes)) if bytes == [2, 3]));
+/// assert!(matches!(part_2(&Term::binary(vec![1]), &Term::Integer(0)), BifResult::Raise { .. }));
+/// ```
+pub(super) fn part_2(subject: &Term, poslen: &Term) -> BifResult {
+    let Term::Tuple(parts) = poslen else {
+        return BifResult::badarg();
+    };
+    let [position, length] = parts.as_ref() else {
+        return BifResult::badarg();
+    };
+    part_3(subject, position, length)
+}
+
+/// Run `binary:part/3` as ERTS `binary_binary_part_3` does
+/// (`erl_bif_binary.c:2021-2024`) and `erlang:binary_part/3` does: return
+/// the `length` bytes of the subject from byte `position`, as
+/// [`erlang::binary_part`] does with `erts_binary_part`
+/// (`erl_bif_binary.c:1954-2012`). A negative length takes the bytes before
+/// the position. The part shares the bytes of the subject, as an ERTS
+/// sub-binary refers to its source.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // <<3, 4>>
+/// let part = part_3(&Term::binary(vec![1, 2, 3, 4]), &Term::Integer(2), &Term::Integer(2));
+/// assert!(matches!(part, BifResult::Value(Term::Binary(bytes)) if bytes == [3, 4]));
+/// assert!(matches!(part_3(&Term::binary(vec![1]), &Term::Integer(0), &Term::Integer(2)), BifResult::Raise { .. }));
+/// ```
+pub(super) fn part_3(subject: &Term, position: &Term, length: &Term) -> BifResult {
+    erlang::binary_part(subject, position, length)
+}
+
+/// Run `binary:copy/1,2` as ERTS `binary_copy_1` and `binary_copy_2` do
+/// (`erl_bif_binary.c:2400-2447`, `2498-2505`): return a binary of the
+/// bytes of the subject `count` times, as a new binary also for the count
+/// of 1. The count of 0 and an empty subject give the empty binary. A
+/// subject that is not a bitstring and a count that is not a non-negative
+/// integer that fits in an `Uint` raise `badarg`. A count of at least
+/// `2^64 - 1` divided by the bit size of the subject raises
+/// `system_limit`, as `erl_bif_binary.c:2423` checks before the copy. The
+/// copy uses one reduction for each 512 bits of the result
+/// (`erl_bif_binary.c:2377`, `2445`). The budget of the turn stops at
+/// 0, so a copy whose charge is larger than the remaining budget
+/// charges that budget only: ERTS resumes its copy after a trap and
+/// charges the next turn too (row "Binary copy reductions" of
+/// `docs/erts-differences.md`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // <<1, 2, 1, 2>>
+/// let copy = copy(&mut process, &Term::binary(vec![1, 2]), &Term::Integer(2));
+/// assert!(matches!(copy, BifResult::Value(Term::Binary(bytes)) if bytes == [1, 2, 1, 2]));
+/// assert!(matches!(copy(&mut process, &Term::binary(vec![1]), &Term::Integer(-1)), BifResult::Raise { .. }));
+/// ```
+pub(super) fn copy(process: &mut ProcessState, subject: &Term, count: &Term) -> BifResult {
+    let Term::Binary(bytes) = subject else {
+        return BifResult::badarg();
+    };
+    let Some(count) = to_uint(count) else {
+        return BifResult::badarg();
+    };
+    // A binary holds at most `usize::MAX` bytes, so its bit size fits in the
+    // low 61 bits of a `u64` and the sums below cannot wrap a `u64` for a
+    // count under the ERTS limit.
+    let bits = bytes.len() as u64 * 8;
+    if count == 0 || bits == 0 {
+        return Value(Term::binary(Vec::new()));
+    }
+    if count >= u64::MAX / bits {
+        return BifResult::Raise {
+            class: ExceptionClass::Error,
+            reason: Term::static_atom("system_limit"),
+        };
+    }
+    let bit_size = bits * count;
+    let mut copied = Vec::with_capacity((bit_size / 8) as usize);
+    for _ in 0..count {
+        copied.extend_from_slice(bytes);
+    }
+    process.bump_reductions(i32::try_from(bit_size / COPY_BITS_PER_REDUCTION).unwrap_or(i32::MAX));
+    Value(Term::binary(copied))
 }
 
 #[cfg(test)]
