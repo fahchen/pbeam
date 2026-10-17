@@ -214,7 +214,7 @@ pub(super) fn new(
     let (Term::Atom(name), Some(options)) = (name, options.proper_list()) else {
         return Ok(BifResult::badarg());
     };
-    let mut table_type = Some(TableType::Set);
+    let mut table_type = TableType::Set;
     let mut named = false;
     let mut access = Access::Protected;
     let mut keypos = 1;
@@ -226,11 +226,11 @@ pub(super) fn new(
         match option {
             Term::Atom(atom) => {
                 if atom.is_static("bag") {
-                    table_type = Some(TableType::Bag);
+                    table_type = TableType::Bag;
                 } else if atom.is_static("duplicate_bag") {
-                    table_type = Some(TableType::DuplicateBag);
+                    table_type = TableType::DuplicateBag;
                 } else if atom.is_static("ordered_set") {
-                    table_type = None;
+                    table_type = TableType::OrderedSet;
                 } else if atom.is_static("named_table") {
                     named = true;
                 } else if atom.is_static("public") {
@@ -280,7 +280,7 @@ pub(super) fn new(
             _ => return Ok(BifResult::badarg()),
         }
     }
-    if (table_type.is_none() && explicit_locks)
+    if (table_type == TableType::OrderedSet && explicit_locks)
         || (named
             && context
                 .scheduler
@@ -289,10 +289,6 @@ pub(super) fn new(
     {
         return Ok(BifResult::badarg());
     }
-    let Some(table_type) = table_type else {
-        // ponytail: no ordered_set tables; see "ETS tables" in docs/erts-differences.md.
-        return Err(error("unsupported ets:new/2 table type ordered_set"));
-    };
     let owner = context.scheduler.current_process_mut().id;
     if let Some(heir) = heir
         && heir != owner
@@ -1030,6 +1026,30 @@ fn check_keypos(tuples: &[&[Term]], keypos: i32, bif: &str) -> Result<(), BeamEr
     Ok(())
 }
 
+/// Return a runtime error for an operation whose result depends on the key
+/// order of an `ordered_set` table. PBeam keeps the hash structure of the
+/// table, so it cannot give the ERTS key order; see "ETS tables" in
+/// `docs/erts-differences.md`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
+/// assert!(reject_ordered_set(&table, "ets:next/2").is_ok());
+/// ```
+///
+/// # Errors
+///
+/// Return the runtime error for an `ordered_set` table.
+fn reject_ordered_set(table: &Table, bif: &str) -> Result<(), BeamError> {
+    if table.table_type() == TableType::OrderedSet {
+        return Err(error(format!(
+            "unsupported {bif} on an ordered_set table (see \"ETS tables\" in docs/erts-differences.md)"
+        )));
+    }
+    Ok(())
+}
+
 /// Return the tuples of `objects` when each one has at least `keypos`
 /// elements, as `ets_insert_2_list_check` (`erl_db.c:1812-1827`) checks
 /// them. A C `int` key position compares with the unsigned arity as a
@@ -1145,7 +1165,7 @@ pub(super) fn lookup_element(
         .collect();
     Ok(match (elements, table.table_type()) {
         (None, _) => BifResult::badarg(),
-        (Some(mut elements), TableType::Set) => Value(elements.remove(0)),
+        (Some(mut elements), TableType::Set | TableType::OrderedSet) => Value(elements.remove(0)),
         (Some(elements), _) => Value(Term::list_from(elements)),
     })
 }
@@ -1271,6 +1291,55 @@ pub(super) fn delete(
     };
     table.delete(&context.scheduler.atoms, key);
     Ok(Value(Term::static_atom("true")))
+}
+
+/// Run `ets:take(Table, Key)`, as ERTS `ets_take_2` (`erl_db.c:1355-1373`)
+/// does through `meth->db_take`, and `db_take_hash`
+/// (`erl_db_hash.c:2949-2995`) does for a hash table: return the objects with
+/// a key that is exactly equal to `Key`, in the order of
+/// [`lookup`], and remove them from the table. A key that the table does not
+/// hold returns `[]`. A table that does not exist or that the caller cannot
+/// write raises `badarg` (`erl_db.c:769-912`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = take(&mut context, &table, &test_atom("k"))?;
+/// assert!(matches!(result, BifResult::Value(objects) if objects.proper_list().is_some_and(|objects| objects.count() == 1)));
+/// ```
+///
+/// # Errors
+///
+/// Return the error of [`ProcessState::bif_reductions_left`] when a busy
+/// table cannot finish its list insert in the turn.
+pub(super) fn take(
+    context: &mut BifContext<'_>,
+    table: &Term,
+    key: &Term,
+) -> Result<BifResult, BeamError> {
+    let caller = context.scheduler.current_process_mut().id;
+    if let Take::Help = help_busy(&mut *context, table)? {
+        return Ok(BifResult::TrapBif {
+            module: "ets",
+            function: "take",
+            arguments: vec![table.clone(), key.clone()],
+        });
+    }
+    let Some(table) =
+        context
+            .scheduler
+            .ets
+            .table(&context.scheduler.atoms, table, caller, Operation::Write)
+    else {
+        return Ok(BifResult::badarg());
+    };
+    let objects: Vec<Term> = table
+        .objects(&context.scheduler.atoms, key)
+        .into_iter()
+        .map(|object| Term::tuple(object.to_vec()))
+        .collect();
+    table.delete(&context.scheduler.atoms, key);
+    Ok(Value(Term::list_from(objects)))
 }
 
 /// Run `ets:delete(Table)`, as ERTS `ets_delete_1` (`erl_db.c:3006-3082`)
@@ -1622,6 +1691,7 @@ fn select_objects(
     else {
         return Ok(BifResult::badarg());
     };
+    reject_ordered_set(table, "ets:select/2,3")?;
     let Some(compiled) = compile_spec(atoms, spec)? else {
         return Ok(BifResult::badarg());
     };
@@ -2090,6 +2160,7 @@ pub(super) fn next(
     else {
         return Ok(BifResult::badarg());
     };
+    reject_ordered_set(table, "ets:next/2")?;
     match table.next_key(atoms, key) {
         Some(Some(next)) => Ok(Value(next)),
         Some(None) => Ok(Value(Term::static_atom("$end_of_table"))),
@@ -2151,7 +2222,7 @@ pub(super) fn update_element(
     else {
         return Ok(BifResult::badarg());
     };
-    if table.table_type() != TableType::Set {
+    if !matches!(table.table_type(), TableType::Set | TableType::OrderedSet) {
         return Ok(BifResult::badarg());
     }
     // `do_update_element` finds the key before it checks the update list, so
@@ -2383,6 +2454,7 @@ pub(super) fn internal_select_delete(
     let Some(found) = context.scheduler.ets.find(atoms, table) else {
         return Ok(BifResult::badarg());
     };
+    reject_ordered_set(found.1, "ets:select_delete/2")?;
     let keypos = found.1.keypos();
     let buckets = found.1.bucket_count();
     if context
