@@ -1,5 +1,6 @@
 -module(bs_create_bin_probe).
--export([prefix/1, around/1, guard/1, catch_bad/1, cost/1, utf16/1]).
+-export([prefix/1, around/1, guard/1, catch_bad/1, cost/1, utf16/1,
+         binary_sized/2]).
 
 %% "count: " <> X in Elixir: a string segment and a binary segment of
 %% size all.
@@ -25,5 +26,9 @@ cost(X) ->
     R1 = element(2, process_info(self(), reductions)),
     {R1 - R0, B}.
 
-%% A utf16 segment, which PBeam does not run yet.
+%% A utf16 segment after a string segment.
 utf16(X) -> <<"b", X/utf16>>.
+
+%% A binary segment of a size in a register, which PBeam does not run yet:
+%% the loader keeps it as an unsupported segment (row "Binary construction").
+binary_sized(X, Size) -> <<X:Size/binary>>.

@@ -181,3 +181,40 @@ fn reports_the_binary_of_the_state() {
     let context = MatchState::new(Binary::from(&[1, 2]));
     assert_eq!(context.binary().to_vec(), vec![1, 2]);
 }
+
+#[test]
+fn matches_a_string_of_bits_at_each_position() {
+    // `i_bs_match_string` compares `Bits` bits at the position with the
+    // string and moves the position past them, or keeps it when fewer bits
+    // remain and when the bits differ (emu bs_instrs.tab:1004-1027).
+    let context = MatchState::new(Binary::from(&b"icrosoft.icon"[..]));
+    // A prefix of the string, then the last two bytes one at a time.
+    assert!(context.match_string(88, b"icrosoft.ic"));
+    assert_eq!(context.position(), 88);
+    assert!(context.match_string(8, b"o"));
+    assert_eq!(context.position(), 96);
+    assert!(context.match_string(8, b"n"));
+    assert_eq!(context.position(), 104);
+    // No bit remains, and the bits differ.
+    assert!(!context.match_string(8, b"x"));
+    assert_eq!(context.position(), 104);
+    // A string of a size that is not a whole number of bytes, at a position
+    // that is not a byte boundary.
+    let context = MatchState::new(Binary::from(&[0xAB, 0xCD][..]));
+    context.skip(4).unwrap();
+    assert!(context.match_string(12, &[0xBC, 0xD0]));
+    assert_eq!(context.position(), 16);
+    assert!(!context.match_string(4, &[0xD0]));
+    assert_eq!(context.position(), 16);
+    // A size of 0 matches at the end of the binary and at its start.
+    assert!(context.match_string(0, b""));
+    assert_eq!(context.position(), 16);
+    let context = MatchState::new(Binary::from(&[1][..]));
+    assert!(context.match_string(0, b""));
+    assert_eq!(context.position(), 0);
+    // Fewer bits remain than the size.
+    assert!(!context.match_string(9, &[0, 1]));
+    assert_eq!(context.position(), 0);
+    assert!(!context.match_string(u64::MAX, b"x"));
+    assert_eq!(context.position(), 0);
+}
