@@ -85,6 +85,10 @@ pub(super) const ERROR_BADOFFSET: c_int = -33;
 /// `PCRE2_ERROR_BADUTFOFFSET` (`pcre2.h:402`): the start offset is not on a
 /// UTF-8 character boundary.
 pub(super) const ERROR_BADUTFOFFSET: c_int = -36;
+/// `PCRE2_ERROR_RECURSELOOP` (`pcre2.h:418`): the pattern recursed without
+/// a match, which `re_run` charges as all reductions of one turn
+/// (`erl_bif_re.c:1751-1754`).
+pub(super) const ERROR_RECURSELOOP: c_int = -52;
 /// `PCRE2_ERROR_MATCHLIMIT` (`pcre2.h:413`).
 pub(super) const ERROR_MATCHLIMIT: c_int = -47;
 /// `PCRE2_ERROR_DEPTHLIMIT` (`pcre2.h:419`), which the obsolete name

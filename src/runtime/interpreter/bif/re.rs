@@ -505,7 +505,9 @@ fn build_capture(
     } else {
         return Ok(None);
     };
-    if is_atom(values, "none") {
+    if is_atom(values, "none") || matches!(values, Term::Nil) {
+        // `build_capture` gives the capture `none` for the atom `none` and
+        // for `[]` (`erl_bif_re.c:1340-1344`).
         return Ok(Some(Capture {
             kind: None,
             groups: Groups::All,
@@ -852,16 +854,6 @@ pub(super) fn run(
         let Some(code) = codes.0.get_mut(magic) else {
             return Ok(BifResult::badarg());
         };
-        // A `newline` or `bsr` option must agree with the compiled code
-        // (`erl_bif_re.c:1609-1632`).
-        if parsed
-            .newline
-            .is_some_and(|newline| code.newline() != newline)
-            || parsed.bsr.is_some_and(|bsr| code.bsr() != bsr)
-        {
-            return Ok(BifResult::badarg());
-        }
-        stored_code = Some(*magic);
         pairs = ovec_pairs;
         if pattern_unicode != 0 && (!binary_subject || (list_cap && !global)) {
             return Ok(urun_trap(subject, pattern, options));
@@ -877,6 +869,16 @@ pub(super) fn run(
                 ],
             });
         }
+        // A `newline` or `bsr` option must agree with the compiled code
+        // (`erl_bif_re.c:1609-1632`).
+        if parsed
+            .newline
+            .is_some_and(|newline| code.newline() != newline)
+            || parsed.bsr.is_some_and(|bsr| code.bsr() != bsr)
+        {
+            return Ok(BifResult::badarg());
+        }
+        stored_code = Some(*magic);
     } else {
         // The text pattern (`erl_bif_re.c:1516-1577`).
         if !is_text_pattern(pattern) {
@@ -996,7 +998,13 @@ pub(super) fn run(
         data.clear_restart();
         rc = data.resume();
     }
-    let used = (limit - data.loops_left()) / LOOP_FACTOR;
+    // A pattern that recursed without a match charges all reductions of
+    // one turn and gives `nomatch` (`erl_bif_re.c:1751-1754`).
+    let used = if rc == pcre2::ERROR_RECURSELOOP {
+        CONTEXT_REDS
+    } else {
+        (limit - data.loops_left()) / LOOP_FACTOR
+    };
     // A bad UTF-8 subject uses the whole budget of the turn and raises
     // `badarg` (`erl_bif_re.c:1756-1786`); a bad offset, code, or mode
     // raises it with no charge at all.

@@ -2,7 +2,7 @@
 -export([main/0, options/0, errors/0, badarg/0, iodata/0, unicode_list/0,
          export/0, unsupported/1, id/1,
          run2/0, run/0, captures/0, globals/0, run_errors/0, reductions/0,
-         spot/0, internal_run_first/0, yield/0]).
+         spot/0, internal_run_first/0, yield/0, recursion/0]).
 
 %% prim_tty:init/1 compiles the ANSI regular expression (prim_tty.erl:238).
 %% The fifth element is a reference (erl_bif_re.c:607-609).
@@ -120,7 +120,8 @@ run() ->
          re:run(<<"abc">>, Compiled, [{newline, lf}]),
          re:run(<<"abc">>, Compiled, [bsr_unicode]),
          re:run("abc", CompiledUnicode, []),
-         re:run(<<"abc">>, {re_pattern, -1, 0, 0, CRef}, [])].
+         re:run(<<"abc">>, {re_pattern, -1, 0, 0, CRef}, []),
+         re:run(<<>>, {re_pattern, 0, 0, 0, CRef}, [global, {offset, 1}, {newline, crlf}])].
 
 run_cases() ->
     [{<<"abc">>, <<"b">>, []},
@@ -161,7 +162,8 @@ run_cases() ->
      {<<"abc">>, <<"a(b">>, [report_errors]},
      {<<"aaaaaaaaaaaaaz">>, <<"(a+)*z">>,
       [{match_limit_recursion, 1}, report_errors]},
-     {<<"abc">>, <<"b">>, [caseless, global]}].
+     {<<"abc">>, <<"b">>, [caseless, global]},
+     {<<"abc">>, <<"(a)(b)?">>, [{capture, [], index}]}].
 
 %% Each capture value and type, on a match with a group that did not take
 %% part in the match (build_exec_return, erl_bif_re.c:1047-1256).
@@ -279,6 +281,12 @@ repeat(N, Part, Size, Block, Acc) when Size =< N ->
 repeat(N, Part, _, _, Acc) -> repeat(N, Part, 1, Part, Acc).
 
 id(X) -> X.
+
+%% A pattern that recurses without a match (PCRE2_ERROR_RECURSELOOP,
+%% pcre2.h:418) charges one turn of reductions and gives nomatch
+%% (erl_bif_re.c:1751-1754). Only the value is compared.
+recursion() ->
+    [re:run(<<"x">>, <<"(?R)">>, []), re:run(<<"xx">>, <<"a(?R)">>, [])].
 
 %% A match that uses the loop limit of one turn continues with a fresh
 %% budget (`erl_bif_re.c:1730-1748`, `1852-1866`). The reduction total of

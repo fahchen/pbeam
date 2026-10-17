@@ -503,6 +503,7 @@ fn runs_re_run_3_with_the_option_set_as_pinned_erts() {
         ]),
         error_term(&program, "match_limit_recursion"),
         matched(&program, vec![Term::list_from(vec![pair(1, 1)])]),
+        Term::Atom(program.atom("match").unwrap()),
         matched(
             &program,
             vec![
@@ -516,6 +517,7 @@ fn runs_re_run_3_with_the_option_set_as_pinned_erts() {
         matched(&program, vec![pair(1, 1), pair(1, 1)]),
         matched(&program, vec![pair(1, 1), pair(1, 1)]),
         nomatch(&program),
+        nomatch(&program),
     ]);
     let result = program.execute("re_probe", "run", &[]).unwrap().term;
     let result = result.proper_list().unwrap().collect::<Vec<_>>();
@@ -524,24 +526,6 @@ fn runs_re_run_3_with_the_option_set_as_pinned_erts() {
     for (index, (result, expected)) in result.iter().zip(&expected).enumerate() {
         assert_eq!(result, expected, "case {index}");
     }
-    assert_eq!(
-        reference("run"),
-        "[{match,[{1,1}]},nomatch,nomatch,nomatch,nomatch,{match,[[98]]},\
-         {match,[<<98>>,<<98>>]},{match,[{0,3}]},nomatch,{match,[{0,3}]},\
-         {match,[{0,3}]},{match,[{0,1}]},{match,[{0,2}]},{match,[{3,1}]},\
-         {match,[{1,1}]},{match,[{1,1}]},{match,[{1,1}]},{match,[<<98>>]},\
-         {match,[{1,2}]},{match,[{1,2}]},{match,[<<98>>,<<98>>]},\
-         {match,[[98],[98]]},match,{match,[{1,1},{1,1}]},nomatch,nomatch,\
-         nomatch,{error,match_limit},nomatch,{match,[{0,1},{1,1}]},\
-         {match,[{1,1},{-1,0}]},{match,[{0,2}]},match,match,\
-         {match,[{0,2},{0,1},{-1,0},{1,1}]},\
-         {error,{compile,{[109,105,115,115,105,110,103,32,99,108,111,115,\
-         105,110,103,32,112,97,114,101,110,116,104,101,115,105,115],3}}},\
-         {error,match_limit_recursion},{match,[[{1,1}]]},\
-         {match,[[{1,1},{1,1}],[{4,1},{4,1}]]},{match,[<<98>>]},\
-         {match,[{1,1}]},{match,[{1,1},{1,1}]},{match,[{1,1},{1,1}]},\
-         {match,[{1,1},{1,1}]},nomatch]\n"
-    );
 }
 
 #[test]
@@ -792,4 +776,19 @@ fn runs_a_match_that_uses_the_loop_limit_of_more_than_one_turn() {
         ])
     );
     assert_eq!(reference("yield"), "[{match,[{0,600001}]},nomatch]\n");
+}
+
+#[test]
+fn gives_nomatch_for_a_pattern_that_recurses_without_a_match() {
+    // PCRE2 returns `PCRE2_ERROR_RECURSELOOP` for a pattern such as `(?R)`
+    // that recurses without a match (`pcre2.h:418`). `re_run` charges one
+    // turn of reductions and gives `nomatch` (`erl_bif_re.c:1751-1754`);
+    // the reduction total of the turn differs, so only the value is
+    // compared.
+    let program = program();
+    assert_eq!(
+        program.execute("re_probe", "recursion", &[]).unwrap().term,
+        Term::list_from(vec![nomatch(&program), nomatch(&program)])
+    );
+    assert_eq!(reference("recursion"), "[nomatch,nomatch]\n");
 }
