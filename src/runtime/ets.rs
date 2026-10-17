@@ -1668,10 +1668,7 @@ impl Table {
             }
             let mut remaining = i64::try_from(reds).unwrap_or(i64::MAX);
             let mut charge = 0;
-            loop {
-                let Some(left) = clearing.free else {
-                    break;
-                };
+            while let Some(left) = clearing.free {
                 if left == 0 {
                     // Each segment is free, and the next turn creates the
                     // table (`db_create_hash`, `erl_db_hash.c:4036-4037`).
