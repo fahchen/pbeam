@@ -1108,3 +1108,43 @@ fn skips_a_pseudo_deleted_object_for_the_newest_live_object_as_pinned_erts() {
     );
     assert_eq!(reference("fixtable_bag_skip_deleted"), b"[[{k,1}]]\n");
 }
+
+#[test]
+fn keeps_a_bag_key_with_a_deleted_node_and_a_live_object_as_pinned_erts() {
+    // The chain node of the key is pseudo-deleted, but the key still has a
+    // live object, so the next key passes the key
+    // (`erl_db_hash.c:1147-1200`).
+    fixture_fixed("fixtable_next_live_behind_node", Term::Integer(2), b"[2]\n");
+}
+
+#[test]
+fn clears_the_live_objects_behind_a_deleted_node_as_pinned_erts() {
+    // The clear of a fixed table frees every live object of the key, also
+    // behind a pseudo-deleted chain node (`erl_db_hash.c:4027-4028`).
+    fixture_fixed("fixtable_clear_behind_node", Term::nil(), b"[[]]\n");
+}
+
+#[test]
+fn restores_a_bag_object_behind_a_deleted_node_as_pinned_erts() {
+    // The insert restores the pseudo-deleted object and moves it to the
+    // head of the object list (`erl_db_hash.c:1426-1437`).
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    let object = |value| Term::tuple(vec![atom("k"), Term::Integer(value)]);
+    assert_eq!(
+        program
+            .execute("ets_probe", "fixtable_bag_restore_behind_node", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![Term::list_from(vec![
+            object(1),
+            object(3),
+            object(4),
+            object(2),
+        ])])
+    );
+    assert_eq!(
+        reference("fixtable_bag_restore_behind_node"),
+        b"[[{k,1},{k,3},{k,4},{k,2}]]\n"
+    );
+}

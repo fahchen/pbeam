@@ -19,7 +19,9 @@
          fixtable_ordered_set/0, fixtable_safe_fixed/0,
          fixtable_bag_repeat/0, fixtable_bag_partial/0,
          fixtable_bag_double_delete/0, fixtable_bag_restore/0,
-         fixtable_bag_last_live/0, fixtable_bag_skip_deleted/0]).
+         fixtable_bag_last_live/0, fixtable_bag_skip_deleted/0,
+         fixtable_next_live_behind_node/0, fixtable_clear_behind_node/0,
+         fixtable_bag_restore_behind_node/0]).
 
 %% ets:new/2 return values and badarg cases (erl_db.c:2555-2840).
 new() ->
@@ -1021,6 +1023,41 @@ fixtable_bag_skip_deleted() ->
     ets:safe_fixtable(T, true),
     ets:internal_select_delete(T, [{{k, 2}, [], [true]}]),
     ets:internal_select_delete(T, [{{k, 3}, [], [true]}]),
+    Objects = ets:lookup(T, k),
+    ets:safe_fixtable(T, false),
+    [Objects].
+
+%% A key whose chain node is pseudo-deleted still comes next while one of
+%% its older objects is live.
+fixtable_next_live_behind_node() ->
+    T = ets:new(ets_probe_fix_next_live_behind_node, [bag]),
+    ets:insert(T, [{1, a}, {2, a}, {2, b}, {2, c}]),
+    ets:safe_fixtable(T, true),
+    ets:internal_select_delete(T, [{{2, c}, [], [true]}]),
+    Next = ets:next(T, 1),
+    ets:safe_fixtable(T, false),
+    [Next].
+
+%% The clear of a fixed bag also frees the live objects behind a
+%% pseudo-deleted chain node.
+fixtable_clear_behind_node() ->
+    T = ets:new(ets_probe_fix_clear_behind_node, [bag]),
+    ets:insert(T, [{k, 1}, {k, 2}]),
+    ets:safe_fixtable(T, true),
+    ets:internal_select_delete(T, [{{k, 2}, [], [true]}]),
+    ets:internal_delete_all(T, undefined),
+    Objects = ets:lookup(T, k),
+    ets:safe_fixtable(T, false),
+    [Objects].
+
+%% The insert of an object that a select delete kept restores it at the
+%% head of the object list.
+fixtable_bag_restore_behind_node() ->
+    T = ets:new(ets_probe_fix_bag_restore_behind_node, [bag]),
+    ets:insert(T, [{k, 1}, {k, 2}, {k, 3}, {k, 4}]),
+    ets:safe_fixtable(T, true),
+    ets:internal_select_delete(T, [{{k, 2}, [], [true]}]),
+    ets:insert(T, [{k, 2}]),
     Objects = ets:lookup(T, k),
     ets:safe_fixtable(T, false),
     [Objects].

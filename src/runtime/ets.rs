@@ -1085,7 +1085,7 @@ impl Table {
     fn next_live_after(&self, mut bucket: usize, mut slot: usize) -> Option<Term> {
         loop {
             while slot != EMPTY {
-                if !self.is_deleted(slot) {
+                if !self.is_deleted(slot) || self.object_chain_has_live(slot) {
                     return Some(self.key(self.object_of(slot)).clone());
                 }
                 slot = self.next[slot];
@@ -1101,6 +1101,11 @@ impl Table {
     /// Return whether the slot holds a pseudo-deleted object.
     fn is_deleted(&self, slot: usize) -> bool {
         self.deleted.get(slot).copied().unwrap_or(false)
+    }
+
+    /// Return whether the key of the chain node `node` has a live object.
+    fn object_chain_has_live(&self, node: usize) -> bool {
+        links(node, &self.older).any(|slot| !self.is_deleted(slot))
     }
 
     /// Return the slot of the chain node of the key with the stored hash
@@ -1181,6 +1186,36 @@ impl Table {
             object = self.older[object];
         }
         None
+    }
+
+    /// Restore the pseudo-deleted object in the slot `slot` as the newest
+    /// object of its key, as the insert of an object that a fixed table
+    /// keeps does (`erl_db_hash.c:1426-1437`): the object becomes live and
+    /// moves to the head of the object chain.
+    fn restore_object(&mut self, slot: usize, hash: u64, key: &Term) {
+        self.deleted[slot] = false;
+        self.deleted_objects -= 1;
+        let node = self
+            .chain_node(hash, key)
+            .expect("a live key has a chain node");
+        if slot != node {
+            let mut previous = node;
+            while self.older[previous] != slot {
+                previous = self.older[previous];
+            }
+            self.older[previous] = self.older[slot];
+            let bucket = self.bucket(hash);
+            let before = self.key_before(bucket, node);
+            self.next[slot] = std::mem::replace(&mut self.next[node], EMPTY);
+            self.older[slot] = node;
+            self.link(bucket, before, slot);
+        }
+        let current = self
+            .position(hash, key)
+            .expect("a key with a pseudo-deleted object is live");
+        self.index.replace(hash, current, slot);
+        self.retain_record(hash, key, slot);
+        self.writes += 1;
     }
 
     /// Free each pseudo-deleted object and remove it from its object chain,
@@ -1295,7 +1330,7 @@ impl Table {
             // and keeps its bucket chains (`erl_db_hash.c:4027-4028`).
             for bucket in 0..self.buckets {
                 for slot in self.chain_keys(bucket).collect::<Vec<_>>() {
-                    if self.is_deleted(slot) {
+                    if !self.object_chain_has_live(slot) {
                         continue;
                     }
                     let key = self.key(self.object_of(slot)).clone();
@@ -1711,7 +1746,10 @@ impl Table {
             Some(index) => index,
             None => {
                 let key = self.key(&object).clone();
-                let cursor = self.position(hash, &key).unwrap_or(EMPTY);
+                // ERTS compares the new object with the first object of
+                // the key's list first, and that object stays the chain
+                // node when it is pseudo-deleted (`erl_db_hash.c:1423-1442`).
+                let cursor = self.chain_node(hash, &key).unwrap_or(EMPTY);
                 walks.push(BagWalk::new(key, cursor));
                 walks.len() - 1
             }
@@ -1719,7 +1757,18 @@ impl Table {
         let walk = &mut walks[index];
         let object_hash = object_hash(&object);
         match walk.find(self, object_hash, &object) {
-            Some(count) => count,
+            Some(count) => {
+                if let Some(slot) = walk.seen.get(&object_hash).and_then(|pairs| {
+                    pairs
+                        .iter()
+                        .find(|(_, slot)| self.object_of(*slot).as_slice() == object)
+                        .map(|(_, slot)| *slot)
+                }) && self.is_deleted(slot)
+                {
+                    self.restore_object(slot, hash, &walk.key);
+                }
+                count
+            }
             None => {
                 let count = walk.added + walk.walked;
                 let node = self.chain_node(hash, &walk.key).unwrap_or(EMPTY);
