@@ -35,9 +35,6 @@
     setupterm/0,
     tigetnum/0,
     tigetflag/0,
-    tinfo/0,
-    tigetstr/0,
-    tputs/0,
     halt_run/0,
     system_flag/0,
     load_nif/0,
@@ -203,12 +200,6 @@ setupterm() -> attempt(fun() -> prim_tty:setupterm_nif() end).
 tigetnum() -> attempt(fun() -> prim_tty:tigetnum_nif("co\0") end).
 
 tigetflag() -> attempt(fun() -> prim_tty:tigetflag_nif("xn\0") end).
-
-tinfo() -> attempt(fun() -> prim_tty:tinfo_nif() end).
-
-tigetstr() -> attempt(fun() -> prim_tty:tigetstr_nif("cup\0") end).
-
-tputs() -> attempt(fun() -> prim_tty:tputs_nif("cup\0", []) end).
 
 %% A permitted halt stops the run with the status 3.
 halt_run() -> attempt(fun() -> erlang:halt(3, []) end).

@@ -35,7 +35,7 @@ const INVENTORY: &str = include_str!("../../docs/effect-inventory.md");
 /// Each capability of the column "Capability" of the effect inventory, as
 /// `(entry, kind:operation)`, with the `effect_probe` function that calls
 /// the entry once.
-const PROBES: [(&str, &str, &str); 61] = [
+const PROBES: [(&str, &str, &str); 58] = [
     ("erlang:exit/2", "process:exit_other", "exit_other"),
     ("erlang:link/1", "process:link", "link"),
     ("erlang:monitor/2", "process:monitor", "monitor2"),
@@ -113,9 +113,6 @@ const PROBES: [(&str, &str, &str); 61] = [
     ("prim_tty:setupterm_nif/0", "terminal:setup", "setupterm"),
     ("prim_tty:tigetflag_nif/1", "terminal:query", "tigetflag"),
     ("prim_tty:tigetnum_nif/1", "terminal:query", "tigetnum"),
-    ("prim_tty:tinfo_nif/0", "terminal:query", "tinfo"),
-    ("prim_tty:tigetstr_nif/1", "terminal:query", "tigetstr"),
-    ("prim_tty:tputs_nif/2", "terminal:query", "tputs"),
     ("prim_tty:tty_create/1", "terminal:query", "tty_create"),
     ("prim_tty:tty_init/2", "terminal:raw_mode", "tty_init"),
     ("prim_tty:tty_select/2", "terminal:read", "tty_select"),

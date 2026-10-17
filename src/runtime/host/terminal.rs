@@ -3,13 +3,9 @@
 //! `prim_tty` NIFs does (`erts/emulator/nifs/common/prim_tty_nif.c`).
 
 use std::{
-    cell::RefCell,
-    ffi::{CStr, c_char, c_int, c_long, c_void},
+    ffi::{CStr, c_char, c_int, c_void},
     ptr,
-    sync::{
-        Mutex,
-        atomic::{AtomicPtr, Ordering},
-    },
+    sync::atomic::{AtomicPtr, Ordering},
 };
 
 use super::errno::errno;
@@ -29,26 +25,6 @@ unsafe extern "C" {
     fn del_curterm(terminal: *mut c_void) -> c_int;
     fn tgetnum(id: *const c_char) -> c_int;
     fn tgetflag(id: *const c_char) -> c_int;
-    fn wcwidth(wc: libc::wchar_t) -> c_int;
-    fn tigetstr(cap: *const c_char) -> *mut c_char;
-    /// `tparm` is variadic on the supported hosts (`NCURSES_TPARM_VARARGS`
-    /// is defined in the curses header of macOS and of the Linux build that
-    /// mise installs).
-    fn tparm(cap: *const c_char, ...) -> *mut c_char;
-    fn tputs(cap: *const c_char, count: c_int, putc: extern "C" fn(c_int) -> c_int) -> c_int;
-    /// The name tables of ncurses, each one terminated by a null pointer.
-    /// Each table is an array of `char *`, so the declaration uses a
-    /// zero-length array: the address of the symbol is the address of the
-    /// first entry, and a load from it would read that entry.
-    static boolnames: [*const c_char; 0];
-    static boolcodes: [*const c_char; 0];
-    static boolfnames: [*const c_char; 0];
-    static numnames: [*const c_char; 0];
-    static numcodes: [*const c_char; 0];
-    static numfnames: [*const c_char; 0];
-    static strnames: [*const c_char; 0];
-    static strcodes: [*const c_char; 0];
-    static strfnames: [*const c_char; 0];
     /// The current terminal of curses, which `setupterm` sets.
     static mut cur_term: *mut c_void;
 }
@@ -190,226 +166,6 @@ pub(crate) fn termcap_flag(code: &CStr) -> bool {
     unsafe { tgetflag(code.as_ptr()) != 0 }
 }
 
-/// The result of `tigetstr` for one termcap code, as `tty_tigetstr_nif`
-/// (`prim_tty_nif.c:865-881`) gives it.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum TermcapString {
-    /// The current terminal has no such capability: `false`.
-    Missing,
-    /// The capability code is invalid: `badarg`.
-    Invalid,
-    /// The capability string: `{ok, Binary}`.
-    Value(Vec<u8>),
-}
-
-/// Return the string capability `code` of the current terminal with the
-/// curses `tigetstr`, as `tty_tigetstr_nif` (`prim_tty_nif.c:865-881`)
-/// does. A null result is `false`, the pointer -1 is `badarg`, and each
-/// other result is the bytes before the first NUL.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// // TERM=vt100, after setupterm()
-/// assert!(matches!(termcap_string(c"cup"), TermcapString::Value(_)));
-/// assert_eq!(termcap_string(c"zz"), TermcapString::Missing);
-/// ```
-pub(crate) fn termcap_string(code: &CStr) -> TermcapString {
-    // SAFETY: `code` is a NUL-terminated string. `tigetstr` reads the
-    // current terminal, and its result is null, -1, or a NUL-terminated
-    // string.
-    unsafe {
-        let result = tigetstr(code.as_ptr());
-        if result.is_null() {
-            TermcapString::Missing
-        } else if result as isize == -1 {
-            TermcapString::Invalid
-        } else {
-            TermcapString::Value(CStr::from_ptr(result).to_bytes().to_vec())
-        }
-    }
-}
-
-/// The name, the code, and the full name of one capability of a curses
-/// table, as `tty_tinfo_make_map` (`prim_tty_nif.c:794-815`) writes them.
-pub(crate) type TermcapEntry = (Vec<u8>, Vec<u8>, Vec<u8>);
-
-/// Return the three capability lists of the curses library, as
-/// `tty_tinfo_nif` (`prim_tty_nif.c:818-839`) does: the boolean, numeric,
-/// and string capabilities, each as a [`TermcapEntry`]. The list is in the
-/// reverse order of the ncurses table, as `enif_make_list_cell` prepends
-/// each entry.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// let [booleans, numbers, strings] = tinfo();
-/// assert_eq!(booleans.len(), 44);
-/// assert_eq!(numbers.len(), 39);
-/// assert!(strings.len() > 400);
-/// ```
-pub(crate) fn tinfo() -> [Vec<TermcapEntry>; 3] {
-    // SAFETY: the statics are the ncurses capability tables, which are
-    // read-only after the library starts. `as_ptr` gives the address of each
-    // table, and `tinfo_list` stops at the first null of each table and
-    // copies the strings.
-    let tables = unsafe {
-        [
-            (boolnames.as_ptr(), boolcodes.as_ptr(), boolfnames.as_ptr()),
-            (numnames.as_ptr(), numcodes.as_ptr(), numfnames.as_ptr()),
-            (strnames.as_ptr(), strcodes.as_ptr(), strfnames.as_ptr()),
-        ]
-    };
-    tables.map(|(names, codes, full_names)| tinfo_list(names, codes, full_names))
-}
-
-/// Return the entries of the three ncurses tables `names`, `codes`, and
-/// `full_names` up to the first null of each table, in the reverse order of
-/// the tables.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// assert!(tinfo_list(boolnames, boolcodes, boolfnames).len() == 44);
-/// ```
-fn tinfo_list(
-    names: *const *const c_char,
-    codes: *const *const c_char,
-    full_names: *const *const c_char,
-) -> Vec<TermcapEntry> {
-    let mut entries = Vec::new();
-    let mut index = 0;
-    // SAFETY: the three pointers are the null-terminated ncurses tables,
-    // and the loop stops at the first null of each of them.
-    unsafe {
-        loop {
-            let name = *names.add(index);
-            let code = *codes.add(index);
-            let full_name = *full_names.add(index);
-            if name.is_null() || code.is_null() || full_name.is_null() {
-                break;
-            }
-            entries.push((
-                CStr::from_ptr(name).to_bytes().to_vec(),
-                CStr::from_ptr(code).to_bytes().to_vec(),
-                CStr::from_ptr(full_name).to_bytes().to_vec(),
-            ));
-            index += 1;
-        }
-    }
-    entries.reverse();
-    entries
-}
-
-// The bytes that the `tputs` callback writes.
-thread_local! {
-    static TPUTC_BUFFER: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
-}
-
-/// The lock of `tparm` and `tputs`, because neither function is thread safe
-/// (`prim_tty_nif.c:947-948`, `980`).
-static TPUTC_LOCK: Mutex<()> = Mutex::new(());
-
-/// The `putc` callback of `tputs` (`prim_tty_nif.c:898-919`): append the
-/// byte to [`TPUTC_BUFFER`] and give 0.
-extern "C" fn tputs_putc(byte: c_int) -> c_int {
-    TPUTC_BUFFER.with_borrow_mut(|buffer| buffer.push(byte as u8));
-    0
-}
-
-/// Emit the expansion `expanded` with `tputs`, as `tty_tputs_nif`
-/// (`prim_tty_nif.c:956-986`) does: a null result of `tparm` gives its
-/// `errno`, and each other result writes its bytes through the `putc`
-/// callback. ERTS ignores the result of `tputs`, which fails only for a
-/// null string.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// assert!(emit_expanded(std::ptr::null_mut()).is_err());
-/// assert_eq!(emit_expanded(c"cup".as_ptr().cast_mut()), Ok(b"cup".to_vec()));
-/// ```
-///
-/// # Errors
-///
-/// The `errno` of a failed `tparm`.
-fn emit_expanded(expanded: *mut c_char) -> Result<Vec<u8>, c_int> {
-    if expanded.is_null() {
-        return Err(errno());
-    }
-    // SAFETY: `expanded` is a NUL-terminated string from `tparm` or from
-    // the capability code. `tputs` writes through the `putc` callback,
-    // which only appends to `TPUTC_BUFFER`, and `TPUTC_LOCK` serializes it.
-    unsafe {
-        TPUTC_BUFFER.with_borrow_mut(Vec::clear);
-        let _ = tputs(expanded, 1, tputs_putc);
-        Ok(TPUTC_BUFFER.with_borrow(Clone::clone))
-    }
-}
-
-/// Expand and emit the capability `code` with `params`, as
-/// `tty_tputs_nif` (`prim_tty_nif.c:922-986`) does with `tparm` and
-/// `tputs`: the first nine `params` replace the `tparm` parameters, an
-/// empty list emits the bytes of `code` unchanged, and the result is the
-/// bytes that `tputs` writes. A failed `tparm` gives its `errno`.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// // TERM=vt100, after setupterm()
-/// assert!(termcap_expand(c"cup", &[1, 2]).is_ok());
-/// ```
-///
-/// # Errors
-///
-/// The `errno` of a failed `tparm`.
-pub(crate) fn termcap_expand(code: &CStr, params: &[i64]) -> Result<Vec<u8>, c_int> {
-    let _guard = TPUTC_LOCK.lock().expect("the tputs lock is not poisoned");
-    let mut values = [0 as c_long; 9];
-    for (value, param) in values.iter_mut().zip(params) {
-        *value = *param as c_long;
-    }
-    // SAFETY: `code` is a NUL-terminated string. `tparm` reads the current
-    // terminal and gives null or a NUL-terminated string that stays valid
-    // until the next `tparm`.
-    let expanded = unsafe {
-        if params.is_empty() {
-            code.as_ptr().cast_mut()
-        } else {
-            tparm(
-                code.as_ptr(),
-                values[0],
-                values[1],
-                values[2],
-                values[3],
-                values[4],
-                values[5],
-                values[6],
-                values[7],
-                values[8],
-            )
-        }
-    };
-    emit_expanded(expanded)
-}
-
-/// Return the width of the code point `codepoint` with `wcwidth`, as
-/// `wcwidth_nif` (`prim_tty_nif.c:309-325`) does. A width of -1 is a code
-/// point that is not printable.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// // LC_CTYPE=C.UTF-8
-/// assert_eq!(char_width('a' as c_int), 1);
-/// assert_eq!(char_width(0x4e2d), 2);
-/// ```
-pub(crate) fn char_width(codepoint: c_int) -> c_int {
-    // SAFETY: `wcwidth` reads the current locale and its tables, and it
-    // only reads the argument.
-    unsafe { wcwidth(codepoint as libc::wchar_t) }
-}
-
 /// Return the window size of the terminal as `(columns, rows)`, as
 /// `tty_window_size_nif` (`prim_tty_nif.c:1179-1189`) reads it: the
 /// `TIOCGWINSZ` size of fd 0, or of `ofd` only when fd 0 fails. A count of
@@ -545,7 +301,3 @@ pub(crate) fn raw_mode(mode: &libc::termios) -> libc::termios {
     }
     raw
 }
-
-#[cfg(test)]
-#[path = "../../../tests/runtime/host/terminal.rs"]
-mod tests;

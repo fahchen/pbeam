@@ -455,52 +455,6 @@ fn debug_text(text: &str) -> String {
 }
 
 #[test]
-fn reads_the_termcap_strings_and_char_widths_as_pinned_erts() {
-    // `tty_nif_probe:extras/0` calls `setlocale/1`, `setupterm_nif/0`,
-    // `tinfo_nif/0`, `tigetstr_nif/1`, `tputs_nif/2`, and `wcwidth/1`. It
-    // digests the three capability lists of `tinfo_nif/0` and the results of
-    // the other calls, so the test compares the exact answers of the pinned
-    // ERTS and of PBeam on the same host. The capability lists keep the
-    // order of the ncurses tables. A `TERM` with a terminfo entry gives
-    // capability strings, `false` for a capability that the terminal has
-    // without a value, and `badarg` for an invalid capability name. A
-    // `TERM` without a terminfo entry leaves curses without a current
-    // terminal, so each capability name gives `badarg`.
-    for term in ["vt100", "pbeam-unknown-term"] {
-        let environment = [("TERM", term)];
-        let erts = String::from_utf8(run_erts_nif_probe(FILES, &environment, "extras")).unwrap();
-        let numbers: Vec<u64> = erts
-            .trim()
-            .trim_start_matches('[')
-            .trim_end_matches(']')
-            .split(',')
-            .map(|number| number.parse().unwrap())
-            .collect();
-        assert_eq!(numbers.len(), 7, "{term} {erts}");
-        assert!(numbers[6] > 400, "{term} {erts}");
-        let expected = format!(
-            "Ok(List([{}]))",
-            numbers
-                .iter()
-                .map(|number| format!("Integer({number})"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-        assert_eq!(
-            String::from_utf8(run_isolated(
-                FILES,
-                &environment,
-                "tty_nif_probe:extras",
-                &[TTY_NIF_PROBE, STAND_IN]
-            ))
-            .unwrap(),
-            expected,
-            "{term}"
-        );
-    }
-}
-
-#[test]
 fn sets_the_terminal_mode_with_tty_init() {
     // `tty_nif_probe:init/0` calls `prim_tty:tty_init/2`. A term that is not
     // a map, three terms that are not a TTY resource (an atom, a
