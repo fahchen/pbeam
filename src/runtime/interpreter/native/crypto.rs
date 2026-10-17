@@ -310,6 +310,21 @@ fn known_digest(name: &str) -> bool {
     )
 }
 
+/// Return whether the pinned libcrypto was built without `name`, so its
+/// `md.p` is NULL (`digest.c:25-179`). The pinned macOS ERTS has no MD4
+/// support, and its `crypto:pbkdf2_hmac(md4, ...)` gives `"md.p is not
+/// NULL"` at `pbkdf2_hmac.c:38`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(unavailable_digest("md4"));
+/// assert!(!unavailable_digest("md5"));
+/// ```
+fn unavailable_digest(name: &str) -> bool {
+    name == "md4"
+}
+
 /// Run `crypto:hash_nif(Type, Data)` as the ERTS NIF `hash_nif`
 /// (`hash.c:101-164`) does. `Data` is a binary: the only caller,
 /// `crypto:hash/2`, converts the iodata first (`crypto.erl:1092-1095`).
@@ -401,7 +416,16 @@ fn pbkdf2_hmac_nif(
         _ => "",
     };
     let Some(hash) = Hash::from_name(name) else {
-        return if known_digest(name) {
+        return if unavailable_digest(name) {
+            c_error(
+                scheduler,
+                "badarg",
+                "pbkdf2_hmac.c",
+                38,
+                0,
+                "md.p is not NULL",
+            )
+        } else if known_digest(name) {
             c_error(
                 scheduler,
                 "badarg",
@@ -429,6 +453,21 @@ fn pbkdf2_hmac_nif(
         Term::Binary(salt) if salt.bit_size() % 8 == 0 => salt,
         _ => return c_error(scheduler, "badarg", "pbkdf2_hmac.c", 46, 2, "Not binary"),
     };
+    // The C code allocates the key before it calls `PKCS5_PBKDF2_HMAC`
+    // (pbkdf2_hmac.c:55-61), and takes the key length as a `size_t`, so a
+    // 32-bit host gives the allocation failure for a larger value.
+    let key_length = usize::try_from(key_length).unwrap_or(usize::MAX);
+    let mut output = Vec::new();
+    if output.try_reserve_exact(key_length).is_err() {
+        return c_error(
+            scheduler,
+            "error",
+            "pbkdf2_hmac.c",
+            56,
+            -1,
+            "Can't allocate binary",
+        );
+    }
     // `PKCS5_PBKDF2_HMAC` takes the iterations as a C `int`
     // (pbkdf2_hmac.c:58-61), so the high 32 bits do not count.
     let iterations = (iterations as u32) as i32;
@@ -440,20 +479,6 @@ fn pbkdf2_hmac_nif(
             63,
             -1,
             "Low-level call failed",
-        );
-    }
-    // The C code takes the key length as a `size_t`, so a 32-bit host
-    // gives the allocation failure below for a larger value.
-    let key_length = usize::try_from(key_length).unwrap_or(usize::MAX);
-    let mut output = Vec::new();
-    if output.try_reserve_exact(key_length).is_err() {
-        return c_error(
-            scheduler,
-            "error",
-            "pbkdf2_hmac.c",
-            56,
-            -1,
-            "Can't allocate binary",
         );
     }
     hash.pbkdf2(password, salt, iterations, key_length, &mut output);

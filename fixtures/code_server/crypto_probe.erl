@@ -1,5 +1,5 @@
 -module(crypto_probe).
--export([main/0, nifs/0, hash_init/0, hash_large/0]).
+-export([main/0, nifs/0, info/0, hash_init/0, hash_large/0]).
 
 %% Write the results of crypto:strong_rand_bytes/1, one term on each line.
 %% The first call loads crypto on demand, and its -on_load function loads
@@ -31,7 +31,7 @@ nifs() ->
               || Digest <- Digests],
     Pbkdf2Errors = [bad_reason(fun() -> crypto:pbkdf2_hmac(Type, Pass, Salt, Iter, KeyLen) end) ||
                        {Type, Pass, Salt, Iter, KeyLen} <-
-                           [{md5, <<"p">>, <<"s">>, 1, 16},
+                           [{sha3_256, <<"p">>, <<"s">>, 1, 16},
                             {nosuch, <<"p">>, <<"s">>, 1, 16},
                             {sha, <<"p">>, <<"s">>, 0, 16},
                             {sha, <<"p">>, <<"s">>, -1, 16},
@@ -58,14 +58,21 @@ nifs() ->
                        Value <- [crypto:strong_rand_range(Range)]],
     RangeErrors = [bad_reason(fun() -> crypto:strong_rand_range(Range) end) ||
                       Range <- [0, -1, 1.0, a, <<0>>, <<>>, <<0, 0>>]],
-    Info = crypto:info(),
-    InfoFields = [{Key, maps:get(Key, Info)} ||
-                     Key <- [compile_type, link_type, cryptolib_version_compiled,
-                             cryptolib_version_linked, fips_provider_available,
-                             otp_crypto_version]],
     io:format("~p~n", [[Hashes, HashErrors, Pbkdf2, Pbkdf2Errors, Pbkdf2Wrapped,
-                        Ranges, RangeOne, BinaryRanges, BinaryShapes, RangeErrors,
-                        InfoFields, crypto:info_lib()]]).
+                        Ranges, RangeOne, BinaryRanges, BinaryShapes, RangeErrors]]).
+
+%% Write the fields of crypto:info/0 and crypto:info_lib/0 that do not
+%% depend on the libcrypto build of the host. The pinned ERTS links a
+%% different OpenSSL on macOS and Linux, so the version fields and the link
+%% type stay out of the comparison.
+info() ->
+    Fields = crypto:info(),
+    [{Name, Number, Text}] = crypto:info_lib(),
+    io:format("~p~n", [[lists:sort(maps:keys(Fields)),
+                        maps:get(compile_type, Fields),
+                        maps:get(fips_provider_available, Fields),
+                        maps:get(otp_crypto_version, Fields),
+                        {Name, is_integer(Number), is_binary(Text)}]]).
 
 %% Call crypto:hash_init/1, whose NIF hash_init_nif/1 PBeam does not link.
 hash_init() ->

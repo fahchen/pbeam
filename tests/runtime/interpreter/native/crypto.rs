@@ -305,7 +305,7 @@ fn checks_the_pbkdf2_arguments_in_the_erts_order() {
         Term,
         (&'static str, &'static str, i64, i64, &'static str),
     );
-    let cases: [Case; 10] = [
+    let cases: [Case; 11] = [
         (
             sha.clone(),
             password.clone(),
@@ -345,6 +345,14 @@ fn checks_the_pbkdf2_arguments_in_the_erts_order() {
             Term::Integer(1),
             Term::Integer(0),
             ("badarg", "pbkdf2_hmac.c", 84, 4, "Must be > 0"),
+        ),
+        (
+            atom(&mut scheduler, "md4"),
+            password.clone(),
+            salt.clone(),
+            Term::Integer(1),
+            Term::Integer(16),
+            ("badarg", "pbkdf2_hmac.c", 38, 0, "md.p is not NULL"),
         ),
         (
             atom(&mut scheduler, "md5"),
@@ -465,7 +473,7 @@ fn gives_the_allocation_error_of_a_key_length_that_does_not_fit() {
         &sha,
         &Term::binary(b"password".to_vec()),
         &Term::binary(b"salt".to_vec()),
-        &Term::Integer(1),
+        &Term::Integer(1 << 32),
         &Term::BigInt(std::sync::Arc::new(num_bigint::BigInt::from(u64::MAX))),
     )
     .unwrap();

@@ -207,6 +207,14 @@ fn runs_the_linked_crypto_nifs_as_pinned_erts() {
         run(&mut pbeam_probe(CRYPTO_PROBE, "crypto_probe", "nifs", &[])),
         erts
     );
+    // The pinned ERTS links a different libcrypto on macOS and Linux, so the
+    // version fields and the link type stay out of this comparison. The unit
+    // test checks the full pinned values of a PBeam build.
+    let erts = run(&mut erts_probe(CRYPTO_PROBE, "crypto_probe", "info", &[]));
+    assert_eq!(
+        run(&mut pbeam_probe(CRYPTO_PROBE, "crypto_probe", "info", &[])),
+        erts
+    );
 }
 
 #[test]
