@@ -97,3 +97,22 @@ fn reads_no_byte_of_an_iodata_that_has_no_budget() {
             .is_none()
     );
 }
+
+#[test]
+fn stops_a_walk_at_the_budget_before_the_next_element() {
+    // The walk of ERTS stops when its budget is 0, before it reads the next
+    // element, so the rest holds that element and the empty list after it
+    // (`erl_bif_chksum.c:118-160`, `205-212`). The pinned ERTS gives
+    // `erlang:md5([1, 2, []])` the same digest as `erlang:md5([1, 2])`, and
+    // a walk with a budget of 2 holds the rest `[[]]`.
+    let list = Term::list_from([Term::Integer(1), Term::Integer(2), Term::nil()]);
+    let mut budget = 2;
+    let mut bytes = Vec::new();
+    let rest = read(&list, &mut budget, &mut |part| {
+        bytes.extend_from_slice(part)
+    })
+    .unwrap()
+    .expect("the walk does not read the last element");
+    assert_eq!(bytes, [1, 2]);
+    assert_eq!(rest, Term::list_from([Term::nil()]));
+}

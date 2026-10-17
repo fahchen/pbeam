@@ -379,6 +379,13 @@ fn read(term: &Term, budget: &mut u64, sum: &mut impl FnMut(&[u8])) -> Result<Op
     let mut tails: Vec<Term> = Vec::new();
     let mut current = term.clone();
     loop {
+        // The walk of ERTS stops at the budget before it reads the next
+        // element, also when that element is an empty list or the budget ends
+        // at the end of a list level (`erl_bif_chksum.c:118-160`, `205-212`).
+        if *budget == 0 {
+            flush(&mut run, sum);
+            return Ok(Some(rest_term(current.clone(), tails)));
+        }
         match &current {
             Term::Nil => {}
             Term::Binary(binary) => {
@@ -390,15 +397,17 @@ fn read(term: &Term, budget: &mut u64, sum: &mut impl FnMut(&[u8])) -> Result<Op
                     return Err(());
                 }
                 let size = bit_size / 8;
-                if size as u64 > *budget {
-                    let taken = *budget as usize;
-                    sum(&binary[..taken]);
-                    *budget = 0;
+                let taken = (size as u64).min(*budget) as usize;
+                // The runs read the bytes without joining the parts of a
+                // binary that an append built.
+                for run in binary.byte_runs(0, taken) {
+                    sum(run);
+                }
+                *budget -= taken as u64;
+                if taken < size {
                     let rest = Term::Binary(binary.bits(taken * 8, bit_size));
                     return Ok(Some(rest_term(rest, tails)));
                 }
-                sum(&binary[..size]);
-                *budget -= size as u64;
             }
             Term::Cons(_) => {
                 let (head, rest) = current.cons_cell().expect("the term is a list");
@@ -412,10 +421,6 @@ fn read(term: &Term, budget: &mut u64, sum: &mut impl FnMut(&[u8])) -> Result<Op
                         continue;
                     }
                     Term::Integer(value @ 0..=255) => {
-                        if *budget == 0 {
-                            flush(&mut run, sum);
-                            return Ok(Some(rest_term(current.clone(), tails)));
-                        }
                         run.push(value as u8);
                         *budget -= 1;
                         current = rest;
@@ -435,7 +440,12 @@ fn read(term: &Term, budget: &mut u64, sum: &mut impl FnMut(&[u8])) -> Result<Op
         // The current term is read: continue with the tail of the list above
         // it, or end the walk.
         match tails.pop() {
-            Some(tail) => current = tail,
+            Some(tail) => {
+                // ERTS reads each flat list level with its own update call,
+                // so the run ends with the level (`erl_bif_chksum.c:120-160`).
+                flush(&mut run, sum);
+                current = tail;
+            }
             None => {
                 flush(&mut run, sum);
                 return Ok(None);
