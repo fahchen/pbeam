@@ -1766,6 +1766,13 @@ impl Table {
                 }) && self.is_deleted(slot)
                 {
                     self.restore_object(slot, hash, &walk.key);
+                    // The restored object is the first object of the key,
+                    // so the next object of the run compares from it
+                    // (`erl_db_hash.c:1431-1435`).
+                    walk.cursor = slot;
+                    walk.walked = 0;
+                    walk.added = 0;
+                    walk.seen.clear();
                 }
                 count
             }

@@ -926,6 +926,35 @@ fn compares_the_keys_of_an_ordered_set_by_the_arithmetic_order() {
 }
 
 #[test]
+fn counts_the_bag_comparisons_after_a_restore() {
+    // The restored object moves to the first position, so the second insert
+    // of the object compares with it at once (`erl_db_hash.c:1426-1442`).
+    let mut atoms = AtomTable::new();
+    let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Bag);
+    let key = Term::Atom(atoms.put("k").unwrap());
+    table.insert_all(
+        &atoms,
+        vec![
+            vec![key.clone(), Term::Integer(1)],
+            vec![key.clone(), Term::Integer(2)],
+            vec![key.clone(), Term::Integer(3)],
+        ],
+    );
+    table.fix(ProcessId(0));
+    assert!(table.delete_object(&atoms, &[key.clone(), Term::Integer(1)]));
+    assert_eq!(
+        table.insert_all(
+            &atoms,
+            vec![
+                vec![key.clone(), Term::Integer(1)],
+                vec![key.clone(), Term::Integer(1)],
+            ],
+        ),
+        vec![2, 0]
+    );
+}
+
+#[test]
 fn counts_the_bag_comparisons_of_a_fixed_key() {
     // An insert into a fixed bag compares the new object with each object
     // of the key that the fixation keeps, and each comparison that is not
