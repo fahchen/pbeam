@@ -1,6 +1,7 @@
 -module(re_probe).
 -export([main/0, options/0, errors/0, badarg/0, iodata/0, unicode_list/0,
-         export/0, unsupported/1, id/1,
+         export/0, imported/0, imported_run/0, imported_badarg/0,
+         unsupported/1, id/1,
          run2/0, run/0, captures/0, globals/0, run_errors/0, reductions/0,
          spot/0, internal_run_first/0, yield/0, yield_charge/0, recursion/0,
          unexpected_error/0, forged_pairs/0, recursion_after_restart/0]).
@@ -89,6 +90,129 @@ export() ->
                        [bsr_anycrlf, bsr_unicode],
                        [bsr_unicode, bsr_anycrlf]]]
     ++ [re:compile(<<"(">>, [export])].
+
+%% re:import/1 (re_import_1, erl_bif_re.c:703-796). A valid export
+%% decodes with PCRE2 and gives the pattern tuple without `ok`. The unicode
+%% element is the unicode byte of the header, also when it is not 0 or 1.
+%% An export from another encode version, PCRE2 version, or architecture
+%% re-compiles Source with Options.
+imported() ->
+    [import_info(re:import(Export)) || Export <- import_exports()]
+    ++ [catch_error(fun() -> re:import(Term) end)
+        || Term <- import_badarg_terms()]
+    ++ [import_info(re:import(Export)) || Export <- import_fallbacks()].
+
+import_exports() ->
+    Plain = exported_pattern(<<"a(b)">>, [export]),
+    [Plain,
+     exported_pattern(<<"(a)(?:b)(c)">>, [export]),
+     exported_pattern(<<"a(b)">>, [unicode, export]),
+     exported_pattern(<<"(*CRLF)a(b)">>, [export]),
+     with_header(Plain, 1, 7),
+     header_extra(Plain)].
+
+imported_run() ->
+    [re:run(<<"zab">>, re:import(Export), [{capture, all, list}])
+     || Export <- import_exports()].
+
+imported_badarg() ->
+    re:import(foo).
+
+import_fallbacks() ->
+    Plain = exported_pattern(<<"a(b)">>, [export]),
+    {re_exported_pattern, _, _, [export], _} = Plain,
+    UnicodeOptions = [unicode, export],
+    Version2 = with_header(Plain, 2, 0),
+    [Version2,
+     with_options(Version2, UnicodeOptions),
+     set_encoded(Version2, notbin),
+     zero_word(Plain, 0),
+     zero_word(Plain, 4),
+     zero_word(Plain, 8)].
+
+import_badarg_terms() ->
+    Plain = exported_pattern(<<"a(b)">>, [export]),
+    {re_exported_pattern, H, S, O, E} = Plain,
+    <<T:8/binary, C:32, V:8, U:8>> = H,
+    Version2 = with_header(Plain, 2, 0),
+    [foo,
+     {re_exported_pattern},
+     {re_exported_pattern, H, S, O},
+     {re_exported_pattern, H, S, O, E, extra},
+     {other, H, S, O, E},
+     {re_exported_pattern, notbin, S, O, E},
+     {re_exported_pattern, binary:part(H, 0, 13), S, O, E},
+     {re_exported_pattern, <<"re-PCRE3", (binary:part(H, 8, 6))/binary>>,
+      S, O, E},
+     {re_exported_pattern, <<T/binary, (C bxor 1):32, V, U>>, S, O, E},
+     {re_exported_pattern, H, S, O, notbin},
+     with_source(Version2, notbin),
+     with_source(Version2, <<"(">>),
+     with_options(Version2, [export, global]),
+     with_options(Version2, foo),
+     with_encoded(Plain, binary:part(E, 0, 16))].
+
+exported_pattern(Pattern, Options) ->
+    element(2, re:compile(Pattern, Options)).
+
+%% Return Export with a header of Version and Unicode, and the checksum of
+%% its encoded binary.
+with_header({re_exported_pattern, H, S, O, E}, Version, Unicode) ->
+    <<T:8/binary, _:32, _:16>> = H,
+    {re_exported_pattern,
+     <<T/binary, (crc32(E)):32, Version, Unicode>>, S, O, E}.
+
+%% Return Export with Encoded and the checksum of Encoded. A header of
+%% another encode version keeps the checksum but ERTS does not read it.
+with_encoded({re_exported_pattern, H, S, O, _}, Encoded) ->
+    <<T:8/binary, _:32, V:8, U:8>> = H,
+    {re_exported_pattern,
+     <<T/binary, (crc32(Encoded)):32, V, U>>, S, O, Encoded}.
+
+%% Return Export with Encoded replaced and the header kept.
+set_encoded({re_exported_pattern, H, S, O, _}, Encoded) ->
+    {re_exported_pattern, H, S, O, Encoded}.
+
+%% Return Export with Source replaced.
+with_source({re_exported_pattern, H, _, O, E}, Source) ->
+    {re_exported_pattern, H, Source, O, E}.
+
+%% Return Export with Options replaced.
+with_options({re_exported_pattern, H, S, _, E}, Options) ->
+    {re_exported_pattern, H, S, Options, E}.
+
+%% Return Export with the header followed by bytes that ERTS ignores.
+header_extra({re_exported_pattern, H, S, O, E}) ->
+    {re_exported_pattern, <<H/binary, "extra">>, S, O, E}.
+
+%% Return Export with the four bytes of Encoded at Offset set to zero and
+%% the checksum of the new Encoded. Offset 0 is the magic number, 4 is the
+%% PCRE2 version, and 8 is the PCRE2 configuration
+%% (pcre2_serialize.c:53-61).
+zero_word({re_exported_pattern, H, S, O, E}, Offset) ->
+    <<A:Offset/binary, _:32, B/binary>> = E,
+    with_encoded({re_exported_pattern, H, S, O, E}, <<A/binary, 0:32, B/binary>>).
+
+import_info({re_pattern, Count, Unicode, Crlf, Ref}) when is_reference(Ref) ->
+    {Count, Unicode, Crlf};
+import_info(Other) ->
+    Other.
+
+%% The zlib CRC-32 of Bin, as calc_checksum (erl_bif_re.c:635-639) gets
+%% it with crc32(0, bytes, size).
+crc32(Bin) ->
+    crc32(Bin, 16#FFFFFFFF) bxor 16#FFFFFFFF.
+
+crc32(<<Byte, Rest/binary>>, Crc) ->
+    crc32(Rest, crc32_byte(Crc bxor Byte, 8));
+crc32(<<>>, Crc) ->
+    Crc.
+
+crc32_byte(Crc, 0) ->
+    Crc;
+crc32_byte(Crc, N) ->
+    Mask = case Crc band 1 of 1 -> 16#EDB88320; 0 -> 0 end,
+    crc32_byte((Crc bsr 1) bxor Mask, N - 1).
 
 %% Calls that ERTS runs and PBeam does not support yet.
 unsupported(chardata) -> re:compile(foo, [unicode]);

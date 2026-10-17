@@ -313,8 +313,124 @@ pub(super) fn compile(
     if parsed.flags & FLAG_EXPORT != 0 {
         return Ok(Value(export(&code, unicode, bytes, options)));
     }
-    let result = compile_result(context, code, unicode)?;
+    let result = compile_result(context, code, unicode.into())?;
     Ok(Value(Term::tuple(vec![Term::static_atom("ok"), result])))
+}
+
+/// Run `re:import(Exported)` as `re_import_1` (`erl_bif_re.c:703-796`)
+/// does, in its order:
+///
+/// 1. A term that is not a 5-tuple, or whose first element is not
+///    `re_exported_pattern`, raises `badarg` (`erl_bif_re.c:722-728`).
+/// 2. `Header` must be a binary of at least 14 bytes that starts with
+///    `re-PCRE2` (`erl_bif_re.c:730-734`).
+/// 3. With encode version 1, `Encoded` must be a binary whose zlib CRC-32
+///    equals the checksum of the header (`erl_bif_re.c:749-759`). A failed
+///    check raises `badarg`.
+/// 4. With encode version 1 and a matching checksum, PCRE2 decodes
+///    `Encoded`, and the unicode byte of the header becomes the unicode
+///    element of the result (`erl_bif_re.c:759-781`).
+/// 5. A decoded code gives `{re_pattern, CaptureCount, Unicode, UseCrlf,
+///    Ref}`, with no `ok` (`build_compile_result`,
+///    `erl_bif_re.c:581-615`).
+/// 6. When the encode version, the magic number, the PCRE2 version, or the
+///    PCRE2 configuration does not match, `Source` and `Options` are
+///    compiled again as `re:compile/2` does, but a bad option, a source
+///    that is not a binary, and a compile error raise `badarg`
+///    (`erl_bif_re.c:765-789`, `927-949`). The unicode element then comes
+///    from the options.
+/// 7. Any other decode error raises `badarg` (`erl_bif_re.c:790-795`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let options = Term::list_from(vec![Term::static_atom("export")]);
+/// let compiled = compile(&mut context, &Term::binary(b"(a)".to_vec()), &options)?;
+/// let BifResult::Value(Term::Tuple(ok)) = compiled else { panic!() };
+/// let exported = &ok[1];
+/// // {re_pattern, 1, 0, 0, Ref}
+/// assert!(matches!(import(&mut context, exported)?, BifResult::Value(Term::Tuple(_))));
+/// assert!(matches!(import(&mut context, &Term::static_atom("foo"))?, BifResult::Raise { .. }));
+/// ```
+pub(super) fn import(
+    context: &mut BifContext<'_>,
+    exported: &Term,
+) -> Result<BifResult, BeamError> {
+    let Term::Tuple(elements) = exported else {
+        return Ok(BifResult::badarg());
+    };
+    let [tag, header, source, options, encoded] = elements.as_ref() else {
+        return Ok(BifResult::badarg());
+    };
+    if !is_atom(tag, "re_exported_pattern") {
+        return Ok(BifResult::badarg());
+    }
+    let Term::Binary(header) = header else {
+        return Ok(BifResult::badarg());
+    };
+    let header: &[u8] = header;
+    if header.len() < EXPORT_HEADER_SIZE || header[..EXPORT_TITLE.len()] != EXPORT_TITLE[..] {
+        return Ok(BifResult::badarg());
+    }
+    if header[EXPORT_VERSION_OFFSET] == EXPORT_VERSION {
+        let Term::Binary(encoded) = encoded else {
+            return Ok(BifResult::badarg());
+        };
+        let checksum = u32::from_be_bytes(
+            header[EXPORT_CHECKSUM_OFFSET..EXPORT_VERSION_OFFSET]
+                .try_into()
+                .expect("the header holds the checksum"),
+        );
+        if checksum != crc32(encoded) {
+            return Ok(BifResult::badarg());
+        }
+        let unicode = header[EXPORT_UNICODE_OFFSET];
+        match pcre2::deserialize(encoded) {
+            pcre2::Deserialized::Code(code) => {
+                return Ok(Value(compile_result(context, code, unicode)?));
+            }
+            pcre2::Deserialized::Incompatible => {}
+            pcre2::Deserialized::Invalid => return Ok(BifResult::badarg()),
+        }
+    }
+    import_fallback(context, source, options)
+}
+
+/// Compile the source and options of an export that PCRE2 did not decode,
+/// as the fallback of `re_import_1` (`erl_bif_re.c:783-788`) and
+/// `re_compile` with `is_import` (`erl_bif_re.c:891-955`) do. The source
+/// must be a binary, the options must parse and hold no execution option,
+/// and the source must compile; each other result is `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let source = Term::binary(b"(a)".to_vec());
+/// let options = Term::list_from(vec![Term::static_atom("unicode")]);
+/// // {re_pattern, 1, 1, 0, Ref}
+/// assert!(matches!(import_fallback(&mut context, &source, &options)?, BifResult::Value(Term::Tuple(_))));
+/// assert!(matches!(import_fallback(&mut context, &Term::Integer(1), &Term::nil())?, BifResult::Raise { .. }));
+/// ```
+fn import_fallback(
+    context: &mut BifContext<'_>,
+    source: &Term,
+    options: &Term,
+) -> Result<BifResult, BeamError> {
+    let Term::Binary(source) = source else {
+        return Ok(BifResult::badarg());
+    };
+    let Some(parsed) = parse_options(&context.scheduler.atoms, options) else {
+        return Ok(BifResult::badarg());
+    };
+    if parsed.flags & FLAG_UNIQUE_EXEC_OPT != 0 {
+        return Ok(BifResult::badarg());
+    }
+    let unicode = parsed.flags & FLAG_UNICODE != 0;
+    let code = match pcre2::compile(source, parsed.compile, parsed.newline, parsed.bsr) {
+        Ok(code) => code,
+        Err(_) => return Ok(BifResult::badarg()),
+    };
+    Ok(Value(compile_result(context, code, unicode.into())?))
 }
 
 /// Return `{error, {Message, Offset}}`, or `{error, {Tag, {Message,
@@ -359,7 +475,7 @@ fn compile_error(failure: &pcre2::CompileError, tag: Option<&str>) -> Term {
 /// ```rust,ignore
 /// let code = pcre2::compile(b"(a)", pcre2::UTF, None, None).unwrap();
 /// // {re_pattern, 1, 1, 0, Ref}
-/// let result = compile_result(&mut context, code, true)?;
+/// let result = compile_result(&mut context, code, 1)?;
 /// assert!(matches!(result, Term::Tuple(_)));
 /// ```
 ///
@@ -369,7 +485,7 @@ fn compile_error(failure: &pcre2::CompileError, tag: Option<&str>) -> Term {
 fn compile_result(
     context: &mut BifContext<'_>,
     code: pcre2::Code,
-    unicode: bool,
+    unicode: u8,
 ) -> Result<Term, BeamError> {
     let use_crlf = matches!(
         code.newline(),
@@ -907,7 +1023,7 @@ pub(super) fn run(
             Ok(code) if global => {
                 // The pattern becomes a compiled pattern, and the call
                 // continues in `re:grun/3` (`erl_bif_re.c:1557-1572`).
-                let precompiled = compile_result(context, code, unicode)?;
+                let precompiled = compile_result(context, code, unicode.into())?;
                 let clean = match parsed.flags & FLAG_UNIQUE_COMPILE_OPT != 0 {
                     true => "true",
                     false => "false",
@@ -1120,6 +1236,18 @@ const EXPORT_TITLE: &[u8; 8] = b"re-PCRE2";
 /// The encode version of the header of an exported pattern,
 /// `EXPORTED_ENCODE_VERSION` (`erl_bif_re.c:633`).
 const EXPORT_VERSION: u8 = 1;
+/// The size of the header of an exported pattern, `EXPORTED_HDR_SZ`
+/// (`erl_bif_re.c:617-626`).
+const EXPORT_HEADER_SIZE: usize = 14;
+/// The offset of the checksum in that header, `EXPORTED_HDR_CHECKSUM_OFFS`
+/// (`erl_bif_re.c:623`).
+const EXPORT_CHECKSUM_OFFSET: usize = 8;
+/// The offset of the encode version in that header,
+/// `EXPORTED_HDR_ENCODE_VER_OFFS` (`erl_bif_re.c:624`).
+const EXPORT_VERSION_OFFSET: usize = 12;
+/// The offset of the unicode byte in that header,
+/// `EXPORTED_HDR_UNICODE_OFFS` (`erl_bif_re.c:625`).
+const EXPORT_UNICODE_OFFSET: usize = 13;
 
 /// Return `{ok, {re_exported_pattern, Header, Source, Options, Encoded}}`,
 /// as `build_compile_export` (`erl_bif_re.c:644-700`) makes it:

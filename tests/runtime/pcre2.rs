@@ -1,6 +1,81 @@
 use super::*;
 
 #[test]
+fn decodes_the_serialized_bytes_of_a_compiled_code() {
+    // `pcre2_serialize_decode` rebuilds the code with the default allocator,
+    // as `the_precomp_general_ctx` does for `re:import/1`
+    // (erl_bif_re.c:761-763).
+    let code = compile(b"(a)", 0, None, None).unwrap();
+    let encoded = code.serialize();
+    let Deserialized::Code(code) = deserialize(&encoded) else {
+        panic!("the serialized bytes of a code decode");
+    };
+    assert_eq!(code.capture_count(), 1);
+    assert_eq!(code.newline(), NEWLINE_LF);
+}
+
+#[test]
+fn reports_incompatible_and_invalid_serialized_bytes() {
+    // A wrong magic number, PCRE2 version, or PCRE2 configuration makes
+    // `re:import/1` re-compile the source (erl_bif_re.c:783-788). Each
+    // other error gives `badarg` (erl_bif_re.c:790-795). The pbeam check
+    // also stops bytes that PCRE2 would read past, because ERTS gives it no
+    // length.
+    let code = compile(b"a", 0, None, None).unwrap();
+    let encoded = code.serialize();
+    let word = std::mem::size_of::<usize>();
+    // SAFETY: the layout functions read no memory.
+    let (header, tables, blocksize_offset, count_offset, magic_offset) = unsafe {
+        (
+            pbeam_pcre2_serialized_header_size(),
+            pbeam_pcre2_serialized_tables_size(),
+            pbeam_pcre2_serialized_blocksize_offset(),
+            pbeam_pcre2_serialized_number_of_codes_offset(),
+            pbeam_pcre2_serialized_magic_offset(),
+        )
+    };
+    let mut bad_magic = encoded.clone();
+    bad_magic[..4].fill(0);
+    assert!(matches!(
+        deserialize(&bad_magic),
+        Deserialized::Incompatible
+    ));
+    let mut bad_version = encoded.clone();
+    bad_version[4..8].fill(0);
+    assert!(matches!(
+        deserialize(&bad_version),
+        Deserialized::Incompatible
+    ));
+    let mut bad_config = encoded.clone();
+    bad_config[8..12].fill(0);
+    assert!(matches!(
+        deserialize(&bad_config),
+        Deserialized::Incompatible
+    ));
+    let mut no_codes = encoded.clone();
+    no_codes[count_offset..count_offset + 4].fill(0);
+    assert!(matches!(deserialize(&no_codes), Deserialized::Invalid));
+    assert!(matches!(
+        deserialize(&encoded[..header - 1]),
+        Deserialized::Invalid
+    ));
+    assert!(matches!(
+        deserialize(&encoded[..header + tables]),
+        Deserialized::Invalid
+    ));
+    let mut forged = encoded.clone();
+    let at = header + tables + blocksize_offset;
+    forged[at..at + word].copy_from_slice(&usize::MAX.to_ne_bytes());
+    assert!(matches!(deserialize(&forged), Deserialized::Invalid));
+    // The magic number of the first code block, after a valid header and
+    // block size, makes the decode itself fail.
+    let mut bad_code = encoded.clone();
+    let at = header + tables + magic_offset;
+    bad_code[at..at + 4].fill(0);
+    assert!(matches!(deserialize(&bad_code), Deserialized::Invalid));
+}
+
+#[test]
 fn gives_unknown_error_for_a_code_that_pcre2_does_not_know() {
     // ERTS: "Unknown error (%d)" for PCRE2_ERROR_BADDATA
     // (erl_bif_re.c:812-815).
