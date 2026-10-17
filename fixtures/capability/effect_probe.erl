@@ -531,9 +531,9 @@ ambient() ->
         element(1, prim_file:make_symlink("target", "/pbeam-missing/link")),
         element(1, prim_file:rename("/pbeam-missing", "/pbeam-missing2")),
         element(1, prim_file:set_cwd("/pbeam-missing")),
-        element(1, prim_file:write_file_info("/pbeam-missing", #file_info{uid = 0, gid = 0, atime = 0, mtime = 0, ctime = 0}, [{time, posix}])),
-        element(1, prim_file:write_file_info("/pbeam-missing", #file_info{mode = 8#644, atime = 0, mtime = 0, ctime = 0}, [{time, posix}])),
-        element(1, prim_file:write_file_info("/pbeam-missing", #file_info{atime = 0, mtime = 0, ctime = 0}, [{time, posix}])),
+        set_owner_probe(),
+        set_permissions_probe(),
+        set_time_probe(),
         is_binary(erlang:term_to_binary(1)),
         is_binary(erlang:term_to_binary(1, [])),
         erlang:binary_to_term(erlang:term_to_binary(1)) =:= 1,
@@ -541,6 +541,30 @@ ambient() ->
         erlang:external_size(<<1, 2, 3>>),
         erlang:read_timer(make_ref())
     ].
+
+%% Each metadata probe makes a temporary file, so `write_file_info/3`
+%% reaches `set_owner_nif/3`, `set_permissions_nif/2`, and `set_time_nif/4`.
+set_owner_probe() ->
+    metadata_probe("owner", fun(Path) ->
+        prim_file:write_file_info(Path, #file_info{uid = undefined, gid = undefined, atime = 0, mtime = 0, ctime = 0}, [{time, posix}])
+    end).
+
+set_permissions_probe() ->
+    metadata_probe("permissions", fun(Path) ->
+        prim_file:write_file_info(Path, #file_info{mode = 8#644, atime = 0, mtime = 0, ctime = 0}, [{time, posix}])
+    end).
+
+set_time_probe() ->
+    metadata_probe("time", fun(Path) ->
+        prim_file:write_file_info(Path, #file_info{atime = 0, mtime = 0, ctime = 0}, [{time, posix}])
+    end).
+
+metadata_probe(Name, Operation) ->
+    Path = "/tmp/pbeam-effect-" ++ Name ++ "-" ++ os:getpid(),
+    ok = prim_file:write_file(Path, <<>>),
+    Result = Operation(Path),
+    ok = prim_file:delete(Path),
+    Result.
 
 %% Open /dev/null in write mode, write, move the position, and close it
 %% with prim_file. A write-only file keeps no prim_buffer read buffer
