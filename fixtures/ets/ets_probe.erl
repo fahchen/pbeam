@@ -911,6 +911,11 @@ ordered_set() ->
                   ets:lookup_element(T, 1.0, 2, undefined),
                   ets:update_element(T, 1.0, {2, updated}),
                   ets:lookup(T, 1),
+                  %% A replacement moves the key to the new exactly equal
+                  %% term, and its stored hash.
+                  ets:insert(T, {1.0, replaced}),
+                  ets:lookup(T, 1),
+                  ets:insert_new(T, {1, other}),
                   ets:take(T, 1.0),
                   ets:lookup(T, 1),
                   ets:lookup(T, {2.0, a}),
