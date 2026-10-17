@@ -2151,10 +2151,10 @@ fn help_table(context: &mut BifContext<'_>, table: &Term) -> Result<(), BeamErro
 /// not `true` or `false`, and a term that is not a table of the run, raise
 /// `badarg`. ERTS reads the table before it checks the second argument.
 ///
-/// PBeam does not keep the ERTS traversal guarantees of a fixed table: a
-/// key that another process deletes between two `ets:next/2` calls ends the
-/// traversal, and a table that grows or shrinks between the calls can skip
-/// or repeat a key (row "ETS tables" of `docs/erts-differences.md`).
+/// While a table is fixed, `ets:delete/2` keeps the key of each deleted
+/// object as a ghost, so `ets:next/2` from that key continues the
+/// traversal, and the table does not split or join a bucket
+/// (`erl_db_hash.c:49-60`). The exit of a process removes its fixations.
 ///
 /// # Examples
 ///
@@ -2181,15 +2181,22 @@ pub(super) fn safe_fixtable(
     }
     // ERTS reads the table before it checks the second argument
     // (`erl_db.c:1146-1161`).
-    let known = context
-        .scheduler
-        .ets
-        .table(&context.scheduler.atoms, table, caller, Operation::Read)
-        .is_some();
-    if !known {
+    let Some(known) =
+        context
+            .scheduler
+            .ets
+            .table(&context.scheduler.atoms, table, caller, Operation::Read)
+    else {
         return Ok(BifResult::badarg());
-    }
-    if !matches!(flag, Term::Atom(atom) if atom.is_one_of(&["true", "false"])) {
+    };
+    let Term::Atom(flag) = flag else {
+        return Ok(BifResult::badarg());
+    };
+    if flag.is_one_of(&["true"]) {
+        known.fix(caller);
+    } else if flag.is_one_of(&["false"]) {
+        known.unfix(caller);
+    } else {
         return Ok(BifResult::badarg());
     }
     Ok(Value(Term::static_atom("true")))

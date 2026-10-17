@@ -700,3 +700,66 @@ fn returns_the_safe_fixtable_results_of_pinned_erts() {
         b"[true,true,true,true,{error,badarg},{error,badarg},{error,badarg},{error,badarg}]\n"
     );
 }
+
+#[test]
+fn keeps_a_deleted_key_of_a_fixed_table_for_next_as_pinned_erts() {
+    // A fixed table keeps the key of each deleted object for ets:next/2
+    // (`erl_db_hash.c:49-60`), and an unfixed table gives badarg for a key
+    // that the table does not hold.
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    assert_eq!(
+        program.execute("ets_probe", "fixtable", &[]).unwrap().term,
+        Term::list_from(vec![
+            atom("$end_of_table"),
+            Term::tuple(vec![atom("error"), atom("badarg")]),
+        ])
+    );
+    assert_eq!(reference("fixtable"), b"['$end_of_table',{error,badarg}]\n");
+}
+
+#[test]
+fn continues_a_fixed_traversal_over_deleted_keys_as_pinned_erts() {
+    // Each deleted key follows the deleted key before it, so the walk ends
+    // at the end of the table (`erl_db_hash.c:49-60`).
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    assert_eq!(
+        program
+            .execute("ets_probe", "fixtable_chain", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![atom("$end_of_table")])
+    );
+    assert_eq!(reference("fixtable_chain"), b"['$end_of_table']\n");
+}
+
+#[test]
+fn keeps_the_size_of_a_fixed_table_as_pinned_erts() {
+    // An insert or a delete while the table is fixed does not split or join
+    // a bucket (`erl_db_hash.c:49-60`); the size still counts the objects.
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    assert_eq!(
+        program
+            .execute("ets_probe", "fixtable_resize", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![Term::Integer(10_000), Term::Integer(0)])
+    );
+    assert_eq!(reference("fixtable_resize"), b"[10000,0]\n");
+}
+
+#[test]
+fn gives_the_next_live_key_of_a_fixed_table_as_pinned_erts() {
+    // The ghost of the deleted key holds its successor, so `ets:next/2`
+    // gives the live key after it (`erl_db_hash.c:49-60`).
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    assert_eq!(
+        program
+            .execute("ets_probe", "fixtable_successor", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![Term::Integer(2)])
+    );
+    assert_eq!(reference("fixtable_successor"), b"[2]\n");
+}

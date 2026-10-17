@@ -8,7 +8,8 @@
          own/2, write/1, select/0, match_object/0, iterate/0,
          update_element/0, info_items/0, delete_all/0, select_reductions/0,
          private_owner/1, ordered_set/0, ordered_set_reductions/0, take/0,
-         safe_fixtable/0]).
+         safe_fixtable/0, fixtable/0, fixtable_chain/0, fixtable_successor/0,
+         fixtable_resize/0]).
 
 %% ets:new/2 return values and badarg cases (erl_db.c:2555-2840).
 new() ->
@@ -677,6 +678,56 @@ safe_fixtable() ->
      catch_error(fun() -> ets:safe_fixtable(T, yes) end),
      catch_error(fun() -> ets:safe_fixtable(no_such_table, true) end),
      catch_error(fun() -> ets:safe_fixtable(1, true) end)].
+
+
+%% A fixed table keeps the key of a deleted object for ets:next/2
+%% (erl_db_hash.c:49-60); an unfixed table gives badarg for the key.
+fixtable() ->
+    T = ets:new(ets_probe_fix, [set]),
+    ets:insert(T, {k}),
+    ets:safe_fixtable(T, true),
+    ets:delete(T, k),
+    Fixed = ets:next(T, k),
+    ets:safe_fixtable(T, false),
+    Unfixed = catch_error(fun() -> ets:next(T, k) end),
+    [Fixed, Unfixed].
+
+
+%% A fixed table follows the ghosts of two deleted keys, and an insert or a
+%% delete while fixed does not resize the table (erl_db_hash.c:49-60).
+fixtable_chain() ->
+    T = ets:new(ets_probe_fix_chain, [set]),
+    ets:insert(T, [{1}, {2}, {3}]),
+    ets:safe_fixtable(T, true),
+    ets:delete(T, 1),
+    ets:delete(T, 2),
+    ets:delete(T, 3),
+    Fixed = ets:next(T, 1),
+    ets:safe_fixtable(T, false),
+    [Fixed].
+
+fixtable_successor() ->
+    T = ets:new(ets_probe_fix_successor, [set]),
+    ets:insert(T, [{1}, {2}]),
+    ets:safe_fixtable(T, true),
+    ets:delete(T, 1),
+    Next = ets:next(T, 1),
+    ets:safe_fixtable(T, false),
+    [Next].
+
+fixtable_resize() ->
+    T = ets:new(ets_probe_fix_resize, [set]),
+    ets:insert(T, [{I} || I <- from(1, 5000)]),
+    ets:safe_fixtable(T, true),
+    ets:insert(T, [{I} || I <- from(5001, 10000)]),
+    Before = ets:info(T, size),
+    [ets:delete(T, I) || I <- from(1, 10000)],
+    After = ets:info(T, size),
+    ets:safe_fixtable(T, false),
+    [Before, After].
+
+from(High, High) -> [High];
+from(Low, High) -> [Low | from(Low + 1, High)].
 
 catch_error(Fun) ->
     try Fun() catch error:Reason -> {error, Reason} end.
