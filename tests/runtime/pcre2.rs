@@ -24,16 +24,18 @@ fn reports_incompatible_and_invalid_serialized_bytes() {
     let code = compile(b"a", 0, None, None).unwrap();
     let encoded = code.serialize();
     let word = std::mem::size_of::<usize>();
-    // SAFETY: the layout functions read no memory.
-    let (header, tables, blocksize_offset, count_offset, magic_offset) = unsafe {
-        (
-            pbeam_pcre2_serialized_header_size(),
-            pbeam_pcre2_serialized_tables_size(),
-            pbeam_pcre2_serialized_blocksize_offset(),
-            pbeam_pcre2_serialized_number_of_codes_offset(),
-            pbeam_pcre2_serialized_magic_offset(),
-        )
-    };
+    let (header, tables, blocksize_offset, count_offset, magic_offset, code_start_offset) =
+        // SAFETY: the layout functions read no memory.
+        unsafe {
+            (
+                pbeam_pcre2_serialized_header_size(),
+                pbeam_pcre2_serialized_tables_size(),
+                pbeam_pcre2_serialized_blocksize_offset(),
+                pbeam_pcre2_serialized_number_of_codes_offset(),
+                pbeam_pcre2_serialized_magic_offset(),
+                pbeam_pcre2_serialized_code_start_offset(),
+            )
+        };
     let mut bad_magic = encoded.clone();
     bad_magic[..4].fill(0);
     assert!(matches!(
@@ -73,6 +75,12 @@ fn reports_incompatible_and_invalid_serialized_bytes() {
     let at = header + tables + magic_offset;
     bad_code[at..at + 4].fill(0);
     assert!(matches!(deserialize(&bad_code), Deserialized::Invalid));
+    // A `code_start` outside the block makes the matcher read outside it
+    // (`pcre2_match.c:8018`).
+    let mut bad_start = encoded.clone();
+    let at = header + tables + code_start_offset;
+    bad_start[at..at + word].copy_from_slice(&usize::MAX.to_ne_bytes());
+    assert!(matches!(deserialize(&bad_start), Deserialized::Invalid));
 }
 
 #[test]

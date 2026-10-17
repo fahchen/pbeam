@@ -191,8 +191,10 @@ unsafe extern "C" {
     fn pbeam_pcre2_serialized_code_size() -> usize;
     #[cfg(test)]
     fn pbeam_pcre2_serialized_magic_offset() -> usize;
+    #[cfg(test)]
+    fn pbeam_pcre2_serialized_code_start_offset() -> usize;
     fn pbeam_pcre2_serialized_number_of_codes_offset() -> usize;
-    fn pbeam_pcre2_serialized_code_is_valid(bytes: *const u8) -> c_int;
+    fn pbeam_pcre2_serialized_code_is_valid(bytes: *const u8, blocksize: usize) -> c_int;
     fn pcre2_code_free_8(code: *mut c_void);
 }
 
@@ -426,17 +428,18 @@ pub(super) fn deserialize(encoded: &[u8]) -> Deserialized {
     }
     // SAFETY: the code block holds at least `code_size` bytes, which is all
     // that this function reads.
-    let valid = unsafe { pbeam_pcre2_serialized_code_is_valid(encoded[tables_end..].as_ptr()) };
+    let valid =
+        unsafe { pbeam_pcre2_serialized_code_is_valid(encoded[tables_end..].as_ptr(), blocksize) };
     if valid == 0 {
         return Deserialized::Invalid;
     }
     let mut code = std::ptr::null_mut();
     // SAFETY: `encoded` holds the table block and a code block of
     // `blocksize` bytes, which is all that the decode reads. The block
-    // passes the checks of the decode, so the call allocates no tables
-    // that it leaves allocated on an error. With no general context, PCRE2
-    // allocates the code with the default allocator, which
-    // `pcre2_code_free_8` in `Drop` uses.
+    // passes the field checks of the decode and the code range check, so
+    // the call allocates no tables that it leaves allocated on an error.
+    // With no general context, PCRE2 allocates the code with the default
+    // allocator, which `pcre2_code_free_8` in `Drop` uses.
     let decoded = unsafe {
         pcre2_serialize_decode_8(&raw mut code, 1, encoded.as_ptr(), std::ptr::null_mut())
     };

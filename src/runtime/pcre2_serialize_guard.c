@@ -7,16 +7,25 @@
 #include "pcre2_internal.h"
 
 /* The checks of pcre2_serialize_decode on the first code block
-   (pcre2_serialize.c:210-217). The call frees the code block but not the
-   character tables when one fails, so pbeam checks them before the call. */
-int pbeam_pcre2_serialized_code_is_valid(const uint8_t *bytes)
+   (pcre2_serialize.c:210-217), and the range of `code_start`. The call
+   frees the code block but not the character tables when one check fails,
+   so pbeam checks them before the call. A `code_start` outside the block
+   makes the matcher read outside it (pcre2_match.c:8018). */
+int pbeam_pcre2_serialized_code_is_valid(const uint8_t *bytes, size_t blocksize)
 {
   pcre2_real_code code;
 
   memcpy(&code, bytes, sizeof code);
   return code.magic_number == MAGIC_NUMBER
       && code.name_entry_size <= MAX_NAME_SIZE + IMM2_SIZE + 1
-      && code.name_count <= MAX_NAME_COUNT;
+      && code.name_count <= MAX_NAME_COUNT
+      && code.code_start >= sizeof code
+      && code.code_start <= blocksize;
+}
+
+size_t pbeam_pcre2_serialized_code_start_offset(void)
+{
+  return offsetof(pcre2_real_code, code_start);
 }
 
 size_t pbeam_pcre2_serialized_header_size(void)
