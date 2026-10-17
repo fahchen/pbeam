@@ -1,7 +1,7 @@
 //! BIFs: the ERTS `bif.tab` table, the BIF dispatch, and BIF results.
 //!
 //! The `bifs!` table in `table.rs` lists each BIF with its implementation.
-//! The `binary`, `erlang`, `erts_internal`, `ets`, `file`, `iolist`,
+//! The `binary`, `erlang`, `erts_internal`, `ets`, `file`, `hash`, `iolist`,
 //! `lists`, `maps`, `math`, `os`, `re`, and `unicode` modules hold the BIF
 //! bodies that do not fit on one table line.
 //! The `pbeam_cap` module holds the bodies of the PBeam BIFs, which are not
@@ -23,6 +23,7 @@ mod erts_internal;
 mod ets;
 mod file;
 mod float;
+mod hash;
 mod integer;
 mod io_service;
 mod iolist;
@@ -1070,6 +1071,11 @@ impl BeamProgram {
                 result: std::mem::replace(result, Term::Nil),
             };
             return erlang::ptab_list(scheduler, state);
+        }
+        // The hidden export of `erlang:md5/1`, which is not in `bif.tab`
+        // (`erl_bif_chksum.c:42-52`, `481`).
+        if let ("erlang", "md5_trap", [context, rest]) = (module, function, arguments.as_slice()) {
+            return hash::md5_trap(scheduler, context, rest);
         }
         let (process, atoms) = scheduler.current_process_and_atoms();
         match (module, function, arguments.as_slice()) {

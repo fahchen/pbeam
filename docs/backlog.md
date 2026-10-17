@@ -110,6 +110,13 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ## Runtime
 
+### Keep the parts of a chunked binary when the md5 walk traps
+
+- **Now:** `erlang:md5/1` reads a binary with `Binary::byte_runs` up to its byte budget, and a walk that does not finish makes the remainder with `Binary::bits`, which joins the parts of a binary that an append built. A large chunked binary therefore costs a copy in the turn that traps. The "md5 binary remainder" row of `docs/erts-differences.md` records this.
+- **Option:** make the remainder as a view that keeps the chunks, so the walk reads the rest of the parts in later turns. `Binary::bits` joins through `flat_backing`; a view of the parts needs an API for the rest of a chunked view.
+- **Trigger:** when a caller hashes chunked binaries above the budget.
+- **Source:** Codex review of PR #768.
+
 ### Model the process heap for GC reductions and the message copy cost
 
 - PBeam has no process heap, and its terms keep no literal origin. A message, an ETS table, and `persistent_term` share each map with the sender, and do not copy it. Thus PBeam charges no garbage collection reductions and no message copy cost, and `maps:merge/2` of a map and its copy from a send, ETS, or `persistent_term` takes their shared nodes with no step. A change of the `message_queue_data` process flag does not move the messages and sends no adjust signal. The "Garbage collection reductions", "Scheduling", "Process flags", and "Map merge reductions" rows of `docs/erts-differences.md` record these differences, and this entry owns them.

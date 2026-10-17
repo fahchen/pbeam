@@ -1,10 +1,13 @@
 //! Build the PCRE2 10.47 sources of OTP 29.1.1 in `vendor/pcre2`, which
-//! `re:compile/2` uses.
+//! `re:compile/2` and `re:run/2,3` use.
 
-/// The PCRE2 sources that the compile path and the `export` option link.
-/// ERTS builds them with `-DERLANG_INTEGRATION` (`pcre.mk:60`), so
-/// `pcre2_internal.h` includes `local_config.h`.
-const SOURCES: [&str; 19] = [
+use std::path::PathBuf;
+
+/// The PCRE2 sources that the compile path, the match path, and the `export`
+/// option link, as the `PCRE_O` list of `pcre.mk:23-48` gives the other
+/// sources of the library. ERTS builds them with `-DERLANG_INTEGRATION`
+/// (`pcre.mk:60`), so `pcre2_internal.h` includes `local_config.h`.
+const SOURCES: [&str; 23] = [
     "pcre2_auto_possess.c",
     "pcre2_chartables.c",
     "pcre2_chkdint.c",
@@ -13,10 +16,14 @@ const SOURCES: [&str; 19] = [
     "pcre2_compile_class.c",
     "pcre2_context.c",
     "pcre2_error.c",
+    "pcre2_extuni.c",
     "pcre2_find_bracket.c",
+    "pcre2_match.c",
+    "pcre2_match_data.c",
     "pcre2_newline.c",
     "pcre2_ord2utf.c",
     "pcre2_pattern_info.c",
+    "pcre2_script_run.c",
     "pcre2_serialize.c",
     "pcre2_string_utils.c",
     "pcre2_study.c",
@@ -41,6 +48,7 @@ fn main() {
     println!("cargo:rerun-if-changed=vendor/pcre2");
     println!("cargo:rerun-if-changed=mise.toml");
     println!("cargo:rustc-env=PBEAM_OTP_RELEASE={}", otp_release());
+    let generated = generate_match_headers();
     cc::Build::new()
         .files(
             SOURCES
@@ -48,10 +56,85 @@ fn main() {
                 .map(|source| format!("vendor/pcre2/{source}")),
         )
         .include("vendor/pcre2")
+        .include(&generated)
         .define("ERLANG_INTEGRATION", None)
         .opt_level(2)
         .warnings(false)
         .compile("pcre2");
+}
+
+/// Write the match headers of `pcre2_match.c` into `OUT_DIR` and return that
+/// directory, as the three rules of `pcre.mk:74-94` make them from the line
+/// numbers of the `COST_CHK` and `MEMCHR_ERLANG` calls of the source:
+///
+/// - `pcre2_match_loop_break_cases.gen.h` holds the `case` label of each
+///   `COST_CHK` call, which the `LOOP_COUNT_BREAK` switch uses to resume a
+///   match.
+/// - `pcre2_match_memchr_break_cases.gen.h` holds the `case` label of each
+///   `MEMCHR_ERLANG` call, which the restart switch of `pcre2_match` uses.
+/// - `pcre2_match_yield_coverage.gen.h` numbers each yield point, which the
+///   `DEBUG` build counts. The file is written for each build, as the
+///   `PCRE_YIELD_COV` rule does.
+///
+/// Each rule skips a line that holds `define`, which is the `COST_CHK` or
+/// `MEMCHR_ERLANG` macro itself or a `DBG_FAKE_` call.
+///
+/// # Examples
+///
+/// ```text
+/// let headers = generate_match_headers();  // target/debug/build/pbeam-*/out
+/// assert!(headers.join("pcre2_match_loop_break_cases.gen.h").exists());
+/// ```
+fn generate_match_headers() -> PathBuf {
+    let source = std::fs::read_to_string("vendor/pcre2/pcre2_match.c").expect("read pcre2_match.c");
+    let lines: Vec<(&str, usize)> = source
+        .lines()
+        .enumerate()
+        .map(|(index, line)| (line, index + 1))
+        .collect();
+    let calls = |needle: &str| -> Vec<usize> {
+        lines
+            .iter()
+            .filter(|(line, _)| {
+                line.contains(needle) && !line.contains("define") && !line.contains("DBG_FAKE_")
+            })
+            .map(|&(_, number)| number)
+            .collect()
+    };
+    let loop_break = calls("COST_CHK(");
+    let memchr_break = calls("MEMCHR_ERLANG(");
+    let mut yield_coverage = String::new();
+    for (index, number) in loop_break.iter().chain(&memchr_break).enumerate() {
+        yield_coverage.push_str(&format!("#define ERLANG_YIELD_POINT_{number} {index}\n"));
+    }
+    yield_coverage.push_str(&format!(
+        "#define ERLANG_YIELD_POINT_CNT {}\n",
+        loop_break.len() + memchr_break.len()
+    ));
+    let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
+    let headers = [
+        (
+            "pcre2_match_loop_break_cases.gen.h",
+            loop_break
+                .iter()
+                .map(|number| format!("case {number}: goto L_LOOP_COUNT_{number};\n"))
+                .collect::<String>(),
+        ),
+        (
+            "pcre2_match_memchr_break_cases.gen.h",
+            memchr_break
+                .iter()
+                .map(|number| {
+                    format!("case {number}: goto ERLANG_PCRE2_MATCH_YIELD_LINE_{number};\n")
+                })
+                .collect::<String>(),
+        ),
+        ("pcre2_match_yield_coverage.gen.h", yield_coverage),
+    ];
+    for (name, contents) in headers {
+        std::fs::write(out_dir.join(name), contents).expect("write match header");
+    }
+    out_dir
 }
 
 /// Return the OTP release of the pinned ERTS: the major part of the

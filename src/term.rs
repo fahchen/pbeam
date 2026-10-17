@@ -22,7 +22,7 @@ pub(crate) use atom::{test_atom, test_atom_table};
 pub use binary::Binary;
 pub use fun::Fun;
 pub(crate) use fun::{Lambda, Target, debug_target};
-pub(crate) use hash::internal_hash;
+pub(crate) use hash::{atom_hash, internal_hash, make_hash, make_hash2};
 pub(crate) use integer::{MAX_BIG_DIGITS, fits_big_arity, low_64_bits};
 use list::{Cons, ConsRef};
 pub(crate) use live_bytes::LiveBytes;

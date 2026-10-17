@@ -1,7 +1,8 @@
 use super::{
-    Access, Busy, EMPTY, EtsTables, KeyIndex, Table, TableType, atom_hash, key_hash, object_hash,
-    segment, stored_hash,
+    Access, Busy, EMPTY, EtsTables, KeyIndex, Table, TableType, key_hash, object_hash, segment,
+    stored_hash,
 };
+use crate::term::atom_hash;
 use crate::term::{Atom, AtomTable, Map, ProcessId, Reference, Term, test_atom_table};
 
 #[test]

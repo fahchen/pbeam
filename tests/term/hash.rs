@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
-use super::{internal_hash, mix64};
-use crate::term::{Atom, Binary, Fun, Lambda, Map, MatchState, PortId, ProcessId, Reference, Term};
+use super::{internal_hash, make_hash, make_hash2, mix64};
+use crate::term::{
+    Atom, AtomTable, Binary, Fun, Lambda, Map, MatchState, PortId, ProcessId, Reference, Term,
+};
 
 #[test]
 #[should_panic(expected = "a match context reached a term operation")]
@@ -349,4 +351,190 @@ fn hashes_a_float_as_pinned_erts() {
             3606456034818785087
         ]
     );
+}
+
+/// A table with the atoms of the phash tests, and the atoms `a` and `abc`
+/// from it.
+fn phash_atoms() -> (AtomTable, Atom, Atom) {
+    let mut atoms = AtomTable::new();
+    let a = atoms.put("a").unwrap();
+    let abc = atoms.put("abc").unwrap();
+    (atoms, a, abc)
+}
+
+/// The terms of the phash tests with their `make_hash` and `make_hash2`
+/// values, as the pinned ERTS gives them: the value of
+/// `erlang:phash(Term, 4294967296)` is the `make_hash` value plus one, and
+/// the value of `erlang:phash2(Term, 4294967296)` is the `make_hash2` value
+/// (`bif.c:5319-5402`). Both are measured with `mise run erts-eval` on the
+/// pinned ERTS OTP 29.1.1.
+fn phash_terms(atoms: &AtomTable, a: &Atom, abc: &Atom) -> Vec<(Term, u32, u32)> {
+    let map = |pairs: Vec<(Term, Term)>| Term::Map(Map::from_pairs(pairs, atoms).unwrap());
+    let range = |first: i64, last: i64| Term::list_from((first..=last).map(Term::Integer));
+    vec![
+        (Term::Integer(1 << 59), 2_147_483_672, 2_442_888_721),
+        (Term::Float(1.5), 1_073_217_536, 2_023_646_235),
+        (Term::Float(1.0e300), 4_130_836_896, 387_524_106),
+        (Term::Float(-0.0), 0, 423_528_920),
+        (
+            Term::tuple(vec![
+                Term::Atom(a.clone()),
+                Term::Integer(1),
+                Term::Integer(2),
+            ]),
+            1_756_186_963,
+            313_221_675,
+        ),
+        (range(1, 3), 3_336_869_157, 4_186_538_188),
+        (range(1, 100), 2_449_873_273, 1_698_018_711),
+        (
+            map(vec![(Term::Atom(a.clone()), Term::Integer(1))]),
+            1_670_235_873,
+            1_401_795_262,
+        ),
+        (
+            map((1..=40)
+                .map(|key| (Term::Integer(key), Term::Integer(key)))
+                .collect()),
+            2_470_972_761,
+            2_202_532_150,
+        ),
+        (
+            map((1..=100)
+                .map(|key| (Term::Integer(key), Term::Integer(key + 1)))
+                .collect()),
+            3_637_457_306,
+            3_369_016_695,
+        ),
+        (Term::binary(vec![1, 2, 3]), 687_692_589, 4_167_228_639),
+        (Term::binary(vec![0; 1000]), 1000, 4_013_479_069),
+        (Term::binary(vec![]), 0, 147_926_629),
+        (Term::Atom(abc.clone()), 26_499, 26_499),
+        (Term::Integer(-1), 1_680_185_269, 1_117_813_597),
+        (Term::Integer(0), 0, 3_175_731_469),
+        (Term::Integer(1), 2_788_898_427, 539_485_162),
+        (Term::nil(), 1, 3_468_870_702),
+        (Term::tuple(vec![]), 0, 221_703_996),
+        (map(vec![]), 1_113_425_984, 844_985_373),
+        (Term::Pid(ProcessId(7)), 1_912_891_191, 591_482_922),
+        (
+            Term::Reference(Reference::ordinary(7).unwrap()),
+            134_293_115,
+            464_301_042,
+        ),
+        (Term::Port(PortId(5)), 3_777_324_193, 125_905_316),
+    ]
+}
+
+#[test]
+fn hashes_terms_with_make_hash_as_pinned_erts() {
+    // The old term hash of `erlang:phash/2` gives the same value for each
+    // term as the pinned ERTS (`make_hash`, `erl_term_hashing.c:165-427`).
+    let (atoms, a, abc) = phash_atoms();
+    for (term, hash, _) in phash_terms(&atoms, &a, &abc) {
+        assert_eq!(make_hash(&atoms, &term), hash, "{term:?}");
+    }
+}
+
+#[test]
+fn hashes_terms_with_make_hash2_as_pinned_erts() {
+    // The term hash of `erlang:phash2/2` gives the same value for each term
+    // as the pinned ERTS (`make_hash2`, `erl_term_hashing.c:858-1596`), in
+    // the range 2^32, which leaves the hash as it is.
+    let (atoms, a, abc) = phash_atoms();
+    for (term, _, hash) in phash_terms(&atoms, &a, &abc) {
+        // An ERTS port number is a 64-bit unique value, not the number of
+        // `port_info(Port, id)`, so an ERTS run cannot pin the value of a
+        // port term. The port branch follows `UINT32_HASH_2(low, high,
+        // HCONST_6)` (`erl_term_hashing.c:1446-1452`), and the `make_hash`
+        // case above pins the port number of a fabricated port.
+        if matches!(term, Term::Port(_)) {
+            continue;
+        }
+        assert_eq!(make_hash2(&atoms, &term).0, hash, "{term:?}");
+    }
+}
+
+#[test]
+fn hashes_a_bitstring_that_is_not_a_whole_number_of_bytes_as_pinned_erts() {
+    // The binary paths of both hashes read the whole bytes and then the tail
+    // bits in the high bits of the last byte (`hash_binary_bytes`,
+    // `erl_term_hashing.c:117-160`; `BIN_REF_SUBTAG`, `1270-1310`). The
+    // values are `erlang:phash(<<1,2:4>>, 4294967296)` minus one,
+    // `erlang:phash2(<<1,2:4>>, 4294967296)`, and
+    // `erlang:phash2(<<1,2:3>>, 4294967296)` on the pinned ERTS (measured
+    // with `mise run erts-eval`).
+    let atoms = AtomTable::new();
+    let four = Term::Binary(Binary::from(vec![1, 0x20]).bits(0, 12));
+    assert_eq!(make_hash(&atoms, &four), 3_378_198_522);
+    assert_eq!(make_hash2(&atoms, &four).0, 915_905_169);
+    let three = Term::Binary(Binary::from(vec![1, 0x40]).bits(0, 11));
+    assert_eq!(make_hash2(&atoms, &three).0, 2_841_540_738);
+}
+
+#[test]
+#[should_panic(expected = "a match context reached a term operation")]
+fn make_hash_panics_for_a_match_context() {
+    let atoms = AtomTable::new();
+    make_hash(
+        &atoms,
+        &Term::MatchContext(Arc::new(MatchState::new(Binary::from(b"a")))),
+    );
+}
+
+#[test]
+#[should_panic(expected = "a match context reached a term operation")]
+fn make_hash2_panics_for_a_match_context() {
+    let atoms = AtomTable::new();
+    make_hash2(
+        &atoms,
+        &Term::MatchContext(Arc::new(MatchState::new(Binary::from(b"a")))),
+    );
+}
+
+#[test]
+fn hashes_a_collision_node_of_a_hashmap_as_pinned_erts() {
+    // The pairs of equal map-hash keys of the test above form one collision
+    // node of the hashmap, which `make_hash2` reads as the pushed pairs of
+    // the node (`push_children`, `erl_term_hashing.c:1224-1250`). The
+    // values are `erlang:phash(Map, 4294967296)` minus one and
+    // `erlang:phash2(Map, 4294967296)` on the pinned ERTS for the same map
+    // (measured with `mise run erts-eval`).
+    let a = integers(&[126, 114, 233, 199, 27, 172, 209, 95]);
+    let b = integers(&[57, 112, 19, 186, 16, 195, 81, 198]);
+    let term = map([(a, Term::Integer(100)), (b, Term::Integer(200))]
+        .into_iter()
+        .chain((1..=31).map(|key| (Term::Integer(key), Term::Integer(key)))));
+    let atoms = AtomTable::new();
+    assert_eq!(make_hash(&atoms, &term), 996_043_277);
+    assert_eq!(make_hash2(&atoms, &term).0, 727_602_666);
+}
+
+#[test]
+fn hashes_a_port_with_a_large_number_from_the_erts_source() {
+    // A port number above 2^32 mixes its high word first in `make_hash`
+    // (`erl_term_hashing.c:255-266`), and `make_hash2` mixes both words
+    // (`1446-1452`). An ERTS run cannot pin a port number, so the values are
+    // computed from those functions. The `make_hash` value is the value of
+    // `phash` minus one.
+    let atoms = AtomTable::new();
+    let port = Term::Port(PortId(1 << 32));
+    assert_eq!(make_hash(&atoms, &port), 3_591_747_951);
+    assert_eq!(make_hash2(&atoms, &port).0, 3_633_483_707);
+}
+
+#[test]
+fn hashes_only_the_pid_number_and_not_the_serial_as_pinned_erts() {
+    // ERTS hashes the 28-bit pid number only (`internal_pid_number`,
+    // `erl_term.h:645-656`), so `<0.0.1>` and `<0.0.0>` have the same hash.
+    // The pinned ERTS gives `erlang:phash(Pid, 4294967296)` = 1 and
+    // `erlang:phash2(Pid, 4294967296)` = 2858162279 for both pids (measured
+    // with `mise run erts-eval`).
+    let atoms = AtomTable::new();
+    let zero = Term::Pid(ProcessId(0));
+    let serial = Term::Pid(ProcessId(1 << 28));
+    assert_eq!(make_hash(&atoms, &zero), 0);
+    assert_eq!(make_hash(&atoms, &serial), 0);
+    assert_eq!(make_hash2(&atoms, &zero).0, 2_858_162_279);
+    assert_eq!(make_hash2(&atoms, &serial).0, 2_858_162_279);
 }
