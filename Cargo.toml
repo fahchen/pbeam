@@ -10,7 +10,7 @@ autotests = false
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 libc = "0.2"
-nix = { version = "0.31.3", default-features = false }
+nix = { version = "0.31.3", default-features = false, features = ["fs"] }
 num-bigint = "0.5"
 num-integer = "0.1"
 num-traits = "0.2"

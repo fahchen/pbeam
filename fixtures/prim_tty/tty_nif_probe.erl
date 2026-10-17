@@ -1,5 +1,6 @@
 -module(tty_nif_probe).
--export([isatty/0, create/0, window_size/0, setlocale/0, setupterm/0, terminfo/0, init/0, monitor/0,
+-export([isatty/0, create/0, window_size/0, setlocale/0, setupterm/0, terminfo/0, extras/0,
+         init/0, monitor/0,
          owner/1, holder/3, select/0, encoding/0, select_monitor/0, selector/1, link/0,
          linker/1, linked_owner/1, root_exit/0, root_free/0, write/0, write_error/0, read/0,
          read_error/0, loop/0, loop_reader/2]).
@@ -36,6 +37,26 @@ terminfo() ->
      || C <- ["co\0", "li\0", "it\0", "xn\0", "am\0", "bs\0", "km\0", "zz\0", "\0", "c\0",
               "cols\0", "co\0x", [<<"c">>, $o | <<0>>], <<"xn", 0>>, foo, 1, [256], [-1],
               [$c | x], make_ref(), 'co\0']].
+
+%% The answers of tinfo_nif/0, tigetstr_nif/1, tputs_nif/2, and
+%% wcwidth/1. The digest of each capability list keeps the output short, and
+%% the order of each list stays in the digest.
+extras() ->
+    _ = prim_tty:setlocale(foo),
+    _ = prim_tty:setupterm_nif(),
+    #{bool := B, num := N, str := S} = prim_tty:tinfo_nif(),
+    Caps = [B, N, S],
+    [erlang:phash2(erlang:phash2([digest(C) || C <- Caps])),
+     erlang:phash2([catch_error(fun() -> prim_tty:tigetstr_nif([C, 0]) end)
+                    || C <- ["sgr0", "cup", "op", "zz", "not_a_capability"]]),
+     erlang:phash2([catch_error(fun() -> prim_tty:tputs_nif([C, 0], A) end)
+                    || {C, A} <- [{"cup", [1, 2]}, {"sgr0", []}, {"%", []}, {"%p1%d", [7]}]]),
+     erlang:phash2([catch_error(fun() -> prim_tty:wcwidth(Char) end)
+                    || Char <- [0, 16#61, 16#4e2d, 16#301, 16#1f600, -1, foo, 1 bsl 40]])
+     | [length(C) || C <- Caps]].
+
+digest(Caps) ->
+    [{maps:get(name, C), maps:get(code, C), maps:get(full_name, C)} || C <- Caps].
 
 init() ->
     {ok, Out} = prim_tty:tty_create(stdout),

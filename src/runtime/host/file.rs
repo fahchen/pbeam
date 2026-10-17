@@ -8,10 +8,12 @@ use std::{
     io::{self, IoSlice, Read, Seek, SeekFrom, Write},
     os::unix::{
         ffi::{OsStrExt, OsStringExt},
-        fs::OpenOptionsExt,
+        fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     },
     path::Path,
 };
+
+use nix::sys::{stat::utimes, time::TimeVal};
 
 use super::errno::errno;
 
@@ -491,6 +493,219 @@ pub(crate) fn close(file: File) -> Result<(), c_int> {
 /// The `errno` of `lseek`, for example `EINVAL` for a negative position.
 pub(crate) fn seek(mut file: &File, from: SeekFrom) -> Result<u64, c_int> {
     file.seek(from).map_err(os_errno)
+}
+
+/// Delete the file at `path`, as `efile_del_file`
+/// (`nifs/unix/unix_prim_file.c:991-1002`) does with `unlink`. Linux gives
+/// `EISDIR` for a directory, and ERTS gives `EPERM` there instead; macOS
+/// gives `EPERM` directly.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(delete_file(c"/pbeam-missing"), Err(libc::ENOENT));
+/// ```
+///
+/// # Errors
+///
+/// The `errno` of `unlink`, with the Linux `EISDIR` that ERTS maps to
+/// `EPERM`.
+pub(crate) fn delete_file(path: &CStr) -> Result<(), c_int> {
+    match fs::remove_file(host_path(path)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.raw_os_error() == Some(libc::EISDIR) => Err(libc::EPERM),
+        Err(error) => Err(os_errno(error)),
+    }
+}
+
+/// Delete the directory at `path`, as `efile_del_dir`
+/// (`nifs/unix/unix_prim_file.c:1004-1032`) does with `rmdir`:
+/// `ENOTEMPTY` becomes `EEXIST`, and a directory that is the current
+/// directory gives `EINVAL`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(delete_dir(c"/pbeam-missing"), Err(libc::ENOENT));
+/// ```
+///
+/// # Errors
+///
+/// The `errno` of `rmdir`, with the `ENOTEMPTY` that ERTS maps to
+/// `EEXIST`, and `EINVAL` for the current directory.
+pub(crate) fn delete_dir(path: &CStr) -> Result<(), c_int> {
+    let Err(error) = fs::remove_dir(host_path(path)) else {
+        return Ok(());
+    };
+    let mut errno = os_errno(error);
+    if errno == libc::ENOTEMPTY {
+        errno = libc::EEXIST;
+    }
+    if errno == libc::EEXIST
+        && let (Ok(directory), Ok(cwd)) =
+            (fs::metadata(host_path(path)), fs::metadata(host_path(c".")))
+        && directory.ino() == cwd.ino()
+        && directory.dev() == cwd.dev()
+    {
+        return Err(libc::EINVAL);
+    }
+    Err(errno)
+}
+
+/// Create the directory at `path` with the mode `0777` of `DIR_MODE`, as
+/// `efile_make_dir` (`nifs/unix/unix_prim_file.c:979-989`) does with
+/// `mkdir`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(make_dir(c"/pbeam-missing/dir"), Err(libc::ENOENT));
+/// ```
+///
+/// # Errors
+///
+/// The `errno` of `mkdir`.
+pub(crate) fn make_dir(path: &CStr) -> Result<(), c_int> {
+    fs::create_dir(host_path(path)).map_err(os_errno)
+}
+
+/// Make the hard link `new` to `existing`, as `efile_make_hard_link`
+/// (`nifs/unix/unix_prim_file.c:963-969`) does with `link`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(make_hard_link(c"/pbeam-missing", c"/tmp/new"), Err(libc::ENOENT));
+/// ```
+///
+/// # Errors
+///
+/// The `errno` of `link`.
+pub(crate) fn make_hard_link(existing: &CStr, new: &CStr) -> Result<(), c_int> {
+    fs::hard_link(host_path(existing), host_path(new)).map_err(os_errno)
+}
+
+/// Make the symbolic link `new` to `existing`, as `efile_make_soft_link`
+/// (`nifs/unix/unix_prim_file.c:971-977`) does with `symlink`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(make_soft_link(c"target", c"/pbeam-missing/link"), Err(libc::ENOENT));
+/// ```
+///
+/// # Errors
+///
+/// The `errno` of `symlink`.
+pub(crate) fn make_soft_link(existing: &CStr, new: &CStr) -> Result<(), c_int> {
+    std::os::unix::fs::symlink(host_path(existing), host_path(new)).map_err(os_errno)
+}
+
+/// Rename `old` to `new`, as `efile_rename`
+/// (`nifs/unix/unix_prim_file.c:945-961`) does with `rename`:
+/// `ENOTEMPTY` becomes `EEXIST`, and a failed rename of `/` gives `EINVAL`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(rename(c"/pbeam-missing", c"/tmp/new"), Err(libc::ENOENT));
+/// ```
+///
+/// # Errors
+///
+/// The `errno` of `rename`, with the two changes of ERTS.
+pub(crate) fn rename(old: &CStr, new: &CStr) -> Result<(), c_int> {
+    let Err(error) = fs::rename(host_path(old), host_path(new)) else {
+        return Ok(());
+    };
+    let errno = os_errno(error);
+    if errno == libc::ENOTEMPTY {
+        Err(libc::EEXIST)
+    } else if old.to_bytes() == b"/" {
+        Err(libc::EINVAL)
+    } else {
+        Err(errno)
+    }
+}
+
+/// Set the current directory of the OS process to `path`, as
+/// `efile_set_cwd` (`nifs/unix/unix_prim_file.c:1034-1040`) does with
+/// `chdir`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(set_cwd(c"/pbeam-missing"), Err(libc::ENOENT));
+/// ```
+///
+/// # Errors
+///
+/// The `errno` of `chdir`.
+pub(crate) fn set_cwd(path: &CStr) -> Result<(), c_int> {
+    std::env::set_current_dir(host_path(path)).map_err(os_errno)
+}
+
+/// Set the permission bits of `path` to the mutable modes of
+/// `permissions`, as `efile_set_permissions`
+/// (`nifs/unix/unix_prim_file.c:821-834`) does with `chmod`: the mode is
+/// `permissions` masked with the set-id bits and the nine permission bits.
+/// When `chmod` with that mode fails, a second `chmod` clears the set-id
+/// bits, and its result is the result of the call.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(set_permissions(c"/pbeam-missing", 0o644), Err(libc::ENOENT));
+/// ```
+///
+/// # Errors
+///
+/// The `errno` of the second failed `chmod`.
+pub(crate) fn set_permissions(path: &CStr, permissions: u32) -> Result<(), c_int> {
+    const MUTABLE_MODES: u32 = 0o7777;
+    let modes = permissions & MUTABLE_MODES;
+    let set = |modes| fs::set_permissions(host_path(path), fs::Permissions::from_mode(modes));
+    match set(modes) {
+        Ok(()) => Ok(()),
+        Err(_) => set(modes & !0o6000).map_err(os_errno),
+    }
+}
+
+/// Set the owner `uid` and the group `gid` of `path`, as
+/// `efile_set_owner` (`nifs/unix/unix_prim_file.c:836-842`) does with
+/// `chown`. The value -1 of an undefined owner or group leaves that field
+/// unchanged.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(set_owner(c"/pbeam-missing", -1, -1), Err(libc::ENOENT));
+/// ```
+///
+/// # Errors
+///
+/// The `errno` of `chown`.
+pub(crate) fn set_owner(path: &CStr, uid: i32, gid: i32) -> Result<(), c_int> {
+    std::os::unix::fs::chown(host_path(path), Some(uid as u32), Some(gid as u32)).map_err(os_errno)
+}
+
+/// Set the access time `atime` and the modification time `mtime` of `path`,
+/// as `efile_set_time` (`nifs/unix/unix_prim_file.c:844-857`) does with
+/// `utime`. ERTS ignores the change time.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(set_time(c"/pbeam-missing", 0, 0), Err(libc::ENOENT));
+/// ```
+///
+/// # Errors
+///
+/// The `errno` of `utime`.
+pub(crate) fn set_time(path: &CStr, atime: i64, mtime: i64) -> Result<(), c_int> {
+    let atime = TimeVal::new(atime as libc::time_t, 0);
+    let mtime = TimeVal::new(mtime as libc::time_t, 0);
+    utimes(host_path(path), &atime, &mtime).map_err(|errno| errno as c_int)
 }
 
 /// Return the host path of the bytes of `path`.

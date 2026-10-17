@@ -1,4 +1,6 @@
 -module(effect_probe).
+
+-include_lib("kernel/include/file.hrl").
 -export([
     spawn/0,
     spawn_link/0,
@@ -33,6 +35,9 @@
     setupterm/0,
     tigetnum/0,
     tigetflag/0,
+    tinfo/0,
+    tigetstr/0,
+    tputs/0,
     halt_run/0,
     system_flag/0,
     load_nif/0,
@@ -196,6 +201,12 @@ setupterm() -> attempt(fun() -> prim_tty:setupterm_nif() end).
 tigetnum() -> attempt(fun() -> prim_tty:tigetnum_nif("co\0") end).
 
 tigetflag() -> attempt(fun() -> prim_tty:tigetflag_nif("xn\0") end).
+
+tinfo() -> attempt(fun() -> prim_tty:tinfo_nif() end).
+
+tigetstr() -> attempt(fun() -> prim_tty:tigetstr_nif("cup\0") end).
+
+tputs() -> attempt(fun() -> prim_tty:tputs_nif("cup\0", []) end).
 
 %% A permitted halt stops the run with the status 3.
 halt_run() -> attempt(fun() -> erlang:halt(3, []) end).
@@ -487,7 +498,18 @@ ambient() ->
         integer(os:system_time()),
         timestamp(os:timestamp()),
         integer(os:perf_counter()),
-        integer(list_to_integer(os:getpid()))
+        integer(list_to_integer(os:getpid())),
+        prim_file:altname("/"),
+        element(1, prim_file:delete("/pbeam-missing")),
+        element(1, prim_file:del_dir("/pbeam-missing")),
+        element(1, prim_file:make_dir("/pbeam-missing/dir")),
+        element(1, prim_file:make_link("/pbeam-missing", "/pbeam-missing2")),
+        element(1, prim_file:make_symlink("target", "/pbeam-missing/link")),
+        element(1, prim_file:rename("/pbeam-missing", "/pbeam-missing2")),
+        element(1, prim_file:set_cwd("/pbeam-missing")),
+        element(1, prim_file:write_file_info("/pbeam-missing", #file_info{uid = 0, gid = 0, atime = 0, mtime = 0, ctime = 0}, [{time, posix}])),
+        element(1, prim_file:write_file_info("/pbeam-missing", #file_info{mode = 8#644, atime = 0, mtime = 0, ctime = 0}, [{time, posix}])),
+        element(1, prim_file:write_file_info("/pbeam-missing", #file_info{atime = 0, mtime = 0, ctime = 0}, [{time, posix}]))
     ].
 
 %% Open /dev/null in write mode, write, move the position, and close it

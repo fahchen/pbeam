@@ -400,3 +400,154 @@ fn reads_writes_seeks_and_closes_a_file_resource_as_erts() {
     assert_eq!(std::fs::read(&file).unwrap(), b"");
     std::fs::remove_dir_all(&directory).unwrap();
 }
+
+#[test]
+fn changes_names_directories_and_links_with_the_errors_of_erts() {
+    // Each binding of the write and metadata paths marshals the path with
+    // `efile_marshal_path` before its host call (prim_file_nif.c:1149-1249,
+    // 1282-1296, 1389-1404), and `unix_prim_file.c` gives the Unix
+    // results. The test drives each binding directly, because `prim_file`
+    // gives only paths that end with a NUL to the NIFs.
+    let mut scheduler = scheduler();
+    let directory = scratch("changes");
+    let empty = directory.join("empty");
+    let full = directory.join("full");
+    let missing = directory.join("missing");
+    std::fs::create_dir(&empty).unwrap();
+    std::fs::create_dir(&full).unwrap();
+    std::fs::write(full.join("child"), b"").unwrap();
+    let einval = "Value(Tuple([Atom(\"error\"), Atom(\"einval\")]))";
+    let enoent = "Value(Tuple([Atom(\"error\"), Atom(\"enoent\")]))";
+    let eexist = "Value(Tuple([Atom(\"error\"), Atom(\"eexist\")]))";
+    let enotsup = "Value(Tuple([Atom(\"error\"), Atom(\"enotsup\")]))";
+    let invalid = Term::binary(b"/".to_vec());
+    for name in [
+        "del_file_nif",
+        "del_dir_nif",
+        "make_dir_nif",
+        "set_cwd_nif",
+        "altname_nif",
+    ] {
+        let binding = BINDINGS
+            .iter()
+            .find(|binding| (binding.name, binding.arity) == (name, 1))
+            .unwrap();
+        assert_eq!(
+            text(&mut scheduler, |s| (binding.run)(
+                s,
+                std::slice::from_ref(&invalid)
+            )),
+            einval,
+            "{name}"
+        );
+    }
+    for name in ["rename_nif", "make_hard_link_nif", "make_soft_link_nif"] {
+        let binding = BINDINGS
+            .iter()
+            .find(|binding| (binding.name, binding.arity) == (name, 2))
+            .unwrap();
+        assert_eq!(
+            text(&mut scheduler, |s| (binding.run)(
+                s,
+                &[invalid.clone(), nif_path(&empty)]
+            )),
+            einval,
+            "{name} first"
+        );
+        assert_eq!(
+            text(&mut scheduler, |s| (binding.run)(
+                s,
+                &[nif_path(&empty), invalid.clone()]
+            )),
+            einval,
+            "{name} second"
+        );
+    }
+    // `rename` of the root gives `EINVAL`, and a non-empty target gives
+    // `EEXIST` for the `ENOTEMPTY` of the host (unix_prim_file.c:945-958).
+    assert_eq!(
+        text(&mut scheduler, |s| pair_result(
+            s,
+            &Term::binary(b"/\0".to_vec()),
+            &nif_path(&empty),
+            file::rename
+        )),
+        einval
+    );
+    assert_eq!(
+        text(&mut scheduler, |s| pair_result(
+            s,
+            &nif_path(&empty),
+            &nif_path(&full),
+            file::rename
+        )),
+        eexist
+    );
+    // A missing source gives `ENOENT` for `rename` too.
+    assert_eq!(
+        text(&mut scheduler, |s| pair_result(
+            s,
+            &nif_path(&missing),
+            &nif_path(&empty),
+            file::rename
+        )),
+        enoent
+    );
+    // A missing directory gives `ENOENT` for `chdir`.
+    assert_eq!(
+        text(&mut scheduler, |s| path_result(
+            s,
+            &nif_path(&missing),
+            file::set_cwd
+        )),
+        enoent
+    );
+    // A failed first `chmod` repeats the call without the set-id bits
+    // (unix_prim_file.c:821-834).
+    assert_eq!(
+        text(&mut scheduler, |s| set_permissions_nif(
+            s,
+            &nif_path(&missing),
+            &Term::Integer(0o644)
+        )),
+        enoent
+    );
+    // The three metadata NIFs check their arguments, then the path
+    // (prim_file_nif.c:1053-1113).
+    assert_eq!(
+        text(&mut scheduler, |s| set_permissions_nif(
+            s,
+            &invalid,
+            &Term::Integer(0o644)
+        )),
+        einval
+    );
+    assert_eq!(
+        text(&mut scheduler, |s| set_owner_nif(
+            s,
+            &invalid,
+            &Term::Integer(-1),
+            &Term::Integer(-1)
+        )),
+        einval
+    );
+    assert_eq!(
+        text(&mut scheduler, |s| set_time_nif(
+            s,
+            &invalid,
+            &Term::Integer(0),
+            &Term::Integer(0),
+            &Term::Integer(0)
+        )),
+        einval
+    );
+    // `altname` is `ENOTSUP` on Unix (unix_prim_file.c:1085-1090).
+    assert_eq!(
+        text(&mut scheduler, |s| altname_nif(
+            &mut s.atoms,
+            &nif_path(&empty)
+        )),
+        enotsup
+    );
+    std::fs::remove_dir_all(&directory).unwrap();
+}
