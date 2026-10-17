@@ -650,8 +650,13 @@ enum FrameKind {
     Map,
     /// An `EXPORT_EXT` of the module, the function, and the arity.
     Export,
-    /// A `LOCAL_EXT` with its hash and the start of the wrapped term.
-    Local { hash: u32, start: usize },
+    /// A `LOCAL_EXT` with its hash, the start of the wrapped term, and the
+    /// local flag of the enclosing term.
+    Local {
+        hash: u32,
+        start: usize,
+        prior: bool,
+    },
 }
 
 /// One open container of the decoder walk: its kind, the terms that it still
@@ -675,8 +680,13 @@ enum CheckKind {
     Map,
     /// An `EXPORT_EXT` of the module, the function, and the arity.
     Export,
-    /// A `LOCAL_EXT` with its hash and the start of the wrapped term.
-    Local { hash: u32, start: usize },
+    /// A `LOCAL_EXT` with its hash, the start of the wrapped term, and the
+    /// local flag of the enclosing term.
+    Local {
+        hash: u32,
+        start: usize,
+        prior: bool,
+    },
 }
 
 /// One open container of the validation walk.
@@ -964,9 +974,14 @@ fn validate(input: &[u8], seed: u32) -> Result<(), DecodeError> {
             }
             121 => {
                 let hash = check_number(input, &mut index, 4)?;
+                let prior = local;
                 local = true;
                 frames.push(CheckFrame {
-                    kind: CheckKind::Local { hash, start: index },
+                    kind: CheckKind::Local {
+                        hash,
+                        start: index,
+                        prior,
+                    },
                     remaining: 1,
                 });
                 complete = false;
@@ -1000,8 +1015,9 @@ fn validate(input: &[u8], seed: u32) -> Result<(), DecodeError> {
                     frames.pop();
                     continue;
                 }
-                CheckKind::Local { hash, start } => {
+                CheckKind::Local { hash, start, prior } => {
                     frames.pop();
+                    local = prior;
                     if external::block_hash(&input[start..index], seed) != hash {
                         return Err(DecodeError::Badarg);
                     }
@@ -1298,11 +1314,13 @@ impl Decoder<'_> {
                             .try_into()
                             .expect("four bytes of the local hash"),
                     );
+                    let prior = self.local;
                     self.local = true;
                     frames.push(Frame {
                         kind: FrameKind::Local {
                             hash,
                             start: self.pos,
+                            prior,
                         },
                         remaining: 1,
                         items: Vec::new(),
@@ -1363,8 +1381,9 @@ impl Decoder<'_> {
                         }
                         break;
                     }
-                    FrameKind::Local { hash, start } => {
+                    FrameKind::Local { hash, start, prior } => {
                         frames.pop();
+                        self.local = prior;
                         if external::block_hash(&self.input[start..self.pos], self.seed) != hash {
                             return Err(DecodeError::Badarg);
                         }

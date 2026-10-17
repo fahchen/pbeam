@@ -686,6 +686,21 @@ fn decodes_the_unsupported_forms_and_local_terms() {
         decode_full(&mut atoms, &pid_input, false).unwrap(),
         Term::Pid(ProcessId(5))
     );
+    // The local node scope ends with the `LOCAL_EXT` term, so a sibling
+    // pid cannot use `NIL_EXT` as its node (`decoded_size`,
+    // `external.c:6150-6500`).
+    let inner = encode(&Term::static_atom("ok"), &atoms, &Options::default()).unwrap();
+    let inner_hash = external::block_hash(&inner, SEED);
+    let mut siblings = vec![104, 2, 121];
+    siblings.extend(inner_hash.to_be_bytes());
+    siblings.extend(inner);
+    siblings.push(88);
+    siblings.push(106);
+    siblings.extend(with_words(&[], &[5, 0, 0]));
+    assert!(matches!(
+        decode_with(&mut atoms, &siblings, false),
+        Err(DecodeError::Badarg)
+    ));
     // A local term with a different block hash raises badarg
     // (`external.c:5250-5255`).
     let body = encode(&Term::Integer(1), &atoms, &options).unwrap();
