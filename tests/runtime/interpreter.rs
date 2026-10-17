@@ -1335,6 +1335,32 @@ fn raises_or_jumps_when_put_map_exact_gets_no_map_or_no_key() {
     .execute("fixture", "main", &[]);
     let error = unsupported.unwrap_err().to_string();
     assert!(error.contains("badkey,{<<>>}"), "{error}");
+    // An alias reference has no PBeam order, so the exact change reports
+    // that order instead of comparing the keys.
+    let alias = make_program(
+        vec![Instruction::PutMapExact {
+            fail_label: 0,
+            map: Operand::Value(Term::Map(Map::new())),
+            destination: Operand::X(0),
+            pairs: vec![
+                (
+                    Operand::Value(Term::Reference(crate::Reference(1).pid_reference())),
+                    atom("a"),
+                ),
+                (
+                    Operand::Value(Term::Reference(crate::Reference(2).pid_reference())),
+                    atom("b"),
+                ),
+            ],
+        }],
+        0,
+    )
+    .execute("fixture", "main", &[]);
+    let error = alias.unwrap_err().to_string();
+    assert!(
+        error.contains("unsupported term order of an alias reference"),
+        "{error}"
+    );
     // The assoc change adds the key, so a key that PBeam cannot hold raises
     // the runtime error of the key. The first change builds a map with one
     // owner, so the second change takes that map and puts it back on the

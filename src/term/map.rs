@@ -688,16 +688,24 @@ impl Map {
     ///
     /// # Errors
     ///
-    /// Sort the pairs in the flatmap key order. Each term has a term order,
-    /// so the sort cannot fail.
+    /// Sort the pairs in the flatmap key order.
+    ///
+    /// Return a runtime error when the order depends on an alias reference,
+    /// which has no PBeam term order. Compiled code cannot get this error:
+    /// the ERTS loader sorts only literal keys, and a literal cannot hold a
+    /// reference.
     pub(crate) fn sort_pairs(
         pairs: &mut [(Term, Term)],
         atoms: &AtomTable,
     ) -> Result<(), BeamError> {
+        let mut failure = None;
         pairs.sort_by(|(left, _), (right, _)| {
-            flatmap_order(left, right, atoms).expect("each term has a term order")
+            flatmap_order(left, right, atoms).unwrap_or_else(|error| {
+                failure.get_or_insert(error);
+                Ordering::Equal
+            })
         });
-        Ok(())
+        failure.map_or(Ok(()), Err)
     }
 
     /// Set a key to a value. Replace the value when the key exists. A
@@ -1692,9 +1700,10 @@ fn encode_path(elements: Vec<usize>) -> Result<i64, BeamError> {
 /// supported tuple. A float key hashes with the float path
 /// (`erl_term_hashing.c:2193-2202`). A tuple key hashes with the tuple path
 /// (`erl_term_hashing.c:1878-1893`): its type and arity, then its elements.
-/// A binary key hashes with the binary path of `make_internal_hash`. A
-/// reference key hashes with the reference path
-/// (`erl_term_hashing.c`). A binary in a list or a tuple key is not
+/// A binary key hashes with the binary path of `make_internal_hash`. An
+/// ordinary reference key hashes with the reference path
+/// (`erl_term_hashing.c`); an alias reference has no comparison order, so
+/// it is not a supported key. A binary in a list or a tuple key is not
 /// supported yet.
 ///
 /// # Examples
@@ -1719,12 +1728,14 @@ fn map_hash(key: &Term) -> Option<u64> {
     match key {
         // An immediate key or a binary needs no walk, so the check
         // allocates nothing.
-        Term::Atom(_) | Term::Nil | Term::Binary(_) | Term::Float(_) | Term::Reference(_) => {}
+        Term::Atom(_) | Term::Nil | Term::Binary(_) | Term::Float(_) => {}
+        Term::Reference(reference) if !reference.is_pid_reference() => {}
         Term::Cons(_) | Term::Tuple(_) => {
             let mut pending = vec![key];
             while let Some(term) = pending.pop() {
                 match term {
-                    Term::Atom(_) | Term::Nil | Term::Float(_) | Term::Reference(_) => {}
+                    Term::Atom(_) | Term::Nil | Term::Float(_) => {}
+                    Term::Reference(reference) if !reference.is_pid_reference() => {}
                     Term::Cons(cell) => pending.extend([&cell.tail, &cell.head]),
                     Term::Tuple(elements) => pending.extend(elements.iter()),
                     _ => {
