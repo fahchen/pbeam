@@ -406,14 +406,16 @@ fn decodes_each_identifier_tag_and_checks_the_node() {
         decode_with(&mut atoms, &new_ref, false).unwrap(),
         Term::Reference(Reference::ordinary(5).unwrap())
     );
+    // An old reference has the scheduler number 0, which PBeam cannot
+    // hold (`dec_term`, `external.c:4786-4855`).
     let mut old_ref = vec![101];
     old_ref.extend(node());
     old_ref.extend(with_words(&[], &[5]));
     old_ref.push(0);
-    assert_eq!(
-        decode_with(&mut atoms, &old_ref, false).unwrap(),
-        Term::Reference(Reference::ordinary(5).unwrap())
-    );
+    assert!(matches!(
+        decode_with(&mut atoms, &old_ref, false),
+        Err(DecodeError::Unsupported(_))
+    ));
 
     // `NIL_EXT` is a node only inside `LOCAL_EXT`, a sysname must be an
     // atom, and a creation that is not 0 belongs to another node
@@ -669,6 +671,19 @@ fn decodes_the_unsupported_forms_and_local_terms() {
 }
 
 #[test]
+fn validates_the_structure_before_it_adds_an_atom() {
+    let mut atoms = AtomTable::new();
+    // `decoded_size` validates the whole term before `dec_term` adds the
+    // atoms (`external.c:6150-6500`, `2159-2198`), so a malformed tuple
+    // leaves the atom table unchanged.
+    assert!(matches!(
+        decode_with(&mut atoms, &[104, 2, 119, 3, 120, 121, 122, 255], false),
+        Err(DecodeError::Badarg)
+    ));
+    assert!(atoms.get("xyz").is_none());
+}
+
+#[test]
 fn decodes_and_rejects_the_compressed_form() {
     let mut atoms = AtomTable::new();
     // `COMPRESSED` with the length of the plain term and its zlib stream
@@ -844,4 +859,55 @@ fn decodes_and_encodes_a_deep_term_without_a_rust_stack() {
         encode(&term, &atoms, &Options::default()).unwrap(),
         bytes[1..]
     );
+}
+
+#[test]
+fn keeps_the_decoder_guards_behind_the_validation() {
+    // `binary_to_term` validates the structure before `Decoder::term` adds
+    // an atom (`external.c:6150-6500`, `2159-2198`). These bodies reach the
+    // guard of `Decoder::term` itself, which keeps the same checks.
+    let mut atoms = AtomTable::new();
+    let mut term = |bytes: &[u8]| {
+        Decoder {
+            input: bytes,
+            pos: 0,
+            safe: false,
+            local: false,
+            atoms: &mut atoms,
+            seed: SEED,
+        }
+        .term()
+    };
+    for invalid in [
+        &[108, 0, 0, 0, 5, 97, 1][..],
+        &[104, 3, 97, 1],
+        &[105, 0, 0, 0, 3, 97, 1],
+        &[116, 0, 0, 0, 2, 97, 1],
+        &[77, 0, 0, 0, 0, 8],
+        &[255],
+        &[121, 0, 0, 0, 0, 97, 1],
+    ] {
+        assert!(matches!(term(invalid), Err(DecodeError::Badarg)));
+    }
+    let mut long = vec![118, 1, 0];
+    long.resize(3 + 256, b'a');
+    assert!(matches!(term(&long), Err(DecodeError::Badarg)));
+    let mut nil_pid = vec![88, 106];
+    nil_pid.extend(with_words(&[], &[5, 0, 0]));
+    assert!(matches!(term(&nil_pid), Err(DecodeError::Badarg)));
+    let mut bad_sysname = vec![88, 97, 1];
+    bad_sysname.extend(with_words(&[], &[5, 0, 0]));
+    assert!(matches!(term(&bad_sysname), Err(DecodeError::Badarg)));
+    let mut six_ref = vec![90, 0, 6];
+    six_ref.extend(node());
+    six_ref.extend(with_words(&[], &[0, 1, 1, 0, 0, 0]));
+    assert!(matches!(term(&six_ref), Err(DecodeError::Badarg)));
+    // The validated path rejects a six-word `NEW_REFERENCE_EXT` too.
+    let mut six_new_ref = vec![114, 0, 6];
+    six_new_ref.extend(node());
+    six_new_ref.extend(with_words(&[], &[0, 1, 1, 0, 0, 0]));
+    assert!(matches!(
+        decode_with(&mut atoms, &six_new_ref, false),
+        Err(DecodeError::Badarg)
+    ));
 }

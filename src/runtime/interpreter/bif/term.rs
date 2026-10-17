@@ -662,6 +662,309 @@ struct Frame {
     items: Vec<Term>,
 }
 
+/// The container that [`validate`] still fills.
+enum CheckKind {
+    /// A tuple of the remaining elements.
+    Tuple,
+    /// A list of the remaining heads, then its tail.
+    List,
+    /// A map of the remaining 2 * size keys and values.
+    Map,
+    /// An `EXPORT_EXT` of the module, the function, and the arity.
+    Export,
+    /// A `LOCAL_EXT` with its hash and the start of the wrapped term.
+    Local { hash: u32, start: usize },
+}
+
+/// One open container of the validation walk.
+struct CheckFrame {
+    /// The kind of the container.
+    kind: CheckKind,
+    /// The number of terms that the container still expects.
+    remaining: usize,
+}
+
+/// Take `count` bytes at `index`, as the decoder does.
+fn check_skip(input: &[u8], index: &mut usize, count: usize) -> Result<(), DecodeError> {
+    let end = index.checked_add(count).ok_or(DecodeError::Badarg)?;
+    if end > input.len() {
+        return Err(DecodeError::Badarg);
+    }
+    *index = end;
+    Ok(())
+}
+
+/// Take a big-endian number of `count` bytes at `index`.
+fn check_number(input: &[u8], index: &mut usize, count: usize) -> Result<u32, DecodeError> {
+    let start = *index;
+    check_skip(input, index, count)?;
+    Ok(input[start..*index]
+        .iter()
+        .fold(0u32, |value, &byte| (value << 8) | u32::from(byte)))
+}
+
+/// Take an atom name of `length` bytes at `index` and validate its encoding,
+/// as `dec_atom` (`external.c:4490-4550`) does, without adding the atom.
+fn check_atom_name(
+    input: &[u8],
+    index: &mut usize,
+    length: usize,
+    latin1: bool,
+) -> Result<(), DecodeError> {
+    let start = *index;
+    check_skip(input, index, length)?;
+    let bytes = &input[start..*index];
+    if latin1 {
+        return (length <= MAX_ATOM_CHARACTERS)
+            .then_some(())
+            .ok_or(DecodeError::Badarg);
+    }
+    let name = std::str::from_utf8(bytes).map_err(|_| DecodeError::Badarg)?;
+    (name.chars().count() <= MAX_ATOM_CHARACTERS)
+        .then_some(())
+        .ok_or(DecodeError::Badarg)
+}
+
+/// Take the node atom of a pid, port, or reference at `index`.
+fn check_sysname(input: &[u8], index: &mut usize, local: bool) -> Result<(), DecodeError> {
+    match *input.get(*index).ok_or(DecodeError::Badarg)? {
+        106 => {
+            if !local {
+                return Err(DecodeError::Badarg);
+            }
+            *index += 1;
+            Ok(())
+        }
+        100 => {
+            *index += 1;
+            let length = check_number(input, index, 2)? as usize;
+            check_atom_name(input, index, length, true)
+        }
+        118 => {
+            *index += 1;
+            let length = check_number(input, index, 2)? as usize;
+            check_atom_name(input, index, length, false)
+        }
+        115 => {
+            *index += 1;
+            let length = usize::from(*input.get(*index).ok_or(DecodeError::Badarg)?);
+            *index += 1;
+            check_atom_name(input, index, length, true)
+        }
+        119 => {
+            *index += 1;
+            let length = usize::from(*input.get(*index).ok_or(DecodeError::Badarg)?);
+            *index += 1;
+            check_atom_name(input, index, length, false)
+        }
+        _ => Err(DecodeError::Badarg),
+    }
+}
+
+/// Validate the structure of one external term as `decoded_size`
+/// (`external.c:6150-6500`) does before the decoder adds an atom: the tags,
+/// the lengths, the atom encodings, the reference counts, and the local
+/// block hashes. A term that PBeam decodes to an unsupported form passes the
+/// check, because its structure is valid.
+fn validate(input: &[u8], seed: u32) -> Result<(), DecodeError> {
+    let mut index = 0usize;
+    let mut local = false;
+    let mut frames: Vec<CheckFrame> = Vec::new();
+    'parse: loop {
+        let tag = *input.get(index).ok_or(DecodeError::Badarg)?;
+        index += 1;
+        let mut complete = true;
+        match tag {
+            97 => check_skip(input, &mut index, 1)?,
+            98 => check_skip(input, &mut index, 4)?,
+            99 => check_skip(input, &mut index, FLOAT_TEXT_SIZE)?,
+            70 => check_skip(input, &mut index, 8)?,
+            100 => {
+                let length = check_number(input, &mut index, 2)? as usize;
+                check_atom_name(input, &mut index, length, true)?;
+            }
+            115 => {
+                let length = usize::from(*input.get(index).ok_or(DecodeError::Badarg)?);
+                index += 1;
+                check_atom_name(input, &mut index, length, true)?;
+            }
+            118 => {
+                let length = check_number(input, &mut index, 2)? as usize;
+                check_atom_name(input, &mut index, length, false)?;
+            }
+            119 => {
+                let length = usize::from(*input.get(index).ok_or(DecodeError::Badarg)?);
+                index += 1;
+                check_atom_name(input, &mut index, length, false)?;
+            }
+            106 => {}
+            107 => {
+                let length = check_number(input, &mut index, 2)? as usize;
+                check_skip(input, &mut index, length)?;
+            }
+            108 => {
+                let count = check_number(input, &mut index, 4)? as usize;
+                frames.push(CheckFrame {
+                    kind: CheckKind::List,
+                    remaining: count,
+                });
+                complete = false;
+            }
+            104 => {
+                let count = usize::from(*input.get(index).ok_or(DecodeError::Badarg)?);
+                index += 1;
+                if count != 0 {
+                    frames.push(CheckFrame {
+                        kind: CheckKind::Tuple,
+                        remaining: count,
+                    });
+                    complete = false;
+                }
+            }
+            105 => {
+                let count = check_number(input, &mut index, 4)? as usize;
+                if count > MAX_TUPLE_SIZE {
+                    return Err(DecodeError::Badarg);
+                }
+                if count != 0 {
+                    frames.push(CheckFrame {
+                        kind: CheckKind::Tuple,
+                        remaining: count,
+                    });
+                    complete = false;
+                }
+            }
+            116 => {
+                let count = check_number(input, &mut index, 4)? as usize;
+                let terms = count.checked_mul(2).ok_or(DecodeError::Badarg)?;
+                if terms != 0 {
+                    frames.push(CheckFrame {
+                        kind: CheckKind::Map,
+                        remaining: terms,
+                    });
+                    complete = false;
+                }
+            }
+            109 => {
+                let length = check_number(input, &mut index, 4)? as usize;
+                check_skip(input, &mut index, length)?;
+            }
+            77 => {
+                let length = check_number(input, &mut index, 4)? as usize;
+                let bits = *input.get(index).ok_or(DecodeError::Badarg)?;
+                index += 1;
+                if length == 0 || !(1..=8).contains(&bits) {
+                    return Err(DecodeError::Badarg);
+                }
+                check_skip(input, &mut index, length)?;
+            }
+            110 => {
+                let length = usize::from(*input.get(index).ok_or(DecodeError::Badarg)?);
+                index += 1;
+                check_skip(input, &mut index, 1 + length)?;
+            }
+            111 => {
+                let length = check_number(input, &mut index, 4)? as usize;
+                check_skip(input, &mut index, 1 + length)?;
+            }
+            88 => {
+                check_sysname(input, &mut index, local)?;
+                check_skip(input, &mut index, 12)?;
+            }
+            103 => {
+                check_sysname(input, &mut index, local)?;
+                check_skip(input, &mut index, 9)?;
+            }
+            120 => {
+                check_sysname(input, &mut index, local)?;
+                check_skip(input, &mut index, 12)?;
+            }
+            89 => {
+                check_sysname(input, &mut index, local)?;
+                check_skip(input, &mut index, 8)?;
+            }
+            102 => {
+                check_sysname(input, &mut index, local)?;
+                check_skip(input, &mut index, 5)?;
+            }
+            90 => {
+                let count = check_number(input, &mut index, 2)? as usize;
+                if count > MAX_REFERENCE_NUMBERS {
+                    return Err(DecodeError::Badarg);
+                }
+                check_sysname(input, &mut index, local)?;
+                check_skip(input, &mut index, 4 + 4 * count)?;
+            }
+            114 => {
+                let count = check_number(input, &mut index, 2)? as usize;
+                if count > MAX_REFERENCE_NUMBERS {
+                    return Err(DecodeError::Badarg);
+                }
+                check_sysname(input, &mut index, local)?;
+                check_skip(input, &mut index, 1 + 4 * count)?;
+            }
+            101 => {
+                check_sysname(input, &mut index, local)?;
+                check_skip(input, &mut index, 5)?;
+            }
+            113 => {
+                frames.push(CheckFrame {
+                    kind: CheckKind::Export,
+                    remaining: 3,
+                });
+                complete = false;
+            }
+            112 | 117 | 67 => return Ok(()),
+            121 => {
+                let hash = check_number(input, &mut index, 4)?;
+                local = true;
+                frames.push(CheckFrame {
+                    kind: CheckKind::Local { hash, start: index },
+                    remaining: 1,
+                });
+                complete = false;
+            }
+            _ => return Err(DecodeError::Badarg),
+        }
+        if !complete {
+            continue 'parse;
+        }
+        loop {
+            let Some(frame) = frames.last_mut() else {
+                return Ok(());
+            };
+            match frame.kind {
+                CheckKind::Tuple | CheckKind::Map | CheckKind::Export => {
+                    frame.remaining -= 1;
+                    if frame.remaining == 0 {
+                        frames.pop();
+                        continue;
+                    }
+                    break;
+                }
+                CheckKind::List => {
+                    if frame.remaining > 0 {
+                        frame.remaining -= 1;
+                        if frame.remaining == 0 {
+                            continue 'parse;
+                        }
+                        break;
+                    }
+                    frames.pop();
+                    continue;
+                }
+                CheckKind::Local { hash, start } => {
+                    frames.pop();
+                    if external::block_hash(&input[start..index], seed) != hash {
+                        return Err(DecodeError::Badarg);
+                    }
+                    continue;
+                }
+            }
+        }
+    }
+}
+
 impl Decoder<'_> {
     /// Decode `VERSION_MAGIC`, the optional `COMPRESSED` header, and one
     /// term, as `binary2term_prepare` and `dec_term`
@@ -684,6 +987,7 @@ impl Decoder<'_> {
             Some(plain) => plain,
             None => &self.input[start..],
         };
+        validate(body, seed)?;
         let mut decoder = Decoder {
             input: body,
             pos: 0,
@@ -1291,10 +1595,10 @@ impl Decoder<'_> {
         if number >= MAX_REFERENCE {
             return Err(DecodeError::Badarg);
         }
-        Ok(Term::Reference(
-            Reference::ordinary(u64::from(number))
-                .expect("a number below MAX_REFERENCE is ordinary"),
-        ))
+        // An old reference has no scheduler number, so its second reference
+        // number is 0 (`dec_term`, `external.c:4786-4855`). PBeam holds the
+        // references of its first scheduler only.
+        Err(DecodeError::Unsupported("a reference of another scheduler"))
     }
 
     /// Build the external fun of a decoded `EXPORT_EXT` as its case in
