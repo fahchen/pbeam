@@ -5,6 +5,7 @@ use super::*;
 use crate::runtime::ets::pattern::{MatchSpec, SpecError};
 use crate::runtime::ets::{Access, Busy, Operation, Table, TableType};
 use crate::term::Reference;
+use num_bigint::BigInt;
 
 /// The fewest and the most locks that the hidden option
 /// `{write_concurrency, {debug_hash_fixed_number_of_locks, N}}` accepts
@@ -1360,7 +1361,7 @@ pub(super) fn take(
         .into_iter()
         .map(|object| Term::tuple(object.to_vec()))
         .collect();
-    table.delete(&context.scheduler.atoms, key);
+    table.take_key(&context.scheduler.atoms, key);
     Ok(Value(Term::list_from(objects)))
 }
 
@@ -1525,7 +1526,7 @@ pub(super) fn info(
     };
     let value = match item {
         Term::Atom(atom) if atom.is_static("type") => Term::static_atom(found.table_type().name()),
-        Term::Atom(atom) if atom.is_static("size") => Term::Integer(found.len() as i64),
+        Term::Atom(atom) if atom.is_static("size") => Term::from_bigint(BigInt::from(found.size())),
         Term::Atom(atom) if atom.is_static("memory") => Term::Integer(found.memory_words() as i64),
         Term::Atom(atom) if atom.is_static("owner") => Term::Pid(found.owner()),
         Term::Atom(atom) if atom.is_static("heir") => {
@@ -2483,7 +2484,7 @@ pub(super) fn info_all(context: &mut BifContext<'_>, table: &Term) -> Result<Bif
                     .expect("the table name atom is in the table"),
             ),
         ),
-        ("size", Term::Integer(found.len() as i64)),
+        ("size", Term::from_bigint(BigInt::from(found.size()))),
         ("node", Term::static_atom("nonode@nohost")),
         ("named_table", boolean_term(named)),
         ("type", Term::static_atom(found.table_type().name())),
@@ -2573,10 +2574,11 @@ pub(super) fn internal_delete_all(
     if !matches!(holder, Term::Atom(atom) if atom.is_static("undefined")) {
         return Ok(Value(holder.clone()));
     }
-    let count = found.len();
+    let count = found.size();
     let reductions = found.delete_all_reductions();
     if found.is_fixed() && found.table_type() != TableType::OrderedSet {
-        if !found.step_clear(atoms, caller, count, left).0 {
+        let units = usize::try_from(count).unwrap_or(usize::MAX);
+        if !found.step_clear(atoms, caller, units, left).0 {
             // The clear marks 8 buckets for each reduction. A clear that
             // does not finish marks the table busy, uses the turn, and
             // traps to itself (`erl_db.c:3255-3279`).
@@ -2587,21 +2589,21 @@ pub(super) fn internal_delete_all(
             return Ok(BifResult::TrapBif {
                 module: "ets",
                 function: "internal_delete_all",
-                arguments: vec![Term::Reference(id), Term::Integer(count as i64)],
+                arguments: vec![Term::Reference(id), Term::from_bigint(BigInt::from(count))],
             });
         }
         context
             .scheduler
             .current_process_mut()
             .bump_reductions(i32::try_from(reductions).unwrap_or(i32::MAX));
-        return Ok(Value(Term::Integer(count as i64)));
+        return Ok(Value(Term::from_bigint(BigInt::from(count))));
     }
     found.clear(&context.scheduler.atoms);
     context
         .scheduler
         .current_process_mut()
         .bump_reductions(i32::try_from(reductions).unwrap_or(i32::MAX));
-    Ok(Value(Term::Integer(count as i64)))
+    Ok(Value(Term::from_bigint(BigInt::from(count))))
 }
 
 /// Run `ets:internal_select_delete/2`, the BIF of `ets:select_delete/2`

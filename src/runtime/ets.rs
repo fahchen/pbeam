@@ -191,6 +191,11 @@ pub(super) struct Table {
     /// free visits only the buckets that have a record
     /// (`db_free_table_continue_hash`, `erl_db_hash.c:3122-3149`).
     retained_buckets: BTreeMap<usize, Vec<u64>>,
+    /// The difference between the ERTS item counter and the live object
+    /// count. Only the take of a fixed key makes it nonzero, because the
+    /// counter falls by each record of the key and the kept pseudo-deleted
+    /// objects count as items (`db_take_hash`, `erl_db_hash.c:2949-2995`).
+    size_adjust: i64,
     /// The number of delete records that the fixation keeps, as the count of
     /// the ERTS `FixedDeletion` records (`erl_db_hash.c:221-272`): one for a
     /// delete of a key, one for a clear, and one for each bucket of a select
@@ -1068,6 +1073,7 @@ impl Table {
             fixed_by: Vec::new(),
             retained: HashMap::new(),
             retained_buckets: BTreeMap::new(),
+            size_adjust: 0,
             fixdels: 0,
             select_slot: EMPTY,
             deleted: Vec::new(),
@@ -1174,8 +1180,18 @@ impl Table {
     }
 
     /// Return the number of objects.
+    #[cfg(test)]
     pub(super) fn len(&self) -> usize {
         self.object_count()
+    }
+
+    /// Return the ERTS item counter, which `ets:info(Table, size)` gives: the
+    /// live objects and the adjustment of a fixed take, wrapped as the
+    /// unsigned `Uint` counter (`ADD_NITEMS`, `erl_db_hash.c:2949-2995`).
+    pub(super) fn size(&self) -> u64 {
+        let structural = i128::try_from(self.object_count()).unwrap_or(i128::MAX);
+        let size = structural + i128::from(self.size_adjust);
+        (size as u128 & u128::from(u64::MAX)) as u64
     }
 
     /// Return the reductions of `ets:delete_all_objects/1`, as
@@ -1787,6 +1803,68 @@ impl Table {
         self.heads = vec![EMPTY; FIRST_SEGMENT_SLOTS];
         self.next.clear();
         self.buckets = FIRST_SEGMENT_SLOTS;
+        self.size_adjust = 0;
+        self.writes += 1;
+    }
+
+    /// Take the objects of the key, as `db_take_hash` does
+    /// (`erl_db_hash.c:2949-2995`): a fixed table keeps the first live object
+    /// of the key as a pseudo-deleted object and frees each record after it,
+    /// also the pseudo-deleted ones. The ERTS item counter falls by the
+    /// number of those records, so the table size counts them and can go
+    /// below 0. A table without a fixation removes the objects as a delete
+    /// does.
+    pub(super) fn take_key(&mut self, atoms: &AtomTable, key: &Term) {
+        let hash = stored_hash(atoms, key);
+        let Some(index_slot) = self.position(hash, key) else {
+            return;
+        };
+        if !self.is_fixed() || self.table_type == TableType::OrderedSet {
+            self.delete(atoms, key);
+            return;
+        }
+        let node = self
+            .chain_node(hash, key)
+            .expect("a live key has a chain node");
+        self.index.remove(hash, index_slot);
+        let mut kept = Vec::new();
+        let mut slot = node;
+        let mut seen_live = false;
+        let mut live = 0i64;
+        let mut records = 0i64;
+        while slot != EMPTY {
+            let older = self.older[slot];
+            if !seen_live && self.is_deleted(slot) {
+                kept.push(slot);
+            } else if !seen_live {
+                seen_live = true;
+                live += 1;
+                records += 1;
+                self.mark_deleted(slot);
+                self.deleted_objects += 1;
+                kept.push(slot);
+            } else {
+                records += 1;
+                if self.is_deleted(slot) {
+                    self.deleted_objects -= 1;
+                } else {
+                    live += 1;
+                }
+                self.objects[slot] = None;
+                self.older[slot] = EMPTY;
+                self.free.push(slot);
+            }
+            slot = older;
+        }
+        for pair in kept.windows(2) {
+            self.older[pair[0]] = pair[1];
+        }
+        if let Some(&last) = kept.last() {
+            self.older[last] = EMPTY;
+        }
+        self.size_adjust += live - records;
+        self.fixdels += 1;
+        self.retain_record(hash, key, node);
         self.writes += 1;
     }
 

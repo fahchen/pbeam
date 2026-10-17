@@ -22,7 +22,8 @@
          fixtable_bag_last_live/0, fixtable_bag_skip_deleted/0,
          fixtable_next_live_behind_node/0, fixtable_clear_behind_node/0,
          fixtable_bag_restore_behind_node/0, fixtable_delete_table/0,
-         fixtable_clear_large/0, fixtable_clear_help/0, clear_task/2]).
+         fixtable_clear_large/0, fixtable_clear_help/0, clear_task/2,
+         fixtable_take/0]).
 
 %% ets:new/2 return values and badarg cases (erl_db.c:2555-2840).
 new() ->
@@ -1101,6 +1102,20 @@ wait_size(T) ->
         0 -> 0;
         _ -> wait_size(T)
     end.
+
+%% The take of a key of a fixed table keeps the first live object as a
+%% pseudo-deleted object and frees the records after it, and the item
+%% counter falls by each of those records (`erl_db_hash.c:2949-2995`).
+fixtable_take() ->
+    T = ets:new(ets_probe_fix_take, [bag]),
+    ets:insert(T, [{k, 1}, {k, 2}, {k, 3}]),
+    ets:safe_fixtable(T, true),
+    ets:internal_select_delete(T, [{{k, 2}, [], [true]}]),
+    Taken = ets:take(T, k),
+    Size = ets:info(T, size),
+    Objects = ets:lookup(T, k),
+    ets:safe_fixtable(T, false),
+    [Taken, Size, Objects].
 
 catch_error(Fun) ->
     try Fun() catch error:Reason -> {error, Reason} end.

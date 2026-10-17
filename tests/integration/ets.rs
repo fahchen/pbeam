@@ -1,5 +1,7 @@
 use std::process::Command;
+use std::sync::Arc;
 
+use num_bigint::BigInt;
 use pbeam_runtime::{BeamProgram, Term};
 
 #[path = "../common/mod.rs"]
@@ -1009,6 +1011,31 @@ fn clears_a_large_fixed_table_in_turns_as_pinned_erts() {
         Term::list_from(vec![Term::Integer(33000), Term::Integer(0)])
     );
     assert_eq!(reference("fixtable_clear_large"), b"[33000,0]\n");
+}
+
+#[test]
+fn takes_a_key_of_a_fixed_bag_as_pinned_erts() {
+    // The take keeps the first live object as a pseudo-deleted object and
+    // frees the records after it; the item counter falls by each record, so
+    // the size wraps below 0 (`db_take_hash`, `erl_db_hash.c:2949-2995`).
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    let object = |value| Term::tuple(vec![atom("k"), Term::Integer(value)]);
+    assert_eq!(
+        program
+            .execute("ets_probe", "fixtable_take", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![
+            Term::list_from(vec![object(1), object(3)]),
+            Term::BigInt(Arc::new(BigInt::from(u64::MAX))),
+            Term::nil(),
+        ])
+    );
+    assert_eq!(
+        reference("fixtable_take"),
+        b"[[{k,1},{k,3}],18446744073709551615,[]]\n"
+    );
 }
 
 #[test]
