@@ -158,7 +158,8 @@ reductions() ->
     List = bytes(100),
     [cost(fun() -> erlang:md5(id(Binary)) end),
      cost(fun() -> erlang:phash2(id(Map)) end),
-     cost(fun() -> erlang:phash2(id(List)) end)].
+     cost(fun() -> erlang:phash2(id(List)) end),
+     cost(fun() -> erlang:phash2(id(one(a, list_to_binary(bytes(696))))) end)].
 
 cost(Fun) ->
     Before = element(2, process_info(self(), reductions)),

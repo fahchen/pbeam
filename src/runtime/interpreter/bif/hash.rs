@@ -153,7 +153,7 @@ impl Md5 {
                 let block = self.buffer;
                 self.hash_block(&block);
                 self.buffered = 0;
-                self.total += 64;
+                self.total = self.total.wrapping_add(64);
             } else {
                 self.buffer[buffered..buffered + part.len()].copy_from_slice(part);
                 self.buffered += part.len() as u64;
@@ -165,7 +165,7 @@ impl Md5 {
             let block: [u8; 64] = block.try_into().expect("a block of 64 bytes");
             self.hash_block(&block);
             part = rest;
-            self.total += 64;
+            self.total = self.total.wrapping_add(64);
         }
         if !part.is_empty() {
             self.buffer[..part.len()].copy_from_slice(part);
@@ -193,7 +193,7 @@ impl Md5 {
         // `size_t` arithmetic wraps for a buffered part of 56 bytes or more,
         // as `pad` does (`erl_md5.c:227-231`).
         let zeroes = (56_u64.wrapping_sub(filled as u64) & 63) as usize;
-        let bits = (self.total + self.buffered).wrapping_mul(8);
+        let bits = self.total.wrapping_add(self.buffered).wrapping_mul(8);
         let length = size + 1 + zeroes + 8;
         pad[length - 8..length].copy_from_slice(&bits.to_le_bytes());
         for block in pad[..length].chunks(64) {

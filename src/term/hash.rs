@@ -1404,7 +1404,12 @@ pub(crate) fn make_hash2(atoms: &AtomTable, term: &Term) -> (u32, u64) {
                 }) => {
                     hash = hash_with(saved, xor, HCONST_19);
                     xor = saved_xor;
-                    iterations += 1;
+                    // The tail of a map ends the walk here, and the walk of
+                    // ERTS returns from `hash2_common` before its trailing
+                    // charge point (`erl_term_hashing.c:1565-1570`).
+                    if !stack.is_empty() {
+                        iterations += 1;
+                    }
                     continue;
                 }
                 Some(Hash2Item::Node(node)) => {
