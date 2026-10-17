@@ -2,12 +2,12 @@
 
 use std::{collections::HashMap, rc::Rc};
 
-use super::CodeTable;
+use super::{CodeTable, Finish};
 use crate::{
     BeamModule,
     beam::{ModuleId, code::Instruction},
     runtime::process::InitialCall,
-    term::{Atom, AtomTable},
+    term::{Atom, AtomTable, Reference},
 };
 
 /// Return the code table of one module `fixture` with the function `main/0`.
@@ -76,4 +76,65 @@ fn returns_the_names_of_a_start_mfa() {
             0
         )
     );
+}
+
+/// Return the module `name` with no export.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let module = module("a");
+/// assert_eq!(module.name, "a");
+/// ```
+fn module(name: &str) -> BeamModule {
+    BeamModule::new(
+        name.to_owned(),
+        HashMap::new(),
+        Vec::new(),
+        vec![Instruction::End],
+    )
+    .unwrap()
+}
+
+#[test]
+fn returns_not_purged_in_reverse_input_order() {
+    // `exception_list` prepends each module of the input order
+    // (`beam_bif_load.c:322-337`), so the result is in reverse order.
+    let mut code = CodeTable::new(HashMap::new());
+    let (a1, b1) = (Reference(1), Reference(2));
+    code.prepare(a1, module("a"));
+    code.prepare(b1, module("b"));
+    code.finish(&[a1, b1], vec!["a".into(), "b".into()])
+        .unwrap();
+    assert_eq!(code.delete("a"), Some(true));
+    assert_eq!(code.delete("b"), Some(true));
+    let (a2, b2) = (Reference(3), Reference(4));
+    code.prepare(a2, module("a"));
+    code.prepare(b2, module("b"));
+    code.finish(&[a2, b2], vec!["a".into(), "b".into()])
+        .unwrap();
+    let (a3, b3) = (Reference(5), Reference(6));
+    code.prepare(a3, module("a"));
+    code.prepare(b3, module("b"));
+    assert_eq!(
+        code.finish(&[a3, b3], vec!["a".into(), "b".into()])
+            .unwrap(),
+        Finish::NotPurged(vec!["b".into(), "a".into()])
+    );
+}
+
+#[test]
+fn rejects_a_delete_when_the_module_has_old_code() {
+    // `delete_module_1` raises `badarg` before it changes code when the
+    // module has old code (`beam_bif_load.c:702-708`).
+    let mut code = CodeTable::new(HashMap::new());
+    let first = Reference(1);
+    code.prepare(first, module("a"));
+    code.finish(&[first], vec!["a".into()]).unwrap();
+    assert_eq!(code.delete("a"), Some(true));
+    let second = Reference(2);
+    code.prepare(second, module("a"));
+    code.finish(&[second], vec!["a".into()]).unwrap();
+    assert_eq!(code.delete("a"), Some(false));
+    assert!(code.get("a").is_some());
 }

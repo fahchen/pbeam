@@ -157,6 +157,19 @@ impl Ports {
         Ok(id)
     }
 
+    /// Return the identifiers of the open ports, in no order, as
+    /// `erts_ptab_list` (`erl_ptab.c:738-...`) gives them to
+    /// `erlang:ports/0`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(ports.ids(), vec![PortId(0)]);
+    /// ```
+    pub(super) fn ids(&self) -> Vec<PortId> {
+        self.by_id.keys().copied().collect()
+    }
+
     /// Return true when the port `id` is in the `CLOSING` state.
     ///
     /// # Examples

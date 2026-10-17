@@ -50,6 +50,8 @@
     send_after/0,
     send_after_4/0,
     process_info/0,
+    process_info1/0,
+    delete_module/0,
     is_process_alive/0,
     is_alive_request/0,
     group_leader2/0,
@@ -242,6 +244,12 @@ send_after_4() -> attempt(fun() -> erlang:send_after(0, self(), ping, []) end).
 %% The process inspection and group leader entries. A call for the caller
 %% has no check, so each probe calls them for a child.
 process_info() -> other(fun(Pid) -> erlang:process_info(Pid, registered_name) end).
+
+%% The diagnostics BIF for another process, which checks process:inspect.
+process_info1() -> other(fun(Pid) -> erlang:process_info(Pid) end).
+
+%% The code delete, which checks code:load.
+delete_module() -> attempt(fun() -> erlang:delete_module(effect_probe) end).
 
 is_process_alive() -> other(fun(Pid) -> erlang:is_process_alive(Pid) end).
 
@@ -539,7 +547,14 @@ ambient() ->
         erlang:binary_to_term(erlang:term_to_binary(1)) =:= 1,
         erlang:binary_to_term(erlang:term_to_binary(1), []) =:= 1,
         erlang:external_size(<<1, 2, 3>>),
-        erlang:read_timer(make_ref())
+        erlang:read_timer(make_ref()),
+        is_reference(erlang:alias([explicit_unalias])),
+        alias_unalias(),
+        is_list(erlang:registered()),
+        is_list(erlang:ports()),
+        erlang:display_string(stdout, <<>>),
+        erlang:display(effect_probe_ambient_display),
+        attempt(fun() -> erlang:has_prepared_code_on_load(make_ref()) end)
     ].
 
 %% Each metadata probe makes a temporary file, so `write_file_info/3`
@@ -565,6 +580,12 @@ metadata_probe(Name, Operation) ->
     Result = Operation(Path),
     ok = prim_file:delete(Path),
     Result.
+
+%% Make an explicit_unalias alias and end it.
+alias_unalias() ->
+    Alias = erlang:alias([explicit_unalias]),
+    true = erlang:unalias(Alias),
+    true.
 
 %% Open /dev/null in write mode, write, move the position, and close it
 %% with prim_file. A write-only file keeps no prim_buffer read buffer

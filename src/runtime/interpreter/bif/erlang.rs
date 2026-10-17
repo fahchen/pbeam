@@ -2,13 +2,15 @@
 
 use super::BifResult::{Raise, Trap, Value};
 use super::*;
+use crate::beam::code::Instruction;
 use crate::runtime::capability;
 use crate::runtime::host;
 use crate::runtime::interpreter::DEFAULT_ERROR_HANDLER;
-use crate::runtime::interpreter::code_table::Finish;
+use crate::runtime::interpreter::code_table::{CodeTable, Finish};
 use crate::runtime::local_node;
 use crate::runtime::port::Ports;
-use crate::runtime::process::{Flush, Priority, TimerReference};
+use crate::runtime::process::InitialCall;
+use crate::runtime::process::{Flush, Origin, Priority, TimerReference};
 use crate::runtime::process::{LinkId, ProcessState};
 use crate::runtime::scheduler::PTAB_SIZE;
 use crate::runtime::scheduler::{AliasMode, CONTEXT_REDS, Flushed, MonitorOptions, MonitorTarget};
@@ -17,9 +19,10 @@ use crate::runtime::time::{self, TimeValue};
 use crate::runtime::timer::{Receiver, Timer, Timers};
 use num_bigint::BigInt;
 use num_traits::FromPrimitive;
+use std::io::Write;
 
 use crate::term::{
-    Atom, AtomTable, Fun, MAX_ATOM_CHARACTERS, MAX_ATOM_SZ_LIMIT, MAX_TUPLE_SIZE, ProcessId,
+    Atom, AtomTable, Fun, MAX_ATOM_CHARACTERS, MAX_ATOM_SZ_LIMIT, MAX_TUPLE_SIZE, Map, ProcessId,
     Reference, SMALL_INTEGER_MAX, SMALL_INTEGER_MIN, debug_term, external, print_term,
 };
 
@@ -2848,6 +2851,11 @@ pub(super) fn system_info(atoms: &mut AtomTable, item: &Term) -> Result<BifResul
                 .map(|byte| Term::Integer(i64::from(byte))),
         ))),
         Term::Atom(atom) if atoms.name_of(atom) == "schedulers" => Ok(Value(Term::Integer(1))),
+        // PBeam has one scheduler, and `erlang:system_flag/2` cannot change
+        // its count.
+        Term::Atom(atom) if atoms.name_of(atom) == "schedulers_online" => {
+            Ok(Value(Term::Integer(1)))
+        }
         Term::Atom(atom) if atoms.name_of(atom) == "build_type" => {
             Ok(Value(Term::static_atom("opt")))
         }
@@ -4107,6 +4115,7 @@ pub(super) fn process_info(
         return Ok(denied);
     }
     let caller = scheduler.current_process_mut();
+    let caller_id = caller.id;
     // ponytail: lists of items, other items, and the frames of another process need more state; see "BIF arguments" in docs/erts-differences.md.
     let unsupported = |atoms: &AtomTable| {
         error(format!(
@@ -4115,35 +4124,21 @@ pub(super) fn process_info(
             debug_term(item, atoms)
         ))
     };
-    if *id == caller.id {
-        if caller.flush == Flush::None && !caller.self_signals {
-            if caller.mailbox.has_outer_messages() {
-                caller.mailbox.fetch();
-            }
-        } else {
-            match scheduler.flush_signals()? {
-                Flushed::Done => {}
-                Flushed::Exited(reason) => return Ok(BifResult::Exited(reason)),
-                Flushed::Yield => {
-                    return Ok(BifResult::TrapBif {
-                        module: "erlang",
-                        function: "process_info",
-                        arguments: vec![process.clone(), item.clone()],
-                    });
-                }
-            }
-        }
-        let current = scheduler.current_reductions();
-        let info = {
-            let (caller, atoms) = scheduler.current_process_and_atoms();
-            let messages = caller.mailbox.message_count();
-            let info = caller
-                .info(atoms, item, current, messages, true)?
-                .ok_or_else(|| unsupported(atoms))?;
-            caller.bump_reductions(1);
-            info
-        };
-        return Ok(Value(info));
+    if *id == caller_id {
+        return caller_read(
+            scheduler,
+            vec![process.clone(), item.clone()],
+            |scheduler| {
+                let current = scheduler.current_reductions();
+                let (caller, atoms) = scheduler.current_process_and_atoms();
+                let messages = caller.mailbox.message_count();
+                let info = caller
+                    .info(atoms, item, current, messages, true)?
+                    .ok_or_else(|| unsupported(atoms))?;
+                caller.bump_reductions(1);
+                Ok(Value(info))
+            },
+        );
     }
     let Some(target) = scheduler.process(*id) else {
         return Ok(Value(Term::static_atom("undefined")));
@@ -4385,6 +4380,16 @@ pub(super) fn finish_loading(
                 Term::list_from(modules),
             ])))
         }
+        Finish::NotPurged(names) => {
+            let mut modules = Vec::with_capacity(names.len());
+            for name in names {
+                modules.push(Term::Atom(scheduler.atoms.put(&name)?));
+            }
+            Ok(Value(Term::tuple(vec![
+                Term::static_atom("not_purged"),
+                Term::list_from(modules),
+            ])))
+        }
     }
 }
 
@@ -4487,6 +4492,787 @@ pub(super) fn module_loaded(
     } else {
         "false"
     })))
+}
+
+/// The key names of `erlang:process_info/1`, in the order of
+/// `pi_1_keys_list` (`erl_bif_info.c:1007-1025`). The `registered_name`
+/// item is omitted when the process has no name (`erl_bif_info.c:1608-1625`).
+const PROCESS_INFO_1_KEYS: [&str; 17] = [
+    "registered_name",
+    "current_function",
+    "initial_call",
+    "status",
+    "message_queue_len",
+    "links",
+    "dictionary",
+    "trap_exit",
+    "error_handler",
+    "priority",
+    "group_leader",
+    "total_heap_size",
+    "heap_size",
+    "stack_size",
+    "reductions",
+    "garbage_collection",
+    "suspending",
+];
+
+/// The names of an MFA item of `erlang:process_info/1`: module and function
+/// names that the atom table interns, or atoms that a start MFA holds.
+enum MfaNames {
+    /// A module and a function name from the tables of a loaded module.
+    Names(String, String, usize),
+    /// The atoms of an undefined start MFA.
+    Atoms(Atom, Atom, usize),
+}
+
+/// The values of the `erlang:process_info/1` items of one process, read
+/// while the process is borrowed.
+struct ProcessInfoValues {
+    registered_name: Option<Atom>,
+    current_function: Option<MfaNames>,
+    initial_call: MfaNames,
+    status: &'static str,
+    message_queue_len: i64,
+    links: Vec<Term>,
+    dictionary: Vec<(Term, Term)>,
+    trap_exit: bool,
+    error_handler: Option<String>,
+    priority: &'static str,
+    group_leader: ProcessId,
+    total_heap_size: i64,
+    heap_size: i64,
+    stack_size: i64,
+    reductions: i64,
+}
+
+/// Run `erlang:process_info/1` as `process_info_bif` with `pi_1_keys_list`
+/// (`erl_bif_info.c:1560-1563`, `1007-1025`) does. The result is the 17
+/// items of a live process, in the ERTS order, and the `registered_name`
+/// item is omitted when the process has no name. The item values come from
+/// the state of the process: `current_function` and `initial_call` name its
+/// frames or start MFA, and the heap and stack sizes are the words of its
+/// PBeam containers (`heap_size` and `total_heap_size` are equal, because
+/// PBeam has no separate old heap). The garbage collection item gives the
+/// ERTS defaults with `minor_gcs` 0, because PBeam has no garbage
+/// collection.
+///
+/// A pid that no process has gives `undefined`. A read of another process
+/// needs the `process` capability with `inspect`, as for
+/// `erlang:process_info/2`. The caller first handles its own signals, and
+/// traps when the read uses up its reductions or a signal can end it, as
+/// `erlang:process_info/2` does. A read of another process with signals
+/// gives its current state without the ERTS process-info request, because
+/// `ProcessState::info` reads one atom item.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let info = process_info_1(&mut context, &Term::Pid(context.scheduler.current_process().id))?;
+/// assert!(matches!(info, BifResult::Value(Term::Cons(_))));
+/// assert!(matches!(process_info_1(&mut context, &Term::Integer(1))?, BifResult::Raise { .. }));
+/// ```
+///
+/// # Errors
+///
+/// A name of an MFA item that the atom table does not hold, and the name
+/// numbers of an unloaded module, are runtime errors.
+pub(super) fn process_info_1(
+    context: &mut BifContext<'_>,
+    process: &Term,
+) -> Result<BifResult, BeamError> {
+    let Term::Pid(id) = process else {
+        return Ok(BifResult::badarg());
+    };
+    let scheduler = &mut *context.scheduler;
+    if let Some(denied) = other_process_denial(scheduler, *id, Operation::Inspect)? {
+        return Ok(denied);
+    }
+    if *id == scheduler.current_process().id {
+        return caller_read(scheduler, vec![process.clone()], |scheduler| {
+            let current = scheduler.current_reductions();
+            let messages = scheduler.current_process().mailbox.message_count();
+            let values = {
+                let caller = scheduler.current_process();
+                process_info_values(&scheduler.code, caller, current, messages, true)?
+            };
+            let info = process_info_term(&mut scheduler.atoms, values)?;
+            scheduler
+                .current_process_mut()
+                .bump_reductions(PROCESS_INFO_1_KEYS.len() as i32);
+            Ok(Value(info))
+        });
+    }
+    let Some(target) = scheduler.process(*id) else {
+        return Ok(Value(Term::static_atom("undefined")));
+    };
+    let messages = target.mailbox.message_count();
+    let values = process_info_values(&scheduler.code, target, 0, messages, false)?;
+    let info = process_info_term(&mut scheduler.atoms, values)?;
+    scheduler
+        .current_process_mut()
+        .bump_reductions(PROCESS_INFO_1_KEYS.len() as i32);
+    Ok(Value(info))
+}
+
+/// Read the values of the `erlang:process_info/1` items of `process`.
+/// `current` is the reduction count of the current turn of the caller.
+fn process_info_values(
+    code: &CodeTable,
+    process: &ProcessState,
+    current: u64,
+    messages: usize,
+    caller: bool,
+) -> Result<ProcessInfoValues, BeamError> {
+    let current_function = if let Some(frame) = process.frames.last() {
+        let module = code.module_by_id(frame.module_id)?;
+        let index = frame.next_instruction.saturating_sub(1);
+        module.instructions[..index]
+            .iter()
+            .rev()
+            .find_map(|instruction| match instruction {
+                Instruction::FunctionInfo {
+                    module,
+                    name,
+                    arity,
+                } => Some(MfaNames::Names(
+                    module.clone(),
+                    name.clone(),
+                    *arity as usize,
+                )),
+                _ => None,
+            })
+            .map(Some)
+            .ok_or_else(|| error("invariant error: the instruction has no func_info before it"))?
+    } else {
+        process.undefined_start.as_ref().map(|(module, function)| {
+            MfaNames::Atoms(module.clone(), function.clone(), process.registers.len())
+        })
+    };
+    let initial_call = match &process.initial_call {
+        InitialCall::Entry {
+            module,
+            function,
+            arity,
+        } => {
+            let loaded = code.module_by_id(*module)?;
+            MfaNames::Names(
+                loaded.name.clone(),
+                loaded.tables.name(*function).to_owned(),
+                *arity,
+            )
+        }
+        InitialCall::Undefined {
+            module,
+            function,
+            arity,
+        } => MfaNames::Atoms(module.clone(), function.clone(), *arity),
+    };
+    let status = if process.exiting.is_some() {
+        "exiting"
+    } else if caller {
+        "running"
+    } else if process.waiting {
+        "waiting"
+    } else {
+        "runnable"
+    };
+    let reductions = i64::try_from(process.reductions.saturating_add(current))
+        .map_err(|_| error("the reduction total exceeds the PBeam integer range"))?;
+    let words = std::mem::size_of::<usize>();
+    let heap_size = i64::try_from(process.allocated_bytes() / words)
+        .map_err(|_| error("the heap size exceeds the PBeam integer range"))?;
+    let stack_size = i64::try_from(
+        process
+            .frames
+            .iter()
+            .map(|frame| frame.stack.capacity())
+            .sum::<usize>()
+            + process.registers.capacity(),
+    )
+    .map_err(|_| error("the stack size exceeds the PBeam integer range"))?;
+    Ok(ProcessInfoValues {
+        registered_name: process.registered_name.clone(),
+        current_function,
+        initial_call,
+        status,
+        message_queue_len: i64::try_from(messages).unwrap_or(i64::MAX),
+        links: process
+            .links
+            .post_order()
+            .map(|(id, _)| id.term())
+            .collect(),
+        dictionary: process.dictionary.pairs().cloned().collect(),
+        trap_exit: process.trap_exit,
+        error_handler: process.error_handler.clone(),
+        priority: process.priority.name(),
+        group_leader: process.group_leader,
+        total_heap_size: heap_size,
+        heap_size,
+        stack_size,
+        reductions,
+    })
+}
+
+/// Build the `erlang:process_info/1` list from the item values.
+fn process_info_term(atoms: &mut AtomTable, values: ProcessInfoValues) -> Result<Term, BeamError> {
+    let mfa = |atoms: &mut AtomTable, mfa: MfaNames| -> Result<Term, BeamError> {
+        let (module, function, arity) = match mfa {
+            MfaNames::Names(module, function, arity) => (
+                Term::Atom(atoms.put(&module)?),
+                Term::Atom(atoms.put(&function)?),
+                arity,
+            ),
+            MfaNames::Atoms(module, function, arity) => {
+                (Term::Atom(module), Term::Atom(function), arity)
+            }
+        };
+        let arity =
+            i64::try_from(arity).map_err(|_| error("the arity exceeds the PBeam integer range"))?;
+        Ok(Term::tuple(vec![module, function, Term::Integer(arity)]))
+    };
+    let mut items = Vec::with_capacity(PROCESS_INFO_1_KEYS.len());
+    if let Some(name) = values.registered_name {
+        items.push(Term::tuple(vec![
+            Term::static_atom("registered_name"),
+            Term::Atom(name),
+        ]));
+    }
+    let current_function = match values.current_function {
+        Some(mfa_names) => mfa(atoms, mfa_names)?,
+        None => Term::static_atom("undefined"),
+    };
+    items.push(Term::tuple(vec![
+        Term::static_atom("current_function"),
+        current_function,
+    ]));
+    items.push(Term::tuple(vec![
+        Term::static_atom("initial_call"),
+        mfa(atoms, values.initial_call)?,
+    ]));
+    items.push(Term::tuple(vec![
+        Term::static_atom("status"),
+        Term::static_atom(values.status),
+    ]));
+    items.push(Term::tuple(vec![
+        Term::static_atom("message_queue_len"),
+        Term::Integer(values.message_queue_len),
+    ]));
+    items.push(Term::tuple(vec![
+        Term::static_atom("links"),
+        Term::list_from(values.links),
+    ]));
+    let dictionary = values
+        .dictionary
+        .into_iter()
+        .map(|(key, value)| Term::tuple(vec![key, value]));
+    items.push(Term::tuple(vec![
+        Term::static_atom("dictionary"),
+        Term::list_from(dictionary),
+    ]));
+    items.push(Term::tuple(vec![
+        Term::static_atom("trap_exit"),
+        Term::static_atom(if values.trap_exit { "true" } else { "false" }),
+    ]));
+    let error_handler = match values.error_handler {
+        Some(name) => Term::Atom(atoms.put(&name)?),
+        None => Term::static_atom("error_handler"),
+    };
+    items.push(Term::tuple(vec![
+        Term::static_atom("error_handler"),
+        error_handler,
+    ]));
+    items.push(Term::tuple(vec![
+        Term::static_atom("priority"),
+        Term::static_atom(values.priority),
+    ]));
+    items.push(Term::tuple(vec![
+        Term::static_atom("group_leader"),
+        Term::Pid(values.group_leader),
+    ]));
+    for (key, value) in [
+        ("total_heap_size", values.total_heap_size),
+        ("heap_size", values.heap_size),
+        ("stack_size", values.stack_size),
+        ("reductions", values.reductions),
+    ] {
+        items.push(Term::tuple(vec![
+            Term::static_atom(key),
+            Term::Integer(value),
+        ]));
+    }
+    let max_heap_size = Map::from_pairs(
+        vec![
+            (Term::static_atom("error_logger"), Term::static_atom("true")),
+            (
+                Term::static_atom("include_shared_binaries"),
+                Term::static_atom("false"),
+            ),
+            (Term::static_atom("kill"), Term::static_atom("true")),
+            (Term::static_atom("size"), Term::Integer(0)),
+        ],
+        &*atoms,
+    )
+    .expect("the max_heap_size map holds atom keys");
+    let minor_gcs = atoms.put("minor_gcs")?;
+    items.push(Term::tuple(vec![
+        Term::static_atom("garbage_collection"),
+        Term::list_from(vec![
+            Term::tuple(vec![
+                Term::static_atom("max_heap_size"),
+                Term::Map(max_heap_size),
+            ]),
+            Term::tuple(vec![
+                Term::static_atom("min_bin_vheap_size"),
+                Term::Integer(46422),
+            ]),
+            Term::tuple(vec![Term::static_atom("min_heap_size"), Term::Integer(233)]),
+            Term::tuple(vec![
+                Term::static_atom("fullsweep_after"),
+                Term::Integer(65535),
+            ]),
+            Term::tuple(vec![Term::Atom(minor_gcs), Term::Integer(0)]),
+        ]),
+    ]));
+    items.push(Term::tuple(vec![
+        Term::static_atom("suspending"),
+        Term::nil(),
+    ]));
+    Ok(Term::list_from(items))
+}
+
+/// Handle the signals of the caller before a read of its own process state,
+/// as `pi_maybe_flush_signals` (`erl_bif_info.c:1198-1268`) does. Without a
+/// flush and without self signals, only fetch. Return `Some(result)` when
+/// the call ends with a trap of the BIF `arguments` or with the exit of the
+/// caller, and `None` when the read can go on.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(prepare_caller_read(&mut scheduler, vec![pid]).unwrap().is_none());
+/// ```
+fn prepare_caller_read(
+    scheduler: &mut Scheduler,
+    arguments: Vec<Term>,
+) -> Result<Option<BifResult>, BeamError> {
+    let caller = scheduler.current_process_mut();
+    if caller.flush == Flush::None && !caller.self_signals {
+        if caller.mailbox.has_outer_messages() {
+            caller.mailbox.fetch();
+        }
+        return Ok(None);
+    }
+    Ok(Some(match scheduler.flush_signals()? {
+        Flushed::Done => return Ok(None),
+        Flushed::Exited(reason) => BifResult::Exited(reason),
+        Flushed::Yield => BifResult::TrapBif {
+            module: "erlang",
+            function: "process_info",
+            arguments,
+        },
+    }))
+}
+
+/// Run the read of the caller of `erlang:process_info/1,2` after it handles
+/// its signals, as `process_info_bif` does (`erl_bif_info.c:1355-1363`,
+/// `1374-1379`). A trap or an exit of the flush is the result of the BIF;
+/// else `read` runs.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = caller_read(&mut scheduler, vec![pid], |_| Ok(Value(Term::nil())))?;
+/// ```
+fn caller_read(
+    scheduler: &mut Scheduler,
+    arguments: Vec<Term>,
+    read: impl FnOnce(&mut Scheduler) -> Result<BifResult, BeamError>,
+) -> Result<BifResult, BeamError> {
+    if let Some(result) = prepare_caller_read(scheduler, arguments)? {
+        return Ok(result);
+    }
+    read(scheduler)
+}
+
+/// Run `erlang:registered/0` as `registered_0` (`register.c:576-604`) does:
+/// return the names of the registered processes. ERTS walks its hash table,
+/// so the order is not part of the result.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(registered(&mut scheduler)?, BifResult::Value(Term::Nil)));
+/// ```
+///
+/// # Errors
+///
+/// A new atom of a name in a full atom table gives the error of
+/// `AtomTable::put`.
+pub(super) fn registered(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
+    let mut names = Vec::new();
+    for name in scheduler.registered_names() {
+        names.push(Term::Atom(scheduler.atoms.put(&name)?));
+    }
+    Ok(Value(Term::list_from(names)))
+}
+
+/// Run `erlang:ports/0` as `ports_0` (`bif.c:4125-4128`) does with
+/// `erts_ptab_list` (`erl_ptab.c:738-...`): return each open port. ERTS
+/// walks its port table, so the order is not part of the result.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(ports(&mut scheduler), BifResult::Value(Term::Nil)));
+/// ```
+pub(super) fn ports(scheduler: &mut Scheduler) -> BifResult {
+    let ports = scheduler.resources.borrow_mut::<Ports>().ids();
+    Value(Term::list_from(ports.into_iter().map(Term::Port)))
+}
+
+/// Run `erlang:alias/1` as `alias_1` (`bif.c:5852-5892`) does. The options
+/// `explicit_unalias` and `reply` set the alias mode, and the last one
+/// wins. An unknown option, an improper list, and a term that is not a list
+/// raise `badarg`. The result is a pid reference, as `erts_make_pid_ref`
+/// gives it, with an alias and no monitor in the monitor tree of the
+/// caller. PBeam does not support the `priority` option: it raises a
+/// runtime error, as each other priority signal path does.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let alias = alias(&mut context, &Term::nil())?;
+/// assert!(matches!(alias, BifResult::Value(Term::Reference(_))));
+/// assert!(matches!(alias(&mut context, &Term::static_atom("x"))?, BifResult::badarg()));
+/// ```
+///
+/// # Errors
+///
+/// The `priority` option, and the errors of `Scheduler::monitor`.
+pub(super) fn alias(context: &mut BifContext<'_>, options: &Term) -> Result<BifResult, BeamError> {
+    let Some(mut elements) = options.list_iter() else {
+        return Ok(BifResult::badarg());
+    };
+    let mut mode = AliasMode::ExplicitUnalias;
+    let mut priority = false;
+    for element in elements.by_ref() {
+        match element {
+            Term::Atom(atom) if atom.is_static("explicit_unalias") => {
+                mode = AliasMode::ExplicitUnalias;
+            }
+            Term::Atom(atom) if atom.is_static("reply") => mode = AliasMode::ReplyDemonitor,
+            Term::Atom(atom) if atom.is_static("priority") => priority = true,
+            _ => return Ok(BifResult::badarg()),
+        }
+    }
+    if !elements.rest().is_nil() {
+        return Ok(BifResult::badarg());
+    }
+    if priority {
+        return Err(error("unsupported erlang:alias/1 option priority"));
+    }
+    let scheduler = &mut *context.scheduler;
+    let caller = scheduler.current_process().id;
+    let options = MonitorOptions {
+        alias: Some(mode),
+        tag: Term::nil(),
+        priority: false,
+    };
+    let reference = scheduler.monitor(MonitorTarget::Process(caller), options)?;
+    scheduler.current_process_mut().monitors.insert(
+        reference,
+        Origin {
+            monitor: None,
+            alias: Some(mode),
+        },
+    );
+    Ok(Value(Term::Reference(reference)))
+}
+
+/// Run `erlang:unalias/1` as `unalias_1` (`bif.c:5896-5927`) does. A term
+/// that is not a reference raises `badarg`. An ordinary reference, a pid
+/// reference of another process, and a reference that is not an active
+/// alias of the caller give `false`. An active alias gives `true`, and the
+/// alias ends.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let alias = alias(&mut context, &Term::nil())?;
+/// let BifResult::Value(Term::Reference(reference)) = alias else { return };
+/// assert!(matches!(unalias(&mut context, &Term::Reference(reference))?, BifResult::Value(Term::Atom(atom))) if atom.is_static("true"));
+/// ```
+pub(super) fn unalias(
+    context: &mut BifContext<'_>,
+    reference: &Term,
+) -> Result<BifResult, BeamError> {
+    let Term::Reference(reference) = reference else {
+        return Ok(BifResult::badarg());
+    };
+    let scheduler = &mut *context.scheduler;
+    let caller = scheduler.current_process().id;
+    if !reference.is_pid_reference() || scheduler.alias_owner(*reference) != Some(caller) {
+        return Ok(Value(Term::static_atom("false")));
+    }
+    let process = scheduler.current_process_mut();
+    let Some(origin) = process.monitors.get_mut(reference) else {
+        return Ok(Value(Term::static_atom("false")));
+    };
+    if origin.alias.is_none() {
+        return Ok(Value(Term::static_atom("false")));
+    }
+    // ERTS keeps a monitor that has an alias option and removes only the
+    // alias, and removes an alias without a monitor (`bif.c:5910-5921`).
+    if origin.monitor.is_some() {
+        origin.alias = None;
+    } else {
+        process.monitors.remove(reference);
+    }
+    Ok(Value(Term::static_atom("true")))
+}
+
+/// Run `erlang:unique_integer/1` as `unique_integer_1`
+/// (`erl_bif_unique.c:840-871`) does. The options are `monotonic` and
+/// `positive`: `monotonic` gives a value of the monotonic counter, and
+/// `positive` gives a positive value. A term that is not a proper list of
+/// those options raises `badarg`; ERTS 29.1.1 does not accept `negative`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let value = unique_integer_1(&mut scheduler, &Term::nil())?;
+/// assert!(matches!(value, BifResult::Value(Term::Integer(value)) if value < 0));
+/// assert!(matches!(unique_integer_1(&mut scheduler, &Term::static_atom("positive"))?, BifResult::Raise { .. }));
+/// ```
+///
+/// # Errors
+///
+/// A counter value above the small integer range is a runtime error.
+pub(super) fn unique_integer_1(
+    scheduler: &mut Scheduler,
+    options: &Term,
+) -> Result<BifResult, BeamError> {
+    let Some(mut elements) = options.list_iter() else {
+        return Ok(BifResult::badarg());
+    };
+    let (mut monotonic, mut positive) = (false, false);
+    for element in elements.by_ref() {
+        match element {
+            Term::Atom(atom) if atom.is_static("monotonic") => monotonic = true,
+            Term::Atom(atom) if atom.is_static("positive") => positive = true,
+            _ => return Ok(BifResult::badarg()),
+        }
+    }
+    if !elements.rest().is_nil() {
+        return Ok(BifResult::badarg());
+    }
+    let value = if monotonic {
+        scheduler.unique_monotonic_integer(positive)?
+    } else if positive {
+        scheduler.unique_integer_positive()?
+    } else {
+        scheduler.unique_integer()?
+    };
+    Ok(Value(Term::Integer(value)))
+}
+
+/// Run `erlang:delete_module/1` as `delete_module_1`
+/// (`beam_bif_load.c:679-736`) does. A term that is not an atom raises
+/// `badarg`. A module with current code moves to old code and gives `true`,
+/// a module with old code from an earlier delete raises `badarg`, and a
+/// name with no code gives `undefined`. The caller then needs a `code`
+/// capability that permits `load` for the module name.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(delete_module(&mut context, &Term::static_atom("nomod"))?, BifResult::Value(Term::Atom(atom))) if atom.is_static("undefined"));
+/// assert!(matches!(delete_module(&mut context, &Term::Integer(1))?, BifResult::Raise { .. }));
+/// ```
+///
+/// # Errors
+///
+/// A new `capability_denied` atom in a full atom table gives the error of
+/// `AtomTable::put`.
+pub(super) fn delete_module(
+    scheduler: &mut Scheduler,
+    module: &Term,
+) -> Result<BifResult, BeamError> {
+    let Term::Atom(module) = module else {
+        return Ok(BifResult::badarg());
+    };
+    let name = scheduler.atoms.name_of(module).as_bytes().to_vec();
+    let kind = CapabilityKind::Code;
+    let denied = denial(scheduler, kind, Operation::Load, Some(&name))?;
+    if let Some(denied) = denied {
+        return Ok(denied);
+    }
+    Ok(
+        match scheduler.code.delete(scheduler.atoms.name_of(module)) {
+            Some(true) => Value(Term::static_atom("true")),
+            Some(false) => BifResult::badarg(),
+            None => Value(Term::static_atom("undefined")),
+        },
+    )
+}
+
+/// Run `erlang:has_prepared_code_on_load/1` as
+/// `has_prepared_code_on_load_1` (`beam_bif_load.c:268-283`) and
+/// `erts_has_code_on_load` (`beam_load.c:336-349`) do: return `true` when a
+/// reference of `erts_internal:prepare_loading/2` holds prepared code with
+/// an `-on_load` function, and `false` when the code has none. A term that
+/// is not a prepared-code reference raises `badarg`. A reference that
+/// `erlang:finish_loading/1` consumed keeps its flag, as the ERTS magic
+/// reference stays valid (`beam_bif_load.c:268-283`). PBeam checks no
+/// capability: the call only reads the prepared code state, as the ambient
+/// `erlang:function_exported/3` does.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(has_prepared_code_on_load(&mut scheduler, &Term::Reference(reference))?, BifResult::Value(Term::Atom(atom))) if atom.is_static("true"));
+/// assert!(matches!(has_prepared_code_on_load(&mut scheduler, &Term::static_atom("x"))?, BifResult::Raise { .. }));
+/// ```
+///
+/// # Errors
+///
+/// The function has no error.
+pub(super) fn has_prepared_code_on_load(
+    scheduler: &mut Scheduler,
+    reference: &Term,
+) -> Result<BifResult, BeamError> {
+    let Term::Reference(reference) = reference else {
+        return Ok(BifResult::badarg());
+    };
+    let on_load = if scheduler.code.prepared_module(reference).is_some() {
+        scheduler.code.prepared_on_load(&[*reference])
+    } else if let Some(on_load) = scheduler.code.finished_prepared_on_load(reference) {
+        on_load
+    } else {
+        return Ok(BifResult::badarg());
+    };
+    Ok(Value(Term::static_atom(if on_load {
+        "true"
+    } else {
+        "false"
+    })))
+}
+
+/// Run `erlang:display/1` as `display_1` (`bif.c:4144-4148`) does: write
+/// the `%T` text of the term and a newline to the standard output, and
+/// return `true`. The text is [`print_term`]. ERTS writes the newline as
+/// `\r\n` on Unix, because `erts_printf` adds a carriage return to standard
+/// output (`sys/unix/sys.c:342`). A failed write changes nothing and gives
+/// no error, as ERTS does not check the `erts_printf` result.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = display(&Term::static_atom("ok"), &AtomTable::new());
+/// assert!(matches!(result, BifResult::Value(Term::Atom(atom))) if atom.is_static("true"));
+/// ```
+pub(super) fn display(term: &Term, atoms: &AtomTable) -> BifResult {
+    let mut text = print_term(term, atoms);
+    text.extend_from_slice(b"\r\n");
+    let mut stdout = std::io::stdout();
+    let _ = stdout.write_all(&text);
+    let _ = stdout.flush();
+    Value(Term::static_atom("true"))
+}
+
+/// Run `erlang:display_string/2` as `display_string_2`
+/// (`bif.c:4192-4285`) does: write the UTF-8 bytes of the string to the
+/// standard output or the standard error, and return `true`. The string is
+/// a proper list of Unicode code points or a binary of whole bytes. A
+/// device that is not `stdout` or `stderr`, a string with another form or a
+/// bad code point, an improper list, and a failed write raise `badarg`.
+/// PBeam does not support the `stdin` device, because it writes the bytes
+/// with the `TIOCSTI` ioctl: it raises a runtime error.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = display_string(&mut atoms, &Term::static_atom("stdout"), &Term::nil());
+/// assert!(matches!(result, BifResult::Value(Term::Atom(atom))) if atom.is_static("true"));
+/// assert!(matches!(display_string(&mut atoms, &Term::static_atom("stdin"), &Term::nil()), Err(_)));
+/// ```
+///
+/// # Errors
+///
+/// The `stdin` device, and the errors of `AtomTable::put`.
+pub(super) fn display_string(
+    atoms: &mut AtomTable,
+    device: &Term,
+    string: &Term,
+) -> Result<BifResult, BeamError> {
+    let Term::Atom(device) = device else {
+        return Ok(BifResult::badarg());
+    };
+    let bytes = if let Some(mut elements) = string.list_iter() {
+        let mut bytes = Vec::new();
+        for element in elements.by_ref() {
+            let Term::Integer(code) = element else {
+                return Ok(BifResult::badarg());
+            };
+            let Some(character) = u32::try_from(*code).ok().and_then(char::from_u32) else {
+                return Ok(BifResult::badarg());
+            };
+            let mut buffer = [0; 4];
+            bytes.extend_from_slice(character.encode_utf8(&mut buffer).as_bytes());
+        }
+        if !elements.rest().is_nil() {
+            return Ok(BifResult::badarg());
+        }
+        bytes
+    } else if let Term::Binary(binary) = string {
+        if binary.bit_size() % 8 != 0 {
+            return Ok(BifResult::badarg());
+        }
+        binary.to_vec()
+    } else {
+        return Ok(BifResult::badarg());
+    };
+    let name = atoms.name_of(device);
+    if name == "stdout" {
+        return Ok(write_display(&mut std::io::stdout(), &bytes));
+    }
+    if name == "stderr" {
+        return Ok(write_display(&mut std::io::stderr(), &bytes));
+    }
+    if name == "stdin" {
+        // PBeam does not write to the terminal input with `TIOCSTI`.
+        return Err(error("unsupported erlang:display_string/2 device stdin"));
+    }
+    Ok(BifResult::badarg())
+}
+
+/// Write `bytes` to `writer` and give `true`, or raise `badarg` when the
+/// write fails, as `display_string_2` does (`bif.c:4274-4297`).
+fn write_display(writer: &mut dyn Write, bytes: &[u8]) -> BifResult {
+    match writer.write_all(bytes).and_then(|()| writer.flush()) {
+        Ok(()) => Value(Term::static_atom("true")),
+        Err(_) => BifResult::badarg(),
+    }
+}
+
+/// Run `erlang:ref_to_list/1` as `ref_to_list_1` (`bif.c:4459-4465`) does:
+/// return the characters of the `%T` text of a reference as a proper list.
+/// A term that is not a reference raises `badarg`. [`print_term`] gives the
+/// text of a PBeam reference, `#Ref<0.N2.N1.N0>`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let text = ref_to_list(&Term::Reference(Reference(0)), &AtomTable::new());
+/// assert!(matches!(text, BifResult::Value(codes) if codes.proper_list().is_some_and(|codes| codes.len() > 0)));
+/// assert!(matches!(ref_to_list(&Term::Integer(1), &AtomTable::new()), BifResult::Raise { .. }));
+/// ```
+pub(super) fn ref_to_list(term: &Term, atoms: &AtomTable) -> BifResult {
+    match term {
+        Term::Reference(_) => term_text_list(term, atoms),
+        _ => BifResult::badarg(),
+    }
 }
 
 /// The preloaded modules of ERTS, in the order of `PRELOAD_BEAM` and

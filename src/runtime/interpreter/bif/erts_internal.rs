@@ -1567,6 +1567,21 @@ pub(super) fn purge_module(
     Ok(BifResult::badarg())
 }
 
+/// Run `erts_internal:time_unit/0` as `erts_internal_time_unit_0`
+/// (`erl_time_sup.c:2537-2540`) does: return the native time unit, the
+/// number of parts of a second, `ERTS_MONOTONIC_TIME_UNIT`
+/// (`erl_time.h:282-283`). The native unit of PBeam is one nanosecond, so
+/// the value is 1000000000.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(time_unit(), BifResult::Value(Term::Integer(1_000_000_000))));
+/// ```
+pub(super) fn time_unit() -> BifResult {
+    Value(Term::Integer(crate::runtime::time::TIME_UNIT))
+}
+
 #[cfg(test)]
 #[path = "../../../../tests/runtime/interpreter/bif/erts_internal.rs"]
 mod tests;
