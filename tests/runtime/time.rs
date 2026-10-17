@@ -194,3 +194,23 @@ fn gives_the_posix_time_of_a_date_in_range() {
         assert_eq!(univ_to_clock(date), None, "{date:?}");
     }
 }
+
+#[test]
+fn splits_a_time_in_the_native_unit_into_timestamp_parts() {
+    // `make_timestamp_value` (`erl_time_sup.c:1906-1925`) gives the parts of
+    // `erlang:timestamp/0`. The measurements are `erlang:timestamp()` and
+    // `os:timestamp()` on the pinned ERTS, and the parts of their values:
+    // 1792192300076209000 ns give {1792,192300,76209}.
+    assert_eq!(
+        make_timestamp_value(1_792_192_300_076_209_000),
+        (1792, 192_300, 76_209)
+    );
+    assert_eq!(
+        make_timestamp_value(1_792_192_300_000_000_000),
+        (1792, 192_300, 0)
+    );
+    assert_eq!(make_timestamp_value(999_999_999), (0, 0, 999_999));
+    assert_eq!(make_timestamp_value(1_000_000_000), (0, 1, 0));
+    assert_eq!(make_timestamp_value(1_000_000_000_000), (0, 1000, 0));
+    assert_eq!(make_timestamp_value(0), (0, 0, 0));
+}

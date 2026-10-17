@@ -2821,6 +2821,134 @@ pub(super) fn convert_time(value: i64, offset_multiplier: i64, unit: &Term) -> B
     }
 }
 
+/// Run `erlang:timestamp()`: return the system time of the run as the tuple
+/// `{MegaSecs, Secs, MicroSecs}`, as `timestamp_0` (`erl_time_sup.c:2555-2587`)
+/// does with `make_timestamp_value` (`erl_time_sup.c:1906-1925`). The
+/// system time is the internal monotonic time plus the time offset of the
+/// run, as `system_time_0` adds them (`erl_time_sup.c:2517-2525`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // {1792,192300,76209}
+/// assert!(matches!(timestamp(1_792_192_300_076_209_000), BifResult::Value(Term::Tuple(parts)) if parts.len() == 3));
+/// ```
+pub(super) fn timestamp(system_time: i64) -> BifResult {
+    let (mega, seconds, micros) = time::make_timestamp_value(system_time);
+    Value(Term::tuple(vec![
+        Term::Integer(mega),
+        Term::Integer(seconds),
+        Term::Integer(micros),
+    ]))
+}
+
+/// Run `erlang:localtime()`: return the local date and time of the host
+/// time zone as `{{Year, Month, Day}, {Hour, Minute, Second}}`, as
+/// `localtime_0` (`bif.c:3880-3901`) does with `get_localtime`
+/// (`erl_time_sup.c:1543-1557`). The clock is the host `CLOCK_REALTIME`
+/// truncated to a second, as the C library `time` gives it.
+///
+/// A failed `localtime_r` raises `badarg`; ERTS does not check the result
+/// of `sys_localtime_r` there.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // TZ=EST5EDT,M3.2.0,M11.1.0 in January
+/// assert!(matches!(localtime(), BifResult::Value(Term::Tuple(parts)) if parts.len() == 2));
+/// ```
+pub(super) fn localtime() -> BifResult {
+    local_clock().map_or_else(BifResult::badarg, |local| Value(date_time(local)))
+}
+
+/// Run `erlang:date()`: return the local date of the host time zone as the
+/// tuple `{Year, Month, Day}`, as `date_0` (`bif.c:3842-3854`) does with
+/// `get_date` (`erl_time_sup.c:1527-1541`). A failed `localtime_r` raises
+/// `badarg`; ERTS does not check the result of `sys_localtime_r` there.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // TZ=EST5EDT,M3.2.0,M11.1.0 in January
+/// assert!(matches!(date(), BifResult::Value(Term::Tuple(parts)) if parts.len() == 3));
+/// ```
+pub(super) fn date() -> BifResult {
+    local_clock().map_or_else(BifResult::badarg, |(year, month, day, ..)| {
+        Value(Term::tuple(vec![
+            Term::Integer(year),
+            Term::Integer(month),
+            Term::Integer(day),
+        ]))
+    })
+}
+
+/// Run `erlang:time()`: return the local time of the host time zone as the
+/// tuple `{Hour, Minute, Second}`, as `time_0` (`bif.c:3828-3840`) does
+/// with `get_time` (`erl_time_sup.c:1516-1525`). A failed `localtime_r`
+/// raises `badarg`; ERTS does not check the result of `sys_localtime_r`
+/// there.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // TZ=EST5EDT,M3.2.0,M11.1.0 in January
+/// assert!(matches!(time_of_day(), BifResult::Value(Term::Tuple(parts)) if parts.len() == 3));
+/// ```
+pub(super) fn time_of_day() -> BifResult {
+    local_clock().map_or_else(BifResult::badarg, |(_, _, _, hour, minute, second)| {
+        Value(Term::tuple(vec![
+            Term::Integer(hour),
+            Term::Integer(minute),
+            Term::Integer(second),
+        ]))
+    })
+}
+
+/// Run `erlang:universaltime()`: return the UTC date and time of the host
+/// clock as `{{Year, Month, Day}, {Hour, Minute, Second}}`, as
+/// `universaltime_0` (`bif.c:3856-3878`) does with `get_universaltime`
+/// (`erl_time_sup.c:1559-1583`). PBeam reads the UTC date of the POSIX time
+/// with [`time::seconds_to_univ`], the algorithm of the other UTC BIFs
+/// (`erl_time_sup.c:1669-1702`), where ERTS calls `gmtime_r`; the two agree
+/// for each second that the host clock can give (`gmtime_r` and the
+/// proleptic Gregorian calendar differ before the year 1).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(universaltime(), BifResult::Value(Term::Tuple(parts)) if parts.len() == 2));
+/// ```
+pub(super) fn universaltime() -> BifResult {
+    Value(date_time(time::seconds_to_univ(local_clock_seconds())))
+}
+
+/// Return the local date and time of the host clock, or `None` when
+/// `localtime_r` fails. The local time comes from `sys_localtime_r`, which
+/// adds no leap second of the time zone (`erl_time_sup.c:1516-1557`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // TZ=EST5EDT,M3.2.0,M11.1.0 in January
+/// assert!(local_clock().is_some());
+/// ```
+fn local_clock() -> Option<time::DateTime> {
+    host::clock::local_zone_time(local_clock_seconds())
+}
+
+/// Return the host `CLOCK_REALTIME` truncated to a second, as the C library
+/// `time` gives it (`get_time`, `erl_time_sup.c:1516-1525`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // 2023-11-14 and later.
+/// assert!(local_clock_seconds() > 1_700_000_000);
+/// ```
+fn local_clock_seconds() -> i64 {
+    host::clock::system_time() / 1_000_000_000
+}
+
 /// Run `erlang:monotonic_time/0`: return the Erlang monotonic time in the
 /// native time unit, as ERTS `monotonic_time_0` (`erl_time_sup.c:2500-2507`)
 /// does. ERTS gives `get_time(esdp) + ERTS_MONOTONIC_OFFSET_NATIVE`, which

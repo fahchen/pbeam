@@ -114,6 +114,31 @@ pub(super) fn time_unit_conversion(value: i64, offset_multiplier: i64, unit: &Te
 /// BIFs.
 pub(crate) type DateTime = (i64, i64, i64, i64, i64, i64);
 
+/// Return the megaseconds, the seconds of a megasecond, and the
+/// microseconds of a second of `time`, a time in the native unit, as
+/// `make_timestamp_value` (`erl_time_sup.c:1906-1925`) makes the parts of
+/// `erlang:timestamp/0` from that time. Each part is the value that it
+/// counts with the lower parts removed. ERTS divides the signed 64-bit value in C, which truncates
+/// toward zero, as Rust does; a negative `time` is not a system time.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(make_timestamp_value(1_792_192_300_076_251_000), (1792, 192_300, 76_251));
+/// assert_eq!(make_timestamp_value(0), (0, 0, 0));
+/// assert_eq!(make_timestamp_value(1_000_999), (0, 0, 1000));
+/// ```
+pub(super) fn make_timestamp_value(time: i64) -> (i64, i64, i64) {
+    let micros = time / 1_000;
+    let mega = micros / 1_000_000_000_000;
+    let seconds = micros / 1_000_000;
+    (
+        mega,
+        seconds - mega * 1_000_000,
+        micros - seconds * 1_000_000,
+    )
+}
+
 /// The seconds in a day, `SECONDS_PER_DAY` (`erl_time_sup.c:1664-1666`).
 const SECONDS_PER_DAY: i64 = 24 * SECONDS_PER_HOUR;
 
