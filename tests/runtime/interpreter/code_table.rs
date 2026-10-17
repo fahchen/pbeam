@@ -5,9 +5,12 @@ use std::{collections::HashMap, rc::Rc};
 use super::{CodeTable, Finish};
 use crate::{
     BeamModule,
-    beam::{ModuleId, code::Instruction},
+    beam::{
+        ModuleId,
+        code::{Instruction, Operand},
+    },
     runtime::process::InitialCall,
-    term::{Atom, AtomTable, Reference},
+    term::{Atom, AtomTable, Lambda, Reference},
 };
 
 /// Return the code table of one module `fixture` with the function `main/0`.
@@ -19,6 +22,13 @@ use crate::{
 /// assert!(code.get("fixture").is_some());
 /// ```
 fn fixture() -> CodeTable {
+    let lambda = Lambda::new(
+        AtomTable::new().put("fixture").expect("the atom fits"),
+        0,
+        7,
+        2,
+        1,
+    );
     let module = BeamModule::new(
         "fixture".into(),
         HashMap::new(),
@@ -30,6 +40,17 @@ fn fixture() -> CodeTable {
                 arity: 0,
             },
             Instruction::Label(1),
+            Instruction::MakeFun {
+                lambda,
+                free: Vec::new(),
+                destination: Operand::X(0),
+            },
+            Instruction::FunctionInfo {
+                module: "fixture".into(),
+                name: "-fun-".into(),
+                arity: 1,
+            },
+            Instruction::Label(2),
         ],
     )
     .expect("the fixture module loads");
@@ -137,4 +158,36 @@ fn rejects_a_delete_when_the_module_has_old_code() {
     code.finish(&[second], vec!["a".into()]).unwrap();
     assert_eq!(code.delete("a"), Some(false));
     assert!(code.get("a").is_some());
+}
+
+/// A fun of the old code of a deleted module has the name of its function,
+/// also after a load of another version, and it has no name while a purge of
+/// that code runs: the preparation of the purge clears the fun address
+/// (`erl_fun.c:159-175`).
+#[test]
+fn gives_no_name_of_a_fun_of_code_in_a_purge() {
+    let mut code = fixture();
+    let lambda = Lambda::new(
+        AtomTable::new().put("fixture").expect("the atom fits"),
+        0,
+        7,
+        2,
+        1,
+    );
+    assert_eq!(
+        code.function_name_of("fixture", &lambda)
+            .unwrap()
+            .as_deref(),
+        Some("-fun-")
+    );
+    code.delete("fixture");
+    assert_eq!(
+        code.function_name_of("fixture", &lambda)
+            .unwrap()
+            .as_deref(),
+        Some("-fun-")
+    );
+    let module = Rc::clone(&code.by_id.values().next().expect("the old code").code);
+    code.purging = Some(("fixture".to_owned(), module));
+    assert_eq!(code.function_name_of("fixture", &lambda).unwrap(), None);
 }

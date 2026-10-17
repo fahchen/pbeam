@@ -558,7 +558,9 @@ impl CodeTable {
     /// includes the old code that `erlang:delete_module/1` kept until the
     /// purge (`beam_bif_load.c:2412-2455`). A code of the name that is not
     /// current and does not wait gives its funs a name, so the caller reads
-    /// each code of the name.
+    /// each code of the name. The code of a purge that runs has no name, as
+    /// the preparation of the purge clears the fun address
+    /// (`erl_fun.c:159-175`).
     ///
     /// # Examples
     ///
@@ -566,6 +568,10 @@ impl CodeTable {
     /// assert_eq!(code.codes("missing").count(), 0);
     /// ```
     fn codes<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a Rc<BeamModule>> + 'a {
+        // The preparation of a purge clears the fun address of the old code
+        // (`erl_fun.c:159-175`), so `erts_get_fun_mfa` gives no MFA for its
+        // funs until the purge ends.
+        let purging = self.old_code(name);
         self.get(name)
             .into_iter()
             .chain(self.on_load.get(name).map(|waiting| &waiting.code))
@@ -573,7 +579,7 @@ impl CodeTable {
                 self.by_id
                     .values()
                     .map(|loaded| &loaded.code)
-                    .filter(move |code| code.name == name),
+                    .filter(move |code| code.name == name && Some(code.id) != purging),
             )
     }
 
