@@ -1049,3 +1049,62 @@ fn keeps_a_partially_deleted_bag_object_as_pinned_erts() {
     );
     assert_eq!(reference("fixtable_bag_partial"), b"[1,[{k,1},{k,3}]]\n");
 }
+
+#[test]
+fn counts_a_double_deleted_bag_key_once_as_pinned_erts() {
+    // The delete of the key marks the live object only, so the size is 0
+    // and no slot is counted twice (`erl_db_hash.c:49-60`).
+    fixture_fixed("fixtable_bag_double_delete", Term::Integer(0), b"[0]\n");
+}
+
+#[test]
+fn restores_the_object_of_a_kept_bag_key_as_pinned_erts() {
+    // The insert of the object that a select delete kept restores it and
+    // keeps the insertion order (`erl_db_hash.c:1426-1437`).
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    let object = |value| Term::tuple(vec![atom("k"), Term::Integer(value)]);
+    assert_eq!(
+        program
+            .execute("ets_probe", "fixtable_bag_restore", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![Term::list_from(vec![object(1), object(2)])])
+    );
+    assert_eq!(reference("fixtable_bag_restore"), b"[[{k,1},{k,2}]]\n");
+}
+
+#[test]
+fn keeps_a_bag_key_gone_after_its_last_live_object_as_pinned_erts() {
+    // The second select delete leaves the key without a live object, so the
+    // unfix frees each slot and the lookup gives no object
+    // (`erl_db_hash.c:2634-2648`).
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    assert_eq!(
+        program
+            .execute("ets_probe", "fixtable_bag_last_live", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![Term::nil(), Term::nil()])
+    );
+    assert_eq!(reference("fixtable_bag_last_live"), b"[[],[]]\n");
+}
+
+#[test]
+fn skips_a_pseudo_deleted_object_for_the_newest_live_object_as_pinned_erts() {
+    // The newest live object of the key after the delete skips the
+    // pseudo-deleted object behind it (`erl_db_hash.c:2634-2648`).
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    assert_eq!(
+        program
+            .execute("ets_probe", "fixtable_bag_skip_deleted", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![Term::list_from(vec![Term::tuple(vec![
+            atom("k"),
+            Term::Integer(1),
+        ])])])
+    );
+    assert_eq!(reference("fixtable_bag_skip_deleted"), b"[[{k,1}]]\n");
+}

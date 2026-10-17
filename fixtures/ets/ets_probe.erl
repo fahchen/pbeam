@@ -17,7 +17,9 @@
          fixtable_bag_reinsert/0, fixtable_shrink/0,
          fixtable_duplicate_bag_reinsert/0, fixtable_info/0,
          fixtable_ordered_set/0, fixtable_safe_fixed/0,
-         fixtable_bag_repeat/0, fixtable_bag_partial/0]).
+         fixtable_bag_repeat/0, fixtable_bag_partial/0,
+         fixtable_bag_double_delete/0, fixtable_bag_restore/0,
+         fixtable_bag_last_live/0, fixtable_bag_skip_deleted/0]).
 
 %% ets:new/2 return values and badarg cases (erl_db.c:2555-2840).
 new() ->
@@ -973,6 +975,55 @@ fixtable_bag_partial() ->
     Objects = ets:lookup(T, k),
     ets:safe_fixtable(T, false),
     [Removed, Objects].
+
+
+%% A delete of the key of a bag with an object that a select delete kept
+%% counts each slot once.
+fixtable_bag_double_delete() ->
+    T = ets:new(ets_probe_fix_bag_double_delete, [bag]),
+    ets:insert(T, [{k, 1}, {k, 2}]),
+    ets:safe_fixtable(T, true),
+    ets:internal_select_delete(T, [{{k, 2}, [], [true]}]),
+    ets:delete(T, k),
+    Size = ets:info(T, size),
+    ets:safe_fixtable(T, false),
+    [Size].
+
+%% The insert of an object that a select delete kept restores it.
+fixtable_bag_restore() ->
+    T = ets:new(ets_probe_fix_bag_restore, [bag]),
+    ets:insert(T, [{k, 1}, {k, 2}]),
+    ets:safe_fixtable(T, true),
+    ets:internal_select_delete(T, [{{k, 2}, [], [true]}]),
+    ets:insert(T, [{k, 2}]),
+    Objects = ets:lookup(T, k),
+    ets:safe_fixtable(T, false),
+    [Objects].
+
+%% The second delete of the key of a bag with a pseudo-deleted object
+%% keeps the key gone after the unfix.
+fixtable_bag_last_live() ->
+    T = ets:new(ets_probe_fix_bag_last_live, [bag]),
+    ets:insert(T, [{k, 1}, {k, 2}]),
+    ets:safe_fixtable(T, true),
+    ets:internal_select_delete(T, [{{k, 2}, [], [true]}]),
+    ets:internal_select_delete(T, [{{k, 1}, [], [true]}]),
+    Before = ets:lookup(T, k),
+    ets:safe_fixtable(T, false),
+    [Before, ets:lookup(T, k)].
+
+
+%% The newest live object of a bag key skips the pseudo-deleted object
+%% behind it.
+fixtable_bag_skip_deleted() ->
+    T = ets:new(ets_probe_fix_bag_skip_deleted, [bag]),
+    ets:insert(T, [{k, 1}, {k, 2}, {k, 3}]),
+    ets:safe_fixtable(T, true),
+    ets:internal_select_delete(T, [{{k, 2}, [], [true]}]),
+    ets:internal_select_delete(T, [{{k, 3}, [], [true]}]),
+    Objects = ets:lookup(T, k),
+    ets:safe_fixtable(T, false),
+    [Objects].
 
 catch_error(Fun) ->
     try Fun() catch error:Reason -> {error, Reason} end.
