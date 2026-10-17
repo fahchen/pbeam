@@ -2,7 +2,8 @@ use super::{
     capability::{Policy, Restriction},
     host::output::IovecWrite,
     process::{
-        DirtyWrite, Frame, PendingBif, ProcessState, ReceiveTimer, StackSlot, Start, StartFlags,
+        DirtyWrite, Frame, PendingBif, PendingTrap, ProcessState, ReceiveTimer, StackSlot, Start,
+        StartFlags,
     },
     scheduler::{PolicyEnd, Received, Scheduler, Turn},
     tty::{InitialMode, Ttys},
@@ -743,6 +744,20 @@ impl BeamProgram {
             if let Some(outcome) = self.finish_bif(scheduler, result, tail)? {
                 return Ok(outcome);
             }
+        }
+        // A BIF trap whose target had no loaded export resolves the target
+        // in this turn, after the switch out of the trap
+        // (`context_switch_simplified` in `jit/arm/instr_bif.cpp:525-536`,
+        // `676-701`).
+        if let Some(PendingTrap {
+            module,
+            function,
+            arity,
+            tail,
+        }) = scheduler.current_process_mut().pending_trap.take()
+            && let Some(outcome) = self.resume_trap(scheduler, module, function, arity, tail)?
+        {
+            return Ok(outcome);
         }
         let process = scheduler.current_process_mut();
         if process.frames.is_empty() {
@@ -2981,10 +2996,10 @@ impl BeamProgram {
     /// of a tail call, and switches out the process. An exception goes to
     /// the error handler. A trap writes its arguments to the X registers,
     /// enters the target function, and switches out the process. A target
-    /// export that is not loaded enters `error_handler:undefined_function/3`
-    /// instead, as the ERTS export stub does. An exit ends the process, and
-    /// no catch tag sees it. A trap to a BIF export keeps the export, its
-    /// arguments, and `tail` in the process, and switches out the process:
+    /// that is not loaded is kept for the next turn, which resolves it as the
+    /// ERTS export stub does and enters `error_handler:undefined_function/3`.
+    /// An exit ends the process, and no catch tag sees it. A trap to a BIF
+    /// export keeps the export, its arguments, and `tail` in the process, and switches out the process:
     /// `run` then finishes the call through the export. Return the outcome
     /// when the process stops.
     ///
@@ -3065,14 +3080,19 @@ impl BeamProgram {
                         Ok(Some(Outcome::Yield))
                     }
                     None => {
-                        // The trap switches out before the error handler
-                        // runs, as every BIF trap does (`instr_bif.cpp:525-536`,
-                        // `676-701`). A handler frame that
-                        // `undefined_function` enters runs in the next turn.
-                        match self.undefined_function(scheduler, module, function, arity, tail)? {
-                            Some(outcome) => Ok(Some(outcome)),
-                            None => Ok(Some(Outcome::Yield)),
-                        }
+                        // ERTS switches out at the trap, and the export
+                        // stub of the target runs in the next turn
+                        // (`context_switch_simplified` in
+                        // `jit/arm/instr_bif.cpp:525-536`, `676-701`). Keep
+                        // the call for `run`, so the switch out happens
+                        // before the error handler.
+                        scheduler.current_process_mut().pending_trap = Some(PendingTrap {
+                            module,
+                            function,
+                            arity,
+                            tail,
+                        });
+                        Ok(Some(Outcome::Yield))
                     }
                 }
             }
@@ -3125,6 +3145,37 @@ impl BeamProgram {
                 process.registers = vec![Some(module), Some(function), Some(arguments)];
                 Ok(Some(Outcome::Hibernate))
             }
+        }
+    }
+
+    /// Resolve the target of a BIF trap that waited for the next turn, as
+    /// the ERTS export entry does when the process runs again
+    /// (`call_error_handler`, beam_common.c:1294-1342). An export enters its
+    /// frame, and the process continues in it. A target that the loaded
+    /// modules do not export enters `error_handler:undefined_function/3`
+    /// with the arguments in the X registers. Return the outcome when the
+    /// process stops.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let outcome = program.resume_trap(&mut scheduler, "re", "grun", 3, false)?;
+    /// assert!(outcome.is_none());
+    /// ```
+    fn resume_trap(
+        &self,
+        scheduler: &mut Scheduler,
+        module: &str,
+        function: &str,
+        arity: u32,
+        tail: bool,
+    ) -> Result<Option<Outcome>, BeamError> {
+        match scheduler.code.export_frame(module, function, arity)? {
+            Some(frame) => {
+                enter_frame(scheduler.current_process_mut(), frame, tail);
+                Ok(None)
+            }
+            None => self.undefined_function(scheduler, module, function, arity, tail),
         }
     }
 }

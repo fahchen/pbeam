@@ -87,12 +87,12 @@ fn switches_out_at_a_trap_to_a_module_that_the_run_did_not_load_as_pinned_erts()
 }
 
 #[test]
-fn ends_a_process_when_its_error_handler_has_no_undefined_function_as_pinned_erts() {
-    // The handler lookup of `undefined_function` fails, because the process
-    // error handler has no `undefined_function/3`. The fallback raises
-    // `undef`, and `undefined_function` returns the outcome of the exit.
+fn switches_out_before_an_undef_of_an_unloaded_trap_target_as_pinned_erts() {
+    // The process error handler has no `undefined_function/3`. The trap
+    // switches out first, so the peer sees the process alive and the
+    // process exits with `undef` after the peer ran.
     let erts = run(&mut erts("re_global_probe:uncaught()."));
-    assert_eq!(erts, "undef\n");
+    assert_eq!(erts, "{undef,true}\n");
     assert_eq!(
         run(&mut pbeam(
             "re_global_probe",

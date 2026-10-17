@@ -68,22 +68,31 @@ undefined_function(_Module, _Function, _Arguments) ->
     handled.
 
 %% A process error handler with no `undefined_function/3` makes the
-%% fallback raise `undef` in `undefined_function` itself, and the process
-%% that traps exits with that reason.
+%% fallback raise `undef`. The trap switches out first, so the peer runs
+%% while the process that traps is alive and exits with `undef`.
 uncaught() ->
+    Self = self(),
     {Pid, Ref} = spawn_monitor(fun() ->
+        Me = self(),
+        spawn(fun() -> Self ! {peer, is_process_alive(Me)} end),
         process_flag(error_handler, no_such_error_handler),
         re:run(<<"abc">>, <<"b">>, [global])
     end),
+    Alive = receive
+        {peer, Value} -> Value
+    after 5000 ->
+        timeout
+    end,
     Reason = receive
         {'DOWN', Ref, process, Pid, Down} -> Down
     after 5000 ->
         timeout
     end,
-    case Reason of
-        {undef, _} -> io:format("~w~n", [undef]);
-        Other -> io:format("~w~n", [Other])
+    Exit = case Reason of
+        {undef, _} -> undef;
+        Other -> Other
     end,
+    io:format("~w~n", [{Exit, Alive}]),
     halt().
 
 catch_error(Fun) ->
