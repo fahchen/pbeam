@@ -1094,6 +1094,39 @@ fn does_not_shrink_below_the_first_segment() {
 }
 
 #[test]
+fn takes_a_key_with_a_pseudo_deleted_newest_object() {
+    // Records that are newer than the first live object stay, and the take
+    // keeps the first live object after them
+    // (`db_take_hash`, `erl_db_hash.c:2949-2995`).
+    let atoms = test_atom_table();
+    let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Bag);
+    let key = Term::Integer(0);
+    let object = |value| vec![key.clone(), Term::Integer(value)];
+    table.insert_all(&atoms, vec![object(1), object(2), object(3)]);
+    table.fix(ProcessId(0));
+    table.begin_select_delete();
+    assert!(table.delete_object(&atoms, &object(3)));
+    table.take_key(&atoms, &key);
+    assert_eq!(table.object_count(), 0);
+    assert_eq!(table.size(), 0);
+}
+
+#[test]
+fn revives_a_deleted_set_key() {
+    // The insert of a deleted set key restores its object
+    // (`erl_db_hash.c:1396-1411`).
+    let atoms = test_atom_table();
+    let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
+    let key = Term::Integer(1);
+    table.insert(&atoms, vec![key.clone()]);
+    table.fix(ProcessId(0));
+    table.delete(&atoms, &key);
+    table.insert(&atoms, vec![key.clone()]);
+    assert_eq!(table.object_count(), 1);
+    assert_eq!(table.size(), 1);
+}
+
+#[test]
 fn grows_by_the_item_counter() {
     // A take leaves the item counter below 0, and the growth decision uses
     // the counter, so 257 inserts leave the 256 buckets of the table

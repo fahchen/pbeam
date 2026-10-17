@@ -646,9 +646,12 @@ impl EtsTables {
         reds: usize,
     ) -> (bool, usize) {
         let table = self.tables.get_mut(&id).expect("a cleared table is live");
-        let (owner, count) = match table.clear.as_ref() {
-            Some(clearing) => (clearing.owner, clearing.count),
-            None => (ProcessId(0), 0),
+        let (owner, count) = {
+            let clearing = table
+                .clear
+                .as_ref()
+                .expect("a cleared table has a pending clear");
+            (clearing.owner, clearing.count)
         };
         table.step_clear(atoms, owner, count, reds)
     }
@@ -1660,11 +1663,7 @@ impl Table {
             // segment that uses the last reduction
             // (`db_free_table_continue_hash`, `erl_db_hash.c:3140-3149`).
             if clearing.free.is_none() {
-                clearing.free = Some(if self.table_type == TableType::OrderedSet {
-                    1
-                } else {
-                    segment(self.segment_slots() - 1) + 1
-                });
+                clearing.free = Some(segment(self.segment_slots() - 1) + 1);
             }
             let mut remaining = i64::try_from(reds).unwrap_or(i64::MAX);
             let mut charge = 0;

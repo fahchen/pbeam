@@ -5348,6 +5348,14 @@ fn traps_a_call_that_meets_a_fixed_clear() {
     let calls = [
         ("next", vec![Term::Integer(0)]),
         ("update_element", vec![Term::Integer(0), Term::nil()]),
+        (
+            "update_element",
+            vec![
+                Term::Integer(0),
+                Term::nil(),
+                Term::tuple(vec![Term::Integer(0)]),
+            ],
+        ),
         ("info", vec![]),
         ("internal_select_delete", vec![Term::nil()]),
         ("delete", vec![]),
@@ -5405,6 +5413,33 @@ fn traps_a_select_continuation_that_meets_a_fixed_clear() {
         BifResult::TrapBif { function: "select", arguments, .. }
             if arguments == vec![continuation]
     ));
+}
+
+#[test]
+fn helps_a_trapped_insert_from_internal_delete_all() {
+    // `ets:internal_delete_all/2` first completes the list insert that
+    // holds the table busy (`handle_lacking_permission`, `erl_db.c:769-798`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let owner = scheduler.current_process_mut().id;
+    let mut table = Table::new(owner, Access::Public, 1, TableType::Set);
+    table.insert(&scheduler.atoms, vec![Term::Integer(1)]);
+    table.busy = Some(Busy::new(owner, Vec::new(), false));
+    scheduler.ets.create(Reference(0), None, table);
+    let result = program
+        .bif(
+            &mut scheduler,
+            "ets",
+            "internal_delete_all",
+            vec![
+                Term::Reference(Reference(0)),
+                Term::static_atom("undefined"),
+            ],
+        )
+        .unwrap();
+    assert!(matches!(result, BifResult::Value(value) if value == Term::Integer(1)));
 }
 
 #[test]

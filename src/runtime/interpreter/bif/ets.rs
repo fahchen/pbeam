@@ -2547,9 +2547,12 @@ pub(super) fn internal_delete_all(
     let caller = context.scheduler.current_process_mut().id;
     match help_busy(&mut *context, table)? {
         Take::Clear => {
-            let Some((id, _)) = context.scheduler.ets.find(&context.scheduler.atoms, table) else {
-                return Ok(BifResult::badarg());
-            };
+            let id = context
+                .scheduler
+                .ets
+                .find(&context.scheduler.atoms, table)
+                .expect("the caller found the table")
+                .0;
             // The call keeps its own arguments: a call that has not started
             // its clear yet runs it after the clear of the other operation
             // (`erl_db.c:769-798`), and a call after its own trap returns
