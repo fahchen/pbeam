@@ -1417,6 +1417,10 @@ pub(crate) fn make_hash2(atoms: &AtomTable, term: &Term) -> (u32, u64) {
                     // it reads its children into the pair context of the map
                     // around it (`erl_map.h:203`, `erl_term_hashing.c:1192-1210`).
                     push_children(&mut stack, &mut iterations, node.children());
+                    // The walk of ERTS charges the iteration of the
+                    // `hash2_common_3` that follows the node
+                    // (`erl_term_hashing.c:1560-1572`).
+                    iterations += 1;
                     continue;
                 }
             },
