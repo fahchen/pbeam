@@ -737,17 +737,19 @@ impl EtsTables {
     /// reduction for each (`proc_cleanup_fixed_table`,
     /// `erl_db.c:4975-5015`). Return 0 when the process has no pending
     /// cleanup.
-    pub(super) fn drain_pending(&mut self, process: ProcessId) -> usize {
-        if self.pending.is_empty() {
-            return 0;
-        }
-        let Some(ids) = self.pending.remove(&process) else {
+    pub(super) fn drain_pending(&mut self, process: ProcessId, limit: usize) -> usize {
+        let Some(ids) = self.pending.get_mut(&process) else {
             return 0;
         };
-        for id in &ids {
+        let count = limit.min(ids.len());
+        let drained = ids.drain(..count).collect::<Vec<_>>();
+        if ids.is_empty() {
+            self.pending.remove(&process);
+        }
+        for id in &drained {
             self.forget_fixation(*id, process);
         }
-        ids.len()
+        drained.len()
     }
 
     /// Delete the tables that the process `owner` owns, as

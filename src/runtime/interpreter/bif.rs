@@ -675,7 +675,17 @@ macro_rules! bifs {
             // reduction for each entry (`erts_schedule_ets_free_fixation`,
             // `erl_db.c:5263-5301`).
             let caller = context.scheduler.current_process_mut().id;
-            let pending = context.scheduler.ets.drain_pending(caller);
+            // The task loop runs while the budget remains and keeps the
+            // tasks that it did not reach for the next turn
+            // (`erl_process.c:10932-10989`).
+            let left = context
+                .scheduler
+                .current_process_mut()
+                .bif_reductions_left()?;
+            let pending = context
+                .scheduler
+                .ets
+                .drain_pending(caller, left.max(1));
             if pending > 0 {
                 context
                     .scheduler

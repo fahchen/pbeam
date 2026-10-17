@@ -1396,9 +1396,28 @@ fn drains_the_cleanup_of_a_deleted_table_when_the_process_runs() {
     );
     tables.fix_table(Reference(0), ProcessId(2));
     assert_eq!(tables.delete_table(Reference(0), ProcessId(1)), 1);
-    assert_eq!(tables.drain_pending(ProcessId(3)), 0);
-    assert_eq!(tables.drain_pending(ProcessId(2)), 1);
+    assert_eq!(tables.drain_pending(ProcessId(3), 5), 0);
+    assert_eq!(tables.drain_pending(ProcessId(2), 1), 1);
     // The entry is gone, so the exit charges nothing more.
+    assert_eq!(tables.delete_owned(ProcessId(2), 100), Some(100));
+}
+
+#[test]
+fn drains_the_cleanup_of_a_deleted_table_within_the_budget() {
+    // The scheduler runs one cleanup task for each reduction that remains
+    // and keeps the rest for the next turn (`erl_process.c:10932-10989`).
+    let mut tables = EtsTables::default();
+    for id in 0..2 {
+        tables.create(
+            Reference(id),
+            None,
+            Table::new(ProcessId(1), Access::Public, 1, TableType::Set),
+        );
+        tables.fix_table(Reference(id), ProcessId(2));
+        assert_eq!(tables.delete_table(Reference(id), ProcessId(1)), 1);
+    }
+    assert_eq!(tables.drain_pending(ProcessId(2), 1), 1);
+    assert_eq!(tables.drain_pending(ProcessId(2), 5), 1);
     assert_eq!(tables.delete_owned(ProcessId(2), 100), Some(100));
 }
 
