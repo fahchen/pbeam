@@ -312,24 +312,10 @@ impl Md5 {
     }
 }
 
-/// Read at most `budget` bytes of the binary `binary` and give them to
-/// `sum`, as the `is_bitstring` case of `do_chksum` (`erl_bif_chksum.c:68-92`)
-/// does. Return the rest of the binary when the budget ended inside it, and
-/// `Err(())` when the bit size is not a whole number of bytes, which
-/// `erts_get_aligned_binary_bytes` rejects (`erl_bits.h:606-629`).
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// let mut budget = 1;
-/// let mut bytes = Vec::new();
-/// let rest = read_binary(&Binary::from(b"ab".to_vec()), &mut budget, &mut |part| bytes.extend_from_slice(part));
-/// assert_eq!(bytes, b"a");
-/// assert!(rest.unwrap().is_some());
-/// ```
 /// Give the bytes of a pending run to `sum` as one update call, and empty
-/// the run. ERTS reads a flat list level of bytes with one call of its sum
-/// function (`erl_bif_chksum.c:120-155`), so the md5 state of
+/// the run. ERTS reads a flat level of byte elements with one call of its
+/// sum function, and a nil element or another element ends the run
+/// (`erl_bif_chksum.c:120-160`), so the md5 state of
 /// `erlang:md5_update/2` keeps the same block boundaries.
 ///
 /// # Examples
@@ -347,26 +333,20 @@ fn flush(run: &mut Vec<u8>, sum: &mut impl FnMut(&[u8])) {
     }
 }
 
-fn read_binary(
-    binary: &Binary,
-    budget: &mut u64,
-    sum: &mut impl FnMut(&[u8]),
-) -> Result<Option<Term>, ()> {
-    let bit_size = binary.bit_size();
-    if !bit_size.is_multiple_of(8) {
-        return Err(());
+/// Return the rest of a walk that ended inside `term`: the term and then the
+/// tail of each list around it, innermost first, as `do_chksum` builds the
+/// rest from its stack (`erl_bif_chksum.c:247-259`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(rest_term(Term::Integer(1), Vec::new()), Term::Integer(1));
+/// ```
+fn rest_term(mut term: Term, mut tails: Vec<Term>) -> Term {
+    while let Some(tail) = tails.pop() {
+        term = Term::cons(term, tail);
     }
-    let size = (bit_size / 8) as u64;
-    let bytes = &binary[..];
-    if size > *budget {
-        let taken = *budget as usize;
-        sum(&bytes[..taken]);
-        *budget = 0;
-        return Ok(Some(Term::Binary(binary.bits(taken * 8, bit_size))));
-    }
-    sum(&bytes[..size as usize]);
-    *budget -= size;
-    Ok(None)
+    term
 }
 
 /// Read at most `budget` bytes of the iodata `term` and give them to `sum`,
@@ -374,6 +354,9 @@ fn read_binary(
 /// the walk read all of the iodata, and the rest of the iodata when the
 /// budget ended before it did. `Err(())` marks a term that is not iodata: a
 /// term that is not a byte, a list, a nil, or a byte-aligned binary.
+///
+/// The walk keeps the tails of the lists around the current level on a work
+/// list, so a deep term does not recurse.
 ///
 /// # Examples
 ///
@@ -391,57 +374,73 @@ fn read(term: &Term, budget: &mut u64, sum: &mut impl FnMut(&[u8])) -> Result<Op
     if *budget == 0 {
         return Ok(Some(term.clone()));
     }
-    let Term::Cons(_) = term else {
-        return match term {
-            Term::Binary(binary) => read_binary(binary, budget, sum),
-            _ => Err(()),
-        };
-    };
-    let mut current = term;
-    // A run of byte elements, which one update call reads, as one call of
-    // `sumfun` reads a flat list level (`erl_bif_chksum.c:120-155`).
     let mut run: Vec<u8> = Vec::new();
+    // The tails of the lists above the current level, innermost last.
+    let mut tails: Vec<Term> = Vec::new();
+    let mut current = term.clone();
     loop {
-        let Some((head, rest)) = current.cons_cell() else {
-            // The tail of the list is nil, a binary, or not iodata.
-            if current.is_nil() {
-                flush(&mut run, sum);
-                return Ok(None);
-            }
-            return match current {
-                Term::Binary(binary) => {
-                    flush(&mut run, sum);
-                    read_binary(binary, budget, sum)
-                }
-                _ => Err(()),
-            };
-        };
-        match head {
-            // The walk skips an empty list in a list (`erl_bif_chksum.c:118-124`).
-            _ if head.is_nil() => {}
-            Term::Integer(value @ 0..=255) => {
-                if *budget == 0 {
-                    flush(&mut run, sum);
-                    return Ok(Some(current.clone()));
-                }
-                run.push(*value as u8);
-                *budget -= 1;
-            }
-            Term::Cons(_) => {
-                flush(&mut run, sum);
-                if let Some(part) = read(head, budget, sum)? {
-                    return Ok(Some(Term::cons(part, rest.clone())));
-                }
-            }
+        match &current {
+            Term::Nil => {}
             Term::Binary(binary) => {
                 flush(&mut run, sum);
-                if let Some(part) = read_binary(binary, budget, sum)? {
-                    return Ok(Some(Term::cons(part, rest.clone())));
+                let bit_size = binary.bit_size();
+                // `erts_get_aligned_binary_bytes` gives NULL for a bitstring
+                // that is not a whole number of bytes (`erl_bits.h:621-628`).
+                if !bit_size.is_multiple_of(8) {
+                    return Err(());
+                }
+                let size = bit_size / 8;
+                if size as u64 > *budget {
+                    let taken = *budget as usize;
+                    sum(&binary[..taken]);
+                    *budget = 0;
+                    let rest = Term::Binary(binary.bits(taken * 8, bit_size));
+                    return Ok(Some(rest_term(rest, tails)));
+                }
+                sum(&binary[..size]);
+                *budget -= size as u64;
+            }
+            Term::Cons(_) => {
+                let (head, rest) = current.cons_cell().expect("the term is a list");
+                let (head, rest) = (head.clone(), rest.clone());
+                match head {
+                    // The walk skips an empty list in a list, and the empty
+                    // list ends a run of bytes (`erl_bif_chksum.c:145-160`).
+                    Term::Nil => {
+                        flush(&mut run, sum);
+                        current = rest;
+                        continue;
+                    }
+                    Term::Integer(value @ 0..=255) => {
+                        if *budget == 0 {
+                            flush(&mut run, sum);
+                            return Ok(Some(rest_term(current.clone(), tails)));
+                        }
+                        run.push(value as u8);
+                        *budget -= 1;
+                        current = rest;
+                        continue;
+                    }
+                    Term::Cons(_) | Term::Binary(_) => {
+                        flush(&mut run, sum);
+                        tails.push(rest);
+                        current = head;
+                        continue;
+                    }
+                    _ => return Err(()),
                 }
             }
             _ => return Err(()),
         }
-        current = rest;
+        // The current term is read: continue with the tail of the list above
+        // it, or end the walk.
+        match tails.pop() {
+            Some(tail) => current = tail,
+            None => {
+                flush(&mut run, sum);
+                return Ok(None);
+            }
+        }
     }
 }
 

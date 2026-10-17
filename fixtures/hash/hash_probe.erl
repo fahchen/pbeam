@@ -73,6 +73,7 @@ md5_context() ->
      byte_size(erlang:md5_update(C0, list_to_binary(bytes(40000)))),
      binary_to_list(erlang:md5_update(C0, list_to_binary(bytes(56)))),
      binary_to_list(erlang:md5_update(C0, list_to_binary(bytes(64)))),
+     binary_to_list(erlang:md5_update(C0, bytes(56) ++ [[]] ++ bytes(20))),
      binary_to_list(erlang:md5_update(erlang:md5_update(C0, list_to_binary(bytes(56))),
                                        list_to_binary(bytes(20)))),
      binary_to_list(erlang:md5_update(erlang:md5_update(C0, list_to_binary(bytes(56))),

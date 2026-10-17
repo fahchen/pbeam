@@ -1579,6 +1579,12 @@ pub(crate) fn make_hash2(atoms: &AtomTable, term: &Term) -> (u32, u64) {
             },
             Term::MatchContext(_) => unreachable!("{MATCH_CONTEXT_ESCAPE}"),
         }
+        // `hash2_common` of ERTS returns before its trailing charge point
+        // when no item waits, so the last item of a walk costs no iteration
+        // (`erl_term_hashing.c:1565-1570`).
+        if next.is_none() && stack.is_empty() {
+            iterations = iterations.saturating_sub(1);
+        }
     }
 }
 
