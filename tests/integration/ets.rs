@@ -1011,3 +1011,41 @@ fn stops_at_the_safe_fixed_details_of_a_fixed_table() {
         "{error}"
     );
 }
+
+#[test]
+fn keeps_the_deleted_objects_of_a_bag_key_as_pinned_erts() {
+    // The insert of the key keeps the objects of the deleted key, so a later
+    // insert compares them too, and the lookup gives the live objects
+    // (`erl_db_hash.c:1422-1452`).
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    let object = |value| Term::tuple(vec![atom("k"), Term::Integer(value)]);
+    assert_eq!(
+        program
+            .execute("ets_probe", "fixtable_bag_repeat", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![Term::list_from(vec![object(3), object(4)])])
+    );
+    assert_eq!(reference("fixtable_bag_repeat"), b"[[{k,3},{k,4}]]\n");
+}
+
+#[test]
+fn keeps_a_partially_deleted_bag_object_as_pinned_erts() {
+    // A select_delete of one object of a bag keeps it as a pseudo-deleted
+    // object of the live key (`erl_db_hash.c:2634-2648`).
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    let object = |value| Term::tuple(vec![atom("k"), Term::Integer(value)]);
+    assert_eq!(
+        program
+            .execute("ets_probe", "fixtable_bag_partial", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![
+            Term::Integer(1),
+            Term::list_from(vec![object(1), object(3)]),
+        ])
+    );
+    assert_eq!(reference("fixtable_bag_partial"), b"[1,[{k,1},{k,3}]]\n");
+}

@@ -946,10 +946,16 @@ fn counts_the_bag_comparisons_of_a_fixed_key() {
         table.insert_all(&atoms, vec![vec![key.clone(), Term::Integer(3)]]),
         vec![2]
     );
+    // The objects of the deleted key stay, so the next insert compares
+    // them too.
+    assert_eq!(
+        table.insert_all(&atoms, vec![vec![key.clone(), Term::Integer(4)]]),
+        vec![3]
+    );
     // The equal object that the walk meets first costs no unit.
     table.delete(&atoms, &key);
     assert_eq!(
-        table.insert_all(&atoms, vec![vec![key.clone(), Term::Integer(3)]]),
+        table.insert_all(&atoms, vec![vec![key.clone(), Term::Integer(4)]]),
         vec![0]
     );
 }

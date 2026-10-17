@@ -1148,6 +1148,31 @@ impl Table {
                         object = older;
                     }
                 } else {
+                    // Remove each pseudo-deleted object from the object
+                    // chain of the live node.
+                    let mut chain = Vec::new();
+                    let mut object = self.older[slot];
+                    while object != EMPTY {
+                        chain.push(object);
+                        object = self.older[object];
+                    }
+                    let mut kept = Vec::with_capacity(chain.len());
+                    for object in chain {
+                        if self.is_deleted(object) {
+                            self.objects[object] = None;
+                            self.older[object] = EMPTY;
+                            self.next[object] = EMPTY;
+                            self.free.push(object);
+                        } else {
+                            kept.push(object);
+                        }
+                    }
+                    let mut next_object = EMPTY;
+                    for object in kept.into_iter().rev() {
+                        self.older[object] = next_object;
+                        next_object = object;
+                    }
+                    self.older[slot] = next_object;
                     if previous == EMPTY {
                         head = slot;
                     } else {
@@ -1293,6 +1318,29 @@ impl Table {
                         }
                         self.index.remove(hash, slot);
                         self.link(bucket, self.key_before(bucket, slot), after);
+                    } else if self.is_fixed() && self.table_type != TableType::OrderedSet {
+                        // The key stays live, and the removed object stays as
+                        // a pseudo-deleted object after the new newest object
+                        // of the key (`erl_db_hash.c:2634-2648`).
+                        self.index.replace(hash, slot, next);
+                        self.next[next] = after;
+                        self.link(bucket, self.key_before(bucket, slot), next);
+                        if self.deleted.len() <= slot {
+                            self.deleted.resize(slot + 1, false);
+                        }
+                        self.deleted[slot] = true;
+                        self.deleted_objects += 1;
+                        self.next[slot] = EMPTY;
+                        self.older[slot] = self.older[next];
+                        self.older[next] = slot;
+                        self.retained.push(Retained {
+                            hash,
+                            key: key.clone(),
+                            newest: slot,
+                            slots: vec![slot],
+                        });
+                        self.writes += 1;
+                        return true;
                     } else {
                         // The key stays in the chain, and its new newest
                         // object takes the place of the removed one
@@ -1405,6 +1453,38 @@ impl Table {
         self.deleted_objects -= retained.slots.len();
         self.objects[retained.newest] = Some(object);
         self.index.insert(hash, retained.newest);
+        self.writes += 1;
+    }
+
+    /// Put the object `object` at the chain node of the retained bag key
+    /// `index`, as the insert of a fixed ERTS table does
+    /// (`erl_db_hash.c:1447-1452`): the object of the chain node moves to a
+    /// new pseudo-deleted slot at the head of the object chain of the key,
+    /// so a later insert compares it too, and the other pseudo-deleted
+    /// objects stay.
+    fn revive_bag(&mut self, object: Vec<Term>, index: usize, hash: u64) {
+        let newest = self.retained[index].newest;
+        let slot = self.allocate();
+        self.objects[slot] = self.objects[newest].take();
+        self.older[slot] = self.older[newest];
+        if self.deleted.len() <= slot {
+            self.deleted.resize(slot + 1, false);
+        }
+        self.deleted[slot] = true;
+        self.deleted_objects += 1;
+        self.deleted[newest] = false;
+        self.deleted_objects -= 1;
+        self.objects[newest] = Some(object);
+        self.older[newest] = slot;
+        self.index.insert(hash, newest);
+        let retained = &mut self.retained[index];
+        retained.newest = slot;
+        let position = retained
+            .slots
+            .iter()
+            .position(|listed| *listed == newest)
+            .expect("the retained key lists the chain node of its key");
+        retained.slots[position] = slot;
         self.writes += 1;
     }
 
@@ -1618,7 +1698,7 @@ impl Table {
                     .iter()
                     .take_while(|slot| self.object_of(**slot).as_slice() != object.as_slice())
                     .count();
-                self.revive(object, index, hash);
+                self.revive_bag(object, index, hash);
                 return compared;
             }
         }
@@ -1894,7 +1974,9 @@ impl Table {
         let mut objects = Vec::new();
         let mut slot = self.key_slot(atoms, key).unwrap_or(EMPTY);
         while slot != EMPTY {
-            objects.push(self.object_of(slot).as_slice());
+            if !self.is_deleted(slot) {
+                objects.push(self.object_of(slot).as_slice());
+            }
             slot = self.older[slot];
         }
         objects.reverse();
@@ -1932,7 +2014,9 @@ impl Table {
         self.chain_keys(bucket)
             .filter(|&newest| !self.is_deleted(newest))
             .flat_map(|newest| {
-                links(newest, &self.older).map(|slot| self.object_of(slot).as_slice())
+                links(newest, &self.older)
+                    .filter(|&slot| !self.is_deleted(slot))
+                    .map(|slot| self.object_of(slot).as_slice())
             })
     }
 

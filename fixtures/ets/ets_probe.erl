@@ -16,7 +16,8 @@
          fixtable_clear_reinsert/0, fixtable_clear_after_delete/0,
          fixtable_bag_reinsert/0, fixtable_shrink/0,
          fixtable_duplicate_bag_reinsert/0, fixtable_info/0,
-         fixtable_ordered_set/0, fixtable_safe_fixed/0]).
+         fixtable_ordered_set/0, fixtable_safe_fixed/0,
+         fixtable_bag_repeat/0, fixtable_bag_partial/0]).
 
 %% ets:new/2 return values and badarg cases (erl_db.c:2555-2840).
 new() ->
@@ -946,6 +947,32 @@ fixtable_safe_fixed() ->
     T = ets:new(ets_probe_fix_safe_fixed, [set]),
     ets:safe_fixtable(T, true),
     ets:info(T, safe_fixed).
+
+
+%% The insert of a bag key after a delete keeps the deleted objects, so a
+%% later insert compares them too.
+fixtable_bag_repeat() ->
+    T = ets:new(ets_probe_fix_bag_repeat, [bag]),
+    ets:insert(T, [{k, 1}, {k, 2}]),
+    ets:safe_fixtable(T, true),
+    ets:delete(T, k),
+    ets:insert(T, [{k, 3}]),
+    ets:insert(T, [{k, 4}]),
+    Objects = ets:lookup(T, k),
+    ets:safe_fixtable(T, false),
+    [Objects].
+
+%% The select delete of one object of a bag keeps it as a pseudo-deleted
+%% object of the live key.
+fixtable_bag_partial() ->
+    T = ets:new(ets_probe_fix_bag_partial, [bag]),
+    ets:insert(T, [{k, 1}, {k, 2}]),
+    ets:safe_fixtable(T, true),
+    Removed = ets:internal_select_delete(T, [{{k, 2}, [], [true]}]),
+    ets:insert(T, [{k, 3}]),
+    Objects = ets:lookup(T, k),
+    ets:safe_fixtable(T, false),
+    [Removed, Objects].
 
 catch_error(Fun) ->
     try Fun() catch error:Reason -> {error, Reason} end.
