@@ -109,22 +109,43 @@ fn help_busy(context: &mut BifContext<'_>, table: &Term) -> Result<Take, BeamErr
     let Some((id, found)) = context.scheduler.ets.find(&context.scheduler.atoms, table) else {
         return Ok(Take::Free);
     };
-    let Some(started) = found.busy.as_ref() else {
-        return Ok(Take::Free);
-    };
-    if started.owner == caller {
-        return Ok(Take::Mine);
-    }
-    let budget = ITERATIONS_PER_RED
-        * context
+    if let Some(started) = found.busy.as_ref() {
+        if started.owner == caller {
+            return Ok(Take::Mine);
+        }
+        let budget = ITERATIONS_PER_RED
+            * context
+                .scheduler
+                .current_process_mut()
+                .bif_reductions_left()? as i64;
+        let (used, _) = step_inserting(context, &Term::Reference(id), budget, None)?;
+        context
             .scheduler
             .current_process_mut()
-            .bif_reductions_left()? as i64;
-    let (used, _) = step_inserting(context, &Term::Reference(id), budget, None)?;
+            .bump_reductions((used / ITERATIONS_PER_RED) as i32);
+        return Ok(Take::Help);
+    }
+    if !found.clearing() {
+        return Ok(Take::Free);
+    }
+    // A process that uses the table while a fixed clear does not finish
+    // helps with the mark, as `delete_all_objects_continue` does
+    // (`erl_db.c:3300-3320`): 8 buckets for each reduction.
+    let left = context
+        .scheduler
+        .current_process_mut()
+        .bif_reductions_left()?;
+    let units = usize::try_from(left.max(0))
+        .unwrap_or(usize::MAX)
+        .saturating_mul(8);
+    let (_, processed) = context
+        .scheduler
+        .ets
+        .step_clear(&context.scheduler.atoms, id, units);
     context
         .scheduler
         .current_process_mut()
-        .bump_reductions((used / ITERATIONS_PER_RED) as i32);
+        .bump_reductions(i32::try_from(processed.div_ceil(8)).unwrap_or(i32::MAX));
     Ok(Take::Help)
 }
 
@@ -141,15 +162,28 @@ fn finish_busy(context: &mut BifContext<'_>, table: &Term) -> Result<(), BeamErr
             .ets
             .find(atoms, table)
             .expect("the caller found the table");
-        if found.busy.is_none() {
+        if found.busy.is_none() && !found.clearing() {
             return Ok(());
         }
-        let (used, _) = step_inserting(context, &Term::Reference(id), i64::from(i32::MAX), None)?;
-        debug_assert!(used > 0, "a busy insert makes progress");
-        context
-            .scheduler
-            .current_process_mut()
-            .bump_reductions((used / ITERATIONS_PER_RED) as i32);
+        if found.busy.is_some() {
+            let (used, _) =
+                step_inserting(context, &Term::Reference(id), i64::from(i32::MAX), None)?;
+            debug_assert!(used > 0, "a busy insert makes progress");
+            context
+                .scheduler
+                .current_process_mut()
+                .bump_reductions((used / ITERATIONS_PER_RED) as i32);
+        } else {
+            let reductions = found.delete_all_reductions();
+            context
+                .scheduler
+                .ets
+                .step_clear(&context.scheduler.atoms, id, usize::MAX);
+            context
+                .scheduler
+                .current_process_mut()
+                .bump_reductions(i32::try_from(reductions).unwrap_or(i32::MAX));
+        }
     }
 }
 
@@ -2194,21 +2228,24 @@ pub(super) fn safe_fixtable(
     }
     // ERTS reads the table before it checks the second argument
     // (`erl_db.c:1146-1161`).
-    let Some(known) =
-        context
-            .scheduler
-            .ets
-            .table(&context.scheduler.atoms, table, caller, Operation::Read)
-    else {
+    if context
+        .scheduler
+        .ets
+        .table(&context.scheduler.atoms, table, caller, Operation::Read)
+        .is_none()
+    {
         return Ok(BifResult::badarg());
-    };
+    }
+    let id = (context.scheduler.ets.find(&context.scheduler.atoms, table))
+        .expect("the caller found the table")
+        .0;
     let Term::Atom(flag) = flag else {
         return Ok(BifResult::badarg());
     };
     if flag.is_one_of(&["true"]) {
-        known.fix(caller);
+        context.scheduler.ets.fix_table(id, caller);
     } else if flag.is_one_of(&["false"]) {
-        known.unfix(caller);
+        context.scheduler.ets.unfix_table(id, caller);
     } else {
         return Ok(BifResult::badarg());
     }
@@ -2472,8 +2509,12 @@ pub(super) fn internal_delete_all(
 ) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
     help_table(&mut *context, table)?;
+    let left = context
+        .scheduler
+        .current_process_mut()
+        .bif_reductions_left()?;
     let atoms = &context.scheduler.atoms;
-    let Some(table) = context
+    let Some(found) = context
         .scheduler
         .ets
         .table(atoms, table, caller, Operation::Write)
@@ -2483,9 +2524,33 @@ pub(super) fn internal_delete_all(
     if !matches!(holder, Term::Atom(atom) if atom.is_static("undefined")) {
         return Ok(Value(holder.clone()));
     }
-    let count = table.len();
-    let reductions = table.delete_all_reductions();
-    table.clear(&context.scheduler.atoms);
+    let count = found.len();
+    let reductions = found.delete_all_reductions();
+    if found.is_fixed() && found.table_type() != TableType::OrderedSet {
+        let units = usize::try_from(left.max(0))
+            .unwrap_or(usize::MAX)
+            .saturating_mul(8);
+        if !found.step_clear(atoms, caller, count, units).0 {
+            // The clear marks 8 buckets for each reduction. A clear that
+            // does not finish marks the table busy, uses the turn, and
+            // traps to itself (`erl_db.c:3255-3279`).
+            context
+                .scheduler
+                .current_process_mut()
+                .bump_all_reductions();
+            return Ok(BifResult::TrapBif {
+                module: "ets",
+                function: "internal_delete_all",
+                arguments: vec![table.clone(), Term::Integer(count as i64)],
+            });
+        }
+        context
+            .scheduler
+            .current_process_mut()
+            .bump_reductions(i32::try_from(reductions).unwrap_or(i32::MAX));
+        return Ok(Value(Term::Integer(count as i64)));
+    }
+    found.clear(&context.scheduler.atoms);
     context
         .scheduler
         .current_process_mut()

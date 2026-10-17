@@ -21,7 +21,8 @@
          fixtable_bag_double_delete/0, fixtable_bag_restore/0,
          fixtable_bag_last_live/0, fixtable_bag_skip_deleted/0,
          fixtable_next_live_behind_node/0, fixtable_clear_behind_node/0,
-         fixtable_bag_restore_behind_node/0, fixtable_delete_table/0]).
+         fixtable_bag_restore_behind_node/0, fixtable_delete_table/0,
+         fixtable_clear_large/0]).
 
 %% ets:new/2 return values and badarg cases (erl_db.c:2555-2840).
 new() ->
@@ -1069,6 +1070,17 @@ fixtable_delete_table() ->
     ets:insert(T, {k}),
     ets:safe_fixtable(T, true),
     [ets:delete(T)].
+
+%% A clear of a large fixed table marks 8 buckets for each reduction, so
+%% it traps and continues in a later turn (`erl_db_hash.c:3007-3051`).
+fixtable_clear_large() ->
+    T = ets:new(ets_probe_fix_clear_large, [set]),
+    ets:insert(T, [{I} || I <- from(1, 33000)]),
+    ets:safe_fixtable(T, true),
+    Count = ets:internal_delete_all(T, undefined),
+    Size = ets:info(T, size),
+    ets:safe_fixtable(T, false),
+    [Count, Size].
 
 catch_error(Fun) ->
     try Fun() catch error:Reason -> {error, Reason} end.

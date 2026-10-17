@@ -980,6 +980,22 @@ fn gives_the_fixation_state_of_an_info_item_as_pinned_erts() {
 }
 
 #[test]
+fn clears_a_large_fixed_table_in_turns_as_pinned_erts() {
+    // The clear marks 8 buckets for each reduction, so a table with more
+    // buckets than the turn allows traps and continues in a later turn
+    // (`erl_db_hash.c:3007-3051`, `erl_db.c:3255-3279`).
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    assert_eq!(
+        program
+            .execute("ets_probe", "fixtable_clear_large", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![Term::Integer(33000), Term::Integer(0)])
+    );
+    assert_eq!(reference("fixtable_clear_large"), b"[33000,0]\n");
+}
+
+#[test]
 fn deletes_a_table_that_the_process_fixed_as_pinned_erts() {
     // The explicit delete of a fixed table removes the fixations and frees
     // the table (`erl_db.c:3053-3061`, `5304-5318`).
