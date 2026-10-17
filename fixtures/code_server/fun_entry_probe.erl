@@ -26,8 +26,12 @@ deleted() ->
     Fun = fun_entry_send:make_rev(rev),
     Before = erlang:fun_info(Fun, name),
     true = code:delete(fun_entry_send),
-    Name = erlang:fun_info(Fun, name),
-    io:format("~w~n", [[Before, Name]]).
+    Deleted = erlang:fun_info(Fun, name),
+    %% A load of another version makes new current code and keeps the old
+    %% code, so the fun of the old code keeps the name of its function.
+    {module, fun_entry_send} = code:load_abs("fixtures/code_server/fun_entry_send"),
+    Reloaded = erlang:fun_info(Fun, name),
+    io:format("~w~n", [[Before, Deleted, Reloaded]]).
 
 %% A later load of the code that made the funs, while this process holds no
 %% name, makes the code current again, so each call enters the function of

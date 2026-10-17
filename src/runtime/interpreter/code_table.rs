@@ -509,32 +509,13 @@ impl CodeTable {
             .transpose()
     }
 
-    /// Return the code of the module `name` that `erlang:delete_module/1`
-    /// moved to old code, or `None` when the run has no old code of the
-    /// name. The code stays in `by_id` until the purge
-    /// (`beam_bif_load.c:2412-2455`).
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert!(code.old_code_by_name("fixture").is_none());
-    /// ```
-    fn old_code_by_name(&self, name: &str) -> Option<&Rc<BeamModule>> {
-        if !self.old.contains(name) {
-            return None;
-        }
-        self.by_id
-            .values()
-            .map(|loaded| &loaded.code)
-            .find(|code| code.name == name)
-    }
-
     /// Return the name of the function that holds the code of `lambda`, as
     /// ERTS `erts_get_fun_mfa` (`erl_fun.c:37-46`) gives it: the function of
-    /// the `func_info` before the entry label of the fun entry. A fun of the
-    /// code that waits for its `-on_load` function, and a fun of the old
-    /// code that `erlang:delete_module/1` kept until the purge, have the
-    /// name of their function. A module that the code table does not hold
+    /// the `func_info` before the entry label of the fun entry. The code of
+    /// the fun is the current code, the code that waits for its `-on_load`
+    /// function, or the old code that `erlang:delete_module/1` kept until
+    /// the purge; the first code whose fun entry matches the fun gives the
+    /// name of its function. A fun whose code the code table does not hold
     /// gives `None`. A call of a fun puts
     /// its arguments in `x(0)` onwards and then its free variables in the
     /// registers after them, so the arity of that function is the arity of
@@ -557,28 +538,43 @@ impl CodeTable {
         module: &str,
         lambda: &Lambda,
     ) -> Result<Option<String>, BeamError> {
-        let loaded = match self.get(module) {
-            Some(loaded) => loaded,
-            None => match self.on_load.get(module) {
-                Some(waiting) => &waiting.code,
-                None => {
-                    let Some(loaded) = self.old_code_by_name(module) else {
-                        return Ok(None);
-                    };
-                    loaded
-                }
-            },
-        };
-        let Some(entry) = loaded
-            .tables
-            .fun_entries
-            .get(&lambda.index())
-            .filter(|entry| entry.old_unique == lambda.old_unique())
-        else {
-            return Ok(None);
-        };
-        let function = super::function_at_label(loaded, entry.label)?;
-        Ok(Some(loaded.tables.name(function.name).to_owned()))
+        for loaded in self.codes(module) {
+            let Some(entry) = loaded
+                .tables
+                .fun_entries
+                .get(&lambda.index())
+                .filter(|entry| entry.old_unique == lambda.old_unique())
+            else {
+                continue;
+            };
+            let function = super::function_at_label(loaded, entry.label)?;
+            return Ok(Some(loaded.tables.name(function.name).to_owned()));
+        }
+        Ok(None)
+    }
+
+    /// Return the current code of the module `name`, the code that waits for
+    /// its `-on_load` function, and each code of the name in `by_id`, which
+    /// includes the old code that `erlang:delete_module/1` kept until the
+    /// purge (`beam_bif_load.c:2412-2455`). A code of the name that is not
+    /// current and does not wait gives its funs a name, so the caller reads
+    /// each code of the name.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(code.codes("missing").count(), 0);
+    /// ```
+    fn codes<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a Rc<BeamModule>> + 'a {
+        self.get(name)
+            .into_iter()
+            .chain(self.on_load.get(name).map(|waiting| &waiting.code))
+            .chain(
+                self.by_id
+                    .values()
+                    .map(|loaded| &loaded.code)
+                    .filter(move |code| code.name == name),
+            )
     }
 
     /// Return the code of `module` that waits for its `-on_load` function,
