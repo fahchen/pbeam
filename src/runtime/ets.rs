@@ -1129,6 +1129,9 @@ impl Table {
     /// bucket chain, as the last unfix of an ERTS table does
     /// (`erl_db_hash.c:49-60`).
     fn drop_retained(&mut self) {
+        if self.retained.is_empty() {
+            return;
+        }
         for bucket in 0..self.buckets {
             let mut slot = self.heads[bucket];
             let mut head = EMPTY;
@@ -1214,7 +1217,7 @@ impl Table {
     /// ```
     pub(super) fn clear(&mut self, atoms: &AtomTable) -> usize {
         let count = self.object_count();
-        if self.is_fixed() {
+        if self.is_fixed() && self.table_type != TableType::OrderedSet {
             // A fixed table keeps each object as a pseudo-deleted object
             // and keeps its bucket chains (`erl_db_hash.c:4027-4028`).
             for bucket in 0..self.buckets {
@@ -1270,7 +1273,7 @@ impl Table {
                 if previous == EMPTY {
                     let after = self.next[slot];
                     if next == EMPTY {
-                        if self.is_fixed() {
+                        if self.is_fixed() && self.table_type != TableType::OrderedSet {
                             // The key keeps its chain node as a
                             // pseudo-deleted object (`erl_db_hash.c:49-60`).
                             self.index.remove(hash, slot);
@@ -2144,7 +2147,11 @@ impl Table {
         };
         let hash = stored_hash(atoms, self.key(self.object_of(newest)));
         self.writes += 1;
-        if self.is_fixed() {
+        // An ordered_set has no supported traversal, and its compaction
+        // moves the last object into the freed slot, so a fixed ordered_set
+        // deletes as an unfixed one does (row "ETS tables" of
+        // docs/erts-differences.md).
+        if self.is_fixed() && self.table_type != TableType::OrderedSet {
             self.retain_key(hash, key, newest);
             return;
         }

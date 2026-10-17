@@ -15,7 +15,8 @@
          fixtable_insert_before_successor/0, fixtable_reinsert/0,
          fixtable_clear_reinsert/0, fixtable_clear_after_delete/0,
          fixtable_bag_reinsert/0, fixtable_shrink/0,
-         fixtable_duplicate_bag_reinsert/0]).
+         fixtable_duplicate_bag_reinsert/0, fixtable_info/0,
+         fixtable_ordered_set/0, fixtable_safe_fixed/0]).
 
 %% ets:new/2 return values and badarg cases (erl_db.c:2555-2840).
 new() ->
@@ -914,6 +915,37 @@ fixtable_duplicate_bag_reinsert() ->
     Fresh = ets:insert(T, [{j, 4}]),
     ets:safe_fixtable(T, false),
     [ets:lookup(T, k), Fresh, ets:lookup(T, j)].
+
+
+%% The fixed item of ets:info/2, and the safe_fixed item of an unfixed
+%% table.
+fixtable_info() ->
+    T = ets:new(ets_probe_fix_info, [set]),
+    Before = ets:info(T, fixed),
+    ets:safe_fixtable(T, true),
+    During = ets:info(T, fixed),
+    Safe = ets:info(ets:new(ets_probe_fix_info_safe, [set]), safe_fixed),
+    ets:safe_fixtable(T, false),
+    After = ets:info(T, fixed),
+    [Before, During, Safe, After].
+
+%% An ordered_set that a process deletes a key from while fixed keeps the
+%% ordinary delete and compaction.
+fixtable_ordered_set() ->
+    T = ets:new(ets_probe_fix_ordered, [ordered_set]),
+    ets:insert(T, [{1, a}]),
+    ets:safe_fixtable(T, true),
+    ets:delete(T, 1),
+    Lookup = ets:lookup(T, 1),
+    ets:safe_fixtable(T, false),
+    [Lookup, ets:info(T, size)].
+
+
+%% The safe_fixed details of a fixed table, which PBeam does not keep.
+fixtable_safe_fixed() ->
+    T = ets:new(ets_probe_fix_safe_fixed, [set]),
+    ets:safe_fixtable(T, true),
+    ets:info(T, safe_fixed).
 
 catch_error(Fun) ->
     try Fun() catch error:Reason -> {error, Reason} end.

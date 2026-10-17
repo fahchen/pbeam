@@ -1518,12 +1518,21 @@ pub(super) fn info(
         Term::Atom(atom) if atom.is_static("compressed") => boolean_term(found.compressed()),
         Term::Atom(atom) if atom.is_static("id") => Term::Reference(id),
         Term::Atom(atom) if atom.is_static("decentralized_counters") => Term::static_atom("false"),
+        Term::Atom(atom) if atoms.name_of(atom) == "fixed" => boolean_term(found.is_fixed()),
         Term::Atom(atom)
             if matches!(
                 atoms.name_of(atom),
-                "fixed" | "safe_fixed" | "safe_fixed_monotonic_time"
+                "safe_fixed" | "safe_fixed_monotonic_time"
             ) =>
         {
+            if found.is_fixed() {
+                // ponytail: the fixations of each process with their times
+                // and counts; see "ETS tables" in docs/erts-differences.md.
+                return Err(error(format!(
+                    "unsupported ets:info/2 item {} of a fixed table",
+                    atoms.name_of(atom)
+                )));
+            }
             Term::static_atom("false")
         }
         Term::Atom(atom) if matches!(atoms.name_of(atom), "data" | "stats") => {

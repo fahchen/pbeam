@@ -957,3 +957,57 @@ fn reuses_the_duplicate_bag_node_of_a_reinserted_key_as_pinned_erts() {
         b"[[{k,3}],true,[{j,4}]]\n"
     );
 }
+
+#[test]
+fn gives_the_fixation_state_of_an_info_item_as_pinned_erts() {
+    // `fixed` gives whether a process fixed the table, and `safe_fixed` of
+    // an unfixed table gives false (`erl_db.c:5447-5625`).
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    assert_eq!(
+        program
+            .execute("ets_probe", "fixtable_info", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![
+            atom("false"),
+            atom("true"),
+            atom("false"),
+            atom("false"),
+        ])
+    );
+    assert_eq!(reference("fixtable_info"), b"[false,true,false,false]\n");
+}
+
+#[test]
+fn deletes_the_key_of_a_fixed_ordered_set_as_pinned_erts() {
+    // An ordered_set deletes as usual while fixed, because its traversal is
+    // not supported and its compaction moves objects
+    // (`erl_db_hash.c:49-60`; row "ETS tables" of `docs/erts-differences.md`).
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    assert_eq!(
+        program
+            .execute("ets_probe", "fixtable_ordered_set", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![Term::nil(), Term::Integer(0)])
+    );
+    assert_eq!(reference("fixtable_ordered_set"), b"[[],0]\n");
+}
+
+#[test]
+fn stops_at_the_safe_fixed_details_of_a_fixed_table() {
+    // PBeam does not keep the fixations of each process with their times
+    // and counts, so the item returns a runtime error (row "ETS tables" of
+    // `docs/erts-differences.md`).
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let error = program
+        .execute("ets_probe", "fixtable_safe_fixed", &[])
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported ets:info/2 item safe_fixed"),
+        "{error}"
+    );
+}
