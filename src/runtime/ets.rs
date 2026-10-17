@@ -72,9 +72,12 @@ pub(super) struct Freeing {
     /// is not free is `segments - 1`. An `ordered_set` table frees its
     /// objects one by one, so the count is not used.
     segments: usize,
-    /// The slot where the free of the objects of an `ordered_set` table
+    /// The bucket where the free of the objects of an `ordered_set` table
     /// continues, as the work stack of `do_free_tree_continue` remembers the
     /// nodes (`erl_db_tree.c:2877-2904`).
+    bucket: usize,
+    /// The next key of the bucket `bucket` whose object is not free, or
+    /// `EMPTY` when the walk reads the next bucket.
     next: usize,
 }
 
@@ -693,7 +696,8 @@ impl Freeing {
         Freeing {
             table,
             segments,
-            next: 0,
+            bucket: 0,
+            next: EMPTY,
         }
     }
 
@@ -745,7 +749,10 @@ impl Freeing {
     /// reductions `budget` of the turn, as `do_free_tree_continue` frees a
     /// node for each reduction and returns when the reductions are less
     /// than 0 (`erl_db_tree.c:2877-2904`). Return the number of objects that
-    /// are free, or `None` when the table holds no object.
+    /// are free, or `None` when the table holds no object. The walk follows
+    /// the bucket chains of the live keys, so it reads no slot of an object
+    /// that an earlier delete freed, as the ERTS walk reads only the live
+    /// nodes of the tree.
     ///
     /// # Examples
     ///
@@ -765,14 +772,24 @@ impl Freeing {
             .saturating_add(1);
         let mut freed = 0;
         while freed < limit {
-            let Some(object) = self.table.objects.get(self.next) else {
-                break;
-            };
-            if object.is_some() {
-                self.table.objects[self.next] = None;
-                freed += 1;
+            if self.next == EMPTY {
+                if self.bucket == self.table.buckets {
+                    break;
+                }
+                let head = std::mem::replace(&mut self.table.heads[self.bucket], EMPTY);
+                if head == EMPTY {
+                    self.bucket += 1;
+                    continue;
+                }
+                self.next = head;
             }
-            self.next += 1;
+            let slot = self.next;
+            self.next = self.table.next[slot];
+            self.table.objects[slot] = None;
+            freed += 1;
+            if self.next == EMPTY {
+                self.bucket += 1;
+            }
         }
         (freed > 0).then(|| i32::try_from(freed).unwrap_or(i32::MAX))
     }

@@ -166,6 +166,21 @@ fn frees_the_objects_of_an_ordered_set_one_for_each_reduction() {
     assert_eq!(tables.free_segments(ProcessId(1), 2), Some(0));
     assert_eq!(live(&tables), 0);
     assert!(tables.freeing.is_empty());
+    // The walk follows the live keys, so a delete of most objects leaves
+    // slots that the walk never reads, as the ERTS walk reads only the live
+    // nodes of the tree (`erl_db_tree.c:2877-2904`).
+    let mut table = Table::new(ProcessId(1), Access::Public, 1, TableType::OrderedSet);
+    for key in 0..5 {
+        table.insert(&atoms, vec![Term::Integer(key)]);
+    }
+    for key in 0..4 {
+        table.delete(&atoms, &Term::Integer(key));
+    }
+    tables.create(Reference(1), None, table);
+    tables.delete_table(Reference(1), ProcessId(1));
+    assert_eq!(tables.free_segments(ProcessId(1), 1), Some(0));
+    assert_eq!(live(&tables), 0);
+    assert!(tables.freeing.is_empty());
 }
 
 #[test]
