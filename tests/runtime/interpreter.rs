@@ -5350,6 +5350,7 @@ fn traps_a_call_that_meets_a_fixed_clear() {
         ("update_element", vec![Term::Integer(0), Term::nil()]),
         ("info", vec![]),
         ("internal_select_delete", vec![Term::nil()]),
+        ("delete", vec![]),
     ];
     for (number, (function, mut arguments)) in calls.into_iter().enumerate() {
         let id = Reference(number as u64);

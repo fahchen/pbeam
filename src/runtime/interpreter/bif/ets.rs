@@ -135,17 +135,14 @@ fn help_busy(context: &mut BifContext<'_>, table: &Term) -> Result<Take, BeamErr
     // A process that uses the table while a fixed clear does not finish
     // helps with the mark, as `delete_all_objects_continue` does
     // (`erl_db.c:3300-3320`): 8 buckets for each reduction.
-    let left = context
+    let reds = context
         .scheduler
         .current_process_mut()
         .bif_reductions_left()?;
-    let units = usize::try_from(left.max(0))
-        .unwrap_or(usize::MAX)
-        .saturating_mul(8);
     let (_, charge) = context
         .scheduler
         .ets
-        .step_clear(&context.scheduler.atoms, id, units);
+        .step_clear(&context.scheduler.atoms, id, reds);
     context
         .scheduler
         .current_process_mut()
@@ -1398,6 +1395,13 @@ pub(super) fn delete_table(
     table: &Term,
 ) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
+    if help_table(&mut *context, table)? {
+        return Ok(BifResult::TrapBif {
+            module: "ets",
+            function: "delete",
+            arguments: vec![table.clone()],
+        });
+    }
     let scheduler = &mut *context.scheduler;
     if scheduler
         .ets
@@ -2564,10 +2568,7 @@ pub(super) fn internal_delete_all(
     let count = found.len();
     let reductions = found.delete_all_reductions();
     if found.is_fixed() && found.table_type() != TableType::OrderedSet {
-        let units = usize::try_from(left.max(0))
-            .unwrap_or(usize::MAX)
-            .saturating_mul(8);
-        if !found.step_clear(atoms, caller, count, units).0 {
+        if !found.step_clear(atoms, caller, count, left).0 {
             // The clear marks 8 buckets for each reduction. A clear that
             // does not finish marks the table busy, uses the turn, and
             // traps to itself (`erl_db.c:3255-3279`).

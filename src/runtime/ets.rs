@@ -221,6 +221,10 @@ pub(super) struct Clearing {
     owner: ProcessId,
     count: usize,
     bucket: usize,
+    /// The number of segments that the clear has not freed yet after the
+    /// last unfix ended the fixation, or `None` while the clear marks
+    /// buckets (`db_free_table_continue_hash`, `erl_db_hash.c:3140-3149`).
+    free: Option<usize>,
 }
 
 /// A list insert that took a table and did not finish in its turn, as the
@@ -606,14 +610,14 @@ impl EtsTables {
         &mut self,
         atoms: &AtomTable,
         id: Reference,
-        units: usize,
+        reds: usize,
     ) -> (bool, usize) {
         let table = self.tables.get_mut(&id).expect("a cleared table is live");
         let (owner, count) = match table.clear.as_ref() {
             Some(clearing) => (clearing.owner, clearing.count),
             None => (ProcessId(0), 0),
         };
-        table.step_clear(atoms, owner, count, units)
+        table.step_clear(atoms, owner, count, reds)
     }
 
     /// Fix the table `id` for the process `process`, and add the fixation
@@ -724,10 +728,13 @@ impl EtsTables {
             };
             if let Some(mut table) = self.tables.remove(&id) {
                 let fixers = table.fixers();
-                reds -= i32::try_from(fixers.len()).unwrap_or(i32::MAX);
+                reds -= i32::try_from(fixers.len() + table.fixdels).unwrap_or(i32::MAX);
                 // The table goes, so each fixation of it goes too
-                // (`free_fixations_locked`, `erl_db.c:5304-5318`).
+                // (`free_fixations_locked`, `erl_db.c:5304-5318`), and its
+                // delete records free with one reduction for each
+                // (`erl_db_hash.c:3122-3137`).
                 table.fixed_by.clear();
+                table.fixdels = 0;
                 for process in &fixers {
                     self.forget_fixations(id, *process);
                 }
@@ -809,8 +816,12 @@ impl EtsTables {
         for process in &fixers {
             self.forget_fixations(id, *process);
         }
+        // The free of the table frees each delete record, one reduction
+        // for each (`db_free_table_continue_hash`, `erl_db_hash.c:3122-3137`).
+        let charge = fixers.len() + table.fixdels;
+        table.fixdels = 0;
         self.freeing.insert(id, Freeing::new(table));
-        fixers.len()
+        charge
     }
 
     /// Return the position of the next table that goes into an owned list,
@@ -1576,29 +1587,59 @@ impl Table {
         atoms: &AtomTable,
         owner: ProcessId,
         count: usize,
-        units: usize,
+        reds: usize,
     ) -> (bool, usize) {
+        let mut clearing = self.clear.take().unwrap_or(Clearing {
+            owner,
+            count,
+            bucket: 0,
+            free: None,
+        });
         if !self.is_fixed() {
             // The last unfix ended the fixation, so the continuation frees
             // the table as `db_delete_all_objects_hash` does without a
-            // fixation (`erl_db_hash.c:4017-4037`).
-            let charge = self.delete_all_reductions();
+            // fixation (`erl_db_hash.c:4017-4037`). The free stops after the
+            // segment that uses the last reduction
+            // (`db_free_table_continue_hash`, `erl_db_hash.c:3140-3149`).
+            if clearing.free.is_none() {
+                clearing.free = Some(if self.table_type == TableType::OrderedSet {
+                    1
+                } else {
+                    segment(self.segment_slots() - 1) + 1
+                });
+            }
+            let mut charge = 0;
+            let mut freed = false;
+            while clearing.free.is_some() {
+                if freed && charge >= reds {
+                    break;
+                }
+                let remaining = clearing
+                    .free
+                    .take()
+                    .expect("the clear has a segment to free");
+                let index = remaining - 1;
+                charge += self.segment_free_cost(index);
+                clearing.free = (index > 0).then_some(index);
+                freed = true;
+            }
+            if clearing.free.is_some() {
+                self.clear = Some(clearing);
+                return (false, charge);
+            }
             self.drop_retained();
             self.reset_cleared();
             self.clear = None;
             return (true, charge);
         }
-        let mut clearing = self.clear.take().unwrap_or(Clearing {
-            owner,
-            count,
-            bucket: 0,
-        });
         if clearing.bucket == 0 {
             self.fixdels += 1;
             self.writes += 1;
         }
         let start = clearing.bucket;
-        let limit = clearing.bucket.saturating_add(units.max(1));
+        let limit = clearing
+            .bucket
+            .saturating_add(reds.saturating_mul(8).max(1));
         while clearing.bucket < self.buckets && clearing.bucket < limit {
             let bucket = clearing.bucket;
             self.mark_bucket(atoms, bucket);
@@ -1617,6 +1658,28 @@ impl Table {
             processed
         };
         (done, counted.div_ceil(8))
+    }
+
+    /// Return the reductions of the free of the segment `index`, as
+    /// `db_free_table_continue_hash` charges them (`erl_db_hash.c:3141`):
+    /// 32 for the segment and one for each object in it.
+    fn segment_free_cost(&self, index: usize) -> usize {
+        let first = match index {
+            0 => 0,
+            later => FIRST_SEGMENT_SLOTS + (later - 1) * SEGMENT_SLOTS,
+        };
+        let last = (FIRST_SEGMENT_SLOTS + index * SEGMENT_SLOTS).min(self.buckets);
+        let mut objects = 0;
+        for bucket in first..last {
+            for node in self.chain_keys(bucket) {
+                let mut slot = node;
+                while slot != EMPTY {
+                    objects += 1;
+                    slot = self.older[slot];
+                }
+            }
+        }
+        SEGMENT_REDUCTIONS as usize + objects
     }
 
     /// Remove all objects of the table, as `db_delete_all_objects_hash`

@@ -1040,10 +1040,13 @@ fn frees_a_clear_after_the_last_unfix() {
     }
     table.fix(ProcessId(0));
     table.fix(ProcessId(1));
-    assert_eq!(table.step_clear(&atoms, ProcessId(0), 300, 8), (false, 1));
+    assert_eq!(table.step_clear(&atoms, ProcessId(0), 300, 1), (false, 1));
     table.unfix_all(ProcessId(0));
     table.unfix_all(ProcessId(1));
     assert!(table.clearing());
+    let (done, charge) = table.step_clear(&atoms, ProcessId(0), 300, 0);
+    assert!(!done);
+    assert!(charge >= 32);
     let (done, charge) = table.step_clear(&atoms, ProcessId(0), 300, usize::MAX);
     assert!(done);
     assert!(charge > 0);
@@ -1051,6 +1054,29 @@ fn frees_a_clear_after_the_last_unfix() {
     assert_eq!(table.object_count(), 0);
     assert_eq!(table.deleted_objects, 0);
     assert!(table.next_key(&atoms, &Term::Integer(0)).is_none());
+}
+
+#[test]
+fn charges_the_delete_records_of_an_explicit_delete() {
+    // The free of a deleted table charges one reduction for each delete
+    // record (`db_free_table_continue_hash`, `erl_db_hash.c:3122-3137`).
+    let atoms = test_atom_table();
+    let mut tables = EtsTables::default();
+    tables.create(
+        Reference(0),
+        None,
+        Table::new(ProcessId(1), Access::Public, 1, TableType::Set),
+    );
+    tables
+        .table_by_id(Reference(0))
+        .unwrap()
+        .insert(&atoms, vec![Term::Integer(1)]);
+    tables.fix_table(Reference(0), ProcessId(2));
+    tables
+        .table_by_id(Reference(0))
+        .unwrap()
+        .delete(&atoms, &Term::Integer(1));
+    assert_eq!(tables.delete_table(Reference(0), ProcessId(1)), 2);
 }
 
 #[test]
@@ -1103,13 +1129,13 @@ fn marks_the_buckets_of_a_fixed_clear_in_turns() {
     }
     assert_eq!(table.buckets, 300);
     table.fix(ProcessId(0));
-    assert_eq!(table.step_clear(&atoms, ProcessId(0), 300, 8), (false, 1));
+    assert_eq!(table.step_clear(&atoms, ProcessId(0), 300, 8), (false, 8));
     assert!(table.clearing());
     assert_eq!(table.fixdels, 1);
     assert_eq!(table.step_clear(&atoms, ProcessId(0), 300, 0), (false, 1));
     assert_eq!(
         table.step_clear(&atoms, ProcessId(0), 300, usize::MAX),
-        (true, 37)
+        (true, 30)
     );
     assert!(!table.clearing());
     assert_eq!(table.object_count(), 0);
