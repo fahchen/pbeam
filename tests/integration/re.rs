@@ -380,3 +380,323 @@ fn raises_badarg_for_a_unicode_pattern_that_is_not_chardata() {
         "badarg\n"
     );
 }
+
+/// Return `{match, Elements}`, as `build_exec_return`
+/// (`erl_bif_re.c:1047-1256`) makes a match.
+fn matched(program: &BeamProgram, elements: Vec<Term>) -> Term {
+    Term::tuple(vec![Term::Atom(program.atom("match").unwrap()), Term::list_from(elements)])
+}
+
+/// Return the offset pair `{From, Length}` of one capture group.
+fn pair(from: i64, length: i64) -> Term {
+    Term::tuple(vec![Term::Integer(from), Term::Integer(length)])
+}
+
+/// Return a binary of `bytes`.
+fn bin(bytes: &[u8]) -> Term {
+    Term::binary(bytes.to_vec())
+}
+
+/// Return the list of the character codes of `bytes`.
+fn codes(bytes: &[u8]) -> Term {
+    Term::list_from(
+        bytes
+            .iter()
+            .map(|&byte| Term::Integer(byte.into()))
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// Return the atom `nomatch`.
+fn nomatch(program: &BeamProgram) -> Term {
+    Term::Atom(program.atom("nomatch").unwrap())
+}
+
+/// Return `{error, Reason}`.
+fn error_term(program: &BeamProgram, reason: &str) -> Term {
+    Term::tuple(vec![Term::Atom(program.atom("error").unwrap()), Term::Atom(program.atom(reason).unwrap())])
+}
+
+#[test]
+fn runs_re_run_2_as_pinned_erts() {
+    // `re:run(Subject, RE)` compiles the pattern and matches it with the
+    // default options: the capture `all` of the type `index`, no offset,
+    // and no limit (re_run, erl_bif_re.c:1485-1803).
+    let program = program();
+    assert_eq!(
+        program.execute("re_probe", "run2", &[]).unwrap().term,
+        Term::list_from(vec![
+            matched(&program, vec![pair(1, 1)]),
+            matched(&program, vec![pair(1, 1)]),
+            nomatch(&program),
+            matched(&program, vec![pair(0, 0)]),
+            matched(&program, vec![pair(2, 1)]),
+        ])
+    );
+    assert_eq!(
+        reference("run2"),
+        "[{match,[{1,1}]},{match,[{1,1}]},nomatch,{match,[{0,0}]},{match,[{2,1}]}]\n"
+    );
+}
+
+#[test]
+fn runs_re_run_3_with_the_option_set_as_pinned_erts() {
+    // The options of the Plug serve path and the other simple options, on a
+    // binary or a list subject and pattern: each capture value and type,
+    // `global`, `{offset, N}`, the limits, and the compile flags
+    // (re_run, erl_bif_re.c:1513-1716).
+    let program = program();
+    let expected = Term::list_from(vec![
+            matched(&program, vec![pair(1, 1)]),
+            nomatch(&program),
+            nomatch(&program),
+            nomatch(&program),
+            nomatch(&program),
+            matched(&program, vec![codes(b"b")]),
+            matched(&program, vec![bin(b"b"), bin(b"b")]),
+            matched(&program, vec![pair(0, 3)]),
+            nomatch(&program),
+            matched(&program, vec![pair(0, 3)]),
+            matched(&program, vec![pair(0, 3)]),
+            matched(&program, vec![pair(0, 1)]),
+            matched(&program, vec![pair(0, 2)]),
+            matched(&program, vec![pair(3, 1)]),
+            matched(&program, vec![pair(1, 1)]),
+            matched(&program, vec![pair(1, 1)]),
+            matched(&program, vec![pair(1, 1)]),
+            matched(&program, vec![bin(b"b")]),
+            matched(&program, vec![pair(1, 2)]),
+            matched(&program, vec![pair(1, 2)]),
+            matched(&program, vec![bin(b"b"), bin(b"b")]),
+            matched(&program, vec![codes(b"b"), codes(b"b")]),
+            Term::Atom(program.atom("match").unwrap()),
+            matched(&program, vec![pair(1, 1), pair(1, 1)]),
+            nomatch(&program),
+            nomatch(&program),
+            nomatch(&program),
+            error_term(&program, "match_limit"),
+            nomatch(&program),
+            matched(&program, vec![pair(0, 1), pair(1, 1)]),
+            matched(&program, vec![pair(1, 1), pair(-1, 0)]),
+            matched(&program, vec![pair(0, 2)]),
+            Term::Atom(program.atom("match").unwrap()),
+            Term::Atom(program.atom("match").unwrap()),
+            matched(&program, vec![
+                Term::list_from(vec![pair(1, 1), pair(1, 1)]),
+                Term::list_from(vec![pair(4, 1), pair(4, 1)]),
+            ]),
+            matched(&program, vec![bin(b"b")]),
+            matched(&program, vec![pair(1, 1)]),
+            matched(&program, vec![pair(1, 1), pair(1, 1)]),
+            matched(&program, vec![pair(1, 1), pair(1, 1)]),
+        ]);
+    let result = program.execute("re_probe", "run", &[]).unwrap().term;
+    let result = result.proper_list().unwrap().collect::<Vec<_>>();
+    let expected = expected.proper_list().unwrap().collect::<Vec<_>>();
+    assert_eq!(result.len(), expected.len());
+    for (index, (result, expected)) in result.iter().zip(&expected).enumerate() {
+        assert_eq!(result, expected, "case {index}");
+    }
+    assert_eq!(
+        reference("run"),
+        "[{match,[{1,1}]},nomatch,nomatch,nomatch,nomatch,{match,[[98]]},\
+         {match,[<<98>>,<<98>>]},{match,[{0,3}]},nomatch,{match,[{0,3}]},\
+         {match,[{0,3}]},{match,[{0,1}]},{match,[{0,2}]},{match,[{3,1}]},\
+         {match,[{1,1}]},{match,[{1,1}]},{match,[{1,1}]},{match,[<<98>>]},\
+         {match,[{1,2}]},{match,[{1,2}]},{match,[<<98>>,<<98>>]},\
+         {match,[[98],[98]]},match,{match,[{1,1},{1,1}]},nomatch,nomatch,\
+         nomatch,{error,match_limit},nomatch,{match,[{0,1},{1,1}]},\
+         {match,[{1,1},{-1,0}]},{match,[{0,2}]},match,match,\
+         {match,[[{1,1},{1,1}],[{4,1},{4,1}]]},{match,[<<98>>]},\
+         {match,[{1,1}]},{match,[{1,1},{1,1}]},{match,[{1,1},{1,1}]}]\n"
+    );
+}
+
+#[test]
+fn returns_the_capture_shapes_of_a_match_as_pinned_erts() {
+    // Each capture value with each type, on `(a)(b)?` against `abc`: group
+    // 2 does not take part in the match, so its offset pair is `{-1, 0}`,
+    // its list is `[]`, and its binary is `<<>>`
+    // (build_exec_return, erl_bif_re.c:1047-1256).
+    let program = program();
+    assert_eq!(
+        program.execute("re_probe", "captures", &[]).unwrap().term,
+        Term::list_from(vec![
+            matched(&program, vec![pair(0, 2), pair(0, 1), pair(1, 1)]),
+            matched(&program, vec![codes(b"ab"), codes(b"a"), codes(b"b")]),
+            matched(&program, vec![bin(b"ab"), bin(b"a"), bin(b"b")]),
+            matched(&program, vec![pair(0, 1), pair(1, 1)]),
+            matched(&program, vec![codes(b"a"), codes(b"b")]),
+            matched(&program, vec![bin(b"a"), bin(b"b")]),
+            matched(&program, vec![pair(0, 2)]),
+            matched(&program, vec![codes(b"ab")]),
+            matched(&program, vec![bin(b"ab")]),
+            Term::Atom(program.atom("match").unwrap()),
+            Term::Atom(program.atom("match").unwrap()),
+            Term::Atom(program.atom("match").unwrap()),
+            matched(&program, vec![pair(0, 2), pair(0, 1), pair(1, 1), pair(-1, 0)]),
+            matched(&program, vec![codes(b"ab"), codes(b"a"), codes(b"b"), Term::nil()]),
+            matched(&program, vec![bin(b"ab"), bin(b"a"), bin(b"b"), bin(b"")]),
+        ])
+    );
+    assert_eq!(
+        reference("captures"),
+        "[{match,[{0,2},{0,1},{1,1}]},{match,[[97,98],[97],[98]]},\
+         {match,[<<97,98>>,<<97>>,<<98>>]},{match,[{0,1},{1,1}]},\
+         {match,[[97],[98]]},{match,[<<97>>,<<98>>]},{match,[{0,2}]},\
+         {match,[[97,98]]},{match,[<<97,98>>]},match,match,match,\
+         {match,[{0,2},{0,1},{1,1},{-1,0}]},{match,[[97,98],[97],[98],[]]},\
+         {match,[<<97,98>>,<<97>>,<<98>>,<<>>]}]\n"
+    );
+}
+
+#[test]
+fn runs_a_global_match_as_pinned_erts() {
+    // `global` traps to `re:grun/3` (`erl_bif_re.c:1557-1572`,
+    // `1599-1605`), which runs `re:run/3` again for each match
+    // (`re.erl:1796-1899`). A match of a zero length, an offset, a missing
+    // match, and the capture forms of the inner calls are covered.
+    let program = program();
+    assert_eq!(
+        program.execute("re_probe", "globals", &[]).unwrap().term,
+        Term::list_from(vec![
+            matched(&program, vec![
+                Term::list_from(vec![pair(1, 1)]),
+                Term::list_from(vec![pair(4, 1)]),
+            ]),
+            matched(&program, vec![
+                Term::list_from(vec![pair(0, 3)]),
+                Term::list_from(vec![pair(3, 0)]),
+            ]),
+            matched(&program, vec![Term::list_from(vec![pair(2, 1)])]),
+            nomatch(&program),
+            matched(&program, vec![
+                Term::list_from(vec![bin(b"b")]),
+                Term::list_from(vec![bin(b"b")]),
+            ]),
+            Term::Atom(program.atom("match").unwrap()),
+            matched(&program, vec![
+                Term::list_from(vec![bin(b"b")]),
+                Term::list_from(vec![bin(b"b")]),
+            ]),
+        ])
+    );
+    assert_eq!(
+        reference("globals"),
+        "[{match,[[{1,1}],[{4,1}]]},{match,[[{0,3}],[{3,0}]]},{match,[[{2,1}]]}\
+         ,nomatch,{match,[[<<98>>],[<<98>>]]},match,{match,[[<<98>>],[<<98>>]]}]\n"
+    );
+}
+
+#[test]
+fn raises_badarg_for_bad_run_options_and_subjects_as_pinned_erts() {
+    // The option list, the capture specification, the offset and the
+    // limits (erl_bif_re.c:1501-1518, 1646-1701), the subject
+    // (erl_bif_re.c:1691-1701), a UTF-8 error of the subject or the pattern
+    // (erl_bif_re.c:1756-1786), and a precompiled pattern
+    // (erl_bif_re.c:1581-1632) give `badarg` where ERTS gives it.
+    let program = program();
+    let labels = [
+        "options_type",
+        "unknown_option",
+        "option_not_atom",
+        "unknown_option_after_global",
+        "offset_past_subject",
+        "offset_negative",
+        "offset_float",
+        "offset_too_large",
+        "match_limit_negative",
+        "capture_type_unknown",
+        "capture_none_type",
+        "capture_values_tuple",
+        "capture_index_float",
+        "capture_index_negative",
+        "export",
+        "global_export",
+        "pattern_error",
+        "pattern_not_text",
+        "subject_not_iodata",
+        "subject_negative_byte",
+        "subject_tuple",
+        "subject_not_utf8",
+        "pattern_not_utf8",
+        "compile_option_with_pattern",
+        "newline_mismatch",
+        "bsr_mismatch",
+        "foreign_pattern",
+        "pattern_tag",
+        "pattern_count_not_small",
+    ];
+    let expected: Vec<Term> = labels
+        .iter()
+        .map(|&label| {
+            Term::tuple(vec![
+                Term::Atom(program.atom(label).unwrap()),
+                error_term(&program, "badarg"),
+            ])
+        })
+        .collect();
+    assert_eq!(
+        program.execute("re_probe", "run_errors", &[]).unwrap().term,
+        Term::list_from(expected)
+    );
+    let texts: Vec<String> = labels
+        .iter()
+        .map(|&label| format!("{{{label},{{error,badarg}}}}"))
+        .collect();
+    assert_eq!(
+        reference("run_errors"),
+        format!("[{}]\n", texts.join(","))
+    );
+}
+
+#[test]
+fn charges_the_reductions_of_a_match_as_pinned_erts() {
+    // `re_run` charges one reduction for each 16 loops of the match
+    // (`reds_consumed`, erl_bif_re.c:1718, 1796) and one turn of
+    // reductions for each 4000 (`CONTEXT_REDS`, `erl_vm.h:53`,
+    // `erl_bif_re.c:1639`). The probe runs each call alone on `erl +S 1`.
+    let program = program();
+    assert_eq!(
+        program.execute("re_probe", "reductions", &[]).unwrap().term,
+        Term::list_from(vec![
+            Term::tuple(vec![Term::Integer(2), matched(&program, vec![pair(1, 1)])]),
+            Term::tuple(vec![Term::Integer(2), nomatch(&program)]),
+            Term::tuple(vec![
+                Term::Integer(2),
+                matched(&program, vec![bin(b"ab"), bin(b"a"), bin(b"b")]),
+            ]),
+            Term::tuple(vec![Term::Integer(2), matched(&program, vec![pair(1, 1)])]),
+            Term::tuple(vec![Term::Integer(9), nomatch(&program)]),
+            Term::tuple(vec![Term::Integer(80), nomatch(&program)]),
+        ])
+    );
+    assert_eq!(
+        reference("reductions"),
+        "[{2,{match,[{1,1}]}},{2,nomatch},{2,{match,[<<97,98>>,<<97>>,<<98>>]}},\
+         {2,{match,[{1,1}]}},{9,nomatch},{80,nomatch}]\n"
+    );
+}
+
+#[test]
+fn stops_on_a_capture_group_name_that_pbeam_does_not_resolve() {
+    // ERTS turns a group name into its number with the name table of the
+    // code (`build_one_capture`, erl_bif_re.c:1269-1307). PBeam does not
+    // keep that table yet, and a name that it ignored would give a wrong
+    // capture, so the call stops (row "Regular expressions" in
+    // `docs/erts-differences.md`).
+    let program = program();
+    for case in ["names", "name_index"] {
+        let error = program
+            .execute(
+                "re_probe",
+                "unsupported",
+                &[program.host_term(Term::Atom(program.atom(case).unwrap()))],
+            )
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("unsupported capture group name"),
+            "{case}: {error}"
+        );
+    }
+}

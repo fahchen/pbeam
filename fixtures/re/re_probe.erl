@@ -1,6 +1,8 @@
 -module(re_probe).
 -export([main/0, options/0, errors/0, badarg/0, iodata/0, unicode_list/0,
-         export/0, unsupported/1, id/1]).
+         export/0, unsupported/1, id/1,
+         run2/0, run/0, captures/0, globals/0, run_errors/0, reductions/0,
+         spot/0]).
 
 %% prim_tty:init/1 compiles the ANSI regular expression (prim_tty.erl:238).
 %% The fifth element is a reference (erl_bif_re.c:607-609).
@@ -88,7 +90,162 @@ export() ->
     ++ [re:compile(<<"(">>, [export])].
 
 %% Calls that ERTS runs and PBeam does not support yet.
-unsupported(chardata) -> re:compile(foo, [unicode]).
+unsupported(chardata) -> re:compile(foo, [unicode]);
+unsupported(names) ->
+    re:run(<<"abc">>, <<"(?<x>a)(?<y>b)?">>, [{capture, all_names}]);
+unsupported(name_index) ->
+    re:run(<<"abc">>, <<"(?<x>a)(?<y>b)?">>, [{capture, [x], index}]).
+
+%% re:run/2: the option list is []. The subject and the pattern are a
+%% binary or a list (re_run, erl_bif_re.c:1485-1803).
+run2() ->
+    [re:run(Subject, Pattern)
+     || {Subject, Pattern} <-
+            [{<<"abc">>, <<"b">>}, {"abc", "b"}, {<<"abc">>, <<"z">>},
+             {<<>>, <<>>}, {[<<"a">>, "bc"], <<"c">>}]].
+
+%% re:run/3 with the options that the Plug serve path uses.
+run() ->
+    {ok, Compiled} = re:compile(<<"(b)">>, []),
+    {ok, Caseless} = re:compile(<<"b">>, [caseless]),
+    [re:run(Subject, RE, Options)
+     || {Subject, RE, Options} <- run_cases()] ++
+        [re:run(<<"abcabc">>, Compiled, [global]),
+         re:run(<<"abcabc">>, Compiled, [{capture, [1], binary}]),
+         re:run(<<"abc">>, Caseless, []),
+         re:run(<<"abc">>, Compiled, [{newline, lf}]),
+         re:run(<<"abc">>, Compiled, [bsr_unicode])].
+
+run_cases() ->
+    [{<<"abc">>, <<"b">>, []},
+     {<<"abc">>, <<"z">>, []},
+     {<<"abc">>, <<"(a)(b)">>, [{offset, 1}]},
+     {<<"abc">>, <<"b">>, [{offset, 2}]},
+     {<<"abc">>, <<"b">>, [{offset, 3}]},
+     {"abc", <<"b">>, [{capture, all, list}]},
+     {[$a, <<"b">>, "c"], <<"(b)">>, [{capture, all, binary}]},
+     {<<"a\nb">>, <<"a.b">>, [dotall]},
+     {<<"ab">>, <<"^b">>, [multiline]},
+     {<<"abc">>, <<"a b c">>, [extended]},
+     {<<"ABC">>, <<"abc">>, [caseless]},
+     {<<"abc">>, <<"a+?">>, [ungreedy]},
+     {<<"abc">>, <<"(a)(b)">>, [no_auto_capture]},
+     {<<"a\r\nb">>, <<"^b">>, [{newline, anycrlf}, multiline]},
+     {<<"abc">>, <<"b">>, [bsr_unicode]},
+     {<<"abc">>, <<"b">>, [{match_limit, 1000}]},
+     {<<"abc">>, <<"b">>, [{match_limit_recursion, 1000}]},
+     {<<"abcabc">>, <<"b">>, [{capture, all, binary}]},
+     {<<"\x{68}\x{e9}llo"/utf8>>, <<"\x{e9}"/utf8>>, [unicode]},
+     {<<"\x{68}\x{e9}llo"/utf8>>, "\x{e9}", [unicode]},
+     {<<"abc">>, <<"(b)">>, [unicode, {capture, all, binary}]},
+     {<<"abc">>, <<"(b)">>, [unicode, {capture, all, list}]},
+     {<<"abc">>, <<"(b)">>, [{capture, all_names}]},
+     {<<"abc">>, <<"(b)">>, [notbol]},
+     {<<"abc">>, <<"c$">>, [noteol]},
+     {<<"abc">>, <<"b">>, [notempty, anchored, no_start_optimize]},
+     {<<"abc">>, <<"z">>, [report_errors]},
+     {<<"a">>, <<"a">>, [{match_limit, 1}, report_errors]},
+     {<<"a">>, <<"a">>, [{match_limit, 1}]},
+     {<<"abc">>, <<"(a)(b)?">>, [{capture, all_but_first}]},
+     {<<"abc">>, <<"(a)(b)?">>, [{capture, [2, 5], index}]},
+     {<<"abc">>, <<"(a)(b)?">>, [{capture, first}]},
+     {<<"abc">>, <<"(a)(b)?">>, [{capture, none}]},
+     {<<"abc">>, <<"(a)(b)?">>, [{capture, none, list}]}].
+
+%% Each capture value and type, on a match with a group that did not take
+%% part in the match (build_exec_return, erl_bif_re.c:1047-1256).
+captures() ->
+    [re:run(<<"abc">>, <<"(a)(b)?">>, [{capture, Values, Type}])
+     || Values <- [all, all_but_first, first, none, [0, 1, 2, 7]],
+        Type <- [index, list, binary]].
+
+%% A global run with several matches, with an empty match, and with an
+%% offset (re.erl:1796-1899).
+globals() ->
+    [re:run(<<"abcabc">>, <<"b">>, [global]),
+     re:run(<<"aaa">>, <<"a*">>, [global]),
+     re:run(<<"aba">>, <<"a">>, [global, {offset, 1}]),
+     re:run(<<"abc">>, <<"z">>, [global]),
+     re:run(<<"abcabc">>, <<"b">>, [global, {capture, all, binary}]),
+     re:run(<<"abcabc">>, <<"b">>, [global, {capture, none}]),
+     re:run(<<"abcabc">>, <<"b">>, [{capture, all, binary}, global])].
+
+%% The badarg of re:run/2,3 (erl_bif_re.c:1501-1518, 1581-1632, 1646-1701,
+%% 1756-1786). Each pair holds a name and the caught result.
+run_errors() ->
+    {ok, Compiled} = re:compile(<<"b">>, [caseless]),
+    [{Label, catch_error(fun() -> re:run(Subject, RE, Options) end)}
+     || {Label, Subject, RE, Options} <-
+            [{options_type, <<"abc">>, <<"b">>, foo},
+             {unknown_option, <<"abc">>, <<"b">>, [bogus]},
+             {option_not_atom, <<"abc">>, <<"b">>, [1]},
+             {unknown_option_after_global, <<"abc">>, <<"b">>, [global, bogus]},
+             {offset_past_subject, <<"abc">>, <<"b">>, [{offset, 5}]},
+             {offset_negative, <<"abc">>, <<"b">>, [{offset, ?MODULE:id(-1)}]},
+             {offset_float, <<"abc">>, <<"b">>, [{offset, 1.5}]},
+             {offset_too_large, <<"abc">>, <<"b">>, [{offset, 2147483648}]},
+             {match_limit_negative, <<"abc">>, <<"b">>,
+              [{match_limit, ?MODULE:id(-1)}]},
+             {capture_type_unknown, <<"abc">>, <<"b">>, [{capture, [1], bogus}]},
+             {capture_none_type, <<"abc">>, <<"b">>, [{capture, [1], none}]},
+             {capture_values_tuple, <<"abc">>, <<"b">>, [{capture, {a}}]},
+             {capture_index_float, <<"abc">>, <<"b">>,
+              [{capture, [1.5], index}]},
+             {capture_index_negative, <<"abc">>, <<"b">>,
+              [{capture, [?MODULE:id(-1)], index}]},
+             {export, <<"abc">>, <<"b">>, [export]},
+             {global_export, <<"abc">>, <<"b">>, [global, export]},
+             {pattern_error, <<"abc">>, <<"a(b">>, []},
+             {pattern_not_text, <<"abc">>, foo, []},
+             {subject_not_iodata, foo, <<"b">>, []},
+             {subject_negative_byte, [?MODULE:id(-1)], <<"b">>, []},
+             {subject_tuple, {a}, <<"b">>, []},
+             {subject_not_utf8, <<255>>, <<"a">>, [unicode]},
+             {pattern_not_utf8, <<"abc">>, <<255>>, [unicode]},
+             {compile_option_with_pattern, <<"abc">>, Compiled, [caseless]},
+             {newline_mismatch, <<"abc">>, Compiled, [{newline, crlf}]},
+             {bsr_mismatch, <<"abc">>, Compiled, [bsr_anycrlf]},
+             {foreign_pattern, <<"abc">>, {re_pattern, 1, 0, 0, make_ref()}, []},
+             {pattern_tag, <<"abc">>, {pattern, 0, 0, 0, make_ref()}, []},
+             {pattern_count_not_small, <<"abc">>,
+              {re_pattern, 1 bsl 60, 0, 0, ?MODULE:id(make_ref())}, []}]].
+
+%% One case of each shape of a match, with the value of each one.
+spot() ->
+    {ok, Compiled} = re:compile(<<"(b)">>, []),
+    [re:run(<<"abc">>, <<"b">>, []),
+     re:run(<<"abc">>, <<"(a)(b)">>, [{capture, all}]),
+     re:run(<<"abc">>, <<"(a)(b)?">>, [{capture, all_but_first}]),
+     re:run(<<"abc">>, <<"(a)(b)?">>, [{capture, first}]),
+     re:run(<<"abc">>, <<"(a)(b)?">>, [{capture, [1], list}]),
+     re:run(<<"abc">>, <<"(a)(b)?">>, [{capture, all, binary}]),
+     re:run(<<"abc">>, <<"(a)(b)?">>, [{capture, none}]),
+     re:run(<<"abc">>, <<"z">>, []),
+     re:run(<<"abc">>, <<"b">>, [{offset, 2}]),
+     re:run(<<"abc">>, <<"b">>, [{offset, 3}]),
+     re:run(<<"abc">>, <<"(b)">>, [{capture, all_names}]),
+     re:run(<<"a">>, <<"a">>, [{match_limit, 1}, report_errors]),
+     re:run(<<"abc">>, Compiled, [{capture, [1], binary}]),
+     re:run(<<"abc">>, <<"(a)(b)?">>, [{capture, [4], index}])].
+
+%% The reductions that a re:run call charges, as erl_bif_re.c:1718 and 1796
+%% read them. erl +S 1 runs the probe on one scheduler.
+reductions() ->
+    {ok, Compiled} = re:compile(<<"b">>, []),
+    [charge(Subject, RE, Options)
+     || {Subject, RE, Options} <-
+            [{<<"abc">>, <<"b">>, []},
+             {<<"abc">>, <<"z">>, []},
+             {<<"abc">>, <<"(a)(b)">>, [{capture, all, binary}]},
+             {<<"abc">>, Compiled, []},
+             {dup(1000, $a), <<"b">>, []},
+             {dup(10000, $a), <<"a*b">>, []}]].
+
+charge(Subject, RE, Options) ->
+    {reductions, Before} = process_info(self(), reductions),
+    Result = re:run(Subject, RE, Options),
+    {reductions, After} = process_info(self(), reductions),
+    {After - Before, Result}.
 
 info({ok, {re_pattern, Count, Unicode, Crlf, Ref}}) when is_reference(Ref) ->
     {Count, Unicode, Crlf}.
@@ -109,6 +266,10 @@ repeat(N, Part, Size, Block, Acc) when Size =< N ->
 repeat(N, Part, _, _, Acc) -> repeat(N, Part, 1, Part, Acc).
 
 id(X) -> X.
+
+%% A list of N copies of C.
+dup(0, _) -> [];
+dup(N, C) -> [C | dup(N - 1, C)].
 
 catch_error(Fun) ->
     try Fun() catch error:Reason -> {error, Reason} end.
