@@ -290,10 +290,10 @@ pub(super) fn compile(
     options: &Term,
 ) -> Result<BifResult, BeamError> {
     let Some(parsed) = parse_options(&context.scheduler.atoms, options) else {
-        return Ok(BifResult::badarg());
+        return Ok(BifResult::badopt());
     };
     if parsed.flags & FLAG_UNIQUE_EXEC_OPT != 0 {
-        return Ok(BifResult::badarg());
+        return Ok(BifResult::badopt());
     }
     let unicode = parsed.flags & FLAG_UNICODE != 0;
     if unicode && !matches!(pattern, Term::Binary(_)) {
@@ -420,10 +420,10 @@ fn import_fallback(
         return Ok(BifResult::badarg());
     };
     let Some(parsed) = parse_options(&context.scheduler.atoms, options) else {
-        return Ok(BifResult::badarg());
+        return Ok(BifResult::badopt());
     };
     if parsed.flags & FLAG_UNIQUE_EXEC_OPT != 0 {
-        return Ok(BifResult::badarg());
+        return Ok(BifResult::badopt());
     }
     let unicode = parsed.flags & FLAG_UNICODE != 0;
     let code = match pcre2::compile(source, parsed.compile, parsed.newline, parsed.bsr) {

@@ -429,29 +429,26 @@ fn imports_exported_patterns_as_pinned_erts() {
 
 #[test]
 fn runs_an_imported_pattern_as_pinned_erts() {
-    // Each import in `imported/0` runs through `re:run/3`, so the decoded
-    // code and the fallback code are the compiled patterns of the export.
+    // Each import of `imported/0` runs through `re:run/3`, so the decoded
+    // code and each fallback code are the compiled patterns of the export.
     let program = program();
     let ab = codes(b"ab");
     let b = codes(b"b");
-    let expected = Term::list_from(vec![
-        matched(&program, vec![ab.clone(), b.clone()]),
-        nomatch(&program),
-        matched(&program, vec![ab.clone(), b.clone()]),
-        matched(&program, vec![ab.clone(), b.clone()]),
-        matched(&program, vec![ab.clone(), b.clone()]),
-        matched(&program, vec![ab, b]),
-    ]);
+    let mut expected = vec![matched(&program, vec![ab, b]); 12];
+    expected[1] = nomatch(&program);
     assert_eq!(
         program
             .execute("re_probe", "imported_run", &[])
             .unwrap()
             .term,
-        expected
+        Term::list_from(expected)
     );
     assert_eq!(
         reference("imported_run"),
         "[{match,[[97,98],[98]]},nomatch,{match,[[97,98],[98]]},\
+         {match,[[97,98],[98]]},{match,[[97,98],[98]]},\
+         {match,[[97,98],[98]]},{match,[[97,98],[98]]},\
+         {match,[[97,98],[98]]},{match,[[97,98],[98]]},\
          {match,[[97,98],[98]]},{match,[[97,98],[98]]},\
          {match,[[97,98],[98]]}]\n"
     );
@@ -476,6 +473,25 @@ fn raises_badarg_for_a_term_that_is_not_an_export() {
     );
     assert_eq!(
         reference_of("try re_probe:imported_badarg() catch error:R -> R end"),
+        "badarg\n"
+    );
+}
+
+#[test]
+fn raises_badarg_with_the_badopt_cause_for_a_fallback_option() {
+    // The fallback of `re:import/1` compiles the source with the options
+    // of the export. An execution option raises `badarg` with the
+    // `error_info` cause `badopt` (`erl_bif_re.c:908-916`), as
+    // `re:compile/2` does.
+    let program = program();
+    let error = program
+        .execute("re_probe", "imported_badopt", &[])
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("cause=>badopt"), "{error}");
+    assert!(error.contains("module=>erl_stdlib_errors"), "{error}");
+    assert_eq!(
+        reference_of("try re_probe:imported_badopt() catch error:R -> R end"),
         "badarg\n"
     );
 }

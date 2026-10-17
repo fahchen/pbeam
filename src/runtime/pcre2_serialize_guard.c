@@ -2,7 +2,22 @@
    these fields without a length, so pbeam checks the encoded binary with
    the same layout before the call. */
 
+#include <string.h>
+
 #include "pcre2_internal.h"
+
+/* The checks of pcre2_serialize_decode on the first code block
+   (pcre2_serialize.c:210-217). The call frees the code block but not the
+   character tables when one fails, so pbeam checks them before the call. */
+int pbeam_pcre2_serialized_code_is_valid(const uint8_t *bytes)
+{
+  pcre2_real_code code;
+
+  memcpy(&code, bytes, sizeof code);
+  return code.magic_number == MAGIC_NUMBER
+      && code.name_entry_size <= MAX_NAME_SIZE + IMM2_SIZE + 1
+      && code.name_count <= MAX_NAME_COUNT;
+}
 
 size_t pbeam_pcre2_serialized_header_size(void)
 {

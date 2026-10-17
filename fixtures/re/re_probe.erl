@@ -1,6 +1,7 @@
 -module(re_probe).
 -export([main/0, options/0, errors/0, badarg/0, iodata/0, unicode_list/0,
          export/0, imported/0, imported_run/0, imported_badarg/0,
+         imported_badopt/0,
          unsupported/1, id/1,
          run2/0, run/0, captures/0, globals/0, run_errors/0, reductions/0,
          spot/0, internal_run_first/0, yield/0, yield_charge/0, recursion/0,
@@ -113,10 +114,17 @@ import_exports() ->
 
 imported_run() ->
     [re:run(<<"zab">>, re:import(Export), [{capture, all, list}])
-     || Export <- import_exports()].
+     || Export <- import_exports() ++ import_fallbacks()].
 
 imported_badarg() ->
     re:import(foo).
+
+%% The fallback compiles the source with the options, so an execution
+%% option raises `badarg` with the `error_info` cause `badopt`
+%% (erl_bif_re.c:908-916).
+imported_badopt() ->
+    re:import({re_exported_pattern, <<"re-PCRE2", 0:32, 2, 0>>, <<"a">>,
+               [global], <<>>}).
 
 import_fallbacks() ->
     Plain = exported_pattern(<<"a(b)">>, [export]),
