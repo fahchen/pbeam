@@ -68,6 +68,41 @@ fn runs_the_global_helpers_of_re_that_the_run_loads_on_demand_as_pinned_erts() {
     );
 }
 
+#[test]
+fn switches_out_at_a_trap_to_a_module_that_the_run_did_not_load_as_pinned_erts() {
+    // A BIF trap switches out before the export stub enters the error
+    // handler (`instr_bif.cpp:525-536`, `676-701`). The custom handler loads
+    // no module, so only that switch lets the peer process send its message
+    // before the `receive` with `after 0`.
+    let erts = run(&mut erts("re_global_probe:scheduling()."));
+    assert_eq!(erts, "{handled,ran}\n");
+    assert_eq!(
+        run(&mut pbeam(
+            "re_global_probe",
+            "scheduling",
+            &[format!("{PROBE}.beam")]
+        )),
+        erts
+    );
+}
+
+#[test]
+fn ends_a_process_when_its_error_handler_has_no_undefined_function_as_pinned_erts() {
+    // The handler lookup of `undefined_function` fails, because the process
+    // error handler has no `undefined_function/3`. The fallback raises
+    // `undef`, and `undefined_function` returns the outcome of the exit.
+    let erts = run(&mut erts("re_global_probe:uncaught()."));
+    assert_eq!(erts, "undef\n");
+    assert_eq!(
+        run(&mut pbeam(
+            "re_global_probe",
+            "uncaught",
+            &[format!("{PROBE}.beam")]
+        )),
+        erts
+    );
+}
+
 /// Return the command of the probe on the pinned ERTS with the code path
 /// directory.
 ///

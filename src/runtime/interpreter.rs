@@ -3064,7 +3064,16 @@ impl BeamProgram {
                         // the entry costs one reduction of the next turn.
                         Ok(Some(Outcome::Yield))
                     }
-                    None => self.undefined_function(scheduler, module, function, arity, tail),
+                    None => {
+                        // The trap switches out before the error handler
+                        // runs, as every BIF trap does (`instr_bif.cpp:525-536`,
+                        // `676-701`). A handler frame that
+                        // `undefined_function` enters runs in the next turn.
+                        match self.undefined_function(scheduler, module, function, arity, tail)? {
+                            Some(outcome) => Ok(Some(outcome)),
+                            None => Ok(Some(Outcome::Yield)),
+                        }
+                    }
                 }
             }
             BifResult::TrapBif {

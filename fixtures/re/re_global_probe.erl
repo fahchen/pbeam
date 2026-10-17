@@ -1,5 +1,5 @@
 -module(re_global_probe).
--export([main/0]).
+-export([main/0, scheduling/0, uncaught/0, undefined_function/3]).
 
 %% The `re` module is not loaded at the first call. The `global` option and
 %% a unicode subject or pattern that needs the conversion trap `re:run/3`
@@ -49,6 +49,42 @@ charge(Fun) ->
     Result = Fun(),
     {reductions, After} = process_info(self(), reductions),
     {After - Before, Result}.
+
+%% A BIF trap switches out the process before the target runs
+%% (`instr_bif.cpp:525-536`, `676-701`). This handler loads no module, so
+%% the peer process runs at the trap switch, before the `receive` with
+%% `after 0`.
+scheduling() ->
+    process_flag(error_handler, ?MODULE),
+    Self = self(),
+    spawn_link(fun() -> Self ! {peer, ran} end),
+    Result = re:run(<<"abc">>, <<"b">>, [global]),
+    Message = receive {peer, ran} -> ran after 0 -> late end,
+    process_flag(error_handler, error_handler),
+    io:format("~w~n", [{Result, Message}]),
+    halt().
+
+undefined_function(_Module, _Function, _Arguments) ->
+    handled.
+
+%% A process error handler with no `undefined_function/3` makes the
+%% fallback raise `undef` in `undefined_function` itself, and the process
+%% that traps exits with that reason.
+uncaught() ->
+    {Pid, Ref} = spawn_monitor(fun() ->
+        process_flag(error_handler, no_such_error_handler),
+        re:run(<<"abc">>, <<"b">>, [global])
+    end),
+    Reason = receive
+        {'DOWN', Ref, process, Pid, Down} -> Down
+    after 5000 ->
+        timeout
+    end,
+    case Reason of
+        {undef, _} -> io:format("~w~n", [undef]);
+        Other -> io:format("~w~n", [Other])
+    end,
+    halt().
 
 catch_error(Fun) ->
     try Fun() catch error:Reason -> Reason end.
