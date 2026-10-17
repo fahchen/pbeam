@@ -714,9 +714,14 @@ impl EtsTables {
     /// `process`, as `free_fixations_locked` does (`erl_db.c:5304-5318`).
     /// The caller gives the processes that fixed the table, so the delete
     /// reads no other list.
-    fn forget_fixations(&mut self, id: Reference, fixers: &[ProcessId]) {
+    fn forget_fixations(&mut self, id: Reference, fixers: &[ProcessId], caller: ProcessId) {
         for process in fixers {
-            self.forget_fixation(id, *process);
+            if *process == caller {
+                self.forget_fixation(id, *process);
+            }
+            // The entry of another process stays until its exit, which
+            // charges one reduction for the cleanup of the deleted table
+            // (`erts_schedule_ets_free_fixation`, `erl_db.c:5263-5301`).
         }
     }
 
@@ -773,7 +778,7 @@ impl EtsTables {
                 // The table goes, so each fixation of it goes too
                 // (`free_fixations_locked`, `erl_db.c:5304-5318`).
                 table.fixed_by.clear();
-                self.forget_fixations(id, &fixers);
+                self.forget_fixations(id, &fixers, owner);
                 self.names.retain(|_, named| *named != id);
                 self.programs.retain(|_, (table, _)| *table != id);
                 self.freeing.insert(id, Freeing::new(table));
@@ -794,9 +799,15 @@ impl EtsTables {
                 self.fixed.remove(&owner);
                 break;
             };
-            let table = self.tables.get_mut(&id).expect("a fixed table is live");
-            reds -= i32::try_from(table.unfix_cost(owner)).unwrap_or(i32::MAX);
-            table.unfix_all(owner);
+            match self.tables.get_mut(&id) {
+                Some(table) => {
+                    reds -= i32::try_from(table.unfix_cost(owner)).unwrap_or(i32::MAX);
+                    table.unfix_all(owner);
+                }
+                // The cleanup of a fixation on a deleted table charges one
+                // reduction (`proc_cleanup_fixed_table`, `erl_db.c:4975-5015`).
+                None => reds -= 1,
+            }
             // The exit frees each fixation of the process on the table, so
             // the fixed-table list of the process drops the table too
             // (`proc_cleanup_fixed_table`, `erl_db.c:4975-5015`).
@@ -849,7 +860,7 @@ impl EtsTables {
         // `erl_db.c:3056`).
         let fixers = table.fixers();
         table.fixed_by.clear();
-        self.forget_fixations(id, &fixers);
+        self.forget_fixations(id, &fixers, caller);
         // The free of the table frees each delete record with the segments
         // (`db_free_table_continue_hash`, `erl_db_hash.c:3122-3137`).
         let charge = fixers.len();

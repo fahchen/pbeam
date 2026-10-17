@@ -1384,6 +1384,22 @@ fn charges_one_reduction_for_a_fixation_that_leaves_the_table_fixed() {
 }
 
 #[test]
+fn charges_the_cleanup_of_a_deleted_table_at_the_exit() {
+    // A process that fixed a table pays one reduction when its exit cleans
+    // the fixation of the deleted table (`proc_cleanup_fixed_table`,
+    // `erl_db.c:4975-5015`, `5263-5301`).
+    let mut tables = EtsTables::default();
+    tables.create(
+        Reference(0),
+        None,
+        Table::new(ProcessId(1), Access::Public, 1, TableType::Set),
+    );
+    tables.fix_table(Reference(0), ProcessId(2));
+    assert_eq!(tables.delete_table(Reference(0), ProcessId(1)), 1);
+    assert_eq!(tables.delete_owned(ProcessId(2), 100), Some(99));
+}
+
+#[test]
 fn deletes_a_table_that_no_process_fixed() {
     // The delete visits only the processes that fixed the table, so the
     // unrelated fixations stay (`free_fixations_locked`, `erl_db.c:5304-5318`).
