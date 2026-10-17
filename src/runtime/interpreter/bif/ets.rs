@@ -2,7 +2,7 @@
 
 use super::BifResult::Value;
 use super::*;
-use crate::runtime::ets::pattern::Pattern;
+use crate::runtime::ets::pattern::{MatchSpec, SpecError};
 use crate::runtime::ets::{Access, Busy, Operation, Table, TableType};
 use crate::term::Reference;
 
@@ -128,6 +128,31 @@ fn help_busy(context: &mut BifContext<'_>, table: &Term) -> Result<Take, BeamErr
     Ok(Take::Help)
 }
 
+/// Complete the list insert that holds `table` busy, with no turn limit, as
+/// `handle_lacking_permission` completes it before it runs the operation
+/// again (`erl_db.c:769-798`). The steps charge the reductions of their
+/// units. PBeam has one scheduler and no trap export for the other ETS
+/// calls, so the insert finishes in the turn of the caller.
+fn finish_busy(context: &mut BifContext<'_>, table: &Term) -> Result<(), BeamError> {
+    loop {
+        let atoms = &context.scheduler.atoms;
+        let (id, found) = context
+            .scheduler
+            .ets
+            .find(atoms, table)
+            .expect("the caller found the table");
+        if found.busy.is_none() {
+            return Ok(());
+        }
+        let (used, _) = step_inserting(context, &Term::Reference(id), i64::from(i32::MAX), None)?;
+        debug_assert!(used > 0, "a busy insert makes progress");
+        context
+            .scheduler
+            .current_process_mut()
+            .bump_reductions((used / ITERATIONS_PER_RED) as i32);
+    }
+}
+
 /// Run `ets:new(Name, Options)`: make a hash table that the calling process
 /// owns, and return `Name` for a named table or a new table reference for
 /// another table, as ERTS `ets_new_2` (`erl_db.c:2555-2840`) does.
@@ -195,6 +220,8 @@ pub(super) fn new(
     let mut keypos = 1;
     let mut explicit_locks = false;
     let mut heir = None;
+    let mut read_concurrency = false;
+    let mut compressed = false;
     for option in options {
         match option {
             Term::Atom(atom) => {
@@ -210,7 +237,9 @@ pub(super) fn new(
                     access = Access::Public;
                 } else if atom.is_static("private") {
                     access = Access::Private;
-                } else if atom.is_one_of(&["set", "protected", "compressed"]) {
+                } else if atom.is_static("compressed") {
+                    compressed = true;
+                } else if atom.is_static("set") || atom.is_static("protected") {
                 } else {
                     return Ok(BifResult::badarg());
                 }
@@ -230,7 +259,12 @@ pub(super) fn new(
                     ("write_concurrency", Term::Tuple(locks)) if is_lock_count(locks) => {
                         explicit_locks = true;
                     }
-                    ("read_concurrency" | "decentralized_counters", Term::Atom(value))
+                    ("read_concurrency", Term::Atom(value))
+                        if value.is_one_of(&["true", "false"]) =>
+                    {
+                        read_concurrency = value.is_static("true");
+                    }
+                    ("decentralized_counters", Term::Atom(value))
                         if value.is_one_of(&["true", "false"]) => {}
                     ("heir", Term::Atom(value)) if value.is_static("none") => {
                         heir = None;
@@ -268,11 +302,23 @@ pub(super) fn new(
         return Err(error(format!("unsupported ets:new/2 heir {heir:?}")));
     }
     let table = context.scheduler.make_ref()?;
+    let mut made = Table::new(owner, access, keypos, table_type);
+    made.set_name(context.scheduler.atoms.name_of(name));
     let name = named.then_some(name);
+    // A run has one scheduler, so ERTS gives no fine locking
+    // (`DB_LOCK_FREE`, `erl_db.c:2656-2657`) and centralized counters
+    // (`erl_db.c:2776-2779`). `ets:info/2` then gives `false` for
+    // `write_concurrency` and `decentralized_counters`.
+    made.set_options(
+        Term::static_atom("false"),
+        read_concurrency,
+        false,
+        compressed,
+    );
     context.scheduler.ets.create(
         table,
         name.map(|name| context.scheduler.atoms.name_of(name)),
-        Table::new(owner, access, keypos, table_type),
+        made,
     );
     Ok(Value(name.map_or(Term::Reference(table), |name| {
         Term::Atom(name.clone())
@@ -1316,13 +1362,12 @@ pub(super) fn delete_trap(context: &mut BifContext<'_>) -> Result<BifResult, Bea
 }
 
 /// Run `ets:info(Table, Item)`, as ERTS `ets_info_2` (`erl_db.c:4523-4579`)
-/// does, for the item `type`: return `set`, `bag`, or `duplicate_bag`
-/// (`table_info`, `erl_db.c:5457-5469`). The item `binary` traps before the
-/// table lookup (`erl_db.c:4541-4542`). Then the lookup asks only for
-/// `DB_INFO` (`erl_db_util.h:451`), which each process has. A free name
+/// does with `table_info` (`erl_db.c:5447-5625`). The item `binary` traps
+/// before the table lookup (`erl_db.c:4541-4542`). Then the lookup asks only
+/// for `DB_INFO` (`erl_db_util.h:451`), which each process has. A free name
 /// gives `undefined` (`erl_db.c:4544-4547`), and a term that is not an atom
 /// or a reference raises `badarg`. After the lookup, an item that
-/// `table_info` (`erl_db.c:5447-5625`) does not know raises `badarg`.
+/// `table_info` does not know raises `badarg`.
 ///
 /// # Examples
 ///
@@ -1331,46 +1376,24 @@ pub(super) fn delete_trap(context: &mut BifContext<'_>) -> Result<BifResult, Bea
 /// assert!(matches!(result, BifResult::Value(value) if value == test_atom("set")));
 /// let result = info(&mut context, &test_atom("missing"), &test_atom("type"))?;
 /// assert!(matches!(result, BifResult::Value(value) if value == test_atom("undefined")));
-/// assert!(info(&mut context, &table, &test_atom("size")).is_err());
+/// assert!(matches!(info(&mut context, &table, &test_atom("size"))?, BifResult::Value(_)));
 /// ```
 ///
 /// # Errors
 ///
-/// Return a runtime error for the item `binary` and for each other item
-/// that ERTS knows. Also return a runtime error for a reference that is not
-/// a live table: ERTS gives `undefined` for the reference of a deleted
-/// table and raises `badarg` for another reference, and PBeam keeps no
-/// record of a deleted table.
+/// Return a runtime error for the items `binary`, `data`, and `stats`.
+/// Also return a runtime error for a reference that is not a live table:
+/// ERTS gives `undefined` for the reference of a deleted table and raises
+/// `badarg` for another reference, and PBeam keeps no record of a deleted
+/// table.
 pub(super) fn info(
     context: &mut BifContext<'_>,
     table: &Term,
     item: &Term,
 ) -> Result<BifResult, BeamError> {
-    /// The items of `table_info` other than `type` (`erl_db.c:5454-5622`).
-    const ITEMS: [&str; 19] = [
-        "size",
-        "memory",
-        "owner",
-        "heir",
-        "protection",
-        "write_concurrency",
-        "read_concurrency",
-        "name",
-        "keypos",
-        "node",
-        "named_table",
-        "compressed",
-        "id",
-        "decentralized_counters",
-        "data",
-        "fixed",
-        "safe_fixed",
-        "safe_fixed_monotonic_time",
-        "stats",
-    ];
     let is_item = |name| matches!(item, Term::Atom(atom) if atom.is_static(name));
     if is_item("binary") {
-        // ponytail: info/2 gives only the type; see "ETS tables" in docs/erts-differences.md.
+        // ponytail: no binary reference list; see "ETS tables" in docs/erts-differences.md.
         return Err(error("unsupported ets:info/2 item binary"));
     }
     // `ets:info/2` asks for `DB_INFO`, so a busy table completes its list
@@ -1384,7 +1407,7 @@ pub(super) fn info(
         });
     }
     let atoms = &context.scheduler.atoms;
-    let Some((_, found)) = context.scheduler.ets.find(atoms, table) else {
+    let Some((id, found)) = context.scheduler.ets.find(atoms, table) else {
         return match table {
             Term::Atom(_) => Ok(Value(Term::static_atom("undefined"))),
             // ponytail: no record of a deleted table; see "ETS tables" in docs/erts-differences.md.
@@ -1394,19 +1417,51 @@ pub(super) fn info(
             _ => Ok(BifResult::badarg()),
         };
     };
-    if is_item("type") {
-        return Ok(Value(Term::static_atom(found.table_type().name())));
-    }
-    match item {
-        Term::Atom(atom) if ITEMS.contains(&atoms.name_of(atom)) => {
-            // ponytail: info/2 gives only the type; see "ETS tables" in docs/erts-differences.md.
-            Err(error(format!(
+    let value = match item {
+        Term::Atom(atom) if atom.is_static("type") => Term::static_atom(found.table_type().name()),
+        Term::Atom(atom) if atom.is_static("size") => Term::Integer(found.len() as i64),
+        Term::Atom(atom) if atom.is_static("memory") => Term::Integer(found.memory_words() as i64),
+        Term::Atom(atom) if atom.is_static("owner") => Term::Pid(found.owner()),
+        Term::Atom(atom) if atom.is_static("heir") => Term::static_atom("none"),
+        Term::Atom(atom) if atom.is_static("protection") => {
+            Term::static_atom(access_name(found.access()))
+        }
+        Term::Atom(atom) if atom.is_static("write_concurrency") => Term::static_atom("false"),
+        Term::Atom(atom) if atom.is_static("read_concurrency") => {
+            boolean_term(found.read_concurrency())
+        }
+        Term::Atom(atom) if atom.is_static("name") => Term::Atom(
+            atoms
+                .get(found.name())
+                .expect("the table name atom is in the table"),
+        ),
+        Term::Atom(atom) if atom.is_static("keypos") => Term::Integer(i64::from(found.keypos())),
+        Term::Atom(atom) if atom.is_static("node") => Term::static_atom("nonode@nohost"),
+        Term::Atom(atom) if atom.is_static("named_table") => {
+            boolean_term(context.scheduler.ets.named(id))
+        }
+        Term::Atom(atom) if atom.is_static("compressed") => boolean_term(found.compressed()),
+        Term::Atom(atom) if atom.is_static("id") => Term::Reference(id),
+        Term::Atom(atom) if atom.is_static("decentralized_counters") => Term::static_atom("false"),
+        Term::Atom(atom)
+            if matches!(
+                atoms.name_of(atom),
+                "fixed" | "safe_fixed" | "safe_fixed_monotonic_time"
+            ) =>
+        {
+            Term::static_atom("false")
+        }
+        Term::Atom(atom) if matches!(atoms.name_of(atom), "data" | "stats") => {
+            // ponytail: no ERTS debug print or chain statistics; see
+            // "ETS tables" in docs/erts-differences.md.
+            return Err(error(format!(
                 "unsupported ets:info/2 item {}",
                 atoms.name_of(atom)
-            )))
+            )));
         }
-        _ => Ok(BifResult::badarg()),
-    }
+        _ => return Ok(BifResult::badarg()),
+    };
+    Ok(Value(value))
 }
 
 /// Return whether `{Tag, Count}` is the hidden lock option
@@ -1425,51 +1480,129 @@ fn is_lock_count(locks: &[Term]) -> bool {
         if tag.is_static("debug_hash_fixed_number_of_locks") && LOCKS.contains(count))
 }
 
+/// Compile the match specification `spec`, as `db_match_compile` does.
+/// Return `Ok(None)` when ERTS raises `badarg`, and a runtime error for a
+/// guard function that PBeam does not run yet.
+fn compile_spec(atoms: &AtomTable, spec: &Term) -> Result<Option<MatchSpec>, BeamError> {
+    match MatchSpec::compile(atoms, spec) {
+        Ok(compiled) => Ok(Some(compiled)),
+        Err(SpecError::Badarg) => Ok(None),
+        Err(SpecError::Unsupported(name)) => Err(error(format!(
+            "unsupported ets:match specification function {name}: see \"ETS tables\" in docs/erts-differences.md"
+        ))),
+    }
+}
+
+/// Return the match specification of a pattern, as `ets:match/2,3` makes
+/// it: `[{Pattern, [], ['$$']}]` (`erl_db.c:3781-3787`, `3809-3815`).
+fn match_specification(pattern: &Term) -> Term {
+    Term::list_from(vec![Term::tuple(vec![
+        pattern.clone(),
+        Term::nil(),
+        Term::list_from(vec![Term::static_atom("$$")]),
+    ])])
+}
+
+/// Return the match specification of a pattern, as `ets:match_object/2`
+/// makes it: `[{Pattern, [], ['$_']}]` (`erl_db.c:4353-4359`).
+fn match_object_specification(pattern: &Term) -> Term {
+    Term::list_from(vec![Term::tuple(vec![
+        pattern.clone(),
+        Term::nil(),
+        Term::list_from(vec![Term::static_atom("$_")]),
+    ])])
+}
+
 /// The most objects that one turn of a match reads before it can trap
 /// (`MAX_SELECT_CHUNK_ITERATIONS`, `erl_db_hash.c:2161`).
 const MATCH_ITERATIONS: i64 = 1000;
 
 /// Run `ets:match(Table, Pattern)` or, with `Some(Limit)`,
 /// `ets:match(Table, Pattern, Limit)`, as `ets_match_2` and `ets_match_3`
-/// (`erl_db.c:3771-3818`) do with the match specification
-/// `[{Pattern, [], ['$$']}]`. The checks keep the ERTS order:
-///
-/// 1. A table that does not exist or that the caller cannot read raises
-///    `badarg` (`erl_db.c:769-912`).
-/// 2. A limit that is not a small integer above 0 raises `badarg`
-///    (`erl_db.c:3803-3807`).
-/// 3. A pattern that does not compile raises `badarg`
-///    (`erl_db_hash.c:3296-3310`): see [`Pattern::compile`].
-///
-/// Then [`match_turn`] reads the table.
+/// (`erl_db.c:3771-3818`) do.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// let result = match_objects(&mut context, &table, &test_atom("$1"), None)?;
 /// assert!(matches!(result, BifResult::Value(_)));
-/// assert!(matches!(match_objects(&mut context, &table, &test_atom("_"), Some(&Term::Integer(0)))?, BifResult::Raise { .. }));
 /// ```
 ///
 /// # Errors
 ///
-/// None in the first turn. See [`match_turn`].
+/// See [`select_objects`].
 pub(super) fn match_objects(
     context: &mut BifContext<'_>,
     table: &Term,
     pattern: &Term,
     limit: Option<&Term>,
 ) -> Result<BifResult, BeamError> {
+    select_objects(context, table, &match_specification(pattern), limit)
+}
+
+/// Run `ets:match_object(Table, Pattern)`, as `ets_match_object_2`
+/// (`erl_db.c:4343-4362`) does: [`select_objects`] with the specification
+/// `[{Pattern, [], ['$_']}]`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = match_object(&mut context, &table, &test_atom("_"))?;
+/// assert!(matches!(result, BifResult::Value(_)));
+/// ```
+///
+/// # Errors
+///
+/// See [`select_objects`].
+pub(super) fn match_object(
+    context: &mut BifContext<'_>,
+    table: &Term,
+    pattern: &Term,
+) -> Result<BifResult, BeamError> {
+    select_objects(context, table, &match_object_specification(pattern), None)
+}
+
+/// Run `ets:select(Table, MatchSpec)` or, with `Some(Limit)`,
+/// `ets:select(Table, MatchSpec, Limit)`, as `ets_select_2` and
+/// `ets_select_3` (`erl_db.c:3821-3835`, `4000-4048`) do:
+///
+/// 1. A table that does not exist or that the caller cannot read raises
+///    `badarg` (`erl_db.c:769-912`).
+/// 2. A limit that is not a small integer above 0 raises `badarg`
+///    (`erl_db.c:3828-3832`).
+/// 3. A match specification that does not compile raises `badarg`
+///    (`erl_db.c:4016-4043`): see [`MatchSpec::compile`].
+///
+/// Then [`match_turn`] reads the table.
+///
+/// # Errors
+///
+/// Return a runtime error for a guard function that PBeam does not run
+/// yet, and for a table that changed while the match trapped.
+pub(super) fn select(
+    context: &mut BifContext<'_>,
+    table: &Term,
+    spec: &Term,
+    limit: Option<&Term>,
+) -> Result<BifResult, BeamError> {
+    select_objects(context, table, spec, limit)
+}
+
+/// Run [`select`] over the match specification `spec`.
+fn select_objects(
+    context: &mut BifContext<'_>,
+    table: &Term,
+    spec: &Term,
+    limit: Option<&Term>,
+) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
+    let chunk = match limit.map(Term::small_integer) {
+        None => 0,
+        Some(Some(chunk)) if chunk > 0 => chunk as usize,
+        Some(_) => return Ok(BifResult::badarg()),
+    };
     if let Take::Help = help_busy(&mut *context, table)? {
-        return Ok(BifResult::TrapBif {
-            module: "ets",
-            function: "match",
-            arguments: match limit {
-                Some(limit) => vec![table.clone(), pattern.clone(), limit.clone()],
-                None => vec![table.clone(), pattern.clone()],
-            },
-        });
+        return select_trap(context, table, spec, chunk);
     }
     let atoms = &context.scheduler.atoms;
     let Some(id) = context.scheduler.ets.find(atoms, table).map(|(id, _)| id) else {
@@ -1483,12 +1616,7 @@ pub(super) fn match_objects(
     else {
         return Ok(BifResult::badarg());
     };
-    let chunk = match limit.map(Term::small_integer) {
-        None => 0,
-        Some(Some(chunk)) if chunk > 0 => chunk as usize,
-        Some(_) => return Ok(BifResult::badarg()),
-    };
-    let Some(compiled) = Pattern::compile(atoms, pattern) else {
+    let Some(compiled) = compile_spec(atoms, spec)? else {
         return Ok(BifResult::badarg());
     };
     // A key position below 1 compares as a large unsigned number with the
@@ -1504,8 +1632,8 @@ pub(super) fn match_objects(
             Some(bucket) => {
                 let mut state = MatchState::new(chunk, table.writes());
                 let mut iterations = MATCH_ITERATIONS;
-                state.read(&compiled, table.chain(bucket), &mut iterations);
-                return match_end(context, id, state, -1, iterations);
+                state.read(atoms, &compiled, table.chain(bucket), &mut iterations);
+                return match_end(context, id, &compiled, state, -1, iterations);
             }
             None => true,
         }
@@ -1520,21 +1648,53 @@ pub(super) fn match_objects(
         }));
     }
     let state = MatchState::new(chunk, table.writes());
-    match_turn(context, id, pattern, &compiled, 0, state)
+    match_turn(context, id, spec, &compiled, 0, state)
+}
+
+/// Trap a select that found a busy table, as `handle_lacking_permission`
+/// makes the call run again in a later turn (`erl_db.c:769-798`). The
+/// change count `u64::MAX` marks the restart: the insert changes the table,
+/// and the resumed call reads the current count ([`match_trap`]).
+fn select_trap(
+    context: &mut BifContext<'_>,
+    table: &Term,
+    spec: &Term,
+    chunk: usize,
+) -> Result<BifResult, BeamError> {
+    let atoms = &context.scheduler.atoms;
+    let (id, _) = context
+        .scheduler
+        .ets
+        .find(atoms, table)
+        .expect("the caller found the table");
+    Ok(BifResult::TrapBif {
+        module: "ets",
+        function: "select_trap",
+        arguments: vec![
+            Term::Reference(id),
+            spec.clone(),
+            Term::Integer(0),
+            Term::Integer(chunk as i64),
+            Term::nil(),
+            Term::Integer(0),
+            Term::Integer(u64::MAX as i64),
+        ],
+    })
 }
 
 /// Run the trap export `ets:select_trap/7` of a match: the table reference,
-/// the pattern, the next bucket, the limit or 0, the matches so far, the
-/// number of matches, and the change count of the table. ERTS traps to
-/// `ets:select_trap/1` with a tuple that holds a magic reference to the
-/// compiled pattern (`erl_db.c:3883-3930`; `erl_db_hash.c:2264-2307`), and
-/// PBeam compiles the pattern again in each turn. The compile reads only
-/// the pattern, so its work does not grow with the table.
+/// the match specification, the next bucket, the limit or 0, the matches so
+/// far, the number of matches, and the change count of the table. ERTS traps
+/// to `ets:select_trap/1` with a tuple that holds a magic reference to the
+/// compiled match specification (`erl_db.c:3883-3930`;
+/// `erl_db_hash.c:2264-2307`), and PBeam compiles the specification again in
+/// each turn. The compile reads only the specification, so its work does not
+/// grow with the table.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = match_trap(&mut context, id, &pattern, 300, MatchState::new(0, 1000))?;
+/// let result = match_trap(&mut context, id, &spec, 300, MatchState::new(0, 1000))?;
 /// assert!(matches!(result, BifResult::Value(_) | BifResult::TrapBif { .. }));
 /// ```
 ///
@@ -1544,7 +1704,7 @@ pub(super) fn match_objects(
 pub(super) fn match_trap(
     context: &mut BifContext<'_>,
     id: Reference,
-    pattern: &Term,
+    spec: &Term,
     bucket: usize,
     state: MatchState,
 ) -> Result<BifResult, BeamError> {
@@ -1555,7 +1715,7 @@ pub(super) fn match_trap(
             function: "select_trap",
             arguments: vec![
                 Term::Reference(id),
-                pattern.clone(),
+                spec.clone(),
                 Term::Integer(bucket as i64),
                 Term::Integer(state.chunk as i64),
                 state.matches.clone(),
@@ -1573,19 +1733,111 @@ pub(super) fn match_trap(
     else {
         return Ok(BifResult::badarg());
     };
-    if table.writes() != state.writes {
+    let restart = state.writes == u64::MAX;
+    if !restart && table.writes() != state.writes {
         // ponytail: ERTS fixes the table; see "ETS tables" in docs/erts-differences.md.
         return Err(error(
-            "unsupported ets:match/2,3 on a table that changed while the match trapped",
+            "unsupported ets:match/2,3 or ets:select/2,3 on a table that changed while the match trapped",
         ));
     }
-    let compiled = Pattern::compile(atoms, pattern).expect("the first turn compiled the pattern");
-    match_turn(context, id, pattern, &compiled, bucket, state)
+    let state = MatchState {
+        writes: table.writes(),
+        ..state
+    };
+    let Some(compiled) = compile_spec(atoms, spec)? else {
+        return Ok(BifResult::badarg());
+    };
+    match_turn(context, id, spec, &compiled, bucket, state)
+}
+
+/// Run `ets:select(Continuation)`, as `ets_select_1` and
+/// `db_select_continue_hash` (`erl_db.c:3931-3998`;
+/// `erl_db_hash.c:2411-2478`) do. The continuation
+/// `{Table, Next, Limit, Program, Rest, RestSize}` continues the match that
+/// made it. `'$end_of_table'` gives `'$end_of_table'`. Each other term that
+/// is not a 6-tuple with a small next bucket, a small limit, a program
+/// reference of a live table, a list, and a small size raises `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = select_continue(&mut context, &Term::static_atom("$end_of_table"))?;
+/// assert!(matches!(result, BifResult::Value(value) if value == Term::static_atom("$end_of_table")));
+/// ```
+///
+/// # Errors
+///
+/// Return the errors of [`match_turn`].
+pub(super) fn select_continue(
+    context: &mut BifContext<'_>,
+    continuation: &Term,
+) -> Result<BifResult, BeamError> {
+    if matches!(continuation, Term::Atom(atom) if atom.is_static("$end_of_table")) {
+        return Ok(Value(Term::static_atom("$end_of_table")));
+    }
+    let Term::Tuple(elements) = continuation else {
+        return Ok(BifResult::badarg());
+    };
+    let [table, next, chunk, program, rest, size] = elements.as_ref() else {
+        return Ok(BifResult::badarg());
+    };
+    let (Term::Integer(next), Term::Integer(chunk), Term::Reference(program), Term::Integer(size)) =
+        (next, chunk, program, size)
+    else {
+        return Ok(BifResult::badarg());
+    };
+    if *chunk < 0 || *size < 0 || !(rest.is_nil() || rest.cons_cell().is_some()) {
+        return Ok(BifResult::badarg());
+    }
+    let caller = context.scheduler.current_process_mut().id;
+    // ERTS takes the table with `DB_GET_TABLE` and no trap export, so it
+    // does not help a busy insert here (`erl_db.c:3965`).
+    let atoms = &context.scheduler.atoms;
+    let Some(id) = context.scheduler.ets.find(atoms, table).map(|(id, _)| id) else {
+        return Ok(BifResult::badarg());
+    };
+    let Some(found) =
+        context
+            .scheduler
+            .ets
+            .table(atoms, &Term::Reference(id), caller, Operation::Read)
+    else {
+        return Ok(BifResult::badarg());
+    };
+    let writes = found.writes();
+    let bucket = found.bucket_count();
+    let Some(compiled) = context.scheduler.ets.program(*program) else {
+        return Ok(BifResult::badarg());
+    };
+    let spec = match_specification_of(compiled);
+    let compiled = compiled.clone();
+    if *next >= 0 && *next as usize >= bucket {
+        return Ok(BifResult::badarg());
+    }
+    let state = MatchState {
+        chunk: *chunk as usize,
+        matches: rest.clone(),
+        got: *size as usize,
+        writes,
+        resumed: true,
+    };
+    if *next < 0 || (state.chunk > 0 && state.got >= state.chunk) {
+        return match_end(context, id, &compiled, state, *next, MATCH_ITERATIONS);
+    }
+    match_turn(context, id, &spec, &compiled, *next as usize, state)
+}
+
+/// Return the specification term of a compiled match specification. PBeam
+/// keeps the term of the compiled program, so a continuation resumes with
+/// the same specification.
+fn match_specification_of(compiled: &MatchSpec) -> Term {
+    compiled.specification()
 }
 
 /// The state of a match across its turns.
 pub(super) struct MatchState {
-    /// The limit of `ets:match/3`, or 0 for `ets:match/2`.
+    /// The limit of `ets:match/3` or `ets:select/3`, or 0 for a call
+    /// without a limit.
     pub(super) chunk: usize,
     /// The list of the matches so far, the last match first, as
     /// `select_chunk_on_match_res` (`erl_db_hash.c:2174-2185`) puts each
@@ -1619,22 +1871,23 @@ impl MatchState {
         }
     }
 
-    /// Match each object of `objects` with `pattern` and use one iteration
+    /// Match each object of `objects` with `spec` and use one iteration
     /// for each object (`erl_db_hash.c:1900-1916`).
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// state.read(&pattern, table.chain(0), &mut iterations);
+    /// state.read(&atoms, &spec, table.chain(0), &mut iterations);
     /// ```
     fn read<'a>(
         &mut self,
-        pattern: &Pattern,
+        atoms: &AtomTable,
+        spec: &MatchSpec,
         objects: impl Iterator<Item = &'a [Term]>,
         iterations: &mut i64,
     ) {
         for object in objects {
-            if let Some(found) = pattern.run(object) {
+            if let Some(found) = spec.run(atoms, object) {
                 self.matches = Term::cons(found, std::mem::replace(&mut self.matches, Term::nil()));
                 self.got += 1;
             }
@@ -1647,15 +1900,16 @@ impl MatchState {
 /// and `match_traverse_continue` (`erl_db_hash.c:1835-2071`) do. An empty
 /// bucket uses no iteration. After each bucket the turn ends when it was
 /// the last bucket, or when the matches reach the limit of
-/// `ets:match/3`. Else, when the turn used its 1000 iterations, the call
-/// uses all reductions and traps to `ets:select_trap/7` with the next
-/// bucket ([`match_trap`]). A bucket is never split across turns, so a
-/// trap keeps the position and no turn reads a bucket again.
+/// `ets:match/3` or `ets:select/3`. Else, when the turn used its 1000
+/// iterations, the call uses all reductions and traps to
+/// `ets:select_trap/7` with the next bucket ([`match_trap`]). A bucket is
+/// never split across turns, so a trap keeps the position and no turn reads
+/// a bucket again.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = match_turn(&mut context, id, &pattern, &compiled, 0, MatchState::new(0, 0))?;
+/// let result = match_turn(&mut context, id, &spec, &compiled, 0, MatchState::new(0, 0))?;
 /// assert!(matches!(result, BifResult::Value(_)));
 /// ```
 ///
@@ -1665,8 +1919,8 @@ impl MatchState {
 fn match_turn(
     context: &mut BifContext<'_>,
     id: Reference,
-    pattern: &Term,
-    compiled: &Pattern,
+    spec: &Term,
+    compiled: &MatchSpec,
     mut bucket: usize,
     mut state: MatchState,
 ) -> Result<BifResult, BeamError> {
@@ -1677,13 +1931,18 @@ fn match_turn(
     let (_, table) = table.expect("the caller found the table");
     let mut iterations = MATCH_ITERATIONS;
     loop {
-        state.read(compiled, table.chain(bucket), &mut iterations);
+        state.read(
+            &context.scheduler.atoms,
+            compiled,
+            table.chain(bucket),
+            &mut iterations,
+        );
         bucket += 1;
         if bucket == table.bucket_count() {
-            return match_end(context, id, state, -1, iterations);
+            return match_end(context, id, compiled, state, -1, iterations);
         }
         if state.chunk > 0 && state.got >= state.chunk {
-            return match_end(context, id, state, bucket as i64, iterations);
+            return match_end(context, id, compiled, state, bucket as i64, iterations);
         }
         if iterations <= 0 {
             context
@@ -1695,7 +1954,7 @@ fn match_turn(
                 function: "select_trap",
                 arguments: vec![
                     Term::Reference(id),
-                    pattern.clone(),
+                    spec.clone(),
                     Term::Integer(bucket as i64),
                     Term::Integer(state.chunk as i64),
                     state.matches,
@@ -1712,18 +1971,19 @@ fn match_turn(
 /// `select_chunk_continue_on_loop_ended` (`erl_db_hash.c:2187-2262`,
 /// `2364-2409`) do. The call uses one reduction for each iteration. Then:
 ///
-/// - `ets:match/2` returns the matches.
-/// - `ets:match/3` keeps the first matches of the list over the limit as
-///   the rest. It returns the other matches and the continuation
+/// - A call without a limit returns the matches.
+/// - A call with a limit keeps the first matches of the list over the limit
+///   as the rest. It returns the other matches and the continuation
 ///   `{Table, Next, Limit, Program, Rest, RestSize}` when there is a rest
 ///   or a next bucket, else `{Matches, '$end_of_table'}`, or
 ///   `'$end_of_table'` with no match. ERTS puts a magic reference to the
-///   compiled pattern in `Program`, and PBeam puts a new reference there.
+///   compiled specification in `Program`, and PBeam puts a new reference
+///   there and keeps the compiled specification under it.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = match_end(&mut context, id, MatchState::new(1, 0), -1, 1000)?;
+/// let result = match_end(&mut context, id, &compiled, MatchState::new(1, 0), -1, 1000)?;
 /// assert!(matches!(result, BifResult::Value(value) if value == Term::static_atom("$end_of_table")));
 /// ```
 ///
@@ -1733,6 +1993,7 @@ fn match_turn(
 fn match_end(
     context: &mut BifContext<'_>,
     id: Reference,
+    compiled: &MatchSpec,
     state: MatchState,
     next: i64,
     iterations: i64,
@@ -1758,6 +2019,10 @@ fn match_end(
     if !rest.is_empty() || next >= 0 {
         let program = context.scheduler.make_ref()?;
         let size = rest.len() as i64;
+        context
+            .scheduler
+            .ets
+            .remember_program(id, program, compiled.clone());
         let continuation = Term::tuple(vec![
             Term::Reference(id),
             Term::Integer(next),
@@ -1774,4 +2039,375 @@ fn match_end(
     } else {
         Term::tuple(vec![matches, end])
     }))
+}
+
+/// Complete the list insert that holds `table` busy, before the caller uses
+/// the table (`erl_db.c:769-798`). The caller found the table, so this call
+/// always runs and one busy path covers each caller.
+fn help_table(context: &mut BifContext<'_>, table: &Term) -> Result<(), BeamError> {
+    if let Take::Help = help_busy(context, table)? {
+        finish_busy(context, table)?;
+    }
+    Ok(())
+}
+
+/// Run `ets:next(Table, Key)` or `ets:prev(Table, Key)`, as `ets_next_2`
+/// and `ets_prev_2` (`erl_db.c:1216-1234`, `1309-1327`) do. A hash table
+/// gives its keys in the chain order of its buckets, and `prev` is the same
+/// as `next` (`erl_db_hash.c:854-856`, `1147-1200`). A key that the table
+/// does not hold raises `badarg`; after the last key the atom
+/// `'$end_of_table'` comes.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = next(&mut context, &table, &test_atom("missing"))?;
+/// assert!(matches!(result, BifResult::Raise { .. }));
+/// ```
+///
+/// # Errors
+///
+/// Return the error of [`ProcessState::bif_reductions_left`] when a busy
+/// table cannot finish its list insert in the turn.
+pub(super) fn next(
+    context: &mut BifContext<'_>,
+    table: &Term,
+    key: &Term,
+) -> Result<BifResult, BeamError> {
+    let caller = context.scheduler.current_process_mut().id;
+    help_table(&mut *context, table)?;
+    let atoms = &context.scheduler.atoms;
+    let Some(table) = context
+        .scheduler
+        .ets
+        .table(atoms, table, caller, Operation::Read)
+    else {
+        return Ok(BifResult::badarg());
+    };
+    match table.next_key(atoms, key) {
+        Some(Some(next)) => Ok(Value(next)),
+        Some(None) => Ok(Value(Term::static_atom("$end_of_table"))),
+        None => Ok(BifResult::badarg()),
+    }
+}
+
+/// Run `ets:update_element/3` or `ets:update_element/4`, as
+/// `ets_update_element_3` and `ets_update_element_4` (`erl_db.c:1464-1491`)
+/// do with `do_update_element` (`erl_db.c:1371-1458`):
+///
+/// - A table that does not exist or that the caller cannot write raises
+///   `badarg` (`erl_db.c:769-912`).
+/// - A default object that is not a tuple with at least `keypos` elements
+///   raises `badarg` (`erl_db.c:1483-1488`).
+/// - The table type must be `set` (`erl_db.c:1381-1385`).
+/// - Each update is a `{Pos, Value}` tuple with a small `Pos`. `Pos` equal
+///   to the key position, below 1, or above the object arity raises
+///   `badarg` (`erl_db.c:1399-1428`).
+/// - A missing key gives `false`, or, with a default object, inserts the
+///   default object with the requested key (`erl_db.c:1393-1397`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = update_element(&mut context, &table, &key, &Term::tuple(vec![Term::Integer(2), Term::Integer(9)]), None)?;
+/// assert!(matches!(result, BifResult::Value(value) if value == Term::static_atom("true")));
+/// ```
+///
+/// # Errors
+///
+/// Return the error of [`ProcessState::bif_reductions_left`] when a busy
+/// table cannot finish its list insert in the turn.
+pub(super) fn update_element(
+    context: &mut BifContext<'_>,
+    table: &Term,
+    key: &Term,
+    spec: &Term,
+    default: Option<&Term>,
+) -> Result<BifResult, BeamError> {
+    let caller = context.scheduler.current_process_mut().id;
+    help_table(&mut *context, table)?;
+    let atoms = &context.scheduler.atoms;
+    let Some(found) = context.scheduler.ets.find(atoms, table) else {
+        return Ok(BifResult::badarg());
+    };
+    let keypos = found.1.keypos();
+    let default_elements = match default {
+        Some(Term::Tuple(elements)) if elements.len() as i64 >= i64::from(keypos) => Some(elements),
+        Some(_) => return Ok(BifResult::badarg()),
+        None => None,
+    };
+    let Some(table) = context
+        .scheduler
+        .ets
+        .table(atoms, table, caller, Operation::Write)
+    else {
+        return Ok(BifResult::badarg());
+    };
+    if table.table_type() != TableType::Set {
+        return Ok(BifResult::badarg());
+    }
+    let updates = match update_specs(spec, keypos) {
+        Some(updates) => updates,
+        None => return Ok(BifResult::badarg()),
+    };
+    let arity = match table.object_arity(atoms, key) {
+        Some(arity) => arity,
+        None => match default_elements {
+            None => return Ok(Value(Term::static_atom("false"))),
+            Some(elements) => {
+                let mut object = elements.to_vec();
+                let index = usize::try_from(keypos).expect("the key position is not negative") - 1;
+                object[index] = key.clone();
+                table.insert(atoms, object);
+                table
+                    .object_arity(atoms, key)
+                    .expect("the insert stored the object")
+            }
+        },
+    };
+    if updates
+        .iter()
+        .any(|(position, _)| *position == 0 || *position > arity)
+    {
+        return Ok(BifResult::badarg());
+    }
+    table.update_elements(atoms, key, &updates);
+    Ok(Value(Term::static_atom("true")))
+}
+
+/// Return the positions and values of an `update_element` specification, or
+/// `None` when the term is not a `{Pos, Value}` or a proper list of them
+/// with a small position. A position equal to the key position is
+/// `badarg`; the caller compares it with the key position.
+fn update_specs(spec: &Term, keypos: i32) -> Option<Vec<(usize, Term)>> {
+    let single;
+    let list = if matches!(spec, Term::Tuple(_)) {
+        single = Term::list_from(vec![spec.clone()]);
+        &single
+    } else {
+        spec
+    };
+    let mut updates = Vec::new();
+    for item in list.proper_list()? {
+        let Term::Tuple(elements) = item else {
+            return None;
+        };
+        let [Term::Integer(position), value] = elements.as_ref() else {
+            return None;
+        };
+        if *position == i64::from(keypos) || *position < 1 {
+            return None;
+        }
+        updates.push((usize::try_from(*position).ok()?, value.clone()));
+    }
+    Some(updates)
+}
+
+/// Run `ets:info(Table)`, as `ets_info_1` (`erl_db.c:4399-4517`) does:
+/// return the list of `{Item, Value}` pairs for the table, in the order of
+/// the `fields` array, reversed by the cons build (`erl_db.c:4488-4516`).
+/// A free name gives `undefined`; a term that is not an atom or a reference
+/// raises `badarg`. The items `binary`, `data`, and `stats` raise a runtime
+/// error: PBeam does not run them yet.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = info_all(&mut context, &table)?;
+/// assert!(matches!(result, BifResult::Value(value) if value.is_nil() || value.cons_cell().is_some()));
+/// ```
+///
+/// # Errors
+///
+/// Return a runtime error for the items `binary`, `data`, and `stats`, and
+/// for a reference that is not a live table.
+pub(super) fn info_all(context: &mut BifContext<'_>, table: &Term) -> Result<BifResult, BeamError> {
+    let caller = context.scheduler.current_process_mut().id;
+    help_table(&mut *context, table)?;
+    let atoms = &context.scheduler.atoms;
+    let Some((id, found)) = context.scheduler.ets.find(atoms, table) else {
+        return match table {
+            Term::Atom(_) => Ok(Value(Term::static_atom("undefined"))),
+            Term::Reference(_) => Err(error(
+                "unsupported ets:info/1 of a reference that is not a live table",
+            )),
+            _ => Ok(BifResult::badarg()),
+        };
+    };
+    let _ = caller;
+    let named = context.scheduler.ets.named(id);
+    let items = [
+        ("id", Term::Reference(id)),
+        (
+            "decentralized_counters",
+            boolean_term(found.decentralized_counters()),
+        ),
+        ("read_concurrency", boolean_term(found.read_concurrency())),
+        ("write_concurrency", found.write_concurrency().clone()),
+        ("compressed", boolean_term(found.compressed())),
+        ("memory", Term::Integer(found.memory_words() as i64)),
+        ("owner", Term::Pid(found.owner())),
+        ("heir", Term::static_atom("none")),
+        (
+            "name",
+            Term::Atom(
+                atoms
+                    .get(found.name())
+                    .expect("the table name atom is in the table"),
+            ),
+        ),
+        ("size", Term::Integer(found.len() as i64)),
+        ("node", Term::static_atom("nonode@nohost")),
+        ("named_table", boolean_term(named)),
+        ("type", Term::static_atom(found.table_type().name())),
+        ("keypos", Term::Integer(i64::from(found.keypos()))),
+        ("protection", Term::static_atom(access_name(found.access()))),
+    ];
+    let pairs: Vec<Term> = items
+        .into_iter()
+        .map(|(item, value)| Term::tuple(vec![Term::static_atom(item), value]))
+        .collect();
+    Ok(Value(Term::list_from(pairs)))
+}
+
+/// Return the atom `true` or `false` for `value`.
+fn boolean_term(value: bool) -> Term {
+    Term::static_atom(if value { "true" } else { "false" })
+}
+
+/// Return the atom of the access mode, as `ets:info/2` gives it.
+fn access_name(access: Access) -> &'static str {
+    match access {
+        Access::Public => "public",
+        Access::Protected => "protected",
+        Access::Private => "private",
+    }
+}
+
+/// Run `ets:internal_delete_all/2`, the BIF of `ets:delete_all_objects/1`
+/// (`lib/stdlib/src/ets.erl:386-396`), as `ets_internal_delete_all_2`
+/// (`erl_db.c:3234-3299`) does: a table that the caller cannot write raises
+/// `badarg`; the argument `undefined` removes each object and returns their
+/// count, and each other argument is returned, as the trap argument
+/// `NItemsHolder` gives (`erl_db.c:3284-3297`). The call uses the ERTS free
+/// cost: 32 reductions for each segment and 1 for each object
+/// (`erl_db_hash.c:3122-3149`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = internal_delete_all(&mut context, &table, &Term::static_atom("undefined"))?;
+/// assert!(matches!(result, BifResult::Value(Term::Integer(_))));
+/// ```
+///
+/// # Errors
+///
+/// Return the error of [`ProcessState::bif_reductions_left`] when a busy
+/// table cannot finish its list insert in the turn.
+pub(super) fn internal_delete_all(
+    context: &mut BifContext<'_>,
+    table: &Term,
+    holder: &Term,
+) -> Result<BifResult, BeamError> {
+    let caller = context.scheduler.current_process_mut().id;
+    help_table(&mut *context, table)?;
+    let atoms = &context.scheduler.atoms;
+    let Some(table) = context
+        .scheduler
+        .ets
+        .table(atoms, table, caller, Operation::Write)
+    else {
+        return Ok(BifResult::badarg());
+    };
+    if !matches!(holder, Term::Atom(atom) if atom.is_static("undefined")) {
+        return Ok(Value(holder.clone()));
+    }
+    let count = table.len();
+    let reductions = table.delete_all_reductions();
+    table.clear();
+    context
+        .scheduler
+        .current_process_mut()
+        .bump_reductions(i32::try_from(reductions).unwrap_or(i32::MAX));
+    Ok(Value(Term::Integer(count as i64)))
+}
+
+/// Run `ets:internal_select_delete/2`, the BIF of `ets:select_delete/2`
+/// (`lib/stdlib/src/ets.erl:1849-1861`), as `ets_internal_select_delete_2`
+/// (`erl_db.c:3433-3475`) does: a table that the caller cannot write raises
+/// `badarg`; a match specification that does not compile raises `badarg`;
+/// each object whose result is `true` is removed, and the count of removed
+/// objects comes back. The traversal uses one iteration for each object and
+/// charges `1000 - iterations_left` reductions (`erl_db_hash.c:2677-2709`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = internal_select_delete(&mut context, &table, &spec)?;
+/// assert!(matches!(result, BifResult::Value(Term::Integer(_))));
+/// ```
+///
+/// # Errors
+///
+/// Return a runtime error for a guard function that PBeam does not run yet,
+/// and the error of [`ProcessState::bif_reductions_left`] when a busy table
+/// cannot finish its list insert in the turn.
+pub(super) fn internal_select_delete(
+    context: &mut BifContext<'_>,
+    table: &Term,
+    spec: &Term,
+) -> Result<BifResult, BeamError> {
+    let caller = context.scheduler.current_process_mut().id;
+    help_table(&mut *context, table)?;
+    let atoms = &context.scheduler.atoms;
+    let Some(found) = context.scheduler.ets.find(atoms, table) else {
+        return Ok(BifResult::badarg());
+    };
+    let keypos = found.1.keypos();
+    let buckets = found.1.bucket_count();
+    if context
+        .scheduler
+        .ets
+        .table(atoms, table, caller, Operation::Write)
+        .is_none()
+    {
+        return Ok(BifResult::badarg());
+    }
+    let Some(compiled) = compile_spec(atoms, spec)? else {
+        return Ok(BifResult::badarg());
+    };
+    let keypos = usize::try_from(keypos)
+        .ok()
+        .filter(|&keypos| keypos > 0)
+        .unwrap_or(usize::MAX);
+    if compiled.matches_nothing(keypos) {
+        return Ok(Value(Term::Integer(0)));
+    }
+    let table = context
+        .scheduler
+        .ets
+        .table(atoms, table, caller, Operation::Write)
+        .expect("the caller can write the table");
+    let mut iterations = 0_usize;
+    let mut matches = Vec::new();
+    for bucket in 0..buckets {
+        for object in table.chain(bucket) {
+            if compiled.run(atoms, object) == Some(Term::static_atom("true")) {
+                matches.push(object.to_vec());
+            }
+            iterations += 1;
+        }
+    }
+    let mut removed = 0;
+    for object in &matches {
+        if table.delete_object(atoms, object) {
+            removed += 1;
+        }
+    }
+    table.shrink();
+    context
+        .scheduler
+        .current_process_mut()
+        .bump_reductions(i32::try_from(iterations).unwrap_or(i32::MAX));
+    Ok(Value(Term::Integer(removed)))
 }

@@ -411,6 +411,8 @@ ambient() ->
     Self = self(),
     Name = effect_probe_ambient,
     Table = ets:new(Name, [named_table]),
+    Selected = ets:new(effect_probe_selected, []),
+    true = ets:insert(Selected, {key, value}),
     Array = erts_internal:atomics_new(1, 1),
     [
         erlang:unlink(Self),
@@ -450,6 +452,30 @@ ambient() ->
         ets:member(Name, key),
         ets:delete(Name, key),
         ets:info(Name, type),
+        ets:insert(Name, {key, value}),
+        length(ets:info(Name)),
+        case ets:next(Name, key) of
+            '$end_of_table' -> eot;
+            Next -> Next
+        end,
+        case ets:prev(Name, key) of
+            '$end_of_table' -> eot;
+            Previous -> Previous
+        end,
+        ets:match_object(Name, {'_', '_'}),
+        ets:select(Name, [{{'_', '_'}, [], ['$_']}]),
+        begin
+            {_, C} = ets:select(Name, [{{'_', '_'}, [], ['$_']}], 1),
+            case ets:select(C) of
+                '$end_of_table' -> eot;
+                {Matches, '$end_of_table'} -> {Matches, eot};
+                Other -> Other
+            end
+        end,
+        ets:update_element(Selected, key, {2, updated}),
+        ets:update_element(Selected, missing, {2, updated}, {missing, 0}),
+        ets:internal_select_delete(Selected, [{{'_', '_'}, [], [false]}]),
+        ets:internal_delete_all(Selected, undefined),
         reference(ets:whereis(Name)),
         ets:delete(ets:new(effect_probe_deleted, [])),
         atom(file:native_name_encoding()),

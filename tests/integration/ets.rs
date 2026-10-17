@@ -476,12 +476,10 @@ fn gives_the_table_type_as_pinned_erts() {
 
 #[test]
 fn rejects_tables_that_pbeam_cannot_model() {
-    // ERTS 29.1.1 gives the size of a table, the binary item, and badarg
-    // for a reference that is not a table, and it makes an ordered_set
-    // table and two set tables whose heir is a live process other than the
-    // caller. PBeam gives only the type item of ets:info/2, keeps no record
-    // of a deleted table, and supports only hash tables without such a
-    // heir. ERTS
+    // ERTS 29.1.1 gives the binary item, and it makes an ordered_set table
+    // and two set tables whose heir is a live process other than the
+    // caller. PBeam gives no binary item, keeps no record of a deleted
+    // table, and supports only hash tables without such a heir. ERTS
     // aborts the emulator for an insert with the key position 0 (status
     // 134, `Invalid tag in make_internal_hash`) and crashes for a found key
     // and an index that becomes 0 (status 139). This is the "ETS tables"
@@ -492,8 +490,18 @@ fn rejects_tables_that_pbeam_cannot_model() {
             "delete_inserting",
             "delete/1 of a table that a trapped insert uses",
         ),
-        ("info_size", "info/2 item size"),
         ("info_binary", "info/2 item binary"),
+        ("info_stats", "info/2 item stats"),
+        ("info_data", "info/2 item data"),
+        (
+            "info_all_reference",
+            "info/1 of a reference that is not a live table",
+        ),
+        ("select_unsupported", "match specification function round/1"),
+        (
+            "select_delete_unsupported",
+            "match specification function round/1",
+        ),
         (
             "info_reference",
             "info/2 of a reference that is not a live table",
@@ -506,7 +514,7 @@ fn rejects_tables_that_pbeam_cannot_model() {
         ("index", "lookup_element/4 index 4294967296 with position 0"),
         (
             "match_changed",
-            "match/2,3 on a table that changed while the match trapped",
+            "match/2,3 or ets:select/2,3 on a table that changed while the match trapped",
         ),
     ] {
         let message = format!("unsupported ets:{detail}");
@@ -613,4 +621,38 @@ fn frees_the_owned_tables_of_a_killed_deleter_in_owned_list_order_as_pinned_erts
         reference_with(&["+S", "1"], "delete_order"),
         b"[{1,10},{1,9}]\n"
     );
+}
+
+/// Run `ets_probe:Function()` on PBeam with the pinned `ets` module and
+/// compare its `~w` text with the output of the pinned ERTS with one
+/// scheduler.
+fn assert_probe_matches_erts(program: &BeamProgram, function: &str) {
+    let result = program.execute("ets_probe", function, &[]).unwrap().term;
+    assert_eq!(
+        format!("{}\n", text(&result, program.atoms())),
+        String::from_utf8(reference_with(&["+S", "1"], function)).unwrap(),
+        "{function}"
+    );
+}
+
+#[test]
+fn runs_the_select_and_iteration_bifs_as_pinned_erts() {
+    // `ets_probe:select/0`, `match_object/0`, `iterate/0`, `update_element/0`,
+    // `info_items/0`, `delete_all/0`, and `select_reductions/0` run the new
+    // `ets` BIFs. ERTS runs with one scheduler, as PBeam does, so
+    // `ets:info/2` gives `false` for `write_concurrency` and
+    // `decentralized_counters` (erl_db.c:2656-2657, 2776-2779).
+    let ets = pinned_beam("ets");
+    let program = BeamProgram::load(&[&ets, ETS_PROBE]).unwrap();
+    for function in [
+        "select",
+        "match_object",
+        "iterate",
+        "update_element",
+        "info_items",
+        "delete_all",
+        "select_reductions",
+    ] {
+        assert_probe_matches_erts(&program, function);
+    }
 }

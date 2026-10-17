@@ -5223,3 +5223,33 @@ fn raises_the_reason_of_an_error_with_cause_that_no_call_path_converted() {
         Term::tuple(vec![Term::static_atom("badarg"), Term::nil()])
     );
 }
+
+#[test]
+fn rejects_a_select_delete_of_a_private_table_of_another_process() {
+    // `ets:internal_select_delete/2` takes the table with `DB_WRITE`, so a
+    // process that does not own a `private` table raises `badarg`
+    // (`erl_db.c:3433-3475`, `769-798`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    scheduler.ets.create(
+        Reference(0),
+        None,
+        Table::new(ProcessId(999), Access::Private, 1, TableType::Set),
+    );
+    let spec = Term::list_from([Term::tuple(vec![
+        Term::static_atom("_"),
+        Term::nil(),
+        Term::list_from([Term::static_atom("true")]),
+    ])]);
+    let result = program
+        .bif(
+            &mut scheduler,
+            "ets",
+            "internal_select_delete",
+            vec![Term::Reference(Reference(0)), spec],
+        )
+        .unwrap();
+    assert!(matches!(result, BifResult::Raise { .. }));
+}
