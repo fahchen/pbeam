@@ -4,7 +4,7 @@
 pub(super) mod pattern;
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap};
 use std::hash::{DefaultHasher, Hasher};
 
 use crate::term::atom_hash;
@@ -52,11 +52,18 @@ pub(super) struct EtsTables {
     /// (`save_owned_table`, `erl_db.c:628-650`), so the next table gets
     /// this position, at the end of the list of its owner.
     saved: u64,
-    /// The fixations of each process, in the order that it fixed the
-    /// tables, as the fixed-table list of the process (`erl_db.c:130-150`).
-    /// One entry for each table: a second fix of the same table adds no
-    /// entry (`fix_table_locked`, `erl_db.c:5150-5192`).
-    fixed: HashMap<ProcessId, VecDeque<Reference>>,
+    /// The fixations of each process by their insertion number, in the
+    /// order that it fixed the tables, as the fixed-table list of the
+    /// process (`erl_db.c:130-150`). One entry for each table: a second fix
+    /// of the same table adds no entry (`fix_table_locked`,
+    /// `erl_db.c:5150-5192`).
+    fixed: HashMap<ProcessId, BTreeMap<u64, Reference>>,
+    /// The insertion number of each fixation, so an unfix or a delete
+    /// removes its entry without a scan (`fixed_tabs_delete`,
+    /// `erl_db.c:152-172`).
+    fixed_seq: HashMap<(ProcessId, Reference), u64>,
+    /// The last insertion number that `fixed` holds.
+    next_fix: u64,
     /// The compiled match specification of each `ets:select/1`
     /// continuation, by the reference that the continuation holds in place
     /// of the ERTS magic reference (`ets_db_make_match_prog_ref`,
@@ -655,7 +662,10 @@ impl EtsTables {
             .fixed_by
             .contains_key(&process);
         if first {
-            self.fixed.entry(process).or_default().push_back(id);
+            self.next_fix += 1;
+            let seq = self.next_fix;
+            self.fixed.entry(process).or_default().insert(seq, id);
+            self.fixed_seq.insert((process, id), seq);
         }
         self.tables
             .get_mut(&id)
@@ -670,19 +680,30 @@ impl EtsTables {
         let table = self.tables.get_mut(&id).expect("an unfixed table is live");
         table.unfix(process);
         if !table.fixed_by.contains_key(&process) {
-            // A process that did not fix the table has no list here, and a
+            // A process that did not fix the table has no entry here, and a
             // second unfix of the last fixation changes nothing
             // (`unfix_table_locked`, `erl_db.c:1153-1157`).
-            let empty = match self.fixed.get_mut(&process) {
-                Some(list) => {
-                    list.retain(|table| *table != id);
-                    list.is_empty()
-                }
-                None => false,
-            };
-            if empty {
-                self.fixed.remove(&process);
-            }
+            self.forget_fixation(id, process);
+        }
+    }
+
+    /// Remove the order entry of the fixation of the process `process` on
+    /// the table `id`, and the list of the process when it is empty
+    /// (`fixed_tabs_delete`, `erl_db.c:152-172`).
+    fn forget_fixation(&mut self, id: Reference, process: ProcessId) {
+        let Some(seq) = self.fixed_seq.remove(&(process, id)) else {
+            return;
+        };
+        let empty = {
+            let list = self
+                .fixed
+                .get_mut(&process)
+                .expect("a fixing process has a fixation list");
+            list.remove(&seq);
+            list.is_empty()
+        };
+        if empty {
+            self.fixed.remove(&process);
         }
     }
 
@@ -690,17 +711,9 @@ impl EtsTables {
     /// `process`, as `free_fixations_locked` does (`erl_db.c:5304-5318`).
     /// The caller gives the processes that fixed the table, so the delete
     /// reads no other list.
-    fn forget_fixations(&mut self, id: Reference, process: ProcessId) {
-        let empty = {
-            let list = self
-                .fixed
-                .get_mut(&process)
-                .expect("a fixing process has a fixation list");
-            list.retain(|table| *table != id);
-            list.is_empty()
-        };
-        if empty {
-            self.fixed.remove(&process);
+    fn forget_fixations(&mut self, id: Reference, fixers: &[ProcessId]) {
+        for process in fixers {
+            self.forget_fixation(id, *process);
         }
     }
 
@@ -757,9 +770,7 @@ impl EtsTables {
                 // The table goes, so each fixation of it goes too
                 // (`free_fixations_locked`, `erl_db.c:5304-5318`).
                 table.fixed_by.clear();
-                for process in &fixers {
-                    self.forget_fixations(id, *process);
-                }
+                self.forget_fixations(id, &fixers);
                 self.names.retain(|_, named| *named != id);
                 self.programs.retain(|_, (table, _)| *table != id);
                 self.freeing.insert(id, Freeing::new(table));
@@ -773,10 +784,9 @@ impl EtsTables {
         // that stay, in the order of its fixed-table list
         // (`erl_db.c:5110-5126`).
         loop {
-            let Some(id) = self
-                .fixed
-                .get(&owner)
-                .and_then(|fixed| fixed.front().copied())
+            let Some((seq, id)) = (self.fixed.get(&owner))
+                .and_then(|fixed| fixed.first_key_value())
+                .map(|(&seq, &id)| (seq, id))
             else {
                 self.fixed.remove(&owner);
                 break;
@@ -792,9 +802,10 @@ impl EtsTables {
                     .fixed
                     .get_mut(&owner)
                     .expect("the process has a fixation");
-                fixed.pop_front();
+                fixed.remove(&seq);
                 fixed.is_empty()
             };
+            self.fixed_seq.remove(&(owner, id));
             if empty {
                 self.fixed.remove(&owner);
             }
@@ -835,9 +846,7 @@ impl EtsTables {
         // `erl_db.c:3056`).
         let fixers = table.fixers();
         table.fixed_by.clear();
-        for process in &fixers {
-            self.forget_fixations(id, *process);
-        }
+        self.forget_fixations(id, &fixers);
         // The free of the table frees each delete record with the segments
         // (`db_free_table_continue_hash`, `erl_db_hash.c:3122-3137`).
         let charge = fixers.len();
