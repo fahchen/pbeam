@@ -11,7 +11,11 @@
          safe_fixtable/0, fixtable/0, fixtable_chain/0, fixtable_successor/0,
          fixtable_resize/0, fixtable_fix_count/0, fixtable_insert_after_delete/0,
          fixtable_clear/0, fixtable_delete_object/0, fixtable_same_bucket/0,
-         fixtable_clear_wide/0, fixtable_live_after_predecessor/0, fixtable_cycle/0]).
+         fixtable_clear_wide/0, fixtable_live_after_predecessor/0, fixtable_cycle/0,
+         fixtable_insert_before_successor/0, fixtable_reinsert/0,
+         fixtable_clear_reinsert/0, fixtable_clear_after_delete/0,
+         fixtable_bag_reinsert/0, fixtable_shrink/0,
+         fixtable_duplicate_bag_reinsert/0]).
 
 %% ets:new/2 return values and badarg cases (erl_db.c:2555-2840).
 new() ->
@@ -826,6 +830,90 @@ fixtable_clear_wide() ->
     Ended = length([1 || I <- from(1, 1000), ets:next(T, I) =:= '$end_of_table']),
     ets:safe_fixtable(T, false),
     [Ended].
+
+
+%% A key that the run inserts into a bucket between the deleted key and
+%% its successor is after the deleted key.
+fixtable_insert_before_successor() ->
+    T = ets:new(ets_probe_fix_before, [set]),
+    ets:insert(T, [{1}, {2}]),
+    ets:safe_fixtable(T, true),
+    ets:delete(T, 1),
+    ets:insert(T, {17}),
+    Next = ets:next(T, 1),
+    ets:safe_fixtable(T, false),
+    [Next].
+
+%% The insert of a deleted key reuses its position, so the traversal
+%% continues after that position.
+fixtable_reinsert() ->
+    T = ets:new(ets_probe_fix_reinsert, [set]),
+    ets:insert(T, [{2}, {146}]),
+    ets:safe_fixtable(T, true),
+    ets:delete(T, 2),
+    ets:insert(T, {2}),
+    Next = ets:next(T, 2),
+    ets:safe_fixtable(T, false),
+    [Next].
+
+%% The insert of a key after a clear reuses its old position, which is
+%% before the other deleted key.
+fixtable_clear_reinsert() ->
+    T = ets:new(ets_probe_fix_clear_reinsert, [set]),
+    ets:insert(T, [{2}, {146}]),
+    ets:safe_fixtable(T, true),
+    ets:internal_delete_all(T, undefined),
+    ets:insert(T, {2}),
+    Next = ets:next(T, 146),
+    ets:safe_fixtable(T, false),
+    [Next].
+
+
+%% A clear skips the chain nodes that the earlier deletes kept.
+fixtable_clear_after_delete() ->
+    T = ets:new(ets_probe_fix_clear_after_delete, [set]),
+    ets:insert(T, [{2}, {146}]),
+    ets:safe_fixtable(T, true),
+    ets:delete(T, 2),
+    ets:internal_delete_all(T, undefined),
+    Next = ets:next(T, 146),
+    ets:safe_fixtable(T, false),
+    [Next].
+
+%% The insert of a bag key reuses its chain node and frees the other
+%% pseudo-deleted objects of the key.
+fixtable_bag_reinsert() ->
+    T = ets:new(ets_probe_fix_bag_reinsert, [bag]),
+    ets:insert(T, [{k, 1}, {k, 2}]),
+    ets:safe_fixtable(T, true),
+    ets:delete(T, k),
+    ets:insert(T, [{k, 3}]),
+    Fresh = ets:insert(T, [{j, 4}]),
+    ets:safe_fixtable(T, false),
+    [ets:lookup(T, k), Fresh, ets:lookup(T, j)].
+
+%% A select_delete of every object of a fixed table does not join buckets.
+fixtable_shrink() ->
+    T = ets:new(ets_probe_fix_shrink, [set]),
+    ets:insert(T, [{I} || I <- from(1, 5000)]),
+    ets:safe_fixtable(T, true),
+    Removed = ets:internal_select_delete(T, [{{'_'}, [], [true]}]),
+    Size = ets:info(T, size),
+    ets:safe_fixtable(T, false),
+    [Removed, Size].
+
+
+%% The insert of a duplicate_bag key reuses its chain node and frees the
+%% other pseudo-deleted objects of the key.
+fixtable_duplicate_bag_reinsert() ->
+    T = ets:new(ets_probe_fix_duplicate_bag, [duplicate_bag]),
+    ets:insert(T, [{k, 1}, {k, 2}]),
+    ets:safe_fixtable(T, true),
+    ets:delete(T, k),
+    ets:insert(T, [{k, 3}]),
+    Fresh = ets:insert(T, [{j, 4}]),
+    ets:safe_fixtable(T, false),
+    [ets:lookup(T, k), Fresh, ets:lookup(T, j)].
 
 catch_error(Fun) ->
     try Fun() catch error:Reason -> {error, Reason} end.
