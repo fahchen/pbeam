@@ -524,10 +524,10 @@ fn decodes_each_identifier_tag_and_checks_the_node() {
     let mut pid_ref = vec![90, 0, 3];
     pid_ref.extend(node());
     pid_ref.extend(with_words(&[], &[0, 5, 1, 0x8000_0000]));
-    assert!(matches!(
-        decode_with(&mut atoms, &pid_ref, false),
-        Err(DecodeError::Unsupported(_))
-    ));
+    assert_eq!(
+        decode_with(&mut atoms, &pid_ref, false).unwrap(),
+        Term::Reference(Reference::ordinary(5).unwrap().pid_reference())
+    );
     // A count above five raises badarg (`ERTS_MAX_REF_NUMBERS`,
     // `external.c:4800`).
     let mut six_ref = vec![90, 0, 6];
@@ -590,6 +590,16 @@ fn decodes_the_unsupported_forms_and_local_terms() {
     assert!(matches!(
         decode_with(&mut atoms, &local_fun, false),
         Err(DecodeError::Unsupported(_))
+    ));
+    // A free-variable count above 255 raises badarg
+    // (`MAX_ARG`, `erl_vm.h:54`, `external.c:6392-6394`).
+    let mut many_free = vec![112, 0, 0, 0, 0, 0];
+    many_free.extend([0u8; 16]);
+    many_free.extend([0u8; 4]);
+    many_free.extend(256u32.to_be_bytes());
+    assert!(matches!(
+        decode_with(&mut atoms, &many_free, false),
+        Err(DecodeError::Badarg)
     ));
     // A `LOCAL_EXT` term inside a term sets the local node, and its hash
     // covers the term that it wraps (`external.c:5250-5255`).
@@ -746,6 +756,18 @@ fn validates_the_structure_before_it_adds_an_atom() {
         Err(DecodeError::Badarg)
     ));
     assert!(atoms.get("xyz").is_none());
+    // The structure pass adds no atom, and the decode pass adds an atom
+    // before a later malformed atom fails (`decoded_size` and `dec_term`,
+    // `external.c:6150-6500`, `4525-4545`).
+    assert!(matches!(
+        decode_with(
+            &mut atoms,
+            &[104, 2, 119, 3, 97, 98, 99, 119, 1, 0xff],
+            false
+        ),
+        Err(DecodeError::Badarg)
+    ));
+    assert!(atoms.get("abc").is_some());
 }
 
 #[test]
@@ -869,6 +891,22 @@ fn encodes_a_hashmap_in_the_erts_order() {
     assert_eq!(
         encode(&Term::Map(map), &atoms, &Options::default()).unwrap(),
         expected
+    );
+}
+
+#[test]
+fn decodes_a_pid_reference() {
+    // A pid reference has the marker bit of its third reference number, and
+    // it round-trips as the same reference (`dec_term`, `external.c:4786-4855`).
+    let atoms = AtomTable::new();
+    let reference = Reference::ordinary(5).unwrap().pid_reference();
+    let body = encode(&Term::Reference(reference), &atoms, &Options::default()).unwrap();
+    let mut input = vec![VERSION_MAGIC];
+    input.extend(body);
+    let mut decode_atoms = AtomTable::new();
+    assert_eq!(
+        decode_full(&mut decode_atoms, &input, false).unwrap(),
+        Term::Reference(reference)
     );
 }
 

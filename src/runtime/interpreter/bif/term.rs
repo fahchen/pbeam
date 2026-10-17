@@ -56,6 +56,11 @@ const MAX_REFERENCE: u32 = 1 << 18;
 const REF_NUMBER_1_MASK: u32 = 0xFFFC_0000;
 /// The scheduler number of the references of PBeam (`REF_THREAD`).
 const REF_THREAD: u32 = 1;
+/// The bit of a reference value that marks a pid reference
+/// (see `Reference::pid_reference`).
+const PID_REFERENCE_MARKER: u64 = 1 << 63;
+/// The largest free-variable count of a fun (`MAX_ARG`, `erl_vm.h:54`).
+const MAX_FUN_ARG: usize = 255;
 /// The largest count of reference numbers (`ERTS_MAX_REF_NUMBERS`).
 const MAX_REFERENCE_NUMBERS: usize = 5;
 /// The largest creation of a legacy `PID_EXT`, `PORT_EXT`, or
@@ -716,26 +721,12 @@ fn check_number(input: &[u8], index: &mut usize, count: usize) -> Result<u32, De
         .fold(0u32, |value, &byte| (value << 8) | u32::from(byte)))
 }
 
-/// Take an atom name of `length` bytes at `index` and validate its encoding,
-/// as `dec_atom` (`external.c:4490-4550`) does, without adding the atom.
-fn check_atom_name(
-    input: &[u8],
-    index: &mut usize,
-    length: usize,
-    latin1: bool,
-) -> Result<(), DecodeError> {
-    let start = *index;
-    check_skip(input, index, length)?;
-    let bytes = &input[start..*index];
-    if latin1 {
-        return (length <= MAX_ATOM_CHARACTERS)
-            .then_some(())
-            .ok_or(DecodeError::Badarg);
-    }
-    let name = std::str::from_utf8(bytes).map_err(|_| DecodeError::Badarg)?;
-    (name.chars().count() <= MAX_ATOM_CHARACTERS)
-        .then_some(())
-        .ok_or(DecodeError::Badarg)
+/// Take an atom name of `length` bytes at `index`. The validation pass
+/// reads only the structure, so the checks of `dec_atom`
+/// (`external.c:4490-4550`) run in `Decoder::atom` after the atoms of the
+/// earlier terms exist, as `decoded_size` and `dec_term` do.
+fn check_atom_name(input: &[u8], index: &mut usize, length: usize) -> Result<(), DecodeError> {
+    check_skip(input, index, length)
 }
 
 /// Take and check the creation of a legacy `PID_EXT`, `PORT_EXT`, or
@@ -762,24 +753,24 @@ fn check_sysname(input: &[u8], index: &mut usize, local: bool) -> Result<(), Dec
         100 => {
             *index += 1;
             let length = check_number(input, index, 2)? as usize;
-            check_atom_name(input, index, length, true)
+            check_atom_name(input, index, length)
         }
         118 => {
             *index += 1;
             let length = check_number(input, index, 2)? as usize;
-            check_atom_name(input, index, length, false)
+            check_atom_name(input, index, length)
         }
         115 => {
             *index += 1;
             let length = usize::from(*input.get(*index).ok_or(DecodeError::Badarg)?);
             *index += 1;
-            check_atom_name(input, index, length, true)
+            check_atom_name(input, index, length)
         }
         119 => {
             *index += 1;
             let length = usize::from(*input.get(*index).ok_or(DecodeError::Badarg)?);
             *index += 1;
-            check_atom_name(input, index, length, false)
+            check_atom_name(input, index, length)
         }
         _ => Err(DecodeError::Badarg),
     }
@@ -805,21 +796,21 @@ fn validate(input: &[u8], seed: u32) -> Result<(), DecodeError> {
             70 => check_skip(input, &mut index, 8)?,
             100 => {
                 let length = check_number(input, &mut index, 2)? as usize;
-                check_atom_name(input, &mut index, length, true)?;
+                check_atom_name(input, &mut index, length)?;
             }
             115 => {
                 let length = usize::from(*input.get(index).ok_or(DecodeError::Badarg)?);
                 index += 1;
-                check_atom_name(input, &mut index, length, true)?;
+                check_atom_name(input, &mut index, length)?;
             }
             118 => {
                 let length = check_number(input, &mut index, 2)? as usize;
-                check_atom_name(input, &mut index, length, false)?;
+                check_atom_name(input, &mut index, length)?;
             }
             119 => {
                 let length = usize::from(*input.get(index).ok_or(DecodeError::Badarg)?);
                 index += 1;
-                check_atom_name(input, &mut index, length, false)?;
+                check_atom_name(input, &mut index, length)?;
             }
             106 => {}
             107 => {
@@ -949,6 +940,9 @@ fn validate(input: &[u8], seed: u32) -> Result<(), DecodeError> {
                 // (`enc_term`, `external.c:3976-4005`).
                 check_skip(input, &mut index, 4 + 1 + 16 + 4)?;
                 let free = check_number(input, &mut index, 4)? as usize;
+                if free > MAX_FUN_ARG {
+                    return Err(DecodeError::Badarg);
+                }
                 frames.push(CheckFrame {
                     kind: CheckKind::Tuple,
                     remaining: 4 + free,
@@ -1656,9 +1650,13 @@ impl Decoder<'_> {
         let value = (u64::from(numbers[2]) << 32)
             | (u64::from(numbers[1]) & 0xFFFC_0000)
             | u64::from(numbers[0]);
-        Reference::ordinary(value)
-            .map(Term::Reference)
-            .ok_or(DecodeError::Unsupported("a pid reference"))
+        let reference = match Reference::ordinary(value) {
+            Some(reference) => reference,
+            None => Reference::ordinary(value & !PID_REFERENCE_MARKER)
+                .expect("the marker bit is the only reason for the error")
+                .pid_reference(),
+        };
+        Ok(Term::Reference(reference))
     }
 
     /// Decode an old `REFERENCE_EXT`, as `dec_term`
