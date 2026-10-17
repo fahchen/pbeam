@@ -45,6 +45,9 @@ md5_iodata() ->
      binary_to_list(erlang:md5(list_to_binary(bytes(40000)))),
      binary_to_list(erlang:md5([[bytes(40000)]])),
      binary_to_list(erlang:md5([list_to_binary(bytes(40000))])),
+     binary_to_list(erlang:md5(list_to_binary(bytes(56)))),
+     binary_to_list(erlang:md5(list_to_binary(bytes(60)))),
+     binary_to_list(erlang:md5(list_to_binary(bytes(63)))),
      ?CAUSE(erlang:md5(id(1))),
      ?CAUSE(erlang:md5([1 | 2])),
      ?CAUSE(erlang:md5([257]))].
@@ -68,6 +71,8 @@ md5_context() ->
      binary_to_list(erlang:md5_final(C0)),
      binary_to_list(erlang:md5_final(erlang:md5_update(C1, <<"def">>))),
      byte_size(erlang:md5_update(C0, list_to_binary(bytes(40000)))),
+     binary_to_list(erlang:md5_update(C0, list_to_binary(bytes(56)))),
+     binary_to_list(erlang:md5_update(C0, list_to_binary(bytes(64)))),
      binary_to_list(erlang:md5_final(Fabricated)),
      ?CAUSE(erlang:md5_final(Final)),
      ?CAUSE(erlang:md5_update(Final, <<>>)),
@@ -96,7 +101,7 @@ phash(Term) ->
 
 terms() ->
     [576460752303423488, 1 bsl 64, -(1 bsl 59), -(1 bsl 64),
-     4294967297, 1.5, {a, 1, 2}, [1, 2, 3], one(a, 1),
+     4294967297, -(1 bsl 59) - 1, 1.5, {a, 1, 2}, [1, 2, 3], one(a, 1),
      list_to_binary([1, 2, 3]), abc, -1, 0, 1, [], {}, list_to_binary([]), one(1, 2),
      {[1, 2, {a, b}], one(1, [2]), list_to_binary([3, 4])},
      bytes(100), list_to_binary(bytes(11)), big_map(40), big_list(),

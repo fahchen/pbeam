@@ -844,7 +844,7 @@ pub(crate) fn make_hash(atoms: &AtomTable, term: &Term) -> u32 {
                 }
                 Term::Integer(value) => match term.small_integer() {
                     Some(small) => hash = small_hash(hash, small),
-                    None => hash = bignum_hash(hash, false, &[value.unsigned_abs()]),
+                    None => hash = bignum_hash(hash, *value < 0, &[value.unsigned_abs()]),
                 },
                 Term::BigInt(value) => {
                     let digits = value.magnitude().to_u64_digits();

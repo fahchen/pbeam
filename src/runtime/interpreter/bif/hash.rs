@@ -190,7 +190,9 @@ impl Md5 {
         // The padding fills the rest of the block, except the 8 bytes of the
         // bit length (`pad`, `erl_md5.c:222-243`).
         let filled = (size + 1) % 64;
-        let zeroes = (64 - 8 - filled) & 63;
+        // `size_t` arithmetic wraps for a buffered part of 56 bytes or more,
+        // as `pad` does (`erl_md5.c:227-231`).
+        let zeroes = (56_u64.wrapping_sub(filled as u64) & 63) as usize;
         let bits = (self.total + self.buffered).wrapping_mul(8);
         let length = size + 1 + zeroes + 8;
         pad[length - 8..length].copy_from_slice(&bits.to_le_bytes());
@@ -325,6 +327,26 @@ impl Md5 {
 /// assert_eq!(bytes, b"a");
 /// assert!(rest.unwrap().is_some());
 /// ```
+/// Give the bytes of a pending run to `sum` as one update call, and empty
+/// the run. ERTS reads a flat list level of bytes with one call of its sum
+/// function (`erl_bif_chksum.c:120-155`), so the md5 state of
+/// `erlang:md5_update/2` keeps the same block boundaries.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut run = vec![1, 2];
+/// let mut bytes = Vec::new();
+/// flush(&mut run, &mut |part| bytes.extend_from_slice(part));
+/// assert_eq!(bytes, [1, 2]);
+/// ```
+fn flush(run: &mut Vec<u8>, sum: &mut impl FnMut(&[u8])) {
+    if !run.is_empty() {
+        sum(run);
+        run.clear();
+    }
+}
+
 fn read_binary(
     binary: &Binary,
     budget: &mut u64,
@@ -376,14 +398,21 @@ fn read(term: &Term, budget: &mut u64, sum: &mut impl FnMut(&[u8])) -> Result<Op
         };
     };
     let mut current = term;
+    // A run of byte elements, which one update call reads, as one call of
+    // `sumfun` reads a flat list level (`erl_bif_chksum.c:120-155`).
+    let mut run: Vec<u8> = Vec::new();
     loop {
         let Some((head, rest)) = current.cons_cell() else {
             // The tail of the list is nil, a binary, or not iodata.
             if current.is_nil() {
+                flush(&mut run, sum);
                 return Ok(None);
             }
             return match current {
-                Term::Binary(binary) => read_binary(binary, budget, sum),
+                Term::Binary(binary) => {
+                    flush(&mut run, sum);
+                    read_binary(binary, budget, sum)
+                }
                 _ => Err(()),
             };
         };
@@ -392,17 +421,20 @@ fn read(term: &Term, budget: &mut u64, sum: &mut impl FnMut(&[u8])) -> Result<Op
             _ if head.is_nil() => {}
             Term::Integer(value @ 0..=255) => {
                 if *budget == 0 {
+                    flush(&mut run, sum);
                     return Ok(Some(current.clone()));
                 }
-                sum(&[*value as u8]);
+                run.push(*value as u8);
                 *budget -= 1;
             }
             Term::Cons(_) => {
+                flush(&mut run, sum);
                 if let Some(part) = read(head, budget, sum)? {
                     return Ok(Some(Term::cons(part, rest.clone())));
                 }
             }
             Term::Binary(binary) => {
+                flush(&mut run, sum);
                 if let Some(part) = read_binary(binary, budget, sum)? {
                     return Ok(Some(Term::cons(part, rest.clone())));
                 }
