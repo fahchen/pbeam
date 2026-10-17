@@ -1,5 +1,9 @@
-//! The ERTS internal term hash, as in ERTS OTP 29.1.1 (`erts_internal_hash`
-//! and `make_internal_hash` in `erl_term_hashing.c`).
+//! The ERTS term hashes, as in ERTS OTP 29.1.1 (`erl_term_hashing.c`): the
+//! internal hash (`erts_internal_hash` and `make_internal_hash`), the old
+//! term hash `make_hash` of `erlang:phash/2`, and the term hash
+//! `make_hash2` of `erlang:phash2/1,2`. The atom table hash `atom_hash`
+//! (`atom.c:83-105`) here serves the two phash hashes and the stored hash of
+//! an ETS key.
 //!
 //! An immediate term hashes as `ihash_mix64` of its ERTS word:
 //!
@@ -25,7 +29,7 @@
 use num_bigint::Sign;
 
 use super::{
-    Fun, Map, PortId, ProcessId, Reference, Target, Term,
+    Atom, AtomTable, Binary, Fun, Map, PortId, ProcessId, Reference, Target, Term,
     map::{Child, Form, Node},
     match_context::MATCH_CONTEXT_ESCAPE,
 };
@@ -684,6 +688,897 @@ impl State {
             stack.push(cell(pair));
         }
         Some(cell(last))
+    }
+}
+
+/// Return the atom table hash of `atom`, as `atom_hash` (`atom.c:83-105`)
+/// gives it: the `hashpjw` hash of the UTF-8 bytes of the name, which this
+/// function reads from `atoms`. A two-byte UTF-8 sequence for a Latin-1
+/// character hashes as the low byte of that character. The atom table
+/// stores the value as the `hvalue` of the atom, and the two phash hashes
+/// and `MAKE_HASH` of an ETS key read it from there.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(atom_hash(&atoms, &a), 0x61);
+/// assert_eq!(atom_hash(&atoms, &ab), 0x672);
+/// ```
+pub(crate) fn atom_hash(atoms: &AtomTable, atom: &Atom) -> u64 {
+    let mut bytes = atoms.name_of(atom).bytes().peekable();
+    let mut hash: u64 = 0;
+    while let Some(mut byte) = bytes.next() {
+        if byte & 0xFE == 0xC2
+            && let Some(next) = bytes.next_if(|next| next & 0xC0 == 0x80)
+        {
+            byte = (byte << 6) | (next & 0x3F);
+        }
+        hash = (hash << 4) + u64::from(byte);
+        let high = hash & 0xF000_0000;
+        if high != 0 {
+            hash ^= high >> 24;
+            hash ^= high;
+        }
+    }
+    hash
+}
+
+/// The prime numbers just above 2^28 (`FUNNY_NUMBER1` to `FUNNY_NUMBER14`,
+/// `erl_term_hashing.c:100-115`). `FUNNY_NUMBER7` and `FUNNY_NUMBER15`
+/// belong to the record paths, which PBeam has no term for.
+const FUNNY_1: u32 = 268_440_163;
+const FUNNY_2: u32 = 268_439_161;
+const FUNNY_3: u32 = 268_435_459;
+const FUNNY_4: u32 = 268_436_141;
+const FUNNY_5: u32 = 268_438_633;
+const FUNNY_6: u32 = 268_437_017;
+const FUNNY_8: u32 = 268_437_511;
+const FUNNY_9: u32 = 268_439_627;
+const FUNNY_10: u32 = 268_440_479;
+const FUNNY_11: u32 = 268_440_577;
+const FUNNY_12: u32 = 268_440_581;
+const FUNNY_13: u32 = 268_440_593;
+const FUNNY_14: u32 = 268_440_611;
+
+/// The golden-ratio mix value of `make_hash2` (`HCONST`,
+/// `erl_term_hashing.c:437`).
+const HCONST: u32 = 0x9e37_79b9;
+/// `HCONST * n mod 2^32` for the mixes of `make_hash2`
+/// (`erl_term_hashing.c:866-888`). The unused multiples belong to the record
+/// and external-term paths.
+const HCONST_2: u32 = 0x3c6e_f372;
+const HCONST_3: u32 = 0xdaa6_6d2b;
+const HCONST_4: u32 = 0x78dd_e6e4;
+const HCONST_5: u32 = 0x1715_609d;
+const HCONST_6: u32 = 0xb54c_da56;
+const HCONST_7: u32 = 0x5384_540f;
+const HCONST_9: u32 = 0x8ff3_4781;
+const HCONST_10: u32 = 0x2e2a_c13a;
+const HCONST_11: u32 = 0xcc62_3af3;
+const HCONST_12: u32 = 0x6a99_b4ac;
+const HCONST_13: u32 = 0x08d1_2e65;
+const HCONST_14: u32 = 0xa708_a81e;
+const HCONST_15: u32 = 0x4540_21d7;
+const HCONST_16: u32 = 0xe377_9b90;
+const HCONST_19: u32 = 0xbe1e_08bb;
+
+/// The `NIL_DEF` tag value of `[]` in a `make_hash2` mix
+/// (`erl_term.h:1442-1443`).
+const NIL_DEF: u32 = 2;
+
+/// Return true for a cons cell, as the ERTS C check `is_list` does
+/// (`erl_term.h:1260-1261`): `[]` is not a cons. The Erlang guard
+/// `is_list/1` of [`Term::is_list`] also accepts `[]`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(!is_cons(&Term::nil()));
+/// assert!(is_cons(&Term::list_from([Term::Integer(1)])));
+/// ```
+fn is_cons(term: &Term) -> bool {
+    matches!(term, Term::Cons(_))
+}
+
+/// The block size of the binary hash of `make_hash2`
+/// (`BLOCK_HASH_BYTES_PER_ITER`, `erl_term_hashing.c:440`).
+const BLOCK_BYTES: usize = 12;
+
+/// The value that `make_hash2` gives `[]` when it is the whole term
+/// (`erl_term_hashing.c:1546-1548`).
+const NIL_HASH: u32 = 3_468_870_702;
+
+/// The steps of the walk of [`make_hash`], as the term work stack (`WSTACK`)
+/// of ERTS holds its operations (`erl_term_hashing.c:169-180`).
+enum HashStep<'a> {
+    /// Hash this term.
+    Term(&'a Term),
+    /// Hash the elements of a tuple from `index`, then mix the arity
+    /// (`MAKE_HASH_TUPLE_OP`).
+    Tuple {
+        /// The elements of the tuple.
+        elements: &'a [Term],
+        /// The element to hash next.
+        index: usize,
+    },
+    /// Hash the free variables of a local fun from `index`
+    /// (`MAKE_HASH_TERM_ARRAY_OP`).
+    Array {
+        /// The free variables of the fun.
+        elements: &'a [Term],
+        /// The variable to hash next.
+        index: usize,
+    },
+    /// Hash the cells of a list (`LIST_DEF`).
+    Cells(&'a Term),
+    /// Continue at the tail of a list (`MAKE_HASH_CDR_PRE_OP`).
+    CdrPre(&'a Term),
+    /// Mix the mark of the tail of a list (`MAKE_HASH_CDR_POST_OP`).
+    CdrPost,
+}
+
+/// Return the value of the old term hash of `term`, as `make_hash`
+/// (`erl_term_hashing.c:165-427`) gives it to `erlang:phash/2`. `atoms` owns
+/// the names of the atoms of `term`.
+///
+/// A term that is not immediate goes through a work stack, so a deep term
+/// does not recurse.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(make_hash(&atoms, &Term::static_atom("abc")), 26499);
+/// assert_eq!(make_hash(&atoms, &Term::Integer(1)), 1_688_579_892);
+/// ```
+pub(crate) fn make_hash(atoms: &AtomTable, term: &Term) -> u32 {
+    let mut hash: u32 = 0;
+    let mut stack: Vec<HashStep> = Vec::new();
+    let mut next = Some(HashStep::Term(term));
+    while let Some(step) = next.take().or_else(|| stack.pop()) {
+        match step {
+            HashStep::Term(term) => match term {
+                Term::Nil => hash = hash.wrapping_mul(FUNNY_3).wrapping_add(1),
+                Term::Atom(atom) => {
+                    let value = atom_hash(atoms, atom) as u32;
+                    hash = hash.wrapping_mul(FUNNY_1).wrapping_add(value);
+                }
+                Term::Integer(value) => match term.small_integer() {
+                    Some(small) => hash = small_hash(hash, small),
+                    None => hash = bignum_hash(hash, false, &[value.unsigned_abs()]),
+                },
+                Term::BigInt(value) => {
+                    let digits = value.magnitude().to_u64_digits();
+                    hash = bignum_hash(hash, value.sign() == Sign::Minus, &digits);
+                }
+                Term::Float(value) => {
+                    // `GET_DOUBLE` reads the two 32-bit words of the double,
+                    // and `FLOAT_DEF` mixes their exclusive or
+                    // (`erl_term_hashing.c:270-282`). ERTS first makes the
+                    // negative zero positive, so both zeros mix the bits of
+                    // the positive zero.
+                    let value = if *value == 0.0 { 0.0 } else { *value };
+                    let bits = value.to_bits();
+                    hash = hash
+                        .wrapping_mul(FUNNY_6)
+                        .wrapping_add((bits as u32) ^ ((bits >> 32) as u32));
+                }
+                Term::Binary(bytes) => hash = binary_hash(hash, bytes),
+                Term::Pid(pid) => {
+                    hash = uint32_step(hash, pid.0, FUNNY_5).wrapping_mul(FUNNY_6);
+                }
+                Term::Port(port) => {
+                    let (low, high) = (port.0 as u32, (port.0 >> 32) as u32);
+                    if high != 0 {
+                        hash = uint32_step(hash, u64::from(high), FUNNY_11);
+                    }
+                    hash = uint32_step(hash, u64::from(low), FUNNY_9).wrapping_mul(FUNNY_10);
+                }
+                Term::Reference(reference) => {
+                    let number = u64::from(reference.numbers()[0]);
+                    hash = uint32_step(hash, number, FUNNY_9).wrapping_mul(FUNNY_10);
+                }
+                Term::Tuple(elements) => stack.push(HashStep::Tuple { elements, index: 0 }),
+                Term::Map(_) => {
+                    hash = hash
+                        .wrapping_mul(FUNNY_13)
+                        .wrapping_add(FUNNY_14)
+                        .wrapping_add(make_hash2(atoms, term).0);
+                }
+                Term::Cons(_) => next = Some(HashStep::Cells(term)),
+                Term::Fun(fun) => next = fun_hash(atoms, fun, &mut hash, &mut stack),
+                Term::MatchContext(_) => unreachable!("{MATCH_CONTEXT_ESCAPE}"),
+            },
+            HashStep::Tuple { elements, index } => match elements.get(index) {
+                Some(element) => {
+                    next = Some(HashStep::Term(element));
+                    stack.push(HashStep::Tuple {
+                        elements,
+                        index: index + 1,
+                    });
+                }
+                None => {
+                    hash = hash
+                        .wrapping_mul(FUNNY_9)
+                        .wrapping_add(elements.len() as u32);
+                }
+            },
+            HashStep::Array { elements, index } => {
+                if let Some(element) = elements.get(index) {
+                    next = Some(HashStep::Term(element));
+                    stack.push(HashStep::Array {
+                        elements,
+                        index: index + 1,
+                    });
+                }
+            }
+            HashStep::Cells(list) => next = cells_hash(&mut hash, &mut stack, list),
+            HashStep::CdrPre(tail) => {
+                if is_cons(tail) {
+                    next = Some(HashStep::Cells(tail));
+                } else {
+                    stack.push(HashStep::CdrPost);
+                    next = Some(HashStep::Term(tail));
+                }
+            }
+            HashStep::CdrPost => hash = hash.wrapping_mul(FUNNY_8),
+        }
+    }
+    hash
+}
+
+/// Mix a small integer as `SMALL_DEF` (`erl_term_hashing.c:227-238`) does:
+/// the four bytes of the value and, for a value above 2^32, the four bytes
+/// above them, then the sign mark.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(small_hash(0, -1), 1_680_185_270);
+/// ```
+fn small_hash(hash: u32, small: i64) -> u32 {
+    let magnitude = small.unsigned_abs();
+    let mut value = uint32_step(hash, magnitude, FUNNY_2);
+    if magnitude >> 32 != 0 {
+        value = uint32_step(value, magnitude >> 32, FUNNY_2);
+    }
+    value.wrapping_mul(if small < 0 { FUNNY_4 } else { FUNNY_3 })
+}
+
+/// Mix the digits of a bignum as `BIG_DEF` (`erl_term_hashing.c:340-380`)
+/// does: every byte of every digit below the top digit, then the bytes of
+/// the top digit, of which ERTS skips the four high zero bytes, then the
+/// sign mark. The digits are 64-bit words, least significant first.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(bignum_hash(0, false, &[1]), 1_688_579_892 >> 0);
+/// ```
+fn bignum_hash(hash: u32, negative: bool, digits: &[u64]) -> u32 {
+    let (top, below) = digits.split_last().expect("a bignum has a digit");
+    let mut hash = hash;
+    for digit in below {
+        for byte in digit.to_le_bytes() {
+            hash = hash.wrapping_mul(FUNNY_2).wrapping_add(u32::from(byte));
+        }
+    }
+    let bytes = if top >> 32 == 0 { 4 } else { 8 };
+    let mut digit = *top;
+    for _ in 0..bytes {
+        hash = hash
+            .wrapping_mul(FUNNY_2)
+            .wrapping_add((digit & 0xFF) as u32);
+        digit >>= 8;
+    }
+    hash.wrapping_mul(if negative { FUNNY_4 } else { FUNNY_3 })
+}
+
+/// Mix the bytes of a binary as the list path of `BITSTRING_DEF`
+/// (`hash_binary_bytes`, `erl_term_hashing.c:117-160`) does: each byte below
+/// the tail bits, then the byte with the tail bits and their count, then the
+/// number of whole bytes.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(binary_hash(0, &Binary::from(b"abc".to_vec())), 0x28fd5cae);
+/// ```
+fn binary_hash(hash: u32, bytes: &Binary) -> u32 {
+    let bit_size = bytes.bit_size();
+    let whole = bit_size / 8;
+    let tail = bit_size % 8;
+    let mut hash = hash;
+    for byte in bytes[..whole].iter() {
+        hash = hash.wrapping_mul(FUNNY_1).wrapping_add(u32::from(*byte));
+    }
+    if tail > 0 {
+        // The bits of the tail are the high bits of the last byte of the
+        // packed form of the binary (`Binary::deref`).
+        let last = bytes[whole] >> (8 - tail);
+        hash = hash
+            .wrapping_mul(FUNNY_1)
+            .wrapping_add(u32::from(last))
+            .wrapping_mul(FUNNY_12)
+            .wrapping_add(tail as u32);
+    }
+    hash.wrapping_mul(FUNNY_4).wrapping_add(whole as u32)
+}
+
+/// Mix the module, the index, the old unique value, and the free variables
+/// of a fun as `FUN_DEF` (`erl_term_hashing.c:240-268`) does, or the arity
+/// and the name of an external fun. Return the step that continues the walk
+/// for the first free variable, if the fun has one.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut stack = Vec::new();
+/// let fun = Term::Fun(Fun::external(module, function, 1));
+/// assert!(fun_hash(&atoms, &fun, 0, &mut stack).is_none());
+/// ```
+fn fun_hash<'a>(
+    atoms: &AtomTable,
+    fun: &'a Fun,
+    hash: &mut u32,
+    stack: &mut Vec<HashStep<'a>>,
+) -> Option<HashStep<'a>> {
+    match fun.target() {
+        Target::Local(lambda) => {
+            let free = fun.free();
+            let module = atom_hash(atoms, lambda.module()) as u32;
+            *hash = hash
+                .wrapping_mul(FUNNY_10)
+                .wrapping_add(free.len() as u32)
+                .wrapping_mul(FUNNY_1)
+                .wrapping_add(module)
+                .wrapping_mul(FUNNY_2)
+                .wrapping_add(lambda.index as u32)
+                .wrapping_mul(FUNNY_2)
+                .wrapping_add(lambda.old_unique as u32);
+            let (first, rest) = free.split_first()?;
+            if !rest.is_empty() {
+                stack.push(HashStep::Array {
+                    elements: rest,
+                    index: 0,
+                });
+            }
+            Some(HashStep::Term(first))
+        }
+        Target::External {
+            module,
+            function,
+            arity,
+        } => {
+            let module = atom_hash(atoms, module) as u32;
+            let function = atom_hash(atoms, function) as u32;
+            *hash = hash
+                .wrapping_mul(FUNNY_11)
+                .wrapping_add(*arity)
+                .wrapping_mul(FUNNY_1)
+                .wrapping_add(module)
+                .wrapping_mul(FUNNY_1)
+                .wrapping_add(function);
+            None
+        }
+    }
+}
+
+/// Hash the cells of a list from `list` as `LIST_DEF`
+/// (`erl_term_hashing.c:289-337`) does: a byte element mixes
+/// `FUNNY_NUMBER2` and continues, and the first element that is not a byte
+/// continues as a term while the tail waits on the work stack. Return the
+/// step that continues the walk.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let list = Term::list_from([Term::Integer(1), Term::Integer(2)]);
+/// let mut stack = Vec::new();
+/// assert!(cells_hash(&mut 0, &mut stack, &list).is_none());
+/// ```
+fn cells_hash<'a>(
+    hash: &mut u32,
+    stack: &mut Vec<HashStep<'a>>,
+    list: &'a Term,
+) -> Option<HashStep<'a>> {
+    let mut current = list;
+    loop {
+        let (head, rest) = current.cons_cell()?;
+        if let Some(byte) = byte(head) {
+            *hash = hash.wrapping_mul(FUNNY_2).wrapping_add(byte as u32);
+            if !is_cons(rest) {
+                stack.push(HashStep::CdrPost);
+                return Some(HashStep::Term(rest));
+            }
+            current = rest;
+            continue;
+        }
+        stack.push(HashStep::CdrPre(rest));
+        return Some(HashStep::Term(head));
+    }
+}
+
+/// Mix a 32-bit value into a hash in four steps, as `UINT32_HASH_STEP`
+/// (`erl_term_hashing.c:183-193`) does.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(uint32_step(0, 0x01020304, FUNNY_2), 0x04030201 * 0);
+/// ```
+fn uint32_step(hash: u32, value: u64, prime: u32) -> u32 {
+    let mut hash = hash;
+    let mut value = value;
+    for _ in 0..4 {
+        hash = hash.wrapping_mul(prime).wrapping_add((value & 0xFF) as u32);
+        value >>= 8;
+    }
+    hash
+}
+
+/// One item of the work stack of [`make_hash2`], as the `ESTACK` of ERTS
+/// holds it (`erl_term_hashing.c:908-910`).
+enum Hash2Item<'a> {
+    /// Hash this term.
+    Term(&'a Term),
+    /// Hash the children of this HAMT node.
+    Node(&'a Node),
+    /// The end of the key and the value of one pair of a map
+    /// (`HASH_MAP_PAIR`).
+    Pair,
+    /// The end of the pairs of a map (`HASH_MAP_TAIL`), with the hash and
+    /// the exclusive or of the pairs around the pairs of the map.
+    Tail {
+        /// The hash before the pairs.
+        hash: u32,
+        /// The exclusive or before the pairs.
+        xor: u32,
+    },
+}
+
+/// The three 32-bit words of one `MIX` state (`ErtsBlockHashHelperCtx`,
+/// `erl_term_hashing.c:418-424`).
+struct Mix {
+    /// The first word (`a`).
+    a: u32,
+    /// The second word (`b`).
+    b: u32,
+    /// The third word (`c`).
+    c: u32,
+}
+
+impl Mix {
+    /// Mix the three words, as the `MIX` macro
+    /// (`erl_term_hashing.c:427-439`) does. Every difference wraps and every
+    /// shift is logical, as the `Uint32` arithmetic of ERTS does.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut mix = Mix { a: 1, b: 2, c: 3 };
+    /// mix.mix();
+    /// ```
+    fn mix(&mut self) {
+        let (mut a, mut b, mut c) = (self.a, self.b, self.c);
+        a = a.wrapping_sub(b);
+        a = a.wrapping_sub(c);
+        a ^= c >> 13;
+        b = b.wrapping_sub(c);
+        b = b.wrapping_sub(a);
+        b ^= a << 8;
+        c = c.wrapping_sub(a);
+        c = c.wrapping_sub(b);
+        c ^= b >> 13;
+        a = a.wrapping_sub(b);
+        a = a.wrapping_sub(c);
+        a ^= c >> 12;
+        b = b.wrapping_sub(c);
+        b = b.wrapping_sub(a);
+        b ^= a << 16;
+        c = c.wrapping_sub(a);
+        c = c.wrapping_sub(b);
+        c ^= b >> 5;
+        a = a.wrapping_sub(b);
+        a = a.wrapping_sub(c);
+        a ^= c >> 3;
+        b = b.wrapping_sub(c);
+        b = b.wrapping_sub(a);
+        b ^= a << 10;
+        c = c.wrapping_sub(a);
+        c = c.wrapping_sub(b);
+        c ^= b >> 15;
+        self.a = a;
+        self.b = b;
+        self.c = c;
+    }
+}
+
+/// Mix two values into a `make_hash2` value as `UINT32_HASH_2` does
+/// (`erl_term_hashing.c:911-917`): the constant plus the first value is `a`,
+/// the constant plus the second is `b`, and `MIX` mixes them into the value,
+/// which becomes `c`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(hash2_with(0, 1, 0, HCONST), hash_with(0, 1, HCONST));
+/// ```
+fn hash2_with(hash: u32, first: u32, second: u32, constant: u32) -> u32 {
+    let mut mix = Mix {
+        a: constant.wrapping_add(first),
+        b: constant.wrapping_add(second),
+        c: hash,
+    };
+    mix.mix();
+    mix.c
+}
+
+/// Mix one value into a `make_hash2` value as `UINT32_HASH` does: the second
+/// value is 0.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(hash_with(0, 1, HCONST), hash2_with(0, 1, 0, HCONST));
+/// ```
+fn hash_with(hash: u32, value: u32, constant: u32) -> u32 {
+    hash2_with(hash, value, 0, constant)
+}
+
+/// Return the block hash of `bytes` with the initial value `initval`, as
+/// `block_hash` (`erl_term_hashing.c:500-521`) does: the whole 12-byte blocks
+/// (`block_hash_buffer`, `457-477`), then the last bytes with the whole
+/// length added to the third word (`block_hash_final_bytes`, `479-498`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(block_hash(b"", HCONST_13), 0x3f1a8f42);
+/// ```
+fn block_hash(bytes: &[u8], initval: u32) -> u32 {
+    let (blocks, last) = bytes.as_chunks::<BLOCK_BYTES>();
+    let mut mix = Mix {
+        a: HCONST,
+        b: HCONST,
+        c: initval,
+    };
+    for block in blocks {
+        // Each block is three 32-bit words, least significant byte first.
+        for (word, bytes) in block.as_chunks::<4>().0.iter().enumerate() {
+            let value = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+            match word {
+                0 => mix.a = mix.a.wrapping_add(value),
+                1 => mix.b = mix.b.wrapping_add(value),
+                _ => mix.c = mix.c.wrapping_add(value),
+            }
+        }
+        mix.mix();
+    }
+    let (mut a, mut b) = (mix.a, mix.b);
+    let mut c = mix.c.wrapping_add(bytes.len() as u32);
+    for (index, byte) in last.iter().enumerate() {
+        let value = u32::from(*byte);
+        // The low byte of the third word holds the length
+        // (`block_hash_final_bytes`, `erl_term_hashing.c:486-498`).
+        match index {
+            0..=3 => a = a.wrapping_add(value << (8 * index)),
+            4..=7 => b = b.wrapping_add(value << (8 * (index - 4))),
+            _ => c = c.wrapping_add(value << (8 * (index - 8) + 8)),
+        }
+    }
+    let mut mix = Mix { a, b, c };
+    mix.mix();
+    mix.c
+}
+
+/// Mix a small integer into a `make_hash2` value as the `SMALL` case does
+/// (`erl_term_hashing.c:1553-1563`): a value of the s28 range mixes as the
+/// two's complement of the value, which the negative range mixes twice, and
+/// a larger value mixes its magnitude as two words (`NOT_SSMALL28_HASH`,
+/// `952-968`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(small_hash2(0, 0), 3_175_731_469);
+/// assert_eq!(small_hash2(0, -1), 1_117_813_597);
+/// ```
+fn small_hash2(hash: u32, small: i64) -> u32 {
+    if !(-(1 << 27)..(1 << 27)).contains(&small) {
+        let (constant, magnitude) = if small < 0 {
+            (HCONST_10, small.unsigned_abs())
+        } else {
+            (HCONST_11, small as u64)
+        };
+        return hash2_with(hash, magnitude as u32, (magnitude >> 32) as u32, constant);
+    }
+    let hash = match small < 0 {
+        true => hash_with(hash, small.unsigned_abs() as u32, HCONST),
+        false => hash,
+    };
+    hash_with(hash, small as i32 as u32, HCONST)
+}
+
+/// Mix the digits of a bignum into a `make_hash2` value as the
+/// `POS_BIG_SUBTAG` and `NEG_BIG_SUBTAG` cases do
+/// (`erl_term_hashing.c:1400-1432`): one mix for each 64-bit digit, least
+/// significant first, with the low word first. Return the number of digits,
+/// which is the number of iterations of the ERTS walk.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(bignum_hash2(0, false, &[1]), (hash2_with(0, 1, 0, HCONST_11), 1));
+/// ```
+fn bignum_hash2(hash: u32, negative: bool, digits: &[u64]) -> (u32, u64) {
+    let constant = if negative { HCONST_10 } else { HCONST_11 };
+    let mut hash = hash;
+    for digit in digits {
+        hash = hash2_with(hash, *digit as u32, (*digit >> 32) as u32, constant);
+    }
+    (hash, digits.len() as u64)
+}
+
+/// Push the pairs of a map for [`make_hash2`], with one iteration for each
+/// pair, and return the number of children. The value comes first and then
+/// the key, as the pushed `[Key | Value]` cells of ERTS do
+/// (`erl_term_hashing.c:1194-1206`, `1224-1250`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut stack = Vec::new();
+/// assert_eq!(push_children(&[], &mut stack, &[]), 0);
+/// ```
+fn push_children<'a>(
+    stack: &mut Vec<Hash2Item<'a>>,
+    iterations: &mut u64,
+    children: &'a [Child],
+) -> usize {
+    let push_pair = |stack: &mut Vec<Hash2Item<'a>>, key: &'a Term, value: &'a Term| {
+        stack.push(Hash2Item::Pair);
+        stack.push(Hash2Item::Term(value));
+        stack.push(Hash2Item::Term(key));
+    };
+    for child in children {
+        match child {
+            Child::Leaf(key, value) => push_pair(stack, key, value),
+            Child::Node(node) => stack.push(Hash2Item::Node(node)),
+            Child::Collision(pairs) => {
+                for (key, value) in pairs {
+                    push_pair(stack, key, value);
+                }
+            }
+        }
+    }
+    *iterations += children.len() as u64;
+    children.len()
+}
+
+/// Return the value of the term hash of `term` and the number of its
+/// iterations, as `make_hash2_helper` (`erl_term_hashing.c:858-1596`) gives
+/// them to `erlang:phash2/1,2`. `atoms` owns the names of the atoms of
+/// `term`. An atom and a small integer return from the fast path with no
+/// iteration, and the walk of a binary counts one iteration for each 12
+/// bytes.
+///
+/// ERTS charges one reduction for each 64 iterations, so a caller charges
+/// `iterations / 64`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(make_hash2(&atoms, &Term::static_atom("abc")), (26499, 0));
+/// assert_eq!(make_hash2(&atoms, &Term::Integer(1)).0, 539_485_162);
+/// ```
+pub(crate) fn make_hash2(atoms: &AtomTable, term: &Term) -> (u32, u64) {
+    // The fast paths before the walk (`erl_term_hashing.c:1005-1030`).
+    if let Term::Atom(atom) = term {
+        return (atom_hash(atoms, atom) as u32, 0);
+    }
+    if let Term::Integer(_) = term
+        && let Some(small) = term.small_integer()
+    {
+        return (small_hash2(0, small), 0);
+    }
+    let mut hash: u32 = 0;
+    let mut xor: u32 = 0;
+    let mut iterations: u64 = 0;
+    let mut stack: Vec<Hash2Item> = Vec::new();
+    let mut next: Option<&Term> = Some(term);
+    loop {
+        let term = match next.take() {
+            Some(term) => term,
+            None => match stack.pop() {
+                None => return (hash, iterations),
+                Some(Hash2Item::Term(term)) => term,
+                Some(Hash2Item::Pair) => {
+                    xor ^= hash;
+                    hash = 0;
+                    iterations += 1;
+                    continue;
+                }
+                Some(Hash2Item::Tail {
+                    hash: saved,
+                    xor: saved_xor,
+                }) => {
+                    hash = hash_with(saved, xor, HCONST_19);
+                    xor = saved_xor;
+                    iterations += 1;
+                    continue;
+                }
+                Some(Hash2Item::Node(node)) => {
+                    // An inner node has no size word and no mix of its own:
+                    // it reads its children into the pair context of the map
+                    // around it (`erl_map.h:203`, `erl_term_hashing.c:1192-1210`).
+                    push_children(&mut stack, &mut iterations, node.children());
+                    continue;
+                }
+            },
+        };
+        iterations += 1;
+        match term {
+            Term::Nil => {
+                hash = if hash == 0 {
+                    NIL_HASH
+                } else {
+                    hash_with(hash, NIL_DEF, HCONST_2)
+                };
+            }
+            Term::Atom(atom) => {
+                let value = atom_hash(atoms, atom) as u32;
+                hash = if hash == 0 {
+                    value
+                } else {
+                    hash_with(hash, value, HCONST_3)
+                };
+            }
+            Term::Integer(value) => match term.small_integer() {
+                Some(small) => hash = small_hash2(hash, small),
+                None => {
+                    let (value, count) = bignum_hash2(hash, *value < 0, &[value.unsigned_abs()]);
+                    hash = value;
+                    iterations += count;
+                }
+            },
+            Term::BigInt(value) => {
+                let digits = value.magnitude().to_u64_digits();
+                let (value, count) = bignum_hash2(hash, value.sign() == Sign::Minus, &digits);
+                hash = value;
+                iterations += count;
+            }
+            Term::Float(value) => {
+                // The two 32-bit words of the double, the high word first
+                // (`erl_term_hashing.c:1592-1601`).
+                let value = if *value == 0.0 { 0.0 } else { *value };
+                let bits = value.to_bits();
+                hash = hash2_with(hash, (bits >> 32) as u32, bits as u32, HCONST_12);
+            }
+            Term::Binary(bytes) => {
+                let bit_size = bytes.bit_size();
+                let whole = bit_size / 8;
+                // ERTS truncates the byte size to 32 bits, so the bytes
+                // above 2^32 do not change the value (`erl_term_hashing.c:1274-1278`).
+                let size = (whole & 0xFFFF_FFFF) as u32;
+                let tail = bit_size % 8;
+                let start = HCONST_13.wrapping_add(hash);
+                if size == 0 && tail == 0 {
+                    hash = start;
+                } else {
+                    iterations += u64::from((size / BLOCK_BYTES as u32).max(1));
+                    hash = block_hash(&bytes[..size as usize], start);
+                    if tail > 0 {
+                        let last = bytes[size as usize] >> (8 - tail);
+                        hash = hash2_with(hash, tail as u32, u32::from(last), HCONST_15);
+                    }
+                }
+            }
+            Term::Pid(pid) => hash = hash_with(hash, pid.0 as u32, HCONST_5),
+            Term::Port(port) => {
+                hash = hash2_with(hash, port.0 as u32, (port.0 >> 32) as u32, HCONST_6);
+            }
+            Term::Reference(reference) => {
+                hash = hash_with(hash, reference.numbers()[0], HCONST_7);
+            }
+            Term::Tuple(elements) => {
+                let arity = elements.len() as u32;
+                hash = hash_with(hash, arity, HCONST_9);
+                if let Some((first, rest)) = elements.split_first() {
+                    for element in rest.iter().rev() {
+                        stack.push(Hash2Item::Term(element));
+                        iterations += 1;
+                    }
+                    next = Some(first);
+                }
+            }
+            Term::Map(map) => match map.form() {
+                Form::Flat(pairs) => {
+                    hash = hash_with(hash, pairs.len() as u32, HCONST_16);
+                    if !pairs.is_empty() {
+                        stack.push(Hash2Item::Tail { hash, xor });
+                        hash = 0;
+                        xor = 0;
+                        for (key, value) in pairs.iter().rev() {
+                            stack.push(Hash2Item::Pair);
+                            stack.push(Hash2Item::Term(value));
+                            stack.push(Hash2Item::Term(key));
+                            iterations += 1;
+                        }
+                    }
+                }
+                Form::Hash { size, root } => {
+                    hash = hash_with(hash, size as u32, HCONST_16);
+                    if size != 0 {
+                        stack.push(Hash2Item::Tail { hash, xor });
+                        hash = 0;
+                        xor = 0;
+                        push_children(&mut stack, &mut iterations, root.children());
+                    }
+                }
+            },
+            Term::Cons(_) => {
+                let mut chunk: u32 = 0;
+                let mut count: u32 = 0;
+                let mut tail = term;
+                while let Some((head, rest)) = tail.cons_cell()
+                    && let Some(byte) = byte(head)
+                {
+                    chunk = (chunk << 8) | byte as u32;
+                    if count == 3 {
+                        hash = hash_with(hash, chunk, HCONST_4);
+                        count = 0;
+                        chunk = 0;
+                    } else {
+                        count += 1;
+                    }
+                    tail = rest;
+                    if !is_cons(tail) {
+                        break;
+                    }
+                    iterations += 1;
+                }
+                if count > 0 {
+                    hash = hash_with(hash, chunk, HCONST_4);
+                }
+                match tail.cons_cell() {
+                    Some((head, rest)) => {
+                        stack.push(Hash2Item::Term(rest));
+                        next = Some(head);
+                    }
+                    // The walk of ERTS processes the tail as a term, so an
+                    // improper list hashes its tail (`erl_term_hashing.c:1046-1068`).
+                    None => next = Some(tail),
+                }
+            }
+            Term::Fun(fun) => match fun.target() {
+                Target::Local(lambda) => {
+                    let free = fun.free();
+                    hash = hash2_with(
+                        hash,
+                        free.len() as u32,
+                        atom_hash(atoms, lambda.module()) as u32,
+                        HCONST,
+                    );
+                    hash = hash2_with(hash, lambda.index as u32, lambda.old_unique as u32, HCONST);
+                    if let Some((first, rest)) = free.split_first() {
+                        for element in rest.iter().rev() {
+                            stack.push(Hash2Item::Term(element));
+                            iterations += 1;
+                        }
+                        next = Some(first);
+                    }
+                }
+                Target::External {
+                    module,
+                    function,
+                    arity,
+                } => {
+                    hash = hash2_with(hash, *arity, atom_hash(atoms, module) as u32, HCONST);
+                    hash = hash_with(hash, atom_hash(atoms, function) as u32, HCONST_14);
+                }
+            },
+            Term::MatchContext(_) => unreachable!("{MATCH_CONTEXT_ESCAPE}"),
+        }
     }
 }
 

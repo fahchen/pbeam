@@ -303,6 +303,10 @@ name = "halt"
 path = "tests/integration/halt.rs"
 
 [[test]]
+name = "hash"
+path = "tests/integration/hash.rs"
+
+[[test]]
 name = "hibernate"
 path = "tests/integration/hibernate.rs"
 
