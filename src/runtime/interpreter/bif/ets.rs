@@ -2165,18 +2165,14 @@ fn match_end(
 /// Complete the list insert that holds `table` busy, before the caller uses
 /// the table (`erl_db.c:769-798`). The caller found the table, so this call
 /// always runs and one busy path covers each caller.
-fn help_table(context: &mut BifContext<'_>, table: &Term) -> Result<(), BeamError> {
-    loop {
-        match help_busy(context, table)? {
-            Take::Help => {
-                finish_busy(context, table)?;
-                return Ok(());
-            }
-            // Each step marks a bounded group of buckets and charges its
-            // reductions (`delete_all_objects_continue`, `erl_db.c:3300-3320`).
-            Take::Clear => continue,
-            Take::Free | Take::Mine => return Ok(()),
+fn help_table(context: &mut BifContext<'_>, table: &Term) -> Result<bool, BeamError> {
+    match help_busy(context, table)? {
+        Take::Help => {
+            finish_busy(context, table)?;
+            Ok(false)
         }
+        Take::Clear => Ok(true),
+        Take::Free | Take::Mine => Ok(false),
     }
 }
 
@@ -2264,7 +2260,13 @@ pub(super) fn next(
     key: &Term,
 ) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
-    help_table(&mut *context, table)?;
+    if help_table(&mut *context, table)? {
+        return Ok(BifResult::TrapBif {
+            module: "ets",
+            function: "next",
+            arguments: vec![table.clone(), key.clone()],
+        });
+    }
     let atoms = &context.scheduler.atoms;
     let Some(table) = context
         .scheduler
@@ -2315,7 +2317,17 @@ pub(super) fn update_element(
     default: Option<&Term>,
 ) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
-    help_table(&mut *context, table)?;
+    if help_table(&mut *context, table)? {
+        let mut arguments = vec![table.clone(), key.clone(), spec.clone()];
+        if let Some(default) = default {
+            arguments.push(default.clone());
+        }
+        return Ok(BifResult::TrapBif {
+            module: "ets",
+            function: "update_element",
+            arguments,
+        });
+    }
     let atoms = &context.scheduler.atoms;
     let Some(found) = context.scheduler.ets.find(atoms, table) else {
         return Ok(BifResult::badarg());
@@ -2424,7 +2436,13 @@ fn update_specs(spec: &Term, keypos: i32) -> Option<Vec<(usize, Term)>> {
 /// for a reference that is not a live table.
 pub(super) fn info_all(context: &mut BifContext<'_>, table: &Term) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
-    help_table(&mut *context, table)?;
+    if help_table(&mut *context, table)? {
+        return Ok(BifResult::TrapBif {
+            module: "ets",
+            function: "info",
+            arguments: vec![table.clone()],
+        });
+    }
     let atoms = &context.scheduler.atoms;
     let Some((id, found)) = context.scheduler.ets.find(atoms, table) else {
         return match table {
@@ -2516,18 +2534,17 @@ pub(super) fn internal_delete_all(
     let caller = context.scheduler.current_process_mut().id;
     match help_busy(&mut *context, table)? {
         Take::Clear => {
-            let Some((id, found)) = context.scheduler.ets.find(&context.scheduler.atoms, table)
-            else {
+            let Some((id, _)) = context.scheduler.ets.find(&context.scheduler.atoms, table) else {
                 return Ok(BifResult::badarg());
             };
-            let count = match holder {
-                Term::Integer(count) => *count,
-                _ => found.len() as i64,
-            };
+            // The call keeps its own arguments: a call that has not started
+            // its clear yet runs it after the clear of the other operation
+            // (`erl_db.c:769-798`), and a call after its own trap returns
+            // the count that it holds.
             return Ok(BifResult::TrapBif {
                 module: "ets",
                 function: "internal_delete_all",
-                arguments: vec![Term::Reference(id), Term::Integer(count)],
+                arguments: vec![Term::Reference(id), holder.clone()],
             });
         }
         Take::Help => finish_busy(&mut *context, table)?,
@@ -2538,6 +2555,9 @@ pub(super) fn internal_delete_all(
         .current_process_mut()
         .bif_reductions_left()?;
     let atoms = &context.scheduler.atoms;
+    let Some((id, _)) = context.scheduler.ets.find(atoms, table) else {
+        return Ok(BifResult::badarg());
+    };
     let Some(found) = context
         .scheduler
         .ets
@@ -2565,7 +2585,7 @@ pub(super) fn internal_delete_all(
             return Ok(BifResult::TrapBif {
                 module: "ets",
                 function: "internal_delete_all",
-                arguments: vec![table.clone(), Term::Integer(count as i64)],
+                arguments: vec![Term::Reference(id), Term::Integer(count as i64)],
             });
         }
         context
@@ -2608,7 +2628,13 @@ pub(super) fn internal_select_delete(
     spec: &Term,
 ) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
-    help_table(&mut *context, table)?;
+    if help_table(&mut *context, table)? {
+        return Ok(BifResult::TrapBif {
+            module: "ets",
+            function: "internal_select_delete",
+            arguments: vec![table.clone(), spec.clone()],
+        });
+    }
     let atoms = &context.scheduler.atoms;
     let Some(found) = context.scheduler.ets.find(atoms, table) else {
         return Ok(BifResult::badarg());

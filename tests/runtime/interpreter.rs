@@ -5336,6 +5336,77 @@ fn resumes_a_trap_target_through_its_loaded_export() {
 }
 
 #[test]
+fn traps_a_call_that_meets_a_fixed_clear() {
+    // A call that uses a table while a fixed clear does not finish marks a
+    // bounded group of buckets and traps to itself
+    // (`handle_lacking_permission`, `erl_db.c:769-798`, `3300-3320`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let owner = scheduler.current_process_mut().id;
+    let calls = [
+        ("next", vec![Term::Integer(0)]),
+        ("update_element", vec![Term::Integer(0), Term::nil()]),
+        ("info", vec![]),
+        ("internal_select_delete", vec![Term::nil()]),
+    ];
+    for (number, (function, mut arguments)) in calls.into_iter().enumerate() {
+        let id = Reference(number as u64);
+        let mut table = Table::new(owner, Access::Public, 1, TableType::Set);
+        for key in 0..300 {
+            table.insert(&scheduler.atoms, vec![Term::Integer(key)]);
+        }
+        table.fix(owner);
+        table.step_clear(&scheduler.atoms, owner, 300, 8);
+        scheduler.ets.create(id, None, table);
+        arguments.insert(0, Term::Reference(id));
+        let result = program
+            .bif(&mut scheduler, "ets", function, arguments)
+            .unwrap();
+        assert!(
+            matches!(result, BifResult::TrapBif { function: trapped, .. } if trapped == function),
+            "{function}"
+        );
+    }
+}
+
+#[test]
+fn traps_the_initial_clear_with_the_table_reference() {
+    // The clear of a fixed table that does not finish traps with the table
+    // reference and the object count, so a reused name cannot resume
+    // against another table (`erl_db.c:3268-3279`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let owner = scheduler.current_process_mut().id;
+    let mut table = Table::new(owner, Access::Public, 1, TableType::Set);
+    for key in 0..300 {
+        table.insert(&scheduler.atoms, vec![Term::Integer(key)]);
+    }
+    table.fix(owner);
+    scheduler.ets.create(Reference(0), None, table);
+    scheduler.current_process_mut().fcalls = 1;
+    let result = program
+        .bif(
+            &mut scheduler,
+            "ets",
+            "internal_delete_all",
+            vec![
+                Term::Reference(Reference(0)),
+                Term::static_atom("undefined"),
+            ],
+        )
+        .unwrap();
+    assert!(matches!(
+        result,
+        BifResult::TrapBif { function: "internal_delete_all", arguments, .. }
+            if arguments == vec![Term::Reference(Reference(0)), Term::Integer(300)]
+    ));
+}
+
+#[test]
 fn rejects_a_select_delete_of_a_private_table_of_another_process() {
     // `ets:internal_select_delete/2` takes the table with `DB_WRITE`, so a
     // process that does not own a `private` table raises `badarg`
