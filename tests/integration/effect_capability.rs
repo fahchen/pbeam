@@ -272,7 +272,11 @@ fn only(names: &[&str]) -> Constraint {
 
 /// Each entry that the column "Capability" of the effect inventory marks
 /// `ambient`. `effect_probe:ambient/0` calls each entry once.
-const AMBIENT: [&str; 46] = [
+const AMBIENT: [&str; 51] = [
+    "atomics:add/3",
+    "atomics:get/2",
+    "atomics:info/1",
+    "atomics:put/3",
     "erlang:binary_to_atom/2",
     "erlang:cancel_timer/1",
     "erlang:cancel_timer/2",
@@ -297,6 +301,7 @@ const AMBIENT: [&str; 46] = [
     "erlang:unlink/1",
     "erlang:unregister/1",
     "erlang:whereis/1",
+    "erts_internal:atomics_new/2",
     "erts_internal:prepare_loading/2",
     "erts_internal:processes_next/1",
     "erts_internal:purge_module/2",
@@ -402,9 +407,20 @@ fn inventory_marked(value: &str) -> BTreeSet<&'static str> {
 /// `get_cwd/0` call the `prim_file` native bindings.
 fn program() -> BeamProgram {
     let erlang = pinned_beam("erlang");
+    let counters = pinned_beam("counters");
+    let atomics = pinned_beam("atomics");
     let prim_file = pinned_beam("prim_file");
     let prim_buffer = pinned_beam("prim_buffer");
-    BeamProgram::load(&[&erlang, &prim_file, &prim_buffer, PRIM_TTY, EFFECT_PROBE]).unwrap()
+    BeamProgram::load(&[
+        &erlang,
+        &counters,
+        &atomics,
+        &prim_file,
+        &prim_buffer,
+        PRIM_TTY,
+        EFFECT_PROBE,
+    ])
+    .unwrap()
 }
 
 /// Run `effect_probe:Function()` with `policy`.
@@ -465,7 +481,7 @@ fn calls_each_ambient_and_later_entry_with_no_capability() {
     // The root process holds no capability, so no policy can permit the
     // calls: each `ambient` and `later` entry has no check.
     let program = program();
-    let expected = "[true,true,false,true,true,true,integer,integer,integer,integer,integer,date_time,unix,nonode@nohost,nonode@nohost,[],[nonode@nohost],1,true,{error,badfile},{error,badarg},false,false,true,effect_probe_ambient_atom,effect_probe_ambient_binary,ok,effect_probe_ambient,true,false,[{key,value}],value,true,true,set,reference,true,atom,2,ok,1,error,ok,error,ok,error,[ok,{ok,0},ok],[eof,ok],[11,<<48,49>>,{ok,8},9,ok,0,<<120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120>>,acquired,ok],none,{error,notsup},ok,false]";
+    let expected = "[true,true,false,true,true,true,integer,integer,integer,integer,integer,date_time,unix,nonode@nohost,nonode@nohost,[],[nonode@nohost],1,true,{error,badfile},{error,badarg},false,false,true,effect_probe_ambient_atom,effect_probe_ambient_binary,ok,effect_probe_ambient,true,false,[{key,value}],value,true,true,set,reference,true,atom,2,ok,1,error,ok,error,ok,error,[ok,{ok,0},ok],[eof,ok],[11,<<48,49>>,{ok,8},9,ok,0,<<120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120>>,acquired,ok],none,{error,notsup},ok,false,reference,ok,1,ok,48]";
     assert_eq!(run_text(&program, "ambient", &Grants(vec![])), expected);
     assert_eq!(erts_with_stand_in("ambient"), format!("{expected}\n"));
 }
