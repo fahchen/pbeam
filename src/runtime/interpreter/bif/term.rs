@@ -330,16 +330,7 @@ fn encode_term(
             out.extend_from_slice(&(map.len() as u32).to_be_bytes());
             let mut pairs: Vec<(&Term, &Term)> = map.iter().collect();
             if options.deterministic {
-                let mut failure = None;
-                pairs.sort_by(|(left, _), (right, _)| {
-                    left.compare_exact(right, atoms).unwrap_or_else(|error| {
-                        failure = Some(error);
-                        Ordering::Equal
-                    })
-                });
-                if let Some(error) = failure {
-                    return Err(error);
-                }
+                pairs.sort_by(|(left, _), (right, _)| exact_map_key_order(left, right, atoms));
             } else if map.len() <= 32 {
                 // A flatmap of ERTS keeps its pairs in descending key order
                 // (`erl_map.c`), while `Map::iter` gives the ascending order.
@@ -401,6 +392,21 @@ fn encode_term(
         }
     }
     Ok(())
+}
+
+/// Compare two map keys in the exact term order of the `deterministic`
+/// option (`map_key_compare`, `external.c:3217-3227`). The exact order has
+/// an error only for two different references, and a PBeam map key is not a
+/// reference (see `Map`), so the comparison always gives an order.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let atoms = AtomTable::new();
+/// assert_eq!(exact_map_key_order(&Term::Integer(2), &Term::Float(1.0), &atoms), Ordering::Less);
+/// ```
+fn exact_map_key_order(left: &Term, right: &Term, atoms: &AtomTable) -> Ordering {
+    left.compare_exact(right, atoms).unwrap_or(Ordering::Equal)
 }
 
 /// Write the node atom of a pid, port, or reference: `NIL_EXT` with `local`,
@@ -875,7 +881,9 @@ impl Decoder<'_> {
             67 => Err(DecodeError::Unsupported("a record")),
             121 => {
                 let hash = u32::from_be_bytes(
-                    self.take(4)?.try_into().expect("four bytes of the local hash"),
+                    self.take(4)?
+                        .try_into()
+                        .expect("four bytes of the local hash"),
                 );
                 let start = self.pos;
                 self.local = true;
