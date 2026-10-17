@@ -515,8 +515,8 @@ impl Binary {
     }
 
     /// Return the last byte of this binary, or `None` for a binary with no
-    /// byte. The call touches one chunk of an append-built binary and joins
-    /// no chunk, so it is O(1) for each view.
+    /// byte. The call reads the last chunk of an append-built binary and
+    /// joins no chunk, and each empty chunk at the end costs one step.
     ///
     /// # Examples
     ///
