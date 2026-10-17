@@ -591,8 +591,8 @@ impl CodeTable {
     /// Move the current code of the module `name` to old code, as
     /// `delete_module_1` and `delete_code` (`beam_bif_load.c:679-736`,
     /// `2412-2455`) do. Return `Some(true)` when the run had current code
-    /// of the name, and `Some(false)` when it has only old code and a
-    /// second delete must give `badarg`. Return `None` when the run has
+    /// of the name, and `Some(false)` when it has old code and a delete
+    /// must give `badarg` before the current code changes. Return `None` when the run has
     /// neither: the module is not loaded. The code stays in `by_id` for the
     /// frames that run it, and each import slot of another module that
     /// names the code is emptied, so a later call of the module gives
@@ -607,9 +607,10 @@ impl CodeTable {
     /// assert!(code.get("fixture").is_none());
     /// ```
     pub(in crate::runtime) fn delete(&mut self, name: &str) -> Option<bool> {
-        let Some(module) = self.modules.remove(name) else {
-            return self.old.contains(name).then_some(false);
-        };
+        if self.old.contains(name) {
+            return Some(false);
+        }
+        let module = self.modules.remove(name)?;
         for loaded in self.by_id.values() {
             for slot in loaded.imports.iter() {
                 if slot
@@ -671,11 +672,14 @@ impl CodeTable {
         // ERTS rejects a load only when the module has current and old
         // code (`beam_bif_load.c:443-455`). A module with old code only
         // loads new current code.
-        let not_purged: Vec<String> = names
+        let mut not_purged: Vec<String> = names
             .iter()
             .filter(|name| self.modules.contains_key(*name) && self.old.contains(*name))
             .cloned()
             .collect();
+        // `exception_list` prepends each entry of the input order
+        // (`beam_bif_load.c:322-337`).
+        not_purged.reverse();
         if !not_purged.is_empty() {
             return Ok(Finish::NotPurged(not_purged));
         }
