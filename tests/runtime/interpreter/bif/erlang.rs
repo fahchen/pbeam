@@ -434,3 +434,59 @@ fn raises_badarg_for_a_failed_display_string_write() {
         } if reason == Term::static_atom("badarg")
     ));
 }
+
+#[test]
+fn keeps_the_on_load_flag_after_finish_loading() {
+    // The ERTS magic reference stays valid after `erlang:finish_loading/1`
+    // consumed the prepared code, so `erlang:has_prepared_code_on_load/1`
+    // gives the flag again (`beam_bif_load.c:268-283`). A second
+    // `finish_loading/1` of the reference raises `badarg`.
+    let mut scheduler = Scheduler::new(AtomTable::new());
+    scheduler.code = fixture_code();
+    let frame = scheduler.code.mfa_frame("fixture", "main", 0).unwrap();
+    scheduler.start(frame, vec![], AllowAll.initial()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let plain = BeamModule::new(
+        "plain".into(),
+        HashMap::new(),
+        Vec::new(),
+        vec![Instruction::End],
+    )
+    .unwrap();
+    let plain_reference = scheduler.make_ref().unwrap();
+    scheduler.code.prepare(plain_reference, plain);
+    let loaded = finish_loading(
+        &mut scheduler,
+        &Term::list_from(vec![Term::Reference(plain_reference)]),
+    )
+    .unwrap();
+    assert!(matches!(loaded, BifResult::YieldReturn(_)));
+    assert!(matches!(
+        has_prepared_code_on_load(&mut scheduler, &Term::Reference(plain_reference)).unwrap(),
+        BifResult::Value(Term::Atom(ref atom)) if atom.is_static("false")
+    ));
+    assert!(matches!(
+        finish_loading(
+            &mut scheduler,
+            &Term::list_from(vec![Term::Reference(plain_reference)])
+        )
+        .unwrap(),
+        BifResult::Raise { .. }
+    ));
+    let on_load = BeamModule::load(include_bytes!(
+        "../../../../fixtures/diagnostics/diagnostics_on_load.beam"
+    ))
+    .unwrap();
+    let on_load_reference = scheduler.make_ref().unwrap();
+    scheduler.code.prepare(on_load_reference, on_load);
+    let loaded = finish_loading(
+        &mut scheduler,
+        &Term::list_from(vec![Term::Reference(on_load_reference)]),
+    )
+    .unwrap();
+    assert!(matches!(loaded, BifResult::YieldReturn(_)));
+    assert!(matches!(
+        has_prepared_code_on_load(&mut scheduler, &Term::Reference(on_load_reference)).unwrap(),
+        BifResult::Value(Term::Atom(ref atom)) if atom.is_static("true")
+    ));
+}

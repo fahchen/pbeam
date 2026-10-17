@@ -5122,7 +5122,9 @@ pub(super) fn delete_module(
 /// `erts_has_code_on_load` (`beam_load.c:336-349`) do: return `true` when a
 /// reference of `erts_internal:prepare_loading/2` holds prepared code with
 /// an `-on_load` function, and `false` when the code has none. A term that
-/// is not a prepared-code reference raises `badarg`. PBeam checks no
+/// is not a prepared-code reference raises `badarg`. A reference that
+/// `erlang:finish_loading/1` consumed keeps its flag, as the ERTS magic
+/// reference stays valid (`beam_bif_load.c:268-283`). PBeam checks no
 /// capability: the call only reads the prepared code state, as the ambient
 /// `erlang:function_exported/3` does.
 ///
@@ -5143,10 +5145,13 @@ pub(super) fn has_prepared_code_on_load(
     let Term::Reference(reference) = reference else {
         return Ok(BifResult::badarg());
     };
-    if scheduler.code.prepared_module(reference).is_none() {
+    let on_load = if scheduler.code.prepared_module(reference).is_some() {
+        scheduler.code.prepared_on_load(&[*reference])
+    } else if let Some(on_load) = scheduler.code.finished_prepared_on_load(reference) {
+        on_load
+    } else {
         return Ok(BifResult::badarg());
-    }
-    let on_load = scheduler.code.prepared_on_load(&[*reference]);
+    };
     Ok(Value(Term::static_atom(if on_load {
         "true"
     } else {

@@ -74,6 +74,14 @@ pub(in crate::runtime) struct CodeTable {
     /// and a second delete gives `badarg`. A load with current and old code
     /// gives `not_purged` (`beam_bif_load.c:444-455`).
     old: HashSet<String>,
+    /// The `-on_load` flag of each reference of
+    /// `erts_internal:prepare_loading/2` that `erlang:finish_loading/1`
+    /// consumed. The ERTS magic reference stays valid after the load, so
+    /// `erlang:has_prepared_code_on_load/1` gives the flag again
+    /// (`beam_bif_load.c:268-283`). ERTS frees the loader state when the
+    /// garbage collector frees the last copy of the reference; PBeam has no
+    /// garbage collection, so the entry stays until the run ends.
+    finished_prepared: HashMap<Reference, bool>,
     /// The module name and the code of the purge that
     /// `erts_internal:purge_module(Module, prepare_on_load)` started, as
     /// `purge_state.module` and the old code of the ERTS module
@@ -218,6 +226,7 @@ impl CodeTable {
             prepared: HashMap::new(),
             on_load: HashMap::new(),
             old: HashSet::new(),
+            finished_prepared: HashMap::new(),
             purging: None,
         }
     }
@@ -683,6 +692,8 @@ impl CodeTable {
                 .prepared
                 .remove(reference)
                 .expect("checked by prepared_names");
+            self.finished_prepared
+                .insert(*reference, module.on_load.is_some());
             let module = Rc::new(module);
             self.by_id
                 .insert(module.id, LoadedModule::new(Rc::clone(&module)));
@@ -716,6 +727,23 @@ impl CodeTable {
                 .get(reference)
                 .is_some_and(|module| module.on_load.is_some())
         })
+    }
+
+    /// Return the `-on_load` flag of the prepared code of `reference` after
+    /// `erlang:finish_loading/1` consumed it, or `None` when no load
+    /// consumed the code. The ERTS magic reference stays valid after the
+    /// load (`beam_bif_load.c:268-283`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(code.finished_prepared_on_load(&reference), Some(false));
+    /// ```
+    pub(in crate::runtime) fn finished_prepared_on_load(
+        &self,
+        reference: &Reference,
+    ) -> Option<bool> {
+        self.finished_prepared.get(reference).copied()
     }
 
     /// Return the frame of the `-on_load` function of the module `name` while
