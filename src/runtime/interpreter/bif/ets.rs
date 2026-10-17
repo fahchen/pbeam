@@ -315,6 +315,10 @@ pub(super) fn new(
         false,
         compressed,
     );
+    // A heir that is not alive, or that is another live process, acts as
+    // `none` only when it is not alive; the owner as heir stays the owner
+    // (`erl_db.c:5319-5337`).
+    made.set_heir(heir.filter(|heir| *heir == owner));
     context.scheduler.ets.create(
         table,
         name.map(|name| context.scheduler.atoms.name_of(name)),
@@ -1422,7 +1426,9 @@ pub(super) fn info(
         Term::Atom(atom) if atom.is_static("size") => Term::Integer(found.len() as i64),
         Term::Atom(atom) if atom.is_static("memory") => Term::Integer(found.memory_words() as i64),
         Term::Atom(atom) if atom.is_static("owner") => Term::Pid(found.owner()),
-        Term::Atom(atom) if atom.is_static("heir") => Term::static_atom("none"),
+        Term::Atom(atom) if atom.is_static("heir") => {
+            found.heir().map_or(Term::static_atom("none"), Term::Pid)
+        }
         Term::Atom(atom) if atom.is_static("protection") => {
             Term::static_atom(access_name(found.access()))
         }
@@ -2258,7 +2264,10 @@ pub(super) fn info_all(context: &mut BifContext<'_>, table: &Term) -> Result<Bif
         ("compressed", boolean_term(found.compressed())),
         ("memory", Term::Integer(found.memory_words() as i64)),
         ("owner", Term::Pid(found.owner())),
-        ("heir", Term::static_atom("none")),
+        (
+            "heir",
+            found.heir().map_or(Term::static_atom("none"), Term::Pid),
+        ),
         (
             "name",
             Term::Atom(

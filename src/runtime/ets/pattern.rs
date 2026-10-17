@@ -324,6 +324,9 @@ enum Expr {
     AndAlso(Box<Expr>, Box<Expr>),
     /// `orelse`: `true` or the right value.
     OrElse(Box<Expr>, Box<Expr>),
+    /// A one-operand `and` or `or` (checked) or `andalso` or `orelse`
+    /// (unchecked): the operand value.
+    BooleanOne(Box<Expr>, bool),
 }
 
 /// A guard function of the match specification dialect, as `guard_tab`
@@ -492,7 +495,7 @@ impl MatchSpec {
             let values = &bindings;
             let whole = Term::tuple(object.to_vec());
             if !clause.guards.iter().all(|guard| {
-                evaluate(atoms, guard, values, &whole) == Some(Term::static_atom("true"))
+                evaluate(atoms, guard, values, &whole, true) == Some(Term::static_atom("true"))
             }) {
                 continue;
             }
@@ -500,7 +503,7 @@ impl MatchSpec {
             for body in &clause.body {
                 // A body BIF that fails gives `'EXIT'`, as `matchCatch`
                 // catches the failure of a BIF (`erl_db_util.c:3098-3105`).
-                result = evaluate(atoms, body, values, &whole)
+                result = evaluate(atoms, body, values, &whole, false)
                     .unwrap_or_else(|| Term::static_atom("EXIT"));
             }
             return Some(result);
@@ -592,6 +595,15 @@ fn expression(atoms: &AtomTable, term: &Term, numbers: &[i32]) -> Result<Expr, S
                 return Err(SpecError::Badarg);
             };
             let name = atoms.name_of(name);
+            let operands = elements.len() - 1;
+            if operands == 1 && matches!(name, "and" | "or" | "andalso" | "orelse") {
+                let checked = name == "and" || name == "or";
+                let operand = expression(atoms, &elements[1], numbers)?;
+                return Ok(Expr::BooleanOne(Box::new(operand), checked));
+            }
+            if operands == 0 && matches!(name, "and" | "or" | "andalso" | "orelse") {
+                return Err(SpecError::Badarg);
+            }
             if name == "andalso" || name == "orelse" {
                 // `dmc_andalso` and `dmc_orelse` accept two or more
                 // operands (`erl_db_util.c:4760-4827`).
@@ -599,9 +611,6 @@ fn expression(atoms: &AtomTable, term: &Term, numbers: &[i32]) -> Result<Expr, S
                     .iter()
                     .map(|operand| expression(atoms, operand, numbers))
                     .collect::<Result<Vec<_>, _>>()?;
-                if operands.len() < 2 {
-                    return Err(SpecError::Badarg);
-                }
                 let mut operands = operands.drain(..);
                 let first = operands.next().expect("the form has an operand");
                 return Ok(operands.fold(first, |left, right| {
@@ -734,7 +743,13 @@ fn known_guard(name: &str, arity: usize) -> bool {
 /// (`erl_db_util.c:2247-3110`) runs the compiled program. Return `None`
 /// when a BIF of the expression fails; a guard then fails and a body gives
 /// `'EXIT'`.
-fn evaluate(atoms: &AtomTable, expression: &Expr, bindings: &[Term], whole: &Term) -> Option<Term> {
+fn evaluate(
+    atoms: &AtomTable,
+    expression: &Expr,
+    bindings: &[Term],
+    whole: &Term,
+    guard: bool,
+) -> Option<Term> {
     match expression {
         Expr::Constant(term) => Some(term.clone()),
         Expr::Variable(index) => bindings.get(*index).cloned(),
@@ -743,22 +758,15 @@ fn evaluate(atoms: &AtomTable, expression: &Expr, bindings: &[Term], whole: &Ter
         Expr::Tuple(elements) => Some(Term::tuple(
             elements
                 .iter()
-                .map(|element| {
-                    evaluate(atoms, element, bindings, whole)
-                        .unwrap_or_else(|| Term::static_atom("EXIT"))
-                })
-                .collect(),
+                .map(|element| part(atoms, element, bindings, whole, guard))
+                .collect::<Option<Vec<_>>>()?,
         )),
         Expr::List(elements, tail) => {
             let elements: Vec<Term> = elements
                 .iter()
-                .map(|element| {
-                    evaluate(atoms, element, bindings, whole)
-                        .unwrap_or_else(|| Term::static_atom("EXIT"))
-                })
-                .collect();
-            let mut tail =
-                evaluate(atoms, tail, bindings, whole).unwrap_or_else(|| Term::static_atom("EXIT"));
+                .map(|element| part(atoms, element, bindings, whole, guard))
+                .collect::<Option<Vec<_>>>()?;
+            let mut tail = part(atoms, tail, bindings, whole, guard)?;
             for element in elements.into_iter().rev() {
                 tail = Term::cons(element, tail);
             }
@@ -767,23 +775,52 @@ fn evaluate(atoms: &AtomTable, expression: &Expr, bindings: &[Term], whole: &Ter
         Expr::Call(function, arguments) => {
             let arguments: Vec<Term> = arguments
                 .iter()
-                .map(|argument| {
-                    evaluate(atoms, argument, bindings, whole)
-                        .unwrap_or_else(|| Term::static_atom("EXIT"))
-                })
-                .collect();
+                .map(|argument| part(atoms, argument, bindings, whole, guard))
+                .collect::<Option<Vec<_>>>()?;
             call(atoms, *function, &arguments)
         }
-        Expr::AndAlso(left, right) => match &evaluate(atoms, left, bindings, whole)? {
+        Expr::AndAlso(left, right) => match &evaluate(atoms, left, bindings, whole, guard)? {
             Term::Atom(atom) if atom.is_static("false") => Some(Term::static_atom("false")),
-            Term::Atom(atom) if atom.is_static("true") => evaluate(atoms, right, bindings, whole),
+            Term::Atom(atom) if atom.is_static("true") => {
+                evaluate(atoms, right, bindings, whole, guard)
+            }
             _ => None,
         },
-        Expr::OrElse(left, right) => match &evaluate(atoms, left, bindings, whole)? {
+        Expr::OrElse(left, right) => match &evaluate(atoms, left, bindings, whole, guard)? {
             Term::Atom(atom) if atom.is_static("true") => Some(Term::static_atom("true")),
-            Term::Atom(atom) if atom.is_static("false") => evaluate(atoms, right, bindings, whole),
+            Term::Atom(atom) if atom.is_static("false") => {
+                evaluate(atoms, right, bindings, whole, guard)
+            }
             _ => None,
         },
+        Expr::BooleanOne(expression, checked) => {
+            let value = evaluate(atoms, expression, bindings, whole, guard)?;
+            if *checked {
+                match &value {
+                    Term::Atom(atom) if atom.is_one_of(&["true", "false"]) => Some(value),
+                    _ => None,
+                }
+            } else {
+                Some(value)
+            }
+        }
+    }
+}
+
+/// Evaluate one part of a tuple, a list, or a call. A guard propagates a
+/// failure; a body gives `EXIT` for that part (`erl_db_util.c:2580-2618`).
+fn part(
+    atoms: &AtomTable,
+    expression: &Expr,
+    bindings: &[Term],
+    whole: &Term,
+    guard: bool,
+) -> Option<Term> {
+    let value = evaluate(atoms, expression, bindings, whole, guard);
+    if guard {
+        value
+    } else {
+        Some(value.unwrap_or_else(|| Term::static_atom("EXIT")))
     }
 }
 
@@ -942,10 +979,23 @@ fn compare_exact(
 /// do.
 fn choose(atoms: &AtomTable, left: &Term, right: &Term, larger: bool) -> Option<Term> {
     let order = left.compare(right, atoms).ok()?;
-    Some(if order.is_lt() != larger {
-        left.clone()
-    } else {
-        right.clone()
+    Some(match order {
+        std::cmp::Ordering::Less => {
+            if larger {
+                right.clone()
+            } else {
+                left.clone()
+            }
+        }
+        std::cmp::Ordering::Greater => {
+            if larger {
+                left.clone()
+            } else {
+                right.clone()
+            }
+        }
+        // ERTS keeps the first operand on a tie (`erl_bif_guard.c:475-484`).
+        std::cmp::Ordering::Equal => left.clone(),
     })
 }
 

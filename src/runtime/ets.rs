@@ -148,6 +148,9 @@ pub(super) struct Table {
     decentralized_counters: bool,
     /// The `compressed` option (`erl_db.c:5512-5513`).
     compressed: bool,
+    /// The heir that `ets:new/2` accepted and that is the owner, as
+    /// `ets:info(Table, heir)` gives it (`table_info`, `erl_db.c:5478-5479`).
+    heir: Option<ProcessId>,
     /// The list insert that took the table and yields between its objects
     /// (`tb->common.status & DB_BUSY`, `erl_db.c:2077-2107`, `2310-2319`),
     /// else `None`. Each process that uses the table while it is busy
@@ -750,6 +753,7 @@ impl Table {
             read_concurrency: false,
             decentralized_counters: false,
             compressed: false,
+            heir: None,
             busy: None,
         }
     }
@@ -824,6 +828,16 @@ impl Table {
     /// Return the `compressed` option.
     pub(super) fn compressed(&self) -> bool {
         self.compressed
+    }
+
+    /// Return the heir, as `ets:info(Table, heir)` gives it.
+    pub(super) fn heir(&self) -> Option<ProcessId> {
+        self.heir
+    }
+
+    /// Set the heir that `ets:new/2` accepted and that is the owner.
+    pub(super) fn set_heir(&mut self, heir: Option<ProcessId>) {
+        self.heir = heir;
     }
 
     /// Set the options that `ets:info/2` gives. `ets:new/2` accepts them

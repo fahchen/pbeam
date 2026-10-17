@@ -5285,3 +5285,43 @@ fn rejects_an_update_default_at_the_zero_key_position() {
         .unwrap();
     assert!(matches!(result, BifResult::Raise { .. }));
 }
+
+#[test]
+fn gives_the_owner_as_the_heir_of_a_table() {
+    // `ets:new/2` keeps `{heir, self()}` as the heir, and `ets:info/1,2`
+    // gives the owner pid (`erl_db.c:5478-5479`, `5319-5337`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let owner = scheduler.current_process_mut().id;
+    let heir = Term::Atom(scheduler.atoms.put("heir").unwrap());
+    let name = Term::Atom(scheduler.atoms.put("ets_probe_heir").unwrap());
+    let options = Term::list_from([
+        Term::static_atom("named_table"),
+        Term::tuple(vec![heir.clone(), Term::Pid(owner)]),
+    ]);
+    let table = program
+        .bif(&mut scheduler, "ets", "new", vec![name.clone(), options])
+        .unwrap();
+    let BifResult::Value(table) = table else {
+        panic!("ets:new/2 did not make a table");
+    };
+    let item = program
+        .bif(
+            &mut scheduler,
+            "ets",
+            "info",
+            vec![table.clone(), heir.clone()],
+        )
+        .unwrap();
+    assert!(matches!(item, BifResult::Value(Term::Pid(pid)) if pid == owner));
+    let BifResult::Value(items) = program
+        .bif(&mut scheduler, "ets", "info", vec![table])
+        .unwrap()
+    else {
+        panic!("ets:info/1 did not return a list");
+    };
+    let heir_entry = Term::tuple(vec![heir, Term::Pid(owner)]);
+    assert!(items.proper_list().unwrap().any(|item| *item == heir_entry));
+}

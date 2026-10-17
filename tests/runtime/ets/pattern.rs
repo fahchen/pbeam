@@ -633,10 +633,12 @@ fn builds_match_specification_terms_and_rejects_bad_ones() {
         Term::list_from(vec![Term::tuple(vec![
             head.clone(),
             Term::nil(),
-            Term::list_from([Term::tuple(vec![
-                atom(&mut atoms, "andalso"),
-                Term::static_atom("true"),
-            ])]),
+            Term::list_from([Term::tuple(vec![atom(&mut atoms, "and")])]),
+        ])]),
+        Term::list_from(vec![Term::tuple(vec![
+            head.clone(),
+            Term::nil(),
+            Term::list_from([Term::tuple(vec![atom(&mut atoms, "andalso")])]),
         ])]),
     ];
     for spec in bad {
@@ -1052,14 +1054,49 @@ fn shifts_lists_and_boolean_forms_like_the_match_program() {
             "{form}"
         );
     }
-    let one = Term::tuple(vec![atom(&mut atoms, "and"), ok]);
+    // One operand is allowed. `and` and `or` check the boolean; `andalso`
+    // and `orelse` give the operand (`erl_db_util.c:4701-4855`).
+    for (form, operand, expected) in [
+        ("and", ok.clone(), ok.clone()),
+        ("or", Term::static_atom("false"), Term::static_atom("false")),
+        ("andalso", Term::Integer(1), Term::Integer(1)),
+        ("orelse", Term::Integer(1), Term::Integer(1)),
+        ("and", Term::Integer(1), Term::static_atom("EXIT")),
+        ("or", Term::Integer(1), Term::static_atom("EXIT")),
+    ] {
+        let one = Term::tuple(vec![atom(&mut atoms, form), operand]);
+        assert_eq!(run_expression(&atoms, one), Some(expected), "{form}");
+    }
+    // A failing nested guard propagates; it does not become `EXIT`.
+    let guard = Term::tuple(vec![
+        atom(&mut atoms, "=="),
+        call(&mut atoms, "hd", vec![Term::Integer(1)]),
+        Term::static_atom("EXIT"),
+    ]);
     let spec = Term::list_from([Term::tuple(vec![
         head.clone(),
-        Term::nil(),
-        Term::list_from([one]),
+        Term::list_from([guard]),
+        Term::list_from([ok.clone()]),
     ])]);
-    assert!(matches!(
-        MatchSpec::compile(&atoms, &spec),
-        Err(SpecError::Badarg)
-    ));
+    assert_eq!(
+        MatchSpec::compile(&atoms, &spec)
+            .unwrap()
+            .run(&atoms, &[Term::Integer(1)]),
+        None
+    );
+    // `min` and `max` keep the first operand on a tie.
+    let tie = Term::tuple(vec![
+        atom(&mut atoms, "=:="),
+        call(&mut atoms, "min", vec![Term::Integer(1), Term::Float(1.0)]),
+        Term::tuple(vec![atom(&mut atoms, "const"), Term::Integer(1)]),
+    ]);
+    assert_eq!(run_expression(&atoms, tie), Some(ok.clone()));
+    for (name, expected) in [("min", 1), ("max", 2)] {
+        let less = Term::tuple(vec![
+            atom(&mut atoms, "=:="),
+            call(&mut atoms, name, vec![Term::Integer(1), Term::Integer(2)]),
+            Term::tuple(vec![atom(&mut atoms, "const"), Term::Integer(expected)]),
+        ]);
+        assert_eq!(run_expression(&atoms, less), Some(ok.clone()), "{name}");
+    }
 }
