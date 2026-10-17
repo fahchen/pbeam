@@ -264,6 +264,7 @@ dependencies = [
  "sha1",
  "sha2",
  "socket2",
+ "zlib-rs",
 ]
 
 [[package]]
@@ -377,3 +378,9 @@ checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
 dependencies = [
  "windows-link",
 ]
+
+[[package]]
+name = "zlib-rs"
+version = "0.6.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b268e58e7c693d7c271f93ffc4ba3b380412554231c85bf61ca7af91042a4112"

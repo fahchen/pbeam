@@ -59,6 +59,26 @@ impl Resources {
             .and_then(|value| value.downcast_mut())
             .unwrap_or_else(|| missing::<T>())
     }
+
+    /// Return a mutable borrow of the value of type `T`, and put
+    /// `T::default()` when the resources have no value of that type. The
+    /// `zlib` streams use this: the first `zlib:open/0` of a run puts the
+    /// empty map, and the scheduler does not know the private type of the
+    /// native bindings.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut resources = Resources::default();
+    /// assert!(resources.borrow_mut_or_default::<RegexCodes>().0.is_empty());
+    /// ```
+    pub(super) fn borrow_mut_or_default<T: Default + 'static>(&mut self) -> &mut T {
+        self.data
+            .entry(TypeId::of::<T>())
+            .or_insert_with(|| Box::new(T::default()))
+            .downcast_mut()
+            .expect("the value of the key has the type of the key")
+    }
 }
 
 impl fmt::Debug for Resources {
