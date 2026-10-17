@@ -10,7 +10,11 @@
 stale() ->
     {First, Second} = funs_of_removed_code(),
     {module, fun_entry_send} = code:load_abs("fixtures/fun_entry_rev/fun_entry_send"),
-    io:format("~p~n", [[call(First), call(Second)]]).
+    %% The name of a fun of code that is not loaded is `[]`
+    %% (erl_bif_info.c:3998-4001).
+    io:format("~p~n", [[call(First), call(Second),
+                        erlang:fun_info(First, name),
+                        erlang:fun_info(Second, name)]]).
 
 %% A later load of the code that made the funs, while this process holds no
 %% name, makes the code current again, so each call enters the function of

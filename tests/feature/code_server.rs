@@ -351,8 +351,10 @@ fn raises_badfun_for_the_funs_of_removed_code_as_pinned_erts() {
     // the same module name gives the entry of the first fun another old
     // unique value and leaves no entry for the index of the second fun, so
     // the call of each fun enters no code and raises error:{badfun, Fun}
-    // (beam_common.c:1626-1630, 1697-1706).
-    let expected = "[{error,{badfun,fun_term}},{error,{badfun,fun_term}}]\n";
+    // (beam_common.c:1626-1630, 1697-1706). The name of a fun of code that
+    // is not loaded is `[]` (`erl_bif_info.c:3998-4001`).
+    let expected = "[{error,{badfun,fun_term}},{error,{badfun,fun_term}},\
+                    {name,[]},{name,[]}]\n";
     let erts = run(&mut erts_probe(
         FUN_ENTRY_PROBE,
         "fun_entry_probe",
