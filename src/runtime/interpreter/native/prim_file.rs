@@ -83,9 +83,24 @@ pub(super) const FUNCTIONS: [(&str, u32); 33] = [
 /// ```
 pub(super) const BINDINGS: &[Binding] = &[
     Binding {
+        name: "altname_nif",
+        arity: 1,
+        run: |scheduler, arguments| altname_nif(&mut scheduler.atoms, &arguments[0]),
+    },
+    Binding {
         name: "close_nif",
         arity: 1,
         run: |scheduler, arguments| close_nif(scheduler, &arguments[0]),
+    },
+    Binding {
+        name: "del_dir_nif",
+        arity: 1,
+        run: |scheduler, arguments| path_result(scheduler, &arguments[0], file::delete_dir),
+    },
+    Binding {
+        name: "del_file_nif",
+        arity: 1,
+        run: |scheduler, arguments| path_result(scheduler, &arguments[0], file::delete_file),
     },
     Binding {
         name: "get_cwd_nif",
@@ -96,6 +111,35 @@ pub(super) const BINDINGS: &[Binding] = &[
         name: "list_dir_nif",
         arity: 1,
         run: |scheduler, arguments| list_dir_nif(&mut scheduler.atoms, &arguments[0]),
+    },
+    Binding {
+        name: "make_dir_nif",
+        arity: 1,
+        run: |scheduler, arguments| path_result(scheduler, &arguments[0], file::make_dir),
+    },
+    Binding {
+        name: "make_hard_link_nif",
+        arity: 2,
+        run: |scheduler, arguments| {
+            pair_result(
+                scheduler,
+                &arguments[0],
+                &arguments[1],
+                file::make_hard_link,
+            )
+        },
+    },
+    Binding {
+        name: "make_soft_link_nif",
+        arity: 2,
+        run: |scheduler, arguments| {
+            pair_result(
+                scheduler,
+                &arguments[0],
+                &arguments[1],
+                file::make_soft_link,
+            )
+        },
     },
     Binding {
         name: "open_nif",
@@ -123,10 +167,47 @@ pub(super) const BINDINGS: &[Binding] = &[
         run: |scheduler, arguments| read_nif(scheduler, &arguments[0], &arguments[1]),
     },
     Binding {
+        name: "rename_nif",
+        arity: 2,
+        run: |scheduler, arguments| {
+            pair_result(scheduler, &arguments[0], &arguments[1], file::rename)
+        },
+    },
+    Binding {
         name: "seek_nif",
         arity: 3,
         run: |scheduler, arguments| {
             seek_nif(scheduler, &arguments[0], &arguments[1], &arguments[2])
+        },
+    },
+    Binding {
+        name: "set_cwd_nif",
+        arity: 1,
+        run: |scheduler, arguments| path_result(scheduler, &arguments[0], file::set_cwd),
+    },
+    Binding {
+        name: "set_owner_nif",
+        arity: 3,
+        run: |scheduler, arguments| {
+            set_owner_nif(scheduler, &arguments[0], &arguments[1], &arguments[2])
+        },
+    },
+    Binding {
+        name: "set_permissions_nif",
+        arity: 2,
+        run: |scheduler, arguments| set_permissions_nif(scheduler, &arguments[0], &arguments[1]),
+    },
+    Binding {
+        name: "set_time_nif",
+        arity: 4,
+        run: |scheduler, arguments| {
+            set_time_nif(
+                scheduler,
+                &arguments[0],
+                &arguments[1],
+                &arguments[2],
+                &arguments[3],
+            )
         },
     },
     Binding {
@@ -595,6 +676,221 @@ fn read_link_nif(atoms: &mut AtomTable, path: &Term) -> Result<BifResult, BeamEr
 /// `AtomTable::put`.
 fn get_cwd_nif(atoms: &mut AtomTable) -> Result<BifResult, BeamError> {
     ok_tuple(atoms, file::get_cwd().map(Term::binary))
+}
+
+/// Run `prim_file:altname_nif(Path)`, as the ERTS NIF `altname_nif`
+/// (`prim_file_nif.c:1389-1404`) does on Unix: a `Path` that
+/// [`marshal_path`] does not accept gives `{error, einval}`, and each other
+/// path gives `{error, enotsup}` (`efile_altname`,
+/// `unix_prim_file.c:1085-1090`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // {error, enotsup}
+/// let result = altname_nif(&mut atoms, &Term::binary(b"/tmp\0".to_vec()))?;
+/// // {error, einval}
+/// let result = altname_nif(&mut atoms, &Term::binary(b"/tmp".to_vec()))?;
+/// ```
+///
+/// # Errors
+///
+/// The atom `einval` or `enotsup` in a full atom table gives the error of
+/// `AtomTable::put`.
+fn altname_nif(atoms: &mut AtomTable, path: &Term) -> Result<BifResult, BeamError> {
+    if marshal_path(path).is_none() {
+        return error_tuple(atoms, "einval");
+    }
+    error_tuple(atoms, "enotsup")
+}
+
+/// Run the `prim_file` NIF that takes the path `path` and calls `operation`
+/// on it, as each of `del_file_nif`, `del_dir_nif`, `make_dir_nif`, and
+/// `set_cwd_nif` (`prim_file_nif.c:1203-1249`, `1282-1296`) does: a path
+/// that [`marshal_path`] does not accept gives `{error, einval}`, else
+/// `operation` gives `ok` or `{error, Errno}`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // {error, enoent}
+/// let result = path_result(&mut scheduler, &Term::binary(b"/pbeam-missing\0".to_vec()), file::delete_file)?;
+/// ```
+///
+/// # Errors
+///
+/// A new result atom in a full atom table gives the error of
+/// `AtomTable::put`.
+fn path_result(
+    scheduler: &mut Scheduler,
+    path: &Term,
+    operation: impl FnOnce(&CStr) -> Result<(), c_int>,
+) -> Result<BifResult, BeamError> {
+    let atoms = &mut scheduler.atoms;
+    let Some(path) = marshal_path(path) else {
+        return error_tuple(atoms, "einval");
+    };
+    value_or_error(atoms, operation(path).map(|()| Term::static_atom("ok")))
+}
+
+/// Run the `prim_file` NIF that takes the paths `first` and `second` and
+/// calls `operation` on them, as `rename_nif`, `make_hard_link_nif`, and
+/// `make_soft_link_nif` (`prim_file_nif.c:1149-1201`) do: a path that
+/// [`marshal_path`] does not accept gives `{error, einval}`, and the first
+/// path is checked before the second. Else `operation` gives `ok` or
+/// `{error, Errno}`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // {error, enoent}
+/// let result = pair_result(&mut scheduler, &source, &destination, file::rename)?;
+/// ```
+///
+/// # Errors
+///
+/// A new result atom in a full atom table gives the error of
+/// `AtomTable::put`.
+fn pair_result(
+    scheduler: &mut Scheduler,
+    first: &Term,
+    second: &Term,
+    operation: impl FnOnce(&CStr, &CStr) -> Result<(), c_int>,
+) -> Result<BifResult, BeamError> {
+    let atoms = &mut scheduler.atoms;
+    let Some(first) = marshal_path(first) else {
+        return error_tuple(atoms, "einval");
+    };
+    let Some(second) = marshal_path(second) else {
+        return error_tuple(atoms, "einval");
+    };
+    value_or_error(
+        atoms,
+        operation(first, second).map(|()| Term::static_atom("ok")),
+    )
+}
+
+/// Run `prim_file:set_permissions_nif(Path, Permissions)`, as the ERTS NIF
+/// `set_permissions_nif` (`prim_file_nif.c:1053-1071`) does: a
+/// `Permissions` that is not an unsigned 32-bit integer raises
+/// `error:badarg` before the path check, a path that [`marshal_path`] does
+/// not accept gives `{error, einval}`, and else [`file::set_permissions`]
+/// gives `ok` or `{error, Errno}`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // ok
+/// let result = set_permissions_nif(&mut scheduler, &Term::binary(b"/tmp/f\0".to_vec()), &Term::Integer(0o644))?;
+/// // badarg
+/// let result = set_permissions_nif(&mut scheduler, &path, &Term::Integer(-1))?;
+/// ```
+///
+/// # Errors
+///
+/// A new result atom in a full atom table gives the error of
+/// `AtomTable::put`.
+fn set_permissions_nif(
+    scheduler: &mut Scheduler,
+    path: &Term,
+    permissions: &Term,
+) -> Result<BifResult, BeamError> {
+    let Some(permissions) = permissions
+        .small_integer()
+        .and_then(|value| u32::try_from(value).ok())
+    else {
+        return Ok(BifResult::badarg());
+    };
+    let atoms = &mut scheduler.atoms;
+    let Some(path) = marshal_path(path) else {
+        return error_tuple(atoms, "einval");
+    };
+    value_or_error(
+        atoms,
+        file::set_permissions(path, permissions).map(|()| Term::static_atom("ok")),
+    )
+}
+
+/// Run `prim_file:set_owner_nif(Path, Uid, Gid)`, as the ERTS NIF
+/// `set_owner_nif` (`prim_file_nif.c:1073-1091`) does: a `Uid` or `Gid`
+/// that is not a C `int` raises `error:badarg` before the path check, a
+/// path that [`marshal_path`] does not accept gives `{error, einval}`, and
+/// else [`file::set_owner`] gives `ok` or `{error, Errno}`. The value -1
+/// leaves its field unchanged.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // {error, enoent}
+/// let result = set_owner_nif(&mut scheduler, &Term::binary(b"/pbeam-missing\0".to_vec()), &Term::Integer(-1), &Term::Integer(-1))?;
+/// ```
+///
+/// # Errors
+///
+/// A new result atom in a full atom table gives the error of
+/// `AtomTable::put`.
+fn set_owner_nif(
+    scheduler: &mut Scheduler,
+    path: &Term,
+    uid: &Term,
+    gid: &Term,
+) -> Result<BifResult, BeamError> {
+    let uid = uid
+        .small_integer()
+        .and_then(|value| i32::try_from(value).ok());
+    let gid = gid
+        .small_integer()
+        .and_then(|value| i32::try_from(value).ok());
+    let (Some(uid), Some(gid)) = (uid, gid) else {
+        return Ok(BifResult::badarg());
+    };
+    let atoms = &mut scheduler.atoms;
+    let Some(path) = marshal_path(path) else {
+        return error_tuple(atoms, "einval");
+    };
+    value_or_error(
+        atoms,
+        file::set_owner(path, uid, gid).map(|()| Term::static_atom("ok")),
+    )
+}
+
+/// Run `prim_file:set_time_nif(Path, ATime, MTime, CTime)`, as the ERTS NIF
+/// `set_time_nif` (`prim_file_nif.c:1093-1113`) does: a time that is not an
+/// integer in the `Sint64` range raises `error:badarg` before the path
+/// check, a path that [`marshal_path`] does not accept gives
+/// `{error, einval}`, and else [`file::set_time`] gives `ok` or
+/// `{error, Errno}`. ERTS ignores `CTime`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // {error, enoent}
+/// let result = set_time_nif(&mut scheduler, &Term::binary(b"/pbeam-missing\0".to_vec()), &Term::Integer(0), &Term::Integer(0), &Term::Integer(0))?;
+/// ```
+///
+/// # Errors
+///
+/// A new result atom in a full atom table gives the error of
+/// `AtomTable::put`.
+fn set_time_nif(
+    scheduler: &mut Scheduler,
+    path: &Term,
+    atime: &Term,
+    mtime: &Term,
+    ctime: &Term,
+) -> Result<BifResult, BeamError> {
+    let (Term::Integer(atime), Term::Integer(mtime), Term::Integer(_)) = (atime, mtime, ctime)
+    else {
+        return Ok(BifResult::badarg());
+    };
+    let atoms = &mut scheduler.atoms;
+    let Some(path) = marshal_path(path) else {
+        return error_tuple(atoms, "einval");
+    };
+    value_or_error(
+        atoms,
+        file::set_time(path, *atime, *mtime).map(|()| Term::static_atom("ok")),
+    )
 }
 
 /// Return `{ok, Value}` for `Ok(Value)`, as `enif_make_tuple2(env, am_ok,

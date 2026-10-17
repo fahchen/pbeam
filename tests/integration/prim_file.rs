@@ -97,3 +97,65 @@ fn read_to_end(fifo: &Path) {
     let mut bytes = Vec::new();
     File::open(fifo).unwrap().read_to_end(&mut bytes).unwrap();
 }
+
+const PRIM_EXTRAS_PROBE: &[u8] = include_bytes!("../../fixtures/prim_file/prim_extras_probe.beam");
+
+#[test]
+fn runs_the_write_and_metadata_nifs_of_prim_file_as_pinned_erts() {
+    // `prim_extras_probe:main/1` calls `make_dir/1`, `del_dir/1`,
+    // `delete/1`, `rename/2`, `make_link/2`, `make_symlink/2`, `altname/1`,
+    // `write_file_info/3`, `read_file_info/1,2`, `read_link/1`,
+    // `read_link_info/1`, `read_file/1`, `write_file/2`, `get_cwd/0`, and
+    // `set_cwd/1`. Each call reaches the NIF of `prim_file_nif.c` that the
+    // binding adds, and `unix_prim_file.c` gives the Unix results. The probe
+    // returns the `phash2` digest of the result list, so the test compares
+    // the exact results of the pinned ERTS and of PBeam on this host. Each
+    // run gets its own empty directory, so no result depends on another run.
+    let directory = std::env::temp_dir().join(format!("pbeam-prim-extras-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    let erlang = pinned_beam("erlang");
+    let lists = pinned_beam("lists");
+    let prim_file = pinned_beam("prim_file");
+    let mut digests = Vec::new();
+    for name in ["ERTS", "PBeam"] {
+        let scratch = directory.join(name);
+        std::fs::create_dir_all(&scratch).unwrap();
+        let dir = scratch.to_str().unwrap();
+        if name == "ERTS" {
+            let output = Command::new("erl")
+                .args([
+                    "-noshell",
+                    "-pa",
+                    "fixtures/prim_file",
+                    "-eval",
+                    "io:format(\"~w~n\", [prim_extras_probe:main(init:get_plain_arguments())]), halt().",
+                    "-extra",
+                    dir,
+                ])
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{name} {:?}", output.stderr);
+            digests.push(
+                String::from_utf8(output.stdout)
+                    .unwrap()
+                    .trim()
+                    .parse::<u64>()
+                    .unwrap(),
+            );
+        } else {
+            let program =
+                BeamProgram::load(&[&erlang, &lists, &prim_file, PRIM_EXTRAS_PROBE]).unwrap();
+            let argument = Term::list_from(dir.bytes().map(|byte| Term::Integer(byte.into())));
+            let argument = program.host_term(Term::list_from([argument]));
+            let result = program
+                .execute("prim_extras_probe", "main", &[argument])
+                .unwrap();
+            let Term::Integer(digest) = result.term else {
+                panic!("the probe returns the digest");
+            };
+            digests.push(u64::try_from(digest).unwrap());
+        }
+    }
+    assert_eq!(digests[0], digests[1]);
+    std::fs::remove_dir_all(&directory).unwrap();
+}
