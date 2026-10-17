@@ -345,10 +345,10 @@ fn encode(term: &Term, atoms: &AtomTable, options: &Options) -> Result<Vec<u8>, 
                 let mut pairs: Vec<(&Term, &Term)> = map.iter().collect();
                 if options.deterministic {
                     pairs.sort_by(|(left, _), (right, _)| exact_map_key_order(left, right, atoms));
-                } else if map.len() <= 32 {
-                    // A flatmap of ERTS keeps its pairs in descending key
-                    // order (`erl_map.c`), while `Map::iter` gives the
-                    // ascending order.
+                } else {
+                    // ERTS writes a flatmap in descending key order
+                    // (`erl_map.c`) and a hashmap in the reverse of the HAMT
+                    // traversal order (`enc_term`, `external.c:3819-3825`).
                     pairs.reverse();
                 }
                 for (key, value) in pairs.into_iter().rev() {
@@ -917,7 +917,8 @@ fn validate(input: &[u8], seed: u32) -> Result<(), DecodeError> {
                     return Err(DecodeError::Badarg);
                 }
                 check_sysname(input, &mut index, local)?;
-                check_skip(input, &mut index, 1 + 4 * count)?;
+                check_tiny_creation(input, &mut index)?;
+                check_skip(input, &mut index, 4 * count)?;
             }
             101 => {
                 check_sysname(input, &mut index, local)?;
@@ -1608,7 +1609,11 @@ impl Decoder<'_> {
         let creation = if tag == 4 {
             self.u32()?
         } else {
-            u32::from(self.u8()?)
+            let creation = u32::from(self.u8()?);
+            if creation > MAX_TINY_CREATION {
+                return Err(DecodeError::Badarg);
+            }
+            creation
         };
         let mut numbers = [0u32; 3];
         for number in numbers.iter_mut().take(count.min(3)) {

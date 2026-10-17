@@ -833,6 +833,31 @@ fn encodes_the_large_and_unsupported_forms() {
 }
 
 #[test]
+fn encodes_a_hashmap_in_the_erts_order() {
+    // ERTS writes the reverse of the HAMT traversal order
+    // (`enc_term`, `external.c:3819-3825`). The bytes are
+    // `term_to_binary(maps:from_list([{I, I} || I <- lists:seq(1, 33)]))`
+    // on the pinned ERTS.
+    let atoms = AtomTable::new();
+    let pairs = (1..=33)
+        .map(|value| (Term::Integer(value), Term::Integer(value)))
+        .collect();
+    let map = crate::term::Map::from_pairs(pairs, &atoms).unwrap();
+    let expected = [
+        116, 0, 0, 0, 33, 97, 22, 97, 22, 97, 26, 97, 26, 97, 27, 97, 27, 97, 5, 97, 5, 97, 21, 97,
+        21, 97, 30, 97, 30, 97, 16, 97, 16, 97, 3, 97, 3, 97, 33, 97, 33, 97, 14, 97, 14, 97, 24,
+        97, 24, 97, 17, 97, 17, 97, 11, 97, 11, 97, 6, 97, 6, 97, 20, 97, 20, 97, 28, 97, 28, 97,
+        25, 97, 25, 97, 1, 97, 1, 97, 32, 97, 32, 97, 15, 97, 15, 97, 9, 97, 9, 97, 23, 97, 23, 97,
+        10, 97, 10, 97, 8, 97, 8, 97, 31, 97, 31, 97, 7, 97, 7, 97, 2, 97, 2, 97, 13, 97, 13, 97,
+        29, 97, 29, 97, 19, 97, 19, 97, 12, 97, 12, 97, 4, 97, 4, 97, 18, 97, 18,
+    ];
+    assert_eq!(
+        encode(&Term::Map(map), &atoms, &Options::default()).unwrap(),
+        expected
+    );
+}
+
+#[test]
 fn binary_to_term_checks_the_binary_and_the_options() {
     use crate::runtime::scheduler::Scheduler;
     let mut scheduler = Scheduler::new(AtomTable::new());
@@ -985,6 +1010,17 @@ fn keeps_the_decoder_guards_behind_the_validation() {
     six_ref.extend(node());
     six_ref.extend(with_words(&[], &[0, 1, 1, 0, 0, 0]));
     assert!(matches!(term(&six_ref), Err(DecodeError::Badarg)));
+    // A legacy creation above 3 raises badarg for `NEW_REFERENCE_EXT` too
+    // (`is_tiny_creation`, `external.c:4763-4777`).
+    let mut tiny_new_ref = vec![114, 0, 3];
+    tiny_new_ref.extend(node());
+    tiny_new_ref.push(4);
+    tiny_new_ref.extend(with_words(&[], &[5, 1, 0]));
+    assert!(matches!(term(&tiny_new_ref), Err(DecodeError::Badarg)));
+    assert!(matches!(
+        decode_with(&mut atoms, &tiny_new_ref, false),
+        Err(DecodeError::Badarg)
+    ));
     // The validated path rejects a six-word `NEW_REFERENCE_EXT` too.
     let mut six_new_ref = vec![114, 0, 6];
     six_new_ref.extend(node());
