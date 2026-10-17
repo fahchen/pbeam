@@ -1239,6 +1239,10 @@ pub(super) fn at(subject: &Term, index: &Term) -> BifResult {
 /// than 8 bits, raise `badarg`. PBeam has only binary terms, so the empty
 /// binary is the only subject of less than 8 bits.
 ///
+/// The read asks [`Binary::byte_runs`] for the one byte. The read of an
+/// append-built binary then touches one chunk and joins no chunk, as the
+/// single-byte read of ERTS does.
+///
 /// # Examples
 ///
 /// ```rust,ignore
@@ -1251,10 +1255,19 @@ pub(super) fn last(subject: &Term) -> BifResult {
     let Term::Binary(bytes) = subject else {
         return BifResult::badarg();
     };
-    match bytes.last() {
-        Some(byte) => Value(Term::Integer(i64::from(*byte))),
-        None => BifResult::badarg(),
+    let size = bytes.bit_size();
+    if size < 8 {
+        return BifResult::badarg();
     }
+    // PBeam has only binary terms, so the size is a whole number of bytes.
+    let index = size / 8 - 1;
+    let byte = bytes
+        .byte_runs(index, index + 1)
+        .first()
+        .expect("the range of the last byte gives one run")
+        .first()
+        .expect("the range holds one byte");
+    Value(Term::Integer(i64::from(*byte)))
 }
 
 /// Return the value of a term as an `Uint`, as ERTS `term_to_Uint` gives it

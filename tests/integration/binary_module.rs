@@ -53,9 +53,10 @@ const TRACES: &str = "[{badarg,{binary,at,[<<1,2>>,5]},erl_stdlib_errors},\
                       {badarg,{binary,list_to_bin,[[256]]},erl_stdlib_errors}]";
 
 /// `binary_module_probe:last/0` on the pinned ERTS: the last byte of each
-/// subject, and the `badarg` of the empty binary and of a term that is not
-/// a binary (`binary_last_1`, `erl_bif_binary.c:2311-2333`).
-const LAST: &str = "[5,7,{error,badarg},{error,badarg},{error,badarg}]";
+/// subject, including an append-built binary of 70001 bytes, and the
+/// `badarg` of the empty binary and of a term that is not a binary
+/// (`binary_last_1`, `erl_bif_binary.c:2311-2333`).
+const LAST: &str = "[5,7,255,{error,badarg},{error,badarg},{error,badarg}]";
 
 /// `binary_module_probe:last_traces/0` on the pinned ERTS: the first stack
 /// frame of each `binary:last/1` error, as [`TRACES`] gives it.

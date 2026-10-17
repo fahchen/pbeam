@@ -51,12 +51,19 @@ describe(Reason, {Module, Function, Args, Location}) ->
 info_module([{error_info, #{module := Module}}]) -> Module;
 info_module(_) -> none.
 
-%% The value and the error of each binary:last/1 call.
+%% The value and the error of each binary:last/1 call. `last_of_append/1`
+%% builds an append binary of more bytes than one leaf of the append tree,
+%% so the read of its last byte must touch one chunk and join no chunk.
 last() ->
-    [last_of(<<1, 2, 3, 4, 5>>), last_of(<<7>>), last_of(<<>>), last_of(foo), last_of(true)].
+    [last_of(<<1, 2, 3, 4, 5>>), last_of(<<7>>), last_of_append(70000), last_of(<<>>),
+     last_of(foo), last_of(true)].
 
 last_of(Bin) ->
     try binary:last(id(Bin)) catch Class:Reason -> {Class, Reason} end.
+
+last_of_append(Size) ->
+    Prefix = id(binary:copy(<<0>>, Size)),
+    last_of(id(<<Prefix/binary, 255>>)).
 
 %% As traces/0, for binary:last/1.
 last_traces() ->
