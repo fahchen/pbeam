@@ -106,10 +106,10 @@ timestamp() ->
     OsUs = os:system_time(microsecond),
     [in(0, Mega, 4000), in(0, Sec, 999999), in(0, Micro, 999999),
      in(0, OsMega, 4000), in(0, OsSec, 999999), in(0, OsMicro, 999999),
-     le(Us - 10000000, micros({Mega, Sec, Micro})),
-     le(micros({Mega, Sec, Micro}), Us + 10000000),
-     le(OsUs - 10000000, micros({OsMega, OsSec, OsMicro})),
-     le(micros({OsMega, OsSec, OsMicro}), OsUs + 10000000)].
+     le(Us - 10000, micros({Mega, Sec, Micro})),
+     le(micros({Mega, Sec, Micro}), Us + 10000),
+     le(OsUs - 10000, micros({OsMega, OsSec, OsMicro})),
+     le(micros({OsMega, OsSec, OsMicro}), OsUs + 10000)].
 
 %% The microseconds of `{MegaSecs, Secs, MicroSecs}`.
 micros({Mega, Sec, Micro}) -> (Mega * 1000000 + Sec) * 1000000 + Micro.
@@ -121,9 +121,9 @@ micros({Mega, Sec, Micro}) -> (Mega * 1000000 + Sec) * 1000000 + Micro.
 perf() ->
     P1 = os:perf_counter(),
     burn(100000),
+    Seconds = os:perf_counter(second),
     P2 = os:perf_counter(),
-    [in(0, P1, P2), lt(P1, P2),
-     floor_in(P1, os:perf_counter(second), 1000000000, P2)].
+    [in(0, P1, P2), lt(P1, P2), floor_in(P1, Seconds, 1000000000, P2)].
 
 %% The process identifier of the host as a flat string of its digits
 %% (`sys/unix/sys.c:934-939`).
@@ -303,9 +303,7 @@ local_check() ->
 %% (`sys/unix/erl_unix_sys.h:331-343`), so the local time of the fixture
 %% zone is 27 seconds before its UTC time.
 leap_local() ->
-    {{_, _, _}, {LH, LMi, LS}} = erlang:localtime(),
-    {{_, _, _}, {UH, UMi, US}} = erlang:universaltime(),
-    Difference = (LH * 3600 + LMi * 60 + LS) - (UH * 3600 + UMi * 60 + US),
+    Difference = seconds(erlang:localtime()) - seconds(erlang:universaltime()),
     io:put_chars(case in(-28, Difference, -26) of
                      true -> <<"localtime_r\n">>;
                      false -> <<"posix2time\n">>
