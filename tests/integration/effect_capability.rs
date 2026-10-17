@@ -409,9 +409,20 @@ fn inventory_marked(value: &str) -> BTreeSet<&'static str> {
 /// `get_cwd/0` call the `prim_file` native bindings.
 fn program() -> BeamProgram {
     let erlang = pinned_beam("erlang");
+    let counters = pinned_beam("counters");
+    let atomics = pinned_beam("atomics");
     let prim_file = pinned_beam("prim_file");
     let prim_buffer = pinned_beam("prim_buffer");
-    BeamProgram::load(&[&erlang, &prim_file, &prim_buffer, PRIM_TTY, EFFECT_PROBE]).unwrap()
+    BeamProgram::load(&[
+        &erlang,
+        &counters,
+        &atomics,
+        &prim_file,
+        &prim_buffer,
+        PRIM_TTY,
+        EFFECT_PROBE,
+    ])
+    .unwrap()
 }
 
 /// Run `effect_probe:Function()` with `policy`.
