@@ -1610,8 +1610,16 @@ impl Table {
                 .iter()
                 .rposition(|retained| retained.hash == hash && retained.key == key)
             {
+                // ERTS compares the new object with each object of the key
+                // that the fixation keeps, and each comparison that is not
+                // equal uses one unit (`erl_db_hash.c:1422-1444`).
+                let compared = self.retained[index]
+                    .slots
+                    .iter()
+                    .take_while(|slot| self.object_of(**slot).as_slice() != object.as_slice())
+                    .count();
                 self.revive(object, index, hash);
-                return 0;
+                return compared;
             }
         }
         let walks = walks.entry(hash).or_default();
@@ -1986,6 +1994,14 @@ impl Table {
                 .flatten()
                 .map(|object| object.capacity() * std::mem::size_of::<Term>())
                 .sum::<usize>()
+            + self.fixed_by.capacity() * std::mem::size_of::<ProcessId>()
+            + self.retained.capacity() * std::mem::size_of::<Retained>()
+            + self
+                .retained
+                .iter()
+                .map(|retained| retained.slots.capacity() * std::mem::size_of::<usize>())
+                .sum::<usize>()
+            + self.deleted.capacity() * std::mem::size_of::<bool>()
             + self.busy.as_ref().map_or(0, |busy| {
                 busy.objects.capacity() * std::mem::size_of::<Vec<Term>>()
                     + busy
