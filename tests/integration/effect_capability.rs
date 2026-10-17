@@ -35,7 +35,7 @@ const INVENTORY: &str = include_str!("../../docs/effect-inventory.md");
 /// Each capability of the column "Capability" of the effect inventory, as
 /// `(entry, kind:operation)`, with the `effect_probe` function that calls
 /// the entry once.
-const PROBES: [(&str, &str, &str); 56] = [
+const PROBES: [(&str, &str, &str); 58] = [
     ("erlang:exit/2", "process:exit_other", "exit_other"),
     ("erlang:link/1", "process:link", "link"),
     ("erlang:monitor/2", "process:monitor", "monitor2"),
@@ -43,7 +43,9 @@ const PROBES: [(&str, &str, &str); 56] = [
     ("erlang:send/2", "process:send", "send2"),
     ("erlang:send/3", "process:send", "send3"),
     ("erlang:start_timer/3", "process:send", "start_timer"),
+    ("erlang:start_timer/4", "process:send", "start_timer_4"),
     ("erlang:send_after/3", "process:send", "send_after"),
+    ("erlang:send_after/4", "process:send", "send_after_4"),
     ("erlang:process_info/2", "process:inspect", "process_info"),
     (
         "erlang:is_process_alive/1",
@@ -275,18 +277,21 @@ fn only(names: &[&str]) -> Constraint {
 
 /// Each entry that the column "Capability" of the effect inventory marks
 /// `ambient`. `effect_probe:ambient/0` calls each entry once.
-const AMBIENT: [&str; 64] = [
+const AMBIENT: [&str; 70] = [
     "atomics:add/3",
     "atomics:get/2",
     "atomics:info/1",
     "atomics:put/3",
     "erlang:binary_to_atom/2",
     "erlang:binary_to_existing_atom/2",
+    "erlang:binary_to_term/1",
+    "erlang:binary_to_term/2",
     "erlang:cancel_timer/1",
     "erlang:cancel_timer/2",
     "erlang:date/0",
     "erlang:demonitor/1",
     "erlang:demonitor/2",
+    "erlang:external_size/1",
     "erlang:finish_after_on_load/2",
     "erlang:function_exported/3",
     "erlang:list_to_atom/1",
@@ -300,10 +305,13 @@ const AMBIENT: [&str; 64] = [
     "erlang:nodes/1",
     "erlang:nodes/2",
     "erlang:processes/0",
+    "erlang:read_timer/1",
     "erlang:register/2",
     "erlang:system_info/1",
     "erlang:system_time/0",
     "erlang:system_time/1",
+    "erlang:term_to_binary/1",
+    "erlang:term_to_binary/2",
     "erlang:time/0",
     "erlang:time_offset/0",
     "erlang:time_offset/1",
@@ -497,7 +505,7 @@ fn calls_each_ambient_and_later_entry_with_no_capability() {
     // The root process holds no capability, so no policy can permit the
     // calls: each `ambient` and `later` entry has no check.
     let program = program();
-    let expected = "[true,true,false,true,true,true,integer,integer,integer,integer,integer,date_time,unix,nonode@nohost,nonode@nohost,[],[nonode@nohost],1,true,{error,badfile},{error,badarg},false,false,true,effect_probe_ambient_atom,effect_probe_ambient_binary,effect_probe_ambient_binary,effect_probe_ambient_atom,ok,effect_probe_ambient,true,false,[{key,value}],value,true,true,set,reference,true,atom,2,ok,1,error,ok,error,ok,error,[ok,{ok,0},ok],[eof,ok],[11,<<48,49>>,{ok,8},9,ok,0,<<120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120>>,acquired,ok],none,{error,notsup},ok,false,reference,ok,1,ok,48,integer,integer,timestamp,date,time,date_time,date_time,integer,timestamp,integer,integer]";
+    let expected = "[true,true,false,true,true,true,integer,integer,integer,integer,integer,date_time,unix,nonode@nohost,nonode@nohost,[],[nonode@nohost],1,true,{error,badfile},{error,badarg},false,false,true,effect_probe_ambient_atom,effect_probe_ambient_binary,effect_probe_ambient_binary,effect_probe_ambient_atom,ok,effect_probe_ambient,true,false,[{key,value}],value,true,true,set,reference,true,atom,2,ok,1,error,ok,error,ok,error,[ok,{ok,0},ok],[eof,ok],[11,<<48,49>>,{ok,8},9,ok,0,<<120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120>>,acquired,ok],none,{error,notsup},ok,false,reference,ok,1,ok,48,integer,integer,timestamp,date,time,date_time,date_time,integer,timestamp,integer,integer,true,true,true,true,9,false]";
     assert_eq!(run_text(&program, "ambient", &Grants(vec![])), expected);
     assert_eq!(erts_with_stand_in("ambient"), format!("{expected}\n"));
 }

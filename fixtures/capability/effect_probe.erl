@@ -44,7 +44,9 @@
     send2/0,
     send3/0,
     start_timer/0,
+    start_timer_4/0,
     send_after/0,
+    send_after_4/0,
     process_info/0,
     is_process_alive/0,
     is_alive_request/0,
@@ -229,7 +231,11 @@ send3() -> attempt(fun() -> erlang:send(self(), ping, []) end).
 
 start_timer() -> attempt(fun() -> erlang:start_timer(0, self(), ping) end).
 
+start_timer_4() -> attempt(fun() -> erlang:start_timer(0, self(), ping, []) end).
+
 send_after() -> attempt(fun() -> erlang:send_after(0, self(), ping) end).
+
+send_after_4() -> attempt(fun() -> erlang:send_after(0, self(), ping, []) end).
 
 %% The process inspection and group leader entries. A call for the caller
 %% has no check, so each probe calls them for a child.
@@ -487,7 +493,13 @@ ambient() ->
         integer(os:system_time()),
         timestamp(os:timestamp()),
         integer(os:perf_counter()),
-        integer(list_to_integer(os:getpid()))
+        integer(list_to_integer(os:getpid())),
+        is_binary(erlang:term_to_binary(1)),
+        is_binary(erlang:term_to_binary(1, [])),
+        erlang:binary_to_term(erlang:term_to_binary(1)) =:= 1,
+        erlang:binary_to_term(erlang:term_to_binary(1), []) =:= 1,
+        erlang:external_size(<<1, 2, 3>>),
+        erlang:read_timer(make_ref())
     ].
 
 %% Open /dev/null in write mode, write, move the position, and close it

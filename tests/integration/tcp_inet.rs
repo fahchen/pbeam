@@ -708,10 +708,6 @@ fn stops_the_run_for_each_receive_and_send_part_that_is_not_implemented() {
             "unsupported tcp_inet output to a busy port with a send_timeout",
         ),
         ("busy", "unsupported tcp_inet output to a busy port"),
-        (
-            "term",
-            "unsupported erlang:term_to_binary/2 other than an ordinary reference with [local]",
-        ),
     ] {
         let path = std::env::temp_dir().join(format!(
             "pbeam-tcp-unsupported-{case}-{}",
