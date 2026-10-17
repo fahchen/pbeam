@@ -35,7 +35,7 @@ bifs! {
     binary:encode_unsigned/1 => unsupported,
     binary:encode_unsigned/2 => unsupported,
     binary:first/1 => unsupported,
-    binary:last/1 => unsupported,
+    binary:last/1 as BinaryLast1 => |_, [subject]| Ok(binary::last(subject)),
     binary:list_to_bin/1 as BinaryListToBin1 => |cx, [term]| iolist::list_to_binary(cx.scheduler, term),
     binary:longest_common_prefix/1 => unsupported,
     binary:longest_common_suffix/1 => unsupported,

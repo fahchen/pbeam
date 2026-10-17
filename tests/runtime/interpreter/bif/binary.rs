@@ -13,6 +13,21 @@ fn bytes(term: &Term) -> (&[u8], &Arc<Vec<u8>>) {
 }
 
 #[test]
+fn gives_the_last_byte_of_an_append_binary_without_joining_its_chunks() {
+    // `binary_last_1` reads the one byte (`erl_bif_binary.c:2311-2333`), so
+    // the read of an append-built binary touches one chunk and joins none.
+    let binary = Binary::from_chunks(vec![Arc::new(b"ab".to_vec()), Arc::new(b"c".to_vec())]);
+    let result = last(&Term::Binary(binary.clone()));
+    assert!(matches!(result, Value(Term::Integer(value)) if value == i64::from(b'c')));
+    assert!(!binary.is_joined());
+    // The empty binary has no last byte.
+    assert!(matches!(
+        last(&Term::Binary(Binary::default())),
+        BifResult::Raise { .. }
+    ));
+}
+
+#[test]
 fn gives_a_not_found_result_that_shares_the_bytes_of_the_subject() {
     // `do_split_not_found_result` (`erl_bif_binary.c:1737-1751`) gives the
     // subject in a list, and `binary_split` writes sub-binaries of the

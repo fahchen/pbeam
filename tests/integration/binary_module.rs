@@ -52,6 +52,17 @@ const TRACES: &str = "[{badarg,{binary,at,[<<1,2>>,5]},erl_stdlib_errors},\
                       {badarg,{binary,copy,[<<1>>,-1]},erl_stdlib_errors},\
                       {badarg,{binary,list_to_bin,[[256]]},erl_stdlib_errors}]";
 
+/// `binary_module_probe:last/0` on the pinned ERTS: the last byte of each
+/// subject, including an append-built binary of 70001 bytes, and the
+/// `badarg` of the empty binary and of a term that is not a binary
+/// (`binary_last_1`, `erl_bif_binary.c:2311-2333`).
+const LAST: &str = "[5,7,255,{error,badarg},{error,badarg},{error,badarg}]";
+
+/// `binary_module_probe:last_traces/0` on the pinned ERTS: the first stack
+/// frame of each `binary:last/1` error, as [`TRACES`] gives it.
+const LAST_TRACES: &str = "[{badarg,{binary,last,[<<>>]},erl_stdlib_errors},\
+                           {badarg,{binary,last,[foo]},erl_stdlib_errors}]";
+
 /// `binary_module_probe:costs/1` on the pinned ERTS with `erl +S 1`: the
 /// summary of the matches and the reductions of `binary:matches/2` for a
 /// subject of `N` bytes `$a` and `Tail`, with 1 for the `call_ext`. The
@@ -149,6 +160,46 @@ fn runs_the_binary_module_bifs_as_pinned_erts() {
     assert_eq!(
         String::from_utf8(reference.stdout).unwrap(),
         format!("{RESULTS}\n{TRACES}\n{COSTS}\n")
+    );
+}
+
+#[test]
+fn runs_binary_last_as_pinned_erts() {
+    // The pinned compiler emits a `binary:last/1` call as an external call,
+    // so the probe runs it through the import path of the interpreter.
+    let program = BeamProgram::load(&[BINARY_MODULE_PROBE]).unwrap();
+    let run = |function| {
+        let result = program
+            .execute("binary_module_probe", function, &[])
+            .unwrap();
+        text(&result.term, result.atoms())
+    };
+    assert_eq!(run("last"), LAST);
+    assert_eq!(run("last_traces"), LAST_TRACES);
+
+    let reference = Command::new("erl")
+        .args([
+            "+S",
+            "1",
+            "-noshell",
+            "-pa",
+            "fixtures/binary_module",
+            "-eval",
+            &format!(
+                "{ERTS_TEXT}, M = binary_module_probe, \
+                 io:format(\"~s~n~s~n\", [T(M:last()), T(M:last_traces())]), halt()."
+            ),
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        reference.status.success() && reference.stderr.is_empty(),
+        "{reference:?}"
+    );
+    assert_eq!(
+        String::from_utf8(reference.stdout).unwrap(),
+        format!("{LAST}\n{LAST_TRACES}\n")
     );
 }
 

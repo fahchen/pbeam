@@ -514,6 +514,23 @@ impl Binary {
         }
     }
 
+    /// Return the last byte of this binary, or `None` for a binary with no
+    /// byte. The call reads the last chunk of an append-built binary and
+    /// joins no chunk, and each empty chunk at the end costs one step.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Binary::from(b"ab".to_vec()).last_byte(), Some(b'b'));
+    /// assert_eq!(Binary::default().last_byte(), None);
+    /// ```
+    pub(crate) fn last_byte(&self) -> Option<u8> {
+        match &self.0.chunks {
+            Some(chunks) => chunks.iter().rev().find_map(|chunk| chunk.last().copied()),
+            None => self.0.bytes_of_view().last().copied(),
+        }
+    }
+
     /// Return the runs of the bytes from byte `start` to byte `end` of this
     /// binary, in order, for a reader of one byte range. A view that an
     /// append built gives the part of each chunk in the range and does not
