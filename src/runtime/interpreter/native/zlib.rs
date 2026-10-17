@@ -261,6 +261,10 @@ struct ZStream {
     /// keeps this size in `wbits` until the next init, also across
     /// `inflateReset` (`inflate.c:136-171`, `539-545`).
     inflate_learned_bits: Option<i32>,
+    /// The first bytes of the header of an automatic wrapper, until it
+    /// tells the window size. The C state reads the header across calls
+    /// (`inflate.c:505-545`), and a header can arrive in parts.
+    inflate_header: Vec<u8>,
     /// True after a `deflate_nif/4` call that passed its flush check. The
     /// `deflateEnd` of zlib gives `Z_DATA_ERROR` for a stream in the busy
     /// state, which is each state after such a call until the stream end
@@ -302,6 +306,7 @@ impl ZStream {
             inflate: None,
             inflate_window_bits: 0,
             inflate_learned_bits: None,
+            inflate_header: Vec::new(),
             deflate_started: false,
             deflate_finished: false,
             eos_behavior: 2,
@@ -405,8 +410,20 @@ impl ZStream {
                     // `inflate` ignores each other flush (`inflate.c:1310-1317`).
                     _ => InflateFlush::NoFlush,
                 };
-                if self.inflate_learned_bits.is_none() {
-                    self.inflate_learned_bits = learn_window_bits(self.inflate_window_bits, input);
+                if self.inflate_learned_bits.is_none()
+                    && self.inflate_window_bits >= 0
+                    && self.inflate_window_bits & 15 == 0
+                {
+                    // The header can arrive in parts, so keep its first two
+                    // bytes until the window size is known.
+                    let missing = 2 - self.inflate_header.len();
+                    let taken = input.len().min(missing);
+                    self.inflate_header.extend_from_slice(&input[..taken]);
+                    if self.inflate_header.len() == 2 {
+                        self.inflate_learned_bits =
+                            learn_window_bits(self.inflate_window_bits, &self.inflate_header);
+                        self.inflate_header.clear();
+                    }
                 }
                 let inflate = self.inflate.as_mut().expect("the inflate state");
                 let before_in = inflate.total_in();
@@ -967,6 +984,7 @@ fn inflate_nif(
                     stream.inflate_window_bits,
                     stream.inflate_learned_bits,
                 ));
+                stream.inflate_header.clear();
                 stream.eos_seen = false;
             }
             if cut {
@@ -1201,6 +1219,7 @@ fn inflate_init_nif(
         stream.inflate = Some(inflate_state(window_bits, None));
         stream.inflate_window_bits = window_bits;
         stream.inflate_learned_bits = None;
+        stream.inflate_header.clear();
         stream.state = State::Inflate;
         stream.eos_behavior = eos_behavior;
         stream.eos_seen = false;
@@ -1311,6 +1330,7 @@ fn inflate_reset_nif(scheduler: &mut Scheduler, stream: &Term) -> Result<BifResu
             stream.inflate_window_bits,
             stream.inflate_learned_bits,
         ));
+        stream.inflate_header.clear();
         stream.eos_seen = false;
         stream.reset_input();
         Native::Atom("ok")

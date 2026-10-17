@@ -328,6 +328,64 @@ fn learns_the_window_size_of_an_automatic_header() {
 }
 
 #[test]
+fn learns_the_window_size_of_a_header_split_across_calls() {
+    // The C state reads the header across calls (`inflate.c:505-545`). The
+    // first byte of the zlib header arrives in one `inflate_nif/4` call and
+    // the rest in the next one. A reset must still keep the window size 9
+    // of that header.
+    let first = compress_with_window(b"hello hello hello", 9);
+    let far: Vec<u8> = (0..600)
+        .map(|value| (value % 251) as u8)
+        .chain((0..600).map(|value| (value % 251) as u8))
+        .collect();
+    let second = compress_with_window(&far, 15);
+    let (head, rest) = first.split_at(1);
+    let mut scheduler = scheduler();
+    let stream = stream(&mut scheduler);
+    let result = inflate_init_nif(
+        &mut scheduler,
+        &stream,
+        &Term::Integer(32),
+        &Term::Integer(2),
+    )
+    .unwrap();
+    assert_eq!(atom_name(&scheduler, result), "ok");
+    enqueue(&mut scheduler, &stream, head);
+    let result = inflate_nif(
+        &mut scheduler,
+        &stream,
+        &Term::Integer(1024),
+        &Term::Integer(1024),
+        &Term::Integer(0),
+    )
+    .unwrap();
+    assert_eq!(tag(&scheduler, &result), "finished");
+    assert!(output_bytes(&result).is_empty());
+    enqueue(&mut scheduler, &stream, rest);
+    let result = inflate_nif(
+        &mut scheduler,
+        &stream,
+        &Term::Integer(1024),
+        &Term::Integer(1024),
+        &Term::Integer(0),
+    )
+    .unwrap();
+    assert_eq!(output_bytes(&result), b"hello hello hello");
+    let result = inflate_reset_nif(&mut scheduler, &stream).unwrap();
+    assert_eq!(atom_name(&scheduler, result), "ok");
+    enqueue(&mut scheduler, &stream, &second);
+    let result = inflate_nif(
+        &mut scheduler,
+        &stream,
+        &Term::Integer(1024),
+        &Term::Integer(1024),
+        &Term::Integer(0),
+    )
+    .unwrap();
+    assert_eq!(raise_name(&scheduler, result), "data_error");
+}
+
+#[test]
 fn keeps_the_learned_window_size_across_inflate_reset() {
     // The C `inflateReset` keeps the window size that the first header told
     // (`inflate.c:136-171`, `539-545`). A window-9 stream teaches 9, and
