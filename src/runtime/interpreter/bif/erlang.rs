@@ -5181,9 +5181,9 @@ pub(super) fn display(term: &Term, atoms: &AtomTable) -> BifResult {
 /// standard output or the standard error, and return `true`. The string is
 /// a proper list of Unicode code points or a binary of whole bytes. A
 /// device that is not `stdout` or `stderr`, a string with another form or a
-/// bad code point, and an improper list raise `badarg`. PBeam does not
-/// support the `stdin` device, because it writes the bytes with the
-/// `TIOCSTI` ioctl: it raises a runtime error.
+/// bad code point, an improper list, and a failed write raise `badarg`.
+/// PBeam does not support the `stdin` device, because it writes the bytes
+/// with the `TIOCSTI` ioctl: it raises a runtime error.
 ///
 /// # Examples
 ///
@@ -5230,20 +5230,25 @@ pub(super) fn display_string(
     };
     let name = atoms.name_of(device);
     if name == "stdout" {
-        let mut stdout = std::io::stdout();
-        let _ = stdout.write_all(&bytes);
-        let _ = stdout.flush();
-    } else if name == "stderr" {
-        let mut stderr = std::io::stderr();
-        let _ = stderr.write_all(&bytes);
-        let _ = stderr.flush();
-    } else if name == "stdin" {
+        return Ok(write_display(&mut std::io::stdout(), &bytes));
+    }
+    if name == "stderr" {
+        return Ok(write_display(&mut std::io::stderr(), &bytes));
+    }
+    if name == "stdin" {
         // PBeam does not write to the terminal input with `TIOCSTI`.
         return Err(error("unsupported erlang:display_string/2 device stdin"));
-    } else {
-        return Ok(BifResult::badarg());
     }
-    Ok(Value(Term::static_atom("true")))
+    Ok(BifResult::badarg())
+}
+
+/// Write `bytes` to `writer` and give `true`, or raise `badarg` when the
+/// write fails, as `display_string_2` does (`bif.c:4274-4297`).
+fn write_display(writer: &mut dyn Write, bytes: &[u8]) -> BifResult {
+    match writer.write_all(bytes).and_then(|()| writer.flush()) {
+        Ok(()) => Value(Term::static_atom("true")),
+        Err(_) => BifResult::badarg(),
+    }
 }
 
 /// Run `erlang:ref_to_list/1` as `ref_to_list_1` (`bif.c:4459-4465`) does:

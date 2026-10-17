@@ -67,13 +67,13 @@ pub(in crate::runtime) struct CodeTable {
     /// not loaded, and its exports stay hidden until
     /// [`CodeTable::finish_after_on_load`] keeps the code.
     on_load: HashMap<String, OnLoadCode>,
-    /// The modules whose current code `erlang:delete_module/1` moved to old
-    /// code, as `modp->old` of ERTS (`beam_bif_load.c:2412-2455`). The code
-    /// stays in `by_id` for the frames that run it, and the name leaves
-    /// `modules`, so the module is not loaded. A second delete and a load
-    /// of the name give `badarg` and `not_purged` until a purge, as ERTS
-    /// does (`beam_bif_load.c:702-708`, `444-455`).
-    deleted: HashSet<String>,
+    /// The modules that have old code, as `modp->old` of ERTS
+    /// (`beam_bif_load.c:2412-2455`). `erlang:delete_module/1` moves the
+    /// current code here, and a later load keeps the old code and adds new
+    /// current code. The code stays in `by_id` for the frames that run it,
+    /// and a second delete gives `badarg`. A load with current and old code
+    /// gives `not_purged` (`beam_bif_load.c:444-455`).
+    old: HashSet<String>,
     /// The module name and the code of the purge that
     /// `erts_internal:purge_module(Module, prepare_on_load)` started, as
     /// `purge_state.module` and the old code of the ERTS module
@@ -191,10 +191,10 @@ pub(in crate::runtime) enum Finish {
     /// list, as `exception_list` (`beam_bif_load.c:322-337`) gives them.
     /// No module loads, and each entry stays prepared.
     Duplicated(Vec<String>),
-    /// A module of the list has old code from `erlang:delete_module/1`. The
-    /// names are the modules in the order of the list, as `exception_list`
-    /// (`beam_bif_load.c:444-455`) gives them. No module loads, and each
-    /// entry stays prepared.
+    /// A module of the list has current code and old code from
+    /// `erlang:delete_module/1`. The names are the modules in the order of
+    /// the list, as `exception_list` (`beam_bif_load.c:444-455`) gives
+    /// them. No module loads, and each entry stays prepared.
     NotPurged(Vec<String>),
 }
 
@@ -217,7 +217,7 @@ impl CodeTable {
             by_id,
             prepared: HashMap::new(),
             on_load: HashMap::new(),
-            deleted: HashSet::new(),
+            old: HashSet::new(),
             purging: None,
         }
     }
@@ -582,11 +582,12 @@ impl CodeTable {
     /// Move the current code of the module `name` to old code, as
     /// `delete_module_1` and `delete_code` (`beam_bif_load.c:679-736`,
     /// `2412-2455`) do. Return `Some(true)` when the run had current code
-    /// of the name, and `Some(false)` when it has old code and a second
-    /// delete must give `badarg`. Return `None` when the run has neither:
-    /// the module is not loaded. The code stays in `by_id` for the frames
-    /// that run it, and each import slot of another module that names the
-    /// code is emptied, so a later call of the module gives `undef`.
+    /// of the name, and `Some(false)` when it has only old code and a
+    /// second delete must give `badarg`. Return `None` when the run has
+    /// neither: the module is not loaded. The code stays in `by_id` for the
+    /// frames that run it, and each import slot of another module that
+    /// names the code is emptied, so a later call of the module gives
+    /// `undef`.
     ///
     /// # Examples
     ///
@@ -598,7 +599,7 @@ impl CodeTable {
     /// ```
     pub(in crate::runtime) fn delete(&mut self, name: &str) -> Option<bool> {
         let Some(module) = self.modules.remove(name) else {
-            return self.deleted.contains(name).then_some(false);
+            return self.old.contains(name).then_some(false);
         };
         for loaded in self.by_id.values() {
             for slot in loaded.imports.iter() {
@@ -610,7 +611,7 @@ impl CodeTable {
                 }
             }
         }
-        self.deleted.insert(name.to_owned());
+        self.old.insert(name.to_owned());
         Some(true)
     }
 
@@ -658,9 +659,12 @@ impl CodeTable {
             duplicated.reverse();
             return Ok(Finish::Duplicated(duplicated));
         }
+        // ERTS rejects a load only when the module has current and old
+        // code (`beam_bif_load.c:443-455`). A module with old code only
+        // loads new current code.
         let not_purged: Vec<String> = names
             .iter()
-            .filter(|name| self.deleted.contains(*name))
+            .filter(|name| self.modules.contains_key(*name) && self.old.contains(*name))
             .cloned()
             .collect();
         if !not_purged.is_empty() {

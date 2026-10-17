@@ -252,11 +252,12 @@ fn returns_the_on_load_flag_of_prepared_code() {
 }
 
 #[test]
-fn returns_not_purged_for_prepared_code_of_a_deleted_module() {
-    // `finish_loading_1` gives `{not_purged, [Module]}` when the module has
-    // current and old code (`beam_bif_load.c:444-455`). `delete_module/1`
-    // moves the current code of a module to old code
-    // (`beam_bif_load.c:2412-2455`).
+fn loads_over_old_code_and_returns_not_purged_for_current_and_old_code() {
+    // `finish_loading_1` gives `{not_purged, [Module]}` only when the module
+    // has current and old code (`beam_bif_load.c:443-455`).
+    // `delete_module/1` moves the current code of a module to old code, so
+    // the first load after it succeeds and the second one gives
+    // `not_purged` (`beam_bif_load.c:2412-2455`).
     let mut scheduler = Scheduler::new(AtomTable::new());
     let first = BeamModule::new(
         "fixture".into(),
@@ -288,6 +289,21 @@ fn returns_not_purged_for_prepared_code_of_a_deleted_module() {
     .unwrap();
     let reference = scheduler.make_ref().unwrap();
     scheduler.code.prepare(reference, second);
+    let result = finish_loading(
+        &mut scheduler,
+        &Term::list_from(vec![Term::Reference(reference)]),
+    )
+    .unwrap();
+    assert!(matches!(result, BifResult::YieldReturn(_)));
+    let third = BeamModule::new(
+        "fixture".into(),
+        HashMap::new(),
+        Vec::new(),
+        vec![Instruction::End],
+    )
+    .unwrap();
+    let reference = scheduler.make_ref().unwrap();
+    scheduler.code.prepare(reference, third);
     let result = finish_loading(
         &mut scheduler,
         &Term::list_from(vec![Term::Reference(reference)]),
@@ -389,4 +405,32 @@ fn builds_the_process_info_items_of_an_atom_mfa_and_an_undefined_function() {
     assert!(matches!(term, Term::Cons(_)));
     let term = process_info_term(&mut atoms, info_values(None)).unwrap();
     assert!(matches!(term, Term::Cons(_)));
+}
+
+/// A writer whose each write fails with a broken pipe.
+struct BrokenWriter;
+
+impl std::io::Write for BrokenWriter {
+    fn write(&mut self, _buffer: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn raises_badarg_for_a_failed_display_string_write() {
+    // `display_string_2` raises `badarg` with error information when a
+    // write to the standard output or the standard error fails
+    // (`bif.c:4274-4297`). PBeam gives the reason `badarg` with the frame
+    // of the BIF.
+    assert!(matches!(
+        write_display(&mut BrokenWriter, b"x"),
+        BifResult::Raise {
+            class: ExceptionClass::Error,
+            reason
+        } if reason == Term::static_atom("badarg")
+    ));
 }
