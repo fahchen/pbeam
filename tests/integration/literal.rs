@@ -26,8 +26,9 @@ fn reads_a_large_tuple_literal_as_pinned_erts() {
         panic!("large/0 gives a tuple");
     };
     assert_eq!(elements.len(), 300);
-    assert_eq!(elements[0], Term::Integer(1));
-    assert_eq!(elements[299], Term::Integer(300));
+    for (index, element) in elements.iter().enumerate() {
+        assert_eq!(*element, Term::Integer((index + 1) as i64));
+    }
 
     let reference = Command::new("erl")
         .args([
