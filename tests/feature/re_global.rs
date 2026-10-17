@@ -90,7 +90,9 @@ fn switches_out_at_a_trap_to_a_module_that_the_run_did_not_load_as_pinned_erts()
 fn switches_out_before_an_undef_of_an_unloaded_trap_target_as_pinned_erts() {
     // The process error handler has no `undefined_function/3`. The trap
     // switches out first, so the peer sees the process alive and the
-    // process exits with `undef` after the peer ran.
+    // process exits with `undef` after the peer ran. The exit class and the
+    // order are compared; the stack trace has the documented missing caller
+    // frames and `error_info`.
     let erts = run(&mut erts("re_global_probe:uncaught()."));
     assert_eq!(erts, "{undef,true}\n");
     assert_eq!(

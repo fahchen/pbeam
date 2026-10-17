@@ -69,7 +69,10 @@ undefined_function(_Module, _Function, _Arguments) ->
 
 %% A process error handler with no `undefined_function/3` makes the
 %% fallback raise `undef`. The trap switches out first, so the peer runs
-%% while the process that traps is alive and exits with `undef`.
+%% while the process that traps is alive and exits with `undef`. Only the
+%% exit class and the order are compared: PBeam adds no caller frames and
+%% no `error_info` to the synthetic frame (row "Exception stack trace" of
+%% docs/erts-differences.md).
 uncaught() ->
     Self = self(),
     {Pid, Ref} = spawn_monitor(fun() ->
