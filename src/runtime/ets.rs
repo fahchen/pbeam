@@ -1940,7 +1940,10 @@ impl Table {
     /// assert_eq!(table.objects.len(), 1);
     /// ```
     fn compact(&mut self, atoms: &AtomTable, freed: usize) {
-        debug_assert_eq!(self.free.pop(), Some(freed));
+        // The free list holds the slot that the caller freed. The pop runs in
+        // each build, also a release build without `debug_assert!`.
+        let freed_slot = self.free.pop();
+        debug_assert_eq!(freed_slot, Some(freed));
         let last = self.objects.len() - 1;
         if freed == last {
             self.objects.pop();
