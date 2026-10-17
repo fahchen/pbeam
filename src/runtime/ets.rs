@@ -1988,7 +1988,10 @@ impl Table {
     /// (`erl_db_hash.c:2677-2709`).
     pub(super) fn shrink(&mut self) {
         for _ in 0..RESIZE_STEPS {
-            if self.item_count() >= i64::try_from(self.shrink_limit()).unwrap_or(i64::MAX) {
+            // ERTS compares the unsigned counter with the shrink limit, so
+            // a counter below 0 is a huge value and stops the shrink
+            // (`erl_db_hash.c:3743-3760`).
+            if self.size() >= u64::try_from(self.shrink_limit()).unwrap_or(u64::MAX) {
                 break;
             }
             self.join();
@@ -2980,7 +2983,10 @@ impl Table {
             self.compact(atoms, newest);
         }
         for _ in 0..RESIZE_STEPS {
-            if self.item_count() >= i64::try_from(self.shrink_limit()).unwrap_or(i64::MAX) {
+            // ERTS compares the unsigned counter with the shrink limit, so
+            // a counter below 0 is a huge value and stops the shrink
+            // (`erl_db_hash.c:3743-3760`).
+            if self.size() >= u64::try_from(self.shrink_limit()).unwrap_or(u64::MAX) {
                 break;
             }
             self.join();

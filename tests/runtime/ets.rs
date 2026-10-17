@@ -1073,6 +1073,27 @@ fn grows_after_unfix_by_five_splits() {
 }
 
 #[test]
+fn does_not_shrink_below_the_first_segment() {
+    // A counter below 0 is a huge unsigned value, so it stops the shrink and
+    // the table keeps its 256 buckets (`erl_db_hash.c:3743-3760`).
+    let atoms = test_atom_table();
+    let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Bag);
+    let key = Term::Integer(0);
+    let object = |value| vec![key.clone(), Term::Integer(value)];
+    table.insert_all(&atoms, vec![object(1), object(2), object(3)]);
+    table.fix(ProcessId(0));
+    table.begin_select_delete();
+    assert!(table.delete_object(&atoms, &object(2)));
+    table.take_key(&atoms, &key);
+    table.unfix_all(ProcessId(0));
+    assert_eq!(table.size(), u64::MAX);
+    let other = Term::Integer(9);
+    table.insert(&atoms, vec![other.clone()]);
+    table.delete(&atoms, &other);
+    assert_eq!(table.buckets, 256);
+}
+
+#[test]
 fn grows_by_the_item_counter() {
     // A take leaves the item counter below 0, and the growth decision uses
     // the counter, so 257 inserts leave the 256 buckets of the table
