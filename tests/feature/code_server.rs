@@ -196,17 +196,31 @@ fn checks_the_crypto_load_info_as_pinned_erts() {
 }
 
 #[test]
+fn runs_the_linked_crypto_nifs_as_pinned_erts() {
+    // PBeam links hash_nif/2, pbkdf2_hmac_nif/5, strong_rand_range_nif/1,
+    // info_nif/0, and info_lib/0 (hash.c:101-164, pbkdf2_hmac.c:70-100,
+    // rand.c:54-85, info.c:110-204). The probe prints only the shape of a
+    // random value, and it prints the pinned OpenSSL version that the
+    // pinned ERTS reports.
+    let erts = run(&mut erts_probe(CRYPTO_PROBE, "crypto_probe", "nifs", &[]));
+    assert_eq!(
+        run(&mut pbeam_probe(CRYPTO_PROBE, "crypto_probe", "nifs", &[])),
+        erts
+    );
+}
+
+#[test]
 fn stops_with_a_runtime_error_for_an_unsupported_crypto_nif() {
-    // PBeam links only `strong_rand_bytes_nif/1` of the `crypto` library.
-    // ERTS gives the OpenSSL version from `info_lib/0`.
-    let output = pbeam_probe(CRYPTO_PROBE, "crypto_probe", "info_lib", &[])
+    // PBeam does not link `hash_init_nif/1`, which `crypto:hash_init/1`
+    // calls (crypto.erl:1160).
+    let output = pbeam_probe(CRYPTO_PROBE, "crypto_probe", "hash_init", &[])
         .env("TERM", "dumb")
         .stdin(Stdio::null())
         .output()
         .unwrap();
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
-        !output.status.success() && stderr.contains("crypto:info_lib/0 NIF is not supported"),
+        !output.status.success() && stderr.contains("crypto:hash_init_nif/1 NIF is not supported"),
         "{stderr}"
     );
 }

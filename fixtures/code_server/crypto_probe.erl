@@ -1,5 +1,5 @@
 -module(crypto_probe).
--export([main/0, info_lib/0]).
+-export([main/0, nifs/0, hash_init/0]).
 
 %% Write the results of crypto:strong_rand_bytes/1, one term on each line.
 %% The first call loads crypto on demand, and its -on_load function loads
@@ -9,13 +9,70 @@
 main() ->
     Sizes = [byte_size(crypto:strong_rand_bytes(Size)) || Size <- [0, 1, 16, 1024]],
     Binaries = [is_binary(crypto:strong_rand_bytes(Size)) || Size <- [1, 16]],
-    Bad = [bad(Size) || Size <- [-1, 2147483648, 1 bsl 64, 1.0, a, <<1>>]],
+    Bad = [bad(fun() -> crypto:strong_rand_bytes(Size) end)
+           || Size <- [-1, 2147483648, 1 bsl 64, 1.0, a, <<1>>]],
     io:format("~p~n", [[erlang:system_info(build_type), crypto:strong_rand_bytes(0),
                         Sizes, Binaries, Bad]]).
 
-%% Call crypto:info_lib/0, whose NIF info_lib/0 PBeam does not link.
-info_lib() ->
-    io:format("~p~n", [crypto:info_lib()]).
+%% Write the results of the crypto NIFs that PBeam links: hash_nif/2,
+%% pbkdf2_hmac_nif/5, strong_rand_range_nif/1, info_nif/0, and info_lib/0.
+%% A random value prints only as its shape, because its bytes change from
+%% run to run. The value of the range 1 is always <<>> (rand.c:54-85). The
+%% errors print the class and the reason, which names the C file and line
+%% of the failed check (crypto.erl:761-775, common.c:29-90). PBeam gives a
+%% frame location of `[]` in each stack trace, so the probe does not compare
+%% the location (row "Exception stack trace" of docs/erts-differences.md).
+nifs() ->
+    Digests = [sha, sha224, sha256, sha384, sha512, sha512_224, sha512_256],
+    Hashes = [{Digest, crypto:hash(Digest, <<"abc">>)} || Digest <- Digests],
+    HashErrors = [bad_reason(fun() -> crypto:hash(Type, <<"abc">>) end) ||
+                     Type <- [nosuch, "sha", <<"sha">>]],
+    Pbkdf2 = [{Digest, crypto:pbkdf2_hmac(Digest, <<"password">>, <<"salt">>, 1, 20)}
+              || Digest <- Digests],
+    Pbkdf2Errors = [bad_reason(fun() -> crypto:pbkdf2_hmac(Type, Pass, Salt, Iter, KeyLen) end) ||
+                       {Type, Pass, Salt, Iter, KeyLen} <-
+                           [{md5, <<"p">>, <<"s">>, 1, 16},
+                            {nosuch, <<"p">>, <<"s">>, 1, 16},
+                            {sha, <<"p">>, <<"s">>, 0, 16},
+                            {sha, <<"p">>, <<"s">>, -1, 16},
+                            {sha, <<"p">>, <<"s">>, 1.0, 16},
+                            {sha, <<"p">>, <<"s">>, 1 bsl 32, 16},
+                            {sha, <<"p">>, <<"s">>, 1 bsl 31, 16},
+                            {sha, <<"p">>, <<"s">>, 1, 0},
+                            {sha, "p", <<"s">>, 1, 16},
+                            {sha, <<"p">>, "s", 1, 16}]],
+    %% The value 2^32 + 1 keeps the low 32 bits of the C int (pbkdf2_hmac.c:76-96).
+    Pbkdf2Wrapped = crypto:pbkdf2_hmac(sha, <<"p">>, <<"s">>, (1 bsl 32) + 1, 16)
+        =:= crypto:pbkdf2_hmac(sha, <<"p">>, <<"s">>, 1, 16),
+    Ranges = [{is_integer(crypto:strong_rand_range(N)), crypto:strong_rand_range(N) < N}
+              || N <- [2, 10, 1024]],
+    RangeOne = crypto:strong_rand_range(1),
+    BinaryRanges = [{Value, is_binary(Value),
+                     crypto:bytes_to_integer(Value) < crypto:bytes_to_integer(Range)}
+                    || Range <- [<<1>>, <<0, 1>>],
+                       Value <- [crypto:strong_rand_range(Range)]],
+    BinaryShapes = [{is_binary(Value),
+                     byte_size(Value) =< byte_size(Range),
+                     crypto:bytes_to_integer(Value) < crypto:bytes_to_integer(Range)}
+                    || Range <- [<<10>>, <<1, 0>>, <<255, 255>>],
+                       Value <- [crypto:strong_rand_range(Range)]],
+    RangeErrors = [bad_reason(fun() -> crypto:strong_rand_range(Range) end) ||
+                      Range <- [0, -1, 1.0, a, <<0>>, <<>>, <<0, 0>>]],
+    Info = crypto:info(),
+    InfoFields = [{Key, maps:get(Key, Info)} ||
+                     Key <- [compile_type, link_type, cryptolib_version_compiled,
+                             cryptolib_version_linked, fips_provider_available,
+                             otp_crypto_version]],
+    io:format("~p~n", [[Hashes, HashErrors, Pbkdf2, Pbkdf2Errors, Pbkdf2Wrapped,
+                        Ranges, RangeOne, BinaryRanges, BinaryShapes, RangeErrors,
+                        InfoFields, crypto:info_lib()]]).
 
-bad(Size) ->
-    try crypto:strong_rand_bytes(Size) catch Class:Reason:Stack -> {Class, Reason, hd(Stack)} end.
+%% Call crypto:hash_init/1, whose NIF hash_init_nif/1 PBeam does not link.
+hash_init() ->
+    io:format("~p~n", [crypto:hash_init(sha)]).
+
+bad(Fun) ->
+    try Fun() catch Class:Reason:Stack -> {Class, Reason, hd(Stack)} end.
+
+bad_reason(Fun) ->
+    try Fun() catch Class:Reason -> {Class, Reason} end.
