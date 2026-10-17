@@ -1057,6 +1057,29 @@ fn frees_a_clear_after_the_last_unfix() {
 }
 
 #[test]
+fn frees_a_clear_until_the_budget_is_negative() {
+    // The free stops after the segment that makes the budget negative, so
+    // it frees one segment more than the budget covers
+    // (`db_free_table_continue_hash`, `erl_db_hash.c:3140-3149`).
+    let atoms = test_atom_table();
+    let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
+    for key in 0..300 {
+        table.insert(&atoms, vec![Term::Integer(key)]);
+    }
+    table.fix(ProcessId(0));
+    table.step_clear(&atoms, ProcessId(0), 300, 1);
+    table.unfix_all(ProcessId(0));
+    let first = table.segment_free_cost(1);
+    let second = table.segment_free_cost(0);
+    let (done, charge) = table.step_clear(&atoms, ProcessId(0), 300, first);
+    assert!(!done);
+    assert_eq!(charge, first + second);
+    let (done, charge) = table.step_clear(&atoms, ProcessId(0), 300, 0);
+    assert!(done);
+    assert_eq!(charge, 0);
+}
+
+#[test]
 fn charges_the_delete_records_of_an_explicit_delete() {
     // The free of a deleted table charges one reduction for each delete
     // record (`db_free_table_continue_hash`, `erl_db_hash.c:3122-3137`).

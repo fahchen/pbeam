@@ -1608,22 +1608,31 @@ impl Table {
                     segment(self.segment_slots() - 1) + 1
                 });
             }
+            let mut remaining = i64::try_from(reds).unwrap_or(i64::MAX);
             let mut charge = 0;
-            let mut freed = false;
-            while clearing.free.is_some() {
-                if freed && charge >= reds {
+            loop {
+                let Some(left) = clearing.free else {
+                    break;
+                };
+                if left == 0 {
+                    // Each segment is free, and the next turn creates the
+                    // table (`db_create_hash`, `erl_db_hash.c:4036-4037`).
                     break;
                 }
-                let remaining = clearing
-                    .free
-                    .take()
-                    .expect("the clear has a segment to free");
-                let index = remaining - 1;
-                charge += self.segment_free_cost(index);
-                clearing.free = (index > 0).then_some(index);
-                freed = true;
+                // The loop of `db_free_table_continue_hash` stops after the
+                // segment that makes the budget negative
+                // (`erl_db_hash.c:3140-3149`).
+                if charge > 0 && remaining < 0 {
+                    break;
+                }
+                let index = left - 1;
+                let cost = self.segment_free_cost(index);
+                self.free_segments_objects(index);
+                charge += cost;
+                remaining -= i64::try_from(cost).unwrap_or(i64::MAX);
+                clearing.free = Some(index);
             }
-            if clearing.free.is_some() {
+            if clearing.free != Some(0) || remaining < 0 {
                 self.clear = Some(clearing);
                 return (false, charge);
             }
@@ -1658,6 +1667,32 @@ impl Table {
             processed
         };
         (done, counted.div_ceil(8))
+    }
+
+    /// Free each object of the segment `index` and remove each of its bucket
+    /// chains, so the objects of one segment go in the turn that frees it
+    /// (`db_free_table_continue_hash`, `erl_db_hash.c:3140-3149`).
+    fn free_segments_objects(&mut self, index: usize) {
+        let first = match index {
+            0 => 0,
+            later => FIRST_SEGMENT_SLOTS + (later - 1) * SEGMENT_SLOTS,
+        };
+        let last = (FIRST_SEGMENT_SLOTS + index * SEGMENT_SLOTS).min(self.buckets);
+        for bucket in first..last {
+            let mut node = std::mem::replace(&mut self.heads[bucket], EMPTY);
+            while node != EMPTY {
+                let mut slot = node;
+                node = self.next[node];
+                while slot != EMPTY {
+                    let older = self.older[slot];
+                    self.objects[slot] = None;
+                    self.older[slot] = EMPTY;
+                    self.next[slot] = EMPTY;
+                    self.free.push(slot);
+                    slot = older;
+                }
+            }
+        }
     }
 
     /// Return the reductions of the free of the segment `index`, as
