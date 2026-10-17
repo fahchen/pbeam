@@ -9,7 +9,9 @@
          update_element/0, info_items/0, delete_all/0, select_reductions/0,
          private_owner/1, ordered_set/0, ordered_set_reductions/0, take/0,
          safe_fixtable/0, fixtable/0, fixtable_chain/0, fixtable_successor/0,
-         fixtable_resize/0]).
+         fixtable_resize/0, fixtable_fix_count/0, fixtable_insert_after_delete/0,
+         fixtable_clear/0, fixtable_delete_object/0, fixtable_same_bucket/0,
+         fixtable_clear_wide/0, fixtable_live_after_predecessor/0, fixtable_cycle/0]).
 
 %% ets:new/2 return values and badarg cases (erl_db.c:2555-2840).
 new() ->
@@ -728,6 +730,102 @@ fixtable_resize() ->
 
 from(High, High) -> [High];
 from(Low, High) -> [Low | from(Low + 1, High)].
+
+
+%% Each fix counts, so one unfix leaves the table fixed
+%% (erl_db.c:5158-5169).
+fixtable_fix_count() ->
+    T = ets:new(ets_probe_fix_count, [set]),
+    ets:insert(T, {k}),
+    ets:safe_fixtable(T, true),
+    ets:safe_fixtable(T, true),
+    ets:delete(T, k),
+    ets:safe_fixtable(T, false),
+    Fixed = ets:next(T, k),
+    ets:safe_fixtable(T, false),
+    [Fixed].
+
+%% A key that the run inserts after the delete is still after the fixed
+%% position of the deleted key.
+fixtable_insert_after_delete() ->
+    T = ets:new(ets_probe_fix_insert, [set]),
+    ets:insert(T, {1}),
+    ets:safe_fixtable(T, true),
+    ets:delete(T, 1),
+    ets:insert(T, {2}),
+    Next = ets:next(T, 1),
+    ets:safe_fixtable(T, false),
+    [Next].
+
+%% A clear and a delete_object keep the position of each removed key
+%% (erl_db_hash.c:2636-2643, 4027-4028).
+fixtable_clear() ->
+    T = ets:new(ets_probe_fix_clear, [set]),
+    ets:insert(T, {k}),
+    ets:safe_fixtable(T, true),
+    ets:internal_delete_all(T, undefined),
+    Next = ets:next(T, k),
+    ets:safe_fixtable(T, false),
+    [Next].
+
+fixtable_delete_object() ->
+    T = ets:new(ets_probe_fix_delete_object, [set]),
+    ets:insert(T, {k}),
+    ets:safe_fixtable(T, true),
+    ets:internal_select_delete(T, [{{'_'}, [], [true]}]),
+    Next = ets:next(T, k),
+    ets:safe_fixtable(T, false),
+    [Next].
+
+
+%% Two keys of one bucket: the ghost follows the live predecessor, and then
+%% the ghost of a predecessor that the run deleted too.
+fixtable_same_bucket() ->
+    T = ets:new(ets_probe_fix_bucket, [set]),
+    ets:insert(T, [{2}, {146}]),
+    ets:safe_fixtable(T, true),
+    ets:delete(T, 146),
+    Next = ets:next(T, 146),
+    ets:delete(T, 2),
+    Chained = ets:next(T, 146),
+    ets:safe_fixtable(T, false),
+    [Next, Chained].
+
+%% Two ghosts that follow each other end at the end of the table.
+fixtable_cycle() ->
+    T = ets:new(ets_probe_fix_cycle, [set]),
+    ets:insert(T, [{2}, {146}]),
+    ets:safe_fixtable(T, true),
+    ets:delete(T, 146),
+    ets:insert(T, {146}),
+    ets:delete(T, 2),
+    ets:delete(T, 146),
+    Next = ets:next(T, 2),
+    ets:safe_fixtable(T, false),
+    [Next].
+
+%% The deleted key follows its live predecessor, and a key that the run
+%% inserts after the predecessor is after it.
+fixtable_live_after_predecessor() ->
+    T = ets:new(ets_probe_fix_live, [set]),
+    ets:insert(T, [{4}, {84}]),
+    ets:safe_fixtable(T, true),
+    ets:delete(T, 84),
+    ets:insert(T, {136}),
+    Next = ets:next(T, 84),
+    ets:safe_fixtable(T, false),
+    [Next].
+
+%% A clear of a table with more buckets than a new table keeps the
+%% position of each removed key (erl_db_hash.c:4027-4028).
+fixtable_clear_wide() ->
+    T = ets:new(ets_probe_fix_clear_wide, [set]),
+    ets:insert(T, [{I} || I <- from(1, 1000)]),
+    ets:safe_fixtable(T, true),
+    ets:internal_delete_all(T, undefined),
+    Ended = length([1 || I <- from(1, 1000), ets:next(T, I) =:= '$end_of_table']),
+    ets:safe_fixtable(T, false),
+    [Ended].
 
 catch_error(Fun) ->
     try Fun() catch error:Reason -> {error, Reason} end.

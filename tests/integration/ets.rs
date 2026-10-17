@@ -763,3 +763,97 @@ fn gives_the_next_live_key_of_a_fixed_table_as_pinned_erts() {
     );
     assert_eq!(reference("fixtable_successor"), b"[2]\n");
 }
+
+/// Return the single-key list that the probe `function` gives, with
+/// `eot` for `'$end_of_table'` and `int` for an integer key.
+fn fixture_fixed(function: &str, expected: Term, text: &[u8]) {
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    assert_eq!(
+        program.execute("ets_probe", function, &[]).unwrap().term,
+        Term::list_from(vec![expected])
+    );
+    assert_eq!(reference(function), text);
+}
+
+#[test]
+fn counts_each_fix_of_a_table_as_pinned_erts() {
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let eot = Term::Atom(program.atom("$end_of_table").unwrap());
+    fixture_fixed("fixtable_fix_count", eot, b"['$end_of_table']\n");
+}
+
+#[test]
+fn gives_a_key_inserted_after_a_fixed_delete_as_pinned_erts() {
+    fixture_fixed("fixtable_insert_after_delete", Term::Integer(2), b"[2]\n");
+}
+
+#[test]
+fn keeps_the_position_of_a_cleared_fixed_table_as_pinned_erts() {
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let eot = Term::Atom(program.atom("$end_of_table").unwrap());
+    fixture_fixed("fixtable_clear", eot, b"['$end_of_table']\n");
+}
+
+#[test]
+fn keeps_the_position_of_a_deleted_object_of_a_fixed_table_as_pinned_erts() {
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let eot = Term::Atom(program.atom("$end_of_table").unwrap());
+    fixture_fixed("fixtable_delete_object", eot, b"['$end_of_table']\n");
+}
+
+#[test]
+fn follows_a_same_bucket_predecessor_of_a_fixed_table_as_pinned_erts() {
+    // The ghost of the deleted key follows its live predecessor, and then
+    // the ghost of a predecessor that the run deleted too
+    // (`erl_db_hash.c:49-60`).
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let eot = Term::Atom(program.atom("$end_of_table").unwrap());
+    assert_eq!(
+        program
+            .execute("ets_probe", "fixtable_same_bucket", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![eot.clone(), eot])
+    );
+    assert_eq!(
+        reference("fixtable_same_bucket"),
+        b"['$end_of_table','$end_of_table']\n"
+    );
+}
+
+#[test]
+fn keeps_the_position_of_a_wide_clear_of_a_fixed_table_as_pinned_erts() {
+    // Each key of a 1000-object table ends its traversal after the clear,
+    // also when the bucket of its ghost is outside the 256 buckets of the
+    // new table.
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    assert_eq!(
+        program
+            .execute("ets_probe", "fixtable_clear_wide", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![Term::Integer(1000)])
+    );
+    assert_eq!(reference("fixtable_clear_wide"), b"[1000]\n");
+}
+
+#[test]
+fn gives_a_key_after_a_live_predecessor_of_a_fixed_table_as_pinned_erts() {
+    // The deleted key follows its live predecessor, so a key that the run
+    // inserts after the predecessor is after the deleted key
+    // (`erl_db_hash.c:49-60`).
+    fixture_fixed(
+        "fixtable_live_after_predecessor",
+        Term::Integer(136),
+        b"[136]\n",
+    );
+}
+
+#[test]
+fn ends_a_fixed_traversal_at_two_ghosts_that_follow_each_other_as_pinned_erts() {
+    // The deleted keys of one bucket follow each other, so the ghost walk
+    // ends at the end of the table (`erl_db_hash.c:49-60`).
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let eot = Term::Atom(program.atom("$end_of_table").unwrap());
+    fixture_fixed("fixtable_cycle", eot, b"['$end_of_table']\n");
+}

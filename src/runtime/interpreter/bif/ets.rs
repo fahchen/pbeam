@@ -2472,7 +2472,7 @@ pub(super) fn internal_delete_all(
     }
     let count = table.len();
     let reductions = table.delete_all_reductions();
-    table.clear();
+    table.clear(&context.scheduler.atoms);
     context
         .scheduler
         .current_process_mut()
