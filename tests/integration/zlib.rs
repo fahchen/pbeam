@@ -52,6 +52,16 @@ fn reference(expression: &str) -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 
+/// Return whether the pinned ERTS decompresses `hex` to `expected`, an
+/// Erlang expression over the fixture.
+fn erts_decodes(hex: &str, expected: &str) -> bool {
+    reference(&format!(
+        "io:format(\"~p~n\",[zlib_probe:uncompress_hex(<<\"{hex}\">>) =:= {expected}])"
+    ))
+    .trim()
+        == "true"
+}
+
 /// Return the elements of a tuple.
 fn elements(term: &Term) -> &[Term] {
     match term {
@@ -159,6 +169,7 @@ fn matches_the_pinned_erts_deflate_bytes() {
                     small()
                 );
             }
+            assert!(erts_decodes(actual, "zlib_probe:small()"));
         } else {
             assert_eq!(actual, expected);
         }
@@ -189,10 +200,11 @@ fn records_the_compressed_byte_difference_of_the_filtered_strategy() {
         call(
             &program,
             "uncompress_hex",
-            &[Term::binary(actual_hex.into_bytes())]
+            &[Term::binary(actual_hex.clone().into_bytes())]
         ),
         data
     );
+    assert!(erts_decodes(&actual_hex, "zlib_probe:data()"));
 }
 
 #[test]
@@ -229,6 +241,10 @@ fn matches_the_pinned_erts_flush_bytes() {
             double_small()
         );
     }
+    assert!(erts_decodes(
+        &actual[0],
+        "<<(zlib_probe:small())/binary, (zlib_probe:small())/binary>>"
+    ));
 }
 
 #[test]

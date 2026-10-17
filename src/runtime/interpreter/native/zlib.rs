@@ -256,6 +256,11 @@ struct ZStream {
     /// the window size and wrapper of the stream (`inflate.c:136-171`), and
     /// PBeam makes the state again with these bits.
     inflate_window_bits: i32,
+    /// The window size that the first header of an automatic wrapper told,
+    /// for `inflate_window_bits` 0, 16 to 23, or 32 to 39. The C state
+    /// keeps this size in `wbits` until the next init, also across
+    /// `inflateReset` (`inflate.c:136-171`, `539-545`).
+    inflate_learned_bits: Option<i32>,
     /// True after a `deflate_nif/4` call that passed its flush check. The
     /// `deflateEnd` of zlib gives `Z_DATA_ERROR` for a stream in the busy
     /// state, which is each state after such a call until the stream end
@@ -296,6 +301,7 @@ impl ZStream {
             deflate: None,
             inflate: None,
             inflate_window_bits: 0,
+            inflate_learned_bits: None,
             deflate_started: false,
             deflate_finished: false,
             eos_behavior: 2,
@@ -399,6 +405,9 @@ impl ZStream {
                     // `inflate` ignores each other flush (`inflate.c:1310-1317`).
                     _ => InflateFlush::NoFlush,
                 };
+                if self.inflate_learned_bits.is_none() {
+                    self.inflate_learned_bits = learn_window_bits(self.inflate_window_bits, input);
+                }
                 let inflate = self.inflate.as_mut().expect("the inflate state");
                 let before_in = inflate.total_in();
                 let before_out = inflate.total_out();
@@ -954,7 +963,10 @@ fn inflate_nif(
             Native::Raise("data_error")
         } else {
             if reset {
-                stream.inflate = Some(inflate_state(stream.inflate_window_bits));
+                stream.inflate = Some(inflate_state(
+                    stream.inflate_window_bits,
+                    stream.inflate_learned_bits,
+                ));
                 stream.eos_seen = false;
             }
             if cut {
@@ -1186,8 +1198,9 @@ fn inflate_init_nif(
     } else if inflate_window_bits(window_bits).is_none() {
         Native::Raise("stream_error")
     } else {
-        stream.inflate = Some(inflate_state(window_bits));
+        stream.inflate = Some(inflate_state(window_bits, None));
         stream.inflate_window_bits = window_bits;
+        stream.inflate_learned_bits = None;
         stream.state = State::Inflate;
         stream.eos_behavior = eos_behavior;
         stream.eos_seen = false;
@@ -1198,20 +1211,74 @@ fn inflate_init_nif(
 
 /// Return the `zlib-rs` inflate state of `inflateInit2` with `window_bits`.
 /// The negative bits select the raw stream, and the bits from 16 select the
-/// gzip header, as `inflate.c:144-157` does.
+/// gzip header, as `inflate.c:144-157` does. When the bits have no window
+/// size, `learned` is the size that the first header told, and a reset
+/// keeps it as the C `wbits` does (`inflate.c:136-171`, `539-545`).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let state = inflate_state(15);
-/// let state = inflate_state(-15);
+/// let state = inflate_state(15, None);
+/// let state = inflate_state(-15, None);
+/// let state = inflate_state(32, Some(9));
 /// ```
-fn inflate_state(window_bits: i32) -> Inflate {
+fn inflate_state(window_bits: i32, learned: Option<i32>) -> Inflate {
     if window_bits < 0 {
-        Inflate::new(false, (-window_bits) as u8)
-    } else {
-        Inflate::new(true, window_bits as u8)
+        return Inflate::new(false, (-window_bits) as u8);
     }
+    let window = window_bits & 15;
+    if window != 0 {
+        return Inflate::new(true, window_bits as u8);
+    }
+    let Some(bits) = learned else {
+        return Inflate::new(true, window_bits as u8);
+    };
+    let configured = if window_bits < 16 {
+        bits
+    } else if window_bits < 32 {
+        16 + bits
+    } else {
+        32 + bits
+    };
+    Inflate::new(true, configured as u8)
+}
+
+/// Return the window size of the header of `input`, when `window_bits`
+/// takes the size from the header (`inflate.c:505-545`), and `None` for a
+/// fixed size or a header that does not name one. The C state keeps this
+/// size in `wbits`, also across `inflateReset` (`inflate.c:136-171`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // A zlib header with the window size 9: CINFO is 1.
+/// assert_eq!(learn_window_bits(32, &[0x18, 0x95]), Some(9));
+/// assert_eq!(learn_window_bits(32, &[0x1f, 0x8b]), Some(15));
+/// assert_eq!(learn_window_bits(15, &[0x78, 0x9c]), None);
+/// ```
+fn learn_window_bits(window_bits: i32, input: &[u8]) -> Option<i32> {
+    if window_bits < 0 || window_bits & 15 != 0 {
+        return None;
+    }
+    if input.starts_with(&[0x1f, 0x8b]) {
+        // A gzip header has no window size, and zlib uses 15
+        // (`inflate.c:513-515`).
+        return (window_bits >= 16).then_some(15);
+    }
+    if (16..32).contains(&window_bits) {
+        // The gzip only wrapper rejects a zlib header.
+        return None;
+    }
+    if input.len() < 2 || input[0] & 15 != 8 {
+        return None;
+    }
+    let header = (u16::from(input[0]) << 8) | u16::from(input[1]);
+    if header % 31 != 0 {
+        return None;
+    }
+    // The high four bits of the first byte are the window size minus 8
+    // (`inflate.c:539-545`).
+    Some(i32::from(input[0] >> 4) + 8)
 }
 
 /// Run `zlib:inflateReset/1`, as the ERTS NIF `inflateReset_nif`
@@ -1240,7 +1307,10 @@ fn inflate_reset_nif(scheduler: &mut Scheduler, stream: &Term) -> Result<BifResu
     } else if stream.state != State::Inflate {
         Native::Raise("not_initialized")
     } else {
-        stream.inflate = Some(inflate_state(stream.inflate_window_bits));
+        stream.inflate = Some(inflate_state(
+            stream.inflate_window_bits,
+            stream.inflate_learned_bits,
+        ));
         stream.eos_seen = false;
         stream.reset_input();
         Native::Atom("ok")

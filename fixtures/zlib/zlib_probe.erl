@@ -1,5 +1,5 @@
 -module(zlib_probe).
--export([exact/0, filtered_large/0, roundtrips/0, flushes/0, safe_chunks/0,
+-export([data/0, small/0, exact/0, filtered_large/0, roundtrips/0, flushes/0, safe_chunks/0,
          eos/0, errors/0, controller/0, controller_child/2, uncompress_hex/1,
          unsupported_set_controller/0, unsupported_deflate_dictionary/0,
          unsupported_deflate_params/0, unsupported_inflate_dictionary/0,

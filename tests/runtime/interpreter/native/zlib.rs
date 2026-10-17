@@ -110,7 +110,13 @@ fn enqueue(scheduler: &mut Scheduler, stream: &Term, data: &[u8]) {
 
 /// Return a compressed zlib stream of `data`.
 fn compress(data: &[u8]) -> Vec<u8> {
-    let mut deflate = Deflate::new_with_config(deflate_config(6, 8, 15, 8, 0).unwrap());
+    compress_with_window(data, 15)
+}
+
+/// Return a compressed zlib stream of `data` with the window bits
+/// `window_bits`.
+fn compress_with_window(data: &[u8], window_bits: i32) -> Vec<u8> {
+    let mut deflate = Deflate::new_with_config(deflate_config(6, 8, window_bits, 8, 0).unwrap());
     let mut output = vec![0; data.len() * 2 + 64];
     assert_eq!(
         deflate
@@ -304,6 +310,194 @@ fn maps_the_codec_failure_steps() {
     assert!(codec_failure(Step::StreamEnd).is_none());
     assert!(codec_failure(Step::BufError).is_none());
     assert!(codec_failure(Step::NeedDict(1)).is_none());
+}
+
+#[test]
+fn learns_the_window_size_of_an_automatic_header() {
+    assert_eq!(learn_window_bits(32, &[0x78, 0x9c]), Some(15));
+    assert_eq!(learn_window_bits(0, &[0x78, 0x9c]), Some(15));
+    assert_eq!(learn_window_bits(32, &[0x18, 0x95]), Some(9));
+    assert_eq!(learn_window_bits(32, &[0x1f, 0x8b]), Some(15));
+    assert_eq!(learn_window_bits(16, &[0x1f, 0x8b]), Some(15));
+    assert_eq!(learn_window_bits(16, &[0x78, 0x9c]), None);
+    assert_eq!(learn_window_bits(0, &[0x1f, 0x8b]), None);
+    assert_eq!(learn_window_bits(40, &[0x78, 0x9c]), None);
+    assert_eq!(learn_window_bits(32, &[0x18, 0x00]), None);
+    assert_eq!(learn_window_bits(32, &[0x18]), None);
+    assert_eq!(learn_window_bits(-15, &[0x78, 0x9c]), None);
+}
+
+#[test]
+fn keeps_the_learned_window_size_across_inflate_reset() {
+    // The C `inflateReset` keeps the window size that the first header told
+    // (`inflate.c:136-171`, `539-545`). A window-9 stream teaches 9, and
+    // the next stream can then use only that window. The repeated 600 bytes
+    // need a distance of 600, so a window-9 inflate raises a data error.
+    let first = compress_with_window(b"hello hello hello", 9);
+    let far: Vec<u8> = (0..600)
+        .map(|value| (value % 251) as u8)
+        .chain((0..600).map(|value| (value % 251) as u8))
+        .collect();
+    let second = compress_with_window(&far, 15);
+    let mut scheduler = scheduler();
+    let stream = stream(&mut scheduler);
+    let result = inflate_init_nif(
+        &mut scheduler,
+        &stream,
+        &Term::Integer(32),
+        &Term::Integer(2),
+    )
+    .unwrap();
+    assert_eq!(atom_name(&scheduler, result), "ok");
+    enqueue(&mut scheduler, &stream, &first);
+    let result = inflate_nif(
+        &mut scheduler,
+        &stream,
+        &Term::Integer(1024),
+        &Term::Integer(1024),
+        &Term::Integer(0),
+    )
+    .unwrap();
+    assert_eq!(output_bytes(&result), b"hello hello hello");
+    let result = inflate_reset_nif(&mut scheduler, &stream).unwrap();
+    assert_eq!(atom_name(&scheduler, result), "ok");
+    enqueue(&mut scheduler, &stream, &second);
+    let result = inflate_nif(
+        &mut scheduler,
+        &stream,
+        &Term::Integer(1024),
+        &Term::Integer(1024),
+        &Term::Integer(0),
+    )
+    .unwrap();
+    assert_eq!(raise_name(&scheduler, result), "data_error");
+}
+
+#[test]
+fn keeps_the_learned_window_size_across_reset_with_a_zlib_wrapper() {
+    // `windowBits` 0 takes the window size from the zlib header
+    // (`inflate.c:539-545`), and `inflateReset` keeps it.
+    let first = compress_with_window(b"hello hello hello", 9);
+    let far: Vec<u8> = (0..600)
+        .map(|value| (value % 251) as u8)
+        .chain((0..600).map(|value| (value % 251) as u8))
+        .collect();
+    let second = compress_with_window(&far, 15);
+    let mut scheduler = scheduler();
+    let stream = stream(&mut scheduler);
+    let result = inflate_init_nif(
+        &mut scheduler,
+        &stream,
+        &Term::Integer(0),
+        &Term::Integer(2),
+    )
+    .unwrap();
+    assert_eq!(atom_name(&scheduler, result), "ok");
+    enqueue(&mut scheduler, &stream, &first);
+    let result = inflate_nif(
+        &mut scheduler,
+        &stream,
+        &Term::Integer(1024),
+        &Term::Integer(1024),
+        &Term::Integer(0),
+    )
+    .unwrap();
+    assert_eq!(output_bytes(&result), b"hello hello hello");
+    let result = inflate_reset_nif(&mut scheduler, &stream).unwrap();
+    assert_eq!(atom_name(&scheduler, result), "ok");
+    enqueue(&mut scheduler, &stream, &second);
+    let result = inflate_nif(
+        &mut scheduler,
+        &stream,
+        &Term::Integer(1024),
+        &Term::Integer(1024),
+        &Term::Integer(0),
+    )
+    .unwrap();
+    assert_eq!(raise_name(&scheduler, result), "data_error");
+}
+
+#[test]
+fn keeps_the_gzip_wrapper_across_inflate_reset() {
+    // `windowBits` 16 takes the gzip header with no window size, and zlib
+    // uses 15 (`inflate.c:513-515`). `inflateReset` keeps the gzip wrapper.
+    let first = compress_with_window(b"hello", 25);
+    let second = compress_with_window(b"world", 31);
+    let mut scheduler = scheduler();
+    let stream = stream(&mut scheduler);
+    let result = inflate_init_nif(
+        &mut scheduler,
+        &stream,
+        &Term::Integer(16),
+        &Term::Integer(2),
+    )
+    .unwrap();
+    assert_eq!(atom_name(&scheduler, result), "ok");
+    enqueue(&mut scheduler, &stream, &first);
+    let result = inflate_nif(
+        &mut scheduler,
+        &stream,
+        &Term::Integer(1024),
+        &Term::Integer(1024),
+        &Term::Integer(0),
+    )
+    .unwrap();
+    assert_eq!(output_bytes(&result), b"hello");
+    let result = inflate_reset_nif(&mut scheduler, &stream).unwrap();
+    assert_eq!(atom_name(&scheduler, result), "ok");
+    enqueue(&mut scheduler, &stream, &second);
+    let result = inflate_nif(
+        &mut scheduler,
+        &stream,
+        &Term::Integer(1024),
+        &Term::Integer(1024),
+        &Term::Integer(0),
+    )
+    .unwrap();
+    assert_eq!(output_bytes(&result), b"world");
+}
+
+#[test]
+fn keeps_the_learned_window_size_across_the_automatic_reset() {
+    // The automatic `reset` behavior calls `inflateReset` (`zlib_nif.c:937-958`),
+    // which keeps the window size that the first header told.
+    let first = compress_with_window(b"hello", 9);
+    let far: Vec<u8> = (0..600)
+        .map(|value| (value % 251) as u8)
+        .chain((0..600).map(|value| (value % 251) as u8))
+        .collect();
+    let second = compress_with_window(&far, 15);
+    let mut both = first;
+    both.extend_from_slice(&second);
+    let mut scheduler = scheduler();
+    let stream = stream(&mut scheduler);
+    let result = inflate_init_nif(
+        &mut scheduler,
+        &stream,
+        &Term::Integer(32),
+        &Term::Integer(1),
+    )
+    .unwrap();
+    assert_eq!(atom_name(&scheduler, result), "ok");
+    enqueue(&mut scheduler, &stream, &both);
+    let result = inflate_nif(
+        &mut scheduler,
+        &stream,
+        &Term::Integer(1024),
+        &Term::Integer(1024),
+        &Term::Integer(0),
+    )
+    .unwrap();
+    assert_eq!(output_bytes(&result), b"hello");
+    let result = inflate_nif(
+        &mut scheduler,
+        &stream,
+        &Term::Integer(1024),
+        &Term::Integer(1024),
+        &Term::Integer(0),
+    )
+    .unwrap();
+    assert_eq!(raise_name(&scheduler, result), "data_error");
 }
 
 #[test]
