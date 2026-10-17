@@ -1700,8 +1700,9 @@ fn encode_path(elements: Vec<usize>) -> Result<i64, BeamError> {
 /// supported tuple. A float key hashes with the float path
 /// (`erl_term_hashing.c:2193-2202`). A tuple key hashes with the tuple path
 /// (`erl_term_hashing.c:1878-1893`): its type and arity, then its elements.
-/// A binary key hashes with the binary path of `make_internal_hash`. An
-/// ordinary reference key hashes with the reference path
+/// A binary key hashes with the binary path of `make_internal_hash`. A pid
+/// key hashes with the pid path of `make_internal_hash`. An ordinary
+/// reference key hashes with the reference path
 /// (`erl_term_hashing.c`); an alias reference has no comparison order, so
 /// it is not a supported key. A binary in a list or a tuple key is not
 /// supported yet.
@@ -1728,13 +1729,13 @@ fn map_hash(key: &Term) -> Option<u64> {
     match key {
         // An immediate key or a binary needs no walk, so the check
         // allocates nothing.
-        Term::Atom(_) | Term::Nil | Term::Binary(_) | Term::Float(_) => {}
+        Term::Atom(_) | Term::Nil | Term::Binary(_) | Term::Float(_) | Term::Pid(_) => {}
         Term::Reference(reference) if !reference.is_pid_reference() => {}
         Term::Cons(_) | Term::Tuple(_) => {
             let mut pending = vec![key];
             while let Some(term) = pending.pop() {
                 match term {
-                    Term::Atom(_) | Term::Nil | Term::Float(_) => {}
+                    Term::Atom(_) | Term::Nil | Term::Float(_) | Term::Pid(_) => {}
                     Term::Reference(reference) if !reference.is_pid_reference() => {}
                     Term::Cons(cell) => pending.extend([&cell.tail, &cell.head]),
                     Term::Tuple(elements) => pending.extend(elements.iter()),

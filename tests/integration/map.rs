@@ -17,6 +17,7 @@ const TUPLE_KEY_PROBE: &[u8] = include_bytes!("../../fixtures/map/tuple_key_prob
 const MAP_SHARE_PROBE: &[u8] = include_bytes!("../../fixtures/map/map_share_probe.beam");
 const MAP_ELEMENTS_PROBE: &[u8] = include_bytes!("../../fixtures/map/map_elements_probe.beam");
 const REFERENCE_KEY_PROBE: &[u8] = include_bytes!("../../fixtures/map/reference_key_probe.beam");
+const PID_KEY_PROBE: &[u8] = include_bytes!("../../fixtures/map/pid_key_probe.beam");
 
 /// The numbers `N` of the binary keys `<<"kNN">>`, 1 to 33, in the order of a hashmap of these 33
 /// keys under the pinned ERTS.
@@ -1200,5 +1201,49 @@ fn runs_map_operations_with_reference_keys_as_pinned_erts() {
              [reference_key_probe:flat(), reference_key_probe:hash(), reference_key_probe:order()])"
         ),
         b"[4,1,3,4,true,false,true]\n[34,ref,17,true]\n[true,true,true,true]\n"
+    );
+}
+
+#[test]
+fn runs_map_operations_with_pid_keys_as_pinned_erts() {
+    // A pid is a map key, alone and inside a tuple or a list. ERTS orders
+    // two pids by node and number (`erts_cmp_compound`, utils.c:2215-2238).
+    // The probe returns no pid, so both runs print the same text.
+    let erlang = pinned_beam("erlang");
+    let program = BeamProgram::load(&[&erlang, PID_KEY_PROBE]).unwrap();
+    let run = |function| {
+        program
+            .execute("pid_key_probe", function, &[])
+            .unwrap()
+            .term
+    };
+    let int = Term::Integer;
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    assert_eq!(
+        run("flat"),
+        Term::list_from(vec![
+            int(4),
+            int(1),
+            int(3),
+            int(4),
+            atom("true"),
+            atom("false"),
+            atom("true"),
+        ])
+    );
+    assert_eq!(
+        run("hash"),
+        Term::list_from(vec![int(34), atom("pid"), int(17), atom("true")])
+    );
+    assert_eq!(
+        run("order"),
+        Term::list_from(vec![atom("true"), atom("true"), atom("true"), atom("true"),])
+    );
+    assert_eq!(
+        erl_reference(
+            "io:format(\"~p~n~p~n~p~n\", \
+             [pid_key_probe:flat(), pid_key_probe:hash(), pid_key_probe:order()])"
+        ),
+        b"[4,1,3,4,true,false,true]\n[34,pid,17,true]\n[true,true,true,true]\n"
     );
 }
