@@ -142,6 +142,7 @@ fn decode_full(atoms: &mut AtomTable, bytes: &[u8], safe: bool) -> Result<Term, 
         safe,
         local: false,
         atoms,
+        seed: SEED,
     }
     .decode_input(SEED)
     .map(|(term, _)| term)
@@ -248,6 +249,15 @@ fn decodes_the_large_tuple_bitstring_and_guards() {
     assert!(matches!(
         decode_with(&mut atoms, &[77, 0, 0, 0, 1, 7, 5], false),
         Err(DecodeError::Unsupported(_))
+    ));
+    // A duplicate map key raises badarg (`external.c:5069-5150`).
+    assert!(matches!(
+        decode_with(
+            &mut atoms,
+            &[116, 0, 0, 0, 2, 97, 1, 97, 2, 97, 1, 97, 3],
+            false
+        ),
+        Err(DecodeError::Badarg)
     ));
     // A map and a list whose bytes do not hold their count raise badarg.
     assert!(matches!(
@@ -397,6 +407,15 @@ fn decodes_each_identifier_tag_and_checks_the_node() {
         decode_with(&mut atoms, &big_ref, false),
         Err(DecodeError::Badarg)
     ));
+    // A reference of another scheduler has other low bits in its second
+    // reference number, which PBeam cannot hold.
+    let mut other_scheduler = vec![90, 0, 3];
+    other_scheduler.extend(node());
+    other_scheduler.extend(with_words(&[], &[0, 5, 2, 0]));
+    assert!(matches!(
+        decode_with(&mut atoms, &other_scheduler, false),
+        Err(DecodeError::Unsupported(_))
+    ));
     // A pid reference has the marker bit of its third number.
     let mut pid_ref = vec![90, 0, 3];
     pid_ref.extend(node());
@@ -430,12 +449,20 @@ fn decodes_the_unsupported_forms_and_local_terms() {
         decode_with(&mut atoms, &[67], false),
         Err(DecodeError::Unsupported(_))
     ));
-    // A `LOCAL_EXT` term inside a term sets the local node and skips its
-    // hash (`external.c:5250-5255`).
+    // A `LOCAL_EXT` term inside a term sets the local node, and its hash
+    // covers the term that it wraps (`external.c:5250-5255`).
+    let hash = external::block_hash(&[97, 1], SEED);
+    let mut nested = vec![104, 2, 121];
+    nested.extend(hash.to_be_bytes());
+    nested.extend([97, 1, 97, 2]);
     assert_eq!(
-        decode_with(&mut atoms, &[104, 2, 121, 0, 0, 0, 0, 97, 1, 97, 2], false).unwrap(),
+        decode_with(&mut atoms, &nested, false).unwrap(),
         Term::tuple(vec![Term::Integer(1), Term::Integer(2)])
     );
+    assert!(matches!(
+        decode_with(&mut atoms, &[104, 2, 121, 0, 0, 0, 0, 97, 1, 97, 2], false),
+        Err(DecodeError::Badarg)
+    ));
     // An `EXPORT_EXT` term gives an external fun, and each other form of
     // it raises badarg (`external.c:5004-5047`).
     let export = vec![
@@ -508,6 +535,7 @@ fn decodes_the_unsupported_forms_and_local_terms() {
             safe: false,
             local: false,
             atoms: &mut atoms,
+            seed: SEED,
         }
         .decode_input(SEED)
         .unwrap()
@@ -522,6 +550,7 @@ fn decodes_the_unsupported_forms_and_local_terms() {
             safe: false,
             local: false,
             atoms: &mut atoms,
+            seed: SEED,
         }
         .decode_input(SEED),
         Err(DecodeError::Badarg)
@@ -600,6 +629,20 @@ fn encodes_the_large_and_unsupported_forms() {
     assert!(encode(&Term::Fun(fun), &atoms, &options).is_err());
     let state = MatchState::new(Binary::from(vec![]));
     assert!(encode(&Term::MatchContext(Arc::new(state)), &atoms, &options).is_err());
+    // `deterministic` sorts map keys in exact term order, where an integer
+    // is less than a float (`erl_utils.h:267-272`, `utils.c:2121-2130`).
+    let pairs: Vec<(Term, Term)> = vec![
+        (Term::Float(1.0), Term::static_atom("y")),
+        (Term::Integer(2), Term::static_atom("x")),
+    ];
+    let map = crate::term::Map::from_pairs(pairs, &atoms).unwrap();
+    let deterministic = Options {
+        deterministic: true,
+        ..Options::default()
+    };
+    let bytes = encode(&Term::Map(map), &atoms, &deterministic).unwrap();
+    assert_eq!(&bytes[..9], [116, 0, 0, 0, 2, 97, 2, 119, 1]);
+    assert_eq!(bytes[9], b'x');
 }
 
 #[test]

@@ -51,6 +51,11 @@ const MAX_PID_NUMBER: u32 = (1 << PID_NUMBER_BITS) - 1;
 /// The first reference number holds at most 18 bits (`MAX_REFERENCE`,
 /// `erl_term.h:180`).
 const MAX_REFERENCE: u32 = 1 << 18;
+/// The mask of the counter bits in the second reference number
+/// (`ERTS_REF1_NUM_MASK__`).
+const REF_NUMBER_1_MASK: u32 = 0xFFFC_0000;
+/// The scheduler number of the references of PBeam (`REF_THREAD`).
+const REF_THREAD: u32 = 1;
 
 /// The options of `erlang:term_to_binary/2`, as `parse_t2b_opts`
 /// (`external.c:1483-1557`) reads them.
@@ -325,9 +330,16 @@ fn encode_term(
             out.extend_from_slice(&(map.len() as u32).to_be_bytes());
             let mut pairs: Vec<(&Term, &Term)> = map.iter().collect();
             if options.deterministic {
+                let mut failure = None;
                 pairs.sort_by(|(left, _), (right, _)| {
-                    left.compare(right, atoms).unwrap_or(Ordering::Equal)
+                    left.compare_exact(right, atoms).unwrap_or_else(|error| {
+                        failure = Some(error);
+                        Ordering::Equal
+                    })
                 });
+                if let Some(error) = failure {
+                    return Err(error);
+                }
             } else if map.len() <= 32 {
                 // A flatmap of ERTS keeps its pairs in descending key order
                 // (`erl_map.c`), while `Map::iter` gives the ascending order.
@@ -564,6 +576,7 @@ pub(super) fn binary_to_term(
         safe,
         local: false,
         atoms: &mut context.scheduler.atoms,
+        seed,
     };
     match decoder.decode_input(seed) {
         Ok((term, used_bytes)) if used => Ok(Value(Term::tuple(vec![
@@ -628,6 +641,8 @@ struct Decoder<'a> {
     local: bool,
     /// The atom table of the run.
     atoms: &'a mut AtomTable,
+    /// The seed of the block hash of `LOCAL_EXT`.
+    seed: u32,
 }
 
 impl Decoder<'_> {
@@ -658,24 +673,9 @@ impl Decoder<'_> {
             safe: self.safe,
             local: false,
             atoms: &mut *self.atoms,
+            seed,
         };
-        let term = if body.first() == Some(&LOCAL_EXT) {
-            let hash = u32::from_be_bytes(
-                body.get(1..5)
-                    .ok_or(DecodeError::Badarg)?
-                    .try_into()
-                    .expect("four bytes of the local hash"),
-            );
-            decoder.local = true;
-            decoder.pos = 5;
-            let term = decoder.term()?;
-            if external::block_hash(&body[5..decoder.pos], seed) != hash {
-                return Err(DecodeError::Badarg);
-            }
-            term
-        } else {
-            decoder.term()?
-        };
+        let term = decoder.term()?;
         // The compressed header counts the bytes of the stream, and the
         // decompressed body adds no byte of the input (`binary2term_prepare`,
         // `external.c:1826-1839`); the plain body adds its cells to the
@@ -874,9 +874,16 @@ impl Decoder<'_> {
             117 => Err(DecodeError::Unsupported("an old local fun")),
             67 => Err(DecodeError::Unsupported("a record")),
             121 => {
+                let hash = u32::from_be_bytes(
+                    self.take(4)?.try_into().expect("four bytes of the local hash"),
+                );
+                let start = self.pos;
                 self.local = true;
-                self.take(4)?;
-                self.term()
+                let term = self.term()?;
+                if external::block_hash(&self.input[start..self.pos], self.seed) != hash {
+                    return Err(DecodeError::Badarg);
+                }
+                Ok(term)
             }
             _ => Err(DecodeError::Badarg),
         }
@@ -950,9 +957,13 @@ impl Decoder<'_> {
             let value = self.term()?;
             pairs.push((key, value));
         }
-        crate::term::Map::from_pairs(pairs, self.atoms)
-            .map(Term::Map)
-            .map_err(|_| DecodeError::Unsupported("a map with a key that PBeam cannot hold"))
+        let map = crate::term::Map::from_pairs(pairs, self.atoms)
+            .map_err(|_| DecodeError::Unsupported("a map with a key that PBeam cannot hold"))?;
+        // ERTS rejects a duplicate key (`dec_term`, `external.c:5069-5150`).
+        if map.len() != count {
+            return Err(DecodeError::Badarg);
+        }
+        Ok(Term::Map(map))
     }
 
     /// Decode a bignum of `count` magnitude bytes and a sign byte, as the
@@ -1083,6 +1094,12 @@ impl Decoder<'_> {
         }
         if numbers[0] >= MAX_REFERENCE {
             return Err(DecodeError::Badarg);
+        }
+        // A PBeam reference belongs to the first scheduler, whose number is
+        // in the low bits of the second reference number (`REF_THREAD`,
+        // `erl_bif_unique.h:117-131`).
+        if numbers[1] & !REF_NUMBER_1_MASK != REF_THREAD {
+            return Err(DecodeError::Unsupported("a reference of another scheduler"));
         }
         let value = (u64::from(numbers[2]) << 32)
             | (u64::from(numbers[1]) & 0xFFFC_0000)
