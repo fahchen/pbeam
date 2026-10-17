@@ -509,12 +509,33 @@ impl CodeTable {
             .transpose()
     }
 
+    /// Return the code of the module `name` that `erlang:delete_module/1`
+    /// moved to old code, or `None` when the run has no old code of the
+    /// name. The code stays in `by_id` until the purge
+    /// (`beam_bif_load.c:2412-2455`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(code.old_code_by_name("fixture").is_none());
+    /// ```
+    fn old_code_by_name(&self, name: &str) -> Option<&Rc<BeamModule>> {
+        if !self.old.contains(name) {
+            return None;
+        }
+        self.by_id
+            .values()
+            .map(|loaded| &loaded.code)
+            .find(|code| code.name == name)
+    }
+
     /// Return the name of the function that holds the code of `lambda`, as
     /// ERTS `erts_get_fun_mfa` (`erl_fun.c:37-46`) gives it: the function of
     /// the `func_info` before the entry label of the fun entry. A fun of the
-    /// code that waits for its `-on_load` function has the name of its
-    /// function, as `fun_entry_send:init/0` gives it on ERTS, and a module
-    /// that the code table does not hold gives `None`. A call of a fun puts
+    /// code that waits for its `-on_load` function, and a fun of the old
+    /// code that `erlang:delete_module/1` kept until the purge, have the
+    /// name of their function. A module that the code table does not hold
+    /// gives `None`. A call of a fun puts
     /// its arguments in `x(0)` onwards and then its free variables in the
     /// registers after them, so the arity of that function is the arity of
     /// the fun plus the number of free variables (`jit/asm_load.c:1218-1223`),
@@ -536,14 +557,17 @@ impl CodeTable {
         module: &str,
         lambda: &Lambda,
     ) -> Result<Option<String>, BeamError> {
-        let loaded = match self.on_load.get(module) {
-            Some(waiting) => &waiting.code,
-            None => {
-                let Some(loaded) = self.get(module) else {
-                    return Ok(None);
-                };
-                loaded
-            }
+        let loaded = match self.get(module) {
+            Some(loaded) => loaded,
+            None => match self.on_load.get(module) {
+                Some(waiting) => &waiting.code,
+                None => {
+                    let Some(loaded) = self.old_code_by_name(module) else {
+                        return Ok(None);
+                    };
+                    loaded
+                }
+            },
         };
         let Some(entry) = loaded
             .tables

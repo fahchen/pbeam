@@ -377,6 +377,31 @@ fn raises_badfun_for_the_funs_of_removed_code_as_pinned_erts() {
 }
 
 #[test]
+fn reads_the_name_of_the_funs_of_deleted_code_as_pinned_erts() {
+    // `erlang:delete_module/1` moves the code of the module to old code and
+    // keeps its fun entries until the purge (`beam_bif_load.c:2412-2455`),
+    // so `erlang:fun_info/2` gives the name of the function of a fun of that
+    // code, as on ERTS (`erl_fun.c:37-46`).
+    let expected = "[{name,'-make_rev/1-fun-0-'},{name,'-make_rev/1-fun-0-'}]\n";
+    let erts = run(&mut erts_probe(
+        FUN_ENTRY_PROBE,
+        "fun_entry_probe",
+        "deleted",
+        &[],
+    ));
+    assert!(erts.starts_with(expected), "{erts}");
+    assert_eq!(
+        run(&mut pbeam_probe(
+            FUN_ENTRY_PROBE,
+            "fun_entry_probe",
+            "deleted",
+            &[]
+        )),
+        expected
+    );
+}
+
+#[test]
 fn calls_the_funs_of_identical_reloaded_code_as_pinned_erts() {
     // A load of the code that made the funs, while the probe holds no
     // name, makes the code current again. The entry of each fun is then in

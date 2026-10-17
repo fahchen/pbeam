@@ -1,5 +1,5 @@
 -module(fun_entry_probe).
--export([stale/0, identical/0]).
+-export([stale/0, identical/0, deleted/0]).
 
 %% The -on_load function of the first version of fun_entry_send sends two
 %% funs of its code to this process and fails, so code_server removes the
@@ -17,6 +17,17 @@ stale() ->
     {module, fun_entry_send} = code:load_abs("fixtures/fun_entry_rev/fun_entry_send"),
     After = [erlang:fun_info(F, name) || F <- [First, Second]],
     io:format("~w~n", [[call(First), call(Second), Waiting, Before, After]]).
+
+%% `erlang:delete_module/1` moves the code of a module to old code, which
+%% keeps the name of the function of each fun until the purge
+%% (`beam_bif_load.c:2412-2455`, `erl_fun.c:37-46`).
+deleted() ->
+    {module, fun_entry_send} = code:load_abs("fixtures/fun_entry_rev/fun_entry_send"),
+    Fun = fun_entry_send:make_rev(rev),
+    Before = erlang:fun_info(Fun, name),
+    true = code:delete(fun_entry_send),
+    Name = erlang:fun_info(Fun, name),
+    io:format("~w~n", [[Before, Name]]).
 
 %% A later load of the code that made the funs, while this process holds no
 %% name, makes the code current again, so each call enters the function of
