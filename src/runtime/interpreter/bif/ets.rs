@@ -467,7 +467,7 @@ fn insert_objects(
     if new && first_held(&context.scheduler.atoms, table, &tuples, keypos)?.is_some() {
         return Ok(Value(Term::static_atom("false")));
     }
-    let compared = put_objects(&context.scheduler.atoms, table, &tuples, keypos)?;
+    let compared = put_objects(&context.scheduler.atoms, table, &tuples, keypos, new)?;
     let compared: usize = compared.iter().sum();
     // `consumed_reds / ITERATIONS_PER_RED` (`erl_db.c:2379`).
     let reductions = i32::try_from(compared / 8).unwrap_or(i32::MAX);
@@ -670,7 +670,13 @@ pub(super) fn insert_list(
                     break 'work Some(Value(Term::static_atom("false")));
                 }
             }
-            put_objects(&context.scheduler.atoms, table, &tuples, keypos)?;
+            put_objects(
+                &context.scheduler.atoms,
+                table,
+                &tuples,
+                keypos,
+                !matches!(new, New::No),
+            )?;
             units.left -= 2 * count as i64;
             break 'work Some(Value(Term::static_atom("true")));
         }
@@ -702,11 +708,14 @@ pub(super) fn insert_list(
                     let walk = matches!(new, New::Unlocked);
                     let bif = if walk { "insert_new/2" } else { "insert/2" };
                     check_keypos(&tuples, keypos, bif)?;
-                    taken_table.busy = Some(Busy::new(
-                        caller,
-                        tuples.iter().map(|object| object.to_vec()).collect(),
-                        walk,
-                    ));
+                    taken_table.busy = Some(
+                        Busy::new(
+                            caller,
+                            tuples.iter().map(|object| object.to_vec()).collect(),
+                            walk,
+                        )
+                        .with_new(!matches!(new, New::No)),
+                    );
                     // The call keeps its own BIF: `ets:insert_new/2` marks
                     // the steps of the walk and the insert with
                     // [`New::Locked`], and `ets:insert/2` with the units
@@ -987,10 +996,15 @@ fn put_objects(
     table: &mut Table,
     tuples: &[&[Term]],
     keypos: i32,
+    new: bool,
 ) -> Result<Vec<usize>, BeamError> {
     check_keypos(tuples, keypos, "insert/2")?;
     let objects = tuples.iter().map(|elements| elements.to_vec()).collect();
-    Ok(table.insert_all(atoms, objects))
+    Ok(if new {
+        table.insert_all_new(atoms, objects)
+    } else {
+        table.insert_all(atoms, objects)
+    })
 }
 
 /// Return the position, from 1, of the first object of `tuples` whose key

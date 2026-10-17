@@ -1014,6 +1014,31 @@ fn clears_a_large_fixed_table_in_turns_as_pinned_erts() {
 }
 
 #[test]
+fn inserts_new_into_a_fixed_bag_key_as_pinned_erts() {
+    // The key-clash walk of `ets:insert_new/2` adds a new object for a key
+    // whose objects are all pseudo-deleted (`erl_db_hash.c:1412-1422`).
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    let object = |value| Term::tuple(vec![atom("k"), Term::Integer(value)]);
+    assert_eq!(
+        program
+            .execute("ets_probe", "fixtable_insert_new", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![
+            atom("true"),
+            Term::list_from(vec![object(1)]),
+            Term::list_from(vec![object(1)]),
+            Term::BigInt(Arc::new(BigInt::from(u64::MAX))),
+        ])
+    );
+    assert_eq!(
+        reference("fixtable_insert_new"),
+        b"[true,[{k,1}],[{k,1}],18446744073709551615]\n"
+    );
+}
+
+#[test]
 fn clears_a_table_after_a_fixed_take_as_pinned_erts() {
     // A completed clear resets the item counter, so a table that a take
     // counted below 0 reports the size 0 (`RESET_NITEMS`,

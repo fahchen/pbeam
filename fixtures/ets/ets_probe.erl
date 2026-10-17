@@ -23,7 +23,7 @@
          fixtable_next_live_behind_node/0, fixtable_clear_behind_node/0,
          fixtable_bag_restore_behind_node/0, fixtable_delete_table/0,
          fixtable_clear_large/0, fixtable_clear_help/0, clear_task/2,
-         fixtable_take/0, fixtable_take_clear/0]).
+         fixtable_take/0, fixtable_take_clear/0, fixtable_insert_new/0]).
 
 %% ets:new/2 return values and badarg cases (erl_db.c:2555-2840).
 new() ->
@@ -1131,6 +1131,20 @@ fixtable_take_clear() ->
     Size = ets:info(T, size),
     ets:safe_fixtable(T, false),
     [Cleared, Size].
+
+%% The key-clash walk of `ets:insert_new/2` adds a new object for a bag
+%% key whose objects are all pseudo-deleted (`erl_db_hash.c:1412-1422`).
+fixtable_insert_new() ->
+    T = ets:new(ets_probe_fix_insert_new, [bag]),
+    ets:insert(T, [{k, 1}]),
+    ets:safe_fixtable(T, true),
+    ets:delete(T, k),
+    Added = ets:insert_new(T, {k, 1}),
+    Objects = ets:lookup(T, k),
+    Taken = ets:take(T, k),
+    Size = ets:info(T, size),
+    ets:safe_fixtable(T, false),
+    [Added, Objects, Taken, Size].
 
 catch_error(Fun) ->
     try Fun() catch error:Reason -> {error, Reason} end.

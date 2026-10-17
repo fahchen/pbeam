@@ -255,6 +255,10 @@ pub(super) struct Busy {
     /// True when the call is `ets:insert_new/2` and the walk for a key
     /// that the table holds did not finish (`erl_db.c:1909-1925`).
     walk: bool,
+    /// True when the call is `ets:insert_new/2`, whose key-clash walk adds
+    /// a new object for a bag key with no live object
+    /// (`erl_db_hash.c:1412-1422`).
+    new: bool,
     /// The number of objects that the walk checked.
     walked: usize,
     /// True when the walk found a key that the table holds.
@@ -289,12 +293,21 @@ impl Busy {
             owner,
             objects,
             walk,
+            new: false,
             walked: 0,
             found: false,
             inserted: 0,
             looped: false,
             walks: HashMap::new(),
         }
+    }
+
+    /// Set the `ets:insert_new/2` flag of the call, whose key-clash walk
+    /// adds a new object for a bag key with no live object
+    /// (`erl_db_hash.c:1412-1422`).
+    pub(super) fn with_new(mut self, new: bool) -> Busy {
+        self.new = new;
+        self
     }
 
     /// Return the result of the insert, and end the busy state of the table
@@ -1193,6 +1206,12 @@ impl Table {
         (size as u128 & u128::from(u64::MAX)) as u64
     }
 
+    /// Return the item counter as the signed `Sint` that growth and shrink
+    /// compare (`NITEMS_ESTIMATE`, `erl_db_hash.c:1352`, `759`).
+    fn item_count(&self) -> i64 {
+        self.size() as i64
+    }
+
     /// Return the reductions of `ets:delete_all_objects/1`, as
     /// `db_free_table_continue_hash` charges them (`erl_db_hash.c:3122-3149`):
     /// 32 for each segment and 1 for each object.
@@ -1973,7 +1992,7 @@ impl Table {
     /// (`erl_db_hash.c:2677-2709`).
     pub(super) fn shrink(&mut self) {
         for _ in 0..RESIZE_STEPS {
-            if self.object_count() >= self.shrink_limit() {
+            if self.item_count() >= i64::try_from(self.shrink_limit()).unwrap_or(i64::MAX) {
                 break;
             }
             self.join();
@@ -2192,7 +2211,7 @@ impl Table {
                 // work stays that of one list insert.
                 let object = std::mem::take(&mut busy.objects[busy.inserted]);
                 let compared = if self.table_type == TableType::Bag {
-                    self.insert_bag(atoms, object, &mut busy.walks)
+                    self.insert_bag(atoms, object, &mut busy.walks, busy.new)
                 } else {
                     self.insert(atoms, object);
                     0
@@ -2241,6 +2260,27 @@ impl Table {
     /// assert_eq!(table.insert_all(&atoms, vec![object(2), object(1), object(3)]), vec![1, 1, 2]);
     /// ```
     pub(super) fn insert_all(&mut self, atoms: &AtomTable, objects: Vec<Vec<Term>>) -> Vec<usize> {
+        self.insert_all_with(atoms, objects, false)
+    }
+
+    /// Insert the objects of `ets:insert_new/2`: for a bag key that the
+    /// fixation keeps without a live object, the key-clash walk adds a new
+    /// object instead of restoring an equal pseudo-deleted one
+    /// (`erl_db_hash.c:1412-1422`).
+    pub(super) fn insert_all_new(
+        &mut self,
+        atoms: &AtomTable,
+        objects: Vec<Vec<Term>>,
+    ) -> Vec<usize> {
+        self.insert_all_with(atoms, objects, true)
+    }
+
+    fn insert_all_with(
+        &mut self,
+        atoms: &AtomTable,
+        objects: Vec<Vec<Term>>,
+        new: bool,
+    ) -> Vec<usize> {
         if self.table_type != TableType::Bag {
             let count = objects.len();
             for object in objects {
@@ -2251,7 +2291,7 @@ impl Table {
         let mut walks: HashMap<u64, Vec<BagWalk>> = HashMap::new();
         objects
             .into_iter()
-            .map(|object| self.insert_bag(atoms, object, &mut walks))
+            .map(|object| self.insert_bag(atoms, object, &mut walks, new))
             .collect()
     }
 
@@ -2276,6 +2316,7 @@ impl Table {
         atoms: &AtomTable,
         object: Vec<Term>,
         walks: &mut HashMap<u64, Vec<BagWalk>>,
+        new: bool,
     ) -> usize {
         let hash = stored_hash(atoms, self.key(&object));
         if self.is_fixed() && self.position(hash, self.key(&object)).is_none() {
@@ -2283,6 +2324,14 @@ impl Table {
             if let Some(records) = self.retained.get(&hash)
                 && let Some(index) = records.iter().rposition(|retained| retained.key == key)
             {
+                if new {
+                    // The key-clash walk of `ets:insert_new/2` adds a new
+                    // object at the head of the key's list
+                    // (`erl_db_hash.c:1412-1422`, `1447-1452`).
+                    let node = records[index].newest;
+                    self.add(atoms, hash, object, node);
+                    return 0;
+                }
                 // ERTS compares the new object with each object of the key
                 // that the fixation keeps, and each comparison that is not
                 // equal uses one unit (`erl_db_hash.c:1422-1444`).
@@ -2326,7 +2375,8 @@ impl Table {
                         .iter()
                         .find(|(_, slot)| self.object_of(*slot).as_slice() == object)
                         .map(|(_, slot)| *slot)
-                }) && self.is_deleted(slot)
+                }) && !new
+                    && self.is_deleted(slot)
                 {
                     self.restore_object(slot, hash, &walk.key);
                     // The restored object is the first object of the key,
@@ -2391,7 +2441,7 @@ impl Table {
             self.next[slot] = std::mem::replace(&mut self.next[node], EMPTY);
             self.link(bucket, before, slot);
         }
-        if self.object_count() > self.buckets {
+        if self.item_count() > i64::try_from(self.buckets).unwrap_or(i64::MAX) {
             self.split(atoms);
         }
         slot
@@ -2928,7 +2978,7 @@ impl Table {
             self.compact(atoms, newest);
         }
         for _ in 0..RESIZE_STEPS {
-            if self.object_count() >= self.shrink_limit() {
+            if self.item_count() >= i64::try_from(self.shrink_limit()).unwrap_or(i64::MAX) {
                 break;
             }
             self.join();

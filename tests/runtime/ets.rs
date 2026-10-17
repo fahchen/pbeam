@@ -1057,6 +1057,28 @@ fn frees_a_clear_after_the_last_unfix() {
 }
 
 #[test]
+fn grows_by_the_item_counter() {
+    // A take leaves the item counter below 0, and the growth decision uses
+    // the counter, so 257 inserts leave the 256 buckets of the table
+    // (`erl_db_hash.c:1352`).
+    let atoms = test_atom_table();
+    let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Bag);
+    let key = Term::Integer(0);
+    let object = |value| vec![key.clone(), Term::Integer(value)];
+    table.insert_all(&atoms, vec![object(1), object(2), object(3)]);
+    table.fix(ProcessId(0));
+    table.begin_select_delete();
+    assert!(table.delete_object(&atoms, &object(2)));
+    table.take_key(&atoms, &key);
+    table.unfix_all(ProcessId(0));
+    assert_eq!(table.size(), u64::MAX);
+    let objects = (1..=257).map(|value| vec![Term::Integer(value)]).collect();
+    table.insert_all(&atoms, objects);
+    assert_eq!(table.buckets, 256);
+    assert_eq!(table.size(), 256);
+}
+
+#[test]
 fn forgets_the_records_of_a_freed_segment() {
     // The free of a segment drops the retained records of its buckets, so
     // their keys do not stay alive until the whole table is free
