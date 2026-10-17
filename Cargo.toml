@@ -90,6 +90,10 @@ name = "prim_loader"
 path = "tests/feature/prim_loader.rs"
 
 [[test]]
+name = "re_global"
+path = "tests/feature/re_global.rs"
+
+[[test]]
 name = "run_end"
 path = "tests/feature/run_end.rs"
 

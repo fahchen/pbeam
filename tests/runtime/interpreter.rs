@@ -5225,6 +5225,44 @@ fn raises_the_reason_of_an_error_with_cause_that_no_call_path_converted() {
 }
 
 #[test]
+fn resumes_a_trap_target_through_its_loaded_export() {
+    // A trap that waited for the next turn enters the export of its target
+    // when the process runs again. A target that a module exports needs no
+    // error handler. `fun_probe:tail_wait/1` has a known entry.
+    let program =
+        BeamProgram::load(&[include_bytes!("../../fixtures/funs/fun_probe.beam")]).unwrap();
+    let label = program.modules["fun_probe"].exports[&(
+        program.modules["fun_probe"]
+            .tables
+            .name_id("tail_wait")
+            .unwrap(),
+        1,
+    )];
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.code = CodeTable::new(program.modules.clone());
+    let frame = scheduler.code.frame("fun_probe", label, 1).unwrap();
+    scheduler
+        .start(frame, vec![Term::Integer(1)], Vec::new())
+        .unwrap();
+    scheduler.schedule_next().unwrap();
+    write(
+        scheduler.current_process_mut(),
+        &Operand::X(0),
+        Term::Integer(1),
+    )
+    .unwrap();
+    let outcome = program
+        .resume_trap(&mut scheduler, "fun_probe", "tail_wait", 1, false)
+        .unwrap();
+    assert!(outcome.is_none());
+    let frames = &scheduler.current_process_mut().frames;
+    assert_eq!(frames.len(), 2);
+    let (module_id, function) = (frames[1].module_id, frames[1].function);
+    let module = scheduler.code.module_by_id(module_id).unwrap();
+    assert_eq!(module.tables.name(function), "tail_wait");
+}
+
+#[test]
 fn rejects_a_select_delete_of_a_private_table_of_another_process() {
     // `ets:internal_select_delete/2` takes the table with `DB_WRITE`, so a
     // process that does not own a `private` table raises `badarg`

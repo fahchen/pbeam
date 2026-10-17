@@ -429,6 +429,7 @@ impl Scheduler {
         process.frames.clear();
         process.registers.clear();
         process.pending_bif = None;
+        process.pending_trap = None;
         process.length_trap = None;
         process.mailbox.set_save_first();
         let policy = self.policy.as_mut().expect("the policy process runs");
