@@ -74,6 +74,7 @@ pub(super) const BSR_ANYCRLF: u32 = 2;
 /// not know the error code.
 const ERROR_BADDATA: c_int = -29;
 /// `PCRE2_ERROR_NOMATCH` (`pcre2.h:352`): the subject does not match.
+#[cfg(test)]
 pub(super) const ERROR_NOMATCH: c_int = -1;
 /// `PCRE2_ERROR_BADMAGIC` (`pcre2.h:397`).
 pub(super) const ERROR_BADMAGIC: c_int = -31;
@@ -94,8 +95,6 @@ pub(super) const ERROR_MATCHLIMIT: c_int = -47;
 /// `PCRE2_ERROR_DEPTHLIMIT` (`pcre2.h:419`), which the obsolete name
 /// `PCRE2_ERROR_RECURSIONLIMIT` also gives.
 pub(super) const ERROR_DEPTHLIMIT: c_int = -53;
-/// `PCRE2_ERROR_HEAPLIMIT` (`pcre2.h:430`).
-pub(super) const ERROR_HEAPLIMIT: c_int = -63;
 /// `PCRE2_ERROR_LOOP_LIMIT` (`pcre2.h:444`), the ERTS addition that a match
 /// returns when it uses the loops that remain.
 pub(super) const ERROR_LOOP_LIMIT: c_int = -76;
