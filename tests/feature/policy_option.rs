@@ -189,6 +189,8 @@ fn runs_the_boot_with_boot_authority_and_enters_the_runtime_with_the_policy_capa
         format!("{{send_name,{denied}}}"),
         format!("{{timer_pid,{denied}}}"),
         format!("{{timer_name,{denied}}}"),
+        format!("{{timer_pid_4,{denied}}}"),
+        format!("{{timer_name_4,{denied}}}"),
         format!("{{link,{denied}}}"),
         format!("{{exit,{denied}}}"),
         format!("{{exit_alias,{denied}}}"),

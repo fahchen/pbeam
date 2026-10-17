@@ -5261,3 +5261,105 @@ fn resumes_a_trap_target_through_its_loaded_export() {
     let module = scheduler.code.module_by_id(module_id).unwrap();
     assert_eq!(module.tables.name(function), "tail_wait");
 }
+
+#[test]
+fn rejects_a_select_delete_of_a_private_table_of_another_process() {
+    // `ets:internal_select_delete/2` takes the table with `DB_WRITE`, so a
+    // process that does not own a `private` table raises `badarg`
+    // (`erl_db.c:3433-3475`, `769-798`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    scheduler.ets.create(
+        Reference(0),
+        None,
+        Table::new(ProcessId(999), Access::Private, 1, TableType::Set),
+    );
+    let spec = Term::list_from([Term::tuple(vec![
+        Term::static_atom("_"),
+        Term::nil(),
+        Term::list_from([Term::static_atom("true")]),
+    ])]);
+    let result = program
+        .bif(
+            &mut scheduler,
+            "ets",
+            "internal_select_delete",
+            vec![Term::Reference(Reference(0)), spec],
+        )
+        .unwrap();
+    assert!(matches!(result, BifResult::Raise { .. }));
+}
+
+#[test]
+fn rejects_an_update_default_at_the_zero_key_position() {
+    // A key position of 0 comes from a truncated `{keypos, 1 bsl 32}`. The
+    // unsigned arity check passes, and the default object has no key
+    // position to replace, so the call raises `badarg` (`erl_db.c:1483-1484`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let owner = scheduler.current_process_mut().id;
+    scheduler.ets.create(
+        Reference(0),
+        None,
+        Table::new(owner, Access::Public, 0, TableType::Set),
+    );
+    let object = Term::tuple(vec![Term::Integer(1), Term::Integer(0)]);
+    let result = program
+        .bif(
+            &mut scheduler,
+            "ets",
+            "update_element",
+            vec![
+                Term::Reference(Reference(0)),
+                Term::Integer(1),
+                Term::tuple(vec![Term::Integer(2), Term::Integer(9)]),
+                object,
+            ],
+        )
+        .unwrap();
+    assert!(matches!(result, BifResult::Raise { .. }));
+}
+
+#[test]
+fn gives_the_owner_as_the_heir_of_a_table() {
+    // `ets:new/2` keeps `{heir, self()}` as the heir, and `ets:info/1,2`
+    // gives the owner pid (`erl_db.c:5478-5479`, `5319-5337`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let owner = scheduler.current_process_mut().id;
+    let heir = Term::Atom(scheduler.atoms.put("heir").unwrap());
+    let name = Term::Atom(scheduler.atoms.put("ets_probe_heir").unwrap());
+    let options = Term::list_from([
+        Term::static_atom("named_table"),
+        Term::tuple(vec![heir.clone(), Term::Pid(owner)]),
+    ]);
+    let table = program
+        .bif(&mut scheduler, "ets", "new", vec![name.clone(), options])
+        .unwrap();
+    let BifResult::Value(table) = table else {
+        panic!("ets:new/2 did not make a table");
+    };
+    let item = program
+        .bif(
+            &mut scheduler,
+            "ets",
+            "info",
+            vec![table.clone(), heir.clone()],
+        )
+        .unwrap();
+    assert!(matches!(item, BifResult::Value(Term::Pid(pid)) if pid == owner));
+    let BifResult::Value(items) = program
+        .bif(&mut scheduler, "ets", "info", vec![table])
+        .unwrap()
+    else {
+        panic!("ets:info/1 did not return a list");
+    };
+    let heir_entry = Term::tuple(vec![heir, Term::Pid(owner)]);
+    assert!(items.proper_list().unwrap().any(|item| *item == heir_entry));
+}

@@ -35,6 +35,8 @@ mod pbeam_cap;
 mod persistent_term;
 mod re;
 mod subtract;
+mod term;
+mod timer;
 mod unicode;
 mod ycf;
 

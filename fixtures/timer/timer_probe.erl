@@ -1,7 +1,8 @@
 -module(timer_probe).
 -export([receive_after/0, timeout_values/0, receive_limits/0, start_timer/0,
          cancel_timer/0, cancel_timer_1/0, receiver_exit/0, order/0, timer_limits/0,
-         send_after/3, wait/0, id/1, send_after_timer/0]).
+         send_after/3, wait/0, id/1, send_after_timer/0, start_timer_4/0,
+         send_after_4/0, read_timer/0]).
 
 %% Return the argument. A call through ?MODULE stops the compiler from
 %% folding a constant timeout or argument.
@@ -176,3 +177,71 @@ after_bad(Time, To) ->
     try erlang:send_after(Time, To, x)
     catch Class:Reason -> {Class, Reason}
     end.
+
+%% erlang:start_timer/4 with the relative and absolute options
+%% (erl_hl_timer.c:2622-2642).
+start_timer_4() ->
+    Self = self(),
+    R1 = erlang:start_timer(?MODULE:id(60), Self, a, []),
+    R2 = erlang:start_timer(?MODULE:id(30), Self, b, [{abs, false}]),
+    M1 = receive X -> X end,
+    M2 = receive Y -> Y end,
+    Now = erlang:monotonic_time(millisecond),
+    R3 = erlang:start_timer(Now, Self, c, [{abs, true}]),
+    M3 = receive Z -> Z end,
+    {Dead, MRef} = spawn_monitor(?MODULE, id, [x]),
+    receive {'DOWN', MRef, process, Dead, normal} -> ok end,
+    RD = erlang:start_timer(10, Dead, d, []),
+    Bad = [start_4_bad(T, To, O)
+           || {T, To, O} <- [{-1, Self, []}, {foo, Self, []}, {10, Self, foo},
+                             {10, Self, [foo]}, {10, Self, [abs]},
+                             {10, Self, [{abs, 1}]}, {10, Self, [{async, true}]},
+                             {10, Self, [{info, true}]}, {10, 1, []},
+                             {-576460753000, Self, [{abs, true}]},
+                             {1 bsl 62, Self, [{abs, true}]}]],
+    [M1 =:= {timeout, R2, b}, M2 =:= {timeout, R1, a}, M3 =:= {timeout, R3, c},
+     is_reference(RD), wait(0), Bad].
+
+start_4_bad(Time, To, Options) ->
+    try erlang:start_timer(Time, To, x, Options)
+    catch Class:Reason -> {Class, Reason}
+    end.
+
+%% erlang:send_after/4 with the relative and absolute options
+%% (erl_hl_timer.c:2583-2603).
+send_after_4() ->
+    Self = self(),
+    R1 = erlang:send_after(?MODULE:id(60), Self, a, []),
+    R2 = erlang:send_after(?MODULE:id(30), Self, b, [{abs, false}]),
+    M1 = receive X -> X end,
+    M2 = receive Y -> Y end,
+    Now = erlang:monotonic_time(millisecond),
+    erlang:send_after(Now, Self, c, [{abs, true}]),
+    M3 = receive Z -> Z end,
+    Bad = [after_4_bad(T, To, O)
+           || {T, To, O} <- [{-1, Self, []}, {foo, Self, []}, {10, Self, [foo]},
+                             {10, Self, [{abs, 1}]}, {10, Self, [{async, true}]},
+                             {10, 1, []}]],
+    [is_reference(R1), is_reference(R2), M1 =:= b, M2 =:= a, M3 =:= c,
+     wait(0), Bad].
+
+after_4_bad(Time, To, Options) ->
+    try erlang:send_after(Time, To, x, Options)
+    catch Class:Reason -> {Class, Reason}
+    end.
+
+%% erlang:read_timer/1 on a live, cancelled, and expired timer
+%% (erl_hl_timer.c:2661-2664).
+read_timer() ->
+    Self = self(),
+    R1 = erlang:start_timer(?MODULE:id(200), Self, x),
+    A = left(erlang:read_timer(R1)),
+    B = left(erlang:read_timer(R1)),
+    C = left(erlang:cancel_timer(R1)),
+    D = erlang:read_timer(R1),
+    R2 = erlang:start_timer(0, Self, y),
+    _ = receive {timeout, R2, y} -> ok end,
+    E = erlang:read_timer(R2),
+    F = erlang:read_timer(make_ref()),
+    G = try erlang:read_timer(foo) catch Class:Reason -> {Class, Reason} end,
+    [A, B, C, D, E, F, G, wait(0)].

@@ -44,7 +44,9 @@
     send2/0,
     send3/0,
     start_timer/0,
+    start_timer_4/0,
     send_after/0,
+    send_after_4/0,
     process_info/0,
     is_process_alive/0,
     is_alive_request/0,
@@ -229,7 +231,11 @@ send3() -> attempt(fun() -> erlang:send(self(), ping, []) end).
 
 start_timer() -> attempt(fun() -> erlang:start_timer(0, self(), ping) end).
 
+start_timer_4() -> attempt(fun() -> erlang:start_timer(0, self(), ping, []) end).
+
 send_after() -> attempt(fun() -> erlang:send_after(0, self(), ping) end).
+
+send_after_4() -> attempt(fun() -> erlang:send_after(0, self(), ping, []) end).
 
 %% The process inspection and group leader entries. A call for the caller
 %% has no check, so each probe calls them for a child.
@@ -411,6 +417,8 @@ ambient() ->
     Self = self(),
     Name = effect_probe_ambient,
     Table = ets:new(Name, [named_table]),
+    Selected = ets:new(effect_probe_selected, []),
+    true = ets:insert(Selected, {key, value}),
     Array = erts_internal:atomics_new(1, 1),
     [
         erlang:unlink(Self),
@@ -451,6 +459,30 @@ ambient() ->
         ets:member(Name, key),
         ets:delete(Name, key),
         ets:info(Name, type),
+        ets:insert(Name, {key, value}),
+        length(ets:info(Name)),
+        case ets:next(Name, key) of
+            '$end_of_table' -> eot;
+            Next -> Next
+        end,
+        case ets:prev(Name, key) of
+            '$end_of_table' -> eot;
+            Previous -> Previous
+        end,
+        ets:match_object(Name, {'_', '_'}),
+        ets:select(Name, [{{'_', '_'}, [], ['$_']}]),
+        begin
+            {_, C} = ets:select(Name, [{{'_', '_'}, [], ['$_']}], 1),
+            case ets:select(C) of
+                '$end_of_table' -> eot;
+                {Matches, '$end_of_table'} -> {Matches, eot};
+                Other -> Other
+            end
+        end,
+        ets:update_element(Selected, key, {2, updated}),
+        ets:update_element(Selected, missing, {2, updated}, {missing, 0}),
+        ets:internal_select_delete(Selected, [{{'_', '_'}, [], [false]}]),
+        ets:internal_delete_all(Selected, undefined),
         reference(ets:whereis(Name)),
         ets:delete(ets:new(effect_probe_deleted, [])),
         atom(file:native_name_encoding()),
@@ -488,7 +520,13 @@ ambient() ->
         integer(os:system_time()),
         timestamp(os:timestamp()),
         integer(os:perf_counter()),
-        integer(list_to_integer(os:getpid()))
+        integer(list_to_integer(os:getpid())),
+        is_binary(erlang:term_to_binary(1)),
+        is_binary(erlang:term_to_binary(1, [])),
+        erlang:binary_to_term(erlang:term_to_binary(1)) =:= 1,
+        erlang:binary_to_term(erlang:term_to_binary(1), []) =:= 1,
+        erlang:external_size(<<1, 2, 3>>),
+        erlang:read_timer(make_ref())
     ].
 
 %% Open /dev/null in write mode, write, move the position, and close it

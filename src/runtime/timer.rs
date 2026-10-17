@@ -251,6 +251,41 @@ impl Timers {
             .filter(|&end| end <= MONOTONIC_END_TICKS)
     }
 
+    /// Return the end tick of an absolute timer of `msec` milliseconds in
+    /// Erlang monotonic time, as the absolute branch of `parse_timeout_pos`
+    /// (`erl_hl_timer.c:2494-2554`) does: the internal time is the Erlang
+    /// time minus `ERTS_MONOTONIC_OFFSET_MSEC`, and a time before
+    /// `ERTS_MONOTONIC_BEGIN` or after `ERTS_MONOTONIC_END` is `None`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Timers::absolute_position(-576_460_752_000_000), Some(1000));
+    /// assert_eq!(Timers::absolute_position(-576_460_753_000_000), None);
+    /// ```
+    pub(super) fn absolute_position(msec: i64) -> Option<i64> {
+        let offset = crate::runtime::time::MONOTONIC_OFFSET_NATIVE / UNITS_PER_TICK;
+        let end = msec.checked_sub(offset)?;
+        (MONOTONIC_BEGIN / UNITS_PER_TICK..=MONOTONIC_END_TICKS)
+            .contains(&end)
+            .then_some(end)
+    }
+
+    /// Return the end tick of the active BIF timer `reference`, as
+    /// `btm_rbt_lookup` finds the `btm_tree` entry of the timer service
+    /// (`erl_hl_timer.c:1907-1920`), or `None` when no BIF timer with the
+    /// reference is active.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let timers = Timers::new();
+    /// assert_eq!(timers.bif_timer_end(Reference(0)), None);
+    /// ```
+    pub(super) fn bif_timer_end(&self, reference: Reference) -> Option<i64> {
+        self.bif_timers.get(&reference).map(|key| key.0)
+    }
+
     /// Return the milliseconds from the time `now` to the end tick `end`, as
     /// `get_time_left` (`erl_hl_timer.c:681-689`) does: `now` becomes the
     /// tick `(now - 1) div 1000000 + 1`, and an end at or before that tick
