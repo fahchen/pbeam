@@ -394,6 +394,12 @@ pub(super) struct ProcessState {
     /// (`jit/arm/instr_bif.cpp:525-536`, `676-701`). `BeamProgram::run` runs
     /// it first.
     pub(super) pending_bif: Option<PendingBif>,
+    /// The result of a list insert of `ets:insert/2` or `ets:insert_new/2`
+    /// that ended while the process trapped in it, until the process reads
+    /// it, as `ctx->return_value` (`erl_db.c:2180-2184`, `2239-2244`). The
+    /// state of the call lives with the process, so the result stays after
+    /// the table goes away (`erl_db.c:2142-2150`).
+    pub(super) insert_result: Option<Term>,
     /// The dirty IO call of the process, from the switch out at the call
     /// until `BeamProgram::run` returns its result, or until a signal ends
     /// the process. ERTS runs the process on a dirty IO scheduler for this
@@ -573,6 +579,7 @@ impl ProcessState {
             fcalls: 0,
             reductions: 0,
             pending_bif: None,
+            insert_result: None,
             dirty_write: None,
             length_trap: None,
             bif_timers: MonitorLinkTree::default(),

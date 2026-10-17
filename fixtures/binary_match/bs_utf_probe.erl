@@ -1,5 +1,5 @@
 -module(bs_utf_probe).
--export([retract16/1, get16/1, get16_little/1, get16_native/1, get32/1, get32_little/1, get32_native/1, skip16/1, skip16_little/1, skip32/1, skip32_little/1, offset16/1, offset32/1, retract32/1]).
+-export([retract16/1, get16/1, get16_little/1, get16_native/1, get32/1, get32_little/1, get32_native/1, skip16/1, skip16_little/1, skip32/1, skip32_little/1, offset16/1, offset32/1, retract32/1, skip8/1]).
 
 %% bs_get_utf16 with the flags 0 (big), 2 (little), and 16 (native). A code
 %% unit that is not a surrogate is one character. A high surrogate and a
@@ -96,5 +96,13 @@ retract32(Bin) when is_binary(Bin) ->
     case Bin of
         <<C/utf32, Rest/binary>> -> {C, Rest};
         <<X:32, Rest/binary>> -> {int, X, Rest};
+        _ -> short
+    end.
+
+%% bs_skip_utf8 reads one character and drops it. A character that is not
+%% a valid UTF-8 form, and a short binary, fail.
+skip8(Bin) when is_binary(Bin) ->
+    case Bin of
+        <<_/utf8, Rest/binary>> -> Rest;
         _ -> short
     end.

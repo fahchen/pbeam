@@ -432,6 +432,24 @@ fn text(term: &Term, atoms: &pbeam_runtime::AtomTable) -> String {
 }
 
 #[test]
+fn completes_a_busy_list_insert_as_pinned_erts() {
+    // `ets_probe:busy/0` runs a list insert of 24000 objects alone, and
+    // with a process that uses the table while the insert traps after its
+    // copy (`ETS_INSERT_2_LIST_GLOBAL`, `erl_db.c:2077-2107`,
+    // `2310-2319`). The second process completes the insert first, so its
+    // lookup finds the last object, and it charges the units of the work
+    // with its own reductions (`handle_lacking_permission`,
+    // `erl_db.c:769-798`, `2152-2197`). The insert of the table then
+    // returns `true` with no unit left (`erl_db.c:2223-2244`). Each number
+    // is the reductions of the process, and the pinned ERTS with one
+    // scheduler gives the same numbers.
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let result = program.execute("ets_probe", "busy", &[]).unwrap();
+    let expected = String::from_utf8(reference_with(&["+S", "1"], "busy")).unwrap();
+    assert_eq!(text(&result.term, result.atoms()), expected.trim_end());
+}
+
+#[test]
 fn gives_the_table_type_as_pinned_erts() {
     // `ets_probe:info/0` reads the item type of a set and a bag table
     // (erl_db.c:5457-5469). A free name gives undefined before the item
