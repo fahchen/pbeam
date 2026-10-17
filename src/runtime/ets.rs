@@ -4,7 +4,7 @@
 pub(super) mod pattern;
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::hash::{DefaultHasher, Hasher};
 
 use crate::term::atom_hash;
@@ -56,7 +56,7 @@ pub(super) struct EtsTables {
     /// tables, as the fixed-table list of the process (`erl_db.c:130-150`).
     /// One entry for each table: a second fix of the same table adds no
     /// entry (`fix_table_locked`, `erl_db.c:5150-5192`).
-    fixed: Vec<(ProcessId, Reference)>,
+    fixed: HashMap<ProcessId, VecDeque<Reference>>,
     /// The compiled match specification of each `ets:select/1`
     /// continuation, by the reference that the continuation holds in place
     /// of the ERTS magic reference (`ets_db_make_match_prog_ref`,
@@ -626,7 +626,7 @@ impl EtsTables {
             .iter()
             .all(|fixed| *fixed != process);
         if first {
-            self.fixed.push((process, id));
+            self.fixed.entry(process).or_default().push_back(id);
         }
         self.tables
             .get_mut(&id)
@@ -641,9 +641,27 @@ impl EtsTables {
         let table = self.tables.get_mut(&id).expect("an unfixed table is live");
         table.unfix(process);
         if !table.fixed_by.contains(&process) {
-            self.fixed
-                .retain(|(fixed, table)| !(*fixed == process && *table == id));
+            let empty = {
+                let list = self
+                    .fixed
+                    .get_mut(&process)
+                    .expect("a fixed process has a fixation list");
+                list.retain(|table| *table != id);
+                list.is_empty()
+            };
+            if empty {
+                self.fixed.remove(&process);
+            }
         }
+    }
+
+    /// Remove each fixation of the table `id` from the list of its process,
+    /// as `free_fixations_locked` does (`erl_db.c:5304-5318`).
+    fn forget_fixations(&mut self, id: Reference) {
+        self.fixed.retain(|_, list| {
+            list.retain(|table| *table != id);
+            !list.is_empty()
+        });
     }
 
     /// Delete the tables that the process `owner` owns, as
@@ -698,7 +716,7 @@ impl EtsTables {
                 // The table goes, so each fixation of it goes too
                 // (`free_fixations_locked`, `erl_db.c:5304-5318`).
                 table.fixed_by.clear();
-                self.fixed.retain(|(_, table)| *table != id);
+                self.forget_fixations(id);
                 self.names.retain(|_, named| *named != id);
                 self.programs.retain(|_, (table, _)| *table != id);
                 self.freeing.insert(id, Freeing::new(table));
@@ -711,19 +729,32 @@ impl EtsTables {
         // The exit now removes the fixations of the process on the tables
         // that stay, in the order of its fixed-table list
         // (`erl_db.c:5110-5126`).
-        let fixed = (self.fixed.iter())
-            .filter(|(process, _)| *process == owner)
-            .map(|(_, id)| *id)
-            .collect::<Vec<_>>();
-        for id in fixed {
+        loop {
+            let Some(id) = self
+                .fixed
+                .get(&owner)
+                .and_then(|fixed| fixed.front().copied())
+            else {
+                self.fixed.remove(&owner);
+                break;
+            };
             let table = self.tables.get_mut(&id).expect("a fixed table is live");
             reds -= i32::try_from(table.unfix_cost(owner)).unwrap_or(i32::MAX);
             table.unfix_all(owner);
             // The exit frees each fixation of the process on the table, so
             // the fixed-table list of the process drops the table too
             // (`proc_cleanup_fixed_table`, `erl_db.c:4975-5015`).
-            self.fixed
-                .retain(|(fixed, table)| !(*fixed == owner && *table == id));
+            let empty = {
+                let fixed = self
+                    .fixed
+                    .get_mut(&owner)
+                    .expect("the process has a fixation");
+                fixed.pop_front();
+                fixed.is_empty()
+            };
+            if empty {
+                self.fixed.remove(&owner);
+            }
             if reds <= 0 {
                 return None;
             }
@@ -761,7 +792,7 @@ impl EtsTables {
         // `erl_db.c:3056`).
         let fixations = table.fixation_count();
         table.fixed_by.clear();
-        self.fixed.retain(|(_, table)| *table != id);
+        self.forget_fixations(id);
         self.freeing.insert(id, Freeing::new(table));
         fixations
     }
@@ -1526,6 +1557,16 @@ impl Table {
         count: usize,
         units: usize,
     ) -> (bool, usize) {
+        if !self.is_fixed() {
+            // The last unfix ended the fixation, so the continuation frees
+            // the table as `db_delete_all_objects_hash` does without a
+            // fixation (`erl_db_hash.c:4017-4037`).
+            let charge = self.delete_all_reductions();
+            self.drop_retained();
+            self.reset_cleared();
+            self.clear = None;
+            return (true, charge);
+        }
         let mut clearing = self.clear.take().unwrap_or(Clearing {
             owner,
             count,
@@ -1547,7 +1588,14 @@ impl Table {
         if !done {
             self.clear = Some(clearing);
         }
-        (done, processed)
+        // The loop of `db_mark_all_deleted_hash` does not count its last
+        // bucket (`erl_db_hash.c:3034-3051`).
+        let counted = if done {
+            processed.saturating_sub(1)
+        } else {
+            processed
+        };
+        (done, counted.div_ceil(8))
     }
 
     /// Remove all objects of the table, as `db_delete_all_objects_hash`
@@ -1576,6 +1624,13 @@ impl Table {
             self.writes += 1;
             return count;
         }
+        self.reset_cleared();
+        count
+    }
+
+    /// Empty the table for a clear that keeps no object, as `db_create_hash`
+    /// does for a table without a fixation (`erl_db_hash.c:4036-4037`).
+    fn reset_cleared(&mut self) {
         self.objects.clear();
         self.free.clear();
         self.older.clear();
@@ -1584,7 +1639,6 @@ impl Table {
         self.next.clear();
         self.buckets = FIRST_SEGMENT_SLOTS;
         self.writes += 1;
-        count
     }
 
     /// Remove one object that is exactly equal to `object`, as the

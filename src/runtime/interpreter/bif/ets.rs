@@ -142,21 +142,14 @@ fn help_busy(context: &mut BifContext<'_>, table: &Term) -> Result<Take, BeamErr
     let units = usize::try_from(left.max(0))
         .unwrap_or(usize::MAX)
         .saturating_mul(8);
-    let (done, processed) = context
+    let (_, charge) = context
         .scheduler
         .ets
         .step_clear(&context.scheduler.atoms, id, units);
-    // The loop of `db_mark_all_deleted_hash` does not count its last
-    // bucket (`erl_db_hash.c:3034-3051`).
-    let counted = if done {
-        processed.saturating_sub(1)
-    } else {
-        processed
-    };
     context
         .scheduler
         .current_process_mut()
-        .bump_reductions(i32::try_from(counted.div_ceil(8)).unwrap_or(i32::MAX));
+        .bump_reductions(i32::try_from(charge).unwrap_or(i32::MAX));
     Ok(Take::Clear)
 }
 

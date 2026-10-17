@@ -1026,6 +1026,31 @@ fn charges_the_fixations_of_an_explicit_delete() {
 }
 
 #[test]
+fn frees_a_clear_after_the_last_unfix() {
+    // A clear that a trap left unfinished frees the table for real when the
+    // last unfix removes the fixation, as `db_delete_all_objects_hash` does
+    // without a fixation (`erl_db_hash.c:4017-4037`).
+    let atoms = test_atom_table();
+    let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
+    for key in 0..300 {
+        table.insert(&atoms, vec![Term::Integer(key)]);
+    }
+    table.fix(ProcessId(0));
+    table.fix(ProcessId(1));
+    assert_eq!(table.step_clear(&atoms, ProcessId(0), 300, 8), (false, 1));
+    table.unfix_all(ProcessId(0));
+    table.unfix_all(ProcessId(1));
+    assert!(table.clearing());
+    let (done, charge) = table.step_clear(&atoms, ProcessId(0), 300, usize::MAX);
+    assert!(done);
+    assert!(charge > 0);
+    assert!(!table.clearing());
+    assert_eq!(table.object_count(), 0);
+    assert_eq!(table.deleted_objects, 0);
+    assert!(table.next_key(&atoms, &Term::Integer(0)).is_none());
+}
+
+#[test]
 fn charges_one_delete_record_for_a_fixed_clear() {
     // A clear of a fixed table adds one delete record, so the exit cleanup
     // of 100 keys costs one for the fixation, 100 for the objects, and one
@@ -1075,13 +1100,13 @@ fn marks_the_buckets_of_a_fixed_clear_in_turns() {
     }
     assert_eq!(table.buckets, 300);
     table.fix(ProcessId(0));
-    assert_eq!(table.step_clear(&atoms, ProcessId(0), 300, 8), (false, 8));
+    assert_eq!(table.step_clear(&atoms, ProcessId(0), 300, 8), (false, 1));
     assert!(table.clearing());
     assert_eq!(table.fixdels, 1);
     assert_eq!(table.step_clear(&atoms, ProcessId(0), 300, 0), (false, 1));
     assert_eq!(
         table.step_clear(&atoms, ProcessId(0), 300, usize::MAX),
-        (true, 291)
+        (true, 37)
     );
     assert!(!table.clearing());
     assert_eq!(table.object_count(), 0);
