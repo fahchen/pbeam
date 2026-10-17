@@ -4,7 +4,7 @@
 pub(super) mod pattern;
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::hash::{DefaultHasher, Hasher};
 
 use crate::term::atom_hash;
@@ -182,7 +182,7 @@ pub(super) struct Table {
     /// true)`, one entry for each fix. While one exists, the table keeps
     /// each deleted object as a pseudo-deleted object and does not split or
     /// join a bucket, as ERTS keeps a fixated table (`erl_db_hash.c:49-60`).
-    fixed_by: Vec<ProcessId>,
+    fixed_by: HashMap<ProcessId, usize>,
     /// The keys that a process deleted while the table was fixed, with the
     /// slots of their objects. The objects stay in the table, and their
     /// chain nodes stay in the bucket chains, until the last unfix.
@@ -650,11 +650,10 @@ impl EtsTables {
     /// to the order of the fixations of the process (`fixed_tabs_insert`,
     /// `erl_db.c:135-150`).
     pub(super) fn fix_table(&mut self, id: Reference, process: ProcessId) {
-        let first = (self.tables.get(&id))
+        let first = !(self.tables.get(&id))
             .expect("a fixed table is live")
             .fixed_by
-            .iter()
-            .all(|fixed| *fixed != process);
+            .contains_key(&process);
         if first {
             self.fixed.entry(process).or_default().push_back(id);
         }
@@ -670,7 +669,7 @@ impl EtsTables {
     pub(super) fn unfix_table(&mut self, id: Reference, process: ProcessId) {
         let table = self.tables.get_mut(&id).expect("an unfixed table is live");
         table.unfix(process);
-        if !table.fixed_by.contains(&process) {
+        if !table.fixed_by.contains_key(&process) {
             // A process that did not fix the table has no list here, and a
             // second unfix of the last fixation changes nothing
             // (`unfix_table_locked`, `erl_db.c:1153-1157`).
@@ -1070,7 +1069,7 @@ impl Table {
             heir: None,
             busy: None,
             clear: None,
-            fixed_by: Vec::new(),
+            fixed_by: HashMap::new(),
             retained: HashMap::new(),
             retained_buckets: BTreeMap::new(),
             size_adjust: 0,
@@ -1536,17 +1535,20 @@ impl Table {
     /// (`erl_db.c:1150-1152`) does. A second fix by one process changes
     /// nothing.
     pub(super) fn fix(&mut self, process: ProcessId) {
-        // Each fix counts, so the matching unfix removes one count
-        // (`erl_db.c:5158-5169`).
-        self.fixed_by.push(process);
+        // Each fix counts in one entry of the process, and the matching
+        // unfix decrements it (`erl_db.c:5158-5169`).
+        *self.fixed_by.entry(process).or_insert(0) += 1;
     }
 
     /// Unfix the table for the process `process`, as `unfix_table_locked`
     /// (`erl_db.c:1153-1157`) does. The last unfix drops the keys that the
     /// fixation kept.
     pub(super) fn unfix(&mut self, process: ProcessId) {
-        if let Some(position) = self.fixed_by.iter().rposition(|fixed| *fixed == process) {
-            self.fixed_by.remove(position);
+        if let Some(count) = self.fixed_by.get_mut(&process) {
+            *count -= 1;
+            if *count == 0 {
+                self.fixed_by.remove(&process);
+            }
         }
         if self.fixed_by.is_empty() {
             self.drop_retained();
@@ -1556,7 +1558,7 @@ impl Table {
     /// Remove each fixation of the process `process`, as the exit of the
     /// process does (`db_fixation_cleanup`, `erl_db.c:5207-5211`).
     pub(super) fn unfix_all(&mut self, process: ProcessId) {
-        self.fixed_by.retain(|fixed| *fixed != process);
+        self.fixed_by.remove(&process);
         if self.fixed_by.is_empty() {
             self.drop_retained();
         }
@@ -1577,11 +1579,7 @@ impl Table {
     /// of one process counts once, because ERTS keeps one entry with a
     /// count.
     fn fixers(&self) -> Vec<ProcessId> {
-        let mut processes = HashSet::new();
-        for fixed in &self.fixed_by {
-            processes.insert(*fixed);
-        }
-        processes.into_iter().collect()
+        self.fixed_by.keys().copied().collect()
     }
 
     /// Return the reductions of the exit cleanup of the fixations of
@@ -1591,7 +1589,7 @@ impl Table {
     /// and one for each delete record that the unfix frees
     /// (`db_unfix_table_hash`, `erl_db_hash.c:939-990`).
     fn unfix_cost(&self, process: ProcessId) -> usize {
-        let last = self.fixed_by.iter().all(|fixed| *fixed == process);
+        let last = self.fixed_by.keys().all(|fixed| *fixed == process);
         let work = if last {
             self.deleted_objects + self.fixdels
         } else {
@@ -2715,7 +2713,7 @@ impl Table {
                 .flatten()
                 .map(|object| object.capacity() * std::mem::size_of::<Term>())
                 .sum::<usize>()
-            + self.fixed_by.capacity() * std::mem::size_of::<ProcessId>()
+            + self.fixed_by.capacity() * std::mem::size_of::<(ProcessId, usize)>()
             + self.retained.capacity() * std::mem::size_of::<(u64, Vec<Retained>)>()
             + self
                 .retained
