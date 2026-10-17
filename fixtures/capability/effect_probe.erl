@@ -411,6 +411,7 @@ ambient() ->
     Self = self(),
     Name = effect_probe_ambient,
     Table = ets:new(Name, [named_table]),
+    Array = erts_internal:atomics_new(1, 1),
     [
         erlang:unlink(Self),
         erlang:demonitor(make_ref()),
@@ -465,6 +466,11 @@ ambient() ->
         attempt(fun() -> erts_internal:purge_module(effect_probe_missing, complete) end),
         erts_internal:request_system_task(Self, normal, {check_process_code, Name, lists}),
         receive {check_process_code, Name, Refers} -> Refers end,
+        reference(Array),
+        atomics:add(Array, 1, 1),
+        atomics:get(Array, 1),
+        atomics:put(Array, 1, 7),
+        maps:get(memory, atomics:info(Array)),
         %% The default arity clock BIFs and the host identifiers, each
         %% reduced to a stable sign by the helpers below. The sibling task
         %% #754 already calls `erlang:monotonic_time/0` and

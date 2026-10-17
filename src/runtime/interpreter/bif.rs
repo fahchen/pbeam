@@ -16,6 +16,7 @@ use crate::runtime::{
 };
 use crate::term::ProcessId;
 
+mod atomics;
 mod binary;
 mod erlang;
 mod erts_internal;
@@ -987,6 +988,38 @@ impl BeamProgram {
             };
             let mut context = BifContext { scheduler };
             return ets::match_trap(&mut context, *id, pattern, *bucket as usize, state);
+        }
+        if let ("ets", "lookup" | "member" | "delete" | "insert" | "insert_new", [table, key]) =
+            (module, function, arguments.as_slice())
+        {
+            let mut context = BifContext { scheduler };
+            let result = match function {
+                "lookup" => ets::lookup(&mut context, table, key)?,
+                "member" => ets::member(&mut context, table, key)?,
+                "delete" => ets::delete(&mut context, table, key)?,
+                "insert_new" => ets::insert_new(&mut context, table, key)?,
+                _ => ets::insert(&mut context, table, key)?,
+            };
+            return Ok(result);
+        }
+        if let ("ets", "match", [table, pattern]) = (module, function, arguments.as_slice()) {
+            let mut context = BifContext { scheduler };
+            return ets::match_objects(&mut context, table, pattern, None);
+        }
+        if let ("ets", "match", [table, pattern, limit]) = (module, function, arguments.as_slice())
+        {
+            let mut context = BifContext { scheduler };
+            return ets::match_objects(&mut context, table, pattern, Some(limit));
+        }
+        if let ("ets", "info", [table, item]) = (module, function, arguments.as_slice()) {
+            let mut context = BifContext { scheduler };
+            return ets::info(&mut context, table, item);
+        }
+        if let ("ets", "lookup_element", [table, key, index, default]) =
+            (module, function, arguments.as_slice())
+        {
+            let mut context = BifContext { scheduler };
+            return ets::lookup_element(&mut context, table, key, index, default);
         }
         if let ("ets", "delete_trap", []) = (module, function, arguments.as_slice()) {
             return ets::delete_trap(&mut BifContext { scheduler });

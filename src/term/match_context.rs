@@ -319,6 +319,42 @@ impl MatchState {
         ((end - start).is_multiple_of(8)).then(|| self.bytes.bits(start, end))
     }
 
+    /// Compare the `size` bits after the position with the first `size`
+    /// bits of `text` and move the position past them, as
+    /// `i_bs_match_string` does (emu `bs_instrs.tab:1004-1027`; JIT
+    /// `emit_i_bs_match_string`, jit/arm/instr_bs.cpp:191-234). Return
+    /// `false` and keep the position when fewer than `size` bits remain and
+    /// when the bits differ, which are the two `$FAIL` branches of the emu
+    /// instruction. The position can be at any bit. `text` holds the
+    /// `(size + 7) / 8` bytes of the string, as the decoder checks
+    /// (`read_segment_string`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let context = MatchState::new(Binary::from(&[b'a', b'b', b'c'][..]));
+    /// assert!(context.match_string(16, b"ab"));
+    /// assert_eq!(context.position(), 16);
+    /// assert!(!context.match_string(8, b"x"));
+    /// assert_eq!(context.position(), 16);
+    /// assert!(context.match_string(8, b"c"));
+    /// assert_eq!(context.position(), 24);
+    /// ```
+    pub(crate) fn match_string(&self, size: u64, text: &[u8]) -> bool {
+        let start = self.position();
+        let Some(size) = usize::try_from(size)
+            .ok()
+            .filter(|&size| size <= self.remaining_bits())
+        else {
+            return false;
+        };
+        if segment_bits(&self.bytes, start, size) != segment_bits(text, 0, size) {
+            return false;
+        }
+        self.position.fetch_add(size as u64, Ordering::Relaxed);
+        true
+    }
+
     /// Return the bits after the position as a view of the bytes of the
     /// binary, and keep the position, as the `get_tail` command of
     /// `bs_match` does (`emit_bs_get_tail_shared`, jit/arm/instr_bs.cpp:

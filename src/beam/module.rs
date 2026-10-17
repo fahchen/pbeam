@@ -429,10 +429,13 @@ fn resolve(
         | Instruction::BinaryMatchStart { fail_label, .. }
         | Instruction::BinaryGetBinary { fail_label, .. }
         | Instruction::BinaryGetFloat { fail_label, .. }
+        | Instruction::BinaryGetInteger { fail_label, .. }
         | Instruction::BinaryGetUtf8 { fail_label, .. }
         | Instruction::BinaryGetUtf16 { fail_label, .. }
         | Instruction::BinaryGetUtf32 { fail_label, .. }
+        | Instruction::BinarySkipBits { fail_label, .. }
         | Instruction::BinaryMatch { fail_label, .. }
+        | Instruction::BinaryMatchString { fail_label, .. }
         | Instruction::BinaryCreate { fail_label, .. }
         | Instruction::LoopReceive { fail_label, .. } => resolve_branch(fail_label, jump_targets)?,
         Instruction::SelectTupleArity {

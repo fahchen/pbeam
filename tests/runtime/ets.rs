@@ -1,8 +1,76 @@
 use super::{
-    Access, EMPTY, EtsTables, KeyIndex, Table, TableType, atom_hash, key_hash, object_hash,
+    Access, Busy, EMPTY, EtsTables, KeyIndex, Table, TableType, atom_hash, key_hash, object_hash,
     segment, stored_hash,
 };
 use crate::term::{Atom, AtomTable, Map, ProcessId, Reference, Term, test_atom_table};
+
+#[test]
+fn bounds_the_work_of_one_turn_of_a_busy_list_insert() {
+    // The steps of a list insert put one object into the table for each two
+    // units, and a step ends between two objects, so one turn puts at most
+    // `units / 2 + 1` objects in (`ets_insert_2_list_insert_db_term_list`,
+    // `erl_db.c:1927-1949`). The position stays in the table, so the next
+    // turn continues where the one before it stopped, and the units of the
+    // last step may go below 0, as the YCF counter does
+    // (`erl_db.c:1939`).
+    let atoms = AtomTable::new();
+    let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
+    assert_eq!(table.step_busy(&atoms, 7), (0, None));
+    let objects = (0..10).map(|value| vec![Term::Integer(value)]).collect();
+    table.busy = Some(Busy::new(ProcessId(0), objects, false));
+    // The counter yields after the loop unit of a step (`erl_db.c:1936-1940`),
+    // so 7 units put three objects in and charge the loop unit of the
+    // fourth.
+    assert_eq!(table.step_busy(&atoms, 7), (7, None));
+    assert_eq!(table.live_objects().len(), 3);
+    assert_eq!(table.step_busy(&atoms, 2), (2, None));
+    assert_eq!(table.live_objects().len(), 4);
+    // The loop unit of the fifth object is already charged, so this turn
+    // puts six objects in with 11 units.
+    assert_eq!(
+        table.step_busy(&atoms, 100),
+        (11, Some(Term::static_atom("true")))
+    );
+    assert_eq!(table.live_objects().len(), 10);
+    assert!(table.busy.is_none());
+
+    // The copies of a list insert that runs count as the live bytes of the
+    // table and of the terms that only they hold.
+    let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Bag);
+    let mut tables = EtsTables::default();
+    let objects = vec![vec![Term::Integer(1)], vec![Term::Integer(2)]];
+    table.busy = Some(Busy::new(ProcessId(0), objects, false));
+    // The budget ends the insert with the last object, so the state with
+    // the walk of each key stays for this turn.
+    table.step_busy(&atoms, 4);
+    let with_busy = table.allocated_bytes();
+    tables.create(Reference(0), None, table);
+    let mut live = crate::term::LiveBytes::new();
+    tables.account_terms(&mut live);
+    let mut plain = EtsTables::default();
+    plain.create(
+        Reference(0),
+        None,
+        Table::new(ProcessId(0), Access::Public, 1, TableType::Set),
+    );
+    let mut empty = crate::term::LiveBytes::new();
+    plain.account_terms(&mut empty);
+    assert!(live.bytes() > empty.bytes());
+    assert!(with_busy > 0);
+
+    // A walk that finds a key of the table frees the copies, and the
+    // counter yields after the loop unit of the last copy, so the next
+    // turn gives the result `false` (`erl_db.c:1863-1873`, `1909-1925`).
+    let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
+    table.insert_all(&atoms, vec![vec![Term::Integer(1)]]);
+    table.busy = Some(Busy::new(ProcessId(0), vec![vec![Term::Integer(1)]], true));
+    assert_eq!(table.step_busy(&atoms, 2), (2, None));
+    assert_eq!(
+        table.step_busy(&atoms, 2),
+        (0, Some(Term::static_atom("false")))
+    );
+    assert!(table.busy.is_none());
+}
 
 #[test]
 fn deletes_only_the_tables_of_the_owner() {
