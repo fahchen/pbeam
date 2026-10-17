@@ -179,5 +179,6 @@ fn registry_is_sorted_and_matches_the_exact_mfa() {
     assert!(binding("prim_file", "read_info_nif", 2).is_some());
     assert!(binding("prim_file", "write_nif", 2).is_some());
     assert!(binding("prim_file", "sync_nif", 2).is_none());
-    assert!(binding("zlib", "inflate_nif", 4).is_none());
+    assert!(binding("zlib", "inflate_nif", 4).is_some());
+    assert!(binding("zlib", "deflateParams_nif", 3).is_none());
 }

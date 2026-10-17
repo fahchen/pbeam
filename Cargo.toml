@@ -17,6 +17,7 @@ num-traits = "0.2"
 sha1 = "0.10"
 sha2 = "0.10"
 socket2 = { version = "0.6", features = ["all"] }
+zlib-rs = "0.6"
 
 [build-dependencies]
 cc = "1"
@@ -583,3 +584,7 @@ path = "tests/integration/prim_file.rs"
 [[test]]
 name = "atomics"
 path = "tests/integration/atomics.rs"
+
+[[test]]
+name = "zlib"
+path = "tests/integration/zlib.rs"
