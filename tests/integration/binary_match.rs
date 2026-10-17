@@ -1192,3 +1192,351 @@ fn runs_the_utf16_and_utf32_match_instructions_as_pinned_erts() {
         [pair(0x1F600, &[9]), short.clone(), short]
     );
 }
+
+/// Run `bs_match_probe:Function/N` on each call and return the results, or
+/// the text of each error.
+fn match_probe_each(function: &str, calls: &[Vec<Term>]) -> Vec<Result<Term, String>> {
+    let program = BeamProgram::load(&[BS_MATCH_PROBE]).unwrap();
+    calls
+        .iter()
+        .map(|arguments| {
+            let imported = arguments
+                .iter()
+                .cloned()
+                .map(|term| program.host_term(term))
+                .collect::<Vec<_>>();
+            program
+                .execute("bs_match_probe", function, &imported)
+                .map(|host| host.term)
+                .map_err(|error| error.to_string())
+        })
+        .collect()
+}
+
+/// The atom `name` of the `bs_match_probe` fixture.
+fn match_probe_atom(name: &str) -> Term {
+    let program = BeamProgram::load(&[BS_MATCH_PROBE]).unwrap();
+    Term::Atom(program.atom(name).unwrap())
+}
+
+#[test]
+fn runs_bs_match_string_as_pinned_erts() {
+    // `bs_match_probe:match_string/1` is `<<"icrosoft.icon", Rest/binary>>`.
+    // The string of 104 bits is above the 64-bit value of a `=:=` command,
+    // so the compiler writes `bs_match_string` (opcode 132). ERTS jumps to
+    // the fail label when fewer bits remain and when the bits differ, and
+    // keeps the position in both cases (emu bs_instrs.tab:1004-1027; JIT
+    // `emit_i_bs_match_string`, jit/arm/instr_bs.cpp:191-234).
+    let binary = |bytes: &[u8]| Term::binary(bytes.to_vec());
+    let false_ = || Ok(match_probe_atom("false"));
+    let calls = [
+        vec![binary(b"icrosoft.icon")],
+        vec![binary(b"icrosoft.icon!")],
+        vec![binary(b"icrosoft.ico")],
+        vec![binary(b"icrosoft.ican")],
+        vec![binary(b"i")],
+        vec![binary(b"")],
+    ];
+    assert_eq!(
+        match_probe_each("match_string", &calls),
+        [
+            Ok(binary(b"")),
+            Ok(binary(b"!")),
+            false_(),
+            false_(),
+            false_(),
+            false_(),
+        ]
+    );
+    assert_eq!(
+        reference(
+            "[bs_match_probe:match_string(B) || B <- [<<\"icrosoft.icon\">>, \
+             <<\"icrosoft.icon!\">>, <<\"icrosoft.ico\">>, <<\"icrosoft.ican\">>, \
+             <<\"i\">>, <<>>]]"
+        ),
+        b"[<<>>,<<33>>,false,false,false,false]\n"
+    );
+}
+
+#[test]
+fn runs_bs_match_string_at_a_bit_offset_as_pinned_erts() {
+    // `bs_match_probe:match_string_offset/1` is
+    // `<<_:4, "icrosoft.icon", Rest/binary>>`: a `skip` command, then
+    // `bs_match_string` at the bit offset 4, then the check that the tail
+    // is a whole number of bytes. A PBeam term is a binary, whose size is
+    // a multiple of 8 bits, so the tail of each input below is not a whole
+    // number of bytes and the match fails, as it does on ERTS.
+    let binary = |bytes: &[u8]| Term::binary(bytes.to_vec());
+    let calls = [
+        vec![binary(b"icrosoft.icon")],
+        vec![binary(b"icrosoft.icon!\x00")],
+        vec![binary(b"icrosoft.ican!")],
+    ];
+    assert_eq!(
+        match_probe_each("match_string_offset", &calls),
+        [
+            Ok(match_probe_atom("false")),
+            Ok(match_probe_atom("false")),
+            Ok(match_probe_atom("false")),
+        ]
+    );
+    assert_eq!(
+        reference(
+            "[bs_match_probe:match_string_offset(B) || B <- [<<\"icrosoft.icon\">>, \
+             <<\"icrosoft.icon!\",0>>, <<\"icrosoft.ican!\">>]]"
+        ),
+        b"[false,false,false]\n"
+    );
+    // `bs_match_probe:match_string_bits/1` matches the same string at the
+    // bit offset 4 without the check of the tail, so a binary with the
+    // string 4 bits after a byte boundary matches. The input is
+    // `<<1:4, "icrosoft.icon", 4:4>>`.
+    let shifted = binary(&[
+        22, 150, 55, 38, 247, 54, 246, 103, 66, 230, 150, 54, 246, 228,
+    ]);
+    let calls = [
+        vec![shifted.clone()],
+        vec![binary(&[
+            22, 150, 55, 38, 247, 54, 246, 103, 66, 230, 150, 54, 22, 228,
+        ])],
+        vec![binary(&[
+            22, 150, 55, 38, 247, 54, 246, 103, 66, 230, 150, 54, 20,
+        ])],
+        vec![binary(&[22, 150, 55, 38, 247, 54, 246, 103, 68])],
+        vec![binary(b"")],
+    ];
+    assert_eq!(
+        match_probe_each("match_string_bits", &calls),
+        [
+            Ok(match_probe_atom("ok")),
+            Ok(match_probe_atom("false")),
+            Ok(match_probe_atom("false")),
+            Ok(match_probe_atom("false")),
+            Ok(match_probe_atom("false")),
+        ]
+    );
+    assert_eq!(
+        reference(
+            "[bs_match_probe:match_string_bits(B) || B <- [<<1:4, \"icrosoft.icon\", 4:4>>, \
+             <<1:4, \"icrosoft.ican\", 4:4>>, <<1:4, \"icrosoft.ica\", 4:4>>, \
+             <<1:4, \"icrosoft\", 4:4>>, <<>>]]"
+        ),
+        b"[ok,false,false,false,false]\n"
+    );
+}
+
+#[test]
+fn runs_bs_skip_bits2_as_pinned_erts() {
+    // `bs_match_probe:skip_size/2` is `<<_:Size/unit:8, Rest/binary>>` and
+    // `skip_size_bits/2` is `<<_:Size, Rest/binary>>`. The compiler writes
+    // `bs_skip_bits2` (opcode 120) for a size in a register. ERTS jumps to
+    // the fail label when the size is not a small integer that is not
+    // negative, when the size times the unit overflows, and when fewer bits
+    // remain (emu bs_instrs.tab:260-283; `emit_bs_get_field_size`,
+    // jit/arm/instr_bs.cpp:38-116).
+    let bytes = || Term::binary(b"abcdef".to_vec());
+    let false_ = || Ok(match_probe_atom("false"));
+    let calls = [
+        vec![bytes(), Term::Integer(0)],
+        vec![bytes(), Term::Integer(3)],
+        vec![bytes(), Term::Integer(6)],
+        vec![bytes(), Term::Integer(7)],
+        vec![bytes(), Term::Integer(-1)],
+        vec![bytes(), match_probe_atom("other")],
+        vec![bytes(), Term::BigInt(Arc::new(BigInt::from(1u8) << 64u32))],
+    ];
+    assert_eq!(
+        match_probe_each("skip_size", &calls),
+        [
+            Ok(bytes()),
+            Ok(Term::binary(b"def".to_vec())),
+            Ok(Term::binary(Vec::new())),
+            false_(),
+            false_(),
+            false_(),
+            false_(),
+        ]
+    );
+    let calls = [
+        vec![bytes(), Term::Integer(0)],
+        vec![bytes(), Term::Integer(12)],
+        vec![bytes(), Term::Integer(48)],
+        vec![bytes(), Term::Integer(49)],
+        vec![bytes(), Term::Integer(-1)],
+    ];
+    assert_eq!(
+        match_probe_each("skip_size_bits", &calls),
+        [
+            Ok(bytes()),
+            false_(),
+            Ok(Term::binary(Vec::new())),
+            false_(),
+            false_(),
+        ]
+    );
+    assert_eq!(
+        reference(
+            "[bs_match_probe:skip_size(B, N) || {B, N} <- [{<<97,98,99,100,101,102>>,0},\
+             {<<97,98,99,100,101,102>>,3},{<<97,98,99,100,101,102>>,6},\
+             {<<97,98,99,100,101,102>>,7},{<<97,98,99,100,101,102>>,-1},\
+             {<<97,98,99,100,101,102>>,other},{<<97,98,99,100,101,102>>,1 bsl 64}]]"
+        ),
+        b"[<<97,98,99,100,101,102>>,<<100,101,102>>,<<>>,false,false,false,false]\n"
+    );
+    assert_eq!(
+        reference(
+            "[bs_match_probe:skip_size_bits(B, N) || {B, N} <- \
+             [{<<97,98,99,100,101,102>>,0},{<<97,98,99,100,101,102>>,12},\
+             {<<97,98,99,100,101,102>>,48},{<<97,98,99,100,101,102>>,49},\
+             {<<97,98,99,100,101,102>>,-1}]]"
+        ),
+        b"[<<97,98,99,100,101,102>>,false,<<>>,false,false]\n"
+    );
+}
+
+#[test]
+fn runs_bs_get_integer2_as_pinned_erts() {
+    // `bs_match_probe:get_size/2` is `<<X:Size, Rest/binary>>` and
+    // `get_size_flagged/2` is `<<X:Size/little-signed, Rest/binary>>`. The
+    // compiler writes `bs_get_integer2` (opcode 117) for a size in a
+    // register. ERTS checks the size as `bs_skip_bits2` does, then reads
+    // the integer or jumps to the fail label when fewer bits remain
+    // (`emit_bs_get_integer2`, jit/arm/instr_bs.cpp:312-358;
+    // `erts_bs_get_integer_2`, erl_bits.c:170-398).
+    let bytes = || Term::binary(vec![0x12, 0x34, 0x56]);
+    let false_ = || Ok(match_probe_atom("false"));
+    let calls = [
+        vec![bytes(), Term::Integer(0)],
+        vec![bytes(), Term::Integer(8)],
+        vec![bytes(), Term::Integer(24)],
+        vec![bytes(), Term::Integer(25)],
+        vec![bytes(), Term::Integer(-1)],
+        vec![bytes(), Term::Integer(1 << 20)],
+        vec![bytes(), match_probe_atom("other")],
+        vec![bytes(), Term::BigInt(Arc::new(BigInt::from(1u8) << 64u32))],
+        vec![
+            Term::binary(vec![1, 0, 0, 0, 0, 0, 0, 0]),
+            Term::Integer(64),
+        ],
+    ];
+    assert_eq!(
+        match_probe_each("get_size", &calls),
+        [
+            Ok(Term::tuple(vec![Term::Integer(0), bytes()])),
+            Ok(Term::tuple(vec![
+                Term::Integer(0x12),
+                Term::binary(vec![0x34, 0x56])
+            ])),
+            Ok(Term::tuple(vec![
+                Term::Integer(0x123456),
+                Term::binary(Vec::new())
+            ])),
+            false_(),
+            false_(),
+            false_(),
+            false_(),
+            false_(),
+            Ok(Term::tuple(vec![
+                Term::Integer(1 << 56),
+                Term::binary(Vec::new())
+            ])),
+        ]
+    );
+    assert_eq!(
+        reference(
+            "[bs_match_probe:get_size(B, S) || {B, S} <- [{<<18,52,86>>,0},\
+             {<<18,52,86>>,8},{<<18,52,86>>,24},{<<18,52,86>>,25},\
+             {<<18,52,86>>,-1},{<<18,52,86>>,1 bsl 20},{<<18,52,86>>,other},\
+             {<<18,52,86>>,1 bsl 64},{<<1,0,0,0,0,0,0,0>>,64}]]"
+        ),
+        b"[{0,<<18,52,86>>},{18,<<52,86>>},{1193046,<<>>},false,false,false,false,\
+          false,{72057594037927936,<<>>}]\n"
+    );
+    let calls = [
+        vec![bytes(), Term::Integer(0)],
+        vec![bytes(), Term::Integer(32)],
+        vec![Term::binary(vec![0x34, 0x12]), Term::Integer(16)],
+        vec![Term::binary(vec![0xFF, 0xFF]), Term::Integer(16)],
+    ];
+    assert_eq!(
+        match_probe_each("get_size_flagged", &calls),
+        [
+            Ok(Term::tuple(vec![Term::Integer(0), bytes()])),
+            false_(),
+            Ok(Term::tuple(vec![
+                Term::Integer(0x1234),
+                Term::binary(Vec::new())
+            ])),
+            Ok(Term::tuple(vec![
+                Term::Integer(-1),
+                Term::binary(Vec::new())
+            ])),
+        ]
+    );
+    assert_eq!(
+        reference(
+            "[bs_match_probe:get_size_flagged(B, S) || {B, S} <- \
+             [{<<18,52,86>>,0},{<<18,52,86>>,32},{<<52,18>>,16},{<<255,255>>,16}]]"
+        ),
+        b"[{0,<<18,52,86>>},false,{4660,<<>>},{-1,<<>>}]\n"
+    );
+}
+
+#[test]
+fn stops_at_a_bs_get_integer2_that_needs_a_bignum() {
+    // `bs_match_probe:get_size/2` with a size of 64 reads the bignum
+    // 2^64 - 1, which PBeam has no term for (row "Integer range"). ERTS
+    // gives it.
+    let calls = [vec![Term::binary(vec![0xFF; 8]), Term::Integer(64)]];
+    assert_eq!(
+        match_probe_each("get_size", &calls),
+        [Err(
+            "unsupported bs_get_integer2 integer outside the 64-bit range: needs a bignum".into()
+        )]
+    );
+    assert_eq!(
+        reference("bs_match_probe:get_size(<<255,255,255,255,255,255,255,255>>, 64)"),
+        b"{18446744073709551615,<<>>}\n"
+    );
+}
+
+#[test]
+fn runs_bs_skip_utf8_as_pinned_erts() {
+    // `bs_utf_probe:skip8/1` is `<<_/utf8, Rest/binary>>`. The compiler
+    // writes `bs_skip_utf8` (opcode 139), which ERTS loads as
+    // `i_bs_get_utf8` without a destination (emu ops.tab:1289), so it reads
+    // one character and drops it, or jumps to the fail label for each
+    // invalid form and for a short binary (`erts_bs_get_utf8`,
+    // erl_bits.c:2128-2221).
+    let inputs: Vec<Vec<u8>> = [
+        &[65, 66][..],
+        &[0xC3, 0xA9, 66],
+        &[0xF0, 0x9F, 0x98, 0x80, 66],
+        &[0x80, 66],
+        &[0xC3],
+        &[],
+        &[0xED, 0xA0, 0x80, 66],
+    ]
+    .map(<[u8]>::to_vec)
+    .to_vec();
+    let short = match_probe_atom("short");
+    assert_eq!(
+        bs_utf_each("skip8", &inputs),
+        [
+            Term::binary(vec![66]),
+            Term::binary(vec![66]),
+            Term::binary(vec![66]),
+            short.clone(),
+            short.clone(),
+            short.clone(),
+            short,
+        ]
+    );
+    assert_eq!(
+        reference(
+            "[bs_utf_probe:skip8(B) || B <- [<<65,66>>,<<195,169,66>>,\
+             <<240,159,152,128,66>>,<<128,66>>,<<195>>,<<>>,<<237,160,128,66>>]]"
+        ),
+        b"[<<66>>,<<66>>,<<66>>,short,short,short,short]\n"
+    );
+}
