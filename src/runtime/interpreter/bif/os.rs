@@ -14,10 +14,12 @@ use crate::runtime::unicode::{filename_from_native, native_filename};
 /// (see [`environment::variables`]); ERTS walks a red-black tree in an
 /// unordered order, so neither runtime gives a stated order.
 ///
-/// A caller without an `env` capability with `read` gets
-/// `error:capability_denied`, as `os:getenv/1` does. Each key and value
-/// follows [`filename_from_native`], which gives `badarg` where ERTS
-/// composes a term (see "OS environment" in `docs/erts-differences.md`).
+/// A caller without an `env` capability with `read` that permits the native
+/// bytes of a name gets `error:capability_denied`, as `os:getenv/1` does:
+/// the call names each variable of the copy, so a capability restricted to
+/// some names permits only those. Each key and value follows
+/// [`filename_from_native`], which gives `badarg` where ERTS composes a
+/// term (see "OS environment" in `docs/erts-differences.md`).
 ///
 /// # Examples
 ///
@@ -31,12 +33,12 @@ use crate::runtime::unicode::{filename_from_native, native_filename};
 /// The atom `capability_denied` in a full atom table, and a value that
 /// PBeam cannot give (see [`filename_from_native`]).
 pub(super) fn env(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
-    if let Some(denied) = denial(scheduler, CapabilityKind::Env, Operation::Read, None)? {
-        return Ok(denied);
-    }
     let encoding = filename_encoding();
     let mut pairs = Vec::new();
     for (key, value) in environment::variables() {
+        if let Some(denied) = denial(scheduler, CapabilityKind::Env, Operation::Read, Some(&key))? {
+            return Ok(denied);
+        }
         pairs.push(Term::tuple(vec![
             filename_from_native(&key, encoding)?,
             filename_from_native(&value, encoding)?,

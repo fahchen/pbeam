@@ -2923,7 +2923,8 @@ pub(super) fn universaltime() -> BifResult {
 }
 
 /// Return the local date and time of the host clock, or `None` when
-/// `localtime_r` fails.
+/// `localtime_r` fails. The local time comes from `sys_localtime_r`, which
+/// adds no leap second of the time zone (`erl_time_sup.c:1516-1557`).
 ///
 /// # Examples
 ///
@@ -2932,7 +2933,7 @@ pub(super) fn universaltime() -> BifResult {
 /// assert!(local_clock().is_some());
 /// ```
 fn local_clock() -> Option<time::DateTime> {
-    host::clock::local_time(local_clock_seconds())
+    host::clock::local_zone_time(local_clock_seconds())
 }
 
 /// Return the host `CLOCK_REALTIME` truncated to a second, as the C library

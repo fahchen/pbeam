@@ -3,7 +3,7 @@
          local_badarg/0, local/0, local_check/0, leap_check/0,
          wall_time/0, wall_time_on/0, wall_time_order/0, wall_time_reds/0,
          clock/0, time_offset_units/0, timestamp/0, perf/0, pid/0, pid_value/0,
-         environment/0, clock_utc/0, clock_jst/0,
+         environment/0, clock_utc/0, clock_jst/0, leap_local/0,
          ping/1]).
 
 %% The Erlang monotonic time at the emulator start in `native`
@@ -295,6 +295,20 @@ local_check() ->
     io:put_chars(case local() =:= ?LOCAL of
                      true -> <<"ok\n">>;
                      false -> <<"mismatch\n">>
+                 end).
+
+%% Print which path `erlang:localtime/0` takes in a time zone with leap
+%% seconds: `get_localtime` reads the local time with `sys_localtime_r`
+%% (`erl_time_sup.c:1543-1557`), which adds no leap second
+%% (`sys/unix/erl_unix_sys.h:331-343`), so the local time of the fixture
+%% zone is 27 seconds before its UTC time.
+leap_local() ->
+    {{_, _, _}, {LH, LMi, LS}} = erlang:localtime(),
+    {{_, _, _}, {UH, UMi, US}} = erlang:universaltime(),
+    Difference = (LH * 3600 + LMi * 60 + LS) - (UH * 3600 + UMi * 60 + US),
+    io:put_chars(case in(-28, Difference, -26) of
+                     true -> <<"localtime_r\n">>;
+                     false -> <<"posix2time\n">>
                  end).
 
 %% Print how the local time of a time zone with leap seconds is found.

@@ -302,6 +302,13 @@ fn adds_the_leap_seconds_of_the_time_zone_as_the_host_erts() {
     for (name, output) in run_with_time_zone("leap_check", tz) {
         assert_printed(name, &output, stdout);
     }
+    // `erlang:localtime/0` reads the local time with `sys_localtime_r`
+    // (`get_localtime`, `erl_time_sup.c:1543-1557`), which adds no leap
+    // second (`sys/unix/erl_unix_sys.h:331-343`), so the local time of the
+    // zone is 27 seconds before its UTC time on each host.
+    for (name, output) in run_with_time_zone("leap_local", tz) {
+        assert_printed(name, &output, b"localtime_r\n");
+    }
 }
 
 #[test]

@@ -78,10 +78,8 @@ pub(crate) fn perf_counter() -> i64 {
 /// time zone, as the end of ERTS `univ_to_local`
 /// (`erl_time_sup.c:1822-1848`) does. On macOS, ERTS has `posix2time`
 /// (`HAVE_POSIX2TIME`) and adds the leap seconds of the time zone first. A
-/// glibc host has no `posix2time`. Then `sys_localtime_r` calls `tzset`,
-/// so a change of `TZ` takes effect, and `localtime_r`
-/// (`sys/unix/erl_unix_sys.h:331-343`). Return `None` when `localtime_r`
-/// fails.
+/// glibc host has no `posix2time`. Then `sys_localtime_r` gives the local
+/// time (see [`local_zone_time`]). Return `None` when `localtime_r` fails.
 ///
 /// # Examples
 ///
@@ -94,6 +92,25 @@ pub(crate) fn local_time(clock: i64) -> Option<DateTime> {
     // SAFETY: `posix2time` reads only its argument and the time zone data
     // of the C library.
     let clock = unsafe { posix2time(clock) };
+    local_zone_time(clock)
+}
+
+/// Return the local date and time of `clock`, a POSIX time, in the host
+/// time zone, as ERTS `sys_localtime_r` gives it to `get_localtime`,
+/// `get_date`, and `get_time` (`erl_time_sup.c:1516-1557`). `sys_localtime_r`
+/// calls `tzset`, so a change of `TZ` takes effect, and `localtime_r`
+/// (`sys/unix/erl_unix_sys.h:331-343`). It adds no leap second of the time
+/// zone, unlike the `univ_to_local` path of
+/// `erlang:universaltime_to_localtime/1`, which calls `posix2time` first on
+/// macOS. Return `None` when `localtime_r` fails.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // TZ=EST5EDT,M3.2.0,M11.1.0
+/// assert_eq!(local_zone_time(0), Some((1969, 12, 31, 19, 0, 0)));
+/// ```
+pub(crate) fn local_zone_time(clock: i64) -> Option<DateTime> {
     // SAFETY: all zeros is a valid `tm`. `tzset` changes only the time zone
     // data of the C library, and `localtime_r` reads the time that the
     // first pointer gives and writes only into the struct that the second
