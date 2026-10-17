@@ -163,6 +163,10 @@ name = "binary_match"
 path = "tests/integration/binary_match.rs"
 
 [[test]]
+name = "binary_module"
+path = "tests/integration/binary_module.rs"
+
+[[test]]
 name = "binary_part"
 path = "tests/integration/binary_part.rs"
 
