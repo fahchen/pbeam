@@ -27,6 +27,7 @@ mod crypto;
 mod prim_buffer;
 mod prim_file;
 mod prim_tty;
+mod zlib;
 
 pub(super) use prim_tty::dirty_write_result;
 
@@ -128,6 +129,13 @@ const LIBRARIES: &[Library] = &[
         load: None,
         unbound_fails: false,
     },
+    Library {
+        module: "zlib",
+        functions: &zlib::FUNCTIONS,
+        bindings: zlib::BINDINGS,
+        load: None,
+        unbound_fails: true,
+    },
 ];
 
 /// Return the registered static NIF library of `module`, or `None` when
@@ -138,7 +146,7 @@ const LIBRARIES: &[Library] = &[
 /// ```rust,ignore
 /// assert_eq!(library("prim_tty").map(|library| library.functions[0]), Some(("isatty", 1)));
 /// assert_eq!(library("prim_file").map(|library| library.functions[0]), Some(("open_nif", 2)));
-/// assert!(library("zlib").is_none());
+/// assert!(library("runtime_tools").is_none());
 /// ```
 fn library(module: &str) -> Option<&'static Library> {
     let index = LIBRARIES.binary_search_by_key(&module, |library| library.module);

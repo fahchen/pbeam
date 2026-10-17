@@ -394,6 +394,10 @@ pub(super) struct ProcessState {
     /// (`jit/arm/instr_bif.cpp:525-536`, `676-701`). `BeamProgram::run` runs
     /// it first.
     pub(super) pending_bif: Option<PendingBif>,
+    /// A BIF trap whose target had no loaded export at the trap. `run`
+    /// resolves the target when the process runs again, after the switch
+    /// out of the trap.
+    pub(super) pending_trap: Option<PendingTrap>,
     /// The result of a list insert of `ets:insert/2` or `ets:insert_new/2`
     /// that ended while the process trapped in it, until the process reads
     /// it, as `ctx->return_value` (`erl_db.c:2180-2184`, `2239-2244`). The
@@ -477,6 +481,22 @@ pub(super) struct PendingBif {
     pub(super) arguments: Vec<Term>,
     /// True when the BIF call was a tail call through the export: its
     /// value then returns from the frame with no reduction.
+    pub(super) tail: bool,
+}
+
+/// A BIF trap that waits for the next turn of the process: the trap target
+/// had no loaded export, and ERTS switches out at the trap before its export
+/// stub runs (`context_switch_simplified`, `jit/arm/instr_bif.cpp:525-536`,
+/// `676-701`). The arguments are in `x0` onwards.
+#[derive(Debug)]
+pub(super) struct PendingTrap {
+    /// Module of the target, for example `re`.
+    pub(super) module: &'static str,
+    /// Function of the target, for example `grun`.
+    pub(super) function: &'static str,
+    /// Arity of the target, and the number of arguments in `x0` onwards.
+    pub(super) arity: u32,
+    /// True when the BIF call was a tail call through the target.
     pub(super) tail: bool,
 }
 
@@ -579,6 +599,7 @@ impl ProcessState {
             fcalls: 0,
             reductions: 0,
             pending_bif: None,
+            pending_trap: None,
             insert_result: None,
             dirty_write: None,
             length_trap: None,
