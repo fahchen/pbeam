@@ -926,6 +926,114 @@ fn compares_the_keys_of_an_ordered_set_by_the_arithmetic_order() {
 }
 
 #[test]
+fn restores_the_slot_of_a_reinserted_bag_object() {
+    // A delete and an insert of one object per cycle reuse the slot of the
+    // pseudo-deleted object, so the retained storage does not grow
+    // (`erl_db_hash.c:1426-1437`).
+    let atoms = test_atom_table();
+    let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Bag);
+    let key = Term::Integer(1);
+    let object = |value| vec![key.clone(), Term::Integer(value)];
+    table.insert_all(&atoms, vec![object(1), object(2)]);
+    table.fix(ProcessId(0));
+    let slots = table.objects.len();
+    for _ in 0..3 {
+        table.delete(&atoms, &key);
+        assert_eq!(table.insert_all(&atoms, vec![object(2)]), vec![0]);
+        assert_eq!(table.insert_all(&atoms, vec![object(2)]), vec![0]);
+    }
+    assert_eq!(table.objects.len(), slots);
+    // The other object of the deleted key stays pseudo-deleted, as ERTS
+    // keeps it until the unfix.
+    assert_eq!(table.len(), 1);
+}
+
+#[test]
+fn charges_the_fixed_clear_for_each_bucket_group() {
+    // A clear of a fixed table marks each bucket, 8 buckets for each
+    // reduction (`db_mark_all_deleted_hash`, `erl_db_hash.c:3007-3051`).
+    let atoms = test_atom_table();
+    let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
+    for key in 0..100 {
+        table.insert(&atoms, vec![Term::Integer(key)]);
+    }
+    assert_eq!(table.delete_all_reductions(), 132);
+    table.fix(ProcessId(0));
+    assert_eq!(table.delete_all_reductions(), 32);
+}
+
+#[test]
+fn deletes_the_owned_tables_before_the_fixations_as_pinned_erts() {
+    // The exit frees its owned tables first, so another process sees the
+    // fixation on its table until the owned tables are gone
+    // (`erl_db.c:5096-5126`).
+    let atoms = test_atom_table();
+    let mut tables = EtsTables::default();
+    tables.create(
+        Reference(0),
+        None,
+        Table::new(ProcessId(1), Access::Public, 1, TableType::Set),
+    );
+    let mut fixed = Table::new(ProcessId(2), Access::Public, 1, TableType::Set);
+    fixed.insert(&atoms, vec![Term::Integer(1)]);
+    fixed.fix(ProcessId(1));
+    fixed.delete(&atoms, &Term::Integer(1));
+    tables.create(Reference(1), None, fixed);
+    assert_eq!(tables.delete_owned(ProcessId(1), 10), None);
+    assert!(tables.table_by_id(Reference(1)).unwrap().is_fixed());
+    assert_eq!(tables.delete_owned(ProcessId(1), 100), Some(97));
+    assert!(!tables.table_by_id(Reference(1)).unwrap().is_fixed());
+}
+
+#[test]
+fn charges_one_reduction_for_each_process_that_fixed_an_owned_table() {
+    // The free of an owned table charges one reduction for each process
+    // that fixed it (`free_fixations_locked`, `erl_db.c:5304-5318`).
+    let mut tables = EtsTables::default();
+    let mut owned = Table::new(ProcessId(1), Access::Public, 1, TableType::Set);
+    owned.fix(ProcessId(1));
+    owned.fix(ProcessId(2));
+    owned.fix(ProcessId(2));
+    tables.create(Reference(0), None, owned);
+    assert_eq!(tables.delete_owned(ProcessId(1), 100), Some(66));
+}
+
+#[test]
+fn charges_one_reduction_for_a_fixation_that_leaves_the_table_fixed() {
+    // A fixation that another process holds too frees no object, so the
+    // cleanup uses one reduction (`proc_cleanup_fixed_table`,
+    // `erl_db.c:4975-5015`).
+    let mut tables = EtsTables::default();
+    let mut table = Table::new(ProcessId(2), Access::Public, 1, TableType::Set);
+    table.fix(ProcessId(1));
+    table.fix(ProcessId(2));
+    tables.create(Reference(0), None, table);
+    assert_eq!(tables.delete_owned(ProcessId(1), 100), Some(99));
+    assert!(tables.table_by_id(Reference(0)).unwrap().is_fixed());
+}
+
+#[test]
+fn removes_the_fixations_of_the_exit_in_bounded_turns() {
+    // Each fixation costs one reduction, and the unfix of the last fixation
+    // costs one for each pseudo-deleted object and one for each delete
+    // record (`erl_db.c:4975-5015`, `erl_db_hash.c:939-990`). The exit
+    // switches out when no reduction is left and continues in the next turn.
+    let atoms = test_atom_table();
+    let mut tables = EtsTables::default();
+    for id in 0..2 {
+        let mut table = Table::new(ProcessId(2), Access::Public, 1, TableType::Set);
+        table.insert(&atoms, vec![Term::Integer(1)]);
+        table.fix(ProcessId(1));
+        table.delete(&atoms, &Term::Integer(1));
+        tables.create(Reference(id), None, table);
+    }
+    assert_eq!(tables.delete_owned(ProcessId(1), 3), None);
+    assert!(!tables.table_by_id(Reference(0)).unwrap().is_fixed());
+    assert!(tables.table_by_id(Reference(1)).unwrap().is_fixed());
+    assert_eq!(tables.delete_owned(ProcessId(1), 100), Some(97));
+}
+
+#[test]
 fn counts_the_bag_comparisons_after_a_restore() {
     // The restored object moves to the first position, so the second insert
     // of the object compares with it at once (`erl_db_hash.c:1426-1442`).
