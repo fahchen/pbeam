@@ -196,6 +196,25 @@ fn copies_a_view_whose_size_is_not_a_whole_number_of_bytes_in_o1_time() {
 }
 
 #[test]
+fn gives_the_last_byte_of_each_view_without_joining_it() {
+    // An append-built view keeps its chunks, so the read of its last byte
+    // touches one chunk and joins none.
+    let binary = Binary::from_chunks(vec![Arc::new(b"ab".to_vec()), Arc::new(b"cd".to_vec())]);
+    assert_eq!(binary.last_byte(), Some(b'd'));
+    assert!(!binary.is_joined());
+    // An empty chunk at the end holds no byte.
+    let binary = Binary::from_chunks(vec![
+        Arc::new(b"a".to_vec()),
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+    ]);
+    assert_eq!(binary.last_byte(), Some(b'a'));
+    // A view of one array reads the byte of the array.
+    assert_eq!(Binary::from(b"ab".to_vec()).last_byte(), Some(b'b'));
+    assert_eq!(Binary::default().last_byte(), None);
+}
+
+#[test]
 fn takes_the_bytes_of_the_last_holder_with_no_copy() {
     // `Binary::take_bytes` moves the array out when the binary is its last
     // holder, and else it copies the view. The trap state of
