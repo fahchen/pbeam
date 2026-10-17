@@ -760,6 +760,11 @@ impl EtsTables {
         drained.len()
     }
 
+    /// Return each process that has a pending cleanup.
+    pub(super) fn pending_processes(&self) -> Vec<ProcessId> {
+        self.pending.keys().copied().collect()
+    }
+
     /// Return the number of pending cleanups of the process `process`.
     #[cfg(test)]
     pub(super) fn pending_count(&self, process: ProcessId) -> usize {

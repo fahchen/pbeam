@@ -670,6 +670,19 @@ impl Scheduler {
         self.enqueue(id);
     }
 
+    /// Put each process that has a pending fixation cleanup into the run
+    /// queue, so its next turn runs the cleanup as system work without
+    /// resuming its Erlang code (`erts_schedule_ets_free_fixation`,
+    /// `erl_db.c:5263-5301`).
+    pub(super) fn schedule_pending_cleanups(&mut self) {
+        let processes = self.ets.pending_processes();
+        for id in processes {
+            if self.processes.get(&id).is_some() {
+                self.enqueue(id);
+            }
+        }
+    }
+
     /// Put the process `id` at the end of the run queue of its priority
     /// ([`RunQueue::push`]), unless it is in the run queue or runs now: such a process keeps its place, as
     /// `erts_schedule_process` and `erts_proc_sys_schedule` do
@@ -2838,6 +2851,9 @@ impl Scheduler {
             }
             rest.is_some()
         };
+        // A process that fixed a deleted table runs the cleanup in a turn of
+        // its own (`erts_schedule_ets_free_fixation`, `erl_db.c:5263-5301`).
+        self.schedule_pending_cleanups();
         if !deleted {
             let process = self.current_process_mut();
             process.exiting = Some(reason);

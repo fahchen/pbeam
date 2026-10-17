@@ -5416,6 +5416,34 @@ fn traps_a_select_continuation_that_meets_a_fixed_clear() {
 }
 
 #[test]
+fn schedules_a_waiting_process_for_the_fixation_cleanup() {
+    // A waiting process that fixed a deleted table runs the cleanup in a
+    // turn of its own, without resuming its Erlang code
+    // (`erts_schedule_ets_free_fixation`, `erl_db.c:5263-5301`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let fixer = ProcessId(1);
+    let mut process = ProcessState::new(fixer, Start::Entry(frame()), Vec::new());
+    process.waiting = true;
+    scheduler.insert(process);
+    // The fixer runs once and parks.
+    scheduler.schedule_next().unwrap();
+    scheduler.ets.create(
+        Reference(0),
+        None,
+        Table::new(ProcessId(99), Access::Public, 1, TableType::Set),
+    );
+    scheduler.ets.fix_table(Reference(0), fixer);
+    assert_eq!(scheduler.ets.delete_table(Reference(0), ProcessId(99)), 1);
+    scheduler.schedule_pending_cleanups();
+    scheduler.schedule_next().unwrap();
+    assert_eq!(scheduler.ets.pending_count(fixer), 0);
+    assert!(scheduler.process(fixer).unwrap().waiting);
+}
+
+#[test]
 fn cleans_a_pending_fixation_when_the_process_is_scheduled() {
     // The cleanup of a fixation on a table that another process deleted runs
     // as process system work at each scheduling

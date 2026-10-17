@@ -1426,6 +1426,7 @@ pub(super) fn delete_table(
         ));
     }
     let fixations = scheduler.ets.delete_table(id, caller);
+    scheduler.schedule_pending_cleanups();
     context
         .scheduler
         .current_process_mut()
