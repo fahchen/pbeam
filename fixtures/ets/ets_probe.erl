@@ -23,7 +23,7 @@
          fixtable_next_live_behind_node/0, fixtable_clear_behind_node/0,
          fixtable_bag_restore_behind_node/0, fixtable_delete_table/0,
          fixtable_clear_large/0, fixtable_clear_help/0, clear_task/2,
-         fixtable_take/0]).
+         fixtable_take/0, fixtable_take_clear/0]).
 
 %% ets:new/2 return values and badarg cases (erl_db.c:2555-2840).
 new() ->
@@ -1114,8 +1114,23 @@ fixtable_take() ->
     Taken = ets:take(T, k),
     Size = ets:info(T, size),
     Objects = ets:lookup(T, k),
+    ets:insert(T, [{j, 9}, {l, 10}]),
+    Both = [ets:lookup(T, j), ets:lookup(T, l)],
     ets:safe_fixtable(T, false),
-    [Taken, Size, Objects].
+    [Taken, Size, Objects, Both].
+
+%% A completed clear resets the item counter (`RESET_NITEMS`,
+%% `erl_db_hash.c:3048-3050`).
+fixtable_take_clear() ->
+    T = ets:new(ets_probe_fix_take_clear, [bag]),
+    ets:insert(T, [{k, 1}, {k, 2}, {k, 3}]),
+    ets:safe_fixtable(T, true),
+    ets:internal_select_delete(T, [{{k, 2}, [], [true]}]),
+    ets:take(T, k),
+    Cleared = ets:internal_delete_all(T, undefined),
+    Size = ets:info(T, size),
+    ets:safe_fixtable(T, false),
+    [Cleared, Size].
 
 catch_error(Fun) ->
     try Fun() catch error:Reason -> {error, Reason} end.

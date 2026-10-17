@@ -1014,6 +1014,28 @@ fn clears_a_large_fixed_table_in_turns_as_pinned_erts() {
 }
 
 #[test]
+fn clears_a_table_after_a_fixed_take_as_pinned_erts() {
+    // A completed clear resets the item counter, so a table that a take
+    // counted below 0 reports the size 0 (`RESET_NITEMS`,
+    // `erl_db_hash.c:3048-3050`).
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    assert_eq!(
+        program
+            .execute("ets_probe", "fixtable_take_clear", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![
+            Term::BigInt(Arc::new(BigInt::from(u64::MAX))),
+            Term::Integer(0),
+        ])
+    );
+    assert_eq!(
+        reference("fixtable_take_clear"),
+        b"[18446744073709551615,0]\n"
+    );
+}
+
+#[test]
 fn takes_a_key_of_a_fixed_bag_as_pinned_erts() {
     // The take keeps the first live object as a pseudo-deleted object and
     // frees the records after it; the item counter falls by each record, so
@@ -1030,11 +1052,15 @@ fn takes_a_key_of_a_fixed_bag_as_pinned_erts() {
             Term::list_from(vec![object(1), object(3)]),
             Term::BigInt(Arc::new(BigInt::from(u64::MAX))),
             Term::nil(),
+            Term::list_from(vec![
+                Term::list_from(vec![Term::tuple(vec![atom("j"), Term::Integer(9)])]),
+                Term::list_from(vec![Term::tuple(vec![atom("l"), Term::Integer(10)])]),
+            ]),
         ])
     );
     assert_eq!(
         reference("fixtable_take"),
-        b"[[{k,1},{k,3}],18446744073709551615,[]]\n"
+        b"[[{k,1},{k,3}],18446744073709551615,[],[[{j,9}],[{l,10}]]]\n"
     );
 }
 

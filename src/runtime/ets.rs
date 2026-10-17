@@ -1701,7 +1701,11 @@ impl Table {
         }
         let done = clearing.bucket == self.buckets;
         let processed = clearing.bucket - start;
-        if !done {
+        if done {
+            // The mark ends with `RESET_NITEMS`
+            // (`db_mark_all_deleted_hash`, `erl_db_hash.c:3048-3050`).
+            self.size_adjust = 0;
+        } else {
             self.clear = Some(clearing);
         }
         // The loop of `db_mark_all_deleted_hash` does not count its last
@@ -1785,6 +1789,7 @@ impl Table {
             for bucket in 0..self.buckets {
                 self.mark_bucket(atoms, bucket);
             }
+            self.size_adjust = 0;
             self.fixdels += 1;
             self.writes += 1;
             return count;
@@ -2857,7 +2862,14 @@ impl Table {
     /// ```
     fn allocate(&mut self) -> usize {
         match self.free.pop() {
-            Some(slot) => slot,
+            Some(slot) => {
+                // A freed slot can hold the flag of a pseudo-deleted object
+                // that a take freed (`db_take_hash`, `erl_db_hash.c:2949-2995`).
+                if let Some(deleted) = self.deleted.get_mut(slot) {
+                    *deleted = false;
+                }
+                slot
+            }
             None => {
                 self.objects.push(None);
                 self.older.push(EMPTY);
