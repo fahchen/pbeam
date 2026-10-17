@@ -670,13 +670,9 @@ pub(super) fn insert_list(
                     break 'work Some(Value(Term::static_atom("false")));
                 }
             }
-            put_objects(
-                &context.scheduler.atoms,
-                table,
-                &tuples,
-                keypos,
-                !matches!(new, New::No),
-            )?;
+            // The list call does its own membership walk and passes `false`
+            // to `db_put` (`erl_db.c:1858`, `1943`).
+            put_objects(&context.scheduler.atoms, table, &tuples, keypos, false)?;
             units.left -= 2 * count as i64;
             break 'work Some(Value(Term::static_atom("true")));
         }
@@ -708,14 +704,11 @@ pub(super) fn insert_list(
                     let walk = matches!(new, New::Unlocked);
                     let bif = if walk { "insert_new/2" } else { "insert/2" };
                     check_keypos(&tuples, keypos, bif)?;
-                    taken_table.busy = Some(
-                        Busy::new(
-                            caller,
-                            tuples.iter().map(|object| object.to_vec()).collect(),
-                            walk,
-                        )
-                        .with_new(!matches!(new, New::No)),
-                    );
+                    taken_table.busy = Some(Busy::new(
+                        caller,
+                        tuples.iter().map(|object| object.to_vec()).collect(),
+                        walk,
+                    ));
                     // The call keeps its own BIF: `ets:insert_new/2` marks
                     // the steps of the walk and the insert with
                     // [`New::Locked`], and `ets:insert/2` with the units

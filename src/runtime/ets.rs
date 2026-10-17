@@ -255,10 +255,6 @@ pub(super) struct Busy {
     /// True when the call is `ets:insert_new/2` and the walk for a key
     /// that the table holds did not finish (`erl_db.c:1909-1925`).
     walk: bool,
-    /// True when the call is `ets:insert_new/2`, whose key-clash walk adds
-    /// a new object for a bag key with no live object
-    /// (`erl_db_hash.c:1412-1422`).
-    new: bool,
     /// The number of objects that the walk checked.
     walked: usize,
     /// True when the walk found a key that the table holds.
@@ -293,21 +289,12 @@ impl Busy {
             owner,
             objects,
             walk,
-            new: false,
             walked: 0,
             found: false,
             inserted: 0,
             looped: false,
             walks: HashMap::new(),
         }
-    }
-
-    /// Set the `ets:insert_new/2` flag of the call, whose key-clash walk
-    /// adds a new object for a bag key with no live object
-    /// (`erl_db_hash.c:1412-1422`).
-    pub(super) fn with_new(mut self, new: bool) -> Busy {
-        self.new = new;
-        self
     }
 
     /// Return the result of the insert, and end the busy state of the table
@@ -2211,7 +2198,7 @@ impl Table {
                 // work stays that of one list insert.
                 let object = std::mem::take(&mut busy.objects[busy.inserted]);
                 let compared = if self.table_type == TableType::Bag {
-                    self.insert_bag(atoms, object, &mut busy.walks, busy.new)
+                    self.insert_bag(atoms, object, &mut busy.walks, false)
                 } else {
                     self.insert(atoms, object);
                     0

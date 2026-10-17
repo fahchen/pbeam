@@ -1014,6 +1014,30 @@ fn clears_a_large_fixed_table_in_turns_as_pinned_erts() {
 }
 
 #[test]
+fn inserts_a_list_new_into_a_fixed_bag_key_as_pinned_erts() {
+    // A list `ets:insert_new/2` does its own membership walk and then
+    // inserts as a put, which restores the pseudo-deleted object
+    // (`erl_db.c:1858`, `1943`).
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    let object = |value| Term::tuple(vec![atom("k"), Term::Integer(value)]);
+    assert_eq!(
+        program
+            .execute("ets_probe", "fixtable_insert_new_list", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![
+            atom("true"),
+            Term::list_from(vec![object(2), object(1)]),
+        ])
+    );
+    assert_eq!(
+        reference("fixtable_insert_new_list"),
+        b"[true,[{k,2},{k,1}]]\n"
+    );
+}
+
+#[test]
 fn inserts_new_into_a_fixed_bag_key_as_pinned_erts() {
     // The key-clash walk of `ets:insert_new/2` adds a new object for a key
     // whose objects are all pseudo-deleted (`erl_db_hash.c:1412-1422`).
