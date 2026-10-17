@@ -333,7 +333,12 @@ named_captures() ->
                 {<<"ab">>, <<"(?<n>a)(?<n>b)">>, [dupnames, {capture, all_names}]},
                 {<<"ab">>, <<"(?<n>a)(?<n>b)?">>, [dupnames, {capture, [n]}]},
                 {<<"a">>, <<"(?<n>b)?(?<n>a)">>, [dupnames, {capture, [n]}]},
-                {<<"a">>, <<"a(?<n>b)?(?<n>c)?">>, [dupnames, {capture, [n]}]}]]
+                {<<"a">>, <<"a(?<n>b)?(?<n>c)?">>, [dupnames, {capture, [n]}]},
+                {<<"ab">>, <<"(?J)(?<n>a)(?<n>b)">>, [{capture, all_names}]},
+                {<<"ab">>, <<"(?J)(?<n>a)(?<n>b)">>, [{capture, [n]}]},
+                {<<"abc">>, <<"(?<x>a)(?<y>b)">>, [dupnames, {capture, [x]}]},
+                {<<"abc">>, <<"(?<x>a)(?<y>b)">>,
+                 [dupnames, {capture, all_names}]}]]
     ++ [re:run(<<"abab">>, <<"(?<x>a)(?<y>b)">>,
                [global, {capture, [y], binary}]),
         re:run(<<"abab">>, <<"(?<x>a)(?<y>b)">>,

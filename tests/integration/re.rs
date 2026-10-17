@@ -871,6 +871,10 @@ fn runs_a_capture_group_name_as_pinned_erts() {
             matched(&program, vec![pair(0, 1)]),
             matched(&program, vec![pair(0, 1)]),
             matched(&program, vec![pair(-1, 0)]),
+            matched(&program, vec![pair(0, 1), pair(1, 1)]),
+            matched(&program, vec![pair(-1, 0)]),
+            matched(&program, vec![pair(0, 1)]),
+            matched(&program, vec![pair(0, 1), pair(1, 1)]),
             matched(
                 &program,
                 vec![
@@ -897,7 +901,9 @@ fn runs_a_capture_group_name_as_pinned_erts() {
          {match,[{0,1},{1,1},{2,1}]},{match,[<<99>>]},\
          {match,[{0,1},{-1,0}]},{match,[[]]},{match,[{0,1}]},\
          {match,[{0,1}]},{match,[{0,1}]},\
-         {match,[{-1,0}]},{match,[[<<98>>],[<<98>>]]},\
+         {match,[{-1,0}]},{match,[{0,1},{1,1}]},{match,[{-1,0}]},\
+         {match,[{0,1}]},{match,[{0,1},{1,1}]},\
+         {match,[[<<98>>],[<<98>>]]},\
          {match,[[{0,1}],[{2,1}]]}]\n"
     );
     // A name that is not valid iodata gives `badarg`

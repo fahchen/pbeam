@@ -705,9 +705,11 @@ fn capture_field(atoms: &AtomTable, code: &pcre2::Code, element: &Term) -> Optio
 }
 
 /// Return the field of the group name `name` of `code`, as
-/// `build_one_capture` (`erl_bif_re.c:1269-1307`) makes it: the number of
-/// its group, `-1` when the code has no such name, and the numbers of all
-/// groups of the name when the `dupnames` option allows several.
+/// `build_one_capture` (`erl_bif_re.c:1269-1307`) makes it. Without the
+/// `dupnames` compile bit, that function reads the number with
+/// `pcre2_substring_number_from_name`, which gives `-1` for a missing name
+/// and for a name that several entries define. With the bit, it gives the
+/// number of one entry and one field for all entries of a duplicate name.
 ///
 /// A name is a C string: the bytes up to its first NUL byte are the name
 /// that PCRE2 looks up (`erl_bif_re.c:1434`, `1453`).
@@ -730,33 +732,24 @@ fn name_field(code: &pcre2::Code, name: &[u8]) -> Field {
         .into_iter()
         .filter(|(_, entry)| entry.as_slice() == name)
         .collect();
+    if !code.has_dupnames() {
+        return match entries.as_slice() {
+            [(number, _)] => Field::Index(*number as i32),
+            _ => Field::Index(-1),
+        };
+    }
     match entries.as_slice() {
         [] => Field::Index(-1),
-        entries => field_of(entries),
-    }
-}
-
-/// Return the field of the entries of one name in the name table.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// // {1, 1}
-/// let field = field_of(&[(1, b"x".to_vec())]);
-/// // {0, 0}
-/// let field = field_of(&[(1, b"x".to_vec()), (2, b"x".to_vec())]);
-/// ```
-fn field_of(entries: &[(u32, Vec<u8>)]) -> Field {
-    match entries {
         [(number, _)] => Field::Index(*number as i32),
-        _ => Field::Duplicate(entries.iter().map(|&(number, _)| number as i32).collect()),
+        entries => Field::Duplicate(entries.iter().map(|&(number, _)| number as i32).collect()),
     }
 }
 
 /// Return the fields of the names of `code`, as the `all_names` case of
-/// `build_capture` (`erl_bif_re.c:1356-1402`) makes them: one field for
-/// each distinct name in the order of the name table. One pass groups the
-/// adjacent entries of a duplicate name.
+/// `build_capture` (`erl_bif_re.c:1356-1402`) makes them. Without the
+/// `dupnames` compile bit, each entry is one field in the order of the
+/// name table. With the bit, one field holds all entries of a duplicate
+/// name.
 ///
 /// # Examples
 ///
@@ -767,6 +760,12 @@ fn field_of(entries: &[(u32, Vec<u8>)]) -> Field {
 /// ```
 fn name_fields(code: &pcre2::Code) -> Vec<Field> {
     let names = code.names();
+    if !code.has_dupnames() {
+        return names
+            .into_iter()
+            .map(|(number, _)| Field::Index(number as i32))
+            .collect();
+    }
     let mut fields = Vec::new();
     let mut start = 0;
     while start < names.len() {
@@ -774,7 +773,11 @@ fn name_fields(code: &pcre2::Code) -> Vec<Field> {
         while end < names.len() && names[end].1 == names[start].1 {
             end += 1;
         }
-        fields.push(field_of(&names[start..end]));
+        let entries = &names[start..end];
+        fields.push(match entries {
+            [(number, _)] => Field::Index(*number as i32),
+            _ => Field::Duplicate(entries.iter().map(|&(number, _)| number as i32).collect()),
+        });
         start = end;
     }
     fields

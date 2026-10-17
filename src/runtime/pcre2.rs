@@ -105,6 +105,9 @@ const INFO_CAPTURECOUNT: u32 = 4;
 /// `PCRE2_INFO_BSR` (`pcre2.h:452`): the `\R` convention of the compiled
 /// code, as a `uint32_t` `PCRE2_BSR_*` value.
 const INFO_BSR: u32 = 3;
+/// `PCRE2_INFO_ALLOPTIONS` (`pcre2.h:449`): the options that the compile
+/// set, as a `uint32_t` `PCRE2_*` value.
+const INFO_ALLOPTIONS: u32 = 0;
 /// `PCRE2_INFO_NAMECOUNT` (`pcre2.h:466`): the number of named capture
 /// groups, as a `uint32_t`.
 const INFO_NAMECOUNT: u32 = 17;
@@ -279,6 +282,21 @@ impl Code {
     /// ```
     pub(super) fn name_count(&self) -> u32 {
         self.info(INFO_NAMECOUNT)
+    }
+
+    /// Return whether the compile set `PCRE2_DUPNAMES`, as
+    /// `build_capture` reads `PCRE2_INFO_ALLOPTIONS`
+    /// (`erl_bif_re.c:1379`). The inline item `(?J)` allows duplicate
+    /// names but does not set the bit.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(compile(b"(?<a>x)(?<a>y)", DUPNAMES, None, None)?.has_dupnames());
+    /// assert!(!compile(b"(?J)(?<a>x)(?<a>y)", 0, None, None)?.has_dupnames());
+    /// ```
+    pub(super) fn has_dupnames(&self) -> bool {
+        self.info(INFO_ALLOPTIONS) & DUPNAMES != 0
     }
 
     /// Return the entries of the name table of the code, as
