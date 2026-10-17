@@ -37,6 +37,19 @@ pub(super) const UCP: u32 = 0x0002_0000;
 pub(super) const UNGREEDY: u32 = 0x0004_0000;
 /// `PCRE2_UTF` (`pcre2.h:136`): the `unicode` option.
 pub(super) const UTF: u32 = 0x0008_0000;
+/// `PCRE2_NOTBOL` (`pcre2.h:181`): the `notbol` option.
+pub(super) const NOTBOL: u32 = 0x0000_0001;
+/// `PCRE2_NOTEOL` (`pcre2.h:182`): the `noteol` option.
+pub(super) const NOTEOL: u32 = 0x0000_0002;
+/// `PCRE2_NOTEMPTY` (`pcre2.h:183`): the `notempty` option.
+pub(super) const NOTEMPTY: u32 = 0x0000_0004;
+/// `PCRE2_NOTEMPTY_ATSTART` (`pcre2.h:184`): the `notempty_atstart` option.
+pub(super) const NOTEMPTY_ATSTART: u32 = 0x0000_0008;
+/// `PCRE2_NO_UTF_CHECK` (`pcre2.h:104`): the match does not check the UTF-8
+/// form of the subject. `re:internal_run/4` sets it with `first` false,
+/// because `re:grun/3` checked the subject already
+/// (`erl_bif_re.c:1505-1512`).
+pub(super) const NO_UTF_CHECK: u32 = 0x4000_0000;
 
 /// `PCRE2_NEWLINE_CR` (`pcre2.h:215`): `{newline, cr}`.
 pub(super) const NEWLINE_CR: u32 = 1;
@@ -60,12 +73,47 @@ pub(super) const BSR_ANYCRLF: u32 = 2;
 /// `PCRE2_ERROR_BADDATA` (`pcre2.h:395`): `pcre2_get_error_message` does
 /// not know the error code.
 const ERROR_BADDATA: c_int = -29;
+/// `PCRE2_ERROR_NOMATCH` (`pcre2.h:352`): the subject does not match.
+pub(super) const ERROR_NOMATCH: c_int = -1;
+/// `PCRE2_ERROR_BADMAGIC` (`pcre2.h:397`).
+pub(super) const ERROR_BADMAGIC: c_int = -31;
+/// `PCRE2_ERROR_BADMODE` (`pcre2.h:398`).
+pub(super) const ERROR_BADMODE: c_int = -32;
+/// `PCRE2_ERROR_BADOFFSET` (`pcre2.h:399`): the start offset is past the
+/// end of the subject.
+pub(super) const ERROR_BADOFFSET: c_int = -33;
+/// `PCRE2_ERROR_BADUTFOFFSET` (`pcre2.h:402`): the start offset is not on a
+/// UTF-8 character boundary.
+pub(super) const ERROR_BADUTFOFFSET: c_int = -36;
+/// `PCRE2_ERROR_RECURSELOOP` (`pcre2.h:418`): the pattern recursed without
+/// a match, which `re_run` charges as all reductions of one turn
+/// (`erl_bif_re.c:1751-1754`).
+pub(super) const ERROR_RECURSELOOP: c_int = -52;
+/// `PCRE2_ERROR_MATCHLIMIT` (`pcre2.h:413`).
+pub(super) const ERROR_MATCHLIMIT: c_int = -47;
+/// `PCRE2_ERROR_DEPTHLIMIT` (`pcre2.h:419`), which the obsolete name
+/// `PCRE2_ERROR_RECURSIONLIMIT` also gives.
+pub(super) const ERROR_DEPTHLIMIT: c_int = -53;
+/// `PCRE2_ERROR_HEAPLIMIT` (`pcre2.h:430`): the match used the heap limit.
+pub(super) const ERROR_HEAPLIMIT: c_int = -63;
+/// `PCRE2_ERROR_LOOP_LIMIT` (`pcre2.h:444`), the ERTS addition that a match
+/// returns when it uses the loops that remain.
+pub(super) const ERROR_LOOP_LIMIT: c_int = -76;
 /// `PCRE2_INFO_CAPTURECOUNT` (`pcre2.h:453`): the highest capture group
 /// number, as a `uint32_t`.
 const INFO_CAPTURECOUNT: u32 = 4;
+/// `PCRE2_INFO_BSR` (`pcre2.h:452`): the `\R` convention of the compiled
+/// code, as a `uint32_t` `PCRE2_BSR_*` value.
+const INFO_BSR: u32 = 3;
+/// `PCRE2_INFO_NAMECOUNT` (`pcre2.h:466`): the number of named capture
+/// groups, as a `uint32_t`.
+const INFO_NAMECOUNT: u32 = 17;
 /// `PCRE2_INFO_NEWLINE` (`pcre2.h:469`): the newline convention of the
 /// compiled code, as a `uint32_t` `PCRE2_NEWLINE_*` value.
 const INFO_NEWLINE: u32 = 20;
+/// `PCRE2_UNSET` (`pcre2.h:314`): an ovector slot of a capture group that
+/// did not take part in the match.
+pub(super) const UNSET: usize = usize::MAX;
 
 /// The size of the error message buffer of `build_compile_error`
 /// (`erl_bif_re.c:809`). A longer message is cut to 119 bytes.
@@ -75,10 +123,12 @@ const ERROR_MESSAGE_SIZE: usize = 120;
 /// as `ERTS_PCRE_STACK_MARGIN` (`erl_bif_re.c:157`).
 const STACK_MARGIN: usize = 10 * 1024;
 
-// The PCRE2 functions that the compile path and the `export` option use
-// (`pcre2.h:650-751`, `pcre2.h:826-834`, and `pcre2.h:878`).
-// `pcre2_code_8`, `pcre2_compile_context_8`, and `pcre2_general_context_8`
-// are opaque C structs, so a `c_void` pointer stands for each.
+// The PCRE2 functions that the compile path, the match path, and the
+// `export` option use (`pcre2.h:650-790`, `pcre2.h:826-834`, and
+// `pcre2.h:878`). `pcre2_code_8`, `pcre2_compile_context_8`,
+// `pcre2_general_context_8`, `pcre2_match_context_8`, and
+// `pcre2_match_data_8` are opaque C structs, so a `c_void` pointer stands
+// for each.
 unsafe extern "C" {
     fn pcre2_compile_context_create_8(general: *mut c_void) -> *mut c_void;
     fn pcre2_compile_context_free_8(context: *mut c_void);
@@ -99,6 +149,27 @@ unsafe extern "C" {
     ) -> *mut c_void;
     fn pcre2_pattern_info_8(code: *const c_void, what: u32, place: *mut c_void) -> c_int;
     fn pcre2_get_error_message_8(code: c_int, buffer: *mut u8, size: usize) -> c_int;
+    fn pcre2_match_data_create_8(ovec_count: u32, general: *mut c_void) -> *mut c_void;
+    fn pcre2_match_data_free_8(data: *mut c_void);
+    fn pcre2_get_ovector_pointer_8(data: *mut c_void) -> *mut usize;
+    fn pcre2_set_loops_left_8(data: *mut c_void, budget: c_int);
+    fn pcre2_get_loops_left_8(data: *mut c_void) -> c_int;
+    fn pcre2_set_restart_data_8(data: *mut c_void, restart: *mut *mut c_void);
+    fn pcre2_set_restart_flags_8(data: *mut c_void, flags: u32);
+    fn pcre2_match_context_create_8(general: *mut c_void) -> *mut c_void;
+    fn pcre2_match_context_free_8(context: *mut c_void);
+    fn pcre2_set_match_limit_8(context: *mut c_void, limit: u32) -> c_int;
+    fn pcre2_set_depth_limit_8(context: *mut c_void, limit: u32) -> c_int;
+    fn pcre2_free_restart_data_8(data: *mut c_void);
+    fn pcre2_match_8(
+        code: *const c_void,
+        subject: *const u8,
+        length: usize,
+        start_offset: usize,
+        options: u32,
+        data: *mut c_void,
+        context: *mut c_void,
+    ) -> c_int;
     fn pcre2_serialize_encode_8(
         codes: *const *const c_void,
         number_of_codes: i32,
@@ -155,6 +226,32 @@ impl Code {
     /// ```
     pub(super) fn newline(&self) -> u32 {
         self.info(INFO_NEWLINE)
+    }
+
+    /// Return the `\R` convention (`PCRE2_INFO_BSR`): the `bsr_anycrlf` or
+    /// `bsr_unicode` option of the compile, a `(*BSR_ANYCRLF)` item of the
+    /// pattern, or `BSR_UNICODE`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(compile(b"a", 0, None, None)?.bsr(), BSR_UNICODE);
+    /// assert_eq!(compile(b"a", 0, None, Some(BSR_ANYCRLF))?.bsr(), BSR_ANYCRLF);
+    /// ```
+    pub(super) fn bsr(&self) -> u32 {
+        self.info(INFO_BSR)
+    }
+
+    /// Return the number of named capture groups (`PCRE2_INFO_NAMECOUNT`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(compile(b"(?<a>x)(?<b>y)", 0, None, None)?.name_count(), 2);
+    /// assert_eq!(compile(b"(a)", 0, None, None)?.name_count(), 0);
+    /// ```
+    pub(super) fn name_count(&self) -> u32 {
+        self.info(INFO_NAMECOUNT)
     }
 
     /// Return the serialized form of this code, as `build_compile_export`
@@ -229,6 +326,320 @@ impl Drop for Code {
         // owns it, so PCRE2 frees it once.
         unsafe { pcre2_code_free_8(self.0.as_ptr()) };
     }
+}
+
+/// One match state: the `pcre2_match_data` of one `re:run/2,3` call, which
+/// this value owns and frees when it drops, as `cleanup_restart_context`
+/// (`erl_bif_re.c:1013-1017`) frees it. The ovector of the match data gives
+/// the offsets of each capture group after a match.
+pub(super) struct MatchData {
+    /// The owned pointer to the live `pcre2_match_data` that
+    /// `pcre2_match_data_create_8` returned. The value is opaque to Rust,
+    /// and only `pcre2_match_data_free_8` in `Drop` frees it.
+    data: NonNull<c_void>,
+    /// The number of offset pairs of the ovector, which is the capture
+    /// count of the code plus one for the whole match
+    /// (`erl_bif_re.c:1575`, `1607`).
+    pairs: usize,
+    /// The `restart_data` field of the match data. PCRE2 reads and writes
+    /// the field through this pointer, so the field has a stable address
+    /// for the life of the match data. ERTS keeps the field in the restart
+    /// context of the call and sets it to NULL before a match
+    /// (`erl_bif_re.c:1641-1642`). A match that stops at its loop limit
+    /// makes PCRE2 write the position of the match into the field
+    /// (`pcre2_match.c:8586-8587`), and `Drop` frees that state through
+    /// `pcre2_free_restart_data`, as `cleanup_restart_context`
+    /// (`erl_bif_re.c:1009-1012`) does.
+    restart: Box<*mut c_void>,
+}
+
+impl MatchData {
+    /// Make the match data of a match with `pairs` offset pairs.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let data = MatchData::new(2);
+    /// assert_eq!(data.ovector(2), [UNSET, UNSET, UNSET, UNSET]);
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panic when PCRE2 cannot allocate the match data.
+    pub(super) fn new(pairs: u32) -> Self {
+        // PCRE2 keeps at least one pair and at most `UINT16_MAX`
+        // (`pcre2_match_data.c:58-59`), and the ovector of the match data
+        // has the clamped size.
+        let pairs = pairs.clamp(1, u32::from(u16::MAX));
+        // SAFETY: `pcre2_match_data_create_8` with no general context uses
+        // `malloc`, and the new match data is valid until
+        // `pcre2_match_data_free_8` in `Drop`.
+        let data = unsafe { pcre2_match_data_create_8(pairs, std::ptr::null_mut()) };
+        let data = NonNull::new(data).expect("PCRE2 match data allocation failed");
+        let mut restart: Box<*mut c_void> = Box::new(std::ptr::null_mut());
+        // SAFETY: `data` is a live match data. The pointer to the boxed
+        // field stays valid until `Drop` frees the match data first, and
+        // PCRE2 writes no other value into the field without a restart.
+        unsafe { pcre2_set_restart_data_8(data.as_ptr(), &raw mut *restart) };
+        Self {
+            data,
+            pairs: pairs as usize,
+            restart,
+        }
+    }
+
+    /// Return the `pairs` offset pairs that PCRE2 wrote into the ovector of
+    /// this match data: two offsets, the start and the end of the match, for
+    /// each pair. A slot of a capture group that did not take part in the
+    /// match is [`UNSET`]. The match returns this count, and PCRE2 leaves
+    /// the other pairs of the allocation uninitialized, so the slice stops
+    /// at the count.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let data = MatchData::new(1);
+    /// assert_eq!(data.ovector(1).len(), 2);
+    /// ```
+    pub(super) fn ovector(&self, pairs: usize) -> &[usize] {
+        let pairs = pairs.min(self.pairs);
+        // SAFETY: `self.data` is a live match data with `self.pairs` pairs,
+        // and PCRE2 owns its ovector, which stays valid until `Drop`.
+        // PCRE2 initialized the first `pairs` pairs of the ovector in the
+        // match that returned `pairs`. No other reference to the ovector
+        // exists while this slice borrows the match data.
+        unsafe {
+            std::slice::from_raw_parts(pcre2_get_ovector_pointer_8(self.data.as_ptr()), pairs * 2)
+        }
+    }
+
+    /// Set the loops that the next match may use, as `re_run`
+    /// (`erl_bif_re.c:1640`) does with `reds_initial * LOOP_FACTOR`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut data = MatchData::new(1);
+    /// data.set_loops_left(64000);
+    /// assert_eq!(data.loops_left(), 64000);
+    /// ```
+    pub(super) fn set_loops_left(&mut self, loops: i32) {
+        // SAFETY: `self.data` is a live match data that this value owns.
+        unsafe { pcre2_set_loops_left_8(self.data.as_ptr(), loops) };
+    }
+
+    /// Return the loops that the match did not use, as
+    /// `pcre2_get_loops_left` gives them to `re_run`
+    /// (`erl_bif_re.c:1718`) for the reduction charge.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut data = MatchData::new(1);
+    /// data.set_loops_left(100);
+    /// assert_eq!(data.loops_left(), 100);
+    /// ```
+    pub(super) fn loops_left(&self) -> i32 {
+        // SAFETY: `self.data` is a live match data that this value owns.
+        unsafe { pcre2_get_loops_left_8(self.data.as_ptr()) }
+    }
+
+    /// Clear the restart state of a match that a previous call left, as
+    /// `re_run` does before each match with `pcre2_set_restart_flags`
+    /// (`erl_bif_re.c:1643`). PBeam runs a match in one step, so the field
+    /// is NULL already, and this call keeps the invariant of the field.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut data = MatchData::new(1);
+    /// data.clear_restart();
+    /// ```
+    pub(super) fn clear_restart(&mut self) {
+        // SAFETY: the box behind `self.restart` gave PCRE2 a pointer to a
+        // `*mut c_void` field, and this value owns it. A match that never
+        // traps leaves the field NULL.
+        unsafe { pcre2_set_restart_flags_8(self.data.as_ptr(), 0) };
+    }
+
+    /// Continue a match that used its loop limit, as the trap to
+    /// `erlang:re_run_trap/3` does with `pcre2_match(NULL, NULL, 0, 0, 0,
+    /// match_data, NULL)` (`erl_bif_re.c:1856`) after it sets a fresh loop
+    /// limit. The restart data of the match data holds the position of the
+    /// match, so the call continues from there, and the return code is the
+    /// same one that a fresh match gives.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let code = compile(b"a+", 0, None, None)?;
+    /// let mut data = MatchData::new(2);
+    /// data.set_loops_left(1);
+    /// assert_eq!(execute(&code, &data, None, b"aa", 0, 0), ERROR_LOOP_LIMIT);
+    /// data.set_loops_left(i32::MAX);
+    /// data.clear_restart();
+    /// assert_eq!(data.resume(), 1);
+    /// ```
+    pub(super) fn resume(&self) -> c_int {
+        // SAFETY: the match data holds the restart state of the interrupted
+        // match, and PCRE2 reads NULL code, subject, and context as the
+        // restart call of `re_match_trap` passes them (`erl_bif_re.c:1856`).
+        unsafe {
+            pcre2_match_8(
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                0,
+                0,
+                self.data.as_ptr(),
+                std::ptr::null_mut(),
+            )
+        }
+    }
+}
+
+impl Drop for MatchData {
+    /// Free the match data, as `cleanup_restart_context`
+    /// (`erl_bif_re.c:1013-1017`) does after a match.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// drop(MatchData::new(1));
+    /// ```
+    fn drop(&mut self) {
+        // SAFETY: `self.data` came from `pcre2_match_data_create_8`, and
+        // only this value owns it. The match data holds the pointer to the
+        // boxed restart field, which this value owns too, so PCRE2 frees
+        // the state of an interrupted match through it once. PCRE2 then
+        // frees the match data itself.
+        unsafe {
+            if !(*self.restart).is_null() {
+                pcre2_free_restart_data_8(self.data.as_ptr());
+            }
+            pcre2_match_data_free_8(self.data.as_ptr());
+        }
+    }
+}
+
+/// The `pcre2_match_context` of one `re:run/2,3` call that sets a match
+/// limit or a recursion limit, as `re_run` makes it
+/// (`erl_bif_re.c:1654-1665`). The value owns the context and frees it when
+/// it drops.
+pub(super) struct MatchContext(
+    /// The owned pointer to the live `pcre2_match_context` that
+    /// `pcre2_match_context_create_8` returned. The value is opaque to
+    /// Rust, and only `pcre2_match_context_free_8` in `Drop` frees it.
+    NonNull<c_void>,
+);
+
+impl MatchContext {
+    /// Make the match context of a match that gives a match limit, a
+    /// recursion limit, or both. PCRE2 uses its own limit for each one that
+    /// is `None`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let context = MatchContext::new(Some(1), None);
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panic when PCRE2 cannot allocate the match context.
+    pub(super) fn new(match_limit: Option<u32>, depth_limit: Option<u32>) -> Self {
+        // SAFETY: `pcre2_match_context_create_8` with no general context
+        // uses `malloc`. The new context is valid until
+        // `pcre2_match_context_free_8` in `Drop`, and the set functions
+        // only write a limit field of the context.
+        let context = unsafe { pcre2_match_context_create_8(std::ptr::null_mut()) };
+        let context = NonNull::new(context).expect("PCRE2 match context allocation failed");
+        unsafe {
+            if let Some(limit) = match_limit {
+                pcre2_set_match_limit_8(context.as_ptr(), limit);
+            }
+            if let Some(limit) = depth_limit {
+                pcre2_set_depth_limit_8(context.as_ptr(), limit);
+            }
+        }
+        Self(context)
+    }
+}
+
+impl Drop for MatchContext {
+    /// Free the match context, as `cleanup_restart_context`
+    /// (`erl_bif_re.c:1018-1021`) does after a match.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// drop(MatchContext::new(None, Some(7)));
+    /// ```
+    fn drop(&mut self) {
+        // SAFETY: `self.0` came from `pcre2_match_context_create_8`, and
+        // only this value owns it, so PCRE2 frees it once.
+        unsafe { pcre2_match_context_free_8(self.0.as_ptr()) };
+    }
+}
+
+/// Match `subject` from `offset` with `code`, as `re_run`
+/// (`erl_bif_re.c:1712-1716`) does with `pcre2_match`, and return its return
+/// code: the number of capture pairs that the match set, 0 for a match
+/// whose ovector is too small, or a negative `PCRE2_ERROR_*` value. The
+/// offsets of each pair are in `data.ovector(rc)`. The options are the
+/// `PCRE2_*` match bits.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let code = compile(b"(a)", 0, None, None)?;
+/// let mut data = MatchData::new(code.capture_count() as u32 + 1);
+/// data.set_loops_left(i32::MAX);
+/// assert_eq!(execute(&code, &data, None, b"ba", 0, 0), 2);
+/// assert_eq!(data.ovector(2), [1, 2, 1, 2]);
+/// assert_eq!(execute(&code, &data, None, b"ba", 2, 0), ERROR_NOMATCH);
+/// ```
+pub(super) fn execute(
+    code: &Code,
+    data: &MatchData,
+    context: Option<&MatchContext>,
+    subject: &[u8],
+    offset: usize,
+    options: u32,
+) -> c_int {
+    // SAFETY: `code` is a live code, `data` is a live match data that
+    // holds the restart field that PCRE2 reads and writes, and `subject`
+    // and its length come from one slice that outlives the call. The
+    // context is a live match context when it is present, and PCRE2 reads
+    // it only during the call.
+    unsafe {
+        pcre2_match_8(
+            code.0.as_ptr(),
+            subject.as_ptr(),
+            subject.len(),
+            offset,
+            options,
+            data.data.as_ptr(),
+            context.map_or(std::ptr::null_mut(), |context| context.0.as_ptr()),
+        )
+    }
+}
+
+/// Return whether `rc` is a UTF-8 error of the subject, which `re_run`
+/// (`erl_bif_re.c:1756-1777`) turns into `badarg` after it uses all
+/// reductions.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(is_utf8_error(-3));
+/// assert!(is_utf8_error(-23));
+/// assert!(!is_utf8_error(-24));
+/// assert!(!is_utf8_error(ERROR_NOMATCH));
+/// ```
+pub(super) fn is_utf8_error(rc: c_int) -> bool {
+    // `PCRE2_ERROR_UTF8_ERR1` to `PCRE2_ERROR_UTF8_ERR21` (`pcre2.h:357-377`).
+    (-23..=-3).contains(&rc)
 }
 
 /// Compile `pattern` with the `PCRE2_*` option bits `options`, as

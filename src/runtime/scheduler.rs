@@ -1696,6 +1696,26 @@ impl Scheduler {
         u64::try_from(used).expect("a turn uses 0 or more reductions")
     }
 
+    /// Add the reductions of the current turn to the process total and start
+    /// a fresh turn without a run-queue move, as the schedule out after the
+    /// trap to `erlang:re_run_trap/3` does (`erl_bif_re.c:1737-1740`,
+    /// `erl_process.c:9678-9700`). The `re` match calls it when a match uses
+    /// the loop limit of a turn.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.account_turn();
+    /// assert_eq!(scheduler.current_process().fcalls, CONTEXT_REDS);
+    /// ```
+    pub(super) fn account_turn(&mut self) {
+        let used = self.current_reductions();
+        self.virtual_reductions = 0;
+        let process = self.current_process_mut();
+        process.reductions += used;
+        process.fcalls = CONTEXT_REDS;
+    }
+
     /// Switch out the current process: add the reductions of its turn to
     /// its total and set the virtual reductions to 0, as `schedule` does
     /// (`erl_process.c:9678-9700`). Return the process.
