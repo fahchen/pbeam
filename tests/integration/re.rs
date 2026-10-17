@@ -834,26 +834,119 @@ fn charges_the_reductions_of_a_match_as_pinned_erts() {
 }
 
 #[test]
-fn stops_on_a_capture_group_name_that_pbeam_does_not_resolve() {
-    // ERTS turns a group name into its number with the name table of the
-    // code (`build_one_capture`, erl_bif_re.c:1269-1307). PBeam does not
-    // keep that table yet, and a name that it ignored would give a wrong
-    // capture, so the call stops (row "Regular expressions" in
-    // `docs/erts-differences.md`).
+fn runs_a_capture_group_name_as_pinned_erts() {
+    // A name resolves with the name table of the code
+    // (`build_one_capture`, erl_bif_re.c:1269-1307), `all_names` gives the
+    // names in the order of that table, and a name that the code does not
+    // define gives an empty element. A name that a second group defines
+    // gives the first group of the name that took part in the match.
     let program = program();
-    for case in ["names", "name_index", "name_list"] {
-        let error = program
-            .execute(
-                "re_probe",
-                "unsupported",
-                &[program.host_term(Term::Atom(program.atom(case).unwrap()))],
-            )
-            .unwrap_err();
-        assert!(
-            error.to_string().contains("unsupported capture group name"),
-            "{case}: {error}"
-        );
+    assert_eq!(
+        program
+            .execute("re_probe", "named_captures", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![
+            matched(&program, vec![pair(0, 2), pair(0, 1), pair(1, 1)]),
+            matched(&program, vec![pair(0, 1), pair(1, 1)]),
+            matched(&program, vec![pair(0, 1), pair(1, 1)]),
+            matched(&program, vec![bin(b"a"), bin(b"b")]),
+            matched(&program, vec![codes(b"a"), codes(b"b")]),
+            matched(&program, vec![pair(0, 1)]),
+            matched(&program, vec![codes(b"b")]),
+            matched(&program, vec![bin(b"a"), bin(b"b")]),
+            matched(&program, vec![pair(-1, 0)]),
+            matched(&program, vec![Term::nil()]),
+            matched(
+                &program,
+                vec![pair(0, 3), pair(0, 1), pair(1, 1), pair(2, 1)],
+            ),
+            matched(&program, vec![pair(0, 1), pair(1, 1), pair(2, 1)]),
+            matched(&program, vec![pair(2, 1), pair(1, 1), pair(0, 1)]),
+            matched(&program, vec![pair(0, 1), pair(1, 1), pair(2, 1)]),
+            matched(&program, vec![bin(b"c")]),
+            matched(&program, vec![pair(0, 1), pair(-1, 0)]),
+            matched(&program, vec![Term::nil()]),
+            matched(&program, vec![pair(0, 1)]),
+            matched(&program, vec![pair(0, 1)]),
+            matched(&program, vec![pair(0, 1)]),
+            matched(&program, vec![pair(-1, 0)]),
+            matched(
+                &program,
+                vec![
+                    Term::list_from(vec![bin(b"b")]),
+                    Term::list_from(vec![bin(b"b")]),
+                ],
+            ),
+            matched(
+                &program,
+                vec![
+                    Term::list_from(vec![pair(0, 1)]),
+                    Term::list_from(vec![pair(2, 1)]),
+                ],
+            ),
+        ])
+    );
+    assert_eq!(
+        reference("named_captures"),
+        "[{match,[{0,2},{0,1},{1,1}]},{match,[{0,1},{1,1}]},\
+         {match,[{0,1},{1,1}]},{match,[<<97>>,<<98>>]},{match,[[97],[98]]},\
+         {match,[{0,1}]},{match,[[98]]},{match,[<<97>>,<<98>>]},\
+         {match,[{-1,0}]},{match,[[]]},{match,[{0,3},{0,1},{1,1},{2,1}]},\
+         {match,[{0,1},{1,1},{2,1}]},{match,[{2,1},{1,1},{0,1}]},\
+         {match,[{0,1},{1,1},{2,1}]},{match,[<<99>>]},\
+         {match,[{0,1},{-1,0}]},{match,[[]]},{match,[{0,1}]},\
+         {match,[{0,1}]},{match,[{0,1}]},\
+         {match,[{-1,0}]},{match,[[<<98>>],[<<98>>]]},\
+         {match,[[{0,1}],[{2,1}]]}]\n"
+    );
+    // A name that is not valid iodata gives `badarg`
+    // (`erl_bif_re.c:1436-1458`).
+    let badarg = error_term(&program, "badarg");
+    assert_eq!(
+        program
+            .execute("re_probe", "named_errors", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![badarg.clone(), badarg])
+    );
+    assert_eq!(
+        reference("named_errors"),
+        "[{error,badarg},{error,badarg}]\n"
+    );
+}
+
+#[test]
+fn charges_the_reductions_of_a_capture_group_name_as_pinned_erts() {
+    // The name lookup reads the name table of the code and adds no loop of
+    // the match, so the charge is the one of the match
+    // (`erl_bif_re.c:1718`, `1796`).
+    let program = program();
+    let result = program
+        .execute("re_probe", "named_reductions", &[])
+        .unwrap()
+        .term;
+    let result = result.proper_list().unwrap().collect::<Vec<_>>();
+    let expected = Term::list_from(vec![
+        Term::tuple(vec![
+            Term::Integer(2),
+            matched(&program, vec![pair(0, 1), pair(1, 1)]),
+        ]),
+        Term::tuple(vec![Term::Integer(2), matched(&program, vec![bin(b"a")])]),
+        Term::tuple(vec![
+            Term::Integer(2),
+            matched(&program, vec![pair(0, 1), pair(1, 1), pair(2, 1)]),
+        ]),
+    ]);
+    let expected = expected.proper_list().unwrap().collect::<Vec<_>>();
+    for (index, (result, expected)) in result.iter().zip(&expected).enumerate() {
+        assert_eq!(result, expected, "case {index}");
     }
+    assert_eq!(
+        reference("named_reductions"),
+        "[{2,{match,[{0,1},{1,1}]}},{2,{match,[<<97>>]}},\
+         {2,{match,[{0,1},{1,1},{2,1}]}}]\n"
+    );
 }
 
 #[test]

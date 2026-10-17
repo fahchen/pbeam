@@ -108,6 +108,12 @@ const INFO_BSR: u32 = 3;
 /// `PCRE2_INFO_NAMECOUNT` (`pcre2.h:466`): the number of named capture
 /// groups, as a `uint32_t`.
 const INFO_NAMECOUNT: u32 = 17;
+/// `PCRE2_INFO_NAMEENTRYSIZE` (`pcre2.h:467`): the size of one entry of
+/// the name table, as a `uint32_t`.
+const INFO_NAMEENTRYSIZE: u32 = 18;
+/// `PCRE2_INFO_NAMETABLE` (`pcre2.h:468`): the address of the name table,
+/// as a `PCRE2_SPTR`.
+const INFO_NAMETABLE: u32 = 19;
 /// `PCRE2_INFO_NEWLINE` (`pcre2.h:469`): the newline convention of the
 /// compiled code, as a `uint32_t` `PCRE2_NEWLINE_*` value.
 const INFO_NEWLINE: u32 = 20;
@@ -269,6 +275,53 @@ impl Code {
     /// ```
     pub(super) fn name_count(&self) -> u32 {
         self.info(INFO_NAMECOUNT)
+    }
+
+    /// Return the entries of the name table of the code, as
+    /// `pcre2_substring_nametable_scan` reads them for `build_one_capture`
+    /// (`erl_bif_re.c:1269-1307`): the number of one named group and the
+    /// bytes of its name without the final NUL byte. PCRE2 sorts the
+    /// entries by name, and the entries of one name are adjacent. The
+    /// slices borrow the live name table of the code.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let code = compile(b"(?<z>a)(?<m>b)", 0, None, None)?;
+    /// assert_eq!(code.names(), vec![(2, b"m".as_slice()), (1, b"z".as_slice())]);
+    /// assert!(compile(b"(a)", 0, None, None)?.names().is_empty());
+    /// ```
+    pub(super) fn names(&self) -> Vec<(u32, &[u8])> {
+        let count = self.name_count() as usize;
+        if count == 0 {
+            return Vec::new();
+        }
+        let entry_size = self.info(INFO_NAMEENTRYSIZE) as usize;
+        let mut table: *const u8 = std::ptr::null();
+        // SAFETY: `self.0` is a live `pcre2_code` that only this value
+        // owns. `PCRE2_INFO_NAMETABLE` writes the address of its name table
+        // as a `PCRE2_SPTR` (`pcre2_pattern_info.c`, `PCRE2_INFO_NAMETABLE`).
+        unsafe {
+            pcre2_pattern_info_8(self.0.as_ptr(), INFO_NAMETABLE, (&raw mut table).cast());
+        }
+        // SAFETY: the code has `count` entries of `entry_size` bytes in the
+        // table that PCRE2 returned (`PCRE2_INFO_NAMECOUNT`,
+        // `PCRE2_INFO_NAMEENTRYSIZE`), and each entry has its NUL byte. The
+        // table stays allocated and constant while this code is live, so
+        // the slices live as long as the borrow of `self`.
+        let table = unsafe { std::slice::from_raw_parts(table, count * entry_size) };
+        table
+            .chunks_exact(entry_size)
+            .map(|entry| {
+                let number = u32::from(u16::from_be_bytes([entry[0], entry[1]]));
+                let end = entry[2..]
+                    .iter()
+                    .position(|&byte| byte == 0)
+                    .unwrap_or(entry_size - 2)
+                    + 2;
+                (number, &entry[2..end])
+            })
+            .collect()
     }
 
     /// Return the serialized form of this code, as `build_compile_export`
