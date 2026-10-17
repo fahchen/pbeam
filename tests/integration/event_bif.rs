@@ -166,19 +166,18 @@ fn selects_the_minimum_as_pinned_erts() {
 }
 
 #[test]
-fn stops_at_the_minimum_of_two_references() {
-    // `event_bif_probe:refs/0` runs `erlang:min/2` on two different
-    // references. ERTS gives one of the references. PBeam cannot give the
-    // ERTS order of two references and returns the runtime error of the row
-    // "Term order" in `docs/erts-differences.md`.
+fn gives_the_minimum_of_two_references() {
+    // `event_bif_probe:refs/0` runs `erlang:min/2` on two references that
+    // one process makes. ERTS gives the reference with the smaller number
+    // words (`erts_cmp_compound`, utils.c:2239-2290), so PBeam gives a
+    // reference too, as the "Term order" row of `docs/erts-differences.md`
+    // records.
     let program = BeamProgram::load(&[EVENT_BIF_PROBE]).unwrap();
-    let error = program.execute("event_bif_probe", "refs", &[]).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("unsupported term order of two references"),
-        "{error}"
-    );
+    let term = program
+        .execute("event_bif_probe", "refs", &[])
+        .unwrap()
+        .term;
+    assert!(matches!(term, Term::Reference(_)), "{term:?}");
     assert_eq!(evaluate("is_reference(event_bif_probe:refs())"), b"true\n");
 }
 

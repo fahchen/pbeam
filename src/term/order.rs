@@ -38,9 +38,10 @@
 //!   less than a list, `[1|x] < [1,2]`, and `[1|<<>>] > [1,2]`;
 //! - binary: by the bytes, then by the size.
 //!
-//! Two different references have no PBeam order: ERTS orders them by a
-//! counter of the scheduler thread that made each one, and the thread
-//! number (`erts_set_ref_numbers` in `erl_bif_unique.h`).
+//! Two references compare by their number words, from the highest word
+//! down, as in ERTS (`erts_cmp_compound`, `utils.c:2283-2286`). Two
+//! different alias references have no PBeam order: ERTS holds the pid of
+//! the owner in the higher words, and a PBeam reference does not keep it.
 
 use std::cmp::Ordering;
 
@@ -85,13 +86,13 @@ impl Term {
     /// // returns Equal.
     /// let tuple = Term::tuple(vec![Term::static_atom("a"), Term::Integer(1)]);
     /// assert_eq!(tuple.compare(&tuple, &atoms)?, Ordering::Equal);
-    /// assert!(Term::Reference(Reference(1)).compare(&Term::Reference(Reference(2)), &atoms).is_err());
+    /// assert_eq!(Term::Reference(Reference(1)).compare(&Term::Reference(Reference(2)), &atoms)?, Ordering::Less);
     /// ```
     ///
     /// # Errors
     ///
-    /// Return a runtime error when the result depends on the order of two
-    /// different references.
+    /// Return a runtime error when the result depends on the order of an
+    /// alias reference.
     pub(crate) fn compare(&self, other: &Term, atoms: &AtomTable) -> Result<Ordering, BeamError> {
         self.compare_in(other, false, atoms)
     }
@@ -112,8 +113,8 @@ impl Term {
     ///
     /// # Errors
     ///
-    /// Return a runtime error when the result depends on the order of two
-    /// different references.
+    /// Return a runtime error when the result depends on the order of an
+    /// alias reference.
     pub(crate) fn compare_exact(
         &self,
         other: &Term,
@@ -219,12 +220,25 @@ fn compare_pair<'a>(
         (Term::Binary(left), Term::Binary(right)) => left.cmp(right),
         (Term::Pid(left), Term::Pid(right)) => left.0.cmp(&right.0),
         (Term::Port(left), Term::Port(right)) => left.0.cmp(&right.0),
+        // ERTS compares two references on one node by their number words,
+        // from the highest word down (`erts_cmp_compound`,
+        // utils.c:2283-2286), and the words below match that layout (row
+        // "Term order" of docs/erts-differences.md). An alias reference
+        // holds the pid of its owner in the higher ERTS words, which a PBeam
+        // reference does not keep, so its order is not supported.
         (Term::Reference(left), Term::Reference(right)) if left == right => Ordering::Equal,
-        (Term::Reference(_), Term::Reference(_)) => {
-            return Err(error(format!(
-                "unsupported term order of two references {left:?} and {right:?}"
-            )));
+        (Term::Reference(left), Term::Reference(right))
+            if left.is_pid_reference() || right.is_pid_reference() =>
+        {
+            return Err(error(
+                "unsupported term order of an alias reference (see \"Term order\" in docs/erts-differences.md)",
+            ));
         }
+        (Term::Reference(left), Term::Reference(right)) => left
+            .numbers()
+            .iter()
+            .rev()
+            .cmp(right.numbers().iter().rev()),
         (Term::Tuple(left), Term::Tuple(right)) if left.len() == right.len() => {
             steps.extend(
                 left.iter()

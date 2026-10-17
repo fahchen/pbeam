@@ -345,24 +345,54 @@ fn orders_external_funs_by_mfa_and_after_local_funs() {
 }
 
 #[test]
-fn rejects_the_order_of_two_different_references() {
-    // ERTS 29.1.1: a reference made later on scheduler 1 is less than one
-    // made earlier on scheduler 2, so PBeam cannot give the ERTS order.
-    let pair = Term::tuple(vec![atom("a"), Term::Reference(Reference(1))]);
-    let other = Term::tuple(vec![atom("a"), Term::Reference(Reference(2))]);
+fn orders_references_by_their_number_words() {
+    // ERTS compares two references by their number words, from the highest
+    // word down (`erts_cmp_compound`, utils.c:2283-2286). PBeam makes the
+    // same words from its counter, so the reference 1 comes before the
+    // reference 2.
+    let earlier = Term::tuple(vec![atom("a"), Term::Reference(Reference(1))]);
+    let later = Term::tuple(vec![atom("a"), Term::Reference(Reference(2))]);
+    assert_eq!(earlier.compare(&later, &test_atom_table()).unwrap(), Less);
+    // ERTS compares the number words from the highest word down
+    // (`utils.c:2283-2286`), so the counter value orders the references, and
+    // a counter that passed 2^18 orders after a smaller counter.
+    let wrapped = Term::Reference(Reference(1 << 18));
     assert_eq!(
-        pair.compare(&other, &test_atom_table())
-            .unwrap_err()
-            .to_string(),
-        "unsupported term order of two references Reference(Reference(1)) and \
-         Reference(Reference(2))"
+        wrapped
+            .compare(&Term::Reference(Reference(1)), &test_atom_table())
+            .unwrap(),
+        Greater
     );
-    let earlier = Term::tuple(vec![atom("a"), Term::Reference(Reference(2))]);
     assert_eq!(
         Term::tuple(vec![atom("b"), Term::Reference(Reference(1))])
             .compare(&earlier, &test_atom_table())
             .unwrap(),
         Greater
+    );
+}
+
+#[test]
+fn rejects_the_order_of_an_alias_reference() {
+    // ERTS keeps the pid of the owner in the higher reference words of an
+    // alias, and a PBeam reference does not keep it, so an alias reference
+    // has no PBeam order with another reference.
+    let alias = |number| Term::Reference(Reference(number).pid_reference());
+    let error = alias(1)
+        .compare(&alias(2), &test_atom_table())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("unsupported term order of an alias reference"),
+        "{error}"
+    );
+    assert!(
+        alias(1)
+            .compare(&Term::Reference(Reference(2)), &test_atom_table())
+            .is_err()
+    );
+    assert_eq!(
+        alias(1).compare(&alias(1), &test_atom_table()).unwrap(),
+        Equal
     );
 }
 

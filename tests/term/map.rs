@@ -590,15 +590,32 @@ fn sorts_pairs_by_the_flatmap_key_order() {
     Map::sort_pairs(&mut compound, &test_atom_table()).unwrap();
     let values: Vec<_> = compound.iter().map(|(_, value)| value.clone()).collect();
     assert_eq!(values, [5, 4, 3, 2, 1].map(Term::Integer));
+    // ERTS compares two references by their number words (`utils.c:2239-2290`),
+    // so the reference 2 comes after the reference 1.
     let mut references = vec![
-        (Term::Reference(Reference(1)), Term::Integer(1)),
         (Term::Reference(Reference(2)), Term::Integer(2)),
+        (Term::Reference(Reference(1)), Term::Integer(1)),
+    ];
+    Map::sort_pairs(&mut references, &test_atom_table()).unwrap();
+    let values: Vec<_> = references.iter().map(|(_, value)| value.clone()).collect();
+    assert_eq!(values, [1, 2].map(Term::Integer));
+    // An alias reference has no PBeam order, so the sort reports it instead
+    // of panicking.
+    let mut aliases = vec![
+        (
+            Term::Reference(Reference(1).pid_reference()),
+            Term::Integer(1),
+        ),
+        (
+            Term::Reference(Reference(2).pid_reference()),
+            Term::Integer(2),
+        ),
     ];
     assert!(
-        Map::sort_pairs(&mut references, &test_atom_table())
+        Map::sort_pairs(&mut aliases, &test_atom_table())
             .unwrap_err()
             .to_string()
-            .contains("unsupported term order of two references")
+            .contains("unsupported term order of an alias reference")
     );
 }
 
