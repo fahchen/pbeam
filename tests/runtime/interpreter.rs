@@ -5426,7 +5426,8 @@ fn helps_a_trapped_insert_from_internal_delete_all() {
     let owner = scheduler.current_process_mut().id;
     let mut table = Table::new(owner, Access::Public, 1, TableType::Set);
     table.insert(&scheduler.atoms, vec![Term::Integer(1)]);
-    table.busy = Some(Busy::new(owner, Vec::new(), false));
+    // The insert belongs to another process, so the call helps it.
+    table.busy = Some(Busy::new(ProcessId(999), Vec::new(), false));
     scheduler.ets.create(Reference(0), None, table);
     let result = program
         .bif(

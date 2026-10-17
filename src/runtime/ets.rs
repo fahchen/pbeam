@@ -2500,10 +2500,12 @@ impl Table {
             .map(|(bucket, _)| *bucket)
             .collect::<Vec<_>>();
         for bucket in buckets {
-            if let Some(hashes) = self.retained_buckets.remove(&bucket) {
-                for hash in hashes {
-                    self.retained.remove(&hash);
-                }
+            let hashes = self
+                .retained_buckets
+                .remove(&bucket)
+                .expect("a collected bucket has records");
+            for hash in hashes {
+                self.retained.remove(&hash);
             }
         }
     }

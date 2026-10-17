@@ -1112,6 +1112,27 @@ fn takes_a_key_with_a_pseudo_deleted_newest_object() {
 }
 
 #[test]
+fn revives_one_of_two_deleted_keys_of_a_bucket() {
+    // A bucket keeps its record bucket when another key of the bucket still
+    // has a record (`fixed_tabs_delete`, `erl_db.c:152-172`).
+    let atoms = test_atom_table();
+    let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
+    table.insert(&atoms, vec![Term::Integer(2)]);
+    table.insert(&atoms, vec![Term::Integer(146)]);
+    assert_eq!(
+        table.bucket(stored_hash(&atoms, &Term::Integer(2))),
+        table.bucket(stored_hash(&atoms, &Term::Integer(146)))
+    );
+    table.fix(ProcessId(0));
+    table.delete(&atoms, &Term::Integer(2));
+    table.delete(&atoms, &Term::Integer(146));
+    table.insert(&atoms, vec![Term::Integer(2)]);
+    assert_eq!(table.retained_buckets.len(), 1);
+    table.insert(&atoms, vec![Term::Integer(146)]);
+    assert!(table.retained_buckets.is_empty());
+}
+
+#[test]
 fn revives_a_deleted_set_key() {
     // The insert of a deleted set key restores its object
     // (`erl_db_hash.c:1396-1411`).
