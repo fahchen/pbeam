@@ -237,11 +237,6 @@ fn runs_each_guard_function_of_the_match_specification() {
         ),
         (
             call(&mut atoms, "size", vec![var1.clone()]),
-            map.clone(),
-            Term::Integer(1),
-        ),
-        (
-            call(&mut atoms, "size", vec![var1.clone()]),
             binary.clone(),
             Term::Integer(2),
         ),
@@ -749,6 +744,12 @@ fn fails_each_guard_and_expression_like_the_match_program() {
             "{guard:?}"
         );
     };
+    let map_value =
+        Term::Map(Map::from_pairs(vec![(key_a.clone(), Term::Integer(1))], &atoms).unwrap());
+    let size_map = call(&mut atoms, "size", vec![var1.clone()]);
+    fails(&atoms, size_map, map_value);
+    let map_key = call(&mut atoms, "is_map_key", vec![key_a.clone(), var1.clone()]);
+    fails(&atoms, map_key, key_a.clone());
     for guard in [
         call(
             &mut atoms,

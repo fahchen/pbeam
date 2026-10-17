@@ -2146,30 +2146,34 @@ pub(super) fn update_element(
     if table.table_type() != TableType::Set {
         return Ok(BifResult::badarg());
     }
-    let updates = match update_specs(spec, keypos) {
-        Some(updates) => updates,
-        None => return Ok(BifResult::badarg()),
-    };
-    let arity = match table.object_arity(atoms, key) {
+    // `do_update_element` finds the key before it checks the update list, so
+    // a missing key without a default gives `false` (`erl_db.c:1393-1397`).
+    // A default inserts no object when an update is bad
+    // (`erl_db_hash.c:3972`).
+    let existing = table.object_arity(atoms, key);
+    let arity = match existing {
         Some(arity) => arity,
         None => match default_elements {
             None => return Ok(Value(Term::static_atom("false"))),
-            Some(elements) => {
-                let mut object = elements.to_vec();
-                let index = usize::try_from(keypos).expect("the key position is not negative") - 1;
-                object[index] = key.clone();
-                table.insert(atoms, object);
-                table
-                    .object_arity(atoms, key)
-                    .expect("the insert stored the object")
-            }
+            Some(elements) => elements.len(),
         },
+    };
+    let updates = match update_specs(spec, keypos) {
+        Some(updates) => updates,
+        None => return Ok(BifResult::badarg()),
     };
     if updates
         .iter()
         .any(|(position, _)| *position == 0 || *position > arity)
     {
         return Ok(BifResult::badarg());
+    }
+    if existing.is_none() {
+        let elements = default_elements.expect("the missing key has a default");
+        let mut object = elements.as_ref().to_vec();
+        let index = usize::try_from(keypos).expect("the key position is not negative") - 1;
+        object[index] = key.clone();
+        table.insert(atoms, object);
     }
     table.update_elements(atoms, key, &updates);
     Ok(Value(Term::static_atom("true")))

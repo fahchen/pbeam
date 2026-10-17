@@ -721,14 +721,20 @@ fn evaluate(atoms: &AtomTable, expression: &Expr, bindings: &[Term], whole: &Ter
         Expr::Tuple(elements) => Some(Term::tuple(
             elements
                 .iter()
-                .map(|element| evaluate(atoms, element, bindings, whole))
-                .collect::<Option<Vec<_>>>()?,
+                .map(|element| {
+                    evaluate(atoms, element, bindings, whole)
+                        .unwrap_or_else(|| Term::static_atom("EXIT"))
+                })
+                .collect(),
         )),
         Expr::List(elements, tail) => {
-            let elements = elements
+            let elements: Vec<Term> = elements
                 .iter()
-                .map(|element| evaluate(atoms, element, bindings, whole))
-                .collect::<Option<Vec<_>>>()?;
+                .map(|element| {
+                    evaluate(atoms, element, bindings, whole)
+                        .unwrap_or_else(|| Term::static_atom("EXIT"))
+                })
+                .collect();
             let mut tail = evaluate(atoms, tail, bindings, whole)?;
             for element in elements.into_iter().rev() {
                 tail = Term::cons(element, tail);
@@ -736,10 +742,13 @@ fn evaluate(atoms: &AtomTable, expression: &Expr, bindings: &[Term], whole: &Ter
             Some(tail)
         }
         Expr::Call(function, arguments) => {
-            let arguments = arguments
+            let arguments: Vec<Term> = arguments
                 .iter()
-                .map(|argument| evaluate(atoms, argument, bindings, whole))
-                .collect::<Option<Vec<_>>>()?;
+                .map(|argument| {
+                    evaluate(atoms, argument, bindings, whole)
+                        .unwrap_or_else(|| Term::static_atom("EXIT"))
+                })
+                .collect();
             call(atoms, *function, &arguments)
         }
         Expr::AndAlso(left, right) => match &evaluate(atoms, left, bindings, whole)? {
@@ -809,12 +818,12 @@ fn call(atoms: &AtomTable, function: Guard, arguments: &[Term]) -> Option<Term> 
             Term::Map(map) => map.get(&arguments[0]).cloned(),
             _ => None,
         },
-        Guard::IsMapKey => {
-            truth(matches!(&arguments[1], Term::Map(map) if map.get(&arguments[0]).is_some()))
-        }
+        Guard::IsMapKey => match &arguments[1] {
+            Term::Map(map) => truth(map.get(&arguments[0]).is_some()),
+            _ => None,
+        },
         Guard::Size => match &arguments[0] {
             Term::Tuple(elements) => Some(Term::Integer(elements.len() as i64)),
-            Term::Map(map) => Some(Term::Integer(map.iter().count() as i64)),
             Term::Binary(binary) => Some(Term::Integer((binary.bit_size() / 8) as i64)),
             _ => None,
         },
@@ -1008,10 +1017,12 @@ fn bitwise_not(term: &Term) -> Option<Term> {
 fn shift(left: &Term, right: &Term, right_shift: bool) -> Option<Term> {
     let left = integer(left)?;
     let shift = right.small_integer()?;
-    if shift < 0 {
-        return None;
-    }
-    let shift = usize::try_from(shift).ok()?;
+    // A negative count reverses the direction (`erl_arith.c:1378-1436`).
+    let (shift, right_shift) = if shift < 0 {
+        (shift.unsigned_abs() as usize, !right_shift)
+    } else {
+        (shift as usize, right_shift)
+    };
     Some(integer_term(if right_shift {
         left >> shift
     } else {

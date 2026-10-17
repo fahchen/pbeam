@@ -778,6 +778,9 @@ update_element() ->
      catch_error(fun() -> ets:update_element(T, a, [{2, 9}, {2}]) end),
      catch_error(fun() -> ets:update_element(T, a, {2, 9}, bad) end),
      catch_error(fun() -> ets:update_element(T, a, {2, 9}, {a}) end),
+     catch_error(fun() -> ets:update_element(T, new, {3, x}, {new, 0}) end),
+     ets:lookup(T, new),
+     catch_error(fun() -> ets:update_element(T, missing, bad) end),
      catch_error(fun() -> ets:update_element(T, a, [], bad) end),
      catch_error(fun() -> ets:update_element(ets_probe_missing, a, {2, 9}) end),
      begin
