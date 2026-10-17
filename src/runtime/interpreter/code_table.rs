@@ -514,9 +514,10 @@ impl CodeTable {
     /// the `func_info` before the entry label of the fun entry. A fun of the
     /// code that waits for its `-on_load` function has the name of its
     /// function, as `fun_entry_send:init/0` gives it on ERTS, and a module
-    /// that the code table does not hold gives `None`. The code of a lambda
-    /// takes its free variables before its arguments, so the arity of that
-    /// function is not the arity of the fun (`jit/asm_load.c:1218-1223`),
+    /// that the code table does not hold gives `None`. A call of a fun puts
+    /// its arguments in `x(0)` onwards and then its free variables in the
+    /// registers after them, so the arity of that function is the arity of
+    /// the fun plus the number of free variables (`jit/asm_load.c:1218-1223`),
     /// and this function compares no arity.
     ///
     /// # Examples

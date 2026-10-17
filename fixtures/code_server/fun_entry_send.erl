@@ -15,8 +15,8 @@ init() ->
         Probe ->
             First = make_first(version_one),
             Second = make_second(version_one),
-            %% The name of a fun of code that waits for its -on_load function
-            %% is `[]` (`erl_fun.c:37-46`, `erl_bif_info.c:3998-4001`).
+            %% A fun of code that waits for its -on_load function has the
+            %% name of its function (`erl_fun.c:37-46`).
             Probe ! {stale_fun, first, First, erlang:fun_info(First, name)},
             Probe ! {stale_fun, second, Second, erlang:fun_info(Second, name)},
             {error, sent}
