@@ -526,6 +526,10 @@ fn runs_re_run_3_with_the_option_set_as_pinned_erts() {
     for (index, (result, expected)) in result.iter().zip(&expected).enumerate() {
         assert_eq!(result, expected, "case {index}");
     }
+    assert_eq!(
+        reference("run"),
+        "[{match,[{1,1}]},nomatch,nomatch,nomatch,nomatch,{match,[[98]]},{match,[<<98>>,<<98>>]},{match,[{0,3}]},nomatch,{match,[{0,3}]},{match,[{0,3}]},{match,[{0,1}]},{match,[{0,2}]},{match,[{3,1}]},{match,[{1,1}]},{match,[{1,1}]},{match,[{1,1}]},{match,[<<98>>]},{match,[{1,2}]},{match,[{1,2}]},{match,[<<98>>,<<98>>]},{match,[[98],[98]]},match,{match,[{1,1},{1,1}]},nomatch,nomatch,nomatch,{error,match_limit},nomatch,{match,[{0,1},{1,1}]},{match,[{1,1},{-1,0}]},{match,[{0,2}]},match,match,{match,[{0,2},{0,1},{-1,0},{1,1}]},{error,{compile,{[109,105,115,115,105,110,103,32,99,108,111,115,105,110,103,32,112,97,114,101,110,116,104,101,115,105,115],3}}},{error,match_limit_recursion},{match,[[{1,1}]]},match,{match,[[{1,1},{1,1}],[{4,1},{4,1}]]},{match,[<<98>>]},{match,[{1,1}]},{match,[{1,1},{1,1}]},{match,[{1,1},{1,1}]},{match,[{1,1},{1,1}]},nomatch,nomatch]\n"
+    );
 }
 
 #[test]
@@ -776,6 +780,39 @@ fn runs_a_match_that_uses_the_loop_limit_of_more_than_one_turn() {
         ])
     );
     assert_eq!(reference("yield"), "[{match,[{0,600001}]},nomatch]\n");
+    // Each ended turn adds its budget to the process total, as the switch
+    // out of the trap does (`erl_process.c:9678-9700`). One turn is
+    // `CONTEXT_REDS` 4000 (`erl_vm.h:53`), so a match that traps charges
+    // more than one turn; the charge stays in the last turn without this.
+    let outcome = program
+        .execute("re_probe", "yield_charge", &[])
+        .unwrap()
+        .term;
+    let Term::Tuple(charge) = &outcome else {
+        panic!("yield_charge gives a tuple");
+    };
+    let Term::Integer(used) = &charge[0] else {
+        panic!("the charge is an integer");
+    };
+    assert!(*used > 4_000, "the trapped match charges {used}");
+    assert_eq!(charge[1], matched(&program, vec![pair(0, 600001)]));
+}
+
+#[test]
+fn raises_internal_error_for_an_unexpected_pcre2_error() {
+    // The default case of `re_run` raises `internal_error` for a code that
+    // it does not list (`erl_bif_re.c:1788-1793`). ERTS marks the error
+    // `EXF_PANIC` (`error.h:133`) and ends the runtime, so only PBeam runs
+    // this probe. PCRE2 10.47 returns `PCRE2_ERROR_BAD_BACKSLASH_K` for
+    // `\K` in a lookahead (`pcre2.h:442`).
+    let program = program();
+    assert_eq!(
+        program
+            .execute("re_probe", "unexpected_error", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![error_term(&program, "internal_error")])
+    );
 }
 
 #[test]

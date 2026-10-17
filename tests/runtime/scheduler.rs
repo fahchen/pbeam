@@ -50,6 +50,24 @@ fn current(scheduler: &mut Scheduler) -> ProcessId {
 }
 
 #[test]
+fn adds_the_reductions_of_an_ended_turn_and_starts_the_next() {
+    // A BIF that runs several turns in one call adds each ended turn to the
+    // process total and starts the next with a full budget, as the switch
+    // out of the `erlang:re_run_trap/3` trap does (`erl_process.c:9678-9700`).
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    scheduler.current_process_mut().fcalls = 3_000;
+    scheduler.account_turn();
+    assert_eq!(scheduler.current_process().fcalls, CONTEXT_REDS);
+    assert_eq!(scheduler.current_process().reductions, 1_000);
+    scheduler.current_process_mut().fcalls = 500;
+    scheduler.account_turn();
+    assert_eq!(scheduler.current_process().fcalls, CONTEXT_REDS);
+    assert_eq!(scheduler.current_process().reductions, 4_500);
+}
+
+#[test]
 fn keeps_the_current_process_in_the_table_and_out_of_the_run_queue() {
     let mut scheduler = test_scheduler();
     scheduler.start(frame(), vec![], allow_all()).unwrap();

@@ -989,10 +989,11 @@ pub(super) fn run(
             .scheduler
             .current_process_mut()
             .bump_reductions(used);
-        context
-            .scheduler
-            .current_process_mut()
-            .bump_all_reductions();
+        // ERTS switches out at the trap and adds the whole turn to the
+        // process total (`erl_process.c:9678-9700`). PBeam runs the turns
+        // in one call, so it adds each ended turn here and starts a fresh
+        // budget.
+        context.scheduler.account_turn();
         limit = loop_limit(CONTEXT_REDS);
         data.set_loops_left(limit);
         data.clear_restart();
@@ -1021,9 +1022,25 @@ pub(super) fn run(
     ) {
         return Ok(BifResult::badarg());
     }
-    // Every other negative code is unreachable for a live code and a
-    // subject that this call checked: ERTS asserts them too
-    // (`erl_bif_re.c:1788-1793`), and PCRE2 returns one of the codes above.
+    // Every other negative code raises `internal_error`, as the default case
+    // of `re_run` does (`erl_bif_re.c:1788-1793`). ERTS asserts that PCRE2
+    // does not return one for a live code and a subject that this call
+    // checked, but a build can return another code.
+    if rc < 0
+        && !matches!(
+            rc,
+            pcre2::ERROR_NOMATCH
+                | pcre2::ERROR_MATCHLIMIT
+                | pcre2::ERROR_DEPTHLIMIT
+                | pcre2::ERROR_HEAPLIMIT
+                | pcre2::ERROR_RECURSELOOP
+        )
+    {
+        return Ok(BifResult::Raise {
+            class: ExceptionClass::Error,
+            reason: Term::static_atom("internal_error"),
+        });
+    }
     context
         .scheduler
         .current_process_mut()

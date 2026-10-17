@@ -2,7 +2,8 @@
 -export([main/0, options/0, errors/0, badarg/0, iodata/0, unicode_list/0,
          export/0, unsupported/1, id/1,
          run2/0, run/0, captures/0, globals/0, run_errors/0, reductions/0,
-         spot/0, internal_run_first/0, yield/0, recursion/0]).
+         spot/0, internal_run_first/0, yield/0, yield_charge/0, recursion/0,
+         unexpected_error/0]).
 
 %% prim_tty:init/1 compiles the ANSI regular expression (prim_tty.erl:238).
 %% The fifth element is a reference (erl_bif_re.c:607-609).
@@ -244,7 +245,7 @@ spot() ->
      re:run(<<"abc">>, <<"(a)(b)?">>, [{capture, [4], index}])].
 
 %% The reductions that a re:run call charges, as erl_bif_re.c:1718 and 1796
-%% read them. erl +S 1 runs the probe on one scheduler.
+%% read them.
 reductions() ->
     {ok, Compiled} = re:compile(<<"b">>, []),
     [charge(Subject, RE, Options)
@@ -288,12 +289,30 @@ id(X) -> X.
 recursion() ->
     [re:run(<<"x">>, <<"(?R)">>, []), re:run(<<"xx">>, <<"a(?R)">>, [])].
 
+%% An error that PCRE2 returns for a live code raises `internal_error`, as
+%% the default case of re_run does (erl_bif_re.c:1788-1793). The pattern
+%% reaches PCRE2_ERROR_BAD_BACKSLASH_K (pcre2.h:442).
+unexpected_error() ->
+    [catch_error(fun() ->
+         re:run(<<"a">>, <<"(?(DEFINE)(?<k>a\\K))(?=(?&k))">>, [])
+     end)].
+
 %% A match that uses the loop limit of one turn continues with a fresh
-%% budget (`erl_bif_re.c:1730-1748`, `1852-1866`). The reduction total of
-%% this call is the ERTS one, but ERTS switches the process out between the
-%% turns and PBeam runs them in one call, so only the value is compared.
+%% budget (`erl_bif_re.c:1730-1748`, `1852-1866`). ERTS switches the process
+%% out between the turns; PBeam runs them in one call. `yield_charge/0`
+%% checks that each ended turn reaches the process total.
 yield() ->
     [re:run(dup(600000, $a) ++ "b", <<"a*b">>), re:run(dup(600000, $a), <<"a*b">>)].
+
+%% The reduction charge of the first call of `yield/0`, around the call. The
+%% charge is more than one turn (`CONTEXT_REDS`, erl_vm.h:53) because each
+%% ended turn adds its budget, as the trap does (erl_bif_re.c:1730-1748).
+yield_charge() ->
+    Subject = dup(600000, $a) ++ "b",
+    {reductions, Before} = process_info(self(), reductions),
+    Result = re:run(Subject, <<"a*b">>, []),
+    {reductions, After} = process_info(self(), reductions),
+    {After - Before, Result}.
 
 %% The fourth argument of re:internal_run/4 must be true or false
 %% (erl_bif_re.c:1805-1816). ERTS does not export the function, so only
