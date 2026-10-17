@@ -3,7 +3,8 @@
          export/0, imported/0, imported_run/0, imported_badarg/0,
          imported_badopt/0,
          unsupported/1, id/1,
-         run2/0, run/0, captures/0, globals/0, run_errors/0, reductions/0,
+         run2/0, run/0, captures/0, named_captures/0, named_errors/0,
+         globals/0, run_errors/0, reductions/0, named_reductions/0,
          spot/0, internal_run_first/0, yield/0, yield_charge/0, recursion/0,
          unexpected_error/0, forged_pairs/0, recursion_after_restart/0]).
 
@@ -223,13 +224,7 @@ crc32_byte(Crc, N) ->
     crc32_byte((Crc bsr 1) bxor Mask, N - 1).
 
 %% Calls that ERTS runs and PBeam does not support yet.
-unsupported(chardata) -> re:compile(foo, [unicode]);
-unsupported(names) ->
-    re:run(<<"abc">>, <<"(?<x>a)(?<y>b)?">>, [{capture, all_names}]);
-unsupported(name_index) ->
-    re:run(<<"abc">>, <<"(?<x>a)(?<y>b)?">>, [{capture, [x], index}]);
-unsupported(name_list) ->
-    re:run(<<"abc">>, <<"(?<x>a)(?<y>b)?">>, [{capture, ["x"], index}]).
+unsupported(chardata) -> re:compile(foo, [unicode]).
 
 %% re:run/2: the option list is []. The subject and the pattern are a
 %% binary or a list (re_run, erl_bif_re.c:1485-1803).
@@ -304,6 +299,60 @@ captures() ->
     [re:run(<<"abc">>, <<"(a)(b)?">>, [{capture, Values, Type}])
      || Values <- [all, all_but_first, first, none, [0, 1, 2, 7]],
         Type <- [index, list, binary]].
+
+%% The capture result of a pattern with named groups (build_one_capture,
+%% erl_bif_re.c:1269-1307; build_capture, erl_bif_re.c:1309-1479). The
+%% name table of PCRE2 orders the names alphabetically, and `all_names`
+%% gives one element of each distinct name in that order. A name that the
+%% pattern does not define gives an empty element.
+named_captures() ->
+    [re:run(<<"abc">>, <<"(?<x>a)(?<y>b)?">>, Options)
+     || Options <- [[{capture, all}],
+                    [{capture, all_but_first}],
+                    [{capture, all_names}],
+                    [{capture, all_names, binary}],
+                    [{capture, all_names, list}],
+                    [{capture, [x]}],
+                    [{capture, [y], list}],
+                    [{capture, ["x", y], binary}],
+                    [{capture, [nope]}],
+                    [{capture, ["nope"], list}]]]
+    ++ [re:run(Subject, Pattern, Options)
+        || {Subject, Pattern, Options} <-
+               [{<<"abc">>, <<"(?<z>a)(?<m>b)(?<a>c)">>, [{capture, all}]},
+                {<<"abc">>, <<"(?<z>a)(?<m>b)(?<a>c)">>,
+                 [{capture, all_but_first}]},
+                {<<"abc">>, <<"(?<z>a)(?<m>b)(?<a>c)">>,
+                 [{capture, all_names}]},
+                {<<"abc">>, <<"(?<z>a)(?<m>b)(?<a>c)">>,
+                 [{capture, [z, m, a]}]},
+                {<<"abc">>, <<"(?<z>a)(?<m>b)(?<a>c)">>,
+                 [{capture, ["a"], binary}]},
+                {<<"ac">>, <<"(?<x>a)(?<y>b)?">>, [{capture, all_names}]},
+                {<<"ac">>, <<"(?<x>a)(?<y>b)?">>, [{capture, [y], list}]},
+                {<<"ab">>, <<"(?<n>a)(?<n>b)">>, [dupnames, {capture, all_names}]},
+                {<<"ab">>, <<"(?<n>a)(?<n>b)?">>, [dupnames, {capture, [n]}]},
+                {<<"a">>, <<"(?<n>b)?(?<n>a)">>, [dupnames, {capture, [n]}]},
+                {<<"a">>, <<"a(?<n>b)?(?<n>c)?">>, [dupnames, {capture, [n]}]},
+                {<<"ab">>, <<"(?J)(?<n>a)(?<n>b)">>, [{capture, all_names}]},
+                {<<"ab">>, <<"(?J)(?<n>a)(?<n>b)">>, [{capture, [n]}]},
+                {<<"abc">>, <<"(?<x>a)(?<y>b)">>, [dupnames, {capture, [x]}]},
+                {<<"abc">>, <<"(?<x>a)(?<y>b)">>,
+                 [dupnames, {capture, all_names}]}]]
+    ++ [re:run(<<"abab">>, <<"(?<x>a)(?<y>b)">>,
+               [global, {capture, [y], binary}]),
+        re:run(<<"abab">>, <<"(?<x>a)(?<y>b)">>,
+               [{capture, [x]}, global])].
+
+%% A name that is not valid iodata gives badarg, as each other value that
+%% `build_capture` rejects (erl_bif_re.c:1436-1458). ERTS does not define a
+%% name that the pattern does not list, so that case gives an empty element
+%% rather than an exception (`named_captures/0`).
+named_errors() ->
+    [catch_error(fun() ->
+         re:run(<<"abc">>, <<"(?<x>a)">>, [{capture, [Name]}])
+     end)
+     || Name <- [[], [foo], [256]]].
 
 %% A global run with several matches, with an empty match, and with an
 %% offset (re.erl:1796-1899).
@@ -394,6 +443,15 @@ charge(Subject, RE, Options) ->
     Result = re:run(Subject, RE, Options),
     {reductions, After} = process_info(self(), reductions),
     {After - Before, Result}.
+
+%% The reductions that a re:run call with named groups charges. The name
+%% lookup reads the name table of the code and adds no loop of the match.
+named_reductions() ->
+    [charge(Subject, RE, Options)
+     || {Subject, RE, Options} <-
+            [{<<"abc">>, <<"(?<x>a)(?<y>b)?">>, [{capture, all_names}]},
+             {<<"abc">>, <<"(?<x>a)(?<y>b)?">>, [{capture, [x], binary}]},
+             {<<"abc">>, <<"(?<z>a)(?<m>b)(?<a>c)">>, [{capture, [z, m, a]}]}]].
 
 info({ok, {re_pattern, Count, Unicode, Crlf, Ref}}) when is_reference(Ref) ->
     {Count, Unicode, Crlf}.

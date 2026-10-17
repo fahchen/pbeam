@@ -23,6 +23,41 @@ int pbeam_pcre2_serialized_code_is_valid(const uint8_t *bytes, size_t blocksize)
       && code.code_start < blocksize;
 }
 
+/* Copy the name table of a compiled pattern into a caller buffer, so that
+   the caller reads the entries in safe code. PCRE2 keeps the table in the
+   code block, and pcre2_pattern_info gives its address. The function returns
+   -1 when a query or the size check fails. */
+int pbeam_pcre2_name_table(const void *code_ptr, uint8_t *buffer, size_t size,
+                           uint32_t *count, uint32_t *entry_size)
+{
+  pcre2_code *code = (pcre2_code *)code_ptr;
+  uint32_t number;
+  uint32_t entry;
+  unsigned char *table;
+
+  if (pcre2_pattern_info(code, PCRE2_INFO_NAMECOUNT, &number) != 0) {
+    return -1;
+  }
+  if (number == 0) {
+    *count = 0;
+    *entry_size = 0;
+    return 0;
+  }
+  if (pcre2_pattern_info(code, PCRE2_INFO_NAMEENTRYSIZE, &entry) != 0) {
+    return -1;
+  }
+  if (pcre2_pattern_info(code, PCRE2_INFO_NAMETABLE, &table) != 0) {
+    return -1;
+  }
+  if (size < (size_t)number * (size_t)entry) {
+    return -1;
+  }
+  memcpy(buffer, table, (size_t)number * (size_t)entry);
+  *count = number;
+  *entry_size = entry;
+  return 0;
+}
+
 size_t pbeam_pcre2_serialized_code_start_offset(void)
 {
   return offsetof(pcre2_real_code, code_start);

@@ -105,9 +105,15 @@ const INFO_CAPTURECOUNT: u32 = 4;
 /// `PCRE2_INFO_BSR` (`pcre2.h:452`): the `\R` convention of the compiled
 /// code, as a `uint32_t` `PCRE2_BSR_*` value.
 const INFO_BSR: u32 = 3;
+/// `PCRE2_INFO_ALLOPTIONS` (`pcre2.h:449`): the options that the compile
+/// set, as a `uint32_t` `PCRE2_*` value.
+const INFO_ALLOPTIONS: u32 = 0;
 /// `PCRE2_INFO_NAMECOUNT` (`pcre2.h:466`): the number of named capture
 /// groups, as a `uint32_t`.
 const INFO_NAMECOUNT: u32 = 17;
+/// `PCRE2_INFO_NAMEENTRYSIZE` (`pcre2.h:467`): the size of one entry of
+/// the name table, as a `uint32_t`.
+const INFO_NAMEENTRYSIZE: u32 = 18;
 /// `PCRE2_INFO_NEWLINE` (`pcre2.h:469`): the newline convention of the
 /// compiled code, as a `uint32_t` `PCRE2_NEWLINE_*` value.
 const INFO_NEWLINE: u32 = 20;
@@ -185,6 +191,13 @@ unsafe extern "C" {
         bytes: *const u8,
         general: *mut c_void,
     ) -> i32;
+    fn pbeam_pcre2_name_table(
+        code: *const c_void,
+        buffer: *mut u8,
+        size: usize,
+        count: *mut u32,
+        entry_size: *mut u32,
+    ) -> c_int;
     fn pbeam_pcre2_serialized_header_size() -> usize;
     fn pbeam_pcre2_serialized_tables_size() -> usize;
     fn pbeam_pcre2_serialized_blocksize_offset() -> usize;
@@ -269,6 +282,78 @@ impl Code {
     /// ```
     pub(super) fn name_count(&self) -> u32 {
         self.info(INFO_NAMECOUNT)
+    }
+
+    /// Return whether the compile set `PCRE2_DUPNAMES`, as
+    /// `build_capture` reads `PCRE2_INFO_ALLOPTIONS`
+    /// (`erl_bif_re.c:1379`). The inline item `(?J)` allows duplicate
+    /// names but does not set the bit.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(compile(b"(?<a>x)(?<a>y)", DUPNAMES, None, None)?.has_dupnames());
+    /// assert!(!compile(b"(?J)(?<a>x)(?<a>y)", 0, None, None)?.has_dupnames());
+    /// ```
+    pub(super) fn has_dupnames(&self) -> bool {
+        self.info(INFO_ALLOPTIONS) & DUPNAMES != 0
+    }
+
+    /// Return the entries of the name table of the code, as
+    /// `pcre2_substring_nametable_scan` reads them for `build_one_capture`
+    /// (`erl_bif_re.c:1269-1307`): the number of one named group and the
+    /// bytes of its name without the final NUL byte. PCRE2 sorts the
+    /// entries by name, and the entries of one name are adjacent.
+    ///
+    /// The C shim `pbeam_pcre2_name_table` copies the table into a buffer
+    /// that this value owns, as `pbeam_pcre2_serialized_code_is_valid`
+    /// checks serialized bytes. Rust then reads the copy.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let code = compile(b"(?<z>a)(?<m>b)", 0, None, None)?;
+    /// assert_eq!(code.names(), vec![(2, b"m".to_vec()), (1, b"z".to_vec())]);
+    /// assert!(compile(b"(a)", 0, None, None)?.names().is_empty());
+    /// ```
+    pub(super) fn names(&self) -> Vec<(u32, Vec<u8>)> {
+        let count = self.name_count() as usize;
+        if count == 0 {
+            return Vec::new();
+        }
+        let entry_size = self.info(INFO_NAMEENTRYSIZE) as usize;
+        let mut table = vec![0u8; count * entry_size];
+        let mut copied_count = 0u32;
+        let mut copied_entry_size = 0u32;
+        // SAFETY: `self.0` is a live `pcre2_code` that only this value
+        // owns. `table` has `count * entry_size` writable bytes, and the
+        // shim copies at most that many bytes into it.
+        let result = unsafe {
+            pbeam_pcre2_name_table(
+                self.0.as_ptr(),
+                table.as_mut_ptr(),
+                table.len(),
+                &raw mut copied_count,
+                &raw mut copied_entry_size,
+            )
+        };
+        assert_eq!(result, 0, "PCRE2 name table copy failed");
+        assert_eq!(
+            (copied_count, copied_entry_size),
+            (count as u32, entry_size as u32)
+        );
+        table
+            .chunks_exact(entry_size)
+            .map(|entry| {
+                let number = u32::from(u16::from_be_bytes([entry[0], entry[1]]));
+                let end = entry[2..]
+                    .iter()
+                    .position(|&byte| byte == 0)
+                    .unwrap_or(entry_size - 2)
+                    + 2;
+                (number, entry[2..end].to_vec())
+            })
+            .collect()
     }
 
     /// Return the serialized form of this code, as `build_compile_export`

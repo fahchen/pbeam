@@ -527,9 +527,23 @@ enum Groups {
     All,
     /// The capture `all_but_first`: each group from group 1.
     AllButFirst,
-    /// The capture `first` and a list of group numbers: the group of each
-    /// element of the result.
-    Indexes(Vec<i32>),
+    /// The capture `first` and a list of groups: one field of each element
+    /// of the result.
+    Fields(Vec<Field>),
+}
+
+/// One element of a capture list, as one entry of `ri->v` and the entries
+/// that `build_one_capture` adds after it (`erl_bif_re.c:1269-1307`).
+enum Field {
+    /// A group number. `-1` is the number of a name that the code does not
+    /// define, which gives an empty element
+    /// (`erl_bif_re.c:1301-1304`, `1126-1132`).
+    Index(i32),
+    /// The numbers of the groups that define one name. ERTS gives one
+    /// element: the group of the first number that took part in the match,
+    /// or an empty element when no group took part
+    /// (`erl_bif_re.c:1115-1125`).
+    Duplicate(Vec<i32>),
 }
 
 /// The capture specification of a match, as the `ReturnInfo` of
@@ -579,10 +593,9 @@ fn is_text_pattern(pattern: &Term) -> bool {
 /// `binary` (`erl_bif_re.c:1322-1334`), for values that are neither a
 /// capture atom nor a list (`erl_bif_re.c:1463-1465`), for a list that is
 /// not proper (`erl_bif_re.c:1460-1462`), and for an element of a list that
-/// is neither an integer nor a name (`erl_bif_re.c:1456-1458`). PBeam does
-/// not support a named group yet, so an element that is a name, and
-/// `all_names` on a pattern with names, give the runtime error
-/// [`unsupported_name`].
+/// is neither an integer nor a name (`erl_bif_re.c:1456-1458`). A name is
+/// an atom, a binary, or an iodata list. Its group number comes from the
+/// name table of the code (`build_one_capture`, `erl_bif_re.c:1269-1307`).
 ///
 /// # Examples
 ///
@@ -591,26 +604,22 @@ fn is_text_pattern(pattern: &Term) -> bool {
 /// let all = Term::static_atom("all");
 /// let index = Term::static_atom("index");
 /// // [{0, 0}]
-/// let capture = build_capture(&code, Some((&all, &Term::static_atom("none"))))?;
+/// let capture = build_capture(atoms, &code, Some((&all, &Term::static_atom("none"))))?;
 /// assert!(capture.is_some_and(|capture| capture.kind.is_none()));
 /// let bad = Term::list_from(vec![Term::Float(1.0)]);
-/// assert!(build_capture(&code, Some((&bad, &index))).unwrap().is_none());
+/// assert!(build_capture(atoms, &code, Some((&bad, &index))).unwrap().is_none());
 /// ```
-///
-/// # Errors
-///
-/// Return a runtime error when the capture names a group, which PBeam does
-/// not support yet.
 fn build_capture(
+    atoms: &AtomTable,
     code: &pcre2::Code,
     capture: Option<(&Term, &Term)>,
-) -> Result<Option<Capture>, BeamError> {
+) -> Option<Capture> {
     let default = Capture {
         kind: Some(ReturnType::Index),
         groups: Groups::All,
     };
     let Some((values, kind)) = capture else {
-        return Ok(Some(default));
+        return Some(default);
     };
     let kind = if is_atom(kind, "index") {
         Some(ReturnType::Index)
@@ -619,26 +628,32 @@ fn build_capture(
     } else if is_atom(kind, "binary") {
         Some(ReturnType::Binary)
     } else {
-        return Ok(None);
+        return None;
     };
     if is_atom(values, "none") || matches!(values, Term::Nil) {
         // `build_capture` gives the capture `none` for the atom `none` and
         // for `[]` (`erl_bif_re.c:1340-1344`).
-        return Ok(Some(Capture {
+        return Some(Capture {
             kind: None,
             groups: Groups::All,
-        }));
+        });
     }
     if is_atom(values, "all_names") {
         // `all_names` gives the capture `none` for a pattern with no name
-        // (`erl_bif_re.c:1367-1373`).
-        if code.name_count() > 0 {
-            return Err(unsupported_name());
+        // (`erl_bif_re.c:1367-1373`), and each distinct name in the order
+        // of the name table for a pattern with names
+        // (`erl_bif_re.c:1381-1400`).
+        let fields = name_fields(code);
+        if fields.is_empty() {
+            return Some(Capture {
+                kind: None,
+                groups: Groups::All,
+            });
         }
-        return Ok(Some(Capture {
-            kind: None,
-            groups: Groups::All,
-        }));
+        return Some(Capture {
+            kind,
+            groups: Groups::Fields(fields),
+        });
     }
     let groups = if is_atom(values, "all") {
         Groups::All
@@ -647,43 +662,125 @@ fn build_capture(
     } else if is_atom(values, "first") {
         // `build_capture` writes the index 0 of the capture `first`
         // (`erl_bif_re.c:1348-1355`).
-        Groups::Indexes(vec![0])
-    } else if let Some(elements) = values.proper_list() {
-        let mut indexes = Vec::new();
-        for element in elements {
-            if let Term::Atom(_) | Term::Binary(_) = element {
-                return Err(unsupported_name());
-            }
-            if element.is_list() {
-                return Err(unsupported_name());
-            }
-            let Some(index) = option_integer(element) else {
-                return Ok(None);
-            };
-            indexes.push(index);
-        }
-        Groups::Indexes(indexes)
+        Groups::Fields(vec![Field::Index(0)])
     } else {
-        return Ok(None);
+        let elements = values.proper_list()?;
+        let mut fields = Vec::new();
+        for element in elements {
+            fields.push(capture_field(atoms, code, element)?);
+        }
+        Groups::Fields(fields)
     };
-    Ok(Some(Capture { kind, groups }))
+    Some(Capture { kind, groups })
 }
 
-/// Return the runtime error of a `re:run/2,3` call that names a capture
-/// group. PBeam does not resolve a group name to its number yet (row
-/// "Regular expressions" in `docs/erts-differences.md`), and a name that it
-/// ignored would give a wrong capture, so the call stops.
+/// Return the field of one element of a capture list, or `None` when
+/// `build_capture` gives `badarg` for it (`erl_bif_re.c:1404-1466`).
+///
+/// An integer is a group number. An atom, a binary, or a nonempty list is
+/// a group name, and its number comes from the name table of `code`. Each
+/// other value gives `badarg`, also `[]` (`is_list` is false for it,
+/// `erl_bif_re.c:1416`).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let error = unsupported_name();
+/// let code = pcre2::compile(b"(?<x>a)", 0, None, None).unwrap();
+/// // {0, 0}
+/// let field = capture_field(atoms, &code, &Term::Integer(0)).unwrap();
+/// // {0, 0}
+/// let field = capture_field(atoms, &code, &Term::static_atom("x")).unwrap();
+/// assert!(capture_field(atoms, &code, &Term::Float(1.0)).is_none());
+/// assert!(capture_field(atoms, &code, &Term::nil()).is_none());
 /// ```
-fn unsupported_name() -> BeamError {
-    crate::error::error(
-        "unsupported capture group name in re:run/2,3 \
-         (see \"Regular expressions\" in docs/erts-differences.md)",
-    )
+fn capture_field(atoms: &AtomTable, code: &pcre2::Code, element: &Term) -> Option<Field> {
+    match element {
+        Term::Atom(atom) => Some(name_field(code, atoms.name_of(atom).as_bytes())),
+        Term::Binary(_) | Term::Cons(_) => {
+            let bytes = iolist::iodata_bytes(element)?;
+            Some(name_field(code, &bytes))
+        }
+        _ => option_integer(element).map(Field::Index),
+    }
+}
+
+/// Return the field of the group name `name` of `code`, as
+/// `build_one_capture` (`erl_bif_re.c:1269-1307`) makes it. Without the
+/// `dupnames` compile bit, that function reads the number with
+/// `pcre2_substring_number_from_name`, which gives `-1` for a missing name
+/// and for a name that several entries define. With the bit, it gives the
+/// number of one entry and one field for all entries of a duplicate name.
+///
+/// A name is a C string: the bytes up to its first NUL byte are the name
+/// that PCRE2 looks up (`erl_bif_re.c:1434`, `1453`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let code = pcre2::compile(b"(?<x>a)", 0, None, None).unwrap();
+/// assert!(matches!(name_field(&code, b"x"), Field::Index(1)));
+/// assert!(matches!(name_field(&code, b"no"), Field::Index(-1)));
+/// ```
+fn name_field(code: &pcre2::Code, name: &[u8]) -> Field {
+    let end = name
+        .iter()
+        .position(|&byte| byte == 0)
+        .unwrap_or(name.len());
+    let name = &name[..end];
+    let entries: Vec<(u32, Vec<u8>)> = code
+        .names()
+        .into_iter()
+        .filter(|(_, entry)| entry.as_slice() == name)
+        .collect();
+    if !code.has_dupnames() {
+        return match entries.as_slice() {
+            [(number, _)] => Field::Index(*number as i32),
+            _ => Field::Index(-1),
+        };
+    }
+    match entries.as_slice() {
+        [] => Field::Index(-1),
+        [(number, _)] => Field::Index(*number as i32),
+        entries => Field::Duplicate(entries.iter().map(|&(number, _)| number as i32).collect()),
+    }
+}
+
+/// Return the fields of the names of `code`, as the `all_names` case of
+/// `build_capture` (`erl_bif_re.c:1356-1402`) makes them. Without the
+/// `dupnames` compile bit, each entry is one field in the order of the
+/// name table. With the bit, one field holds all entries of a duplicate
+/// name.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let code = pcre2::compile(b"(?<z>a)(?<m>b)", 0, None, None).unwrap();
+/// // 2 fields, for `m` then `z`
+/// assert_eq!(name_fields(&code).len(), 2);
+/// ```
+fn name_fields(code: &pcre2::Code) -> Vec<Field> {
+    let names = code.names();
+    if !code.has_dupnames() {
+        return names
+            .into_iter()
+            .map(|(number, _)| Field::Index(number as i32))
+            .collect();
+    }
+    let mut fields = Vec::new();
+    let mut start = 0;
+    while start < names.len() {
+        let mut end = start + 1;
+        while end < names.len() && names[end].1 == names[start].1 {
+            end += 1;
+        }
+        let entries = &names[start..end];
+        fields.push(match entries {
+            [(number, _)] => Field::Index(*number as i32),
+            _ => Field::Duplicate(entries.iter().map(|&(number, _)| number as i32).collect()),
+        });
+        start = end;
+    }
+    fields
 }
 
 /// Return the value of a match, as `build_exec_return`
@@ -737,11 +834,20 @@ fn exec_return(
     let elements: Vec<Term> = match &capture.groups {
         Groups::All => (0..rc).map(element).collect(),
         Groups::AllButFirst => (1..rc).map(element).collect(),
-        Groups::Indexes(indexes) => indexes
+        Groups::Fields(fields) => fields
             .iter()
-            .map(|&index| match usize::try_from(index) {
-                Ok(index) if index < rc => element(index),
-                _ => empty_element(kind),
+            .map(|field| match field {
+                Field::Index(index) => match usize::try_from(*index) {
+                    Ok(index) if index < rc => element(index),
+                    _ => empty_element(kind),
+                },
+                Field::Duplicate(indexes) => indexes
+                    .iter()
+                    .find(|&&index| {
+                        usize::try_from(index)
+                            .is_ok_and(|index| index < rc && ovector[index * 2] != pcre2::UNSET)
+                    })
+                    .map_or_else(|| empty_element(kind), |&index| element(index as usize)),
             })
             .collect(),
     };
@@ -920,10 +1026,9 @@ fn ovec_pairs(count: i64) -> u32 {
 ///
 /// # Errors
 ///
-/// Return the runtime error of [`unsupported_name`] for a capture that
-/// names a group, the runtime error of the scheduler for a run without a
-/// new reference, and a runtime error for a PCRE2 result that this code
-/// does not expect.
+/// Return the runtime error of the scheduler for a run without a new
+/// reference, and a runtime error for a PCRE2 result that this code does
+/// not expect.
 pub(super) fn run(
     context: &mut BifContext<'_>,
     subject: &Term,
@@ -1094,7 +1199,7 @@ pub(super) fn run(
                     .expect("the reference holds a compiled expression")
             }
         };
-        let Some(capture) = build_capture(code, parsed.capture())? else {
+        let Some(capture) = build_capture(&context.scheduler.atoms, code, parsed.capture()) else {
             return Ok(BifResult::badarg());
         };
         let rc = pcre2::execute(
