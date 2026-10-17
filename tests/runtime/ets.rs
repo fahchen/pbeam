@@ -181,6 +181,48 @@ fn frees_the_objects_of_an_ordered_set_one_for_each_reduction() {
     assert_eq!(tables.free_segments(ProcessId(1), 1), Some(0));
     assert_eq!(live(&tables), 0);
     assert!(tables.freeing.is_empty());
+    // A delete of an `ordered_set` object moves the last object into the
+    // freed slot, so the slots stay dense and a deleted table drops no slot
+    // of a freed object.
+    let mut table = Table::new(ProcessId(1), Access::Public, 1, TableType::OrderedSet);
+    for key in 0..5 {
+        table.insert(&atoms, vec![Term::Integer(key)]);
+    }
+    table.delete(&atoms, &Term::Integer(3));
+    assert_eq!(table.objects.len(), 4);
+    assert_eq!(table.object(&atoms, &Term::Integer(3)), None);
+    assert_eq!(
+        table.object(&atoms, &Term::Integer(4)),
+        Some(&[Term::Integer(4)][..])
+    );
+    table.delete(&atoms, &Term::Integer(4));
+    assert_eq!(table.objects.len(), 3);
+    assert_eq!(
+        table.object(&atoms, &Term::Integer(2)),
+        Some(&[Term::Integer(2)][..])
+    );
+    // The moved object can follow another key in its bucket chain: the chain
+    // then points to the slot that the object moves into.
+    let probe = Table::new(ProcessId(1), Access::Public, 1, TableType::OrderedSet);
+    let bucket = |key: i64| probe.bucket(stored_hash(&atoms, &Term::Integer(key)));
+    let (earlier, later) = (0..256)
+        .find_map(|later| {
+            (0..later)
+                .find(|&earlier| bucket(earlier) == bucket(later))
+                .map(|earlier| (earlier, later))
+        })
+        .expect("256 keys share 256 buckets");
+    let filler = (0..256)
+        .find(|&key| bucket(key) != bucket(later) && key != later)
+        .expect("a bucket holds one key");
+    let mut table = Table::new(ProcessId(1), Access::Public, 1, TableType::OrderedSet);
+    for key in [earlier, filler, later] {
+        table.insert(&atoms, vec![Term::Integer(key)]);
+    }
+    table.delete(&atoms, &Term::Integer(filler));
+    assert_eq!(table.objects.len(), 2);
+    assert!(table.object(&atoms, &Term::Integer(earlier)).is_some());
+    assert!(table.object(&atoms, &Term::Integer(later)).is_some());
 }
 
 #[test]

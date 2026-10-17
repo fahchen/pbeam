@@ -750,9 +750,10 @@ impl Freeing {
     /// node for each reduction and returns when the reductions are less
     /// than 0 (`erl_db_tree.c:2877-2904`). Return the number of objects that
     /// are free, or `None` when the table holds no object. The walk follows
-    /// the bucket chains of the live keys, so it reads no slot of an object
-    /// that an earlier delete freed, as the ERTS walk reads only the live
-    /// nodes of the tree.
+    /// the bucket chains of the live keys, and [`Table::compact`] keeps the
+    /// slots dense, so the free of the table drops one slot for each object
+    /// that is in it and no slot of an object that an earlier delete freed,
+    /// as the ERTS walk reads only the live nodes of the tree.
     ///
     /// # Examples
     ///
@@ -1908,12 +1909,59 @@ impl Table {
             self.free.push(slot);
             slot = std::mem::replace(&mut self.older[slot], EMPTY);
         }
+        if self.table_type == TableType::OrderedSet {
+            self.compact(atoms, newest);
+        }
         for _ in 0..RESIZE_STEPS {
             if self.object_count() >= self.shrink_limit() {
                 break;
             }
             self.join();
         }
+    }
+
+    /// Move the object of the last slot into the slot `freed` of the
+    /// `ordered_set` object that [`Table::delete`] just freed, and remove
+    /// the last slot, so the slots of the table stay dense. The moved object
+    /// keeps its key and its place in the bucket chain, and its slot in the
+    /// key index changes. The free of a deleted `ordered_set` table then
+    /// drops one slot for each object of the table and no slot of an object
+    /// that an earlier delete freed, as the ERTS tree walk reads the live
+    /// nodes only (`do_free_tree_continue`, `erl_db_tree.c:2877-2904`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::OrderedSet);
+    /// let atoms = AtomTable::new();
+    /// table.insert(&atoms, vec![Term::Integer(1)]);
+    /// table.insert(&atoms, vec![Term::Integer(2)]);
+    /// table.delete(&atoms, &Term::Integer(1));
+    /// assert_eq!(table.objects.len(), 1);
+    /// ```
+    fn compact(&mut self, atoms: &AtomTable, freed: usize) {
+        debug_assert_eq!(self.free.pop(), Some(freed));
+        let last = self.objects.len() - 1;
+        if freed == last {
+            self.objects.pop();
+            self.older.pop();
+            self.next.pop();
+            return;
+        }
+        let moved = self.object_of(last);
+        let moved_hash = stored_hash(atoms, self.key(moved));
+        self.objects[freed] = self.objects.pop().expect("the last slot is live");
+        self.older[freed] = self.older.pop().expect("the last slot is allocated");
+        self.index.remove(moved_hash, last);
+        self.index.insert(moved_hash, freed);
+        let bucket = self.bucket(moved_hash);
+        // The chain walk reads `next[last]`, so the chain moves before the
+        // array loses its last slot.
+        match self.key_before(bucket, last) {
+            EMPTY => self.heads[bucket] = freed,
+            before => self.next[before] = freed,
+        }
+        self.next[freed] = self.next.pop().expect("the last slot is allocated");
     }
 
     /// Return the number of slots of the ERTS hash table: the first segment
