@@ -4,7 +4,7 @@
 pub(super) mod pattern;
 
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::hash::{DefaultHasher, Hasher};
 
 use crate::term::atom_hash;
@@ -84,6 +84,10 @@ pub(super) struct Freeing {
     /// The next key of the bucket `bucket` whose object is not free, or
     /// `EMPTY` when the walk reads the next bucket.
     next: usize,
+    /// The number of delete records that are not free yet, which the free
+    /// consumes before the segments (`db_free_table_continue_hash`,
+    /// `erl_db_hash.c:3122-3137`).
+    fixdels: usize,
 }
 
 /// One ETS hash table: a `set`, a `bag`, or a `duplicate_bag` table.
@@ -183,6 +187,10 @@ pub(super) struct Table {
     /// slots of their objects. The objects stay in the table, and their
     /// chain nodes stay in the bucket chains, until the last unfix.
     retained: HashMap<u64, Vec<Retained>>,
+    /// The stored hashes of the retained records by bucket, so a segment
+    /// free visits only the buckets that have a record
+    /// (`db_free_table_continue_hash`, `erl_db_hash.c:3122-3149`).
+    retained_buckets: BTreeMap<usize, Vec<u64>>,
     /// The number of delete records that the fixation keeps, as the count of
     /// the ERTS `FixedDeletion` records (`erl_db_hash.c:221-272`): one for a
     /// delete of a key, one for a clear, and one for each bucket of a select
@@ -741,13 +749,10 @@ impl EtsTables {
             };
             if let Some(mut table) = self.tables.remove(&id) {
                 let fixers = table.fixers();
-                reds -= i32::try_from(fixers.len() + table.fixdels).unwrap_or(i32::MAX);
+                reds -= i32::try_from(fixers.len()).unwrap_or(i32::MAX);
                 // The table goes, so each fixation of it goes too
-                // (`free_fixations_locked`, `erl_db.c:5304-5318`), and its
-                // delete records free with one reduction for each
-                // (`erl_db_hash.c:3122-3137`).
+                // (`free_fixations_locked`, `erl_db.c:5304-5318`).
                 table.fixed_by.clear();
-                table.fixdels = 0;
                 for process in &fixers {
                     self.forget_fixations(id, *process);
                 }
@@ -829,10 +834,9 @@ impl EtsTables {
         for process in &fixers {
             self.forget_fixations(id, *process);
         }
-        // The free of the table frees each delete record, one reduction
-        // for each (`db_free_table_continue_hash`, `erl_db_hash.c:3122-3137`).
-        let charge = fixers.len() + table.fixdels;
-        table.fixdels = 0;
+        // The free of the table frees each delete record with the segments
+        // (`db_free_table_continue_hash`, `erl_db_hash.c:3122-3137`).
+        let charge = fixers.len();
         self.freeing.insert(id, Freeing::new(table));
         charge
     }
@@ -902,17 +906,20 @@ impl Freeing {
     /// let freeing = Freeing::new(Table::new(ProcessId(1), Access::Public, 1, TableType::Set));
     /// assert_eq!(freeing.segments, 1);
     /// ```
-    fn new(table: Table) -> Freeing {
+    fn new(mut table: Table) -> Freeing {
         let segments = if table.table_type == TableType::OrderedSet {
             1
         } else {
             segment(table.segment_slots() - 1) + 1
         };
+        let fixdels = table.fixdels;
+        table.fixdels = 0;
         Freeing {
             table,
             segments,
             bucket: 0,
             next: EMPTY,
+            fixdels,
         }
     }
 
@@ -934,6 +941,12 @@ impl Freeing {
     /// assert_eq!(freeing.free_segment(0), None);
     /// ```
     fn free_segment(&mut self, budget: i32) -> Option<i32> {
+        // The delete records free before the segments, one reduction each
+        // (`db_free_table_continue_hash`, `erl_db_hash.c:3122-3137`).
+        if self.fixdels > 0 {
+            self.fixdels -= 1;
+            return Some(1);
+        }
         if self.table.table_type == TableType::OrderedSet {
             return self.free_objects(budget);
         }
@@ -1054,6 +1067,7 @@ impl Table {
             clear: None,
             fixed_by: Vec::new(),
             retained: HashMap::new(),
+            retained_buckets: BTreeMap::new(),
             fixdels: 0,
             select_slot: EMPTY,
             deleted: Vec::new(),
@@ -1385,6 +1399,8 @@ impl Table {
                 newest: node,
                 slots,
             });
+            let bucket = stored_bucket(hash, self.buckets);
+            self.retained_buckets.entry(bucket).or_default().push(hash);
         }
     }
 
@@ -1494,6 +1510,7 @@ impl Table {
             self.heads[bucket] = head;
         }
         self.retained.clear();
+        self.retained_buckets.clear();
         self.fixdels = 0;
         self.deleted.clear();
         self.deleted_objects = 0;
@@ -1813,7 +1830,18 @@ impl Table {
                     let node = self
                         .chain_node(hash, &key)
                         .expect("a live key has a chain node");
-                    self.retain_record(hash, &key, node);
+                    // A select delete marks objects without a change of the
+                    // chain, so the first removal registers the chain and
+                    // each later one keeps it (`erl_db_hash.c:2622-2653`).
+                    let registered = self.retained.get(&hash).is_some_and(|records| {
+                        records
+                            .iter()
+                            .rev()
+                            .any(|record| record.key == key && record.newest == node)
+                    });
+                    if !registered {
+                        self.retain_record(hash, &key, node);
+                    }
                     if slot == index_slot {
                         match self.next_live_object(slot) {
                             Some(next_live) => self.index.replace(hash, slot, next_live),
@@ -1951,6 +1979,18 @@ impl Table {
         };
         if empty {
             self.retained.remove(&hash);
+            let bucket = stored_bucket(hash, self.buckets);
+            let bucket_empty = {
+                let hashes = self
+                    .retained_buckets
+                    .get_mut(&bucket)
+                    .expect("a retained record has a bucket");
+                hashes.retain(|stored| *stored != hash);
+                hashes.is_empty()
+            };
+            if bucket_empty {
+                self.retained_buckets.remove(&bucket);
+            }
         }
         for slot in &retained.slots {
             self.deleted[*slot] = false;
@@ -2324,13 +2364,15 @@ impl Table {
     /// a segment free removed (`db_free_table_continue_hash`,
     /// `erl_db_hash.c:3140-3149`).
     fn forget_retained_segment(&mut self, first: usize, last: usize) {
-        let buckets = self.buckets;
-        let removed = (self.retained.keys())
-            .filter(|hash| (first..last).contains(&stored_bucket(**hash, buckets)))
-            .copied()
+        let buckets = (self.retained_buckets.range(first..last))
+            .map(|(bucket, _)| *bucket)
             .collect::<Vec<_>>();
-        for hash in removed {
-            self.retained.remove(&hash);
+        for bucket in buckets {
+            if let Some(hashes) = self.retained_buckets.remove(&bucket) {
+                for hash in hashes {
+                    self.retained.remove(&hash);
+                }
+            }
         }
     }
 

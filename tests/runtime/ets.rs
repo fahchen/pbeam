@@ -1075,6 +1075,8 @@ fn forgets_the_records_of_a_freed_segment() {
     assert_eq!(table.retained.len(), 1);
     let mut freeing = Freeing::new(table);
     assert!(freeing.free_segment(0).is_some());
+    // The free frees the delete record first and then the top segment.
+    assert!(freeing.free_segment(0).is_some());
     assert!(freeing.table.retained.is_empty());
 }
 
@@ -1121,7 +1123,9 @@ fn charges_the_delete_records_of_an_explicit_delete() {
         .table_by_id(Reference(0))
         .unwrap()
         .delete(&atoms, &Term::Integer(1));
-    assert_eq!(tables.delete_table(Reference(0), ProcessId(1)), 2);
+    assert_eq!(tables.delete_table(Reference(0), ProcessId(1)), 1);
+    // The record costs one reduction, the segment 32, and its object one.
+    assert_eq!(tables.free_segments(ProcessId(1), 100), Some(66));
 }
 
 #[test]
