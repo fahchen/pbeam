@@ -244,6 +244,12 @@ pub(super) enum TableType {
     Bag,
     /// `DB_DUPLICATE_BAG`: objects with one key, also exactly equal ones.
     DuplicateBag,
+    /// `DB_ORDERED_SET`: one object for each key. PBeam keeps the hash
+    /// structure, so the results and the reductions of the single-key
+    /// operations match ERTS; an operation whose result depends on the key
+    /// order is a clear runtime error (see "ETS tables" in
+    /// `docs/erts-differences.md`).
+    OrderedSet,
 }
 
 impl TableType {
@@ -260,6 +266,7 @@ impl TableType {
             TableType::Set => "set",
             TableType::Bag => "bag",
             TableType::DuplicateBag => "duplicate_bag",
+            TableType::OrderedSet => "ordered_set",
         }
     }
 }
@@ -1082,7 +1089,7 @@ impl Table {
             (self.position(hash, key), hash)
         };
         let newest = match (found, self.table_type) {
-            (Some(slot), TableType::Set) => {
+            (Some(slot), TableType::Set | TableType::OrderedSet) => {
                 self.objects[slot] = Some(object);
                 self.writes += 1;
                 return;

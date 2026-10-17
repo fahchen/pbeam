@@ -467,6 +467,7 @@ ambient() ->
         ets:lookup(Name, key),
         ets:lookup_element(Name, key, 2, none),
         ets:member(Name, key),
+        ets:take(Name, key),
         ets:delete(Name, key),
         ets:info(Name, type),
         ets:insert(Name, {key, value}),

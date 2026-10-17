@@ -7,7 +7,7 @@
          busy_helper/2,
          own/2, write/1, select/0, match_object/0, iterate/0,
          update_element/0, info_items/0, delete_all/0, select_reductions/0,
-         private_owner/1]).
+         private_owner/1, ordered_set/0, take/0]).
 
 %% ets:new/2 return values and badarg cases (erl_db.c:2555-2840).
 new() ->
@@ -201,13 +201,23 @@ busy_iteration() ->
     Insert ! go,
     erlang:yield(),
     erlang:yield(),
-    Next = ets:next(Table, 1),
+    Taken = ets:take(Table, 2),
+    receive {inserted, _, _} -> ok end,
+    %% A second busy table: ets:next/2 completes its insert first
+    %% (`handle_lacking_permission`, erl_db.c:769-798).
+    Second = ets:new(ets_probe, [public]),
+    Insert2 = spawn(?MODULE, busy_insert, [self(), Second]),
+    receive ready -> ok end,
+    Insert2 ! go,
+    erlang:yield(),
+    erlang:yield(),
+    Next = ets:next(Second, 1),
     Info = length(ets:info(Table)),
     Updated = ets:update_element(Table, 1, {2, 9}),
     Deleted = ets:internal_select_delete(Table, [{{'_', '_'}, [false], [true]}]),
     Cleared = ets:internal_delete_all(Table, undefined),
     receive {inserted, _, _} -> ok end,
-    [Info, Updated, Next, Deleted, Cleared].
+    [Taken, Next, Info, Updated, Deleted, Cleared].
 
 %% Insert the list of busy_objects/0 into the table Table, and send the
 %% result and the reductions of the insert to Parent.
@@ -570,7 +580,14 @@ unsupported(Case) ->
             T = ets:new(ets_probe, []),
             true = ets:insert(T, {a, 1}),
             ets:internal_select_delete(T, [{{'$1', '$2'}, [], [{round, 1.0}]}]);
-        ordered_set -> ets:new(ets_probe, [ordered_set]);
+        ordered_next ->
+            T = ets:new(ets_probe, [ordered_set]),
+            true = ets:insert(T, {a, 1}),
+            ets:next(T, a);
+        ordered_select ->
+            T = ets:new(ets_probe, [ordered_set]),
+            true = ets:insert(T, {a, 1}),
+            ets:select(T, [{{'$1', '$2'}, [], ['$1']}]);
         heir -> ets:new(ets_probe, [{heir, element(1, start([]))}]);
         heir_data -> ets:new(ets_probe, [{heir, element(1, start([])), data}]);
         keypos -> ets:insert(ets:new(ets_probe, [{keypos, id(1 bsl 32)}]), {a});
@@ -869,3 +886,33 @@ select_reductions() ->
      Call(fun() -> ets:update_element(T, a, {2, 9}) end),
      Call(fun() -> ets:internal_select_delete(T, [{'$1', [], [false]}]) end),
      Call(fun() -> ets:internal_delete_all(T, undefined) end)].
+
+%% An `ordered_set` table keeps the hash structure of PBeam, so its
+%% single-key operations give the ERTS result, and a key-order operation
+%% raises a clear runtime error (see "ETS tables" in docs/erts-differences.md).
+ordered_set() ->
+    T = ets:new(ets_probe, [ordered_set, public]),
+    Insert = ets:insert(T, [{b, 2}, {a, 1}, {c, 3}, {a, 10}]),
+    Lookup = ets:lookup(T, a),
+    Member = [ets:member(T, a), ets:member(T, z)],
+    New = [ets:insert_new(T, [{d, 4}]), ets:insert_new(T, [{a, 1}])],
+    Info = [ets:info(T, type), ets:info(T, size), ets:info(T, keypos),
+            ets:info(T, protection)],
+    Taken = ets:take(T, b),
+    TakenAgain = ets:take(T, b),
+    Deleted = [ets:delete(T, a), ets:info(T, size)],
+    Left = ets:info(T, size),
+    [Insert, Lookup, Member, New, Info, Taken, TakenAgain, Deleted, Left].
+
+%% `ets:take/2` on the three hash table types.
+take() ->
+    T = ets:new(ets_probe, []),
+    true = ets:insert(T, [{a, 1}, {b, 2}]),
+    B = ets:new(ets_probe, [bag]),
+    true = ets:insert(B, [{a, 1}, {a, 2}, {b, 3}]),
+    D = ets:new(ets_probe, [duplicate_bag]),
+    true = ets:insert(D, [{a, 1}, {a, 1}, {b, 2}]),
+    Invalid = catch_error(fun() -> ets:take(make_ref(), a) end),
+    [Invalid, ets:take(T, a), ets:lookup(T, a), ets:take(T, missing),
+     ets:take(B, a), ets:lookup(B, a), ets:take(B, a),
+     ets:take(D, a), ets:take(D, a), ets:lookup(D, a)].
