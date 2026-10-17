@@ -1295,7 +1295,8 @@ fn raises_or_jumps_when_put_map_exact_gets_no_map_or_no_key() {
         "root process exited with {{badkey,{}},[]}"
     );
     assert_eq!(tuple_key(3).unwrap().term, test_atom("failed"));
-    // Two different references have no PBeam order.
+    // A reference is a key of the map, so a missing reference key raises
+    // `{badkey, Ref}` as another missing key does.
     let references = make_program(
         vec![Instruction::PutMapExact {
             fail_label: 0,
@@ -1315,12 +1316,52 @@ fn raises_or_jumps_when_put_map_exact_gets_no_map_or_no_key() {
         0,
     )
     .execute("fixture", "main", &[]);
-    assert!(
-        references
-            .unwrap_err()
-            .to_string()
-            .contains("unsupported term order of two references")
-    );
+    let error = references.unwrap_err().to_string();
+    assert!(error.contains("badkey,#Ref<0.0.1.1>"), "{error}");
+    // A key that a PBeam map cannot hold is a missing key of the exact
+    // change, as ERTS reports a missing key.
+    let unsupported = make_program(
+        vec![Instruction::PutMapExact {
+            fail_label: 0,
+            map: Operand::Value(Term::Map(Map::new())),
+            destination: Operand::X(0),
+            pairs: vec![(
+                Operand::Value(Term::tuple(vec![Term::binary(vec![])])),
+                atom("a"),
+            )],
+        }],
+        0,
+    )
+    .execute("fixture", "main", &[]);
+    let error = unsupported.unwrap_err().to_string();
+    assert!(error.contains("badkey,{<<>>}"), "{error}");
+    // The assoc change adds the key, so a key that PBeam cannot hold raises
+    // the runtime error of the key. The first change builds a map with one
+    // owner, so the second change takes that map and puts it back on the
+    // error.
+    let unsupported = make_program(
+        vec![
+            Instruction::Move(Operand::Value(Term::Map(Map::new())), Operand::X(0)),
+            Instruction::PutMapAssoc {
+                map: Operand::X(0),
+                destination: Operand::X(0),
+                pairs: vec![(Operand::Value(Term::Integer(1)), atom("a"))],
+            },
+            Instruction::PutMapAssoc {
+                map: Operand::X(0),
+                destination: Operand::X(0),
+                pairs: vec![(
+                    Operand::Value(Term::tuple(vec![Term::binary(vec![])])),
+                    atom("a"),
+                )],
+            },
+            Instruction::Return,
+        ],
+        0,
+    )
+    .execute("fixture", "main", &[]);
+    let error = unsupported.unwrap_err().to_string();
+    assert!(error.contains("unsupported map key"), "{error}");
 }
 
 #[test]
@@ -1427,8 +1468,8 @@ fn keeps_a_built_map_when_a_same_register_change_fails() {
             .unwrap()
         )
     );
-    // Two references have no PBeam order, so the change fails with a runtime
-    // error after the take.
+    // The reference keys are missing from the source map, so the exact
+    // change fails with `{badkey, Ref}` after the take.
     let error = make_program(
         {
             let mut body = build(source);
@@ -1452,12 +1493,8 @@ fn keeps_a_built_map_when_a_same_register_change_fails() {
         0,
     )
     .execute("fixture", "main", &[]);
-    assert!(
-        error
-            .unwrap_err()
-            .to_string()
-            .contains("unsupported term order of two references")
-    );
+    let error = error.unwrap_err().to_string();
+    assert!(error.contains("badkey,#Ref<0.0.1.1>"), "{error}");
 }
 
 #[test]
@@ -3993,31 +4030,41 @@ fn reads_the_tuple_size_as_pinned_erts() {
 }
 
 #[test]
-fn rejects_is_ge_and_is_lt_on_two_different_references() {
-    // ERTS orders two references by the scheduler thread that made each
-    // one; this is the "Term order" row in `docs/erts-differences.md`.
+fn orders_two_references_by_their_number_words() {
+    // ERTS orders two references by their number words
+    // (`erts_cmp_compound`, utils.c:2239-2290); this is the "Term order"
+    // row in `docs/erts-differences.md`. The reference 1 comes first.
     let reference = |number| Operand::Value(Term::Reference(crate::Reference(number)));
-    let is_ge = Instruction::TestGreaterEqual {
-        fail_label: 3,
-        left: reference(1),
-        right: reference(2),
+    let outcome = |test| {
+        let body = vec![
+            test,
+            Instruction::Move(Operand::Value(Term::Integer(1)), Operand::X(0)),
+            Instruction::Return,
+            Instruction::Label(3),
+            Instruction::Move(Operand::Value(Term::Integer(2)), Operand::X(0)),
+            Instruction::Return,
+        ];
+        make_program(body, 0)
+            .execute("fixture", "main", &[])
+            .unwrap()
+            .term
     };
-    let is_lt = Instruction::TestLess {
-        fail_label: 3,
-        left: reference(1),
-        right: reference(2),
-    };
-    for test in [is_ge, is_lt] {
-        let body = vec![test, Instruction::Label(3), Instruction::Return];
-        assert_eq!(
-            make_program(body, 0)
-                .execute("fixture", "main", &[])
-                .unwrap_err()
-                .to_string(),
-            "unsupported term order of two references Reference(Reference(1)) and \
-             Reference(Reference(2))"
-        );
-    }
+    assert_eq!(
+        outcome(Instruction::TestLess {
+            fail_label: 3,
+            left: reference(1),
+            right: reference(2),
+        }),
+        Term::Integer(1)
+    );
+    assert_eq!(
+        outcome(Instruction::TestGreaterEqual {
+            fail_label: 3,
+            left: reference(1),
+            right: reference(2),
+        }),
+        Term::Integer(2)
+    );
 }
 
 #[test]

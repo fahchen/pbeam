@@ -48,7 +48,7 @@ use num_bigint::{BigInt, Sign};
 use num_traits::FromPrimitive;
 
 use super::{AtomTable, Term, match_context::MATCH_CONTEXT_ESCAPE};
-use crate::error::{BeamError, error};
+use crate::error::BeamError;
 
 /// The rank of `[]` in the ERTS term order (`NIL_DEF`).
 const NIL_RANK: u8 = 8;
@@ -219,12 +219,11 @@ fn compare_pair<'a>(
         (Term::Binary(left), Term::Binary(right)) => left.cmp(right),
         (Term::Pid(left), Term::Pid(right)) => left.0.cmp(&right.0),
         (Term::Port(left), Term::Port(right)) => left.0.cmp(&right.0),
-        (Term::Reference(left), Term::Reference(right)) if left == right => Ordering::Equal,
-        (Term::Reference(_), Term::Reference(_)) => {
-            return Err(error(format!(
-                "unsupported term order of two references {left:?} and {right:?}"
-            )));
-        }
+        // ERTS compares two references on one node by their number words,
+        // in order (`erts_cmp_compound`, utils.c:2239-2290), and the words
+        // below match that layout (row "Reference order" of
+        // docs/erts-differences.md).
+        (Term::Reference(left), Term::Reference(right)) => left.numbers().cmp(&right.numbers()),
         (Term::Tuple(left), Term::Tuple(right)) if left.len() == right.len() => {
             steps.extend(
                 left.iter()

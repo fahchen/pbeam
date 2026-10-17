@@ -3669,8 +3669,7 @@ enum Update {
 ///
 /// # Errors
 ///
-/// Return a runtime error when the key order depends on two different
-/// references (`Map::sort_pairs`).
+/// No error is possible: each term has a term order.
 fn update_map_exact(
     entries: &mut Map,
     mut pairs: Vec<(Term, Term)>,

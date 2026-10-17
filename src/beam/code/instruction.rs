@@ -298,21 +298,18 @@ pub(crate) fn prepare_select_value_choices(
         return SelectValueChoices::Linear(choices);
     }
     let mut ordered = choices.clone();
-    let mut failure = None;
+    // Each term has a term order, so the comparison cannot fail.
     ordered.sort_by(|(left, _), (right, _)| {
-        left.compare_exact(right, atoms).unwrap_or_else(|error| {
-            failure.get_or_insert(error);
-            Ordering::Equal
-        })
+        left.compare_exact(right, atoms)
+            .expect("each term has a term order")
     });
-    let distinct = failure.is_none()
-        && ordered.windows(2).all(|pair| {
-            pair[0].0 != pair[1].0
-                && !matches!(
-                    pair[0].0.compare_exact(&pair[1].0, atoms),
-                    Ok(Ordering::Equal)
-                )
-        });
+    let distinct = ordered.windows(2).all(|pair| {
+        pair[0].0 != pair[1].0
+            && !matches!(
+                pair[0].0.compare_exact(&pair[1].0, atoms),
+                Ok(Ordering::Equal)
+            )
+    });
     if distinct {
         SelectValueChoices::Ordered(ordered)
     } else {

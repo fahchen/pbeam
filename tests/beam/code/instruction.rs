@@ -259,13 +259,14 @@ fn prepares_the_select_value_choices_by_shape() {
     };
     assert_eq!(kept, duplicate);
 
-    // A choice list with no term order keeps the linear form.
-    let incomparable: Vec<(Term, u32)> = (0..=SELECT_VALUE_LINEAR_LIMIT as u64)
+    // Two different references have a term order, so a large list of
+    // distinct references takes the ordered form.
+    let references: Vec<(Term, u32)> = (0..=SELECT_VALUE_LINEAR_LIMIT as u64)
         .map(|index| (Term::Reference(Reference(index)), index as u32))
         .collect();
     assert!(matches!(
-        prepare_select_value_choices(incomparable, &atoms),
-        SelectValueChoices::Linear(_)
+        prepare_select_value_choices(references, &atoms),
+        SelectValueChoices::Ordered(_)
     ));
 }
 
