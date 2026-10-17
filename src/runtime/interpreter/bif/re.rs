@@ -725,10 +725,10 @@ fn name_field(code: &pcre2::Code, name: &[u8]) -> Field {
         .position(|&byte| byte == 0)
         .unwrap_or(name.len());
     let name = &name[..end];
-    let entries: Vec<(u32, &[u8])> = code
+    let entries: Vec<(u32, Vec<u8>)> = code
         .names()
         .into_iter()
-        .filter(|(_, entry)| *entry == name)
+        .filter(|(_, entry)| entry.as_slice() == name)
         .collect();
     match entries.as_slice() {
         [] => Field::Index(-1),
@@ -742,11 +742,11 @@ fn name_field(code: &pcre2::Code, name: &[u8]) -> Field {
 ///
 /// ```rust,ignore
 /// // {1, 1}
-/// let field = field_of(&[(1, b"x".as_slice())]);
+/// let field = field_of(&[(1, b"x".to_vec())]);
 /// // {0, 0}
-/// let field = field_of(&[(1, b"x".as_slice()), (2, b"x".as_slice())]);
+/// let field = field_of(&[(1, b"x".to_vec()), (2, b"x".to_vec())]);
 /// ```
-fn field_of(entries: &[(u32, &[u8])]) -> Field {
+fn field_of(entries: &[(u32, Vec<u8>)]) -> Field {
     match entries {
         [(number, _)] => Field::Index(*number as i32),
         _ => Field::Duplicate(entries.iter().map(|&(number, _)| number as i32).collect()),
