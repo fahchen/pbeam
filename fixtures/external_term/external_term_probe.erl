@@ -85,6 +85,9 @@ check(F) ->
     catch Class:Reason -> {Class, Reason}
     end.
 
-%% A term that PBeam cannot hold gives a runtime error.
+%% A term that PBeam cannot hold gives a runtime error. The bytes are a
+%% well-formed `NEW_FUN_EXT` of a local fun with no free variables.
 decode_fun() ->
-    binary_to_term(<<131, 112>>).
+    binary_to_term(<<131, 112, 0:232, 119, 6, "erlang", 97, 0, 97, 0,
+                     88, 119, 13, "nonode@nohost", 0, 0, 0, 5,
+                     0, 0, 0, 0, 0, 0, 0, 0>>).

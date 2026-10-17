@@ -485,6 +485,16 @@ fn decodes_each_identifier_tag_and_checks_the_node() {
             Err(DecodeError::Unsupported(_))
         ));
     }
+    // A legacy creation above 3 raises badarg before the node check
+    // (`is_tiny_creation`, `external.c:71-72`, `3162`).
+    let mut tiny_pid = vec![103];
+    tiny_pid.extend(node());
+    tiny_pid.extend(with_words(&[], &[5, 0]));
+    tiny_pid.push(4);
+    assert!(matches!(
+        decode_with(&mut atoms, &tiny_pid, false),
+        Err(DecodeError::Badarg)
+    ));
     // A pid number above 2^28 - 1 raises badarg, and a reference whose
     // first number is 2^18 or more raises it too (`external.c:4810-4840`).
     let mut big_pid = vec![88];
@@ -540,16 +550,45 @@ fn decodes_each_identifier_tag_and_checks_the_node() {
 #[test]
 fn decodes_the_unsupported_forms_and_local_terms() {
     let mut atoms = AtomTable::new();
+    // A truncated fun and the removed `FUN_EXT` raise badarg; a record
+    // without its fields raises badarg (`decoded_size`, `external.c:6150-6500`).
     assert!(matches!(
         decode_with(&mut atoms, &[112], false),
-        Err(DecodeError::Unsupported(_))
+        Err(DecodeError::Badarg)
     ));
     assert!(matches!(
         decode_with(&mut atoms, &[117], false),
-        Err(DecodeError::Unsupported(_))
+        Err(DecodeError::Badarg)
     ));
     assert!(matches!(
         decode_with(&mut atoms, &[67], false),
+        Err(DecodeError::Badarg)
+    ));
+    // A well-formed record passes the structure check, and the decoder
+    // gives the documented runtime error. An exported flag above 1 and a
+    // record without its fields raise badarg.
+    let empty_record = vec![
+        67, 0, 0, 0, 0, 0, 119, 6, 101, 114, 108, 97, 110, 103, 119, 1, 120,
+    ];
+    assert!(matches!(
+        decode_with(&mut atoms, &empty_record, false),
+        Err(DecodeError::Unsupported(_))
+    ));
+    assert!(matches!(
+        decode_with(&mut atoms, &[67, 0, 0, 0, 0, 2], false),
+        Err(DecodeError::Badarg)
+    ));
+    // A well-formed local fun passes the structure check, and the decoder
+    // gives the documented runtime error.
+    let mut local_fun = vec![112, 0, 0, 0, 0, 0];
+    local_fun.extend([0u8; 16]);
+    local_fun.extend([0u8; 8]);
+    local_fun.extend([119, 6, 101, 114, 108, 97, 110, 103, 97, 0, 97, 0]);
+    local_fun.extend([88]);
+    local_fun.extend(node());
+    local_fun.extend(with_words(&[], &[5, 0, 0]));
+    assert!(matches!(
+        decode_with(&mut atoms, &local_fun, false),
         Err(DecodeError::Unsupported(_))
     ));
     // A `LOCAL_EXT` term inside a term sets the local node, and its hash
@@ -599,6 +638,17 @@ fn decodes_the_unsupported_forms_and_local_terms() {
     assert!(matches!(
         decode_with(&mut atoms, &bad_function, false),
         Err(DecodeError::Badarg)
+    ));
+    // A bignum that fits a small integer decodes to the integer.
+    // ERTS takes an export arity that is a small integer above 2^32 - 1
+    // (`external.c:5014-5030`). A PBeam fun holds its arity as a `u32`, so
+    // the decoder gives the documented runtime error.
+    let big_arity = vec![
+        113, 119, 6, 101, 114, 108, 97, 110, 103, 119, 3, 97, 98, 115, 110, 5, 0, 0, 0, 0, 0, 1,
+    ];
+    assert!(matches!(
+        decode_with(&mut atoms, &big_arity, false),
+        Err(DecodeError::Unsupported(_))
     ));
     let bad_arity = vec![
         113, 119, 6, 101, 114, 108, 97, 110, 103, 119, 3, 97, 98, 115, 119, 1, 97,
@@ -810,8 +860,20 @@ fn binary_to_term_checks_the_binary_and_the_options() {
         binary_to_term(&mut context, &bitstring, &Term::nil()).unwrap(),
         BifResult::Raise { .. }
     ));
-    // A term that PBeam cannot hold gives a runtime error.
-    let error = binary_to_term(&mut context, &Term::binary(vec![131, 112]), &Term::nil())
+    // A truncated local fun raises `badarg`, and a well-formed one gives
+    // the documented runtime error.
+    assert!(matches!(
+        binary_to_term(&mut context, &Term::binary(vec![131, 112]), &Term::nil()).unwrap(),
+        BifResult::Raise { reason, .. } if reason == Term::static_atom("badarg")
+    ));
+    let mut local_fun = vec![131, 112, 0, 0, 0, 0, 0];
+    local_fun.extend([0u8; 16]);
+    local_fun.extend([0u8; 8]);
+    local_fun.extend([119, 6, 101, 114, 108, 97, 110, 103, 97, 0, 97, 0]);
+    local_fun.extend([88]);
+    local_fun.extend(node());
+    local_fun.extend(with_words(&[], &[5, 0, 0]));
+    let error = binary_to_term(&mut context, &Term::binary(local_fun), &Term::nil())
         .unwrap_err()
         .to_string();
     assert!(
@@ -898,6 +960,27 @@ fn keeps_the_decoder_guards_behind_the_validation() {
     let mut bad_sysname = vec![88, 97, 1];
     bad_sysname.extend(with_words(&[], &[5, 0, 0]));
     assert!(matches!(term(&bad_sysname), Err(DecodeError::Badarg)));
+    for unsupported in [&[112][..], &[117], &[67]] {
+        assert!(matches!(
+            term(unsupported),
+            Err(DecodeError::Unsupported(_))
+        ));
+    }
+    let mut tiny_pid = vec![103];
+    tiny_pid.extend(node());
+    tiny_pid.extend(with_words(&[], &[5, 0]));
+    tiny_pid.push(4);
+    assert!(matches!(term(&tiny_pid), Err(DecodeError::Badarg)));
+    let mut tiny_port = vec![102];
+    tiny_port.extend(node());
+    tiny_port.extend(with_words(&[], &[5]));
+    tiny_port.push(4);
+    assert!(matches!(term(&tiny_port), Err(DecodeError::Badarg)));
+    let mut tiny_ref = vec![101];
+    tiny_ref.extend(node());
+    tiny_ref.extend(with_words(&[], &[5]));
+    tiny_ref.push(4);
+    assert!(matches!(term(&tiny_ref), Err(DecodeError::Badarg)));
     let mut six_ref = vec![90, 0, 6];
     six_ref.extend(node());
     six_ref.extend(with_words(&[], &[0, 1, 1, 0, 0, 0]));

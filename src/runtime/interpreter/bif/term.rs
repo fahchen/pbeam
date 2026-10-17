@@ -58,6 +58,9 @@ const REF_NUMBER_1_MASK: u32 = 0xFFFC_0000;
 const REF_THREAD: u32 = 1;
 /// The largest count of reference numbers (`ERTS_MAX_REF_NUMBERS`).
 const MAX_REFERENCE_NUMBERS: usize = 5;
+/// The largest creation of a legacy `PID_EXT`, `PORT_EXT`, or
+/// `REFERENCE_EXT` (`ERTS_MAX_TINY_CREATION`, `external.c:71`).
+const MAX_TINY_CREATION: u32 = 3;
 /// The largest port number of the local node
 /// (`ERTS_MAX_INTERNAL_PORT_NUMBER`, `erl_node_container_utils.h:250`):
 /// 2^60 - 1 on a 64-bit host (`_PORT_DATA_SIZE`, `erl_term.h:696`).
@@ -301,7 +304,7 @@ fn encode(term: &Term, atoms: &AtomTable, options: &Options) -> Result<Vec<u8>, 
             Term::BigInt(value) => encode_big(value, &mut out),
             Term::Float(value) if options.minor == 0 => {
                 out.push(99);
-                let text = float_text::scientific(*value, 17);
+                let text = float_text::scientific(*value, 20);
                 out.extend_from_slice(&text);
                 out.resize(out.len() + FLOAT_TEXT_SIZE - text.len(), 0);
             }
@@ -725,6 +728,17 @@ fn check_atom_name(
         .ok_or(DecodeError::Badarg)
 }
 
+/// Take and check the creation of a legacy `PID_EXT`, `PORT_EXT`, or
+/// `REFERENCE_EXT`: it is at most 3 (`is_tiny_creation`,
+/// `external.c:71-72`).
+fn check_tiny_creation(input: &[u8], index: &mut usize) -> Result<(), DecodeError> {
+    let creation = *input.get(*index).ok_or(DecodeError::Badarg)?;
+    *index += 1;
+    (u32::from(creation) <= MAX_TINY_CREATION)
+        .then_some(())
+        .ok_or(DecodeError::Badarg)
+}
+
 /// Take the node atom of a pid, port, or reference at `index`.
 fn check_sysname(input: &[u8], index: &mut usize, local: bool) -> Result<(), DecodeError> {
     match *input.get(*index).ok_or(DecodeError::Badarg)? {
@@ -873,7 +887,8 @@ fn validate(input: &[u8], seed: u32) -> Result<(), DecodeError> {
             }
             103 => {
                 check_sysname(input, &mut index, local)?;
-                check_skip(input, &mut index, 9)?;
+                check_skip(input, &mut index, 8)?;
+                check_tiny_creation(input, &mut index)?;
             }
             120 => {
                 check_sysname(input, &mut index, local)?;
@@ -885,7 +900,8 @@ fn validate(input: &[u8], seed: u32) -> Result<(), DecodeError> {
             }
             102 => {
                 check_sysname(input, &mut index, local)?;
-                check_skip(input, &mut index, 5)?;
+                check_skip(input, &mut index, 4)?;
+                check_tiny_creation(input, &mut index)?;
             }
             90 => {
                 let count = check_number(input, &mut index, 2)? as usize;
@@ -905,7 +921,8 @@ fn validate(input: &[u8], seed: u32) -> Result<(), DecodeError> {
             }
             101 => {
                 check_sysname(input, &mut index, local)?;
-                check_skip(input, &mut index, 5)?;
+                check_skip(input, &mut index, 4)?;
+                check_tiny_creation(input, &mut index)?;
             }
             113 => {
                 frames.push(CheckFrame {
@@ -914,7 +931,36 @@ fn validate(input: &[u8], seed: u32) -> Result<(), DecodeError> {
                 });
                 complete = false;
             }
-            112 | 117 | 67 => return Ok(()),
+            112 => {
+                // The size, the arity, the unique value, the index, and the
+                // free count, then the module, the old index, the old
+                // unique value, the creator pid, and the free variables
+                // (`enc_term`, `external.c:3976-4005`).
+                check_skip(input, &mut index, 4 + 1 + 16 + 4)?;
+                let free = check_number(input, &mut index, 4)? as usize;
+                frames.push(CheckFrame {
+                    kind: CheckKind::Tuple,
+                    remaining: 4 + free,
+                });
+                complete = false;
+            }
+            117 => return Err(DecodeError::Badarg),
+            67 => {
+                // The field count, the exported flag, the module and the
+                // name, the field names, and the values (`dec_term`,
+                // `external.c:5264-5330`).
+                let count = check_number(input, &mut index, 4)? as usize;
+                let exported = *input.get(index).ok_or(DecodeError::Badarg)?;
+                index += 1;
+                if exported > 1 {
+                    return Err(DecodeError::Badarg);
+                }
+                frames.push(CheckFrame {
+                    kind: CheckKind::Tuple,
+                    remaining: 2 + 2 * count,
+                });
+                complete = false;
+            }
             121 => {
                 let hash = check_number(input, &mut index, 4)?;
                 local = true;
@@ -1500,7 +1546,11 @@ impl Decoder<'_> {
         let creation = if tag == 4 {
             self.u32()?
         } else {
-            u32::from(self.u8()?)
+            let creation = u32::from(self.u8()?);
+            if creation > MAX_TINY_CREATION {
+                return Err(DecodeError::Badarg);
+            }
+            creation
         };
         if !self.is_local(sysname, creation) {
             return Err(DecodeError::Unsupported("a pid of another node"));
@@ -1520,7 +1570,11 @@ impl Decoder<'_> {
         let creation = if tag == 4 {
             self.u32()?
         } else {
-            u32::from(self.u8()?)
+            let creation = u32::from(self.u8()?);
+            if creation > MAX_TINY_CREATION {
+                return Err(DecodeError::Badarg);
+            }
+            creation
         };
         self.local_port(sysname, number, creation)
     }
@@ -1589,6 +1643,9 @@ impl Decoder<'_> {
         let sysname = self.sysname()?;
         let number = self.u32()?;
         let creation = u32::from(self.u8()?);
+        if creation > MAX_TINY_CREATION {
+            return Err(DecodeError::Badarg);
+        }
         if !self.is_local(sysname, creation) {
             return Err(DecodeError::Unsupported("a reference of another node"));
         }
@@ -1614,8 +1671,13 @@ impl Decoder<'_> {
         let Term::Integer(arity) = items[2] else {
             return Err(DecodeError::Badarg);
         };
-        if !(0..=i64::from(u32::MAX)).contains(&arity) || self.safe {
+        if arity < 0 || self.safe {
             return Err(DecodeError::Badarg);
+        }
+        if arity > i64::from(u32::MAX) {
+            return Err(DecodeError::Unsupported(
+                "an external fun with an arity above 2^32 - 1",
+            ));
         }
         Ok(Term::Fun(Fun::external(
             module.clone(),
