@@ -128,6 +128,87 @@ pub(super) struct Table {
     /// `ets:new/2` makes it and when `ets:delete/1` of another process
     /// takes it (`save_owned_table`, `erl_db.c:628-650`, `3031-3051`).
     owned: u64,
+    /// The list insert that took the table and yields between its objects
+    /// (`tb->common.status & DB_BUSY`, `erl_db.c:2077-2107`, `2310-2319`),
+    /// else `None`. Each process that uses the table while it is busy
+    /// completes the insert first (`handle_lacking_permission`,
+    /// `erl_db.c:769-798`).
+    pub(super) busy: Option<Busy>,
+}
+
+/// A list insert that took a table and did not finish in its turn, as the
+/// YCF state that `tb->common.continuation_ctx` points at
+/// (`erl_db.c:2091-2107`, `2310-2319`). The table owns the copies of the
+/// objects, so each process that uses the table can run the steps.
+#[derive(Debug)]
+pub(super) struct Busy {
+    /// The process that started the insert. It gets the result of the
+    /// completed insert (`erl_db.c:2223-2244`).
+    pub(super) owner: ProcessId,
+    /// The object of each position of the list, as the copies that
+    /// `ets_insert_2_list_copy_term_list` (`erl_db.c:1876-1907`) makes.
+    objects: Vec<Vec<Term>>,
+    /// True when the call is `ets:insert_new/2` and the walk for a key
+    /// that the table holds did not finish (`erl_db.c:1909-1925`).
+    walk: bool,
+    /// The number of objects that the walk checked.
+    walked: usize,
+    /// True when the walk found a key that the table holds.
+    found: bool,
+    /// The number of objects that are in the table, or whose copy went
+    /// away after the walk found a key.
+    inserted: usize,
+    /// True when the loop unit of the step of the object `inserted` is
+    /// charged and the object is not in the table yet, as the counter of
+    /// the YCF loop can yield between the two (`erl_db.c:1936-1940`).
+    looped: bool,
+    /// The walk of each key of a `bag` insert ([`Table::insert_all`]),
+    /// which the steps share ([`Table::insert_bag`]).
+    walks: HashMap<u64, Vec<BagWalk>>,
+}
+
+impl Busy {
+    /// Return the busy state of a list insert of the BIF `bif` over the
+    /// objects `objects`, which the process `owner` started, as the YCF
+    /// state of `ets_insert_2_list` starts it: the copies of the objects
+    /// and the walk of `ets:insert_new/2` from its first object
+    /// (`erl_db.c:1876-1907`, `2072-2074`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let busy = Busy::new(ProcessId(0), vec![vec![test_atom("k")]], false);
+    /// assert_eq!(busy.walked, 0);
+    /// ```
+    pub(super) fn new(owner: ProcessId, objects: Vec<Vec<Term>>, walk: bool) -> Busy {
+        Busy {
+            owner,
+            objects,
+            walk,
+            walked: 0,
+            found: false,
+            inserted: 0,
+            looped: false,
+            walks: HashMap::new(),
+        }
+    }
+
+    /// Return the result of the insert, and end the busy state of the table
+    /// when each object is in it or its copy went away, as
+    /// `ets_insert_2_list_continuation` sets `ctx->return_value` and
+    /// uninstalls the continuation (`erl_db.c:2180-2195`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut busy = Busy::new(ProcessId(0), Vec::new(), false);
+    /// assert_eq!(busy.end(), Some(Term::static_atom("true")));
+    /// ```
+    fn end(&mut self) -> Option<Term> {
+        let ended =
+            self.inserted == self.objects.len() && !self.looped && (self.found || !self.walk);
+        ended.then(|| Term::static_atom(if self.found { "false" } else { "true" }))
+    }
 }
 
 /// The type of a hash table: the part of `tb->common.status` that
@@ -240,10 +321,25 @@ impl EtsTables {
         let freeing = self.freeing.values().map(|freeing| &freeing.table);
         for table in self.tables.values().chain(freeing) {
             live.add(table.allocated_bytes());
-            for object in table.objects.iter().flatten() {
+            let stored = table.objects.iter().flatten();
+            let copies = table
+                .busy
+                .as_ref()
+                .into_iter()
+                .flat_map(|busy| &busy.objects);
+            for object in stored.chain(copies) {
                 for term in object {
                     live.term(term);
                 }
+            }
+            for walk in table
+                .busy
+                .as_ref()
+                .into_iter()
+                .flat_map(|busy| busy.walks.values())
+                .flatten()
+            {
+                live.term(&walk.key);
             }
         }
     }
@@ -324,6 +420,44 @@ impl EtsTables {
             _ => return None,
         };
         self.tables.get(&id).map(|table| (id, table))
+    }
+
+    /// Return the table that `id` identifies when a list insert that took
+    /// it did not finish, else `None`, as `db_get_table` gives a table
+    /// with `DB_BUSY` to `handle_lacking_permission` (`erl_db.c:769-798`).
+    /// A process that uses the table then completes the insert first.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut tables = EtsTables::default();
+    /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
+    /// let atoms = AtomTable::new();
+    /// table.busy = Some(Busy::new(ProcessId(0), Vec::new(), false));
+    /// tables.create(Reference(0), None, table);
+    /// assert!(tables.busy(&atoms, &Term::Reference(Reference(0))).is_some());
+    /// ```
+    pub(super) fn busy(&mut self, atoms: &AtomTable, id: &Term) -> Option<&mut Table> {
+        let (id, busy) = {
+            let (id, table) = self.find(atoms, id)?;
+            (id, table.busy.is_some())
+        };
+        busy.then(|| self.tables.get_mut(&id)).flatten()
+    }
+
+    /// Return the live table with the reference `id`, with no access
+    /// check, as [`EtsTables::find`] finds it.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut tables = EtsTables::default();
+    /// tables.create(Reference(0), None, Table::new(ProcessId(0), Access::Public, 1, TableType::Set));
+    /// assert!(tables.table_by_id(Reference(0)).is_some());
+    /// ```
+    #[cfg(test)]
+    pub(super) fn table_by_id(&mut self, id: Reference) -> Option<&mut Table> {
+        self.tables.get_mut(&id)
     }
 
     /// Delete the tables that the process `owner` owns, as
@@ -544,6 +678,7 @@ impl Table {
             writes: 0,
             buckets: FIRST_SEGMENT_SLOTS,
             owned: 0,
+            busy: None,
         }
     }
 
@@ -614,6 +749,136 @@ impl Table {
         self.add(atoms, hash, object, newest);
     }
 
+    /// Run up to `units` units of the steps of the list insert that took
+    /// this table, as the YCF loop of `ets_insert_2_list` does
+    /// (`erl_db.c:1927-1949`, `2091-2107`): the walk of
+    /// `ets:insert_new/2` with one unit for each object that it checks
+    /// (`erl_db.c:1909-1925`), then either the removal of the copies with
+    /// one unit for each object after the walk found a key
+    /// (`erl_db.c:1863-1873`) or the insert of the objects with two units
+    /// for each object. Each step ends between two objects, so the
+    /// position of the work is in this table and the call traps between
+    /// the steps. Return the units that the steps used, over the units of
+    /// the budget that the steps may use, and the result when the insert
+    /// ended: `true` for an insert and `false` for a walk that found a key.
+    ///
+    /// The caller makes sure that the key position is not 0.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
+    /// let atoms = AtomTable::new();
+    /// table.busy = Some(Busy::new(ProcessId(0), vec![vec![test_atom("k")]], false));
+    /// let (units, result) = table.step_busy(&atoms, 8);
+    /// assert_eq!((units, result), (2, Some(Term::static_atom("true"))));
+    /// ```
+    pub(super) fn step_busy(&mut self, atoms: &AtomTable, units: i64) -> (i64, Option<Term>) {
+        let Some(mut busy) = self.busy.take() else {
+            return (0, None);
+        };
+        let mut left = units;
+        let mut exhausted = false;
+        // The counter of ERTS can be 0 or less at the start of a step, and
+        // the step runs then: `YCF_CONSUME_REDS` yields after it
+        // (`erl_db.c:1939`, `2152-2176`).
+        let mut first = true;
+        if busy.walk {
+            while busy.walked < busy.objects.len() && (first || left > 0) {
+                first = false;
+                // The counter consumes the loop unit of the step and yields
+                // before the key of the object; a turn that yields there
+                // keeps the unit charged (`erl_db.c:1916-1923`).
+                if !busy.looped {
+                    left -= 1;
+                    busy.looped = true;
+                    if left <= 0 {
+                        break;
+                    }
+                }
+                let key = &busy.objects[busy.walked][self.keypos as usize - 1];
+                busy.looped = false;
+                if self.object(atoms, key).is_some() {
+                    busy.found = true;
+                    break;
+                }
+                busy.walked += 1;
+            }
+            if busy.found || busy.walked == busy.objects.len() {
+                busy.walk = false;
+            }
+        }
+        if busy.walk {
+            self.busy = Some(busy);
+            return (units - left, None);
+        }
+
+        if busy.found {
+            // The copy of each object goes away, one unit for each object
+            // (`ets_insert_2_list_destroy_copied_dbterms`, `erl_db.c:1863-1873`).
+            // The counter yields after the loop unit of a step and before
+            // the copy goes away, as it does in the loop of the insert
+            // (`erl_db.c:1936-1940`).
+            while busy.inserted < busy.objects.len() && (first || left > 0) {
+                first = false;
+                if !busy.looped {
+                    left -= 1;
+                    busy.looped = true;
+                    if left <= 0 {
+                        exhausted = true;
+                        break;
+                    }
+                }
+                std::mem::take(&mut busy.objects[busy.inserted]);
+                busy.looped = false;
+                busy.inserted += 1;
+            }
+            exhausted = exhausted || left <= 0;
+        } else {
+            // The objects go into the table, one unit for the loop of the
+            // step and one for the object, and one more for each object
+            // that a `bag` insert compares (`erl_db_hash.c:1422-1442`). The
+            // counter yields after the loop unit and before the object, and
+            // after the insert of the object (`erl_db.c:1936-1940`), so a
+            // turn can charge the loop unit of an object that it does not
+            // put into the table.
+            while busy.inserted < busy.objects.len() && (first || left > 0) {
+                first = false;
+                if !busy.looped {
+                    left -= 1;
+                    busy.looped = true;
+                    if left <= 0 {
+                        exhausted = true;
+                        break;
+                    }
+                }
+                // The copy of the object goes into the table in its step
+                // (`db_put_dbterm`, `erl_db.c:1934-1940`). A `bag` insert
+                // keeps the walk of each key for its other objects, so its
+                // work stays that of one list insert.
+                let object = std::mem::take(&mut busy.objects[busy.inserted]);
+                let compared = if self.table_type == TableType::Bag {
+                    self.insert_bag(atoms, object, &mut busy.walks)
+                } else {
+                    self.insert(atoms, object);
+                    0
+                };
+                busy.looped = false;
+                busy.inserted += 1;
+                left -= 1 + compared as i64;
+            }
+            // A turn that uses the last of the budget ends the insert in
+            // its next turn, as the trapped YCF call uninstalls the state
+            // then (`erl_db.c:2180-2196`, `2297-2332`).
+            exhausted = exhausted || left <= 0;
+        }
+        let result = if exhausted { None } else { busy.end() };
+        if result.is_none() {
+            self.busy = Some(busy);
+        }
+        (units - left, result)
+    }
+
     /// Add each object of `objects` in list order, as a list insert puts
     /// them, and return the number of objects that the insert of each
     /// object compared, as one insert after another gives it.
@@ -650,38 +915,61 @@ impl Table {
             return vec![0; count];
         }
         let mut walks: HashMap<u64, Vec<BagWalk>> = HashMap::new();
-        let mut counts = Vec::with_capacity(objects.len());
-        for object in objects {
-            let hash = stored_hash(atoms, self.key(&object));
-            let walks = walks.entry(hash).or_default();
-            let index = match (walks.iter()).position(|walk| walk.key == *self.key(&object)) {
-                Some(index) => index,
-                None => {
-                    let key = self.key(&object).clone();
-                    let cursor = self.position(hash, &key).unwrap_or(EMPTY);
-                    walks.push(BagWalk::new(key, cursor));
-                    walks.len() - 1
-                }
-            };
-            let walk = &mut walks[index];
-            let object_hash = object_hash(&object);
-            let count = match walk.find(self, object_hash, &object) {
-                Some(count) => count,
-                None => {
-                    let count = walk.added + walk.walked;
-                    let newest = self.position(hash, &walk.key).unwrap_or(EMPTY);
-                    let slot = self.add(atoms, hash, object, newest);
-                    walk.seen
-                        .entry(object_hash)
-                        .or_default()
-                        .push((Place::Added(walk.added), slot));
-                    walk.added += 1;
-                    count
-                }
-            };
-            counts.push(count);
+        objects
+            .into_iter()
+            .map(|object| self.insert_bag(atoms, object, &mut walks))
+            .collect()
+    }
+
+    /// Add the object `object` of a `bag` table and return the number of
+    /// objects that its insert compared, as the steps of one list insert
+    /// give it ([`Table::insert_all`]). The walk of each key stays in
+    /// `walks` across the objects of the list, so one list insert does the
+    /// work of ERTS and not that work for each object.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Bag);
+    /// let atoms = AtomTable::new();
+    /// let mut walks = HashMap::new();
+    /// let object = vec![Term::Integer(1), Term::Integer(2)];
+    /// assert_eq!(table.insert_bag(&atoms, object.clone(), &mut walks), 0);
+    /// assert_eq!(table.insert_bag(&atoms, object, &mut walks), 1);
+    /// ```
+    fn insert_bag(
+        &mut self,
+        atoms: &AtomTable,
+        object: Vec<Term>,
+        walks: &mut HashMap<u64, Vec<BagWalk>>,
+    ) -> usize {
+        let hash = stored_hash(atoms, self.key(&object));
+        let walks = walks.entry(hash).or_default();
+        let index = match (walks.iter()).position(|walk| walk.key == *self.key(&object)) {
+            Some(index) => index,
+            None => {
+                let key = self.key(&object).clone();
+                let cursor = self.position(hash, &key).unwrap_or(EMPTY);
+                walks.push(BagWalk::new(key, cursor));
+                walks.len() - 1
+            }
+        };
+        let walk = &mut walks[index];
+        let object_hash = object_hash(&object);
+        match walk.find(self, object_hash, &object) {
+            Some(count) => count,
+            None => {
+                let count = walk.added + walk.walked;
+                let newest = self.position(hash, &walk.key).unwrap_or(EMPTY);
+                let slot = self.add(atoms, hash, object, newest);
+                walk.seen
+                    .entry(object_hash)
+                    .or_default()
+                    .push((Place::Added(walk.added), slot));
+                walk.added += 1;
+                count
+            }
         }
-        counts
     }
 
     /// Put `object` into a new slot as the newest object of its key, whose
@@ -990,6 +1278,34 @@ impl Table {
                 .flatten()
                 .map(|object| object.capacity() * std::mem::size_of::<Term>())
                 .sum::<usize>()
+            + self.busy.as_ref().map_or(0, |busy| {
+                busy.objects.capacity() * std::mem::size_of::<Vec<Term>>()
+                    + busy
+                        .objects
+                        .iter()
+                        .map(|object| object.capacity() * std::mem::size_of::<Term>())
+                        .sum::<usize>()
+                    + busy.walks.capacity() * std::mem::size_of::<(u64, Vec<BagWalk>)>()
+                    + busy
+                        .walks
+                        .values()
+                        .map(|walks| {
+                            walks.capacity() * std::mem::size_of::<BagWalk>()
+                                + walks
+                                    .iter()
+                                    .map(|walk| {
+                                        walk.seen
+                                            .values()
+                                            .map(|slots| {
+                                                slots.capacity()
+                                                    * std::mem::size_of::<(Place, usize)>()
+                                            })
+                                            .sum::<usize>()
+                                    })
+                                    .sum::<usize>()
+                        })
+                        .sum::<usize>()
+            })
     }
 
     /// Return the slot of the object whose stored key hash is `hash` and whose
