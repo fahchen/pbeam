@@ -346,20 +346,22 @@ fn orders_external_funs_by_mfa_and_after_local_funs() {
 
 #[test]
 fn orders_references_by_their_number_words() {
-    // ERTS compares two references by their number words, in order
-    // (`erts_cmp_compound`, utils.c:2239-2290). PBeam makes the same words
-    // from its counter, so the reference 1 comes before the reference 2.
+    // ERTS compares two references by their number words, from the highest
+    // word down (`erts_cmp_compound`, utils.c:2283-2286). PBeam makes the
+    // same words from its counter, so the reference 1 comes before the
+    // reference 2.
     let earlier = Term::tuple(vec![atom("a"), Term::Reference(Reference(1))]);
     let later = Term::tuple(vec![atom("a"), Term::Reference(Reference(2))]);
     assert_eq!(earlier.compare(&later, &test_atom_table()).unwrap(), Less);
-    // The first word holds the low 18 bits of the counter, so a counter that
-    // passed 2^18 orders before a smaller counter, as in ERTS.
+    // ERTS compares the number words from the highest word down
+    // (`utils.c:2283-2286`), so the counter value orders the references, and
+    // a counter that passed 2^18 orders after a smaller counter.
     let wrapped = Term::Reference(Reference(1 << 18));
     assert_eq!(
         wrapped
             .compare(&Term::Reference(Reference(1)), &test_atom_table())
             .unwrap(),
-        Less
+        Greater
     );
     assert_eq!(
         Term::tuple(vec![atom("b"), Term::Reference(Reference(1))])

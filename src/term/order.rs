@@ -85,13 +85,12 @@ impl Term {
     /// // returns Equal.
     /// let tuple = Term::tuple(vec![Term::static_atom("a"), Term::Integer(1)]);
     /// assert_eq!(tuple.compare(&tuple, &atoms)?, Ordering::Equal);
-    /// assert!(Term::Reference(Reference(1)).compare(&Term::Reference(Reference(2)), &atoms).is_err());
+    /// assert_eq!(Term::Reference(Reference(1)).compare(&Term::Reference(Reference(2)), &atoms)?, Ordering::Less);
     /// ```
     ///
     /// # Errors
     ///
-    /// Return a runtime error when the result depends on the order of two
-    /// different references.
+    /// No error is possible: each term has a term order.
     pub(crate) fn compare(&self, other: &Term, atoms: &AtomTable) -> Result<Ordering, BeamError> {
         self.compare_in(other, false, atoms)
     }
@@ -220,10 +219,14 @@ fn compare_pair<'a>(
         (Term::Pid(left), Term::Pid(right)) => left.0.cmp(&right.0),
         (Term::Port(left), Term::Port(right)) => left.0.cmp(&right.0),
         // ERTS compares two references on one node by their number words,
-        // in order (`erts_cmp_compound`, utils.c:2239-2290), and the words
-        // below match that layout (row "Reference order" of
-        // docs/erts-differences.md).
-        (Term::Reference(left), Term::Reference(right)) => left.numbers().cmp(&right.numbers()),
+        // from the highest word down (`erts_cmp_compound`,
+        // utils.c:2283-2286), and the words below match that layout (row
+        // "Term order" of docs/erts-differences.md).
+        (Term::Reference(left), Term::Reference(right)) => left
+            .numbers()
+            .iter()
+            .rev()
+            .cmp(right.numbers().iter().rev()),
         (Term::Tuple(left), Term::Tuple(right)) if left.len() == right.len() => {
             steps.extend(
                 left.iter()
