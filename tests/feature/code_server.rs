@@ -351,8 +351,13 @@ fn raises_badfun_for_the_funs_of_removed_code_as_pinned_erts() {
     // the same module name gives the entry of the first fun another old
     // unique value and leaves no entry for the index of the second fun, so
     // the call of each fun enters no code and raises error:{badfun, Fun}
-    // (beam_common.c:1626-1630, 1697-1706).
-    let expected = "[{error,{badfun,fun_term}},{error,{badfun,fun_term}}]\n";
+    // (beam_common.c:1626-1630, 1697-1706). The name of a fun of code that
+    // is not loaded is `[]` (`erl_bif_info.c:3998-4001`), also after the
+    // code_server purged the module and before a load of another version.
+    let expected = "[{error,{badfun,fun_term}},{error,{badfun,fun_term}},\
+                    [{name,'-make_first/1-fun-0-'},\
+                     {name,'-make_second/1-fun-0-'}],\
+                    [{name,[]},{name,[]}],[{name,[]},{name,[]}]]\n";
     let erts = run(&mut erts_probe(
         FUN_ENTRY_PROBE,
         "fun_entry_probe",
@@ -365,6 +370,32 @@ fn raises_badfun_for_the_funs_of_removed_code_as_pinned_erts() {
             FUN_ENTRY_PROBE,
             "fun_entry_probe",
             "stale",
+            &[]
+        )),
+        expected
+    );
+}
+
+#[test]
+fn reads_the_name_of_the_funs_of_deleted_code_as_pinned_erts() {
+    // `erlang:delete_module/1` moves the code of the module to old code and
+    // keeps its fun entries until the purge (`beam_bif_load.c:2412-2455`),
+    // so `erlang:fun_info/2` gives the name of the function of a fun of that
+    // code, as on ERTS (`erl_fun.c:37-46`).
+    let expected = "[{name,'-make_rev/1-fun-0-'},{name,'-make_rev/1-fun-0-'},\
+                    {name,'-make_rev/1-fun-0-'}]\n";
+    let erts = run(&mut erts_probe(
+        FUN_ENTRY_PROBE,
+        "fun_entry_probe",
+        "deleted",
+        &[],
+    ));
+    assert!(erts.starts_with(expected), "{erts}");
+    assert_eq!(
+        run(&mut pbeam_probe(
+            FUN_ENTRY_PROBE,
+            "fun_entry_probe",
+            "deleted",
             &[]
         )),
         expected

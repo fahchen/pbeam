@@ -173,7 +173,7 @@ bifs! {
     erlang:float_to_list/1 as ErlangFloatToList1 => |_, [float]| Ok(float::to_list(float, &Term::nil())),
     erlang:float_to_list/2 as ErlangFloatToList2 => |_, [float, options]| Ok(float::to_list(float, options)),
     erlang:floor/1 as ErlangFloor1 => |_, [term]| Ok(erlang::round_to_integer(term, f64::floor)),
-    erlang:fun_info/2 => unsupported,
+    erlang:fun_info/2 as ErlangFunInfo2 => |cx, [fun, what]| erlang::fun_info(cx, fun, what),
     erlang:fun_info_mfa/1 => unsupported,
     erlang:fun_to_list/1 => unsupported,
     erlang:function_exported/3 as ErlangFunctionExported3 => |cx, [module, name, arity]| Ok(erlang::function_exported(&cx.scheduler.atoms, &cx.scheduler.code, module, name, arity)),

@@ -509,6 +509,80 @@ impl CodeTable {
             .transpose()
     }
 
+    /// Return the name of the function that holds the code of `lambda`, as
+    /// ERTS `erts_get_fun_mfa` (`erl_fun.c:37-46`) gives it: the function of
+    /// the `func_info` before the entry label of the fun entry. The code of
+    /// the fun is the current code, the code that waits for its `-on_load`
+    /// function, or the old code that `erlang:delete_module/1` kept until
+    /// the purge; the first code whose fun entry matches the fun gives the
+    /// name of its function. A fun whose code the code table does not hold
+    /// gives `None`. A call of a fun puts
+    /// its arguments in `x(0)` onwards and then its free variables in the
+    /// registers after them, so the arity of that function is the arity of
+    /// the fun plus the number of free variables (`jit/asm_load.c:1218-1223`),
+    /// and this function compares no arity.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let name = code.function_name_of("fun_probe", &lambda)?;
+    /// assert_eq!(name.as_deref(), Some("locals"));
+    /// assert_eq!(code.function_name_of("missing", &lambda)?, None);
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// An entry label that starts no function is a runtime invariant error.
+    pub(in crate::runtime) fn function_name_of(
+        &self,
+        module: &str,
+        lambda: &Lambda,
+    ) -> Result<Option<String>, BeamError> {
+        for loaded in self.codes(module) {
+            let Some(entry) = loaded
+                .tables
+                .fun_entries
+                .get(&lambda.index())
+                .filter(|entry| entry.old_unique == lambda.old_unique())
+            else {
+                continue;
+            };
+            let function = super::function_at_label(loaded, entry.label)?;
+            return Ok(Some(loaded.tables.name(function.name).to_owned()));
+        }
+        Ok(None)
+    }
+
+    /// Return the current code of the module `name`, the code that waits for
+    /// its `-on_load` function, and each code of the name in `by_id`, which
+    /// includes the old code that `erlang:delete_module/1` kept until the
+    /// purge (`beam_bif_load.c:2412-2455`). A code of the name that is not
+    /// current and does not wait gives its funs a name, so the caller reads
+    /// each code of the name. The code of a purge that runs has no name, as
+    /// the preparation of the purge clears the fun address
+    /// (`erl_fun.c:159-175`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(code.codes("missing").count(), 0);
+    /// ```
+    fn codes<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a Rc<BeamModule>> + 'a {
+        // The preparation of a purge clears the fun address of the old code
+        // (`erl_fun.c:159-175`), so `erts_get_fun_mfa` gives no MFA for its
+        // funs until the purge ends.
+        let purging = self.old_code(name);
+        self.get(name)
+            .into_iter()
+            .chain(self.on_load.get(name).map(|waiting| &waiting.code))
+            .chain(
+                self.by_id
+                    .values()
+                    .map(|loaded| &loaded.code)
+                    .filter(move |code| code.name == name && Some(code.id) != purging),
+            )
+    }
+
     /// Return the code of `module` that waits for its `-on_load` function,
     /// else the loaded module `module`. `erlang:load_nif/2` from an on_load
     /// function checks the functions of the waiting code, as ERTS

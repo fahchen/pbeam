@@ -1,5 +1,5 @@
 -module(fun_entry_probe).
--export([stale/0, identical/0]).
+-export([stale/0, identical/0, deleted/0]).
 
 %% The -on_load function of the first version of fun_entry_send sends two
 %% funs of its code to this process and fails, so code_server removes the
@@ -8,15 +8,36 @@
 %% value and the entry of the other fun absent, so each call raises
 %% error:{badfun, Fun} (beam_common.c:1697-1706).
 stale() ->
-    {First, Second} = funs_of_removed_code(),
+    {First, Second, Waiting} = funs_of_removed_code(),
+    %% The name of a fun of code that is not loaded is `[]`
+    %% (erl_bif_info.c:3998-4001), also when the code_server purged the
+    %% module after the failed -on_load function. `Waiting` holds the names
+    %% that the -on_load function read while the code waited for it.
+    Before = [erlang:fun_info(F, name) || F <- [First, Second]],
     {module, fun_entry_send} = code:load_abs("fixtures/fun_entry_rev/fun_entry_send"),
-    io:format("~p~n", [[call(First), call(Second)]]).
+    After = [erlang:fun_info(F, name) || F <- [First, Second]],
+    io:format("~w~n", [[call(First), call(Second), Waiting, Before, After]]).
+
+%% `erlang:delete_module/1` moves the code of a module to old code, which
+%% keeps the name of the function of each fun until the purge
+%% (`beam_bif_load.c:2412-2455`, `erl_fun.c:37-46`).
+deleted() ->
+    {module, fun_entry_send} = code:load_abs("fixtures/fun_entry_rev/fun_entry_send"),
+    Fun = fun_entry_send:make_rev(rev),
+    Before = erlang:fun_info(Fun, name),
+    true = code:delete(fun_entry_send),
+    Deleted = erlang:fun_info(Fun, name),
+    %% A load of another version makes new current code and keeps the old
+    %% code, so the fun of the old code keeps the name of its function.
+    {module, fun_entry_send} = code:load_abs("fixtures/code_server/fun_entry_send"),
+    Reloaded = erlang:fun_info(Fun, name),
+    io:format("~w~n", [[Before, Deleted, Reloaded]]).
 
 %% A later load of the code that made the funs, while this process holds no
 %% name, makes the code current again, so each call enters the function of
 %% its lambda.
 identical() ->
-    {First, Second} = funs_of_removed_code(),
+    {First, Second, _Waiting} = funs_of_removed_code(),
     true = unregister(fun_entry_probe),
     {module, fun_entry_send} = code:load_abs("fixtures/code_server/fun_entry_send"),
     io:format("~p~n", [[call(First), call(Second)]]).
@@ -26,9 +47,9 @@ identical() ->
 funs_of_removed_code() ->
     true = register(fun_entry_probe, self()),
     {error, on_load_failure} = code:ensure_loaded(fun_entry_send),
-    First = receive {stale_fun, first, FirstFun} -> FirstFun end,
-    Second = receive {stale_fun, second, SecondFun} -> SecondFun end,
-    {First, Second}.
+    {First, FirstName} = receive {stale_fun, first, F1, N1} -> {F1, N1} end,
+    {Second, SecondName} = receive {stale_fun, second, F2, N2} -> {F2, N2} end,
+    {First, Second, [FirstName, SecondName]}.
 
 %% Call the fun and report the class and the reason of the call. The reason
 %% of an error holds the called fun, which io_lib prints through

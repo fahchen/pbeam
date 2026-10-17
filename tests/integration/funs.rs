@@ -261,3 +261,98 @@ fn releases_the_frame_before_a_tail_apply_as_pinned_erts() {
         b"[{outer,{badfun,notfun}},{outer,badarg},{outer,badarg},{inner,badarg}]\n"
     );
 }
+
+#[test]
+fn gives_fun_information_as_pinned_erts() {
+    // `fun_probe:infos/0` asks `erlang:fun_info/2` for the items that
+    // `Elixir.BadArityError` and `Elixir.Agent.Server` read. A local fun
+    // gives `local`, its module and function, its arity, its free variables
+    // in `FunT` order, `1` for `refc`, the `Index` field of its `FunT` entry
+    // for `new_index` (`erl_bif_info.c:3954-3957`, `jit/asm_load.c:1218-1223`),
+    // and the old unique value of the entry for `uniq`
+    // (`erl_bif_info.c:3968-3971`). An external fun gives `external`, its
+    // module and function, its arity, `[]` for `env`, and `undefined` for
+    // `refc`, `index`, `new_index`, `uniq`, `new_uniq`, and `pid`
+    // (`erl_bif_info.c:3943-3969`, `erl_bif_info.c:3985-3990`). A term that
+    // is not a fun, an item that the BIF does not know, and `native` and
+    // `native_address` raise `badarg` (`erl_bif_info.c:3924-3926`,
+    // `erl_bif_info.c:4003-4004`).
+    let program = BeamProgram::load(&[FUN_PROBE]).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let pair = |first: &str, second: Term| Term::tuple(vec![atom(first), second]);
+    let mut expected = vec![
+        pair("type", atom("local")),
+        pair("module", atom("fun_probe")),
+        pair("name", atom("-infos/0-fun-0-")),
+        pair("arity", Term::Integer(1)),
+        pair(
+            "env",
+            Term::list_from(vec![
+                Term::Integer(7),
+                Term::tuple(vec![atom("a"), atom("b")]),
+            ]),
+        ),
+        pair("refc", Term::Integer(1)),
+        pair("uniq", Term::Integer(111_449_314)),
+        pair("new_index", Term::Integer(6)),
+        pair("type", atom("local")),
+        pair("module", atom("fun_probe")),
+        pair("name", atom("-infos/0-fun-1-")),
+        pair("arity", Term::Integer(0)),
+        pair("env", Term::nil()),
+        pair("refc", Term::Integer(1)),
+        pair("uniq", Term::Integer(111_449_314)),
+        pair("new_index", Term::Integer(7)),
+        pair("type", atom("external")),
+        pair("module", atom("lists")),
+        pair("name", atom("reverse")),
+        pair("arity", Term::Integer(1)),
+        pair("env", Term::nil()),
+        pair("refc", atom("undefined")),
+        pair("index", atom("undefined")),
+        pair("new_index", atom("undefined")),
+        pair("uniq", atom("undefined")),
+        pair("new_uniq", atom("undefined")),
+        pair("pid", atom("undefined")),
+    ];
+    expected.extend(["badarg", "badarg", "badarg", "badarg"].map(atom));
+    assert_eq!(
+        program.execute("fun_probe", "infos", &[]).unwrap().term,
+        Term::list_from(expected)
+    );
+    assert_eq!(
+        reference("infos"),
+        b"[{type,local},{module,fun_probe},{name,'-infos/0-fun-0-'},\
+          {arity,1},{env,[7,{a,b}]},{refc,1},{uniq,111449314},{new_index,6},\
+          {type,local},{module,fun_probe},{name,'-infos/0-fun-1-'},\
+          {arity,0},{env,[]},{refc,1},{uniq,111449314},{new_index,7},\
+          {type,external},{module,lists},{name,reverse},\
+          {arity,1},{env,[]},{refc,undefined},{index,undefined},\
+          {new_index,undefined},{uniq,undefined},{new_uniq,undefined},\
+          {pid,undefined},badarg,badarg,badarg,badarg]\n"
+    );
+}
+
+#[test]
+fn rejects_fun_info_items_the_loader_keeps_no_value_for() {
+    // The loader of PBeam keeps no old index of a `FunT` entry, no MD5 of
+    // the module, and no init process ID (`jit/asm_load.c:1218-1223`), so a
+    // local fun stops the run with a clear runtime error at these items.
+    // This is the "Fun information" row in `docs/erts-differences.md`.
+    let program = BeamProgram::load(&[FUN_PROBE]).unwrap();
+    for item in ["index", "new_uniq", "pid"] {
+        let message = format!("unsupported erlang:fun_info/2 item {item}");
+        let item = Term::Atom(program.atom(item).unwrap());
+        let error = program
+            .execute(
+                "fun_probe",
+                "fun_info_unsupported",
+                &[program.host_term(item)],
+            )
+            .unwrap_err();
+        assert!(
+            error.to_string().contains(&message),
+            "expected {message}, got {error}"
+        );
+    }
+}

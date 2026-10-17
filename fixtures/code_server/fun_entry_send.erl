@@ -13,8 +13,12 @@ init() ->
         undefined ->
             ok;
         Probe ->
-            Probe ! {stale_fun, first, make_first(version_one)},
-            Probe ! {stale_fun, second, make_second(version_one)},
+            First = make_first(version_one),
+            Second = make_second(version_one),
+            %% A fun of code that waits for its -on_load function has the
+            %% name of its function (`erl_fun.c:37-46`).
+            Probe ! {stale_fun, first, First, erlang:fun_info(First, name)},
+            Probe ! {stale_fun, second, Second, erlang:fun_info(Second, name)},
             {error, sent}
     end.
 
