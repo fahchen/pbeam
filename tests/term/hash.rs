@@ -522,3 +522,19 @@ fn hashes_a_port_with_a_large_number_from_the_erts_source() {
     assert_eq!(make_hash(&atoms, &port), 3_591_747_951);
     assert_eq!(make_hash2(&atoms, &port).0, 3_633_483_707);
 }
+
+#[test]
+fn hashes_only_the_pid_number_and_not_the_serial_as_pinned_erts() {
+    // ERTS hashes the 28-bit pid number only (`internal_pid_number`,
+    // `erl_term.h:645-656`), so `<0.0.1>` and `<0.0.0>` have the same hash.
+    // The pinned ERTS gives `erlang:phash(Pid, 4294967296)` = 1 and
+    // `erlang:phash2(Pid, 4294967296)` = 2858162279 for both pids (measured
+    // with `mise run erts-eval`).
+    let atoms = AtomTable::new();
+    let zero = Term::Pid(ProcessId(0));
+    let serial = Term::Pid(ProcessId(1 << 28));
+    assert_eq!(make_hash(&atoms, &zero), 0);
+    assert_eq!(make_hash(&atoms, &serial), 0);
+    assert_eq!(make_hash2(&atoms, &zero).0, 2_858_162_279);
+    assert_eq!(make_hash2(&atoms, &serial).0, 2_858_162_279);
+}

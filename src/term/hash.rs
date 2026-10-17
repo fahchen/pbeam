@@ -766,6 +766,10 @@ const HCONST_19: u32 = 0xbe1e_08bb;
 /// (`erl_term.h:1442-1443`).
 const NIL_DEF: u32 = 2;
 
+/// The mask of the pid number in the ERTS pid data word, below the serial
+/// bits (`_PID_NUM_SIZE`, `erl_term.h:645-656`).
+const PID_NUMBER_MASK: u64 = (1 << 28) - 1;
+
 /// Return true for a cons cell, as the ERTS C check `is_list` does
 /// (`erl_term.h:1260-1261`): `[]` is not a cons. The Erlang guard
 /// `is_list/1` of [`Term::is_list`] also accepts `[]`.
@@ -864,7 +868,10 @@ pub(crate) fn make_hash(atoms: &AtomTable, term: &Term) -> u32 {
                 }
                 Term::Binary(bytes) => hash = binary_hash(hash, bytes),
                 Term::Pid(pid) => {
-                    hash = uint32_step(hash, pid.0, FUNNY_5).wrapping_mul(FUNNY_6);
+                    // ERTS hashes the pid number only, not its serial
+                    // (`internal_pid_number`, `erl_term.h:645-656`).
+                    let number = u64::from(pid.0 & PID_NUMBER_MASK);
+                    hash = uint32_step(hash, number, FUNNY_5).wrapping_mul(FUNNY_6);
                 }
                 Term::Port(port) => {
                     let (low, high) = (port.0 as u32, (port.0 >> 32) as u32);
@@ -1482,7 +1489,9 @@ pub(crate) fn make_hash2(atoms: &AtomTable, term: &Term) -> (u32, u64) {
                     }
                 }
             }
-            Term::Pid(pid) => hash = hash_with(hash, pid.0 as u32, HCONST_5),
+            // ERTS hashes the pid number only, not its serial
+            // (`internal_pid_number`, `erl_term.h:645-656`).
+            Term::Pid(pid) => hash = hash_with(hash, (pid.0 & PID_NUMBER_MASK) as u32, HCONST_5),
             Term::Port(port) => {
                 hash = hash2_with(hash, port.0 as u32, (port.0 >> 32) as u32, HCONST_6);
             }
