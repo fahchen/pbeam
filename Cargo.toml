@@ -9,6 +9,7 @@ autotests = false
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+flate2 = { version = "1.1.10", features = ["zlib"] }
 libc = "0.2"
 nix = { version = "0.31.3", default-features = false }
 num-bigint = "0.5"
@@ -17,6 +18,7 @@ num-traits = "0.2"
 sha1 = "0.10"
 sha2 = "0.10"
 socket2 = { version = "0.6", features = ["all"] }
+zlib-rs = "0.6"
 
 [build-dependencies]
 cc = "1"
@@ -263,6 +265,10 @@ path = "tests/integration/event_bif.rs"
 [[test]]
 name = "exception"
 path = "tests/integration/exception.rs"
+
+[[test]]
+name = "external_term"
+path = "tests/integration/external_term.rs"
 
 [[test]]
 name = "exit_costs"
@@ -583,3 +589,7 @@ path = "tests/integration/prim_file.rs"
 [[test]]
 name = "atomics"
 path = "tests/integration/atomics.rs"
+
+[[test]]
+name = "zlib"
+path = "tests/integration/zlib.rs"
