@@ -1,5 +1,5 @@
 -module(crypto_probe).
--export([main/0, nifs/0, hash_init/0]).
+-export([main/0, nifs/0, hash_init/0, hash_large/0]).
 
 %% Write the results of crypto:strong_rand_bytes/1, one term on each line.
 %% The first call loads crypto on demand, and its -on_load function loads
@@ -70,6 +70,12 @@ nifs() ->
 %% Call crypto:hash_init/1, whose NIF hash_init_nif/1 PBeam does not link.
 hash_init() ->
     io:format("~p~n", [crypto:hash_init(sha)]).
+
+%% Call crypto:hash/2 with more than the 20000 bytes that hash_nif/2 takes.
+%% crypto:hash/2 sends the input through hash_init_nif/1, which PBeam does
+%% not link (crypto.erl:4535-4540).
+hash_large() ->
+    io:format("~p~n", [crypto:hash(sha, binary:copy(<<0>>, 20001))]).
 
 bad(Fun) ->
     try Fun() catch Class:Reason:Stack -> {Class, Reason, hd(Stack)} end.

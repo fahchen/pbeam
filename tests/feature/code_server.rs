@@ -212,17 +212,21 @@ fn runs_the_linked_crypto_nifs_as_pinned_erts() {
 #[test]
 fn stops_with_a_runtime_error_for_an_unsupported_crypto_nif() {
     // PBeam does not link `hash_init_nif/1`, which `crypto:hash_init/1`
-    // calls (crypto.erl:1160).
-    let output = pbeam_probe(CRYPTO_PROBE, "crypto_probe", "hash_init", &[])
-        .env("TERM", "dumb")
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(
-        !output.status.success() && stderr.contains("crypto:hash_init_nif/1 NIF is not supported"),
-        "{stderr}"
-    );
+    // calls (crypto.erl:1160). `crypto:hash/2` sends an input of more than
+    // 20000 bytes through the same NIF (crypto.erl:4535-4540).
+    for function in ["hash_init", "hash_large"] {
+        let output = pbeam_probe(CRYPTO_PROBE, "crypto_probe", function, &[])
+            .env("TERM", "dumb")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            !output.status.success()
+                && stderr.contains("crypto:hash_init_nif/1 NIF is not supported"),
+            "{function}: {stderr}"
+        );
+    }
 }
 
 #[test]

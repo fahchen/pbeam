@@ -312,9 +312,12 @@ fn known_digest(name: &str) -> bool {
 
 /// Run `crypto:hash_nif(Type, Data)` as the ERTS NIF `hash_nif`
 /// (`hash.c:101-164`) does. `Data` is a binary: the only caller,
-/// `crypto:hash/2`, converts the iodata first (`crypto.erl:1092-1095`). A
-/// digest type that PBeam does not compute, such as `md5`, stops the run
-/// with a clear runtime error. A name that is not a digest type raises the
+/// `crypto:hash/2`, converts the iodata first (`crypto.erl:1092-1095`).
+/// `crypto:hash/2` sends an input of more than 20000 bytes through
+/// `hash_init_nif/1` (`crypto.erl:4535-4540`), which PBeam does not link, so
+/// that input stops the run with a runtime error. A digest type that PBeam
+/// does not compute, such as `md5`, stops the run with a clear runtime
+/// error. A name that is not a digest type raises the
 /// ERTS error `{badarg, #{c_file_name => "hash.c", c_file_line_num => 111,
 /// c_function_arg_num => 0}, "Bad digest type"}`, which `crypto:hash/2`
 /// gives as `error:{badarg, {"hash.c", 111}, "Bad digest type"}`
@@ -344,8 +347,9 @@ fn hash_nif(
         }
         return c_error(scheduler, "badarg", "hash.c", 111, 0, "Bad digest type");
     };
-    let Term::Binary(data) = data else {
-        return c_error(scheduler, "badarg", "hash.c", 118, 1, "Not iolist");
+    let data = match data {
+        Term::Binary(data) if data.bit_size() % 8 == 0 => data,
+        _ => return c_error(scheduler, "badarg", "hash.c", 118, 1, "Not iolist"),
     };
     Ok(BifResult::Value(Term::binary(hash.digest(data))))
 }
@@ -417,11 +421,13 @@ fn pbkdf2_hmac_nif(
             )
         };
     };
-    let Term::Binary(password) = password else {
-        return c_error(scheduler, "badarg", "pbkdf2_hmac.c", 43, 1, "Not binary");
+    let password = match password {
+        Term::Binary(password) if password.bit_size() % 8 == 0 => password,
+        _ => return c_error(scheduler, "badarg", "pbkdf2_hmac.c", 43, 1, "Not binary"),
     };
-    let Term::Binary(salt) = salt else {
-        return c_error(scheduler, "badarg", "pbkdf2_hmac.c", 46, 2, "Not binary");
+    let salt = match salt {
+        Term::Binary(salt) if salt.bit_size() % 8 == 0 => salt,
+        _ => return c_error(scheduler, "badarg", "pbkdf2_hmac.c", 46, 2, "Not binary"),
     };
     // `PKCS5_PBKDF2_HMAC` takes the iterations as a C `int`
     // (pbkdf2_hmac.c:58-61), so the high 32 bits do not count.
@@ -610,8 +616,9 @@ fn strong_rand_bytes_nif(size: &Term) -> BifResult {
 /// assert!(matches!(strong_rand_range_nif(&Term::Integer(10)), BifResult::Raise { .. }));
 /// ```
 fn strong_rand_range_nif(range: &Term) -> BifResult {
-    let Term::Binary(range) = range else {
-        return BifResult::badarg();
+    let range = match range {
+        Term::Binary(range) if range.bit_size() % 8 == 0 => range,
+        _ => return BifResult::badarg(),
     };
     match random_below(range) {
         Some(value) => BifResult::Value(Term::binary(value)),
