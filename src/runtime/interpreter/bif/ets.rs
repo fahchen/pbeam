@@ -86,6 +86,10 @@ enum Take {
     /// The table runs the list insert of the calling process, and it does
     /// not read the result of an ended one.
     Mine,
+    /// The table holds a clear of a fixed table that did not finish, and
+    /// the call traps and continues in a later turn
+    /// (`delete_all_objects_continue`, `erl_db.c:3300-3320`).
+    Clear,
     /// The table runs the list insert of another process, or holds the
     /// result of one that its process did not read: this process completes
     /// the steps, and its own operation runs in a later turn.
@@ -138,15 +142,22 @@ fn help_busy(context: &mut BifContext<'_>, table: &Term) -> Result<Take, BeamErr
     let units = usize::try_from(left.max(0))
         .unwrap_or(usize::MAX)
         .saturating_mul(8);
-    let (_, processed) = context
+    let (done, processed) = context
         .scheduler
         .ets
         .step_clear(&context.scheduler.atoms, id, units);
+    // The loop of `db_mark_all_deleted_hash` does not count its last
+    // bucket (`erl_db_hash.c:3034-3051`).
+    let counted = if done {
+        processed.saturating_sub(1)
+    } else {
+        processed
+    };
     context
         .scheduler
         .current_process_mut()
-        .bump_reductions(i32::try_from(processed.div_ceil(8)).unwrap_or(i32::MAX));
-    Ok(Take::Help)
+        .bump_reductions(i32::try_from(counted.div_ceil(8)).unwrap_or(i32::MAX));
+    Ok(Take::Clear)
 }
 
 /// Complete the list insert that holds `table` busy, with no turn limit, as
@@ -162,28 +173,15 @@ fn finish_busy(context: &mut BifContext<'_>, table: &Term) -> Result<(), BeamErr
             .ets
             .find(atoms, table)
             .expect("the caller found the table");
-        if found.busy.is_none() && !found.clearing() {
+        if found.busy.is_none() {
             return Ok(());
         }
-        if found.busy.is_some() {
-            let (used, _) =
-                step_inserting(context, &Term::Reference(id), i64::from(i32::MAX), None)?;
-            debug_assert!(used > 0, "a busy insert makes progress");
-            context
-                .scheduler
-                .current_process_mut()
-                .bump_reductions((used / ITERATIONS_PER_RED) as i32);
-        } else {
-            let reductions = found.delete_all_reductions();
-            context
-                .scheduler
-                .ets
-                .step_clear(&context.scheduler.atoms, id, usize::MAX);
-            context
-                .scheduler
-                .current_process_mut()
-                .bump_reductions(i32::try_from(reductions).unwrap_or(i32::MAX));
-        }
+        let (used, _) = step_inserting(context, &Term::Reference(id), i64::from(i32::MAX), None)?;
+        debug_assert!(used > 0, "a busy insert makes progress");
+        context
+            .scheduler
+            .current_process_mut()
+            .bump_reductions((used / ITERATIONS_PER_RED) as i32);
     }
 }
 
@@ -452,7 +450,7 @@ fn insert_objects(
         return insert_list(context, id, objects, keypos, state);
     }
     let caller = context.scheduler.current_process_mut().id;
-    if let Take::Help = help_busy(&mut *context, table)? {
+    if let Take::Help | Take::Clear = help_busy(&mut *context, table)? {
         return Ok(BifResult::TrapBif {
             module: "ets",
             function: if new { "insert_new" } else { "insert" },
@@ -640,7 +638,7 @@ pub(super) fn insert_list(
                     // ERTS takes the table before it raises `badarg` for a
                     // bad object, so a busy table runs its list insert first
                     // (`erl_db.c:2036-2047`).
-                    if let Take::Help = help_busy(&mut *context, &table)? {
+                    if let Take::Help | Take::Clear = help_busy(&mut *context, &table)? {
                         break 'work None;
                     }
                     break 'work Some(BifResult::badarg());
@@ -662,7 +660,7 @@ pub(super) fn insert_list(
             // A second call completes the list insert that holds the
             // table busy before it takes it, also without a copy of the
             // objects (`erl_db.c:2050-2055`).
-            if let Take::Help = help_busy(&mut *context, &table)? {
+            if let Take::Help | Take::Clear = help_busy(&mut *context, &table)? {
                 break 'work None;
             }
             let Some(table) = context.scheduler.ets.table(
@@ -699,7 +697,7 @@ pub(super) fn insert_list(
             // the units of this call, and this call then takes the table in
             // a later turn (`handle_lacking_permission`, `erl_db.c:769-798`,
             // `2223-2253`).
-            if let Take::Help = help_busy(&mut *context, &table)? {
+            if let Take::Help | Take::Clear = help_busy(&mut *context, &table)? {
                 break 'work None;
             }
             match context.scheduler.ets.table(
@@ -1161,7 +1159,7 @@ pub(super) fn lookup_element(
     default: &Term,
 ) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
-    if let Take::Help = help_busy(&mut *context, table)? {
+    if let Take::Help | Take::Clear = help_busy(&mut *context, table)? {
         return Ok(BifResult::TrapBif {
             module: "ets",
             function: "lookup_element",
@@ -1223,7 +1221,7 @@ pub(super) fn lookup(
     key: &Term,
 ) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
-    if let Take::Help = help_busy(&mut *context, table)? {
+    if let Take::Help | Take::Clear = help_busy(&mut *context, table)? {
         return Ok(BifResult::TrapBif {
             module: "ets",
             function: "lookup",
@@ -1265,7 +1263,7 @@ pub(super) fn member(
     key: &Term,
 ) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
-    if let Take::Help = help_busy(&mut *context, table)? {
+    if let Take::Help | Take::Clear = help_busy(&mut *context, table)? {
         return Ok(BifResult::TrapBif {
             module: "ets",
             function: "member",
@@ -1308,7 +1306,7 @@ pub(super) fn delete(
     key: &Term,
 ) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
-    if let Take::Help = help_busy(&mut *context, table)? {
+    if let Take::Help | Take::Clear = help_busy(&mut *context, table)? {
         return Ok(BifResult::TrapBif {
             module: "ets",
             function: "delete",
@@ -1352,7 +1350,7 @@ pub(super) fn take(
     key: &Term,
 ) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
-    if let Take::Help = help_busy(&mut *context, table)? {
+    if let Take::Help | Take::Clear = help_busy(&mut *context, table)? {
         return Ok(BifResult::TrapBif {
             module: "ets",
             function: "take",
@@ -1510,7 +1508,7 @@ pub(super) fn info(
     // `ets:info/2` asks for `DB_INFO`, so a busy table completes its list
     // insert first, and the call runs again in a later turn
     // (`erl_db.c:769-798`, `4549-4555`).
-    if let Take::Help = help_busy(&mut *context, table)? {
+    if let Take::Help | Take::Clear = help_busy(&mut *context, table)? {
         return Ok(BifResult::TrapBif {
             module: "ets",
             function: "info",
@@ -1723,7 +1721,7 @@ fn select_objects(
         Some(Some(chunk)) if chunk > 0 => chunk as usize,
         Some(_) => return Ok(BifResult::badarg()),
     };
-    if let Take::Help = help_busy(&mut *context, table)? {
+    if let Take::Help | Take::Clear = help_busy(&mut *context, table)? {
         return select_trap(context, table, spec, chunk);
     }
     let atoms = &context.scheduler.atoms;
@@ -1832,7 +1830,7 @@ pub(super) fn match_trap(
     state: MatchState,
 ) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
-    if let Take::Help = help_busy(&mut *context, &Term::Reference(id))? {
+    if let Take::Help | Take::Clear = help_busy(&mut *context, &Term::Reference(id))? {
         return Ok(BifResult::TrapBif {
             module: "ets",
             function: "select_trap",
@@ -2168,10 +2166,18 @@ fn match_end(
 /// the table (`erl_db.c:769-798`). The caller found the table, so this call
 /// always runs and one busy path covers each caller.
 fn help_table(context: &mut BifContext<'_>, table: &Term) -> Result<(), BeamError> {
-    if let Take::Help = help_busy(context, table)? {
-        finish_busy(context, table)?;
+    loop {
+        match help_busy(context, table)? {
+            Take::Help => {
+                finish_busy(context, table)?;
+                return Ok(());
+            }
+            // Each step marks a bounded group of buckets and charges its
+            // reductions (`delete_all_objects_continue`, `erl_db.c:3300-3320`).
+            Take::Clear => continue,
+            Take::Free | Take::Mine => return Ok(()),
+        }
     }
-    Ok(())
 }
 
 /// Run `ets:next(Table, Key)` or `ets:prev(Table, Key)`, as `ets_next_2`
@@ -2219,7 +2225,7 @@ pub(super) fn safe_fixtable(
     flag: &Term,
 ) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
-    if let Take::Help = help_busy(&mut *context, table)? {
+    if let Take::Help | Take::Clear = help_busy(&mut *context, table)? {
         return Ok(BifResult::TrapBif {
             module: "ets",
             function: "safe_fixtable",
@@ -2508,7 +2514,25 @@ pub(super) fn internal_delete_all(
     holder: &Term,
 ) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
-    help_table(&mut *context, table)?;
+    match help_busy(&mut *context, table)? {
+        Take::Clear => {
+            let Some((id, found)) = context.scheduler.ets.find(&context.scheduler.atoms, table)
+            else {
+                return Ok(BifResult::badarg());
+            };
+            let count = match holder {
+                Term::Integer(count) => *count,
+                _ => found.len() as i64,
+            };
+            return Ok(BifResult::TrapBif {
+                module: "ets",
+                function: "internal_delete_all",
+                arguments: vec![Term::Reference(id), Term::Integer(count)],
+            });
+        }
+        Take::Help => finish_busy(&mut *context, table)?,
+        Take::Free | Take::Mine => {}
+    }
     let left = context
         .scheduler
         .current_process_mut()

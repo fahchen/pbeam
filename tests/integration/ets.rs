@@ -980,6 +980,22 @@ fn gives_the_fixation_state_of_an_info_item_as_pinned_erts() {
 }
 
 #[test]
+fn helps_a_fixed_clear_from_another_process_as_pinned_erts() {
+    // A process that uses the table while a fixed clear does not finish
+    // marks the next buckets, 8 for each reduction
+    // (`delete_all_objects_continue`, `erl_db.c:3300-3320`).
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    assert_eq!(
+        program
+            .execute("ets_probe", "fixtable_clear_help", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![Term::Integer(100000), Term::Integer(0)])
+    );
+    assert_eq!(reference("fixtable_clear_help"), b"[100000,0]\n");
+}
+
+#[test]
 fn clears_a_large_fixed_table_in_turns_as_pinned_erts() {
     // The clear marks 8 buckets for each reduction, so a table with more
     // buckets than the turn allows traps and continues in a later turn

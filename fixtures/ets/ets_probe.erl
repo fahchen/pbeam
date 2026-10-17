@@ -22,7 +22,7 @@
          fixtable_bag_last_live/0, fixtable_bag_skip_deleted/0,
          fixtable_next_live_behind_node/0, fixtable_clear_behind_node/0,
          fixtable_bag_restore_behind_node/0, fixtable_delete_table/0,
-         fixtable_clear_large/0]).
+         fixtable_clear_large/0, fixtable_clear_help/0, clear_task/2]).
 
 %% ets:new/2 return values and badarg cases (erl_db.c:2555-2840).
 new() ->
@@ -1081,6 +1081,26 @@ fixtable_clear_large() ->
     Size = ets:info(T, size),
     ets:safe_fixtable(T, false),
     [Count, Size].
+
+%% A process that uses the table during a fixed clear helps with the mark,
+%% 8 buckets for each reduction (`erl_db.c:3300-3320`).
+fixtable_clear_help() ->
+    T = ets:new(ets_probe_fix_clear_help, [public, set]),
+    ets:insert(T, [{I} || I <- from(1, 100000)]),
+    ets:safe_fixtable(T, true),
+    Self = self(),
+    spawn(?MODULE, clear_task, [T, Self]),
+    Size = wait_size(T),
+    receive {cleared, Count} -> [Count, Size] end.
+
+clear_task(T, Self) ->
+    Self ! {cleared, ets:internal_delete_all(T, undefined)}.
+
+wait_size(T) ->
+    case ets:info(T, size) of
+        0 -> 0;
+        _ -> wait_size(T)
+    end.
 
 catch_error(Fun) ->
     try Fun() catch error:Reason -> {error, Reason} end.
