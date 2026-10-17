@@ -9,12 +9,13 @@
 %% error:{badfun, Fun} (beam_common.c:1697-1706).
 stale() ->
     {First, Second} = funs_of_removed_code(),
-    {module, fun_entry_send} = code:load_abs("fixtures/fun_entry_rev/fun_entry_send"),
     %% The name of a fun of code that is not loaded is `[]`
-    %% (erl_bif_info.c:3998-4001).
-    io:format("~p~n", [[call(First), call(Second),
-                        erlang:fun_info(First, name),
-                        erlang:fun_info(Second, name)]]).
+    %% (erl_bif_info.c:3998-4001), also when the code_server purged the
+    %% module after the failed -on_load function.
+    Before = [erlang:fun_info(F, name) || F <- [First, Second]],
+    {module, fun_entry_send} = code:load_abs("fixtures/fun_entry_rev/fun_entry_send"),
+    After = [erlang:fun_info(F, name) || F <- [First, Second]],
+    io:format("~w~n", [[call(First), call(Second), Before, After]]).
 
 %% A later load of the code that made the funs, while this process holds no
 %% name, makes the code current again, so each call enters the function of
