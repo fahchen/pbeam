@@ -873,3 +873,193 @@ fn fails_each_guard_and_expression_like_the_match_program() {
         Some(ok.clone())
     );
 }
+
+#[test]
+fn shifts_lists_and_boolean_forms_like_the_match_program() {
+    let mut atoms = test_atom_table();
+    let head = Term::static_atom("_");
+    let ok = Term::static_atom("true");
+    let run_expression = |atoms: &AtomTable, expression: Term| {
+        let spec = Term::list_from([Term::tuple(vec![
+            head.clone(),
+            Term::nil(),
+            Term::list_from([expression]),
+        ])]);
+        MatchSpec::compile(atoms, &spec)
+            .unwrap()
+            .run(atoms, &[Term::Integer(1)])
+    };
+    let big = |power: u32| Term::from_bigint(BigInt::from(10).pow(power));
+    let cases = [
+        (
+            call(&mut atoms, "bsl", vec![Term::Integer(8), Term::Integer(-1)]),
+            Term::Integer(4),
+        ),
+        (
+            call(&mut atoms, "bsr", vec![Term::Integer(8), Term::Integer(-1)]),
+            Term::Integer(16),
+        ),
+        (
+            call(&mut atoms, "bsl", vec![Term::Integer(1), Term::Integer(0)]),
+            Term::Integer(1),
+        ),
+        (
+            call(
+                &mut atoms,
+                "bsl",
+                vec![Term::Integer(0), Term::Integer(1_000_000)],
+            ),
+            Term::Integer(0),
+        ),
+        (
+            call(&mut atoms, "bsr", vec![Term::Integer(1), big(20)]),
+            Term::Integer(0),
+        ),
+        (
+            call(&mut atoms, "bsr", vec![Term::Integer(-1), big(20)]),
+            Term::Integer(-1),
+        ),
+        (
+            call(&mut atoms, "bsl", vec![Term::Integer(0), big(20)]),
+            Term::Integer(0),
+        ),
+        (
+            call(&mut atoms, "bsl", vec![Term::Integer(1), big(20)]),
+            Term::static_atom("EXIT"),
+        ),
+        (
+            call(
+                &mut atoms,
+                "bsl",
+                vec![
+                    Term::Integer(1),
+                    Term::from_bigint(-(BigInt::from(10_i32).pow(20))),
+                ],
+            ),
+            Term::Integer(0),
+        ),
+        (
+            call(
+                &mut atoms,
+                "bsr",
+                vec![
+                    Term::Integer(1),
+                    Term::from_bigint(-(BigInt::from(10_i32).pow(20))),
+                ],
+            ),
+            Term::static_atom("EXIT"),
+        ),
+        (
+            call(
+                &mut atoms,
+                "bsl",
+                vec![Term::Integer(1), Term::Integer(4_194_239)],
+            ),
+            Term::from_bigint(BigInt::from(1_i32) << 4_194_239_usize),
+        ),
+        (
+            call(
+                &mut atoms,
+                "bsl",
+                vec![Term::Integer(1), Term::Integer(4_194_240)],
+            ),
+            Term::static_atom("EXIT"),
+        ),
+        (
+            call(
+                &mut atoms,
+                "bsl",
+                vec![Term::Integer(1), Term::Integer(i64::MAX)],
+            ),
+            Term::static_atom("EXIT"),
+        ),
+        (
+            call(
+                &mut atoms,
+                "bsl",
+                vec![Term::Integer(1), Term::Integer(i64::MIN)],
+            ),
+            Term::Integer(0),
+        ),
+    ];
+    for (expression, expected) in cases {
+        assert_eq!(
+            run_expression(&atoms, expression.clone()),
+            Some(expected),
+            "{expression:?}"
+        );
+    }
+    // A failing list tail keeps the list and gives EXIT in the tail.
+    let tail = call(
+        &mut atoms,
+        "element",
+        vec![Term::Integer(5), Term::static_atom("$_")],
+    );
+    let list = Term::list_with_tail(vec![Term::Integer(1)], tail);
+    assert_eq!(
+        run_expression(&atoms, list),
+        Some(Term::list_with_tail(
+            vec![Term::Integer(1)],
+            Term::static_atom("EXIT")
+        ))
+    );
+    // The boolean forms take two or more operands.
+    for (form, operands, expected) in [
+        ("and", vec![ok.clone(), ok.clone(), ok.clone()], ok.clone()),
+        (
+            "or",
+            vec![
+                Term::static_atom("false"),
+                Term::static_atom("false"),
+                Term::static_atom("false"),
+            ],
+            Term::static_atom("false"),
+        ),
+        (
+            "andalso",
+            vec![ok.clone(), ok.clone(), ok.clone()],
+            ok.clone(),
+        ),
+        (
+            "andalso",
+            vec![Term::static_atom("false"), ok.clone(), ok.clone()],
+            Term::static_atom("false"),
+        ),
+        (
+            "orelse",
+            vec![
+                Term::static_atom("false"),
+                Term::static_atom("false"),
+                ok.clone(),
+            ],
+            ok.clone(),
+        ),
+        (
+            "orelse",
+            vec![
+                ok.clone(),
+                Term::static_atom("false"),
+                Term::static_atom("false"),
+            ],
+            ok.clone(),
+        ),
+    ] {
+        let mut elements = vec![atom(&mut atoms, form)];
+        elements.extend(operands);
+        assert_eq!(
+            run_expression(&atoms, Term::tuple(elements)),
+            Some(expected),
+            "{form}"
+        );
+    }
+    let one = Term::tuple(vec![atom(&mut atoms, "and"), ok]);
+    let spec = Term::list_from([Term::tuple(vec![
+        head.clone(),
+        Term::nil(),
+        Term::list_from([one]),
+    ])]);
+    assert!(matches!(
+        MatchSpec::compile(&atoms, &spec),
+        Err(SpecError::Badarg)
+    ));
+}

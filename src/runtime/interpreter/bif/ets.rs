@@ -2131,8 +2131,10 @@ pub(super) fn update_element(
         return Ok(BifResult::badarg());
     };
     let keypos = found.1.keypos();
+    // ERTS compares the unsigned arity with the C `int` key position, so a
+    // negative key position rejects each default (`erl_db.c:1483-1484`).
     let default_elements = match default {
-        Some(Term::Tuple(elements)) if elements.len() as i64 >= i64::from(keypos) => Some(elements),
+        Some(Term::Tuple(elements)) if elements.len() as u32 >= keypos as u32 => Some(elements),
         Some(_) => return Ok(BifResult::badarg()),
         None => None,
     };
@@ -2171,7 +2173,12 @@ pub(super) fn update_element(
     if existing.is_none() {
         let elements = default_elements.expect("the missing key has a default");
         let mut object = elements.as_ref().to_vec();
-        let index = usize::try_from(keypos).expect("the key position is not negative") - 1;
+        let Some(index) = usize::try_from(keypos)
+            .ok()
+            .and_then(|keypos| keypos.checked_sub(1))
+        else {
+            return Ok(BifResult::badarg());
+        };
         object[index] = key.clone();
         table.insert(atoms, object);
     }

@@ -5253,3 +5253,35 @@ fn rejects_a_select_delete_of_a_private_table_of_another_process() {
         .unwrap();
     assert!(matches!(result, BifResult::Raise { .. }));
 }
+
+#[test]
+fn rejects_an_update_default_at_the_zero_key_position() {
+    // A key position of 0 comes from a truncated `{keypos, 1 bsl 32}`. The
+    // unsigned arity check passes, and the default object has no key
+    // position to replace, so the call raises `badarg` (`erl_db.c:1483-1484`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let owner = scheduler.current_process_mut().id;
+    scheduler.ets.create(
+        Reference(0),
+        None,
+        Table::new(owner, Access::Public, 0, TableType::Set),
+    );
+    let object = Term::tuple(vec![Term::Integer(1), Term::Integer(0)]);
+    let result = program
+        .bif(
+            &mut scheduler,
+            "ets",
+            "update_element",
+            vec![
+                Term::Reference(Reference(0)),
+                Term::Integer(1),
+                Term::tuple(vec![Term::Integer(2), Term::Integer(9)]),
+                object,
+            ],
+        )
+        .unwrap();
+    assert!(matches!(result, BifResult::Raise { .. }));
+}

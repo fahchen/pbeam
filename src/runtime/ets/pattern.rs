@@ -593,18 +593,40 @@ fn expression(atoms: &AtomTable, term: &Term, numbers: &[i32]) -> Result<Expr, S
             };
             let name = atoms.name_of(name);
             if name == "andalso" || name == "orelse" {
-                let [_, left, right] = elements.as_ref() else {
+                // `dmc_andalso` and `dmc_orelse` accept two or more
+                // operands (`erl_db_util.c:4760-4827`).
+                let mut operands = elements[1..]
+                    .iter()
+                    .map(|operand| expression(atoms, operand, numbers))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if operands.len() < 2 {
                     return Err(SpecError::Badarg);
-                };
-                let (left, right) = (
-                    Box::new(expression(atoms, left, numbers)?),
-                    Box::new(expression(atoms, right, numbers)?),
+                }
+                let mut operands = operands.drain(..);
+                let first = operands.next().expect("the form has an operand");
+                return Ok(operands.fold(first, |left, right| {
+                    let (left, right) = (Box::new(left), Box::new(right));
+                    if name == "andalso" {
+                        Expr::AndAlso(left, right)
+                    } else {
+                        Expr::OrElse(left, right)
+                    }
+                }));
+            }
+            if (name == "and" || name == "or") && elements.len() > 3 {
+                // `dmc_and` and `dmc_or` accept two or more operands
+                // (`erl_db_util.c:4701-4757`). A left fold keeps the
+                // left-to-right evaluation.
+                let function = if name == "and" { Guard::And } else { Guard::Or };
+                let mut operands = elements[1..]
+                    .iter()
+                    .map(|operand| expression(atoms, operand, numbers))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let mut operands = operands.drain(..);
+                let first = operands.next().expect("the form has an operand");
+                return Ok(
+                    operands.fold(first, |left, right| Expr::Call(function, vec![left, right]))
                 );
-                return Ok(if name == "andalso" {
-                    Expr::AndAlso(left, right)
-                } else {
-                    Expr::OrElse(left, right)
-                });
             }
             let Some(function) = guard(name, elements.len() - 1) else {
                 return Err(if known_guard(name, elements.len() - 1) {
@@ -735,7 +757,8 @@ fn evaluate(atoms: &AtomTable, expression: &Expr, bindings: &[Term], whole: &Ter
                         .unwrap_or_else(|| Term::static_atom("EXIT"))
                 })
                 .collect();
-            let mut tail = evaluate(atoms, tail, bindings, whole)?;
+            let mut tail =
+                evaluate(atoms, tail, bindings, whole).unwrap_or_else(|| Term::static_atom("EXIT"));
             for element in elements.into_iter().rev() {
                 tail = Term::cons(element, tail);
             }
@@ -1015,19 +1038,54 @@ fn bitwise_not(term: &Term) -> Option<Term> {
 
 /// Return the value of `bsl` or `bsr` of two integers.
 fn shift(left: &Term, right: &Term, right_shift: bool) -> Option<Term> {
+    /// The largest bignum arity on a 64-bit system (`BIG_ARITY_MAX`,
+    /// `erl_term.h:465-466`).
+    const BIG_ARITY_MAX: u128 = (1 << 16) - 1;
     let left = integer(left)?;
-    let shift = right.small_integer()?;
-    // A negative count reverses the direction (`erl_arith.c:1378-1436`).
-    let (shift, right_shift) = if shift < 0 {
-        (shift.unsigned_abs() as usize, !right_shift)
-    } else {
-        (shift as usize, right_shift)
+    let count = integer(right)?;
+    let mut left_shift = !right_shift;
+    let mut huge = false;
+    let count = match count.to_i64() {
+        // A negative count reverses the direction
+        // (`erts_shift`, `erl_arith.c:198-308`).
+        Some(count) if count < 0 => {
+            left_shift = !left_shift;
+            count.unsigned_abs()
+        }
+        Some(count) => count as u64,
+        None => {
+            // `N bsl NegativeBigNum` is `N bsr MAX_SMALL`, and
+            // `N bsr NegativeBigNum` is `N bsl MAX_SMALL`
+            // (`erl_arith.c:209-216`, `286-295`).
+            if count.is_negative() {
+                left_shift = !left_shift;
+            }
+            huge = true;
+            u64::MAX
+        }
     };
-    Some(integer_term(if right_shift {
-        left >> shift
-    } else {
-        left << shift
-    }))
+    if !huge && (count == 0 || left == BigInt::from(0)) {
+        return Some(integer_term(left));
+    }
+    if !left_shift {
+        if huge || count > u64::from(u32::MAX) {
+            return Some(Term::Integer(if left.is_negative() { -1 } else { 0 }));
+        }
+        return Some(integer_term(left >> count as usize));
+    }
+    if left == BigInt::from(0) {
+        return Some(Term::Integer(0));
+    }
+    if huge {
+        return None;
+    }
+    // The pre-check of `erts_shift` gives `system_limit` when the result
+    // would exceed the bignum arity (`erl_arith.c:246-278`).
+    let bits = (left.magnitude().bits() as u128) + u128::from(count);
+    if bits.div_ceil(64) > BIG_ARITY_MAX {
+        return None;
+    }
+    Some(integer_term(left << count as usize))
 }
 
 /// Return the value of unary `+`, which requires a number.
