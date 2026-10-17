@@ -175,6 +175,11 @@ pub(super) struct Table {
     /// slots of their objects. The objects stay in the table, and their
     /// chain nodes stay in the bucket chains, until the last unfix.
     retained: Vec<Retained>,
+    /// The number of delete records that the fixation keeps, as the count of
+    /// the ERTS `FixedDeletion` records (`erl_db_hash.c:221-272`): one for a
+    /// delete of a key, one for a clear, and one for each bucket of a select
+    /// delete.
+    fixdels: usize,
     /// For each slot, whether the slot holds a pseudo-deleted object that a
     /// fixation keeps.
     deleted: Vec<bool>,
@@ -895,6 +900,7 @@ impl Table {
             busy: None,
             fixed_by: Vec::new(),
             retained: Vec::new(),
+            fixdels: 0,
             deleted: Vec::new(),
             deleted_objects: 0,
         }
@@ -1019,9 +1025,10 @@ impl Table {
             return self.object_count();
         }
         if self.is_fixed() {
-            // A fixed table marks each bucket, 8 buckets for each reduction
-            // (`db_mark_all_deleted_hash`, `erl_db_hash.c:3007-3051`).
-            return self.buckets.div_ceil(8);
+            // A fixed table marks each bucket, 8 buckets for each reduction,
+            // and the loop does not count the last bucket
+            // (`db_mark_all_deleted_hash`, `erl_db_hash.c:3034-3051`).
+            return (self.buckets - 1).div_ceil(8);
         }
         self.segment_slots().div_ceil(SEGMENT_SLOTS) * SEGMENT_REDUCTIONS as usize
             + self.object_count()
@@ -1157,22 +1164,41 @@ impl Table {
     }
 
     /// Keep the objects of the key `key` as pseudo-deleted objects, as the
-    /// delete of a fixed ERTS table does (`erl_db_hash.c:49-60`): remove
-    /// the key from the index, mark each live object slot deleted, and keep
-    /// the chain node of the key in its bucket chain. A record of an
-    /// earlier delete of the key takes the new slots.
+    /// delete of a fixed ERTS table does (`erl_db_hash.c:1631-1645`): remove
+    /// the key from the index, keep each pseudo-deleted object, mark the
+    /// first live object pseudo-deleted, free each other live object, and
+    /// keep the chain node of the key in its bucket chain. The delete adds
+    /// one delete record (`add_fixed_deletion`, `erl_db_hash.c:263-269`).
     fn retain_key(&mut self, hash: u64, key: &Term, node: usize) {
         if let Some(index_slot) = self.position(hash, key) {
             self.index.remove(hash, index_slot);
         }
+        let mut kept = Vec::new();
         let mut slot = node;
+        let mut kept_live = false;
         while slot != EMPTY {
-            if !self.is_deleted(slot) {
+            let older = self.older[slot];
+            if self.is_deleted(slot) {
+                kept.push(slot);
+            } else if !kept_live {
                 self.mark_deleted(slot);
                 self.deleted_objects += 1;
+                kept.push(slot);
+                kept_live = true;
+            } else {
+                self.objects[slot] = None;
+                self.older[slot] = EMPTY;
+                self.free.push(slot);
             }
-            slot = self.older[slot];
+            slot = older;
         }
+        for pair in kept.windows(2) {
+            self.older[pair[0]] = pair[1];
+        }
+        if let Some(&last) = kept.last() {
+            self.older[last] = EMPTY;
+        }
+        self.fixdels += 1;
         self.retain_record(hash, key, node);
     }
 
@@ -1301,6 +1327,7 @@ impl Table {
             self.heads[bucket] = head;
         }
         self.retained.clear();
+        self.fixdels = 0;
         self.deleted.clear();
         self.deleted_objects = 0;
     }
@@ -1363,7 +1390,7 @@ impl Table {
     fn unfix_cost(&self, process: ProcessId) -> usize {
         let last = self.fixed_by.iter().all(|fixed| *fixed == process);
         let work = if last {
-            self.deleted_objects + self.retained.len()
+            self.deleted_objects + self.fixdels
         } else {
             0
         };
@@ -1386,18 +1413,28 @@ impl Table {
     pub(super) fn clear(&mut self, atoms: &AtomTable) -> usize {
         let count = self.object_count();
         if self.is_fixed() && self.table_type != TableType::OrderedSet {
-            // A fixed table keeps each object as a pseudo-deleted object
-            // and keeps its bucket chains (`erl_db_hash.c:4027-4028`).
+            // A fixed table marks each object of each bucket as a
+            // pseudo-deleted object and keeps its chains, with one delete
+            // record (`db_mark_all_deleted_hash`, `erl_db_hash.c:3007-3051`).
             for bucket in 0..self.buckets {
                 for slot in self.chain_keys(bucket).collect::<Vec<_>>() {
-                    if !self.object_chain_has_live(slot) {
-                        continue;
-                    }
                     let key = self.key(self.object_of(slot)).clone();
                     let hash = stored_hash(atoms, &key);
-                    self.retain_key(hash, &key, slot);
+                    if let Some(index_slot) = self.position(hash, &key) {
+                        self.index.remove(hash, index_slot);
+                    }
+                    let mut object = slot;
+                    while object != EMPTY {
+                        if !self.is_deleted(object) {
+                            self.mark_deleted(object);
+                            self.deleted_objects += 1;
+                        }
+                        object = self.older[object];
+                    }
+                    self.retain_record(hash, &key, slot);
                 }
             }
+            self.fixdels += 1;
             self.writes += 1;
             return count;
         }
@@ -1442,6 +1479,7 @@ impl Table {
                     // (`erl_db_hash.c:2634-2648`).
                     self.mark_deleted(slot);
                     self.deleted_objects += 1;
+                    self.fixdels += 1;
                     let node = self
                         .chain_node(hash, &key)
                         .expect("a live key has a chain node");

@@ -949,6 +949,58 @@ fn restores_the_slot_of_a_reinserted_bag_object() {
 }
 
 #[test]
+fn frees_the_older_objects_of_a_deleted_bag_key() {
+    // `db_erase_hash` keeps the first live object as a pseudo-deleted
+    // object and frees each other live object (`erl_db_hash.c:1631-1645`).
+    let atoms = test_atom_table();
+    let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Bag);
+    let key = Term::Integer(1);
+    let objects = (0..16)
+        .map(|value| vec![key.clone(), Term::Integer(value)])
+        .collect();
+    table.insert_all(&atoms, objects);
+    table.fix(ProcessId(0));
+    table.delete(&atoms, &key);
+    assert_eq!(table.object_count(), 0);
+    assert_eq!(
+        table.insert_all(&atoms, vec![vec![key.clone(), Term::Integer(99)]]),
+        vec![1]
+    );
+}
+
+#[test]
+fn charges_one_delete_record_for_a_fixed_clear() {
+    // A clear of a fixed table adds one delete record, so the exit cleanup
+    // of 100 keys costs one for the fixation, 100 for the objects, and one
+    // for the record (`erl_db_hash.c:3007-3051`, `erl_db.c:4975-5015`).
+    let atoms = test_atom_table();
+    let mut tables = EtsTables::default();
+    let mut table = Table::new(ProcessId(2), Access::Public, 1, TableType::Set);
+    for key in 0..100 {
+        table.insert(&atoms, vec![Term::Integer(key)]);
+    }
+    table.fix(ProcessId(1));
+    table.clear(&atoms);
+    tables.create(Reference(0), None, table);
+    assert_eq!(tables.delete_owned(ProcessId(1), 1000), Some(898));
+}
+
+#[test]
+fn charges_the_last_bucket_of_a_fixed_clear_once() {
+    // The loop of `db_mark_all_deleted_hash` does not count its last
+    // bucket, so 257 buckets cost 32 reductions
+    // (`erl_db_hash.c:3034-3051`).
+    let atoms = test_atom_table();
+    let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
+    for key in 0..257 {
+        table.insert(&atoms, vec![Term::Integer(key)]);
+    }
+    assert_eq!(table.buckets, 257);
+    table.fix(ProcessId(0));
+    assert_eq!(table.delete_all_reductions(), 32);
+}
+
+#[test]
 fn charges_the_fixed_clear_for_each_bucket_group() {
     // A clear of a fixed table marks each bucket, 8 buckets for each
     // reduction (`db_mark_all_deleted_hash`, `erl_db_hash.c:3007-3051`).
@@ -1079,15 +1131,16 @@ fn counts_the_bag_comparisons_of_a_fixed_key() {
     );
     table.fix(ProcessId(0));
     table.delete(&atoms, &key);
+    // The delete keeps the first live object and frees the other one, so
+    // the insert compares one object (`erl_db_hash.c:1631-1645`).
     assert_eq!(
         table.insert_all(&atoms, vec![vec![key.clone(), Term::Integer(3)]]),
-        vec![2]
+        vec![1]
     );
-    // The objects of the deleted key stay, so the next insert compares
-    // them too.
+    // The objects of the key stay, so the next insert compares them too.
     assert_eq!(
         table.insert_all(&atoms, vec![vec![key.clone(), Term::Integer(4)]]),
-        vec![3]
+        vec![2]
     );
     // The equal object that the walk meets first costs no unit.
     table.delete(&atoms, &key);
