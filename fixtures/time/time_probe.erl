@@ -297,16 +297,19 @@ local_check() ->
                      false -> <<"mismatch\n">>
                  end).
 
-%% Print which path `erlang:localtime/0` takes in a time zone with leap
-%% seconds: `get_localtime` reads the local time with `sys_localtime_r`
-%% (`erl_time_sup.c:1543-1557`), which adds no leap second
-%% (`sys/unix/erl_unix_sys.h:331-343`), so the local time of the fixture
-%% zone is 27 seconds before its UTC time.
+%% Print the difference of the local time and the UTC time of a time zone
+%% with leap seconds: `get_localtime` reads the local time with
+%% `sys_localtime_r` (`erl_time_sup.c:1543-1557`), which adds no leap second
+%% (`sys/unix/erl_unix_sys.h:331-343`). The C libraries read the leap
+%% seconds of that zone differently: measured on the pinned ERTS, macOS
+%% gives a local time 27 seconds before UTC and glibc gives the UTC time.
+%% The test compares this value with the value of the ERTS of the same
+%% host, and `other` fails that comparison.
 leap_local() ->
-    Difference = seconds(erlang:localtime()) - seconds(erlang:universaltime()),
-    io:put_chars(case in(-28, Difference, -26) of
-                     true -> <<"localtime_r\n">>;
-                     false -> <<"posix2time\n">>
+    io:put_chars(case seconds(erlang:localtime()) - seconds(erlang:universaltime()) of
+                     Leap when -28 =< Leap, Leap =< -26 -> <<"leap\n">>;
+                     0 -> <<"same\n">>;
+                     _ -> <<"other\n">>
                  end).
 
 %% Print how the local time of a time zone with leap seconds is found.
