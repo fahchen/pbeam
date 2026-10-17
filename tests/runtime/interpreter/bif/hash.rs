@@ -116,3 +116,25 @@ fn stops_a_walk_at_the_budget_before_the_next_element() {
     assert_eq!(bytes, [1, 2]);
     assert_eq!(rest, Term::list_from([Term::nil()]));
 }
+
+#[test]
+fn reads_a_binary_of_several_parts_with_one_update() {
+    // An append-built binary keeps its parts, and the walk reads them with
+    // one update call, as `md5_wrap` reads one bitstring
+    // (`erl_bif_chksum.c:74-92`, `280-284`), so the md5 state does not
+    // depend on the parts.
+    let binary = Term::Binary(Binary::from_chunks(vec![
+        std::sync::Arc::new(vec![1; 30]),
+        std::sync::Arc::new(vec![2; 6]),
+    ]));
+    let mut budget = 64;
+    let mut calls = 0;
+    let mut bytes = Vec::new();
+    read(&binary, &mut budget, &mut |part| {
+        calls += 1;
+        bytes.extend_from_slice(part);
+    })
+    .unwrap();
+    assert_eq!(calls, 1);
+    assert_eq!(bytes.len(), 36);
+}
