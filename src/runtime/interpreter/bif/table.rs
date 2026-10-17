@@ -481,7 +481,7 @@ bifs! {
     ets:select_reverse/3 => unsupported,
     ets:setopts/2 => unsupported,
     ets:slot/2 => unsupported,
-    ets:take/2 => unsupported,
+    ets:take/2 as EtsTake2 => |cx, [table, key]| ets::take(cx, table, key),
     ets:update_counter/3 => unsupported,
     ets:update_counter/4 => unsupported,
     ets:update_element/3 as EtsUpdateElement3 => |cx, [table, key, spec]| ets::update_element(cx, table, key, spec, None),

@@ -142,6 +142,90 @@ fn frees_a_large_deleted_table_in_bounded_turns() {
 }
 
 #[test]
+fn frees_the_objects_of_an_ordered_set_one_for_each_reduction() {
+    // `do_free_tree_continue` frees one node for each reduction and returns
+    // when the reductions are less than 0 (`erl_db_tree.c:2877-2904`), so a
+    // turn with a budget of 2 frees 3 objects. The ERTS tree charges no
+    // segment.
+    let mut tables = EtsTables::default();
+    let atoms = AtomTable::new();
+    let mut table = Table::new(ProcessId(1), Access::Public, 1, TableType::OrderedSet);
+    for key in 0..5 {
+        table.insert(&atoms, vec![Term::Integer(key)]);
+    }
+    let live = |tables: &EtsTables| {
+        tables
+            .freeing
+            .get(&Reference(0))
+            .map_or(0, |freeing| freeing.table.objects.iter().flatten().count())
+    };
+    tables.create(Reference(0), None, table);
+    tables.delete_table(Reference(0), ProcessId(1));
+    assert_eq!(tables.free_segments(ProcessId(1), 2), None);
+    assert_eq!(live(&tables), 2);
+    assert_eq!(tables.free_segments(ProcessId(1), 2), Some(0));
+    assert_eq!(live(&tables), 0);
+    assert!(tables.freeing.is_empty());
+    // The walk follows the live keys, so a delete of most objects leaves
+    // slots that the walk never reads, as the ERTS walk reads only the live
+    // nodes of the tree (`erl_db_tree.c:2877-2904`).
+    let mut table = Table::new(ProcessId(1), Access::Public, 1, TableType::OrderedSet);
+    for key in 0..5 {
+        table.insert(&atoms, vec![Term::Integer(key)]);
+    }
+    for key in 0..4 {
+        table.delete(&atoms, &Term::Integer(key));
+    }
+    tables.create(Reference(1), None, table);
+    tables.delete_table(Reference(1), ProcessId(1));
+    assert_eq!(tables.free_segments(ProcessId(1), 1), Some(0));
+    assert_eq!(live(&tables), 0);
+    assert!(tables.freeing.is_empty());
+    // A delete of an `ordered_set` object moves the last object into the
+    // freed slot, so the slots stay dense and a deleted table drops no slot
+    // of a freed object.
+    let mut table = Table::new(ProcessId(1), Access::Public, 1, TableType::OrderedSet);
+    for key in 0..5 {
+        table.insert(&atoms, vec![Term::Integer(key)]);
+    }
+    table.delete(&atoms, &Term::Integer(3));
+    assert_eq!(table.objects.len(), 4);
+    assert_eq!(table.object(&atoms, &Term::Integer(3)), None);
+    assert_eq!(
+        table.object(&atoms, &Term::Integer(4)),
+        Some(&[Term::Integer(4)][..])
+    );
+    table.delete(&atoms, &Term::Integer(4));
+    assert_eq!(table.objects.len(), 3);
+    assert_eq!(
+        table.object(&atoms, &Term::Integer(2)),
+        Some(&[Term::Integer(2)][..])
+    );
+    // The moved object can follow another key in its bucket chain: the chain
+    // then points to the slot that the object moves into.
+    let probe = Table::new(ProcessId(1), Access::Public, 1, TableType::OrderedSet);
+    let bucket = |key: i64| probe.bucket(stored_hash(&atoms, &Term::Integer(key)));
+    let (earlier, later) = (0..256)
+        .find_map(|later| {
+            (0..later)
+                .find(|&earlier| bucket(earlier) == bucket(later))
+                .map(|earlier| (earlier, later))
+        })
+        .expect("256 keys share 256 buckets");
+    let filler = (0..256)
+        .find(|&key| bucket(key) != bucket(later) && key != later)
+        .expect("a bucket holds one key");
+    let mut table = Table::new(ProcessId(1), Access::Public, 1, TableType::OrderedSet);
+    for key in [earlier, filler, later] {
+        table.insert(&atoms, vec![Term::Integer(key)]);
+    }
+    table.delete(&atoms, &Term::Integer(filler));
+    assert_eq!(table.objects.len(), 2);
+    assert!(table.object(&atoms, &Term::Integer(earlier)).is_some());
+    assert!(table.object(&atoms, &Term::Integer(later)).is_some());
+}
+
+#[test]
 fn finds_a_named_table_of_each_access_mode() {
     let mut tables = EtsTables::default();
     tables.create(
@@ -769,4 +853,74 @@ fn deletes_one_exact_object_from_a_chain() {
     // A key that the table does not hold changes nothing.
     assert!(!table.delete_object(&atoms, &[Term::Integer(9)]));
     assert!(!table.update_elements(&atoms, &Term::Integer(9), &[]));
+}
+
+#[test]
+fn compares_the_keys_of_an_ordered_set_by_the_arithmetic_order() {
+    // `cmp_key_eq` tests the exact equality of a key and then compares with
+    // the arithmetic term order (`erl_db_tree.c:758-761`), so `1` and `1.0`
+    // are one key of an `ordered_set` table, also inside a tuple or a list,
+    // and the value of a map key compares by its mode. The ERTS tree frees
+    // one node for each reduction (`do_free_tree_continue`,
+    // `erl_db_tree.c:2877-2904`).
+    let mut atoms = AtomTable::new();
+    let atom = |atoms: &mut AtomTable, name: &str| Term::Atom(atoms.put(name).unwrap());
+    let (a, b, c) = (
+        atom(&mut atoms, "a"),
+        atom(&mut atoms, "b"),
+        atom(&mut atoms, "c"),
+    );
+    let (t, l, v) = (
+        atom(&mut atoms, "t"),
+        atom(&mut atoms, "l"),
+        atom(&mut atoms, "v"),
+    );
+    let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::OrderedSet);
+    let integer = Term::Integer(1);
+    let float = Term::Float(1.0);
+    table.insert(&atoms, vec![integer.clone(), a.clone()]);
+    assert_eq!(
+        table.object(&atoms, &float),
+        Some(&[integer.clone(), a.clone()][..])
+    );
+    assert_eq!(table.object_arity(&atoms, &float), Some(2));
+    assert!(table.update_elements(&atoms, &float, &[(2, b.clone())]));
+    assert_eq!(
+        table.object(&atoms, &integer),
+        Some(&[integer.clone(), b.clone()][..])
+    );
+    // A replacement moves the stored hash of the key to the hash of the new
+    // key, so a delete removes the index entry of the object.
+    table.insert(&atoms, vec![float.clone(), c.clone()]);
+    assert_eq!(
+        table.object(&atoms, &integer),
+        Some(&[float.clone(), c.clone()][..])
+    );
+    assert_eq!(table.object_count(), 1);
+    // A tuple and a list compare element by element.
+    let tuple = Term::tuple(vec![integer.clone(), t.clone()]);
+    table.insert(&atoms, vec![tuple.clone(), v.clone()]);
+    assert_eq!(
+        table.object(&atoms, &Term::tuple(vec![float.clone(), t.clone()])),
+        Some(&[tuple.clone(), v.clone()][..])
+    );
+    let list = Term::list_from([integer.clone(), l.clone()]);
+    table.insert(&atoms, vec![list.clone(), v.clone()]);
+    assert_eq!(
+        table.object(&atoms, &Term::list_from([float.clone(), l.clone()])),
+        Some(&[list, v.clone()][..])
+    );
+    // A map key compares its keys exactly and its values arithmetically.
+    let map =
+        |value| Term::Map(Map::from_pairs(vec![(a.clone(), value)], &AtomTable::new()).unwrap());
+    table.insert(&atoms, vec![map(integer.clone()), v.clone()]);
+    assert_eq!(
+        table.object(&atoms, &map(float.clone())),
+        Some(&[map(integer.clone()), v.clone()][..])
+    );
+    assert_eq!(table.object_count(), 4);
+    table.delete(&atoms, &float);
+    assert_eq!(table.object(&atoms, &integer), None);
+    assert_eq!(table.object_count(), 3);
+    assert_eq!(table.delete_all_reductions(), 3);
 }

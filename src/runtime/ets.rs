@@ -3,6 +3,7 @@
 
 pub(super) mod pattern;
 
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hasher};
 
@@ -68,8 +69,16 @@ pub(super) struct Freeing {
     /// The table. Its free segments hold no object.
     table: Table,
     /// The count of the segments that are not free, so the top segment that
-    /// is not free is `segments - 1`.
+    /// is not free is `segments - 1`. An `ordered_set` table frees its
+    /// objects one by one, so the count is not used.
     segments: usize,
+    /// The bucket where the free of the objects of an `ordered_set` table
+    /// continues, as the work stack of `do_free_tree_continue` remembers the
+    /// nodes (`erl_db_tree.c:2877-2904`).
+    bucket: usize,
+    /// The next key of the bucket `bucket` whose object is not free, or
+    /// `EMPTY` when the walk reads the next bucket.
+    next: usize,
 }
 
 /// One ETS hash table: a `set`, a `bag`, or a `duplicate_bag` table.
@@ -244,6 +253,12 @@ pub(super) enum TableType {
     Bag,
     /// `DB_DUPLICATE_BAG`: objects with one key, also exactly equal ones.
     DuplicateBag,
+    /// `DB_ORDERED_SET`: one object for each key. PBeam keeps the hash
+    /// structure, so the results and the reductions of the single-key
+    /// operations match ERTS; an operation whose result depends on the key
+    /// order is a clear runtime error (see "ETS tables" in
+    /// `docs/erts-differences.md`).
+    OrderedSet,
 }
 
 impl TableType {
@@ -260,6 +275,7 @@ impl TableType {
             TableType::Set => "set",
             TableType::Bag => "bag",
             TableType::DuplicateBag => "duplicate_bag",
+            TableType::OrderedSet => "ordered_set",
         }
     }
 }
@@ -650,7 +666,7 @@ impl EtsTables {
     /// ```
     fn free_table(&mut self, id: Reference, mut reds: i32) -> Option<i32> {
         let freeing = self.freeing.get_mut(&id)?;
-        while let Some(segment) = freeing.free_segment() {
+        while let Some(segment) = freeing.free_segment(reds) {
             reds -= segment;
             if reds < 0 {
                 return None;
@@ -672,15 +688,26 @@ impl Freeing {
     /// assert_eq!(freeing.segments, 1);
     /// ```
     fn new(table: Table) -> Freeing {
-        let segments = segment(table.segment_slots() - 1) + 1;
-        Freeing { table, segments }
+        let segments = if table.table_type == TableType::OrderedSet {
+            1
+        } else {
+            segment(table.segment_slots() - 1) + 1
+        };
+        Freeing {
+            table,
+            segments,
+            bucket: 0,
+            next: EMPTY,
+        }
     }
 
-    /// Free the objects of the top segment that is not free yet and return
-    /// its reductions: 32, and 1 for each object in the segment
-    /// (`erl_db_hash.c:3141`, `3468-3530`). Return `None` when each segment
-    /// is free. The walk reads only the bucket chains of the segment, so the
-    /// work of one segment grows with its objects only.
+    /// Free the objects of the table and return their reductions: of the
+    /// top segment that is not free yet of a hash table, with 32 for the
+    /// segment and 1 for each object in it (`erl_db_hash.c:3141`,
+    /// `3468-3530`), or of an `ordered_set` table, with 1 for each object
+    /// (`erl_db_tree.c:2877-2904`). Return `None` when each object is free.
+    /// The walk reads only the bucket chains of the segment, so the work of
+    /// one segment grows with its objects only.
     ///
     /// # Examples
     ///
@@ -688,10 +715,13 @@ impl Freeing {
     /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
     /// table.insert(&AtomTable::new(), vec![Term::Integer(1)]);
     /// let mut freeing = Freeing::new(table);
-    /// assert_eq!(freeing.free_segment(), Some(33));
-    /// assert_eq!(freeing.free_segment(), None);
+    /// assert_eq!(freeing.free_segment(0), Some(33));
+    /// assert_eq!(freeing.free_segment(0), None);
     /// ```
-    fn free_segment(&mut self) -> Option<i32> {
+    fn free_segment(&mut self, budget: i32) -> Option<i32> {
+        if self.table.table_type == TableType::OrderedSet {
+            return self.free_objects(budget);
+        }
         self.segments = self.segments.checked_sub(1)?;
         let first = match self.segments {
             0 => 0,
@@ -713,6 +743,56 @@ impl Freeing {
             }
         }
         Some(reds)
+    }
+
+    /// Free the objects of an `ordered_set` table, one more than the
+    /// reductions `budget` of the turn, as `do_free_tree_continue` frees a
+    /// node for each reduction and returns when the reductions are less
+    /// than 0 (`erl_db_tree.c:2877-2904`). Return the number of objects that
+    /// are free, or `None` when the table holds no object. The walk follows
+    /// the bucket chains of the live keys, and [`Table::compact`] keeps the
+    /// slots dense, so the free of the table drops one slot for each object
+    /// that is in it and no slot of an object that an earlier delete freed,
+    /// as the ERTS walk reads only the live nodes of the tree.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::OrderedSet);
+    /// let atoms = AtomTable::new();
+    /// table.insert(&atoms, vec![Term::Integer(1)]);
+    /// table.insert(&atoms, vec![Term::Integer(2)]);
+    /// let mut freeing = Freeing::new(table);
+    /// assert_eq!(freeing.free_objects(0), Some(1));
+    /// assert_eq!(freeing.free_objects(0), Some(1));
+    /// assert_eq!(freeing.free_objects(0), None);
+    /// ```
+    fn free_objects(&mut self, budget: i32) -> Option<i32> {
+        let limit = usize::try_from(budget.max(0))
+            .unwrap_or(0)
+            .saturating_add(1);
+        let mut freed = 0;
+        while freed < limit {
+            if self.next == EMPTY {
+                if self.bucket == self.table.buckets {
+                    break;
+                }
+                let head = std::mem::replace(&mut self.table.heads[self.bucket], EMPTY);
+                if head == EMPTY {
+                    self.bucket += 1;
+                    continue;
+                }
+                self.next = head;
+            }
+            let slot = self.next;
+            self.next = self.table.next[slot];
+            self.table.objects[slot] = None;
+            freed += 1;
+            if self.next == EMPTY {
+                self.bucket += 1;
+            }
+        }
+        (freed > 0).then(|| i32::try_from(freed).unwrap_or(i32::MAX))
     }
 }
 
@@ -871,6 +951,11 @@ impl Table {
     /// assert_eq!(table.delete_all_reductions(), 32);
     /// ```
     pub(super) fn delete_all_reductions(&self) -> usize {
+        if self.table_type == TableType::OrderedSet {
+            // The ERTS tree frees one node for each reduction
+            // (`do_free_tree_continue`, `erl_db_tree.c:2877-2904`).
+            return self.object_count();
+        }
         self.segment_slots().div_ceil(SEGMENT_SLOTS) * SEGMENT_REDUCTIONS as usize
             + self.object_count()
     }
@@ -891,7 +976,7 @@ impl Table {
     /// assert_eq!(table.object_arity(&atoms, &Term::static_atom("k")), Some(2));
     /// ```
     pub(super) fn object_arity(&self, atoms: &AtomTable, key: &Term) -> Option<usize> {
-        let slot = self.position(stored_hash(atoms, key), key)?;
+        let slot = self.key_slot(atoms, key)?;
         Some(self.object_of(slot).len())
     }
 
@@ -911,7 +996,7 @@ impl Table {
         key: &Term,
         updates: &[(usize, Term)],
     ) -> bool {
-        let Some(slot) = self.position(stored_hash(atoms, key), key) else {
+        let Some(slot) = self.key_slot(atoms, key) else {
             return false;
         };
         let object = self.objects[slot]
@@ -1079,10 +1164,12 @@ impl Table {
         let (found, hash) = {
             let key = self.key(&object);
             let hash = stored_hash(atoms, key);
-            (self.position(hash, key), hash)
+            (self.key_slot(atoms, key), hash)
         };
         let newest = match (found, self.table_type) {
-            (Some(slot), TableType::Set) => {
+            (Some(slot), TableType::Set | TableType::OrderedSet) => {
+                let old = stored_hash(atoms, self.key(self.object_of(slot)));
+                self.rekey(slot, old, hash);
                 self.objects[slot] = Some(object);
                 self.writes += 1;
                 return;
@@ -1355,6 +1442,34 @@ impl Table {
         slot
     }
 
+    /// Move the key of the object in the slot `slot` from the stored hash
+    /// `old` to the stored hash `new` in the key index and in the bucket
+    /// chain. An `ordered_set` insert can replace the key of an object by an
+    /// arithmetically equal key with another hash, as `1` and `1.0`
+    /// (`erl_db_tree.c:758-761`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
+    /// let atoms = AtomTable::new();
+    /// table.insert(&atoms, vec![Term::static_atom("k")]);
+    /// table.rekey(0, stored_hash(&atoms, &Term::static_atom("k")), stored_hash(&atoms, &Term::static_atom("k")));
+    /// ```
+    fn rekey(&mut self, slot: usize, old: u64, new: u64) {
+        if old == new {
+            return;
+        }
+        self.index.remove(old, slot);
+        self.index.insert(new, slot);
+        let old_bucket = self.bucket(old);
+        let after = self.next[slot];
+        self.link(old_bucket, self.key_before(old_bucket, slot), after);
+        let new_bucket = self.bucket(new);
+        self.next[slot] = self.heads[new_bucket];
+        self.link(new_bucket, EMPTY, slot);
+    }
+
     /// Return the bucket of the stored key hash `hash`: the hash under the
     /// size mask, or under the half mask when that bucket is not active
     /// (`hash_to_ix`, `erl_db_hash.c:199-209`). The size mask is one less
@@ -1501,7 +1616,7 @@ impl Table {
     /// assert_eq!(table.object(&atoms, &Term::static_atom("k")), Some(&[Term::static_atom("k")][..]));
     /// ```
     pub(super) fn object(&self, atoms: &AtomTable, key: &Term) -> Option<&[Term]> {
-        let slot = self.position(stored_hash(atoms, key), key)?;
+        let slot = self.key_slot(atoms, key)?;
         Some(self.object_of(slot).as_slice())
     }
 
@@ -1522,7 +1637,7 @@ impl Table {
     /// ```
     pub(super) fn objects(&self, atoms: &AtomTable, key: &Term) -> Vec<&[Term]> {
         let mut objects = Vec::new();
-        let mut slot = self.position(stored_hash(atoms, key), key).unwrap_or(EMPTY);
+        let mut slot = self.key_slot(atoms, key).unwrap_or(EMPTY);
         while slot != EMPTY {
             objects.push(self.object_of(slot).as_slice());
             slot = self.older[slot];
@@ -1667,6 +1782,39 @@ impl Table {
     /// table.insert(&atoms, vec![Term::static_atom("k")]);
     /// assert_eq!(table.position(stored_hash(&Term::static_atom("k")), &Term::static_atom("k")), Some(0));
     /// ```
+    /// Return the slot of the object whose key is `key`. A `set` table finds
+    /// the slot by the stored hash of an exactly equal key. An `ordered_set`
+    /// table compares keys with the arithmetic term order, as the ERTS tree
+    /// does: `cmp_key_eq` tests the exact equality first and then compares
+    /// with `CMP` (`erl_db_tree.c:758-761`), so `1` finds the object with
+    /// the key `1.0`. The exact lookup runs first, because an exactly equal
+    /// key has the same stored hash. A walk of the slots then compares each
+    /// key with `Term::compare`. A comparison error continues the walk: the
+    /// order of two different references is the only error
+    /// (`src/term/order.rs`), and a term with another reference is not equal.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::OrderedSet);
+    /// let atoms = AtomTable::new();
+    /// table.insert(&atoms, vec![Term::Integer(1), Term::static_atom("a")]);
+    /// assert_eq!(table.key_slot(&atoms, &Term::Float(1.0)), Some(0));
+    /// assert_eq!(table.key_slot(&atoms, &Term::Integer(2)), None);
+    /// ```
+    fn key_slot(&self, atoms: &AtomTable, key: &Term) -> Option<usize> {
+        if let Some(slot) = self.position(stored_hash(atoms, key), key) {
+            return Some(slot);
+        }
+        if self.table_type != TableType::OrderedSet {
+            return None;
+        }
+        self.objects.iter().enumerate().find_map(|(slot, object)| {
+            let object = object.as_ref()?;
+            matches!(self.key(object).compare(key, atoms), Ok(Ordering::Equal)).then_some(slot)
+        })
+    }
+
     fn position(&self, hash: u64, key: &Term) -> Option<usize> {
         self.index
             .find(hash, |slot| self.key(self.object_of(slot)) == key)
@@ -1745,10 +1893,10 @@ impl Table {
     /// assert_eq!(table.object(&atoms, &Term::static_atom("k")), None);
     /// ```
     pub(super) fn delete(&mut self, atoms: &AtomTable, key: &Term) {
-        let hash = stored_hash(atoms, key);
-        let Some(newest) = self.position(hash, key) else {
+        let Some(newest) = self.key_slot(atoms, key) else {
             return;
         };
+        let hash = stored_hash(atoms, self.key(self.object_of(newest)));
         self.index.remove(hash, newest);
         self.writes += 1;
         let bucket = self.bucket(hash);
@@ -1761,12 +1909,62 @@ impl Table {
             self.free.push(slot);
             slot = std::mem::replace(&mut self.older[slot], EMPTY);
         }
+        if self.table_type == TableType::OrderedSet {
+            self.compact(atoms, newest);
+        }
         for _ in 0..RESIZE_STEPS {
             if self.object_count() >= self.shrink_limit() {
                 break;
             }
             self.join();
         }
+    }
+
+    /// Move the object of the last slot into the slot `freed` of the
+    /// `ordered_set` object that [`Table::delete`] just freed, and remove
+    /// the last slot, so the slots of the table stay dense. The moved object
+    /// keeps its key and its place in the bucket chain, and its slot in the
+    /// key index changes. The free of a deleted `ordered_set` table then
+    /// drops one slot for each object of the table and no slot of an object
+    /// that an earlier delete freed, as the ERTS tree walk reads the live
+    /// nodes only (`do_free_tree_continue`, `erl_db_tree.c:2877-2904`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::OrderedSet);
+    /// let atoms = AtomTable::new();
+    /// table.insert(&atoms, vec![Term::Integer(1)]);
+    /// table.insert(&atoms, vec![Term::Integer(2)]);
+    /// table.delete(&atoms, &Term::Integer(1));
+    /// assert_eq!(table.objects.len(), 1);
+    /// ```
+    fn compact(&mut self, atoms: &AtomTable, freed: usize) {
+        // The free list holds the slot that the caller freed. The pop runs in
+        // each build, also a release build without `debug_assert!`.
+        let freed_slot = self.free.pop();
+        debug_assert_eq!(freed_slot, Some(freed));
+        let last = self.objects.len() - 1;
+        if freed == last {
+            self.objects.pop();
+            self.older.pop();
+            self.next.pop();
+            return;
+        }
+        let moved = self.object_of(last);
+        let moved_hash = stored_hash(atoms, self.key(moved));
+        self.objects[freed] = self.objects.pop().expect("the last slot is live");
+        self.older[freed] = self.older.pop().expect("the last slot is allocated");
+        self.index.remove(moved_hash, last);
+        self.index.insert(moved_hash, freed);
+        let bucket = self.bucket(moved_hash);
+        // The chain walk reads `next[last]`, so the chain moves before the
+        // array loses its last slot.
+        match self.key_before(bucket, last) {
+            EMPTY => self.heads[bucket] = freed,
+            before => self.next[before] = freed,
+        }
+        self.next[freed] = self.next.pop().expect("the last slot is allocated");
     }
 
     /// Return the number of slots of the ERTS hash table: the first segment

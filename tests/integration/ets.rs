@@ -476,10 +476,9 @@ fn gives_the_table_type_as_pinned_erts() {
 
 #[test]
 fn rejects_tables_that_pbeam_cannot_model() {
-    // ERTS 29.1.1 gives the binary item, and it makes an ordered_set table
-    // and two set tables whose heir is a live process other than the
-    // caller. PBeam gives no binary item, keeps no record of a deleted
-    // table, and supports only hash tables without such a heir. ERTS
+    // ERTS 29.1.1 gives the binary item, and it makes two set tables whose
+    // heir is a live process other than the caller. PBeam gives no binary
+    // item, keeps no record of a deleted table, and keeps no such heir. ERTS
     // aborts the emulator for an insert with the key position 0 (status
     // 134, `Invalid tag in make_internal_hash`) and crashes for a found key
     // and an index that becomes 0 (status 139). This is the "ETS tables"
@@ -506,7 +505,12 @@ fn rejects_tables_that_pbeam_cannot_model() {
             "info_reference",
             "info/2 of a reference that is not a live table",
         ),
-        ("ordered_set", "new/2 table type ordered_set"),
+        ("ordered_next", "next/2 on an ordered_set table"),
+        ("ordered_select", "select/2,3 on an ordered_set table"),
+        (
+            "ordered_select_delete",
+            "select_delete/2 on an ordered_set table",
+        ),
         ("heir", "new/2 heir ProcessId("),
         ("heir_data", "new/2 heir ProcessId("),
         ("keypos", "insert/2 in a table with key position 0"),
@@ -590,11 +594,18 @@ fn traps_the_delete_of_a_large_table_as_pinned_erts() {
             .execute("ets_probe", "delete_trap", &[])
             .unwrap()
             .term,
-        Term::list_from(vec![atom("true"), atom("none"), atom("true"), atom("ping")])
+        Term::list_from(vec![
+            atom("true"),
+            atom("none"),
+            atom("true"),
+            atom("ping"),
+            atom("true"),
+            atom("ping"),
+        ])
     );
     assert_eq!(
         reference_with(&["+S", "1"], "delete_trap"),
-        b"[true,none,true,ping]\n"
+        b"[true,none,true,ping,true,ping]\n"
     );
 }
 
@@ -652,6 +663,9 @@ fn runs_the_select_and_iteration_bifs_as_pinned_erts() {
         "info_items",
         "delete_all",
         "select_reductions",
+        "ordered_set",
+        "ordered_set_reductions",
+        "take",
     ] {
         assert_probe_matches_erts(&program, function);
     }
