@@ -2980,11 +2980,13 @@ impl BeamProgram {
     /// reduction. A yield return writes its value to x0, does the return
     /// of a tail call, and switches out the process. An exception goes to
     /// the error handler. A trap writes its arguments to the X registers,
-    /// enters the target function, and switches out the process. An exit ends the process, and no catch
-    /// tag sees it. A trap to a BIF export keeps the export, its arguments,
-    /// and `tail` in the process, and switches out the process: `run` then
-    /// finishes the call through the export. Return the outcome when the
-    /// process stops.
+    /// enters the target function, and switches out the process. A target
+    /// export that is not loaded enters `error_handler:undefined_function/3`
+    /// instead, as the ERTS export stub does. An exit ends the process, and
+    /// no catch tag sees it. A trap to a BIF export keeps the export, its
+    /// arguments, and `tail` in the process, and switches out the process:
+    /// `run` then finishes the call through the export. Return the outcome
+    /// when the process stops.
     ///
     /// # Examples
     ///
@@ -3037,17 +3039,33 @@ impl BeamProgram {
             } => {
                 let arity = u32::try_from(arguments.len())
                     .map_err(|_| error("arity exceeds BEAM limit"))?;
-                let frame = scheduler.code.mfa_frame(module, function, arity)?;
                 let process = scheduler.current_process_mut();
                 for (index, argument) in (0..).zip(arguments) {
                     write(process, &Operand::X(index), argument)?;
                 }
-                enter_frame(process, frame, tail);
-                // A BIF trap always switches out the process
-                // (`context_switch_simplified` in `jit/arm/instr_bif.cpp:525-536`,
-                // `676-701`). The process enters the target when it runs
-                // again, so the entry costs one reduction of the next turn.
-                Ok(Some(Outcome::Yield))
+                // ERTS resolves the target through its export entry. A
+                // function that has no loaded export has a stub entry that
+                // calls `error_handler:undefined_function/3`
+                // (`erts_export_get_or_make_stub`, export.c:228-242;
+                // `call_error_handler`, beam_common.c:1294-1342). Thus a
+                // `re:run/2,3` call that runs before the pinned `re` module
+                // is loaded traps to `re:grun/3` or `re:urun/3`, and the
+                // error handler loads `re` and enters that function
+                // (`error_handler.erl:85-98`).
+                let frame = scheduler.code.export_frame(module, function, arity)?;
+                match frame {
+                    Some(frame) => {
+                        let process = scheduler.current_process_mut();
+                        enter_frame(process, frame, tail);
+                        // A BIF trap always switches out the process
+                        // (`context_switch_simplified` in
+                        // `jit/arm/instr_bif.cpp:525-536`, `676-701`). The
+                        // process enters the target when it runs again, so
+                        // the entry costs one reduction of the next turn.
+                        Ok(Some(Outcome::Yield))
+                    }
+                    None => self.undefined_function(scheduler, module, function, arity, tail),
+                }
             }
             BifResult::TrapBif {
                 module,
