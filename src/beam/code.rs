@@ -6,7 +6,10 @@ use super::module::{BeamModule, Import};
 use crate::{
     error::{BeamError, error},
     runtime::import_kind,
-    term::{Atom, AtomTable, Fun, Lambda, MAX_ATOM_CHARACTERS, Map, Term, fits_big_arity},
+    term::{
+        Atom, AtomTable, Fun, Lambda, MAX_ATOM_CHARACTERS, MAX_TUPLE_SIZE, Map, Term,
+        fits_big_arity,
+    },
 };
 
 const WORD_SIZE: usize = 4;
@@ -865,17 +868,25 @@ fn read_external_term(
                     continue;
                 }
             },
-            ETF_LARGE_TUPLE_EXT => match read_u32(take(data, cursor, WORD_SIZE)?)? {
-                0 => Term::tuple(Vec::new()),
-                remaining => {
-                    let elements = Vec::new();
-                    partial.push(PartialTerm::Tuple {
-                        remaining,
-                        elements,
-                    });
-                    continue;
+            ETF_LARGE_TUPLE_EXT => {
+                let count = read_u32(take(data, cursor, WORD_SIZE)?)?;
+                // ERTS rejects a tuple literal above `ERTS_MAX_TUPLE_SIZE`
+                // (`external.c:6284-6289`, `erl_term.h:318-323`).
+                if count as usize > MAX_TUPLE_SIZE {
+                    return Err(error("BEAM tuple literal exceeds the maximum tuple size"));
                 }
-            },
+                match count {
+                    0 => Term::tuple(Vec::new()),
+                    remaining => {
+                        let elements = Vec::new();
+                        partial.push(PartialTerm::Tuple {
+                            remaining,
+                            elements,
+                        });
+                        continue;
+                    }
+                }
+            }
             ETF_LIST_EXT => {
                 let elements = Vec::new();
                 partial.push(match read_u32(take(data, cursor, WORD_SIZE)?)? {
