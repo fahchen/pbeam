@@ -1293,8 +1293,9 @@ pub(super) fn delete(
     Ok(Value(Term::static_atom("true")))
 }
 
-/// Run `ets:take(Table, Key)`, as ERTS `ets_take_2` (`erl_db.c:2949-2971`)
-/// and `db_take_hash` (`erl_db_hash.c:1563-1612`) do: return the objects with
+/// Run `ets:take(Table, Key)`, as ERTS `ets_take_2` (`erl_db.c:1355-1373`)
+/// does through `meth->db_take`, and `db_take_hash`
+/// (`erl_db_hash.c:2949-2995`) does for a hash table: return the objects with
 /// a key that is exactly equal to `Key`, in the order of
 /// [`lookup`], and remove them from the table. A key that the table does not
 /// hold returns `[]`. A table that does not exist or that the caller cannot
