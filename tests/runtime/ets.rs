@@ -1016,11 +1016,14 @@ fn charges_the_fixations_of_an_explicit_delete() {
     // The delete charges one reduction for each process that fixed the
     // table (`free_fixations_locked`, `erl_db.c:3056`).
     let mut tables = EtsTables::default();
-    let mut table = Table::new(ProcessId(1), Access::Public, 1, TableType::Set);
-    table.fix(ProcessId(2));
-    table.fix(ProcessId(2));
-    table.fix(ProcessId(3));
-    tables.create(Reference(0), None, table);
+    tables.create(
+        Reference(0),
+        None,
+        Table::new(ProcessId(1), Access::Public, 1, TableType::Set),
+    );
+    tables.fix_table(Reference(0), ProcessId(2));
+    tables.fix_table(Reference(0), ProcessId(2));
+    tables.fix_table(Reference(0), ProcessId(3));
     assert_eq!(tables.delete_table(Reference(0), ProcessId(1)), 2);
     assert_eq!(tables.free_segments(ProcessId(1), 100), Some(68));
 }
@@ -1164,11 +1167,14 @@ fn charges_one_reduction_for_each_process_that_fixed_an_owned_table() {
     // The free of an owned table charges one reduction for each process
     // that fixed it (`free_fixations_locked`, `erl_db.c:5304-5318`).
     let mut tables = EtsTables::default();
-    let mut owned = Table::new(ProcessId(1), Access::Public, 1, TableType::Set);
-    owned.fix(ProcessId(1));
-    owned.fix(ProcessId(2));
-    owned.fix(ProcessId(2));
-    tables.create(Reference(0), None, owned);
+    tables.create(
+        Reference(0),
+        None,
+        Table::new(ProcessId(1), Access::Public, 1, TableType::Set),
+    );
+    tables.fix_table(Reference(0), ProcessId(1));
+    tables.fix_table(Reference(0), ProcessId(2));
+    tables.fix_table(Reference(0), ProcessId(2));
     assert_eq!(tables.delete_owned(ProcessId(1), 100), Some(66));
 }
 
@@ -1187,6 +1193,31 @@ fn charges_one_reduction_for_a_fixation_that_leaves_the_table_fixed() {
     tables.fix_table(Reference(0), ProcessId(2));
     assert_eq!(tables.delete_owned(ProcessId(1), 100), Some(99));
     assert!(tables.table_by_id(Reference(0)).unwrap().is_fixed());
+}
+
+#[test]
+fn deletes_a_table_that_no_process_fixed() {
+    // The delete visits only the processes that fixed the table, so the
+    // unrelated fixations stay (`free_fixations_locked`, `erl_db.c:5304-5318`).
+    let mut tables = EtsTables::default();
+    for number in 0..100 {
+        let id = Reference(number);
+        tables.create(
+            id,
+            None,
+            Table::new(ProcessId(1), Access::Public, 1, TableType::Set),
+        );
+        tables.fix_table(id, ProcessId(number + 2));
+    }
+    tables.create(
+        Reference(100),
+        None,
+        Table::new(ProcessId(1), Access::Public, 1, TableType::Set),
+    );
+    assert_eq!(tables.delete_table(Reference(100), ProcessId(1)), 0);
+    for number in 0..100 {
+        assert!(tables.table_by_id(Reference(number)).unwrap().is_fixed());
+    }
 }
 
 #[test]

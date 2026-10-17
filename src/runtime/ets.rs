@@ -657,13 +657,22 @@ impl EtsTables {
         }
     }
 
-    /// Remove each fixation of the table `id` from the list of its process,
-    /// as `free_fixations_locked` does (`erl_db.c:5304-5318`).
-    fn forget_fixations(&mut self, id: Reference) {
-        self.fixed.retain(|_, list| {
+    /// Remove each fixation of the table `id` from the list of the process
+    /// `process`, as `free_fixations_locked` does (`erl_db.c:5304-5318`).
+    /// The caller gives the processes that fixed the table, so the delete
+    /// reads no other list.
+    fn forget_fixations(&mut self, id: Reference, process: ProcessId) {
+        let empty = {
+            let list = self
+                .fixed
+                .get_mut(&process)
+                .expect("a fixing process has a fixation list");
             list.retain(|table| *table != id);
-            !list.is_empty()
-        });
+            list.is_empty()
+        };
+        if empty {
+            self.fixed.remove(&process);
+        }
     }
 
     /// Delete the tables that the process `owner` owns, as
@@ -714,11 +723,14 @@ impl EtsTables {
                 break;
             };
             if let Some(mut table) = self.tables.remove(&id) {
-                reds -= i32::try_from(table.fixation_count()).unwrap_or(i32::MAX);
+                let fixers = table.fixers();
+                reds -= i32::try_from(fixers.len()).unwrap_or(i32::MAX);
                 // The table goes, so each fixation of it goes too
                 // (`free_fixations_locked`, `erl_db.c:5304-5318`).
                 table.fixed_by.clear();
-                self.forget_fixations(id);
+                for process in &fixers {
+                    self.forget_fixations(id, *process);
+                }
                 self.names.retain(|_, named| *named != id);
                 self.programs.retain(|_, (table, _)| *table != id);
                 self.freeing.insert(id, Freeing::new(table));
@@ -792,11 +804,13 @@ impl EtsTables {
         // The delete frees each fixation of the table, with one reduction for
         // each process that fixed it (`free_fixations_locked`,
         // `erl_db.c:3056`).
-        let fixations = table.fixation_count();
+        let fixers = table.fixers();
         table.fixed_by.clear();
-        self.forget_fixations(id);
+        for process in &fixers {
+            self.forget_fixations(id, *process);
+        }
         self.freeing.insert(id, Freeing::new(table));
-        fixations
+        fixers.len()
     }
 
     /// Return the position of the next table that goes into an owned list,
@@ -1500,18 +1514,18 @@ impl Table {
         !self.fixed_by.is_empty()
     }
 
-    /// Return the number of processes that fixed the table, as the count of
-    /// the fixation entries that `free_fixations_locked` frees
-    /// (`erl_db.c:5304-5318`). A second fix of one process counts once,
-    /// because ERTS keeps one entry with a count.
-    fn fixation_count(&self) -> usize {
+    /// Return each process that fixed the table once, as the entries that
+    /// `free_fixations_locked` frees (`erl_db.c:5304-5318`). A second fix
+    /// of one process counts once, because ERTS keeps one entry with a
+    /// count.
+    fn fixers(&self) -> Vec<ProcessId> {
         let mut processes = Vec::new();
         for fixed in &self.fixed_by {
             if !processes.contains(fixed) {
                 processes.push(*fixed);
             }
         }
-        processes.len()
+        processes
     }
 
     /// Return the reductions of the exit cleanup of the fixations of
