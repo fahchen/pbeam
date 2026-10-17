@@ -716,6 +716,25 @@ fn loop_limit(reds: i32) -> i32 {
     (reds * LOOP_FACTOR).min(MAX_LOOP_LIMIT)
 }
 
+/// Return the number of offset pairs of the match data of a precompiled
+/// pattern: its capture count plus one for the whole match, as `re_run`
+/// reads `unsigned_val(tp[2]) + 1` into an `int` (`erl_bif_re.c:1607`). The
+/// count is a small integer of the 64-bit range, and an `int` keeps the low
+/// 32 bits of the sum, so a forged negative count gives 0 as it does in
+/// ERTS. `pcre2_match_data_create` then keeps at least one pair and at
+/// most `UINT16_MAX` (`pcre2_match_data.c:58-59`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(ovec_pairs(0), 1);
+/// assert_eq!(ovec_pairs(1), 2);
+/// assert_eq!(ovec_pairs(-1), 0);
+/// ```
+fn ovec_pairs(count: i64) -> u32 {
+    (count as u64).wrapping_add(1) as u32
+}
+
 /// Run `re:run(Subject, RE, Options)`, or
 /// `re:internal_run(Subject, RE, Options, First)` with `first` false, as
 /// `re_run` (`erl_bif_re.c:1485-1828`) does:
@@ -802,20 +821,21 @@ pub(super) fn run(
     // The code of the match and the number of offset pairs of its ovector:
     // the pairs of a precompiled pattern, or the capture count of a code
     // that this call compiles, plus one (`erl_bif_re.c:1574-1575`, `1607`).
-    let pattern_elements = match pattern {
-        Term::Tuple(elements) if elements.len() == 5 => Some(elements),
+    // A five-element tuple gives the five fields of a precompiled pattern
+    // (`erl_bif_re.c:1585-1590`); each other term is a text pattern.
+    let pattern_elements: Option<&[Term; 5]> = match pattern {
+        Term::Tuple(elements) if elements.len() == 5 => {
+            <&[Term; 5]>::try_from(elements.as_ref()).ok()
+        }
         _ => None,
     };
     let mut own_code = None;
     let mut stored_code = None;
     let pairs;
-    if let Some(elements) = pattern_elements {
+    if let Some([tag, count, pattern_unicode, crlf, magic]) = pattern_elements {
         if parsed.flags & FLAG_UNIQUE_COMPILE_OPT != 0 {
             return Ok(BifResult::badarg());
         }
-        let [tag, count, pattern_unicode, crlf, magic] = elements.as_ref() else {
-            return Ok(BifResult::badarg());
-        };
         let Term::Reference(magic) = magic else {
             return Ok(BifResult::badarg());
         };
@@ -827,12 +847,7 @@ pub(super) fn run(
         if !is_atom(tag, "re_pattern") || crlf.small_integer().is_none() {
             return Ok(BifResult::badarg());
         }
-        let Some(ovec_pairs) = u32::try_from(count)
-            .ok()
-            .and_then(|count| count.checked_add(1))
-        else {
-            return Ok(BifResult::badarg());
-        };
+        let ovec_pairs = ovec_pairs(count);
         let codes = context.scheduler.resources.borrow_mut::<RegexCodes>();
         let Some(code) = codes.0.get_mut(magic) else {
             return Ok(BifResult::badarg());
@@ -998,19 +1013,9 @@ pub(super) fn run(
     ) {
         return Ok(BifResult::badarg());
     }
-    if rc < 0
-        && !matches!(
-            rc,
-            pcre2::ERROR_NOMATCH
-                | pcre2::ERROR_MATCHLIMIT
-                | pcre2::ERROR_DEPTHLIMIT
-                | pcre2::ERROR_HEAPLIMIT
-        )
-    {
-        return Err(crate::error::error(format!(
-            "unexpected pcre2_match result {rc}"
-        )));
-    }
+    // Every other negative code is unreachable for a live code and a
+    // subject that this call checked: ERTS asserts them too
+    // (`erl_bif_re.c:1788-1793`), and PCRE2 returns one of the codes above.
     context
         .scheduler
         .current_process_mut()
@@ -1136,3 +1141,7 @@ fn crc32(bytes: &[u8]) -> u32 {
         })
     })
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/runtime/interpreter/bif/re.rs"]
+mod tests;

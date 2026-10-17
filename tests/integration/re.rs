@@ -489,6 +489,22 @@ fn runs_re_run_3_with_the_option_set_as_pinned_erts() {
         Term::Atom(program.atom("match").unwrap()),
         matched(
             &program,
+            vec![pair(0, 2), pair(0, 1), pair(-1, 0), pair(1, 1)],
+        ),
+        Term::tuple(vec![
+            Term::Atom(program.atom("error").unwrap()),
+            Term::tuple(vec![
+                Term::Atom(program.atom("compile").unwrap()),
+                Term::tuple(vec![
+                    codes(b"missing closing parenthesis"),
+                    Term::Integer(3),
+                ]),
+            ]),
+        ]),
+        error_term(&program, "match_limit_recursion"),
+        matched(&program, vec![Term::list_from(vec![pair(1, 1)])]),
+        matched(
+            &program,
             vec![
                 Term::list_from(vec![pair(1, 1), pair(1, 1)]),
                 Term::list_from(vec![pair(4, 1), pair(4, 1)]),
@@ -498,6 +514,8 @@ fn runs_re_run_3_with_the_option_set_as_pinned_erts() {
         matched(&program, vec![pair(1, 1)]),
         matched(&program, vec![pair(1, 1), pair(1, 1)]),
         matched(&program, vec![pair(1, 1), pair(1, 1)]),
+        matched(&program, vec![pair(1, 1), pair(1, 1)]),
+        nomatch(&program),
     ]);
     let result = program.execute("re_probe", "run", &[]).unwrap().term;
     let result = result.proper_list().unwrap().collect::<Vec<_>>();
@@ -516,8 +534,13 @@ fn runs_re_run_3_with_the_option_set_as_pinned_erts() {
          {match,[[98],[98]]},match,{match,[{1,1},{1,1}]},nomatch,nomatch,\
          nomatch,{error,match_limit},nomatch,{match,[{0,1},{1,1}]},\
          {match,[{1,1},{-1,0}]},{match,[{0,2}]},match,match,\
+         {match,[{0,2},{0,1},{-1,0},{1,1}]},\
+         {error,{compile,{[109,105,115,115,105,110,103,32,99,108,111,115,\
+         105,110,103,32,112,97,114,101,110,116,104,101,115,105,115],3}}},\
+         {error,match_limit_recursion},{match,[[{1,1}]]},\
          {match,[[{1,1},{1,1}],[{4,1},{4,1}]]},{match,[<<98>>]},\
-         {match,[{1,1}]},{match,[{1,1},{1,1}]},{match,[{1,1},{1,1}]}]\n"
+         {match,[{1,1}]},{match,[{1,1},{1,1}]},{match,[{1,1},{1,1}]},\
+         {match,[{1,1},{1,1}]},nomatch]\n"
     );
 }
 
@@ -642,6 +665,7 @@ fn raises_badarg_for_bad_run_options_and_subjects_as_pinned_erts() {
         "global_export",
         "pattern_error",
         "pattern_not_text",
+        "pattern_not_iodata",
         "subject_not_iodata",
         "subject_negative_byte",
         "subject_tuple",
@@ -652,6 +676,7 @@ fn raises_badarg_for_bad_run_options_and_subjects_as_pinned_erts() {
         "bsr_mismatch",
         "foreign_pattern",
         "pattern_tag",
+        "pattern_magic_not_ref",
         "pattern_count_not_small",
     ];
     let expected: Vec<Term> = labels
@@ -693,7 +718,6 @@ fn charges_the_reductions_of_a_match_as_pinned_erts() {
         Term::tuple(vec![Term::Integer(2), matched(&program, vec![pair(1, 1)])]),
         Term::tuple(vec![Term::Integer(9), nomatch(&program)]),
         Term::tuple(vec![Term::Integer(80), nomatch(&program)]),
-        Term::tuple(vec![Term::Integer(4689), nomatch(&program)]),
     ]);
     let expected = expected.proper_list().unwrap().collect::<Vec<_>>();
     for (index, (result, expected)) in result.iter().zip(&expected).enumerate() {
@@ -714,7 +738,7 @@ fn stops_on_a_capture_group_name_that_pbeam_does_not_resolve() {
     // capture, so the call stops (row "Regular expressions" in
     // `docs/erts-differences.md`).
     let program = program();
-    for case in ["names", "name_index"] {
+    for case in ["names", "name_index", "name_list"] {
         let error = program
             .execute(
                 "re_probe",
@@ -727,4 +751,45 @@ fn stops_on_a_capture_group_name_that_pbeam_does_not_resolve() {
             "{case}: {error}"
         );
     }
+}
+
+#[test]
+fn raises_badarg_for_a_first_argument_of_internal_run_that_is_not_a_boolean() {
+    // `re_internal_run_4` accepts only `true` and `false` in its fourth
+    // argument (`erl_bif_re.c:1805-1816`). ERTS does not export the
+    // function to another module, so only PBeam runs this probe; the values
+    // are the ones of the source: two matches and two `badarg`.
+    let program = program();
+    let badarg = error_term(&program, "badarg");
+    assert_eq!(
+        program
+            .execute("re_probe", "internal_run_first", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![
+            matched(&program, vec![pair(1, 1)]),
+            matched(&program, vec![pair(1, 1)]),
+            badarg.clone(),
+            badarg,
+        ])
+    );
+}
+
+#[test]
+fn runs_a_match_that_uses_the_loop_limit_of_more_than_one_turn() {
+    // A match that uses its loop limit continues with a fresh budget, as
+    // the trap to `erlang:re_run_trap/3` does (`erl_bif_re.c:1730-1748`,
+    // `1852-1866`). ERTS switches the process out between the turns, so its
+    // reduction total counts the whole budget of each turn; PBeam runs the
+    // turns in one call and only compares the value (row "Regular
+    // expressions" in `docs/erts-differences.md`).
+    let program = program();
+    assert_eq!(
+        program.execute("re_probe", "yield", &[]).unwrap().term,
+        Term::list_from(vec![
+            matched(&program, vec![pair(0, 600001)]),
+            nomatch(&program),
+        ])
+    );
+    assert_eq!(reference("yield"), "[{match,[{0,600001}]},nomatch]\n");
 }

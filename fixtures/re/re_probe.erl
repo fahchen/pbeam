@@ -2,7 +2,7 @@
 -export([main/0, options/0, errors/0, badarg/0, iodata/0, unicode_list/0,
          export/0, unsupported/1, id/1,
          run2/0, run/0, captures/0, globals/0, run_errors/0, reductions/0,
-         spot/0]).
+         spot/0, internal_run_first/0, yield/0]).
 
 %% prim_tty:init/1 compiles the ANSI regular expression (prim_tty.erl:238).
 %% The fifth element is a reference (erl_bif_re.c:607-609).
@@ -94,7 +94,9 @@ unsupported(chardata) -> re:compile(foo, [unicode]);
 unsupported(names) ->
     re:run(<<"abc">>, <<"(?<x>a)(?<y>b)?">>, [{capture, all_names}]);
 unsupported(name_index) ->
-    re:run(<<"abc">>, <<"(?<x>a)(?<y>b)?">>, [{capture, [x], index}]).
+    re:run(<<"abc">>, <<"(?<x>a)(?<y>b)?">>, [{capture, [x], index}]);
+unsupported(name_list) ->
+    re:run(<<"abc">>, <<"(?<x>a)(?<y>b)?">>, [{capture, ["x"], index}]).
 
 %% re:run/2: the option list is []. The subject and the pattern are a
 %% binary or a list (re_run, erl_bif_re.c:1485-1803).
@@ -108,13 +110,17 @@ run2() ->
 run() ->
     {ok, Compiled} = re:compile(<<"(b)">>, []),
     {ok, Caseless} = re:compile(<<"b">>, [caseless]),
+    {ok, CompiledUnicode} = re:compile(<<"(b)">>, [unicode]),
+    {re_pattern, _, _, _, CRef} = Compiled,
     [re:run(Subject, RE, Options)
      || {Subject, RE, Options} <- run_cases()] ++
         [re:run(<<"abcabc">>, Compiled, [global]),
          re:run(<<"abcabc">>, Compiled, [{capture, [1], binary}]),
          re:run(<<"abc">>, Caseless, []),
          re:run(<<"abc">>, Compiled, [{newline, lf}]),
-         re:run(<<"abc">>, Compiled, [bsr_unicode])].
+         re:run(<<"abc">>, Compiled, [bsr_unicode]),
+         re:run("abc", CompiledUnicode, []),
+         re:run(<<"abc">>, {re_pattern, -1, 0, 0, CRef}, [])].
 
 run_cases() ->
     [{<<"abc">>, <<"b">>, []},
@@ -150,7 +156,12 @@ run_cases() ->
      {<<"abc">>, <<"(a)(b)?">>, [{capture, [2, 5], index}]},
      {<<"abc">>, <<"(a)(b)?">>, [{capture, first}]},
      {<<"abc">>, <<"(a)(b)?">>, [{capture, none}]},
-     {<<"abc">>, <<"(a)(b)?">>, [{capture, none, list}]}].
+     {<<"abc">>, <<"(a)(b)?">>, [{capture, none, list}]},
+     {<<"ab">>, <<"(a)(z)?(b)">>, [{capture, all}]},
+     {<<"abc">>, <<"a(b">>, [report_errors]},
+     {<<"aaaaaaaaaaaaaz">>, <<"(a+)*z">>,
+      [{match_limit_recursion, 1}, report_errors]},
+     {<<"abc">>, <<"b">>, [caseless, global]}].
 
 %% Each capture value and type, on a match with a group that did not take
 %% part in the match (build_exec_return, erl_bif_re.c:1047-1256).
@@ -197,6 +208,7 @@ run_errors() ->
              {global_export, <<"abc">>, <<"b">>, [global, export]},
              {pattern_error, <<"abc">>, <<"a(b">>, []},
              {pattern_not_text, <<"abc">>, foo, []},
+             {pattern_not_iodata, <<"abc">>, [foo], []},
              {subject_not_iodata, foo, <<"b">>, []},
              {subject_negative_byte, [?MODULE:id(-1)], <<"b">>, []},
              {subject_tuple, {a}, <<"b">>, []},
@@ -207,6 +219,7 @@ run_errors() ->
              {bsr_mismatch, <<"abc">>, Compiled, [bsr_anycrlf]},
              {foreign_pattern, <<"abc">>, {re_pattern, 1, 0, 0, make_ref()}, []},
              {pattern_tag, <<"abc">>, {pattern, 0, 0, 0, make_ref()}, []},
+             {pattern_magic_not_ref, <<"abc">>, {re_pattern, 1, 0, 0, foo}, []},
              {pattern_count_not_small, <<"abc">>,
               {re_pattern, 1 bsl 60, 0, 0, ?MODULE:id(make_ref())}, []}]].
 
@@ -266,6 +279,20 @@ repeat(N, Part, Size, Block, Acc) when Size =< N ->
 repeat(N, Part, _, _, Acc) -> repeat(N, Part, 1, Part, Acc).
 
 id(X) -> X.
+
+%% A match that uses the loop limit of one turn continues with a fresh
+%% budget (`erl_bif_re.c:1730-1748`, `1852-1866`). The reduction total of
+%% this call is the ERTS one, but ERTS switches the process out between the
+%% turns and PBeam runs them in one call, so only the value is compared.
+yield() ->
+    [re:run(dup(600000, $a) ++ "b", <<"a*b">>), re:run(dup(600000, $a), <<"a*b">>)].
+
+%% The fourth argument of re:internal_run/4 must be true or false
+%% (erl_bif_re.c:1805-1816). ERTS does not export the function, so only
+%% PBeam runs this probe.
+internal_run_first() ->
+    [catch_error(fun() -> re:internal_run(<<"abc">>, <<"b">>, [], First) end)
+     || First <- [true, false, foo, 1]].
 
 %% A list of N copies of C.
 dup(N, C) -> dup(N, C, []).

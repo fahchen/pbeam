@@ -363,6 +363,10 @@ impl MatchData {
     ///
     /// Panic when PCRE2 cannot allocate the match data.
     pub(super) fn new(pairs: u32) -> Self {
+        // PCRE2 keeps at least one pair and at most `UINT16_MAX`
+        // (`pcre2_match_data.c:58-59`), and the ovector of the match data
+        // has the clamped size.
+        let pairs = pairs.clamp(1, u32::from(u16::MAX));
         // SAFETY: `pcre2_match_data_create_8` with no general context uses
         // `malloc`, and the new match data is valid until
         // `pcre2_match_data_free_8` in `Drop`.
