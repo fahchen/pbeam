@@ -870,7 +870,7 @@ pub(crate) fn make_hash(atoms: &AtomTable, term: &Term) -> u32 {
                 Term::Pid(pid) => {
                     // ERTS hashes the pid number only, not its serial
                     // (`internal_pid_number`, `erl_term.h:645-656`).
-                    let number = u64::from(pid.0 & PID_NUMBER_MASK);
+                    let number = pid.0 & PID_NUMBER_MASK;
                     hash = uint32_step(hash, number, FUNNY_5).wrapping_mul(FUNNY_6);
                 }
                 Term::Port(port) => {
