@@ -593,6 +593,10 @@ unsupported(Case) ->
             T = ets:new(ets_probe, [ordered_set]),
             true = ets:insert(T, {a, 1}),
             ets:select(T, [{{'$1', '$2'}, [], ['$1']}]);
+        ordered_select_delete ->
+            T = ets:new(ets_probe, [ordered_set]),
+            true = ets:insert(T, {a, 1}),
+            ets:internal_select_delete(T, [{{'$1', '$2'}, [], [true]}]);
         heir -> ets:new(ets_probe, [{heir, element(1, start([]))}]);
         heir_data -> ets:new(ets_probe, [{heir, element(1, start([])), data}]);
         keypos -> ets:insert(ets:new(ets_probe, [{keypos, id(1 bsl 32)}]), {a});

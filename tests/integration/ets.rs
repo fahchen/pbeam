@@ -507,6 +507,10 @@ fn rejects_tables_that_pbeam_cannot_model() {
         ),
         ("ordered_next", "next/2 on an ordered_set table"),
         ("ordered_select", "select/2,3 on an ordered_set table"),
+        (
+            "ordered_select_delete",
+            "select_delete/2 on an ordered_set table",
+        ),
         ("heir", "new/2 heir ProcessId("),
         ("heir_data", "new/2 heir ProcessId("),
         ("keypos", "insert/2 in a table with key position 0"),

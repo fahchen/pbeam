@@ -2454,6 +2454,7 @@ pub(super) fn internal_select_delete(
     let Some(found) = context.scheduler.ets.find(atoms, table) else {
         return Ok(BifResult::badarg());
     };
+    reject_ordered_set(found.1, "ets:select_delete/2")?;
     let keypos = found.1.keypos();
     let buckets = found.1.bucket_count();
     if context
