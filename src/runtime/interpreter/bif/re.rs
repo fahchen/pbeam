@@ -802,12 +802,10 @@ pub(super) fn run(
     // The code of the match and the number of offset pairs of its ovector:
     // the pairs of a precompiled pattern, or the capture count of a code
     // that this call compiles, plus one (`erl_bif_re.c:1574-1575`, `1607`).
-    let mut pattern_elements = None;
-    if let Term::Tuple(elements) = pattern {
-        if elements.len() == 5 {
-            pattern_elements = Some(elements);
-        }
-    }
+    let pattern_elements = match pattern {
+        Term::Tuple(elements) if elements.len() == 5 => Some(elements),
+        _ => None,
+    };
     let mut own_code = None;
     let mut stored_code = None;
     let pairs;

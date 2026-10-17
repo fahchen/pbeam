@@ -268,8 +268,9 @@ repeat(N, Part, _, _, Acc) -> repeat(N, Part, 1, Part, Acc).
 id(X) -> X.
 
 %% A list of N copies of C.
-dup(0, _) -> [];
-dup(N, C) -> [C | dup(N - 1, C)].
+dup(N, C) -> dup(N, C, []).
+dup(0, _, Acc) -> Acc;
+dup(N, C, Acc) -> dup(N - 1, C, [C | Acc]).
 
 catch_error(Fun) ->
     try Fun() catch error:Reason -> {error, Reason} end.

@@ -681,20 +681,24 @@ fn charges_the_reductions_of_a_match_as_pinned_erts() {
     // reductions for each 4000 (`CONTEXT_REDS`, `erl_vm.h:53`,
     // `erl_bif_re.c:1639`). The probe runs each call alone on `erl +S 1`.
     let program = program();
-    assert_eq!(
-        program.execute("re_probe", "reductions", &[]).unwrap().term,
-        Term::list_from(vec![
-            Term::tuple(vec![Term::Integer(2), matched(&program, vec![pair(1, 1)])]),
-            Term::tuple(vec![Term::Integer(2), nomatch(&program)]),
-            Term::tuple(vec![
-                Term::Integer(2),
-                matched(&program, vec![bin(b"ab"), bin(b"a"), bin(b"b")]),
-            ]),
-            Term::tuple(vec![Term::Integer(2), matched(&program, vec![pair(1, 1)])]),
-            Term::tuple(vec![Term::Integer(9), nomatch(&program)]),
-            Term::tuple(vec![Term::Integer(80), nomatch(&program)]),
-        ])
-    );
+    let result = program.execute("re_probe", "reductions", &[]).unwrap().term;
+    let result = result.proper_list().unwrap().collect::<Vec<_>>();
+    let expected = Term::list_from(vec![
+        Term::tuple(vec![Term::Integer(2), matched(&program, vec![pair(1, 1)])]),
+        Term::tuple(vec![Term::Integer(2), nomatch(&program)]),
+        Term::tuple(vec![
+            Term::Integer(2),
+            matched(&program, vec![bin(b"ab"), bin(b"a"), bin(b"b")]),
+        ]),
+        Term::tuple(vec![Term::Integer(2), matched(&program, vec![pair(1, 1)])]),
+        Term::tuple(vec![Term::Integer(9), nomatch(&program)]),
+        Term::tuple(vec![Term::Integer(80), nomatch(&program)]),
+        Term::tuple(vec![Term::Integer(4689), nomatch(&program)]),
+    ]);
+    let expected = expected.proper_list().unwrap().collect::<Vec<_>>();
+    for (index, (result, expected)) in result.iter().zip(&expected).enumerate() {
+        assert_eq!(result, expected, "case {index}");
+    }
     assert_eq!(
         reference("reductions"),
         "[{2,{match,[{1,1}]}},{2,nomatch},{2,{match,[<<97,98>>,<<97>>,<<98>>]}},\
