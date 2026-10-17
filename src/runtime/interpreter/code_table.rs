@@ -67,6 +67,13 @@ pub(in crate::runtime) struct CodeTable {
     /// not loaded, and its exports stay hidden until
     /// [`CodeTable::finish_after_on_load`] keeps the code.
     on_load: HashMap<String, OnLoadCode>,
+    /// The modules whose current code `erlang:delete_module/1` moved to old
+    /// code, as `modp->old` of ERTS (`beam_bif_load.c:2412-2455`). The code
+    /// stays in `by_id` for the frames that run it, and the name leaves
+    /// `modules`, so the module is not loaded. A second delete and a load
+    /// of the name give `badarg` and `not_purged` until a purge, as ERTS
+    /// does (`beam_bif_load.c:702-708`, `444-455`).
+    deleted: HashSet<String>,
     /// The module name and the code of the purge that
     /// `erts_internal:purge_module(Module, prepare_on_load)` started, as
     /// `purge_state.module` and the old code of the ERTS module
@@ -184,6 +191,11 @@ pub(in crate::runtime) enum Finish {
     /// list, as `exception_list` (`beam_bif_load.c:322-337`) gives them.
     /// No module loads, and each entry stays prepared.
     Duplicated(Vec<String>),
+    /// A module of the list has old code from `erlang:delete_module/1`. The
+    /// names are the modules in the order of the list, as `exception_list`
+    /// (`beam_bif_load.c:444-455`) gives them. No module loads, and each
+    /// entry stays prepared.
+    NotPurged(Vec<String>),
 }
 
 impl CodeTable {
@@ -205,6 +217,7 @@ impl CodeTable {
             by_id,
             prepared: HashMap::new(),
             on_load: HashMap::new(),
+            deleted: HashSet::new(),
             purging: None,
         }
     }
@@ -566,6 +579,41 @@ impl CodeTable {
             .collect()
     }
 
+    /// Move the current code of the module `name` to old code, as
+    /// `delete_module_1` and `delete_code` (`beam_bif_load.c:679-736`,
+    /// `2412-2455`) do. Return `Some(true)` when the run had current code
+    /// of the name, and `Some(false)` when it has old code and a second
+    /// delete must give `badarg`. Return `None` when the run has neither:
+    /// the module is not loaded. The code stays in `by_id` for the frames
+    /// that run it, and each import slot of another module that names the
+    /// code is emptied, so a later call of the module gives `undef`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(code.delete("fixture"), Some(true));
+    /// assert_eq!(code.delete("fixture"), Some(false));
+    /// assert_eq!(code.delete("nomod"), None);
+    /// assert!(code.get("fixture").is_none());
+    /// ```
+    pub(in crate::runtime) fn delete(&mut self, name: &str) -> Option<bool> {
+        let Some(module) = self.modules.remove(name) else {
+            return self.deleted.contains(name).then_some(false);
+        };
+        for loaded in self.by_id.values() {
+            for slot in loaded.imports.iter() {
+                if slot
+                    .get()
+                    .is_some_and(|target| target.module_id == module.id)
+                {
+                    slot.set(None);
+                }
+            }
+        }
+        self.deleted.insert(name.to_owned());
+        Some(true)
+    }
+
     /// Load the prepared code of `references`, whose module names are
     /// `names` in the same order, as `finish_loading_1`
     /// (`beam_bif_load.c:381-507`) does. `names` comes from
@@ -609,6 +657,14 @@ impl CodeTable {
         if !duplicated.is_empty() {
             duplicated.reverse();
             return Ok(Finish::Duplicated(duplicated));
+        }
+        let not_purged: Vec<String> = names
+            .iter()
+            .filter(|name| self.deleted.contains(*name))
+            .cloned()
+            .collect();
+        if !not_purged.is_empty() {
+            return Ok(Finish::NotPurged(not_purged));
         }
         if let Some(name) = names
             .iter()

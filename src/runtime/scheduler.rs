@@ -369,6 +369,11 @@ pub(super) struct Scheduler {
     /// (`erl_bif_unique.c:574`, `812`): the number of
     /// `erlang:unique_integer/0` calls so far.
     unique: u64,
+    /// The counter of `erlang:unique_integer([monotonic])`, as
+    /// `raw_unique_monotonic_integer` (`erl_bif_unique.c:648-672`): the
+    /// value -1 before the first call, and the raw value of the last call
+    /// after it.
+    unique_monotonic: i64,
     /// The seed of the hash of `term_to_binary/2` with `local`
     /// (`local_node_hash`, external.c:134), which the first such call
     /// computes (see [`Scheduler::local_node_hash`]).
@@ -492,6 +497,7 @@ impl Scheduler {
             next_process_id: ROOT.0 + 1,
             next_reference: 0,
             unique: 0,
+            unique_monotonic: -1,
             local_node_hash: std::cell::OnceCell::new(),
             root_result: None,
             names: HashMap::new(),
@@ -1875,6 +1881,82 @@ impl Scheduler {
             .ok_or_else(|| error("erlang:unique_integer/0 needs a bignum"))?;
         self.unique += 1;
         Ok(value)
+    }
+
+    /// Return the next value of `erlang:unique_integer([positive])`, as
+    /// `unique_integer_bif` with `positive` (`erl_bif_unique.c:487-491`)
+    /// makes it from the thread id and the counter of the scheduler: the
+    /// value 2 for the first call, and 2 more for each later call. ERTS
+    /// gives other values: its thread ids include the dirty schedulers of
+    /// the host.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(scheduler.unique_integer_positive()?, 2);
+    /// assert_eq!(scheduler.unique_integer_positive()?, 4);
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// A value above `MAX_SMALL` is a runtime error: ERTS then gives a
+    /// bignum, which PBeam does not have.
+    pub(super) fn unique_integer_positive(&mut self) -> Result<i64, BeamError> {
+        let value = i64::try_from((self.unique << 1) + 2)
+            .ok()
+            .filter(|value| Term::Integer(*value).small_integer().is_some())
+            .ok_or_else(|| error("erlang:unique_integer/1 needs a bignum"))?;
+        self.unique += 1;
+        Ok(value)
+    }
+
+    /// Return the next value of `erlang:unique_integer([monotonic])`, as
+    /// `unique_monotonic_integer_bif` and
+    /// `make_unique_monotonic_integer_value` (`erl_bif_unique.c:693-734`)
+    /// do. The counter starts at -1, so the first call has the raw value 0.
+    /// The value of a call without `positive` is the raw value plus
+    /// `MIN_SMALL`; the value of a call with `positive` is the raw value
+    /// plus 1.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(scheduler.unique_monotonic_integer(false)?, -(1 << 59));
+    /// assert_eq!(scheduler.unique_monotonic_integer(false)?, -(1 << 59) + 1);
+    /// assert_eq!(scheduler.unique_monotonic_integer(true)?, 3);
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// A value above the small integer range is a runtime error: ERTS then
+    /// gives a bignum, which PBeam does not have.
+    pub(super) fn unique_monotonic_integer(&mut self, positive: bool) -> Result<i64, BeamError> {
+        let raw = self
+            .unique_monotonic
+            .checked_add(1)
+            .ok_or_else(|| error("erlang:unique_integer/1 needs a bignum"))?;
+        self.unique_monotonic = raw;
+        let value = if positive {
+            raw.checked_add(1)
+        } else {
+            raw.checked_add(SMALL_INTEGER_MIN)
+        }
+        .filter(|value| Term::Integer(*value).small_integer().is_some())
+        .ok_or_else(|| error("erlang:unique_integer/1 needs a bignum"))?;
+        Ok(value)
+    }
+
+    /// Return the registered names of the run, in no order, as the ERTS
+    /// `process_reg` table gives them to `erlang:registered/0`
+    /// (`register.c:576-604`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(scheduler.registered_names().is_empty());
+    /// ```
+    pub(super) fn registered_names(&self) -> Vec<String> {
+        self.names.keys().cloned().collect()
     }
 
     /// Return whether the exit of the root process completed: the root

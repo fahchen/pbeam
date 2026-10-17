@@ -40,6 +40,10 @@ name = "dirty_io"
 path = "tests/feature/dirty_io.rs"
 
 [[test]]
+name = "diagnostics_feature"
+path = "tests/feature/diagnostics.rs"
+
+[[test]]
 name = "error_handler_feature"
 path = "tests/feature/error_handler.rs"
 
@@ -227,6 +231,10 @@ path = "tests/integration/constant.rs"
 [[test]]
 name = "demonitor"
 path = "tests/integration/demonitor.rs"
+
+[[test]]
+name = "diagnostics"
+path = "tests/integration/diagnostics.rs"
 
 [[test]]
 name = "dispatch_baseline"
