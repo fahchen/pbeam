@@ -1010,6 +1010,19 @@ impl Scheduler {
                 return Ok(Turn::Done);
             }
         }
+        // The cleanup of fixations on tables that another process deleted
+        // runs as process system work in this turn: one task for each
+        // reduction that remains and at least one, and the rest stays for
+        // the next turn (`erl_process.c:10932-10989`).
+        let budget = {
+            let process = self.current_process_mut();
+            usize::try_from(process.fcalls.max(0)).unwrap_or(usize::MAX)
+        };
+        let drained = self.ets.drain_pending(id, budget.max(1));
+        if drained > 0 {
+            self.current_process_mut()
+                .bump_reductions(i32::try_from(drained).unwrap_or(i32::MAX));
+        }
         let process = self.current_process_mut();
         if process.fcalls <= 0 || process.waiting {
             if process.waiting {

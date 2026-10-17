@@ -5416,10 +5416,11 @@ fn traps_a_select_continuation_that_meets_a_fixed_clear() {
 }
 
 #[test]
-fn charges_a_pending_fixation_cleanup_when_the_process_calls_a_bif() {
+fn cleans_a_pending_fixation_when_the_process_is_scheduled() {
     // The cleanup of a fixation on a table that another process deleted runs
-    // when the process runs, with one reduction for each entry
-    // (`erts_schedule_ets_free_fixation`, `erl_db.c:5263-5301`).
+    // as process system work at each scheduling
+    // (`erts_schedule_ets_free_fixation`, `erl_db.c:5263-5301`,
+    // `erl_process.c:10932-10989`).
     let program = make_program(vec![], 0);
     let mut scheduler = Scheduler::new((*program.atoms).clone());
     scheduler.start(frame(), vec![], allow_all()).unwrap();
@@ -5432,11 +5433,10 @@ fn charges_a_pending_fixation_cleanup_when_the_process_calls_a_bif() {
     );
     scheduler.ets.fix_table(Reference(0), caller);
     assert_eq!(scheduler.ets.delete_table(Reference(0), ProcessId(99)), 1);
-    scheduler.current_process_mut().fcalls = 10;
-    program
-        .bif(&mut scheduler, "erlang", "self", vec![])
-        .unwrap();
-    assert_eq!(scheduler.current_process_mut().fcalls, 9);
+    assert_eq!(scheduler.ets.pending_count(caller), 1);
+    scheduler.yield_current();
+    scheduler.schedule_next().unwrap();
+    assert_eq!(scheduler.ets.pending_count(caller), 0);
 }
 
 #[test]

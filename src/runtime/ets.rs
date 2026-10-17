@@ -4,7 +4,7 @@
 pub(super) mod pattern;
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::hash::{DefaultHasher, Hasher};
 
 use crate::term::atom_hash;
@@ -68,7 +68,7 @@ pub(super) struct EtsTables {
     /// did not delete them, so the process removes the entry and pays one
     /// reduction when it runs (`erts_schedule_ets_free_fixation`,
     /// `erl_db.c:5263-5301`).
-    pending: HashMap<ProcessId, Vec<Reference>>,
+    pending: HashMap<ProcessId, VecDeque<Reference>>,
     /// The compiled match specification of each `ets:select/1`
     /// continuation, by the reference that the continuation holds in place
     /// of the ERTS magic reference (`ets_db_make_match_prog_ref`,
@@ -727,7 +727,7 @@ impl EtsTables {
                 // The entry of another process stays until that process runs
                 // and then removes it, or until its exit
                 // (`erts_schedule_ets_free_fixation`, `erl_db.c:5263-5301`).
-                self.pending.entry(*process).or_default().push(id);
+                self.pending.entry(*process).or_default().push_back(id);
             }
         }
     }
@@ -738,18 +738,32 @@ impl EtsTables {
     /// `erl_db.c:4975-5015`). Return 0 when the process has no pending
     /// cleanup.
     pub(super) fn drain_pending(&mut self, process: ProcessId, limit: usize) -> usize {
-        let Some(ids) = self.pending.get_mut(&process) else {
-            return 0;
+        let (drained, empty) = {
+            let Some(ids) = self.pending.get_mut(&process) else {
+                return 0;
+            };
+            let mut drained = Vec::with_capacity(limit.min(ids.len()));
+            while drained.len() < limit {
+                let Some(id) = ids.pop_front() else {
+                    break;
+                };
+                drained.push(id);
+            }
+            (drained, ids.is_empty())
         };
-        let count = limit.min(ids.len());
-        let drained = ids.drain(..count).collect::<Vec<_>>();
-        if ids.is_empty() {
+        if empty {
             self.pending.remove(&process);
         }
         for id in &drained {
             self.forget_fixation(*id, process);
         }
         drained.len()
+    }
+
+    /// Return the number of pending cleanups of the process `process`.
+    #[cfg(test)]
+    pub(super) fn pending_count(&self, process: ProcessId) -> usize {
+        (self.pending.get(&process)).map_or(0, VecDeque::len)
     }
 
     /// Delete the tables that the process `owner` owns, as
