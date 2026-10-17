@@ -51,6 +51,9 @@ const ETF_SMALL_INTEGER_EXT: u8 = 97;
 /// `[98, 255, 255, 255, 255]`.
 const ETF_INTEGER_EXT: u8 = 98;
 const ETF_SMALL_TUPLE_EXT: u8 = 104;
+/// `LARGE_TUPLE_EXT`, a tuple with a four-byte big-endian element count,
+/// such as a 300-element tuple (`external.c:4542-4549`).
+const ETF_LARGE_TUPLE_EXT: u8 = 105;
 /// `SMALL_BIG_EXT`: a bignum with a one-byte digit count, a sign byte, and
 /// little-endian bytes, such as `1 bsl 64` as
 /// `[110, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]` (`external.c:4457-4497`).
@@ -724,7 +727,7 @@ fn read_literal(data: &[u8], atom_table: &mut AtomTable) -> Result<Option<Term>,
 /// finished.
 enum PartialTerm {
     /// A tuple that still needs `remaining` elements.
-    Tuple { remaining: u8, elements: Vec<Term> },
+    Tuple { remaining: u32, elements: Vec<Term> },
     /// A list that still needs `remaining` elements before its tail.
     List { remaining: u32, elements: Vec<Term> },
     /// A list whose elements are read and whose tail is next.
@@ -852,6 +855,17 @@ fn read_external_term(
                 Term::Atom(atom_table.put(name)?)
             }
             ETF_SMALL_TUPLE_EXT => match take(data, cursor, 1)?[0] {
+                0 => Term::tuple(Vec::new()),
+                remaining => {
+                    let elements = Vec::new();
+                    partial.push(PartialTerm::Tuple {
+                        remaining: u32::from(remaining),
+                        elements,
+                    });
+                    continue;
+                }
+            },
+            ETF_LARGE_TUPLE_EXT => match read_u32(take(data, cursor, WORD_SIZE)?)? {
                 0 => Term::tuple(Vec::new()),
                 remaining => {
                     let elements = Vec::new();
