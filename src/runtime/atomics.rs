@@ -137,9 +137,11 @@ impl AtomicArrays {
     /// Create the array of `size` atomics with the signedness `signed` for
     /// the reference `id`, as `erts_internal_atomics_new_2` makes it
     /// (`erl_bif_atomics.c:56-89`). Return `false` when PBeam cannot
-    /// allocate the array, which ERTS reports as `system_limit`
-    /// (`erts_alloc_n_enomem` of `erts_create_magic_binary_x`,
-    /// `erl_binary.h:404-407`).
+    /// allocate the array, and the caller then raises `error:system_limit`.
+    /// ERTS ends the emulator in that case: `erts_create_magic_binary_x`
+    /// calls `erts_alloc_n_enomem` (`erl_binary.h:404-407`), which is
+    /// `__decl_noreturn` (`erl_alloc.c:2105-2109`). See "Atomic arrays" in
+    /// `docs/erts-differences.md`.
     ///
     /// # Examples
     ///
