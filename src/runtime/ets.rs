@@ -51,6 +51,12 @@ pub(super) struct EtsTables {
     /// (`save_owned_table`, `erl_db.c:628-650`), so the next table gets
     /// this position, at the end of the list of its owner.
     saved: u64,
+    /// The compiled match specification of each `ets:select/1`
+    /// continuation, by the reference that the continuation holds in place
+    /// of the ERTS magic reference (`ets_db_make_match_prog_ref`,
+    /// `erl_db_hash.c:2103`, `2229`). Each entry also holds the table
+    /// reference, so the delete of the table drops its programs.
+    programs: HashMap<Reference, (Reference, pattern::MatchSpec)>,
 }
 
 /// A deleted table and the count of its segments that are not free yet. ERTS
@@ -129,6 +135,22 @@ pub(super) struct Table {
     /// `ets:new/2` makes it and when `ets:delete/1` of another process
     /// takes it (`save_owned_table`, `erl_db.c:628-650`, `3031-3051`).
     owned: u64,
+    /// The atom that `ets:new/2` gave the table, also when the table is
+    /// not named. `ets:info(Table, name)` gives it (`table_info`,
+    /// `erl_db.c:5504-5505`).
+    name: String,
+    /// The `write_concurrency` option, as `ets:info(Table,
+    /// write_concurrency)` gives it (`table_info`, `erl_db.c:5487-5501`).
+    write_concurrency: Term,
+    /// The `read_concurrency` option (`erl_db.c:5502-5503`).
+    read_concurrency: bool,
+    /// The `decentralized_counters` option (`erl_db.c:5516-5517`).
+    decentralized_counters: bool,
+    /// The `compressed` option (`erl_db.c:5512-5513`).
+    compressed: bool,
+    /// The heir that `ets:new/2` accepted and that is the owner, as
+    /// `ets:info(Table, heir)` gives it (`table_info`, `erl_db.c:5478-5479`).
+    heir: Option<ProcessId>,
     /// The list insert that took the table and yields between its objects
     /// (`tb->common.status & DB_BUSY`, `erl_db.c:2077-2107`, `2310-2319`),
     /// else `None`. Each process that uses the table while it is busy
@@ -362,6 +384,17 @@ impl EtsTables {
         self.names.get(name).copied()
     }
 
+    /// Return whether the table is a named table.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(!tables.named(Reference(0)));
+    /// ```
+    pub(super) fn named(&self, id: Reference) -> bool {
+        self.names.values().any(|named| *named == id)
+    }
+
     /// Return the table that `id` identifies, when the process `caller` can
     /// do `operation` on it, as `db_get_table` (`erl_db.c:800-912`) does. An
     /// atom finds a named table, and a reference finds its table. Return
@@ -446,6 +479,40 @@ impl EtsTables {
         busy.then(|| self.tables.get_mut(&id)).flatten()
     }
 
+    /// Remember the compiled match specification `spec` under the reference
+    /// `program` of a continuation of the table `table`, as ERTS keeps the
+    /// compiled program in a magic reference (`erl_db_hash.c:2103`,
+    /// `2229`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut tables = EtsTables::default();
+    /// let spec = MatchSpec::compile(&atoms, &Term::nil()).unwrap();
+    /// tables.remember_program(Reference(0), Reference(1), spec);
+    /// assert!(tables.program(Reference(1)).is_some());
+    /// ```
+    pub(super) fn remember_program(
+        &mut self,
+        table: Reference,
+        program: Reference,
+        spec: pattern::MatchSpec,
+    ) {
+        self.programs.insert(program, (table, spec));
+    }
+
+    /// Return the compiled match specification of the continuation program
+    /// `program`, or `None` when no continuation of a live table holds it.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(EtsTables::default().program(Reference(0)).is_none());
+    /// ```
+    pub(super) fn program(&self, program: Reference) -> Option<&pattern::MatchSpec> {
+        self.programs.get(&program).map(|(_, spec)| spec)
+    }
+
     /// Return the live table with the reference `id`, with no access
     /// check, as [`EtsTables::find`] finds it.
     ///
@@ -501,6 +568,7 @@ impl EtsTables {
             };
             if let Some(table) = self.tables.remove(&id) {
                 self.names.retain(|_, named| *named != id);
+                self.programs.retain(|_, (table, _)| *table != id);
                 self.freeing.insert(id, Freeing::new(table));
             }
             reds = self.free_table(id, reds)?;
@@ -530,6 +598,7 @@ impl EtsTables {
     pub(super) fn delete_table(&mut self, id: Reference, caller: ProcessId) {
         let mut table = self.tables.remove(&id).expect("a deleted table is live");
         self.names.retain(|_, named| *named != id);
+        self.programs.retain(|_, (table, _)| *table != id);
         if table.owner != caller {
             table.owner = caller;
             table.owned = self.save_owned();
@@ -679,6 +748,12 @@ impl Table {
             writes: 0,
             buckets: FIRST_SEGMENT_SLOTS,
             owned: 0,
+            name: String::new(),
+            write_concurrency: Term::static_atom("false"),
+            read_concurrency: false,
+            decentralized_counters: false,
+            compressed: false,
+            heir: None,
             busy: None,
         }
     }
@@ -704,6 +779,274 @@ impl Table {
     /// ```
     pub(super) fn table_type(&self) -> TableType {
         self.table_type
+    }
+
+    /// Return the atom that `ets:new/2` gave the table, as
+    /// `ets:info(Table, name)` gives it.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
+    /// table.set_name("t");
+    /// assert_eq!(table.name(), "t");
+    /// ```
+    pub(super) fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Set the atom that `ets:new/2` gave the table.
+    pub(super) fn set_name(&mut self, name: &str) {
+        self.name = name.to_owned();
+    }
+
+    /// Return the owner.
+    pub(super) fn owner(&self) -> ProcessId {
+        self.owner
+    }
+
+    /// Return the access mode.
+    pub(super) fn access(&self) -> Access {
+        self.access
+    }
+
+    /// Return the `write_concurrency` option.
+    pub(super) fn write_concurrency(&self) -> &Term {
+        &self.write_concurrency
+    }
+
+    /// Return the `read_concurrency` option.
+    pub(super) fn read_concurrency(&self) -> bool {
+        self.read_concurrency
+    }
+
+    /// Return the `decentralized_counters` option.
+    pub(super) fn decentralized_counters(&self) -> bool {
+        self.decentralized_counters
+    }
+
+    /// Return the `compressed` option.
+    pub(super) fn compressed(&self) -> bool {
+        self.compressed
+    }
+
+    /// Return the heir, as `ets:info(Table, heir)` gives it.
+    pub(super) fn heir(&self) -> Option<ProcessId> {
+        self.heir
+    }
+
+    /// Set the heir that `ets:new/2` accepted and that is the owner.
+    pub(super) fn set_heir(&mut self, heir: Option<ProcessId>) {
+        self.heir = heir;
+    }
+
+    /// Set the options that `ets:info/2` gives. `ets:new/2` accepts them
+    /// and keeps no other effect of them, as it does not compress objects
+    /// and has one scheduler.
+    pub(super) fn set_options(
+        &mut self,
+        write_concurrency: Term,
+        read_concurrency: bool,
+        decentralized_counters: bool,
+        compressed: bool,
+    ) {
+        self.write_concurrency = write_concurrency;
+        self.read_concurrency = read_concurrency;
+        self.decentralized_counters = decentralized_counters;
+        self.compressed = compressed;
+    }
+
+    /// Return the number of objects.
+    pub(super) fn len(&self) -> usize {
+        self.object_count()
+    }
+
+    /// Return the reductions of `ets:delete_all_objects/1`, as
+    /// `db_free_table_continue_hash` charges them (`erl_db_hash.c:3122-3149`):
+    /// 32 for each segment and 1 for each object.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(table.delete_all_reductions(), 32);
+    /// ```
+    pub(super) fn delete_all_reductions(&self) -> usize {
+        self.segment_slots().div_ceil(SEGMENT_SLOTS) * SEGMENT_REDUCTIONS as usize
+            + self.object_count()
+    }
+
+    /// Return the memory of the table in 64-bit words, as
+    /// `ets:info(Table, memory)` counts it (`erl_db.c:5470-5475`). ERTS
+    /// counts its own allocation, so only the unit is the same.
+    pub(super) fn memory_words(&self) -> usize {
+        self.allocated_bytes().div_ceil(std::mem::size_of::<u64>())
+    }
+
+    /// Return the number of elements of the object with the key `key`, or
+    /// `None` when the table holds no such object.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(table.object_arity(&atoms, &Term::static_atom("k")), Some(2));
+    /// ```
+    pub(super) fn object_arity(&self, atoms: &AtomTable, key: &Term) -> Option<usize> {
+        let slot = self.position(stored_hash(atoms, key), key)?;
+        Some(self.object_of(slot).len())
+    }
+
+    /// Set the 1-based elements `updates` of the object with the key `key`,
+    /// as `db_do_update_element` (`erl_db_hash.c` `db_do_update_element`)
+    /// does. Return `false` when the table holds no such object. The caller
+    /// checks each position.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(table.update_elements(&atoms, &Term::static_atom("k"), &[(2, Term::Integer(9))]));
+    /// ```
+    pub(super) fn update_elements(
+        &mut self,
+        atoms: &AtomTable,
+        key: &Term,
+        updates: &[(usize, Term)],
+    ) -> bool {
+        let Some(slot) = self.position(stored_hash(atoms, key), key) else {
+            return false;
+        };
+        let object = self.objects[slot]
+            .as_mut()
+            .expect("a live slot holds an object");
+        for (position, value) in updates {
+            object[*position - 1] = value.clone();
+        }
+        if !updates.is_empty() {
+            self.writes += 1;
+        }
+        true
+    }
+
+    /// Return the next key after `key` in the order of a hash table, as
+    /// `db_next_hash` (`erl_db_hash.c:1147-1200`) gives it: the key of the
+    /// next live object in the chain of the bucket, then the chain of each
+    /// later bucket. Return `None` for a key that the table does not hold,
+    /// and `Some(None)` after the last key.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
+    /// let atoms = AtomTable::new();
+    /// assert_eq!(table.next_key(&atoms, &Term::static_atom("k")), None);
+    /// ```
+    pub(super) fn next_key(&self, atoms: &AtomTable, key: &Term) -> Option<Option<Term>> {
+        let hash = stored_hash(atoms, key);
+        let newest = self.position(hash, key)?;
+        let mut bucket = self.bucket(hash);
+        let mut slot = self.next[newest];
+        loop {
+            if slot != EMPTY {
+                return Some(Some(self.key(self.object_of(slot)).clone()));
+            }
+            bucket += 1;
+            if bucket == self.buckets {
+                return Some(None);
+            }
+            slot = self.heads[bucket];
+        }
+    }
+
+    /// Remove all objects of the table, as `db_delete_all_objects_hash`
+    /// (`erl_db_hash.c:4017-4037`) does: the table gets the buckets of a new
+    /// table and keeps its name, reference, owner, and options.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
+    /// let atoms = AtomTable::new();
+    /// table.insert(&atoms, vec![Term::static_atom("k")]);
+    /// assert_eq!(table.clear(), 1);
+    /// assert_eq!(table.len(), 0);
+    /// ```
+    pub(super) fn clear(&mut self) -> usize {
+        let count = self.object_count();
+        self.objects.clear();
+        self.free.clear();
+        self.older.clear();
+        self.index = KeyIndex::default();
+        self.heads = vec![EMPTY; FIRST_SEGMENT_SLOTS];
+        self.next.clear();
+        self.buckets = FIRST_SEGMENT_SLOTS;
+        self.writes += 1;
+        count
+    }
+
+    /// Remove one object that is exactly equal to `object`, as the
+    /// `select_delete` callback removes one object (`erl_db_hash.c:2622-2653`).
+    /// Return whether the table held it. The caller shrinks the table after
+    /// the traversal.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::DuplicateBag);
+    /// let atoms = AtomTable::new();
+    /// let object = vec![Term::static_atom("k"), Term::Integer(1)];
+    /// table.insert(&atoms, object.clone());
+    /// assert!(table.delete_object(&atoms, &object));
+    /// assert!(!table.delete_object(&atoms, &object));
+    /// ```
+    pub(super) fn delete_object(&mut self, atoms: &AtomTable, object: &[Term]) -> bool {
+        let key = self.key(object).clone();
+        let hash = stored_hash(atoms, &key);
+        let Some(mut slot) = self.position(hash, &key) else {
+            return false;
+        };
+        let mut previous = EMPTY;
+        while slot != EMPTY {
+            if self.object_of(slot) == object {
+                let bucket = self.bucket(hash);
+                let next = self.older[slot];
+                if previous == EMPTY {
+                    let after = self.next[slot];
+                    if next == EMPTY {
+                        self.index.remove(hash, slot);
+                        self.link(bucket, self.key_before(bucket, slot), after);
+                    } else {
+                        // The key stays in the chain, and its new newest
+                        // object takes the place of the removed one
+                        // (`select_delete_on_match_res`, erl_db_hash.c:2643-2648).
+                        self.index.replace(hash, slot, next);
+                        self.next[next] = after;
+                        self.link(bucket, self.key_before(bucket, slot), next);
+                    }
+                } else {
+                    self.older[previous] = next;
+                }
+                self.objects[slot] = None;
+                self.older[slot] = EMPTY;
+                self.next[slot] = EMPTY;
+                self.free.push(slot);
+                self.writes += 1;
+                return true;
+            }
+            previous = slot;
+            slot = self.older[slot];
+        }
+        false
+    }
+
+    /// Join buckets after a `select_delete` traversal, as
+    /// `select_delete_on_loop_ended` calls `try_shrink` once
+    /// (`erl_db_hash.c:2677-2709`).
+    pub(super) fn shrink(&mut self) {
+        for _ in 0..RESIZE_STEPS {
+            if self.object_count() >= self.shrink_limit() {
+                break;
+            }
+            self.join();
+        }
     }
 
     /// Add the object with the elements `object` to a `set` or a

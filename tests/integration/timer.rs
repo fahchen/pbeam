@@ -240,3 +240,77 @@ fn runs_erlang_send_after_as_pinned_erts() {
         b"[true,true,b,a,true,named,none,[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}]]\n"
     );
 }
+
+#[test]
+fn runs_the_absolute_timer_bifs_and_read_timer_as_pinned_erts() {
+    // `start_timer/4` and `send_after/4` take the `abs` option with
+    // `parse_bif_timer_options` (`erl_hl_timer.c:2583-2642`, `2352-2398`),
+    // and an absolute time of the Erlang monotonic clock starts the timer
+    // (`erl_hl_timer.c:2494-2554`). `read_timer/1` gives the time left of a
+    // live timer and does not cancel it, and gives `false` for a cancelled,
+    // expired, or unknown reference (`erl_hl_timer.c:2661-2664`).
+    let erlang = pinned_beam("erlang");
+    let program = BeamProgram::load(&[&erlang, TIMER_PROBE]).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let badargs = |count| {
+        Term::list_from(vec![
+            Term::tuple(vec![atom("error"), atom("badarg")]);
+            count
+        ])
+    };
+    let run = |function| program.execute("timer_probe", function, &[]).unwrap();
+
+    assert_eq!(
+        run("start_timer_4").term,
+        Term::list_from(vec![
+            atom("true"),
+            atom("true"),
+            atom("true"),
+            atom("true"),
+            atom("none"),
+            badargs(11),
+        ])
+    );
+    assert_eq!(
+        run("send_after_4").term,
+        Term::list_from(vec![
+            atom("true"),
+            atom("true"),
+            atom("true"),
+            atom("true"),
+            atom("true"),
+            atom("none"),
+            badargs(6),
+        ])
+    );
+    assert_eq!(
+        run("read_timer").term,
+        Term::list_from(vec![
+            atom("true"),
+            atom("true"),
+            atom("true"),
+            atom("false"),
+            atom("false"),
+            atom("false"),
+            Term::tuple(vec![atom("error"), atom("badarg")]),
+            atom("none"),
+        ])
+    );
+
+    let reference = Command::new("erl")
+        .args([
+            "-noshell",
+            "-pa",
+            "fixtures/timer",
+            "-eval",
+            "io:format(\"~w~n\", [[timer_probe:F() || F <- [start_timer_4, send_after_4, read_timer]]]), halt().",
+        ])
+        .output()
+        .unwrap();
+    assert!(reference.status.success());
+    assert!(reference.stderr.is_empty());
+    assert_eq!(
+        reference.stdout,
+        b"[[true,true,true,true,none,[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}]],[true,true,true,true,true,none,[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}]],[true,true,true,false,false,false,{error,badarg},none]]\n"
+    );
+}

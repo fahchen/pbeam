@@ -5,7 +5,9 @@
          delete_order/0, deleter/2,
          insert_new/0, unsupported/1, insert_all/2, ping/1, busy/0, busy_insert/2,
          busy_helper/2,
-         own/2, write/1]).
+         own/2, write/1, select/0, match_object/0, iterate/0,
+         update_element/0, info_items/0, delete_all/0, select_reductions/0,
+         private_owner/1]).
 
 %% ets:new/2 return values and badarg cases (erl_db.c:2555-2840).
 new() ->
@@ -156,7 +158,7 @@ insert_all(T, Objects) -> ets:insert(T, Objects).
 %% reductions that it did not use (`erl_db.c:2223-2244`). The list is
 %% `{I, I}` for 1 to 24000, which spans at least three turns. Run with +S 1.
 busy() ->
-    [busy_alone(), busy_helped()].
+    [busy_alone(), busy_helped(), busy_iteration()].
 
 %% The insert of the list with no second process.
 busy_alone() ->
@@ -179,10 +181,33 @@ busy_helped() ->
     %% the table and the steps of the objects, which leave it busy.
     erlang:yield(),
     erlang:yield(),
+    %% The table is busy here: the select completes the insert first and
+    %% traps to its continuation (erl_db.c:769-798). An invalid
+    %% specification traps too, and the resumed call raises badarg.
+    Invalid = catch_error(fun() -> ets:select(Table, foo) end),
+    Selected = ets:select(Table, [{{'$1', '_'}, [], ['$1']}]),
     _Helper = spawn_opt(?MODULE, busy_helper, [Parent, Table], [{priority, high}]),
     A = receive M -> M end,
     B = receive M2 -> M2 end,
-    [A, B].
+    [Invalid, A, B, length(Selected)].
+
+%% A process that uses the table while it is busy completes the insert in
+%% its own turn, as `ets:next/2` does (`handle_lacking_permission`,
+%% erl_db.c:769-798).
+busy_iteration() ->
+    Table = ets:new(ets_probe, [public]),
+    Insert = spawn(?MODULE, busy_insert, [self(), Table]),
+    receive ready -> ok end,
+    Insert ! go,
+    erlang:yield(),
+    erlang:yield(),
+    Next = ets:next(Table, 1),
+    Info = length(ets:info(Table)),
+    Updated = ets:update_element(Table, 1, {2, 9}),
+    Deleted = ets:internal_select_delete(Table, [{{'_', '_'}, [false], [true]}]),
+    Cleared = ets:internal_delete_all(Table, undefined),
+    receive {inserted, _, _} -> ok end,
+    [Info, Updated, Next, Deleted, Cleared].
 
 %% Insert the list of busy_objects/0 into the table Table, and send the
 %% result and the reductions of the insert to Parent.
@@ -534,6 +559,17 @@ unsupported(Case) ->
         info_size -> ets:info(ets:new(ets_probe, []), size);
         info_binary -> ets:info(ets:new(ets_probe, []), binary);
         info_reference -> ets:info(make_ref(), type);
+        info_all_reference -> ets:info(make_ref());
+        info_stats -> ets:info(ets:new(ets_probe, []), stats);
+        info_data -> ets:info(ets:new(ets_probe, []), data);
+        select_unsupported ->
+            T = ets:new(ets_probe, []),
+            true = ets:insert(T, {a, 1}),
+            ets:select(T, [{{'$1', '$2'}, [], [{round, 1.0}]}]);
+        select_delete_unsupported ->
+            T = ets:new(ets_probe, []),
+            true = ets:insert(T, {a, 1}),
+            ets:internal_select_delete(T, [{{'$1', '$2'}, [], [{round, 1.0}]}]);
         ordered_set -> ets:new(ets_probe, [ordered_set]);
         heir -> ets:new(ets_probe, [{heir, element(1, start([]))}]);
         heir_data -> ets:new(ets_probe, [{heir, element(1, start([])), data}]);
@@ -600,3 +636,236 @@ catch_error(Fun) ->
 %% Keep an integer outside the 32-bit signed range out of a literal: PBeam
 %% does not load SMALL_BIG_EXT integers in literals.
 id(X) -> X.
+
+
+%% ets:select/1,2,3 on set, bag, and duplicate_bag tables
+%% (erl_db.c:3821-4048; erl_db_hash.c:1835-2478).
+select() ->
+    T = ets:new(ets_probe, []),
+    true = ets:insert(T, [{a, 1}, {b, 2}, {c, 3}]),
+    B = ets:new(ets_probe, [bag]),
+    true = ets:insert(B, [{a, 1}, {a, 2}, {b, 3}]),
+    D = ets:new(ets_probe, [duplicate_bag]),
+    true = ets:insert(D, [{a, 1}, {a, 1}, {b, 2}]),
+    [ets:select(T, [{{'$1', '$2'}, [], ['$1']}]),
+     ets:select(T, [{{'$1', '$2'}, [], ['$_']}]),
+     ets:select(T, [{{'$1', '$2'}, [], ['$$']}]),
+     ets:select(T, [{{'$1', '$2'}, [{'>', '$2', 1}], ['$1']}]),
+     ets:select(T, [{{'$1', '$2'}, [{element, 2, '$_'}], ['$1']}]),
+     ets:select(T, [{{'$1', '$2'}, [{'=:=', {element, 2, '$_'}, {const, 2}}], ['$1']}]),
+     ets:select(T, [{{'$1', '$2'}, [], [{{'$1', '$2'}}]}]),
+     catch_error(fun() -> ets:select(T, [{{'$1', '$2'}, [], [{'$2', '$1'}]}]) end),
+     ets:select(T, [{{'$1', '$2'}, [{is_integer, '$2'}], ['$2']},
+                    {{'$1', '$2'}, [{'=:=', '$1', {const, c}}], ['$2']}]),
+     ets:select(B, [{{'$1', '$2'}, [], ['$1']}]),
+     ets:select(D, [{'$1', [], ['$_']}]),
+     ets:select(T, [{{'$1', '$2'}, [], [{'+', '$2', 1}]}]),
+     ets:select(T, [{{'$1', '$2'}, [], [{element, 3, '$_'}]}]),
+     catch_error(fun() -> ets:select(T, foo) end),
+     catch_error(fun() -> ets:select(T, [{{'$1', '$2'}, [{bad_guard, 1}], ['$1']}]) end),
+     catch_error(fun() -> ets:select(T, [{{'$1', '$2'}, [], [{bad_body, 1}]}]) end),
+     catch_error(fun() -> ets:select(T, [{{'$1', '$2'}, [], [{'$1', '$2'}]}]) end),
+     catch_error(fun() -> ets:select(T, [{{'$1', '$2'}, [], ['$3']}]) end),
+     select_chunks(T),
+     select_continue_errors(T),
+     [catch_error(fun() -> ets:select(Table, Spec) end)
+      || {Table, Spec} <- [{ets_probe_missing, [{'$1', [], ['$1']}]},
+                           {1, [{'$1', [], ['$1']}]},
+                           {T, #{'$1' => a}}]],
+     [catch_error(fun() -> ets:select(Table, [{'$1', [], ['$1']}], Limit) end)
+      || {Table, Limit} <- [{T, 0}, {T, -1}, {T, a}, {ets_probe_missing, 1}]],
+     begin
+         {PrivateOwner, Private, PrivateContinuation} = private_table(),
+         Result = [catch_error(fun() -> ets:select(Private, [{'$1', [], ['$1']}]) end),
+                   catch_error(fun() -> ets:select(PrivateContinuation) end)],
+         PrivateOwner ! stop,
+         Result
+     end].
+
+%% A limited select and its continuation. The continuation is immutable:
+%% the same continuation gives the same rest again
+%% (erl_db_hash.c:2224-2254, 2379-2401).
+select_chunks(T) ->
+    {First, C} = ets:select(T, [{'$1', [], ['$1']}], 2),
+    {All, End} = ets:select(T, [{'$1', [], ['$1']}], 10),
+    {Table, _Next, Limit, Program, _Rest, _Size} = C,
+    [First, ets:select(C), ets:select(C), All, End, ets:select(End),
+     ets:select({Table, -1, Limit, Program, [first], 2})].
+
+%% Each continuation that is not a live 6-tuple raises badarg
+%% (erl_db_hash.c:2411-2478).
+select_continue_errors(T) ->
+    {_, C} = ets:select(T, [{'$1', [], ['$1']}], 2),
+    {Table, _Next, Limit, Program, Rest, Size} = C,
+    [catch_error(fun() -> ets:select(foo) end),
+     catch_error(fun() -> ets:select({}) end),
+     catch_error(fun() -> ets:select({T, 0, 1, make_ref(), [], x}) end),
+     catch_error(fun() -> ets:select({T, 0, -1, make_ref(), [], 0}) end),
+     catch_error(fun() -> ets:select({T, 0, 1, make_ref(), bad, 0}) end),
+     catch_error(fun() -> ets:select({T, 0, 1, make_ref(), [], -1}) end),
+     catch_error(fun() -> ets:select({T, 0, 1, make_ref(), [], 0}) end),
+     catch_error(fun() -> ets:select({ets_probe_missing, 0, 1, make_ref(), [], 0}) end),
+     catch_error(fun() -> ets:select({Table, 999, Limit, Program, Rest, Size}) end)].
+
+%% ets:match_object/2 (erl_db.c:4343-4362).
+match_object() ->
+    T = ets:new(ets_probe, []),
+    true = ets:insert(T, [{a, 1}, {b, 2}, {c, 3}]),
+    B = ets:new(ets_probe, [bag]),
+    true = ets:insert(B, [{a, 1}, {a, 2}, {b, 3}]),
+    [ets:match_object(T, '_'),
+     ets:match_object(T, {'$1', '$2'}),
+     ets:match_object(T, {a, '_'}),
+     ets:match_object(T, {'_', 2}),
+     ets:match_object(B, {'$1', '$2'}),
+     catch_error(fun() -> ets:match_object(ets_probe_missing, '_') end)].
+
+%% ets:next/2 and ets:prev/2, which give the hash chain order; prev is next
+%% for a hash table (erl_db_hash.c:854-856, 1147-1200).
+iterate() ->
+    T = ets:new(ets_probe, []),
+    true = ets:insert(T, [{a, 1}, {b, 2}, {c, 3}]),
+    B = ets:new(ets_probe, [bag]),
+    true = ets:insert(B, [{a, 1}, {a, 2}, {b, 3}]),
+    Keys = fun ets_next/2,
+    {PrivateOwner, Private, _} = private_table(),
+    Result = [Keys(T, a), Keys(T, b), Keys(T, c), Keys(B, a), Keys(B, b),
+              catch_error(fun() -> ets:next(T, missing) end),
+              catch_error(fun() -> ets:prev(T, missing) end),
+              ets:prev(T, a), ets:prev(T, b), ets:prev(T, c),
+              catch_error(fun() -> ets:next(Private, a) end),
+              catch_error(fun() -> ets:prev(Private, a) end)],
+    PrivateOwner ! stop,
+    Result.
+
+ets_next(Table, Key) ->
+    [ets:next(Table, Key), ets:prev(Table, Key)].
+
+%% Return the owner and the reference of a private table of another
+%% process, and a continuation of an `ets:select/3` of that process. Send
+%% `stop` to the owner when the caller is done.
+private_table() ->
+    Owner = spawn(?MODULE, private_owner, [self()]),
+    receive {private_table, T, C} -> {Owner, T, C} end.
+
+private_owner(Parent) ->
+    T = ets:new(ets_probe_private, [private]),
+    true = ets:insert(T, [{a, 1}]),
+    {_, C} = ets:select(T, [{'$1', [], ['$1']}], 1),
+    Parent ! {private_table, T, C},
+    receive stop -> ok end.
+
+%% ets:update_element/3,4 (erl_db.c:1371-1491).
+update_element() ->
+    T = ets:new(ets_probe, []),
+    true = ets:insert(T, [{a, 1, x}]),
+    B = ets:new(ets_probe, [bag]),
+    true = ets:insert(B, [{a, 1}]),
+    [ets:update_element(T, a, {2, 9}),
+     ets:lookup(T, a),
+     ets:update_element(T, a, [{2, 8}, {2, 7}, {3, z}]),
+     ets:lookup(T, a),
+     ets:update_element(T, missing, {2, 9}),
+     ets:update_element(T, missing, {2, 9}, {missing, 0, d}),
+     ets:lookup(T, missing),
+     ets:update_element(T, a, [], {ignored}),
+     catch_error(fun() -> ets:update_element(B, a, {2, 9}) end),
+     catch_error(fun() -> ets:update_element(T, a, {1, 9}) end),
+     catch_error(fun() -> ets:update_element(T, a, {4, 9}) end),
+     catch_error(fun() -> ets:update_element(T, a, {0, 9}) end),
+     catch_error(fun() -> ets:update_element(T, a, bad) end),
+     catch_error(fun() -> ets:update_element(T, a, [{2, 9}, bad]) end),
+     catch_error(fun() -> ets:update_element(T, a, [{2, 9}, {2}]) end),
+     catch_error(fun() -> ets:update_element(T, a, {2, 9}, bad) end),
+     catch_error(fun() -> ets:update_element(T, a, {2, 9}, {a}) end),
+     catch_error(fun() -> ets:update_element(T, new, {3, x}, {new, 0}) end),
+     ets:lookup(T, new),
+     catch_error(fun() -> ets:update_element(T, missing, bad) end),
+     begin
+         K = ets:new(ets_probe, [{keypos, 1 bsl 31}]),
+         catch_error(fun() -> ets:update_element(K, k, {2, x}, {k, 0}) end)
+     end,
+     catch_error(fun() -> ets:update_element(T, a, [], bad) end),
+     catch_error(fun() -> ets:update_element(ets_probe_missing, a, {2, 9}) end),
+     begin
+         {PrivateOwner, Private, _} = private_table(),
+         Result = [catch_error(fun() -> ets:update_element(Private, a, {2, 9}) end),
+                   catch_error(fun() -> ets:update_element(Private, a, {2, 9}, {a, 0}) end)],
+         PrivateOwner ! stop,
+         Result
+     end].
+
+%% ets:info/1,2 (erl_db.c:4399-4579, 5447-5625). The owner, the id, and
+%% the memory depend on the run, so the list omits them.
+info_items() ->
+    T = ets:new(ets_probe, [named_table, public, {keypos, 1},
+                            {read_concurrency, true}, {write_concurrency, true},
+                            {decentralized_counters, true}, compressed]),
+    true = ets:insert(T, [{a, 1}]),
+    U = ets:new(ets_probe, []),
+    [[element(1, Pair) || Pair <- ets:info(T)],
+     [{K, V} || {K, V} <- ets:info(T), not lists:member(K, [owner, id, memory])],
+     [ets:info(T, I) || I <- [type, size, heir, protection, write_concurrency,
+                              read_concurrency, name, keypos, node, named_table,
+                              compressed, decentralized_counters, fixed,
+                              safe_fixed, safe_fixed_monotonic_time]],
+     [ets:info(U, I) || I <- [name, named_table, type, size]],
+     catch_error(fun() -> ets:info(1) end),
+     ets:info(ets_probe_missing),
+     begin
+         {PrivateOwner, Private, _} = private_table(),
+         Result = ets:info(Private, protection),
+         PrivateOwner ! stop,
+         Result
+     end,
+     ets:info(ets_probe_missing, type),
+     ets:info(ets_probe_missing, size),
+     [catch_error(fun() -> ets:info(Table, Item) end)
+      || {Table, Item} <- [{T, bogus}, {T, 1}, {1, type}, {{T}, type}]]].
+
+%% ets:delete_all_objects/1, ets:match_delete/2, and ets:select_delete/2
+%% through ets:internal_delete_all/2 and ets:internal_select_delete/2
+%% (lib/stdlib/src/ets.erl:386-396, 1849-1861, 2761-2763;
+%% erl_db.c:3234-3299, 3433-3475).
+delete_all() ->
+    T = ets:new(ets_probe, []),
+    true = ets:insert(T, [{a, 1}, {b, 2}, {c, 2}]),
+    R1 = [ets:delete_all_objects(T), ets:info(T, size)],
+    true = ets:insert(T, [{a, 1}, {b, 2}, {c, 2}]),
+    R2 = [ets:internal_delete_all(T, undefined), ets:info(T, size)],
+    true = ets:insert(T, [{a, 1}, {b, 2}, {c, 2}]),
+    R3 = [ets:match_delete(T, {'_', 2}), ets:lookup(T, a)],
+    true = ets:insert(T, [{a, 1}, {b, 2}, {c, 2}]),
+    R4 = [ets:select_delete(T, [{{'$1', '$2'}, [{'>', '$2', 1}], [true]}]),
+          ets:lookup(T, a)],
+    D = ets:new(ets_probe, [duplicate_bag]),
+    true = ets:insert(D, [{a, 1}, {a, 2}, {a, 3}]),
+    R5 = [ets:select_delete(D, [{{a, '$1'}, [{'=:=', '$1', {const, 3}}], [true]}]),
+          ets:select_delete(D, [{{a, '$1'}, [{'=:=', '$1', {const, 2}}], [true]}]),
+          ets:lookup(D, a)],
+    true = ets:insert(T, [{a, 1}, {b, 2}, {c, 2}]),
+    R6 = ets:internal_delete_all(T, holder),
+    R7 = ets:internal_select_delete(T, [{foo, [], [true]}]),
+    R8 = [ets:delete_all_objects(T), ets:info(T, size)],
+    {PrivateOwner, Private, _} = private_table(),
+    R9 = [ets:info(Private, owner) =:= self(),
+          catch_error(fun() -> ets:insert(Private, {b, 2}) end),
+          catch_error(fun() -> ets:internal_select_delete(Private, [{{'_', '_'}, [], [true]}]) end),
+          catch_error(fun() -> ets:internal_delete_all(Private, undefined) end)],
+    PrivateOwner ! stop,
+    [R1, R2, R3, R4, R5, R6, R7, R8, R9,
+     catch_error(fun() -> ets:internal_select_delete(T, foo) end),
+     catch_error(fun() -> ets:internal_select_delete(ets_probe_missing, []) end),
+     catch_error(fun() -> ets:internal_delete_all(ets_probe_missing, undefined) end)].
+
+%% The reductions of the new BIFs. Run with +S 1.
+select_reductions() ->
+    T = ets:new(ets_probe, []),
+    true = ets:insert(T, [{a, 1}, {b, 2}, {c, 3}]),
+    Call = fun(F) -> Before = reductions(), F(), reductions() - Before end,
+    [Call(fun() -> ets:select(T, [{'$1', [], ['$1']}]) end),
+     Call(fun() -> ets:select(T, [{'$1', [], ['$1']}], 1) end),
+     Call(fun() -> ets:next(T, a) end),
+     Call(fun() -> ets:update_element(T, a, {2, 9}) end),
+     Call(fun() -> ets:internal_select_delete(T, [{'$1', [], [false]}]) end),
+     Call(fun() -> ets:internal_delete_all(T, undefined) end)].

@@ -381,6 +381,121 @@ fn raises_badarg_for_a_unicode_pattern_that_is_not_chardata() {
     );
 }
 
+#[test]
+fn imports_exported_patterns_as_pinned_erts() {
+    // `re:import/1` (re_import_1, erl_bif_re.c:703-796) gives the pattern
+    // tuple `{re_pattern, Count, Unicode, Crlf, Ref}` without `ok`. A valid
+    // export decodes with PCRE2 and takes the unicode element from the
+    // header byte, also when it is 7. A header with bytes after the 14
+    // bytes is accepted. The source is not read in these cases.
+    // An export with another encode version, a zero magic number, PCRE2
+    // version, or PCRE2 configuration re-compiles the source with the
+    // options, and the unicode element then comes from the options. A
+    // term that is not an export, a bad header, a checksum mismatch, a
+    // missing encoded binary, a source that is not a binary, a bad option,
+    // a compile error, and a truncated encoded binary give `badarg`.
+    let program = program();
+    let infos = [
+        info(1, 0, 0),
+        info(2, 0, 0),
+        info(1, 1, 0),
+        info(1, 0, 1),
+        info(1, 7, 0),
+        info(1, 0, 0),
+        info(1, 0, 0),
+        info(1, 1, 0),
+        info(1, 0, 0),
+        info(1, 0, 0),
+        info(1, 0, 0),
+        info(1, 0, 0),
+    ];
+    let mut expected: Vec<Term> = infos[..6].to_vec();
+    expected.extend(vec![error_term(&program, "badarg"); 15]);
+    expected.extend_from_slice(&infos[6..]);
+    assert_eq!(
+        program.execute("re_probe", "imported", &[]).unwrap().term,
+        Term::list_from(expected)
+    );
+    assert_eq!(
+        reference("imported"),
+        "[{1,0,0},{2,0,0},{1,1,0},{1,0,1},{1,7,0},{1,0,0},\
+         {error,badarg},{error,badarg},{error,badarg},{error,badarg},\
+         {error,badarg},{error,badarg},{error,badarg},{error,badarg},\
+         {error,badarg},{error,badarg},{error,badarg},{error,badarg},\
+         {error,badarg},{error,badarg},{error,badarg},\
+         {1,0,0},{1,1,0},{1,0,0},{1,0,0},{1,0,0},{1,0,0}]\n"
+    );
+}
+
+#[test]
+fn runs_an_imported_pattern_as_pinned_erts() {
+    // Each import of `imported/0` runs through `re:run/3`, so the decoded
+    // code and each fallback code are the compiled patterns of the export.
+    let program = program();
+    let ab = codes(b"ab");
+    let b = codes(b"b");
+    let mut expected = vec![matched(&program, vec![ab, b]); 12];
+    expected[1] = nomatch(&program);
+    assert_eq!(
+        program
+            .execute("re_probe", "imported_run", &[])
+            .unwrap()
+            .term,
+        Term::list_from(expected)
+    );
+    assert_eq!(
+        reference("imported_run"),
+        "[{match,[[97,98],[98]]},nomatch,{match,[[97,98],[98]]},\
+         {match,[[97,98],[98]]},{match,[[97,98],[98]]},\
+         {match,[[97,98],[98]]},{match,[[97,98],[98]]},\
+         {match,[[97,98],[98]]},{match,[[97,98],[98]]},\
+         {match,[[97,98],[98]]},{match,[[97,98],[98]]},\
+         {match,[[97,98],[98]]}]\n"
+    );
+}
+
+#[test]
+fn raises_badarg_for_a_term_that_is_not_an_export() {
+    // `re_import_1` raises `badarg` for a term that is not a 5-tuple with
+    // the atom `re_exported_pattern` first (erl_bif_re.c:722-728). The
+    // first frame holds the `error_info` cause `erl_stdlib_errors`, as the
+    // ERTS frame does. PBeam gives no location of its frames (row
+    // "Exception stack trace" in docs/erts-differences.md).
+    let program = program();
+    let error = program
+        .execute("re_probe", "imported_badarg", &[])
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "root process exited with {badarg,[{re,import,[foo],\
+         [{error_info,#{module=>erl_stdlib_errors}}]},\
+         {re_probe,imported_badarg,0,[]}]}"
+    );
+    assert_eq!(
+        reference_of("try re_probe:imported_badarg() catch error:R -> R end"),
+        "badarg\n"
+    );
+}
+
+#[test]
+fn raises_badarg_with_the_badopt_cause_for_a_fallback_option() {
+    // The fallback of `re:import/1` compiles the source with the options
+    // of the export. An execution option raises `badarg` with the
+    // `error_info` cause `badopt` (`erl_bif_re.c:908-916`), as
+    // `re:compile/2` does.
+    let program = program();
+    let error = program
+        .execute("re_probe", "imported_badopt", &[])
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("cause=>badopt"), "{error}");
+    assert!(error.contains("module=>erl_stdlib_errors"), "{error}");
+    assert_eq!(
+        reference_of("try re_probe:imported_badopt() catch error:R -> R end"),
+        "badarg\n"
+    );
+}
+
 /// Return `{match, Elements}`, as `build_exec_return`
 /// (`erl_bif_re.c:1047-1256`) makes a match.
 fn matched(program: &BeamProgram, elements: Vec<Term>) -> Term {

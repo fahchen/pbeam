@@ -41,6 +41,8 @@ main() ->
         {send_name, result(fun() -> boot_authority_service ! x end)},
         {timer_pid, result(fun() -> erlang:start_timer(0, Service, x) end)},
         {timer_name, result(fun() -> erlang:start_timer(0, boot_authority_service, x) end)},
+        {timer_pid_4, result(fun() -> erlang:start_timer(0, Service, x, []) end)},
+        {timer_name_4, result(fun() -> erlang:start_timer(0, boot_authority_service, x, []) end)},
         {link, result(fun() -> link(Service) end)},
         {exit, result(fun() -> exit(Service, kill) end)},
         {exit_alias, result(fun() -> exit(Alias, kill) end)},

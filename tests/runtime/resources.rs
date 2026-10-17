@@ -1,6 +1,6 @@
 use super::Resources;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Default, PartialEq)]
 struct MyStruct {
     value: i32,
 }
@@ -24,6 +24,16 @@ fn put_and_borrow_mut_keep_one_value_of_each_type() {
         resources.borrow_mut::<AnotherStruct>(),
         &AnotherStruct { value: "a string" }
     );
+}
+
+#[test]
+fn borrow_mut_or_default_puts_the_default_value() {
+    let mut resources = Resources::default();
+    resources.borrow_mut_or_default::<MyStruct>().value += 1;
+    assert_eq!(resources.borrow_mut::<MyStruct>(), &MyStruct { value: 1 });
+    resources.put(MyStruct { value: 100 });
+    resources.borrow_mut_or_default::<MyStruct>().value += 1;
+    assert_eq!(resources.borrow_mut::<MyStruct>(), &MyStruct { value: 101 });
 }
 
 #[test]
