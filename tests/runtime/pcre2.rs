@@ -76,11 +76,19 @@ fn reports_incompatible_and_invalid_serialized_bytes() {
     bad_code[at..at + 4].fill(0);
     assert!(matches!(deserialize(&bad_code), Deserialized::Invalid));
     // A `code_start` outside the block makes the matcher read outside it
-    // (`pcre2_match.c:8018`).
-    let mut bad_start = encoded.clone();
-    let at = header + tables + code_start_offset;
-    bad_start[at..at + word].copy_from_slice(&usize::MAX.to_ne_bytes());
-    assert!(matches!(deserialize(&bad_start), Deserialized::Invalid));
+    // (`pcre2_match.c:8018`). The block size itself is outside the block.
+    let blocksize_at = header + tables + blocksize_offset;
+    let blocksize = usize::from_ne_bytes(
+        encoded[blocksize_at..blocksize_at + word]
+            .try_into()
+            .expect("the word holds the block size"),
+    );
+    for start in [blocksize, usize::MAX] {
+        let mut bad_start = encoded.clone();
+        let at = header + tables + code_start_offset;
+        bad_start[at..at + word].copy_from_slice(&start.to_ne_bytes());
+        assert!(matches!(deserialize(&bad_start), Deserialized::Invalid));
+    }
 }
 
 #[test]

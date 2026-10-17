@@ -20,7 +20,7 @@ int pbeam_pcre2_serialized_code_is_valid(const uint8_t *bytes, size_t blocksize)
       && code.name_entry_size <= MAX_NAME_SIZE + IMM2_SIZE + 1
       && code.name_count <= MAX_NAME_COUNT
       && code.code_start >= sizeof code
-      && code.code_start <= blocksize;
+      && code.code_start < blocksize;
 }
 
 size_t pbeam_pcre2_serialized_code_start_offset(void)
