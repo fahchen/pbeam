@@ -384,7 +384,10 @@ fn read(term: &Term, budget: &mut u64, sum: &mut impl FnMut(&[u8])) -> Result<Op
         // at the end of a list level (`erl_bif_chksum.c:118-160`, `205-212`).
         if *budget == 0 {
             flush(&mut run, sum);
-            return Ok(Some(rest_term(current.clone(), tails)));
+            let rest = rest_term(current.clone(), tails);
+            // An empty rest ends the walk: ERTS returns the nil term, which
+            // `md5/1` does not trap on (`erl_bif_chksum.c:205-268`).
+            return Ok((!rest.is_nil()).then_some(rest));
         }
         match &current {
             Term::Nil => {}
@@ -398,10 +401,19 @@ fn read(term: &Term, budget: &mut u64, sum: &mut impl FnMut(&[u8])) -> Result<Op
                 }
                 let size = bit_size / 8;
                 let taken = (size as u64).min(*budget) as usize;
-                // The runs read the bytes without joining the parts of a
-                // binary that an append built.
-                for run in binary.byte_runs(0, taken) {
-                    sum(run);
+                // One update call reads the binary, as `md5_wrap` reads one
+                // bitstring, so the state does not depend on the parts of a
+                // binary that an append built (`erl_bif_chksum.c:74-92`).
+                let runs = binary.byte_runs(0, taken);
+                match runs.as_slice() {
+                    [run] => sum(run),
+                    runs => {
+                        let mut bytes = Vec::with_capacity(taken);
+                        for run in runs {
+                            bytes.extend_from_slice(run);
+                        }
+                        sum(&bytes);
+                    }
                 }
                 *budget -= taken as u64;
                 if taken < size {
