@@ -56,9 +56,9 @@ const MAX_REFERENCE: u32 = 1 << 18;
 const REF_NUMBER_1_MASK: u32 = 0xFFFC_0000;
 /// The scheduler number of the references of PBeam (`REF_THREAD`).
 const REF_THREAD: u32 = 1;
-/// The bit of a reference value that marks a pid reference
-/// (see `Reference::pid_reference`).
-const PID_REFERENCE_MARKER: u64 = 1 << 63;
+/// The bit of the second reference number that marks a pid reference
+/// (`ERTS_REF1_PID_MARKER_BIT__`, `erl_bif_unique.h:106-109`).
+const PID_REFERENCE_BIT: u32 = 1 << 30;
 /// The largest free-variable count of a fun (`MAX_ARG`, `erl_vm.h:54`).
 const MAX_FUN_ARG: usize = 255;
 /// The largest count of reference numbers (`ERTS_MAX_REF_NUMBERS`).
@@ -1646,6 +1646,13 @@ impl Decoder<'_> {
         if numbers[0] >= MAX_REFERENCE {
             return Err(DecodeError::Badarg);
         }
+        // ERTS marks a pid reference in the second reference number
+        // (`ERTS_REF1_PID_MARKER_BIT__`, `erl_bif_unique.h:106-109`,
+        // `140-156`). The alias reference holds the monitored pid, which
+        // PBeam does not keep.
+        if numbers[1] & PID_REFERENCE_BIT != 0 {
+            return Err(DecodeError::Unsupported("a pid reference"));
+        }
         // A PBeam reference belongs to the first scheduler, whose number is
         // in the low bits of the second reference number (`REF_THREAD`,
         // `erl_bif_unique.h:117-131`).
@@ -1655,13 +1662,14 @@ impl Decoder<'_> {
         let value = (u64::from(numbers[2]) << 32)
             | (u64::from(numbers[1]) & 0xFFFC_0000)
             | u64::from(numbers[0]);
-        let reference = match Reference::ordinary(value) {
-            Some(reference) => reference,
-            None => Reference::ordinary(value & !PID_REFERENCE_MARKER)
-                .expect("the marker bit is the only reason for the error")
-                .pid_reference(),
-        };
-        Ok(Term::Reference(reference))
+        // The high bit of the third reference number is not a marker in
+        // ERTS, and PBeam keeps its pid marker in bit 63 of the value, so
+        // PBeam cannot hold such an ordinary reference.
+        Reference::ordinary(value)
+            .map(Term::Reference)
+            .ok_or(DecodeError::Unsupported(
+                "a reference with the high bit of its third number",
+            ))
     }
 
     /// Decode an old `REFERENCE_EXT`, as `dec_term`

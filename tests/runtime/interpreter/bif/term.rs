@@ -520,14 +520,25 @@ fn decodes_each_identifier_tag_and_checks_the_node() {
         decode_with(&mut atoms, &other_scheduler, false),
         Err(DecodeError::Unsupported(_))
     ));
-    // A pid reference has the marker bit of its third number.
+    // ERTS marks a pid reference in the second reference number
+    // (`ERTS_REF1_PID_MARKER_BIT__`, `erl_bif_unique.h:106-109`), and the
+    // alias reference holds a pid that PBeam does not keep.
     let mut pid_ref = vec![90, 0, 3];
     pid_ref.extend(node());
-    pid_ref.extend(with_words(&[], &[0, 5, 1, 0x8000_0000]));
-    assert_eq!(
-        decode_with(&mut atoms, &pid_ref, false).unwrap(),
-        Term::Reference(Reference::ordinary(5).unwrap().pid_reference())
-    );
+    pid_ref.extend(with_words(&[], &[0, 5, 0x4000_0001, 0]));
+    assert!(matches!(
+        decode_with(&mut atoms, &pid_ref, false),
+        Err(DecodeError::Unsupported(_))
+    ));
+    // The high bit of the third number is not a marker in ERTS, and PBeam
+    // cannot hold an ordinary reference with that bit.
+    let mut high_ref = vec![90, 0, 3];
+    high_ref.extend(node());
+    high_ref.extend(with_words(&[], &[0, 5, 1, 0x8000_0000]));
+    assert!(matches!(
+        decode_with(&mut atoms, &high_ref, false),
+        Err(DecodeError::Unsupported(_))
+    ));
     // A count above five raises badarg (`ERTS_MAX_REF_NUMBERS`,
     // `external.c:4800`).
     let mut six_ref = vec![90, 0, 6];
@@ -895,20 +906,19 @@ fn encodes_a_hashmap_in_the_erts_order() {
 }
 
 #[test]
-fn decodes_a_pid_reference() {
-    // A pid reference has the marker bit of its third reference number, and
-    // it decodes as the same reference (`dec_term`, `external.c:4786-4855`).
+fn rejects_a_pid_reference() {
     // ERTS writes the monitored pid in the alias reference, which PBeam
-    // does not hold, so an encode gives a runtime error.
+    // does not hold, so a decode and an encode give a runtime error
+    // (`dec_term`, `external.c:4786-4855`).
     let reference = Reference::ordinary(5).unwrap().pid_reference();
     let mut input = vec![VERSION_MAGIC, 90, 0, 3];
     input.extend(node());
-    input.extend(with_words(&[], &[0, 5, 1, 0x8000_0000]));
+    input.extend(with_words(&[], &[0, 5, 0x4000_0001, 0]));
     let mut atoms = AtomTable::new();
-    assert_eq!(
-        decode_full(&mut atoms, &input, false).unwrap(),
-        Term::Reference(reference)
-    );
+    assert!(matches!(
+        decode_full(&mut atoms, &input, false),
+        Err(DecodeError::Unsupported(_))
+    ));
     let atoms = AtomTable::new();
     assert!(encode(&Term::Reference(reference), &atoms, &Options::default()).is_err());
 }
