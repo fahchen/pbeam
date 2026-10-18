@@ -21,7 +21,7 @@ jobs:
     timeout-minutes: 15
     env:
       MISE_AUTO_INSTALL: "0"
-      # Each run builds from an empty target/, so the incremental state has no later use. With incremental compilation, the tests of the `opt-level = 1` test profile also ran slower in the measurement of #354. The value is explicit, because the profile default enables it.
+      # The cached target/ holds no incremental state, and with incremental compilation the tests of the `opt-level = 1` test profile ran slower in the measurement of #354. The value is explicit, because the profile default enables it.
       CARGO_INCREMENTAL: "0"
     steps:
       - name: Check out source
@@ -58,7 +58,14 @@ jobs:
       - name: Install Rust check components
         run: mise run setup
 
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
       - name: Run repository checks
         env:
           TASK: ${{ steps.select.outputs.task }}
+          # The tests spawn guest processes and wait on pipes, so four nextest threads run the suite faster than one thread for each CPU of the runner.
+          NEXTEST_TEST_THREADS: "4"
         run: mise run "$TASK"
