@@ -1,6 +1,6 @@
 # Plug Hello
 
-This example is a Mix project with the dependencies `plug` and `bandit`. The versions are pinned in `mix.lock`. The plug `PlugHello` answers `GET /` with the status 200, the content type `text/plain`, and the body `Hello world!`. It answers each other request with the status 404. The application `PlugHello.Application` starts Bandit with `PlugHello` on the port of the environment variable `PORT`, default 4000. The test run uses the port 0, so that it does not need the port 4000.
+This example is a Mix project with the dependencies `plug` and `bandit`. The versions are pinned in `mix.lock`. The plug `PlugHello` answers `GET /` with the status 200, the content type `text/plain`, and the body `Hello world from PBeam!`, on the pinned ERTS and on the `pbeam` binary. It answers each other request with the status 404. The application `PlugHello.Application` starts Bandit with `PlugHello` on the port of the environment variable `PORT`, default 4000. The test run uses the port 0, so that it does not need the port 4000.
 
 ## Third-party code
 
@@ -24,7 +24,7 @@ curl -s --retry 20 --retry-connrefused --retry-delay 1 http://127.0.0.1:4000/
 target/examples/plug_hello/bin/plug_hello stop
 ```
 
-The `curl` command prints `Hello world!`. Use `PORT=<port>` before `daemon` to use another port.
+The `curl` command prints `Hello world from PBeam!`. Use `PORT=<port>` before `daemon` to use another port.
 
 ## Run with the example runner
 
@@ -36,7 +36,7 @@ curl -s --retry 60 --retry-connrefused --retry-delay 1 http://127.0.0.1:4000/
 kill %1
 ```
 
-The `curl` command prints `Hello world!`. Use `PORT=<port>` before `mise run` to use another port.
+The `curl` command prints `Hello world from PBeam!`. Use `PORT=<port>` before `mise run` to use another port.
 
 The task builds the release with `mix deps.get --check-locked` and `MIX_ENV=prod mix release --overwrite`, and writes the output of `mix` to stderr. Hex and rebar3 must be installed, as `scripts/test.sh` installs them. The task then compiles `plug_hello_run.erl` and `examples/hello_world/pbeam_boot.erl` into `target/examples/plug_hello/pbeam/`. The code path is that directory, each `lib/*/ebin` directory of the release, and `releases/0.1.0/consolidated`. The task sets `RELEASE_ROOT` and `RELEASE_SYS_CONFIG` as `bin/plug_hello` sets them. The entry `plug_hello_run:main/0` does the steps of the boot script that set the application environment and start the applications:
 
@@ -46,16 +46,22 @@ The task builds the release with `mix deps.get --check-locked` and `MIX_ENV=prod
 
 The run is in interactive mode. The release runs in embedded mode. The "Boot" row of [ERTS Differences](../../docs/erts-differences.md) gives the differences.
 
-This command runs the same entry on the `pbeam` binary:
+This command runs the same entry on the `pbeam` binary, sends a request, and stops the run:
 
 ```sh
-mise run example plug_hello
+mise run example plug_hello &
+curl -s --retry 60 --retry-connrefused --retry-delay 1 http://127.0.0.1:4000/
+kill %1
 ```
 
-The run does not serve the page yet. It stops at the first gap of epic #651 and prints this error, with exit status 1:
+The `curl` command prints `Hello world from PBeam!`. The run does not end by itself, so `kill` stops it.
 
-```text
-pbeam: unsupported BEAM opcode 133
+The release runner serves the same page:
+
+```sh
+mise run example-release plug_hello &
+curl -s --retry 300 --retry-connrefused --retry-delay 1 -D - http://127.0.0.1:4000/
+kill %1
 ```
 
-Step 1 calls `erl_parse:parse_term/1`, which calls `eval_bits:expr_grp/3` for each binary of `sys.config`. `eval_bits:expr_grp/3` starts with `bs_init_writable` (opcode 133), which PBeam does not run yet (#681). Issue #652 lists the next stops in order.
+The `curl` command prints the status line `HTTP/1.1 200 OK`, the headers of the response, and the body `Hello world from PBeam!`. The `scripts/example.sh` runner starts the release code on the pinned ERTS and on the `pbeam` binary. The feature test `serves_hello_world_from_the_plug_example_as_pinned_erts` of `tests/feature/serve.rs` compares the status line, the content type, and the body of both runs.
