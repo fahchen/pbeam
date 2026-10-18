@@ -19,7 +19,10 @@ use crate::{
         import_kind,
         process::{ProcessState, Start, tests::frame},
     },
-    term::{Atom, AtomTable, Lambda, ProcessId, Reference, debug_term, test_atom, test_atom_table},
+    term::{
+        Atom, AtomTable, Binary, Lambda, ProcessId, Reference, debug_term, test_atom,
+        test_atom_table,
+    },
 };
 
 /// Return the initial capabilities of the default policy.
@@ -5560,6 +5563,26 @@ fn traps_the_initial_clear_with_the_table_reference() {
         BifResult::TrapBif { function: "internal_delete_all", arguments, .. }
             if arguments == vec![Term::Reference(Reference(0)), Term::Integer(300)]
     ));
+}
+
+#[test]
+fn rejects_a_packet_bitstring_that_is_not_a_byte() {
+    // A subject that is not a whole number of bytes raises `badarg`
+    // (`erts_get_aligned_binary_bytes`, `erl_bif_port.c:1550-1556`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let subject = Term::Binary(Binary::from(&[0x10_u8]).bits(0, 4));
+    let result = program
+        .bif(
+            &mut scheduler,
+            "erlang",
+            "decode_packet",
+            vec![Term::static_atom("http_bin"), subject, Term::nil()],
+        )
+        .unwrap();
+    assert!(matches!(result, BifResult::Raise { .. }));
 }
 
 #[test]

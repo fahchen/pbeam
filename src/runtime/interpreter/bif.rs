@@ -31,6 +31,7 @@ mod lists;
 mod maps;
 mod math;
 mod os;
+mod packet;
 mod pbeam_cap;
 mod persistent_term;
 mod re;

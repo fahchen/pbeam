@@ -130,7 +130,7 @@ bifs! {
     erlang:crc32/2 => unsupported,
     erlang:crc32_combine/3 => unsupported,
     erlang:date/0 as ErlangDate0 => |_, []| Ok(erlang::date()),
-    erlang:decode_packet/3 => unsupported,
+    erlang:decode_packet/3 as ErlangDecodePacket3 => |cx, [packet_type, subject, options]| packet::decode_packet(cx, packet_type, subject, options),
     erlang:delete_element/2 as ErlangDeleteElement2 => |_, [index, tuple]| Ok(erlang::delete_element(index, tuple)),
     erlang:delete_module/1 as ErlangDeleteModule1 => |cx, [module]| erlang::delete_module(cx.scheduler, module),
     erlang:demonitor/1 as ErlangDemonitor1 => |cx, [reference]| Ok(erlang::demonitor(cx, reference, &Term::nil())),
