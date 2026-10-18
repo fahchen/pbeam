@@ -12,6 +12,14 @@ mix pbeam.build
 
 The task builds the `pbeam` runtime and the `pbeam_bundle` tool with Cargo, writes the bundle with `mix pbeam.bundle`, and appends the bundle to the runtime. The executable runs in a directory that holds no other file, and the run needs no installed OTP. `--output <path>` names another output path, and `--runtime <path>` and `--tool <path>` use built binaries instead of the Cargo build.
 
+From the repository root, this task writes the same executable for each release example:
+
+```sh
+mise run example-executable plug_hello
+```
+
+It builds the release, the runtime, and the bundle tool, and writes `target/examples/plug_hello.bundle`. `--no-build` uses the release that is already built, and `--output <path>` names the output path. A name of an example that is not a Mix release stops with a clear message.
+
 ## Third-party code
 
 The build fetches the dependencies of `mix.lock` from Hex and compiles them. The Elixir compiler runs the macros of the dependencies when it compiles them, and a run then runs their code. Read the sources of the pinned versions before the first build.
