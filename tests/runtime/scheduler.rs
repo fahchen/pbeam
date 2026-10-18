@@ -2014,6 +2014,15 @@ fn drops_the_link_exit_signal_of_a_process_that_the_port_does_not_link() {
 }
 
 #[test]
+fn stops_a_break_key_with_no_data_at_a_second_break() {
+    // `sys_get_key` retries a read with no data, and a second break stops
+    // the run while the read waits (`sys.c:1051-1071`, `611-624`).
+    crate::runtime::host::signal::mark_second_break();
+    assert_eq!(Scheduler::break_key(|| Err(libc::EAGAIN)), 0);
+    assert!(!crate::runtime::host::signal::take_second_break());
+}
+
+#[test]
 fn reads_a_break_key_after_a_failed_menu_wait() {
     // `sys_get_key` gives 0 when its `select` fails, so the menu reads fd 0,
     // where the read fails and the run stops (`sys.c:1051-1071`).

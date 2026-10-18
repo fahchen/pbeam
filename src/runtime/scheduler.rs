@@ -401,6 +401,12 @@ pub(super) struct Scheduler {
     /// The signals that arrived while the break menu waited, which the
     /// scheduler processes after the menu.
     deferred_signals: Vec<libc::c_int>,
+    /// The write end of the socket pair that reports the end of a menu
+    /// write from its thread. ERTS allocates no descriptor at a break, so
+    /// the run makes the pair.
+    menu_writer: std::sync::Arc<std::os::unix::net::UnixStream>,
+    /// The read end of [`Self::menu_writer`].
+    menu_written: std::os::unix::net::UnixStream,
     /// The mode of fd 0 at the start of the run, which the break menu sets
     /// while it reads its keys (`erl_sys_initial_tty_mode`, `sys.c:428-432`,
     /// `899-923`).
@@ -501,6 +507,7 @@ impl Scheduler {
         resources.put(Files::default());
         resources.put(Buffers::default());
         resources.put(Ports::default());
+        let menu_pair = std::os::unix::net::UnixStream::pair().expect("a menu socket pair opens");
         Scheduler {
             processes: ProcessTable::default(),
             freed: HashMap::new(),
@@ -517,6 +524,8 @@ impl Scheduler {
             atomics: AtomicArrays::default(),
             binary_patterns: BinaryPatterns::default(),
             deferred_signals: Vec::new(),
+            menu_writer: std::sync::Arc::new(menu_pair.0),
+            menu_written: menu_pair.1,
             initial_tty_mode: InitialMode::read(),
             resources,
             atoms,
@@ -1327,7 +1336,14 @@ impl Scheduler {
             match read() {
                 Ok(bytes) if !bytes.is_empty() => return bytes[0],
                 Ok(_) => return 0,
-                Err(libc::EAGAIN) => continue,
+                Err(libc::EAGAIN) => {
+                    // A read with no data is retried (`sys.c:1051-1071`).
+                    // A second break stops the run while the read waits, as
+                    // the dispatcher of ERTS does (`sys.c:611-624`).
+                    if signal::take_second_break() {
+                        return 0;
+                    }
+                }
                 Err(_) => return 0,
             }
         }
@@ -1384,7 +1400,13 @@ impl Scheduler {
             ""
         };
         let notify = signal::notify_fd().expect("a handler install makes the pipe");
-        Self::write_break_menu(format!("\r\n{clear}{HELP}").into_bytes(), notify, deferred)?;
+        Self::write_break_menu(
+            format!("\r\n{clear}{HELP}").into_bytes(),
+            notify,
+            &self.menu_writer,
+            &self.menu_written,
+            deferred,
+        )?;
         let fds = [libc::STDIN_FILENO, notify];
         loop {
             // `sys_get_key` waits until the descriptor is readable, reads up
@@ -1437,7 +1459,13 @@ impl Scheduler {
                     message.push(option);
                     message.extend_from_slice(b"'. Please enter one of the following:\r\n");
                     message.extend_from_slice(HELP.as_bytes());
-                    Self::write_break_menu(message, notify, deferred)?;
+                    Self::write_break_menu(
+                        message,
+                        notify,
+                        &self.menu_writer,
+                        &self.menu_written,
+                        deferred,
+                    )?;
                 }
             }
         }
@@ -1457,22 +1485,24 @@ impl Scheduler {
     fn write_break_menu(
         bytes: Vec<u8>,
         notify: libc::c_int,
+        writer: &std::sync::Arc<std::os::unix::net::UnixStream>,
+        written: &std::os::unix::net::UnixStream,
         deferred: &mut Vec<libc::c_int>,
     ) -> Result<(), BeamError> {
         use std::io::Write;
 
-        let (mut written, written_reader) =
-            std::os::unix::net::UnixStream::pair().expect("a socket pair opens");
+        let writer = std::sync::Arc::clone(writer);
         std::thread::spawn(move || {
             // A failed write changes nothing, as `erts_printf` ignores its
             // result (`break.c:571-687`).
             let mut buffers = [std::io::IoSlice::new(&bytes)];
             let _ = super::host::output::write_all(libc::STDOUT_FILENO, &mut buffers);
-            let _ = written.write_all(&[0]);
+            let mut writer = &*writer;
+            let _ = writer.write_all(&[0]);
         });
         let done = {
             use std::os::fd::AsRawFd;
-            written_reader.as_raw_fd()
+            written.as_raw_fd()
         };
         let fds = [notify, done];
         loop {
@@ -1488,9 +1518,15 @@ impl Scheduler {
                     deferred.extend(signals);
                 }
                 // The write ended, or the wait cannot watch it: the menu
-                // reads its keys in either case.
+                // reads its keys in either case. Take the byte of the end
+                // of the write, so that the next menu waits for its own
+                // write.
                 super::host::input::Readiness::Ready(_)
                 | super::host::input::Readiness::Invalid => {
+                    use std::io::Read;
+                    let mut buffer = [0; 8];
+                    let mut written = written;
+                    let _ = written.read(&mut buffer);
                     return Ok(());
                 }
                 // An interrupted wait: the handler wrote the notify pipe, so
