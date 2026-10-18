@@ -262,60 +262,6 @@ fn aborts_the_break_menu_at_a_nul_key_as_pinned_erts() {
 }
 
 #[test]
-fn keeps_the_break_menu_open_for_another_signal_as_pinned_erts() {
-    // A handled signal stops the wait of `sys_get_key` with `EINTR`, and
-    // ERTS keeps the menu open for a signal other than a second `SIGINT`
-    // (`sys.c:611-624`, `break.c:602-604`). The key `a` then aborts the run.
-    let erts = break_after_signal(&mut erts("wait"));
-    let pbeam = break_after_signal(&mut pbeam("wait"));
-    assert_eq!(erts, pbeam, "ERTS and PBeam");
-    let (status, output) = pbeam;
-    assert_eq!(status, Some(0));
-    assert!(
-        output
-            .as_bytes()
-            .windows(7)
-            .any(|window| window == b"BREAK: "),
-        "{output:?}"
-    );
-}
-
-/// Run `command`, send `SIGINT`, send `SIGTERM` while the menu waits, check
-/// that the run is alive, and then send the key `a`. Return the exit status
-/// and the output. A run that ended on `SIGTERM` fails the check.
-fn break_after_signal(command: &mut Command) -> (Option<i32>, String) {
-    let mut child = command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut stdin = child.stdin.take().expect("the child has a stdin");
-    let stdout = Arc::new(Mutex::new(Vec::new()));
-    let stdout_reader = collect(child.stdout.take().unwrap(), Arc::clone(&stdout));
-    let stderr = Arc::new(Mutex::new(Vec::new()));
-    let stderr_reader = collect(child.stderr.take().unwrap(), Arc::clone(&stderr));
-    wait_for(&mut child, &stdout, b"ready\n");
-    send(&child, libc::SIGINT);
-    wait_for(&mut child, &stdout, b"BREAK: ");
-    send(&child, libc::SIGTERM);
-    thread::sleep(Duration::from_millis(200));
-    assert!(
-        child.try_wait().unwrap().is_none(),
-        "the run ended on SIGTERM in the break menu"
-    );
-    stdin
-        .write_all(b"a")
-        .expect("the input pipe takes the bytes");
-    drop(stdin);
-    let status = wait_for_exit(&mut child, &stdout);
-    stdout_reader.join().unwrap();
-    stderr_reader.join().unwrap();
-    let output = String::from_utf8_lossy(&stdout.lock().unwrap()).into_owned();
-    (status, output)
-}
-
-#[test]
 fn gives_a_runtime_error_for_a_break_command_that_pbeam_does_not_run() {
     // The crash dump of `A` (break.c:615-616) and the information commands
     // (break.c:619-646) are not implemented, so PBeam names the command in a

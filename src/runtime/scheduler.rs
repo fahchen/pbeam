@@ -1327,20 +1327,16 @@ impl Scheduler {
             // than 64 bytes and keep them from the next reader of the
             // descriptor. A wait that a signal stops, the end of the input,
             // and the NUL byte abort the run (`break.c:602-604`).
-            let key = loop {
-                match super::host::input::wait_readable(&[libc::STDIN_FILENO], None) {
-                    super::host::input::Readiness::Ready(_) => {
-                        break Self::break_key(|| super::host::input::read(libc::STDIN_FILENO, 64));
-                    }
-                    // A handled signal stops the wait with `EINTR`. ERTS keeps
-                    // the menu open for each signal other than a second
-                    // SIGINT, and a second SIGINT stops the run
-                    // (`sys.c:611-624`, `break.c:602-604`).
-                    super::host::input::Readiness::Invalid if signal::take_break_requested() => {
-                        return Err(BeamError::Halt(0));
-                    }
-                    super::host::input::Readiness::Invalid
-                    | super::host::input::Readiness::Pending => continue,
+            let key = match super::host::input::wait_readable(&[libc::STDIN_FILENO], None) {
+                super::host::input::Readiness::Ready(_) => {
+                    Self::break_key(|| super::host::input::read(libc::STDIN_FILENO, 64))
+                }
+                // A handled signal stops the wait with `EINTR`, which
+                // `wait_readable` reports as `Pending`; `sys_get_key` then
+                // returns 0 and the run stops (`sys.c:1051-1071`,
+                // `break.c:602-604`).
+                super::host::input::Readiness::Pending | super::host::input::Readiness::Invalid => {
+                    0
                 }
             };
             if key == 0 {
