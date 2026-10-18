@@ -93,18 +93,27 @@ run_await(Port, Out, Name, Action, Expect, Bound, Steps, Screen1, Done) ->
 %% bytes and wait, send a key, or do nothing.
 act(_Port, _Out, none, Screen) ->
     {ok, Screen};
-act(_Port, Out, resize, Screen) ->
+act(Port, Out, resize, Screen) ->
     ok = file:write_file(filename:join(Out, "resize"), <<"1">>),
-    case await_resize(Out, erlang:monotonic_time(millisecond) + ?STEP_TIMEOUT) of
-        ok -> {ok, Screen#{rows := 30, cols := 100}};
-        failed -> {failed, Screen}
-    end;
+    await_resize(Port, Out, erlang:monotonic_time(millisecond) + ?STEP_TIMEOUT, Screen);
 act(Port, _Out, {send, Bytes, Wait}, Screen) ->
-    true = port_command(Port, Bytes),
-    wait(Port, erlang:monotonic_time(millisecond) + Wait, Screen);
+    case send(Port, Bytes) of
+        ok -> wait(Port, erlang:monotonic_time(millisecond) + Wait, Screen);
+        closed -> {failed, Screen}
+    end;
 act(Port, _Out, Key, Screen) ->
-    true = port_command(Port, Key),
-    {ok, Screen}.
+    case send(Port, Key) of
+        ok -> {ok, Screen};
+        closed -> {failed, Screen}
+    end.
+
+%% Send bytes to the program, or report a port that the program closed.
+send(Port, Bytes) ->
+    try port_command(Port, Bytes) of
+        true -> ok
+    catch
+        error:badarg -> closed
+    end.
 
 %% Read the output of the port until the deadline, so that the program can
 %% write and exit while the step waits. Return the exit status when the
@@ -124,18 +133,32 @@ wait(Port, Deadline, Screen) ->
 
 %% Wait until the shell of the pseudo-terminal writes the size of the
 %% resized terminal and a marker, and accept only 30 rows and 100 columns.
-await_resize(Out, Deadline) ->
+%% Read the output of the port while it waits, so a program that ends
+%% during the wait gives its exit status.
+await_resize(Port, Out, Deadline, Screen) ->
     Marker = filename:join(Out, "stty-resize-ok"),
     case filelib:is_regular(Marker) of
         true ->
             case file:read_file(filename:join(Out, "stty-resize-size.txt")) of
-                {ok, <<"30 100\n">>} -> ok;
-                _ -> failed
+                {ok, <<"30 100\n">>} -> {ok, Screen#{rows := 30, cols := 100}};
+                _ -> {failed, Screen}
             end;
         false ->
-            case erlang:monotonic_time(millisecond) >= Deadline of
-                true -> failed;
-                false -> timer:sleep(20), await_resize(Out, Deadline)
+            Timeout = Deadline - erlang:monotonic_time(millisecond),
+            case Timeout =< 0 of
+                true ->
+                    {failed, Screen};
+                false ->
+                    receive
+                        {Port, {data, Bytes}} ->
+                            await_resize(Port, Out, Deadline, feed(Bytes, Screen));
+                        {Port, {exit_status, Status}} ->
+                            {exit, Status, Screen}
+                    after min(20, Timeout) ->
+                        %% Look again at the files of the shell, which writes
+                        %% no output when the resize changes no view.
+                        await_resize(Port, Out, Deadline, Screen)
+                    end
             end
     end.
 
