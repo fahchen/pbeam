@@ -8,6 +8,7 @@ mod files;
 mod host;
 mod interpreter;
 mod mailbox;
+mod native_registry;
 mod pcre2;
 mod persistent_term;
 mod port;
@@ -24,7 +25,13 @@ mod unicode;
 pub use capability::{AllowAll, Capability, CapabilityKind, Constraint, Operation, Policy};
 pub use host::signal::install_start_dispositions;
 pub use interpreter::BeamProgram;
+pub use interpreter::ExceptionClass;
+pub use interpreter::bif::BifResult;
 pub(crate) use interpreter::bif::{BifId, import_kind, resolve as resolve_bif};
+pub use native_registry::{
+    NativeFn, RegistrationError, lookup_native, register_native, unregister_native,
+};
+pub use scheduler::Scheduler;
 
 use crate::term::Term;
 

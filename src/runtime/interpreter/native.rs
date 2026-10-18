@@ -214,6 +214,12 @@ pub(super) fn call(
     arguments: &[Term],
 ) -> Option<Result<BifResult, BeamError>> {
     let arity = u32::try_from(arguments.len()).ok()?;
+    // A manually registered native function takes precedence over the
+    // static binding table, so a registered MFA runs as a NIF at function
+    // entry, as ERTS installs NIF dispatch over the first instruction.
+    if let Some(native) = crate::runtime::lookup_native(module, name, arity) {
+        return Some((native)(scheduler, arguments));
+    }
     let Some(binding) = binding(module, name, arity) else {
         return unbound_error(module, name, arity).map(Err);
     };

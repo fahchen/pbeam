@@ -347,7 +347,8 @@ enum ExitPhase {
 /// wait for a turn. A process can be in the run queue for Erlang work or
 /// only to handle its signals.
 #[derive(Debug)]
-pub(super) struct Scheduler {
+#[allow(private_interfaces)]
+pub struct Scheduler {
     /// All live processes, including the current process, and the slot of
     /// the current process, like `current_process` in the ERTS scheduler
     /// data.

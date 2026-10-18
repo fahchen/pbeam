@@ -148,3 +148,12 @@ fn reports_the_bytes_of_the_element_array() {
     );
     assert_eq!(tuple.allocated_bytes(), 3 * std::mem::size_of::<Term>());
 }
+
+#[test]
+fn returns_the_elements_of_a_tuple_and_none_for_a_non_tuple() {
+    // `tuple_elements` gives the elements of a tuple, so a caller reads a
+    // result without a copy. A non-tuple returns `None`.
+    let term = tuple(&[1, 2, 3]);
+    assert_eq!(term.tuple_elements(), Some(elements(&term)));
+    assert_eq!(Term::Integer(1).tuple_elements(), None);
+}

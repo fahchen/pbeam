@@ -377,6 +377,21 @@ impl Term {
         Term::Tuple(elements.into())
     }
 
+    /// Return the elements of a tuple, or `None` when the term is not a
+    /// tuple. The slice borrows the tuple, so the caller copies nothing.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Term::tuple(vec![Term::Integer(1)]).tuple_elements(), Some([Term::Integer(1)].as_slice()));
+    /// ```
+    pub fn tuple_elements(&self) -> Option<&[Term]> {
+        match self {
+            Term::Tuple(tuple) => Some(tuple.arc().as_slice()),
+            _ => None,
+        }
+    }
+
     /// Return the value of an integer in the ERTS small-integer range,
     /// -(2^59) to 2^59 - 1, as the ERTS checks `is_small` and `signed_val`
     /// do. Return `None` for any other term. ERTS stores a larger integer as

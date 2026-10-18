@@ -182,3 +182,49 @@ fn registry_is_sorted_and_matches_the_exact_mfa() {
     assert!(binding("zlib", "inflate_nif", 4).is_some());
     assert!(binding("zlib", "deflateParams_nif", 3).is_none());
 }
+
+/// A registered native function returns its result and a duplicate
+/// registration fails.
+#[test]
+fn native_registry_registers_and_rejects_duplicates() {
+    use crate::BeamError;
+    use crate::Term;
+    use crate::runtime::interpreter::bif::BifResult;
+    use crate::runtime::register_native;
+    fn add(
+        _scheduler: &mut crate::runtime::Scheduler,
+        arguments: &[crate::Term],
+    ) -> Result<BifResult, BeamError> {
+        match (arguments.first(), arguments.get(1)) {
+            (Some(Term::Integer(left)), Some(Term::Integer(right))) => {
+                Ok(BifResult::Value(Term::Integer(left + right)))
+            }
+            _ => Ok(BifResult::badarg()),
+        }
+    }
+    let module = "native_probe_dup";
+    let _ = crate::runtime::unregister_native(module, "add", 2);
+    register_native(module, "add", 2, add).unwrap();
+    assert!(register_native(module, "add", 2, add).is_err());
+    assert!(crate::runtime::lookup_native(module, "add", 2).is_some());
+    assert!(crate::runtime::lookup_native(module, "add", 1).is_none());
+    crate::runtime::unregister_native(module, "add", 2);
+}
+
+/// Unregistering removes the binding.
+#[test]
+fn native_registry_unregisters() {
+    use crate::runtime::{lookup_native, register_native, unregister_native};
+    fn f(
+        _s: &mut crate::runtime::Scheduler,
+        _a: &[crate::Term],
+    ) -> Result<crate::runtime::BifResult, crate::BeamError> {
+        Ok(crate::runtime::BifResult::Value(crate::Term::Integer(0)))
+    }
+    let _ = unregister_native("m_unreg", "f", 1);
+    register_native("m_unreg", "f", 1, f).unwrap();
+    assert!(lookup_native("m_unreg", "f", 1).is_some());
+    assert!(unregister_native("m_unreg", "f", 1));
+    assert!(lookup_native("m_unreg", "f", 1).is_none());
+    assert!(!unregister_native("m_unreg", "f", 1));
+}
