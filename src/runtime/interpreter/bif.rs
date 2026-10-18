@@ -1387,3 +1387,18 @@ pub(crate) fn import_kind(module: &str, name: &str, arity: u32) -> ImportKind {
 #[cfg(test)]
 #[path = "../../../tests/runtime/interpreter/bif.rs"]
 mod tests;
+
+/// Return the extra reductions of a `links` item, `floor(Links / 4)`
+/// (`erl_bif_info.c:1777`), and 0 for another item.
+pub(crate) fn links_reductions(item: &Term, value: &Term) -> i32 {
+    if item != &Term::static_atom("links") {
+        return 0;
+    }
+    let links = value
+        .tuple_elements()
+        .and_then(|elements| elements.get(1))
+        .and_then(|links| links.proper_list())
+        .map(|links| links.count())
+        .unwrap_or(0);
+    i32::try_from(links / 4).unwrap_or(i32::MAX)
+}

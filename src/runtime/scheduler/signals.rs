@@ -560,8 +560,11 @@ impl Scheduler {
                 let info = process
                     .info(&self.atoms, &item, current, messages, true)?
                     .expect("erlang:process_info/2 sends a supported item");
+                // ERTS builds the reply in the target process and charges
+                // the `links` item there (`erl_proc_sig_queue.c:5393-5400`).
+                let reductions = crate::runtime::interpreter::bif::links_reductions(&item, &info);
                 self.send_message(id, requester, reply(reference, info));
-                0
+                reductions
             }
         };
         Ok(Handled::Continue(extra))
