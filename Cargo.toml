@@ -127,6 +127,10 @@ name = "native_dispatch"
 path = "tests/integration/native_dispatch.rs"
 
 [[test]]
+name = "native_decl"
+path = "tests/integration/native_decl.rs"
+
+[[test]]
 name = "arith"
 path = "tests/integration/arith.rs"
 
