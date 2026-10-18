@@ -54,7 +54,9 @@ local action or an error report.
 ## Compiled fixtures omit representative input shapes
 
 Cover each supported input shape, including bare values and boundary sizes, in
-compiled fixtures. Assert exact results against pinned ERTS.
+compiled fixtures. Assert exact results against pinned ERTS. When the fixture
+compiler cannot emit an input shape, such as a bitstring that is not a whole
+number of bytes, cover it with a unit test instead.
 
 ## Equality uses semantic identity, not dispatch metadata
 
