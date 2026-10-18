@@ -5,8 +5,8 @@ defmodule PBeam.NativeTest do
   defmodule PBeam.NativeTest.Declared do
     use PBeam.Native
 
-    native :sha256, 1
-    native :zero, 0
+    defnative sha256(data)
+    defnative zero()
   end
   """
 
@@ -30,6 +30,11 @@ defmodule PBeam.NativeTest do
     assert_raise ErlangError, fn -> apply(declared, :sha256, [<<1, 2>>]) end
     error = assert_raise ErlangError, fn -> apply(declared, :zero, []) end
     assert error.original == :pbeam_native_only
+  end
+
+  test "refuses a declaration that is not a plain function head" do
+    assert_refused("defnative :sha256")
+    assert_refused("defnative guarded(data) when is_binary(data)")
   end
 
   test "the committed fixture keeps the declarations of the library", %{fresh: fresh} do
@@ -58,6 +63,20 @@ defmodule PBeam.NativeTest do
   test "the committed fixture keeps the caller without a declaration", %{fresh: fresh} do
     refute starts_at_nif_start?(Map.fetch!(fresh, NativeDeclProbeCaller))
     refute starts_at_nif_start?(File.read!(@caller_beam))
+  end
+
+  defp assert_refused(declaration) do
+    source = """
+    defmodule PBeam.NativeTest.Refused do
+      use PBeam.Native
+
+      #{declaration}
+    end
+    """
+
+    assert_raise ArgumentError, ~r/defnative expects a function head/, fn ->
+      Code.compile_string(source)
+    end
   end
 
   # Return whether the stub of `sha256/1` starts at a `nif_start`

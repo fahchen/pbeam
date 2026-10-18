@@ -9,7 +9,7 @@ defmodule NativeDeclProbe do
 
   use PBeam.Native
 
-  native :sha256, 1
+  defnative sha256(data)
 
   def local(data), do: sha256(data)
 

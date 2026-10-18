@@ -146,11 +146,11 @@ The interface uses ordinary Elixir function calls:
 defmodule MyApp.NativeHash do
   use PBeam.Native
 
-  native :sha256, 1
+  defnative sha256(data)
 end
 ```
 
-The library is the Mix project at the repository root, and its single module is `PBeam.Native`. `use PBeam.Native` registers the module attribute `pbeam_native` with accumulation and persistence. `native :name, arity` adds one `{name, arity}` pair to that attribute and defines a stub of the same name and arity.
+The library is the Mix project at the repository root, and its single module is `PBeam.Native`. `use PBeam.Native` registers the module attribute `pbeam_native` with accumulation and persistence. `defnative name(arguments)` adds one `{name, arity}` pair to that attribute and defines a stub of the same name and arity, where `arity` is the count of the arguments of the head. The names of the arguments have no effect.
 
 The compiler writes the pairs into the `Attr` chunk of the BEAM file. PBeam reads that chunk at the load of a module and reports the pairs as the native declarations of the module. A bundler reads the same declarations to discover the required native implementations.
 
