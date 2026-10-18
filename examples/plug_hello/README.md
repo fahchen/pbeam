@@ -2,6 +2,16 @@
 
 This example is a Mix project with the dependencies `plug` and `bandit`. The versions are pinned in `mix.lock`. The plug `PlugHello` answers `GET /` with the status 200, the content type `text/plain`, and the body `Hello world from PBeam!`, on the pinned ERTS and on the `pbeam` binary. It answers each other request with the status 404. The application `PlugHello.Application` starts Bandit with `PlugHello` on the port of the environment variable `PORT`, default 4000. The test run uses the port 0, so that it does not need the port 4000.
 
+## Build one executable
+
+From this directory, after `mix release`, this command writes `plug_hello.bundle` under `target/examples/` of the repository:
+
+```sh
+mix pbeam.build
+```
+
+The task builds the `pbeam` runtime and the `pbeam_bundle` tool with Cargo, writes the bundle with `mix pbeam.bundle`, and appends the bundle to the runtime. The executable runs in a directory that holds no other file, and the run needs no installed OTP. `--output <path>` names another output path, and `--runtime <path>` and `--tool <path>` use built binaries instead of the Cargo build.
+
 ## Third-party code
 
 The build fetches the dependencies of `mix.lock` from Hex and compiles them. The Elixir compiler runs the macros of the dependencies when it compiles them, and a run then runs their code. Read the sources of the pinned versions before the first build.
