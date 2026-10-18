@@ -30,10 +30,11 @@ const ERASE_COSTS: &str = "[3,0,2,0,0,0,1,0,0,0]";
 
 /// `bif_cost_probe:erase_trap/0` on the pinned ERTS with `erl +S 1`: the
 /// reductions of an erase that rehashes a table of 16 slots with 1
-/// reduction left. The copies go through 48 slots, more than the 32 of the
-/// budget: the erase uses all reductions and traps. 4000 is 1 for
-/// `process_info/2`, 3996 for `bump_reductions/1`, 1 for the call of the
-/// erase, and 2 for the trap and the resume.
+/// reduction left. The temporary copy brings 16 slots and the rehashed
+/// copy 32 slots, so each copy fits its own limit of 32 slots and the
+/// erase completes in this call. 4000 is 1 for `process_info/2`, 3996 for
+/// `bump_reductions/1`, 1 for the call of the erase, 1 for its charge, and
+/// 1 for the switch out.
 const ERASE_TRAP: &str = "4000";
 
 /// `bif_cost_probe:erase_trap_32/0` on the pinned ERTS with `erl +S 1`: the

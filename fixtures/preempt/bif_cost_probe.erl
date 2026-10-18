@@ -347,9 +347,9 @@ erase_cost(Key) ->
     ?REDS - Before - 2.
 
 %% The reductions of an erase that rehashes the 16 slots of a table of 8
-%% keys with 1 reduction left. The copies go through 48 slots, more than
-%% the 32 of the budget. The erase uses all reductions and traps, and the
-%% copies end in the next turn (erl_bif_persistent.c:275-293).
+%% keys with 1 reduction left. The temporary copy brings 16 slots and the
+%% rehashed copy 32 slots, so each copy fits its own limit of 32 slots and
+%% the erase completes in this call (erl_bif_persistent.c:275-293).
 erase_trap() ->
     [persistent_term:put(Key, Key) || Key <- keys(1, 8)],
     erlang:yield(),
