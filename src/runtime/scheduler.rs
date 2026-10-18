@@ -675,7 +675,7 @@ impl Scheduler {
     /// resuming its Erlang code (`erts_schedule_ets_free_fixation`,
     /// `erl_db.c:5263-5301`).
     pub(super) fn schedule_pending_cleanups(&mut self) {
-        let processes = self.ets.pending_processes();
+        let processes = self.ets.take_pending_new();
         for id in processes {
             if self.processes.get(&id).is_some() {
                 self.enqueue(id);

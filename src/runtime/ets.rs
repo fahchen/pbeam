@@ -69,6 +69,10 @@ pub(super) struct EtsTables {
     /// reduction when it runs (`erts_schedule_ets_free_fixation`,
     /// `erl_db.c:5263-5301`).
     pending: HashMap<ProcessId, VecDeque<Reference>>,
+    /// The processes that became pending since the last scheduling, so the
+    /// caller enqueues only them (`erts_schedule_ets_free_fixation`,
+    /// `erl_db.c:5263-5301`).
+    pending_new: Vec<ProcessId>,
     /// The compiled match specification of each `ets:select/1`
     /// continuation, by the reference that the continuation holds in place
     /// of the ERTS magic reference (`ets_db_make_match_prog_ref`,
@@ -728,6 +732,7 @@ impl EtsTables {
                 // and then removes it, or until its exit
                 // (`erts_schedule_ets_free_fixation`, `erl_db.c:5263-5301`).
                 self.pending.entry(*process).or_default().push_back(id);
+                self.pending_new.push(*process);
             }
         }
     }
@@ -760,9 +765,10 @@ impl EtsTables {
         drained.len()
     }
 
-    /// Return each process that has a pending cleanup.
-    pub(super) fn pending_processes(&self) -> Vec<ProcessId> {
-        self.pending.keys().copied().collect()
+    /// Return the processes that became pending since the last call, and
+    /// forget them.
+    pub(super) fn take_pending_new(&mut self) -> Vec<ProcessId> {
+        std::mem::take(&mut self.pending_new)
     }
 
     /// Return the number of pending cleanups of the process `process`.
