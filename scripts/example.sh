@@ -21,13 +21,14 @@ step() {
   if [[ -t 2 ]]; then echo "==> $1" >&2; fi
 }
 
-usage='usage: example <name> [--erts] [--no-build] [--policy <module>]'
+usage='usage: example <name> [--erts] [--no-build] [--policy <module>] [--write-start <file>]'
 [[ $# -ge 1 ]] || fail "$usage"
 name=$1
 shift
 erts=false
 build=true
 policy=()
+start_file=
 while [[ $# -gt 0 ]]; do
   case $1 in
     --erts) erts=true ;;
@@ -35,6 +36,11 @@ while [[ $# -gt 0 ]]; do
     --policy)
       [[ $# -ge 2 ]] || fail "$usage"
       policy=(--boot --policy "$2")
+      shift
+      ;;
+    --write-start)
+      [[ $# -ge 2 ]] || fail "$usage"
+      start_file=$2
       shift
       ;;
     *) fail "unknown option $1" ;;
@@ -107,12 +113,20 @@ if [[ -f examples/$name/mix.exs ]]; then
   # pbeam_boot spawns erts_code_purger before init, as erl_init.c does, and the other examples get it from @preloaded of scripts/example_beams.exs.
   read -ra boot_list <<<"$boot_modules erts_code_purger"
   start_list=$(erl -noshell -eval '[io:put_chars([F, $\n]) || A <- init:get_plain_arguments(), F <- [case code:which(list_to_atom(A)) of preloaded -> filename:join([code:lib_dir(erts), "ebin", A ++ ".beam"]); P -> P end], filelib:is_regular(F)], halt().' -extra "${boot_list[@]}")
+  # The files of the start set, one path for each line: the bundle tool
+  # copies them into the bundle.
+  if [[ -n $start_file ]]; then
+    printf '%s\n' "$start_list" >"$start_file"
+    exit 0
+  fi
   start=("$output/$entry.beam" "$output/pbeam_boot.beam")
   while IFS= read -r item; do
     start+=("$item")
   done <<<"$start_list"
   run "${start[@]}"
 fi
+
+[[ -z $start_file ]] || fail '--write-start works only for a release example, with examples/<name>/mix.exs'
 
 # With --no-build, run the last build with the lists that it wrote: the start set of BEAM files, and the code path directories. A policy run loads each other module of the run before the entry: the boot gate denies a message of a runtime process to a boot process (docs/capability-security-migration.md), so a policy run gives the whole list of the build.
 if [[ $build == false ]]; then

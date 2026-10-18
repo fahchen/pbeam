@@ -119,6 +119,16 @@ cargo build --locked --release --bin pbeam
 PBEAM_BIN=$(pwd)/target/release/pbeam bash scripts/example.sh "$usage_name" ${usage_policy:+--policy "$usage_policy"}
 '''
 
+[tasks.example-bundle]
+description = "Build a release example as one executable with an appended bundle"
+quiet = true
+usage = 'arg "<name>" help="The directory of a release example in examples/, such as plug_hello"'
+run = '''
+cargo build --locked --release --bin pbeam --bin pbeam_bundle
+bash scripts/example.sh "$usage_name" --write-start target/examples/"$usage_name"/pbeam.start.list
+target/release/pbeam_bundle target/examples/"$usage_name" target/release/pbeam target/examples/"$usage_name.bundle" "${usage_name}_run" main target/examples/"$usage_name"/pbeam.start.list
+'''
+
 [tasks.bench-dispatch]
 description = "Measure the interpreter dispatch baseline on a release build and write target/dispatch-baseline.txt"
 run = "bash scripts/dispatch_baseline.sh"

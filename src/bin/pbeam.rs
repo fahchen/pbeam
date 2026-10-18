@@ -94,6 +94,12 @@ struct Cli {
 /// // Hello, world!
 /// ```
 fn main() -> ExitCode {
+    // A binary with an appended bundle starts it when it has no argument.
+    if std::env::args_os().len() == 1
+        && let Some(status) = pbeam_runtime::embedded::run()
+    {
+        return status;
+    }
     match run(Cli::parse()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(Exit::Halt(status)) => ExitCode::from(status.to_le_bytes()[0]),
