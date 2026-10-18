@@ -1242,6 +1242,9 @@ impl Scheduler {
     fn notify_signals(&mut self, signals: &[libc::c_int]) -> Result<(), BeamError> {
         for &number in signals {
             if number == libc::SIGINT {
+                // The request that opens the menu is consumed here; a later
+                // SIGINT marks a new request (`sys.c:611-624`, `913`).
+                let _ = signal::take_break_requested();
                 self.break_menu()?;
                 continue;
             }
@@ -1297,16 +1300,21 @@ impl Scheduler {
         if let Some(initial) = self.initial_tty_mode.mode() {
             let _ = terminal::set_mode(libc::STDIN_FILENO, initial);
         }
-        let result = self.run_break_menu();
+        let mut deferred = Vec::new();
+        let result = self.run_break_menu(&mut deferred);
         if let Some(saved) = saved {
             let _ = terminal::set_mode(libc::STDIN_FILENO, &saved);
         }
+        // The signals that arrived while the menu waited reach the
+        // scheduler after it ends, in their order.
+        signal::requeue(&deferred);
         result
     }
 
     /// Read the keys of the break menu, with the mode of fd 0 of the start
-    /// of the run.
-    fn run_break_menu(&mut self) -> Result<(), BeamError> {
+    /// of the run. `deferred` holds the signals that arrived while the menu
+    /// waited.
+    fn run_break_menu(&mut self, deferred: &mut Vec<libc::c_int>) -> Result<(), BeamError> {
         use std::io::{IsTerminal, Write};
 
         const HELP: &str = "BREAK: (a)bort (A)bort with dump (c)ontinue (p)roc info (i)nfo\r\n       (l)oaded (v)ersion (k)ill (D)b-tables (d)istribution\r\n";
@@ -1320,6 +1328,8 @@ impl Scheduler {
         let mut stdout = std::io::stdout();
         let _ = write!(stdout, "\r\n{clear}{HELP}");
         let _ = stdout.flush();
+        let notify = signal::notify_fd().expect("a handler install makes the pipe");
+        let fds = [libc::STDIN_FILENO, notify];
         loop {
             // `sys_get_key` waits until the descriptor is readable, reads up
             // to 64 bytes, and retries a read with no data (`sys.c:1051-1071`).
@@ -1327,16 +1337,32 @@ impl Scheduler {
             // than 64 bytes and keep them from the next reader of the
             // descriptor. A wait that a signal stops, the end of the input,
             // and the NUL byte abort the run (`break.c:602-604`).
-            let key = match super::host::input::wait_readable(&[libc::STDIN_FILENO], None) {
-                super::host::input::Readiness::Ready(_) => {
-                    Self::break_key(|| super::host::input::read(libc::STDIN_FILENO, 64))
-                }
-                // A handled signal stops the wait with `EINTR`, which
-                // `wait_readable` reports as `Pending`; `sys_get_key` then
-                // returns 0 and the run stops (`sys.c:1051-1071`,
-                // `break.c:602-604`).
-                super::host::input::Readiness::Pending | super::host::input::Readiness::Invalid => {
-                    0
+            let key = loop {
+                match super::host::input::wait_readable(&fds, None) {
+                    super::host::input::Readiness::Ready(ready) => {
+                        if ready.contains(&notify) {
+                            // A signal wrote to the notify pipe. A SIGINT stops
+                            // the run; each other signal stays for the
+                            // scheduler and the menu waits again
+                            // (`sys.c:611-624`, `break.c:602-604`).
+                            let signals = signal::take_notified();
+                            if signals.contains(&libc::SIGINT) || signal::take_break_requested() {
+                                return Err(BeamError::Halt(0));
+                            }
+                            deferred.extend(signals);
+                            continue;
+                        }
+                        break Self::break_key(|| super::host::input::read(libc::STDIN_FILENO, 64));
+                    }
+                    // A handled signal can stop the wait with `EINTR`; a
+                    // SIGINT then stops the run (`sys.c:611-624`).
+                    super::host::input::Readiness::Invalid
+                    | super::host::input::Readiness::Pending => {
+                        if signal::take_break_requested() {
+                            return Err(BeamError::Halt(0));
+                        }
+                        continue;
+                    }
                 }
             };
             if key == 0 {

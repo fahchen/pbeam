@@ -25,6 +25,11 @@ static NOTIFY_PIPE: OnceLock<[c_int; 2]> = OnceLock::new();
 /// signal reaches its target without a system call for each step.
 static NOTIFIED: AtomicBool = AtomicBool::new(false);
 
+/// Whether a `SIGINT` arrived since the scheduler last cleared the flag, as
+/// `break_requested` (`sys.c:611-624`) marks a break. A second `SIGINT`
+/// stops the run while the break menu reads a key (`break.c:602-604`).
+static BREAK_REQUESTED: AtomicBool = AtomicBool::new(false);
+
 /// The disposition that `os:set_signal/2` gives a signal: its `Mode`
 /// argument `ignore`, `default`, or `handle`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -172,6 +177,45 @@ pub(crate) fn take_notified() -> Vec<c_int> {
     }
 }
 
+/// Return whether a `SIGINT` arrived, and clear the flag.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // SAFETY: the handler of SIGINT writes to the notify pipe.
+/// unsafe { libc::raise(libc::SIGINT) };
+/// assert!(take_break_requested());
+/// assert!(!take_break_requested());
+/// ```
+pub(crate) fn take_break_requested() -> bool {
+    BREAK_REQUESTED.swap(false, Ordering::Acquire)
+}
+
+/// Write `signals` back to the notify pipe, in their order, so the scheduler
+/// processes them after the break menu. A full pipe drops a signal, as the
+/// handler does.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let notified = take_notified();
+/// requeue(&notified);
+/// assert_eq!(take_notified(), notified);
+/// ```
+pub(crate) fn requeue(signals: &[c_int]) {
+    if signals.is_empty() {
+        return;
+    }
+    let [_, write_end] = *NOTIFY_PIPE.get().expect("a handler install makes the pipe");
+    let bytes: Vec<u8> = signals
+        .iter()
+        .flat_map(|signal| signal.to_ne_bytes())
+        .collect();
+    let mut buffers = [std::io::IoSlice::new(&bytes)];
+    let _ = super::output::write_all(write_end, &mut buffers);
+    NOTIFIED.store(true, Ordering::Release);
+}
+
 /// Read all signals in the notify pipe, as the signal dispatcher thread
 /// reads each signal number (sys.c:1128-1144). A wait of the scheduler that
 /// the pipe ends does not read it: the next [`take_notified`] does. Each handler writes one
@@ -278,6 +322,9 @@ const SIGNALS: &[(&str, c_int)] = &[
 extern "C" fn notify_signal(signal: c_int) {
     let [_, write_end] = *NOTIFY_PIPE.get().expect("a handler install makes the pipe");
     let saved = errno();
+    if signal == libc::SIGINT {
+        BREAK_REQUESTED.store(true, Ordering::Release);
+    }
     let bytes = signal.to_ne_bytes();
     // SAFETY: `write` reads the bytes of `bytes`. It is async-signal-safe.
     // A write to a non-blocking pipe does not wait, so a signal cannot stop
