@@ -498,6 +498,26 @@ fn open_pipe() -> (OwnedFd, OwnedFd) {
 }
 
 #[test]
+fn delivers_the_signals_of_the_menu_before_a_later_signal_as_pinned_erts() {
+    // A signal that arrived during the menu reaches `erl_signal_server`
+    // before a signal that arrived after the menu, in the order of the
+    // notify pipe (`sys.c:1128-1144`).
+    let steps = [
+        ("ready\n", Action::Signal(libc::SIGINT)),
+        ("BREAK:", Action::Signal(libc::SIGHUP)),
+        ("BREAK:", Action::Write(b"c")),
+        ("sighup\n", Action::Signal(libc::SIGUSR2)),
+    ];
+    let erts = run_with_actions(&mut erts("notify"), b"", &steps);
+    let pbeam = run_with_actions(&mut pbeam("notify"), b"", &steps);
+    assert_eq!(erts, pbeam, "ERTS and PBeam");
+    let (status, stdout, stderr) = pbeam;
+    assert_eq!(status, Some(0));
+    assert_eq!(stderr, "");
+    assert!(stdout.ends_with("sighup\nsigusr2\n"), "{stdout:?}");
+}
+
+#[test]
 fn delivers_a_signal_that_arrived_during_the_menu_as_pinned_erts() {
     // SIGTERM during the menu waits in the notify pipe. The key `c`
     // continues the run, and the scheduler then sends the signal to

@@ -1258,13 +1258,16 @@ impl Scheduler {
                     return Err(BeamError::Halt(0));
                 }
                 break_pending = true;
-                self.break_menu()?;
-                // A SIGINT that arrived before the menu ended stops the run
-                // while the flag is still set (`sys.c:611-624`).
-                queue.extend(signal::take_notified());
-                // ERTS clears the flag after the menu returns (`sys.c:913`).
-                let _ = signal::take_break_requested();
+                let result = self.break_menu();
+                // The signals that the menu deferred arrived before the
+                // signals that the handler wrote after the menu
+                // (`sys.c:1128-1144`).
                 queue.extend(std::mem::take(&mut self.deferred_signals));
+                queue.extend(signal::take_notified());
+                // ERTS clears the flag on each exit from the menu, also when
+                // the menu ends the run (`sys.c:913`).
+                let _ = signal::take_break_requested();
+                result?;
                 continue;
             }
             let name =
