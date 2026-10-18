@@ -207,6 +207,66 @@ fn writes_an_invalid_break_key_as_its_byte_as_pinned_erts() {
 }
 
 #[test]
+fn opens_a_new_menu_after_the_key_c_as_pinned_erts() {
+    // ERTS clears the break flag after the menu returns (`sys.c:913`), so a
+    // later SIGINT writes the menu again.
+    for (name, mut command) in [("ERTS", erts("hold")), ("PBeam", pbeam("hold"))] {
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().expect("the child has a stdin");
+        let stdout = Arc::new(Mutex::new(Vec::new()));
+        let stdout_reader = collect(child.stdout.take().unwrap(), Arc::clone(&stdout));
+        let stderr = Arc::new(Mutex::new(Vec::new()));
+        let stderr_reader = collect(child.stderr.take().unwrap(), Arc::clone(&stderr));
+        wait_for(&mut child, &stdout, b"ready\n");
+        send(&child, libc::SIGINT);
+        wait_for(&mut child, &stdout, b"BREAK: ");
+        stdin.write_all(b"c").unwrap();
+        wait_for(&mut child, &stdout, b"done\n");
+        send(&child, libc::SIGINT);
+        wait_for_count(&mut child, &stdout, b"BREAK: ", 2);
+        stdin.write_all(b"a").unwrap();
+        assert_eq!(wait_for_exit(&mut child, &stdout), Some(0), "{name}");
+        stdout_reader.join().unwrap();
+        stderr_reader.join().unwrap();
+    }
+}
+
+/// Wait until `output` holds `count` occurrences of `text`. Kill `child`
+/// and panic when they do not come in `RUN_TIME_LIMIT`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// wait_for_count(&mut child, &stdout, b"BREAK: ", 2);
+/// ```
+fn wait_for_count(child: &mut Child, output: &Mutex<Vec<u8>>, text: &[u8], count: usize) {
+    let start = Instant::now();
+    while output
+        .lock()
+        .unwrap()
+        .windows(text.len())
+        .filter(|window| *window == text)
+        .count()
+        < count
+    {
+        if start.elapsed() >= RUN_TIME_LIMIT {
+            child.kill().unwrap();
+            panic!(
+                "no {count} occurrences of {:?} in the output {:?}",
+                String::from_utf8_lossy(text),
+                String::from_utf8_lossy(&output.lock().unwrap())
+            );
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
 fn continues_the_break_menu_on_m_as_pinned_erts() {
     // The key `m` continues the run with no output (`break.c:622-623`).
     let steps = [

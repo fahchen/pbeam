@@ -25,9 +25,11 @@ static NOTIFY_PIPE: OnceLock<[c_int; 2]> = OnceLock::new();
 /// signal reaches its target without a system call for each step.
 static NOTIFIED: AtomicBool = AtomicBool::new(false);
 
-/// Whether a `SIGINT` arrived since the scheduler last cleared the flag, as
-/// `break_requested` (`sys.c:611-624`) marks a break. A second `SIGINT`
-/// stops the run while the break menu reads a key (`break.c:602-604`).
+/// Whether a break is active, as `erts_break_requested` marks one
+/// (`sys.c:611-624`). The scheduler of PBeam takes the dispatcher role of
+/// ERTS: it sets the flag before the menu, and clears it after the menu
+/// returns (`sys.c:913`). A second request stops the run while the flag is
+/// set (`break.c:602-604`).
 static BREAK_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// The disposition that `os:set_signal/2` gives a signal: its `Mode`
@@ -177,13 +179,26 @@ pub(crate) fn take_notified() -> Vec<c_int> {
     }
 }
 
-/// Return whether a `SIGINT` arrived, and clear the flag.
+/// Return whether a break is active, and mark one, as `break_requested`
+/// does before it pokes the break handling (`sys.c:611-624`).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// // SAFETY: the handler of SIGINT writes to the notify pipe.
-/// unsafe { libc::raise(libc::SIGINT) };
+/// assert!(!request_break());
+/// assert!(request_break());
+/// ```
+pub(crate) fn request_break() -> bool {
+    BREAK_REQUESTED.swap(true, Ordering::AcqRel)
+}
+
+/// Return whether a break is active, and clear the flag. The scheduler
+/// clears it after the menu returns, as ERTS does (`sys.c:913`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(!request_break());
 /// assert!(take_break_requested());
 /// assert!(!take_break_requested());
 /// ```
@@ -297,9 +312,6 @@ const SIGNALS: &[(&str, c_int)] = &[
 extern "C" fn notify_signal(signal: c_int) {
     let [_, write_end] = *NOTIFY_PIPE.get().expect("a handler install makes the pipe");
     let saved = errno();
-    if signal == libc::SIGINT {
-        BREAK_REQUESTED.store(true, Ordering::Release);
-    }
     let bytes = signal.to_ne_bytes();
     // SAFETY: `write` reads the bytes of `bytes`. It is async-signal-safe.
     // A write to a non-blocking pipe does not wait, so a signal cannot stop

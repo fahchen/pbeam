@@ -1246,22 +1246,24 @@ impl Scheduler {
     fn notify_signals(&mut self, signals: &[libc::c_int]) -> Result<(), BeamError> {
         let mut queue: VecDeque<libc::c_int> = std::mem::take(&mut self.deferred_signals).into();
         queue.extend(signals);
-        // ERTS stops the run when a break request is already pending
+        // ERTS stops the run when a break is already active
         // (`break_requested`, `sys.c:611-624`).
         let mut break_pending = false;
         while let Some(number) = queue.pop_front() {
             if number == libc::SIGINT {
                 // A second break request in the same batch stops the run
-                // before the menu opens (`break_requested`,
-                // `sys.c:611-624`).
-                if break_pending || queue.contains(&libc::SIGINT) {
+                // before the menu opens, and a request that found the flag
+                // set stops it at once (`break_requested`, `sys.c:611-624`).
+                if break_pending || signal::request_break() || queue.contains(&libc::SIGINT) {
                     return Err(BeamError::Halt(0));
                 }
                 break_pending = true;
-                // The request that opens the menu is consumed here
-                // (`sys.c:611-624`, `913`).
-                let _ = signal::take_break_requested();
                 self.break_menu()?;
+                // A SIGINT that arrived before the menu ended stops the run
+                // while the flag is still set (`sys.c:611-624`).
+                queue.extend(signal::take_notified());
+                // ERTS clears the flag after the menu returns (`sys.c:913`).
+                let _ = signal::take_break_requested();
                 queue.extend(std::mem::take(&mut self.deferred_signals));
                 continue;
             }
@@ -1367,7 +1369,7 @@ impl Scheduler {
                             // scheduler and the menu waits again
                             // (`sys.c:611-624`, `break.c:602-604`).
                             let signals = signal::take_notified();
-                            if signals.contains(&libc::SIGINT) || signal::take_break_requested() {
+                            if signals.contains(&libc::SIGINT) {
                                 return Err(BeamError::Halt(0));
                             }
                             deferred.extend(signals);
@@ -1378,15 +1380,10 @@ impl Scheduler {
                     // A select that fails, for example on a closed stdin,
                     // gives 0 from `sys_get_key`, and the run stops
                     // (`sys.c:1051-1071`, `break.c:602-604`). An interrupted
-                    // wait keeps the menu open, and a SIGINT stops the run
-                    // (`sys.c:611-624`).
+                    // wait keeps the menu open, and the next wait sees the
+                    // notify pipe (`sys.c:611-624`).
                     super::host::input::Readiness::Invalid => return Err(BeamError::Halt(0)),
-                    super::host::input::Readiness::Pending => {
-                        if signal::take_break_requested() {
-                            return Err(BeamError::Halt(0));
-                        }
-                        continue;
-                    }
+                    super::host::input::Readiness::Pending => continue,
                 }
             };
             if key == 0 {
@@ -1458,7 +1455,7 @@ impl Scheduler {
                     // run; each other signal stays for the scheduler
                     // (`sys.c:611-624`, `break.c:602-604`).
                     let signals = signal::take_notified();
-                    if signals.contains(&libc::SIGINT) || signal::take_break_requested() {
+                    if signals.contains(&libc::SIGINT) {
                         return Err(BeamError::Halt(0));
                     }
                     deferred.extend(signals);
@@ -1470,13 +1467,8 @@ impl Scheduler {
                     return Ok(());
                 }
                 // An interrupted wait: the handler wrote the notify pipe, so
-                // the next wait sees it. A SIGINT that interrupted it stops
-                // the run.
-                super::host::input::Readiness::Pending => {
-                    if signal::take_break_requested() {
-                        return Err(BeamError::Halt(0));
-                    }
-                }
+                // the next wait sees it.
+                super::host::input::Readiness::Pending => {}
             }
         }
     }
