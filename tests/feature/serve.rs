@@ -163,7 +163,6 @@ fn builds_the_one_file_executable_with_the_mix_task_and_runs_it_clean() {
     let out = directory.join("out");
     let clean = directory.join("clean");
     let home = directory.join("home");
-    fs::create_dir_all(&out).unwrap();
     fs::create_dir_all(&clean).unwrap();
     fs::create_dir_all(&home).unwrap();
     let output = out.join("plug_hello");

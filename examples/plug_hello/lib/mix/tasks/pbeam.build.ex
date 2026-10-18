@@ -37,6 +37,7 @@ defmodule Mix.Tasks.Pbeam.Build do
     app = Mix.Project.config()[:app]
     output = Path.expand(Keyword.get(options, :output) || default_output(root, app), cwd)
     bundle = Path.join(Path.dirname(output), "#{app}.pbeamb")
+    File.mkdir_p!(Path.dirname(output))
 
     tool =
       case Keyword.get(options, :tool) do
