@@ -20,6 +20,30 @@ Detailed incident writeups with full context live in `postmortems/`.
 
 **Reference:** `path/to/file` or `postmortems/YYYY-MM-DD-slug.md`
 -->
+## 20261018: Catch each ERTS probe call on its own
+
+**Problem:** A list of `decode_packet` probes stopped at the first `badarg`, so the later cases gave no result.
+
+**Root Cause:** The probe list evaluated the calls without `catch`, and the exception aborted the whole list.
+
+**Fix:** Wrap each probe call in `catch` so that each case returns its value or its exit reason.
+
+**Guardrail:** When a probe compares several calls, give each call a `catch` before you run it.
+
+**Reference:** <https://github.com/fahchen/pbeam/pull/806>
+
+## 20261018: Capture ERTS reference output in the assertion's format
+
+**Problem:** The integration-test reference constants were captured with `~p` output, but the tests compare `~w` output, so the expected text did not match the runtime result.
+
+**Root Cause:** The probe command and the assertion format were chosen separately.
+
+**Fix:** Capture each reference with `io:format("~w~n", ...)`, the same format that the test compares.
+
+**Guardrail:** Before you paste a reference constant, run the exact probe command that produced it and compare its format with the test's assertion.
+
+**Reference:** <https://github.com/fahchen/pbeam/pull/806>
+
 ## 20261011: Verify a benchmark probe after compilation
 
 **Problem:** The `funcopy` probe of `docs/copy-on-write-terms.md` did not measure the tuple construction and `element/2` work that it claimed. The compiler reduced `fc_loop/2` to a zero test, a decrement, and a tail call.
