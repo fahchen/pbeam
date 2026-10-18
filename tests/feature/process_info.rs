@@ -1,0 +1,85 @@
+//! Compare `erlang:process_info(Pid, links)` of the pinned ERTS with the
+//! same call on the `pbeam` binary. The probe prints the registered name of
+//! each link, or `unnamed`, so the run needs no pid of another run.
+
+use std::process::Command;
+
+#[path = "../common/boot.rs"]
+mod boot;
+#[expect(
+    dead_code,
+    reason = "this test crate gives BEAM paths, not bytes, to the binary"
+)]
+#[path = "../common/mod.rs"]
+mod common;
+
+use boot::{BOOT_MODULES, boot_beam, otp_root};
+use common::pinned_beam_path;
+
+const PROCESS_INFO_PROBE: &str = "fixtures/boot/process_info_probe.beam";
+
+#[test]
+fn reads_the_links_of_a_process_as_pinned_erts() {
+    // `process_info(Pid, links)` gives `{links, [Pid | Port]}` from the
+    // link tree, without a link that waits for its unlink acknowledgment,
+    // in the reverse of the tree walk (`erl_bif_info.c:574-585`,
+    // `1764-1775`). The probe checks the caller and another process with
+    // the same two nameable links, so the boot links do not differ.
+    let erts = run(&mut erts("links"));
+    let pbeam = run(&mut pbeam("links"));
+    assert_eq!(erts, pbeam, "links");
+    assert_eq!(erts.0, Some(0), "links");
+    assert_eq!(erts.2, "", "links");
+}
+
+/// The exit status code, the stdout, and the stderr of a run.
+type Output = (Option<i32>, String, String);
+
+/// Run `command` and return its exit status, its stdout, and its stderr.
+fn run(command: &mut Command) -> Output {
+    let output = command.output().expect("the command runs");
+    (
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// Return the `erl` command that runs `process_info_probe:Function()`.
+fn erts(function: &str) -> Command {
+    let mut command = Command::new("erl");
+    command
+        .args([
+            "-noshell",
+            "-pa",
+            "fixtures/boot",
+            "-eval",
+            &format!("process_info_probe:{function}(), halt()."),
+        ])
+        .env("ERL_CRASH_DUMP_SECONDS", "0")
+        .env("TERM", "dumb")
+        .env("LC_ALL", "C.UTF-8");
+    command
+}
+
+/// Return the `pbeam` command that boots with `pbeam_boot` and runs
+/// `process_info_probe:Function()`.
+fn pbeam(function: &str) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_pbeam"));
+    command
+        .args([
+            "pbeam_boot",
+            "start",
+            "process_info_probe",
+            function,
+            "--root",
+            otp_root().to_str().unwrap(),
+            "--",
+            PROCESS_INFO_PROBE,
+        ])
+        .args(BOOT_MODULES.map(pinned_beam_path))
+        .arg(boot_beam())
+        .env("TERM", "dumb")
+        .env("LC_ALL", "C.UTF-8");
+    command
+}
