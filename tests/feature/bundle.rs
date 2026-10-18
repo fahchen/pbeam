@@ -80,6 +80,42 @@ fn reports_the_usage_and_the_input_files() {
 }
 
 #[test]
+fn keeps_the_last_lib_suffix_of_a_start_file() {
+    // An OTP installation under `/usr/local/lib/erlang` has another `lib`
+    // component before the suffix of its applications.
+    let directory = directory("lib-suffix");
+    let release = directory.join("release");
+    fs::create_dir(&release).unwrap();
+    let ebin = directory.join("lib/otp/lib/erts-17/ebin");
+    fs::create_dir_all(&ebin).unwrap();
+    fs::write(ebin.join("init.beam"), b"beam").unwrap();
+    fs::write(ebin.join("extra.beam"), b"extra").unwrap();
+    let runtime = directory.join("pbeam");
+    fs::write(&runtime, b"binary").unwrap();
+    let start = start_list(&directory, &[ebin.join("init.beam").to_str().unwrap()]);
+    let output = directory.join("out");
+    let (status, stderr) = run(tool()
+        .arg(&release)
+        .arg(&runtime)
+        .arg(&output)
+        .args(["m", "f"])
+        .arg(&start));
+    assert_eq!(status, Some(0), "{stderr}");
+    let bytes = fs::read(&output).unwrap();
+    let end = bytes.len() - 16;
+    let length = u64::from_le_bytes(bytes[end + 8..].try_into().unwrap()) as usize;
+    let bundle = pbeam_runtime::Bundle::parse(&bytes[end - length..end]).unwrap();
+    assert!(bundle.resource("lib/erts-17/ebin/init.beam").is_some());
+    assert!(bundle.resource("lib/erts-17/ebin/extra.beam").is_some());
+    assert!(
+        bundle
+            .resource("lib/otp/lib/erts-17/ebin/init.beam")
+            .is_none()
+    );
+    fs::remove_dir_all(&directory).unwrap();
+}
+
+#[test]
 fn reports_an_output_that_the_host_cannot_write() {
     let directory = directory("output");
     let release = directory.join("release");

@@ -11,7 +11,7 @@ use std::{
     collections::BTreeMap,
     env, fs,
     io::Write,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     process::ExitCode,
 };
 
@@ -179,17 +179,21 @@ fn start_modules(
 /// Return the name of a start file in the OTP installation: its path from
 /// the `lib` directory, for example `lib/erts-17.1/ebin/init.beam`.
 fn resource_name(path: &Path) -> Result<String, String> {
-    let name = path
+    // The suffix is `<lib>/<application>/ebin/<file>`. An OTP installation
+    // under a path such as `/usr/local/lib/erlang` has another `lib`
+    // component before it.
+    let components: Vec<String> = path
         .components()
-        .skip_while(|component| !matches!(component, Component::Normal(name) if *name == "lib"))
         .map(|component| component.as_os_str().to_string_lossy().into_owned())
-        .collect::<Vec<_>>()
-        .join("/");
-    if name.is_empty() {
-        return Err(format!(
+        .collect();
+    let suffix = components.len().checked_sub(4);
+    match suffix {
+        Some(start) if components[start] == "lib" && components[start + 2] == "ebin" => {
+            Ok(components[start..].join("/"))
+        }
+        _ => Err(format!(
             "{} is not a file of an OTP lib directory",
             path.display()
-        ));
+        )),
     }
-    Ok(name)
 }
