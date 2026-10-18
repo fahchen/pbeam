@@ -167,18 +167,26 @@ owner_exit(Reason) ->
 epipe() ->
     Parent = self(),
     {Pid, Ref} = spawn_monitor(fun() ->
+                                       %% With trap_exit the epipe exit signal
+                                       %% of the port is a message, so the
+                                       %% child sends its result before it
+                                       %% exits. The parent then reads the
+                                       %% messages in a fixed order.
+                                       process_flag(trap_exit, true),
                                        Port = closed_input(),
                                        Parent ! {program, os_pid(Port)},
-                                       exit({result, write(Port)})
+                                       Parent ! {result, write(Port)},
+                                       exit(normal)
                                end),
-    Down = receive {'DOWN', Ref, process, Pid, Reason} -> Reason end,
     First = receive {program, OsPid} -> OsPid end,
+    Written = receive {result, Result} -> Result end,
+    Down = receive {'DOWN', Ref, process, Pid, Reason} -> Reason end,
     process_flag(trap_exit, true),
     Port = closed_input(),
     Second = os_pid(Port),
-    Result = [write(Port), Down],
+    Output = [Written, Down],
     stop(First, Second),
-    Result.
+    Output.
 
 closed_input() ->
     open_port({spawn_executable, sh()},
