@@ -69,20 +69,27 @@ pub(crate) fn native_declarations(attr: &[u8]) -> Result<Vec<(String, u32)>, Bea
     // another shape loads, and bytes after the term are ignored. PBeam
     // follows that, and reads no declaration from a term that is not a list
     // of pairs.
-    let Some(count) = cursor.list_count()? else {
+    let Some(mut count) = cursor.list_count()? else {
         cursor.skip_term()?;
         return Ok(Vec::new());
     };
     let mut declarations = Vec::new();
-    for _ in 0..count {
-        if let Some((name, value)) = cursor.pair()?
-            && name == DECLARATIONS_ATTRIBUTE
-        {
-            declarations = Cursor::new(value).declarations()?;
+    loop {
+        for _ in 0..count {
+            if let Some((name, value)) = cursor.pair()?
+                && name == DECLARATIONS_ATTRIBUTE
+            {
+                declarations = Cursor::new(value).declarations()?;
+            }
         }
+        // ERTS decodes a list whose encoding continues through another
+        // `LIST_EXT` as one list (`external.c:4581-4614`), so read each
+        // segment up to the `NIL_EXT` or the improper tail.
+        if !cursor.list_tail()? {
+            break;
+        }
+        count = cursor.number(4)?;
     }
-    // The tail of the attribute list.
-    cursor.skip_term()?;
     Ok(declarations)
 }
 
@@ -192,6 +199,39 @@ impl<'a> Cursor<'a> {
         Ok(Some(self.number(4)?))
     }
 
+    /// Advance over the tail of one list segment.
+    ///
+    /// Return `true` when another `LIST_EXT` segment follows, whose count is
+    /// next. Return `false` when the list ends with `NIL_EXT`, or when the
+    /// tail is another term, which this method skips. ERTS decodes a list
+    /// whose encoding continues through another `LIST_EXT` as one list
+    /// (`external.c:4581-4614`).
+    fn list_tail(&mut self) -> Result<bool, BeamError> {
+        match self.peek() {
+            Some(108) => {
+                self.pos += 1;
+                Ok(true)
+            }
+            Some(106) => {
+                // `NIL_EXT` names the node of a local pid, a port, or a
+                // reference only inside a local encoding
+                // (`external.c:6249-6262`).
+                if self.extra != 0 {
+                    return Err(error(
+                        "the node of a pid, a port, or a reference is not an atom",
+                    ));
+                }
+                self.pos += 1;
+                Ok(false)
+            }
+            Some(_) => {
+                self.skip_term()?;
+                Ok(false)
+            }
+            None => Err(error("truncated external term")),
+        }
+    }
+
     /// Read the arity of a tuple tag and return it.
     fn tuple_length(&mut self) -> Result<u64, BeamError> {
         match self.byte()? {
@@ -235,27 +275,32 @@ impl<'a> Cursor<'a> {
     fn declarations(&mut self) -> Result<Vec<(String, u32)>, BeamError> {
         // A value of another shape declares no native function. ERTS loads
         // such a module, so it is not an error.
-        let Some(count) = self.list_count()? else {
+        let Some(mut count) = self.list_count()? else {
             return Ok(Vec::new());
         };
-        // The caller has walked the value, so the count fits the bytes of the
-        // elements and the tail below.
-        let count = usize::try_from(count).expect("a 32-bit length");
-        let mut declarations = Vec::with_capacity(count);
-        for _ in 0..count {
-            let start = self.pos;
-            let extra = self.extra;
-            match self.declaration() {
-                Some(declaration) => declarations.push(declaration),
-                None => {
-                    self.pos = start;
-                    self.extra = extra;
-                    self.skip_term()?;
+        let mut declarations = Vec::new();
+        loop {
+            // The caller has walked the value, so the count fits the bytes of
+            // the elements and the tail below.
+            for _ in 0..count {
+                let start = self.pos;
+                let extra = self.extra;
+                match self.declaration() {
+                    Some(declaration) => declarations.push(declaration),
+                    None => {
+                        self.pos = start;
+                        self.extra = extra;
+                        self.skip_term()?;
+                    }
                 }
             }
+            // The declaration list can also continue through more than one
+            // `LIST_EXT` segment (`external.c:4581-4614`).
+            if !self.list_tail()? {
+                break;
+            }
+            count = self.number(4)?;
         }
-        // The tail of the declaration list.
-        self.skip_term()?;
         Ok(declarations)
     }
 

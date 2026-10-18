@@ -36,12 +36,26 @@ fn tuple(elements: &[Vec<u8>]) -> Vec<u8> {
 /// assert_eq!(list(&[]), [108, 0, 0, 0, 0, 106]);
 /// ```
 fn list(elements: &[Vec<u8>]) -> Vec<u8> {
+    list_with_tail(elements, &[106])
+}
+
+/// Return the `LIST_EXT` bytes of elements and a tail.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(
+///     list_with_tail(&[small_integer(1)], &[106]),
+///     [108, 0, 0, 0, 1, 97, 1, 106]
+/// );
+/// ```
+fn list_with_tail(elements: &[Vec<u8>], tail: &[u8]) -> Vec<u8> {
     let mut bytes = vec![108];
     bytes.extend_from_slice(&u32::try_from(elements.len()).unwrap().to_be_bytes());
     for element in elements {
         bytes.extend_from_slice(element);
     }
-    bytes.push(106);
+    bytes.extend_from_slice(tail);
     bytes
 }
 
@@ -147,6 +161,27 @@ fn reads_each_arity_encoding_and_an_empty_declaration() {
     assert_eq!(
         native_declarations(&bytes).unwrap(),
         [("wide".to_owned(), 300), ("small".to_owned(), 9)]
+    );
+}
+
+#[test]
+fn reads_declarations_across_list_segments() {
+    // ERTS decodes the `LIST_EXT` segments of one list as that one list
+    // (`external.c:4581-4614`). The `pbeam_native` attribute and the pairs of
+    // its value can each follow a segment boundary.
+    let value = list_with_tail(
+        &[tuple(&[atom("sha256"), small_integer(1)])],
+        &list_with_tail(&[tuple(&[atom("sha512"), small_integer(1)])], &[106]),
+    );
+    let attributes = list_with_tail(
+        &[tuple(&[atom("other"), small_integer(1)])],
+        &list_with_tail(&[tuple(&[atom("pbeam_native"), value])], &[106]),
+    );
+    let mut bytes = vec![131];
+    bytes.extend_from_slice(&attributes);
+    assert_eq!(
+        native_declarations(&bytes).unwrap(),
+        [("sha256".to_owned(), 1), ("sha512".to_owned(), 1)]
     );
 }
 
