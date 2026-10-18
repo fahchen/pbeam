@@ -316,6 +316,56 @@ fn break_after_signal(command: &mut Command) -> (Option<i32>, String) {
 }
 
 #[test]
+fn delivers_a_signal_that_arrived_during_the_menu_as_pinned_erts() {
+    // SIGTERM during the menu waits in the notify pipe. The key `c`
+    // continues the run, and the scheduler then sends the signal to
+    // `erl_signal_server`, whose default handler writes the report and stops
+    // the node (`erl_signal_handler.erl:39-48`).
+    let erts = continue_after_signal(&mut erts("hold"));
+    let pbeam = continue_after_signal(&mut pbeam("hold"));
+    assert_eq!(erts, pbeam, "ERTS and PBeam");
+    let (status, stdout, stderr) = pbeam;
+    assert_eq!(status, Some(0));
+    assert_eq!(stderr, "");
+    assert!(
+        stdout.contains("SIGTERM received - shutting down"),
+        "{stdout:?}"
+    );
+}
+
+/// Run `command`, send `SIGINT`, send `SIGTERM` while the menu waits, and
+/// send the key `c` after a pause. Return the exit status and the output,
+/// with the time of a log report masked.
+fn continue_after_signal(command: &mut Command) -> (Option<i32>, String, String) {
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().expect("the child has a stdin");
+    let stdout = Arc::new(Mutex::new(Vec::new()));
+    let stdout_reader = collect(child.stdout.take().unwrap(), Arc::clone(&stdout));
+    let stderr = Arc::new(Mutex::new(Vec::new()));
+    let stderr_reader = collect(child.stderr.take().unwrap(), Arc::clone(&stderr));
+    wait_for(&mut child, &stdout, b"ready\n");
+    send(&child, libc::SIGINT);
+    wait_for(&mut child, &stdout, b"BREAK: ");
+    send(&child, libc::SIGTERM);
+    thread::sleep(Duration::from_millis(200));
+    stdin
+        .write_all(b"c")
+        .expect("the input pipe takes the bytes");
+    drop(stdin);
+    let status = wait_for_exit(&mut child, &stdout);
+    stdout_reader.join().unwrap();
+    stderr_reader.join().unwrap();
+    let stdout = mask_time(&String::from_utf8_lossy(&stdout.lock().unwrap()));
+    let stderr = String::from_utf8_lossy(&stderr.lock().unwrap()).into_owned();
+    (status, stdout, stderr)
+}
+
+#[test]
 fn stops_the_break_menu_at_a_closed_stdin_as_pinned_erts() {
     // A `select` on a closed stdin fails, `sys_get_key` returns 0, and the
     // run stops with status 0 (`sys.c:1051-1071`, `break.c:602-604`).

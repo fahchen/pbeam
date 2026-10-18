@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     time::Duration,
 };
 
@@ -1244,13 +1244,22 @@ impl Scheduler {
     /// that PBeam does not run, and [`BeamError::Halt`] when the menu aborts
     /// the run.
     fn notify_signals(&mut self, signals: &[libc::c_int]) -> Result<(), BeamError> {
-        let deferred = std::mem::take(&mut self.deferred_signals);
-        for &number in deferred.iter().chain(signals) {
+        let mut queue: VecDeque<libc::c_int> = std::mem::take(&mut self.deferred_signals).into();
+        queue.extend(signals);
+        // ERTS stops the run when a break request is already pending
+        // (`break_requested`, `sys.c:611-624`).
+        let mut break_pending = false;
+        while let Some(number) = queue.pop_front() {
             if number == libc::SIGINT {
-                // The request that opens the menu is consumed here; a later
-                // SIGINT marks a new request (`sys.c:611-624`, `913`).
+                if break_pending {
+                    return Err(BeamError::Halt(0));
+                }
+                break_pending = true;
+                // The request that opens the menu is consumed here
+                // (`sys.c:611-624`, `913`).
                 let _ = signal::take_break_requested();
                 self.break_menu()?;
+                queue.extend(std::mem::take(&mut self.deferred_signals));
                 continue;
             }
             let name =
@@ -1260,6 +1269,7 @@ impl Scheduler {
                     Term::tuple(vec![Term::static_atom("notify"), Term::static_atom(name)]);
                 self.deliver(server, message);
             }
+            queue.extend(std::mem::take(&mut self.deferred_signals));
         }
         Ok(())
     }
