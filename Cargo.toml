@@ -23,6 +23,7 @@ zlib-rs = "0.6"
 [build-dependencies]
 cc = "1"
 
+
 # The tests interpret BEAM code; opt-level 1 makes the instrumented test run about two times faster.
 # The clippy lint build keeps the dev profile.
 [profile.test]
@@ -461,6 +462,10 @@ path = "tests/feature/pretty.rs"
 [[test]]
 name = "otp_io"
 path = "tests/integration/otp_io.rs"
+
+[[test]]
+name = "native_sha256"
+path = "tests/integration/native_sha256.rs"
 
 [[test]]
 name = "persistent_term"
