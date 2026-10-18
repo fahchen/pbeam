@@ -18,7 +18,7 @@ jobs:
   checks:
     name: checks
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     env:
       MISE_AUTO_INSTALL: "0"
       # Each run builds from an empty target/, so the incremental state has no later use. With incremental compilation, the tests of the `opt-level = 1` test profile also ran slower in the measurement of #354. The value is explicit, because the profile default enables it.
