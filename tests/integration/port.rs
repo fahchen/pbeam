@@ -156,8 +156,9 @@ fn closes_the_port_at_the_exit_of_its_owner_as_pinned_erts() {
 fn closes_the_port_with_epipe_after_a_failed_write_as_pinned_erts() {
     // The program closed its input, so the write fails with `EPIPE`, and
     // the port closes with the reason `epipe` (sys_drivers.c:1180-1184).
-    // Without trap_exit, the owner exits with the reason.
-    assert_runs("epipe()", "[[true,[{'EXIT',port,epipe}],undefined],epipe]");
+    // The owner traps the exit, so the signal is the `'EXIT'` message of the
+    // write result, and the child then exits with the reason `normal`.
+    assert_runs("epipe()", "[[true,[{'EXIT',port,epipe}],undefined],normal]");
 }
 
 #[test]
