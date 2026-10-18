@@ -2,7 +2,7 @@
 %% Run the Terra Counter scenario of docs/terra-target.md in a pseudo-terminal, check each screen, the exit status, and the terminal restore, and write a report.
 %% Usage: escript scripts/terra_reference.escript <output directory> -- <command>...
 %% The macOS script(1) utility opens the pseudo-terminal. Its stdin and stdout are the pipes of an Erlang port, so the harness sends the keys and reads the bytes that the program writes to the terminal.
-%% A shell in the pseudo-terminal sets 80 columns and 24 rows, writes `stty -g` and `stty -a` before and after the command, and writes the exit status of the command.
+%% A shell in the pseudo-terminal sets 80 columns and 24 rows, writes `stty -g` and `stty -a` before and after the command, and writes the exit status of the command. A background loop of the shell sets 30 rows and 100 columns when the harness writes the `resize` file, so that the resize reaches the program as a `SIGWINCH`.
 %% A small screen model applies the control sequences of the output, as a terminal does. The checks read the visible screen, not the bytes.
 %% Exit status: 0 when every check passes, 1 when a check fails, 2 for a usage error.
 -mode(compile).
@@ -18,7 +18,7 @@
 main([Out, "--" | [_ | _] = Command]) ->
     ok = filelib:ensure_path(Out),
     Port = open(Out, Command),
-    {Steps, Screen, Status} = run_steps(Port, steps(), new_screen()),
+    {Steps, Screen, Status} = run_steps(Port, Out, steps(), new_screen()),
     ok = file:write_file(filename:join(Out, "transcript.bin"), maps:get(transcript, Screen)),
     Report = report(Out, Command, Steps, Screen, Status),
     ok = file:write_file(filename:join(Out, "report.txt"), Report),
@@ -31,10 +31,13 @@ main(_) ->
     io:format(standard_error, "usage: terra_reference.escript <output directory> -- <command>...~n", []),
     halt(2).
 
-%% The steps of the Counter scenario: the key to send, the texts that the visible screen must show, and the bound. Each key goes only after the screen of the step before it.
+%% The steps of the Counter scenario: the action, the texts that the visible screen must show, and the bound. Each action goes only after the screen of the step before it.
+%% `resize` sets the pseudo-terminal to 30 rows and 100 columns. `{send, Bytes, Wait}` sends the bytes and waits, so the input flush timer of Terra fires before the next step reads its screen.
 steps() ->
     [
         {start, none, ["Count: 0", "j/k to change, q to quit"], ?START_TIMEOUT},
+        {resize, resize, ["Count: 0"], ?STEP_TIMEOUT},
+        {flush, {send, "\e[", 500}, ["Count: 0"], ?STEP_TIMEOUT},
         {increment, "j", ["Count: 1"], ?STEP_TIMEOUT},
         {increment, "j", ["Count: 2"], ?STEP_TIMEOUT},
         {decrement, "k", ["Count: 1"], ?STEP_TIMEOUT},
@@ -44,6 +47,9 @@ steps() ->
 open(Out, Command) ->
     Shell =
         "out=$1; shift; "
+        "rm -f \"$out/resize\"; "
+        "(wait=0; while [ ! -f \"$out/resize\" ] && [ \"$wait\" -lt 12000 ]; do /bin/sleep 0.05; wait=$((wait + 1)); done; "
+        "[ -f \"$out/resize\" ] && { stty rows 30 cols 100 < /dev/tty; stty -g < /dev/tty > \"$out/stty-resize.g\"; }) & "
         "stty rows 24 cols 80 && stty -g > \"$out/stty-before.g\" && stty -a > \"$out/stty-before.txt\" || exit 125; "
         "\"$@\"; echo $? > \"$out/status\"; "
         "stty -g > \"$out/stty-after.g\"; stty -a > \"$out/stty-after.txt\"",
@@ -51,29 +57,52 @@ open(Out, Command) ->
     Env = [{"TERM", "xterm-256color"}, {"LANG", "en_US.UTF-8"}, {"LC_ALL", "en_US.UTF-8"}],
     open_port({spawn_executable, ?SCRIPT}, [binary, stream, exit_status, use_stdio, {args, Args}, {env, Env}]).
 
-run_steps(Port, Steps, Screen) ->
-    run_steps(Port, Steps, Screen, []).
+run_steps(Port, Out, Steps, Screen) ->
+    run_steps(Port, Out, Steps, Screen, []).
 
-run_steps(Port, [{Name, Key, Expect, Bound} | Steps], Screen0, Done) ->
-    send_key(Port, Key),
+run_steps(Port, Out, [{Name, Action, Expect, Bound} | Steps], Screen0, Done) ->
+    Screen1 = act(Port, Out, Action, Screen0),
     Deadline = erlang:monotonic_time(millisecond) + Bound,
-    case await(Port, Expect, Screen0, Deadline) of
+    case await(Port, Expect, Screen1, Deadline) of
         {ok, Screen} ->
-            Step = {Name, Key, Expect, pass, visible(Screen)},
-            run_steps(Port, Steps, Screen, [Step | Done]);
+            Step = {Name, Action, Expect, pass, visible(Screen)},
+            run_steps(Port, Out, Steps, Screen, [Step | Done]);
         {exit, Status, Screen} when Expect =:= exit ->
-            {lists:reverse([{Name, Key, Expect, pass, visible(Screen)} | Done]), Screen, Status};
+            {lists:reverse([{Name, Action, Expect, pass, visible(Screen)} | Done]), Screen, Status};
         {exit, Status, Screen} ->
-            {lists:reverse([{Name, Key, Expect, early_exit, visible(Screen)} | Done]), Screen, Status};
+            {lists:reverse([{Name, Action, Expect, early_exit, visible(Screen)} | Done]), Screen, Status};
         {timeout, Screen} ->
-            port_close(Port),
-            {lists:reverse([{Name, Key, Expect, timeout, visible(Screen)} | Done]), Screen, timeout}
+            kill(Port),
+            {lists:reverse([{Name, Action, Expect, timeout, visible(Screen)} | Done]), Screen, timeout}
     end;
-run_steps(_Port, [], Screen, Done) ->
+run_steps(_Port, _Out, [], Screen, Done) ->
     {lists:reverse(Done), Screen, none}.
 
-send_key(_Port, none) -> ok;
-send_key(Port, Key) -> true = port_command(Port, Key).
+%% Run the action of a step: write the `resize` file that the shell loop of the
+%% pseudo-terminal waits for and follow the new size in the screen model, send
+%% bytes and wait, send a key, or do nothing.
+act(_Port, _Out, none, Screen) ->
+    Screen;
+act(_Port, Out, resize, Screen) ->
+    ok = file:write_file(filename:join(Out, "resize"), <<"1">>),
+    Screen#{rows := 30, cols := 100};
+act(Port, _Out, {send, Bytes, Wait}, Screen) ->
+    true = port_command(Port, Bytes),
+    timer:sleep(Wait),
+    Screen;
+act(Port, _Out, Key, Screen) ->
+    true = port_command(Port, Key),
+    Screen.
+
+%% Kill the process of the pseudo-terminal, which closes the terminal and
+%% sends `SIGHUP` to the program, so that a run that times out does not
+%% keep the harness alive.
+kill(Port) ->
+    case erlang:port_info(Port, os_pid) of
+        {os_pid, Pid} -> os:cmd("kill -KILL " ++ integer_to_list(Pid));
+        undefined -> ok
+    end,
+    port_close(Port).
 
 %% The step accepts only the output that it receives before the deadline. After the deadline, queued or continuous output does not make the step pass.
 await(Port, Expect, Screen, Deadline) ->
@@ -122,7 +151,8 @@ report(Out, Command, Steps, Screen, Status) ->
     unicode:characters_to_binary([
         "# Terra Counter reference run\n\n",
         "command: ", lists:join(" ", Command), "\n",
-        "pseudo-terminal: ", ?SCRIPT, " -q /dev/null, ", integer_to_list(?COLUMNS), "x", integer_to_list(?ROWS), ", TERM=xterm-256color, LANG=LC_ALL=en_US.UTF-8\n",
+        "pseudo-terminal: ", ?SCRIPT, " -q /dev/null, ", integer_to_list(?COLUMNS), "x", integer_to_list(?ROWS),
+        " (30x100 after the resize), TERM=xterm-256color, LANG=LC_ALL=en_US.UTF-8\n",
         "otp: ", erlang:system_info(otp_release), ", erts ", erlang:system_info(version), "\n",
         "os: ", os_version(), "\n",
         "script(1) exit status: ", io_lib:format("~tp", [Status]), "\n",
@@ -156,6 +186,7 @@ os_version() ->
 
 new_screen() ->
     #{main => #{}, alt => #{}, active => main, row => 1, col => 1, saved => {1, 1},
+      rows => ?ROWS, cols => ?COLUMNS,
       cursor_visible => true, sgr => default, modes => #{}, unknown => [], pending => <<>>, transcript => <<>>}.
 
 feed(Bytes, #{pending := Pending, transcript := Transcript} = Screen) ->
@@ -183,9 +214,9 @@ parse(<<$\r, Rest/binary>>, Screen) ->
 parse(<<$\n, Rest/binary>>, Screen) ->
     parse(Rest, line_feed(Screen));
 parse(<<$\b, Rest/binary>>, #{col := Col} = Screen) ->
-    parse(Rest, Screen#{col := max(1, min(Col, ?COLUMNS) - 1)});
+    parse(Rest, Screen#{col := max(1, min(Col, cols(Screen)) - 1)});
 parse(<<$\t, Rest/binary>>, #{col := Col} = Screen) ->
-    parse(Rest, Screen#{col := min(?COLUMNS, ((Col - 1) div 8 + 1) * 8 + 1)});
+    parse(Rest, Screen#{col := min(cols(Screen), ((Col - 1) div 8 + 1) * 8 + 1)});
 parse(<<C, Rest/binary>>, Screen) when C < 32; C =:= 127 ->
     parse(Rest, Screen);
 parse(<<C/utf8, Rest/binary>>, Screen) ->
@@ -206,11 +237,11 @@ control(<<"?", Modes/binary>>, Final, Screen) when Final =:= $h; Final =:= $l ->
 control(Params, $H, Screen) -> cursor_position(Params, Screen);
 control(Params, $f, Screen) -> cursor_position(Params, Screen);
 control(Params, $A, #{row := Row} = Screen) -> Screen#{row := max(1, Row - hd(numbers(Params, 1)))};
-control(Params, $B, #{row := Row} = Screen) -> Screen#{row := min(?ROWS, Row + hd(numbers(Params, 1)))};
-control(Params, $C, #{col := Col} = Screen) -> Screen#{col := min(?COLUMNS, Col + hd(numbers(Params, 1)))};
-control(Params, $D, #{col := Col} = Screen) -> Screen#{col := max(1, min(Col, ?COLUMNS) - hd(numbers(Params, 1)))};
-control(Params, $G, Screen) -> Screen#{col := clamp(hd(numbers(Params, 1)), ?COLUMNS)};
-control(Params, $d, Screen) -> Screen#{row := clamp(hd(numbers(Params, 1)), ?ROWS)};
+control(Params, $B, #{row := Row} = Screen) -> Screen#{row := min(rows(Screen), Row + hd(numbers(Params, 1)))};
+control(Params, $C, #{col := Col} = Screen) -> Screen#{col := min(cols(Screen), Col + hd(numbers(Params, 1)))};
+control(Params, $D, #{col := Col} = Screen) -> Screen#{col := max(1, min(Col, cols(Screen)) - hd(numbers(Params, 1)))};
+control(Params, $G, Screen) -> Screen#{col := clamp(hd(numbers(Params, 1)), cols(Screen))};
+control(Params, $d, Screen) -> Screen#{row := clamp(hd(numbers(Params, 1)), rows(Screen))};
 control(Params, $J, Screen) -> erase_display(hd(numbers(Params, 0)), Screen);
 control(Params, $K, Screen) -> erase_line(hd(numbers(Params, 0)), Screen);
 control(Params, $m, Screen) -> Screen#{sgr := lists:foldl(fun sgr/2, maps:get(sgr, Screen), numbers(Params, 0))};
@@ -231,7 +262,7 @@ private_mode(Mode, Set, Screen) ->
 
 cursor_position(Params, Screen) ->
     [Row, Col | _] = numbers(Params, 1) ++ [1],
-    Screen#{row := clamp(Row, ?ROWS), col := clamp(Col, ?COLUMNS)}.
+    Screen#{row := clamp(Row, rows(Screen)), col := clamp(Col, cols(Screen))}.
 
 %% The numeric parameters, separated by ';'. An empty parameter takes the default.
 numbers(Params, Default) ->
@@ -253,13 +284,13 @@ erase_line(_, #{row := Row} = Screen) -> erase(fun({R, _}) -> R =:= Row end, Scr
 erase(Erased, #{active := Active} = Screen) ->
     Screen#{Active := maps:filter(fun(Cell, _) -> not Erased(Cell) end, maps:get(Active, Screen))}.
 
-%% A character in column ?COLUMNS + 1 wraps to the next line first, as a terminal with auto-wrap does.
-put_char(C, #{col := Col} = Screen) when Col > ?COLUMNS ->
+%% A character in the column after the last wraps to the next line first, as a terminal with auto-wrap does.
+put_char(C, #{col := Col, cols := Cols} = Screen) when Col > Cols ->
     put_char(C, (line_feed(Screen))#{col := 1});
 put_char(C, #{active := Active, row := Row, col := Col} = Screen) ->
     Screen#{Active := maps:put({Row, Col}, C, maps:get(Active, Screen)), col := Col + 1}.
 
-line_feed(#{row := Row} = Screen) when Row < ?ROWS ->
+line_feed(#{row := Row, rows := Rows} = Screen) when Row < Rows ->
     Screen#{row := Row + 1};
 line_feed(#{active := Active} = Screen) ->
     Grid = maps:get(Active, Screen),
@@ -271,4 +302,7 @@ unknown(Sequence, #{unknown := Unknown} = Screen) ->
 %% The rows of the active screen, without trailing spaces.
 visible(#{active := Active} = Screen) ->
     Grid = maps:get(Active, Screen),
-    [string:trim([maps:get({Row, Col}, Grid, $\s) || Col <- lists:seq(1, ?COLUMNS)], trailing) || Row <- lists:seq(1, ?ROWS)].
+    [string:trim([maps:get({Row, Col}, Grid, $\s) || Col <- lists:seq(1, cols(Screen))], trailing) || Row <- lists:seq(1, rows(Screen))].
+
+cols(Screen) -> maps:get(cols, Screen).
+rows(Screen) -> maps:get(rows, Screen).

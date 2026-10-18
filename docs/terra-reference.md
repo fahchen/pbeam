@@ -27,19 +27,23 @@ The task compiles the upstream `examples/counter_app.exs` with the Terra sources
 
 The shell in the pseudo-terminal sets 80 columns and 24 rows with `stty`. It writes `stty -g` and `stty -a` before and after the command, and it writes the exit status of the command.
 
-A screen model applies the control sequences of the output to an 80 by 24 grid: cursor movement, erase, SGR attributes, the alternate screen of mode 1049, and the cursor visibility of mode 25. The report lists each control sequence that the model does not know.
+A screen model applies the control sequences of the output to a grid of 80 by 24 cells, and of 30 by 100 cells after the resize: cursor movement, erase, SGR attributes, the alternate screen of mode 1049, and the cursor visibility of mode 25. The report lists each control sequence that the model does not know.
 
 The harness sends one key only after the visible screen shows the expected text of the step before it:
 
 | Step | Key | Expected visible text | Bound |
 | --- | --- | --- | --- |
 | Start | None | `Count: 0` and `j/k to change, q to quit` | 600 seconds, because the command can build the example first |
+| Resize | None; sets the pseudo-terminal to 30 rows and 100 columns | `Count: 0` | 10 seconds |
+| Flush | `\e[`, then 500 milliseconds | `Count: 0` | 10 seconds |
 | Increment | `j` | `Count: 1` | 10 seconds |
 | Increment | `j` | `Count: 2` | 10 seconds |
 | Decrement | `k` | `Count: 1` | 10 seconds |
 | Quit | `q` | The command exits. | 10 seconds |
 
-A step that does not see its text in its bound fails the run. After the run, these checks must pass: the exit status of `script(1)` and of the command is 0, the output has `{:ok, 1}`, the main screen is active, the cursor is visible, the SGR attributes are reset, and `stty -g` after the run is the same as before the run.
+The resize step writes the `resize` file, and a background loop of the shell of the pseudo-terminal sets 30 rows and 100 columns with `stty`. Terra caches the terminal size when it enters the terminal (`lib/terra/terminal/owner.ex:192`), and `Owner.info/0` gives that cache (`229-236`), so `Terminal.size/0` keeps 80 by 24 and the view does not change. The step checks that the run continues after the signal. The flush step sends an incomplete escape sequence and waits 500 milliseconds, so the input flush timer of Terra (`lib/terra/input.ex:211-222`) fires; the step checks that the run continues after the timer.
+
+A step that does not see its text in its bound fails the run. A timeout kills the process of the pseudo-terminal, which closes the terminal and sends `SIGHUP` to the program. After the run, these checks must pass: the exit status of `script(1)` and of the command is 0, the output has `{:ok, 1}`, the main screen is active, the cursor is visible, the SGR attributes are reset, and `stty -g` after the run is the same as before the run.
 
 The check of the result reads the output, not the main screen. Terra sends the result to `main/0` before its terminal owner restores the terminal (Terra `lib/terra/runtime.ex:282-288`, `356-359`), so the order of the two writes is a race. When `main/0` writes first, `{:ok, 1}` goes to the alternate screen and is not visible after the run. The "Code loading" row of [ERTS Differences](erts-differences.md) records this race (#428). The report gives the screen that shows the result after the run.
 
@@ -47,7 +51,7 @@ The checks were tested on 2026-10-11 with commands that break them on purpose. A
 
 ## Reference result
 
-Measured on 2026-10-11 on `main` `1bc5c34` with this branch. `mise run terra-reference` gave exit status 0, and each check of both runs passed. A second run gave the same inventory.
+Measured on 2026-10-19 on `main` `ecb20086`. `mise run terra-reference` gave exit status 0, and each check of both runs passed. A second run gave the same inventory.
 
 | Item | Value |
 | --- | --- |
@@ -59,11 +63,11 @@ Measured on 2026-10-11 on `main` `1bc5c34` with this branch. `mise run terra-ref
 | Terminal | `script(1)` pseudo-terminal, 80 columns, 24 rows, `TERM=xterm-256color`, `LANG=LC_ALL=en_US.UTF-8` |
 | First mode | `stty -g`: `gfmt1:cflag=4b00:iflag=2b02:lflag=5cb:oflag=3:...` (`icanon isig iexten echo`, `opost onlcr`, `-iutf8`) |
 
-The steps showed `Count: 0` with `j/k to change, q to quit`, then `Count: 1`, `Count: 2`, and `Count: 1`, in a box of 80 by 24 cells on the alternate screen. After `q`, the command exited with status 0. The output ended with `\e[0m\e[?25h\e[?1049l{:ok, 1}\n`, so the main screen showed `{:ok, 1}` after the build messages. The cursor was visible, the attributes were reset, and `stty -g` after the run was the same as before the run.
+The steps showed `Count: 0` with `j/k to change, q to quit`, then the resize and the flush, then `Count: 1`, `Count: 2`, and `Count: 1`, in a box of 80 by 24 cells on the alternate screen. The terminal was in raw mode when the resize step set 30 rows and 100 columns (`stty-resize.g`). After `q`, the command exited with status 0. The output ended with `\e[0m\e[?25h\e[?1049l{:ok, 1}\n`, so the main screen showed `{:ok, 1}` after the build messages. The cursor was visible, the attributes were reset, and `stty -g` after the run was the same as before the run.
 
 In the inventory run, `main/0` wrote `{:ok, 1}` before the restore sequence, so the result went to the alternate screen. That run loads the modules before the run, as PBeam does, and the "Code loading" row of [ERTS Differences](erts-differences.md) gives this order for that case. Each other check passed.
 
-Task #21 ran the same harness on the PBeam runtime of `main` `ecb20086` on 2026-10-19 with `PBEAM_BIN=target/release/pbeam escript scripts/terra_reference.escript target/reference/pbeam -- bash scripts/example.sh terra_counter --no-build`, and got exit status 0. Each check of both runs passed: each step showed its screen, the exit statuses were 0, the output had `{:ok, 1}`, the main screen was active, the cursor was visible, the attributes were reset, and `stty -g` after equalled `stty -g` before. The two reports differ only in the command line and in the banner lines of the example runner; the final main screens, the terminal states, and the unknown-sequence lists are equal. #448 gives the PBeam run the start set of the build, so the `main` process waits for its module loads as in the reference run, and the restore sequence comes before the result. The scenario exercises none of the static candidates that the inventory lists as unexercised, and it does not resize the terminal, give an error, or wait for a flush timer, so those paths stay unverified. Task #832 extends the harness with a resize step and a partial escape sequence and owns these paths.
+Task #21 ran the same harness, without the resize and flush steps, on the PBeam runtime of `main` `ecb20086` on 2026-10-19 with `PBEAM_BIN=target/release/pbeam escript scripts/terra_reference.escript target/reference/pbeam -- bash scripts/example.sh terra_counter --no-build`, and got exit status 0. Each check of both runs passed: each step showed its screen, the exit statuses were 0, the output had `{:ok, 1}`, the main screen was active, the cursor was visible, the attributes were reset, and `stty -g` after equalled `stty -g` before. The two reports differ only in the command line and in the banner lines of the example runner; the final main screens, the terminal states, and the unknown-sequence lists are equal. #448 gives the PBeam run the start set of the build, so the `main` process waits for its module loads as in the reference run, and the restore sequence comes before the result. Task #832 added the resize and flush steps and ran the harness on PBeam again on 2026-10-19 with the same command. Both runtimes pass every step and every check, and the reports differ only in the command line and the runner banner lines. Terra keeps the cached 80 by 24 size on both runtimes, so neither view changes at the resize. The scenario still exercises none of the static candidates that the inventory lists as unexercised, and it does not give an error; those paths stay unverified.
 
 The fixture disassembly of the entry, `mise run disasm target/examples/terra_counter/Elixir.TerraCounter.beam main/0`, gives `io:setopts/2` with `[binary]` on `standard_io`, an `is_eq_exact` test of `ok`, `'Elixir.Terra':run/1` with `'Elixir.Counter'`, and `'Elixir.IO':inspect/1` as the last call.
 
@@ -126,7 +130,7 @@ Exercised: the called functions have 104 of these names. These are the names tha
 
 ## Known uncertainty
 
-- The scenario is one session with the keys `j j k q`. It does not resize the terminal, give an error, or wait for a timer, so the code of these events is static only.
+- The scenario is one session with the keys `j j k q`, a resize, and an incomplete escape sequence. It does not give an error, so the code of the error path is static only. Terra keeps the terminal size that it caches at the start, so the resize reaches its signal handler but changes no view.
 - The call counters count calls of functions, not instructions. A called function can have instructions that did not run, so the exercised instruction names are an upper bound.
 - A BIF that the compiler makes a `bif` or `gc_bif` instruction, for example `erlang:element/2` in a guard, has no count. The 65 BIFs of these instructions are static candidates only.
 - The counters start after the boot of `erl -noshell` and stop after the terminal owner of Terra stops. The count of `erts_internal:trace_pattern/3` comes from `terra_calls`, not from the scenario.
