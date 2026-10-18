@@ -2,7 +2,7 @@ use std::{
     ffi::c_int,
     io::{self, Read, Write},
     os::{
-        fd::{FromRawFd, OwnedFd},
+        fd::{AsRawFd, FromRawFd, OwnedFd},
         unix::process::CommandExt,
     },
     process::{Child, Command, Stdio},
@@ -277,6 +277,83 @@ fn gives_a_runtime_error_for_a_break_command_that_pbeam_does_not_run() {
         assert_eq!(status, Some(1), "{key}");
         assert_eq!(stdout, BREAKS, "{key}");
         assert!(stderr.contains(detail), "expected {detail} in {stderr:?}");
+    }
+}
+
+#[test]
+fn reads_a_break_key_in_the_initial_terminal_mode_as_pinned_erts() {
+    // ERTS sets fd 0 to the mode of the start of the run during the menu
+    // and restores the application mode after it (`sys.c:899-923`). A key
+    // that the application reads in raw mode then waits in the line
+    // discipline for the newline, as in the initial mode.
+    for (name, mut command) in [("ERTS", erts("wait")), ("PBeam", pbeam("wait"))] {
+        let (status, output) = break_in_raw_terminal(&mut command);
+        assert_eq!(status, Some(0), "{name}");
+        assert!(
+            output.windows(7).any(|window| window == b"BREAK: "),
+            "{name}: {:?}",
+            String::from_utf8_lossy(&output)
+        );
+    }
+}
+
+/// Run `command` in a pseudo-terminal, set the terminal to raw mode, send
+/// `SIGINT`, and write the key `a` without a newline. Return the exit status
+/// and the output. Assert that the run waits for the newline, which gives
+/// the key in the initial terminal mode.
+fn break_in_raw_terminal(command: &mut Command) -> (Option<i32>, Vec<u8>) {
+    let (master, slave) = open_terminal();
+    let raw = slave.try_clone().unwrap();
+    // SAFETY: the closure runs in the child before `exec`, and calls only
+    // the async-signal-safe `setsid` and `ioctl`, as `run_in_terminal` does.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 || set_controlling_terminal() == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command
+        .stdin(slave.try_clone().unwrap())
+        .stdout(slave.try_clone().unwrap())
+        .stderr(slave)
+        .spawn()
+        .unwrap();
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut terminal = std::fs::File::from(master);
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let reader = collect(terminal.try_clone().unwrap(), Arc::clone(&output));
+    wait_for(&mut child, &output, b"ready\r\n");
+    set_raw(&raw);
+    send(&child, libc::SIGINT);
+    wait_for(&mut child, &output, b"BREAK: ");
+    terminal.write_all(b"a").unwrap();
+    thread::sleep(Duration::from_millis(200));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "the run read the key before the newline"
+    );
+    terminal.write_all(b"\n").unwrap();
+    let status = wait_for_exit(&mut child, &output);
+    reader.join().unwrap();
+    let output = output.lock().unwrap().clone();
+    (status, output)
+}
+
+/// Set `fd`, a pseudo-terminal, to raw mode, as an application does with
+/// `cfmakeraw`.
+fn set_raw(fd: &OwnedFd) {
+    // SAFETY: `tcgetattr` writes one `termios` and `tcsetattr` reads one
+    // from the terminal fd, which the test owns.
+    unsafe {
+        let mut mode = std::mem::zeroed();
+        assert_eq!(libc::tcgetattr(fd.as_raw_fd(), &raw mut mode), 0);
+        libc::cfmakeraw(&raw mut mode);
+        assert_eq!(libc::tcsetattr(fd.as_raw_fd(), libc::TCSANOW, &mode), 0);
     }
 }
 

@@ -18,7 +18,7 @@ use super::{
         self,
         input::{self, Readiness},
         output::IovecWrite,
-        signal,
+        signal, terminal,
     },
     interpreter::{CodeTable, LoadedModule},
     local_node,
@@ -34,7 +34,7 @@ use super::{
     resources::Resources,
     signal::Signal,
     timer::{Receiver, Timer, Timers},
-    tty::Ttys,
+    tty::{InitialMode, Ttys},
 };
 use crate::{
     error::{BeamError, error},
@@ -398,6 +398,10 @@ pub(super) struct Scheduler {
     /// Compiled patterns of `binary:compile_pattern/1` of the node. All
     /// processes of the run share them.
     pub(super) binary_patterns: BinaryPatterns,
+    /// The mode of fd 0 at the start of the run, which the break menu sets
+    /// while it reads its keys (`erl_sys_initial_tty_mode`, `sys.c:428-432`,
+    /// `899-923`).
+    initial_tty_mode: InitialMode,
     /// Typed values of the node, one value of each type, such as the
     /// compiled regular expressions in `RegexCodes` and the TTY resources
     /// in `Ttys`. All processes of the run share them.
@@ -509,6 +513,7 @@ impl Scheduler {
             ets: EtsTables::default(),
             atomics: AtomicArrays::default(),
             binary_patterns: BinaryPatterns::default(),
+            initial_tty_mode: InitialMode::read(),
             resources,
             atoms,
             code: CodeTable::default(),
@@ -1284,6 +1289,24 @@ impl Scheduler {
     /// Return the runtime error that names a break command that PBeam does
     /// not run, and [`BeamError::Halt`] for an abort.
     fn break_menu(&mut self) -> Result<(), BeamError> {
+        // ERTS saves the mode of fd 0, sets the mode of the start of the
+        // run while the menu reads its keys, and then restores the saved
+        // mode (`sys.c:899-923`). `get_mode` gives `None` when fd 0 is not
+        // a terminal, and ERTS then changes nothing.
+        let saved = terminal::get_mode(libc::STDIN_FILENO);
+        if let Some(initial) = self.initial_tty_mode.mode() {
+            let _ = terminal::set_mode(libc::STDIN_FILENO, initial);
+        }
+        let result = self.run_break_menu();
+        if let Some(saved) = saved {
+            let _ = terminal::set_mode(libc::STDIN_FILENO, &saved);
+        }
+        result
+    }
+
+    /// Read the keys of the break menu, with the mode of fd 0 of the start
+    /// of the run.
+    fn run_break_menu(&mut self) -> Result<(), BeamError> {
         use std::io::{IsTerminal, Write};
 
         const HELP: &str = "BREAK: (a)bort (A)bort with dump (c)ontinue (p)roc info (i)nfo\r\n       (l)oaded (v)ersion (k)ill (D)b-tables (d)istribution\r\n";
