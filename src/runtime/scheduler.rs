@@ -1263,7 +1263,7 @@ impl Scheduler {
     /// Return the runtime error that names a break command that PBeam does
     /// not run, and [`BeamError::Halt`] for an abort.
     fn break_menu(&mut self) -> Result<(), BeamError> {
-        use std::io::{IsTerminal, Read, Write};
+        use std::io::{IsTerminal, Write};
 
         const HELP: &str = "BREAK: (a)bort (A)bort with dump (c)ontinue (p)roc info (i)nfo\r\n       (l)oaded (v)ersion (k)ill (D)b-tables (d)istribution\r\n";
         // A run that does not write to a terminal keeps its screen
@@ -1276,15 +1276,15 @@ impl Scheduler {
         let mut stdout = std::io::stdout();
         let _ = write!(stdout, "\r\n{clear}{HELP}");
         let _ = stdout.flush();
-        let mut stdin = std::io::stdin();
         loop {
-            let mut buffer = [0_u8; 64];
-            // `sys_get_key` reads up to 64 bytes and uses the first, and a
-            // read error, the end of the input, and the NUL byte abort the
-            // run (`sys.c:1051-1071`, `break.c:602-604`).
-            let key = match stdin.read(&mut buffer) {
-                Ok(0) | Err(_) => 0,
-                Ok(_) => buffer[0],
+            // `sys_get_key` reads up to 64 bytes of the descriptor and uses
+            // the first (`sys.c:1051-1071`). Read the descriptor directly: a
+            // buffered read can take more than 64 bytes and keep them from
+            // the next reader of the descriptor. A read error, the end of
+            // the input, and the NUL byte abort the run (`break.c:602-604`).
+            let key = match super::host::input::read(libc::STDIN_FILENO, 64) {
+                Ok(bytes) if !bytes.is_empty() => bytes[0],
+                _ => 0,
             };
             if key == 0 {
                 return Err(BeamError::Halt(0));
