@@ -274,7 +274,7 @@ Security implementation is milestone M6. The owner decisions of 2026-10-15 set t
 - Application startup semantics, dependency initialization, entry arguments, exit status, and shutdown policy.
 - Required process semantics, including selective receive, timers, links, monitors, and exception behavior for the chosen slice.
 - Native registry conflict policy, validation timing, call-path coverage, errors, resource ownership, and async cancellation.
-- Bundle encoding/versioning, validation limits, resource lookup semantics, and whether compression is needed.
+- Bundle encoding/versioning, validation limits, and resource lookup semantics: resolved by task #15 and `docs/bundle-format.md`. Compression remains open and stays out until a measured need justifies it.
 - Scheduler count policy for the initial macOS arm64 target.
 
 Resolve each detail when its first implementation slice requires it. Add only the foundations that slice consumes; do not interpret the logical architecture or future platform matrix as a request to scaffold unused components.
