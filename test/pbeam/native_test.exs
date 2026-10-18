@@ -11,12 +11,15 @@ defmodule PBeam.NativeTest do
   """
 
   @root Path.expand("../..", __DIR__)
-  @fixture_source Path.join(@root, "fixtures/native_decl/native_decl_probe.ex")
-  @fixture_beam Path.join(@root, "fixtures/native_decl/Elixir.NativeDeclProbe.beam")
+  @fixture_dir Path.join(@root, "fixtures/native_decl")
+  @fixture_source Path.join(@fixture_dir, "native_decl_probe.ex")
+  @fixture_beam Path.join(@fixture_dir, "Elixir.NativeDeclProbe.beam")
+  @caller_beam Path.join(@fixture_dir, "Elixir.NativeDeclProbeCaller.beam")
 
   setup_all do
     [{declared, binary}] = Code.compile_string(@declared)
-    %{declared: declared, binary: binary}
+    fresh = Map.new(Code.compile_file(@fixture_source))
+    %{declared: declared, binary: binary, fresh: fresh}
   end
 
   test "writes the declared pairs to the pbeam_native attribute", %{binary: binary} do
@@ -29,35 +32,63 @@ defmodule PBeam.NativeTest do
     assert error.original == :pbeam_native_only
   end
 
-  test "the committed fixture keeps the declarations of the current library" do
-    compiled = Map.new(Code.compile_file(@fixture_source))
-    committed = attributes(File.read!(@fixture_beam))
+  test "the committed fixture keeps the declarations of the library", %{fresh: fresh} do
+    assert attributes(Map.fetch!(fresh, NativeDeclProbe))[:pbeam_native] ==
+             attributes(File.read!(@fixture_beam))[:pbeam_native]
 
-    assert attributes(Map.fetch!(compiled, NativeDeclProbe))[:pbeam_native] ==
-             committed[:pbeam_native]
+    assert attributes(Map.fetch!(fresh, NativeDeclProbeCaller))[:pbeam_native] ==
+             attributes(File.read!(@caller_beam))[:pbeam_native]
+  end
 
-    assert attributes(Map.fetch!(compiled, NativeDeclProbeCaller))[:pbeam_native] == nil
+  test "the committed fixture keeps the entry of the declaration of the library", %{
+    fresh: fresh
+  } do
+    # The declaration also writes the `nifs` attribute, which makes the
+    # compiler write `nif_start` at the entry of the stub. A change of the
+    # declaration of the library must fail here too, so no committed fixture
+    # stays behind the library.
+    assert starts_at_nif_start?(Map.fetch!(fresh, NativeDeclProbe))
+    assert starts_at_nif_start?(File.read!(@fixture_beam))
   end
 
   test "the committed fixture adds the declaration to the nifs attribute" do
-    binary = File.read!(@fixture_beam)
-    assert nifs(binary) == [sha256: 1]
+    assert nifs(File.read!(@fixture_beam)) == [sha256: 1]
   end
 
-  test "the committed fixture starts the declaration with nif_start" do
-    {:beam_file, _module, _exports, _attributes, _compile_info, functions} =
-      :beam_disasm.file(String.to_charlist(@fixture_beam))
-
-    {_label, :sha256, 1, _entry, code} =
-      Enum.find(functions, fn {_label, name, arity, _entry, _code} ->
-        name == :sha256 and arity == 1
-      end)
-
-    # Only the entry instructions of the function come before `nif_start`,
-    # so a call enters the instruction at once.
-    assert :nif_start in code
-    assert code |> Enum.take_while(&(&1 != :nif_start)) |> Enum.all?(&entry_instruction?/1)
+  test "the committed fixture keeps the caller without a declaration", %{fresh: fresh} do
+    refute starts_at_nif_start?(Map.fetch!(fresh, NativeDeclProbeCaller))
+    refute starts_at_nif_start?(File.read!(@caller_beam))
   end
+
+  # Return whether the stub of `sha256/1` starts at a `nif_start`
+  # instruction. A compile inside a Mix task keeps no abstract code, so this
+  # reads the instructions from a file.
+  defp starts_at_nif_start?(binary) do
+    path =
+      Path.join(System.tmp_dir!(), "pbeam_native_#{:erlang.unique_integer([:positive])}.beam")
+
+    File.write!(path, binary)
+
+    try do
+      {:beam_file, _module, _exports, _attributes, _compile_info, functions} =
+        :beam_disasm.file(String.to_charlist(path))
+
+      case Enum.find(functions, &stub?/1) do
+        {_label, :sha256, 1, _function_entry, code} ->
+          # Only the entry instructions of the function come before
+          # `nif_start`, so a call enters the instruction at once.
+          :nif_start in code and
+            code |> Enum.take_while(&(&1 != :nif_start)) |> Enum.all?(&entry_instruction?/1)
+
+        nil ->
+          false
+      end
+    after
+      File.rm(path)
+    end
+  end
+
+  defp stub?({_label, name, arity, _entry, _code}), do: name == :sha256 and arity == 1
 
   defp entry_instruction?({:label, _}), do: true
   defp entry_instruction?({:line, _}), do: true
