@@ -1,5 +1,5 @@
 -module(binary_find_probe).
--export([results/0, costs/1, measure/4]).
+-export([results/0, compiled/0, costs/1, measure/4]).
 
 %% binary:match/2 with each subject and pattern form. A pattern of one
 %% binary runs the Boyer-Moore search, and two or more binaries run the
@@ -67,3 +67,36 @@ repeat(Bin, N) ->
         0 -> <<Half/binary, Half/binary>>;
         1 -> <<Half/binary, Half/binary, Bin/binary>>
     end.
+
+
+%% binary:compile_pattern/1 and the compiled patterns of
+%% binary:match/2, binary:matches/2, and binary:split/2,3
+%% (erl_bif_binary.c:1004-1116, 1244-1271). The reference of a compiled
+%% pattern differs between runs, so this probe prints only its tag and
+%% whether the second element is a reference.
+compiled() ->
+    S = <<"xaxbcx">>,
+    B = binary:compile_pattern(<<"a">>),
+    One = binary:compile_pattern([<<"a">>]),
+    A = binary:compile_pattern([<<"a">>, <<"bc">>]),
+    [tag(B), tag(One), tag(A),
+     binary:match(S, B), binary:matches(<<"xaxa">>, B), binary:split(S, B),
+     binary:match(S, A), binary:matches(<<"abc">>, A), binary:split(S, A),
+     binary:split(S, A, [global]),
+     binary:match(binary:copy(<<"a">>, 400000), binary:compile_pattern(<<"b">>)),
+     attempt(fun() -> binary:match(S, {ac, element(2, B)}) end),
+     attempt(fun() -> binary:match(S, {bm, element(2, A)}) end),
+     attempt(fun() -> binary:match(S, {bm, make_ref()}) end),
+     attempt(fun() -> binary:match(S, {xx, element(2, B)}) end),
+     attempt(fun() -> binary:compile_pattern(<<>>) end),
+     attempt(fun() -> binary:compile_pattern([]) end),
+     attempt(fun() -> binary:compile_pattern([<<>>]) end),
+     attempt(fun() -> binary:compile_pattern([<<"a">>, 1]) end),
+     attempt(fun() -> binary:compile_pattern([<<"a">> | b]) end),
+     attempt(fun() -> binary:compile_pattern(abc) end)].
+
+tag(Pattern) ->
+    {element(1, Pattern), is_reference(element(2, Pattern))}.
+
+attempt(Fun) ->
+    try Fun() catch Class:Reason -> {Class, Reason} end.

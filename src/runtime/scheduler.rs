@@ -5,6 +5,7 @@ use std::{
 
 use super::{
     atomics::AtomicArrays,
+    binary_pattern::BinaryPatterns,
     buffers::Buffers,
     capability::{
         Capability, CapabilityId, CapabilityKind, Delegations, Denied, Operation, Restriction,
@@ -394,6 +395,9 @@ pub(super) struct Scheduler {
     /// Atomic arrays of the node, which the `atomics` module and the
     /// `counters` module use. All processes of the run share them.
     pub(super) atomics: AtomicArrays,
+    /// Compiled patterns of `binary:compile_pattern/1` of the node. All
+    /// processes of the run share them.
+    pub(super) binary_patterns: BinaryPatterns,
     /// Typed values of the node, one value of each type, such as the
     /// compiled regular expressions in `RegexCodes` and the TTY resources
     /// in `Ttys`. All processes of the run share them.
@@ -504,6 +508,7 @@ impl Scheduler {
             persistent_terms: PersistentTerms::default(),
             ets: EtsTables::default(),
             atomics: AtomicArrays::default(),
+            binary_patterns: BinaryPatterns::default(),
             resources,
             atoms,
             code: CodeTable::default(),
@@ -1517,6 +1522,35 @@ impl Scheduler {
             .current_mut()
             .expect("the scheduler has a current process");
         (process, &self.atoms)
+    }
+
+    /// Return the current process and the compiled binary patterns of the
+    /// run together. A `binary:match/2`, `binary:matches/2`, or
+    /// `binary:split/2,3` call with a compiled pattern needs the store at the
+    /// same time as the process. The two borrows are of different fields, so
+    /// they do not conflict.
+    ///
+    /// # Panics
+    ///
+    /// Panic when the scheduler has no current process, as
+    /// [`Self::current_process_mut`] does.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.schedule_next();
+    /// let (process, patterns) = scheduler.current_process_and_patterns_mut();
+    /// assert_eq!(process.id, ProcessId(0));
+    /// assert!(patterns.pattern(&Term::Reference(Reference(0))).is_none());
+    /// ```
+    pub(super) fn current_process_and_patterns_mut(
+        &mut self,
+    ) -> (&mut ProcessState, &BinaryPatterns) {
+        let process = self
+            .processes
+            .current_mut()
+            .expect("the scheduler has a current process");
+        (process, &self.binary_patterns)
     }
 
     /// Return the module of the active frame of the current process from

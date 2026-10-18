@@ -5642,6 +5642,22 @@ fn rejects_a_packet_bitstring_that_is_not_a_byte() {
 }
 
 #[test]
+fn rejects_a_compile_pattern_bitstring_that_is_not_a_byte() {
+    // ERTS rejects a needle that is not a whole number of bytes
+    // (`erl_bif_binary.c:1023-1026`, `1040-1043`). A compiled fixture cannot
+    // hold that shape, so the test builds it in Rust.
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let needle = Term::Binary(Binary::from(&[0x10_u8]).bits(0, 4));
+    let result = program
+        .bif(&mut scheduler, "binary", "compile_pattern", vec![needle])
+        .unwrap();
+    assert!(matches!(result, BifResult::Raise { .. }));
+}
+
+#[test]
 fn stops_at_an_integer_packet_type_that_pbeam_does_not_run() {
     // The small integers 0, 1, 2 and 4 are packet types
     // (`erl_bif_port.c:1493-1496`), so they reach the runtime error of the
