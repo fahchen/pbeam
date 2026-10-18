@@ -33,8 +33,10 @@ defmodule PBeam.NativeTest do
   end
 
   test "refuses a declaration that is not a plain function head" do
-    assert_refused("defnative :sha256")
-    assert_refused("defnative guarded(data) when is_binary(data)")
+    head = ~r/defnative expects a function head/
+    assert_refused("defnative :sha256", head)
+    assert_refused("defnative guarded(data) when is_binary(data)", head)
+    assert_refused("defnative patterned({a, b})", ~r/defnative expects a variable argument/)
   end
 
   test "the committed fixture keeps the declarations of the library", %{fresh: fresh} do
@@ -60,12 +62,23 @@ defmodule PBeam.NativeTest do
     assert nifs(File.read!(@fixture_beam)) == [sha256: 1]
   end
 
+  test "the stub keeps the names of the declaration" do
+    # The stub takes the arguments of the declaration, so the module shows the
+    # names of the declaration and not synthetic ones.
+    import PBeam.Native
+
+    expanded = Macro.expand_once(quote(do: defnative(sha256(data))), __ENV__)
+
+    assert Macro.to_string(expanded) =~ "def sha256(data) do"
+    assert Macro.to_string(expanded) =~ ":erlang.nif_error(:pbeam_native_only)"
+  end
+
   test "the committed fixture keeps the caller without a declaration", %{fresh: fresh} do
     refute starts_at_nif_start?(Map.fetch!(fresh, NativeDeclProbeCaller))
     refute starts_at_nif_start?(File.read!(@caller_beam))
   end
 
-  defp assert_refused(declaration) do
+  defp assert_refused(declaration, message) do
     source = """
     defmodule PBeam.NativeTest.Refused do
       use PBeam.Native
@@ -74,7 +87,7 @@ defmodule PBeam.NativeTest do
     end
     """
 
-    assert_raise ArgumentError, ~r/defnative expects a function head/, fn ->
+    assert_raise ArgumentError, message, fn ->
       Code.compile_string(source)
     end
   end
