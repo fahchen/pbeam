@@ -65,6 +65,8 @@ run_steps(Port, Out, [{Name, Action, Expect, Bound} | Steps], Screen0, Done) ->
         {failed, Screen} ->
             kill(Port),
             {lists:reverse([{Name, Action, Expect, act_failed, visible(Screen)} | Done]), Screen, act_failed};
+        {exit, Status, Screen} ->
+            {lists:reverse([{Name, Action, Expect, early_exit, visible(Screen)} | Done]), Screen, Status};
         {ok, Screen1} ->
             run_await(Port, Out, Name, Action, Expect, Bound, Steps, Screen1, Done)
     end;
@@ -99,11 +101,26 @@ act(_Port, Out, resize, Screen) ->
     end;
 act(Port, _Out, {send, Bytes, Wait}, Screen) ->
     true = port_command(Port, Bytes),
-    timer:sleep(Wait),
-    {ok, Screen};
+    wait(Port, erlang:monotonic_time(millisecond) + Wait, Screen);
 act(Port, _Out, Key, Screen) ->
     true = port_command(Port, Key),
     {ok, Screen}.
+
+%% Read the output of the port until the deadline, so that the program can
+%% write and exit while the step waits. Return the exit status when the
+%% program ends first.
+wait(Port, Deadline, Screen) ->
+    Timeout = Deadline - erlang:monotonic_time(millisecond),
+    case Timeout =< 0 of
+        true ->
+            {ok, Screen};
+        false ->
+            receive
+                {Port, {data, Bytes}} -> wait(Port, Deadline, feed(Bytes, Screen));
+                {Port, {exit_status, Status}} -> {exit, Status, Screen}
+            after Timeout -> {ok, Screen}
+            end
+    end.
 
 %% Wait until the shell of the pseudo-terminal writes the size of the
 %% resized terminal and a marker, and accept only 30 rows and 100 columns.

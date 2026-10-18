@@ -112,7 +112,7 @@ The boot of `erl -noshell` (for example `prim_tty:tty_create/1` and `setlocale/1
 
 ### BIFs and NIFs
 
-Static candidates: 331 BIFs in external calls, 65 BIFs in `bif` and `gc_bif` instructions, and 139 NIF stubs (functions that call `erlang:nif_error/1,2` and are not BIFs).
+Static candidates: 334 BIFs in external calls, 66 BIFs in `bif` and `gc_bif` instructions, and 139 NIF stubs (functions that call `erlang:nif_error/1,2` and are not BIFs).
 
 Exercised: 60 BIFs and 8 NIFs. The called NIFs are `prim_file:read_info_nif/2` and the seven `prim_tty` NIFs of the host operations table. The called BIFs, with the count:
 
@@ -132,7 +132,7 @@ Exercised: the called functions have 105 of these names. These are the names tha
 
 - The scenario is one session with the keys `j j k q`, a resize, and an incomplete escape sequence. It does not give an error, so the code of the error path is static only. Terra keeps the terminal size that it caches at the start, so the terminal changes size and the following steps still pass, but no view changes; the harness does not show that the signal handler ran.
 - The call counters count calls of functions, not instructions. A called function can have instructions that did not run, so the exercised instruction names are an upper bound.
-- A BIF that the compiler makes a `bif` or `gc_bif` instruction, for example `erlang:element/2` in a guard, has no count. The 65 BIFs of these instructions are static candidates only.
+- A BIF that the compiler makes a `bif` or `gc_bif` instruction, for example `erlang:element/2` in a guard, has no count. The 66 BIFs of these instructions are static candidates only.
 - The counters start after the boot of `erl -noshell` and stop after the terminal owner of Terra stops. The count of `erts_internal:trace_pattern/3` comes from `terra_calls`, not from the scenario.
 - The inventory run loads the modules of the BEAM list before the counters start, so its counts do not have the module loads of the code server. The reference run loads the modules on their first call. The order of the result and the restore sequence then changes (#428), but the other observable results are the same.
 - The counts of `os:find_executable/1` depend on `PATH`. The `PATH` of `mise run` puts the mise tool directories first.
