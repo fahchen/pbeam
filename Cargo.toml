@@ -23,9 +23,6 @@ zlib-rs = "0.6"
 [build-dependencies]
 cc = "1"
 
-[dev-dependencies]
-# An integration test registers the SHA-256 native of the declaration example.
-sha2 = "0.10"
 
 # The tests interpret BEAM code; opt-level 1 makes the instrumented test run about two times faster.
 # The clippy lint build keeps the dev profile.
