@@ -1,7 +1,9 @@
 //! Serve `GET /` from `examples/plug_hello` on the pinned ERTS and on the
 //! `pbeam` binary, and compare the status line, the content type, and the
-//! body. The example starts Bandit on the port of the `PORT` variable, so
-//! each run gets a free port and the runs do not collide.
+//! body. The one-file run also compares the SIGTERM shutdown notice and the
+//! exit status with the pinned ERTS. The example starts Bandit on the port
+//! of the `PORT` variable, so each run gets a free port and the runs do not
+//! collide.
 
 use std::{
     fs,
@@ -201,6 +203,23 @@ fn serve_one_file() -> (String, String, String) {
         fs::read_dir(&temporary).unwrap().next().is_none(),
         "the run keeps its extracted directory"
     );
+    // The kernel `erl_signal_handler` prints the SIGTERM notice and calls
+    // `init:stop/0` (`erl_signal_handler.erl:45-48`). The one-file run gives
+    // the same notice and exit status as the same release on the pinned
+    // ERTS.
+    assert!(
+        status.success(),
+        "the one-file run exits 0 after SIGTERM: {status:?}"
+    );
+    let one_file_stdout = String::from_utf8_lossy(&stdout.lock().unwrap()).into_owned();
+    let notice = shutdown_notice(&one_file_stdout);
+    assert!(
+        notice.is_some(),
+        "the one-file run writes the shutdown notice: {one_file_stdout}"
+    );
+    let (erts_status, erts_notice) = shutdown_on_erts();
+    assert_eq!(status.code(), erts_status);
+    assert_eq!(notice, erts_notice);
     fs::remove_dir_all(&directory).unwrap();
     response.unwrap_or_else(|error| {
         let text = |bytes: &Arc<Mutex<Vec<u8>>>| {
@@ -219,6 +238,46 @@ fn stop_with_term(mut child: Child) -> ExitStatus {
     let group = format!("-{}", child.id());
     let _ = Command::new("kill").args(["-TERM", "--", &group]).status();
     child.wait().expect("the child has a status")
+}
+
+/// Run the release on the pinned ERTS, wait until its server accepts,
+/// send `SIGTERM`, and return the exit status and the SIGTERM notice.
+fn shutdown_on_erts() -> (Option<i32>, Option<String>) {
+    let port = free_port();
+    let mut child = Command::new(release_directory().join("bin").join("plug_hello"))
+        .arg("start")
+        .env("PORT", port.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .spawn()
+        .expect("the ERTS release starts");
+    let stdout = Arc::new(Mutex::new(Vec::new()));
+    let stdout_reader = collect(child.stdout.take().unwrap(), Arc::clone(&stdout));
+    let stderr = Arc::new(Mutex::new(Vec::new()));
+    let stderr_reader = collect(child.stderr.take().unwrap(), Arc::clone(&stderr));
+    let started = wait_for_server(&mut child, port);
+    let status = stop_with_term(child);
+    stdout_reader.join().unwrap();
+    stderr_reader.join().unwrap();
+    started.unwrap_or_else(|error| {
+        panic!(
+            "the ERTS release on port {port}: {error}\nstderr: {}",
+            String::from_utf8_lossy(&stderr.lock().unwrap())
+        )
+    });
+    let stdout = String::from_utf8_lossy(&stdout.lock().unwrap()).into_owned();
+    (status.code(), shutdown_notice(&stdout))
+}
+
+/// Return the text of the `erl_signal_handler` notice in `output`, without
+/// the timestamp that differs between runs.
+fn shutdown_notice(output: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        line.split_once("[notice] ")
+            .map(|(_, text)| text.to_owned())
+    })
 }
 
 /// Return the build directory of `examples/plug_hello`.
