@@ -117,8 +117,10 @@ impl<'a> Bundle<'a> {
     /// that is not [`FORMAT_VERSION`], an OTP release that is not
     /// `erlang:system_info(otp_release)` of this runtime, a count over
     /// [`MAX_MODULES`] or [`MAX_RESOURCES`], a name over its limit, an empty
-    /// name, a duplicate name in one table, a truncated field, a payload
-    /// that a length leaves short, and trailing bytes after the last table.
+    /// resource name, a duplicate name in one table, a truncated field, a
+    /// payload that a length leaves short, and trailing bytes after the last
+    /// table. An atom name, such as a module name or an entry name, may be
+    /// empty.
     ///
     /// # Examples
     ///
@@ -367,8 +369,8 @@ impl<'a> BundleWriter<'a> {
     ///
     /// # Errors
     ///
-    /// An empty or over-long name, a name that the module table already
-    /// holds, and a module table that is full.
+    /// An over-long name, a name that the module table already holds, and a
+    /// module table that is full. An empty module name is valid.
     pub fn add_module(&mut self, name: &'a str, bytes: &'a [u8]) -> Result<(), BeamError> {
         check_atom_name(name, "module name")?;
         add_blob(
@@ -519,7 +521,9 @@ fn check_atom_name(name: &str, what: &str) -> Result<(), BeamError> {
 /// Read one table: a count, then one name, one length, and one payload for
 /// each entry. The name set rejects a duplicate, and each length is checked
 /// against the remaining bytes before the payload is borrowed, so a declared
-/// payload that is too long allocates nothing.
+/// payload that is too long allocates nothing. An entry of the module table
+/// has an atom name, which may be empty; an entry of the resource table has a
+/// name that is not empty.
 fn read_table<'a>(
     cursor: &mut Cursor<'a>,
     max_count: u32,
@@ -710,14 +714,14 @@ impl<'a> Cursor<'a> {
         Ok(name)
     }
 
-    /// Read a length-prefixed atom name: non-empty, at most
-    /// [`MAX_ATOM_NAME_BYTES`] bytes and at most
-    /// [`MAX_ATOM_NAME_CHARACTERS`] characters.
+    /// Read a length-prefixed atom name: at most [`MAX_ATOM_NAME_BYTES`]
+    /// bytes and at most [`MAX_ATOM_NAME_CHARACTERS`] characters. An empty
+    /// atom name is valid, as the atom `''` is.
     ///
     /// # Errors
     ///
-    /// The errors of [`Cursor::text`], an empty name, a name over the byte
-    /// limit, and a name over the character limit.
+    /// The errors of [`Cursor::text`], a name over the byte limit, and a name
+    /// over the character limit.
     fn atom_name(&mut self, what: &str) -> Result<&'a str, BeamError> {
         let name = self.text(MAX_ATOM_NAME_BYTES, what)?;
         let characters = name.chars().count();
