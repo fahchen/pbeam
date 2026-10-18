@@ -1249,10 +1249,11 @@ impl Scheduler {
         while let Some(number) = queue.pop_front() {
             if number == libc::SIGINT {
                 signal::request_break();
-                // A second break request in the same batch stops the run
-                // before the menu opens (`break_requested`, `sys.c:611-624`).
-                let in_batch = queue.contains(&libc::SIGINT);
-                let result = if in_batch {
+                // A second break request stops the run before the menu
+                // opens, in the batch or before the end of the last menu
+                // (`break_requested`, `sys.c:611-624`).
+                let second = signal::take_second_break() || queue.contains(&libc::SIGINT);
+                let result = if second {
                     Err(BeamError::Halt(0))
                 } else {
                     self.break_menu()
