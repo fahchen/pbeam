@@ -6,6 +6,7 @@ mod term;
 
 pub use beam::BeamModule;
 pub use bundle::{Blob, Bundle, BundleWriter, Entry};
+pub mod embedded;
 pub use error::BeamError;
 pub use runtime::{
     AllowAll, BeamProgram, Capability, CapabilityKind, Constraint, Operation, Policy,

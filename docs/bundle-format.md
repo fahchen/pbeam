@@ -103,3 +103,11 @@ Each payload is bounded by its `payload_length`. The reader borrows the
 payload from the bundle bytes and copies nothing to read it. A declared
 payload that is longer than the remaining bytes is rejected before the
 reader borrows a byte.
+
+## Appended executable
+
+The `pbeam_bundle` tool writes one executable: the bytes of the `pbeam` binary, a bundle, and a trailer. The trailer is 16 bytes: the magic `PBEAMEMB`, then the length of the bundle as a little-endian `u64`. A `pbeam` run with no argument finds the trailer at the end of its own file, parses the bundle that the trailer names, extracts each resource to a new temporary directory, and replaces the process with `pbeam_boot start` of the extracted release, whose directory is its OTP root. The replacement keeps the process identifier, so a signal reaches the boot as in a normal run. The boot removes the extracted directory at its exit; the launcher gives it the directory with the flag `--extracted-root`, so a program that the run starts does not inherit it. The launcher creates the directory with mode `0700`. The bundle carries the release of the application and the modules of the start set, so the run needs no other file.
+
+A trailer with a bundle length that does not fit before the trailer is an error, and the run stops with status 1. Without the magic at the end of the file, the binary has no bundle, and its command line runs as usual.
+
+The resource `meta/start-modules` names the modules of the start set, separated by ASCII whitespace. The run loads `pbeam/<entry_module>.beam` and `pbeam/pbeam_boot.beam` first, then each module of the resource, each resolved in `lib/*/ebin` or `erts-*/ebin` of the extracted release.

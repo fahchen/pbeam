@@ -102,6 +102,10 @@ name = "run_end"
 path = "tests/feature/run_end.rs"
 
 [[test]]
+name = "bundle"
+path = "tests/feature/bundle.rs"
+
+[[test]]
 name = "serve"
 path = "tests/feature/serve.rs"
 
