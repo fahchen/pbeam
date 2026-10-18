@@ -21,7 +21,7 @@ step() {
   if [[ -t 2 ]]; then echo "==> $1" >&2; fi
 }
 
-usage='usage: example <name> [--erts] [--no-build] [--policy <module>] [--write-start <file>]'
+usage='usage: example <name> [--erts] [--no-build] [--policy <module>] [--write-start <file>] [--release <dir>]'
 [[ $# -ge 1 ]] || fail "$usage"
 name=$1
 shift
@@ -29,6 +29,7 @@ erts=false
 build=true
 policy=()
 start_file=
+release_directory=
 while [[ $# -gt 0 ]]; do
   case $1 in
     --erts) erts=true ;;
@@ -41,6 +42,11 @@ while [[ $# -gt 0 ]]; do
     --write-start)
       [[ $# -ge 2 ]] || fail "$usage"
       start_file=$2
+      shift
+      ;;
+    --release)
+      [[ $# -ge 2 ]] || fail "$usage"
+      release_directory=$2
       shift
       ;;
     *) fail "unknown option $1" ;;
@@ -90,9 +96,11 @@ run() {
 # A release example is a Mix project, examples/<name>/mix.exs, with a release that the build writes into target/examples/<name>/. The entry is main/0 of the Erlang module <name>_run of examples/<name>/<name>_run.erl. The build runs `mix release` and compiles the entry and pbeam_boot.erl into target/examples/<name>/pbeam/. The code path of the run is that directory, each lib/*/ebin directory of the release, and releases/<version>/consolidated last, so that the consolidated protocols come first. The start set of the pbeam run is the entry, pbeam_boot.beam, and the files of the boot modules of the pinned OTP. Both runs get RELEASE_ROOT and RELEASE_SYS_CONFIG as bin/<name> sets them. The run does not read the boot script of the release (docs/erts-differences.md, row "Boot").
 if [[ -f examples/$name/mix.exs ]]; then
   [[ ${#policy[@]} -eq 0 ]] || fail 'a release example has no policy: give no --policy'
-  release=target/examples/$name
+  release=${release_directory:-target/examples/$name}
   output=$release/pbeam
   entry=${name}_run
+  # The build writes the release at the path of the project config.
+  [[ -z $release_directory || $build == false ]] || fail '--release needs --no-build: the build writes the release of the project config'
   [[ -f examples/$name/$entry.erl ]] || fail "examples/$name has no $entry.erl"
   if [[ $build == true ]]; then
     # The output of mix goes to stderr, so that stdout has only the output of the run.
@@ -102,7 +110,9 @@ if [[ -f examples/$name/mix.exs ]]; then
     step "Compile examples/$name/$entry.erl and examples/hello_world/pbeam_boot.erl"
     erlc +deterministic -o "$output" "examples/$name/$entry.erl" examples/hello_world/pbeam_boot.erl
   fi
-  [[ -f $output/$entry.beam && -f $release/releases/start_erl.data ]] || fail "$release has no build. Build the example first: run the script without --no-build"
+  # The start list needs the release data only; the entry stubs belong to a run.
+  [[ -f $release/releases/start_erl.data ]] || fail "$release has no build. Build the example first: run the script without --no-build"
+  [[ -n $start_file || -f $output/$entry.beam ]] || fail "$release has no build. Build the example first: run the script without --no-build"
   version=$(cut -d' ' -f2 "$release/releases/start_erl.data")
   paths=("$output" "$release"/lib/*/ebin "$release/releases/$version/consolidated")
   RELEASE_ROOT=$(cd "$release" && pwd -P)

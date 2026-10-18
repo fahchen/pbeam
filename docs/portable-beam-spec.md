@@ -30,7 +30,7 @@ The [Hello World contract](hello-world-target.md) is the first target: PBeam exe
 | Native trust | All in-process native code and dependencies are part of the trusted computing base. Static linking and Rust type safety do not establish extension isolation. |
 | Security profiles | Trusted application and secure guest profiles use the same authorization path. Secure execution remains unavailable until its coverage and bypass acceptance gates pass. |
 | Code loading | The bundle defines the loadable module set. Interactive mode loads a module on demand; embedded mode loads all modules at startup. Loaded code does not change (no code replacement). See [code loading](code-loading.md). |
-| Packaging | One application bundle embedded in a Rust launcher with `include_bytes!`. |
+| Packaging | One application bundle appended to the `pbeam` binary, with a 16-byte trailer that names the bundle. |
 | Validation order | Hello World, then Terra Counter. |
 
 Firefly is an architectural reference for separation of responsibilities, scheduler organization, and native integration. Its compiler pipeline is not part of this design, and the design does not require a Firefly dependency.
@@ -47,7 +47,6 @@ The initial scope excludes:
 - Arena allocation or a replacement process heap/GC implementation.
 - Hot code upgrades, code replacement, code purge, multiple versions of a module, and loading a module from outside the loadable module set.
 - Traditional `erl_nif`/Rustler ABI compatibility and dynamically loaded native extension libraries.
-- Post-link bundle appending or platform-specific executable section manipulation.
 - Complete OTP compatibility as a prerequisite for the first application.
 - Rewriting BEAM instructions to replace native dependencies, or replacing an entire OTP application by default.
 
@@ -204,7 +203,7 @@ def project do
 end
 ```
 
-The builder generates a launcher crate with those Cargo dependencies and registration calls. Native implementations are linked into the application executable; startup does not locate or load extension `.so`, `.dylib`, or `.dll` files.
+A native build step links the declared implementations into the application executable and registers them; the exact mechanism follows the native work. Startup does not locate or load extension `.so`, `.dylib`, or `.dll` files.
 
 Missing required implementations and conflicting native registrations must be diagnosed before application execution. The exact validation mechanism remains open.
 
@@ -223,20 +222,18 @@ mix pbeam.build
 It performs these steps:
 
 1. Compile the Elixir application with the existing toolchain.
-2. Collect application, dependency, and required OTP BEAM modules and application resources.
+2. Collect the Mix release and the modules of the start set.
 3. Read native declaration metadata and configured native crate paths.
-4. Generate a manifest and one `app.pbeam` bundle.
-5. Generate a Rust launcher crate that embeds that bundle and registers native modules.
-6. Run a release Cargo build for the selected target.
-7. Produce the application executable, illustrated as `dist/my_app` in the discussion.
+4. Write one bundle with the `pbeam_bundle` tool.
+5. Build the `pbeam` binary for the selected target, append the bundle and the trailer, and write the application executable, illustrated as `dist/my_app` in the discussion.
 
 The bundle contains identifying/version metadata, an entry MFA, compiler/OTP compatibility metadata, a module table, a resource table, and the module/resource payload. Compression was proposed, but its codec and necessity are not settled. The example `otp: 28` is illustrative, not a compatibility commitment.
 
 Capability manifest entries request authority; the trusted launcher grants only what host policy permits. Startup identifies the selected profile, policy, and executable build. Add manifest fields with their build consumer. A manifest signature does not grant authority. The current toolchain pin is OTP 29.1.1 in `mise.toml`; neither an example field nor a pin establishes general compatibility.
 
-Use one embedded bundle rather than generating a separate `include_bytes!` declaration for every module. Bundle parsing is independent of executable embedding so an external-bundle runner can be added later without changing the application representation.
+Use one bundle that carries the whole release and the start set. Bundle parsing is independent of the trailer, so an external bundle can start the same way.
 
-At startup the launcher loads and validates the embedded bundle, initializes atom/code/native tables from the start set (all modules in embedded mode), registers linked native modules, starts the scheduler pool, and spawns the entry MFA. Required initialization must finish before application code runs.
+At startup a run without an argument finds the trailer, parses the bundle, extracts it into a new temporary directory, and replaces the process with the boot of the extracted release, so a signal reaches the boot as in a normal run. The boot initializes the atom, code, and native tables from the start set, starts the scheduler, and spawns the entry MFA. The boot removes the extracted directory at the exit. Required initialization must finish before application code runs.
 
 The delivered executable must not require installed `erl`, `elixir`, external BEAM files, or separately distributed native extension libraries. Build-time Erlang/Elixir and Rust toolchains are still required.
 

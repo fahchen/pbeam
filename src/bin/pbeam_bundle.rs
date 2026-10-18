@@ -24,22 +24,45 @@ const MAGIC: &[u8; 8] = b"PBEAMEMB";
 const START_MODULES: &str = "meta/start-modules";
 
 /// The usage text of the tool.
-const USAGE: &str = "usage: pbeam_bundle <release-dir> <pbeam-binary> <output> <entry-module> <entry-function> <start-list>";
+const USAGE: &str =
+    "usage: pbeam_bundle bundle <release-dir> <output> <entry-module> <entry-function> <start-list>
+       pbeam_bundle executable <runtime-binary> <bundle> <output>";
 
 fn main() -> ExitCode {
     let arguments: Vec<_> = env::args_os().skip(1).collect();
-    let [directory, runtime, output, module, function, start] = arguments.as_slice() else {
+    let Some((command, rest)) = arguments.split_first() else {
         eprintln!("{USAGE}");
         return ExitCode::FAILURE;
     };
-    match build(
-        Path::new(directory),
-        Path::new(runtime),
-        Path::new(output),
-        &module.to_string_lossy(),
-        &function.to_string_lossy(),
-        Path::new(start),
-    ) {
+    let result = match command.to_str() {
+        Some("bundle") => match rest {
+            [directory, output, module, function, start] => build_bundle(
+                Path::new(directory),
+                Path::new(output),
+                &module.to_string_lossy(),
+                &function.to_string_lossy(),
+                Path::new(start),
+            ),
+            _ => {
+                eprintln!("{USAGE}");
+                return ExitCode::FAILURE;
+            }
+        },
+        Some("executable") => match rest {
+            [runtime, bundle, output] => {
+                build_executable(Path::new(runtime), Path::new(bundle), Path::new(output))
+            }
+            _ => {
+                eprintln!("{USAGE}");
+                return ExitCode::FAILURE;
+            }
+        },
+        _ => {
+            eprintln!("{USAGE}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
             eprintln!("pbeam_bundle: {message}");
@@ -48,10 +71,10 @@ fn main() -> ExitCode {
     }
 }
 
-/// Write the binary, the bundle of `directory`, and the trailer to `output`.
-fn build(
+/// Write the bundle of `directory`, with the start set of `start_list`, to
+/// `output`.
+fn build_bundle(
     directory: &Path,
-    runtime: &Path,
     output: &Path,
     module: &str,
     function: &str,
@@ -76,20 +99,23 @@ fn build(
     writer
         .add_resource(START_MODULES, start.as_bytes())
         .map_err(|error| error.to_string())?;
-    let mut file = Vec::new();
-    file.extend_from_slice(
-        &fs::read(runtime)
-            .map_err(|error| format!("cannot read the binary {}: {error}", runtime.display()))?,
-    );
-    let bundle = writer.encode();
+    write_output(output, &writer.encode(), 0o644)
+}
+
+/// Write the binary, the bundle of `bundle`, and the trailer to `output`.
+fn build_executable(runtime: &Path, bundle: &Path, output: &Path) -> Result<(), String> {
+    let mut file = fs::read(runtime)
+        .map_err(|error| format!("cannot read the binary {}: {error}", runtime.display()))?;
+    let bundle = fs::read(bundle)
+        .map_err(|error| format!("cannot read the bundle {}: {error}", bundle.display()))?;
     file.extend_from_slice(&bundle);
     file.extend_from_slice(MAGIC);
     file.extend_from_slice(&u64::try_from(bundle.len()).unwrap().to_le_bytes());
-    write_output(output, &file)
+    write_output(output, &file, 0o755)
 }
 
-/// Write `bytes` to `output` with the mode of an executable.
-fn write_output(output: &Path, bytes: &[u8]) -> Result<(), String> {
+/// Write `bytes` to `output` with `mode`.
+fn write_output(output: &Path, bytes: &[u8], mode: u32) -> Result<(), String> {
     let mut file = fs::File::create(output)
         .map_err(|error| format!("cannot write {}: {error}", output.display()))?;
     file.write_all(bytes)
@@ -97,7 +123,7 @@ fn write_output(output: &Path, bytes: &[u8]) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(output, fs::Permissions::from_mode(0o755))
+        fs::set_permissions(output, fs::Permissions::from_mode(mode))
             .map_err(|error| format!("cannot set the mode of {}: {error}", output.display()))?;
     }
     Ok(())
