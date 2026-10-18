@@ -150,7 +150,7 @@ defmodule MyApp.NativeHash do
 end
 ```
 
-The library is the Mix project at the repository root, and its single module is `PBeam.Native`. `use PBeam.Native` registers the module attribute `pbeam_native` with accumulation and persistence. `defnative name(arguments)` adds one `{name, arity}` pair to that attribute and defines a stub of the same name and arity, where the arguments are those of the head. Each argument must be a plain variable with a distinct name. A pattern, a repeated name, or a guard is not a supported form, because PBeam dispatches at the entry of the stub.
+The library is the Mix project at the repository root, and its single module is `PBeam.Native`. `use PBeam.Native` registers the module attribute `pbeam_native` with accumulation and persistence. `defnative name(arguments)` adds one `{name, arity}` pair to that attribute and defines a stub of the same name and arity, where the arguments are those of the head. Each argument must be a plain variable with a distinct name. A pattern, a repeated name, a guard, and a name that Elixir expands to a value, such as `__MODULE__`, are not supported forms, because PBeam dispatches at the entry of the stub.
 
 The compiler writes the pairs into the `Attr` chunk of the BEAM file. PBeam reads that chunk at the load of a module and reports the pairs as the native declarations of the module. A bundler reads the same declarations to discover the required native implementations.
 

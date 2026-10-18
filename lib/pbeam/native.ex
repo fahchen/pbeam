@@ -30,8 +30,9 @@ defmodule PBeam.Native do
   arguments of the call to the registered function.
 
   Each argument must be a plain variable, and no two arguments may share a
-  name. A pattern, a repeated name, or a guard is not a supported form,
-  because PBeam dispatches at the entry of the stub, before the head runs.
+  name. A pattern, a repeated name, a guard, and a name that Elixir expands
+  to a value, such as `__MODULE__`, are not supported forms, because PBeam
+  dispatches at the entry of the stub, before the head runs.
 
   The declaration records the pair in the persisted `pbeam_native` attribute
   of the module.
@@ -101,13 +102,19 @@ defmodule PBeam.Native do
     raise ArgumentError, "defnative expects a function head, got: #{Macro.to_string(call)}"
   end
 
+  # Elixir expands these names to a value instead of a variable, although the
+  # parser gives them the shape of a variable. A head that carries one carries
+  # a pattern, which the dispatch bypasses.
+  @special_forms [:__MODULE__, :__ENV__, :__DIR__, :__CALLER__, :__STACKTRACE__]
+
   # Return one argument of the stub. The stub body does not use the argument,
   # and the Elixir compiler warns for an unused variable. A variable that
   # carries `generated: true` raises no such warning, so the stub keeps the
   # name that the declaration gives it. A pattern is not a supported form,
   # because the dispatch already returned before the head runs, so no pattern
   # of the head can match.
-  defp stub_argument({name, meta, context}) when is_atom(name) and is_atom(context) do
+  defp stub_argument({name, meta, context})
+       when is_atom(name) and is_atom(context) and name not in @special_forms do
     {name, Keyword.put(meta, :generated, true), context}
   end
 

@@ -36,9 +36,12 @@ defmodule PBeam.NativeTest do
 
   test "refuses a declaration that is not a plain function head" do
     head = ~r/defnative expects a function head/
+    argument = ~r/defnative expects a variable argument/
     assert_refused("defnative :sha256", head)
     assert_refused("defnative guarded(data) when is_binary(data)", head)
-    assert_refused("defnative patterned({a, b})", ~r/defnative expects a variable argument/)
+    assert_refused("defnative patterned({a, b})", argument)
+    assert_refused("defnative module_of(__MODULE__)", argument)
+    assert_refused("defnative directory(__DIR__)", argument)
     assert_refused("defnative same(data, data)", ~r/defnative expects distinct argument names/)
   end
 
