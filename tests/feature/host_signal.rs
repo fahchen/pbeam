@@ -316,32 +316,107 @@ fn break_after_signal(command: &mut Command) -> (Option<i32>, String) {
 }
 
 #[test]
-fn stops_at_two_sigints_as_pinned_erts() {
-    // The second break request stops the run (`break_requested`,
-    // `sys.c:611-624`). Send it after the menu is open, so that the two
-    // signals do not coalesce, and keep stdin open, so that the run must
-    // not depend on its end.
+fn stops_at_two_sigints_while_a_full_stdout_waits_as_pinned_erts() {
+    // ERTS stops the run from its signal dispatcher thread, so a second
+    // `SIGINT` ends a run whose stdout is full and whose menu write waits
+    // (`sys.c:611-624`). The menu of PBeam must watch the notify pipe while
+    // it writes.
     for (name, mut command) in [("ERTS", erts("wait")), ("PBeam", pbeam("wait"))] {
-        let mut child = command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let stdin = child.stdin.take().expect("the child has a stdin");
-        let stdout = Arc::new(Mutex::new(Vec::new()));
-        let stdout_reader = collect(child.stdout.take().unwrap(), Arc::clone(&stdout));
-        let stderr = Arc::new(Mutex::new(Vec::new()));
-        let stderr_reader = collect(child.stderr.take().unwrap(), Arc::clone(&stderr));
-        wait_for(&mut child, &stdout, b"ready\n");
-        send(&child, libc::SIGINT);
-        wait_for(&mut child, &stdout, b"BREAK: ");
-        send(&child, libc::SIGINT);
-        let status = wait_for_exit(&mut child, &stdout);
-        drop(stdin);
-        stdout_reader.join().unwrap();
-        stderr_reader.join().unwrap();
-        assert_eq!(status, Some(0), "{name}");
+        assert_eq!(run_with_a_full_stdout(&mut command), Some(0), "{name}");
+    }
+}
+
+/// Run `command` with stdin open and stdout a pipe. Read "ready" from the
+/// pipe, fill it from this process, send `SIGINT` twice, and return the exit
+/// status. The run cannot end from the end of its input, and its menu write
+/// waits for room in the pipe.
+fn run_with_a_full_stdout(command: &mut Command) -> Option<i32> {
+    let (read_end, write_end) = open_pipe();
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::from(write_end.try_clone().unwrap()))
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let stdin = child.stdin.take().expect("the child has a stdin");
+    let mut output = Vec::new();
+    read_until(&read_end, &mut output, b"ready\n");
+    // A blocking write fills the pipe and then waits for room. This process
+    // reads no more, so the next write of the run waits.
+    let filler = thread::spawn(move || {
+        let bytes = [b' '; 1 << 16];
+        for _ in 0..16 {
+            // SAFETY: `write` reads the bytes of `bytes`, which holds the
+            // length that it gets.
+            if unsafe { libc::write(write_end.as_raw_fd(), bytes.as_ptr().cast(), bytes.len()) } < 0
+            {
+                break;
+            }
+        }
+    });
+    send(&child, libc::SIGINT);
+    // The kernel coalesces two signals that wait together, so the run must
+    // handle the first break before the next signal arrives.
+    thread::sleep(Duration::from_millis(200));
+    // A signal that arrives during the waiting write stays for the
+    // scheduler, and the menu writes on.
+    send(&child, libc::SIGTERM);
+    thread::sleep(Duration::from_millis(200));
+    send(&child, libc::SIGINT);
+    let empty = Mutex::new(Vec::new());
+    let status = wait_for_exit(&mut child, &empty);
+    drop(stdin);
+    drop(read_end);
+    filler.join().unwrap();
+    status
+}
+
+/// Read `fd` without a wait until `output` holds `text`. Panic when the text
+/// does not come in `RUN_TIME_LIMIT`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let mut output = Vec::new();
+/// read_until(&read_end, &mut output, b"ready\n");
+/// ```
+fn read_until(fd: &OwnedFd, output: &mut Vec<u8>, text: &[u8]) {
+    // SAFETY: `fcntl` changes only the flags of `fd`.
+    unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) };
+    let start = Instant::now();
+    let mut buffer = [0; 4096];
+    while !output.windows(text.len()).any(|window| window == text) {
+        if start.elapsed() >= RUN_TIME_LIMIT {
+            panic!(
+                "no {:?} in the output {:?}",
+                String::from_utf8_lossy(text),
+                String::from_utf8_lossy(output)
+            );
+        }
+        // SAFETY: `read` writes at most the length of `buffer` into it.
+        let count = unsafe { libc::read(fd.as_raw_fd(), buffer.as_mut_ptr().cast(), buffer.len()) };
+        match usize::try_from(count) {
+            Ok(count @ 1..) => output.extend_from_slice(&buffer[..count]),
+            // No input yet, or an error that the text of the run reports.
+            _ => thread::sleep(Duration::from_millis(10)),
+        }
+    }
+}
+
+/// Make a pipe, and return its read end and its write end.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let (read_end, write_end) = open_pipe();
+/// ```
+fn open_pipe() -> (OwnedFd, OwnedFd) {
+    let mut fds = [-1; 2];
+    // SAFETY: `pipe` writes two new fds to `fds`, and each `OwnedFd` takes
+    // one new fd.
+    unsafe {
+        assert_eq!(libc::pipe(fds.as_mut_ptr()), 0, "pipe failed");
+        (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1]))
     }
 }
 
@@ -505,6 +580,63 @@ fn reads_a_break_key_in_the_initial_terminal_mode_as_pinned_erts() {
             "{name}: {:?}",
             String::from_utf8_lossy(&output)
         );
+    }
+}
+
+#[test]
+fn keeps_the_initial_terminal_mode_after_an_abort_as_pinned_erts() {
+    // ERTS restores the application mode only after `do_break` returns, and
+    // an abort ends the run inside `do_break` (`sys.c:899-923`). The run
+    // then leaves the initial canonical mode, also when stdout is not a
+    // terminal.
+    for (name, mut command) in [("ERTS", erts("wait")), ("PBeam", pbeam("wait"))] {
+        let (status, canonical) = abort_from_a_raw_terminal(&mut command);
+        assert_eq!(status, Some(0), "{name}");
+        assert!(canonical, "{name} left the terminal in raw mode");
+    }
+}
+
+/// Run `command` with fd 0 a pseudo-terminal and stdout a pipe, set the
+/// terminal to raw mode, send `SIGINT`, and abort the menu with `a`. Return
+/// the exit status, and whether the terminal is in the initial canonical
+/// mode after the run.
+fn abort_from_a_raw_terminal(command: &mut Command) -> (Option<i32>, bool) {
+    let (master, slave) = open_terminal();
+    let mut child = command
+        .stdin(slave)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let stdout = Arc::new(Mutex::new(Vec::new()));
+    let stdout_reader = collect(child.stdout.take().unwrap(), Arc::clone(&stdout));
+    wait_for(&mut child, &stdout, b"ready\n");
+    set_raw(&master);
+    send(&child, libc::SIGINT);
+    wait_for(&mut child, &stdout, b"BREAK: ");
+    // The menu reads its keys in the initial mode, which gives the key to
+    // the run at the newline.
+    let mut terminal = std::fs::File::from(master);
+    terminal.write_all(b"a\n").unwrap();
+    let status = wait_for_exit(&mut child, &stdout);
+    stdout_reader.join().unwrap();
+    (status, is_canonical(&terminal))
+}
+
+/// Return whether the terminal `fd` reads its input in canonical mode.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(is_canonical(&terminal));
+/// ```
+fn is_canonical(fd: &std::fs::File) -> bool {
+    // SAFETY: `tcgetattr` writes one `termios` of the terminal fd, which
+    // the test owns.
+    unsafe {
+        let mut mode = std::mem::zeroed();
+        assert_eq!(libc::tcgetattr(fd.as_raw_fd(), &raw mut mode), 0);
+        mode.c_lflag & libc::ICANON != 0
     }
 }
 

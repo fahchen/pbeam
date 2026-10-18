@@ -1320,7 +1320,12 @@ impl Scheduler {
         }
         let mut deferred = Vec::new();
         let result = self.run_break_menu(&mut deferred);
-        if let Some(saved) = saved {
+        // ERTS restores the saved mode after `do_break` returns, and an
+        // abort ends the run inside `do_break`, so the mode that the menu
+        // set stays after an abort (`sys.c:899-923`).
+        if result.is_ok()
+            && let Some(saved) = saved
+        {
             let _ = terminal::set_mode(libc::STDIN_FILENO, &saved);
         }
         // The signals that arrived while the menu waited reach the
@@ -1333,7 +1338,7 @@ impl Scheduler {
     /// of the run. `deferred` holds the signals that arrived while the menu
     /// waited.
     fn run_break_menu(&mut self, deferred: &mut Vec<libc::c_int>) -> Result<(), BeamError> {
-        use std::io::{IsTerminal, Write};
+        use std::io::IsTerminal;
 
         const HELP: &str = "BREAK: (a)bort (A)bort with dump (c)ontinue (p)roc info (i)nfo\r\n       (l)oaded (v)ersion (k)ill (D)b-tables (d)istribution\r\n";
         // A run that does not write to a terminal keeps its screen
@@ -1343,10 +1348,8 @@ impl Scheduler {
         } else {
             ""
         };
-        let mut stdout = std::io::stdout();
-        let _ = write!(stdout, "\r\n{clear}{HELP}");
-        let _ = stdout.flush();
         let notify = signal::notify_fd().expect("a handler install makes the pipe");
+        Self::write_break_menu(format!("\r\n{clear}{HELP}").into_bytes(), notify, deferred)?;
         let fds = [libc::STDIN_FILENO, notify];
         loop {
             // `sys_get_key` waits until the descriptor is readable, reads up
@@ -1406,10 +1409,73 @@ impl Scheduler {
                 }
                 option => {
                     // `%c` writes the key byte itself (`break.c:682-684`).
-                    let _ = write!(stdout, "Invalid option '");
-                    let _ = stdout.write_all(&[option]);
-                    let _ = write!(stdout, "'. Please enter one of the following:\r\n{HELP}");
-                    let _ = stdout.flush();
+                    let mut message = b"Invalid option '".to_vec();
+                    message.push(option);
+                    message.extend_from_slice(b"'. Please enter one of the following:\r\n");
+                    message.extend_from_slice(HELP.as_bytes());
+                    Self::write_break_menu(message, notify, deferred)?;
+                }
+            }
+        }
+    }
+
+    /// Write `bytes` of the break menu to stdout, and stop the run when a
+    /// `SIGINT` arrives before the write ends. A thread does the write,
+    /// because a full stdout can hold it without end; the scheduler then
+    /// still reads the notify pipe, and ERTS stops the run from its signal
+    /// dispatcher thread in the same case (`sys.c:611-624`). The thread
+    /// reports the end of the write on a socket pair, and this wait returns
+    /// then, so the menu reads no key before it writes the menu.
+    ///
+    /// # Errors
+    ///
+    /// Return [`BeamError::Halt`] when a `SIGINT` arrives during the write.
+    fn write_break_menu(
+        bytes: Vec<u8>,
+        notify: libc::c_int,
+        deferred: &mut Vec<libc::c_int>,
+    ) -> Result<(), BeamError> {
+        use std::io::Write;
+
+        let (mut written, written_reader) =
+            std::os::unix::net::UnixStream::pair().expect("a socket pair opens");
+        std::thread::spawn(move || {
+            // A failed write changes nothing, as `erts_printf` ignores its
+            // result (`break.c:571-687`).
+            let mut buffers = [std::io::IoSlice::new(&bytes)];
+            let _ = super::host::output::write_all(libc::STDOUT_FILENO, &mut buffers);
+            let _ = written.write_all(&[0]);
+        });
+        let done = {
+            use std::os::fd::AsRawFd;
+            written_reader.as_raw_fd()
+        };
+        let fds = [notify, done];
+        loop {
+            match super::host::input::wait_readable(&fds, None) {
+                super::host::input::Readiness::Ready(ready) if ready.contains(&notify) => {
+                    // A signal wrote to the notify pipe. A SIGINT stops the
+                    // run; each other signal stays for the scheduler
+                    // (`sys.c:611-624`, `break.c:602-604`).
+                    let signals = signal::take_notified();
+                    if signals.contains(&libc::SIGINT) || signal::take_break_requested() {
+                        return Err(BeamError::Halt(0));
+                    }
+                    deferred.extend(signals);
+                }
+                // The write ended, or the wait cannot watch it: the menu
+                // reads its keys in either case.
+                super::host::input::Readiness::Ready(_)
+                | super::host::input::Readiness::Invalid => {
+                    return Ok(());
+                }
+                // An interrupted wait: the handler wrote the notify pipe, so
+                // the next wait sees it. A SIGINT that interrupted it stops
+                // the run.
+                super::host::input::Readiness::Pending => {
+                    if signal::take_break_requested() {
+                        return Err(BeamError::Halt(0));
+                    }
                 }
             }
         }
