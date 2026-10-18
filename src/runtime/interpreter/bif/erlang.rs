@@ -4227,9 +4227,10 @@ pub(super) fn process_info(
     let info = target
         .info(&scheduler.atoms, item, 0, messages, false)?
         .ok_or_else(|| unsupported(&scheduler.atoms))?;
-    // A queued reply is built in the target process, which is charged
-    // there (`erl_proc_sig_queue.c:5393-5400`); this path charges the
-    // caller for its own work only.
+    // A queued reply is built in the target process, but ERTS discards
+    // the cost that `handle_process_info` returns
+    // (`erl_proc_sig_queue.c:6796,7405,5425-5428`), so only the direct
+    // read charges the item.
     if target.exiting.is_some() || target.mailbox.has_incoming() {
         let caller = scheduler.current_process_mut().id;
         let reference = scheduler.make_ref()?;
@@ -4248,7 +4249,9 @@ pub(super) fn process_info(
             arguments: vec![Term::Reference(reference)],
         });
     }
-    scheduler.current_process_mut().bump_reductions(1);
+    scheduler
+        .current_process_mut()
+        .bump_reductions(1 + super::links_reductions(item, &info));
     Ok(signals_return(scheduler, process, info))
 }
 
