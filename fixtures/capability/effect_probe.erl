@@ -472,6 +472,7 @@ ambient() ->
         ets:insert_new(Name, {key, value}),
         ets:lookup(Name, key),
         ets:lookup_element(Name, key, 2, none),
+        ets:lookup_element(Name, key, 2),
         ets:member(Name, key),
         ets:safe_fixtable(Name, true),
         ets:take(Name, key),
