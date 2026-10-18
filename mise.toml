@@ -137,6 +137,14 @@ bash scripts/example.sh "$usage_name" ${usage_no_build:+--no-build} --write-star
 output=${usage_output:-target/examples/$usage_name.bundle}
 bundle=${output%.bundle}.pbeamb
 mkdir -p "$(dirname "$output")" "$(dirname "$bundle")"
+release_dir=$(cd "target/examples/$usage_name" && pwd -P)
+output_dir=$(cd "$(dirname "$output")" && pwd -P)
+case "$output_dir/" in
+    "$release_dir"/*)
+        echo "example-executable: --output must be outside the release directory target/examples/$usage_name." >&2
+        exit 1
+        ;;
+esac
 target/release/pbeam_bundle bundle "target/examples/$usage_name" "$bundle" "${usage_name}_run" main "target/examples/$usage_name/pbeam.start.list"
 target/release/pbeam_bundle executable target/release/pbeam "$bundle" "$output"
 echo "Wrote $output"
