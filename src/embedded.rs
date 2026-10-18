@@ -20,10 +20,6 @@ const MAGIC: &[u8; 8] = b"PBEAMEMB";
 /// The size of the trailer: the magic and the length of the bundle, a `u64`.
 const TRAILER: usize = 16;
 
-/// The variable that tells the boot of an extracted release its directory,
-/// for the removal at the end of the run.
-pub const EXTRACTED_ROOT: &str = "PBEAM_EMBEDDED_ROOT";
-
 /// What the end of `bytes` holds.
 #[derive(Debug, PartialEq, Eq)]
 enum Trailer<'a> {
@@ -50,23 +46,17 @@ pub fn run() -> Option<ExitCode> {
     run_bundle(&executable, &bytes, &env::temp_dir())
 }
 
-/// Remove the extracted directory at the end of an embedded run, as the
-/// variable [`EXTRACTED_ROOT`] names it. The launcher sets the variable for
-/// the boot that replaces it.
+/// Remove the extracted directory at the end of an embedded run. The boot
+/// of an extracted release gets the directory with `--extracted-root`, so
+/// the flag reaches no program that the run starts.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// // A run that a launcher did not start has no directory.
-/// remove_extraction();
+/// remove_extraction(None);
 /// ```
-pub fn remove_extraction() {
-    remove_path(env::var_os(EXTRACTED_ROOT));
-}
-
-/// Remove the extracted directory that `directory` names, when there is
-/// one.
-fn remove_path(directory: Option<std::ffi::OsString>) {
+pub fn remove_extraction(directory: Option<PathBuf>) {
     if let Some(directory) = directory {
         let _ = fs::remove_dir_all(directory);
     }
@@ -173,6 +163,7 @@ fn boot(
     let mut command = Command::new(executable);
     command.args(["pbeam_boot", "start", entry.module, entry.function]);
     command.arg("--root").arg(directory);
+    command.arg("--extracted-root").arg(directory);
     for path in code_paths(directory, &version)? {
         command.arg("--pa").arg(path);
     }
@@ -182,7 +173,6 @@ fn boot(
         "RELEASE_SYS_CONFIG",
         directory.join("releases").join(&version).join("sys"),
     );
-    command.env(EXTRACTED_ROOT, directory);
     Ok(command.exec())
 }
 
@@ -200,9 +190,10 @@ fn failure(message: &str) -> ExitCode {
 /// Return a new temporary directory for the extraction, as the first free
 /// `pbeam-embedded-<pid>-<attempt>` directory under `base`.
 fn temp_directory(base: &Path) -> Result<PathBuf, String> {
+    use std::os::unix::fs::DirBuilderExt;
     for attempt in 0..100 {
         let directory = base.join(format!("pbeam-embedded-{}-{attempt}", std::process::id()));
-        match fs::create_dir(&directory) {
+        match fs::DirBuilder::new().mode(0o700).create(&directory) {
             Ok(()) => return Ok(directory),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => {

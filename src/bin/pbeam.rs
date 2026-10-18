@@ -63,6 +63,11 @@ struct Cli {
     /// it.
     #[arg(long, value_name = "MODE", value_parser = ["interactive", "embedded"], requires = "root")]
     mode: Option<String>,
+    /// The extracted release of an embedded run, which the boot removes at
+    /// its exit. The launcher of an appended bundle sets it; a command line
+    /// does not set it.
+    #[arg(long = "extracted-root", value_name = "DIR", hide = true)]
+    extracted_root: Option<PathBuf>,
     /// BEAM files to load, after `--`.
     #[arg(value_name = "BEAM_FILE", required = true, num_args = 1.., last = true)]
     beam_files: Vec<PathBuf>,
@@ -100,7 +105,9 @@ fn main() -> ExitCode {
     {
         return status;
     }
-    let status = match run(Cli::parse()) {
+    let arguments = Cli::parse();
+    let extracted = arguments.extracted_root.clone();
+    let status = match run(arguments) {
         Ok(()) => ExitCode::SUCCESS,
         Err(Exit::Halt(status)) => ExitCode::from(status.to_le_bytes()[0]),
         Err(Exit::Error(message)) => {
@@ -108,8 +115,9 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     };
-    // A boot of an extracted release removes its directory at the exit.
-    pbeam_runtime::embedded::remove_extraction();
+    // A boot of an extracted release removes its directory at the exit. The
+    // flag reaches only this process, not the programs that it starts.
+    pbeam_runtime::embedded::remove_extraction(extracted);
     status
 }
 

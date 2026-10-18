@@ -118,9 +118,9 @@ fn a_run_bundle_that_cannot_start_removes_its_directory() {
 #[test]
 fn removes_the_extracted_directory_of_a_run() {
     let directory = directory("remove");
-    remove_path(Some(directory.clone().into_os_string()));
+    remove_extraction(Some(directory.clone()));
     assert!(!directory.exists());
-    remove_path(None);
+    remove_extraction(None);
 }
 
 #[test]
@@ -293,6 +293,14 @@ fn a_temporary_directory_skips_a_name_that_exists() {
     let created = temp_directory(&base).unwrap();
     assert_ne!(created, taken);
     assert!(created.is_dir());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&created).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
     for attempt in 0..100 {
         let path = base.join(format!("pbeam-embedded-{}-{attempt}", std::process::id()));
         let _ = fs::create_dir(&path);
