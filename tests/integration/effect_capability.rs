@@ -35,7 +35,7 @@ const INVENTORY: &str = include_str!("../../docs/effect-inventory.md");
 /// Each capability of the column "Capability" of the effect inventory, as
 /// `(entry, kind:operation)`, with the `effect_probe` function that calls
 /// the entry once.
-const PROBES: [(&str, &str, &str); 60] = [
+const PROBES: [(&str, &str, &str); 61] = [
     ("erlang:exit/2", "process:exit_other", "exit_other"),
     ("erlang:delete_module/1", "code:load", "delete_module"),
     ("erlang:link/1", "process:link", "link"),
@@ -109,6 +109,11 @@ const PROBES: [(&str, &str, &str); 60] = [
     ("persistent_term:get/1", "persistent_term:read", "pt_get1"),
     ("persistent_term:get/2", "persistent_term:read", "pt_get2"),
     ("persistent_term:put/2", "persistent_term:write", "pt_put"),
+    (
+        "persistent_term:erase/1",
+        "persistent_term:write",
+        "pt_erase",
+    ),
     ("prim_tty:isatty/1", "terminal:query", "isatty"),
     ("prim_tty:read_nif/3", "terminal:read", "read_nif"),
     ("prim_tty:setlocale/1", "terminal:setup", "setlocale"),
@@ -835,7 +840,11 @@ fn skips_each_effect_check_in_a_run_with_no_policy() {
     let stored = |value| tuple(&[ok.clone(), Term::Integer(value)]);
     assert_eq!(
         unchecked("persistent_term_kept").term,
-        Term::list_from(vec![stored(1), stored(2)])
+        Term::list_from(vec![
+            stored(1),
+            stored(2),
+            tuple(&[ok.clone(), atom(&program, "none")]),
+        ])
     );
 }
 
@@ -1022,6 +1031,9 @@ fn gives_the_erts_results_of_the_permitted_persistent_term_operations() {
         Term::Integer(1),
         Term::Integer(1),
         tuple(&[key, Term::Integer(1)]),
+        atom("true"),
+        atom("none"),
+        atom("false"),
     ]);
     let policy = grants(
         CapabilityKind::PersistentTerm,
@@ -1034,21 +1046,22 @@ fn gives_the_erts_results_of_the_permitted_persistent_term_operations() {
     );
     assert_eq!(
         erts_with_stand_in("persistent_term_permitted"),
-        "[none,badarg,ok,ok,1,1,{{effect_probe,permitted},1}]\n"
+        "[none,badarg,ok,ok,1,1,{{effect_probe,permitted},1},true,none,false]\n"
     );
 }
 
 #[test]
-fn keeps_the_persistent_terms_after_a_denied_put() {
+fn keeps_the_persistent_terms_after_a_denied_put_or_erase() {
     // A child with `#{persistent_term => #{operations => []}}` tries a put
-    // of a new key, then of a changed value. The parent then sees no value,
-    // then the old value.
+    // of a new key, a put of a changed value, and an erase. The parent then
+    // sees no value, then the old value, which stays.
     let program = program();
     let denied = atom(&program, "denied");
     assert_eq!(
         run(&program, "persistent_term_kept", &AllowAll),
         Term::list_from(vec![
             tuple(&[denied.clone(), atom(&program, "none")]),
+            tuple(&[denied.clone(), Term::Integer(1)]),
             tuple(&[denied, Term::Integer(1)]),
         ])
     );

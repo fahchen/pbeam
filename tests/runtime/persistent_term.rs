@@ -88,6 +88,81 @@ fn keeps_the_erts_slots_through_collisions_and_a_resize() {
 }
 
 #[test]
+fn erases_a_key_in_place_when_the_next_slot_is_free() {
+    let (true_, ok) = (Term::static_atom("true"), Term::static_atom("ok"));
+    let mut terms = PersistentTerms::default();
+    terms.put(&true_, &Term::Integer(1));
+    terms.put(&Term::Integer(39), &Term::Integer(2));
+    terms.put(&ok, &Term::Integer(3));
+    terms.put(&Term::Integer(7), &Term::Integer(4));
+    // 7 is in slot 3, and slot 4 is free, so it is no stepping stone to
+    // another key (`is_erasable`).
+    assert!(terms.erase(&Term::Integer(7)));
+    assert_eq!(
+        slots(&terms),
+        [(0, Term::Integer(39)), (1, ok.clone()), (7, true_.clone())]
+    );
+    assert_eq!(terms.num_entries, 3);
+    // A key without a value erases nothing.
+    assert!(!terms.erase(&Term::Integer(7)));
+    assert_eq!(terms.num_entries, 3);
+    assert_eq!(terms.get(&ok), Some(&Term::Integer(3)));
+}
+
+#[test]
+fn rehashes_the_other_pairs_when_the_slot_is_a_stepping_stone() {
+    let (true_, ok) = (Term::static_atom("true"), Term::static_atom("ok"));
+    let mut terms = PersistentTerms::default();
+    terms.put(&true_, &Term::Integer(1));
+    terms.put(&Term::Integer(39), &Term::Integer(2));
+    terms.put(&ok, &Term::Integer(3));
+    terms.put(&Term::Integer(7), &Term::Integer(4));
+    // true is in slot 7, and slot 0 holds 39, so the table is copied
+    // without true and the other pairs go again in old slot order: 39, ok,
+    // and 7.
+    assert!(terms.erase(&true_));
+    assert_eq!(
+        slots(&terms),
+        [
+            (0, ok.clone()),
+            (3, Term::Integer(7)),
+            (7, Term::Integer(39))
+        ]
+    );
+    assert_eq!(terms.num_entries, 3);
+    assert_eq!(terms.get(&Term::Integer(39)), Some(&Term::Integer(2)));
+}
+
+#[test]
+fn shrinks_the_table_when_the_erase_leaves_it_mostly_empty() {
+    let (true_, ok) = (Term::static_atom("true"), Term::static_atom("ok"));
+    let mut terms = PersistentTerms::default();
+    terms.put(&true_, &Term::Integer(1));
+    terms.put(&Term::Integer(39), &Term::Integer(2));
+    terms.put(&ok, &Term::Integer(3));
+    terms.put(&Term::Integer(7), &Term::Integer(4));
+    let ok_tuple = Term::tuple(vec![ok.clone()]);
+    terms.put(&ok_tuple, &Term::Integer(5));
+    // Five keys in 16 slots: no shrink yet, and slot 1 is free.
+    assert!(terms.erase(&ok));
+    assert_eq!(terms.buckets.len(), 16);
+    // Four keys in 16 slots meet `MUST_SHRINK` when 7 is erased: the copy
+    // goes to 8 slots and the remaining pairs true, {ok}, and 39 go again
+    // in old slot order.
+    assert!(terms.erase(&Term::Integer(7)));
+    assert_eq!(terms.buckets.len(), 8);
+    assert_eq!(
+        slots(&terms),
+        [
+            (0, ok_tuple.clone()),
+            (1, Term::Integer(39)),
+            (7, true_.clone())
+        ]
+    );
+    assert_eq!(terms.get(&ok_tuple), Some(&Term::Integer(5)));
+}
+
+#[test]
 fn counts_the_keys_and_values_of_the_table() {
     let mut terms = PersistentTerms::default();
     terms.put(&atom("key"), &Term::tuple(vec![Term::Integer(1)]));
