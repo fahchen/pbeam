@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     time::Duration,
 };
 
@@ -18,7 +18,7 @@ use super::{
         self,
         input::{self, Readiness},
         output::IovecWrite,
-        signal,
+        signal, terminal,
     },
     interpreter::{CodeTable, LoadedModule},
     local_node,
@@ -34,7 +34,7 @@ use super::{
     resources::Resources,
     signal::Signal,
     timer::{Receiver, Timer, Timers},
-    tty::Ttys,
+    tty::{InitialMode, Ttys},
 };
 use crate::{
     error::{BeamError, error},
@@ -398,6 +398,19 @@ pub(super) struct Scheduler {
     /// Compiled patterns of `binary:compile_pattern/1` of the node. All
     /// processes of the run share them.
     pub(super) binary_patterns: BinaryPatterns,
+    /// The signals that arrived while the break menu waited, which the
+    /// scheduler processes after the menu.
+    deferred_signals: Vec<libc::c_int>,
+    /// The write end of the socket pair that reports the end of a menu
+    /// write from its thread. ERTS allocates no descriptor at a break, so
+    /// the run makes the pair.
+    menu_writer: std::sync::Arc<std::os::unix::net::UnixStream>,
+    /// The read end of [`Self::menu_writer`].
+    menu_written: std::os::unix::net::UnixStream,
+    /// The mode of fd 0 at the start of the run, which the break menu sets
+    /// while it reads its keys (`erl_sys_initial_tty_mode`, `sys.c:428-432`,
+    /// `899-923`).
+    initial_tty_mode: InitialMode,
     /// Typed values of the node, one value of each type, such as the
     /// compiled regular expressions in `RegexCodes` and the TTY resources
     /// in `Ttys`. All processes of the run share them.
@@ -494,6 +507,7 @@ impl Scheduler {
         resources.put(Files::default());
         resources.put(Buffers::default());
         resources.put(Ports::default());
+        let menu_pair = std::os::unix::net::UnixStream::pair().expect("a menu socket pair opens");
         Scheduler {
             processes: ProcessTable::default(),
             freed: HashMap::new(),
@@ -509,6 +523,10 @@ impl Scheduler {
             ets: EtsTables::default(),
             atomics: AtomicArrays::default(),
             binary_patterns: BinaryPatterns::default(),
+            deferred_signals: Vec::new(),
+            menu_writer: std::sync::Arc::new(menu_pair.0),
+            menu_written: menu_pair.1,
+            initial_tty_mode: InitialMode::read(),
             resources,
             atoms,
             code: CodeTable::default(),
@@ -1231,15 +1249,42 @@ impl Scheduler {
     ///
     /// # Errors
     ///
-    /// `SIGINT` gives a runtime error: ERTS runs its break handler
-    /// (`break_requested` at `sys.c:611-624`, `do_break` at
-    /// `break.c:571-687`), which PBeam does not have.
+    /// Return the runtime error of [`Self::break_menu`] for a break command
+    /// that PBeam does not run, and [`BeamError::Halt`] when the menu aborts
+    /// the run.
     fn notify_signals(&mut self, signals: &[libc::c_int]) -> Result<(), BeamError> {
-        for &number in signals {
+        let mut queue: VecDeque<libc::c_int> = std::mem::take(&mut self.deferred_signals).into();
+        queue.extend(signals);
+        while let Some(number) = queue.pop_front() {
             if number == libc::SIGINT {
-                return Err(error(
-                    "unsupported break of SIGINT: PBeam has no break handler",
-                ));
+                signal::request_break();
+                // A second break request stops the run before the menu
+                // opens, in the batch or before the end of the last menu
+                // (`break_requested`, `sys.c:611-624`).
+                let second = signal::second_break() || queue.contains(&libc::SIGINT);
+                let result = if second { Ok(()) } else { self.break_menu() };
+                // The signals that the menu deferred arrived before the
+                // signals that the handler wrote after the menu
+                // (`sys.c:1128-1144`).
+                queue.extend(std::mem::take(&mut self.deferred_signals));
+                queue.extend(signal::take_notified());
+                // A request that arrived while the break was active stops
+                // the run, also at the end of the menu (`sys.c:611-624`).
+                let second = signal::take_second_break() || queue.contains(&libc::SIGINT);
+                let result = if second {
+                    Err(BeamError::Halt(0))
+                } else {
+                    result
+                };
+                // ERTS clears the flag on each exit from the menu, also when
+                // the menu ends the run (`sys.c:913`). A run that ends has
+                // no flag to keep.
+                let _ = signal::take_break_requested();
+                if result.is_err() {
+                    let _ = signal::take_second_break();
+                }
+                result?;
+                continue;
             }
             let name =
                 signal::signal_name(number).expect("a handler is set only for a named signal");
@@ -1248,8 +1293,248 @@ impl Scheduler {
                     Term::tuple(vec![Term::static_atom("notify"), Term::static_atom(name)]);
                 self.deliver(server, message);
             }
+            queue.extend(std::mem::take(&mut self.deferred_signals));
         }
         Ok(())
+    }
+
+    /// Return the fds that a wait of the menu reports as ready. A failed
+    /// wait, as on fd 0 closed after the run started, names fd 0: the read
+    /// then fails, `sys_get_key` gives 0, and the run stops
+    /// (`sys.c:1051-1071`, `break.c:602-604`). An interrupted wait returns
+    /// no fd, and the menu waits again (`sys.c:611-624`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Scheduler::menu_ready(Readiness::Pending), vec![]);
+    /// ```
+    fn menu_ready(readiness: super::host::input::Readiness) -> Vec<libc::c_int> {
+        match readiness {
+            super::host::input::Readiness::Ready(ready) => ready,
+            super::host::input::Readiness::Pending => Vec::new(),
+            super::host::input::Readiness::Invalid => vec![libc::STDIN_FILENO],
+        }
+    }
+
+    /// Return the first byte of a key of the break menu, or 0 for the end of
+    /// the input, a NUL byte, and a read error, as `sys_get_key` does
+    /// (`sys.c:1051-1071`). A read that has no data is retried.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let reads = [Err(libc::EAGAIN), Ok(vec![b'a'])].into_iter();
+    /// assert_eq!(Scheduler::break_key(|| reads.next().unwrap()), b'a');
+    /// ```
+    fn break_key(mut read: impl FnMut() -> Result<Vec<u8>, libc::c_int>) -> u8 {
+        loop {
+            match read() {
+                Ok(bytes) if !bytes.is_empty() => return bytes[0],
+                Ok(_) => return 0,
+                Err(libc::EAGAIN) => {
+                    // A read with no data is retried (`sys.c:1051-1071`).
+                    // A second break stops the run while the read waits, as
+                    // the dispatcher of ERTS does (`sys.c:611-624`).
+                    if signal::take_second_break() {
+                        return 0;
+                    }
+                }
+                Err(_) => return 0,
+            }
+        }
+    }
+
+    /// Read the break menu of `SIGINT`, as `do_break` does
+    /// (`break.c:571-687`): write the menu, and act on the keys of stdin.
+    /// `a`, `q`, and `*` abort the run with the status 0, `c` continues the
+    /// run, and the end of the input aborts it (`break.c:600-618`). A key
+    /// for the crash dump or for the information commands returns a runtime
+    /// error; each other key writes the ERTS message and reads the next key.
+    ///
+    /// # Errors
+    ///
+    /// Return the runtime error that names a break command that PBeam does
+    /// not run, and [`BeamError::Halt`] for an abort.
+    fn break_menu(&mut self) -> Result<(), BeamError> {
+        // ERTS saves the mode of fd 0, sets the mode of the start of the
+        // run while the menu reads its keys, and then restores the saved
+        // mode (`sys.c:899-923`). `get_mode` gives `None` when fd 0 is not
+        // a terminal, and ERTS then changes nothing.
+        let saved = terminal::get_mode(libc::STDIN_FILENO);
+        if let Some(initial) = self.initial_tty_mode.mode() {
+            let _ = terminal::set_mode(libc::STDIN_FILENO, initial);
+        }
+        let mut deferred = Vec::new();
+        let result = self.run_break_menu(&mut deferred);
+        // ERTS restores the saved mode after `do_break` returns, and an
+        // abort ends the run inside `do_break`, so the mode that the menu
+        // set stays after an abort (`sys.c:899-923`).
+        if result.is_ok()
+            && let Some(saved) = saved
+        {
+            let _ = terminal::set_mode(libc::STDIN_FILENO, &saved);
+        }
+        // The signals that arrived while the menu waited reach the
+        // scheduler after it ends, in their order.
+        self.deferred_signals.extend(deferred);
+        result
+    }
+
+    /// Read the keys of the break menu, with the mode of fd 0 of the start
+    /// of the run. `deferred` holds the signals that arrived while the menu
+    /// waited.
+    fn run_break_menu(&mut self, deferred: &mut Vec<libc::c_int>) -> Result<(), BeamError> {
+        use std::io::IsTerminal;
+
+        const HELP: &str = "BREAK: (a)bort (A)bort with dump (c)ontinue (p)roc info (i)nfo\r\n       (l)oaded (v)ersion (k)ill (D)b-tables (d)istribution\r\n";
+        // A run that does not write to a terminal keeps its screen
+        // (`break.c:593-598`).
+        let clear = if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+            "\x1b[J"
+        } else {
+            ""
+        };
+        let notify = signal::notify_fd().expect("a handler install makes the pipe");
+        self.write_menu(format!("\r\n{clear}{HELP}").into_bytes(), deferred)?;
+        let fds = [libc::STDIN_FILENO, notify];
+        loop {
+            // `sys_get_key` waits until the descriptor is readable, reads up
+            // to 64 bytes, and retries a read with no data (`sys.c:1051-1071`).
+            // Read the descriptor directly: a buffered read can take more
+            // than 64 bytes and keep them from the next reader of the
+            // descriptor. A wait that a signal stops, the end of the input,
+            // and the NUL byte abort the run (`break.c:602-604`).
+            let key = loop {
+                let ready = Self::menu_ready(super::host::input::wait_readable(&fds, None));
+                // An interrupted wait keeps the menu open, and the next wait
+                // sees the notify pipe (`sys.c:611-624`).
+                if ready.is_empty() {
+                    continue;
+                }
+                if ready.contains(&notify) {
+                    // A signal wrote to the notify pipe. A SIGINT stops the
+                    // run; each other signal stays for the scheduler and the
+                    // menu waits again (`sys.c:611-624`, `break.c:602-604`).
+                    let signals = signal::take_notified();
+                    if signals.contains(&libc::SIGINT) {
+                        return Err(BeamError::Halt(0));
+                    }
+                    deferred.extend(signals);
+                    continue;
+                }
+                break Self::break_key(|| super::host::input::read(libc::STDIN_FILENO, 64));
+            };
+            if key == 0 {
+                return Err(BeamError::Halt(0));
+            }
+            match key {
+                b'a' | b'q' | b'*' => return Err(BeamError::Halt(0)),
+                b'c' | b'm' => return Ok(()),
+                b'\n' => continue,
+                b'A' => {
+                    return Err(error(
+                        "unsupported break command A: PBeam writes no crash dump (see \"OS signals\" in docs/erts-differences.md)",
+                    ));
+                }
+                option @ (b'p' | b'i' | b'l' | b'v' | b'd' | b'D' | b'k' | b'o') => {
+                    return Err(error(format!(
+                        "unsupported break command {}: PBeam runs only the commands a, c, m, q, and * (see \"OS signals\" in docs/erts-differences.md)",
+                        char::from(option)
+                    )));
+                }
+                option => {
+                    // `%c` writes the key byte itself (`break.c:682-684`).
+                    let mut message = b"Invalid option '".to_vec();
+                    message.push(option);
+                    message.extend_from_slice(b"'. Please enter one of the following:\r\n");
+                    message.extend_from_slice(HELP.as_bytes());
+                    self.write_menu(message, deferred)?;
+                }
+            }
+        }
+    }
+
+    /// Write the bytes of the break menu, and stop the run when a `SIGINT`
+    /// arrives before the write ends.
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`Self::write_break_menu`].
+    fn write_menu(&self, bytes: Vec<u8>, deferred: &mut Vec<libc::c_int>) -> Result<(), BeamError> {
+        let notify = signal::notify_fd().expect("a handler install makes the pipe");
+        Self::write_break_menu(
+            bytes,
+            notify,
+            &self.menu_writer,
+            &self.menu_written,
+            deferred,
+        )
+    }
+
+    /// Write `bytes` of the break menu to stdout, and stop the run when a
+    /// `SIGINT` arrives before the write ends. A thread does the write,
+    /// because a full stdout can hold it without end; the scheduler then
+    /// still reads the notify pipe, and ERTS stops the run from its signal
+    /// dispatcher thread in the same case (`sys.c:611-624`). The thread
+    /// reports the end of the write on a socket pair, and this wait returns
+    /// then, so the menu reads no key before it writes the menu.
+    ///
+    /// # Errors
+    ///
+    /// Return [`BeamError::Halt`] when a `SIGINT` arrives during the write.
+    fn write_break_menu(
+        bytes: Vec<u8>,
+        notify: libc::c_int,
+        writer: &std::sync::Arc<std::os::unix::net::UnixStream>,
+        written: &std::os::unix::net::UnixStream,
+        deferred: &mut Vec<libc::c_int>,
+    ) -> Result<(), BeamError> {
+        use std::io::Write;
+
+        let writer = std::sync::Arc::clone(writer);
+        std::thread::spawn(move || {
+            // A failed write changes nothing, as `erts_printf` ignores its
+            // result (`break.c:571-687`).
+            let mut buffers = [std::io::IoSlice::new(&bytes)];
+            let _ = super::host::output::write_all(libc::STDOUT_FILENO, &mut buffers);
+            let mut writer = &*writer;
+            let _ = writer.write_all(&[0]);
+        });
+        let done = {
+            use std::os::fd::AsRawFd;
+            written.as_raw_fd()
+        };
+        let fds = [notify, done];
+        loop {
+            match super::host::input::wait_readable(&fds, None) {
+                super::host::input::Readiness::Ready(ready) if ready.contains(&notify) => {
+                    // A signal wrote to the notify pipe. A SIGINT stops the
+                    // run; each other signal stays for the scheduler
+                    // (`sys.c:611-624`, `break.c:602-604`).
+                    let signals = signal::take_notified();
+                    if signals.contains(&libc::SIGINT) {
+                        return Err(BeamError::Halt(0));
+                    }
+                    deferred.extend(signals);
+                }
+                // The write ended, or the wait cannot watch it: the menu
+                // reads its keys in either case. Take the byte of the end
+                // of the write, so that the next menu waits for its own
+                // write.
+                super::host::input::Readiness::Ready(_)
+                | super::host::input::Readiness::Invalid => {
+                    use std::io::Read;
+                    let mut buffer = [0; 8];
+                    let mut written = written;
+                    let _ = written.read(&mut buffer);
+                    return Ok(());
+                }
+                // An interrupted wait: the handler wrote the notify pipe, so
+                // the next wait sees it.
+                super::host::input::Readiness::Pending => {}
+            }
+        }
     }
 
     /// Run the `prim_tty:write_nif/2` call of the current process on a

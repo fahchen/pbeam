@@ -1,6 +1,6 @@
 -module(notify_probe).
 -behaviour(gen_event).
--export([notify/0, busy/0, wait/0, init/1, handle_event/2, handle_call/2]).
+-export([notify/0, busy/0, wait/0, done/0, hold/0, init/1, handle_event/2, handle_call/2]).
 
 %% Handle sighup and sigusr2, and add a handler to erl_signal_server that
 %% sends each event to the probe. Write "ready", then write each of the two
@@ -35,6 +35,20 @@ handle_event(Signal, Probe) ->
 
 handle_call(_Request, Probe) ->
     {ok, ok, Probe}.
+
+%% Write "ready", wait in a receive with a timer of 500 ms, and write
+%% "done". A break menu that continues the run lets the timer fire; an abort
+%% ends the run before "done".
+done() ->
+    io:put_chars("ready\n"),
+    receive after 500 -> io:put_chars("done\n") end.
+
+%% As done/0, then wait with no timer, so a later signal reaches the run
+%% after the timer wrote "done".
+hold() ->
+    io:put_chars("ready\n"),
+    receive after 500 -> io:put_chars("done\n") end,
+    receive after infinity -> ok end.
 
 %% Write "ready" and wait with no timer and no input select, so only a host
 %% signal can end the run.

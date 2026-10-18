@@ -25,6 +25,18 @@ static NOTIFY_PIPE: OnceLock<[c_int; 2]> = OnceLock::new();
 /// signal reaches its target without a system call for each step.
 static NOTIFIED: AtomicBool = AtomicBool::new(false);
 
+/// Whether a break is active, as `erts_break_requested` marks one
+/// (`sys.c:611-624`). The scheduler of PBeam takes the dispatcher role of
+/// ERTS: it sets the flag before the menu, and clears it after the menu
+/// returns (`sys.c:913`). A second request stops the run while the flag is
+/// set (`break.c:602-604`).
+static BREAK_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Whether a `SIGINT` arrived while a break was active. The handler sets it
+/// when [`BREAK_REQUESTED`] is set, so a request that arrives at the end of
+/// the menu cannot become a new menu (`sys.c:611-624`).
+static SECOND_BREAK: AtomicBool = AtomicBool::new(false);
+
 /// The disposition that `os:set_signal/2` gives a signal: its `Mode`
 /// argument `ignore`, `default`, or `handle`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -172,6 +184,65 @@ pub(crate) fn take_notified() -> Vec<c_int> {
     }
 }
 
+/// Mark a break, as `break_requested` does before it pokes the break
+/// handling (`sys.c:611-624`). The signal handler marks a second break when
+/// it finds this flag set.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// request_break();
+/// assert!(take_break_requested());
+/// ```
+pub(crate) fn request_break() {
+    BREAK_REQUESTED.store(true, Ordering::Release);
+}
+
+/// Return whether a break is active, and clear the flag. The scheduler
+/// clears it after the menu returns, as ERTS does (`sys.c:913`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// request_break();
+/// assert!(take_break_requested());
+/// assert!(!take_break_requested());
+/// ```
+pub(crate) fn take_break_requested() -> bool {
+    BREAK_REQUESTED.swap(false, Ordering::Acquire)
+}
+
+/// Return whether a `SIGINT` arrived while a break was active, without a
+/// change to the flag.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(!second_break());
+/// ```
+pub(crate) fn second_break() -> bool {
+    SECOND_BREAK.load(Ordering::Acquire)
+}
+
+/// Mark a second break for a test. The signal handler marks the second
+/// break of a run; no production code calls this function.
+#[cfg(test)]
+pub(crate) fn mark_second_break() {
+    SECOND_BREAK.store(true, Ordering::Release);
+}
+
+/// Return whether a `SIGINT` arrived while a break was active, and clear
+/// the flag.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(!take_second_break());
+/// ```
+pub(crate) fn take_second_break() -> bool {
+    SECOND_BREAK.swap(false, Ordering::Acquire)
+}
+
 /// Read all signals in the notify pipe, as the signal dispatcher thread
 /// reads each signal number (sys.c:1128-1144). A wait of the scheduler that
 /// the pipe ends does not read it: the next [`take_notified`] does. Each handler writes one
@@ -278,6 +349,9 @@ const SIGNALS: &[(&str, c_int)] = &[
 extern "C" fn notify_signal(signal: c_int) {
     let [_, write_end] = *NOTIFY_PIPE.get().expect("a handler install makes the pipe");
     let saved = errno();
+    if signal == libc::SIGINT && BREAK_REQUESTED.load(Ordering::Acquire) {
+        SECOND_BREAK.store(true, Ordering::Release);
+    }
     let bytes = signal.to_ne_bytes();
     // SAFETY: `write` reads the bytes of `bytes`. It is async-signal-safe.
     // A write to a non-blocking pipe does not wait, so a signal cannot stop

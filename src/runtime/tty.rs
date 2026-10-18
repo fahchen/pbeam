@@ -199,6 +199,19 @@ impl InitialMode {
         Self(terminal::get_mode(libc::STDIN_FILENO))
     }
 
+    /// Return the mode of fd 0 at the start of the run, or `None` when fd 0
+    /// is not a terminal.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// // fd 0 is a pipe.
+    /// assert!(InitialMode::read().mode().is_none());
+    /// ```
+    pub(super) fn mode(&self) -> Option<&libc::termios> {
+        self.0.as_ref()
+    }
+
     /// Set fd 0 to the mode at the start of the run when fds 0 and 1 are
     /// terminals, and ignore the result of `tcsetattr`. ERTS does this at
     /// each emulator exit in `sys_tty_reset` (`erl_init.c:2730`,
