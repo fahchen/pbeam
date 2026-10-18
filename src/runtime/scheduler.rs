@@ -1278,14 +1278,18 @@ impl Scheduler {
         let _ = stdout.flush();
         let mut stdin = std::io::stdin();
         loop {
-            let mut key = [0_u8; 1];
-            // A read error and the end of the input abort the run
-            // (`sys_get_key` and `erts_exit` of `do_break`,
-            // `break.c:602-604`).
-            if stdin.read(&mut key).unwrap_or(0) != 1 {
+            let mut buffer = [0_u8; 64];
+            // `sys_get_key` reads up to 64 bytes and uses the first, and a
+            // read error, the end of the input, and the NUL byte abort the
+            // run (`sys.c:1051-1071`, `break.c:602-604`).
+            let key = match stdin.read(&mut buffer) {
+                Ok(0) | Err(_) => 0,
+                Ok(_) => buffer[0],
+            };
+            if key == 0 {
                 return Err(BeamError::Halt(0));
             }
-            match key[0] {
+            match key {
                 b'a' | b'q' | b'*' => return Err(BeamError::Halt(0)),
                 b'c' => return Ok(()),
                 b'\n' => continue,

@@ -164,18 +164,58 @@ fn aborts_the_break_menu_of_a_sigint_as_pinned_erts() {
 #[test]
 fn continues_after_an_invalid_break_key_as_pinned_erts() {
     // An invalid key writes its message and the menu, and reads the next
-    // key (break.c:681-684). The key `c` continues the run (break.c:617-618).
-    // SIGQUIT then stops the run as its default handler does
-    // (erl_signal_handler.erl:39-41), which writes no output.
-    let steps = [("ready\n", libc::SIGINT), ("Invalid option", libc::SIGQUIT)];
-    let erts = run_with_signals(&mut erts("wait"), b"x\nc\n", &steps);
-    let pbeam = run_with_signals(&mut pbeam("wait"), b"x\nc\n", &steps);
+    // key (break.c:681-684); the key `a` then aborts the run
+    // (break.c:606-614). Each key comes in its own write, as a key from a
+    // terminal does, because `sys_get_key` reads up to 64 bytes and uses
+    // only the first (`sys.c:1051-1071`).
+    let steps = [
+        ("ready\n", Action::Signal(libc::SIGINT)),
+        ("BREAK:", Action::Write(b"x")),
+        ("Invalid option", Action::Write(b"a")),
+    ];
+    let erts = run_with_actions(&mut erts("wait"), b"", &steps);
+    let pbeam = run_with_actions(&mut pbeam("wait"), b"", &steps);
     assert_eq!(erts, pbeam, "ERTS and PBeam");
     let (status, stdout, stderr) = pbeam;
     assert_eq!(status, Some(0));
     assert_eq!(stderr, "");
     assert!(stdout.starts_with(BREAKS), "{stdout:?}");
     assert!(stdout.contains("Invalid option 'x'."), "{stdout:?}");
+}
+
+#[test]
+fn continues_the_break_menu_on_c_as_pinned_erts() {
+    // The key `c` continues the run (break.c:617-618), and the timer of the
+    // probe then writes `done` and ends the run with the status 0.
+    let steps = [
+        ("ready\n", Action::Signal(libc::SIGINT)),
+        ("BREAK:", Action::Write(b"c")),
+    ];
+    let erts = run_with_actions(&mut erts("done"), b"", &steps);
+    let pbeam = run_with_actions(&mut pbeam("done"), b"", &steps);
+    assert_eq!(erts, pbeam, "ERTS and PBeam");
+    let (status, stdout, stderr) = pbeam;
+    assert_eq!(status, Some(0));
+    assert_eq!(stderr, "");
+    assert!(stdout.starts_with(BREAKS), "{stdout:?}");
+    assert!(stdout.ends_with("done\n"), "{stdout:?}");
+}
+
+#[test]
+fn aborts_the_break_menu_at_a_nul_key_as_pinned_erts() {
+    // `sys_get_key` returns 0 for the NUL byte, and `do_break` aborts the
+    // run with the status 0 (`break.c:602-604`).
+    let steps = [
+        ("ready\n", Action::Signal(libc::SIGINT)),
+        ("BREAK:", Action::Write(b"\0")),
+    ];
+    for (name, mut command) in [("ERTS", erts("wait")), ("PBeam", pbeam("wait"))] {
+        assert_eq!(
+            run_with_actions(&mut command, b"", &steps),
+            (Some(0), String::from(BREAKS), String::new()),
+            "{name}"
+        );
+    }
 }
 
 #[test]
@@ -289,6 +329,36 @@ fn dumb_utf8(command: &mut Command) {
 /// assert_eq!(output, (Some(0), String::from("ready\n"), String::new()));
 /// ```
 fn run_with_signals(command: &mut Command, input: &[u8], steps: &[(&str, c_int)]) -> Output {
+    let steps: Vec<_> = steps
+        .iter()
+        .map(|&(text, signal)| (text, Action::Signal(signal)))
+        .collect();
+    run_with_actions(command, input, &steps)
+}
+
+/// An action of [`run_with_actions`] after its step text.
+#[derive(Clone, Copy)]
+enum Action {
+    /// Write these bytes to stdin.
+    Write(&'static [u8]),
+    /// Send this signal to the run.
+    Signal(c_int),
+}
+
+/// Run `command` with the bytes `input` on stdin and the steps of `steps`:
+/// wait until stdout holds the text of a step, then do its action. Return
+/// the output when the run ends, and give the run the end of the input after
+/// the steps. Kill the run and panic when a text or the end does not come in
+/// `RUN_TIME_LIMIT`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let steps = [("ready\n", Action::Signal(libc::SIGTERM))];
+/// let output = run_with_actions(&mut pbeam("wait"), b"", &steps);
+/// assert_eq!(output.0, Some(0));
+/// ```
+fn run_with_actions(command: &mut Command, input: &[u8], steps: &[(&str, Action)]) -> Output {
     let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -299,15 +369,20 @@ fn run_with_signals(command: &mut Command, input: &[u8], steps: &[(&str, c_int)]
     stdin
         .write_all(input)
         .expect("the input pipe takes the bytes");
-    drop(stdin);
     let stdout = Arc::new(Mutex::new(Vec::new()));
     let stdout_reader = collect(child.stdout.take().unwrap(), Arc::clone(&stdout));
     let stderr = Arc::new(Mutex::new(Vec::new()));
     let stderr_reader = collect(child.stderr.take().unwrap(), Arc::clone(&stderr));
-    for &(text, signal) in steps {
+    for &(text, action) in steps {
         wait_for(&mut child, &stdout, text.as_bytes());
-        send(&child, signal);
+        match action {
+            Action::Write(bytes) => stdin
+                .write_all(bytes)
+                .expect("the input pipe takes the bytes"),
+            Action::Signal(signal) => send(&child, signal),
+        }
     }
+    drop(stdin);
     let status = wait_for_exit(&mut child, &stdout);
     stdout_reader.join().unwrap();
     stderr_reader.join().unwrap();
