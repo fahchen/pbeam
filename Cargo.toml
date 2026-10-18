@@ -106,6 +106,10 @@ name = "bundle"
 path = "tests/feature/bundle.rs"
 
 [[test]]
+name = "process_info"
+path = "tests/feature/process_info.rs"
+
+[[test]]
 name = "serve"
 path = "tests/feature/serve.rs"
 

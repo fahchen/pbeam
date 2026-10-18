@@ -4215,7 +4215,7 @@ pub(super) fn process_info(
                 let info = caller
                     .info(atoms, item, current, messages, true)?
                     .ok_or_else(|| unsupported(atoms))?;
-                caller.bump_reductions(1);
+                caller.bump_reductions(1 + super::links_reductions(item, &info));
                 Ok(Value(info))
             },
         );
@@ -4227,6 +4227,10 @@ pub(super) fn process_info(
     let info = target
         .info(&scheduler.atoms, item, 0, messages, false)?
         .ok_or_else(|| unsupported(&scheduler.atoms))?;
+    // A queued reply is built in the target process, but ERTS discards
+    // the cost that `handle_process_info` returns
+    // (`erl_proc_sig_queue.c:6796,7405,5425-5428`), so only the direct
+    // read charges the item.
     if target.exiting.is_some() || target.mailbox.has_incoming() {
         let caller = scheduler.current_process_mut().id;
         let reference = scheduler.make_ref()?;
@@ -4245,7 +4249,9 @@ pub(super) fn process_info(
             arguments: vec![Term::Reference(reference)],
         });
     }
-    scheduler.current_process_mut().bump_reductions(1);
+    scheduler
+        .current_process_mut()
+        .bump_reductions(1 + super::links_reductions(item, &info));
     Ok(signals_return(scheduler, process, info))
 }
 
@@ -4777,11 +4783,18 @@ fn process_info_values(
         initial_call,
         status,
         message_queue_len: i64::try_from(messages).unwrap_or(i64::MAX),
-        links: process
-            .links
-            .post_order()
-            .map(|(id, _)| id.term())
-            .collect(),
+        links: {
+            // ERTS reports only active links, in the reverse of the tree
+            // walk (`collect_one_link`, `erl_bif_info.c:574-585`,
+            // `1764-1775`).
+            let links: Vec<Term> = process
+                .links
+                .post_order()
+                .filter(|(_, unlinking)| **unlinking == 0)
+                .map(|(id, _)| id.term())
+                .collect();
+            links.into_iter().rev().collect()
+        },
         dictionary: process.dictionary.pairs().cloned().collect(),
         trap_exit: process.trap_exit,
         error_handler: process.error_handler.clone(),

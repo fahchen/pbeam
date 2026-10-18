@@ -1,7 +1,7 @@
 use std::{collections::HashMap, rc::Rc};
 
 use super::{
-    Frame, Origin, OriginMonitor, PendingBif, ProcessState, ReceiveTimer, StackSlot, Start,
+    Frame, LinkId, Origin, OriginMonitor, PendingBif, ProcessState, ReceiveTimer, StackSlot, Start,
 };
 use crate::{
     BeamModule,
@@ -211,4 +211,45 @@ fn walks_the_exit_reason_of_an_exiting_process() {
         live.bytes()
     };
     assert!(after > before);
+}
+
+#[test]
+fn gives_the_links_of_a_process_as_process_info_2() {
+    // `process_info(Pid, links)` gives `{links, Links}`, with a pid or a
+    // port for each link (`erl_bif_info.c`, `links_reply`).
+    let atoms = AtomTable::new();
+    let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![]);
+    assert_eq!(
+        process
+            .info(&atoms, &Term::static_atom("links"), 0, 0, false)
+            .unwrap(),
+        Some(Term::tuple(vec![Term::static_atom("links"), Term::nil()]))
+    );
+    process.links.insert(LinkId::Process(ProcessId(1)), 0);
+    process.links.insert(LinkId::Process(ProcessId(2)), 0);
+    process.links.insert(LinkId::Process(ProcessId(3)), 0);
+    // A link that waits for its unlink acknowledgment stays out of the
+    // result (`collect_one_link`, `erl_bif_info.c:574-585`).
+    process.links.insert(LinkId::Process(ProcessId(4)), 7);
+    let value = process
+        .info(&atoms, &Term::static_atom("links"), 0, 0, false)
+        .unwrap()
+        .unwrap();
+    let elements = value.tuple_elements().expect("a tuple");
+    assert_eq!(elements[0], Term::static_atom("links"));
+    let links: Vec<Term> = elements[1]
+        .proper_list()
+        .expect("a list")
+        .cloned()
+        .collect();
+    // ERTS prepends each link of its post-order walk, so the list is the
+    // reverse of the walk `[1, 3, 2]` (`erl_bif_info.c:1764-1775`).
+    assert_eq!(
+        links,
+        vec![
+            Term::Pid(ProcessId(2)),
+            Term::Pid(ProcessId(3)),
+            Term::Pid(ProcessId(1))
+        ]
+    );
 }

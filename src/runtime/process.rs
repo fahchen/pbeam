@@ -722,6 +722,21 @@ impl ProcessState {
             ("message_queue_len", _) => Term::Integer(messages as i64),
             ("group_leader", _) => Term::Pid(self.group_leader),
             ("priority", _) => Term::static_atom(self.priority.name()),
+            ("links", _) => {
+                // An entry of a link that waits for its unlink
+                // acknowledgment stays in the tree with a nonzero value,
+                // and ERTS reports only active links (`collect_one_link`,
+                // `erl_bif_info.c:574-585`). ERTS walks the tree and
+                // prepends each link, so the list is the reverse of the
+                // walk (`erl_bif_info.c:1764-1775`).
+                let links: Vec<Term> = self
+                    .links
+                    .post_order()
+                    .filter(|(_, unlinking)| **unlinking == 0)
+                    .map(|(id, _)| id.term())
+                    .collect();
+                Term::list_from(links.into_iter().rev())
+            }
             ("reductions", _) => Term::Integer(
                 i64::try_from(self.reductions + current)
                     .map_err(|_| error("the reduction total exceeds the PBeam integer range"))?,

@@ -490,3 +490,32 @@ fn keeps_the_on_load_flag_after_finish_loading() {
         BifResult::Value(Term::Atom(ref atom)) if atom.is_static("true")
     ));
 }
+
+#[test]
+fn charges_a_quarter_reduction_for_each_group_of_four_links() {
+    // The `links` item of `process_info/2` charges `floor(links / 4)`
+    // (`erl_bif_info.c:1777`), and another item charges nothing extra.
+    let links = |count: usize| {
+        Term::list_from(
+            (0..count)
+                .map(|index| Term::Pid(ProcessId(index as u64)))
+                .collect::<Vec<_>>(),
+        )
+    };
+    let item = Term::static_atom("links");
+    for (count, reductions) in [(0, 0), (3, 0), (4, 1), (9, 2)] {
+        assert_eq!(
+            links_reductions(&item, &Term::tuple(vec![item.clone(), links(count)])),
+            reductions,
+            "{count}"
+        );
+    }
+    let status = Term::static_atom("status");
+    assert_eq!(
+        links_reductions(
+            &status,
+            &Term::tuple(vec![status.clone(), Term::static_atom("running")])
+        ),
+        0
+    );
+}
