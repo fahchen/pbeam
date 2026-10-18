@@ -2012,3 +2012,14 @@ fn drops_the_link_exit_signal_of_a_process_that_the_port_does_not_link() {
     let ports = scheduler.resources.borrow_mut::<Ports>();
     assert!(ports.get(port).is_some());
 }
+
+#[test]
+fn reads_a_break_key_after_a_read_with_no_data() {
+    // `sys_get_key` retries a read that returns EAGAIN, and it gives 0 for
+    // the end of the input, a NUL byte, and a read error (`sys.c:1051-1071`).
+    let mut reads = [Err(libc::EAGAIN), Ok(vec![b'a'])].into_iter();
+    assert_eq!(Scheduler::break_key(|| reads.next().unwrap()), b'a');
+    assert_eq!(Scheduler::break_key(|| Ok(Vec::new())), 0);
+    assert_eq!(Scheduler::break_key(|| Ok(vec![0])), 0);
+    assert_eq!(Scheduler::break_key(|| Err(libc::EBADF)), 0);
+}

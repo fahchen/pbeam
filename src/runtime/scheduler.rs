@@ -1251,6 +1251,27 @@ impl Scheduler {
         Ok(())
     }
 
+    /// Return the first byte of a key of the break menu, or 0 for the end of
+    /// the input, a NUL byte, and a read error, as `sys_get_key` does
+    /// (`sys.c:1051-1071`). A read that has no data is retried.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let reads = [Err(libc::EAGAIN), Ok(vec![b'a'])].into_iter();
+    /// assert_eq!(Scheduler::break_key(|| reads.next().unwrap()), b'a');
+    /// ```
+    fn break_key(mut read: impl FnMut() -> Result<Vec<u8>, libc::c_int>) -> u8 {
+        loop {
+            match read() {
+                Ok(bytes) if !bytes.is_empty() => return bytes[0],
+                Ok(_) => return 0,
+                Err(libc::EAGAIN) => continue,
+                Err(_) => return 0,
+            }
+        }
+    }
+
     /// Read the break menu of `SIGINT`, as `do_break` does
     /// (`break.c:571-687`): write the menu, and act on the keys of stdin.
     /// `a`, `q`, and `*` abort the run with the status 0, `c` continues the
@@ -1277,14 +1298,19 @@ impl Scheduler {
         let _ = write!(stdout, "\r\n{clear}{HELP}");
         let _ = stdout.flush();
         loop {
-            // `sys_get_key` reads up to 64 bytes of the descriptor and uses
-            // the first (`sys.c:1051-1071`). Read the descriptor directly: a
-            // buffered read can take more than 64 bytes and keep them from
-            // the next reader of the descriptor. A read error, the end of
-            // the input, and the NUL byte abort the run (`break.c:602-604`).
-            let key = match super::host::input::read(libc::STDIN_FILENO, 64) {
-                Ok(bytes) if !bytes.is_empty() => bytes[0],
-                _ => 0,
+            // `sys_get_key` waits until the descriptor is readable, reads up
+            // to 64 bytes, and retries a read with no data (`sys.c:1051-1071`).
+            // Read the descriptor directly: a buffered read can take more
+            // than 64 bytes and keep them from the next reader of the
+            // descriptor. A wait that a signal stops, the end of the input,
+            // and the NUL byte abort the run (`break.c:602-604`).
+            let key = match super::host::input::wait_readable(&[libc::STDIN_FILENO], None) {
+                super::host::input::Readiness::Ready(_) => {
+                    Self::break_key(|| super::host::input::read(libc::STDIN_FILENO, 64))
+                }
+                super::host::input::Readiness::Pending | super::host::input::Readiness::Invalid => {
+                    0
+                }
             };
             if key == 0 {
                 return Err(BeamError::Halt(0));

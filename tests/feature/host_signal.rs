@@ -191,15 +191,19 @@ fn writes_an_invalid_break_key_as_its_byte_as_pinned_erts() {
         ("ready\n", Action::Signal(libc::SIGINT)),
         ("BREAK:", Action::Write(b"\xff")),
     ];
-    let erts = run_with_actions(&mut erts("wait"), b"", &steps);
-    let pbeam = run_with_actions(&mut pbeam("wait"), b"", &steps);
+    let erts = run_with_actions_raw(&mut erts("wait"), b"", &steps);
+    let pbeam = run_with_actions_raw(&mut pbeam("wait"), b"", &steps);
     assert_eq!(erts, pbeam, "ERTS and PBeam");
     let (status, stdout, stderr) = pbeam;
     assert_eq!(status, Some(0));
-    assert_eq!(stderr, "");
-    // The lossy text of the output gives the byte 0xff as the replacement
-    // character, and the equality above shows that both runs write it.
-    assert!(stdout.contains("Invalid option '\u{fffd}'."), "{stdout:?}");
+    assert!(stderr.is_empty(), "{stderr:?}");
+    let message = b"Invalid option '\xff'.";
+    assert!(
+        stdout
+            .windows(message.len())
+            .any(|window| window == message),
+        "{stdout:?}"
+    );
 }
 
 #[test]
@@ -398,6 +402,18 @@ enum Action {
 /// assert_eq!(output.0, Some(0));
 /// ```
 fn run_with_actions(command: &mut Command, input: &[u8], steps: &[(&str, Action)]) -> Output {
+    let (status, stdout, stderr) = run_with_actions_raw(command, input, steps);
+    let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).into_owned();
+    (status, text(&stdout), text(&stderr))
+}
+
+/// Run the steps of [`run_with_actions`] and return the raw bytes of the
+/// output, so that a comparison does not lose a byte that is not UTF-8.
+fn run_with_actions_raw(
+    command: &mut Command,
+    input: &[u8],
+    steps: &[(&str, Action)],
+) -> (Option<i32>, Vec<u8>, Vec<u8>) {
     let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -425,9 +441,9 @@ fn run_with_actions(command: &mut Command, input: &[u8], steps: &[(&str, Action)
     let status = wait_for_exit(&mut child, &stdout);
     stdout_reader.join().unwrap();
     stderr_reader.join().unwrap();
-    let text =
-        |bytes: &Arc<Mutex<Vec<u8>>>| String::from_utf8_lossy(&bytes.lock().unwrap()).into_owned();
-    (status, text(&stdout), text(&stderr))
+    let stdout = stdout.lock().unwrap().clone();
+    let stderr = stderr.lock().unwrap().clone();
+    (status, stdout, stderr)
 }
 
 /// Read `source` until its end into `output` in a new thread.
