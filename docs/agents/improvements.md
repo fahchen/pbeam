@@ -30,7 +30,7 @@ Detailed incident writeups with full context live in `postmortems/`.
 
 **Guardrail:** When a probe compares several calls, give each call a `catch` before you run it.
 
-**Reference:** `fixtures/decode_packet/decode_packet_probe.erl`
+**Reference:** <https://github.com/fahchen/pbeam/pull/806>
 
 ## 20261018: Capture ERTS reference output in the assertion's format
 
@@ -42,7 +42,7 @@ Detailed incident writeups with full context live in `postmortems/`.
 
 **Guardrail:** Before you paste a reference constant, run the exact probe command that produced it and compare its format with the test's assertion.
 
-**Reference:** `tests/integration/decode_packet.rs`
+**Reference:** <https://github.com/fahchen/pbeam/pull/806>
 
 ## 20261011: Verify a benchmark probe after compilation
 
