@@ -6,6 +6,7 @@
 use std::{
     io::{BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream},
+    os::unix::process::CommandExt,
     process::{Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
@@ -59,7 +60,10 @@ fn serve(arguments: &[&str], pbeam: Option<&str>) -> (String, String, String) {
         .env_remove("PBEAM_BIN")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        // The runner starts mix and erlc, so one process group holds the
+        // whole run and a kill reaches each process.
+        .process_group(0);
     if let Some(pbeam) = pbeam {
         command.env("PBEAM_BIN", pbeam);
     }
@@ -150,10 +154,10 @@ fn request(mut stream: TcpStream) -> Result<(String, String, String), String> {
     Ok((status, content_type, body))
 }
 
-/// Kill the process of the run and return its output.
+/// Kill the process group of the run, which holds the runner and its build
+/// processes, and return the output of the runner.
 fn stop(child: Child) -> std::process::Output {
-    let _ = Command::new("kill")
-        .args(["-9", &child.id().to_string()])
-        .status();
+    let group = format!("-{}", child.id());
+    let _ = Command::new("kill").args(["-9", "--", &group]).status();
     child.wait_with_output().expect("the child has an output")
 }
