@@ -145,6 +145,12 @@ case "$output_dir/" in
         exit 1
         ;;
 esac
+for path in "$output" "$bundle"; do
+    if [ -L "$path" ]; then
+        echo "example-executable: $path is a symbolic link. Name a path that is not a link, outside the release directory." >&2
+        exit 1
+    fi
+done
 target/release/pbeam_bundle bundle "target/examples/$usage_name" "$bundle" "${usage_name}_run" main "target/examples/$usage_name/pbeam.start.list"
 target/release/pbeam_bundle executable target/release/pbeam "$bundle" "$output"
 echo "Wrote $output"
