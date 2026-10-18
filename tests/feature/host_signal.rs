@@ -329,6 +329,9 @@ fn break_in_raw_terminal(command: &mut Command) -> (Option<i32>, Vec<u8>) {
     let reader = collect(terminal.try_clone().unwrap(), Arc::clone(&output));
     wait_for(&mut child, &output, b"ready\r\n");
     set_raw(&raw);
+    // Drop the slave: while the test holds it, the master gives no end of
+    // the output after the run exits.
+    drop(raw);
     send(&child, libc::SIGINT);
     wait_for(&mut child, &output, b"BREAK: ");
     terminal.write_all(b"a").unwrap();
