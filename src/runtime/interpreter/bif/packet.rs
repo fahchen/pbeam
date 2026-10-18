@@ -257,12 +257,12 @@ fn parse_http(atoms: &mut AtomTable, bytes: &[u8], header: bool) -> Result<Term,
 /// `packet_parse_http` refuses (`packet_parser.c:662-862`). The line is
 /// `bytes` without the trailing CRLF (`packet_parser.c:669-673`).
 fn line(atoms: &mut AtomTable, bytes: &[u8], header: bool) -> Result<Option<Term>, BeamError> {
+    // `packet_length` gives a packet only after a newline, so the last byte
+    // is always `\n`.
     let n = if bytes.len() >= 2 && bytes[bytes.len() - 2] == b'\r' {
         bytes.len() - 2
-    } else if !bytes.is_empty() && bytes[bytes.len() - 1] == b'\n' {
-        bytes.len() - 1
     } else {
-        bytes.len()
+        bytes.len() - 1
     };
     if header {
         return header_line(atoms, bytes, n);

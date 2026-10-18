@@ -21,6 +21,9 @@ request_lines() ->
      decode(http_bin, <<"GET http:/x HTTP/1.1\r\n">>),
      decode(http_bin, <<"GET foo:bar HTTP/1.1\r\n">>),
      decode(http_bin, <<"GET foo HTTP/1.1\r\n">>),
+     decode(http_bin, <<"GET http://example.com:abc/x HTTP/1.1\r\n">>),
+     decode(http_bin, <<"GET http://[::1]:/x HTTP/1.1\r\n">>),
+     decode(http_bin, <<"GET http://[::1]:abc/x HTTP/1.1\r\n">>),
      decode(http_bin, <<"HTTP/1.1 200 OK\r\n">>),
      decode(http_bin, <<"HTTP/1.0 404 \r\n">>),
      decode(http_bin, <<"GET / HTTP/1.1\r\nX">>)].
@@ -51,14 +54,27 @@ malformed() ->
      decode(http_bin, <<"\r\n">>),
      decode(httph_bin, <<"NoColon\r\n\r\n">>),
      decode(httph_bin, <<"Bad Header\r\n\r\n">>),
-     decode(http_bin, <<"GE T / HTTP/1.1\r\n">>)].
+     decode(http_bin, <<"GE T / HTTP/1.1\r\n">>),
+     decode(http_bin, <<"HTTP/1 200 OK\r\n">>),
+     decode(http_bin, <<"HTTP/1. 200 OK\r\n">>),
+     decode(http_bin, <<"HTTP/1.1\r\n">>),
+     decode(http_bin, <<"HTTP/1.1 200OK\r\n">>),
+     decode(http_bin, <<"GET \r\n">>),
+     decode(http_bin, <<"GET / HTP/1.1\r\n">>),
+     decode(http_bin, <<"GET / HTTP/1.\r\n">>),
+     decode(http_bin, <<"GET / HTTP/xyz\r\n">>),
+     decode(http_bin, <<"GET / HTTP/12x\r\n">>),
+     decode(http_bin, <<"GET / HTTP/123\r\n">>),
+     decode(http_bin, <<"GET / HTTP/1.a\r\n">>)].
 
 options() ->
     [erlang:decode_packet(http_bin, <<"GET / HTTP/1.1\r\n">>, [{packet_size, 4}]),
      erlang:decode_packet(http_bin, <<"GET / HTTP/1.1\r\n">>, [{packet_size, 100}]),
      erlang:decode_packet(http_bin, <<"GET / HTTP/1.1\r\n">>, [{packet_size, 0}]),
      erlang:decode_packet(httph_bin, <<"Host: x\r\n\r\n">>, [{line_length, 4}]),
-     erlang:decode_packet(httph_bin, <<"Host: x\r\n\r\n">>, [{line_length, 100}])].
+     erlang:decode_packet(httph_bin, <<"Host: x\r\n\r\n">>, [{line_length, 100}]),
+     erlang:decode_packet(http_bin, <<"GET /">>, [{packet_size, 3}]),
+     erlang:decode_packet(httph_bin, <<"Host: x\r\n">>, [{packet_size, 5}])].
 
 %% Each argument error gives `{error, badarg, Info}` with the error
 %% information of the first stack frame.
@@ -68,7 +84,10 @@ badargs() ->
      catch_error(http_bin, <<"x">>, [{packet_size, -1}]),
      catch_error(http_bin, <<"x">>, [{packet_size, big()}]),
      catch_error(http_bin, <<"x">>, [{line_delimiter, 10}]),
-     catch_error(http_bin, <<>>, [packet_size])].
+     catch_error(http_bin, <<>>, [packet_size]),
+     catch_error(http_bin, <<"x">>, [packet_size | foo]),
+     catch_error(http_bin, <<"x">>, [{packet_size}]),
+     catch_error(http_bin, <<"x">>, [{packet_size, foo}])].
 
 %% A packet type that PBeam does not run stops with a runtime error.
 unsupported() ->

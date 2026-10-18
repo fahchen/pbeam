@@ -5640,6 +5640,72 @@ fn rejects_a_packet_bitstring_that_is_not_a_byte() {
 }
 
 #[test]
+fn stops_at_an_integer_packet_type_that_pbeam_does_not_run() {
+    // The small integers 0, 1, 2 and 4 are packet types
+    // (`erl_bif_port.c:1493-1496`), so they reach the runtime error of the
+    // unsupported type.
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let result = program.bif(
+        &mut scheduler,
+        "erlang",
+        "decode_packet",
+        vec![Term::Integer(2), Term::binary(b"abc".to_vec()), Term::nil()],
+    );
+    let error = result.unwrap_err().to_string();
+    assert!(
+        error.contains("unsupported erlang:decode_packet/3 type 2"),
+        "{error}"
+    );
+}
+
+#[test]
+fn raises_badopt_for_an_unknown_packet_type() {
+    // A type that is not an atom or a small integer raises `badarg` with the
+    // `badopt` cause (`erl_bif_port.c:1492-1511`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let result = program
+        .bif(
+            &mut scheduler,
+            "erlang",
+            "decode_packet",
+            vec![
+                Term::tuple(vec![Term::Integer(1)]),
+                Term::binary(b"abc".to_vec()),
+                Term::nil(),
+            ],
+        )
+        .unwrap();
+    assert!(matches!(result, BifResult::ErrorWithCause { .. }));
+}
+
+#[test]
+fn rejects_an_unsupported_packet_type_bitstring_that_is_not_a_byte() {
+    // ERTS rejects a subject that is not a whole number of bytes before it
+    // parses the packet, for every packet type
+    // (`erts_get_aligned_binary_bytes`, `erl_bif_port.c:1550-1556`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let subject = Term::Binary(Binary::from(&[0x10_u8]).bits(0, 4));
+    let result = program
+        .bif(
+            &mut scheduler,
+            "erlang",
+            "decode_packet",
+            vec![Term::static_atom("line"), subject, Term::nil()],
+        )
+        .unwrap();
+    assert!(matches!(result, BifResult::Raise { .. }));
+}
+
+#[test]
 fn rejects_a_select_delete_of_a_private_table_of_another_process() {
     // `ets:internal_select_delete/2` takes the table with `DB_WRITE`, so a
     // process that does not own a `private` table raises `badarg`
