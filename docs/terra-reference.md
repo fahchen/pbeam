@@ -114,13 +114,13 @@ The boot of `erl -noshell` (for example `prim_tty:tty_create/1` and `setlocale/1
 
 Static candidates: 331 BIFs in external calls, 65 BIFs in `bif` and `gc_bif` instructions, and 139 NIF stubs (functions that call `erlang:nif_error/1,2` and are not BIFs).
 
-Exercised: 57 BIFs and 8 NIFs. The called NIFs are `prim_file:read_info_nif/2` and the seven `prim_tty` NIFs of the host operations table. The called BIFs, with the count:
+Exercised: 59 BIFs and 8 NIFs. The called NIFs are `prim_file:read_info_nif/2` and the seven `prim_tty` NIFs of the host operations table. The called BIFs, with the count:
 
-- `erlang`: `'++'/2` 156, `apply/2` 1, `atom_to_binary/2` 1, `atom_to_list/1` 6, `demonitor/2` 151, `dt_restore_tag/1` 108, `dt_spread_tag/1` 108, `function_exported/3` 11, `group_leader/0` 17, `integer_to_binary/1` 94, `integer_to_binary/2` 1, `integer_to_list/1` 3, `iolist_to_binary/1` 40, `iolist_to_iovec/1` 14, `list_to_atom/1` 3, `list_to_binary/1` 4, `list_to_tuple/1` 108, `make_fun/3` 12, `make_ref/0` 4, `module_loaded/1` 2, `monitor/2` 147, `monitor/3` 10, `posixtime_to_universaltime/1` 6, `process_flag/2` 3, `process_info/2` 18, `put/2` 14, `raise/3` 6, `register/2` 1, `send/2` 9, `send/3` 6, `spawn_link/3` 1, `spawn_opt/4` 3, `system_info/1` 223, `tuple_to_list/1` 1, `universaltime_to_localtime/1` 6, `whereis/1` 127.
+- `erlang`: `'++'/2` 156, `apply/2` 1, `atom_to_binary/2` 1, `atom_to_list/1` 6, `cancel_timer/1` 1, `demonitor/2` 151, `dt_restore_tag/1` 108, `dt_spread_tag/1` 108, `function_exported/3` 11, `group_leader/0` 17, `integer_to_binary/1` 94, `integer_to_binary/2` 1, `integer_to_list/1` 3, `iolist_to_binary/1` 40, `iolist_to_iovec/1` 14, `list_to_atom/1` 3, `list_to_binary/1` 4, `list_to_tuple/1` 108, `make_fun/3` 12, `make_ref/0` 4, `module_loaded/1` 2, `monitor/2` 147, `monitor/3` 10, `posixtime_to_universaltime/1` 6, `process_flag/2` 3, `process_info/2` 18, `put/2` 14, `raise/3` 6, `register/2` 1, `send/2` 9, `send/3` 6, `send_after/4` 2, `spawn_link/3` 1, `spawn_opt/4` 3, `system_info/1` 223, `tuple_to_list/1` 1, `universaltime_to_localtime/1` 6, `whereis/1` 127.
 - `erts_internal`: `map_next/3` 37, `open_port/2` 2, `port_info/1` 2, `trace_pattern/3` 2 (the calls of `terra_calls` that stop the counters).
 - Other modules: `binary:match/2` 2, `binary:split/3` 30, `file:native_name_encoding/0` 108, `lists:keyfind/3` 429, `lists:keymember/3` 2, `lists:member/2` 61, `lists:reverse/2` 264, `maps:merge/2` 1184, `maps:put/3` 1180, `net_kernel:dflag_unicode_io/1` 5, `os:getenv/1` 2, `os:set_signal/2` 1, `persistent_term:get/2` 2, `prim_file:internal_name2native/1` 108, `unicode:bin_is_7bit/1` 8, `unicode:characters_to_binary/2` 28, `unicode:characters_to_list/2` 1670.
 
-Static candidates that the run does not call include the timers of Terra (`erlang:send_after/3`, `erlang:cancel_timer/1`; Terra `lib/terra/input.ex:219`, `lib/terra/runtime.ex:540`, `554`), `erts_internal:port_close/1`, the `prim_tty` NIFs `tty_select/2`, `tty_encoding/1`, `tigetstr_nif/1`, `tputs_nif/2`, `wcwidth/1`, and `wcswidth/1`, each `prim_file` NIF except `read_info_nif/2`, and each NIF of `prim_socket`, `prim_net`, `prim_buffer`, and `zlib`.
+Static candidates that the run does not call include `erlang:send_after/3` (the input flush timer calls `erlang:send_after/4`, and a cancel calls `erlang:cancel_timer/1`; Terra `lib/terra/input.ex:219`), `erts_internal:port_close/1`, the `prim_tty` NIFs `tty_select/2`, `tty_encoding/1`, `tigetstr_nif/1`, `tputs_nif/2`, `wcwidth/1`, and `wcswidth/1`, each `prim_file` NIF except `read_info_nif/2`, and each NIF of `prim_socket`, `prim_net`, `prim_buffer`, and `zlib`.
 
 ### Instructions
 
@@ -130,7 +130,7 @@ Exercised: the called functions have 104 of these names. These are the names tha
 
 ## Known uncertainty
 
-- The scenario is one session with the keys `j j k q`, a resize, and an incomplete escape sequence. It does not give an error, so the code of the error path is static only. Terra keeps the terminal size that it caches at the start, so the resize reaches its signal handler but changes no view.
+- The scenario is one session with the keys `j j k q`, a resize, and an incomplete escape sequence. It does not give an error, so the code of the error path is static only. Terra keeps the terminal size that it caches at the start, so the terminal changes size and the following steps still pass, but no view changes; the harness does not show that the signal handler ran.
 - The call counters count calls of functions, not instructions. A called function can have instructions that did not run, so the exercised instruction names are an upper bound.
 - A BIF that the compiler makes a `bif` or `gc_bif` instruction, for example `erlang:element/2` in a guard, has no count. The 65 BIFs of these instructions are static candidates only.
 - The counters start after the boot of `erl -noshell` and stop after the terminal owner of Terra stops. The count of `erts_internal:trace_pattern/3` comes from `terra_calls`, not from the scenario.

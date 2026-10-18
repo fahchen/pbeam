@@ -47,7 +47,7 @@ steps() ->
 open(Out, Command) ->
     Shell =
         "out=$1; shift; "
-        "rm -f \"$out/resize\"; "
+        "rm -f \"$out/resize\" \"$out/stty-resize-ok\" \"$out/stty-resize-size.txt\" \"$out/stty-resize.g\"; "
         "(wait=0; while [ ! -f \"$out/resize\" ] && [ \"$wait\" -lt 12000 ]; do /bin/sleep 0.05; wait=$((wait + 1)); done; "
         "[ -f \"$out/resize\" ] && { stty rows 30 cols 100 < /dev/tty && stty size < /dev/tty > \"$out/stty-resize-size.txt\" && stty -g < /dev/tty > \"$out/stty-resize.g\" && : > \"$out/stty-resize-ok\"; }) & "
         "stty rows 24 cols 80 && stty -g > \"$out/stty-before.g\" && stty -a > \"$out/stty-before.txt\" || exit 125; "
