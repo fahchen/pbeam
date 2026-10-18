@@ -327,7 +327,7 @@ fn accepts_the_attribute_shapes_that_erts_loads() {
     // only when the encoding is bad (`asm_load.c:1086-1091`). It reads no
     // chunk of no bytes (`asm_load.c:1080`), and it loads a term of another
     // shape, so PBeam reads no declaration from one.
-    let cases: [Vec<u8>; 13] = [
+    let cases: [Vec<u8>; 14] = [
         // A payload of no bytes.
         Vec::new(),
         // A term that is not a list.
@@ -386,6 +386,15 @@ fn accepts_the_attribute_shapes_that_erts_loads() {
                 value
             }])]),
         )]),
+        // A pid inside an attribute value, whose node atom and identity
+        // bytes are inside that value too.
+        {
+            let mut bytes = vec![131, 108, 0, 0, 0, 1, 104, 2, 119, 5];
+            bytes.extend_from_slice(b"other");
+            bytes.extend_from_slice(&pid_());
+            bytes.push(106);
+            bytes
+        },
     ];
     for bytes in cases {
         assert_eq!(native_declarations(&bytes).unwrap(), [], "{bytes:?}");
@@ -400,9 +409,19 @@ fn reports_a_payload_that_erts_refuses() {
 
     // Each tag and each count that the ERTS walk refuses
     // (`external.c:6041-6540`), with the least bytes that reach the refusal.
-    let refused: [(&str, Vec<u8>); 11] = [
+    let refused: [(&str, Vec<u8>); 12] = [
         // `FUN_EXT`, which OTP 23 removed.
         ("fun", chunk(&[("other", vec![117])])),
+        // The identity bytes of a pid whose node term ends at the end of the
+        // attribute value, so the atom of the tail of the list must consume
+        // them. The walk keeps the count across the elements of a container
+        // and refuses the tail (`external.c:6194-6248`, `external.c:6249-6262`).
+        (
+            "pid across the value",
+            vec![
+                131, 108, 0, 0, 0, 1, 104, 2, 119, 5, b'o', b't', b'h', b'e', b'r', 88, 97, 0, 106,
+            ],
+        ),
         // `LOCAL_EXT`, which needs a matching block hash.
         ("local", chunk(&[("other", vec![121, 0, 0, 0, 0])])),
         // An atom name above 255 characters, which `pair` reads.

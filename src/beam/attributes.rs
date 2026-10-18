@@ -89,12 +89,21 @@ struct Cursor<'a> {
     bytes: &'a [u8],
     /// The position of the next byte.
     pos: usize,
+    /// The count of identity bytes of a pid, a port, or a reference, which
+    /// the tag of the atom of its node consumes (`atom_extra_skip`,
+    /// `external.c:6194-6248`). The count stays until that atom, also across
+    /// the elements of a container, as in the ERTS walk.
+    extra: u64,
 }
 
 impl<'a> Cursor<'a> {
     /// Return a cursor at the start of `bytes`.
     fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, pos: 0 }
+        Self {
+            bytes,
+            pos: 0,
+            extra: 0,
+        }
     }
 
     /// Take `count` bytes and return them.
@@ -138,6 +147,11 @@ impl<'a> Cursor<'a> {
     /// UTF-8 bytes (`dec_atom`, `external.c:4485-4560`). A name above the
     /// ERTS limit is an error, as in the walk `decoded_size`
     /// (`external.c:6152-6189`).
+    ///
+    /// The name of the node of a pid, a port, or a reference holds the
+    /// identity bytes of that term, which the walk counts in
+    /// [`Cursor::extra`] and this read consumes with the tag of the atom
+    /// (`dec_atom`, `external.c:4485-4516`).
     fn atom(&mut self) -> Result<String, BeamError> {
         let (length, latin1, limit) = match self.byte()? {
             100 => (self.number(2)?, true, MAX_ATOM_CHARACTERS as u64),
@@ -151,11 +165,13 @@ impl<'a> Cursor<'a> {
         if length > limit {
             return Err(error("an external term atom name is too long"));
         }
-        let bytes = self.take(length)?;
+        let bytes = self.take(length + self.extra)?;
+        self.extra = 0;
+        let name = &bytes[..usize::try_from(length).expect("an atom length that fits")];
         if latin1 {
-            Ok(bytes.iter().map(|byte| char::from(*byte)).collect())
+            Ok(name.iter().map(|byte| char::from(*byte)).collect())
         } else {
-            String::from_utf8(bytes.to_vec())
+            String::from_utf8(name.to_vec())
                 .map_err(|_| error("an external term atom is not UTF-8"))
         }
     }
@@ -190,10 +206,12 @@ impl<'a> Cursor<'a> {
     /// not an error.
     fn pair(&mut self) -> Result<Option<(String, &'a [u8])>, BeamError> {
         let start = self.pos;
+        let extra = self.extra;
         if let Some(pair) = self.read_pair() {
             return Ok(Some(pair));
         }
         self.pos = start;
+        self.extra = extra;
         self.skip_term()?;
         Ok(None)
     }
@@ -223,10 +241,12 @@ impl<'a> Cursor<'a> {
         let mut declarations = Vec::with_capacity(count);
         for _ in 0..count {
             let start = self.pos;
+            let extra = self.extra;
             match self.declaration() {
                 Some(declaration) => declarations.push(declaration),
                 None => {
                     self.pos = start;
+                    self.extra = extra;
                     self.skip_term()?;
                 }
             }
@@ -274,13 +294,12 @@ impl<'a> Cursor<'a> {
     ///
     /// `remaining` counts the terms that the walk still expects in the
     /// current container, and `stack` holds the count of each enclosing
-    /// container, so a term of any depth needs no recursion. `extra` is the
-    /// ERTS `atom_extra_skip`: the bytes of the identity of a pid, a port, or
-    /// a reference, which the walk adds to the atom tag of the node.
+    /// container, so a term of any depth needs no recursion. The identity
+    /// bytes of a pid, a port, or a reference stay in [`Cursor::extra`] until
+    /// the tag of the atom of its node consumes them.
     fn skip_term(&mut self) -> Result<(), BeamError> {
         let mut remaining: u64 = 1;
         let mut stack: Vec<u64> = Vec::new();
-        let mut extra: u64 = 0;
         loop {
             while remaining == 0 {
                 match stack.pop() {
@@ -317,38 +336,43 @@ impl<'a> Cursor<'a> {
                     if length > limit {
                         return Err(error("an external term atom name is too long"));
                     }
+                    let extra = self.extra;
                     self.take(length + extra)?;
-                    extra = 0;
+                    self.extra = 0;
                 }
                 // A small atom holds a one-byte length, which is below both
                 // limits, so the walk does not compare it
                 // (`external.c:6178-6189`).
                 115 | 119 => {
                     let length = u64::from(self.byte()?);
+                    let extra = self.extra;
                     self.take(length + extra)?;
-                    extra = 0;
+                    self.extra = 0;
                 }
                 // The atom references of a distribution or internal encoding
                 // carry the same bytes (`external.c:6190-6193`,
                 // `external.c:6405-6412`).
                 82 => {
+                    let extra = self.extra;
                     self.take(1 + extra)?;
-                    extra = 0;
+                    self.extra = 0;
                 }
                 73 => {
+                    let extra = self.extra;
                     self.take(2 + extra)?;
-                    extra = 0;
+                    self.extra = 0;
                 }
                 75 => {
+                    let extra = self.extra;
                     self.take(3 + extra)?;
-                    extra = 0;
+                    self.extra = 0;
                 }
                 // The empty list, a string, and a binary.
                 106 => {
                     // `NIL_EXT` names the node of a local pid, a port, or a
                     // reference only inside a local encoding
                     // (`external.c:6249-6262`).
-                    if extra != 0 {
+                    if self.extra != 0 {
                         return Err(error(
                             "the node of a pid, a port, or a reference is not an atom",
                         ));
@@ -385,27 +409,27 @@ impl<'a> Cursor<'a> {
                 // one more term and adds the identity bytes to its atom tag
                 // (`external.c:6194-6248`).
                 88 => {
-                    extra = 12;
+                    self.extra = 12;
                     remaining += 1;
                 }
                 103 => {
-                    extra = 9;
+                    self.extra = 9;
                     remaining += 1;
                 }
                 120 => {
-                    extra = 12;
+                    self.extra = 12;
                     remaining += 1;
                 }
                 89 => {
-                    extra = 8;
+                    self.extra = 8;
                     remaining += 1;
                 }
                 102 => {
-                    extra = 5;
+                    self.extra = 5;
                     remaining += 1;
                 }
                 101 => {
-                    extra = 5;
+                    self.extra = 5;
                     remaining += 1;
                 }
                 90 | 114 => {
@@ -416,7 +440,7 @@ impl<'a> Cursor<'a> {
                     // `NEWER_REFERENCE_EXT` holds one creation byte and
                     // `NEW_REFERENCE_EXT` four, then four bytes for each
                     // number.
-                    extra = if tag == 90 {
+                    self.extra = if tag == 90 {
                         4 + 4 * count
                     } else {
                         1 + 4 * count
