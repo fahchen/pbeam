@@ -5349,6 +5349,8 @@ fn traps_a_call_that_meets_a_fixed_clear() {
     scheduler.schedule_next().unwrap();
     let owner = scheduler.current_process_mut().id;
     let calls = [
+        ("first", vec![]),
+        ("first_lookup", vec![]),
         ("next", vec![Term::Integer(0)]),
         ("update_element", vec![Term::Integer(0), Term::nil()]),
         (

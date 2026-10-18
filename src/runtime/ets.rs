@@ -1383,6 +1383,21 @@ impl Table {
         Some(self.next_live_after(self.bucket(hash), self.next[retained.newest]))
     }
 
+    /// Return the first key in the order of a hash table, as
+    /// `db_first_hash_common` (`erl_db_hash.c:1117-1140`) gives it: the key
+    /// of the first live object from bucket 0 up. Return `None` for an empty
+    /// table.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
+    /// assert_eq!(table.first_key(), None);
+    /// ```
+    pub(super) fn first_key(&self) -> Option<Term> {
+        self.next_live_after(0, self.heads[0])
+    }
+
     /// Return the key of the first slot that is not deleted after the slot
     /// `slot` of the bucket `bucket`, or `None` at the end of the table.
     fn next_live_after(&self, mut bucket: usize, mut slot: usize) -> Option<Term> {

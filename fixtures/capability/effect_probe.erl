@@ -482,6 +482,14 @@ ambient() ->
             '$end_of_table' -> eot;
             Previous -> Previous
         end,
+        case ets:first(Name) of
+            key -> first;
+            First -> First
+        end,
+        case ets:first_lookup(Name) of
+            {key, [{key, value}]} -> first_lookup;
+            Lookup -> Lookup
+        end,
         ets:match_object(Name, {'_', '_'}),
         ets:select(Name, [{{'_', '_'}, [], ['$_']}]),
         begin
