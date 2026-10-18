@@ -43,23 +43,7 @@ defmodule Mix.Tasks.Pbeam.Bundle do
     tool =
       case Keyword.get(options, :tool) do
         nil ->
-          # The target directory keeps the tool path independent of
-          # `CARGO_TARGET_DIR` and the build configuration.
-          run!(
-            "cargo",
-            [
-              "build",
-              "--locked",
-              "--release",
-              "--bin",
-              "pbeam_bundle",
-              "--target-dir",
-              Path.join(root, "target")
-            ],
-            root
-          )
-
-          Path.join(root, "target/release/pbeam_bundle")
+          build_tool!(root)
 
         tool ->
           Path.expand(tool, cwd)
@@ -117,6 +101,43 @@ defmodule Mix.Tasks.Pbeam.Bundle do
       ],
       root
     )
+  end
+
+  # Cargo reports the path of each artifact, so a configured target
+  # directory or build target cannot move or hide the tool.
+  defp build_tool!(root) do
+    {output, status} =
+      System.cmd(
+        "cargo",
+        ["build", "--locked", "--release", "--bin", "pbeam_bundle", "--message-format=json"],
+        cd: root
+      )
+
+    if status != 0 do
+      Mix.raise("pbeam.bundle: cargo failed with status #{status}")
+    end
+
+    output
+    |> String.split("\n", trim: true)
+    |> Enum.find_value(fn line ->
+      case JSON.decode(line) do
+        {:ok,
+         %{
+           "reason" => "compiler-artifact",
+           "target" => %{"name" => "pbeam_bundle"},
+           "executable" => executable
+         }}
+        when is_binary(executable) ->
+          executable
+
+        _ ->
+          nil
+      end
+    end)
+    |> case do
+      nil -> Mix.raise("pbeam.bundle: cargo reported no pbeam_bundle artifact")
+      executable -> executable
+    end
   end
 
   defp run!(command, arguments, root) do
