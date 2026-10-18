@@ -122,6 +122,53 @@ impl PersistentTerms {
         Some(copied)
     }
 
+    /// Erase the value of `key`, as `persistent_term_erase_1` does
+    /// (`erl_bif_persistent.c:417-549`). Return whether the key had a
+    /// value. A slot whose next slot is free is cleared in place
+    /// (`is_erasable`, `erl_bif_persistent.c:1025-1030`). Else the table
+    /// keeps no erased entry, so the remaining pairs go again in old slot
+    /// order into a table of the same size, or of half the size when the
+    /// table is mostly empty (`MUST_SHRINK`,
+    /// `erl_bif_persistent.c:47-48`), as `copy_table` does.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut terms = PersistentTerms::default();
+    /// terms.put(&Term::static_atom("key"), &Term::Integer(1));
+    /// assert!(terms.erase(&Term::static_atom("key")));
+    /// assert!(!terms.erase(&Term::static_atom("key")));
+    /// assert_eq!(terms.get(&Term::static_atom("key")), None);
+    /// ```
+    pub(super) fn erase(&mut self, key: &Term) -> bool {
+        let slot = self.lookup(key);
+        if self.buckets[slot].is_none() {
+            return false;
+        }
+        let must_shrink = 200 * self.num_entries <= LOAD_FACTOR * self.buckets.len()
+            && self.buckets.len() > INITIAL_SIZE;
+        let mask = self.buckets.len() - 1;
+        self.num_entries -= 1;
+        // It is safe to clear the slot when it is no stepping stone to the
+        // next slot (`is_erasable`).
+        if !must_shrink && self.buckets[(slot + 1) & mask].is_none() {
+            self.buckets[slot] = None;
+            return true;
+        }
+        let size = if must_shrink {
+            self.buckets.len() / 2
+        } else {
+            self.buckets.len()
+        };
+        let mut old = std::mem::replace(&mut self.buckets, vec![None; size]);
+        old[slot] = None;
+        for (key, value) in old.into_iter().flatten() {
+            let slot = self.lookup(&key);
+            self.buckets[slot] = Some((key, value));
+        }
+        true
+    }
+
     /// Return all stored pairs as the elements `{Key, Value}` of a list, in
     /// descending slot order. `do_get_all` of `persistent_term_get_0` in
     /// `erl_bif_persistent.c` reads the slots from slot 0 and puts each pair

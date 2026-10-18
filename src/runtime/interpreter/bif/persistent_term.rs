@@ -133,6 +133,47 @@ pub(super) fn get_all_trap(process: &mut ProcessState, all: Term, entries: usize
     Value(all)
 }
 
+/// Run `persistent_term:erase/1`: erase the value of `key` and return
+/// `true`, or return `false` for a key with no value, as
+/// `persistent_term_erase_1` does (`erl_bif_persistent.c:417-549`). ERTS
+/// returns `true` after the process switches out and `false` with no
+/// switch, so this BIF does the same. ERTS charges the slots of a rehashed
+/// table (`erl_bif_persistent.c:538`); PBeam charges no copy (row
+/// "Persistent terms" in `docs/erts-differences.md`).
+///
+/// The caller needs a `persistent_term` capability that permits `write`,
+/// else the call raises `error:capability_denied` and erases nothing,
+/// also for a key that has a value.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let missing = erase(&mut context, &Term::static_atom("key"))?;
+/// assert!(matches!(missing, BifResult::Value(Term::Atom(atom)) if atom.is_static("false")));
+/// ```
+///
+/// # Errors
+///
+/// A new `capability_denied` atom in a full atom table gives the error of
+/// `AtomTable::put`.
+pub(super) fn erase(context: &mut BifContext<'_>, key: &Term) -> Result<BifResult, BeamError> {
+    let scheduler = &mut *context.scheduler;
+    let check = denial(
+        scheduler,
+        CapabilityKind::PersistentTerm,
+        Operation::Write,
+        None,
+    );
+    if let Some(denied) = check? {
+        return Ok(denied);
+    }
+    if scheduler.persistent_terms.erase(key) {
+        Ok(BifResult::YieldReturn(Term::static_atom("true")))
+    } else {
+        Ok(Value(Term::static_atom("false")))
+    }
+}
+
 /// Run `persistent_term:put/2`: store `value` for `key`, as ERTS
 /// `put_common` does (`erl_bif_persistent.c:642-784`). A key that has
 /// exactly this value already returns `ok` with no cost. Else the copy of a
