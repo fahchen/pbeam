@@ -1254,7 +1254,12 @@ impl Scheduler {
                 // A second break request in the same batch stops the run
                 // before the menu opens, and a request that found the flag
                 // set stops it at once (`break_requested`, `sys.c:611-624`).
-                if break_pending || signal::request_break() || queue.contains(&libc::SIGINT) {
+                if break_pending
+                    || signal::request_break()
+                    || signal::take_second_break()
+                    || queue.contains(&libc::SIGINT)
+                {
+                    let _ = signal::take_break_requested();
                     return Err(BeamError::Halt(0));
                 }
                 break_pending = true;
@@ -1265,8 +1270,13 @@ impl Scheduler {
                 queue.extend(std::mem::take(&mut self.deferred_signals));
                 queue.extend(signal::take_notified());
                 // ERTS clears the flag on each exit from the menu, also when
-                // the menu ends the run (`sys.c:913`).
+                // the menu ends the run (`sys.c:913`). A second request that
+                // arrived at the end of the menu stays in its flag for the
+                // next check, and a run that ends has no flag to keep.
                 let _ = signal::take_break_requested();
+                if result.is_err() {
+                    let _ = signal::take_second_break();
+                }
                 result?;
                 continue;
             }

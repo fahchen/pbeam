@@ -32,6 +32,11 @@ static NOTIFIED: AtomicBool = AtomicBool::new(false);
 /// set (`break.c:602-604`).
 static BREAK_REQUESTED: AtomicBool = AtomicBool::new(false);
 
+/// Whether a `SIGINT` arrived while a break was active. The handler sets it
+/// when [`BREAK_REQUESTED`] is set, so a request that arrives at the end of
+/// the menu cannot become a new menu (`sys.c:611-624`).
+static SECOND_BREAK: AtomicBool = AtomicBool::new(false);
+
 /// The disposition that `os:set_signal/2` gives a signal: its `Mode`
 /// argument `ignore`, `default`, or `handle`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -206,6 +211,18 @@ pub(crate) fn take_break_requested() -> bool {
     BREAK_REQUESTED.swap(false, Ordering::Acquire)
 }
 
+/// Return whether a `SIGINT` arrived while a break was active, and clear
+/// the flag.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(!take_second_break());
+/// ```
+pub(crate) fn take_second_break() -> bool {
+    SECOND_BREAK.swap(false, Ordering::Acquire)
+}
+
 /// Read all signals in the notify pipe, as the signal dispatcher thread
 /// reads each signal number (sys.c:1128-1144). A wait of the scheduler that
 /// the pipe ends does not read it: the next [`take_notified`] does. Each handler writes one
@@ -312,6 +329,9 @@ const SIGNALS: &[(&str, c_int)] = &[
 extern "C" fn notify_signal(signal: c_int) {
     let [_, write_end] = *NOTIFY_PIPE.get().expect("a handler install makes the pipe");
     let saved = errno();
+    if signal == libc::SIGINT && BREAK_REQUESTED.load(Ordering::Acquire) {
+        SECOND_BREAK.store(true, Ordering::Release);
+    }
     let bytes = signal.to_ne_bytes();
     // SAFETY: `write` reads the bytes of `bytes`. It is async-signal-safe.
     // A write to a non-blocking pipe does not wait, so a signal cannot stop
