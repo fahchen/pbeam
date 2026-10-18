@@ -24,7 +24,7 @@ use crate::term::{MAX_ATOM_CHARACTERS, MAX_ATOM_SZ_LIMIT, MAX_BIG_DIGITS, MAX_TU
 const VERSION_MAGIC: u8 = 131;
 
 /// The module attribute that `use PBeam.Native` writes.
-pub(crate) const DECLARATIONS_ATTRIBUTE: &str = "pbeam_native";
+const DECLARATIONS_ATTRIBUTE: &str = "pbeam_native";
 
 /// The largest count of numbers in a reference (`ERTS_MAX_REF_NUMBERS`,
 /// `erl_term.h:780`).
