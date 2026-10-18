@@ -1,6 +1,6 @@
 use super::{
-    Access, Busy, EMPTY, EtsTables, FIRST_SEGMENT_SLOTS, Freeing, KeyIndex, Table, TableType,
-    key_hash, object_hash, segment, stored_hash,
+    Access, Busy, EMPTY, EtsTables, FIRST_SEGMENT_SLOTS, Freeing, KeyIndex, Retained, Table,
+    TableType, key_hash, object_hash, segment, stored_hash,
 };
 use crate::term::atom_hash;
 use crate::term::{Atom, AtomTable, Map, ProcessId, Reference, Term, test_atom_table};
@@ -1109,6 +1109,30 @@ fn takes_a_key_with_a_pseudo_deleted_newest_object() {
     table.take_key(&atoms, &key);
     assert_eq!(table.object_count(), 0);
     assert_eq!(table.size(), 0);
+}
+
+#[test]
+fn keeps_the_record_of_another_key_with_the_same_hash() {
+    // Two records in one hash slot, which a hash collision makes possible:
+    // the revive of one key keeps the slot for the other.
+    let atoms = test_atom_table();
+    let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
+    let key = Term::Integer(1);
+    table.insert(&atoms, vec![key.clone()]);
+    table.fix(ProcessId(0));
+    table.delete(&atoms, &key);
+    let hash = stored_hash(&atoms, &key);
+    let mut records = table.retained.remove(&hash).expect("the key has a record");
+    let slot = records[0].newest;
+    records.push(Retained {
+        key: Term::Integer(2),
+        newest: slot,
+        slots: vec![slot],
+    });
+    table.retained.insert(hash, records);
+    table.insert(&atoms, vec![key.clone()]);
+    assert_eq!(table.retained.len(), 1);
+    assert_eq!(table.retained[&hash].len(), 1);
 }
 
 #[test]
