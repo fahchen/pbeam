@@ -186,7 +186,7 @@ report(Out, Command, Steps, Screen, Status) ->
         "# Terra Counter reference run\n\n",
         "command: ", lists:join(" ", Command), "\n",
         "pseudo-terminal: ", ?SCRIPT, " -q /dev/null, ", integer_to_list(?COLUMNS), "x", integer_to_list(?ROWS),
-        " (30x100 after the resize), TERM=xterm-256color, LANG=LC_ALL=en_US.UTF-8\n",
+        " (100x30 after the resize), TERM=xterm-256color, LANG=LC_ALL=en_US.UTF-8\n",
         "otp: ", erlang:system_info(otp_release), ", erts ", erlang:system_info(version), "\n",
         "os: ", os_version(), "\n",
         "script(1) exit status: ", io_lib:format("~tp", [Status]), "\n",
