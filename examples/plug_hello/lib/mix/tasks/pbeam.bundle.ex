@@ -43,7 +43,22 @@ defmodule Mix.Tasks.Pbeam.Bundle do
     tool =
       case Keyword.get(options, :tool) do
         nil ->
-          run!("cargo", ["build", "--locked", "--release", "--bin", "pbeam_bundle"], root)
+          # The target directory keeps the tool path independent of
+          # `CARGO_TARGET_DIR` and the build configuration.
+          run!(
+            "cargo",
+            [
+              "build",
+              "--locked",
+              "--release",
+              "--bin",
+              "pbeam_bundle",
+              "--target-dir",
+              Path.join(root, "target")
+            ],
+            root
+          )
+
           Path.join(root, "target/release/pbeam_bundle")
 
         tool ->

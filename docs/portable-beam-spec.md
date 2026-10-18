@@ -47,7 +47,6 @@ The initial scope excludes:
 - Arena allocation or a replacement process heap/GC implementation.
 - Hot code upgrades, code replacement, code purge, multiple versions of a module, and loading a module from outside the loadable module set.
 - Traditional `erl_nif`/Rustler ABI compatibility and dynamically loaded native extension libraries.
-- Post-link bundle appending or platform-specific executable section manipulation.
 - Complete OTP compatibility as a prerequisite for the first application.
 - Rewriting BEAM instructions to replace native dependencies, or replacing an entire OTP application by default.
 
