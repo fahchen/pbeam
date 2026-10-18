@@ -99,6 +99,8 @@ if [[ -f examples/$name/mix.exs ]]; then
   release=${release_directory:-target/examples/$name}
   output=$release/pbeam
   entry=${name}_run
+  # The build writes the release at the path of the project config.
+  [[ -z $release_directory || $build == false ]] || fail '--release needs --no-build: the build writes the release of the project config'
   [[ -f examples/$name/$entry.erl ]] || fail "examples/$name has no $entry.erl"
   if [[ $build == true ]]; then
     # The output of mix goes to stderr, so that stdout has only the output of the run.

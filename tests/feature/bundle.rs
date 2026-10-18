@@ -86,6 +86,22 @@ fn reports_the_usage_and_the_input_files() {
 }
 
 #[test]
+fn rejects_a_release_directory_for_a_build() {
+    let output = Command::new("bash")
+        .arg("scripts/example.sh")
+        .args(["plug_hello", "--release", "/tmp/other"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("scripts/example.sh runs");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("--release needs --no-build"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn writes_the_bundle_from_a_mix_task() {
     // The task builds the tool, resolves the start set with
     // `scripts/example.sh --no-build --write-start`, and writes one bundle.
