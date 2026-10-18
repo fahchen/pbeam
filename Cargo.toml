@@ -605,3 +605,7 @@ path = "tests/integration/atomics.rs"
 [[test]]
 name = "zlib"
 path = "tests/integration/zlib.rs"
+
+[[test]]
+name = "decode_packet"
+path = "tests/integration/decode_packet.rs"

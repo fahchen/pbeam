@@ -19,7 +19,10 @@ use crate::{
         import_kind,
         process::{ProcessState, Start, tests::frame},
     },
-    term::{Atom, AtomTable, Lambda, ProcessId, Reference, debug_term, test_atom, test_atom_table},
+    term::{
+        Atom, AtomTable, Binary, Lambda, ProcessId, Reference, debug_term, test_atom,
+        test_atom_table,
+    },
 };
 
 /// Return the initial capabilities of the default policy.
@@ -5560,6 +5563,146 @@ fn traps_the_initial_clear_with_the_table_reference() {
         BifResult::TrapBif { function: "internal_delete_all", arguments, .. }
             if arguments == vec![Term::Reference(Reference(0)), Term::Integer(300)]
     ));
+}
+
+#[test]
+fn accepts_the_line_delimiter_of_the_line_type() {
+    // ERTS accepts a delimiter of at most 255 for the `line` type, so the
+    // call reaches the runtime error of the unsupported type and not
+    // `badarg` (`erl_bif_port.c:1537-1541`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let result = program.bif(
+        &mut scheduler,
+        "erlang",
+        "decode_packet",
+        vec![
+            Term::static_atom("line"),
+            Term::binary(b"abc;rest".to_vec()),
+            Term::list_from(vec![Term::tuple(vec![
+                Term::static_atom("line_delimiter"),
+                Term::Integer(59),
+            ])]),
+        ],
+    );
+    let error = result.unwrap_err().to_string();
+    assert!(
+        error.contains("unsupported erlang:decode_packet/3 type line"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_a_line_delimiter_that_is_too_large() {
+    // A delimiter above 255 raises `badarg` (`erl_bif_port.c:1537-1541`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let result = program
+        .bif(
+            &mut scheduler,
+            "erlang",
+            "decode_packet",
+            vec![
+                Term::static_atom("line"),
+                Term::binary(b"abc;rest".to_vec()),
+                Term::list_from(vec![Term::tuple(vec![
+                    Term::static_atom("line_delimiter"),
+                    Term::Integer(256),
+                ])]),
+            ],
+        )
+        .unwrap();
+    assert!(matches!(result, BifResult::Raise { .. }));
+}
+
+#[test]
+fn rejects_a_packet_bitstring_that_is_not_a_byte() {
+    // A subject that is not a whole number of bytes raises `badarg`
+    // (`erts_get_aligned_binary_bytes`, `erl_bif_port.c:1550-1556`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let subject = Term::Binary(Binary::from(&[0x10_u8]).bits(0, 4));
+    let result = program
+        .bif(
+            &mut scheduler,
+            "erlang",
+            "decode_packet",
+            vec![Term::static_atom("http_bin"), subject, Term::nil()],
+        )
+        .unwrap();
+    assert!(matches!(result, BifResult::Raise { .. }));
+}
+
+#[test]
+fn stops_at_an_integer_packet_type_that_pbeam_does_not_run() {
+    // The small integers 0, 1, 2 and 4 are packet types
+    // (`erl_bif_port.c:1493-1496`), so they reach the runtime error of the
+    // unsupported type.
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let result = program.bif(
+        &mut scheduler,
+        "erlang",
+        "decode_packet",
+        vec![Term::Integer(2), Term::binary(b"abc".to_vec()), Term::nil()],
+    );
+    let error = result.unwrap_err().to_string();
+    assert!(
+        error.contains("unsupported erlang:decode_packet/3 type 2"),
+        "{error}"
+    );
+}
+
+#[test]
+fn raises_badopt_for_an_unknown_packet_type() {
+    // A type that is not an atom or a small integer raises `badarg` with the
+    // `badopt` cause (`erl_bif_port.c:1492-1511`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let result = program
+        .bif(
+            &mut scheduler,
+            "erlang",
+            "decode_packet",
+            vec![
+                Term::tuple(vec![Term::Integer(1)]),
+                Term::binary(b"abc".to_vec()),
+                Term::nil(),
+            ],
+        )
+        .unwrap();
+    assert!(matches!(result, BifResult::ErrorWithCause { .. }));
+}
+
+#[test]
+fn rejects_an_unsupported_packet_type_bitstring_that_is_not_a_byte() {
+    // ERTS rejects a subject that is not a whole number of bytes before it
+    // parses the packet, for every packet type
+    // (`erts_get_aligned_binary_bytes`, `erl_bif_port.c:1550-1556`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let subject = Term::Binary(Binary::from(&[0x10_u8]).bits(0, 4));
+    let result = program
+        .bif(
+            &mut scheduler,
+            "erlang",
+            "decode_packet",
+            vec![Term::static_atom("line"), subject, Term::nil()],
+        )
+        .unwrap();
+    assert!(matches!(result, BifResult::Raise { .. }));
 }
 
 #[test]
