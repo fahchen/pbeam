@@ -1,26 +1,20 @@
-use pbeam_runtime::{Atom, BeamProgram, BifResult, Term, register_native, unregister_native};
+use pbeam_runtime::{Atom, BeamProgram, NativeResult, Term, register_native, unregister_native};
 
 const NATIVE_PROBE: &[u8] = include_bytes!("../../fixtures/native/native_probe.beam");
 
-fn add(
-    _scheduler: &mut pbeam_runtime::Scheduler,
-    arguments: &[Term],
-) -> Result<BifResult, pbeam_runtime::BeamError> {
+fn add(arguments: &[Term]) -> Result<NativeResult, pbeam_runtime::BeamError> {
     match (arguments.first(), arguments.get(1)) {
         (Some(Term::Integer(left)), Some(Term::Integer(right))) => {
-            Ok(BifResult::Value(Term::Integer(left + right)))
+            Ok(NativeResult::Value(Term::Integer(left + right)))
         }
-        _ => Ok(BifResult::badarg()),
+        _ => Ok(NativeResult::badarg()),
     }
 }
 
-fn hidden(
-    _scheduler: &mut pbeam_runtime::Scheduler,
-    arguments: &[Term],
-) -> Result<BifResult, pbeam_runtime::BeamError> {
+fn hidden(arguments: &[Term]) -> Result<NativeResult, pbeam_runtime::BeamError> {
     match arguments.first() {
-        Some(Term::Integer(value)) => Ok(BifResult::Value(Term::Integer(value + 100))),
-        _ => Ok(BifResult::badarg()),
+        Some(Term::Integer(value)) => Ok(NativeResult::Value(Term::Integer(value + 100))),
+        _ => Ok(NativeResult::badarg()),
     }
 }
 

@@ -118,8 +118,7 @@ enum Outcome {
 
 /// The class of an exception.
 #[derive(Debug, Clone, Copy)]
-#[allow(private_interfaces)]
-pub enum ExceptionClass {
+enum ExceptionClass {
     /// Class `error`, as `erlang:nif_error/1` raises.
     Error,
     /// Class `exit`, as `erlang:exit/1` raises.
@@ -2410,8 +2409,8 @@ impl BeamProgram {
             ImportKind::Export => {
                 // A registered native function runs at the `NifStart`
                 // instruction of its stub, so this path enters the frame and
-                // keeps the entry reduction charge and the yield check.
-                let process = scheduler.current_process_mut();
+                // keeps the entry reduction charge and the yield check. The
+                // registry check stays in `native::call`.
                 let slot = &targets[index];
                 if let Some(target) = slot.get() {
                     return enter_export(process, target.frame(), arity, tail);

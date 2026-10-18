@@ -46,8 +46,7 @@ pub(super) use iolist::iodata_bytes;
 
 /// What a BIF call does to the calling process.
 #[derive(Debug)]
-#[allow(private_interfaces)]
-pub enum BifResult {
+pub(super) enum BifResult {
     /// The BIF returns this value.
     Value(Term),
     /// The BIF raises an exception in the calling process.
@@ -152,7 +151,7 @@ impl BifResult {
     /// ```rust,ignore
     /// assert!(matches!(BifResult::badarg(), BifResult::Raise { class: ExceptionClass::Error, .. }));
     /// ```
-    pub fn badarg() -> BifResult {
+    pub(super) fn badarg() -> BifResult {
         BifResult::Raise {
             class: ExceptionClass::Error,
             reason: Term::static_atom("badarg"),
