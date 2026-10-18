@@ -1261,12 +1261,8 @@ impl Scheduler {
                 // A second break request stops the run before the menu
                 // opens, in the batch or before the end of the last menu
                 // (`break_requested`, `sys.c:611-624`).
-                let second = signal::take_second_break() || queue.contains(&libc::SIGINT);
-                let result = if second {
-                    Err(BeamError::Halt(0))
-                } else {
-                    self.break_menu()
-                };
+                let second = signal::second_break() || queue.contains(&libc::SIGINT);
+                let result = if second { Ok(()) } else { self.break_menu() };
                 // The signals that the menu deferred arrived before the
                 // signals that the handler wrote after the menu
                 // (`sys.c:1128-1144`).
@@ -1400,13 +1396,7 @@ impl Scheduler {
             ""
         };
         let notify = signal::notify_fd().expect("a handler install makes the pipe");
-        Self::write_break_menu(
-            format!("\r\n{clear}{HELP}").into_bytes(),
-            notify,
-            &self.menu_writer,
-            &self.menu_written,
-            deferred,
-        )?;
+        self.write_menu(format!("\r\n{clear}{HELP}").into_bytes(), deferred)?;
         let fds = [libc::STDIN_FILENO, notify];
         loop {
             // `sys_get_key` waits until the descriptor is readable, reads up
@@ -1459,16 +1449,27 @@ impl Scheduler {
                     message.push(option);
                     message.extend_from_slice(b"'. Please enter one of the following:\r\n");
                     message.extend_from_slice(HELP.as_bytes());
-                    Self::write_break_menu(
-                        message,
-                        notify,
-                        &self.menu_writer,
-                        &self.menu_written,
-                        deferred,
-                    )?;
+                    self.write_menu(message, deferred)?;
                 }
             }
         }
+    }
+
+    /// Write the bytes of the break menu, and stop the run when a `SIGINT`
+    /// arrives before the write ends.
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`Self::write_break_menu`].
+    fn write_menu(&self, bytes: Vec<u8>, deferred: &mut Vec<libc::c_int>) -> Result<(), BeamError> {
+        let notify = signal::notify_fd().expect("a handler install makes the pipe");
+        Self::write_break_menu(
+            bytes,
+            notify,
+            &self.menu_writer,
+            &self.menu_written,
+            deferred,
+        )
     }
 
     /// Write `bytes` of the break menu to stdout, and stop the run when a

@@ -750,9 +750,10 @@ fn continues_in_the_application_terminal_mode(command: &mut Command) -> bool {
     // no output translation.
     wait_for(&mut child, &output, b"done");
     let raw_mode = !is_canonical(&terminal);
-    // `hold` waits with no timer after "done", so the test ends the run.
-    send(&child, libc::SIGKILL);
-    child.wait().unwrap();
+    // `hold` waits with no timer after "done". SIGQUIT halts the run, and
+    // the run then writes the profile of the coverage build.
+    send(&child, libc::SIGQUIT);
+    wait_for_exit(&mut child, &output);
     reader.join().unwrap();
     raw_mode
 }

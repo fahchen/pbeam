@@ -212,6 +212,18 @@ pub(crate) fn take_break_requested() -> bool {
     BREAK_REQUESTED.swap(false, Ordering::Acquire)
 }
 
+/// Return whether a `SIGINT` arrived while a break was active, without a
+/// change to the flag.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(!second_break());
+/// ```
+pub(crate) fn second_break() -> bool {
+    SECOND_BREAK.load(Ordering::Acquire)
+}
+
 /// Mark a second break for a test. The signal handler marks the second
 /// break of a run; no production code calls this function.
 #[cfg(test)]
