@@ -184,6 +184,25 @@ fn continues_after_an_invalid_break_key_as_pinned_erts() {
 }
 
 #[test]
+fn writes_an_invalid_break_key_as_its_byte_as_pinned_erts() {
+    // The invalid-key message writes the key byte itself, as the `%c` of
+    // `break.c:682-684` does, also for a byte above 0x7f.
+    let steps = [
+        ("ready\n", Action::Signal(libc::SIGINT)),
+        ("BREAK:", Action::Write(b"\xff")),
+    ];
+    let erts = run_with_actions(&mut erts("wait"), b"", &steps);
+    let pbeam = run_with_actions(&mut pbeam("wait"), b"", &steps);
+    assert_eq!(erts, pbeam, "ERTS and PBeam");
+    let (status, stdout, stderr) = pbeam;
+    assert_eq!(status, Some(0));
+    assert_eq!(stderr, "");
+    // The lossy text of the output gives the byte 0xff as the replacement
+    // character, and the equality above shows that both runs write it.
+    assert!(stdout.contains("Invalid option '\u{fffd}'."), "{stdout:?}");
+}
+
+#[test]
 fn continues_the_break_menu_on_c_as_pinned_erts() {
     // The key `c` continues the run (break.c:617-618), and the timer of the
     // probe then writes `done` and ends the run with the status 0.
@@ -204,21 +223,23 @@ fn continues_the_break_menu_on_c_as_pinned_erts() {
 #[test]
 fn continues_the_break_menu_after_a_read_of_64_bytes_as_pinned_erts() {
     // `sys_get_key` reads up to 64 bytes and uses the first
-    // (`sys.c:1051-1071`), so the key `c` continues the run and the 64
-    // bytes after it are dropped.
+    // (`sys.c:1051-1071`): the key `c` continues the run, and the last byte
+    // of the write is the next key of the menu.
     let mut input = vec![b'c'];
     input.extend_from_slice(&[b'x'; 64]);
-    let steps = [("ready\n", Action::Signal(libc::SIGINT))];
-    let erts = run_with_actions(&mut erts("done"), &input, &steps);
-    let pbeam = run_with_actions(&mut pbeam("done"), &input, &steps);
+    let steps = [
+        ("ready\n", Action::Signal(libc::SIGINT)),
+        ("done\n", Action::Signal(libc::SIGINT)),
+    ];
+    let erts = run_with_actions(&mut erts("hold"), &input, &steps);
+    let pbeam = run_with_actions(&mut pbeam("hold"), &input, &steps);
     assert_eq!(erts, pbeam, "ERTS and PBeam");
     let (status, stdout, stderr) = pbeam;
     assert_eq!(status, Some(0));
     assert_eq!(stderr, "");
-    assert!(stdout.starts_with(BREAKS), "{stdout:?}");
-    assert!(stdout.ends_with("done\n"), "{stdout:?}");
+    assert!(stdout.contains("done\n"), "{stdout:?}");
+    assert!(stdout.contains("Invalid option 'x'."), "{stdout:?}");
 }
-
 #[test]
 fn aborts_the_break_menu_at_a_nul_key_as_pinned_erts() {
     // `sys_get_key` returns 0 for the NUL byte, and `do_break` aborts the

@@ -1305,11 +1305,10 @@ impl Scheduler {
                     )));
                 }
                 option => {
-                    let _ = write!(
-                        stdout,
-                        "Invalid option '{}'. Please enter one of the following:\r\n{HELP}",
-                        char::from(option)
-                    );
+                    // `%c` writes the key byte itself (`break.c:682-684`).
+                    let _ = write!(stdout, "Invalid option '");
+                    let _ = stdout.write_all(&[option]);
+                    let _ = write!(stdout, "'. Please enter one of the following:\r\n{HELP}");
                     let _ = stdout.flush();
                 }
             }
