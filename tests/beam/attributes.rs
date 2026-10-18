@@ -186,6 +186,32 @@ fn reads_declarations_across_list_segments() {
 }
 
 #[test]
+fn reads_an_improper_tail_and_refuses_a_missing_one() {
+    // ERTS decodes an attribute list with an improper tail as that list
+    // (`external.c:4581-4614`), so the reader skips the tail.
+    let attributes = list_with_tail(
+        &[tuple(&[
+            atom("pbeam_native"),
+            declarations(&[("sha256", 1)]),
+        ])],
+        &small_integer(1),
+    );
+    let mut bytes = vec![131];
+    bytes.extend_from_slice(&attributes);
+    assert_eq!(
+        native_declarations(&bytes).unwrap(),
+        [("sha256".to_owned(), 1)]
+    );
+
+    // A list that ends after its elements has no tail term, so the encoding
+    // is bad.
+    let attributes = list_with_tail(&[tuple(&[atom("other"), small_integer(1)])], &[]);
+    let mut bytes = vec![131];
+    bytes.extend_from_slice(&attributes);
+    assert!(native_declarations(&bytes).is_err());
+}
+
+#[test]
 fn skips_every_supported_tag() {
     // One attribute of each tag shape before the declaration.
     let mut new_pid = vec![88];
