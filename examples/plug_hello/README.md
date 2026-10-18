@@ -60,7 +60,7 @@ The release runner serves the same page:
 
 ```sh
 mise run example-release plug_hello &
-curl -s -D - http://127.0.0.1:4000/
+curl -s --retry 300 --retry-connrefused --retry-delay 1 -D - http://127.0.0.1:4000/
 kill %1
 ```
 
