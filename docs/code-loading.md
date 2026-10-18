@@ -143,4 +143,4 @@ The owner asked on 2026-10-11 to start the `kernel` application as OTP does. The
 
 ## 13. Bundle
 
-The bundle work of [m8] gets no task now. `docs/backlog.md` has the entry "Read code files from the bundle as a read-only code path root": a bundle is a read-only code path root, and `prim_file` reads a path under this root from the bundle. The trigger is the bundle format of #15.
+The bundle format of #15 now exists (`docs/bundle-format.md`). The bundle work of [m8] is task #15, then #16, #817, #17, and #18. `docs/backlog.md` keeps the entry "Read code files from the bundle as a read-only code path root": a bundle is a read-only code path root, and `prim_file` reads a path under this root from the bundle. Its trigger is now met by #15.
