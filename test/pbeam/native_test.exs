@@ -7,6 +7,7 @@ defmodule PBeam.NativeTest do
 
     defnative sha256(data)
     defnative zero()
+    defnative wildcard(_, _)
   end
   """
 
@@ -23,11 +24,12 @@ defmodule PBeam.NativeTest do
   end
 
   test "writes the declared pairs to the pbeam_native attribute", %{binary: binary} do
-    assert attributes(binary)[:pbeam_native] == [sha256: 1, zero: 0]
+    assert attributes(binary)[:pbeam_native] == [sha256: 1, zero: 0, wildcard: 2]
   end
 
   test "the stub raises pbeam_native_only", %{declared: declared} do
     assert_raise ErlangError, fn -> apply(declared, :sha256, [<<1, 2>>]) end
+    assert_raise ErlangError, fn -> apply(declared, :wildcard, [1, 2]) end
     error = assert_raise ErlangError, fn -> apply(declared, :zero, []) end
     assert error.original == :pbeam_native_only
   end
@@ -37,6 +39,7 @@ defmodule PBeam.NativeTest do
     assert_refused("defnative :sha256", head)
     assert_refused("defnative guarded(data) when is_binary(data)", head)
     assert_refused("defnative patterned({a, b})", ~r/defnative expects a variable argument/)
+    assert_refused("defnative same(data, data)", ~r/defnative expects distinct argument names/)
   end
 
   test "the committed fixture keeps the declarations of the library", %{fresh: fresh} do

@@ -29,9 +29,9 @@ defmodule PBeam.Native do
   declaration defines a stub of the same name and arity, and PBeam passes the
   arguments of the call to the registered function.
 
-  Each argument must be a plain variable. A pattern or a guard is not a
-  supported form, because PBeam dispatches at the entry of the stub, before
-  the head runs.
+  Each argument must be a plain variable, and no two arguments may share a
+  name. A pattern, a repeated name, or a guard is not a supported form,
+  because PBeam dispatches at the entry of the stub, before the head runs.
 
   The declaration records the pair in the persisted `pbeam_native` attribute
   of the module.
@@ -83,7 +83,18 @@ defmodule PBeam.Native do
   # before it runs the head, so a guard would not run.
   defp declaration({name, _meta, arguments})
        when is_atom(name) and name != :when and is_list(arguments) do
-    {name, Enum.map(arguments, &stub_argument/1)}
+    arguments = Enum.map(arguments, &stub_argument/1)
+
+    # A repeated argument name carries an equality test in the head, which the
+    # dispatch bypasses, because it returns before the head runs. The
+    # anonymous variable `_` carries no such test.
+    names = for {argument, _meta, _context} <- arguments, argument != :_, do: argument
+
+    if Enum.uniq(names) != names do
+      raise ArgumentError, "defnative expects distinct argument names"
+    end
+
+    {name, arguments}
   end
 
   defp declaration(call) do
