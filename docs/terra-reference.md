@@ -27,7 +27,7 @@ The task compiles the upstream `examples/counter_app.exs` with the Terra sources
 
 The shell in the pseudo-terminal sets 80 columns and 24 rows with `stty`. It writes `stty -g` and `stty -a` before and after the command, and it writes the exit status of the command.
 
-A screen model applies the control sequences of the output to a grid of 80 by 24 cells, and of 30 by 100 cells after the resize: cursor movement, erase, SGR attributes, the alternate screen of mode 1049, and the cursor visibility of mode 25. The report lists each control sequence that the model does not know.
+A screen model applies the control sequences of the output to a grid of 80 by 24 cells, and of 100 by 30 cells after the resize: cursor movement, erase, SGR attributes, the alternate screen of mode 1049, and the cursor visibility of mode 25. The report lists each control sequence that the model does not know.
 
 The harness sends one key only after the visible screen shows the expected text of the step before it:
 
@@ -124,7 +124,7 @@ Static candidates that the run does not call include `erlang:send_after/3` (the 
 
 ### Instructions
 
-Static candidates: 122 instruction names in the BEAM list. The inventory gives a `test` instruction by the name of its test (for example `is_ne`), a `bs_match` instruction by each command (for example `bs_match:integer`), and a `bs_create_bin` instruction by each segment type (for example `bs_create_bin:append`).
+Static candidates: 127 instruction names in the BEAM list. The inventory gives a `test` instruction by the name of its test (for example `is_ne`), a `bs_match` instruction by each command (for example `bs_match:integer`), and a `bs_create_bin` instruction by each segment type (for example `bs_create_bin:append`).
 
 Exercised: the called functions have 105 of these names. These are the names that no called function has: `bs_create_bin:float`, `bs_create_bin:utf16`, `bs_create_bin:utf32`, `bs_get_float2`, `bs_get_integer2`, `bs_get_utf16`, `bs_get_utf32`, `bs_match:skip`, `bs_match_string`, `bs_skip_bits2`, `bs_skip_utf16`, `bs_skip_utf32`, `bs_skip_utf8`, `fadd`, `fconv`, `fdiv`, `fmove`, `fmul`, `fnegate`, `fsub`, `is_number`, and `is_record`.
 
