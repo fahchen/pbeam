@@ -7,7 +7,24 @@
          busy_helper/2,
          own/2, write/1, select/0, match_object/0, iterate/0,
          update_element/0, info_items/0, delete_all/0, select_reductions/0,
-         private_owner/1, ordered_set/0, ordered_set_reductions/0, take/0]).
+         private_owner/1, ordered_set/0, ordered_set_reductions/0, take/0,
+         safe_fixtable/0, fixtable/0, fixtable_chain/0, fixtable_successor/0,
+         fixtable_resize/0, fixtable_fix_count/0, fixtable_insert_after_delete/0,
+         fixtable_clear/0, fixtable_delete_object/0, fixtable_same_bucket/0,
+         fixtable_clear_wide/0, fixtable_live_after_predecessor/0, fixtable_cycle/0,
+         fixtable_insert_before_successor/0, fixtable_reinsert/0,
+         fixtable_clear_reinsert/0, fixtable_clear_after_delete/0,
+         fixtable_bag_reinsert/0, fixtable_shrink/0,
+         fixtable_duplicate_bag_reinsert/0, fixtable_info/0,
+         fixtable_ordered_set/0, fixtable_safe_fixed/0,
+         fixtable_bag_repeat/0, fixtable_bag_partial/0,
+         fixtable_bag_double_delete/0, fixtable_bag_restore/0,
+         fixtable_bag_last_live/0, fixtable_bag_skip_deleted/0,
+         fixtable_next_live_behind_node/0, fixtable_clear_behind_node/0,
+         fixtable_bag_restore_behind_node/0, fixtable_delete_table/0,
+         fixtable_clear_large/0, fixtable_clear_help/0, clear_task/2,
+         fixtable_take/0, fixtable_take_clear/0, fixtable_insert_new/0,
+         fixtable_insert_new_list/0]).
 
 %% ets:new/2 return values and badarg cases (erl_db.c:2555-2840).
 new() ->
@@ -217,12 +234,22 @@ busy_iteration() ->
     erlang:yield(),
     erlang:yield(),
     Next = ets:next(Second, 1),
+    %% A third busy table: ets:safe_fixtable/2 completes its insert first
+    %% and then gives true.
+    Third = ets:new(ets_probe, [public]),
+    Insert3 = spawn(?MODULE, busy_insert, [self(), Third]),
+    receive ready -> ok end,
+    Insert3 ! go,
+    erlang:yield(),
+    erlang:yield(),
+    Fixed = ets:safe_fixtable(Third, true),
+    receive {inserted, _, _} -> ok end,
     Info = length(ets:info(Table)),
     Updated = ets:update_element(Table, 1, {2, 9}),
     Deleted = ets:internal_select_delete(Table, [{{'_', '_'}, [false], [true]}]),
     Cleared = ets:internal_delete_all(Table, undefined),
     receive {inserted, _, _} -> ok end,
-    [Taken, Next, Info, Updated, Deleted, Cleared].
+    [Taken, Next, Fixed, Info, Updated, Deleted, Cleared].
 
 %% Insert the list of busy_objects/0 into the table Table, and send the
 %% result and the reductions of the insert to Parent.
@@ -655,6 +682,483 @@ dead() ->
     {Pid, _} = start([]),
     stopped = stop({Pid, x}),
     Pid.
+
+
+%% ets:safe_fixtable/2 results and badarg cases (erl_db.c:1136-1164).
+safe_fixtable() ->
+    T = ets:new(ets_probe_fixtable, [set]),
+    [ets:safe_fixtable(T, true), ets:safe_fixtable(T, true),
+     ets:safe_fixtable(T, false), ets:safe_fixtable(T, false),
+     catch_error(fun() -> ets:safe_fixtable(T, 1) end),
+     catch_error(fun() -> ets:safe_fixtable(T, yes) end),
+     catch_error(fun() -> ets:safe_fixtable(no_such_table, true) end),
+     catch_error(fun() -> ets:safe_fixtable(1, true) end)].
+
+
+%% A fixed table keeps the key of a deleted object for ets:next/2
+%% (erl_db_hash.c:49-60); an unfixed table gives badarg for the key.
+fixtable() ->
+    T = ets:new(ets_probe_fix, [set]),
+    ets:insert(T, {k}),
+    ets:safe_fixtable(T, true),
+    ets:delete(T, k),
+    Fixed = ets:next(T, k),
+    ets:safe_fixtable(T, false),
+    Unfixed = catch_error(fun() -> ets:next(T, k) end),
+    [Fixed, Unfixed].
+
+
+%% A fixed table follows the ghosts of two deleted keys, and an insert or a
+%% delete while fixed does not resize the table (erl_db_hash.c:49-60).
+fixtable_chain() ->
+    T = ets:new(ets_probe_fix_chain, [set]),
+    ets:insert(T, [{1}, {2}, {3}]),
+    ets:safe_fixtable(T, true),
+    ets:delete(T, 1),
+    ets:delete(T, 2),
+    ets:delete(T, 3),
+    Fixed = ets:next(T, 1),
+    ets:safe_fixtable(T, false),
+    [Fixed].
+
+fixtable_successor() ->
+    T = ets:new(ets_probe_fix_successor, [set]),
+    ets:insert(T, [{1}, {2}]),
+    ets:safe_fixtable(T, true),
+    ets:delete(T, 1),
+    Next = ets:next(T, 1),
+    ets:safe_fixtable(T, false),
+    [Next].
+
+fixtable_resize() ->
+    T = ets:new(ets_probe_fix_resize, [set]),
+    ets:insert(T, [{I} || I <- from(1, 5000)]),
+    ets:safe_fixtable(T, true),
+    ets:insert(T, [{I} || I <- from(5001, 10000)]),
+    Before = ets:info(T, size),
+    [ets:delete(T, I) || I <- from(1, 10000)],
+    After = ets:info(T, size),
+    ets:safe_fixtable(T, false),
+    [Before, After].
+
+from(High, High) -> [High];
+from(Low, High) -> [Low | from(Low + 1, High)].
+
+
+%% Each fix counts, so one unfix leaves the table fixed
+%% (erl_db.c:5158-5169).
+fixtable_fix_count() ->
+    T = ets:new(ets_probe_fix_count, [set]),
+    ets:insert(T, {k}),
+    ets:safe_fixtable(T, true),
+    ets:safe_fixtable(T, true),
+    ets:delete(T, k),
+    ets:safe_fixtable(T, false),
+    Fixed = ets:next(T, k),
+    ets:safe_fixtable(T, false),
+    [Fixed].
+
+%% A key that the run inserts after the delete is still after the fixed
+%% position of the deleted key.
+fixtable_insert_after_delete() ->
+    T = ets:new(ets_probe_fix_insert, [set]),
+    ets:insert(T, {1}),
+    ets:safe_fixtable(T, true),
+    ets:delete(T, 1),
+    ets:insert(T, {2}),
+    Next = ets:next(T, 1),
+    ets:safe_fixtable(T, false),
+    [Next].
+
+%% A clear and a delete_object keep the position of each removed key
+%% (erl_db_hash.c:2636-2643, 4027-4028).
+fixtable_clear() ->
+    T = ets:new(ets_probe_fix_clear, [set]),
+    ets:insert(T, {k}),
+    ets:safe_fixtable(T, true),
+    ets:internal_delete_all(T, undefined),
+    Next = ets:next(T, k),
+    ets:safe_fixtable(T, false),
+    [Next].
+
+fixtable_delete_object() ->
+    T = ets:new(ets_probe_fix_delete_object, [set]),
+    ets:insert(T, {k}),
+    ets:safe_fixtable(T, true),
+    ets:internal_select_delete(T, [{{'_'}, [], [true]}]),
+    Next = ets:next(T, k),
+    ets:safe_fixtable(T, false),
+    [Next].
+
+
+%% Two keys of one bucket: the ghost follows the live predecessor, and then
+%% the ghost of a predecessor that the run deleted too.
+fixtable_same_bucket() ->
+    T = ets:new(ets_probe_fix_bucket, [set]),
+    ets:insert(T, [{2}, {146}]),
+    ets:safe_fixtable(T, true),
+    ets:delete(T, 146),
+    Next = ets:next(T, 146),
+    ets:delete(T, 2),
+    Chained = ets:next(T, 146),
+    ets:safe_fixtable(T, false),
+    [Next, Chained].
+
+%% Two ghosts that follow each other end at the end of the table.
+fixtable_cycle() ->
+    T = ets:new(ets_probe_fix_cycle, [set]),
+    ets:insert(T, [{2}, {146}]),
+    ets:safe_fixtable(T, true),
+    ets:delete(T, 146),
+    ets:insert(T, {146}),
+    ets:delete(T, 2),
+    ets:delete(T, 146),
+    Next = ets:next(T, 2),
+    ets:safe_fixtable(T, false),
+    [Next].
+
+%% The deleted key follows its live predecessor, and a key that the run
+%% inserts after the predecessor is after it.
+fixtable_live_after_predecessor() ->
+    T = ets:new(ets_probe_fix_live, [set]),
+    ets:insert(T, [{4}, {84}]),
+    ets:safe_fixtable(T, true),
+    ets:delete(T, 84),
+    ets:insert(T, {136}),
+    Next = ets:next(T, 84),
+    ets:safe_fixtable(T, false),
+    [Next].
+
+%% A clear of a table with more buckets than a new table keeps the
+%% position of each removed key (erl_db_hash.c:4027-4028).
+fixtable_clear_wide() ->
+    T = ets:new(ets_probe_fix_clear_wide, [set]),
+    ets:insert(T, [{I} || I <- from(1, 1000)]),
+    ets:safe_fixtable(T, true),
+    ets:internal_delete_all(T, undefined),
+    Ended = length([1 || I <- from(1, 1000), ets:next(T, I) =:= '$end_of_table']),
+    ets:safe_fixtable(T, false),
+    [Ended].
+
+
+%% A key that the run inserts into a bucket between the deleted key and
+%% its successor is after the deleted key.
+fixtable_insert_before_successor() ->
+    T = ets:new(ets_probe_fix_before, [set]),
+    ets:insert(T, [{1}, {2}]),
+    ets:safe_fixtable(T, true),
+    ets:delete(T, 1),
+    ets:insert(T, {17}),
+    Next = ets:next(T, 1),
+    ets:safe_fixtable(T, false),
+    [Next].
+
+%% The insert of a deleted key reuses its position, so the traversal
+%% continues after that position.
+fixtable_reinsert() ->
+    T = ets:new(ets_probe_fix_reinsert, [set]),
+    ets:insert(T, [{2}, {146}]),
+    ets:safe_fixtable(T, true),
+    ets:delete(T, 2),
+    ets:insert(T, {2}),
+    Next = ets:next(T, 2),
+    ets:safe_fixtable(T, false),
+    [Next].
+
+%% The insert of a key after a clear reuses its old position, which is
+%% before the other deleted key.
+fixtable_clear_reinsert() ->
+    T = ets:new(ets_probe_fix_clear_reinsert, [set]),
+    ets:insert(T, [{2}, {146}]),
+    ets:safe_fixtable(T, true),
+    ets:internal_delete_all(T, undefined),
+    ets:insert(T, {2}),
+    Next = ets:next(T, 146),
+    ets:safe_fixtable(T, false),
+    [Next].
+
+
+%% A clear skips the chain nodes that the earlier deletes kept.
+fixtable_clear_after_delete() ->
+    T = ets:new(ets_probe_fix_clear_after_delete, [set]),
+    ets:insert(T, [{2}, {146}]),
+    ets:safe_fixtable(T, true),
+    ets:delete(T, 2),
+    ets:internal_delete_all(T, undefined),
+    Next = ets:next(T, 146),
+    ets:safe_fixtable(T, false),
+    [Next].
+
+%% The insert of a bag key reuses its chain node and frees the other
+%% pseudo-deleted objects of the key.
+fixtable_bag_reinsert() ->
+    T = ets:new(ets_probe_fix_bag_reinsert, [bag]),
+    ets:insert(T, [{k, 1}, {k, 2}]),
+    ets:safe_fixtable(T, true),
+    ets:delete(T, k),
+    ets:insert(T, [{k, 3}]),
+    Fresh = ets:insert(T, [{j, 4}]),
+    ets:safe_fixtable(T, false),
+    [ets:lookup(T, k), Fresh, ets:lookup(T, j)].
+
+%% A select_delete of every object of a fixed table does not join buckets.
+fixtable_shrink() ->
+    T = ets:new(ets_probe_fix_shrink, [set]),
+    ets:insert(T, [{I} || I <- from(1, 5000)]),
+    ets:safe_fixtable(T, true),
+    Removed = ets:internal_select_delete(T, [{{'_'}, [], [true]}]),
+    Size = ets:info(T, size),
+    ets:safe_fixtable(T, false),
+    [Removed, Size].
+
+
+%% The insert of a duplicate_bag key reuses its chain node and frees the
+%% other pseudo-deleted objects of the key.
+fixtable_duplicate_bag_reinsert() ->
+    T = ets:new(ets_probe_fix_duplicate_bag, [duplicate_bag]),
+    ets:insert(T, [{k, 1}, {k, 2}]),
+    ets:safe_fixtable(T, true),
+    ets:delete(T, k),
+    ets:insert(T, [{k, 3}]),
+    Fresh = ets:insert(T, [{j, 4}]),
+    ets:safe_fixtable(T, false),
+    [ets:lookup(T, k), Fresh, ets:lookup(T, j)].
+
+
+%% The fixed item of ets:info/2, and the safe_fixed item of an unfixed
+%% table.
+fixtable_info() ->
+    T = ets:new(ets_probe_fix_info, [set]),
+    Before = ets:info(T, fixed),
+    ets:safe_fixtable(T, true),
+    During = ets:info(T, fixed),
+    Safe = ets:info(ets:new(ets_probe_fix_info_safe, [set]), safe_fixed),
+    ets:safe_fixtable(T, false),
+    After = ets:info(T, fixed),
+    [Before, During, Safe, After].
+
+%% An ordered_set that a process deletes a key from while fixed keeps the
+%% ordinary delete and compaction.
+fixtable_ordered_set() ->
+    T = ets:new(ets_probe_fix_ordered, [ordered_set]),
+    ets:insert(T, [{1, a}]),
+    ets:safe_fixtable(T, true),
+    ets:delete(T, 1),
+    Lookup = ets:lookup(T, 1),
+    ets:safe_fixtable(T, false),
+    [Lookup, ets:info(T, size)].
+
+
+%% The safe_fixed details of a fixed table, which PBeam does not keep.
+fixtable_safe_fixed() ->
+    T = ets:new(ets_probe_fix_safe_fixed, [set]),
+    ets:safe_fixtable(T, true),
+    ets:info(T, safe_fixed).
+
+
+%% The insert of a bag key after a delete keeps the deleted objects, so a
+%% later insert compares them too.
+fixtable_bag_repeat() ->
+    T = ets:new(ets_probe_fix_bag_repeat, [bag]),
+    ets:insert(T, [{k, 1}, {k, 2}]),
+    ets:safe_fixtable(T, true),
+    ets:delete(T, k),
+    ets:insert(T, [{k, 3}]),
+    ets:insert(T, [{k, 4}]),
+    Objects = ets:lookup(T, k),
+    ets:safe_fixtable(T, false),
+    [Objects].
+
+%% The select delete of one object of a bag keeps it as a pseudo-deleted
+%% object of the live key.
+fixtable_bag_partial() ->
+    T = ets:new(ets_probe_fix_bag_partial, [bag]),
+    ets:insert(T, [{k, 1}, {k, 2}]),
+    ets:safe_fixtable(T, true),
+    Removed = ets:internal_select_delete(T, [{{k, 2}, [], [true]}]),
+    ets:insert(T, [{k, 3}]),
+    Objects = ets:lookup(T, k),
+    ets:safe_fixtable(T, false),
+    [Removed, Objects].
+
+
+%% A delete of the key of a bag with an object that a select delete kept
+%% counts each slot once.
+fixtable_bag_double_delete() ->
+    T = ets:new(ets_probe_fix_bag_double_delete, [bag]),
+    ets:insert(T, [{k, 1}, {k, 2}]),
+    ets:safe_fixtable(T, true),
+    ets:internal_select_delete(T, [{{k, 2}, [], [true]}]),
+    ets:delete(T, k),
+    Size = ets:info(T, size),
+    ets:safe_fixtable(T, false),
+    [Size].
+
+%% The insert of an object that a select delete kept restores it.
+fixtable_bag_restore() ->
+    T = ets:new(ets_probe_fix_bag_restore, [bag]),
+    ets:insert(T, [{k, 1}, {k, 2}]),
+    ets:safe_fixtable(T, true),
+    ets:internal_select_delete(T, [{{k, 2}, [], [true]}]),
+    ets:insert(T, [{k, 2}]),
+    Objects = ets:lookup(T, k),
+    ets:safe_fixtable(T, false),
+    [Objects].
+
+%% The second delete of the key of a bag with a pseudo-deleted object
+%% keeps the key gone after the unfix.
+fixtable_bag_last_live() ->
+    T = ets:new(ets_probe_fix_bag_last_live, [bag]),
+    ets:insert(T, [{k, 1}, {k, 2}]),
+    ets:safe_fixtable(T, true),
+    ets:internal_select_delete(T, [{{k, 2}, [], [true]}]),
+    ets:internal_select_delete(T, [{{k, 1}, [], [true]}]),
+    Before = ets:lookup(T, k),
+    ets:safe_fixtable(T, false),
+    [Before, ets:lookup(T, k)].
+
+
+%% The newest live object of a bag key skips the pseudo-deleted object
+%% behind it.
+fixtable_bag_skip_deleted() ->
+    T = ets:new(ets_probe_fix_bag_skip_deleted, [bag]),
+    ets:insert(T, [{k, 1}, {k, 2}, {k, 3}]),
+    ets:safe_fixtable(T, true),
+    ets:internal_select_delete(T, [{{k, 2}, [], [true]}]),
+    ets:internal_select_delete(T, [{{k, 3}, [], [true]}]),
+    Objects = ets:lookup(T, k),
+    ets:safe_fixtable(T, false),
+    [Objects].
+
+%% A key whose chain node is pseudo-deleted still comes next while one of
+%% its older objects is live.
+fixtable_next_live_behind_node() ->
+    T = ets:new(ets_probe_fix_next_live_behind_node, [bag]),
+    ets:insert(T, [{1, a}, {2, a}, {2, b}, {2, c}]),
+    ets:safe_fixtable(T, true),
+    ets:internal_select_delete(T, [{{2, c}, [], [true]}]),
+    Next = ets:next(T, 1),
+    ets:safe_fixtable(T, false),
+    [Next].
+
+%% The clear of a fixed bag also frees the live objects behind a
+%% pseudo-deleted chain node.
+fixtable_clear_behind_node() ->
+    T = ets:new(ets_probe_fix_clear_behind_node, [bag]),
+    ets:insert(T, [{k, 1}, {k, 2}]),
+    ets:safe_fixtable(T, true),
+    ets:internal_select_delete(T, [{{k, 2}, [], [true]}]),
+    ets:internal_delete_all(T, undefined),
+    Objects = ets:lookup(T, k),
+    ets:safe_fixtable(T, false),
+    [Objects].
+
+%% The insert of an object that a select delete kept restores it at the
+%% head of the object list.
+fixtable_bag_restore_behind_node() ->
+    T = ets:new(ets_probe_fix_bag_restore_behind_node, [bag]),
+    ets:insert(T, [{k, 1}, {k, 2}, {k, 3}, {k, 4}]),
+    ets:safe_fixtable(T, true),
+    ets:internal_select_delete(T, [{{k, 2}, [], [true]}]),
+    ets:insert(T, [{k, 2}]),
+    Objects = ets:lookup(T, k),
+    ets:safe_fixtable(T, false),
+    [Objects].
+
+%% The explicit delete of a table that the process fixed removes the
+%% fixations too (`erl_db.c:3053-3061`).
+fixtable_delete_table() ->
+    T = ets:new(ets_probe_fix_delete_table, [set]),
+    ets:insert(T, {k}),
+    ets:safe_fixtable(T, true),
+    [ets:delete(T)].
+
+%% A clear of a large fixed table marks 8 buckets for each reduction, so
+%% it traps and continues in a later turn (`erl_db_hash.c:3007-3051`).
+fixtable_clear_large() ->
+    T = ets:new(ets_probe_fix_clear_large, [set]),
+    ets:insert(T, [{I} || I <- from(1, 33000)]),
+    ets:safe_fixtable(T, true),
+    Count = ets:internal_delete_all(T, undefined),
+    Size = ets:info(T, size),
+    ets:safe_fixtable(T, false),
+    [Count, Size].
+
+%% A process that uses the table during a fixed clear helps with the mark,
+%% 8 buckets for each reduction (`erl_db.c:3300-3320`).
+fixtable_clear_help() ->
+    T = ets:new(ets_probe_fix_clear_help, [public, set]),
+    ets:insert(T, [{I} || I <- from(1, 100000)]),
+    ets:safe_fixtable(T, true),
+    Self = self(),
+    spawn(?MODULE, clear_task, [T, Self]),
+    Size = wait_size(T),
+    receive {cleared, Count} -> [Count, Size] end.
+
+clear_task(T, Self) ->
+    Self ! {cleared, ets:internal_delete_all(T, undefined)}.
+
+wait_size(T) ->
+    case ets:info(T, size) of
+        0 -> 0;
+        _ -> wait_size(T)
+    end.
+
+%% The take of a key of a fixed table keeps the first live object as a
+%% pseudo-deleted object and frees the records after it, and the item
+%% counter falls by each of those records (`erl_db_hash.c:2949-2995`).
+fixtable_take() ->
+    T = ets:new(ets_probe_fix_take, [bag]),
+    ets:insert(T, [{k, 1}, {k, 2}, {k, 3}]),
+    ets:safe_fixtable(T, true),
+    ets:internal_select_delete(T, [{{k, 2}, [], [true]}]),
+    Taken = ets:take(T, k),
+    Size = ets:info(T, size),
+    Objects = ets:lookup(T, k),
+    ets:insert(T, [{j, 9}, {l, 10}]),
+    Both = [ets:lookup(T, j), ets:lookup(T, l)],
+    ets:safe_fixtable(T, false),
+    [Taken, Size, Objects, Both].
+
+%% A completed clear resets the item counter (`RESET_NITEMS`,
+%% `erl_db_hash.c:3048-3050`).
+fixtable_take_clear() ->
+    T = ets:new(ets_probe_fix_take_clear, [bag]),
+    ets:insert(T, [{k, 1}, {k, 2}, {k, 3}]),
+    ets:safe_fixtable(T, true),
+    ets:internal_select_delete(T, [{{k, 2}, [], [true]}]),
+    ets:take(T, k),
+    Cleared = ets:internal_delete_all(T, undefined),
+    Size = ets:info(T, size),
+    ets:safe_fixtable(T, false),
+    [Cleared, Size].
+
+%% The key-clash walk of `ets:insert_new/2` adds a new object for a bag
+%% key whose objects are all pseudo-deleted (`erl_db_hash.c:1412-1422`).
+fixtable_insert_new() ->
+    T = ets:new(ets_probe_fix_insert_new, [bag]),
+    ets:insert(T, [{k, 1}]),
+    ets:safe_fixtable(T, true),
+    ets:delete(T, k),
+    Added = ets:insert_new(T, {k, 1}),
+    Objects = ets:lookup(T, k),
+    Taken = ets:take(T, k),
+    Size = ets:info(T, size),
+    ets:safe_fixtable(T, false),
+    [Added, Objects, Taken, Size].
+
+%% A list `ets:insert_new/2` does its own membership walk and then inserts
+%% as a put, so it restores the pseudo-deleted object
+%% (`erl_db.c:1858`, `1943`).
+fixtable_insert_new_list() ->
+    T = ets:new(ets_probe_fix_insert_new_list, [bag]),
+    ets:insert(T, [{k, 1}]),
+    ets:safe_fixtable(T, true),
+    ets:delete(T, k),
+    Added = ets:insert_new(T, [{k, 2}, {k, 1}]),
+    Objects = ets:lookup(T, k),
+    ets:safe_fixtable(T, false),
+    [Added, Objects].
 
 catch_error(Fun) ->
     try Fun() catch error:Reason -> {error, Reason} end.

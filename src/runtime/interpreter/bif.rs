@@ -670,6 +670,9 @@ macro_rules! bifs {
             id: BifId,
             arguments: &[Term],
         ) -> Result<BifResult, BeamError> {
+            // The cleanup of a fixation on a table that another process
+            // deleted runs as process system work at each scheduling
+            // (`erts_schedule_ets_free_fixation`, `erl_db.c:5263-5301`).
             match (id, arguments) {
                 $($(
                     (BifId::$variant, $arguments) $(if $guard)? => {

@@ -5336,6 +5336,233 @@ fn resumes_a_trap_target_through_its_loaded_export() {
 }
 
 #[test]
+fn traps_a_call_that_meets_a_fixed_clear() {
+    // A call that uses a table while a fixed clear does not finish marks a
+    // bounded group of buckets and traps to itself
+    // (`handle_lacking_permission`, `erl_db.c:769-798`, `3300-3320`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let owner = scheduler.current_process_mut().id;
+    let calls = [
+        ("next", vec![Term::Integer(0)]),
+        ("update_element", vec![Term::Integer(0), Term::nil()]),
+        (
+            "update_element",
+            vec![
+                Term::Integer(0),
+                Term::nil(),
+                Term::tuple(vec![Term::Integer(0)]),
+            ],
+        ),
+        ("info", vec![]),
+        ("internal_select_delete", vec![Term::nil()]),
+        ("delete", vec![]),
+    ];
+    for (number, (function, mut arguments)) in calls.into_iter().enumerate() {
+        let id = Reference(number as u64);
+        let mut table = Table::new(owner, Access::Public, 1, TableType::Set);
+        for key in 0..300 {
+            table.insert(&scheduler.atoms, vec![Term::Integer(key)]);
+        }
+        table.fix(owner);
+        table.step_clear(&scheduler.atoms, owner, 300, 8);
+        scheduler.ets.create(id, None, table);
+        arguments.insert(0, Term::Reference(id));
+        let result = program
+            .bif(&mut scheduler, "ets", function, arguments)
+            .unwrap();
+        assert!(
+            matches!(result, BifResult::TrapBif { function: trapped, .. } if trapped == function),
+            "{function}"
+        );
+    }
+}
+
+#[test]
+fn traps_a_select_continuation_that_meets_a_fixed_clear() {
+    // `ets:select/1` takes the table of its continuation with
+    // `DB_GET_TABLE`, which helps a clear that does not finish and traps
+    // (`erl_db.c:89-114`, `769-798`, `3965`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let owner = scheduler.current_process_mut().id;
+    let mut table = Table::new(owner, Access::Public, 1, TableType::Set);
+    for key in 0..300 {
+        table.insert(&scheduler.atoms, vec![Term::Integer(key)]);
+    }
+    table.fix(owner);
+    table.step_clear(&scheduler.atoms, owner, 300, 1);
+    scheduler.ets.create(Reference(0), None, table);
+    let continuation = Term::tuple(vec![
+        Term::Reference(Reference(0)),
+        Term::Integer(0),
+        Term::Integer(1),
+        Term::Reference(Reference(999)),
+        Term::nil(),
+        Term::Integer(1),
+    ]);
+    let result = program
+        .bif(&mut scheduler, "ets", "select", vec![continuation.clone()])
+        .unwrap();
+    assert!(matches!(
+        result,
+        BifResult::TrapBif { function: "select", arguments, .. }
+            if arguments == vec![continuation]
+    ));
+}
+
+#[test]
+fn schedules_a_waiting_process_for_the_fixation_cleanup() {
+    // A waiting process that fixed a deleted table runs the cleanup in a
+    // turn of its own, without resuming its Erlang code
+    // (`erts_schedule_ets_free_fixation`, `erl_db.c:5263-5301`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let fixer = ProcessId(1);
+    let mut process = ProcessState::new(fixer, Start::Entry(frame()), Vec::new());
+    process.waiting = true;
+    scheduler.insert(process);
+    // The fixer runs once and parks.
+    scheduler.schedule_next().unwrap();
+    scheduler.ets.create(
+        Reference(0),
+        None,
+        Table::new(ProcessId(99), Access::Public, 1, TableType::Set),
+    );
+    scheduler.ets.fix_table(Reference(0), fixer);
+    assert_eq!(scheduler.ets.delete_table(Reference(0), ProcessId(99)), 1);
+    scheduler.schedule_pending_cleanups();
+    scheduler.schedule_next().unwrap();
+    assert_eq!(scheduler.ets.pending_count(fixer), 0);
+    assert!(scheduler.process(fixer).unwrap().waiting);
+}
+
+#[test]
+fn requeues_a_waiting_process_with_more_cleanup_than_a_turn() {
+    // The scheduler keeps a waiting process scheduled while its cleanup
+    // remains (`notify_sys_task_executed`, `erl_process.c:10989`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let fixer = ProcessId(1);
+    let mut process = ProcessState::new(fixer, Start::Entry(frame()), Vec::new());
+    process.waiting = true;
+    scheduler.insert(process);
+    scheduler.schedule_next().unwrap();
+    let turn = crate::runtime::scheduler::CONTEXT_REDS as u64;
+    for number in 0..=turn {
+        let id = Reference(number);
+        scheduler.ets.create(
+            id,
+            None,
+            Table::new(ProcessId(99), Access::Public, 1, TableType::Set),
+        );
+        scheduler.ets.fix_table(id, fixer);
+        assert_eq!(scheduler.ets.delete_table(id, ProcessId(99)), 1);
+    }
+    scheduler.schedule_pending_cleanups();
+    scheduler.schedule_next().unwrap();
+    assert!(scheduler.process(fixer).unwrap().waiting);
+    assert_eq!(scheduler.ets.pending_count(fixer), 1);
+    scheduler.schedule_next().unwrap();
+    assert_eq!(scheduler.ets.pending_count(fixer), 0);
+}
+
+#[test]
+fn cleans_a_pending_fixation_when_the_process_is_scheduled() {
+    // The cleanup of a fixation on a table that another process deleted runs
+    // as process system work at each scheduling
+    // (`erts_schedule_ets_free_fixation`, `erl_db.c:5263-5301`,
+    // `erl_process.c:10932-10989`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let caller = scheduler.current_process_mut().id;
+    scheduler.ets.create(
+        Reference(0),
+        None,
+        Table::new(ProcessId(99), Access::Public, 1, TableType::Set),
+    );
+    scheduler.ets.fix_table(Reference(0), caller);
+    assert_eq!(scheduler.ets.delete_table(Reference(0), ProcessId(99)), 1);
+    assert_eq!(scheduler.ets.pending_count(caller), 1);
+    scheduler.yield_current();
+    scheduler.schedule_next().unwrap();
+    assert_eq!(scheduler.ets.pending_count(caller), 0);
+}
+
+#[test]
+fn helps_a_trapped_insert_from_internal_delete_all() {
+    // `ets:internal_delete_all/2` first completes the list insert that
+    // holds the table busy (`handle_lacking_permission`, `erl_db.c:769-798`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let owner = scheduler.current_process_mut().id;
+    let mut table = Table::new(owner, Access::Public, 1, TableType::Set);
+    table.insert(&scheduler.atoms, vec![Term::Integer(1)]);
+    // The insert belongs to another process, so the call helps it.
+    table.busy = Some(Busy::new(ProcessId(999), Vec::new(), false));
+    scheduler.ets.create(Reference(0), None, table);
+    let result = program
+        .bif(
+            &mut scheduler,
+            "ets",
+            "internal_delete_all",
+            vec![
+                Term::Reference(Reference(0)),
+                Term::static_atom("undefined"),
+            ],
+        )
+        .unwrap();
+    assert!(matches!(result, BifResult::Value(value) if value == Term::Integer(1)));
+}
+
+#[test]
+fn traps_the_initial_clear_with_the_table_reference() {
+    // The clear of a fixed table that does not finish traps with the table
+    // reference and the object count, so a reused name cannot resume
+    // against another table (`erl_db.c:3268-3279`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let owner = scheduler.current_process_mut().id;
+    let mut table = Table::new(owner, Access::Public, 1, TableType::Set);
+    for key in 0..300 {
+        table.insert(&scheduler.atoms, vec![Term::Integer(key)]);
+    }
+    table.fix(owner);
+    scheduler.ets.create(Reference(0), None, table);
+    scheduler.current_process_mut().fcalls = 1;
+    let result = program
+        .bif(
+            &mut scheduler,
+            "ets",
+            "internal_delete_all",
+            vec![
+                Term::Reference(Reference(0)),
+                Term::static_atom("undefined"),
+            ],
+        )
+        .unwrap();
+    assert!(matches!(
+        result,
+        BifResult::TrapBif { function: "internal_delete_all", arguments, .. }
+            if arguments == vec![Term::Reference(Reference(0)), Term::Integer(300)]
+    ));
+}
+
+#[test]
 fn rejects_a_select_delete_of_a_private_table_of_another_process() {
     // `ets:internal_select_delete/2` takes the table with `DB_WRITE`, so a
     // process that does not own a `private` table raises `badarg`

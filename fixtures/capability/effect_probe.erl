@@ -468,6 +468,7 @@ ambient() ->
         ets:lookup(Name, key),
         ets:lookup_element(Name, key, 2, none),
         ets:member(Name, key),
+        ets:safe_fixtable(Name, true),
         ets:take(Name, key),
         ets:delete(Name, key),
         ets:info(Name, type),
