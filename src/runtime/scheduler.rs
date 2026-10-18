@@ -1251,7 +1251,10 @@ impl Scheduler {
         let mut break_pending = false;
         while let Some(number) = queue.pop_front() {
             if number == libc::SIGINT {
-                if break_pending {
+                // A second break request in the same batch stops the run
+                // before the menu opens (`break_requested`,
+                // `sys.c:611-624`).
+                if break_pending || queue.contains(&libc::SIGINT) {
                     return Err(BeamError::Halt(0));
                 }
                 break_pending = true;

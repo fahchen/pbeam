@@ -316,6 +316,36 @@ fn break_after_signal(command: &mut Command) -> (Option<i32>, String) {
 }
 
 #[test]
+fn stops_at_two_sigints_as_pinned_erts() {
+    // The second break request stops the run (`break_requested`,
+    // `sys.c:611-624`). Send it after the menu is open, so that the two
+    // signals do not coalesce, and keep stdin open, so that the run must
+    // not depend on its end.
+    for (name, mut command) in [("ERTS", erts("wait")), ("PBeam", pbeam("wait"))] {
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().expect("the child has a stdin");
+        let stdout = Arc::new(Mutex::new(Vec::new()));
+        let stdout_reader = collect(child.stdout.take().unwrap(), Arc::clone(&stdout));
+        let stderr = Arc::new(Mutex::new(Vec::new()));
+        let stderr_reader = collect(child.stderr.take().unwrap(), Arc::clone(&stderr));
+        wait_for(&mut child, &stdout, b"ready\n");
+        send(&child, libc::SIGINT);
+        wait_for(&mut child, &stdout, b"BREAK: ");
+        send(&child, libc::SIGINT);
+        let status = wait_for_exit(&mut child, &stdout);
+        drop(stdin);
+        stdout_reader.join().unwrap();
+        stderr_reader.join().unwrap();
+        assert_eq!(status, Some(0), "{name}");
+    }
+}
+
+#[test]
 fn delivers_a_signal_that_arrived_during_the_menu_as_pinned_erts() {
     // SIGTERM during the menu waits in the notify pipe. The key `c`
     // continues the run, and the scheduler then sends the signal to
