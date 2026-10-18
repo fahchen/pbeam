@@ -54,7 +54,15 @@ defmodule Mix.Tasks.Pbeam.Bundle do
 
     run!(
       "bash",
-      ["scripts/example.sh", Atom.to_string(app), "--no-build", "--write-start", start],
+      [
+        "scripts/example.sh",
+        Atom.to_string(app),
+        "--no-build",
+        "--write-start",
+        start,
+        "--release",
+        release
+      ],
       root
     )
 
