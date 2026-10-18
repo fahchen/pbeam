@@ -46,16 +46,22 @@ The task builds the release with `mix deps.get --check-locked` and `MIX_ENV=prod
 
 The run is in interactive mode. The release runs in embedded mode. The "Boot" row of [ERTS Differences](../../docs/erts-differences.md) gives the differences.
 
-This command runs the same entry on the `pbeam` binary:
+This command runs the same entry on the `pbeam` binary, sends a request, and stops the run:
 
 ```sh
-mise run example plug_hello
+mise run example plug_hello &
+curl -s --retry 60 --retry-connrefused --retry-delay 1 http://127.0.0.1:4000/
+kill %1
 ```
 
-The run does not serve the page yet. It stops at the first gap of epic #651 and prints this error, with exit status 1:
+The `curl` command prints `Hello world!`. The run does not end by itself, so `kill` stops it.
 
-```text
-pbeam: unsupported BEAM opcode 133
+The release runner serves the same page:
+
+```sh
+mise run example-release plug_hello &
+curl -s -D - http://127.0.0.1:4000/
+kill %1
 ```
 
-Step 1 calls `erl_parse:parse_term/1`, which calls `eval_bits:expr_grp/3` for each binary of `sys.config`. `eval_bits:expr_grp/3` starts with `bs_init_writable` (opcode 133), which PBeam does not run yet (#681). Issue #652 lists the next stops in order.
+The `curl` command prints the status line `HTTP/1.1 200 OK`, the headers of the response, and the body `Hello world!`. The `scripts/example.sh` runner starts the release code on the pinned ERTS and on the `pbeam` binary. The feature test `serves_hello_world_from_the_plug_example_as_pinned_erts` of `tests/feature/serve.rs` compares the status line, the content type, and the body of both runs.
