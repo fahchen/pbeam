@@ -121,7 +121,8 @@ fn writes_the_bundle_from_a_mix_task() {
         .status()
         .unwrap();
     assert!(status.success());
-    fs::remove_dir_all(release.join("pbeam")).unwrap();
+    // A release from `mix release` has no `pbeam` directory.
+    let _ = fs::remove_dir_all(release.join("pbeam"));
     let mut command = Command::new("mix");
     command
         .args(["pbeam.bundle", "--output"])
