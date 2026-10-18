@@ -140,7 +140,7 @@ If an OTP subsystem proves impractical to support at its native boundary, replac
 
 ### Elixir declaration
 
-The proposed interface uses ordinary Elixir function calls:
+The interface uses ordinary Elixir function calls:
 
 ```elixir
 defmodule MyApp.NativeHash do
@@ -150,9 +150,15 @@ defmodule MyApp.NativeHash do
 end
 ```
 
-The declaration generates a callable stub and persists native MFA metadata in the BEAM module. The bundler reads that metadata to discover required native implementations. On ordinary ERTS, executing the stub raises `:pbeam_native_only` through `:erlang.nif_error/1`.
+The library is the Mix project at the repository root, and its single module is `PBeam.Native`. `use PBeam.Native` registers the module attribute `pbeam_native` with accumulation and persistence. `native :name, arity` adds one `{name, arity}` pair to that attribute and defines a stub of the same name and arity.
 
-These API names are proposed contracts, not currently available libraries.
+The compiler writes the pairs into the `Attr` chunk of the BEAM file. PBeam reads that chunk at the load of a module and reports the pairs as the native declarations of the module. A bundler reads the same declarations to discover the required native implementations.
+
+The declaration also adds the pair to the `nifs` attribute of the module, so the compiler writes the `nif_start` instruction at the entry of the stub. That instruction is where PBeam looks up a registered native function.
+
+Executing the stub on ordinary ERTS raises `:pbeam_native_only` through `:erlang.nif_error/1`. PBeam does the same when no registered native function matches the declaration, so an unknown declaration cannot run unnoticed.
+
+The declaration alone does not dispatch to a Rust implementation. Task #12 delivers the lookup at `nif_start`, task #13 delivers the declaration and the declarations that PBeam reads, and task #14 delivers the first registered native function.
 
 ### Rust registration and dispatch
 
