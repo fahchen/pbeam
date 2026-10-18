@@ -2,7 +2,7 @@ use std::process::Command;
 use std::sync::Arc;
 
 use num_bigint::BigInt;
-use pbeam_runtime::{BeamProgram, Term};
+use pbeam_runtime::{BeamProgram, Map, Term};
 
 #[path = "../common/mod.rs"]
 mod common;
@@ -200,6 +200,37 @@ fn looks_up_elements_as_pinned_erts() {
     let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
     let atom = |name| Term::Atom(program.atom(name).unwrap());
     let badarg = || Term::tuple(vec![atom("error"), atom("badarg")]);
+    // `ets:lookup_element/3` raises `badarg` with the cause `badkey` for a
+    // missing key (`ets_lookup_element_3`, `erl_db.c:2959-2961`).
+    let info = |pairs: &[(&str, &str)]| {
+        let pairs = pairs
+            .iter()
+            .map(|&(key, value)| {
+                (
+                    Term::Atom(program.atom(key).unwrap()),
+                    Term::Atom(program.atom(value).unwrap()),
+                )
+            })
+            .collect();
+        Term::list_from(vec![Term::tuple(vec![
+            atom("error_info"),
+            Term::Map(Map::from_pairs(pairs, program.atoms()).unwrap()),
+        ])])
+    };
+    let missing_key = || {
+        Term::tuple(vec![
+            atom("error"),
+            atom("badarg"),
+            info(&[("cause", "badkey"), ("module", "erl_stdlib_errors")]),
+        ])
+    };
+    let bad_index = || {
+        Term::tuple(vec![
+            atom("error"),
+            atom("badarg"),
+            info(&[("module", "erl_stdlib_errors")]),
+        ])
+    };
     assert_eq!(
         program.execute("ets_probe", "lookup", &[]).unwrap().term,
         Term::list_from(vec![
@@ -213,11 +244,23 @@ fn looks_up_elements_as_pinned_erts() {
             atom("true"),
             atom("d"),
             Term::list_from(vec![badarg(); 8]),
+            Term::list_from(vec![
+                atom("v"),
+                atom("x"),
+                atom("v"),
+                missing_key(),
+                bad_index(),
+                badarg(),
+                badarg(),
+                badarg(),
+                badarg(),
+                badarg(),
+            ]),
         ])
     );
     assert_eq!(
         reference("lookup"),
-        b"[v,x,d,v,d,v,{error,badarg},true,d,[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}]]\n"
+        b"[v,x,d,v,d,v,{error,badarg},true,d,[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}],[v,x,v,{error,badarg,[{error_info,#{cause => badkey,module => erl_stdlib_errors}}]},{error,badarg,[{error_info,#{module => erl_stdlib_errors}}]},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}]]\n"
     );
 }
 

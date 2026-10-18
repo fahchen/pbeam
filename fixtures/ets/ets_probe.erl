@@ -345,7 +345,17 @@ lookup() ->
       || {Table, Key, Index} <-
              [{T, missing, 0}, {T, k, 3}, {T, k, a}, {T, k, 1 bsl 31},
               {T, k, 1 bsl 59}, {ets_probe_missing, k, 1}, {make_ref(), k, 1},
-              {1, k, 1}]]].
+              {1, k, 1}]],
+     [ets:lookup_element(T, k, 2),
+      ets:lookup_element(T, {1, k}, 3),
+      ets:lookup_element(W, k, 3),
+      catch_info(fun() -> ets:lookup_element(T, missing, 1) end),
+      catch_info(fun() -> ets:lookup_element(T, k, 3) end),
+      catch_error(fun() -> ets:lookup_element(T, missing, 1) end),
+      catch_error(fun() -> ets:lookup_element(T, k, 0) end),
+      catch_error(fun() -> ets:lookup_element(T, k, a) end),
+      catch_error(fun() -> ets:lookup_element(ets_probe_missing, k, 1) end),
+      catch_error(fun() -> ets:lookup_element(make_ref(), k, 1) end)]].
 
 %% Access checks for a process that is not the owner (erl_db.c:769-798),
 %% and the delete of the tables of an exiting owner (erl_db.c:5031-5093).
@@ -1170,6 +1180,15 @@ fixtable_insert_new_list() ->
 
 catch_error(Fun) ->
     try Fun() catch error:Reason -> {error, Reason} end.
+
+%% Return the error, its reason, and the error information of the first
+%% stack frame, as the first frame of a BIF raise gives it.
+catch_info(Fun) ->
+    try Fun()
+    catch error:Reason:Stack ->
+            [Frame | _] = Stack,
+            {error, Reason, element(4, Frame)}
+    end.
 
 %% Keep an integer outside the 32-bit signed range out of a literal: PBeam
 %% does not load SMALL_BIG_EXT integers in literals.

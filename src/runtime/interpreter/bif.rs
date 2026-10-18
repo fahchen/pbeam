@@ -1026,7 +1026,13 @@ impl BeamProgram {
             (module, function, arguments.as_slice())
         {
             let mut context = BifContext { scheduler };
-            return ets::lookup_element(&mut context, table, key, index, default);
+            return ets::lookup_element(&mut context, table, key, index, Some(default));
+        }
+        if let ("ets", "lookup_element", [table, key, index]) =
+            (module, function, arguments.as_slice())
+        {
+            let mut context = BifContext { scheduler };
+            return ets::lookup_element(&mut context, table, key, index, None);
         }
         if let ("ets", "delete_trap", []) = (module, function, arguments.as_slice()) {
             return ets::delete_trap(&mut BifContext { scheduler });

@@ -4616,6 +4616,10 @@ fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
                 Term::Integer(0),
             ],
         ),
+        (
+            "lookup_element",
+            vec![id.clone(), Term::Integer(5), Term::Integer(1)],
+        ),
         ("delete", vec![id.clone(), Term::Integer(5)]),
         ("info", vec![id.clone(), Term::Atom(type_atom)]),
         ("insert", vec![id.clone(), object.clone()]),
@@ -5352,6 +5356,7 @@ fn traps_a_call_that_meets_a_fixed_clear() {
         ("first", vec![]),
         ("first_lookup", vec![]),
         ("next", vec![Term::Integer(0)]),
+        ("lookup_element", vec![Term::Integer(0), Term::Integer(1)]),
         ("update_element", vec![Term::Integer(0), Term::nil()]),
         (
             "update_element",
