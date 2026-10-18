@@ -370,8 +370,8 @@ fn stops_the_break_menu_at_a_closed_stdin_as_pinned_erts() {
     // A `select` on a closed stdin fails, `sys_get_key` returns 0, and the
     // run stops with status 0 (`sys.c:1051-1071`, `break.c:602-604`).
     let steps = [("ready\n", libc::SIGINT)];
-    let erts = run_with_signals(&mut closes_stdin(&mut erts("wait")), b"", &steps);
-    let pbeam = run_with_signals(&mut closes_stdin(&mut pbeam("wait")), b"", &steps);
+    let erts = run_with_signals(closes_stdin(&mut erts("wait")), b"", &steps);
+    let pbeam = run_with_signals(closes_stdin(&mut pbeam("wait")), b"", &steps);
     assert_eq!(erts, pbeam, "ERTS and PBeam");
     assert_eq!(pbeam.0, Some(0));
     assert!(
