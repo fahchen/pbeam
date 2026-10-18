@@ -100,14 +100,17 @@ fn main() -> ExitCode {
     {
         return status;
     }
-    match run(Cli::parse()) {
+    let status = match run(Cli::parse()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(Exit::Halt(status)) => ExitCode::from(status.to_le_bytes()[0]),
         Err(Exit::Error(message)) => {
             eprintln!("pbeam: {message}");
             ExitCode::FAILURE
         }
-    }
+    };
+    // A boot of an extracted release removes its directory at the exit.
+    pbeam_runtime::embedded::remove_extraction();
+    status
 }
 
 /// How a command line ends without a root result.

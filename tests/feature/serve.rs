@@ -144,7 +144,9 @@ fn reports_a_bundle_that_cannot_start() {
 fn serve_one_file() -> (String, String, String) {
     let directory = test_directory("one-file");
     let clean = directory.join("clean");
+    let temporary = directory.join("tmp");
     fs::create_dir_all(&clean).unwrap();
+    fs::create_dir_all(&temporary).unwrap();
     let start = directory.join("start.list");
     let status = Command::new("bash")
         .arg("scripts/example.sh")
@@ -167,6 +169,7 @@ fn serve_one_file() -> (String, String, String) {
     let port = free_port();
     let mut child = Command::new(&output)
         .current_dir(&clean)
+        .env("TMPDIR", &temporary)
         .env("PORT", port.to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -180,9 +183,15 @@ fn serve_one_file() -> (String, String, String) {
     let stderr_reader = collect(child.stderr.take().unwrap(), Arc::clone(&stderr));
     let stream = wait_for_server(&mut child, port);
     let response = stream.and_then(request);
-    let status = stop(child);
+    // SIGTERM reaches the boot of the extracted release, because the
+    // launcher is the boot. The run removes its extraction at the exit.
+    let status = stop_with_term(child);
     stdout_reader.join().unwrap();
     stderr_reader.join().unwrap();
+    assert!(
+        fs::read_dir(&temporary).unwrap().next().is_none(),
+        "the run keeps its extracted directory"
+    );
     fs::remove_dir_all(&directory).unwrap();
     response.unwrap_or_else(|error| {
         let text = |bytes: &Arc<Mutex<Vec<u8>>>| {
@@ -194,6 +203,13 @@ fn serve_one_file() -> (String, String, String) {
             text(&stderr)
         )
     })
+}
+
+/// Send `SIGTERM` to the process group of the run, and wait for the run.
+fn stop_with_term(mut child: Child) -> ExitStatus {
+    let group = format!("-{}", child.id());
+    let _ = Command::new("kill").args(["-TERM", "--", &group]).status();
+    child.wait().expect("the child has a status")
 }
 
 /// Return the build directory of `examples/plug_hello`.

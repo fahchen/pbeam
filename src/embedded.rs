@@ -1,9 +1,10 @@
 //! The embedded mode of the `pbeam` binary: the `pbeam_bundle` tool appends
 //! an application bundle to the binary, and a run without arguments starts
-//! it. The mode extracts the bundle to a temporary directory and starts the
-//! normal boot with the extracted files, so the application needs no loose
-//! file of its own. The bundle carries the OTP modules of the start set, so
-//! the run needs no OTP installation.
+//! it. The mode extracts the bundle to a temporary directory and replaces
+//! the process with the normal boot of the extracted release, so the
+//! application needs no loose file of its own, and a signal reaches the boot
+//! as it reaches a normal run. The bundle carries the OTP modules of the
+//! start set, so the run needs no OTP installation.
 
 use std::{
     env, fs,
@@ -19,6 +20,21 @@ const MAGIC: &[u8; 8] = b"PBEAMEMB";
 /// The size of the trailer: the magic and the length of the bundle, a `u64`.
 const TRAILER: usize = 16;
 
+/// The variable that tells the boot of an extracted release its directory,
+/// for the removal at the end of the run.
+pub const EXTRACTED_ROOT: &str = "PBEAM_EMBEDDED_ROOT";
+
+/// What the end of `bytes` holds.
+#[derive(Debug, PartialEq, Eq)]
+enum Trailer<'a> {
+    /// The bytes end without a trailer.
+    Absent,
+    /// The trailer names a bundle that does not fit before it.
+    Invalid,
+    /// The bundle that the trailer names.
+    Bundle(&'a [u8]),
+}
+
 /// Run the bundle that is appended to the binary. Return `None` when the
 /// binary holds no bundle.
 ///
@@ -31,51 +47,86 @@ const TRAILER: usize = 16;
 pub fn run() -> Option<ExitCode> {
     let executable = env::current_exe().ok()?;
     let bytes = fs::read(&executable).ok()?;
-    let bundle_bytes = trailer_bundle(&bytes)?;
-    let Some(bundle) = Bundle::parse(bundle_bytes).ok() else {
-        eprintln!("pbeam: the embedded bundle does not parse");
-        return Some(ExitCode::FAILURE);
-    };
-    Some(match start_bundle(&executable, &bundle) {
-        Ok(status) => ExitCode::from(status),
-        Err(message) => {
-            eprintln!("pbeam: {message}");
-            ExitCode::FAILURE
-        }
-    })
+    run_bundle(&executable, &bytes, &env::temp_dir())
 }
 
-/// Return the bundle that the trailer at the end of `bytes` names, or
-/// `None` when `bytes` ends without a trailer or with a short bundle.
+/// Remove the extracted directory at the end of an embedded run, as the
+/// variable [`EXTRACTED_ROOT`] names it. The launcher sets the variable for
+/// the boot that replaces it.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(trailer_bundle(b"plain binary").is_none());
+/// // A run that a launcher did not start has no directory.
+/// remove_extraction();
 /// ```
-fn trailer_bundle(bytes: &[u8]) -> Option<&[u8]> {
-    let end = bytes.len().checked_sub(TRAILER)?;
-    if &bytes[end..end + MAGIC.len()] != MAGIC {
-        return None;
+pub fn remove_extraction() {
+    remove_path(env::var_os(EXTRACTED_ROOT));
+}
+
+/// Remove the extracted directory that `directory` names, when there is
+/// one.
+fn remove_path(directory: Option<std::ffi::OsString>) {
+    if let Some(directory) = directory {
+        let _ = fs::remove_dir_all(directory);
     }
-    let length = u64::from_le_bytes(bytes[end + MAGIC.len()..].try_into().ok()?) as usize;
-    let start = end.checked_sub(length)?;
-    Some(&bytes[start..end])
 }
 
-/// Extract the bundle to a temporary directory and start the boot of the
-/// entry with the extracted files as the OTP root. Return the exit status of
-/// the run.
-fn start_bundle(executable: &Path, bundle: &Bundle<'_>) -> Result<u8, String> {
-    let directory = temp_directory(&env::temp_dir())?;
-    let result = start_in(executable, bundle, &directory);
-    // A temporary directory that stays behind changes nothing for the run.
-    let _ = fs::remove_dir_all(&directory);
-    result
+/// Run the bundle of `bytes`, with `base` for the extraction. Return `None`
+/// when the bytes end without a trailer.
+fn run_bundle(executable: &Path, bytes: &[u8], base: &Path) -> Option<ExitCode> {
+    let bundle_bytes = match trailer(bytes) {
+        Trailer::Absent => return None,
+        Trailer::Invalid => return Some(failure("the embedded trailer is invalid")),
+        Trailer::Bundle(bundle) => bundle,
+    };
+    let Some(bundle) = Bundle::parse(bundle_bytes).ok() else {
+        return Some(failure("the embedded bundle does not parse"));
+    };
+    let directory = match temp_directory(base) {
+        Ok(directory) => directory,
+        Err(message) => return Some(failure(&message)),
+    };
+    Some(start(executable, &bundle, &directory))
 }
 
-/// Extract the bundle to `directory` and run the entry there.
-fn start_in(executable: &Path, bundle: &Bundle<'_>, directory: &Path) -> Result<u8, String> {
+/// Return the bundle that the trailer at the end of `bytes` names.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(trailer(b"plain binary"), Trailer::Absent);
+/// ```
+fn trailer(bytes: &[u8]) -> Trailer<'_> {
+    let Some(end) = bytes.len().checked_sub(TRAILER) else {
+        return Trailer::Absent;
+    };
+    if &bytes[end..end + MAGIC.len()] != MAGIC {
+        return Trailer::Absent;
+    }
+    let length = u64::from_le_bytes(bytes[end + MAGIC.len()..].try_into().unwrap()) as usize;
+    match end.checked_sub(length) {
+        Some(start) => Trailer::Bundle(&bytes[start..end]),
+        None => Trailer::Invalid,
+    }
+}
+
+/// Extract the bundle to `directory`, then replace this process with the
+/// boot of its entry. Return the exit status of a run that fails before the
+/// boot.
+fn start(executable: &Path, bundle: &Bundle<'_>, directory: &Path) -> ExitCode {
+    let result = extract(directory, bundle)
+        .and_then(|()| start_modules(bundle))
+        .and_then(|modules| boot(executable, bundle.entry(), &modules, directory));
+    remove(directory);
+    match result {
+        Ok(error) => failure(&format!("cannot start the embedded run: {error}")),
+        Err(message) => failure(&message),
+    }
+}
+
+/// Write each resource of `bundle` below `directory`.
+fn extract(directory: &Path, bundle: &Bundle<'_>) -> Result<(), String> {
     for blob in bundle.resources() {
         let path = bundle_path(directory, blob.name())?;
         let parent = path.parent().expect("a resource path has a parent");
@@ -84,17 +135,38 @@ fn start_in(executable: &Path, bundle: &Bundle<'_>, directory: &Path) -> Result<
         fs::write(&path, blob.bytes())
             .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
     }
-    let entry = bundle.entry();
+    Ok(())
+}
+
+/// Return the modules of the start set of `bundle`, from the resource
+/// `meta/start-modules`.
+fn start_modules(bundle: &Bundle<'_>) -> Result<Vec<String>, String> {
+    let modules = bundle
+        .resource("meta/start-modules")
+        .ok_or("the bundle has no meta/start-modules resource")?;
+    Ok(String::from_utf8_lossy(modules)
+        .split_ascii_whitespace()
+        .map(ToOwned::to_owned)
+        .collect())
+}
+
+/// Replace the process with the boot of `entry` in `directory`. Return the
+/// error of a command that the host does not start.
+fn boot(
+    executable: &Path,
+    entry: crate::Entry<'_>,
+    modules: &[String],
+    directory: &Path,
+) -> Result<std::io::Error, String> {
+    use std::os::unix::process::CommandExt;
+
     let mut beams = vec![
         directory
             .join("pbeam")
             .join(format!("{}.beam", entry.module)),
         directory.join("pbeam").join("pbeam_boot.beam"),
     ];
-    let modules = bundle
-        .resource("meta/start-modules")
-        .ok_or("the bundle has no meta/start-modules resource")?;
-    for module in String::from_utf8_lossy(modules).split_ascii_whitespace() {
+    for module in modules {
         beams.push(resolve_module(directory, module)?);
     }
     let version = release_version(directory)?;
@@ -110,13 +182,19 @@ fn start_in(executable: &Path, bundle: &Bundle<'_>, directory: &Path) -> Result<
         "RELEASE_SYS_CONFIG",
         directory.join("releases").join(&version).join("sys"),
     );
-    let status = command
-        .status()
-        .map_err(|error| format!("cannot start the embedded run: {error}"))?;
-    Ok(status
-        .code()
-        .and_then(|code| u8::try_from(code).ok())
-        .unwrap_or(1))
+    command.env(EXTRACTED_ROOT, directory);
+    Ok(command.exec())
+}
+
+/// Remove the extracted `directory`, and leave a directory that stays.
+fn remove(directory: &Path) {
+    let _ = fs::remove_dir_all(directory);
+}
+
+/// Return [`ExitCode::FAILURE`] after a message on stderr.
+fn failure(message: &str) -> ExitCode {
+    eprintln!("pbeam: {message}");
+    ExitCode::FAILURE
 }
 
 /// Return a new temporary directory for the extraction, as the first free
