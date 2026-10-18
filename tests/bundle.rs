@@ -359,6 +359,16 @@ fn writer_rejects_a_module_name_over_the_character_limit() {
 }
 
 #[test]
+fn writer_rejects_a_module_name_over_the_byte_limit() {
+    let mut writer = BundleWriter::new(OTP_RELEASE, COMPILER, "m", "f", 0).unwrap();
+    let name = "a".repeat(1021);
+    assert_eq!(
+        writer.add_module(&name, b"a").unwrap_err().to_string(),
+        "bundle module name is 1021 bytes, over the limit 1020"
+    );
+}
+
+#[test]
 fn writer_rejects_an_empty_resource_name() {
     let mut writer = BundleWriter::new(OTP_RELEASE, COMPILER, "m", "f", 0).unwrap();
     assert_eq!(

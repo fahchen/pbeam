@@ -396,7 +396,7 @@ impl<'a> BundleWriter<'a> {
     /// An empty or over-long name, a name that the resource table already
     /// holds, and a resource table that is full.
     pub fn add_resource(&mut self, name: &'a str, bytes: &'a [u8]) -> Result<(), BeamError> {
-        check_name(name, MAX_RESOURCE_NAME_BYTES, None, "resource name")?;
+        check_name(name, MAX_RESOURCE_NAME_BYTES, "resource name")?;
         add_blob(
             &mut self.bundle.resources,
             &mut self.resource_names,
@@ -471,14 +471,8 @@ fn check_text(text: &str, max: usize, what: &str) -> Result<(), BeamError> {
     Ok(())
 }
 
-/// Check that `name` is not empty, not longer than `max_bytes` bytes, and,
-/// when `max_chars` is `Some`, not longer than that many characters.
-fn check_name(
-    name: &str,
-    max_bytes: usize,
-    max_chars: Option<usize>,
-    what: &str,
-) -> Result<(), BeamError> {
+/// Check that `name` is not empty and not longer than `max_bytes` bytes.
+fn check_name(name: &str, max_bytes: usize, what: &str) -> Result<(), BeamError> {
     if name.is_empty() {
         return Err(error(format!("bundle {what} is empty")));
     }
@@ -487,14 +481,6 @@ fn check_name(
             "bundle {what} is {} bytes, over the limit {max_bytes}",
             name.len()
         )));
-    }
-    if let Some(limit) = max_chars {
-        let characters = name.chars().count();
-        if characters > limit {
-            return Err(error(format!(
-                "bundle {what} is {characters} characters, over the limit {limit}"
-            )));
-        }
     }
     Ok(())
 }
