@@ -2140,9 +2140,7 @@ impl Table {
                 hashes.retain(|stored| *stored != hash);
                 hashes.is_empty()
             };
-            if bucket_empty {
-                self.retained_buckets.remove(&bucket);
-            }
+            let _ = bucket_empty.then(|| self.retained_buckets.remove(&bucket));
         }
         for slot in &retained.slots {
             self.deleted[*slot] = false;
