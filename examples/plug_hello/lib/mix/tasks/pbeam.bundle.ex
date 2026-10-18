@@ -2,10 +2,12 @@ defmodule Mix.Tasks.Pbeam.Bundle do
   @moduledoc """
   Writes the PBeam application bundle of the release.
 
-  The task builds the `pbeam_bundle` tool, resolves the start set with
+  The task builds the `pbeam_bundle` tool, compiles the entry and
+  `pbeam_boot` stubs into the release, resolves the start set with
   `scripts/example.sh --no-build --write-start`, and writes one bundle. Run
   `mix release` first; the task reads the release that the project config
-  names.
+  names, or the directory of `--release`. Relative paths are relative to the
+  directory of the command line.
 
       mix pbeam.bundle
       mix pbeam.bundle --output target/app.pbeamb --start-list target/start.list --tool target/release/pbeam_bundle
@@ -17,20 +19,26 @@ defmodule Mix.Tasks.Pbeam.Bundle do
 
   @impl Mix.Task
   def run(arguments) do
-    {options, _, invalid} =
+    {options, positional, invalid} =
       OptionParser.parse(arguments,
-        strict: [output: :string, start_list: :string, tool: :string]
+        strict: [output: :string, start_list: :string, tool: :string, release: :string]
       )
 
-    if invalid != [] do
-      Mix.raise("pbeam.bundle: unknown arguments #{inspect(invalid)}")
+    if invalid != [] or positional != [] do
+      Mix.raise("pbeam.bundle: unknown arguments #{inspect(invalid ++ positional)}")
     end
 
-    root = Path.expand("../..", File.cwd!())
+    cwd = File.cwd!()
+    root = Path.expand("../..", cwd)
     app = Mix.Project.config()[:app]
-    release = release_directory(app)
-    output = Keyword.get(options, :output) || Path.join(Path.dirname(release), "#{app}.pbeamb")
-    start = Keyword.get(options, :start_list) || Path.join(release, "pbeam.start.list")
+    release = release_directory(app, options, cwd)
+    output = Path.expand(Keyword.get(options, :output) || default_output(release, app), cwd)
+
+    start =
+      Path.expand(
+        Keyword.get(options, :start_list) || Path.join(release, "pbeam.start.list"),
+        cwd
+      )
 
     tool =
       case Keyword.get(options, :tool) do
@@ -39,8 +47,10 @@ defmodule Mix.Tasks.Pbeam.Bundle do
           Path.join(root, "target/release/pbeam_bundle")
 
         tool ->
-          tool
+          Path.expand(tool, cwd)
       end
+
+    stubs!(root, release, "#{app}_run")
 
     run!(
       "bash",
@@ -52,14 +62,38 @@ defmodule Mix.Tasks.Pbeam.Bundle do
     Mix.shell().info("Wrote #{output}")
   end
 
-  defp release_directory(app) do
-    path = Mix.Project.config()[:releases][app][:path]
+  defp release_directory(app, options, cwd) do
+    path =
+      Keyword.get(options, :release) || Mix.Project.config()[:releases][app][:path]
 
     if path == nil do
       Mix.raise("pbeam.bundle: the project config names no directory for the release #{app}")
     end
 
-    Path.expand(path)
+    Path.expand(path, cwd)
+  end
+
+  defp default_output(release, app) do
+    Path.join(Path.dirname(release), "#{app}.pbeamb")
+  end
+
+  # `mix release` writes no entry stub, and the start set of the release
+  # needs the entry and `pbeam_boot` in the `pbeam` directory.
+  defp stubs!(root, release, entry) do
+    directory = Path.join(release, "pbeam")
+    File.mkdir_p!(directory)
+
+    run!(
+      "erlc",
+      [
+        "+deterministic",
+        "-o",
+        directory,
+        Path.join(File.cwd!(), "#{entry}.erl"),
+        Path.join(root, "examples/hello_world/pbeam_boot.erl")
+      ],
+      root
+    )
   end
 
   defp run!(command, arguments, root) do

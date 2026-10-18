@@ -102,7 +102,9 @@ if [[ -f examples/$name/mix.exs ]]; then
     step "Compile examples/$name/$entry.erl and examples/hello_world/pbeam_boot.erl"
     erlc +deterministic -o "$output" "examples/$name/$entry.erl" examples/hello_world/pbeam_boot.erl
   fi
-  [[ -f $output/$entry.beam && -f $release/releases/start_erl.data ]] || fail "$release has no build. Build the example first: run the script without --no-build"
+  # The start list needs the release data only; the entry stubs belong to a run.
+  [[ -f $release/releases/start_erl.data ]] || fail "$release has no build. Build the example first: run the script without --no-build"
+  [[ -n $start_file || -f $output/$entry.beam ]] || fail "$release has no build. Build the example first: run the script without --no-build"
   version=$(cut -d' ' -f2 "$release/releases/start_erl.data")
   paths=("$output" "$release"/lib/*/ebin "$release/releases/$version/consolidated")
   RELEASE_ROOT=$(cd "$release" && pwd -P)

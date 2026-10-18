@@ -30,6 +30,11 @@ fn run(command: &mut Command) -> (Option<i32>, String) {
     )
 }
 
+/// Return the build directory of `examples/plug_hello`.
+fn release_directory() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/examples/plug_hello")
+}
+
 /// Write a start list with `lines` and return its path.
 fn start_list(directory: &Path, lines: &[&str]) -> PathBuf {
     let path = directory.join("start.list");
@@ -90,18 +95,33 @@ fn writes_the_bundle_from_a_mix_task() {
     let output = directory.join("plug_hello.pbeamb");
     let start = directory.join("start.list");
     let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/plug_hello");
+    // The task compiles the entry stubs, so the release needs no earlier
+    // output of the example runner.
+    let release = directory.join("release");
+    let status = Command::new("cp")
+        .arg("-R")
+        .arg(release_directory())
+        .arg(&release)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    fs::remove_dir_all(release.join("pbeam")).unwrap();
     let mut command = Command::new("mix");
     command
         .args(["pbeam.bundle", "--output"])
         .arg(&output)
         .arg("--start-list")
         .arg(&start)
+        .arg("--release")
+        .arg(&release)
         .arg("--tool")
         .arg(env!("CARGO_BIN_EXE_pbeam_bundle"))
         .current_dir(&example)
         .env("MIX_ENV", "prod");
     let (status, stderr) = run(&mut command);
     assert_eq!(status, Some(0), "{stderr}");
+    assert!(release.join("pbeam/plug_hello_run.beam").is_file());
+    assert!(release.join("pbeam/pbeam_boot.beam").is_file());
     let bytes = fs::read(&output).unwrap();
     let bundle = pbeam_runtime::Bundle::parse(&bytes).unwrap();
     let names: Vec<_> = bundle
