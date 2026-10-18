@@ -14,7 +14,8 @@
 //! reads the chunk during a load too. Each other attribute has a value of
 //! any shape, so [`native_declarations`] skips it with
 //! [`Cursor::skip_term`], which accepts each tag and each count that the
-//! ERTS walk `decoded_size` accepts (`external.c:6041-6540`).
+//! ERTS walk `decoded_size` accepts (`external.c:6041-6540`), except the tag
+//! `LOCAL_EXT` (`docs/erts-differences.md`).
 
 use crate::error::{BeamError, error};
 use crate::term::{MAX_ATOM_CHARACTERS, MAX_ATOM_SZ_LIMIT, MAX_BIG_DIGITS, MAX_TUPLE_SIZE};
@@ -49,11 +50,13 @@ const MAX_MAP_PAIRS: u64 = (1 << 31) - 1;
 ///
 /// # Errors
 ///
-/// The payload must hold one term of the external term format with a tag and
-/// a count that ERTS accepts. Another payload gives an error, as the ERTS
-/// loader refuses the module with `badfile` (`asm_load.c:1086-1091`). A
-/// payload of no bytes is not read at all, as in ERTS
-/// (`asm_load.c:1080`).
+/// The payload must hold one term of the external term format with a valid
+/// encoding. Another payload gives an error, as the ERTS loader refuses the
+/// module with `badfile` (`asm_load.c:1086-1091`). The tag `LOCAL_EXT` is
+/// the one difference between the two accept sets: PBeam refuses it, and
+/// ERTS accepts it only with a matching block hash
+/// (`docs/erts-differences.md`). A payload of no bytes is not read at all,
+/// as in ERTS (`asm_load.c:1080`).
 pub(crate) fn native_declarations(attr: &[u8]) -> Result<Vec<(String, u32)>, BeamError> {
     if attr.is_empty() {
         return Ok(Vec::new());
@@ -289,8 +292,10 @@ impl<'a> Cursor<'a> {
     /// `decoded_size` walks it (`external.c:6041-6540`).
     ///
     /// The walk refuses each tag and each count that `decoded_size` refuses,
-    /// so a module loads in PBeam exactly when the ERTS loader accepts its
-    /// attribute chunk (`asm_load.c:1080-1094`).
+    /// so a module loads in PBeam when the ERTS loader accepts its attribute
+    /// chunk (`asm_load.c:1080-1094`). The tag `LOCAL_EXT` is the one
+    /// exception: ERTS accepts it only with a matching block hash, and PBeam
+    /// refuses it (`docs/erts-differences.md`).
     ///
     /// `remaining` counts the terms that the walk still expects in the
     /// current container, and `stack` holds the count of each enclosing
