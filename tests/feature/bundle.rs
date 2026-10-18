@@ -137,6 +137,37 @@ fn writes_the_bundle_from_a_mix_task() {
             .any(|name| name.starts_with("lib/erts-") && name.ends_with("/ebin/init.beam"))
     );
     assert_eq!(bundle.entry().module, "plug_hello_run");
+    // The payloads are the bytes of the release files.
+    let entry = release.join("pbeam/plug_hello_run.beam");
+    assert_eq!(
+        bundle
+            .resource("pbeam/plug_hello_run.beam")
+            .expect("the entry is a resource"),
+        fs::read(&entry).unwrap()
+    );
+    let application = fs::read_dir(release.join("lib"))
+        .unwrap()
+        .map(|app| app.unwrap().path().join("ebin"))
+        .find_map(|ebin| {
+            fs::read_dir(ebin).ok()?.find_map(|entry| {
+                let path = entry.ok()?.path();
+                (path
+                    .extension()
+                    .is_some_and(|extension| extension == "beam"))
+                .then_some(path)
+            })
+        })
+        .expect("the release holds a BEAM file of an application");
+    let name = application
+        .strip_prefix(&release)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .replace(std::path::MAIN_SEPARATOR, "/");
+    assert_eq!(
+        bundle.resource(&name).expect("bandit is a resource"),
+        fs::read(&application).unwrap()
+    );
     fs::remove_dir_all(&directory).unwrap();
 }
 
