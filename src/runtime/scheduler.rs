@@ -1394,16 +1394,16 @@ impl Scheduler {
             }
             match key {
                 b'a' | b'q' | b'*' => return Err(BeamError::Halt(0)),
-                b'c' => return Ok(()),
+                b'c' | b'm' => return Ok(()),
                 b'\n' => continue,
                 b'A' => {
                     return Err(error(
                         "unsupported break command A: PBeam writes no crash dump (see \"OS signals\" in docs/erts-differences.md)",
                     ));
                 }
-                option @ (b'p' | b'i' | b'l' | b'v' | b'd' | b'D' | b'k' | b'm' | b'o') => {
+                option @ (b'p' | b'i' | b'l' | b'v' | b'd' | b'D' | b'k' | b'o') => {
                     return Err(error(format!(
-                        "unsupported break command {}: PBeam runs only the commands a, c, q, and * (see \"OS signals\" in docs/erts-differences.md)",
+                        "unsupported break command {}: PBeam runs only the commands a, c, m, q, and * (see \"OS signals\" in docs/erts-differences.md)",
                         char::from(option)
                     )));
                 }

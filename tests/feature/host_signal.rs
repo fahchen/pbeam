@@ -207,6 +207,23 @@ fn writes_an_invalid_break_key_as_its_byte_as_pinned_erts() {
 }
 
 #[test]
+fn continues_the_break_menu_on_m_as_pinned_erts() {
+    // The key `m` continues the run with no output (`break.c:622-623`).
+    let steps = [
+        ("ready\n", Action::Signal(libc::SIGINT)),
+        ("BREAK:", Action::Write(b"m")),
+    ];
+    let erts = run_with_actions(&mut erts("done"), b"", &steps);
+    let pbeam = run_with_actions(&mut pbeam("done"), b"", &steps);
+    assert_eq!(erts, pbeam, "ERTS and PBeam");
+    let (status, stdout, stderr) = pbeam;
+    assert_eq!(status, Some(0));
+    assert_eq!(stderr, "");
+    assert!(stdout.starts_with(BREAKS), "{stdout:?}");
+    assert!(stdout.ends_with("done\n"), "{stdout:?}");
+}
+
+#[test]
 fn continues_the_break_menu_on_c_as_pinned_erts() {
     // The key `c` continues the run (break.c:617-618), and the timer of the
     // probe then writes `done` and ends the run with the status 0.
