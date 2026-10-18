@@ -7,7 +7,8 @@ use std::{
     io::{BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream},
     os::unix::process::CommandExt,
-    process::{Child, Command, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
+    sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
 };
@@ -70,13 +71,38 @@ fn serve(arguments: &[&str], pbeam: Option<&str>) -> (String, String, String) {
     let mut child = command
         .spawn()
         .unwrap_or_else(|error| panic!("scripts/example.sh {arguments:?}: {error}"));
+    // Drain both pipes while the run builds, so that a full pipe cannot
+    // block the build.
+    let stdout = Arc::new(Mutex::new(Vec::new()));
+    let stdout_reader = collect(child.stdout.take().unwrap(), Arc::clone(&stdout));
+    let stderr = Arc::new(Mutex::new(Vec::new()));
+    let stderr_reader = collect(child.stderr.take().unwrap(), Arc::clone(&stderr));
     let stream = wait_for_server(&mut child, port);
     let response = stream.and_then(request);
-    let output = stop(child);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let status = stop(child);
+    stdout_reader.join().unwrap();
+    stderr_reader.join().unwrap();
+    let text =
+        |bytes: &Arc<Mutex<Vec<u8>>>| String::from_utf8_lossy(&bytes.lock().unwrap()).into_owned();
+    let stdout = text(&stdout);
+    let stderr = text(&stderr);
     response.unwrap_or_else(|error| {
-        panic!("{arguments:?} on port {port}: {error}\nstdout: {stdout}\nstderr: {stderr}")
+        panic!(
+            "{arguments:?} on port {port}: {error}\nstatus: {status:?}\nstdout: {stdout}\nstderr: {stderr}"
+        )
+    })
+}
+
+/// Read `source` until its end into `output` in a new thread.
+fn collect(
+    mut source: impl Read + Send + 'static,
+    output: Arc<Mutex<Vec<u8>>>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let mut buffer = [0; 4096];
+        while let Ok(count @ 1..) = source.read(&mut buffer) {
+            output.lock().unwrap().extend_from_slice(&buffer[..count]);
+        }
     })
 }
 
@@ -155,9 +181,9 @@ fn request(mut stream: TcpStream) -> Result<(String, String, String), String> {
 }
 
 /// Kill the process group of the run, which holds the runner and its build
-/// processes, and return the output of the runner.
-fn stop(child: Child) -> std::process::Output {
+/// processes, and wait for the runner.
+fn stop(mut child: Child) -> ExitStatus {
     let group = format!("-{}", child.id());
     let _ = Command::new("kill").args(["-9", "--", &group]).status();
-    child.wait_with_output().expect("the child has an output")
+    child.wait().expect("the child has a status")
 }
