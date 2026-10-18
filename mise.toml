@@ -120,15 +120,41 @@ cargo build --locked --release --bin pbeam
 PBEAM_BIN=$(pwd)/target/release/pbeam bash scripts/example.sh "$usage_name" ${usage_policy:+--policy "$usage_policy"}
 '''
 
-[tasks.example-bundle]
-description = "Build a release example as one executable with an appended bundle"
+[tasks.example-executable]
+description = "Write one executable of a release example of examples/, with the release bundle appended"
 quiet = true
-usage = 'arg "<name>" help="The directory of a release example in examples/, such as plug_hello"'
+usage = '''
+flag "--no-build" help="Use the release that is already built"
+flag "--output <path>" help="The output path of the executable, default target/examples/<name>.bundle"
+arg "<name>" help="The directory of the example in examples/, such as plug_hello"
+'''
 run = '''
+[ -f "examples/$usage_name/mix.exs" ] || {
+    echo "example-executable: examples/$usage_name is not a release example. Only a Mix release example becomes one executable, such as examples/plug_hello." >&2
+    exit 1
+}
 cargo build --locked --release --bin pbeam --bin pbeam_bundle
-bash scripts/example.sh "$usage_name" --write-start target/examples/"$usage_name"/pbeam.start.list
-target/release/pbeam_bundle bundle target/examples/"$usage_name" target/examples/"$usage_name.pbeamb" "${usage_name}_run" main target/examples/"$usage_name"/pbeam.start.list
-target/release/pbeam_bundle executable target/release/pbeam target/examples/"$usage_name.pbeamb" target/examples/"$usage_name.bundle"
+bash scripts/example.sh "$usage_name" ${usage_no_build:+--no-build} --write-start "target/examples/$usage_name/pbeam.start.list"
+output=${usage_output:-target/examples/$usage_name.bundle}
+bundle=${output%.bundle}.pbeamb
+mkdir -p "$(dirname "$output")" "$(dirname "$bundle")"
+release_dir=$(cd "target/examples/$usage_name" && pwd -P)
+output_dir=$(cd "$(dirname "$output")" && pwd -P)
+case "$output_dir/" in
+    "$release_dir"/*)
+        echo "example-executable: --output must be outside the release directory target/examples/$usage_name." >&2
+        exit 1
+        ;;
+esac
+for path in "$output" "$bundle"; do
+    if [ -L "$path" ]; then
+        echo "example-executable: $path is a symbolic link. Name a path that is not a link, outside the release directory." >&2
+        exit 1
+    fi
+done
+target/release/pbeam_bundle bundle "target/examples/$usage_name" "$bundle" "${usage_name}_run" main "target/examples/$usage_name/pbeam.start.list"
+target/release/pbeam_bundle executable target/release/pbeam "$bundle" "$output"
+echo "Wrote $output"
 '''
 
 [tasks.bench-dispatch]
