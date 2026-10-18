@@ -127,6 +127,10 @@ pub(super) fn decode_packet(
         match context.scheduler.atoms.name_of(name) {
             "packet_size" => packet_size = value,
             "line_length" => line_length = value,
+            // ERTS accepts a delimiter of at most 255 for the `line` type
+            // (`erl_bif_port.c:1537-1541`).
+            "line_delimiter"
+                if value <= 255 && matches!(&kind, Kind::Unsupported(name) if name == "line") => {}
             _ => return Ok(BifResult::badarg()),
         }
     }
@@ -163,11 +167,10 @@ pub(super) fn decode_packet(
     // `packet_sz > bin_sz` case of `decode_packet_3` cannot occur.
     let packet_size = usize::try_from(length).expect("an HTTP packet length fits a usize");
     let packet = parse_http(&mut context.scheduler.atoms, &bytes[..packet_size], header)?;
-    Ok(Value(Term::tuple(vec![
-        atom(context, "ok")?,
-        packet,
-        Term::Binary(Binary::from(&bytes[packet_size..])),
-    ])))
+    // The rest is a sub-binary of the subject, as
+    // `erts_make_sub_binary` gives it (`erl_bif_port.c:1602-1604`).
+    let rest = Term::Binary(binary.bits(packet_size * 8, binary.bit_size()));
+    Ok(Value(Term::tuple(vec![atom(context, "ok")?, packet, rest])))
 }
 
 /// Return the kind of the first argument of `decode_packet_3`

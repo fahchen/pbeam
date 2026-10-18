@@ -5566,6 +5566,60 @@ fn traps_the_initial_clear_with_the_table_reference() {
 }
 
 #[test]
+fn accepts_the_line_delimiter_of_the_line_type() {
+    // ERTS accepts a delimiter of at most 255 for the `line` type, so the
+    // call reaches the runtime error of the unsupported type and not
+    // `badarg` (`erl_bif_port.c:1537-1541`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let result = program.bif(
+        &mut scheduler,
+        "erlang",
+        "decode_packet",
+        vec![
+            Term::static_atom("line"),
+            Term::binary(b"abc;rest".to_vec()),
+            Term::list_from(vec![Term::tuple(vec![
+                Term::static_atom("line_delimiter"),
+                Term::Integer(59),
+            ])]),
+        ],
+    );
+    let error = result.unwrap_err().to_string();
+    assert!(
+        error.contains("unsupported erlang:decode_packet/3 type line"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_a_line_delimiter_that_is_too_large() {
+    // A delimiter above 255 raises `badarg` (`erl_bif_port.c:1537-1541`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let result = program
+        .bif(
+            &mut scheduler,
+            "erlang",
+            "decode_packet",
+            vec![
+                Term::static_atom("line"),
+                Term::binary(b"abc;rest".to_vec()),
+                Term::list_from(vec![Term::tuple(vec![
+                    Term::static_atom("line_delimiter"),
+                    Term::Integer(256),
+                ])]),
+            ],
+        )
+        .unwrap();
+    assert!(matches!(result, BifResult::Raise { .. }));
+}
+
+#[test]
 fn rejects_a_packet_bitstring_that_is_not_a_byte() {
     // A subject that is not a whole number of bytes raises `badarg`
     // (`erts_get_aligned_binary_bytes`, `erl_bif_port.c:1550-1556`).
