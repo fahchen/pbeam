@@ -766,7 +766,6 @@ impl EtsTables {
     }
 
     /// Return the number of pending cleanups of the process `process`.
-    #[cfg(test)]
     pub(super) fn pending_count(&self, process: ProcessId) -> usize {
         (self.pending.get(&process)).map_or(0, VecDeque::len)
     }

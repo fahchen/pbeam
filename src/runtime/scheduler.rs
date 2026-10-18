@@ -1036,12 +1036,18 @@ impl Scheduler {
             self.current_process_mut()
                 .bump_reductions(i32::try_from(drained).unwrap_or(i32::MAX));
         }
+        let more = self.ets.pending_count(id) > 0;
         let process = self.current_process_mut();
         if process.fcalls <= 0 || process.waiting {
             if process.waiting {
                 self.park_current();
             } else {
                 self.yield_current();
+            }
+            if more {
+                // The process stays scheduled for the cleanup that remains
+                // (`notify_sys_task_executed`, `erl_process.c:10989`).
+                self.enqueue(id);
             }
             return Ok(Turn::Done);
         }

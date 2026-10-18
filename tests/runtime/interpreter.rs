@@ -5444,6 +5444,38 @@ fn schedules_a_waiting_process_for_the_fixation_cleanup() {
 }
 
 #[test]
+fn requeues_a_waiting_process_with_more_cleanup_than_a_turn() {
+    // The scheduler keeps a waiting process scheduled while its cleanup
+    // remains (`notify_sys_task_executed`, `erl_process.c:10989`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let fixer = ProcessId(1);
+    let mut process = ProcessState::new(fixer, Start::Entry(frame()), Vec::new());
+    process.waiting = true;
+    scheduler.insert(process);
+    scheduler.schedule_next().unwrap();
+    let turn = crate::runtime::scheduler::CONTEXT_REDS as u64;
+    for number in 0..=turn {
+        let id = Reference(number);
+        scheduler.ets.create(
+            id,
+            None,
+            Table::new(ProcessId(99), Access::Public, 1, TableType::Set),
+        );
+        scheduler.ets.fix_table(id, fixer);
+        assert_eq!(scheduler.ets.delete_table(id, ProcessId(99)), 1);
+    }
+    scheduler.schedule_pending_cleanups();
+    scheduler.schedule_next().unwrap();
+    assert!(scheduler.process(fixer).unwrap().waiting);
+    assert_eq!(scheduler.ets.pending_count(fixer), 1);
+    scheduler.schedule_next().unwrap();
+    assert_eq!(scheduler.ets.pending_count(fixer), 0);
+}
+
+#[test]
 fn cleans_a_pending_fixation_when_the_process_is_scheduled() {
     // The cleanup of a fixation on a table that another process deleted runs
     // as process system work at each scheduling
