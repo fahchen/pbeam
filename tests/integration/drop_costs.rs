@@ -15,7 +15,9 @@
 //!
 //! Run the release measurement with `mise run bench-drop`. The check gate
 //! runs the same test under the test profile, which proves that every shape
-//! runs; its numbers are not the report numbers.
+//! runs; its numbers are not the report numbers. The test profile holds
+//! debug assertions, so the constants scale the population down and the
+//! gate stays short.
 
 use std::{
     hint::black_box,
@@ -25,20 +27,24 @@ use std::{
 use pbeam_runtime::{AtomTable, Map, Term};
 
 /// The number of terms of one timed run of a shape whose term is small.
-const BATCH: usize = 100_000;
+const BATCH: usize = if cfg!(debug_assertions) { 100 } else { 100_000 };
 
 /// The number of timed runs of one shape with a small term. The report gives
 /// the minimum of the runs.
-const RUNS: usize = 9;
+const RUNS: usize = if cfg!(debug_assertions) { 2 } else { 9 };
 
 /// The number of cells of the deep list of the report. `Term::drop` walks
 /// the nested terms with a work stack, so the drop of this list must not
 /// overflow the Rust stack.
-const LIST_CELLS: usize = 1_000_000;
+const LIST_CELLS: usize = if cfg!(debug_assertions) {
+    1_000
+} else {
+    1_000_000
+};
 
 /// The number of timed runs of the deep list. One run builds one list of
 /// [`LIST_CELLS`] cells, and the report gives the minimum of the runs.
-const LIST_RUNS: usize = 3;
+const LIST_RUNS: usize = if cfg!(debug_assertions) { 1 } else { 3 };
 
 /// One measured shape: its name in the report, the number of terms of one
 /// run, the number of timed runs, and the builder of one run.

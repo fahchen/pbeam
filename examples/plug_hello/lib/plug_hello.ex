@@ -1,5 +1,5 @@
 defmodule PlugHello do
-  @moduledoc "The plug that answers `GET /` with `Hello world!`."
+  @moduledoc "The plug that answers `GET /` with `Hello world from PBeam!`."
   @behaviour Plug
 
   import Plug.Conn
@@ -11,7 +11,7 @@ defmodule PlugHello do
   def call(%Plug.Conn{method: "GET", path_info: []} = conn, _options) do
     conn
     |> put_resp_content_type("text/plain")
-    |> send_resp(200, "Hello world!")
+    |> send_resp(200, "Hello world from PBeam!")
   end
 
   def call(conn, _options), do: send_resp(conn, 404, "Not found")

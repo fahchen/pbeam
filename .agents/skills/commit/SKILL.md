@@ -142,7 +142,7 @@ Skip the body only for self-explanatory commits.
 
 ### 7. Verify and commit
 
-Run the focused check for the change. For Rust changes, run `cargo clippy --all-targets -- -D warnings` and the affected tests with `mise run test-focus`. Run `mise run check-brief` before the last commit of a PR. It runs the `mise run check` gate and prints only the result; the full log is in `target/check.log`. Do not use `--no-verify`.
+Run the focused check for the change. For Rust changes, run `cargo clippy --all-targets -- -D warnings` and the affected tests with `mise run test-focus`. For documentation-only changes, run `mise run lint`. CI runs the gate of the change on the PR head; run the full `mise run check` locally only when the change needs evidence that CI cannot give, and record why. Do not use `--no-verify`.
 
 ```bash
 git commit -m "$(cat <<'EOF'
