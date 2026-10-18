@@ -1,6 +1,6 @@
 # Plug Hello
 
-This example is a Mix project with the dependencies `plug` and `bandit`. The versions are pinned in `mix.lock`. The plug `PlugHello` answers `GET /` with the status 200, the content type `text/plain`, and the body `Hello world!`, on the pinned ERTS and on the `pbeam` binary. It answers each other request with the status 404. The application `PlugHello.Application` starts Bandit with `PlugHello` on the port of the environment variable `PORT`, default 4000. The test run uses the port 0, so that it does not need the port 4000.
+This example is a Mix project with the dependencies `plug` and `bandit`. The versions are pinned in `mix.lock`. The plug `PlugHello` answers `GET /` with the status 200, the content type `text/plain`, and the body `Hello world from PBeam!`, on the pinned ERTS and on the `pbeam` binary. It answers each other request with the status 404. The application `PlugHello.Application` starts Bandit with `PlugHello` on the port of the environment variable `PORT`, default 4000. The test run uses the port 0, so that it does not need the port 4000.
 
 ## Third-party code
 
@@ -24,7 +24,7 @@ curl -s --retry 20 --retry-connrefused --retry-delay 1 http://127.0.0.1:4000/
 target/examples/plug_hello/bin/plug_hello stop
 ```
 
-The `curl` command prints `Hello world!`. Use `PORT=<port>` before `daemon` to use another port.
+The `curl` command prints `Hello world from PBeam!`. Use `PORT=<port>` before `daemon` to use another port.
 
 ## Run with the example runner
 
@@ -36,7 +36,7 @@ curl -s --retry 60 --retry-connrefused --retry-delay 1 http://127.0.0.1:4000/
 kill %1
 ```
 
-The `curl` command prints `Hello world!`. Use `PORT=<port>` before `mise run` to use another port.
+The `curl` command prints `Hello world from PBeam!`. Use `PORT=<port>` before `mise run` to use another port.
 
 The task builds the release with `mix deps.get --check-locked` and `MIX_ENV=prod mix release --overwrite`, and writes the output of `mix` to stderr. Hex and rebar3 must be installed, as `scripts/test.sh` installs them. The task then compiles `plug_hello_run.erl` and `examples/hello_world/pbeam_boot.erl` into `target/examples/plug_hello/pbeam/`. The code path is that directory, each `lib/*/ebin` directory of the release, and `releases/0.1.0/consolidated`. The task sets `RELEASE_ROOT` and `RELEASE_SYS_CONFIG` as `bin/plug_hello` sets them. The entry `plug_hello_run:main/0` does the steps of the boot script that set the application environment and start the applications:
 
@@ -54,7 +54,7 @@ curl -s --retry 60 --retry-connrefused --retry-delay 1 http://127.0.0.1:4000/
 kill %1
 ```
 
-The `curl` command prints `Hello world!`. The run does not end by itself, so `kill` stops it.
+The `curl` command prints `Hello world from PBeam!`. The run does not end by itself, so `kill` stops it.
 
 The release runner serves the same page:
 
@@ -64,4 +64,4 @@ curl -s --retry 300 --retry-connrefused --retry-delay 1 -D - http://127.0.0.1:40
 kill %1
 ```
 
-The `curl` command prints the status line `HTTP/1.1 200 OK`, the headers of the response, and the body `Hello world!`. The `scripts/example.sh` runner starts the release code on the pinned ERTS and on the `pbeam` binary. The feature test `serves_hello_world_from_the_plug_example_as_pinned_erts` of `tests/feature/serve.rs` compares the status line, the content type, and the body of both runs.
+The `curl` command prints the status line `HTTP/1.1 200 OK`, the headers of the response, and the body `Hello world from PBeam!`. The `scripts/example.sh` runner starts the release code on the pinned ERTS and on the `pbeam` binary. The feature test `serves_hello_world_from_the_plug_example_as_pinned_erts` of `tests/feature/serve.rs` compares the status line, the content type, and the body of both runs.

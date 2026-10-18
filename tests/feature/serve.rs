@@ -18,7 +18,7 @@ use std::{
 const RESPONSE: (&str, &str, &str) = (
     "HTTP/1.1 200 OK",
     "text/plain; charset=utf-8",
-    "Hello world!",
+    "Hello world from PBeam!",
 );
 
 /// The time that the server has to start, and the time that a response has
