@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use num_bigint::{BigInt, Sign};
 
+use super::attributes;
 use super::module::{BeamModule, Import};
 use crate::{
     error::{BeamError, error},
@@ -432,6 +433,11 @@ fn decode(
         .collect();
     let mut module = BeamModule::new(name, exports, imports, instructions)?;
     module.on_load = on_load;
+    module.native_declarations = chunks
+        .get(b"Attr".as_slice())
+        .map(|data| attributes::native_declarations(data))
+        .transpose()?
+        .unwrap_or_default();
     Ok(module)
 }
 

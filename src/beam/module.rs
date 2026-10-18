@@ -160,6 +160,12 @@ pub struct BeamModule {
     /// keeps the exports of such a module hidden until
     /// `erlang:finish_after_on_load/2` (`beam_load.c:259-330`).
     pub(crate) on_load: Option<u32>,
+    /// The native functions that the module declares, as the `{name,
+    /// arity}` pairs of the `pbeam_native` attribute of its `Attr` chunk
+    /// (see [`crate::beam::attributes`]). The loader reads them so that it
+    /// can check each declaration against the registered native functions
+    /// before a run uses the module.
+    pub(crate) native_declarations: Vec<(String, u32)>,
 }
 
 /// The side tables that the loader builds from the instruction stream of one
@@ -530,7 +536,24 @@ impl BeamModule {
             instructions,
             tables,
             on_load: None,
+            native_declarations: Vec::new(),
         })
+    }
+
+    /// Return the native functions that the module declares, as the
+    /// `{name, arity}` pairs of the `pbeam_native` attribute of its `Attr`
+    /// chunk. The `PBeam.Native` declaration of an Elixir module writes
+    /// that attribute (see [`crate::beam::attributes`]). A module that
+    /// declares no native function gives an empty slice.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let module = BeamModule::load(DECLARED)?;
+    /// assert_eq!(module.native_declarations(), [("sha256".to_owned(), 1)]);
+    /// ```
+    pub fn native_declarations(&self) -> &[(String, u32)] {
+        &self.native_declarations
     }
 
     /// Parse one BEAM file into a module, with a new atom table.
