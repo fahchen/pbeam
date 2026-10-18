@@ -11,7 +11,9 @@
 //!
 //! Run the release measurement with `mise run bench-dispatch`. The check
 //! gate runs the same test under the test profile, which measures slower
-//! numbers but proves that the probes and the ERTS reference run.
+//! numbers but proves that the probes and the ERTS reference run. The test
+//! profile holds debug assertions, so the constants scale the loop lengths
+//! and the runs down and the gate stays short.
 
 use std::{
     collections::HashMap,
@@ -29,14 +31,22 @@ const POSITION_PROBE: &[u8] =
 
 /// The number of timed runs of each probe. The report gives the minimum of
 /// the runs, as `docs/interpreter-dispatch-plan.md` does.
-const RUNS: usize = 9;
+const RUNS: usize = if cfg!(debug_assertions) { 2 } else { 9 };
 
 /// The floor-loop lengths of `docs/interpreter-dispatch-plan.md`.
-const FLOOR_LENGTHS: [usize; 2] = [20_000, 200_000];
+const FLOOR_LENGTHS: [usize; 2] = if cfg!(debug_assertions) {
+    [2_000, 20_000]
+} else {
+    [20_000, 200_000]
+};
 
 /// The length of the added-instruction runs. The added cost of one
 /// instruction is stable at this length.
-const DELTA_LENGTH: usize = 200_000;
+const DELTA_LENGTH: usize = if cfg!(debug_assertions) {
+    20_000
+} else {
+    200_000
+};
 
 /// The number of guest functions before `floor_loop/1` in
 /// `fixtures/dispatch/dispatch_position_probe.erl`. That module holds the

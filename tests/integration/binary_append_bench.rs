@@ -1,5 +1,9 @@
 //! Temporary measurement of the append tree candidate: the copy cost of a
 //! repeated append and the match throughput of a doubling build.
+//!
+//! The test profile holds debug assertions, so the constants scale the runs
+//! down and the check gate stays short. The release profile of `cargo test`
+//! holds the measurement runs.
 
 use std::{hint::black_box, time::Instant};
 
@@ -8,7 +12,7 @@ use pbeam_runtime::{BeamProgram, Term};
 const BINARY_APPEND_PROBE: &[u8] =
     include_bytes!("../../fixtures/binary_append/binary_append_probe.beam");
 
-const RUNS: usize = 9;
+const RUNS: usize = if cfg!(debug_assertions) { 2 } else { 9 };
 
 fn execute(program: &BeamProgram, function: &str, arguments: &[Term]) -> Term {
     let arguments = arguments

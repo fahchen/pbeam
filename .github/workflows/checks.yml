@@ -66,6 +66,4 @@ jobs:
       - name: Run repository checks
         env:
           TASK: ${{ steps.select.outputs.task }}
-          # The tests spawn guest processes and wait on pipes, so four nextest threads run the suite faster than one thread for each CPU of the runner.
-          NEXTEST_TEST_THREADS: "4"
         run: mise run "$TASK"
