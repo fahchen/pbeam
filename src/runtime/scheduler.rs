@@ -1231,15 +1231,14 @@ impl Scheduler {
     ///
     /// # Errors
     ///
-    /// `SIGINT` gives a runtime error: ERTS runs its break handler
-    /// (`break_requested` at `sys.c:611-624`, `do_break` at
-    /// `break.c:571-687`), which PBeam does not have.
+    /// Return the runtime error of [`Self::break_menu`] for a break command
+    /// that PBeam does not run, and [`BeamError::Halt`] when the menu aborts
+    /// the run.
     fn notify_signals(&mut self, signals: &[libc::c_int]) -> Result<(), BeamError> {
         for &number in signals {
             if number == libc::SIGINT {
-                return Err(error(
-                    "unsupported break of SIGINT: PBeam has no break handler",
-                ));
+                self.break_menu()?;
+                continue;
             }
             let name =
                 signal::signal_name(number).expect("a handler is set only for a named signal");
@@ -1250,6 +1249,67 @@ impl Scheduler {
             }
         }
         Ok(())
+    }
+
+    /// Read the break menu of `SIGINT`, as `do_break` does
+    /// (`break.c:571-687`): write the menu, and act on the keys of stdin.
+    /// `a`, `q`, and `*` abort the run with the status 0, `c` continues the
+    /// run, and the end of the input aborts it (`break.c:600-618`). A key
+    /// for the crash dump or for the information commands returns a runtime
+    /// error; each other key writes the ERTS message and reads the next key.
+    ///
+    /// # Errors
+    ///
+    /// Return the runtime error that names a break command that PBeam does
+    /// not run, and [`BeamError::Halt`] for an abort.
+    fn break_menu(&mut self) -> Result<(), BeamError> {
+        use std::io::{IsTerminal, Read, Write};
+
+        const HELP: &str = "BREAK: (a)bort (A)bort with dump (c)ontinue (p)roc info (i)nfo\r\n       (l)oaded (v)ersion (k)ill (D)b-tables (d)istribution\r\n";
+        // A run that does not write to a terminal keeps its screen
+        // (`break.c:593-598`).
+        let clear = if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+            "\x1b[J"
+        } else {
+            ""
+        };
+        let mut stdout = std::io::stdout();
+        let _ = write!(stdout, "\r\n{clear}{HELP}");
+        let _ = stdout.flush();
+        let mut stdin = std::io::stdin();
+        loop {
+            let mut key = [0_u8; 1];
+            // A read error and the end of the input abort the run
+            // (`sys_get_key` and `erts_exit` of `do_break`,
+            // `break.c:602-604`).
+            if stdin.read(&mut key).unwrap_or(0) != 1 {
+                return Err(BeamError::Halt(0));
+            }
+            match key[0] {
+                b'a' | b'q' | b'*' => return Err(BeamError::Halt(0)),
+                b'c' => return Ok(()),
+                b'\n' => continue,
+                b'A' => {
+                    return Err(error(
+                        "unsupported break command A: PBeam writes no crash dump (see \"OS signals\" in docs/erts-differences.md)",
+                    ));
+                }
+                option @ (b'p' | b'i' | b'l' | b'v' | b'd' | b'D' | b'k' | b'm' | b'o') => {
+                    return Err(error(format!(
+                        "unsupported break command {}: PBeam runs only the commands a, c, q, and * (see \"OS signals\" in docs/erts-differences.md)",
+                        char::from(option)
+                    )));
+                }
+                option => {
+                    let _ = write!(
+                        stdout,
+                        "Invalid option '{}'. Please enter one of the following:\r\n{HELP}",
+                        char::from(option)
+                    );
+                    let _ = stdout.flush();
+                }
+            }
+        }
     }
 
     /// Run the `prim_tty:write_nif/2` call of the current process on a

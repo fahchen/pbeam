@@ -226,12 +226,12 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a consumer uses another option, port kind, or port BIF, for example `{line, L}` or `Port ! {self(), {command, Data}}`, or writes more data than the pipe holds to a program that writes back, or reads the exit status of a port after `os:set_signal(sigchld, ignore)`.
 - **Source:** PR for #302.
 
-### Run the break menu and the crash dump of `SIGINT` and `SIGUSR1`
+### Run the crash dump of `SIGUSR1`
 
-- After #301, `SIGINT` stops a `pbeam` run with `pbeam: unsupported break of SIGINT: PBeam has no break handler` and status 1, and `SIGUSR1` stops it with `pbeam: unsupported erlang:halt/2 with a crash dump slogan: PBeam writes no crash dump` and status 1. ERTS writes the break menu and reads a key from fd 0 (break.c:571-687), and for `SIGUSR1` writes `Received SIGUSR1` and `erl_crash.dump` and exits with status 1 (erl_signal_handler.erl:39-41, bif.c:4370-4387). The "OS signals" row records this.
-- **Evidence:** `tests/feature/host_signal.rs` (`gives_a_runtime_error_for_a_crash_dump_and_a_break`): with stdin `/dev/null`, ERTS writes the break menu and exits with status 0 at the end of file of fd 0.
-- The work: the break menu with its keys, which needs the process, port, and table information that ERTS prints, and a crash dump writer.
-- **Trigger:** a consumer needs the break menu at `^C` or a crash dump.
+- `SIGUSR1` stops a `pbeam` run with `pbeam: unsupported erlang:halt/2 with a crash dump slogan: PBeam writes no crash dump` and status 1. ERTS writes `Received SIGUSR1` and `erl_crash.dump` and exits with status 1 (erl_signal_handler.erl:39-41, bif.c:4370-4387). The "OS signals" row records this. The break menu of `SIGINT` runs (`break.c:571-687`).
+- **Evidence:** `tests/feature/host_signal.rs` (`gives_a_runtime_error_for_a_crash_dump`).
+- The work: a crash dump writer with the ERTS file and messages.
+- **Trigger:** a consumer needs a crash dump, which a break command `A` and `erlang:halt/2` with a slogan also request.
 - **Source:** PR for #301.
 
 ### Run `at_exit` callbacks and flush the logger before the root exit

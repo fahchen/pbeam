@@ -48,7 +48,7 @@ fn notifies_erl_signal_server_of_each_handled_signal_as_pinned_erts() {
     let steps = [("ready\n", libc::SIGHUP), ("sighup\n", libc::SIGUSR2)];
     for (name, mut command) in [("ERTS", erts("notify")), ("PBeam", pbeam("notify"))] {
         assert_eq!(
-            run_with_signals(&mut command, &steps),
+            run_with_signals(&mut command, b"", &steps),
             (
                 Some(0),
                 String::from("ready\nsighup\nsigusr2\n"),
@@ -67,7 +67,7 @@ fn notifies_erl_signal_server_while_a_process_can_always_run() {
     // notify flag before each scheduling step.
     for (name, mut command) in [("ERTS", erts("busy")), ("PBeam", pbeam("busy"))] {
         assert_eq!(
-            run_with_signals(&mut command, &[("ready\n", libc::SIGHUP)]),
+            run_with_signals(&mut command, b"", &[("ready\n", libc::SIGHUP)]),
             (Some(0), String::from("ready\nsighup\n"), String::new()),
             "{name}"
         );
@@ -92,7 +92,8 @@ fn runs_the_default_handler_of_a_start_signal_as_pinned_erts() {
         ),
     ] {
         for (name, mut command) in [("ERTS", erts("wait")), ("PBeam", pbeam("wait"))] {
-            let (status, stdout, stderr) = run_with_signals(&mut command, &[("ready\n", signal)]);
+            let (status, stdout, stderr) =
+                run_with_signals(&mut command, b"", &[("ready\n", signal)]);
             assert_eq!(
                 (status, mask_time(&stdout), stderr),
                 (Some(0), String::from(expected), String::new()),
@@ -102,37 +103,97 @@ fn runs_the_default_handler_of_a_start_signal_as_pinned_erts() {
     }
 }
 
+/// The break menu of ERTS on stdout, with the line endings of the console
+/// writer (`erts_printf`, `break.c:574-575`, `600`).
+const BREAKS: &str = "ready\n\r\nBREAK: (a)bort (A)bort with dump (c)ontinue (p)roc info (i)nfo\r\n       (l)oaded (v)ersion (k)ill (D)b-tables (d)istribution\r\n";
+
 #[test]
-fn gives_a_runtime_error_for_a_crash_dump_and_a_break() {
-    // For SIGUSR1, `erl_signal_handler` calls `erlang:halt/1` with a slogan
-    // (erl_signal_handler.erl:39-41), which writes a crash dump. For SIGINT,
-    // ERTS runs its break handler (sys.c:611-629, 1165-1167), which writes
-    // the break menu and reads a key from fd 0 (break.c:571-605). PBeam has
-    // neither, so both give a runtime error.
-    let breaks = "ready\n\r\nBREAK: (a)bort (A)bort with dump (c)ontinue (p)roc info (i)nfo\r\n       (l)oaded (v)ersion (k)ill (D)b-tables (d)istribution\r\n";
-    for (signal, erts_output, pbeam_stderr) in [
+fn gives_a_runtime_error_for_a_crash_dump() {
+    // `erl_signal_handler` calls `erlang:halt/1` with a slogan for SIGUSR1
+    // (erl_signal_handler.erl:39-41), which writes a crash dump. PBeam
+    // writes no crash dump, so the run gives a runtime error.
+    assert_eq!(
+        run_with_signals(&mut erts("wait"), b"", &[("ready\n", libc::SIGUSR1)]),
         (
-            libc::SIGUSR1,
-            (Some(1), "ready\n", "Received SIGUSR1\r\n"),
-            "pbeam: unsupported erlang:halt/2 with a crash dump slogan: PBeam writes no crash dump\n",
+            Some(1),
+            String::from("ready\n"),
+            String::from("Received SIGUSR1\r\n")
         ),
+        "ERTS"
+    );
+    assert_eq!(
+        run_with_signals(&mut pbeam("wait"), b"", &[("ready\n", libc::SIGUSR1)]),
         (
-            libc::SIGINT,
-            (Some(0), breaks, ""),
-            "pbeam: unsupported break of SIGINT: PBeam has no break handler\n",
+            Some(1),
+            String::from("ready\n"),
+            String::from(
+                "pbeam: unsupported erlang:halt/2 with a crash dump slogan: PBeam writes no crash dump\n"
+            )
         ),
+        "PBeam"
+    );
+}
+
+#[test]
+fn runs_the_break_menu_of_a_sigint_as_pinned_erts() {
+    // ERTS runs the break handler for SIGINT (sys.c:611-629, 1165-1167): it
+    // writes the menu and reads a key from fd 0 (break.c:571-618). The end
+    // of the input aborts the run with the status 0.
+    for (name, mut command) in [("ERTS", erts("wait")), ("PBeam", pbeam("wait"))] {
+        assert_eq!(
+            run_with_signals(&mut command, b"", &[("ready\n", libc::SIGINT)]),
+            (Some(0), String::from(BREAKS), String::new()),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn aborts_the_break_menu_of_a_sigint_as_pinned_erts() {
+    // The keys `a`, `q`, and `*` abort the run with the status 0
+    // (break.c:606-614).
+    for (name, mut command) in [("ERTS", erts("wait")), ("PBeam", pbeam("wait"))] {
+        assert_eq!(
+            run_with_signals(&mut command, b"a\n", &[("ready\n", libc::SIGINT)]),
+            (Some(0), String::from(BREAKS), String::new()),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn continues_after_an_invalid_break_key_as_pinned_erts() {
+    // An invalid key writes its message and the menu, and reads the next
+    // key (break.c:681-684). The key `c` continues the run (break.c:617-618).
+    // SIGQUIT then stops the run as its default handler does
+    // (erl_signal_handler.erl:39-41), which writes no output.
+    let steps = [("ready\n", libc::SIGINT), ("Invalid option", libc::SIGQUIT)];
+    let erts = run_with_signals(&mut erts("wait"), b"x\nc\n", &steps);
+    let pbeam = run_with_signals(&mut pbeam("wait"), b"x\nc\n", &steps);
+    assert_eq!(erts, pbeam, "ERTS and PBeam");
+    let (status, stdout, stderr) = pbeam;
+    assert_eq!(status, Some(0));
+    assert_eq!(stderr, "");
+    assert!(stdout.starts_with(BREAKS), "{stdout:?}");
+    assert!(stdout.contains("Invalid option 'x'."), "{stdout:?}");
+}
+
+#[test]
+fn gives_a_runtime_error_for_a_break_command_that_pbeam_does_not_run() {
+    // The crash dump of `A` (break.c:615-616) and the information commands
+    // (break.c:619-646) are not implemented, so PBeam names the command in a
+    // runtime error. The "OS signals" row of `docs/erts-differences.md`
+    // records the difference.
+    for (key, detail) in [
+        (b'A', "unsupported break command A"),
+        (b'p', "unsupported break command p"),
     ] {
-        let (status, stdout, stderr) = erts_output;
-        assert_eq!(
-            run_with_signals(&mut erts("wait"), &[("ready\n", signal)]),
-            (status, String::from(stdout), String::from(stderr)),
-            "ERTS {signal}"
-        );
-        assert_eq!(
-            run_with_signals(&mut pbeam("wait"), &[("ready\n", signal)]),
-            (Some(1), String::from("ready\n"), String::from(pbeam_stderr)),
-            "PBeam {signal}"
-        );
+        let input = [key, b'\n'];
+        let (status, stdout, stderr) =
+            run_with_signals(&mut pbeam("wait"), &input, &[("ready\n", libc::SIGINT)]);
+        assert_eq!(status, Some(1), "{key}");
+        assert_eq!(stdout, BREAKS, "{key}");
+        assert!(stderr.contains(detail), "expected {detail} in {stderr:?}");
     }
 }
 
@@ -216,24 +277,29 @@ fn dumb_utf8(command: &mut Command) {
     command.env("TERM", "dumb").env("LC_ALL", "C.UTF-8");
 }
 
-/// Run `command` with stdin `/dev/null`. For each step, wait until stdout
-/// holds the text of the step, then send the signal of the step to the
-/// run. Return the output when the run ends. Kill the run and panic when a
-/// text or the end does not come in `RUN_TIME_LIMIT`.
+/// Run `command` with the bytes `input` on stdin, which then ends. For each
+/// step, wait until stdout holds the text of the step, then send the signal
+/// of the step to the run. Return the output when the run ends. Kill the run
+/// and panic when a text or the end does not come in `RUN_TIME_LIMIT`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let output = run_with_signals(&mut pbeam("wait"), &[("ready\n", libc::SIGQUIT)]);
+/// let output = run_with_signals(&mut pbeam("wait"), b"", &[("ready\n", libc::SIGQUIT)]);
 /// assert_eq!(output, (Some(0), String::from("ready\n"), String::new()));
 /// ```
-fn run_with_signals(command: &mut Command, steps: &[(&str, c_int)]) -> Output {
+fn run_with_signals(command: &mut Command, input: &[u8], steps: &[(&str, c_int)]) -> Output {
     let mut child = command
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
+    let mut stdin = child.stdin.take().expect("the child has a stdin");
+    stdin
+        .write_all(input)
+        .expect("the input pipe takes the bytes");
+    drop(stdin);
     let stdout = Arc::new(Mutex::new(Vec::new()));
     let stdout_reader = collect(child.stdout.take().unwrap(), Arc::clone(&stdout));
     let stderr = Arc::new(Mutex::new(Vec::new()));
