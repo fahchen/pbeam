@@ -49,7 +49,7 @@ open(Out, Command) ->
         "out=$1; shift; "
         "rm -f \"$out/resize\"; "
         "(wait=0; while [ ! -f \"$out/resize\" ] && [ \"$wait\" -lt 12000 ]; do /bin/sleep 0.05; wait=$((wait + 1)); done; "
-        "[ -f \"$out/resize\" ] && { stty rows 30 cols 100 < /dev/tty; stty -g < /dev/tty > \"$out/stty-resize.g\"; }) & "
+        "[ -f \"$out/resize\" ] && { stty rows 30 cols 100 < /dev/tty && stty size < /dev/tty > \"$out/stty-resize-size.txt\" && stty -g < /dev/tty > \"$out/stty-resize.g\" && : > \"$out/stty-resize-ok\"; }) & "
         "stty rows 24 cols 80 && stty -g > \"$out/stty-before.g\" && stty -a > \"$out/stty-before.txt\" || exit 125; "
         "\"$@\"; echo $? > \"$out/status\"; "
         "stty -g > \"$out/stty-after.g\"; stty -a > \"$out/stty-after.txt\"",
@@ -61,7 +61,17 @@ run_steps(Port, Out, Steps, Screen) ->
     run_steps(Port, Out, Steps, Screen, []).
 
 run_steps(Port, Out, [{Name, Action, Expect, Bound} | Steps], Screen0, Done) ->
-    Screen1 = act(Port, Out, Action, Screen0),
+    case act(Port, Out, Action, Screen0) of
+        {failed, Screen} ->
+            kill(Port),
+            {lists:reverse([{Name, Action, Expect, act_failed, visible(Screen)} | Done]), Screen, act_failed};
+        {ok, Screen1} ->
+            run_await(Port, Out, Name, Action, Expect, Bound, Steps, Screen1, Done)
+    end;
+run_steps(_Port, _Out, [], Screen, Done) ->
+    {lists:reverse(Done), Screen, none}.
+
+run_await(Port, Out, Name, Action, Expect, Bound, Steps, Screen1, Done) ->
     Deadline = erlang:monotonic_time(millisecond) + Bound,
     case await(Port, Expect, Screen1, Deadline) of
         {ok, Screen} ->
@@ -74,25 +84,43 @@ run_steps(Port, Out, [{Name, Action, Expect, Bound} | Steps], Screen0, Done) ->
         {timeout, Screen} ->
             kill(Port),
             {lists:reverse([{Name, Action, Expect, timeout, visible(Screen)} | Done]), Screen, timeout}
-    end;
-run_steps(_Port, _Out, [], Screen, Done) ->
-    {lists:reverse(Done), Screen, none}.
+    end.
 
 %% Run the action of a step: write the `resize` file that the shell loop of the
 %% pseudo-terminal waits for and follow the new size in the screen model, send
 %% bytes and wait, send a key, or do nothing.
 act(_Port, _Out, none, Screen) ->
-    Screen;
+    {ok, Screen};
 act(_Port, Out, resize, Screen) ->
     ok = file:write_file(filename:join(Out, "resize"), <<"1">>),
-    Screen#{rows := 30, cols := 100};
+    case await_resize(Out, erlang:monotonic_time(millisecond) + ?STEP_TIMEOUT) of
+        ok -> {ok, Screen#{rows := 30, cols := 100}};
+        failed -> {failed, Screen}
+    end;
 act(Port, _Out, {send, Bytes, Wait}, Screen) ->
     true = port_command(Port, Bytes),
     timer:sleep(Wait),
-    Screen;
+    {ok, Screen};
 act(Port, _Out, Key, Screen) ->
     true = port_command(Port, Key),
-    Screen.
+    {ok, Screen}.
+
+%% Wait until the shell of the pseudo-terminal writes the size of the
+%% resized terminal and a marker, and accept only 30 rows and 100 columns.
+await_resize(Out, Deadline) ->
+    Marker = filename:join(Out, "stty-resize-ok"),
+    case filelib:is_regular(Marker) of
+        true ->
+            case file:read_file(filename:join(Out, "stty-resize-size.txt")) of
+                {ok, <<"30 100\n">>} -> ok;
+                _ -> failed
+            end;
+        false ->
+            case erlang:monotonic_time(millisecond) >= Deadline of
+                true -> failed;
+                false -> timer:sleep(20), await_resize(Out, Deadline)
+            end
+    end.
 
 %% Kill the process of the pseudo-terminal, which closes the terminal and
 %% sends `SIGHUP` to the program, so that a run that times out does not
@@ -102,7 +130,13 @@ kill(Port) ->
         {os_pid, Pid} -> os:cmd("kill -KILL " ++ integer_to_list(Pid));
         undefined -> ok
     end,
-    port_close(Port).
+    %% The kill can close the port before this call.
+    try
+        port_close(Port)
+    catch
+        error:badarg -> ok
+    end,
+    ok.
 
 %% The step accepts only the output that it receives before the deadline. After the deadline, queued or continuous output does not make the step pass.
 await(Port, Expect, Screen, Deadline) ->
