@@ -316,6 +316,39 @@ fn break_after_signal(command: &mut Command) -> (Option<i32>, String) {
 }
 
 #[test]
+fn stops_the_break_menu_at_a_closed_stdin_as_pinned_erts() {
+    // A `select` on a closed stdin fails, `sys_get_key` returns 0, and the
+    // run stops with status 0 (`sys.c:1051-1071`, `break.c:602-604`).
+    let steps = [("ready\n", libc::SIGINT)];
+    let erts = run_with_signals(&mut closes_stdin(&mut erts("wait")), b"", &steps);
+    let pbeam = run_with_signals(&mut closes_stdin(&mut pbeam("wait")), b"", &steps);
+    assert_eq!(erts, pbeam, "ERTS and PBeam");
+    assert_eq!(pbeam.0, Some(0));
+    assert!(
+        pbeam
+            .1
+            .as_bytes()
+            .windows(7)
+            .any(|window| window == b"BREAK: "),
+        "{:?}",
+        pbeam.1
+    );
+}
+
+/// Close fd 0 of the child before `exec`.
+fn closes_stdin(command: &mut Command) -> &mut Command {
+    // SAFETY: the closure runs in the child before `exec` and calls only the
+    // async-signal-safe `close`.
+    unsafe {
+        command.pre_exec(|| {
+            libc::close(0);
+            Ok(())
+        });
+    }
+    command
+}
+
+#[test]
 fn stops_the_break_menu_at_a_second_sigint_as_pinned_erts() {
     // A second SIGINT while the menu waits stops the run with status 0
     // (`sys.c:611-624`, `break.c:602-604`), while stdin stays open.

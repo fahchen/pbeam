@@ -191,31 +191,6 @@ pub(crate) fn take_break_requested() -> bool {
     BREAK_REQUESTED.swap(false, Ordering::Acquire)
 }
 
-/// Write `signals` back to the notify pipe, in their order, so the scheduler
-/// processes them after the break menu. A full pipe drops a signal, as the
-/// handler does.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// let notified = take_notified();
-/// requeue(&notified);
-/// assert_eq!(take_notified(), notified);
-/// ```
-pub(crate) fn requeue(signals: &[c_int]) {
-    if signals.is_empty() {
-        return;
-    }
-    let [_, write_end] = *NOTIFY_PIPE.get().expect("a handler install makes the pipe");
-    let bytes: Vec<u8> = signals
-        .iter()
-        .flat_map(|signal| signal.to_ne_bytes())
-        .collect();
-    let mut buffers = [std::io::IoSlice::new(&bytes)];
-    let _ = super::output::write_all(write_end, &mut buffers);
-    NOTIFIED.store(true, Ordering::Release);
-}
-
 /// Read all signals in the notify pipe, as the signal dispatcher thread
 /// reads each signal number (sys.c:1128-1144). A wait of the scheduler that
 /// the pipe ends does not read it: the next [`take_notified`] does. Each handler writes one

@@ -398,6 +398,9 @@ pub(super) struct Scheduler {
     /// Compiled patterns of `binary:compile_pattern/1` of the node. All
     /// processes of the run share them.
     pub(super) binary_patterns: BinaryPatterns,
+    /// The signals that arrived while the break menu waited, which the
+    /// scheduler processes after the menu.
+    deferred_signals: Vec<libc::c_int>,
     /// The mode of fd 0 at the start of the run, which the break menu sets
     /// while it reads its keys (`erl_sys_initial_tty_mode`, `sys.c:428-432`,
     /// `899-923`).
@@ -513,6 +516,7 @@ impl Scheduler {
             ets: EtsTables::default(),
             atomics: AtomicArrays::default(),
             binary_patterns: BinaryPatterns::default(),
+            deferred_signals: Vec::new(),
             initial_tty_mode: InitialMode::read(),
             resources,
             atoms,
@@ -1240,7 +1244,8 @@ impl Scheduler {
     /// that PBeam does not run, and [`BeamError::Halt`] when the menu aborts
     /// the run.
     fn notify_signals(&mut self, signals: &[libc::c_int]) -> Result<(), BeamError> {
-        for &number in signals {
+        let deferred = std::mem::take(&mut self.deferred_signals);
+        for &number in deferred.iter().chain(signals) {
             if number == libc::SIGINT {
                 // The request that opens the menu is consumed here; a later
                 // SIGINT marks a new request (`sys.c:611-624`, `913`).
@@ -1307,7 +1312,7 @@ impl Scheduler {
         }
         // The signals that arrived while the menu waited reach the
         // scheduler after it ends, in their order.
-        signal::requeue(&deferred);
+        self.deferred_signals.extend(deferred);
         result
     }
 
@@ -1354,10 +1359,13 @@ impl Scheduler {
                         }
                         break Self::break_key(|| super::host::input::read(libc::STDIN_FILENO, 64));
                     }
-                    // A handled signal can stop the wait with `EINTR`; a
-                    // SIGINT then stops the run (`sys.c:611-624`).
-                    super::host::input::Readiness::Invalid
-                    | super::host::input::Readiness::Pending => {
+                    // A select that fails, for example on a closed stdin,
+                    // gives 0 from `sys_get_key`, and the run stops
+                    // (`sys.c:1051-1071`, `break.c:602-604`). An interrupted
+                    // wait keeps the menu open, and a SIGINT stops the run
+                    // (`sys.c:611-624`).
+                    super::host::input::Readiness::Invalid => return Err(BeamError::Halt(0)),
+                    super::host::input::Readiness::Pending => {
                         if signal::take_break_requested() {
                             return Err(BeamError::Halt(0));
                         }
