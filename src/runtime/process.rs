@@ -722,6 +722,10 @@ impl ProcessState {
             ("message_queue_len", _) => Term::Integer(messages as i64),
             ("group_leader", _) => Term::Pid(self.group_leader),
             ("priority", _) => Term::static_atom(self.priority.name()),
+            ("links", _) => {
+                let links: Vec<Term> = self.links.post_order().map(|(id, _)| id.term()).collect();
+                Term::list_from(links)
+            }
             ("reductions", _) => Term::Integer(
                 i64::try_from(self.reductions + current)
                     .map_err(|_| error("the reduction total exceeds the PBeam integer range"))?,
