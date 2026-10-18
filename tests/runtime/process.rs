@@ -7,7 +7,7 @@ use crate::{
     BeamModule,
     beam::code::Instruction,
     runtime::{interpreter::CodeTable, scheduler::Scheduler},
-    term::{Atom, AtomTable, PortId, ProcessId, Reference, Term},
+    term::{Atom, AtomTable, ProcessId, Reference, Term},
 };
 
 thread_local! {
@@ -225,8 +225,12 @@ fn gives_the_links_of_a_process_as_process_info_2() {
             .unwrap(),
         Some(Term::tuple(vec![Term::static_atom("links"), Term::nil()]))
     );
+    process.links.insert(LinkId::Process(ProcessId(1)), 0);
+    process.links.insert(LinkId::Process(ProcessId(2)), 0);
     process.links.insert(LinkId::Process(ProcessId(3)), 0);
-    process.links.insert(LinkId::Port(PortId(2)), 0);
+    // A link that waits for its unlink acknowledgment stays out of the
+    // result (`collect_one_link`, `erl_bif_info.c:574-585`).
+    process.links.insert(LinkId::Process(ProcessId(4)), 7);
     let value = process
         .info(&atoms, &Term::static_atom("links"), 0, 0, false)
         .unwrap()
@@ -238,7 +242,14 @@ fn gives_the_links_of_a_process_as_process_info_2() {
         .expect("a list")
         .cloned()
         .collect();
-    assert_eq!(links.len(), 2);
-    assert!(links.contains(&Term::Pid(ProcessId(3))));
-    assert!(links.contains(&Term::Port(PortId(2))));
+    // ERTS prepends each link of its post-order walk, so the list is the
+    // reverse of the walk `[1, 3, 2]` (`erl_bif_info.c:1764-1775`).
+    assert_eq!(
+        links,
+        vec![
+            Term::Pid(ProcessId(2)),
+            Term::Pid(ProcessId(3)),
+            Term::Pid(ProcessId(1))
+        ]
+    );
 }

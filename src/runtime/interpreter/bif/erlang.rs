@@ -4215,7 +4215,7 @@ pub(super) fn process_info(
                 let info = caller
                     .info(atoms, item, current, messages, true)?
                     .ok_or_else(|| unsupported(atoms))?;
-                caller.bump_reductions(1);
+                caller.bump_reductions(1 + links_reductions(item, &info));
                 Ok(Value(info))
             },
         );
@@ -4227,7 +4227,13 @@ pub(super) fn process_info(
     let info = target
         .info(&scheduler.atoms, item, 0, messages, false)?
         .ok_or_else(|| unsupported(&scheduler.atoms))?;
-    if target.exiting.is_some() || target.mailbox.has_incoming() {
+    let must_wait = target.exiting.is_some() || target.mailbox.has_incoming();
+    // ERTS charges the item cost in the process that builds the reply, also
+    // when the item waits for a signal (`erl_bif_info.c:1777`).
+    scheduler
+        .current_process_mut()
+        .bump_reductions(links_reductions(item, &info));
+    if must_wait {
         let caller = scheduler.current_process_mut().id;
         let reference = scheduler.make_ref()?;
         scheduler.current_process_mut().mailbox.set_save_end();
@@ -4247,6 +4253,21 @@ pub(super) fn process_info(
     }
     scheduler.current_process_mut().bump_reductions(1);
     Ok(signals_return(scheduler, process, info))
+}
+
+/// Return the extra reductions of a `links` item, `floor(Links / 4)`
+/// (`erl_bif_info.c:1777`), and 0 for another item.
+fn links_reductions(item: &Term, value: &Term) -> i32 {
+    if item != &Term::static_atom("links") {
+        return 0;
+    }
+    let links = value
+        .tuple_elements()
+        .and_then(|elements| elements.get(1))
+        .and_then(|links| links.proper_list())
+        .map(|links| links.count())
+        .unwrap_or(0);
+    i32::try_from(links / 4).unwrap_or(i32::MAX)
 }
 
 /// Run `erlang:is_process_alive/1` as `is_process_alive_1`
