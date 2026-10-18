@@ -2014,6 +2014,18 @@ fn drops_the_link_exit_signal_of_a_process_that_the_port_does_not_link() {
 }
 
 #[test]
+fn reads_a_break_key_after_a_failed_menu_wait() {
+    // `sys_get_key` gives 0 when its `select` fails, so the menu reads fd 0,
+    // where the read fails and the run stops (`sys.c:1051-1071`).
+    assert_eq!(
+        Scheduler::menu_ready(Readiness::Invalid),
+        vec![libc::STDIN_FILENO]
+    );
+    assert!(Scheduler::menu_ready(Readiness::Pending).is_empty());
+    assert_eq!(Scheduler::menu_ready(Readiness::Ready(vec![7])), vec![7]);
+}
+
+#[test]
 fn reads_a_break_key_after_a_read_with_no_data() {
     // `sys_get_key` retries a read that returns EAGAIN, and it gives 0 for
     // the end of the input, a NUL byte, and a read error (`sys.c:1051-1071`).

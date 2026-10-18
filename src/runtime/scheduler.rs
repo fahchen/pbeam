@@ -1293,6 +1293,25 @@ impl Scheduler {
         Ok(())
     }
 
+    /// Return the fds that a wait of the menu reports as ready. A failed
+    /// wait, as on fd 0 closed after the run started, names fd 0: the read
+    /// then fails, `sys_get_key` gives 0, and the run stops
+    /// (`sys.c:1051-1071`, `break.c:602-604`). An interrupted wait returns
+    /// no fd, and the menu waits again (`sys.c:611-624`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Scheduler::menu_ready(Readiness::Pending), vec![]);
+    /// ```
+    fn menu_ready(readiness: super::host::input::Readiness) -> Vec<libc::c_int> {
+        match readiness {
+            super::host::input::Readiness::Ready(ready) => ready,
+            super::host::input::Readiness::Pending => Vec::new(),
+            super::host::input::Readiness::Invalid => vec![libc::STDIN_FILENO],
+        }
+    }
+
     /// Return the first byte of a key of the break menu, or 0 for the end of
     /// the input, a NUL byte, and a read error, as `sys_get_key` does
     /// (`sys.c:1051-1071`). A read that has no data is retried.
@@ -1375,11 +1394,9 @@ impl Scheduler {
             // descriptor. A wait that a signal stops, the end of the input,
             // and the NUL byte abort the run (`break.c:602-604`).
             let key = loop {
+                let ready = Self::menu_ready(super::host::input::wait_readable(&fds, None));
                 // An interrupted wait keeps the menu open, and the next wait
-                // sees the notify pipe (`sys.c:611-624`). A failed wait
-                // retries in the same way: fd 0 is open because the notify
-                // pipe takes it when the run starts with a closed stdin.
-                let ready = super::host::input::wait_readable(&fds, None).into_ready();
+                // sees the notify pipe (`sys.c:611-624`).
                 if ready.is_empty() {
                     continue;
                 }
