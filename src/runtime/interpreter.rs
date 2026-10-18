@@ -239,6 +239,39 @@ impl BeamProgram {
         &self.atoms
     }
 
+    /// Check each native declaration of the loaded modules against the
+    /// registered native functions. A declaration without a registered
+    /// function is an error that names the MFA. Call it before a run starts
+    /// the application, so a missing implementation fails before the run
+    /// executes the declaration.
+    ///
+    /// A run that skips this check still stops at the call: the stub raises
+    /// `:pbeam_native_only` when no registered function matches
+    /// (`docs/portable-beam-spec.md`, section "Elixir declaration").
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let program = BeamProgram::load(&[NATIVE_HASH])?;
+    /// register_native("Elixir.NativeHash", "sha256", 1, sha256).unwrap();
+    /// assert!(program.validate_native_declarations().is_ok());
+    /// ```
+    pub fn validate_native_declarations(&self) -> Result<(), BeamError> {
+        let mut names: Vec<&String> = self.modules.keys().collect();
+        names.sort();
+        for name in names {
+            let module = &self.modules[name];
+            for (function, arity) in module.native_declarations() {
+                if super::lookup_native(name, function, *arity).is_none() {
+                    return Err(error(format!(
+                        "native declaration {name}:{function}/{arity} has no registered implementation"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Pair `term` with the atom table of this program. Pass the result as
     /// an argument of [`BeamProgram::execute`],
     /// [`BeamProgram::execute_with_policy`], or
