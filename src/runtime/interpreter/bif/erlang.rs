@@ -4780,11 +4780,18 @@ fn process_info_values(
         initial_call,
         status,
         message_queue_len: i64::try_from(messages).unwrap_or(i64::MAX),
-        links: process
-            .links
-            .post_order()
-            .map(|(id, _)| id.term())
-            .collect(),
+        links: {
+            // ERTS reports only active links, in the reverse of the tree
+            // walk (`collect_one_link`, `erl_bif_info.c:574-585`,
+            // `1764-1775`).
+            let links: Vec<Term> = process
+                .links
+                .post_order()
+                .filter(|(_, unlinking)| **unlinking == 0)
+                .map(|(id, _)| id.term())
+                .collect();
+            links.into_iter().rev().collect()
+        },
         dictionary: process.dictionary.pairs().cloned().collect(),
         trap_exit: process.trap_exit,
         error_handler: process.error_handler.clone(),
