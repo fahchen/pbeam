@@ -124,26 +124,27 @@ impl PersistentTerms {
 
     /// Erase the value of `key`, as `persistent_term_erase_1` does
     /// (`erl_bif_persistent.c:417-549`). Return `None` for a key without a
-    /// value, and the number of slots that the table copy goes through,
-    /// else. A slot whose next slot is free is cleared in place
-    /// (`is_erasable`, `erl_bif_persistent.c:1025-1030`), which copies no
-    /// slot. Else the table keeps no erased entry, so the remaining pairs
-    /// go again in old slot order into a table of the same size, or of half
-    /// the size when the table is mostly empty (`MUST_SHRINK`,
-    /// `erl_bif_persistent.c:47-48`), as `copy_table` does: a temporary
-    /// copy goes through the old slots, and the new table through its own
-    /// slots and the old slots.
+    /// value. Else return the slots of the two table copies, which are 0
+    /// and 0 for an erase in place. A slot whose next slot is free is
+    /// cleared in place (`is_erasable`, `erl_bif_persistent.c:1025-1030`),
+    /// which copies no slot. Else the table keeps no erased entry, so the
+    /// remaining pairs go again in old slot order into a table of the same
+    /// size, or of half the size when the table is mostly empty
+    /// (`MUST_SHRINK`, `erl_bif_persistent.c:47-48`), as `copy_table` does:
+    /// a temporary copy goes through the old slots, and the new table
+    /// through its own slots and the old slots. Each copy has its own limit
+    /// in a call (`erl_bif_persistent.c:275-293`).
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// let mut terms = PersistentTerms::default();
     /// terms.put(&Term::static_atom("key"), &Term::Integer(1));
-    /// assert_eq!(terms.erase(&Term::static_atom("key")), Some(0));
+    /// assert_eq!(terms.erase(&Term::static_atom("key")), Some((0, 0)));
     /// assert_eq!(terms.erase(&Term::static_atom("key")), None);
     /// assert_eq!(terms.get(&Term::static_atom("key")), None);
     /// ```
-    pub(super) fn erase(&mut self, key: &Term) -> Option<usize> {
+    pub(super) fn erase(&mut self, key: &Term) -> Option<(usize, usize)> {
         let slot = self.lookup(key);
         self.buckets[slot].as_ref()?;
         let must_shrink = 200 * self.num_entries <= LOAD_FACTOR * self.buckets.len()
@@ -154,14 +155,14 @@ impl PersistentTerms {
         // next slot (`is_erasable`).
         if !must_shrink && self.buckets[(slot + 1) & mask].is_none() {
             self.buckets[slot] = None;
-            return Some(0);
+            return Some((0, 0));
         }
         let size = if must_shrink {
             self.buckets.len() / 2
         } else {
             self.buckets.len()
         };
-        let copied = 2 * self.buckets.len() + size;
+        let copied = (self.buckets.len(), size + self.buckets.len());
         let mut old = std::mem::replace(&mut self.buckets, vec![None; size]);
         old[slot] = None;
         for (key, value) in old.into_iter().flatten() {

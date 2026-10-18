@@ -36,6 +36,13 @@ const ERASE_COSTS: &str = "[3,0,2,0,0,0,1,0,0,0]";
 /// erase, and 2 for the trap and the resume.
 const ERASE_TRAP: &str = "4000";
 
+/// `bif_cost_probe:erase_trap_32/0` on the pinned ERTS with `erl +S 1`: the
+/// reductions of an erase that rehashes a table of 32 slots with 1
+/// reduction left. The temporary copy goes through its 32 slots within the
+/// limit of 32, and the rehashed copy traps after 32 slots of its 64. ERTS
+/// gives each copy its own limit (`erl_bif_persistent.c:275-293`).
+const ERASE_TRAP_32: &str = "4001";
+
 /// `bif_cost_probe:put_trap/0` on the pinned ERTS with `erl +S 1`: the
 /// reductions of a put that grows a table of 16 slots with 1 reduction
 /// left. The put uses all reductions and traps, and the copy of the other
@@ -214,6 +221,7 @@ fn charges_the_remaining_bif_costs_and_the_exit_as_pinned_erts_with_one_schedule
     assert_eq!(run("put_trap", &[]), PUT_TRAP);
     assert_eq!(run("erase_costs", &options), ERASE_COSTS);
     assert_eq!(run("erase_trap", &[]), ERASE_TRAP);
+    assert_eq!(run("erase_trap_32", &[]), ERASE_TRAP_32);
     assert_eq!(run("costs", &options), COSTS);
     assert_eq!(run("longs", &options), LONGS);
     assert_eq!(run("exits", &[]), EXITS);
@@ -243,8 +251,9 @@ fn charges_the_remaining_bif_costs_and_the_exit_as_pinned_erts_with_one_schedule
                  true = erts_internal:erase_persistent_terms(), T = M:put_trap(), \
                  true = erts_internal:erase_persistent_terms(), X = M:erase_costs(O), \
                  true = erts_internal:erase_persistent_terms(), Y = M:erase_trap(), \
+                 true = erts_internal:erase_persistent_terms(), Z = M:erase_trap_32(), \
                  [0] = lists:usort([element(tuple_size(G), G) || G <- M:gcs(O)]), \
-                 io:format(\"~w~n~w~n~w~n~w~n~w~n~w~n~w~n~w~n~w~n~w~n\", [P, C, L, E, R, W, B, T, X, Y]), \
+                 io:format(\"~w~n~w~n~w~n~w~n~w~n~w~n~w~n~w~n~w~n~w~n~w~n\", [P, C, L, E, R, W, B, T, X, Y, Z]), \
                  halt()."
             ),
         ])
@@ -257,7 +266,7 @@ fn charges_the_remaining_bif_costs_and_the_exit_as_pinned_erts_with_one_schedule
     assert_eq!(
         String::from_utf8(reference.stdout).unwrap(),
         format!(
-            "{PUTS}\n{COSTS}\n{LONGS}\n{EXITS}\n{RESULTS}\n{LOWS}\n{BINARY_RESULTS}\n{PUT_TRAP}\n{ERASE_COSTS}\n{ERASE_TRAP}\n"
+            "{PUTS}\n{COSTS}\n{LONGS}\n{EXITS}\n{RESULTS}\n{LOWS}\n{BINARY_RESULTS}\n{PUT_TRAP}\n{ERASE_COSTS}\n{ERASE_TRAP}\n{ERASE_TRAP_32}\n"
         )
     );
 }

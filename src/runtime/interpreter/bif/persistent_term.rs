@@ -4,7 +4,7 @@
 //! caller: `read` for `get/0,1,2` and `write` for `put/2`. ERTS checks no
 //! argument of these BIFs, so the check comes before the table access, and
 //! a denied call raises `error:capability_denied` and has no effect. The
-//! trap exports `get_all_trap/2`, `put_common_trap/1`, and `erase_trap/1`
+//! trap exports `get_all_trap/2`, `put_common_trap/1`, and `erase_trap/2`
 //! continue a call that passed its check, so they do not check again.
 
 use super::BifResult::Value;
@@ -170,31 +170,32 @@ pub(super) fn erase(context: &mut BifContext<'_>, key: &Term) -> Result<BifResul
     }
     match scheduler.persistent_terms.erase(key) {
         None => Ok(Value(Term::static_atom("false"))),
-        Some(copied) => erase_trap(scheduler.current_process_mut(), copied),
+        Some((first, second)) => erase_trap(scheduler.current_process_mut(), first, second),
     }
 }
 
 /// Use the reductions of the table copies of `persistent_term:erase/1`, of
-/// which `copied` slots remain, as `TRAPPING_COPY_TABLE` does
+/// which `first` slots of the temporary copy and `second` slots of the
+/// rehashed copy remain, as `TRAPPING_COPY_TABLE` does
 /// (`erl_bif_persistent.c:275-293`, `1034-1139`). A call goes through at
-/// most 32 slots for each reduction of the budget, but at least 1. When the
-/// copies end, the BIF bumps one reduction for each 32 slots of the call,
-/// and returns `true` after the process switches out
+/// most 32 slots for each reduction of the budget in each copy, but at
+/// least 1. When the copies end, the BIF bumps one reduction for each 32
+/// slots of the call, and returns `true` after the process switches out
 /// (`erl_bif_persistent.c:537-539`). Else it uses all reductions and traps
-/// to the export `persistent_term:erase_trap/1`, which continues with the
+/// to the export `persistent_term:erase_trap/2`, which continues with the
 /// slots that remain. ERTS traps to `erase/1` with a magic reference to the
 /// copy state. PBeam copies the table in the first call, so the trap keeps
-/// the number of slots that remain.
+/// the number of slots of each copy that remain.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// process.fcalls = 2;
-/// assert!(matches!(erase_trap(&mut process, 64)?, BifResult::YieldReturn(_)));
+/// assert!(matches!(erase_trap(&mut process, 0, 64)?, BifResult::YieldReturn(_)));
 /// assert_eq!(process.fcalls, 0);
 /// process.fcalls = 2;
-/// let trap = erase_trap(&mut process, 65)?;
-/// assert!(matches!(trap, BifResult::TrapBif { function: "erase_trap", arguments, .. } if arguments[0] == Term::Integer(1)));
+/// let trap = erase_trap(&mut process, 0, 65)?;
+/// assert!(matches!(trap, BifResult::TrapBif { function: "erase_trap", arguments, .. } if arguments[1] == Term::Integer(1)));
 /// ```
 ///
 /// # Errors
@@ -203,18 +204,32 @@ pub(super) fn erase(context: &mut BifContext<'_>, key: &Term) -> Result<BifResul
 /// negative budget.
 pub(super) fn erase_trap(
     process: &mut ProcessState,
-    copied: usize,
+    mut first: usize,
+    mut second: usize,
 ) -> Result<BifResult, BeamError> {
     /// `ITERATIONS_PER_RED` of `persistent_term_erase_1`
     /// (`erl_bif_persistent.c:419`).
     const ITERATIONS_PER_RED: usize = 32;
-    let budget = (ITERATIONS_PER_RED * process.bif_reductions_left()?).max(1);
-    if copied > budget {
+    let limit = (ITERATIONS_PER_RED * process.bif_reductions_left()?).max(1);
+    // Use at most `limit` slots of one copy in this call, and return true
+    // when the copy does not end.
+    fn step(remaining: &mut usize, limit: usize, copied: &mut usize) -> bool {
+        if *remaining == 0 {
+            return false;
+        }
+        let done = (*remaining).min(limit);
+        *remaining -= done;
+        *copied += done;
+        *remaining > 0
+    }
+    let mut copied = 0;
+    let trapped = step(&mut first, limit, &mut copied) || step(&mut second, limit, &mut copied);
+    if trapped {
         process.bump_all_reductions();
         return Ok(BifResult::TrapBif {
             module: "persistent_term",
             function: "erase_trap",
-            arguments: vec![Term::Integer((copied - budget) as i64)],
+            arguments: vec![Term::Integer(first as i64), Term::Integer(second as i64)],
         });
     }
     process.bump_reductions((copied / ITERATIONS_PER_RED) as i32);

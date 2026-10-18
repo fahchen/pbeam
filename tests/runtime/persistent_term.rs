@@ -97,7 +97,7 @@ fn erases_a_key_in_place_when_the_next_slot_is_free() {
     terms.put(&Term::Integer(7), &Term::Integer(4));
     // 7 is in slot 3, and slot 4 is free, so it is no stepping stone to
     // another key (`is_erasable`).
-    assert_eq!(terms.erase(&Term::Integer(7)), Some(0));
+    assert_eq!(terms.erase(&Term::Integer(7)), Some((0, 0)));
     assert_eq!(
         slots(&terms),
         [(0, Term::Integer(39)), (1, ok.clone()), (7, true_.clone())]
@@ -120,7 +120,7 @@ fn rehashes_the_other_pairs_when_the_slot_is_a_stepping_stone() {
     // true is in slot 7, and slot 0 holds 39, so the table is copied
     // without true and the other pairs go again in old slot order: 39, ok,
     // and 7.
-    assert_eq!(terms.erase(&true_), Some(24));
+    assert_eq!(terms.erase(&true_), Some((8, 16)));
     assert_eq!(
         slots(&terms),
         [
@@ -144,12 +144,12 @@ fn shrinks_the_table_when_the_erase_leaves_it_mostly_empty() {
     let ok_tuple = Term::tuple(vec![ok.clone()]);
     terms.put(&ok_tuple, &Term::Integer(5));
     // Five keys in 16 slots: no shrink yet, and slot 1 is free.
-    assert_eq!(terms.erase(&ok), Some(0));
+    assert_eq!(terms.erase(&ok), Some((0, 0)));
     assert_eq!(terms.buckets.len(), 16);
     // Four keys in 16 slots meet `MUST_SHRINK` when 7 is erased: the copy
     // goes to 8 slots and the remaining pairs true, {ok}, and 39 go again
     // in old slot order.
-    assert_eq!(terms.erase(&Term::Integer(7)), Some(40));
+    assert_eq!(terms.erase(&Term::Integer(7)), Some((16, 24)));
     assert_eq!(terms.buckets.len(), 8);
     assert_eq!(
         slots(&terms),

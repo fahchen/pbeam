@@ -1,5 +1,5 @@
 -module(bif_cost_probe).
--export([costs/1, longs/1, puts/1, put_trap/0, erase_costs/1, erase_trap/0, put_race/0, exits/0, bad_long/0,
+-export([costs/1, longs/1, puts/1, put_trap/0, erase_costs/1, erase_trap/0, erase_trap_32/0, put_race/0, exits/0, bad_long/0,
          bad_binary/0, bad_latin1/0, results/0, binary_results/0, lows/1, gcs/1]).
 -export([measure/3, measure_low/3, put_loop/2, erase_loop/2, erase_cost/1, erase_keys/0, exiter/2, watcher/3, traced/3, start/4,
          long_loop/5, send_loop/3]).
@@ -352,6 +352,19 @@ erase_cost(Key) ->
 %% copies end in the next turn (erl_bif_persistent.c:275-293).
 erase_trap() ->
     [persistent_term:put(Key, Key) || Key <- keys(1, 8)],
+    erlang:yield(),
+    Before = ?REDS,
+    erlang:bump_reductions(3996),
+    persistent_term:erase(1),
+    ?REDS - Before.
+
+%% The reductions of an erase that rehashes a table of 32 slots with 1
+%% reduction left. The temporary copy goes through its 32 slots within the
+%% limit of 32, and the rehashed copy goes through 32 slots of its 64 and
+%% traps (erl_bif_persistent.c:275-293). The caller must erase the
+%% persistent terms first.
+erase_trap_32() ->
+    [persistent_term:put(Key, Key) || Key <- keys(1, 16)],
     erlang:yield(),
     Before = ?REDS,
     erlang:bump_reductions(3996),
