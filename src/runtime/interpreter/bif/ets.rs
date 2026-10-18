@@ -1121,12 +1121,15 @@ fn valid_object(object: &Term, keypos: i32) -> Option<&[Term]> {
     }
 }
 
-/// Run `ets:lookup_element(Table, Key, Index, Default)`, as ERTS
-/// `ets_lookup_element_4` (`erl_db.c:2972-3001`) and
-/// `db_get_element_hash` (`erl_db_hash.c:1544-1608`) do: return the element
-/// at `Index` of the object with the key `Key` in a `set` table, the list of
-/// the elements at `Index` of the objects with the key in insertion order in
-/// another table, or `Default` when the table has no object with that key.
+/// Run `ets:lookup_element(Table, Key, Index)` or
+/// `ets:lookup_element(Table, Key, Index, Default)`, as ERTS
+/// `ets_lookup_element_3` and `ets_lookup_element_4` (`erl_db.c:2935-3001`)
+/// and `db_get_element_hash` (`erl_db_hash.c:1544-1608`) do: return the
+/// element at `Index` of the object with the key `Key` in a `set` table, the
+/// list of the elements at `Index` of the objects with the key in insertion
+/// order in another table, or `Default` when the table has no object with
+/// that key. Without a `Default`, a missing key raises `badarg` with the
+/// cause `badkey` (`erl_db.c:2959-2961`).
 ///
 /// A table that does not exist or that the caller cannot read raises
 /// `badarg` first. Then an index that is not a small integer or that is
@@ -1139,9 +1142,9 @@ fn valid_object(object: &Term, keypos: i32) -> Option<&[Term]> {
 ///
 /// ```rust,ignore
 /// let key = test_atom("k");
-/// let result = lookup_element(&mut context, &table, &key, &Term::Integer(2), &test_atom("d"))?;
+/// let result = lookup_element(&mut context, &table, &key, &Term::Integer(2), Some(&test_atom("d")))?;
 /// assert!(matches!(result, BifResult::Value(value) if value == test_atom("v")));
-/// let result = lookup_element(&mut context, &table, &key, &Term::Integer(0), &test_atom("d"))?;
+/// let result = lookup_element(&mut context, &table, &key, &Term::Integer(0), None)?;
 /// assert!(matches!(result, BifResult::Raise { .. }));
 /// ```
 ///
@@ -1154,14 +1157,16 @@ pub(super) fn lookup_element(
     table: &Term,
     key: &Term,
     index: &Term,
-    default: &Term,
+    default: Option<&Term>,
 ) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
     if let Take::Help | Take::Clear = help_busy(&mut *context, table)? {
+        let mut arguments = vec![table.clone(), key.clone(), index.clone()];
+        arguments.extend(default.cloned());
         return Ok(BifResult::TrapBif {
             module: "ets",
             function: "lookup_element",
-            arguments: vec![table.clone(), key.clone(), index.clone(), default.clone()],
+            arguments,
         });
     }
     let Some(table) =
@@ -1177,7 +1182,13 @@ pub(super) fn lookup_element(
     };
     let objects = table.objects(&context.scheduler.atoms, key);
     if objects.is_empty() {
-        return Ok(Value(default.clone()));
+        return Ok(match default {
+            Some(default) => Value(default.clone()),
+            None => BifResult::ErrorWithCause {
+                reason: Term::static_atom("badarg"),
+                cause: Term::static_atom("badkey"),
+            },
+        });
     }
     let position = index as i32;
     if position == 0 {

@@ -5352,6 +5352,7 @@ fn traps_a_call_that_meets_a_fixed_clear() {
         ("first", vec![]),
         ("first_lookup", vec![]),
         ("next", vec![Term::Integer(0)]),
+        ("lookup_element", vec![Term::Integer(0), Term::Integer(1)]),
         ("update_element", vec![Term::Integer(0), Term::nil()]),
         (
             "update_element",
