@@ -141,6 +141,134 @@ fn reports_a_bundle_that_cannot_start() {
     fs::remove_dir_all(&directory).unwrap();
 }
 
+#[test]
+fn builds_the_one_file_executable_with_the_mix_task_and_runs_it_clean() {
+    // `mix pbeam.build` builds the runtime and the bundle tool with Cargo and
+    // writes one executable. The test gives the built binaries, so the test
+    // does not build the release binaries a second time. The release is
+    // private to this test, so another test does not rebuild it. The run
+    // then uses no installed OTP: `PATH` holds no `erl` or `elixir`, `HOME`
+    // is an empty directory, and `PBEAM_OTP_ROOT` is unset.
+    let directory = test_directory("mix-build");
+    let example = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/plug_hello");
+    let release = directory.join("release");
+    let status = Command::new("mix")
+        .args(["release", "--overwrite", "--path"])
+        .arg(&release)
+        .current_dir(&example)
+        .env("MIX_ENV", "prod")
+        .status()
+        .expect("mix release runs");
+    assert!(status.success(), "the private release builds");
+    let out = directory.join("out");
+    let clean = directory.join("clean");
+    let home = directory.join("home");
+    fs::create_dir_all(&clean).unwrap();
+    fs::create_dir_all(&home).unwrap();
+    let output = out.join("plug_hello");
+    let status = Command::new("mix")
+        .args(["pbeam.build", "--output"])
+        .arg(&output)
+        .arg("--release")
+        .arg(&release)
+        .args([
+            "--runtime",
+            env!("CARGO_BIN_EXE_pbeam"),
+            "--tool",
+            env!("CARGO_BIN_EXE_pbeam_bundle"),
+        ])
+        .current_dir(&example)
+        .env("MIX_ENV", "prod")
+        .status()
+        .expect("mix pbeam.build runs");
+    assert!(status.success(), "the task writes the executable");
+    let executable = clean.join("plug_hello");
+    fs::copy(&output, &executable).unwrap();
+    let port = free_port();
+    let mut command = Command::new(&executable);
+    command
+        .current_dir(&clean)
+        .env_clear()
+        .env("HOME", &home)
+        .env("PORT", port.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0);
+    if std::env::var_os("LLVM_PROFILE_FILE").is_some() {
+        // The coverage build writes its profile file to the working
+        // directory. Keep that file out of the clean directory.
+        command.env("LLVM_PROFILE_FILE", directory.join("pbeam-%p.profraw"));
+    }
+    let mut child = command.spawn().expect("the clean run starts");
+    let stdout = Arc::new(Mutex::new(Vec::new()));
+    let stdout_reader = collect(child.stdout.take().unwrap(), Arc::clone(&stdout));
+    let stderr = Arc::new(Mutex::new(Vec::new()));
+    let stderr_reader = collect(child.stderr.take().unwrap(), Arc::clone(&stderr));
+    let stream = wait_for_server(&mut child, port);
+    let response = stream.and_then(request);
+    let status = stop_with_term(child);
+    stdout_reader.join().unwrap();
+    stderr_reader.join().unwrap();
+    assert!(status.success(), "the clean run exits 0: {status:?}");
+    let entries: Vec<_> = fs::read_dir(&clean)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(
+        entries,
+        [std::ffi::OsString::from("plug_hello")],
+        "the clean run writes no other file next to the executable"
+    );
+    // The pinned ERTS serves the same release. The status line, the content
+    // type, and the body must not change without an installed OTP.
+    let erts = erts_release_response(&release);
+    fs::remove_dir_all(&directory).unwrap();
+    let response = response.unwrap_or_else(|error| {
+        let text = |bytes: &Arc<Mutex<Vec<u8>>>| {
+            String::from_utf8_lossy(&bytes.lock().unwrap()).into_owned()
+        };
+        panic!(
+            "the clean run on port {port}: {error}\nstatus: {status:?}\nstdout: {}\nstderr: {}",
+            text(&stdout),
+            text(&stderr)
+        )
+    });
+    assert_eq!(response, erts);
+}
+
+/// Run the release of `release` on the pinned ERTS, send `GET /`, and
+/// return the response.
+fn erts_release_response(release: &std::path::Path) -> (String, String, String) {
+    let port = free_port();
+    let mut child = Command::new(release.join("bin").join("plug_hello"))
+        .arg("start")
+        .env("PORT", port.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .spawn()
+        .expect("the ERTS release starts");
+    let stdout = Arc::new(Mutex::new(Vec::new()));
+    let stdout_reader = collect(child.stdout.take().unwrap(), Arc::clone(&stdout));
+    let stderr = Arc::new(Mutex::new(Vec::new()));
+    let stderr_reader = collect(child.stderr.take().unwrap(), Arc::clone(&stderr));
+    let stream = wait_for_server(&mut child, port);
+    let response = stream.and_then(request);
+    let status = stop_with_term(child);
+    stdout_reader.join().unwrap();
+    stderr_reader.join().unwrap();
+    assert!(status.success(), "the ERTS release exits 0: {status:?}");
+    response.unwrap_or_else(|error| {
+        panic!(
+            "the ERTS release on port {port}: {error}\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&stdout.lock().unwrap()),
+            String::from_utf8_lossy(&stderr.lock().unwrap())
+        )
+    })
+}
+
 /// Build `examples/plug_hello` as one file in a clean directory, run it
 /// there, and return the response.
 fn serve_one_file() -> (String, String, String) {

@@ -33,6 +33,7 @@ defmodule Mix.Tasks.Pbeam.Bundle do
     app = Mix.Project.config()[:app]
     release = release_directory(app, options, cwd)
     output = Path.expand(Keyword.get(options, :output) || default_output(release, app), cwd)
+    File.mkdir_p!(Path.dirname(output))
 
     start =
       Path.expand(
