@@ -2297,6 +2297,97 @@ pub(super) fn next(
     }
 }
 
+/// Run `ets:first/1`, as `ets_first_1` (`erl_db.c:1170-1188`) and
+/// `db_first_hash_common` (`erl_db_hash.c:1117-1140`) do: return the key of
+/// the first live object in bucket order, or `'$end_of_table'` for an empty
+/// table. A table that does not exist or that the caller cannot read raises
+/// `badarg` (`erl_db.c:769-912`). An `ordered_set` gives the clear runtime
+/// error of the unsupported type, as `ets:next/2` does.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = first(&mut context, &table)?;
+/// assert!(matches!(result, BifResult::Value(value) if value == test_atom("k")));
+/// ```
+///
+/// # Errors
+///
+/// Return the error of [`ProcessState::bif_reductions_left`] when a busy
+/// table cannot finish its list insert in the turn.
+pub(super) fn first(context: &mut BifContext<'_>, table: &Term) -> Result<BifResult, BeamError> {
+    let caller = context.scheduler.current_process_mut().id;
+    if help_table(&mut *context, table)? {
+        return Ok(BifResult::TrapBif {
+            module: "ets",
+            function: "first",
+            arguments: vec![table.clone()],
+        });
+    }
+    let atoms = &context.scheduler.atoms;
+    let Some(table) = context
+        .scheduler
+        .ets
+        .table(atoms, table, caller, Operation::Read)
+    else {
+        return Ok(BifResult::badarg());
+    };
+    reject_ordered_set(table, "ets:first/1")?;
+    match table.first_key() {
+        Some(key) => Ok(Value(key)),
+        None => Ok(Value(Term::static_atom("$end_of_table"))),
+    }
+}
+
+/// Run `ets:first_lookup/1`, as `ets_first_lookup_1` (`erl_db.c:1193-1211`)
+/// and `db_first_lookup_hash` (`erl_db_hash.c:1142-1145`) do: return
+/// `{Key, Objects}` for the first live object in bucket order, where
+/// `Objects` is the list of the live objects with that key, or
+/// `'$end_of_table'` for an empty table. The rest of the behavior is the
+/// same as for `ets:first/1`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = first_lookup(&mut context, &table)?;
+/// assert!(matches!(result, BifResult::Value(value) if value == Term::static_atom("$end_of_table")));
+/// ```
+///
+/// # Errors
+///
+/// Return the error of [`ProcessState::bif_reductions_left`] when a busy
+/// table cannot finish its list insert in the turn.
+pub(super) fn first_lookup(
+    context: &mut BifContext<'_>,
+    table: &Term,
+) -> Result<BifResult, BeamError> {
+    let caller = context.scheduler.current_process_mut().id;
+    if help_table(&mut *context, table)? {
+        return Ok(BifResult::TrapBif {
+            module: "ets",
+            function: "first_lookup",
+            arguments: vec![table.clone()],
+        });
+    }
+    let atoms = &context.scheduler.atoms;
+    let Some(table) = context
+        .scheduler
+        .ets
+        .table(atoms, table, caller, Operation::Read)
+    else {
+        return Ok(BifResult::badarg());
+    };
+    reject_ordered_set(table, "ets:first_lookup/1")?;
+    let Some(key) = table.first_key() else {
+        return Ok(Value(Term::static_atom("$end_of_table")));
+    };
+    let objects = table
+        .objects(atoms, &key)
+        .into_iter()
+        .map(|object| Term::tuple(object.to_vec()));
+    Ok(Value(Term::tuple(vec![key, Term::list_from(objects)])))
+}
+
 /// Run `ets:update_element/3` or `ets:update_element/4`, as
 /// `ets_update_element_3` and `ets_update_element_4` (`erl_db.c:1464-1491`)
 /// do with `do_update_element` (`erl_db.c:1371-1458`):

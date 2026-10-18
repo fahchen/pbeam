@@ -6,7 +6,7 @@
          insert_new/0, unsupported/1, insert_all/2, ping/1, busy/0, busy_insert/2,
          busy_helper/2,
          own/2, write/1, select/0, match_object/0, iterate/0,
-         update_element/0, info_items/0, delete_all/0, select_reductions/0,
+         update_element/0, info_items/0, delete_all/0, select_reductions/0, first/0,
          private_owner/1, ordered_set/0, ordered_set_reductions/0, take/0,
          safe_fixtable/0, fixtable/0, fixtable_chain/0, fixtable_successor/0,
          fixtable_resize/0, fixtable_fix_count/0, fixtable_insert_after_delete/0,
@@ -612,6 +612,14 @@ unsupported(Case) ->
             T = ets:new(ets_probe, []),
             true = ets:insert(T, {a, 1}),
             ets:internal_select_delete(T, [{{'$1', '$2'}, [], [{round, 1.0}]}]);
+        ordered_first ->
+            T = ets:new(ets_probe, [ordered_set]),
+            true = ets:insert(T, {a, 1}),
+            ets:first(T);
+        ordered_first_lookup ->
+            T = ets:new(ets_probe, [ordered_set]),
+            true = ets:insert(T, {a, 1}),
+            ets:first_lookup(T);
         ordered_next ->
             T = ets:new(ets_probe, [ordered_set]),
             true = ets:insert(T, {a, 1}),
@@ -1472,3 +1480,20 @@ take() ->
     [Invalid, ets:take(T, a), ets:lookup(T, a), ets:take(T, missing),
      ets:take(B, a), ets:lookup(B, a), ets:take(B, a),
      ets:take(D, a), ets:take(D, a), ets:lookup(D, a)].
+
+%% The first key and the first {Key, Objects} of a table (erl_db.c:1170-1211,
+%% db_first_hash_common, erl_db_hash.c:1117-1145).
+first() ->
+    Set = ets:new(first_set, [set]),
+    Bag = ets:new(first_bag, [bag]),
+    Dup = ets:new(first_dup, [duplicate_bag]),
+    Empty = ets:new(first_empty, []),
+    true = ets:insert(Set, [{a, 1}, {b, 2}]),
+    true = ets:insert(Bag, [{a, 1}, {a, 2}, {b, 3}]),
+    true = ets:insert(Dup, [{a, 1}, {a, 2}, {b, 3}]),
+    Invalid = catch_error(fun() -> ets:first(make_ref()) end),
+    [ets:first(Set), ets:first_lookup(Set),
+     ets:first(Bag), ets:first_lookup(Bag),
+     ets:first(Dup), ets:first_lookup(Dup),
+     ets:first(Empty), ets:first_lookup(Empty),
+     Invalid, catch_error(fun() -> ets:first_lookup(not_a_table) end)].
