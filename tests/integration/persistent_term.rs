@@ -159,3 +159,78 @@ fn returns_all_persistent_terms_in_the_erts_table_order() {
         ])
     );
 }
+
+#[test]
+fn erases_persistent_terms_as_pinned_erts() {
+    // `erase/0` erases a missing key, a stored key, the same key again, and
+    // a stored tuple key. The keys start with the probe module name, so the
+    // persistent terms of the ERTS logger do not change the result.
+    let reference = Command::new("erl")
+        .args([
+            "-noshell",
+            "-pa",
+            "fixtures/persistent_term",
+            "-eval",
+            "io:format(\"~p~n\", [persistent_term_probe:erase()]), halt().",
+        ])
+        .output()
+        .unwrap();
+    assert!(reference.status.success());
+    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stdout, b"{false,true,default,false,true}\n");
+
+    let program = BeamProgram::load(&[PERSISTENT_TERM_PROBE]).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    assert_eq!(
+        program
+            .execute("persistent_term_probe", "erase", &[])
+            .unwrap()
+            .term,
+        Term::tuple(vec![
+            atom("false"),
+            atom("true"),
+            atom("default"),
+            atom("false"),
+            atom("true"),
+        ])
+    );
+}
+
+#[test]
+fn keeps_the_erts_table_order_after_an_erase() {
+    // `erase_table/0` puts the four keys of `table/0`, erases a key whose
+    // next slot holds another key, and erases a key whose next slot is
+    // free. The ERTS table holds the boot terms at `-eval` time, so the
+    // reference run resets the table to 8 empty slots first, as the `table`
+    // test does.
+    let reference = Command::new("erl")
+        .args([
+            "-noshell",
+            "-pa",
+            "fixtures/persistent_term",
+            "-eval",
+            "{module, M} = code:ensure_loaded(persistent_term_probe), \
+             Saved = persistent_term:get(), \
+             true = erts_internal:erase_persistent_terms(), \
+             Result = M:erase_table(), \
+             true = erts_internal:erase_persistent_terms(), \
+             [persistent_term:put(K, V) || {K, V} <- Saved], \
+             io:format(\"~w~n\", [Result]), halt().",
+        ])
+        .output()
+        .unwrap();
+    assert!(reference.status.success());
+    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stdout, b"[{39,2},{ok,3}]\n");
+
+    let program = BeamProgram::load(&[PERSISTENT_TERM_PROBE]).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let pair = |key: Term, value: i64| Term::tuple(vec![key, Term::Integer(value)]);
+    assert_eq!(
+        program
+            .execute("persistent_term_probe", "erase_table", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![pair(Term::Integer(39), 2), pair(atom("ok"), 3),])
+    );
+}

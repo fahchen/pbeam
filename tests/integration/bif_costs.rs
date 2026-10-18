@@ -18,6 +18,32 @@ const ERTS_OPTIONS: &str = "[{min_heap_size,4000000},{min_bin_vheap_size,4000000
 const PUTS: &str =
     "{[{1,0},{2,0},{4,0},{5,0},{8,0},{9,1},{10,0},{17,3},{33,6},{34,0},{65,12}],0,0}";
 
+/// `bif_cost_probe:erase_costs/1` on the pinned ERTS with `erl +S 1`:
+/// the reductions of `persistent_term:erase/1` for the keys 1 to 10 of an
+/// empty table, in this order. The table grows to 32 slots at the ninth
+/// key. The erase of key 1 copies the 32 slots of the same-size table
+/// twice and 32 more, the erase of key 3 shrinks the table from 32 to 16
+/// slots, and the erase of key 7 shrinks it from 16 to 8 slots. A key
+/// whose next slot is free charges nothing. The probe yields before each
+/// erase, so the erase does not wait for thread progress.
+const ERASE_COSTS: &str = "[3,0,2,0,0,0,1,0,0,0]";
+
+/// `bif_cost_probe:erase_trap/0` on the pinned ERTS with `erl +S 1`: the
+/// reductions of an erase that rehashes a table of 16 slots with 1
+/// reduction left. The temporary copy brings 16 slots and the rehashed
+/// copy 32 slots, so each copy fits its own limit of 32 slots and the
+/// erase completes in this call. 4000 is 1 for `process_info/2`, 3996 for
+/// `bump_reductions/1`, 1 for the call of the erase, 1 for its charge, and
+/// 1 for the switch out.
+const ERASE_TRAP: &str = "4000";
+
+/// `bif_cost_probe:erase_trap_32/0` on the pinned ERTS with `erl +S 1`: the
+/// reductions of an erase that rehashes a table of 32 slots with 1
+/// reduction left. The temporary copy goes through its 32 slots within the
+/// limit of 32, and the rehashed copy traps after 32 slots of its 64. ERTS
+/// gives each copy its own limit (`erl_bif_persistent.c:275-293`).
+const ERASE_TRAP_32: &str = "4001";
+
 /// `bif_cost_probe:put_trap/0` on the pinned ERTS with `erl +S 1`: the
 /// reductions of a put that grows a table of 16 slots with 1 reduction
 /// left. The put uses all reductions and traps, and the copy of the other
@@ -194,6 +220,9 @@ fn charges_the_remaining_bif_costs_and_the_exit_as_pinned_erts_with_one_schedule
     let options = [program.host_term(Term::nil())];
     assert_eq!(run("puts", &options), PUTS);
     assert_eq!(run("put_trap", &[]), PUT_TRAP);
+    assert_eq!(run("erase_costs", &options), ERASE_COSTS);
+    assert_eq!(run("erase_trap", &[]), ERASE_TRAP);
+    assert_eq!(run("erase_trap_32", &[]), ERASE_TRAP_32);
     assert_eq!(run("costs", &options), COSTS);
     assert_eq!(run("longs", &options), LONGS);
     assert_eq!(run("exits", &[]), EXITS);
@@ -221,8 +250,11 @@ fn charges_the_remaining_bif_costs_and_the_exit_as_pinned_erts_with_one_schedule
                  P = M:puts(O), C = M:costs(O), L = M:longs(O), E = M:exits(), \
                  R = M:results(), W = M:lows(O), B = M:binary_results(), \
                  true = erts_internal:erase_persistent_terms(), T = M:put_trap(), \
+                 true = erts_internal:erase_persistent_terms(), X = M:erase_costs(O), \
+                 true = erts_internal:erase_persistent_terms(), Y = M:erase_trap(), \
+                 true = erts_internal:erase_persistent_terms(), Z = M:erase_trap_32(), \
                  [0] = lists:usort([element(tuple_size(G), G) || G <- M:gcs(O)]), \
-                 io:format(\"~w~n~w~n~w~n~w~n~w~n~w~n~w~n~w~n\", [P, C, L, E, R, W, B, T]), \
+                 io:format(\"~w~n~w~n~w~n~w~n~w~n~w~n~w~n~w~n~w~n~w~n~w~n\", [P, C, L, E, R, W, B, T, X, Y, Z]), \
                  halt()."
             ),
         ])
@@ -235,7 +267,7 @@ fn charges_the_remaining_bif_costs_and_the_exit_as_pinned_erts_with_one_schedule
     assert_eq!(
         String::from_utf8(reference.stdout).unwrap(),
         format!(
-            "{PUTS}\n{COSTS}\n{LONGS}\n{EXITS}\n{RESULTS}\n{LOWS}\n{BINARY_RESULTS}\n{PUT_TRAP}\n"
+            "{PUTS}\n{COSTS}\n{LONGS}\n{EXITS}\n{RESULTS}\n{LOWS}\n{BINARY_RESULTS}\n{PUT_TRAP}\n{ERASE_COSTS}\n{ERASE_TRAP}\n{ERASE_TRAP_32}\n"
         )
     );
 }

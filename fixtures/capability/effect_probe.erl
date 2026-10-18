@@ -60,6 +60,7 @@
     pt_get1/0,
     pt_get2/0,
     pt_put/0,
+    pt_erase/0,
     permitted/0,
     runtime_permitted/0,
     runtime_badargs/0,
@@ -274,6 +275,8 @@ pt_get2() -> attempt(fun() -> persistent_term:get({?MODULE, missing}, none) end)
 
 pt_put() -> attempt(fun() -> persistent_term:put({?MODULE, put}, 1) end).
 
+pt_erase() -> attempt(fun() -> persistent_term:erase({?MODULE, put}) end).
+
 %% Permitted calls that give the same result on ERTS. The variable
 %% PBEAM_EFFECT_PROBE is not set.
 permitted() ->
@@ -328,15 +331,17 @@ load_nif_kept() ->
 %% of the same value again also gives ok.
 persistent_term_permitted() ->
     Key = {?MODULE, permitted},
-    [
-        persistent_term:get(Key, none),
-        badarg(fun() -> persistent_term:get(Key) end),
-        persistent_term:put(Key, 1),
-        persistent_term:put(Key, 1),
-        persistent_term:get(Key),
-        persistent_term:get(Key, none),
-        lists:keyfind(Key, 1, persistent_term:get())
-    ].
+    Missing = persistent_term:get(Key, none),
+    Badarg = badarg(fun() -> persistent_term:get(Key) end),
+    Put = persistent_term:put(Key, 1),
+    Same = persistent_term:put(Key, 1),
+    One = persistent_term:get(Key),
+    Default = persistent_term:get(Key, none),
+    Found = lists:keyfind(Key, 1, persistent_term:get()),
+    Erased = persistent_term:erase(Key),
+    Gone = persistent_term:get(Key, none),
+    Again = persistent_term:erase(Key),
+    [Missing, Badarg, Put, Same, One, Default, Found, Erased, Gone, Again].
 
 %% A child with a persistent_term capability of no operation tries a put of
 %% a new key and of a changed value. A denied put stores nothing.
@@ -346,7 +351,10 @@ persistent_term_kept() ->
     Absent = persistent_term:get(Key, none),
     ok = persistent_term:put(Key, 1),
     Change = restricted(persistent_term, fun() -> persistent_term:put(Key, 2) end),
-    [{New, Absent}, {Change, persistent_term:get(Key)}].
+    Changed = persistent_term:get(Key),
+    Erase = restricted(persistent_term, fun() -> persistent_term:erase(Key) end),
+    Kept = persistent_term:get(Key, none),
+    [{New, Absent}, {Change, Changed}, {Erase, Kept}].
 
 %% Permitted terminal queries and setup. The results depend on the standard
 %% streams and on TERM, so the test compares them with an ERTS run that has

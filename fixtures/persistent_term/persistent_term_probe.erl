@@ -1,5 +1,5 @@
 -module(persistent_term_probe).
--export([main/0, put_term/3, table/0]).
+-export([main/0, put_term/3, table/0, erase/0, erase_table/0]).
 
 main() ->
     Key = {?MODULE, key},
@@ -39,3 +39,28 @@ table() ->
     ok = persistent_term:put(ok, 30),
     ok = persistent_term:put(true, 1),
     {Empty, Small, Grown, persistent_term:get()}.
+
+%% Erase a missing key, an existing key, the same key again, and an
+%% existing tuple key. The keys start with the probe module name, so the
+%% boot terms of the ERTS table do not change the result.
+erase() ->
+    Missing = persistent_term:erase({?MODULE, missing}),
+    ok = persistent_term:put({?MODULE, key}, 1),
+    Erased = persistent_term:erase({?MODULE, key}),
+    Gone = persistent_term:get({?MODULE, key}, default),
+    Again = persistent_term:erase({?MODULE, key}),
+    ok = persistent_term:put({?MODULE, term}, {a, [1]}),
+    TermErased = persistent_term:erase({?MODULE, term}),
+    {Missing, Erased, Gone, Again, TermErased}.
+
+%% Put the four keys of `table/0`, erase a key whose next slot is not
+%% free, and erase a key whose next slot is free. Return the table after
+%% the erases, in the slot order.
+erase_table() ->
+    ok = persistent_term:put(true, 1),
+    ok = persistent_term:put(39, 2),
+    ok = persistent_term:put(ok, 3),
+    ok = persistent_term:put(7, 4),
+    true = persistent_term:erase(true),
+    true = persistent_term:erase(7),
+    persistent_term:get().

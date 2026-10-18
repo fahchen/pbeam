@@ -541,7 +541,7 @@ bifs! {
     os:system_time/1 as OsSystemTime1 => |_, [unit]| Ok(os::system_time(unit)),
     os:timestamp/0 as OsTimestamp0 => |_, []| Ok(os::timestamp()),
     os:unsetenv/1 as OsUnsetenv1 => |cx, [name]| os::unsetenv(cx.scheduler, name),
-    persistent_term:erase/1 => unsupported,
+    persistent_term:erase/1 as PersistentTermErase1 => |cx, [key]| persistent_term::erase(cx, key),
     persistent_term:get/0 as PersistentTermGet0 => |cx, []| persistent_term::get_all(cx),
     persistent_term:get/1 as PersistentTermGet1 => |cx, [key]| persistent_term::get(cx, key, None),
     persistent_term:get/2 as PersistentTermGet2 => |cx, [key, default]| persistent_term::get(cx, key, Some(default)),
