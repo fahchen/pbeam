@@ -202,6 +202,24 @@ fn continues_the_break_menu_on_c_as_pinned_erts() {
 }
 
 #[test]
+fn continues_the_break_menu_after_a_read_of_64_bytes_as_pinned_erts() {
+    // `sys_get_key` reads up to 64 bytes and uses the first
+    // (`sys.c:1051-1071`), so the key `c` continues the run and the 64
+    // bytes after it are dropped.
+    let mut input = vec![b'c'];
+    input.extend_from_slice(&[b'x'; 64]);
+    let steps = [("ready\n", Action::Signal(libc::SIGINT))];
+    let erts = run_with_actions(&mut erts("done"), &input, &steps);
+    let pbeam = run_with_actions(&mut pbeam("done"), &input, &steps);
+    assert_eq!(erts, pbeam, "ERTS and PBeam");
+    let (status, stdout, stderr) = pbeam;
+    assert_eq!(status, Some(0));
+    assert_eq!(stderr, "");
+    assert!(stdout.starts_with(BREAKS), "{stdout:?}");
+    assert!(stdout.ends_with("done\n"), "{stdout:?}");
+}
+
+#[test]
 fn aborts_the_break_menu_at_a_nul_key_as_pinned_erts() {
     // `sys_get_key` returns 0 for the NUL byte, and `do_break` aborts the
     // run with the status 0 (`break.c:602-604`).
