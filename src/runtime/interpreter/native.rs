@@ -214,10 +214,28 @@ pub(super) fn call(
     arguments: &[Term],
 ) -> Option<Result<BifResult, BeamError>> {
     let arity = u32::try_from(arguments.len()).ok()?;
+    // A manually registered native function takes precedence over the
+    // static binding table, so a registered MFA runs as a NIF at function
+    // entry, as ERTS installs NIF dispatch over the first instruction.
+    if let Some(native) = crate::runtime::lookup_native(module, name, arity) {
+        return Some((native)(arguments).map(to_bif_result));
+    }
     let Some(binding) = binding(module, name, arity) else {
         return unbound_error(module, name, arity).map(Err);
     };
     Some((binding.run)(scheduler, arguments))
+}
+
+/// Map the narrow result of a registered native function to the interpreter
+/// result. A registered native raises only the class `error`, as a NIF does.
+fn to_bif_result(result: crate::runtime::NativeResult) -> BifResult {
+    match result {
+        crate::runtime::NativeResult::Value(term) => BifResult::Value(term),
+        crate::runtime::NativeResult::Raise { reason } => BifResult::Raise {
+            class: ExceptionClass::Error,
+            reason,
+        },
+    }
 }
 
 /// Run `erlang:load_nif(Path, LoadInfo)` from code of the module `caller`,

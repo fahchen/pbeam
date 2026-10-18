@@ -2407,6 +2407,10 @@ impl BeamProgram {
             ImportKind::ApplyFun => self.apply_fun(scheduler, tail),
             ImportKind::Apply => self.apply_mfa(scheduler, tail),
             ImportKind::Export => {
+                // A registered native function runs at the `NifStart`
+                // instruction of its stub, so this path enters the frame and
+                // keeps the entry reduction charge and the yield check. The
+                // registry check stays in `native::call`.
                 let slot = &targets[index];
                 if let Some(target) = slot.get() {
                     return enter_export(process, target.frame(), arity, tail);

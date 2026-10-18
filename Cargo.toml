@@ -123,6 +123,10 @@ name = "alias"
 path = "tests/integration/alias.rs"
 
 [[test]]
+name = "native_dispatch"
+path = "tests/integration/native_dispatch.rs"
+
+[[test]]
 name = "arith"
 path = "tests/integration/arith.rs"
 
