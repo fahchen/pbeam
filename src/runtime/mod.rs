@@ -1,4 +1,5 @@
 mod atomics;
+mod binary_pattern;
 mod buffers;
 mod capability;
 mod dirty_io;

@@ -52,6 +52,19 @@ const COSTS: &str = "[{10,0,1,nomatch,1},{10,1,1,{10,1},1},{100000,0,1,nomatch,1
                      {100000,2,2,{100000,2},5001},{100000,10,10,{100000,10},1001},\
                      {1000,0,21,nomatch,13}]";
 
+/// `binary_find_probe:compiled/0` on the pinned ERTS: the tags of
+/// `binary:compile_pattern/1` for one needle and for two needles
+/// (`erl_bif_binary.c:1103-1116`), the matches and parts of the compiled
+/// patterns in `binary:match/2`, `binary:matches/2`, and `binary:split/2,3`
+/// (`1244-1271`), and `badarg` for a compiled pattern whose tag and
+/// reference do not agree and for each invalid needle.
+const COMPILED: &str = "[{bm,true},{bm,true},{ac,true},{1,1},[{1,1},{3,1}],\
+                        [<<120>>,<<120,98,99,120>>],{1,1},[{0,1},{1,2}],\
+                        [<<120>>,<<120,98,99,120>>],[<<120>>,<<120>>,<<120>>],nomatch,\
+                        {error,badarg},{error,badarg},{error,badarg},{error,badarg},\
+                        {error,badarg},{error,badarg},{error,badarg},{error,badarg},\
+                        {error,badarg},{error,badarg}]";
+
 /// Return a term as the `T` fun of [`ERTS_TEXT`] gives it: the `~w` text,
 /// with each binary as its bytes, for the atoms, integers, binaries, lists,
 /// and tuples of the probe results.
@@ -121,5 +134,38 @@ fn matches_binaries_as_pinned_erts_with_one_scheduler() {
     assert_eq!(
         String::from_utf8(reference.stdout).unwrap(),
         format!("{RESULTS}\n{COSTS}\n")
+    );
+}
+
+#[test]
+fn matches_compiled_patterns_as_pinned_erts() {
+    let program = BeamProgram::load(&[BINARY_FIND_PROBE]).unwrap();
+    let result = program
+        .execute("binary_find_probe", "compiled", &[])
+        .unwrap();
+    assert_eq!(text(&result.term, result.atoms()), COMPILED);
+
+    let reference = Command::new("erl")
+        .args([
+            "+S",
+            "1",
+            "-noshell",
+            "-pa",
+            "fixtures/binary_find",
+            "-eval",
+            &format!(
+                "{ERTS_TEXT}, io:format(\"~s~n\", [T(binary_find_probe:compiled())]), halt()."
+            ),
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        reference.status.success() && reference.stderr.is_empty(),
+        "{reference:?}"
+    );
+    assert_eq!(
+        String::from_utf8(reference.stdout).unwrap(),
+        format!("{COMPILED}\n")
     );
 }

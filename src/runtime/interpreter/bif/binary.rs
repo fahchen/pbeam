@@ -6,6 +6,7 @@
 
 use super::BifResult::Value;
 use super::*;
+use crate::runtime::binary_pattern::{BinaryPatterns, CompiledPattern};
 use crate::term::Binary;
 
 /// The option `global`: find each match (`BF_FLAG_GLOBAL`,
@@ -587,21 +588,109 @@ fn ac_all(trie: &[AcNode], find: &mut Find, haystack: &[u8], reds: &mut u64) -> 
     }
 }
 
-/// Compile a pattern of `binary:split/2,3`, as `maybe_binary_match_compile`
-/// and `do_binary_match_compile` do (`erl_bif_binary.c:1004-1101`,
-/// `1244-1271`): a binary, or a proper list of binaries, each with at least
-/// one byte. One needle gives a Boyer-Moore search, and more needles give an
-/// Aho-Corasick search. Return `None` for each other term. ERTS also takes a
-/// compiled pattern `{bm, Ref}` or `{ac, Ref}` of `binary:compile_pattern/1`,
-/// which PBeam does not run, so each tuple is not valid.
+/// Run `binary:compile_pattern/1`, as `binary_compile_pattern_1`
+/// (`erl_bif_binary.c:1103-1116`) and `do_binary_match_compile`
+/// (`1004-1101`) do: one needle gives `{bm, Ref}`, and two or more needles
+/// give `{ac, Ref}`. A needle is a bitstring with at least one byte and a
+/// whole number of bytes, and the argument is one needle or a proper list of
+/// needles. Each other term raises `badarg`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(matches!(compile(&Term::binary(b",".to_vec())), Some(Pattern::Bm(_))));
-/// assert!(compile(&Term::binary(Vec::new())).is_none());
+/// let result = compile_pattern(&mut scheduler, &Term::binary(b"a".to_vec()))?;
+/// assert!(matches!(result, BifResult::Value(Term::Tuple(fields)) if fields[0] == Term::static_atom("bm")));
 /// ```
-fn compile(pattern: &Term) -> Option<Pattern> {
+///
+/// # Errors
+///
+/// A full reference counter gives the error of [`Scheduler::make_ref`].
+pub(super) fn compile_pattern(
+    scheduler: &mut Scheduler,
+    pattern: &Term,
+) -> Result<BifResult, BeamError> {
+    let Some(compiled) = compile_source(pattern) else {
+        return Ok(BifResult::badarg());
+    };
+    let tag = match compiled {
+        CompiledPattern::Bm(_) => "bm",
+        CompiledPattern::Ac(_) => "ac",
+    };
+    let id = scheduler.make_ref()?;
+    scheduler.binary_patterns.insert(id, compiled);
+    Ok(Value(Term::tuple(vec![
+        Term::static_atom(tag),
+        Term::Reference(id),
+    ])))
+}
+
+/// Return the compiled data of the pattern argument of
+/// `binary:compile_pattern/1`, or `None` for a term that
+/// `do_binary_match_compile` refuses (`erl_bif_binary.c:1004-1101`): each
+/// needle is a bitstring with at least one byte and a whole number of bytes,
+/// and the argument is one needle or a proper list of needles.
+fn compile_source(pattern: &Term) -> Option<CompiledPattern> {
+    match pattern {
+        Term::Binary(binary) => Some(CompiledPattern::Bm(compile_needle(binary)?)),
+        _ => {
+            let mut needles = Vec::new();
+            for needle in pattern.proper_list()? {
+                let Term::Binary(binary) = needle else {
+                    return None;
+                };
+                needles.push(compile_needle(binary)?);
+            }
+            match needles.len() {
+                0 => None,
+                1 => Some(CompiledPattern::Bm(
+                    needles.pop().expect("the list has one needle"),
+                )),
+                _ => Some(CompiledPattern::Ac(needles)),
+            }
+        }
+    }
+}
+
+/// Return the bytes of one needle of `binary:compile_pattern/1`, or `None`
+/// for a bitstring with no byte or with a partial byte
+/// (`erl_bif_binary.c:1023-1026`, `1040-1043`).
+fn compile_needle(binary: &Binary) -> Option<Vec<u8>> {
+    (binary.bit_size().is_multiple_of(8) && !binary.is_empty()).then(|| binary.to_vec())
+}
+
+/// Compile a pattern of `binary:split/2,3`, as `maybe_binary_match_compile`
+/// and `do_binary_match_compile` do (`erl_bif_binary.c:1004-1101`,
+/// `1244-1271`): a binary, or a proper list of binaries, each with at least
+/// one byte, or a compiled pattern `{bm, Ref}` or `{ac, Ref}` of
+/// `binary:compile_pattern/1`. One needle gives a Boyer-Moore search, and
+/// more needles give an Aho-Corasick search. Return `None` for each other
+/// term, including a compiled pattern whose tag and reference do not match.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(compile(&Term::binary(b",".to_vec()), &patterns), Some(Pattern::Bm(_))));
+/// assert!(compile(&Term::binary(Vec::new()), &patterns).is_none());
+/// ```
+fn compile(pattern: &Term, patterns: &BinaryPatterns) -> Option<Pattern> {
+    if let Term::Tuple(fields) = pattern {
+        if fields.len() != 2 {
+            return None;
+        }
+        let (Term::Atom(tag), reference) = (&fields[0], &fields[1]) else {
+            return None;
+        };
+        return match patterns.pattern(reference)? {
+            CompiledPattern::Bm(needle) if tag.is_static("bm") => {
+                Some(Pattern::Bm(Bm::new(needle)))
+            }
+            CompiledPattern::Ac(needles) if tag.is_static("ac") => {
+                let needles: Vec<&[u8]> = needles.iter().map(Vec::as_slice).collect();
+                Some(Pattern::Ac(ac_trie(&needles)))
+            }
+            _ => None,
+        };
+    }
     let needles: Vec<&[u8]> = match pattern {
         Term::Binary(needle) => vec![&needle[..]],
         _ => pattern
@@ -966,12 +1055,13 @@ impl Find {
 /// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
 /// negative budget.
 pub(super) fn split(
-    process: &mut ProcessState,
+    context: &mut BifContext<'_>,
     subject: &Term,
     pattern: &Term,
     options_term: Option<&Term>,
 ) -> Result<BifResult, BeamError> {
-    find_first_turn(process, subject, pattern, options_term, 0)
+    let (process, patterns) = context.scheduler.current_process_and_patterns_mut();
+    find_first_turn(process, patterns, subject, pattern, options_term, 0)
 }
 
 /// Run `binary:match/2` as ERTS `binary_match` does with no options
@@ -999,11 +1089,12 @@ pub(super) fn split(
 /// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
 /// negative budget.
 pub(super) fn match_2(
-    process: &mut ProcessState,
+    context: &mut BifContext<'_>,
     subject: &Term,
     pattern: &Term,
 ) -> Result<BifResult, BeamError> {
-    find_first_turn(process, subject, pattern, None, MATCH)
+    let (process, patterns) = context.scheduler.current_process_and_patterns_mut();
+    find_first_turn(process, patterns, subject, pattern, None, MATCH)
 }
 
 /// Run `binary:matches/2` as ERTS `binary_matches_2` does
@@ -1031,11 +1122,12 @@ pub(super) fn match_2(
 /// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
 /// negative budget.
 pub(super) fn matches_2(
-    process: &mut ProcessState,
+    context: &mut BifContext<'_>,
     subject: &Term,
     pattern: &Term,
 ) -> Result<BifResult, BeamError> {
-    find_first_turn(process, subject, pattern, None, GLOBAL | MATCHES)
+    let (process, patterns) = context.scheduler.current_process_and_patterns_mut();
+    find_first_turn(process, patterns, subject, pattern, None, GLOBAL | MATCHES)
 }
 
 /// Check the arguments of `binary:match/2` or `binary:split/2,3`, and run
@@ -1054,6 +1146,7 @@ pub(super) fn matches_2(
 /// negative budget.
 fn find_first_turn(
     process: &mut ProcessState,
+    patterns: &BinaryPatterns,
     subject: &Term,
     pattern: &Term,
     options_term: Option<&Term>,
@@ -1062,9 +1155,10 @@ fn find_first_turn(
     let Term::Binary(bytes) = subject else {
         return Ok(BifResult::badarg());
     };
-    let (Some((flags, start, end)), Some(compiled)) =
-        (options(options_term, bytes.len() as u64), compile(pattern))
-    else {
+    let (Some((flags, start, end)), Some(compiled)) = (
+        options(options_term, bytes.len() as u64),
+        compile(pattern, patterns),
+    ) else {
         return Ok(BifResult::badarg());
     };
     let mut find = Find {
@@ -1103,12 +1197,13 @@ fn find_first_turn(
 /// negative budget.
 pub(super) fn find_trap(
     process: &mut ProcessState,
+    patterns: &BinaryPatterns,
     subject: &Term,
     bytes: &Binary,
     state: &[Term],
     pattern: &Term,
 ) -> Result<BifResult, BeamError> {
-    let compiled = compile(pattern).expect("the first call checked the pattern");
+    let compiled = compile(pattern, patterns).expect("the first call checked the pattern");
     let mut find = Find::from_term(state);
     Ok(match find_turn(process, &compiled, &mut find, bytes)? {
         Some(parts) => Value(parts),

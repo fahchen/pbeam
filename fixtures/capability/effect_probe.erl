@@ -461,6 +461,11 @@ ambient() ->
         erlang:binary_to_existing_atom(<<"effect_probe_ambient_binary">>, utf8),
         erlang:list_to_existing_atom("effect_probe_ambient_atom"),
         element(1, re:compile("a", [])),
+        begin
+            P = binary:compile_pattern(<<"a">>),
+            [element(1, P), binary:match(<<"xax">>, P)]
+        end,
+        element(1, binary:compile_pattern([<<"a">>, <<"b">>])),
         element(1, re:import(element(2, re:compile("a", [export])))),
         Table,
         ets:insert(Name, {key, value}),

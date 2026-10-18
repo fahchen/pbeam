@@ -1081,6 +1081,15 @@ impl BeamProgram {
         if let ("erlang", "md5_trap", [context, rest]) = (module, function, arguments.as_slice()) {
             return hash::md5_trap(scheduler, context, rest);
         }
+        if let (
+            "erlang",
+            "binary_find_trap",
+            [subject @ Term::Binary(bytes), Term::Tuple(state), pattern],
+        ) = (module, function, arguments.as_slice())
+        {
+            let (process, patterns) = scheduler.current_process_and_patterns_mut();
+            return binary::find_trap(process, patterns, subject, bytes, state, pattern);
+        }
         let (process, atoms) = scheduler.current_process_and_atoms();
         match (module, function, arguments.as_slice()) {
             ("erlang", "length", [list, Term::Integer(count)]) => {
@@ -1230,11 +1239,6 @@ impl BeamProgram {
                     *size as usize,
                 ))
             }
-            (
-                "erlang",
-                "binary_find_trap",
-                [subject @ Term::Binary(bytes), Term::Tuple(state), pattern],
-            ) => binary::find_trap(process, subject, bytes, state, pattern),
             ("erlang", "bif_handle_signals_return", [_, value]) => {
                 Ok(match scheduler.flush_signals()? {
                     Flushed::Done => BifResult::Value(value.clone()),
