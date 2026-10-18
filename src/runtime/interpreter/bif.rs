@@ -886,6 +886,10 @@ impl BeamProgram {
     ///   copy that remain ([`persistent_term::put_trap`]). ERTS traps to
     ///   `persistent_term:put_common_trap/3` with a magic reference to the
     ///   copy state (`erl_bif_persistent.c:176-177`, `650-651`).
+    /// - `persistent_term:erase_trap/1`, with the slots of the table copies
+    ///   that remain ([`persistent_term::erase_trap`]). ERTS traps to
+    ///   `persistent_term:erase/1` with a magic reference to the copy state
+    ///   (`erl_bif_persistent.c:432-433`).
     /// - `ets:insert/6`, with the table reference, the objects, the units
     ///   done, the key position, the steps of a `bag` insert or `false`, and
     ///   the state of the check ([`ets::insert_list`]). ERTS traps to
@@ -1171,6 +1175,9 @@ impl BeamProgram {
             }
             ("persistent_term", "put_common_trap", [Term::Integer(copied)]) => {
                 persistent_term::put_trap(process, *copied as usize)
+            }
+            ("persistent_term", "erase_trap", [Term::Integer(copied)]) => {
+                persistent_term::erase_trap(process, *copied as usize)
             }
             ("erts_internal", "iolist_size_continue", [term, stack, Term::Integer(size)])
                 if let Some(stack) = stack.proper_list() =>

@@ -4,8 +4,8 @@
 //! caller: `read` for `get/0,1,2` and `write` for `put/2`. ERTS checks no
 //! argument of these BIFs, so the check comes before the table access, and
 //! a denied call raises `error:capability_denied` and has no effect. The
-//! trap exports `get_all_trap/2` and `put_common_trap/1` continue a call
-//! that passed its check, so they do not check again.
+//! trap exports `get_all_trap/2`, `put_common_trap/1`, and `erase_trap/1`
+//! continue a call that passed its check, so they do not check again.
 
 use super::BifResult::Value;
 use super::*;
@@ -137,9 +137,9 @@ pub(super) fn get_all_trap(process: &mut ProcessState, all: Term, entries: usize
 /// `true`, or return `false` for a key with no value, as
 /// `persistent_term_erase_1` does (`erl_bif_persistent.c:417-549`). ERTS
 /// returns `true` after the process switches out and `false` with no
-/// switch, so this BIF does the same. ERTS charges the slots of a rehashed
-/// table (`erl_bif_persistent.c:538`); PBeam charges no copy (row
-/// "Persistent terms" in `docs/erts-differences.md`).
+/// switch, so this BIF does the same. The copy of a rehashed table goes
+/// through its slots ([`erase_trap`]) and charges one reduction for each
+/// 32 slots (`erl_bif_persistent.c:538`).
 ///
 /// The caller needs a `persistent_term` capability that permits `write`,
 /// else the call raises `error:capability_denied` and erases nothing,
@@ -154,8 +154,9 @@ pub(super) fn get_all_trap(process: &mut ProcessState, all: Term, entries: usize
 ///
 /// # Errors
 ///
-/// A new `capability_denied` atom in a full atom table gives the error of
-/// `AtomTable::put`.
+/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
+/// negative budget. A new `capability_denied` atom in a full atom table
+/// gives the error of `AtomTable::put`.
 pub(super) fn erase(context: &mut BifContext<'_>, key: &Term) -> Result<BifResult, BeamError> {
     let scheduler = &mut *context.scheduler;
     let check = denial(
@@ -167,11 +168,57 @@ pub(super) fn erase(context: &mut BifContext<'_>, key: &Term) -> Result<BifResul
     if let Some(denied) = check? {
         return Ok(denied);
     }
-    if scheduler.persistent_terms.erase(key) {
-        Ok(BifResult::YieldReturn(Term::static_atom("true")))
-    } else {
-        Ok(Value(Term::static_atom("false")))
+    match scheduler.persistent_terms.erase(key) {
+        None => Ok(Value(Term::static_atom("false"))),
+        Some(copied) => erase_trap(scheduler.current_process_mut(), copied),
     }
+}
+
+/// Use the reductions of the table copies of `persistent_term:erase/1`, of
+/// which `copied` slots remain, as `TRAPPING_COPY_TABLE` does
+/// (`erl_bif_persistent.c:275-293`, `1034-1139`). A call goes through at
+/// most 32 slots for each reduction of the budget, but at least 1. When the
+/// copies end, the BIF bumps one reduction for each 32 slots of the call,
+/// and returns `true` after the process switches out
+/// (`erl_bif_persistent.c:537-539`). Else it uses all reductions and traps
+/// to the export `persistent_term:erase_trap/1`, which continues with the
+/// slots that remain. ERTS traps to `erase/1` with a magic reference to the
+/// copy state. PBeam copies the table in the first call, so the trap keeps
+/// the number of slots that remain.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// process.fcalls = 2;
+/// assert!(matches!(erase_trap(&mut process, 64)?, BifResult::YieldReturn(_)));
+/// assert_eq!(process.fcalls, 0);
+/// process.fcalls = 2;
+/// let trap = erase_trap(&mut process, 65)?;
+/// assert!(matches!(trap, BifResult::TrapBif { function: "erase_trap", arguments, .. } if arguments[0] == Term::Integer(1)));
+/// ```
+///
+/// # Errors
+///
+/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
+/// negative budget.
+pub(super) fn erase_trap(
+    process: &mut ProcessState,
+    copied: usize,
+) -> Result<BifResult, BeamError> {
+    /// `ITERATIONS_PER_RED` of `persistent_term_erase_1`
+    /// (`erl_bif_persistent.c:419`).
+    const ITERATIONS_PER_RED: usize = 32;
+    let budget = (ITERATIONS_PER_RED * process.bif_reductions_left()?).max(1);
+    if copied > budget {
+        process.bump_all_reductions();
+        return Ok(BifResult::TrapBif {
+            module: "persistent_term",
+            function: "erase_trap",
+            arguments: vec![Term::Integer((copied - budget) as i64)],
+        });
+    }
+    process.bump_reductions((copied / ITERATIONS_PER_RED) as i32);
+    Ok(BifResult::YieldReturn(Term::static_atom("true")))
 }
 
 /// Run `persistent_term:put/2`: store `value` for `key`, as ERTS

@@ -123,28 +123,29 @@ impl PersistentTerms {
     }
 
     /// Erase the value of `key`, as `persistent_term_erase_1` does
-    /// (`erl_bif_persistent.c:417-549`). Return whether the key had a
-    /// value. A slot whose next slot is free is cleared in place
-    /// (`is_erasable`, `erl_bif_persistent.c:1025-1030`). Else the table
-    /// keeps no erased entry, so the remaining pairs go again in old slot
-    /// order into a table of the same size, or of half the size when the
-    /// table is mostly empty (`MUST_SHRINK`,
-    /// `erl_bif_persistent.c:47-48`), as `copy_table` does.
+    /// (`erl_bif_persistent.c:417-549`). Return `None` for a key without a
+    /// value, and the number of slots that the table copy goes through,
+    /// else. A slot whose next slot is free is cleared in place
+    /// (`is_erasable`, `erl_bif_persistent.c:1025-1030`), which copies no
+    /// slot. Else the table keeps no erased entry, so the remaining pairs
+    /// go again in old slot order into a table of the same size, or of half
+    /// the size when the table is mostly empty (`MUST_SHRINK`,
+    /// `erl_bif_persistent.c:47-48`), as `copy_table` does: a temporary
+    /// copy goes through the old slots, and the new table through its own
+    /// slots and the old slots.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// let mut terms = PersistentTerms::default();
     /// terms.put(&Term::static_atom("key"), &Term::Integer(1));
-    /// assert!(terms.erase(&Term::static_atom("key")));
-    /// assert!(!terms.erase(&Term::static_atom("key")));
+    /// assert_eq!(terms.erase(&Term::static_atom("key")), Some(0));
+    /// assert_eq!(terms.erase(&Term::static_atom("key")), None);
     /// assert_eq!(terms.get(&Term::static_atom("key")), None);
     /// ```
-    pub(super) fn erase(&mut self, key: &Term) -> bool {
+    pub(super) fn erase(&mut self, key: &Term) -> Option<usize> {
         let slot = self.lookup(key);
-        if self.buckets[slot].is_none() {
-            return false;
-        }
+        self.buckets[slot].as_ref()?;
         let must_shrink = 200 * self.num_entries <= LOAD_FACTOR * self.buckets.len()
             && self.buckets.len() > INITIAL_SIZE;
         let mask = self.buckets.len() - 1;
@@ -153,20 +154,21 @@ impl PersistentTerms {
         // next slot (`is_erasable`).
         if !must_shrink && self.buckets[(slot + 1) & mask].is_none() {
             self.buckets[slot] = None;
-            return true;
+            return Some(0);
         }
         let size = if must_shrink {
             self.buckets.len() / 2
         } else {
             self.buckets.len()
         };
+        let copied = 2 * self.buckets.len() + size;
         let mut old = std::mem::replace(&mut self.buckets, vec![None; size]);
         old[slot] = None;
         for (key, value) in old.into_iter().flatten() {
             let slot = self.lookup(&key);
             self.buckets[slot] = Some((key, value));
         }
-        true
+        Some(copied)
     }
 
     /// Return all stored pairs as the elements `{Key, Value}` of a list, in

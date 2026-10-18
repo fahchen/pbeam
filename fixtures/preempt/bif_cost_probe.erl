@@ -1,7 +1,7 @@
 -module(bif_cost_probe).
--export([costs/1, longs/1, puts/1, put_trap/0, put_race/0, exits/0, bad_long/0,
+-export([costs/1, longs/1, puts/1, put_trap/0, erase_costs/1, erase_trap/0, put_race/0, exits/0, bad_long/0,
          bad_binary/0, bad_latin1/0, results/0, binary_results/0, lows/1, gcs/1]).
--export([measure/3, measure_low/3, put_loop/2, exiter/2, watcher/3, traced/3, start/4,
+-export([measure/3, measure_low/3, put_loop/2, erase_loop/2, erase_cost/1, erase_keys/0, exiter/2, watcher/3, traced/3, start/4,
          long_loop/5, send_loop/3]).
 
 %% The reductions of the BIFs whose ERTS cost depends on their input and
@@ -318,6 +318,45 @@ send_loop(_, _, 0) -> ok;
 send_loop(P, T, N) ->
     P ! T,
     send_loop(P, T, N - 1).
+
+%% The reductions of persistent_term:erase/1 for the keys 1 to 10 in an
+%% empty table, in the order of erase_keys/0. The table
+%% grows to 32 slots at the ninth key, and an erase copies 96 slots when
+%% it rehashes the same size, 80 slots when it shrinks to 16 slots, and no
+%% slot when the next slot of the key is free (erl_bif_persistent.c:478-539,
+%% 1025-1030). The erase switches out the caller.
+erase_costs(Opts) ->
+    Pid = spawn_opt(?MODULE, erase_loop, [self(), 10], Opts),
+    receive {Pid, Costs} -> Costs end.
+
+erase_loop(Collector, Count) ->
+    [persistent_term:put(Key, Key) || Key <- keys(1, Count)],
+    Costs = [erase_cost(Key) || Key <- erase_keys()],
+    Collector ! {self(), Costs}.
+
+erase_keys() -> [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].
+
+%% The cost of one erase, without the call_ext of the light BIF and the
+%% process_info/2 after it. The yield finishes the thread progress of the
+%% updates of the earlier calls, so the erase does not wait for it and
+%% uses no reductions for the wait.
+erase_cost(Key) ->
+    erlang:yield(),
+    Before = ?REDS,
+    persistent_term:erase(Key),
+    ?REDS - Before - 2.
+
+%% The reductions of an erase that rehashes the 16 slots of a table of 8
+%% keys with 1 reduction left. The copies go through 48 slots, more than
+%% the 32 of the budget. The erase uses all reductions and traps, and the
+%% copies end in the next turn (erl_bif_persistent.c:275-293).
+erase_trap() ->
+    [persistent_term:put(Key, Key) || Key <- keys(1, 8)],
+    erlang:yield(),
+    Before = ?REDS,
+    erlang:bump_reductions(3996),
+    persistent_term:erase(1),
+    ?REDS - Before.
 
 %% The reductions of a put that grows the table with 1 reduction left. The
 %% table of 16 slots holds 8 keys, so the copy goes through 48 slots, more
