@@ -267,6 +267,23 @@ fn wait_for_count(child: &mut Child, output: &Mutex<Vec<u8>>, text: &[u8], count
 }
 
 #[test]
+fn continues_the_break_menu_on_a_newline_as_pinned_erts() {
+    // The menu keeps its prompt at a newline (`break.c:676-677`), and the
+    // end of the input then aborts the run with status 0.
+    let steps = [
+        ("ready\n", Action::Signal(libc::SIGINT)),
+        ("BREAK:", Action::Write(b"\n")),
+    ];
+    let erts = run_with_actions(&mut erts("wait"), b"", &steps);
+    let pbeam = run_with_actions(&mut pbeam("wait"), b"", &steps);
+    assert_eq!(erts, pbeam, "ERTS and PBeam");
+    let (status, stdout, stderr) = pbeam;
+    assert_eq!(status, Some(0));
+    assert_eq!(stderr, "");
+    assert!(stdout.contains("BREAK: "), "{stdout:?}");
+}
+
+#[test]
 fn continues_the_break_menu_on_m_as_pinned_erts() {
     // The key `m` continues the run with no output (`break.c:622-623`).
     let steps = [
@@ -678,6 +695,66 @@ fn reads_a_break_key_in_the_initial_terminal_mode_as_pinned_erts() {
             String::from_utf8_lossy(&output)
         );
     }
+}
+
+#[test]
+fn restores_the_application_terminal_mode_after_the_key_c_as_pinned_erts() {
+    // ERTS restores the saved mode after `do_break` returns, so a run that
+    // continues reads in the application mode (`sys.c:913-923`).
+    for (name, mut command) in [("ERTS", erts("hold")), ("PBeam", pbeam("hold"))] {
+        assert!(
+            continues_in_the_application_terminal_mode(&mut command),
+            "{name} did not restore the application mode"
+        );
+    }
+}
+
+/// Run `command` in a pseudo-terminal, set the terminal to raw mode, send
+/// `SIGINT`, continue the menu with `c`, and return whether the terminal is
+/// in raw mode after the timer of the probe wrote "done".
+fn continues_in_the_application_terminal_mode(command: &mut Command) -> bool {
+    let (master, slave) = open_terminal();
+    let raw = slave.try_clone().unwrap();
+    // SAFETY: the closure runs in the child before `exec`, and calls only
+    // the async-signal-safe `setsid` and `ioctl`, as `run_in_terminal` does.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 || set_controlling_terminal() == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command
+        .stdin(slave.try_clone().unwrap())
+        .stdout(slave.try_clone().unwrap())
+        .stderr(slave)
+        .spawn()
+        .unwrap();
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut terminal = std::fs::File::from(master);
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let reader = collect(terminal.try_clone().unwrap(), Arc::clone(&output));
+    wait_for(&mut child, &output, b"ready\r\n");
+    set_raw(&raw);
+    // Drop the slave: while the test holds it, the master gives no end of
+    // the output after the run exits.
+    drop(raw);
+    send(&child, libc::SIGINT);
+    wait_for(&mut child, &output, b"BREAK: ");
+    terminal.write_all(b"c\n").unwrap();
+    // The probe writes "done" in the restored application mode, which has
+    // no output translation.
+    wait_for(&mut child, &output, b"done");
+    let raw_mode = !is_canonical(&terminal);
+    // `hold` waits with no timer after "done", so the test ends the run.
+    send(&child, libc::SIGKILL);
+    child.wait().unwrap();
+    reader.join().unwrap();
+    raw_mode
 }
 
 #[test]

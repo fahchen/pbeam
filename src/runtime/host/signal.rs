@@ -184,17 +184,18 @@ pub(crate) fn take_notified() -> Vec<c_int> {
     }
 }
 
-/// Return whether a break is active, and mark one, as `break_requested`
-/// does before it pokes the break handling (`sys.c:611-624`).
+/// Mark a break, as `break_requested` does before it pokes the break
+/// handling (`sys.c:611-624`). The signal handler marks a second break when
+/// it finds this flag set.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(!request_break());
-/// assert!(request_break());
+/// request_break();
+/// assert!(take_break_requested());
 /// ```
-pub(crate) fn request_break() -> bool {
-    BREAK_REQUESTED.swap(true, Ordering::AcqRel)
+pub(crate) fn request_break() {
+    BREAK_REQUESTED.store(true, Ordering::Release);
 }
 
 /// Return whether a break is active, and clear the flag. The scheduler
@@ -203,7 +204,7 @@ pub(crate) fn request_break() -> bool {
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(!request_break());
+/// request_break();
 /// assert!(take_break_requested());
 /// assert!(!take_break_requested());
 /// ```
