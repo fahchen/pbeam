@@ -156,16 +156,25 @@ fn serve_one_file() -> (String, String, String) {
         .status()
         .expect("scripts/example.sh runs");
     assert!(status.success(), "the start list builds");
-    let output = clean.join("plug_hello");
+    let bundle = directory.join("plug_hello.pbeamb");
     let status = Command::new(env!("CARGO_BIN_EXE_pbeam_bundle"))
+        .arg("bundle")
         .arg(release_directory())
-        .arg(env!("CARGO_BIN_EXE_pbeam"))
-        .arg(&output)
+        .arg(&bundle)
         .args(["plug_hello_run", "main"])
         .arg(&start)
         .status()
         .expect("pbeam_bundle runs");
     assert!(status.success(), "the bundle builds");
+    let output = clean.join("plug_hello");
+    let status = Command::new(env!("CARGO_BIN_EXE_pbeam_bundle"))
+        .arg("executable")
+        .arg(env!("CARGO_BIN_EXE_pbeam"))
+        .arg(&bundle)
+        .arg(&output)
+        .status()
+        .expect("pbeam_bundle runs");
+    assert!(status.success(), "the executable builds");
     let port = free_port();
     let mut child = Command::new(&output)
         .current_dir(&clean)

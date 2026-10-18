@@ -22,7 +22,7 @@ run = [
   "shellcheck scripts/*.sh",
   "cd fixtures/hello && mix format --check-formatted && mix compile --warnings-as-errors",
   "cd examples/plug_hello && mix format --check-formatted",
-  "mix format --check-formatted 'examples/*/*.ex' 'fixtures/*/*.ex'",
+  "mix format --check-formatted 'examples/*/**/*.ex' 'fixtures/*/*.ex'",
   "cargo fmt --all -- --check",
   "cargo clippy --locked --workspace --all-targets --all-features -- -D warnings",
 ]
@@ -126,7 +126,8 @@ usage = 'arg "<name>" help="The directory of a release example in examples/, suc
 run = '''
 cargo build --locked --release --bin pbeam --bin pbeam_bundle
 bash scripts/example.sh "$usage_name" --write-start target/examples/"$usage_name"/pbeam.start.list
-target/release/pbeam_bundle target/examples/"$usage_name" target/release/pbeam target/examples/"$usage_name.bundle" "${usage_name}_run" main target/examples/"$usage_name"/pbeam.start.list
+target/release/pbeam_bundle bundle target/examples/"$usage_name" target/examples/"$usage_name.pbeamb" "${usage_name}_run" main target/examples/"$usage_name"/pbeam.start.list
+target/release/pbeam_bundle executable target/release/pbeam target/examples/"$usage_name.pbeamb" target/examples/"$usage_name.bundle"
 '''
 
 [tasks.bench-dispatch]

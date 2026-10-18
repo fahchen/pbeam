@@ -48,7 +48,9 @@ fn reports_the_usage_and_the_input_files() {
     fs::create_dir(&release).unwrap();
     let start = start_list(&directory, &["/etc/hosts"]);
     let (status, stderr) = run(tool()
-        .args([&release, Path::new("pbeam"), &directory.join("out")])
+        .arg("bundle")
+        .arg(&release)
+        .arg(directory.join("out"))
         .args(["m", "f"])
         .arg(&start));
     assert_eq!(status, Some(1));
@@ -59,23 +61,62 @@ fn reports_the_usage_and_the_input_files() {
 
     let start = start_list(&directory, &["/tmp/lib/app/ebin/missing.beam"]);
     let (status, stderr) = run(tool()
-        .args([&release, Path::new("pbeam"), &directory.join("out")])
+        .arg("bundle")
+        .arg(&release)
+        .arg(directory.join("out"))
         .args(["m", "f"])
         .arg(&start));
     assert_eq!(status, Some(1));
     assert!(stderr.contains("cannot read"), "{stderr}");
 
     let (status, stderr) = run(tool()
+        .arg("bundle")
         .arg(directory.join("missing"))
-        .args([
-            Path::new("pbeam"),
-            &directory.join("out"),
-            Path::new("m"),
-            Path::new("f"),
-        ])
+        .arg(directory.join("out"))
+        .args(["m", "f"])
         .arg(&start));
     assert_eq!(status, Some(1));
     assert!(stderr.contains("cannot read"), "{stderr}");
+    fs::remove_dir_all(&directory).unwrap();
+}
+
+#[test]
+fn writes_the_bundle_from_a_mix_task() {
+    // The task builds the tool, resolves the start set with
+    // `scripts/example.sh --no-build --write-start`, and writes one bundle.
+    // The check builds the release of examples/plug_hello before the Rust
+    // tests.
+    let directory = directory("mix-task");
+    let output = directory.join("plug_hello.pbeamb");
+    let start = directory.join("start.list");
+    let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/plug_hello");
+    let mut command = Command::new("mix");
+    command
+        .args(["pbeam.bundle", "--output"])
+        .arg(&output)
+        .arg("--start-list")
+        .arg(&start)
+        .arg("--tool")
+        .arg(env!("CARGO_BIN_EXE_pbeam_bundle"))
+        .current_dir(&example)
+        .env("MIX_ENV", "prod");
+    let (status, stderr) = run(&mut command);
+    assert_eq!(status, Some(0), "{stderr}");
+    let bytes = fs::read(&output).unwrap();
+    let bundle = pbeam_runtime::Bundle::parse(&bytes).unwrap();
+    let names: Vec<_> = bundle
+        .resources()
+        .iter()
+        .map(|blob| blob.name().to_owned())
+        .collect();
+    assert!(names.iter().any(|name| name == "meta/start-modules"));
+    assert!(names.iter().any(|name| name == "pbeam/plug_hello_run.beam"));
+    assert!(
+        names
+            .iter()
+            .any(|name| name.starts_with("lib/erts-") && name.ends_with("/ebin/init.beam"))
+    );
+    assert_eq!(bundle.entry().module, "plug_hello_run");
     fs::remove_dir_all(&directory).unwrap();
 }
 
@@ -90,21 +131,17 @@ fn keeps_the_last_lib_suffix_of_a_start_file() {
     fs::create_dir_all(&ebin).unwrap();
     fs::write(ebin.join("init.beam"), b"beam").unwrap();
     fs::write(ebin.join("extra.beam"), b"extra").unwrap();
-    let runtime = directory.join("pbeam");
-    fs::write(&runtime, b"binary").unwrap();
     let start = start_list(&directory, &[ebin.join("init.beam").to_str().unwrap()]);
     let output = directory.join("out");
     let (status, stderr) = run(tool()
+        .arg("bundle")
         .arg(&release)
-        .arg(&runtime)
         .arg(&output)
         .args(["m", "f"])
         .arg(&start));
     assert_eq!(status, Some(0), "{stderr}");
     let bytes = fs::read(&output).unwrap();
-    let end = bytes.len() - 16;
-    let length = u64::from_le_bytes(bytes[end + 8..].try_into().unwrap()) as usize;
-    let bundle = pbeam_runtime::Bundle::parse(&bytes[end - length..end]).unwrap();
+    let bundle = pbeam_runtime::Bundle::parse(&bytes).unwrap();
     assert!(bundle.resource("lib/erts-17/ebin/init.beam").is_some());
     assert!(bundle.resource("lib/erts-17/ebin/extra.beam").is_some());
     assert!(
@@ -116,6 +153,20 @@ fn keeps_the_last_lib_suffix_of_a_start_file() {
 }
 
 #[test]
+fn reports_the_usage_of_each_command() {
+    for arguments in [
+        vec!["bundle"],
+        vec!["bundle", "only"],
+        vec!["executable"],
+        vec!["unknown"],
+    ] {
+        let (status, stderr) = run(tool().args(&arguments));
+        assert_eq!(status, Some(1), "{arguments:?}");
+        assert!(stderr.starts_with("usage:"), "{arguments:?}: {stderr}");
+    }
+}
+
+#[test]
 fn reports_an_output_that_the_host_cannot_write() {
     let directory = directory("output");
     let release = directory.join("release");
@@ -123,12 +174,10 @@ fn reports_an_output_that_the_host_cannot_write() {
     let module = directory.join("lib/app/ebin/m.beam");
     fs::create_dir_all(module.parent().unwrap()).unwrap();
     fs::write(&module, b"beam").unwrap();
-    let runtime = directory.join("pbeam");
-    fs::write(&runtime, b"binary").unwrap();
     let start = start_list(&directory, &[module.to_str().unwrap()]);
     let (status, stderr) = run(tool()
+        .arg("bundle")
         .arg(&release)
-        .arg(&runtime)
         .arg(directory.join("missing/out"))
         .args(["m", "f"])
         .arg(&start));
