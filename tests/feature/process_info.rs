@@ -24,12 +24,17 @@ fn reads_the_links_of_a_process_as_pinned_erts() {
     // link tree, without a link that waits for its unlink acknowledgment,
     // in the reverse of the tree walk (`erl_bif_info.c:574-585`,
     // `1764-1775`). The probe checks the caller and another process with
-    // the same two nameable links, so the boot links do not differ.
-    let erts = run(&mut erts("links"));
-    let pbeam = run(&mut pbeam("links"));
-    assert_eq!(erts, pbeam, "links");
-    assert_eq!(erts.0, Some(0), "links");
-    assert_eq!(erts.2, "", "links");
+    // the same two nameable links, so the boot links do not differ. It
+    // also prints `ok` when reads of a target with 4096 links cost more
+    // reductions than reads of a target without links, which checks the
+    // `floor(Links / 4)` charge of the item (`erl_bif_info.c:1424,1777`).
+    for function in ["links", "charges"] {
+        let erts = run(&mut erts(function));
+        let pbeam = run(&mut pbeam(function));
+        assert_eq!(erts, pbeam, "{function}");
+        assert_eq!(erts.0, Some(0), "{function}");
+        assert_eq!(erts.2, "", "{function}");
+    }
 }
 
 /// The exit status code, the stdout, and the stderr of a run.
