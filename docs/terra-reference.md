@@ -98,7 +98,7 @@ The call counts give these host operations. The Terra and OTP lines give the arg
 | Operation | Calls in the run | Source |
 | --- | --- | --- |
 | Port of `/bin/sh -c "stty -isig 2>/dev/null"` and `"stty isig 2>/dev/null"` with `[:binary, :exit_status, :nouse_stdio]`: `erts_internal:open_port/2` | 2 opens, 2 `erts_internal:port_info/1`, no `port_close` | Terra `lib/terra/terminal/tty.ex:88-121`. The port gives `{:exit_status, 0}` before `Port.info/1`, so `Port.close/1` does not run. |
-| `os:find_executable("sh")`: `prim_file:read_info_nif/2` (stat of each `PATH` candidate) | 2 calls, 102 `read_info_nif/2` | Terra `lib/terra/terminal/tty.ex:89`. Each call reads the file information of `<directory>/sh` for each `PATH` directory, up to the first directory with an executable `sh` (`lib/kernel/src/os.erl:441-462` of OTP-29.1.1). In this run, that is 54 directories for each call. |
+| `os:find_executable("sh")`: `prim_file:read_info_nif/2` (stat of each `PATH` candidate) | 2 calls, 102 `read_info_nif/2` | Terra `lib/terra/terminal/tty.ex:89`. Each call reads the file information of `<directory>/sh` for each `PATH` directory, up to the first directory with an executable `sh` (`lib/kernel/src/os.erl:441-462` of OTP-29.1.1). In this run, that is 51 directories for each call. |
 | Raw mode and cooked mode through `shell:start_interactive/1`: `prim_tty:tty_init/2` | 2 | Terra `lib/terra/terminal/tty.ex:69`, `79` |
 | Terminfo values `co` and `xn`: `prim_tty:tigetnum_nif/1`, `prim_tty:tigetflag_nif/1` | 1 each | `prim_tty:init_term/1` of OTP |
 | `prim_tty:isatty/1` | 10 | `prim_tty` of OTP |
