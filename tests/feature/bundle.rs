@@ -30,11 +30,6 @@ fn run(command: &mut Command) -> (Option<i32>, String) {
     )
 }
 
-/// Return the build directory of `examples/plug_hello`.
-fn release_directory() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/examples/plug_hello")
-}
-
 /// Write a start list with `lines` and return its path.
 fn start_list(directory: &Path, lines: &[&str]) -> PathBuf {
     let path = directory.join("start.list");
@@ -105,22 +100,22 @@ fn rejects_a_release_directory_for_a_build() {
 fn writes_the_bundle_from_a_mix_task() {
     // The task builds the tool, resolves the start set with
     // `scripts/example.sh --no-build --write-start`, and writes one bundle.
-    // The check builds the release of examples/plug_hello before the Rust
-    // tests.
     let directory = directory("mix-task");
     let output = directory.join("plug_hello.pbeamb");
     let start = directory.join("start.list");
     let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/plug_hello");
     // The task compiles the entry stubs, so the release needs no earlier
-    // output of the example runner.
+    // output of the example runner. The test builds its own release, so it
+    // does not read the release that another test rebuilds.
     let release = directory.join("release");
-    let status = Command::new("cp")
-        .arg("-R")
-        .arg(release_directory())
+    let mut mix_release = Command::new("mix");
+    mix_release
+        .args(["release", "--overwrite", "--path"])
         .arg(&release)
-        .status()
-        .unwrap();
-    assert!(status.success());
+        .current_dir(&example)
+        .env("MIX_ENV", "prod");
+    let (status, mix_output) = run(&mut mix_release);
+    assert_eq!(status, Some(0), "{mix_output}");
     // A release from `mix release` has no `pbeam` directory.
     let _ = fs::remove_dir_all(release.join("pbeam"));
     let mut command = Command::new("mix");
