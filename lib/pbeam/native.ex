@@ -1,0 +1,73 @@
+defmodule PBeam.Native do
+  @moduledoc """
+  Declares a native function of a module that PBeam runs.
+
+  A module that uses this module declares each native function with
+  `native/2`:
+
+      defmodule PBeam.Sha256 do
+        use PBeam.Native
+
+        native :sha256, 1
+      end
+
+  The declaration defines a stub of the same name and arity. Under ERTS the
+  stub raises `:pbeam_native_only` through `:erlang.nif_error/1`. PBeam reads
+  the persisted `pbeam_native` attribute of the compiled module and runs a
+  registered Rust function in place of the stub.
+
+  The declaration also adds the pair to the `-nifs` attribute of the module,
+  so the compiler writes the `nif_start` instruction at the entry of the
+  stub. That instruction is where PBeam looks up a registered native function
+  before it runs the stub body.
+  """
+
+  @doc """
+  Declares one native function of the module.
+
+  `name` is the name of the function and `arity` is the count of its
+  arguments. The declaration defines the stub and records the pair in the
+  persisted `pbeam_native` attribute of the module.
+
+  ## Examples
+
+      defmodule PBeam.Sha256 do
+        use PBeam.Native
+
+        native :sha256, 1
+      end
+
+  """
+  defmacro native(name, arity) do
+    arguments = Macro.generate_arguments(arity, __CALLER__.module)
+
+    quote do
+      @pbeam_native {unquote(name), unquote(arity)}
+
+      def unquote(name)(unquote_splicing(arguments)) do
+        :erlang.nif_error(:pbeam_native_only)
+      end
+    end
+  end
+
+  @doc false
+  defmacro __using__(_options) do
+    quote do
+      import PBeam.Native, only: [native: 2]
+
+      Module.register_attribute(__MODULE__, :pbeam_native, accumulate: true, persist: true)
+      @before_compile PBeam.Native
+    end
+  end
+
+  @doc false
+  defmacro __before_compile__(env) do
+    # `Module.get_attribute/2` gives accumulated values in reverse order, so
+    # the reverse below puts the pairs in declaration order.
+    declarations = env.module |> Module.get_attribute(:pbeam_native) |> Enum.reverse()
+
+    quote do
+      @nifs unquote(declarations)
+    end
+  end
+end

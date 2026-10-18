@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# The root Mix project holds the PBeam.Native library. It declares the native
+# functions of an Elixir module that PBeam runs. The test requires 100%
+# coverage of the library.
+mix test --cover --warnings-as-errors
+
 (cd fixtures/hello && mix test --cover --warnings-as-errors)
 # The Plug and Bandit example fetches the dependencies of its mix.lock from Hex, so the check installs Hex and rebar3 (for telemetry) when they are missing.
 # `mix test --warnings-as-errors` does not pass the flag to the compile of the application code, so the check compiles the application first with warnings as errors. The test requires 100% coverage. The release build writes the compiled output to target/examples/plug_hello/.
