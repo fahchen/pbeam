@@ -61,7 +61,10 @@ pub(super) fn group_leader(
         return Ok(denied);
     }
     let caller = scheduler.current_process_mut().id;
+    // A live process of another scheduler takes the routed request.
+    let remote = scheduler.remote_owner(*target).is_some();
     let result = match scheduler.process_mut(*target) {
+        None if remote => "false",
         None => "badarg",
         Some(process) if *target != caller && process.mailbox.has_incoming() => "false",
         Some(process) if process.exiting.is_some() => "badarg",

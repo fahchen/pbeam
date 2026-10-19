@@ -67,6 +67,8 @@ pub(in crate::runtime) struct SharedNode {
     timers: Mutex<HashMap<crate::term::Reference, usize>>,
     /// The scheduler of each compiled regular expression, by its reference.
     regexes: Mutex<HashMap<crate::term::Reference, usize>>,
+    /// The scheduler of each compiled binary pattern, by its reference.
+    patterns: Mutex<HashMap<crate::term::Reference, usize>>,
     /// The inbox of each scheduler.
     inboxes: Vec<Inbox>,
     /// The next process identifier.
@@ -130,6 +132,7 @@ impl SharedNode {
                 ports: Mutex::new(HashMap::new()),
                 timers: Mutex::new(HashMap::new()),
                 regexes: Mutex::new(HashMap::new()),
+                patterns: Mutex::new(HashMap::new()),
                 inboxes,
                 next_pid: AtomicU64::new(0),
                 next_reference: AtomicU64::new(0),
@@ -395,6 +398,31 @@ impl SharedNode {
         self.regexes
             .lock()
             .expect("the regex table is not poisoned")
+            .get(&reference)
+            .copied()
+    }
+
+    /// Record the compiled binary pattern `reference` of the scheduler
+    /// `index`.
+    pub(in crate::runtime) fn register_pattern(
+        &self,
+        reference: crate::term::Reference,
+        index: usize,
+    ) {
+        self.patterns
+            .lock()
+            .expect("the pattern table is not poisoned")
+            .insert(reference, index);
+    }
+
+    /// Return the scheduler of the compiled binary pattern `reference`.
+    pub(in crate::runtime) fn pattern_owner(
+        &self,
+        reference: crate::term::Reference,
+    ) -> Option<usize> {
+        self.patterns
+            .lock()
+            .expect("the pattern table is not poisoned")
             .get(&reference)
             .copied()
     }

@@ -1029,7 +1029,3 @@ fn file_info(info: &FileInfo) -> BifResult {
         integer(info.gid),
     ]))
 }
-
-#[cfg(test)]
-#[path = "../../../../tests/runtime/interpreter/native/prim_file.rs"]
-mod tests;

@@ -2717,6 +2717,14 @@ impl Scheduler {
         self.activate(target);
     }
 
+    /// Return the scheduler of the compiled binary pattern `reference`
+    /// when it is a pattern of another scheduler of the node.
+    pub(super) fn remote_pattern_owner(&self, reference: crate::term::Reference) -> Option<usize> {
+        let node = self.shared.as_ref()?;
+        let owner = node.pattern_owner(reference)?;
+        (owner != self.index).then_some(owner)
+    }
+
     /// Return the scheduler of the compiled regular expression `reference`
     /// when it is an expression of another scheduler of the node.
     pub(super) fn remote_regex_owner(&self, reference: crate::term::Reference) -> Option<usize> {

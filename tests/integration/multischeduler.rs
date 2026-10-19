@@ -263,6 +263,44 @@ fn rejects_a_timer_for_another_scheduler() {
     );
 }
 
+/// A compiled binary pattern of another scheduler fails with a clear
+/// error.
+#[test]
+fn rejects_a_compiled_binary_pattern_of_another_scheduler() {
+    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
+    let error = program
+        .execute_on_schedulers(&[
+            ("ping_pong", "pattern_match"),
+            ("ping_pong", "pattern_give"),
+        ])
+        .expect_err("the pattern is unsupported");
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported: a compiled binary pattern of another scheduler"),
+        "{error}"
+    );
+}
+
+/// A group leader request routes to a process of another scheduler, and
+/// its reply comes back to the caller.
+#[test]
+fn routes_a_group_leader_request() {
+    let erlang = pinned_beam("erlang");
+    let erts_internal = pinned_beam("erts_internal");
+    let program =
+        BeamProgram::load(&[&erlang, &erts_internal, PING_PONG]).expect("the fixture loads");
+    let ok_atom = program.atom("ok").expect("the fixture names ok");
+    let results = program
+        .execute_on_schedulers(&[
+            ("ping_pong", "group_leader_remote"),
+            ("ping_pong", "leader_hold"),
+        ])
+        .expect("the two schedulers run");
+    assert_eq!(results[0].term, Term::Atom(ok_atom.clone()), "the caller");
+    assert_eq!(results[1].term, Term::Atom(ok_atom), "the leader");
+}
+
 /// A code delete in a run with scheduler threads fails with a clear error.
 #[test]
 fn rejects_a_code_delete() {

@@ -498,6 +498,7 @@ impl BeamProgram {
         if roots.is_empty() {
             return Err(error("a multi-scheduler run needs at least one root"));
         }
+        let initial_mode = InitialMode::read();
         let (node, readers) = SharedNode::new(roots.len())
             .map_err(|cause| error(format!("cannot create the scheduler node: {cause}")))?;
         let results = std::thread::scope(|scope| {
@@ -507,7 +508,7 @@ impl BeamProgram {
                 .enumerate()
                 .map(|(index, ((module, function), reader))| {
                     let node = Arc::clone(&node);
-                    scope.spawn(move || -> Result<_, BeamError> {
+                    scope.spawn(move || -> Result<_, (BeamError, bool)> {
                         let mut scheduler = Scheduler::with_shared(
                             (*self.atoms).clone(),
                             Arc::clone(&node),
@@ -515,11 +516,19 @@ impl BeamProgram {
                             reader,
                         );
                         scheduler.code = CodeTable::new(self.modules.clone());
+                        // The reset of the terminal mode needs the state of
+                        // each scheduler after the run.
                         match self.run_multi_root(&mut scheduler, module, function) {
-                            Ok(()) => Ok(scheduler.into_run_result()),
+                            Ok(()) => {
+                                let selected =
+                                    scheduler.resources.borrow_mut::<Ttys>().input_selected();
+                                Ok((scheduler.into_run_result(), selected))
+                            }
                             Err(cause) => {
+                                let selected =
+                                    scheduler.resources.borrow_mut::<Ttys>().input_selected();
                                 node.abort();
-                                Err(cause)
+                                Err((cause, selected))
                             }
                         }
                     })
@@ -534,17 +543,25 @@ impl BeamProgram {
                 })
                 .collect::<Vec<_>>()
         });
+        // Restore the terminal mode of the run, also after a failed root.
+        let selected = results.iter().any(|result| match result {
+            Ok((_, selected)) | Err((_, selected)) => *selected,
+        });
+        initial_mode.reset(selected);
         // A failed root aborts the run. Report its error before the wait
         // error or the missing result of a root that the abort stopped.
         for result in &results {
-            if let Ok((Some(Err(reason)), atoms)) = result {
+            if let Ok(((Some(Err(reason)), atoms), _)) = result {
                 return Err(Self::root_error(reason, atoms));
             }
         }
         let mut roots = Vec::with_capacity(results.len());
         for result in results {
-            roots.push(result?);
+            let (root, _) = result.map_err(|(cause, _)| cause)?;
+            roots.push(root);
         }
+        // A failed root aborts the run. Report its error before the wait
+        // error or the missing result of a root that the abort stopped.
         let mut results_out = Vec::with_capacity(roots.len());
         for (root, atoms) in roots {
             match root {

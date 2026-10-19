@@ -14,7 +14,8 @@
          port_term/0, port_term_give/0, atomics_new/0, timer_remote/0,
          timer_hold/0, alias_create/0, monitor_alias/0, alias_hold/0,
          timer_named/0, timer_read/0, timer_give/0, system_flag_depth/0,
-         finish_loading/0, delete_module/0, regex_run/0, regex_give/0]).
+         finish_loading/0, delete_module/0, regex_run/0, regex_give/0,
+         group_leader_remote/0, leader_hold/0, pattern_match/0, pattern_give/0]).
 
 -define(COUNT, 100).
 
@@ -617,4 +618,30 @@ regex_give() ->
     {ok, Pattern} = re:compile("abc", []),
     ok = wait_registered(regex_name, 100000),
     regex_name ! {regex, Pattern},
+    receive done -> ok after 6000 -> timeout end.
+
+%% The root that makes a process of the other scheduler its group leader.
+group_leader_remote() ->
+    Pid = wait_for(leader_name, 100000),
+    true = group_leader(Pid, Pid),
+    Pid ! stop,
+    ok.
+
+%% The root that holds a name for the group leader request.
+leader_hold() ->
+    true = register(leader_name, self()),
+    receive stop -> ok after 6000 -> timeout end.
+
+%% The root that matches with the compiled pattern of the other scheduler.
+pattern_match() ->
+    true = register(pattern_name, self()),
+    receive {pattern, Pattern} ->
+        binary:match(<<"abc">>, Pattern)
+    end.
+
+%% The root that sends its compiled pattern to the other scheduler.
+pattern_give() ->
+    Pattern = binary:compile_pattern(<<"abc">>),
+    ok = wait_registered(pattern_name, 100000),
+    pattern_name ! {pattern, Pattern},
     receive done -> ok after 6000 -> timeout end.
