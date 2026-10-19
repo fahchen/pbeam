@@ -71,6 +71,8 @@ pub(in crate::runtime) struct SharedNode {
     next_unlink_id: AtomicU64,
     /// The number of roots that did not exit yet.
     roots: AtomicUsize,
+    /// The number of live processes.
+    live: AtomicUsize,
     /// True after the last root exited.
     shutdown: AtomicBool,
 }
@@ -109,6 +111,7 @@ impl SharedNode {
                 unique_monotonic: AtomicI64::new(-1),
                 next_unlink_id: AtomicU64::new(1),
                 roots: AtomicUsize::new(count),
+                live: AtomicUsize::new(0),
                 shutdown: AtomicBool::new(false),
             }),
             readers,
@@ -121,14 +124,25 @@ impl SharedNode {
             .lock()
             .expect("the process owner table is not poisoned")
             .insert(id, index);
+        self.live.fetch_add(1, Ordering::AcqRel);
     }
 
-    /// Remove the process `id` from the node.
-    pub(in crate::runtime) fn unregister(&self, id: ProcessId) {
-        self.owners
-            .lock()
-            .expect("the process owner table is not poisoned")
-            .remove(&id);
+    /// Remove the process `id` and each name of it. A registration of a
+    /// name and this removal hold the owner table and the name table in the
+    /// same order, so a name never belongs to a process that left.
+    pub(in crate::runtime) fn remove_process(&self, id: ProcessId) {
+        let mut owners = self.owners.lock().expect("the owner table is not poisoned");
+        owners.remove(&id);
+        let mut names = self.names.lock().expect("the name table is not poisoned");
+        names.retain(|_, owner| *owner != id);
+        drop(names);
+        drop(owners);
+        self.live.fetch_sub(1, Ordering::AcqRel);
+    }
+
+    /// Return the number of live processes.
+    pub(in crate::runtime) fn live_processes(&self) -> usize {
+        self.live.load(Ordering::Acquire)
     }
 
     /// Return the scheduler of the live process `id`.
@@ -244,6 +258,12 @@ impl SharedNode {
     /// Register `name` for `id`. Return false when another process has the
     /// name.
     pub(in crate::runtime) fn name_register(&self, name: &str, id: ProcessId) -> bool {
+        let owners = self.owners.lock().expect("the owner table is not poisoned");
+        if !owners.contains_key(&id) {
+            return false;
+        }
+        // Hold the owner table until the name is in, so the exit of `id`
+        // cannot pass the registration.
         let mut names = self.names.lock().expect("the name table is not poisoned");
         if names.contains_key(name) || names.values().any(|owner| *owner == id) {
             return false;
@@ -252,24 +272,7 @@ impl SharedNode {
         true
     }
 
-    /// Return the name of the process `id`.
-    pub(in crate::runtime) fn name_of(&self, id: ProcessId) -> Option<String> {
-        self.names
-            .lock()
-            .expect("the name table is not poisoned")
-            .iter()
-            .find_map(|(name, owner)| (*owner == id).then(|| name.clone()))
-    }
-
-    /// Remove each name of the process `id`.
-    pub(in crate::runtime) fn name_remove_all(&self, id: ProcessId) {
-        self.names
-            .lock()
-            .expect("the name table is not poisoned")
-            .retain(|_, owner| *owner != id);
-    }
-
-    /// Remove the process `name`. Return the process that had it.
+    /// Remove the process of `name`. Return the process that had it.
     pub(in crate::runtime) fn name_remove(&self, name: &str) -> Option<ProcessId> {
         self.names
             .lock()
@@ -284,6 +287,15 @@ impl SharedNode {
             .expect("the name table is not poisoned")
             .get(name)
             .copied()
+    }
+
+    /// Return the name of the process `id`.
+    pub(in crate::runtime) fn name_of(&self, id: ProcessId) -> Option<String> {
+        self.names
+            .lock()
+            .expect("the name table is not poisoned")
+            .iter()
+            .find_map(|(name, owner)| (*owner == id).then(|| name.clone()))
     }
 
     /// Return the registered names, in no order.
@@ -320,11 +332,6 @@ impl SharedNode {
     /// Return true after the last root exited.
     pub(in crate::runtime) fn is_shutdown(&self) -> bool {
         self.shutdown.load(Ordering::Acquire)
-    }
-
-    /// Return the number of roots that did not exit yet.
-    pub(in crate::runtime) fn roots_left(&self) -> usize {
-        self.roots.load(Ordering::Acquire)
     }
 }
 

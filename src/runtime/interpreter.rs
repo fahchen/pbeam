@@ -534,34 +534,42 @@ impl BeamProgram {
                 })
                 .collect::<Vec<_>>()
         });
-        // A failed root aborts the run. Report its error before the result
-        // of a root that the abort stopped.
+        // A failed root aborts the run. Report its error before the wait
+        // error or the missing result of a root that the abort stopped.
+        for result in &results {
+            if let Ok((Some(Err(reason)), atoms)) = result {
+                return Err(Self::root_error(reason, atoms));
+            }
+        }
         let mut roots = Vec::with_capacity(results.len());
         for result in results {
             roots.push(result?);
         }
         let mut results_out = Vec::with_capacity(roots.len());
         for (root, atoms) in roots {
-            let Some(root) = root else {
-                return Err(error(
-                    "a root process waits for a message that cannot arrive",
-                ));
-            };
             match root {
-                Ok(term) => results_out.push(HostTerm {
+                Some(Ok(term)) => results_out.push(HostTerm {
                     term,
                     atoms: Arc::new(atoms),
                 }),
-                Err(reason) => {
-                    let text: String = print_term(&reason, &atoms)
-                        .into_iter()
-                        .map(char::from)
-                        .collect();
-                    return Err(error(format!("root process exited with {text}")));
+                Some(Err(_)) => unreachable!("a failed root returns above"),
+                None => {
+                    return Err(error(
+                        "a root process waits for a message that cannot arrive",
+                    ));
                 }
             }
         }
         Ok(results_out)
+    }
+
+    /// Return the error of a root process that exited with `reason`.
+    fn root_error(reason: &Term, atoms: &AtomTable) -> BeamError {
+        let text: String = print_term(reason, atoms)
+            .into_iter()
+            .map(char::from)
+            .collect();
+        error(format!("root process exited with {text}"))
     }
 
     /// Run one root of a multi-scheduler run until its exit completes, and
@@ -619,7 +627,7 @@ impl BeamProgram {
                     if !serving
                         && !scheduler.timers.active()
                         && scheduler.root_waiting()
-                        && node.roots_left() == 1
+                        && node.live_processes() == 1
                     {
                         // A delivery of the last other root may already be
                         // in the inbox. Apply it before the error.

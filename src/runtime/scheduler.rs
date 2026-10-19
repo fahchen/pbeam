@@ -3413,7 +3413,7 @@ impl Scheduler {
             .expect("the exiting process is alive");
         debug_assert!(!process.in_run_queue, "only the current process exits");
         match &self.shared {
-            Some(node) => node.name_remove_all(id),
+            Some(node) => node.remove_process(id),
             None => {
                 if let Some(name) = &process.registered_name {
                     let name_text = self.atoms.name_of(name).to_owned();
@@ -3624,9 +3624,6 @@ impl Scheduler {
             reds = reds.max(1);
         }
         self.alias_owners.retain(|_, owner| *owner != id);
-        if let Some(node) = &self.shared {
-            node.unregister(id);
-        }
         self.send_pending_monitor();
         // The process left the process table and no guest code can read it
         // again. Its terms go to the release work list, so that the walk of a

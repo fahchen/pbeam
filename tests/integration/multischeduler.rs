@@ -74,6 +74,20 @@ fn reports_a_root_that_exits_with_an_error() {
     );
 }
 
+/// A failing root decides the error of the run even when another root waits
+/// and the abort stops it.
+#[test]
+fn a_failed_root_reports_its_error_before_a_stopped_wait() {
+    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
+    let error = program
+        .execute_on_schedulers(&[("ping_pong", "wait"), ("ping_pong", "boom")])
+        .expect_err("the boom root fails");
+    assert!(
+        error.to_string().contains("root process exited with {boom"),
+        "{error}"
+    );
+}
+
 /// A root that waits for a message that no process can send gives the error
 /// of an impossible wait.
 #[test]
