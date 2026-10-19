@@ -491,7 +491,7 @@ pub(super) struct Scheduler {
     skip_checks: bool,
     /// The node that this scheduler shares with the other scheduler
     /// threads, or `None` in a run with one scheduler thread.
-    shared: Option<Arc<SharedNode>>,
+    shared: Option<Arc<Node>>,
     /// The index of this scheduler in [`Self::shared`].
     index: usize,
     /// The read end of the wake socket of this scheduler.
@@ -569,13 +569,13 @@ impl Scheduler {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let (node, mut readers) = SharedNode::new(2).unwrap();
+    /// let (node, mut readers) = Node::new(2).unwrap();
     /// let scheduler = Scheduler::with_shared(AtomTable::new(), node, 0, readers.remove(0));
     /// assert_eq!(scheduler.index, 0);
     /// ```
     pub(super) fn with_shared(
         mut atoms: AtomTable,
-        node: Arc<SharedNode>,
+        node: Arc<Node>,
         index: usize,
         wake: UnixStream,
     ) -> Self {
@@ -597,7 +597,7 @@ impl Scheduler {
     }
 
     /// Return the shared node of this scheduler, when it has one.
-    pub(super) fn shared(&self) -> Option<&Arc<SharedNode>> {
+    pub(super) fn shared(&self) -> Option<&Arc<Node>> {
         self.shared.as_ref()
     }
 
@@ -1283,7 +1283,7 @@ impl Scheduler {
         if let (Some(wake), Some(fd)) = (&mut self.wake, wake)
             && matches!(&readiness, Readiness::Ready(ready) if ready.contains(&fd))
         {
-            SharedNode::drain_wake(wake);
+            Node::drain_wake(wake);
         }
         if dirty
             && matches!(&readiness, Readiness::Ready(ready) if ready.contains(&self.dirty_io.wake_fd()))
@@ -1390,23 +1390,27 @@ impl Scheduler {
             let name =
                 signal::signal_name(number).expect("a handler is set only for a named signal");
             if let Some(server) = self.whereis("erl_signal_server") {
-                let message =
-                    Term::tuple(vec![Term::static_atom("notify"), Term::static_atom(name)]);
-                // The signal server can be a process of another scheduler.
-                // The message has only static atoms, so it crosses the
-                // thread unchanged.
-                match self.remote_owner(server) {
-                    Some(index) => self
-                        .shared
-                        .as_ref()
-                        .expect("a remote process has a node")
-                        .send_message(index, None, message, server, None),
-                    None => self.deliver(server, message),
-                }
+                self.notify_signal_server(server, name);
             }
             queue.extend(std::mem::take(&mut self.deferred_signals));
         }
         Ok(())
+    }
+
+    /// Send `{notify, Name}` to the process registered as
+    /// `erl_signal_server`. The signal server can be a process of another
+    /// scheduler. The message has only static atoms, and it comes from the
+    /// system, so it sets no self-signal mark.
+    fn notify_signal_server(&mut self, server: ProcessId, name: &str) {
+        let message = Term::tuple(vec![Term::static_atom("notify"), Term::static_atom(name)]);
+        match self.remote_owner(server) {
+            Some(index) => self
+                .shared
+                .as_ref()
+                .expect("a remote process has a node")
+                .send_message(index, None, message, server, None),
+            None => self.deliver(server, message),
+        }
     }
 
     /// Return the fds that a wait of the menu reports as ready. A failed
@@ -3785,7 +3789,7 @@ mod tcp_inet;
 mod tcp_stream;
 
 use known_nodes::KnownNodes;
-use node::{Delivery, SharedNode};
+use node::{Delivery, Node};
 pub(super) use policy::PolicyEnd;
 use policy::PolicyProcess;
 use process_table::ProcessTable;

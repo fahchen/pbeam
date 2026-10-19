@@ -5,7 +5,7 @@ use super::{
         DirtyWrite, Frame, PendingBif, PendingTrap, ProcessState, ReceiveTimer, StackSlot, Start,
         StartFlags,
     },
-    scheduler::{PolicyEnd, Received, Scheduler, Turn, node::SharedNode},
+    scheduler::{PolicyEnd, Received, Scheduler, Turn, node::Node},
     tty::{InitialMode, Ttys},
 };
 use crate::{
@@ -169,6 +169,29 @@ impl ExceptionClass {
             _ => None,
         }
     }
+}
+
+/// Wait for input in a run with scheduler threads, or decide that the root
+/// waits for a message that cannot arrive.
+fn idle_step(scheduler: &mut Scheduler, node: &Node, serving: bool) -> Result<(), BeamError> {
+    if serving
+        || scheduler.timers.active()
+        || !scheduler.root_waiting()
+        || node.starts_pending()
+        || scheduler.has_external_sources()
+        || node.live_processes() != 1
+    {
+        let wait = scheduler.timers.wait_time(scheduler.timers.now());
+        scheduler.wait_events(Some(wait))?;
+        return Ok(());
+    }
+    // A delivery of the last other root may already be in the inbox. Apply
+    // it and schedule the result before the error: it can make the root
+    // runnable or give it a signal that it did not handle.
+    if scheduler.drain_inbox() || !scheduler.root_waiting() {
+        return Ok(());
+    }
+    Err(error("root process waits for a message that cannot arrive"))
 }
 
 impl BeamProgram {
@@ -499,7 +522,7 @@ impl BeamProgram {
             return Err(error("a multi-scheduler run needs at least one root"));
         }
         let initial_mode = InitialMode::read();
-        let (node, readers) = SharedNode::new(roots.len())
+        let (node, readers) = Node::new(roots.len())
             .map_err(|cause| error(format!("cannot create the scheduler node: {cause}")))?;
         let results = std::thread::scope(|scope| {
             let handles: Vec<_> = roots
@@ -564,18 +587,12 @@ impl BeamProgram {
         // error or the missing result of a root that the abort stopped.
         let mut results_out = Vec::with_capacity(roots.len());
         for (root, atoms) in roots {
-            match root {
-                Some(Ok(term)) => results_out.push(HostTerm {
-                    term,
-                    atoms: Arc::new(atoms),
-                }),
-                Some(Err(_)) => unreachable!("a failed root returns above"),
-                None => {
-                    return Err(error(
-                        "a root process waits for a message that cannot arrive",
-                    ));
-                }
-            }
+            let root = root.expect("a root that did not exit reports its error");
+            let term = root.expect("a failed root returns above");
+            results_out.push(HostTerm {
+                term,
+                atoms: Arc::new(atoms),
+            });
         }
         Ok(results_out)
     }
@@ -589,6 +606,18 @@ impl BeamProgram {
         error(format!("root process exited with {text}"))
     }
 
+    /// Apply the outcome of one process turn, as each run loop does.
+    fn apply_outcome(&self, scheduler: &mut Scheduler, outcome: Outcome) -> Result<(), BeamError> {
+        match outcome {
+            Outcome::Wait => scheduler.park_current(),
+            Outcome::Hibernate => scheduler.hibernate_current(),
+            Outcome::Yield => scheduler.yield_current(),
+            Outcome::Exit { reason, result } => scheduler.finish_current(reason, result)?,
+            Outcome::DirtyWrite { write, tail } => scheduler.start_dirty_write(write, tail),
+        }
+        Ok(())
+    }
+
     /// Run one root of a multi-scheduler run until its exit completes, and
     /// then serve the inbox of its scheduler until the last root exits.
     fn run_multi_root(
@@ -597,9 +626,10 @@ impl BeamProgram {
         module: &str,
         function: &str,
     ) -> Result<(), BeamError> {
-        let Some(node) = scheduler.shared().map(Arc::clone) else {
-            return Ok(());
-        };
+        let node = scheduler
+            .shared()
+            .map(Arc::clone)
+            .expect("a multi-root run has a node");
         let label = scheduler.code.entry_label(module, function, 0)?;
         let frame = scheduler.code.frame(module, label, 0)?;
         let id = scheduler.next_pid()?;
@@ -628,39 +658,10 @@ impl BeamProgram {
             match scheduler.schedule_next()? {
                 Turn::Run => {
                     let outcome = self.run(scheduler)?;
-                    match outcome {
-                        Outcome::Wait => scheduler.park_current(),
-                        Outcome::Hibernate => scheduler.hibernate_current(),
-                        Outcome::Yield => scheduler.yield_current(),
-                        Outcome::Exit { reason, result } => {
-                            scheduler.finish_current(reason, result)?
-                        }
-                        Outcome::DirtyWrite { write, tail } => {
-                            scheduler.start_dirty_write(write, tail)
-                        }
-                    }
+                    self.apply_outcome(scheduler, outcome)?;
                 }
                 Turn::Done => {}
-                Turn::Idle => {
-                    if !serving
-                        && !scheduler.timers.active()
-                        && scheduler.root_waiting()
-                        && !node.starts_pending()
-                        && !scheduler.has_external_sources()
-                        && node.live_processes() == 1
-                    {
-                        // A delivery of the last other root may already be
-                        // in the inbox. Apply it and schedule the result
-                        // before the error: it can make the root runnable or
-                        // give it a signal that it did not handle.
-                        if scheduler.drain_inbox() || !scheduler.root_waiting() {
-                            continue;
-                        }
-                        return Err(error("root process waits for a message that cannot arrive"));
-                    }
-                    let wait = scheduler.timers.wait_time(scheduler.timers.now());
-                    scheduler.wait_events(Some(wait))?;
-                }
+                Turn::Idle => idle_step(scheduler, &node, serving)?,
             }
             if node.is_shutdown() {
                 break;
@@ -857,17 +858,8 @@ impl BeamProgram {
                 Turn::Run if scheduler.policy_idle() => scheduler.park_current(),
                 Turn::Run => {
                     let outcome = self.run(scheduler)?;
-                    match policy_turn(scheduler, outcome) {
-                        Outcome::Wait => scheduler.park_current(),
-                        Outcome::Hibernate => scheduler.hibernate_current(),
-                        Outcome::Yield => scheduler.yield_current(),
-                        Outcome::Exit { reason, result } => {
-                            scheduler.finish_current(reason, result)?
-                        }
-                        Outcome::DirtyWrite { write, tail } => {
-                            scheduler.start_dirty_write(write, tail)
-                        }
-                    }
+                    let outcome = policy_turn(scheduler, outcome);
+                    self.apply_outcome(scheduler, outcome)?;
                 }
                 Turn::Done => {}
                 Turn::Idle => {

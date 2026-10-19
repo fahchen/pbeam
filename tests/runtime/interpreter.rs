@@ -30,6 +30,30 @@ fn allow_all() -> Vec<Capability> {
     AllowAll.initial()
 }
 
+/// A delivery that arrives at an idle step lets the step return, so that the
+/// next scheduling step handles it, and the run does not report an
+/// impossible wait.
+#[test]
+fn a_delivery_at_idle_lets_the_run_wait_again() {
+    use crate::runtime::scheduler::node::Node;
+    let (node, mut readers) = Node::new(1).unwrap();
+    let mut scheduler =
+        Scheduler::with_shared(AtomTable::new(), Arc::clone(&node), 0, readers.remove(0));
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    node.root_started();
+    let root = ProcessId(0);
+    scheduler.process_mut(root).unwrap().waiting = true;
+    node.send_message(0, Some(root), Term::Integer(1), root, None);
+    super::idle_step(&mut scheduler, &node, false).unwrap();
+    assert!(
+        scheduler
+            .process(root)
+            .unwrap()
+            .mailbox
+            .has_outer_messages()
+    );
+}
+
 /// Return the runtime error of a root process whose `fixture:main/0` gets
 /// an uncaught `error:badarg` from the BIF `module:function` with the `%T`
 /// texts `arguments`. ERTS `save_stacktrace` puts the BIF frame with its

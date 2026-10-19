@@ -18,7 +18,10 @@
          group_leader_remote/0, leader_hold/0, pattern_match/0, pattern_give/0,
          timer_fire/0, timer_cancel/0, timer_child_exit/0, timer_child/0,
          timer_cancel_use/0, timer_cancel_give/0, port_link_use/0,
-         port_link_give/0, port_monitor_use/0, port_monitor_give/0]).
+         port_link_give/0, port_monitor_use/0, port_monitor_give/0,
+         timer_fire4/0, timer_named4/0, timer_remote4/0, pattern_split/0,
+         pattern_split_give/0, pattern_matches/0, pattern_matches_give/0,
+         info_idle/0, info_idle_child/0]).
 
 -define(COUNT, 100).
 
@@ -35,7 +38,8 @@ ping() ->
     _ = erlang:unique_integer(),
     _ = erlang:unique_integer([positive]),
     _ = erlang:unique_integer([monotonic]),
-    _ = registered(),
+    Names = registered(),
+    true = is_list(Names),
     ok = send_pings(Pong, 1),
     Pong ! {done, self()},
     receive
@@ -702,3 +706,54 @@ port_monitor_give() ->
     ok = wait_registered(port_monitor_name, 100000),
     port_monitor_name ! {port, Port},
     receive done -> ok after 6000 -> timeout end.
+
+%% The root that waits for its own four-argument BIF timer.
+timer_fire4() ->
+    _ = erlang:send_after(1, self(), tick, []),
+    receive tick -> ok after 60000 -> timeout end.
+
+%% The root that starts a named four-argument BIF timer.
+timer_named4() ->
+    erlang:start_timer(1000, unregistered_timer_name4, tick, []).
+
+%% The root that starts a four-argument BIF timer for a process of the
+%% other scheduler.
+timer_remote4() ->
+    Pid = wait_for(timer_name, 100000),
+    _ = erlang:send_after(1000, Pid, tick, []),
+    ok.
+
+%% The root that splits with the compiled pattern of the other scheduler.
+pattern_split() ->
+    true = register(pattern_split_name, self()),
+    receive {pattern, Pattern} -> binary:split(<<"a,b">>, Pattern) end.
+
+pattern_split_give() ->
+    Pattern = binary:compile_pattern(<<",">>),
+    ok = wait_registered(pattern_split_name, 100000),
+    pattern_split_name ! {pattern, Pattern},
+    receive done -> ok after 6000 -> timeout end.
+
+%% The root that matches all with the compiled pattern of the other
+%% scheduler.
+pattern_matches() ->
+    true = register(pattern_matches_name, self()),
+    receive {pattern, Pattern} -> binary:matches(<<"a,b">>, Pattern) end.
+
+pattern_matches_give() ->
+    Pattern = binary:compile_pattern(<<",">>),
+    ok = wait_registered(pattern_matches_name, 100000),
+    pattern_matches_name ! {pattern, Pattern},
+    receive done -> ok after 6000 -> timeout end.
+
+%% The root that reads the queue length of an idle child.
+info_idle() ->
+    Pid = spawn(?MODULE, info_idle_child, []),
+    ok = wait_registered(info_idle_name, 100000),
+    {message_queue_len, 0} = process_info(Pid, message_queue_len),
+    Pid ! stop,
+    ok.
+
+info_idle_child() ->
+    true = register(info_idle_name, self()),
+    receive stop -> ok end.

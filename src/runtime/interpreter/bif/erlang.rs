@@ -4294,16 +4294,15 @@ pub(super) fn process_info(
     };
     let messages = target.mailbox.message_count();
     let registered = scheduler.registered_name_of(*id);
-    let info = target
-        .info(
-            &scheduler.atoms,
-            item,
-            0,
-            messages,
-            false,
-            registered.as_ref(),
-        )?
-        .ok_or_else(|| unsupported(&scheduler.atoms))?;
+    let values = target.info(
+        &scheduler.atoms,
+        item,
+        0,
+        messages,
+        false,
+        registered.as_ref(),
+    );
+    let info = values?.ok_or_else(|| unsupported(&scheduler.atoms))?;
     // A queued reply is built in the target process, but ERTS discards
     // the cost that `handle_process_info` returns
     // (`erl_proc_sig_queue.c:6796,7405,5425-5428`), so only the direct

@@ -263,8 +263,19 @@ fn rejects_a_timer_for_another_scheduler() {
     );
 }
 
-/// A compiled binary pattern of another scheduler fails with a clear
-/// error.
+/// A read of an idle local child takes the direct path.
+#[test]
+fn reads_the_queue_length_of_an_idle_child() {
+    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
+    let ok_atom = program.atom("ok").expect("the fixture names ok");
+    let results = program
+        .execute_on_schedulers(&[("ping_pong", "info_idle"), ("ping_pong", "monitor_hold")])
+        .expect("the two schedulers run");
+    assert_eq!(results[0].term, Term::Atom(ok_atom.clone()), "the reader");
+    assert_eq!(results[1].term, Term::Atom(ok_atom), "the holder");
+}
+
+/// A read of another local process counts a message that another scheduler
 #[test]
 fn rejects_a_compiled_binary_pattern_of_another_scheduler() {
     let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
@@ -383,6 +394,87 @@ fn fires_a_local_bif_timer() {
         .expect("the two schedulers run");
     assert_eq!(results[0].term, Term::Atom(ok_atom.clone()), "the timer");
     assert_eq!(results[1].term, Term::Atom(ok_atom), "the holder");
+}
+
+/// A split with a compiled pattern of another scheduler fails with a clear
+/// error.
+#[test]
+fn rejects_a_split_with_a_pattern_of_another_scheduler() {
+    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
+    let error = program
+        .execute_on_schedulers(&[
+            ("ping_pong", "pattern_split"),
+            ("ping_pong", "pattern_split_give"),
+        ])
+        .expect_err("the pattern is unsupported");
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported: a compiled binary pattern of another scheduler"),
+        "{error}"
+    );
+}
+
+/// A matches call with a compiled pattern of another scheduler fails with a
+/// clear error.
+#[test]
+fn rejects_a_matches_call_with_a_pattern_of_another_scheduler() {
+    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
+    let error = program
+        .execute_on_schedulers(&[
+            ("ping_pong", "pattern_matches"),
+            ("ping_pong", "pattern_matches_give"),
+        ])
+        .expect_err("the pattern is unsupported");
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported: a compiled binary pattern of another scheduler"),
+        "{error}"
+    );
+}
+
+/// A four-argument BIF timer of a shared run fires.
+#[test]
+fn fires_a_local_four_argument_bif_timer() {
+    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
+    let ok_atom = program.atom("ok").expect("the fixture names ok");
+    let results = program
+        .execute_on_schedulers(&[("ping_pong", "timer_fire4"), ("ping_pong", "monitor_hold")])
+        .expect("the two schedulers run");
+    assert_eq!(results[0].term, Term::Atom(ok_atom.clone()), "the timer");
+    assert_eq!(results[1].term, Term::Atom(ok_atom), "the holder");
+}
+
+/// A named four-argument BIF timer fails with a clear error.
+#[test]
+fn rejects_a_named_four_argument_timer() {
+    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
+    let error = program
+        .execute_on_schedulers(&[("ping_pong", "timer_named4"), ("ping_pong", "monitor_hold")])
+        .expect_err("the named timer is unsupported");
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported: a named BIF timer in a run of execute_on_schedulers"),
+        "{error}"
+    );
+}
+
+/// A four-argument BIF timer for another scheduler fails with a clear
+/// error.
+#[test]
+fn rejects_a_four_argument_timer_for_another_scheduler() {
+    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
+    let error = program
+        .execute_on_schedulers(&[("ping_pong", "timer_remote4"), ("ping_pong", "timer_hold")])
+        .expect_err("the timer is unsupported");
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported: a BIF timer to a process of another scheduler"),
+        "{error}"
+    );
 }
 
 /// A cancel of a local BIF timer leaves its node entry.

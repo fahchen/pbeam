@@ -57,7 +57,7 @@ struct Inbox {
 
 /// The state of a run that more than one scheduler thread shares.
 #[derive(Debug)]
-pub(in crate::runtime) struct SharedNode {
+pub(in crate::runtime) struct Node {
     /// The scheduler of each live process.
     owners: Mutex<HashMap<ProcessId, usize>>,
     /// The registered names of the node, as the ERTS `process_reg` table.
@@ -103,14 +103,14 @@ pub(in crate::runtime) struct SharedNode {
     local_node_hash: OnceLock<u32>,
 }
 
-impl SharedNode {
+impl Node {
     /// Return the node of `count` schedulers and the read end of the wake
     /// socket of each scheduler.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let (node, readers) = SharedNode::new(2).unwrap();
+    /// let (node, readers) = Node::new(2).unwrap();
     /// assert_eq!(readers.len(), 2);
     /// ```
     pub(in crate::runtime) fn new(count: usize) -> io::Result<(Arc<Self>, Vec<UnixStream>)> {
@@ -127,7 +127,7 @@ impl SharedNode {
             readers.push(reader);
         }
         Ok((
-            Arc::new(SharedNode {
+            Arc::new(Node {
                 owners: Mutex::new(HashMap::new()),
                 names: Mutex::new(HashMap::new()),
                 ports: Mutex::new(HashMap::new()),
