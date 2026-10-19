@@ -229,8 +229,35 @@ impl Scheduler {
     ) {
         if self.processes.contains_key(&to) {
             self.queue_signal(Some(pending.watcher), to, monitor_signal(pending));
+        } else if let Some(index) = self.remote_owner(to) {
+            let signal = monitor_signal(pending);
+            self.shared
+                .as_ref()
+                .expect("a remote target has a node")
+                .send_signal(index, to, Some(pending.watcher), signal, None);
         } else {
             self.pending_monitor_failed(sender, pending);
+        }
+    }
+
+    /// Give the ERTS response of the dead target `target` for a signal that
+    /// a scheduler of another thread sent before the target exited.
+    pub(in crate::runtime) fn dead_target_signal(&mut self, target: ProcessId, signal: Signal) {
+        match signal {
+            Signal::Monitor { watcher, reference } => {
+                self.send_monitor_down(None, watcher, reference, Term::static_atom("noproc"));
+            }
+            Signal::Link { from } => {
+                let exit = Signal::Exit {
+                    from: LinkId::Process(target),
+                    reason: Term::static_atom("noproc"),
+                    linked: true,
+                    normal_kills: false,
+                    alias: None,
+                };
+                let _ = self.send_signal(None, from, exit);
+            }
+            _ => {}
         }
     }
 
@@ -431,6 +458,18 @@ impl Scheduler {
             Signal::Flush => {
                 self.handled(id, node).flush = Flush::Flushed;
                 return Ok(Handled::Stop(0));
+            }
+            Signal::ClearName { name } => {
+                let clear = self
+                    .processes
+                    .get(&id)
+                    .and_then(|process| process.registered_name.as_ref())
+                    .is_some_and(|atom| self.atoms.name_of(atom) == name);
+                let process = self.handled(id, node);
+                if clear {
+                    process.registered_name = None;
+                }
+                0
             }
             Signal::Revoke { capability } => {
                 self.handled(id, node).security.remove(capability);

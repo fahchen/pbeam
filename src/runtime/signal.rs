@@ -24,6 +24,15 @@ use crate::term::{PortId, ProcessId, Reference, Term};
 /// A non-message signal in the signal queue of a process.
 #[derive(Debug, PartialEq)]
 pub(super) enum Signal {
+    /// A PBeam signal: the receiver clears its `registered_name` field when
+    /// the field still names `name`. A name table that more than one
+    /// scheduler shares removes the name at once, and the owner of the
+    /// process clears the field through this signal. ERTS changes both
+    /// records under one lock (`register.c:429-541`), so it has no signal.
+    ClearName {
+        /// The name text that the field must still have.
+        name: String,
+    },
     /// `ERTS_SIG_Q_OP_EXIT` from `erlang:exit/2`, or `ERTS_SIG_Q_OP_EXIT_LINKED`
     /// from the exit of a linked process (`send_gen_exit_signal`,
     /// `erl_proc_sig_queue.c:1627-1840`). `handle_exit_signal` costs 1, 1
@@ -349,7 +358,8 @@ impl Signal {
             | Signal::Flush
             | Signal::Revoke { capability: _ }
             | Signal::Grant { capability: _ }
-            | Signal::EnterRuntime { capabilities: _ } => {}
+            | Signal::EnterRuntime { capabilities: _ }
+            | Signal::ClearName { name: _ } => {}
         }
     }
 }

@@ -515,8 +515,13 @@ impl BeamProgram {
                             reader,
                         );
                         scheduler.code = CodeTable::new(self.modules.clone());
-                        self.run_multi_root(&mut scheduler, module, function)?;
-                        Ok(scheduler.into_run_result())
+                        match self.run_multi_root(&mut scheduler, module, function) {
+                            Ok(()) => Ok(scheduler.into_run_result()),
+                            Err(cause) => {
+                                node.abort();
+                                Err(cause)
+                            }
+                        }
                     })
                 })
                 .collect();
@@ -529,9 +534,14 @@ impl BeamProgram {
                 })
                 .collect::<Vec<_>>()
         });
-        let mut results_out = Vec::with_capacity(results.len());
+        // A failed root aborts the run. Report its error before the result
+        // of a root that the abort stopped.
+        let mut roots = Vec::with_capacity(results.len());
         for result in results {
-            let (root, atoms) = result?;
+            roots.push(result?);
+        }
+        let mut results_out = Vec::with_capacity(roots.len());
+        for (root, atoms) in roots {
             let Some(root) = root else {
                 return Err(error(
                     "a root process waits for a message that cannot arrive",
@@ -601,6 +611,13 @@ impl BeamProgram {
                     scheduler.wait_events(Some(wait))?;
                 }
             }
+            if node.is_shutdown() {
+                break;
+            }
+        }
+        if !scheduler.root_exited() {
+            // Another root failed and aborted the run.
+            return Ok(());
         }
         node.root_done();
         while !node.is_shutdown() {

@@ -2044,3 +2044,40 @@ fn reads_a_break_key_after_a_read_with_no_data() {
     assert_eq!(Scheduler::break_key(|| Ok(vec![0])), 0);
     assert_eq!(Scheduler::break_key(|| Err(libc::EBADF)), 0);
 }
+
+#[test]
+fn a_signal_to_a_dead_process_answers_a_monitor() {
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    let root = ProcessId(0);
+    let reference = Reference::ordinary(0).unwrap();
+    scheduler.dead_target_signal(
+        ProcessId(99),
+        Signal::Monitor {
+            watcher: root,
+            reference,
+        },
+    );
+    assert!(
+        scheduler
+            .process(root)
+            .unwrap()
+            .mailbox
+            .has_control_signals()
+    );
+}
+
+#[test]
+fn a_signal_to_a_dead_process_answers_a_link() {
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    let root = ProcessId(0);
+    scheduler.dead_target_signal(ProcessId(99), Signal::Link { from: root });
+    assert!(
+        scheduler
+            .process(root)
+            .unwrap()
+            .mailbox
+            .has_control_signals()
+    );
+}

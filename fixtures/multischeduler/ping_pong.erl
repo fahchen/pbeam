@@ -1,5 +1,6 @@
 -module(ping_pong).
--export([ping/0, pong/0, reference/0, boom/0, wait/0, conflict_try/0, conflict_hold/0]).
+-export([ping/0, pong/0, reference/0, boom/0, wait/0, conflict_try/0, conflict_hold/0,
+         monitor_watch/0, monitor_hold/0, unreg_hold/0, unreg_taker/0]).
 
 -define(COUNT, 100).
 
@@ -107,3 +108,43 @@ wait_registered(Name, Attempts) ->
         undefined -> receive after 1 -> wait_registered(Name, Attempts - 1) end;
         _Pid -> ok
     end.
+
+%% The root that monitors the other root while it waits for the monitor to
+%% leave the pending slot, then reports the reason of the DOWN message.
+monitor_watch() ->
+    Pid = wait_for(monitor_hold_name, 100000),
+    Ref = monitor(process, Pid),
+    receive
+        {'DOWN', Ref, process, Pid, normal} -> true;
+        {'DOWN', Ref, process, Pid, Other} -> Other
+    after 60000 -> timeout
+    end.
+
+%% The root that exits normally after a short wait.
+monitor_hold() ->
+    true = register(monitor_hold_name, self()),
+    receive after 10 -> ok end.
+
+%% The root that holds a name until the other root unregisters it, then
+%% registers the name again.
+unreg_hold() ->
+    true = register(unreg_name, self()),
+    ok = wait_cleared(20000),
+    true = register(unreg_name, self()),
+    true.
+
+wait_cleared(0) ->
+    timeout;
+wait_cleared(Attempts) ->
+    case process_info(self(), registered_name) of
+        [] ->
+            ok;
+        _ ->
+            receive after 1 -> wait_cleared(Attempts - 1) end
+    end.
+
+%% The root that unregisters the name of the other root.
+unreg_taker() ->
+    ok = wait_registered(unreg_name, 20000),
+    true = unregister(unreg_name),
+    true.

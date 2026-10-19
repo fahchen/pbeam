@@ -2643,7 +2643,7 @@ impl Scheduler {
 
     /// Return the scheduler of the live process `target` when it is another
     /// scheduler of the node.
-    fn remote_owner(&self, target: ProcessId) -> Option<usize> {
+    pub(super) fn remote_owner(&self, target: ProcessId) -> Option<usize> {
         let node = self.shared.as_ref()?;
         let owner = node.owner(target)?;
         (owner != self.index).then_some(owner)
@@ -2667,7 +2667,9 @@ impl Scheduler {
                     sender,
                     signal,
                 } => {
-                    let _ = self.send_signal_local(sender, target, signal);
+                    if let Err(signal) = self.send_signal_local(sender, target, signal) {
+                        self.dead_target_signal(target, *signal);
+                    }
                 }
             }
         }
@@ -3255,11 +3257,12 @@ impl Scheduler {
         let Some(id) = self.name_take(&name_text) else {
             return false;
         };
-        // The name may belong to a process of another scheduler in a run
-        // with more than one scheduler. Its field stays, and the owner
-        // removes the name from the shared table at its exit.
         if let Some(process) = self.processes.get_mut(&id) {
             process.registered_name = None;
+        } else if self.remote_owner(id).is_some() {
+            // The field of the process belongs to its scheduler. Clear it
+            // through the signal queue, so the owner removes it too.
+            let _ = self.send_signal(None, id, Signal::ClearName { name: name_text });
         }
         true
     }
@@ -3408,7 +3411,15 @@ impl Scheduler {
         debug_assert!(!process.in_run_queue, "only the current process exits");
         if let Some(name) = &process.registered_name {
             let name_text = self.atoms.name_of(name).to_owned();
-            self.name_take(&name_text);
+            // Another process may have the name after an unregister of this
+            // name. Remove it only when this process still has it.
+            let owned = match &self.shared {
+                Some(node) => node.name_get(&name_text) == Some(id),
+                None => self.names.get(&name_text) == Some(&id),
+            };
+            if owned {
+                self.name_take(&name_text);
+            }
         }
         self.delegations
             .release(std::mem::take(&mut process.security));

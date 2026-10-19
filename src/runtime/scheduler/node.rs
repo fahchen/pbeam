@@ -284,9 +284,19 @@ impl SharedNode {
     pub(in crate::runtime) fn root_done(&self) {
         if self.roots.fetch_sub(1, Ordering::AcqRel) == 1 {
             self.shutdown.store(true, Ordering::Release);
-            for inbox in &self.inboxes {
-                wake(&inbox.wake);
-            }
+        }
+        for inbox in &self.inboxes {
+            wake(&inbox.wake);
+        }
+    }
+
+    /// Stop every scheduler after a root failed. Each scheduler that still
+    /// runs returns from its loop, and each scheduler that serves its inbox
+    /// leaves it.
+    pub(in crate::runtime) fn abort(&self) {
+        self.shutdown.store(true, Ordering::Release);
+        for inbox in &self.inboxes {
+            wake(&inbox.wake);
         }
     }
 

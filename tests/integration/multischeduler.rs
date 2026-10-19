@@ -124,3 +124,44 @@ fn one_of_two_schedulers_registers_a_shared_name() {
         "the first root has the name"
     );
 }
+
+/// A root that fails aborts the run, and the run reports its error instead
+/// of the result of the root that the abort stopped.
+#[test]
+fn a_missing_entry_stops_the_other_scheduler() {
+    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
+    let error = program
+        .execute_on_schedulers(&[("ping_pong", "missing"), ("ping_pong", "pong")])
+        .expect_err("the missing entry is an error");
+    assert!(error.to_string().contains("missing"), "{error}");
+}
+
+/// A monitor of a process of another scheduler reaches it when the watcher
+/// waits, and the DOWN message keeps the real exit reason.
+#[test]
+fn a_pending_monitor_reaches_a_remote_target() {
+    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
+    let true_atom = program.atom("true").expect("the fixture names true");
+    let ok_atom = program.atom("ok").expect("the fixture names ok");
+    let results = program
+        .execute_on_schedulers(&[
+            ("ping_pong", "monitor_watch"),
+            ("ping_pong", "monitor_hold"),
+        ])
+        .expect("the two schedulers run");
+    assert_eq!(results[0].term, Term::Atom(true_atom), "the DOWN reason");
+    assert_eq!(results[1].term, Term::Atom(ok_atom), "the holder");
+}
+
+/// An unregister from another scheduler clears the name of the owner, and
+/// the owner can register the name again.
+#[test]
+fn unregistering_a_remote_name_clears_the_owner() {
+    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
+    let true_atom = program.atom("true").expect("the fixture names true");
+    let results = program
+        .execute_on_schedulers(&[("ping_pong", "unreg_hold"), ("ping_pong", "unreg_taker")])
+        .expect("the two schedulers run");
+    assert_eq!(results[0].term, Term::Atom(true_atom.clone()), "the holder");
+    assert_eq!(results[1].term, Term::Atom(true_atom), "the taker");
+}
