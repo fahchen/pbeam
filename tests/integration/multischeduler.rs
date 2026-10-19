@@ -168,6 +168,36 @@ fn a_killed_remote_process_is_not_alive() {
     assert_eq!(results[1].term, Term::Atom(ok_atom), "the holder");
 }
 
+/// A liveness check of a local child that another scheduler killed answers
+/// false, also when the kill waited in the inbox at the call.
+#[test]
+fn a_killed_local_child_is_not_alive() {
+    let erts_internal = pinned_beam("erts_internal");
+    let program = BeamProgram::load(&[&erts_internal, PING_PONG]).expect("the fixture loads");
+    let false_atom = program.atom("false").expect("the fixture names false");
+    let ok_atom = program.atom("ok").expect("the fixture names ok");
+    let results = program
+        .execute_on_schedulers(&[("ping_pong", "alive_wait"), ("ping_pong", "alive_send")])
+        .expect("the two schedulers run");
+    assert_eq!(results[0].term, Term::Atom(false_atom), "the watcher");
+    assert_eq!(results[1].term, Term::Atom(ok_atom), "the killer");
+}
+
+/// The run reports the number of its schedulers.
+#[test]
+fn reports_the_number_of_schedulers() {
+    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
+    let ok_atom = program.atom("ok").expect("the fixture names ok");
+    let results = program
+        .execute_on_schedulers(&[
+            ("ping_pong", "scheduler_count"),
+            ("ping_pong", "monitor_hold"),
+        ])
+        .expect("the two schedulers run");
+    assert_eq!(results[0].term, Term::Integer(2), "the scheduler count");
+    assert_eq!(results[1].term, Term::Atom(ok_atom), "the holder");
+}
+
 /// The ports of two schedulers have different identifiers.
 #[test]
 fn ports_of_two_schedulers_differ() {

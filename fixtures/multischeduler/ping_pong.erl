@@ -6,7 +6,8 @@
          len_wait/0, len_hold/0, process_list/0, child_wait/0, child_send/0,
          child_hold/0, name_wait/0, name_send/0, reference_name/0,
          stamp_wait/0, stamp_send/0, term_wait/0, term_send/0, port_wait/0,
-         kill_watch/0, kill_hold/0, kill_child/0, port_send/0, port_other/0]).
+         kill_watch/0, kill_hold/0, kill_child/0, port_send/0, port_other/0,
+         alive_wait/0, alive_send/0, alive_child/0, scheduler_count/0]).
 
 -define(COUNT, 100).
 
@@ -403,3 +404,39 @@ port_other() ->
         From ! {port_ok, ok}
     end,
     ok.
+
+%% The root that checks the liveness of its child after another scheduler
+%% killed it.
+alive_wait() ->
+    Pid = spawn(?MODULE, alive_child, []),
+    Result = alive_poll(Pid, 2000000),
+    case whereis(alive_ready) of
+        undefined -> ok;
+        Sender -> Sender ! stop
+    end,
+    Result.
+
+alive_poll(_Pid, 0) ->
+    timeout;
+alive_poll(Pid, Attempts) ->
+    case whereis(alive_ready) of
+        undefined -> alive_poll(Pid, Attempts - 1);
+        _ -> is_process_alive(Pid)
+    end.
+
+%% The child that holds a name and waits to be killed.
+alive_child() ->
+    true = register(alive_name, self()),
+    receive never -> ok end.
+
+%% The root that kills the child of the other scheduler, and then registers
+%% the name that the other root polls.
+alive_send() ->
+    Pid = wait_for(alive_name, 100000),
+    exit(Pid, kill),
+    true = register(alive_ready, self()),
+    receive stop -> ok after 6000 -> timeout end.
+
+%% The root that reports the number of schedulers of the run.
+scheduler_count() ->
+    erlang:system_info(schedulers).

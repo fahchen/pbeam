@@ -139,6 +139,11 @@ impl SharedNode {
         ))
     }
 
+    /// Return the number of schedulers of the node.
+    pub(in crate::runtime) fn scheduler_count(&self) -> usize {
+        self.inboxes.len()
+    }
+
     /// Return the run start of the node, as the instant and the OS system
     /// time at the same moment.
     pub(in crate::runtime) fn clock_origin(&self) -> (Instant, i64) {

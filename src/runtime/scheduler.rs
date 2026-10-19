@@ -2453,6 +2453,21 @@ impl Scheduler {
         matches!(self.root_result, Some(Err(_)))
     }
 
+    /// Return the number of schedulers of the run: the schedulers of the
+    /// shared node, or 1 for a one-thread run.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(scheduler.scheduler_count(), 1);
+    /// ```
+    pub(super) fn scheduler_count(&self) -> i64 {
+        match &self.shared {
+            Some(node) => node.scheduler_count() as i64,
+            None => 1,
+        }
+    }
+
     /// Return the registered name of the process `id`. A run with more than
     /// one scheduler reads the name table of the node, which holds the names
     /// of every scheduler; a one-thread run reads the field of the process.

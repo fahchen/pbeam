@@ -2828,10 +2828,10 @@ const ENDIAN: &str = "little";
 ///
 /// ```rust,ignore
 /// let mut atoms = AtomTable::new();
-/// let os_type = system_info(&mut atoms, &Term::static_atom("os_type"))?;
+/// let os_type = system_info(&mut scheduler, &Term::static_atom("os_type"))?;
 /// // macOS: {unix, darwin}.
 /// assert!(matches!(os_type, BifResult::Value(Term::Tuple(_))));
-/// assert!(system_info(&mut atoms, &Term::static_atom("wordsize")).is_err());
+/// assert!(system_info(&mut scheduler, &Term::static_atom("wordsize")).is_err());
 /// ```
 ///
 /// # Errors
@@ -2839,7 +2839,9 @@ const ENDIAN: &str = "little";
 /// Each other item gives a runtime error, also an item that ERTS rejects
 /// with `badarg`. A new atom in a full atom table gives the error of
 /// `AtomTable::put`.
-pub(super) fn system_info(atoms: &mut AtomTable, item: &Term) -> Result<BifResult, BeamError> {
+pub(super) fn system_info(scheduler: &mut Scheduler, item: &Term) -> Result<BifResult, BeamError> {
+    let schedulers = scheduler.scheduler_count();
+    let atoms = &mut scheduler.atoms;
     match item {
         Term::Atom(atom) if atom.is_static("os_type") => Ok(Value(Term::tuple(vec![
             Term::Atom(Atom::UNIX),
@@ -2850,20 +2852,22 @@ pub(super) fn system_info(atoms: &mut AtomTable, item: &Term) -> Result<BifResul
                 .bytes()
                 .map(|byte| Term::Integer(i64::from(byte))),
         ))),
-        Term::Atom(atom) if atoms.name_of(atom) == "schedulers" => Ok(Value(Term::Integer(1))),
-        // PBeam has one scheduler, and `erlang:system_flag/2` cannot change
-        // its count.
+        Term::Atom(atom) if atoms.name_of(atom) == "schedulers" => {
+            Ok(Value(Term::Integer(schedulers)))
+        }
+        // `erlang:system_flag/2` cannot change the count of online
+        // schedulers, so each scheduler of the run is online.
         Term::Atom(atom) if atoms.name_of(atom) == "schedulers_online" => {
-            Ok(Value(Term::Integer(1)))
+            Ok(Value(Term::Integer(schedulers)))
         }
         Term::Atom(atom) if atoms.name_of(atom) == "build_type" => {
             Ok(Value(Term::static_atom("opt")))
         }
         Term::Atom(atom) if atoms.name_of(atom) == "endian" => Ok(Value(Term::static_atom(ENDIAN))),
-        // `2 * erts_no_schedulers` (`erl_init.c:1354`), and PBeam has one
-        // scheduler. `erlang:system_flag/2` cannot change it in PBeam.
+        // `2 * erts_no_schedulers` (`erl_init.c:1354`). `erlang:system_flag/2`
+        // cannot change it in PBeam.
         Term::Atom(atom) if atom.is_static("outstanding_system_requests_limit") => {
-            Ok(Value(Term::Integer(2)))
+            Ok(Value(Term::Integer(2 * schedulers)))
         }
         _ => Err(error(format!(
             "unsupported erlang:system_info/1 argument {}",
@@ -4321,6 +4325,10 @@ pub(super) fn is_process_alive(
     if let Some(denied) = other_process_denial(scheduler, *id, Operation::Inspect)? {
         return Ok(denied);
     }
+    // Another scheduler can hold a signal for this target in the inbox of
+    // this scheduler. Apply it before the read, so a pending exit signal
+    // leads to the routed request (`erl_bif_info.c:4075-4093`).
+    scheduler.drain_inbox();
     let alive = match scheduler.process(*id) {
         // The target is on another scheduler. Route the request, so that
         // the answer comes after the signals that the caller sent before,
