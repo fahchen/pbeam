@@ -152,6 +152,21 @@ fn rejects_an_atom_that_guest_code_creates() {
     );
 }
 
+/// The schedulers agree on the run clock: a later read is not below an
+/// earlier value from another scheduler, and the time offset is the same.
+#[test]
+fn the_schedulers_agree_on_the_run_clock() {
+    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
+    let ok_atom = program.atom("ok").expect("the fixture names ok");
+    for _ in 0..5 {
+        let results = program
+            .execute_on_schedulers(&[("ping_pong", "stamp_wait"), ("ping_pong", "stamp_send")])
+            .expect("the two schedulers run");
+        assert_eq!(results[0].term, Term::Atom(ok_atom.clone()), "the receiver");
+        assert_eq!(results[1].term, Term::Atom(ok_atom.clone()), "the sender");
+    }
+}
+
 /// A send to a registered name reaches its process on another scheduler.
 #[test]
 fn sends_to_a_registered_name_across_schedulers() {

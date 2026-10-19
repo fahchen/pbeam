@@ -19,10 +19,14 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering},
     },
+    time::Instant,
 };
 
 use super::Signal;
-use crate::term::{ProcessId, Term};
+use crate::{
+    runtime::host::clock,
+    term::{ProcessId, Term},
+};
 
 /// One delivery that crosses a scheduler thread boundary.
 #[derive(Debug)]
@@ -77,6 +81,10 @@ pub(in crate::runtime) struct SharedNode {
     live: AtomicUsize,
     /// True after the last root exited.
     shutdown: AtomicBool,
+    /// The run start, as the instant and the OS system time at the same
+    /// moment. Each scheduler builds its timer service on this pair, so the
+    /// time of every scheduler agrees.
+    clock: (Instant, i64),
 }
 
 impl SharedNode {
@@ -116,9 +124,16 @@ impl SharedNode {
                 starts: AtomicUsize::new(count),
                 live: AtomicUsize::new(0),
                 shutdown: AtomicBool::new(false),
+                clock: (Instant::now(), clock::system_time()),
             }),
             readers,
         ))
+    }
+
+    /// Return the run start of the node, as the instant and the OS system
+    /// time at the same moment.
+    pub(in crate::runtime) fn clock_origin(&self) -> (Instant, i64) {
+        self.clock
     }
 
     /// Make the process `id` the process of the scheduler `index`.

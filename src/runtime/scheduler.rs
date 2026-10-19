@@ -582,13 +582,18 @@ impl Scheduler {
         // A term crosses a scheduler thread with its atom indices, so this
         // copy of the table cannot add an atom that the other copies lack.
         atoms.freeze_creation();
-        Scheduler {
+        let origin = node.clock_origin();
+        let mut scheduler = Scheduler {
             shared: Some(node),
             index,
             wake: Some(wake),
             skip_checks: true,
             ..Scheduler::new(atoms)
-        }
+        };
+        // Each scheduler timer service starts on the run start of the node,
+        // so the clocks of the threads agree.
+        scheduler.timers = Timers::with_origin(origin);
+        scheduler
     }
 
     /// Return the shared node of this scheduler, when it has one.

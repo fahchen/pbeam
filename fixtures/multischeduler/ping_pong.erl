@@ -4,7 +4,8 @@
          info_watch/0, info_hold/0, info_item/0, info_all/0,
          down_wait/0, down_hold/0, atom_create/0, drain_wait/0, drain_hold/0,
          len_wait/0, len_hold/0, process_list/0, child_wait/0, child_send/0,
-         child_hold/0, name_wait/0, name_send/0, reference_name/0]).
+         child_hold/0, name_wait/0, name_send/0, reference_name/0,
+         stamp_wait/0, stamp_send/0]).
 
 -define(COUNT, 100).
 
@@ -318,3 +319,21 @@ reference_name() ->
     ok = wait_registered(name_send, 100000),
     name_send ! {hello, Self},
     receive {reply, Reply} -> Reply after 60000 -> timeout end.
+
+%% The root that compares its clock with the clock of the other scheduler.
+stamp_wait() ->
+    true = register(stamp_name, self()),
+    receive {stamp, From, Offset, Time} ->
+        Offset = erlang:time_offset(),
+        true = erlang:monotonic_time() >= Time,
+        From ! {stamp_ok, ok}
+    end,
+    ok.
+
+%% The root that sends its clock values to the other scheduler.
+stamp_send() ->
+    ok = wait_registered(stamp_name, 100000),
+    Offset = erlang:time_offset(),
+    Time = erlang:monotonic_time(),
+    stamp_name ! {stamp, self(), Offset, Time},
+    receive {stamp_ok, Reply} -> Reply after 60000 -> timeout end.
