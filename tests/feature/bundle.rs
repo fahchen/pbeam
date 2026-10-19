@@ -220,6 +220,8 @@ fn reports_the_usage_of_each_command() {
     for arguments in [
         vec!["bundle"],
         vec!["bundle", "only"],
+        vec!["fixture"],
+        vec!["fixture", "only"],
         vec!["executable"],
         vec!["unknown"],
     ] {
@@ -246,5 +248,181 @@ fn reports_an_output_that_the_host_cannot_write() {
         .arg(&start));
     assert_eq!(status, Some(1));
     assert!(stderr.contains("cannot write"), "{stderr}");
+    fs::remove_dir_all(&directory).unwrap();
+}
+
+#[test]
+fn writes_the_bundle_of_a_fixture_example() {
+    // A fixture has no release directory. The tool writes the layout of a
+    // release from the start set and the beam list of scripts/example.sh:
+    // the example modules in `pbeam/`, the consolidated protocols in
+    // `releases/pbeam/consolidated/`, and each application ebin directory
+    // with all its files, because the run loads each other module on demand.
+    let directory = directory("fixture");
+    let example = directory.join("example");
+    let consolidated = directory.join("consolidated");
+    let ebin = directory.join("otp/lib/app-1/ebin");
+    fs::create_dir_all(&example).unwrap();
+    fs::create_dir_all(&consolidated).unwrap();
+    fs::create_dir_all(&ebin).unwrap();
+    fs::write(example.join("Elixir.M.beam"), b"entry").unwrap();
+    fs::write(example.join("Elixir.Other.beam"), b"other").unwrap();
+    fs::write(example.join("pbeam_boot.beam"), b"boot").unwrap();
+    fs::write(consolidated.join("Elixir.Proto.beam"), b"proto").unwrap();
+    fs::write(ebin.join("init.beam"), b"init").unwrap();
+    fs::write(ebin.join("extra.beam"), b"extra").unwrap();
+    let lines = [
+        example.join("Elixir.M.beam"),
+        example.join("Elixir.Other.beam"),
+        consolidated.join("Elixir.Proto.beam"),
+        example.join("pbeam_boot.beam"),
+        ebin.join("init.beam"),
+    ];
+    let lines: Vec<_> = lines.iter().map(|path| path.to_str().unwrap()).collect();
+    let start = directory.join("start.list");
+    fs::write(&start, lines.join("\n")).unwrap();
+    let beams = directory.join("beams.list");
+    fs::write(&beams, lines.join("\n")).unwrap();
+    let output = directory.join("out.pbeamb");
+    let (status, stderr) = run(tool()
+        .arg("fixture")
+        .arg(&output)
+        .args(["Elixir.M", "main"])
+        .arg(&start)
+        .arg(&beams)
+        .arg(&consolidated));
+    assert_eq!(status, Some(0), "{stderr}");
+    let bytes = fs::read(&output).unwrap();
+    let bundle = pbeam_runtime::Bundle::parse(&bytes).unwrap();
+    assert_eq!(bundle.entry().module, "Elixir.M");
+    assert_eq!(bundle.resource("pbeam/Elixir.M.beam").unwrap(), b"entry");
+    assert_eq!(
+        bundle.resource("pbeam/Elixir.Other.beam").unwrap(),
+        b"other"
+    );
+    assert_eq!(
+        bundle
+            .resource("releases/pbeam/consolidated/Elixir.Proto.beam")
+            .unwrap(),
+        b"proto"
+    );
+    assert_eq!(
+        bundle.resource("lib/app-1/ebin/init.beam").unwrap(),
+        b"init"
+    );
+    // The start set does not name `extra.beam`, and the bundle carries it.
+    assert_eq!(
+        bundle.resource("lib/app-1/ebin/extra.beam").unwrap(),
+        b"extra"
+    );
+    let modules = bundle.resource("meta/start-modules").unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(modules)
+            .split_ascii_whitespace()
+            .collect::<Vec<_>>(),
+        ["Elixir.Other", "Elixir.Proto", "init"]
+    );
+    assert_eq!(
+        bundle.resource("releases/start_erl.data").unwrap(),
+        format!("{} pbeam", env!("PBEAM_OTP_RELEASE")).as_bytes()
+    );
+    fs::remove_dir_all(&directory).unwrap();
+}
+
+#[test]
+fn reports_a_fixture_beam_that_the_layout_does_not_hold() {
+    let directory = directory("fixture-error");
+    let example = directory.join("example");
+    let consolidated = directory.join("consolidated");
+    let stray = directory.join("stray");
+    fs::create_dir_all(&example).unwrap();
+    fs::create_dir_all(&consolidated).unwrap();
+    fs::create_dir_all(&stray).unwrap();
+    fs::write(example.join("Elixir.M.beam"), b"entry").unwrap();
+    fs::write(consolidated.join("Elixir.Proto.beam"), b"proto").unwrap();
+    fs::write(stray.join("stray.beam"), b"stray").unwrap();
+    let entry = example.join("Elixir.M.beam");
+    let stray = stray.join("stray.beam");
+    let start = start_list(
+        &directory,
+        &[entry.to_str().unwrap(), stray.to_str().unwrap()],
+    );
+    let beams = directory.join("beams.list");
+    fs::write(
+        &beams,
+        [entry.to_str().unwrap(), stray.to_str().unwrap()].join("\n"),
+    )
+    .unwrap();
+    let output = directory.join("out.pbeamb");
+    let (status, stderr) = run(tool()
+        .arg("fixture")
+        .arg(&output)
+        .args(["Elixir.M", "main"])
+        .arg(&start)
+        .arg(&beams)
+        .arg(&consolidated));
+    assert_eq!(status, Some(1));
+    assert!(
+        stderr.contains("is not in an OTP lib directory"),
+        "{stderr}"
+    );
+    // The start list names the entry module.
+    let start = start_list(&directory, &[stray.to_str().unwrap()]);
+    let (status, stderr) = run(tool()
+        .arg("fixture")
+        .arg(&output)
+        .args(["Elixir.M", "main"])
+        .arg(&start)
+        .arg(&beams)
+        .arg(&consolidated));
+    assert_eq!(status, Some(1));
+    assert!(stderr.contains("has no Elixir.M.beam"), "{stderr}");
+    // An input file or directory that the tool cannot read.
+    let missing = directory.join("missing");
+    let start = start_list(&directory, &[entry.to_str().unwrap()]);
+    let (status, stderr) = run(tool()
+        .arg("fixture")
+        .arg(&output)
+        .args(["Elixir.M", "main"])
+        .arg(&missing)
+        .arg(&beams)
+        .arg(&consolidated));
+    assert_eq!(status, Some(1));
+    assert!(stderr.contains("cannot read"), "{stderr}");
+    let (status, stderr) = run(tool()
+        .arg("fixture")
+        .arg(&output)
+        .args(["Elixir.M", "main"])
+        .arg(&start)
+        .arg(&missing)
+        .arg(&consolidated));
+    assert_eq!(status, Some(1));
+    assert!(stderr.contains("cannot read"), "{stderr}");
+    let (status, stderr) = run(tool()
+        .arg("fixture")
+        .arg(&output)
+        .args(["Elixir.M", "main"])
+        .arg(&start)
+        .arg(&beams)
+        .arg(&missing));
+    assert_eq!(status, Some(1));
+    assert!(
+        stderr.contains("cannot read the consolidated directory"),
+        "{stderr}"
+    );
+    let missing_beam = example.join("Elixir.Missing.beam");
+    let start = start_list(
+        &directory,
+        &[entry.to_str().unwrap(), missing_beam.to_str().unwrap()],
+    );
+    let (status, stderr) = run(tool()
+        .arg("fixture")
+        .arg(&output)
+        .args(["Elixir.M", "main"])
+        .arg(&start)
+        .arg(&beams)
+        .arg(&consolidated));
+    assert_eq!(status, Some(1));
+    assert!(stderr.contains("cannot read"), "{stderr}");
     fs::remove_dir_all(&directory).unwrap();
 }

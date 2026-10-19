@@ -188,6 +188,25 @@ fn a_start_module_resolves_from_lib_or_from_erts() {
         resolve_module(&directory, "erlang").unwrap(),
         erts.join("erlang.beam")
     );
+    // The modules of a fixture bundle are in `pbeam/`, and its consolidated
+    // protocols are in `releases/*/consolidated/`. The consolidated
+    // protocol comes before the unconsolidated protocol of the lib
+    // directory, and a module of `pbeam/` comes before both.
+    let pbeam = directory.join("pbeam");
+    fs::create_dir_all(&pbeam).unwrap();
+    fs::write(pbeam.join("example.beam"), b"beam").unwrap();
+    assert_eq!(
+        resolve_module(&directory, "example").unwrap(),
+        pbeam.join("example.beam")
+    );
+    let consolidated = directory.join("releases/pbeam/consolidated");
+    fs::create_dir_all(&consolidated).unwrap();
+    fs::write(consolidated.join("proto.beam"), b"beam").unwrap();
+    fs::write(ebin.join("proto.beam"), b"unconsolidated").unwrap();
+    assert_eq!(
+        resolve_module(&directory, "proto").unwrap(),
+        consolidated.join("proto.beam")
+    );
     assert!(resolve_module(&directory, "missing").is_err());
     assert!(resolve_module(&directory.join("missing"), "init").is_err());
     fs::remove_dir_all(&directory).unwrap();

@@ -1,11 +1,16 @@
-//! Build one executable from the `pbeam` binary and a release directory.
+//! Build one executable from the `pbeam` binary and a release directory or
+//! a fixture example.
 //!
 //! The tool writes each file of the release directory into a bundle, with
 //! its path relative to the directory as the name. It adds the BEAM files of
 //! a start list and the `meta/start-modules` resource that names them, and
 //! it writes the binary, the bundle, and the trailer that names the bundle.
-//! A run of the output without arguments extracts the bundle and starts the
-//! release from it.
+//! A fixture example has no release directory, so the `fixture` command
+//! writes the start set of the example into the layout of a release: the
+//! example modules and `pbeam_boot.beam` in `pbeam/`, the consolidated
+//! protocols in `releases/pbeam/consolidated/`, and each other module under
+//! its lib directory. A run of the output without arguments extracts the
+//! bundle and starts the entry from it.
 
 use std::{
     collections::BTreeMap,
@@ -23,9 +28,16 @@ const MAGIC: &[u8; 8] = b"PBEAMEMB";
 /// The name of the resource that lists the modules of the start set.
 const START_MODULES: &str = "meta/start-modules";
 
+/// The release version of a fixture bundle. A fixture has no release
+/// version, so the launcher reads this version from the synthetic
+/// `releases/start_erl.data` and finds the consolidated protocols in
+/// `releases/pbeam/consolidated/`.
+const FIXTURE_VERSION: &str = "pbeam";
+
 /// The usage text of the tool.
 const USAGE: &str =
     "usage: pbeam_bundle bundle <release-dir> <output> <entry-module> <entry-function> <start-list>
+       pbeam_bundle fixture <output> <entry-module> <entry-function> <start-list> <beams-list> <consolidated-dir>
        pbeam_bundle executable <runtime-binary> <bundle> <output>";
 
 fn main() -> ExitCode {
@@ -42,6 +54,20 @@ fn main() -> ExitCode {
                 &module.to_string_lossy(),
                 &function.to_string_lossy(),
                 Path::new(start),
+            ),
+            _ => {
+                eprintln!("{USAGE}");
+                return ExitCode::FAILURE;
+            }
+        },
+        Some("fixture") => match rest {
+            [output, module, function, start, beams, consolidated] => build_fixture(
+                Path::new(output),
+                &module.to_string_lossy(),
+                &function.to_string_lossy(),
+                Path::new(start),
+                Path::new(beams),
+                Path::new(consolidated),
             ),
             _ => {
                 eprintln!("{USAGE}");
@@ -100,6 +126,175 @@ fn build_bundle(
         .add_resource(START_MODULES, start.as_bytes())
         .map_err(|error| error.to_string())?;
     write_output(output, &writer.encode(), 0o644)
+}
+
+/// Write the bundle of a fixture example, which has no release directory, to
+/// `output`.
+///
+/// `start_list` is the start set of the run and `beams_list` is each module
+/// that the run loads, as `scripts/example.sh` writes them. The example
+/// modules and `pbeam_boot.beam` become `pbeam/`, the consolidated
+/// protocols of `consolidated` become `releases/pbeam/consolidated/`, and
+/// each other module keeps its path from the lib directory, as a release
+/// has it. The synthetic `releases/start_erl.data` names the version
+/// `pbeam`, so the launcher reads the same layout as the layout of a
+/// release. The resource `meta/start-modules` names each start module except
+/// the entry module and `pbeam_boot`, which the launcher adds itself.
+fn build_fixture(
+    output: &Path,
+    module: &str,
+    function: &str,
+    start_list: &Path,
+    beams_list: &Path,
+    consolidated: &Path,
+) -> Result<(), String> {
+    let start = read_list(start_list)?;
+    let beams = read_list(beams_list)?;
+    let consolidated = fs::canonicalize(consolidated).map_err(|error| {
+        format!(
+            "cannot read the consolidated directory {}: {error}",
+            consolidated.display()
+        )
+    })?;
+    let entry_file = format!("{module}.beam");
+    let example = start
+        .iter()
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name == std::ffi::OsStr::new(&entry_file))
+        })
+        .and_then(|path| fs::canonicalize(path).ok())
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+        .ok_or_else(|| {
+            format!(
+                "the start list {} has no {entry_file}",
+                start_list.display()
+            )
+        })?;
+    let mut resources = BTreeMap::new();
+    let mut ebins = BTreeMap::new();
+    for path in start.iter().chain(&beams) {
+        add_fixture_beam(path, &example, &consolidated, &mut ebins, &mut resources)?;
+    }
+    // The run loads each other module of an application on demand, so the
+    // bundle carries the whole ebin directory of each application that the
+    // build names, as a release carries its applications.
+    for (directory, prefix) in &ebins {
+        add_ebin(directory, prefix, &mut resources)?;
+    }
+    let mut modules = Vec::new();
+    for path in &start {
+        let name = module_name(path);
+        if name != module && name != "pbeam_boot" {
+            modules.push(name);
+        }
+    }
+    resources.insert(
+        "releases/start_erl.data".to_owned(),
+        format!("{} {FIXTURE_VERSION}", env!("PBEAM_OTP_RELEASE")).into_bytes(),
+    );
+    let mut writer = BundleWriter::new(
+        env!("PBEAM_OTP_RELEASE"),
+        "pbeam_bundle",
+        module,
+        function,
+        0,
+    )
+    .map_err(|error| error.to_string())?;
+    for (name, bytes) in &resources {
+        writer
+            .add_resource(name, bytes)
+            .map_err(|error| error.to_string())?;
+    }
+    let modules = modules.join(" ");
+    writer
+        .add_resource(START_MODULES, modules.as_bytes())
+        .map_err(|error| error.to_string())?;
+    write_output(output, &writer.encode(), 0o644)
+}
+
+/// Add the BEAM file `path` of a fixture build to `resources` under the name
+/// of its layout: a module of an OTP or Elixir lib directory keeps its path
+/// from the lib directory, a module of the example directory `example`
+/// becomes `pbeam/<file>`, and a module of `consolidated` becomes
+/// `releases/pbeam/consolidated/<file>`. An OTP or Elixir module also
+/// records its ebin directory in `ebins`, under the name of the directory.
+fn add_fixture_beam(
+    path: &Path,
+    example: &Path,
+    consolidated: &Path,
+    ebins: &mut BTreeMap<PathBuf, String>,
+    resources: &mut BTreeMap<String, Vec<u8>>,
+) -> Result<(), String> {
+    let canonical = fs::canonicalize(path)
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    let name = match resource_name(&canonical) {
+        Ok(name) => {
+            let ebin = canonical
+                .parent()
+                .expect("a BEAM file of a lib directory has a parent");
+            let prefix = name.rsplit_once('/').map_or("", |(prefix, _)| prefix);
+            ebins.insert(ebin.to_path_buf(), prefix.to_owned());
+            return Ok(());
+        }
+        Err(_) => {
+            let file = canonical
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if canonical.parent() == Some(example) {
+                format!("pbeam/{file}")
+            } else if canonical.parent() == Some(consolidated) {
+                format!("releases/{FIXTURE_VERSION}/consolidated/{file}")
+            } else {
+                return Err(format!(
+                    "{} is not in an OTP lib directory, the example directory {}, or the consolidated directory {}",
+                    path.display(),
+                    example.display(),
+                    consolidated.display()
+                ));
+            }
+        }
+    };
+    let bytes =
+        fs::read(&canonical).map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    resources.insert(name, bytes);
+    Ok(())
+}
+
+/// Add each file of the ebin directory `directory` to `resources` under
+/// `prefix`.
+fn add_ebin(
+    directory: &Path,
+    prefix: &str,
+    resources: &mut BTreeMap<String, Vec<u8>>,
+) -> Result<(), String> {
+    let mut files = BTreeMap::new();
+    collect(directory, directory, &mut files)?;
+    for (name, bytes) in files {
+        resources.insert(format!("{prefix}/{name}"), bytes);
+    }
+    Ok(())
+}
+
+/// Return each non-empty line of the list `path` as a path.
+fn read_list(path: &Path) -> Result<Vec<PathBuf>, String> {
+    let list = fs::read_to_string(path)
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    Ok(list
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(PathBuf::from)
+        .collect())
+}
+
+/// Return the name of the module of the BEAM file `path`.
+fn module_name(path: &Path) -> String {
+    let file = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+    file.strip_suffix(".beam").unwrap_or(&file).to_owned()
 }
 
 /// Write the binary, the bundle of `bundle`, and the trailer to `output`.
@@ -178,8 +373,7 @@ fn start_modules(
         let name = resource_name(path)?;
         let bytes =
             fs::read(path).map_err(|error| format!("cannot read {}: {error}", path.display()))?;
-        let file = name.rsplit('/').next().unwrap_or_default();
-        modules.push(file.strip_suffix(".beam").unwrap_or(file).to_owned());
+        modules.push(module_name(path));
         if name.starts_with("lib/erts-")
             && let Some(parent) = path.parent()
         {

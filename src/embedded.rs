@@ -222,9 +222,30 @@ fn bundle_path(directory: &Path, name: &str) -> Result<PathBuf, String> {
 }
 
 /// Return the path of the boot module `module` under the extracted release
-/// `root`, as `erl` finds it in `lib/*/ebin` and `erts-*/ebin`.
+/// `root`, as `erl` finds it in `lib/*/ebin` and `erts-*/ebin`. The modules
+/// of a fixture bundle are in `pbeam/`, and its consolidated protocols are
+/// in `releases/*/consolidated/`; both come before the lib directories, so
+/// a consolidated protocol comes before the unconsolidated protocol of the
+/// same name.
 fn resolve_module(root: &Path, module: &str) -> Result<PathBuf, String> {
     let file = format!("{module}.beam");
+    let pbeam = root.join("pbeam").join(&file);
+    if pbeam.is_file() {
+        return Ok(pbeam);
+    }
+    let releases = root.join("releases");
+    if let Ok(entries) = fs::read_dir(&releases) {
+        for entry in entries {
+            let consolidated = entry
+                .map_err(|error| error.to_string())?
+                .path()
+                .join("consolidated")
+                .join(&file);
+            if consolidated.is_file() {
+                return Ok(consolidated);
+            }
+        }
+    }
     let mut candidates = Vec::new();
     for entry in
         fs::read_dir(root).map_err(|error| format!("cannot read {}: {error}", root.display()))?
