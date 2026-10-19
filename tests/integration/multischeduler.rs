@@ -183,6 +183,23 @@ fn a_killed_local_child_is_not_alive() {
     assert_eq!(results[1].term, Term::Atom(ok_atom), "the killer");
 }
 
+/// A kill that the caller sent before a read of the registered name of the
+/// target is handled first, so the read reports a dead target.
+#[test]
+fn a_remote_name_read_follows_the_kill_of_the_caller() {
+    let erts_internal = pinned_beam("erts_internal");
+    let program = BeamProgram::load(&[&erts_internal, PING_PONG]).expect("the fixture loads");
+    let ok_atom = program.atom("ok").expect("the fixture names ok");
+    let results = program
+        .execute_on_schedulers(&[
+            ("ping_pong", "name_after_kill"),
+            ("ping_pong", "name_kill_hold"),
+        ])
+        .expect("the two schedulers run");
+    assert_eq!(results[0].term, Term::Atom(ok_atom.clone()), "the reader");
+    assert_eq!(results[1].term, Term::Atom(ok_atom), "the holder");
+}
+
 /// The scheduler wall time request gets one reply for each scheduler.
 #[test]
 fn disables_the_scheduler_wall_time_for_each_scheduler() {

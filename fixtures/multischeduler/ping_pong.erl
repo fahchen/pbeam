@@ -8,7 +8,7 @@
          stamp_wait/0, stamp_send/0, term_wait/0, term_send/0, port_wait/0,
          kill_watch/0, kill_hold/0, kill_child/0, port_send/0, port_other/0,
          alive_wait/0, alive_send/0, alive_child/0, scheduler_count/0,
-         wall_time/0]).
+         wall_time/0, name_after_kill/0, name_kill_hold/0, name_kill_child/0]).
 
 -define(COUNT, 100).
 
@@ -446,3 +446,24 @@ scheduler_count() ->
 %% for each scheduler.
 wall_time() ->
     erts_internal:scheduler_wall_time(false).
+
+%% The root that kills the child of the other scheduler, and then reads its
+%% registered name.
+name_after_kill() ->
+    Child = wait_for(name_kill, 100000),
+    exit(Child, kill),
+    undefined = process_info(Child, registered_name),
+    Holder = wait_for(name_kill_holder, 100000),
+    Holder ! stop,
+    ok.
+
+%% The root that holds the process that the other root kills.
+name_kill_hold() ->
+    true = register(name_kill_holder, self()),
+    _ = spawn(?MODULE, name_kill_child, []),
+    receive stop -> ok after 60000 -> timeout end.
+
+%% The process that holds a name and waits to be killed.
+name_kill_child() ->
+    true = register(name_kill, self()),
+    receive never -> ok end.

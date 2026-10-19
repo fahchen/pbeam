@@ -4230,19 +4230,36 @@ pub(super) fn process_info(
     // deliveries of the target (`erl_bif_info.c:1403-1416`).
     scheduler.drain_inbox();
     let Some(target) = scheduler.process(*id) else {
-        // A live process of another scheduler. The name table of the node
-        // answers its registered name; another item reads the process state
-        // of its scheduler and stays unsupported.
+        // A live process of another scheduler. The request goes to its
+        // scheduler, so the answer comes after the signals that the caller
+        // sent before (`erl_bif_info.c:1374-1401`). Another item reads the
+        // process state of its scheduler and stays unsupported.
         if scheduler.remote_owner(*id).is_some() {
             if let Term::Atom(name) = item
                 && scheduler.atoms.name_of(name) == "registered_name"
             {
-                let value = match scheduler.registered_name_of(*id) {
-                    Some(registered) => Term::tuple(vec![item.clone(), Term::Atom(registered)]),
-                    None => Term::nil(),
+                let caller = scheduler.current_process_mut().id;
+                let reference = scheduler.make_ref()?;
+                scheduler.current_process_mut().mailbox.set_save_end();
+                let request = Signal::ProcessInfo {
+                    requester: caller,
+                    reference,
+                    item: item.clone(),
                 };
-                scheduler.current_process_mut().bump_reductions(1);
-                return Ok(signals_return(scheduler, process, value));
+                if scheduler.send_signal(Some(caller), *id, request).is_err() {
+                    // The target exited before its scheduler took the
+                    // request.
+                    return Ok(signals_return(
+                        scheduler,
+                        process,
+                        Term::static_atom("undefined"),
+                    ));
+                }
+                return Ok(Trap {
+                    module: "erts_internal",
+                    function: "await_result",
+                    arguments: vec![Term::Reference(reference)],
+                });
             }
             return Err(unsupported(&scheduler.atoms));
         }
@@ -4350,6 +4367,10 @@ pub(super) fn is_process_alive(
         }
         Some(_) => "true",
     };
+    // The target can send a signal to the caller after the first drain and
+    // then exit. Apply the inbox again, so the caller handles the signal
+    // before the result (`erl_bif_info.c:4098-4105`).
+    scheduler.drain_inbox();
     Ok(signals_return(scheduler, pid, Term::static_atom(alive)))
 }
 
