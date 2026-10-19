@@ -3,7 +3,7 @@
 # The ERTS run uses one scheduler (+S 1), because the pbeam binary runs all processes on one scheduler thread. With more schedulers, ERTS can run two busy processes at the same time, and the order of their output changes from run to run.
 # Usage: bash scripts/example.sh <name> [--erts] [--no-build] [--policy <module>]
 # The example is the Elixir sources examples/<name>/*.ex. The entry is main/0 of the module with the camel-case name of the example, for example HelloWorld for hello_world.
-# The script has two steps, the build and the run. The build writes all the files that a run needs into target/examples/<name>/. The run starts only erl or the pbeam binary. With --no-build, the script does not build: it reads a list of the last build and runs it. Thus the tests build each example once, and the ERTS run and the pbeam run execute the same compiled modules.
+# The script has two steps, the build and the run. The build writes all the files that a run needs into target/examples/<name>/. The run starts only erl or the pbeam binary. With --no-build, the script does not build: it reads a list of the last build and runs it. Thus the tests build each example once, and the ERTS run and the pbeam run execute the same compiled modules. With --write-start <file>, the script writes the start set of the run into <file> and stops after the build, so that a bundle reads the same start set.
 # The build compiles the example modules and pbeam_boot.beam into target/examples/<name>/, and consolidates the Elixir protocols into target/examples/<name>/consolidated/, as `mix run` consolidates them (scripts/example_beams.exs). It then writes the code path of the ERTS run into target/examples/<name>/erts.paths, one directory for each line. It writes the start set of the pbeam run into target/examples/<name>/pbeam.start, one BEAM file for each line: the boot modules, the example modules, pbeam_boot.beam, the preloaded modules of ERTS, and the consolidated protocols. The pbeam run loads each other module on demand through error_handler and code_server, as an interactive-mode ERTS run does. A policy run gives the whole list of the build (target/examples/<name>/pbeam.beams) instead, because the boot gate denies a message of a runtime process to a boot process. The build writes each called module that the PBeam loader does not load, with the reason, into target/examples/<name>/pbeam.unloaded.
 # The terra_counter example also compiles the Terra sources of the pinned commit, which scripts/terra.sh downloads or finds in PBEAM_TERRA_SRC.
 # With --policy <module>, the pbeam run gives --boot --policy <module> to the pbeam binary. The boot of pbeam_boot then runs with the boot authority, and the policy module of the build gives the capabilities of the entry when pbeam_boot enters the runtime (docs/capability-security-migration.md, section "Decisions of #463"). The ERTS run has no policy, so the script rejects --policy with --erts.
@@ -136,8 +136,6 @@ if [[ -f examples/$name/mix.exs ]]; then
   run "${start[@]}"
 fi
 
-[[ -z $start_file ]] || fail '--write-start works only for a release example, with examples/<name>/mix.exs'
-
 # With --no-build, run the last build with the lists that it wrote: the start set of BEAM files, and the code path directories. A policy run loads each other module of the run before the entry: the boot gate denies a message of a runtime process to a boot process (docs/capability-security-migration.md), so a policy run gives the whole list of the build.
 if [[ $build == false ]]; then
   list=$output/pbeam.start
@@ -157,6 +155,11 @@ if [[ $build == false ]]; then
   while IFS= read -r item; do
     paths+=("$item")
   done <"$path_list"
+  # The bundle tool reads the start set of the last build.
+  if [[ -n $start_file ]]; then
+    printf '%s\n' "${beams[@]}" >"$start_file"
+    exit 0
+  fi
   run "${beams[@]}"
 fi
 
@@ -224,6 +227,11 @@ rm -rf "$work"
 trap - EXIT
 
 paths=("${path_directories[@]}")
+# The bundle tool reads the start set of the same build.
+if [[ -n $start_file ]]; then
+  printf '%s\n' "${start[@]}" >"$start_file"
+  exit 0
+fi
 # A policy run gives the whole list: the runtime-to-boot gate denies the load call of a runtime process to `code_server`.
 if [[ ${#policy[@]} -gt 0 ]]; then run "${beams[@]}"; fi
 run "${start[@]}"

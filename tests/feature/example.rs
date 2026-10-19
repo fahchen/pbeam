@@ -9,11 +9,13 @@
 //! that build, and the ERTS run and the `pbeam` run execute the same
 //! compiled modules. Each example has one test, and nextest runs each test
 //! in its own process, so a test run builds each example once. The
-//! `terra_counter` example has two more tests, of the check of its Terra
-//! source: they stop `scripts/example.sh` in `scripts/terra.sh` before it
-//! compiles a file, and that script removes the lists of the last build only
-//! before it renames a file into the output directory, so a build that stops
-//! early keeps the lists and the files of the last complete build. The
+//! `terra_counter` example has three more tests: two of the check of its
+//! Terra source, and one of the one-file executable of the reference
+//! scenario. The two source tests stop `scripts/example.sh` in
+//! `scripts/terra.sh` before it compiles a file, and that script removes the
+//! lists of the last build only before it renames a file into the output
+//! directory, so a build that stops early keeps the lists and the files of
+//! the last complete build. The
 //! script renames each file of the build into `target/examples/<name>/`, so
 //! a parallel build of the same example cannot give a partial file.
 //!
@@ -94,6 +96,93 @@ fn runs_hello_world_with_one_command_as_pinned_erts() {
         );
         assert_eq!(parts(&pbeam), parts(&erts), "PBeam with LC_ALL {locale:?}");
     }
+
+    // One executable carries the same build and runs in a directory that
+    // holds no other file, with no installed OTP.
+    assert_eq!(
+        parts(&run_hello_world_one_file()),
+        ("Hello, world!\\n".to_owned(), String::new(), Some(0))
+    );
+}
+
+/// Build `examples/hello_world` as one executable, run it in a clean
+/// directory, and return its output. The run uses no installed OTP: `PATH`
+/// holds no `erl` or `elixir`, `HOME` is an empty directory, and the
+/// variable `PBEAM_OTP_ROOT` is unset.
+fn run_hello_world_one_file() -> Output {
+    use std::fs;
+    use std::path::PathBuf;
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let directory =
+        std::env::temp_dir().join(format!("pbeam-one-file-{}-hello_world", std::process::id()));
+    let _ = fs::remove_dir_all(&directory);
+    let clean = directory.join("clean");
+    let home = directory.join("home");
+    let temporary = directory.join("tmp");
+    fs::create_dir_all(&clean).unwrap();
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&temporary).unwrap();
+    let start = directory.join("start.list");
+    let status = Command::new("bash")
+        .arg("scripts/example.sh")
+        .args(["hello_world", "--no-build", "--write-start"])
+        .arg(&start)
+        .current_dir(root)
+        .status()
+        .expect("scripts/example.sh runs");
+    assert!(status.success(), "the start list builds");
+    let build = PathBuf::from(root).join("target/examples/hello_world");
+    let bundle = directory.join("hello_world.pbeamb");
+    let status = Command::new(env!("CARGO_BIN_EXE_pbeam_bundle"))
+        .arg("fixture")
+        .arg(&bundle)
+        .args(["Elixir.HelloWorld", "main"])
+        .arg(&start)
+        .arg(build.join("pbeam.beams"))
+        .arg(build.join("consolidated"))
+        .status()
+        .expect("pbeam_bundle runs");
+    assert!(status.success(), "the bundle builds");
+    let executable = clean.join("hello_world");
+    let status = Command::new(env!("CARGO_BIN_EXE_pbeam_bundle"))
+        .arg("executable")
+        .arg(env!("CARGO_BIN_EXE_pbeam"))
+        .arg(&bundle)
+        .arg(&executable)
+        .status()
+        .expect("pbeam_bundle runs");
+    assert!(status.success(), "the executable builds");
+    let mut command = Command::new(&executable);
+    command
+        .current_dir(&clean)
+        .env_clear()
+        .env("HOME", &home)
+        .env("PATH", "/usr/bin:/bin")
+        .env("TMPDIR", &temporary);
+    if std::env::var_os("LLVM_PROFILE_FILE").is_some() {
+        // The coverage build writes its profile file to the working
+        // directory. Keep that file out of the clean directory.
+        command.env("LLVM_PROFILE_FILE", directory.join("pbeam-%p.profraw"));
+    }
+    let output = run_with_time_limit(&mut command, Stdio::piped(), RUN_TIME_LIMIT);
+    // The launcher removes its extraction at the exit, and the run writes
+    // no file next to the executable.
+    assert!(
+        fs::read_dir(&temporary).unwrap().next().is_none(),
+        "the run keeps its extracted directory"
+    );
+    let entries: Vec<_> = fs::read_dir(&clean)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert_eq!(
+        entries,
+        ["hello_world"],
+        "the clean run writes no other file next to the executable"
+    );
+    fs::remove_dir_all(&directory).unwrap();
+    output
 }
 
 #[test]
@@ -559,9 +648,35 @@ fn run_restricted_guest(policy: &str, arguments: &[&str]) -> Output {
 }
 
 /// Run `scripts/example.sh terra_counter` with `arguments` in a
-/// pseudo-terminal, wait until the screen shows the counter prompt, then
-/// type `q`. Return the bytes that the run wrote and a text of its exit
+/// pseudo-terminal, wait until the screen shows the counter prompt, send
+/// `keys`, and return the bytes that the run wrote and a text of its exit
 /// status.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let (bytes, status) = run_terra_counter_in_terminal(&["terra_counter", "--erts", "--no-build"], b"q");
+/// assert!(status.starts_with("exit status: 0"));
+/// ```
+#[cfg(target_os = "macos")]
+fn run_terra_counter_in_terminal(arguments: &[&str], keys: &[u8]) -> (Vec<u8>, String) {
+    let mut command = Command::new("bash");
+    command
+        .arg("scripts/example.sh")
+        .args(arguments)
+        .env("PBEAM_BIN", env!("CARGO_BIN_EXE_pbeam"))
+        // Terra Counter is an interactive program of the Terra target, which
+        // is a terminal of the type xterm-256color (examples/terra_counter/README.md).
+        // With `TERM=dumb` or without `TERM`, the run draws the screen, but
+        // the runtime keeps the terminal in cooked mode and ignores each key,
+        // so the counter never ends (measured on macOS).
+        .env("TERM", "xterm-256color");
+    run_in_terminal(command, keys)
+}
+
+/// Run `command` in a pseudo-terminal, wait until the screen shows the
+/// counter prompt, send `keys`, and return the bytes that the run wrote and
+/// a text of its exit status.
 ///
 /// The child owns the pseudo-terminal as its controlling terminal. Terra
 /// Counter needs that ownership, because it enters raw mode with
@@ -578,28 +693,18 @@ fn run_restricted_guest(policy: &str, arguments: &[&str]) -> Output {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let (bytes, status) = run_terra_counter_in_terminal(&["terra_counter", "--erts", "--no-build"]);
+/// let (bytes, status) = run_in_terminal(Command::new("true"), b"q");
 /// assert!(status.starts_with("exit status: 0"));
 /// ```
 #[cfg(target_os = "macos")]
-fn run_terra_counter_in_terminal(arguments: &[&str]) -> (Vec<u8>, String) {
+fn run_in_terminal(mut command: Command, keys: &[u8]) -> (Vec<u8>, String) {
     use std::io::{Read, Write};
     use std::os::fd::AsRawFd;
     use std::os::unix::process::CommandExt;
     use std::sync::{Arc, Mutex};
 
     let (master, slave) = open_terminal().expect("a pseudo-terminal");
-    let mut command = Command::new("bash");
     command
-        .arg("scripts/example.sh")
-        .args(arguments)
-        .env("PBEAM_BIN", env!("CARGO_BIN_EXE_pbeam"))
-        // Terra Counter is an interactive program of the Terra target, which
-        // is a terminal of the type xterm-256color (examples/terra_counter/README.md).
-        // With `TERM=dumb` or without `TERM`, the run draws the screen, but
-        // the runtime keeps the terminal in cooked mode and ignores each key,
-        // so the counter never ends (measured on macOS).
-        .env("TERM", "xterm-256color")
         .stdin(Stdio::from(slave.try_clone().unwrap()))
         .stdout(Stdio::from(slave.try_clone().unwrap()))
         .stderr(Stdio::from(slave.try_clone().unwrap()));
@@ -690,10 +795,10 @@ fn run_terra_counter_in_terminal(arguments: &[&str]) -> (Vec<u8>, String) {
         );
         thread::sleep(Duration::from_millis(10));
     }
-    // The counter waits for a key. Type `q`, so that the runtime restores the
-    // terminal and `main/0` writes its result.
+    // The counter waits for a key. Send `keys`, so that the runtime restores
+    // the terminal and `main/0` writes its result.
     std::fs::File::from(master.try_clone().unwrap())
-        .write_all(b"q")
+        .write_all(keys)
         .unwrap();
     // The screen is up, so this wait does not cover the build. A run that
     // does not end after the key uses the limit of the other runs.
@@ -942,8 +1047,9 @@ fn restores_the_terminal_before_the_result_of_terra_counter_as_interactive_erts(
     // emulator stops. The test needs the terminal handling of both runs, so
     // `run_terra_counter_in_terminal` reports that failure, and it does not
     // compare a result of a run that reports it.
-    let (erts, erts_status) = run_terra_counter_in_terminal(&["terra_counter", "--erts"]);
-    let (pbeam, pbeam_status) = run_terra_counter_in_terminal(&["terra_counter", "--no-build"]);
+    let (erts, erts_status) = run_terra_counter_in_terminal(&["terra_counter", "--erts"], b"q");
+    let (pbeam, pbeam_status) =
+        run_terra_counter_in_terminal(&["terra_counter", "--no-build"], b"q");
     assert_eq!(erts_status, pbeam_status, "status");
     assert!(erts_status.starts_with("exit status: 0"), "{erts_status}");
     let (erts_before, erts_result) = restore_before_result(&erts);
@@ -963,6 +1069,117 @@ fn restores_the_terminal_before_the_result_of_terra_counter_as_interactive_erts(
         "PBeam wrote the result before the restore sequence: {:?}",
         String::from_utf8_lossy(pbeam_before)
     );
+}
+
+/// Build `examples/terra_counter` as one executable, run the scenario of the
+/// Terra reference in a clean directory, and compare the result and the exit
+/// status with the pinned ERTS.
+///
+/// The run uses no installed OTP: `PATH` holds no `erl` or `elixir`, `HOME`
+/// is an empty directory, and the variable `PBEAM_OTP_ROOT` is unset. The
+/// keys are those of the reference run, `j j k q`, so `Terra.run/1` returns
+/// `{:ok, 1}` (docs/terra-reference.md).
+#[test]
+#[cfg(target_os = "macos")]
+fn runs_the_terra_counter_executable_in_a_clean_directory() {
+    use std::fs;
+    use std::path::PathBuf;
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let directory = std::env::temp_dir().join(format!(
+        "pbeam-one-file-{}-terra_counter",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&directory);
+    let clean = directory.join("clean");
+    let home = directory.join("home");
+    let temporary = directory.join("tmp");
+    fs::create_dir_all(&clean).unwrap();
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&temporary).unwrap();
+    let start = directory.join("start.list");
+    let status = Command::new("bash")
+        .arg("scripts/example.sh")
+        .args(["terra_counter", "--write-start"])
+        .arg(&start)
+        .current_dir(root)
+        .status()
+        .expect("scripts/example.sh runs");
+    assert!(status.success(), "the start list builds");
+    let build = PathBuf::from(root).join("target/examples/terra_counter");
+    let bundle = directory.join("terra_counter.pbeamb");
+    let status = Command::new(env!("CARGO_BIN_EXE_pbeam_bundle"))
+        .arg("fixture")
+        .arg(&bundle)
+        .args(["Elixir.TerraCounter", "main"])
+        .arg(&start)
+        .arg(build.join("pbeam.beams"))
+        .arg(build.join("consolidated"))
+        .status()
+        .expect("pbeam_bundle runs");
+    assert!(status.success(), "the bundle builds");
+    let executable = clean.join("terra_counter");
+    let status = Command::new(env!("CARGO_BIN_EXE_pbeam_bundle"))
+        .arg("executable")
+        .arg(env!("CARGO_BIN_EXE_pbeam"))
+        .arg(&bundle)
+        .arg(&executable)
+        .status()
+        .expect("pbeam_bundle runs");
+    assert!(status.success(), "the executable builds");
+    let mut command = Command::new(&executable);
+    command
+        .current_dir(&clean)
+        .env_clear()
+        .env("HOME", &home)
+        .env("PATH", "/usr/bin:/bin")
+        .env("TMPDIR", &temporary)
+        .env("TERM", "xterm-256color")
+        .env("LANG", "en_US.UTF-8")
+        .env("LC_ALL", "en_US.UTF-8");
+    if std::env::var_os("LLVM_PROFILE_FILE").is_some() {
+        // The coverage build writes its profile file to the working
+        // directory. Keep that file out of the clean directory.
+        command.env("LLVM_PROFILE_FILE", directory.join("pbeam-%p.profraw"));
+    }
+    let (bytes, status) = run_in_terminal(command, b"jjkq");
+    assert!(status.starts_with("exit status: 0"), "{status}");
+    let (before, result) = restore_before_result(&bytes);
+    assert!(
+        result.starts_with(b"{:ok, 1}"),
+        "{:?}",
+        String::from_utf8_lossy(result)
+    );
+    assert!(
+        !before.windows(6).any(|window| window == b"{:ok, "),
+        "the executable wrote the result before the restore sequence: {:?}",
+        String::from_utf8_lossy(before)
+    );
+    // The launcher removes its extraction at the exit, and the run writes no
+    // file next to the executable.
+    assert!(
+        fs::read_dir(&temporary).unwrap().next().is_none(),
+        "the run keeps its extracted directory"
+    );
+    let entries: Vec<_> = fs::read_dir(&clean)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert_eq!(
+        entries,
+        ["terra_counter"],
+        "the clean run writes no other file next to the executable"
+    );
+    // The pinned ERTS runs the same build with the same keys.
+    let (erts, erts_status) =
+        run_terra_counter_in_terminal(&["terra_counter", "--erts", "--no-build"], b"jjkq");
+    assert_eq!(erts_status, status, "status");
+    assert_eq!(
+        restore_before_result(&erts).1,
+        result,
+        "the result of the reference run"
+    );
+    fs::remove_dir_all(&directory).unwrap();
 }
 
 #[test]
