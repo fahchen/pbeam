@@ -516,7 +516,8 @@ port_use() ->
 
 %% The root that sends its port to the other scheduler.
 port_give() ->
-    Port = open_port({spawn_executable, "/usr/bin/true"}, [binary]),
+    %% The port stays open until the receiver uses it.
+    Port = open_port({spawn_executable, "/bin/cat"}, [binary]),
     ok = wait_registered(port_use_name, 100000),
     port_use_name ! {port, Port},
     receive done -> ok after 6000 -> timeout end.
