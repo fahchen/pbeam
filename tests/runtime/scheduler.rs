@@ -2164,6 +2164,29 @@ fn a_signal_to_a_dead_process_answers_a_group_leader_and_an_is_alive() {
 }
 
 #[test]
+fn a_signal_to_a_dead_process_answers_a_process_info() {
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    let root = ProcessId(0);
+    let reference = Reference::ordinary(2).unwrap();
+    scheduler.dead_target_signal(
+        ProcessId(99),
+        Signal::ProcessInfo {
+            requester: root,
+            reference,
+            item: atom("registered_name"),
+        },
+    );
+    assert_eq!(
+        messages(&scheduler, 0),
+        vec![Term::tuple(vec![
+            Term::Reference(reference),
+            Term::static_atom("undefined")
+        ])]
+    );
+}
+
+#[test]
 fn a_signal_to_a_dead_process_answers_a_link() {
     let mut scheduler = test_scheduler();
     scheduler.start(frame(), vec![], allow_all()).unwrap();

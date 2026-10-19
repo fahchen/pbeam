@@ -283,6 +283,15 @@ impl Scheduler {
                 requester,
                 reply(reference, Term::static_atom("false")),
             ),
+            Signal::ProcessInfo {
+                requester,
+                reference,
+                ..
+            } => self.send_message(
+                target,
+                requester,
+                reply(reference, Term::static_atom("undefined")),
+            ),
             _ => {}
         }
     }
