@@ -1041,6 +1041,13 @@ pub(super) fn port_connect(
             if let Some(denied) = port_denial(scheduler, id, Operation::Command)?.or(boot) {
                 return Ok(denied);
             }
+            // The port keeps the services of its scheduler: the data
+            // messages and the exit of a remote owner do not reach it.
+            if scheduler.remote_owner(pid).is_some() {
+                return Err(error(
+                    "unsupported: erlang:port_connect/2 to a process of another scheduler",
+                ));
+            }
             let connected = scheduler.connect_port(id, pid);
             if connected {
                 scheduler

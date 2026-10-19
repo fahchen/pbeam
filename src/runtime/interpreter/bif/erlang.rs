@@ -5094,16 +5094,29 @@ pub(super) fn registered(scheduler: &mut Scheduler) -> Result<BifResult, BeamErr
 
 /// Run `erlang:ports/0` as `ports_0` (`bif.c:4125-4128`) does with
 /// `erts_ptab_list` (`erl_ptab.c:738-...`): return each open port. ERTS
-/// walks its port table, so the order is not part of the result.
+/// walks its port table, so the order is not part of the result. A run
+/// with scheduler threads fails, because each scheduler keeps its own port
+/// table.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(matches!(ports(&mut scheduler), BifResult::Value(Term::Nil)));
+/// assert!(matches!(ports(&mut scheduler)?, BifResult::Value(Term::Nil)));
 /// ```
-pub(super) fn ports(scheduler: &mut Scheduler) -> BifResult {
+///
+/// # Errors
+///
+/// The unsupported error of a run with scheduler threads.
+pub(super) fn ports(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
+    // The port table stays with each scheduler, so this run cannot list
+    // the ports of the node yet.
+    if scheduler.shared().is_some() {
+        return Err(error(
+            "unsupported: erlang:ports/0 in a run of execute_on_schedulers",
+        ));
+    }
     let ports = scheduler.resources.borrow_mut::<Ports>().ids();
-    Value(Term::list_from(ports.into_iter().map(Term::Port)))
+    Ok(Value(Term::list_from(ports.into_iter().map(Term::Port))))
 }
 
 /// Run `erlang:alias/1` as `alias_1` (`bif.c:5852-5892`) does. The options

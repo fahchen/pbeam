@@ -9,7 +9,8 @@
          kill_watch/0, kill_hold/0, kill_child/0, port_send/0, port_other/0,
          alive_wait/0, alive_send/0, alive_child/0, scheduler_count/0,
          wall_time/0, name_after_kill/0, name_kill_hold/0, name_kill_child/0,
-         decode_atom/0, persistent_put/0, ets_new/0]).
+         decode_atom/0, persistent_put/0, ets_new/0, port_transfer/0,
+         port_transfer_hold/0, ports_list/0]).
 
 -define(COUNT, 100).
 
@@ -483,3 +484,19 @@ persistent_put() ->
 %% share the tables.
 ets_new() ->
     ets:new(ets_probe, []).
+
+%% The root that connects its port to a process of the other scheduler.
+port_transfer() ->
+    Pid = wait_for(transfer_name, 100000),
+    Port = open_port({spawn_executable, "/usr/bin/true"}, [binary]),
+    true = port_connect(Port, Pid),
+    ok.
+
+%% The root that holds a name for the port transfer of the other root.
+port_transfer_hold() ->
+    true = register(transfer_name, self()),
+    receive stop -> ok after 6000 -> timeout end.
+
+%% The root that lists the ports of the node.
+ports_list() ->
+    erlang:ports().

@@ -183,6 +183,40 @@ fn a_killed_local_child_is_not_alive() {
     assert_eq!(results[1].term, Term::Atom(ok_atom), "the killer");
 }
 
+/// A transfer of a port to a process of another scheduler fails with a
+/// clear error.
+#[test]
+fn rejects_a_port_transfer_across_schedulers() {
+    let erlang = pinned_beam("erlang");
+    let program = BeamProgram::load(&[&erlang, PING_PONG]).expect("the fixture loads");
+    let error = program
+        .execute_on_schedulers(&[
+            ("ping_pong", "port_transfer"),
+            ("ping_pong", "port_transfer_hold"),
+        ])
+        .expect_err("the port transfer is unsupported");
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported: erlang:port_connect/2 to a process of another scheduler"),
+        "{error}"
+    );
+}
+
+/// The port list of a run with scheduler threads is not readable yet, and
+/// the run stops with a clear error.
+#[test]
+fn rejects_the_port_list_of_a_scheduler_run() {
+    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
+    let error = program
+        .execute_on_schedulers(&[("ping_pong", "ports_list"), ("ping_pong", "info_hold")])
+        .expect_err("the port list is unsupported");
+    assert!(
+        error.to_string().contains("unsupported: erlang:ports/0"),
+        "{error}"
+    );
+}
+
 /// A persistent term use in a run with scheduler threads fails with a
 /// clear error.
 #[test]

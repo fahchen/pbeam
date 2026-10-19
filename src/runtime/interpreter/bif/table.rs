@@ -272,7 +272,7 @@ bifs! {
     erlang:port_get_data/1 as ErlangPortGetData1 => |cx, [port]| erlang::port_get_data(cx.scheduler, port),
     erlang:port_set_data/2 as ErlangPortSetData2 => |cx, [port, data]| erlang::port_set_data(cx.scheduler, port, data),
     erlang:port_to_list/1 as ErlangPortToList1 => |cx, [term]| Ok(erlang::port_to_list(term, &cx.scheduler.atoms)),
-    erlang:ports/0 as ErlangPorts0 => |cx, []| Ok(erlang::ports(cx.scheduler)),
+    erlang:ports/0 as ErlangPorts0 => |cx, []| erlang::ports(cx.scheduler),
     erlang:posixtime_to_universaltime/1 as ErlangPosixtimeToUniversaltime1 => |_, [time]| Ok(erlang::posixtime_to_universaltime(time)),
     erlang:pre_loaded/0 as ErlangPreLoaded0 => |cx, []| erlang::pre_loaded(cx.scheduler),
     erlang:process_flag/2 as ErlangProcessFlag2 => |cx, [flag, value]| erlang::process_flag(cx, flag, value),
