@@ -79,7 +79,7 @@ fn lists_the_text_of_a_pid_and_of_a_port_as_pinned_erts() {
 use crate::beam::BeamModule;
 use crate::runtime::capability::{AllowAll, Policy};
 use crate::runtime::process::Start;
-use std::{collections::HashMap, rc::Rc};
+use std::{collections::HashMap, sync::Arc};
 
 /// Return a code table with one module `fixture` and the function `main/0`.
 ///
@@ -104,7 +104,7 @@ fn fixture_code() -> CodeTable {
         ],
     )
     .unwrap();
-    CodeTable::new(HashMap::from([("fixture".into(), Rc::new(module))]))
+    CodeTable::new(HashMap::from([("fixture".into(), Arc::new(module))]))
 }
 
 #[test]
@@ -273,7 +273,7 @@ fn loads_over_old_code_and_returns_not_purged_for_current_and_old_code() {
         ],
     )
     .unwrap();
-    scheduler.code = CodeTable::new(HashMap::from([("fixture".into(), Rc::new(first))]));
+    scheduler.code = CodeTable::new(HashMap::from([("fixture".into(), Arc::new(first))]));
     let frame = scheduler.code.mfa_frame("fixture", "main", 0).unwrap();
     scheduler.start(frame, vec![], AllowAll.initial()).unwrap();
     scheduler.schedule_next().unwrap();
