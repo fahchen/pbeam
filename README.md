@@ -80,7 +80,7 @@ Work is managed in [GitHub Issues](https://github.com/fahchen/pbeam/issues),
 
 Each milestone has a dedicated tracking issue. Epics and tasks are assigned to the GitHub milestone; native sub-issue links express the hierarchy and native blocked-by links express dependencies. Milestone trackers and epics list their issues as linked bullets.
 
-The owner decisions of 2026-10-15 set the order of the open milestones. M11 follows M5. M6 Capability security is postponed until after M9. The landed capability checks of epic [#305](https://github.com/fahchen/pbeam/issues/305) stay, and M7 to M9 keep the accepted security contracts. The milestone numbers do not change.
+The owner decisions of 2026-10-15 set the order of the open milestones. M11 follows M5. The owner decision of 2026-10-19 postponed M6 Capability security again after M9 closed, so M10 Multiple schedulers is next. M6 resumes only after a new owner decision. The landed capability checks of epic [#305](https://github.com/fahchen/pbeam/issues/305) stay, and M7 to M9 keep the accepted security contracts. The milestone numbers do not change.
 
 1. M5 Interactive host I/O ([tracker #38](https://github.com/fahchen/pbeam/issues/38))
 2. M11 Serve HTTP with Plug and Bandit ([tracker #650](https://github.com/fahchen/pbeam/issues/650))
