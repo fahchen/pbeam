@@ -4,7 +4,7 @@
          info_watch/0, info_hold/0, info_item/0, info_all/0,
          down_wait/0, down_hold/0, atom_create/0, drain_wait/0, drain_hold/0,
          len_wait/0, len_hold/0, process_list/0, child_wait/0, child_send/0,
-         child_hold/0]).
+         child_hold/0, name_wait/0, name_send/0, reference_name/0]).
 
 -define(COUNT, 100).
 
@@ -298,3 +298,23 @@ child_send() ->
     Pid ! ready,
     true = register(child_ready, self()),
     receive stop -> ok after 2000 -> timeout end.
+
+%% The root that receives a message through its registered name.
+name_wait() ->
+    true = register(name_send, self()),
+    receive {hello, From} -> From ! {reply, ok} end,
+    ok.
+
+%% The root that sends to a registered name of another scheduler.
+name_send() ->
+    ok = wait_registered(name_send, 100000),
+    name_send ! {hello, self()},
+    receive {reply, Reply} -> Reply after 60000 -> timeout end.
+
+%% The reference entry for the pinned ERTS: a send to a registered name.
+reference_name() ->
+    Self = self(),
+    _ = spawn(fun() -> name_wait() end),
+    ok = wait_registered(name_send, 100000),
+    name_send ! {hello, Self},
+    receive {reply, Reply} -> Reply after 60000 -> timeout end.

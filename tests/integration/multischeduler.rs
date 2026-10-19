@@ -152,6 +152,43 @@ fn rejects_an_atom_that_guest_code_creates() {
     );
 }
 
+/// A send to a registered name reaches its process on another scheduler.
+#[test]
+fn sends_to_a_registered_name_across_schedulers() {
+    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
+    let ok_atom = program.atom("ok").expect("the fixture names ok");
+    let results = program
+        .execute_on_schedulers(&[("ping_pong", "name_wait"), ("ping_pong", "name_send")])
+        .expect("the two schedulers run");
+    assert_eq!(results[0].term, Term::Atom(ok_atom.clone()), "the receiver");
+    assert_eq!(results[1].term, Term::Atom(ok_atom), "the sender");
+}
+
+/// The send to a registered name returns the same result on the pinned
+/// ERTS.
+#[test]
+fn the_pinned_erts_sends_to_the_same_registered_name() {
+    let directory =
+        std::env::temp_dir().join(format!("pbeam-multischeduler-{}-name", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).expect("the directory of the reference run");
+    let beam = directory.join("ping_pong.beam");
+    std::fs::write(&beam, PING_PONG).expect("the fixture file");
+    let output = std::process::Command::new("erl")
+        .args(["+S", "2", "-noshell"])
+        .args([
+            "-eval",
+            "io:format(\"~p~n\", [ping_pong:reference_name()]), halt().",
+        ])
+        .arg("-pa")
+        .arg(&directory)
+        .output()
+        .expect("the pinned ERTS runs");
+    std::fs::remove_dir_all(&directory).expect("the reference directory leaves");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "ok\n");
+}
+
 /// A message that arrives while its receiver runs is visible to a receive
 /// with no wait, also when the sender registers a name after the message.
 #[test]
