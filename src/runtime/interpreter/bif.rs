@@ -683,6 +683,7 @@ macro_rules! bifs {
                 || matches!(
                     (module, name),
                     ("erlang", "finish_loading")
+                        | ("erlang", "delete_module")
                         | ("erts_internal", "prepare_loading")
                         | ("erts_internal", "purge_module")
                 );

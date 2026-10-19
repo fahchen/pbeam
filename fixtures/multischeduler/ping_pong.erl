@@ -14,7 +14,7 @@
          port_term/0, port_term_give/0, atomics_new/0, timer_remote/0,
          timer_hold/0, alias_create/0, monitor_alias/0, alias_hold/0,
          timer_named/0, timer_read/0, timer_give/0, system_flag_depth/0,
-         finish_loading/0]).
+         finish_loading/0, delete_module/0, regex_run/0, regex_give/0]).
 
 -define(COUNT, 100).
 
@@ -599,3 +599,22 @@ system_flag_depth() ->
 %% run with scheduler threads.
 finish_loading() ->
     erlang:finish_loading([]).
+
+%% The root that deletes code. The code table stays with each scheduler in
+%% a run with scheduler threads.
+delete_module() ->
+    erlang:delete_module(code_loading_probe).
+
+%% The root that runs the compiled expression of the other scheduler.
+regex_run() ->
+    true = register(regex_name, self()),
+    receive {regex, Pattern} ->
+        re:run(<<"abc">>, Pattern, [])
+    end.
+
+%% The root that sends its compiled expression to the other scheduler.
+regex_give() ->
+    {ok, Pattern} = re:compile("abc", []),
+    ok = wait_registered(regex_name, 100000),
+    regex_name ! {regex, Pattern},
+    receive done -> ok after 6000 -> timeout end.

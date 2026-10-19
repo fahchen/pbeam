@@ -263,6 +263,41 @@ fn rejects_a_timer_for_another_scheduler() {
     );
 }
 
+/// A code delete in a run with scheduler threads fails with a clear error.
+#[test]
+fn rejects_a_code_delete() {
+    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
+    let error = program
+        .execute_on_schedulers(&[
+            ("ping_pong", "delete_module"),
+            ("ping_pong", "monitor_hold"),
+        ])
+        .expect_err("the code delete is unsupported");
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported: erlang:delete_module/1 in a run of execute_on_schedulers"),
+        "{error}"
+    );
+}
+
+/// A compiled expression of another scheduler fails with a clear error.
+#[test]
+fn rejects_a_compiled_expression_of_another_scheduler() {
+    let re = pinned_beam("re");
+    let prim_tty = pinned_beam("prim_tty");
+    let program = BeamProgram::load(&[PING_PONG, &prim_tty, &re]).expect("the fixture loads");
+    let error = program
+        .execute_on_schedulers(&[("ping_pong", "regex_run"), ("ping_pong", "regex_give")])
+        .expect_err("the expression is unsupported");
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported: a compiled regular expression of another scheduler"),
+        "{error}"
+    );
+}
+
 /// A change of a node flag that stays with a scheduler fails with a clear
 /// error.
 #[test]

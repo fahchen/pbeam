@@ -2717,6 +2717,14 @@ impl Scheduler {
         self.activate(target);
     }
 
+    /// Return the scheduler of the compiled regular expression `reference`
+    /// when it is an expression of another scheduler of the node.
+    pub(super) fn remote_regex_owner(&self, reference: crate::term::Reference) -> Option<usize> {
+        let node = self.shared.as_ref()?;
+        let owner = node.regex_owner(reference)?;
+        (owner != self.index).then_some(owner)
+    }
+
     /// Return the index of this scheduler in its node.
     pub(super) fn index(&self) -> usize {
         self.index

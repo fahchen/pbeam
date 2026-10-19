@@ -65,6 +65,8 @@ pub(in crate::runtime) struct SharedNode {
     ports: Mutex<HashMap<PortId, usize>>,
     /// The scheduler of each active BIF timer, by its reference.
     timers: Mutex<HashMap<crate::term::Reference, usize>>,
+    /// The scheduler of each compiled regular expression, by its reference.
+    regexes: Mutex<HashMap<crate::term::Reference, usize>>,
     /// The inbox of each scheduler.
     inboxes: Vec<Inbox>,
     /// The next process identifier.
@@ -127,6 +129,7 @@ impl SharedNode {
                 names: Mutex::new(HashMap::new()),
                 ports: Mutex::new(HashMap::new()),
                 timers: Mutex::new(HashMap::new()),
+                regexes: Mutex::new(HashMap::new()),
                 inboxes,
                 next_pid: AtomicU64::new(0),
                 next_reference: AtomicU64::new(0),
@@ -366,6 +369,32 @@ impl SharedNode {
         self.timers
             .lock()
             .expect("the timer table is not poisoned")
+            .get(&reference)
+            .copied()
+    }
+
+    /// Record the compiled regular expression `reference` of the
+    /// scheduler `index`.
+    pub(in crate::runtime) fn register_regex(
+        &self,
+        reference: crate::term::Reference,
+        index: usize,
+    ) {
+        self.regexes
+            .lock()
+            .expect("the regex table is not poisoned")
+            .insert(reference, index);
+    }
+
+    /// Return the scheduler of the compiled regular expression
+    /// `reference`.
+    pub(in crate::runtime) fn regex_owner(
+        &self,
+        reference: crate::term::Reference,
+    ) -> Option<usize> {
+        self.regexes
+            .lock()
+            .expect("the regex table is not poisoned")
             .get(&reference)
             .copied()
     }
