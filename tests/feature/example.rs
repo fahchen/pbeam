@@ -9,13 +9,11 @@
 //! that build, and the ERTS run and the `pbeam` run execute the same
 //! compiled modules. Each example has one test, and nextest runs each test
 //! in its own process, so a test run builds each example once. The
-//! `terra_counter` example has three more tests: two of the check of its
-//! Terra source, and one of the one-file executable of the reference
-//! scenario. The two source tests stop `scripts/example.sh` in
-//! `scripts/terra.sh` before it compiles a file, and that script removes the
-//! lists of the last build only before it renames a file into the output
-//! directory, so a build that stops early keeps the lists and the files of
-//! the last complete build. The
+//! `terra_counter` example has two more tests, of the check of its Terra
+//! source: they stop `scripts/example.sh` in `scripts/terra.sh` before it
+//! compiles a file, and that script removes the lists of the last build only
+//! before it renames a file into the output directory, so a build that stops
+//! early keeps the lists and the files of the last complete build. The
 //! script renames each file of the build into `target/examples/<name>/`, so
 //! a parallel build of the same example cannot give a partial file.
 //!
@@ -1047,6 +1045,13 @@ fn restores_the_terminal_before_the_result_of_terra_counter_as_interactive_erts(
     // emulator stops. The test needs the terminal handling of both runs, so
     // `run_terra_counter_in_terminal` reports that failure, and it does not
     // compare a result of a run that reports it.
+    //
+    // The test then builds one executable of the same build and runs the keys
+    // of the Terra reference, `j j k q`, in a clean directory with no `erl`
+    // or `elixir` on `PATH`. The result `{:ok, 1}` and the exit status match
+    // the pinned ERTS (#23). The executable check shares the build of this
+    // test, because a second build of the same example in a parallel test
+    // removes the lists that the other run reads.
     let (erts, erts_status) = run_terra_counter_in_terminal(&["terra_counter", "--erts"], b"q");
     let (pbeam, pbeam_status) =
         run_terra_counter_in_terminal(&["terra_counter", "--no-build"], b"q");
@@ -1069,19 +1074,12 @@ fn restores_the_terminal_before_the_result_of_terra_counter_as_interactive_erts(
         "PBeam wrote the result before the restore sequence: {:?}",
         String::from_utf8_lossy(pbeam_before)
     );
-}
 
-/// Build `examples/terra_counter` as one executable, run the scenario of the
-/// Terra reference in a clean directory, and compare the result and the exit
-/// status with the pinned ERTS.
-///
-/// The run uses no installed OTP: `PATH` holds no `erl` or `elixir`, `HOME`
-/// is an empty directory, and the variable `PBEAM_OTP_ROOT` is unset. The
-/// keys are those of the reference run, `j j k q`, so `Terra.run/1` returns
-/// `{:ok, 1}` (docs/terra-reference.md).
-#[test]
-#[cfg(target_os = "macos")]
-fn runs_the_terra_counter_executable_in_a_clean_directory() {
+    // One executable of the same build, with the keys of the Terra
+    // reference: `Terra.run/1` returns `{:ok, 1}` (docs/terra-reference.md).
+    // The run uses no installed OTP: `PATH` holds no `erl` or `elixir`,
+    // `HOME` is an empty directory, and the variable `PBEAM_OTP_ROOT` is
+    // unset.
     use std::fs;
     use std::path::PathBuf;
 
@@ -1100,7 +1098,7 @@ fn runs_the_terra_counter_executable_in_a_clean_directory() {
     let start = directory.join("start.list");
     let status = Command::new("bash")
         .arg("scripts/example.sh")
-        .args(["terra_counter", "--write-start"])
+        .args(["terra_counter", "--no-build", "--write-start"])
         .arg(&start)
         .current_dir(root)
         .status()

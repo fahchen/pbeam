@@ -45,7 +45,7 @@ mise run example-executable terra_counter
 
 The task writes `target/examples/terra_counter.bundle`, or the path of `--output`. The file holds the `pbeam` runtime, the compiled Terra sources, `Counter`, `TerraCounter`, and the OTP and Elixir modules of the run. Move the file into an empty directory and run it there in a terminal. The run needs no Erlang or Elixir installation, no release directory, and no other file of the build. It needs the host `sh` and `stty` utilities on `PATH`, `TERM=xterm-256color`, and a UTF-8 locale, as the Terra target requires. The keys `j j k q` print `{:ok, 1}` after Terra gives back the terminal, and the run exits with status 0.
 
-The check of this slice is `runs_the_terra_counter_executable_in_a_clean_directory` in `tests/feature/example.rs`. It builds the executable, runs it in a directory that holds only the executable, with an empty `HOME` and a `PATH` that holds no `erl` or `elixir`, and compares the result and the exit status with the pinned ERTS on the same build. The check ran on macOS arm64 on 2026-10-19.
+The check of this slice is the Terra Counter test in `tests/feature/example.rs`, `restores_the_terminal_before_the_result_of_terra_counter_as_interactive_erts`. It builds the executable from the same build, runs it in a directory that holds only the executable, with an empty `HOME` and a `PATH` that holds no `erl` or `elixir`, and compares the result and the exit status with the pinned ERTS on the same build. The check ran on macOS arm64 on 2026-10-19.
 
 Scope of the claim:
 
