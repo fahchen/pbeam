@@ -2090,6 +2090,19 @@ fn a_signal_to_a_dead_process_answers_an_unlink() {
 }
 
 #[test]
+fn a_signal_server_is_an_external_source() {
+    use super::node::SharedNode;
+    let (node, mut readers) = SharedNode::new(1).unwrap();
+    let mut scheduler =
+        Scheduler::with_shared(AtomTable::new(), Arc::clone(&node), 0, readers.remove(0));
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    let root = ProcessId(0);
+    assert!(!scheduler.has_external_sources());
+    assert!(node.name_register("erl_signal_server", root));
+    assert!(scheduler.has_external_sources());
+}
+
+#[test]
 fn a_host_signal_notification_reaches_a_remote_signal_server() {
     use super::node::{Delivery, SharedNode};
     let (node, mut readers) = SharedNode::new(2).unwrap();

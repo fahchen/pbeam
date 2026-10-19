@@ -1217,6 +1217,8 @@ impl Scheduler {
             || self.dirty_io.running()
             || !self.resources.borrow_mut::<Ports>().wait_fds().is_empty()
             || !self.resources.borrow_mut::<Ports>().write_fds().is_empty()
+            // A handled host signal becomes a message to `erl_signal_server`.
+            || self.whereis("erl_signal_server").is_some()
     }
 
     /// Wait for at most `timeout`, or without end for `None`, until fd 0
