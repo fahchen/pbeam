@@ -264,6 +264,25 @@ impl Scheduler {
                 let ack = Signal::UnlinkAck { from: target, id };
                 let _ = self.send_signal(None, from, ack);
             }
+            // A request to a dead target gets the answer of the exit path
+            // for a process that is gone.
+            Signal::GroupLeader {
+                requester,
+                reference,
+                ..
+            } => self.send_message(
+                target,
+                requester,
+                reply(reference, Term::static_atom("badarg")),
+            ),
+            Signal::IsAlive {
+                requester,
+                reference,
+            } => self.send_message(
+                target,
+                requester,
+                reply(reference, Term::static_atom("false")),
+            ),
             _ => {}
         }
     }
@@ -586,7 +605,7 @@ impl Scheduler {
                 reference,
             } => {
                 self.handled(id, node).group_leader = leader;
-                self.deliver(requester, reply(reference, Term::static_atom("true")));
+                self.send_message(id, requester, reply(reference, Term::static_atom("true")));
                 0
             }
             Signal::IsAlive {
@@ -594,7 +613,7 @@ impl Scheduler {
                 reference,
             } => {
                 self.handled(id, node);
-                self.deliver(requester, reply(reference, Term::static_atom("true")));
+                self.send_message(id, requester, reply(reference, Term::static_atom("true")));
                 0
             }
             Signal::ProcessInfo {
@@ -894,11 +913,13 @@ impl Scheduler {
                     requester,
                     reference,
                     ..
-                } => self.deliver(requester, reply(reference, Term::static_atom("badarg"))),
+                } => {
+                    self.send_message(id, requester, reply(reference, Term::static_atom("badarg")))
+                }
                 Signal::IsAlive {
                     requester,
                     reference,
-                } => self.deliver(requester, reply(reference, Term::static_atom("false"))),
+                } => self.send_message(id, requester, reply(reference, Term::static_atom("false"))),
                 Signal::ProcessInfo {
                     requester,
                     reference,

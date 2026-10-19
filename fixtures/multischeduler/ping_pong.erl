@@ -268,6 +268,7 @@ process_list() ->
 child_wait() ->
     Pid = spawn(?MODULE, child_hold, []),
     Result = child_poll(Pid, 2000000),
+    Pid ! stop,
     case whereis(child_ready) of
         undefined -> ok;
         Sender -> Sender ! stop
@@ -287,16 +288,17 @@ child_poll(Pid, Attempts) ->
             end
     end.
 
-%% The child that holds a name and waits for a message.
+%% The child that holds a name and waits for the stop message. Another
+%% message that waits in its queue stays there.
 child_hold() ->
     true = register(child_name, self()),
-    receive _Message -> ok after 2000 -> timeout end.
+    receive stop -> ok after 2000 -> timeout end.
 
 %% The root that sends a message to the child, and then registers the name
 %% that the other root polls.
 child_send() ->
     Pid = wait_for(child_name, 100000),
-    Pid ! ready,
+    Pid ! hold,
     true = register(child_ready, self()),
     receive stop -> ok after 2000 -> timeout end.
 

@@ -2090,6 +2090,43 @@ fn a_signal_to_a_dead_process_answers_an_unlink() {
 }
 
 #[test]
+fn a_signal_to_a_dead_process_answers_a_group_leader_and_an_is_alive() {
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    let root = ProcessId(0);
+    let leader_reference = Reference::ordinary(0).unwrap();
+    let alive_reference = Reference::ordinary(1).unwrap();
+    scheduler.dead_target_signal(
+        ProcessId(99),
+        Signal::GroupLeader {
+            leader: ProcessId(98),
+            requester: root,
+            reference: leader_reference,
+        },
+    );
+    scheduler.dead_target_signal(
+        ProcessId(99),
+        Signal::IsAlive {
+            requester: root,
+            reference: alive_reference,
+        },
+    );
+    assert_eq!(
+        messages(&scheduler, 0),
+        vec![
+            Term::tuple(vec![
+                Term::Reference(leader_reference),
+                Term::static_atom("badarg")
+            ]),
+            Term::tuple(vec![
+                Term::Reference(alive_reference),
+                Term::static_atom("false")
+            ]),
+        ]
+    );
+}
+
+#[test]
 fn a_signal_to_a_dead_process_answers_a_link() {
     let mut scheduler = test_scheduler();
     scheduler.start(frame(), vec![], allow_all()).unwrap();
