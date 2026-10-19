@@ -183,6 +183,22 @@ fn a_killed_local_child_is_not_alive() {
     assert_eq!(results[1].term, Term::Atom(ok_atom), "the killer");
 }
 
+/// A use of a port of another scheduler fails with a clear error.
+#[test]
+fn rejects_the_use_of_a_port_of_another_scheduler() {
+    let erlang = pinned_beam("erlang");
+    let program = BeamProgram::load(&[&erlang, PING_PONG]).expect("the fixture loads");
+    let error = program
+        .execute_on_schedulers(&[("ping_pong", "port_use"), ("ping_pong", "port_give")])
+        .expect_err("the port use is unsupported");
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported: a port of another scheduler"),
+        "{error}"
+    );
+}
+
 /// A transfer of a port to a process of another scheduler fails with a
 /// clear error.
 #[test]

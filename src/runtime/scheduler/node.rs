@@ -61,6 +61,8 @@ pub(in crate::runtime) struct SharedNode {
     owners: Mutex<HashMap<ProcessId, usize>>,
     /// The registered names of the node, as the ERTS `process_reg` table.
     names: Mutex<HashMap<String, ProcessId>>,
+    /// The scheduler of each open port.
+    ports: Mutex<HashMap<PortId, usize>>,
     /// The inbox of each scheduler.
     inboxes: Vec<Inbox>,
     /// The next process identifier.
@@ -121,6 +123,7 @@ impl SharedNode {
             Arc::new(SharedNode {
                 owners: Mutex::new(HashMap::new()),
                 names: Mutex::new(HashMap::new()),
+                ports: Mutex::new(HashMap::new()),
                 inboxes,
                 next_pid: AtomicU64::new(0),
                 next_reference: AtomicU64::new(0),
@@ -305,6 +308,31 @@ impl SharedNode {
     /// Return the next raw value of `erlang:unique_integer([monotonic])`.
     pub(in crate::runtime) fn next_unique_monotonic(&self) -> i64 {
         self.unique_monotonic.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// Make the port `id` a port of the scheduler `index`.
+    pub(in crate::runtime) fn register_port(&self, id: PortId, index: usize) {
+        self.ports
+            .lock()
+            .expect("the port table is not poisoned")
+            .insert(id, index);
+    }
+
+    /// Remove the port `id` from the node.
+    pub(in crate::runtime) fn remove_port(&self, id: PortId) {
+        self.ports
+            .lock()
+            .expect("the port table is not poisoned")
+            .remove(&id);
+    }
+
+    /// Return the scheduler of the open port `id`.
+    pub(in crate::runtime) fn port_owner(&self, id: PortId) -> Option<usize> {
+        self.ports
+            .lock()
+            .expect("the port table is not poisoned")
+            .get(&id)
+            .copied()
     }
 
     /// Return the next port identifier, or the error when the counter

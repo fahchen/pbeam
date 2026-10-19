@@ -10,7 +10,7 @@
          alive_wait/0, alive_send/0, alive_child/0, scheduler_count/0,
          wall_time/0, name_after_kill/0, name_kill_hold/0, name_kill_child/0,
          decode_atom/0, persistent_put/0, ets_new/0, port_transfer/0,
-         port_transfer_hold/0, ports_list/0]).
+         port_transfer_hold/0, ports_list/0, port_use/0, port_give/0]).
 
 -define(COUNT, 100).
 
@@ -500,3 +500,18 @@ port_transfer_hold() ->
 %% The root that lists the ports of the node.
 ports_list() ->
     erlang:ports().
+
+%% The root that receives the port of the other scheduler and asks for its
+%% information.
+port_use() ->
+    true = register(port_use_name, self()),
+    receive {port, Port} ->
+        erlang:port_info(Port)
+    end.
+
+%% The root that sends its port to the other scheduler.
+port_give() ->
+    Port = open_port({spawn_executable, "/usr/bin/true"}, [binary]),
+    ok = wait_registered(port_use_name, 100000),
+    port_use_name ! {port, Port},
+    receive done -> ok after 6000 -> timeout end.

@@ -2711,6 +2711,14 @@ impl Scheduler {
         self.activate(target);
     }
 
+    /// Return the scheduler of the open port `id` when it is a port of
+    /// another scheduler of the node.
+    pub(super) fn remote_port_owner(&self, id: crate::term::PortId) -> Option<usize> {
+        let node = self.shared.as_ref()?;
+        let owner = node.port_owner(id)?;
+        (owner != self.index).then_some(owner)
+    }
+
     /// Return the scheduler of the live process `target` when it is another
     /// scheduler of the node.
     pub(super) fn remote_owner(&self, target: ProcessId) -> Option<usize> {
