@@ -2,7 +2,8 @@
 -export([ping/0, pong/0, reference/0, boom/0, wait/0, conflict_try/0, conflict_hold/0,
          monitor_watch/0, monitor_hold/0, unreg_hold/0, unreg_taker/0,
          info_watch/0, info_hold/0, info_item/0, info_all/0,
-         down_wait/0, down_hold/0, atom_create/0, drain_wait/0, drain_hold/0]).
+         down_wait/0, down_hold/0, atom_create/0, drain_wait/0, drain_hold/0,
+         len_wait/0, len_hold/0, process_list/0]).
 
 -define(COUNT, 100).
 
@@ -223,3 +224,39 @@ drain_hold() ->
     Pid ! ready,
     true = register(drain_ready, self()),
     receive stop -> ok after 2000 -> timeout end.
+
+%% The root that reads its own message queue length without a scheduling
+%% step after the other root registers the name.
+len_wait() ->
+    true = register(len_name, self()),
+    Result = len_poll(2000000),
+    case whereis(len_ready) of
+        undefined -> ok;
+        Sender -> Sender ! stop
+    end,
+    Result.
+
+len_poll(0) ->
+    timeout;
+len_poll(Attempts) ->
+    case whereis(len_ready) of
+        undefined -> len_poll(Attempts - 1);
+        _ ->
+            {message_queue_len, Length} = process_info(self(), message_queue_len),
+            case Length of
+                0 -> timeout;
+                _ -> Length
+            end
+    end.
+
+%% The root that sends a message, and then registers the name that the other
+%% root polls.
+len_hold() ->
+    Pid = wait_for(len_name, 100000),
+    Pid ! ready,
+    true = register(len_ready, self()),
+    receive stop -> ok after 2000 -> timeout end.
+
+%% The root that lists the processes of the node.
+process_list() ->
+    processes().

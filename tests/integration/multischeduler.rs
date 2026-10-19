@@ -168,6 +168,37 @@ fn a_running_receive_reads_a_message_from_an_inbox() {
     }
 }
 
+/// A read of the caller counts a message that another scheduler sent, also
+/// when the caller did not schedule since the send.
+#[test]
+fn a_running_caller_read_counts_a_message_from_an_inbox() {
+    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
+    let ok_atom = program.atom("ok").expect("the fixture names ok");
+    for _ in 0..10 {
+        let results = program
+            .execute_on_schedulers(&[("ping_pong", "len_wait"), ("ping_pong", "len_hold")])
+            .expect("the two schedulers run");
+        assert_eq!(results[0].term, Term::Integer(1), "the queued message");
+        assert_eq!(results[1].term, Term::Atom(ok_atom.clone()), "the sender");
+    }
+}
+
+/// The process list of a run with scheduler threads is not readable yet,
+/// and the run stops with a clear error.
+#[test]
+fn rejects_the_process_list_of_a_scheduler_run() {
+    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
+    let error = program
+        .execute_on_schedulers(&[("ping_pong", "process_list"), ("ping_pong", "info_hold")])
+        .expect_err("the process list is unsupported");
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported: erlang:processes/0"),
+        "{error}"
+    );
+}
+
 /// A failing root decides the error of the run even when another root waits
 /// and the abort stops it.
 #[test]

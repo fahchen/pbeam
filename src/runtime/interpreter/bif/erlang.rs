@@ -4989,6 +4989,10 @@ fn prepare_caller_read(
     scheduler: &mut Scheduler,
     arguments: Vec<Term>,
 ) -> Result<Option<BifResult>, BeamError> {
+    // A message of another scheduler waits in the inbox of this one. This
+    // read fetches the messages of the caller, as ERTS fetches its in-queue
+    // buffers (`erl_proc_sig_queue.c:7771-7799`), so apply the inbox first.
+    scheduler.drain_inbox();
     let caller = scheduler.current_process_mut();
     if caller.flush == Flush::None && !caller.self_signals {
         if caller.mailbox.has_outer_messages() {
@@ -6129,6 +6133,13 @@ thread_local! {
 ///
 /// A budget of the current process that is less than 0.
 pub(super) fn processes(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
+    // The process table stays with each scheduler, so this run cannot list
+    // the processes of the node yet.
+    if scheduler.shared().is_some() {
+        return Err(error(
+            "unsupported: erlang:processes/0 in a run of execute_on_schedulers",
+        ));
+    }
     let state = PtabList {
         tix: -1,
         found: Term::Nil,
