@@ -9,7 +9,7 @@ use crate::term::{AtomTable, test_atom};
 use crate::{
     runtime::ets::{Access, Table, TableType},
     runtime::process::{
-        Origin, OriginMonitor, PendingBif, ProcessState, ReceiveTimer, StackSlot, Start,
+        Monitor, Origin, OriginMonitor, PendingBif, ProcessState, ReceiveTimer, StackSlot, Start,
         TimerReference,
         tests::{frame, test_scheduler, test_scheduler_without_checks},
     },
@@ -2100,6 +2100,51 @@ fn a_signal_server_is_an_external_source() {
     assert!(!scheduler.has_external_sources());
     assert!(node.name_register("erl_signal_server", root));
     assert!(scheduler.has_external_sources());
+}
+
+#[test]
+fn a_remote_signal_flushes_the_pending_monitor_first() {
+    use super::node::{Delivery, SharedNode};
+    let (node, mut readers) = SharedNode::new(2).unwrap();
+    let mut scheduler =
+        Scheduler::with_shared(AtomTable::new(), Arc::clone(&node), 0, readers.remove(0));
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    let root = ProcessId(0);
+    let target = ProcessId(77);
+    node.register(target, 1);
+    let reference = Reference::ordinary(0).unwrap();
+    scheduler.pending_monitor = Some((
+        target,
+        Monitor {
+            watcher: root,
+            reference,
+        },
+    ));
+    scheduler.send_signal_to_owner(
+        1,
+        Some(root),
+        target,
+        Signal::ProcessInfo {
+            requester: root,
+            reference,
+            item: atom("registered_name"),
+        },
+    );
+    let mut deliveries = Vec::new();
+    node.take(1, &mut deliveries);
+    assert!(matches!(
+        deliveries.as_slice(),
+        [
+            Delivery::Signal {
+                signal: Signal::Monitor { .. },
+                ..
+            },
+            Delivery::Signal {
+                signal: Signal::ProcessInfo { .. },
+                ..
+            }
+        ]
+    ));
 }
 
 #[test]

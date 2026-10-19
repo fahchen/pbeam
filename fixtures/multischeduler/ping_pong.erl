@@ -8,7 +8,8 @@
          stamp_wait/0, stamp_send/0, term_wait/0, term_send/0, port_wait/0,
          kill_watch/0, kill_hold/0, kill_child/0, port_send/0, port_other/0,
          alive_wait/0, alive_send/0, alive_child/0, scheduler_count/0,
-         wall_time/0, name_after_kill/0, name_kill_hold/0, name_kill_child/0]).
+         wall_time/0, name_after_kill/0, name_kill_hold/0, name_kill_child/0,
+         decode_atom/0]).
 
 -define(COUNT, 100).
 
@@ -467,3 +468,8 @@ name_kill_hold() ->
 name_kill_child() ->
     true = register(name_kill, self()),
     receive never -> ok end.
+
+%% The root that decodes a term with a new atom. A run with scheduler
+%% threads cannot create an atom.
+decode_atom() ->
+    binary_to_term(<<131, 119, 19, "review_runtime_atom">>).

@@ -183,6 +183,22 @@ fn a_killed_local_child_is_not_alive() {
     assert_eq!(results[1].term, Term::Atom(ok_atom), "the killer");
 }
 
+/// A term with a new atom stops a run with scheduler threads with the
+/// clear unsupported error, not with `badarg`.
+#[test]
+fn rejects_an_atom_in_a_decoded_term() {
+    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
+    let error = program
+        .execute_on_schedulers(&[("ping_pong", "decode_atom"), ("ping_pong", "info_hold")])
+        .expect_err("the atom creation is unsupported");
+    assert!(
+        error
+            .to_string()
+            .contains("cannot create the atom review_runtime_atom at runtime"),
+        "{error}"
+    );
+}
+
 /// A kill that the caller sent before a read of the registered name of the
 /// target is handled first, so the read reports a dead target.
 #[test]

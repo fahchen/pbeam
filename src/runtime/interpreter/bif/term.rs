@@ -593,6 +593,7 @@ pub(super) fn binary_to_term(
         Err(DecodeError::Unsupported(what)) => Err(error(format!(
             "unsupported erlang:binary_to_term/1,2 of {what}: see \"External term format\" in docs/erts-differences.md"
         ))),
+        Err(DecodeError::Error(cause)) => Err(cause),
     }
 }
 
@@ -631,6 +632,9 @@ enum DecodeError {
     Badarg,
     /// A term of the external term format that PBeam cannot represent.
     Unsupported(&'static str),
+    /// A runtime error of the byte sequence, such as a new atom in a table
+    /// that a run with scheduler threads froze.
+    Error(BeamError),
 }
 
 /// The decoder of one external term: the input bytes, the cursor, and the
@@ -1461,7 +1465,7 @@ impl Decoder<'_> {
         if self.safe {
             self.atoms.get(&name).ok_or(DecodeError::Badarg)
         } else {
-            self.atoms.put(&name).map_err(|_| DecodeError::Badarg)
+            self.atoms.put(&name).map_err(DecodeError::Error)
         }
     }
 

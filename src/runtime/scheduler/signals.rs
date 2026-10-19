@@ -139,6 +139,30 @@ impl Scheduler {
         self.send_signal_local(sender, target, signal)
     }
 
+    /// Put `signal` for the remote target `target` into the inbox of its
+    /// owner `index`, which `remote_owner` gave, with the pending monitor
+    /// signal of the sender first. The inbox always takes the signal: a
+    /// target that left before the drain is answered there.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.send_signal_to_owner(index, Some(caller), target, signal);
+    /// ```
+    pub(in crate::runtime) fn send_signal_to_owner(
+        &mut self,
+        index: usize,
+        sender: Option<ProcessId>,
+        target: ProcessId,
+        signal: Signal,
+    ) {
+        let pending = self.take_pending_monitor(target).map(monitor_signal);
+        self.shared
+            .as_ref()
+            .expect("a remote target has a node")
+            .send_signal(index, target, sender, signal, pending);
+    }
+
     /// Put the signal into the queue of the local process `target`, as
     /// [`Self::send_signal`] does.
     pub(in crate::runtime) fn send_signal_local(

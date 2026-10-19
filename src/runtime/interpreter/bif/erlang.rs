@@ -4246,13 +4246,10 @@ pub(super) fn process_info(
                     reference,
                     item: item.clone(),
                 };
-                // Put the request in the inbox of the owner. A target that
-                // exits before the owner drains the inbox is answered with
-                // `undefined` there.
-                scheduler
-                    .shared()
-                    .expect("a remote process has a node")
-                    .send_signal(index, *id, Some(caller), request, None);
+                // The pending monitor of the caller goes before the
+                // request, and a target that exits before the owner drains
+                // the inbox is answered with `undefined` there.
+                scheduler.send_signal_to_owner(index, Some(caller), *id, request);
                 return Ok(Trap {
                     module: "erts_internal",
                     function: "await_result",
