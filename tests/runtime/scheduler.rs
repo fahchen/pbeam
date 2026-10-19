@@ -2087,12 +2087,13 @@ fn a_signal_to_a_dead_process_answers_a_link() {
 fn a_scheduler_registers_a_name_for_a_remote_process() {
     use super::node::SharedNode;
     let (node, mut readers) = SharedNode::new(2).unwrap();
-    let mut scheduler =
-        Scheduler::with_shared(AtomTable::new(), Arc::clone(&node), 0, readers.remove(0));
+    // The shared scheduler cannot create an atom. Make the two names first.
+    let mut atoms = AtomTable::new();
+    let first = atoms.put("pbeam_remote_name").unwrap();
+    let second = atoms.put("pbeam_remote_other").unwrap();
+    let mut scheduler = Scheduler::with_shared(atoms, Arc::clone(&node), 0, readers.remove(0));
     let remote = ProcessId(7);
     node.register(remote, 1);
-    let first = scheduler.atoms.put("pbeam_remote_name").unwrap();
-    let second = scheduler.atoms.put("pbeam_remote_other").unwrap();
     assert!(scheduler.register(&Term::Atom(first.clone()), &Term::Pid(remote)));
     assert_eq!(scheduler.registered_name_of(remote), Some(first.clone()));
     // One process has one name.

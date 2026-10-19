@@ -574,11 +574,14 @@ impl Scheduler {
     /// assert_eq!(scheduler.index, 0);
     /// ```
     pub(super) fn with_shared(
-        atoms: AtomTable,
+        mut atoms: AtomTable,
         node: Arc<SharedNode>,
         index: usize,
         wake: UnixStream,
     ) -> Self {
+        // A term crosses a scheduler thread with its atom indices, so this
+        // copy of the table cannot add an atom that the other copies lack.
+        atoms.freeze_creation();
         Scheduler {
             shared: Some(node),
             index,

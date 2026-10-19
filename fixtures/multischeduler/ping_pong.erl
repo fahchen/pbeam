@@ -2,7 +2,7 @@
 -export([ping/0, pong/0, reference/0, boom/0, wait/0, conflict_try/0, conflict_hold/0,
          monitor_watch/0, monitor_hold/0, unreg_hold/0, unreg_taker/0,
          info_watch/0, info_hold/0, info_item/0, info_all/0,
-         down_wait/0, down_hold/0]).
+         down_wait/0, down_hold/0, atom_create/0]).
 
 -define(COUNT, 100).
 
@@ -191,3 +191,8 @@ down_wait() ->
 down_hold() ->
     true = register(down_name, self()),
     receive after 100 -> ok end.
+
+%% The root that creates an atom at runtime. A run with scheduler threads
+%% cannot create an atom yet.
+atom_create() ->
+    list_to_atom("new_scheduler_atom_" ++ integer_to_list(erlang:unique_integer([positive]))).

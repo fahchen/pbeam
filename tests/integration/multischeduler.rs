@@ -132,6 +132,22 @@ fn rejects_the_whole_state_of_a_remote_process() {
     );
 }
 
+/// An atom that guest code creates stops a run with scheduler threads with
+/// a clear error, because the copies of the atom table can differ.
+#[test]
+fn rejects_an_atom_that_guest_code_creates() {
+    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
+    let error = program
+        .execute_on_schedulers(&[("ping_pong", "atom_create"), ("ping_pong", "info_hold")])
+        .expect_err("the atom creation is unsupported");
+    assert!(
+        error
+            .to_string()
+            .contains("cannot create the atom new_scheduler_atom_"),
+        "{error}"
+    );
+}
+
 /// A failing root decides the error of the run even when another root waits
 /// and the abort stops it.
 #[test]
