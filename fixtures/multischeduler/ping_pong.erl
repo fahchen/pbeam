@@ -12,7 +12,8 @@
          decode_atom/0, persistent_put/0, ets_new/0, port_transfer/0,
          port_transfer_hold/0, ports_list/0, port_use/0, port_give/0,
          port_term/0, port_term_give/0, atomics_new/0, timer_remote/0,
-         timer_hold/0, alias_create/0, monitor_alias/0, alias_hold/0]).
+         timer_hold/0, alias_create/0, monitor_alias/0, alias_hold/0,
+         timer_named/0, timer_read/0, timer_give/0]).
 
 -define(COUNT, 100).
 
@@ -568,3 +569,22 @@ monitor_alias() ->
 alias_hold() ->
     true = register(alias_name, self()),
     receive stop -> ok after 6000 -> timeout end.
+
+%% The root that starts a named timer. A run with scheduler threads cannot
+%% route the message of a named timer.
+timer_named() ->
+    erlang:start_timer(1000, unregistered_timer_name, tick).
+
+%% The root that reads a timer of the other scheduler.
+timer_read() ->
+    true = register(timer_read_name, self()),
+    receive {timer, Reference} ->
+        erlang:read_timer(Reference)
+    end.
+
+%% The root that sends its timer reference to the other scheduler.
+timer_give() ->
+    Reference = erlang:start_timer(60000, self(), tick),
+    ok = wait_registered(timer_read_name, 100000),
+    timer_read_name ! {timer, Reference},
+    receive done -> ok after 6000 -> timeout end.

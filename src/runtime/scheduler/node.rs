@@ -63,6 +63,8 @@ pub(in crate::runtime) struct SharedNode {
     names: Mutex<HashMap<String, ProcessId>>,
     /// The scheduler of each open port.
     ports: Mutex<HashMap<PortId, usize>>,
+    /// The scheduler of each active BIF timer, by its reference.
+    timers: Mutex<HashMap<crate::term::Reference, usize>>,
     /// The inbox of each scheduler.
     inboxes: Vec<Inbox>,
     /// The next process identifier.
@@ -124,6 +126,7 @@ impl SharedNode {
                 owners: Mutex::new(HashMap::new()),
                 names: Mutex::new(HashMap::new()),
                 ports: Mutex::new(HashMap::new()),
+                timers: Mutex::new(HashMap::new()),
                 inboxes,
                 next_pid: AtomicU64::new(0),
                 next_reference: AtomicU64::new(0),
@@ -332,6 +335,38 @@ impl SharedNode {
             .lock()
             .expect("the port table is not poisoned")
             .get(&id)
+            .copied()
+    }
+
+    /// Record the BIF timer `reference` of the scheduler `index`.
+    pub(in crate::runtime) fn register_timer(
+        &self,
+        reference: crate::term::Reference,
+        index: usize,
+    ) {
+        self.timers
+            .lock()
+            .expect("the timer table is not poisoned")
+            .insert(reference, index);
+    }
+
+    /// Remove the BIF timer `reference` from the node.
+    pub(in crate::runtime) fn remove_timer(&self, reference: crate::term::Reference) {
+        self.timers
+            .lock()
+            .expect("the timer table is not poisoned")
+            .remove(&reference);
+    }
+
+    /// Return the scheduler of the active BIF timer `reference`.
+    pub(in crate::runtime) fn timer_owner(
+        &self,
+        reference: crate::term::Reference,
+    ) -> Option<usize> {
+        self.timers
+            .lock()
+            .expect("the timer table is not poisoned")
+            .get(&reference)
             .copied()
     }
 

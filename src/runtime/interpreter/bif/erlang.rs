@@ -5793,6 +5793,11 @@ fn bif_timer(
         Term::Atom(name) => Receiver::Name(name.clone()),
         _ => return Ok(BifResult::badarg()),
     };
+    if matches!(receiver, Receiver::Name(_)) && scheduler.shared().is_some() {
+        return Err(error(
+            "unsupported: a named BIF timer in a run of execute_on_schedulers",
+        ));
+    }
     if let Some(denied) = denial(scheduler, CapabilityKind::Process, Operation::Send, None)? {
         return Ok(denied);
     }
@@ -5836,6 +5841,9 @@ fn bif_timer(
                 message,
             },
         );
+        if let Some(node) = scheduler.shared() {
+            node.register_timer(reference, scheduler.index());
+        }
     }
     Ok(Value(Term::Reference(reference)))
 }
@@ -5881,6 +5889,13 @@ pub(super) fn cancel_timer(
         return Ok(BifResult::badarg());
     };
     let scheduler = &mut *context.scheduler;
+    // The timer queue stays with each scheduler, so a timer of another
+    // scheduler cannot be canceled here.
+    if scheduler.remote_timer_owner(*reference).is_some() {
+        return Err(error(
+            "unsupported: a BIF timer of another scheduler in a run of execute_on_schedulers",
+        ));
+    }
     let result = match scheduler.cancel_bif_timer(*reference) {
         Some(end) => Term::Integer(Timers::time_left(scheduler.timers.now(), end)),
         None => Term::static_atom("false"),

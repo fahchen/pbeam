@@ -1187,6 +1187,9 @@ impl Scheduler {
                     receiver,
                     message,
                 } => {
+                    if let Some(node) = &self.shared {
+                        node.remove_timer(reference);
+                    }
                     self.forget_bif_timer(&receiver, reference);
                     let target = match receiver {
                         Receiver::Process(id) => Some(id),
@@ -1789,6 +1792,9 @@ impl Scheduler {
     /// ```
     pub(super) fn cancel_bif_timer(&mut self, reference: Reference) -> Option<i64> {
         let (end, timer) = self.timers.cancel_bif(reference)?;
+        if let Some(node) = &self.shared {
+            node.remove_timer(reference);
+        }
         if let Timer::Bif { receiver, .. } = timer {
             self.forget_bif_timer(&receiver, reference);
         }
@@ -2711,6 +2717,19 @@ impl Scheduler {
         self.activate(target);
     }
 
+    /// Return the index of this scheduler in its node.
+    pub(super) fn index(&self) -> usize {
+        self.index
+    }
+
+    /// Return the scheduler of the active BIF timer `reference` when it is
+    /// a timer of another scheduler of the node.
+    pub(super) fn remote_timer_owner(&self, reference: crate::term::Reference) -> Option<usize> {
+        let node = self.shared.as_ref()?;
+        let owner = node.timer_owner(reference)?;
+        (owner != self.index).then_some(owner)
+    }
+
     /// Return the scheduler of the open port `id` when it is a port of
     /// another scheduler of the node.
     pub(super) fn remote_port_owner(&self, id: crate::term::PortId) -> Option<usize> {
@@ -3451,6 +3470,9 @@ impl Scheduler {
             next = walk.position();
             // The receiver exits, so the timer has no tree entry to remove.
             let _ = self.timers.cancel_bif(timer.0);
+            if let Some(node) = &self.shared {
+                node.remove_timer(timer.0);
+            }
             reds -= TIMER_CANCEL_REDUCTIONS;
         }
         if walked && next.is_none() {
