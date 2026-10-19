@@ -256,7 +256,7 @@ impl Scheduler {
     /// dropping the driver closes the socket after the kernel sends the
     /// written bytes (`tcp_inet_stop`, inet_drv.c:11895-11920). An open
     /// port and a port that terminated change nothing.
-    fn tcp_flushed(&mut self, port: PortId) {
+    pub(super) fn tcp_flushed(&mut self, port: PortId) {
         let ports = self.resources.borrow_mut::<Ports>();
         let flushed = ports.get(port).is_some_and(|item| {
             item.closing && matches!(&item.driver, Driver::Inet(tcp) if !tcp.has_output())

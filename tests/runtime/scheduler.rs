@@ -2149,26 +2149,89 @@ fn a_remote_signal_flushes_the_pending_monitor_first() {
 
 #[test]
 fn a_host_signal_notification_reaches_a_remote_signal_server() {
-    use super::node::{Delivery, SharedNode};
+    use super::node::SharedNode;
     let (node, mut readers) = SharedNode::new(2).unwrap();
+    let mut owner =
+        Scheduler::with_shared(AtomTable::new(), Arc::clone(&node), 1, readers.remove(1));
     let mut scheduler =
         Scheduler::with_shared(AtomTable::new(), Arc::clone(&node), 0, readers.remove(0));
-    let server = ProcessId(77);
-    node.register(server, 1);
+    owner.start(frame(), vec![], allow_all()).unwrap();
+    let server = ProcessId(0);
     assert!(node.name_register("erl_signal_server", server));
     scheduler.notify_signals(&[libc::SIGUSR1]).unwrap();
-    let mut deliveries = Vec::new();
-    node.take(1, &mut deliveries);
-    assert!(matches!(
-        deliveries.as_slice(),
-        [Delivery::Message { target, term, .. }]
-            if *target == server
-                && *term
-                    == Term::tuple(vec![
-                        Term::static_atom("notify"),
-                        Term::static_atom("sigusr1"),
-                    ])
-    ));
+    owner.drain_inbox();
+    assert_eq!(
+        messages(&owner, 0),
+        vec![Term::tuple(vec![
+            Term::static_atom("notify"),
+            Term::static_atom("sigusr1")
+        ])]
+    );
+    // A message of the system sets no self-signal mark on the receiver.
+    assert!(!owner.processes[&server].self_signals);
+}
+
+#[test]
+fn a_flushed_port_leaves_the_shared_port_table() {
+    use super::node::SharedNode;
+    use crate::runtime::port::{
+        Driver, Ports,
+        inet::{Inet, SocketType},
+    };
+    let (node, mut readers) = SharedNode::new(1).unwrap();
+    let mut scheduler =
+        Scheduler::with_shared(AtomTable::new(), Arc::clone(&node), 0, readers.remove(0));
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let tcp = Inet::new(SocketType::Stream);
+    let port = scheduler
+        .open_port(b"tcp_inet".to_vec(), Driver::Inet(tcp))
+        .unwrap();
+    assert!(node.port_owner(port).is_some());
+    scheduler
+        .resources
+        .borrow_mut::<Ports>()
+        .get_mut(port)
+        .unwrap()
+        .closing = true;
+    scheduler.tcp_flushed(port);
+    assert!(node.port_owner(port).is_none());
+    assert!(
+        scheduler
+            .resources
+            .borrow_mut::<Ports>()
+            .get(port)
+            .is_none()
+    );
+}
+
+#[test]
+fn a_delivery_to_a_dead_target_answers_its_request() {
+    use super::node::SharedNode;
+    let (node, mut readers) = SharedNode::new(1).unwrap();
+    let mut scheduler =
+        Scheduler::with_shared(AtomTable::new(), Arc::clone(&node), 0, readers.remove(0));
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    let root = ProcessId(0);
+    let reference = Reference::ordinary(3).unwrap();
+    node.send_signal(
+        0,
+        ProcessId(99),
+        Some(root),
+        Signal::IsAlive {
+            requester: root,
+            reference,
+        },
+        None,
+    );
+    scheduler.drain_inbox();
+    assert_eq!(
+        messages(&scheduler, 0),
+        vec![Term::tuple(vec![
+            Term::Reference(reference),
+            Term::static_atom("false")
+        ])]
+    );
 }
 
 #[test]

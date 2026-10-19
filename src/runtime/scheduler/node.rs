@@ -32,10 +32,11 @@ use crate::{
 /// One delivery that crosses a scheduler thread boundary.
 #[derive(Debug)]
 pub(in crate::runtime) enum Delivery {
-    /// A message for `target`.
+    /// A message for `target`. `from` is None for a message of the system,
+    /// which sets no self-signal mark on the receiver.
     Message {
         target: ProcessId,
-        from: ProcessId,
+        from: Option<ProcessId>,
         term: Term,
     },
     /// A control signal for `target`.
@@ -229,7 +230,7 @@ impl SharedNode {
     pub(in crate::runtime) fn send_message(
         &self,
         index: usize,
-        from: ProcessId,
+        from: Option<ProcessId>,
         term: Term,
         target: ProcessId,
         pending: Option<Signal>,
@@ -243,7 +244,7 @@ impl SharedNode {
             if let Some(signal) = pending {
                 queue.push_back(Delivery::Signal {
                     target,
-                    sender: Some(from),
+                    sender: from,
                     signal,
                 });
             }
@@ -528,3 +529,7 @@ fn wake(writer: &UnixStream) {
     let mut writer = writer;
     let _ = writer.write(&[1]);
 }
+
+#[cfg(test)]
+#[path = "../../../tests/runtime/scheduler/node.rs"]
+mod tests;

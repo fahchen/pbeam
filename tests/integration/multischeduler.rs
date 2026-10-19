@@ -373,6 +373,105 @@ fn rejects_a_code_load() {
     );
 }
 
+/// A BIF timer of a shared run fires, and its entry leaves the node.
+#[test]
+fn fires_a_local_bif_timer() {
+    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
+    let ok_atom = program.atom("ok").expect("the fixture names ok");
+    let results = program
+        .execute_on_schedulers(&[("ping_pong", "timer_fire"), ("ping_pong", "monitor_hold")])
+        .expect("the two schedulers run");
+    assert_eq!(results[0].term, Term::Atom(ok_atom.clone()), "the timer");
+    assert_eq!(results[1].term, Term::Atom(ok_atom), "the holder");
+}
+
+/// A cancel of a local BIF timer leaves its node entry.
+#[test]
+fn cancels_a_local_bif_timer() {
+    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
+    let ok_atom = program.atom("ok").expect("the fixture names ok");
+    let results = program
+        .execute_on_schedulers(&[("ping_pong", "timer_cancel"), ("ping_pong", "monitor_hold")])
+        .expect("the two schedulers run");
+    assert_eq!(results[0].term, Term::Atom(ok_atom.clone()), "the cancel");
+    assert_eq!(results[1].term, Term::Atom(ok_atom), "the holder");
+}
+
+/// The exit of a process cancels its BIF timer and leaves its node entry.
+#[test]
+fn cancels_a_bif_timer_at_an_exit() {
+    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
+    let ok_atom = program.atom("ok").expect("the fixture names ok");
+    let results = program
+        .execute_on_schedulers(&[
+            ("ping_pong", "timer_child_exit"),
+            ("ping_pong", "monitor_hold"),
+        ])
+        .expect("the two schedulers run");
+    assert_eq!(
+        results[0].term,
+        Term::Atom(ok_atom.clone()),
+        "the child timer"
+    );
+    assert_eq!(results[1].term, Term::Atom(ok_atom), "the holder");
+}
+
+/// A cancel of a timer of another scheduler fails with a clear error.
+#[test]
+fn rejects_a_cancel_of_a_timer_of_another_scheduler() {
+    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
+    let error = program
+        .execute_on_schedulers(&[
+            ("ping_pong", "timer_cancel_use"),
+            ("ping_pong", "timer_cancel_give"),
+        ])
+        .expect_err("the timer cancel is unsupported");
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported: a BIF timer of another scheduler"),
+        "{error}"
+    );
+}
+
+/// A link to a port of another scheduler fails with a clear error.
+#[test]
+fn rejects_a_link_to_a_port_of_another_scheduler() {
+    let erlang = pinned_beam("erlang");
+    let program = BeamProgram::load(&[&erlang, PING_PONG]).expect("the fixture loads");
+    let error = program
+        .execute_on_schedulers(&[
+            ("ping_pong", "port_link_use"),
+            ("ping_pong", "port_link_give"),
+        ])
+        .expect_err("the port link is unsupported");
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported: a port of another scheduler"),
+        "{error}"
+    );
+}
+
+/// A monitor of a port of another scheduler fails with a clear error.
+#[test]
+fn rejects_a_monitor_of_a_port_of_another_scheduler() {
+    let erlang = pinned_beam("erlang");
+    let program = BeamProgram::load(&[&erlang, PING_PONG]).expect("the fixture loads");
+    let error = program
+        .execute_on_schedulers(&[
+            ("ping_pong", "port_monitor_use"),
+            ("ping_pong", "port_monitor_give"),
+        ])
+        .expect_err("the port monitor is unsupported");
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported: a port of another scheduler"),
+        "{error}"
+    );
+}
+
 /// A named BIF timer in a run with scheduler threads fails with a clear
 /// error.
 #[test]

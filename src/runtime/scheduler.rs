@@ -1400,7 +1400,7 @@ impl Scheduler {
                         .shared
                         .as_ref()
                         .expect("a remote process has a node")
-                        .send_message(index, server, message, server, None),
+                        .send_message(index, None, message, server, None),
                     None => self.deliver(server, message),
                 }
             }
@@ -2687,7 +2687,7 @@ impl Scheduler {
             self.shared
                 .as_ref()
                 .expect("a remote target has a node")
-                .send_message(index, from, term, target, pending);
+                .send_message(index, Some(from), term, target, pending);
             return;
         }
         self.send_message_local(from, target, term);
@@ -2774,8 +2774,22 @@ impl Scheduler {
         let drained = !deliveries.is_empty();
         for delivery in deliveries {
             match delivery {
-                Delivery::Message { target, from, term } => {
+                Delivery::Message {
+                    target,
+                    from: Some(from),
+                    term,
+                } => {
                     self.send_message_local(from, target, term);
+                }
+                Delivery::Message {
+                    target,
+                    from: None,
+                    term,
+                } => {
+                    // A message of the system sets no self-signal mark and
+                    // sends no pending monitor, as `erts_queue_message`
+                    // with `am_system` does (`sys.c:589-607`).
+                    self.deliver(target, term);
                 }
                 Delivery::Signal {
                     target,

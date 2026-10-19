@@ -15,7 +15,10 @@
          timer_hold/0, alias_create/0, monitor_alias/0, alias_hold/0,
          timer_named/0, timer_read/0, timer_give/0, system_flag_depth/0,
          finish_loading/0, delete_module/0, regex_run/0, regex_give/0,
-         group_leader_remote/0, leader_hold/0, pattern_match/0, pattern_give/0]).
+         group_leader_remote/0, leader_hold/0, pattern_match/0, pattern_give/0,
+         timer_fire/0, timer_cancel/0, timer_child_exit/0, timer_child/0,
+         timer_cancel_use/0, timer_cancel_give/0, port_link_use/0,
+         port_link_give/0, port_monitor_use/0, port_monitor_give/0]).
 
 -define(COUNT, 100).
 
@@ -645,4 +648,57 @@ pattern_give() ->
     Pattern = binary:compile_pattern(<<"abc">>),
     ok = wait_registered(pattern_name, 100000),
     pattern_name ! {pattern, Pattern},
+    receive done -> ok after 6000 -> timeout end.
+
+%% The root that waits for its own BIF timer.
+timer_fire() ->
+    _ = erlang:send_after(1, self(), tick),
+    receive tick -> ok after 60000 -> timeout end.
+
+%% The root that cancels its own BIF timer.
+timer_cancel() ->
+    Reference = erlang:start_timer(60000, self(), tick),
+    _ = erlang:cancel_timer(Reference),
+    ok.
+
+%% The root whose child exits with an active BIF timer.
+timer_child_exit() ->
+    Reference = erlang:monitor(process, spawn(?MODULE, timer_child, [])),
+    receive {'DOWN', Reference, process, _, normal} -> ok after 60000 -> timeout end.
+
+timer_child() ->
+    _ = erlang:start_timer(60000, self(), tick),
+    ok.
+
+%% The root that cancels the timer of the other scheduler.
+timer_cancel_use() ->
+    true = register(timer_cancel_name, self()),
+    receive {timer, Reference} -> erlang:cancel_timer(Reference) end.
+
+timer_cancel_give() ->
+    Reference = erlang:start_timer(60000, self(), tick),
+    ok = wait_registered(timer_cancel_name, 100000),
+    timer_cancel_name ! {timer, Reference},
+    receive done -> ok after 6000 -> timeout end.
+
+%% The root that links to a port of the other scheduler.
+port_link_use() ->
+    true = register(port_link_name, self()),
+    receive {port, Port} -> erlang:link(Port) end.
+
+port_link_give() ->
+    Port = open_port({spawn_executable, "/bin/cat"}, [binary]),
+    ok = wait_registered(port_link_name, 100000),
+    port_link_name ! {port, Port},
+    receive done -> ok after 6000 -> timeout end.
+
+%% The root that monitors a port of the other scheduler.
+port_monitor_use() ->
+    true = register(port_monitor_name, self()),
+    receive {port, Port} -> erlang:monitor(port, Port) end.
+
+port_monitor_give() ->
+    Port = open_port({spawn_executable, "/bin/cat"}, [binary]),
+    ok = wait_registered(port_monitor_name, 100000),
+    port_monitor_name ! {port, Port},
     receive done -> ok after 6000 -> timeout end.
