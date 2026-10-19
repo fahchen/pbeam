@@ -87,8 +87,8 @@ The owner decisions of 2026-10-15 set the order of the open milestones. M11 foll
 3. M7 Linked native calls ([tracker #36](https://github.com/fahchen/pbeam/issues/36))
 4. M8 Embedded application ([tracker #37](https://github.com/fahchen/pbeam/issues/37))
 5. M9 Pinned Terra scenario ([tracker #39](https://github.com/fahchen/pbeam/issues/39))
-6. M6 Capability security ([tracker #304](https://github.com/fahchen/pbeam/issues/304))
-7. M10 Multiple schedulers ([tracker #35](https://github.com/fahchen/pbeam/issues/35))
+6. M10 Multiple schedulers ([tracker #35](https://github.com/fahchen/pbeam/issues/35))
+7. M6 Capability security ([tracker #304](https://github.com/fahchen/pbeam/issues/304)) — postponed until a new owner decision
 
 Milestone titles use `[m1] Title`. Epic and task titles use `[m1-e1] Title`;
 GitHub issue numbers identify individual tasks.
