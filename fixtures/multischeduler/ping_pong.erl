@@ -2,7 +2,7 @@
 -export([ping/0, pong/0, reference/0, boom/0, wait/0, conflict_try/0, conflict_hold/0,
          monitor_watch/0, monitor_hold/0, unreg_hold/0, unreg_taker/0,
          info_watch/0, info_hold/0, info_item/0, info_all/0,
-         down_wait/0, down_hold/0, atom_create/0]).
+         down_wait/0, down_hold/0, atom_create/0, drain_wait/0, drain_hold/0]).
 
 -define(COUNT, 100).
 
@@ -196,3 +196,30 @@ down_hold() ->
 %% cannot create an atom yet.
 atom_create() ->
     list_to_atom("new_scheduler_atom_" ++ integer_to_list(erlang:unique_integer([positive]))).
+
+%% The root that busy-polls a shared name, then reads its mailbox without a
+%% scheduling step.
+drain_wait() ->
+    true = register(drain_name, self()),
+    Result = drain_poll(2000000),
+    case whereis(drain_ready) of
+        undefined -> ok;
+        Sender -> Sender ! stop
+    end,
+    Result.
+
+drain_poll(0) ->
+    timeout;
+drain_poll(Attempts) ->
+    case whereis(drain_ready) of
+        undefined -> drain_poll(Attempts - 1);
+        _ -> receive Message -> Message after 0 -> timeout end
+    end.
+
+%% The root that sends a message, and then registers the name that the other
+%% root polls.
+drain_hold() ->
+    Pid = wait_for(drain_name, 100000),
+    Pid ! ready,
+    true = register(drain_ready, self()),
+    receive stop -> ok after 2000 -> timeout end.

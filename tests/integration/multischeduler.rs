@@ -148,6 +148,26 @@ fn rejects_an_atom_that_guest_code_creates() {
     );
 }
 
+/// A message that arrives while its receiver runs is visible to a receive
+/// with no wait, also when the sender registers a name after the message.
+#[test]
+fn a_running_receive_reads_a_message_from_an_inbox() {
+    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
+    let ready_atom = program.atom("ready").expect("the fixture names ready");
+    let ok_atom = program.atom("ok").expect("the fixture names ok");
+    for _ in 0..20 {
+        let results = program
+            .execute_on_schedulers(&[("ping_pong", "drain_wait"), ("ping_pong", "drain_hold")])
+            .expect("the two schedulers run");
+        assert_eq!(
+            results[0].term,
+            Term::Atom(ready_atom.clone()),
+            "the receiver"
+        );
+        assert_eq!(results[1].term, Term::Atom(ok_atom.clone()), "the sender");
+    }
+}
+
 /// A failing root decides the error of the run even when another root waits
 /// and the abort stops it.
 #[test]

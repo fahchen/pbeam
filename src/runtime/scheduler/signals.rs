@@ -930,6 +930,11 @@ impl Scheduler {
     ///
     /// An error of [`Scheduler::handle_signals`].
     pub(in crate::runtime) fn receive_helper(&mut self) -> Result<Received, BeamError> {
+        // A message of another scheduler waits in the inbox of this one. A
+        // running process does not schedule before it fetches its messages,
+        // so apply the inbox here, as ERTS fetches its in-queue buffers
+        // (`erl_proc_sig_queue.c:7771-7799`).
+        self.drain_inbox();
         let process = self.current_process_mut();
         let id = process.id;
         let mut left = process.fcalls;
