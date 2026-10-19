@@ -13,7 +13,8 @@
          port_transfer_hold/0, ports_list/0, port_use/0, port_give/0,
          port_term/0, port_term_give/0, atomics_new/0, timer_remote/0,
          timer_hold/0, alias_create/0, monitor_alias/0, alias_hold/0,
-         timer_named/0, timer_read/0, timer_give/0]).
+         timer_named/0, timer_read/0, timer_give/0, system_flag_depth/0,
+         finish_loading/0]).
 
 -define(COUNT, 100).
 
@@ -588,3 +589,13 @@ timer_give() ->
     ok = wait_registered(timer_read_name, 100000),
     timer_read_name ! {timer, Reference},
     receive done -> ok after 6000 -> timeout end.
+
+%% The root that sets the backtrace depth. The flag stays with each
+%% scheduler in a run with scheduler threads.
+system_flag_depth() ->
+    erlang:system_flag(backtrace_depth, 0).
+
+%% The root that loads code. The code table stays with each scheduler in a
+%% run with scheduler threads.
+finish_loading() ->
+    erlang:finish_loading([]).

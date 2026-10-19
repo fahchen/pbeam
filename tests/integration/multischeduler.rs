@@ -263,6 +263,43 @@ fn rejects_a_timer_for_another_scheduler() {
     );
 }
 
+/// A change of a node flag that stays with a scheduler fails with a clear
+/// error.
+#[test]
+fn rejects_a_scheduler_local_system_flag() {
+    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
+    let error = program
+        .execute_on_schedulers(&[
+            ("ping_pong", "system_flag_depth"),
+            ("ping_pong", "monitor_hold"),
+        ])
+        .expect_err("the flag is unsupported");
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported: erlang:system_flag/2 backtrace_depth"),
+        "{error}"
+    );
+}
+
+/// A code load in a run with scheduler threads fails with a clear error.
+#[test]
+fn rejects_a_code_load() {
+    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
+    let error = program
+        .execute_on_schedulers(&[
+            ("ping_pong", "finish_loading"),
+            ("ping_pong", "monitor_hold"),
+        ])
+        .expect_err("the code load is unsupported");
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported: erlang:finish_loading/1 in a run of execute_on_schedulers"),
+        "{error}"
+    );
+}
+
 /// A named BIF timer in a run with scheduler threads fails with a clear
 /// error.
 #[test]

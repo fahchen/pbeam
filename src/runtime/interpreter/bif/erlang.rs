@@ -537,6 +537,19 @@ pub(super) fn system_flag(
     if let Some(denied) = check? {
         return Ok(denied);
     }
+    // These flags stay with each scheduler, so a change on one scheduler
+    // would not reach the others.
+    if scheduler.shared().is_some()
+        && matches!(
+            scheduler.atoms.name_of(item),
+            "system_logger" | "backtrace_depth"
+        )
+    {
+        let name = scheduler.atoms.name_of(item).to_owned();
+        return Err(error(format!(
+            "unsupported: erlang:system_flag/2 {name} in a run of execute_on_schedulers"
+        )));
+    }
     Ok(
         match (scheduler.atoms.name_of(item), value.small_integer()) {
             ("system_logger", _) => Value(std::mem::replace(

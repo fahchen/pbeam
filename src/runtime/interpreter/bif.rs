@@ -679,7 +679,13 @@ macro_rules! bifs {
             // each scheduler, so their use fails with a clear error until
             // the services move to the node.
             let local_service = matches!(module, "ets" | "persistent_term")
-                || (module == "erts_internal" && name == "atomics_new");
+                || (module == "erts_internal" && name == "atomics_new")
+                || matches!(
+                    (module, name),
+                    ("erlang", "finish_loading")
+                        | ("erts_internal", "prepare_loading")
+                        | ("erts_internal", "purge_module")
+                );
             if context.scheduler.shared().is_some() && local_service {
                 return Err(error(format!(
                     "unsupported: {module}:{name}/{arity} in a run of execute_on_schedulers"
