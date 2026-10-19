@@ -34,3 +34,21 @@ The task does the steps of the other examples (see the [Hello World example](../
 After it compiles `terra_counter.ex`, the task consolidates the protocols of Elixir with the implementations of Elixir, Terra, `Counter`, and `TerraCounter` into `target/examples/terra_counter/consolidated/`, as `mix run` does in the Terra project. Thus `String.Chars` (`"Count: #{count}"`) and `Inspect` (`IO.inspect/1`) find their implementations with a pattern match and do not call `code:ensure_loaded/1`. The run on ERTS puts the consolidated protocols first in the code path.
 
 The `pbeam` binary loads a start set: the Terra modules, `Counter`, `TerraCounter`, `pbeam_boot`, the boot modules, and the consolidated protocols in place of the unconsolidated protocols of Elixir. Each other pinned OTP and Elixir module loads on demand through the pinned `error_handler` and `code_server`, as in an interactive-mode ERTS run. For example, Terra calls `Code.ensure_loaded/1` (`lib/terra/runtime.ex:121` and `:161`), and the Elixir module `Code` calls `code:ensure_loaded/1`. The run gives `--root`, so `pbeam_boot` starts `code_server`, and `--pa` with the code path of the build. Thus `main/0` waits for the 11 module loads of its first `IO.inspect/1` call, and the terminal owner writes the restore sequence before the result, as an interactive-mode ERTS run does (#428). The task writes each called module that the PBeam loader does not load, with the reason, into `target/examples/terra_counter/pbeam.unloaded`.
+
+## Build one executable
+
+From the repository root, this command builds the example and writes one executable:
+
+```sh
+mise run example-executable terra_counter
+```
+
+The task writes `target/examples/terra_counter.bundle`, or the path of `--output`. The file holds the `pbeam` runtime, the compiled Terra sources, `Counter`, `TerraCounter`, and the OTP and Elixir modules of the run. Move the file into an empty directory and run it there in a terminal. The run needs no Erlang or Elixir installation, no release directory, and no other file of the build. It needs the host `sh` and `stty` utilities on `PATH`, `TERM=xterm-256color`, and a UTF-8 locale, as the Terra target requires. The keys `j j k q` print `{:ok, 1}` after Terra gives back the terminal, and the run exits with status 0.
+
+The check of this slice is `runs_the_terra_counter_executable_in_a_clean_directory` in `tests/feature/example.rs`. It builds the executable, runs it in a directory that holds only the executable, with an empty `HOME` and a `PATH` that holds no `erl` or `elixir`, and compares the result and the exit status with the pinned ERTS on the same build. The check ran on macOS arm64 on 2026-10-19.
+
+Scope of the claim:
+
+- Terra `30dea5667d7e4ae5777aa3df77acb36c4aac6967`, OTP 29.1.1, ERTS 17.1, and Elixir 1.20.4 as `mise.toml` pins them.
+- macOS arm64. The bundle carries BEAM files and the host build of the `pbeam` binary, so the executable runs only on the platform and architecture of that build. The Terra scenario check does not run on Linux, and this README makes no Linux claim.
+- The keys `j j k q` of the Terra reference. The check does not repeat the resize and flush steps of the reference harness, and it does not claim them for the executable.
