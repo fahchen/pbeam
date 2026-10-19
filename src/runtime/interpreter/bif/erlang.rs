@@ -4234,7 +4234,7 @@ pub(super) fn process_info(
         // scheduler, so the answer comes after the signals that the caller
         // sent before (`erl_bif_info.c:1374-1401`). Another item reads the
         // process state of its scheduler and stays unsupported.
-        if scheduler.remote_owner(*id).is_some() {
+        if let Some(index) = scheduler.remote_owner(*id) {
             if let Term::Atom(name) = item
                 && scheduler.atoms.name_of(name) == "registered_name"
             {
@@ -4246,15 +4246,13 @@ pub(super) fn process_info(
                     reference,
                     item: item.clone(),
                 };
-                if scheduler.send_signal(Some(caller), *id, request).is_err() {
-                    // The target exited before its scheduler took the
-                    // request.
-                    return Ok(signals_return(
-                        scheduler,
-                        process,
-                        Term::static_atom("undefined"),
-                    ));
-                }
+                // Put the request in the inbox of the owner. A target that
+                // exits before the owner drains the inbox is answered with
+                // `undefined` there.
+                scheduler
+                    .shared()
+                    .expect("a remote process has a node")
+                    .send_signal(index, *id, Some(caller), request, None);
                 return Ok(Trap {
                     module: "erts_internal",
                     function: "await_result",
