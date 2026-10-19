@@ -256,8 +256,8 @@ fn writes_the_bundle_of_a_fixture_example() {
     // A fixture has no release directory. The tool writes the layout of a
     // release from the start set and the beam list of scripts/example.sh:
     // the example modules in `pbeam/`, the consolidated protocols in
-    // `releases/pbeam/consolidated/`, and each application directory with
-    // all its files, because the run loads each other module on demand.
+    // `releases/pbeam/consolidated/`, and each application ebin directory
+    // with all its files, because the run loads each other module on demand.
     let directory = directory("fixture");
     let example = directory.join("example");
     let consolidated = directory.join("consolidated");
