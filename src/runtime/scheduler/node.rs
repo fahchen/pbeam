@@ -16,7 +16,7 @@ use std::{
     io::{self, Read, Write},
     os::unix::net::UnixStream,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering},
     },
     time::Instant,
@@ -85,6 +85,10 @@ pub(in crate::runtime) struct SharedNode {
     /// moment. Each scheduler builds its timer service on this pair, so the
     /// time of every scheduler agrees.
     clock: (Instant, i64),
+    /// The seed of the hash of `term_to_binary/2` with `local`
+    /// (`local_node_hash`, external.c:134). The first call on any scheduler
+    /// computes it, and each scheduler reads the same value.
+    local_node_hash: OnceLock<u32>,
 }
 
 impl SharedNode {
@@ -125,6 +129,7 @@ impl SharedNode {
                 live: AtomicUsize::new(0),
                 shutdown: AtomicBool::new(false),
                 clock: (Instant::now(), clock::system_time()),
+                local_node_hash: OnceLock::new(),
             }),
             readers,
         ))
@@ -134,6 +139,12 @@ impl SharedNode {
     /// time at the same moment.
     pub(in crate::runtime) fn clock_origin(&self) -> (Instant, i64) {
         self.clock
+    }
+
+    /// Return the seed of the local node hash. `compute` runs at the first
+    /// call on any scheduler, and each scheduler reads the same value.
+    pub(in crate::runtime) fn local_node_hash(&self, compute: impl FnOnce() -> u32) -> u32 {
+        *self.local_node_hash.get_or_init(compute)
     }
 
     /// Make the process `id` the process of the scheduler `index`.

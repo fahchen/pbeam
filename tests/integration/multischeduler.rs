@@ -152,6 +152,19 @@ fn rejects_an_atom_that_guest_code_creates() {
     );
 }
 
+/// A term that `term_to_binary/2` seeds with the local node hash decodes on
+/// another scheduler, because the node holds one hash.
+#[test]
+fn a_local_seeded_term_decodes_on_another_scheduler() {
+    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
+    let ok_atom = program.atom("ok").expect("the fixture names ok");
+    let results = program
+        .execute_on_schedulers(&[("ping_pong", "term_wait"), ("ping_pong", "term_send")])
+        .expect("the two schedulers run");
+    assert_eq!(results[0].term, Term::Atom(ok_atom.clone()), "the receiver");
+    assert_eq!(results[1].term, Term::Atom(ok_atom), "the sender");
+}
+
 /// The schedulers agree on the run clock: a later read is not below an
 /// earlier value from another scheduler, and the time offset is the same.
 #[test]

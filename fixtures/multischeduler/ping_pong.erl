@@ -5,7 +5,7 @@
          down_wait/0, down_hold/0, atom_create/0, drain_wait/0, drain_hold/0,
          len_wait/0, len_hold/0, process_list/0, child_wait/0, child_send/0,
          child_hold/0, name_wait/0, name_send/0, reference_name/0,
-         stamp_wait/0, stamp_send/0]).
+         stamp_wait/0, stamp_send/0, term_wait/0, term_send/0]).
 
 -define(COUNT, 100).
 
@@ -337,3 +337,19 @@ stamp_send() ->
     Time = erlang:monotonic_time(),
     stamp_name ! {stamp, self(), Offset, Time},
     receive {stamp_ok, Reply} -> Reply after 60000 -> timeout end.
+
+%% The root that decodes a local-seeded term from the other scheduler.
+term_wait() ->
+    true = register(term_name, self()),
+    receive {term, From, Binary} ->
+        {value, 1} = binary_to_term(Binary),
+        From ! {term_ok, ok}
+    end,
+    ok.
+
+%% The root that sends a local-seeded term to the other scheduler.
+term_send() ->
+    ok = wait_registered(term_name, 100000),
+    Binary = term_to_binary({value, 1}, [local]),
+    term_name ! {term, self(), Binary},
+    receive {term_ok, Reply} -> Reply after 60000 -> timeout end.

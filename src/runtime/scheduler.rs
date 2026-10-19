@@ -3068,15 +3068,26 @@ impl Scheduler {
     /// assert_eq!(scheduler.local_node_hash(), scheduler.local_node_hash());
     /// ```
     pub(in crate::runtime) fn local_node_hash(&self) -> u32 {
-        *self.local_node_hash.get_or_init(|| {
-            let node = [
-                &self.timers.time_offset().to_le_bytes()[..],
-                &host::host_name(),
-                std::process::id().to_string().as_bytes(),
-            ]
-            .concat();
-            block_hash(&node, self.timers.now() as u32)
-        })
+        // The hash belongs to the node, so each scheduler of a shared run
+        // reads the one value.
+        if let Some(node) = &self.shared {
+            return node.local_node_hash(|| self.compute_local_node_hash());
+        }
+        *self
+            .local_node_hash
+            .get_or_init(|| self.compute_local_node_hash())
+    }
+
+    /// Return the local node hash of this scheduler, with the seed of its
+    /// first call, as `local_node_hash` (`external.c:134`) does.
+    fn compute_local_node_hash(&self) -> u32 {
+        let node = [
+            &self.timers.time_offset().to_le_bytes()[..],
+            &host::host_name(),
+            std::process::id().to_string().as_bytes(),
+        ]
+        .concat();
+        block_hash(&node, self.timers.now() as u32)
     }
 
     /// Remove a monitor that the current process holds, as the ERTS
