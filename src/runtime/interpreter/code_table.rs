@@ -48,7 +48,7 @@ pub(in crate::runtime::interpreter) fn export_frame_calls() -> usize {
 #[derive(Debug, Default)]
 pub(in crate::runtime) struct CodeTable {
     /// The loaded modules by name. The program owns the start modules too,
-    /// and each run shares them through the `Rc`.
+    /// and each run shares them through the `Arc`.
     modules: HashMap<String, Arc<BeamModule>>,
     /// The loaded modules by their identity, for a frame that names its
     /// module by [`ModuleId`] and not by name, with the export targets of
