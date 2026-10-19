@@ -1016,7 +1016,14 @@ pub(super) fn raise(depth: usize, class: &Term, reason: &Term, stacktrace: &Term
 pub(super) fn link(scheduler: &mut Scheduler, target: &Term) -> Result<BifResult, BeamError> {
     let target = match *target {
         Term::Pid(pid) => LinkId::Process(pid),
-        Term::Port(port) => LinkId::Port(port),
+        Term::Port(port) => {
+            if scheduler.remote_port_owner(port).is_some() {
+                return Err(error(
+                    "unsupported: a port of another scheduler in a run of execute_on_schedulers",
+                ));
+            }
+            LinkId::Port(port)
+        }
         _ => return Ok(BifResult::badarg()),
     };
     if let Some(denied) = denial(scheduler, CapabilityKind::Process, Operation::Link, None)? {
@@ -1262,6 +1269,11 @@ pub(super) fn monitor(
     let target = match (context.scheduler.atoms.name_of(kind), target) {
         ("process", Term::Pid(id)) => Some(Ok(MonitorTarget::Process(*id))),
         ("process", target) => local_name(target).map(|name| Ok(MonitorTarget::ProcessName(name))),
+        ("port", Term::Port(port)) if context.scheduler.remote_port_owner(*port).is_some() => {
+            Some(Err(error(
+                "unsupported: a port of another scheduler in a run of execute_on_schedulers",
+            )))
+        }
         ("port", Term::Port(port)) => Some(Ok(MonitorTarget::Port(*port))),
         ("port", target) => local_name(target).map(|name| Ok(MonitorTarget::PortName(name))),
         ("time_offset", Term::Atom(service)) if service.is_static("clock_service") => {
@@ -6060,7 +6072,7 @@ pub(super) fn port_set_data(
     port: &Term,
     data: &Term,
 ) -> Result<BifResult, BeamError> {
-    let Some(id) = erts_internal::open_port_id(scheduler, port) else {
+    let Some(id) = erts_internal::open_port_id(scheduler, port)? else {
         return Ok(BifResult::badarg());
     };
     if let Some(denied) = erts_internal::port_denial(scheduler, id, Operation::Command)? {
@@ -6092,7 +6104,7 @@ pub(super) fn port_get_data(
     scheduler: &mut Scheduler,
     port: &Term,
 ) -> Result<BifResult, BeamError> {
-    let Some(id) = erts_internal::open_port_id(scheduler, port) else {
+    let Some(id) = erts_internal::open_port_id(scheduler, port)? else {
         return Ok(BifResult::badarg());
     };
     if let Some(denied) = erts_internal::port_denial(scheduler, id, Operation::Inspect)? {

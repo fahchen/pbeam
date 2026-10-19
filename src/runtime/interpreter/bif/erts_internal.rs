@@ -592,12 +592,17 @@ fn native_name(atoms: &AtomTable, name: &Term, allow_empty: bool) -> Option<Vec<
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(open_port_id(scheduler, &Term::Port(port)), Some(port));
-/// assert_eq!(open_port_id(scheduler, &Term::static_atom("foo")), None);
+/// assert_eq!(open_port_id(scheduler, &Term::Port(port)).unwrap(), Some(port));
+/// assert_eq!(open_port_id(scheduler, &Term::static_atom("foo")).unwrap(), None);
 /// ```
-pub(super) fn open_port_id(scheduler: &mut Scheduler, port: &Term) -> Option<PortId> {
-    let id = found_port_id(scheduler, port)?;
-    (!scheduler.resources.borrow_mut::<Ports>().closing(id)).then_some(id)
+pub(super) fn open_port_id(
+    scheduler: &mut Scheduler,
+    port: &Term,
+) -> Result<Option<PortId>, BeamError> {
+    let Some(id) = found_port_id(scheduler, port)? else {
+        return Ok(None);
+    };
+    Ok((!scheduler.resources.borrow_mut::<Ports>().closing(id)).then_some(id))
 }
 
 /// Return the port of `port` that is open or in the `CLOSING` state, as
@@ -607,17 +612,24 @@ pub(super) fn open_port_id(scheduler: &mut Scheduler, port: &Term) -> Option<Por
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(found_port_id(scheduler, &Term::Port(port)), Some(port));
+/// assert_eq!(found_port_id(scheduler, &Term::Port(port)).unwrap(), Some(port));
 /// ```
-fn found_port_id(scheduler: &mut Scheduler, port: &Term) -> Option<PortId> {
+fn found_port_id(scheduler: &mut Scheduler, port: &Term) -> Result<Option<PortId>, BeamError> {
     let Term::Port(id) = port else {
-        return None;
+        return Ok(None);
     };
-    scheduler
+    // The services of a port stay with its scheduler, so a BIF cannot use a
+    // port of another scheduler.
+    if scheduler.remote_port_owner(*id).is_some() {
+        return Err(error(
+            "unsupported: a port of another scheduler in a run of execute_on_schedulers",
+        ));
+    }
+    Ok(scheduler
         .resources
         .borrow_mut::<Ports>()
         .get(*id)
-        .map(|_| *id)
+        .map(|_| *id))
 }
 
 /// Run `erts_internal:port_command(Port, Data, OptionList)`, which
@@ -660,7 +672,7 @@ pub(super) fn port_command(
         ));
     }
     let scheduler = &mut *context.scheduler;
-    let (Some(id), Some(bytes)) = (open_port_id(scheduler, port), iolist::iodata_bytes(data))
+    let (Some(id), Some(bytes)) = (open_port_id(scheduler, port)?, iolist::iodata_bytes(data))
     else {
         return Ok(signals_return(scheduler, port, Term::static_atom("badarg")));
     };
@@ -713,7 +725,7 @@ pub(super) fn port_close(
     port: &Term,
 ) -> Result<BifResult, BeamError> {
     let scheduler = &mut *context.scheduler;
-    let Some(id) = open_port_id(scheduler, port) else {
+    let Some(id) = open_port_id(scheduler, port)? else {
         return Ok(signals_return(scheduler, port, Term::static_atom("badarg")));
     };
     if let Some(denied) = port_denial(scheduler, id, Operation::Close)? {
@@ -772,7 +784,7 @@ pub(super) fn port_control(
         .small_integer()
         .and_then(|value| u32::try_from(value).ok());
     let (Some(id), Some(command), Some(bytes)) = (
-        found_port_id(scheduler, port),
+        found_port_id(scheduler, port)?,
         command,
         iolist::iodata_bytes(data),
     ) else {
@@ -857,7 +869,7 @@ pub(super) fn port_denial(
 /// The atom `capability_denied` in a full atom table.
 pub(super) fn port_info(context: &mut BifContext<'_>, port: &Term) -> Result<BifResult, BeamError> {
     let scheduler = &mut *context.scheduler;
-    let info = match (port, found_port_id(scheduler, port)) {
+    let info = match (port, found_port_id(scheduler, port)?) {
         (_, Some(id)) => {
             if let Some(denied) = port_denial(scheduler, id, Operation::Inspect)? {
                 return Ok(denied);
@@ -972,7 +984,7 @@ pub(super) fn port_info_item(
     item: &Term,
 ) -> Result<BifResult, BeamError> {
     let scheduler = &mut *context.scheduler;
-    let info = match (port, found_port_id(scheduler, port)) {
+    let info = match (port, found_port_id(scheduler, port)?) {
         (_, Some(id)) => {
             let name = match item {
                 Term::Atom(name) => scheduler.atoms.name_of(name).to_owned(),
@@ -1033,7 +1045,7 @@ pub(super) fn port_connect(
     pid: &Term,
 ) -> Result<BifResult, BeamError> {
     let scheduler = &mut *context.scheduler;
-    let result = match (open_port_id(scheduler, port), pid) {
+    let result = match (open_port_id(scheduler, port)?, pid) {
         (Some(id), &Term::Pid(pid)) => {
             // The runtime to boot gate denies a boot process as the new
             // owner, as for `link/1` and `send/2` (see [`boot_denial`]).

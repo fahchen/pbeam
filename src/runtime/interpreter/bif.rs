@@ -680,15 +680,6 @@ macro_rules! bifs {
                     "unsupported: {module}:{name}/{arity} in a run of execute_on_schedulers"
                 )));
             }
-            // The services of a port stay with its scheduler, so a BIF
-            // cannot use a port of another scheduler.
-            if arguments.iter().any(|argument| {
-                matches!(argument, Term::Port(id) if context.scheduler.remote_port_owner(*id).is_some())
-            }) {
-                return Err(error(
-                    "unsupported: a port of another scheduler in a run of execute_on_schedulers",
-                ));
-            }
             // The cleanup of a fixation on a table that another process
             // deleted runs as process system work at each scheduling
             // (`erts_schedule_ets_free_fixation`, `erl_db.c:5263-5301`).

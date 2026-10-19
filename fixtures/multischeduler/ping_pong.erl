@@ -10,7 +10,8 @@
          alive_wait/0, alive_send/0, alive_child/0, scheduler_count/0,
          wall_time/0, name_after_kill/0, name_kill_hold/0, name_kill_child/0,
          decode_atom/0, persistent_put/0, ets_new/0, port_transfer/0,
-         port_transfer_hold/0, ports_list/0, port_use/0, port_give/0]).
+         port_transfer_hold/0, ports_list/0, port_use/0, port_give/0,
+         port_term/0, port_term_give/0]).
 
 -define(COUNT, 100).
 
@@ -514,4 +515,24 @@ port_give() ->
     Port = open_port({spawn_executable, "/usr/bin/true"}, [binary]),
     ok = wait_registered(port_use_name, 100000),
     port_use_name ! {port, Port},
+    receive done -> ok after 6000 -> timeout end.
+
+%% The root that uses the port of the other scheduler only as a term.
+port_term() ->
+    true = register(port_term_name, self()),
+    receive {port, From, Port} ->
+        List = erlang:port_to_list(Port),
+        true = is_list(List),
+        Binary = term_to_binary(Port),
+        Port = binary_to_term(Binary),
+        From ! done
+    end,
+    ok.
+
+%% The root that sends its port to the other scheduler and waits for the
+%% result.
+port_term_give() ->
+    Port = open_port({spawn_executable, "/usr/bin/true"}, [binary]),
+    ok = wait_registered(port_term_name, 100000),
+    port_term_name ! {port, self(), Port},
     receive done -> ok after 6000 -> timeout end.

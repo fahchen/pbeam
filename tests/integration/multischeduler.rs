@@ -183,6 +183,20 @@ fn a_killed_local_child_is_not_alive() {
     assert_eq!(results[1].term, Term::Atom(ok_atom), "the killer");
 }
 
+/// A port of another scheduler works as a term: its text and its encoded
+/// form need no port service.
+#[test]
+fn uses_a_port_of_another_scheduler_as_a_term() {
+    let erlang = pinned_beam("erlang");
+    let program = BeamProgram::load(&[&erlang, PING_PONG]).expect("the fixture loads");
+    let ok_atom = program.atom("ok").expect("the fixture names ok");
+    let results = program
+        .execute_on_schedulers(&[("ping_pong", "port_term"), ("ping_pong", "port_term_give")])
+        .expect("the two schedulers run");
+    assert_eq!(results[0].term, Term::Atom(ok_atom.clone()), "the user");
+    assert_eq!(results[1].term, Term::Atom(ok_atom), "the giver");
+}
+
 /// A use of a port of another scheduler fails with a clear error.
 #[test]
 fn rejects_the_use_of_a_port_of_another_scheduler() {
