@@ -587,6 +587,7 @@ impl BeamProgram {
         let frame = scheduler.code.frame(module, label, 0)?;
         let id = scheduler.next_pid()?;
         scheduler.start_with_id(id, frame, Vec::new(), Vec::new())?;
+        node.root_started();
         // After its root exits, a scheduler keeps running the processes that
         // its root started, because a process of another scheduler can still
         // depend on them until the last root exits.
@@ -627,6 +628,7 @@ impl BeamProgram {
                     if !serving
                         && !scheduler.timers.active()
                         && scheduler.root_waiting()
+                        && !node.starts_pending()
                         && node.live_processes() == 1
                     {
                         // A delivery of the last other root may already be

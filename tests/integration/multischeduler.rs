@@ -74,6 +74,35 @@ fn reports_a_root_that_exits_with_an_error() {
     );
 }
 
+/// A process of another scheduler answers its registered name and its
+/// liveness from the tables of the node.
+#[test]
+fn reads_the_name_and_liveness_of_a_remote_process() {
+    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
+    let ok_atom = program.atom("ok").expect("the fixture names ok");
+    let results = program
+        .execute_on_schedulers(&[("ping_pong", "info_watch"), ("ping_pong", "info_hold")])
+        .expect("the two schedulers run");
+    assert_eq!(results[0].term, Term::Atom(ok_atom.clone()), "the watcher");
+    assert_eq!(results[1].term, Term::Atom(ok_atom), "the holder");
+}
+
+/// An item of a remote process that the runtime cannot read stops the run
+/// with a clear error.
+#[test]
+fn rejects_an_unsupported_item_of_a_remote_process() {
+    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
+    let error = program
+        .execute_on_schedulers(&[("ping_pong", "info_item"), ("ping_pong", "info_hold")])
+        .expect_err("the item is unsupported");
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported erlang:process_info/2"),
+        "{error}"
+    );
+}
+
 /// A failing root decides the error of the run even when another root waits
 /// and the abort stops it.
 #[test]

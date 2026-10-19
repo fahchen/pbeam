@@ -71,6 +71,8 @@ pub(in crate::runtime) struct SharedNode {
     next_unlink_id: AtomicU64,
     /// The number of roots that did not exit yet.
     roots: AtomicUsize,
+    /// The number of roots that did not start yet.
+    starts: AtomicUsize,
     /// The number of live processes.
     live: AtomicUsize,
     /// True after the last root exited.
@@ -111,6 +113,7 @@ impl SharedNode {
                 unique_monotonic: AtomicI64::new(-1),
                 next_unlink_id: AtomicU64::new(1),
                 roots: AtomicUsize::new(count),
+                starts: AtomicUsize::new(count),
                 live: AtomicUsize::new(0),
                 shutdown: AtomicBool::new(false),
             }),
@@ -135,9 +138,28 @@ impl SharedNode {
         owners.remove(&id);
         let mut names = self.names.lock().expect("the name table is not poisoned");
         names.retain(|_, owner| *owner != id);
-        drop(names);
-        drop(owners);
+    }
+
+    /// Record the start of a root. The impossible-wait check waits for each
+    /// root to start, because a root that waits can get its reply from a
+    /// root of a scheduler thread that did not run yet.
+    pub(in crate::runtime) fn root_started(&self) {
+        self.starts.fetch_sub(1, Ordering::AcqRel);
+    }
+
+    /// Return true before each root started.
+    pub(in crate::runtime) fn starts_pending(&self) -> bool {
+        self.starts.load(Ordering::Acquire) != 0
+    }
+
+    /// Record the exit of a process after its exit signals. A waiting root
+    /// reads the count at the impossible-wait check, so the decrement comes
+    /// after the notifications of the exit and wakes each scheduler.
+    pub(in crate::runtime) fn live_exit(&self) {
         self.live.fetch_sub(1, Ordering::AcqRel);
+        for inbox in &self.inboxes {
+            wake(&inbox.wake);
+        }
     }
 
     /// Return the number of live processes.

@@ -3625,6 +3625,9 @@ impl Scheduler {
         }
         self.alias_owners.retain(|_, owner| *owner != id);
         self.send_pending_monitor();
+        if let Some(node) = &self.shared {
+            node.live_exit();
+        }
         // The process left the process table and no guest code can read it
         // again. Its terms go to the release work list, so that the walk of a
         // large graph runs in bounded scheduler work and not in this step.

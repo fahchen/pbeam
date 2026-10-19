@@ -4222,6 +4222,22 @@ pub(super) fn process_info(
         );
     }
     let Some(target) = scheduler.process(*id) else {
+        // A live process of another scheduler. The name table of the node
+        // answers its registered name; another item reads the process state
+        // of its scheduler and stays unsupported.
+        if scheduler.remote_owner(*id).is_some() {
+            if let Term::Atom(name) = item
+                && scheduler.atoms.name_of(name) == "registered_name"
+            {
+                let value = match scheduler.registered_name_of(*id) {
+                    Some(registered) => Term::tuple(vec![item.clone(), Term::Atom(registered)]),
+                    None => Term::nil(),
+                };
+                scheduler.current_process_mut().bump_reductions(1);
+                return Ok(signals_return(scheduler, process, value));
+            }
+            return Err(unsupported(&scheduler.atoms));
+        }
         return Ok(Value(Term::static_atom("undefined")));
     };
     let messages = target.mailbox.message_count();
@@ -4302,6 +4318,10 @@ pub(super) fn is_process_alive(
         return Ok(denied);
     }
     let alive = match scheduler.process(*id) {
+        // A live process of another scheduler. The owner table of the node
+        // records it. The routing of the request to its scheduler for the
+        // signal order stays in #843.
+        None if scheduler.remote_owner(*id).is_some() => "true",
         None => "false",
         Some(target) if target.exiting.is_some() || target.mailbox.has_incoming() => {
             return Ok(Trap {

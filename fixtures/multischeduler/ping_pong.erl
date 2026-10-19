@@ -1,6 +1,7 @@
 -module(ping_pong).
 -export([ping/0, pong/0, reference/0, boom/0, wait/0, conflict_try/0, conflict_hold/0,
-         monitor_watch/0, monitor_hold/0, unreg_hold/0, unreg_taker/0]).
+         monitor_watch/0, monitor_hold/0, unreg_hold/0, unreg_taker/0,
+         info_watch/0, info_hold/0, info_item/0]).
 
 -define(COUNT, 100).
 
@@ -148,3 +149,25 @@ unreg_taker() ->
     ok = wait_registered(unreg_name, 20000),
     true = unregister(unreg_name),
     true.
+
+%% The root that reads the registered name and the liveness of a process of
+%% another scheduler, and then stops it.
+info_watch() ->
+    Pid = wait_for(info_name, 100000),
+    {registered_name, info_name} = process_info(Pid, registered_name),
+    true = is_process_alive(Pid),
+    Pid ! stop,
+    ok.
+
+%% The root that holds the name of the other root.
+info_hold() ->
+    true = register(info_name, self()),
+    receive stop -> ok after 60000 -> timeout end.
+
+%% The root that asks for an item of a remote process that PBeam cannot read
+%% yet. The run stops with the unsupported error.
+info_item() ->
+    Pid = wait_for(info_name, 100000),
+    _ = process_info(Pid, message_queue_len),
+    Pid ! stop,
+    ok.
