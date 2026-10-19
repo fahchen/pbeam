@@ -1261,6 +1261,13 @@ pub(super) fn monitor(
     let Some(options) = monitor_options(options) else {
         return Ok(BifResult::badarg());
     };
+    // The alias owners stay with each scheduler, so a message to an alias
+    // of another scheduler would be dropped.
+    if context.scheduler.shared().is_some() && options.alias.is_some() {
+        return Err(error(
+            "unsupported: an alias from a monitor in a run of execute_on_schedulers",
+        ));
+    }
     let Term::Atom(kind) = kind else {
         return Ok(BifResult::badarg());
     };
@@ -5151,6 +5158,13 @@ pub(super) fn ports(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
 ///
 /// The `priority` option, and the errors of `Scheduler::monitor`.
 pub(super) fn alias(context: &mut BifContext<'_>, options: &Term) -> Result<BifResult, BeamError> {
+    // The alias owners stay with each scheduler, so a message to an alias
+    // of another scheduler would be dropped.
+    if context.scheduler.shared().is_some() {
+        return Err(error(
+            "unsupported: erlang:alias/0,1 in a run of execute_on_schedulers",
+        ));
+    }
     let Some(mut elements) = options.list_iter() else {
         return Ok(BifResult::badarg());
     };
@@ -5786,6 +5800,13 @@ fn bif_timer(
         Receiver::Process(id) => Some(*id),
         Receiver::Name(name) => scheduler.whereis(scheduler.atoms.name_of(name)),
     };
+    // The timer queue stays with each scheduler, so a timer that fires on
+    // another scheduler cannot reach its receiver.
+    if target.is_some_and(|target| scheduler.remote_owner(target).is_some()) {
+        return Err(error(
+            "unsupported: a BIF timer to a process of another scheduler in a run of execute_on_schedulers",
+        ));
+    }
     if let Some(target) = target
         && let Some(denied) = boot_denial(scheduler, target)?
     {

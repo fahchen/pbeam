@@ -208,6 +208,13 @@ fn setup(
         Receiver::Process(id) => Some(*id),
         Receiver::Name(name) => scheduler.whereis(scheduler.atoms.name_of(name)),
     };
+    // The timer queue stays with each scheduler, so a timer that fires on
+    // another scheduler cannot reach its receiver.
+    if target.is_some_and(|target| scheduler.remote_owner(target).is_some()) {
+        return Err(error(
+            "unsupported: a BIF timer to a process of another scheduler in a run of execute_on_schedulers",
+        ));
+    }
     if let Some(target) = target
         && let Some(denied) = boot_denial(scheduler, target)?
     {

@@ -11,7 +11,8 @@
          wall_time/0, name_after_kill/0, name_kill_hold/0, name_kill_child/0,
          decode_atom/0, persistent_put/0, ets_new/0, port_transfer/0,
          port_transfer_hold/0, ports_list/0, port_use/0, port_give/0,
-         port_term/0, port_term_give/0, atomics_new/0]).
+         port_term/0, port_term_give/0, atomics_new/0, timer_remote/0,
+         timer_hold/0, alias_create/0, monitor_alias/0, alias_hold/0]).
 
 -define(COUNT, 100).
 
@@ -541,3 +542,29 @@ port_term_give() ->
 %% cannot share the arrays.
 atomics_new() ->
     erts_internal:atomics_new(1, []).
+
+%% The root that starts a timer for a process of the other scheduler.
+timer_remote() ->
+    Pid = wait_for(timer_name, 100000),
+    _ = erlang:send_after(1000, Pid, tick),
+    ok.
+
+%% The root that holds a name for the timer of the other root.
+timer_hold() ->
+    true = register(timer_name, self()),
+    receive stop -> ok after 6000 -> timeout end.
+
+%% The root that makes an alias. A run with scheduler threads cannot share
+%% the alias owners.
+alias_create() ->
+    erlang:alias().
+
+%% The root that monitors a process of the other scheduler with an alias.
+monitor_alias() ->
+    Pid = wait_for(alias_name, 100000),
+    erlang:monitor(process, Pid, [{alias, explicit_unalias}]).
+
+%% The root that holds a name for the monitor of the other root.
+alias_hold() ->
+    true = register(alias_name, self()),
+    receive stop -> ok after 6000 -> timeout end.
