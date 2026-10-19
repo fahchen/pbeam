@@ -2668,13 +2668,15 @@ impl Scheduler {
     }
 
     /// Move each delivery of the inbox of this scheduler into the signal
-    /// queue or the mailbox of its target, in inbox order.
-    pub(super) fn drain_inbox(&mut self) {
+    /// queue or the mailbox of its target, in inbox order. Return true when
+    /// the inbox held a delivery.
+    pub(super) fn drain_inbox(&mut self) -> bool {
         let Some(node) = self.shared.as_ref().map(Arc::clone) else {
-            return;
+            return false;
         };
         let mut deliveries = Vec::new();
         node.take(self.index, &mut deliveries);
+        let drained = !deliveries.is_empty();
         for delivery in deliveries {
             match delivery {
                 Delivery::Message { target, from, term } => {
@@ -2691,6 +2693,7 @@ impl Scheduler {
                 }
             }
         }
+        drained
     }
 
     /// Spawn a child process for the current process and optionally monitor

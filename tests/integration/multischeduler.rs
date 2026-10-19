@@ -103,6 +103,35 @@ fn rejects_an_unsupported_item_of_a_remote_process() {
     );
 }
 
+/// The DOWN of the last other process reaches a root that waits without a
+/// timer before the runtime reports an impossible wait.
+#[test]
+fn a_down_resumes_a_root_that_waits_for_it() {
+    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
+    let ok_atom = program.atom("ok").expect("the fixture names ok");
+    let results = program
+        .execute_on_schedulers(&[("ping_pong", "down_wait"), ("ping_pong", "down_hold")])
+        .expect("the two schedulers run");
+    assert_eq!(results[0].term, Term::Atom(ok_atom.clone()), "the watcher");
+    assert_eq!(results[1].term, Term::Atom(ok_atom), "the holder");
+}
+
+/// The whole state of a remote process is not readable yet, and the run
+/// stops with a clear error.
+#[test]
+fn rejects_the_whole_state_of_a_remote_process() {
+    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
+    let error = program
+        .execute_on_schedulers(&[("ping_pong", "info_all"), ("ping_pong", "info_hold")])
+        .expect_err("the whole state is unsupported");
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported erlang:process_info/1"),
+        "{error}"
+    );
+}
+
 /// A failing root decides the error of the run even when another root waits
 /// and the abort stops it.
 #[test]

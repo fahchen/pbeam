@@ -4720,6 +4720,14 @@ pub(super) fn process_info_1(
         });
     }
     let Some(target) = scheduler.process(*id) else {
+        // A live process of another scheduler needs the process state of its
+        // scheduler, which this read cannot reach yet.
+        if scheduler.remote_owner(*id).is_some() {
+            return Err(error(format!(
+                "unsupported erlang:process_info/1 arguments {}",
+                debug_term(process, &scheduler.atoms)
+            )));
+        }
         return Ok(Value(Term::static_atom("undefined")));
     };
     let messages = target.mailbox.message_count();

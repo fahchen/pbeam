@@ -1,7 +1,8 @@
 -module(ping_pong).
 -export([ping/0, pong/0, reference/0, boom/0, wait/0, conflict_try/0, conflict_hold/0,
          monitor_watch/0, monitor_hold/0, unreg_hold/0, unreg_taker/0,
-         info_watch/0, info_hold/0, info_item/0]).
+         info_watch/0, info_hold/0, info_item/0, info_all/0,
+         down_wait/0, down_hold/0]).
 
 -define(COUNT, 100).
 
@@ -171,3 +172,22 @@ info_item() ->
     _ = process_info(Pid, message_queue_len),
     Pid ! stop,
     ok.
+
+%% The root that reads the whole state of a remote process. PBeam cannot
+%% read it yet, so the run stops with the unsupported error.
+info_all() ->
+    Pid = wait_for(info_name, 100000),
+    _ = process_info(Pid),
+    Pid ! stop,
+    ok.
+
+%% The root that waits without a timer for the DOWN of a remote process.
+down_wait() ->
+    Pid = wait_for(down_name, 100000),
+    Ref = monitor(process, Pid),
+    receive {'DOWN', Ref, process, Pid, normal} -> ok end.
+
+%% The root that holds a name and exits after a short wait.
+down_hold() ->
+    true = register(down_name, self()),
+    receive after 100 -> ok end.

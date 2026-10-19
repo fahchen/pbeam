@@ -632,9 +632,10 @@ impl BeamProgram {
                         && node.live_processes() == 1
                     {
                         // A delivery of the last other root may already be
-                        // in the inbox. Apply it before the error.
-                        scheduler.drain_inbox();
-                        if !scheduler.root_waiting() {
+                        // in the inbox. Apply it and schedule the result
+                        // before the error: it can make the root runnable or
+                        // give it a signal that it did not handle.
+                        if scheduler.drain_inbox() || !scheduler.root_waiting() {
                             continue;
                         }
                         return Err(error("root process waits for a message that cannot arrive"));
