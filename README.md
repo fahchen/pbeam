@@ -80,15 +80,15 @@ Work is managed in [GitHub Issues](https://github.com/fahchen/pbeam/issues),
 
 Each milestone has a dedicated tracking issue. Epics and tasks are assigned to the GitHub milestone; native sub-issue links express the hierarchy and native blocked-by links express dependencies. Milestone trackers and epics list their issues as linked bullets.
 
-The owner decisions of 2026-10-15 set the order of the open milestones. M11 follows M5. M6 Capability security is postponed until after M9. The landed capability checks of epic [#305](https://github.com/fahchen/pbeam/issues/305) stay, and M7 to M9 keep the accepted security contracts. The milestone numbers do not change.
+The owner decisions of 2026-10-15 set the order of the open milestones. M11 follows M5. The owner decision of 2026-10-19 postponed M6 Capability security again after M9 closed, so M10 Multiple schedulers is next. M6 resumes only after a new owner decision. The landed capability checks of epic [#305](https://github.com/fahchen/pbeam/issues/305) stay, and M7 to M9 keep the accepted security contracts. The milestone numbers do not change.
 
 1. M5 Interactive host I/O ([tracker #38](https://github.com/fahchen/pbeam/issues/38))
 2. M11 Serve HTTP with Plug and Bandit ([tracker #650](https://github.com/fahchen/pbeam/issues/650))
 3. M7 Linked native calls ([tracker #36](https://github.com/fahchen/pbeam/issues/36))
 4. M8 Embedded application ([tracker #37](https://github.com/fahchen/pbeam/issues/37))
 5. M9 Pinned Terra scenario ([tracker #39](https://github.com/fahchen/pbeam/issues/39))
-6. M6 Capability security ([tracker #304](https://github.com/fahchen/pbeam/issues/304))
-7. M10 Multiple schedulers ([tracker #35](https://github.com/fahchen/pbeam/issues/35))
+6. M10 Multiple schedulers ([tracker #35](https://github.com/fahchen/pbeam/issues/35))
+7. M6 Capability security ([tracker #304](https://github.com/fahchen/pbeam/issues/304)) — postponed until a new owner decision
 
 Milestone titles use `[m1] Title`. Epic and task titles use `[m1-e1] Title`;
 GitHub issue numbers identify individual tasks.
