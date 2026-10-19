@@ -11,7 +11,7 @@
          wall_time/0, name_after_kill/0, name_kill_hold/0, name_kill_child/0,
          decode_atom/0, persistent_put/0, ets_new/0, port_transfer/0,
          port_transfer_hold/0, ports_list/0, port_use/0, port_give/0,
-         port_term/0, port_term_give/0]).
+         port_term/0, port_term_give/0, atomics_new/0]).
 
 -define(COUNT, 100).
 
@@ -536,3 +536,8 @@ port_term_give() ->
     ok = wait_registered(port_term_name, 100000),
     port_term_name ! {port, self(), Port},
     receive done -> ok after 6000 -> timeout end.
+
+%% The root that makes an atomic array. A run with scheduler threads
+%% cannot share the arrays.
+atomics_new() ->
+    erts_internal:atomics_new(1, []).

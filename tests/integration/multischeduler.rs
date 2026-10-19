@@ -247,6 +247,23 @@ fn rejects_the_port_list_of_a_scheduler_run() {
     );
 }
 
+/// An atomic array in a run with scheduler threads fails with a clear
+/// error.
+#[test]
+fn rejects_an_atomic_array() {
+    let erts_internal = pinned_beam("erts_internal");
+    let program = BeamProgram::load(&[&erts_internal, PING_PONG]).expect("the fixture loads");
+    let error = program
+        .execute_on_schedulers(&[("ping_pong", "atomics_new"), ("ping_pong", "info_hold")])
+        .expect_err("atomic arrays are unsupported");
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported: erts_internal:atomics_new/2 in a run of execute_on_schedulers"),
+        "{error}"
+    );
+}
+
 /// A persistent term use in a run with scheduler threads fails with a
 /// clear error.
 #[test]

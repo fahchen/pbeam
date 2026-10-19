@@ -675,7 +675,12 @@ macro_rules! bifs {
             // with each scheduler, so a use of them fails with a clear
             // error until the services move to the node.
             let (module, name, arity) = mfa(id);
-            if context.scheduler.shared().is_some() && matches!(module, "ets" | "persistent_term") {
+            // A run with scheduler threads keeps these node services with
+            // each scheduler, so their use fails with a clear error until
+            // the services move to the node.
+            let local_service = matches!(module, "ets" | "persistent_term")
+                || (module == "erts_internal" && name == "atomics_new");
+            if context.scheduler.shared().is_some() && local_service {
                 return Err(error(format!(
                     "unsupported: {module}:{name}/{arity} in a run of execute_on_schedulers"
                 )));
