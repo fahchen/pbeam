@@ -320,6 +320,20 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a measured path with a map of about 100000 keys or more, or a task that changes the YCF trap state of these BIFs.
 - **Source:** Codex review of PR #753 (#750).
 
+### Share the node services of a multi-scheduler run
+
+- **Now:** #842 runs one root on each of two scheduler threads with one shared node. The node holds the process owners, the registered names, the identifier counters, the inbox of each scheduler, and the shutdown state. The atom table, the code table and its import-target caches, ETS, `persistent_term`, the timers, the resources, the alias owners, and the delegations stay with each scheduler. A runtime atom created on one scheduler is unknown to the other, so a term that carries it does not compare or print correctly across threads. ETS and `persistent_term` do not see the writes of the other scheduler, and a timer of one scheduler cannot wake a process of the other.
+- **Option:** move each service to the shared node behind a lock or to an owner scheduler with request messages, as ERTS does for the process table, the atom table, ETS, and timers. The atom table is the first need: an append-only shared table with one global index, and a text fallback for an index that a scheduler did not create.
+- **Trigger:** a multi-scheduler run that creates an atom at runtime, uses ETS or `persistent_term` across schedulers, or needs a timer that wakes a process of another scheduler.
+- **Source:** #842.
+
+### Route alias messages across scheduler threads
+
+- **Now:** the owner of each alias is in the scheduler that made the alias (`Scheduler::alias_owners`), so a message to an alias from another scheduler does not find its owner. A `gen:call` between processes of two schedulers uses an alias and fails in a restricted or multi-scheduler run that reaches this path.
+- **Option:** put the alias owners in the shared node, as the names, and route an alias message to the owner scheduler through its inbox.
+- **Trigger:** the first cross-scheduler alias send, for example a `gen:call` between two schedulers.
+- **Source:** #842.
+
 ## Exceptions
 
 ### Give the `error_info` cause of BIF errors

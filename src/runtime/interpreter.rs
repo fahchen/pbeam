@@ -5,7 +5,7 @@ use super::{
         DirtyWrite, Frame, PendingBif, PendingTrap, ProcessState, ReceiveTimer, StackSlot, Start,
         StartFlags,
     },
-    scheduler::{PolicyEnd, Received, Scheduler, Turn},
+    scheduler::{PolicyEnd, Received, Scheduler, Turn, node::SharedNode},
     tty::{InitialMode, Ttys},
 };
 use crate::{
@@ -466,6 +466,148 @@ impl BeamProgram {
     ) -> Result<HostTerm, BeamError> {
         let issuer = Issuer::Module { policy, boot };
         self.execute_issued(module, function, arguments, issuer, &mut None)
+    }
+
+    /// Run one root process on each of `roots.len()` scheduler threads.
+    ///
+    /// Each root is `Module:Function/0`. The schedulers share one node: the
+    /// process owners, the registered names, the identifier counters, and
+    /// the inbox of each scheduler for the messages and signals that cross a
+    /// thread boundary. Terms are shared and immutable, and one process runs
+    /// on one scheduler thread only. The run ends when each root exits, and
+    /// the threads join before this function returns. The results keep the
+    /// order of `roots`, and each result is the return value of its root.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let results = program.execute_on_schedulers(&[("ping_pong", "ping"), ("ping_pong", "pong")])?;
+    /// assert_eq!(results.len(), 2);
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`BeamProgram::execute`] for a root that exits with an
+    /// error or waits for a message that cannot arrive, the error of an
+    /// empty list of roots, and the error of a scheduler that cannot be
+    /// created.
+    pub fn execute_on_schedulers(
+        &self,
+        roots: &[(&str, &str)],
+    ) -> Result<Vec<HostTerm>, BeamError> {
+        if roots.is_empty() {
+            return Err(error("a multi-scheduler run needs at least one root"));
+        }
+        let (node, readers) = SharedNode::new(roots.len())
+            .map_err(|cause| error(format!("cannot create the scheduler node: {cause}")))?;
+        let results = std::thread::scope(|scope| {
+            let handles: Vec<_> = roots
+                .iter()
+                .zip(readers)
+                .enumerate()
+                .map(|(index, ((module, function), reader))| {
+                    let node = Arc::clone(&node);
+                    scope.spawn(move || -> Result<_, BeamError> {
+                        let mut scheduler = Scheduler::with_shared(
+                            (*self.atoms).clone(),
+                            Arc::clone(&node),
+                            index,
+                            reader,
+                        );
+                        scheduler.code = CodeTable::new(self.modules.clone());
+                        self.run_multi_root(&mut scheduler, module, function)?;
+                        Ok(scheduler.into_run_result())
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle
+                        .join()
+                        .expect("a scheduler thread does not panic in a multi-scheduler run")
+                })
+                .collect::<Vec<_>>()
+        });
+        let mut results_out = Vec::with_capacity(results.len());
+        for result in results {
+            let (root, atoms) = result?;
+            let Some(root) = root else {
+                return Err(error(
+                    "a root process waits for a message that cannot arrive",
+                ));
+            };
+            match root {
+                Ok(term) => results_out.push(HostTerm {
+                    term,
+                    atoms: Arc::new(atoms),
+                }),
+                Err(reason) => {
+                    let text: String = print_term(&reason, &atoms)
+                        .into_iter()
+                        .map(char::from)
+                        .collect();
+                    return Err(error(format!("root process exited with {text}")));
+                }
+            }
+        }
+        Ok(results_out)
+    }
+
+    /// Run one root of a multi-scheduler run until its exit completes, and
+    /// then serve the inbox of its scheduler until the last root exits.
+    fn run_multi_root(
+        &self,
+        scheduler: &mut Scheduler,
+        module: &str,
+        function: &str,
+    ) -> Result<(), BeamError> {
+        let Some(node) = scheduler.shared().map(Arc::clone) else {
+            return Ok(());
+        };
+        let label = scheduler.code.entry_label(module, function, 0)?;
+        let frame = scheduler.code.frame(module, label, 0)?;
+        let id = scheduler.next_pid()?;
+        scheduler.start_with_id(id, frame, Vec::new(), Vec::new())?;
+        while !scheduler.root_exited() {
+            let now = scheduler.timers.now();
+            scheduler.expire_timers(now);
+            scheduler.check_signals()?;
+            scheduler.complete_dirty_writes();
+            match scheduler.schedule_next()? {
+                Turn::Run => {
+                    let outcome = self.run(scheduler)?;
+                    match outcome {
+                        Outcome::Wait => scheduler.park_current(),
+                        Outcome::Hibernate => scheduler.hibernate_current(),
+                        Outcome::Yield => scheduler.yield_current(),
+                        Outcome::Exit { reason, result } => {
+                            scheduler.finish_current(reason, result)?
+                        }
+                        Outcome::DirtyWrite { write, tail } => {
+                            scheduler.start_dirty_write(write, tail)
+                        }
+                    }
+                }
+                Turn::Done => {}
+                Turn::Idle => {
+                    if !scheduler.timers.active()
+                        && scheduler.root_waiting()
+                        && node.roots_left() == 1
+                    {
+                        return Err(error("root process waits for a message that cannot arrive"));
+                    }
+                    let wait = scheduler.timers.wait_time(scheduler.timers.now());
+                    scheduler.wait_events(Some(wait))?;
+                }
+            }
+        }
+        node.root_done();
+        while !node.is_shutdown() {
+            scheduler.discard_inbox();
+            scheduler.wait_events(None)?;
+        }
+        Ok(())
     }
 
     /// Run an exported function as the root process, as

@@ -1,0 +1,126 @@
+//! Two scheduler threads share one node. A root on each thread exchanges
+//! messages: the ping root sends a burst to the pong root, and the pong root
+//! reports whether the burst arrived in the order of the sender.
+
+use pbeam_runtime::{BeamProgram, Term};
+
+/// The fixture with the two roots. `ping/0` sends `COUNT` messages to the
+/// process registered as `pong`, and `pong/0` records the next expected
+/// sequence number. `reference/0` runs the same exchange on the pinned ERTS.
+const PING_PONG: &[u8] = include_bytes!("../../fixtures/multischeduler/ping_pong.beam");
+
+/// Run the two roots on two scheduler threads and check the result of each
+/// root.
+///
+/// The channel of one sender and one receiver keeps its order, so the burst
+/// arrives in order. The test repeats the run to exercise different
+/// interleavings of the two threads.
+#[test]
+fn runs_a_cross_thread_ping_pong_on_two_schedulers() {
+    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
+    let true_atom = program.atom("true").expect("the fixture names true");
+    let ok_atom = program.atom("ok").expect("the fixture names ok");
+    let expected_ping = Term::tuple(vec![Term::Integer(100), Term::Atom(true_atom)]);
+    for _ in 0..10 {
+        let results = program
+            .execute_on_schedulers(&[("ping_pong", "ping"), ("ping_pong", "pong")])
+            .expect("the two schedulers run");
+        assert_eq!(results.len(), 2, "one result for each root");
+        assert_eq!(results[0].term, expected_ping, "the ping root");
+        assert_eq!(
+            results[1].term,
+            Term::Atom(ok_atom.clone()),
+            "the pong root"
+        );
+    }
+}
+
+/// The same exchange on the pinned ERTS returns the same results.
+#[test]
+fn the_pinned_erts_gives_the_same_result() {
+    let directory = std::env::temp_dir().join(format!(
+        "pbeam-multischeduler-{}-reference",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).expect("the directory of the reference run");
+    let beam = directory.join("ping_pong.beam");
+    std::fs::write(&beam, PING_PONG).expect("the fixture file");
+    let output = std::process::Command::new("erl")
+        .args(["+S", "2", "-noshell"])
+        .args([
+            "-eval",
+            "io:format(\"~p~n\", [ping_pong:reference()]), halt().",
+        ])
+        .arg("-pa")
+        .arg(&directory)
+        .output()
+        .expect("the pinned ERTS runs");
+    std::fs::remove_dir_all(&directory).expect("the reference directory leaves");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "{{100,true},ok}\n");
+}
+
+/// A root that exits with an error gives that error.
+#[test]
+fn reports_a_root_that_exits_with_an_error() {
+    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
+    let error = program
+        .execute_on_schedulers(&[("ping_pong", "boom")])
+        .expect_err("the root exits with an error");
+    assert!(
+        error.to_string().contains("root process exited with {boom"),
+        "{error}"
+    );
+}
+
+/// A root that waits for a message that no process can send gives the error
+/// of an impossible wait.
+#[test]
+fn reports_a_root_that_waits_for_a_message_that_cannot_arrive() {
+    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
+    let error = program
+        .execute_on_schedulers(&[("ping_pong", "wait")])
+        .expect_err("the root waits");
+    assert!(
+        error
+            .to_string()
+            .contains("root process waits for a message that cannot arrive"),
+        "{error}"
+    );
+}
+
+/// A run without a root gives an error.
+#[test]
+fn rejects_an_empty_root_list() {
+    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
+    let error = program
+        .execute_on_schedulers(&[])
+        .expect_err("an empty root list is an error");
+    assert!(error.to_string().contains("at least one root"), "{error}");
+}
+
+/// Two roots of different scheduler threads register one name. One root gets
+/// the name and the other root gets false.
+#[test]
+fn one_of_two_schedulers_registers_a_shared_name() {
+    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
+    let true_atom = program.atom("true").expect("the fixture names true");
+    let false_atom = program.atom("false").expect("the fixture names false");
+    let results = program
+        .execute_on_schedulers(&[
+            ("ping_pong", "conflict_try"),
+            ("ping_pong", "conflict_hold"),
+        ])
+        .expect("the two schedulers run");
+    assert_eq!(
+        results[0].term,
+        Term::Atom(false_atom),
+        "the second root has the name"
+    );
+    assert_eq!(
+        results[1].term,
+        Term::Atom(true_atom),
+        "the first root has the name"
+    );
+}

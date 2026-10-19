@@ -126,6 +126,27 @@ impl Scheduler {
         target: ProcessId,
         signal: Signal,
     ) -> Result<(), Box<Signal>> {
+        if !self.processes.contains_key(&target)
+            && let Some(index) = self.remote_owner(target)
+        {
+            let pending = self.take_pending_monitor(target).map(monitor_signal);
+            self.shared
+                .as_ref()
+                .expect("a remote target has a node")
+                .send_signal(index, target, sender, signal, pending);
+            return Ok(());
+        }
+        self.send_signal_local(sender, target, signal)
+    }
+
+    /// Put the signal into the queue of the local process `target`, as
+    /// [`Self::send_signal`] does.
+    pub(in crate::runtime) fn send_signal_local(
+        &mut self,
+        sender: Option<ProcessId>,
+        target: ProcessId,
+        signal: Signal,
+    ) -> Result<(), Box<Signal>> {
         if let Some(pending) = self.take_pending_monitor(target) {
             if !self.processes.contains_key(&target) {
                 self.pending_monitor_failed(sender, pending);
@@ -304,6 +325,7 @@ impl Scheduler {
         max_reds: i32,
         point: HandlingPoint,
     ) -> Result<i32, BeamError> {
+        self.drain_inbox();
         let process = self.processes.get_mut(&id).expect("the process is alive");
         if point == HandlingPoint::ScheduleIn {
             process.mailbox.fetch();
