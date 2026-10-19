@@ -4368,38 +4368,28 @@ pub(super) fn is_process_alive(
     if let Some(denied) = other_process_denial(scheduler, *id, Operation::Inspect)? {
         return Ok(denied);
     }
-    // A delivery can arrive between a read and the answer. Apply the inbox
-    // before each read, and read again after a drain applied a delivery, so
-    // the answer and the caller signals are the state of the return
-    // (`erl_bif_info.c:4075-4105`).
-    let alive = loop {
-        scheduler.drain_inbox();
-        let alive = match scheduler.process(*id) {
+    // The inbox is applied before the read, so a signal that the target sent
+    // before this call leads to the routed request, and a delivery that came
+    // with it is handled before the answer (`erl_bif_info.c:4075-4105`).
+    Ok(signals_return_after_drain(scheduler, pid, |scheduler| {
+        match scheduler.process(*id) {
             // The target is on another scheduler. Route the request, so that
             // the answer comes after the signals that the caller sent before,
             // as `erts_internal:is_process_alive/1` does on ERTS.
-            None if scheduler.remote_owner(*id).is_some() => {
-                return Ok(Trap {
-                    module: "erts_internal",
-                    function: "is_process_alive",
-                    arguments: vec![pid.clone()],
-                });
-            }
-            None => "false",
-            Some(target) if target.exiting.is_some() || target.mailbox.has_incoming() => {
-                return Ok(Trap {
-                    module: "erts_internal",
-                    function: "is_process_alive",
-                    arguments: vec![pid.clone()],
-                });
-            }
-            Some(_) => "true",
-        };
-        if !scheduler.drain_inbox() {
-            break alive;
+            None if scheduler.remote_owner(*id).is_some() => Trap {
+                module: "erts_internal",
+                function: "is_process_alive",
+                arguments: vec![pid.clone()],
+            },
+            None => Value(Term::static_atom("false")),
+            Some(target) if target.exiting.is_some() || target.mailbox.has_incoming() => Trap {
+                module: "erts_internal",
+                function: "is_process_alive",
+                arguments: vec![pid.clone()],
+            },
+            Some(_) => Value(Term::static_atom("true")),
         }
-    };
-    Ok(signals_return(scheduler, pid, Term::static_atom(alive)))
+    }))
 }
 
 /// Return `value` as the result of a BIF that read the state of the process
@@ -4416,14 +4406,35 @@ pub(super) fn is_process_alive(
 /// let result = signals_return(scheduler, &Term::Pid(child), Term::static_atom("true"));
 /// ```
 pub(super) fn signals_return(scheduler: &mut Scheduler, from: &Term, value: Term) -> BifResult {
-    if scheduler.current_process_mut().mailbox.has_incoming() {
-        return BifResult::TrapBif {
-            module: "erlang",
-            function: "bif_handle_signals_return",
-            arguments: vec![from.clone(), value],
-        };
+    signals_return_after_drain(scheduler, from, |_| Value(value))
+}
+
+/// Return the result of `read` after the scheduler applies its inbox. When
+/// the caller then has an incoming signal, trap to
+/// `erlang:bif_handle_signals_return/2`, so the caller handles the signal
+/// before the result.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = signals_return_after_drain(&mut scheduler, &pid, |_| Value(Term::nil()));
+/// ```
+pub(super) fn signals_return_after_drain(
+    scheduler: &mut Scheduler,
+    from: &Term,
+    read: impl FnOnce(&mut Scheduler) -> BifResult,
+) -> BifResult {
+    scheduler.drain_inbox();
+    match read(scheduler) {
+        Value(term) if scheduler.current_process_mut().mailbox.has_incoming() => {
+            BifResult::TrapBif {
+                module: "erlang",
+                function: "bif_handle_signals_return",
+                arguments: vec![from.clone(), term],
+            }
+        }
+        result => result,
     }
-    Value(value)
 }
 
 /// Run `erlang:function_exported/3`: return `true` when a loaded module
