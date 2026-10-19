@@ -183,6 +183,20 @@ fn a_killed_local_child_is_not_alive() {
     assert_eq!(results[1].term, Term::Atom(ok_atom), "the killer");
 }
 
+/// The scheduler wall time request gets one reply for each scheduler.
+#[test]
+fn disables_the_scheduler_wall_time_for_each_scheduler() {
+    let erts_internal = pinned_beam("erts_internal");
+    let program = BeamProgram::load(&[&erts_internal, PING_PONG]).expect("the fixture loads");
+    let false_atom = program.atom("false").expect("the fixture names false");
+    let ok_atom = program.atom("ok").expect("the fixture names ok");
+    let results = program
+        .execute_on_schedulers(&[("ping_pong", "wall_time"), ("ping_pong", "monitor_hold")])
+        .expect("the two schedulers run");
+    assert_eq!(results[0].term, Term::Atom(false_atom), "the old state");
+    assert_eq!(results[1].term, Term::Atom(ok_atom), "the holder");
+}
+
 /// The run reports the number of its schedulers.
 #[test]
 fn reports_the_number_of_schedulers() {

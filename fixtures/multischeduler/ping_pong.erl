@@ -7,7 +7,8 @@
          child_hold/0, name_wait/0, name_send/0, reference_name/0,
          stamp_wait/0, stamp_send/0, term_wait/0, term_send/0, port_wait/0,
          kill_watch/0, kill_hold/0, kill_child/0, port_send/0, port_other/0,
-         alive_wait/0, alive_send/0, alive_child/0, scheduler_count/0]).
+         alive_wait/0, alive_send/0, alive_child/0, scheduler_count/0,
+         wall_time/0]).
 
 -define(COUNT, 100).
 
@@ -440,3 +441,8 @@ alive_send() ->
 %% The root that reports the number of schedulers of the run.
 scheduler_count() ->
     erlang:system_info(schedulers).
+
+%% The root that disables the scheduler wall time. It waits for one reply
+%% for each scheduler.
+wall_time() ->
+    erts_internal:scheduler_wall_time(false).

@@ -1303,10 +1303,11 @@ fn chars_to_integer(text: &[u8], base: u32) -> BifResult {
 /// is `false`. `erts_sched_wall_time_request` makes a reference, and each
 /// scheduler sends it to the caller; the scheduler of the caller sends it
 /// before the BIF returns (`erl_process.c:1382-1421`, `1209-1340`). PBeam
-/// has one scheduler, so it sends the reference one time. The BIF then
-/// traps to `erts_internal:await_sched_wall_time_modifications(Ref,
-/// Result)`, which receives `Ref` one time for each scheduler and returns
-/// `Result` (`erts_internal.erl:756-774`).
+/// sends the reference one time for each scheduler of the node before the
+/// BIF returns. The BIF then traps to
+/// `erts_internal:await_sched_wall_time_modifications(Ref, Result)`, which
+/// receives `Ref` one time for each scheduler and returns `Result`
+/// (`erts_internal.erl:756-774`).
 ///
 /// # Examples
 ///
@@ -1332,7 +1333,9 @@ pub(super) fn scheduler_wall_time(
     let scheduler = &mut *context.scheduler;
     let reference = Term::Reference(scheduler.make_ref()?);
     let caller = scheduler.current_process_mut().id;
-    scheduler.deliver(caller, reference.clone());
+    for _ in 0..scheduler.scheduler_count() {
+        scheduler.deliver(caller, reference.clone());
+    }
     Ok(BifResult::Trap {
         module: "erts_internal",
         function: "await_sched_wall_time_modifications",
