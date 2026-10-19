@@ -9,7 +9,7 @@
          kill_watch/0, kill_hold/0, kill_child/0, port_send/0, port_other/0,
          alive_wait/0, alive_send/0, alive_child/0, scheduler_count/0,
          wall_time/0, name_after_kill/0, name_kill_hold/0, name_kill_child/0,
-         decode_atom/0]).
+         decode_atom/0, persistent_put/0, ets_new/0]).
 
 -define(COUNT, 100).
 
@@ -473,3 +473,13 @@ name_kill_child() ->
 %% threads cannot create an atom.
 decode_atom() ->
     binary_to_term(<<131, 119, 19, "review_runtime_atom">>).
+
+%% The root that writes a persistent term. A run with scheduler threads
+%% cannot share the table.
+persistent_put() ->
+    persistent_term:put(persistent_probe, 1).
+
+%% The root that makes an ETS table. A run with scheduler threads cannot
+%% share the tables.
+ets_new() ->
+    ets:new(ets_probe, []).

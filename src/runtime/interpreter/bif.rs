@@ -671,6 +671,15 @@ macro_rules! bifs {
             id: BifId,
             arguments: &[Term],
         ) -> Result<BifResult, BeamError> {
+            // A run with scheduler threads keeps ETS and persistent_term
+            // with each scheduler, so a use of them fails with a clear
+            // error until the services move to the node.
+            let (module, name, arity) = mfa(id);
+            if context.scheduler.shared().is_some() && matches!(module, "ets" | "persistent_term") {
+                return Err(error(format!(
+                    "unsupported: {module}:{name}/{arity} in a run of execute_on_schedulers"
+                )));
+            }
             // The cleanup of a fixation on a table that another process
             // deleted runs as process system work at each scheduling
             // (`erts_schedule_ets_free_fixation`, `erl_db.c:5263-5301`).
