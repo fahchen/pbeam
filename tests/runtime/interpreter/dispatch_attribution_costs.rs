@@ -25,7 +25,7 @@
 //! `cargo test --locked --release --lib -- dispatch_attribution_costs -- --nocapture --test-threads=1`
 //! and read the `COST` lines.
 
-use std::{collections::HashMap, hint::black_box, rc::Rc, sync::Arc, time::Instant};
+use std::{collections::HashMap, hint::black_box, sync::Arc, time::Instant};
 
 use super::{
     BeamProgram, CodeTable, Cursor, bif::BifId, code_table, current_frame, function_at_label,
@@ -124,8 +124,8 @@ fn cost_with<State>(
 /// ```rust,ignore
 /// assert_eq!(floor_module().instructions.len(), 7);
 /// ```
-fn floor_module() -> Rc<BeamModule> {
-    Rc::new(
+fn floor_module() -> Arc<BeamModule> {
+    Arc::new(
         BeamModule::new(
             "fixture".into(),
             HashMap::from([(("floor_loop".into(), 1), 1)]),
@@ -190,10 +190,10 @@ fn dispatch_arm(instruction: &Instruction) -> u64 {
 /// let (scheduler, module) = cursor_scheduler();
 /// assert_eq!(scheduler.current_module().unwrap().id, module.id);
 /// ```
-fn cursor_scheduler() -> (Scheduler, Rc<BeamModule>) {
+fn cursor_scheduler() -> (Scheduler, Arc<BeamModule>) {
     let module = floor_module();
     let mut scheduler = Scheduler::new(AtomTable::new());
-    scheduler.code = CodeTable::new(HashMap::from([("fixture".to_owned(), Rc::clone(&module))]));
+    scheduler.code = CodeTable::new(HashMap::from([("fixture".to_owned(), Arc::clone(&module))]));
     let frame = code_table::frame(&module, 1, 1).expect("floor_loop/1 exists");
     scheduler
         .start(frame, vec![Term::Integer(7)], Vec::new())
@@ -368,7 +368,7 @@ fn prints_the_cost_of_every_instruction_part() {
     // active frame, and the reset of `cursor.module` between the operations
     // adds one more clone-and-drop pair. The `cursor_module_reset` row gives
     // the cost of that reset alone, so a reader can subtract it.
-    let other = Rc::new(
+    let other = Arc::new(
         BeamModule::new("other".into(), HashMap::new(), Vec::new(), vec![])
             .expect("the fixture module loads"),
     );
@@ -382,7 +382,7 @@ fn prints_the_cost_of_every_instruction_part() {
                 (cursor, module)
             },
             |(cursor, _module)| {
-                cursor.module = Rc::clone(black_box(&other));
+                cursor.module = Arc::clone(black_box(&other));
                 cursor.position as u64
             },
         ),
@@ -396,7 +396,7 @@ fn prints_the_cost_of_every_instruction_part() {
                 (scheduler, cursor, module)
             },
             |(scheduler, cursor, _module)| {
-                cursor.module = Rc::clone(black_box(&other));
+                cursor.module = Arc::clone(black_box(&other));
                 cursor
                     .refresh(black_box(scheduler))
                     .expect("the module is loaded");

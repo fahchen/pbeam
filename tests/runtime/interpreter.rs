@@ -1,4 +1,4 @@
-use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
+use std::{cell::RefCell, collections::HashMap, sync::Arc};
 
 use super::bif::{BIFS, BifId, BifResult, resolve, resolve_calls};
 use super::code_table::export_frame_calls;
@@ -100,7 +100,7 @@ fn program_of(instructions: Vec<Instruction>, exports: HashMap<(String, u32), u3
     BeamProgram {
         modules: HashMap::from([(
             "fixture".into(),
-            Rc::new(
+            Arc::new(
                 BeamModule::new("fixture".into(), exports, fixture_imports(), instructions)
                     .expect("the fixture module loads"),
             ),
@@ -976,7 +976,7 @@ fn prints_a_non_ascii_module_and_function_name_in_a_call_path_error() {
     let module = BeamModule::new("mäin_module".into(), exports, Vec::new(), instructions)
         .expect("the fixture module loads");
     let mut program = BeamProgram {
-        modules: HashMap::from([("mäin_module".into(), Rc::new(module))]),
+        modules: HashMap::from([("mäin_module".into(), Arc::new(module))]),
         atoms: Arc::new(AtomTable::new()),
     };
     assert_eq!(
@@ -988,7 +988,7 @@ fn prints_a_non_ascii_module_and_function_name_in_a_call_path_error() {
     );
     // The export names arity 1 and the function holds arity 0, so the frame
     // creation gives the arity error.
-    let module = Rc::get_mut(program.modules.get_mut("mäin_module").unwrap()).unwrap();
+    let module = Arc::get_mut(program.modules.get_mut("mäin_module").unwrap()).unwrap();
     module
         .exports
         .insert((module.tables.name_id("mäin").unwrap(), 1), 2);
@@ -1040,7 +1040,7 @@ fn recognizes_runtime_process_identifiers_as_pids() {
         ],
         1,
     );
-    let module = Rc::get_mut(program.modules.get_mut("fixture").unwrap()).unwrap();
+    let module = Arc::get_mut(program.modules.get_mut("fixture").unwrap()).unwrap();
     let main = module.tables.name_id("main").unwrap();
     module.exports.insert((main, 1), 2);
 
@@ -1810,7 +1810,7 @@ fn runs_a_table_bif_before_a_loaded_module_that_exports_the_same_mfa() {
     );
     program.modules.insert(
         "maps".into(),
-        Rc::new(
+        Arc::new(
             BeamModule::new(
                 "maps".into(),
                 HashMap::from([(("keys".into(), 1), 1)]),
@@ -1851,7 +1851,7 @@ fn never_runs_the_stub_of_a_table_bif_that_pbeam_does_not_implement() {
     );
     program.modules.insert(
         "atomics".into(),
-        Rc::new(
+        Arc::new(
             BeamModule::new(
                 "atomics".into(),
                 HashMap::from([(("add_get".into(), 3), 1)]),
@@ -2550,7 +2550,7 @@ fn rejects_unresolved_exports_and_function_labels() {
     let module = BeamModule::new("external".into(), HashMap::new(), Vec::new(), vec![])
         .expect("the fixture module loads");
     let program = BeamProgram {
-        modules: HashMap::from([("external".into(), Rc::new(module))]),
+        modules: HashMap::from([("external".into(), Arc::new(module))]),
         atoms: Arc::new(AtomTable::new()),
     };
     assert!(
@@ -3430,7 +3430,7 @@ fn traps_a_tail_called_demonitor_flush_into_erts_internal() {
     );
     program.modules.insert(
         "erts_internal".into(),
-        Rc::new(
+        Arc::new(
             BeamModule::new(
                 "erts_internal".into(),
                 HashMap::from([(("flush_monitor_messages".into(), 3), 2)]),
@@ -5828,4 +5828,13 @@ fn gives_the_owner_as_the_heir_of_a_table() {
     };
     let heir_entry = Term::tuple(vec![heir, Term::Pid(owner)]);
     assert!(items.proper_list().unwrap().any(|item| *item == heir_entry));
+}
+
+#[test]
+fn a_program_is_send_and_sync_for_a_second_scheduler_thread() {
+    // A second scheduler thread builds its code table from one program. The
+    // shared program holds the immutable modules and the atom table, so it
+    // must cross a thread boundary.
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<BeamProgram>();
 }

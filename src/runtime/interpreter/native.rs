@@ -311,7 +311,7 @@ pub(super) fn load_nif(scheduler: &mut Scheduler, caller: &str) -> Result<BifRes
             "NIF library already loaded (reload disallowed since OTP 20).",
         );
     }
-    let module = Rc::clone(scheduler.code.waiting_or_loaded(caller)?);
+    let module = Arc::clone(scheduler.code.waiting_or_loaded(caller)?);
     let instructions = &module.instructions;
     let has_nifs = instructions
         .iter()

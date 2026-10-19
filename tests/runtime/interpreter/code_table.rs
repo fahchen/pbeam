@@ -1,6 +1,6 @@
 //! The unit tests of `src/runtime/interpreter/code_table.rs`.
 
-use std::{collections::HashMap, rc::Rc};
+use std::{collections::HashMap, sync::Arc};
 
 use super::{CodeTable, Finish};
 use crate::{
@@ -54,7 +54,7 @@ fn fixture() -> CodeTable {
         ],
     )
     .expect("the fixture module loads");
-    CodeTable::new(HashMap::from([("fixture".into(), Rc::new(module))]))
+    CodeTable::new(HashMap::from([("fixture".into(), Arc::new(module))]))
 }
 
 /// The identity of a module reads back its code, and an identity that no
@@ -187,7 +187,7 @@ fn gives_no_name_of_a_fun_of_code_in_a_purge() {
             .as_deref(),
         Some("-fun-")
     );
-    let module = Rc::clone(&code.by_id.values().next().expect("the old code").code);
+    let module = Arc::clone(&code.by_id.values().next().expect("the old code").code);
     code.purging = Some(("fixture".to_owned(), module));
     assert_eq!(code.function_name_of("fixture", &lambda).unwrap(), None);
 }

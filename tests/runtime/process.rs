@@ -1,4 +1,4 @@
-use std::{collections::HashMap, rc::Rc};
+use std::{collections::HashMap, sync::Arc};
 
 use super::{
     Frame, LinkId, Origin, OriginMonitor, PendingBif, ProcessState, ReceiveTimer, StackSlot, Start,
@@ -13,7 +13,7 @@ use crate::{
 thread_local! {
     /// The module of the frames of the tests. A test scheduler loads it, so
     /// a frame of [`frame`] names a module of its code table.
-    static MODULE: Rc<BeamModule> = Rc::new(BeamModule::new(
+    static MODULE: Arc<BeamModule> = Arc::new(BeamModule::new(
         "fixture".into(),
         HashMap::new(),
         Vec::new(),
@@ -29,8 +29,8 @@ thread_local! {
 }
 
 /// Return the module of the frames of the tests.
-pub(in crate::runtime) fn module() -> Rc<BeamModule> {
-    MODULE.with(Rc::clone)
+pub(in crate::runtime) fn module() -> Arc<BeamModule> {
+    MODULE.with(Arc::clone)
 }
 
 /// Return the entry frame of the tests: `fixture:main/0`.

@@ -9,6 +9,7 @@ use std::{
     cell::Cell,
     collections::{HashMap, HashSet},
     rc::Rc,
+    sync::Arc,
 };
 
 #[cfg(test)]
@@ -48,7 +49,7 @@ pub(in crate::runtime::interpreter) fn export_frame_calls() -> usize {
 pub(in crate::runtime) struct CodeTable {
     /// The loaded modules by name. The program owns the start modules too,
     /// and each run shares them through the `Rc`.
-    modules: HashMap<String, Rc<BeamModule>>,
+    modules: HashMap<String, Arc<BeamModule>>,
     /// The loaded modules by their identity, for a frame that names its
     /// module by [`ModuleId`] and not by name, with the export targets of
     /// the imports of each module in this run.
@@ -87,14 +88,14 @@ pub(in crate::runtime) struct CodeTable {
     /// `purge_state.module` and the old code of the ERTS module
     /// (`beam_bif_load.c:2134-2160`). The code stays in `by_id` until
     /// [`CodeTable::complete_purge`] removes it, and it is in no other map.
-    purging: Option<(String, Rc<BeamModule>)>,
+    purging: Option<(String, Arc<BeamModule>)>,
 }
 
 /// The code of a module that waits for its `-on_load` function.
 #[derive(Debug)]
 struct OnLoadCode {
     /// The new code of the module.
-    code: Rc<BeamModule>,
+    code: Arc<BeamModule>,
     /// `true` while the exports wait for the code, as the deferred address of
     /// each ERTS export entry (`jit/asm_load.c:1188-1195`).
     /// `erlang:finish_after_on_load(Module, false)` clears it
@@ -107,7 +108,7 @@ struct OnLoadCode {
 #[derive(Debug, Clone)]
 pub(in crate::runtime) struct LoadedModule {
     /// The code of the module, which the runs of the program share.
-    pub(in crate::runtime) code: Rc<BeamModule>,
+    pub(in crate::runtime) code: Arc<BeamModule>,
     /// The export target of each import of the module, by the index of the
     /// import in [`BeamModule::imports`].
     pub(in crate::runtime) imports: ImportTargets,
@@ -119,10 +120,10 @@ impl LoadedModule {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let loaded = LoadedModule::new(Rc::clone(&module));
+    /// let loaded = LoadedModule::new(Arc::clone(&module));
     /// assert_eq!(loaded.imports.len(), module.imports.len());
     /// ```
-    fn new(code: Rc<BeamModule>) -> Self {
+    fn new(code: Arc<BeamModule>) -> Self {
         let imports = code.imports.iter().map(|_| Cell::new(None)).collect();
         LoadedModule { code, imports }
     }
@@ -215,10 +216,10 @@ impl CodeTable {
     /// let code = CodeTable::new(program.modules.clone());
     /// assert!(code.get("erlang").is_some());
     /// ```
-    pub(in crate::runtime) fn new(modules: HashMap<String, Rc<BeamModule>>) -> Self {
+    pub(in crate::runtime) fn new(modules: HashMap<String, Arc<BeamModule>>) -> Self {
         let by_id = modules
             .values()
-            .map(|module| (module.id, LoadedModule::new(Rc::clone(module))))
+            .map(|module| (module.id, LoadedModule::new(Arc::clone(module))))
             .collect();
         CodeTable {
             modules,
@@ -247,7 +248,7 @@ impl CodeTable {
     pub(in crate::runtime) fn module_by_id(
         &self,
         id: ModuleId,
-    ) -> Result<&Rc<BeamModule>, BeamError> {
+    ) -> Result<&Arc<BeamModule>, BeamError> {
         self.loaded_by_id(id).map(|loaded| &loaded.code)
     }
 
@@ -329,7 +330,7 @@ impl CodeTable {
     /// assert_eq!(code.get("erlang").unwrap().name, "erlang");
     /// assert!(code.get("nomod").is_none());
     /// ```
-    pub(in crate::runtime) fn get(&self, name: &str) -> Option<&Rc<BeamModule>> {
+    pub(in crate::runtime) fn get(&self, name: &str) -> Option<&Arc<BeamModule>> {
         self.modules.get(name)
     }
 
@@ -345,7 +346,7 @@ impl CodeTable {
     /// # Errors
     ///
     /// A module that is not loaded is the error `missing BEAM module M`.
-    pub(in crate::runtime) fn module(&self, name: &str) -> Result<&Rc<BeamModule>, BeamError> {
+    pub(in crate::runtime) fn module(&self, name: &str) -> Result<&Arc<BeamModule>, BeamError> {
         self.get(name)
             .ok_or_else(|| error(format!("missing BEAM module {name}")))
     }
@@ -567,7 +568,7 @@ impl CodeTable {
     /// ```rust,ignore
     /// assert_eq!(code.codes("missing").count(), 0);
     /// ```
-    fn codes<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a Rc<BeamModule>> + 'a {
+    fn codes<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a Arc<BeamModule>> + 'a {
         // The preparation of a purge clears the fun address of the old code
         // (`erl_fun.c:159-175`), so `erts_get_fun_mfa` gives no MFA for its
         // funs until the purge ends.
@@ -601,7 +602,7 @@ impl CodeTable {
     pub(in crate::runtime) fn waiting_or_loaded(
         &self,
         module: &str,
-    ) -> Result<&Rc<BeamModule>, BeamError> {
+    ) -> Result<&Arc<BeamModule>, BeamError> {
         match self.on_load.get(module) {
             Some(waiting) => Ok(&waiting.code),
             None => self.module(module),
@@ -772,9 +773,9 @@ impl CodeTable {
                 .expect("checked by prepared_names");
             self.finished_prepared
                 .insert(*reference, module.on_load.is_some());
-            let module = Rc::new(module);
+            let module = Arc::new(module);
             self.by_id
-                .insert(module.id, LoadedModule::new(Rc::clone(&module)));
+                .insert(module.id, LoadedModule::new(Arc::clone(&module)));
             if module.on_load.is_some() {
                 let code = OnLoadCode {
                     code: module,

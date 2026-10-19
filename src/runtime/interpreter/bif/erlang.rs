@@ -891,7 +891,7 @@ fn raise_with_args(
         });
     }
     let module_id = current_frame(context.scheduler.current_process_mut()).module_id;
-    let module = Rc::clone(context.scheduler.code.module_by_id(module_id)?);
+    let module = Arc::clone(context.scheduler.code.module_by_id(module_id)?);
     let (module, function, arity) = current_function(context.scheduler, &module)?;
     let args = if args.is_list() {
         args.clone()

@@ -70,7 +70,7 @@ const DEFAULT_ERROR_HANDLER: &str = "error_handler";
 pub struct BeamProgram {
     /// The start modules by name. Each run starts its code table with them
     /// (see [`CodeTable`]).
-    modules: HashMap<String, Rc<BeamModule>>,
+    modules: HashMap<String, Arc<BeamModule>>,
     /// The atom table of the loaded modules. ERTS has one atom table for
     /// each emulator, so each run starts its own table from a copy of it.
     /// The `Arc` lets a [`HostTerm`] of this program share the table.
@@ -199,7 +199,7 @@ impl BeamProgram {
                     "the start module {name} has an -on_load function, which PBeam runs only for a module that loads in the run"
                 )));
             }
-            if loaded.insert(name.clone(), Rc::new(module)).is_some() {
+            if loaded.insert(name.clone(), Arc::new(module)).is_some() {
                 return Err(error(format!("duplicate BEAM module {name}")));
             }
         }
@@ -3432,7 +3432,7 @@ fn create_process(
 /// cursor at each exit that changes the frame.
 struct Cursor {
     /// The code of the active frame.
-    module: Rc<BeamModule>,
+    module: Arc<BeamModule>,
     /// The export targets of the imports of `module` in this run.
     imports: ImportTargets,
     /// The index of the next instruction in `module.instructions`.
@@ -3475,7 +3475,7 @@ impl Cursor {
         };
         if module_id != self.module.id {
             let loaded = scheduler.current_module()?;
-            self.module = Rc::clone(&loaded.code);
+            self.module = Arc::clone(&loaded.code);
             self.imports = Rc::clone(&loaded.imports);
         }
         self.position = position;
@@ -6040,7 +6040,7 @@ fn mfa_stacktrace(scheduler: &mut Scheduler, skip: usize) -> Result<Vec<Term>, B
     let count = frames.len();
     let mut stacktrace = Vec::with_capacity(count);
     for (index, frame) in frames.into_iter().enumerate() {
-        let module = Rc::clone(scheduler.code.module_by_id(frame.module_id)?);
+        let module = Arc::clone(scheduler.code.module_by_id(frame.module_id)?);
         let (_, function, arity) = frame_function(&module, &frame)?;
         // The first apply of a start at `erlang:apply/3` is a body apply
         // with no frame in ERTS, so `apply_bif_error_adjustment` does not
