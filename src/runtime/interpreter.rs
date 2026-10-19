@@ -629,6 +629,7 @@ impl BeamProgram {
                         && !scheduler.timers.active()
                         && scheduler.root_waiting()
                         && !node.starts_pending()
+                        && !scheduler.has_external_sources()
                         && node.live_processes() == 1
                     {
                         // A delivery of the last other root may already be

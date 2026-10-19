@@ -1202,6 +1202,23 @@ impl Scheduler {
         }
     }
 
+    /// Return true when the scheduler can get input from outside the node:
+    /// a read select of fd 0, a dirty IO thread, or a port or socket that
+    /// waits for input or output. Such a source can send a message to a
+    /// waiting process without another process of the node.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(!scheduler.has_external_sources());
+    /// ```
+    pub(super) fn has_external_sources(&mut self) -> bool {
+        self.resources.borrow_mut::<Ttys>().input_selected()
+            || self.dirty_io.running()
+            || !self.resources.borrow_mut::<Ports>().wait_fds().is_empty()
+            || !self.resources.borrow_mut::<Ports>().write_fds().is_empty()
+    }
+
     /// Wait for at most `timeout`, or without end for `None`, until fd 0
     /// has input, when fd 0 has a read select, until a pipe of a port has
     /// input, until a dirty IO call completes, when a call runs, or until a

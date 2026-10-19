@@ -2069,6 +2069,27 @@ fn a_signal_to_a_dead_process_answers_a_monitor() {
 }
 
 #[test]
+fn a_signal_to_a_dead_process_answers_an_unlink() {
+    use super::signals::HandlingPoint;
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    let root = ProcessId(0);
+    let target = ProcessId(99);
+    let link = LinkId::Process(target);
+    scheduler
+        .processes
+        .get_mut(&root)
+        .unwrap()
+        .links
+        .insert(link, 7);
+    scheduler.dead_target_signal(target, Signal::Unlink { from: root, id: 7 });
+    scheduler
+        .handle_signals(root, 100, 100, HandlingPoint::ScheduleIn)
+        .unwrap();
+    assert_eq!(scheduler.processes[&root].links.get(&link), None);
+}
+
+#[test]
 fn a_signal_to_a_dead_process_answers_a_link() {
     let mut scheduler = test_scheduler();
     scheduler.start(frame(), vec![], allow_all()).unwrap();

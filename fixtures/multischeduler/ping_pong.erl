@@ -5,7 +5,7 @@
          down_wait/0, down_hold/0, atom_create/0, drain_wait/0, drain_hold/0,
          len_wait/0, len_hold/0, process_list/0, child_wait/0, child_send/0,
          child_hold/0, name_wait/0, name_send/0, reference_name/0,
-         stamp_wait/0, stamp_send/0, term_wait/0, term_send/0]).
+         stamp_wait/0, stamp_send/0, term_wait/0, term_send/0, port_wait/0]).
 
 -define(COUNT, 100).
 
@@ -353,3 +353,11 @@ term_send() ->
     Binary = term_to_binary({value, 1}, [local]),
     term_name ! {term, self(), Binary},
     receive {term_ok, Reply} -> Reply after 60000 -> timeout end.
+
+%% The root that waits without a receive timer for the output of a port.
+port_wait() ->
+    Port = open_port({spawn_executable, "/bin/echo"}, [binary, exit_status, {args, ["hi"]}]),
+    receive
+        {Port, {data, <<"hi\n">>}} -> ok;
+        {Port, {exit_status, 0}} -> ok
+    end.

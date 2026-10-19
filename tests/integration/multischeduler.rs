@@ -152,6 +152,20 @@ fn rejects_an_atom_that_guest_code_creates() {
     );
 }
 
+/// A root that waits for the output of a port without a receive timer is
+/// not an impossible wait, because the port can send a message.
+#[test]
+fn waits_for_a_port_without_a_receive_timer() {
+    // The pinned `erlang` module holds `open_port/2`.
+    let erlang = pinned_beam("erlang");
+    let program = BeamProgram::load(&[&erlang, PING_PONG]).expect("the fixture loads");
+    let ok_atom = program.atom("ok").expect("the fixture names ok");
+    let results = program
+        .execute_on_schedulers(&[("ping_pong", "port_wait")])
+        .expect("the port sends its output");
+    assert_eq!(results[0].term, Term::Atom(ok_atom), "the root");
+}
+
 /// A term that `term_to_binary/2` seeds with the local node hash decodes on
 /// another scheduler, because the node holds one hash.
 #[test]

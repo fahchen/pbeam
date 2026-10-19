@@ -257,6 +257,13 @@ impl Scheduler {
                 };
                 let _ = self.send_signal(None, from, exit);
             }
+            // The target answered an unlink at its exit
+            // (`erl_proc_sig_queue.c:7369-7386`), so the sender can remove
+            // its unlinking link.
+            Signal::Unlink { from, id } => {
+                let ack = Signal::UnlinkAck { from: target, id };
+                let _ = self.send_signal(None, from, ack);
+            }
             _ => {}
         }
     }
