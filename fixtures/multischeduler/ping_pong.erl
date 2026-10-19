@@ -3,7 +3,8 @@
          monitor_watch/0, monitor_hold/0, unreg_hold/0, unreg_taker/0,
          info_watch/0, info_hold/0, info_item/0, info_all/0,
          down_wait/0, down_hold/0, atom_create/0, drain_wait/0, drain_hold/0,
-         len_wait/0, len_hold/0, process_list/0]).
+         len_wait/0, len_hold/0, process_list/0, child_wait/0, child_send/0,
+         child_hold/0]).
 
 -define(COUNT, 100).
 
@@ -260,3 +261,40 @@ len_hold() ->
 %% The root that lists the processes of the node.
 process_list() ->
     processes().
+
+%% The root that reads the queue length of its child without a scheduling
+%% step after the other root registers the name.
+child_wait() ->
+    Pid = spawn(?MODULE, child_hold, []),
+    Result = child_poll(Pid, 2000000),
+    case whereis(child_ready) of
+        undefined -> ok;
+        Sender -> Sender ! stop
+    end,
+    Result.
+
+child_poll(_Pid, 0) ->
+    timeout;
+child_poll(Pid, Attempts) ->
+    case whereis(child_ready) of
+        undefined -> child_poll(Pid, Attempts - 1);
+        _ ->
+            {message_queue_len, Length} = process_info(Pid, message_queue_len),
+            case Length of
+                0 -> timeout;
+                _ -> Length
+            end
+    end.
+
+%% The child that holds a name and waits for a message.
+child_hold() ->
+    true = register(child_name, self()),
+    receive _Message -> ok after 2000 -> timeout end.
+
+%% The root that sends a message to the child, and then registers the name
+%% that the other root polls.
+child_send() ->
+    Pid = wait_for(child_name, 100000),
+    Pid ! ready,
+    true = register(child_ready, self()),
+    receive stop -> ok after 2000 -> timeout end.

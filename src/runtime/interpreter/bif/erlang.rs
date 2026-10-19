@@ -4221,6 +4221,10 @@ pub(super) fn process_info(
             },
         );
     }
+    // Another scheduler can hold a delivery for this target in the inbox of
+    // this scheduler. Apply it before the read, as ERTS fetches the pending
+    // deliveries of the target (`erl_bif_info.c:1403-1416`).
+    scheduler.drain_inbox();
     let Some(target) = scheduler.process(*id) else {
         // A live process of another scheduler. The name table of the node
         // answers its registered name; another item reads the process state
@@ -4719,6 +4723,10 @@ pub(super) fn process_info_1(
             Ok(Value(info))
         });
     }
+    // Another scheduler can hold a delivery for this target in the inbox of
+    // this scheduler. Apply it before the read, as ERTS fetches the pending
+    // deliveries of the target (`erl_bif_info.c:1403-1416`).
+    scheduler.drain_inbox();
     let Some(target) = scheduler.process(*id) else {
         // A live process of another scheduler needs the process state of its
         // scheduler, which this read cannot reach yet.

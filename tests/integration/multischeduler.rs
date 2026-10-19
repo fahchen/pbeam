@@ -2,6 +2,10 @@
 //! messages: the ping root sends a burst to the pong root, and the pong root
 //! reports whether the burst arrived in the order of the sender.
 
+#[path = "../common/mod.rs"]
+mod common;
+
+use common::pinned_beam;
 use pbeam_runtime::{BeamProgram, Term};
 
 /// The fixture with the two roots. `ping/0` sends `COUNT` messages to the
@@ -197,6 +201,24 @@ fn rejects_the_process_list_of_a_scheduler_run() {
             .contains("unsupported: erlang:processes/0"),
         "{error}"
     );
+}
+
+/// A read of another local process counts a message that another scheduler
+/// sent, also when its scheduler did not schedule since the send.
+#[test]
+fn a_running_read_counts_a_message_for_a_local_child() {
+    // A target with a message that it did not fetch gets a process-info
+    // request, and the caller waits for the reply.
+    let erts_internal = pinned_beam("erts_internal");
+    let program = BeamProgram::load(&[&erts_internal, PING_PONG]).expect("the fixture loads");
+    let ok_atom = program.atom("ok").expect("the fixture names ok");
+    for _ in 0..10 {
+        let results = program
+            .execute_on_schedulers(&[("ping_pong", "child_wait"), ("ping_pong", "child_send")])
+            .expect("the two schedulers run");
+        assert_eq!(results[0].term, Term::Integer(1), "the queued message");
+        assert_eq!(results[1].term, Term::Atom(ok_atom.clone()), "the sender");
+    }
 }
 
 /// A failing root decides the error of the run even when another root waits
