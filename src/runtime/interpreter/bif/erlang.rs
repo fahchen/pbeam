@@ -4369,35 +4369,37 @@ pub(super) fn is_process_alive(
     if let Some(denied) = other_process_denial(scheduler, *id, Operation::Inspect)? {
         return Ok(denied);
     }
-    // Another scheduler can hold a signal for this target in the inbox of
-    // this scheduler. Apply it before the read, so a pending exit signal
-    // leads to the routed request (`erl_bif_info.c:4075-4093`).
-    scheduler.drain_inbox();
-    let alive = match scheduler.process(*id) {
-        // The target is on another scheduler. Route the request, so that
-        // the answer comes after the signals that the caller sent before,
-        // as `erts_internal:is_process_alive/1` does on ERTS.
-        None if scheduler.remote_owner(*id).is_some() => {
-            return Ok(Trap {
-                module: "erts_internal",
-                function: "is_process_alive",
-                arguments: vec![pid.clone()],
-            });
+    // A delivery can arrive between a read and the answer. Apply the inbox
+    // before each read, and read again after a drain applied a delivery, so
+    // the answer and the caller signals are the state of the return
+    // (`erl_bif_info.c:4075-4105`).
+    let alive = loop {
+        scheduler.drain_inbox();
+        let alive = match scheduler.process(*id) {
+            // The target is on another scheduler. Route the request, so that
+            // the answer comes after the signals that the caller sent before,
+            // as `erts_internal:is_process_alive/1` does on ERTS.
+            None if scheduler.remote_owner(*id).is_some() => {
+                return Ok(Trap {
+                    module: "erts_internal",
+                    function: "is_process_alive",
+                    arguments: vec![pid.clone()],
+                });
+            }
+            None => "false",
+            Some(target) if target.exiting.is_some() || target.mailbox.has_incoming() => {
+                return Ok(Trap {
+                    module: "erts_internal",
+                    function: "is_process_alive",
+                    arguments: vec![pid.clone()],
+                });
+            }
+            Some(_) => "true",
+        };
+        if !scheduler.drain_inbox() {
+            break alive;
         }
-        None => "false",
-        Some(target) if target.exiting.is_some() || target.mailbox.has_incoming() => {
-            return Ok(Trap {
-                module: "erts_internal",
-                function: "is_process_alive",
-                arguments: vec![pid.clone()],
-            });
-        }
-        Some(_) => "true",
     };
-    // The target can send a signal to the caller after the first drain and
-    // then exit. Apply the inbox again, so the caller handles the signal
-    // before the result (`erl_bif_info.c:4098-4105`).
-    scheduler.drain_inbox();
     Ok(signals_return(scheduler, pid, Term::static_atom(alive)))
 }
 
