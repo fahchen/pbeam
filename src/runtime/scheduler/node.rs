@@ -24,8 +24,9 @@ use std::{
 
 use super::Signal;
 use crate::{
+    error::{BeamError, error},
     runtime::host::clock,
-    term::{ProcessId, Term},
+    term::{PortId, ProcessId, Term},
 };
 
 /// One delivery that crosses a scheduler thread boundary.
@@ -71,6 +72,8 @@ pub(in crate::runtime) struct SharedNode {
     /// The raw counter of `erlang:unique_integer([monotonic])`, which starts
     /// at -1.
     unique_monotonic: AtomicI64,
+    /// The next port identifier.
+    next_port: AtomicU64,
     /// The next unlink operation identifier.
     next_unlink_id: AtomicU64,
     /// The number of roots that did not exit yet.
@@ -123,6 +126,7 @@ impl SharedNode {
                 next_reference: AtomicU64::new(0),
                 unique: AtomicU64::new(0),
                 unique_monotonic: AtomicI64::new(-1),
+                next_port: AtomicU64::new(0),
                 next_unlink_id: AtomicU64::new(1),
                 roots: AtomicUsize::new(count),
                 starts: AtomicUsize::new(count),
@@ -296,6 +300,16 @@ impl SharedNode {
     /// Return the next raw value of `erlang:unique_integer([monotonic])`.
     pub(in crate::runtime) fn next_unique_monotonic(&self) -> i64 {
         self.unique_monotonic.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// Return the next port identifier, or the error when the counter
+    /// ends.
+    pub(in crate::runtime) fn next_port(&self) -> Result<PortId, BeamError> {
+        let value = self.next_port.fetch_add(1, Ordering::Relaxed);
+        if value == u64::MAX {
+            return Err(error("port identifier overflow"));
+        }
+        Ok(PortId(value))
     }
 
     /// Return the next unlink operation identifier.

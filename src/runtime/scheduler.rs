@@ -1387,7 +1387,17 @@ impl Scheduler {
             if let Some(server) = self.whereis("erl_signal_server") {
                 let message =
                     Term::tuple(vec![Term::static_atom("notify"), Term::static_atom(name)]);
-                self.deliver(server, message);
+                // The signal server can be a process of another scheduler.
+                // The message has only static atoms, so it crosses the
+                // thread unchanged.
+                match self.remote_owner(server) {
+                    Some(index) => self
+                        .shared
+                        .as_ref()
+                        .expect("a remote process has a node")
+                        .send_message(index, server, message, server, None),
+                    None => self.deliver(server, message),
+                }
             }
             queue.extend(std::mem::take(&mut self.deferred_signals));
         }

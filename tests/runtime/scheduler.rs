@@ -2090,6 +2090,30 @@ fn a_signal_to_a_dead_process_answers_an_unlink() {
 }
 
 #[test]
+fn a_host_signal_notification_reaches_a_remote_signal_server() {
+    use super::node::{Delivery, SharedNode};
+    let (node, mut readers) = SharedNode::new(2).unwrap();
+    let mut scheduler =
+        Scheduler::with_shared(AtomTable::new(), Arc::clone(&node), 0, readers.remove(0));
+    let server = ProcessId(77);
+    node.register(server, 1);
+    assert!(node.name_register("erl_signal_server", server));
+    scheduler.notify_signals(&[libc::SIGUSR1]).unwrap();
+    let mut deliveries = Vec::new();
+    node.take(1, &mut deliveries);
+    assert!(matches!(
+        deliveries.as_slice(),
+        [Delivery::Message { target, term, .. }]
+            if *target == server
+                && *term
+                    == Term::tuple(vec![
+                        Term::static_atom("notify"),
+                        Term::static_atom("sigusr1"),
+                    ])
+    ));
+}
+
+#[test]
 fn a_signal_to_a_dead_process_answers_a_group_leader_and_an_is_alive() {
     let mut scheduler = test_scheduler();
     scheduler.start(frame(), vec![], allow_all()).unwrap();

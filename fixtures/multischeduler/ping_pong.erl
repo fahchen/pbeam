@@ -5,7 +5,8 @@
          down_wait/0, down_hold/0, atom_create/0, drain_wait/0, drain_hold/0,
          len_wait/0, len_hold/0, process_list/0, child_wait/0, child_send/0,
          child_hold/0, name_wait/0, name_send/0, reference_name/0,
-         stamp_wait/0, stamp_send/0, term_wait/0, term_send/0, port_wait/0]).
+         stamp_wait/0, stamp_send/0, term_wait/0, term_send/0, port_wait/0,
+         kill_watch/0, kill_hold/0, kill_child/0, port_send/0, port_other/0]).
 
 -define(COUNT, 100).
 
@@ -363,3 +364,42 @@ port_wait() ->
         {Port, {data, <<"hi\n">>}} -> ok;
         {Port, {exit_status, 0}} -> ok
     end.
+
+%% The root that kills a process of the other scheduler and then checks
+%% that it is not alive.
+kill_watch() ->
+    Child = wait_for(kill_name, 100000),
+    exit(Child, kill),
+    false = is_process_alive(Child),
+    Holder = wait_for(kill_holder, 100000),
+    Holder ! stop,
+    ok.
+
+%% The root that holds a process that the other root kills.
+kill_hold() ->
+    true = register(kill_holder, self()),
+    _ = spawn(?MODULE, kill_child, []),
+    receive stop -> ok after 60000 -> timeout end.
+
+%% The process that holds a name and waits to be killed.
+kill_child() ->
+    true = register(kill_name, self()),
+    receive never -> ok end.
+
+%% The root that sends its port to the other scheduler.
+port_send() ->
+    Port = open_port({spawn_executable, "/usr/bin/true"}, [binary]),
+    ok = wait_registered(port_name, 100000),
+    port_name ! {port, self(), Port},
+    receive {port_ok, Reply} -> Reply after 60000 -> timeout end.
+
+%% The root that checks that its port differs from the port of the other
+%% scheduler.
+port_other() ->
+    true = register(port_name, self()),
+    Port = open_port({spawn_executable, "/usr/bin/true"}, [binary]),
+    receive {port, From, Other} ->
+        true = Other =/= Port,
+        From ! {port_ok, ok}
+    end,
+    ok.

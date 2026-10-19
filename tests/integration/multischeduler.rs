@@ -82,7 +82,9 @@ fn reports_a_root_that_exits_with_an_error() {
 /// liveness from the tables of the node.
 #[test]
 fn reads_the_name_and_liveness_of_a_remote_process() {
-    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
+    // The liveness check routes through `erts_internal:is_process_alive/1`.
+    let erts_internal = pinned_beam("erts_internal");
+    let program = BeamProgram::load(&[&erts_internal, PING_PONG]).expect("the fixture loads");
     let ok_atom = program.atom("ok").expect("the fixture names ok");
     let results = program
         .execute_on_schedulers(&[("ping_pong", "info_watch"), ("ping_pong", "info_hold")])
@@ -150,6 +152,34 @@ fn rejects_an_atom_that_guest_code_creates() {
             .contains("cannot create the atom new_scheduler_atom_"),
         "{error}"
     );
+}
+
+/// A check of a process that the caller killed on another scheduler
+/// answers false, after the exit signal that the caller sent.
+#[test]
+fn a_killed_remote_process_is_not_alive() {
+    let erts_internal = pinned_beam("erts_internal");
+    let program = BeamProgram::load(&[&erts_internal, PING_PONG]).expect("the fixture loads");
+    let ok_atom = program.atom("ok").expect("the fixture names ok");
+    let results = program
+        .execute_on_schedulers(&[("ping_pong", "kill_watch"), ("ping_pong", "kill_hold")])
+        .expect("the two schedulers run");
+    assert_eq!(results[0].term, Term::Atom(ok_atom.clone()), "the watcher");
+    assert_eq!(results[1].term, Term::Atom(ok_atom), "the holder");
+}
+
+/// The ports of two schedulers have different identifiers.
+#[test]
+fn ports_of_two_schedulers_differ() {
+    // The pinned `erlang` module holds `open_port/2`.
+    let erlang = pinned_beam("erlang");
+    let program = BeamProgram::load(&[&erlang, PING_PONG]).expect("the fixture loads");
+    let ok_atom = program.atom("ok").expect("the fixture names ok");
+    let results = program
+        .execute_on_schedulers(&[("ping_pong", "port_send"), ("ping_pong", "port_other")])
+        .expect("the two schedulers run");
+    assert_eq!(results[0].term, Term::Atom(ok_atom.clone()), "the sender");
+    assert_eq!(results[1].term, Term::Atom(ok_atom), "the receiver");
 }
 
 /// A root that waits for the output of a port without a receive timer is

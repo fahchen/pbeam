@@ -77,7 +77,15 @@ impl Scheduler {
             monitors: Vec::new(),
             closing: false,
         };
-        let id = self.resources.borrow_mut::<Ports>().insert(port)?;
+        // The identifiers belong to the node, so a port of one scheduler
+        // never compares equal to a port of another.
+        let id = if let Some(node) = &self.shared {
+            let id = node.next_port()?;
+            self.resources.borrow_mut::<Ports>().insert_at(id, port);
+            id
+        } else {
+            self.resources.borrow_mut::<Ports>().insert(port)?
+        };
         self.process_mut(owner)
             .expect("the owner of a port exists")
             .links

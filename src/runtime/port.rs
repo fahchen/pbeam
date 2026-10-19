@@ -148,13 +148,41 @@ impl Ports {
     ///
     /// The port number overflows.
     pub(super) fn insert(&mut self, port: Port) -> Result<PortId, BeamError> {
+        let id = self.next_id()?;
+        self.insert_at(id, port);
+        Ok(id)
+    }
+
+    /// Return the next port identifier.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let ports = Ports::default();
+    /// assert_eq!(ports.next_id().unwrap(), PortId(0));
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The port number overflows.
+    pub(super) fn next_id(&mut self) -> Result<PortId, BeamError> {
         let id = PortId(self.next);
         self.next = self
             .next
             .checked_add(1)
             .ok_or_else(|| error("port identifier overflow"))?;
-        self.by_id.insert(id, port);
         Ok(id)
+    }
+
+    /// Put `port` under the identifier `id`, which no open port has.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// ports.insert_at(PortId(7), port);
+    /// ```
+    pub(super) fn insert_at(&mut self, id: PortId, port: Port) {
+        self.by_id.insert(id, port);
     }
 
     /// Return the identifiers of the open ports, in no order, as

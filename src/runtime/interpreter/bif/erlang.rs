@@ -4322,10 +4322,16 @@ pub(super) fn is_process_alive(
         return Ok(denied);
     }
     let alive = match scheduler.process(*id) {
-        // A live process of another scheduler. The owner table of the node
-        // records it. The routing of the request to its scheduler for the
-        // signal order stays in #843.
-        None if scheduler.remote_owner(*id).is_some() => "true",
+        // The target is on another scheduler. Route the request, so that
+        // the answer comes after the signals that the caller sent before,
+        // as `erts_internal:is_process_alive/1` does on ERTS.
+        None if scheduler.remote_owner(*id).is_some() => {
+            return Ok(Trap {
+                module: "erts_internal",
+                function: "is_process_alive",
+                arguments: vec![pid.clone()],
+            });
+        }
         None => "false",
         Some(target) if target.exiting.is_some() || target.mailbox.has_incoming() => {
             return Ok(Trap {
