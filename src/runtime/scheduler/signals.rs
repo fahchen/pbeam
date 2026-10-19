@@ -459,18 +459,6 @@ impl Scheduler {
                 self.handled(id, node).flush = Flush::Flushed;
                 return Ok(Handled::Stop(0));
             }
-            Signal::ClearName { name } => {
-                let clear = self
-                    .processes
-                    .get(&id)
-                    .and_then(|process| process.registered_name.as_ref())
-                    .is_some_and(|atom| self.atoms.name_of(atom) == name);
-                let process = self.handled(id, node);
-                if clear {
-                    process.registered_name = None;
-                }
-                0
-            }
             Signal::Revoke { capability } => {
                 self.handled(id, node).security.remove(capability);
                 let signals = self.delegations.revoke(capability);
@@ -613,13 +601,21 @@ impl Scheduler {
                     HandlingPoint::Running => self.current_reductions(),
                     HandlingPoint::ScheduleIn => 0,
                 };
+                let registered = self.registered_name_of(id);
                 let process = self.processes.get_mut(&id).expect("the process is alive");
                 let messages = process.mailbox.messages_before(node);
                 // The item name comes from the atom table, so remove the
                 // node here and keep the two field borrows separate.
                 process.mailbox.remove(node);
                 let info = process
-                    .info(&self.atoms, &item, current, messages, true)?
+                    .info(
+                        &self.atoms,
+                        &item,
+                        current,
+                        messages,
+                        true,
+                        registered.as_ref(),
+                    )?
                     .expect("erlang:process_info/2 sends a supported item");
                 self.send_message(id, requester, reply(reference, info));
                 0

@@ -116,19 +116,19 @@ fn reports_the_exiting_status_of_another_process() {
     let frame = code.mfa_frame("fixture", "main", 0).unwrap();
     let mut process = ProcessState::new(ProcessId(1), Start::Entry(frame), vec![]);
     process.exiting = Some(Term::static_atom("normal"));
-    let values = process_info_values(&code, &process, 0, 0, false).unwrap();
+    let values = process_info_values(&code, &process, 0, 0, false, None).unwrap();
     assert_eq!(values.status, "exiting");
     process.exiting = None;
     process.waiting = true;
     assert_eq!(
-        process_info_values(&code, &process, 0, 0, false)
+        process_info_values(&code, &process, 0, 0, false, None)
             .unwrap()
             .status,
         "waiting"
     );
     process.waiting = false;
     assert_eq!(
-        process_info_values(&code, &process, 0, 0, false)
+        process_info_values(&code, &process, 0, 0, false, None)
             .unwrap()
             .status,
         "runnable"
@@ -146,13 +146,13 @@ fn reads_the_current_function_of_a_process_that_did_not_run() {
         function: Atom::from_static("apply").unwrap(),
     };
     let mut process = ProcessState::new(ProcessId(1), start, vec![Term::Integer(1)]);
-    let values = process_info_values(&code, &process, 0, 0, false).unwrap();
+    let values = process_info_values(&code, &process, 0, 0, false, None).unwrap();
     assert!(matches!(
         values.current_function,
         Some(MfaNames::Atoms(_, _, 1))
     ));
     process.undefined_start = None;
-    let values = process_info_values(&code, &process, 0, 0, false).unwrap();
+    let values = process_info_values(&code, &process, 0, 0, false, None).unwrap();
     assert!(values.current_function.is_none());
 }
 

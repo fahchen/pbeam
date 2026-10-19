@@ -696,7 +696,7 @@ impl ProcessState {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let length = process.info(&atoms, &Term::static_atom("message_queue_len"), 0, 2, false)?;
+    /// let length = process.info(&atoms, &Term::static_atom("message_queue_len"), 0, 2, false, None)?;
     /// assert_eq!(length, Some(Term::tuple(vec![Term::static_atom("message_queue_len"), Term::Integer(2)])));
     /// ```
     ///
@@ -710,6 +710,7 @@ impl ProcessState {
         current: u64,
         messages: usize,
         caller: bool,
+        registered_name: Option<&Atom>,
     ) -> Result<Option<Term>, BeamError> {
         let Term::Atom(name) = item else {
             return Ok(None);
@@ -717,8 +718,10 @@ impl ProcessState {
         let value = match (atoms.name_of(name), &self.registered_name) {
             // ponytail: PBeam records no stack frames; see "Exception stack trace" in docs/erts-differences.md.
             ("current_stacktrace", _) if caller => Term::nil(),
-            ("registered_name", Some(registered)) => Term::Atom(registered.clone()),
-            ("registered_name", None) => return Ok(Some(Term::nil())),
+            ("registered_name", _) => match registered_name {
+                Some(registered) => Term::Atom(registered.clone()),
+                None => return Ok(Some(Term::nil())),
+            },
             ("message_queue_len", _) => Term::Integer(messages as i64),
             ("group_leader", _) => Term::Pid(self.group_leader),
             ("priority", _) => Term::static_atom(self.priority.name()),

@@ -2411,6 +2411,24 @@ impl Scheduler {
         }
     }
 
+    /// Return true when the root process exited with an error.
+    pub(super) fn root_failed(&self) -> bool {
+        matches!(self.root_result, Some(Err(_)))
+    }
+
+    /// Return the registered name of the process `id`. A run with more than
+    /// one scheduler reads the name table of the node, which holds the names
+    /// of every scheduler; a one-thread run reads the field of the process.
+    pub(super) fn registered_name_of(&self, id: ProcessId) -> Option<Atom> {
+        match &self.shared {
+            Some(node) => node.name_of(id).and_then(|name| self.atoms.get(&name)),
+            None => self
+                .processes
+                .get(&id)
+                .and_then(|process| process.registered_name.clone()),
+        }
+    }
+
     /// Return true when the root process waits for a message and has no
     /// receive timer.
     pub(super) fn root_waiting(&self) -> bool {
@@ -2672,16 +2690,6 @@ impl Scheduler {
                     }
                 }
             }
-        }
-    }
-
-    /// Remove each delivery of the inbox of this scheduler without applying
-    /// it. A scheduler whose root exited serves the inbox until the last
-    /// root exits, and drops the deliveries for its dead processes.
-    pub(super) fn discard_inbox(&mut self) {
-        if let Some(node) = &self.shared {
-            let mut deliveries = Vec::new();
-            node.take(self.index, &mut deliveries);
         }
     }
 
@@ -3196,20 +3204,19 @@ impl Scheduler {
         if name.is_static("undefined") {
             return false;
         }
-        let Some(process) = self.processes.get(id) else {
+        if self.processes.get(id).is_none() && self.remote_owner(*id).is_none() {
             return false;
-        };
-        if process.registered_name.is_some() {
+        }
+        if self.registered_name_of(*id).is_some() {
             return false;
         }
         let name_text = self.atoms.name_of(name).to_owned();
         if !self.name_insert(&name_text, *id) {
             return false;
         }
-        self.processes
-            .get_mut(id)
-            .expect("the process is alive")
-            .registered_name = Some(name.clone());
+        if let Some(process) = self.processes.get_mut(id) {
+            process.registered_name = Some(name.clone());
+        }
         true
     }
 
@@ -3259,10 +3266,6 @@ impl Scheduler {
         };
         if let Some(process) = self.processes.get_mut(&id) {
             process.registered_name = None;
-        } else if self.remote_owner(id).is_some() {
-            // The field of the process belongs to its scheduler. Clear it
-            // through the signal queue, so the owner removes it too.
-            let _ = self.send_signal(None, id, Signal::ClearName { name: name_text });
         }
         true
     }
@@ -3409,16 +3412,18 @@ impl Scheduler {
             .remove(&id)
             .expect("the exiting process is alive");
         debug_assert!(!process.in_run_queue, "only the current process exits");
-        if let Some(name) = &process.registered_name {
-            let name_text = self.atoms.name_of(name).to_owned();
-            // Another process may have the name after an unregister of this
-            // name. Remove it only when this process still has it.
-            let owned = match &self.shared {
-                Some(node) => node.name_get(&name_text) == Some(id),
-                None => self.names.get(&name_text) == Some(&id),
-            };
-            if owned {
-                self.name_take(&name_text);
+        match &self.shared {
+            Some(node) => node.name_remove_all(id),
+            None => {
+                if let Some(name) = &process.registered_name {
+                    let name_text = self.atoms.name_of(name).to_owned();
+                    // Another process may have the name after an unregister
+                    // of this name. Remove it only when this process still
+                    // has it.
+                    if self.names.get(&name_text) == Some(&id) {
+                        self.names.remove(&name_text);
+                    }
+                }
             }
         }
         self.delegations

@@ -5,7 +5,7 @@ use super::{
 use crate::runtime::capability::{AllowAll, Capability, CapabilityKind, Denied, Policy};
 use crate::runtime::host::input::{Readiness, wait_readable};
 use crate::runtime::host::output::{IovecWrite, IovecWritten};
-use crate::term::test_atom;
+use crate::term::{AtomTable, test_atom};
 use crate::{
     runtime::ets::{Access, Table, TableType},
     runtime::process::{
@@ -20,6 +20,7 @@ use crate::{
 use std::{
     io::{PipeReader, PipeWriter, Read, Write},
     os::fd::AsRawFd,
+    sync::Arc,
     time::Duration,
 };
 
@@ -2080,4 +2081,22 @@ fn a_signal_to_a_dead_process_answers_a_link() {
             .mailbox
             .has_control_signals()
     );
+}
+
+#[test]
+fn a_scheduler_registers_a_name_for_a_remote_process() {
+    use super::node::SharedNode;
+    let (node, mut readers) = SharedNode::new(2).unwrap();
+    let mut scheduler =
+        Scheduler::with_shared(AtomTable::new(), Arc::clone(&node), 0, readers.remove(0));
+    let remote = ProcessId(7);
+    node.register(remote, 1);
+    let first = scheduler.atoms.put("pbeam_remote_name").unwrap();
+    let second = scheduler.atoms.put("pbeam_remote_other").unwrap();
+    assert!(scheduler.register(&Term::Atom(first.clone()), &Term::Pid(remote)));
+    assert_eq!(scheduler.registered_name_of(remote), Some(first.clone()));
+    // One process has one name.
+    assert!(!scheduler.register(&Term::Atom(second), &Term::Pid(remote)));
+    assert!(scheduler.unregister(&Term::Atom(first)));
+    assert_eq!(scheduler.registered_name_of(remote), None);
 }

@@ -579,7 +579,22 @@ impl BeamProgram {
         let frame = scheduler.code.frame(module, label, 0)?;
         let id = scheduler.next_pid()?;
         scheduler.start_with_id(id, frame, Vec::new(), Vec::new())?;
-        while !scheduler.root_exited() {
+        // After its root exits, a scheduler keeps running the processes that
+        // its root started, because a process of another scheduler can still
+        // depend on them until the last root exits.
+        let mut serving = false;
+        loop {
+            if !serving && scheduler.root_exited() {
+                if scheduler.root_failed() {
+                    node.abort();
+                    return Ok(());
+                }
+                node.root_done();
+                serving = true;
+            }
+            if serving && node.is_shutdown() {
+                break;
+            }
             let now = scheduler.timers.now();
             scheduler.expire_timers(now);
             scheduler.check_signals()?;
@@ -601,10 +616,17 @@ impl BeamProgram {
                 }
                 Turn::Done => {}
                 Turn::Idle => {
-                    if !scheduler.timers.active()
+                    if !serving
+                        && !scheduler.timers.active()
                         && scheduler.root_waiting()
                         && node.roots_left() == 1
                     {
+                        // A delivery of the last other root may already be
+                        // in the inbox. Apply it before the error.
+                        scheduler.drain_inbox();
+                        if !scheduler.root_waiting() {
+                            continue;
+                        }
                         return Err(error("root process waits for a message that cannot arrive"));
                     }
                     let wait = scheduler.timers.wait_time(scheduler.timers.now());
@@ -614,15 +636,6 @@ impl BeamProgram {
             if node.is_shutdown() {
                 break;
             }
-        }
-        if !scheduler.root_exited() {
-            // Another root failed and aborted the run.
-            return Ok(());
-        }
-        node.root_done();
-        while !node.is_shutdown() {
-            scheduler.discard_inbox();
-            scheduler.wait_events(None)?;
         }
         Ok(())
     }

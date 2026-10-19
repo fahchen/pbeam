@@ -4210,10 +4210,11 @@ pub(super) fn process_info(
             vec![process.clone(), item.clone()],
             |scheduler| {
                 let current = scheduler.current_reductions();
+                let registered = scheduler.registered_name_of(caller_id);
                 let (caller, atoms) = scheduler.current_process_and_atoms();
                 let messages = caller.mailbox.message_count();
                 let info = caller
-                    .info(atoms, item, current, messages, true)?
+                    .info(atoms, item, current, messages, true, registered.as_ref())?
                     .ok_or_else(|| unsupported(atoms))?;
                 caller.bump_reductions(1 + super::links_reductions(item, &info));
                 Ok(Value(info))
@@ -4224,8 +4225,16 @@ pub(super) fn process_info(
         return Ok(Value(Term::static_atom("undefined")));
     };
     let messages = target.mailbox.message_count();
+    let registered = scheduler.registered_name_of(*id);
     let info = target
-        .info(&scheduler.atoms, item, 0, messages, false)?
+        .info(
+            &scheduler.atoms,
+            item,
+            0,
+            messages,
+            false,
+            registered.as_ref(),
+        )?
         .ok_or_else(|| unsupported(&scheduler.atoms))?;
     // A queued reply is built in the target process, but ERTS discards
     // the cost that `handle_process_info` returns
@@ -4678,9 +4687,10 @@ pub(super) fn process_info_1(
         return caller_read(scheduler, vec![process.clone()], |scheduler| {
             let current = scheduler.current_reductions();
             let messages = scheduler.current_process().mailbox.message_count();
+            let registered = scheduler.registered_name_of(*id);
             let values = {
                 let caller = scheduler.current_process();
-                process_info_values(&scheduler.code, caller, current, messages, true)?
+                process_info_values(&scheduler.code, caller, current, messages, true, registered)?
             };
             let info = process_info_term(&mut scheduler.atoms, values)?;
             scheduler
@@ -4693,7 +4703,8 @@ pub(super) fn process_info_1(
         return Ok(Value(Term::static_atom("undefined")));
     };
     let messages = target.mailbox.message_count();
-    let values = process_info_values(&scheduler.code, target, 0, messages, false)?;
+    let registered = scheduler.registered_name_of(*id);
+    let values = process_info_values(&scheduler.code, target, 0, messages, false, registered)?;
     let info = process_info_term(&mut scheduler.atoms, values)?;
     scheduler
         .current_process_mut()
@@ -4709,6 +4720,7 @@ fn process_info_values(
     current: u64,
     messages: usize,
     caller: bool,
+    registered_name: Option<Atom>,
 ) -> Result<ProcessInfoValues, BeamError> {
     let current_function = if let Some(frame) = process.frames.last() {
         let module = code.module_by_id(frame.module_id)?;
@@ -4778,7 +4790,7 @@ fn process_info_values(
     )
     .map_err(|_| error("the stack size exceeds the PBeam integer range"))?;
     Ok(ProcessInfoValues {
-        registered_name: process.registered_name.clone(),
+        registered_name,
         current_function,
         initial_call,
         status,

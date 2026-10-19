@@ -245,11 +245,28 @@ impl SharedNode {
     /// name.
     pub(in crate::runtime) fn name_register(&self, name: &str, id: ProcessId) -> bool {
         let mut names = self.names.lock().expect("the name table is not poisoned");
-        if names.contains_key(name) {
+        if names.contains_key(name) || names.values().any(|owner| *owner == id) {
             return false;
         }
         names.insert(name.to_owned(), id);
         true
+    }
+
+    /// Return the name of the process `id`.
+    pub(in crate::runtime) fn name_of(&self, id: ProcessId) -> Option<String> {
+        self.names
+            .lock()
+            .expect("the name table is not poisoned")
+            .iter()
+            .find_map(|(name, owner)| (*owner == id).then(|| name.clone()))
+    }
+
+    /// Remove each name of the process `id`.
+    pub(in crate::runtime) fn name_remove_all(&self, id: ProcessId) {
+        self.names
+            .lock()
+            .expect("the name table is not poisoned")
+            .retain(|_, owner| *owner != id);
     }
 
     /// Remove the process `name`. Return the process that had it.
