@@ -628,6 +628,10 @@ name = "atomics"
 path = "tests/integration/atomics.rs"
 
 [[test]]
+name = "nif_libraries"
+path = "tests/integration/nif_libraries.rs"
+
+[[test]]
 name = "zlib"
 path = "tests/integration/zlib.rs"
 

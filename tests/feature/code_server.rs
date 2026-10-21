@@ -28,6 +28,10 @@ const CRYPTO_PROBE: &str = "fixtures/code_server/crypto_probe";
 /// The stand-in `crypto` module that loads the `crypto` NIF library.
 const CRYPTO_STAND_IN: &str = "fixtures/crypto/crypto";
 
+/// The probe that loads the stand-in of each module of an OTP NIF library
+/// without bindings in `fixtures/nif_libraries`.
+const NIF_LIBRARY_PROBE: &str = "fixtures/nif_libraries/nif_library_probe";
+
 /// The code path directory of the runs. It has `code_server_target.beam`,
 /// which no run loads at its start.
 const CODE_PATH: &str = "fixtures/code_server";
@@ -193,6 +197,89 @@ fn checks_the_crypto_load_info_as_pinned_erts() {
         let pbeam = run(&mut pbeam_probe(CRYPTO_STAND_IN, "crypto", function, &[]));
         assert_eq!(pbeam, erts);
     }
+}
+
+#[test]
+fn checks_the_load_info_of_the_libraries_without_bindings_as_pinned_erts() {
+    // Each stand-in defines the functions of the `nif_funcs` table of its
+    // library and loads the library with each load info. The load callback
+    // of `prim_socket` needs a map with a local pid under `registry`
+    // (prim_socket_nif.c:18862-18867), and the load callback of `asn1rt_nif`
+    // needs the integer 1 (asn1_erl_nif.c:1320-1329). A table entry that the
+    // stand-in does not define gives `Function not found` on one side.
+    let reload =
+        "{error,{reload,\"NIF library already loaded (reload disallowed since OTP 20).\"}}";
+    let veto = |veto| format!("{{error,{{load,\"Library load-call unsuccessful ({veto}).\"}}}}");
+    let socket = [
+        veto(1),
+        veto(1),
+        veto(1),
+        "ok".to_owned(),
+        reload.to_owned(),
+    ];
+    let asn1 = [
+        &[veto(-1), veto(-1), veto(-1), veto(-1), veto(-1)][..],
+        &["ok".to_owned(), reload.to_owned()],
+    ]
+    .concat();
+    let expected = format!(
+        "{{zstd,[ok,{reload}]}}\n{{prim_socket,[{}]}}\n{{prim_net,[ok,{reload}]}}\n\
+         {{erl_tracer,[ok,{reload}]}}\n{{asn1rt_nif,[{}]}}\n",
+        socket.join(","),
+        asn1.join(","),
+    );
+    let flat = |text: String| text.split_whitespace().collect::<Vec<_>>().join("");
+    let erts = run(&mut erts_probe(
+        NIF_LIBRARY_PROBE,
+        "nif_library_probe",
+        "main",
+        &[],
+    ));
+    assert_eq!(flat(erts.clone()), flat(expected));
+    let pbeam = run(&mut pbeam_probe(
+        NIF_LIBRARY_PROBE,
+        "nif_library_probe",
+        "main",
+        &[],
+    ));
+    assert_eq!(pbeam, erts);
+}
+
+#[test]
+fn loads_the_pinned_zstd_as_pinned_erts() {
+    // The `on_load` function of the pinned `zstd` loads its library and
+    // matches `ok` on the result (zstd.erl:251-252).
+    let erts = run(&mut erts_probe(
+        NIF_LIBRARY_PROBE,
+        "nif_library_probe",
+        "pinned",
+        &[],
+    ));
+    assert_eq!(erts, "{module,zstd}\n");
+    let pbeam = run(&mut pbeam_probe(
+        NIF_LIBRARY_PROBE,
+        "nif_library_probe",
+        "pinned",
+        &[],
+    ));
+    assert_eq!(pbeam, erts);
+}
+
+#[test]
+fn stops_with_a_runtime_error_for_a_nif_of_the_pinned_zstd() {
+    // `zstd:get_frame_header/1` calls `get_frame_header_nif/1`
+    // (zstd.erl:433-435), which has no binding.
+    let output = pbeam_probe(NIF_LIBRARY_PROBE, "nif_library_probe", "frame_header", &[])
+        .env("TERM", "dumb")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        !output.status.success()
+            && stderr.contains("zstd:get_frame_header_nif/1 NIF is not supported"),
+        "{stderr}"
+    );
 }
 
 #[test]
