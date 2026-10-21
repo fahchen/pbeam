@@ -34,7 +34,6 @@ mod prim_file;
 mod prim_net;
 mod prim_socket;
 mod prim_tty;
-mod pubkey_os_cacerts;
 mod zlib;
 mod zstd;
 
@@ -165,13 +164,6 @@ const LIBRARIES: &[Library] = &[
         bindings: prim_tty::BINDINGS,
         load: None,
         unbound_fails: false,
-    },
-    Library {
-        module: "pubkey_os_cacerts",
-        functions: &pubkey_os_cacerts::FUNCTIONS,
-        bindings: &[],
-        load: None,
-        unbound_fails: true,
     },
     Library {
         module: "zlib",
