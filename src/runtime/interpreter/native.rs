@@ -29,6 +29,7 @@ use crate::runtime::{
 mod asn1rt_nif;
 mod crypto;
 mod erl_tracer;
+mod manifest;
 mod prim_buffer;
 mod prim_file;
 mod prim_net;
@@ -37,6 +38,7 @@ mod prim_tty;
 mod zlib;
 mod zstd;
 
+pub use manifest::nif_manifest_gaps;
 pub(super) use prim_tty::dirty_write_result;
 
 /// The native binding of one NIF of a module. ERTS finds a NIF of a library

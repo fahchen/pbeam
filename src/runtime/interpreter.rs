@@ -38,6 +38,8 @@ mod bits;
 mod code_table;
 mod native;
 
+pub use native::nif_manifest_gaps;
+
 pub(super) use code_table::{CodeTable, LoadedModule};
 
 use code_table::{ExportTarget, ImportTargets};
