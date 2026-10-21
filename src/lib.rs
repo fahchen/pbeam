@@ -11,6 +11,6 @@ pub use error::BeamError;
 pub use runtime::{
     AllowAll, BeamProgram, Capability, CapabilityKind, Constraint, NativeFn, NativeResult,
     Operation, Policy, RegistrationError, install_start_dispositions, lookup_native,
-    register_native, unregister_native,
+    nif_manifest_gaps, register_native, unregister_native,
 };
 pub use term::{Atom, AtomTable, HostTerm, Map, PortId, ProcessId, Reference, Term, debug_term};
