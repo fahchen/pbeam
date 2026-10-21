@@ -609,6 +609,10 @@ impl BeamProgram {
                 let node = Arc::clone(&node);
                 let thread_gate = Arc::clone(&gate);
                 let body = move || -> Result<_, (BeamError, bool)> {
+                    // The guard aborts the gate if the scheduler cannot be
+                    // created, so a peer never waits for a thread that
+                    // panicked before it arrived.
+                    let mut start = StartGuard(Some(&thread_gate));
                     let mut scheduler = Scheduler::with_shared(
                         (*self.atoms).clone(),
                         Arc::clone(&node),
@@ -618,7 +622,7 @@ impl BeamProgram {
                     scheduler.code = CodeTable::new(self.modules.clone());
                     // The reset of the terminal mode needs the state of
                     // each scheduler after the run.
-                    match self.run_multi_root(&mut scheduler, module, function, &thread_gate) {
+                    match self.run_multi_root(&mut scheduler, module, function, &mut start) {
                         Ok(()) => {
                             let selected =
                                 scheduler.resources.borrow_mut::<Ttys>().input_selected();
@@ -730,10 +734,9 @@ impl BeamProgram {
         scheduler: &mut Scheduler,
         module: &str,
         function: &str,
-        gate: &StartGate,
+        start: &mut StartGuard<'_>,
     ) -> Result<(), BeamError> {
         let node = Arc::clone(scheduler.node());
-        let mut start = StartGuard(Some(gate));
         let label = scheduler.code.entry_label(module, function, 0)?;
         let frame = scheduler.code.frame(module, label, 0)?;
         let id = scheduler.next_pid()?;
