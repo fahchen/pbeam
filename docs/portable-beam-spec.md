@@ -209,11 +209,11 @@ def project do
 end
 ```
 
-A native build step links the declared implementations into the application executable and registers them; the exact mechanism follows the native work. Startup does not locate or load extension `.so`, `.dylib`, or `.dll` files.
+A native build step links the declared implementations into the application executable and registers them; the exact mechanism follows the native work. Startup does not locate or load extension `.so`, `.dylib`, or `.dll` files, except a NIF shared library that the NIF ABI layer of `docs/adr/0001-unsafe-in-the-nif-abi-layer.md` loads for a supported package.
 
 Missing required implementations and conflicting native registrations must be diagnosed before application execution. The exact validation mechanism remains open.
 
-Build-time inspection should inventory required OTP modules, imports, native declarations, and other observed native dependencies, then check them against bundled BEAM code and registered Rust implementations. An import alone does not prove that a function is native or that every dynamic call is reachable. Record such limits, and report a required third-party NIF with no replacement as unsupported rather than assuming its original native library can load.
+Build-time inspection should inventory required OTP modules, imports, native declarations, and other observed native dependencies, then check them against bundled BEAM code and registered Rust implementations. An import alone does not prove that a function is native or that every dynamic call is reachable. Record such limits, and report a required third-party NIF with no replacement as unsupported rather than assuming its original native library can load. The one exception is a supported package whose NIF shared library the ADR 0001 layer loads; the build check verifies its library and functions against that layer.
 
 Automatic `FromTerm`/`IntoTerm` conversions and attribute macros may follow when manual bindings become repetitive. Async native functions use the suspension/completion model above; they must not call blocking `block_on` on scheduler threads.
 
