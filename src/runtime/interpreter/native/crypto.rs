@@ -183,10 +183,10 @@ const OPENSSL_VERSION_NUMBER: i64 = 810549376;
 ///
 /// ```rust,ignore
 /// let info = Term::tuple(vec![Term::Integer(302), Term::binary(vec![]), Term::static_atom("false")]);
-/// assert_eq!(load(&info), 0);
-/// assert_eq!(load(&Term::Integer(302)), 205);
+/// assert_eq!(load(&info, &atoms), 0);
+/// assert_eq!(load(&Term::Integer(302), &atoms), 205);
 /// ```
-pub(super) fn load(load_info: &Term) -> i32 {
+pub(super) fn load(load_info: &Term, _atoms: &AtomTable) -> i32 {
     let Term::Tuple(elements) = load_info else {
         return 205;
     };
