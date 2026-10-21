@@ -136,6 +136,10 @@ name = "native_decl"
 path = "tests/integration/native_decl.rs"
 
 [[test]]
+name = "nif_gate"
+path = "tests/integration/nif_gate.rs"
+
+[[test]]
 name = "arith"
 path = "tests/integration/arith.rs"
 
