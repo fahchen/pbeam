@@ -5,7 +5,7 @@ use super::{
         DirtyWrite, Frame, PendingBif, PendingTrap, ProcessState, ReceiveTimer, StackSlot, Start,
         StartFlags,
     },
-    scheduler::{PolicyEnd, Received, Scheduler, Turn},
+    scheduler::{PolicyEnd, Received, Scheduler, Turn, node::Node},
     tty::{InitialMode, Ttys},
 };
 use crate::{
@@ -22,13 +22,15 @@ use crate::{
         low_64_bits, print_term, segment_equals, segment_integer,
     },
 };
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::{
     borrow::{Borrow, Cow},
     cell::Cell,
     cmp::Ordering,
     collections::HashMap,
     rc::Rc,
-    sync::Arc,
+    sync::{Arc, Condvar, Mutex},
 };
 
 pub(crate) mod bif;
@@ -169,6 +171,104 @@ impl ExceptionClass {
             _ => None,
         }
     }
+}
+
+/// Force the next scheduler thread creation to fail, for a test of the
+/// start path.
+#[cfg(test)]
+pub(super) static FAIL_SCHEDULER_SPAWN: AtomicBool = AtomicBool::new(false);
+
+/// A one-use gate that releases the scheduler threads after each created
+/// its root. `abort` releases them when a scheduler thread cannot start, so
+/// no thread waits without end on a barrier that will not open.
+struct StartGate {
+    state: Mutex<StartState>,
+    ready: Condvar,
+}
+
+/// The state of [`StartGate`].
+struct StartState {
+    /// The number of threads that created their root.
+    arrived: usize,
+    /// The number of threads of the run.
+    expected: usize,
+    /// True when a scheduler thread cannot start.
+    aborted: bool,
+}
+
+impl StartGate {
+    /// Return a closed gate for `expected` scheduler threads.
+    fn new(expected: usize) -> Self {
+        Self {
+            state: Mutex::new(StartState {
+                arrived: 0,
+                expected,
+                aborted: false,
+            }),
+            ready: Condvar::new(),
+        }
+    }
+
+    /// Record that one scheduler thread created its root.
+    fn arrive(&self) {
+        let mut state = self.state.lock().expect("the start gate is not poisoned");
+        state.arrived += 1;
+        self.ready.notify_all();
+    }
+
+    /// Wait until each scheduler thread created its root. Return false when
+    /// the run was aborted.
+    fn wait(&self) -> bool {
+        let mut state = self.state.lock().expect("the start gate is not poisoned");
+        while state.arrived < state.expected && !state.aborted {
+            state = self
+                .ready
+                .wait(state)
+                .expect("the start gate is not poisoned");
+        }
+        !state.aborted
+    }
+
+    /// Release each waiting scheduler thread after a thread cannot start.
+    fn abort(&self) {
+        let mut state = self.state.lock().expect("the start gate is not poisoned");
+        state.aborted = true;
+        self.ready.notify_all();
+    }
+}
+
+/// Abort the start gate when a scheduler thread ends before the gate opens,
+/// also on a panic. Disarm it after the gate opened.
+struct StartGuard<'a>(Option<&'a StartGate>);
+
+impl Drop for StartGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(gate) = self.0 {
+            gate.abort();
+        }
+    }
+}
+
+/// Wait for input in a run with scheduler threads, or decide that the root
+/// waits for a message that cannot arrive.
+fn idle_step(scheduler: &mut Scheduler, node: &Node, serving: bool) -> Result<(), BeamError> {
+    if serving
+        || scheduler.timers.active()
+        || !scheduler.root_waiting()
+        || scheduler.has_external_sources()
+        || node.live_processes() != 1
+    {
+        let wait = scheduler.timers.wait_time(scheduler.timers.now());
+        scheduler.wait_events(Some(wait))?;
+        return Ok(());
+    }
+    // A delivery of the last other root may already be in the inbox. Apply
+    // it and schedule the result before the error: it can make the root
+    // runnable or give it a signal that it did not handle.
+    if scheduler.drain_inbox() || !scheduler.root_waiting() {
+        return Ok(());
+    }
+    Err(error("root process waits for a message that cannot arrive"))
 }
 
 impl BeamProgram {
@@ -468,6 +568,222 @@ impl BeamProgram {
         self.execute_issued(module, function, arguments, issuer, &mut None)
     }
 
+    /// Run one root process on each of `roots.len()` scheduler threads.
+    ///
+    /// Each root is `Module:Function/0`. The schedulers share one node: the
+    /// process owners, the registered names, the identifier counters, and
+    /// the inbox of each scheduler for the messages and signals that cross a
+    /// thread boundary. Terms are shared and immutable, and one process runs
+    /// on one scheduler thread only. The run ends when each root exits, and
+    /// the threads join before this function returns. The results keep the
+    /// order of `roots`, and each result is the return value of its root.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let results = program.execute_on_schedulers(&[("ping_pong", "ping"), ("ping_pong", "pong")])?;
+    /// assert_eq!(results.len(), 2);
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`BeamProgram::execute`] for a root that exits with an
+    /// error or waits for a message that cannot arrive, the error of an
+    /// empty list of roots, and the error of a scheduler that cannot be
+    /// created.
+    pub fn execute_on_schedulers(
+        &self,
+        roots: &[(&str, &str)],
+    ) -> Result<Vec<HostTerm>, BeamError> {
+        if roots.is_empty() {
+            return Err(error("a multi-scheduler run needs at least one root"));
+        }
+        let initial_mode = InitialMode::read();
+        let (node, readers) = Node::new(roots.len())
+            .map_err(|cause| error(format!("cannot create the scheduler node: {cause}")))?;
+        let gate = Arc::new(StartGate::new(roots.len()));
+        let mut spawn_error = None;
+        let results = std::thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(roots.len());
+            for (index, ((module, function), reader)) in roots.iter().zip(readers).enumerate() {
+                let node = Arc::clone(&node);
+                let thread_gate = Arc::clone(&gate);
+                let body = move || -> Result<_, (BeamError, bool)> {
+                    // The guard aborts the gate if the scheduler cannot be
+                    // created, so a peer never waits for a thread that
+                    // panicked before it arrived.
+                    let mut start = StartGuard(Some(&thread_gate));
+                    let mut scheduler = Scheduler::with_shared(
+                        (*self.atoms).clone(),
+                        Arc::clone(&node),
+                        index,
+                        reader,
+                    );
+                    scheduler.code = CodeTable::new(self.modules.clone());
+                    // The reset of the terminal mode needs the state of
+                    // each scheduler after the run.
+                    match self.run_multi_root(&mut scheduler, module, function, &mut start) {
+                        Ok(()) => {
+                            let selected =
+                                scheduler.resources.borrow_mut::<Ttys>().input_selected();
+                            Ok((scheduler.into_run_result(), selected))
+                        }
+                        Err(cause) => {
+                            let selected =
+                                scheduler.resources.borrow_mut::<Ttys>().input_selected();
+                            node.abort();
+                            Err((cause, selected))
+                        }
+                    }
+                };
+                let force_failure = {
+                    #[cfg(test)]
+                    {
+                        FAIL_SCHEDULER_SPAWN.swap(false, AtomicOrdering::SeqCst)
+                    }
+                    #[cfg(not(test))]
+                    {
+                        false
+                    }
+                };
+                let spawned = if force_failure {
+                    Err(std::io::Error::other(
+                        "a test forces a scheduler thread failure",
+                    ))
+                } else {
+                    std::thread::Builder::new().spawn_scoped(scope, body)
+                };
+                match spawned {
+                    Ok(handle) => handles.push(handle),
+                    Err(cause) => {
+                        spawn_error =
+                            Some(error(format!("cannot create a scheduler thread: {cause}")));
+                        gate.abort();
+                        break;
+                    }
+                }
+            }
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle
+                        .join()
+                        .expect("a scheduler thread does not panic in a multi-scheduler run")
+                })
+                .collect::<Vec<_>>()
+        });
+        if let Some(cause) = spawn_error {
+            return Err(cause);
+        }
+        // Restore the terminal mode of the run, also after a failed root.
+        let selected = results.iter().any(|result| match result {
+            Ok((_, selected)) | Err((_, selected)) => *selected,
+        });
+        initial_mode.reset(selected);
+        // A failed root aborts the run. Report its error before the wait
+        // error or the missing result of a root that the abort stopped.
+        for result in &results {
+            if let Ok(((Some(Err(reason)), atoms), _)) = result {
+                return Err(Self::root_error(reason, atoms));
+            }
+        }
+        let mut roots = Vec::with_capacity(results.len());
+        for result in results {
+            let (root, _) = result.map_err(|(cause, _)| cause)?;
+            roots.push(root);
+        }
+        // A failed root aborts the run. Report its error before the wait
+        // error or the missing result of a root that the abort stopped.
+        let mut results_out = Vec::with_capacity(roots.len());
+        for (root, atoms) in roots {
+            let root = root.expect("a root that did not exit reports its error");
+            let term = root.expect("a failed root returns above");
+            results_out.push(HostTerm {
+                term,
+                atoms: Arc::new(atoms),
+            });
+        }
+        Ok(results_out)
+    }
+
+    /// Return the error of a root process that exited with `reason`.
+    fn root_error(reason: &Term, atoms: &AtomTable) -> BeamError {
+        let text: String = print_term(reason, atoms)
+            .into_iter()
+            .map(char::from)
+            .collect();
+        error(format!("root process exited with {text}"))
+    }
+
+    /// Apply the outcome of one process turn, as each run loop does.
+    fn apply_outcome(&self, scheduler: &mut Scheduler, outcome: Outcome) -> Result<(), BeamError> {
+        match outcome {
+            Outcome::Wait => scheduler.park_current(),
+            Outcome::Hibernate => scheduler.hibernate_current(),
+            Outcome::Yield => scheduler.yield_current(),
+            Outcome::Exit { reason, result } => scheduler.finish_current(reason, result)?,
+            Outcome::DirtyWrite { write, tail } => scheduler.start_dirty_write(write, tail),
+        }
+        Ok(())
+    }
+
+    /// Run one root of a multi-scheduler run until its exit completes, and
+    /// then serve the inbox of its scheduler until the last root exits.
+    fn run_multi_root(
+        &self,
+        scheduler: &mut Scheduler,
+        module: &str,
+        function: &str,
+        start: &mut StartGuard<'_>,
+    ) -> Result<(), BeamError> {
+        let node = Arc::clone(scheduler.node());
+        let label = scheduler.code.entry_label(module, function, 0)?;
+        let frame = scheduler.code.frame(module, label, 0)?;
+        let id = scheduler.next_pid()?;
+        scheduler.start_with_id(id, frame, Vec::new(), Vec::new())?;
+        // Wait until each scheduler created its root, so an idle root cannot
+        // decide that its message cannot arrive before another root started.
+        let gate = start.0.expect("the start gate is armed");
+        gate.arrive();
+        if !gate.wait() {
+            return Err(error("the multi-scheduler run was cancelled"));
+        }
+        start.0 = None;
+        // After its root exits, a scheduler keeps running the processes that
+        // its root started, because a process of another scheduler can still
+        // depend on them until the last root exits.
+        let mut serving = false;
+        loop {
+            if !serving && scheduler.root_exited() {
+                if scheduler.root_failed() {
+                    node.abort();
+                    return Ok(());
+                }
+                node.root_done();
+                serving = true;
+            }
+            if serving && node.is_shutdown() {
+                break;
+            }
+            let now = scheduler.timers.now();
+            scheduler.expire_timers(now);
+            scheduler.check_signals()?;
+            scheduler.complete_dirty_writes();
+            match scheduler.schedule_next()? {
+                Turn::Run => {
+                    let outcome = self.run(scheduler)?;
+                    self.apply_outcome(scheduler, outcome)?;
+                }
+                Turn::Done => {}
+                Turn::Idle => idle_step(scheduler, &node, serving)?,
+            }
+            if node.is_shutdown() {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     /// Run an exported function as the root process, as
     /// [`BeamProgram::execute`] does, and call `sample` with the live bytes
     /// of the guest containers before each scheduling step. The bytes are
@@ -656,17 +972,8 @@ impl BeamProgram {
                 Turn::Run if scheduler.policy_idle() => scheduler.park_current(),
                 Turn::Run => {
                     let outcome = self.run(scheduler)?;
-                    match policy_turn(scheduler, outcome) {
-                        Outcome::Wait => scheduler.park_current(),
-                        Outcome::Hibernate => scheduler.hibernate_current(),
-                        Outcome::Yield => scheduler.yield_current(),
-                        Outcome::Exit { reason, result } => {
-                            scheduler.finish_current(reason, result)?
-                        }
-                        Outcome::DirtyWrite { write, tail } => {
-                            scheduler.start_dirty_write(write, tail)
-                        }
-                    }
+                    let outcome = policy_turn(scheduler, outcome);
+                    self.apply_outcome(scheduler, outcome)?;
                 }
                 Turn::Done => {}
                 Turn::Idle => {

@@ -1,5 +1,7 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    os::{fd::AsRawFd, unix::net::UnixStream},
+    sync::Arc,
     time::Duration,
 };
 
@@ -362,32 +364,10 @@ pub(super) struct Scheduler {
     /// Processes that wait for a turn, in the queue of their priority. The
     /// current process is not in this queue, as in ERTS.
     runnable: RunQueue,
-    /// Number for the next process identifier.
-    next_process_id: u64,
-    /// Number for the next reference.
-    next_reference: u64,
-    /// The unique integer counter of the scheduler, as `esdp->unique`
-    /// (`erl_bif_unique.c:574`, `812`): the number of
-    /// `erlang:unique_integer/0` calls so far.
-    unique: u64,
-    /// The counter of `erlang:unique_integer([monotonic])`, as
-    /// `raw_unique_monotonic_integer` (`erl_bif_unique.c:648-672`): the
-    /// value -1 before the first call, and the raw value of the last call
-    /// after it.
-    unique_monotonic: i64,
-    /// The seed of the hash of `term_to_binary/2` with `local`
-    /// (`local_node_hash`, external.c:134), which the first such call
-    /// computes (see [`Scheduler::local_node_hash`]).
-    local_node_hash: std::cell::OnceCell<u32>,
     /// Return value or exit reason of the root process. The root process
     /// records it when its exit starts, and the run ends only after the
     /// exit completes ([`Self::root_exited`]).
     root_result: Option<Result<Term, Term>>,
-    /// Registered names and their processes, as the ERTS `process_reg`
-    /// table. An atom name is unique in one atom table, so its text
-    /// identifies it. The process also keeps its name in its
-    /// `registered_name` field.
-    names: HashMap<String, ProcessId>,
     /// Persistent terms of the node. All processes of the run share them.
     pub(super) persistent_terms: PersistentTerms,
     /// ETS tables of the node. All processes of the run share them.
@@ -447,9 +427,6 @@ pub(super) struct Scheduler {
     /// same target, or the next monitor signal, as `esdp->pending_signal`
     /// (`erl_proc_sig_queue.c:1101-1170`). The pid is the target.
     pending_monitor: Option<(ProcessId, Monitor)>,
-    /// Number for the next unlink operation identifier
-    /// (`erts_proc_sig_new_unlink_id`). The values are not observable.
-    next_unlink_id: u64,
     /// The process that gets the error reports of the emulator: `logger`,
     /// `undefined`, or a pid, as `system_logger` in `erl_trace.c`. The start
     /// value is `logger` (`erl_trace.c:339`).
@@ -487,6 +464,19 @@ pub(super) struct Scheduler {
     /// [`Self::without_checks`] before the root process starts, and no BIF
     /// can change it, so a restricted process cannot turn the checks off.
     skip_checks: bool,
+    /// The node of this scheduler. Every scheduler has one; a run with one
+    /// scheduler thread has a node that wakes no thread.
+    node: Arc<Node>,
+    /// True when scheduler threads share the node: the inbox of each
+    /// scheduler carries the deliveries of other threads and the atom table
+    /// is frozen.
+    multi: bool,
+    /// The index of this scheduler in [`Self::node`].
+    index: usize,
+    /// The read end of the wake socket of this scheduler.
+    wake: Option<UnixStream>,
+    /// The pid of the root process of this scheduler.
+    root: ProcessId,
 }
 
 impl Scheduler {
@@ -512,13 +502,7 @@ impl Scheduler {
             processes: ProcessTable::default(),
             freed: HashMap::new(),
             runnable: RunQueue::default(),
-            next_process_id: ROOT.0 + 1,
-            next_reference: 0,
-            unique: 0,
-            unique_monotonic: -1,
-            local_node_hash: std::cell::OnceCell::new(),
             root_result: None,
-            names: HashMap::new(),
             persistent_terms: PersistentTerms::default(),
             ets: EtsTables::default(),
             atomics: AtomicArrays::default(),
@@ -535,7 +519,6 @@ impl Scheduler {
             known_nodes: KnownNodes::default(),
             alias_owners: HashMap::new(),
             pending_monitor: None,
-            next_unlink_id: 1,
             system_logger: Term::static_atom("logger"),
             backtrace_depth: 8,
             virtual_reductions: 0,
@@ -544,7 +527,57 @@ impl Scheduler {
             release: ReleaseStack::new(),
             policy: None,
             skip_checks: false,
+            node: Node::single(),
+            multi: false,
+            index: 0,
+            wake: None,
+            root: ROOT,
         }
+    }
+
+    /// Return a scheduler that shares the node `node` with the other
+    /// schedulers of the run. `wake` is the read end of the wake socket of
+    /// this scheduler.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let (node, mut readers) = Node::new(2).unwrap();
+    /// let scheduler = Scheduler::with_shared(AtomTable::new(), node, 0, readers.remove(0));
+    /// assert_eq!(scheduler.index, 0);
+    /// ```
+    pub(super) fn with_shared(
+        mut atoms: AtomTable,
+        node: Arc<Node>,
+        index: usize,
+        wake: UnixStream,
+    ) -> Self {
+        // A term crosses a scheduler thread with its atom indices, so this
+        // copy of the table cannot add an atom that the other copies lack.
+        atoms.freeze_creation();
+        let origin = node.clock_origin();
+        let mut scheduler = Scheduler {
+            node,
+            multi: true,
+            index,
+            wake: Some(wake),
+            skip_checks: true,
+            ..Scheduler::new(atoms)
+        };
+        // Each scheduler timer service starts on the run start of the node,
+        // so the clocks of the threads agree.
+        scheduler.timers = Timers::with_origin(origin);
+        scheduler
+    }
+
+    /// Return the node of this scheduler.
+    pub(super) fn node(&self) -> &Arc<Node> {
+        &self.node
+    }
+
+    /// Return true when scheduler threads share the node.
+    pub(super) fn is_multi(&self) -> bool {
+        self.multi
     }
 
     /// Return a scheduler as [`Self::new`] does, for a run that skips each
@@ -596,7 +629,20 @@ impl Scheduler {
         arguments: Vec<Term>,
         capabilities: Vec<Capability>,
     ) -> Result<(), BeamError> {
-        let id = ROOT;
+        self.start_with_id(ROOT, frame, arguments, capabilities)
+    }
+
+    /// Create the root process with the pid `id`, as [`Self::start`] does.
+    /// A run with more than one scheduler starts one root in each scheduler,
+    /// and each root gets its own pid from the shared node.
+    pub(super) fn start_with_id(
+        &mut self,
+        id: ProcessId,
+        frame: Frame,
+        arguments: Vec<Term>,
+        capabilities: Vec<Capability>,
+    ) -> Result<(), BeamError> {
+        self.root = id;
         let mut root = ProcessState::new(id, Start::Entry(frame), arguments);
         let issued = capabilities
             .into_iter()
@@ -618,6 +664,7 @@ impl Scheduler {
     /// assert!(scheduler.process(ProcessId(0)).unwrap().security.is_boot());
     /// ```
     pub(super) fn start_boot(&mut self, frame: Frame, arguments: Vec<Term>) {
+        self.root = ROOT;
         let mut root = ProcessState::new(ROOT, Start::Entry(frame), arguments);
         root.security = SecurityContext::boot();
         self.insert(root);
@@ -689,6 +736,7 @@ impl Scheduler {
     /// ```
     pub(super) fn insert(&mut self, process: ProcessState) {
         let id = process.id;
+        self.node.register(id, self.index);
         self.processes.insert(process);
         self.enqueue(id);
     }
@@ -1000,6 +1048,7 @@ impl Scheduler {
     ///
     /// An error of [`Scheduler::handle_signals`].
     pub(super) fn schedule_next(&mut self) -> Result<Turn, BeamError> {
+        self.drain_inbox();
         // The release work of an exiting process runs in this bound, so the
         // process that this step runs waits for the release of at most
         // [`RELEASE_BATCH`] nodes.
@@ -1115,6 +1164,7 @@ impl Scheduler {
                     receiver,
                     message,
                 } => {
+                    self.node.remove_timer(reference);
                     self.forget_bif_timer(&receiver, reference);
                     let target = match receiver {
                         Receiver::Process(id) => Some(id),
@@ -1128,6 +1178,25 @@ impl Scheduler {
                 Timer::SocketReceive { port } => self.tcp_receive_timeout(port),
             }
         }
+    }
+
+    /// Return true when the scheduler can get input from outside the node:
+    /// a read select of fd 0, a dirty IO thread, or a port or socket that
+    /// waits for input or output. Such a source can send a message to a
+    /// waiting process without another process of the node.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(!scheduler.has_external_sources());
+    /// ```
+    pub(super) fn has_external_sources(&mut self) -> bool {
+        self.resources.borrow_mut::<Ttys>().input_selected()
+            || self.dirty_io.running()
+            || !self.resources.borrow_mut::<Ports>().wait_fds().is_empty()
+            || !self.resources.borrow_mut::<Ports>().write_fds().is_empty()
+            // A handled host signal becomes a message to `erl_signal_server`.
+            || self.whereis("erl_signal_server").is_some()
     }
 
     /// Wait for at most `timeout`, or without end for `None`, until fd 0
@@ -1171,10 +1240,12 @@ impl Scheduler {
         let dirty = self.dirty_io.running();
         let ports = self.resources.borrow_mut::<Ports>().wait_fds();
         let writes = self.resources.borrow_mut::<Ports>().write_fds();
+        let wake = self.wake.as_ref().map(|wake| wake.as_raw_fd());
         let fds: Vec<_> = [
             selected.then_some(libc::STDIN_FILENO),
             dirty.then(|| self.dirty_io.wake_fd()),
             signal::notify_fd(),
+            wake,
         ]
         .into_iter()
         .flatten()
@@ -1184,6 +1255,11 @@ impl Scheduler {
             return Ok(false);
         }
         let (readiness, writable) = input::wait(&fds, &writes, timeout);
+        if let (Some(wake), Some(fd)) = (&mut self.wake, wake)
+            && matches!(&readiness, Readiness::Ready(ready) if ready.contains(&fd))
+        {
+            Node::drain_wake(wake);
+        }
         if dirty
             && matches!(&readiness, Readiness::Ready(ready) if ready.contains(&self.dirty_io.wake_fd()))
         {
@@ -1289,13 +1365,23 @@ impl Scheduler {
             let name =
                 signal::signal_name(number).expect("a handler is set only for a named signal");
             if let Some(server) = self.whereis("erl_signal_server") {
-                let message =
-                    Term::tuple(vec![Term::static_atom("notify"), Term::static_atom(name)]);
-                self.deliver(server, message);
+                self.notify_signal_server(server, name);
             }
             queue.extend(std::mem::take(&mut self.deferred_signals));
         }
         Ok(())
+    }
+
+    /// Send `{notify, Name}` to the process registered as
+    /// `erl_signal_server`. The signal server can be a process of another
+    /// scheduler. The message has only static atoms, and it comes from the
+    /// system, so it sets no self-signal mark.
+    fn notify_signal_server(&mut self, server: ProcessId, name: &str) {
+        let message = Term::tuple(vec![Term::static_atom("notify"), Term::static_atom(name)]);
+        match self.remote_owner(server) {
+            Some(index) => self.node.send_message(index, None, message, server, None),
+            None => self.deliver(server, message),
+        }
     }
 
     /// Return the fds that a wait of the menu reports as ready. A failed
@@ -1681,6 +1767,7 @@ impl Scheduler {
     /// ```
     pub(super) fn cancel_bif_timer(&mut self, reference: Reference) -> Option<i64> {
         let (end, timer) = self.timers.cancel_bif(reference)?;
+        self.node.remove_timer(reference);
         if let Timer::Bif { receiver, .. } = timer {
             self.forget_bif_timer(&receiver, reference);
         }
@@ -2178,12 +2265,8 @@ impl Scheduler {
     /// ```rust,ignore
     /// assert_eq!(Scheduler::new(AtomTable::new()).next_pid()?, ProcessId(1));
     /// ```
-    fn next_pid(&mut self) -> Result<ProcessId, BeamError> {
-        let value = self.next_process_id;
-        self.next_process_id = value
-            .checked_add(1)
-            .ok_or_else(|| error("process identifier overflow"))?;
-        Ok(ProcessId(value))
+    pub(super) fn next_pid(&mut self) -> Result<ProcessId, BeamError> {
+        Ok(ProcessId(self.node.next_pid()?))
     }
 
     /// Create a new unique reference.
@@ -2194,11 +2277,8 @@ impl Scheduler {
     /// assert_eq!(scheduler.make_ref()?, Reference(0));
     /// ```
     pub(super) fn make_ref(&mut self) -> Result<Reference, BeamError> {
-        let value = self.next_reference;
-        let reference =
-            Reference::ordinary(value).ok_or_else(|| error("process reference overflow"))?;
-        self.next_reference = value + 1;
-        Ok(reference)
+        Reference::ordinary(self.node.next_reference())
+            .ok_or_else(|| error("process reference overflow"))
     }
 
     /// Return the next value of `erlang:unique_integer/0`, as
@@ -2225,13 +2305,18 @@ impl Scheduler {
     /// A value above `MAX_SMALL` is a runtime error after 2^59 calls: ERTS
     /// then gives a bignum, which PBeam does not have.
     pub(super) fn unique_integer(&mut self) -> Result<i64, BeamError> {
-        let value = i64::try_from((self.unique << 1) | 1)
+        let counter = self.take_unique();
+        let value = i64::try_from((counter << 1) | 1)
             .ok()
             .and_then(|raw| SMALL_INTEGER_MIN.checked_add(raw))
             .filter(|value| Term::Integer(*value).small_integer().is_some())
             .ok_or_else(|| error("erlang:unique_integer/0 needs a bignum"))?;
-        self.unique += 1;
         Ok(value)
+    }
+
+    /// Return the next counter value of `erlang:unique_integer/0,1`.
+    fn take_unique(&mut self) -> u64 {
+        self.node.next_unique()
     }
 
     /// Return the next value of `erlang:unique_integer([positive])`, as
@@ -2253,12 +2338,13 @@ impl Scheduler {
     /// A value above `MAX_SMALL` is a runtime error: ERTS then gives a
     /// bignum, which PBeam does not have.
     pub(super) fn unique_integer_positive(&mut self) -> Result<i64, BeamError> {
-        let value = i64::try_from((self.unique << 1) + 2)
+        let counter = self.take_unique();
+        i64::try_from(counter)
             .ok()
+            .and_then(|counter| counter.checked_mul(2))
+            .and_then(|value| value.checked_add(2))
             .filter(|value| Term::Integer(*value).small_integer().is_some())
-            .ok_or_else(|| error("erlang:unique_integer/1 needs a bignum"))?;
-        self.unique += 1;
-        Ok(value)
+            .ok_or_else(|| error("erlang:unique_integer/1 needs a bignum"))
     }
 
     /// Return the next value of `erlang:unique_integer([monotonic])`, as
@@ -2282,11 +2368,7 @@ impl Scheduler {
     /// A value above the small integer range is a runtime error: ERTS then
     /// gives a bignum, which PBeam does not have.
     pub(super) fn unique_monotonic_integer(&mut self, positive: bool) -> Result<i64, BeamError> {
-        let raw = self
-            .unique_monotonic
-            .checked_add(1)
-            .ok_or_else(|| error("erlang:unique_integer/1 needs a bignum"))?;
-        self.unique_monotonic = raw;
+        let raw = self.node.next_unique_monotonic();
         let value = if positive {
             raw.checked_add(1)
         } else {
@@ -2307,7 +2389,37 @@ impl Scheduler {
     /// assert!(scheduler.registered_names().is_empty());
     /// ```
     pub(super) fn registered_names(&self) -> Vec<String> {
-        self.names.keys().cloned().collect()
+        self.node.name_keys()
+    }
+
+    /// Return true when the root process exited with an error.
+    pub(super) fn root_failed(&self) -> bool {
+        matches!(self.root_result, Some(Err(_)))
+    }
+
+    /// Return the number of schedulers of the node of this run.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(scheduler.scheduler_count(), 1);
+    /// ```
+    pub(super) fn scheduler_count(&self) -> i64 {
+        self.node.scheduler_count() as i64
+    }
+
+    /// Return the registered name of the process `id` from the name table of
+    /// the node, which holds the names of every scheduler.
+    pub(super) fn registered_name_of(&self, id: ProcessId) -> Option<Atom> {
+        self.node.name_of(id).and_then(|name| self.atoms.get(&name))
+    }
+
+    /// Return true when the root process waits for a message and has no
+    /// receive timer.
+    pub(super) fn root_waiting(&self) -> bool {
+        self.processes
+            .get(&self.root)
+            .is_some_and(|process| process.waiting)
     }
 
     /// Return whether the exit of the root process completed: the root
@@ -2327,7 +2439,7 @@ impl Scheduler {
     /// assert!(scheduler.root_exited());
     /// ```
     pub(super) fn root_exited(&self) -> bool {
-        let root = ROOT;
+        let root = self.root;
         self.root_result.is_some()
             && !self.processes.contains_key(&root)
             && !self.freed.contains_key(&root)
@@ -2493,6 +2605,22 @@ impl Scheduler {
     /// scheduler.send_message(caller, target, Term::static_atom("ok"));
     /// ```
     pub(super) fn send_message(&mut self, from: ProcessId, target: ProcessId, term: Term) {
+        if !self.processes.contains_key(&target)
+            && let Some(index) = self.remote_owner(target)
+        {
+            let pending = self
+                .take_pending_monitor(target)
+                .map(signals::monitor_signal);
+            self.node
+                .send_message(index, Some(from), term, target, pending);
+            return;
+        }
+        self.send_message_local(from, target, term);
+    }
+
+    /// Put the message into the mailbox of the local process `target`, as
+    /// [`Self::send_message`] does.
+    fn send_message_local(&mut self, from: ProcessId, target: ProcessId, term: Term) {
         let Some(process) = self.processes.get(&target) else {
             return;
         };
@@ -2512,6 +2640,90 @@ impl Scheduler {
         }
         process.mailbox.push(term);
         self.activate(target);
+    }
+
+    /// Return the scheduler of the compiled binary pattern `reference`
+    /// when it is a pattern of another scheduler of the node.
+    pub(super) fn remote_pattern_owner(&self, reference: crate::term::Reference) -> Option<usize> {
+        let owner = self.node.pattern_owner(reference)?;
+        (owner != self.index).then_some(owner)
+    }
+
+    /// Return the scheduler of the compiled regular expression `reference`
+    /// when it is an expression of another scheduler of the node.
+    pub(super) fn remote_regex_owner(&self, reference: crate::term::Reference) -> Option<usize> {
+        let owner = self.node.regex_owner(reference)?;
+        (owner != self.index).then_some(owner)
+    }
+
+    /// Return the index of this scheduler in its node.
+    pub(super) fn index(&self) -> usize {
+        self.index
+    }
+
+    /// Return the scheduler of the active BIF timer `reference` when it is
+    /// a timer of another scheduler of the node.
+    pub(super) fn remote_timer_owner(&self, reference: crate::term::Reference) -> Option<usize> {
+        let owner = self.node.timer_owner(reference)?;
+        (owner != self.index).then_some(owner)
+    }
+
+    /// Return the scheduler of the open port `id` when it is a port of
+    /// another scheduler of the node.
+    pub(super) fn remote_port_owner(&self, id: crate::term::PortId) -> Option<usize> {
+        let owner = self.node.port_owner(id)?;
+        (owner != self.index).then_some(owner)
+    }
+
+    /// Return the scheduler of the live process `target` when it is another
+    /// scheduler of the node.
+    pub(super) fn remote_owner(&self, target: ProcessId) -> Option<usize> {
+        let owner = self.node.owner(target)?;
+        (owner != self.index).then_some(owner)
+    }
+
+    /// Move each delivery of the inbox of this scheduler into the signal
+    /// queue or the mailbox of its target, in inbox order. Return true when
+    /// the inbox held a delivery.
+    pub(super) fn drain_inbox(&mut self) -> bool {
+        if !self.multi {
+            return false;
+        }
+        let node = Arc::clone(&self.node);
+        let mut deliveries = Vec::new();
+        node.take(self.index, &mut deliveries);
+        let drained = !deliveries.is_empty();
+        for delivery in deliveries {
+            match delivery {
+                Delivery::Message {
+                    target,
+                    from: Some(from),
+                    term,
+                } => {
+                    self.send_message_local(from, target, term);
+                }
+                Delivery::Message {
+                    target,
+                    from: None,
+                    term,
+                } => {
+                    // A message of the system sets no self-signal mark and
+                    // sends no pending monitor, as `erts_queue_message`
+                    // with `am_system` does (`sys.c:589-607`).
+                    self.deliver(target, term);
+                }
+                Delivery::Signal {
+                    target,
+                    sender,
+                    signal,
+                } => {
+                    if let Err(signal) = self.send_signal_local(sender, target, signal) {
+                        self.dead_target_signal(target, *signal);
+                    }
+                }
+            }
+        }
+        drained
     }
 
     /// Spawn a child process for the current process and optionally monitor
@@ -2629,7 +2841,7 @@ impl Scheduler {
     /// scheduler.revoke_issued(&[CapabilityKind::Process]);
     /// ```
     pub(super) fn revoke_issued(&mut self, kinds: &[CapabilityKind]) {
-        let root = self.processes.get(&ROOT);
+        let root = self.processes.get(&self.root);
         let copies: Vec<_> = root.map_or_else(Vec::new, |root| {
             kinds
                 .iter()
@@ -2724,7 +2936,10 @@ impl Scheduler {
         if target == current {
             return true;
         }
-        if self.live_process(target).is_none() && !self.current_process_mut().trap_exit {
+        if self.live_process(target).is_none()
+            && self.remote_owner(target).is_none()
+            && !self.current_process_mut().trap_exit
+        {
             return false;
         }
         let linked = LinkId::Process(target);
@@ -2767,8 +2982,7 @@ impl Scheduler {
         if self.current_process_mut().links.get(&link) != Some(&0) {
             return;
         }
-        let id = self.next_unlink_id;
-        self.next_unlink_id += 1;
+        let id = self.node.next_unlink_id();
         let unlink = Signal::Unlink { from: current, id };
         if self.send_signal(Some(current), target, unlink).is_ok() {
             self.current_process_mut().links.insert(link, id);
@@ -2869,15 +3083,21 @@ impl Scheduler {
     /// assert_eq!(scheduler.local_node_hash(), scheduler.local_node_hash());
     /// ```
     pub(in crate::runtime) fn local_node_hash(&self) -> u32 {
-        *self.local_node_hash.get_or_init(|| {
-            let node = [
-                &self.timers.time_offset().to_le_bytes()[..],
-                &host::host_name(),
-                std::process::id().to_string().as_bytes(),
-            ]
-            .concat();
-            block_hash(&node, self.timers.now() as u32)
-        })
+        // The hash belongs to the node, so every scheduler of a run reads
+        // the one value.
+        self.node.local_node_hash(|| self.compute_local_node_hash())
+    }
+
+    /// Return the local node hash of this scheduler, with the seed of its
+    /// first call, as `local_node_hash` (`external.c:134`) does.
+    fn compute_local_node_hash(&self) -> u32 {
+        let node = [
+            &self.timers.time_offset().to_le_bytes()[..],
+            &host::host_name(),
+            std::process::id().to_string().as_bytes(),
+        ]
+        .concat();
+        block_hash(&node, self.timers.now() as u32)
     }
 
     /// Remove a monitor that the current process holds, as the ERTS
@@ -3013,19 +3233,34 @@ impl Scheduler {
         let (Term::Atom(name), Term::Pid(id)) = (name, id) else {
             return false;
         };
-        let name_text = self.atoms.name_of(name);
-        match self.processes.get_mut(id) {
-            Some(process)
-                if !name.is_static("undefined")
-                    && process.registered_name.is_none()
-                    && !self.names.contains_key(name_text) =>
-            {
-                process.registered_name = Some(name.clone());
-                self.names.insert(name_text.to_owned(), *id);
-                true
-            }
-            _ => false,
+        if name.is_static("undefined") {
+            return false;
         }
+        if self.processes.get(id).is_none() && self.remote_owner(*id).is_none() {
+            return false;
+        }
+        if self.registered_name_of(*id).is_some() {
+            return false;
+        }
+        let name_text = self.atoms.name_of(name).to_owned();
+        if !self.name_insert(&name_text, *id) {
+            return false;
+        }
+        if let Some(process) = self.processes.get_mut(id) {
+            process.registered_name = Some(name.clone());
+        }
+        true
+    }
+
+    /// Register `name` for `id` unless another process has it. Return false
+    /// and change nothing when another process has the name.
+    fn name_insert(&mut self, name: &str, id: ProcessId) -> bool {
+        self.node.name_register(name, id)
+    }
+
+    /// Remove the process of `name`. Return the process that had it.
+    fn name_take(&mut self, name: &str) -> Option<ProcessId> {
+        self.node.name_remove(name)
     }
 
     /// Remove the registered name `name` from its process, as
@@ -3045,14 +3280,13 @@ impl Scheduler {
         let Term::Atom(name) = name else {
             return false;
         };
-        let Some(id) = self.names.remove(self.atoms.name_of(name)) else {
+        let name_text = self.atoms.name_of(name).to_owned();
+        let Some(id) = self.name_take(&name_text) else {
             return false;
         };
-        let process = self
-            .processes
-            .get_mut(&id)
-            .expect("a name belongs to a live process");
-        process.registered_name = None;
+        if let Some(process) = self.processes.get_mut(&id) {
+            process.registered_name = None;
+        }
         true
     }
 
@@ -3070,7 +3304,7 @@ impl Scheduler {
     /// assert_eq!(scheduler.whereis("pbeam_probe_reg"), Some(ProcessId(0)));
     /// ```
     pub(super) fn whereis(&self, name: &str) -> Option<ProcessId> {
-        self.names.get(name).copied()
+        self.node.name_get(name)
     }
 
     /// Run the exit of the current process, as `erts_do_exit_process` and
@@ -3131,7 +3365,7 @@ impl Scheduler {
                 if let ReceiveTimer::Set { key, .. } = process.receive_timer {
                     self.timers.cancel(key);
                 }
-                if id == ROOT {
+                if id == self.root {
                     let normal = reason == Term::static_atom("normal");
                     self.root_result = Some(match result {
                         Some(result) if normal => Ok(result),
@@ -3160,6 +3394,7 @@ impl Scheduler {
             next = walk.position();
             // The receiver exits, so the timer has no tree entry to remove.
             let _ = self.timers.cancel_bif(timer.0);
+            self.node.remove_timer(timer.0);
             reds -= TIMER_CANCEL_REDUCTIONS;
         }
         if walked && next.is_none() {
@@ -3195,9 +3430,7 @@ impl Scheduler {
             .remove(&id)
             .expect("the exiting process is alive");
         debug_assert!(!process.in_run_queue, "only the current process exits");
-        if let Some(name) = &process.registered_name {
-            self.names.remove(self.atoms.name_of(name));
-        }
+        self.node.remove_process(id);
         self.delegations
             .release(std::mem::take(&mut process.security));
         self.policy_exited(id, &reason);
@@ -3397,6 +3630,7 @@ impl Scheduler {
         }
         self.alias_owners.retain(|_, owner| *owner != id);
         self.send_pending_monitor();
+        self.node.live_exit();
         // The process left the process table and no guest code can read it
         // again. Its terms go to the release work list, so that the walk of a
         // large graph runs in bounded scheduler work and not in this step.
@@ -3418,6 +3652,7 @@ fn named_item(name: &Atom) -> Term {
 }
 
 mod known_nodes;
+pub(super) mod node;
 mod policy;
 mod ports;
 mod process_table;
@@ -3427,6 +3662,7 @@ mod tcp_inet;
 mod tcp_stream;
 
 use known_nodes::KnownNodes;
+use node::{Delivery, Node};
 pub(super) use policy::PolicyEnd;
 use policy::PolicyProcess;
 use process_table::ProcessTable;

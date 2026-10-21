@@ -14,6 +14,7 @@
 
 use super::BifResult::{Raise, Value};
 use super::*;
+use crate::error::error;
 use crate::runtime::host::filename_encoding;
 use crate::runtime::time;
 use integer::{Arith, Bitwise};
@@ -271,7 +272,7 @@ bifs! {
     erlang:port_get_data/1 as ErlangPortGetData1 => |cx, [port]| erlang::port_get_data(cx.scheduler, port),
     erlang:port_set_data/2 as ErlangPortSetData2 => |cx, [port, data]| erlang::port_set_data(cx.scheduler, port, data),
     erlang:port_to_list/1 as ErlangPortToList1 => |cx, [term]| Ok(erlang::port_to_list(term, &cx.scheduler.atoms)),
-    erlang:ports/0 as ErlangPorts0 => |cx, []| Ok(erlang::ports(cx.scheduler)),
+    erlang:ports/0 as ErlangPorts0 => |cx, []| erlang::ports(cx.scheduler),
     erlang:posixtime_to_universaltime/1 as ErlangPosixtimeToUniversaltime1 => |_, [time]| Ok(erlang::posixtime_to_universaltime(time)),
     erlang:pre_loaded/0 as ErlangPreLoaded0 => |cx, []| erlang::pre_loaded(cx.scheduler),
     erlang:process_flag/2 as ErlangProcessFlag2 => |cx, [flag, value]| erlang::process_flag(cx, flag, value),
@@ -310,7 +311,7 @@ bifs! {
     erlang:statistics/1 => unsupported,
     erlang:subtract/2 => unsupported,
     erlang:system_flag/2 as ErlangSystemFlag2 => |cx, [item, value]| erlang::system_flag(cx, item, value),
-    erlang:system_info/1 as ErlangSystemInfo1 => |cx, [item]| erlang::system_info(&mut cx.scheduler.atoms, item),
+    erlang:system_info/1 as ErlangSystemInfo1 => |cx, [item]| erlang::system_info(cx.scheduler, item),
     erlang:system_profile/0 => unsupported,
     erlang:system_profile/2 => unsupported,
     erlang:system_time/0 as ErlangSystemTime0 => |cx, []| Ok(erlang::system_time(cx.scheduler)),

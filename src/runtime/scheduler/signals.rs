@@ -126,6 +126,47 @@ impl Scheduler {
         target: ProcessId,
         signal: Signal,
     ) -> Result<(), Box<Signal>> {
+        if !self.processes.contains_key(&target)
+            && let Some(index) = self.remote_owner(target)
+        {
+            let pending = self.take_pending_monitor(target).map(monitor_signal);
+            self.node
+                .send_signal(index, target, sender, signal, pending);
+            return Ok(());
+        }
+        self.send_signal_local(sender, target, signal)
+    }
+
+    /// Put `signal` for the remote target `target` into the inbox of its
+    /// owner `index`, which `remote_owner` gave, with the pending monitor
+    /// signal of the sender first. The inbox always takes the signal: a
+    /// target that left before the drain is answered there.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.send_signal_to_owner(index, Some(caller), target, signal);
+    /// ```
+    pub(in crate::runtime) fn send_signal_to_owner(
+        &mut self,
+        index: usize,
+        sender: Option<ProcessId>,
+        target: ProcessId,
+        signal: Signal,
+    ) {
+        let pending = self.take_pending_monitor(target).map(monitor_signal);
+        self.node
+            .send_signal(index, target, sender, signal, pending);
+    }
+
+    /// Put the signal into the queue of the local process `target`, as
+    /// [`Self::send_signal`] does.
+    pub(in crate::runtime) fn send_signal_local(
+        &mut self,
+        sender: Option<ProcessId>,
+        target: ProcessId,
+        signal: Signal,
+    ) -> Result<(), Box<Signal>> {
         if let Some(pending) = self.take_pending_monitor(target) {
             if !self.processes.contains_key(&target) {
                 self.pending_monitor_failed(sender, pending);
@@ -208,8 +249,68 @@ impl Scheduler {
     ) {
         if self.processes.contains_key(&to) {
             self.queue_signal(Some(pending.watcher), to, monitor_signal(pending));
+        } else if let Some(index) = self.remote_owner(to) {
+            let signal = monitor_signal(pending);
+            self.node
+                .send_signal(index, to, Some(pending.watcher), signal, None);
         } else {
             self.pending_monitor_failed(sender, pending);
+        }
+    }
+
+    /// Give the ERTS response of the dead target `target` for a signal that
+    /// a scheduler of another thread sent before the target exited.
+    pub(in crate::runtime) fn dead_target_signal(&mut self, target: ProcessId, signal: Signal) {
+        match signal {
+            Signal::Monitor { watcher, reference } => {
+                self.send_monitor_down(None, watcher, reference, Term::static_atom("noproc"));
+            }
+            Signal::Link { from } => {
+                let exit = Signal::Exit {
+                    from: LinkId::Process(target),
+                    reason: Term::static_atom("noproc"),
+                    linked: true,
+                    normal_kills: false,
+                    alias: None,
+                };
+                let _ = self.send_signal(None, from, exit);
+            }
+            // The target answered an unlink at its exit
+            // (`erl_proc_sig_queue.c:7369-7386`), so the sender can remove
+            // its unlinking link.
+            Signal::Unlink { from, id } => {
+                let ack = Signal::UnlinkAck { from: target, id };
+                let _ = self.send_signal(None, from, ack);
+            }
+            // A request to a dead target gets the answer of the exit path
+            // for a process that is gone.
+            Signal::GroupLeader {
+                requester,
+                reference,
+                ..
+            } => self.send_message(
+                target,
+                requester,
+                reply(reference, Term::static_atom("badarg")),
+            ),
+            Signal::IsAlive {
+                requester,
+                reference,
+            } => self.send_message(
+                target,
+                requester,
+                reply(reference, Term::static_atom("false")),
+            ),
+            Signal::ProcessInfo {
+                requester,
+                reference,
+                ..
+            } => self.send_message(
+                target,
+                requester,
+                reply(reference, Term::static_atom("undefined")),
+            ),
+            _ => {}
         }
     }
 
@@ -304,6 +405,7 @@ impl Scheduler {
         max_reds: i32,
         point: HandlingPoint,
     ) -> Result<i32, BeamError> {
+        self.drain_inbox();
         let process = self.processes.get_mut(&id).expect("the process is alive");
         if point == HandlingPoint::ScheduleIn {
             process.mailbox.fetch();
@@ -530,7 +632,7 @@ impl Scheduler {
                 reference,
             } => {
                 self.handled(id, node).group_leader = leader;
-                self.deliver(requester, reply(reference, Term::static_atom("true")));
+                self.send_message(id, requester, reply(reference, Term::static_atom("true")));
                 0
             }
             Signal::IsAlive {
@@ -538,7 +640,7 @@ impl Scheduler {
                 reference,
             } => {
                 self.handled(id, node);
-                self.deliver(requester, reply(reference, Term::static_atom("true")));
+                self.send_message(id, requester, reply(reference, Term::static_atom("true")));
                 0
             }
             Signal::ProcessInfo {
@@ -552,14 +654,21 @@ impl Scheduler {
                     HandlingPoint::Running => self.current_reductions(),
                     HandlingPoint::ScheduleIn => 0,
                 };
+                let registered = self.registered_name_of(id);
                 let process = self.processes.get_mut(&id).expect("the process is alive");
                 let messages = process.mailbox.messages_before(node);
                 // The item name comes from the atom table, so remove the
                 // node here and keep the two field borrows separate.
                 process.mailbox.remove(node);
-                let info = process
-                    .info(&self.atoms, &item, current, messages, true)?
-                    .expect("erlang:process_info/2 sends a supported item");
+                let values = process.info(
+                    &self.atoms,
+                    &item,
+                    current,
+                    messages,
+                    true,
+                    registered.as_ref(),
+                );
+                let info = values?.expect("erlang:process_info/2 sends a supported item");
                 self.send_message(id, requester, reply(reference, info));
                 0
             }
@@ -830,11 +939,13 @@ impl Scheduler {
                     requester,
                     reference,
                     ..
-                } => self.deliver(requester, reply(reference, Term::static_atom("badarg"))),
+                } => {
+                    self.send_message(id, requester, reply(reference, Term::static_atom("badarg")))
+                }
                 Signal::IsAlive {
                     requester,
                     reference,
-                } => self.deliver(requester, reply(reference, Term::static_atom("false"))),
+                } => self.send_message(id, requester, reply(reference, Term::static_atom("false"))),
                 Signal::ProcessInfo {
                     requester,
                     reference,
@@ -873,6 +984,11 @@ impl Scheduler {
     ///
     /// An error of [`Scheduler::handle_signals`].
     pub(in crate::runtime) fn receive_helper(&mut self) -> Result<Received, BeamError> {
+        // A message of another scheduler waits in the inbox of this one. A
+        // running process does not schedule before it fetches its messages,
+        // so apply the inbox here, as ERTS fetches its in-queue buffers
+        // (`erl_proc_sig_queue.c:7771-7799`).
+        self.drain_inbox();
         let process = self.current_process_mut();
         let id = process.id;
         let mut left = process.fcalls;

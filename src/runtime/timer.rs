@@ -117,8 +117,23 @@ impl Timers {
     /// assert!(timers.now() >= 1_000_000_000);
     /// ```
     pub(super) fn new() -> Self {
-        let start = Instant::now();
-        let correction = Correction::new(HOST_CHECK, clock::system_time());
+        Self::with_origin((Instant::now(), clock::system_time()))
+    }
+
+    /// Return a timer service on the run start `start` and the OS system
+    /// time `sinit` at the same moment. Each scheduler of a run with
+    /// scheduler threads gets the same pair, so `erlang:monotonic_time/0,1`
+    /// and `erlang:time_offset/0,1` agree across the threads.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let start = std::time::Instant::now();
+    /// let timers = Timers::with_origin((start, 5_000_000_000));
+    /// assert!(timers.now() >= 1_000_000_000);
+    /// ```
+    pub(super) fn with_origin((start, sinit): (Instant, i64)) -> Self {
+        let correction = Correction::new(HOST_CHECK, sinit);
         // `late_init_time_correction` sets the first check timer at the
         // scheduler start (`erl_time_sup.c:913-950`).
         let now = correction.monotonic_time(os_monotonic_time(start));

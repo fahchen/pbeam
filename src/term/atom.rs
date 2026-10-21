@@ -236,6 +236,10 @@ pub struct AtomTable {
     /// The program that owns the table. A copy keeps the identity, and the
     /// import compares it with the identity of the destination table.
     program: ProgramId,
+    /// True for the copy of a scheduler in a run with scheduler threads. A
+    /// term crosses a thread with its atom indices, so a new atom in one
+    /// copy can collide with a different new atom in another copy.
+    frozen: bool,
 }
 
 impl AtomTable {
@@ -265,6 +269,7 @@ impl AtomTable {
             indices,
             names,
             program: ProgramId::next(),
+            frozen: false,
         }
     }
 
@@ -285,10 +290,17 @@ impl AtomTable {
     ///
     /// A new atom when the table holds 1048576 atoms is the error
     /// `no more index entries in atom_tab (max=1048576)`. ERTS exits the
-    /// emulator with this message (`index_put_entry`).
+    /// emulator with this message (`index_put_entry`). A new atom in a
+    /// frozen table is the unsupported error of
+    /// [`AtomTable::freeze_creation`].
     pub(crate) fn put(&mut self, name: &str) -> Result<Atom, BeamError> {
         if let Some(atom) = self.get(name) {
             return Ok(atom);
+        }
+        if self.frozen {
+            return Err(error(format!(
+                "unsupported: a run of execute_on_schedulers cannot create the atom {name} at runtime"
+            )));
         }
         let count = self.names.len();
         if count >= ATOM_LIMIT {
@@ -301,6 +313,22 @@ impl AtomTable {
         self.indices.insert(Arc::clone(&shared), index);
         self.names.push(shared);
         Ok(Atom { index })
+    }
+
+    /// Freeze the table for the copy of a scheduler in a run with scheduler
+    /// threads. A later run that creates an atom returns the unsupported
+    /// error, because the atom indices of two copies can differ.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut table = AtomTable::new();
+    /// table.freeze_creation();
+    /// assert!(table.put("pbeam_zeta").is_err());
+    /// assert!(table.put("ok").is_ok());
+    /// ```
+    pub(crate) fn freeze_creation(&mut self) {
+        self.frozen = true;
     }
 
     /// Return the atom of a name only when it exists.

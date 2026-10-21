@@ -77,7 +77,11 @@ impl Scheduler {
             monitors: Vec::new(),
             closing: false,
         };
-        let id = self.resources.borrow_mut::<Ports>().insert(port)?;
+        // The identifiers belong to the node, so a port of one scheduler
+        // never compares equal to a port of another.
+        let id = self.node.next_port()?;
+        self.resources.borrow_mut::<Ports>().insert_at(id, port);
+        self.node.register_port(id, self.index);
         self.process_mut(owner)
             .expect("the owner of a port exists")
             .links
@@ -226,6 +230,9 @@ impl Scheduler {
         let monitors = std::mem::take(&mut port.monitors);
         port.closing |= queued;
         let port = (!flushes).then(|| ports.remove(id).expect("the port to close is open"));
+        if !flushes {
+            self.node.remove_port(id);
+        }
         let reason = if reason == Term::static_atom("kill") {
             Term::static_atom("killed")
         } else {

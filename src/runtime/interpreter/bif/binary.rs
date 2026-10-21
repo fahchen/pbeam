@@ -618,6 +618,7 @@ pub(super) fn compile_pattern(
     };
     let id = scheduler.make_ref()?;
     scheduler.binary_patterns.insert(id, compiled);
+    scheduler.node().register_pattern(id, scheduler.index());
     Ok(Value(Term::tuple(vec![
         Term::static_atom(tag),
         Term::Reference(id),
@@ -1036,6 +1037,27 @@ impl Find {
     }
 }
 
+/// Return true when `pattern` is a compiled pattern of another scheduler,
+/// which this scheduler cannot run.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(!remote_pattern(&scheduler, &Term::binary(b"a".to_vec())));
+/// ```
+fn remote_pattern(scheduler: &Scheduler, pattern: &Term) -> bool {
+    let Term::Tuple(fields) = pattern else {
+        return false;
+    };
+    if fields.len() != 2 {
+        return false;
+    }
+    let Term::Reference(reference) = &fields[1] else {
+        return false;
+    };
+    scheduler.remote_pattern_owner(*reference).is_some()
+}
+
 /// Run `binary:split/2,3` as ERTS `binary_split` does
 /// (`erl_bif_binary.c:1599-1645`): read the subject, the options, and the
 /// pattern, then search. A subject that is not a binary, options that are
@@ -1060,6 +1082,11 @@ pub(super) fn split(
     pattern: &Term,
     options_term: Option<&Term>,
 ) -> Result<BifResult, BeamError> {
+    if remote_pattern(context.scheduler, pattern) {
+        return Err(error(
+            "unsupported: a compiled binary pattern of another scheduler in a run of execute_on_schedulers",
+        ));
+    }
     let (process, patterns) = context.scheduler.current_process_and_patterns_mut();
     find_first_turn(process, patterns, subject, pattern, options_term, 0)
 }
@@ -1093,6 +1120,11 @@ pub(super) fn match_2(
     subject: &Term,
     pattern: &Term,
 ) -> Result<BifResult, BeamError> {
+    if remote_pattern(context.scheduler, pattern) {
+        return Err(error(
+            "unsupported: a compiled binary pattern of another scheduler in a run of execute_on_schedulers",
+        ));
+    }
     let (process, patterns) = context.scheduler.current_process_and_patterns_mut();
     find_first_turn(process, patterns, subject, pattern, None, MATCH)
 }
@@ -1126,6 +1158,11 @@ pub(super) fn matches_2(
     subject: &Term,
     pattern: &Term,
 ) -> Result<BifResult, BeamError> {
+    if remote_pattern(context.scheduler, pattern) {
+        return Err(error(
+            "unsupported: a compiled binary pattern of another scheduler in a run of execute_on_schedulers",
+        ));
+    }
     let (process, patterns) = context.scheduler.current_process_and_patterns_mut();
     find_first_turn(process, patterns, subject, pattern, None, GLOBAL | MATCHES)
 }

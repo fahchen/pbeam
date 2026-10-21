@@ -61,7 +61,10 @@ pub(super) fn group_leader(
         return Ok(denied);
     }
     let caller = scheduler.current_process_mut().id;
+    // A live process of another scheduler takes the routed request.
+    let remote = scheduler.remote_owner(*target).is_some();
     let result = match scheduler.process_mut(*target) {
+        None if remote => "false",
         None => "badarg",
         Some(process) if *target != caller && process.mailbox.has_incoming() => "false",
         Some(process) if process.exiting.is_some() => "badarg",
@@ -592,12 +595,17 @@ fn native_name(atoms: &AtomTable, name: &Term, allow_empty: bool) -> Option<Vec<
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(open_port_id(scheduler, &Term::Port(port)), Some(port));
-/// assert_eq!(open_port_id(scheduler, &Term::static_atom("foo")), None);
+/// assert_eq!(open_port_id(scheduler, &Term::Port(port)).unwrap(), Some(port));
+/// assert_eq!(open_port_id(scheduler, &Term::static_atom("foo")).unwrap(), None);
 /// ```
-pub(super) fn open_port_id(scheduler: &mut Scheduler, port: &Term) -> Option<PortId> {
-    let id = found_port_id(scheduler, port)?;
-    (!scheduler.resources.borrow_mut::<Ports>().closing(id)).then_some(id)
+pub(super) fn open_port_id(
+    scheduler: &mut Scheduler,
+    port: &Term,
+) -> Result<Option<PortId>, BeamError> {
+    let Some(id) = found_port_id(scheduler, port)? else {
+        return Ok(None);
+    };
+    Ok((!scheduler.resources.borrow_mut::<Ports>().closing(id)).then_some(id))
 }
 
 /// Return the port of `port` that is open or in the `CLOSING` state, as
@@ -607,17 +615,24 @@ pub(super) fn open_port_id(scheduler: &mut Scheduler, port: &Term) -> Option<Por
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(found_port_id(scheduler, &Term::Port(port)), Some(port));
+/// assert_eq!(found_port_id(scheduler, &Term::Port(port)).unwrap(), Some(port));
 /// ```
-fn found_port_id(scheduler: &mut Scheduler, port: &Term) -> Option<PortId> {
+fn found_port_id(scheduler: &mut Scheduler, port: &Term) -> Result<Option<PortId>, BeamError> {
     let Term::Port(id) = port else {
-        return None;
+        return Ok(None);
     };
-    scheduler
+    // The services of a port stay with its scheduler, so a BIF cannot use a
+    // port of another scheduler.
+    if scheduler.remote_port_owner(*id).is_some() {
+        return Err(error(
+            "unsupported: a port of another scheduler in a run of execute_on_schedulers",
+        ));
+    }
+    Ok(scheduler
         .resources
         .borrow_mut::<Ports>()
         .get(*id)
-        .map(|_| *id)
+        .map(|_| *id))
 }
 
 /// Run `erts_internal:port_command(Port, Data, OptionList)`, which
@@ -660,7 +675,7 @@ pub(super) fn port_command(
         ));
     }
     let scheduler = &mut *context.scheduler;
-    let (Some(id), Some(bytes)) = (open_port_id(scheduler, port), iolist::iodata_bytes(data))
+    let (Some(id), Some(bytes)) = (open_port_id(scheduler, port)?, iolist::iodata_bytes(data))
     else {
         return Ok(signals_return(scheduler, port, Term::static_atom("badarg")));
     };
@@ -713,7 +728,7 @@ pub(super) fn port_close(
     port: &Term,
 ) -> Result<BifResult, BeamError> {
     let scheduler = &mut *context.scheduler;
-    let Some(id) = open_port_id(scheduler, port) else {
+    let Some(id) = open_port_id(scheduler, port)? else {
         return Ok(signals_return(scheduler, port, Term::static_atom("badarg")));
     };
     if let Some(denied) = port_denial(scheduler, id, Operation::Close)? {
@@ -772,7 +787,7 @@ pub(super) fn port_control(
         .small_integer()
         .and_then(|value| u32::try_from(value).ok());
     let (Some(id), Some(command), Some(bytes)) = (
-        found_port_id(scheduler, port),
+        found_port_id(scheduler, port)?,
         command,
         iolist::iodata_bytes(data),
     ) else {
@@ -857,7 +872,7 @@ pub(super) fn port_denial(
 /// The atom `capability_denied` in a full atom table.
 pub(super) fn port_info(context: &mut BifContext<'_>, port: &Term) -> Result<BifResult, BeamError> {
     let scheduler = &mut *context.scheduler;
-    let info = match (port, found_port_id(scheduler, port)) {
+    let info = match (port, found_port_id(scheduler, port)?) {
         (_, Some(id)) => {
             if let Some(denied) = port_denial(scheduler, id, Operation::Inspect)? {
                 return Ok(denied);
@@ -972,7 +987,7 @@ pub(super) fn port_info_item(
     item: &Term,
 ) -> Result<BifResult, BeamError> {
     let scheduler = &mut *context.scheduler;
-    let info = match (port, found_port_id(scheduler, port)) {
+    let info = match (port, found_port_id(scheduler, port)?) {
         (_, Some(id)) => {
             let name = match item {
                 Term::Atom(name) => scheduler.atoms.name_of(name).to_owned(),
@@ -1033,13 +1048,20 @@ pub(super) fn port_connect(
     pid: &Term,
 ) -> Result<BifResult, BeamError> {
     let scheduler = &mut *context.scheduler;
-    let result = match (open_port_id(scheduler, port), pid) {
+    let result = match (open_port_id(scheduler, port)?, pid) {
         (Some(id), &Term::Pid(pid)) => {
             // The runtime to boot gate denies a boot process as the new
             // owner, as for `link/1` and `send/2` (see [`boot_denial`]).
             let boot = boot_denial(scheduler, pid)?;
             if let Some(denied) = port_denial(scheduler, id, Operation::Command)?.or(boot) {
                 return Ok(denied);
+            }
+            // The port keeps the services of its scheduler: the data
+            // messages and the exit of a remote owner do not reach it.
+            if scheduler.remote_owner(pid).is_some() {
+                return Err(error(
+                    "unsupported: erlang:port_connect/2 to a process of another scheduler",
+                ));
             }
             let connected = scheduler.connect_port(id, pid);
             if connected {
@@ -1303,10 +1325,11 @@ fn chars_to_integer(text: &[u8], base: u32) -> BifResult {
 /// is `false`. `erts_sched_wall_time_request` makes a reference, and each
 /// scheduler sends it to the caller; the scheduler of the caller sends it
 /// before the BIF returns (`erl_process.c:1382-1421`, `1209-1340`). PBeam
-/// has one scheduler, so it sends the reference one time. The BIF then
-/// traps to `erts_internal:await_sched_wall_time_modifications(Ref,
-/// Result)`, which receives `Ref` one time for each scheduler and returns
-/// `Result` (`erts_internal.erl:756-774`).
+/// sends the reference one time for each scheduler of the node before the
+/// BIF returns. The BIF then traps to
+/// `erts_internal:await_sched_wall_time_modifications(Ref, Result)`, which
+/// receives `Ref` one time for each scheduler and returns `Result`
+/// (`erts_internal.erl:756-774`).
 ///
 /// # Examples
 ///
@@ -1332,7 +1355,9 @@ pub(super) fn scheduler_wall_time(
     let scheduler = &mut *context.scheduler;
     let reference = Term::Reference(scheduler.make_ref()?);
     let caller = scheduler.current_process_mut().id;
-    scheduler.deliver(caller, reference.clone());
+    for _ in 0..scheduler.scheduler_count() {
+        scheduler.deliver(caller, reference.clone());
+    }
     Ok(BifResult::Trap {
         module: "erts_internal",
         function: "await_sched_wall_time_modifications",

@@ -30,6 +30,92 @@ fn allow_all() -> Vec<Capability> {
     AllowAll.initial()
 }
 
+/// A delivery that arrives at an idle step lets the step return, so that the
+/// next scheduling step handles it, and the run does not report an
+/// impossible wait.
+#[test]
+fn a_delivery_at_idle_lets_the_run_wait_again() {
+    use crate::runtime::scheduler::node::Node;
+    let (node, mut readers) = Node::new(1).unwrap();
+    let mut scheduler =
+        Scheduler::with_shared(AtomTable::new(), Arc::clone(&node), 0, readers.remove(0));
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    let root = ProcessId(0);
+    scheduler.process_mut(root).unwrap().waiting = true;
+    node.send_message(0, Some(root), Term::Integer(1), root, None);
+    super::idle_step(&mut scheduler, &node, false).unwrap();
+    assert!(
+        scheduler
+            .process(root)
+            .unwrap()
+            .mailbox
+            .has_outer_messages()
+    );
+}
+
+#[test]
+fn the_start_gate_opens_after_each_thread_arrives() {
+    let gate = Arc::new(super::StartGate::new(2));
+    let first = {
+        let gate = Arc::clone(&gate);
+        std::thread::spawn(move || {
+            gate.arrive();
+            gate.wait()
+        })
+    };
+    let second = {
+        let gate = Arc::clone(&gate);
+        std::thread::spawn(move || {
+            gate.arrive();
+            gate.wait()
+        })
+    };
+    assert!(first.join().unwrap());
+    assert!(second.join().unwrap());
+}
+
+#[test]
+fn aborting_the_start_gate_releases_a_waiter() {
+    let gate = Arc::new(super::StartGate::new(2));
+    let waiter = {
+        let gate = Arc::clone(&gate);
+        std::thread::spawn(move || {
+            gate.arrive();
+            gate.wait()
+        })
+    };
+    gate.abort();
+    assert!(!waiter.join().unwrap());
+}
+
+#[test]
+fn dropping_the_start_guard_aborts_the_gate() {
+    let gate = Arc::new(super::StartGate::new(2));
+    let waiter = {
+        let gate = Arc::clone(&gate);
+        std::thread::spawn(move || {
+            gate.arrive();
+            gate.wait()
+        })
+    };
+    drop(super::StartGuard(Some(&gate)));
+    assert!(!waiter.join().unwrap());
+}
+
+#[test]
+fn a_scheduler_thread_failure_returns_an_error() {
+    let program = make_program(vec![Instruction::Return], 0);
+    super::FAIL_SCHEDULER_SPAWN.store(true, std::sync::atomic::Ordering::SeqCst);
+    let result = program.execute_on_schedulers(&[("fixture", "main"), ("fixture", "main")]);
+    let error = result.expect_err("a failed scheduler thread returns an error");
+    assert!(
+        error
+            .to_string()
+            .contains("cannot create a scheduler thread"),
+        "{error}"
+    );
+}
+
 /// Return the runtime error of a root process whose `fixture:main/0` gets
 /// an uncaught `error:badarg` from the BIF `module:function` with the `%T`
 /// texts `arguments`. ERTS `save_stacktrace` puts the BIF frame with its

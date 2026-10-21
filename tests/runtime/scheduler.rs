@@ -1,15 +1,15 @@
 use super::{
     CONTEXT_REDS, ExitPhase, LinkId, MonitorOptions, MonitorTarget, RELEASE_BATCH, RELEASE_CHUNK,
-    Release, Scheduler, StartFlags, Turn,
+    Release, Scheduler, StartFlags, Turn, node::Node,
 };
 use crate::runtime::capability::{AllowAll, Capability, CapabilityKind, Denied, Policy};
 use crate::runtime::host::input::{Readiness, wait_readable};
 use crate::runtime::host::output::{IovecWrite, IovecWritten};
-use crate::term::test_atom;
+use crate::term::{AtomTable, test_atom};
 use crate::{
     runtime::ets::{Access, Table, TableType},
     runtime::process::{
-        Origin, OriginMonitor, PendingBif, ProcessState, ReceiveTimer, StackSlot, Start,
+        Monitor, Origin, OriginMonitor, PendingBif, ProcessState, ReceiveTimer, StackSlot, Start,
         TimerReference,
         tests::{frame, test_scheduler, test_scheduler_without_checks},
     },
@@ -20,6 +20,7 @@ use crate::{
 use std::{
     io::{PipeReader, PipeWriter, Read, Write},
     os::fd::AsRawFd,
+    sync::Arc,
     time::Duration,
 };
 
@@ -383,8 +384,7 @@ fn ends_a_linked_process_and_rejects_counter_overflow() {
     assert_eq!(scheduler.into_run_result().0, Some(Err(atom("boom"))));
 
     let mut scheduler = Scheduler {
-        next_process_id: u64::MAX,
-        next_reference: u64::MAX,
+        node: Node::exhausted(),
         ..test_scheduler()
     };
     // The root process has the fixed pid 0, so the overflow comes at the
@@ -2043,4 +2043,313 @@ fn reads_a_break_key_after_a_read_with_no_data() {
     assert_eq!(Scheduler::break_key(|| Ok(Vec::new())), 0);
     assert_eq!(Scheduler::break_key(|| Ok(vec![0])), 0);
     assert_eq!(Scheduler::break_key(|| Err(libc::EBADF)), 0);
+}
+
+#[test]
+fn a_signal_to_a_dead_process_answers_a_monitor() {
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    let root = ProcessId(0);
+    let reference = Reference::ordinary(0).unwrap();
+    scheduler.dead_target_signal(
+        ProcessId(99),
+        Signal::Monitor {
+            watcher: root,
+            reference,
+        },
+    );
+    assert!(
+        scheduler
+            .process(root)
+            .unwrap()
+            .mailbox
+            .has_control_signals()
+    );
+}
+
+#[test]
+fn a_signal_to_a_dead_process_answers_an_unlink() {
+    use super::signals::HandlingPoint;
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    let root = ProcessId(0);
+    let target = ProcessId(99);
+    let link = LinkId::Process(target);
+    scheduler
+        .processes
+        .get_mut(&root)
+        .unwrap()
+        .links
+        .insert(link, 7);
+    scheduler.dead_target_signal(target, Signal::Unlink { from: root, id: 7 });
+    scheduler
+        .handle_signals(root, 100, 100, HandlingPoint::ScheduleIn)
+        .unwrap();
+    assert_eq!(scheduler.processes[&root].links.get(&link), None);
+}
+
+#[test]
+fn a_signal_server_is_an_external_source() {
+    use super::node::Node;
+    let (node, mut readers) = Node::new(1).unwrap();
+    let mut scheduler =
+        Scheduler::with_shared(AtomTable::new(), Arc::clone(&node), 0, readers.remove(0));
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    let root = ProcessId(0);
+    assert!(!scheduler.has_external_sources());
+    assert!(node.name_register("erl_signal_server", root));
+    assert!(scheduler.has_external_sources());
+}
+
+#[test]
+fn a_remote_signal_flushes_the_pending_monitor_first() {
+    use super::node::{Delivery, Node};
+    let (node, mut readers) = Node::new(2).unwrap();
+    let mut scheduler =
+        Scheduler::with_shared(AtomTable::new(), Arc::clone(&node), 0, readers.remove(0));
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    let root = ProcessId(0);
+    let target = ProcessId(77);
+    node.register(target, 1);
+    let reference = Reference::ordinary(0).unwrap();
+    scheduler.pending_monitor = Some((
+        target,
+        Monitor {
+            watcher: root,
+            reference,
+        },
+    ));
+    scheduler.send_signal_to_owner(
+        1,
+        Some(root),
+        target,
+        Signal::ProcessInfo {
+            requester: root,
+            reference,
+            item: atom("registered_name"),
+        },
+    );
+    let mut deliveries = Vec::new();
+    node.take(1, &mut deliveries);
+    assert!(matches!(
+        deliveries.as_slice(),
+        [
+            Delivery::Signal {
+                signal: Signal::Monitor { .. },
+                ..
+            },
+            Delivery::Signal {
+                signal: Signal::ProcessInfo { .. },
+                ..
+            }
+        ]
+    ));
+}
+
+#[test]
+fn a_host_signal_notification_reaches_a_remote_signal_server() {
+    use super::node::Node;
+    let (node, mut readers) = Node::new(2).unwrap();
+    let mut owner =
+        Scheduler::with_shared(AtomTable::new(), Arc::clone(&node), 1, readers.remove(1));
+    let mut scheduler =
+        Scheduler::with_shared(AtomTable::new(), Arc::clone(&node), 0, readers.remove(0));
+    owner.start(frame(), vec![], allow_all()).unwrap();
+    let server = ProcessId(0);
+    assert!(node.name_register("erl_signal_server", server));
+    scheduler.notify_signals(&[libc::SIGUSR1]).unwrap();
+    owner.drain_inbox();
+    assert_eq!(
+        messages(&owner, 0),
+        vec![Term::tuple(vec![
+            Term::static_atom("notify"),
+            Term::static_atom("sigusr1")
+        ])]
+    );
+    // A message of the system sets no self-signal mark on the receiver.
+    assert!(!owner.processes[&server].self_signals);
+}
+
+#[test]
+fn a_flushed_port_leaves_the_shared_port_table() {
+    use super::node::Node;
+    use crate::runtime::port::{
+        Driver, Ports,
+        inet::{Inet, SocketType},
+    };
+    let (node, mut readers) = Node::new(1).unwrap();
+    let mut scheduler =
+        Scheduler::with_shared(AtomTable::new(), Arc::clone(&node), 0, readers.remove(0));
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let tcp = Inet::new(SocketType::Stream);
+    let port = scheduler
+        .open_port(b"tcp_inet".to_vec(), Driver::Inet(tcp))
+        .unwrap();
+    assert!(node.port_owner(port).is_some());
+    scheduler
+        .resources
+        .borrow_mut::<Ports>()
+        .get_mut(port)
+        .unwrap()
+        .closing = true;
+    scheduler.tcp_flushed(port);
+    assert!(node.port_owner(port).is_none());
+    assert!(
+        scheduler
+            .resources
+            .borrow_mut::<Ports>()
+            .get(port)
+            .is_none()
+    );
+}
+
+#[test]
+fn a_delivery_to_an_exiting_process_changes_nothing() {
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    let root = ProcessId(0);
+    scheduler.processes.get_mut(&root).unwrap().exiting = Some(atom("normal"));
+    scheduler.deliver(root, atom("lost"));
+    assert!(messages(&scheduler, 0).is_empty());
+}
+
+#[test]
+fn a_delivery_to_a_missing_process_changes_nothing() {
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.deliver(ProcessId(99), atom("lost"));
+    assert!(scheduler.process(ProcessId(99)).is_none());
+}
+
+#[test]
+fn a_signal_to_a_dead_process_drops_an_unlink_ack() {
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    let root = ProcessId(0);
+    scheduler.dead_target_signal(ProcessId(99), Signal::UnlinkAck { from: root, id: 1 });
+    assert!(messages(&scheduler, 0).is_empty());
+}
+
+#[test]
+fn a_delivery_to_a_dead_target_answers_its_request() {
+    use super::node::Node;
+    let (node, mut readers) = Node::new(1).unwrap();
+    let mut scheduler =
+        Scheduler::with_shared(AtomTable::new(), Arc::clone(&node), 0, readers.remove(0));
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    let root = ProcessId(0);
+    let reference = Reference::ordinary(3).unwrap();
+    node.send_signal(
+        0,
+        ProcessId(99),
+        Some(root),
+        Signal::IsAlive {
+            requester: root,
+            reference,
+        },
+        None,
+    );
+    scheduler.drain_inbox();
+    assert_eq!(
+        messages(&scheduler, 0),
+        vec![Term::tuple(vec![
+            Term::Reference(reference),
+            Term::static_atom("false")
+        ])]
+    );
+}
+
+#[test]
+fn a_signal_to_a_dead_process_answers_a_group_leader_and_an_is_alive() {
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    let root = ProcessId(0);
+    let leader_reference = Reference::ordinary(0).unwrap();
+    let alive_reference = Reference::ordinary(1).unwrap();
+    scheduler.dead_target_signal(
+        ProcessId(99),
+        Signal::GroupLeader {
+            leader: ProcessId(98),
+            requester: root,
+            reference: leader_reference,
+        },
+    );
+    scheduler.dead_target_signal(
+        ProcessId(99),
+        Signal::IsAlive {
+            requester: root,
+            reference: alive_reference,
+        },
+    );
+    assert_eq!(
+        messages(&scheduler, 0),
+        vec![
+            Term::tuple(vec![
+                Term::Reference(leader_reference),
+                Term::static_atom("badarg")
+            ]),
+            Term::tuple(vec![
+                Term::Reference(alive_reference),
+                Term::static_atom("false")
+            ]),
+        ]
+    );
+}
+
+#[test]
+fn a_signal_to_a_dead_process_answers_a_process_info() {
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    let root = ProcessId(0);
+    let reference = Reference::ordinary(2).unwrap();
+    scheduler.dead_target_signal(
+        ProcessId(99),
+        Signal::ProcessInfo {
+            requester: root,
+            reference,
+            item: atom("registered_name"),
+        },
+    );
+    assert_eq!(
+        messages(&scheduler, 0),
+        vec![Term::tuple(vec![
+            Term::Reference(reference),
+            Term::static_atom("undefined")
+        ])]
+    );
+}
+
+#[test]
+fn a_signal_to_a_dead_process_answers_a_link() {
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    let root = ProcessId(0);
+    scheduler.dead_target_signal(ProcessId(99), Signal::Link { from: root });
+    assert!(
+        scheduler
+            .process(root)
+            .unwrap()
+            .mailbox
+            .has_control_signals()
+    );
+}
+
+#[test]
+fn a_scheduler_registers_a_name_for_a_remote_process() {
+    use super::node::Node;
+    let (node, mut readers) = Node::new(2).unwrap();
+    // The shared scheduler cannot create an atom. Make the two names first.
+    let mut atoms = AtomTable::new();
+    let first = atoms.put("pbeam_remote_name").unwrap();
+    let second = atoms.put("pbeam_remote_other").unwrap();
+    let mut scheduler = Scheduler::with_shared(atoms, Arc::clone(&node), 0, readers.remove(0));
+    let remote = ProcessId(7);
+    node.register(remote, 1);
+    assert!(scheduler.register(&Term::Atom(first.clone()), &Term::Pid(remote)));
+    assert_eq!(scheduler.registered_name_of(remote), Some(first.clone()));
+    // One process has one name.
+    assert!(!scheduler.register(&Term::Atom(second), &Term::Pid(remote)));
+    assert!(scheduler.unregister(&Term::Atom(first)));
+    assert_eq!(scheduler.registered_name_of(remote), None);
 }

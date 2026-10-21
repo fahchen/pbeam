@@ -499,6 +499,10 @@ fn compile_result(
         .borrow_mut::<RegexCodes>()
         .0
         .insert(reference, code);
+    context
+        .scheduler
+        .node()
+        .register_regex(reference, context.scheduler.index());
     Ok(Term::tuple(vec![
         Term::static_atom("re_pattern"),
         Term::Integer(capture_count.into()),
@@ -1082,8 +1086,16 @@ pub(super) fn run(
             return Ok(BifResult::badarg());
         }
         let ovec_pairs = ovec_pairs(count);
+        // The compiled expression stays with its scheduler, so an
+        // expression of another scheduler cannot run here.
+        let remote = context.scheduler.remote_regex_owner(*magic).is_some();
         let codes = context.scheduler.resources.borrow_mut::<RegexCodes>();
         let Some(code) = codes.0.get_mut(magic) else {
+            if remote {
+                return Err(error(
+                    "unsupported: a compiled regular expression of another scheduler in a run of execute_on_schedulers",
+                ));
+            }
             return Ok(BifResult::badarg());
         };
         pairs = ovec_pairs;

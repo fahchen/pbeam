@@ -165,6 +165,13 @@ pub(super) fn read_timer(
         return Ok(BifResult::badarg());
     };
     let scheduler = &mut *context.scheduler;
+    // The timer queue stays with each scheduler, so a timer of another
+    // scheduler cannot be read here.
+    if scheduler.remote_timer_owner(*reference).is_some() {
+        return Err(error(
+            "unsupported: a BIF timer of another scheduler in a run of execute_on_schedulers",
+        ));
+    }
     let result = match scheduler.timers.bif_timer_end(*reference) {
         Some(end) => Term::Integer(Timers::time_left(scheduler.timers.now(), end)),
         None => Term::static_atom("false"),
@@ -201,6 +208,11 @@ fn setup(
         Term::Atom(name) => Receiver::Name(name.clone()),
         _ => return Ok(BifResult::badarg()),
     };
+    if matches!(receiver, Receiver::Name(_)) && scheduler.is_multi() {
+        return Err(error(
+            "unsupported: a named BIF timer in a run of execute_on_schedulers",
+        ));
+    }
     if let Some(denied) = denial(scheduler, CapabilityKind::Process, Operation::Send, None)? {
         return Ok(denied);
     }
@@ -208,6 +220,13 @@ fn setup(
         Receiver::Process(id) => Some(*id),
         Receiver::Name(name) => scheduler.whereis(scheduler.atoms.name_of(name)),
     };
+    // The timer queue stays with each scheduler, so a timer that fires on
+    // another scheduler cannot reach its receiver.
+    if target.is_some_and(|target| scheduler.remote_owner(target).is_some()) {
+        return Err(error(
+            "unsupported: a BIF timer to a process of another scheduler in a run of execute_on_schedulers",
+        ));
+    }
     if let Some(target) = target
         && let Some(denied) = boot_denial(scheduler, target)?
     {
@@ -237,6 +256,9 @@ fn setup(
                 message,
             },
         );
+        scheduler
+            .node()
+            .register_timer(reference, scheduler.index());
     }
     Ok(Value(Term::Reference(reference)))
 }

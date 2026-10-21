@@ -537,6 +537,19 @@ pub(super) fn system_flag(
     if let Some(denied) = check? {
         return Ok(denied);
     }
+    // These flags stay with each scheduler, so a change on one scheduler
+    // would not reach the others.
+    if scheduler.is_multi()
+        && matches!(
+            scheduler.atoms.name_of(item),
+            "system_logger" | "backtrace_depth"
+        )
+    {
+        let name = scheduler.atoms.name_of(item).to_owned();
+        return Err(error(format!(
+            "unsupported: erlang:system_flag/2 {name} in a run of execute_on_schedulers"
+        )));
+    }
     Ok(
         match (scheduler.atoms.name_of(item), value.small_integer()) {
             ("system_logger", _) => Value(std::mem::replace(
@@ -1016,7 +1029,14 @@ pub(super) fn raise(depth: usize, class: &Term, reason: &Term, stacktrace: &Term
 pub(super) fn link(scheduler: &mut Scheduler, target: &Term) -> Result<BifResult, BeamError> {
     let target = match *target {
         Term::Pid(pid) => LinkId::Process(pid),
-        Term::Port(port) => LinkId::Port(port),
+        Term::Port(port) => {
+            if scheduler.remote_port_owner(port).is_some() {
+                return Err(error(
+                    "unsupported: a port of another scheduler in a run of execute_on_schedulers",
+                ));
+            }
+            LinkId::Port(port)
+        }
         _ => return Ok(BifResult::badarg()),
     };
     if let Some(denied) = denial(scheduler, CapabilityKind::Process, Operation::Link, None)? {
@@ -1254,6 +1274,13 @@ pub(super) fn monitor(
     let Some(options) = monitor_options(options) else {
         return Ok(BifResult::badarg());
     };
+    // The alias owners stay with each scheduler, so a message to an alias
+    // of another scheduler would be dropped.
+    if context.scheduler.is_multi() && options.alias.is_some() {
+        return Err(error(
+            "unsupported: an alias from a monitor in a run of execute_on_schedulers",
+        ));
+    }
     let Term::Atom(kind) = kind else {
         return Ok(BifResult::badarg());
     };
@@ -1262,6 +1289,11 @@ pub(super) fn monitor(
     let target = match (context.scheduler.atoms.name_of(kind), target) {
         ("process", Term::Pid(id)) => Some(Ok(MonitorTarget::Process(*id))),
         ("process", target) => local_name(target).map(|name| Ok(MonitorTarget::ProcessName(name))),
+        ("port", Term::Port(port)) if context.scheduler.remote_port_owner(*port).is_some() => {
+            Some(Err(error(
+                "unsupported: a port of another scheduler in a run of execute_on_schedulers",
+            )))
+        }
         ("port", Term::Port(port)) => Some(Ok(MonitorTarget::Port(*port))),
         ("port", target) => local_name(target).map(|name| Ok(MonitorTarget::PortName(name))),
         ("time_offset", Term::Atom(service)) if service.is_static("clock_service") => {
@@ -2828,10 +2860,10 @@ const ENDIAN: &str = "little";
 ///
 /// ```rust,ignore
 /// let mut atoms = AtomTable::new();
-/// let os_type = system_info(&mut atoms, &Term::static_atom("os_type"))?;
+/// let os_type = system_info(&mut scheduler, &Term::static_atom("os_type"))?;
 /// // macOS: {unix, darwin}.
 /// assert!(matches!(os_type, BifResult::Value(Term::Tuple(_))));
-/// assert!(system_info(&mut atoms, &Term::static_atom("wordsize")).is_err());
+/// assert!(system_info(&mut scheduler, &Term::static_atom("wordsize")).is_err());
 /// ```
 ///
 /// # Errors
@@ -2839,7 +2871,9 @@ const ENDIAN: &str = "little";
 /// Each other item gives a runtime error, also an item that ERTS rejects
 /// with `badarg`. A new atom in a full atom table gives the error of
 /// `AtomTable::put`.
-pub(super) fn system_info(atoms: &mut AtomTable, item: &Term) -> Result<BifResult, BeamError> {
+pub(super) fn system_info(scheduler: &mut Scheduler, item: &Term) -> Result<BifResult, BeamError> {
+    let schedulers = scheduler.scheduler_count();
+    let atoms = &mut scheduler.atoms;
     match item {
         Term::Atom(atom) if atom.is_static("os_type") => Ok(Value(Term::tuple(vec![
             Term::Atom(Atom::UNIX),
@@ -2850,20 +2884,22 @@ pub(super) fn system_info(atoms: &mut AtomTable, item: &Term) -> Result<BifResul
                 .bytes()
                 .map(|byte| Term::Integer(i64::from(byte))),
         ))),
-        Term::Atom(atom) if atoms.name_of(atom) == "schedulers" => Ok(Value(Term::Integer(1))),
-        // PBeam has one scheduler, and `erlang:system_flag/2` cannot change
-        // its count.
+        Term::Atom(atom) if atoms.name_of(atom) == "schedulers" => {
+            Ok(Value(Term::Integer(schedulers)))
+        }
+        // `erlang:system_flag/2` cannot change the count of online
+        // schedulers, so each scheduler of the run is online.
         Term::Atom(atom) if atoms.name_of(atom) == "schedulers_online" => {
-            Ok(Value(Term::Integer(1)))
+            Ok(Value(Term::Integer(schedulers)))
         }
         Term::Atom(atom) if atoms.name_of(atom) == "build_type" => {
             Ok(Value(Term::static_atom("opt")))
         }
         Term::Atom(atom) if atoms.name_of(atom) == "endian" => Ok(Value(Term::static_atom(ENDIAN))),
-        // `2 * erts_no_schedulers` (`erl_init.c:1354`), and PBeam has one
-        // scheduler. `erlang:system_flag/2` cannot change it in PBeam.
+        // `2 * erts_no_schedulers` (`erl_init.c:1354`). `erlang:system_flag/2`
+        // cannot change it in PBeam.
         Term::Atom(atom) if atom.is_static("outstanding_system_requests_limit") => {
-            Ok(Value(Term::Integer(2)))
+            Ok(Value(Term::Integer(2 * schedulers)))
         }
         _ => Err(error(format!(
             "unsupported erlang:system_info/1 argument {}",
@@ -4210,23 +4246,63 @@ pub(super) fn process_info(
             vec![process.clone(), item.clone()],
             |scheduler| {
                 let current = scheduler.current_reductions();
+                let registered = scheduler.registered_name_of(caller_id);
                 let (caller, atoms) = scheduler.current_process_and_atoms();
                 let messages = caller.mailbox.message_count();
                 let info = caller
-                    .info(atoms, item, current, messages, true)?
+                    .info(atoms, item, current, messages, true, registered.as_ref())?
                     .ok_or_else(|| unsupported(atoms))?;
                 caller.bump_reductions(1 + super::links_reductions(item, &info));
                 Ok(Value(info))
             },
         );
     }
+    // Another scheduler can hold a delivery for this target in the inbox of
+    // this scheduler. Apply it before the read, as ERTS fetches the pending
+    // deliveries of the target (`erl_bif_info.c:1403-1416`).
+    scheduler.drain_inbox();
     let Some(target) = scheduler.process(*id) else {
+        // A live process of another scheduler. The request goes to its
+        // scheduler, so the answer comes after the signals that the caller
+        // sent before (`erl_bif_info.c:1374-1401`). Another item reads the
+        // process state of its scheduler and stays unsupported.
+        if let Some(index) = scheduler.remote_owner(*id) {
+            if let Term::Atom(name) = item
+                && scheduler.atoms.name_of(name) == "registered_name"
+            {
+                let caller = scheduler.current_process_mut().id;
+                let reference = scheduler.make_ref()?;
+                scheduler.current_process_mut().mailbox.set_save_end();
+                let request = Signal::ProcessInfo {
+                    requester: caller,
+                    reference,
+                    item: item.clone(),
+                };
+                // The pending monitor of the caller goes before the
+                // request, and a target that exits before the owner drains
+                // the inbox is answered with `undefined` there.
+                scheduler.send_signal_to_owner(index, Some(caller), *id, request);
+                return Ok(Trap {
+                    module: "erts_internal",
+                    function: "await_result",
+                    arguments: vec![Term::Reference(reference)],
+                });
+            }
+            return Err(unsupported(&scheduler.atoms));
+        }
         return Ok(Value(Term::static_atom("undefined")));
     };
     let messages = target.mailbox.message_count();
-    let info = target
-        .info(&scheduler.atoms, item, 0, messages, false)?
-        .ok_or_else(|| unsupported(&scheduler.atoms))?;
+    let registered = scheduler.registered_name_of(*id);
+    let values = target.info(
+        &scheduler.atoms,
+        item,
+        0,
+        messages,
+        false,
+        registered.as_ref(),
+    );
+    let info = values?.ok_or_else(|| unsupported(&scheduler.atoms))?;
     // A queued reply is built in the target process, but ERTS discards
     // the cost that `handle_process_info` returns
     // (`erl_proc_sig_queue.c:6796,7405,5425-5428`), so only the direct
@@ -4292,18 +4368,28 @@ pub(super) fn is_process_alive(
     if let Some(denied) = other_process_denial(scheduler, *id, Operation::Inspect)? {
         return Ok(denied);
     }
-    let alive = match scheduler.process(*id) {
-        None => "false",
-        Some(target) if target.exiting.is_some() || target.mailbox.has_incoming() => {
-            return Ok(Trap {
+    // The inbox is applied before the read, so a signal that the target sent
+    // before this call leads to the routed request, and a delivery that came
+    // with it is handled before the answer (`erl_bif_info.c:4075-4105`).
+    Ok(signals_return_after_drain(scheduler, pid, |scheduler| {
+        match scheduler.process(*id) {
+            // The target is on another scheduler. Route the request, so that
+            // the answer comes after the signals that the caller sent before,
+            // as `erts_internal:is_process_alive/1` does on ERTS.
+            None if scheduler.remote_owner(*id).is_some() => Trap {
                 module: "erts_internal",
                 function: "is_process_alive",
                 arguments: vec![pid.clone()],
-            });
+            },
+            None => Value(Term::static_atom("false")),
+            Some(target) if target.exiting.is_some() || target.mailbox.has_incoming() => Trap {
+                module: "erts_internal",
+                function: "is_process_alive",
+                arguments: vec![pid.clone()],
+            },
+            Some(_) => Value(Term::static_atom("true")),
         }
-        Some(_) => "true",
-    };
-    Ok(signals_return(scheduler, pid, Term::static_atom(alive)))
+    }))
 }
 
 /// Return `value` as the result of a BIF that read the state of the process
@@ -4320,14 +4406,35 @@ pub(super) fn is_process_alive(
 /// let result = signals_return(scheduler, &Term::Pid(child), Term::static_atom("true"));
 /// ```
 pub(super) fn signals_return(scheduler: &mut Scheduler, from: &Term, value: Term) -> BifResult {
-    if scheduler.current_process_mut().mailbox.has_incoming() {
-        return BifResult::TrapBif {
-            module: "erlang",
-            function: "bif_handle_signals_return",
-            arguments: vec![from.clone(), value],
-        };
+    signals_return_after_drain(scheduler, from, |_| Value(value))
+}
+
+/// Return the result of `read` after the scheduler applies its inbox. When
+/// the caller then has an incoming signal, trap to
+/// `erlang:bif_handle_signals_return/2`, so the caller handles the signal
+/// before the result.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = signals_return_after_drain(&mut scheduler, &pid, |_| Value(Term::nil()));
+/// ```
+pub(super) fn signals_return_after_drain(
+    scheduler: &mut Scheduler,
+    from: &Term,
+    read: impl FnOnce(&mut Scheduler) -> BifResult,
+) -> BifResult {
+    scheduler.drain_inbox();
+    match read(scheduler) {
+        Value(term) if scheduler.current_process_mut().mailbox.has_incoming() => {
+            BifResult::TrapBif {
+                module: "erlang",
+                function: "bif_handle_signals_return",
+                arguments: vec![from.clone(), term],
+            }
+        }
+        result => result,
     }
-    Value(value)
 }
 
 /// Run `erlang:function_exported/3`: return `true` when a loaded module
@@ -4678,9 +4785,10 @@ pub(super) fn process_info_1(
         return caller_read(scheduler, vec![process.clone()], |scheduler| {
             let current = scheduler.current_reductions();
             let messages = scheduler.current_process().mailbox.message_count();
+            let registered = scheduler.registered_name_of(*id);
             let values = {
                 let caller = scheduler.current_process();
-                process_info_values(&scheduler.code, caller, current, messages, true)?
+                process_info_values(&scheduler.code, caller, current, messages, true, registered)?
             };
             let info = process_info_term(&mut scheduler.atoms, values)?;
             scheduler
@@ -4689,11 +4797,24 @@ pub(super) fn process_info_1(
             Ok(Value(info))
         });
     }
+    // Another scheduler can hold a delivery for this target in the inbox of
+    // this scheduler. Apply it before the read, as ERTS fetches the pending
+    // deliveries of the target (`erl_bif_info.c:1403-1416`).
+    scheduler.drain_inbox();
     let Some(target) = scheduler.process(*id) else {
+        // A live process of another scheduler needs the process state of its
+        // scheduler, which this read cannot reach yet.
+        if scheduler.remote_owner(*id).is_some() {
+            return Err(error(format!(
+                "unsupported erlang:process_info/1 arguments {}",
+                debug_term(process, &scheduler.atoms)
+            )));
+        }
         return Ok(Value(Term::static_atom("undefined")));
     };
     let messages = target.mailbox.message_count();
-    let values = process_info_values(&scheduler.code, target, 0, messages, false)?;
+    let registered = scheduler.registered_name_of(*id);
+    let values = process_info_values(&scheduler.code, target, 0, messages, false, registered)?;
     let info = process_info_term(&mut scheduler.atoms, values)?;
     scheduler
         .current_process_mut()
@@ -4709,6 +4830,7 @@ fn process_info_values(
     current: u64,
     messages: usize,
     caller: bool,
+    registered_name: Option<Atom>,
 ) -> Result<ProcessInfoValues, BeamError> {
     let current_function = if let Some(frame) = process.frames.last() {
         let module = code.module_by_id(frame.module_id)?;
@@ -4778,7 +4900,7 @@ fn process_info_values(
     )
     .map_err(|_| error("the stack size exceeds the PBeam integer range"))?;
     Ok(ProcessInfoValues {
-        registered_name: process.registered_name.clone(),
+        registered_name,
         current_function,
         initial_call,
         status,
@@ -4949,6 +5071,10 @@ fn prepare_caller_read(
     scheduler: &mut Scheduler,
     arguments: Vec<Term>,
 ) -> Result<Option<BifResult>, BeamError> {
+    // A message of another scheduler waits in the inbox of this one. This
+    // read fetches the messages of the caller, as ERTS fetches its in-queue
+    // buffers (`erl_proc_sig_queue.c:7771-7799`), so apply the inbox first.
+    scheduler.drain_inbox();
     let caller = scheduler.current_process_mut();
     if caller.flush == Flush::None && !caller.self_signals {
         if caller.mailbox.has_outer_messages() {
@@ -5012,16 +5138,29 @@ pub(super) fn registered(scheduler: &mut Scheduler) -> Result<BifResult, BeamErr
 
 /// Run `erlang:ports/0` as `ports_0` (`bif.c:4125-4128`) does with
 /// `erts_ptab_list` (`erl_ptab.c:738-...`): return each open port. ERTS
-/// walks its port table, so the order is not part of the result.
+/// walks its port table, so the order is not part of the result. A run
+/// with scheduler threads fails, because each scheduler keeps its own port
+/// table.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(matches!(ports(&mut scheduler), BifResult::Value(Term::Nil)));
+/// assert!(matches!(ports(&mut scheduler)?, BifResult::Value(Term::Nil)));
 /// ```
-pub(super) fn ports(scheduler: &mut Scheduler) -> BifResult {
+///
+/// # Errors
+///
+/// The unsupported error of a run with scheduler threads.
+pub(super) fn ports(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
+    // The port table stays with each scheduler, so this run cannot list
+    // the ports of the node yet.
+    if scheduler.is_multi() {
+        return Err(error(
+            "unsupported: erlang:ports/0 in a run of execute_on_schedulers",
+        ));
+    }
     let ports = scheduler.resources.borrow_mut::<Ports>().ids();
-    Value(Term::list_from(ports.into_iter().map(Term::Port)))
+    Ok(Value(Term::list_from(ports.into_iter().map(Term::Port))))
 }
 
 /// Run `erlang:alias/1` as `alias_1` (`bif.c:5852-5892`) does. The options
@@ -5044,6 +5183,13 @@ pub(super) fn ports(scheduler: &mut Scheduler) -> BifResult {
 ///
 /// The `priority` option, and the errors of `Scheduler::monitor`.
 pub(super) fn alias(context: &mut BifContext<'_>, options: &Term) -> Result<BifResult, BeamError> {
+    // The alias owners stay with each scheduler, so a message to an alias
+    // of another scheduler would be dropped.
+    if context.scheduler.is_multi() {
+        return Err(error(
+            "unsupported: erlang:alias/0,1 in a run of execute_on_schedulers",
+        ));
+    }
     let Some(mut elements) = options.list_iter() else {
         return Ok(BifResult::badarg());
     };
@@ -5672,6 +5818,11 @@ fn bif_timer(
         Term::Atom(name) => Receiver::Name(name.clone()),
         _ => return Ok(BifResult::badarg()),
     };
+    if matches!(receiver, Receiver::Name(_)) && scheduler.is_multi() {
+        return Err(error(
+            "unsupported: a named BIF timer in a run of execute_on_schedulers",
+        ));
+    }
     if let Some(denied) = denial(scheduler, CapabilityKind::Process, Operation::Send, None)? {
         return Ok(denied);
     }
@@ -5679,6 +5830,13 @@ fn bif_timer(
         Receiver::Process(id) => Some(*id),
         Receiver::Name(name) => scheduler.whereis(scheduler.atoms.name_of(name)),
     };
+    // The timer queue stays with each scheduler, so a timer that fires on
+    // another scheduler cannot reach its receiver.
+    if target.is_some_and(|target| scheduler.remote_owner(target).is_some()) {
+        return Err(error(
+            "unsupported: a BIF timer to a process of another scheduler in a run of execute_on_schedulers",
+        ));
+    }
     if let Some(target) = target
         && let Some(denied) = boot_denial(scheduler, target)?
     {
@@ -5708,6 +5866,9 @@ fn bif_timer(
                 message,
             },
         );
+        scheduler
+            .node()
+            .register_timer(reference, scheduler.index());
     }
     Ok(Value(Term::Reference(reference)))
 }
@@ -5753,6 +5914,13 @@ pub(super) fn cancel_timer(
         return Ok(BifResult::badarg());
     };
     let scheduler = &mut *context.scheduler;
+    // The timer queue stays with each scheduler, so a timer of another
+    // scheduler cannot be canceled here.
+    if scheduler.remote_timer_owner(*reference).is_some() {
+        return Err(error(
+            "unsupported: a BIF timer of another scheduler in a run of execute_on_schedulers",
+        ));
+    }
     let result = match scheduler.cancel_bif_timer(*reference) {
         Some(end) => Term::Integer(Timers::time_left(scheduler.timers.now(), end)),
         None => Term::static_atom("false"),
@@ -5965,7 +6133,7 @@ pub(super) fn port_set_data(
     port: &Term,
     data: &Term,
 ) -> Result<BifResult, BeamError> {
-    let Some(id) = erts_internal::open_port_id(scheduler, port) else {
+    let Some(id) = erts_internal::open_port_id(scheduler, port)? else {
         return Ok(BifResult::badarg());
     };
     if let Some(denied) = erts_internal::port_denial(scheduler, id, Operation::Command)? {
@@ -5997,7 +6165,7 @@ pub(super) fn port_get_data(
     scheduler: &mut Scheduler,
     port: &Term,
 ) -> Result<BifResult, BeamError> {
-    let Some(id) = erts_internal::open_port_id(scheduler, port) else {
+    let Some(id) = erts_internal::open_port_id(scheduler, port)? else {
         return Ok(BifResult::badarg());
     };
     if let Some(denied) = erts_internal::port_denial(scheduler, id, Operation::Inspect)? {
@@ -6089,6 +6257,13 @@ thread_local! {
 ///
 /// A budget of the current process that is less than 0.
 pub(super) fn processes(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
+    // The process table stays with each scheduler, so this run cannot list
+    // the processes of the node yet.
+    if scheduler.is_multi() {
+        return Err(error(
+            "unsupported: erlang:processes/0 in a run of execute_on_schedulers",
+        ));
+    }
     let state = PtabList {
         tix: -1,
         found: Term::Nil,
