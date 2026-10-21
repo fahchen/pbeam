@@ -9,21 +9,16 @@ pub(super) mod inet;
 use std::{collections::BTreeMap, ffi::c_int};
 
 use super::{host::spawn::Child, process::MonitorLinkTree};
-use crate::{
-    error::{BeamError, error},
-    term::{PortId, ProcessId, Reference, Term},
-};
+use crate::term::{PortId, ProcessId, Reference, Term};
 use inet::Inet;
 
-/// The open ports of the node, by port number, and the number of the next
-/// port. A port leaves the table when it closes, as `kill_port` removes it
-/// from the ERTS port table (`io.c:3697-3790`).
+/// The open ports of the node, by port number. A port leaves the table when
+/// it closes, as `kill_port` removes it from the ERTS port table
+/// (`io.c:3697-3790`).
 #[derive(Debug, Default)]
 pub(super) struct Ports {
     /// Each open port.
     by_id: BTreeMap<PortId, Port>,
-    /// The number of the next port. The first port of a run is `#Port<0.0>`.
-    next: u64,
 }
 
 /// One open port: the ERTS `Port` (`erl_port.h`) with the data of its
@@ -135,45 +130,6 @@ impl Port {
 }
 
 impl Ports {
-    /// Put `port` into the table with the next port number, and return the
-    /// number.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert_eq!(ports.insert(port)?, PortId(0));
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// The port number overflows.
-    pub(super) fn insert(&mut self, port: Port) -> Result<PortId, BeamError> {
-        let id = self.next_id()?;
-        self.insert_at(id, port);
-        Ok(id)
-    }
-
-    /// Return the next port identifier.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// let ports = Ports::default();
-    /// assert_eq!(ports.next_id().unwrap(), PortId(0));
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// The port number overflows.
-    pub(super) fn next_id(&mut self) -> Result<PortId, BeamError> {
-        let id = PortId(self.next);
-        self.next = self
-            .next
-            .checked_add(1)
-            .ok_or_else(|| error("port identifier overflow"))?;
-        Ok(id)
-    }
-
     /// Put `port` under the identifier `id`, which no open port has.
     ///
     /// # Examples

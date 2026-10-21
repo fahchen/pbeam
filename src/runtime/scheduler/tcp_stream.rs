@@ -263,9 +263,7 @@ impl Scheduler {
         });
         if flushed {
             let item = ports.remove(port).expect("the flushed port is closing");
-            if let Some(node) = &self.shared {
-                node.remove_port(port);
-            }
+            self.node.remove_port(port);
             self.stop_port(port, item);
         }
     }

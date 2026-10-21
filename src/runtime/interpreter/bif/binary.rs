@@ -618,9 +618,7 @@ pub(super) fn compile_pattern(
     };
     let id = scheduler.make_ref()?;
     scheduler.binary_patterns.insert(id, compiled);
-    if let Some(node) = scheduler.shared() {
-        node.register_pattern(id, scheduler.index());
-    }
+    scheduler.node().register_pattern(id, scheduler.index());
     Ok(Value(Term::tuple(vec![
         Term::static_atom(tag),
         Term::Reference(id),

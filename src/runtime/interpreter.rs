@@ -22,13 +22,15 @@ use crate::{
         low_64_bits, print_term, segment_equals, segment_integer,
     },
 };
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::{
     borrow::{Borrow, Cow},
     cell::Cell,
     cmp::Ordering,
     collections::HashMap,
     rc::Rc,
-    sync::Arc,
+    sync::{Arc, Condvar, Mutex},
 };
 
 pub(crate) mod bif;
@@ -171,13 +173,88 @@ impl ExceptionClass {
     }
 }
 
+/// Force the next scheduler thread creation to fail, for a test of the
+/// start path.
+#[cfg(test)]
+pub(super) static FAIL_SCHEDULER_SPAWN: AtomicBool = AtomicBool::new(false);
+
+/// A one-use gate that releases the scheduler threads after each created
+/// its root. `abort` releases them when a scheduler thread cannot start, so
+/// no thread waits without end on a barrier that will not open.
+struct StartGate {
+    state: Mutex<StartState>,
+    ready: Condvar,
+}
+
+/// The state of [`StartGate`].
+struct StartState {
+    /// The number of threads that created their root.
+    arrived: usize,
+    /// The number of threads of the run.
+    expected: usize,
+    /// True when a scheduler thread cannot start.
+    aborted: bool,
+}
+
+impl StartGate {
+    /// Return a closed gate for `expected` scheduler threads.
+    fn new(expected: usize) -> Self {
+        Self {
+            state: Mutex::new(StartState {
+                arrived: 0,
+                expected,
+                aborted: false,
+            }),
+            ready: Condvar::new(),
+        }
+    }
+
+    /// Record that one scheduler thread created its root.
+    fn arrive(&self) {
+        let mut state = self.state.lock().expect("the start gate is not poisoned");
+        state.arrived += 1;
+        self.ready.notify_all();
+    }
+
+    /// Wait until each scheduler thread created its root. Return false when
+    /// the run was aborted.
+    fn wait(&self) -> bool {
+        let mut state = self.state.lock().expect("the start gate is not poisoned");
+        while state.arrived < state.expected && !state.aborted {
+            state = self
+                .ready
+                .wait(state)
+                .expect("the start gate is not poisoned");
+        }
+        !state.aborted
+    }
+
+    /// Release each waiting scheduler thread after a thread cannot start.
+    fn abort(&self) {
+        let mut state = self.state.lock().expect("the start gate is not poisoned");
+        state.aborted = true;
+        self.ready.notify_all();
+    }
+}
+
+/// Abort the start gate when a scheduler thread ends before the gate opens,
+/// also on a panic. Disarm it after the gate opened.
+struct StartGuard<'a>(Option<&'a StartGate>);
+
+impl Drop for StartGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(gate) = self.0 {
+            gate.abort();
+        }
+    }
+}
+
 /// Wait for input in a run with scheduler threads, or decide that the root
 /// waits for a message that cannot arrive.
 fn idle_step(scheduler: &mut Scheduler, node: &Node, serving: bool) -> Result<(), BeamError> {
     if serving
         || scheduler.timers.active()
         || !scheduler.root_waiting()
-        || node.starts_pending()
         || scheduler.has_external_sources()
         || node.live_processes() != 1
     {
@@ -524,39 +601,64 @@ impl BeamProgram {
         let initial_mode = InitialMode::read();
         let (node, readers) = Node::new(roots.len())
             .map_err(|cause| error(format!("cannot create the scheduler node: {cause}")))?;
+        let gate = Arc::new(StartGate::new(roots.len()));
+        let mut spawn_error = None;
         let results = std::thread::scope(|scope| {
-            let handles: Vec<_> = roots
-                .iter()
-                .zip(readers)
-                .enumerate()
-                .map(|(index, ((module, function), reader))| {
-                    let node = Arc::clone(&node);
-                    scope.spawn(move || -> Result<_, (BeamError, bool)> {
-                        let mut scheduler = Scheduler::with_shared(
-                            (*self.atoms).clone(),
-                            Arc::clone(&node),
-                            index,
-                            reader,
-                        );
-                        scheduler.code = CodeTable::new(self.modules.clone());
-                        // The reset of the terminal mode needs the state of
-                        // each scheduler after the run.
-                        match self.run_multi_root(&mut scheduler, module, function) {
-                            Ok(()) => {
-                                let selected =
-                                    scheduler.resources.borrow_mut::<Ttys>().input_selected();
-                                Ok((scheduler.into_run_result(), selected))
-                            }
-                            Err(cause) => {
-                                let selected =
-                                    scheduler.resources.borrow_mut::<Ttys>().input_selected();
-                                node.abort();
-                                Err((cause, selected))
-                            }
+            let mut handles = Vec::with_capacity(roots.len());
+            for (index, ((module, function), reader)) in roots.iter().zip(readers).enumerate() {
+                let node = Arc::clone(&node);
+                let thread_gate = Arc::clone(&gate);
+                let body = move || -> Result<_, (BeamError, bool)> {
+                    let mut scheduler = Scheduler::with_shared(
+                        (*self.atoms).clone(),
+                        Arc::clone(&node),
+                        index,
+                        reader,
+                    );
+                    scheduler.code = CodeTable::new(self.modules.clone());
+                    // The reset of the terminal mode needs the state of
+                    // each scheduler after the run.
+                    match self.run_multi_root(&mut scheduler, module, function, &thread_gate) {
+                        Ok(()) => {
+                            let selected =
+                                scheduler.resources.borrow_mut::<Ttys>().input_selected();
+                            Ok((scheduler.into_run_result(), selected))
                         }
-                    })
-                })
-                .collect();
+                        Err(cause) => {
+                            let selected =
+                                scheduler.resources.borrow_mut::<Ttys>().input_selected();
+                            node.abort();
+                            Err((cause, selected))
+                        }
+                    }
+                };
+                let force_failure = {
+                    #[cfg(test)]
+                    {
+                        FAIL_SCHEDULER_SPAWN.swap(false, AtomicOrdering::SeqCst)
+                    }
+                    #[cfg(not(test))]
+                    {
+                        false
+                    }
+                };
+                let spawned = if force_failure {
+                    Err(std::io::Error::other(
+                        "a test forces a scheduler thread failure",
+                    ))
+                } else {
+                    std::thread::Builder::new().spawn_scoped(scope, body)
+                };
+                match spawned {
+                    Ok(handle) => handles.push(handle),
+                    Err(cause) => {
+                        spawn_error =
+                            Some(error(format!("cannot create a scheduler thread: {cause}")));
+                        gate.abort();
+                        break;
+                    }
+                }
+            }
             handles
                 .into_iter()
                 .map(|handle| {
@@ -566,6 +668,9 @@ impl BeamProgram {
                 })
                 .collect::<Vec<_>>()
         });
+        if let Some(cause) = spawn_error {
+            return Err(cause);
+        }
         // Restore the terminal mode of the run, also after a failed root.
         let selected = results.iter().any(|result| match result {
             Ok((_, selected)) | Err((_, selected)) => *selected,
@@ -625,16 +730,22 @@ impl BeamProgram {
         scheduler: &mut Scheduler,
         module: &str,
         function: &str,
+        gate: &StartGate,
     ) -> Result<(), BeamError> {
-        let node = scheduler
-            .shared()
-            .map(Arc::clone)
-            .expect("a multi-root run has a node");
+        let node = Arc::clone(scheduler.node());
+        let mut start = StartGuard(Some(gate));
         let label = scheduler.code.entry_label(module, function, 0)?;
         let frame = scheduler.code.frame(module, label, 0)?;
         let id = scheduler.next_pid()?;
         scheduler.start_with_id(id, frame, Vec::new(), Vec::new())?;
-        node.root_started();
+        // Wait until each scheduler created its root, so an idle root cannot
+        // decide that its message cannot arrive before another root started.
+        let gate = start.0.expect("the start gate is armed");
+        gate.arrive();
+        if !gate.wait() {
+            return Err(error("the multi-scheduler run was cancelled"));
+        }
+        start.0 = None;
         // After its root exits, a scheduler keeps running the processes that
         // its root started, because a process of another scheduler can still
         // depend on them until the last root exits.

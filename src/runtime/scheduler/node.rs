@@ -87,8 +87,8 @@ pub(in crate::runtime) struct Node {
     next_unlink_id: AtomicU64,
     /// The number of roots that did not exit yet.
     roots: AtomicUsize,
-    /// The number of roots that did not start yet.
-    starts: AtomicUsize,
+    /// The number of schedulers of the node.
+    schedulers: usize,
     /// The number of live processes.
     live: AtomicUsize,
     /// True after the last root exited.
@@ -142,7 +142,7 @@ impl Node {
                 next_port: AtomicU64::new(0),
                 next_unlink_id: AtomicU64::new(1),
                 roots: AtomicUsize::new(count),
-                starts: AtomicUsize::new(count),
+                schedulers: count,
                 live: AtomicUsize::new(0),
                 shutdown: AtomicBool::new(false),
                 clock: (Instant::now(), clock::system_time()),
@@ -154,7 +154,7 @@ impl Node {
 
     /// Return the number of schedulers of the node.
     pub(in crate::runtime) fn scheduler_count(&self) -> usize {
-        self.inboxes.len()
+        self.schedulers
     }
 
     /// Return the run start of the node, as the instant and the OS system
@@ -167,6 +167,53 @@ impl Node {
     /// call on any scheduler, and each scheduler reads the same value.
     pub(in crate::runtime) fn local_node_hash(&self, compute: impl FnOnce() -> u32) -> u32 {
         *self.local_node_hash.get_or_init(compute)
+    }
+
+    /// Return the node of one scheduler that has no other scheduler. It has
+    /// no inbox and no root that waits for a start, so a one-thread run never
+    /// wakes a scheduler.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let node = Node::single();
+    /// assert_eq!(node.scheduler_count(), 1);
+    /// ```
+    pub(in crate::runtime) fn single() -> Arc<Self> {
+        Arc::new(Node {
+            owners: Mutex::new(HashMap::new()),
+            names: Mutex::new(HashMap::new()),
+            ports: Mutex::new(HashMap::new()),
+            timers: Mutex::new(HashMap::new()),
+            regexes: Mutex::new(HashMap::new()),
+            patterns: Mutex::new(HashMap::new()),
+            inboxes: Vec::new(),
+            // A run with one scheduler creates its root as `ProcessId(0)`
+            // before it starts a process, so the first other pid is 1.
+            next_pid: AtomicU64::new(1),
+            next_reference: AtomicU64::new(0),
+            unique: AtomicU64::new(0),
+            unique_monotonic: AtomicI64::new(-1),
+            next_port: AtomicU64::new(0),
+            next_unlink_id: AtomicU64::new(1),
+            roots: AtomicUsize::new(0),
+            schedulers: 1,
+            live: AtomicUsize::new(0),
+            shutdown: AtomicBool::new(false),
+            clock: (Instant::now(), clock::system_time()),
+            local_node_hash: OnceLock::new(),
+        })
+    }
+
+    /// Return a node whose identifier counters are at their last value, for
+    /// a test of the overflow errors.
+    #[cfg(test)]
+    pub(in crate::runtime) fn exhausted() -> Arc<Self> {
+        let mut node = Node::single();
+        let inner = Arc::get_mut(&mut node).expect("the test holds the only reference");
+        inner.next_pid = AtomicU64::new(u64::MAX);
+        inner.next_reference = AtomicU64::new(u64::MAX);
+        node
     }
 
     /// Make the process `id` the process of the scheduler `index`.
@@ -186,18 +233,6 @@ impl Node {
         owners.remove(&id);
         let mut names = self.names.lock().expect("the name table is not poisoned");
         names.retain(|_, owner| *owner != id);
-    }
-
-    /// Record the start of a root. The impossible-wait check waits for each
-    /// root to start, because a root that waits can get its reply from a
-    /// root of a scheduler thread that did not run yet.
-    pub(in crate::runtime) fn root_started(&self) {
-        self.starts.fetch_sub(1, Ordering::AcqRel);
-    }
-
-    /// Return true before each root started.
-    pub(in crate::runtime) fn starts_pending(&self) -> bool {
-        self.starts.load(Ordering::Acquire) != 0
     }
 
     /// Record the exit of a process after its exit signals. A waiting root
@@ -300,9 +335,14 @@ impl Node {
         while matches!(reader.read(&mut bytes), Ok(count) if count > 0) {}
     }
 
-    /// Return the next process identifier.
-    pub(in crate::runtime) fn next_pid(&self) -> u64 {
-        self.next_pid.fetch_add(1, Ordering::Relaxed)
+    /// Return the next process identifier, or the error when the counter
+    /// ends.
+    pub(in crate::runtime) fn next_pid(&self) -> Result<u64, BeamError> {
+        let value = self.next_pid.fetch_add(1, Ordering::Relaxed);
+        if value == u64::MAX {
+            return Err(error("process identifier overflow"));
+        }
+        Ok(value)
     }
 
     /// Return the next ordinary reference.

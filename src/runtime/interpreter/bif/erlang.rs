@@ -539,7 +539,7 @@ pub(super) fn system_flag(
     }
     // These flags stay with each scheduler, so a change on one scheduler
     // would not reach the others.
-    if scheduler.shared().is_some()
+    if scheduler.is_multi()
         && matches!(
             scheduler.atoms.name_of(item),
             "system_logger" | "backtrace_depth"
@@ -1276,7 +1276,7 @@ pub(super) fn monitor(
     };
     // The alias owners stay with each scheduler, so a message to an alias
     // of another scheduler would be dropped.
-    if context.scheduler.shared().is_some() && options.alias.is_some() {
+    if context.scheduler.is_multi() && options.alias.is_some() {
         return Err(error(
             "unsupported: an alias from a monitor in a run of execute_on_schedulers",
         ));
@@ -5154,7 +5154,7 @@ pub(super) fn registered(scheduler: &mut Scheduler) -> Result<BifResult, BeamErr
 pub(super) fn ports(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
     // The port table stays with each scheduler, so this run cannot list
     // the ports of the node yet.
-    if scheduler.shared().is_some() {
+    if scheduler.is_multi() {
         return Err(error(
             "unsupported: erlang:ports/0 in a run of execute_on_schedulers",
         ));
@@ -5185,7 +5185,7 @@ pub(super) fn ports(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
 pub(super) fn alias(context: &mut BifContext<'_>, options: &Term) -> Result<BifResult, BeamError> {
     // The alias owners stay with each scheduler, so a message to an alias
     // of another scheduler would be dropped.
-    if context.scheduler.shared().is_some() {
+    if context.scheduler.is_multi() {
         return Err(error(
             "unsupported: erlang:alias/0,1 in a run of execute_on_schedulers",
         ));
@@ -5818,7 +5818,7 @@ fn bif_timer(
         Term::Atom(name) => Receiver::Name(name.clone()),
         _ => return Ok(BifResult::badarg()),
     };
-    if matches!(receiver, Receiver::Name(_)) && scheduler.shared().is_some() {
+    if matches!(receiver, Receiver::Name(_)) && scheduler.is_multi() {
         return Err(error(
             "unsupported: a named BIF timer in a run of execute_on_schedulers",
         ));
@@ -5866,9 +5866,9 @@ fn bif_timer(
                 message,
             },
         );
-        if let Some(node) = scheduler.shared() {
-            node.register_timer(reference, scheduler.index());
-        }
+        scheduler
+            .node()
+            .register_timer(reference, scheduler.index());
     }
     Ok(Value(Term::Reference(reference)))
 }
@@ -6259,7 +6259,7 @@ thread_local! {
 pub(super) fn processes(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
     // The process table stays with each scheduler, so this run cannot list
     // the processes of the node yet.
-    if scheduler.shared().is_some() {
+    if scheduler.is_multi() {
         return Err(error(
             "unsupported: erlang:processes/0 in a run of execute_on_schedulers",
         ));

@@ -208,7 +208,7 @@ fn setup(
         Term::Atom(name) => Receiver::Name(name.clone()),
         _ => return Ok(BifResult::badarg()),
     };
-    if matches!(receiver, Receiver::Name(_)) && scheduler.shared().is_some() {
+    if matches!(receiver, Receiver::Name(_)) && scheduler.is_multi() {
         return Err(error(
             "unsupported: a named BIF timer in a run of execute_on_schedulers",
         ));
@@ -256,9 +256,9 @@ fn setup(
                 message,
             },
         );
-        if let Some(node) = scheduler.shared() {
-            node.register_timer(reference, scheduler.index());
-        }
+        scheduler
+            .node()
+            .register_timer(reference, scheduler.index());
     }
     Ok(Value(Term::Reference(reference)))
 }

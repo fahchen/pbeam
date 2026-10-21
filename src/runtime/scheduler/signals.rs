@@ -130,9 +130,7 @@ impl Scheduler {
             && let Some(index) = self.remote_owner(target)
         {
             let pending = self.take_pending_monitor(target).map(monitor_signal);
-            self.shared
-                .as_ref()
-                .expect("a remote target has a node")
+            self.node
                 .send_signal(index, target, sender, signal, pending);
             return Ok(());
         }
@@ -157,9 +155,7 @@ impl Scheduler {
         signal: Signal,
     ) {
         let pending = self.take_pending_monitor(target).map(monitor_signal);
-        self.shared
-            .as_ref()
-            .expect("a remote target has a node")
+        self.node
             .send_signal(index, target, sender, signal, pending);
     }
 
@@ -255,9 +251,7 @@ impl Scheduler {
             self.queue_signal(Some(pending.watcher), to, monitor_signal(pending));
         } else if let Some(index) = self.remote_owner(to) {
             let signal = monitor_signal(pending);
-            self.shared
-                .as_ref()
-                .expect("a remote target has a node")
+            self.node
                 .send_signal(index, to, Some(pending.watcher), signal, None);
         } else {
             self.pending_monitor_failed(sender, pending);

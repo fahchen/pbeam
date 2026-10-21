@@ -687,7 +687,7 @@ macro_rules! bifs {
                         | ("erts_internal", "prepare_loading")
                         | ("erts_internal", "purge_module")
                 );
-            if context.scheduler.shared().is_some() && local_service {
+            if context.scheduler.is_multi() && local_service {
                 return Err(error(format!(
                     "unsupported: {module}:{name}/{arity} in a run of execute_on_schedulers"
                 )));

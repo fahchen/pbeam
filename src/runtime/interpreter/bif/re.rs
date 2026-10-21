@@ -499,9 +499,10 @@ fn compile_result(
         .borrow_mut::<RegexCodes>()
         .0
         .insert(reference, code);
-    if let Some(node) = context.scheduler.shared() {
-        node.register_regex(reference, context.scheduler.index());
-    }
+    context
+        .scheduler
+        .node()
+        .register_regex(reference, context.scheduler.index());
     Ok(Term::tuple(vec![
         Term::static_atom("re_pattern"),
         Term::Integer(capture_count.into()),

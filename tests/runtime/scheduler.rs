@@ -1,6 +1,6 @@
 use super::{
     CONTEXT_REDS, ExitPhase, LinkId, MonitorOptions, MonitorTarget, RELEASE_BATCH, RELEASE_CHUNK,
-    Release, Scheduler, StartFlags, Turn,
+    Release, Scheduler, StartFlags, Turn, node::Node,
 };
 use crate::runtime::capability::{AllowAll, Capability, CapabilityKind, Denied, Policy};
 use crate::runtime::host::input::{Readiness, wait_readable};
@@ -384,8 +384,7 @@ fn ends_a_linked_process_and_rejects_counter_overflow() {
     assert_eq!(scheduler.into_run_result().0, Some(Err(atom("boom"))));
 
     let mut scheduler = Scheduler {
-        next_process_id: u64::MAX,
-        next_reference: u64::MAX,
+        node: Node::exhausted(),
         ..test_scheduler()
     };
     // The root process has the fixed pid 0, so the overflow comes at the
