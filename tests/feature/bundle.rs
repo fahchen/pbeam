@@ -426,3 +426,52 @@ fn reports_a_fixture_beam_that_the_layout_does_not_hold() {
     assert!(stderr.contains("cannot read"), "{stderr}");
     fs::remove_dir_all(&directory).unwrap();
 }
+
+/// Return the path of the gate fixture directory `name` in `fixtures/nif_gate`.
+fn nif_gate(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures/nif_gate")
+        .join(name)
+}
+
+#[test]
+fn runs_the_nif_manifest_gate_on_each_beam_file_of_a_directory() {
+    // The directory also holds the source, which the gate does not read.
+    let (status, stderr) = run(tool().arg("check-nifs").arg(nif_gate("ok")));
+    assert_eq!((status, stderr.as_str()), (Some(0), ""));
+
+    // The items of each fixture, in the order of the paths.
+    let (status, stderr) = run(tool().arg("check-nifs").arg(nif_gate("")));
+    assert_eq!(status, Some(1));
+    assert_eq!(
+        stderr,
+        "pbeam_bundle: the NIF manifest gate failed:\n\
+         nif_gate_dynamic: the library name of erlang:load_nif/2 is not a literal string\n\
+         nif_gate_dynamic: the library name of erlang:load_nif/2 is not a literal string\n\
+         prim_tty:isprint/1: NIF function has no PBeam binding\n\
+         prim_tty:wcwidth/1: NIF function has no PBeam binding\n\
+         nif_gate_library: NIF library \"priv/nif_gate_library\" has no PBeam bindings\n\
+         prim_tty:isprint/1: NIF function has no PBeam binding\n"
+    );
+}
+
+#[test]
+fn reports_the_usage_and_the_input_of_the_nif_manifest_gate() {
+    let (status, stderr) = run(tool().arg("check-nifs"));
+    assert_eq!(status, Some(1));
+    assert!(stderr.starts_with("usage:"), "{stderr}");
+
+    let directory = directory("check-nifs");
+    let (status, stderr) = run(tool().arg("check-nifs").arg(directory.join("missing")));
+    assert_eq!(status, Some(1));
+    assert!(stderr.contains("cannot read"), "{stderr}");
+
+    fs::write(directory.join("bad.beam"), b"not beam").unwrap();
+    let (status, stderr) = run(tool().arg("check-nifs").arg(&directory));
+    assert_eq!(status, Some(1));
+    assert!(
+        stderr.starts_with("pbeam_bundle: cannot load bad.beam:"),
+        "{stderr}"
+    );
+    fs::remove_dir_all(&directory).unwrap();
+}

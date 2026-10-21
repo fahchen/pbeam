@@ -10,7 +10,8 @@
 //! example modules and `pbeam_boot.beam` in `pbeam/`, the consolidated
 //! protocols in `releases/pbeam/consolidated/`, and each other module under
 //! its lib directory. A run of the output without arguments extracts the
-//! bundle and starts the entry from it.
+//! bundle and starts the entry from it. The `check-nifs` command runs the
+//! NIF manifest gate on each BEAM file of a directory before a bundle build.
 
 use std::{
     collections::BTreeMap,
@@ -20,7 +21,7 @@ use std::{
     process::ExitCode,
 };
 
-use pbeam_runtime::BundleWriter;
+use pbeam_runtime::{BeamModule, BundleWriter, nif_manifest_gaps};
 
 /// The magic of the trailer that follows the bundle at the end of the binary.
 const MAGIC: &[u8; 8] = b"PBEAMEMB";
@@ -38,7 +39,8 @@ const FIXTURE_VERSION: &str = "pbeam";
 const USAGE: &str =
     "usage: pbeam_bundle bundle <release-dir> <output> <entry-module> <entry-function> <start-list>
        pbeam_bundle fixture <output> <entry-module> <entry-function> <start-list> <beams-list> <consolidated-dir>
-       pbeam_bundle executable <runtime-binary> <bundle> <output>";
+       pbeam_bundle executable <runtime-binary> <bundle> <output>
+       pbeam_bundle check-nifs <directory>";
 
 fn main() -> ExitCode {
     let arguments: Vec<_> = env::args_os().skip(1).collect();
@@ -78,6 +80,13 @@ fn main() -> ExitCode {
             [runtime, bundle, output] => {
                 build_executable(Path::new(runtime), Path::new(bundle), Path::new(output))
             }
+            _ => {
+                eprintln!("{USAGE}");
+                return ExitCode::FAILURE;
+            }
+        },
+        Some("check-nifs") => match rest {
+            [directory] => check_nifs(Path::new(directory)),
             _ => {
                 eprintln!("{USAGE}");
                 return ExitCode::FAILURE;
@@ -295,6 +304,37 @@ fn module_name(path: &Path) -> String {
         .map(|name| name.to_string_lossy())
         .unwrap_or_default();
     file.strip_suffix(".beam").unwrap_or(&file).to_owned()
+}
+
+/// Run the NIF manifest gate on each BEAM file under `directory`, in the
+/// order of the paths. The result is an error that lists each NIF library
+/// and each `library:function/arity` that PBeam does not bind, one item on
+/// each line, or the error of a BEAM file that does not load.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(check_nifs(Path::new("fixtures/nif_gate/ok")).is_ok());
+/// // The error starts "the NIF manifest gate failed:" and names
+/// // "prim_tty:isprint/1: NIF function has no PBeam binding".
+/// assert!(check_nifs(Path::new("fixtures/nif_gate/missing_binding")).is_err());
+/// ```
+fn check_nifs(directory: &Path) -> Result<(), String> {
+    let mut files = BTreeMap::new();
+    collect(directory, directory, &mut files)?;
+    let mut gaps = Vec::new();
+    for (name, bytes) in files.iter().filter(|(name, _)| name.ends_with(".beam")) {
+        let module =
+            BeamModule::load(bytes).map_err(|error| format!("cannot load {name}: {error}"))?;
+        gaps.extend(nif_manifest_gaps(&module));
+    }
+    if gaps.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "the NIF manifest gate failed:\n{}",
+        gaps.join("\n")
+    ))
 }
 
 /// Write the binary, the bundle of `bundle`, and the trailer to `output`.
