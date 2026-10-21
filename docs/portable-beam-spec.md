@@ -46,7 +46,7 @@ The initial scope excludes:
 - A compiler frontend, Core/Kernel/SSA pipeline, LLVM/MLIR, AOT, and JIT.
 - Arena allocation or a replacement process heap/GC implementation.
 - Hot code upgrades, code replacement, code purge, multiple versions of a module, and loading a module from outside the loadable module set.
-- Traditional `erl_nif`/Rustler ABI compatibility and dynamically loaded native extension libraries.
+- Full `erl_nif`/Rustler ABI compatibility. One limited exception exists: the NIF ABI layer of `docs/adr/0001-unsafe-in-the-nif-abi-layer.md` loads a NIF shared library of NIF version 2.18 and gives it only the `enif_*` functions that a supported package calls.
 - Complete OTP compatibility as a prerequisite for the first application.
 - Rewriting BEAM instructions to replace native dependencies, or replacing an entire OTP application by default.
 
@@ -129,7 +129,7 @@ Privileged OTP services require an explicit authenticated request contract. Chec
 
 ### OTP and system dependencies
 
-NIF compatibility means behavioral compatibility at each required native boundary. It does not mean copying OTP's native source, using its dynamic NIF ABI, or implementing every NIF in OTP. Support the NIF MFAs reached by the selected application and pinned OTP/host targets. Expand that set only when a supported application requires more behavior. Record the OTP release, target, observed arguments and results, errors, and side effects for each supported binding.
+NIF compatibility means behavioral compatibility at each required native boundary. It does not mean copying OTP's native source or implementing every NIF in OTP. Static Rust bindings are the default. The limited NIF ABI layer of `docs/adr/0001-unsafe-in-the-nif-abi-layer.md` loads a NIF shared library only for a supported package that has no static binding. Support the NIF MFAs reached by the selected application and pinned OTP/host targets. Expand that set only when a supported application requires more behavior. Record the OTP release, target, observed arguments and results, errors, and side effects for each supported binding.
 
 For required OTP applications, first run their original `.beam` modules. Resolve ordinary calls through the code server; dispatch calls that reach an ERTS primitive or registered native leaf to the corresponding PBeam implementation. Do not patch bytecode or replace an OTP application merely because it uses a native dependency. This applies to `:httpc`, `:ssl`, and `:ssh` as a strategy, not as a claim that any of them runs on PBeam today.
 
@@ -209,11 +209,11 @@ def project do
 end
 ```
 
-A native build step links the declared implementations into the application executable and registers them; the exact mechanism follows the native work. Startup does not locate or load extension `.so`, `.dylib`, or `.dll` files.
+A native build step links the declared implementations into the application executable and registers them; the exact mechanism follows the native work. Startup does not locate or load extension `.so`, `.dylib`, or `.dll` files, except a NIF shared library that the NIF ABI layer of `docs/adr/0001-unsafe-in-the-nif-abi-layer.md` loads for a supported package.
 
 Missing required implementations and conflicting native registrations must be diagnosed before application execution. The exact validation mechanism remains open.
 
-Build-time inspection should inventory required OTP modules, imports, native declarations, and other observed native dependencies, then check them against bundled BEAM code and registered Rust implementations. An import alone does not prove that a function is native or that every dynamic call is reachable. Record such limits, and report a required third-party NIF with no replacement as unsupported rather than assuming its original native library can load.
+Build-time inspection should inventory required OTP modules, imports, native declarations, and other observed native dependencies, then check them against bundled BEAM code and registered Rust implementations. An import alone does not prove that a function is native or that every dynamic call is reachable. Record such limits, and report a required third-party NIF with no replacement as unsupported rather than assuming its original native library can load. The one exception is a supported package whose NIF shared library the ADR 0001 layer loads; the build check verifies its library and functions against that layer.
 
 Automatic `FromTerm`/`IntoTerm` conversions and attribute macros may follow when manual bindings become repetitive. Async native functions use the suspension/completion model above; they must not call blocking `block_on` on scheduler threads.
 
