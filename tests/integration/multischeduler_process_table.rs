@@ -46,7 +46,8 @@ fn lists_the_processes_of_the_node_from_each_scheduler() {
 
 /// After the exit of a process of the other scheduler, the process list,
 /// the process iterator, and `is_process_alive/1` do not find it on either
-/// scheduler.
+/// scheduler. The monitor of the watcher reaches the process before the
+/// kill of the other root, so the `DOWN` reason is `killed`.
 #[test]
 fn finds_no_exited_process_on_either_scheduler() {
     run_pair("gone_a", "gone_b");
