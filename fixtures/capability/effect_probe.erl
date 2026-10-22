@@ -542,6 +542,7 @@ ambient() ->
         null_read(),
         buffer(),
         erts_internal:processes_next(1048576),
+        erts_internal:is_system_process(Self),
         attempt(fun() -> erts_internal:purge_module(effect_probe_missing, complete) end),
         erts_internal:request_system_task(Self, normal, {check_process_code, Name, lists}),
         receive {check_process_code, Name, Refers} -> Refers end,

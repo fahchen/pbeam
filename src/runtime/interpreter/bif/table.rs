@@ -392,7 +392,7 @@ bifs! {
     erts_internal:group_leader/3 as ErtsInternalGroupLeader3 => |cx, [leader, target, reference]| erts_internal::group_leader_request(cx, leader, target, reference),
     erts_internal:is_process_alive/2 as ErtsInternalIsProcessAlive2 => |cx, [pid, reference]| erts_internal::is_process_alive(cx, pid, reference),
     erts_internal:is_process_executing_dirty/1 => unsupported,
-    erts_internal:is_system_process/1 => unsupported,
+    erts_internal:is_system_process/1 as ErtsInternalIsSystemProcess1 => |cx, [pid]| Ok(erts_internal::is_system_process(cx.scheduler, pid)),
     erts_internal:list_to_integer/2 as ErtsInternalListToInteger2 => |_, [list, base]| Ok(erts_internal::list_to_integer(list, base)),
     erts_internal:map_hashmap_children/1 => unsupported,
     erts_internal:map_next/3 as ErtsInternalMapNext3 => |cx, [path, map, acc]| maps::map_next(cx.scheduler.current_process_mut(), path, map, acc),

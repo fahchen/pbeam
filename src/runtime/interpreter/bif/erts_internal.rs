@@ -1365,6 +1365,33 @@ pub(super) fn scheduler_wall_time(
     })
 }
 
+/// Run `erts_internal:is_system_process(Pid)`, which `init` calls for each
+/// process when it kills the processes at a stop (`init.erl:1082-1093`), as
+/// `erts_internal_is_system_process_1` (`erl_bif_info.c:4932-4947`) does:
+/// `true` for a live process with the system flag, `false` for each other
+/// pid, and `badarg` for a term that is not a pid. The exit of a system
+/// process stops the run, so each process of [`Scheduler::is_system`] is
+/// live. The set of system processes is per scheduler, so a system process
+/// of another scheduler thread gives `false` (row "Node boot" of
+/// `docs/erts-differences.md`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(is_system_process(&mut scheduler, &Term::Pid(init)), BifResult::Value(Term::Atom(atom)) if atom.is_static("true")));
+/// assert!(matches!(is_system_process(&mut scheduler, &Term::Integer(1)), BifResult::Raise { .. }));
+/// ```
+pub(super) fn is_system_process(scheduler: &mut Scheduler, pid: &Term) -> BifResult {
+    match pid {
+        Term::Pid(id) => Value(Term::static_atom(if scheduler.is_system(*id) {
+            "true"
+        } else {
+            "false"
+        })),
+        _ => BifResult::badarg(),
+    }
+}
+
 /// The indices of the ERTS process table that `erts_internal:processes_next/1`
 /// reads for each pid that it can give, and for one reduction
 /// (`ERTS_PTAB_REDS_MULTIPLIER`, `erl_ptab.c:1470`).

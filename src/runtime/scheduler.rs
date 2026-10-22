@@ -588,6 +588,18 @@ impl Scheduler {
         self.system.insert(id);
     }
 
+    /// Return true when the process `id` is a system process of this
+    /// scheduler (see [`Self::system`]).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(!scheduler.is_system(pid));
+    /// ```
+    pub(super) fn is_system(&self, id: ProcessId) -> bool {
+        self.system.contains(&id)
+    }
+
     /// Mark the root process as a system process, before it starts, as ERTS
     /// starts its first process `init` (`erl_init.c:355-399`).
     ///
