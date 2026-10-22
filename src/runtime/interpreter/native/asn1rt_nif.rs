@@ -250,7 +250,8 @@ impl Per<'_> {
 
     /// `per_insert_octets_as_bits` (`asn1_erl_nif.c:659-693`): each byte
     /// must be 0 or 1. The C function returns `(used_bits + no_bytes) / 8`
-    /// after its loop counts `no_bytes` down.
+    /// after its loop counts `no_bytes` down; with `unused` from 16 to 23,
+    /// that value is -1, which the callers take as `ASN1_ERROR`.
     fn insert_octets_as_bits(&mut self, mut no_bytes: i32) -> Option<i32> {
         let used_bits = 8 - self.unused;
         while no_bytes > 0 {
@@ -261,7 +262,7 @@ impl Per<'_> {
             };
             no_bytes -= 1;
         }
-        Some((used_bits + no_bytes) / 8)
+        checked((used_bits + no_bytes) / 8)
     }
 
     /// `per_insert_octets` (`asn1_erl_nif.c:699-719`).
@@ -298,13 +299,15 @@ impl Per<'_> {
         no_bytes
     }
 
-    /// `per_insert_octets_except_unused` (`asn1_erl_nif.c:748-789`).
-    fn insert_octets_except_unused(&mut self, no_bytes: i32, in_unused: i32) -> i32 {
+    /// `per_insert_octets_except_unused` (`asn1_erl_nif.c:748-789`). With
+    /// `in_unused` other than 0 and `no_bytes` 0, the inner call returns
+    /// -1, which is `ASN1_ERROR`.
+    fn insert_octets_except_unused(&mut self, no_bytes: i32, in_unused: i32) -> Option<i32> {
         let unused = self.unused;
         if in_unused == 0 {
-            return self.insert_octets_unaligned(no_bytes, unused);
+            return checked(self.insert_octets_unaligned(no_bytes, unused));
         }
-        let mut ret = self.insert_octets_unaligned(no_bytes - 1, unused);
+        let mut ret = checked(self.insert_octets_unaligned(no_bytes - 1, unused))?;
         let val = self.next();
         let no_bits = 8 - in_unused;
         self.or(shr(val, 8 - unused));
@@ -320,8 +323,18 @@ impl Per<'_> {
             self.or(shl(val, unused));
             self.unused = 8 - (no_bits - unused);
         }
-        ret
+        Some(ret)
     }
+}
+
+/// The C value `ASN1_ERROR` (`asn1_erl_nif.c:31`).
+const ASN1_ERROR: i32 = -1;
+
+/// Return `None` for a helper result that is `ASN1_ERROR`, as each
+/// `== ASN1_ERROR` check of the C code does. A count can equal -1, and the
+/// C code then takes it as the error.
+fn checked(ret: i32) -> Option<i32> {
+    (ret != ASN1_ERROR).then_some(ret)
 }
 
 /// The C `int` shift `value << amount`. The shift instructions of the
@@ -402,7 +415,9 @@ fn per_complete(input: &[u8]) -> Option<Vec<u8>> {
                 if counter < 0 {
                     return None;
                 }
-                buf_space -= i64::from(per.insert_octets_except_unused(no_bytes, in_unused));
+                buf_space -= i64::from(checked(
+                    per.insert_octets_except_unused(no_bytes, in_unused)?,
+                )?);
             }
             40..=43 | 45..=47 => {
                 let wide_desired = matches!(opcode, 42 | 43 | 46 | 47);
@@ -426,7 +441,7 @@ fn per_complete(input: &[u8]) -> Option<Vec<u8>> {
                     return None;
                 }
                 let ret = if opcode < 45 {
-                    per.insert_octets_as_bits_exact_len(desired_len, no_bytes)?
+                    checked(per.insert_octets_as_bits_exact_len(desired_len, no_bytes)?)?
                 } else {
                     per.insert_bits_as_bits(desired_len, no_bytes)
                 };
