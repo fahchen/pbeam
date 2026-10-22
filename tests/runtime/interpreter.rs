@@ -5807,7 +5807,9 @@ fn rejects_a_copied_list_insert_into_a_protected_bag_of_another_owner() {
             ],
         )
         .unwrap();
-    assert!(matches!(result, BifResult::Raise { .. }));
+    assert!(
+        matches!(result, BifResult::ErrorWithCause { cause, .. } if cause == Term::static_atom("access"))
+    );
 }
 
 #[test]
@@ -6028,7 +6030,9 @@ fn rejects_a_select_delete_of_a_private_table_of_another_process() {
             vec![Term::Reference(Reference(0)), spec],
         )
         .unwrap();
-    assert!(matches!(result, BifResult::Raise { .. }));
+    assert!(
+        matches!(result, BifResult::ErrorWithCause { cause, .. } if cause == Term::static_atom("access"))
+    );
 }
 
 #[test]

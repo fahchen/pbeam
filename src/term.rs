@@ -1099,6 +1099,17 @@ pub struct Reference(pub(crate) u64);
 /// in the number `N2` of [`Reference::numbers`].
 const PID_REFERENCE_MARKER: u64 = 1 << 63;
 
+/// The bit of a reference value that marks an ETS table identifier. ERTS
+/// makes the table identifier a magic reference whose binary has the
+/// destructor `db_table_tid_destructor`, and the identifier of a deleted
+/// table keeps it (`tid2tab`, `erl_db.c:280-306`). The reference counter
+/// stays below this bit. The bit shows in the number `N2` of
+/// [`Reference::numbers`].
+const TABLE_REFERENCE_MARKER: u64 = 1 << 62;
+
+/// The marker bits of a reference value.
+const REFERENCE_MARKERS: u64 = PID_REFERENCE_MARKER | TABLE_REFERENCE_MARKER;
+
 /// The mask of the first reference number (`REF_MASK`, 18 bits).
 const REF_NUMBER_0_MASK: u64 = 0x3_FFFF;
 /// The mask of the counter bits in the second reference number
@@ -1147,6 +1158,29 @@ impl Reference {
         self.0 & PID_REFERENCE_MARKER != 0
     }
 
+    /// Return the table identifier with the counter value of the ordinary
+    /// reference `self`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(Reference(0).table_reference().is_table_reference());
+    /// ```
+    pub(crate) fn table_reference(self) -> Self {
+        Reference(self.0 | TABLE_REFERENCE_MARKER)
+    }
+
+    /// Return true for an ETS table identifier, live or deleted.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(!Reference(0).is_table_reference());
+    /// ```
+    pub(crate) fn is_table_reference(self) -> bool {
+        self.0 & TABLE_REFERENCE_MARKER != 0
+    }
+
     /// Return the three ERTS reference numbers `[N0, N1, N2]` of the
     /// reference. ERTS makes them from a 64-bit counter value of a
     /// scheduler (`erts_set_ref_numbers`, `erl_bif_unique.h:117-131`): `N0` is the
@@ -1176,9 +1210,9 @@ impl Reference {
 
 impl Ord for Reference {
     /// Compare the counter values, so that the order is the creation order
-    /// also for a pid reference.
+    /// also for a pid reference and a table identifier.
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        (self.0 & !PID_REFERENCE_MARKER).cmp(&(other.0 & !PID_REFERENCE_MARKER))
+        (self.0 & !REFERENCE_MARKERS).cmp(&(other.0 & !REFERENCE_MARKERS))
     }
 }
 

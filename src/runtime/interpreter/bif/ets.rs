@@ -3,7 +3,7 @@
 use super::BifResult::Value;
 use super::*;
 use crate::runtime::ets::pattern::{MatchSpec, SpecError};
-use crate::runtime::ets::{Access, Busy, ITERATIONS_PER_RED, Lacking, Table, TableType};
+use crate::runtime::ets::{Access, Busy, EtsTables, ITERATIONS_PER_RED, Lacking, Table, TableType};
 use crate::term::Reference;
 use num_bigint::BigInt;
 use std::sync::Arc;
@@ -258,7 +258,7 @@ pub(super) fn new(
         return Ok(BifResult::badarg());
     }
     let owner = context.scheduler.current_process_mut().id;
-    let table = context.scheduler.make_ref()?;
+    let table = context.scheduler.make_ref()?.table_reference();
     let mut made = Table::new(owner, access, keypos, table_type);
     made.set_name(context.scheduler.atoms.name_of(name));
     let name = named.then_some(name);
@@ -392,7 +392,7 @@ fn insert_objects(
         let store = Arc::clone(&context.scheduler.ets);
         let ets = store.shared();
         let Some((id, found)) = ets.find(&context.scheduler.atoms, table) else {
-            return Ok(denied(ets.missing(table)));
+            return Ok(denied(EtsTables::missing(table)));
         };
         let (keypos, bag) = (found.keypos(), found.table_type() == TableType::Bag);
         drop(found);
@@ -402,6 +402,7 @@ fn insert_objects(
             bag: bag.then(Term::nil),
             check: Check::Rest(objects.clone()),
             new: if new { New::Unlocked } else { New::No },
+            refused: None,
         };
         return insert_list(context, id, objects, keypos, state);
     }
@@ -520,7 +521,7 @@ fn insert_objects(
 /// process.fcalls = 10;
 /// let objects = Term::list_from(vec![Term::tuple(vec![test_atom("k")]); 8]);
 /// // 8 units of the check and 16 units of the insert: 3 reductions.
-/// let state = ListState { done: 0, bag: None, check: Check::Rest(objects.clone()), new: New::No };
+/// let state = ListState { done: 0, bag: None, check: Check::Rest(objects.clone()), new: New::No, refused: None };
 /// assert!(matches!(insert_list(&mut context, id, &objects, 1, state)?, BifResult::Value(_)));
 /// assert_eq!(context.scheduler.current_process_mut().fcalls, 7);
 /// ```
@@ -541,6 +542,7 @@ pub(super) fn insert_list(
         mut bag,
         mut check,
         mut new,
+        mut refused,
     } = state;
     let table = Term::Reference(id);
     let inserting = |bag: &Option<Term>| bag.as_ref().is_some_and(|steps| !steps.is_nil());
@@ -718,7 +720,10 @@ pub(super) fn insert_list(
                     }
                     took = true;
                 }
-                Err(Lacking::Denied(_)) => done = 4 * count,
+                Err(Lacking::Denied(cause)) => {
+                    done = 4 * count;
+                    refused = Some(cause);
+                }
             }
         }
         if took || global {
@@ -737,14 +742,11 @@ pub(super) fn insert_list(
         if !units.run(&mut done, 5 * count) {
             break 'work None;
         }
-        // The refused table keeps the cause of the refusal across the
-        // yields of the free (`erl_db.c:2076-2088`): a live table refused
-        // the access.
-        let ets = context.scheduler.ets.shared();
-        Some(denied(match ets.id(&context.scheduler.atoms, &table) {
-            Some(_) => "access",
-            None => ets.missing(&table),
-        }))
+        // The call keeps the cause of the refusal across the yields of the
+        // free (`erl_db.c:2076-2088`).
+        Some(denied(
+            refused.expect("only a refused insert frees its copies"),
+        ))
     };
     let process = context.scheduler.current_process_mut();
     process.bump_reductions(((budget - units.left) / ITERATIONS_PER_RED) as i32);
@@ -754,7 +756,12 @@ pub(super) fn insert_list(
             objects.clone(),
             Term::Integer(done as i64),
             Term::Integer(i64::from(keypos)),
-            bag.unwrap_or_else(|| Term::static_atom("false")),
+            // A refused insert keeps no `bag` steps, and the slot keeps the
+            // cause of the refusal.
+            match refused {
+                Some(cause) => Term::static_atom(cause),
+                None => bag.unwrap_or_else(|| Term::static_atom("false")),
+            },
             check.into_term(),
         ];
         let function = match new.into_term() {
@@ -783,6 +790,9 @@ pub(super) struct ListState {
     pub(super) check: Check,
     /// The `ets:insert_new/2` state.
     pub(super) new: New,
+    /// The `error_info` cause of the table that refused the insert, which
+    /// the call raises after it frees its copies (`erl_db.c:2076-2088`).
+    pub(super) refused: Option<&'static str>,
 }
 
 /// The `ets:insert_new/2` state of a list insert ([`insert_list`]).
@@ -1748,7 +1758,7 @@ fn select_objects(
     let store = Arc::clone(&context.scheduler.ets);
     let ets = store.shared();
     let Some(id) = ets.id(atoms, table) else {
-        return Ok(denied(ets.missing(table)));
+        return Ok(denied(EtsTables::missing(table)));
     };
     let table = match ets.read(atoms, &Term::Reference(id), caller, reds) {
         Ok(table) => table,
@@ -1973,7 +1983,7 @@ pub(super) fn select_continue(
     let store = Arc::clone(&context.scheduler.ets);
     let ets = store.shared();
     let Some(id) = ets.id(atoms, table) else {
-        return Ok(denied(ets.missing(table)));
+        return Ok(denied(EtsTables::missing(table)));
     };
     let found = match ets.read(atoms, &Term::Reference(id), caller, reds) {
         Ok(table) => table,
@@ -2694,7 +2704,7 @@ pub(super) fn internal_delete_all(
     let store = Arc::clone(&context.scheduler.ets);
     let ets = store.shared();
     let Some(id) = ets.id(atoms, table) else {
-        return Ok(denied(ets.missing(table)));
+        return Ok(denied(EtsTables::missing(table)));
     };
     let mut found = match ets.write(atoms, table, caller, left) {
         Ok(table) => table,
@@ -2779,7 +2789,7 @@ pub(super) fn internal_select_delete(
     let store = Arc::clone(&context.scheduler.ets);
     let ets = store.shared();
     let Some(found) = ets.find(atoms, table) else {
-        return Ok(denied(ets.missing(table)));
+        return Ok(denied(EtsTables::missing(table)));
     };
     reject_ordered_set(&found.1, "ets:select_delete/2")?;
     drop(found);
