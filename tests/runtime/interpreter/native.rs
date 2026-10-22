@@ -182,6 +182,8 @@ fn registry_is_sorted_and_matches_the_exact_mfa() {
     assert!(!has_binding("prim_file", "sync_nif", 2));
     assert!(has_binding("zlib", "inflate_nif", 4));
     assert!(!has_binding("zlib", "deflateParams_nif", 3));
+    assert!(has_binding("zstd", "compress_stream_nif", 3));
+    assert!(!has_binding("zstd", "create_cdict_nif", 2));
 }
 
 /// Return whether the library of `module` has a binding of exactly
@@ -192,9 +194,7 @@ fn has_binding(module: &str, name: &str, arity: u32) -> bool {
 
 /// The NIF functions of the static libraries whose pinned-OTP `ErlNifFunc`
 /// has a dirty job flag (erl_nif.h:239-243), with the job of the flag. Each
-/// other function has no flag and runs on a normal scheduler. The `zstd`
-/// flags (zstd_nif.c:1086-1109) are not listed: PBeam has no `zstd`
-/// binding.
+/// other function has no flag and runs on a normal scheduler.
 const DIRTY_FUNCTIONS: &[(&str, &str, u32, Job)] = &[
     // prim_file_nif.c:179-218: each function except `get_handle_nif/1`
     // (prim_file_nif.c:215).
@@ -233,12 +233,17 @@ const DIRTY_FUNCTIONS: &[(&str, &str, u32, Job)] = &[
     // prim_tty_nif.c:161, 163.
     ("prim_tty", "write_nif", 2, Job::IoBound),
     ("prim_tty", "read_nif", 3, Job::IoBound),
+    // zstd_nif.c:1086-1087, 1093-1094, 1108-1109.
+    ("zstd", "load_compress_dictionary_nif", 2, Job::CpuBound),
+    ("zstd", "load_decompress_dictionary_nif", 2, Job::CpuBound),
+    ("zstd", "create_cdict_nif", 2, Job::CpuBound),
+    ("zstd", "create_ddict_nif", 1, Job::CpuBound),
 ];
 
 /// Each static binding has the job of the flag of its pinned-OTP
 /// `ErlNifFunc`: `crypto` (crypto.c:69-103), `prim_buffer`
-/// (prim_buffer_nif.c:87-95), and `zlib` (zlib_nif.c:148-176) have no
-/// flag on a bound function.
+/// (prim_buffer_nif.c:87-95), `zlib` (zlib_nif.c:148-176), and `zstd`
+/// (zstd_nif.c:1082-1116) have no flag on a bound function.
 #[test]
 fn each_binding_has_the_job_of_its_pinned_flag() {
     for &(module, name, arity, _) in DIRTY_FUNCTIONS {

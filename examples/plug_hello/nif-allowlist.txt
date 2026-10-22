@@ -161,24 +161,13 @@ prim_tty:tinfo_nif/0
 prim_tty:tigetstr_nif/1
 prim_tty:tputs_nif/2
 
-reason: Bandit calls the zstd module only for a request whose Accept-Encoding accepts zstd. Such a request fails with the runtime error `zstd:init_compress_nif/0 NIF is not supported`. This is a known gap.
-zstd:init_compress_nif/0
-zstd:init_decompress_nif/0
+reason: Bandit compresses a response with a zstd context, and plug_hello uses no zstd dictionary and reads no zstd parameter. A call of one of these fails with the runtime error `zstd:F/A NIF is not supported`.
 zstd:load_compress_dictionary_nif/2
 zstd:ref_compress_dictionary_nif/2
-zstd:set_compress_parameter_nif/3
 zstd:get_compress_parameter_nif/2
-zstd:set_pledged_src_size_nif/2
 zstd:load_decompress_dictionary_nif/2
 zstd:ref_decompress_dictionary_nif/2
-zstd:set_decompress_parameter_nif/3
 zstd:get_decompress_parameter_nif/2
-zstd:compress_stream_nif/3
-zstd:decompress_stream_nif/3
-zstd:compress_reset_nif/1
-zstd:decompress_reset_nif/1
-zstd:compress_close_nif/1
-zstd:decompress_close_nif/1
 zstd:create_cdict_nif/2
 zstd:create_ddict_nif/1
 zstd:getDictId_fromCDict_nif/1

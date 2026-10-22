@@ -14,7 +14,7 @@
 //! function runs it. Each OTP module has one submodule that holds the
 //! function table of its library and registers its bindings in
 //! `BINDINGS`, and `LIBRARIES` registers each such list under its module.
-//! A library without bindings, such as `zstd`, has only the function table:
+//! A library without bindings, such as `erl_tracer`, has only the function table:
 //! `erlang:load_nif/2` checks it, and each call of a function in it gives
 //! the runtime error of `Library::unbound_fails`.
 //!
@@ -200,7 +200,7 @@ const LIBRARIES: &[Library] = &[
     Library {
         module: "zstd",
         functions: &zstd::FUNCTIONS,
-        bindings: &[],
+        bindings: zstd::BINDINGS,
         load: None,
         unbound_fails: true,
     },

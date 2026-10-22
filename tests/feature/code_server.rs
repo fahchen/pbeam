@@ -32,6 +32,9 @@ const CRYPTO_STAND_IN: &str = "fixtures/crypto/crypto";
 /// without bindings in `fixtures/nif_libraries`.
 const NIF_LIBRARY_PROBE: &str = "fixtures/nif_libraries/nif_library_probe";
 
+/// The probe of the `zstd` contexts, which loads the pinned `zstd`.
+const ZSTD_PROBE: &str = "fixtures/zstd/zstd_probe";
+
 /// The code path directory of the runs. It has `code_server_target.beam`,
 /// which no run loads at its start.
 const CODE_PATH: &str = "fixtures/code_server";
@@ -280,6 +283,55 @@ fn stops_with_a_runtime_error_for_a_nif_of_the_pinned_zstd() {
             && stderr.contains("zstd:get_frame_header_nif/1 NIF is not supported"),
         "{stderr}"
     );
+}
+
+#[test]
+fn runs_the_zstd_contexts_as_pinned_erts() {
+    // Each line is one case of the probe: its label and the hex text of the
+    // external term format of its result. The results hold the compressed
+    // and decompressed bytes, the iodata shape of each output, and each
+    // exception class and reason (zstd_nif.c:100-827). libzstd 1.5.7 of
+    // `zstd-sys` is the version that pinned ERTS vendors, so the compressed
+    // bytes are the same.
+    let erts = run(&mut erts_probe(ZSTD_PROBE, "zstd_probe", "main", &[]));
+    let pbeam = run(&mut pbeam_probe(ZSTD_PROBE, "zstd_probe", "main", &[]));
+    assert_eq!(pbeam.lines().count(), erts.lines().count());
+    for (pbeam, erts) in pbeam.lines().zip(erts.lines()) {
+        let label = erts.rsplit_once(' ').unwrap().0;
+        assert!(pbeam == erts, "the case {label} differs");
+    }
+}
+
+#[test]
+fn stops_with_a_runtime_error_for_each_unsupported_zstd_call() {
+    // The dictionary functions and the parameter reads have no binding, and
+    // the safe API of libzstd cannot set the `default` strategy again.
+    for (function, expected) in [
+        (
+            "unsupported_dictionary",
+            "zstd:load_compress_dictionary_nif/2 NIF is not supported",
+        ),
+        (
+            "unsupported_get_parameter",
+            "zstd:get_compress_parameter_nif/2 NIF is not supported",
+        ),
+        (
+            "unsupported_default_strategy",
+            "zstd:set_compress_parameter_nif/3 cannot set the default strategy after another \
+             strategy",
+        ),
+    ] {
+        let output = pbeam_probe(ZSTD_PROBE, "zstd_probe", function, &[])
+            .env("TERM", "dumb")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            !output.status.success() && stderr.contains(expected),
+            "{function}: {stderr}"
+        );
+    }
 }
 
 #[test]
