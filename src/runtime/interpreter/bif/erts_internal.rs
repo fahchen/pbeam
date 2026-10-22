@@ -1498,8 +1498,8 @@ pub(super) fn processes_next(
 /// runs the check when the process `Pid` next runs. PBeam runs it at once
 /// for a process of the scheduler of the caller (row "Code loading" of
 /// `docs/erts-differences.md`). A process of another scheduler of a run
-/// with scheduler threads gets the signal `CheckProcessCode` through the
-/// inbox of its scheduler, and replies when it handles the signal.
+/// with scheduler threads gets the request through the inbox of its
+/// scheduler, which runs the check at once when it drains the inbox.
 ///
 /// # Examples
 ///
@@ -1565,12 +1565,8 @@ pub(super) fn request_system_task(
     // signal, as an ERTS process runs its system task
     // (`erl_process.c:11309-11492`).
     if let Some(index) = scheduler.remote_owner(*target) {
-        let signal = Signal::CheckProcessCode {
-            requester: caller,
-            tag: id.clone(),
-            module: module.clone(),
-        };
-        scheduler.send_signal_to_owner(index, Some(caller), *target, signal);
+        let node = scheduler.node();
+        node.check_process_code(index, *target, caller, id.clone(), module.clone());
         return Ok(Value(Term::static_atom("ok")));
     }
     let refers = scheduler.check_process_code(*target, module);

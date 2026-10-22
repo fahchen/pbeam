@@ -2858,6 +2858,15 @@ impl Scheduler {
                     // with `am_system` does (`sys.c:589-607`).
                     self.deliver(target, term);
                 }
+                Delivery::CheckProcessCode {
+                    target,
+                    requester,
+                    tag,
+                    module,
+                } => {
+                    let refers = self.check_process_code(target, &module);
+                    self.send_message(target, requester, check_process_code_reply(tag, refers));
+                }
                 Delivery::Signal {
                     target,
                     sender,
@@ -3851,13 +3860,14 @@ mod steal;
 mod tcp_inet;
 mod tcp_stream;
 
+pub(super) use code::check_process_code_reply;
 use known_nodes::KnownNodes;
 use node::{Delivery, Node};
 pub(super) use policy::PolicyEnd;
 use policy::PolicyProcess;
 use process_slots::ProcessSlots;
 use run_queue::RunQueue;
-pub(super) use signals::{Flushed, HandlingPoint, Received, check_process_code_reply};
+pub(super) use signals::{Flushed, HandlingPoint, Received};
 
 #[cfg(test)]
 #[path = "../../tests/runtime/scheduler.rs"]

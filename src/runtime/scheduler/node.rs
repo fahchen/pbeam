@@ -54,6 +54,20 @@ pub(in crate::runtime) enum Delivery {
     /// of a fixation on a table that another process deleted
     /// (`erts_schedule_ets_free_fixation`, `erl_db.c:5263-5301`).
     Cleanup { target: ProcessId },
+    /// The `check_process_code` system task of
+    /// `erts_internal:request_system_task/3` for the process `target` of
+    /// this scheduler (`erl_process.c:11309-11492`). The receiver runs the
+    /// check at once, as for a process of the scheduler of the caller, and
+    /// sends `{check_process_code, Tag, Result}` to `requester`: `true`
+    /// when the process has a frame in the old code of `module`
+    /// (`beam_bif_load.c:1149-1212`), and `false` for a process that is
+    /// gone or exits (`erl_process.c:11425-11433`).
+    CheckProcessCode {
+        target: ProcessId,
+        requester: ProcessId,
+        tag: Term,
+        module: crate::term::Atom,
+    },
     /// A cancel of the BIF timer `reference` of this scheduler, which
     /// another scheduler took from the node timer table. The receiver
     /// removes the timer from its timer wheel.
@@ -463,6 +477,34 @@ impl Node {
                 .lock()
                 .expect("the scheduler inbox is not poisoned")
                 .push_back(Delivery::Cleanup { target });
+            inbox
+        });
+        wake(&inbox.wake);
+    }
+
+    /// Put the `check_process_code` request of `requester` for `target` into
+    /// the inbox of its scheduler. The scheduler is read as
+    /// [`Self::send_message`] reads it.
+    pub(in crate::runtime) fn check_process_code(
+        &self,
+        index: usize,
+        target: ProcessId,
+        requester: ProcessId,
+        tag: Term,
+        module: crate::term::Atom,
+    ) {
+        let inbox = self.processes.with_owner(target, |owner| {
+            let inbox = &self.inboxes[owner.unwrap_or(index)];
+            inbox
+                .queue
+                .lock()
+                .expect("the scheduler inbox is not poisoned")
+                .push_back(Delivery::CheckProcessCode {
+                    target,
+                    requester,
+                    tag,
+                    module,
+                });
             inbox
         });
         wake(&inbox.wake);

@@ -2487,49 +2487,24 @@ fn a_scheduler_registers_a_name_for_a_remote_process() {
 }
 
 #[test]
-fn answers_a_check_process_code_signal_while_alive_and_at_exit() {
-    use super::signals::HandlingPoint;
-    // A process with no frame in old code replies `false` when it handles
-    // the signal, and an exiting or a dead process replies `false` for a
-    // signal that it did not handle (`erl_process.c:11478-11483`).
-    let mut scheduler = test_scheduler();
+fn answers_a_check_process_code_request_of_another_scheduler() {
+    // The scheduler of the target runs the check when it drains its inbox:
+    // a live process with no frame in old code and a process that is gone
+    // give `false` (`erl_process.c:11425-11433`).
+    let (node, mut readers) = Node::new(1).unwrap();
+    let mut scheduler = Scheduler::with_shared(
+        Arc::new(AtomTable::new()),
+        Arc::clone(&node),
+        0,
+        readers.remove(0),
+    );
     scheduler.start(frame(), vec![], allow_all()).unwrap();
-    scheduler.schedule_next().unwrap();
     let root = ProcessId(0);
-    let spawn = |scheduler: &mut Scheduler| {
-        scheduler
-            .spawn(
-                Start::Entry(frame()),
-                vec![],
-                None,
-                false,
-                StartFlags::default(),
-                None,
-            )
-            .unwrap()
-            .unwrap()
-            .0
-    };
-    let request = |tag: i64| Signal::CheckProcessCode {
-        requester: root,
-        tag: Term::Integer(tag),
-        module: Atom::from_static("erlang").unwrap(),
-    };
-    let alive = spawn(&mut scheduler);
-    scheduler
-        .send_signal_local(Some(root), alive, request(1))
-        .unwrap();
-    scheduler
-        .handle_signals(alive, 100, 100, HandlingPoint::ScheduleIn)
-        .unwrap();
-    let exiting = spawn(&mut scheduler);
-    scheduler
-        .send_signal_local(Some(root), exiting, request(2))
-        .unwrap();
-    let mut process = scheduler.processes.remove(&exiting).unwrap();
-    process.mailbox.fetch();
-    assert!(scheduler.handle_exit_signals(&mut process, 100).unwrap());
-    scheduler.dead_target_signal(ProcessId(99), request(3));
+    for (target, tag) in [(root, 1), (ProcessId(99), 2)] {
+        let module = Atom::from_static("erlang").unwrap();
+        node.check_process_code(0, target, root, Term::Integer(tag), module);
+    }
+    scheduler.drain_inbox();
     let reply = |tag: i64| {
         Term::tuple(vec![
             atom("check_process_code"),
@@ -2537,5 +2512,5 @@ fn answers_a_check_process_code_signal_while_alive_and_at_exit() {
             atom("false"),
         ])
     };
-    assert_eq!(messages(&scheduler, 0), vec![reply(1), reply(2), reply(3)]);
+    assert_eq!(messages(&scheduler, 0), vec![reply(1), reply(2)]);
 }
