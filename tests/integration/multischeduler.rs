@@ -582,21 +582,34 @@ fn rejects_a_monitor_of_a_port_of_another_scheduler() {
     );
 }
 
-/// An atomic array in a run with scheduler threads fails with a clear
-/// error.
+/// Two roots on two schedulers add to one counter array and one unsigned
+/// atomic array. The pinned ERTS on `erl +S 10`, with the roots on the
+/// schedulers 1 and 2, gives `{8, 18446744073709551615}` and `ok`.
 #[test]
-fn rejects_an_atomic_array() {
-    let erts_internal = pinned_beam("erts_internal");
-    let program = BeamProgram::load(&[&erts_internal, PING_PONG]).expect("the fixture loads");
-    let error = program
-        .execute_on_schedulers(&[("ping_pong", "atomics_new"), ("ping_pong", "info_hold")])
-        .expect_err("atomic arrays are unsupported");
-    assert!(
-        error
-            .to_string()
-            .contains("unsupported: erts_internal:atomics_new/2 in a run of execute_on_schedulers"),
-        "{error}"
+fn shares_an_atomic_array_between_schedulers() {
+    let program = BeamProgram::load(&[
+        &pinned_beam("erts_internal"),
+        &pinned_beam("counters"),
+        &pinned_beam("atomics"),
+        PING_PONG,
+    ])
+    .expect("the fixture loads");
+    let ok_atom = program.atom("ok").expect("the fixture names ok");
+    let results = program
+        .execute_on_schedulers(&[
+            ("ping_pong", "counters_hold"),
+            ("ping_pong", "counters_add"),
+        ])
+        .expect("the two schedulers run");
+    assert_eq!(
+        results[0].term,
+        Term::tuple(vec![
+            Term::Integer(8),
+            Term::BigInt(std::sync::Arc::new(num_bigint::BigInt::from(u64::MAX))),
+        ]),
+        "the holder"
     );
+    assert_eq!(results[1].term, Term::Atom(ok_atom), "the adder");
 }
 
 /// A persistent term use in a run with scheduler threads fails with a
