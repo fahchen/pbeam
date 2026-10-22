@@ -1,6 +1,6 @@
 -module(nif_add).
--export([load/2, calls/1, trace/1, vetoed/1, reload/2, missing/0, probes/1, probe/3, add/2,
-         other/0]).
+-export([load/2, calls/1, trace/1, vetoed/1, reload/2, probes/1, probe/3, add/2,
+         other/0, cross_load/0, cross_call/0]).
 
 %% The C library nif_add.c implements add/2. other/0 is a NIF function
 %% that the library does not implement, so it runs its stub body.
@@ -14,6 +14,28 @@ calls(Path) ->
     {try_add(1, 2), load(Path, 0), try_add(1, 2), try_add(-5, 2), try_add(1, a),
      try_add(1 bsl 31, 0), try other() catch Class:Reason -> {Class, Reason} end,
      load(Path, 0)}.
+
+%% The root that loads the library on one scheduler and tells the root of
+%% the other scheduler. The test builds the library at this path, relative
+%% to the directory of the crate.
+cross_load() ->
+    ok = load("target/nif_cross/nif_add", 0),
+    caller() ! loaded,
+    ok.
+
+%% The root that calls the library that the other scheduler loaded.
+cross_call() ->
+    true = register(nif_caller, self()),
+    receive loaded -> try_add(1, 2) end.
+
+caller() ->
+    case whereis(nif_caller) of
+        undefined ->
+            erlang:yield(),
+            caller();
+        Pid ->
+            Pid
+    end.
 
 %% Load `Path` and return the reason and the first stack frame of add(1, a).
 trace(Path) ->
@@ -55,9 +77,6 @@ id(Term) -> Term.
 
 try_probe(Kind, Arg) ->
     try add(Kind, Arg) catch Class:Reason:Stack -> {Class, Reason, hd(Stack)} end.
-
-%% Load a library that does not exist.
-missing() -> load("/nonexistent/nif_add", 0).
 
 try_add(A, B) -> try add(A, B) catch Class:Reason -> {Class, Reason} end.
 

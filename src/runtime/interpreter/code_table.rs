@@ -60,7 +60,7 @@ pub(in crate::runtime) struct CodeTable {
     /// entry when it loads the module. An entry that does not finish stays
     /// until the run ends; ERTS frees it when the garbage collector frees
     /// the last copy of the reference.
-    prepared: HashMap<Reference, BeamModule>,
+    prepared: HashMap<Reference, Arc<BeamModule>>,
     /// The code of each module that `erlang:finish_loading/1` loaded with an
     /// `-on_load` function, by module name, as the ERTS `on_load` instance
     /// of the module (`beam_load.c:305-313`). The code is in `by_id`, so
@@ -97,8 +97,25 @@ pub(in crate::runtime) struct CodeTable {
     purging: Option<(String, Arc<BeamModule>)>,
 }
 
+/// The state of a [`CodeTable`] without the import caches of its
+/// scheduler, which the node publishes to the other schedulers of a run.
+/// It is the code index that ERTS commits after a load or a delete
+/// (`code_ix.c`, `beam_bif_load.c:381-507`). A scheduler that installs it
+/// starts with empty import caches.
+#[derive(Debug, Clone, Default)]
+pub(in crate::runtime) struct CodeSnapshot {
+    modules: HashMap<String, Arc<BeamModule>>,
+    by_id: HashMap<ModuleId, Arc<BeamModule>>,
+    prepared: HashMap<Reference, Arc<BeamModule>>,
+    on_load: HashMap<String, OnLoadCode>,
+    old: HashSet<String>,
+    order: Vec<String>,
+    finished_prepared: HashMap<Reference, bool>,
+    purging: Option<(String, Arc<BeamModule>)>,
+}
+
 /// The code of a module that waits for its `-on_load` function.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct OnLoadCode {
     /// The new code of the module.
     code: Arc<BeamModule>,
@@ -144,8 +161,10 @@ impl LoadedModule {
 /// [`CodeTable`]). A call that finds no export keeps the slot empty, so a
 /// later call finds a module that loads after it, as the load sets the code
 /// address in the ERTS export entry (`jit/asm_load.c:1194`). The slots
-/// belong to the run and not to the shared code, because each run loads
-/// its own modules.
+/// belong to the code table of one scheduler and not to the shared code,
+/// because each run loads its own modules. A scheduler that installs the
+/// code state of another scheduler starts with empty slots (see
+/// [`CodeTable::from_snapshot`]).
 pub(in crate::runtime) type ImportTargets = Rc<[Cell<Option<ExportTarget>>]>;
 
 /// The function that the export of an MFA enters: the parts of the
@@ -242,6 +261,88 @@ impl CodeTable {
             finished_prepared: HashMap::new(),
             purging: None,
         }
+    }
+
+    /// Return the state of this table without its import caches.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let copy = CodeTable::from_snapshot(code.snapshot());
+    /// assert_eq!(copy.names().count(), code.names().count());
+    /// ```
+    pub(in crate::runtime) fn snapshot(&self) -> CodeSnapshot {
+        CodeSnapshot {
+            modules: self.modules.clone(),
+            by_id: self
+                .by_id
+                .iter()
+                .map(|(id, loaded)| (*id, Arc::clone(&loaded.code)))
+                .collect(),
+            prepared: self.prepared.clone(),
+            on_load: self.on_load.clone(),
+            old: self.old.clone(),
+            order: self.order.clone(),
+            finished_prepared: self.finished_prepared.clone(),
+            purging: self.purging.clone(),
+        }
+    }
+
+    /// Return the code table of `snapshot`, with no resolved import.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let copy = CodeTable::from_snapshot(code.snapshot());
+    /// assert!(copy.get("erlang").is_some());
+    /// ```
+    pub(in crate::runtime) fn from_snapshot(snapshot: CodeSnapshot) -> Self {
+        CodeTable {
+            modules: snapshot.modules,
+            by_id: snapshot
+                .by_id
+                .into_iter()
+                .map(|(id, code)| (id, LoadedModule::new(code)))
+                .collect(),
+            prepared: snapshot.prepared,
+            on_load: snapshot.on_load,
+            old: snapshot.old,
+            order: snapshot.order,
+            finished_prepared: snapshot.finished_prepared,
+            purging: snapshot.purging,
+        }
+    }
+
+    /// Replace the state of this table with `snapshot`. A module that this
+    /// table has keeps its import slots, emptied, so that a cursor that
+    /// holds the slots finds the code of the snapshot at its next call.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// code.install(other.snapshot());
+    /// assert_eq!(code.names().count(), other.names().count());
+    /// ```
+    pub(in crate::runtime) fn install(&mut self, snapshot: CodeSnapshot) {
+        let mut old = std::mem::take(&mut self.by_id);
+        let mut table = CodeTable::from_snapshot(CodeSnapshot {
+            by_id: HashMap::new(),
+            ..snapshot.clone()
+        });
+        table.by_id = snapshot
+            .by_id
+            .into_iter()
+            .map(|(id, code)| match old.remove(&id) {
+                Some(loaded) => {
+                    for slot in loaded.imports.iter() {
+                        slot.set(None);
+                    }
+                    (id, loaded)
+                }
+                None => (id, LoadedModule::new(code)),
+            })
+            .collect();
+        *self = table;
     }
 
     /// Return the loaded module of `id`.
@@ -655,7 +756,7 @@ impl CodeTable {
     /// assert_eq!(code.prepared_module(&reference), Some("load_target"));
     /// ```
     pub(in crate::runtime) fn prepare(&mut self, reference: Reference, module: BeamModule) {
-        self.prepared.insert(reference, module);
+        self.prepared.insert(reference, Arc::new(module));
     }
 
     /// Return the module name of the prepared code of `reference`, or
@@ -812,7 +913,6 @@ impl CodeTable {
                 .expect("checked by prepared_names");
             self.finished_prepared
                 .insert(*reference, module.on_load.is_some());
-            let module = Arc::new(module);
             self.by_id
                 .insert(module.id, LoadedModule::new(Arc::clone(&module)));
             if module.on_load.is_some() {
