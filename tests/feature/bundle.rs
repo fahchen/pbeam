@@ -462,7 +462,7 @@ fn runs_the_nif_manifest_gate_on_each_beam_file_of_a_directory() {
         "pbeam_bundle: the NIF manifest gate reports prim_tty:isprint/1: NIF function has no PBeam binding; a call runs the BEAM stub body\n\
          pbeam_bundle: the NIF manifest gate reports prim_tty:wcwidth/1: NIF function has no PBeam binding; a call runs the BEAM stub body\n\
          pbeam_bundle: the NIF manifest gate reports prim_tty:isprint/1: NIF function has no PBeam binding; a call runs the BEAM stub body\n\
-         pbeam_bundle: the NIF manifest gate reports zstd:init_compress_nif/0: NIF function has no PBeam binding; a call gives the runtime error \"zstd:init_compress_nif/0 NIF is not supported\"\n"
+         pbeam_bundle: the NIF manifest gate reports zstd:get_frame_header_nif/1: NIF function has no PBeam binding; a call gives the runtime error \"zstd:get_frame_header_nif/1 NIF is not supported\"\n"
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stderr),

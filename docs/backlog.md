@@ -343,9 +343,9 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### Bind the full function tables of the OTP NIF libraries
 
-- **Now:** the OTP NIF libraries `zstd`, `net`, `erl_tracer`, and `asn1rt_nif` have load-check tables with no bindings and `unbound_fails` (#868); `prim_socket` binds only `nif_supports/0,1` (#887); and `crypto`, `prim_file`, `prim_tty`, and `zlib` bind only part of their tables. A call of an unbound function of a library with `unbound_fails` gives `M:F/A NIF is not supported`; for `prim_file` and `prim_tty`, which do not set it, the call runs the BEAM stub body, which gives `erlang:nif_error(undef)`.
+- **Now:** the OTP NIF libraries `net`, `erl_tracer`, and `asn1rt_nif` have load-check tables with no bindings and `unbound_fails` (#868); `prim_socket` binds only `nif_supports/0,1` (#887); `zstd` binds only its context functions (#898); and `crypto`, `prim_file`, `prim_tty`, and `zlib` bind only part of their tables. A call of an unbound function of a library with `unbound_fails` gives `M:F/A NIF is not supported`; for `prim_file` and `prim_tty`, which do not set it, the call runs the BEAM stub body, which gives `erlang:nif_error(undef)`.
 - **Option:** bind each library in full against its pinned OTP source, one task for each library or function group, each function compared with pinned ERTS.
-- **Trigger:** an application that reaches an unbound function; the order follows the applications (zstd first, #898).
+- **Trigger:** an application that reaches an unbound function; the order follows the applications.
 - **Source:** owner comment of 2026-10-22 ("最终我们需要完整实现一遍").
 
 ### Route alias messages across scheduler threads

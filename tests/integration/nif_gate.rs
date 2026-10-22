@@ -44,14 +44,15 @@ fn reports_each_declared_library_function_without_a_binding_in_library_order() {
 
 #[test]
 fn reports_the_runtime_error_of_an_unbound_function_of_a_library_whose_unbound_functions_fail() {
-    // `-nifs([init_compress_nif/0])`: the `zstd` library has no binding, and
-    // a call of a function of it gives the runtime error of the library.
+    // `-nifs([get_frame_header_nif/1])`: the `zstd` library has no binding
+    // of the function, and a call of it gives the runtime error of the
+    // library.
     assert_eq!(
         gaps(include_bytes!(
             "../../fixtures/nif_gate/unbound_fails/zstd.beam"
         )),
         [
-            "zstd:init_compress_nif/0: NIF function has no PBeam binding; a call gives the runtime error \"zstd:init_compress_nif/0 NIF is not supported\""
+            "zstd:get_frame_header_nif/1: NIF function has no PBeam binding; a call gives the runtime error \"zstd:get_frame_header_nif/1 NIF is not supported\""
         ]
     );
 }
