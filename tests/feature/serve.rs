@@ -1,9 +1,13 @@
 //! Serve `GET /` from `examples/plug_hello` on the pinned ERTS and on the
-//! `pbeam` binary, and compare the status line, the content type, and the
-//! body. The one-file run also compares the SIGTERM shutdown notice and the
-//! exit status with the pinned ERTS. The example starts Bandit on the port
-//! of the `PORT` variable, so each run gets a free port and the runs do not
-//! collide.
+//! `pbeam` binary, and compare the status line, the headers without `date`,
+//! and the body. Each run boots the release with its boot script, as
+//! `bin/plug_hello start` does: the pinned ERTS with the `erl` of the
+//! release, and PBeam with `pbeam erl`. The one-file run also compares the
+//! SIGTERM shutdown notice and the exit status with the pinned ERTS. The
+//! example starts Bandit on the port of the `PORT` variable, so each run
+//! gets a free port and the runs do not collide. The request sends no
+//! `accept-encoding` header: PBeam has no binding of
+//! `zstd:init_compress_nif/0`, which a request that accepts `zstd` calls.
 
 use std::{
     fs,
@@ -20,13 +24,35 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// The status line, the content type, and the body of the response of the
-/// example to `GET /`.
+/// The status line, the headers without `date` in their order, and the
+/// body of the response of the example to `GET /`, as the pinned ERTS
+/// gives them.
 const RESPONSE: (&str, &str, &str) = (
     "HTTP/1.1 200 OK",
-    "text/plain; charset=utf-8",
+    "connection: close\n\
+     content-length: 23\n\
+     vary: accept-encoding\n\
+     cache-control: max-age=0, private, must-revalidate\n\
+     content-type: text/plain; charset=utf-8\n",
     "Hello world from PBeam!",
 );
+
+/// The variables that `pbeam erl` rejects when they are set and not empty,
+/// as the flags of `erlexec` that PBeam does not read. Each run removes
+/// them, so that a shell setting does not change the runs.
+const ERL_FLAG_VARIABLES: [&str; 5] = [
+    "ERL_OTP29_FLAGS",
+    "ERL_AFLAGS",
+    "ERL_FLAGS",
+    "ERL_ZFLAGS",
+    "ERL_EPMD_PORT",
+];
+
+/// The modules of the NIF libraries of PBeam, and `pubkey_os_cacerts`,
+/// whose `on_load` calls `erlang:load_nif/2` only on Windows
+/// (`pubkey_os_cacerts.erl:265-275`).
+const NIF_MODULES: &str = "[asn1rt_nif, crypto, erl_tracer, prim_buffer, prim_file, \
+                           prim_net, prim_socket, prim_tty, pubkey_os_cacerts, zlib, zstd]";
 
 /// The time that the server has to start, and the time that a response has
 /// to arrive.
@@ -46,6 +72,20 @@ fn serves_hello_world_from_the_plug_example_as_pinned_erts() {
         Some(env!("CARGO_BIN_EXE_pbeam")),
     );
     let bundled = serve_one_file();
+    // The NIF record of this acceptance: each module of a NIF library that
+    // the release boot loads. A module with an `on_load` function is loaded
+    // only when the function returns `ok`, so `erlang:load_nif/2` gave `ok`
+    // for each library that the record names.
+    let erts_record = nif_record(None);
+    let pbeam_record = nif_record(Some(env!("CARGO_BIN_EXE_pbeam")));
+    eprintln!("NIF record: {pbeam_record}");
+    assert_eq!(erts_record, pbeam_record);
+    assert_eq!(
+        pbeam_record,
+        "[{asn1rt_nif,true},{crypto,true},{erl_tracer,true},{prim_buffer,true},\
+         {prim_file,true},{prim_net,true},{prim_socket,true},{prim_tty,true},\
+         {pubkey_os_cacerts,true},{zlib,true},{zstd,true}]"
+    );
     assert_eq!(erts, pbeam);
     assert_eq!(pbeam, bundled);
     assert_eq!(
@@ -241,7 +281,7 @@ fn builds_the_one_file_executable_with_the_mix_task_and_runs_it_clean() {
 /// return the response.
 fn erts_release_response(release: &std::path::Path) -> (String, String, String) {
     let port = free_port();
-    let mut child = Command::new(release.join("bin").join("plug_hello"))
+    let mut child = without_erl_flags(&mut Command::new(release.join("bin").join("plug_hello")))
         .arg("start")
         .env("PORT", port.to_string())
         .stdin(Stdio::null())
@@ -291,7 +331,7 @@ fn serve_one_file() -> (String, String, String) {
         .arg("bundle")
         .arg(release_directory())
         .arg(&bundle)
-        .args(["plug_hello_run", "main"])
+        .args(["elixir", "start_cli"])
         .arg(&start)
         .arg(
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/plug_hello/nif-allowlist.txt"),
@@ -309,7 +349,7 @@ fn serve_one_file() -> (String, String, String) {
         .expect("pbeam_bundle runs");
     assert!(status.success(), "the executable builds");
     let port = free_port();
-    let mut child = Command::new(&output)
+    let mut child = without_erl_flags(&mut Command::new(&output))
         .current_dir(&clean)
         .env("TMPDIR", &temporary)
         .env("PORT", port.to_string())
@@ -375,15 +415,17 @@ fn stop_with_term(mut child: Child) -> ExitStatus {
 /// send `SIGTERM`, and return the exit status and the SIGTERM notice.
 fn shutdown_on_erts() -> (Option<i32>, Option<String>) {
     let port = free_port();
-    let mut child = Command::new(release_directory().join("bin").join("plug_hello"))
-        .arg("start")
-        .env("PORT", port.to_string())
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0)
-        .spawn()
-        .expect("the ERTS release starts");
+    let mut child = without_erl_flags(&mut Command::new(
+        release_directory().join("bin").join("plug_hello"),
+    ))
+    .arg("start")
+    .env("PORT", port.to_string())
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .process_group(0)
+    .spawn()
+    .expect("the ERTS release starts");
     let stdout = Arc::new(Mutex::new(Vec::new()));
     let stdout_reader = collect(child.stdout.take().unwrap(), Arc::clone(&stdout));
     let stderr = Arc::new(Mutex::new(Vec::new()));
@@ -447,6 +489,7 @@ fn serve(arguments: &[&str], pbeam: Option<&str>) -> (String, String, String) {
         // The runner starts mix and erlc, so one process group holds the
         // whole run and a kill reaches each process.
         .process_group(0);
+    without_erl_flags(&mut command);
     if let Some(pbeam) = pbeam {
         command.env("PBEAM_BIN", pbeam);
     }
@@ -515,7 +558,8 @@ fn wait_for_server(child: &mut Child, port: u16) -> Result<TcpStream, String> {
     }
 }
 
-/// Send `GET /` and return the status line, the content type, and the body.
+/// Send `GET /` and return the status line, the headers without `date`, one
+/// `name: value` line for each in their order, and the body.
 fn request(mut stream: TcpStream) -> Result<(String, String, String), String> {
     stream
         .set_read_timeout(Some(READ_TIME_LIMIT))
@@ -529,7 +573,7 @@ fn request(mut stream: TcpStream) -> Result<(String, String, String), String> {
         .read_line(&mut status)
         .map_err(|error| error.to_string())?;
     let status = status.trim_end().to_owned();
-    let mut content_type = String::new();
+    let mut headers = String::new();
     let mut content_length = None;
     loop {
         let mut line = String::new();
@@ -547,10 +591,12 @@ fn request(mut stream: TcpStream) -> Result<(String, String, String), String> {
         let Some((name, value)) = line.split_once(':') else {
             continue;
         };
-        match name.trim().to_ascii_lowercase().as_str() {
-            "content-type" => content_type = value.trim().to_owned(),
-            "content-length" => content_length = value.trim().parse::<usize>().ok(),
-            _ => {}
+        let name = name.trim().to_ascii_lowercase();
+        if name == "content-length" {
+            content_length = value.trim().parse::<usize>().ok();
+        }
+        if name != "date" {
+            headers.push_str(&format!("{name}: {}\n", value.trim()));
         }
     }
     let length = content_length.ok_or("the response has no content-length header")?;
@@ -559,7 +605,99 @@ fn request(mut stream: TcpStream) -> Result<(String, String, String), String> {
         .read_exact(&mut body)
         .map_err(|error| error.to_string())?;
     let body = String::from_utf8(body).map_err(|error| error.to_string())?;
-    Ok((status, content_type, body))
+    Ok((status, headers, body))
+}
+
+/// Remove the variables of [`ERL_FLAG_VARIABLES`] from the environment of
+/// `command`.
+fn without_erl_flags(command: &mut Command) -> &mut Command {
+    for name in ERL_FLAG_VARIABLES {
+        command.env_remove(name);
+    }
+    command
+}
+
+/// Boot the release of `examples/plug_hello` with its boot script and the
+/// `-eval` probe of [`NIF_MODULES`] instead of the `elixir` entry, on the
+/// pinned ERTS or on `pbeam erl`, and return the line of the probe: each
+/// module with the result of `erlang:module_loaded/1`. The run stops when
+/// the probe halts, or after [`START_TIME_LIMIT`].
+fn nif_record(pbeam: Option<&str>) -> String {
+    let release = fs::canonicalize(release_directory()).unwrap();
+    let data = fs::read_to_string(release.join("releases/start_erl.data")).unwrap();
+    let (erts, version) = data.trim().split_once(' ').unwrap();
+    let bindir = release.join(format!("erts-{erts}/bin"));
+    let config = release.join(format!("releases/{version}/sys"));
+    let mut command = match pbeam {
+        None => Command::new(bindir.join("erl")),
+        Some(pbeam) => {
+            let mut command = Command::new(pbeam);
+            command.arg("erl").arg("--root").arg(&release);
+            command.arg("--bindir").arg(&bindir);
+            command.arg("--preloaded").arg(preloaded_directory());
+            command.arg("--");
+            command
+        }
+    };
+    let probe = format!(
+        "io:format(\"~w~n\", [[{{M, erlang:module_loaded(M)}} || M <- {NIF_MODULES}]]), halt()."
+    );
+    command
+        .args(["-noshell", "-mode", "embedded", "-config"])
+        .arg(&config)
+        .arg("-boot")
+        .arg(release.join(format!("releases/{version}/start")))
+        .args(["-boot_var", "RELEASE_LIB"])
+        .arg(release.join("lib"))
+        .args(["-eval", &probe])
+        .env("RELEASE_ROOT", &release)
+        .env("RELEASE_SYS_CONFIG", &config)
+        .env("PORT", free_port().to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0);
+    let mut child = without_erl_flags(&mut command)
+        .spawn()
+        .expect("the probe boot starts");
+    let stdout = Arc::new(Mutex::new(Vec::new()));
+    let stdout_reader = collect(child.stdout.take().unwrap(), Arc::clone(&stdout));
+    let stderr = Arc::new(Mutex::new(Vec::new()));
+    let stderr_reader = collect(child.stderr.take().unwrap(), Arc::clone(&stderr));
+    let deadline = Instant::now() + START_TIME_LIMIT;
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("the child has a status") {
+            break Some(status);
+        }
+        if Instant::now() >= deadline {
+            stop(child);
+            break None;
+        }
+        thread::sleep(Duration::from_millis(100));
+    };
+    stdout_reader.join().unwrap();
+    stderr_reader.join().unwrap();
+    let stdout = String::from_utf8_lossy(&stdout.lock().unwrap()).into_owned();
+    let stderr = String::from_utf8_lossy(&stderr.lock().unwrap()).into_owned();
+    let line = stdout.lines().find(|line| line.starts_with("[{"));
+    match (status, line) {
+        (Some(status), Some(line)) if status.success() => line.to_owned(),
+        _ => panic!("the probe boot {pbeam:?}: {status:?}\nstdout: {stdout}\nstderr: {stderr}"),
+    }
+}
+
+/// Return the `ebin` directory of `erts` of the pinned OTP, which holds the
+/// BEAM files of the preloaded modules.
+fn preloaded_directory() -> PathBuf {
+    let output = Command::new("erl")
+        .args([
+            "-noshell",
+            "-eval",
+            "io:put_chars(filename:join(code:lib_dir(erts), \"ebin\")), halt().",
+        ])
+        .output()
+        .expect("erl runs");
+    PathBuf::from(String::from_utf8(output.stdout).unwrap())
 }
 
 /// Kill the process group of the run, which holds the runner and its build

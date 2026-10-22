@@ -107,9 +107,9 @@ fn writes_the_bundle_from_a_mix_task() {
     let output = directory.join("plug_hello.pbeamb");
     let start = directory.join("start.list");
     let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/plug_hello");
-    // The task compiles the entry stubs, so the release needs no earlier
-    // output of the example runner. The test builds its own release, so it
-    // does not read the release that another test rebuilds.
+    // The release needs no earlier output of the example runner. The test
+    // builds its own release, so it does not read the release that another
+    // test rebuilds.
     let release = directory.join("release");
     let mut mix_release = Command::new("mix");
     mix_release
@@ -119,8 +119,6 @@ fn writes_the_bundle_from_a_mix_task() {
         .env("MIX_ENV", "prod");
     let (status, mix_output) = run(&mut mix_release);
     assert_eq!(status, Some(0), "{mix_output}");
-    // A release from `mix release` has no `pbeam` directory.
-    let _ = fs::remove_dir_all(release.join("pbeam"));
     let mut command = Command::new("mix");
     command
         .args(["pbeam.bundle", "--output"])
@@ -135,8 +133,9 @@ fn writes_the_bundle_from_a_mix_task() {
         .env("MIX_ENV", "prod");
     let (status, stderr) = run(&mut command);
     assert_eq!(status, Some(0), "{stderr}");
-    assert!(release.join("pbeam/plug_hello_run.beam").is_file());
-    assert!(release.join("pbeam/pbeam_boot.beam").is_file());
+    // The task compiles no entry stub: the launcher boots the release with
+    // its boot script.
+    assert!(!release.join("pbeam").exists());
     let bytes = fs::read(&output).unwrap();
     let bundle = pbeam_runtime::Bundle::parse(&bytes).unwrap();
     let names: Vec<_> = bundle
@@ -144,22 +143,28 @@ fn writes_the_bundle_from_a_mix_task() {
         .iter()
         .map(|blob| blob.name().to_owned())
         .collect();
-    assert!(names.iter().any(|name| name == "meta/start-modules"));
-    assert!(names.iter().any(|name| name == "pbeam/plug_hello_run.beam"));
+    // The start set is the preloaded modules, which the launcher gives to
+    // `pbeam erl` from the ebin directory of erts.
+    assert_eq!(
+        bundle.resource("meta/start-modules"),
+        Some(
+            &b"persistent_term counters atomics erts_dirty_process_signal_handler \
+               erts_trace_cleaner erts_literal_area_collector erl_tracer erts_internal erlang \
+               erl_prim_loader prim_zip prim_net prim_socket socket_registry zlib prim_file \
+               prim_inet prim_eval prim_buffer init erl_init erts_code_purger"[..]
+        )
+    );
     assert!(
         names
             .iter()
             .any(|name| name.starts_with("lib/erts-") && name.ends_with("/ebin/init.beam"))
     );
-    assert_eq!(bundle.entry().module, "plug_hello_run");
-    // The payloads are the bytes of the release files.
-    let entry = release.join("pbeam/plug_hello_run.beam");
+    assert!(names.iter().any(|name| name == "releases/0.1.0/start.boot"));
     assert_eq!(
-        bundle
-            .resource("pbeam/plug_hello_run.beam")
-            .expect("the entry is a resource"),
-        fs::read(&entry).unwrap()
+        (bundle.entry().module, bundle.entry().function),
+        ("elixir", "start_cli")
     );
+    // The payloads are the bytes of the release files.
     let application = fs::read_dir(release.join("lib"))
         .unwrap()
         .map(|app| app.unwrap().path().join("ebin"))
