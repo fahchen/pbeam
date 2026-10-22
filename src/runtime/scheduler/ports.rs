@@ -12,7 +12,7 @@ use super::{LinkId, Scheduler};
 use crate::{
     error::{BeamError, error},
     runtime::{
-        port::{Driver, Port, PortEvent, Ports, inet},
+        port::{Driver, Input, Port, PortEvent, Ports, inet},
         process::MonitorLinkTree,
         signal::Signal,
     },
@@ -28,7 +28,7 @@ impl Scheduler {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let spawn = Spawn { exit_status: true, child, end_of_file: false };
+    /// let spawn = Spawn { exit_status: true, soft_eof: false, packets: Packets::new(0), child, input: Input::Open };
     /// let port = scheduler.open_port(b"/bin/sh".to_vec(), Driver::Spawn(spawn))?;
     /// assert_eq!(port, PortId(0));
     /// ```
@@ -94,11 +94,14 @@ impl Scheduler {
     ///
     /// - Output of the child goes to the owner as `{Port, {data, Bytes}}`
     ///   (`driver_output` in binary mode), and adds to the input count.
+    /// - With `{packet, N}`, each complete packet goes to the owner as one
+    ///   message, and its data adds to the input count.
     /// - The end of file closes the port with the reason `normal`
-    ///   (`driver_failure_eof`). With `exit_status`, the port first waits
-    ///   for the exit of the child (`dd->alive == 1`), and then sends
-    ///   `{Port, {exit_status, Status}}` to the owner before it closes
-    ///   (`driver_report_exit`).
+    ///   (`driver_failure_eof`), or sends `{Port, eof}` with `eof` (see
+    ///   [`Self::port_end_of_file`]). With `exit_status`, the port first
+    ///   waits for the exit of the child (`dd->alive == 1`), and then sends
+    ///   `{Port, {exit_status, Status}}` to the owner before the end of
+    ///   file (`driver_report_exit`).
     /// - A datagram on an active `udp_inet` socket stops the run: PBeam does
     ///   not send `{udp, Socket, Address, Port, Data}` (inet_drv.c:14619-14621).
     ///
@@ -133,15 +136,17 @@ impl Scheduler {
         let port = ports.get_mut(id).expect("the port of a read is open");
         let owner = port.owner;
         match event {
-            PortEvent::Data(bytes) => {
-                port.input += bytes.len() as u64;
-                self.deliver(owner, port_message(id, "data", Term::binary(bytes)));
+            PortEvent::Data(parts) => {
+                port.input += parts.iter().map(|bytes| bytes.len() as u64).sum::<u64>();
+                for bytes in parts {
+                    self.deliver(owner, port_message(id, "data", Term::binary(bytes)));
+                }
             }
-            PortEvent::EndOfFile => self.close_port(id, Term::static_atom("normal")),
+            PortEvent::EndOfFile => self.port_end_of_file(id),
             PortEvent::ExitStatus(Some(status)) => {
                 let status = Term::Integer(status.into());
                 self.deliver(owner, port_message(id, "exit_status", status));
-                self.close_port(id, Term::static_atom("normal"));
+                self.port_end_of_file(id);
             }
             PortEvent::ExitStatus(None) => {
                 return Err(error(
@@ -150,6 +155,25 @@ impl Scheduler {
             }
         }
         Ok(())
+    }
+
+    /// Handle the end of file of the spawn port `id`, after its exit status
+    /// with `exit_status`, as `driver_failure_eof` does
+    /// (`io.c:7191-7219`): a port with `eof` sends `{Port, eof}` to the
+    /// owner and stays open, and it reads nothing more. Each other port
+    /// closes with the reason `normal`.
+    fn port_end_of_file(&mut self, id: PortId) {
+        let port = self.resources.borrow_mut::<Ports>().get_mut(id);
+        let port = port.expect("the port of an end of file is open");
+        let owner = port.owner;
+        match &mut port.driver {
+            Driver::Spawn(spawn) if spawn.soft_eof => {
+                spawn.input = Input::Ended;
+                let eof = Term::tuple(vec![Term::Port(id), Term::static_atom("eof")]);
+                self.deliver(owner, eof);
+            }
+            _ => self.close_port(id, Term::static_atom("normal")),
+        }
     }
 
     /// Write the queued output of the port of the socket `fd`, which the

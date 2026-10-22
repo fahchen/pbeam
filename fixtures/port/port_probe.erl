@@ -1,6 +1,6 @@
 -module(port_probe).
 -export([exit_status/0, output/0, command/0, close/0, owner_exit/0, epipe/0, errors/0,
-         nul_name/0, sigchld_ignored/0, monitor/0, unsupported/1, terminal/0, high_fd/0, costs/1, measure/2]).
+         nul_name/0, sigchld_ignored/0, packet/0, packet_errors/0, eof/0, monitor/0, unsupported/1, terminal/0, high_fd/0, costs/1, measure/2]).
 
 %% Each result replaces a port with the atom port, because the port numbers
 %% of ERTS and PBeam differ.
@@ -251,6 +251,85 @@ errors() ->
     Data = catch_error(fun() -> port_command(Port, foo) end),
     port_close(Port),
     [Open, Internal, Bifs, Data].
+
+%% {packet, N} in both directions: cat echoes each packet with its header,
+%% and the port gives each packet as one message, also when a read holds
+%% more than one packet or a part of a packet. A packet that does not fit
+%% in its header closes the port with einval, and the end of file drops a
+%% part of a packet.
+packet() ->
+    process_flag(trap_exit, true),
+    Four = open_port({spawn_executable, sh()}, [{packet, 4}, binary, {args, ["-c", "cat"]}]),
+    Sent = [port_command(Four, <<"hello">>), port_command(Four, [<<>>]),
+            port_command(Four, ["ab", $c])],
+    Echo = [receive {Four, {data, D}} -> D end || _ <- [1, 2, 3]],
+    Counts = [erlang:port_info(Four, input), erlang:port_info(Four, output)],
+    true = port_close(Four),
+    One = open_port({spawn_executable, sh()},
+                    [binary, {packet, 1}, exit_status,
+                     {args, ["-c", "printf '\\002h'; sleep 0.1; printf 'i\\000\\001'; sleep 0.1; printf x"]}]),
+    Two = open_port({spawn_executable, sh()},
+                    [{packet, 2}, binary, exit_status,
+                     {args, ["-c", "printf '\\000'; sleep 0.1; printf '\\003abc\\000\\005ab'"]}]),
+    Split = [collect_packets(One, []), collect_packets(Two, [])],
+    Limits = [too_large(1, 255), too_large(1, 256), too_large(2, 65535), too_large(2, 65536)],
+    [Sent, Echo, Counts, Split, Limits, flush()].
+
+collect_packets(Port, Packets) ->
+    receive
+        {Port, {data, Packet}} -> collect_packets(Port, [Packet | Packets]);
+        {Port, {exit_status, Status}} -> {lists:reverse(Packets, []), Status}
+    end.
+
+%% The result of a packet of Size bytes on a port with a header of Header
+%% bytes: the size of the echo, or the exit reason of the port.
+too_large(Header, Size) ->
+    Port = open_port({spawn_executable, sh()}, [{packet, Header}, binary, {args, ["-c", "cat"]}]),
+    true = port_command(Port, binary:copy(<<"x">>, Size)),
+    receive
+        {Port, {data, Echo}} -> port_close(Port), byte_size(Echo);
+        {'EXIT', Port, Reason} -> Reason
+    end.
+
+%% The settings of {packet, N} that ERTS does not accept, and the small
+%% integers whose low 32 bits ERTS takes as the header size: each of them
+%% echoes a packet through cat.
+packet_errors() ->
+    Sh = {spawn_executable, sh()},
+    [erts_internal:open_port(Sh, [binary, {packet, N}])
+     || N <- [0, 3, 8, -1, x, 1 bsl 64, (1 bsl 32) + 3, (1 bsl 59) + 4]]
+        ++ [catch_error(fun() -> open_port(Sh, [binary, {packet, 3}]) end)]
+        ++ [echo(N) || N <- [(1 bsl 32) + 1, (1 bsl 32) + 2, (1 bsl 32) + 4, 1 - (1 bsl 32)]].
+
+echo(Header) ->
+    Port = open_port({spawn_executable, sh()}, [binary, {packet, Header}, {args, ["-c", "cat"]}]),
+    true = port_command(Port, <<"hi">>),
+    receive {Port, {data, Data}} -> port_close(Port), Data end.
+
+%% The eof setting: the end of file sends {Port, eof} after the exit status,
+%% and the port stays open until port_close/1 or a failed write. The
+%% overlapped_io setting changes nothing on Unix, as in the settings of
+%% inet_gethost_native.
+eof() ->
+    process_flag(trap_exit, true),
+    Status = open_port({spawn_executable, sh()},
+                       [binary, eof, exit_status, {args, ["-c", "printf hi; exit 3"]}]),
+    Messages = [receive {Status, M} -> M end || _ <- [1, 2, 3]],
+    Open = [erlang:port_info(Status, input), erlang:port_info(Status, connected) =:= {connected, self()}],
+    Write = port_command(Status, <<"x">>),
+    Exit = receive {'EXIT', Status, R} -> R end,
+    Plain = open_port({spawn_executable, sh()}, [eof, binary, {args, ["-c", "printf hi"]}]),
+    PlainMessages = [receive {Plain, M} -> M end || _ <- [1, 2]],
+    Quiet = receive {Plain, Other} -> Other after 100 -> none end,
+    Close = port_close(Plain),
+    PlainExit = receive {'EXIT', Plain, PR} -> PR end,
+    Gethost = open_port({spawn_executable, sh()},
+                        [overlapped_io, {args, ["-c", "printf '\\000\\000\\000\\002hi\\000'"]},
+                         {packet, 4}, eof, binary]),
+    GethostMessages = [receive {Gethost, M} -> M end || _ <- [1, 2]],
+    true = port_close(Gethost),
+    [normal(Messages), Open, Write, Exit, PlainMessages, Quiet, Close, PlainExit,
+     GethostMessages, flush()].
 
 %% The port name of a binary path ends at its first byte 0.
 nul_name() ->

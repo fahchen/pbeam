@@ -1,5 +1,5 @@
 %% The inetrc file of the kernel boot test (ERL_INETRC). With a domain,
 %% inet_config:init/0 does not look up the host name with
-%% inet:gethostbyname/1 on Linux (inet_config.erl:110-133), which opens
-%% the inet_gethost port program with options that PBeam does not support.
+%% inet:gethostbyname/1 on Linux (inet_config.erl:110-133), so the output
+%% of the boot does not depend on the host name.
 {domain, "pbeam.test"}.

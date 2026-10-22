@@ -25,11 +25,11 @@ const LOADED_ORDER_PROBE: &[u8] = include_bytes!("../../fixtures/boot/loaded_ord
 const SYSTEM_PROCESS_PROBE: &[u8] = include_bytes!("../../fixtures/boot/system_process_probe.beam");
 
 /// The environment variable that `boots_init_with_a_fixed_boot_script_as_pinned_erts`
-/// and `starts_kernel_and_stops_at_init_stop_as_pinned_erts` set for their
-/// child, so the boot runs in a process of its own: the probe halts the
-/// node, and the kernel boot starts `user_drv`, which sets signal
-/// dispositions of the process (prim_tty.erl:284-298). For the kernel boot,
-/// the value is the status argument of the probe.
+/// and the kernel boot tests set for their child, so the boot runs in a
+/// process of its own: the probe halts the node, and the kernel boot
+/// starts `user_drv`, which sets signal dispositions of the process
+/// (prim_tty.erl:284-298). For the kernel boot, the value is the `-s`
+/// arguments of the probe.
 const ISOLATED: &str = "PBEAM_INIT_BOOT_ISOLATED";
 
 /// The pinned modules that the boot runs before the probe: `erl_init` and
@@ -175,21 +175,22 @@ fn boot_node(probes: &[&[u8]], flags: &[&[u8]]) -> Result<pbeam_runtime::HostTer
 
 /// The environment of the kernel boot: a home directory and a user
 /// configuration directory that do not exist, so `c:erlangrc/0` finds no
-/// `.erlang` file of the host user (c.erl:1051-1072), and the inetrc file
-/// `fixtures/boot/kernel_boot.inetrc`, whose domain keeps
-/// `inet_config:init/0` from the host name lookup on Linux
-/// (inet_config.erl:63-64, 110-133). PBeam does not support the options of
-/// the `inet_gethost` port of that lookup (row "Node boot").
-const KERNEL_BOOT_ENVIRONMENT: [(&str, &str); 3] = [
+/// `.erlang` file of the host user (c.erl:1051-1072).
+const KERNEL_BOOT_ENVIRONMENT: [(&str, &str); 2] = [
     ("HOME", "fixtures/boot/no_home"),
     ("XDG_CONFIG_HOME", "fixtures/boot/no_home"),
-    ("ERL_INETRC", "fixtures/boot/kernel_boot.inetrc"),
 ];
 
+/// The inetrc file `fixtures/boot/kernel_boot.inetrc`, whose domain keeps
+/// `inet_config:init/0` from the host name lookup on Linux
+/// (inet_config.erl:63-64, 110-133), so the output of the boot does not
+/// depend on the host name.
+const KERNEL_BOOT_INETRC: (&str, &str) = ("ERL_INETRC", "fixtures/boot/kernel_boot.inetrc");
+
 /// The flags of `erl` for the kernel boot of `kernel_boot_probe`, with the
-/// `-s` arguments of the probe from `status`: none for `init:stop/0`, and
-/// the status for `init:stop/1`.
-fn kernel_boot_flags(status: &str) -> Vec<String> {
+/// `-s` arguments `arguments`: the function of the probe and its
+/// arguments, for example `main 3`.
+fn kernel_boot_flags(arguments: &str) -> Vec<String> {
     let mut flags = [
         "-boot",
         "start_clean",
@@ -197,13 +198,72 @@ fn kernel_boot_flags(status: &str) -> Vec<String> {
         "fixtures/boot",
         "-s",
         "kernel_boot_probe",
-        "main",
     ]
     .map(String::from)
     .to_vec();
-    flags.extend(status.split_whitespace().map(String::from));
+    flags.extend(arguments.split_whitespace().map(String::from));
     flags.extend(["-kernel", "logger_level", "warning"].map(String::from));
     flags
+}
+
+/// Run the kernel boot of `kernel_boot_probe` with the `-s` arguments
+/// `arguments` (see [`kernel_boot_flags`]), the environment of the kernel
+/// boot, and `ERL_INETRC` only when `inetrc` is true, on the pinned ERTS
+/// and on PBeam in a child process. Check that ERTS writes nothing to
+/// stderr and that the child passes. Return the stdout and the exit code of
+/// ERTS, and the lines of the child that start with one of `prefixes`: the
+/// test harness writes its own lines around the output of the node.
+fn run_kernel_boot(
+    arguments: &str,
+    inetrc: bool,
+    prefixes: &[&str],
+) -> (String, Option<i32>, String) {
+    let environment = |command: &mut Command| {
+        command
+            .envs(KERNEL_BOOT_ENVIRONMENT)
+            .env_remove(KERNEL_BOOT_INETRC.0)
+            .stdin(Stdio::null());
+        if inetrc {
+            command.env(KERNEL_BOOT_INETRC.0, KERNEL_BOOT_INETRC.1);
+        }
+    };
+    let mut reference = Command::new("erl");
+    reference
+        .args(["-noshell"])
+        .args(kernel_boot_flags(arguments));
+    environment(&mut reference);
+    let reference = reference.output().unwrap();
+    let mut child = Command::new(env::current_exe().unwrap());
+    child
+        .args([
+            "--exact",
+            "isolated_kernel_boot",
+            "--include-ignored",
+            "--quiet",
+        ])
+        .env(ISOLATED, arguments);
+    environment(&mut child);
+    let child = child.output().unwrap();
+    let stdout = String::from_utf8_lossy(&child.stdout);
+    assert_eq!(
+        String::from_utf8_lossy(&reference.stderr),
+        "",
+        "ERTS with {arguments:?}"
+    );
+    assert!(
+        child.status.success(),
+        "child exited with {}\n{stdout}",
+        child.status
+    );
+    let node = stdout
+        .split_inclusive('\n')
+        .filter(|line| prefixes.iter().any(|prefix| line.starts_with(prefix)))
+        .collect();
+    (
+        String::from_utf8_lossy(&reference.stdout).into_owned(),
+        reference.status.code(),
+        node,
+    )
 }
 
 #[test]
@@ -242,61 +302,50 @@ fn starts_kernel_and_stops_at_init_stop_as_pinned_erts() {
         stop_badarg,{error,badarg},system,[true,false,false],system_badarg,{error,badarg},\
         status,{starting,started}}\r\n\
         {stop,kernel_boot_app,[],undefined,{stopping,started}}\r\n";
-    for (status, code) in [("", 0), ("3", 3)] {
-        let reference = Command::new("erl")
-            .args(["-noshell"])
-            .args(kernel_boot_flags(status))
-            .envs(KERNEL_BOOT_ENVIRONMENT)
-            .stdin(Stdio::null())
-            .output()
-            .unwrap();
-        let child = Command::new(env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "isolated_kernel_boot",
-                "--include-ignored",
-                "--quiet",
-            ])
-            .env(ISOLATED, status)
-            .envs(KERNEL_BOOT_ENVIRONMENT)
-            .stdin(Stdio::null())
-            .output()
-            .unwrap();
-        // The test harness writes its own lines around the output of the
-        // node.
-        let stdout = String::from_utf8_lossy(&child.stdout);
-        let node = stdout
-            .split_inclusive('\n')
-            .filter(|line| line.starts_with("{controller") || line.starts_with("{stop,"))
-            .collect::<String>();
+    for (arguments, code) in [("main", 0), ("main 3", 3)] {
+        let (reference, status, node) =
+            run_kernel_boot(arguments, true, &["{controller", "{stop,"]);
         assert_eq!(
-            (
-                String::from_utf8_lossy(&reference.stdout).as_ref(),
-                reference.stderr.as_slice(),
-                reference.status.code()
-            ),
-            (expected, &b""[..], Some(code)),
-            "ERTS with status {status:?}"
+            (reference.as_str(), status),
+            (expected, Some(code)),
+            "ERTS with {arguments:?}"
         );
-        assert!(
-            child.status.success(),
-            "child exited with {}\n{stdout}",
-            child.status
-        );
-        assert_eq!(node, expected, "PBeam with status {status:?}");
+        assert_eq!(node, expected, "PBeam with {arguments:?}");
     }
 }
 
-/// The child side of `starts_kernel_and_stops_at_init_stop_as_pinned_erts`:
-/// boot the node with `start_clean` and expect the halt of `init:stop/0,1`
-/// with the status of the environment variable [`ISOLATED`].
 #[test]
-#[ignore = "starts_kernel_and_stops_at_init_stop_as_pinned_erts runs it in a child process"]
+fn looks_up_the_host_name_at_the_kernel_boot_as_pinned_erts() {
+    // Without a domain in an inetrc file, `inet_config:init/0` looks up
+    // the host name on Linux at the kernel start, when the domain is empty
+    // (inet_config.erl:110-133). The native lookup opens the
+    // `inet_gethost` port program of `$ROOT/erts-*/bin` with the settings
+    // `[overlapped_io, {args, Args}, {packet, 4}, eof, binary]` and
+    // exchanges packets with it (inet_gethost_native.erl:167-190,
+    // 412-428). `kernel_boot_probe:lookup/0` then displays the domain and
+    // the native lookup of the host name and of `localhost`, on each host
+    // OS, and calls `init:stop/0`.
+    let (reference, status, node) = run_kernel_boot("lookup", false, &["{lookup,"]);
+    assert_eq!(status, Some(0), "ERTS");
+    assert!(reference.starts_with("{lookup,[native],"), "{reference}");
+    assert_eq!(node, reference, "PBeam");
+}
+
+/// The child side of `starts_kernel_and_stops_at_init_stop_as_pinned_erts`
+/// and `looks_up_the_host_name_at_the_kernel_boot_as_pinned_erts`: boot
+/// the node with `start_clean` and the `-s` arguments of the environment
+/// variable [`ISOLATED`], and expect the halt of `init:stop/0,1` with the
+/// status of the second argument, or 0 without it.
+#[test]
+#[ignore = "the kernel boot tests run it in a child process"]
 fn isolated_kernel_boot() {
-    let status = env::var(ISOLATED).expect("run it through its parent test");
-    let flags = kernel_boot_flags(&status);
+    let arguments = env::var(ISOLATED).expect("run it through its parent test");
+    let flags = kernel_boot_flags(&arguments);
     let flags = flags.iter().map(String::as_bytes).collect::<Vec<_>>();
-    let code = status.parse().unwrap_or(0);
+    let code = arguments
+        .split_whitespace()
+        .nth(1)
+        .map_or(0, |status| status.parse().unwrap());
     assert_eq!(boot_node(&[], &flags).unwrap_err(), BeamError::Halt(code));
 }
 

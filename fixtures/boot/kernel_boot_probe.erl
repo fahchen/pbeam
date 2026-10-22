@@ -1,7 +1,7 @@
 -module(kernel_boot_probe).
 -behaviour(application).
 -behaviour(supervisor).
--export([main/0, main/1, start/2, stop/1, init/1]).
+-export([main/0, main/1, lookup/0, start/2, stop/1, init/1]).
 
 %% `erl -noshell -boot start_clean -pa fixtures/boot -s kernel_boot_probe
 %% main -kernel logger_level warning` runs main/0 in the boot process of init after the boot script
@@ -23,6 +23,20 @@ main() ->
 main([Status]) ->
     report(),
     init:stop(list_to_integer(atom_to_list(Status))).
+
+%% `erl -noshell -boot start_clean -pa fixtures/boot -s kernel_boot_probe
+%% lookup -kernel logger_level warning` without a domain in an inetrc file
+%% runs lookup/0. On Linux, inet_config:init/0 looked up the host name at
+%% the kernel start (inet_config.erl:110-133). lookup/0 displays the domain
+%% after that, and the results of the native lookup of the host name and of
+%% localhost through the inet_gethost port program
+%% (inet_gethost_native.erl:412-428), and then calls init:stop/0.
+lookup() ->
+    Name = inet_db:gethostname(),
+    erlang:display({lookup, inet_db:res_option(lookup), inet_db:res_option(domain),
+                    inet:gethostbyname(Name), inet:gethostbyname("localhost"),
+                    is_pid(whereis(inet_gethost_native))}),
+    init:stop().
 
 report() ->
     Controller = whereis(application_controller),

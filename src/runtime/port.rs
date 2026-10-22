@@ -90,22 +90,134 @@ pub(super) struct Spawn {
     /// True with the `exit_status` option: the port sends
     /// `{Port, {exit_status, Status}}` before it closes at the end of file.
     pub(super) exit_status: bool,
+    /// True with the `eof` option (`ERTS_PORT_SFLG_SOFT_EOF`,
+    /// `erl_bif_port.c:995-996`): at the end of file, the port sends
+    /// `{Port, eof}` and stays open (`driver_failure_term`,
+    /// `io.c:7208-7209`).
+    pub(super) soft_eof: bool,
+    /// The packet framing of the `{packet, N}` option.
+    pub(super) packets: Packets,
     /// The started program and the parent ends of its pipes. Dropping the
     /// port closes the pipes.
     pub(super) child: Child,
-    /// True after the output pipe gave its end of file, while the port
-    /// waits for the exit status of the child (`dd->alive == 1`,
-    /// `sys_drivers.c:1232-1240`).
-    pub(super) end_of_file: bool,
+    /// The state of the output pipe of the child.
+    pub(super) input: Input,
+}
+
+/// The state of the output pipe of a spawn port, which the port reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Input {
+    /// The port reads the pipe.
+    Open,
+    /// The pipe gave its end of file, and the port waits for the exit
+    /// status of the child (`dd->alive == 1`, `sys_drivers.c:1232-1240`).
+    Status,
+    /// The port with `eof` sent `{Port, eof}`, and it reads nothing more:
+    /// `port_inp_failure` stops the select of the pipe
+    /// (`sys_drivers.c:1211-1214`).
+    Ended,
+}
+
+/// The packet framing of a spawn port (`packet_bytes` of
+/// `ErtsSysDriverData`, `sys_drivers.c:112`): each packet has a header of
+/// 1, 2, or 4 bytes with the size of its data, big-endian. With no header
+/// (the default), the data has no framing.
+#[derive(Debug, Default)]
+pub(super) struct Packets {
+    /// The size of the header: 0, 1, 2, or 4.
+    header: usize,
+    /// The bytes of a packet that the child did not write completely: its
+    /// header, or a part of it, and a part of its data.
+    pending: Vec<u8>,
+}
+
+impl Packets {
+    /// Return the framing of the header size `header`: 0, 1, 2, or 4.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let packets = Packets::new(4);
+    /// ```
+    pub(super) fn new(header: usize) -> Self {
+        Self {
+            header,
+            pending: Vec::new(),
+        }
+    }
+
+    /// Return the data of each complete packet of the bytes that the child
+    /// wrote, after the bytes of earlier reads, as `ready_input` does
+    /// (`sys_drivers.c:1336-1440`). Keep the bytes of a packet that is not
+    /// complete for the next read. Without a header, return the bytes as
+    /// one part.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut packets = Packets::new(1);
+    /// assert_eq!(packets.split(vec![2, b'h']), Vec::<Vec<u8>>::new());
+    /// assert_eq!(packets.split(vec![b'i', 0]), vec![b"hi".to_vec(), Vec::new()]);
+    /// ```
+    pub(super) fn split(&mut self, bytes: Vec<u8>) -> Vec<Vec<u8>> {
+        if self.header == 0 {
+            return vec![bytes];
+        }
+        self.pending.extend(bytes);
+        let mut parts = Vec::new();
+        let mut start = 0;
+        while let Some(header) = self.pending.get(start..start + self.header) {
+            let size = header
+                .iter()
+                .fold(0, |size, &byte| (size << 8) | usize::from(byte));
+            let data = start + self.header;
+            let Some(packet) = self.pending.get(data..data + size) else {
+                break;
+            };
+            parts.push(packet.to_vec());
+            start = data + size;
+        }
+        self.pending.drain(..start);
+        parts
+    }
+
+    /// Return the bytes that the port writes for the data `bytes`: the
+    /// header with the size and then the data, as `output` does
+    /// (`sys_drivers.c:1140-1203`). Return `None` when the size does not
+    /// fit in a header of 1 or 2 bytes (`sys_drivers.c:1153-1158`). A
+    /// header of 4 bytes keeps the low 32 bits of the size (`put_int32`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Packets::new(2).frame(b"hi".to_vec()), Some(vec![0, 2, b'h', b'i']));
+    /// assert_eq!(Packets::new(1).frame(vec![0; 256]), None);
+    /// ```
+    pub(super) fn frame(&self, bytes: Vec<u8>) -> Option<Vec<u8>> {
+        let limit = match self.header {
+            0 => return Some(bytes),
+            1 => 0xff,
+            2 => 0xffff,
+            _ => usize::MAX,
+        };
+        if bytes.len() > limit {
+            return None;
+        }
+        let size = (bytes.len() as u32).to_be_bytes();
+        let mut framed = size[4 - self.header..].to_vec();
+        framed.extend(bytes);
+        Some(framed)
+    }
 }
 
 /// What the IO poll found on one fd of a port.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum PortEvent {
-    /// The child wrote these bytes.
-    Data(Vec<u8>),
+    /// The child wrote the data of these messages: one part without a
+    /// packet header, else each complete packet.
+    Data(Vec<Vec<u8>>),
     /// The output pipe of a port without `exit_status` gave its end of
-    /// file.
+    /// file. The bytes of a packet that is not complete go.
     EndOfFile,
     /// The child exited with this exit status, or `None` when the host
     /// reaped the child (see [`Child::read_status`]).
@@ -203,8 +315,9 @@ impl Ports {
     /// Return the fds that the IO poll waits for: the output pipe of each
     /// spawn port before its end of file, and then its status pipe, and the
     /// socket of each `tcp_inet` listen port with a caller in its accept
-    /// queue, and the socket of each active `udp_inet` port. Only a port with `exit_status` stays open after its end of
-    /// file.
+    /// queue, and the socket of each active `udp_inet` port. A port with
+    /// `exit_status` waits for its status pipe after its end of file. A
+    /// port with `eof` that sent `{Port, eof}` waits for no fd.
     ///
     /// # Examples
     ///
@@ -215,8 +328,11 @@ impl Ports {
         self.by_id
             .values()
             .filter_map(|port| match &port.driver {
-                Driver::Spawn(spawn) if spawn.end_of_file => Some(spawn.child.status_fd()),
-                Driver::Spawn(spawn) => Some(spawn.child.output_fd()),
+                Driver::Spawn(spawn) => match spawn.input {
+                    Input::Open => Some(spawn.child.output_fd()),
+                    Input::Status => Some(spawn.child.status_fd()),
+                    Input::Ended => None,
+                },
                 Driver::Inet(inet) => inet
                     .accept_fd()
                     .or_else(|| inet.receive_fd())
@@ -311,17 +427,18 @@ impl Ports {
 
     /// Read the fd `fd` that the IO poll found ready, and return its port
     /// and what the read found, as `ready_input` does
-    /// (`sys_drivers.c:1267-1347`). Return `None` when no port waits for
+    /// (`sys_drivers.c:1267-1440`). Return `None` when no port waits for
     /// the fd, and when the read of the output pipe fails, for example with
     /// `EINTR`: the port then waits again (`sys_drivers.c:1340-1342`).
     /// The end of file of a port with `exit_status` also returns `None`:
     /// the port then waits for the exit status of the child (`dd->alive ==
-    /// 1`, `sys_drivers.c:1232-1240`).
+    /// 1`, `sys_drivers.c:1232-1240`). A read that completes no packet of a
+    /// port with `{packet, N}` also returns `None`.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(ports.read(fd), Some((PortId(0), PortEvent::Data(b"hi".to_vec()))));
+    /// assert_eq!(ports.read(fd), Some((PortId(0), PortEvent::Data(vec![b"hi".to_vec()]))));
     /// ```
     pub(super) fn read(&mut self, fd: c_int) -> Option<(PortId, PortEvent)> {
         let (id, spawn) = self
@@ -329,25 +446,24 @@ impl Ports {
             .iter_mut()
             .find_map(|(&id, port)| match &mut port.driver {
                 Driver::Spawn(spawn)
-                    if spawn.child.output_fd() == fd
-                        || (spawn.end_of_file && spawn.child.status_fd() == fd) =>
+                    if (spawn.input == Input::Open && spawn.child.output_fd() == fd)
+                        || (spawn.input == Input::Status && spawn.child.status_fd() == fd) =>
                 {
                     Some((id, spawn))
                 }
                 _ => None,
             })?;
-        if spawn.end_of_file {
+        if spawn.input == Input::Status {
             return Some((id, PortEvent::ExitStatus(spawn.child.read_status())));
         }
         let bytes = spawn.child.read_output().ok()?;
-        let event = if bytes.is_empty() && spawn.exit_status {
-            spawn.end_of_file = true;
+        if bytes.is_empty() && spawn.exit_status {
+            spawn.input = Input::Status;
             return None;
         } else if bytes.is_empty() {
-            PortEvent::EndOfFile
-        } else {
-            PortEvent::Data(bytes)
-        };
-        Some((id, event))
+            return Some((id, PortEvent::EndOfFile));
+        }
+        let packets = spawn.packets.split(bytes);
+        (!packets.is_empty()).then_some((id, PortEvent::Data(packets)))
     }
 }
