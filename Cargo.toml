@@ -705,3 +705,7 @@ path = "tests/integration/multischeduler_aliases.rs"
 [[test]]
 name = "work_stealing"
 path = "tests/integration/work_stealing.rs"
+
+[[test]]
+name = "multischeduler_clock"
+path = "tests/integration/multischeduler_clock.rs"

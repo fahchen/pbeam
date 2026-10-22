@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use super::correction::{Check, Correction};
-use super::{MONOTONIC_END_TICKS, Receiver, Timer, Timers};
+use super::{MONOTONIC_END_TICKS, NodeClock, Receiver, Timer, Timers};
 use crate::term::{ProcessId, Reference, Term, test_atom};
 
 fn bif(reference: u64, receiver: Receiver) -> Timer {
@@ -126,7 +126,7 @@ fn counts_the_message_of_an_active_bif_timer() {
 #[test]
 fn sets_the_first_check_timer_at_the_start_as_late_init_time_correction() {
     let timers = Timers::new();
-    let first = timers.correction.first_timeout();
+    let first = timers.clock.read().correction.first_timeout();
     // The check is after the first timeout from the start time, which is
     // 1000000000 or later. The upper bound allows the thread to be
     // preempted between the clock reads of `Timers::new` on a loaded host.
@@ -146,9 +146,10 @@ fn does_the_check_in_timer_order_and_reads_the_os_clocks_only_at_the_check() {
     const SINIT: i64 = 1_700_000_000_000_000_000;
     let hour = 3_600_000_000_000;
     let mut timers = Timers::new();
-    timers.correction = Correction::new(Check::Offset, SINIT);
+    timers.clock.shared.write().unwrap().correction = Correction::new(Check::Offset, SINIT);
     timers.check = (Timers::check_position(1_000_000_001, 1500), 0);
-    let offset = timers.correction.time_offset();
+    timers.clock.shared.write().unwrap().check = timers.check.0;
+    let offset = timers.time_offset();
     assert_eq!(timers.check, (2501, 0));
     timers.start(2000, Timer::Receive(ProcessId(0)));
     timers.start(2501, Timer::Receive(ProcessId(1)));
@@ -164,15 +165,40 @@ fn does_the_check_in_timer_order_and_reads_the_os_clocks_only_at_the_check() {
         timers.pop_due_with(2_501_000_000, || (m, SINIT + m + hour)),
         Some(Timer::Receive(ProcessId(1)))
     );
-    assert_eq!(timers.correction.time_offset(), offset + hour);
+    assert_eq!(timers.time_offset(), offset + hour);
     assert_eq!(timers.check, (62_501, 3));
     assert_eq!(timers.wait_time(2_501_000_000), Duration::from_secs(60));
     // A step between checks is not seen before the next check.
     assert_eq!(timers.pop_due_with(62_500_999_999, || unreachable!()), None);
-    assert_eq!(timers.correction.time_offset(), offset + hour);
+    assert_eq!(timers.time_offset(), offset + hour);
     let m = 61_501_000_000;
     assert_eq!(timers.pop_due_with(62_501_000_000, || (m, SINIT + m)), None);
-    assert_eq!(timers.correction.time_offset(), offset);
+    assert_eq!(timers.time_offset(), offset);
     assert_eq!(timers.check, (122_501, 4));
     assert!(!timers.active());
+}
+
+#[test]
+fn does_the_check_once_for_the_schedulers_of_the_node() {
+    const SINIT: i64 = 1_700_000_000_000_000_000;
+    let hour = 3_600_000_000_000;
+    let clock = NodeClock::new();
+    clock.shared.write().unwrap().correction = Correction::new(Check::Offset, SINIT);
+    clock.shared.write().unwrap().check = 2501;
+    let mut first = Timers::with_clock(clock.clone());
+    let mut second = Timers::with_clock(clock);
+    assert_eq!((first.check, second.check), ((2501, 0), (2501, 0)));
+    let offset = first.time_offset();
+    // The first scheduler at the check tick does the check for the node.
+    let m = 1_501_000_000;
+    assert_eq!(
+        first.pop_due_with(2_501_000_000, || (m, SINIT + m + hour)),
+        None
+    );
+    assert_eq!(first.check, (62_501, 1));
+    // The other scheduler sees the new offset and takes the next check
+    // tick of the node with no clock reading.
+    assert_eq!(second.time_offset(), offset + hour);
+    assert_eq!(second.pop_due_with(2_501_000_000, || unreachable!()), None);
+    assert_eq!(second.check, (62_501, 1));
 }
