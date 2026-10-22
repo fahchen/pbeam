@@ -84,4 +84,4 @@ kill %1
 
 The `curl` command prints the status line `HTTP/1.1 200 OK`, the headers of the response, and the body `Hello world from PBeam!`. The feature test `serves_hello_world_from_the_plug_example_as_pinned_erts` of `tests/feature/serve.rs` compares the status line, the headers without `date`, and the body of the ERTS run, the pbeam run, and the one-file executable. It also boots the release with an `-eval` probe on both runtimes and compares the NIF record: `erlang:module_loaded/1` of each module of a PBeam NIF library and of `pubkey_os_cacerts`.
 
-PBeam has no binding of the `zstd` NIF functions. A request whose `Accept-Encoding` accepts `zstd` makes Bandit call `zstd:init_compress_nif/0`, and the run stops with `zstd:init_compress_nif/0 NIF is not supported`.
+A request whose `Accept-Encoding` accepts `zstd` gets a body that Bandit compresses with `zstd:compress/2` and a context. PBeam binds the `zstd` context NIFs with libzstd 1.5.7, the version of the pinned ERTS, so the compressed bytes are the same. The feature test sends such a request first and compares its response with the ERTS response.

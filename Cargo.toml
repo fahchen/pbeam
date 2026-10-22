@@ -19,6 +19,9 @@ sha1 = "0.10"
 sha2 = "0.10"
 socket2 = { version = "0.6", features = ["all"] }
 zlib-rs = "0.6"
+zstd = { version = "0.13", default-features = false, features = [
+  "experimental",
+] }
 
 [build-dependencies]
 cc = "1"
