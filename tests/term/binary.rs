@@ -505,3 +505,52 @@ fn reads_a_byte_range_of_an_appended_binary_from_the_chunks_of_the_range() {
     assert_eq!(chunk_span(ends, 7, 7), 0..0);
     assert!(binary.byte_runs(7, 7).is_empty());
 }
+
+/// Return the bitstring of the first `size` bits of `bytes`, at offset 0.
+fn bits(bytes: &[u8], size: usize) -> Binary {
+    Binary::from(bytes).bits(0, size)
+}
+
+#[test]
+fn compares_two_bitstrings_by_their_bits_and_then_their_sizes() {
+    use std::cmp::Ordering;
+    // ERTS compares the bits, and then the sizes (`utils.c:1209-1217`,
+    // `utils.c:2325-2335`). Each result is from the pinned ERTS.
+    let one_of_3 = bits(&[0x20], 3);
+    let one_of_4 = bits(&[0x10], 4);
+    let space = Binary::from(b" ".to_vec());
+    // list_to_bitstring([<<1:3>>]) == <<32>> is false.
+    assert_ne!(one_of_3, space);
+    assert_eq!(one_of_3.cmp(&space), Ordering::Less);
+    // lists:sort([<<32>>, <<1:3>>, <<1:4>>]) is [<<1:4>>,<<1:3>>,<<" ">>].
+    let mut sorted = vec![space.clone(), one_of_3.clone(), one_of_4.clone()];
+    sorted.sort();
+    assert_eq!(sorted, vec![one_of_4, one_of_3.clone(), space]);
+    // <<0:3>> < <<>> is false, and <<5:3>> < <<6:3>> is true.
+    assert_eq!(bits(&[0], 3).cmp(&Binary::default()), Ordering::Greater);
+    assert_eq!(bits(&[0xA0], 3).cmp(&bits(&[0xC0], 3)), Ordering::Less);
+    // <<255,1:1>> < <<255,1:2>> is false: the 9th bit decides.
+    assert_eq!(
+        bits(&[0xFF, 0x80], 9).cmp(&bits(&[0xFF, 0x40], 10)),
+        Ordering::Greater
+    );
+    // The bits after the size do not change the result.
+    let one_of_3_in_0x3f = bits(&[0x3F], 3);
+    assert_eq!(one_of_3_in_0x3f, one_of_3);
+    assert_eq!(one_of_3_in_0x3f.cmp(&one_of_3), Ordering::Equal);
+    assert_ne!(one_of_3_in_0x3f, bits(&[0x3F], 4));
+}
+
+#[test]
+fn compares_a_view_at_a_bit_offset_by_its_bits() {
+    use std::cmp::Ordering;
+    // <<_:4, A:12/bits, _/bits>> = <<"abc">> gives A = <<22,2:4>> on the
+    // pinned ERTS, and A > <<22>>.
+    let view = Binary::from(b"abc".to_vec()).bits(4, 16);
+    assert_eq!(view, bits(&[0x16, 0x2F], 12));
+    assert_ne!(view, Binary::from(vec![0x16, 0x20]));
+    assert_eq!(view.cmp(&bits(&[0x16, 0x30], 12)), Ordering::Less);
+    assert_eq!(view.cmp(&Binary::from(vec![0x16])), Ordering::Greater);
+    // <<1:3>> at bit offset 3 of <<4>> is equal to <<1:3>> at offset 0.
+    assert_eq!(Binary::from(vec![0x04]).bits(3, 6), bits(&[0x20], 3));
+}

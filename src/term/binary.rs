@@ -693,14 +693,12 @@ impl Default for Binary {
 }
 
 impl PartialEq for Binary {
-    /// Compare the two binaries by their bytes. Two binaries that share one
-    /// array, one offset, and one size have the same bytes. The size of the
-    /// array that holds the bytes does not change the result: two binaries
-    /// with equal bytes are equal, also when one array is longer. ERTS
-    /// compares two bitstrings by their bits and then by their sizes
-    /// (`erts_cmp_compound`, `utils.c:2100-2125`). PBeam has no bitstring
-    /// term, and no supported path compares two binaries with a size that is
-    /// not a whole number of bytes.
+    /// Compare the two binaries by their bits. Two binaries are equal when
+    /// their sizes in bits are equal and their bits are equal, as ERTS `eq`
+    /// compares two bitstrings (`utils.c:1209-1217`). Thus `<<1:3>>` is not
+    /// equal to `<<32>>`. Two binaries that share one array, one offset, and
+    /// one size have the same bits. The size of the array that holds the
+    /// bytes does not change the result.
     ///
     /// # Examples
     ///
@@ -708,13 +706,15 @@ impl PartialEq for Binary {
     /// let source = Binary::from(b"abc".to_vec());
     /// assert_eq!(source.bits(0, 16), Binary::from(b"ab".to_vec()));
     /// assert_ne!(source.bits(0, 16), Binary::from(b"ac".to_vec()));
+    /// assert_ne!(Binary::from(vec![32]).bits(0, 3), Binary::from(vec![32]));
     /// ```
     fn eq(&self, other: &Self) -> bool {
-        // A view of one array with the same offset and length has the same
-        // bytes. Each other pair compares the bytes, so the size of the
-        // array does not change the result.
-        (self.same_bytes(other) && self.0.offset == other.0.offset && self.0.size == other.0.size)
-            || self[..] == other[..]
+        // A view of one array with the same offset and size has the same
+        // bits. Each other pair of one size compares the bits, so the size
+        // of the array does not change the result.
+        self.0.size == other.0.size
+            && ((self.same_bytes(other) && self.0.offset == other.0.offset)
+                || cmp_bits(self, other, self.0.size).is_eq())
     }
 }
 
@@ -850,8 +850,8 @@ impl fmt::Debug for Binary {
 }
 
 impl PartialOrd for Binary {
-    /// Compare the bytes, then the sizes, as `erts_cmp_compound` compares two
-    /// bitstrings (`utils.c:2100-2125`).
+    /// Compare the bits, then the sizes in bits, as `erts_cmp` compares two
+    /// bitstrings (`utils.c:2325-2335`).
     ///
     /// # Examples
     ///
@@ -864,9 +864,9 @@ impl PartialOrd for Binary {
 }
 
 impl Ord for Binary {
-    /// Compare the bytes, then the sizes, as `erts_cmp_compound` compares two
-    /// bitstrings: a shorter binary is less when it is a prefix of the other
-    /// (`utils.c:2100-2125`).
+    /// Compare the bits that the two binaries both have, then the sizes in
+    /// bits, as `erts_cmp` compares two bitstrings: a shorter binary is less
+    /// when its bits are a prefix of the other (`utils.c:2325-2335`).
     ///
     /// # Examples
     ///
@@ -874,10 +874,38 @@ impl Ord for Binary {
     /// use std::cmp::Ordering;
     /// assert_eq!(Binary::from(vec![1]).cmp(&Binary::from(vec![1])), Ordering::Equal);
     /// assert_eq!(Binary::from(vec![1]).cmp(&Binary::from(vec![1, 2])), Ordering::Less);
+    /// // <<1:3>> < <<32>>: the 3 bits are equal and the size is less.
+    /// assert_eq!(Binary::from(vec![32]).bits(0, 3).cmp(&Binary::from(vec![32])), Ordering::Less);
     /// ```
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self[..].cmp(&other[..])
+        cmp_bits(self, other, self.0.size.min(other.0.size)).then(self.0.size.cmp(&other.0.size))
     }
+}
+
+/// Compare the first `size` bits of the two binaries, as `erts_cmp_bits`
+/// does (`erl_bits.h:559-582`): the whole bytes, then the high bits of the
+/// next byte. A mask removes the bits after `size` in that byte, because a
+/// view at a byte offset keeps those bits of its array. `size` is at most
+/// the size of each binary.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let left = Binary::from(vec![0x3F]);
+/// let right = Binary::from(vec![0x20]);
+/// assert!(cmp_bits(&left, &right, 3).is_eq());
+/// assert!(cmp_bits(&left, &right, 4).is_gt());
+/// ```
+fn cmp_bits(left: &Binary, right: &Binary, size: usize) -> std::cmp::Ordering {
+    let whole = byte(size);
+    let tail = size % BITS_PER_BYTE;
+    left[..whole].cmp(&right[..whole]).then_with(|| {
+        if tail == 0 {
+            return std::cmp::Ordering::Equal;
+        }
+        let mask = 0xFF_u8 << (BITS_PER_BYTE - tail);
+        (left[whole] & mask).cmp(&(right[whole] & mask))
+    })
 }
 
 impl Term {
