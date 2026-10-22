@@ -170,6 +170,49 @@ fn gives_the_errors_of_the_port_bifs_as_pinned_erts() {
 }
 
 #[test]
+fn frames_the_packets_of_a_packet_port_as_pinned_erts() {
+    // `{packet, N}` gives a header of N bytes with the size of the data
+    // (erl_bif_port.c:849-861). The output writes the header and then the
+    // data, and data that does not fit in a header of 1 or 2 bytes closes
+    // the port with `einval` (sys_drivers.c:1140-1203). The input gives
+    // each complete packet as one message, also for a header or data in
+    // more than one read, and the end of file drops a packet that is not
+    // complete (sys_drivers.c:1336-1440). The counts are the bytes of the
+    // data without the headers (io.c:1408, 6354).
+    assert_runs(
+        "packet()",
+        "[[true,true,true],[<<104,101,108,108,111>>,<<>>,<<97,98,99>>],[{input,8},{output,8}],[{[<<104,105>>,<<>>,<<120>>],0},{[<<97,98,99>>],0}],[255,einval,65535,einval],[{'EXIT',port,normal},{'EXIT',port,normal},{'EXIT',port,normal},{'EXIT',port,normal},{'EXIT',port,normal}]]",
+    );
+}
+
+#[test]
+fn gives_badopt_for_a_packet_setting_that_erts_does_not_accept() {
+    // Only a small integer 1, 2, or 4 is a header size
+    // (erl_bif_port.c:849-861), and `erlang:open_port/2` raises `badarg`
+    // for `badopt`.
+    assert_runs(
+        "packet_errors()",
+        "[badopt,badopt,badopt,badopt,badopt,badopt,{error,badarg}]",
+    );
+}
+
+#[test]
+fn sends_eof_and_keeps_the_port_open_as_pinned_erts() {
+    // `eof` sets `ERTS_PORT_SFLG_SOFT_EOF` (erl_bif_port.c:995-996): the end
+    // of file sends `{Port, eof}`, after the exit status with
+    // `exit_status`, and the port stays open (io.c:7204-7209) until a write
+    // to the program that exited fails with `epipe` or `port_close/1`
+    // closes it. `overlapped_io` changes nothing on Unix
+    // (erl_bif_port.c:1001-1002, erl_sys_driver.h:56), so the settings of
+    // `inet_gethost_native:do_open_port/2` (inet_gethost_native.erl:415)
+    // give one packet and then `eof`.
+    assert_runs(
+        "eof()",
+        "[[{data,<<104,105>>},{exit_status,3},eof],[{input,2},true],true,epipe,[{data,<<104,105>>},eof],none,true,normal,[{data,<<104,105>>},eof],[{'EXIT',port,normal}]]",
+    );
+}
+
+#[test]
 fn gives_the_port_name_before_the_first_byte_0_as_pinned_erts() {
     // ERTS copies a binary name into a C string, and the port name is that
     // C string (erl_unicode.c:2107-2108, io.c:323, 366-367).

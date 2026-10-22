@@ -13,7 +13,7 @@ use crate::runtime::{
         spawn::{self, SpawnError, Streams},
     },
     port::{
-        Driver, Port, Ports, Spawn,
+        Driver, Input, Packets, Port, Ports, Spawn,
         inet::{Control, Inet, SocketType},
     },
     signal::Signal,
@@ -200,8 +200,7 @@ const PORT_REDUCTIONS: i32 = 40;
 
 /// The tuple options of `open_port/2` that ERTS accepts and PBeam does not
 /// support (`erl_bif_port.c:849-976`).
-const UNSUPPORTED_TUPLE_OPTIONS: [&str; 8] = [
-    "packet",
+const UNSUPPORTED_TUPLE_OPTIONS: [&str; 7] = [
     "line",
     "env",
     "arg0",
@@ -213,15 +212,7 @@ const UNSUPPORTED_TUPLE_OPTIONS: [&str; 8] = [
 
 /// The atom options of `open_port/2` that ERTS accepts and PBeam does not
 /// support (`erl_bif_port.c:979-1009`).
-const UNSUPPORTED_ATOM_OPTIONS: [&str; 7] = [
-    "stream",
-    "line",
-    "in",
-    "out",
-    "eof",
-    "hide",
-    "overlapped_io",
-];
+const UNSUPPORTED_ATOM_OPTIONS: [&str; 5] = ["stream", "line", "in", "out", "hide"];
 
 /// The options of `open_port/2` that PBeam supports, as the fields of the
 /// ERTS `SysDriverOpts` and the port flags that `open_port` sets
@@ -234,6 +225,12 @@ struct PortSettings {
     binary: bool,
     /// `exit_status`.
     exit_status: bool,
+    /// `eof`: the end of file sends `{Port, eof}`, and the port stays open
+    /// (`ERTS_PORT_SFLG_SOFT_EOF`, `erl_bif_port.c:995-996`).
+    eof: bool,
+    /// The header size of `{packet, N}`: 1, 2, or 4, or 0 without it
+    /// (`packet_bytes`, `erl_bif_port.c:849-861`).
+    packet: usize,
     /// The native bytes of the strings of `{args, Args}`, or no bytes
     /// without it.
     args: Vec<Vec<u8>>,
@@ -319,8 +316,10 @@ pub(super) fn open_port(
     };
     let spawn = Spawn {
         exit_status: settings.exit_status,
+        soft_eof: settings.eof,
+        packets: Packets::new(settings.packet),
         child,
-        end_of_file: false,
+        input: Input::Open,
     };
     let port = scheduler.open_port(path, Driver::Spawn(spawn))?;
     let reference = scheduler.make_ref()?;
@@ -377,6 +376,8 @@ fn open_driver_port(
             },
             binary: true,
             exit_status: false,
+            eof: false,
+            packet: 0,
             args,
         } if args.is_empty()
     );
@@ -425,6 +426,8 @@ fn port_settings(atoms: &AtomTable, settings: &Term) -> Result<Option<PortSettin
         },
         binary: false,
         exit_status: false,
+        eof: false,
+        packet: 0,
         args: Vec::new(),
     };
     for element in elements {
@@ -438,6 +441,12 @@ fn port_settings(atoms: &AtomTable, settings: &Term) -> Result<Option<PortSettin
                         return Ok(None);
                     };
                     result.args = args;
+                    continue;
+                } else if option.is_static("packet") {
+                    match pair[1] {
+                        Term::Integer(size @ (1 | 2 | 4)) => result.packet = size as usize,
+                        _ => return Ok(None),
+                    }
                     continue;
                 } else if option.is_one_of(&UNSUPPORTED_TUPLE_OPTIONS) {
                     option
@@ -456,6 +465,10 @@ fn port_settings(atoms: &AtomTable, settings: &Term) -> Result<Option<PortSettin
                     result.binary = true;
                 } else if option.is_static("exit_status") {
                     result.exit_status = true
+                } else if option.is_static("eof") {
+                    result.eof = true
+                } else if option.is_static("overlapped_io") {
+                    // Only a Windows port uses it (`erl_sys_driver.h:56`).
                 } else if option.is_one_of(&UNSUPPORTED_ATOM_OPTIONS) {
                     return Err(unsupported_option(atoms.name_of(option)));
                 } else {
@@ -643,7 +656,10 @@ fn found_port_id(scheduler: &mut Scheduler, port: &Term) -> Result<Option<PortId
 /// output count, use 40 reductions, and return `true`. A failed write
 /// closes the port with the `erl_errno_id` atom of the failure as its
 /// reason, for example `epipe`, as `driver_failure_posix` does
-/// (`sys_drivers.c:1180-1184`). On a `tcp_inet` port, the driver runs the
+/// (`sys_drivers.c:1180-1184`). With `{packet, N}`, the program gets a
+/// header with the size before the bytes, and data that does not fit in a
+/// header of 1 or 2 bytes closes the port with `einval`
+/// (`sys_drivers.c:1140-1203`). On a `tcp_inet` port, the driver runs the
 /// output with its `inet_reply` message (see `Scheduler::tcp_send`). A term
 /// that is not an open port, or `Data`
 /// that is not iodata, gives the atom `badarg`. The result traps to
@@ -692,8 +708,12 @@ pub(super) fn port_command(
         scheduler.tcp_send(id, &bytes)?;
         return Ok(signals_return(scheduler, port, Term::static_atom("true")));
     };
-    match spawn.child.write_input(&bytes) {
-        Ok(()) => port_state.output += bytes.len() as u64,
+    // A packet that does not fit in its header fails with `EINVAL`
+    // (`sys_drivers.c:1153-1158`).
+    let size = bytes.len() as u64;
+    let written = spawn.packets.frame(bytes).ok_or(libc::EINVAL);
+    match written.and_then(|framed| spawn.child.write_input(&framed)) {
+        Ok(()) => port_state.output += size,
         Err(errno) => {
             let reason = Term::Atom(scheduler.atoms.put(&errno_id(errno))?);
             scheduler.close_port(id, reason);
