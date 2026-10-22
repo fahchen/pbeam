@@ -812,7 +812,12 @@ impl EtsTables {
         program: Reference,
         spec: pattern::MatchSpec,
     ) {
-        self.programs.insert(program, (table, spec));
+        // A process of another scheduler can delete the table after the
+        // walk released its locks; the delete dropped the programs of the
+        // table, so a program of a deleted table is not kept.
+        if self.tables.contains_key(&table) {
+            self.programs.insert(program, (table, spec));
+        }
     }
 
     /// Return the compiled match specification of the continuation program

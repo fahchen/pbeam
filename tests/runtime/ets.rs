@@ -1726,3 +1726,13 @@ fn keeps_no_result_for_an_insert_of_a_dead_process() {
     assert_eq!(tables.take_result(ProcessId(1)), Some(Term::Integer(2)));
     assert!(tables.take_result(ProcessId(1)).is_none());
 }
+
+#[test]
+fn keeps_no_program_of_a_deleted_table() {
+    // A select of another scheduler can end after the delete of its table.
+    let atoms = test_atom_table();
+    let mut tables = EtsTables::default();
+    let spec = super::pattern::MatchSpec::compile(&atoms, &Term::nil()).expect("an empty spec");
+    tables.remember_program(Reference(0), Reference(1), spec);
+    assert!(tables.program(Reference(1)).is_none());
+}
