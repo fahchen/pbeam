@@ -385,7 +385,7 @@ fn hashes_a_float_as_pinned_erts() {
 /// A table with the atoms of the phash tests, and the atoms `a` and `abc`
 /// from it.
 fn phash_atoms() -> (AtomTable, Atom, Atom) {
-    let mut atoms = AtomTable::new();
+    let atoms = AtomTable::new();
     let a = atoms.put("a").unwrap();
     let abc = atoms.put("abc").unwrap();
     (atoms, a, abc)

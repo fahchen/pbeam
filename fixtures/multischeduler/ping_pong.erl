@@ -22,7 +22,7 @@
          pattern_split_give/0, pattern_matches/0, pattern_matches_give/0,
          info_idle/0, info_idle_child/0, stuck_child/0, relay_wait/0,
          bounce_ping/0, bounce_pong/0, busy_send/0, timer_send/0,
-         port_relay/0]).
+         port_relay/0, atom_send/0, atom_receive/0]).
 
 -define(COUNT, 100).
 
@@ -213,8 +213,7 @@ down_hold() ->
     true = register(down_name, self()),
     receive after 100 -> ok end.
 
-%% The root that creates an atom at runtime. A run with scheduler threads
-%% cannot create an atom yet.
+%% The root that creates an atom at runtime.
 atom_create() ->
     list_to_atom("new_scheduler_atom_" ++ integer_to_list(erlang:unique_integer([positive]))).
 
@@ -479,10 +478,28 @@ name_kill_child() ->
     true = register(name_kill, self()),
     receive never -> ok end.
 
-%% The root that decodes a term with a new atom. A run with scheduler
-%% threads cannot create an atom.
+%% The root that decodes a term with a new atom.
 decode_atom() ->
     binary_to_term(<<131, 119, 19, "review_runtime_atom">>).
+
+%% The root that creates a new atom with list_to_atom/1 and sends it to the
+%% root of the other scheduler. It returns the atom.
+atom_send() ->
+    Atom = list_to_atom("pbeam_shared_atom"),
+    case wait_for(atom_receiver, 100000) of
+        timeout -> timeout;
+        Pid -> Pid ! {shared, Atom}, Atom
+    end.
+
+%% The root that creates the same atom with binary_to_atom/2 and compares
+%% it with the atom that the other root sends.
+atom_receive() ->
+    true = register(atom_receiver, self()),
+    Atom = binary_to_atom(<<"pbeam_shared_atom">>, utf8),
+    receive
+        {shared, Other} -> {Other =:= Atom, Other, atom_to_list(Other)}
+    after 60000 -> timeout
+    end.
 
 %% The root that writes a persistent term. A run with scheduler threads
 %% cannot share the table.

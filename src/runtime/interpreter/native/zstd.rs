@@ -260,7 +260,7 @@ impl Native {
 /// A new result atom in a full atom table gives the error of
 /// `AtomTable::put`.
 fn result(scheduler: &mut Scheduler, native: Native) -> Result<BifResult, BeamError> {
-    let mut atom =
+    let atom =
         |name: &str| -> Result<Term, BeamError> { Ok(Term::Atom(scheduler.atoms.put(name)?)) };
     let raise = |reason| BifResult::Raise {
         class: ExceptionClass::Error,

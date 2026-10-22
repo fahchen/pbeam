@@ -138,20 +138,48 @@ fn rejects_the_whole_state_of_a_remote_process() {
     );
 }
 
-/// An atom that guest code creates stops a run with scheduler threads with
-/// a clear error, because the copies of the atom table can differ.
+/// Two schedulers that create one new atom get one atom, as the one atom
+/// table of ERTS gives (`erts_atom_put_index`, `atom.c:231`). The pinned
+/// ERTS returns `pbeam_shared_atom` and
+/// `{true, pbeam_shared_atom, "pbeam_shared_atom"}`.
 #[test]
-fn rejects_an_atom_that_guest_code_creates() {
+fn two_schedulers_share_a_new_atom() {
     let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
-    let error = program
-        .execute_on_schedulers(&[("ping_pong", "atom_create"), ("ping_pong", "info_hold")])
-        .expect_err("the atom creation is unsupported");
-    assert!(
-        error
-            .to_string()
-            .contains("cannot create the atom new_scheduler_atom_"),
-        "{error}"
+    let results = program
+        .execute_on_schedulers(&[("ping_pong", "atom_send"), ("ping_pong", "atom_receive")])
+        .expect("the two schedulers run");
+    let Term::Atom(sent) = &results[0].term else {
+        panic!("the sender returns an atom: {:?}", results[0]);
+    };
+    assert_eq!(results[0].atoms().name_of(sent), "pbeam_shared_atom");
+    let Term::Tuple(received) = &results[1].term else {
+        panic!("the receiver returns a tuple: {:?}", results[1]);
+    };
+    assert_eq!(
+        received[0],
+        Term::Atom(program.atom("true").expect("the fixture names true"))
     );
+    assert_eq!(received[1], results[0].term);
+}
+
+/// A new atom of `list_to_atom/1` and of `binary_to_term/1` on two
+/// schedulers. The pinned ERTS returns `review_runtime_atom` and an atom
+/// `new_scheduler_atom_<N>`.
+#[test]
+fn creates_an_atom_on_each_scheduler() {
+    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
+    let results = program
+        .execute_on_schedulers(&[("ping_pong", "decode_atom"), ("ping_pong", "atom_create")])
+        .expect("the two schedulers run");
+    let names: Vec<&str> = results
+        .iter()
+        .map(|result| match &result.term {
+            Term::Atom(atom) => result.atoms().name_of(atom),
+            other => panic!("each root returns an atom: {other:?}"),
+        })
+        .collect();
+    assert_eq!(names[0], "review_runtime_atom");
+    assert!(names[1].starts_with("new_scheduler_atom_"), "{}", names[1]);
 }
 
 /// A check of a process that the caller killed on another scheduler
@@ -639,22 +667,6 @@ fn rejects_an_ets_table() {
         error
             .to_string()
             .contains("unsupported: ets:new/2 in a run of execute_on_schedulers"),
-        "{error}"
-    );
-}
-
-/// A term with a new atom stops a run with scheduler threads with the
-/// clear unsupported error, not with `badarg`.
-#[test]
-fn rejects_an_atom_in_a_decoded_term() {
-    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
-    let error = program
-        .execute_on_schedulers(&[("ping_pong", "decode_atom"), ("ping_pong", "info_hold")])
-        .expect_err("the atom creation is unsupported");
-    assert!(
-        error
-            .to_string()
-            .contains("cannot create the atom review_runtime_atom at runtime"),
         "{error}"
     );
 }

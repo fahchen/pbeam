@@ -15,8 +15,18 @@ use crate::term::{AtomTable, ProcessId, Reference, Term};
 /// Return the two schedulers of a node with two schedulers.
 fn two_schedulers() -> (Arc<Node>, Scheduler, Scheduler) {
     let (node, mut readers) = Node::new(2).unwrap();
-    let first = Scheduler::with_shared(AtomTable::new(), Arc::clone(&node), 0, readers.remove(0));
-    let second = Scheduler::with_shared(AtomTable::new(), Arc::clone(&node), 1, readers.remove(0));
+    let first = Scheduler::with_shared(
+        Arc::new(AtomTable::new()),
+        Arc::clone(&node),
+        0,
+        readers.remove(0),
+    );
+    let second = Scheduler::with_shared(
+        Arc::new(AtomTable::new()),
+        Arc::clone(&node),
+        1,
+        readers.remove(0),
+    );
     (node, first, second)
 }
 

@@ -299,7 +299,7 @@ fn tty_window_size(scheduler: &mut Scheduler, tty: &Term) -> Result<BifResult, B
         return Ok(denied);
     }
     let result = match terminal::window_size(ofd) {
-        (-1, -1) => enotsup(&mut scheduler.atoms)?,
+        (-1, -1) => enotsup(&scheduler.atoms)?,
         (columns, rows) => Term::tuple(vec![
             Term::static_atom("ok"),
             Term::tuple(vec![
@@ -374,7 +374,7 @@ fn tty_init(scheduler: &mut Scheduler, tty: &Term, options: &Term) -> Result<Bif
     let raw = *input == Term::static_atom("raw");
     if tty.state == TtyState::Unavailable {
         let result = if raw {
-            enotsup(&mut scheduler.atoms)?
+            enotsup(&scheduler.atoms)?
         } else {
             Term::static_atom("ok")
         };
@@ -392,7 +392,7 @@ fn tty_init(scheduler: &mut Scheduler, tty: &Term, options: &Term) -> Result<Bif
             tty.first_mode
         };
         if let Err(errno) = terminal::set_mode(tty.ofd, &tty.set_mode) {
-            let error = errno_error(&mut scheduler.atoms, "tcsetattr", errno)?;
+            let error = errno_error(&scheduler.atoms, "tcsetattr", errno)?;
             return Ok(BifResult::Value(error));
         }
     }
@@ -569,7 +569,7 @@ fn read_nif(
         Ok(bytes) => bytes,
         Err(libc::EAGAIN | libc::EINTR) => Vec::new(),
         Err(errno) => {
-            let error = errno_error(&mut scheduler.atoms, "read", errno)?;
+            let error = errno_error(&scheduler.atoms, "read", errno)?;
             return Ok(BifResult::Value(error));
         }
     };
@@ -651,7 +651,7 @@ fn setupterm_nif(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
     }
     let result = match terminal::setupterm() {
         Ok(()) => Term::static_atom("ok"),
-        Err(errno) => errno_error(&mut scheduler.atoms, "setupterm", errno)?,
+        Err(errno) => errno_error(&scheduler.atoms, "setupterm", errno)?,
     };
     Ok(BifResult::Value(result))
 }
@@ -765,17 +765,13 @@ fn termcap_code(term: &Term) -> Option<CString> {
 ///
 /// ```rust,ignore
 /// // {error, {setupterm, enoent}}
-/// let error = errno_error(&mut atoms, "setupterm", libc::ENOENT)?;
+/// let error = errno_error(&atoms, "setupterm", libc::ENOENT)?;
 /// ```
 ///
 /// # Errors
 ///
 /// A new atom in a full atom table gives the error of `AtomTable::put`.
-fn errno_error(
-    atoms: &mut AtomTable,
-    function: &str,
-    errno: libc::c_int,
-) -> Result<Term, BeamError> {
+fn errno_error(atoms: &AtomTable, function: &str, errno: libc::c_int) -> Result<Term, BeamError> {
     Ok(Term::tuple(vec![
         Term::static_atom("error"),
         Term::tuple(vec![
@@ -792,14 +788,14 @@ fn errno_error(
 ///
 /// ```rust,ignore
 /// // {error, enotsup}
-/// let error = enotsup(&mut atoms)?;
+/// let error = enotsup(&atoms)?;
 /// ```
 ///
 /// # Errors
 ///
 /// The atom `enotsup` in a full atom table gives the error of
 /// `AtomTable::put`.
-fn enotsup(atoms: &mut AtomTable) -> Result<Term, BeamError> {
+fn enotsup(atoms: &AtomTable) -> Result<Term, BeamError> {
     Ok(Term::tuple(vec![
         Term::static_atom("error"),
         Term::Atom(atoms.put("enotsup")?),
@@ -814,13 +810,13 @@ fn enotsup(atoms: &mut AtomTable) -> Result<Term, BeamError> {
 ///
 /// ```rust,ignore
 /// // {error, epipe}
-/// let error = error_errno(&mut atoms, libc::EPIPE)?;
+/// let error = error_errno(&atoms, libc::EPIPE)?;
 /// ```
 ///
 /// # Errors
 ///
 /// A new atom in a full atom table gives the error of `AtomTable::put`.
-fn error_errno(atoms: &mut AtomTable, errno: libc::c_int) -> Result<Term, BeamError> {
+fn error_errno(atoms: &AtomTable, errno: libc::c_int) -> Result<Term, BeamError> {
     Ok(Term::tuple(vec![
         Term::static_atom("error"),
         Term::Atom(atoms.put(&errno_id(errno))?),
@@ -934,10 +930,10 @@ fn write_nif(scheduler: &mut Scheduler, tty: &Term, iovec: &Term) -> Result<BifR
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(matches!(dirty_write_result(&mut atoms, IovecWritten::All)?, BifResult::Value(_)));
+/// assert!(matches!(dirty_write_result(&atoms, IovecWritten::All)?, BifResult::Value(_)));
 /// // {error, epipe}
-/// assert!(matches!(dirty_write_result(&mut atoms, IovecWritten::Failed(libc::EPIPE))?, BifResult::Value(Term::Tuple(_))));
-/// assert!(matches!(dirty_write_result(&mut atoms, IovecWritten::BadGroup)?, BifResult::Raise { .. }));
+/// assert!(matches!(dirty_write_result(&atoms, IovecWritten::Failed(libc::EPIPE))?, BifResult::Value(Term::Tuple(_))));
+/// assert!(matches!(dirty_write_result(&atoms, IovecWritten::BadGroup)?, BifResult::Raise { .. }));
 /// ```
 ///
 /// # Errors
@@ -945,7 +941,7 @@ fn write_nif(scheduler: &mut Scheduler, tty: &Term, iovec: &Term) -> Result<BifR
 /// A new errno atom in a full atom table gives the error of
 /// `AtomTable::put`.
 pub(in crate::runtime::interpreter) fn dirty_write_result(
-    atoms: &mut AtomTable,
+    atoms: &AtomTable,
     written: IovecWritten,
 ) -> Result<BifResult, BeamError> {
     Ok(match written {

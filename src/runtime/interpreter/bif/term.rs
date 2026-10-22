@@ -577,7 +577,7 @@ pub(super) fn binary_to_term(
         pos: 0,
         safe,
         local: false,
-        atoms: &mut context.scheduler.atoms,
+        atoms: &context.scheduler.atoms,
         seed,
     };
     match decoder.decode_input(seed) {
@@ -629,8 +629,8 @@ enum DecodeError {
     Badarg,
     /// A term of the external term format that PBeam cannot represent.
     Unsupported(&'static str),
-    /// A runtime error of the byte sequence, such as a new atom in a table
-    /// that a run with scheduler threads froze.
+    /// A runtime error of the byte sequence, such as a new atom in a full
+    /// atom table.
     Error(BeamError),
 }
 
@@ -646,7 +646,7 @@ struct Decoder<'a> {
     /// True inside `LOCAL_EXT`: `NIL_EXT` stands for the local node.
     local: bool,
     /// The atom table of the run.
-    atoms: &'a mut AtomTable,
+    atoms: &'a AtomTable,
     /// The seed of the block hash of `LOCAL_EXT`.
     seed: u32,
 }
@@ -1056,7 +1056,7 @@ impl Decoder<'_> {
             pos: 0,
             safe: self.safe,
             local: false,
-            atoms: &mut *self.atoms,
+            atoms: self.atoms,
             seed,
         };
         let term = decoder.term()?;

@@ -3,7 +3,7 @@ use crate::term::AtomTable;
 
 #[test]
 fn keeps_the_first_send_order_and_deletes_an_entry_after_the_delay() {
-    let mut atoms = AtomTable::new();
+    let atoms = AtomTable::new();
     let a = atoms.put("a@h").unwrap();
     let b = atoms.put("b@h").unwrap();
     let c = atoms.put("c@h").unwrap();
@@ -27,7 +27,7 @@ fn keeps_the_first_send_order_and_deletes_an_entry_after_the_delay() {
 
 #[test]
 fn runs_the_timers_that_ended_before_a_send() {
-    let mut atoms = AtomTable::new();
+    let atoms = AtomTable::new();
     let a = atoms.put("a@h").unwrap();
     let b = atoms.put("b@h").unwrap();
     let mut known = KnownNodes::default();
@@ -45,7 +45,7 @@ fn runs_the_timers_that_ended_before_a_send() {
 
 #[test]
 fn finds_an_entry_among_many_nodes_without_a_walk_of_all_entries() {
-    let mut atoms = AtomTable::new();
+    let atoms = AtomTable::new();
     let names: Vec<_> = (0..1000)
         .map(|n| atoms.put(&format!("n{n}@h")).unwrap())
         .collect();

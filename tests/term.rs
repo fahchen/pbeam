@@ -290,7 +290,7 @@ fn prints_the_module_and_the_function_name_of_a_fun_target() {
 fn formats_and_compares_maps_by_their_pairs() {
     // A fresh table for this test makes a before b, so the Debug text
     // lists a first. A table shared with other tests could make b first.
-    let mut table = AtomTable::new();
+    let table = AtomTable::new();
     let a = Term::Atom(table.put("a").unwrap());
     let b = Term::Atom(table.put("b").unwrap());
     let atom = |name: &str| match name {

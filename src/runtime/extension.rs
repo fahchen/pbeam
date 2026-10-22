@@ -179,12 +179,12 @@ pub enum RegistrationError {
 pub struct NifContext<'a> {
     /// The atom table of the scheduler of the call, or `None` on a dirty
     /// thread, which has no atom table.
-    atoms: Option<&'a mut AtomTable>,
+    atoms: Option<&'a AtomTable>,
 }
 
 impl<'a> NifContext<'a> {
     /// Return the context of a call on the scheduler that owns `atoms`.
-    pub(crate) fn new(atoms: &'a mut AtomTable) -> Self {
+    pub(crate) fn new(atoms: &'a AtomTable) -> Self {
         Self { atoms: Some(atoms) }
     }
 
@@ -206,14 +206,14 @@ impl<'a> NifContext<'a> {
     /// (`MAX_ATOM_CHARACTERS`), is the error `the atom name has more than
     /// 255 characters`. A name that is not a static atom on a dirty thread
     /// is the unsupported error `a dirty NIF cannot make the atom Name`. A
-    /// new atom in a full or frozen atom table gives the error of the table.
+    /// new atom in a full atom table gives the error of the table.
     pub fn atom(&mut self, name: &str) -> Result<Atom, BeamError> {
         if name.chars().count() > MAX_ATOM_CHARACTERS {
             return Err(error(format!(
                 "the atom name has more than {MAX_ATOM_CHARACTERS} characters"
             )));
         }
-        match &mut self.atoms {
+        match &self.atoms {
             Some(atoms) => atoms.put(name),
             None => Atom::from_static(name).ok_or_else(|| {
                 error(format!(

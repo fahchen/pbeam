@@ -128,14 +128,14 @@ const SEED: u32 = 7;
 
 /// Decode one term body with the atom table `atoms`: the input is
 /// `VERSION_MAGIC` and the bytes.
-fn decode_with(atoms: &mut AtomTable, bytes: &[u8], safe: bool) -> Result<Term, DecodeError> {
+fn decode_with(atoms: &AtomTable, bytes: &[u8], safe: bool) -> Result<Term, DecodeError> {
     let input = [&[VERSION_MAGIC][..], bytes].concat();
     decode_full(atoms, &input, safe)
 }
 
 /// Decode one external term with the atom table `atoms`, including
 /// `VERSION_MAGIC`.
-fn decode_full(atoms: &mut AtomTable, bytes: &[u8], safe: bool) -> Result<Term, DecodeError> {
+fn decode_full(atoms: &AtomTable, bytes: &[u8], safe: bool) -> Result<Term, DecodeError> {
     Decoder {
         input: bytes,
         pos: 0,
@@ -159,15 +159,15 @@ fn with_words(tags: &[u8], values: &[u32]) -> Vec<u8> {
 
 #[test]
 fn decodes_the_extended_integer_and_float_forms() {
-    let mut atoms = AtomTable::new();
+    let atoms = AtomTable::new();
     // A zero-width bignum is 0 (`external.c:4478-4485`).
     assert_eq!(
-        decode_with(&mut atoms, &[110, 1, 0, 0], false).unwrap(),
+        decode_with(&atoms, &[110, 1, 0, 0], false).unwrap(),
         Term::Integer(0)
     );
     // `LARGE_BIG_EXT` of the two-byte magnitude 1.
     assert_eq!(
-        decode_with(&mut atoms, &[111, 0, 0, 0, 2, 0, 1, 0], false).unwrap(),
+        decode_with(&atoms, &[111, 0, 0, 0, 2, 0, 1, 0], false).unwrap(),
         Term::Integer(1)
     );
     // `FLOAT_EXT` of 31 bytes with the text `1.5` and NUL padding.
@@ -175,7 +175,7 @@ fn decodes_the_extended_integer_and_float_forms() {
     float.extend_from_slice(b"1.5");
     float.resize(1 + 31, 0);
     assert_eq!(
-        decode_with(&mut atoms, &float, false).unwrap(),
+        decode_with(&atoms, &float, false).unwrap(),
         Term::Float(1.5)
     );
     // A comma is the other radix character that `sys_chars_to_double`
@@ -184,7 +184,7 @@ fn decodes_the_extended_integer_and_float_forms() {
     comma.extend_from_slice(b"1,5");
     comma.resize(1 + 31, 0);
     assert_eq!(
-        decode_with(&mut atoms, &comma, false).unwrap(),
+        decode_with(&atoms, &comma, false).unwrap(),
         Term::Float(1.5)
     );
     // An exponent with a sign is part of the text that ERTS writes.
@@ -192,14 +192,14 @@ fn decodes_the_extended_integer_and_float_forms() {
     exponent.extend_from_slice(b"1.5e+00");
     exponent.resize(1 + 31, 0);
     assert_eq!(
-        decode_with(&mut atoms, &exponent, false).unwrap(),
+        decode_with(&atoms, &exponent, false).unwrap(),
         Term::Float(1.5)
     );
     let mut negative_exponent = vec![99];
     negative_exponent.extend_from_slice(b"1.5E-2");
     negative_exponent.resize(1 + 31, 0);
     assert_eq!(
-        decode_with(&mut atoms, &negative_exponent, false).unwrap(),
+        decode_with(&atoms, &negative_exponent, false).unwrap(),
         Term::Float(0.015)
     );
     // A text without a decimal point, a text without digits after it, an
@@ -209,7 +209,7 @@ fn decodes_the_extended_integer_and_float_forms() {
         invalid.extend_from_slice(text);
         invalid.resize(1 + 31, 0);
         assert!(matches!(
-            decode_with(&mut atoms, &invalid, false),
+            decode_with(&atoms, &invalid, false),
             Err(DecodeError::Badarg)
         ));
     }
@@ -218,113 +218,113 @@ fn decodes_the_extended_integer_and_float_forms() {
     let mut invalid = vec![99];
     invalid.resize(1 + 31, 0xff);
     assert!(matches!(
-        decode_with(&mut atoms, &invalid, false),
+        decode_with(&atoms, &invalid, false),
         Err(DecodeError::Badarg)
     ));
     let mut infinite = vec![99];
     infinite.extend_from_slice(b"inf");
     infinite.resize(1 + 31, 0);
     assert!(matches!(
-        decode_with(&mut atoms, &infinite, false),
+        decode_with(&atoms, &infinite, false),
         Err(DecodeError::Badarg)
     ));
 }
 
 #[test]
 fn decodes_each_atom_tag_and_checks_the_limits() {
-    let mut atoms = AtomTable::new();
+    let atoms = AtomTable::new();
     // `ATOM_EXT` holds Latin-1 bytes, and the other tags hold UTF-8 names.
-    let latin1 = decode_with(&mut atoms, &[100, 0, 1, 233], false).unwrap();
+    let latin1 = decode_with(&atoms, &[100, 0, 1, 233], false).unwrap();
     assert_eq!(latin1, Term::Atom(atoms.get("é").unwrap()));
-    let small_latin1 = decode_with(&mut atoms, &[115, 1, 97], false).unwrap();
+    let small_latin1 = decode_with(&atoms, &[115, 1, 97], false).unwrap();
     assert_eq!(small_latin1, Term::Atom(atoms.get("a").unwrap()));
-    let utf8 = decode_with(&mut atoms, &[118, 0, 1, 97], false).unwrap();
+    let utf8 = decode_with(&atoms, &[118, 0, 1, 97], false).unwrap();
     assert_eq!(utf8, Term::Atom(atoms.get("a").unwrap()));
     // An invalid UTF-8 name and a name of more than 255 characters raise
     // badarg (`external.c:4535-4545`).
     assert!(matches!(
-        decode_with(&mut atoms, &[119, 1, 0xff], false),
+        decode_with(&atoms, &[119, 1, 0xff], false),
         Err(DecodeError::Badarg)
     ));
     let mut long = vec![118, 1, 0];
     long.resize(3 + 256, b'a');
     assert!(matches!(
-        decode_with(&mut atoms, &long, false),
+        decode_with(&atoms, &long, false),
         Err(DecodeError::Badarg)
     ));
     // The `safe` option takes only an atom that the run has.
     assert!(matches!(
-        decode_with(&mut AtomTable::new(), &[119, 3, 122, 122, 122], true),
+        decode_with(&AtomTable::new(), &[119, 3, 122, 122, 122], true),
         Err(DecodeError::Badarg)
     ));
     assert!(matches!(
-        decode_with(&mut atoms, &[119, 3, 97, 98, 115], true),
+        decode_with(&atoms, &[119, 3, 97, 98, 115], true),
         Ok(Term::Atom(_))
     ));
 }
 
 #[test]
 fn decodes_the_large_tuple_bitstring_and_guards() {
-    let mut atoms = AtomTable::new();
+    let atoms = AtomTable::new();
     assert_eq!(
-        decode_with(&mut atoms, &[105, 0, 0, 0, 1, 97, 1], false).unwrap(),
+        decode_with(&atoms, &[105, 0, 0, 0, 1, 97, 1], false).unwrap(),
         Term::tuple(vec![Term::Integer(1)])
     );
     // A count that the bytes cannot hold raises badarg.
     assert!(matches!(
-        decode_with(&mut atoms, &[105, 0, 0, 0, 3, 97, 1], false),
+        decode_with(&atoms, &[105, 0, 0, 0, 3, 97, 1], false),
         Err(DecodeError::Badarg)
     ));
     // A bitstring of whole bytes is a binary, and another tail raises the
     // runtime error of the missing bitstring term.
     assert_eq!(
-        decode_with(&mut atoms, &[77, 0, 0, 0, 1, 8, 5], false).unwrap(),
+        decode_with(&atoms, &[77, 0, 0, 0, 1, 8, 5], false).unwrap(),
         Term::binary(vec![5])
     );
     assert!(matches!(
-        decode_with(&mut atoms, &[77, 0, 0, 0, 1, 7, 5], false),
+        decode_with(&atoms, &[77, 0, 0, 0, 1, 7, 5], false),
         Err(DecodeError::Unsupported(_))
     ));
     // A bit count of 0 or 9, and a payload of no bytes, raise badarg
     // (`external.c:4895-4920`).
     assert!(matches!(
-        decode_with(&mut atoms, &[77, 0, 0, 0, 1, 9, 5], false),
+        decode_with(&atoms, &[77, 0, 0, 0, 1, 9, 5], false),
         Err(DecodeError::Badarg)
     ));
     assert!(matches!(
-        decode_with(&mut atoms, &[77, 0, 0, 0, 1, 0, 5], false),
+        decode_with(&atoms, &[77, 0, 0, 0, 1, 0, 5], false),
         Err(DecodeError::Badarg)
     ));
     assert!(matches!(
-        decode_with(&mut atoms, &[77, 0, 0, 0, 0, 8], false),
+        decode_with(&atoms, &[77, 0, 0, 0, 0, 8], false),
         Err(DecodeError::Badarg)
     ));
     // An empty `LARGE_TUPLE_EXT`, an empty `MAP_EXT`, and a
     // `LIST_EXT` of no cells give `{}`, `#{}`, and the tail.
     assert_eq!(
-        decode_with(&mut atoms, &[105, 0, 0, 0, 0], false).unwrap(),
+        decode_with(&atoms, &[105, 0, 0, 0, 0], false).unwrap(),
         Term::tuple(vec![])
     );
-    let empty = decode_with(&mut atoms, &[116, 0, 0, 0, 0], false).unwrap();
+    let empty = decode_with(&atoms, &[116, 0, 0, 0, 0], false).unwrap();
     assert!(matches!(&empty, Term::Map(map) if map.len() == 0));
     assert_eq!(
-        decode_with(&mut atoms, &[108, 0, 0, 0, 0, 97, 1], false).unwrap(),
+        decode_with(&atoms, &[108, 0, 0, 0, 0, 97, 1], false).unwrap(),
         Term::Integer(1)
     );
     // A small tuple whose count the bytes cannot hold raises badarg.
     assert!(matches!(
-        decode_with(&mut atoms, &[104, 3, 97, 1], false),
+        decode_with(&atoms, &[104, 3, 97, 1], false),
         Err(DecodeError::Badarg)
     ));
     // A tuple above `ERTS_MAX_TUPLE_SIZE` raises badarg.
     assert!(matches!(
-        decode_with(&mut atoms, &[105, 1, 0, 0, 0], false),
+        decode_with(&atoms, &[105, 1, 0, 0, 0], false),
         Err(DecodeError::Badarg)
     ));
     // A duplicate map key raises badarg (`external.c:5069-5150`).
     assert!(matches!(
         decode_with(
-            &mut atoms,
+            &atoms,
             &[116, 0, 0, 0, 2, 97, 1, 97, 2, 97, 1, 97, 3],
             false
         ),
@@ -332,23 +332,23 @@ fn decodes_the_large_tuple_bitstring_and_guards() {
     ));
     // A map and a list whose bytes do not hold their count raise badarg.
     assert!(matches!(
-        decode_with(&mut atoms, &[116, 0, 0, 0, 2, 97, 1], false),
+        decode_with(&atoms, &[116, 0, 0, 0, 2, 97, 1], false),
         Err(DecodeError::Badarg)
     ));
     assert!(matches!(
-        decode_with(&mut atoms, &[108, 0, 0, 0, 2, 97, 1], false),
+        decode_with(&atoms, &[108, 0, 0, 0, 2, 97, 1], false),
         Err(DecodeError::Badarg)
     ));
 }
 
 #[test]
 fn decodes_each_identifier_tag_and_checks_the_node() {
-    let mut atoms = AtomTable::new();
+    let atoms = AtomTable::new();
     let mut pid = vec![88];
     pid.extend(node());
     pid.extend(with_words(&[], &[5, 0, 0]));
     assert_eq!(
-        decode_with(&mut atoms, &pid, false).unwrap(),
+        decode_with(&atoms, &pid, false).unwrap(),
         Term::Pid(ProcessId(5))
     );
     let mut old_pid = vec![103];
@@ -356,14 +356,14 @@ fn decodes_each_identifier_tag_and_checks_the_node() {
     old_pid.extend(with_words(&[], &[5, 0]));
     old_pid.push(0);
     assert_eq!(
-        decode_with(&mut atoms, &old_pid, false).unwrap(),
+        decode_with(&atoms, &old_pid, false).unwrap(),
         Term::Pid(ProcessId(5))
     );
     let mut v4_port = vec![120];
     v4_port.extend(node());
     v4_port.extend(with_words(&[], &[0, 5, 0]));
     assert_eq!(
-        decode_with(&mut atoms, &v4_port, false).unwrap(),
+        decode_with(&atoms, &v4_port, false).unwrap(),
         Term::Port(PortId(5))
     );
     // A port number above 2^60 - 1 raises badarg
@@ -373,14 +373,14 @@ fn decodes_each_identifier_tag_and_checks_the_node() {
     big_port.extend_from_slice(&u64::MAX.to_be_bytes());
     big_port.extend(with_words(&[], &[0]));
     assert!(matches!(
-        decode_with(&mut atoms, &big_port, false),
+        decode_with(&atoms, &big_port, false),
         Err(DecodeError::Badarg)
     ));
     let mut new_port = vec![89];
     new_port.extend(node());
     new_port.extend(with_words(&[], &[5, 0]));
     assert_eq!(
-        decode_with(&mut atoms, &new_port, false).unwrap(),
+        decode_with(&atoms, &new_port, false).unwrap(),
         Term::Port(PortId(5))
     );
     let mut old_port = vec![102];
@@ -388,14 +388,14 @@ fn decodes_each_identifier_tag_and_checks_the_node() {
     old_port.extend(with_words(&[], &[5]));
     old_port.push(0);
     assert_eq!(
-        decode_with(&mut atoms, &old_port, false).unwrap(),
+        decode_with(&atoms, &old_port, false).unwrap(),
         Term::Port(PortId(5))
     );
     let mut newer_ref = vec![90, 0, 3];
     newer_ref.extend(node());
     newer_ref.extend(with_words(&[], &[0, 5, 1, 0]));
     assert_eq!(
-        decode_with(&mut atoms, &newer_ref, false).unwrap(),
+        decode_with(&atoms, &newer_ref, false).unwrap(),
         Term::Reference(Reference::ordinary(5).unwrap())
     );
     let mut new_ref = vec![114, 0, 3];
@@ -403,7 +403,7 @@ fn decodes_each_identifier_tag_and_checks_the_node() {
     new_ref.push(0);
     new_ref.extend(with_words(&[], &[5, 1, 0]));
     assert_eq!(
-        decode_with(&mut atoms, &new_ref, false).unwrap(),
+        decode_with(&atoms, &new_ref, false).unwrap(),
         Term::Reference(Reference::ordinary(5).unwrap())
     );
     // An old reference has the scheduler number 0, which PBeam cannot
@@ -413,7 +413,7 @@ fn decodes_each_identifier_tag_and_checks_the_node() {
     old_ref.extend(with_words(&[], &[5]));
     old_ref.push(0);
     assert!(matches!(
-        decode_with(&mut atoms, &old_ref, false),
+        decode_with(&atoms, &old_ref, false),
         Err(DecodeError::Unsupported(_))
     ));
 
@@ -423,13 +423,13 @@ fn decodes_each_identifier_tag_and_checks_the_node() {
     let mut nil_pid = vec![88, 106];
     nil_pid.extend(with_words(&[], &[5, 0, 0]));
     assert!(matches!(
-        decode_with(&mut atoms, &nil_pid, false),
+        decode_with(&atoms, &nil_pid, false),
         Err(DecodeError::Badarg)
     ));
     let mut bad_sysname = vec![88, 97, 1];
     bad_sysname.extend(with_words(&[], &[5, 0, 0]));
     assert!(matches!(
-        decode_with(&mut atoms, &bad_sysname, false),
+        decode_with(&atoms, &bad_sysname, false),
         Err(DecodeError::Badarg)
     ));
     let mut other = vec![119, 3, 102, 111, 111];
@@ -437,7 +437,7 @@ fn decodes_each_identifier_tag_and_checks_the_node() {
     other_pid.append(&mut other);
     other_pid.extend(with_words(&[], &[5, 0, 1]));
     assert!(matches!(
-        decode_with(&mut atoms, &other_pid, false),
+        decode_with(&atoms, &other_pid, false),
         Err(DecodeError::Unsupported(_))
     ));
     // A port and a reference of another node, and an old reference of
@@ -447,14 +447,14 @@ fn decodes_each_identifier_tag_and_checks_the_node() {
     other_port.extend(foo.clone());
     other_port.extend(with_words(&[], &[0, 5, 1]));
     assert!(matches!(
-        decode_with(&mut atoms, &other_port, false),
+        decode_with(&atoms, &other_port, false),
         Err(DecodeError::Unsupported(_))
     ));
     let mut other_ref = vec![90, 0, 3];
     other_ref.extend(foo.clone());
     other_ref.extend(with_words(&[], &[1, 5, 1, 0]));
     assert!(matches!(
-        decode_with(&mut atoms, &other_ref, false),
+        decode_with(&atoms, &other_ref, false),
         Err(DecodeError::Unsupported(_))
     ));
     let mut other_old_ref = vec![101];
@@ -462,7 +462,7 @@ fn decodes_each_identifier_tag_and_checks_the_node() {
     other_old_ref.extend(with_words(&[], &[5]));
     other_old_ref.push(0);
     assert!(matches!(
-        decode_with(&mut atoms, &other_old_ref, false),
+        decode_with(&atoms, &other_old_ref, false),
         Err(DecodeError::Unsupported(_))
     ));
     // An old reference whose number is 2^18 or more raises badarg.
@@ -471,7 +471,7 @@ fn decodes_each_identifier_tag_and_checks_the_node() {
     big_old_ref.extend(with_words(&[], &[1 << 18]));
     big_old_ref.push(0);
     assert!(matches!(
-        decode_with(&mut atoms, &big_old_ref, false),
+        decode_with(&atoms, &big_old_ref, false),
         Err(DecodeError::Badarg)
     ));
     // The node atom of a pid takes each atom tag (`dec_sysname`,
@@ -481,7 +481,7 @@ fn decodes_each_identifier_tag_and_checks_the_node() {
         tagged.extend_from_slice(sysname);
         tagged.extend(with_words(&[], &[5, 0, 0]));
         assert!(matches!(
-            decode_with(&mut atoms, &tagged, false),
+            decode_with(&atoms, &tagged, false),
             Err(DecodeError::Unsupported(_))
         ));
     }
@@ -492,7 +492,7 @@ fn decodes_each_identifier_tag_and_checks_the_node() {
     tiny_pid.extend(with_words(&[], &[5, 0]));
     tiny_pid.push(4);
     assert!(matches!(
-        decode_with(&mut atoms, &tiny_pid, false),
+        decode_with(&atoms, &tiny_pid, false),
         Err(DecodeError::Badarg)
     ));
     // A pid number above 2^28 - 1 raises badarg, and a reference whose
@@ -501,14 +501,14 @@ fn decodes_each_identifier_tag_and_checks_the_node() {
     big_pid.extend(node());
     big_pid.extend(with_words(&[], &[1 << 28, 0, 0]));
     assert!(matches!(
-        decode_with(&mut atoms, &big_pid, false),
+        decode_with(&atoms, &big_pid, false),
         Err(DecodeError::Badarg)
     ));
     let mut big_ref = vec![90, 0, 3];
     big_ref.extend(node());
     big_ref.extend(with_words(&[], &[0, 1 << 18, 1, 0]));
     assert!(matches!(
-        decode_with(&mut atoms, &big_ref, false),
+        decode_with(&atoms, &big_ref, false),
         Err(DecodeError::Badarg)
     ));
     // A reference of another scheduler has other low bits in its second
@@ -517,7 +517,7 @@ fn decodes_each_identifier_tag_and_checks_the_node() {
     other_scheduler.extend(node());
     other_scheduler.extend(with_words(&[], &[0, 5, 2, 0]));
     assert!(matches!(
-        decode_with(&mut atoms, &other_scheduler, false),
+        decode_with(&atoms, &other_scheduler, false),
         Err(DecodeError::Unsupported(_))
     ));
     // ERTS marks a pid reference in the second reference number
@@ -527,7 +527,7 @@ fn decodes_each_identifier_tag_and_checks_the_node() {
     pid_ref.extend(node());
     pid_ref.extend(with_words(&[], &[0, 5, 0x4000_0001, 0]));
     assert!(matches!(
-        decode_with(&mut atoms, &pid_ref, false),
+        decode_with(&atoms, &pid_ref, false),
         Err(DecodeError::Unsupported(_))
     ));
     // The high bit of the third number is not a marker in ERTS, and PBeam
@@ -536,7 +536,7 @@ fn decodes_each_identifier_tag_and_checks_the_node() {
     high_ref.extend(node());
     high_ref.extend(with_words(&[], &[0, 5, 1, 0x8000_0000]));
     assert!(matches!(
-        decode_with(&mut atoms, &high_ref, false),
+        decode_with(&atoms, &high_ref, false),
         Err(DecodeError::Unsupported(_))
     ));
     // A zero count is a reference of the scheduler 0, which PBeam cannot
@@ -546,7 +546,7 @@ fn decodes_each_identifier_tag_and_checks_the_node() {
     zero_ref.extend(node());
     zero_ref.extend(with_words(&[], &[0, 0]));
     assert!(matches!(
-        decode_with(&mut atoms, &zero_ref, false),
+        decode_with(&atoms, &zero_ref, false),
         Err(DecodeError::Unsupported(_))
     ));
     // A count above five raises badarg (`ERTS_MAX_REF_NUMBERS`,
@@ -555,7 +555,7 @@ fn decodes_each_identifier_tag_and_checks_the_node() {
     six_ref.extend(node());
     six_ref.extend(with_words(&[], &[0, 1, 1, 0, 0, 0]));
     assert!(matches!(
-        decode_with(&mut atoms, &six_ref, false),
+        decode_with(&atoms, &six_ref, false),
         Err(DecodeError::Badarg)
     ));
     // A count above three reads and skips the extra numbers.
@@ -563,26 +563,26 @@ fn decodes_each_identifier_tag_and_checks_the_node() {
     four_ref.extend(node());
     four_ref.extend(with_words(&[], &[0, 5, 1, 0, 9]));
     assert_eq!(
-        decode_with(&mut atoms, &four_ref, false).unwrap(),
+        decode_with(&atoms, &four_ref, false).unwrap(),
         Term::Reference(Reference::ordinary(5).unwrap())
     );
 }
 
 #[test]
 fn decodes_the_unsupported_forms_and_local_terms() {
-    let mut atoms = AtomTable::new();
+    let atoms = AtomTable::new();
     // A truncated fun and the removed `FUN_EXT` raise badarg; a record
     // without its fields raises badarg (`decoded_size`, `external.c:6150-6500`).
     assert!(matches!(
-        decode_with(&mut atoms, &[112], false),
+        decode_with(&atoms, &[112], false),
         Err(DecodeError::Badarg)
     ));
     assert!(matches!(
-        decode_with(&mut atoms, &[117], false),
+        decode_with(&atoms, &[117], false),
         Err(DecodeError::Badarg)
     ));
     assert!(matches!(
-        decode_with(&mut atoms, &[67], false),
+        decode_with(&atoms, &[67], false),
         Err(DecodeError::Badarg)
     ));
     // A well-formed record passes the structure check, and the decoder
@@ -592,11 +592,11 @@ fn decodes_the_unsupported_forms_and_local_terms() {
         67, 0, 0, 0, 0, 0, 119, 6, 101, 114, 108, 97, 110, 103, 119, 1, 120,
     ];
     assert!(matches!(
-        decode_with(&mut atoms, &empty_record, false),
+        decode_with(&atoms, &empty_record, false),
         Err(DecodeError::Unsupported(_))
     ));
     assert!(matches!(
-        decode_with(&mut atoms, &[67, 0, 0, 0, 0, 2], false),
+        decode_with(&atoms, &[67, 0, 0, 0, 0, 2], false),
         Err(DecodeError::Badarg)
     ));
     // A well-formed local fun passes the structure check, and the decoder
@@ -609,7 +609,7 @@ fn decodes_the_unsupported_forms_and_local_terms() {
     local_fun.extend(node());
     local_fun.extend(with_words(&[], &[5, 0, 0]));
     assert!(matches!(
-        decode_with(&mut atoms, &local_fun, false),
+        decode_with(&atoms, &local_fun, false),
         Err(DecodeError::Unsupported(_))
     ));
     // A free-variable count above 255 raises badarg
@@ -619,7 +619,7 @@ fn decodes_the_unsupported_forms_and_local_terms() {
     many_free.extend([0u8; 4]);
     many_free.extend(256u32.to_be_bytes());
     assert!(matches!(
-        decode_with(&mut atoms, &many_free, false),
+        decode_with(&atoms, &many_free, false),
         Err(DecodeError::Badarg)
     ));
     // A `LOCAL_EXT` term inside a term sets the local node, and its hash
@@ -629,11 +629,11 @@ fn decodes_the_unsupported_forms_and_local_terms() {
     nested.extend(hash.to_be_bytes());
     nested.extend([97, 1, 97, 2]);
     assert_eq!(
-        decode_with(&mut atoms, &nested, false).unwrap(),
+        decode_with(&atoms, &nested, false).unwrap(),
         Term::tuple(vec![Term::Integer(1), Term::Integer(2)])
     );
     assert!(matches!(
-        decode_with(&mut atoms, &[104, 2, 121, 0, 0, 0, 0, 97, 1, 97, 2], false),
+        decode_with(&atoms, &[104, 2, 121, 0, 0, 0, 0, 97, 1, 97, 2], false),
         Err(DecodeError::Badarg)
     ));
     // An `EXPORT_EXT` term gives an external fun, and each other form of
@@ -641,7 +641,7 @@ fn decodes_the_unsupported_forms_and_local_terms() {
     let export = vec![
         113, 119, 6, 101, 114, 108, 97, 110, 103, 119, 3, 97, 98, 115, 97, 1,
     ];
-    let term = decode_with(&mut atoms, &export, false).unwrap();
+    let term = decode_with(&atoms, &export, false).unwrap();
     assert!(matches!(
         &term,
         Term::Fun(fun) if *fun.target()
@@ -652,22 +652,22 @@ fn decodes_the_unsupported_forms_and_local_terms() {
             }
     ));
     assert!(matches!(
-        decode_with(&mut atoms, &[113, 97, 1], false),
+        decode_with(&atoms, &[113, 97, 1], false),
         Err(DecodeError::Badarg)
     ));
     let bad_module = vec![113, 97, 1, 119, 3, 97, 98, 115, 97, 1];
     assert!(matches!(
-        decode_with(&mut atoms, &bad_module, false),
+        decode_with(&atoms, &bad_module, false),
         Err(DecodeError::Badarg)
     ));
     let bad_name = vec![113, 119, 6, 101, 114, 108, 97, 110, 103, 97, 1, 97, 1];
     assert!(matches!(
-        decode_with(&mut atoms, &bad_name, false),
+        decode_with(&atoms, &bad_name, false),
         Err(DecodeError::Badarg)
     ));
     let bad_function = vec![113, 119, 6, 101, 114, 108, 97, 110, 103, 97, 1];
     assert!(matches!(
-        decode_with(&mut atoms, &bad_function, false),
+        decode_with(&atoms, &bad_function, false),
         Err(DecodeError::Badarg)
     ));
     // A bignum that fits a small integer decodes to the integer.
@@ -678,25 +678,25 @@ fn decodes_the_unsupported_forms_and_local_terms() {
         113, 119, 6, 101, 114, 108, 97, 110, 103, 119, 3, 97, 98, 115, 110, 5, 0, 0, 0, 0, 0, 1,
     ];
     assert!(matches!(
-        decode_with(&mut atoms, &big_arity, false),
+        decode_with(&atoms, &big_arity, false),
         Err(DecodeError::Unsupported(_))
     ));
     let bad_arity = vec![
         113, 119, 6, 101, 114, 108, 97, 110, 103, 119, 3, 97, 98, 115, 119, 1, 97,
     ];
     assert!(matches!(
-        decode_with(&mut atoms, &bad_arity, false),
+        decode_with(&atoms, &bad_arity, false),
         Err(DecodeError::Badarg)
     ));
     let negative = vec![
         113, 119, 6, 101, 114, 108, 97, 110, 103, 119, 3, 97, 98, 115, 98, 255, 255, 255, 255,
     ];
     assert!(matches!(
-        decode_with(&mut atoms, &negative, false),
+        decode_with(&atoms, &negative, false),
         Err(DecodeError::Badarg)
     ));
     assert!(matches!(
-        decode_with(&mut atoms, &export, true),
+        decode_with(&atoms, &export, true),
         Err(DecodeError::Unsupported(_))
     ));
     // A local pid holds `NIL_EXT` for the node, and its hash covers the
@@ -714,7 +714,7 @@ fn decodes_the_unsupported_forms_and_local_terms() {
     ]
     .concat();
     assert_eq!(
-        decode_full(&mut atoms, &pid_input, false).unwrap(),
+        decode_full(&atoms, &pid_input, false).unwrap(),
         Term::Pid(ProcessId(5))
     );
     // The local node scope ends with the `LOCAL_EXT` term, so a sibling
@@ -729,7 +729,7 @@ fn decodes_the_unsupported_forms_and_local_terms() {
     siblings.push(106);
     siblings.extend(with_words(&[], &[5, 0, 0]));
     assert!(matches!(
-        decode_with(&mut atoms, &siblings, false),
+        decode_with(&atoms, &siblings, false),
         Err(DecodeError::Badarg)
     ));
     // A local term with a different block hash raises badarg
@@ -743,7 +743,7 @@ fn decodes_the_unsupported_forms_and_local_terms() {
             pos: 0,
             safe: false,
             local: false,
-            atoms: &mut atoms,
+            atoms: &atoms,
             seed: SEED,
         }
         .decode_input(SEED)
@@ -758,7 +758,7 @@ fn decodes_the_unsupported_forms_and_local_terms() {
             pos: 0,
             safe: false,
             local: false,
-            atoms: &mut atoms,
+            atoms: &atoms,
             seed: SEED,
         }
         .decode_input(SEED),
@@ -768,12 +768,12 @@ fn decodes_the_unsupported_forms_and_local_terms() {
 
 #[test]
 fn validates_the_structure_before_it_adds_an_atom() {
-    let mut atoms = AtomTable::new();
+    let atoms = AtomTable::new();
     // `decoded_size` validates the whole term before `dec_term` adds the
     // atoms (`external.c:6150-6500`, `2159-2198`), so a malformed tuple
     // leaves the atom table unchanged.
     assert!(matches!(
-        decode_with(&mut atoms, &[104, 2, 119, 3, 120, 121, 122, 255], false),
+        decode_with(&atoms, &[104, 2, 119, 3, 120, 121, 122, 255], false),
         Err(DecodeError::Badarg)
     ));
     assert!(atoms.get("xyz").is_none());
@@ -781,11 +781,7 @@ fn validates_the_structure_before_it_adds_an_atom() {
     // before a later malformed atom fails (`decoded_size` and `dec_term`,
     // `external.c:6150-6500`, `4525-4545`).
     assert!(matches!(
-        decode_with(
-            &mut atoms,
-            &[104, 2, 119, 3, 97, 98, 99, 119, 1, 0xff],
-            false
-        ),
+        decode_with(&atoms, &[104, 2, 119, 3, 97, 98, 99, 119, 1, 0xff], false),
         Err(DecodeError::Badarg)
     ));
     assert!(atoms.get("abc").is_some());
@@ -793,13 +789,13 @@ fn validates_the_structure_before_it_adds_an_atom() {
 
 #[test]
 fn decodes_and_rejects_the_compressed_form() {
-    let mut atoms = AtomTable::new();
+    let atoms = AtomTable::new();
     // `COMPRESSED` with the length of the plain term and its zlib stream
     // (`external.c:1783-1843`).
     let mut valid = vec![131, 80, 0, 0, 0, 2];
     valid.extend(deflate(&[97, 1], 6).unwrap());
     assert_eq!(
-        decode_full(&mut atoms, &valid, false).unwrap(),
+        decode_full(&atoms, &valid, false).unwrap(),
         Term::Integer(1)
     );
     // A stream that inflates past the declared length, a stream that does
@@ -808,36 +804,36 @@ fn decodes_and_rejects_the_compressed_form() {
     let mut past = vec![131, 80, 0, 0, 0, 0];
     past.extend(deflate(&[97, 1], 6).unwrap());
     assert!(matches!(
-        decode_full(&mut atoms, &past, false),
+        decode_full(&atoms, &past, false),
         Err(DecodeError::Badarg)
     ));
     let mut stalled = vec![131, 80, 0, 0, 0, 10, 120];
     assert!(matches!(
-        decode_full(&mut atoms, &stalled, false),
+        decode_full(&atoms, &stalled, false),
         Err(DecodeError::Badarg)
     ));
     let stalled_header = vec![131, 80, 0, 0, 0, 10, 120, 156];
     assert!(matches!(
-        decode_full(&mut atoms, &stalled_header, false),
+        decode_full(&atoms, &stalled_header, false),
         Err(DecodeError::Badarg)
     ));
     let mut short = vec![131, 80, 0, 0, 0, 5];
     short.extend(deflate(&[97, 1], 6).unwrap());
     assert!(matches!(
-        decode_full(&mut atoms, &short, false),
+        decode_full(&atoms, &short, false),
         Err(DecodeError::Badarg)
     ));
     stalled[6] = 0xff;
     stalled.push(0xff);
     assert!(matches!(
-        decode_full(&mut atoms, &stalled, false),
+        decode_full(&atoms, &stalled, false),
         Err(DecodeError::Badarg)
     ));
 }
 
 #[test]
 fn encodes_the_large_and_unsupported_forms() {
-    let mut atoms = AtomTable::new();
+    let atoms = AtomTable::new();
     let options = Options::default();
     // A tuple of 256 elements takes `LARGE_TUPLE_EXT`.
     let elements = (0..256).map(Term::Integer).collect();
@@ -924,13 +920,37 @@ fn rejects_a_pid_reference() {
     let mut input = vec![VERSION_MAGIC, 90, 0, 3];
     input.extend(node());
     input.extend(with_words(&[], &[0, 5, 0x4000_0001, 0]));
-    let mut atoms = AtomTable::new();
+    let atoms = AtomTable::new();
     assert!(matches!(
-        decode_full(&mut atoms, &input, false),
+        decode_full(&atoms, &input, false),
         Err(DecodeError::Unsupported(_))
     ));
     let atoms = AtomTable::new();
     assert!(encode(&Term::Reference(reference), &atoms, &Options::default()).is_err());
+}
+
+#[test]
+fn binary_to_term_gives_the_error_of_a_full_atom_table() {
+    // ERTS exits the emulator when the atom table is full
+    // (`index_put_entry`); the decode returns the error of the table.
+    use crate::runtime::scheduler::Scheduler;
+    let atoms = AtomTable::new();
+    let mut index = 0u32;
+    while atoms.put(&format!("pbeam_fill_{index}")).is_ok() {
+        index += 1;
+    }
+    let mut scheduler = Scheduler::new(atoms);
+    let mut context = BifContext {
+        scheduler: &mut scheduler,
+    };
+    let mut bytes = vec![131, 119, 10];
+    bytes.extend_from_slice(b"pbeam_full");
+    assert_eq!(
+        binary_to_term(&mut context, &Term::binary(bytes), &Term::nil())
+            .unwrap_err()
+            .to_string(),
+        "no more index entries in atom_tab (max=1048576)"
+    );
 }
 
 #[test]
@@ -1016,8 +1036,8 @@ fn decodes_and_encodes_a_deep_term_without_a_rust_stack() {
         bytes.extend([104, 1]);
     }
     bytes.push(106);
-    let mut atoms = AtomTable::new();
-    let term = decode_full(&mut atoms, &bytes, false).unwrap();
+    let atoms = AtomTable::new();
+    let term = decode_full(&atoms, &bytes, false).unwrap();
     assert_eq!(
         encode(&term, &atoms, &Options::default()).unwrap(),
         bytes[1..]
@@ -1029,14 +1049,14 @@ fn keeps_the_decoder_guards_behind_the_validation() {
     // `binary_to_term` validates the structure before `Decoder::term` adds
     // an atom (`external.c:6150-6500`, `2159-2198`). These bodies reach the
     // guard of `Decoder::term` itself, which keeps the same checks.
-    let mut atoms = AtomTable::new();
-    let mut term = |bytes: &[u8]| {
+    let atoms = AtomTable::new();
+    let term = |bytes: &[u8]| {
         Decoder {
             input: bytes,
             pos: 0,
             safe: false,
             local: false,
-            atoms: &mut atoms,
+            atoms: &atoms,
             seed: SEED,
         }
         .term()
@@ -1094,7 +1114,7 @@ fn keeps_the_decoder_guards_behind_the_validation() {
     tiny_new_ref.extend(with_words(&[], &[5, 1, 0]));
     assert!(matches!(term(&tiny_new_ref), Err(DecodeError::Badarg)));
     assert!(matches!(
-        decode_with(&mut atoms, &tiny_new_ref, false),
+        decode_with(&atoms, &tiny_new_ref, false),
         Err(DecodeError::Badarg)
     ));
     // The validated path rejects a six-word `NEW_REFERENCE_EXT` too.
@@ -1102,7 +1122,7 @@ fn keeps_the_decoder_guards_behind_the_validation() {
     six_new_ref.extend(node());
     six_new_ref.extend(with_words(&[], &[0, 1, 1, 0, 0, 0]));
     assert!(matches!(
-        decode_with(&mut atoms, &six_new_ref, false),
+        decode_with(&atoms, &six_new_ref, false),
         Err(DecodeError::Badarg)
     ));
 }

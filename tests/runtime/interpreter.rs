@@ -38,8 +38,12 @@ fn allow_all() -> Vec<Capability> {
 fn a_delivery_at_idle_lets_the_run_wait_again() {
     use crate::runtime::scheduler::node::Node;
     let (node, mut readers) = Node::new(1).unwrap();
-    let mut scheduler =
-        Scheduler::with_shared(AtomTable::new(), Arc::clone(&node), 0, readers.remove(0));
+    let mut scheduler = Scheduler::with_shared(
+        Arc::new(AtomTable::new()),
+        Arc::clone(&node),
+        0,
+        readers.remove(0),
+    );
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     let root = ProcessId(0);
     scheduler.process_mut(root).unwrap().waiting = true;
@@ -3267,7 +3271,7 @@ fn puts_a_new_atom_into_the_atom_table_of_the_run() {
     // loaded modules, so `pbeam_alpha` gets index 1168 after
     // `pbeam_zeta` (1167). The table of the loaded modules does not
     // change, so each run gives the same index.
-    let mut program = make_program(
+    let program = make_program(
         vec![
             Instruction::Move(
                 Operand::Value(Term::list_from(
@@ -3282,14 +3286,7 @@ fn puts_a_new_atom_into_the_atom_table_of_the_run() {
         ],
         0,
     );
-    assert_eq!(
-        Arc::get_mut(&mut program.atoms)
-            .unwrap()
-            .put("pbeam_zeta")
-            .unwrap()
-            .index(),
-        1167
-    );
+    assert_eq!(program.atoms.put("pbeam_zeta").unwrap().index(), 1167);
     for _ in 0..2 {
         let result = program.execute("fixture", "main", &[]).unwrap();
         let Term::Atom(alpha) = &result.term else {

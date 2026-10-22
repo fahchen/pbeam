@@ -1950,7 +1950,7 @@ fn sends_the_messages_of_an_active_socket_to_the_owner_and_ends_the_port() {
         Event::Exit("etimedout".to_owned()),
     ];
     scheduler.deliver_events(port, events).unwrap();
-    let mut name = |text| Term::Atom(scheduler.atoms.put(text).unwrap());
+    let name = |text| Term::Atom(scheduler.atoms.put(text).unwrap());
     let (tcp_error, etimedout, tcp_closed) =
         (name("tcp_error"), name("etimedout"), name("tcp_closed"));
     let error = Term::tuple(vec![tcp_error, Term::Port(port), etimedout]);
@@ -2134,8 +2134,12 @@ fn a_signal_to_a_dead_process_answers_an_unlink() {
 fn a_signal_server_is_an_external_source() {
     use super::node::Node;
     let (node, mut readers) = Node::new(1).unwrap();
-    let mut scheduler =
-        Scheduler::with_shared(AtomTable::new(), Arc::clone(&node), 0, readers.remove(0));
+    let mut scheduler = Scheduler::with_shared(
+        Arc::new(AtomTable::new()),
+        Arc::clone(&node),
+        0,
+        readers.remove(0),
+    );
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     let root = ProcessId(0);
     assert!(!scheduler.has_external_sources());
@@ -2147,8 +2151,12 @@ fn a_signal_server_is_an_external_source() {
 fn a_remote_signal_flushes_the_pending_monitor_first() {
     use super::node::{Delivery, Node};
     let (node, mut readers) = Node::new(2).unwrap();
-    let mut scheduler =
-        Scheduler::with_shared(AtomTable::new(), Arc::clone(&node), 0, readers.remove(0));
+    let mut scheduler = Scheduler::with_shared(
+        Arc::new(AtomTable::new()),
+        Arc::clone(&node),
+        0,
+        readers.remove(0),
+    );
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     let root = ProcessId(0);
     let target = ProcessId(77);
@@ -2199,10 +2207,18 @@ fn a_remote_target_adds_and_removes_the_monitor_of_a_watcher() {
     use super::HandlingPoint;
     use crate::runtime::process::TargetMonitor;
     let (node, mut readers) = Node::new(2).unwrap();
-    let mut owner =
-        Scheduler::with_shared(AtomTable::new(), Arc::clone(&node), 1, readers.remove(1));
-    let mut scheduler =
-        Scheduler::with_shared(AtomTable::new(), Arc::clone(&node), 0, readers.remove(0));
+    let mut owner = Scheduler::with_shared(
+        Arc::new(AtomTable::new()),
+        Arc::clone(&node),
+        1,
+        readers.remove(1),
+    );
+    let mut scheduler = Scheduler::with_shared(
+        Arc::new(AtomTable::new()),
+        Arc::clone(&node),
+        0,
+        readers.remove(0),
+    );
     let (target, watcher) = (ProcessId(0), ProcessId(1));
     owner
         .start_with_id(target, 1, frame(), vec![], allow_all())
@@ -2242,10 +2258,18 @@ fn a_remote_target_adds_and_removes_the_monitor_of_a_watcher() {
 fn a_host_signal_notification_reaches_a_remote_signal_server() {
     use super::node::Node;
     let (node, mut readers) = Node::new(2).unwrap();
-    let mut owner =
-        Scheduler::with_shared(AtomTable::new(), Arc::clone(&node), 1, readers.remove(1));
-    let mut scheduler =
-        Scheduler::with_shared(AtomTable::new(), Arc::clone(&node), 0, readers.remove(0));
+    let mut owner = Scheduler::with_shared(
+        Arc::new(AtomTable::new()),
+        Arc::clone(&node),
+        1,
+        readers.remove(1),
+    );
+    let mut scheduler = Scheduler::with_shared(
+        Arc::new(AtomTable::new()),
+        Arc::clone(&node),
+        0,
+        readers.remove(0),
+    );
     owner.start(frame(), vec![], allow_all()).unwrap();
     let server = ProcessId(0);
     assert!(node.name_register("erl_signal_server", server));
@@ -2270,8 +2294,12 @@ fn a_flushed_port_leaves_the_shared_port_table() {
         inet::{Inet, SocketType},
     };
     let (node, mut readers) = Node::new(1).unwrap();
-    let mut scheduler =
-        Scheduler::with_shared(AtomTable::new(), Arc::clone(&node), 0, readers.remove(0));
+    let mut scheduler = Scheduler::with_shared(
+        Arc::new(AtomTable::new()),
+        Arc::clone(&node),
+        0,
+        readers.remove(0),
+    );
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     scheduler.schedule_next().unwrap();
     let tcp = Inet::new(SocketType::Stream);
@@ -2327,8 +2355,12 @@ fn a_signal_to_a_dead_process_drops_an_unlink_ack() {
 fn a_delivery_to_a_dead_target_answers_its_request() {
     use super::node::Node;
     let (node, mut readers) = Node::new(1).unwrap();
-    let mut scheduler =
-        Scheduler::with_shared(AtomTable::new(), Arc::clone(&node), 0, readers.remove(0));
+    let mut scheduler = Scheduler::with_shared(
+        Arc::new(AtomTable::new()),
+        Arc::clone(&node),
+        0,
+        readers.remove(0),
+    );
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     let root = ProcessId(0);
     let reference = Reference::ordinary(3).unwrap();
@@ -2431,11 +2463,12 @@ fn a_signal_to_a_dead_process_answers_a_link() {
 fn a_scheduler_registers_a_name_for_a_remote_process() {
     use super::node::Node;
     let (node, mut readers) = Node::new(2).unwrap();
-    // The shared scheduler cannot create an atom. Make the two names first.
-    let mut atoms = AtomTable::new();
+    // Make the two names before the scheduler starts.
+    let atoms = AtomTable::new();
     let first = atoms.put("pbeam_remote_name").unwrap();
     let second = atoms.put("pbeam_remote_other").unwrap();
-    let mut scheduler = Scheduler::with_shared(atoms, Arc::clone(&node), 0, readers.remove(0));
+    let mut scheduler =
+        Scheduler::with_shared(Arc::new(atoms), Arc::clone(&node), 0, readers.remove(0));
     let remote = ProcessId(7);
     node.register(remote, 1);
     assert!(scheduler.register(&Term::Atom(first.clone()), &Term::Pid(remote)));

@@ -328,10 +328,10 @@ impl BeamProgram {
     /// assert!(BeamProgram::load(&[CALLS, CALLS]).is_err());
     /// ```
     pub fn load(modules: &[&[u8]]) -> Result<Self, BeamError> {
-        let mut atoms = AtomTable::new();
+        let atoms = AtomTable::new();
         let mut loaded = HashMap::new();
         for bytes in modules {
-            let mut module = code::parse(bytes, &mut atoms)?;
+            let mut module = code::parse(bytes, &atoms)?;
             // ERTS builds each preloaded module into the emulator without
             // its `Line` chunk (`beam_strip`, `make_preload:143-157`), so
             // each frame of such a module has the location `[]`.
@@ -745,9 +745,13 @@ impl BeamProgram {
         let (node, readers) = Node::new(roots.len())
             .map_err(|cause| error(format!("cannot create the scheduler node: {cause}")))?;
         let gate = Arc::new(StartGate::new(roots.len()));
+        // The schedulers share one copy of the program table, so an atom
+        // that one scheduler creates has one index on every scheduler.
+        let atoms = Arc::new((*self.atoms).clone());
         let mut spawn_error = None;
         let results = std::thread::scope(|scope| {
             let mut handles = Vec::with_capacity(roots.len());
+            let atoms = &atoms;
             for (index, ((module, function), reader)) in roots.iter().zip(readers).enumerate() {
                 let node = Arc::clone(&node);
                 let thread_gate = Arc::clone(&gate);
@@ -756,12 +760,8 @@ impl BeamProgram {
                     // created, so a peer never waits for a thread that
                     // panicked before it arrived.
                     let mut start = StartGuard(Some(&thread_gate));
-                    let mut scheduler = Scheduler::with_shared(
-                        (*self.atoms).clone(),
-                        Arc::clone(&node),
-                        index,
-                        reader,
-                    );
+                    let mut scheduler =
+                        Scheduler::with_shared(Arc::clone(atoms), Arc::clone(&node), index, reader);
                     scheduler.code = CodeTable::new(self.modules.clone());
                     // The reset of the terminal mode needs the state of
                     // each scheduler after the run.
@@ -820,14 +820,13 @@ impl BeamProgram {
             Ok(selected) | Err((_, selected)) => *selected,
         });
         initial_mode.reset(selected);
-        // The atom table of each scheduler is the frozen copy of the
-        // program table, so each root result is a term of the program table.
+        // Each root result is a term of the shared table of the run.
         let roots = node.take_root_results();
         // A failed root aborts the run. Report its error before the wait
         // error or the missing result of a root that the abort stopped.
         for root in &roots {
             if let Some(Err(reason)) = root {
-                return Err(Self::root_error(reason, &self.atoms));
+                return Err(Self::root_error(reason, &atoms));
             }
         }
         for result in results {
@@ -839,7 +838,7 @@ impl BeamProgram {
             let term = root.expect("a failed root returns above");
             results_out.push(HostTerm {
                 term,
-                atoms: Arc::clone(&self.atoms),
+                atoms: Arc::clone(&atoms),
             });
         }
         Ok(results_out)
@@ -983,7 +982,7 @@ impl BeamProgram {
         // run. `run_root` then runs with terms of one table.
         let imported = arguments
             .iter()
-            .map(|argument| argument.import_into(&mut scheduler.atoms))
+            .map(|argument| argument.import_into(&scheduler.atoms))
             .collect::<Result<Vec<Term>, BeamError>>();
         let run = match imported {
             Ok(arguments) => {
@@ -1001,7 +1000,7 @@ impl BeamProgram {
         match root {
             Some(Ok(result)) => Ok(HostTerm {
                 term: result,
-                atoms: Arc::new(atoms),
+                atoms,
             }),
             Some(Err(reason)) => {
                 // `erlang:halt/1` writes each byte of the `%T` text as one code
@@ -1208,9 +1207,7 @@ impl BeamProgram {
         }) = scheduler.current_process_mut().dirty_call.take()
         {
             let result = match output {
-                Output::Written(written) => {
-                    native::dirty_write_result(&mut scheduler.atoms, written)?
-                }
+                Output::Written(written) => native::dirty_write_result(&scheduler.atoms, written)?,
                 Output::Native(result) => native::to_bif_result(result?),
                 Output::Host(finish) => finish.run(scheduler)?,
             };
@@ -3902,7 +3899,7 @@ fn create_process(
         capabilities.as_deref(),
     );
     let Ok((pid, reference)) = spawned? else {
-        return BifResult::capability_denied(&mut scheduler.atoms);
+        return BifResult::capability_denied(&scheduler.atoms);
     };
     Ok(BifResult::Value(match reference {
         Some(reference) => Term::tuple(vec![Term::Pid(pid), Term::Reference(reference)]),

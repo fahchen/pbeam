@@ -199,14 +199,14 @@ impl BifResult {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let denied = BifResult::capability_denied(&mut scheduler.atoms)?;
+    /// let denied = BifResult::capability_denied(&scheduler.atoms)?;
     /// assert!(matches!(denied, BifResult::Raise { class: ExceptionClass::Error, .. }));
     /// ```
     ///
     /// # Errors
     ///
     /// The errors of `AtomTable::put` for a full atom table.
-    pub(super) fn capability_denied(atoms: &mut AtomTable) -> Result<BifResult, BeamError> {
+    pub(super) fn capability_denied(atoms: &AtomTable) -> Result<BifResult, BeamError> {
         Ok(BifResult::Raise {
             class: ExceptionClass::Error,
             reason: Term::Atom(atoms.put("capability_denied")?),
@@ -248,7 +248,7 @@ pub(super) fn denial(
     {
         return Ok(None);
     }
-    BifResult::capability_denied(&mut scheduler.atoms).map(Some)
+    BifResult::capability_denied(&scheduler.atoms).map(Some)
 }
 
 /// Return the `error:capability_denied` exception when the current process
@@ -273,7 +273,7 @@ pub(super) fn boot_denial(
     target: ProcessId,
 ) -> Result<Option<BifResult>, BeamError> {
     if scheduler.enters_boot(target) {
-        return BifResult::capability_denied(&mut scheduler.atoms).map(Some);
+        return BifResult::capability_denied(&scheduler.atoms).map(Some);
     }
     Ok(None)
 }
