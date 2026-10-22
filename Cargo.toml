@@ -360,6 +360,10 @@ name = "getenv"
 path = "tests/integration/getenv.rs"
 
 [[test]]
+name = "init_boot"
+path = "tests/integration/init_boot.rs"
+
+[[test]]
 name = "group"
 path = "tests/integration/group.rs"
 
@@ -634,6 +638,10 @@ path = "tests/integration/bif_stack.rs"
 [[test]]
 name = "prim_file"
 path = "tests/integration/prim_file.rs"
+
+[[test]]
+name = "prim_file_dirty"
+path = "tests/integration/prim_file_dirty.rs"
 
 [[test]]
 name = "atomics"

@@ -72,7 +72,9 @@ struct Binding {
     /// The scheduler of the NIF, as the `flags` of its ERTS `ErlNifFunc`.
     /// A `CpuBound` or `IoBound` binding checks its arguments on the
     /// scheduler thread and returns `BifResult::Dirty` with the work of the
-    /// call, which runs on the dirty pool of the job.
+    /// call, which runs on the dirty pool of the job. An `IoBound` binding
+    /// that does not wait, such as `prim_tty:read_nif/3` after its select
+    /// message, returns its result at once.
     job: Job,
     /// Runs the NIF for the current process of the scheduler. The lookup
     /// gives exactly `arity` arguments.

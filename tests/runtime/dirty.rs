@@ -14,7 +14,7 @@ const COMPLETION_LIMIT: Duration = Duration::from_secs(10);
 fn written(completion: Completion) -> (ProcessId, u64, Option<IovecWritten>) {
     let written = completion.output.map(|output| match output {
         Output::Written(written) => written,
-        Output::Native(result) => panic!("a write gives no native result: {result:?}"),
+        other => panic!("a write gives no other output: {other:?}"),
     });
     (completion.process, completion.call, written)
 }
@@ -359,4 +359,78 @@ fn runs_cpu_bound_calls_on_one_dirty_cpu_thread_for_each_scheduler() {
     names.sort();
     names.dedup();
     assert_eq!(names, ["erts_dcpus_1", "erts_dcpus_2"]);
+}
+
+/// A value that sends the name of the thread that drops it.
+struct DropProbe(mpsc::Sender<Option<String>>);
+
+impl Drop for DropProbe {
+    fn drop(&mut self) {
+        _ = self.0.send(thread::current().name().map(str::to_owned));
+    }
+}
+
+/// Return the host part of a static binding whose finish owns `probe`, as
+/// the finish of `prim_file:open_nif/2` owns the open file.
+fn probe_host(probe: DropProbe) -> Work {
+    Work::Host(Host(Box::new(move || {
+        let finish: Box<FinishFn> = Box::new(move |_| {
+            drop(probe);
+            Ok(BifResult::Value(Term::nil()))
+        });
+        finish
+    })))
+}
+
+#[test]
+fn runs_the_host_part_of_a_static_binding_and_gives_its_finish() {
+    let (sender, _dropped) = mpsc::channel();
+    let work = probe_host(DropProbe(sender));
+    assert_eq!(format!("{work:?}"), "Host(Host)");
+    assert_eq!(format!("{:?}", work.run(&Arc::default())), "Host(Finish)");
+    let discard = Discard(Box::new(|_| Ok(BifResult::Value(Term::nil()))));
+    assert_eq!(format!("{discard:?}"), "Discard");
+}
+
+#[test]
+fn drops_a_finish_that_did_not_run_on_a_dirty_io_thread() {
+    // A caller that exits before its finish runs leaves the finish to the
+    // scheduler, which drops it. A dirty IO thread then drops the function
+    // and the host resource that it owns, such as the open file of
+    // `open_nif/2`, so a `close` that waits does not stop the scheduler.
+    let pools = Pools::new(1);
+    let mut dirty_io = DirtyCalls::new();
+    let wake = [dirty_io.wake_fd()];
+    let claim = Claim::default();
+    let (sender, dropped) = mpsc::channel();
+    let work = probe_host(DropProbe(sender));
+    dirty_io
+        .submit(
+            &pools,
+            Job::IoBound,
+            ProcessId(3),
+            Priority::Normal,
+            &claim,
+            work,
+        )
+        .unwrap();
+    assert_eq!(
+        wait_readable(&wake, Some(COMPLETION_LIMIT)),
+        Readiness::Ready(wake.to_vec())
+    );
+    let completion = dirty_io.take_completion().unwrap();
+    assert_eq!(format!("{:?}", completion.output), "Some(Host(Finish))");
+    drop(completion);
+    let name = dropped.recv_timeout(COMPLETION_LIMIT).unwrap().unwrap();
+    assert!(name.starts_with("erts_dios_"), "{name}");
+    // After the node dropped the pool, the current thread drops the
+    // function.
+    let (sender, dropped) = mpsc::channel();
+    let output = probe_host(DropProbe(sender)).run(&pools.io.shared);
+    drop(pools);
+    drop(output);
+    assert_eq!(
+        dropped.try_recv().unwrap(),
+        thread::current().name().map(str::to_owned)
+    );
 }

@@ -1,0 +1,10 @@
+%% The boot script of init_kill_probe.erl. Without primLoad, ERTS has no
+%% error_handler, so an apply command loads the probe through init
+%% (init.erl:463-464, 722-750). The next apply kills init.
+{script,
+ {"init_kill_probe", "1"},
+ [{preLoaded, [erl_init, erl_prim_loader, erlang, erts_internal, init, prim_file, zlib]},
+  {progress, preloaded},
+  {apply, {init, ensure_loaded, [init_kill_probe]}},
+  {apply, {init_kill_probe, kill_init, []}},
+  {progress, started}]}.

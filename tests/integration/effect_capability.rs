@@ -35,7 +35,7 @@ const INVENTORY: &str = include_str!("../../docs/effect-inventory.md");
 /// Each capability of the column "Capability" of the effect inventory, as
 /// `(entry, kind:operation)`, with the `effect_probe` function that calls
 /// the entry once.
-const PROBES: [(&str, &str, &str); 61] = [
+const PROBES: [(&str, &str, &str); 63] = [
     ("erlang:exit/2", "process:exit_other", "exit_other"),
     ("erlang:delete_module/1", "code:load", "delete_module"),
     ("erlang:link/1", "process:link", "link"),
@@ -70,6 +70,11 @@ const PROBES: [(&str, &str, &str); 61] = [
         "group_leader3",
     ),
     ("erlang:spawn/3", "process:spawn", "spawn"),
+    (
+        "erts_internal:spawn_system_process/3",
+        "process:spawn",
+        "spawn_system_process",
+    ),
     ("erlang:spawn_link/3", "process:spawn", "spawn_link"),
     ("erlang:spawn_link/3", "process:link", "spawn_link"),
     ("erlang:spawn_opt/4", "process:spawn", "spawn_opt"),
@@ -131,6 +136,7 @@ const PROBES: [(&str, &str, &str); 61] = [
     ("prim_tty:write_nif/2", "terminal:write", "write_nif"),
     ("erlang:finish_loading/1", "code:load", "finish_loading"),
     ("erlang:module_loaded/1", "code:inspect", "module_loaded"),
+    ("erlang:loaded/0", "code:inspect", "loaded"),
     (
         "erlang:get_module_info/1",
         "code:inspect",
@@ -666,8 +672,9 @@ fn needs_both_signal_operations_for_the_default_disposition() {
 #[test]
 fn compares_the_module_name_of_a_code_entry() {
     // The `modules` constraint of `code` compares the module atom of
-    // `erlang:module_loaded/1` and `erlang:get_module_info/2`, and each
-    // module of the list of `erlang:finish_loading/1`. An empty list has no
+    // `erlang:module_loaded/1` and `erlang:get_module_info/2`, each loaded
+    // module of `erlang:loaded/0`, and each module of the list of
+    // `erlang:finish_loading/1`. An empty list has no
     // module name, so it needs the `load` operation only.
     let program = program();
     let policy = grants(
@@ -677,7 +684,7 @@ fn compares_the_module_name_of_a_code_entry() {
     );
     assert_eq!(
         run(&program, "code_names", &policy),
-        atoms(&program, &["ok", "denied", "ok", "denied", "ok"])
+        atoms(&program, &["denied", "ok", "denied", "ok", "denied", "ok"])
     );
 }
 

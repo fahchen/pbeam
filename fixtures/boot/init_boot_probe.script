@@ -1,0 +1,27 @@
+%% The fixed boot script of init_boot_probe.erl. It has the commands of the
+%% pinned start_clean.script in their order, without the primLoad commands,
+%% with one kernel process of the probe in place of heart, logger, and
+%% application_controller, and with probe steps in place of the kernel and
+%% stdlib applications. Without primLoad, ERTS has no error_handler, so two
+%% apply commands load lists and the probe through init (init.erl:463-464,
+%% 722-750): init calls lists:foreach/2 at the started progress
+%% (init.erl:690-694, 753-754). The last apply starts the report in place of
+%% -s, which needs the code module (init.erl:1568-1569).
+{script,
+ {"init_boot_probe", "1"},
+ [{preLoaded, [erl_init, erl_prim_loader, erlang, erts_internal, init, prim_file, zlib]},
+  {progress, preloaded},
+  {path, ["$ROOT/lib/kernel-11.0.4/ebin", "$ROOT/lib/stdlib-8.1/ebin"]},
+  {apply, {init, ensure_loaded, [lists]}},
+  {apply, {init, ensure_loaded, [init_boot_probe]}},
+  {kernel_load_completed},
+  {progress, kernel_load_completed},
+  {progress, modules_loaded},
+  {path, ["$ROOT/lib/kernel-11.0.4/ebin", "$ROOT/lib/stdlib-8.1/ebin"]},
+  {kernelProcess, init_boot_probe_recorder, {init_boot_probe, start_recorder, []}},
+  {progress, init_kernel_started},
+  {apply, {init_boot_probe, step, [first]}},
+  {progress, applications_loaded},
+  {apply, {init_boot_probe, step, [second]}},
+  {apply, {init_boot_probe, report, []}},
+  {progress, started}]}.

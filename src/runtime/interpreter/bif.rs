@@ -46,7 +46,7 @@ pub(super) use iolist::iodata_bytes;
 
 /// What a BIF call does to the calling process.
 #[derive(Debug)]
-pub(super) enum BifResult {
+pub(in crate::runtime) enum BifResult {
     /// The BIF returns this value.
     Value(Term),
     /// The BIF raises an exception in the calling process.

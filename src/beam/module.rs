@@ -52,8 +52,10 @@ impl Default for LabelHasher {
 /// The identity of a loaded module. [`BeamModule::new`] gives each module a
 /// number, and the run loop compares two numbers instead of two module names.
 /// The loader owns the number for the whole life of the module, so a frame
-/// that names a module stays valid in each run that shares the code.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// that names a module stays valid in each run that shares the code. The
+/// numbers increase in the order of [`BeamModule::new`], so their order is
+/// the load order of the modules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct ModuleId(u32);
 
 impl ModuleId {

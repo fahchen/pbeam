@@ -6,14 +6,15 @@
 //! The bindings have no capability check yet: the `file` kind of the
 //! capability security migration adds it (row "Capability checks" of
 //! `docs/erts-differences.md`). ERTS runs each of these NIFs on a dirty IO
-//! scheduler (`prim_file_nif.c:179-182`, `185`, `196`, `200-201`, `207`,
-//! `212`). PBeam runs
-//! them on the scheduler thread, so a host call that waits stops all
-//! processes until it returns (row "Dirty NIFs" of
-//! `docs/erts-differences.md`).
+//! scheduler (`ERL_NIF_DIRTY_JOB_IO_BOUND`, `prim_file_nif.c:179-217`), so
+//! each binding has the job `IoBound`. A binding reads its arguments and
+//! its file resource on the scheduler thread, runs its host calls on the
+//! dirty IO pool, and makes its result on the scheduler thread again (row
+//! "Dirty NIFs" of `docs/erts-differences.md`).
 
 use super::*;
 use crate::runtime::{
+    dirty::{FinishFn, Host},
     files::Files,
     host::{
         errno::errno_id,
@@ -85,113 +86,97 @@ pub(super) const BINDINGS: &[Binding] = &[
     Binding {
         name: "altname_nif",
         arity: 1,
-        job: Job::Normal,
-        run: |scheduler, arguments| altname_nif(&mut scheduler.atoms, &arguments[0]),
+        job: Job::IoBound,
+        run: |_, arguments| altname_nif(&arguments[0]),
     },
     Binding {
         name: "close_nif",
         arity: 1,
-        job: Job::Normal,
+        job: Job::IoBound,
         run: |scheduler, arguments| close_nif(scheduler, &arguments[0]),
     },
     Binding {
         name: "del_dir_nif",
         arity: 1,
-        job: Job::Normal,
-        run: |scheduler, arguments| path_result(scheduler, &arguments[0], file::delete_dir),
+        job: Job::IoBound,
+        run: |_, arguments| path_result(&arguments[0], file::delete_dir),
     },
     Binding {
         name: "del_file_nif",
         arity: 1,
-        job: Job::Normal,
-        run: |scheduler, arguments| path_result(scheduler, &arguments[0], file::delete_file),
+        job: Job::IoBound,
+        run: |_, arguments| path_result(&arguments[0], file::delete_file),
     },
     Binding {
         name: "get_cwd_nif",
         arity: 0,
-        job: Job::Normal,
-        run: |scheduler, _| get_cwd_nif(&mut scheduler.atoms),
+        job: Job::IoBound,
+        run: |_, _| get_cwd_nif(),
     },
     Binding {
         name: "list_dir_nif",
         arity: 1,
-        job: Job::Normal,
-        run: |scheduler, arguments| list_dir_nif(&mut scheduler.atoms, &arguments[0]),
+        job: Job::IoBound,
+        run: |_, arguments| list_dir_nif(&arguments[0]),
     },
     Binding {
         name: "make_dir_nif",
         arity: 1,
-        job: Job::Normal,
-        run: |scheduler, arguments| path_result(scheduler, &arguments[0], file::make_dir),
+        job: Job::IoBound,
+        run: |_, arguments| path_result(&arguments[0], file::make_dir),
     },
     Binding {
         name: "make_hard_link_nif",
         arity: 2,
-        job: Job::Normal,
-        run: |scheduler, arguments| {
-            pair_result(
-                scheduler,
-                &arguments[0],
-                &arguments[1],
-                file::make_hard_link,
-            )
-        },
+        job: Job::IoBound,
+        run: |_, arguments| pair_result(&arguments[0], &arguments[1], file::make_hard_link),
     },
     Binding {
         name: "make_soft_link_nif",
         arity: 2,
-        job: Job::Normal,
-        run: |scheduler, arguments| {
-            pair_result(
-                scheduler,
-                &arguments[0],
-                &arguments[1],
-                file::make_soft_link,
-            )
-        },
+        job: Job::IoBound,
+        run: |_, arguments| pair_result(&arguments[0], &arguments[1], file::make_soft_link),
     },
     Binding {
         name: "open_nif",
         arity: 2,
-        job: Job::Normal,
+        job: Job::IoBound,
         run: |scheduler, arguments| open_nif(scheduler, &arguments[0], &arguments[1]),
     },
     Binding {
         name: "read_file_nif",
         arity: 1,
-        job: Job::Normal,
-        run: |scheduler, arguments| read_file_nif(&mut scheduler.atoms, &arguments[0]),
+        job: Job::IoBound,
+        run: |_, arguments| read_file_nif(&arguments[0]),
     },
     Binding {
         name: "read_info_nif",
         arity: 2,
-        job: Job::Normal,
-        run: |scheduler, arguments| read_info_nif(scheduler, &arguments[0], &arguments[1]),
+        job: Job::IoBound,
+        run: |_, arguments| read_info_nif(&arguments[0], &arguments[1]),
     },
     Binding {
         name: "read_link_nif",
         arity: 1,
-        job: Job::Normal,
-        run: |scheduler, arguments| read_link_nif(&mut scheduler.atoms, &arguments[0]),
+        job: Job::IoBound,
+        run: |_, arguments| read_link_nif(&arguments[0]),
     },
     Binding {
         name: "read_nif",
         arity: 2,
-        job: Job::Normal,
+        job: Job::IoBound,
         run: |scheduler, arguments| read_nif(scheduler, &arguments[0], &arguments[1]),
     },
     Binding {
         name: "rename_nif",
         arity: 2,
-        job: Job::Normal,
-        run: |scheduler, arguments| {
-            pair_result(scheduler, &arguments[0], &arguments[1], file::rename)
-        },
+        job: Job::IoBound,
+        run: |_, arguments| pair_result(&arguments[0], &arguments[1], file::rename),
     },
     Binding {
         name: "seek_nif",
         arity: 3,
-        job: Job::Normal,
+        job: Job::IoBound,
         run: |scheduler, arguments| {
             seek_nif(scheduler, &arguments[0], &arguments[1], &arguments[2])
         },
@@ -199,41 +184,33 @@ pub(super) const BINDINGS: &[Binding] = &[
     Binding {
         name: "set_cwd_nif",
         arity: 1,
-        job: Job::Normal,
-        run: |scheduler, arguments| path_result(scheduler, &arguments[0], file::set_cwd),
+        job: Job::IoBound,
+        run: |_, arguments| path_result(&arguments[0], file::set_cwd),
     },
     Binding {
         name: "set_owner_nif",
         arity: 3,
-        job: Job::Normal,
-        run: |scheduler, arguments| {
-            set_owner_nif(scheduler, &arguments[0], &arguments[1], &arguments[2])
-        },
+        job: Job::IoBound,
+        run: |_, arguments| set_owner_nif(&arguments[0], &arguments[1], &arguments[2]),
     },
     Binding {
         name: "set_permissions_nif",
         arity: 2,
-        job: Job::Normal,
-        run: |scheduler, arguments| set_permissions_nif(scheduler, &arguments[0], &arguments[1]),
+        job: Job::IoBound,
+        run: |_, arguments| set_permissions_nif(&arguments[0], &arguments[1]),
     },
     Binding {
         name: "set_time_nif",
         arity: 4,
-        job: Job::Normal,
-        run: |scheduler, arguments| {
-            set_time_nif(
-                scheduler,
-                &arguments[0],
-                &arguments[1],
-                &arguments[2],
-                &arguments[3],
-            )
+        job: Job::IoBound,
+        run: |_, arguments| {
+            set_time_nif(&arguments[0], &arguments[1], &arguments[2], &arguments[3])
         },
     },
     Binding {
         name: "write_nif",
         arity: 2,
-        job: Job::Normal,
+        job: Job::IoBound,
         run: |scheduler, arguments| write_nif(scheduler, &arguments[0], &arguments[1]),
     },
 ];
@@ -284,27 +261,29 @@ fn open_nif(scheduler: &mut Scheduler, path: &Term, modes: &Term) -> Result<BifR
         return Ok(BifResult::badarg());
     }
     let modes = translate_modelist(&scheduler.atoms, modes);
-    let atoms = &mut scheduler.atoms;
     let Some(path) = marshal_path(path) else {
-        return error_tuple(atoms, "einval");
+        return einval();
     };
-    let file = match file::open(path, modes) {
-        Ok(file) => file,
-        Err(errno) => return error_tuple(atoms, &errno_id(errno)),
-    };
-    let reference = scheduler.make_ref()?;
-    let caller = scheduler.current_process_mut().id;
-    scheduler
-        .resources
-        .borrow_mut::<Files>()
-        .insert(reference, file, caller);
-    scheduler
-        .send_signal(None, caller, Signal::FileMonitor { file: reference })
-        .expect("the caller is alive");
-    Ok(BifResult::Value(Term::tuple(vec![
-        Term::static_atom("ok"),
-        Term::Reference(reference),
-    ])))
+    let path = path.to_owned();
+    dirty(
+        move || file::open(&path, modes),
+        |scheduler, opened| {
+            let file = match opened {
+                Ok(file) => file,
+                Err(errno) => return error_tuple(&mut scheduler.atoms, &errno_id(errno)),
+            };
+            let reference = scheduler.make_ref()?;
+            let caller = scheduler.current_process_mut().id;
+            scheduler
+                .resources
+                .borrow_mut::<Files>()
+                .insert(reference, file, caller);
+            scheduler
+                .send_signal(None, caller, Signal::FileMonitor { file: reference })
+                .expect("the caller is alive");
+            Ok(BifResult::Value(ok(Term::Reference(reference))))
+        },
+    )
 }
 
 /// Return the open modes of the list `modes`, as `efile_translate_modelist`
@@ -347,67 +326,138 @@ fn translate_modelist(atoms: &AtomTable, modes: &Term) -> OpenModes {
 
 /// Run `prim_file:close_nif(Fd)`, as the ERTS NIF `close_nif`
 /// (`prim_file_nif.c:618-647`) does: a term that is not a file resource
-/// raises `error:badarg`, a closed resource gives `{error, einval}`, and
-/// else the binding removes the monitor of the resource on its owner
-/// (`enif_demonitor_process`, `prim_file_nif.c:633`), closes the host
-/// file with [`file::close`], and gives `ok`, or `{error, Errno}` for a
-/// failed `close`.
+/// raises `error:badarg`. On a dirty IO thread, a resource that is not idle
+/// gives `{error, einval}`, and else the binding marks the resource closed
+/// and closes the host file with [`file::close`] (see `FileData::close`).
+/// A call that does not start, because its caller exits first, leaves the
+/// resource open, as in ERTS. Then the binding removes the monitor of the
+/// resource on its owner (`enif_demonitor_process`, `prim_file_nif.c:633`)
+/// and gives `ok`, or `{error, Errno}` for a failed `close`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(matches!(close_nif(&mut scheduler, &fd)?, BifResult::Value(Term::Atom(_))));
-/// // {error, einval}
-/// assert!(matches!(close_nif(&mut scheduler, &fd)?, BifResult::Value(Term::Tuple(_))));
+/// assert!(matches!(close_nif(&mut scheduler, &fd)?, BifResult::Dirty(_)));
 /// ```
-///
-/// # Errors
-///
-/// The atom `einval` in a full atom table gives the error of
-/// `AtomTable::put`.
 fn close_nif(scheduler: &mut Scheduler, fd: &Term) -> Result<BifResult, BeamError> {
     let Term::Reference(reference) = fd else {
         return Ok(BifResult::badarg());
     };
-    match scheduler.resources.borrow_mut::<Files>().close(*reference) {
-        None => Ok(BifResult::badarg()),
-        Some(None) => error_tuple(&mut scheduler.atoms, "einval"),
-        Some(Some((file, owner))) => {
-            scheduler.demonitor_file(owner, *reference);
-            let closed = file::close(file).map(|()| Term::static_atom("ok"));
-            value_or_error(&mut scheduler.atoms, closed)
-        }
-    }
+    let reference = *reference;
+    let Some((data, owner)) = scheduler
+        .resources
+        .borrow_mut::<Files>()
+        .with_owner(reference)
+    else {
+        return Ok(BifResult::badarg());
+    };
+    dirty(
+        move || data.close().map(file::close),
+        move |scheduler, closed| match closed {
+            None => einval(),
+            Some(closed) => {
+                scheduler.demonitor_file(owner, reference);
+                let closed = closed.map(|()| Term::static_atom("ok"));
+                value_or_error(&mut scheduler.atoms, closed)
+            }
+        },
+    )
 }
 
-/// Run `operation` on the open host file of the file resource `fd`, as
-/// `file_handle_wrapper` (`prim_file_nif.c:315-357`) does: a term that is
-/// not a file resource raises `error:badarg`, and a closed resource gives
-/// `{error, einval}`, before `operation` reads its arguments.
+/// The result of an argument of a file handle NIF that is not valid: the
+/// exception `error:badarg` or the value `{error, einval}`.
+enum Reject {
+    /// The exception `error:badarg`.
+    Badarg,
+    /// The value `{error, einval}`.
+    Einval,
+}
+
+/// Run `operation` on the open host file of the file resource `fd` on a
+/// dirty IO thread, as `file_handle_wrapper` (`prim_file_nif.c:315-357`)
+/// does, and then `finish` on the scheduler thread with the value of
+/// `operation`. A term that is not a file resource raises `error:badarg`.
+/// On the dirty thread, a resource that is not idle gives
+/// `{error, einval}` (see `FileData::acquire`); then `arguments`, which
+/// the binding read on the scheduler thread, gives its `Reject`, as the
+/// NIF checks its arguments after the state; else `operation` runs with
+/// them.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = file_handle_wrapper(&mut scheduler, &fd, |_file, _atoms| Ok(BifResult::Value(Term::nil())))?;
+/// let result = file_handle_wrapper(&mut scheduler, &fd, Ok(2), file::read, |atoms, read| ok_tuple(atoms, read.map(Term::binary)))?;
+/// assert!(matches!(result, BifResult::Dirty(_)));
 /// ```
-///
-/// # Errors
-///
-/// The error of `operation`. The atom `einval` in a full atom table gives
-/// the error of `AtomTable::put`.
-fn file_handle_wrapper(
+fn file_handle_wrapper<A, T>(
     scheduler: &mut Scheduler,
     fd: &Term,
-    operation: impl FnOnce(&File, &mut AtomTable) -> Result<BifResult, BeamError>,
-) -> Result<BifResult, BeamError> {
+    arguments: Result<A, Reject>,
+    operation: impl FnOnce(&File, A) -> T + Send + 'static,
+    finish: impl FnOnce(&mut AtomTable, T) -> Result<BifResult, BeamError> + Send + 'static,
+) -> Result<BifResult, BeamError>
+where
+    A: Send + 'static,
+    T: Send + 'static,
+{
     let Term::Reference(reference) = fd else {
         return Ok(BifResult::badarg());
     };
-    match scheduler.resources.borrow_mut::<Files>().get(*reference) {
-        None => Ok(BifResult::badarg()),
-        Some(None) => error_tuple(&mut scheduler.atoms, "einval"),
-        Some(Some(file)) => operation(file, &mut scheduler.atoms),
-    }
+    let Some(data) = scheduler.resources.borrow_mut::<Files>().get(*reference) else {
+        return Ok(BifResult::badarg());
+    };
+    dirty(
+        move || {
+            let file = data.acquire().ok_or(Reject::Einval)?;
+            let value = arguments.map(|arguments| operation(&file, arguments));
+            data.release(file);
+            value
+        },
+        |scheduler, value| match value {
+            Ok(value) => finish(&mut scheduler.atoms, value),
+            Err(Reject::Badarg) => Ok(BifResult::badarg()),
+            Err(Reject::Einval) => einval(),
+        },
+    )
+}
+
+/// Run `host` on a dirty IO thread, and then `finish` on the scheduler
+/// thread of the caller with the value of `host`, as ERTS runs a
+/// `prim_file` NIF on a dirty IO scheduler (`prim_file_nif.c:179-217`).
+/// `finish` reads and changes the atoms and the resources of the
+/// scheduler, which stay on its thread.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = dirty(file::get_cwd, |scheduler, cwd| ok_tuple(&mut scheduler.atoms, cwd.map(Term::binary)))?;
+/// assert!(matches!(result, BifResult::Dirty(_)));
+/// ```
+fn dirty<T: Send + 'static>(
+    host: impl FnOnce() -> T + Send + 'static,
+    finish: impl FnOnce(&mut Scheduler, T) -> Result<BifResult, BeamError> + Send + 'static,
+) -> Result<BifResult, BeamError> {
+    Ok(BifResult::Dirty(Work::Host(Host(Box::new(move || {
+        let value = host();
+        let finish: Box<FinishFn> = Box::new(move |scheduler| finish(scheduler, value));
+        finish
+    })))))
+}
+
+/// Run `host` on a dirty IO thread (see [`dirty`]). The result is its
+/// value, or `{error, Errno}` for its error.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = dirty_value(|| file::get_cwd().map(|cwd| ok(Term::binary(cwd))))?;
+/// ```
+fn dirty_value(
+    host: impl FnOnce() -> Result<Term, c_int> + Send + 'static,
+) -> Result<BifResult, BeamError> {
+    dirty(host, |scheduler, value| {
+        value_or_error(&mut scheduler.atoms, value)
+    })
 }
 
 /// Run `prim_file:read_nif(Fd, Size)`, as the ERTS NIF `read_nif_impl`
@@ -431,19 +481,14 @@ fn file_handle_wrapper(
 /// A new result atom in a full atom table gives the error of
 /// `AtomTable::put`.
 fn read_nif(scheduler: &mut Scheduler, fd: &Term, size: &Term) -> Result<BifResult, BeamError> {
-    file_handle_wrapper(scheduler, fd, |file, atoms| {
-        let size = match size {
-            Term::Integer(size) => u64::try_from(*size).ok(),
-            Term::BigInt(_) | Term::Float(_) => None,
-            _ => return Ok(BifResult::badarg()),
-        };
-        let Some(size) = size else {
-            return error_tuple(atoms, "einval");
-        };
-        match file::read(file, size) {
-            Ok(bytes) if bytes.is_empty() => Ok(BifResult::Value(Term::static_atom("eof"))),
-            result => ok_tuple(atoms, result.map(Term::binary)),
-        }
+    let size = match size {
+        Term::Integer(size) => u64::try_from(*size).map_err(|_| Reject::Einval),
+        Term::BigInt(_) | Term::Float(_) => Err(Reject::Einval),
+        _ => Err(Reject::Badarg),
+    };
+    file_handle_wrapper(scheduler, fd, size, file::read, |atoms, read| match read {
+        Ok(bytes) if bytes.is_empty() => Ok(BifResult::Value(Term::static_atom("eof"))),
+        read => ok_tuple(atoms, read.map(Term::binary)),
     })
 }
 
@@ -469,35 +514,56 @@ fn read_nif(scheduler: &mut Scheduler, fd: &Term, size: &Term) -> Result<BifResu
 /// A new result atom in a full atom table gives the error of
 /// `AtomTable::put`.
 fn write_nif(scheduler: &mut Scheduler, fd: &Term, iovec: &Term) -> Result<BifResult, BeamError> {
-    file_handle_wrapper(scheduler, fd, |file, atoms| {
-        let mut buffers = Vec::new();
-        let mut rest = iovec;
-        let mut elements = 0;
-        while let Some((element, tail)) = rest.cons_cell() {
-            let Term::Binary(binary) = element else {
-                return Ok(BifResult::badarg());
-            };
-            // `examine_iovec_term` gives no iovec entry for an empty binary
-            // (erl_nif.c:4123-4155).
-            if !binary.is_empty() {
-                buffers.push(IoSlice::new(binary));
-            }
-            rest = tail;
-            elements += 1;
-            if elements >= WRITE_MAX_ELEMENTS {
-                break;
-            }
-        }
-        if !rest.is_list() {
-            return Ok(BifResult::badarg());
-        }
+    let iovec = write_iovec(iovec);
+    let operation = |file: &File, (binaries, rest): (Vec<Binary>, Term)| {
+        let mut buffers: Vec<_> = binaries.iter().map(|binary| IoSlice::new(binary)).collect();
+        (file::write(file, &mut buffers), rest)
+    };
+    file_handle_wrapper(scheduler, fd, iovec, operation, |atoms, (written, rest)| {
         let value = if rest.is_nil() {
             Term::static_atom("ok")
         } else {
-            Term::tuple(vec![Term::Atom(atoms.put("continue")?), rest.clone()])
+            Term::tuple(vec![Term::Atom(atoms.put("continue")?), rest])
         };
-        value_or_error(atoms, file::write(file, &mut buffers).map(|()| value))
+        value_or_error(atoms, written.map(|()| value))
     })
+}
+
+/// Return the binaries that `write_nif/2` writes from `iovec`, with no
+/// empty binary, and the rest of the list, as `enif_inspect_iovec` reads
+/// at most [`WRITE_MAX_ELEMENTS`] elements (`erl_nif.c:4107-4166`,
+/// `4342-4356`): an element that is not a binary, or a rest that is not a
+/// list, gives `Reject::Badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let (binaries, rest) = write_iovec(&Term::list_from(vec![Term::binary(b"ab".to_vec())])).unwrap();
+/// assert!(rest.is_nil());
+/// ```
+fn write_iovec(iovec: &Term) -> Result<(Vec<Binary>, Term), Reject> {
+    let mut binaries = Vec::new();
+    let mut rest = iovec;
+    let mut elements = 0;
+    while let Some((element, tail)) = rest.cons_cell() {
+        let Term::Binary(binary) = element else {
+            return Err(Reject::Badarg);
+        };
+        // `examine_iovec_term` gives no iovec entry for an empty binary
+        // (erl_nif.c:4123-4155).
+        if !binary.is_empty() {
+            binaries.push(binary.clone());
+        }
+        rest = tail;
+        elements += 1;
+        if elements >= WRITE_MAX_ELEMENTS {
+            break;
+        }
+    }
+    if !rest.is_list() {
+        return Err(Reject::Badarg);
+    }
+    Ok((binaries, rest.clone()))
 }
 
 /// Run `prim_file:seek_nif(Fd, Mark, Offset)`, as the ERTS NIF
@@ -524,23 +590,22 @@ fn seek_nif(
     mark: &Term,
     offset: &Term,
 ) -> Result<BifResult, BeamError> {
-    file_handle_wrapper(scheduler, fd, |file, atoms| {
-        let Term::Integer(offset) = *offset else {
-            return Ok(BifResult::badarg());
-        };
-        let from = match mark {
-            Term::Atom(mark) => match atoms.name_of(mark) {
-                // `SeekFrom::Start` gives the bits of `offset` to `lseek`
-                // as `off_t`, so a negative offset stays negative.
-                "bof" => SeekFrom::Start(offset.cast_unsigned()),
-                "cur" => SeekFrom::Current(offset),
-                "eof" => SeekFrom::End(offset),
-                _ => return Ok(BifResult::badarg()),
-            },
-            _ => return Ok(BifResult::badarg()),
-        };
-        let position = file::seek(file, from).map(|position| Term::Integer(position.cast_signed()));
-        ok_tuple(atoms, position)
+    let from = match (offset, mark) {
+        (Term::Integer(offset), Term::Atom(mark)) => match scheduler.atoms.name_of(mark) {
+            // `SeekFrom::Start` gives the bits of `offset` to `lseek` as
+            // `off_t`, so a negative offset stays negative.
+            "bof" => Ok(SeekFrom::Start(offset.cast_unsigned())),
+            "cur" => Ok(SeekFrom::Current(*offset)),
+            "eof" => Ok(SeekFrom::End(*offset)),
+            _ => Err(Reject::Badarg),
+        },
+        _ => Err(Reject::Badarg),
+    };
+    file_handle_wrapper(scheduler, fd, from, file::seek, |atoms, position| {
+        ok_tuple(
+            atoms,
+            position.map(|position| Term::Integer(position.cast_signed())),
+        )
     })
 }
 
@@ -577,25 +642,18 @@ fn seek_nif(
 ///
 /// A new result atom in a full atom table gives the error of
 /// `AtomTable::put`.
-fn read_info_nif(
-    scheduler: &mut Scheduler,
-    path: &Term,
-    follow_links: &Term,
-) -> Result<BifResult, BeamError> {
+fn read_info_nif(path: &Term, follow_links: &Term) -> Result<BifResult, BeamError> {
     let Some(follow_links) = follow_links
         .small_integer()
         .and_then(|value| i32::try_from(value).ok())
     else {
         return Ok(BifResult::badarg());
     };
-    let atoms = &mut scheduler.atoms;
     let Some(path) = marshal_path(path) else {
-        return error_tuple(atoms, "einval");
+        return einval();
     };
-    match file::read_info(path, follow_links != 0) {
-        Ok(info) => Ok(file_info(&info)),
-        Err(errno) => error_tuple(atoms, &errno_id(errno)),
-    }
+    let path = path.to_owned();
+    dirty_value(move || file::read_info(&path, follow_links != 0).map(|info| file_info(&info)))
 }
 
 /// Run `prim_file:read_file_nif(Path)`, as the ERTS NIF `read_file_nif`
@@ -617,11 +675,10 @@ fn read_info_nif(
 ///
 /// A new result atom in a full atom table gives the error of
 /// `AtomTable::put`.
-fn read_file_nif(atoms: &mut AtomTable, path: &Term) -> Result<BifResult, BeamError> {
-    let Some(path) = marshal_path(path) else {
-        return error_tuple(atoms, "einval");
-    };
-    ok_tuple(atoms, file::read_file(path).map(Term::binary))
+fn read_file_nif(path: &Term) -> Result<BifResult, BeamError> {
+    path_value(path, |path| {
+        file::read_file(path).map(|bytes| ok(Term::binary(bytes)))
+    })
 }
 
 /// Run `prim_file:list_dir_nif(Path)`, as the ERTS NIF `list_dir_nif`
@@ -645,13 +702,11 @@ fn read_file_nif(atoms: &mut AtomTable, path: &Term) -> Result<BifResult, BeamEr
 ///
 /// A new result atom in a full atom table gives the error of
 /// `AtomTable::put`.
-fn list_dir_nif(atoms: &mut AtomTable, path: &Term) -> Result<BifResult, BeamError> {
-    let Some(path) = marshal_path(path) else {
-        return error_tuple(atoms, "einval");
-    };
-    let names = file::list_dir(path)
-        .map(|names| Term::list_from(names.into_iter().rev().map(Term::binary)));
-    ok_tuple(atoms, names)
+fn list_dir_nif(path: &Term) -> Result<BifResult, BeamError> {
+    path_value(path, |path| {
+        file::list_dir(path)
+            .map(|names| ok(Term::list_from(names.into_iter().rev().map(Term::binary))))
+    })
 }
 
 /// Run `prim_file:read_link_nif(Path)`, as the ERTS NIF `read_link_nif`
@@ -673,11 +728,10 @@ fn list_dir_nif(atoms: &mut AtomTable, path: &Term) -> Result<BifResult, BeamErr
 ///
 /// A new result atom in a full atom table gives the error of
 /// `AtomTable::put`.
-fn read_link_nif(atoms: &mut AtomTable, path: &Term) -> Result<BifResult, BeamError> {
-    let Some(path) = marshal_path(path) else {
-        return error_tuple(atoms, "einval");
-    };
-    ok_tuple(atoms, file::read_link(path).map(Term::binary))
+fn read_link_nif(path: &Term) -> Result<BifResult, BeamError> {
+    path_value(path, |path| {
+        file::read_link(path).map(|bytes| ok(Term::binary(bytes)))
+    })
 }
 
 /// Run `prim_file:get_cwd_nif()`, as the ERTS NIF `get_cwd_nif`
@@ -695,8 +749,8 @@ fn read_link_nif(atoms: &mut AtomTable, path: &Term) -> Result<BifResult, BeamEr
 ///
 /// A new result atom in a full atom table gives the error of
 /// `AtomTable::put`.
-fn get_cwd_nif(atoms: &mut AtomTable) -> Result<BifResult, BeamError> {
-    ok_tuple(atoms, file::get_cwd().map(Term::binary))
+fn get_cwd_nif() -> Result<BifResult, BeamError> {
+    dirty_value(|| file::get_cwd().map(|cwd| ok(Term::binary(cwd))))
 }
 
 /// Run `prim_file:altname_nif(Path)`, as the ERTS NIF `altname_nif`
@@ -718,11 +772,14 @@ fn get_cwd_nif(atoms: &mut AtomTable) -> Result<BifResult, BeamError> {
 ///
 /// The atom `einval` or `enotsup` in a full atom table gives the error of
 /// `AtomTable::put`.
-fn altname_nif(atoms: &mut AtomTable, path: &Term) -> Result<BifResult, BeamError> {
+fn altname_nif(path: &Term) -> Result<BifResult, BeamError> {
     if marshal_path(path).is_none() {
-        return error_tuple(atoms, "einval");
+        return einval();
     }
-    error_tuple(atoms, "enotsup")
+    dirty(
+        || (),
+        |scheduler, ()| error_tuple(&mut scheduler.atoms, "enotsup"),
+    )
 }
 
 /// Run the `prim_file` NIF that takes the path `path` and calls `operation`
@@ -743,15 +800,32 @@ fn altname_nif(atoms: &mut AtomTable, path: &Term) -> Result<BifResult, BeamErro
 /// A new result atom in a full atom table gives the error of
 /// `AtomTable::put`.
 fn path_result(
-    scheduler: &mut Scheduler,
     path: &Term,
-    operation: impl FnOnce(&CStr) -> Result<(), c_int>,
+    operation: impl FnOnce(&CStr) -> Result<(), c_int> + Send + 'static,
 ) -> Result<BifResult, BeamError> {
-    let atoms = &mut scheduler.atoms;
+    path_value(path, |path| {
+        operation(path).map(|()| Term::static_atom("ok"))
+    })
+}
+
+/// Run `host` with the path `path` on a dirty IO thread (see
+/// [`dirty_value`]). A `path` that [`marshal_path`] does not accept gives
+/// `{error, einval}` at once.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = path_value(&Term::binary(b"/\0".to_vec()), |path| file::read_link(path).map(Term::binary))?;
+/// ```
+fn path_value(
+    path: &Term,
+    host: impl FnOnce(&CStr) -> Result<Term, c_int> + Send + 'static,
+) -> Result<BifResult, BeamError> {
     let Some(path) = marshal_path(path) else {
-        return error_tuple(atoms, "einval");
+        return einval();
     };
-    value_or_error(atoms, operation(path).map(|()| Term::static_atom("ok")))
+    let path = path.to_owned();
+    dirty_value(move || host(&path))
 }
 
 /// Run the `prim_file` NIF that takes the paths `first` and `second` and
@@ -773,22 +847,18 @@ fn path_result(
 /// A new result atom in a full atom table gives the error of
 /// `AtomTable::put`.
 fn pair_result(
-    scheduler: &mut Scheduler,
     first: &Term,
     second: &Term,
-    operation: impl FnOnce(&CStr, &CStr) -> Result<(), c_int>,
+    operation: impl FnOnce(&CStr, &CStr) -> Result<(), c_int> + Send + 'static,
 ) -> Result<BifResult, BeamError> {
-    let atoms = &mut scheduler.atoms;
     let Some(first) = marshal_path(first) else {
-        return error_tuple(atoms, "einval");
+        return einval();
     };
     let Some(second) = marshal_path(second) else {
-        return error_tuple(atoms, "einval");
+        return einval();
     };
-    value_or_error(
-        atoms,
-        operation(first, second).map(|()| Term::static_atom("ok")),
-    )
+    let (first, second) = (first.to_owned(), second.to_owned());
+    dirty_value(move || operation(&first, &second).map(|()| Term::static_atom("ok")))
 }
 
 /// Run `prim_file:set_permissions_nif(Path, Permissions)`, as the ERTS NIF
@@ -811,25 +881,14 @@ fn pair_result(
 ///
 /// A new result atom in a full atom table gives the error of
 /// `AtomTable::put`.
-fn set_permissions_nif(
-    scheduler: &mut Scheduler,
-    path: &Term,
-    permissions: &Term,
-) -> Result<BifResult, BeamError> {
+fn set_permissions_nif(path: &Term, permissions: &Term) -> Result<BifResult, BeamError> {
     let Some(permissions) = permissions
         .small_integer()
         .and_then(|value| u32::try_from(value).ok())
     else {
         return Ok(BifResult::badarg());
     };
-    let atoms = &mut scheduler.atoms;
-    let Some(path) = marshal_path(path) else {
-        return error_tuple(atoms, "einval");
-    };
-    value_or_error(
-        atoms,
-        file::set_permissions(path, permissions).map(|()| Term::static_atom("ok")),
-    )
+    path_result(path, move |path| file::set_permissions(path, permissions))
 }
 
 /// Run `prim_file:set_owner_nif(Path, Uid, Gid)`, as the ERTS NIF
@@ -850,12 +909,7 @@ fn set_permissions_nif(
 ///
 /// A new result atom in a full atom table gives the error of
 /// `AtomTable::put`.
-fn set_owner_nif(
-    scheduler: &mut Scheduler,
-    path: &Term,
-    uid: &Term,
-    gid: &Term,
-) -> Result<BifResult, BeamError> {
+fn set_owner_nif(path: &Term, uid: &Term, gid: &Term) -> Result<BifResult, BeamError> {
     let uid = uid
         .small_integer()
         .and_then(|value| i32::try_from(value).ok());
@@ -865,14 +919,7 @@ fn set_owner_nif(
     let (Some(uid), Some(gid)) = (uid, gid) else {
         return Ok(BifResult::badarg());
     };
-    let atoms = &mut scheduler.atoms;
-    let Some(path) = marshal_path(path) else {
-        return error_tuple(atoms, "einval");
-    };
-    value_or_error(
-        atoms,
-        file::set_owner(path, uid, gid).map(|()| Term::static_atom("ok")),
-    )
+    path_result(path, move |path| file::set_owner(path, uid, gid))
 }
 
 /// Run `prim_file:set_time_nif(Path, ATime, MTime, CTime)`, as the ERTS NIF
@@ -894,7 +941,6 @@ fn set_owner_nif(
 /// A new result atom in a full atom table gives the error of
 /// `AtomTable::put`.
 fn set_time_nif(
-    scheduler: &mut Scheduler,
     path: &Term,
     atime: &Term,
     mtime: &Term,
@@ -904,14 +950,8 @@ fn set_time_nif(
     else {
         return Ok(BifResult::badarg());
     };
-    let atoms = &mut scheduler.atoms;
-    let Some(path) = marshal_path(path) else {
-        return error_tuple(atoms, "einval");
-    };
-    value_or_error(
-        atoms,
-        file::set_time(path, *atime, *mtime).map(|()| Term::static_atom("ok")),
-    )
+    let (atime, mtime) = (*atime, *mtime);
+    path_result(path, move |path| file::set_time(path, atime, mtime))
 }
 
 /// Return `{ok, Value}` for `Ok(Value)`, as `enif_make_tuple2(env, am_ok,
@@ -931,10 +971,32 @@ fn set_time_nif(
 /// A new error atom in a full atom table gives the error of
 /// `AtomTable::put`.
 fn ok_tuple(atoms: &mut AtomTable, result: Result<Term, c_int>) -> Result<BifResult, BeamError> {
-    value_or_error(
-        atoms,
-        result.map(|value| Term::tuple(vec![Term::static_atom("ok"), value])),
-    )
+    value_or_error(atoms, result.map(ok))
+}
+
+/// Return the tuple `{ok, Value}`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let value = ok(Term::Integer(0));
+/// ```
+fn ok(value: Term) -> Term {
+    Term::tuple(vec![Term::static_atom("ok"), value])
+}
+
+/// Return the value `{error, einval}`, with the static atom `einval`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(einval()?, BifResult::Value(Term::Tuple(_))));
+/// ```
+fn einval() -> Result<BifResult, BeamError> {
+    Ok(BifResult::Value(Term::tuple(vec![
+        Term::static_atom("error"),
+        Term::static_atom("einval"),
+    ])))
 }
 
 /// Return the value of `Ok`, or the [`error_tuple`] of the `errno` of
@@ -1017,7 +1079,7 @@ fn error_tuple(atoms: &mut AtomTable, reason: &str) -> Result<BifResult, BeamErr
 /// let info = file::read_info(c"/bin/sh", true).unwrap();
 /// assert!(matches!(file_info(&info), BifResult::Value(Term::Tuple(fields)) if fields.len() == 14));
 /// ```
-fn file_info(info: &FileInfo) -> BifResult {
+fn file_info(info: &FileInfo) -> Term {
     let file_type = match info.file_type {
         FileType::Device => Atom::DEVICE,
         FileType::Directory => Atom::DIRECTORY,
@@ -1033,7 +1095,7 @@ fn file_info(info: &FileInfo) -> BifResult {
     };
     let time = |seconds: i64| Term::Integer(seconds.clamp(MIN_FILETIME, MAX_FILETIME));
     let integer = |value: u32| Term::Integer(value.into());
-    BifResult::Value(Term::tuple(vec![
+    Term::tuple(vec![
         Term::Atom(Atom::FILE_INFO),
         Term::Integer(info.size),
         Term::Atom(file_type),
@@ -1048,7 +1110,7 @@ fn file_info(info: &FileInfo) -> BifResult {
         integer(info.inode),
         integer(info.uid),
         integer(info.gid),
-    ]))
+    ])
 }
 
 #[cfg(test)]
