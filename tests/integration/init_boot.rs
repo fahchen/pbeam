@@ -331,11 +331,38 @@ fn looks_up_the_host_name_at_the_kernel_boot_as_pinned_erts() {
     assert_eq!(node, reference, "PBeam");
 }
 
-/// The child side of `starts_kernel_and_stops_at_init_stop_as_pinned_erts`
-/// and `looks_up_the_host_name_at_the_kernel_boot_as_pinned_erts`: boot
-/// the node with `start_clean` and the `-s` arguments of the environment
-/// variable [`ISOLATED`], and expect the halt of `init:stop/0,1` with the
-/// status of the second argument, or 0 without it.
+#[test]
+fn reports_the_socket_support_of_the_host_at_the_kernel_boot_as_pinned_erts() {
+    // The pinned ERTS preloads `socket_registry`, `prim_socket`, and
+    // `prim_net` (erts/emulator/Makefile.in:804-817), so
+    // `erl_init:start/2` runs `prim_socket:on_load/0` (erl_init.erl:42-48).
+    // `prim_socket:init/0` stores the lists of `nif_supports/1` as maps in
+    // persistent terms (prim_socket.erl:184-255).
+    // `kernel_boot_probe:supports/0` displays `nif_supports/0`, the maps as
+    // sorted lists, and the results of other keys, and calls
+    // `init:stop/0`. The values depend on the host OS and on the host file
+    // `/etc/protocols`, so the test compares the two runs on the host.
+    let (reference, status, node) = run_kernel_boot("supports", true, &["{supports,"]);
+    assert_eq!(status, Some(0), "ERTS");
+    assert!(
+        reference.starts_with("{supports,[{sctp,false},{ipv6,true},{local,true},"),
+        "{reference}"
+    );
+    assert_eq!(node, reference, "PBeam");
+}
+
+/// The pinned modules of the socket NIF libraries, which the pinned ERTS
+/// preloads (erts/emulator/Makefile.in:804-817), and which the kernel boot
+/// loads as preloaded modules.
+const ESOCK_MODULES: [&str; 3] = ["socket_registry", "prim_socket", "prim_net"];
+
+/// The child side of `starts_kernel_and_stops_at_init_stop_as_pinned_erts`,
+/// `looks_up_the_host_name_at_the_kernel_boot_as_pinned_erts`, and
+/// `reports_the_socket_support_of_the_host_at_the_kernel_boot_as_pinned_erts`:
+/// boot the node with [`ESOCK_MODULES`], `start_clean`, and the `-s`
+/// arguments of the environment variable [`ISOLATED`], and expect the halt
+/// of `init:stop/0,1` with the status of the second argument, or 0 without
+/// it.
 #[test]
 #[ignore = "the kernel boot tests run it in a child process"]
 fn isolated_kernel_boot() {
@@ -346,7 +373,12 @@ fn isolated_kernel_boot() {
         .split_whitespace()
         .nth(1)
         .map_or(0, |status| status.parse().unwrap());
-    assert_eq!(boot_node(&[], &flags).unwrap_err(), BeamError::Halt(code));
+    let esock = ESOCK_MODULES.map(pinned_beam);
+    let esock = esock.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    assert_eq!(
+        boot_node(&esock, &flags).unwrap_err(),
+        BeamError::Halt(code)
+    );
 }
 
 #[test]

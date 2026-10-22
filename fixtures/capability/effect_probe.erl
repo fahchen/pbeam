@@ -589,7 +589,9 @@ ambient() ->
         is_list(erlang:ports()),
         erlang:display_string(stdout, <<>>),
         erlang:display(effect_probe_ambient_display),
-        attempt(fun() -> erlang:has_prepared_code_on_load(make_ref()) end)
+        attempt(fun() -> erlang:has_prepared_code_on_load(make_ref()) end),
+        is_list(prim_socket:supports()),
+        prim_socket:supports(other)
     ].
 
 %% Each metadata probe makes a temporary file, so `write_file_info/3`
