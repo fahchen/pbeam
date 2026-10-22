@@ -132,11 +132,12 @@ impl PersistentTermStore {
         self.progress.iter().any(|progress| progress.caller == id)
     }
 
-    /// Start a copy of the visible table into a table of `size` slots,
-    /// which leaves out the key `skip`.
-    pub(super) fn start_copy(&mut self, size: usize, skip: Option<Term>) {
+    /// Start a copy of the visible table into the empty `table`, which
+    /// leaves out the key `skip`. The caller makes `table` outside the lock
+    /// of the node.
+    pub(super) fn start_copy(&mut self, table: PersistentTerms, skip: Option<Term>) {
         self.copy = Some(Copy {
-            table: PersistentTerms::with_slots(size),
+            table,
             next: 0,
             skip,
         });
@@ -277,7 +278,7 @@ impl Default for PersistentTerms {
 
 impl PersistentTerms {
     /// Return an empty table of `slots` slots.
-    fn with_slots(slots: usize) -> Self {
+    pub(super) fn with_slots(slots: usize) -> Self {
         PersistentTerms {
             buckets: vec![None; slots],
             num_entries: 0,

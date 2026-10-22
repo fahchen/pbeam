@@ -21,7 +21,7 @@
 use super::BifResult::Value;
 use super::*;
 use crate::runtime::capability::{CapabilityKind, Operation};
-use crate::runtime::persistent_term::Change;
+use crate::runtime::persistent_term::{Change, PersistentTerms};
 use std::sync::{Arc, atomic::Ordering};
 
 /// Continue a call at a trap export of this module. `get_all_wait/0`,
@@ -264,11 +264,11 @@ fn erase_start(scheduler: &mut Scheduler, key: &Term) -> BifResult {
         }
         Some((first, second)) => {
             if second > 0 {
-                let size = second - first;
+                let table = PersistentTerms::with_slots(second - first);
                 scheduler
                     .node()
                     .persistent_terms()
-                    .start_copy(size, Some(key.clone()));
+                    .start_copy(table, Some(key.clone()));
             }
             erase_trap(scheduler, key, first, second)
         }
@@ -354,7 +354,15 @@ fn schedule(scheduler: &mut Scheduler, change: Change, value: Term) -> BifResult
     let node = Arc::clone(scheduler.node());
     node.persistent_terms().schedule(id, change);
     node.persistent_progress().store(true, Ordering::Release);
-    thread_progress(scheduler, value)
+    // The caller always switches out and suspends, as `ERTS_BIF_YIELD_RETURN`
+    // after `suspend_updater` does (`erl_bif_persistent.c:539`, `783`).
+    // A publication on another scheduler resumes it with a signal, which it
+    // handles after the switch.
+    BifResult::Suspend {
+        module: "persistent_term",
+        function: "thread_progress",
+        arguments: vec![value],
+    }
 }
 
 /// Return `value` when the table of the caller is visible. Else suspend the
@@ -430,10 +438,8 @@ fn put_start(scheduler: &mut Scheduler, key: &Term, value: &Term) -> BifResult {
         Some(copied) => {
             if copied > 0 {
                 // The copy doubles the table: `copied` is 3 times its size.
-                scheduler
-                    .node()
-                    .persistent_terms()
-                    .start_copy(copied / 3 * 2, None);
+                let table = PersistentTerms::with_slots(copied / 3 * 2);
+                scheduler.node().persistent_terms().start_copy(table, None);
             }
             put_trap(scheduler, key, value, copied)
         }
