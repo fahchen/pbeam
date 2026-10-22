@@ -175,10 +175,15 @@ fn boot_node(probes: &[&[u8]], flags: &[&[u8]]) -> Result<pbeam_runtime::HostTer
 
 /// The environment of the kernel boot: a home directory and a user
 /// configuration directory that do not exist, so `c:erlangrc/0` finds no
-/// `.erlang` file of the host user (c.erl:1051-1072).
-const NO_CONFIGURATION: [(&str, &str); 2] = [
+/// `.erlang` file of the host user (c.erl:1051-1072), and the inetrc file
+/// `fixtures/boot/kernel_boot.inetrc`, whose domain keeps
+/// `inet_config:init/0` from the host name lookup on Linux
+/// (inet_config.erl:63-64, 110-133). PBeam does not support the options of
+/// the `inet_gethost` port of that lookup (row "Node boot").
+const KERNEL_BOOT_ENVIRONMENT: [(&str, &str); 3] = [
     ("HOME", "fixtures/boot/no_home"),
     ("XDG_CONFIG_HOME", "fixtures/boot/no_home"),
+    ("ERL_INETRC", "fixtures/boot/kernel_boot.inetrc"),
 ];
 
 /// The flags of `erl` for the kernel boot of `kernel_boot_probe`, with the
@@ -241,7 +246,7 @@ fn starts_kernel_and_stops_at_init_stop_as_pinned_erts() {
         let reference = Command::new("erl")
             .args(["-noshell"])
             .args(kernel_boot_flags(status))
-            .envs(NO_CONFIGURATION)
+            .envs(KERNEL_BOOT_ENVIRONMENT)
             .stdin(Stdio::null())
             .output()
             .unwrap();
@@ -253,7 +258,7 @@ fn starts_kernel_and_stops_at_init_stop_as_pinned_erts() {
                 "--quiet",
             ])
             .env(ISOLATED, status)
-            .envs(NO_CONFIGURATION)
+            .envs(KERNEL_BOOT_ENVIRONMENT)
             .stdin(Stdio::null())
             .output()
             .unwrap();
