@@ -659,6 +659,7 @@ impl Node {
                         Delivery::Message { target, .. }
                             | Delivery::Signal { target, .. }
                             | Delivery::Cleanup { target }
+                            | Delivery::CheckProcessCode { target, .. }
                             if *target == id
                     );
                     if follows {
