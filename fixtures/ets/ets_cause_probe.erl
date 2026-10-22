@@ -41,6 +41,8 @@ main() ->
          fun() -> ets:update_element(Set, k, {1, x}) end,
          fun() -> ets:update_element(Set, k, [{2, x}, {3, x}]) end,
          fun() -> ets:update_element(Set, k, [{0, x}]) end,
+         fun() -> ets:update_element(Set, k, {1 bsl 59, x}) end,
+         fun() -> ets:update_element(Set, k, {1 bsl 60, x}) end,
          fun() -> ets:update_element(Set, k, [{2, x} | bad]) end,
          fun() -> ets:update_element(Set, k, [{1, x} | bad]) end,
          fun() -> ets:update_element(Set, k, [bad, {1, x}]) end,

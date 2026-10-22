@@ -1104,7 +1104,10 @@ const PID_REFERENCE_MARKER: u64 = 1 << 63;
 /// destructor `db_table_tid_destructor`, and the identifier of a deleted
 /// table keeps it (`tid2tab`, `erl_db.c:280-306`). The reference counter
 /// stays below this bit. The bit shows in the number `N2` of
-/// [`Reference::numbers`].
+/// [`Reference::numbers`], as the pid reference marker does; ERTS keeps
+/// it in `N1` below the counter bits (`ERTS_REF1_MAGIC_MARKER_BIT__`,
+/// `erl_bif_unique.h:102-105`, `181-186`), so the term order compares the
+/// values without the markers (`Ord for Reference`).
 const TABLE_REFERENCE_MARKER: u64 = 1 << 62;
 
 /// The marker bits of a reference value.
@@ -1166,7 +1169,7 @@ impl Reference {
     /// ```rust,ignore
     /// assert!(Reference(0).table_reference().is_table_reference());
     /// ```
-    pub(crate) fn table_reference(self) -> Self {
+    pub(crate) const fn table_reference(self) -> Self {
         Reference(self.0 | TABLE_REFERENCE_MARKER)
     }
 

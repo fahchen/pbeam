@@ -2570,13 +2570,14 @@ fn update_specs(
         let Term::Tuple(elements) = item else {
             return Err(None);
         };
-        let [Term::Integer(position), value] = elements.as_ref() else {
+        let [position, value] = elements.as_ref() else {
             return Err(None);
         };
-        if *position == i64::from(keypos) {
+        let position = position.small_integer().ok_or(None)?;
+        if position == i64::from(keypos) {
             return Err(Some("keypos"));
         }
-        let position = (usize::try_from(*position).ok())
+        let position = (usize::try_from(position).ok())
             .filter(|position| (1..=arity).contains(position))
             .ok_or(Some("position"))?;
         updates.push((position, value.clone()));
