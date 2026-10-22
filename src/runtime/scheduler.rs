@@ -1593,33 +1593,31 @@ impl Scheduler {
             written.as_raw_fd()
         };
         let fds = [notify, done];
+        // An interrupted wait gives neither case: the handler wrote the
+        // notify pipe, so the next wait sees it. Which thread gets a signal
+        // is not fixed, so this case has no branch of its own.
         loop {
-            match super::host::input::wait_readable(&fds, None) {
-                super::host::input::Readiness::Ready(ready) if ready.contains(&notify) => {
-                    // A signal wrote to the notify pipe. A SIGINT stops the
-                    // run; each other signal stays for the scheduler
-                    // (`sys.c:611-624`, `break.c:602-604`).
-                    let signals = signal::take_notified();
-                    if signals.contains(&libc::SIGINT) {
-                        return Err(BeamError::Halt(0));
-                    }
-                    deferred.extend(signals);
+            let readiness = super::host::input::wait_readable(&fds, None);
+            if matches!(&readiness, super::host::input::Readiness::Ready(ready) if ready.contains(&notify))
+            {
+                // A signal wrote to the notify pipe. A SIGINT stops the
+                // run; each other signal stays for the scheduler
+                // (`sys.c:611-624`, `break.c:602-604`).
+                let signals = signal::take_notified();
+                if signals.contains(&libc::SIGINT) {
+                    return Err(BeamError::Halt(0));
                 }
+                deferred.extend(signals);
+            } else if readiness.ended(done) {
                 // The write ended, or the wait cannot watch it: the menu
                 // reads its keys in either case. Take the byte of the end
                 // of the write, so that the next menu waits for its own
                 // write.
-                super::host::input::Readiness::Ready(_)
-                | super::host::input::Readiness::Invalid => {
-                    use std::io::Read;
-                    let mut buffer = [0; 8];
-                    let mut written = written;
-                    let _ = written.read(&mut buffer);
-                    return Ok(());
-                }
-                // An interrupted wait: the handler wrote the notify pipe, so
-                // the next wait sees it.
-                super::host::input::Readiness::Pending => {}
+                use std::io::Read;
+                let mut buffer = [0; 8];
+                let mut written = written;
+                let _ = written.read(&mut buffer);
+                return Ok(());
             }
         }
     }
@@ -2702,6 +2700,23 @@ impl Scheduler {
         (owner != self.index).then_some(owner)
     }
 
+    /// Return the scheduler of the process `target` when it is another
+    /// scheduler of the node and the process does not exit (see
+    /// [`Node::live_owner`]).
+    pub(super) fn remote_live_owner(&self, target: ProcessId) -> Option<usize> {
+        let owner = self.node.live_owner(target)?;
+        (owner != self.index).then_some(owner)
+    }
+
+    /// Make the process `id` exiting for the other schedulers of a run with
+    /// scheduler threads (see [`Node::set_exiting`]). A run with one
+    /// scheduler has no other reader.
+    pub(super) fn set_exiting(&self, id: ProcessId) {
+        if self.multi {
+            self.node.set_exiting(id);
+        }
+    }
+
     /// Move each delivery of the inbox of this scheduler into the signal
     /// queue or the mailbox of its target, in inbox order. Return true when
     /// the inbox held a delivery.
@@ -2936,7 +2951,8 @@ impl Scheduler {
     /// link signal to the target, which adds its side of the link when it
     /// handles the signal.
     ///
-    /// A target that does not exist or exits (`erts_proc_lookup`) gives
+    /// A target that does not exist or exits (`erts_proc_lookup`), on this
+    /// scheduler or on another scheduler of the node, gives
     /// `false` and no link when the current process does not trap exits:
     /// the BIF then raises `noproc` (`bif.c:162-163`, `411-423`). With
     /// `trap_exit` the link is made. A target that exits gets the link
@@ -2957,7 +2973,7 @@ impl Scheduler {
             return true;
         }
         if self.live_process(target).is_none()
-            && self.remote_owner(target).is_none()
+            && self.remote_live_owner(target).is_none()
             && !self.current_process_mut().trap_exit
         {
             return false;
@@ -3382,6 +3398,8 @@ impl Scheduler {
             Some(next) => next,
             None => {
                 process.bump_reductions(EXIT_REDUCTIONS);
+                self.set_exiting(id);
+                let process = self.current_process_mut();
                 if let ReceiveTimer::Set { key, .. } = process.receive_timer {
                     self.timers.cancel(key);
                 }

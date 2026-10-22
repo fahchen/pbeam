@@ -654,3 +654,11 @@ path = "tests/integration/multischeduler.rs"
 [[test]]
 name = "multischeduler_info"
 path = "tests/integration/multischeduler_info.rs"
+
+[[test]]
+name = "multischeduler_links"
+path = "tests/integration/multischeduler_links.rs"
+
+[[test]]
+name = "multischeduler_monitors"
+path = "tests/integration/multischeduler_monitors.rs"

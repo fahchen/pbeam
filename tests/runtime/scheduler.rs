@@ -2183,6 +2183,56 @@ fn a_remote_signal_flushes_the_pending_monitor_first() {
 }
 
 #[test]
+fn a_remote_target_adds_and_removes_the_monitor_of_a_watcher() {
+    // The target of another scheduler adds the target monitor when it
+    // handles the monitor signal (`erl_proc_sig_queue.c:6544-6562`), and
+    // removes it when it handles the demonitor signal
+    // (`erl_proc_sig_queue.c:6564-6633`). Both signals go through the inbox
+    // of its owner. The watcher removes its own monitor first, so only the
+    // target shows that the demonitor signal arrived.
+    use super::HandlingPoint;
+    use crate::runtime::process::TargetMonitor;
+    let (node, mut readers) = Node::new(2).unwrap();
+    let mut owner =
+        Scheduler::with_shared(AtomTable::new(), Arc::clone(&node), 1, readers.remove(1));
+    let mut scheduler =
+        Scheduler::with_shared(AtomTable::new(), Arc::clone(&node), 0, readers.remove(0));
+    let (target, watcher) = (ProcessId(0), ProcessId(1));
+    owner
+        .start_with_id(target, frame(), vec![], allow_all())
+        .unwrap();
+    scheduler
+        .start_with_id(watcher, frame(), vec![], allow_all())
+        .unwrap();
+    scheduler.schedule_next().unwrap();
+    let reference = scheduler
+        .monitor(MonitorTarget::Process(target), no_options())
+        .unwrap();
+    scheduler.send_pending_monitor();
+    assert!(owner.drain_inbox());
+    owner
+        .handle_signals(target, 100, 100, HandlingPoint::ScheduleIn)
+        .unwrap();
+    let watchers = |owner: &Scheduler| -> Vec<ProcessId> {
+        owner.processes[&target]
+            .monitored_by
+            .iter()
+            .filter_map(|monitor| match monitor {
+                TargetMonitor::Process(monitor) => Some(monitor.watcher),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(watchers(&owner), [watcher]);
+    assert!(scheduler.demonitor(reference));
+    assert!(owner.drain_inbox());
+    owner
+        .handle_signals(target, 100, 100, HandlingPoint::ScheduleIn)
+        .unwrap();
+    assert!(watchers(&owner).is_empty());
+}
+
+#[test]
 fn a_host_signal_notification_reaches_a_remote_signal_server() {
     use super::node::Node;
     let (node, mut readers) = Node::new(2).unwrap();
