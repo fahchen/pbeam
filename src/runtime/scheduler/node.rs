@@ -13,7 +13,7 @@
 //! never touches a process of another scheduler.
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeSet, HashMap, VecDeque},
     io::{self, Read, Write},
     os::unix::net::UnixStream,
     sync::{
@@ -121,7 +121,7 @@ struct TimerEntry {
 #[derive(Debug, Default)]
 struct BifTimers {
     entries: HashMap<crate::term::Reference, TimerEntry>,
-    by_receiver: HashMap<ProcessId, HashSet<crate::term::Reference>>,
+    by_receiver: HashMap<ProcessId, BTreeSet<crate::term::Reference>>,
 }
 
 /// The state of a run that more than one scheduler thread shares.
@@ -788,8 +788,7 @@ impl Node {
     ) -> Option<crate::term::Reference> {
         let mut timers = self.timers.lock().expect("the timer table is not poisoned");
         let set = timers.by_receiver.get_mut(&receiver)?;
-        let reference = *set.iter().next().expect("a receiver set is not empty");
-        set.remove(&reference);
+        let reference = set.pop_first().expect("a receiver set is not empty");
         if set.is_empty() {
             timers.by_receiver.remove(&receiver);
         }
