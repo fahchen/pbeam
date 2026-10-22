@@ -1440,17 +1440,12 @@ pub(super) fn processes_next(
         return Ok(Value(Term::static_atom("none")));
     }
     let hidden = super::erlang::hidden_policy(scheduler);
-    let mut pids = Vec::new();
-    let mut next = limit;
-    for (index, id) in scheduler.ptab_indexed(first, limit) {
-        if Some(id) != hidden {
-            pids.push(Term::Pid(id));
-        }
-        if pids.len() as u64 == max_pids {
-            next = index + 1;
-            break;
-        }
-    }
+    let found = scheduler.ptab_indexed(first, limit, max_pids as usize, |id| Some(id) != hidden);
+    let next = match found.last() {
+        Some((index, _)) if found.len() as u64 == max_pids => index + 1,
+        _ => limit,
+    };
+    let pids: Vec<Term> = found.into_iter().map(|(_, id)| Term::Pid(id)).collect();
     let scanned = (next - first) / PTAB_REDS_MULTIPLIER + 1;
     scheduler
         .current_process_mut()

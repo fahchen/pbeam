@@ -1,20 +1,20 @@
-//! The process table of a scheduler: each live process in a slot, an index
-//! from the pid to the slot, and the slot of the current process.
+//! The process table of the node: the pid, the scheduler, the exiting
+//! state, and the insert interval of each live process, in the index order
+//! of the ERTS process table, and the state of the `erlang:processes/0`
+//! reads. Each scheduler of the node reads the same table, so a pid lookup,
+//! `erlang:processes/0`, and `erts_internal:processes_next/1` give the same
+//! result on each scheduler. The state of a process stays with the
+//! scheduler that runs it (see [`super::process_slots::ProcessSlots`]).
 //!
-//! ERTS keeps the current process as a pointer in the scheduler data
-//! (`current_process`, `erl_process.h:698`), and the JIT keeps it in a
-//! register (`c_p`, `jit/arm/beam_asm.hpp:86`), so the emulator reads the
-//! running process with no pid lookup. Only a lookup of another process by
-//! its pid goes through the process table (`erts_proc_lookup_raw`,
-//! `erl_process_lock.h:1135-1149`). This table gives the same split: the
-//! slot of the current process takes the place of the pointer, and only a
-//! lookup by pid hashes the pid.
-//!
-//! The slots do not give an order of the processes. Their only iteration,
-//! [`ProcessTable::values`], adds the live bytes of each process, and that
-//! sum does not depend on the order. The table also keeps the pids in the
-//! index order of the ERTS process table, for the reads of
-//! `erlang:processes/0` (see [`ProcessTable::list_chunk`]).
+//! ERTS keeps the table as an array of atomic pointers, and a lookup takes
+//! no lock (`erts_ptab_pix2intptr_nob`, `erl_ptab.h:344-348`). The insert
+//! and the delete of an element hold the table rwlock for a read, and a
+//! chunk read of `erlang:processes/0` holds it for a write
+//! (`erl_ptab.c:540-558`, `687-728`, `970-1020`). This table puts the
+//! entries into [`SHARDS`] shards, each with its own lock, by blocks of
+//! [`BLOCK`] table indices. A lookup locks only the shard of the pid. The
+//! state of the reads has the rwlock: an insert and a delete hold it for a
+//! read, and a read of a chunk holds it for a write, as in ERTS.
 //!
 //! The reads of `erlang:processes/0` share one deleted list, as ERTS does
 //! (`erl_ptab.c:643-672`, `888-1280`). Each entry keeps the insert and the
@@ -27,16 +27,24 @@
 //! drops at most [`DROP_PER_STEP`] entries that no read can step through.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::ops::Index;
+use std::sync::{Mutex, MutexGuard, RwLock};
 
 use super::PTAB_SIZE;
-use crate::{runtime::process::ProcessState, term::ProcessId};
+use crate::term::ProcessId;
 
 /// The maximum number of entries of the deleted list that one operation
 /// drops when no read can step through them. Each exit adds at most one
 /// entry, so the entries that no read can see go away at the same rate as
 /// the exits add them, also after the exit of a read.
 const DROP_PER_STEP: usize = 2;
+
+/// The number of shards of the table.
+const SHARDS: usize = 64;
+
+/// The number of consecutive table indices in one shard. A chunk read of
+/// `erlang:processes/0` of 1000 indices locks one or two shards, and the
+/// processes of a burst of spawns go to more than one shard.
+const BLOCK: u64 = 1024;
 
 #[cfg(test)]
 thread_local! {
@@ -111,27 +119,37 @@ fn table_index(id: ProcessId) -> u64 {
     id.0 % PTAB_SIZE
 }
 
-/// The live processes of a scheduler and its current process.
+/// Remove the entry of the process `id` with the table index `ix` from its
+/// locked shard.
 ///
-/// Each process stays in one slot from its insert to its removal, so the slot
-/// of the current process stays valid while the process runs. A removal puts
-/// the slot on the free list, and the next insert uses it again. The current
-/// process cannot leave the table: the scheduler switches it out first.
+/// # Panics
+///
+/// Panic when the shard has no entry of the pid.
+fn take(shard: &mut Shard, ix: u64, id: ProcessId) -> Entry {
+    shard
+        .remove(&(ix, id))
+        .expect("a process leaves the process table once")
+}
+
+/// The entry of one live process.
+#[derive(Debug, Clone, Copy)]
+struct Entry {
+    /// The scheduler that runs the process.
+    owner: usize,
+    /// True when the process exits, as the ERTS `EXITING` state flag.
+    exiting: bool,
+    /// The interval when the process entered the table, as the
+    /// `started_interval` of an ERTS element (`erl_ptab.c:568-569`).
+    inserted: u64,
+}
+
+/// The entries of the table indices of some blocks, by table index and
+/// pid.
+type Shard = BTreeMap<(u64, ProcessId), Entry>;
+
+/// The state of the `erlang:processes/0` reads of the table.
 #[derive(Debug, Default)]
-pub(super) struct ProcessTable {
-    /// The slots of the processes. A free slot holds `None`.
-    slots: Vec<Option<ProcessState>>,
-    /// The free slots, most recent last.
-    free: Vec<usize>,
-    /// The slot of each live process.
-    index: HashMap<ProcessId, usize>,
-    /// The slot of the process that runs now, like `current_process` in the
-    /// ERTS scheduler data.
-    current: Option<usize>,
-    /// The insert interval of each live process, in the index order of the
-    /// ERTS process table, as the `started_interval` of each element of
-    /// `ptab->r.o.tab` (`erl_ptab.c:996-1015`).
-    order: BTreeMap<(u64, ProcessId), u64>,
+struct Listing {
     /// The current interval of the table (`erts_ptab_interval`). The start
     /// of a read and the read of each chunk after the first step it
     /// (`erl_ptab.c:933-934`, `978-982`).
@@ -150,9 +168,41 @@ pub(super) struct ProcessTable {
     deleted_base: u64,
 }
 
+/// The process table of a node, which each scheduler of the node shares.
+#[derive(Debug)]
+pub(super) struct ProcessTable {
+    /// The entries, by blocks of [`BLOCK`] table indices.
+    shards: Box<[Mutex<Shard>]>,
+    /// The state of the reads, as the ERTS table rwlock guards the deleted
+    /// list (`erl_ptab.c:687-692`, `970-975`).
+    listing: RwLock<Listing>,
+}
+
+impl Default for ProcessTable {
+    fn default() -> Self {
+        ProcessTable {
+            shards: (0..SHARDS).map(|_| Mutex::default()).collect(),
+            listing: RwLock::default(),
+        }
+    }
+}
+
 impl ProcessTable {
-    /// Store `process` in a free slot, or in a new slot when no slot is
-    /// free.
+    /// Lock the shard of the table index `ix`.
+    fn shard(&self, ix: u64) -> MutexGuard<'_, Shard> {
+        self.shards[(ix / BLOCK) as usize % SHARDS]
+            .lock()
+            .expect("the process table shard is not poisoned")
+    }
+
+    /// Return the entry of the process `id`.
+    fn entry(&self, id: ProcessId) -> Option<Entry> {
+        let ix = table_index(id);
+        self.shard(ix).get(&(ix, id)).copied()
+    }
+
+    /// Add the process `id` of the scheduler `owner`, with the current
+    /// interval as its insert interval.
     ///
     /// # Panics
     ///
@@ -162,68 +212,109 @@ impl ProcessTable {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// table.insert(ProcessState::new(ProcessId(1), Start::Entry(frame), vec![]));
-    /// assert!(table.contains_key(&ProcessId(1)));
+    /// table.insert(ProcessId(1), 0);
+    /// assert_eq!(table.owner(ProcessId(1)), Some(0));
     /// ```
-    pub(super) fn insert(&mut self, process: ProcessState) {
-        let id = process.id;
-        let slot = match self.free.pop() {
-            Some(slot) => {
-                self.slots[slot] = Some(process);
-                slot
-            }
-            None => {
-                self.slots.push(Some(process));
-                self.slots.len() - 1
-            }
+    pub(super) fn insert(&self, id: ProcessId, owner: usize) {
+        let listing = self
+            .listing
+            .read()
+            .expect("the process list state is not poisoned");
+        let ix = table_index(id);
+        let entry = Entry {
+            owner,
+            exiting: false,
+            inserted: listing.interval,
         };
-        let old = self.index.insert(id, slot);
+        let old = self.shard(ix).insert((ix, id), entry);
         assert!(old.is_none(), "each process has a new pid");
-        self.order.insert((table_index(id), id), self.interval);
     }
 
-    /// Remove the process `id` and return it. Return `None` when no process
-    /// has the pid.
+    /// Mark the process `id` as exiting.
     ///
     /// # Panics
     ///
-    /// Panic when `id` is the current process: the scheduler switches a
-    /// process out before it leaves the table.
+    /// Panic when no process has the pid.
+    pub(super) fn set_exiting(&self, id: ProcessId) {
+        let ix = table_index(id);
+        self.shard(ix)
+            .get_mut(&(ix, id))
+            .expect("an exiting process is in the process table")
+            .exiting = true;
+    }
+
+    /// Return the scheduler of the process `id`, also when it exits, as
+    /// `erts_proc_lookup_raw` (`erl_process_lock.h:1135-1149`) finds it.
+    pub(super) fn owner(&self, id: ProcessId) -> Option<usize> {
+        self.entry(id).map(|entry| entry.owner)
+    }
+
+    /// Return the scheduler of the process `id` when it does not exit, as
+    /// `erts_proc_lookup` (`erl_process_lock.h:1151-1157`) finds it.
+    pub(super) fn live_owner(&self, id: ProcessId) -> Option<usize> {
+        self.entry(id)
+            .and_then(|entry| (!entry.exiting).then_some(entry.owner))
+    }
+
+    /// Return whether the process `id` is in the table, and hold its shard
+    /// until the guard drops, so that the process cannot leave the table
+    /// before the guard drops.
+    pub(super) fn hold(&self, id: ProcessId) -> Option<impl Sized + '_> {
+        let ix = table_index(id);
+        let shard = self.shard(ix);
+        shard.contains_key(&(ix, id)).then_some(shard)
+    }
+
+    /// Remove the process `id`, then run `after` while its shard is locked.
+    /// A process that left the table while a read is in progress goes to
+    /// the deleted list, as `erts_ptab_delete_element` saves it
+    /// (`erl_ptab.c:687-728`). The exit of a reader ends its read, as
+    /// `cleanup_ptab_list_bif_data` does (`erl_ptab.c:796-885`).
+    ///
+    /// # Panics
+    ///
+    /// Panic when no process has the pid: a process leaves the table once.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let process = table.remove(&ProcessId(1)).unwrap();
-    /// assert!(!table.contains_key(&ProcessId(1)));
+    /// table.remove(ProcessId(1), || {});
+    /// assert_eq!(table.owner(ProcessId(1)), None);
     /// ```
-    pub(super) fn remove(&mut self, id: &ProcessId) -> Option<ProcessState> {
-        let slot = self.index.remove(id)?;
-        assert_ne!(
-            self.current,
-            Some(slot),
-            "the current process switches out before it leaves the table"
-        );
-        self.free.push(slot);
-        let ix = table_index(*id);
-        let inserted = self
-            .order
-            .remove(&(ix, *id))
-            .expect("each live process has an index");
-        // The exit of a reader ends its read, as
-        // `cleanup_ptab_list_bif_data` does (`erl_ptab.c:796-885`).
-        self.drop_reader(*id);
+    pub(super) fn remove(&self, id: ProcessId, after: impl FnOnce()) {
+        let ix = table_index(id);
+        let listing = self
+            .listing
+            .read()
+            .expect("the process list state is not poisoned");
         // ERTS saves a deleted element only while a read is in progress
         // (`erl_ptab.c:688-692`, `722-728`).
-        if !self.readers.is_empty() {
+        if listing.readers.is_empty() && listing.deleted.is_empty() {
+            let mut shard = self.shard(ix);
+            take(&mut shard, ix, id);
+            after();
+            return;
+        }
+        drop(listing);
+        let mut listing = self
+            .listing
+            .write()
+            .expect("the process list state is not poisoned");
+        let mut shard = self.shard(ix);
+        let entry = take(&mut shard, ix, id);
+        after();
+        drop(shard);
+        listing.drop_reader(id);
+        if !listing.readers.is_empty() {
             count_work(1);
-            self.deleted.push_back(Deleted {
-                id: *id,
-                inserted,
-                deleted: self.interval,
+            let deleted = listing.interval;
+            listing.deleted.push_back(Deleted {
+                id,
+                inserted: entry.inserted,
+                deleted,
             });
         }
-        self.prune_deleted();
-        self.slots[slot].take()
+        listing.prune_deleted();
     }
 
     /// Start an `erlang:processes/0` read of the table by the process
@@ -235,25 +326,29 @@ impl ProcessTable {
     /// ```rust,ignore
     /// table.start_list(ProcessId(0));
     /// ```
-    pub(super) fn start_list(&mut self, reader: ProcessId) {
-        self.interval += 1;
-        let pos = self.deleted_base + self.deleted.len() as u64;
+    pub(super) fn start_list(&self, reader: ProcessId) {
+        let mut listing = self
+            .listing
+            .write()
+            .expect("the process list state is not poisoned");
+        listing.interval += 1;
+        let pos = listing.deleted_base + listing.deleted.len() as u64;
         let start = Reader {
-            start: self.interval,
+            start: listing.interval,
             tix: 0,
             chunks: Vec::new(),
             pos,
         };
-        self.readers.insert(reader, start);
+        listing.readers.insert(reader, start);
         count_work(1);
-        *self.positions.entry(pos).or_default() += 1;
+        *listing.positions.entry(pos).or_default() += 1;
     }
 
     /// Return the pid of each process with a table index from the first
     /// index that the read of `reader` did not read up to `end`, in index
     /// order, when the process was in the table at the start of the read.
     /// The read then continues at `end`. The work is in proportion to the
-    /// processes of these indices.
+    /// processes of these indices and to the blocks of the indices.
     ///
     /// # Panics
     ///
@@ -262,14 +357,15 @@ impl ProcessTable {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(table.list_chunk(ProcessId(0), 1000).collect::<Vec<_>>(), vec![ProcessId(0)]);
+    /// assert_eq!(table.list_chunk(ProcessId(0), 1000), vec![ProcessId(0)]);
     /// ```
-    pub(super) fn list_chunk(
-        &mut self,
-        reader: ProcessId,
-        end: u64,
-    ) -> impl Iterator<Item = ProcessId> + '_ {
-        let reader = self
+    pub(super) fn list_chunk(&self, reader: ProcessId, end: u64) -> Vec<ProcessId> {
+        let mut listing = self
+            .listing
+            .write()
+            .expect("the process list state is not poisoned");
+        let listing = &mut *listing;
+        let reader = listing
             .readers
             .get_mut(&reader)
             .expect("the process reads the table");
@@ -280,14 +376,35 @@ impl ProcessTable {
         let interval = if tix == 0 {
             start
         } else {
-            self.interval += 1;
-            self.interval
+            listing.interval += 1;
+            listing.interval
         };
         reader.chunks.push((end, interval));
-        self.order
-            .range((tix, ProcessId(0))..(end, ProcessId(0)))
-            .filter(move |(_, inserted)| **inserted < start)
-            .map(|((_, id), _)| *id)
+        let mut ids = Vec::new();
+        self.scan(tix, end, |id, entry| {
+            if entry.inserted < start {
+                ids.push(id);
+            }
+            true
+        });
+        ids
+    }
+
+    /// Call `visit` with each process with a table index from `start` up
+    /// to `end`, in index order, until `visit` returns false. The call
+    /// holds the lock of one shard at a time.
+    fn scan(&self, start: u64, end: u64, mut visit: impl FnMut(ProcessId, &Entry) -> bool) {
+        let mut low = start;
+        while low < end {
+            let high = end.min((low / BLOCK + 1) * BLOCK);
+            let shard = self.shard(low);
+            for ((_, id), entry) in shard.range((low, ProcessId(0))..(high, ProcessId(0))) {
+                if !visit(*id, entry) {
+                    return;
+                }
+            }
+            low = high;
+        }
     }
 
     /// Step the read of `reader` to the next entry of the deleted list.
@@ -308,20 +425,25 @@ impl ProcessTable {
     /// ```rust,ignore
     /// assert_eq!(table.next_deleted(ProcessId(0)), None);
     /// ```
-    pub(super) fn next_deleted(&mut self, reader: ProcessId) -> Option<(Option<ProcessId>, bool)> {
-        let read = &self.readers[&reader];
+    pub(super) fn next_deleted(&self, reader: ProcessId) -> Option<(Option<ProcessId>, bool)> {
+        let mut listing = self
+            .listing
+            .write()
+            .expect("the process list state is not poisoned");
+        let read = &listing.readers[&reader];
         let pos = read.pos;
-        let entry = self.deleted.get((pos - self.deleted_base) as usize)?;
+        let entry = listing.deleted.get((pos - listing.deleted_base) as usize)?;
         let listed = read.lists(entry).then_some(entry.id);
         // The read is the oldest when it is alone at the first position.
         count_work(1);
-        let free = self.positions.first_key_value() == Some((&pos, &1));
-        self.readers
+        let free = listing.positions.first_key_value() == Some((&pos, &1));
+        listing
+            .readers
             .get_mut(&reader)
             .expect("the process reads the table")
             .pos += 1;
-        self.move_position(pos, pos + 1);
-        self.prune_deleted();
+        listing.move_position(pos, pos + 1);
+        listing.prune_deleted();
         Some((listed, free))
     }
 
@@ -338,9 +460,60 @@ impl ProcessTable {
     /// assert!(table.deleted_done(ProcessId(0)));
     /// ```
     pub(super) fn deleted_done(&self, reader: ProcessId) -> bool {
-        self.readers[&reader].pos == self.deleted_base + self.deleted.len() as u64
+        let listing = self
+            .listing
+            .read()
+            .expect("the process list state is not poisoned");
+        listing.readers[&reader].pos == listing.deleted_base + listing.deleted.len() as u64
     }
 
+    /// End the read of `reader`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// table.end_list(ProcessId(0));
+    /// ```
+    pub(super) fn end_list(&self, reader: ProcessId) {
+        let mut listing = self
+            .listing
+            .write()
+            .expect("the process list state is not poisoned");
+        listing.drop_reader(reader);
+        listing.prune_deleted();
+    }
+
+    /// Return the index and the pid of each process in the table, also an
+    /// exiting process, with an index from `start` up to `end`, in the index
+    /// order of the ERTS table, up to `max` processes that `keep` accepts,
+    /// as `erts_ptab_processes_next` reads the elements of the table with
+    /// no table lock (`erl_ptab.c:1514-1523`). The work is in proportion to
+    /// the processes of these indices and to the blocks of the indices.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(table.indexed(0, 25, 10, |_| true), vec![(0, ProcessId(0))]);
+    /// ```
+    pub(super) fn indexed(
+        &self,
+        start: u64,
+        end: u64,
+        max: usize,
+        mut keep: impl FnMut(ProcessId) -> bool,
+    ) -> Vec<(u64, ProcessId)> {
+        let mut found = Vec::new();
+        self.scan(start, end, |id, _| {
+            if keep(id) {
+                found.push((table_index(id), id));
+            }
+            found.len() < max
+        });
+        found
+    }
+}
+
+impl Listing {
     /// Move one read from the position `from` to the position `to` of the
     /// deleted list.
     fn move_position(&mut self, from: u64, to: u64) {
@@ -386,187 +559,6 @@ impl ProcessTable {
             self.deleted.pop_front();
             self.deleted_base += 1;
         }
-    }
-
-    /// End the read of `reader`.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// table.end_list(ProcessId(0));
-    /// ```
-    pub(super) fn end_list(&mut self, reader: ProcessId) {
-        self.drop_reader(reader);
-        self.prune_deleted();
-    }
-
-    /// Return the process `id`, or `None` when no process has the pid.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert_eq!(table.get(&ProcessId(1)).map(|process| process.id), Some(ProcessId(1)));
-    /// ```
-    pub(super) fn get(&self, id: &ProcessId) -> Option<&ProcessState> {
-        let slot = *self.index.get(id)?;
-        self.slots[slot].as_ref()
-    }
-
-    /// Return the process `id` for a change, or `None` when no process has
-    /// the pid.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// table.get_mut(&ProcessId(1)).unwrap().waiting = true;
-    /// ```
-    pub(super) fn get_mut(&mut self, id: &ProcessId) -> Option<&mut ProcessState> {
-        let slot = *self.index.get(id)?;
-        self.slots[slot].as_mut()
-    }
-
-    /// Return whether a process has the pid `id`.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert!(!table.contains_key(&ProcessId(99)));
-    /// ```
-    pub(super) fn contains_key(&self, id: &ProcessId) -> bool {
-        self.index.contains_key(id)
-    }
-
-    /// Return each process of the table, in no given order.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert_eq!(table.values().count(), 2);
-    /// ```
-    pub(super) fn values(&self) -> impl Iterator<Item = &ProcessState> {
-        self.slots.iter().flatten()
-    }
-
-    /// Return the index and the pid of each process in the table, also an
-    /// exiting process, with an index from `start` up to `end`, in the index
-    /// order of the ERTS table, as `erts_ptab_processes_next` reads the
-    /// elements of the table (`erl_ptab.c:1514-1521`). The work is in
-    /// proportion to the processes of these indices.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert_eq!(table.indexed(0, 25).collect::<Vec<_>>(), vec![(0, ProcessId(0))]);
-    /// ```
-    pub(super) fn indexed(
-        &self,
-        start: u64,
-        end: u64,
-    ) -> impl Iterator<Item = (u64, ProcessId)> + '_ {
-        self.order
-            .range((start, ProcessId(0))..(end, ProcessId(0)))
-            .map(|((index, id), _)| (*index, *id))
-    }
-
-    /// Return whether the table has no process.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert!(ProcessTable::default().is_empty());
-    /// ```
-    #[cfg(test)]
-    pub(super) fn is_empty(&self) -> bool {
-        self.index.is_empty()
-    }
-
-    /// Make the process `id` the current process and return it.
-    ///
-    /// # Panics
-    ///
-    /// Panic when no process has the pid.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// table.set_current(ProcessId(1)).fcalls = CONTEXT_REDS;
-    /// assert_eq!(table.current_id(), Some(ProcessId(1)));
-    /// ```
-    pub(super) fn set_current(&mut self, id: ProcessId) -> &mut ProcessState {
-        let slot = self.index[&id];
-        self.current = Some(slot);
-        self.slots[slot]
-            .as_mut()
-            .expect("an indexed slot holds a process")
-    }
-
-    /// Return the pid of the current process, or `None` when no process runs.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert_eq!(table.current_id(), None);
-    /// ```
-    pub(super) fn current_id(&self) -> Option<ProcessId> {
-        self.current().map(|process| process.id)
-    }
-
-    /// Return the current process, or `None` when no process runs. The read
-    /// uses the slot of the process and does not hash its pid.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert_eq!(table.current().map(|process| process.id), Some(ProcessId(1)));
-    /// ```
-    #[inline]
-    pub(super) fn current(&self) -> Option<&ProcessState> {
-        self.slots.get(self.current?)?.as_ref()
-    }
-
-    /// Return the current process for a change, or `None` when no process
-    /// runs. The read uses the slot of the process and does not hash its pid.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// table.current_mut().unwrap().fcalls -= 1;
-    /// ```
-    #[inline]
-    pub(super) fn current_mut(&mut self) -> Option<&mut ProcessState> {
-        self.slots.get_mut(self.current?)?.as_mut()
-    }
-
-    /// Clear the current process and return it, or `None` when no process
-    /// runs.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// table.take_current().unwrap().reductions += used;
-    /// assert_eq!(table.current_id(), None);
-    /// ```
-    pub(super) fn take_current(&mut self) -> Option<&mut ProcessState> {
-        self.slots.get_mut(self.current.take()?)?.as_mut()
-    }
-}
-
-impl Index<&ProcessId> for ProcessTable {
-    type Output = ProcessState;
-
-    /// Return the process `id`.
-    ///
-    /// # Panics
-    ///
-    /// Panic when no process has the pid.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert!(!table[&ProcessId(1)].waiting);
-    /// ```
-    fn index(&self, id: &ProcessId) -> &ProcessState {
-        self.get(id).expect("the process is alive")
     }
 }
 

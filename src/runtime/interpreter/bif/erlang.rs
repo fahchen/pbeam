@@ -6311,13 +6311,6 @@ thread_local! {
 ///
 /// A budget of the current process that is less than 0.
 pub(super) fn processes(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
-    // The process table stays with each scheduler, so this run cannot list
-    // the processes of the node yet.
-    if scheduler.is_multi() {
-        return Err(error(
-            "unsupported: erlang:processes/0 in a run of execute_on_schedulers",
-        ));
-    }
     let state = PtabList {
         tix: -1,
         found: Term::Nil,

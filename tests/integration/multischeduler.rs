@@ -865,22 +865,6 @@ fn a_running_caller_read_counts_a_message_from_an_inbox() {
     }
 }
 
-/// The process list of a run with scheduler threads is not readable yet,
-/// and the run stops with a clear error.
-#[test]
-fn rejects_the_process_list_of_a_scheduler_run() {
-    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
-    let error = program
-        .execute_on_schedulers(&[("ping_pong", "process_list"), ("ping_pong", "info_hold")])
-        .expect_err("the process list is unsupported");
-    assert!(
-        error
-            .to_string()
-            .contains("unsupported: erlang:processes/0"),
-        "{error}"
-    );
-}
-
 /// A read of another local process counts a message that another scheduler
 /// sent, also when its scheduler did not schedule since the send.
 #[test]
