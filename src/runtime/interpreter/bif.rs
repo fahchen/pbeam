@@ -676,24 +676,35 @@ macro_rules! bifs {
             // A run with scheduler threads keeps these node services with
             // each scheduler, so their use fails with a clear error until
             // the services move to the node.
+            // A purge needs `check_process_code` on the processes of each
+            // scheduler (`erts_code_purger.erl:166-179`), which a scheduler
+            // reads only for its own processes.
             let local_service = module == "persistent_term"
-                || (module == "erts_internal" && name == "atomics_new")
-                || matches!(
-                    (module, name),
-                    ("erlang", "finish_loading")
-                        | ("erlang", "delete_module")
-                        | ("erts_internal", "prepare_loading")
-                        | ("erts_internal", "purge_module")
-                );
+                || (module == "erts_internal" && matches!(name, "atomics_new" | "purge_module"));
             if context.scheduler.is_multi() && local_service {
                 return Err(error(format!(
                     "unsupported: {module}:{name}/{arity} in a run of execute_on_schedulers"
                 )));
             }
+            // A code operation of a run with scheduler threads runs on the
+            // newest code state of the node and publishes its result, as
+            // ERTS stages and commits a code index (`code_ix.c`).
+            let code_operation = context.scheduler.is_multi()
+                && matches!(
+                    (module, name),
+                    ("erlang", "finish_loading" | "finish_after_on_load" | "delete_module")
+                        | ("erts_internal", "prepare_loading")
+                );
+            let node = code_operation.then(|| Arc::clone(context.scheduler.node()));
+            let mut state = node.as_deref().map(|node| {
+                let state = node.code.lock();
+                context.scheduler.install_code(&state);
+                state
+            });
             // The cleanup of a fixation on a table that another process
             // deleted runs as process system work at each scheduling
             // (`erts_schedule_ets_free_fixation`, `erl_db.c:5263-5301`).
-            match (id, arguments) {
+            let result = match (id, arguments) {
                 $($(
                     (BifId::$variant, $arguments) $(if $guard)? => {
                         (|$context: &mut BifContext<'_>| $body)(context)
@@ -703,7 +714,11 @@ macro_rules! bifs {
                     let (module, name, _) = mfa(id);
                     Err(unresolved_mfa(module, name, arguments.len()))
                 }
+            };
+            if let Some(state) = state.as_mut() {
+                context.scheduler.publish_code(state);
             }
+            result
         }
     };
 }

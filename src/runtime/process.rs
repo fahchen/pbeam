@@ -414,11 +414,9 @@ pub(super) struct ProcessState {
     /// `i_length` keeps them in the X registers above the live registers
     /// and runs the instruction again (`jit/arm/instr_bif.cpp:198-273`).
     pub(super) length_trap: Option<Vec<Term>>,
-    /// The BIF timers to this process, as the ERTS tree `p->bif_timers`
-    /// (`erl_hl_timer.c:579-617`). `erlang:start_timer/3` to the pid adds a
-    /// timer, and a timer that expires or that `erlang:cancel_timer/2`
-    /// cancels leaves the tree when the process does not exit
-    /// (`erl_hl_timer.c:1180-1190`, `1832-1858`, `1895-1915`). The exit
+    /// The BIF timers to this process during its exit, as the ERTS tree
+    /// `p->bif_timers` (`erl_hl_timer.c:579-617`). The node holds the tree
+    /// while the process lives, and the exit takes it from the node and
     /// cancels the timers in the post-order of the tree.
     pub(super) bif_timers: MonitorLinkTree<TimerReference, ()>,
     /// The state of an exit that switched out before it left the process
@@ -471,8 +469,8 @@ pub(super) struct ProcessState {
     pub(super) root: Option<usize>,
     /// True when the process used a service that stays with its scheduler:
     /// a port, a file, a terminal, a compiled expression or pattern, a
-    /// buffer, a zlib stream, or a BIF timer that it started, read, or
-    /// canceled. Such a process stays with its scheduler, as ERTS keeps a
+    /// buffer, or a zlib stream. Such a process stays with its scheduler,
+    /// as ERTS keeps a
     /// process bound to its run queue (`erts_try_change_runq_proc`,
     /// `erl_process.h:2722-2723`). The mark does not clear.
     pub(super) pinned: bool,

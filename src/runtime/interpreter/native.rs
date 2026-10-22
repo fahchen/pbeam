@@ -564,13 +564,6 @@ pub(super) fn load_nif(
         return load_shared(scheduler, caller, &arguments);
     };
     let extension = matches!(linked, Linked::Extension(_));
-    if extension && scheduler.is_multi() {
-        // Each scheduler of the run keeps its code table, so a load on one
-        // scheduler cannot make the NIFs callable on the other schedulers.
-        return Err(error(format!(
-            "unsupported: erlang:load_nif/2 of the extension library of {caller} in a run of execute_on_schedulers"
-        )));
-    }
     let module = Arc::clone(scheduler.code.waiting_or_loaded(caller)?);
     let loaded = if extension {
         scheduler.extension_loads.contains(&module.id)
@@ -779,13 +772,6 @@ fn load_shared(
     caller: &str,
     arguments: &[Term],
 ) -> Result<BifResult, BeamError> {
-    if scheduler.is_multi() {
-        // Each scheduler of the run keeps its code table, as for an
-        // extension library.
-        return Err(error(format!(
-            "unsupported: erlang:load_nif/2 of the NIF library of {caller} in a run of execute_on_schedulers"
-        )));
-    }
     let module = Arc::clone(scheduler.code.waiting_or_loaded(caller)?);
     if scheduler.shared_libraries.contains_key(&module.id) {
         let text = "NIF library already loaded (reload disallowed since OTP 20).";

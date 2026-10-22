@@ -313,20 +313,31 @@ fn gives_the_load_errors_of_erts_and_the_unbound_behavior_of_the_library() {
 }
 
 #[test]
-fn refuses_the_load_of_a_module_without_nif_start_and_a_load_on_scheduler_threads() {
+fn refuses_the_load_of_a_module_without_nif_start() {
     let program = program();
     let bare = execute(&program, "extension_bare", "calls", vec![]).unwrap_err();
     assert_eq!(
         bare.to_string(),
         "unsupported: erlang:load_nif/2 of the extension library of extension_bare: the module has no nif_start instruction"
     );
-    let multi = program
-        .execute_on_schedulers(&[("extension_probe", "loaded")])
-        .unwrap_err();
-    assert_eq!(
-        multi.to_string(),
-        "unsupported: erlang:load_nif/2 of the extension library of extension_probe in a run of execute_on_schedulers"
-    );
+}
+
+#[test]
+fn calls_a_library_that_another_scheduler_loaded() {
+    // The node keeps the record of the load, so a call on the other
+    // scheduler runs the binding (`beam/erl_nif.c:4990-4997`).
+    let program = program();
+    let ok = Term::Atom(program.atom("ok").unwrap());
+    for _ in 0..10 {
+        let results = program
+            .execute_on_schedulers(&[
+                ("extension_probe", "cross_load"),
+                ("extension_probe", "cross_call"),
+            ])
+            .unwrap();
+        assert_eq!(results[0].term, ok);
+        assert_eq!(results[1].term, Term::Integer(3));
+    }
 }
 
 #[test]

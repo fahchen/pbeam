@@ -7,10 +7,10 @@ use std::sync::Arc;
 use super::super::{Delivery, Scheduler, node::Node, run_queue::RunQueue};
 use crate::runtime::dirty::Claim;
 use crate::runtime::process::{
-    DirtyCall, Priority, ProcessState, ReceiveTimer, Start, TimerReference, tests::frame,
+    DirtyCall, Priority, ProcessState, ReceiveTimer, Start, tests::frame,
 };
 use crate::runtime::signal::Signal;
-use crate::term::{AtomTable, ProcessId, Reference, Term};
+use crate::term::{AtomTable, ProcessId, Term};
 
 /// Return the two schedulers of a node with two schedulers.
 fn two_schedulers() -> (Arc<Node>, Scheduler, Scheduler) {
@@ -48,7 +48,8 @@ fn process(scheduler: &mut Scheduler, id: u64) -> &mut ProcessState {
 }
 
 /// Return the pid of each delivery of the inbox of `index`, with `P` for a
-/// process, `M` for a message, and `S` for a signal.
+/// process, `M` for a message, `S` for a signal, and `C` with 0 for a timer
+/// cancel.
 fn inbox(node: &Node, index: usize) -> Vec<(char, u64)> {
     let mut deliveries = Vec::new();
     node.take(index, &mut deliveries);
@@ -59,6 +60,7 @@ fn inbox(node: &Node, index: usize) -> Vec<(char, u64)> {
             Delivery::Message { target, .. } => ('M', target.0),
             Delivery::Signal { target, .. } => ('S', target.0),
             Delivery::Cleanup { target } => ('C', target.0),
+            Delivery::CancelTimer { .. } => ('T', 0),
         })
         .collect()
 }
@@ -108,8 +110,8 @@ fn gives_nothing_without_a_hungry_scheduler() {
     assert!(inbox(&node, 1).is_empty());
 }
 
-/// A process that waits, exits, waits for a receive timer, is the target
-/// of a BIF timer, used a scheduler service, is a system process, or is in
+/// A process that waits, exits, waits for a receive timer, used a
+/// scheduler service, is a system process, or is in
 /// a dirty call stays with its scheduler, also when the thief is hungry.
 #[test]
 fn keeps_each_process_that_cannot_move() {
@@ -121,9 +123,7 @@ fn keeps_each_process_that_cannot_move() {
         key: (1100, 0),
         resume: 7,
     };
-    process(&mut victim, 4)
-        .bif_timers
-        .insert(TimerReference(Reference(9)), ());
+    process(&mut victim, 4).pinned = true;
     process(&mut victim, 5).pinned = true;
     victim.mark_system(ProcessId(6));
     // The dirty call starts after the process is in the run queue, as a

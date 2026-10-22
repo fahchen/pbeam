@@ -286,21 +286,6 @@ impl Timers {
             .then_some(end)
     }
 
-    /// Return the end tick of the active BIF timer `reference`, as
-    /// `btm_rbt_lookup` finds the `btm_tree` entry of the timer service
-    /// (`erl_hl_timer.c:1907-1920`), or `None` when no BIF timer with the
-    /// reference is active.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// let timers = Timers::new();
-    /// assert_eq!(timers.bif_timer_end(Reference(0)), None);
-    /// ```
-    pub(super) fn bif_timer_end(&self, reference: Reference) -> Option<i64> {
-        self.bif_timers.get(&reference).map(|key| key.0)
-    }
-
     /// Return the milliseconds from the time `now` to the end tick `end`, as
     /// `get_time_left` (`erl_hl_timer.c:681-689`) does: `now` becomes the
     /// tick `(now - 1) div 1000000 + 1`, and an end at or before that tick
