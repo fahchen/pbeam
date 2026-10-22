@@ -477,7 +477,7 @@ fn utf8_sequence(bytes: &[u8]) -> Utf8Sequence {
 /// assert!(!is_native_filename(&Term::list_from(vec![Term::Integer(0)]), FilenameEncoding::Utf8));
 /// ```
 pub(super) fn is_native_filename(name: &Term, encoding: FilenameEncoding) -> bool {
-    name.binary_bytes().is_some() || native_filename(name, encoding).is_some()
+    name.is_binary() || native_filename(name, encoding).is_some()
 }
 
 /// Return the native bytes of the file name `name` in `encoding`, as

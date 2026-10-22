@@ -138,7 +138,7 @@ pub(super) fn decode_packet(
         Kind::HttpBin => false,
         Kind::HttpHBin => true,
         Kind::Unsupported(name) => {
-            if binary.bytes().is_none() {
+            if !binary.bit_size().is_multiple_of(8) {
                 return Ok(BifResult::badarg());
             }
             return Err(error(format!(

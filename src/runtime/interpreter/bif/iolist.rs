@@ -118,9 +118,7 @@ impl<'a> Walk<'a> {
                     }
                     // A bitstring is not iodata, as ERTS raises `badarg` for
                     // `iolist_size([<<1:4>>])`.
-                    _ if matches!(head, Term::Integer(0..=255))
-                        || head.binary_bytes().is_some() =>
-                    {
+                    _ if matches!(head, Term::Integer(0..=255)) || head.is_binary() => {
                         if let Some(taken) = leaf(head, 0, steps) {
                             // The rest of the binary comes first when the walk
                             // continues (`erl_iolist.c:528-537`).
@@ -139,7 +137,7 @@ impl<'a> Walk<'a> {
             }
             match self.current {
                 tail if tail.is_nil() => {}
-                binary if binary.binary_bytes().is_some() => {
+                binary if binary.is_binary() => {
                     if let Some(taken) = leaf(binary, self.offset, steps) {
                         self.offset += taken;
                         return Step::Yield;
@@ -296,15 +294,13 @@ pub(super) fn iolist_to_iovec(
 ) -> Result<BifResult, BeamError> {
     match term {
         Term::Binary(bytes) if bytes.bit_size() == 0 => Ok(Value(Term::nil())),
-        _ if term.binary_bytes().is_some() => Ok(Value(Term::list_from(vec![term.clone()]))),
+        _ if term.is_binary() => Ok(Value(Term::list_from(vec![term.clone()]))),
         _ if term.is_nil() => Ok(Value(Term::nil())),
         _ => match term.cons_cell() {
             Some((Term::Binary(bytes), tail)) if tail.is_nil() && bytes.bit_size() == 0 => {
                 Ok(Value(Term::nil()))
             }
-            Some((head, tail)) if tail.is_nil() && head.binary_bytes().is_some() => {
-                Ok(Value(term.clone()))
-            }
+            Some((head, tail)) if tail.is_nil() && head.is_binary() => Ok(Value(term.clone())),
             Some(_) => iovec_size(process, term, term, &[]),
             None => Ok(BifResult::badarg()),
         },
@@ -537,7 +533,7 @@ pub(super) fn iolist_to_binary(
     scheduler: &mut Scheduler,
     term: &Term,
 ) -> Result<BifResult, BeamError> {
-    if term.binary_bytes().is_some() {
+    if term.is_binary() {
         return Ok(Value(term.clone()));
     }
     list_to_bitstring(scheduler, term, "iolist_to_binary")
@@ -612,9 +608,7 @@ fn list_to_bitstring(
         return Ok(Value(Term::binary(Vec::new())));
     }
     match term.cons_cell() {
-        Some((binary, tail)) if tail.is_nil() && binary.binary_bytes().is_some() => {
-            Ok(Value(binary.clone()))
-        }
+        Some((binary, tail)) if tail.is_nil() && binary.is_binary() => Ok(Value(binary.clone())),
         Some(_) => Ok(l2b_size(process, reds_left, term, term, &[], 0)),
         None => Ok(BifResult::badarg()),
     }
@@ -795,3 +789,7 @@ pub(in crate::runtime::interpreter) fn iodata_bytes(term: &Term) -> Option<Vec<u
     });
     (step == Step::Done).then_some(bytes)
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/runtime/interpreter/bif/iolist.rs"]
+mod tests;

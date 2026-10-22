@@ -209,7 +209,7 @@ pub(super) fn load(load_info: &Term, _atoms: &AtomTable) -> i32 {
     if version != 302 {
         return 214;
     }
-    if path.binary_bytes().is_none() {
+    if !path.is_binary() {
         return 217;
     }
     match fips_mode {
