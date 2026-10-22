@@ -4,6 +4,7 @@
 //! `erl_bif_binary.c:1103-1116`). PBeam keeps the source needles in this
 //! store, by the reference of the magic binary that ERTS would make.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 
 use crate::term::{Reference, Term};
@@ -26,6 +27,11 @@ pub(super) struct BinaryPatterns {
     /// references it. PBeam keeps each pattern until the run ends: see
     /// "Compiled binary patterns" in `docs/erts-differences.md`.
     patterns: HashMap<Reference, CompiledPattern>,
+    /// True after a read of a pattern since the last
+    /// [`BinaryPatterns::take_touched`]. The scheduler reads it at the
+    /// switch out of a process, because the patterns stay with their
+    /// scheduler (see `ProcessState::pinned`).
+    touched: Cell<bool>,
 }
 
 impl BinaryPatterns {
@@ -57,6 +63,24 @@ impl BinaryPatterns {
         let Term::Reference(id) = term else {
             return None;
         };
-        self.patterns.get(id)
+        let pattern = self.patterns.get(id);
+        if pattern.is_some() {
+            self.touched.set(true);
+        }
+        pattern
+    }
+
+    /// Return whether a pattern was read since the last call, and clear the
+    /// mark.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let _ = patterns.pattern(&Term::Reference(id));
+    /// assert!(patterns.take_touched());
+    /// assert!(!patterns.take_touched());
+    /// ```
+    pub(super) fn take_touched(&mut self) -> bool {
+        self.touched.take()
     }
 }

@@ -1127,8 +1127,9 @@ impl Scheduler {
             return Ok(Turn::Done);
         }
         if self.multi {
-            // Only a borrow in the turn of this process pins it.
+            // Only a use in the turn of this process pins it.
             self.resources.take_touched();
+            self.binary_patterns.take_touched();
         }
         let process = self.processes.set_current(id);
         process.in_run_queue = false;
@@ -2253,7 +2254,8 @@ impl Scheduler {
     fn schedule_out(&mut self) -> &mut ProcessState {
         let used = self.current_reductions();
         self.virtual_reductions = 0;
-        let touched = self.multi && self.resources.take_touched();
+        let touched =
+            self.multi && (self.resources.take_touched() | self.binary_patterns.take_touched());
         let process = self
             .processes
             .take_current()
