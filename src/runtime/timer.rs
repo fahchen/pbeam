@@ -123,13 +123,15 @@ impl NodeClock {
         self.shared.read().expect("the clock lock is not poisoned")
     }
 
-    /// Return the internal monotonic time. The OS time is read before the
-    /// correction state, as `read_corrected_time` does
-    /// (`erl_time_sup.c:385-412`): a check that installs a later instance
-    /// meanwhile leaves this time on the previous instance.
+    /// Return the internal monotonic time. The OS time is read under the
+    /// read lock of the correction state, as `read_corrected_time` does
+    /// (`erl_time_sup.c:366-389`), so no check runs between the read and
+    /// the selection of the correction instance.
     fn now(&self) -> i64 {
-        let os_mtime = os_monotonic_time(self.start);
-        self.read().correction.monotonic_time(os_mtime)
+        let shared = self.read();
+        shared
+            .correction
+            .monotonic_time(os_monotonic_time(self.start))
     }
 }
 
@@ -264,9 +266,10 @@ impl Timers {
     /// assert!(timers.system_time() > 1_700_000_000_000_000_000);
     /// ```
     pub(super) fn system_time(&self) -> i64 {
-        let os_mtime = os_monotonic_time(self.clock.start);
         let shared = self.clock.read();
-        let now = shared.correction.monotonic_time(os_mtime);
+        let now = shared
+            .correction
+            .monotonic_time(os_monotonic_time(self.clock.start));
         now.saturating_add(shared.correction.time_offset())
     }
 

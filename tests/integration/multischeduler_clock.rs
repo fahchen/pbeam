@@ -1,5 +1,5 @@
 //! The clocks of two scheduler threads. The roots of `clock_signals` run on
-//! two threads, exchange `erlang:monotonic_time/0,1`, `erlang:system_time/0`,
+//! two threads, exchange `erlang:monotonic_time/0,1`,
 //! `erlang:time_offset/0,1`, and the time support settings, and each root
 //! returns `ok` when the values agree as on `erl +S 2`.
 
@@ -14,8 +14,9 @@ use pbeam_runtime::{BeamProgram, Term};
 const CLOCK_SIGNALS: &[u8] = include_bytes!("../../fixtures/multischeduler/clock_signals.beam");
 
 /// The time of a reading on one thread is at or after the time of the
-/// reading of the other thread that it received, and the time offset is the
-/// same, before and after the first time correction check of the node.
+/// reading of the other thread that it received, and the time support
+/// settings are the same, before and after the first time correction check
+/// of the node.
 #[test]
 fn reads_one_clock_of_the_node_on_two_schedulers() {
     let beams = ["erlang", "erts_internal"].map(pinned_beam);

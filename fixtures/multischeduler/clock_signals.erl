@@ -26,8 +26,10 @@ writer() ->
     ok.
 
 %% The root that reads its clock after each reading of the other root. Each
-%% value must be at or after the value of the other root, and the time
-%% offset and the time support settings must be the same.
+%% monotonic time must be at or after the time of the other root, and the
+%% time support settings must be the same. The offset can change at a check
+%% in the `multi_time_warp` mode (`erl_time_sup.c:807-817`), so the root
+%% does not compare the offsets or the system times.
 reader() ->
     true = register(clock_reader, self()),
     check_readings(0).
@@ -40,17 +42,17 @@ send_readings(Reader, Count) ->
 
 readings() ->
     {erlang:monotonic_time(), erlang:monotonic_time(microsecond),
-     erlang:system_time(), erlang:time_offset(), erlang:time_offset(millisecond),
-     erlang:system_info(time_correction), erlang:system_info(time_warp_mode)}.
+     erlang:time_offset(), erlang:system_info(time_correction),
+     erlang:system_info(time_warp_mode)}.
 
 check_readings(Count) ->
     receive
-        {reading, {M0, M1, S0, O0, O1, C, W}} ->
-            {N0, N1, T0, P0, P1, D, X} = readings(),
-            case N0 >= M0 andalso N1 >= M1 andalso T0 >= S0 andalso
-                 {P0, P1, D, X} =:= {O0, O1, C, W} of
+        {reading, {M0, M1, O, C, W} = Theirs} ->
+            {N0, N1, P, D, X} = Ours = readings(),
+            case N0 >= M0 andalso N1 >= M1 andalso is_integer(O) andalso
+                 is_integer(P) andalso {D, X} =:= {C, W} of
                 true -> check_readings(Count + 1);
-                false -> {unexpected, {M0, M1, S0, O0, O1, C, W}, {N0, N1, T0, P0, P1, D, X}}
+                false -> {unexpected, Theirs, Ours}
             end;
         done when Count =:= 2 * ?ROUNDS ->
             ok;
