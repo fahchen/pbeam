@@ -1,6 +1,6 @@
 use super::{
-    Access, Busy, EMPTY, EtsTables, FIRST_SEGMENT_SLOTS, Freeing, KeyIndex, Retained, Table,
-    TableType, key_hash, object_hash, segment, stored_hash,
+    Access, Busy, EMPTY, EtsTables, FIRST_SEGMENT_SLOTS, Freeing, KeyIndex, Lacking, Retained,
+    Table, TableType, key_hash, object_hash, segment, stored_hash,
 };
 use crate::term::atom_hash;
 use crate::term::{Atom, AtomTable, Map, ProcessId, Reference, Term, test_atom_table};
@@ -1035,14 +1035,14 @@ fn frees_a_clear_after_the_last_unfix() {
     assert_eq!(table.step_clear(&atoms, ProcessId(0), 300, 1), (false, 1));
     table.unfix_all(ProcessId(0));
     table.unfix_all(ProcessId(1));
-    assert!(table.clearing());
+    assert!(table.clear.is_some());
     let (done, charge) = table.step_clear(&atoms, ProcessId(0), 300, 0);
     assert!(!done);
     assert!(charge >= 32);
     let (done, charge) = table.step_clear(&atoms, ProcessId(0), 300, i64::MAX);
     assert!(done);
     assert!(charge > 0);
-    assert!(!table.clearing());
+    assert!(!table.clear.is_some());
     assert_eq!(table.object_count(), 0);
     assert_eq!(table.deleted_objects, 0);
     assert!(table.next_key(&atoms, &Term::Integer(0)).is_none());
@@ -1308,14 +1308,14 @@ fn marks_the_buckets_of_a_fixed_clear_in_turns() {
     assert_eq!(table.buckets, 300);
     table.fix(ProcessId(0));
     assert_eq!(table.step_clear(&atoms, ProcessId(0), 300, 8), (false, 8));
-    assert!(table.clearing());
+    assert!(table.clear.is_some());
     assert_eq!(table.fixdels, 1);
     assert_eq!(table.step_clear(&atoms, ProcessId(0), 300, 0), (false, 1));
     assert_eq!(
         table.step_clear(&atoms, ProcessId(0), 300, i64::MAX),
         (true, 30)
     );
-    assert!(!table.clearing());
+    assert!(!table.clear.is_some());
     assert_eq!(table.object_count(), 0);
     assert_eq!(table.fixdels, 1);
 }
@@ -1604,4 +1604,135 @@ fn counts_the_bag_comparisons_of_a_fixed_key() {
         table.insert_all(&atoms, vec![vec![key.clone(), Term::Integer(4)]]),
         vec![0]
     );
+}
+
+#[test]
+fn a_read_or_a_write_helps_the_list_insert_of_another_process() {
+    // A process of another scheduler can start a list insert at any time
+    // before the lock of a BIF, so the take of the table checks the insert
+    // under the table lock, helps it, and keeps the result of its end for
+    // its starter (`erl_db.c:769-798`).
+    let atoms = AtomTable::new();
+    let mut tables = EtsTables::default();
+    for id in 0..2 {
+        let mut table = Table::new(ProcessId(1), Access::Public, 1, TableType::Set);
+        let objects = vec![vec![Term::Integer(id)], vec![Term::Integer(id + 10)]];
+        table.busy = Some(Busy::new(ProcessId(1), objects, false));
+        tables.create(Reference(id as u64), None, table);
+    }
+    tables.reserve_result(ProcessId(1));
+    // The helper runs the insert with its budget under the table lock and
+    // traps; its next call takes the table (`erl_db.c:773-787`).
+    let id = |n| Term::Reference(Reference(n));
+    assert!(matches!(
+        tables.read(&atoms, &id(0), ProcessId(2), 4000),
+        Err(Lacking::Busy { reductions: 0 })
+    ));
+    let read = tables.read(&atoms, &id(0), ProcessId(2), 4000);
+    assert!(read.is_ok_and(|table| table.busy.is_none() && table.len() == 2));
+    assert!(tables.take_result(ProcessId(1)).is_some());
+    assert!(matches!(
+        tables.write(&atoms, &id(1), ProcessId(2), 4000),
+        Err(Lacking::Busy { .. })
+    ));
+    let write = tables.write(&atoms, &id(1), ProcessId(2), 4000);
+    assert!(write.is_ok_and(|table| table.busy.is_none() && table.len() == 2));
+    // The starter itself takes its busy table with no completion.
+    let mut table = Table::new(ProcessId(1), Access::Public, 1, TableType::Set);
+    table.busy = Some(Busy::new(ProcessId(1), vec![vec![Term::Integer(5)]], false));
+    tables.create(Reference(2), None, table);
+    let own = tables.write(&atoms, &id(2), ProcessId(1), 4000);
+    assert!(own.is_ok_and(|table| table.busy.is_some()));
+}
+
+#[test]
+fn helps_a_clear_that_started_before_an_insert_takes_the_table() {
+    // Race: a process of another scheduler starts a fixed clear after the
+    // insert checked the table and before it takes the table. The take
+    // sees the clear under the table lock, helps it with the budget of the
+    // caller, and traps (`erl_db.c:773-787`, `3300-3320`).
+    let atoms = test_atom_table();
+    let mut tables = EtsTables::default();
+    let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
+    for key in 0..300 {
+        table.insert(&atoms, vec![Term::Integer(key)]);
+    }
+    table.fix(ProcessId(0));
+    tables.create(Reference(0), None, table);
+    let id = Term::Reference(Reference(0));
+    assert!(tables.write(&atoms, &id, ProcessId(1), 4000).is_ok());
+    // The clear of the owner starts here and traps.
+    let started = tables.live(Reference(0)).expect("the table is live");
+    assert_eq!(started.step_clear(&atoms, ProcessId(0), 300, 1), (false, 1));
+    assert!(matches!(
+        tables.write(&atoms, &id, ProcessId(1), 1),
+        Err(Lacking::Busy { reductions }) if reductions > 0
+    ));
+    assert!(matches!(
+        tables.read(&atoms, &id, ProcessId(1), 1),
+        Err(Lacking::Busy { .. })
+    ));
+}
+
+#[test]
+fn keeps_the_buckets_of_a_walk_from_a_clear_of_another_thread() {
+    // Race: a process of another scheduler clears the table between the
+    // check of a resumed select and its walk. The walk holds the table lock
+    // from the check, so the clear waits, and a walk that resumes at bucket
+    // 256 or higher reads the buckets that the check saw.
+    let atoms = test_atom_table();
+    let mut tables = EtsTables::default();
+    let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
+    for key in 0..5000 {
+        table.insert(&atoms, vec![Term::Integer(key)]);
+    }
+    tables.create(Reference(0), None, table);
+    let id = Term::Reference(Reference(0));
+    let checked = tables
+        .read(&atoms, &id, ProcessId(1), 4000)
+        .expect("the table is free");
+    let buckets = checked.bucket_count();
+    assert!(buckets > 256);
+    std::thread::scope(|scope| {
+        let clear = scope.spawn(|| {
+            let mut table = tables
+                .write(&atoms, &id, ProcessId(0), 4000)
+                .expect("the owner writes");
+            table.clear(&atoms);
+            table.bucket_count()
+        });
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert!(!clear.is_finished());
+        let walked: usize = (256..buckets)
+            .map(|bucket| checked.chain(bucket).count())
+            .sum();
+        assert!(walked > 0);
+        assert_eq!(checked.bucket_count(), buckets);
+        drop(checked);
+        assert!(clear.join().expect("the clear ends") < buckets);
+    });
+}
+
+#[test]
+fn keeps_no_result_for_an_insert_of_a_dead_process() {
+    // A helper that ends the insert of a process whose exit removed its
+    // entry keeps no result, so nothing waits for a dead process.
+    let tables = EtsTables::default();
+    tables.put_result(ProcessId(1), Term::Integer(1));
+    assert!(tables.take_result(ProcessId(1)).is_none());
+    tables.reserve_result(ProcessId(1));
+    assert!(tables.take_result(ProcessId(1)).is_none());
+    tables.put_result(ProcessId(1), Term::Integer(2));
+    assert_eq!(tables.take_result(ProcessId(1)), Some(Term::Integer(2)));
+    assert!(tables.take_result(ProcessId(1)).is_none());
+}
+
+#[test]
+fn keeps_no_program_of_a_deleted_table() {
+    // A select of another scheduler can end after the delete of its table.
+    let atoms = test_atom_table();
+    let mut tables = EtsTables::default();
+    let spec = super::pattern::MatchSpec::compile(&atoms, &Term::nil()).expect("an empty spec");
+    tables.remember_program(Reference(0), Reference(1), spec);
+    assert!(tables.program(Reference(1)).is_none());
 }

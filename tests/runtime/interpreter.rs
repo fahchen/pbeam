@@ -4626,7 +4626,7 @@ fn shares_the_stored_term_of_an_ets_lookup() {
     scheduler.schedule_next().unwrap();
     let owner = scheduler.current_process_mut().id;
     let id = Term::Reference(Reference(0));
-    scheduler.ets.create(
+    scheduler.ets.exclusive().create(
         Reference(0),
         None,
         Table::new(owner, Access::Public, 1, TableType::Set),
@@ -4664,7 +4664,7 @@ fn resumes_a_list_insert_without_a_walk_of_the_checked_objects() {
     scheduler.schedule_next().unwrap();
     let owner = scheduler.current_process_mut().id;
     let id = Term::Reference(Reference(0));
-    scheduler.ets.create(
+    scheduler.ets.exclusive().create(
         Reference(0),
         None,
         Table::new(owner, Access::Public, 1, TableType::Bag),
@@ -4695,7 +4695,8 @@ fn resumes_a_list_insert_without_a_walk_of_the_checked_objects() {
     // take (`erl_db.c:2072-2110`), so a resume runs the objects of the
     // table and does not read the objects of the call, which are not a
     // list here.
-    let Some(table) = scheduler.ets.table_by_id(Reference(0)) else {
+    let mut ets = scheduler.ets.exclusive();
+    let Some(table) = ets.table_by_id(Reference(0)) else {
         panic!("the table is live");
     };
     let object = Term::tuple(vec![Term::Integer(1)]);
@@ -4704,6 +4705,8 @@ fn resumes_a_list_insert_without_a_walk_of_the_checked_objects() {
         vec![vec![object.clone()], vec![object]],
         false,
     ));
+    ets.reserve_result(owner);
+    drop(ets);
     scheduler.current_process_mut().fcalls = 1;
     let arguments = vec![
         id,
@@ -4717,6 +4720,22 @@ fn resumes_a_list_insert_without_a_walk_of_the_checked_objects() {
         .bif_trap(&mut scheduler, "ets", "insert", arguments)
         .unwrap();
     assert!(matches!(result, BifResult::Value(value) if value == Term::static_atom("true")));
+    // A process of another scheduler can complete the insert before a
+    // resume: the step then finds no busy insert and no result, and the
+    // call traps again.
+    scheduler.current_process_mut().fcalls = 1;
+    let arguments = vec![
+        Term::Reference(Reference(0)),
+        Term::Integer(7),
+        Term::Integer(5),
+        Term::Integer(1),
+        Term::list_from([Term::Integer(0)]),
+        Term::Integer(2),
+    ];
+    let result = program
+        .bif_trap(&mut scheduler, "ets", "insert", arguments)
+        .unwrap();
+    assert!(matches!(result, BifResult::TrapBif { .. }));
 }
 
 #[test]
@@ -4738,6 +4757,7 @@ fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
     let busy = |scheduler: &mut Scheduler| {
         scheduler
             .ets
+            .exclusive()
             .table_by_id(Reference(0))
             .expect("the table is live")
             .busy = Some(Busy::new(
@@ -4779,7 +4799,7 @@ fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
     ];
     let mut table = Table::new(caller, Access::Public, 1, TableType::Set);
     table.busy = None;
-    scheduler.ets.create(Reference(0), None, table);
+    scheduler.ets.exclusive().create(Reference(0), None, table);
     for (function, arguments) in &arguments {
         busy(&mut scheduler);
         let result = program
@@ -4950,7 +4970,7 @@ fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
     // A plain list insert that uses the last of its budget on its last
     // object traps with all units of the insert charged, and it returns
     // `true` in its next turn (`erl_db.c:1936-1940`, `2180-2196`).
-    scheduler.ets.create(
+    scheduler.ets.exclusive().create(
         Reference(0),
         None,
         Table::new(caller, Access::Public, 1, TableType::Set),
@@ -4958,6 +4978,7 @@ fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
     let objects = |key: i64| Term::tuple(vec![Term::Integer(key)]);
     scheduler
         .ets
+        .exclusive()
         .table_by_id(Reference(0))
         .expect("the table is live")
         .busy = Some(Busy::new(
@@ -4968,8 +4989,10 @@ fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
         ],
         false,
     ));
+    scheduler.ets.shared().reserve_result(caller);
     scheduler
         .ets
+        .exclusive()
         .table_by_id(Reference(0))
         .expect("the table is live")
         .step_busy(&scheduler.atoms.clone(), 4);
@@ -4996,8 +5019,10 @@ fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
     // A list insert that ended in another turn gives its result to the
     // process that started it, also after the table went away
     // (`erl_db.c:2142-2150`, `2223-2244`).
-    scheduler.ets.delete_table(Reference(0), caller);
-    scheduler.current_process_mut().insert_result = Some(Term::static_atom("true"));
+    scheduler.ets.exclusive().delete_table(Reference(0), caller);
+    let caller = scheduler.current_process_mut().id;
+    scheduler.ets.shared().reserve_result(caller);
+    (scheduler.ets.exclusive()).put_result(caller, Term::static_atom("true"));
     let result = program
         .bif_trap(
             &mut scheduler,
@@ -5019,7 +5044,7 @@ fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
     );
     // The process that runs the insert takes its own table: the steps of
     // the walk and of the insert are its own (`erl_db.c:2077-2107`).
-    scheduler.ets.create(
+    scheduler.ets.exclusive().create(
         Reference(0),
         None,
         Table::new(caller, Access::Public, 1, TableType::Set),
@@ -5027,9 +5052,11 @@ fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
     scheduler.current_process_mut().fcalls = 1;
     scheduler
         .ets
+        .exclusive()
         .table_by_id(Reference(0))
         .expect("the table is live")
         .busy = Some(Busy::new(caller, vec![vec![Term::Integer(5)]], false));
+    scheduler.ets.shared().reserve_result(caller);
     let result = program
         .bif(
             &mut scheduler,
@@ -5570,7 +5597,7 @@ fn traps_a_call_that_meets_a_fixed_clear() {
         }
         table.fix(owner);
         table.step_clear(&scheduler.atoms, owner, 300, 8);
-        scheduler.ets.create(id, None, table);
+        scheduler.ets.exclusive().create(id, None, table);
         arguments.insert(0, Term::Reference(id));
         let result = program
             .bif(&mut scheduler, "ets", function, arguments)
@@ -5598,7 +5625,7 @@ fn traps_a_select_continuation_that_meets_a_fixed_clear() {
     }
     table.fix(owner);
     table.step_clear(&scheduler.atoms, owner, 300, 1);
-    scheduler.ets.create(Reference(0), None, table);
+    scheduler.ets.exclusive().create(Reference(0), None, table);
     let continuation = Term::tuple(vec![
         Term::Reference(Reference(0)),
         Term::Integer(0),
@@ -5632,16 +5659,22 @@ fn schedules_a_waiting_process_for_the_fixation_cleanup() {
     scheduler.insert(process);
     // The fixer runs once and parks.
     scheduler.schedule_next().unwrap();
-    scheduler.ets.create(
+    scheduler.ets.exclusive().create(
         Reference(0),
         None,
         Table::new(ProcessId(99), Access::Public, 1, TableType::Set),
     );
-    scheduler.ets.fix_table(Reference(0), fixer);
-    assert_eq!(scheduler.ets.delete_table(Reference(0), ProcessId(99)), 1);
+    scheduler.ets.exclusive().fix_table(Reference(0), fixer);
+    assert_eq!(
+        scheduler
+            .ets
+            .exclusive()
+            .delete_table(Reference(0), ProcessId(99)),
+        1
+    );
     scheduler.schedule_pending_cleanups();
     scheduler.schedule_next().unwrap();
-    assert_eq!(scheduler.ets.pending_count(fixer), 0);
+    assert_eq!(scheduler.ets.exclusive().pending_count(fixer), 0);
     assert!(scheduler.process(fixer).unwrap().waiting);
 }
 
@@ -5661,20 +5694,20 @@ fn requeues_a_waiting_process_with_more_cleanup_than_a_turn() {
     let turn = crate::runtime::scheduler::CONTEXT_REDS as u64;
     for number in 0..=turn {
         let id = Reference(number);
-        scheduler.ets.create(
+        scheduler.ets.exclusive().create(
             id,
             None,
             Table::new(ProcessId(99), Access::Public, 1, TableType::Set),
         );
-        scheduler.ets.fix_table(id, fixer);
-        assert_eq!(scheduler.ets.delete_table(id, ProcessId(99)), 1);
+        scheduler.ets.exclusive().fix_table(id, fixer);
+        assert_eq!(scheduler.ets.exclusive().delete_table(id, ProcessId(99)), 1);
     }
     scheduler.schedule_pending_cleanups();
     scheduler.schedule_next().unwrap();
     assert!(scheduler.process(fixer).unwrap().waiting);
-    assert_eq!(scheduler.ets.pending_count(fixer), 1);
+    assert_eq!(scheduler.ets.exclusive().pending_count(fixer), 1);
     scheduler.schedule_next().unwrap();
-    assert_eq!(scheduler.ets.pending_count(fixer), 0);
+    assert_eq!(scheduler.ets.exclusive().pending_count(fixer), 0);
 }
 
 #[test]
@@ -5688,23 +5721,29 @@ fn cleans_a_pending_fixation_when_the_process_is_scheduled() {
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     scheduler.schedule_next().unwrap();
     let caller = scheduler.current_process_mut().id;
-    scheduler.ets.create(
+    scheduler.ets.exclusive().create(
         Reference(0),
         None,
         Table::new(ProcessId(99), Access::Public, 1, TableType::Set),
     );
-    scheduler.ets.fix_table(Reference(0), caller);
-    assert_eq!(scheduler.ets.delete_table(Reference(0), ProcessId(99)), 1);
-    assert_eq!(scheduler.ets.pending_count(caller), 1);
+    scheduler.ets.exclusive().fix_table(Reference(0), caller);
+    assert_eq!(
+        scheduler
+            .ets
+            .exclusive()
+            .delete_table(Reference(0), ProcessId(99)),
+        1
+    );
+    assert_eq!(scheduler.ets.exclusive().pending_count(caller), 1);
     scheduler.yield_current();
     scheduler.schedule_next().unwrap();
-    assert_eq!(scheduler.ets.pending_count(caller), 0);
+    assert_eq!(scheduler.ets.exclusive().pending_count(caller), 0);
 }
 
 #[test]
 fn helps_a_trapped_insert_from_internal_delete_all() {
-    // `ets:internal_delete_all/2` first completes the list insert that
-    // holds the table busy (`handle_lacking_permission`, `erl_db.c:769-798`).
+    // `ets:internal_delete_all/2` first helps the list insert that holds
+    // the table busy (`handle_lacking_permission`, `erl_db.c:769-798`).
     let program = make_program(vec![], 0);
     let mut scheduler = Scheduler::new((*program.atoms).clone());
     scheduler.start(frame(), vec![], allow_all()).unwrap();
@@ -5714,7 +5753,7 @@ fn helps_a_trapped_insert_from_internal_delete_all() {
     table.insert(&scheduler.atoms, vec![Term::Integer(1)]);
     // The insert belongs to another process, so the call helps it.
     table.busy = Some(Busy::new(ProcessId(999), Vec::new(), false));
-    scheduler.ets.create(Reference(0), None, table);
+    scheduler.ets.exclusive().create(Reference(0), None, table);
     let result = program
         .bif(
             &mut scheduler,
@@ -5726,7 +5765,49 @@ fn helps_a_trapped_insert_from_internal_delete_all() {
             ],
         )
         .unwrap();
+    // The help traps, and the next turn runs the clear
+    // (`erl_db.c:773-787`).
+    assert!(
+        matches!(result, BifResult::TrapBif { function, .. } if function == "internal_delete_all")
+    );
+    let result = program
+        .bif_trap(
+            &mut scheduler,
+            "ets",
+            "internal_delete_all",
+            vec![
+                Term::Reference(Reference(0)),
+                Term::static_atom("undefined"),
+            ],
+        )
+        .unwrap();
     assert!(matches!(result, BifResult::Value(value) if value == Term::Integer(1)));
+}
+
+#[test]
+fn rejects_a_copied_list_insert_into_a_protected_bag_of_another_owner() {
+    // A `bag` list insert copies its objects before it takes the table, so
+    // the access check of the take raises `badarg` after the copy
+    // (`erl_db.c:2072-2110`, `788-795`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let table = Table::new(ProcessId(999), Access::Protected, 1, TableType::Bag);
+    scheduler.ets.exclusive().create(Reference(0), None, table);
+    let object = Term::tuple(vec![Term::Integer(1)]);
+    let result = program
+        .bif(
+            &mut scheduler,
+            "ets",
+            "insert",
+            vec![
+                Term::Reference(Reference(0)),
+                Term::list_from([object.clone(), object]),
+            ],
+        )
+        .unwrap();
+    assert!(matches!(result, BifResult::Raise { .. }));
 }
 
 #[test]
@@ -5744,7 +5825,7 @@ fn traps_the_initial_clear_with_the_table_reference() {
         table.insert(&scheduler.atoms, vec![Term::Integer(key)]);
     }
     table.fix(owner);
-    scheduler.ets.create(Reference(0), None, table);
+    scheduler.ets.exclusive().create(Reference(0), None, table);
     scheduler.current_process_mut().fcalls = 1;
     let result = program
         .bif(
@@ -5929,7 +6010,7 @@ fn rejects_a_select_delete_of_a_private_table_of_another_process() {
     let mut scheduler = Scheduler::new((*program.atoms).clone());
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     scheduler.schedule_next().unwrap();
-    scheduler.ets.create(
+    scheduler.ets.exclusive().create(
         Reference(0),
         None,
         Table::new(ProcessId(999), Access::Private, 1, TableType::Set),
@@ -5960,7 +6041,7 @@ fn rejects_an_update_default_at_the_zero_key_position() {
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     scheduler.schedule_next().unwrap();
     let owner = scheduler.current_process_mut().id;
-    scheduler.ets.create(
+    scheduler.ets.exclusive().create(
         Reference(0),
         None,
         Table::new(owner, Access::Public, 0, TableType::Set),

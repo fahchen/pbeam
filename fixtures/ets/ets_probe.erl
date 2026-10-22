@@ -606,7 +606,7 @@ unsupported(Case) ->
         delete_inserting ->
             T = ets:new(ets_probe, [public]),
             spawn(?MODULE, insert_all, [T, [{I} || I <- seq(400000)]]),
-            true = ets:insert(ets:new(ets_probe, []), [{I} || I <- seq(40000)]),
+            erlang:yield(),
             ets:delete(T);
         info_size -> ets:info(ets:new(ets_probe, []), size);
         info_binary -> ets:info(ets:new(ets_probe, []), binary);

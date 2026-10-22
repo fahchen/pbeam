@@ -405,12 +405,6 @@ pub(super) struct ProcessState {
     /// resolves the target when the process runs again, after the switch
     /// out of the trap.
     pub(super) pending_trap: Option<PendingTrap>,
-    /// The result of a list insert of `ets:insert/2` or `ets:insert_new/2`
-    /// that ended while the process trapped in it, until the process reads
-    /// it, as `ctx->return_value` (`erl_db.c:2180-2184`, `2239-2244`). The
-    /// state of the call lives with the process, so the result stays after
-    /// the table goes away (`erl_db.c:2142-2150`).
-    pub(super) insert_result: Option<Term>,
     /// The dirty NIF call of the process, from the switch out at the call
     /// until `BeamProgram::run` returns its result, or until a signal ends
     /// the process. ERTS runs the process on a dirty scheduler for this
@@ -632,7 +626,6 @@ impl ProcessState {
             reductions: 0,
             pending_bif: None,
             pending_trap: None,
-            insert_result: None,
             dirty_call: None,
             length_trap: None,
             bif_timers: MonitorLinkTree::default(),
