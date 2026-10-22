@@ -310,6 +310,10 @@ pub(super) struct ProcessState {
     /// True while the process has no Erlang work: it waits in `wait` for a
     /// new message, or after `erlang:hibernate/0` (no `ERTS_PSFLG_ACTIVE`).
     pub(super) waiting: bool,
+    /// True while a `persistent_term` call suspends the process, as
+    /// `erts_suspend` does. A message or a signal does not wake it; only
+    /// [`Scheduler::resume`] does, and an exit signal still ends it.
+    pub(super) suspended: bool,
     /// True while the process is in the run queue (`ERTS_PSFLG_IN_RUNQ`). A
     /// waiting process can be in the run queue to handle its signals.
     pub(super) in_run_queue: bool,
@@ -599,6 +603,7 @@ impl ProcessState {
             float_registers: Vec::new(),
             mailbox: Mailbox::default(),
             waiting: false,
+            suspended: false,
             in_run_queue: false,
             exiting: None,
             self_signals: false,

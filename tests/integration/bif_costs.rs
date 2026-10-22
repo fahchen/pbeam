@@ -303,14 +303,15 @@ fn stops_maps_from_list_that_finds_a_bad_element_after_a_trap() {
 fn switches_out_at_each_persistent_term_put() {
     let program = BeamProgram::load(&[BIF_COST_PROBE]).unwrap();
     let runs = program.execute("bif_cost_probe", "put_race", &[]).unwrap();
-    // Each put of a new value switches out `a` (`ERTS_BIF_YIELD_RETURN`,
-    // `erl_bif_persistent.c:782-783`). ERTS also suspends `a` until thread
-    // progress, so `b` runs more turns, for example
-    // [{b,1334},{a,1},{b,1334},{a,1},{b,667},{a,1},{b,1665}] (row "Persistent terms" in
-    // docs/erts-differences.md).
+    // Each put of a new value suspends `a` until thread progress
+    // (`erl_bif_persistent.c:774-783`), so `b` runs two or more turns.
+    // ERTS gives, for example,
+    // [{b,1334},{a,1},{b,1334},{a,1},{b,667},{a,1},{b,1665}]. PBeam makes
+    // the table visible after three scheduling steps (row "Persistent
+    // terms" in docs/erts-differences.md).
     assert_eq!(
         text(&runs.term, runs.atoms()),
-        "[{b,667},{a,1},{b,667},{a,1},{b,667},{a,1},{b,2999}]"
+        "[{b,1334},{a,1},{b,1334},{a,1},{b,1334},{a,1},{b,998}]"
     );
 }
 

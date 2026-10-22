@@ -17,13 +17,16 @@ use std::{
     io::{self, Read, Write},
     os::unix::net::UnixStream,
     sync::{
-        Arc, Mutex, OnceLock,
+        Arc, Mutex, MutexGuard, OnceLock,
         atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
     },
 };
 
 use super::{Signal, process_table::ProcessTable};
-use crate::runtime::process::{MonitorLinkTree, ProcessState, TimerReference};
+use crate::runtime::{
+    persistent_term::PersistentTermStore,
+    process::{MonitorLinkTree, ProcessState, TimerReference},
+};
 use crate::{
     error::{BeamError, error},
     runtime::{dirty::Pools, ets::NodeTables, timer::NodeClock},
@@ -137,6 +140,12 @@ pub(in crate::runtime) struct Node {
     names: Mutex<HashMap<String, ProcessId>>,
     /// The scheduler of each open port.
     ports: Mutex<HashMap<PortId, usize>>,
+    /// The persistent terms of the node and their update permission. ERTS
+    /// keeps one table for the node, and any scheduler reads it
+    /// (`the_hash_table`, `erl_bif_persistent.c:358-398`).
+    persistent_terms: Mutex<PersistentTermStore>,
+    /// True when a persistent term table waits for thread progress.
+    persistent_progress: AtomicBool,
     /// The owner of each alias, by its reference. ERTS aliases belong to
     /// the node, and any scheduler sends to them
     /// (`erl_proc_sig_queue.c:2814-2895`).
@@ -226,6 +235,8 @@ impl Node {
                 processes: ProcessTable::default(),
                 names: Mutex::new(HashMap::new()),
                 ports: Mutex::new(HashMap::new()),
+                persistent_terms: Mutex::default(),
+                persistent_progress: AtomicBool::new(false),
                 aliases: Mutex::new(Aliases::default()),
                 timers: Mutex::new(BifTimers::default()),
                 regexes: Mutex::new(HashMap::new()),
@@ -289,6 +300,8 @@ impl Node {
             processes: ProcessTable::default(),
             names: Mutex::new(HashMap::new()),
             ports: Mutex::new(HashMap::new()),
+            persistent_terms: Mutex::default(),
+            persistent_progress: AtomicBool::new(false),
             aliases: Mutex::new(Aliases::default()),
             timers: Mutex::new(BifTimers::default()),
             regexes: Mutex::new(HashMap::new()),
@@ -986,6 +999,19 @@ impl Node {
     pub(in crate::runtime) fn take_root_results(&self) -> Vec<Option<Result<Term, Term>>> {
         let mut roots = self.roots.lock().expect("the roots are not poisoned");
         std::mem::take(&mut roots.results)
+    }
+
+    /// Lock and return the persistent terms of the node.
+    pub(in crate::runtime) fn persistent_terms(&self) -> MutexGuard<'_, PersistentTermStore> {
+        self.persistent_terms
+            .lock()
+            .expect("the persistent terms are not poisoned")
+    }
+
+    /// Return the flag that is true when a persistent term table waits for
+    /// thread progress.
+    pub(in crate::runtime) fn persistent_progress(&self) -> &AtomicBool {
+        &self.persistent_progress
     }
 
     /// Account the terms of the root results in `live`.

@@ -1,7 +1,274 @@
 //! Persistent terms of the node, as the ERTS persistent term hash table
-//! (`erl_bif_persistent.c`). All processes of a run share one store.
+//! (`erl_bif_persistent.c`). All processes of the node share one store,
+//! also on more than one scheduler thread.
 
-use crate::term::{LiveBytes, Term, internal_hash};
+use std::sync::{Arc, atomic::Ordering};
+
+use super::scheduler::Scheduler;
+use crate::term::{LiveBytes, ProcessId, Term, internal_hash};
+
+/// The number of scheduling steps of the node after which a new table is
+/// visible. ERTS waits for thread progress, and with `erl +S 1` other
+/// processes run two or more turns before the caller continues. The step
+/// that follows the switch out of the caller counts too, so 3 steps give
+/// other processes two turns.
+const PROGRESS_STEPS: u8 = 3;
+
+/// The change of a `put/2` or an `erase/1`.
+#[derive(Debug)]
+pub(in crate::runtime) enum Change {
+    /// Store the value for the key.
+    Put(Term, Term),
+    /// Erase the key.
+    Erase(Term),
+}
+
+/// A change that waits for thread progress, and the caller that it
+/// suspends (`erts_schedule_thr_prgr_later_op`, `erl_bif_persistent.c:774-779`).
+#[derive(Debug)]
+struct Progress {
+    /// The suspended caller, which holds the update permission.
+    caller: ProcessId,
+    /// The scheduler of the caller, which counts the steps. It takes a
+    /// step only after the caller switched out, so the change is never
+    /// visible before the caller suspends.
+    scheduler: usize,
+    /// The copied table with the change, or `None` for a change in place of
+    /// the visible table (`fast_update_index`, `erl_bif_persistent.c:763-770`).
+    table: Option<PersistentTerms>,
+    /// The change.
+    change: Change,
+    /// The scheduling steps that remain.
+    steps: u8,
+}
+
+/// The table copy of the holder of the update permission, which goes
+/// through the slots of the visible table in steps (`copy_table`,
+/// `erl_bif_persistent.c:1034-1139`).
+#[derive(Debug)]
+struct Copy {
+    /// The new table. Its slots are made in the copy steps too.
+    table: PersistentTerms,
+    /// The number of slots of the new table.
+    size: usize,
+    /// The next slot of the visible table to copy.
+    next: usize,
+    /// The erased key, which the copy leaves out.
+    skip: Option<Term>,
+}
+
+/// The persistent term table of the node and its update permission, as
+/// `the_hash_table`, `updater_process`, and `update_queue` of
+/// `erl_bif_persistent.c`. The node keeps it behind one lock.
+#[derive(Debug, Default)]
+pub(in crate::runtime) struct PersistentTermStore {
+    /// The visible table. A reader takes a reference and reads with no
+    /// lock, and an update swaps in a new table, as `the_hash_table` is an
+    /// atomic pointer in ERTS.
+    pub(super) terms: Arc<PersistentTerms>,
+    /// The process that holds the update permission: a `put/2` or an
+    /// `erase/1` until thread progress, or a `get/0` that traps until its
+    /// last chunk (`erl_bif_persistent.c:1311-1365`).
+    updater: Option<ProcessId>,
+    /// The processes that wait for the update permission.
+    waiters: Vec<ProcessId>,
+    /// The changes that wait for thread progress.
+    progress: Vec<Progress>,
+    /// The table copy of the holder of the update permission.
+    copy: Option<Copy>,
+}
+
+impl PersistentTermStore {
+    /// Give the update permission to `id` and return true, or put `id`
+    /// into the wait queue and return false when another process holds it,
+    /// as `try_seize_update_permission` does
+    /// (`erl_bif_persistent.c:1311-1335`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut store = PersistentTermStore::default();
+    /// assert!(store.seize(ProcessId(1)));
+    /// assert!(!store.seize(ProcessId(2)));
+    /// ```
+    pub(super) fn seize(&mut self, id: ProcessId) -> bool {
+        match self.updater {
+            Some(holder) if holder != id => {
+                if !self.waiters.contains(&id) {
+                    self.waiters.push(id);
+                }
+                false
+            }
+            _ => {
+                self.updater = Some(id);
+                self.waiters.retain(|waiter| *waiter != id);
+                true
+            }
+        }
+    }
+
+    /// Release the update permission of `id` and return the processes that
+    /// wait for it, as `release_update_permission` takes "the entire herd"
+    /// (`erl_bif_persistent.c:1337-1365`). Return no process when `id`
+    /// does not hold the permission.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut store = PersistentTermStore::default();
+    /// store.seize(ProcessId(1));
+    /// store.seize(ProcessId(2));
+    /// assert_eq!(store.release(ProcessId(1)), [ProcessId(2)]);
+    /// ```
+    pub(super) fn release(&mut self, id: ProcessId) -> Vec<ProcessId> {
+        // The publication of a table that waits for thread progress
+        // releases the permission of its caller.
+        if self.updater != Some(id) || self.is_progressing(id) {
+            return Vec::new();
+        }
+        self.updater = None;
+        // The copy of a holder that exited ends with no change, as its trap
+        // state destructor frees it (`erl_bif_persistent.c:295-301`).
+        self.copy = None;
+        // ERTS puts each waiter at the head of its queue and resumes from
+        // the head (`erl_bif_persistent.c:1325-1331`, `1353-1363`).
+        let mut waiters = std::mem::take(&mut self.waiters);
+        waiters.reverse();
+        waiters
+    }
+
+    /// Return true when the table of the caller `id` waits for thread
+    /// progress.
+    pub(super) fn is_progressing(&self, id: ProcessId) -> bool {
+        self.progress.iter().any(|progress| progress.caller == id)
+    }
+
+    /// Start a copy of the visible table into a new table of `size`
+    /// slots, which leaves out the key `skip`. The copy steps make the
+    /// slots, as `copy_table` clears them in its budget
+    /// (`erl_bif_persistent.c:1082-1103`).
+    pub(super) fn start_copy(&mut self, size: usize, skip: Option<Term>) {
+        self.copy = Some(Copy {
+            table: PersistentTerms {
+                buckets: Vec::with_capacity(size),
+                num_entries: 0,
+            },
+            size,
+            next: 0,
+            skip,
+        });
+    }
+
+    /// Copy at most `slots` slots of the visible table into the copy.
+    pub(super) fn copy_step(&mut self, slots: usize) {
+        if let Some(copy) = &mut self.copy {
+            let made = copy.table.buckets.len();
+            let new = (copy.size - made).min(slots);
+            copy.table.buckets.resize(made + new, None);
+            let slots = slots - new;
+            if copy.table.buckets.len() < copy.size {
+                return;
+            }
+            let end = copy
+                .next
+                .saturating_add(slots)
+                .min(self.terms.buckets.len());
+            for (key, value) in self.terms.buckets[copy.next..end].iter().flatten() {
+                if copy.skip.as_ref() != Some(key) {
+                    copy.table.insert(key.clone(), value.clone());
+                }
+            }
+            copy.next = end;
+        }
+    }
+
+    /// Make `change` visible after thread progress, and keep the update
+    /// permission of `caller` until then. A table copy ends first, and the
+    /// change goes into the copy.
+    pub(super) fn schedule(&mut self, caller: ProcessId, scheduler: usize, change: Change) {
+        self.copy_step(usize::MAX);
+        let table = self.copy.take().map(|copy| {
+            let mut table = copy.table;
+            if let Change::Put(key, value) = &change {
+                table.put(key, value);
+            }
+            table
+        });
+        self.progress.push(Progress {
+            caller,
+            scheduler,
+            table,
+            change,
+            steps: PROGRESS_STEPS,
+        });
+    }
+}
+
+impl Scheduler {
+    /// Count one scheduling step for each table that waits for thread
+    /// progress. A table whose steps end becomes visible, its caller
+    /// releases the update permission and resumes, as `table_updater` does
+    /// (`erl_bif_persistent.c:1172-1234`). Return true when a table still
+    /// waits, so that the run keeps stepping.
+    pub(super) fn persistent_term_progress(&mut self) -> bool {
+        let node = Arc::clone(self.node());
+        if !node.persistent_progress().load(Ordering::Acquire) {
+            return false;
+        }
+        let mut done = Vec::new();
+        let pending = {
+            let mut store = node.persistent_terms();
+            let index = self.index();
+            for progress in &mut store.progress {
+                if progress.scheduler == index {
+                    progress.steps -= 1;
+                }
+            }
+            while let Some(index) = store
+                .progress
+                .iter()
+                .position(|progress| progress.steps == 0)
+            {
+                let progress = store.progress.remove(index);
+                match (progress.table, progress.change) {
+                    (Some(table), _) => store.terms = Arc::new(table),
+                    (None, Change::Put(key, value)) => {
+                        Arc::make_mut(&mut store.terms).put(&key, &value);
+                    }
+                    (None, Change::Erase(key)) => {
+                        Arc::make_mut(&mut store.terms).erase(&key);
+                    }
+                }
+                done.push(progress.caller);
+            }
+            node.persistent_progress()
+                .store(!store.progress.is_empty(), Ordering::Release);
+            // Only a change of this scheduler keeps it stepping.
+            store
+                .progress
+                .iter()
+                .any(|progress| progress.scheduler == index)
+        };
+        // ERTS resumes the updater before its waiters
+        // (`erl_bif_persistent.c:1342-1363`).
+        for caller in done {
+            self.resume(caller);
+            self.release_persistent_terms(caller);
+        }
+        pending
+    }
+
+    /// Release the update permission of the persistent terms that the
+    /// process `id` holds, and resume each process that waits for it. The
+    /// end of a call releases it, and so does the exit of the process, as
+    /// the destructor of the ERTS trap state does.
+    pub(super) fn release_persistent_terms(&mut self, id: ProcessId) {
+        let waiters = self.node().persistent_terms().release(id);
+        for waiter in waiters {
+            self.resume(waiter);
+        }
+    }
+}
 
 /// The number of slots of a new table (`INITIAL_SIZE`).
 const INITIAL_SIZE: usize = 8;
@@ -18,7 +285,7 @@ const LOAD_FACTOR: usize = 50;
 /// order (`put_common`, `copy_table`). `persistent_term:get/0` returns the
 /// pairs in descending slot order (`get_all`), so the layout is visible to
 /// BEAM code.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) struct PersistentTerms {
     /// The slots of the table. The number of slots is a power of two.
     buckets: Vec<Option<(Term, Term)>>,
@@ -43,6 +310,13 @@ impl Default for PersistentTerms {
 }
 
 impl PersistentTerms {
+    /// Put the pair of a table copy into its slot.
+    fn insert(&mut self, key: Term, value: Term) {
+        let slot = self.lookup(&key);
+        self.buckets[slot] = Some((key, value));
+        self.num_entries += 1;
+    }
+
     /// Return the value of `key`, or `None` when the key has no value. This
     /// is the lookup of `persistent_term_get_2` in `erl_bif_persistent.c`,
     /// which never raises.
@@ -122,6 +396,52 @@ impl PersistentTerms {
         Some(copied)
     }
 
+    /// Return what [`Self::put`] of `key` and `value` would return, and
+    /// change nothing.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let terms = PersistentTerms::default();
+    /// assert_eq!(terms.put_cost(&Term::static_atom("key"), &Term::Integer(1)), Some(0));
+    /// ```
+    pub(super) fn put_cost(&self, key: &Term, value: &Term) -> Option<usize> {
+        match &self.buckets[self.lookup(key)] {
+            Some((_, existing)) if existing == value => None,
+            Some(_) => Some(0),
+            None if 100 * self.num_entries >= LOAD_FACTOR * self.buckets.len() => {
+                Some(3 * self.buckets.len())
+            }
+            None => Some(0),
+        }
+    }
+
+    /// Return what [`Self::erase`] of `key` would return, and change
+    /// nothing.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let terms = PersistentTerms::default();
+    /// assert_eq!(terms.erase_cost(&Term::static_atom("key")), None);
+    /// ```
+    pub(super) fn erase_cost(&self, key: &Term) -> Option<(usize, usize)> {
+        let slot = self.lookup(key);
+        self.buckets[slot].as_ref()?;
+        let must_shrink = 200 * self.num_entries <= LOAD_FACTOR * self.buckets.len()
+            && self.buckets.len() > INITIAL_SIZE;
+        let mask = self.buckets.len() - 1;
+        if !must_shrink && self.buckets[(slot + 1) & mask].is_none() {
+            return Some((0, 0));
+        }
+        let size = if must_shrink {
+            self.buckets.len() / 2
+        } else {
+            self.buckets.len()
+        };
+        Some((self.buckets.len(), size + self.buckets.len()))
+    }
+
     /// Erase the value of `key`, as `persistent_term_erase_1` does
     /// (`erl_bif_persistent.c:417-549`). Return `None` for a key without a
     /// value. Else return the slots of the two table copies, which are 0
@@ -145,24 +465,16 @@ impl PersistentTerms {
     /// assert_eq!(terms.get(&Term::static_atom("key")), None);
     /// ```
     pub(super) fn erase(&mut self, key: &Term) -> Option<(usize, usize)> {
+        let copied = self.erase_cost(key)?;
         let slot = self.lookup(key);
-        self.buckets[slot].as_ref()?;
-        let must_shrink = 200 * self.num_entries <= LOAD_FACTOR * self.buckets.len()
-            && self.buckets.len() > INITIAL_SIZE;
-        let mask = self.buckets.len() - 1;
         self.num_entries -= 1;
         // It is safe to clear the slot when it is no stepping stone to the
         // next slot (`is_erasable`).
-        if !must_shrink && self.buckets[(slot + 1) & mask].is_none() {
+        if copied == (0, 0) {
             self.buckets[slot] = None;
-            return Some((0, 0));
+            return Some(copied);
         }
-        let size = if must_shrink {
-            self.buckets.len() / 2
-        } else {
-            self.buckets.len()
-        };
-        let copied = (self.buckets.len(), size + self.buckets.len());
+        let size = copied.1 - copied.0;
         let mut old = std::mem::replace(&mut self.buckets, vec![None; size]);
         old[slot] = None;
         for (key, value) in old.into_iter().flatten() {

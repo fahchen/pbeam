@@ -707,6 +707,10 @@ name = "multischeduler_ets"
 path = "tests/integration/multischeduler_ets.rs"
 
 [[test]]
+name = "multischeduler_persistent_terms"
+path = "tests/integration/multischeduler_persistent_terms.rs"
+
+[[test]]
 name = "work_stealing"
 path = "tests/integration/work_stealing.rs"
 

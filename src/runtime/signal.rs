@@ -240,6 +240,11 @@ pub(super) enum Signal {
         /// The capability that the policy granted, or `None` for a denial.
         capability: Option<Capability>,
     },
+    /// The release of the update permission of the persistent terms
+    /// resumes the receiver, which waits for it, as `erts_resume` in
+    /// `release_update_permission` does (`erl_bif_persistent.c:1353-1363`).
+    /// The receiver tries its call again; the cost is 0.
+    Resume,
     /// PBeam only: the answer of `initial/1` of the policy process to the
     /// `pbeam_cap:enter_runtime/2` call of the root process in boot mode.
     /// ERTS has no capabilities and no such signal. The receiver replaces
@@ -349,6 +354,7 @@ impl Signal {
             | Signal::Flush
             | Signal::Revoke { capability: _ }
             | Signal::Grant { capability: _ }
+            | Signal::Resume
             | Signal::EnterRuntime { capabilities: _ } => {}
         }
     }

@@ -25,7 +25,6 @@ use super::{
     local_node,
     mailbox::Mailbox,
     nif::abi,
-    persistent_term::PersistentTerms,
     port::Ports,
     process::{
         DirtyCall, Flush, Frame, LinkId, Monitor, MonitorLinkTree, Origin, OriginMonitor,
@@ -368,8 +367,6 @@ pub(super) struct Scheduler {
     /// Processes that wait for a turn, in the queue of their priority. The
     /// current process is not in this queue, as in ERTS.
     runnable: RunQueue,
-    /// Persistent terms of the node. All processes of the run share them.
-    pub(super) persistent_terms: PersistentTerms,
     /// ETS tables of the node ([`Node::ets`]). All processes of the run
     /// share them.
     pub(super) ets: Arc<NodeTables>,
@@ -525,7 +522,6 @@ impl Scheduler {
             processes: ProcessSlots::default(),
             freed: HashMap::new(),
             runnable: RunQueue::default(),
-            persistent_terms: PersistentTerms::default(),
             binary_patterns: BinaryPatterns::default(),
             deferred_signals: Vec::new(),
             menu_writer: std::sync::Arc::new(menu_pair.0),
@@ -855,9 +851,21 @@ impl Scheduler {
     /// ```rust,ignore
     /// scheduler.activate(child);
     /// ```
+    /// Resume the suspended process `id`, as `erts_resume` does with no
+    /// signal and no cost. A process of another scheduler gets a
+    /// `Resume` signal. A process that exited needs no resume.
+    pub(super) fn resume(&mut self, id: ProcessId) {
+        if let Some(process) = self.processes.get_mut(&id) {
+            process.suspended = false;
+            self.activate(id);
+        } else {
+            let _ = self.send_signal(None, id, Signal::Resume);
+        }
+    }
+
     fn activate(&mut self, id: ProcessId) {
         let process = self.processes.get_mut(&id).expect("the process is alive");
-        if std::mem::take(&mut process.waiting) {
+        if !process.suspended && std::mem::take(&mut process.waiting) {
             self.enqueue(id);
         }
     }
@@ -1119,6 +1127,7 @@ impl Scheduler {
         // process that this step runs waits for the release of at most
         // [`RELEASE_BATCH`] nodes.
         self.drain_release(RELEASE_BATCH);
+        let progressing = self.persistent_term_progress();
         if self.multi {
             self.serve_steal();
         }
@@ -1127,7 +1136,7 @@ impl Scheduler {
             // keeps stepping and the release completes. An `Idle` step would
             // let the loop wait for input while most of a dead graph stays
             // retained, and nothing would wake it to finish the release.
-            return Ok(if self.release.is_empty() {
+            return Ok(if self.release.is_empty() && !progressing {
                 Turn::Idle
             } else {
                 Turn::Done
@@ -2579,7 +2588,7 @@ impl Scheduler {
         for process in self.processes.values().chain(freed) {
             process.account(&mut live);
         }
-        self.persistent_terms.account_terms(&mut live);
+        self.node.persistent_terms().terms.account_terms(&mut live);
         self.ets.shared().account_terms(&mut live);
         self.timers.account_terms(&mut live);
         self.node.account_roots(&mut live);
@@ -3499,6 +3508,7 @@ impl Scheduler {
             None => {
                 process.bump_reductions(EXIT_REDUCTIONS);
                 self.set_exiting(id);
+                self.release_persistent_terms(id);
                 let process = self.current_process_mut();
                 if let ReceiveTimer::Set { key, .. } = process.receive_timer {
                     self.timers.cancel(key);

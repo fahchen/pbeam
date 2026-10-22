@@ -1608,9 +1608,11 @@ fn counts_the_exit_reason_of_a_freed_process() {
 fn counts_the_persistent_terms_the_ets_objects_and_the_timer_messages() {
     let mut scheduler = test_scheduler();
     let before = scheduler.live_bytes();
-    let _ = scheduler
-        .persistent_terms
-        .put(&atom("key"), &Term::tuple(vec![Term::Integer(1)]));
+    {
+        let mut store = scheduler.node().persistent_terms();
+        let _ = std::sync::Arc::make_mut(&mut store.terms)
+            .put(&atom("key"), &Term::tuple(vec![Term::Integer(1)]));
+    }
     assert!(scheduler.live_bytes() > before);
     let key = Term::Atom(scheduler.atoms.put("key").unwrap());
     let mut table = Table::new(ProcessId(1), Access::Public, 1, TableType::Set);
