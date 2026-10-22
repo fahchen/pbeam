@@ -7,7 +7,7 @@ use std::{
 
 use super::{
     Job,
-    binary_pattern::BinaryPatterns,
+    binary_pattern::{BinaryPatterns, CompiledPattern},
     capability::{
         Capability, CapabilityId, CapabilityKind, Delegations, Denied, Operation, Restriction,
         SecurityContext, Source,
@@ -24,12 +24,13 @@ use super::{
     local_node,
     mailbox::Mailbox,
     nif::abi,
+    pcre2::{self, Code, Deserialized},
     port::Ports,
     process::{
         DirtyCall, Flush, Frame, LinkId, Monitor, MonitorLinkTree, Origin, OriginMonitor,
         ProcessState, ReceiveTimer, StackSlot, Start, StartFlags, TargetMonitor, WalkPosition,
     },
-    regex_code::RegexCodes,
+    regex_code::{RegexCodes, RegexSources},
     resources::{Resources, lock},
     signal::Signal,
     timer::{Receiver, Timer, Timers},
@@ -369,9 +370,9 @@ pub(super) struct Scheduler {
     /// ETS tables of the node ([`Node::ets`]). All processes of the run
     /// share them.
     pub(super) ets: Arc<NodeTables>,
-    /// Compiled patterns of `binary:compile_pattern/1` of the node. All
-    /// processes of the run share them.
-    pub(super) binary_patterns: BinaryPatterns,
+    /// The decoded compiled regular expressions of this scheduler: a cache
+    /// of the expressions of the node (see [`RegexCodes`]).
+    pub(super) regex_codes: RegexCodes,
     /// The signals that arrived while the break menu waited, which the
     /// scheduler processes after the menu.
     deferred_signals: Vec<libc::c_int>,
@@ -386,8 +387,7 @@ pub(super) struct Scheduler {
     /// `899-923`).
     initial_tty_mode: InitialMode,
     /// Typed values of this scheduler, one value of each type: the
-    /// compiled regular expressions in `RegexCodes`, the TTY resources in
-    /// `Ttys`, and the ports in `Ports`. A use pins the process. The values
+    /// TTY resources in `Ttys` and the ports in `Ports`. A use pins the process. The values
     /// that each scheduler reads are in the resources of the node.
     pub(super) resources: Resources,
     /// The atom table of the run, as `erts_atom_table` for one emulator. A
@@ -511,7 +511,6 @@ impl Scheduler {
     /// ```
     pub(super) fn new(atoms: impl Into<Arc<AtomTable>>) -> Self {
         let mut resources = Resources::default();
-        resources.put(RegexCodes::default());
         resources.put(Ttys::default());
         resources.put(Ports::default());
         let menu_pair = std::os::unix::net::UnixStream::pair().expect("a menu socket pair opens");
@@ -520,7 +519,7 @@ impl Scheduler {
             processes: ProcessSlots::default(),
             freed: HashMap::new(),
             runnable: RunQueue::default(),
-            binary_patterns: BinaryPatterns::default(),
+            regex_codes: RegexCodes::default(),
             deferred_signals: Vec::new(),
             menu_writer: std::sync::Arc::new(menu_pair.0),
             menu_written: menu_pair.1,
@@ -1151,7 +1150,6 @@ impl Scheduler {
         if self.multi {
             // Only a use in the turn of this process pins it.
             self.resources.take_touched();
-            self.binary_patterns.take_touched();
         }
         let process = self.processes.set_current(id);
         process.in_run_queue = false;
@@ -2008,33 +2006,84 @@ impl Scheduler {
         (process, &self.atoms)
     }
 
-    /// Return the current process and the compiled binary patterns of the
-    /// run together. A `binary:match/2`, `binary:matches/2`, or
-    /// `binary:split/2,3` call with a compiled pattern needs the store at the
-    /// same time as the process. The two borrows are of different fields, so
-    /// they do not conflict.
-    ///
-    /// # Panics
-    ///
-    /// Panic when the scheduler has no current process, as
-    /// [`Self::current_process_mut`] does.
+    /// Store the compiled regular expression `code` with the reference
+    /// `reference`: its serialized bytes in the resources of the node, and
+    /// the code in the cache of this scheduler.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// scheduler.schedule_next();
-    /// let (process, patterns) = scheduler.current_process_and_patterns_mut();
-    /// assert_eq!(process.id, ProcessId(0));
-    /// assert!(patterns.pattern(&Term::Reference(Reference(0))).is_none());
+    /// scheduler.insert_regex(reference, pcre2::compile(b"a", 0, None, None)?);
+    /// assert!(scheduler.regex_code(reference).is_some());
     /// ```
-    pub(super) fn current_process_and_patterns_mut(
+    pub(super) fn insert_regex(&mut self, reference: crate::term::Reference, code: Code) {
+        let bytes = code.serialize().into();
+        lock(&self.node.resources.kind::<RegexSources>())
+            .0
+            .insert(reference, bytes);
+        self.regex_codes.0.insert(reference, code);
+    }
+
+    /// Return the compiled regular expression `reference` of the node and
+    /// the atom table, or `None` when the node has no expression with this
+    /// reference. A first
+    /// use on this scheduler decodes the bytes of the node, as
+    /// `re_import_1` does (`erl_bif_re.c:761-789`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(scheduler.regex_code(Reference(0)).is_none());
+    /// ```
+    pub(super) fn regex_code(
         &mut self,
-    ) -> (&mut ProcessState, &BinaryPatterns) {
-        let process = self
-            .processes
-            .current_mut()
-            .expect("the scheduler has a current process");
-        (process, &self.binary_patterns)
+        reference: crate::term::Reference,
+    ) -> Option<(&mut Code, &Arc<AtomTable>)> {
+        if !self.regex_codes.0.contains_key(&reference) {
+            let bytes = lock(&self.node.resources.kind::<RegexSources>())
+                .0
+                .get(&reference)?
+                .clone();
+            if let Deserialized::Code(code) = pcre2::deserialize(&bytes) {
+                self.regex_codes.0.insert(reference, code);
+            }
+        }
+        Some((self.regex_codes.0.get_mut(&reference)?, &self.atoms))
+    }
+
+    /// Store the compiled binary pattern `pattern` with the reference `id`
+    /// in the resources of the node.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.insert_binary_pattern(id, CompiledPattern::Bm(b"a".to_vec()));
+    /// ```
+    pub(super) fn insert_binary_pattern(
+        &self,
+        id: crate::term::Reference,
+        pattern: CompiledPattern,
+    ) {
+        lock(&self.node.resources.kind::<BinaryPatterns>()).insert(id, pattern);
+    }
+
+    /// Return the compiled pattern of the term `{bm, Ref}` or `{ac, Ref}`,
+    /// or `None` when `pattern` is not a tuple of two elements with the
+    /// reference of a compiled pattern of the node.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(scheduler.binary_pattern(&Term::binary(b"a".to_vec())).is_none());
+    /// ```
+    pub(super) fn binary_pattern(&self, pattern: &Term) -> Option<Arc<CompiledPattern>> {
+        let Term::Tuple(fields) = pattern else {
+            return None;
+        };
+        let [_, reference] = fields.as_ref() else {
+            return None;
+        };
+        lock(&self.node.resources.kind::<BinaryPatterns>()).pattern(reference)
     }
 
     /// Return the module of the active frame of the current process from
@@ -2308,8 +2357,7 @@ impl Scheduler {
     fn schedule_out(&mut self) -> &mut ProcessState {
         let used = self.current_reductions();
         self.virtual_reductions = 0;
-        let touched =
-            self.multi && (self.resources.take_touched() | self.binary_patterns.take_touched());
+        let touched = self.multi && self.resources.take_touched();
         let process = self
             .processes
             .take_current()
@@ -2742,20 +2790,6 @@ impl Scheduler {
         if released {
             self.release_held();
         }
-    }
-
-    /// Return the scheduler of the compiled binary pattern `reference`
-    /// when it is a pattern of another scheduler of the node.
-    pub(super) fn remote_pattern_owner(&self, reference: crate::term::Reference) -> Option<usize> {
-        let owner = self.node.pattern_owner(reference)?;
-        (owner != self.index).then_some(owner)
-    }
-
-    /// Return the scheduler of the compiled regular expression `reference`
-    /// when it is an expression of another scheduler of the node.
-    pub(super) fn remote_regex_owner(&self, reference: crate::term::Reference) -> Option<usize> {
-        let owner = self.node.regex_owner(reference)?;
-        (owner != self.index).then_some(owner)
     }
 
     /// Return the index of this scheduler in its node.
