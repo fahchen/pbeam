@@ -189,7 +189,7 @@ info_hold() ->
 %% yet. The run stops with the unsupported error.
 info_item() ->
     Pid = wait_for(info_name, 100000),
-    _ = process_info(Pid, message_queue_len),
+    _ = process_info(Pid, current_stacktrace),
     Pid ! stop,
     ok.
 
