@@ -646,3 +646,7 @@ path = "tests/integration/decode_packet.rs"
 [[test]]
 name = "multischeduler"
 path = "tests/integration/multischeduler.rs"
+
+[[test]]
+name = "multischeduler_info"
+path = "tests/integration/multischeduler_info.rs"
