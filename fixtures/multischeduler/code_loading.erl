@@ -8,31 +8,45 @@
 %%   -module(code_target).
 %%   -export([version/0, wait/1]).
 %%   version() -> ?VERSION.
-%%   wait(From) -> From ! waiting, receive go -> {old, version()} end.
+%%   wait(From) -> From ! {waiting, self()}, receive go -> {old, version()} end.
 -include("code_target.hrl").
 
-%% The root that loads version 1, waits until the caller runs it, deletes
-%% it, and loads version 2 while the caller still runs version 1.
+%% The root that loads version 1, waits until a process of the caller runs
+%% it and the caller is ready, deletes it, and loads version 2 while that
+%% process still runs version 1.
 loader() ->
     false = erlang:module_loaded(code_target),
     {module, code_target} = erlang:load_module(code_target, ?TARGET_V1),
     Caller = wait_registered(code_caller),
     Caller ! {loaded, self()},
-    receive waiting -> ok end,
+    Waiter = receive {waiting, Pid} -> Pid end,
+    receive ready -> ok end,
     true = erlang:delete_module(code_target),
     {module, code_target} = erlang:load_module(code_target, ?TARGET_V2),
     NotPurged = {error, not_purged} = erlang:load_module(code_target, ?TARGET_V1),
+    Waiter ! go,
     Caller ! go,
     {NotPurged, code_target:version()}.
 
-%% The root that calls version 1 of the other scheduler, waits in it, and
-%% calls version 2 after the load.
+%% The root that calls version 1 of the other scheduler, starts a process
+%% that waits in it, and calls version 2 after the load from the same
+%% function, whose import of code_target:version/0 found version 1 before.
 caller() ->
     true = register(code_caller, self()),
     Loader = receive {loaded, From} -> From end,
     First = {erlang:module_loaded(code_target), code_target:version()},
-    Old = {old, _} = code_target:wait(Loader),
-    {First, Old, code_target:version()}.
+    Self = self(),
+    _ = spawn(fun() -> Self ! {old, code_target:wait(Loader)} end),
+    Loader ! ready,
+    ok = poll(),
+    Second = code_target:version(),
+    Old = receive {old, Result = {old, _}} -> Result end,
+    {First, Old, Second}.
+
+%% Wait for go with a receive that does not suspend, so that the caller
+%% finds the message while it runs.
+poll() ->
+    receive go -> ok after 0 -> poll() end.
 
 %% The same two roots on the pinned ERTS.
 reference() ->

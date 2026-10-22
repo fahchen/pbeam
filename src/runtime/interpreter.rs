@@ -2848,6 +2848,9 @@ impl BeamProgram {
         import: u32,
         deallocate: Option<u32>,
     ) -> Result<Option<Outcome>, BeamError> {
+        // An external call sees each code operation that returned on
+        // another scheduler, as the active code index of ERTS gives it.
+        scheduler.sync_code();
         // The loader checks each import index against the import table, and
         // the code table makes one slot for each import.
         let index = import as usize;
@@ -2941,7 +2944,7 @@ impl BeamProgram {
                 if let Some(target) = slot.get() {
                     return enter_export(process, target.frame(), arity, tail);
                 }
-                match scheduler.code.export_frame(module, name, arity)? {
+                match scheduler.synced_code().export_frame(module, name, arity)? {
                     Some(frame) => {
                         slot.set(Some(ExportTarget::of(&frame)));
                         enter_export(scheduler.current_process_mut(), frame, arity, tail)
@@ -3071,7 +3074,7 @@ impl BeamProgram {
             ("erlang", "apply", 3) => return self.apply_mfa(scheduler, tail),
             _ => {}
         }
-        match scheduler.code.export_frame(module, name, arity)? {
+        match scheduler.synced_code().export_frame(module, name, arity)? {
             Some(frame) => enter_export(scheduler.current_process_mut(), frame, arity, tail),
             None => self.undefined_function(scheduler, module, name, arity, tail),
         }
@@ -3433,6 +3436,7 @@ impl BeamProgram {
                 write(process, &Operand::X(register), value)?;
             }
         }
+        scheduler.sync_code();
         let frame = {
             let module = scheduler.atoms.name_of(lambda.module());
             match scheduler.code.fun_frame(module, lambda, total_arity)? {
@@ -3597,7 +3601,9 @@ impl BeamProgram {
                 // is loaded traps to `re:grun/3` or `re:urun/3`, and the
                 // error handler loads `re` and enters that function
                 // (`error_handler.erl:85-98`).
-                let frame = scheduler.code.export_frame(module, function, arity)?;
+                let frame = scheduler
+                    .synced_code()
+                    .export_frame(module, function, arity)?;
                 match frame {
                     Some(frame) => {
                         let process = scheduler.current_process_mut();
@@ -3703,7 +3709,10 @@ impl BeamProgram {
         arity: u32,
         tail: bool,
     ) -> Result<Option<Outcome>, BeamError> {
-        match scheduler.code.export_frame(module, function, arity)? {
+        match scheduler
+            .synced_code()
+            .export_frame(module, function, arity)?
+        {
             Some(frame) => {
                 enter_frame(scheduler.current_process_mut(), frame, tail);
                 Ok(None)
@@ -3879,6 +3888,7 @@ fn create_process(
     // process first runs. The export of a BIF calls the BIF, and not the
     // stub body of the module, which is `erlang:nif_error(undefined)` in
     // `erlang.beam` (`emu/emu_load.c:704-713`, `jit/arm/ops.tab:917-927`).
+    scheduler.sync_code();
     let export = {
         let atoms = &scheduler.atoms;
         let (module, function) = (atoms.name_of(module), atoms.name_of(function));

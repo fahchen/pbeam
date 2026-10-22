@@ -9,8 +9,9 @@
 //! generation number. A code operation in a run with scheduler threads
 //! takes the lock of the node, installs the newest state, runs, and
 //! publishes its result as a new generation. Another scheduler installs
-//! the newest state after it drains its inbox, so a process that gets a
-//! delivery sent after a load sees the load. A later code replacement or
+//! the newest state before each external call and after it drains its
+//! inbox, so a call after a load that returned sees the load, as after the
+//! code barrier of ERTS (`beam_bif_load.c:550-574`). A later code replacement or
 //! purge changes only the snapshot and the operations.
 
 use std::{
@@ -61,6 +62,14 @@ impl NodeCode {
 }
 
 impl Scheduler {
+    /// Return the code table after [`Self::sync_code`], for a lookup of an
+    /// external function, which sees each code operation that returned on
+    /// another scheduler.
+    pub(in crate::runtime) fn synced_code(&mut self) -> &CodeTable {
+        self.sync_code();
+        &self.code
+    }
+
     /// Install `state` when it is newer than the code of this scheduler.
     /// The caller holds the lock of the node code, so that a code
     /// operation runs on the newest state.
@@ -76,7 +85,7 @@ impl Scheduler {
         if state.generation == self.code_generation {
             return;
         }
-        self.code = CodeTable::from_snapshot(state.code.clone());
+        self.code.install(state.code.clone());
         self.nif_libraries.clone_from(&state.nif_libraries);
         self.extension_loads.clone_from(&state.extension_loads);
         self.shared_libraries.clone_from(&state.shared_libraries);
@@ -105,9 +114,11 @@ impl Scheduler {
     }
 
     /// Install the newest published code state when another scheduler
-    /// published one since the last install.
-    pub(super) fn sync_code(&mut self) {
-        if self.node.code.generation.load(Ordering::Acquire) == self.code_generation {
+    /// published one since the last install. A run with one scheduler has
+    /// no other publisher.
+    pub(in crate::runtime) fn sync_code(&mut self) {
+        if !self.multi || self.node.code.generation.load(Ordering::Acquire) == self.code_generation
+        {
             return;
         }
         let node = Arc::clone(&self.node);

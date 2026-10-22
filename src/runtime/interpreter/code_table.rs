@@ -313,6 +313,38 @@ impl CodeTable {
         }
     }
 
+    /// Replace the state of this table with `snapshot`. A module that this
+    /// table has keeps its import slots, emptied, so that a cursor that
+    /// holds the slots finds the code of the snapshot at its next call.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// code.install(other.snapshot());
+    /// assert_eq!(code.names().count(), other.names().count());
+    /// ```
+    pub(in crate::runtime) fn install(&mut self, snapshot: CodeSnapshot) {
+        let mut old = std::mem::take(&mut self.by_id);
+        let mut table = CodeTable::from_snapshot(CodeSnapshot {
+            by_id: HashMap::new(),
+            ..snapshot.clone()
+        });
+        table.by_id = snapshot
+            .by_id
+            .into_iter()
+            .map(|(id, code)| match old.remove(&id) {
+                Some(loaded) => {
+                    for slot in loaded.imports.iter() {
+                        slot.set(None);
+                    }
+                    (id, loaded)
+                }
+                None => (id, LoadedModule::new(code)),
+            })
+            .collect();
+        *self = table;
+    }
+
     /// Return the loaded module of `id`.
     ///
     /// # Examples
