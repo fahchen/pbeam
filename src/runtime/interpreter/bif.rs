@@ -672,14 +672,11 @@ macro_rules! bifs {
             id: BifId,
             arguments: &[Term],
         ) -> Result<BifResult, BeamError> {
-            // A run with scheduler threads keeps ETS and persistent_term
-            // with each scheduler, so a use of them fails with a clear
-            // error until the services move to the node.
             let (module, name, arity) = mfa(id);
             // A run with scheduler threads keeps these node services with
             // each scheduler, so their use fails with a clear error until
             // the services move to the node.
-            let local_service = matches!(module, "ets" | "persistent_term")
+            let local_service = module == "ets"
                 || (module == "erts_internal" && name == "atomics_new")
                 || matches!(
                     (module, name),
@@ -896,23 +893,17 @@ impl BeamProgram {
     /// - `maps:from_keys_trap/3`, with the keys, the value, and the YCF
     ///   units done ([`maps::from_keys`]). ERTS traps to `maps:from_keys/2`
     ///   with a magic reference to the YCF state.
-    /// - `persistent_term:get_all_trap/2`, with the result and the number of
-    ///   pairs that remain ([`persistent_term::get_all_trap`]). ERTS keeps
-    ///   the table and the result so far (`erl_bif_persistent.c:263-265`).
+    /// - the exports of `persistent_term` that [`persistent_term::resume`]
+    ///   continues: the waits for the update permission, the chunks of
+    ///   `get/0`, the table copies of `put/2` and `erase/1` with their key
+    ///   and value, and the wait for thread progress. ERTS traps to the BIF
+    ///   or to `put_common_trap/3` with a magic reference to the state
+    ///   (`erl_bif_persistent.c:263-265`, `432-433`, `650-651`).
     /// - `erlang:characters_to_utf8_trap/3`, `erlang:characters_to_list_trap_1/4`,
     ///   `_2/2`, `_3/3`, and `_4/2`, with the state of a chardata
     ///   conversion ([`unicode`]). ERTS traps to the exports of the same
     ///   names with other arguments: a magic reference to the state, or the
     ///   result binary so far (`erl_unicode.c:83-101`).
-    /// - `persistent_term:put_common_trap/1`, with the slots of the table
-    ///   copy that remain ([`persistent_term::put_trap`]). ERTS traps to
-    ///   `persistent_term:put_common_trap/3` with a magic reference to the
-    ///   copy state (`erl_bif_persistent.c:176-177`, `650-651`).
-    /// - `persistent_term:erase_trap/2`, with the slots of the temporary
-    ///   copy and of the rehashed copy that remain
-    ///   ([`persistent_term::erase_trap`]). ERTS traps to
-    ///   `persistent_term:erase/1` with a magic reference to the copy state
-    ///   (`erl_bif_persistent.c:432-433`).
     /// - `ets:insert/6`, with the table reference, the objects, the units
     ///   done, the key position, the steps of a `bag` insert or `false`, and
     ///   the state of the check ([`ets::insert_list`]). ERTS traps to
@@ -1123,6 +1114,11 @@ impl BeamProgram {
             let (process, patterns) = scheduler.current_process_and_patterns_mut();
             return binary::find_trap(process, patterns, subject, bytes, state, pattern);
         }
+        if module == "persistent_term"
+            && let Some(result) = persistent_term::resume(scheduler, function, &arguments)
+        {
+            return Ok(result);
+        }
         let (process, atoms) = scheduler.current_process_and_atoms();
         match (module, function, arguments.as_slice()) {
             ("erlang", "length", [list, Term::Integer(count)]) => {
@@ -1149,9 +1145,6 @@ impl BeamProgram {
             ("maps", "values_trap", [map, Term::Integer(done)]) => {
                 maps::values(process, map, *done as usize)
             }
-            ("persistent_term", "get_all_trap", [all, Term::Integer(entries)]) => Ok(
-                persistent_term::get_all_trap(process, all.clone(), *entries as usize),
-            ),
             ("erlang", "characters_to_utf8_trap", [Term::Binary(bytes), rest, encoding]) => {
                 unicode::utf8_trap(process, bytes.clone().to_bytes(), rest, encoding)
             }
@@ -1197,12 +1190,6 @@ impl BeamProgram {
                     *remaining as usize,
                     "characters_to_list_trap_4",
                 )
-            }
-            ("persistent_term", "put_common_trap", [Term::Integer(copied)]) => {
-                persistent_term::put_trap(process, *copied as usize)
-            }
-            ("persistent_term", "erase_trap", [Term::Integer(first), Term::Integer(second)]) => {
-                persistent_term::erase_trap(process, *first as usize, *second as usize)
             }
             ("erts_internal", "iolist_size_continue", [term, stack, Term::Integer(size)])
                 if let Some(stack) = stack.proper_list() =>

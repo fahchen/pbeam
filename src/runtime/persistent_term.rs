@@ -1,7 +1,64 @@
 //! Persistent terms of the node, as the ERTS persistent term hash table
-//! (`erl_bif_persistent.c`). All processes of a run share one store.
+//! (`erl_bif_persistent.c`). All processes of the node share one store,
+//! also on more than one scheduler thread.
 
-use crate::term::{LiveBytes, Term, internal_hash};
+use crate::term::{LiveBytes, ProcessId, Term, internal_hash};
+
+/// The persistent term table of the node and its update permission, as
+/// `the_hash_table` and `updater_process` of `erl_bif_persistent.c`. The
+/// node keeps it behind one lock.
+#[derive(Debug, Default)]
+pub(in crate::runtime) struct PersistentTermStore {
+    /// The table.
+    pub(super) terms: PersistentTerms,
+    /// The process that holds the update permission: a `put/2` or an
+    /// `erase/1` until thread progress, or a `get/0` that traps until its
+    /// last chunk (`erl_bif_persistent.c:1311-1365`).
+    updater: Option<ProcessId>,
+}
+
+impl PersistentTermStore {
+    /// Give the update permission to `id` and return true, or return false
+    /// when another process holds it, as `try_seize_update_permission`
+    /// does (`erl_bif_persistent.c:1311-1335`). A holder for which `alive`
+    /// returns false lost the permission when it exited, as the destructor
+    /// of its trap state releases it.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut store = PersistentTermStore::default();
+    /// assert!(store.seize(ProcessId(1), |_| true));
+    /// assert!(!store.seize(ProcessId(2), |_| true));
+    /// assert!(store.seize(ProcessId(2), |_| false));
+    /// ```
+    pub(super) fn seize(&mut self, id: ProcessId, alive: impl Fn(ProcessId) -> bool) -> bool {
+        match self.updater {
+            Some(holder) if holder != id && alive(holder) => false,
+            _ => {
+                self.updater = Some(id);
+                true
+            }
+        }
+    }
+
+    /// Release the update permission of `id`, as
+    /// `release_update_permission` does (`erl_bif_persistent.c:1337-1365`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut store = PersistentTermStore::default();
+    /// store.seize(ProcessId(1), |_| true);
+    /// store.release(ProcessId(1));
+    /// assert!(store.seize(ProcessId(2), |_| true));
+    /// ```
+    pub(super) fn release(&mut self, id: ProcessId) {
+        if self.updater == Some(id) {
+            self.updater = None;
+        }
+    }
+}
 
 /// The number of slots of a new table (`INITIAL_SIZE`).
 const INITIAL_SIZE: usize = 8;
@@ -122,6 +179,52 @@ impl PersistentTerms {
         Some(copied)
     }
 
+    /// Return what [`Self::put`] of `key` and `value` would return, and
+    /// change nothing.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let terms = PersistentTerms::default();
+    /// assert_eq!(terms.put_cost(&Term::static_atom("key"), &Term::Integer(1)), Some(0));
+    /// ```
+    pub(super) fn put_cost(&self, key: &Term, value: &Term) -> Option<usize> {
+        match &self.buckets[self.lookup(key)] {
+            Some((_, existing)) if existing == value => None,
+            Some(_) => Some(0),
+            None if 100 * self.num_entries >= LOAD_FACTOR * self.buckets.len() => {
+                Some(3 * self.buckets.len())
+            }
+            None => Some(0),
+        }
+    }
+
+    /// Return what [`Self::erase`] of `key` would return, and change
+    /// nothing.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let terms = PersistentTerms::default();
+    /// assert_eq!(terms.erase_cost(&Term::static_atom("key")), None);
+    /// ```
+    pub(super) fn erase_cost(&self, key: &Term) -> Option<(usize, usize)> {
+        let slot = self.lookup(key);
+        self.buckets[slot].as_ref()?;
+        let must_shrink = 200 * self.num_entries <= LOAD_FACTOR * self.buckets.len()
+            && self.buckets.len() > INITIAL_SIZE;
+        let mask = self.buckets.len() - 1;
+        if !must_shrink && self.buckets[(slot + 1) & mask].is_none() {
+            return Some((0, 0));
+        }
+        let size = if must_shrink {
+            self.buckets.len() / 2
+        } else {
+            self.buckets.len()
+        };
+        Some((self.buckets.len(), size + self.buckets.len()))
+    }
+
     /// Erase the value of `key`, as `persistent_term_erase_1` does
     /// (`erl_bif_persistent.c:417-549`). Return `None` for a key without a
     /// value. Else return the slots of the two table copies, which are 0
@@ -145,24 +248,16 @@ impl PersistentTerms {
     /// assert_eq!(terms.get(&Term::static_atom("key")), None);
     /// ```
     pub(super) fn erase(&mut self, key: &Term) -> Option<(usize, usize)> {
+        let copied = self.erase_cost(key)?;
         let slot = self.lookup(key);
-        self.buckets[slot].as_ref()?;
-        let must_shrink = 200 * self.num_entries <= LOAD_FACTOR * self.buckets.len()
-            && self.buckets.len() > INITIAL_SIZE;
-        let mask = self.buckets.len() - 1;
         self.num_entries -= 1;
         // It is safe to clear the slot when it is no stepping stone to the
         // next slot (`is_erasable`).
-        if !must_shrink && self.buckets[(slot + 1) & mask].is_none() {
+        if copied == (0, 0) {
             self.buckets[slot] = None;
-            return Some((0, 0));
+            return Some(copied);
         }
-        let size = if must_shrink {
-            self.buckets.len() / 2
-        } else {
-            self.buckets.len()
-        };
-        let copied = (self.buckets.len(), size + self.buckets.len());
+        let size = copied.1 - copied.0;
         let mut old = std::mem::replace(&mut self.buckets, vec![None; size]);
         old[slot] = None;
         for (key, value) in old.into_iter().flatten() {

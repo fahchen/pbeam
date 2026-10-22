@@ -1604,7 +1604,9 @@ fn counts_the_persistent_terms_the_ets_objects_and_the_timer_messages() {
     let mut scheduler = test_scheduler();
     let before = scheduler.live_bytes();
     let _ = scheduler
-        .persistent_terms
+        .node()
+        .persistent_terms()
+        .terms
         .put(&atom("key"), &Term::tuple(vec![Term::Integer(1)]));
     assert!(scheduler.live_bytes() > before);
     let key = Term::Atom(scheduler.atoms.put("key").unwrap());

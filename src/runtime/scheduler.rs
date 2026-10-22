@@ -26,7 +26,6 @@ use super::{
     local_node,
     mailbox::Mailbox,
     nif::abi,
-    persistent_term::PersistentTerms,
     port::Ports,
     process::{
         DirtyCall, Flush, Frame, LinkId, Monitor, MonitorLinkTree, Origin, OriginMonitor,
@@ -370,8 +369,6 @@ pub(super) struct Scheduler {
     /// Processes that wait for a turn, in the queue of their priority. The
     /// current process is not in this queue, as in ERTS.
     runnable: RunQueue,
-    /// Persistent terms of the node. All processes of the run share them.
-    pub(super) persistent_terms: PersistentTerms,
     /// ETS tables of the node. All processes of the run share them.
     pub(super) ets: EtsTables,
     /// Atomic arrays of the node, which the `atomics` module and the
@@ -525,7 +522,6 @@ impl Scheduler {
             processes: ProcessSlots::default(),
             freed: HashMap::new(),
             runnable: RunQueue::default(),
-            persistent_terms: PersistentTerms::default(),
             ets: EtsTables::default(),
             atomics: AtomicArrays::default(),
             binary_patterns: BinaryPatterns::default(),
@@ -2562,7 +2558,7 @@ impl Scheduler {
         for process in self.processes.values().chain(freed) {
             process.account(&mut live);
         }
-        self.persistent_terms.account_terms(&mut live);
+        self.node.persistent_terms().terms.account_terms(&mut live);
         self.ets.account_terms(&mut live);
         self.timers.account_terms(&mut live);
         self.node.account_roots(&mut live);

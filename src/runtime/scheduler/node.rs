@@ -17,14 +17,14 @@ use std::{
     io::{self, Read, Write},
     os::unix::net::UnixStream,
     sync::{
-        Arc, Mutex, OnceLock,
+        Arc, Mutex, MutexGuard, OnceLock,
         atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
     },
     time::Instant,
 };
 
 use super::{Signal, process_table::ProcessTable};
-use crate::runtime::process::ProcessState;
+use crate::runtime::{persistent_term::PersistentTermStore, process::ProcessState};
 use crate::{
     error::{BeamError, error},
     runtime::{dirty::Pools, host::clock},
@@ -107,6 +107,10 @@ pub(in crate::runtime) struct Node {
     names: Mutex<HashMap<String, ProcessId>>,
     /// The scheduler of each open port.
     ports: Mutex<HashMap<PortId, usize>>,
+    /// The persistent terms of the node and their update permission. ERTS
+    /// keeps one table for the node, and any scheduler reads it
+    /// (`the_hash_table`, `erl_bif_persistent.c:358-398`).
+    persistent_terms: Mutex<PersistentTermStore>,
     /// The owner of each alias, by its reference. ERTS aliases belong to
     /// the node, and any scheduler sends to them
     /// (`erl_proc_sig_queue.c:2814-2895`).
@@ -187,6 +191,7 @@ impl Node {
                 processes: ProcessTable::default(),
                 names: Mutex::new(HashMap::new()),
                 ports: Mutex::new(HashMap::new()),
+                persistent_terms: Mutex::default(),
                 aliases: Mutex::new(Aliases::default()),
                 timers: Mutex::new(HashMap::new()),
                 regexes: Mutex::new(HashMap::new()),
@@ -248,6 +253,7 @@ impl Node {
             processes: ProcessTable::default(),
             names: Mutex::new(HashMap::new()),
             ports: Mutex::new(HashMap::new()),
+            persistent_terms: Mutex::default(),
             aliases: Mutex::new(Aliases::default()),
             timers: Mutex::new(HashMap::new()),
             regexes: Mutex::new(HashMap::new()),
@@ -856,6 +862,19 @@ impl Node {
     pub(in crate::runtime) fn take_root_results(&self) -> Vec<Option<Result<Term, Term>>> {
         let mut roots = self.roots.lock().expect("the roots are not poisoned");
         std::mem::take(&mut roots.results)
+    }
+
+    /// Lock and return the persistent terms of the node.
+    pub(in crate::runtime) fn persistent_terms(&self) -> MutexGuard<'_, PersistentTermStore> {
+        self.persistent_terms
+            .lock()
+            .expect("the persistent terms are not poisoned")
+    }
+
+    /// Return true when the process `id` is in the process table and does
+    /// not exit.
+    pub(in crate::runtime) fn is_live(&self, id: ProcessId) -> bool {
+        self.processes.live_owner(id).is_some()
     }
 
     /// Account the terms of the root results in `live`.

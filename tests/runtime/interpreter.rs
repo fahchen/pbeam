@@ -5124,6 +5124,18 @@ fn shares_the_stored_term_of_a_persistent_term() {
 }
 
 #[test]
+fn resolves_a_persistent_term_trap_of_another_name_as_a_call() {
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let error = program
+        .bif_trap(&mut scheduler, "persistent_term", "no_trap", vec![])
+        .unwrap_err();
+    assert!(error.to_string().contains("no_trap"), "{error}");
+}
+
+#[test]
 fn rejects_a_bif_name_that_no_table_entry_holds() {
     // The name path of `BeamProgram::bif` runs a `bif.tab` entry or a PBeam
     // BIF of `PBEAM_BIFS`. An MFA that neither holds gives the unresolved
