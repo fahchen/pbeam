@@ -133,10 +133,12 @@ trapped_get() ->
     High = high_wait(),
     Reader = high_reader(),
     Order = wait_order(),
+    Resumed = resume_order(),
     [persistent_term:erase({trapped, I}) || I <- lists:seq(1, ?KEYS)],
     _ = persistent_term:erase(late_key),
-    case {First, Rest, Killed, High, Reader, Order} of
-        {{got, false}, [erase_done, put_done, {got_again, _}], ok, ok, ok, first} -> ok;
+    case {First, Rest, Killed, High, Reader, Order, Resumed} of
+        {{got, false}, [erase_done, put_done, {got_again, _}], ok, ok, ok, first,
+         [put, got]} -> ok;
         Other -> Other
     end.
 
@@ -180,6 +182,14 @@ wait_order() ->
     _ = spawn(fun() -> ok = persistent_term:put(order_key, second), Self ! put end),
     [receive M -> M after 60000 -> timeout end || M <- [got, put, put]],
     persistent_term:get(order_key).
+
+%% A get/0 waits for the permission of a put. The release resumes the put
+%% first, so its message comes first.
+resume_order() ->
+    Self = self(),
+    _ = spawn(fun() -> ok = persistent_term:put(resume_key, 1), Self ! put end),
+    _ = spawn(fun() -> _ = persistent_term:get(), Self ! got end),
+    [receive M -> M after 60000 -> timeout end || _ <- [1, 2]].
 
 killed_get() ->
     Getter = spawn(fun() -> persistent_term:get() end),

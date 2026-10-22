@@ -249,9 +249,11 @@ impl Scheduler {
                 .iter()
                 .any(|progress| progress.scheduler == index)
         };
+        // ERTS resumes the updater before its waiters
+        // (`erl_bif_persistent.c:1342-1363`).
         for caller in done {
-            self.release_persistent_terms(caller);
             self.resume(caller);
+            self.release_persistent_terms(caller);
         }
         pending
     }
