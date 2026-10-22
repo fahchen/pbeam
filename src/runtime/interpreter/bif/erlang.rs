@@ -2908,6 +2908,15 @@ pub(super) fn system_info(scheduler: &mut Scheduler, item: &Term) -> Result<BifR
         Term::Atom(atom) if atoms.name_of(atom) == "scheduler_id" => {
             Ok(Value(Term::Integer(scheduler_id)))
         }
+        // The run has the time correction of the node in the
+        // `multi_time_warp` mode, the defaults of the pinned ERTS
+        // (`erl_bif_info.c:2854-2868`, `erl_init.c:226`).
+        Term::Atom(atom) if atoms.name_of(atom) == "time_correction" => {
+            Ok(Value(Term::static_atom("true")))
+        }
+        Term::Atom(atom) if atoms.name_of(atom) == "time_warp_mode" => {
+            Ok(Value(Term::Atom(atoms.put("multi_time_warp")?)))
+        }
         Term::Atom(atom) if atoms.name_of(atom) == "build_type" => {
             Ok(Value(Term::static_atom("opt")))
         }

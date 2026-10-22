@@ -20,7 +20,6 @@ use std::{
         Arc, Mutex, MutexGuard, OnceLock,
         atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
     },
-    time::Instant,
 };
 
 use super::{Signal, process_table::ProcessTable};
@@ -30,7 +29,7 @@ use crate::runtime::{
 };
 use crate::{
     error::{BeamError, error},
-    runtime::{dirty::Pools, host::clock},
+    runtime::{dirty::Pools, timer::NodeClock},
     term::{LiveBytes, PortId, ProcessId, Term},
 };
 
@@ -182,10 +181,10 @@ pub(in crate::runtime) struct Node {
     /// True after the last root exited, or after a root or a scheduler
     /// failed.
     shutdown: AtomicBool,
-    /// The run start, as the instant and the OS system time at the same
-    /// moment. Each scheduler builds its timer service on this pair, so the
-    /// time of every scheduler agrees.
-    clock: (Instant, i64),
+    /// The time support of the node: the run start and the one time
+    /// correction state. Each scheduler builds its timer service on it, so
+    /// the time of every scheduler agrees.
+    clock: NodeClock,
     /// The dirty CPU pool and the dirty IO pool, which each scheduler of
     /// the node uses.
     dirty: Pools,
@@ -247,7 +246,7 @@ impl Node {
                 idle: Mutex::new(0),
                 hungry: (0..count).map(|_| AtomicBool::new(false)).collect(),
                 shutdown: AtomicBool::new(false),
-                clock: (Instant::now(), clock::system_time()),
+                clock: NodeClock::new(),
                 dirty: Pools::new(count),
                 local_node_hash: OnceLock::new(),
                 code: super::code::NodeCode::default(),
@@ -267,10 +266,9 @@ impl Node {
         &self.dirty
     }
 
-    /// Return the run start of the node, as the instant and the OS system
-    /// time at the same moment.
-    pub(in crate::runtime) fn clock_origin(&self) -> (Instant, i64) {
-        self.clock
+    /// Return the time support of the node.
+    pub(in crate::runtime) fn clock(&self) -> NodeClock {
+        self.clock.clone()
     }
 
     /// Return the seed of the local node hash. `compute` runs at the first
@@ -314,7 +312,7 @@ impl Node {
             idle: Mutex::new(0),
             hungry: Vec::new(),
             shutdown: AtomicBool::new(false),
-            clock: (Instant::now(), clock::system_time()),
+            clock: NodeClock::new(),
             dirty: Pools::new(1),
             local_node_hash: OnceLock::new(),
             code: super::code::NodeCode::default(),
