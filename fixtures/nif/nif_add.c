@@ -18,7 +18,14 @@
  *   NIF_ADD_LATE_BADARG   add/2 returns a term after enif_make_badarg
  *   NIF_ADD_NULL_ENTRY    nif_init returns NULL
  *   NIF_ADD_NO_INIT       the library has no nif_init
+ *   NIF_ADD_PROBE         add(Kind, Arg) runs the enif call of Kind; see probe
  */
+#ifdef NIF_ADD_PROBE
+/* glibc declares pthread_getname_np only with _GNU_SOURCE. */
+#define _GNU_SOURCE
+#include <pthread.h>
+#include <string.h>
+#endif
 #include "erl_nif.h"
 
 #ifdef NIF_ADD_MAJOR
@@ -48,6 +55,57 @@
 int nif_add_dep(void);
 #endif
 
+#ifdef NIF_ADD_PROBE
+/*
+ * Run one enif call on arg and return its result:
+ *
+ *   0  enif_get_uint, the value or badarg
+ *   1  enif_get_string with a buffer of 0 bytes, the result
+ *   2  enif_get_string with a buffer of 4 bytes, the result * 1000 + the
+ *      first byte
+ *   3  enif_inspect_binary, the size or badarg
+ *   4  enif_inspect_binary of a new binary "hi", size * 1000 + first byte
+ *   5  enif_get_string with ERL_NIF_UTF8, the result
+ *   6  the name of the thread of the call, as a new binary
+ */
+static ERL_NIF_TERM probe(ErlNifEnv *env, int kind, ERL_NIF_TERM arg)
+{
+    unsigned value;
+    char buf[4] = {'x', 'x', 'x', 'x'};
+    ErlNifBinary bin;
+    ERL_NIF_TERM made;
+    unsigned char *data;
+    char name[64] = {0};
+    int result;
+    switch (kind) {
+    case 0:
+        return enif_get_uint(env, arg, &value) ? enif_make_int(env, (int)value) : enif_make_badarg(env);
+    case 1:
+        return enif_make_int(env, enif_get_string(env, arg, buf, 0, ERL_NIF_LATIN1));
+    case 2:
+        result = enif_get_string(env, arg, buf, sizeof(buf), ERL_NIF_LATIN1);
+        return enif_make_int(env, result * 1000 + (unsigned char)buf[0]);
+    case 3:
+        return enif_inspect_binary(env, arg, &bin) ? enif_make_int(env, (int)bin.size) : enif_make_badarg(env);
+    case 4:
+        data = enif_make_new_binary(env, 2, &made);
+        data[0] = 'h';
+        data[1] = 'i';
+        if (!enif_inspect_binary(env, made, &bin)) {
+            return enif_make_badarg(env);
+        }
+        return enif_make_int(env, (int)bin.size * 1000 + bin.data[0]);
+    case 5:
+        return enif_make_int(env, enif_get_string(env, arg, buf, sizeof(buf), ERL_NIF_UTF8));
+    default:
+        pthread_getname_np(pthread_self(), name, sizeof(name));
+        data = enif_make_new_binary(env, strlen(name), &made);
+        memcpy(data, name, strlen(name));
+        return made;
+    }
+}
+#endif
+
 static ERL_NIF_TERM add(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
 {
     int left, right;
@@ -56,7 +114,13 @@ static ERL_NIF_TERM add(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
 #ifdef NIF_ADD_DEP
     (void)nif_add_dep();
 #endif
-#ifdef NIF_ADD_LATE_BADARG
+#ifdef NIF_ADD_PROBE
+    (void)right;
+    if (!enif_get_int(env, argv[0], &left)) {
+        return enif_make_badarg(env);
+    }
+    return probe(env, left, argv[1]);
+#elif defined(NIF_ADD_LATE_BADARG)
     (void)argv;
     (void)left;
     (void)right;

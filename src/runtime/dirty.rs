@@ -48,6 +48,7 @@ use super::{
     Job, NativeFn, NativeResult, NifContext,
     host::output::{IovecWrite, IovecWritten},
     interpreter::BifResult,
+    nif::abi,
     process::Priority,
     scheduler::{Scheduler, run_queue::RunQueue},
 };
@@ -145,6 +146,16 @@ pub(super) enum Work {
         /// The arguments of the call.
         arguments: Vec<Term>,
     },
+    /// A function of a NIF shared library with the arguments of its call.
+    /// The work keeps the library open until the call ends.
+    Shared {
+        /// The library of the function.
+        library: Arc<abi::Library>,
+        /// The index of the function in the functions of the library.
+        index: usize,
+        /// The arguments of the call.
+        arguments: Vec<Term>,
+    },
 }
 
 impl Work {
@@ -167,6 +178,11 @@ impl Work {
                 function,
                 arguments,
             } => Output::Native(function(&mut NifContext::dirty(), &arguments)),
+            Work::Shared {
+                library,
+                index,
+                arguments,
+            } => Output::Native(library.functions()[index].call(&arguments)),
         }
     }
 }

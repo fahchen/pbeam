@@ -22,7 +22,7 @@
 //!
 //! The other `nif_add:load/2` results of the ERTS run are in
 //! [`gives_the_erts_error_of_each_bad_entry`]. ERTS loads a 2.17 library,
-//! a dirty NIF, an upgrade callback, and a module without `-nifs`, and
+//! an upgrade callback, and a module without `-nifs`, and
 //! PBeam does not support them yet.
 
 #[path = "../common/mod.rs"]
@@ -371,14 +371,6 @@ fn gives_the_upgrade_error_of_a_library_without_an_upgrade_callback_as_erts() {
 #[test]
 fn stops_the_run_for_a_part_that_pbeam_does_not_support() {
     let program = program();
-    // ERTS runs the dirty NIF on a dirty CPU scheduler and gives 3.
-    let path = build("dirty", &["-DNIF_ADD_FLAGS=1"], &[]);
-    let failure = load(&program, &path).unwrap_err();
-    assert_eq!(
-        failure.to_string(),
-        "unsupported: the dirty NIF nif_add:add/2 of a NIF shared library"
-    );
-
     // ERTS loads the library and gives `{ok, 3}`.
     let path = build("bare", &["-DNIF_ADD_NAME=nif_bare"], &[]);
     let failure = execute(&program, "nif_bare", "calls", vec![string(&path)]).unwrap_err();
@@ -404,5 +396,117 @@ fn stops_the_run_for_a_result_that_no_enif_call_made() {
     assert_eq!(
         failure.to_string(),
         "the NIF returned the term 0x3039, which no enif call of the call made"
+    );
+}
+
+/// Return the results of `nif_add:probes(Path)`, with `None` for each
+/// exception `{error, badarg, {nif_add, add, [Kind, Arg], []}}`.
+fn probes(program: &BeamProgram, path: &str) -> Vec<Option<i64>> {
+    let result = execute(program, "nif_add", "probes", vec![string(path)]).unwrap();
+    let error = atom(&result, "error");
+    let badarg = atom(&result, "badarg");
+    let add = Term::tuple(vec![atom(&result, "nif_add"), atom(&result, "add")]);
+    result
+        .term
+        .proper_list()
+        .unwrap()
+        .map(|item| match item {
+            Term::Integer(value) => Some(*value),
+            Term::Tuple(caught) => {
+                let Term::Tuple(frame) = &caught[2] else {
+                    panic!("not a frame: {item:?}");
+                };
+                assert_eq!((&caught[0], &caught[1]), (&error, &badarg));
+                assert_eq!(Term::tuple(frame[..2].to_vec()), add);
+                assert_eq!(frame[2].proper_list().unwrap().count(), 2);
+                None
+            }
+            other => panic!("not a probe result: {other:?}"),
+        })
+        .collect()
+}
+
+/// The results of `nif_add:probes(Path)` on the pinned ERTS, for each
+/// library of `-DNIF_ADD_PROBE`, also with `-DNIF_ADD_FLAGS=1`. PBeam forms
+/// no bitstring that is not a whole number of bytes, so the probes have
+/// none; ERTS gives badarg for `<<1:3>>`.
+///
+/// ```text
+/// mise run erts-eval --pa $PWD/fixtures/nif 'nif_add:probes("/tmp/pbeam866/probe")'
+/// [7,{error,badarg,{nif_add,add,[0,-1],[]}},-1,{error,badarg,...},{error,badarg,...},
+///  {error,badarg,...},0,1000,4097,-3903,-3903,97,97,97,0,0,0,3,2,2,
+///  {error,badarg,{nif_add,add,[3,"ab"],[]}},2104,{error,badarg,{nif_add,add,[a,0],[]}}]
+/// ```
+const PROBES: [Option<i64>; 23] = [
+    Some(7),
+    None,
+    Some(-1),
+    None,
+    None,
+    None,
+    Some(0),
+    Some(1000),
+    Some(4097),
+    Some(-3903),
+    Some(-3903),
+    Some(97),
+    Some(97),
+    Some(97),
+    Some(0),
+    Some(0),
+    Some(0),
+    Some(3),
+    Some(2),
+    Some(2),
+    None,
+    Some(2104),
+    None,
+];
+
+/// Return the result of `nif_add:probe(Path, Kind, 0)`.
+fn probe(program: &BeamProgram, path: &str, kind: i64) -> Result<HostTerm, BeamError> {
+    let arguments = vec![string(path), Term::Integer(kind), Term::Integer(0)];
+    execute(program, "nif_add", "probe", arguments)
+}
+
+/// Return the bytes of the binary `term`.
+fn bytes(term: &Term) -> Vec<u8> {
+    let Term::Binary(binary) = term else {
+        panic!("not a binary: {term:?}");
+    };
+    binary.to_vec()
+}
+
+#[test]
+fn gives_the_erts_results_of_the_enif_calls_of_bcrypt() {
+    let program = program();
+    let path = build("probe", &["-DNIF_ADD_PROBE"], &[]);
+    assert_eq!(probes(&program, &path), PROBES);
+}
+
+#[test]
+fn runs_a_dirty_nif_on_the_dirty_pool_of_its_flags_as_erts() {
+    // ERTS gives the same results on a dirty CPU scheduler, and the thread
+    // names `erts_dcpus_N` and `erts_dios_N` (`erl_process.c:8956-8971`).
+    let program = program();
+    let cpu = build("probe_cpu", &["-DNIF_ADD_PROBE", "-DNIF_ADD_FLAGS=1"], &[]);
+    assert_eq!(probes(&program, &cpu), PROBES);
+    let name = bytes(&probe(&program, &cpu, 6).unwrap().term);
+    assert!(name.starts_with(b"erts_dcpus_"), "{name:?}");
+    let io = build("probe_io", &["-DNIF_ADD_PROBE", "-DNIF_ADD_FLAGS=2"], &[]);
+    let name = bytes(&probe(&program, &io, 6).unwrap().term);
+    assert!(name.starts_with(b"erts_dios_"), "{name:?}");
+}
+
+#[test]
+fn stops_the_run_for_the_utf8_encoding_of_enif_get_string() {
+    // ERTS gives 3 for `probe(Path, 5, "ab")`.
+    let program = program();
+    let path = build("probe_utf8", &["-DNIF_ADD_PROBE"], &[]);
+    let arguments = vec![string(&path), Term::Integer(5), string("ab")];
+    let failure = execute(&program, "nif_add", "probe", arguments).unwrap_err();
+    assert_eq!(
+        failure.to_string(),
+        "unsupported: enif_get_string with the encoding 2"
     );
 }

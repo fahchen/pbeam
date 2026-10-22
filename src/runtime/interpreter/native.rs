@@ -355,7 +355,8 @@ fn extension_binding(
 /// `docs/portable-beam-spec.md` gives for a declared native. An extension
 /// binding runs at once for the job `Normal`. For a `CpuBound` or `IoBound`
 /// job, the result is `BifResult::Dirty` with the work of the call, and the
-/// binding runs on a dirty thread.
+/// binding runs on a dirty thread. A function of a NIF shared library runs
+/// in the same way, with the job of its flags.
 ///
 /// # Examples
 ///
@@ -378,8 +379,20 @@ pub(super) fn call(
 ) -> Option<(Job, Result<BifResult, BeamError>)> {
     let arity = u32::try_from(arguments.len()).ok()?;
     if let Some(library) = scheduler.shared_libraries.get(&module.id).cloned() {
-        let function = library.function(name, arity)?;
-        return Some((Job::Normal, function.call(arguments).map(to_bif_result)));
+        let index = library.position(name, arity)?;
+        let function = &library.functions()[index];
+        // A dirty NIF runs on the dirty pool of its flags, as ERTS
+        // schedules it (`static_schedule_dirty_nif`, `erl_nif.c:3437-3477`).
+        let job = function.job();
+        let result = match job {
+            Job::Normal => function.call(arguments).map(to_bif_result),
+            Job::CpuBound | Job::IoBound => Ok(BifResult::Dirty(Work::Shared {
+                library: Arc::clone(&library),
+                index,
+                arguments: arguments.to_vec(),
+            })),
+        };
+        return Some((job, result));
     }
     let linked = Linked::of(&module.name)?;
     let bound = match linked {
@@ -730,8 +743,7 @@ fn library_name(path: &Term) -> std::ffi::CString {
 /// 3. A vm variant other than `beam.vanilla` and a library name other than
 ///    the module name give `{error, {bad_lib, Text}}`
 ///    (`beam/erl_nif.c:4814-4823`).
-/// 4. The function checks of [`function_error`]. A dirty NIF is not
-///    supported yet and gives a runtime error.
+/// 4. The function checks of [`function_error`].
 /// 5. A module without `nif_start` gives a runtime error, as for an
 ///    extension library.
 /// 6. A load for a second instance of the module is an upgrade: a library
@@ -747,8 +759,8 @@ fn library_name(path: &Term) -> std::ffi::CString {
 ///
 /// # Errors
 ///
-/// A run on more than one scheduler, a dirty NIF, a module without
-/// `nif_start`, and an upgrade callback give a runtime error. A new error
+/// A run on more than one scheduler, a module without `nif_start`, and an
+/// upgrade callback give a runtime error. A new error
 /// atom in a full atom table gives the error of `AtomTable::put`.
 fn load_shared(
     scheduler: &mut Scheduler,
@@ -789,16 +801,6 @@ fn load_shared(
         .collect();
     if let Some(text) = function_error(&module, caller, &functions) {
         return load_nif_error(&mut scheduler.atoms, "bad_lib", &text);
-    }
-    if let Some(dirty) = library
-        .functions()
-        .iter()
-        .find(|function| function.flags != 0)
-    {
-        let (name, arity) = (&dirty.name, dirty.arity);
-        return Err(error(format!(
-            "unsupported: the dirty NIF {caller}:{name}/{arity} of a NIF shared library"
-        )));
     }
     if !has_nifs(&module) {
         return Err(error(format!(

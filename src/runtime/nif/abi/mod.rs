@@ -23,7 +23,7 @@ use std::ffi::{CStr, CString, c_char, c_int, c_void};
 
 use crate::BeamError;
 use crate::Term;
-use crate::runtime::NativeResult;
+use crate::runtime::{Job, NativeResult};
 use env::Env;
 use layout::{ErlNifEntry, InitFn, LoadFn, NifFn};
 
@@ -66,6 +66,18 @@ pub(crate) struct Function {
 }
 
 impl Function {
+    /// Return the job of the function: `ERL_NIF_DIRTY_JOB_CPU_BOUND` (1)
+    /// and `ERL_NIF_DIRTY_JOB_IO_BOUND` (2) run on a dirty thread
+    /// (`erl_drv_nif.h:49-52`). The loader rejects other flags than 0, 1,
+    /// and 2.
+    pub(crate) fn job(&self) -> Job {
+        match self.flags {
+            1 => Job::CpuBound,
+            2 => Job::IoBound,
+            _ => Job::Normal,
+        }
+    }
+
     /// Call the function with `arguments` on the current thread and return
     /// its result: a value, or the `error:badarg` of `enif_make_badarg`.
     ///
@@ -73,7 +85,7 @@ impl Function {
     ///
     /// ```rust,ignore
     /// // nif_add:add/2 of fixtures/nif/nif_add.c.
-    /// let add = library.function("add", 2).unwrap();
+    /// let add = &library.functions()[library.position("add", 2).unwrap()];
     /// assert!(matches!(add.call(&[Term::Integer(1), Term::Integer(2)]), Ok(NativeResult::Value(Term::Integer(3)))));
     /// ```
     ///
@@ -130,11 +142,12 @@ impl Library {
         &self.functions
     }
 
-    /// Return the first function of exactly `name/arity`, or `None`.
-    pub(crate) fn function(&self, name: &str, arity: u32) -> Option<&Function> {
+    /// Return the index of the first function of exactly `name/arity` in
+    /// [`Library::functions`], or `None`.
+    pub(crate) fn position(&self, name: &str, arity: u32) -> Option<usize> {
         self.functions
             .iter()
-            .find(|function| function.name == name && function.arity == arity)
+            .position(|function| function.name == name && function.arity == arity)
     }
 
     /// Return whether the library has an upgrade callback.

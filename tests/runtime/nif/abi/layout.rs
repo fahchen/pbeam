@@ -3,8 +3,8 @@ use std::process::Command;
 
 use super::*;
 
-/// The C program that prints the size of `ERL_NIF_TERM`, `ErlNifFunc`, and
-/// `ErlNifEntry`, and the offset of each field, one value for each line.
+/// The C program that prints the size of `ERL_NIF_TERM`, `ErlNifFunc`,
+/// `ErlNifEntry`, and `ErlNifBinary`, and the offset of each field, one value for each line.
 const PROGRAM: &str = r#"
 #include <stddef.h>
 #include <stdio.h>
@@ -32,6 +32,11 @@ int main(void)
     printf("%zu\n", offsetof(ErlNifEntry, options));
     printf("%zu\n", offsetof(ErlNifEntry, sizeof_ErlNifResourceTypeInit));
     printf("%zu\n", offsetof(ErlNifEntry, min_erts));
+    printf("%zu\n", sizeof(ErlNifBinary));
+    printf("%zu\n", offsetof(ErlNifBinary, size));
+    printf("%zu\n", offsetof(ErlNifBinary, data));
+    printf("%zu\n", offsetof(ErlNifBinary, ref_bin));
+    printf("%zu\n", offsetof(ErlNifBinary, __spare__));
     return 0;
 }
 "#;
@@ -86,6 +91,11 @@ fn mirrors_the_layout_of_the_vendored_erl_nif_header() {
             offset_of!(ErlNifEntry, options),
             offset_of!(ErlNifEntry, sizeof_resource_type_init),
             offset_of!(ErlNifEntry, min_erts),
+            size_of::<ErlNifBinary>(),
+            offset_of!(ErlNifBinary, size),
+            offset_of!(ErlNifBinary, data),
+            offset_of!(ErlNifBinary, ref_bin),
+            offset_of!(ErlNifBinary, spare),
         ]
     );
 }
