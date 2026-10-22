@@ -83,14 +83,19 @@ fn uses_reductions_down_to_zero_as_erts_bump_reds() {
 }
 
 #[test]
-fn returns_a_runtime_error_for_the_negative_budget_of_a_bif() {
+fn reads_the_budget_of_a_bif_in_each_erts_form() {
     let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![]);
-    process.fcalls = 0;
-    assert_eq!(process.bif_reductions_left(), Ok(0));
-    process.fcalls = -1;
+    process.fcalls = 6;
+    assert_eq!(process.bif_reductions_left(), Ok(6));
+    assert_eq!(process.bif_reductions_signed(), 6);
+    assert_eq!(process.bif_reductions_or_zero(), 6);
+    assert_eq!(process.bif_reductions_unsigned(), 6);
+    process.fcalls = -3;
     let failure = process.bif_reductions_left().unwrap_err().to_string();
-    assert!(failure.starts_with("unsupported negative reduction budget in a BIF"));
-    assert!(failure.contains("\"Map iteration\""));
+    assert!(failure.starts_with("invariant error: a negative reduction budget in a BIF"));
+    assert_eq!(process.bif_reductions_signed(), -3);
+    assert_eq!(process.bif_reductions_or_zero(), 0);
+    assert_eq!(process.bif_reductions_unsigned(), u64::MAX - 2);
 }
 
 #[test]

@@ -943,16 +943,21 @@ const LOOP_FACTOR: i32 = 16;
 const MAX_LOOP_LIMIT: i32 = CONTEXT_REDS * LOOP_FACTOR;
 
 /// Return the loop limit of one turn that starts with `reds` reductions, as
-/// `re_run` reads it (`erl_bif_re.c:1639`, `1852`).
+/// `re_run` reads it (`erl_bif_re.c:1639`, `1852`). `reds` is the budget
+/// as an unsigned count: `MIN` compares the `int` product with the `Uint`
+/// `max_loop_limit`, so C converts the product to a `Uint`, and a negative
+/// budget gives the largest limit (`erl_bif_re.c:44`, `1498`, `1639`).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// assert_eq!(loop_limit(1), 16);
-/// assert_eq!(loop_limit(CONTEXT_REDS), 64000);
+/// assert_eq!(loop_limit(CONTEXT_REDS as u64), 64000);
+/// assert_eq!(loop_limit(u64::MAX), 64000);
 /// ```
-fn loop_limit(reds: i32) -> i32 {
-    (reds * LOOP_FACTOR).min(MAX_LOOP_LIMIT)
+fn loop_limit(reds: u64) -> i32 {
+    let limit = reds.wrapping_mul(LOOP_FACTOR as u64);
+    i32::try_from(limit.min(MAX_LOOP_LIMIT as u64)).expect("the limit fits in i32")
 }
 
 /// Return the number of offset pairs of the match data of a precompiled
@@ -1177,13 +1182,10 @@ pub(super) fn run(
     let mut data = pcre2::MatchData::new(pairs);
     data.clear_restart();
     let mut limit = loop_limit(
-        i32::try_from(
-            context
-                .scheduler
-                .current_process_mut()
-                .bif_reductions_left()?,
-        )
-        .expect("a reduction budget fits in i32"),
+        context
+            .scheduler
+            .current_process_mut()
+            .bif_reductions_unsigned(),
     );
     data.set_loops_left(limit);
     let match_context =
@@ -1239,7 +1241,7 @@ pub(super) fn run(
         // in one call, so it adds each ended turn here and starts a fresh
         // budget.
         context.scheduler.account_turn();
-        limit = loop_limit(CONTEXT_REDS);
+        limit = loop_limit(CONTEXT_REDS as u64);
         data.set_loops_left(limit);
         data.clear_restart();
         rc = data.resume();

@@ -3,7 +3,7 @@
          to_list/0, map_next/0, next/0, ordered/0, ordered_second_call_badarg/0,
          demonitor/0, unlink/0, hd/0, system_logger/0,
          message_queue_data/0, system_flag/0, process_flag/0, unsupported_flag/1, raise/0,
-         raise_throw/0, map_paths/0, negative_budget/0]).
+         raise_throw/0, map_paths/0, negative_budget/0, negative_budget_forms/0]).
 
 %% `lists:reverse/2` (erl_bif_lists.c:1246-1263). logger_simple_h:replay_buffer/1
 %% (logger_simple_h.erl:150) calls it with the buffer and the drop message, and
@@ -209,6 +209,45 @@ negative_budget(Map, List, N) ->
     [_ | _] = erts_internal:map_next(1, Map, []),
     1 = length(List),
     negative_budget(Map, List, N - 1).
+
+%% BIFs that the apply instruction calls after two direct
+%% `erts_internal:map_next/3` calls, so some calls read a negative budget. The
+%% first call leaves a budget from 0 to 3, as in negative_budget/0. When the
+%% light BIF call of the second one leaves a budget of 1 or 2, that call takes
+%% one pair and leaves -3 or -2 (erl_map.c:3786-3790, 4126). The apply
+%% instruction and the BIF do not check the budget first (`emit_i_apply`,
+%% `call_bif_shared`, jit/arm/instr_bif.cpp).
+%% Each BIF reads the budget in the form of its ERTS source:
+%% - lists:member/2 keeps it in an int and traps at once
+%%   (erl_bif_lists.c:1114-1130), and '--'/2 keeps it in a Sint
+%%   (erl_bif_lists.c:574-605).
+%% - iolist_size/1 yields at once with no bump (erl_iolist.c:133-135).
+%% - binary_to_list/1 compares the Uint size with the budget product as a
+%%   Uint and makes one chunk (binary.c:329-330).
+%% Each call gives the same value as with a positive budget.
+negative_budget_forms() ->
+    Map = identity(lists:seq(1, 2000)),
+    [true] = negative_budget_apply(Map, lists, member, c, id([a, b, c]), 100, []),
+    [[a, c]] = negative_budget_apply(Map, erlang, '--', id([a, b, c]), id([b]), 100, []),
+    [3] = negative_budget_apply(Map, erlang, iolist_size, id([<<"ab">>, $c]), 100, []),
+    Bytes = binary:copy(<<"ab">>, 30000),
+    Expected = binary_to_list(Bytes),
+    [Expected] = negative_budget_apply(Map, erlang, binary_to_list, Bytes, 100, []),
+    ok.
+
+negative_budget_apply(_, _, _, _, 0, Acc) -> lists:usort(Acc);
+negative_budget_apply(Map, M, F, A, N, Acc) ->
+    [_ | _] = erts_internal:map_next(1, Map, []),
+    [_ | _] = erts_internal:map_next(1, Map, []),
+    Result = M:F(A),
+    negative_budget_apply(Map, M, F, A, N - 1, [Result | Acc]).
+
+negative_budget_apply(_, _, _, _, _, 0, Acc) -> lists:usort(Acc);
+negative_budget_apply(Map, M, F, A, B, N, Acc) ->
+    [_ | _] = erts_internal:map_next(1, Map, []),
+    [_ | _] = erts_internal:map_next(1, Map, []),
+    Result = M:F(A, B),
+    negative_budget_apply(Map, M, F, A, B, N - 1, [Result | Acc]).
 
 %% `erts_internal:map_next/3` paths that reach a collision node and paths
 %% that are bignums. Lists A and B have equal map hashes, so they share a

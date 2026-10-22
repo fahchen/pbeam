@@ -647,12 +647,13 @@ impl EtsTables {
 
     /// Mark the next buckets of the clear of the fixed table `id`, as the
     /// trap of `db_mark_all_deleted_hash` continues it (`erl_db_hash.c:3007-3051`).
-    /// Return `true` when each bucket is marked.
+    /// Return `true` when each bucket is marked. `reds` is the signed
+    /// budget of the caller, an `SWord` in ERTS (`erl_db.c:3303`).
     pub(super) fn step_clear(
         &mut self,
         atoms: &AtomTable,
         id: Reference,
-        reds: usize,
+        reds: i64,
     ) -> (bool, usize) {
         let table = self.tables.get_mut(&id).expect("a cleared table is live");
         let (owner, count) = {
@@ -1721,12 +1722,19 @@ impl Table {
     /// one bucket for each unit of `units`, and at least one bucket, with one
     /// delete record for the clear. Return `true` when each bucket is
     /// marked, and keep the state of an unfinished clear for the next turn.
+    ///
+    /// `reds` is the signed budget of the caller, an `SWord` in ERTS
+    /// (`erl_db.c:3236`, `3303`). A negative budget marks one bucket, as a
+    /// budget of 0 does (`erl_db_hash.c:3012`, `3033-3037`). The free of
+    /// a table that is not fixed keeps a negative budget, so a free with
+    /// nothing left to free does not finish (`erl_db_hash.c:3140-3165`,
+    /// `4029-4031`).
     pub(super) fn step_clear(
         &mut self,
         atoms: &AtomTable,
         owner: ProcessId,
         count: usize,
-        reds: usize,
+        reds: i64,
     ) -> (bool, usize) {
         let mut clearing = self.clear.take().unwrap_or(Clearing {
             owner,
@@ -1743,7 +1751,7 @@ impl Table {
             if clearing.free.is_none() {
                 clearing.free = Some(segment(self.segment_slots() - 1) + 1);
             }
-            let mut remaining = i64::try_from(reds).unwrap_or(i64::MAX);
+            let mut remaining = reds;
             let mut charge = 0;
             while let Some(left) = clearing.free {
                 if left == 0 {
@@ -1780,7 +1788,7 @@ impl Table {
         let start = clearing.bucket;
         let limit = clearing
             .bucket
-            .saturating_add(reds.saturating_mul(8).max(1));
+            .saturating_add(usize::try_from(reds).unwrap_or(0).saturating_mul(8).max(1));
         while clearing.bucket < self.buckets && clearing.bucket < limit {
             let bucket = clearing.bucket;
             self.mark_bucket(atoms, bucket);
