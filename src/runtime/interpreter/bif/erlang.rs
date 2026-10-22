@@ -1278,13 +1278,6 @@ pub(super) fn monitor(
     let Some(options) = monitor_options(options) else {
         return Ok(BifResult::badarg());
     };
-    // The alias owners stay with each scheduler, so a message to an alias
-    // of another scheduler would be dropped.
-    if context.scheduler.is_multi() && options.alias.is_some() {
-        return Err(error(
-            "unsupported: an alias from a monitor in a run of execute_on_schedulers",
-        ));
-    }
     let Term::Atom(kind) = kind else {
         return Ok(BifResult::badarg());
     };
@@ -5224,13 +5217,6 @@ pub(super) fn ports(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
 ///
 /// The `priority` option, and the errors of `Scheduler::monitor`.
 pub(super) fn alias(context: &mut BifContext<'_>, options: &Term) -> Result<BifResult, BeamError> {
-    // The alias owners stay with each scheduler, so a message to an alias
-    // of another scheduler would be dropped.
-    if context.scheduler.is_multi() {
-        return Err(error(
-            "unsupported: erlang:alias/0,1 in a run of execute_on_schedulers",
-        ));
-    }
     let Some(mut elements) = options.list_iter() else {
         return Ok(BifResult::badarg());
     };
