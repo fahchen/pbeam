@@ -19,6 +19,19 @@ fn debug_bif(result: &BifResult, atoms: &AtomTable) -> String {
     }
 }
 
+/// Return the result of a call: for the dirty work of a binding, run its
+/// host part on this thread, as a dirty IO thread does, and then its finish
+/// on `scheduler`.
+fn run(scheduler: &mut Scheduler, result: Result<BifResult, BeamError>) -> BifResult {
+    match result.unwrap() {
+        BifResult::Dirty(Work::Host(Host(host))) => {
+            let finish = host();
+            finish(scheduler).unwrap()
+        }
+        result => result,
+    }
+}
+
 /// Return a scheduler whose current process is a new root process.
 fn scheduler() -> Scheduler {
     let mut scheduler = Scheduler::new(AtomTable::new());
@@ -86,14 +99,14 @@ fn checks_the_follow_flag_and_then_the_path_as_erts() {
             "Value(Tuple([Atom(\"error\"), Atom(\"enoent\")]))",
         ),
     ] {
-        let result = read_info_nif(&mut scheduler, &path, &follow).unwrap();
+        let result = run(&mut scheduler, read_info_nif(&path, &follow));
         assert_eq!(
             debug_bif(&result, &scheduler.atoms),
             expected,
             "{path:?} {follow:?}"
         );
     }
-    let result = read_info_nif(&mut scheduler, &path, &Term::Integer(0)).unwrap();
+    let result = run(&mut scheduler, read_info_nif(&path, &Term::Integer(0)));
     assert!(
         matches!(&result, BifResult::Value(Term::Tuple(fields)) if fields.len() == 14
             && matches!(&fields[2], Term::Atom(atom) if scheduler.atoms.name_of(atom) == "directory")),
@@ -158,7 +171,8 @@ fn atoms(scheduler: &mut Scheduler, names: &[&str]) -> Term {
 /// Open `path` with the mode atoms `modes`, and return the file resource.
 fn open(scheduler: &mut Scheduler, path: &std::path::Path, modes: &[&str]) -> Term {
     let modes = atoms(scheduler, modes);
-    let result = open_nif(scheduler, &nif_path(path), &modes).unwrap();
+    let result = open_nif(scheduler, &nif_path(path), &modes);
+    let result = run(scheduler, result);
     resource(&result)
 }
 
@@ -176,7 +190,8 @@ fn text(
     scheduler: &mut Scheduler,
     run: impl FnOnce(&mut Scheduler) -> Result<BifResult, BeamError>,
 ) -> String {
-    let result = run(scheduler).unwrap();
+    let result = run(scheduler);
+    let result = self::run(scheduler, result);
     debug_bif(&result, &scheduler.atoms)
 }
 
@@ -254,7 +269,8 @@ fn opens_files_with_the_modes_and_errors_of_erts() {
         vec![Term::Integer(1), Term::static_atom("ok")],
         Term::Integer(2),
     );
-    let fd = resource(&open_nif(&mut scheduler, &path, &ignored).unwrap());
+    let opened = open_nif(&mut scheduler, &path, &ignored);
+    let fd = resource(&run(&mut scheduler, opened));
     let size = Term::Integer(10);
     assert_eq!(
         text(&mut scheduler, |s| read_nif(s, &fd, &size)),
@@ -466,8 +482,7 @@ fn changes_names_directories_and_links_with_the_errors_of_erts() {
     // `rename` of the root gives `EINVAL`, and a non-empty target gives
     // `EEXIST` for the `ENOTEMPTY` of the host (unix_prim_file.c:945-958).
     assert_eq!(
-        text(&mut scheduler, |s| pair_result(
-            s,
+        text(&mut scheduler, |_| pair_result(
             &Term::binary(b"/\0".to_vec()),
             &nif_path(&empty),
             file::rename
@@ -475,8 +490,7 @@ fn changes_names_directories_and_links_with_the_errors_of_erts() {
         einval
     );
     assert_eq!(
-        text(&mut scheduler, |s| pair_result(
-            s,
+        text(&mut scheduler, |_| pair_result(
             &nif_path(&empty),
             &nif_path(&full),
             file::rename
@@ -485,8 +499,7 @@ fn changes_names_directories_and_links_with_the_errors_of_erts() {
     );
     // A missing source gives `ENOENT` for `rename` too.
     assert_eq!(
-        text(&mut scheduler, |s| pair_result(
-            s,
+        text(&mut scheduler, |_| pair_result(
             &nif_path(&missing),
             &nif_path(&empty),
             file::rename
@@ -495,8 +508,7 @@ fn changes_names_directories_and_links_with_the_errors_of_erts() {
     );
     // A missing directory gives `ENOENT` for `chdir`.
     assert_eq!(
-        text(&mut scheduler, |s| path_result(
-            s,
+        text(&mut scheduler, |_| path_result(
             &nif_path(&missing),
             file::set_cwd
         )),
@@ -505,8 +517,7 @@ fn changes_names_directories_and_links_with_the_errors_of_erts() {
     // A failed first `chmod` repeats the call without the set-id bits
     // (unix_prim_file.c:821-834).
     assert_eq!(
-        text(&mut scheduler, |s| set_permissions_nif(
-            s,
+        text(&mut scheduler, |_| set_permissions_nif(
             &nif_path(&missing),
             &Term::Integer(0o644)
         )),
@@ -515,16 +526,14 @@ fn changes_names_directories_and_links_with_the_errors_of_erts() {
     // The three metadata NIFs check their arguments, then the path
     // (prim_file_nif.c:1053-1113).
     assert_eq!(
-        text(&mut scheduler, |s| set_permissions_nif(
-            s,
+        text(&mut scheduler, |_| set_permissions_nif(
             &invalid,
             &Term::Integer(0o644)
         )),
         einval
     );
     assert_eq!(
-        text(&mut scheduler, |s| set_owner_nif(
-            s,
+        text(&mut scheduler, |_| set_owner_nif(
             &invalid,
             &Term::Integer(-1),
             &Term::Integer(-1)
@@ -532,8 +541,7 @@ fn changes_names_directories_and_links_with_the_errors_of_erts() {
         einval
     );
     assert_eq!(
-        text(&mut scheduler, |s| set_time_nif(
-            s,
+        text(&mut scheduler, |_| set_time_nif(
             &invalid,
             &Term::Integer(0),
             &Term::Integer(0),
@@ -543,18 +551,14 @@ fn changes_names_directories_and_links_with_the_errors_of_erts() {
     );
     // `altname` is `ENOTSUP` on Unix (unix_prim_file.c:1085-1090).
     assert_eq!(
-        text(&mut scheduler, |s| altname_nif(
-            &mut s.atoms,
-            &nif_path(&empty)
-        )),
+        text(&mut scheduler, |_| altname_nif(&nif_path(&empty))),
         enotsup
     );
     // The mutable modes exclude the sticky bit (unix_prim_file.c:822).
     let sticky = directory.join("sticky");
     std::fs::write(&sticky, b"").unwrap();
     assert_eq!(
-        text(&mut scheduler, |s| set_permissions_nif(
-            s,
+        text(&mut scheduler, |_| set_permissions_nif(
             &nif_path(&sticky),
             &Term::Integer(0o1777)
         )),

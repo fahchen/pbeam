@@ -47,8 +47,9 @@ use std::{
 use super::{
     Job, NativeFn, NativeResult,
     host::output::{IovecWrite, IovecWritten},
+    interpreter::BifResult,
     process::Priority,
-    scheduler::run_queue::RunQueue,
+    scheduler::{Scheduler, run_queue::RunQueue},
 };
 use crate::{
     error::{BeamError, error},
@@ -65,11 +66,78 @@ use crate::{
 /// ```
 const DIRTY_IO_THREADS: usize = 10;
 
+/// The function of a [`Finish`].
+pub(super) type FinishFn = dyn FnOnce(&mut Scheduler) -> Result<BifResult, BeamError> + Send;
+
+/// The last part of a static binding that ran on a dirty thread: it makes
+/// the result of the call on the scheduler thread of the caller, with the
+/// atoms and the resources of the scheduler.
+///
+/// The function can own a host resource, such as the open file of
+/// `prim_file:open_nif/2`. When the scheduler drops a finish that did not
+/// run, because its caller exits or the run ends, the drop gives the
+/// function back to the dirty pool of the call, and a dirty thread drops
+/// it. Thus a `close` that waits does not stop the scheduler thread, as
+/// ERTS closes the file of an open whose caller exited on the dirty
+/// scheduler (`create_ref_or_error_tuple`, `prim_file_nif.c:547-553`).
+pub(super) struct Finish {
+    /// The function, until it runs or goes back to the pool.
+    run: Option<Box<FinishFn>>,
+    /// The shared queue of the pool of the call.
+    pool: Arc<Shared>,
+}
+
+impl Finish {
+    /// Run the finish on the scheduler thread of the caller.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let result = finish.run(&mut scheduler)?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The error of the function of the finish.
+    pub(super) fn run(mut self, scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
+        let run = self.run.take().expect("a finish runs once");
+        run(scheduler)
+    }
+}
+
+impl Drop for Finish {
+    fn drop(&mut self) {
+        if let Some(run) = self.run.take() {
+            self.pool.discard(run);
+        }
+    }
+}
+
+/// The host part of a static binding: the host calls of the NIF, which run
+/// on a dirty thread and give the function of the [`Finish`] of the call.
+/// The binding reads the terms and the resources of its arguments on the
+/// scheduler thread first, because they belong to that thread.
+pub(super) struct Host(pub(super) Box<dyn FnOnce() -> Box<FinishFn> + Send>);
+
+impl std::fmt::Debug for Finish {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Finish")
+    }
+}
+
+impl std::fmt::Debug for Host {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Host")
+    }
+}
+
 /// The work of one dirty NIF call, which a dirty thread runs.
 #[derive(Debug)]
 pub(super) enum Work {
     /// The host write of `prim_tty:write_nif/2`.
     Write(IovecWrite),
+    /// The host part of a static binding, such as a `prim_file` NIF.
+    Host(Host),
     /// A registered native function with the arguments of its call.
     Native {
         /// The function of the registration.
@@ -85,12 +153,16 @@ impl Work {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let output = Work::Native { function, arguments: vec![Term::Integer(1)] }.run();
+    /// let output = Work::Native { function, arguments: vec![Term::Integer(1)] }.run(&pool);
     /// assert!(matches!(output, Output::Native(Ok(_))));
     /// ```
-    fn run(self) -> Output {
+    fn run(self, pool: &Arc<Shared>) -> Output {
         match self {
             Work::Write(write) => Output::Written(write.run()),
+            Work::Host(Host(host)) => Output::Host(Finish {
+                run: Some(host()),
+                pool: Arc::clone(pool),
+            }),
             Work::Native {
                 function,
                 arguments,
@@ -105,6 +177,8 @@ impl Work {
 pub(super) enum Output {
     /// The end of a host write.
     Written(IovecWritten),
+    /// The last part of a static binding.
+    Host(Finish),
     /// The result of a registered native function.
     Native(Result<NativeResult, BeamError>),
 }
@@ -179,8 +253,29 @@ struct Queue {
     /// The call of each caller in `order`. A process has at most one dirty
     /// call, and process identifiers are not used again in a run.
     calls: HashMap<ProcessId, Call>,
+    /// The functions of the finishes that the scheduler dropped before they
+    /// ran. A thread drops them before it takes a call.
+    discards: Vec<Discard>,
     /// True after the node dropped the pool.
     closed: bool,
+}
+
+/// The function of a [`Finish`] that did not run, which a dirty thread
+/// drops.
+struct Discard(Box<FinishFn>);
+
+impl std::fmt::Debug for Discard {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Discard")
+    }
+}
+
+/// The next job of a dirty thread.
+enum Taken {
+    /// A call to run.
+    Call(Call),
+    /// A function of a finish to drop.
+    Discard(Discard),
 }
 
 /// The queue of a pool and the condition that wakes its idle threads.
@@ -193,21 +288,48 @@ struct Shared {
 }
 
 impl Shared {
-    /// Return the next call of the queue. Wait while the queue is empty and
-    /// the pool is open. Return `None` when the pool is closed and the queue
-    /// is empty.
+    /// Give the function `run` of a finish that did not run to a thread of
+    /// the pool, which drops it. After the node dropped the pool, the
+    /// current thread drops it, because the threads stop when the queue is
+    /// empty.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// while let Some(call) = shared.take() { /* run call */ }
+    /// shared.discard(run);
     /// ```
-    fn take(&self) -> Option<Call> {
+    fn discard(&self, run: Box<FinishFn>) {
+        let mut queue = self.queue.lock().expect("the dirty queue is not poisoned");
+        if queue.closed {
+            drop(queue);
+            drop(run);
+            return;
+        }
+        queue.discards.push(Discard(run));
+        drop(queue);
+        self.ready.notify_one();
+    }
+
+    /// Return the next job of the queue: a discarded function first, then
+    /// the next call. Wait while the queue is empty and the pool is open.
+    /// Return `None` when the pool is closed and the queue is empty.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// while let Some(taken) = shared.take() { /* run or drop */ }
+    /// ```
+    fn take(&self) -> Option<Taken> {
         let mut queue = self.queue.lock().expect("the dirty queue is not poisoned");
         loop {
+            if let Some(discard) = queue.discards.pop() {
+                return Some(Taken::Discard(discard));
+            }
             if let Some(process) = queue.order.pop() {
                 let call = queue.calls.remove(&process);
-                return Some(call.expect("each caller in the order has its call"));
+                return Some(Taken::Call(
+                    call.expect("each caller in the order has its call"),
+                ));
             }
             if queue.closed {
                 return None;
@@ -499,7 +621,8 @@ impl DirtyCalls {
 /// inbox of its scheduler, then write one byte to the wake socket of the
 /// scheduler, as `wake_poller` writes to the ERTS wake pipe
 /// (`erl_poll.c:429-462`). A call whose claim is gone does not run, and its
-/// completion has no output. A full wake socket already wakes the
+/// completion has no output. The thread drops each discarded function of
+/// a [`Finish`] before it takes a call. A full wake socket already wakes the
 /// scheduler, so the thread ignores a write that fails with `WouldBlock`.
 ///
 /// # Examples
@@ -507,22 +630,28 @@ impl DirtyCalls {
 /// ```rust,ignore
 /// thread::spawn(move || run_calls(&shared));
 /// ```
-fn run_calls(shared: &Shared) {
-    while let Some(Call {
-        process,
-        call,
-        claim,
-        work,
-        completions,
-        wake,
-    }) = shared.take()
-    {
+fn run_calls(shared: &Arc<Shared>) {
+    while let Some(taken) = shared.take() {
+        let Call {
+            process,
+            call,
+            claim,
+            work,
+            completions,
+            wake,
+        } = match taken {
+            Taken::Call(call) => call,
+            Taken::Discard(Discard(run)) => {
+                drop(run);
+                continue;
+            }
+        };
         // The thread does not keep the claim: a caller that exits while the
         // call runs drops it, and the scheduler then drops the result.
         let output = claim.upgrade().map(|claim| {
             claim.store(true, Ordering::Release);
             drop(claim);
-            work.run()
+            work.run(shared)
         });
         let completion = Completion {
             process,

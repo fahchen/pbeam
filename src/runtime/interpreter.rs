@@ -41,12 +41,13 @@ mod native;
 
 pub use native::nif_manifest_gaps;
 
+pub(super) use bif::BifResult;
 pub(super) use code_table::{CodeTable, LoadedModule};
 
 use code_table::{ExportTarget, ImportTargets};
 
 use bif::{
-    BifArguments, BifId, BifResult, MAX_BORROWED_ARGUMENTS, OwnedBifArguments, dispatch_leaf,
+    BifArguments, BifId, MAX_BORROWED_ARGUMENTS, OwnedBifArguments, dispatch_leaf,
     error_info_location, is_function, is_leaf, is_pbeam_bif, mfa, resolve, send,
 };
 use bits::BitWriter;
@@ -128,7 +129,7 @@ enum Outcome {
 
 /// The class of an exception.
 #[derive(Debug, Clone, Copy)]
-enum ExceptionClass {
+pub(in crate::runtime) enum ExceptionClass {
     /// Class `error`, as `erlang:nif_error/1` raises.
     Error,
     /// Class `exit`, as `erlang:exit/1` raises.
@@ -1154,6 +1155,7 @@ impl BeamProgram {
                     native::dirty_write_result(&mut scheduler.atoms, written)?
                 }
                 Output::Native(result) => native::to_bif_result(result?),
+                Output::Host(finish) => finish.run(scheduler)?,
             };
             let outcome = match result {
                 BifResult::Raise { class, reason } => {
