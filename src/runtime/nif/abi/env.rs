@@ -354,6 +354,11 @@ pub unsafe extern "C" fn enif_get_string(
     // A handle that no term has is not a list, as `THE_NON_VALUE` is not.
     let term = env.get(list).unwrap_or(Term::Integer(0));
     let (bytes, result) = latin1_string(&term, len);
+    if bytes.is_empty() {
+        // A buffer of 0 bytes can be NULL, and ERTS does not touch it
+        // (`erl_nif.c:1602-1604`).
+        return result;
+    }
     // SAFETY: the C API requires that `buf` points to `len` writable
     // bytes, and `latin1_string` gives at most `len` bytes.
     unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf.cast::<u8>(), bytes.len()) };
