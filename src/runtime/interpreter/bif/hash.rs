@@ -479,7 +479,7 @@ fn read(term: &Term, budget: &mut u64, sum: &mut impl FnMut(&[u8])) -> Result<Op
 /// ```
 fn context_bytes(term: &Term) -> Option<&[u8]> {
     match term {
-        Term::Binary(binary) if binary.bit_size() == CONTEXT_BYTES * 8 => Some(&binary[..]),
+        Term::Binary(binary) if binary.bit_size() == CONTEXT_BYTES * 8 => binary.bytes(),
         _ => None,
     }
 }

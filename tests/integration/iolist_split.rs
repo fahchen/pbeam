@@ -50,7 +50,7 @@ fn text(term: &Term, atoms: &AtomTable) -> String {
         Term::Atom(atom) => atoms.name_of(atom).to_owned(),
         Term::Integer(value) => value.to_string(),
         Term::Binary(bytes) => {
-            let bytes: Vec<String> = bytes.iter().map(u8::to_string).collect();
+            let bytes: Vec<String> = bytes.bytes().unwrap().iter().map(u8::to_string).collect();
             format!("<<{}>>", bytes.join(","))
         }
         _ if let Some(terms) = term.proper_list() => {

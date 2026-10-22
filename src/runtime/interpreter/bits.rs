@@ -7,6 +7,8 @@
 //! the number of bits written, and fills the bits of each byte from the
 //! most significant bit, as ERTS does.
 
+use crate::term::Binary;
+
 /// A byte buffer that grows by any number of bits.
 ///
 /// `bytes` holds the written bits from the most significant bit of the
@@ -64,6 +66,28 @@ impl BitWriter {
             for &byte in bytes {
                 self.push_bits(byte, 8);
             }
+        }
+    }
+
+    /// Write the bits of `binary` at the current bit offset: its whole
+    /// bytes, then the last bits of a size that is not a whole number of
+    /// bytes, as `erts_bs_put_binary_all` copies each bit of a bitstring
+    /// (`erl_bits.c:1311-1332`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut writer = BitWriter::default();
+    /// writer.push_binary(&Binary::from(vec![0x10]).bits(0, 4));
+    /// writer.push_binary(&Binary::from(vec![0x20]).bits(0, 4));
+    /// assert_eq!(writer.into_bytes(), Ok(vec![0x12]));
+    /// ```
+    pub(super) fn push_binary(&mut self, binary: &Binary) {
+        let size = binary.bit_size();
+        let bits = binary.bit_bytes();
+        self.push_bytes(&bits[..size / 8]);
+        if !size.is_multiple_of(8) {
+            self.push_bits(bits[size / 8] >> (8 - size % 8), (size % 8) as u32);
         }
     }
 

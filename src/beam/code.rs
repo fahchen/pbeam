@@ -15,10 +15,12 @@ use crate::{
 
 const WORD_SIZE: usize = 4;
 mod instruction;
+mod line;
 pub(crate) use instruction::{
     BinaryMatchCommand, BinarySegment, FloatOperation, Instruction, Operand, SelectValueChoices,
     TestKind, TestOperand,
 };
+pub(crate) use line::LineTable;
 
 const CHUNK_ALIGNMENT: usize = WORD_SIZE;
 const CHUNK_HEADER_SIZE: usize = WORD_SIZE * 2;
@@ -403,8 +405,15 @@ fn decode(
         .transpose()?
         .unwrap_or_default();
     let strings = chunks.get(b"StrT".as_slice()).copied().unwrap_or_default();
+    // ERTS reads a `Line` chunk that is not empty (`beam_file.c:1706-1711`).
+    let mut lines = chunks
+        .get(b"Line".as_slice())
+        .filter(|data| !data.is_empty())
+        .map(|data| LineTable::parse(data, &name))
+        .transpose()?
+        .unwrap_or_default();
     let (instructions, number_of_labels, on_load) = instruction::parse_code(
-        code, atom_table, &atoms, &imports, &literals, &lambdas, strings,
+        code, atom_table, &atoms, &imports, &literals, &lambdas, strings, &mut lines,
     )?;
     if let Some(label) = exports
         .values()
@@ -433,6 +442,7 @@ fn decode(
         .collect();
     let mut module = BeamModule::new(name, exports, imports, instructions)?;
     module.on_load = on_load;
+    module.lines = lines;
     module.native_declarations = chunks
         .get(b"Attr".as_slice())
         .map(|data| attributes::native_declarations(data))

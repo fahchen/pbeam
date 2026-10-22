@@ -606,7 +606,7 @@ fn render(term: &Term, atoms: &AtomTable) -> String {
         Term::Integer(value) => value.to_string(),
         Term::Atom(atom) => atoms.name_of(atom).to_owned(),
         Term::Binary(bytes) => {
-            let bytes: Vec<String> = bytes.iter().map(u8::to_string).collect();
+            let bytes: Vec<String> = bytes.bytes().unwrap().iter().map(u8::to_string).collect();
             format!("<<{}>>", bytes.join(","))
         }
         other => panic!("render has no form for {other:?}"),
@@ -1309,7 +1309,7 @@ fn appends_with_private_append_segments_as_pinned_erts() {
     assert_eq!(results, expected);
     assert_eq!(
         run_writable(&program, "bytes", &[int(100_000)]).map(|term| match &term {
-            Term::Binary(bytes) => bytes.len(),
+            Term::Binary(bytes) => bytes.bytes().unwrap().len(),
             other => panic!("not a binary: {other:?}"),
         }),
         Ok(100_000)

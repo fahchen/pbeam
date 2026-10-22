@@ -49,7 +49,10 @@ pub(super) fn native_name_encoding(encoding: FilenameEncoding) -> BifResult {
 pub(super) fn internal_name2native(name: &Term) -> BifResult {
     let bytes = match name {
         Term::Atom(_) => None,
-        Term::Binary(bytes) => (!bytes.contains(&0)).then(|| bytes.to_vec()),
+        Term::Binary(bytes) => bytes
+            .bytes()
+            .filter(|bytes| !bytes.contains(&0))
+            .map(<[u8]>::to_vec),
         _ => native_filename(name, filename_encoding()),
     };
     match bytes {
@@ -88,7 +91,7 @@ pub(super) fn internal_native2name(
     name: &Term,
     encoding: FilenameEncoding,
 ) -> Result<BifResult, BeamError> {
-    let Term::Binary(bytes) = name else {
+    let Some(bytes) = name.binary_bytes() else {
         return Ok(BifResult::badarg());
     };
     Ok(Value(name_from_native(bytes, encoding)?.unwrap_or_else(

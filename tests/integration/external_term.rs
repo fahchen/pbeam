@@ -114,8 +114,8 @@ fn runs_term_to_binary_options_as_pinned_erts() {
     let Term::Binary(plain) = &exact[2] else {
         panic!("the compressed level 0 option gives a binary");
     };
-    assert_eq!(&plain[..6], [131, 108, 0, 0, 0, 40]);
-    assert_eq!(plain.len(), 207);
+    assert_eq!(&plain.bytes().unwrap()[..6], [131, 108, 0, 0, 0, 40]);
+    assert_eq!(plain.bytes().unwrap().len(), 207);
     assert_eq!(exact[3], binary(&[131, 100, 0, 1, 233]));
     assert_eq!(
         exact[4],
@@ -131,9 +131,12 @@ fn runs_term_to_binary_options_as_pinned_erts() {
     let Term::Binary(local) = &local else {
         panic!("the local option gives a binary");
     };
-    assert_eq!(&local[..2], [131, 121]);
-    assert_eq!(&local[6..], [104, 2, 119, 1, 120, 109, 0, 0, 0, 2, 1, 2]);
-    assert_eq!(local.len(), 18);
+    assert_eq!(&local.bytes().unwrap()[..2], [131, 121]);
+    assert_eq!(
+        &local.bytes().unwrap()[6..],
+        [104, 2, 119, 1, 120, 109, 0, 0, 0, 2, 1, 2]
+    );
+    assert_eq!(local.bytes().unwrap().len(), 18);
     assert_eq!(
         decoded,
         Term::tuple(vec![atom(&program, "x"), binary(&[1, 2])])

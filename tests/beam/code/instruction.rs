@@ -1,4 +1,4 @@
-use super::super::{read_integer, read_integer_after_first, read_operand, read_value};
+use super::super::{LineTable, read_integer, read_integer_after_first, read_operand, read_value};
 use super::{
     FloatOperation, OPCODE_BIF0, OPCODE_FADD, OPCODE_FCONV, OPCODE_FDIV, OPCODE_FMOVE, OPCODE_FMUL,
     OPCODE_FNEGATE, OPCODE_FSUB, OPCODE_GET_MAP_ELEMENTS, OPCODE_GET_RECORD_ELEMENTS,
@@ -43,8 +43,32 @@ fn rejects_invalid_operands_and_code_headers() {
     assert!(read_operand(&[], &mut 0, 0).is_err());
     assert!(read_value(&[0x03], &mut 0, &[]).is_err());
     assert!(read_value(&[0x12], &mut 0, &[]).is_err());
-    assert!(parse_code(&[], &AtomTable::new(), &[], &[], &[], &[], &[]).is_err());
-    assert!(parse_code(&[0; 20], &AtomTable::new(), &[], &[], &[], &[], &[]).is_err());
+    assert!(
+        parse_code(
+            &[],
+            &AtomTable::new(),
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &mut LineTable::default()
+        )
+        .is_err()
+    );
+    assert!(
+        parse_code(
+            &[0; 20],
+            &AtomTable::new(),
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &mut LineTable::default()
+        )
+        .is_err()
+    );
     assert!(
         parse_code(
             &[0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
@@ -53,7 +77,8 @@ fn rejects_invalid_operands_and_code_headers() {
             &[],
             &[],
             &[],
-            &[]
+            &[],
+            &mut LineTable::default()
         )
         .is_err()
     );
@@ -81,7 +106,7 @@ fn reads_only_supported_move_literals() {
     let literals = vec![Some(Term::binary(b"ok".to_vec())), None];
     assert!(matches!(
         &read_move_operand(&[0x47, 0x00], &mut 0, &[], &literals).unwrap(),
-        Operand::Value(Term::Binary(value)) if &**value == b"ok"
+        Operand::Value(Term::Binary(value)) if value.bit_bytes() == b"ok"
     ));
     let mut cursor = 0;
     assert!(matches!(
@@ -158,7 +183,8 @@ fn rejects_unsupported_select_val_forms() {
             &[],
             &[],
             &[],
-            &[]
+            &[],
+            &mut LineTable::default()
         )
         .is_err()
     );
@@ -170,7 +196,8 @@ fn rejects_unsupported_select_val_forms() {
             &[],
             &[],
             &[],
-            &[]
+            &[],
+            &mut LineTable::default()
         )
         .is_err()
     );
@@ -183,7 +210,8 @@ fn rejects_unsupported_select_val_forms() {
             &[],
             &[],
             &[],
-            &[]
+            &[],
+            &mut LineTable::default()
         )
         .unwrap_err()
         .to_string()
@@ -199,7 +227,8 @@ fn rejects_unsupported_select_val_forms() {
                 &[],
                 &[],
                 &[],
-                &[]
+                &[],
+                &mut LineTable::default()
             )
             .unwrap_err()
             .to_string()
@@ -291,8 +320,17 @@ fn decodes_build_stacktrace_without_operands() {
     let mut code = vec![0, 0, 0, 16];
     code.extend([0; 16]);
     code.extend([0x40, 0x23, 0x03, 0xA0, 0x03]);
-    let (instructions, _, _) =
-        parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[]).unwrap();
+    let (instructions, _, _) = parse_code(
+        &code,
+        &AtomTable::new(),
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &mut LineTable::default(),
+    )
+    .unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -311,8 +349,17 @@ fn decodes_raise_with_a_raw_stack_trace_and_a_reason() {
     let mut code = vec![0, 0, 0, 16];
     code.extend([0; 16]);
     code.extend([0x6C, 0x23, 0x13, 0x6C, 0x04, 0x02, 0x03]);
-    let (instructions, _, _) =
-        parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[]).unwrap();
+    let (instructions, _, _) = parse_code(
+        &code,
+        &AtomTable::new(),
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &mut LineTable::default(),
+    )
+    .unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -340,8 +387,17 @@ fn decodes_the_error_path_instructions() {
     code.extend([
         0x48, 0x03, 0x48, 0x04, 0x4A, 0x03, 0x49, 0x6B, 0x03, 0xB4, 0x03, 0xA1, 0x4A, 0x02, 0x03,
     ]);
-    let (instructions, _, _) =
-        parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[]).unwrap();
+    let (instructions, _, _) = parse_code(
+        &code,
+        &AtomTable::new(),
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &mut LineTable::default(),
+    )
+    .unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -400,6 +456,7 @@ fn decodes_try_and_catch_instructions_with_a_y_register() {
         &[],
         &[],
         &[],
+        &mut LineTable::default(),
     )
     .unwrap();
     assert!(matches!(
@@ -432,7 +489,8 @@ fn decodes_try_and_catch_instructions_with_a_y_register() {
             &[],
             &[],
             &[],
-            &[]
+            &[],
+            &mut LineTable::default()
         )
         .unwrap_err()
         .to_string()
@@ -465,6 +523,7 @@ fn decodes_nif_start_at_the_entry_of_the_function_of_the_func_info_before_it() {
         &[],
         &[],
         &[],
+        &mut LineTable::default(),
     )
     .unwrap();
     assert!(matches!(
@@ -493,6 +552,7 @@ fn decodes_nif_start_at_the_entry_of_the_function_of_the_func_info_before_it() {
         &[],
         &[],
         &[],
+        &mut LineTable::default(),
     )
     .unwrap();
     assert!(matches!(
@@ -507,9 +567,18 @@ fn decodes_nif_start_at_the_entry_of_the_function_of_the_func_info_before_it() {
         ] if name == "write_nif"
     ));
     assert_eq!(
-        parse_code(&code(&[0xB3]), &table, &atoms, &[], &[], &[], &[])
-            .unwrap_err()
-            .to_string(),
+        parse_code(
+            &code(&[0xB3]),
+            &table,
+            &atoms,
+            &[],
+            &[],
+            &[],
+            &[],
+            &mut LineTable::default()
+        )
+        .unwrap_err()
+        .to_string(),
         "BEAM nif_start has no func_info before it"
     );
 }
@@ -541,6 +610,7 @@ fn decodes_bif0_and_bif1_into_one_bif_instruction_with_its_fail_label() {
         &[],
         &[],
         &[],
+        &mut LineTable::default(),
     )
     .unwrap();
     assert!(matches!(
@@ -571,10 +641,19 @@ fn decodes_bif0_and_bif1_into_one_bif_instruction_with_its_fail_label() {
     ));
     for bif in [&[0x09, 0x20, 0x03][..], &[0x0A, 0x05, 0x20, 0x03, 0x03]] {
         assert!(
-            parse_code(&code(bif), &AtomTable::new(), &[], &imports, &[], &[], &[])
-                .unwrap_err()
-                .to_string()
-                .contains("BEAM BIF import index 2 out of range")
+            parse_code(
+                &code(bif),
+                &AtomTable::new(),
+                &[],
+                &imports,
+                &[],
+                &[],
+                &[],
+                &mut LineTable::default()
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("BEAM BIF import index 2 out of range")
         );
     }
     // `lists:node/0` is not a `bif.tab` entry, so the loader rejects the
@@ -589,7 +668,8 @@ fn decodes_bif0_and_bif1_into_one_bif_instruction_with_its_fail_label() {
             &imports,
             &[],
             &[],
-            &[]
+            &[],
+            &mut LineTable::default()
         )
         .unwrap_err()
         .to_string()
@@ -613,8 +693,17 @@ fn decodes_bif2_into_a_bif_instruction_with_its_fail_label() {
         ("erlang".to_owned(), "element".to_owned(), 2),
         ("erlang".to_owned(), "element".to_owned(), 2),
     ];
-    let (instructions, _, _) =
-        parse_code(&code, &AtomTable::new(), &[], &imports, &[], &[], &[]).unwrap();
+    let (instructions, _, _) = parse_code(
+        &code,
+        &AtomTable::new(),
+        &[],
+        &imports,
+        &[],
+        &[],
+        &[],
+        &mut LineTable::default(),
+    )
+    .unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -649,8 +738,17 @@ fn decodes_is_ne_exact_with_its_fail_label() {
     // Bytes of `user_drv:server/3` in the pinned `user_drv.beam`:
     // {test,is_ne_exact,{f,157},[{x,0},{x,3}]}
     code.extend([0x2C, 0x0D, 0x9D, 0x03, 0x33, 0x03]);
-    let (instructions, _, _) =
-        parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[]).unwrap();
+    let (instructions, _, _) = parse_code(
+        &code,
+        &AtomTable::new(),
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &mut LineTable::default(),
+    )
+    .unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -679,9 +777,18 @@ fn selects_the_classified_operand_form_of_is_eq_exact() {
         code.extend([0; 16]);
         code.extend_from_slice(stream);
         code.push(0x03);
-        parse_code(&code, &AtomTable::new(), &atoms, &[], &[], &[], &[])
-            .unwrap()
-            .0
+        parse_code(
+            &code,
+            &AtomTable::new(),
+            &atoms,
+            &[],
+            &[],
+            &[],
+            &[],
+            &mut LineTable::default(),
+        )
+        .unwrap()
+        .0
     };
     // {test,is_eq_exact,{f,3},[{x,0},{integer,0}]}: the floor-loop shape.
     assert!(matches!(
@@ -766,8 +873,17 @@ fn decodes_is_ge_with_a_typed_register() {
     // Bytes of `group_probe:kind/1` in `fixtures/group/group_probe.beam`:
     // {test,is_ge,{f,22},[{tr,{x,1},{t_integer,{0,16777215}}},{integer,2}]}
     code.extend([0x28, 0x0D, 0x16, 0x57, 0x13, 0x20, 0x21, 0x03]);
-    let (instructions, _, _) =
-        parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[]).unwrap();
+    let (instructions, _, _) = parse_code(
+        &code,
+        &AtomTable::new(),
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &mut LineTable::default(),
+    )
+    .unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -792,8 +908,17 @@ fn decodes_the_is_lt_is_integer_and_is_boolean_tests_of_the_compare_probe_fixtur
     let mut code = vec![0, 0, 0, 16];
     code.extend([0; 16]);
     code.extend([&next[..], &width, &is_integer, &is_boolean, &[0x03]].concat());
-    let (instructions, _, _) =
-        parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[]).unwrap();
+    let (instructions, _, _) = parse_code(
+        &code,
+        &AtomTable::new(),
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &mut LineTable::default(),
+    )
+    .unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -833,7 +958,16 @@ fn decodes_is_any_native_record_with_a_register_source_as_the_erts_loader() {
         code.extend([0; 16]);
         code.extend(stream);
         code.push(0x03);
-        parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[])
+        parse_code(
+            &code,
+            &AtomTable::new(),
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &mut LineTable::default(),
+        )
     };
     let (instructions, _, _) = parse(&[
         0xBA, 0x55, 0x03, 0xBA, 0x65, 0x14, 0xBA, 0x75, 0x57, 0x23, 0x00,
@@ -874,8 +1008,17 @@ fn decodes_the_is_eq_test_of_the_compare_probe_fixture() {
     let mut code = vec![0, 0, 0, 16];
     code.extend([0; 16]);
     code.extend([&is_eq[..], &[0x03]].concat());
-    let (instructions, _, _) =
-        parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[]).unwrap();
+    let (instructions, _, _) = parse_code(
+        &code,
+        &AtomTable::new(),
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &mut LineTable::default(),
+    )
+    .unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -897,8 +1040,17 @@ fn decodes_the_is_ne_test_of_the_compare_probe_fixture() {
     let mut code = vec![0, 0, 0, 16];
     code.extend([0; 16]);
     code.extend([&is_ne[..], &[0x03]].concat());
-    let (instructions, _, _) =
-        parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[]).unwrap();
+    let (instructions, _, _) = parse_code(
+        &code,
+        &AtomTable::new(),
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &mut LineTable::default(),
+    )
+    .unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -921,8 +1073,17 @@ fn decodes_the_bs_start_match3_test_of_the_binary_match_probe_fixture() {
     let mut code = vec![0, 0, 0, 16];
     code.extend([0; 16]);
     code.extend([&bs_start_match3[..], &[0x03]].concat());
-    let (instructions, _, _) =
-        parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[]).unwrap();
+    let (instructions, _, _) = parse_code(
+        &code,
+        &AtomTable::new(),
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &mut LineTable::default(),
+    )
+    .unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -968,7 +1129,17 @@ fn decodes_the_binary_match_instructions_of_is_usascii() {
     code.extend([0; 16]);
     code.extend(parts.concat());
     code.push(0x03);
-    let (instructions, _, _) = parse_code(&code, &table, &atoms, &[], &[], &[], &[]).unwrap();
+    let (instructions, _, _) = parse_code(
+        &code,
+        &table,
+        &atoms,
+        &[],
+        &[],
+        &[],
+        &[],
+        &mut LineTable::default(),
+    )
+    .unwrap();
     assert!(
         matches!(
             instructions.as_slice(),
@@ -1048,7 +1219,17 @@ fn decodes_the_bs_match_commands_of_the_bs_match_probe_fixture() {
     code.extend([0; 16]);
     code.extend(parts.concat());
     code.push(0x03);
-    let (instructions, _, _) = parse_code(&code, &table, &atoms, &[], &[], &[], &[]).unwrap();
+    let (instructions, _, _) = parse_code(
+        &code,
+        &table,
+        &atoms,
+        &[],
+        &[],
+        &[],
+        &[],
+        &mut LineTable::default(),
+    )
+    .unwrap();
     assert!(
         matches!(
             instructions.as_slice(),
@@ -1108,7 +1289,17 @@ fn decodes_each_operand_of_the_utf16_and_utf32_instructions_of_bs_utf_probe() {
     code.extend([0; 16]);
     code.extend(parts.concat());
     code.push(0x03);
-    let (instructions, _, _) = parse_code(&code, &table, &[], &[], &[], &[], &[]).unwrap();
+    let (instructions, _, _) = parse_code(
+        &code,
+        &table,
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &mut LineTable::default(),
+    )
+    .unwrap();
     let decoded: Vec<_> = instructions
         .iter()
         .filter(|instruction| !matches!(instruction, Instruction::End))
@@ -1174,7 +1365,17 @@ fn decodes_each_operand_of_the_bs_get_float2_instructions_of_bs_float_probe() {
     code.extend([0; 16]);
     code.extend(parts.concat());
     code.push(0x03);
-    let (instructions, _, _) = parse_code(&code, &table, &[], &[], &[], &[], &[]).unwrap();
+    let (instructions, _, _) = parse_code(
+        &code,
+        &table,
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &mut LineTable::default(),
+    )
+    .unwrap();
     let floats: Vec<_> = instructions
         .iter()
         .filter(|instruction| !matches!(instruction, Instruction::End))
@@ -1215,7 +1416,17 @@ fn decodes_each_operand_of_the_bs_get_float2_instructions_of_bs_float_probe() {
         0x76, 0x35, 0x03, 0x20, 0xF9, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0,
     ]);
     code.extend([0x10, 0x00, 0x13, 0x03]);
-    let (instructions, _, _) = parse_code(&code, &table, &[], &[], &[], &[], &[]).unwrap();
+    let (instructions, _, _) = parse_code(
+        &code,
+        &table,
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &mut LineTable::default(),
+    )
+    .unwrap();
     assert!(
         matches!(
             instructions.as_slice(),
@@ -1269,8 +1480,17 @@ fn decodes_the_bs_start_match4_bs_get_binary2_and_bs_get_tail_instructions_of_bs
         code.push(0x03);
         code
     };
-    let (instructions, _, _) =
-        parse_code(&code(&parts), &table, &atoms, &[], &[], &[], &[]).unwrap();
+    let (instructions, _, _) = parse_code(
+        &code(&parts),
+        &table,
+        &atoms,
+        &[],
+        &[],
+        &[],
+        &[],
+        &mut LineTable::default(),
+    )
+    .unwrap();
     assert!(
         matches!(
             instructions.as_slice(),
@@ -1316,7 +1536,8 @@ fn decodes_the_bs_start_match4_bs_get_binary2_and_bs_get_tail_instructions_of_bs
             &[],
             &[],
             &[],
-            &[]
+            &[],
+            &mut LineTable::default()
         )
         .unwrap_err()
         .to_string(),
@@ -1442,8 +1663,17 @@ fn decodes_the_fconv_instruction_of_the_float_test_probe_fixture() {
     let mut code = vec![0, 0, 0, 16];
     code.extend([0; 16]);
     code.extend([&fconv[..], &[0x03]].concat());
-    let (instructions, _, _) =
-        parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[]).unwrap();
+    let (instructions, _, _) = parse_code(
+        &code,
+        &AtomTable::new(),
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &mut LineTable::default(),
+    )
+    .unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -1464,8 +1694,17 @@ fn decodes_the_is_float_test_of_the_float_test_probe_fixture() {
     let mut code = vec![0, 0, 0, 16];
     code.extend([0; 16]);
     code.extend([&is_float[..], &[0x03]].concat());
-    let (instructions, _, _) =
-        parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[]).unwrap();
+    let (instructions, _, _) = parse_code(
+        &code,
+        &AtomTable::new(),
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &mut LineTable::default(),
+    )
+    .unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -1487,8 +1726,17 @@ fn decodes_the_is_number_test_of_the_type_test_probe_fixture() {
     let mut code = vec![0, 0, 0, 16];
     code.extend([0; 16]);
     code.extend([&is_number[..], &[0x03]].concat());
-    let (instructions, _, _) =
-        parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[]).unwrap();
+    let (instructions, _, _) = parse_code(
+        &code,
+        &AtomTable::new(),
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &mut LineTable::default(),
+    )
+    .unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -1510,8 +1758,17 @@ fn decodes_the_is_bitstr_test_of_the_bitstr_probe_fixture() {
     let mut code = vec![0, 0, 0, 16];
     code.extend([0; 16]);
     code.extend([&is_bitstr[..], &[0x03]].concat());
-    let (instructions, _, _) =
-        parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[]).unwrap();
+    let (instructions, _, _) = parse_code(
+        &code,
+        &AtomTable::new(),
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &mut LineTable::default(),
+    )
+    .unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -1533,8 +1790,17 @@ fn decodes_the_get_tl_instruction_of_the_io_start_probe_fixture() {
     let mut code = vec![0, 0, 0, 16];
     code.extend([0; 16]);
     code.extend([&get_tl[..], &[0x03]].concat());
-    let (instructions, _, _) =
-        parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[]).unwrap();
+    let (instructions, _, _) = parse_code(
+        &code,
+        &AtomTable::new(),
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &mut LineTable::default(),
+    )
+    .unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -1577,7 +1843,17 @@ fn decodes_the_put_map_exact_instruction_of_the_io_start_probe_fixture() {
     let mut code = vec![0, 0, 0, 16];
     code.extend([0; 16]);
     code.extend([&put_map_exact[..], &[0x03]].concat());
-    let (instructions, _, _) = parse_code(&code, &table, &atoms, &[], &[], &[], &[]).unwrap();
+    let (instructions, _, _) = parse_code(
+        &code,
+        &table,
+        &atoms,
+        &[],
+        &[],
+        &[],
+        &[],
+        &mut LineTable::default(),
+    )
+    .unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -1627,7 +1903,17 @@ fn decodes_the_has_map_fields_tests_of_the_map_probe_fixture() {
     let mut code = vec![0, 0, 0, 16];
     code.extend([0; 16]);
     code.extend([&pair[..], &key[..], &[0x03]].concat());
-    let (instructions, _, _) = parse_code(&code, &table, &atoms, &[], &[], &[], &[]).unwrap();
+    let (instructions, _, _) = parse_code(
+        &code,
+        &table,
+        &atoms,
+        &[],
+        &[],
+        &[],
+        &[],
+        &mut LineTable::default(),
+    )
+    .unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -1720,10 +2006,19 @@ fn sorts_get_map_elements_keys_in_flatmap_key_order_like_the_erts_loader() {
         0x03,
     ]);
     assert!(
-        parse_code(&code, &atoms, &[], &[], &[], &[], &[])
-            .unwrap_err()
-            .to_string()
-            .contains("a register key among other keys")
+        parse_code(
+            &code,
+            &atoms,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &mut LineTable::default()
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("a register key among other keys")
     );
 }
 
@@ -1733,9 +2028,18 @@ fn rejects_malformed_has_map_fields_key_lists() {
         let mut code = vec![0, 0, 0, 16];
         code.extend([0; 16]);
         code.extend([&[OPCODE_HAS_MAP_FIELDS, 0x35, 0x03], operands].concat());
-        parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[])
-            .unwrap_err()
-            .to_string()
+        parse_code(
+            &code,
+            &AtomTable::new(),
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &mut LineTable::default(),
+        )
+        .unwrap_err()
+        .to_string()
     };
     // The key list must be an extended list.
     assert!(error(&[0x27, 0x10, 0x03]).contains("unsupported BEAM list operand"));
@@ -1763,8 +2067,17 @@ fn decodes_the_list_record_and_receive_wait_instructions_of_pinned_gen_statem() 
         0xA1, // call/3: raw_raise
         0x03,
     ]);
-    let (instructions, _, _) =
-        parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[]).unwrap();
+    let (instructions, _, _) = parse_code(
+        &code,
+        &AtomTable::new(),
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &mut LineTable::default(),
+    )
+    .unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -1822,8 +2135,17 @@ fn decodes_the_apply_instructions_of_pinned_gen_statem() {
         0x71, 0x10, 0xB0, // terminate/7: {apply_last,1,11}
         0x03,
     ]);
-    let (instructions, _, _) =
-        parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[]).unwrap();
+    let (instructions, _, _) = parse_code(
+        &code,
+        &AtomTable::new(),
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &mut LineTable::default(),
+    )
+    .unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -1847,7 +2169,19 @@ fn decodes_the_apply_instructions_of_pinned_gen_statem() {
     ));
     // `apply_last` without its deallocate operand is truncated.
     code.truncate(code.len() - 2);
-    assert!(parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[]).is_err());
+    assert!(
+        parse_code(
+            &code,
+            &AtomTable::new(),
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &mut LineTable::default()
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -1873,8 +2207,17 @@ fn decodes_gc_bif1_and_gc_bif2_of_the_arith_probe_fixture_into_a_bif_instruction
         ("erlang".to_owned(), "div".to_owned(), 2),
         ("erlang".to_owned(), "-".to_owned(), 1),
     ];
-    let (instructions, _, _) =
-        parse_code(&code, &AtomTable::new(), &[], &imports, &[], &[], &[]).unwrap();
+    let (instructions, _, _) = parse_code(
+        &code,
+        &AtomTable::new(),
+        &[],
+        &imports,
+        &[],
+        &[],
+        &[],
+        &mut LineTable::default(),
+    )
+    .unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -1906,7 +2249,19 @@ fn decodes_gc_bif1_and_gc_bif2_of_the_arith_probe_fixture_into_a_bif_instruction
     ));
     // Without its destination and the end, the instruction is truncated.
     code.truncate(code.len() - 2);
-    assert!(parse_code(&code, &AtomTable::new(), &[], &imports, &[], &[], &[]).is_err());
+    assert!(
+        parse_code(
+            &code,
+            &AtomTable::new(),
+            &[],
+            &imports,
+            &[],
+            &[],
+            &[],
+            &mut LineTable::default()
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -1923,8 +2278,17 @@ fn decodes_gc_bif3_of_the_binary_part_probe_fixture_into_a_bif_instruction() {
     code.extend([0; 16]);
     code.extend([&guard[..], &body, &[0x03]].concat());
     let imports = vec![("erlang".to_owned(), "binary_part".to_owned(), 3)];
-    let (instructions, _, _) =
-        parse_code(&code, &AtomTable::new(), &[], &imports, &[], &[], &[]).unwrap();
+    let (instructions, _, _) = parse_code(
+        &code,
+        &AtomTable::new(),
+        &[],
+        &imports,
+        &[],
+        &[],
+        &[],
+        &mut LineTable::default(),
+    )
+    .unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -1952,7 +2316,19 @@ fn decodes_gc_bif3_of_the_binary_part_probe_fixture_into_a_bif_instruction() {
     ));
     // Without its destination and the end, the instruction is truncated.
     code.truncate(code.len() - 3);
-    assert!(parse_code(&code, &AtomTable::new(), &[], &imports, &[], &[], &[]).is_err());
+    assert!(
+        parse_code(
+            &code,
+            &AtomTable::new(),
+            &[],
+            &imports,
+            &[],
+            &[],
+            &[],
+            &mut LineTable::default()
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -1971,8 +2347,17 @@ fn decodes_bif3_of_the_is_integer_probe_fixture_into_a_bif_instruction() {
         ("erlang".to_owned(), "binary_part".to_owned(), 3),
         ("erlang".to_owned(), "is_integer".to_owned(), 3),
     ];
-    let (instructions, _, _) =
-        parse_code(&code, &AtomTable::new(), &[], &imports, &[], &[], &[]).unwrap();
+    let (instructions, _, _) = parse_code(
+        &code,
+        &AtomTable::new(),
+        &[],
+        &imports,
+        &[],
+        &[],
+        &[],
+        &mut LineTable::default(),
+    )
+    .unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -2010,13 +2395,26 @@ fn decodes_bif3_of_the_is_integer_probe_fixture_into_a_bif_instruction() {
             &imports,
             &[],
             &[],
-            &[]
+            &[],
+            &mut LineTable::default()
         )
         .is_err()
     );
     // Without its destination and the end, the instruction is truncated.
     code.truncate(code.len() - 2);
-    assert!(parse_code(&code, &AtomTable::new(), &[], &imports, &[], &[], &[]).is_err());
+    assert!(
+        parse_code(
+            &code,
+            &AtomTable::new(),
+            &[],
+            &imports,
+            &[],
+            &[],
+            &[],
+            &mut LineTable::default()
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -2049,6 +2447,7 @@ fn decodes_the_fun_instructions_of_the_fun_probe_fixture() {
             &[],
             &lambdas,
             &[],
+            &mut LineTable::default(),
         )
     };
     // `tests/integration/fixture_opcodes.rs` checks that
@@ -2123,8 +2522,17 @@ fn joins_a_fun_call_in_a_tail_position_as_the_erts_loader() {
         0x12, 0x00, 0x13, // deallocate 0, return
         0x03,
     ]);
-    let (instructions, _, _) =
-        parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[]).unwrap();
+    let (instructions, _, _) = parse_code(
+        &code,
+        &AtomTable::new(),
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &mut LineTable::default(),
+    )
+    .unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -2164,9 +2572,18 @@ fn turns_a_call_of_erlang_hibernate_into_the_erts_hibernate_instruction() {
         code.extend_from_slice(bytes);
         code.push(0x03);
         let imports = [("erlang".to_owned(), "hibernate".to_owned(), 0)];
-        parse_code(&code, &AtomTable::new(), &[], &imports, &[], &[], &[])
-            .unwrap()
-            .0
+        parse_code(
+            &code,
+            &AtomTable::new(),
+            &[],
+            &imports,
+            &[],
+            &[],
+            &[],
+            &mut LineTable::default(),
+        )
+        .unwrap()
+        .0
     };
     assert!(matches!(
         decode(&[0x07, 0x00, 0x00]).as_slice(), // call_ext 0 import 0
@@ -2201,9 +2618,18 @@ fn turns_a_call_of_erlang_yield_into_the_erts_yield_instruction() {
         code.extend_from_slice(bytes);
         code.push(0x03);
         let imports = [("erlang".to_owned(), "yield".to_owned(), 0)];
-        parse_code(&code, &AtomTable::new(), &[], &imports, &[], &[], &[])
-            .unwrap()
-            .0
+        parse_code(
+            &code,
+            &AtomTable::new(),
+            &[],
+            &imports,
+            &[],
+            &[],
+            &[],
+            &mut LineTable::default(),
+        )
+        .unwrap()
+        .0
     };
     assert!(matches!(
         decode(&[0x07, 0x00, 0x00]).as_slice(), // call_ext 0 import 0
@@ -2242,7 +2668,17 @@ fn puts_a_test_yield_after_the_entry_label_of_each_function() {
     ]);
     let table = AtomTable::new();
     let atoms = ["preempt_probe", "body"].map(|name| table.put(name).unwrap());
-    let (instructions, _, _) = parse_code(&code, &table, &atoms, &[], &[], &[], &[]).unwrap();
+    let (instructions, _, _) = parse_code(
+        &code,
+        &table,
+        &atoms,
+        &[],
+        &[],
+        &[],
+        &[],
+        &mut LineTable::default(),
+    )
+    .unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -2267,9 +2703,18 @@ fn puts_the_deallocate_and_the_return_of_a_tail_call_after_call_ext() {
         code.extend_from_slice(bytes);
         code.push(0x03);
         let imports = [("erlang".to_owned(), "whereis".to_owned(), 1)];
-        parse_code(&code, &AtomTable::new(), &[], &imports, &[], &[], &[])
-            .unwrap()
-            .0
+        parse_code(
+            &code,
+            &AtomTable::new(),
+            &[],
+            &imports,
+            &[],
+            &[],
+            &[],
+            &mut LineTable::default(),
+        )
+        .unwrap()
+        .0
     };
     let whereis = |instruction: &Instruction, tail: bool, size: u32| {
         matches!(
@@ -2314,8 +2759,17 @@ fn decodes_the_is_function_tests_of_the_fun_probe_fixture() {
         0x73, 0x0D, 0x64, 0x03, 0x13, // is_function2 f100 x0 x1
         0x03,
     ]);
-    let (instructions, _, _) =
-        parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[]).unwrap();
+    let (instructions, _, _) = parse_code(
+        &code,
+        &AtomTable::new(),
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &mut LineTable::default(),
+    )
+    .unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -2357,7 +2811,19 @@ fn rejects_a_put_tuple2_without_an_element_list() {
     let mut code = vec![0, 0, 0, 16];
     code.extend([0; 16]);
     code.extend([OPCODE_PUT_TUPLE2, 0x03, 0x27]);
-    assert!(parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[]).is_err());
+    assert!(
+        parse_code(
+            &code,
+            &AtomTable::new(),
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &mut LineTable::default()
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -2526,7 +2992,11 @@ fn reads_bs_create_bin_segments_and_rejects_malformed_lists() {
         segments.as_slice(),
         [
             BinarySegment::String(text),
-            BinarySegment::BinaryAll { segment: 2, source: Operand::X(0) },
+            BinarySegment::BinaryAll {
+                segment: 2,
+                unit: 8,
+                source: Operand::X(0)
+            },
         ] if text == b"count: "
     ));
     // {atom,binary} of unit 3 and size all; {atom,binary} of unit 8 and
@@ -2561,6 +3031,7 @@ fn reads_bs_create_bin_segments_and_rejects_malformed_lists() {
             },
             BinarySegment::BinaryAll {
                 segment: 2,
+                unit: 8,
                 source: Operand::X(1)
             },
         ]
@@ -3158,8 +3629,17 @@ fn decodes_the_float_register_instructions_of_the_float_probe_fixture() {
     let mut code = vec![0, 0, 0, 16];
     code.extend([0; 16]);
     code.extend(&body);
-    let (instructions, _, _) =
-        parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[]).unwrap();
+    let (instructions, _, _) = parse_code(
+        &code,
+        &AtomTable::new(),
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &mut LineTable::default(),
+    )
+    .unwrap();
     assert!(matches!(
         instructions.as_slice(),
         [
@@ -3206,7 +3686,19 @@ fn decodes_the_float_register_instructions_of_the_float_probe_fixture() {
         code.extend([0; 16]);
         code.extend(&bad);
         code.push(0x03);
-        assert!(parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[]).is_err());
+        assert!(
+            parse_code(
+                &code,
+                &AtomTable::new(),
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &mut LineTable::default()
+            )
+            .is_err()
+        );
     }
 }
 
@@ -3228,6 +3720,7 @@ fn decodes_the_bs_match_string_instructions_of_the_bs_match_probe_fixture() {
         &[],
         &[],
         b"icrosoft.icon",
+        &mut LineTable::default(),
     )
     .unwrap();
     assert!(
@@ -3300,6 +3793,7 @@ fn decodes_the_bs_skip_bits2_instructions_of_the_bs_match_probe_fixture() {
         &[],
         &[],
         &[],
+        &mut LineTable::default(),
     )
     .unwrap();
     assert!(
@@ -3348,6 +3842,7 @@ fn decodes_the_bs_get_integer2_instructions_of_the_bs_match_probe_fixture() {
         &[],
         &[],
         &[],
+        &mut LineTable::default(),
     )
     .unwrap();
     assert!(
@@ -3393,6 +3888,7 @@ fn decodes_the_bs_skip_utf8_instruction_of_the_bs_utf_probe_fixture() {
         &[],
         &[],
         &[],
+        &mut LineTable::default(),
     )
     .unwrap();
     assert!(
@@ -3500,6 +3996,7 @@ fn keeps_a_known_unsupported_opcode_with_its_operands_skipped() {
         &[],
         &[],
         &[],
+        &mut LineTable::default(),
     )
     .unwrap();
     assert!(

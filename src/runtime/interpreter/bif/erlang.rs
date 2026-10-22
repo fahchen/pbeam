@@ -904,8 +904,8 @@ fn raise_with_args(
         });
     }
     let module_id = current_frame(context.scheduler.current_process_mut()).module_id;
-    let module = Arc::clone(context.scheduler.code.module_by_id(module_id)?);
-    let (module, function, arity) = current_function(context.scheduler, &module)?;
+    let code = Arc::clone(context.scheduler.code.module_by_id(module_id)?);
+    let (module, function, arity) = current_function(context.scheduler, &code)?;
     let args = if args.is_list() {
         args.clone()
     } else {
@@ -925,6 +925,10 @@ fn raise_with_args(
     frames.truncate(depth.max(1));
     // The apply of the first frame of a process that starts at
     // `erlang:apply/2,3` gives no frame, as in ERTS.
+    // `erts_build_mfa_item` puts the file and the line of the call before
+    // the `error_info` location (`utils.c:3430-3446`).
+    let index = current_frame(context.scheduler.current_process_mut()).next_instruction - 1;
+    let location = code.lines.location(index, location);
     if let Some(first) = frames.first_mut() {
         *first = Term::tuple(vec![module, function, args, location]);
     }
@@ -1839,10 +1843,10 @@ pub(super) fn length(
 /// signed word (`erl_bif_binary.c:1974-1977`); PBeam gives the same result
 /// because 2^63 is more than each start. In a guard, the `gc_bif3`
 /// instruction goes to its fail label instead. ERTS returns a sub-binary of
-/// the argument; PBeam returns a copy of the bytes. PBeam has no bitstring
-/// that is not a binary and no bignum, so these ERTS `badarg` inputs cannot
-/// occur (rows "Bitstring terms" and "Integer range" of
-/// `docs/erts-differences.md`).
+/// the argument; PBeam returns a copy of the bytes. A bitstring whose size
+/// is not a whole number of bytes raises `badarg`, as in ERTS. PBeam has no
+/// bignum, so the ERTS `badarg` of a bignum start or length cannot occur
+/// (row "Integer range" of `docs/erts-differences.md`).
 ///
 /// # Examples
 ///
@@ -1874,7 +1878,9 @@ pub(super) fn binary_part(binary: &Term, start: &Term, length: &Term) -> BifResu
     // The start is below 2^63 and the length is at most 2^63, so the sum
     // does not overflow.
     let end = start + length;
-    if end > bytes.len() as u64 {
+    // A bitstring whose size is not a whole number of bytes raises
+    // `badarg` (`erts_binary_part`, `erl_bif_binary.c:1995-1997`).
+    if !bytes.bit_size().is_multiple_of(8) || end > (bytes.bit_size() / 8) as u64 {
         return BifResult::badarg();
     }
     // ERTS makes a sub-binary that refers to the source
@@ -1926,7 +1932,7 @@ pub(super) fn bit_size(term: &Term) -> BifResult {
 /// ```
 pub(super) fn byte_size(term: &Term) -> BifResult {
     match term {
-        Term::Binary(bytes) => Value(Term::Integer(bytes.len() as i64)),
+        Term::Binary(bytes) => Value(Term::Integer(bytes.bit_size().div_ceil(8) as i64)),
         _ => BifResult::badarg(),
     }
 }
@@ -1967,11 +1973,17 @@ pub(super) fn tl(list: &Term) -> BifResult {
 /// ```
 pub(super) fn split_binary(binary: &Term, position: &Term) -> BifResult {
     match (binary, position) {
-        (Term::Binary(bytes), Term::Integer(at)) if (0..=bytes.len() as i64).contains(at) => {
-            let (left, right) = bytes.split_at(*at as usize);
+        (Term::Binary(binary), Term::Integer(at))
+            if (0..=(binary.bit_size() / 8) as i64).contains(at) =>
+        {
+            // The right part of a bitstring keeps the bits after the whole
+            // bytes (`split_binary_2`, `binary.c:488-512`).
+            let at = *at as usize;
+            let (left, right) = binary.bit_bytes().split_at(at);
+            let right = Binary::from(right.to_vec()).bits(0, binary.bit_size() - at * 8);
             Value(Term::tuple(vec![
                 Term::binary(left.to_vec()),
-                Term::binary(right.to_vec()),
+                Term::Binary(right),
             ]))
         }
         _ => BifResult::badarg(),
@@ -2722,9 +2734,9 @@ pub(super) fn binary_to_existing_atom(
     let (Term::Binary(bytes), Term::Atom(encoding)) = (binary, encoding) else {
         return BifResult::badarg();
     };
-    if !bytes.bit_size().is_multiple_of(8) {
+    let Some(bytes) = bytes.bytes() else {
         return BifResult::badarg();
-    }
+    };
     let name = if encoding.is_static("latin1") {
         if bytes.len() > MAX_ATOM_CHARACTERS {
             return BifResult::badarg();
@@ -2794,9 +2806,9 @@ pub(super) fn binary_to_atom(
     let (Term::Binary(bytes), Term::Atom(encoding)) = (binary, encoding) else {
         return Ok(BifResult::badarg());
     };
-    if bytes.bit_size() % 8 != 0 {
+    let Some(bytes) = bytes.bytes() else {
         return Ok(BifResult::badarg());
-    }
+    };
     let system_limit = || Raise {
         class: ExceptionClass::Error,
         reason: Term::static_atom("system_limit"),
@@ -4264,11 +4276,26 @@ pub(super) fn process_info(
             |scheduler| {
                 let current = scheduler.current_reductions();
                 let registered = scheduler.registered_name_of(caller_id);
+                // ERTS builds the frames of the calling process from its
+                // continuation pointers, without the current function, which
+                // is `process_info/2`: at most `backtrace_depth` frames
+                // (`erl_bif_info.c:2397-2460`).
+                let stacktrace = match item {
+                    Term::Atom(name) if scheduler.atoms.name_of(name) == "current_stacktrace" => {
+                        let mut frames = mfa_stacktrace(scheduler, 0)?;
+                        frames.truncate(scheduler.backtrace_depth);
+                        Some(Term::tuple(vec![item.clone(), Term::list_from(frames)]))
+                    }
+                    _ => None,
+                };
                 let (caller, atoms) = scheduler.current_process_and_atoms();
                 let messages = caller.mailbox.message_count();
-                let info = caller
-                    .info(atoms, item, current, messages, true, registered.as_ref())?
-                    .ok_or_else(|| unsupported(atoms))?;
+                let info = match stacktrace {
+                    Some(stacktrace) => stacktrace,
+                    None => caller
+                        .info(atoms, item, current, messages, registered.as_ref())?
+                        .ok_or_else(|| unsupported(atoms))?,
+                };
                 caller.bump_reductions(1 + super::links_reductions(item, &info));
                 Ok(Value(info))
             },
@@ -4315,14 +4342,7 @@ pub(super) fn process_info(
     };
     let messages = target.mailbox.message_count();
     let registered = scheduler.registered_name_of(*id);
-    let values = target.info(
-        &scheduler.atoms,
-        item,
-        0,
-        messages,
-        false,
-        registered.as_ref(),
-    );
+    let values = target.info(&scheduler.atoms, item, 0, messages, registered.as_ref());
     let info = values?.ok_or_else(|| unsupported(&scheduler.atoms))?;
     // A queued reply is built in the target process, but ERTS discards
     // the cost that `handle_process_info` returns
@@ -5486,10 +5506,10 @@ pub(super) fn display_string(
         }
         bytes
     } else if let Term::Binary(binary) = string {
-        if binary.bit_size() % 8 != 0 {
+        let Some(bytes) = binary.bytes() else {
             return Ok(BifResult::badarg());
-        }
-        binary.to_vec()
+        };
+        bytes.to_vec()
     } else {
         return Ok(BifResult::badarg());
     };

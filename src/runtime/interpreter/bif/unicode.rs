@@ -125,7 +125,7 @@ pub(super) fn characters_to_binary(
     };
     let simple = (cost / SIMPLE_FACTOR) as i64;
     cost_to_proc(process, simple);
-    if let Term::Binary(bytes) = subject
+    if let Some(bytes) = subject.binary_bytes()
         && !latin1
         && std::str::from_utf8(bytes).is_ok()
     {
@@ -283,7 +283,7 @@ pub(super) fn characters_to_list(
             });
         }
     };
-    if let Term::Binary(bytes) = chardata
+    if let Some(bytes) = chardata.binary_bytes()
         && !latin1
     {
         return analyze_turn(process, bytes, 0, 0);

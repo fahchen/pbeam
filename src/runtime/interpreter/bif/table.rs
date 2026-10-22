@@ -570,7 +570,7 @@ bifs! {
     records:is_exported/1 => unsupported,
     records:update/4 => unsupported,
     string:list_to_float/1 => unsupported,
-    unicode:bin_is_7bit/1 as UnicodeBinIs7bit1 => |_, [term]| Ok(Value(Term::static_atom(if matches!(term, Term::Binary(bytes) if bytes.is_ascii()) { "true" } else { "false" }))),
+    unicode:bin_is_7bit/1 as UnicodeBinIs7bit1 => |_, [term]| Ok(Value(Term::static_atom(if term.binary_bytes().is_some_and(<[u8]>::is_ascii) { "true" } else { "false" }))),
     unicode:characters_to_binary/2 as UnicodeCharactersToBinary2 => |cx, [chardata, encoding]| { let (process, atoms) = cx.scheduler.current_process_and_atoms(); unicode::characters_to_binary(process, chardata, encoding, atoms) },
     unicode:characters_to_list/2 as UnicodeCharactersToList2 => |cx, [chardata, encoding]| unicode::characters_to_list(cx.scheduler.current_process_mut(), chardata, encoding),
 }

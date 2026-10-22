@@ -75,6 +75,14 @@ fn a_monitor_before_a_message_reaches_the_target_before_a_later_kill() {
     run_pair("kill_watch", "kill_owner");
 }
 
+/// A monitor signal waits in the pending slot while the watcher sends to
+/// other remote processes. A delivery to its target, a second monitor
+/// signal, or the switch out sends it, and each `DOWN` has the exit reason.
+#[test]
+fn a_pending_monitor_goes_at_the_erts_points() {
+    run_pair("slot_watch", "slot_owner");
+}
+
 /// Each pair gives `ok` for each root on the pinned ERTS.
 #[test]
 fn the_pinned_erts_gives_the_same_results() {
@@ -100,6 +108,6 @@ fn the_pinned_erts_gives_the_same_results() {
     assert!(output.status.success(), "{output:?}");
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "[{ok,ok},{ok,ok},{ok,ok},{ok,ok},{ok,ok}]\n"
+        "[{ok,ok},{ok,ok},{ok,ok},{ok,ok},{ok,ok},{ok,ok}]\n"
     );
 }

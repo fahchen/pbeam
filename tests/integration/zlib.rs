@@ -80,7 +80,13 @@ fn list(term: &Term) -> Vec<&Term> {
 /// Return the text of a binary of ASCII characters.
 fn binary_text(term: &Term) -> String {
     match term {
-        Term::Binary(bytes) => String::from_utf8(bytes.to_vec()).unwrap(),
+        Term::Binary(bytes) => String::from_utf8(
+            bytes
+                .bytes()
+                .expect("the term is a binary of whole bytes")
+                .to_vec(),
+        )
+        .unwrap(),
         other => panic!("the term is a binary, not {other:?}"),
     }
 }
@@ -91,7 +97,10 @@ fn plain_text(program: &BeamProgram, term: &Term) -> String {
     match term {
         Term::Atom(atom) => program.atoms().name_of(atom).to_owned(),
         Term::Integer(value) => value.to_string(),
-        Term::Binary(bytes) => format!("<<\"{}\">>", String::from_utf8_lossy(bytes)),
+        Term::Binary(bytes) => format!(
+            "<<\"{}\">>",
+            String::from_utf8_lossy(bytes.bytes().expect("the term is a binary of whole bytes"))
+        ),
         Term::Nil => "[]".to_owned(),
         Term::Cons(_) => {
             let elements: Vec<String> = list(term)

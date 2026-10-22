@@ -11,7 +11,7 @@
 use super::host::FilenameEncoding;
 use crate::{
     error::{BeamError, error},
-    term::Term,
+    term::{Binary, Term},
 };
 
 /// The UTF-8 output of a chardata walk, as the target buffer of
@@ -73,7 +73,7 @@ pub(super) fn utf8_need(chardata: &Term, latin1: bool) -> Option<usize> {
     };
     // Each frame is the rest of a list: its next cons cell, or its tail.
     let mut frames = match chardata {
-        Term::Binary(bytes) => return Some(binary_cost(bytes)),
+        Term::Binary(bytes) => return Some(binary_cost(bytes.bytes()?)),
         _ if chardata.is_list() => vec![chardata],
         _ => return None,
     };
@@ -81,7 +81,7 @@ pub(super) fn utf8_need(chardata: &Term, latin1: bool) -> Option<usize> {
     while let Some(frame) = frames.last_mut() {
         let Some((element, rest)) = frame.cons_cell() else {
             match frame {
-                Term::Binary(bytes) => cost += binary_cost(bytes),
+                Term::Binary(bytes) => cost += binary_cost(bytes.bytes()?),
                 tail if tail.is_nil() => {}
                 _ => return None,
             }
@@ -94,12 +94,26 @@ pub(super) fn utf8_need(chardata: &Term, latin1: bool) -> Option<usize> {
                 return Some(cost);
             }
             Term::Integer(_) => cost += 1,
-            Term::Binary(bytes) => cost += binary_cost(bytes),
+            Term::Binary(bytes) => cost += binary_cost(bytes.bytes()?),
             _ if element.is_list() => frames.push(element),
             _ => return None,
         }
     }
     Some(cost)
+}
+
+/// Return the bytes of a binary of chardata that [`utf8_need`] accepted. A
+/// bitstring is not chardata, so `utf8_need` rejects it before a build.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(checked_bytes(&Binary::from(vec![97])), &[97]);
+/// ```
+fn checked_bytes(binary: &Binary) -> &[u8] {
+    binary
+        .bytes()
+        .expect("utf8_need rejects a bitstring before a build")
 }
 
 /// Convert chardata to UTF-8 with a budget of `left` loop steps, as
@@ -140,7 +154,7 @@ pub(super) fn build_utf8(
     }
     // Each frame is the rest of a list: its next cons cell, or its tail.
     let mut frames = match chardata {
-        Term::Binary(bytes) => return build_binary(bytes, left, latin1, output),
+        Term::Binary(bytes) => return build_binary(checked_bytes(bytes), left, latin1, output),
         _ if chardata.is_list() => vec![chardata],
         _ => return (chardata.clone(), true),
     };
@@ -150,7 +164,7 @@ pub(super) fn build_utf8(
         let Some((element, after)) = frame.cons_cell() else {
             match frame {
                 Term::Binary(bytes) => {
-                    let (rest, error) = build_binary(bytes, left, latin1, output);
+                    let (rest, error) = build_binary(checked_bytes(bytes), left, latin1, output);
                     if error || *left == 0 {
                         break (rest, error);
                     }
@@ -167,7 +181,7 @@ pub(super) fn build_utf8(
         match element {
             Term::Binary(bytes) => {
                 frames[top] = after;
-                let (rest, error) = build_binary(bytes, left, latin1, output);
+                let (rest, error) = build_binary(checked_bytes(bytes), left, latin1, output);
                 if error || rest != nil() {
                     break (Term::cons(rest, after.clone()), error);
                 }
@@ -447,7 +461,9 @@ fn utf8_sequence(bytes: &[u8]) -> Utf8Sequence {
 /// Return `true` when ERTS accepts `name` as a file name in `encoding`, as
 /// `erts_convert_filename_to_encoding` with `allow_empty` and without
 /// `allow_atom` does (`erl_unicode.c:2057-2119`). A binary is valid with
-/// each content, because ERTS copies its bytes without a check. `[]` and a
+/// each content, because ERTS copies its bytes without a check. A bitstring
+/// whose size is not a whole number of bytes is not valid
+/// (`erl_unicode.c:2093-2096`). `[]` and a
 /// list are valid when [`native_filename`] accepts them. Each other term is
 /// not valid, for example an atom, an integer, and a tuple.
 ///
@@ -461,7 +477,7 @@ fn utf8_sequence(bytes: &[u8]) -> Utf8Sequence {
 /// assert!(!is_native_filename(&Term::list_from(vec![Term::Integer(0)]), FilenameEncoding::Utf8));
 /// ```
 pub(super) fn is_native_filename(name: &Term, encoding: FilenameEncoding) -> bool {
-    matches!(name, Term::Binary(_)) || native_filename(name, encoding).is_some()
+    name.is_binary() || native_filename(name, encoding).is_some()
 }
 
 /// Return the native bytes of the file name `name` in `encoding`, as

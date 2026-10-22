@@ -9,7 +9,7 @@ fn bytes(term: &Term) -> (&[u8], &Arc<Vec<u8>>) {
     let Term::Binary(binary) = term else {
         panic!("not a binary: {term:?}");
     };
-    (binary, binary.bytes())
+    (binary.bit_bytes(), binary.array())
 }
 
 #[test]
@@ -43,7 +43,7 @@ fn gives_a_not_found_result_that_shares_the_bytes_of_the_subject() {
     assert_eq!(parts, [Term::Binary(subject.clone())]);
     let (part, array) = bytes(&parts[0]);
     assert_eq!(part, b"abc");
-    assert!(Arc::ptr_eq(subject.bytes(), array));
+    assert!(Arc::ptr_eq(subject.array(), array));
     // An empty subject with `trim` gives no part.
     assert_eq!(not_found(TRIM, &Binary::from(Vec::new())), Term::nil());
 }
@@ -66,11 +66,14 @@ fn gives_split_parts_that_share_the_bytes_of_the_subject() {
     );
     for part in &parts {
         let (_, array) = bytes(part);
-        assert!(Arc::ptr_eq(subject.bytes(), array));
+        assert!(Arc::ptr_eq(subject.array(), array));
     }
     // The second part starts at the byte 4 of the subject.
     let (part, _) = bytes(&parts[1]);
-    assert_eq!(part.as_ptr() as usize - subject.as_ptr() as usize, 4);
+    assert_eq!(
+        part.as_ptr() as usize - subject.bit_bytes().as_ptr() as usize,
+        4
+    );
     // `trim` leaves an empty part at the end out.
     let parts = split_once(TRIM, &Binary::from(b"abc,".to_vec()), 3, 1);
     let parts: Vec<Term> = parts
@@ -113,12 +116,28 @@ fn gives_global_parts_that_share_the_bytes_of_the_subject() {
     );
     for part in &parts {
         let (_, array) = bytes(part);
-        assert!(Arc::ptr_eq(subject.bytes(), array));
+        assert!(Arc::ptr_eq(subject.array(), array));
     }
     // The parts start at the bytes 0, 2, and 4 of the subject.
     let offsets: Vec<usize> = parts
         .iter()
-        .map(|part| bytes(part).0.as_ptr() as usize - subject.as_ptr() as usize)
+        .map(|part| bytes(part).0.as_ptr() as usize - subject.bit_bytes().as_ptr() as usize)
         .collect();
     assert_eq!(offsets, [0, 2, 4]);
+}
+
+#[test]
+fn raises_badarg_for_a_bitstring_subject() {
+    // The pinned ERTS raises `badarg` for `binary:at/2` and `binary:last/1`
+    // of <<1,2,3:4>> (measured with `mise run erts-eval`).
+    let term = Term::Binary(Binary::from(vec![1, 2, 3 << 4]).bits(0, 20));
+    let badarg = |result: BifResult| {
+        matches!(
+            result,
+            BifResult::Raise { class: ExceptionClass::Error, reason }
+                if reason == Term::static_atom("badarg")
+        )
+    };
+    assert!(badarg(at(&term, &Term::Integer(0))));
+    assert!(badarg(last(&term)));
 }

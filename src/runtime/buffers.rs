@@ -16,6 +16,22 @@ const ACCUMULATOR_SIZE: usize = 2 << 10;
 /// The bits of one byte, as the size of a [`Binary`] is a number of bits.
 const BITS_PER_BYTE: usize = 8;
 
+/// Return the bytes of a binary that a buffer holds. A buffer holds only
+/// binaries of whole bytes: `write_nif` takes an iovec, which
+/// `enif_inspect_iovec` gives only for binaries of whole bytes
+/// (`erl_nif.c:4120-4121`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(held(&Binary::from(b"ab".to_vec())), b"ab");
+/// ```
+fn held(binary: &Binary) -> &[u8] {
+    binary
+        .bytes()
+        .expect("a buffer holds only binaries of whole bytes")
+}
+
 /// The buffer resources of the node. ERTS frees a buffer resource when no
 /// term refers to it. PBeam has no garbage collection of resources, so it
 /// keeps each buffer until the end of the run.
@@ -120,8 +136,11 @@ impl Buffer {
     pub(super) fn write(&mut self, iovec: &[Binary]) {
         if !self.combine_small_writes(iovec) {
             self.enqueue_accumulator();
-            let elements = iovec.iter().filter(|binary| !binary.is_empty());
-            self.bytes += elements.clone().map(|binary| binary.len()).sum::<usize>();
+            let elements = iovec.iter().filter(|binary| !held(binary).is_empty());
+            self.bytes += elements
+                .clone()
+                .map(|binary| held(binary).len())
+                .sum::<usize>();
             self.queue.extend(elements.cloned());
         }
     }
@@ -151,8 +170,8 @@ impl Buffer {
         while bytes.len() < size {
             let head = self.queue.front().expect("the queue holds the bytes");
             let needed = size - bytes.len();
-            bytes.extend_from_slice(&head[..needed.min(head.len())]);
-            self.deq(needed.min(head.len()));
+            bytes.extend_from_slice(&held(head)[..needed.min(held(head).len())]);
+            self.deq(needed.min(held(head).len()));
         }
         Some(bytes)
     }
@@ -218,10 +237,10 @@ impl Buffer {
         self.enqueue_accumulator();
         let mut offset = 0;
         for binary in &self.queue {
-            if let Some(index) = binary.iter().position(|&byte| byte == needle) {
+            if let Some(index) = held(binary).iter().position(|&byte| byte == needle) {
                 return Some((offset + index) as u64);
             }
-            offset += binary.len();
+            offset += held(binary).len();
         }
         None
     }
@@ -285,9 +304,9 @@ impl Buffer {
     /// after the enqueue. An accumulator with no bytes adds no element.
     fn enqueue_accumulator(&mut self) {
         if let Some(accumulator) = self.accumulator.take()
-            && !accumulator.is_empty()
+            && !held(&accumulator).is_empty()
         {
-            self.bytes += accumulator.len();
+            self.bytes += held(&accumulator).len();
             self.queue.push_back(accumulator);
         }
     }
@@ -298,7 +317,7 @@ impl Buffer {
     /// bytes are at least half of [`ACCUMULATOR_SIZE`], so the accumulator
     /// does not hold it.
     fn combine_small_writes(&mut self, iovec: &[Binary]) -> bool {
-        let bytes: usize = iovec.iter().map(|binary| binary.len()).sum();
+        let bytes: usize = iovec.iter().map(|binary| held(binary).len()).sum();
         if self.accumulated_bytes() + bytes >= ACCUMULATOR_SIZE {
             if bytes >= ACCUMULATOR_SIZE / 2 {
                 return false;
@@ -307,7 +326,7 @@ impl Buffer {
         }
         let mut written = Vec::with_capacity(bytes);
         for binary in iovec {
-            written.extend_from_slice(binary);
+            written.extend_from_slice(held(binary));
         }
         self.accumulator = Some(match self.accumulator.take() {
             Some(accumulator) => Binary::concat(&accumulator, &written),
@@ -326,9 +345,9 @@ impl Buffer {
         let mut remaining = size;
         while remaining > 0 {
             let head = self.queue.front().expect("the queue holds the bytes");
-            if head.len() <= remaining {
-                remaining -= head.len();
-                self.bytes -= head.len();
+            if held(head).len() <= remaining {
+                remaining -= held(head).len();
+                self.bytes -= held(head).len();
                 self.queue.pop_front();
             } else {
                 let front = head.bits(remaining * BITS_PER_BYTE, head.bit_size());
@@ -351,7 +370,9 @@ impl Buffer {
     /// Return the bytes of the accumulator, as `accumulated_bytes`
     /// (`prim_buffer_nif.c:64`).
     fn accumulated_bytes(&self) -> usize {
-        self.accumulator.as_ref().map_or(0, |binary| binary.len())
+        self.accumulator
+            .as_ref()
+            .map_or(0, |binary| held(binary).len())
     }
 }
 

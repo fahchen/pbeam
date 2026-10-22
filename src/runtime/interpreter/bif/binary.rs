@@ -659,7 +659,10 @@ fn compile_source(pattern: &Term) -> Option<CompiledPattern> {
 /// for a bitstring with no byte or with a partial byte
 /// (`erl_bif_binary.c:1023-1026`, `1040-1043`).
 fn compile_needle(binary: &Binary) -> Option<Vec<u8>> {
-    (binary.bit_size().is_multiple_of(8) && !binary.is_empty()).then(|| binary.to_vec())
+    binary
+        .bytes()
+        .filter(|bytes| !bytes.is_empty())
+        .map(<[u8]>::to_vec)
 }
 
 /// Compile a pattern of `binary:split/2,3`, as `maybe_binary_match_compile`
@@ -696,11 +699,11 @@ fn compile(pattern: &Term, patterns: &BinaryPatterns) -> Option<Pattern> {
         };
     }
     let needles: Vec<&[u8]> = match pattern {
-        Term::Binary(needle) => vec![&needle[..]],
+        Term::Binary(needle) => vec![needle.bytes()?],
         _ => pattern
             .proper_list()?
             .map(|needle| match needle {
-                Term::Binary(needle) => Some(&needle[..]),
+                Term::Binary(needle) => needle.bytes(),
                 _ => None,
             })
             .collect::<Option<_>>()?,
@@ -787,13 +790,13 @@ fn not_found(flags: u8, subject: &Binary) -> Term {
     if flags & MATCHES != 0 {
         return Term::nil();
     }
-    if flags & (TRIM | TRIM_ALL) != 0 && subject.is_empty() {
+    if flags & (TRIM | TRIM_ALL) != 0 && subject.bit_size() == 0 {
         return Term::nil();
     }
     // ERTS puts a sub-binary of the subject in the result (`binary_split`,
     // `erl_bif_binary.c:1599-1645`), so the part shares the bytes of the
     // subject.
-    Term::list_from(vec![Term::Binary(subject.bits(0, subject.len() * 8))])
+    Term::list_from(vec![Term::Binary(subject.bits(0, subject.bit_size()))])
 }
 
 /// Return the result of the first match at `pos` with `len` bytes, as
@@ -811,12 +814,12 @@ fn not_found(flags: u8, subject: &Binary) -> Term {
 /// ```
 fn split_once(flags: u8, subject: &Binary, pos: u64, len: u64) -> Term {
     let (pos, after) = (pos as usize, (pos + len) as usize);
-    let size = subject.len() * 8;
+    let size = subject.bit_size();
     // ERTS puts sub-binaries of the subject in the result
     // (`do_split_single_result`, `erl_bif_binary.c:1753-1833`), so each part
     // shares the bytes of the subject.
     let first = Term::Binary(subject.bits(0, pos * 8));
-    if flags & (TRIM | TRIM_ALL) != 0 && after == subject.len() {
+    if flags & (TRIM | TRIM_ALL) != 0 && after * 8 == size {
         return Term::list_from(if pos > 0 { vec![first] } else { Vec::new() });
     }
     let rest = Term::Binary(subject.bits(after * 8, size));
@@ -846,7 +849,7 @@ fn split_all(find: &mut Find, subject: &Binary, reds: &mut u64) -> Option<Term> 
     let matches = &find.matches;
     let build = find.build.get_or_insert_with(|| Build {
         head: matches.len() as i64 - 1,
-        end_pos: subject.len() as u64,
+        end_pos: (subject.bit_size() / 8) as u64,
         parts: Vec::new(),
     });
     let mut trim = find.flags & (TRIM | TRIM_ALL);
@@ -869,7 +872,7 @@ fn split_all(find: &mut Find, subject: &Binary, reds: &mut u64) -> Option<Term> 
         }
         let (pos, len) = matches[build.head as usize];
         let part = part_at(pos + len, build.end_pos);
-        if !(part.is_empty() && trim != 0) {
+        if !(part.bit_size() == 0 && trim != 0) {
             build.parts.push(Term::Binary(part));
             trim &= !TRIM;
         }
@@ -878,7 +881,7 @@ fn split_all(find: &mut Find, subject: &Binary, reds: &mut u64) -> Option<Term> 
     }
     *reds = steps;
     let first = part_at(0, matches[0].0);
-    if !(first.is_empty() && trim != 0) {
+    if !(first.bit_size() == 0 && trim != 0) {
         build.parts.push(Term::Binary(first));
     }
     let mut parts = std::mem::take(&mut build.parts);
@@ -1176,7 +1179,11 @@ fn find_first_turn(
         return Ok(BifResult::badarg());
     };
     let (Some((flags, start, end)), Some(compiled)) = (
-        options(options_term, bytes.len() as u64),
+        // A bitstring subject raises `badarg` (`parse_match_opts_list` and
+        // `parse_split_opts_list`, `erl_bif_binary.c:1281-1284`, `1354-1356`).
+        bytes
+            .bytes()
+            .and_then(|whole| options(options_term, whole.len() as u64)),
         compile(pattern, patterns),
     ) else {
         return Ok(BifResult::badarg());
@@ -1267,7 +1274,9 @@ fn find_turn(
         .wrapping_mul(LOOP_FACTOR)
         .max(1);
     let mut reds = initial;
-    let bytes: &[u8] = subject;
+    let bytes = subject
+        .bytes()
+        .expect("find_first_turn takes only a subject of whole bytes");
     let parts = if find.build.is_some() {
         // A result build in progress continues with the matches that the
         // search kept: the integers and the tuples of `binary:matches/2`, or
@@ -1331,7 +1340,7 @@ fn find_turn(
 /// assert!(matches!(at(&Term::binary(vec![5]), &Term::Integer(1)), BifResult::Raise { .. }));
 /// ```
 pub(super) fn at(subject: &Term, index: &Term) -> BifResult {
-    let Term::Binary(bytes) = subject else {
+    let Some(bytes) = subject.binary_bytes() else {
         return BifResult::badarg();
     };
     let Some(index) = to_uint(index).and_then(|index| usize::try_from(index).ok()) else {
@@ -1365,11 +1374,11 @@ pub(super) fn last(subject: &Term) -> BifResult {
     let Term::Binary(bytes) = subject else {
         return BifResult::badarg();
     };
-    if bytes.bit_size() < 8 {
+    if bytes.bit_size() == 0 || !bytes.bit_size().is_multiple_of(8) {
         return BifResult::badarg();
     }
-    // PBeam has only binary terms, so a size of at least 8 bits is one or
-    // more whole bytes.
+    // A bitstring raises `badarg` (`binary_last_1`,
+    // `erl_bif_binary.c:2319`), so the binary has one or more whole bytes.
     let byte = bytes
         .last_byte()
         .expect("a binary of at least 8 bits has a last byte");
@@ -1460,7 +1469,7 @@ pub(super) fn part_3(subject: &Term, position: &Term, length: &Term) -> BifResul
 /// assert!(matches!(copy(&mut process, &Term::binary(vec![1]), &Term::Integer(-1)), BifResult::Raise { .. }));
 /// ```
 pub(super) fn copy(process: &mut ProcessState, subject: &Term, count: &Term) -> BifResult {
-    let Term::Binary(bytes) = subject else {
+    let Some(bytes) = subject.binary_bytes() else {
         return BifResult::badarg();
     };
     let Some(count) = to_uint(count) else {

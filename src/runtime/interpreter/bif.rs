@@ -1187,7 +1187,9 @@ impl BeamProgram {
                     Term::Integer(end),
                     Term::Integer(characters),
                 ],
-            ) => unicode::analyze_turn(process, bytes, *end as usize, *characters as usize),
+            ) if let Some(bytes) = bytes.bytes() => {
+                unicode::analyze_turn(process, bytes, *end as usize, *characters as usize)
+            }
             ("erlang", "characters_to_list_trap_4", [result, Term::Integer(remaining)]) => {
                 unicode::finish_trap(
                     process,

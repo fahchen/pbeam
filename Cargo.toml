@@ -647,6 +647,10 @@ name = "throw_exit"
 path = "tests/integration/throw_exit.rs"
 
 [[test]]
+name = "line_table"
+path = "tests/integration/line_table.rs"
+
+[[test]]
 name = "bif_stack"
 path = "tests/integration/bif_stack.rs"
 

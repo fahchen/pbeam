@@ -2,9 +2,9 @@
 
 use super::{
     COMPACT_EXTENDED_FLAG, COMPACT_SHORT_VALUE_SHIFT, COMPACT_SIGN_FLAG, COMPACT_TAG_MASK,
-    FIRST_LABEL_NUMBER, LIST_SUBTAG, TAG_ATOM, TAG_INTEGER, TAG_LABEL, TAG_LITERAL, TAG_REGISTER,
-    TAG_UNSIGNED, TAG_Y_REGISTER, WORD_SIZE, atom_at, read_integer, read_operand, read_u32,
-    read_value,
+    FIRST_LABEL_NUMBER, LIST_SUBTAG, LineTable, TAG_ATOM, TAG_INTEGER, TAG_LABEL, TAG_LITERAL,
+    TAG_REGISTER, TAG_UNSIGNED, TAG_Y_REGISTER, WORD_SIZE, atom_at, read_integer, read_operand,
+    read_u32, read_value,
 };
 use crate::error::{BeamError, error};
 use crate::runtime::{BifId, resolve_bif};
@@ -1790,12 +1790,18 @@ pub(crate) enum BinarySegment {
     /// `{atom,string},0,8,nil,{string,<<"count: ">>},{integer,7}` when atom
     /// 3 is `string` and `StrT` starts with `count: `.
     String(Vec<u8>),
-    /// A `binary` segment of size `all` and unit 8: the binary in `source`.
-    /// `segment` is the segment number of the compiler, which the ERTS
-    /// `error_info` gives. Example: `[0x42, 0x20, 0x80, 0x02, 0x03, 0x52]`
-    /// is `{atom,binary},2,8,nil,{x,0},{atom,all}` when atom 4 is `binary`
-    /// and atom 5 is `all`.
-    BinaryAll { segment: u64, source: Operand },
+    /// A `binary` segment of size `all` and unit 1, 2, 4, or 8: the binary
+    /// in `source`. `segment` is the segment number of the compiler, which
+    /// the ERTS `error_info` gives. The size in bits of the binary must be a
+    /// multiple of `unit` (`erts_bs_put_binary_all`, erl_bits.c:1321-1324).
+    /// Example: `[0x42, 0x20, 0x80, 0x02, 0x03, 0x52]` is
+    /// `{atom,binary},2,8,nil,{x,0},{atom,all}` when atom 4 is `binary` and
+    /// atom 5 is `all`.
+    BinaryAll {
+        segment: u64,
+        unit: u64,
+        source: Operand,
+    },
     /// An `append` segment of size `all` as the first segment: the binary
     /// in `source` is the start of the result. The compiler writes it for
     /// `<<A/binary, ...>>`, and the ERTS JIT runs it only as the first
@@ -1970,11 +1976,15 @@ fn test_operands(left: &Operand, right: &Operand) -> Option<(TestOperand, TestOp
 /// let mut code = vec![0, 0, 0, 16]; // sub-size
 /// code.extend_from_slice(&[0; 16]); // instruction set, opcode max, labels, functions
 /// code.push(0x03); // end
-/// let (instructions, labels, on_load) = parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[])?;
+/// let (instructions, labels, on_load) = parse_code(&code, &AtomTable::new(), &[], &[], &[], &[], &[], &mut LineTable::default())?;
 /// assert_eq!((labels, on_load), (0, None));
 /// assert!(matches!(instructions.as_slice(), [Instruction::End]));
 /// // [label 1, func_info, label 2, on_load] gives Some(2).
 /// ```
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is one decoded chunk that the code refers to"
+)]
 pub(super) fn parse_code(
     data: &[u8],
     atom_table: &AtomTable,
@@ -1983,6 +1993,7 @@ pub(super) fn parse_code(
     literals: &[Option<Term>],
     lambdas: &[(Lambda, usize)],
     strings: &[u8],
+    lines: &mut LineTable,
 ) -> Result<(Vec<Instruction>, u32, Option<u32>), BeamError> {
     if data.len() < CODE_HEADER_SIZE
         || read_u32(&data[..WORD_SIZE])? != CODE_HEADER_SUB_SIZE
@@ -1999,6 +2010,8 @@ pub(super) fn parse_code(
     let mut function_info_count = 0;
     let mut function = None;
     let mut on_load = None;
+    // A `line` directly before `func_info` is the line of the function.
+    let mut function_line = false;
     loop {
         let opcode = *data
             .get(cursor)
@@ -2036,6 +2049,9 @@ pub(super) fn parse_code(
                 continue;
             }
             OPCODE_FUNCTION_INFO => {
+                if !std::mem::take(&mut function_line) {
+                    lines.function(instructions.len(), None)?;
+                }
                 function_info_count += 1;
                 let module_index = read_operand(data, &mut cursor, TAG_ATOM)? as usize;
                 let module = atom_table.name_of(atom_at(atoms, module_index)?).to_owned();
@@ -2730,8 +2746,16 @@ pub(super) fn parse_code(
                 tail: read_move_operand(data, &mut cursor, atoms, literals)?,
                 destination: read_register(data, &mut cursor)?,
             },
+            // The entry starts at the next instruction. `nif_start` directly
+            // follows the entry label, so its insertion moves no entry.
             OPCODE_LINE => {
-                let _line_index = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
+                let item = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
+                function_line = data.get(cursor) == Some(&OPCODE_FUNCTION_INFO);
+                if function_line {
+                    lines.function(instructions.len(), Some(item))?;
+                } else {
+                    lines.line(instructions.len(), item)?;
+                }
                 continue;
             }
             OPCODE_CALL_EXT | OPCODE_CALL_EXT_LAST | OPCODE_CALL_EXT_ONLY => {
@@ -3164,7 +3188,11 @@ fn read_binary_segments(
                         && matches!(unit, 1 | 2 | 4 | 8)
                         && size.is_static("all") =>
                 {
-                    BinarySegment::BinaryAll { segment, source }
+                    BinarySegment::BinaryAll {
+                        segment,
+                        unit,
+                        source,
+                    }
                 }
                 Operand::Value(Term::Atom(size))
                     if kind.is_static("append") && index == 0 && size.is_static("all") =>

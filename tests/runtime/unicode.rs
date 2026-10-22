@@ -2,7 +2,7 @@ use super::{
     COMPOSITION_CANDIDATES, FilenameEncoding, Utf8Output, Utf8State, analyze_utf8, build_utf8,
     code_points, filename_from_native, is_native_filename, native_filename, utf8_need,
 };
-use crate::term::{Term, test_atom};
+use crate::term::{Binary, Term, test_atom};
 
 fn binary(bytes: &[u8]) -> Term {
     Term::binary(bytes.to_vec())
@@ -428,4 +428,25 @@ fn converts_native_bytes_to_a_file_name_in_each_encoding() {
             Ok(list(&[code_point]))
         );
     }
+}
+
+#[test]
+fn rejects_a_bitstring_as_chardata() {
+    // The pinned ERTS raises `badarg` for
+    // `unicode:characters_to_binary(B)` and for `[<<"a">>, B]` with
+    // B = <<1:4>> (measured with `mise run erts-eval`).
+    let bitstring = || Term::Binary(Binary::from(vec![1 << 4]).bits(0, 4));
+    assert_eq!(utf8_need(&bitstring(), false), None);
+    assert_eq!(
+        utf8_need(&Term::list_from(vec![binary(b"a"), bitstring()]), true),
+        None
+    );
+    assert_eq!(
+        utf8_need(
+            &Term::list_with_tail(vec![binary(b"a")], bitstring()),
+            false
+        ),
+        None
+    );
+    assert!(!is_native_filename(&bitstring(), FilenameEncoding::Utf8));
 }

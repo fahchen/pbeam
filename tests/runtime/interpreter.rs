@@ -3,15 +3,16 @@ use std::{cell::RefCell, collections::HashMap, sync::Arc};
 use super::bif::{BIFS, BifId, BifResult, resolve, resolve_calls};
 use super::code_table::export_frame_calls;
 use super::{
-    BeamProgram, BinaryPart, CodeTable, Issuer, Outcome, Register, Scheduler, StackSlot,
-    call_arguments, function_at_label, private_append, read, read_bif_arguments, read_operand,
-    read_owned_bif_arguments, read_ref, take_owned, write, write_operand,
+    BeamProgram, BinaryPart, BinarySegmentFailure, CodeTable, ExceptionClass, Issuer, Outcome,
+    Register, Scheduler, StackSlot, call_arguments, create_binary, function_at_label,
+    private_append, read, read_bif_arguments, read_operand, read_owned_bif_arguments, read_ref,
+    take_owned, write, write_operand,
 };
 use crate::{
     BeamModule, Map, Term,
     beam::{
         Import,
-        code::{BinaryMatchCommand, Instruction, Operand, TestKind, TestOperand},
+        code::{BinaryMatchCommand, BinarySegment, Instruction, Operand, TestKind, TestOperand},
     },
     runtime::{
         capability::{AllowAll, Capability, Policy},
@@ -2482,7 +2483,9 @@ fn raises_class_error_for_the_raw_stack_trace_nil() {
 #[test]
 fn exits_with_the_error_of_an_error_path_instruction_with_no_catch() {
     // With no catch tag, the exception of `badmatch` and `if_end` ends the
-    // process with `{Reason, Stacktrace}` (`beam_common.c:684-692`).
+    // process with `{Reason, Stacktrace}` (`beam_common.c:684-692`). The
+    // stack trace holds the frame of the current function with its arity
+    // (`beam_common.c:1011-1027`); the fixture has no line table.
     let exit = |instruction: Instruction| {
         make_program(vec![instruction], 0)
             .execute("fixture", "main", &[])
@@ -2494,11 +2497,11 @@ fn exits_with_the_error_of_an_error_path_instruction_with_no_catch() {
             tag: "badmatch",
             value: atom("r"),
         }),
-        "root process exited with {{badmatch,r},[]}"
+        "root process exited with {{badmatch,r},[{fixture,main,0,[]}]}"
     );
     assert_eq!(
         exit(Instruction::IfEnd),
-        "root process exited with {if_clause,[]}"
+        "root process exited with {if_clause,[{fixture,main,0,[]}]}"
     );
 }
 
@@ -4230,7 +4233,7 @@ fn orders_two_references_by_their_number_words() {
 }
 
 #[test]
-fn reads_an_empty_current_stacktrace_of_the_calling_process() {
+fn reads_the_current_stacktrace_of_the_calling_process() {
     // `STACKTRACE()` in the pinned `gen_statem` is
     // `element(2, erlang:process_info(self(), current_stacktrace))`.
     let body = vec![
@@ -4250,14 +4253,21 @@ fn reads_an_empty_current_stacktrace_of_the_calling_process() {
         },
         Instruction::Return,
     ];
-    // ERTS 29.1.1 gives the frames of the caller; PBeam records none.
-    let stacktrace = Term::tuple(vec![test_atom("current_stacktrace"), Term::nil()]);
+    // ERTS 29.1.1 gives the frames of the caller, without the frame of
+    // `process_info/2` (`erl_bif_info.c:2397-2405`).
+    let frames = Term::list_from(vec![Term::tuple(vec![
+        test_atom("fixture"),
+        test_atom("main"),
+        Term::Integer(0),
+        Term::nil(),
+    ])]);
+    let stacktrace = Term::tuple(vec![test_atom("current_stacktrace"), frames.clone()]);
     assert_eq!(
         make_program(body, 0)
             .execute("fixture", "main", &[])
             .unwrap()
             .term,
-        Term::tuple(vec![stacktrace, Term::nil()])
+        Term::tuple(vec![stacktrace, frames])
     );
     let process_info =
         |process: Term, item: Term| call_ext_with("erlang", "process_info", vec![process, item]);
@@ -5373,7 +5383,7 @@ fn writes_a_private_append_in_the_array_of_a_binary_with_one_owner() {
     let parts = [BinaryPart::Utf8('z')];
     write(&mut process, &Operand::X(0), Term::binary(b"a".to_vec())).unwrap();
     let start = match read_ref(&process, &Operand::X(0)).unwrap() {
-        Term::Binary(binary) => Arc::as_ptr(binary.bytes()),
+        Term::Binary(binary) => Arc::as_ptr(binary.array()),
         other => panic!("not a binary: {other:?}"),
     };
     let result = private_append(&mut process, &Operand::X(0), &parts).unwrap();
@@ -5381,7 +5391,7 @@ fn writes_a_private_append_in_the_array_of_a_binary_with_one_owner() {
     let Ok(Term::Binary(appended)) = &result else {
         unreachable!()
     };
-    assert_eq!(Arc::as_ptr(appended.bytes()), start);
+    assert_eq!(Arc::as_ptr(appended.array()), start);
     assert_eq!(
         read(&process, &Operand::X(0)).unwrap(),
         Term::binary(b"az".to_vec())
@@ -6005,4 +6015,138 @@ fn a_program_is_send_and_sync_for_a_second_scheduler_thread() {
     // must cross a thread boundary.
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<BeamProgram>();
+}
+
+#[test]
+fn checks_the_unit_of_a_binary_segment_of_a_bitstring() {
+    // ERTS fails a `binary` segment of size `all` whose size in bits is not
+    // a multiple of its unit (`erts_bs_put_binary_all`, erl_bits.c:1321-1324):
+    // `f(B) -> <<0:4, B/binary>>.` raises `badarg` with the cause
+    // `{2,binary,unit,<<1,2:4>>}` for `f(<<1,2:4>>)`. With unit 1, the pinned
+    // ERTS gives `<<0:4, (<<1,2:4>>)/bitstring>>` = <<0,18>>.
+    let atoms = AtomTable::new();
+    let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![]);
+    let bitstring = Term::Binary(Binary::from(vec![1, 2 << 4]).bits(0, 12));
+    write(&mut process, &Operand::X(0), bitstring.clone()).unwrap();
+    let segments = |unit| {
+        [
+            BinarySegment::Integer {
+                segment: 1,
+                unit: 1,
+                little: false,
+                source: Operand::Value(Term::Integer(0)),
+                size: Operand::Value(Term::Integer(4)),
+            },
+            BinarySegment::BinaryAll {
+                segment: 2,
+                unit,
+                source: Operand::X(0),
+            },
+        ]
+    };
+    assert_eq!(
+        create_binary(&atoms, &mut process, &segments(8)).unwrap(),
+        Err(BinarySegmentFailure::badarg(2, "binary", "unit", bitstring))
+    );
+    assert_eq!(
+        create_binary(&atoms, &mut process, &segments(1)).unwrap(),
+        Ok(Term::binary(vec![0, 18]))
+    );
+}
+
+#[test]
+fn writes_the_bits_of_a_bitstring_segment_after_an_append() {
+    // The pinned ERTS gives `<<A/binary, B/bitstring, C/bitstring>>` =
+    // <<97,98,18>> for A = <<"ab">>, B = <<1:4>>, and C = <<2:4>>. The
+    // chunks of a bitstring are not its bits, so the append copies them in
+    // the writer and does not share the arrays.
+    let atoms = AtomTable::new();
+    let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![]);
+    write(&mut process, &Operand::X(0), Term::binary(b"ab".to_vec())).unwrap();
+    let nibble = |value: u8| Term::Binary(Binary::from(vec![value << 4]).bits(0, 4));
+    write(&mut process, &Operand::X(1), nibble(1)).unwrap();
+    write(&mut process, &Operand::X(2), nibble(2)).unwrap();
+    let segments = [
+        BinarySegment::Append {
+            segment: 1,
+            unit: 8,
+            source: Operand::X(0),
+        },
+        BinarySegment::BinaryAll {
+            segment: 2,
+            unit: 1,
+            source: Operand::X(1),
+        },
+        BinarySegment::BinaryAll {
+            segment: 3,
+            unit: 1,
+            source: Operand::X(2),
+        },
+    ];
+    assert_eq!(
+        create_binary(&atoms, &mut process, &segments).unwrap(),
+        Ok(Term::binary(vec![97, 98, 18]))
+    );
+}
+
+#[test]
+fn rejects_a_bitstring_in_the_byte_bifs() {
+    // The pinned ERTS gives, for B = <<1,2:4>>: `iolist_to_binary(B)`,
+    // `list_to_binary([B])`, and `erlang:iolist_to_iovec([B])` raise
+    // `badarg`, and `unicode:bin_is_7bit(B)` gives `false` (measured with
+    // `mise run erts-eval`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let bitstring = || Term::Binary(Binary::from(vec![1, 2 << 4]).bits(0, 12));
+    let mut call = |module, function, argument| {
+        program
+            .bif(&mut scheduler, module, function, vec![argument])
+            .unwrap()
+    };
+    let badarg = |result: BifResult| {
+        matches!(
+            result,
+            BifResult::Raise { class: ExceptionClass::Error, reason }
+                if reason == Term::static_atom("badarg")
+        )
+    };
+    let is_false = |result: BifResult| matches!(result, BifResult::Value(value) if value == Term::static_atom("false"));
+    assert!(badarg(call("erlang", "iolist_to_binary", bitstring())));
+    let listed = || Term::list_from(vec![bitstring()]);
+    assert!(badarg(call("erlang", "list_to_binary", listed())));
+    assert!(badarg(call("erlang", "iolist_to_iovec", listed())));
+    assert!(is_false(call("unicode", "bin_is_7bit", bitstring())));
+    // A bitstring of 7-bit bits is not a binary either.
+    let ascii = Term::Binary(Binary::from(b"ab".to_vec()).bits(0, 12));
+    assert!(is_false(call("unicode", "bin_is_7bit", ascii)));
+}
+
+#[test]
+fn writes_the_bits_of_a_bitstring_append_prefix() {
+    // The pinned ERTS gives `<<B/bitstring, 2:4>>` = <<18>> for B = <<1:4>>:
+    // the append copies the 4 bits of B, not its padded byte.
+    let atoms = AtomTable::new();
+    let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![]);
+    let prefix = Term::Binary(Binary::from(vec![1 << 4]).bits(0, 4));
+    write(&mut process, &Operand::X(0), prefix).unwrap();
+    let segments = [
+        BinarySegment::Append {
+            segment: 1,
+            unit: 1,
+            source: Operand::X(0),
+        },
+        BinarySegment::Integer {
+            segment: 2,
+            unit: 1,
+            little: false,
+            source: Operand::Value(Term::Integer(2)),
+            size: Operand::Value(Term::Integer(4)),
+        },
+    ];
+    assert_eq!(
+        create_binary(&atoms, &mut process, &segments).unwrap(),
+        Ok(Term::binary(vec![18]))
+    );
 }

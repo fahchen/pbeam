@@ -520,9 +520,10 @@ impl State {
                 let tail = size % 8;
                 self.mix_alpha(TYPE_BINARY);
                 self.mix_beta(size as u64);
-                self.mix_bytes(&bytes[..whole]);
+                let bits = bytes.bit_bytes();
+                self.mix_bytes(&bits[..whole]);
                 if tail != 0 {
-                    self.mix_alpha(u64::from(bytes[whole] >> (8 - tail)));
+                    self.mix_alpha(u64::from(bits[whole] >> (8 - tail)));
                 }
             }
             Shape::Bignum(negative, digits) => {
@@ -1003,13 +1004,14 @@ fn binary_hash(hash: u32, bytes: &Binary) -> u32 {
     let whole = bit_size / 8;
     let tail = bit_size % 8;
     let mut hash = hash;
-    for byte in bytes[..whole].iter() {
+    let bits = bytes.bit_bytes();
+    for byte in bits[..whole].iter() {
         hash = hash.wrapping_mul(FUNNY_1).wrapping_add(u32::from(*byte));
     }
     if tail > 0 {
         // The bits of the tail are the high bits of the last byte of the
-        // packed form of the binary (`Binary::deref`).
-        let last = bytes[whole] >> (8 - tail);
+        // packed form of the binary (`Binary::bit_bytes`).
+        let last = bits[whole] >> (8 - tail);
         hash = hash
             .wrapping_mul(FUNNY_1)
             .wrapping_add(u32::from(last))
@@ -1490,9 +1492,10 @@ pub(crate) fn make_hash2(atoms: &AtomTable, term: &Term) -> (u32, u64) {
                     hash = start;
                 } else {
                     iterations += u64::from((size / BLOCK_BYTES as u32).max(1));
-                    hash = block_hash(&bytes[..size as usize], start);
+                    let bits = bytes.bit_bytes();
+                    hash = block_hash(&bits[..size as usize], start);
                     if tail > 0 {
-                        let last = bytes[size as usize] >> (8 - tail);
+                        let last = bits[size as usize] >> (8 - tail);
                         hash = hash2_with(hash, tail as u32, u32::from(last), HCONST_15);
                     }
                 }

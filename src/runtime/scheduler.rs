@@ -441,6 +441,11 @@ pub(super) struct Scheduler {
     /// same target, or the next monitor signal, as `esdp->pending_signal`
     /// (`erl_proc_sig_queue.c:1101-1170`). The pid is the target.
     pending_monitor: Option<(ProcessId, Monitor)>,
+    /// The deliveries of the current process to processes of other
+    /// schedulers that wait behind `pending_monitor`, with the scheduler
+    /// and the pid of the target ([`Self::deliver_remote`]). The list is
+    /// empty when the slot is empty.
+    held: Vec<(usize, ProcessId, signals::Held)>,
     /// The process that gets the error reports of the emulator: `logger`,
     /// `undefined`, or a pid, as `system_logger` in `erl_trace.c`. The start
     /// value is `logger` (`erl_trace.c:339`).
@@ -539,6 +544,7 @@ impl Scheduler {
             known_nodes: KnownNodes::default(),
             alias_owners: HashMap::new(),
             pending_monitor: None,
+            held: Vec::new(),
             system_logger: Term::static_atom("logger"),
             backtrace_depth: 8,
             virtual_reductions: 0,
@@ -2668,7 +2674,7 @@ impl Scheduler {
     /// monitor signal of `from` to the same target goes first
     /// (`prepend_pending_sig_maybe`, `erl_message.c:463-480`). A message to a
     /// process of another scheduler goes after each pending monitor signal
-    /// ([`Self::pending_before_remote`]). A message to a
+    /// ([`Self::deliver_remote`]). A message to a
     /// process that does not exist, or to an exiting process, is dropped,
     /// and the pending signal waits on. A message to the sender itself marks
     /// it as a process that may have signals from itself.
@@ -2682,9 +2688,7 @@ impl Scheduler {
         if !self.processes.contains_key(&target)
             && let Some(index) = self.remote_owner(target)
         {
-            let pending = self.pending_before_remote(target);
-            self.node
-                .send_message(index, Some(from), term, target, pending);
+            self.deliver_remote(index, target, signals::Held::Message { from, term });
             return;
         }
         self.send_message_local(from, target, term);
@@ -2700,6 +2704,7 @@ impl Scheduler {
             return;
         }
         let pending = self.take_pending_monitor(target);
+        let released = pending.is_some();
         let process = self
             .processes
             .get_mut(&target)
@@ -2712,6 +2717,9 @@ impl Scheduler {
         }
         process.mailbox.push(term);
         self.activate(target);
+        if released {
+            self.release_held();
+        }
     }
 
     /// Return the scheduler of the compiled binary pattern `reference`

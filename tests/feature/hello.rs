@@ -75,11 +75,12 @@ fn rejects_an_unsupported_io_device_with_a_function_clause_error() {
         .unwrap_err();
 
     // The `func_info` of `IO.puts/2` raises `error:function_clause` with the
-    // arguments in the first frame (`beam_common.c:1011-1024`). PBeam keeps
-    // no line table, so the location is `[]`.
+    // arguments in the first frame (`beam_common.c:1011-1024`), and the
+    // location of the function entry (`beam_common.c:1231-1233`), as the
+    // pinned ERTS gives `[{file, "lib/io.ex"}, {line, 331}]`.
     assert_eq!(
         error.to_string(),
-        "root process exited with {function_clause,[{'Elixir.IO',puts,[7,<<\"message\">>],[]}]}"
+        "root process exited with {function_clause,[{'Elixir.IO',puts,[7,<<\"message\">>],[{file,\"lib/io.ex\"},{line,331}]}]}"
     );
 }
 
@@ -248,9 +249,9 @@ fn raises_terminated_in_the_entry_after_a_failed_stdout_write() {
     // log event modules before the caller gets `DOWN`. Thus the run also
     // loads `LOG_EVENT_MODULES`. Without them, it stops with
     // `unresolved external MFA logger_backend:log_allowed/3` (measured).
-    // PBeam gives the first frame of `erlang:error/3` with the
-    // `error_info` location and no `file` and `line`, and no frame of
-    // `erl_eval` or `init` (row "Exception stack trace").
+    // PBeam gives the first frame of `erlang:error/3` with the `file` and
+    // `line` of the call before the `error_info` location, as ERTS does, and
+    // no frame of `erl_eval` or `init` (row "Exception stack trace").
     let io = elixir_io_path();
     let mut beams = hello_beams("Elixir.Hello", &io);
     beams.extend(LOG_EVENT_MODULES.map(pinned_beam_path));
@@ -279,7 +280,7 @@ fn raises_terminated_in_the_entry_after_a_failed_stdout_write() {
         &pbeam,
         (
             "",
-            "pbeam: root process exited with {terminated,[{io,put_chars,[standard_io,[<<\"Hello, world!\">>,10]],[{error_info,#{cause=>{io,terminated},module=>erl_stdlib_errors}}]}]}\n",
+            "pbeam: root process exited with {terminated,[{io,put_chars,[standard_io,[<<\"Hello, world!\">>,10]],[{file,\"io.erl\"},{line,200},{error_info,#{cause=>{io,terminated},module=>erl_stdlib_errors}}]}]}\n",
             Some(1),
         ),
     );

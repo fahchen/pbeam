@@ -226,7 +226,7 @@ fn gives_the_links_of_a_process_as_process_info_2() {
     let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![]);
     assert_eq!(
         process
-            .info(&atoms, &Term::static_atom("links"), 0, 0, false, None)
+            .info(&atoms, &Term::static_atom("links"), 0, 0, None)
             .unwrap(),
         Some(Term::tuple(vec![Term::static_atom("links"), Term::nil()]))
     );
@@ -237,7 +237,7 @@ fn gives_the_links_of_a_process_as_process_info_2() {
     // result (`collect_one_link`, `erl_bif_info.c:574-585`).
     process.links.insert(LinkId::Process(ProcessId(4)), 7);
     let value = process
-        .info(&atoms, &Term::static_atom("links"), 0, 0, false, None)
+        .info(&atoms, &Term::static_atom("links"), 0, 0, None)
         .unwrap()
         .unwrap();
     let elements = value.tuple_elements().expect("a tuple");
@@ -268,7 +268,7 @@ fn reads_each_item_of_another_process_that_a_remote_request_carries() {
     let process = ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![]);
     for name in super::OTHER_PROCESS_INFO_ITEMS {
         let item = Term::static_atom(name);
-        let value = process.info(&atoms, &item, 0, 0, false, None).unwrap();
+        let value = process.info(&atoms, &item, 0, 0, None).unwrap();
         assert!(value.is_some(), "{name}");
     }
 }

@@ -519,3 +519,41 @@ fn charges_a_quarter_reduction_for_each_group_of_four_links() {
         0
     );
 }
+
+#[test]
+fn gives_the_erts_results_of_the_byte_bifs_for_a_bitstring() {
+    // The pinned ERTS gives, for B = <<1,2,3:4>>: `binary_part(B, 0, 1)`
+    // raises `badarg`, `byte_size(B)` = 3, `split_binary(B, 2)` =
+    // {<<1,2>>,<<3:4>>}, `split_binary(B, 0)` = {<<>>,<<1,2,3:4>>}, and
+    // `split_binary(B, 3)` raises `badarg` (measured with `mise run
+    // erts-eval`).
+    let bitstring = || Binary::from(vec![1, 2, 3 << 4]).bits(0, 20);
+    let term = Term::Binary(bitstring());
+    let badarg = |result: BifResult| {
+        matches!(
+            result,
+            BifResult::Raise { class: ExceptionClass::Error, reason }
+                if reason == Term::static_atom("badarg")
+        )
+    };
+    assert!(badarg(binary_part(
+        &term,
+        &Term::Integer(0),
+        &Term::Integer(1)
+    )));
+    assert!(matches!(
+        byte_size(&term),
+        BifResult::Value(Term::Integer(3))
+    ));
+    let split = |at: i64| match split_binary(&term, &Term::Integer(at)) {
+        BifResult::Value(Term::Tuple(ref parts)) => parts.to_vec(),
+        other => panic!("split_binary gives {other:?}"),
+    };
+    let tail = Binary::from(vec![3 << 4]).bits(0, 4);
+    assert_eq!(split(2), [Term::binary(vec![1, 2]), Term::Binary(tail)]);
+    assert_eq!(
+        split(0),
+        [Term::binary(Vec::new()), Term::Binary(bitstring())]
+    );
+    assert!(badarg(split_binary(&term, &Term::Integer(3))));
+}

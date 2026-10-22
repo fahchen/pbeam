@@ -474,7 +474,10 @@ fn bytes(term: &Term) -> Vec<u8> {
     let Term::Binary(binary) = term else {
         panic!("not a binary: {term:?}");
     };
-    binary.to_vec()
+    binary
+        .bytes()
+        .expect("the term is a binary of whole bytes")
+        .to_vec()
 }
 
 #[test]
