@@ -43,9 +43,50 @@ fn gives_a_new_atom_the_next_index_and_keeps_existing_indices() {
 }
 
 #[test]
+fn gives_one_index_to_a_name_that_threads_put_at_once() {
+    // ERTS creates each atom once under the atom table lock
+    // (`erts_atom_put_index`, `atom.c:231`), so each thread reads one index
+    // for each name.
+    let table = AtomTable::new();
+    let names: Vec<String> = (0..4000)
+        .map(|index| format!("pbeam_race_{index}"))
+        .collect();
+    let indices: Vec<Vec<u32>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                scope.spawn(|| {
+                    names
+                        .iter()
+                        .map(|name| table.put(name).unwrap().index)
+                        .collect::<Vec<u32>>()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect()
+    });
+    for thread in &indices {
+        assert_eq!(thread, &indices[0]);
+    }
+    for (name, &index) in names.iter().zip(&indices[0]) {
+        assert_eq!(table.name(index), Some(name.as_str()));
+    }
+    assert_eq!(table.read_indices().len(), 1167 + names.len());
+}
+
+#[test]
+fn writes_the_count_and_the_program_of_a_table() {
+    let table = AtomTable::new();
+    assert!(format!("{table:?}").starts_with("AtomTable { len: 1167, program: ProgramId("));
+}
+
+#[test]
 fn stops_at_the_erts_atom_limit() {
     let table = AtomTable::new();
-    for index in table.read_indices().len()..ATOM_LIMIT {
+    let count = table.read_indices().len();
+    for index in count..ATOM_LIMIT {
         table.put(&index.to_string()).unwrap();
     }
     assert_eq!(table.put("1048575").unwrap().index, 1048575);
@@ -205,7 +246,8 @@ fn fails_to_import_when_the_destination_table_is_full() {
     // and gives the error of the full table.
     let source = AtomTable::new();
     let destination = source.clone();
-    for index in destination.read_indices().len()..ATOM_LIMIT {
+    let count = destination.read_indices().len();
+    for index in count..ATOM_LIMIT {
         destination.put(&index.to_string()).unwrap();
     }
     let term = Term::Atom(source.put("pbeam_zeta").unwrap());
