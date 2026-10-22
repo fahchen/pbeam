@@ -19,7 +19,7 @@ pair(First, Second) ->
 %% {unexpected, Result}.
 list_a() -> check(list_a_run(), {true, true, true}).
 list_b() -> check(list_b_run(), {true, true}).
-gone_a() -> check(gone_a_run(), {false, false, false}).
+gone_a() -> check(gone_a_run(), {killed, false, false, false}).
 gone_b() -> check(gone_b_run(), {false, false}).
 
 check(Expected, Expected) -> ok;
@@ -75,18 +75,19 @@ list_b_run() ->
 
 %% The root that waits for the exit of a child of the other root. After
 %% the DOWN message, the child is not in the process list, the process
-%% iterator does not give it, and it is not alive. The check accepts each
-%% DOWN reason: in PBeam, the kill of the other root can reach the child
-%% before the monitor of this root does, and the reason is then noproc.
+%% iterator does not give it, and it is not alive. The monitor signal
+%% reaches the child before the kill of the other root, so the DOWN reason
+%% is killed.
 gone_a_run() ->
     register(gone_a, self()),
     Other = wait_for(gone_b),
     Child = receive {child, Other, C} -> C end,
     Ref = monitor(process, Child),
     Other ! {watching, self()},
-    receive {'DOWN', Ref, process, Child, _} -> ok end,
+    Reason = receive {'DOWN', Ref, process, Child, R} -> R end,
     Other ! {down, self()},
-    {lists:member(Child, processes()),
+    {Reason,
+     lists:member(Child, processes()),
      lists:member(Child, iterate(erlang:processes_iterator(), [])),
      is_process_alive(Child)}.
 

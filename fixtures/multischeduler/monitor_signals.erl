@@ -1,9 +1,10 @@
 -module(monitor_signals).
 -export([order_watch/0, order_owner/0, dead_watch/0, dead_owner/0,
          flush_watch/0, flush_owner/0, race_watch/0, race_owner/0,
-         reference/0]).
+         kill_watch/0, kill_owner/0, reference/0]).
 
 -define(RACES, 20).
+-define(KILLS, 200).
 
 %% Run each pair of roots on the pinned ERTS, as PBeam runs the two roots of
 %% a pair on two scheduler threads, and return the results of each pair.
@@ -11,7 +12,8 @@ reference() ->
     [pair(fun order_watch/0, fun order_owner/0),
      pair(fun dead_watch/0, fun dead_owner/0),
      pair(fun flush_watch/0, fun flush_owner/0),
-     pair(fun race_watch/0, fun race_owner/0)].
+     pair(fun race_watch/0, fun race_owner/0),
+     pair(fun kill_watch/0, fun kill_owner/0)].
 
 pair(First, Second) ->
     Self = self(),
@@ -31,6 +33,8 @@ flush_watch() -> check(flush_watch_run(), flush_log()).
 flush_owner() -> check(owner_run(flush_owner), ok).
 race_watch() -> check(race_watch_run(), race_log()).
 race_owner() -> check(owner_run(race_owner), ok).
+kill_watch() -> check(kill_watch_run(), [killed]).
+kill_owner() -> check(owner_run(kill_owner), ok).
 
 check(Expected, Expected) -> ok;
 check(Result, _) -> {unexpected, Result}.
@@ -210,3 +214,20 @@ monitor_race(Owner) ->
         {'DOWN', Ref, process, Child, Reason} ->
             lists:member(Reason, [boom, noproc]) andalso rest() =:= []
     end.
+
+%% A monitor signal that the watcher sends before its message to the owner
+%% reaches the child before the kill that the owner sends when it gets the
+%% message, so each DOWN has the reason `killed`. The child is a process of
+%% the owner, or a process of the watcher.
+kill_watch_run() ->
+    Owner = wait_for(kill_owner),
+    Remote = [monitor_kill(Owner, remote_child(Owner)) || _ <- lists:seq(1, ?KILLS)],
+    Local = [monitor_kill(Owner, spawn(fun child/0)) || _ <- lists:seq(1, ?KILLS)],
+    Owner ! done,
+    lists:usort(Remote ++ Local).
+
+monitor_kill(Owner, Child) ->
+    Ref = monitor(process, Child),
+    Owner ! {kill, self(), [Child]},
+    receive killed -> ok end,
+    receive {'DOWN', Ref, process, Child, Reason} -> Reason end.

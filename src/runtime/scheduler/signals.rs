@@ -104,8 +104,10 @@ impl Scheduler {
     /// Send the signal `signal` to the process `target`, as
     /// `proc_queue_signal` (`erl_proc_sig_queue.c:1076-1252`) does. A pending
     /// monitor signal to the same target goes first, to keep the order of
-    /// the signals of the sender. The signal goes to the end of the queue.
-    /// A target that does not run and is not in the run queue goes to the
+    /// the signals of the sender. A signal to a process of another scheduler
+    /// goes after each pending monitor signal
+    /// ([`Self::pending_before_remote`]). The signal goes to the end of the
+    /// queue. A target that does not run and is not in the run queue goes to the
     /// end of the run queue to handle it (`erts_proc_notify_new_sig`,
     /// `erl_proc_sig_queue.h:2063-2075`). `sender` is the sending process,
     /// or `None` for the runtime; a signal of a process to itself marks it.
@@ -129,7 +131,7 @@ impl Scheduler {
         if !self.processes.contains_key(&target)
             && let Some(index) = self.remote_owner(target)
         {
-            let pending = self.take_pending_monitor(target).map(monitor_signal);
+            let pending = self.pending_before_remote(target);
             self.node
                 .send_signal(index, target, sender, signal, pending);
             return Ok(());
@@ -138,8 +140,8 @@ impl Scheduler {
     }
 
     /// Put `signal` for the remote target `target` into the inbox of its
-    /// owner `index`, which `remote_owner` gave, with the pending monitor
-    /// signal of the sender first. The inbox always takes the signal: a
+    /// owner `index`, which `remote_owner` gave, after the pending monitor
+    /// signal of the sender ([`Self::pending_before_remote`]). The inbox always takes the signal: a
     /// target that left before the drain is answered there.
     ///
     /// # Examples
@@ -154,7 +156,7 @@ impl Scheduler {
         target: ProcessId,
         signal: Signal,
     ) {
-        let pending = self.take_pending_monitor(target).map(monitor_signal);
+        let pending = self.pending_before_remote(target);
         self.node
             .send_signal(index, target, sender, signal, pending);
     }
@@ -312,6 +314,35 @@ impl Scheduler {
             ),
             _ => {}
         }
+    }
+
+    /// Return the pending monitor signal that goes into the inbox just
+    /// before a delivery to `target`, a process of another scheduler, when
+    /// the signal goes to `target`. A pending monitor signal to another
+    /// process goes now, before the delivery. A delivery to another thread
+    /// can make a process act at once, so a later signal of that process
+    /// must not pass the monitor signal. ERTS sends the signal only at the
+    /// switch out (`erl_process.c:9665-9668`) or with a signal or message to
+    /// the same target (`erl_proc_sig_queue.c:1146-1166`,
+    /// `erl_message.c:463-480`). To send it earlier gives the order of an
+    /// ERTS run in which the sender switches out just before the delivery,
+    /// for example at the end of its reductions, and continues in its next
+    /// turn.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let pending = scheduler.pending_before_remote(target);
+    /// ```
+    pub(in crate::runtime) fn pending_before_remote(
+        &mut self,
+        target: ProcessId,
+    ) -> Option<Signal> {
+        if let Some(pending) = self.take_pending_monitor(target) {
+            return Some(monitor_signal(pending));
+        }
+        self.send_pending_monitor();
+        None
     }
 
     /// Take the pending monitor signal when it goes to `target`.
