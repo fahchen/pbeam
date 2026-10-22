@@ -341,23 +341,23 @@ impl AtomTable {
             return Ok(atom);
         }
         let mut indices = self.indices.write().unwrap_or_else(PoisonError::into_inner);
-        // Another thread can create the name between the two locks.
-        if let Some(&index) = indices.get(name) {
-            return Ok(Atom { index });
-        }
+        // Another thread can create the name between the two locks. The
+        // entry then keeps the index of that thread.
         let count = indices.len();
-        if count >= ATOM_LIMIT {
+        if count >= ATOM_LIMIT && !indices.contains_key(name) {
             return Err(error(format!(
                 "no more index entries in atom_tab (max={ATOM_LIMIT})"
             )));
         }
-        let index = u32::try_from(count).expect("ATOM_LIMIT fits in u32");
+        let next = u32::try_from(count).expect("ATOM_LIMIT fits in u32");
         let shared: Arc<str> = Arc::from(name);
-        let chunk = self.names[count / ATOM_CHUNK]
+        let index = *indices.entry(Arc::clone(&shared)).or_insert(next);
+        let slot = usize::try_from(index).expect("an atom index fits in usize");
+        let chunk = self.names[slot / ATOM_CHUNK]
             .get_or_init(|| (0..ATOM_CHUNK).map(|_| OnceLock::new()).collect());
-        // The write lock gives each index to one name, so the slot is empty.
-        let _ = chunk[count % ATOM_CHUNK].set(Arc::clone(&shared));
-        indices.insert(shared, index);
+        // The write lock is held, so a reader sees the index only after the
+        // slot holds the name. A slot that holds the name already keeps it.
+        let _ = chunk[slot % ATOM_CHUNK].set(shared);
         Ok(Atom { index })
     }
 
