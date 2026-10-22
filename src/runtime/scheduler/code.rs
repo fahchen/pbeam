@@ -116,9 +116,20 @@ impl Scheduler {
     /// Install the newest published code state when another scheduler
     /// published one since the last install. A run with one scheduler has
     /// no other publisher.
+    /// The check is inline, because each external call makes it.
+    #[inline]
     pub(in crate::runtime) fn sync_code(&mut self) {
-        if !self.multi || self.node.code.generation.load(Ordering::Acquire) == self.code_generation
-        {
+        if self.multi {
+            self.sync_shared_code();
+        }
+    }
+
+    /// Install the newest published code state of a run with scheduler
+    /// threads when it is newer than the code of this scheduler.
+    #[cold]
+    #[inline(never)]
+    fn sync_shared_code(&mut self) {
+        if self.node.code.generation.load(Ordering::Acquire) == self.code_generation {
             return;
         }
         let node = Arc::clone(&self.node);
