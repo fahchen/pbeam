@@ -309,14 +309,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Source:** #842.
 - **Milestone:** [m14] Shared node services ([#909](https://github.com/fahchen/pbeam/issues/909)). Each M14 task takes its service out of this entry, and the PR that takes out the last service removes the entry.
 
-### Send the pending monitor signal at the ERTS point across scheduler threads
-
-- **Now:** `Scheduler::pending_before_remote` sends the pending monitor signal of the current process before a delivery to another scheduler (PR #890, #886). ERTS sends it at the switch out of the process, with a delivery to the same target, or when another monitor signal of the process replaces it in the slot (`erl_process.c:9665-9668`, `erl_proc_sig_queue.c:1146-1166`, `erl_message.c:463-480`). The PBeam order is the order of an ERTS run in which the process switches out just before the delivery, so it differs in timing only. The "Signal queue" row of `docs/erts-differences.md` records it.
-- **Option:** prove that one ERTS node also keeps the causal order of a monitor and a later kill in this case, and record the proof; or send the pending signal at the ERTS points only, and keep the causal order through the inbox path in another way.
-- **Trigger:** the next change of the pending monitor slot or of the cross-scheduler delivery path, or a probe that shows a difference from `erl +S 2`.
-- **Source:** #886, owner comment of 2026-10-22 ("可以，后续对齐").
-- **Task:** [#927](https://github.com/fahchen/pbeam/issues/927).
-
 ### Bind the full function tables of the OTP NIF libraries
 
 - **Now:** the OTP NIF libraries `net`, `erl_tracer`, and `asn1rt_nif` have load-check tables with no bindings and `unbound_fails` (#868); `prim_socket` binds only `nif_supports/0,1` (#887); `zstd` binds only its context functions (#898); and `crypto`, `prim_file`, `prim_tty`, and `zlib` bind only part of their tables. A call of an unbound function of a library with `unbound_fails` gives `M:F/A NIF is not supported`; for `prim_file` and `prim_tty`, which do not set it, the call runs the BEAM stub body, which gives `erlang:nif_error(undef)`.

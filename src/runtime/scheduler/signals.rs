@@ -22,6 +22,18 @@ use crate::{
     term::{ProcessId, Reference, Term},
 };
 
+/// A delivery of the current process to a process of another scheduler.
+#[derive(Debug)]
+pub(in crate::runtime) enum Held {
+    /// A message of the process `from`.
+    Message { from: ProcessId, term: Term },
+    /// A control signal of `sender`, or of the runtime when `None`.
+    Signal {
+        sender: Option<ProcessId>,
+        signal: Signal,
+    },
+}
+
 /// The signal count of one reduction, as `ERTS_SIG_REDS_CNT_FACTOR`
 /// (`erl_proc_sig_queue.c:52`).
 const SIGNAL_COUNT_FACTOR: i32 = 4;
@@ -106,7 +118,7 @@ impl Scheduler {
     /// monitor signal to the same target goes first, to keep the order of
     /// the signals of the sender. A signal to a process of another scheduler
     /// goes after each pending monitor signal
-    /// ([`Self::pending_before_remote`]). The signal goes to the end of the
+    /// ([`Self::deliver_remote`]). The signal goes to the end of the
     /// queue. A target that does not run and is not in the run queue goes to the
     /// end of the run queue to handle it (`erts_proc_notify_new_sig`,
     /// `erl_proc_sig_queue.h:2063-2075`). `sender` is the sending process,
@@ -131,9 +143,7 @@ impl Scheduler {
         if !self.processes.contains_key(&target)
             && let Some(index) = self.remote_owner(target)
         {
-            let pending = self.pending_before_remote(target);
-            self.node
-                .send_signal(index, target, sender, signal, pending);
+            self.deliver_remote(index, target, Held::Signal { sender, signal });
             return Ok(());
         }
         self.send_signal_local(sender, target, signal)
@@ -141,7 +151,7 @@ impl Scheduler {
 
     /// Put `signal` for the remote target `target` into the inbox of its
     /// owner `index`, which `remote_owner` gave, after the pending monitor
-    /// signal of the sender ([`Self::pending_before_remote`]). The inbox always takes the signal: a
+    /// signal of the sender ([`Self::deliver_remote`]). The inbox always takes the signal: a
     /// target that left before the drain is answered there.
     ///
     /// # Examples
@@ -156,9 +166,7 @@ impl Scheduler {
         target: ProcessId,
         signal: Signal,
     ) {
-        let pending = self.pending_before_remote(target);
-        self.node
-            .send_signal(index, target, sender, signal, pending);
+        self.deliver_remote(index, target, Held::Signal { sender, signal });
     }
 
     /// Put the signal into the queue of the local process `target`, as
@@ -170,11 +178,12 @@ impl Scheduler {
         signal: Signal,
     ) -> Result<(), Box<Signal>> {
         if let Some(pending) = self.take_pending_monitor(target) {
-            if !self.processes.contains_key(&target) {
+            if self.processes.contains_key(&target) {
+                self.queue_signal(sender, target, monitor_signal(pending));
+            } else {
                 self.pending_monitor_failed(sender, pending);
-                return Err(Box::new(signal));
             }
-            self.queue_signal(sender, target, monitor_signal(pending));
+            self.release_held();
         }
         if !self.processes.contains_key(&target) {
             return Err(Box::new(signal));
@@ -217,6 +226,7 @@ impl Scheduler {
     pub(in crate::runtime) fn send_monitor(&mut self, target: ProcessId, monitor: Monitor) {
         if let Some((to, pending)) = self.pending_monitor.replace((target, monitor)) {
             self.queue_pending_monitor(Some(pending.watcher), to, pending);
+            self.release_held();
         }
     }
 
@@ -232,6 +242,7 @@ impl Scheduler {
     pub(in crate::runtime) fn send_pending_monitor(&mut self) {
         if let Some((to, pending)) = self.pending_monitor.take() {
             self.queue_pending_monitor(None, to, pending);
+            self.release_held();
         }
     }
 
@@ -316,33 +327,64 @@ impl Scheduler {
         }
     }
 
-    /// Return the pending monitor signal that goes into the inbox just
-    /// before a delivery to `target`, a process of another scheduler, when
-    /// the signal goes to `target`. A pending monitor signal to another
-    /// process goes now, before the delivery. A delivery to another thread
-    /// can make a process act at once, so a later signal of that process
-    /// must not pass the monitor signal. ERTS sends the signal only at the
-    /// switch out (`erl_process.c:9665-9668`) or with a signal or message to
-    /// the same target (`erl_proc_sig_queue.c:1146-1166`,
-    /// `erl_message.c:463-480`). To send it earlier gives the order of an
-    /// ERTS run in which the sender switches out just before the delivery,
-    /// for example at the end of its reductions, and continues in its next
-    /// turn.
+    /// Send `held` to `target`, a process of the scheduler `index`. A
+    /// pending monitor signal to `target` goes first, as ERTS prepends it
+    /// (`erl_proc_sig_queue.c:1146-1166`, `erl_message.c:463-480`), and the
+    /// held deliveries go after it. A pending monitor signal to another
+    /// process stays in the slot until the switch out
+    /// (`erl_process.c:9665-9668`), and the delivery waits behind it in
+    /// [`Self::held`]. Thus no later signal of the receiver can pass the
+    /// monitor signal: the delivery reaches the other thread after the
+    /// monitor signal. This is the order of an ERTS run in which the other
+    /// scheduler runs the receiver after the sender switches out.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let pending = scheduler.pending_before_remote(target);
+    /// scheduler.deliver_remote(index, target, Held::Signal { sender, signal });
     /// ```
-    pub(in crate::runtime) fn pending_before_remote(
+    pub(in crate::runtime) fn deliver_remote(
         &mut self,
+        index: usize,
         target: ProcessId,
-    ) -> Option<Signal> {
+        held: Held,
+    ) {
         if let Some(pending) = self.take_pending_monitor(target) {
-            return Some(monitor_signal(pending));
+            self.send_held(index, target, held, Some(monitor_signal(pending)));
+            self.release_held();
+        } else if self.pending_monitor.is_some() {
+            self.held.push((index, target, held));
+        } else {
+            self.send_held(index, target, held, None);
         }
-        self.send_pending_monitor();
-        None
+    }
+
+    /// Put `held` for `target` into the inbox of the scheduler `index`,
+    /// after `pending`.
+    fn send_held(&self, index: usize, target: ProcessId, held: Held, pending: Option<Signal>) {
+        match held {
+            Held::Message { from, term } => {
+                self.node
+                    .send_message(index, Some(from), term, target, pending)
+            }
+            Held::Signal { sender, signal } => self
+                .node
+                .send_signal(index, target, sender, signal, pending),
+        }
+    }
+
+    /// Send the deliveries that waited behind the pending monitor signal, in
+    /// send order.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.release_held();
+    /// ```
+    pub(in crate::runtime) fn release_held(&mut self) {
+        for (index, target, held) in std::mem::take(&mut self.held) {
+            self.send_held(index, target, held, None);
+        }
     }
 
     /// Take the pending monitor signal when it goes to `target`.
