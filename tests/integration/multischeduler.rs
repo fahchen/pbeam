@@ -428,6 +428,45 @@ fn loads_code_on_one_scheduler_and_runs_it_on_another() {
     );
 }
 
+/// An external fun and `apply/3` on one scheduler see the module that the
+/// other scheduler loaded, as `erl +S 2` gives `{{true,1},ok}` for the
+/// two roots.
+#[test]
+fn applies_a_module_that_another_scheduler_loaded() {
+    let (erlang, zlib) = (pinned_beam("erlang"), pinned_beam("zlib"));
+    let program = BeamProgram::load(&[&erlang, &zlib, CODE_LOADING]).expect("the fixture loads");
+    let atom = |name: &str| Term::Atom(program.atom(name).expect("the fixture names the atom"));
+    for _ in 0..10 {
+        let results = program
+            .execute_on_schedulers(&[
+                ("code_loading", "apply_loaded"),
+                ("code_loading", "load_tell"),
+            ])
+            .expect("the two schedulers run");
+        assert_eq!(
+            results[0].term,
+            Term::tuple(vec![atom("true"), Term::Integer(1)])
+        );
+        assert_eq!(results[1].term, atom("ok"));
+    }
+}
+
+/// A purge in a run with scheduler threads fails with a clear error: it
+/// needs `check_process_code` on the processes of each scheduler.
+#[test]
+fn rejects_a_purge() {
+    let program = BeamProgram::load(&[CODE_LOADING]).expect("the fixture loads");
+    let error = program
+        .execute_on_schedulers(&[("code_loading", "purge"), ("code_loading", "purge")])
+        .expect_err("the purge is unsupported");
+    assert!(
+        error.to_string().contains(
+            "unsupported: erts_internal:purge_module/2 in a run of execute_on_schedulers"
+        ),
+        "{error}"
+    );
+}
+
 /// A BIF timer of a shared run fires, and its entry leaves the node.
 #[test]
 fn fires_a_local_bif_timer() {

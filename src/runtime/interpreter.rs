@@ -2986,6 +2986,10 @@ impl BeamProgram {
         arity: u32,
         tail: bool,
     ) -> Result<Option<Outcome>, BeamError> {
+        // A BIF that reads the code table, such as `erlang:module_loaded/1`,
+        // and the export of the MFA see each code operation that returned
+        // on another scheduler.
+        scheduler.sync_code();
         let resolved = {
             let atoms = &scheduler.atoms;
             resolve(atoms.name_of(module), atoms.name_of(name), arity)

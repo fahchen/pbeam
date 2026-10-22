@@ -1,5 +1,5 @@
 -module(code_loading).
--export([loader/0, caller/0, reference/0]).
+-export([loader/0, caller/0, reference/0, purge/0, load_tell/0, apply_loaded/0]).
 
 %% The two roots load code_target on one scheduler and call it from the
 %% other. code_target.hrl holds the stripped code of this module, compiled
@@ -56,6 +56,23 @@ reference() ->
     Loader = receive {loader, L} -> L after 60000 -> timeout end,
     Caller = receive {caller, C} -> C after 60000 -> timeout end,
     {Loader, Caller}.
+
+%% The root that purges code, which needs the processes of each scheduler.
+purge() ->
+    erts_internal:purge_module(code_target, complete).
+
+%% The root that loads code_target and gives an external fun and the module
+%% name to the other root.
+load_tell() ->
+    {module, code_target} = erlang:load_module(code_target, ?TARGET_V1),
+    wait_registered(code_asker) ! {fun erlang:module_loaded/1, code_target},
+    ok.
+
+%% The root that calls the external fun and apply/3 with the module that the
+%% other root loaded.
+apply_loaded() ->
+    true = register(code_asker, self()),
+    receive {Loaded, Module} -> {Loaded(Module), apply(Module, version, [])} end.
 
 wait_registered(Name) ->
     case whereis(Name) of

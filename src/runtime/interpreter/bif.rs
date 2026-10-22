@@ -679,8 +679,11 @@ macro_rules! bifs {
             // A run with scheduler threads keeps these node services with
             // each scheduler, so their use fails with a clear error until
             // the services move to the node.
+            // A purge needs `check_process_code` on the processes of each
+            // scheduler (`erts_code_purger.erl:166-179`), which a scheduler
+            // reads only for its own processes.
             let local_service = matches!(module, "ets" | "persistent_term")
-                || (module == "erts_internal" && name == "atomics_new");
+                || (module == "erts_internal" && matches!(name, "atomics_new" | "purge_module"));
             if context.scheduler.is_multi() && local_service {
                 return Err(error(format!(
                     "unsupported: {module}:{name}/{arity} in a run of execute_on_schedulers"
@@ -693,7 +696,7 @@ macro_rules! bifs {
                 && matches!(
                     (module, name),
                     ("erlang", "finish_loading" | "finish_after_on_load" | "delete_module")
-                        | ("erts_internal", "prepare_loading" | "purge_module")
+                        | ("erts_internal", "prepare_loading")
                 );
             let node = code_operation.then(|| Arc::clone(context.scheduler.node()));
             let mut state = node.as_deref().map(|node| {
