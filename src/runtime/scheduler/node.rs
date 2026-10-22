@@ -58,8 +58,9 @@ struct Inbox {
 /// The state of a run that more than one scheduler thread shares.
 #[derive(Debug)]
 pub(in crate::runtime) struct Node {
-    /// The scheduler of each live process.
-    owners: Mutex<HashMap<ProcessId, usize>>,
+    /// The scheduler of each live process, and true when the process
+    /// exits, as the ERTS `EXITING` state flag.
+    owners: Mutex<HashMap<ProcessId, (usize, bool)>>,
     /// The registered names of the node, as the ERTS `process_reg` table.
     names: Mutex<HashMap<String, ProcessId>>,
     /// The scheduler of each open port.
@@ -221,8 +222,22 @@ impl Node {
         self.owners
             .lock()
             .expect("the process owner table is not poisoned")
-            .insert(id, index);
+            .insert(id, (index, false));
         self.live.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Mark the process `id` as exiting, as `set_self_exiting`
+    /// (`erl_process.c:13485-13517`) sets its `EXITING` flag. A process of
+    /// another scheduler then finds no live process for the pid (see
+    /// [`Self::live_owner`]), and signals still reach the owner, which
+    /// answers them at the exit.
+    pub(in crate::runtime) fn set_exiting(&self, id: ProcessId) {
+        self.owners
+            .lock()
+            .expect("the process owner table is not poisoned")
+            .get_mut(&id)
+            .expect("an exiting process is in the owner table")
+            .1 = true;
     }
 
     /// Remove the process `id` and each name of it. A registration of a
@@ -256,7 +271,18 @@ impl Node {
             .lock()
             .expect("the process owner table is not poisoned")
             .get(&id)
-            .copied()
+            .map(|&(index, _)| index)
+    }
+
+    /// Return the scheduler of the process `id` when the process does not
+    /// exit, as `erts_proc_lookup` (`erl_process_lock.h:1151-1157`) finds
+    /// it.
+    pub(in crate::runtime) fn live_owner(&self, id: ProcessId) -> Option<usize> {
+        self.owners
+            .lock()
+            .expect("the process owner table is not poisoned")
+            .get(&id)
+            .and_then(|&(index, exiting)| (!exiting).then_some(index))
     }
 
     /// Put a message for `target` into the inbox of `index`. `pending` is

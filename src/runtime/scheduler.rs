@@ -2680,6 +2680,23 @@ impl Scheduler {
         (owner != self.index).then_some(owner)
     }
 
+    /// Return the scheduler of the process `target` when it is another
+    /// scheduler of the node and the process does not exit (see
+    /// [`Node::live_owner`]).
+    pub(super) fn remote_live_owner(&self, target: ProcessId) -> Option<usize> {
+        let owner = self.node.live_owner(target)?;
+        (owner != self.index).then_some(owner)
+    }
+
+    /// Make the process `id` exiting for the other schedulers of a run with
+    /// scheduler threads (see [`Node::set_exiting`]). A run with one
+    /// scheduler has no other reader.
+    pub(super) fn set_exiting(&self, id: ProcessId) {
+        if self.multi {
+            self.node.set_exiting(id);
+        }
+    }
+
     /// Move each delivery of the inbox of this scheduler into the signal
     /// queue or the mailbox of its target, in inbox order. Return true when
     /// the inbox held a delivery.
@@ -2914,7 +2931,8 @@ impl Scheduler {
     /// link signal to the target, which adds its side of the link when it
     /// handles the signal.
     ///
-    /// A target that does not exist or exits (`erts_proc_lookup`) gives
+    /// A target that does not exist or exits (`erts_proc_lookup`), on this
+    /// scheduler or on another scheduler of the node, gives
     /// `false` and no link when the current process does not trap exits:
     /// the BIF then raises `noproc` (`bif.c:162-163`, `411-423`). With
     /// `trap_exit` the link is made. A target that exits gets the link
@@ -2935,7 +2953,7 @@ impl Scheduler {
             return true;
         }
         if self.live_process(target).is_none()
-            && self.remote_owner(target).is_none()
+            && self.remote_live_owner(target).is_none()
             && !self.current_process_mut().trap_exit
         {
             return false;
@@ -3360,6 +3378,8 @@ impl Scheduler {
             Some(next) => next,
             None => {
                 process.bump_reductions(EXIT_REDUCTIONS);
+                self.set_exiting(id);
+                let process = self.current_process_mut();
                 if let ReceiveTimer::Set { key, .. } = process.receive_timer {
                     self.timers.cancel(key);
                 }
