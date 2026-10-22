@@ -416,10 +416,11 @@ fn shows_the_registered_library_to_the_nif_manifest_gate() {
             library: "extension_probe".to_owned(),
             function: "unbound".to_owned(),
             arity: 1,
+            call_fails: false,
         }]
     );
     assert_eq!(
         nif_manifest_gaps(&probe)[0].to_string(),
-        "extension_probe:unbound/1: NIF function has no PBeam binding"
+        "extension_probe:unbound/1: NIF function has no PBeam binding; a call runs the BEAM stub body"
     );
 }
