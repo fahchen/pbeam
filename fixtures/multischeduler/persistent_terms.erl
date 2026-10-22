@@ -132,10 +132,11 @@ trapped_get() ->
     Killed = killed_get(),
     High = high_wait(),
     Reader = high_reader(),
+    Order = wait_order(),
     [persistent_term:erase({trapped, I}) || I <- lists:seq(1, ?KEYS)],
     _ = persistent_term:erase(late_key),
-    case {First, Rest, Killed, High, Reader} of
-        {{got, false}, [erase_done, put_done, {got_again, _}], ok, ok, ok} -> ok;
+    case {First, Rest, Killed, High, Reader, Order} of
+        {{got, false}, [erase_done, put_done, {got_again, _}], ok, ok, ok, first} -> ok;
         Other -> Other
     end.
 
@@ -169,6 +170,16 @@ high_reader() ->
                   end, [{priority, high}]),
     ok = persistent_term:put(reader_key, 1),
     receive reader_done -> ok after 60000 -> timeout end.
+
+%% Two puts of one key wait while a get/0 traps. ERTS resumes the last
+%% waiter first, so the first put runs last.
+wait_order() ->
+    Self = self(),
+    _ = spawn(fun() -> _ = persistent_term:get(), Self ! got end),
+    _ = spawn(fun() -> ok = persistent_term:put(order_key, first), Self ! put end),
+    _ = spawn(fun() -> ok = persistent_term:put(order_key, second), Self ! put end),
+    [receive M -> M after 60000 -> timeout end || M <- [got, put, put]],
+    persistent_term:get(order_key).
 
 killed_get() ->
     Getter = spawn(fun() -> persistent_term:get() end),

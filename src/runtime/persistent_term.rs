@@ -130,7 +130,11 @@ impl PersistentTermStore {
         // The copy of a holder that exited ends with no change, as its trap
         // state destructor frees it (`erl_bif_persistent.c:295-301`).
         self.copy = None;
-        std::mem::take(&mut self.waiters)
+        // ERTS puts each waiter at the head of its queue and resumes from
+        // the head (`erl_bif_persistent.c:1325-1331`, `1353-1363`).
+        let mut waiters = std::mem::take(&mut self.waiters);
+        waiters.reverse();
+        waiters
     }
 
     /// Return true when the table of the caller `id` waits for thread
