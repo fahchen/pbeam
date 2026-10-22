@@ -11,7 +11,7 @@
          wall_time/0, name_after_kill/0, name_kill_hold/0, name_kill_child/0,
          decode_atom/0, persistent_put/0, port_transfer/0,
          port_transfer_hold/0, ports_list/0, port_use/0, port_give/0,
-         port_term/0, port_term_give/0, atomics_new/0, timer_remote/0,
+         port_term/0, port_term_give/0, counters_hold/0, counters_add/0, timer_remote/0,
          timer_hold/0, timer_named/0, timer_read/0, timer_give/0, system_flag_depth/0,
          regex_run/0, regex_give/0,
          group_leader_remote/0, leader_hold/0, pattern_match/0, pattern_give/0,
@@ -561,8 +561,30 @@ port_term_give() ->
 
 %% The root that makes an atomic array. A run with scheduler threads
 %% cannot share the arrays.
-atomics_new() ->
-    erts_internal:atomics_new(1, []).
+%% The root that makes a counter array and an unsigned atomic array, gives
+%% them to the other root, and adds to the counter. Each root adds to the
+%% same arrays from its own scheduler.
+counters_hold() ->
+    Counter = counters:new(1, []),
+    Unsigned = atomics:new(1, [{signed, false}]),
+    true = register(counters_hold, self()),
+    receive {arrays, From} -> From ! {arrays, Counter, Unsigned} end,
+    ok = counters:add(Counter, 1, 3),
+    receive added -> ok end,
+    {counters:get(Counter, 1), atomics:get(Unsigned, 1)}.
+
+%% The root that adds to the arrays of `counters_hold/0`. The subtraction
+%% wraps the unsigned atomic around at 64 bits.
+counters_add() ->
+    Pid = wait_for(counters_hold, 100000),
+    Pid ! {arrays, self()},
+    receive
+        {arrays, Counter, Unsigned} ->
+            ok = counters:add(Counter, 1, 5),
+            ok = atomics:sub(Unsigned, 1, 1),
+            Pid ! added,
+            ok
+    end.
 
 %% The root that starts a timer for a process of the other scheduler.
 timer_remote() ->

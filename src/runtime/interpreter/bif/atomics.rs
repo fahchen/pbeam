@@ -69,6 +69,7 @@ pub(super) fn new(
     // array in `usize`.
     let id = scheduler.make_ref()?;
     if !scheduler
+        .node()
         .atomics
         .create(id, options & OPT_SIGNED == OPT_SIGNED, size as usize)
     {
@@ -99,10 +100,10 @@ pub(super) fn get(
     reference: &Term,
     index: &Term,
 ) -> Result<BifResult, BeamError> {
-    let Some(array) = scheduler.atomics.array(reference) else {
+    let Some(array) = scheduler.node().atomics.array(reference) else {
         return Ok(BifResult::badarg());
     };
-    let Some(position) = position(array, index) else {
+    let Some(position) = position(&array, index) else {
         return Ok(BifResult::badarg());
     };
     Ok(Value(value(array.signed(), array.get(position))))
@@ -130,10 +131,10 @@ pub(super) fn put(
     index: &Term,
     value: &Term,
 ) -> Result<BifResult, BeamError> {
-    let Some(array) = scheduler.atomics.array_mut(reference) else {
+    let Some(array) = scheduler.node().atomics.array(reference) else {
         return Ok(BifResult::badarg());
     };
-    let Some(position) = position(array, index) else {
+    let Some(position) = position(&array, index) else {
         return Ok(BifResult::badarg());
     };
     let Some(bits) = value_bits(array.signed(), value) else {
@@ -165,10 +166,10 @@ pub(super) fn add(
     index: &Term,
     increment: &Term,
 ) -> Result<BifResult, BeamError> {
-    let Some(array) = scheduler.atomics.array_mut(reference) else {
+    let Some(array) = scheduler.node().atomics.array(reference) else {
         return Ok(BifResult::badarg());
     };
-    let Some(position) = position(array, index) else {
+    let Some(position) = position(&array, index) else {
         return Ok(BifResult::badarg());
     };
     let Some(bits) = increment_bits(increment) else {
@@ -192,7 +193,7 @@ pub(super) fn add(
 /// assert!(matches!(info(&mut scheduler, &reference)?, BifResult::Value(Term::Map(_))));
 /// ```
 pub(super) fn info(scheduler: &mut Scheduler, reference: &Term) -> Result<BifResult, BeamError> {
-    let Some(array) = scheduler.atomics.array(reference) else {
+    let Some(array) = scheduler.node().atomics.array(reference) else {
         return Ok(BifResult::badarg());
     };
     let (min, max) = if array.signed() {

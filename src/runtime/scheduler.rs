@@ -7,7 +7,6 @@ use std::{
 
 use super::{
     Job,
-    atomics::AtomicArrays,
     binary_pattern::BinaryPatterns,
     buffers::Buffers,
     capability::{
@@ -374,9 +373,6 @@ pub(super) struct Scheduler {
     /// ETS tables of the node ([`Node::ets`]). All processes of the run
     /// share them.
     pub(super) ets: Arc<NodeTables>,
-    /// Atomic arrays of the node, which the `atomics` module and the
-    /// `counters` module use. All processes of the run share them.
-    pub(super) atomics: AtomicArrays,
     /// Compiled patterns of `binary:compile_pattern/1` of the node. All
     /// processes of the run share them.
     pub(super) binary_patterns: BinaryPatterns,
@@ -530,7 +526,6 @@ impl Scheduler {
             freed: HashMap::new(),
             runnable: RunQueue::default(),
             persistent_terms: PersistentTerms::default(),
-            atomics: AtomicArrays::default(),
             binary_patterns: BinaryPatterns::default(),
             deferred_signals: Vec::new(),
             menu_writer: std::sync::Arc::new(menu_pair.0),
@@ -583,7 +578,7 @@ impl Scheduler {
     ) -> Self {
         // A term crosses a scheduler thread with its atom indices, so the
         // schedulers share one table, as ERTS shares `erts_atom_table`.
-        let origin = node.clock_origin();
+        let clock = node.clock();
         let mut scheduler = Scheduler {
             ets: Arc::clone(&node.ets),
             node,
@@ -593,9 +588,9 @@ impl Scheduler {
             skip_checks: true,
             ..Scheduler::new(atoms)
         };
-        // Each scheduler timer service starts on the run start of the node,
-        // so the clocks of the threads agree.
-        scheduler.timers = Timers::with_origin(origin);
+        // Each scheduler timer service reads the one time support of the
+        // node, so the clocks of the threads agree.
+        scheduler.timers = Timers::with_clock(clock);
         scheduler
     }
 
