@@ -22,14 +22,15 @@ writer() ->
     ok = send_readings(Reader, ?ROUNDS),
     receive after 1600 -> ok end,
     ok = send_readings(Reader, ?ROUNDS),
-    Reader ! done,
+    Reader ! {done, offsets()},
     ok.
 
 %% The root that reads its clock after each reading of the other root. Each
 %% monotonic time must be at or after the time of the other root, and the
 %% time support settings must be the same. The offset can change at a check
 %% in the `multi_time_warp` mode (`erl_time_sup.c:807-817`), so the root
-%% does not compare the offsets or the system times.
+%% does not compare the offsets of each reading. After the check, both roots
+%% read the same offset of the node.
 reader() ->
     true = register(clock_reader, self()),
     check_readings(0).
@@ -39,6 +40,9 @@ send_readings(_Reader, 0) ->
 send_readings(Reader, Count) ->
     Reader ! {reading, readings()},
     send_readings(Reader, Count - 1).
+
+offsets() ->
+    {erlang:time_offset(), erlang:time_offset(millisecond)}.
 
 readings() ->
     {erlang:monotonic_time(), erlang:monotonic_time(microsecond),
@@ -54,10 +58,11 @@ check_readings(Count) ->
                 true -> check_readings(Count + 1);
                 false -> {unexpected, Theirs, Ours}
             end;
-        done when Count =:= 2 * ?ROUNDS ->
-            ok;
-        done ->
-            {unexpected, Count}
+        {done, Offsets} ->
+            case {Count, offsets()} of
+                {Count, Offsets} when Count =:= 2 * ?ROUNDS -> ok;
+                Other -> {unexpected, Other, Offsets}
+            end
     after 60000 ->
         timeout
     end.
