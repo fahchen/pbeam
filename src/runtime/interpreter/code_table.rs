@@ -347,8 +347,11 @@ impl CodeTable {
     }
 
     /// Return the names of the modules with current or old code, in the
-    /// order of their first load (see [`Self::order`]): the start modules
-    /// in the order of the program, and then each module in the order of
+    /// order of their first load (see [`Self::order`]). The code of a purge
+    /// that [`Self::prepare_on_load_purge`] started is old code until the
+    /// purge completes, as ERTS moves the `on_load` code to `modp->old`
+    /// (`beam_bif_load.c:2134-2141`). The start modules come in the order
+    /// of the program, and then each module in the order of
     /// its `erlang:finish_loading/1`.
     ///
     /// # Examples
@@ -359,7 +362,11 @@ impl CodeTable {
     pub(in crate::runtime) fn names(&self) -> impl Iterator<Item = &str> {
         self.order
             .iter()
-            .filter(|name| self.modules.contains_key(*name) || self.old.contains(*name))
+            .filter(|name| {
+                self.modules.contains_key(*name)
+                    || self.old.contains(*name)
+                    || self.old_code(name).is_some()
+            })
             .map(String::as_str)
     }
 
