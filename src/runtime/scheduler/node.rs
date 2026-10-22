@@ -733,8 +733,8 @@ impl Node {
 
     /// Remove the active BIF timer `reference` from the node and from the
     /// timer tree of its receiver. Return its scheduler and its end tick,
-    /// or `None` when no timer with the reference is active. The tree of an
-    /// exiting receiver is with its exit, which keeps the timer, as ERTS
+    /// or `None` when no timer with the reference is active. An exiting
+    /// receiver keeps the timer in its tree for its exit, as ERTS
     /// leaves it in the tree of an exiting process (`erl_hl_timer.c:1185-1192`,
     /// `1904-1911`).
     pub(in crate::runtime) fn take_timer(
@@ -743,7 +743,9 @@ impl Node {
     ) -> Option<(usize, i64)> {
         let mut timers = self.timers.lock().expect("the timer table is not poisoned");
         let entry = timers.entries.remove(&reference)?;
+        // An exiting receiver keeps the timer in its tree for its exit.
         if let Some(receiver) = entry.receiver
+            && !(self.owner(receiver).is_some() && self.live_owner(receiver).is_none())
             && let Some(tree) = timers.trees.get_mut(&receiver)
         {
             tree.remove(&TimerReference(reference));

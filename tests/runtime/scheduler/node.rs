@@ -134,8 +134,8 @@ fn the_check_of_the_inboxes_holds_the_idle_count() {
 }
 
 /// A timer for a receiver of another scheduler requires a live receiver.
-/// The exit of the receiver takes its tree, and a later cancel leaves the
-/// tree as it is.
+/// A cancel after the exit start keeps the timer in the tree of the
+/// receiver for its exit.
 #[test]
 fn a_remote_timer_requires_a_live_receiver() {
     let (node, _readers) = Node::new(2).unwrap();
@@ -148,9 +148,10 @@ fn a_remote_timer_requires_a_live_receiver() {
     let late = crate::term::Reference::ordinary(2).unwrap();
     assert!(!node.register_timer(late, 0, 1100, Some(receiver), true));
     assert_eq!(node.timer_end(late), None);
-    let tree = node.take_receiver_timers(receiver);
+    // A cancel between the exit start and the take leaves the tree entry
+    // for the exit to count.
     assert_eq!(node.take_timer(reference), Some((0, 1100)));
     assert_eq!(node.take_timer(reference), None);
-    assert!(!tree.is_empty());
+    assert!(!node.take_receiver_timers(receiver).is_empty());
     assert!(node.take_receiver_timers(receiver).is_empty());
 }
