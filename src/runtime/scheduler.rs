@@ -52,8 +52,9 @@ use crate::{
 /// (`erl_process.c:10183`, `10435`).
 pub(super) const CONTEXT_REDS: i32 = 4000;
 
-/// The pid of the root process, `<0.0.0>`. The launcher makes the root
-/// process with it, also after it made the policy process.
+/// The pid of the root process of a run with one scheduler, `<0.0.0>`. The
+/// launcher makes the root process with it, also after it made the policy
+/// process.
 const ROOT: ProcessId = ProcessId(0);
 
 /// Indices of the ERTS process table: the default process limit
@@ -368,10 +369,6 @@ pub(super) struct Scheduler {
     /// Processes that wait for a turn, in the queue of their priority. The
     /// current process is not in this queue, as in ERTS.
     runnable: RunQueue,
-    /// Return value or exit reason of the root process. The root process
-    /// records it when its exit starts, and the run ends only after the
-    /// exit completes ([`Self::root_exited`]).
-    root_result: Option<Result<Term, Term>>,
     /// Persistent terms of the node. All processes of the run share them.
     pub(super) persistent_terms: PersistentTerms,
     /// ETS tables of the node. All processes of the run share them.
@@ -491,8 +488,6 @@ pub(super) struct Scheduler {
     index: usize,
     /// The read end of the wake socket of this scheduler.
     wake: Option<UnixStream>,
-    /// The pid of the root process of this scheduler.
-    root: ProcessId,
 }
 
 impl Scheduler {
@@ -518,7 +513,6 @@ impl Scheduler {
             processes: ProcessSlots::default(),
             freed: HashMap::new(),
             runnable: RunQueue::default(),
-            root_result: None,
             persistent_terms: PersistentTerms::default(),
             ets: EtsTables::default(),
             atomics: AtomicArrays::default(),
@@ -549,7 +543,6 @@ impl Scheduler {
             multi: false,
             index: 0,
             wake: None,
-            root: ROOT,
         }
     }
 
@@ -620,7 +613,7 @@ impl Scheduler {
     /// scheduler.mark_root_system();
     /// ```
     pub(super) fn mark_root_system(&mut self) {
-        self.system.insert(self.root);
+        self.system.insert(ROOT);
     }
 
     /// Return the node of this scheduler.
@@ -682,21 +675,25 @@ impl Scheduler {
         arguments: Vec<Term>,
         capabilities: Vec<Capability>,
     ) -> Result<(), BeamError> {
-        self.start_with_id(ROOT, frame, arguments, capabilities)
+        self.start_with_id(ROOT, 0, frame, arguments, capabilities)
     }
 
-    /// Create the root process with the pid `id`, as [`Self::start`] does.
-    /// A run with more than one scheduler starts one root in each scheduler,
-    /// and each root gets its own pid from the shared node.
+    /// Create the root process with the pid `id` and the root slot `slot`
+    /// of the node, as [`Self::start`] does. A run with more than one
+    /// scheduler starts one root on each scheduler, and each root gets its
+    /// own pid from the shared node. The root is an ordinary process with a
+    /// root mark, and the node counts it until its exit completes.
     pub(super) fn start_with_id(
         &mut self,
         id: ProcessId,
+        slot: usize,
         frame: Frame,
         arguments: Vec<Term>,
         capabilities: Vec<Capability>,
     ) -> Result<(), BeamError> {
-        self.root = id;
         let mut root = ProcessState::new(id, Start::Entry(frame), arguments);
+        root.root = Some(slot);
+        self.node.add_root(slot);
         let issued = capabilities
             .into_iter()
             .map(|capability| (Source::Launcher, capability));
@@ -717,8 +714,9 @@ impl Scheduler {
     /// assert!(scheduler.process(ProcessId(0)).unwrap().security.is_boot());
     /// ```
     pub(super) fn start_boot(&mut self, frame: Frame, arguments: Vec<Term>) {
-        self.root = ROOT;
         let mut root = ProcessState::new(ROOT, Start::Entry(frame), arguments);
+        root.root = Some(0);
+        self.node.add_root(0);
         root.security = SecurityContext::boot();
         self.insert(root);
     }
@@ -2468,11 +2466,6 @@ impl Scheduler {
         self.node.name_keys()
     }
 
-    /// Return true when the root process exited with an error.
-    pub(super) fn root_failed(&self) -> bool {
-        matches!(self.root_result, Some(Err(_)))
-    }
-
     /// Return the number of schedulers of the node of this run.
     ///
     /// # Examples
@@ -2490,58 +2483,34 @@ impl Scheduler {
         self.node.name_of(id).and_then(|name| self.atoms.get(&name))
     }
 
-    /// Return true when the root process waits for a message and has no
-    /// receive timer.
-    pub(super) fn root_waiting(&self) -> bool {
+    /// Return true when a root process of this scheduler waits for a
+    /// message.
+    pub(super) fn local_root_waits(&self) -> bool {
         self.processes
-            .get(&self.root)
-            .is_some_and(|process| process.waiting)
+            .values()
+            .any(|process| process.root.is_some() && process.waiting)
     }
 
-    /// Return whether the exit of the root process completed: the root
-    /// process recorded its result, and it is not in the process table and
-    /// not in the freed processes. Thus each stage of the exit, also the
-    /// links, the monitors, and the TTY monitors ([`Self::exit_links`]), ran
-    /// before the run ends, also when the exit switched out at the end of
-    /// the budget ([`Self::finish_current`]).
+    /// Return the atom table of the run. The table holds each name that the
+    /// run created, for example each name of `erlang:list_to_atom/1`, so a
+    /// host result that carries the table can name every atom of a root
+    /// result.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// scheduler.start(frame, vec![])?;
-    /// assert!(!scheduler.root_exited());
-    /// scheduler.schedule_next();
-    /// scheduler.finish_current(Term::static_atom("normal"), Some(Term::static_atom("ok")))?;
-    /// assert!(scheduler.root_exited());
+    /// let atoms = scheduler.into_atoms();
+    /// assert_eq!(atoms.get("ok"), Atom::from_static("ok"));
     /// ```
-    pub(super) fn root_exited(&self) -> bool {
-        let root = self.root;
-        self.root_result.is_some()
-            && !self.processes.contains_key(&root)
-            && !self.freed.contains_key(&root)
-    }
-
-    /// Return the root result and the atom table of the run together.
-    /// `None` means the root process did not exit. The table holds each name
-    /// that the run created, for example each name of
-    /// `erlang:list_to_atom/1`, so a host result that carries the table can
-    /// name every atom of the root result.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// let (root, atoms) = scheduler.into_run_result();
-    /// assert_eq!(root, Some(Ok(Term::static_atom("ok"))));
-    /// ```
-    pub(super) fn into_run_result(self) -> (Option<Result<Term, Term>>, AtomTable) {
-        (self.root_result, self.atoms)
+    pub(super) fn into_atoms(self) -> AtomTable {
+        self.atoms
     }
 
     /// Return the bytes of the guest containers that the runtime holds: the
     /// container arrays of each live process and of each freed process, and
     /// the guest terms that they hold; the persistent terms, the ETS
     /// objects, and the messages of the active BIF timers of the node; and
-    /// the result or the exit reason of the root process. A guest term that
+    /// the result or the exit reason of each root process. A guest term that
     /// only the loaded code holds, such as a literal of a decoded
     /// instruction, is not counted. Each shared container is counted once,
     /// as the counting allocator of `docs/term-layout-design.md` section 5
@@ -2561,11 +2530,7 @@ impl Scheduler {
         self.persistent_terms.account_terms(&mut live);
         self.ets.account_terms(&mut live);
         self.timers.account_terms(&mut live);
-        if let Some(result) = &self.root_result {
-            match result {
-                Ok(term) | Err(term) => live.term(term),
-            }
-        }
+        self.node.account_roots(&mut live);
         self.account_release(&mut live);
         live.bytes()
     }
@@ -2934,7 +2899,7 @@ impl Scheduler {
     /// scheduler.revoke_issued(&[CapabilityKind::Process]);
     /// ```
     pub(super) fn revoke_issued(&mut self, kinds: &[CapabilityKind]) {
-        let root = self.processes.get(&self.root);
+        let root = self.processes.get(&ROOT);
         let copies: Vec<_> = root.map_or_else(Vec::new, |root| {
             kinds
                 .iter()
@@ -3480,12 +3445,16 @@ impl Scheduler {
                 if let ReceiveTimer::Set { key, .. } = process.receive_timer {
                     self.timers.cancel(key);
                 }
-                if id == self.root {
+                // A root records its result when its exit starts, and the
+                // run ends only after the exit completes (see
+                // [`Self::exit_links`]).
+                if let Some(slot) = self.current_process().root {
                     let normal = reason == Term::static_atom("normal");
-                    self.root_result = Some(match result {
+                    let result = match result {
                         Some(result) if normal => Ok(result),
                         _ => Err(reason.clone()),
-                    });
+                    };
+                    self.node.root_result(slot, result);
                 }
                 self.current_process_mut()
                     .bif_timers
@@ -3746,6 +3715,9 @@ impl Scheduler {
         self.alias_owners.retain(|_, owner| *owner != id);
         self.send_pending_monitor();
         self.node.live_exit();
+        if let Some(slot) = process.root {
+            self.node.root_exit(slot);
+        }
         // The process left the process table and no guest code can read it
         // again. Its terms go to the release work list, so that the walk of a
         // large graph runs in bounded scheduler work and not in this step.

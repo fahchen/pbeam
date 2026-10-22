@@ -5,7 +5,7 @@
 //! whole run: the process table, with the owner of each live process, the
 //! registered names, the identifier
 //! counters, the inbox of each scheduler for the deliveries that cross a
-//! thread boundary, and the shutdown state. A sender that runs on another
+//! thread boundary, the roots and their results, and the shutdown state. A sender that runs on another
 //! scheduler puts its message or signal into the inbox of the owner and
 //! wakes it; the owner moves the delivery into the signal queue of the
 //! target, in inbox order, at its next scheduling step. Thus the deliveries
@@ -27,7 +27,7 @@ use super::{Signal, process_table::ProcessTable};
 use crate::{
     error::{BeamError, error},
     runtime::{dirty::Pools, host::clock},
-    term::{PortId, ProcessId, Term},
+    term::{LiveBytes, PortId, ProcessId, Term},
 };
 
 /// One delivery that crosses a scheduler thread boundary.
@@ -54,6 +54,28 @@ pub(in crate::runtime) enum Delivery {
 struct Inbox {
     queue: Mutex<VecDeque<Delivery>>,
     wake: UnixStream,
+}
+
+/// The roots of a run. A root is an ordinary process with a root mark: the
+/// slot of its result here. The run ends after the exit of the last root
+/// completes, or after the exit of a root that failed.
+#[derive(Debug)]
+struct Roots {
+    /// The number of roots whose exit did not complete.
+    live: usize,
+    /// The result of each root by its slot: the return value or the exit
+    /// reason. `None` until the exit of the root starts.
+    results: Vec<Option<Result<Term, Term>>>,
+}
+
+impl Roots {
+    /// Return the roots of a run with `slots` root slots and no root yet.
+    fn new(slots: usize) -> Mutex<Self> {
+        Mutex::new(Roots {
+            live: 0,
+            results: vec![None; slots],
+        })
+    }
 }
 
 /// The state of a run that more than one scheduler thread shares.
@@ -87,13 +109,14 @@ pub(in crate::runtime) struct Node {
     next_port: AtomicU64,
     /// The next unlink operation identifier.
     next_unlink_id: AtomicU64,
-    /// The number of roots that did not exit yet.
-    roots: AtomicUsize,
+    /// The roots of the run and their results.
+    roots: Mutex<Roots>,
     /// The number of schedulers of the node.
     schedulers: usize,
     /// The number of live processes.
     live: AtomicUsize,
-    /// True after the last root exited.
+    /// True after the last root exited, or after a root or a scheduler
+    /// failed.
     shutdown: AtomicBool,
     /// The run start, as the instant and the OS system time at the same
     /// moment. Each scheduler builds its timer service on this pair, so the
@@ -146,7 +169,7 @@ impl Node {
                 unique_monotonic: AtomicI64::new(-1),
                 next_port: AtomicU64::new(0),
                 next_unlink_id: AtomicU64::new(1),
-                roots: AtomicUsize::new(count),
+                roots: Roots::new(count),
                 schedulers: count,
                 live: AtomicUsize::new(0),
                 shutdown: AtomicBool::new(false),
@@ -181,8 +204,8 @@ impl Node {
     }
 
     /// Return the node of one scheduler that has no other scheduler. It has
-    /// no inbox and no root that waits for a start, so a one-thread run never
-    /// wakes a scheduler.
+    /// no inbox, so a one-thread run never wakes a scheduler, and one root
+    /// slot.
     ///
     /// # Examples
     ///
@@ -207,7 +230,7 @@ impl Node {
             unique_monotonic: AtomicI64::new(-1),
             next_port: AtomicU64::new(0),
             next_unlink_id: AtomicU64::new(1),
-            roots: AtomicUsize::new(0),
+            roots: Roots::new(1),
             schedulers: 1,
             live: AtomicUsize::new(0),
             shutdown: AtomicBool::new(false),
@@ -561,20 +584,58 @@ impl Node {
             .collect()
     }
 
-    /// Record that the root of one scheduler exited. The last root sets the
-    /// shutdown state and wakes each scheduler.
-    pub(in crate::runtime) fn root_done(&self) {
-        if self.roots.fetch_sub(1, Ordering::AcqRel) == 1 {
+    /// Count a new root of the slot `slot`, before it starts.
+    ///
+    /// # Panics
+    ///
+    /// Panic when the node has no slot `slot`.
+    pub(in crate::runtime) fn add_root(&self, slot: usize) {
+        let mut roots = self.roots.lock().expect("the roots are not poisoned");
+        assert!(slot < roots.results.len(), "the node has the root slot");
+        roots.live += 1;
+    }
+
+    /// Record the result of the root of the slot `slot` when its exit
+    /// starts: the return value, or the exit reason.
+    pub(in crate::runtime) fn root_result(&self, slot: usize, result: Result<Term, Term>) {
+        let mut roots = self.roots.lock().expect("the roots are not poisoned");
+        roots.results[slot] = Some(result);
+    }
+
+    /// Record that the exit of the root of the slot `slot` completed. A
+    /// failed root stops the run, as [`Self::abort`] does. The last root
+    /// sets the shutdown state. Each root exit wakes each scheduler.
+    pub(in crate::runtime) fn root_exit(&self, slot: usize) {
+        let mut roots = self.roots.lock().expect("the roots are not poisoned");
+        roots.live -= 1;
+        if roots.live == 0 || matches!(roots.results[slot], Some(Err(_))) {
             self.shutdown.store(true, Ordering::Release);
         }
+        drop(roots);
         for inbox in &self.inboxes {
             wake(&inbox.wake);
         }
     }
 
-    /// Stop every scheduler after a root failed. Each scheduler that still
-    /// runs returns from its loop, and each scheduler that serves its inbox
-    /// leaves it.
+    /// Take the result of each root, in slot order. `None` is a root whose
+    /// exit did not start.
+    pub(in crate::runtime) fn take_root_results(&self) -> Vec<Option<Result<Term, Term>>> {
+        let mut roots = self.roots.lock().expect("the roots are not poisoned");
+        std::mem::take(&mut roots.results)
+    }
+
+    /// Account the terms of the root results in `live`.
+    pub(in crate::runtime) fn account_roots(&self, live: &mut LiveBytes) {
+        let roots = self.roots.lock().expect("the roots are not poisoned");
+        for result in roots.results.iter().flatten() {
+            match result {
+                Ok(term) | Err(term) => live.term(term),
+            }
+        }
+    }
+
+    /// Stop every scheduler after a scheduler failed. Each scheduler
+    /// returns from its loop.
     pub(in crate::runtime) fn abort(&self) {
         self.shutdown.store(true, Ordering::Release);
         for inbox in &self.inboxes {
@@ -582,7 +643,8 @@ impl Node {
         }
     }
 
-    /// Return true after the last root exited.
+    /// Return true when the run ends: after the last root exited, or after
+    /// a root or a scheduler failed.
     pub(in crate::runtime) fn is_shutdown(&self) -> bool {
         self.shutdown.load(Ordering::Acquire)
     }
