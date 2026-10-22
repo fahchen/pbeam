@@ -18,6 +18,9 @@ use common::pinned_beam;
 /// `-boot` flag of `erl` takes it (init.erl:1256-1267).
 const BOOT_FILE: &str = "fixtures/boot/init_boot_probe";
 const PROBE: &[u8] = include_bytes!("../../fixtures/boot/init_boot_probe.beam");
+/// The boot file of the probe that kills `init`.
+const KILL_BOOT_FILE: &str = "fixtures/boot/init_kill_probe";
+const KILL_PROBE: &[u8] = include_bytes!("../../fixtures/boot/init_kill_probe.beam");
 const LOADED_ORDER_PROBE: &[u8] = include_bytes!("../../fixtures/boot/loaded_order_probe.beam");
 const SYSTEM_PROCESS_PROBE: &[u8] = include_bytes!("../../fixtures/boot/system_process_probe.beam");
 
@@ -128,13 +131,20 @@ fn isolated_init_boot() {
         env::var_os(ISOLATED).is_some(),
         "run it through its parent test"
     );
+    let halted = boot_probe(PROBE, BOOT_FILE);
+    assert_eq!(halted.unwrap_err(), BeamError::Halt(0));
+}
+
+/// Boot the node with `probe` and the boot modules, with the arguments that
+/// `erl -noshell -boot BootFile -pa fixtures/boot` gives the emulator.
+fn boot_probe(probe: &[u8], boot_file: &str) -> Result<pbeam_runtime::HostTerm, BeamError> {
     let mut beams = BOOT_MODULES.map(pinned_beam).to_vec();
-    beams.push(PROBE.to_vec());
+    beams.push(probe.to_vec());
     let slices = beams.iter().map(Vec::as_slice).collect::<Vec<_>>();
     let program = BeamProgram::load(&slices).unwrap();
     let (root, bindir) = emulator_flags();
     let home = env::var_os("HOME").unwrap();
-    let halted = program.boot(&[
+    program.boot(&[
         b"-root",
         &root,
         b"-bindir",
@@ -147,11 +157,42 @@ fn isolated_init_boot() {
         b"--",
         b"-noshell",
         b"-boot",
-        BOOT_FILE.as_bytes(),
+        boot_file.as_bytes(),
         b"-pa",
         b"fixtures/boot",
-    ]);
-    assert_eq!(halted.unwrap_err(), BeamError::Halt(0));
+    ])
+}
+
+#[test]
+fn stops_the_run_at_the_exit_of_init_as_pinned_erts() {
+    // The emulator starts `init` as a system process (erl_init.c:355-399),
+    // and the exit of a system process stops it with `System process <Pid>
+    // terminated: <Reason>` (erl_process.c:14186-14188). The boot script
+    // of `init_kill_probe` kills `init` from the boot process. ERTS writes
+    // the text and exits with status 1, with no crash dump with
+    // `ERL_CRASH_DUMP_SECONDS=0`; PBeam stops the run with the text as its
+    // error (row "Node boot").
+    let text = "System process <0.0.0> terminated: killed";
+    let reference = Command::new("erl")
+        .args(["-noshell", "-boot", KILL_BOOT_FILE, "-pa", "fixtures/boot"])
+        .env("ERL_CRASH_DUMP_SECONDS", "0")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(
+        (
+            String::from_utf8_lossy(&reference.stderr).lines().next(),
+            reference.stdout.as_slice(),
+            reference.status.code()
+        ),
+        (Some(text), &b""[..], Some(1)),
+        "ERTS"
+    );
+    assert_eq!(
+        boot_probe(KILL_PROBE, KILL_BOOT_FILE).unwrap_err(),
+        BeamError::Runtime(text.into()),
+        "PBeam"
+    );
 }
 
 /// Return the standard error text of `system_process_probe:Function()` on
