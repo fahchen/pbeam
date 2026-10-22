@@ -3,7 +3,7 @@
 use super::BifResult::Value;
 use super::*;
 use crate::runtime::ets::pattern::{MatchSpec, SpecError};
-use crate::runtime::ets::{Access, Busy, Operation, Table, TableType};
+use crate::runtime::ets::{Access, Busy, Table, TableType};
 use crate::term::Reference;
 use num_bigint::BigInt;
 
@@ -48,10 +48,11 @@ fn step_inserting(
     }) {
         return Ok((0, None));
     }
+    drop(busy);
     // The table of the caller has the list insert that it did not finish:
     // the step of a call of the table, or the completion of the insert,
     // clears it (`erl_db.c:2185-2195`).
-    let inserting = scheduler
+    let mut inserting = scheduler
         .ets
         .busy(&scheduler.atoms, &Term::Reference(id))
         .expect("the caller found the busy insert");
@@ -61,6 +62,7 @@ fn step_inserting(
         .expect("the caller found the busy insert")
         .owner;
     let (used, result) = inserting.step_busy(&scheduler.atoms, units);
+    drop(inserting);
     if let Some(value) = result {
         // The state of the insert lives with the process that started it,
         // so the result stays for it after the table goes away, and the
@@ -104,8 +106,10 @@ fn help_busy(context: &mut BifContext<'_>, table: &Term) -> Result<Take, BeamErr
     let Some((id, found)) = context.scheduler.ets.find(&context.scheduler.atoms, table) else {
         return Ok(Take::Free);
     };
-    if let Some(started) = found.busy.as_ref() {
-        if started.owner == caller {
+    let (started, clearing) = (found.busy.as_ref().map(|busy| busy.owner), found.clearing());
+    drop(found);
+    if let Some(started) = started {
+        if started == caller {
             return Ok(Take::Mine);
         }
         // `ets_insert_2_list_continuation` keeps `ITERATIONS_PER_RED *
@@ -124,7 +128,7 @@ fn help_busy(context: &mut BifContext<'_>, table: &Term) -> Result<Take, BeamErr
             .bump_reductions((used / ITERATIONS_PER_RED) as i32);
         return Ok(Take::Help);
     }
-    if !found.clearing() {
+    if !clearing {
         return Ok(Take::Free);
     }
     // A process that uses the table while a fixed clear does not finish
@@ -159,7 +163,9 @@ fn finish_busy(context: &mut BifContext<'_>, table: &Term) -> Result<(), BeamErr
             .ets
             .find(atoms, table)
             .expect("the caller found the table");
-        if found.busy.is_none() {
+        let idle = found.busy.is_none();
+        drop(found);
+        if idle {
             return Ok(());
         }
         let (used, _) = step_inserting(context, &Term::Reference(id), i64::from(i32::MAX), None)?;
@@ -426,6 +432,7 @@ fn insert_objects(
             return Ok(BifResult::badarg());
         };
         let (keypos, bag) = (found.keypos(), found.table_type() == TableType::Bag);
+        drop(found);
         let state = ListState {
             done: 0,
             bag: bag.then(Term::nil),
@@ -442,11 +449,10 @@ fn insert_objects(
             arguments: vec![table.clone(), objects.clone()],
         });
     }
-    let Some(table) =
-        context
-            .scheduler
-            .ets
-            .table(&context.scheduler.atoms, table, caller, Operation::Write)
+    let Some(mut table) = context
+        .scheduler
+        .ets
+        .write(&context.scheduler.atoms, table, caller)
     else {
         return Ok(BifResult::badarg());
     };
@@ -458,10 +464,11 @@ fn insert_objects(
     let Some(tuples) = valid_objects(objects, keypos) else {
         return Ok(BifResult::badarg());
     };
-    if new && first_held(&context.scheduler.atoms, table, &tuples, keypos)?.is_some() {
+    if new && first_held(&context.scheduler.atoms, &table, &tuples, keypos)?.is_some() {
         return Ok(Value(Term::static_atom("false")));
     }
-    let compared = put_objects(&context.scheduler.atoms, table, &tuples, keypos, new)?;
+    let compared = put_objects(&context.scheduler.atoms, &mut table, &tuples, keypos, new)?;
+    drop(table);
     let compared: usize = compared.iter().sum();
     // `consumed_reds / ITERATIONS_PER_RED` (`erl_db.c:2379`).
     let reductions = i32::try_from(compared / 8).unwrap_or(i32::MAX);
@@ -649,17 +656,17 @@ pub(super) fn insert_list(
             if let Take::Help | Take::Clear = help_busy(&mut *context, &table)? {
                 break 'work None;
             }
-            let Some(table) = context.scheduler.ets.table(
-                &context.scheduler.atoms,
-                &table,
-                caller,
-                Operation::Write,
-            ) else {
+            let Some(mut table) =
+                context
+                    .scheduler
+                    .ets
+                    .write(&context.scheduler.atoms, &table, caller)
+            else {
                 break 'work Some(BifResult::badarg());
             };
             let tuples = tuples();
             if !matches!(new, New::No) {
-                let held = first_held(&context.scheduler.atoms, table, &tuples, keypos)?;
+                let held = first_held(&context.scheduler.atoms, &table, &tuples, keypos)?;
                 units.left -= held.unwrap_or(count) as i64;
                 if held.is_some() {
                     break 'work Some(Value(Term::static_atom("false")));
@@ -667,7 +674,7 @@ pub(super) fn insert_list(
             }
             // The list call does its own membership walk and passes `false`
             // to `db_put` (`erl_db.c:1858`, `1943`).
-            put_objects(&context.scheduler.atoms, table, &tuples, keypos, false)?;
+            put_objects(&context.scheduler.atoms, &mut table, &tuples, keypos, false)?;
             units.left -= 2 * count as i64;
             break 'work Some(Value(Term::static_atom("true")));
         }
@@ -688,13 +695,12 @@ pub(super) fn insert_list(
             if let Take::Help | Take::Clear = help_busy(&mut *context, &table)? {
                 break 'work None;
             }
-            match context.scheduler.ets.table(
-                &context.scheduler.atoms,
-                &table,
-                caller,
-                Operation::Write,
-            ) {
-                Some(taken_table) => {
+            match context
+                .scheduler
+                .ets
+                .write(&context.scheduler.atoms, &table, caller)
+            {
+                Some(mut taken_table) => {
                     let tuples = tuples();
                     let walk = matches!(new, New::Unlocked);
                     let bif = if walk { "insert_new/2" } else { "insert/2" };
@@ -1164,11 +1170,10 @@ pub(super) fn lookup_element(
             arguments,
         });
     }
-    let Some(table) =
-        context
-            .scheduler
-            .ets
-            .table(&context.scheduler.atoms, table, caller, Operation::Read)
+    let Some(table) = context
+        .scheduler
+        .ets
+        .read(&context.scheduler.atoms, table, caller)
     else {
         return Ok(BifResult::badarg());
     };
@@ -1232,11 +1237,10 @@ pub(super) fn lookup(
             arguments: vec![table.clone(), key.clone()],
         });
     }
-    let Some(table) =
-        context
-            .scheduler
-            .ets
-            .table(&context.scheduler.atoms, table, caller, Operation::Read)
+    let Some(table) = context
+        .scheduler
+        .ets
+        .read(&context.scheduler.atoms, table, caller)
     else {
         return Ok(BifResult::badarg());
     };
@@ -1274,11 +1278,10 @@ pub(super) fn member(
             arguments: vec![table.clone(), key.clone()],
         });
     }
-    let Some(table) =
-        context
-            .scheduler
-            .ets
-            .table(&context.scheduler.atoms, table, caller, Operation::Read)
+    let Some(table) = context
+        .scheduler
+        .ets
+        .read(&context.scheduler.atoms, table, caller)
     else {
         return Ok(BifResult::badarg());
     };
@@ -1317,11 +1320,10 @@ pub(super) fn delete(
             arguments: vec![table.clone(), key.clone()],
         });
     }
-    let Some(table) =
-        context
-            .scheduler
-            .ets
-            .table(&context.scheduler.atoms, table, caller, Operation::Write)
+    let Some(mut table) = context
+        .scheduler
+        .ets
+        .write(&context.scheduler.atoms, table, caller)
     else {
         return Ok(BifResult::badarg());
     };
@@ -1356,11 +1358,10 @@ pub(super) fn take(
             arguments: vec![table.clone(), key.clone()],
         });
     }
-    let Some(table) =
-        context
-            .scheduler
-            .ets
-            .table(&context.scheduler.atoms, table, caller, Operation::Write)
+    let Some(mut table) = context
+        .scheduler
+        .ets
+        .write(&context.scheduler.atoms, table, caller)
     else {
         return Ok(BifResult::badarg());
     };
@@ -1414,13 +1415,12 @@ pub(super) fn delete_table(
     let scheduler = &mut *context.scheduler;
     if scheduler
         .ets
-        .table(&scheduler.atoms, table, caller, Operation::Write)
+        .write(&scheduler.atoms, table, caller)
         .is_none()
     {
         return Ok(BifResult::badarg());
     }
-    let (id, _) =
-        (scheduler.ets.find(&scheduler.atoms, table)).expect("the caller found the table");
+    let id = (scheduler.ets.id(&scheduler.atoms, table)).expect("the caller found the table");
     if scheduler.traps_ets_insert(id) {
         return Err(error(
             "unsupported ets:delete/1 of a table that a trapped insert uses: see \"ETS tables\" in docs/erts-differences.md",
@@ -1733,18 +1733,17 @@ fn select_objects(
         return select_trap(context, table, spec, chunk);
     }
     let atoms = &context.scheduler.atoms;
-    let Some(id) = context.scheduler.ets.find(atoms, table).map(|(id, _)| id) else {
+    let Some(id) = context.scheduler.ets.id(atoms, table) else {
         return Ok(BifResult::badarg());
     };
-    let Some(table) =
-        context
-            .scheduler
-            .ets
-            .table(atoms, &Term::Reference(id), caller, Operation::Read)
+    let Some(table) = context
+        .scheduler
+        .ets
+        .read(atoms, &Term::Reference(id), caller)
     else {
         return Ok(BifResult::badarg());
     };
-    reject_ordered_set(table, "ets:select/2,3")?;
+    reject_ordered_set(&table, "ets:select/2,3")?;
     let Some(compiled) = compile_spec(atoms, spec)? else {
         return Ok(BifResult::badarg());
     };
@@ -1762,6 +1761,7 @@ fn select_objects(
                 let mut state = MatchState::new(chunk, table.writes());
                 let mut iterations = MATCH_ITERATIONS;
                 state.read(atoms, &compiled, table.chain(bucket), &mut iterations);
+                drop(table);
                 return match_end(context, id, &compiled, state, -1, iterations);
             }
             None => true,
@@ -1777,6 +1777,7 @@ fn select_objects(
         }));
     }
     let state = MatchState::new(chunk, table.writes());
+    drop(table);
     match_turn(context, id, spec, &compiled, 0, state)
 }
 
@@ -1791,10 +1792,10 @@ fn select_trap(
     chunk: usize,
 ) -> Result<BifResult, BeamError> {
     let atoms = &context.scheduler.atoms;
-    let (id, _) = context
+    let id = context
         .scheduler
         .ets
-        .find(atoms, table)
+        .id(atoms, table)
         .expect("the caller found the table");
     Ok(BifResult::TrapBif {
         module: "ets",
@@ -1854,11 +1855,10 @@ pub(super) fn match_trap(
         });
     }
     let atoms = &context.scheduler.atoms;
-    let Some(table) =
-        context
-            .scheduler
-            .ets
-            .table(atoms, &Term::Reference(id), caller, Operation::Read)
+    let Some(table) = context
+        .scheduler
+        .ets
+        .read(atoms, &Term::Reference(id), caller)
     else {
         return Ok(BifResult::badarg());
     };
@@ -1873,6 +1873,7 @@ pub(super) fn match_trap(
         writes: table.writes(),
         ..state
     };
+    drop(table);
     let Some(compiled) = compile_spec(atoms, spec)? else {
         return Ok(BifResult::badarg());
     };
@@ -1930,19 +1931,19 @@ pub(super) fn select_continue(
         });
     }
     let atoms = &context.scheduler.atoms;
-    let Some(id) = context.scheduler.ets.find(atoms, table).map(|(id, _)| id) else {
+    let Some(id) = context.scheduler.ets.id(atoms, table) else {
         return Ok(BifResult::badarg());
     };
-    let Some(found) =
-        context
-            .scheduler
-            .ets
-            .table(atoms, &Term::Reference(id), caller, Operation::Read)
+    let Some(found) = context
+        .scheduler
+        .ets
+        .read(atoms, &Term::Reference(id), caller)
     else {
         return Ok(BifResult::badarg());
     };
     let writes = found.writes();
     let bucket = found.bucket_count();
+    drop(found);
     let Some(compiled) = context.scheduler.ets.program(*program) else {
         return Ok(BifResult::badarg());
     };
@@ -2061,32 +2062,43 @@ fn match_turn(
     mut bucket: usize,
     mut state: MatchState,
 ) -> Result<BifResult, BeamError> {
-    let table = context
-        .scheduler
-        .ets
-        .find(&context.scheduler.atoms, &Term::Reference(id));
-    let (_, table) = table.expect("the caller found the table");
     let mut iterations = MATCH_ITERATIONS;
-    loop {
-        state.read(
-            &context.scheduler.atoms,
-            compiled,
-            table.chain(bucket),
-            &mut iterations,
-        );
-        bucket += 1;
-        if bucket == table.bucket_count() {
-            return match_end(context, id, compiled, state, -1, iterations);
+    // The read lock of the table covers the walk of the turn, and the end
+    // or the trap of the turn runs after its release: `Some` gives the next
+    // bucket of the end, and `None` the trap.
+    let end = {
+        let table = context
+            .scheduler
+            .ets
+            .find(&context.scheduler.atoms, &Term::Reference(id));
+        let (_, table) = table.expect("the caller found the table");
+        loop {
+            state.read(
+                &context.scheduler.atoms,
+                compiled,
+                table.chain(bucket),
+                &mut iterations,
+            );
+            bucket += 1;
+            if bucket == table.bucket_count() {
+                break Some(-1);
+            }
+            if state.chunk > 0 && state.got >= state.chunk {
+                break Some(bucket as i64);
+            }
+            if iterations <= 0 {
+                break None;
+            }
         }
-        if state.chunk > 0 && state.got >= state.chunk {
-            return match_end(context, id, compiled, state, bucket as i64, iterations);
-        }
-        if iterations <= 0 {
+    };
+    match end {
+        Some(next) => match_end(context, id, compiled, state, next, iterations),
+        None => {
             context
                 .scheduler
                 .current_process_mut()
                 .bump_all_reductions();
-            return Ok(BifResult::TrapBif {
+            Ok(BifResult::TrapBif {
                 module: "ets",
                 function: "select_trap",
                 arguments: vec![
@@ -2098,7 +2110,7 @@ fn match_turn(
                     Term::Integer(state.got as i64),
                     Term::Integer(state.writes as i64),
                 ],
-            });
+            })
         }
     }
 }
@@ -2244,14 +2256,13 @@ pub(super) fn safe_fixtable(
     if context
         .scheduler
         .ets
-        .table(&context.scheduler.atoms, table, caller, Operation::Read)
+        .read(&context.scheduler.atoms, table, caller)
         .is_none()
     {
         return Ok(BifResult::badarg());
     }
-    let id = (context.scheduler.ets.find(&context.scheduler.atoms, table))
-        .expect("the caller found the table")
-        .0;
+    let id = (context.scheduler.ets.id(&context.scheduler.atoms, table))
+        .expect("the caller found the table");
     let Term::Atom(flag) = flag else {
         return Ok(BifResult::badarg());
     };
@@ -2279,14 +2290,10 @@ pub(super) fn next(
         });
     }
     let atoms = &context.scheduler.atoms;
-    let Some(table) = context
-        .scheduler
-        .ets
-        .table(atoms, table, caller, Operation::Read)
-    else {
+    let Some(table) = context.scheduler.ets.read(atoms, table, caller) else {
         return Ok(BifResult::badarg());
     };
-    reject_ordered_set(table, "ets:next/2")?;
+    reject_ordered_set(&table, "ets:next/2")?;
     match table.next_key(atoms, key) {
         Some(Some(next)) => Ok(Value(next)),
         Some(None) => Ok(Value(Term::static_atom("$end_of_table"))),
@@ -2317,14 +2324,10 @@ pub(super) fn first(context: &mut BifContext<'_>, table: &Term) -> Result<BifRes
         });
     }
     let atoms = &context.scheduler.atoms;
-    let Some(table) = context
-        .scheduler
-        .ets
-        .table(atoms, table, caller, Operation::Read)
-    else {
+    let Some(table) = context.scheduler.ets.read(atoms, table, caller) else {
         return Ok(BifResult::badarg());
     };
-    reject_ordered_set(table, "ets:first/1")?;
+    reject_ordered_set(&table, "ets:first/1")?;
     match table.first_key() {
         Some(key) => Ok(Value(key)),
         None => Ok(Value(Term::static_atom("$end_of_table"))),
@@ -2357,14 +2360,10 @@ pub(super) fn first_lookup(
         });
     }
     let atoms = &context.scheduler.atoms;
-    let Some(table) = context
-        .scheduler
-        .ets
-        .table(atoms, table, caller, Operation::Read)
-    else {
+    let Some(table) = context.scheduler.ets.read(atoms, table, caller) else {
         return Ok(BifResult::badarg());
     };
-    reject_ordered_set(table, "ets:first_lookup/1")?;
+    reject_ordered_set(&table, "ets:first_lookup/1")?;
     let Some(key) = table.first_key() else {
         return Ok(Value(Term::static_atom("$end_of_table")));
     };
@@ -2420,6 +2419,7 @@ pub(super) fn update_element(
         return Ok(BifResult::badarg());
     };
     let keypos = found.1.keypos();
+    drop(found);
     // ERTS compares the unsigned arity with the C `int` key position, so a
     // negative key position rejects each default (`erl_db.c:1483-1484`).
     let default_elements = match default {
@@ -2427,11 +2427,7 @@ pub(super) fn update_element(
         Some(_) => return Ok(BifResult::badarg()),
         None => None,
     };
-    let Some(table) = context
-        .scheduler
-        .ets
-        .table(atoms, table, caller, Operation::Write)
-    else {
+    let Some(mut table) = context.scheduler.ets.write(atoms, table, caller) else {
         return Ok(BifResult::badarg());
     };
     if !matches!(table.table_type(), TableType::Set | TableType::OrderedSet) {
@@ -2619,9 +2615,8 @@ pub(super) fn internal_delete_all(
             let id = context
                 .scheduler
                 .ets
-                .find(&context.scheduler.atoms, table)
-                .expect("the caller found the table")
-                .0;
+                .id(&context.scheduler.atoms, table)
+                .expect("the caller found the table");
             // The call keeps its own arguments: a call that has not started
             // its clear yet runs it after the clear of the other operation
             // (`erl_db.c:769-798`), and a call after its own trap returns
@@ -2641,14 +2636,10 @@ pub(super) fn internal_delete_all(
         .current_process_mut()
         .bif_reductions_signed();
     let atoms = &context.scheduler.atoms;
-    let Some((id, _)) = context.scheduler.ets.find(atoms, table) else {
+    let Some(id) = context.scheduler.ets.id(atoms, table) else {
         return Ok(BifResult::badarg());
     };
-    let Some(found) = context
-        .scheduler
-        .ets
-        .table(atoms, table, caller, Operation::Write)
-    else {
+    let Some(mut found) = context.scheduler.ets.write(atoms, table, caller) else {
         return Ok(BifResult::badarg());
     };
     if !matches!(holder, Term::Atom(atom) if atom.is_static("undefined")) {
@@ -2658,7 +2649,9 @@ pub(super) fn internal_delete_all(
     let reductions = found.delete_all_reductions();
     if found.is_fixed() && found.table_type() != TableType::OrderedSet {
         let units = usize::try_from(count).unwrap_or(usize::MAX);
-        if !found.step_clear(atoms, caller, units, left).0 {
+        let done = found.step_clear(atoms, caller, units, left).0;
+        drop(found);
+        if !done {
             // The clear marks 8 buckets for each reduction. A clear that
             // does not finish marks the table busy, uses the turn, and
             // traps to itself (`erl_db.c:3255-3279`).
@@ -2679,6 +2672,7 @@ pub(super) fn internal_delete_all(
         return Ok(Value(Term::from_bigint(BigInt::from(count))));
     }
     found.clear(&context.scheduler.atoms);
+    drop(found);
     context
         .scheduler
         .current_process_mut()
@@ -2721,15 +2715,11 @@ pub(super) fn internal_select_delete(
     let Some(found) = context.scheduler.ets.find(atoms, table) else {
         return Ok(BifResult::badarg());
     };
-    reject_ordered_set(found.1, "ets:select_delete/2")?;
+    reject_ordered_set(&found.1, "ets:select_delete/2")?;
     let keypos = found.1.keypos();
     let buckets = found.1.bucket_count();
-    if context
-        .scheduler
-        .ets
-        .table(atoms, table, caller, Operation::Write)
-        .is_none()
-    {
+    drop(found);
+    if context.scheduler.ets.write(atoms, table, caller).is_none() {
         return Ok(BifResult::badarg());
     }
     let Some(compiled) = compile_spec(atoms, spec)? else {
@@ -2742,10 +2732,10 @@ pub(super) fn internal_select_delete(
     if compiled.matches_nothing(keypos) {
         return Ok(Value(Term::Integer(0)));
     }
-    let table = context
+    let mut table = context
         .scheduler
         .ets
-        .table(atoms, table, caller, Operation::Write)
+        .write(atoms, table, caller)
         .expect("the caller can write the table");
     let mut iterations = 0_usize;
     let mut matches = Vec::new();
@@ -2765,6 +2755,7 @@ pub(super) fn internal_select_delete(
         }
     }
     table.shrink();
+    drop(table);
     context
         .scheduler
         .current_process_mut()
