@@ -4,12 +4,16 @@
 //! An extension library is a static NIF library of one module, as the
 //! libraries that PBeam links itself, such as `prim_tty`. ERTS selects a
 //! static NIF library by the module name (`is_static_nif_module` in
-//! `beam/erl_nif.c:5324-5331`). A binding is active when its module loads,
-//! also before `erlang:load_nif/2`, and the `nif_start` instruction at the
-//! entry of the function runs it. `erlang:load_nif/2` runs the checks of
+//! `beam/erl_nif.c:5324-5331`). `erlang:load_nif/2` runs the checks of
 //! ERTS against the `functions` of the library and then its load callback.
-//! A function of `functions` without a binding runs its BEAM stub body, or
-//! gives a runtime error when the library sets `unbound_fails`.
+//! A binding becomes active for the loaded instance of the module only when
+//! that load succeeds (`beam/erl_nif.c:4990-5007`); then the `nif_start`
+//! instruction at the entry of the function runs it. Before the load, and
+//! after a failed load, the function runs its BEAM stub body. A function
+//! that the module declares with `PBeam.Native` runs its binding with no
+//! `load_nif/2`. A function of `functions` without a binding runs its BEAM
+//! stub body, or gives a runtime error when the library sets
+//! `unbound_fails`.
 //!
 //! A launcher or a test calls [`register_library`] before it runs the
 //! program. The registry is global and process-safe, and it keeps each
