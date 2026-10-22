@@ -173,6 +173,14 @@ fn boot_node(probes: &[&[u8]], flags: &[&[u8]]) -> Result<pbeam_runtime::HostTer
     program.boot(&arguments)
 }
 
+/// The environment of the kernel boot: a home directory and a user
+/// configuration directory that do not exist, so `c:erlangrc/0` finds no
+/// `.erlang` file of the host user (c.erl:1051-1072).
+const NO_CONFIGURATION: [(&str, &str); 2] = [
+    ("HOME", "fixtures/boot/no_home"),
+    ("XDG_CONFIG_HOME", "fixtures/boot/no_home"),
+];
+
 /// The flags of `erl` for the kernel boot of `kernel_boot_probe`, with the
 /// `-s` arguments of the probe from `status`: none for `init:stop/0`, and
 /// the status for `init:stop/1`.
@@ -209,7 +217,10 @@ fn starts_kernel_and_stops_at_init_stop_as_pinned_erts() {
     // each process that is not a system process (init.erl:1072-1093), and
     // halts with the status (init.erl:943-948). `-kernel logger_level
     // warning` keeps the notice of the stop of a temporary application,
-    // which has a time stamp, out of the output.
+    // which has a time stamp, out of the output. The last `apply` command
+    // runs `c:erlangrc/0`, which evaluates the `.erlang` file of the home
+    // directory and of the user configuration directory (c.erl:1051-1072),
+    // so both runs get a home directory that does not exist.
     let expected = "{controller,{registered_name,application_controller},\
         controller_linked_to_init,true,\
         kernel,[{stdlib,\"ERTS  CXC 138 10\",\"8.1\"},{kernel,\"ERTS  CXC 138 10\",\"11.0.4\"}],\
@@ -230,6 +241,7 @@ fn starts_kernel_and_stops_at_init_stop_as_pinned_erts() {
         let reference = Command::new("erl")
             .args(["-noshell"])
             .args(kernel_boot_flags(status))
+            .envs(NO_CONFIGURATION)
             .stdin(Stdio::null())
             .output()
             .unwrap();
@@ -241,6 +253,7 @@ fn starts_kernel_and_stops_at_init_stop_as_pinned_erts() {
                 "--quiet",
             ])
             .env(ISOLATED, status)
+            .envs(NO_CONFIGURATION)
             .stdin(Stdio::null())
             .output()
             .unwrap();
