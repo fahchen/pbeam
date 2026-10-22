@@ -64,11 +64,13 @@ call_serve() ->
 
 %% The client sends to the aliases of a process of the other scheduler. A
 %% `reply` alias takes one message, an `explicit_unalias` alias takes each
-%% message until `unalias/1`, and a send after it drops the message.
+%% message until `unalias/1`, and a send after it drops the message. A send
+%% to an active alias after the exit of its owner drops the message.
 alias_client_run() ->
     Owner = wait_for(alias_signals_owner),
     Owner ! {client, self()},
-    receive {aliases, Reply, Explicit} -> ok end,
+    receive {aliases, Reply, Explicit, Kept} -> ok end,
+    Monitor = monitor(process, Owner),
     Reply ! one,
     Reply ! dropped,
     Explicit ! two,
@@ -77,8 +79,8 @@ alias_client_run() ->
     receive unaliased -> ok end,
     Explicit ! dropped,
     Owner ! done,
-    receive stop -> ok end,
-    Explicit ! dropped,
+    receive {'DOWN', Monitor, process, Owner, normal} -> ok end,
+    Kept ! dropped,
     ok.
 
 alias_owner_run() ->
@@ -86,16 +88,15 @@ alias_owner_run() ->
     receive {client, Client} -> ok end,
     Reply = alias([reply]),
     Explicit = alias(),
-    Client ! {aliases, Reply, Explicit},
+    Kept = alias(),
+    Client ! {aliases, Reply, Explicit, Kept},
     receive sync -> ok end,
     true = unalias(Explicit),
     false = unalias(Explicit),
     false = unalias(Reply),
     Client ! unaliased,
     receive done -> ok end,
-    Messages = take_all(),
-    Client ! stop,
-    Messages.
+    take_all().
 
 %% A monitor of a process of the other scheduler with an
 %% `explicit_unalias` alias: the reply goes to the alias, the alias stays

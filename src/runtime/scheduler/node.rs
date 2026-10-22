@@ -87,6 +87,16 @@ impl Roots {
     }
 }
 
+/// The alias table of the node: the owner of each alias, and the aliases
+/// of each owner, so the exit of a process removes only its own aliases, as
+/// the ERTS exit walks only the monitors of the process
+/// (`erl_process.c:14560-14569`).
+#[derive(Debug, Default)]
+struct Aliases {
+    owners: HashMap<crate::term::Reference, ProcessId>,
+    by_owner: HashMap<ProcessId, Vec<crate::term::Reference>>,
+}
+
 /// The state of a run that more than one scheduler thread shares.
 #[derive(Debug)]
 pub(in crate::runtime) struct Node {
@@ -100,7 +110,7 @@ pub(in crate::runtime) struct Node {
     /// The owner of each alias, by its reference. ERTS aliases belong to
     /// the node, and any scheduler sends to them
     /// (`erl_proc_sig_queue.c:2814-2895`).
-    aliases: Mutex<HashMap<crate::term::Reference, ProcessId>>,
+    aliases: Mutex<Aliases>,
     /// The scheduler of each active BIF timer, by its reference.
     timers: Mutex<HashMap<crate::term::Reference, usize>>,
     /// The scheduler of each compiled regular expression, by its reference.
@@ -177,7 +187,7 @@ impl Node {
                 processes: ProcessTable::default(),
                 names: Mutex::new(HashMap::new()),
                 ports: Mutex::new(HashMap::new()),
-                aliases: Mutex::new(HashMap::new()),
+                aliases: Mutex::new(Aliases::default()),
                 timers: Mutex::new(HashMap::new()),
                 regexes: Mutex::new(HashMap::new()),
                 patterns: Mutex::new(HashMap::new()),
@@ -238,7 +248,7 @@ impl Node {
             processes: ProcessTable::default(),
             names: Mutex::new(HashMap::new()),
             ports: Mutex::new(HashMap::new()),
-            aliases: Mutex::new(HashMap::new()),
+            aliases: Mutex::new(Aliases::default()),
             timers: Mutex::new(HashMap::new()),
             regexes: Mutex::new(HashMap::new()),
             patterns: Mutex::new(HashMap::new()),
@@ -626,10 +636,12 @@ impl Node {
         reference: crate::term::Reference,
         owner: ProcessId,
     ) {
-        self.aliases
+        let mut aliases = self
+            .aliases
             .lock()
-            .expect("the alias table is not poisoned")
-            .insert(reference, owner);
+            .expect("the alias table is not poisoned");
+        aliases.owners.insert(reference, owner);
+        aliases.by_owner.entry(owner).or_default().push(reference);
     }
 
     /// Return the owner of the alias `reference`.
@@ -640,16 +652,20 @@ impl Node {
         self.aliases
             .lock()
             .expect("the alias table is not poisoned")
+            .owners
             .get(&reference)
             .copied()
     }
 
     /// Remove each alias of the process `owner`, at its exit.
     pub(in crate::runtime) fn remove_aliases(&self, owner: ProcessId) {
-        self.aliases
+        let mut aliases = self
+            .aliases
             .lock()
-            .expect("the alias table is not poisoned")
-            .retain(|_, id| *id != owner);
+            .expect("the alias table is not poisoned");
+        for reference in aliases.by_owner.remove(&owner).unwrap_or_default() {
+            aliases.owners.remove(&reference);
+        }
     }
 
     /// Record the BIF timer `reference` of the scheduler `index`.
