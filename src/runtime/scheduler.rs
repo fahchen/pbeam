@@ -3857,7 +3857,7 @@ pub(super) use policy::PolicyEnd;
 use policy::PolicyProcess;
 use process_slots::ProcessSlots;
 use run_queue::RunQueue;
-pub(super) use signals::{Flushed, HandlingPoint, Received};
+pub(super) use signals::{Flushed, HandlingPoint, Received, check_process_code_reply};
 
 #[cfg(test)]
 #[path = "../../tests/runtime/scheduler.rs"]

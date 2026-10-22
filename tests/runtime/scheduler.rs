@@ -2485,3 +2485,57 @@ fn a_scheduler_registers_a_name_for_a_remote_process() {
     assert!(scheduler.unregister(&Term::Atom(first)));
     assert_eq!(scheduler.registered_name_of(remote), None);
 }
+
+#[test]
+fn answers_a_check_process_code_signal_while_alive_and_at_exit() {
+    use super::signals::HandlingPoint;
+    // A process with no frame in old code replies `false` when it handles
+    // the signal, and an exiting or a dead process replies `false` for a
+    // signal that it did not handle (`erl_process.c:11478-11483`).
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let root = ProcessId(0);
+    let spawn = |scheduler: &mut Scheduler| {
+        scheduler
+            .spawn(
+                Start::Entry(frame()),
+                vec![],
+                None,
+                false,
+                StartFlags::default(),
+                None,
+            )
+            .unwrap()
+            .unwrap()
+            .0
+    };
+    let request = |tag: i64| Signal::CheckProcessCode {
+        requester: root,
+        tag: Term::Integer(tag),
+        module: Atom::from_static("erlang").unwrap(),
+    };
+    let alive = spawn(&mut scheduler);
+    scheduler
+        .send_signal_local(Some(root), alive, request(1))
+        .unwrap();
+    scheduler
+        .handle_signals(alive, 100, 100, HandlingPoint::ScheduleIn)
+        .unwrap();
+    let exiting = spawn(&mut scheduler);
+    scheduler
+        .send_signal_local(Some(root), exiting, request(2))
+        .unwrap();
+    let mut process = scheduler.processes.remove(&exiting).unwrap();
+    process.mailbox.fetch();
+    assert!(scheduler.handle_exit_signals(&mut process, 100).unwrap());
+    scheduler.dead_target_signal(ProcessId(99), request(3));
+    let reply = |tag: i64| {
+        Term::tuple(vec![
+            atom("check_process_code"),
+            Term::Integer(tag),
+            atom("false"),
+        ])
+    };
+    assert_eq!(messages(&scheduler, 0), vec![reply(1), reply(2), reply(3)]);
+}

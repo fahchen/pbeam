@@ -4,7 +4,7 @@ use super::BifResult::Value;
 use super::erlang::signals_return;
 use super::*;
 use crate::beam::code::PrepareError;
-use crate::runtime::scheduler::PTAB_SIZE;
+use crate::runtime::scheduler::{PTAB_SIZE, check_process_code_reply};
 use crate::runtime::{
     capability::{CapabilityKind, Operation},
     host::{
@@ -1495,8 +1495,11 @@ pub(super) fn processes_next(
 /// `normal`, `low`, or `inherit`, and a `Request` that is not a tuple of 2
 /// to 4 elements with a known request type raise `badarg`, and so does a
 /// `check_process_code` request with a `Module` that is not an atom. ERTS
-/// runs the check when the process `Pid` next runs; PBeam runs it at once
-/// (row "Code loading" of `docs/erts-differences.md`).
+/// runs the check when the process `Pid` next runs. PBeam runs it at once
+/// for a process of the scheduler of the caller (row "Code loading" of
+/// `docs/erts-differences.md`). A process of another scheduler of a run
+/// with scheduler threads gets the signal `CheckProcessCode` through the
+/// inbox of its scheduler, and replies when it handles the signal.
 ///
 /// # Examples
 ///
@@ -1557,17 +1560,21 @@ pub(super) fn request_system_task(
     let (true, [Term::Atom(module), ..]) = (kind.is_static("check_process_code"), arguments) else {
         return Ok(BifResult::badarg());
     };
-    let old = scheduler.code.old_code(scheduler.atoms.name_of(module));
-    let refers = scheduler
-        .live_process(*target)
-        .zip(old)
-        .is_some_and(|(process, old)| process.frames.iter().any(|frame| frame.module_id == old));
     let caller = scheduler.current_process().id;
-    let reply = Term::tuple(vec![
-        Term::Atom(kind.clone()),
-        id.clone(),
-        Term::static_atom(if refers { "true" } else { "false" }),
-    ]);
+    // A process of another scheduler runs the check when it handles the
+    // signal, as an ERTS process runs its system task
+    // (`erl_process.c:11309-11492`).
+    if let Some(index) = scheduler.remote_owner(*target) {
+        let signal = Signal::CheckProcessCode {
+            requester: caller,
+            tag: id.clone(),
+            module: module.clone(),
+        };
+        scheduler.send_signal_to_owner(index, Some(caller), *target, signal);
+        return Ok(Value(Term::static_atom("ok")));
+    }
+    let refers = scheduler.check_process_code(*target, module);
+    let reply = check_process_code_reply(id.clone(), refers);
     scheduler.send_message(caller, caller, reply);
     Ok(Value(Term::static_atom("ok")))
 }
@@ -1580,6 +1587,9 @@ pub(super) fn request_system_task(
 /// an atom, and an `Operation` that is not `prepare`, `prepare_on_load`,
 /// `abort`, or `complete`, raise `badarg`.
 ///
+/// - `prepare` returns `false` for a module with no old code, which
+///   `code:purge/1` and `code:soft_purge/1` then report, and raises
+///   `badarg` while a purge runs.
 /// - `prepare_on_load` makes the code that waits for the `-on_load`
 ///   function of `Module` the old code of the module and returns `true`
 ///   after the caller switches out. It returns `false` for a module that
@@ -1596,9 +1606,10 @@ pub(super) fn request_system_task(
 ///
 /// # Errors
 ///
-/// `prepare` and `abort` give the runtime error `unsupported
-/// erts_internal:purge_module/2 operation O`: PBeam has no old code
-/// outside the purge of a failed `-on_load` function. `prepare_on_load`
+/// `prepare` of a module with old code after `erlang:delete_module/1`, and
+/// `abort`, give the runtime error `unsupported
+/// erts_internal:purge_module/2 operation O`: PBeam does not purge such
+/// old code yet. `abort` follows only a `prepare` that returns `true`. `prepare_on_load`
 /// gives the error of [`CodeTable::prepare_on_load_purge`].
 pub(super) fn purge_module(
     scheduler: &mut Scheduler,
@@ -1616,6 +1627,14 @@ pub(super) fn purge_module(
         return Ok(BifResult::badarg());
     };
     let name = scheduler.atoms.name_of(module).to_owned();
+    // `prepare` raises `badarg` while a purge runs, and gives `false` for
+    // a module with no old code (`beam_bif_load.c:2108-2110`, `2143-2144`).
+    if operation.is_static("prepare") && scheduler.code.old_code_pending() {
+        return Ok(BifResult::badarg());
+    }
+    if operation.is_static("prepare") && !scheduler.code.has_old(&name) {
+        return Ok(Value(Term::static_atom("false")));
+    }
     if operation.is_one_of(&["prepare", "abort"]) {
         return Err(error(format!(
             "unsupported erts_internal:purge_module/2 operation {}",

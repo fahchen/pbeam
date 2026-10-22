@@ -17,6 +17,10 @@ const PING_PONG: &[u8] = include_bytes!("../../fixtures/multischeduler/ping_pong
 /// the other.
 const CODE_LOADING: &[u8] = include_bytes!("../../fixtures/multischeduler/code_loading.beam");
 
+/// The fixture whose two roots purge code on one scheduler while a process
+/// of the other scheduler runs it.
+const CODE_PURGE: &[u8] = include_bytes!("../../fixtures/multischeduler/code_purge.beam");
+
 /// Run the two roots on two scheduler threads and check the result of each
 /// root.
 ///
@@ -477,19 +481,59 @@ fn applies_a_module_that_another_scheduler_loaded() {
     }
 }
 
-/// A purge in a run with scheduler threads fails with a clear error: it
-/// needs `check_process_code` on the processes of each scheduler.
+/// A failed `-on_load` function on one scheduler purges its code while a
+/// process of the other scheduler runs it: `erts_code_purger` asks each
+/// process with `check_process_code`, and kills the process that runs the
+/// code (`erts_code_purger.erl:166-182`, `342-344`). Then
+/// `erts_code_purger:purge/1` and `soft_purge/1` of a module with no old
+/// code give `{false, false}` and `true` (`beam_bif_load.c:2100-2189`). The
+/// pinned ERTS gives the same result with `erl +S 2`.
 #[test]
-fn rejects_a_purge() {
-    let program = BeamProgram::load(&[CODE_LOADING]).expect("the fixture loads");
-    let error = program
-        .execute_on_schedulers(&[("code_loading", "purge"), ("code_loading", "purge")])
-        .expect_err("the purge is unsupported");
-    assert!(
-        error.to_string().contains(
-            "unsupported: erts_internal:purge_module/2 in a run of execute_on_schedulers"
-        ),
-        "{error}"
+fn purges_code_that_a_process_of_another_scheduler_runs() {
+    let beams = ["erlang", "zlib", "erts_code_purger"].map(pinned_beam);
+    let mut modules: Vec<&[u8]> = beams.iter().map(Vec::as_slice).collect();
+    modules.push(CODE_PURGE);
+    let program = BeamProgram::load(&modules).expect("the fixture loads");
+    let atom = |name: &str| Term::Atom(program.atom(name).expect("the fixture names the atom"));
+    let no_purge = Term::tuple(vec![atom("false"), atom("false")]);
+    let loader = Term::tuple(vec![
+        atom("error"),
+        atom("false"),
+        no_purge.clone(),
+        atom("true"),
+        no_purge,
+        atom("true"),
+    ]);
+    let holder = Term::tuple(vec![atom("down"), atom("killed")]);
+    for _ in 0..10 {
+        let results = program
+            .execute_on_schedulers(&[("code_purge", "loader"), ("code_purge", "holder")])
+            .expect("the two schedulers run");
+        assert_eq!(results[0].term, loader, "the loader");
+        assert_eq!(results[1].term, holder, "the holder");
+    }
+    let directory = std::env::temp_dir().join(format!(
+        "pbeam-multischeduler-{}-code-purge",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).expect("the directory of the reference run");
+    std::fs::write(directory.join("code_purge.beam"), CODE_PURGE).expect("the fixture file");
+    let output = std::process::Command::new("erl")
+        .args(["+S", "2", "-noshell"])
+        .args([
+            "-eval",
+            "io:format(\"~p~n\", [code_purge:reference()]), halt().",
+        ])
+        .arg("-pa")
+        .arg(&directory)
+        .output()
+        .expect("the pinned ERTS runs");
+    std::fs::remove_dir_all(&directory).expect("the reference directory leaves");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "{{error,false,{false,false},true,{false,false},true},{down,killed}}\n"
     );
 }
 

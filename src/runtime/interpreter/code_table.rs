@@ -1095,6 +1095,32 @@ impl CodeTable {
             .map(|(_, code)| code.id)
     }
 
+    /// Return whether a purge that [`CodeTable::prepare_on_load_purge`]
+    /// started runs, as `purge_state.module` of ERTS is set
+    /// (`beam_bif_load.c:2108-2110`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(!code.old_code_pending());
+    /// ```
+    pub(in crate::runtime) fn old_code_pending(&self) -> bool {
+        self.purging.is_some()
+    }
+
+    /// Return whether the module `name` has old code after
+    /// `erlang:delete_module/1`, as `modp->old.code_hdr` of ERTS
+    /// (`beam_bif_load.c:2143`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(!code.has_old("lists"));
+    /// ```
+    pub(in crate::runtime) fn has_old(&self, name: &str) -> bool {
+        self.old.contains(name)
+    }
+
     /// Remove the old code of the purge of the module `name`, as
     /// `erts_internal:purge_module(Module, complete)` does
     /// (`beam_bif_load.c:2222-2326`). Return `false`, with no change, when

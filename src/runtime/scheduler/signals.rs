@@ -314,6 +314,9 @@ impl Scheduler {
                 requester,
                 reply(reference, Term::static_atom("false")),
             ),
+            Signal::CheckProcessCode { requester, tag, .. } => {
+                self.send_message(target, requester, check_process_code_reply(tag, false))
+            }
             Signal::ProcessInfo {
                 requester,
                 reference,
@@ -719,6 +722,16 @@ impl Scheduler {
                 self.send_message(id, requester, reply(reference, Term::static_atom("true")));
                 0
             }
+            Signal::CheckProcessCode {
+                requester,
+                tag,
+                module,
+            } => {
+                self.handled(id, node);
+                let refers = self.check_process_code(id, &module);
+                self.send_message(id, requester, check_process_code_reply(tag, refers));
+                0
+            }
             Signal::ProcessInfo {
                 requester,
                 reference,
@@ -1017,6 +1030,9 @@ impl Scheduler {
                     requester,
                     reference,
                 } => self.send_message(id, requester, reply(reference, Term::static_atom("false"))),
+                Signal::CheckProcessCode { requester, tag, .. } => {
+                    self.send_message(id, requester, check_process_code_reply(tag, false))
+                }
                 Signal::ProcessInfo {
                     requester,
                     reference,
@@ -1186,6 +1202,16 @@ struct ExitSignal {
 /// ```rust,ignore
 /// let signal = monitor_signal(Monitor { watcher, reference });
 /// ```
+/// Return the reply `{check_process_code, Tag, Result}` of a
+/// `check_process_code` system task (`erl_process.c:11309-11492`).
+pub(in crate::runtime) fn check_process_code_reply(tag: Term, refers: bool) -> Term {
+    Term::tuple(vec![
+        Term::static_atom("check_process_code"),
+        tag,
+        Term::static_atom(if refers { "true" } else { "false" }),
+    ])
+}
+
 pub(super) fn monitor_signal(monitor: Monitor) -> Signal {
     Signal::Monitor {
         watcher: monitor.watcher,

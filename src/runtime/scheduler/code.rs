@@ -29,6 +29,7 @@ use crate::{
         interpreter::{CodeSnapshot, CodeTable},
         nif::abi,
     },
+    term::{Atom, ProcessId},
 };
 
 /// The published code state of a node.
@@ -111,6 +112,29 @@ impl Scheduler {
             .code
             .generation
             .store(state.generation, Ordering::Release);
+    }
+
+    /// Return whether the live process `target` has a frame in the old
+    /// code of `module`, as `check_process_code` (`beam_bif_load.c:1149-1212`)
+    /// looks at the instruction pointer and the continuation pointers of
+    /// the stack. The check first installs the newest published code, so
+    /// that it sees the purge that another scheduler prepared.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(!scheduler.check_process_code(pid, &module));
+    /// ```
+    pub(in crate::runtime) fn check_process_code(
+        &mut self,
+        target: ProcessId,
+        module: &Atom,
+    ) -> bool {
+        self.sync_code();
+        let old = self.code.old_code(self.atoms.name_of(module));
+        self.live_process(target)
+            .zip(old)
+            .is_some_and(|(process, old)| process.frames.iter().any(|frame| frame.module_id == old))
     }
 
     /// Install the newest published code state when another scheduler
