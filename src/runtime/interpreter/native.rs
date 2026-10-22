@@ -298,6 +298,22 @@ impl Linked {
         }
     }
 
+    /// Return `true` when a function of the library without a binding gives
+    /// a runtime error, `false` when it runs its BEAM stub body.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(Linked::of("zstd").unwrap().unbound_fails());
+    /// assert!(!Linked::of("prim_tty").unwrap().unbound_fails());
+    /// ```
+    fn unbound_fails(self) -> bool {
+        match self {
+            Linked::Static(library) => library.unbound_fails,
+            Linked::Extension(library) => library.unbound_fails,
+        }
+    }
+
     /// Return the runtime error of `module:name/arity` when the function is
     /// in a library whose functions without a binding fail, such as
     /// `crypto`, or `None` when the function runs its BEAM stub body.
@@ -311,11 +327,7 @@ impl Linked {
     /// assert!(prim_file.unbound_error("prim_file", "open_nif", 2).is_none());
     /// ```
     fn unbound_error(self, module: &str, name: &str, arity: u32) -> Option<BeamError> {
-        let fails = match self {
-            Linked::Static(library) => library.unbound_fails,
-            Linked::Extension(library) => library.unbound_fails,
-        };
-        (fails && self.functions().contains(&(name, arity)))
+        (self.unbound_fails() && self.functions().contains(&(name, arity)))
             .then(|| error(format!("{module}:{name}/{arity} NIF is not supported")))
     }
 }

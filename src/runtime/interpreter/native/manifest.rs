@@ -2,8 +2,10 @@
 //! BEAM module against the static NIF libraries of PBeam.
 //!
 //! A bundle build runs the gate on each module before a run, so a module
-//! that references a NIF library or a NIF function that PBeam does not bind
-//! fails the build and not the run. The runtime does not call the gate.
+//! whose NIF library PBeam cannot load fails the build and not the run. A
+//! function of a bound library that has no binding is a report item: a call
+//! of it gives a clear result at run time, so it does not fail the build.
+//! The runtime does not call the gate.
 //!
 //! The gate keys a library by the module that calls `erlang:load_nif/2`, as
 //! the runtime does (`load_nif` in the parent module). ERTS selects a static
@@ -19,7 +21,8 @@ use crate::beam::{BeamModule, ImportKind, code::Instruction, code::Operand};
 use crate::term::Term;
 
 /// One NIF reference of a module that PBeam does not bind. The text of an
-/// item is its message.
+/// item is its message. `DynamicPath` and `NoBindings` are build errors:
+/// PBeam has no library for the module. `Unbound` is a report item.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NifGap {
     /// `M: the library name of erlang:load_nif/2 is not a literal string`.
@@ -34,7 +37,8 @@ pub enum NifGap {
         /// The literal path of the call.
         path: String,
     },
-    /// `M:F/A: NIF function has no PBeam binding`.
+    /// `M:F/A: NIF function has no PBeam binding; a call ...`, with the
+    /// result of a call of the function.
     Unbound {
         /// The module of the library.
         library: String,
@@ -42,6 +46,10 @@ pub enum NifGap {
         function: String,
         /// The arity of the function.
         arity: u32,
+        /// `true` when a call gives the runtime error
+        /// `M:F/A NIF is not supported`, `false` when a call runs the BEAM
+        /// stub body of the function.
+        call_fails: bool,
     },
 }
 
@@ -60,9 +68,19 @@ impl fmt::Display for NifGap {
                 library,
                 function,
                 arity,
+                call_fails: true,
             } => write!(
                 formatter,
-                "{library}:{function}/{arity}: NIF function has no PBeam binding"
+                "{library}:{function}/{arity}: NIF function has no PBeam binding; a call gives the runtime error \"{library}:{function}/{arity} NIF is not supported\""
+            ),
+            NifGap::Unbound {
+                library,
+                function,
+                arity,
+                call_fails: false,
+            } => write!(
+                formatter,
+                "{library}:{function}/{arity}: NIF function has no PBeam binding; a call runs the BEAM stub body"
             ),
         }
     }
@@ -75,8 +93,8 @@ impl fmt::Display for NifGap {
 const WINDOWS_ONLY_LOADS: &[&str] = &["pubkey_os_cacerts"];
 
 /// Return each NIF reference of `module` that PBeam does not bind, as one
-/// item, in the order of the code of the module. An empty result passes the
-/// gate.
+/// item, in the order of the code of the module. A result without a
+/// `DynamicPath` or `NoBindings` item passes the gate.
 ///
 /// The items are:
 ///
@@ -88,10 +106,13 @@ const WINDOWS_ONLY_LOADS: &[&str] = &["pubkey_os_cacerts"];
 ///   An instruction without effect, such as `init_yregs`, can be between
 ///   them.
 /// - `M: NIF library "Path" has no PBeam bindings` for a resolved call in
-///   a module without a NIF library.
-/// - `M:F/A: NIF function has no PBeam binding` for each function of the
-///   library of `M` that the module declares as a NIF and that has no
-///   binding. The functions go in the order of the library, as
+///   a module without a NIF library. The runtime opens `Path.so` for such a
+///   module, but a bundle cannot hold a NIF shared library yet, so the item
+///   stays a build error.
+/// - `M:F/A: NIF function has no PBeam binding; a call ...` for each
+///   function of the library of `M` that the module declares as a NIF and
+///   that has no binding, with the result of a call: the runtime error of a
+///   library with `unbound_fails`, or the BEAM stub body. The functions go in the order of the library, as
 ///   `erlang:load_nif/2` checks them (`beam/erl_nif.c:4845-4866`). The
 ///   declared functions are the functions that start with `nif_start`, as
 ///   the ERTS loader keeps them (`jit/asm_load.c:651-661`), and a binding
@@ -111,7 +132,10 @@ const WINDOWS_ONLY_LOADS: &[&str] = &["pubkey_os_cacerts"];
 ///
 /// ```rust,ignore
 /// // prim_tty: -nifs([isatty/1, isprint/1]), load() -> erlang:load_nif("prim_tty", 0).
-/// assert_eq!(nif_manifest_gaps(&prim_tty)[0].to_string(), "prim_tty:isprint/1: NIF function has no PBeam binding");
+/// assert_eq!(
+///     nif_manifest_gaps(&prim_tty)[0].to_string(),
+///     "prim_tty:isprint/1: NIF function has no PBeam binding; a call runs the BEAM stub body",
+/// );
 /// // nif_gate_dynamic: load(Path) -> erlang:load_nif(Path, 0).
 /// assert_eq!(
 ///     nif_manifest_gaps(&dynamic),
@@ -144,6 +168,7 @@ pub fn nif_manifest_gaps(module: &BeamModule) -> Vec<NifGap> {
             library: name.clone(),
             function: function.to_owned(),
             arity,
+            call_fails: linked.unbound_fails(),
         })
         .collect()
 }

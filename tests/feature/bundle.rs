@@ -228,7 +228,7 @@ fn reports_the_usage_of_each_command() {
     for arguments in [
         vec!["bundle"],
         vec!["bundle", "only"],
-        vec!["bundle", "1", "2", "3", "4", "5", "6", "7"],
+        vec!["bundle", "1", "2", "3", "4", "5", "6"],
         vec!["fixture"],
         vec!["fixture", "only"],
         vec!["executable"],
@@ -449,18 +449,27 @@ fn runs_the_nif_manifest_gate_on_each_beam_file_of_a_directory() {
     let (status, stderr) = run(tool().arg("check-nifs").arg(nif_gate("ok")));
     assert_eq!((status, stderr.as_str()), (Some(0), ""));
 
-    // The items of each fixture, in the order of the paths.
-    let (status, stderr) = run(tool().arg("check-nifs").arg(nif_gate("")));
-    assert_eq!(status, Some(1));
+    // Each unbound function of a bound library is a report line on stdout,
+    // and each module without a library fails, in the order of the paths.
+    let result = tool()
+        .arg("check-nifs")
+        .arg(nif_gate(""))
+        .output()
+        .expect("the tool runs");
+    assert_eq!(result.status.code(), Some(1));
     assert_eq!(
-        stderr,
+        String::from_utf8_lossy(&result.stdout),
+        "pbeam_bundle: the NIF manifest gate reports prim_tty:isprint/1: NIF function has no PBeam binding; a call runs the BEAM stub body\n\
+         pbeam_bundle: the NIF manifest gate reports prim_tty:wcwidth/1: NIF function has no PBeam binding; a call runs the BEAM stub body\n\
+         pbeam_bundle: the NIF manifest gate reports prim_tty:isprint/1: NIF function has no PBeam binding; a call runs the BEAM stub body\n\
+         pbeam_bundle: the NIF manifest gate reports zstd:init_compress_nif/0: NIF function has no PBeam binding; a call gives the runtime error \"zstd:init_compress_nif/0 NIF is not supported\"\n"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stderr),
         "pbeam_bundle: the NIF manifest gate failed:\n\
          nif_gate_dynamic: the library name of erlang:load_nif/2 is not a literal string\n\
          nif_gate_dynamic: the library name of erlang:load_nif/2 is not a literal string\n\
-         prim_tty:isprint/1: NIF function has no PBeam binding\n\
-         prim_tty:wcwidth/1: NIF function has no PBeam binding\n\
-         nif_gate_library: NIF library \"priv/nif_gate_library\" has no PBeam bindings\n\
-         prim_tty:isprint/1: NIF function has no PBeam binding\n"
+         nif_gate_library: NIF library \"priv/nif_gate_library\" has no PBeam bindings\n"
     );
 }
 
@@ -485,10 +494,10 @@ fn reports_the_usage_and_the_input_of_the_nif_manifest_gate() {
     fs::remove_dir_all(&directory).unwrap();
 }
 
-/// Run `pbeam_bundle bundle` on `release` with an empty start list and the
-/// arguments `extra`, and return the exit code, the stdout, the stderr, and
-/// whether the output exists.
-fn bundle_release(release: &Path, extra: &[&Path]) -> (Option<i32>, String, String, bool) {
+/// Run `pbeam_bundle bundle` on `release` with an empty start list, and
+/// return the exit code, the stdout, the stderr, and whether the output
+/// exists.
+fn bundle_release(release: &Path) -> (Option<i32>, String, String, bool) {
     let directory = release.parent().unwrap();
     let start = start_list(directory, &[]);
     let output = directory.join("out");
@@ -499,7 +508,6 @@ fn bundle_release(release: &Path, extra: &[&Path]) -> (Option<i32>, String, Stri
         .arg(&output)
         .args(["m", "f"])
         .arg(&start)
-        .args(extra)
         .output()
         .expect("the tool runs");
     (
@@ -511,8 +519,8 @@ fn bundle_release(release: &Path, extra: &[&Path]) -> (Option<i32>, String, Stri
 }
 
 #[test]
-fn runs_the_nif_manifest_gate_with_the_allowlist_before_the_bundle_build() {
-    let directory = directory("nif-allowlist");
+fn runs_the_nif_manifest_gate_before_the_bundle_build() {
+    let directory = directory("nif-gate");
     let release = directory.join("release");
     let ebin = release.join("lib/app/ebin");
     fs::create_dir_all(&ebin).unwrap();
@@ -521,79 +529,33 @@ fn runs_the_nif_manifest_gate_with_the_allowlist_before_the_bundle_build() {
         ebin.join("prim_tty.beam"),
     )
     .unwrap();
-    let allowlist = directory.join("nif-allowlist.txt");
 
-    // Each accepted item is printed with the reason of its group.
-    fs::write(
-        &allowlist,
-        "reason: not reached\nprim_tty:isprint/1\n\nreason:  not reached either \nprim_tty:wcwidth/1\n",
-    )
-    .unwrap();
+    // An unbound function of a bound library is a report line, and the
+    // bundle builds.
+    let report = "pbeam_bundle: the NIF manifest gate reports prim_tty:isprint/1: NIF function has no PBeam binding; a call runs the BEAM stub body\n\
+                  pbeam_bundle: the NIF manifest gate reports prim_tty:wcwidth/1: NIF function has no PBeam binding; a call runs the BEAM stub body\n";
     assert_eq!(
-        bundle_release(&release, &[&allowlist]),
-        (
-            Some(0),
-            "pbeam_bundle: the NIF manifest gate accepts prim_tty:isprint/1: not reached\n\
-             pbeam_bundle: the NIF manifest gate accepts prim_tty:wcwidth/1: not reached either\n"
-                .to_owned(),
-            String::new(),
-            true
-        )
+        bundle_release(&release),
+        (Some(0), report.to_owned(), String::new(), true)
     );
 
-    // Without an allowlist, each item fails the build before the output.
-    let (status, _, stderr, written) = bundle_release(&release, &[]);
-    assert_eq!((status, written), (Some(1), false));
-    assert_eq!(
-        stderr,
-        "pbeam_bundle: the NIF manifest gate failed:\n\
-         prim_tty:isprint/1: NIF function has no PBeam binding\n\
-         prim_tty:wcwidth/1: NIF function has no PBeam binding\n"
-    );
-
-    // A referenced library without bindings cannot be accepted, and an item
-    // of the list that the bundle does not have fails.
+    // A referenced library without bindings fails the build before the
+    // output.
     fs::copy(
         nif_gate("missing_library/nif_gate_library.beam"),
         ebin.join("nif_gate_library.beam"),
     )
     .unwrap();
-    fs::write(
-        &allowlist,
-        "reason: not reached\nprim_tty:isprint/1\nprim_tty:wcwidth/1\nnif_gate_library:load/0\n",
-    )
-    .unwrap();
-    let (status, stdout, stderr, written) = bundle_release(&release, &[&allowlist]);
-    assert_eq!((status, written), (Some(1), false));
-    assert_eq!(stdout.lines().count(), 2, "{stdout}");
     assert_eq!(
-        stderr,
-        "pbeam_bundle: the NIF manifest gate failed:\n\
-         nif_gate_library: NIF library \"priv/nif_gate_library\" has no PBeam bindings\n\
-         nif_gate_library:load/0: the NIF allowlist accepts an item that is not a gap\n"
-    );
-    fs::remove_dir_all(&directory).unwrap();
-}
-
-#[test]
-fn reports_an_allowlist_item_without_a_reason_and_an_allowlist_that_does_not_read() {
-    let directory = directory("nif-allowlist-errors");
-    let release = directory.join("release");
-    fs::create_dir_all(&release).unwrap();
-    let allowlist = directory.join("nif-allowlist.txt");
-    fs::write(&allowlist, "\nreason:\nprim_tty:isprint/1\n").unwrap();
-    let (status, _, stderr, written) = bundle_release(&release, &[&allowlist]);
-    assert_eq!((status, written), (Some(1), false));
-    assert_eq!(
-        stderr,
-        format!(
-            "pbeam_bundle: {}:3: the item prim_tty:isprint/1 has no reason\n",
-            allowlist.display()
+        bundle_release(&release),
+        (
+            Some(1),
+            report.to_owned(),
+            "pbeam_bundle: the NIF manifest gate failed:\n\
+             nif_gate_library: NIF library \"priv/nif_gate_library\" has no PBeam bindings\n"
+                .to_owned(),
+            false
         )
     );
-
-    let (status, _, stderr, written) = bundle_release(&release, &[&directory.join("missing")]);
-    assert_eq!((status, written), (Some(1), false));
-    assert!(stderr.contains("cannot read"), "{stderr}");
     fs::remove_dir_all(&directory).unwrap();
 }

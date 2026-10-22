@@ -25,8 +25,8 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### Ship a NIF shared library in a bundle
 
-- **Now:** PBeam runs `bcrypt_elixir` 3.3.2 from a code path: the `on_load` function of `Elixir.Bcrypt.Base` opens `priv/bcrypt_nif.so` with `dlopen` (#866). The NIF gate of `pbeam_bundle` (#891) reports a module without a PBeam library that calls `erlang:load_nif/2` as a gap, and the allowlist cannot accept it. A bundle holds BEAM files only, and `dlopen` needs a file.
-- **Option:** the gate opens the `.so` at build time with the loader of `src/runtime/nif/abi/` and checks its function table against the module, as `erlang:load_nif/2` does; the bundle carries the `.so` and the run writes it to a private directory before the load. The other option is an allowlist entry with a reason for each module, with the `.so` next to the executable.
+- **Now:** PBeam runs `bcrypt_elixir` 3.3.2 from a code path: the `on_load` function of `Elixir.Bcrypt.Base` opens `priv/bcrypt_nif.so` with `dlopen` (#866). The NIF gate of `pbeam_bundle` (#891, #902) fails the build for a module without a PBeam library that calls `erlang:load_nif/2`. A bundle holds BEAM files only, and `dlopen` needs a file.
+- **Option:** the gate opens the `.so` at build time with the loader of `src/runtime/nif/abi/` and checks its function table against the module, as `erlang:load_nif/2` does; the bundle carries the `.so` and the run writes it to a private directory before the load. The other option is a gate rule that accepts each such module, with the `.so` next to the executable.
 - **Trigger:** an application that a bundle carries depends on a NIF library package, such as `bcrypt_elixir`.
 - **Source:** task #866.
 
