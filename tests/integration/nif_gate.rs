@@ -1,5 +1,7 @@
 //! The NIF manifest gate on the compiled fixtures of `fixtures/nif_gate`:
-//! each NIF reference of a module that PBeam does not bind is one item.
+//! each NIF reference of a module that PBeam does not bind is one item. A
+//! module without a library is a build error, and an unbound function of a
+//! bound library is a report item with the result of a call.
 
 use pbeam_runtime::{BeamModule, nif_manifest_gaps};
 
@@ -27,8 +29,8 @@ fn reports_each_declared_library_function_without_a_binding_in_library_order() {
             "../../fixtures/nif_gate/missing_binding/prim_tty.beam"
         )),
         [
-            "prim_tty:isprint/1: NIF function has no PBeam binding",
-            "prim_tty:wcwidth/1: NIF function has no PBeam binding",
+            "prim_tty:isprint/1: NIF function has no PBeam binding; a call runs the BEAM stub body",
+            "prim_tty:wcwidth/1: NIF function has no PBeam binding; a call runs the BEAM stub body",
         ]
     );
     // Without `-nifs`, each function of the module starts with `nif_start`.
@@ -36,7 +38,22 @@ fn reports_each_declared_library_function_without_a_binding_in_library_order() {
         gaps(include_bytes!(
             "../../fixtures/nif_gate/no_nifs/prim_tty.beam"
         )),
-        ["prim_tty:isprint/1: NIF function has no PBeam binding"]
+        ["prim_tty:isprint/1: NIF function has no PBeam binding; a call runs the BEAM stub body"]
+    );
+}
+
+#[test]
+fn reports_the_runtime_error_of_an_unbound_function_of_a_library_whose_unbound_functions_fail() {
+    // `-nifs([get_frame_header_nif/1])`: the `zstd` library has no binding
+    // of the function, and a call of it gives the runtime error of the
+    // library.
+    assert_eq!(
+        gaps(include_bytes!(
+            "../../fixtures/nif_gate/unbound_fails/zstd.beam"
+        )),
+        [
+            "zstd:get_frame_header_nif/1: NIF function has no PBeam binding; a call gives the runtime error \"zstd:get_frame_header_nif/1 NIF is not supported\""
+        ]
     );
 }
 
