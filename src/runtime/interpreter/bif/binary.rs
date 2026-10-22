@@ -618,6 +618,9 @@ pub(super) fn compile_pattern(
     };
     let id = scheduler.make_ref()?;
     scheduler.binary_patterns.insert(id, compiled);
+    // The pattern stays with this scheduler, and so does the process that
+    // compiled it (see `ProcessState::pinned`).
+    scheduler.current_process_mut().pinned = true;
     scheduler.node().register_pattern(id, scheduler.index());
     Ok(Value(Term::tuple(vec![
         Term::static_atom(tag),

@@ -682,3 +682,7 @@ path = "tests/integration/multischeduler_links.rs"
 [[test]]
 name = "multischeduler_monitors"
 path = "tests/integration/multischeduler_monitors.rs"
+
+[[test]]
+name = "work_stealing"
+path = "tests/integration/work_stealing.rs"

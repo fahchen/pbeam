@@ -268,6 +268,23 @@ impl Drop for StartGuard<'_> {
 /// `Node::enter_idle`): then each live process waits, and no source can
 /// send to it.
 fn idle_step(scheduler: &mut Scheduler, node: &Node) -> Result<(), BeamError> {
+    // A scheduler with no runnable process takes work from another
+    // scheduler while it waits (`try_steal_task`, `erl_process.c:4640`):
+    // the mark lets a scheduler with more work give it some at its next
+    // step (`Scheduler::serve_steal`), which ends the wait with a delivery.
+    let index = scheduler.index();
+    node.set_hungry(index, true);
+    let waited = idle_wait(scheduler, node);
+    node.set_hungry(index, false);
+    // Each process that a steal gave this scheduler is in the inbox now, and
+    // it enters the slots before a timer, an OS signal, or a dirty
+    // completion of the next loop step looks for it.
+    scheduler.drain_inbox();
+    waited
+}
+
+/// Wait in [`idle_step`] for the next timer, event, or delivery.
+fn idle_wait(scheduler: &mut Scheduler, node: &Node) -> Result<(), BeamError> {
     let wait = scheduler.timers.wait_time(scheduler.timers.now());
     if scheduler.timers.active() || scheduler.has_external_sources() {
         scheduler.wait_events(Some(wait))?;

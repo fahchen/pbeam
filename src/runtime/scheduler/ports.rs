@@ -387,6 +387,11 @@ impl Scheduler {
         let port = port.expect("the port to connect is open");
         port.links.insert(pid, ());
         port.owner = pid;
+        // The new owner gets the data of the port, which stays with this
+        // scheduler, so the owner stays too (see `ProcessState::pinned`).
+        if let Some(process) = self.processes.get_mut(&pid) {
+            process.pinned = true;
+        }
         true
     }
 

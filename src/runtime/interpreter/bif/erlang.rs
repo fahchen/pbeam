@@ -2858,7 +2858,8 @@ const ENDIAN: &str = "little";
 /// `wordsize` returns `sizeof(Eterm)` (`erl_bif_info.c:3099-3100`), the
 /// size of a machine word: PBeam gives the size of `usize` of its target.
 /// The item `debug_compiled` returns `false`, as an ERTS build without
-/// `DEBUG` does (`erl_bif_info.c:3382-3387`).
+/// `DEBUG` does (`erl_bif_info.c:3382-3387`). The item `scheduler_id`
+/// returns the number of the scheduler that runs the caller.
 ///
 /// # Examples
 ///
@@ -2877,6 +2878,7 @@ const ENDIAN: &str = "little";
 /// `AtomTable::put`.
 pub(super) fn system_info(scheduler: &mut Scheduler, item: &Term) -> Result<BifResult, BeamError> {
     let schedulers = scheduler.scheduler_count();
+    let scheduler_id = i64::try_from(scheduler.index() + 1).expect("a scheduler index fits");
     let atoms = &mut scheduler.atoms;
     match item {
         Term::Atom(atom) if atom.is_static("os_type") => Ok(Value(Term::tuple(vec![
@@ -2895,6 +2897,12 @@ pub(super) fn system_info(scheduler: &mut Scheduler, item: &Term) -> Result<BifR
         // schedulers, so each scheduler of the run is online.
         Term::Atom(atom) if atoms.name_of(atom) == "schedulers_online" => {
             Ok(Value(Term::Integer(schedulers)))
+        }
+        // The scheduler that runs the caller, numbered from 1 (`esdp->no`,
+        // `erl_bif_info.c:2784-2786`). A process that moves to another
+        // scheduler gives the number of that scheduler.
+        Term::Atom(atom) if atoms.name_of(atom) == "scheduler_id" => {
+            Ok(Value(Term::Integer(scheduler_id)))
         }
         Term::Atom(atom) if atoms.name_of(atom) == "build_type" => {
             Ok(Value(Term::static_atom("opt")))
@@ -5922,6 +5930,9 @@ fn bif_timer(
                 message,
             },
         );
+        // The timer stays with this scheduler, and so does the process that
+        // can read or cancel it (see `ProcessState::pinned`).
+        scheduler.current_process_mut().pinned = true;
         scheduler
             .node()
             .register_timer(reference, scheduler.index());
@@ -5978,7 +5989,12 @@ pub(super) fn cancel_timer(
         ));
     }
     let result = match scheduler.cancel_bif_timer(*reference) {
-        Some(end) => Term::Integer(Timers::time_left(scheduler.timers.now(), end)),
+        Some(end) => {
+            // A process that used a timer of this scheduler stays with it,
+            // as a reader of the timer does (see `ProcessState::pinned`).
+            scheduler.current_process_mut().pinned = true;
+            Term::Integer(Timers::time_left(scheduler.timers.now(), end))
+        }
         None => Term::static_atom("false"),
     };
     if !info {

@@ -48,3 +48,49 @@ fn parses_the_abs_option_as_pinned_erts() {
         None
     );
 }
+
+/// A process that reads or cancels an active BIF timer of its scheduler is
+/// pinned to the scheduler, so that a steal does not move it away from the
+/// timer. A read of a reference with no timer pins no process.
+#[test]
+fn a_user_of_an_active_timer_is_pinned() {
+    use crate::runtime::process::tests::{frame, test_scheduler};
+    use crate::runtime::timer::{Receiver, Timer};
+    use crate::term::ProcessId;
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], vec![]).unwrap();
+    scheduler.schedule_next().unwrap();
+    let unknown = scheduler.make_ref().unwrap();
+    let mut context = BifContext {
+        scheduler: &mut scheduler,
+    };
+    let result = read_timer(&mut context, &Term::Reference(unknown)).unwrap();
+    assert!(matches!(result, Value(Term::Atom(_))));
+    assert!(!scheduler.current_process_mut().pinned);
+    for cancel in [false, true] {
+        let reference = scheduler.make_ref().unwrap();
+        scheduler.timers.start(
+            1_000_000_000,
+            Timer::Bif {
+                reference,
+                receiver: Receiver::Process(ProcessId(0)),
+                message: Term::Integer(0),
+            },
+        );
+        scheduler.current_process_mut().pinned = false;
+        let mut context = BifContext {
+            scheduler: &mut scheduler,
+        };
+        let result = if cancel {
+            super::super::erlang::cancel_timer(
+                &mut context,
+                &Term::Reference(reference),
+                &Term::nil(),
+            )
+        } else {
+            read_timer(&mut context, &Term::Reference(reference))
+        };
+        assert!(matches!(result.unwrap(), Value(Term::Integer(_))));
+        assert!(scheduler.current_process_mut().pinned, "cancel {cancel}");
+    }
+}

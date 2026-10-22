@@ -256,6 +256,56 @@ impl ProcessTable {
             .and_then(|entry| (!entry.exiting).then_some(entry.owner))
     }
 
+    /// Call `deliver` with the scheduler of the process `id`, or `None` when
+    /// the process is not in the table, while the shard of the process is
+    /// locked. A steal ([`Self::move_owner`]) changes the scheduler under
+    /// the same lock, so a delivery that `deliver` puts into the inbox of
+    /// the scheduler is in that inbox before the steal reads it.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// table.insert(ProcessId(1), 0);
+    /// assert_eq!(table.with_owner(ProcessId(1), |owner| owner), Some(0));
+    /// ```
+    pub(super) fn with_owner<R>(
+        &self,
+        id: ProcessId,
+        deliver: impl FnOnce(Option<usize>) -> R,
+    ) -> R {
+        let ix = table_index(id);
+        let shard = self.shard(ix);
+        let result = deliver(shard.get(&(ix, id)).map(|entry| entry.owner));
+        drop(shard);
+        result
+    }
+
+    /// Make `to` the scheduler of the process `id`, and call `handoff` while
+    /// the shard of the process is locked, so that no delivery reads the
+    /// scheduler while the process moves (see [`Self::with_owner`]).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// table.move_owner(ProcessId(1), 1, || {});
+    /// assert_eq!(table.owner(ProcessId(1)), Some(1));
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panic when the process is not in the table or exits: only a
+    /// runnable process that does not exit moves.
+    pub(super) fn move_owner(&self, id: ProcessId, to: usize, handoff: impl FnOnce()) {
+        let ix = table_index(id);
+        let mut shard = self.shard(ix);
+        let entry = shard
+            .get_mut(&(ix, id))
+            .expect("a process that moves is in the process table");
+        assert!(!entry.exiting, "a process that exits does not move");
+        entry.owner = to;
+        handoff();
+    }
+
     /// Return whether the process `id` is in the table, and hold its shard
     /// until the guard drops, so that the process cannot leave the table
     /// before the guard drops.

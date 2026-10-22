@@ -173,7 +173,13 @@ pub(super) fn read_timer(
         ));
     }
     let result = match scheduler.timers.bif_timer_end(*reference) {
-        Some(end) => Term::Integer(Timers::time_left(scheduler.timers.now(), end)),
+        Some(end) => {
+            // The active timer stays with this scheduler, and so does the
+            // process that read it, so that its next read finds the timer
+            // (see `ProcessState::pinned`).
+            scheduler.current_process_mut().pinned = true;
+            Term::Integer(Timers::time_left(scheduler.timers.now(), end))
+        }
         None => Term::static_atom("false"),
     };
     Ok(Value(result))
@@ -256,6 +262,9 @@ fn setup(
                 message,
             },
         );
+        // The timer stays with this scheduler, and so does the process that
+        // can read or cancel it (see `ProcessState::pinned`).
+        scheduler.current_process_mut().pinned = true;
         scheduler
             .node()
             .register_timer(reference, scheduler.index());
