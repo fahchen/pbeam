@@ -2847,7 +2847,8 @@ const ENDIAN: &str = "little";
 /// size of a machine word: PBeam gives the size of `usize` of its target.
 /// The item `debug_compiled` returns `false`, as an ERTS build without
 /// `DEBUG` does (`erl_bif_info.c:3382-3387`). The item `scheduler_id`
-/// returns the number of the scheduler that runs the caller.
+/// returns the number of the scheduler that runs the caller. The item
+/// `system_logger` returns the system logger of the node.
 ///
 /// # Examples
 ///
@@ -2915,6 +2916,11 @@ pub(super) fn system_info(scheduler: &mut Scheduler, item: &Term) -> Result<BifR
         // cannot change it in PBeam.
         Term::Atom(atom) if atom.is_static("outstanding_system_requests_limit") => {
             Ok(Value(Term::Integer(2 * schedulers)))
+        }
+        // The system logger of the node (`erts_get_system_logger`,
+        // `erl_bif_info.c:3547-3548`, `erl_trace.c:2480-2483`).
+        Term::Atom(atom) if atoms.name_of(atom) == "system_logger" => {
+            Ok(Value(scheduler.node().system_logger()))
         }
         _ => Err(error(format!(
             "unsupported erlang:system_info/1 argument {}",

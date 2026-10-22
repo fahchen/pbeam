@@ -24,14 +24,15 @@ setter() ->
     end.
 
 %% The root that waits for the flags of the other root, reads them with the
-%% stack trace depth, and restores them.
+%% stack trace depth and system_info/1, and restores them.
 reader() ->
     Setter = wait_registered(1000000),
     Frames = length(deep_stacktrace(10)),
+    Info = erlang:system_info(system_logger),
     Depth = erlang:system_flag(backtrace_depth, 8),
     Logger = erlang:system_flag(system_logger, logger),
     Setter ! restored,
-    {Frames, Depth, Logger}.
+    {Frames, Info, Depth, Logger}.
 
 wait_registered(0) ->
     timeout;

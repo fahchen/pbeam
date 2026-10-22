@@ -960,6 +960,15 @@ impl Node {
         std::mem::take(&mut roots.results)
     }
 
+    /// Return the system logger of the node, as `erts_get_system_logger`
+    /// (`erl_trace.c:2480-2483`) does.
+    pub(in crate::runtime) fn system_logger(&self) -> Term {
+        self.system_logger
+            .lock()
+            .expect("the system logger is not poisoned")
+            .clone()
+    }
+
     /// Set the system logger of the node and return the old value, as
     /// `erts_set_system_logger` (`erl_trace.c:2486-2491`) does.
     pub(in crate::runtime) fn swap_system_logger(&self, logger: Term) -> Term {

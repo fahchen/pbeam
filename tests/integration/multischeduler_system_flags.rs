@@ -14,7 +14,7 @@ const SYSTEM_FLAGS: &[u8] = include_bytes!("../../fixtures/multischeduler/system
 const RUNS: usize = 10;
 
 /// The result of the pair on the pinned ERTS with `erl +S 2`.
-const REFERENCE: &str = "{8,{3,3,undefined}}\n";
+const REFERENCE: &str = "{8,{3,undefined,3,undefined}}\n";
 
 /// A root reads the flags that the root of the other scheduler sets, and
 /// the stack trace of the reader holds the depth of the other scheduler.
@@ -35,6 +35,7 @@ fn reads_the_flags_of_the_other_scheduler() {
             results[1].term,
             Term::tuple(vec![
                 Term::Integer(3.into()),
+                undefined.clone(),
                 Term::Integer(3.into()),
                 undefined.clone()
             ]),
