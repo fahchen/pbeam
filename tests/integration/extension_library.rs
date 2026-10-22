@@ -226,6 +226,23 @@ fn gives_the_atoms_of_the_run_on_the_scheduler_and_static_atoms_on_a_dirty_threa
         run(&program, "extension_probe", "dirty_atom_name", name("ok")),
         Term::binary(b"ok".to_vec())
     );
+    // `erts_atom_put` takes at most 255 characters (`MAX_ATOM_CHARACTERS`).
+    let longest = "é".repeat(255);
+    assert_eq!(
+        run(&program, "extension_probe", "atom_name", name(&longest)),
+        Term::binary(longest.into_bytes())
+    );
+    let too_long = program
+        .execute(
+            "extension_probe",
+            "atom_name",
+            &[program.host_term(name(&"a".repeat(256)).remove(0))],
+        )
+        .unwrap_err();
+    assert_eq!(
+        too_long.to_string(),
+        "the atom name has more than 255 characters"
+    );
     let fresh = Term::binary(b"extension_fresh".to_vec());
     let dirty = program
         .execute(

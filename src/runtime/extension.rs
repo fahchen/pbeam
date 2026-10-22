@@ -27,7 +27,7 @@ use std::sync::RwLock;
 use crate::BeamError;
 use crate::Term;
 use crate::error::error;
-use crate::term::{Atom, AtomTable};
+use crate::term::{Atom, AtomTable, MAX_ATOM_CHARACTERS};
 
 /// The Rust function of a binding. It receives the context of the call and
 /// the arguments of the call, which have already passed the arity check of
@@ -189,16 +189,26 @@ impl<'a> NifContext<'a> {
         Self { atoms: None }
     }
 
-    /// Return the atom `name`, as `enif_make_atom` does. On the scheduler
+    /// Return the atom of the UTF-8 `name`, as `enif_make_new_atom` with
+    /// `ERL_NIF_UTF8` does (`beam/erl_nif.c:2100-2114`). On the scheduler
     /// thread, a new name goes into the atom table of the run. On a dirty
     /// thread, only a static atom, such as `ok` or `error`, is available.
+    /// As with the failure result of `enif_make_new_atom`, the binding
+    /// decides what an error gives, for example [`NifContext::badarg`].
     ///
     /// # Errors
     ///
-    /// A name that is not a static atom on a dirty thread is the unsupported
-    /// error `a dirty NIF cannot make the atom Name`. A new atom in a full
-    /// or frozen atom table gives the error of the table.
+    /// A name of more than 255 characters, which `erts_atom_put` rejects
+    /// (`MAX_ATOM_CHARACTERS`), is the error `the atom name has more than
+    /// 255 characters`. A name that is not a static atom on a dirty thread
+    /// is the unsupported error `a dirty NIF cannot make the atom Name`. A
+    /// new atom in a full or frozen atom table gives the error of the table.
     pub fn atom(&mut self, name: &str) -> Result<Atom, BeamError> {
+        if name.chars().count() > MAX_ATOM_CHARACTERS {
+            return Err(error(format!(
+                "the atom name has more than {MAX_ATOM_CHARACTERS} characters"
+            )));
+        }
         match &mut self.atoms {
             Some(atoms) => atoms.put(name),
             None => Atom::from_static(name).ok_or_else(|| {
