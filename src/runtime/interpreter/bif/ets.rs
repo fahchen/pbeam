@@ -213,7 +213,13 @@ pub(super) fn new(
                     ("write_concurrency", Term::Tuple(locks)) if is_lock_count(locks) => {
                         explicit_locks = true;
                         decentralized = true;
-                        concurrency = value.clone();
+                        // ERTS rounds the count down to a power of two, and
+                        // at least 64 (`erl_db_hash.c:1043-1050`).
+                        let Term::Integer(count) = locks[1] else {
+                            unreachable!("the check found an integer count")
+                        };
+                        let count = (1_i64 << count.ilog2()).max(64);
+                        concurrency = Term::tuple(vec![locks[0].clone(), Term::Integer(count)]);
                     }
                     ("read_concurrency", Term::Atom(value))
                         if value.is_one_of(&["true", "false"]) =>
