@@ -2485,9 +2485,7 @@ impl BeamProgram {
                     // with its arguments first, as ERTS gives it.
                     let arguments = call_arguments(&process.registers, *arity)?;
                     cursor.commit(process);
-                    if let Some((job, result)) =
-                        native::call(scheduler, &module.name, name, &arguments)
-                    {
+                    if let Some((job, result)) = native::call(scheduler, module, name, &arguments) {
                         let outcome = match result? {
                             BifResult::Raise { class, reason } => raise_at_entry(
                                 scheduler,

@@ -1,6 +1,6 @@
 use super::*;
 use crate::runtime::capability::{AllowAll, Policy};
-use crate::runtime::interpreter::native::call;
+use crate::runtime::interpreter::native::{call, tests::instance};
 use crate::runtime::process::tests::frame;
 use crate::term::Reference;
 use num_bigint::BigInt;
@@ -66,7 +66,7 @@ fn calls_each_binding_of_the_library_through_the_registry() {
         ("unlock", vec![buffer.clone()]),
     ];
     for (name, arguments) in calls {
-        let result = call(&mut scheduler, "prim_buffer", name, &arguments);
+        let result = call(&mut scheduler, &instance("prim_buffer"), name, &arguments);
         assert!(
             matches!(result, Some((Job::Normal, Ok(BifResult::Value(_))))),
             "{name} gives a value, not {result:?}"
@@ -100,7 +100,7 @@ fn raises_badarg_for_a_term_that_is_not_a_buffer_resource() {
         ("try_lock", vec![Term::nil()]),
         ("unlock", vec![reference.clone()]),
     ] {
-        let result = call(&mut scheduler, "prim_buffer", name, &arguments);
+        let result = call(&mut scheduler, &instance("prim_buffer"), name, &arguments);
         assert!(
             matches!(
                 result,

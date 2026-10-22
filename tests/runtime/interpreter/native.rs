@@ -188,3 +188,16 @@ fn registry_is_sorted_and_matches_the_exact_mfa() {
 fn has_binding(module: &str, name: &str, arity: u32) -> bool {
     Linked::of(module).is_some_and(|linked| linked.binds(name, arity))
 }
+
+/// Return an empty instance of the module `name`, for a direct call of
+/// `call`.
+pub(crate) fn instance(name: &str) -> crate::beam::BeamModule {
+    use crate::beam::code::Instruction;
+    crate::beam::BeamModule::new(
+        name.into(),
+        std::collections::HashMap::new(),
+        Vec::new(),
+        vec![Instruction::End],
+    )
+    .unwrap()
+}

@@ -5,6 +5,11 @@
 -nifs([cpu_thread/0, io_thread/0, cpu_wait/1, started/1, release/1, cpu_raise/1,
        cpu_sequence/0]).
 
+%% The test declares each NIF as a PBeam native, so its binding runs
+%% without `erlang:load_nif/2`.
+-pbeam_native([{cpu_thread, 0}, {io_thread, 0}, {cpu_wait, 1}, {started, 1},
+               {release, 1}, {cpu_raise, 1}, {cpu_sequence, 0}]).
+
 %% The test registers each NIF of this module as a Rust native function:
 %% `cpu_thread/0`, `cpu_wait/1`, `cpu_raise/1`, and `cpu_sequence/0` with
 %% the job `CpuBound`,

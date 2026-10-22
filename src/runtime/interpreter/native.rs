@@ -339,17 +339,24 @@ fn extension_binding(
 /// library whose functions without a binding fail, such as `crypto`, gives
 /// the runtime error `M:F/A NIF is not supported`.
 ///
-/// An extension binding runs at once for the job `Normal`. For a
-/// `CpuBound` or `IoBound` job, the result is `BifResult::Dirty` with the
-/// work of the call, and the binding runs on a dirty thread.
+/// The functions of an extension library run only for the instance
+/// `module` of a successful `erlang:load_nif/2`, because ERTS makes the NIF
+/// code callable only then (`beam/erl_nif.c:4990-5007`); before the load
+/// and after a failed load, the function runs its BEAM stub body. A
+/// function that `module` declares with `PBeam.Native` (the `pbeam_native`
+/// attribute) runs its binding without a load, as
+/// `docs/portable-beam-spec.md` gives for a declared native. An extension
+/// binding runs at once for the job `Normal`. For a `CpuBound` or `IoBound`
+/// job, the result is `BifResult::Dirty` with the work of the call, and the
+/// binding runs on a dirty thread.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// let stdout = Term::Atom(scheduler.atoms.put("stdout")?);
 /// // `false` when stdout is a file.
-/// assert!(matches!(call(&mut scheduler, "prim_tty", "isatty", &[stdout]), Some((Job::Normal, Ok(BifResult::Value(_))))));
-/// assert!(call(&mut scheduler, "nif_error_probe", "nif_stub", &[]).is_none());
+/// assert!(matches!(call(&mut scheduler, &prim_tty, "isatty", &[stdout]), Some((Job::Normal, Ok(BifResult::Value(_))))));
+/// assert!(call(&mut scheduler, &nif_error_probe, "nif_stub", &[]).is_none());
 /// ```
 ///
 /// # Errors
@@ -358,21 +365,30 @@ fn extension_binding(
 /// yet, or when a new result atom does not fit in the atom table.
 pub(super) fn call(
     scheduler: &mut Scheduler,
-    module: &str,
+    module: &BeamModule,
     name: &str,
     arguments: &[Term],
 ) -> Option<(Job, Result<BifResult, BeamError>)> {
     let arity = u32::try_from(arguments.len()).ok()?;
-    let linked = Linked::of(module)?;
+    let linked = Linked::of(&module.name)?;
     let bound = match linked {
         Linked::Static(library) => static_binding(library, name, arity)
             .map(|binding| (binding.job, (binding.run)(scheduler, arguments))),
-        Linked::Extension(library) => extension_binding(library, name, arity)
-            .map(|binding| (binding.job, run_extension(scheduler, binding, arguments))),
+        Linked::Extension(library) => {
+            let declared = module
+                .native_declarations()
+                .iter()
+                .any(|(declared, found)| declared == name && *found == arity);
+            if !declared && !scheduler.extension_loads.contains(&module.id) {
+                return None;
+            }
+            extension_binding(library, name, arity)
+                .map(|binding| (binding.job, run_extension(scheduler, binding, arguments)))
+        }
     };
     bound.or_else(|| {
         linked
-            .unbound_error(module, name, arity)
+            .unbound_error(&module.name, name, arity)
             .map(|error| (Job::Normal, Err(error)))
     })
 }
@@ -492,14 +508,27 @@ pub(super) fn load_nif(scheduler: &mut Scheduler, caller: &str) -> Result<BifRes
             "erlang:load_nif/2 from {caller} is not supported: PBeam has no native bindings for the module"
         )));
     };
-    if scheduler.nif_libraries.contains(caller) {
+    let extension = matches!(linked, Linked::Extension(_));
+    if extension && scheduler.is_multi() {
+        // Each scheduler of the run keeps its code table, so a load on one
+        // scheduler cannot make the NIFs callable on the other schedulers.
+        return Err(error(format!(
+            "unsupported: erlang:load_nif/2 of the extension library of {caller} in a run of execute_on_schedulers"
+        )));
+    }
+    let module = Arc::clone(scheduler.code.waiting_or_loaded(caller)?);
+    let loaded = if extension {
+        scheduler.extension_loads.contains(&module.id)
+    } else {
+        scheduler.nif_libraries.contains(caller)
+    };
+    if loaded {
         return load_nif_error(
             &mut scheduler.atoms,
             "reload",
             "NIF library already loaded (reload disallowed since OTP 20).",
         );
     }
-    let module = Arc::clone(scheduler.code.waiting_or_loaded(caller)?);
     let instructions = &module.instructions;
     let has_nifs = instructions
         .iter()
@@ -527,6 +556,29 @@ pub(super) fn load_nif(scheduler: &mut Scheduler, caller: &str) -> Result<BifRes
             return load_nif_error(&mut scheduler.atoms, "bad_lib", &text);
         }
     }
+    if extension && !has_nifs {
+        // ERTS replaces each function of the library in a module without
+        // `nif_start` (`beam/erl_nif.c:4700-4704`, `5050-5098`). PBeam runs
+        // an extension binding only at `nif_start`.
+        return Err(error(format!(
+            "unsupported: erlang:load_nif/2 of the extension library of {caller}: the module has no nif_start instruction"
+        )));
+    }
+    // A library on another instance of the module, such as the code that
+    // `erlang:delete_module/1` made old, makes the load an upgrade, and an
+    // extension library has no upgrade callback (`beam/erl_nif.c:4956-4961`).
+    // PBeam keeps the code of a deleted module, so the instance stays.
+    let upgrade = scheduler.extension_loads.iter().any(|&id| {
+        id != module.id
+            && scheduler
+                .code
+                .module_by_id(id)
+                .is_ok_and(|other| other.name == caller)
+    });
+    if extension && upgrade {
+        let text = "Upgrade not supported by this NIF library.";
+        return load_nif_error(&mut scheduler.atoms, "upgrade", text);
+    }
     let veto = match linked {
         Linked::Static(library) => library
             .load
@@ -539,7 +591,11 @@ pub(super) fn load_nif(scheduler: &mut Scheduler, caller: &str) -> Result<BifRes
         let text = format!("Library load-call unsuccessful ({veto}).");
         return load_nif_error(&mut scheduler.atoms, "load", &text);
     }
-    scheduler.nif_libraries.insert(caller.to_owned());
+    if extension {
+        scheduler.extension_loads.insert(module.id);
+    } else {
+        scheduler.nif_libraries.insert(caller.to_owned());
+    }
     Ok(BifResult::Value(Term::static_atom("ok")))
 }
 

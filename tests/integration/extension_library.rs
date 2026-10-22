@@ -1,36 +1,50 @@
 //! The static Rust extension API, as an extension crate uses it: the test
 //! uses only the public API of `pbeam_runtime`. It registers a `Library` of
 //! `Binding` entries for each fixture of `fixtures/extension` before the
-//! run. The `erlang:load_nif/2` results are the results of the pinned ERTS
-//! with C NIF libraries of the same functions, built with `cc -bundle` from
-//! `ErlNifFunc` tables `{"add", 2, add, 0}` for `extension_probe`, with a
-//! load callback that returns 0 only for the load info `ok`, and
-//! `{"unbound", 0, f, 0}` two times for `extension_strict`:
+//! run. The expected values are the values of the pinned ERTS with C NIF
+//! libraries of the same functions, built with `cc -bundle`: `{"add", 2,
+//! add, 0}` with a load callback that returns 0 only for the load info `ok`
+//! for `extension_probe`, `{"unbound", 0, f, 0}` for `extension_strict`,
+//! `{"twice", 0, f, 0}` two times for `extension_twice`, and `{"add", 2,
+//! add, 0}` for `extension_bare`:
 //!
 //! ```text
 //! mise run erts-eval --pa $PWD/fixtures/extension 'ok = file:set_cwd("/tmp/pbeam854"),
-//!   U = fun(F) -> try F() catch C:R -> {C, R} end end,
-//!   {extension_strict:load(), extension_probe:load(nope), extension_probe:load(ok),
-//!    extension_probe:load(ok), extension_probe:add(1,2), extension_probe:invalid(),
-//!    U(fun() -> extension_probe:unbound(1) end)}'
-//! {{error,{bad_lib,"Duplicate NIF entry for extension_strict:unbound/0"}},
-//!  {error,{load,"Library load-call unsuccessful (1)."}},
-//!  ok,
-//!  {error,{reload,"NIF library already loaded (reload disallowed since OTP 20)."}},
-//!  3,
-//!  {error,badarg},
-//!  {error,undef}}
+//!   {extension_probe:calls(error), extension_probe:calls(ok), extension_probe:add(1,2),
+//!    extension_probe:invalid(), extension_twice:load(), extension_bare:calls()}'
+//! {{{error,undef},{error,{load,"Library load-call unsuccessful (1)."}},
+//!   {error,undef},{error,{load,"Library load-call unsuccessful (1)."}}},
+//!  {{error,undef},ok,3,
+//!   {error,{reload,"NIF library already loaded (reload disallowed since OTP 20)."}}},
+//!  3, {error,badarg},
+//!  {error,{bad_lib,"Duplicate NIF entry for extension_twice:twice/0"}},
+//!  {fallback,ok,fallback}}
+//! mise run erts-eval --pa $PWD/fixtures/extension 'ok = file:set_cwd("/tmp/pbeam854"),
+//!   {ok, B} = file:read_file("fixtures/extension/extension_probe.beam"),
+//!   extension_probe:reload(B)'
+//! {{{error,undef},ok,3,{error,{reload,"NIF library already loaded (...)."}}},
+//!  {{error,undef},{error,{upgrade,"Upgrade not supported by this NIF library."}},
+//!   {error,undef},{error,{upgrade,"Upgrade not supported by this NIF library."}}}}
 //! ```
+//!
+//! After the load of `extension_bare`, which has no `nif_start`, ERTS runs
+//! the NIF for an external call and the BEAM body for a local call.
+
+#[path = "../common/mod.rs"]
+mod common;
 
 use std::sync::Once;
 
+use common::pinned_beam;
 use pbeam_runtime::{
-    BeamError, BeamModule, BeamProgram, Binding, Job, Library, NativeResult, NifContext,
+    BeamError, BeamModule, BeamProgram, Binding, HostTerm, Job, Library, NativeResult, NifContext,
     RegistrationError, Term, nif_manifest_gaps, register_library,
 };
 
 const EXTENSION_PROBE: &[u8] = include_bytes!("../../fixtures/extension/extension_probe.beam");
 const EXTENSION_STRICT: &[u8] = include_bytes!("../../fixtures/extension/extension_strict.beam");
+const EXTENSION_TWICE: &[u8] = include_bytes!("../../fixtures/extension/extension_twice.beam");
+const EXTENSION_BARE: &[u8] = include_bytes!("../../fixtures/extension/extension_bare.beam");
 
 /// Return the sum of two integers, and `badarg` for any other argument.
 fn add(context: &mut NifContext<'_>, arguments: &[Term]) -> Result<NativeResult, BeamError> {
@@ -58,6 +72,14 @@ fn load(context: &mut NifContext<'_>, info: &Term) -> i32 {
     i32::from(*info != ok)
 }
 
+/// The binding `add/2`.
+const ADD: Binding = Binding {
+    name: "add",
+    arity: 2,
+    job: Job::Normal,
+    run: add,
+};
+
 /// The library of `extension_probe`. `unbound/1` has no binding and runs
 /// its stub body.
 static PROBE_LIBRARY: Library = Library {
@@ -69,12 +91,7 @@ static PROBE_LIBRARY: Library = Library {
         ("dirty_atom", 1),
     ],
     bindings: &[
-        Binding {
-            name: "add",
-            arity: 2,
-            job: Job::Normal,
-            run: add,
-        },
+        ADD,
         Binding {
             name: "make_atom",
             arity: 1,
@@ -92,117 +109,174 @@ static PROBE_LIBRARY: Library = Library {
     unbound_fails: false,
 };
 
-/// The library of `extension_strict`: `unbound/0` is in it two times, and a
-/// call of a function without a binding fails.
+/// The library of `extension_strict`: a call of a function without a
+/// binding fails.
 static STRICT_LIBRARY: Library = Library {
     module: "extension_strict",
-    functions: &[("unbound", 0), ("unbound", 0)],
+    functions: &[("unbound", 0)],
     bindings: &[],
     load: None,
     unbound_fails: true,
 };
 
+/// The library of `extension_twice`, which lists `twice/0` two times.
+static TWICE_LIBRARY: Library = Library {
+    module: "extension_twice",
+    functions: &[("twice", 0), ("twice", 0)],
+    bindings: &[],
+    load: None,
+    unbound_fails: false,
+};
+
+/// The library of `extension_bare`, whose module has no `nif_start`.
+static BARE_LIBRARY: Library = Library {
+    module: "extension_bare",
+    functions: &[("add", 2)],
+    bindings: &[ADD],
+    load: None,
+    unbound_fails: false,
+};
+
 /// Register the libraries of the fixtures once for the test binary, and
-/// load the fixtures.
+/// load the fixtures with the pinned modules that `erlang:load_module/2`
+/// needs.
 fn program() -> BeamProgram {
     static REGISTER: Once = Once::new();
     REGISTER.call_once(|| {
-        register_library(&PROBE_LIBRARY).unwrap();
-        register_library(&STRICT_LIBRARY).unwrap();
+        for library in [
+            &PROBE_LIBRARY,
+            &STRICT_LIBRARY,
+            &TWICE_LIBRARY,
+            &BARE_LIBRARY,
+        ] {
+            register_library(library).unwrap();
+        }
     });
-    BeamProgram::load(&[EXTENSION_PROBE, EXTENSION_STRICT]).unwrap()
+    BeamProgram::load(&[
+        &pinned_beam("erlang"),
+        &pinned_beam("erts_internal"),
+        EXTENSION_PROBE,
+        EXTENSION_STRICT,
+        EXTENSION_TWICE,
+        EXTENSION_BARE,
+    ])
+    .unwrap()
 }
 
-/// Run `Module:Function(Arguments)` and return its value.
-fn run(program: &BeamProgram, module: &str, function: &str, arguments: Vec<Term>) -> Term {
+/// Run `Module:Function(Arguments)` and return its result.
+fn execute(
+    program: &BeamProgram,
+    module: &str,
+    function: &str,
+    arguments: Vec<Term>,
+) -> Result<HostTerm, BeamError> {
     let arguments: Vec<_> = arguments
         .into_iter()
         .map(|term| program.host_term(term))
         .collect();
-    program.execute(module, function, &arguments).unwrap().term
+    program.execute(module, function, &arguments)
 }
 
-/// Return the atom `name` of the program.
-fn atom(program: &BeamProgram, name: &str) -> Term {
+/// Return the atom `name` of the table of `result`.
+fn atom(result: &HostTerm, name: &str) -> Term {
+    Term::Atom(result.atom(name).unwrap())
+}
+
+/// Return `{error, {Kind, Text}}` with the atoms of `result` and `Text` as
+/// a list of its bytes.
+fn load_error(result: &HostTerm, kind: &str, text: &str) -> Term {
+    let text = text.bytes().map(|byte| Term::Integer(byte.into()));
+    Term::tuple(vec![
+        atom(result, "error"),
+        Term::tuple(vec![atom(result, kind), Term::list_from(text)]),
+    ])
+}
+
+/// Return `{error, Reason}` with the atoms of `result`.
+fn caught(result: &HostTerm, reason: &str) -> Term {
+    Term::tuple(vec![atom(result, "error"), atom(result, reason)])
+}
+
+/// Return the atom `name` of `program` as an argument.
+fn argument(program: &BeamProgram, name: &str) -> Term {
     Term::Atom(program.atom(name).unwrap())
 }
 
-/// Check that `Module:load(Arguments)` gives `{error, {Kind, Text}}`, with
-/// `Text` as a list of its bytes. The run makes the atom `Kind`, so the
-/// atom comes from the table of the result.
-fn assert_load_error(
-    program: &BeamProgram,
-    module: &str,
-    arguments: &[Term],
-    kind: &str,
-    text: &str,
-) {
-    let arguments: Vec<_> = arguments
-        .iter()
-        .map(|term| program.host_term(term.clone()))
-        .collect();
-    let result = program.execute(module, "load", &arguments).unwrap();
-    let text = text.bytes().map(|byte| Term::Integer(byte.into()));
-    let expected = Term::tuple(vec![
-        Term::Atom(result.atom("error").unwrap()),
+#[test]
+fn runs_a_binding_only_after_a_successful_load_as_erts() {
+    let program = program();
+    let vetoed = execute(
+        &program,
+        "extension_probe",
+        "calls",
+        vec![argument(&program, "error")],
+    )
+    .unwrap();
+    let veto = load_error(&vetoed, "load", "Library load-call unsuccessful (1).");
+    let undef = caught(&vetoed, "undef");
+    assert_eq!(
+        vetoed.term,
+        Term::tuple(vec![undef.clone(), veto.clone(), undef, veto])
+    );
+
+    let loaded = execute(&program, "extension_probe", "loaded", vec![]).unwrap();
+    let reload = "NIF library already loaded (reload disallowed since OTP 20).";
+    assert_eq!(
+        loaded.term,
         Term::tuple(vec![
-            Term::Atom(result.atom(kind).unwrap()),
-            Term::list_from(text),
-        ]),
-    ]);
-    assert_eq!(result.term, expected);
+            caught(&loaded, "undef"),
+            atom(&loaded, "ok"),
+            Term::Integer(3),
+            load_error(&loaded, "reload", reload),
+        ])
+    );
 }
 
 #[test]
-fn loads_the_library_with_the_checks_and_the_load_callback_of_erts() {
+fn starts_the_new_code_of_the_module_without_its_library_as_erts() {
     let program = program();
-    let error = atom(&program, "error");
-    let text = "Library load-call unsuccessful (1).";
-    assert_load_error(&program, "extension_probe", &[error], "load", text);
-    assert_eq!(
-        run(
-            &program,
-            "extension_probe",
-            "load",
-            vec![atom(&program, "ok")]
-        ),
-        atom(&program, "ok")
+    let binary = Term::binary(EXTENSION_PROBE.to_vec());
+    let result = execute(&program, "extension_probe", "reload", vec![binary]).unwrap();
+    let reload = "NIF library already loaded (reload disallowed since OTP 20).";
+    let upgrade = load_error(
+        &result,
+        "upgrade",
+        "Upgrade not supported by this NIF library.",
     );
-    let text = "Duplicate NIF entry for extension_strict:unbound/0";
-    assert_load_error(&program, "extension_strict", &[], "bad_lib", text);
+    let undef = caught(&result, "undef");
+    assert_eq!(
+        result.term,
+        Term::tuple(vec![
+            Term::tuple(vec![
+                undef.clone(),
+                atom(&result, "ok"),
+                Term::Integer(3),
+                load_error(&result, "reload", reload),
+            ]),
+            Term::tuple(vec![undef.clone(), upgrade.clone(), undef, upgrade]),
+        ])
+    );
 }
 
 #[test]
-fn runs_the_bindings_and_the_unbound_behavior_of_the_library() {
+fn gives_the_load_errors_of_erts_and_the_unbound_behavior_of_the_library() {
     let program = program();
-    assert_eq!(
-        run(
-            &program,
-            "extension_probe",
-            "add",
-            vec![Term::Integer(1), Term::Integer(2)]
-        ),
-        Term::Integer(3)
-    );
-    assert_eq!(
-        run(&program, "extension_probe", "invalid", vec![]),
-        Term::tuple(vec![atom(&program, "error"), atom(&program, "badarg")])
-    );
+    let twice = execute(&program, "extension_twice", "load", vec![]).unwrap();
+    let text = "Duplicate NIF entry for extension_twice:twice/0";
+    assert_eq!(twice.term, load_error(&twice, "bad_lib", text));
 
+    let with_load = |name: &str, arguments: Vec<Term>| {
+        let arguments = vec![argument(&program, name), Term::list_from(arguments)];
+        execute(&program, "extension_probe", "with_load", arguments)
+    };
+    let invalid = with_load("invalid", vec![]).unwrap();
+    assert_eq!(invalid.term, caught(&invalid, "badarg"));
     // A function without a binding runs its stub body, which raises `undef`.
-    let stub = program
-        .execute(
-            "extension_probe",
-            "unbound",
-            &[program.host_term(Term::Integer(1))],
-        )
-        .unwrap_err();
+    let stub = with_load("unbound", vec![Term::Integer(1)]).unwrap_err();
     assert!(stub.to_string().contains("undef"), "{stub}");
-    // A library whose functions without a binding fail gives the runtime
-    // error of the function.
-    let strict = program
-        .execute("extension_strict", "unbound", &[])
-        .unwrap_err();
+    // After the load, a function without a binding of a library that sets
+    // `unbound_fails` gives the runtime error of the function.
+    let strict = execute(&program, "extension_strict", "load", vec![]).unwrap_err();
     assert_eq!(
         strict.to_string(),
         "extension_strict:unbound/0 NIF is not supported"
@@ -210,49 +284,52 @@ fn runs_the_bindings_and_the_unbound_behavior_of_the_library() {
 }
 
 #[test]
+fn refuses_the_load_of_a_module_without_nif_start_and_a_load_on_scheduler_threads() {
+    let program = program();
+    let bare = execute(&program, "extension_bare", "calls", vec![]).unwrap_err();
+    assert_eq!(
+        bare.to_string(),
+        "unsupported: erlang:load_nif/2 of the extension library of extension_bare: the module has no nif_start instruction"
+    );
+    let multi = program
+        .execute_on_schedulers(&[("extension_probe", "loaded")])
+        .unwrap_err();
+    assert_eq!(
+        multi.to_string(),
+        "unsupported: erlang:load_nif/2 of the extension library of extension_probe in a run of execute_on_schedulers"
+    );
+}
+
+#[test]
 fn gives_the_atoms_of_the_run_on_the_scheduler_and_static_atoms_on_a_dirty_thread() {
     let program = program();
-    let name = |text: &str| vec![Term::binary(text.as_bytes().to_vec())];
+    let call = |function: &str, name: &str| {
+        let name = Term::binary(name.as_bytes().to_vec());
+        let arguments = vec![argument(&program, function), Term::list_from([name])];
+        execute(&program, "extension_probe", "with_load", arguments).map(|result| result.term)
+    };
     assert_eq!(
-        run(
-            &program,
-            "extension_probe",
-            "atom_name",
-            name("extension_fresh")
-        ),
+        call("atom_name", "extension_fresh").unwrap(),
         Term::binary(b"extension_fresh".to_vec())
-    );
-    assert_eq!(
-        run(&program, "extension_probe", "dirty_atom_name", name("ok")),
-        Term::binary(b"ok".to_vec())
     );
     // `erts_atom_put` takes at most 255 characters (`MAX_ATOM_CHARACTERS`).
     let longest = "é".repeat(255);
     assert_eq!(
-        run(&program, "extension_probe", "atom_name", name(&longest)),
+        call("atom_name", &longest).unwrap(),
         Term::binary(longest.into_bytes())
     );
-    let too_long = program
-        .execute(
-            "extension_probe",
-            "atom_name",
-            &[program.host_term(name(&"a".repeat(256)).remove(0))],
-        )
-        .unwrap_err();
     assert_eq!(
-        too_long.to_string(),
+        call("atom_name", &"a".repeat(256)).unwrap_err().to_string(),
         "the atom name has more than 255 characters"
     );
-    let fresh = Term::binary(b"extension_fresh".to_vec());
-    let dirty = program
-        .execute(
-            "extension_probe",
-            "dirty_atom_name",
-            &[program.host_term(fresh)],
-        )
-        .unwrap_err();
     assert_eq!(
-        dirty.to_string(),
+        call("dirty_atom_name", "ok").unwrap(),
+        Term::binary(b"ok".to_vec())
+    );
+    assert_eq!(
+        call("dirty_atom_name", "extension_fresh")
+            .unwrap_err()
+            .to_string(),
         "unsupported: a dirty NIF cannot make the atom extension_fresh, which is not a static atom"
     );
 }
@@ -277,13 +354,8 @@ fn rejects_a_duplicate_library_and_a_binding_outside_the_functions() {
     );
     static UNLISTED: Library = Library {
         module: "extension_unlisted",
-        functions: &[("add", 2)],
-        bindings: &[Binding {
-            name: "add",
-            arity: 1,
-            job: Job::Normal,
-            run: add,
-        }],
+        functions: &[("add", 1)],
+        bindings: &[ADD],
         load: None,
         unbound_fails: false,
     };
@@ -291,31 +363,18 @@ fn rejects_a_duplicate_library_and_a_binding_outside_the_functions() {
         register_library(&UNLISTED),
         Err(RegistrationError::UnlistedBinding {
             name: "add",
-            arity: 1
+            arity: 2
         })
     );
-    static TWICE: Library = Library {
-        module: "extension_twice",
+    static DOUBLED: Library = Library {
+        module: "extension_doubled",
         functions: &[("add", 2)],
-        bindings: &[
-            Binding {
-                name: "add",
-                arity: 2,
-                job: Job::Normal,
-                run: add,
-            },
-            Binding {
-                name: "add",
-                arity: 2,
-                job: Job::CpuBound,
-                run: add,
-            },
-        ],
+        bindings: &[ADD, ADD],
         load: None,
         unbound_fails: false,
     };
     assert_eq!(
-        register_library(&TWICE),
+        register_library(&DOUBLED),
         Err(RegistrationError::DuplicateBinding {
             name: "add",
             arity: 2

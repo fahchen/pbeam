@@ -3,6 +3,10 @@
 
 -nifs([add/2, hidden/1]).
 
+%% The test declares both NIFs as PBeam natives, so their bindings run
+%% without `erlang:load_nif/2`.
+-pbeam_native([{add, 2}, {hidden, 1}]).
+
 %% `double/1` is an ordinary BEAM function, so an unregistered MFA
 %% resolves to it.
 double(X) -> X + X.
