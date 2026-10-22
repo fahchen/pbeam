@@ -114,8 +114,10 @@ fn boots_a_release_with_the_arguments_of_erl_as_pinned_erts() {
     // (application_controller.erl:1964-2021), and `-s` runs
     // `release_boot_probe:main/0` after the boot (init.erl:1530-1546). The
     // probe displays the applications, the environment, the mode, the plain
-    // arguments, and the preloaded modules that are not loaded, and stops
-    // the node with `init:stop/0`, which halts with status 0.
+    // arguments, the preloaded modules that are not loaded, and whether
+    // `PATH` starts with the bindir, as erlexec sets it
+    // (erlexec.c:556-620), and stops the node with `init:stop/0`, which
+    // halts with status 0.
     let mut reference = Command::new("erl");
     reference.args(RELEASE_ARGUMENTS);
     let reference = isolate(&mut reference).output().unwrap();
@@ -127,7 +129,7 @@ fn boots_a_release_with_the_arguments_of_erl_as_pinned_erts() {
         \x20             {ok,\"hello from sys.config\"},\n\
         \x20             mode,embedded,plain,\n\
         \x20             [\"plain\",\"-sname\",\"x\"],\n\
-        \x20             not_loaded,[],supervisor,true}\n";
+        \x20             not_loaded,[],supervisor,true,path_bindir,true}\n";
     let result = |output: &Output| {
         (
             String::from_utf8_lossy(&output.stdout).into_owned(),

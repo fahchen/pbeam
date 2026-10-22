@@ -19,14 +19,19 @@ init([]) ->
 
 %% Display the running applications, the application environment of
 %% sys.config, the code loading mode, the plain arguments of -extra, the
-%% preloaded modules that are not loaded, and the supervisor of the
-%% application. Then stop the node with init:stop/0.
+%% preloaded modules that are not loaded, the supervisor of the
+%% application, and whether the first element of PATH is the bindir,
+%% which erlexec puts first in each case (erlexec.c:556-620). Then stop
+%% the node with init:stop/0.
 main() ->
+    {ok, [[Bindir]]} = init:get_argument(bindir),
+    [First | _] = string:split(os:getenv("PATH"), ":"),
     io:format("~p~n", [{release_boot,
                         applications, application:which_applications(),
                         greeting, application:get_env(release_boot_probe, greeting),
                         mode, code:get_mode(),
                         plain, init:get_plain_arguments(),
                         not_loaded, [M || M <- erlang:pre_loaded(), not erlang:module_loaded(M)],
-                        supervisor, is_pid(whereis(release_boot_probe_sup))}]),
+                        supervisor, is_pid(whereis(release_boot_probe_sup)),
+                        path_bindir, First =:= Bindir}]),
     init:stop().

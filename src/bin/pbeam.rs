@@ -7,7 +7,9 @@ use std::{
 };
 
 use clap::Parser;
-use pbeam_runtime::{BeamError, BeamProgram, HostTerm, Term, install_start_dispositions};
+use pbeam_runtime::{
+    BeamError, BeamProgram, HostTerm, Term, add_erlexec_path, install_start_dispositions,
+};
 
 #[derive(Parser)]
 #[command(
@@ -377,6 +379,9 @@ fn boot_erl(arguments: ErlCli) -> Result<(), Exit> {
         }
     }
     install_start_dispositions();
+    // `erlexec` puts `bindir` and `rootdir/bin` first in `PATH` before it
+    // starts the emulator (`erlexec.c:556-620`).
+    add_erlexec_path(arguments.bindir.as_bytes(), arguments.root.as_bytes());
     let program = BeamProgram::load_preloaded(&arguments.preloaded)
         .map_err(|load_error| format!("cannot load the preloaded modules: {load_error}"))?;
     let home = std::env::var_os("HOME");

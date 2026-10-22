@@ -98,6 +98,71 @@ fn set(entries: &mut Entries, key: &[u8], value: Vec<u8>) {
     }
 }
 
+/// Change `PATH` of the environment copy as `erlexec` does before it starts
+/// the emulator (`erts/etc/common/erlexec.c:556-620`), so that a release
+/// boot of `pbeam erl` finds the programs of `bindir` and `rootdir/bin`
+/// first, as `erl` does. See [`erlexec_path`] for the three cases.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // PATH=/usr/bin
+/// add_erlexec_path(b"/otp/erts/bin", b"/otp");
+/// assert_eq!(variable(b"PATH"), Some(b"/otp/erts/bin:/otp/bin:/usr/bin".to_vec()));
+/// ```
+pub fn add_erlexec_path(bindir: &[u8], rootdir: &[u8]) {
+    let mut entries = write();
+    let path = entries
+        .iter()
+        .find(|(name, _)| name == b"PATH")
+        .map(|(_, value)| value.clone());
+    let value = erlexec_path(path.as_deref(), bindir, rootdir);
+    set(&mut entries, b"PATH", value);
+}
+
+/// Return the `PATH` that `erlexec` sets (`erlexec.c:556-620`). With no
+/// `PATH`, it is `bindir:rootdir/bin`. When `PATH` does not contain
+/// `rootdir` (a substring test, as `strstr`), it is `bindir:rootdir/bin:`
+/// before the old value. Else `bindir` comes first, and each element of the
+/// old value that is not `bindir` follows in its order.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(erlexec_path(None, b"/b", b"/r"), b"/b:/r/bin");
+/// assert_eq!(erlexec_path(Some(b"/r/bin:/b:/x"), b"/b", b"/r"), b"/b:/r/bin:/x");
+/// ```
+fn erlexec_path(path: Option<&[u8]>, bindir: &[u8], rootdir: &[u8]) -> Vec<u8> {
+    let root_bin = [rootdir, b"/bin"].concat();
+    match path {
+        None => [bindir, b":", &root_bin].concat(),
+        Some(path) if !contains(path, rootdir) => [bindir, b":", &root_bin, b":", path].concat(),
+        Some(path) => {
+            let mut value = bindir.to_vec();
+            for element in path.split(|&byte| byte == b':') {
+                if element != bindir {
+                    value.push(b':');
+                    value.extend_from_slice(element);
+                }
+            }
+            value
+        }
+    }
+}
+
+/// Return whether `part` occurs in `bytes`, as `strstr` finds it: an empty
+/// `part` occurs in each string.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(contains(b"/usr/otp/bin", b"/otp"));
+/// assert!(contains(b"/usr", b""));
+/// ```
+fn contains(bytes: &[u8], part: &[u8]) -> bool {
+    part.is_empty() || bytes.windows(part.len()).any(|window| window == part)
+}
+
 /// Remove the environment variable `key`, as `os_unsetenv_1`
 /// (`erl_bif_os.c:129-142`) does with `erts_osenv_unset_native`. A key that
 /// the environment does not hold changes nothing.
