@@ -21,7 +21,9 @@
          port_link_give/0, port_monitor_use/0, port_monitor_give/0,
          timer_fire4/0, timer_named4/0, timer_remote4/0, pattern_split/0,
          pattern_split_give/0, pattern_matches/0, pattern_matches_give/0,
-         info_idle/0, info_idle_child/0]).
+         info_idle/0, info_idle_child/0, stuck_child/0, relay_wait/0,
+         bounce_ping/0, bounce_pong/0, busy_send/0, timer_send/0,
+         port_relay/0]).
 
 -define(COUNT, 100).
 
@@ -753,3 +755,69 @@ info_idle() ->
 info_idle_child() ->
     true = register(info_idle_name, self()),
     receive stop -> ok end.
+
+%% The root that waits without a timer, as its child does. No process can
+%% send to either of them.
+stuck_child() ->
+    _ = spawn(fun() -> receive never -> ok end end),
+    receive never -> ok end.
+
+%% The root that waits without a timer for the message of the other root.
+relay_wait() ->
+    true = register(relay_name, self()),
+    receive go -> ok end.
+
+%% The roots that bounce one message 1000 times. Both roots wait without a
+%% timer, so a wait of one root comes while the message of the other root
+%% can be in flight.
+bounce_ping() ->
+    Pid = wait_for(bounce_name, 100000),
+    bounce_ping(Pid, 1000).
+
+bounce_ping(Pid, 0) ->
+    Pid ! stop,
+    ok;
+bounce_ping(Pid, N) ->
+    Pid ! {ball, self()},
+    receive ball -> bounce_ping(Pid, N - 1) end.
+
+bounce_pong() ->
+    true = register(bounce_name, self()),
+    bounce_pong_loop().
+
+bounce_pong_loop() ->
+    receive
+        {ball, From} ->
+            From ! ball,
+            bounce_pong_loop();
+        stop ->
+            ok
+    end.
+
+%% The root that runs without a wait before it sends to the waiting root.
+busy_send() ->
+    Pid = wait_for(relay_name, 100000),
+    ok = spin(3000000),
+    Pid ! go,
+    ok.
+
+spin(0) -> ok;
+spin(N) -> spin(N - 1).
+
+%% The root whose receive timer is the only source of the node before it
+%% sends to the waiting root.
+timer_send() ->
+    Pid = wait_for(relay_name, 100000),
+    receive after 50 -> ok end,
+    Pid ! go,
+    ok.
+
+%% The root that waits without a timer for the output of a port before it
+%% sends to the waiting root.
+port_relay() ->
+    Pid = wait_for(relay_name, 100000),
+    Port = open_port({spawn_executable, "/bin/sh"},
+                     [binary, {args, ["-c", "sleep 0.05; echo go"]}]),
+    receive {Port, {data, <<"go\n">>}} -> ok end,
+    Pid ! go,
+    ok.

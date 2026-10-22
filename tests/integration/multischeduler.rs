@@ -913,6 +913,86 @@ fn reports_a_root_that_waits_for_a_message_that_cannot_arrive() {
     );
 }
 
+/// The impossible wait is a decision of the node: two roots of two
+/// schedulers that wait without a timer give the error, although each
+/// scheduler has a live process that another scheduler could reach.
+#[test]
+fn reports_two_roots_that_wait_on_two_schedulers() {
+    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
+    let error = program
+        .execute_on_schedulers(&[("ping_pong", "wait"), ("ping_pong", "wait")])
+        .expect_err("both roots wait");
+    assert_eq!(
+        error.to_string(),
+        "root process waits for a message that cannot arrive"
+    );
+}
+
+/// A root and its child that both wait without a timer give the error.
+#[test]
+fn reports_a_root_that_waits_with_a_waiting_child() {
+    // The pinned `erlang` module holds `spawn/1`.
+    let erlang = pinned_beam("erlang");
+    let program = BeamProgram::load(&[&erlang, PING_PONG]).expect("the fixture loads");
+    let error = program
+        .execute_on_schedulers(&[("ping_pong", "stuck_child")])
+        .expect_err("the root and its child wait");
+    assert_eq!(
+        error.to_string(),
+        "root process waits for a message that cannot arrive"
+    );
+}
+
+/// Run `relay_wait/0` on one scheduler and `sender` on the other, and check
+/// that the waiting root gets the message of the sender. While the sender
+/// uses its source, the scheduler of the waiting root is idle, so the
+/// source alone prevents the error.
+fn relays_through(sender: &str) {
+    // The pinned `erlang` module holds `open_port/2`.
+    let erlang = pinned_beam("erlang");
+    let program = BeamProgram::load(&[&erlang, PING_PONG]).expect("the fixture loads");
+    let ok_atom = Term::Atom(program.atom("ok").expect("the fixture names ok"));
+    let results = program
+        .execute_on_schedulers(&[("ping_pong", "relay_wait"), ("ping_pong", sender)])
+        .expect("the waiting root gets its message");
+    let results: Vec<Term> = results.into_iter().map(|result| result.term).collect();
+    assert_eq!(results, [ok_atom.clone(), ok_atom], "{sender}");
+}
+
+/// A process that can run on another scheduler prevents the error.
+#[test]
+fn a_runnable_process_of_another_scheduler_prevents_the_error() {
+    relays_through("busy_send");
+}
+
+/// A receive timer of another scheduler prevents the error.
+#[test]
+fn a_timer_of_another_scheduler_prevents_the_error() {
+    relays_through("timer_send");
+}
+
+/// A port of another scheduler that waits for output prevents the error.
+#[test]
+fn a_port_of_another_scheduler_prevents_the_error() {
+    relays_through("port_relay");
+}
+
+/// Two roots that bounce one message, each with a wait without a timer, do
+/// not give the error while the message is in flight. The test repeats the
+/// run to exercise different interleavings of the two threads.
+#[test]
+fn a_delivery_in_flight_prevents_the_error() {
+    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
+    let ok_atom = Term::Atom(program.atom("ok").expect("the fixture names ok"));
+    for _ in 0..10 {
+        let results = program
+            .execute_on_schedulers(&[("ping_pong", "bounce_ping"), ("ping_pong", "bounce_pong")])
+            .expect("the message is always in flight or handled");
+        let results: Vec<Term> = results.into_iter().map(|result| result.term).collect();
+        assert_eq!(results, [ok_atom.clone(), ok_atom.clone()]);
+    }
+}
+
 /// A run without a root gives an error.
 #[test]
 fn rejects_an_empty_root_list() {

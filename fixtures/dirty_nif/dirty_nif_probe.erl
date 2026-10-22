@@ -1,6 +1,7 @@
 -module(dirty_nif_probe).
 -export([threads/0, signals/1, signals_with/3, kill/1, kill_with/3, queued/1,
-         raise/1, unfinished/1, waits/1, priorities/1, priorities_with/4, first_root/0, second_root/0, load/0]).
+         raise/1, unfinished/1, waits/1, priorities/1, priorities_with/4, first_root/0, second_root/0,
+         relay_wait/0, relay_send/0, load/0]).
 
 -nifs([cpu_thread/0, io_thread/0, cpu_wait/1, started/1, release/1, cpu_raise/1,
        cpu_sequence/0]).
@@ -133,6 +134,24 @@ waits(Keys) ->
 %% The roots of a run on two schedulers: three dirty CPU calls in all.
 first_root() -> waits([101, 102]).
 second_root() -> waits([103]).
+
+%% The roots of a run on two schedulers: the first root waits without a
+%% timer for the message that the second root sends after its dirty call.
+relay_wait() ->
+    true = register(dirty_relay, self()),
+    receive go -> ok end.
+
+relay_send() ->
+    Pid = wait_name(dirty_relay),
+    ok = cpu_wait(201),
+    Pid ! go,
+    ok.
+
+wait_name(Name) ->
+    case whereis(Name) of
+        undefined -> receive after 1 -> wait_name(Name) end;
+        Pid -> Pid
+    end.
 
 await(Key) ->
     case started(Key) of

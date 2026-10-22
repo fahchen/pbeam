@@ -335,6 +335,42 @@ fn starts_the_queued_dirty_calls_by_the_priority_of_their_callers_as_erts() {
 }
 
 #[test]
+fn a_dirty_call_of_another_scheduler_prevents_the_impossible_wait() {
+    // The first root waits without a timer. While the dirty call of the
+    // second root runs, the scheduler of the first root is idle, and only
+    // the dirty call can lead to the message.
+    let program = program();
+    let run = thread::scope(|scope| {
+        let run = scope.spawn(|| {
+            program.execute_on_schedulers(&[
+                ("dirty_nif_probe", "relay_wait"),
+                ("dirty_nif_probe", "relay_send"),
+            ])
+        });
+        // A run that ends before the call starts gives its error below.
+        let mut gates = GATES.0.lock().unwrap();
+        while !run.is_finished()
+            && !gates
+                .as_ref()
+                .and_then(|gates| gates.get(&201))
+                .is_some_and(|gate| gate.0)
+        {
+            gates = GATES
+                .1
+                .wait_timeout(gates, Duration::from_millis(10))
+                .unwrap()
+                .0;
+        }
+        drop(gates);
+        thread::sleep(Duration::from_millis(100));
+        update(201, |gate| gate.1 = true);
+        run.join().unwrap()
+    });
+    let results: Vec<Term> = run.unwrap().into_iter().map(|result| result.term).collect();
+    assert_eq!(results, [static_atom("ok"), static_atom("ok")]);
+}
+
+#[test]
 fn shares_the_dirty_cpu_pool_of_the_node_between_two_schedulers() {
     // A node of 2 schedulers has 2 dirty CPU threads (erl_init.c:865). The
     // two roots start 3 calls, so 2 of them start and one waits in the

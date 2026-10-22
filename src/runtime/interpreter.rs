@@ -260,24 +260,35 @@ impl Drop for StartGuard<'_> {
 }
 
 /// Wait for input in a run with scheduler threads, or decide that a root
-/// waits for a message that cannot arrive: it is the last live process.
+/// waits for a message that cannot arrive. A scheduler with a timer, a dirty
+/// call, or an input source waits for it, as the one-thread run does.
+/// Another scheduler waits in the idle state of the node until a delivery
+/// or an event wakes it. The scheduler that makes each scheduler of the
+/// node idle while no delivery waits in an inbox gives the error (see
+/// `Node::enter_idle`): then each live process waits, and no source can
+/// send to it.
 fn idle_step(scheduler: &mut Scheduler, node: &Node) -> Result<(), BeamError> {
-    if scheduler.timers.active()
-        || node.live_processes() != 1
-        || !scheduler.local_root_waits()
-        || scheduler.has_external_sources()
-    {
-        let wait = scheduler.timers.wait_time(scheduler.timers.now());
+    let wait = scheduler.timers.wait_time(scheduler.timers.now());
+    if scheduler.timers.active() || scheduler.has_external_sources() {
         scheduler.wait_events(Some(wait))?;
         return Ok(());
     }
-    // A delivery of the last other root may already be in the inbox. Apply
-    // it and schedule the result before the error: it can make the root
-    // runnable or give it a signal that it did not handle.
-    if scheduler.drain_inbox() || !scheduler.local_root_waits() {
-        return Ok(());
+    if node.enter_idle() {
+        return Err(error("root process waits for a message that cannot arrive"));
     }
-    Err(error("root process waits for a message that cannot arrive"))
+    // The scheduler stays counted as idle for the wait, also when the check
+    // found a delivery. A sender writes the wake byte after it puts its
+    // delivery into the inbox, and the run loop takes the inbox at the next
+    // scheduling step after each wait, so a delivery in the inbox always
+    // has a wake byte that ends this wait.
+    // The wait watches the wake socket of the scheduler, which each delivery
+    // to its inbox writes, and ends at the next time correction check at the
+    // latest. Without a port or a select of fd 0, the wait handles no event,
+    // so the scheduler changes no state while the node counts it as idle.
+    let waited = scheduler.wait_events(Some(wait));
+    node.leave_idle();
+    waited?;
+    Ok(())
 }
 
 impl BeamProgram {
