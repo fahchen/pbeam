@@ -48,7 +48,8 @@ fn process(scheduler: &mut Scheduler, id: u64) -> &mut ProcessState {
 }
 
 /// Return the pid of each delivery of the inbox of `index`, with `P` for a
-/// process, `M` for a message, and `S` for a signal.
+/// process, `M` for a message, `S` for a signal, and `C` with 0 for a timer
+/// cancel.
 fn inbox(node: &Node, index: usize) -> Vec<(char, u64)> {
     let mut deliveries = Vec::new();
     node.take(index, &mut deliveries);
@@ -58,6 +59,7 @@ fn inbox(node: &Node, index: usize) -> Vec<(char, u64)> {
             Delivery::Process { process, .. } => ('P', process.id.0),
             Delivery::Message { target, .. } => ('M', target.0),
             Delivery::Signal { target, .. } => ('S', target.0),
+            Delivery::CancelTimer { .. } => ('C', 0),
         })
         .collect()
 }

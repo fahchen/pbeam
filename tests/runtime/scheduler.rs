@@ -644,6 +644,7 @@ fn continues_the_exit_timer_walk_at_its_next_timer() {
                 message: atom("timeout"),
             },
         );
+        scheduler.node.register_timer(reference, 0, 1100);
         let process = scheduler.current_process_mut();
         process.bif_timers.insert(TimerReference(reference), ());
     }

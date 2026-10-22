@@ -13,7 +13,7 @@
 //! never touches a process of another scheduler.
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     io::{self, Read, Write},
     os::unix::net::UnixStream,
     sync::{
@@ -47,6 +47,10 @@ pub(in crate::runtime) enum Delivery {
         sender: Option<ProcessId>,
         signal: Signal,
     },
+    /// A cancel of the BIF timer `reference` of this scheduler, which
+    /// another scheduler took from the node timer table. The receiver
+    /// removes the timer from its timer wheel.
+    CancelTimer { reference: crate::term::Reference },
     /// A runnable process that another scheduler gives to this scheduler
     /// ([`Node::transfer`]). The receiver puts it into its run queue.
     Process {
@@ -97,6 +101,29 @@ struct Aliases {
     by_owner: HashMap<ProcessId, Vec<crate::term::Reference>>,
 }
 
+/// The node entry of one active BIF timer.
+#[derive(Debug, Clone, Copy)]
+struct TimerEntry {
+    /// The scheduler whose timer wheel holds the timer.
+    owner: usize,
+    /// The end tick of the timer.
+    end: i64,
+    /// The receiver when it was a process of another scheduler at the
+    /// start of the timer.
+    receiver: Option<ProcessId>,
+}
+
+/// The BIF timer table of the node. The removal of an entry decides
+/// between the expiry and a cancel, as the state of an ERTS `ErtsBifTimer`
+/// does (`access_btm`, `erl_hl_timer.c:1922-1971`). `by_receiver` holds the
+/// timers of each receiver that was a process of another scheduler at the
+/// start of the timer, so its exit can cancel them.
+#[derive(Debug, Default)]
+struct BifTimers {
+    entries: HashMap<crate::term::Reference, TimerEntry>,
+    by_receiver: HashMap<ProcessId, HashSet<crate::term::Reference>>,
+}
+
 /// The state of a run that more than one scheduler thread shares.
 #[derive(Debug)]
 pub(in crate::runtime) struct Node {
@@ -111,8 +138,8 @@ pub(in crate::runtime) struct Node {
     /// the node, and any scheduler sends to them
     /// (`erl_proc_sig_queue.c:2814-2895`).
     aliases: Mutex<Aliases>,
-    /// The scheduler of each active BIF timer, by its reference.
-    timers: Mutex<HashMap<crate::term::Reference, usize>>,
+    /// The active BIF timers of the node.
+    timers: Mutex<BifTimers>,
     /// The scheduler of each compiled regular expression, by its reference.
     regexes: Mutex<HashMap<crate::term::Reference, usize>>,
     /// The scheduler of each compiled binary pattern, by its reference.
@@ -188,7 +215,7 @@ impl Node {
                 names: Mutex::new(HashMap::new()),
                 ports: Mutex::new(HashMap::new()),
                 aliases: Mutex::new(Aliases::default()),
-                timers: Mutex::new(HashMap::new()),
+                timers: Mutex::new(BifTimers::default()),
                 regexes: Mutex::new(HashMap::new()),
                 patterns: Mutex::new(HashMap::new()),
                 inboxes,
@@ -249,7 +276,7 @@ impl Node {
             names: Mutex::new(HashMap::new()),
             ports: Mutex::new(HashMap::new()),
             aliases: Mutex::new(Aliases::default()),
-            timers: Mutex::new(HashMap::new()),
+            timers: Mutex::new(BifTimers::default()),
             regexes: Mutex::new(HashMap::new()),
             patterns: Mutex::new(HashMap::new()),
             inboxes: Vec::new(),
@@ -668,36 +695,115 @@ impl Node {
         }
     }
 
-    /// Record the BIF timer `reference` of the scheduler `index`.
+    /// Record the BIF timer `reference` of the scheduler `index` with the
+    /// end tick `end`.
     pub(in crate::runtime) fn register_timer(
         &self,
         reference: crate::term::Reference,
         index: usize,
+        end: i64,
     ) {
+        let entry = TimerEntry {
+            owner: index,
+            end,
+            receiver: None,
+        };
         self.timers
             .lock()
             .expect("the timer table is not poisoned")
-            .insert(reference, index);
+            .entries
+            .insert(reference, entry);
     }
 
-    /// Remove the BIF timer `reference` from the node.
-    pub(in crate::runtime) fn remove_timer(&self, reference: crate::term::Reference) {
-        self.timers
-            .lock()
-            .expect("the timer table is not poisoned")
-            .remove(&reference);
-    }
-
-    /// Return the scheduler of the active BIF timer `reference`.
-    pub(in crate::runtime) fn timer_owner(
+    /// Record the BIF timer `reference` of the scheduler `index` with the
+    /// end tick `end` for `receiver`, a process of another scheduler. Return
+    /// false and record nothing when `receiver` is not a live process. The
+    /// check holds the timer table lock, and the exit of `receiver` marks it
+    /// as exiting before it takes its timers ([`Self::take_receiver_timers`]).
+    /// Thus no timer is recorded for a receiver after its exit took them.
+    pub(in crate::runtime) fn register_remote_timer(
         &self,
         reference: crate::term::Reference,
-    ) -> Option<usize> {
+        index: usize,
+        end: i64,
+        receiver: ProcessId,
+    ) -> bool {
+        let mut timers = self.timers.lock().expect("the timer table is not poisoned");
+        if self.live_owner(receiver).is_none() {
+            return false;
+        }
+        let entry = TimerEntry {
+            owner: index,
+            end,
+            receiver: Some(receiver),
+        };
+        timers.entries.insert(reference, entry);
+        timers
+            .by_receiver
+            .entry(receiver)
+            .or_default()
+            .insert(reference);
+        true
+    }
+
+    /// Remove the active BIF timer `reference` from the node. Return its
+    /// scheduler and its end tick, or `None` when no timer with the
+    /// reference is active.
+    pub(in crate::runtime) fn take_timer(
+        &self,
+        reference: crate::term::Reference,
+    ) -> Option<(usize, i64)> {
+        let mut timers = self.timers.lock().expect("the timer table is not poisoned");
+        let entry = timers.entries.remove(&reference)?;
+        if let Some(receiver) = entry.receiver
+            && let Some(set) = timers.by_receiver.get_mut(&receiver)
+        {
+            set.remove(&reference);
+            if set.is_empty() {
+                timers.by_receiver.remove(&receiver);
+            }
+        }
+        Some((entry.owner, entry.end))
+    }
+
+    /// Return the end tick of the active BIF timer `reference`.
+    pub(in crate::runtime) fn timer_end(&self, reference: crate::term::Reference) -> Option<i64> {
         self.timers
             .lock()
             .expect("the timer table is not poisoned")
+            .entries
             .get(&reference)
-            .copied()
+            .map(|entry| entry.end)
+    }
+
+    /// Take the active BIF timers that schedulers other than its own
+    /// started for `receiver`. The timers stay active.
+    pub(in crate::runtime) fn take_receiver_timers(
+        &self,
+        receiver: ProcessId,
+    ) -> HashSet<crate::term::Reference> {
+        self.timers
+            .lock()
+            .expect("the timer table is not poisoned")
+            .by_receiver
+            .remove(&receiver)
+            .unwrap_or_default()
+    }
+
+    /// Put a cancel of the BIF timer `reference` into the inbox of its
+    /// scheduler `index`.
+    pub(in crate::runtime) fn cancel_timer_at(
+        &self,
+        index: usize,
+        reference: crate::term::Reference,
+    ) {
+        let inbox = &self.inboxes[index];
+        inbox
+            .queue
+            .lock()
+            .expect("the scheduler inbox is not poisoned")
+            .push_back(Delivery::CancelTimer { reference });
+        wake(&inbox.wake);
     }
 
     /// Record the compiled regular expression `reference` of the

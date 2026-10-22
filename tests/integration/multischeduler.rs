@@ -275,22 +275,6 @@ fn rejects_the_port_list_of_a_scheduler_run() {
     );
 }
 
-/// A BIF timer for a process of another scheduler fails with a clear
-/// error.
-#[test]
-fn rejects_a_timer_for_another_scheduler() {
-    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
-    let error = program
-        .execute_on_schedulers(&[("ping_pong", "timer_remote"), ("ping_pong", "timer_hold")])
-        .expect_err("the timer is unsupported");
-    assert!(
-        error
-            .to_string()
-            .contains("unsupported: a BIF timer to a process of another scheduler"),
-        "{error}"
-    );
-}
-
 /// A read of an idle local child takes the direct path.
 #[test]
 fn reads_the_queue_length_of_an_idle_child() {
@@ -474,37 +458,6 @@ fn fires_a_local_four_argument_bif_timer() {
     assert_eq!(results[1].term, Term::Atom(ok_atom), "the holder");
 }
 
-/// A named four-argument BIF timer fails with a clear error.
-#[test]
-fn rejects_a_named_four_argument_timer() {
-    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
-    let error = program
-        .execute_on_schedulers(&[("ping_pong", "timer_named4"), ("ping_pong", "monitor_hold")])
-        .expect_err("the named timer is unsupported");
-    assert!(
-        error
-            .to_string()
-            .contains("unsupported: a named BIF timer in a run of execute_on_schedulers"),
-        "{error}"
-    );
-}
-
-/// A four-argument BIF timer for another scheduler fails with a clear
-/// error.
-#[test]
-fn rejects_a_four_argument_timer_for_another_scheduler() {
-    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
-    let error = program
-        .execute_on_schedulers(&[("ping_pong", "timer_remote4"), ("ping_pong", "timer_hold")])
-        .expect_err("the timer is unsupported");
-    assert!(
-        error
-            .to_string()
-            .contains("unsupported: a BIF timer to a process of another scheduler"),
-        "{error}"
-    );
-}
-
 /// A cancel of a local BIF timer leaves its node entry.
 #[test]
 fn cancels_a_local_bif_timer() {
@@ -534,24 +487,6 @@ fn cancels_a_bif_timer_at_an_exit() {
         "the child timer"
     );
     assert_eq!(results[1].term, Term::Atom(ok_atom), "the holder");
-}
-
-/// A cancel of a timer of another scheduler fails with a clear error.
-#[test]
-fn rejects_a_cancel_of_a_timer_of_another_scheduler() {
-    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
-    let error = program
-        .execute_on_schedulers(&[
-            ("ping_pong", "timer_cancel_use"),
-            ("ping_pong", "timer_cancel_give"),
-        ])
-        .expect_err("the timer cancel is unsupported");
-    assert!(
-        error
-            .to_string()
-            .contains("unsupported: a BIF timer of another scheduler"),
-        "{error}"
-    );
 }
 
 /// A link to a port of another scheduler fails with a clear error.
@@ -588,37 +523,6 @@ fn rejects_a_monitor_of_a_port_of_another_scheduler() {
         error
             .to_string()
             .contains("unsupported: a port of another scheduler"),
-        "{error}"
-    );
-}
-
-/// A named BIF timer in a run with scheduler threads fails with a clear
-/// error.
-#[test]
-fn rejects_a_named_timer() {
-    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
-    let error = program
-        .execute_on_schedulers(&[("ping_pong", "timer_named"), ("ping_pong", "monitor_hold")])
-        .expect_err("the named timer is unsupported");
-    assert!(
-        error
-            .to_string()
-            .contains("unsupported: a named BIF timer in a run of execute_on_schedulers"),
-        "{error}"
-    );
-}
-
-/// A read of a timer of another scheduler fails with a clear error.
-#[test]
-fn rejects_a_read_of_a_timer_of_another_scheduler() {
-    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
-    let error = program
-        .execute_on_schedulers(&[("ping_pong", "timer_read"), ("ping_pong", "timer_give")])
-        .expect_err("the timer read is unsupported");
-    assert!(
-        error
-            .to_string()
-            .contains("unsupported: a BIF timer of another scheduler"),
         "{error}"
     );
 }
@@ -1047,4 +951,69 @@ fn unregistering_a_remote_name_clears_the_owner() {
         .expect("the two schedulers run");
     assert_eq!(results[0].term, Term::Atom(true_atom.clone()), "the holder");
     assert_eq!(results[1].term, Term::Atom(true_atom), "the taker");
+}
+
+/// Run the two roots `first` and `second` on two schedulers, and assert
+/// that their results are the terms of `expected`. `expected` gets a
+/// function that makes an atom of the fixture.
+fn timer_pair(
+    first: &str,
+    second: &str,
+    expected: impl FnOnce(&dyn Fn(&str) -> Term) -> [Term; 2],
+) {
+    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
+    let results = program
+        .execute_on_schedulers(&[("ping_pong", first), ("ping_pong", second)])
+        .expect("the two schedulers run");
+    let atom = |name: &str| Term::Atom(program.atom(name).expect("the fixture names the atom"));
+    let expected = expected(&atom);
+    assert_eq!(results[0].term, expected[0], "{first}");
+    assert_eq!(results[1].term, expected[1], "{second}");
+}
+
+/// A BIF timer to a process of another scheduler sends its message there,
+/// as `erl +S 2` gives `[ok, ok]` (`erl_hl_timer.c:1804-1871`).
+#[test]
+fn fires_a_timer_to_a_process_of_another_scheduler() {
+    timer_pair("timer_remote", "timer_hold", |a| [a("ok"), a("ok")]);
+    timer_pair("timer_remote4", "timer_hold", |a| [a("ok"), a("ok")]);
+}
+
+/// A named BIF timer sends to the name on another scheduler, and a timer
+/// to a name that no process has stays active, as `erl +S 2` gives
+/// `[true, ok]`.
+#[test]
+fn fires_a_named_timer() {
+    timer_pair("timer_named", "timer_hold", |a| [a("true"), a("ok")]);
+    timer_pair("timer_named4", "timer_hold", |a| [a("true"), a("ok")]);
+}
+
+/// A read of a timer of another scheduler gives the time left and leaves
+/// the timer active, as `erl +S 2` gives `[true, true]`
+/// (`erl_hl_timer.c:2236-2339`).
+#[test]
+fn reads_a_timer_of_another_scheduler() {
+    timer_pair("timer_read", "timer_give", |a| [a("true"), a("true")]);
+}
+
+/// A cancel of a timer of another scheduler gives the time left, then
+/// `false`, and an async cancel sends its result, as `erl +S 2` gives
+/// `[{true,false,true}, {false,false}]`.
+#[test]
+fn cancels_a_timer_of_another_scheduler() {
+    timer_pair("timer_cancel_use", "timer_cancel_give", |a| {
+        [
+            Term::tuple(vec![a("true"), a("false"), a("true")]),
+            Term::tuple(vec![a("false"), a("false")]),
+        ]
+    });
+}
+
+/// The exit of a receiver of another scheduler cancels the timer at its
+/// owner, as `erl +S 2` gives `[false, ok]`.
+#[test]
+fn cancels_a_timer_of_another_scheduler_at_the_receiver_exit() {
+    timer_pair("timer_exit_use", "timer_exit_hold", |a| {
+        [a("false"), a("ok")]
+    });
 }

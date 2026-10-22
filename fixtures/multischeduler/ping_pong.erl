@@ -22,7 +22,8 @@
          pattern_split_give/0, pattern_matches/0, pattern_matches_give/0,
          info_idle/0, info_idle_child/0, stuck_child/0, relay_wait/0,
          bounce_ping/0, bounce_pong/0, busy_send/0, timer_send/0,
-         port_relay/0, atom_send/0, atom_receive/0]).
+         port_relay/0, atom_send/0, atom_receive/0, timer_exit_use/0,
+         timer_exit_hold/0]).
 
 -define(COUNT, 100).
 
@@ -571,32 +572,43 @@ atomics_new() ->
 %% The root that starts a timer for a process of the other scheduler.
 timer_remote() ->
     Pid = wait_for(timer_name, 100000),
-    _ = erlang:send_after(1000, Pid, tick),
+    _ = erlang:send_after(10, Pid, tick),
     ok.
 
-%% The root that holds a name for the timer of the other root.
+%% The root that holds a name for the timer of the other root and waits for
+%% the message of the timer.
 timer_hold() ->
     true = register(timer_name, self()),
-    receive stop -> ok after 6000 -> timeout end.
+    receive
+        tick -> ok;
+        {timeout, Reference, tick} when is_reference(Reference) -> ok
+    after 6000 -> timeout
+    end.
 
-%% The root that starts a named timer. A run with scheduler threads cannot
-%% route the message of a named timer.
+%% The root that starts a timer to the name of a process of the other
+%% scheduler, and a timer to a name that no process has.
 timer_named() ->
-    erlang:start_timer(1000, unregistered_timer_name, tick).
+    _ = wait_for(timer_name, 100000),
+    _ = erlang:send_after(10, timer_name, tick),
+    Reference = erlang:start_timer(60000, unregistered_timer_name, tick),
+    is_integer(erlang:cancel_timer(Reference)).
 
 %% The root that reads a timer of the other scheduler.
 timer_read() ->
     true = register(timer_read_name, self()),
-    receive {timer, Reference} ->
-        erlang:read_timer(Reference)
+    receive {timer, Reference, From} ->
+        Left = erlang:read_timer(Reference),
+        From ! done,
+        is_integer(Left) andalso Left > 0 andalso Left =< 60000
     end.
 
-%% The root that sends its timer reference to the other scheduler.
+%% The root that sends its timer reference to the other scheduler. The read
+%% leaves the timer active.
 timer_give() ->
     Reference = erlang:start_timer(60000, self(), tick),
     ok = wait_registered(timer_read_name, 100000),
-    timer_read_name ! {timer, Reference},
-    receive done -> ok after 6000 -> timeout end.
+    timer_read_name ! {timer, Reference, self()},
+    receive done -> is_integer(erlang:read_timer(Reference)) after 6000 -> timeout end.
 
 %% The root that sets the backtrace depth. The flag stays with each
 %% scheduler in a run with scheduler threads.
@@ -674,15 +686,44 @@ timer_child() ->
     ok.
 
 %% The root that cancels the timer of the other scheduler.
+%% The first cancel gives the time left and the second gives false. An
+%% async cancel sends its result as a message.
 timer_cancel_use() ->
     true = register(timer_cancel_name, self()),
-    receive {timer, Reference} -> erlang:cancel_timer(Reference) end.
+    receive {timer, Reference, Async, From} ->
+        Left = erlang:cancel_timer(Reference),
+        Again = erlang:cancel_timer(Reference),
+        ok = erlang:cancel_timer(Async, [{async, true}]),
+        AsyncLeft = receive {cancel_timer, Async, Value} -> Value end,
+        From ! done,
+        {is_integer(Left), Again, is_integer(AsyncLeft)}
+    end.
 
 timer_cancel_give() ->
     Reference = erlang:start_timer(60000, self(), tick),
+    Async = erlang:send_after(60000, self(), tick),
     ok = wait_registered(timer_cancel_name, 100000),
-    timer_cancel_name ! {timer, Reference},
-    receive done -> ok after 6000 -> timeout end.
+    timer_cancel_name ! {timer, Reference, Async, self()},
+    receive
+        done -> {erlang:read_timer(Reference), erlang:read_timer(Async)}
+    after 6000 -> timeout
+    end.
+
+%% The root that starts a timer to a process of the other scheduler. The
+%% exit of the receiver cancels the timer.
+timer_exit_use() ->
+    Pid = wait_for(timer_exit_name, 100000),
+    Reference = erlang:send_after(60000, Pid, tick),
+    Monitor = erlang:monitor(process, Pid),
+    Pid ! stop,
+    receive
+        {'DOWN', Monitor, process, Pid, normal} -> erlang:read_timer(Reference)
+    after 6000 -> timeout
+    end.
+
+timer_exit_hold() ->
+    true = register(timer_exit_name, self()),
+    receive stop -> ok after 6000 -> timeout end.
 
 %% The root that links to a port of the other scheduler.
 port_link_use() ->
@@ -713,13 +754,16 @@ timer_fire4() ->
 
 %% The root that starts a named four-argument BIF timer.
 timer_named4() ->
-    erlang:start_timer(1000, unregistered_timer_name4, tick, []).
+    _ = wait_for(timer_name, 100000),
+    _ = erlang:start_timer(10, timer_name, tick, []),
+    Reference = erlang:send_after(60000, unregistered_timer_name4, tick, []),
+    is_integer(erlang:cancel_timer(Reference)).
 
 %% The root that starts a four-argument BIF timer for a process of the
 %% other scheduler.
 timer_remote4() ->
     Pid = wait_for(timer_name, 100000),
-    _ = erlang:send_after(1000, Pid, tick, []),
+    _ = erlang:start_timer(10, Pid, tick, []),
     ok.
 
 %% The root that splits with the compiled pattern of the other scheduler.

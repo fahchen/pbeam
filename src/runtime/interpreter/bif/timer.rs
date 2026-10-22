@@ -165,21 +165,10 @@ pub(super) fn read_timer(
         return Ok(BifResult::badarg());
     };
     let scheduler = &mut *context.scheduler;
-    // The timer queue stays with each scheduler, so a timer of another
-    // scheduler cannot be read here.
-    if scheduler.remote_timer_owner(*reference).is_some() {
-        return Err(error(
-            "unsupported: a BIF timer of another scheduler in a run of execute_on_schedulers",
-        ));
-    }
-    let result = match scheduler.timers.bif_timer_end(*reference) {
-        Some(end) => {
-            // The active timer stays with this scheduler, and so does the
-            // process that read it, so that its next read finds the timer
-            // (see `ProcessState::pinned`).
-            scheduler.current_process_mut().pinned = true;
-            Term::Integer(Timers::time_left(scheduler.timers.now(), end))
-        }
+    // The node holds the end of each active timer, so a timer of any
+    // scheduler gives the same value as on its own scheduler.
+    let result = match scheduler.node().timer_end(*reference) {
+        Some(end) => Term::Integer(Timers::time_left(scheduler.timers.now(), end)),
         None => Term::static_atom("false"),
     };
     Ok(Value(result))
@@ -202,7 +191,7 @@ pub(super) fn read_timer(
 /// # Errors
 ///
 /// The errors of [`Scheduler::make_ref`], [`denial`], and [`boot_denial`].
-fn setup(
+pub(super) fn setup(
     scheduler: &mut Scheduler,
     end: i64,
     receiver: &Term,
@@ -214,11 +203,6 @@ fn setup(
         Term::Atom(name) => Receiver::Name(name.clone()),
         _ => return Ok(BifResult::badarg()),
     };
-    if matches!(receiver, Receiver::Name(_)) && scheduler.is_multi() {
-        return Err(error(
-            "unsupported: a named BIF timer in a run of execute_on_schedulers",
-        ));
-    }
     if let Some(denied) = denial(scheduler, CapabilityKind::Process, Operation::Send, None)? {
         return Ok(denied);
     }
@@ -226,25 +210,35 @@ fn setup(
         Receiver::Process(id) => Some(*id),
         Receiver::Name(name) => scheduler.whereis(scheduler.atoms.name_of(name)),
     };
-    // The timer queue stays with each scheduler, so a timer that fires on
-    // another scheduler cannot reach its receiver.
-    if target.is_some_and(|target| scheduler.remote_owner(target).is_some()) {
-        return Err(error(
-            "unsupported: a BIF timer to a process of another scheduler in a run of execute_on_schedulers",
-        ));
-    }
     if let Some(target) = target
         && let Some(denied) = boot_denial(scheduler, target)?
     {
         return Ok(denied);
     }
     let reference = scheduler.make_ref()?;
-    if !matches!(receiver, Receiver::Process(id) if scheduler.live_process(id).is_none()) {
-        if let Receiver::Process(id) = receiver
-            && let Some(process) = scheduler.process_mut(id)
-        {
-            process.bif_timers.insert(TimerReference(reference), ());
+    let index = scheduler.index();
+    // The timer stays with this scheduler. A receiver of another scheduler
+    // is recorded in the node, so its exit cancels the timer.
+    let active = match receiver {
+        Receiver::Process(id) => match scheduler.remote_owner(id) {
+            Some(_) => scheduler
+                .node()
+                .register_remote_timer(reference, index, end, id),
+            None => match scheduler.process_mut(id) {
+                Some(process) if process.exiting.is_none() => {
+                    process.bif_timers.insert(TimerReference(reference), ());
+                    scheduler.node().register_timer(reference, index, end);
+                    true
+                }
+                _ => false,
+            },
+        },
+        Receiver::Name(_) => {
+            scheduler.node().register_timer(reference, index, end);
+            true
         }
+    };
+    if active {
         let message = if wrap {
             Term::tuple(vec![
                 Term::static_atom("timeout"),
@@ -262,12 +256,6 @@ fn setup(
                 message,
             },
         );
-        // The timer stays with this scheduler, and so does the process that
-        // can read or cancel it (see `ProcessState::pinned`).
-        scheduler.current_process_mut().pinned = true;
-        scheduler
-            .node()
-            .register_timer(reference, scheduler.index());
     }
     Ok(Value(Term::Reference(reference)))
 }

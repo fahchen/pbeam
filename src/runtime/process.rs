@@ -477,8 +477,8 @@ pub(super) struct ProcessState {
     pub(super) root: Option<usize>,
     /// True when the process used a service that stays with its scheduler:
     /// a port, a file, a terminal, a compiled expression or pattern, a
-    /// buffer, a zlib stream, or a BIF timer that it started, read, or
-    /// canceled. Such a process stays with its scheduler, as ERTS keeps a
+    /// buffer, or a zlib stream. Such a process stays with its scheduler,
+    /// as ERTS keeps a
     /// process bound to its run queue (`erts_try_change_runq_proc`,
     /// `erl_process.h:2722-2723`). The mark does not clear.
     pub(super) pinned: bool,
