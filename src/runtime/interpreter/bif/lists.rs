@@ -186,10 +186,9 @@ fn key_search(
 /// assert!(matches!(member(&mut process, &Term::Integer(2), &x)?, BifResult::Raise { .. }));
 /// ```
 ///
-/// # Errors
-///
-/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
-/// negative budget.
+/// ERTS keeps the budget in an `int` and traps when `--max_iter < 0`, before
+/// the first element (`erl_bif_lists.c:1114-1130`), so a negative budget
+/// traps at once as a budget of 0 does.
 pub(super) fn member(
     process: &mut ProcessState,
     element: &Term,
@@ -198,7 +197,7 @@ pub(super) fn member(
     let Some(mut elements) = list.list_iter() else {
         return Ok(BifResult::badarg());
     };
-    let reds_left = process.bif_reductions_left()?;
+    let reds_left = process.bif_reductions_or_zero();
     let max_iter = 16 * reds_left;
     // `BIF_RET2` and `BUMP_REDS` with `reds_left - max_iter / 16`, where
     // `max_iter` counts down for each compared element.
@@ -257,10 +256,11 @@ pub(super) fn member(
 /// assert!(matches!(reverse(&mut process, &x, &Term::nil())?, BifResult::Raise { .. }));
 /// ```
 ///
-/// # Errors
-///
-/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
-/// negative budget.
+/// A negative budget traps at once, as a budget of 0 does. ERTS reads it
+/// into a `Uint` (`erl_bif_lists.c:1207`), but `lists_reverse_onheap` then
+/// takes no element and its `BUMP_REDS` sets the budget to 0
+/// (`erl_bif_lists.c:1215-1230`, `bif.h:71-78`), so `lists_reverse_alloc`
+/// reads 0, takes no element, and traps (`erl_bif_lists.c:1158-1191`).
 pub(super) fn reverse(
     process: &mut ProcessState,
     list: &Term,
@@ -269,7 +269,7 @@ pub(super) fn reverse(
     let Some(mut elements) = list.list_iter() else {
         return Ok(BifResult::badarg());
     };
-    let max_cells = 60 * process.bif_reductions_left()?;
+    let max_cells = 60 * process.bif_reductions_or_zero();
     let mut walked = 0_usize;
     let mut reversed = tail.clone();
     for element in elements.by_ref().take(max_cells) {

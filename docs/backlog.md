@@ -152,14 +152,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a consumer uses a table while a long list insert traps, or the task that adds `ets:delete/1`.
 - **Source:** #234 (PR #243).
 
-### Read a negative reduction budget in each BIF as ERTS does
-
-- A hashmap call of `erts_internal:map_next/3` subtracts 4 for each pair with no lower limit, so the budget can be negative (`erl_map.c:4126`). Each ERTS BIF reads a negative budget in its own way: `lists:member/2` traps at once, and `erlang:length/1` and `lists:reverse/2` read it as a large unsigned count (`erl_bif_lists.c:1114-1130`, `1207`; `erl_bif_guard.c:280`). When a BIF reads a negative budget, through `apply` or as a guard BIF before the next call or return, PBeam stops the run with `unsupported negative reduction budget in a BIF after erts_internal:map_next/3` (`bif_reductions_left` in `src/runtime/process.rs`). `maps.erl` calls `erts_internal:map_next/3` only before a call or a return (`maps.erl:525-542`, `1104-1111`), so the `maps` functions do not get this error. The "Map iteration" row of `docs/erts-differences.md` records this, and this entry owns it.
-- **Evidence:** `logger_start_probe:negative_budget/0` makes the budget negative before `length/1`. ERTS returns `ok`, and PBeam returns the runtime error (`tests/integration/logger_start.rs`).
-- **Trigger:** a measured path calls `erts_internal:map_next/3` directly and then a BIF that reads the budget.
-- **Source:** #234 (PR #243).
-- **Task:** [#922](https://github.com/fahchen/pbeam/issues/922).
-
 ### Run `integer_to_list/1` and `integer_to_binary/1` of a large integer with no reductions left
 
 - When the digits of a bignum divided by 16 are more than the reductions left, ERTS runs `integer_to_list/1` or `integer_to_binary/1` again on a dirty CPU scheduler (`bif.c:3283-3299`; `binary.c:92-108`). PBeam has no dirty scheduler. For an integer from 2^59 to 2^63 - 1 with no reductions left, it returns the runtime error `unsupported erlang:integer_to_list/1 of N with 0 reductions left: ERTS runs it on a dirty CPU scheduler`, or the same error for `erlang:integer_to_binary/1`. `erlang:integer_to_binary/2` gives the same error for a bignum whose cost in its base is more than the reductions left, for example 4 in base 2. The "Scheduling" row of `docs/erts-differences.md` records this, and this entry owns it.

@@ -1455,7 +1455,8 @@ pub(super) fn processes_next(
     }) else {
         return Ok(BifResult::badarg());
     };
-    let max_pids = scheduler.current_process().bif_reductions_left()?.max(1) as u64;
+    // `MAX(ERTS_BIF_REDS_LEFT(c_p), 1)` (`erl_ptab.c:1486`).
+    let max_pids = scheduler.current_process().bif_reductions_or_zero().max(1) as u64;
     let limit = PTAB_SIZE.min(first.saturating_add(max_pids * PTAB_REDS_MULTIPLIER));
     if first > limit {
         return Ok(BifResult::badarg());

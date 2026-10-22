@@ -675,12 +675,19 @@ impl ProcessState {
     }
 
     /// Return the reductions that a BIF can use, as `ERTS_BIF_REDS_LEFT`
-    /// gives them in the JIT: the budget of the turn (`bif.h:66-67`,
-    /// `218-219`). A BIF runs with a budget of 0 or more: a `return` that
-    /// makes the budget -1 switches out the process first. A hashmap call
-    /// of `erts_internal:map_next/3` can also make the budget negative, but
-    /// `maps.erl` calls it only before a call or a return, which switch out
-    /// the process first.
+    /// gives them in the JIT: the budget of the turn, a signed `int`
+    /// (`bif.h:66-67`, `218-219`). Use this form only in a BIF that ERTS
+    /// and PBeam run with a budget of 0 or more: a continuation that runs
+    /// at the start of a turn after a trap, or a step after a bump, which
+    /// sets a negative budget to 0 (`BUMP_REDS`, `bif.h:71-78`).
+    ///
+    /// A hashmap call of `erts_internal:map_next/3` subtracts 4 for each
+    /// pair with no lower limit, so the budget can be negative
+    /// (`erl_map.c:4126`). A guard BIF, or a BIF that the `apply`
+    /// instruction calls, then reads it before the next call or return.
+    /// Such a BIF uses [`ProcessState::bif_reductions_signed`],
+    /// [`ProcessState::bif_reductions_or_zero`], or
+    /// [`ProcessState::bif_reductions_unsigned`], as its ERTS BIF reads it.
     ///
     /// # Examples
     ///
@@ -691,18 +698,62 @@ impl ProcessState {
     ///
     /// # Errors
     ///
-    /// Return a runtime error when the budget is negative: code that calls
-    /// `erts_internal:map_next/3` directly and then calls a BIF that reads
-    /// the budget before the next call or return. Each ERTS BIF reads a
-    /// negative budget in its own way, and PBeam does not implement this
-    /// yet (row "Map iteration" in `docs/erts-differences.md`).
+    /// Return an invariant error when the budget is negative.
     pub(super) fn bif_reductions_left(&self) -> Result<usize, BeamError> {
         usize::try_from(self.fcalls).map_err(|_| {
             error(
-                "unsupported negative reduction budget in a BIF after erts_internal:map_next/3 \
-                 (see \"Map iteration\" in docs/erts-differences.md)",
+                "invariant error: a negative reduction budget in a BIF that runs only with \
+                 a budget of 0 or more",
             )
         })
+    }
+
+    /// Return the reductions that a BIF can use as the signed count that
+    /// ERTS keeps in an `int`, `long`, `Sint`, or `SWord` (`bif.h:218-219`).
+    /// A negative budget stays negative.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// process.fcalls = -3;
+    /// assert_eq!(process.bif_reductions_signed(), -3);
+    /// ```
+    pub(super) fn bif_reductions_signed(&self) -> i64 {
+        i64::from(self.fcalls)
+    }
+
+    /// Return the reductions that a BIF can use, for a BIF that keeps the
+    /// budget signed and stops its work when the count is 0 or less. Such
+    /// a BIF does with a negative budget what it does with a budget of 0:
+    /// it traps or yields at once, so a negative budget reads as 0. For
+    /// example, `lists:member/2` traps before the first element when
+    /// `--max_iter < 0` (`erl_bif_lists.c:1114-1130`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// process.fcalls = -3;
+    /// assert_eq!(process.bif_reductions_or_zero(), 0);
+    /// ```
+    pub(super) fn bif_reductions_or_zero(&self) -> usize {
+        usize::try_from(self.fcalls).unwrap_or(0)
+    }
+
+    /// Return the reductions that a BIF can use as the `Uint` that ERTS
+    /// gets when it converts the signed budget to an unsigned count: a
+    /// negative budget `-n` reads as `2^64 - n`, so the BIF does all its
+    /// work in the call. For example, `erlang:length/1` reads the budget
+    /// into a `Uint` (`erl_bif_guard.c:280`). The caller multiplies the
+    /// count with wrapping arithmetic, as C does.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// process.fcalls = -3;
+    /// assert_eq!(process.bif_reductions_unsigned(), u64::MAX - 2);
+    /// ```
+    pub(super) fn bif_reductions_unsigned(&self) -> u64 {
+        i64::from(self.fcalls) as u64
     }
 
     /// Return the result of `erlang:process_info/2` for the item `item` of

@@ -154,9 +154,8 @@ pub(super) fn get_all_trap(process: &mut ProcessState, all: Term, entries: usize
 ///
 /// # Errors
 ///
-/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
-/// negative budget. A new `capability_denied` atom in a full atom table
-/// gives the error of `AtomTable::put`.
+/// A new `capability_denied` atom in a full atom table gives the error of
+/// `AtomTable::put`.
 pub(super) fn erase(context: &mut BifContext<'_>, key: &Term) -> Result<BifResult, BeamError> {
     let scheduler = &mut *context.scheduler;
     let check = denial(
@@ -197,11 +196,6 @@ pub(super) fn erase(context: &mut BifContext<'_>, key: &Term) -> Result<BifResul
 /// let trap = erase_trap(&mut process, 0, 65)?;
 /// assert!(matches!(trap, BifResult::TrapBif { function: "erase_trap", arguments, .. } if arguments[1] == Term::Integer(1)));
 /// ```
-///
-/// # Errors
-///
-/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
-/// negative budget.
 pub(super) fn erase_trap(
     process: &mut ProcessState,
     mut first: usize,
@@ -210,7 +204,9 @@ pub(super) fn erase_trap(
     /// `ITERATIONS_PER_RED` of `persistent_term_erase_1`
     /// (`erl_bif_persistent.c:419`).
     const ITERATIONS_PER_RED: usize = 32;
-    let limit = (ITERATIONS_PER_RED * process.bif_reductions_left()?).max(1);
+    // `MAX(1, max_iterations)` of a `long` that a negative budget makes
+    // negative (`erl_bif_persistent.c:284`, `429-430`).
+    let limit = (ITERATIONS_PER_RED * process.bif_reductions_or_zero()).max(1);
     // Use at most `limit` slots of one copy in this call, and return true
     // when the copy does not end.
     fn step(remaining: &mut usize, limit: usize, copied: &mut usize) -> bool {
@@ -263,9 +259,8 @@ pub(super) fn erase_trap(
 ///
 /// # Errors
 ///
-/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
-/// negative budget. A new `capability_denied` atom in a full atom table
-/// gives the error of `AtomTable::put`.
+/// A new `capability_denied` atom in a full atom table gives the error of
+/// `AtomTable::put`.
 pub(super) fn put(
     context: &mut BifContext<'_>,
     key: &Term,
@@ -309,15 +304,12 @@ pub(super) fn put(
 /// let trap = put_trap(&mut process, 65)?;
 /// assert!(matches!(trap, BifResult::TrapBif { function: "put_common_trap", arguments, .. } if arguments[0] == Term::Integer(1)));
 /// ```
-///
-/// # Errors
-///
-/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
-/// negative budget.
 pub(super) fn put_trap(process: &mut ProcessState, copied: usize) -> Result<BifResult, BeamError> {
     /// `ITERATIONS_PER_RED` of `put_common` (`erl_bif_persistent.c:644`).
     const ITERATIONS_PER_RED: usize = 32;
-    let budget = (ITERATIONS_PER_RED * process.bif_reductions_left()?).max(1);
+    // `MAX(1, max_iterations)` of a `long` that a negative budget makes
+    // negative (`erl_bif_persistent.c:284`, `661-662`).
+    let budget = (ITERATIONS_PER_RED * process.bif_reductions_or_zero()).max(1);
     if copied > budget {
         process.bump_all_reductions();
         return Ok(BifResult::TrapBif {
