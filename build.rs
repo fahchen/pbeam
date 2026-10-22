@@ -49,6 +49,7 @@ fn main() {
     println!("cargo:rerun-if-changed=src/runtime/pcre2_serialize_guard.c");
     println!("cargo:rerun-if-changed=mise.toml");
     println!("cargo:rustc-env=PBEAM_OTP_RELEASE={}", otp_release());
+    export_nif_api();
     let generated = generate_match_headers();
     cc::Build::new()
         .files(
@@ -63,6 +64,23 @@ fn main() {
         .opt_level(2)
         .warnings(false)
         .compile("pcre2");
+}
+
+/// Export the `enif_*` functions of `src/runtime/nif/abi/env.rs` from each
+/// executable of the package, so the dynamic linker binds the undefined
+/// `enif_*` symbols of a NIF shared library to them. A Linux executable
+/// exports no symbol without a linker option; a macOS executable exports
+/// each global symbol.
+///
+/// # Examples
+///
+/// ```text
+/// cargo:rustc-link-arg=-Wl,--export-dynamic-symbol=enif_*  # on Linux
+/// ```
+fn export_nif_api() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
+        println!("cargo:rustc-link-arg=-Wl,--export-dynamic-symbol=enif_*");
+    }
 }
 
 /// Write the match headers of `pcre2_match.c` into `OUT_DIR` and return that
