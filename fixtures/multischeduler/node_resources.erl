@@ -1,6 +1,6 @@
 -module(node_resources).
 -export([zlib_give/0, zlib_use/0, reference/0, steal_busy/0, steal_idle/0,
-         steal_reference/0, steal_worker/1]).
+         steal_reference/0, steal_worker/2]).
 
 %% Two roots on two schedulers share one zlib stream. The root `zlib_give`
 %% opens the stream, gives the control to the root `zlib_use`, and checks
@@ -55,17 +55,19 @@ wait_for(Name, Attempts) ->
     end.
 
 %% Two roots on two schedulers. The root `steal_busy` starts all workers on
-%% its own scheduler. Each worker uses its zlib stream, yields ?ROUNDS
-%% times, reads its scheduler, and uses the stream again. The root returns
-%% {ok, Schedulers} when each stream gives back the data, with the sorted
-%% schedulers that the workers ran on.
+%% its own scheduler. Each worker uses its zlib stream, yields N * ?ROUNDS
+%% times, so the workers end at different times and a scheduler that runs
+%% out of work takes a worker that already used its stream. Each worker
+%% reads its scheduler at each yield and uses the stream again. The root returns
+%% {ok, Moved} when each stream gives back the data. Moved is true when a
+%% worker ran on another scheduler after its first use of the stream.
 steal_reference() ->
     Self = self(),
     _ = spawn(fun() -> Self ! {busy, steal_busy()} end),
     _ = spawn(fun() -> Self ! {idle, steal_idle()} end),
     Busy = receive {busy, A} -> A after 60000 -> timeout end,
     Idle = receive {idle, B} -> B after 60000 -> timeout end,
-    {case Busy of {ok, Ids} when is_list(Ids) -> ok; _ -> Busy end, Idle}.
+    {case Busy of {ok, Moved} when is_boolean(Moved) -> ok; _ -> Busy end, Idle}.
 
 steal_idle() ->
     true = register(steal_idle, self()),
@@ -73,29 +75,31 @@ steal_idle() ->
 
 steal_busy() ->
     Root = self(),
-    Pids = [spawn(?MODULE, steal_worker, [Root]) || _ <- lists:seq(1, ?WORKERS)],
-    Result = steal_collect(Pids, []),
+    Pids = [spawn(?MODULE, steal_worker, [Root, N * ?ROUNDS]) || N <- lists:seq(1, ?WORKERS)],
+    Result = steal_collect(Pids, false),
     stop_idle(1000),
     Result.
 
-steal_collect([], Ids) ->
-    {ok, lists:usort(Ids)};
-steal_collect([Pid | Pids], Ids) ->
+steal_collect([], Moved) ->
+    {ok, Moved};
+steal_collect([Pid | Pids], Moved) ->
     receive
-        {Pid, true, WorkerIds} -> steal_collect(Pids, WorkerIds ++ Ids);
-        {Pid, false, _} -> {unexpected, Pid}
+        {Pid, true, Before, Ids} ->
+            steal_collect(Pids, Moved orelse lists:any(fun(Id) -> Id =/= Before end, Ids));
+        {Pid, false, _, _} -> {unexpected, Pid}
     after 60000 -> timeout
     end.
 
-steal_worker(Root) ->
+steal_worker(Root, Rounds) ->
     Z = zlib:open(),
     ok = zlib:deflateInit(Z),
     First = zlib:deflate(Z, ?DATA),
-    Ids = spin(?ROUNDS, []),
+    Before = erlang:system_info(scheduler_id),
+    Ids = spin(Rounds, []),
     Last = zlib:deflate(Z, <<>>, finish),
     ok = zlib:close(Z),
     Data = zlib:uncompress(iolist_to_binary([First, Last])),
-    Root ! {self(), Data =:= ?DATA, Ids}.
+    Root ! {self(), Data =:= ?DATA, Before, Ids}.
 
 spin(0, Ids) ->
     Ids;
