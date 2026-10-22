@@ -293,7 +293,7 @@ fn gives_fun_information_as_pinned_erts() {
             ]),
         ),
         pair("refc", Term::Integer(1)),
-        pair("uniq", Term::Integer(111_449_314)),
+        pair("uniq", Term::Integer(101_251_949)),
         pair("new_index", Term::Integer(6)),
         pair("type", atom("local")),
         pair("module", atom("fun_probe")),
@@ -301,7 +301,7 @@ fn gives_fun_information_as_pinned_erts() {
         pair("arity", Term::Integer(0)),
         pair("env", Term::nil()),
         pair("refc", Term::Integer(1)),
-        pair("uniq", Term::Integer(111_449_314)),
+        pair("uniq", Term::Integer(101_251_949)),
         pair("new_index", Term::Integer(7)),
         pair("type", atom("external")),
         pair("module", atom("lists")),
@@ -323,9 +323,9 @@ fn gives_fun_information_as_pinned_erts() {
     assert_eq!(
         reference("infos"),
         b"[{type,local},{module,fun_probe},{name,'-infos/0-fun-0-'},\
-          {arity,1},{env,[7,{a,b}]},{refc,1},{uniq,111449314},{new_index,6},\
+          {arity,1},{env,[7,{a,b}]},{refc,1},{uniq,101251949},{new_index,6},\
           {type,local},{module,fun_probe},{name,'-infos/0-fun-1-'},\
-          {arity,0},{env,[]},{refc,1},{uniq,111449314},{new_index,7},\
+          {arity,0},{env,[]},{refc,1},{uniq,101251949},{new_index,7},\
           {type,external},{module,lists},{name,reverse},\
           {arity,1},{env,[]},{refc,undefined},{index,undefined},\
           {new_index,undefined},{uniq,undefined},{new_uniq,undefined},\
@@ -355,4 +355,64 @@ fn rejects_fun_info_items_the_loader_keeps_no_value_for() {
             "expected {message}, got {error}"
         );
     }
+}
+
+#[test]
+fn prints_funs_as_pinned_erts() {
+    // `fun_probe:texts/0` calls `erlang:fun_to_list/1` and `io_lib:format/2`
+    // with `~p` and `~w`. A local fun prints `#Fun<Module.OldIndex.OldUniq>`
+    // (`erl_printf_term.c:678-690`), and an external fun prints `fun M:F/A`
+    // with quoted atoms, also for a module that is not loaded
+    // (`erl_printf_term.c:691-723`). A term that is not a fun raises
+    // `error:badarg` (`bif.c:4492-4494`).
+    let modules: Vec<Vec<u8>> = [
+        "erlang",
+        "erl_scan",
+        "epp",
+        "lists",
+        "maps",
+        "ets",
+        "io_lib",
+        "io_lib_format",
+        "io_lib_pretty",
+        "string",
+    ]
+    .iter()
+    .map(|module| pinned_beam(module))
+    .collect();
+    let mut beams: Vec<&[u8]> = modules.iter().map(Vec::as_slice).collect();
+    beams.push(FUN_PROBE);
+    let program = BeamProgram::load(&beams).unwrap();
+    let local = "#Fun<fun_probe.8.101251949>";
+    let both = format!("{local} {local}");
+    let texts = [
+        local,
+        "#Fun<fun_probe.9.101251949>",
+        "fun lists:reverse/1",
+        "fun 'A b':'c d'/0",
+        "fun no_such_module:f/3",
+        &both,
+        "fun lists:reverse/1 fun lists:reverse/1",
+        "fun 'A b':'c d'/0 fun 'A b':'c d'/0",
+    ];
+    let mut expected: Vec<Term> = texts
+        .iter()
+        .map(|text| Term::list_from(text.bytes().map(|byte| Term::Integer(byte.into()))))
+        .collect();
+    expected.push(Term::Atom(program.atom("badarg").unwrap()));
+    assert_eq!(
+        program.execute("fun_probe", "texts", &[]).unwrap().term,
+        Term::list_from(expected)
+    );
+    let codes: Vec<String> = texts
+        .iter()
+        .map(|text| {
+            let bytes: Vec<String> = text.bytes().map(|byte| byte.to_string()).collect();
+            format!("[{}]", bytes.join(","))
+        })
+        .collect();
+    assert_eq!(
+        String::from_utf8(reference("texts")).unwrap(),
+        format!("[{},badarg]\n", codes.join(","))
+    );
 }

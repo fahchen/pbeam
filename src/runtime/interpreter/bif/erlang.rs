@@ -2285,6 +2285,26 @@ pub(super) fn pid_to_list(term: &Term, atoms: &AtomTable) -> BifResult {
     }
 }
 
+/// Run `erlang:fun_to_list/1`, as ERTS `fun_to_list_1` (`bif.c:4487-4497`)
+/// does: a fun gives the characters of its `%T` text ([`term_text_list`]).
+/// A local fun prints `#Fun<Module.OldIndex.OldUniq>` and an external fun
+/// prints `fun M:F/A` (`erl_printf_term.c:674-726`). A term that is not a
+/// fun raises `badarg` (`bif.c:4492-4494`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let atoms = AtomTable::new();
+/// assert!(matches!(fun_to_list(&Term::Fun(fun), &atoms), BifResult::Value(_)));
+/// assert!(matches!(fun_to_list(&Term::nil(), &atoms), BifResult::Raise { .. }));
+/// ```
+pub(super) fn fun_to_list(term: &Term, atoms: &AtomTable) -> BifResult {
+    match term {
+        Term::Fun(_) => term_text_list(term, atoms),
+        _ => BifResult::badarg(),
+    }
+}
+
 /// Run `erlang:port_to_list/1`, with the text, the checks, and the result
 /// of [`pid_to_list`] for a term that is a port (`bif.c:4512-4517`).
 ///

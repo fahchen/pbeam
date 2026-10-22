@@ -1,5 +1,5 @@
 -module(fun_probe).
--export([mfas/0, locals/0, tests/0, applies/0, spawned/0, externals/0, infos/0, fun_info_unsupported/1, tail_wait/1, id/1]).
+-export([mfas/0, locals/0, tests/0, applies/0, spawned/0, externals/0, infos/0, fun_info_unsupported/1, texts/0, tail_wait/1, id/1]).
 
 %% erlang:apply/3 and the apply instruction, as proc_lib:init_p_do_apply/3
 %% runs them. apply/3 takes at most 1023 arguments.
@@ -116,6 +116,20 @@ infos() ->
      try erlang:fun_info(Pair, id(bogus)) catch error:R2 -> R2 end,
      try erlang:fun_info(Pair, native) catch error:R3 -> R3 end,
      try erlang:fun_info(Ext, native_address) catch error:R4 -> R4 end].
+
+%% erlang:fun_to_list/1 and io_lib ~p and ~w of a local fun, a local fun
+%% without free variables, external funs (one with quoted atoms, one of a
+%% module that is not loaded), and a term that is not a fun.
+texts() ->
+    K = id(7),
+    Pair = fun(X) -> {K, X} end,
+    Const = fun() -> const end,
+    Ext = fun lists:reverse/1,
+    Quoted = fun 'A b':'c d'/0,
+    Missing = fun no_such_module:f/3,
+    [erlang:fun_to_list(F) || F <- [Pair, Const, Ext, Quoted, Missing]] ++
+    [lists:flatten(io_lib:format("~p ~w", [F, F])) || F <- [Pair, Ext, Quoted]] ++
+    [try erlang:fun_to_list(id(42)) catch error:R -> R end].
 
 %% The fun_info/2 items that PBeam refuses with a runtime error because the
 %% loader keeps no such value.
