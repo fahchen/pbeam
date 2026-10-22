@@ -5545,6 +5545,50 @@ const PRELOADED: [&str; 22] = [
     "persistent_term",
 ];
 
+/// Run `erlang:loaded/0`, which `erl_init:start/2` calls
+/// (`erl_init.erl:72-80`), as ERTS `loaded_0` (`beam_bif_load.c:762-791`)
+/// does: return the name of each loaded module, in the reverse order of the
+/// module table, which is the load order. ERTS gives the module table
+/// index to a module at its first load; PBeam loads no module twice, so
+/// the load order is the same. A run loads the start modules of the
+/// program first, in the order of the program.
+///
+/// The caller needs a `code` capability that permits `inspect` for each
+/// loaded module, else the call raises `error:capability_denied`, as
+/// `erlang:module_loaded/1` does for one module.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let BifResult::Value(modules) = loaded(&mut scheduler)? else { unreachable!() };
+/// // [the last loaded module, ..., the first start module]
+/// ```
+///
+/// # Errors
+///
+/// The atom table cannot take a new module name, or a new
+/// `capability_denied` atom.
+pub(super) fn loaded(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
+    let names = scheduler
+        .code
+        .names()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let mut modules = Vec::with_capacity(names.len());
+    for name in names.iter().rev() {
+        if let Some(denied) = denial(
+            scheduler,
+            CapabilityKind::Code,
+            Operation::Inspect,
+            Some(name.as_bytes()),
+        )? {
+            return Ok(denied);
+        }
+        modules.push(Term::Atom(scheduler.atoms.put(name)?));
+    }
+    Ok(Value(Term::list_from(modules)))
+}
+
 /// Run `erlang:pre_loaded/0`, as ERTS `pre_loaded_0` and `erts_preloaded`
 /// (`beam_bif_load.c:757-760`, `erl_init.c:459-484`) do: return the names
 /// of the preloaded modules of the emulator, with the last module of the

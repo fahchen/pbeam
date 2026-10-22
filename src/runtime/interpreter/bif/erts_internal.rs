@@ -1610,3 +1610,82 @@ pub(super) fn time_unit() -> BifResult {
 #[cfg(test)]
 #[path = "../../../../tests/runtime/interpreter/bif/erts_internal.rs"]
 mod tests;
+
+/// Run `erts_internal:spawn_system_process(Module, Function, Arguments)`,
+/// which `prim_file:on_load/0` calls (`prim_file.erl:117-121`), as
+/// `erts_internal_spawn_system_process_3` (`erl_init.c:436-456`) does: start
+/// a process that runs `Module:Function` with the elements of `Arguments`
+/// and the default spawn options, as `erlang:spawn/3` does
+/// (`erl_init.c:333-353`). The process inherits the group leader of the
+/// caller. It is a system process (`SPO_SYSTEM_PROC`): its exit stops the
+/// run (see `Scheduler::finish_current`).
+///
+/// ERTS first looks up the export in the active code. When `Module` does
+/// not export `Function` with the length of `Arguments`, also for a
+/// `Module` or `Function` that is not an atom and for an improper list,
+/// it stops the emulator with the text `No function M:F/A` and a crash dump
+/// (`erl_init.c:344-346`). PBeam stops the run with the runtime error `No
+/// function M:F/A`, with the terms as ERTS prints them, and writes no crash
+/// dump.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let start = Term::static_atom("start");
+/// let result = spawn_system_process(context, &Term::static_atom("prim_file"), &start, &Term::nil())?;
+/// assert!(matches!(result, BifResult::Value(Term::Pid(_))));
+/// ```
+///
+/// # Errors
+///
+/// The runtime error `No function M:F/A` for a function that is not
+/// exported, and the errors of `create_process`.
+pub(super) fn spawn_system_process(
+    context: &mut BifContext<'_>,
+    module: &Term,
+    function: &Term,
+    arguments: &Term,
+) -> Result<BifResult, BeamError> {
+    let scheduler = &mut *context.scheduler;
+    let arity = arguments.proper_list().map(Iterator::count);
+    let exported = match (module, function, arity.and_then(|n| u32::try_from(n).ok())) {
+        (Term::Atom(module), Term::Atom(function), Some(arity)) => {
+            let (module, function) = (
+                scheduler.atoms.name_of(module),
+                scheduler.atoms.name_of(function),
+            );
+            resolve(module, function, arity).is_some()
+                || scheduler
+                    .code
+                    .export_frame(module, function, arity)?
+                    .is_some()
+        }
+        _ => false,
+    };
+    if !exported {
+        // `erts_list_length` gives -1 for an improper list.
+        let arity = arity.map_or(-1, |n| i64::try_from(n).unwrap_or(i64::MAX));
+        let text = |term: &Term| -> String {
+            print_term(term, &scheduler.atoms)
+                .into_iter()
+                .map(char::from)
+                .collect()
+        };
+        return Err(error(format!(
+            "No function {}:{}/{arity}",
+            text(module),
+            text(function)
+        )));
+    }
+    let spawned = create_process(
+        scheduler,
+        module,
+        function,
+        arguments,
+        SpawnOptions::default(),
+    )?;
+    if let BifResult::Value(Term::Pid(pid)) = &spawned {
+        scheduler.mark_system(*pid);
+    }
+    Ok(spawned)
+}

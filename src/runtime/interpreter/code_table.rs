@@ -334,6 +334,21 @@ impl CodeTable {
         self.modules.get(name)
     }
 
+    /// Return the names of the loaded modules in load order: a start module
+    /// of the program before each module that a run loads, and the start
+    /// modules in the order of the program.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(code.names().any(|name| name == "erlang"));
+    /// ```
+    pub(in crate::runtime) fn names(&self) -> impl Iterator<Item = &str> {
+        let mut modules = self.modules.values().collect::<Vec<_>>();
+        modules.sort_by_key(|module| module.id);
+        modules.into_iter().map(|module| module.name.as_str())
+    }
+
     /// Return the loaded module `name`.
     ///
     /// # Examples

@@ -356,6 +356,10 @@ name = "getenv"
 path = "tests/integration/getenv.rs"
 
 [[test]]
+name = "init_boot"
+path = "tests/integration/init_boot.rs"
+
+[[test]]
 name = "group"
 path = "tests/integration/group.rs"
 
