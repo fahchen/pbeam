@@ -178,6 +178,7 @@ fn deliveries_in_flight_follow_the_process_in_order() {
         },
         None,
     );
+    node.schedule_cleanup(0, ProcessId(1));
     let process = victim.processes.remove(&ProcessId(1)).unwrap();
     node.transfer(0, 1, Box::new(process), None);
     node.send_message(0, sender, Term::Integer(3), ProcessId(1), None);
@@ -185,7 +186,7 @@ fn deliveries_in_flight_follow_the_process_in_order() {
     assert_eq!(inbox(&node, 0), vec![('M', 2)]);
     assert_eq!(
         inbox(&node, 1),
-        vec![('P', 1), ('M', 1), ('S', 1), ('M', 1)]
+        vec![('P', 1), ('M', 1), ('S', 1), ('C', 1), ('M', 1)]
     );
 }
 
