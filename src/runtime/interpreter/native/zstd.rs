@@ -22,6 +22,7 @@
 //! (`zstd_nif.c:1008-1070`).
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use ::zstd::zstd_safe::{
     CCtx, CParameter, DCtx, DParameter, InBuffer, OutBuffer, ResetDirective, SafeResult, Strategy,
@@ -29,6 +30,7 @@ use ::zstd::zstd_safe::{
 };
 
 use super::*;
+use crate::runtime::resources::lock;
 use crate::term::{ProcessId, Reference};
 
 /// The bits of one byte, for the bit range of a binary.
@@ -323,10 +325,9 @@ fn open<'a, H>(
 }
 
 /// Return the contexts of the node and the current process.
-fn contexts(scheduler: &mut Scheduler) -> (&mut ZstdContexts, ProcessId) {
+fn contexts(scheduler: &mut Scheduler) -> (Arc<Mutex<ZstdContexts>>, ProcessId) {
     let current = scheduler.current_process().id;
-    let contexts = scheduler.resources.borrow_mut_or_default::<ZstdContexts>();
-    (contexts, current)
+    (scheduler.node().resources.kind::<ZstdContexts>(), current)
 }
 
 /// Return the C `int` of a term, as `enif_get_int` accepts it.
@@ -422,7 +423,8 @@ fn codec(
 /// A full reference counter gives the error of `Scheduler::make_ref`.
 fn init_compress_nif(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
     let reference = scheduler.make_ref()?;
-    let (contexts, owner) = contexts(scheduler);
+    let (kind, owner) = contexts(scheduler);
+    let mut contexts = lock(&kind);
     let handle = Compressor {
         cctx: CCtx::create(),
         strategy: 0,
@@ -447,7 +449,8 @@ fn init_compress_nif(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> 
 /// A full reference counter gives the error of `Scheduler::make_ref`.
 fn init_decompress_nif(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
     let reference = scheduler.make_ref()?;
-    let (contexts, owner) = contexts(scheduler);
+    let (kind, owner) = contexts(scheduler);
+    let mut contexts = lock(&kind);
     let handle = Decompressor {
         dctx: DCtx::create(),
         in_use: false,
@@ -555,7 +558,8 @@ fn set_compress_parameter_nif(
     value: &Term,
 ) -> Result<BifResult, BeamError> {
     let parameter = compress_parameter(scheduler, key, value);
-    let (contexts, current) = contexts(scheduler);
+    let (kind, current) = contexts(scheduler);
+    let mut contexts = lock(&kind);
     let native = match (open(&mut contexts.compress, context, current), parameter) {
         (Err(reason), _) => Native::Raise(reason),
         (Ok(_), Err(native)) => native,
@@ -606,7 +610,8 @@ fn set_pledged_src_size_nif(
         Term::BigInt(value) => u64::try_from(value.as_ref()).ok(),
         _ => None,
     };
-    let (contexts, current) = contexts(scheduler);
+    let (kind, current) = contexts(scheduler);
+    let mut contexts = lock(&kind);
     let native = match (open(&mut contexts.compress, context, current), size) {
         (Err(reason), _) => Native::Raise(reason),
         (Ok(_), None) => Native::Raise("badarg"),
@@ -643,7 +648,8 @@ fn set_decompress_parameter_nif(
 ) -> Result<BifResult, BeamError> {
     let window_log_max =
         matches!(key, Term::Atom(atom) if scheduler.atoms.name_of(atom) == "windowLogMax");
-    let (contexts, current) = contexts(scheduler);
+    let (kind, current) = contexts(scheduler);
+    let mut contexts = lock(&kind);
     let native = match (
         open(&mut contexts.decompress, context, current),
         integer(value),
@@ -685,7 +691,8 @@ fn compress_stream_nif(
     data: &Term,
     flush: &Term,
 ) -> Result<BifResult, BeamError> {
-    let (contexts, current) = contexts(scheduler);
+    let (kind, current) = contexts(scheduler);
+    let mut contexts = lock(&kind);
     let native = match open(&mut contexts.compress, context, current) {
         Err(reason) => Native::Raise(reason),
         Ok(compressor) => {
@@ -734,7 +741,8 @@ fn decompress_stream_nif(
     flush: &Term,
 ) -> Result<BifResult, BeamError> {
     let flush_true = matches!(flush, Term::Atom(atom) if scheduler.atoms.name_of(atom) == "true");
-    let (contexts, current) = contexts(scheduler);
+    let (kind, current) = contexts(scheduler);
+    let mut contexts = lock(&kind);
     let native = match open(&mut contexts.decompress, context, current) {
         Err(reason) => Native::Raise(reason),
         Ok(decompressor) => decompress(decompressor, data, flush, flush_true),
@@ -798,7 +806,8 @@ fn decompress(
 /// A new result atom in a full atom table gives the error of
 /// `AtomTable::put`.
 fn compress_reset_nif(scheduler: &mut Scheduler, context: &Term) -> Result<BifResult, BeamError> {
-    let (contexts, current) = contexts(scheduler);
+    let (kind, current) = contexts(scheduler);
+    let mut contexts = lock(&kind);
     let native = match open(&mut contexts.compress, context, current) {
         Err(reason) => Native::Raise(reason),
         Ok(compressor) => {
@@ -824,7 +833,8 @@ fn compress_reset_nif(scheduler: &mut Scheduler, context: &Term) -> Result<BifRe
 /// A new result atom in a full atom table gives the error of
 /// `AtomTable::put`.
 fn decompress_reset_nif(scheduler: &mut Scheduler, context: &Term) -> Result<BifResult, BeamError> {
-    let (contexts, current) = contexts(scheduler);
+    let (kind, current) = contexts(scheduler);
+    let mut contexts = lock(&kind);
     let native = match open(&mut contexts.decompress, context, current) {
         Err(reason) => Native::Raise(reason),
         Ok(decompressor) => {
@@ -851,7 +861,8 @@ fn decompress_reset_nif(scheduler: &mut Scheduler, context: &Term) -> Result<Bif
 /// A new result atom in a full atom table gives the error of
 /// `AtomTable::put`.
 fn compress_close_nif(scheduler: &mut Scheduler, context: &Term) -> Result<BifResult, BeamError> {
-    let (contexts, current) = contexts(scheduler);
+    let (kind, current) = contexts(scheduler);
+    let mut contexts = lock(&kind);
     let native = close(&mut contexts.compress, context, current);
     result(scheduler, native)
 }
@@ -871,7 +882,8 @@ fn compress_close_nif(scheduler: &mut Scheduler, context: &Term) -> Result<BifRe
 /// A new result atom in a full atom table gives the error of
 /// `AtomTable::put`.
 fn decompress_close_nif(scheduler: &mut Scheduler, context: &Term) -> Result<BifResult, BeamError> {
-    let (contexts, current) = contexts(scheduler);
+    let (kind, current) = contexts(scheduler);
+    let mut contexts = lock(&kind);
     let native = close(&mut contexts.decompress, context, current);
     result(scheduler, native)
 }

@@ -26,6 +26,7 @@ use super::{Signal, process_table::ProcessTable};
 use crate::runtime::{
     persistent_term::PersistentTermStore,
     process::{MonitorLinkTree, ProcessState, TimerReference},
+    resources::NodeResources,
 };
 use crate::{
     error::{BeamError, error},
@@ -198,6 +199,9 @@ pub(in crate::runtime) struct Node {
     /// binary that a process of any scheduler reaches by its reference
     /// (`erl_bif_atomics.c:90-110`).
     pub(in crate::runtime) atomics: crate::runtime::atomics::AtomicArrays,
+    /// The resources of the node that each scheduler reads, such as the
+    /// zlib streams and the file resources.
+    pub(in crate::runtime) resources: NodeResources,
 }
 
 impl Node {
@@ -251,6 +255,7 @@ impl Node {
                 local_node_hash: OnceLock::new(),
                 code: super::code::NodeCode::default(),
                 atomics: Default::default(),
+                resources: NodeResources::default(),
             }),
             readers,
         ))
@@ -317,6 +322,7 @@ impl Node {
             local_node_hash: OnceLock::new(),
             code: super::code::NodeCode::default(),
             atomics: Default::default(),
+            resources: NodeResources::default(),
         })
     }
 

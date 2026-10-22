@@ -9,7 +9,7 @@
 
 use super::{
     Files, Flush, LinkId, Monitor, ProcessState, RECEIVE_FETCH_REDUCTIONS, Release,
-    SIGNAL_HANDLING_REDUCTIONS, Scheduler, TargetMonitor, Ttys,
+    SIGNAL_HANDLING_REDUCTIONS, Scheduler, TargetMonitor, Ttys, lock,
 };
 use crate::{
     error::BeamError,
@@ -663,7 +663,7 @@ impl Scheduler {
             }
             Signal::FileMonitor { file } => {
                 // A close before this signal removed the monitor already.
-                let open = self.resources.borrow_mut::<Files>().is_open(file);
+                let open = lock(&self.node().resources.kind::<Files>()).is_open(file);
                 let monitors = &mut self.handled(id, node).monitored_by;
                 if open {
                     monitors.push(TargetMonitor::File(file));
@@ -978,7 +978,7 @@ impl Scheduler {
                 }
                 Signal::FileMonitor { file } => {
                     count += 4;
-                    self.resources.borrow_mut::<Files>().monitor_down(file);
+                    lock(&self.node().resources.kind::<Files>()).monitor_down(file);
                 }
                 Signal::PortMonitor { port, reference: _ } => {
                     count += 4;

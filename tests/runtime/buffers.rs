@@ -148,16 +148,18 @@ fn takes_and_releases_the_external_lock() {
 #[test]
 fn keeps_each_buffer_of_the_node_by_its_reference() {
     let mut buffers = Buffers::default();
-    assert!(buffers.get_mut(Reference(0)).is_none());
+    assert!(buffers.get(Reference(0)).is_none());
     buffers.insert(Reference(0), Buffer::default());
     buffers.insert(Reference(1), Buffer::default());
-    assert!(buffers.get_mut(Reference(0)).is_some());
-    assert!(buffers.get_mut(Reference(1)).is_some());
-    assert!(buffers.get_mut(Reference(2)).is_none());
+    assert!(buffers.get(Reference(0)).is_some());
+    assert!(buffers.get(Reference(1)).is_some());
+    assert!(buffers.get(Reference(2)).is_none());
     buffers
-        .get_mut(Reference(0))
+        .get(Reference(0))
+        .unwrap()
+        .lock()
         .unwrap()
         .write(&[binary(b"ab")]);
-    assert_eq!(buffers.get_mut(Reference(0)).unwrap().size(), 2);
-    assert_eq!(buffers.get_mut(Reference(1)).unwrap().size(), 0);
+    assert_eq!(buffers.get(Reference(0)).unwrap().lock().unwrap().size(), 2);
+    assert_eq!(buffers.get(Reference(1)).unwrap().lock().unwrap().size(), 0);
 }
