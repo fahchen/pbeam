@@ -35,6 +35,30 @@ fn a_zlib_stream_resolves_on_another_scheduler() {
     }
 }
 
+/// A worker that used its zlib stream can move to the idle scheduler and
+/// use the stream there: the workers ran on both schedulers, and each
+/// stream gives back its data.
+#[test]
+fn a_process_that_used_a_zlib_stream_can_move() {
+    let (zlib, lists) = (pinned_beam("zlib"), pinned_beam("lists"));
+    let program = BeamProgram::load(&[&zlib, &lists, NODE_RESOURCES]).expect("the fixture loads");
+    let atom = |name| Term::Atom(program.atom(name).expect("the fixture names the atom"));
+    let expected = Term::tuple(vec![
+        atom("ok"),
+        Term::list_from([Term::Integer(1), Term::Integer(2)]),
+    ]);
+    for _ in 0..RUNS {
+        let results = program
+            .execute_on_schedulers(&[
+                ("node_resources", "steal_busy"),
+                ("node_resources", "steal_idle"),
+            ])
+            .expect("the two schedulers run");
+        assert_eq!(results[0].term, expected);
+        assert_eq!(results[1].term, atom("ok"));
+    }
+}
+
 /// The two roots give the same results on the pinned ERTS with two
 /// schedulers.
 #[test]
@@ -49,7 +73,7 @@ fn the_pinned_erts_gives_the_same_results() {
         .args(["+S", "2", "-noshell"])
         .args([
             "-eval",
-            "io:format(\"~w~n\", [node_resources:reference()]), halt().",
+            "io:format(\"~w~n~w~n\", [node_resources:reference(), node_resources:steal_reference()]), halt().",
         ])
         .arg("-pa")
         .arg(&directory)
@@ -59,6 +83,6 @@ fn the_pinned_erts_gives_the_same_results() {
     assert!(output.status.success(), "{output:?}");
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "{not_on_controlling_process,true}\n"
+        "{not_on_controlling_process,true}\n{ok,ok}\n"
     );
 }
