@@ -48,6 +48,12 @@ const ERL_FLAG_VARIABLES: [&str; 5] = [
     "ERL_EPMD_PORT",
 ];
 
+/// The modules of the NIF libraries of PBeam, and `pubkey_os_cacerts`,
+/// whose `on_load` calls `erlang:load_nif/2` only on Windows
+/// (`pubkey_os_cacerts.erl:265-275`).
+const NIF_MODULES: &str = "[asn1rt_nif, crypto, erl_tracer, prim_buffer, prim_file, \
+                           prim_net, prim_socket, prim_tty, pubkey_os_cacerts, zlib, zstd]";
+
 /// The time that the server has to start, and the time that a response has
 /// to arrive.
 const START_TIME_LIMIT: Duration = Duration::from_secs(120);
@@ -66,6 +72,20 @@ fn serves_hello_world_from_the_plug_example_as_pinned_erts() {
         Some(env!("CARGO_BIN_EXE_pbeam")),
     );
     let bundled = serve_one_file();
+    // The NIF record of this acceptance: each module of a NIF library that
+    // the release boot loads. A module with an `on_load` function is loaded
+    // only when the function returns `ok`, so `erlang:load_nif/2` gave `ok`
+    // for each library that the record names.
+    let erts_record = nif_record(None);
+    let pbeam_record = nif_record(Some(env!("CARGO_BIN_EXE_pbeam")));
+    eprintln!("NIF record: {pbeam_record}");
+    assert_eq!(erts_record, pbeam_record);
+    assert_eq!(
+        pbeam_record,
+        "[{asn1rt_nif,true},{crypto,true},{erl_tracer,true},{prim_buffer,true},\
+         {prim_file,true},{prim_net,true},{prim_socket,true},{prim_tty,true},\
+         {pubkey_os_cacerts,true},{zlib,true},{zstd,true}]"
+    );
     assert_eq!(erts, pbeam);
     assert_eq!(pbeam, bundled);
     assert_eq!(
@@ -595,6 +615,89 @@ fn without_erl_flags(command: &mut Command) -> &mut Command {
         command.env_remove(name);
     }
     command
+}
+
+/// Boot the release of `examples/plug_hello` with its boot script and the
+/// `-eval` probe of [`NIF_MODULES`] instead of the `elixir` entry, on the
+/// pinned ERTS or on `pbeam erl`, and return the line of the probe: each
+/// module with the result of `erlang:module_loaded/1`. The run stops when
+/// the probe halts, or after [`START_TIME_LIMIT`].
+fn nif_record(pbeam: Option<&str>) -> String {
+    let release = fs::canonicalize(release_directory()).unwrap();
+    let data = fs::read_to_string(release.join("releases/start_erl.data")).unwrap();
+    let (erts, version) = data.trim().split_once(' ').unwrap();
+    let bindir = release.join(format!("erts-{erts}/bin"));
+    let config = release.join(format!("releases/{version}/sys"));
+    let mut command = match pbeam {
+        None => Command::new(bindir.join("erl")),
+        Some(pbeam) => {
+            let mut command = Command::new(pbeam);
+            command.arg("erl").arg("--root").arg(&release);
+            command.arg("--bindir").arg(&bindir);
+            command.arg("--preloaded").arg(preloaded_directory());
+            command.arg("--");
+            command
+        }
+    };
+    let probe = format!(
+        "io:format(\"~w~n\", [[{{M, erlang:module_loaded(M)}} || M <- {NIF_MODULES}]]), halt()."
+    );
+    command
+        .args(["-noshell", "-mode", "embedded", "-config"])
+        .arg(&config)
+        .arg("-boot")
+        .arg(release.join(format!("releases/{version}/start")))
+        .args(["-boot_var", "RELEASE_LIB"])
+        .arg(release.join("lib"))
+        .args(["-eval", &probe])
+        .env("RELEASE_ROOT", &release)
+        .env("RELEASE_SYS_CONFIG", &config)
+        .env("PORT", free_port().to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0);
+    let mut child = without_erl_flags(&mut command)
+        .spawn()
+        .expect("the probe boot starts");
+    let stdout = Arc::new(Mutex::new(Vec::new()));
+    let stdout_reader = collect(child.stdout.take().unwrap(), Arc::clone(&stdout));
+    let stderr = Arc::new(Mutex::new(Vec::new()));
+    let stderr_reader = collect(child.stderr.take().unwrap(), Arc::clone(&stderr));
+    let deadline = Instant::now() + START_TIME_LIMIT;
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("the child has a status") {
+            break Some(status);
+        }
+        if Instant::now() >= deadline {
+            stop(child);
+            break None;
+        }
+        thread::sleep(Duration::from_millis(100));
+    };
+    stdout_reader.join().unwrap();
+    stderr_reader.join().unwrap();
+    let stdout = String::from_utf8_lossy(&stdout.lock().unwrap()).into_owned();
+    let stderr = String::from_utf8_lossy(&stderr.lock().unwrap()).into_owned();
+    let line = stdout.lines().find(|line| line.starts_with("[{"));
+    match (status, line) {
+        (Some(status), Some(line)) if status.success() => line.to_owned(),
+        _ => panic!("the probe boot {pbeam:?}: {status:?}\nstdout: {stdout}\nstderr: {stderr}"),
+    }
+}
+
+/// Return the `ebin` directory of `erts` of the pinned OTP, which holds the
+/// BEAM files of the preloaded modules.
+fn preloaded_directory() -> PathBuf {
+    let output = Command::new("erl")
+        .args([
+            "-noshell",
+            "-eval",
+            "io:put_chars(filename:join(code:lib_dir(erts), \"ebin\")), halt().",
+        ])
+        .output()
+        .expect("erl runs");
+    PathBuf::from(String::from_utf8(output.stdout).unwrap())
 }
 
 /// Kill the process group of the run, which holds the runner and its build
