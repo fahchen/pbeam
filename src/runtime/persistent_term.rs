@@ -2,22 +2,47 @@
 //! (`erl_bif_persistent.c`). All processes of the node share one store,
 //! also on more than one scheduler thread.
 
-use super::{scheduler::Scheduler, signal::Signal};
+use std::sync::{Arc, atomic::Ordering};
+
+use super::scheduler::Scheduler;
 use crate::term::{LiveBytes, ProcessId, Term, internal_hash};
+
+/// The number of scheduling steps of the node after which a new table is
+/// visible. ERTS waits for thread progress, and with `erl +S 1` other
+/// processes run two or more turns before the caller continues. The step
+/// that follows the switch out of the caller counts too, so 3 steps give
+/// other processes two turns.
+const PROGRESS_STEPS: u8 = 3;
+
+/// A new table that waits for thread progress, and the caller that it
+/// suspends (`erts_schedule_thr_prgr_later_op`, `erl_bif_persistent.c:774-779`).
+#[derive(Debug)]
+struct Progress {
+    /// The suspended caller, which holds the update permission.
+    caller: ProcessId,
+    /// The new table.
+    table: Arc<PersistentTerms>,
+    /// The scheduling steps that remain.
+    steps: u8,
+}
 
 /// The persistent term table of the node and its update permission, as
 /// `the_hash_table`, `updater_process`, and `update_queue` of
 /// `erl_bif_persistent.c`. The node keeps it behind one lock.
 #[derive(Debug, Default)]
 pub(in crate::runtime) struct PersistentTermStore {
-    /// The table.
-    pub(super) terms: PersistentTerms,
+    /// The visible table. A reader takes a reference and reads with no
+    /// lock, and an update swaps in a new table, as `the_hash_table` is an
+    /// atomic pointer in ERTS.
+    pub(super) terms: Arc<PersistentTerms>,
     /// The process that holds the update permission: a `put/2` or an
     /// `erase/1` until thread progress, or a `get/0` that traps until its
     /// last chunk (`erl_bif_persistent.c:1311-1365`).
     updater: Option<ProcessId>,
     /// The processes that wait for the update permission.
     waiters: Vec<ProcessId>,
+    /// The new tables that wait for thread progress.
+    progress: Vec<Progress>,
 }
 
 impl PersistentTermStore {
@@ -63,15 +88,69 @@ impl PersistentTermStore {
     /// assert_eq!(store.release(ProcessId(1)), [ProcessId(2)]);
     /// ```
     pub(super) fn release(&mut self, id: ProcessId) -> Vec<ProcessId> {
-        if self.updater != Some(id) {
+        // The publication of a table that waits for thread progress
+        // releases the permission of its caller.
+        if self.updater != Some(id) || self.is_progressing(id) {
             return Vec::new();
         }
         self.updater = None;
         std::mem::take(&mut self.waiters)
     }
+
+    /// Return true when the table of the caller `id` waits for thread
+    /// progress.
+    pub(super) fn is_progressing(&self, id: ProcessId) -> bool {
+        self.progress.iter().any(|progress| progress.caller == id)
+    }
+
+    /// Make `table` visible after thread progress, and keep the update
+    /// permission of `caller` until then.
+    pub(super) fn schedule(&mut self, caller: ProcessId, table: PersistentTerms) {
+        self.progress.push(Progress {
+            caller,
+            table: Arc::new(table),
+            steps: PROGRESS_STEPS,
+        });
+    }
 }
 
 impl Scheduler {
+    /// Count one scheduling step for each table that waits for thread
+    /// progress. A table whose steps end becomes visible, its caller
+    /// releases the update permission and resumes, as `table_updater` does
+    /// (`erl_bif_persistent.c:1172-1234`). Return true when a table still
+    /// waits, so that the run keeps stepping.
+    pub(super) fn persistent_term_progress(&mut self) -> bool {
+        let node = Arc::clone(self.node());
+        if !node.persistent_progress().load(Ordering::Acquire) {
+            return false;
+        }
+        let mut done = Vec::new();
+        let pending = {
+            let mut store = node.persistent_terms();
+            for progress in &mut store.progress {
+                progress.steps -= 1;
+            }
+            while let Some(index) = store
+                .progress
+                .iter()
+                .position(|progress| progress.steps == 0)
+            {
+                let progress = store.progress.remove(index);
+                store.terms = progress.table;
+                done.push(progress.caller);
+            }
+            let pending = !store.progress.is_empty();
+            node.persistent_progress().store(pending, Ordering::Release);
+            pending
+        };
+        for caller in done {
+            self.release_persistent_terms(caller);
+            self.resume(caller);
+        }
+        pending
+    }
+
     /// Release the update permission of the persistent terms that the
     /// process `id` holds, and resume each process that waits for it. The
     /// end of a call releases it, and so does the exit of the process, as
@@ -79,8 +158,7 @@ impl Scheduler {
     pub(super) fn release_persistent_terms(&mut self, id: ProcessId) {
         let waiters = self.node().persistent_terms().release(id);
         for waiter in waiters {
-            // A waiter that exited needs no resume.
-            let _ = self.send_signal(None, waiter, Signal::Resume);
+            self.resume(waiter);
         }
     }
 }
@@ -100,7 +178,7 @@ const LOAD_FACTOR: usize = 50;
 /// order (`put_common`, `copy_table`). `persistent_term:get/0` returns the
 /// pairs in descending slot order (`get_all`), so the layout is visible to
 /// BEAM code.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) struct PersistentTerms {
     /// The slots of the table. The number of slots is a power of two.
     buckets: Vec<Option<(Term, Term)>>,

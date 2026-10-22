@@ -111,6 +111,8 @@ pub(in crate::runtime) struct Node {
     /// keeps one table for the node, and any scheduler reads it
     /// (`the_hash_table`, `erl_bif_persistent.c:358-398`).
     persistent_terms: Mutex<PersistentTermStore>,
+    /// True when a persistent term table waits for thread progress.
+    persistent_progress: AtomicBool,
     /// The owner of each alias, by its reference. ERTS aliases belong to
     /// the node, and any scheduler sends to them
     /// (`erl_proc_sig_queue.c:2814-2895`).
@@ -192,6 +194,7 @@ impl Node {
                 names: Mutex::new(HashMap::new()),
                 ports: Mutex::new(HashMap::new()),
                 persistent_terms: Mutex::default(),
+                persistent_progress: AtomicBool::new(false),
                 aliases: Mutex::new(Aliases::default()),
                 timers: Mutex::new(HashMap::new()),
                 regexes: Mutex::new(HashMap::new()),
@@ -254,6 +257,7 @@ impl Node {
             names: Mutex::new(HashMap::new()),
             ports: Mutex::new(HashMap::new()),
             persistent_terms: Mutex::default(),
+            persistent_progress: AtomicBool::new(false),
             aliases: Mutex::new(Aliases::default()),
             timers: Mutex::new(HashMap::new()),
             regexes: Mutex::new(HashMap::new()),
@@ -869,6 +873,12 @@ impl Node {
         self.persistent_terms
             .lock()
             .expect("the persistent terms are not poisoned")
+    }
+
+    /// Return the flag that is true when a persistent term table waits for
+    /// thread progress.
+    pub(in crate::runtime) fn persistent_progress(&self) -> &AtomicBool {
+        &self.persistent_progress
     }
 
     /// Account the terms of the root results in `live`.

@@ -5114,6 +5114,8 @@ fn shares_the_stored_term_of_a_persistent_term() {
             vec![key.clone(), value.clone()],
         )
         .unwrap();
+    // The new table is visible after thread progress.
+    while scheduler.persistent_term_progress() {}
     let result = program
         .bif(&mut scheduler, "persistent_term", "get", vec![key])
         .unwrap();

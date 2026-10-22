@@ -12,15 +12,17 @@
 //! (`try_seize_update_permission`, `erl_bif_persistent.c:1311-1335`). A
 //! call that finds the permission with another process suspends until the
 //! release, as ERTS does. A `put/2` or an `erase/1` that changes the table
-//! suspends the caller until thread progress, and ERTS releases the
-//! permission at thread progress, independently of the caller
-//! (`erl_bif_persistent.c:774-779`, `1172-1230`). PBeam releases the
-//! permission when it changes the table, and switches the caller out
-//! twice before the call returns.
+//! suspends the caller until thread progress, and the new table becomes
+//! visible and the permission is released then
+//! (`erl_bif_persistent.c:774-779`, `1172-1234`). PBeam counts scheduling
+//! steps of the node in place of thread progress
+//! ([`Scheduler::persistent_term_progress`]).
 
 use super::BifResult::Value;
 use super::*;
 use crate::runtime::capability::{CapabilityKind, Operation};
+use crate::runtime::persistent_term::PersistentTerms;
+use std::sync::{Arc, atomic::Ordering};
 
 /// Continue a call at a trap export of this module. `get_all_wait/0`,
 /// `put_wait/2`, and `erase_wait/1` try the call again after a wait for
@@ -56,7 +58,7 @@ pub(super) fn resume(
         ("erase_trap", [key, Term::Integer(first), Term::Integer(second)]) => {
             erase_trap(scheduler, key, *first as usize, *second as usize)
         }
-        ("thread_progress", [value]) => BifResult::YieldReturn(value.clone()),
+        ("thread_progress", [value]) => thread_progress(scheduler, value.clone()),
         _ => return None,
     })
 }
@@ -126,7 +128,8 @@ fn get_all_start(scheduler: &mut Scheduler) -> BifResult {
     if let Some(wait) = seize(scheduler, "get_all_wait", Vec::new()) {
         return wait;
     }
-    let pairs = scheduler.node().persistent_terms().terms.get_all();
+    let table = Arc::clone(&scheduler.node().persistent_terms().terms);
+    let pairs = table.get_all();
     let entries = pairs.len();
     get_all_trap(scheduler, Term::list_from(pairs), entries)
 }
@@ -170,7 +173,8 @@ pub(super) fn get(
     if let Some(denied) = check? {
         return Ok(denied);
     }
-    let value = scheduler.node().persistent_terms().terms.get(key).cloned();
+    let table = Arc::clone(&scheduler.node().persistent_terms().terms);
+    let value = table.get(key).cloned();
     Ok(value
         .or_else(|| default.cloned())
         .map_or_else(BifResult::badarg, Value))
@@ -321,21 +325,40 @@ fn erase_trap(
         };
     }
     process.bump_reductions((copied / ITERATIONS_PER_RED) as i32);
-    scheduler.node().persistent_terms().terms.erase(key);
-    release(scheduler);
-    thread_progress(Term::static_atom("true"))
+    let table = Arc::clone(&scheduler.node().persistent_terms().terms);
+    let mut table = PersistentTerms::clone(&table);
+    table.erase(key);
+    schedule(scheduler, table, Term::static_atom("true"))
 }
 
-/// Switch out the caller after its change, and continue at
-/// `thread_progress/1` with `value`. ERTS suspends
-/// the caller until thread progress (`suspend_updater`,
-/// `erl_bif_persistent.c:774-779`).
-fn thread_progress(value: Term) -> BifResult {
-    BifResult::TrapBif {
-        module: "persistent_term",
-        function: "thread_progress",
-        arguments: vec![value],
+/// Make `table` visible after thread progress, and suspend the caller
+/// until then, as `erts_schedule_thr_prgr_later_op` and `suspend_updater`
+/// do (`erl_bif_persistent.c:774-779`). The caller keeps the update
+/// permission until the table is visible. ERTS builds the new table in the
+/// copy traps; PBeam builds it in the last call, outside the lock of the
+/// node.
+fn schedule(scheduler: &mut Scheduler, table: PersistentTerms, value: Term) -> BifResult {
+    let id = scheduler.current_process().id;
+    let node = Arc::clone(scheduler.node());
+    node.persistent_terms().schedule(id, table);
+    node.persistent_progress().store(true, Ordering::Release);
+    thread_progress(scheduler, value)
+}
+
+/// Return `value` when the table of the caller is visible. Else suspend the
+/// caller at the export `persistent_term:thread_progress/1` until thread
+/// progress resumes it, as `ERTS_BIF_YIELD_RETURN` after `suspend_updater`
+/// does (`erl_bif_persistent.c:782-783`, `1172-1234`).
+fn thread_progress(scheduler: &mut Scheduler, value: Term) -> BifResult {
+    let id = scheduler.current_process().id;
+    if scheduler.node().persistent_terms().is_progressing(id) {
+        return BifResult::Suspend {
+            module: "persistent_term",
+            function: "thread_progress",
+            arguments: vec![value],
+        };
     }
+    Value(value)
 }
 
 /// Run `persistent_term:put/2`: store `value` for `key`, as ERTS
@@ -435,7 +458,8 @@ fn put_trap(scheduler: &mut Scheduler, key: &Term, value: &Term, copied: usize) 
         };
     }
     process.bump_reductions((copied / ITERATIONS_PER_RED) as i32);
-    scheduler.node().persistent_terms().terms.put(key, value);
-    release(scheduler);
-    thread_progress(Term::static_atom("ok"))
+    let table = Arc::clone(&scheduler.node().persistent_terms().terms);
+    let mut table = PersistentTerms::clone(&table);
+    table.put(key, value);
+    schedule(scheduler, table, Term::static_atom("ok"))
 }
