@@ -2,7 +2,7 @@
 
 use super::Signal;
 use crate::runtime::process::LinkId;
-use crate::term::{PortId, ProcessId, Reference, Term};
+use crate::term::{Atom, PortId, ProcessId, Reference, Term};
 
 /// Return a term of one integer, for a test that tells terms apart.
 ///
@@ -48,6 +48,12 @@ fn visits_the_terms_of_a_signal() {
         message: Term::Integer(4),
     };
     assert_eq!(terms(&message), vec![Term::Integer(4)]);
+    let check = Signal::CheckProcessCode {
+        requester: ProcessId(1),
+        tag: Term::Integer(5),
+        module: Atom::from_static("erlang").unwrap(),
+    };
+    assert_eq!(terms(&check), vec![Term::Integer(5)]);
     // A signal with no term gives no term.
     assert!(terms(&Signal::Flush).is_empty());
 }

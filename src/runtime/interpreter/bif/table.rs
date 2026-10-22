@@ -14,7 +14,6 @@
 
 use super::BifResult::{Raise, Value};
 use super::*;
-use crate::error::error;
 use crate::runtime::host::filename_encoding;
 use crate::runtime::time;
 use integer::{Arith, Bitwise};

@@ -2847,6 +2847,30 @@ impl Scheduler {
                     // with `am_system` does (`sys.c:589-607`).
                     self.deliver(target, term);
                 }
+                Delivery::CheckProcessCode {
+                    target,
+                    requester,
+                    tag,
+                    module,
+                } => {
+                    // A target with signals to handle gets the request as a
+                    // signal behind them, so that the check does not pass
+                    // them (`erl_process.c:11459-11480`).
+                    let queued = self
+                        .live_process(target)
+                        .is_some_and(|process| process.mailbox.has_control_signals());
+                    if queued {
+                        let signal = Signal::CheckProcessCode {
+                            requester,
+                            tag,
+                            module,
+                        };
+                        let _ = self.send_signal_local(Some(requester), target, signal);
+                    } else {
+                        let refers = self.check_process_code(target, &module);
+                        self.send_message(target, requester, check_process_code_reply(tag, refers));
+                    }
+                }
                 Delivery::Signal {
                     target,
                     sender,
@@ -3840,6 +3864,7 @@ mod steal;
 mod tcp_inet;
 mod tcp_stream;
 
+pub(super) use code::check_process_code_reply;
 use known_nodes::KnownNodes;
 use node::{Delivery, Node};
 pub(super) use policy::PolicyEnd;

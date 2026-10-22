@@ -61,6 +61,7 @@ fn inbox(node: &Node, index: usize) -> Vec<(char, u64)> {
             Delivery::Signal { target, .. } => ('S', target.0),
             Delivery::Cleanup { target } => ('C', target.0),
             Delivery::CancelTimer { .. } => ('T', 0),
+            Delivery::CheckProcessCode { target, .. } => ('K', target.0),
         })
         .collect()
 }
@@ -180,6 +181,8 @@ fn deliveries_in_flight_follow_the_process_in_order() {
         None,
     );
     node.schedule_cleanup(0, ProcessId(1));
+    let module = crate::term::Atom::from_static("erlang").unwrap();
+    node.check_process_code(0, ProcessId(1), ProcessId(9), Term::Nil, module);
     let process = victim.processes.remove(&ProcessId(1)).unwrap();
     node.transfer(0, 1, Box::new(process), None);
     node.send_message(0, sender, Term::Integer(3), ProcessId(1), None);
@@ -187,7 +190,7 @@ fn deliveries_in_flight_follow_the_process_in_order() {
     assert_eq!(inbox(&node, 0), vec![('M', 2)]);
     assert_eq!(
         inbox(&node, 1),
-        vec![('P', 1), ('M', 1), ('S', 1), ('C', 1), ('M', 1)]
+        vec![('P', 1), ('M', 1), ('S', 1), ('C', 1), ('K', 1), ('M', 1)]
     );
 }
 

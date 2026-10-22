@@ -165,6 +165,7 @@ fake_purger() ->
                Purge(on_load_server_probe_missing, prepare_on_load),
                Purge(on_load_error, prepare_on_load),
                Purge(on_load_error, prepare_on_load),
+               Purge(lists, prepare),
                Purge(lists, complete),
                Purge(on_load_error, complete),
                Purge(on_load_error, complete),
@@ -179,10 +180,14 @@ fake_purger() ->
 purge_loaded() ->
     fake_purger_call(lists, prepare_on_load).
 
-%% PBeam only: PBeam has no old code outside the purge of a failed on_load
-%% function, so the soft purge operation prepare stops the run.
+%% PBeam only: the purge operation prepare gives false for a module with
+%% no old code (beam_bif_load.c:2143-2144). PBeam does not purge the old
+%% code that erlang:delete_module/1 leaves, so prepare of such a module
+%% stops the run.
 purge_prepare() ->
-    fake_purger_call(lists, prepare).
+    false = fake_purger_call(lists, prepare),
+    true = erlang:delete_module(on_load_server_probe),
+    erts_internal:purge_module(on_load_server_probe, prepare).
 
 fake_purger_call(Mod, Op) ->
     true = unregister(erts_code_purger),

@@ -596,7 +596,7 @@ fn checks_the_arguments_of_erts_internal_purge_module_from_erts_code_purger() {
     // PBeam only: PBeam lets the process registered as `erts_code_purger`
     // call the BIF, and the probe takes the name. The results follow
     // `erts_internal_purge_module_2` (beam_bif_load.c:2094-2098, 2108-2110,
-    // 2122-2126, 2231-2233, 2328-2336). The last load runs the on_load
+    // 2108-2110, 2122-2126, 2231-2233, 2328-2336). The last load runs the on_load
     // function through the real `erts_code_purger` again.
     assert_eq!(
         run(&mut pbeam_probe(
@@ -606,7 +606,7 @@ fn checks_the_arguments_of_erts_internal_purge_module_from_erts_code_purger() {
             &[]
         )),
         "[[{on_load,[on_load_error]},\n  true,\n  {error,badarg},\n  {error,badarg},\n  \
-         {error,badarg},\n  false,true,\n  {error,badarg},\n  {error,badarg},\n  true,\n  \
+         {error,badarg},\n  false,true,\n  {error,badarg},\n  {error,badarg},\n  {error,badarg},\n  true,\n  \
          {error,badarg},\n  false],\n {error,on_load_failure}]\n"
     );
 }
