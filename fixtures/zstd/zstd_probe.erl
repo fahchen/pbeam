@@ -246,7 +246,9 @@ context_cases() ->
               {ok, {compress, C}} = zstd:context(compress),
               {ok, {decompress, D}} = zstd:context(decompress),
               [attempt(F)
-               || F <- [fun() -> zstd:stream({compress, make_ref()}, <<"a">>) end,
+               || F <- [fun() -> zstd:stream({compress, foo}, <<"a">>) end,
+                        fun() -> zstd:close({decompress, foo}) end,
+                        fun() -> zstd:stream({compress, make_ref()}, <<"a">>) end,
                         fun() -> zstd:close({decompress, make_ref()}) end,
                         fun() -> zstd:stream({decompress, C}, <<"a">>) end,
                         fun() -> zstd:stream({compress, D}, <<"a">>) end,
