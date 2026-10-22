@@ -5547,11 +5547,11 @@ const PRELOADED: [&str; 22] = [
 
 /// Run `erlang:loaded/0`, which `erl_init:start/2` calls
 /// (`erl_init.erl:72-80`), as ERTS `loaded_0` (`beam_bif_load.c:762-791`)
-/// does: return the name of each loaded module, in the reverse order of the
-/// module table, which is the load order. ERTS gives the module table
-/// index to a module at its first load; PBeam loads no module twice, so
-/// the load order is the same. A run loads the start modules of the
-/// program first, in the order of the program.
+/// does: return the name of each module with current or old code, in the
+/// reverse order of the module table. ERTS gives the module table index to
+/// a module at its first `erlang:finish_loading/1`, and the index stays
+/// after a delete (see `CodeTable::names`). A run loads the start modules
+/// of the program first, in the order of the program.
 ///
 /// The caller needs a `code` capability that permits `inspect` for each
 /// loaded module, else the call raises `error:capability_denied`, as

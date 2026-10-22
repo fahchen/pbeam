@@ -75,6 +75,12 @@ pub(in crate::runtime) struct CodeTable {
     /// and a second delete gives `badarg`. A load with current and old code
     /// gives `not_purged` (`beam_bif_load.c:444-455`).
     old: HashSet<String>,
+    /// The module names in the order of their first load, as the indices
+    /// of the ERTS module table: `erlang:finish_loading/1` puts the entry of
+    /// each module of its list in list order, and an entry keeps its index
+    /// after a delete (`beam_bif_load.c:425`, `beam_load.c:258`).
+    /// `erlang:loaded/0` reads it.
+    order: Vec<String>,
     /// The `-on_load` flag of each reference of
     /// `erts_internal:prepare_loading/2` that `erlang:finish_loading/1`
     /// consumed. The ERTS magic reference stays valid after the load, so
@@ -217,6 +223,11 @@ impl CodeTable {
     /// assert!(code.get("erlang").is_some());
     /// ```
     pub(in crate::runtime) fn new(modules: HashMap<String, Arc<BeamModule>>) -> Self {
+        // The program loads its modules in its order, so their numbers
+        // give the order.
+        let mut start = modules.values().collect::<Vec<_>>();
+        start.sort_by_key(|module| module.id);
+        let order = start.iter().map(|module| module.name.clone()).collect();
         let by_id = modules
             .values()
             .map(|module| (module.id, LoadedModule::new(Arc::clone(module))))
@@ -227,6 +238,7 @@ impl CodeTable {
             prepared: HashMap::new(),
             on_load: HashMap::new(),
             old: HashSet::new(),
+            order,
             finished_prepared: HashMap::new(),
             purging: None,
         }
@@ -334,9 +346,10 @@ impl CodeTable {
         self.modules.get(name)
     }
 
-    /// Return the names of the loaded modules in load order: a start module
-    /// of the program before each module that a run loads, and the start
-    /// modules in the order of the program.
+    /// Return the names of the modules with current or old code, in the
+    /// order of their first load (see [`Self::order`]): the start modules
+    /// in the order of the program, and then each module in the order of
+    /// its `erlang:finish_loading/1`.
     ///
     /// # Examples
     ///
@@ -344,9 +357,10 @@ impl CodeTable {
     /// assert!(code.names().any(|name| name == "erlang"));
     /// ```
     pub(in crate::runtime) fn names(&self) -> impl Iterator<Item = &str> {
-        let mut modules = self.modules.values().collect::<Vec<_>>();
-        modules.sort_by_key(|module| module.id);
-        modules.into_iter().map(|module| module.name.as_str())
+        self.order
+            .iter()
+            .filter(|name| self.modules.contains_key(*name) || self.old.contains(*name))
+            .map(String::as_str)
     }
 
     /// Return the loaded module `name`.
@@ -782,6 +796,9 @@ impl CodeTable {
             )));
         }
         for (reference, name) in references.iter().zip(names) {
+            if !self.order.contains(&name) {
+                self.order.push(name.clone());
+            }
             let module = self
                 .prepared
                 .remove(reference)
