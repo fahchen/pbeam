@@ -95,7 +95,7 @@ impl FileData {
     /// assert!(data.close().is_some());
     /// assert!(data.close().is_none());
     /// ```
-    fn close(&self) -> Option<File> {
+    pub(super) fn close(&self) -> Option<File> {
         self.with(|state| match std::mem::replace(state, State::Closed) {
             State::Idle(file) => Some(file),
             other => {
@@ -185,21 +185,18 @@ impl Files {
             .is_some_and(|data| data.with(|state| !matches!(state, State::Closed)))
     }
 
-    /// Mark the idle file resource `reference` closed, as `close_nif`
-    /// (`prim_file_nif.c:618-647`) does, and return its host file and its
-    /// owner, which the caller closes: `None` for a reference that is not a
-    /// file resource, and `Some(None)` for a resource that is not idle.
+    /// Return the file resource `reference` and its owner (see
+    /// [`Files::get`]).
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// files.insert(Reference(0), file, ProcessId(1));
-    /// assert!(matches!(files.close(Reference(0)), Some(Some((_, ProcessId(1))))));
-    /// assert!(matches!(files.close(Reference(0)), Some(None)));
+    /// assert!(matches!(files.with_owner(Reference(0)), Some((_, ProcessId(1)))));
     /// ```
-    pub(super) fn close(&mut self, reference: Reference) -> Option<Option<(File, ProcessId)>> {
+    pub(super) fn with_owner(&self, reference: Reference) -> Option<(Arc<FileData>, ProcessId)> {
         let (data, owner) = self.by_reference.get(&reference)?;
-        Some(data.close().map(|file| (file, *owner)))
+        Some((Arc::clone(data), *owner))
     }
 
     /// Run the monitor of the file resource `reference` on its owner after

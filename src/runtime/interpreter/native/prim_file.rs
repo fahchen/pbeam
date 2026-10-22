@@ -326,36 +326,42 @@ fn translate_modelist(atoms: &AtomTable, modes: &Term) -> OpenModes {
 
 /// Run `prim_file:close_nif(Fd)`, as the ERTS NIF `close_nif`
 /// (`prim_file_nif.c:618-647`) does: a term that is not a file resource
-/// raises `error:badarg`, a closed resource gives `{error, einval}`, and
-/// else the binding removes the monitor of the resource on its owner
-/// (`enif_demonitor_process`, `prim_file_nif.c:633`), closes the host
-/// file with [`file::close`], and gives `ok`, or `{error, Errno}` for a
-/// failed `close`.
+/// raises `error:badarg`. On a dirty IO thread, a resource that is not idle
+/// gives `{error, einval}`, and else the binding marks the resource closed
+/// and closes the host file with [`file::close`] (see `FileData::close`).
+/// A call that does not start, because its caller exits first, leaves the
+/// resource open, as in ERTS. Then the binding removes the monitor of the
+/// resource on its owner (`enif_demonitor_process`, `prim_file_nif.c:633`)
+/// and gives `ok`, or `{error, Errno}` for a failed `close`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(matches!(close_nif(&mut scheduler, &fd)?, BifResult::Value(Term::Atom(_))));
-/// // {error, einval}
-/// assert!(matches!(close_nif(&mut scheduler, &fd)?, BifResult::Value(Term::Tuple(_))));
+/// assert!(matches!(close_nif(&mut scheduler, &fd)?, BifResult::Dirty(_)));
 /// ```
-///
-/// # Errors
-///
-/// The atom `einval` in a full atom table gives the error of
-/// `AtomTable::put`.
 fn close_nif(scheduler: &mut Scheduler, fd: &Term) -> Result<BifResult, BeamError> {
     let Term::Reference(reference) = fd else {
         return Ok(BifResult::badarg());
     };
-    match scheduler.resources.borrow_mut::<Files>().close(*reference) {
-        None => Ok(BifResult::badarg()),
-        Some(None) => error_tuple(&mut scheduler.atoms, "einval"),
-        Some(Some((file, owner))) => {
-            scheduler.demonitor_file(owner, *reference);
-            dirty_value(move || file::close(file).map(|()| Term::static_atom("ok")))
-        }
-    }
+    let reference = *reference;
+    let Some((data, owner)) = scheduler
+        .resources
+        .borrow_mut::<Files>()
+        .with_owner(reference)
+    else {
+        return Ok(BifResult::badarg());
+    };
+    dirty(
+        move || data.close().map(file::close),
+        move |scheduler, closed| match closed {
+            None => einval(),
+            Some(closed) => {
+                scheduler.demonitor_file(owner, reference);
+                let closed = closed.map(|()| Term::static_atom("ok"));
+                value_or_error(&mut scheduler.atoms, closed)
+            }
+        },
+    )
 }
 
 /// The result of an argument of a file handle NIF that is not valid: the
@@ -372,7 +378,7 @@ enum Reject {
 /// does, and then `finish` on the scheduler thread with the value of
 /// `operation`. A term that is not a file resource raises `error:badarg`.
 /// On the dirty thread, a resource that is not idle gives
-/// `{error, einval}` (see [`FileData::acquire`]); then `arguments`, which
+/// `{error, einval}` (see `FileData::acquire`); then `arguments`, which
 /// the binding read on the scheduler thread, gives its `Reject`, as the
 /// NIF checks its arguments after the state; else `operation` runs with
 /// them.
