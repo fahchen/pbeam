@@ -435,7 +435,7 @@ fn probes(program: &BeamProgram, path: &str) -> Vec<Option<i64>> {
 /// mise run erts-eval --pa $PWD/fixtures/nif 'nif_add:probes("/tmp/pbeam866/probe")'
 /// [7,{error,badarg,{nif_add,add,[0,-1],[]}},-1,{error,badarg,...},{error,badarg,...},
 ///  {error,badarg,...},0,1000,4097,-3903,-3903,97,97,97,0,0,0,3,2,2,
-///  {error,badarg,{nif_add,add,[3,"ab"],[]}},2104,{error,badarg,{nif_add,add,[a,0],[]}}]
+///  {error,badarg,{nif_add,add,[3,"ab"],[]}},2111,{error,badarg,{nif_add,add,[a,0],[]}}]
 /// ```
 const PROBES: [Option<i64>; 23] = [
     Some(7),
@@ -459,7 +459,7 @@ const PROBES: [Option<i64>; 23] = [
     Some(2),
     Some(2),
     None,
-    Some(2104),
+    Some(2111),
     None,
 ];
 

@@ -60,11 +60,12 @@ int nif_add_dep(void);
  * Run one enif call on arg and return its result:
  *
  *   0  enif_get_uint, the value or badarg
- *   1  enif_get_string with a buffer of 0 bytes, the result
+ *   1  enif_get_string with a NULL buffer of 0 bytes, the result
  *   2  enif_get_string with a buffer of 4 bytes, the result * 1000 + the
  *      first byte
  *   3  enif_inspect_binary, the size or badarg
- *   4  enif_inspect_binary of a new binary "hi", size * 1000 + first byte
+ *   4  enif_inspect_binary of a new binary "hi", then a write of "o" as
+ *      its second byte, size * 1000 + the second byte that bin.data reads
  *   5  enif_get_string with ERL_NIF_UTF8, the result
  *   6  the name of the thread of the call, as a new binary
  */
@@ -81,7 +82,7 @@ static ERL_NIF_TERM probe(ErlNifEnv *env, int kind, ERL_NIF_TERM arg)
     case 0:
         return enif_get_uint(env, arg, &value) ? enif_make_int(env, (int)value) : enif_make_badarg(env);
     case 1:
-        return enif_make_int(env, enif_get_string(env, arg, buf, 0, ERL_NIF_LATIN1));
+        return enif_make_int(env, enif_get_string(env, arg, NULL, 0, ERL_NIF_LATIN1));
     case 2:
         result = enif_get_string(env, arg, buf, sizeof(buf), ERL_NIF_LATIN1);
         return enif_make_int(env, result * 1000 + (unsigned char)buf[0]);
@@ -94,7 +95,8 @@ static ERL_NIF_TERM probe(ErlNifEnv *env, int kind, ERL_NIF_TERM arg)
         if (!enif_inspect_binary(env, made, &bin)) {
             return enif_make_badarg(env);
         }
-        return enif_make_int(env, (int)bin.size * 1000 + bin.data[0]);
+        data[1] = 'o';
+        return enif_make_int(env, (int)bin.size * 1000 + bin.data[1]);
     case 5:
         return enif_make_int(env, enif_get_string(env, arg, buf, sizeof(buf), ERL_NIF_UTF8));
     default:

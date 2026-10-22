@@ -307,9 +307,14 @@ pub unsafe extern "C" fn enif_inspect_binary(
 ) -> c_int {
     // SAFETY: the C API gives the env of the current call.
     let env = unsafe { env(env_pointer) };
-    let bytes: &[u8] = match env.slot(term) {
-        Some(Slot::Term(Term::Binary(binary))) if binary.bit_size() % 8 == 0 => binary,
-        Some(Slot::Buffer(bytes)) => bytes,
+    let (data, size) = match env.slot(term) {
+        Some(Slot::Term(Term::Binary(binary))) if binary.bit_size() % 8 == 0 => {
+            (binary.as_ptr(), binary.len())
+        }
+        // `Vec::as_ptr` makes no reference to the bytes, so the address
+        // stays valid when the NIF writes the bytes through the address of
+        // `enif_make_new_binary` after this call.
+        Some(Slot::Buffer(bytes)) => (bytes.as_ptr(), bytes.len()),
         _ => return 0,
     };
     // SAFETY: the C API requires that `bin` points to a writable
@@ -318,8 +323,8 @@ pub unsafe extern "C" fn enif_inspect_binary(
     // moves its bytes. The C API allows the NIF to read the bytes only in
     // the call and not to write them (`erl_nif.c:1376`).
     unsafe {
-        (&raw mut (*bin).size).write(bytes.len());
-        (&raw mut (*bin).data).write(bytes.as_ptr().cast_mut());
+        (&raw mut (*bin).size).write(size);
+        (&raw mut (*bin).data).write(data.cast_mut());
         (&raw mut (*bin).ref_bin).write(std::ptr::null_mut());
     }
     1
