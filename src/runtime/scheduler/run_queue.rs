@@ -6,6 +6,10 @@ use crate::{runtime::process::Priority, term::ProcessId};
 /// `normal` queue before it runs (`RESCHEDULE_LOW`, `erl_process.h:373`).
 const RESCHEDULE_LOW: u8 = 8;
 
+/// The most processes that one steal takes, as ERTS limits the critical
+/// section of a steal (`erl_process.c:4533-4534`).
+const STEAL_LIMIT: usize = 100;
+
 /// The process run queue of the scheduler, as the process part of the ERTS
 /// `ErtsRunQueue` (`erl_process.h`): one queue for `max`, one for `high`,
 /// and one that `normal` and `low` processes share. The `schedule_count`
@@ -90,6 +94,66 @@ impl RunQueue {
     /// ```rust,ignore
     /// assert_eq!(queue.ids(), [ProcessId(1)]);
     /// ```
+    /// Return the number of processes in the queue.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// queue.push(a, Priority::Low);
+    /// assert_eq!(queue.len(), 1);
+    /// ```
+    pub(in crate::runtime) fn len(&self) -> usize {
+        self.max.len() + self.high.len() + self.normal.len()
+    }
+
+    /// Take the processes that an idle scheduler steals: from the head of
+    /// the queue of the highest priority with a process, at most half of
+    /// that queue and at most [`STEAL_LIMIT`], skipping each process for
+    /// which `stealable` is false. The `normal` queue holds the `low`
+    /// processes too, as the ERTS normal queue does. The scheduler of this
+    /// queue keeps the process that it runs next, so the half counts it as
+    /// the process that the ERTS victim runs: ERTS steals `(len + 1) / 2`
+    /// of the queue without its running process (`try_steal_task_from_victim`,
+    /// `erl_process.c:4497-4558`), which is `len / 2` of this queue. ERTS
+    /// skips a process bound to its run queue (`erts_try_change_runq_proc`,
+    /// `erl_process.h:2722-2723`), as `stealable` does.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// queue.push(a, Priority::Normal);
+    /// queue.push(b, Priority::Normal);
+    /// assert_eq!(queue.steal(|_| true), vec![a]);
+    /// assert_eq!(queue.pop(), Some(b));
+    /// ```
+    pub(in crate::runtime) fn steal(
+        &mut self,
+        mut stealable: impl FnMut(ProcessId) -> bool,
+    ) -> Vec<ProcessId> {
+        let queue = [&mut self.max, &mut self.high, &mut self.normal]
+            .into_iter()
+            .find(|queue| !queue.is_empty());
+        let Some(queue) = queue else {
+            return Vec::new();
+        };
+        let mut count = (queue.len() / 2).min(STEAL_LIMIT);
+        let mut stolen = Vec::new();
+        let mut kept = VecDeque::with_capacity(queue.len());
+        for id in queue.drain(..) {
+            if count > 0 && stealable(id) {
+                count -= 1;
+                stolen.push(id);
+            } else {
+                kept.push_back(id);
+            }
+        }
+        *queue = kept;
+        for id in &stolen {
+            self.low.remove(id);
+        }
+        stolen
+    }
+
     #[cfg(test)]
     pub(super) fn ids(&self) -> Vec<ProcessId> {
         let queues = self.max.iter().chain(&self.high).chain(&self.normal);

@@ -24,6 +24,7 @@ use std::{
 };
 
 use super::{Signal, process_table::ProcessTable};
+use crate::runtime::process::ProcessState;
 use crate::{
     error::{BeamError, error},
     runtime::{dirty::Pools, host::clock},
@@ -46,6 +47,9 @@ pub(in crate::runtime) enum Delivery {
         sender: Option<ProcessId>,
         signal: Signal,
     },
+    /// A runnable process that another scheduler gives to this scheduler
+    /// ([`Node::transfer`]). The receiver puts it into its run queue.
+    Process(Box<ProcessState>),
 }
 
 /// The inbox of one scheduler: the deliveries that it did not apply yet,
@@ -116,6 +120,10 @@ pub(in crate::runtime) struct Node {
     /// The number of schedulers that wait in the idle state (see
     /// [`Self::enter_idle`]).
     idle: Mutex<usize>,
+    /// One flag for each scheduler: true while the scheduler has no
+    /// runnable process and waits for work that another scheduler can give
+    /// it ([`Self::set_hungry`], [`Self::give_work`]).
+    hungry: Vec<AtomicBool>,
     /// True after the last root exited, or after a root or a scheduler
     /// failed.
     shutdown: AtomicBool,
@@ -173,6 +181,7 @@ impl Node {
                 roots: Roots::new(count),
                 schedulers: count,
                 idle: Mutex::new(0),
+                hungry: (0..count).map(|_| AtomicBool::new(false)).collect(),
                 shutdown: AtomicBool::new(false),
                 clock: (Instant::now(), clock::system_time()),
                 dirty: Pools::new(count),
@@ -234,6 +243,7 @@ impl Node {
             roots: Roots::new(1),
             schedulers: 1,
             idle: Mutex::new(0),
+            hungry: Vec::new(),
             shutdown: AtomicBool::new(false),
             clock: (Instant::now(), clock::system_time()),
             dirty: Pools::new(1),
@@ -333,9 +343,13 @@ impl Node {
         self.processes.live_owner(id)
     }
 
-    /// Put a message for `target` into the inbox of `index`. `pending` is
-    /// the monitor signal that goes before the message, as the send path
-    /// gives it.
+    /// Put a message for `target` into the inbox of its scheduler. `pending`
+    /// is the monitor signal that goes before the message, as the send path
+    /// gives it. The scheduler is read again while the shard of `target` is
+    /// locked, so a message after a steal goes to the new scheduler and
+    /// after the process ([`Self::transfer`]). `index` is the scheduler that
+    /// the sender found; the message goes there when `target` left the
+    /// table, and that scheduler handles it as for a dead target.
     pub(in crate::runtime) fn send_message(
         &self,
         index: usize,
@@ -344,8 +358,8 @@ impl Node {
         target: ProcessId,
         pending: Option<Signal>,
     ) {
-        let inbox = &self.inboxes[index];
-        {
+        let inbox = self.processes.with_owner(target, |owner| {
+            let inbox = &self.inboxes[owner.unwrap_or(index)];
             let mut queue = inbox
                 .queue
                 .lock()
@@ -358,12 +372,14 @@ impl Node {
                 });
             }
             queue.push_back(Delivery::Message { target, from, term });
-        }
+            inbox
+        });
         wake(&inbox.wake);
     }
 
-    /// Put the signal for `target` into the inbox of `index`. `pending` is
-    /// the monitor signal that goes before it, as the send path gives it.
+    /// Put the signal for `target` into the inbox of its scheduler. `pending`
+    /// is the monitor signal that goes before it, as the send path gives it.
+    /// The scheduler is read as [`Self::send_message`] reads it.
     pub(in crate::runtime) fn send_signal(
         &self,
         index: usize,
@@ -372,8 +388,8 @@ impl Node {
         signal: Signal,
         pending: Option<Signal>,
     ) {
-        let inbox = &self.inboxes[index];
-        {
+        let inbox = self.processes.with_owner(target, |owner| {
+            let inbox = &self.inboxes[owner.unwrap_or(index)];
             let mut queue = inbox
                 .queue
                 .lock()
@@ -390,8 +406,136 @@ impl Node {
                 sender,
                 signal,
             });
-        }
+            inbox
+        });
         wake(&inbox.wake);
+    }
+
+    /// Mark the scheduler `index` as a scheduler that has no runnable
+    /// process (`hungry` true) or that has work again (`hungry` false). The
+    /// mark changes under the lock of the idle count, as each steal reads it
+    /// ([`Self::give_work`]). Thus after a call with `false`, each process
+    /// that a steal gave the scheduler is in its inbox, and the scheduler
+    /// takes it at its next step, before it runs a process.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// node.set_hungry(1, true);
+    /// assert!(node.has_hungry(0));
+    /// ```
+    pub(in crate::runtime) fn set_hungry(&self, index: usize, hungry: bool) {
+        let _idle = self.idle.lock().expect("the idle count is not poisoned");
+        self.hungry[index].store(hungry, Ordering::Relaxed);
+    }
+
+    /// Return whether a scheduler other than `index` has no runnable
+    /// process. The read takes no lock, so it is only a hint for
+    /// [`Self::give_work`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(!node.has_hungry(0));
+    /// ```
+    pub(in crate::runtime) fn has_hungry(&self, index: usize) -> bool {
+        self.hungry
+            .iter()
+            .enumerate()
+            .any(|(thief, hungry)| thief != index && hungry.load(Ordering::Relaxed))
+    }
+
+    /// Give work of the scheduler `from` to the first scheduler after
+    /// `from`, in the cyclic order of the scheduler indices, that has no
+    /// runnable process. ERTS gives the same order from the side of the
+    /// thief: an empty run queue tries the queues after its own index
+    /// (`try_steal_task`, `erl_process.c:4682-4697`). `take` gives the
+    /// processes, and each moves with [`Self::transfer`]. The lock of the
+    /// idle count stays held from the read of the mark to the last move,
+    /// so the receiver cannot leave its wait between them (see
+    /// [`Self::set_hungry`]). The receiver keeps its mark when `take` gives
+    /// no process. Return the number of processes that moved.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// node.set_hungry(1, true);
+    /// assert_eq!(node.give_work(0, || vec![process]), 1);
+    /// assert!(!node.has_hungry(0));
+    /// ```
+    pub(in crate::runtime) fn give_work(
+        &self,
+        from: usize,
+        take: impl FnOnce() -> Vec<ProcessState>,
+    ) -> usize {
+        let _idle = self.idle.lock().expect("the idle count is not poisoned");
+        let count = self.hungry.len();
+        let Some(thief) = (1..count)
+            .map(|step| (from + step) % count)
+            .find(|&thief| self.hungry[thief].load(Ordering::Relaxed))
+        else {
+            return 0;
+        };
+        let processes = take();
+        if !processes.is_empty() {
+            self.hungry[thief].store(false, Ordering::Relaxed);
+        }
+        let moved = processes.len();
+        for process in processes {
+            self.transfer(from, thief, Box::new(process));
+        }
+        moved
+    }
+
+    /// Give the runnable process `process` of the scheduler `from` to the
+    /// scheduler `to`. While the shard of the process is locked, the owner
+    /// in the process table becomes `to`, the deliveries for the process
+    /// that wait in the inbox of `from` leave it in their order, and the
+    /// inbox of `to` gets the process and then those deliveries. Each
+    /// sender reads the owner under the same lock ([`Self::send_message`]),
+    /// so a later delivery goes to `to` after them, and the deliveries of
+    /// one sender keep their order.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// node.transfer(0, 1, Box::new(process));
+    /// assert_eq!(node.owner(id), Some(1));
+    /// ```
+    pub(in crate::runtime) fn transfer(&self, from: usize, to: usize, process: Box<ProcessState>) {
+        let id = process.id;
+        self.processes.move_owner(id, to, || {
+            let mut moved = Vec::new();
+            {
+                let mut queue = self.inboxes[from]
+                    .queue
+                    .lock()
+                    .expect("the scheduler inbox is not poisoned");
+                let mut kept = VecDeque::with_capacity(queue.len());
+                for delivery in queue.drain(..) {
+                    // A process for `from` stays: `from` runs, so no
+                    // steal gives it a process (`Self::give_work`).
+                    let follows = matches!(
+                        &delivery,
+                        Delivery::Message { target, .. } | Delivery::Signal { target, .. }
+                            if *target == id
+                    );
+                    if follows {
+                        moved.push(delivery);
+                    } else {
+                        kept.push_back(delivery);
+                    }
+                }
+                *queue = kept;
+            }
+            let mut queue = self.inboxes[to]
+                .queue
+                .lock()
+                .expect("the scheduler inbox is not poisoned");
+            queue.push_back(Delivery::Process(process));
+            queue.extend(moved);
+        });
+        wake(&self.inboxes[to].wake);
     }
 
     /// Move each delivery of the inbox of `index` into `out`.

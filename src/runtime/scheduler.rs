@@ -1104,6 +1104,9 @@ impl Scheduler {
         // process that this step runs waits for the release of at most
         // [`RELEASE_BATCH`] nodes.
         self.drain_release(RELEASE_BATCH);
+        if self.multi {
+            self.serve_steal();
+        }
         let Some(id) = self.runnable.pop() else {
             // A step that releases work reports `Done`, so that the run loop
             // keeps stepping and the release completes. An `Idle` step would
@@ -1122,6 +1125,10 @@ impl Scheduler {
         if self.processes[&id].dirty_running() {
             self.handle_dirty_signals(id)?;
             return Ok(Turn::Done);
+        }
+        if self.multi {
+            // Only a borrow in the turn of this process pins it.
+            self.resources.take_touched();
         }
         let process = self.processes.set_current(id);
         process.in_run_queue = false;
@@ -2246,11 +2253,15 @@ impl Scheduler {
     fn schedule_out(&mut self) -> &mut ProcessState {
         let used = self.current_reductions();
         self.virtual_reductions = 0;
+        let touched = self.multi && self.resources.take_touched();
         let process = self
             .processes
             .take_current()
             .expect("the scheduler has a current process");
         process.reductions += used;
+        // A process that used a scheduler service in this turn stays with
+        // the scheduler (see `ProcessState::pinned`).
+        process.pinned |= touched;
         process
     }
 
@@ -2771,6 +2782,7 @@ impl Scheduler {
                         self.dead_target_signal(target, *signal);
                     }
                 }
+                Delivery::Process(process) => self.adopt(*process),
             }
         }
         drained
@@ -3737,6 +3749,7 @@ mod process_slots;
 mod process_table;
 pub(super) mod run_queue;
 mod signals;
+mod steal;
 mod tcp_inet;
 mod tcp_stream;
 

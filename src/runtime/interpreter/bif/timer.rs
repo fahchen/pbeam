@@ -256,6 +256,9 @@ fn setup(
                 message,
             },
         );
+        // The timer stays with this scheduler, and so does the process that
+        // can read or cancel it (see `ProcessState::pinned`).
+        scheduler.current_process_mut().pinned = true;
         scheduler
             .node()
             .register_timer(reference, scheduler.index());

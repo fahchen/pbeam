@@ -23,6 +23,10 @@ use std::fmt;
 pub(super) struct Resources {
     /// Each value by the `TypeId` of its type.
     data: BTreeMap<TypeId, Box<dyn Any>>,
+    /// True after a borrow of a value since the last
+    /// [`Resources::take_touched`]. The scheduler reads it at the switch
+    /// out of a process, because each value stays with its scheduler.
+    touched: bool,
 }
 
 impl Resources {
@@ -54,6 +58,7 @@ impl Resources {
     ///
     /// Panic when the resources have no value of type `T`.
     pub(super) fn borrow_mut<T: 'static>(&mut self) -> &mut T {
+        self.touched = true;
         self.data
             .get_mut(&TypeId::of::<T>())
             .and_then(|value| value.downcast_mut())
@@ -73,11 +78,27 @@ impl Resources {
     /// assert!(resources.borrow_mut_or_default::<RegexCodes>().0.is_empty());
     /// ```
     pub(super) fn borrow_mut_or_default<T: Default + 'static>(&mut self) -> &mut T {
+        self.touched = true;
         self.data
             .entry(TypeId::of::<T>())
             .or_insert_with(|| Box::new(T::default()))
             .downcast_mut()
             .expect("the value of the key has the type of the key")
+    }
+
+    /// Return whether a value was borrowed since the last call, and clear
+    /// the mark.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut resources = Resources::default();
+    /// let _ = resources.borrow_mut_or_default::<RegexCodes>();
+    /// assert!(resources.take_touched());
+    /// assert!(!resources.take_touched());
+    /// ```
+    pub(super) fn take_touched(&mut self) -> bool {
+        std::mem::take(&mut self.touched)
     }
 }
 
