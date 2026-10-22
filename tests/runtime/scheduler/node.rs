@@ -75,3 +75,60 @@ fn a_failed_root_ends_the_run_while_another_root_lives() {
 fn a_root_needs_a_slot_of_the_node() {
     Node::single().add_root(1);
 }
+
+/// The last scheduler that becomes idle decides the impossible wait, and a
+/// scheduler that still runs prevents it.
+#[test]
+fn the_last_idle_scheduler_decides_the_wait() {
+    let (node, _readers) = Node::new(2).unwrap();
+    assert!(!node.enter_idle(), "the other scheduler still runs");
+    assert!(node.enter_idle(), "each scheduler is idle");
+}
+
+/// A sender puts its delivery into the inbox of an idle receiver and then
+/// becomes idle. The delivery in flight prevents the decision, and the
+/// receiver decides after it took the delivery and became idle again.
+#[test]
+fn a_delivery_in_flight_prevents_the_decision() {
+    let (node, _readers) = Node::new(2).unwrap();
+    assert!(!node.enter_idle(), "the receiver waits");
+    node.send_message(0, Some(ProcessId(1)), Term::Integer(1), ProcessId(0), None);
+    assert!(!node.enter_idle(), "the delivery waits in the inbox");
+    node.leave_idle();
+    let mut deliveries = Vec::new();
+    node.take(0, &mut deliveries);
+    assert_eq!(deliveries.len(), 1);
+    assert!(node.enter_idle(), "no delivery waits");
+}
+
+/// A receiver that woke leaves the idle state before it takes its inbox, so
+/// a sender that becomes idle while the receiver handles the delivery does
+/// not decide.
+#[test]
+fn a_scheduler_that_left_the_idle_state_prevents_the_decision() {
+    let (node, _readers) = Node::new(2).unwrap();
+    assert!(!node.enter_idle());
+    node.leave_idle();
+    assert!(!node.enter_idle(), "the receiver handles its delivery");
+}
+
+/// The last idle scheduler holds the idle count while it reads the inboxes,
+/// so no scheduler can leave the idle state and take a delivery during the
+/// check.
+#[test]
+fn the_check_of_the_inboxes_holds_the_idle_count() {
+    let (node, _readers) = Node::new(1).unwrap();
+    let inbox = node.inboxes[0].queue.lock().unwrap();
+    std::thread::scope(|scope| {
+        let decider = scope.spawn(|| node.enter_idle());
+        // The decider holds the idle count and waits for the inbox.
+        while node.idle.try_lock().is_ok() {
+            std::thread::yield_now();
+        }
+        assert!(node.idle.try_lock().is_err(), "a leave waits for the check");
+        drop(inbox);
+        assert!(decider.join().unwrap());
+    });
+    node.leave_idle();
+    assert_eq!(*node.idle.lock().unwrap(), 0);
+}

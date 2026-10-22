@@ -18,7 +18,7 @@ use std::{
     os::unix::net::UnixStream,
     sync::{
         Arc, Mutex, OnceLock,
-        atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
     },
     time::Instant,
 };
@@ -113,8 +113,9 @@ pub(in crate::runtime) struct Node {
     roots: Mutex<Roots>,
     /// The number of schedulers of the node.
     schedulers: usize,
-    /// The number of live processes.
-    live: AtomicUsize,
+    /// The number of schedulers that wait in the idle state (see
+    /// [`Self::enter_idle`]).
+    idle: Mutex<usize>,
     /// True after the last root exited, or after a root or a scheduler
     /// failed.
     shutdown: AtomicBool,
@@ -171,7 +172,7 @@ impl Node {
                 next_unlink_id: AtomicU64::new(1),
                 roots: Roots::new(count),
                 schedulers: count,
-                live: AtomicUsize::new(0),
+                idle: Mutex::new(0),
                 shutdown: AtomicBool::new(false),
                 clock: (Instant::now(), clock::system_time()),
                 dirty: Pools::new(count),
@@ -232,7 +233,7 @@ impl Node {
             next_unlink_id: AtomicU64::new(1),
             roots: Roots::new(1),
             schedulers: 1,
-            live: AtomicUsize::new(0),
+            idle: Mutex::new(0),
             shutdown: AtomicBool::new(false),
             clock: (Instant::now(), clock::system_time()),
             dirty: Pools::new(1),
@@ -254,7 +255,6 @@ impl Node {
     /// Make the process `id` the process of the scheduler `index`.
     pub(in crate::runtime) fn register(&self, id: ProcessId, index: usize) {
         self.processes.insert(id, index);
-        self.live.fetch_add(1, Ordering::AcqRel);
     }
 
     /// Mark the process `id` as exiting, as `set_self_exiting`
@@ -281,19 +281,44 @@ impl Node {
         });
     }
 
-    /// Record the exit of a process after its exit signals. A waiting root
-    /// reads the count at the impossible-wait check, so the decrement comes
-    /// after the notifications of the exit and wakes each scheduler.
-    pub(in crate::runtime) fn live_exit(&self) {
-        self.live.fetch_sub(1, Ordering::AcqRel);
-        for inbox in &self.inboxes {
-            wake(&inbox.wake);
-        }
+    /// Count the scheduler that calls as idle, and return true when the run
+    /// is stuck: each scheduler of the node is idle, and no delivery waits
+    /// in an inbox. A scheduler is idle when it has no process that can
+    /// run, no release work, no timer, no dirty call, and no input source
+    /// (see `idle_step`), so each live process waits and no source can
+    /// make a process runnable.
+    ///
+    /// Only a scheduler that runs sends a delivery, and it puts the
+    /// delivery into the inbox before it becomes idle. A scheduler leaves
+    /// the idle state with [`Self::leave_idle`] before it takes its inbox.
+    /// The count and the check of the inboxes hold one lock, so a scheduler
+    /// cannot leave the idle state and take a delivery while the last idle
+    /// scheduler reads the inboxes.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let (node, _readers) = Node::new(2).unwrap();
+    /// assert!(!node.enter_idle());
+    /// assert!(node.enter_idle());
+    /// ```
+    pub(in crate::runtime) fn enter_idle(&self) -> bool {
+        let mut idle = self.idle.lock().expect("the idle count is not poisoned");
+        *idle += 1;
+        *idle == self.schedulers
+            && self.inboxes.iter().all(|inbox| {
+                inbox
+                    .queue
+                    .lock()
+                    .expect("the scheduler inbox is not poisoned")
+                    .is_empty()
+            })
     }
 
-    /// Return the number of live processes.
-    pub(in crate::runtime) fn live_processes(&self) -> usize {
-        self.live.load(Ordering::Acquire)
+    /// Count the scheduler that calls out of the idle state, after its wait
+    /// ends and before it takes its inbox or runs a process.
+    pub(in crate::runtime) fn leave_idle(&self) {
+        *self.idle.lock().expect("the idle count is not poisoned") -= 1;
     }
 
     /// Return the scheduler of the live process `id`.

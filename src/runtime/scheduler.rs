@@ -2483,14 +2483,6 @@ impl Scheduler {
         self.node.name_of(id).and_then(|name| self.atoms.get(&name))
     }
 
-    /// Return true when a root process of this scheduler waits for a
-    /// message.
-    pub(super) fn local_root_waits(&self) -> bool {
-        self.processes
-            .values()
-            .any(|process| process.root.is_some() && process.waiting)
-    }
-
     /// Return the atom table of the run. The table holds each name that the
     /// run created, for example each name of `erlang:list_to_atom/1`, so a
     /// host result that carries the table can name every atom of a root
@@ -3714,7 +3706,6 @@ impl Scheduler {
         }
         self.alias_owners.retain(|_, owner| *owner != id);
         self.send_pending_monitor();
-        self.node.live_exit();
         if let Some(slot) = process.root {
             self.node.root_exit(slot);
         }
