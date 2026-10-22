@@ -118,26 +118,39 @@ struct ErlCli {
 /// (`erts/etc/common/erlexec.c:661-861`, `2122-2140`). PBeam has no
 /// `erlexec` for them, and `-name` and `-sname` start the distribution,
 /// which PBeam does not have, as `-proto_dist` and `-start_epmd` configure
-/// it. `pbeam erl` rejects each of them before `-extra`. Each `erlexec`
-/// option with an operand is in the list, so the first `-extra` is the one
-/// that `erlexec` reads as an option (`erlexec.c:708-712`).
-const ERLEXEC_OPTIONS: [&str; 19] = [
+/// it. `-emu_type` and `-emu_flavor` select the emulator, the `-smp`
+/// options are checked by `erlexec` (`-smp disable` and `-smpdisable` stop
+/// it), `-no_epmd` needs `-proto_dist` (`erlexec.c:499-534`, `1118-1123`),
+/// and `-S` makes `erlexec` rewrite the later arguments and add `-noshell`
+/// (`erlexec.c:1084-1090`, `2222-2238`). `pbeam erl` rejects each of them
+/// before `-extra`. Each `erlexec` option with an operand is in the list,
+/// so the first `-extra` is the one that `erlexec` reads as an option
+/// (`erlexec.c:708-712`).
+const ERLEXEC_OPTIONS: [&str; 27] = [
+    "-S",
     "-args_file",
     "-compile",
     "-configfd",
     "-detached",
     "-emu_args",
     "-emu_args_exit",
+    "-emu_flavor",
     "-emu_name_exit",
     "-emu_qouted_cmd_exit",
+    "-emu_type",
     "-env",
     "-epmd",
     "-keep_window",
     "-make",
     "-man",
     "-name",
+    "-no_epmd",
     "-noinput",
     "-proto_dist",
+    "-smp",
+    "-smpauto",
+    "-smpdisable",
+    "-smpenable",
     "-sname",
     "-start_epmd",
     "-version",

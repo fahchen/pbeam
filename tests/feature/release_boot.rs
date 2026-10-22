@@ -158,7 +158,22 @@ fn rejects_the_options_and_variables_of_erlexec() {
     // (erlexec.c:661-861, 869-964, 2122-2140), and the flags of
     // `ERL_AFLAGS`, `ERL_FLAGS`, and `ERL_ZFLAGS`. `pbeam erl` has no
     // `erlexec` part for them, and no distribution for `-sname`.
-    let cases: [Rejected; 7] = [
+    let cases: [Rejected; 10] = [
+        (
+            &["-S", "release_boot_probe", "main", "--", "x"],
+            &[],
+            "the erl option -S is not supported",
+        ),
+        (
+            &["-emu_type", "debug"],
+            &[],
+            "the erl option -emu_type is not supported",
+        ),
+        (
+            &["-smp", "disable"],
+            &[],
+            "the erl option -smp is not supported",
+        ),
         (
             &["-sname", "node", "-extra", "-sname"],
             &[],
