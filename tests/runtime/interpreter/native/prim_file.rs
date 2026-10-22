@@ -25,7 +25,7 @@ fn debug_bif(result: &BifResult, atoms: &AtomTable) -> String {
 fn run(scheduler: &mut Scheduler, result: Result<BifResult, BeamError>) -> BifResult {
     match result.unwrap() {
         BifResult::Dirty(Work::Host(Host(host))) => {
-            let Finish(finish) = host();
+            let finish = host();
             finish(scheduler).unwrap()
         }
         result => result,

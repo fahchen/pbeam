@@ -1,7 +1,7 @@
 use super::{
     Job,
     capability::{Policy, Restriction},
-    dirty::{Finish, Output, Work},
+    dirty::{Output, Work},
     process::{
         DirtyCall, Frame, PendingBif, PendingTrap, ProcessState, ReceiveTimer, StackSlot, Start,
         StartFlags,
@@ -1079,7 +1079,7 @@ impl BeamProgram {
                     native::dirty_write_result(&mut scheduler.atoms, written)?
                 }
                 Output::Native(result) => native::to_bif_result(result?),
-                Output::Host(Finish(finish)) => finish(scheduler)?,
+                Output::Host(finish) => finish.run(scheduler)?,
             };
             let outcome = match result {
                 BifResult::Raise { class, reason } => {

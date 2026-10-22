@@ -14,7 +14,7 @@
 
 use super::*;
 use crate::runtime::{
-    dirty::{Finish, Host},
+    dirty::{FinishFn, Host},
     files::Files,
     host::{
         errno::errno_id,
@@ -439,7 +439,8 @@ fn dirty<T: Send + 'static>(
 ) -> Result<BifResult, BeamError> {
     Ok(BifResult::Dirty(Work::Host(Host(Box::new(move || {
         let value = host();
-        Finish(Box::new(move |scheduler| finish(scheduler, value)))
+        let finish: Box<FinishFn> = Box::new(move |scheduler| finish(scheduler, value));
+        finish
     })))))
 }
 
