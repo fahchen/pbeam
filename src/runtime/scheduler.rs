@@ -30,8 +30,7 @@ use super::{
     port::Ports,
     process::{
         DirtyCall, Flush, Frame, LinkId, Monitor, MonitorLinkTree, Origin, OriginMonitor,
-        ProcessState, ReceiveTimer, StackSlot, Start, StartFlags, TargetMonitor, TimerReference,
-        WalkPosition,
+        ProcessState, ReceiveTimer, StackSlot, Start, StartFlags, TargetMonitor, WalkPosition,
     },
     regex_code::RegexCodes,
     resources::Resources,
@@ -1235,7 +1234,6 @@ impl Scheduler {
                     receiver,
                     message,
                 } => {
-                    self.forget_bif_timer(&receiver, reference);
                     // A timer that another scheduler canceled first sends
                     // nothing, as `bif_timer_timeout` finds it canceled
                     // (`erl_hl_timer.c:1155-1162`).
@@ -1848,7 +1846,7 @@ impl Scheduler {
     /// Cancel the BIF timer `reference`, as `cancel_bif_timer` does
     /// (`erl_hl_timer.c:1895-1971`). Return its end tick, or `None` when no
     /// BIF timer with the reference is active. The timer leaves the timer
-    /// tree of its receiver (see [`Self::forget_bif_timer`]).
+    /// tree of its receiver in the node (see [`Node::take_timer`]).
     ///
     /// # Examples
     ///
@@ -1867,8 +1865,8 @@ impl Scheduler {
     }
 
     /// Remove the BIF timer `reference` from the timer wheel of this
-    /// scheduler and from the timer tree of its receiver, after the node
-    /// entry left. A timer that expired before has no wheel entry.
+    /// scheduler, after the node entry left. A timer that expired before
+    /// has no wheel entry.
     ///
     /// # Examples
     ///
@@ -1876,9 +1874,7 @@ impl Scheduler {
     /// scheduler.drop_bif_timer(reference);
     /// ```
     fn drop_bif_timer(&mut self, reference: Reference) {
-        if let Some((_, Timer::Bif { receiver, .. })) = self.timers.cancel_bif(reference) {
-            self.forget_bif_timer(&receiver, reference);
-        }
+        let _ = self.timers.cancel_bif(reference);
     }
 
     /// Send the message of an expired BIF timer to `target`, as a message
@@ -1896,26 +1892,6 @@ impl Scheduler {
                 self.node.send_message(index, None, message, target, None);
             }
             _ => self.deliver(target, message),
-        }
-    }
-
-    /// Remove the BIF timer `reference` from the timer tree of the process
-    /// `receiver` when the process does not exit, as `bif_timer_timeout` and
-    /// `cancel_bif_timer` do (`erl_hl_timer.c:1180-1190`, `1904-1911`). An
-    /// exiting process keeps the timer in its tree, and its exit uses the
-    /// reductions of the timer.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// scheduler.forget_bif_timer(&Receiver::Process(id), reference);
-    /// ```
-    fn forget_bif_timer(&mut self, receiver: &Receiver, reference: Reference) {
-        if let Receiver::Process(id) = receiver
-            && let Some(process) = self.processes.get_mut(id)
-            && process.exiting.is_none()
-        {
-            process.bif_timers.remove(&TimerReference(reference));
         }
     }
 
@@ -3526,10 +3502,12 @@ impl Scheduler {
                     };
                     self.node.root_result(slot, result);
                 }
-                self.current_process_mut()
-                    .bif_timers
-                    .post_order()
-                    .position()
+                // The exit takes the timer tree from the node after the
+                // process is exiting, so no timer joins it later.
+                let tree = self.node.take_receiver_timers(id);
+                let process = self.current_process_mut();
+                process.bif_timers = tree;
+                process.bif_timers.post_order().position()
             }
         };
         let process = self.current_process_mut();
@@ -3538,7 +3516,7 @@ impl Scheduler {
         // keeps each timer that expires or that a BIF cancels, and gets no
         // new timer. Thus the position stays valid across turns.
         let tree = std::mem::take(&mut process.bif_timers);
-        let mut walked = next.is_some();
+        let walked = next.is_some();
         while let Some(position) = next {
             if reds <= 0 {
                 break;
@@ -3546,29 +3524,11 @@ impl Scheduler {
             let mut walk = tree.post_order_from(position);
             let (&timer, ()) = walk.next().expect("a walk position has an entry");
             next = walk.position();
-            // The tree left the process, so the cancel removes no tree
-            // entry.
+            // The tree left the node, so the cancel removes no tree entry.
             let _ = self.cancel_bif_timer(timer.0);
             reds -= TIMER_CANCEL_REDUCTIONS;
         }
-        // The timers that another scheduler started for the process stay
-        // in the node until the exit takes them, one for each step, with
-        // the cost of a timer of the tree. A later turn goes on with them.
-        let mut remote_done = false;
-        while next.is_none() {
-            if reds <= 0 {
-                remote_done = !self.node.has_receiver_timers(id);
-                break;
-            }
-            let Some(reference) = self.node.take_receiver_timer(id) else {
-                remote_done = true;
-                break;
-            };
-            walked = true;
-            let _ = self.cancel_bif_timer(reference);
-            reds -= TIMER_CANCEL_REDUCTIONS;
-        }
-        if walked && next.is_none() && remote_done {
+        if walked && next.is_none() {
             reds = reds.max(1);
         }
         // The table deletion counts from the reductions left in the turn,

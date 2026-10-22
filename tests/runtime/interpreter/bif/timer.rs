@@ -72,7 +72,7 @@ fn a_user_of_an_active_timer_is_not_pinned() {
         let index = scheduler.index();
         scheduler
             .node()
-            .register_timer(reference, index, 1_000_000_000);
+            .register_timer(reference, index, 1_000_000_000, None, false);
         let mut context = BifContext {
             scheduler: &mut scheduler,
         };

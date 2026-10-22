@@ -133,23 +133,24 @@ fn the_check_of_the_inboxes_holds_the_idle_count() {
     assert_eq!(*node.idle.lock().unwrap(), 0);
 }
 
-/// A timer for a receiver of another scheduler requires a live receiver,
-/// and the exit of the receiver takes its timers.
+/// A timer for a receiver of another scheduler requires a live receiver.
+/// The exit of the receiver takes its tree, and a later cancel leaves the
+/// tree as it is.
 #[test]
 fn a_remote_timer_requires_a_live_receiver() {
     let (node, _readers) = Node::new(2).unwrap();
     let receiver = ProcessId(7);
     let reference = crate::term::Reference::ordinary(1).unwrap();
     node.register(receiver, 1);
-    assert!(node.register_remote_timer(reference, 0, 1100, receiver));
+    assert!(node.register_timer(reference, 0, 1100, Some(receiver), true));
     assert_eq!(node.timer_end(reference), Some(1100));
     node.set_exiting(receiver);
     let late = crate::term::Reference::ordinary(2).unwrap();
-    assert!(!node.register_remote_timer(late, 0, 1100, receiver));
+    assert!(!node.register_timer(late, 0, 1100, Some(receiver), true));
     assert_eq!(node.timer_end(late), None);
-    // A timer of an exiting receiver stays for its exit to count.
+    let tree = node.take_receiver_timers(receiver);
     assert_eq!(node.take_timer(reference), Some((0, 1100)));
     assert_eq!(node.take_timer(reference), None);
-    assert_eq!(node.take_receiver_timer(receiver), Some(reference));
-    assert_eq!(node.take_receiver_timer(receiver), None);
+    assert!(!tree.is_empty());
+    assert!(node.take_receiver_timers(receiver).is_empty());
 }

@@ -5,7 +5,6 @@
 use super::BifResult::Value;
 use super::*;
 use crate::runtime::capability::{CapabilityKind, Operation};
-use crate::runtime::process::TimerReference;
 use crate::runtime::timer::{Receiver, Timer, Timers};
 
 /// Run `erlang:start_timer(Time, Dest, Msg, Options)`, as ERTS `start_timer_4`
@@ -217,26 +216,18 @@ pub(super) fn setup(
     }
     let reference = scheduler.make_ref()?;
     let index = scheduler.index();
-    // The timer stays with this scheduler. A receiver of another scheduler
-    // is recorded in the node, so its exit cancels the timer.
+    // The timer stays with this scheduler. The node holds the timer tree
+    // of the receiver, so each scheduler can cancel the timer.
+    let node = scheduler.node();
     let active = match receiver {
         Receiver::Process(id) => match scheduler.remote_owner(id) {
-            Some(_) => scheduler
-                .node()
-                .register_remote_timer(reference, index, end, id),
-            None => match scheduler.process_mut(id) {
-                Some(process) if process.exiting.is_none() => {
-                    process.bif_timers.insert(TimerReference(reference), ());
-                    scheduler.node().register_timer(reference, index, end);
-                    true
-                }
-                _ => false,
-            },
+            Some(_) => node.register_timer(reference, index, end, Some(id), true),
+            None => {
+                scheduler.live_process(id).is_some()
+                    && node.register_timer(reference, index, end, Some(id), false)
+            }
         },
-        Receiver::Name(_) => {
-            scheduler.node().register_timer(reference, index, end);
-            true
-        }
+        Receiver::Name(_) => node.register_timer(reference, index, end, None, false),
     };
     if active {
         let message = if wrap {

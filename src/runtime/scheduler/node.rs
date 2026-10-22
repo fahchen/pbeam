@@ -13,7 +13,7 @@
 //! never touches a process of another scheduler.
 
 use std::{
-    collections::{BTreeSet, HashMap, VecDeque},
+    collections::{HashMap, VecDeque},
     io::{self, Read, Write},
     os::unix::net::UnixStream,
     sync::{
@@ -24,7 +24,7 @@ use std::{
 };
 
 use super::{Signal, process_table::ProcessTable};
-use crate::runtime::process::ProcessState;
+use crate::runtime::process::{MonitorLinkTree, ProcessState, TimerReference};
 use crate::{
     error::{BeamError, error},
     runtime::{dirty::Pools, host::clock},
@@ -108,20 +108,20 @@ struct TimerEntry {
     owner: usize,
     /// The end tick of the timer.
     end: i64,
-    /// The receiver when it was a process of another scheduler at the
-    /// start of the timer.
+    /// The receiver when it is a process.
     receiver: Option<ProcessId>,
 }
 
 /// The BIF timer table of the node. The removal of an entry decides
 /// between the expiry and a cancel, as the state of an ERTS `ErtsBifTimer`
-/// does (`access_btm`, `erl_hl_timer.c:1922-1971`). `by_receiver` holds the
-/// timers of each receiver that was a process of another scheduler at the
-/// start of the timer, so its exit can cancel them.
+/// does (`access_btm`, `erl_hl_timer.c:1922-1971`). `trees` holds the timer
+/// tree of each receiver process, as the ERTS tree `p->bif_timers`
+/// (`erl_hl_timer.c:579-617`), so a cancel on any scheduler removes the
+/// timer from the tree at once (`erl_hl_timer.c:1904-1911`).
 #[derive(Debug, Default)]
 struct BifTimers {
     entries: HashMap<crate::term::Reference, TimerEntry>,
-    by_receiver: HashMap<ProcessId, BTreeSet<crate::term::Reference>>,
+    trees: HashMap<ProcessId, MonitorLinkTree<TimerReference, ()>>,
 }
 
 /// The state of a run that more than one scheduler thread shares.
@@ -696,75 +696,59 @@ impl Node {
     }
 
     /// Record the BIF timer `reference` of the scheduler `index` with the
-    /// end tick `end`.
+    /// end tick `end` for `receiver`, and put it into the timer tree of a
+    /// receiver process. For a receiver of another scheduler (`remote`),
+    /// return false and record nothing when it is not a live process. The
+    /// check holds the timer table lock, and the exit of the receiver marks
+    /// it as exiting before it takes its tree
+    /// ([`Self::take_receiver_timers`]). Thus no timer joins the tree of a
+    /// receiver after its exit took the tree.
     pub(in crate::runtime) fn register_timer(
         &self,
         reference: crate::term::Reference,
         index: usize,
         end: i64,
-    ) {
-        let entry = TimerEntry {
-            owner: index,
-            end,
-            receiver: None,
-        };
-        self.timers
-            .lock()
-            .expect("the timer table is not poisoned")
-            .entries
-            .insert(reference, entry);
-    }
-
-    /// Record the BIF timer `reference` of the scheduler `index` with the
-    /// end tick `end` for `receiver`, a process of another scheduler. Return
-    /// false and record nothing when `receiver` is not a live process. The
-    /// check holds the timer table lock, and the exit of `receiver` marks it
-    /// as exiting before it takes its timers ([`Self::take_receiver_timer`]).
-    /// Thus no timer is recorded for a receiver after its exit took them.
-    pub(in crate::runtime) fn register_remote_timer(
-        &self,
-        reference: crate::term::Reference,
-        index: usize,
-        end: i64,
-        receiver: ProcessId,
+        receiver: Option<ProcessId>,
+        remote: bool,
     ) -> bool {
         let mut timers = self.timers.lock().expect("the timer table is not poisoned");
-        if self.live_owner(receiver).is_none() {
-            return false;
+        if let Some(receiver) = receiver {
+            if remote && self.live_owner(receiver).is_none() {
+                return false;
+            }
+            timers
+                .trees
+                .entry(receiver)
+                .or_default()
+                .insert(TimerReference(reference), ());
         }
         let entry = TimerEntry {
             owner: index,
             end,
-            receiver: Some(receiver),
+            receiver,
         };
         timers.entries.insert(reference, entry);
-        timers
-            .by_receiver
-            .entry(receiver)
-            .or_default()
-            .insert(reference);
         true
     }
 
-    /// Remove the active BIF timer `reference` from the node. Return its
-    /// scheduler and its end tick, or `None` when no timer with the
-    /// reference is active.
+    /// Remove the active BIF timer `reference` from the node and from the
+    /// timer tree of its receiver. Return its scheduler and its end tick,
+    /// or `None` when no timer with the reference is active. The tree of an
+    /// exiting receiver is with its exit, which keeps the timer, as ERTS
+    /// leaves it in the tree of an exiting process (`erl_hl_timer.c:1185-1192`,
+    /// `1904-1911`).
     pub(in crate::runtime) fn take_timer(
         &self,
         reference: crate::term::Reference,
     ) -> Option<(usize, i64)> {
         let mut timers = self.timers.lock().expect("the timer table is not poisoned");
         let entry = timers.entries.remove(&reference)?;
-        // An exiting receiver keeps the timer, and its exit counts it, as
-        // ERTS leaves the timer in the tree of an exiting process
-        // (`erl_hl_timer.c:1185-1192`, `1904-1911`).
         if let Some(receiver) = entry.receiver
-            && self.live_owner(receiver).is_some()
-            && let Some(set) = timers.by_receiver.get_mut(&receiver)
+            && let Some(tree) = timers.trees.get_mut(&receiver)
         {
-            set.remove(&reference);
-            if set.is_empty() {
-                timers.by_receiver.remove(&receiver);
+            tree.remove(&TimerReference(reference));
+            if tree.is_empty() {
+                timers.trees.remove(&receiver);
             }
         }
         Some((entry.owner, entry.end))
@@ -780,29 +764,18 @@ impl Node {
             .map(|entry| entry.end)
     }
 
-    /// Take one timer that a scheduler other than its own started for
-    /// `receiver`, active or not, or `None` when no timer is left.
-    pub(in crate::runtime) fn take_receiver_timer(
+    /// Take the timer tree of `receiver` for its exit. The timers stay
+    /// active until the exit cancels them.
+    pub(in crate::runtime) fn take_receiver_timers(
         &self,
         receiver: ProcessId,
-    ) -> Option<crate::term::Reference> {
-        let mut timers = self.timers.lock().expect("the timer table is not poisoned");
-        let set = timers.by_receiver.get_mut(&receiver)?;
-        let reference = set.pop_first().expect("a receiver set is not empty");
-        if set.is_empty() {
-            timers.by_receiver.remove(&receiver);
-        }
-        Some(reference)
-    }
-
-    /// Return true when a timer that a scheduler other than its own
-    /// started for `receiver` is left for its exit.
-    pub(in crate::runtime) fn has_receiver_timers(&self, receiver: ProcessId) -> bool {
+    ) -> MonitorLinkTree<TimerReference, ()> {
         self.timers
             .lock()
             .expect("the timer table is not poisoned")
-            .by_receiver
-            .contains_key(&receiver)
+            .trees
+            .remove(&receiver)
+            .unwrap_or_default()
     }
 
     /// Put a cancel of the BIF timer `reference` into the inbox of its

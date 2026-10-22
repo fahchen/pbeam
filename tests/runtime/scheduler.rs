@@ -634,6 +634,7 @@ fn continues_the_exit_timer_walk_at_its_next_timer() {
     let mut scheduler = test_scheduler();
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     scheduler.schedule_next().unwrap();
+    let mut mirror = crate::runtime::process::MonitorLinkTree::default();
     for _ in 0..60 {
         let reference = scheduler.make_ref().unwrap();
         scheduler.timers.start(
@@ -644,12 +645,15 @@ fn continues_the_exit_timer_walk_at_its_next_timer() {
                 message: atom("timeout"),
             },
         );
-        scheduler.node.register_timer(reference, 0, 1100);
-        let process = scheduler.current_process_mut();
-        process.bif_timers.insert(TimerReference(reference), ());
+        scheduler
+            .node
+            .register_timer(reference, 0, 1100, Some(ProcessId(0)), false);
+        mirror.insert(TimerReference(reference), ());
     }
+    // The tree of the node has the shape of the mirror, which has the same
+    // inserts.
+    let order: Vec<TimerReference> = mirror.post_order().map(|(&t, _)| t).collect();
     let process = scheduler.current_process_mut();
-    let order: Vec<TimerReference> = process.bif_timers.post_order().map(|(&t, _)| t).collect();
     // Check that the exit cancelled the first `done` timers in post-order,
     // and keeps the position of the next timer.
     let check = |scheduler: &mut Scheduler, done: usize| {
