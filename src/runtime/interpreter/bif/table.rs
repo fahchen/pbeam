@@ -280,7 +280,7 @@ bifs! {
     erlang:process_info/2 as ErlangProcessInfo2 => |cx, [process, item]| erlang::process_info(cx, process, item),
     erlang:processes/0 as ErlangProcesses0 => |cx, []| erlang::processes(cx.scheduler),
     erlang:put/2 as ErlangPut2 => |cx, [key, value]| Ok(erlang::put(cx, key, value)),
-    erlang:raise/3 as ErlangRaise3 => |cx, [class, reason, stacktrace]| Ok(erlang::raise(cx.scheduler.backtrace_depth, class, reason, stacktrace)),
+    erlang:raise/3 as ErlangRaise3 => |cx, [class, reason, stacktrace]| Ok(erlang::raise(cx.scheduler.node().backtrace_depth(), class, reason, stacktrace)),
     erlang:read_timer/1 as ErlangReadTimer1 => |cx, [reference]| timer::read_timer(cx, reference),
     erlang:read_timer/2 => unsupported,
     erlang:ref_to_list/1 as ErlangRefToList1 => |cx, [term]| Ok(erlang::ref_to_list(term, &cx.scheduler.atoms)),

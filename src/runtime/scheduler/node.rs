@@ -18,7 +18,7 @@ use std::{
     os::unix::net::UnixStream,
     sync::{
         Arc, Mutex, MutexGuard, OnceLock,
-        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering},
     },
 };
 
@@ -205,6 +205,14 @@ pub(in crate::runtime) struct Node {
     /// The resources of the node that each scheduler reads, such as the
     /// zlib streams and the file resources.
     pub(in crate::runtime) resources: NodeResources,
+    /// The process that gets the error reports of the emulator: `logger`,
+    /// `undefined`, or a pid. ERTS keeps one value for the node
+    /// (`system_logger`, `erl_trace.c:339`). The start value is `logger`.
+    system_logger: Mutex<Term>,
+    /// The maximum number of frames of a stack trace. ERTS keeps one value
+    /// for the node (`erts_backtrace_depth`, `erl_init.c:805`). The start
+    /// value is 8 (`DEFAULT_BACKTRACE_SIZE`, `error.h:207`).
+    backtrace_depth: AtomicUsize,
 }
 
 impl Node {
@@ -258,6 +266,8 @@ impl Node {
                 code: super::code::NodeCode::default(),
                 atomics: Default::default(),
                 resources: NodeResources::default(),
+                system_logger: Mutex::new(Term::static_atom("logger")),
+                backtrace_depth: AtomicUsize::new(8),
             }),
             readers,
         ))
@@ -324,6 +334,8 @@ impl Node {
             code: super::code::NodeCode::default(),
             atomics: Default::default(),
             resources: NodeResources::default(),
+            system_logger: Mutex::new(Term::static_atom("logger")),
+            backtrace_depth: AtomicUsize::new(8),
         })
     }
 
@@ -946,6 +958,35 @@ impl Node {
     pub(in crate::runtime) fn take_root_results(&self) -> Vec<Option<Result<Term, Term>>> {
         let mut roots = self.roots.lock().expect("the roots are not poisoned");
         std::mem::take(&mut roots.results)
+    }
+
+    /// Return the system logger of the node, as `erts_get_system_logger`
+    /// (`erl_trace.c:2480-2483`) does.
+    pub(in crate::runtime) fn system_logger(&self) -> Term {
+        self.system_logger
+            .lock()
+            .expect("the system logger is not poisoned")
+            .clone()
+    }
+
+    /// Set the system logger of the node and return the old value, as
+    /// `erts_set_system_logger` (`erl_trace.c:2486-2491`) does.
+    pub(in crate::runtime) fn swap_system_logger(&self, logger: Term) -> Term {
+        let mut current = self
+            .system_logger
+            .lock()
+            .expect("the system logger is not poisoned");
+        std::mem::replace(&mut *current, logger)
+    }
+
+    /// Return the backtrace depth of the node, `erts_backtrace_depth`.
+    pub(in crate::runtime) fn backtrace_depth(&self) -> usize {
+        self.backtrace_depth.load(Ordering::Relaxed)
+    }
+
+    /// Set the backtrace depth of the node and return the old value.
+    pub(in crate::runtime) fn swap_backtrace_depth(&self, depth: usize) -> usize {
+        self.backtrace_depth.swap(depth, Ordering::Relaxed)
     }
 
     /// Lock and return the persistent terms of the node.

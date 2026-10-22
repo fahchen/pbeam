@@ -6419,7 +6419,7 @@ fn raise_in_function(
     reason: Term,
 ) -> Result<Option<Outcome>, BeamError> {
     let mut frames = mfa_stacktrace(scheduler, 0)?;
-    frames.truncate(scheduler.backtrace_depth.max(1));
+    frames.truncate(scheduler.node().backtrace_depth().max(1));
     Ok(raise_with_stacktrace(
         scheduler.current_process_mut(),
         ExceptionClass::Error,
@@ -6447,7 +6447,7 @@ fn raise_in_function(
 /// A module that the code table does not hold, or an instruction with no
 /// `func_info` before it, is a runtime invariant error.
 fn stacktrace_from(scheduler: &mut Scheduler, first: Term, skip: usize) -> Result<Term, BeamError> {
-    let depth = scheduler.backtrace_depth.max(1);
+    let depth = scheduler.node().backtrace_depth().max(1);
     let mut frames = vec![first];
     frames.extend(mfa_stacktrace(scheduler, skip)?.into_iter().take(depth - 1));
     Ok(Term::list_from(frames))

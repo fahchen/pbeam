@@ -387,25 +387,6 @@ fn runs_compiled_patterns_of_a_persistent_term_of_another_scheduler() {
     assert_eq!(results[1].term, Term::Atom(ok_atom), "the giver");
 }
 
-/// A change of a node flag that stays with a scheduler fails with a clear
-/// error.
-#[test]
-fn rejects_a_scheduler_local_system_flag() {
-    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
-    let error = program
-        .execute_on_schedulers(&[
-            ("ping_pong", "system_flag_depth"),
-            ("ping_pong", "monitor_hold"),
-        ])
-        .expect_err("the flag is unsupported");
-    assert!(
-        error
-            .to_string()
-            .contains("unsupported: erlang:system_flag/2 backtrace_depth"),
-        "{error}"
-    );
-}
-
 /// A module that one scheduler loads runs on the other scheduler. A load of
 /// a new version after `erlang:delete_module/1` leaves a process of the
 /// other scheduler in the old code, and a later call runs the new code, as

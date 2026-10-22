@@ -12,7 +12,7 @@
          decode_atom/0, persistent_put/0, port_transfer/0,
          port_transfer_hold/0, ports_list/0, port_use/0, port_give/0,
          port_term/0, port_term_give/0, counters_hold/0, counters_add/0, timer_remote/0,
-         timer_hold/0, timer_named/0, timer_read/0, timer_give/0, system_flag_depth/0,
+         timer_hold/0, timer_named/0, timer_read/0, timer_give/0, 
          regex_run/0, regex_give/0,
          group_leader_remote/0, leader_hold/0, pattern_match/0, pattern_give/0,
          timer_fire/0, timer_cancel/0, timer_child_exit/0, timer_child/0,
@@ -626,11 +626,6 @@ timer_give() ->
     ok = wait_registered(timer_read_name, 100000),
     timer_read_name ! {timer, Reference, self()},
     receive done -> is_integer(erlang:read_timer(Reference)) after 6000 -> timeout end.
-
-%% The root that sets the backtrace depth. The flag stays with each
-%% scheduler in a run with scheduler threads.
-system_flag_depth() ->
-    erlang:system_flag(backtrace_depth, 0).
 
 %% The root that runs the compiled expression of the other scheduler.
 regex_run() ->
