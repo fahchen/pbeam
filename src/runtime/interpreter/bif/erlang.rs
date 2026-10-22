@@ -6311,13 +6311,6 @@ thread_local! {
 ///
 /// A budget of the current process that is less than 0.
 pub(super) fn processes(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
-    // The process table stays with each scheduler, so this run cannot list
-    // the processes of the node yet.
-    if scheduler.is_multi() {
-        return Err(error(
-            "unsupported: erlang:processes/0 in a run of execute_on_schedulers",
-        ));
-    }
     let state = PtabList {
         tix: -1,
         found: Term::Nil,
@@ -6402,15 +6395,22 @@ pub(super) fn ptab_list(
     mut state: PtabList,
 ) -> Result<BifResult, BeamError> {
     let hidden = hidden_policy(scheduler);
-    if state.tix < 0 {
-        scheduler.ptab_list_start();
+    // The start of the read and its first chunk are one step of the
+    // table (`erl_ptab.c:905-1020`).
+    let mut start = state.tix < 0;
+    if start {
         state.tix = 0;
     }
     loop {
         let left = scheduler.current_process().bif_reductions_left()?;
         let have = if state.tix < PTAB_SIZE as i64 {
             let end = (state.tix as u64 + PTAB_CHUNK).min(PTAB_SIZE);
-            for id in scheduler.ptab_list_chunk(end) {
+            let ids = if std::mem::take(&mut start) {
+                scheduler.ptab_list_start(end)
+            } else {
+                scheduler.ptab_list_chunk(end)
+            };
+            for id in ids {
                 #[cfg(test)]
                 PTAB_CELLS.set(PTAB_CELLS.get() + 1);
                 if Some(id) != hidden {
