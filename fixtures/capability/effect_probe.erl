@@ -513,6 +513,22 @@ ambient() ->
             {key, [{key, value}]} -> first_lookup;
             Lookup -> Lookup
         end,
+        case ets:last(Name) of
+            key -> last;
+            Last -> Last
+        end,
+        case ets:last_lookup(Name) of
+            {key, [{key, value}]} -> last_lookup;
+            LastLookup -> LastLookup
+        end,
+        case ets:next_lookup(Name, key) of
+            '$end_of_table' -> eot;
+            NextLookup -> NextLookup
+        end,
+        case ets:prev_lookup(Name, key) of
+            '$end_of_table' -> eot;
+            PrevLookup -> PrevLookup
+        end,
         ets:match_object(Name, {'_', '_'}),
         ets:select(Name, [{{'_', '_'}, [], ['$_']}]),
         begin

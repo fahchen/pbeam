@@ -552,12 +552,6 @@ fn rejects_tables_that_pbeam_cannot_model() {
             "info_reference",
             "info/2 of a reference that is not a live table",
         ),
-        ("ordered_first", "first/1 on an ordered_set table"),
-        (
-            "ordered_first_lookup",
-            "first_lookup/1 on an ordered_set table",
-        ),
-        ("ordered_next", "next/2 on an ordered_set table"),
         ("ordered_select", "select/2,3 on an ordered_set table"),
         (
             "ordered_select_delete",
@@ -706,7 +700,8 @@ fn runs_the_select_and_iteration_bifs_as_pinned_erts() {
     // `ets:info/2` gives `false` for `write_concurrency` and
     // `decentralized_counters` (erl_db.c:2656-2657, 2776-2779).
     let ets = pinned_beam("ets");
-    let program = BeamProgram::load(&[&ets, ETS_PROBE]).unwrap();
+    let lists = pinned_beam("lists");
+    let program = BeamProgram::load(&[&ets, &lists, ETS_PROBE]).unwrap();
     for function in [
         "select",
         "match_object",
@@ -719,6 +714,7 @@ fn runs_the_select_and_iteration_bifs_as_pinned_erts() {
         "ordered_set_reductions",
         "take",
         "first",
+        "walk",
     ] {
         assert_probe_matches_erts(&program, function);
     }

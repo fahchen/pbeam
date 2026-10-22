@@ -267,6 +267,11 @@ pub(super) struct Table {
     /// The number of pseudo-deleted objects, which `object_count` leaves
     /// out.
     deleted_objects: usize,
+    /// The key of each object of an `ordered_set` table, in the ERTS term
+    /// order, as the AVL tree of `erl_db_tree.c` orders them with
+    /// `cmp_key_eq` (`erl_db_tree.c:758-761`). Two keys that compare equal
+    /// (`1` and `1.0`) are one key. The other table types keep it empty.
+    order: Vec<Term>,
 }
 
 /// A key that a process deleted while the table was fixed: its stored
@@ -1387,6 +1392,7 @@ impl Table {
             select_slot: EMPTY,
             deleted: Vec::new(),
             deleted_objects: 0,
+            order: Vec::new(),
         }
     }
 
@@ -1631,6 +1637,83 @@ impl Table {
     /// ```
     pub(super) fn first_key(&self) -> Option<Term> {
         self.next_live_after(0, self.heads[0])
+    }
+
+    /// Return the key of an `ordered_set` table next to the key `key` in the
+    /// term order: the least key above it when `forward` is true, as
+    /// `db_next_tree` does with `find_next` (`erl_db_tree.c:665-711`,
+    /// `erl_db_tree.c:3167-3224`), else the greatest key below it, as
+    /// `db_prev_tree` does with `find_prev` (`erl_db_tree.c:740-757`,
+    /// `erl_db_tree.c:3225-3282`). The key `key` does not have to be in the
+    /// table. Return `None` at the end of the table.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::OrderedSet);
+    /// table.insert(&atoms, vec![Term::Integer(1)]);
+    /// table.insert(&atoms, vec![Term::Integer(3)]);
+    /// assert_eq!(table.ordered_step(&atoms, &Term::Float(2.0), true), Some(Term::Integer(3)));
+    /// assert_eq!(table.ordered_step(&atoms, &Term::Integer(1), false), None);
+    /// ```
+    pub(super) fn ordered_step(
+        &self,
+        atoms: &AtomTable,
+        key: &Term,
+        forward: bool,
+    ) -> Option<Term> {
+        let index = match (self.order_search(atoms, key), forward) {
+            (Ok(index), true) => index + 1,
+            (Err(index), true) => index,
+            (Ok(index) | Err(index), false) => index.checked_sub(1)?,
+        };
+        self.order.get(index).cloned()
+    }
+
+    /// Return the least key of an `ordered_set` table when `first` is true,
+    /// as `db_first_tree` does (`erl_db_tree.c:635-663`), else the
+    /// greatest key, as `db_last_tree` does (`erl_db_tree.c:712-738`).
+    /// Return `None` for an empty table.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let table = Table::new(ProcessId(0), Access::Public, 1, TableType::OrderedSet);
+    /// assert_eq!(table.ordered_end(true), None);
+    /// ```
+    pub(super) fn ordered_end(&self, first: bool) -> Option<Term> {
+        if first {
+            self.order.first().cloned()
+        } else {
+            self.order.last().cloned()
+        }
+    }
+
+    /// Find the key `key` in the key order of an `ordered_set` table with
+    /// the arithmetic term order, so `1` finds `1.0` (`cmp_key_eq`,
+    /// `erl_db_tree.c:758-761`). Return the index of the equal key, or the
+    /// index where the key would go. A comparison error orders the key
+    /// below: the order of two different alias references is the only error
+    /// (`src/term/order.rs`).
+    fn order_search(&self, atoms: &AtomTable, key: &Term) -> Result<usize, usize> {
+        self.order
+            .binary_search_by(|stored| stored.compare(key, atoms).unwrap_or(Ordering::Less))
+    }
+
+    /// Put the key `key` of an `ordered_set` table in the key order, in
+    /// place of an equal key.
+    fn order_put(&mut self, atoms: &AtomTable, key: Term) {
+        match self.order_search(atoms, &key) {
+            Ok(index) => self.order[index] = key,
+            Err(index) => self.order.insert(index, key),
+        }
+    }
+
+    /// Remove the key `key` of an `ordered_set` table from the key order.
+    fn order_remove(&mut self, atoms: &AtomTable, key: &Term) {
+        if let Ok(index) = self.order_search(atoms, key) {
+            self.order.remove(index);
+        }
     }
 
     /// Return the key of the first slot that is not deleted after the slot
@@ -2056,6 +2139,7 @@ impl Table {
     /// chains, so the objects of one segment go in the turn that frees it
     /// (`db_free_table_continue_hash`, `erl_db_hash.c:3140-3149`).
     fn free_segments_objects(&mut self, index: usize) {
+        self.order.clear();
         let first = match index {
             0 => 0,
             later => FIRST_SEGMENT_SLOTS + (later - 1) * SEGMENT_SLOTS,
@@ -2136,6 +2220,7 @@ impl Table {
     /// does for a table without a fixation (`erl_db_hash.c:4036-4037`).
     fn reset_cleared(&mut self) {
         self.objects.clear();
+        self.order.clear();
         self.free.clear();
         self.older.clear();
         self.index = KeyIndex::default();
@@ -2154,6 +2239,11 @@ impl Table {
     /// below 0. A table without a fixation removes the objects as a delete
     /// does.
     pub(super) fn take_key(&mut self, atoms: &AtomTable, key: &Term) {
+        // An ordered_set finds the key with `==` (`erl_db_tree.c:758-761`).
+        if self.table_type == TableType::OrderedSet {
+            self.delete(atoms, key);
+            return;
+        }
         let hash = stored_hash(atoms, key);
         let Some(index_slot) = self.position(hash, key) else {
             return;
@@ -2351,6 +2441,9 @@ impl Table {
             let hash = stored_hash(atoms, key);
             (self.key_slot(atoms, key), hash)
         };
+        if found.is_none() && self.table_type == TableType::OrderedSet {
+            self.order_put(atoms, self.key(&object).clone());
+        }
         if found.is_none() && self.is_fixed() {
             let key = self.key(&object);
             if let Some(records) = self.retained.get(&hash)
@@ -2373,6 +2466,9 @@ impl Table {
             (Some(slot), TableType::Set | TableType::OrderedSet) => {
                 let old = stored_hash(atoms, self.key(self.object_of(slot)));
                 self.rekey(slot, old, hash);
+                if self.table_type == TableType::OrderedSet {
+                    self.order_put(atoms, self.key(&object).clone());
+                }
                 self.objects[slot] = Some(object);
                 self.writes += 1;
                 return;
@@ -3182,10 +3278,8 @@ impl Table {
         if self.table_type != TableType::OrderedSet {
             return None;
         }
-        self.objects.iter().enumerate().find_map(|(slot, object)| {
-            let object = object.as_ref()?;
-            matches!(self.key(object).compare(key, atoms), Ok(Ordering::Equal)).then_some(slot)
-        })
+        let stored = &self.order[self.order_search(atoms, key).ok()?];
+        self.position(stored_hash(atoms, stored), stored)
     }
 
     fn position(&self, hash: u64, key: &Term) -> Option<usize> {
@@ -3278,10 +3372,9 @@ impl Table {
         };
         let hash = stored_hash(atoms, self.key(self.object_of(newest)));
         self.writes += 1;
-        // An ordered_set has no supported traversal, and its compaction
-        // moves the last object into the freed slot, so a fixed ordered_set
-        // deletes as an unfixed one does (row "ETS tables" of
-        // docs/erts-differences.md).
+        // A fixed ordered_set deletes as an unfixed one does: the tree of
+        // ERTS keeps no pseudo-deleted object, and a walk steps from a key
+        // that is not in the table (`erl_db_tree.c:3167-3282`).
         if self.is_fixed() && self.table_type != TableType::OrderedSet {
             let node = self
                 .chain_node(hash, key)
@@ -3301,6 +3394,7 @@ impl Table {
             slot = std::mem::replace(&mut self.older[slot], EMPTY);
         }
         if self.table_type == TableType::OrderedSet {
+            self.order_remove(atoms, key);
             self.compact(atoms, newest);
         }
         for _ in 0..RESIZE_STEPS {
