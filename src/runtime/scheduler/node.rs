@@ -1,8 +1,9 @@
 //! The state that the scheduler threads of one run share.
 //!
-//! Each scheduler owns its processes, its run queue, its code table, and its
-//! services. The node holds what must be the same for the whole run: the
-//! owner of each live process, the registered names, the identifier
+//! Each scheduler owns the state of its processes, its run queue, its code
+//! table, and its services. The node holds what must be the same for the
+//! whole run: the process table, with the owner of each live process, the
+//! registered names, the identifier
 //! counters, the inbox of each scheduler for the deliveries that cross a
 //! thread boundary, and the shutdown state. A sender that runs on another
 //! scheduler puts its message or signal into the inbox of the owner and
@@ -22,7 +23,7 @@ use std::{
     time::Instant,
 };
 
-use super::Signal;
+use super::{Signal, process_table::ProcessTable};
 use crate::{
     error::{BeamError, error},
     runtime::{dirty::Pools, host::clock},
@@ -58,9 +59,9 @@ struct Inbox {
 /// The state of a run that more than one scheduler thread shares.
 #[derive(Debug)]
 pub(in crate::runtime) struct Node {
-    /// The scheduler of each live process, and true when the process
-    /// exits, as the ERTS `EXITING` state flag.
-    owners: Mutex<HashMap<ProcessId, (usize, bool)>>,
+    /// The process table of the node: the scheduler, the exiting state,
+    /// and the table order of each live process.
+    pub(super) processes: ProcessTable,
     /// The registered names of the node, as the ERTS `process_reg` table.
     names: Mutex<HashMap<String, ProcessId>>,
     /// The scheduler of each open port.
@@ -132,7 +133,7 @@ impl Node {
         }
         Ok((
             Arc::new(Node {
-                owners: Mutex::new(HashMap::new()),
+                processes: ProcessTable::default(),
                 names: Mutex::new(HashMap::new()),
                 ports: Mutex::new(HashMap::new()),
                 timers: Mutex::new(HashMap::new()),
@@ -191,7 +192,7 @@ impl Node {
     /// ```
     pub(in crate::runtime) fn single() -> Arc<Self> {
         Arc::new(Node {
-            owners: Mutex::new(HashMap::new()),
+            processes: ProcessTable::default(),
             names: Mutex::new(HashMap::new()),
             ports: Mutex::new(HashMap::new()),
             timers: Mutex::new(HashMap::new()),
@@ -229,10 +230,7 @@ impl Node {
 
     /// Make the process `id` the process of the scheduler `index`.
     pub(in crate::runtime) fn register(&self, id: ProcessId, index: usize) {
-        self.owners
-            .lock()
-            .expect("the process owner table is not poisoned")
-            .insert(id, (index, false));
+        self.processes.insert(id, index);
         self.live.fetch_add(1, Ordering::AcqRel);
     }
 
@@ -242,22 +240,22 @@ impl Node {
     /// [`Self::live_owner`]), and signals still reach the owner, which
     /// answers them at the exit.
     pub(in crate::runtime) fn set_exiting(&self, id: ProcessId) {
-        self.owners
-            .lock()
-            .expect("the process owner table is not poisoned")
-            .get_mut(&id)
-            .expect("an exiting process is in the owner table")
-            .1 = true;
+        self.processes.set_exiting(id);
     }
 
-    /// Remove the process `id` and each name of it. A registration of a
-    /// name and this removal hold the owner table and the name table in the
-    /// same order, so a name never belongs to a process that left.
+    /// Remove the process `id` from the process table and each name of
+    /// it. A registration of a name and this removal hold the shard of the
+    /// process and the name table in the same order, so a name never
+    /// belongs to a process that left.
+    ///
+    /// # Panics
+    ///
+    /// Panic when the process left the table before.
     pub(in crate::runtime) fn remove_process(&self, id: ProcessId) {
-        let mut owners = self.owners.lock().expect("the owner table is not poisoned");
-        owners.remove(&id);
-        let mut names = self.names.lock().expect("the name table is not poisoned");
-        names.retain(|_, owner| *owner != id);
+        self.processes.remove(id, || {
+            let mut names = self.names.lock().expect("the name table is not poisoned");
+            names.retain(|_, owner| *owner != id);
+        });
     }
 
     /// Record the exit of a process after its exit signals. A waiting root
@@ -277,22 +275,14 @@ impl Node {
 
     /// Return the scheduler of the live process `id`.
     pub(in crate::runtime) fn owner(&self, id: ProcessId) -> Option<usize> {
-        self.owners
-            .lock()
-            .expect("the process owner table is not poisoned")
-            .get(&id)
-            .map(|&(index, _)| index)
+        self.processes.owner(id)
     }
 
     /// Return the scheduler of the process `id` when the process does not
     /// exit, as `erts_proc_lookup` (`erl_process_lock.h:1151-1157`) finds
     /// it.
     pub(in crate::runtime) fn live_owner(&self, id: ProcessId) -> Option<usize> {
-        self.owners
-            .lock()
-            .expect("the process owner table is not poisoned")
-            .get(&id)
-            .and_then(|&(index, exiting)| (!exiting).then_some(index))
+        self.processes.live_owner(id)
     }
 
     /// Put a message for `target` into the inbox of `index`. `pending` is
@@ -522,12 +512,11 @@ impl Node {
     /// Register `name` for `id`. Return false when another process has the
     /// name.
     pub(in crate::runtime) fn name_register(&self, name: &str, id: ProcessId) -> bool {
-        let owners = self.owners.lock().expect("the owner table is not poisoned");
-        if !owners.contains_key(&id) {
-            return false;
-        }
-        // Hold the owner table until the name is in, so the exit of `id`
+        // Hold the shard of `id` until the name is in, so the exit of `id`
         // cannot pass the registration.
+        let Some(_shard) = self.processes.hold(id) else {
+            return false;
+        };
         let mut names = self.names.lock().expect("the name table is not poisoned");
         if names.contains_key(name) || names.values().any(|owner| *owner == id) {
             return false;

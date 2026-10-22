@@ -3,7 +3,7 @@
          monitor_watch/0, monitor_hold/0, unreg_hold/0, unreg_taker/0,
          info_watch/0, info_hold/0, info_item/0, info_all/0,
          down_wait/0, down_hold/0, atom_create/0, drain_wait/0, drain_hold/0,
-         len_wait/0, len_hold/0, process_list/0, child_wait/0, child_send/0,
+         len_wait/0, len_hold/0, child_wait/0, child_send/0,
          child_hold/0, name_wait/0, name_send/0, reference_name/0,
          stamp_wait/0, stamp_send/0, term_wait/0, term_send/0, port_wait/0,
          kill_watch/0, kill_hold/0, kill_child/0, port_send/0, port_other/0,
@@ -275,10 +275,6 @@ len_hold() ->
     Pid ! ready,
     true = register(len_ready, self()),
     receive stop -> ok after 2000 -> timeout end.
-
-%% The root that lists the processes of the node.
-process_list() ->
-    processes().
 
 %% The root that reads the queue length of its child without a scheduling
 %% step after the other root registers the name.

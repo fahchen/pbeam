@@ -345,16 +345,19 @@ enum ExitPhase {
 
 /// A scheduler on one OS thread. A process runs until it waits, exits, or
 /// switches out at an ERTS switch point. It follows the ERTS model. The
-/// process table holds every live process, also an exiting one, and the
-/// slot of the running process. The run queue holds only processes that
+/// process table of the node holds every live process of the node, also an
+/// exiting one. The process slots hold the state of each live process of
+/// this scheduler and the slot of the running process. The run queue holds only processes that
 /// wait for a turn. A process can be in the run queue for Erlang work or
 /// only to handle its signals.
 #[derive(Debug)]
 pub(super) struct Scheduler {
-    /// All live processes, including the current process, and the slot of
-    /// the current process, like `current_process` in the ERTS scheduler
-    /// data.
-    processes: ProcessTable,
+    /// The state of each live process of this scheduler, including the
+    /// current process, and the slot of the current process, like
+    /// `current_process` in the ERTS scheduler data. The process table of
+    /// the node (`Node::processes`) holds the pid of each process of the
+    /// node.
+    processes: ProcessSlots,
     /// The processes that left the process table in their exit and switched
     /// out before the end of their exit, as ERTS keeps a process in the
     /// `ERTS_PSFLG_FREE` state (`erl_process.c:14469`, `14814-14816`), with
@@ -512,7 +515,7 @@ impl Scheduler {
         resources.put(Ports::default());
         let menu_pair = std::os::unix::net::UnixStream::pair().expect("a menu socket pair opens");
         Scheduler {
-            processes: ProcessTable::default(),
+            processes: ProcessSlots::default(),
             freed: HashMap::new(),
             runnable: RunQueue::default(),
             root_result: None,
@@ -2016,16 +2019,17 @@ impl Scheduler {
 
     /// Start an `erlang:processes/0` read of the process table by the
     /// current process, as `ptab_list_bif_engine` adds its invocation to
-    /// the deleted list (`erl_ptab.c:922-951`).
+    /// the deleted list (`erl_ptab.c:922-951`), and return the pids of its
+    /// first chunk, up to `end` (see `ProcessTable::start_list`).
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// scheduler.ptab_list_start();
+    /// assert_eq!(scheduler.ptab_list_start(1000), vec![ProcessId(0)]);
     /// ```
-    pub(super) fn ptab_list_start(&mut self) {
+    pub(super) fn ptab_list_start(&mut self, end: u64) -> Vec<ProcessId> {
         let id = self.current_process().id;
-        self.processes.start_list(id);
+        self.node.processes.start_list(id, end)
     }
 
     /// Return the pid of each process of the next indices of the
@@ -2037,11 +2041,11 @@ impl Scheduler {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(scheduler.ptab_list_chunk(1000).collect::<Vec<_>>(), vec![ProcessId(0)]);
+    /// assert_eq!(scheduler.ptab_list_chunk(1000), vec![ProcessId(0)]);
     /// ```
-    pub(super) fn ptab_list_chunk(&mut self, end: u64) -> impl Iterator<Item = ProcessId> + '_ {
+    pub(super) fn ptab_list_chunk(&mut self, end: u64) -> Vec<ProcessId> {
         let id = self.current_process().id;
-        self.processes.list_chunk(id, end)
+        self.node.processes.list_chunk(id, end)
     }
 
     /// Step the `erlang:processes/0` read of the current process to the
@@ -2056,7 +2060,7 @@ impl Scheduler {
     /// ```
     pub(super) fn ptab_list_deleted(&mut self) -> Option<(Option<ProcessId>, bool)> {
         let id = self.current_process().id;
-        self.processes.next_deleted(id)
+        self.node.processes.next_deleted(id)
     }
 
     /// Return whether the `erlang:processes/0` read of the current process
@@ -2068,13 +2072,15 @@ impl Scheduler {
     /// assert!(scheduler.ptab_list_deleted_done());
     /// ```
     pub(super) fn ptab_list_deleted_done(&self) -> bool {
-        self.processes.deleted_done(self.current_process().id)
+        self.node.processes.deleted_done(self.current_process().id)
     }
 
-    /// Remove the process `id` from the process table, as its exit does.
+    /// Remove the process `id` from the process slots and the process
+    /// table, as its exit does.
     #[cfg(test)]
     pub(super) fn remove_process(&mut self, id: ProcessId) {
         self.processes.remove(&id);
+        self.node.remove_process(id);
     }
 
     /// End the `erlang:processes/0` read of the current process.
@@ -2086,7 +2092,7 @@ impl Scheduler {
     /// ```
     pub(super) fn ptab_list_end(&mut self) {
         let id = self.current_process().id;
-        self.processes.end_list(id);
+        self.node.processes.end_list(id);
     }
 
     /// Return the process `id` of the process table, also the current
@@ -2105,21 +2111,24 @@ impl Scheduler {
         self.processes.get(&id)
     }
 
-    /// Return the index and the pid of each process of the table with an
-    /// index from `start` up to `end`, in the index order of the ERTS table
-    /// (see [`ProcessTable::indexed`]).
+    /// Return the index and the pid of each process of the node process
+    /// table with an index from `start` up to `end`, in the index order of
+    /// the ERTS table, up to `max` processes that `keep` accepts (see
+    /// [`process_table::ProcessTable::indexed`]).
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(scheduler.ptab_indexed(0, 25).next(), Some((0, ProcessId(0))));
+    /// assert_eq!(scheduler.ptab_indexed(0, 25, 1, |_| true), vec![(0, ProcessId(0))]);
     /// ```
     pub(super) fn ptab_indexed(
         &self,
         start: u64,
         end: u64,
-    ) -> impl Iterator<Item = (u64, ProcessId)> + '_ {
-        self.processes.indexed(start, end)
+        max: usize,
+        keep: impl FnMut(ProcessId) -> bool,
+    ) -> Vec<(u64, ProcessId)> {
+        self.node.processes.indexed(start, end, max, keep)
     }
 
     /// Return the process `id` when it does not exit, as `erts_proc_lookup`
@@ -3761,6 +3770,7 @@ mod known_nodes;
 pub(super) mod node;
 mod policy;
 mod ports;
+mod process_slots;
 mod process_table;
 pub(super) mod run_queue;
 mod signals;
@@ -3771,7 +3781,7 @@ use known_nodes::KnownNodes;
 use node::{Delivery, Node};
 pub(super) use policy::PolicyEnd;
 use policy::PolicyProcess;
-use process_table::ProcessTable;
+use process_slots::ProcessSlots;
 use run_queue::RunQueue;
 pub(super) use signals::{Flushed, HandlingPoint, Received};
 
