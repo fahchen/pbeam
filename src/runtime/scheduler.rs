@@ -581,7 +581,7 @@ impl Scheduler {
     ) -> Self {
         // A term crosses a scheduler thread with its atom indices, so the
         // schedulers share one table, as ERTS shares `erts_atom_table`.
-        let origin = node.clock_origin();
+        let clock = node.clock();
         let mut scheduler = Scheduler {
             node,
             multi: true,
@@ -590,9 +590,9 @@ impl Scheduler {
             skip_checks: true,
             ..Scheduler::new(atoms)
         };
-        // Each scheduler timer service starts on the run start of the node,
-        // so the clocks of the threads agree.
-        scheduler.timers = Timers::with_origin(origin);
+        // Each scheduler timer service reads the one time support of the
+        // node, so the clocks of the threads agree.
+        scheduler.timers = Timers::with_clock(clock);
         scheduler
     }
 
