@@ -330,14 +330,18 @@ fn run_end(result: Result<HostTerm, BeamError>) -> Result<(), Exit> {
 ///
 /// An `erl` option of [`ERLEXEC_OPTIONS`] or an emulator flag (an
 /// argument that starts with `+`) before `-extra`, a variable of
-/// [`ERLEXEC_VARIABLES`] that is set and not empty, the errors of
+/// [`ERLEXEC_VARIABLES`] that is set and not empty, `ERL_EPMD_PORT` also
+/// when it is empty, the errors of
 /// [`BeamProgram::load_preloaded`], and the errors of
 /// [`BeamProgram::boot`]. A halt of the run gives [`Exit::Halt`].
 fn boot_erl(arguments: ErlCli) -> Result<(), Exit> {
-    if let Some(variable) = ERLEXEC_VARIABLES
-        .iter()
-        .find(|variable| std::env::var_os(variable).is_some_and(|value| !value.is_empty()))
-    {
+    // An empty flag variable gives no flag (`erlexec.c:1762-1768`), but
+    // `erlexec` gives `-epmd_port` for each value of `ERL_EPMD_PORT`, also
+    // an empty one (`erlexec.c:1754-1760`).
+    if let Some(variable) = ERLEXEC_VARIABLES.iter().find(|variable| {
+        std::env::var_os(variable)
+            .is_some_and(|value| !value.is_empty() || **variable == "ERL_EPMD_PORT")
+    }) {
         return Err(format!(
             "the environment variable {variable} of erl is not supported: \
              see \"Release boot\" in docs/erts-differences.md"

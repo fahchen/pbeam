@@ -158,7 +158,7 @@ fn rejects_the_options_and_variables_of_erlexec() {
     // (erlexec.c:661-861, 869-964, 2122-2140), and the flags of
     // `ERL_AFLAGS`, `ERL_FLAGS`, and `ERL_ZFLAGS`. `pbeam erl` has no
     // `erlexec` part for them, and no distribution for `-sname`.
-    let cases: [Rejected; 6] = [
+    let cases: [Rejected; 7] = [
         (
             &["-sname", "node", "-extra", "-sname"],
             &[],
@@ -184,6 +184,11 @@ fn rejects_the_options_and_variables_of_erlexec() {
             &["-noshell"],
             &[("ERL_OTP29_FLAGS", "-kernel logger_level warning")],
             "the environment variable ERL_OTP29_FLAGS of erl is not supported",
+        ),
+        (
+            &["-noshell"],
+            &[("ERL_EPMD_PORT", "")],
+            "the environment variable ERL_EPMD_PORT of erl is not supported",
         ),
     ];
     for (arguments, environment, message) in cases {
