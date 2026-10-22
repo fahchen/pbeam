@@ -378,14 +378,30 @@ fn stops_the_run_for_a_part_that_pbeam_does_not_support() {
         failure.to_string(),
         "unsupported: erlang:load_nif/2 of the NIF library of nif_bare: the module has no nif_start instruction"
     );
+}
 
-    let failure = program
-        .execute_on_schedulers(&[("nif_add", "missing")])
-        .unwrap_err();
-    assert_eq!(
-        failure.to_string(),
-        "unsupported: erlang:load_nif/2 of the NIF library of nif_add in a run of execute_on_schedulers"
-    );
+#[test]
+fn calls_a_library_that_another_scheduler_loaded() {
+    // The node keeps the library of the load, so a call on the other
+    // scheduler runs its function (`beam/erl_nif.c:4990-4997`). The fixture
+    // names the path relative to the directory of the crate.
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/nif_cross");
+    std::fs::create_dir_all(&directory).unwrap();
+    let output = format!("{}/nif_add.so", directory.display());
+    let source = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/nif/nif_add.c");
+    let include = concat!("-I", env!("CARGO_MANIFEST_DIR"), "/vendor/erts/include");
+    let mut arguments = shared().to_vec();
+    arguments.extend([include, "-o", &output, source]);
+    cc(&arguments);
+    let program = program();
+    let ok = Term::Atom(program.atom("ok").unwrap());
+    for _ in 0..10 {
+        let results = program
+            .execute_on_schedulers(&[("nif_add", "cross_load"), ("nif_add", "cross_call")])
+            .unwrap();
+        assert_eq!(results[0].term, ok);
+        assert_eq!(results[1].term, Term::Integer(3));
+    }
 }
 
 #[test]

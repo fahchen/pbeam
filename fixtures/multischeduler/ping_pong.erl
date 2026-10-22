@@ -13,7 +13,7 @@
          port_transfer_hold/0, ports_list/0, port_use/0, port_give/0,
          port_term/0, port_term_give/0, atomics_new/0, timer_remote/0,
          timer_hold/0, timer_named/0, timer_read/0, timer_give/0, system_flag_depth/0,
-         finish_loading/0, delete_module/0, regex_run/0, regex_give/0,
+         regex_run/0, regex_give/0,
          group_leader_remote/0, leader_hold/0, pattern_match/0, pattern_give/0,
          timer_fire/0, timer_cancel/0, timer_child_exit/0, timer_child/0,
          timer_cancel_use/0, timer_cancel_give/0, port_link_use/0,
@@ -602,16 +602,6 @@ timer_give() ->
 %% scheduler in a run with scheduler threads.
 system_flag_depth() ->
     erlang:system_flag(backtrace_depth, 0).
-
-%% The root that loads code. The code table stays with each scheduler in a
-%% run with scheduler threads.
-finish_loading() ->
-    erlang:finish_loading([]).
-
-%% The root that deletes code. The code table stays with each scheduler in
-%% a run with scheduler threads.
-delete_module() ->
-    erlang:delete_module(code_loading_probe).
 
 %% The root that runs the compiled expression of the other scheduler.
 regex_run() ->

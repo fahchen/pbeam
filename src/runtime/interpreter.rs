@@ -43,7 +43,7 @@ pub(crate) use native::has_static_library;
 pub use native::{NifGap, nif_manifest_gaps};
 
 pub(super) use bif::BifResult;
-pub(super) use code_table::{CodeTable, LoadedModule};
+pub(super) use code_table::{CodeSnapshot, CodeTable, LoadedModule};
 
 use code_table::{ExportTarget, ImportTargets};
 
@@ -2872,7 +2872,21 @@ impl BeamProgram {
         match *kind {
             ImportKind::LoadNif => {
                 let module_id = current_frame(process).module_id;
-                let result = native::load_nif(scheduler, module_id)?;
+                // `erlang:load_nif/2` runs on the newest code state of the
+                // node and publishes its NIF library record, as the other
+                // code operations do (see `scheduler::code`).
+                let node = scheduler.is_multi().then(|| Arc::clone(scheduler.node()));
+                let mut state = node.as_deref().map(|node| {
+                    let state = node.code.lock();
+                    scheduler.install_code(&state);
+                    state
+                });
+                let result = native::load_nif(scheduler, module_id);
+                if let Some(state) = state.as_mut() {
+                    scheduler.publish_code(state);
+                }
+                drop(state);
+                let result = result?;
                 // The `load_nif/2` and `call_on_load_function/1`
                 // instructions raise with the BIF frame, as each BIF does
                 // (`jit/arm/instr_bif.cpp:994-1067`).
