@@ -6,8 +6,8 @@ defmodule Mix.Tasks.Pbeam.Bundle do
   preloaded modules) with `scripts/example.sh --no-build --write-start`, and
   writes one bundle. The entry `elixir:start_cli` is the `-s` call of
   `bin/<app> start`, which the launcher gives to the boot of the release. The
-  NIF manifest gate of the tool reads the allowlist `nif-allowlist.txt` of
-  the project and stops the task on an item that the list does not accept. Run
+  NIF manifest gate of the tool reports each NIF function that PBeam does not
+  bind and stops the task on a module that PBeam has no NIF library for. Run
   `mix release` first; the task reads the release that the project config
   names, or the directory of `--release`. Relative paths are relative to the
   directory of the command line.
@@ -67,10 +67,9 @@ defmodule Mix.Tasks.Pbeam.Bundle do
       root
     )
 
-    # The NIF manifest gate of the tool prints each item that the allowlist
-    # of the project accepts.
-    allowlist = Path.join(cwd, "nif-allowlist.txt")
-    gate = run!(tool, ["bundle", release, output, "elixir", "start_cli", start, allowlist], root)
+    # The NIF manifest gate of the tool prints each NIF function that PBeam
+    # does not bind.
+    gate = run!(tool, ["bundle", release, output, "elixir", "start_cli", start], root)
     Mix.shell().info(gate)
     Mix.shell().info("Wrote #{output}")
   end

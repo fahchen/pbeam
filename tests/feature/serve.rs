@@ -333,9 +333,6 @@ fn serve_one_file() -> (String, String, String) {
         .arg(&bundle)
         .args(["elixir", "start_cli"])
         .arg(&start)
-        .arg(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/plug_hello/nif-allowlist.txt"),
-        )
         .status()
         .expect("pbeam_bundle runs");
     assert!(status.success(), "the bundle builds");
