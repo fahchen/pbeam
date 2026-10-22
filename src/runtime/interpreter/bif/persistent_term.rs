@@ -4,17 +4,96 @@
 //! caller: `read` for `get/0,1,2` and `write` for `put/2`. ERTS checks no
 //! argument of these BIFs, so the check comes before the table access, and
 //! a denied call raises `error:capability_denied` and has no effect. The
-//! trap exports `get_all_trap/2`, `put_common_trap/1`, and `erase_trap/2`
-//! continue a call that passed its check, so they do not check again.
+//! trap exports of [`resume`] continue a call that passed its check, so
+//! they do not check again.
+//!
+//! The node keeps one table, and any scheduler reads it. An update, and a
+//! `get/0` that traps, hold the update permission of the node
+//! (`try_seize_update_permission`, `erl_bif_persistent.c:1311-1335`). A
+//! call that finds the permission with another process suspends until the
+//! release, as ERTS does. A `put/2` or an `erase/1` that changes the table
+//! suspends the caller until thread progress, and the new table becomes
+//! visible and the permission is released then
+//! (`erl_bif_persistent.c:774-779`, `1172-1234`). PBeam counts scheduling
+//! steps of the node in place of thread progress
+//! ([`Scheduler::persistent_term_progress`]).
 
 use super::BifResult::Value;
 use super::*;
 use crate::runtime::capability::{CapabilityKind, Operation};
+use crate::runtime::persistent_term::Change;
+use std::sync::{Arc, atomic::Ordering};
+
+/// Continue a call at a trap export of this module. `get_all_wait/0`,
+/// `put_wait/2`, and `erase_wait/1` try the call again after a wait for
+/// the update permission, as `ERTS_BIF_YIELD0`, `ERTS_BIF_YIELD3`, and
+/// `ERTS_BIF_YIELD1` trap to the BIF (`erl_bif_persistent.c:333-335`,
+/// `467-469`, `692-694`). `get_all_trap/2`, `put_common_trap/3`, and
+/// `erase_trap/3` continue a chunk or a table copy. `thread_progress/1`
+/// returns its argument after one more switch, as `table_updater` resumes
+/// the caller (`erl_bif_persistent.c:1172-1230`). Return `None` for another
+/// name.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = resume(&mut scheduler, "thread_progress", &[Term::static_atom("ok")]);
+/// assert!(matches!(result, Some(BifResult::YieldReturn(_))));
+/// ```
+pub(super) fn resume(
+    scheduler: &mut Scheduler,
+    function: &str,
+    arguments: &[Term],
+) -> Option<BifResult> {
+    Some(match (function, arguments) {
+        ("get_all_wait", []) => get_all_start(scheduler),
+        ("get_all_trap", [all, Term::Integer(entries)]) => {
+            get_all_trap(scheduler, all.clone(), *entries as usize)
+        }
+        ("put_wait", [key, value]) => put_start(scheduler, key, value),
+        ("put_common_trap", [key, value, Term::Integer(copied)]) => {
+            put_trap(scheduler, key, value, *copied as usize)
+        }
+        ("erase_wait", [key]) => erase_start(scheduler, key),
+        ("erase_trap", [key, Term::Integer(first), Term::Integer(second)]) => {
+            erase_trap(scheduler, key, *first as usize, *second as usize)
+        }
+        ("thread_progress", [value]) => thread_progress(value.clone()),
+        _ => return None,
+    })
+}
+
+/// Give the update permission to the current process and return `None`.
+/// When another live process holds it, use all reductions and return a
+/// trap to the wait export `function` with `arguments`, as the
+/// `ERTS_BIF_YIELD` after a failed `try_seize_update_permission` does.
+fn seize(
+    scheduler: &mut Scheduler,
+    function: &'static str,
+    arguments: Vec<Term>,
+) -> Option<BifResult> {
+    let id = scheduler.current_process().id;
+    if scheduler.node().persistent_terms().seize(id) {
+        return None;
+    }
+    scheduler.current_process_mut().bump_all_reductions();
+    Some(BifResult::Suspend {
+        module: "persistent_term",
+        function,
+        arguments,
+    })
+}
+
+/// Release the update permission of the current process.
+fn release(scheduler: &mut Scheduler) {
+    let id = scheduler.current_process().id;
+    scheduler.release_persistent_terms(id);
+}
 
 /// Run `persistent_term:get/0`: return each key and value of the node, as
-/// ERTS `persistent_term_get_0` does (`erl_bif_persistent.c:324-356`). ERTS
-/// takes the table of the call and keeps it until the last chunk, so the
-/// result is the table at the call. See [`get_all_trap`] for the chunks.
+/// ERTS `persistent_term_get_0` does (`erl_bif_persistent.c:324-356`). The
+/// call holds the update permission until its last chunk, so the result is
+/// the table at the call. See [`get_all_trap`] for the chunks.
 ///
 /// The caller needs a `persistent_term` capability that permits `read`,
 /// else the call raises `error:capability_denied` and uses no reduction.
@@ -22,7 +101,6 @@ use crate::runtime::capability::{CapabilityKind, Operation};
 /// # Examples
 ///
 /// ```rust,ignore
-/// process.fcalls = 10;
 /// let all = get_all(&mut context)?;
 /// assert!(matches!(all, BifResult::Value(pairs) if pairs.is_nil()));
 /// ```
@@ -42,20 +120,29 @@ pub(super) fn get_all(context: &mut BifContext<'_>) -> Result<BifResult, BeamErr
     if let Some(denied) = check? {
         return Ok(denied);
     }
-    let pairs = scheduler.persistent_terms.get_all();
+    Ok(get_all_start(scheduler))
+}
+
+/// Seize the update permission and read the table for `get/0`.
+fn get_all_start(scheduler: &mut Scheduler) -> BifResult {
+    if let Some(wait) = seize(scheduler, "get_all_wait", Vec::new()) {
+        return wait;
+    }
+    let table = Arc::clone(&scheduler.node().persistent_terms().terms);
+    let pairs = table.get_all();
+    // The release in `get_all_trap` lets a publication change the table in
+    // place, so no reference may stay (`erl_bif_persistent.c:1181-1185`).
+    drop(table);
     let entries = pairs.len();
-    Ok(get_all_trap(
-        scheduler.current_process_mut(),
-        Term::list_from(pairs),
-        entries,
-    ))
+    get_all_trap(scheduler, Term::list_from(pairs), entries)
 }
 
 /// Run `persistent_term:get/1` with no `default` and `persistent_term:get/2`
 /// with its `default`: return the value of `key`. A key with no value gives
 /// `default`, or raises `badarg` with no `default`, as
 /// `persistent_term_get_1` and `persistent_term_get_2` do with their shared
-/// `persistent_term_get` (`erl_bif_persistent.c:358-398`).
+/// `persistent_term_get` (`erl_bif_persistent.c:358-398`). A read takes no
+/// update permission.
 ///
 /// The caller needs a `persistent_term` capability that permits `read`,
 /// else the call raises `error:capability_denied`, also for a key with no
@@ -89,11 +176,14 @@ pub(super) fn get(
     if let Some(denied) = check? {
         return Ok(denied);
     }
-    Ok(scheduler
-        .persistent_terms
-        .get(key)
-        .or(default)
-        .map_or_else(BifResult::badarg, |value| Value(value.clone())))
+    // The lookup runs under the lock of the node and keeps no reference to
+    // the table, so a publication changes the slot in place with no copy
+    // (`erl_bif_persistent.c:1181-1185`). A `get/0` holds the update
+    // permission, so no publication overlaps its reference.
+    let value = scheduler.node().persistent_terms().terms.get(key).cloned();
+    Ok(value
+        .or_else(|| default.cloned())
+        .map_or_else(BifResult::badarg, Value))
 }
 
 /// Use the reductions of the `entries` pairs that remain of the result
@@ -101,25 +191,22 @@ pub(super) fn get(
 /// does (`erl_bif_persistent.c:830-900`). A call takes at most one pair for
 /// each reduction of the budget. ERTS reads the budget as an unsigned
 /// number, so a negative budget takes all pairs. When the pairs end, the
-/// call bumps one reduction for each pair that remained at the call
-/// (`erl_bif_persistent.c:347-351`, `816-826`). Else it uses all reductions
-/// and traps to the export `persistent_term:get_all_trap/2`
-/// (`erl_bif_persistent.c:263-265`, `352-355`, `819-821`), which continues
-/// with no cost in the next turn. ERTS keeps the table and the result so
-/// far in the trap state. PBeam keeps the full result and the number of
-/// pairs that remain.
+/// call bumps one reduction for each pair that remained at the call and
+/// releases the update permission (`erl_bif_persistent.c:347-351`,
+/// `816-826`). Else it uses all reductions and traps to the export
+/// `persistent_term:get_all_trap/2` (`erl_bif_persistent.c:263-265`,
+/// `352-355`, `819-821`), which continues with no cost in the next turn.
+/// ERTS keeps the table and the result so far in the trap state. PBeam
+/// keeps the full result and the number of pairs that remain.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// process.fcalls = 10;
-/// assert!(matches!(get_all_trap(&mut process, Term::nil(), 4), BifResult::Value(_)));
-/// assert_eq!(process.fcalls, 6);
-/// let trap = get_all_trap(&mut process, Term::nil(), 7);
-/// assert!(matches!(trap, BifResult::TrapBif { function: "get_all_trap", arguments, .. } if arguments[1] == Term::Integer(1)));
-/// assert_eq!(process.fcalls, 0);
+/// scheduler.current_process_mut().fcalls = 10;
+/// assert!(matches!(get_all_trap(&mut scheduler, Term::nil(), 4), BifResult::Value(_)));
 /// ```
-pub(super) fn get_all_trap(process: &mut ProcessState, all: Term, entries: usize) -> BifResult {
+fn get_all_trap(scheduler: &mut Scheduler, all: Term, entries: usize) -> BifResult {
+    let process = scheduler.current_process_mut();
     let max_iter = usize::try_from(process.fcalls).unwrap_or(usize::MAX);
     if entries > max_iter {
         process.bump_all_reductions();
@@ -130,16 +217,16 @@ pub(super) fn get_all_trap(process: &mut ProcessState, all: Term, entries: usize
         };
     }
     process.bump_reductions(entries as i32);
+    release(scheduler);
     Value(all)
 }
 
 /// Run `persistent_term:erase/1`: erase the value of `key` and return
 /// `true`, or return `false` for a key with no value, as
-/// `persistent_term_erase_1` does (`erl_bif_persistent.c:417-549`). ERTS
-/// returns `true` after the process switches out and `false` with no
-/// switch, so this BIF does the same. The copy of a rehashed table goes
-/// through its slots ([`erase_trap`]) and charges one reduction for each
-/// 32 slots (`erl_bif_persistent.c:538`).
+/// `persistent_term_erase_1` does (`erl_bif_persistent.c:417-549`). The
+/// call first seizes the update permission. A key with no value releases
+/// it and returns `false` with no switch. Else the copy of a rehashed table
+/// goes through its slots ([`erase_trap`]).
 ///
 /// The caller needs a `persistent_term` capability that permits `write`,
 /// else the call raises `error:capability_denied` and erases nothing,
@@ -167,43 +254,62 @@ pub(super) fn erase(context: &mut BifContext<'_>, key: &Term) -> Result<BifResul
     if let Some(denied) = check? {
         return Ok(denied);
     }
-    match scheduler.persistent_terms.erase(key) {
-        None => Ok(Value(Term::static_atom("false"))),
-        Some((first, second)) => erase_trap(scheduler.current_process_mut(), first, second),
+    Ok(erase_start(scheduler, key))
+}
+
+/// Seize the update permission and start `erase/1` of `key`.
+fn erase_start(scheduler: &mut Scheduler, key: &Term) -> BifResult {
+    if let Some(wait) = seize(scheduler, "erase_wait", vec![key.clone()]) {
+        return wait;
+    }
+    let cost = scheduler.node().persistent_terms().terms.erase_cost(key);
+    match cost {
+        None => {
+            release(scheduler);
+            Value(Term::static_atom("false"))
+        }
+        Some((first, second)) => {
+            if second > 0 {
+                scheduler
+                    .node()
+                    .persistent_terms()
+                    .start_copy(second - first, Some(key.clone()));
+            }
+            erase_trap(scheduler, key, first, second)
+        }
     }
 }
 
-/// Use the reductions of the table copies of `persistent_term:erase/1`, of
-/// which `first` slots of the temporary copy and `second` slots of the
-/// rehashed copy remain, as `TRAPPING_COPY_TABLE` does
+/// Use the reductions of the table copies of `persistent_term:erase/1` of
+/// `key`, of which `first` slots of the temporary copy and `second` slots
+/// of the rehashed copy remain, as `TRAPPING_COPY_TABLE` does
 /// (`erl_bif_persistent.c:275-293`, `1034-1139`). A call goes through at
 /// most 32 slots for each reduction of the budget in each copy, but at
-/// least 1. When the copies end, the BIF bumps one reduction for each 32
-/// slots of the call, and returns `true` after the process switches out
-/// (`erl_bif_persistent.c:537-539`). Else it uses all reductions and traps
-/// to the export `persistent_term:erase_trap/2`, which continues with the
-/// slots that remain. ERTS traps to `erase/1` with a magic reference to the
-/// copy state. PBeam copies the table in the first call, so the trap keeps
-/// the number of slots of each copy that remain.
+/// least 1. When the copies end, the BIF erases the key, bumps one
+/// reduction for each 32 slots of the call, and waits for thread progress
+/// before it returns `true` (`erl_bif_persistent.c:535-539`). Else it uses
+/// all reductions and traps to the export `persistent_term:erase_trap/3`,
+/// which continues with the slots that remain. ERTS traps to `erase/1`
+/// with a magic reference to the copy state. The caller holds the update
+/// permission, so no other update changes the table during the traps.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// process.fcalls = 2;
-/// assert!(matches!(erase_trap(&mut process, 0, 64)?, BifResult::YieldReturn(_)));
-/// assert_eq!(process.fcalls, 0);
-/// process.fcalls = 2;
-/// let trap = erase_trap(&mut process, 0, 65)?;
-/// assert!(matches!(trap, BifResult::TrapBif { function: "erase_trap", arguments, .. } if arguments[1] == Term::Integer(1)));
+/// scheduler.current_process_mut().fcalls = 2;
+/// let trap = erase_trap(&mut scheduler, &key, 0, 65);
+/// assert!(matches!(trap, BifResult::TrapBif { function: "erase_trap", .. }));
 /// ```
-pub(super) fn erase_trap(
-    process: &mut ProcessState,
+fn erase_trap(
+    scheduler: &mut Scheduler,
+    key: &Term,
     mut first: usize,
     mut second: usize,
-) -> Result<BifResult, BeamError> {
+) -> BifResult {
     /// `ITERATIONS_PER_RED` of `persistent_term_erase_1`
     /// (`erl_bif_persistent.c:419`).
     const ITERATIONS_PER_RED: usize = 32;
+    let process = scheduler.current_process_mut();
     // `MAX(1, max_iterations)` of a `long` that a negative budget makes
     // negative (`erl_bif_persistent.c:284`, `429-430`).
     let limit = (ITERATIONS_PER_RED * process.bif_reductions_or_zero()).max(1);
@@ -220,29 +326,64 @@ pub(super) fn erase_trap(
     }
     let mut copied = 0;
     let trapped = step(&mut first, limit, &mut copied) || step(&mut second, limit, &mut copied);
+    scheduler.node().persistent_terms().copy_step(limit);
+    let process = scheduler.current_process_mut();
     if trapped {
         process.bump_all_reductions();
-        return Ok(BifResult::TrapBif {
+        return BifResult::TrapBif {
             module: "persistent_term",
             function: "erase_trap",
-            arguments: vec![Term::Integer(first as i64), Term::Integer(second as i64)],
-        });
+            arguments: vec![
+                key.clone(),
+                Term::Integer(first as i64),
+                Term::Integer(second as i64),
+            ],
+        };
     }
     process.bump_reductions((copied / ITERATIONS_PER_RED) as i32);
-    Ok(BifResult::YieldReturn(Term::static_atom("true")))
+    schedule(
+        scheduler,
+        Change::Erase(key.clone()),
+        Term::static_atom("true"),
+    )
+}
+
+/// Make `table` visible after thread progress, and suspend the caller
+/// until then, as `erts_schedule_thr_prgr_later_op` and `suspend_updater`
+/// do (`erl_bif_persistent.c:774-779`). The caller keeps the update
+/// permission until the table is visible. ERTS builds the new table in the
+/// copy traps; PBeam builds it in the last call, outside the lock of the
+/// node.
+fn schedule(scheduler: &mut Scheduler, change: Change, value: Term) -> BifResult {
+    let id = scheduler.current_process().id;
+    let node = Arc::clone(scheduler.node());
+    node.persistent_terms()
+        .schedule(id, scheduler.index(), change);
+    node.persistent_progress().store(true, Ordering::Release);
+    // The caller always switches out and suspends, as `ERTS_BIF_YIELD_RETURN`
+    // after `suspend_updater` does (`erl_bif_persistent.c:539`, `783`).
+    // A publication on another scheduler resumes it with a signal, which it
+    // handles after the switch.
+    BifResult::Suspend {
+        module: "persistent_term",
+        function: "thread_progress",
+        arguments: vec![value],
+    }
+}
+
+/// Return `value` after thread progress resumed the caller, as the
+/// `ERTS_BIF_YIELD_RETURN` after `suspend_updater` does
+/// (`erl_bif_persistent.c:782-783`, `1172-1234`). Only the publication of
+/// its change resumes the caller, so the change is visible here.
+fn thread_progress(value: Term) -> BifResult {
+    Value(value)
 }
 
 /// Run `persistent_term:put/2`: store `value` for `key`, as ERTS
-/// `put_common` does (`erl_bif_persistent.c:642-784`). A key that has
-/// exactly this value already returns `ok` with no cost. Else the copy of a
-/// doubled table goes through its slots ([`put_trap`]), and the BIF
-/// returns `ok` after the process switches out (`ERTS_BIF_YIELD_RETURN`).
-///
-/// ERTS suspends the caller until thread progress makes the new table
-/// visible (`suspend_updater`, `erl_bif_persistent.c:774-779`), so other
-/// processes can run more than one turn first. PBeam switches the process
-/// out, and the new value is visible at once (row "Persistent terms" in
-/// `docs/erts-differences.md`).
+/// `put_common` does (`erl_bif_persistent.c:642-784`). The call first
+/// seizes the update permission. A key that has exactly this value already
+/// releases it and returns `ok` with no cost (`erl_bif_persistent.c:726-729`).
+/// Else the copy of a doubled table goes through its slots ([`put_trap`]).
 ///
 /// The caller needs a `persistent_term` capability that permits `write`,
 /// else the call raises `error:capability_denied` and stores nothing, also
@@ -252,9 +393,7 @@ pub(super) fn erase_trap(
 ///
 /// ```rust,ignore
 /// let result = put(&mut context, &Term::static_atom("key"), &Term::Integer(1))?;
-/// assert!(matches!(result, BifResult::YieldReturn(_)));
-/// let same = put(&mut context, &Term::static_atom("key"), &Term::Integer(1))?;
-/// assert!(matches!(same, BifResult::Value(_)));
+/// assert!(matches!(result, BifResult::TrapBif { function: "thread_progress", .. }));
 /// ```
 ///
 /// # Errors
@@ -276,48 +415,81 @@ pub(super) fn put(
     if let Some(denied) = check? {
         return Ok(denied);
     }
-    match scheduler.persistent_terms.put(key, value) {
-        None => Ok(Value(Term::static_atom("ok"))),
-        Some(copied) => put_trap(scheduler.current_process_mut(), copied),
+    Ok(put_start(scheduler, key, value))
+}
+
+/// Seize the update permission and start `put/2` of `key` and `value`.
+fn put_start(scheduler: &mut Scheduler, key: &Term, value: &Term) -> BifResult {
+    if let Some(wait) = seize(scheduler, "put_wait", vec![key.clone(), value.clone()]) {
+        return wait;
+    }
+    let cost = scheduler
+        .node()
+        .persistent_terms()
+        .terms
+        .put_cost(key, value);
+    match cost {
+        None => {
+            release(scheduler);
+            Value(Term::static_atom("ok"))
+        }
+        Some(copied) => {
+            if copied > 0 {
+                // The copy doubles the table: `copied` is 3 times its size.
+                scheduler
+                    .node()
+                    .persistent_terms()
+                    .start_copy(copied / 3 * 2, None);
+            }
+            put_trap(scheduler, key, value, copied)
+        }
     }
 }
 
-/// Use the reductions of the table copy of `persistent_term:put/2`, of
-/// which `copied` slots remain, as `TRAPPING_COPY_TABLE` does
-/// (`erl_bif_persistent.c:275-293`, `1034-1139`). A call goes through at
-/// most 32 slots for each reduction of the budget, but at least 1. When the
-/// copy ends, the BIF bumps one reduction for each 32 slots of the call,
-/// and returns `ok` after the process switches out
-/// (`erl_bif_persistent.c:782-783`). Else it uses all reductions and traps
-/// to the export `persistent_term:put_common_trap/1`, which continues with
-/// no cost in the next turn. ERTS traps to `put_common_trap/3` with a magic
-/// reference to the copy state. PBeam puts the pair in the first call, so
-/// the trap keeps the number of slots that remain.
+/// Use the reductions of the table copy of `persistent_term:put/2` of `key`
+/// and `value`, of which `copied` slots remain, as `TRAPPING_COPY_TABLE`
+/// does (`erl_bif_persistent.c:275-293`, `1034-1139`). A call goes through
+/// at most 32 slots for each reduction of the budget, but at least 1. When
+/// the copy ends, the BIF stores the pair, bumps one reduction for each 32
+/// slots of the call, and waits for thread progress before it returns `ok`
+/// (`erl_bif_persistent.c:763-783`). Else it uses all reductions and traps
+/// to the export `persistent_term:put_common_trap/3`, which continues in
+/// the next turn. ERTS traps to `put_common_trap/3` with a magic reference
+/// to the copy state. The caller holds the update permission, so no other
+/// update changes the table during the traps.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// process.fcalls = 2;
-/// assert!(matches!(put_trap(&mut process, 64)?, BifResult::YieldReturn(_)));
-/// assert_eq!(process.fcalls, 0);
-/// process.fcalls = 2;
-/// let trap = put_trap(&mut process, 65)?;
-/// assert!(matches!(trap, BifResult::TrapBif { function: "put_common_trap", arguments, .. } if arguments[0] == Term::Integer(1)));
+/// scheduler.current_process_mut().fcalls = 2;
+/// let trap = put_trap(&mut scheduler, &key, &value, 65);
+/// assert!(matches!(trap, BifResult::TrapBif { function: "put_common_trap", .. }));
 /// ```
-pub(super) fn put_trap(process: &mut ProcessState, copied: usize) -> Result<BifResult, BeamError> {
+fn put_trap(scheduler: &mut Scheduler, key: &Term, value: &Term, copied: usize) -> BifResult {
     /// `ITERATIONS_PER_RED` of `put_common` (`erl_bif_persistent.c:644`).
     const ITERATIONS_PER_RED: usize = 32;
+    let process = scheduler.current_process_mut();
     // `MAX(1, max_iterations)` of a `long` that a negative budget makes
     // negative (`erl_bif_persistent.c:284`, `661-662`).
     let budget = (ITERATIONS_PER_RED * process.bif_reductions_or_zero()).max(1);
+    scheduler.node().persistent_terms().copy_step(budget);
+    let process = scheduler.current_process_mut();
     if copied > budget {
         process.bump_all_reductions();
-        return Ok(BifResult::TrapBif {
+        return BifResult::TrapBif {
             module: "persistent_term",
             function: "put_common_trap",
-            arguments: vec![Term::Integer((copied - budget) as i64)],
-        });
+            arguments: vec![
+                key.clone(),
+                value.clone(),
+                Term::Integer((copied - budget) as i64),
+            ],
+        };
     }
     process.bump_reductions((copied / ITERATIONS_PER_RED) as i32);
-    Ok(BifResult::YieldReturn(Term::static_atom("ok")))
+    schedule(
+        scheduler,
+        Change::Put(key.clone(), value.clone()),
+        Term::static_atom("ok"),
+    )
 }

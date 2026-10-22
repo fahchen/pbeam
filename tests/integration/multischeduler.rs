@@ -612,22 +612,6 @@ fn shares_an_atomic_array_between_schedulers() {
     assert_eq!(results[1].term, Term::Atom(ok_atom), "the adder");
 }
 
-/// A persistent term use in a run with scheduler threads fails with a
-/// clear error.
-#[test]
-fn rejects_a_persistent_term() {
-    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
-    let error = program
-        .execute_on_schedulers(&[("ping_pong", "persistent_put"), ("ping_pong", "info_hold")])
-        .expect_err("persistent_term is unsupported");
-    assert!(
-        error
-            .to_string()
-            .contains("unsupported: persistent_term:put/2 in a run of execute_on_schedulers"),
-        "{error}"
-    );
-}
-
 /// An ETS call in a run with scheduler threads fails with a clear error.
 #[test]
 fn rejects_an_ets_table() {

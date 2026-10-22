@@ -5114,6 +5114,8 @@ fn shares_the_stored_term_of_a_persistent_term() {
             vec![key.clone(), value.clone()],
         )
         .unwrap();
+    // The new table is visible after thread progress.
+    while scheduler.persistent_term_progress() {}
     let result = program
         .bif(&mut scheduler, "persistent_term", "get", vec![key])
         .unwrap();
@@ -5121,6 +5123,18 @@ fn shares_the_stored_term_of_a_persistent_term() {
         panic!("persistent_term:get/1 did not return a value");
     };
     assert!(value.shares_storage_with(&stored));
+}
+
+#[test]
+fn resolves_a_persistent_term_trap_of_another_name_as_a_call() {
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let error = program
+        .bif_trap(&mut scheduler, "persistent_term", "no_trap", vec![])
+        .unwrap_err();
+    assert!(error.to_string().contains("no_trap"), "{error}");
 }
 
 #[test]

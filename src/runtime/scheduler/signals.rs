@@ -591,6 +591,12 @@ impl Scheduler {
                 self.send_revocations(Some(id), signals);
                 0
             }
+            Signal::Resume => {
+                self.handled(id, node);
+                // A `persistent_term` call waits for this signal.
+                self.resume(id);
+                0
+            }
             Signal::Grant { capability } => {
                 let granted = capability
                     .map(|capability| self.delegations.hold(id, [(Source::Policy, capability)]));
