@@ -174,7 +174,7 @@ fn hashes_a_bitstring_by_its_bits_as_pinned_erts() {
 fn local(index: i32, old_unique: i32, arity: u32, free: Vec<Term>) -> Term {
     let module = Atom::from_static("lists").unwrap();
     Term::Fun(Fun::new(
-        Lambda::new(module, index, old_unique, 53, arity),
+        Lambda::new(module, index, index, old_unique, 53, arity),
         free,
     ))
 }
@@ -211,7 +211,7 @@ fn hashes_local_funs_as_pinned_erts() {
     }
     // The entry label only selects code, so it is not part of the hash.
     let module = Atom::from_static("lists").unwrap();
-    let relabeled = Term::Fun(Fun::new(Lambda::new(module, 0, 7, 61, 1), vec![]));
+    let relabeled = Term::Fun(Fun::new(Lambda::new(module, 0, 0, 7, 61, 1), vec![]));
     assert_eq!(internal_hash(&relabeled), internal_hash(&zero()));
 }
 

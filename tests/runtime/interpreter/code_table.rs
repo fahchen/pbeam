@@ -25,6 +25,7 @@ fn fixture() -> CodeTable {
     let lambda = Lambda::new(
         AtomTable::new().put("fixture").expect("the atom fits"),
         0,
+        0,
         7,
         2,
         1,
@@ -41,7 +42,7 @@ fn fixture() -> CodeTable {
             },
             Instruction::Label(1),
             Instruction::MakeFun {
-                lambda,
+                lambda: Box::new(lambda),
                 free: Vec::new(),
                 destination: Operand::X(0),
             },
@@ -169,6 +170,7 @@ fn gives_no_name_of_a_fun_of_code_in_a_purge() {
     let mut code = fixture();
     let lambda = Lambda::new(
         AtomTable::new().put("fixture").expect("the atom fits"),
+        0,
         0,
         7,
         2,

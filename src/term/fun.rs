@@ -28,7 +28,7 @@ use super::{Atom, AtomTable, Term};
 /// ```rust,ignore
 /// // The `FunT` entry of `fun(X) -> {Tag, X} end` in `fun_probe:locals/0`.
 /// let module = AtomTable::new().put("fun_probe")?;
-/// let lambda = Lambda::new(module, 0, 31_263_486, 127, 1);
+/// let lambda = Lambda::new(module, 0, 0, 31_263_486, 127, 1);
 /// assert_eq!(lambda.arity(), 1);
 /// ```
 #[derive(Debug, Clone)]
@@ -37,6 +37,10 @@ pub(crate) struct Lambda {
     module: Atom,
     /// The index of the lambda in the `FunT` chunk (`ErlFunEntry.index`).
     pub(super) index: i32,
+    /// The position of the entry in the `FunT` chunk, which the loader
+    /// keeps as `ErlFunEntry.old_index` (`jit/asm_load.c:1218-1223`) and
+    /// `%T` prints (`erl_printf_term.c:685-686`).
+    pub(super) old_index: i32,
     /// The old unique value of the `FunT` entry (`ErlFunEntry.old_uniq`).
     pub(super) old_unique: i32,
     /// The entry label of the code of the lambda.
@@ -52,13 +56,21 @@ impl Lambda {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let lambda = Lambda::new(atom, 0, 1, 53, 1);
+    /// let lambda = Lambda::new(atom, 0, 0, 1, 53, 1);
     /// assert_eq!(lambda.label(), 53);
     /// ```
-    pub(crate) fn new(module: Atom, index: i32, old_unique: i32, label: u32, arity: u32) -> Self {
+    pub(crate) fn new(
+        module: Atom,
+        index: i32,
+        old_index: i32,
+        old_unique: i32,
+        label: u32,
+        arity: u32,
+    ) -> Self {
         Self {
             module,
             index,
+            old_index,
             old_unique,
             label,
             arity,
@@ -83,7 +95,7 @@ impl Lambda {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(Lambda::new(atom, 3, 1, 53, 1).index(), 3);
+    /// assert_eq!(Lambda::new(atom, 3, 3, 1, 53, 1).index(), 3);
     /// ```
     pub(crate) fn index(&self) -> i32 {
         self.index
@@ -96,7 +108,7 @@ impl Lambda {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(Lambda::new(atom, 0, 7, 53, 1).old_unique(), 7);
+    /// assert_eq!(Lambda::new(atom, 0, 0, 7, 53, 1).old_unique(), 7);
     /// ```
     pub(crate) fn old_unique(&self) -> i32 {
         self.old_unique
@@ -107,7 +119,7 @@ impl Lambda {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(Lambda::new(atom, 0, 1, 53, 1).label(), 53);
+    /// assert_eq!(Lambda::new(atom, 0, 0, 1, 53, 1).label(), 53);
     /// ```
     pub(crate) fn label(&self) -> u32 {
         self.label
@@ -118,7 +130,7 @@ impl Lambda {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(Lambda::new(atom, 0, 1, 53, 1).arity(), 1);
+    /// assert_eq!(Lambda::new(atom, 0, 0, 1, 53, 1).arity(), 1);
     /// ```
     pub(crate) fn arity(&self) -> u32 {
         self.arity
@@ -133,8 +145,8 @@ impl Lambda {
     /// ```rust,ignore
     /// use std::cmp::Ordering;
     ///
-    /// let first = Lambda::new(atom.clone(), 0, 1, 53, 1);
-    /// let second = Lambda::new(atom, 1, 1, 51, 0);
+    /// let first = Lambda::new(atom.clone(), 0, 0, 1, 53, 1);
+    /// let second = Lambda::new(atom, 1, 1, 1, 51, 0);
     /// assert_eq!(first.compare(&second, &atoms), Ordering::Less);
     /// ```
     fn compare(&self, other: &Lambda, atoms: &AtomTable) -> Ordering {
@@ -155,8 +167,8 @@ impl PartialEq for Lambda {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(Lambda::new(atom.clone(), 0, 1, 53, 1), Lambda::new(atom.clone(), 0, 1, 61, 1));
-    /// assert_ne!(Lambda::new(atom.clone(), 0, 1, 53, 1), Lambda::new(atom, 0, 1, 53, 2));
+    /// assert_eq!(Lambda::new(atom.clone(), 0, 0, 1, 53, 1), Lambda::new(atom.clone(), 0, 0, 1, 61, 1));
+    /// assert_ne!(Lambda::new(atom.clone(), 0, 0, 1, 53, 1), Lambda::new(atom, 0, 0, 1, 53, 2));
     /// ```
     fn eq(&self, other: &Self) -> bool {
         self.module == other.module
@@ -239,7 +251,7 @@ impl Target {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(Target::Local(Lambda::new(atom, 0, 1, 53, 1)).arity(), 1);
+    /// assert_eq!(Target::Local(Lambda::new(atom, 0, 0, 1, 53, 1)).arity(), 1);
     /// ```
     pub(crate) fn arity(&self) -> u32 {
         match self {
@@ -259,7 +271,7 @@ impl Target {
     /// ```rust,ignore
     /// use std::cmp::Ordering;
     ///
-    /// let local = Target::Local(Lambda::new(atom.clone(), 0, 1, 53, 1));
+    /// let local = Target::Local(Lambda::new(atom.clone(), 0, 0, 1, 53, 1));
     /// let external = Target::External { module: atom.clone(), function: atom, arity: 0 };
     /// assert_eq!(local.compare(&external, &atoms), Ordering::Less);
     /// ```

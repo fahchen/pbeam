@@ -1455,7 +1455,7 @@ impl BeamProgram {
                         .iter()
                         .map(|operand| read(process, operand))
                         .collect::<Result<_, _>>()?;
-                    let fun = Term::Fun(Fun::new(lambda.clone(), free));
+                    let fun = Term::Fun(Fun::new((**lambda).clone(), free));
                     write(process, destination, fun)?;
                 }
                 Instruction::CallFun {

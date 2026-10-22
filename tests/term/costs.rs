@@ -134,7 +134,7 @@ pub(super) fn deep_copy<T>(name: &str, operations: usize, mut copy: impl FnMut()
 /// name a `FunT` entry, and the benchmark does not run the fun.
 fn lambda() -> Lambda {
     let module = Atom::from_static("lists").expect("lists is a static atom");
-    Lambda::new(module, 0, 7, 53, 1)
+    Lambda::new(module, 0, 0, 7, 53, 1)
 }
 
 /// Return a tuple term of 1000 elements, and the element array that its

@@ -136,7 +136,7 @@ fn imports_a_fun_between_two_atom_tables() {
     assert_eq!(function_destination.index(), 1168);
 
     let local = Term::Fun(Fun::new(
-        Lambda::new(module_source.clone(), 0, 1, 53, 1),
+        Lambda::new(module_source.clone(), 0, 0, 1, 53, 1),
         vec![Term::Atom(function_source.clone())],
     ));
     let external = Term::Fun(Fun::external(
@@ -227,7 +227,7 @@ fn imports_a_fun_between_two_atom_tables() {
         outside_error
     );
     let outside_lambda = Term::Fun(Fun::new(
-        Lambda::new(outside(outside_index), 0, 1, 53, 1),
+        Lambda::new(outside(outside_index), 0, 0, 1, 53, 1),
         Vec::new(),
     ));
     assert_eq!(
@@ -433,20 +433,20 @@ fn compares_terms_with_a_memory_of_the_shared_compounds() {
     // count, and another entry.
     let atom = Atom::from_static("ok").unwrap();
     let fun = Term::Fun(Fun::new(
-        Lambda::new(atom.clone(), 0, 1, 53, 1),
+        Lambda::new(atom.clone(), 0, 0, 1, 53, 1),
         vec![Term::Integer(1)],
     ));
     assert!(fun.eq_shared(&fun.clone()));
     assert!(fun.eq_shared(&Term::Fun(Fun::new(
-        Lambda::new(atom.clone(), 0, 1, 53, 1),
+        Lambda::new(atom.clone(), 0, 0, 1, 53, 1),
         vec![Term::Integer(1)],
     ))));
     assert!(!fun.eq_shared(&Term::Fun(Fun::new(
-        Lambda::new(atom.clone(), 0, 1, 53, 1),
+        Lambda::new(atom.clone(), 0, 0, 1, 53, 1),
         vec![],
     ))));
     assert!(!fun.eq_shared(&Term::Fun(Fun::new(
-        Lambda::new(atom, 1, 1, 53, 1),
+        Lambda::new(atom, 1, 1, 1, 53, 1),
         vec![Term::Integer(1)],
     ))));
 

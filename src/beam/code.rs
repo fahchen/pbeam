@@ -644,7 +644,8 @@ fn parse_lambdas(data: &[u8], atoms: &[Atom]) -> Result<Vec<(Lambda, usize)>, Be
     entries
         .chunks(LAMBDA_ENTRY_SIZE)
         .take(count)
-        .map(|entry| {
+        .enumerate()
+        .map(|(position, entry)| {
             let [
                 atom_index,
                 total_arity,
@@ -664,6 +665,7 @@ fn parse_lambdas(data: &[u8], atoms: &[Atom]) -> Result<Vec<(Lambda, usize)>, Be
             let lambda = Lambda::new(
                 module.clone(),
                 index,
+                position as i32,
                 old_unique,
                 label as u32,
                 arity as u32,

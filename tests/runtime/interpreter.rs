@@ -306,11 +306,11 @@ fn tests_a_fun_with_a_register_arity_as_erl_is_function() {
     // (`jit/arm/instr_common.cpp:1266-1283`), so a `badarg` arity fails
     // the test and raises nothing.
     let run = |arity| {
-        let lambda = Lambda::new(Atom::from_static("erlang").unwrap(), 0, 0, 2, 1);
+        let lambda = Lambda::new(Atom::from_static("erlang").unwrap(), 0, 0, 0, 2, 1);
         make_program(
             vec![
                 Instruction::MakeFun {
-                    lambda,
+                    lambda: Box::new(lambda),
                     free: Vec::new(),
                     destination: Operand::X(0),
                 },

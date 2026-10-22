@@ -223,7 +223,7 @@ fn prints_funs_as_pinned_erts() {
     ));
     assert_eq!(print_term(&external, &table), b"fun lists:map/2");
     let local = Term::Fun(Fun::new(
-        Lambda::new(atom_of(&table, "root_exit_probe"), 0, 120_231_133, 53, 1),
+        Lambda::new(atom_of(&table, "root_exit_probe"), 0, 0, 120_231_133, 53, 1),
         vec![],
     ));
     assert_eq!(

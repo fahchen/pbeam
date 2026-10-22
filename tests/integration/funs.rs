@@ -9,6 +9,7 @@ use common::pinned_beam;
 
 const FUN_PROBE: &[u8] = include_bytes!("../../fixtures/funs/fun_probe.beam");
 const TAIL_CATCH: &[u8] = include_bytes!("../../fixtures/funs/tail_catch.beam");
+const FUN_INDEX: &[u8] = include_bytes!("../../fixtures/funs/fun_index.beam");
 
 /// Run `fun_probe:Function()` on the pinned ERTS and return its `~w` output.
 fn reference(function: &str) -> Vec<u8> {
@@ -293,7 +294,7 @@ fn gives_fun_information_as_pinned_erts() {
             ]),
         ),
         pair("refc", Term::Integer(1)),
-        pair("uniq", Term::Integer(101_251_949)),
+        pair("uniq", Term::Integer(133_604_777)),
         pair("new_index", Term::Integer(6)),
         pair("type", atom("local")),
         pair("module", atom("fun_probe")),
@@ -301,7 +302,7 @@ fn gives_fun_information_as_pinned_erts() {
         pair("arity", Term::Integer(0)),
         pair("env", Term::nil()),
         pair("refc", Term::Integer(1)),
-        pair("uniq", Term::Integer(101_251_949)),
+        pair("uniq", Term::Integer(133_604_777)),
         pair("new_index", Term::Integer(7)),
         pair("type", atom("external")),
         pair("module", atom("lists")),
@@ -323,9 +324,9 @@ fn gives_fun_information_as_pinned_erts() {
     assert_eq!(
         reference("infos"),
         b"[{type,local},{module,fun_probe},{name,'-infos/0-fun-0-'},\
-          {arity,1},{env,[7,{a,b}]},{refc,1},{uniq,101251949},{new_index,6},\
+          {arity,1},{env,[7,{a,b}]},{refc,1},{uniq,133604777},{new_index,6},\
           {type,local},{module,fun_probe},{name,'-infos/0-fun-1-'},\
-          {arity,0},{env,[]},{refc,1},{uniq,101251949},{new_index,7},\
+          {arity,0},{env,[]},{refc,1},{uniq,133604777},{new_index,7},\
           {type,external},{module,lists},{name,reverse},\
           {arity,1},{env,[]},{refc,undefined},{index,undefined},\
           {new_index,undefined},{uniq,undefined},{new_uniq,undefined},\
@@ -383,11 +384,11 @@ fn prints_funs_as_pinned_erts() {
     let mut beams: Vec<&[u8]> = modules.iter().map(Vec::as_slice).collect();
     beams.push(FUN_PROBE);
     let program = BeamProgram::load(&beams).unwrap();
-    let local = "#Fun<fun_probe.8.101251949>";
+    let local = "#Fun<fun_probe.10.133604777>";
     let both = format!("{local} {local}");
     let texts = [
         local,
-        "#Fun<fun_probe.9.101251949>",
+        "#Fun<fun_probe.11.133604777>",
         "fun lists:reverse/1",
         "fun 'A b':'c d'/0",
         "fun no_such_module:f/3",
@@ -414,5 +415,34 @@ fn prints_funs_as_pinned_erts() {
     assert_eq!(
         String::from_utf8(reference("texts")).unwrap(),
         format!("[{},badarg]\n", codes.join(","))
+    );
+}
+
+#[test]
+fn prints_the_fun_entry_position_as_pinned_erts() {
+    // Each `Index` field of the `FunT` chunk of `fun_index` is its position
+    // plus 100 (`fixtures/funs/fun_index.src`). ERTS prints the position,
+    // which the loader keeps as `ErlFunEntry.old_index`
+    // (`jit/asm_load.c:1218-1223`, `erl_printf_term.c:685-686`).
+    let program = BeamProgram::load(&[FUN_INDEX]).unwrap();
+    let texts = ["#Fun<fun_index.0.50994165>", "#Fun<fun_index.1.50994165>"];
+    assert_eq!(
+        program.execute("fun_index", "texts", &[]).unwrap().term,
+        Term::list_from(
+            texts
+                .iter()
+                .map(|text| Term::list_from(text.bytes().map(|byte| Term::Integer(byte.into()))))
+        )
+    );
+    let codes: Vec<String> = texts
+        .iter()
+        .map(|text| {
+            let bytes: Vec<String> = text.bytes().map(|byte| byte.to_string()).collect();
+            format!("[{}]", bytes.join(","))
+        })
+        .collect();
+    assert_eq!(
+        String::from_utf8(reference_of("fun_index", "texts")).unwrap(),
+        format!("[{}]\n", codes.join(","))
     );
 }

@@ -7,7 +7,7 @@ use super::*;
 /// Return a local fun with the free variables `free`.
 fn fun(free: Vec<Term>) -> Term {
     let module = Atom::from_static("lists").unwrap();
-    Term::Fun(Fun::new(Lambda::new(module, 0, 7, 53, 1), free))
+    Term::Fun(Fun::new(Lambda::new(module, 0, 0, 7, 53, 1), free))
 }
 
 /// Return the shared thing of a fun term.
@@ -138,7 +138,7 @@ fn prints_the_cost_of_a_fun_payload() {
     //
     // The target and the free variables are prepared once, so the timed copy
     // measures the copy of the normal fun storage and no static atom lookup.
-    let lambda = Lambda::new(Atom::from_static("lists").unwrap(), 0, 7, 53, 1);
+    let lambda = Lambda::new(Atom::from_static("lists").unwrap(), 0, 0, 7, 53, 1);
     let free = vec![Term::Integer(1), Term::Integer(2)];
     let arc: Arc<FunThing> = Arc::new(FunThing {
         target: Target::Local(lambda.clone()),

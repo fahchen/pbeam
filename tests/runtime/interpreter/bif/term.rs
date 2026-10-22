@@ -855,7 +855,7 @@ fn encodes_the_large_and_unsupported_forms() {
     let bytes = encode(&large, &atoms, &options).unwrap();
     assert_eq!(&bytes[..5], [111, 0, 0, 1, 1]);
     // A local fun, a match context, and a record have no bytes.
-    let fun = Fun::new(Lambda::new(atom, 0, 0, 0, 0), vec![]);
+    let fun = Fun::new(Lambda::new(atom, 0, 0, 0, 0, 0), vec![]);
     assert!(encode(&Term::Fun(fun), &atoms, &options).is_err());
     let state = MatchState::new(Binary::from(vec![]));
     assert!(encode(&Term::MatchContext(Arc::new(state)), &atoms, &options).is_err());

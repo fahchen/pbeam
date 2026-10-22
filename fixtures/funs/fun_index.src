@@ -1,0 +1,15 @@
+%% The source of fun_index.beam. Each Index field of its FunT chunk is the
+%% position of the entry plus 100, so erlang:fun_to_list/1 must print the
+%% position (ErlFunEntry.old_index, jit/asm_load.c:1218-1223), not the field.
+%% erlc gives Index equal to the position, so this command patches the chunk:
+%%
+%%   cp fixtures/funs/fun_index.src /tmp/fun_index.erl && erlc -o /tmp /tmp/fun_index.erl && erl -noshell -eval '{ok, _, Chunks} = beam_lib:all_chunks("/tmp/fun_index.beam"), {_, <<N:32, Es/binary>>} = lists:keyfind("FunT", 1, Chunks), Patched = << <<F:32, A:32, L:32, (I + 100):32, Fr:32, U:32>> || <<F:32, A:32, L:32, I:32, Fr:32, U:32>> <= Es >>, {ok, Beam} = beam_lib:build_module(lists:keyreplace("FunT", 1, Chunks, {"FunT", <<N:32, Patched/binary>>})), ok = file:write_file("fixtures/funs/fun_index.beam", Beam), halt().'
+-module(fun_index).
+-export([texts/0]).
+
+texts() ->
+    K = id(1),
+    [erlang:fun_to_list(fun(X) -> {K, X} end),
+     erlang:fun_to_list(fun(X) -> {X, K} end)].
+
+id(X) -> X.
