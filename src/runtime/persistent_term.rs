@@ -29,6 +29,10 @@ pub(in crate::runtime) enum Change {
 struct Progress {
     /// The suspended caller, which holds the update permission.
     caller: ProcessId,
+    /// The scheduler of the caller, which counts the steps. It takes a
+    /// step only after the caller switched out, so the change is never
+    /// visible before the caller suspends.
+    scheduler: usize,
     /// The copied table with the change, or `None` for a change in place of
     /// the visible table (`fast_update_index`, `erl_bif_persistent.c:763-770`).
     table: Option<PersistentTerms>,
@@ -163,7 +167,7 @@ impl PersistentTermStore {
     /// Make `change` visible after thread progress, and keep the update
     /// permission of `caller` until then. A table copy ends first, and the
     /// change goes into the copy.
-    pub(super) fn schedule(&mut self, caller: ProcessId, change: Change) {
+    pub(super) fn schedule(&mut self, caller: ProcessId, scheduler: usize, change: Change) {
         self.copy_step(usize::MAX);
         let table = self.copy.take().map(|copy| {
             let mut table = copy.table;
@@ -174,6 +178,7 @@ impl PersistentTermStore {
         });
         self.progress.push(Progress {
             caller,
+            scheduler,
             table,
             change,
             steps: PROGRESS_STEPS,
@@ -195,8 +200,11 @@ impl Scheduler {
         let mut done = Vec::new();
         let pending = {
             let mut store = node.persistent_terms();
+            let index = self.index();
             for progress in &mut store.progress {
-                progress.steps -= 1;
+                if progress.scheduler == index {
+                    progress.steps -= 1;
+                }
             }
             while let Some(index) = store
                 .progress
@@ -215,9 +223,13 @@ impl Scheduler {
                 }
                 done.push(progress.caller);
             }
-            let pending = !store.progress.is_empty();
-            node.persistent_progress().store(pending, Ordering::Release);
-            pending
+            node.persistent_progress()
+                .store(!store.progress.is_empty(), Ordering::Release);
+            // Only a change of this scheduler keeps it stepping.
+            store
+                .progress
+                .iter()
+                .any(|progress| progress.scheduler == index)
         };
         for caller in done {
             self.release_persistent_terms(caller);

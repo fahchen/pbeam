@@ -352,7 +352,8 @@ fn erase_trap(
 fn schedule(scheduler: &mut Scheduler, change: Change, value: Term) -> BifResult {
     let id = scheduler.current_process().id;
     let node = Arc::clone(scheduler.node());
-    node.persistent_terms().schedule(id, change);
+    node.persistent_terms()
+        .schedule(id, scheduler.index(), change);
     node.persistent_progress().store(true, Ordering::Release);
     // The caller always switches out and suspends, as `ERTS_BIF_YIELD_RETURN`
     // after `suspend_updater` does (`erl_bif_persistent.c:539`, `783`).
