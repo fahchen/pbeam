@@ -5,9 +5,10 @@
 //! release, and PBeam with `pbeam erl`. The one-file run also compares the
 //! SIGTERM shutdown notice and the exit status with the pinned ERTS. The
 //! example starts Bandit on the port of the `PORT` variable, so each run
-//! gets a free port and the runs do not collide. The request sends no
-//! `accept-encoding` header: PBeam has no binding of
-//! `zstd:init_compress_nif/0`, which a request that accepts `zstd` calls.
+//! gets a free port and the runs do not collide. The ERTS run and the pbeam
+//! run also serve `GET /` with `accept-encoding: zstd` first, which makes
+//! Bandit compress the body with `zstd:compress/2` and a context, and
+//! compare the compressed response.
 
 use std::{
     fs,
@@ -36,6 +37,16 @@ const RESPONSE: (&str, &str, &str) = (
      content-type: text/plain; charset=utf-8\n",
     "Hello world from PBeam!",
 );
+
+/// The request of `GET /` with no `accept-encoding` header.
+const PLAIN_REQUEST: &[u8] = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+
+/// The request of `GET /` that accepts only the `zstd` content encoding.
+const ZSTD_REQUEST: &[u8] =
+    b"GET / HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: zstd\r\nConnection: close\r\n\r\n";
+
+/// A response: the status line, the headers without `date`, and the body.
+type Response<Body> = (String, String, Body);
 
 /// The variables that `pbeam erl` rejects when they are set and not empty,
 /// as the flags of `erlexec` that PBeam does not read. Each run removes
@@ -66,8 +77,8 @@ fn serves_hello_world_from_the_plug_example_as_pinned_erts() {
     // execute the same compiled modules. The one-file run appends the
     // build to a `pbeam` binary and starts it in a directory that holds no
     // other file.
-    let erts = serve(&["plug_hello", "--erts"], None);
-    let pbeam = serve(
+    let (erts, erts_zstd) = serve(&["plug_hello", "--erts"], None);
+    let (pbeam, pbeam_zstd) = serve(
         &["plug_hello", "--no-build"],
         Some(env!("CARGO_BIN_EXE_pbeam")),
     );
@@ -85,6 +96,14 @@ fn serves_hello_world_from_the_plug_example_as_pinned_erts() {
         "[{asn1rt_nif,true},{crypto,true},{erl_tracer,true},{prim_buffer,true},\
          {prim_file,true},{prim_net,true},{prim_socket,true},{prim_tty,true},\
          {pubkey_os_cacerts,true},{zlib,true},{zstd,true}]"
+    );
+    // The zstd response holds the bytes of libzstd 1.5.7, the version of
+    // pinned ERTS, and the run serves the plain request after it.
+    assert_eq!(erts_zstd, pbeam_zstd);
+    assert!(
+        pbeam_zstd.1.contains("\ncontent-encoding: zstd\n"),
+        "{}",
+        pbeam_zstd.1
     );
     assert_eq!(erts, pbeam);
     assert_eq!(pbeam, bundled);
@@ -471,10 +490,11 @@ fn test_directory(name: &str) -> PathBuf {
     directory
 }
 
-/// Run `scripts/example.sh` with `arguments` on a free port, send `GET /`,
-/// return the status line, the content type, and the body, and stop the
-/// server. `pbeam` sets `PBEAM_BIN` for the pbeam run.
-fn serve(arguments: &[&str], pbeam: Option<&str>) -> (String, String, String) {
+/// Run `scripts/example.sh` with `arguments` on a free port, send `GET /`
+/// with `accept-encoding: zstd` and then `GET /` with no `accept-encoding`,
+/// return the plain response and the zstd response, and stop the server.
+/// `pbeam` sets `PBEAM_BIN` for the pbeam run.
+fn serve(arguments: &[&str], pbeam: Option<&str>) -> (Response<String>, Response<Vec<u8>>) {
     let port = free_port();
     let mut command = Command::new("bash");
     command
@@ -503,7 +523,12 @@ fn serve(arguments: &[&str], pbeam: Option<&str>) -> (String, String, String) {
     let stderr = Arc::new(Mutex::new(Vec::new()));
     let stderr_reader = collect(child.stderr.take().unwrap(), Arc::clone(&stderr));
     let stream = wait_for_server(&mut child, port);
-    let response = stream.and_then(request);
+    let response = stream
+        .and_then(|stream| exchange(stream, ZSTD_REQUEST))
+        .and_then(|zstd| {
+            let stream = TcpStream::connect(("127.0.0.1", port)).map_err(|error| error.to_string());
+            Ok((stream.and_then(request)?, zstd))
+        });
     let status = stop(child);
     stdout_reader.join().unwrap();
     stderr_reader.join().unwrap();
@@ -559,13 +584,22 @@ fn wait_for_server(child: &mut Child, port: u16) -> Result<TcpStream, String> {
 }
 
 /// Send `GET /` and return the status line, the headers without `date`, one
-/// `name: value` line for each in their order, and the body.
-fn request(mut stream: TcpStream) -> Result<(String, String, String), String> {
+/// `name: value` line for each in their order, and the body as text.
+fn request(stream: TcpStream) -> Result<Response<String>, String> {
+    let (status, headers, body) = exchange(stream, PLAIN_REQUEST)?;
+    let body = String::from_utf8(body).map_err(|error| error.to_string())?;
+    Ok((status, headers, body))
+}
+
+/// Send the bytes of `request` and return the status line, the headers
+/// without `date`, one `name: value` line for each in their order, and the
+/// bytes of the body.
+fn exchange(mut stream: TcpStream, request: &[u8]) -> Result<Response<Vec<u8>>, String> {
     stream
         .set_read_timeout(Some(READ_TIME_LIMIT))
         .map_err(|error| error.to_string())?;
     stream
-        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .write_all(request)
         .map_err(|error| error.to_string())?;
     let mut reader = BufReader::new(stream);
     let mut status = String::new();
@@ -604,7 +638,6 @@ fn request(mut stream: TcpStream) -> Result<(String, String, String), String> {
     reader
         .read_exact(&mut body)
         .map_err(|error| error.to_string())?;
-    let body = String::from_utf8(body).map_err(|error| error.to_string())?;
     Ok((status, headers, body))
 }
 
