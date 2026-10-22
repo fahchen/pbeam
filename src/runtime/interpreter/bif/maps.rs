@@ -27,8 +27,7 @@ use crate::term::{AtomTable, Direction, debug_term, from_list_units};
 ///
 /// # Errors
 ///
-/// Return a runtime error for a term that is not a map, and the runtime
-/// error of [`ProcessState::bif_reductions_left`] for a negative budget.
+/// Return a runtime error for a term that is not a map.
 pub(super) fn keys(
     process: &mut ProcessState,
     map: &Term,
@@ -200,8 +199,7 @@ pub(super) fn put(
 /// # Errors
 ///
 /// Return a runtime error when a key is of a type that the map form does
-/// not support yet, for example a map key. Also return the runtime error
-/// of [`ProcessState::bif_reductions_left`] for a negative budget.
+/// not support yet, for example a map key.
 pub(super) fn from_list(
     process: &mut ProcessState,
     list: &Term,
@@ -294,8 +292,7 @@ pub(super) fn from_list(
 /// # Errors
 ///
 /// Return a runtime error when a key is of a type that the map form does
-/// not support yet, for example a map key. Also return the runtime error
-/// of [`ProcessState::bif_reductions_left`] for a negative budget.
+/// not support yet, for example a map key.
 pub(super) fn from_keys(
     process: &mut ProcessState,
     keys: &Term,
@@ -402,8 +399,7 @@ pub(super) fn is_key(key: &Term, map: &Term) -> BifResult {
 /// # Errors
 ///
 /// Return the runtime error of `Map::chunk` for a next path that PBeam
-/// cannot hold. Also return the runtime error of
-/// [`ProcessState::bif_reductions_left`] for a negative budget.
+/// cannot hold.
 pub(super) fn map_next(
     process: &mut ProcessState,
     path: &Term,
@@ -424,7 +420,9 @@ pub(super) fn map_next(
     if direction == Direction::Forward && path.is_list() {
         return ordered_next(process, path, entries, map);
     }
-    let budget = (process.bif_reductions_left()? / PAIR_REDUCTIONS).max(1);
+    // `MAX(fcalls / 4, 1)` of the signed budget (`erl_map.c:3786-3790`): a
+    // negative budget takes 1 pair, as a budget of 0 does.
+    let budget = (process.bif_reductions_or_zero() / PAIR_REDUCTIONS).max(1);
     let Some(chunk) = entries.chunk(path, budget, direction)? else {
         return Ok(BifResult::badarg());
     };
@@ -469,11 +467,6 @@ pub(super) fn map_next(
 /// assert_eq!(process.fcalls, 8);
 /// assert!(matches!(ordered_next(&mut process, &path(2), entries, &map)?, BifResult::Raise { .. }));
 /// ```
-///
-/// # Errors
-///
-/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
-/// negative budget.
 fn ordered_next(
     process: &mut ProcessState,
     path: &Term,
@@ -482,7 +475,9 @@ fn ordered_next(
 ) -> Result<BifResult, BeamError> {
     /// `ORDERED_ITER_FACTOR` in a release build (`erl_map.c:3657-3661`).
     const ORDERED_ITER_FACTOR: usize = 32;
-    let budget = (process.bif_reductions_left()? / ORDERED_ITER_FACTOR).max(1);
+    // `MAX(1, fcalls / 32)` of the signed budget (`erl_map.c:3662`): a
+    // negative budget takes 1 key, as a budget of 0 does.
+    let budget = (process.bif_reductions_or_zero() / ORDERED_ITER_FACTOR).max(1);
     let mut keys = path.list_iter().expect("an ordered map path is a list");
     let taken: Vec<&Term> = keys.by_ref().take(budget).collect();
     let rest = keys.rest();
@@ -547,8 +542,7 @@ fn iterator_pairs<'a>(
 ///
 /// Return a runtime error when the merged map gets a key that the map form
 /// does not support yet, for example an integer outside the small-integer
-/// range in a map of more than 32 keys. Also return the runtime error of
-/// [`ProcessState::bif_reductions_left`] for a negative budget.
+/// range in a map of more than 32 keys.
 pub(super) fn merge(
     process: &mut ProcessState,
     first: &Term,
@@ -599,11 +593,6 @@ pub(super) fn merge(
 /// assert!(matches!(trap, BifResult::TrapBif { function: "merge_trap", arguments, .. } if arguments[1] == Term::Integer(1)));
 /// assert_eq!(process.fcalls, 0);
 /// ```
-///
-/// # Errors
-///
-/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
-/// negative budget.
 pub(super) fn merge_trap(
     process: &mut ProcessState,
     merged: Term,
@@ -611,7 +600,10 @@ pub(super) fn merge_trap(
 ) -> Result<BifResult, BeamError> {
     /// `MAP_MERGE_LOOP_FACTOR` (`erl_map.c:1507`).
     const LOOP_FACTOR: usize = 8;
-    let budget = (LOOP_FACTOR * process.bif_reductions_left()?).max(1);
+    // ERTS keeps the budget in a `Sint` and traps when `--reds <= 0`
+    // (`erl_map.c:1569`, `1736`), so a negative budget traps at the first
+    // step, as a budget of 0 does.
+    let budget = (LOOP_FACTOR * process.bif_reductions_or_zero()).max(1);
     if steps >= budget {
         process.bump_all_reductions();
         return Ok(BifResult::TrapBif {
@@ -745,11 +737,6 @@ pub(super) fn update(key: &Term, value: &Term, map: &Term, atoms: &AtomTable) ->
 /// assert!(matches!(values(&mut process, &map, 0)?, BifResult::Value(result) if result == values));
 /// assert!(matches!(values(&mut process, &Term::Integer(1), 0)?, BifResult::Raise { .. }));
 /// ```
-///
-/// # Errors
-///
-/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
-/// negative budget.
 pub(super) fn values(
     process: &mut ProcessState,
     map: &Term,

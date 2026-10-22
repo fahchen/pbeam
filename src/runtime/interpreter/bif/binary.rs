@@ -1077,11 +1077,6 @@ fn remote_pattern(scheduler: &Scheduler, pattern: &Term) -> bool {
 /// let parts = split(&mut process, &Term::binary(b"a,b".to_vec()), &Term::binary(b",".to_vec()), None)?;
 /// assert!(matches!(parts, BifResult::Value(parts) if parts.proper_list().is_some_and(|parts| parts.len() == 2)));
 /// ```
-///
-/// # Errors
-///
-/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
-/// negative budget.
 pub(super) fn split(
     context: &mut BifContext<'_>,
     subject: &Term,
@@ -1116,11 +1111,6 @@ pub(super) fn split(
 /// assert!(matches!(result, BifResult::Value(Term::Tuple(_))));
 /// assert!(matches!(match_2(&mut process, &Term::binary(b"ab".to_vec()), &Term::binary(vec![]))?, BifResult::Raise { .. }));
 /// ```
-///
-/// # Errors
-///
-/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
-/// negative budget.
 pub(super) fn match_2(
     context: &mut BifContext<'_>,
     subject: &Term,
@@ -1154,11 +1144,6 @@ pub(super) fn match_2(
 /// assert!(matches!(result, BifResult::Value(parts) if parts.proper_list().is_some_and(|list| list.len() == 2)));
 /// assert!(matches!(matches_2(&mut process, &Term::binary(b"ab".to_vec()), &Term::binary(vec![]))?, BifResult::Raise { .. }));
 /// ```
-///
-/// # Errors
-///
-/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
-/// negative budget.
 pub(super) fn matches_2(
     context: &mut BifContext<'_>,
     subject: &Term,
@@ -1182,11 +1167,6 @@ pub(super) fn matches_2(
 /// ```rust,ignore
 /// let result = find_first_turn(&mut process, &subject, &pattern, None, MATCH)?;
 /// ```
-///
-/// # Errors
-///
-/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
-/// negative budget.
 fn find_first_turn(
     process: &mut ProcessState,
     patterns: &BinaryPatterns,
@@ -1237,11 +1217,6 @@ fn find_first_turn(
 /// ```rust,ignore
 /// let result = find_trap(&mut process, &subject, b"a,b", &state, &pattern)?;
 /// ```
-///
-/// # Errors
-///
-/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
-/// negative budget.
 pub(super) fn find_trap(
     process: &mut ProcessState,
     patterns: &BinaryPatterns,
@@ -1286,18 +1261,18 @@ fn find_trap_result(subject: &Term, find: &Find, pattern: &Term) -> BifResult {
 /// ```rust,ignore
 /// assert!(find_turn(&mut process, &compiled, &mut find, b"a,b")?.is_some());
 /// ```
-///
-/// # Errors
-///
-/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
-/// negative budget.
 fn find_turn(
     process: &mut ProcessState,
     pattern: &Pattern,
     find: &mut Find,
     subject: &Binary,
 ) -> Result<Option<Term>, BeamError> {
-    let initial = (process.bif_reductions_left()? as u64 * LOOP_FACTOR).max(1);
+    // `get_reds` reads the budget into a `Uint`, so a negative budget does
+    // the whole search in the call (`erl_bif_binary.c:110-121`).
+    let initial = process
+        .bif_reductions_unsigned()
+        .wrapping_mul(LOOP_FACTOR)
+        .max(1);
     let mut reds = initial;
     let bytes = subject
         .bytes()

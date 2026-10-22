@@ -2213,6 +2213,24 @@ impl Scheduler {
         self.virtual_reductions += used;
     }
 
+    /// Use the rest of the budget of the current process as virtual
+    /// reductions, as `ERTS_VBUMP_ALL_REDS` (`bif.h:99-104`, `212-213`)
+    /// does before a BIF yields: only a positive budget counts, and the
+    /// budget becomes 0. A negative budget, after a hashmap call of
+    /// `erts_internal:map_next/3`, adds no virtual reductions.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.current_process_mut().fcalls = -3;
+    /// scheduler.vbump_all_reductions();
+    /// assert_eq!(scheduler.current_process_mut().fcalls, 0);
+    /// ```
+    pub(super) fn vbump_all_reductions(&mut self) {
+        let fcalls = self.current_process_mut().fcalls.max(0);
+        self.vbump_reductions(fcalls);
+    }
+
     /// Return the reductions that the current process used in its turn, as
     /// `erts_current_reductions` gives them for the calling process
     /// (`beam_common.c:2393-2409`): `REDS_IN - fcalls - virtual_reds`.

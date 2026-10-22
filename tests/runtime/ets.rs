@@ -1047,7 +1047,7 @@ fn frees_a_clear_after_the_last_unfix() {
     let (done, charge) = table.step_clear(&atoms, ProcessId(0), 300, 0);
     assert!(!done);
     assert!(charge >= 32);
-    let (done, charge) = table.step_clear(&atoms, ProcessId(0), 300, usize::MAX);
+    let (done, charge) = table.step_clear(&atoms, ProcessId(0), 300, i64::MAX);
     assert!(done);
     assert!(charge > 0);
     assert!(!table.clearing());
@@ -1232,7 +1232,7 @@ fn frees_a_clear_until_the_budget_is_negative() {
     table.unfix_all(ProcessId(0));
     let first = table.segment_free_cost(1);
     let second = table.segment_free_cost(0);
-    let (done, charge) = table.step_clear(&atoms, ProcessId(0), 300, first);
+    let (done, charge) = table.step_clear(&atoms, ProcessId(0), 300, first as i64);
     assert!(!done);
     assert_eq!(charge, first + second);
     let (done, charge) = table.step_clear(&atoms, ProcessId(0), 300, 0);
@@ -1320,7 +1320,7 @@ fn marks_the_buckets_of_a_fixed_clear_in_turns() {
     assert_eq!(table.fixdels, 1);
     assert_eq!(table.step_clear(&atoms, ProcessId(0), 300, 0), (false, 1));
     assert_eq!(
-        table.step_clear(&atoms, ProcessId(0), 300, usize::MAX),
+        table.step_clear(&atoms, ProcessId(0), 300, i64::MAX),
         (true, 30)
     );
     assert!(!table.clearing());

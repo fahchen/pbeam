@@ -534,7 +534,9 @@ fn checksum(
     iolist: &Term,
     kind: Checksum,
 ) -> Result<BifResult, BeamError> {
-    let reds = scheduler.current_process_mut().bif_reductions_left()?;
+    // `do_chksum` returns the whole term when `left <= 0`, so a negative
+    // budget traps at once, as a budget of 0 does (`erl_bif_chksum.c:64-67`).
+    let reds = scheduler.current_process_mut().bif_reductions_or_zero();
     let mut budget = (reds as u64 * 4) & !0x3f;
     let walk = read(iolist, &mut budget, &mut |bytes| state.update(bytes));
     let rest = match walk {
@@ -575,11 +577,6 @@ fn checksum(
 /// let result = md5(&mut scheduler, &Term::binary(b"abc".to_vec()))?;
 /// assert!(matches!(result, BifResult::Value(Term::Binary(bytes)) if bytes.len() == DIGEST_BYTES));
 /// ```
-///
-/// # Errors
-///
-/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
-/// negative reduction budget.
 pub(super) fn md5(scheduler: &mut Scheduler, iolist: &Term) -> Result<BifResult, BeamError> {
     checksum(scheduler, Md5::init(), iolist, Checksum::Digest)
 }
@@ -608,11 +605,6 @@ pub(super) fn md5_init() -> BifResult {
 /// let result = md5_trap(&mut scheduler, &context, &Term::binary(b"abc".to_vec()))?;
 /// assert!(matches!(result, BifResult::Value(Term::Binary(bytes)) if bytes.len() == DIGEST_BYTES));
 /// ```
-///
-/// # Errors
-///
-/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
-/// negative reduction budget.
 pub(super) fn md5_trap(
     scheduler: &mut Scheduler,
     context: &Term,
@@ -639,11 +631,6 @@ pub(super) fn md5_trap(
 /// let result = md5_update(&mut scheduler, &context, &Term::binary(b"abc".to_vec()))?;
 /// assert!(matches!(result, BifResult::Value(Term::Binary(bytes)) if bytes.len() == CONTEXT_BYTES));
 /// ```
-///
-/// # Errors
-///
-/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
-/// negative reduction budget.
 pub(super) fn md5_update(
     scheduler: &mut Scheduler,
     context: &Term,

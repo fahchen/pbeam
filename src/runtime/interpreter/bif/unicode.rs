@@ -30,22 +30,21 @@ const ONHEAP_BINARY_LIMIT: i64 = 64;
 
 /// Return the loop steps that a call can use, as `allowed_iterations` does
 /// (`erl_unicode.c:166-174`): 10 for each reduction left, at most
-/// `CONTEXT_REDS * 10`.
+/// `CONTEXT_REDS * 10`. ERTS keeps the steps in an `int`. A negative budget
+/// reads as 0: the walks stop when `--left <= 0` (`erl_unicode.c:1264`),
+/// so they do with a negative count what they do with 0. The other callers
+/// read the budget after `cost_to_proc`, whose `BUMP_REDS` sets a negative
+/// budget to 0 (`erl_unicode.c:973-975`, `1152-1154`, `bif.h:71-78`).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// process.fcalls = 3;
-/// assert_eq!(allowed_iterations(&process)?, 30);
+/// assert_eq!(allowed_iterations(&process), 30);
 /// ```
-///
-/// # Errors
-///
-/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
-/// negative budget.
-fn allowed_iterations(process: &ProcessState) -> Result<i64, BeamError> {
-    let left = process.bif_reductions_left()? as i64 * LOOP_FACTOR;
-    Ok(left.min(i64::from(CONTEXT_REDS) * LOOP_FACTOR))
+fn allowed_iterations(process: &ProcessState) -> i64 {
+    let left = process.bif_reductions_or_zero() as i64 * LOOP_FACTOR;
+    left.min(i64::from(CONTEXT_REDS) * LOOP_FACTOR)
 }
 
 /// Bump one reduction for each 10 loop steps, as `cost_to_proc` does
@@ -99,8 +98,7 @@ fn cost_to_proc(process: &mut ProcessState, steps: i64) {
 ///
 /// Return a runtime error for an encoding other than `latin1`, `unicode`,
 /// and `utf8`, for chardata that ERTS returns as an `error` or `incomplete`
-/// tuple (see [`utf8_turn`]), and the runtime error of
-/// [`ProcessState::bif_reductions_left`] for a negative budget.
+/// tuple (see [`utf8_turn`]).
 pub(super) fn characters_to_binary(
     process: &mut ProcessState,
     chardata: &Term,
@@ -133,7 +131,7 @@ pub(super) fn characters_to_binary(
     {
         return Ok(Value(subject.clone()));
     }
-    let left = (allowed_iterations(process)? - simple).max(ONHEAP_BINARY_LIMIT);
+    let left = (allowed_iterations(process) - simple).max(ONHEAP_BINARY_LIMIT);
     utf8_turn(process, Utf8Output::default(), subject, left, encoding)
 }
 
@@ -211,15 +209,14 @@ fn utf8_turn(
 ///
 /// # Errors
 ///
-/// Return the runtime errors of [`utf8_turn`] and of
-/// [`ProcessState::bif_reductions_left`].
+/// Return the runtime errors of [`utf8_turn`].
 pub(super) fn utf8_trap(
     process: &mut ProcessState,
     bytes: Vec<u8>,
     rest: &Term,
     encoding: &Term,
 ) -> Result<BifResult, BeamError> {
-    let left = allowed_iterations(process)?;
+    let left = allowed_iterations(process);
     let output = Utf8Output {
         bytes,
         ..Utf8Output::default()
@@ -270,11 +267,6 @@ fn leftover_before(leftover: Vec<u8>, rest: Term) -> Term {
 /// let result = characters_to_list(&mut process, &chardata, &Term::static_atom("utf16"))?;
 /// assert!(matches!(result, BifResult::Trap { function: "characters_to_list_int", .. }));
 /// ```
-///
-/// # Errors
-///
-/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
-/// negative budget.
 pub(super) fn characters_to_list(
     process: &mut ProcessState,
     chardata: &Term,
@@ -301,7 +293,7 @@ pub(super) fn characters_to_list(
     };
     let simple = (cost / SIMPLE_FACTOR) as i64;
     cost_to_proc(process, simple);
-    let left = (allowed_iterations(process)? - simple).max(1);
+    let left = (allowed_iterations(process) - simple).max(1);
     Ok(list_turn(
         process,
         Utf8Output::default(),
@@ -397,11 +389,6 @@ fn list_turn(
 /// let result = list_trap(&mut process, b"a".to_vec(), 1, &Term::list_from(vec![Term::Integer(98)]), false)?;
 /// assert!(matches!(result, BifResult::Value(list) if list.proper_list().is_some_and(|list| list.len() == 2)));
 /// ```
-///
-/// # Errors
-///
-/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
-/// negative budget.
 pub(super) fn list_trap(
     process: &mut ProcessState,
     bytes: Vec<u8>,
@@ -409,7 +396,7 @@ pub(super) fn list_trap(
     rest: &Term,
     latin1: bool,
 ) -> Result<BifResult, BeamError> {
-    let left = allowed_iterations(process)?;
+    let left = allowed_iterations(process);
     let output = Utf8Output {
         bytes,
         characters,
@@ -436,18 +423,13 @@ pub(super) fn list_trap(
 /// let result = analyze_turn(&mut process, b"hi", 0, 0)?;
 /// assert!(matches!(result, BifResult::Value(list) if list.proper_list().is_some_and(|list| list.len() == 2)));
 /// ```
-///
-/// # Errors
-///
-/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
-/// negative budget.
 pub(super) fn analyze_turn(
     process: &mut ProcessState,
     bytes: &[u8],
     start: usize,
     characters: usize,
 ) -> Result<BifResult, BeamError> {
-    let mut left = allowed_iterations(process)?;
+    let mut left = allowed_iterations(process);
     let (state, counted, end) = analyze_utf8(bytes, start, &mut left);
     cost_to_proc(process, counted as i64);
     let characters = characters + counted;
@@ -546,17 +528,12 @@ pub(super) fn finish_list(
 /// let result = finish_trap(&mut process, Term::nil(), 5, "characters_to_list_trap_2")?;
 /// assert!(matches!(result, BifResult::Value(_)));
 /// ```
-///
-/// # Errors
-///
-/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
-/// negative budget.
 pub(super) fn finish_trap(
     process: &mut ProcessState,
     result: Term,
     remaining: usize,
     trap: &'static str,
 ) -> Result<BifResult, BeamError> {
-    let left = allowed_iterations(process)?;
+    let left = allowed_iterations(process);
     Ok(finish_list(process, result, remaining, left, trap))
 }
