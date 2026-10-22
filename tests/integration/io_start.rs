@@ -522,10 +522,29 @@ fn returns_the_endian_as_pinned_erts() {
 }
 
 #[test]
+fn returns_the_word_size_and_the_build_flag_as_pinned_erts() {
+    // `io_start_probe:word_size/0` runs `erlang:system_info(wordsize)` and
+    // `erlang:system_info(debug_compiled)`, as `init:has_small_memory/0`
+    // does at a `primLoad` command (init.erl:1410-1415). ERTS returns
+    // `sizeof(Eterm)` and `false` for a build without `DEBUG`
+    // (erl_bif_info.c:3099-3100, 3382-3387).
+    let program = BeamProgram::load(&[IO_START_PROBE]).unwrap();
+    let result = program.execute("io_start_probe", "word_size", &[]).unwrap();
+    assert_eq!(
+        result.term,
+        Term::tuple(vec![
+            Term::Integer(8),
+            Term::Atom(program.atom("false").unwrap())
+        ])
+    );
+    assert_eq!(reference("word_size"), b"{8,false}\n");
+}
+
+#[test]
 fn rejects_other_system_info_items() {
-    // `io_start_probe:system_other/0` runs `erlang:system_info(wordsize)`.
-    // ERTS returns the word size; PBeam supports only `os_type` and
-    // `otp_release` and returns a runtime error.
+    // `io_start_probe:system_other/0` runs `erlang:system_info(heap_type)`.
+    // ERTS returns `private`; PBeam does not support the item and returns
+    // a runtime error.
     let program = BeamProgram::load(&[IO_START_PROBE]).unwrap();
     let error = program
         .execute("io_start_probe", "system_other", &[])
@@ -535,8 +554,8 @@ fn rejects_other_system_info_items() {
         error.contains("unsupported erlang:system_info/1 argument"),
         "{error}"
     );
-    assert!(error.contains("wordsize"), "{error}");
-    assert_eq!(reference("system_other"), b"8\n");
+    assert!(error.contains("heap_type"), "{error}");
+    assert_eq!(reference("system_other"), b"private\n");
 }
 
 #[test]
