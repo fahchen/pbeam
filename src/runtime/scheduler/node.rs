@@ -719,7 +719,7 @@ impl Node {
     /// end tick `end` for `receiver`, a process of another scheduler. Return
     /// false and record nothing when `receiver` is not a live process. The
     /// check holds the timer table lock, and the exit of `receiver` marks it
-    /// as exiting before it takes its timers ([`Self::take_receiver_timers`]).
+    /// as exiting before it takes its timers ([`Self::take_receiver_timer`]).
     /// Thus no timer is recorded for a receiver after its exit took them.
     pub(in crate::runtime) fn register_remote_timer(
         &self,
@@ -755,7 +755,11 @@ impl Node {
     ) -> Option<(usize, i64)> {
         let mut timers = self.timers.lock().expect("the timer table is not poisoned");
         let entry = timers.entries.remove(&reference)?;
+        // An exiting receiver keeps the timer, and its exit counts it, as
+        // ERTS leaves the timer in the tree of an exiting process
+        // (`erl_hl_timer.c:1185-1192`, `1904-1911`).
         if let Some(receiver) = entry.receiver
+            && self.live_owner(receiver).is_some()
             && let Some(set) = timers.by_receiver.get_mut(&receiver)
         {
             set.remove(&reference);
@@ -776,18 +780,30 @@ impl Node {
             .map(|entry| entry.end)
     }
 
-    /// Take the active BIF timers that schedulers other than its own
-    /// started for `receiver`. The timers stay active.
-    pub(in crate::runtime) fn take_receiver_timers(
+    /// Take one timer that a scheduler other than its own started for
+    /// `receiver`, active or not, or `None` when no timer is left.
+    pub(in crate::runtime) fn take_receiver_timer(
         &self,
         receiver: ProcessId,
-    ) -> HashSet<crate::term::Reference> {
+    ) -> Option<crate::term::Reference> {
+        let mut timers = self.timers.lock().expect("the timer table is not poisoned");
+        let set = timers.by_receiver.get_mut(&receiver)?;
+        let reference = *set.iter().next().expect("a receiver set is not empty");
+        set.remove(&reference);
+        if set.is_empty() {
+            timers.by_receiver.remove(&receiver);
+        }
+        Some(reference)
+    }
+
+    /// Return true when a timer that a scheduler other than its own
+    /// started for `receiver` is left for its exit.
+    pub(in crate::runtime) fn has_receiver_timers(&self, receiver: ProcessId) -> bool {
         self.timers
             .lock()
             .expect("the timer table is not poisoned")
             .by_receiver
-            .remove(&receiver)
-            .unwrap_or_default()
+            .contains_key(&receiver)
     }
 
     /// Put a cancel of the BIF timer `reference` into the inbox of its

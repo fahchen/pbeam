@@ -3526,14 +3526,10 @@ impl Scheduler {
                     };
                     self.node.root_result(slot, result);
                 }
-                // The timers that another scheduler started for the
-                // process join its tree, so the walk cancels them too.
-                let remote = self.node.take_receiver_timers(id);
-                let process = self.current_process_mut();
-                for reference in remote {
-                    process.bif_timers.insert(TimerReference(reference), ());
-                }
-                process.bif_timers.post_order().position()
+                self.current_process_mut()
+                    .bif_timers
+                    .post_order()
+                    .position()
             }
         };
         let process = self.current_process_mut();
@@ -3542,7 +3538,7 @@ impl Scheduler {
         // keeps each timer that expires or that a BIF cancels, and gets no
         // new timer. Thus the position stays valid across turns.
         let tree = std::mem::take(&mut process.bif_timers);
-        let walked = next.is_some();
+        let mut walked = next.is_some();
         while let Some(position) = next {
             if reds <= 0 {
                 break;
@@ -3555,7 +3551,24 @@ impl Scheduler {
             let _ = self.cancel_bif_timer(timer.0);
             reds -= TIMER_CANCEL_REDUCTIONS;
         }
-        if walked && next.is_none() {
+        // The timers that another scheduler started for the process stay
+        // in the node until the exit takes them, one for each step, with
+        // the cost of a timer of the tree. A later turn goes on with them.
+        let mut remote_done = false;
+        while next.is_none() {
+            if reds <= 0 {
+                remote_done = !self.node.has_receiver_timers(id);
+                break;
+            }
+            let Some(reference) = self.node.take_receiver_timer(id) else {
+                remote_done = true;
+                break;
+            };
+            walked = true;
+            let _ = self.cancel_bif_timer(reference);
+            reds -= TIMER_CANCEL_REDUCTIONS;
+        }
+        if walked && next.is_none() && remote_done {
             reds = reds.max(1);
         }
         // The table deletion counts from the reductions left in the turn,

@@ -147,7 +147,9 @@ fn a_remote_timer_requires_a_live_receiver() {
     let late = crate::term::Reference::ordinary(2).unwrap();
     assert!(!node.register_remote_timer(late, 0, 1100, receiver));
     assert_eq!(node.timer_end(late), None);
-    assert_eq!(node.take_receiver_timers(receiver).len(), 1);
+    // A timer of an exiting receiver stays for its exit to count.
     assert_eq!(node.take_timer(reference), Some((0, 1100)));
     assert_eq!(node.take_timer(reference), None);
+    assert_eq!(node.take_receiver_timer(receiver), Some(reference));
+    assert_eq!(node.take_receiver_timer(receiver), None);
 }
