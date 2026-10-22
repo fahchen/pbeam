@@ -930,6 +930,30 @@ fn rejects_a_pid_reference() {
 }
 
 #[test]
+fn binary_to_term_gives_the_error_of_a_full_atom_table() {
+    // ERTS exits the emulator when the atom table is full
+    // (`index_put_entry`); the decode returns the error of the table.
+    use crate::runtime::scheduler::Scheduler;
+    let atoms = AtomTable::new();
+    let mut index = 0u32;
+    while atoms.put(&format!("pbeam_fill_{index}")).is_ok() {
+        index += 1;
+    }
+    let mut scheduler = Scheduler::new(atoms);
+    let mut context = BifContext {
+        scheduler: &mut scheduler,
+    };
+    let mut bytes = vec![131, 119, 10];
+    bytes.extend_from_slice(b"pbeam_full");
+    assert_eq!(
+        binary_to_term(&mut context, &Term::binary(bytes), &Term::nil())
+            .unwrap_err()
+            .to_string(),
+        "no more index entries in atom_tab (max=1048576)"
+    );
+}
+
+#[test]
 fn binary_to_term_checks_the_binary_and_the_options() {
     use crate::runtime::scheduler::Scheduler;
     let mut scheduler = Scheduler::new(AtomTable::new());

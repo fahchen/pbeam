@@ -629,8 +629,8 @@ enum DecodeError {
     Badarg,
     /// A term of the external term format that PBeam cannot represent.
     Unsupported(&'static str),
-    /// A runtime error of the byte sequence, such as a new atom in a table
-    /// that a run with scheduler threads froze.
+    /// A runtime error of the byte sequence, such as a new atom in a full
+    /// atom table.
     Error(BeamError),
 }
 
