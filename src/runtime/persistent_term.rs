@@ -2,11 +2,12 @@
 //! (`erl_bif_persistent.c`). All processes of the node share one store,
 //! also on more than one scheduler thread.
 
+use super::{scheduler::Scheduler, signal::Signal};
 use crate::term::{LiveBytes, ProcessId, Term, internal_hash};
 
 /// The persistent term table of the node and its update permission, as
-/// `the_hash_table` and `updater_process` of `erl_bif_persistent.c`. The
-/// node keeps it behind one lock.
+/// `the_hash_table`, `updater_process`, and `update_queue` of
+/// `erl_bif_persistent.c`. The node keeps it behind one lock.
 #[derive(Debug, Default)]
 pub(in crate::runtime) struct PersistentTermStore {
     /// The table.
@@ -15,47 +16,71 @@ pub(in crate::runtime) struct PersistentTermStore {
     /// `erase/1` until thread progress, or a `get/0` that traps until its
     /// last chunk (`erl_bif_persistent.c:1311-1365`).
     updater: Option<ProcessId>,
+    /// The processes that wait for the update permission.
+    waiters: Vec<ProcessId>,
 }
 
 impl PersistentTermStore {
-    /// Give the update permission to `id` and return true, or return false
-    /// when another process holds it, as `try_seize_update_permission`
-    /// does (`erl_bif_persistent.c:1311-1335`). A holder for which `alive`
-    /// returns false lost the permission when it exited, as the destructor
-    /// of its trap state releases it.
+    /// Give the update permission to `id` and return true, or put `id`
+    /// into the wait queue and return false when another process holds it,
+    /// as `try_seize_update_permission` does
+    /// (`erl_bif_persistent.c:1311-1335`).
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// let mut store = PersistentTermStore::default();
-    /// assert!(store.seize(ProcessId(1), |_| true));
-    /// assert!(!store.seize(ProcessId(2), |_| true));
-    /// assert!(store.seize(ProcessId(2), |_| false));
+    /// assert!(store.seize(ProcessId(1)));
+    /// assert!(!store.seize(ProcessId(2)));
     /// ```
-    pub(super) fn seize(&mut self, id: ProcessId, alive: impl Fn(ProcessId) -> bool) -> bool {
+    pub(super) fn seize(&mut self, id: ProcessId) -> bool {
         match self.updater {
-            Some(holder) if holder != id && alive(holder) => false,
+            Some(holder) if holder != id => {
+                if !self.waiters.contains(&id) {
+                    self.waiters.push(id);
+                }
+                false
+            }
             _ => {
                 self.updater = Some(id);
+                self.waiters.retain(|waiter| *waiter != id);
                 true
             }
         }
     }
 
-    /// Release the update permission of `id`, as
-    /// `release_update_permission` does (`erl_bif_persistent.c:1337-1365`).
+    /// Release the update permission of `id` and return the processes that
+    /// wait for it, as `release_update_permission` takes "the entire herd"
+    /// (`erl_bif_persistent.c:1337-1365`). Return no process when `id`
+    /// does not hold the permission.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// let mut store = PersistentTermStore::default();
-    /// store.seize(ProcessId(1), |_| true);
-    /// store.release(ProcessId(1));
-    /// assert!(store.seize(ProcessId(2), |_| true));
+    /// store.seize(ProcessId(1));
+    /// store.seize(ProcessId(2));
+    /// assert_eq!(store.release(ProcessId(1)), [ProcessId(2)]);
     /// ```
-    pub(super) fn release(&mut self, id: ProcessId) {
-        if self.updater == Some(id) {
-            self.updater = None;
+    pub(super) fn release(&mut self, id: ProcessId) -> Vec<ProcessId> {
+        if self.updater != Some(id) {
+            return Vec::new();
+        }
+        self.updater = None;
+        std::mem::take(&mut self.waiters)
+    }
+}
+
+impl Scheduler {
+    /// Release the update permission of the persistent terms that the
+    /// process `id` holds, and resume each process that waits for it. The
+    /// end of a call releases it, and so does the exit of the process, as
+    /// the destructor of the ERTS trap state does.
+    pub(super) fn release_persistent_terms(&mut self, id: ProcessId) {
+        let waiters = self.node().persistent_terms().release(id);
+        for waiter in waiters {
+            // A waiter that exited needs no resume.
+            let _ = self.send_signal(None, waiter, Signal::Resume);
         }
     }
 }

@@ -75,15 +75,11 @@ fn seize(
     arguments: Vec<Term>,
 ) -> Option<BifResult> {
     let id = scheduler.current_process().id;
-    let node = scheduler.node().clone();
-    if node
-        .persistent_terms()
-        .seize(id, |holder| node.is_live(holder))
-    {
+    if scheduler.node().persistent_terms().seize(id) {
         return None;
     }
     scheduler.current_process_mut().bump_all_reductions();
-    Some(BifResult::TrapBif {
+    Some(BifResult::Suspend {
         module: "persistent_term",
         function,
         arguments,
@@ -93,7 +89,7 @@ fn seize(
 /// Release the update permission of the current process.
 fn release(scheduler: &mut Scheduler) {
     let id = scheduler.current_process().id;
-    scheduler.node().persistent_terms().release(id);
+    scheduler.release_persistent_terms(id);
 }
 
 /// Run `persistent_term:get/0`: return each key and value of the node, as

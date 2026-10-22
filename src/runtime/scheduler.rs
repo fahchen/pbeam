@@ -3476,6 +3476,7 @@ impl Scheduler {
             None => {
                 process.bump_reductions(EXIT_REDUCTIONS);
                 self.set_exiting(id);
+                self.release_persistent_terms(id);
                 let process = self.current_process_mut();
                 if let ReceiveTimer::Set { key, .. } = process.receive_timer {
                     self.timers.cancel(key);

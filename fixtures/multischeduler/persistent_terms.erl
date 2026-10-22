@@ -104,10 +104,29 @@ trapped_get() ->
     First = result(),
     Rest = lists:sort([result(), result(), result()]),
     Killed = killed_get(),
+    High = high_wait(),
     [persistent_term:erase({trapped, I}) || I <- lists:seq(1, ?KEYS)],
     _ = persistent_term:erase(late_key),
-    case {First, Rest, Killed} of
-        {{got, false}, [erase_done, put_done, {got_again, _}], ok} -> ok;
+    case {First, Rest, Killed, High} of
+        {{got, false}, [erase_done, put_done, {got_again, _}], ok, ok} -> ok;
+        Other -> Other
+    end.
+
+%% A process of priority high that waits for the permission suspends, so
+%% the get of priority normal ends.
+high_wait() ->
+    Self = self(),
+    _ = spawn(fun() ->
+                  All = persistent_term:get(),
+                  Self ! {got, lists:keymember(high_key, 1, All)}
+              end),
+    erlang:yield(),
+    _ = spawn_opt(fun() ->
+                      ok = persistent_term:put(high_key, 1),
+                      Self ! put_done
+                  end, [{priority, high}]),
+    case {result(), result()} of
+        {{got, false}, put_done} -> ok;
         Other -> Other
     end.
 

@@ -871,12 +871,6 @@ impl Node {
             .expect("the persistent terms are not poisoned")
     }
 
-    /// Return true when the process `id` is in the process table and does
-    /// not exit.
-    pub(in crate::runtime) fn is_live(&self, id: ProcessId) -> bool {
-        self.processes.live_owner(id).is_some()
-    }
-
     /// Account the terms of the root results in `live`.
     pub(in crate::runtime) fn account_roots(&self, live: &mut LiveBytes) {
         let roots = self.roots.lock().expect("the roots are not poisoned");

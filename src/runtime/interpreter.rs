@@ -3625,6 +3625,19 @@ impl BeamProgram {
                 });
                 Ok(Some(Outcome::Yield))
             }
+            BifResult::Suspend {
+                module,
+                function,
+                arguments,
+            } => {
+                process.pending_bif = Some(PendingBif {
+                    module,
+                    function,
+                    arguments,
+                    tail,
+                });
+                Ok(Some(Outcome::Wait))
+            }
             BifResult::AwaitGrant => {
                 process.pending_bif = Some(PendingBif {
                     module: "pbeam_cap",

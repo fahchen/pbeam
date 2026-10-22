@@ -117,6 +117,18 @@ pub(in crate::runtime) enum BifResult {
     /// gets the result of the call when the work completes. Only a NIF
     /// entry gives it.
     Dirty(Work),
+    /// The calling process suspends until a `Resume` signal, and then
+    /// continues at the trap export `module:function` with `arguments`, as
+    /// a process that `erts_suspend` stops and `erts_resume` starts again
+    /// (`erl_bif_persistent.c:1311-1365`).
+    Suspend {
+        /// Module of the trap export.
+        module: &'static str,
+        /// Name of the trap export.
+        function: &'static str,
+        /// Arguments of the trap export.
+        arguments: Vec<Term>,
+    },
     /// PBeam only: the calling process waits for the answer of the policy
     /// process to its `pbeam_cap:request/2` call. It continues through the
     /// export `pbeam_cap:await_grant/0` each time it runs again, until the
