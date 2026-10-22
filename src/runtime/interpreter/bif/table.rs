@@ -487,7 +487,7 @@ bifs! {
     ets:update_counter/4 => unsupported,
     ets:update_element/3 as EtsUpdateElement3 => |cx, [table, key, spec]| ets::update_element(cx, table, key, spec, None),
     ets:update_element/4 as EtsUpdateElement4 => |cx, [table, key, spec, default]| ets::update_element(cx, table, key, spec, Some(default)),
-    ets:whereis/1 as EtsWhereis1 => |cx, [name]| Ok(match name { Term::Atom(name) => Value(cx.scheduler.ets.whereis(cx.scheduler.atoms.name_of(name)).map_or(Term::static_atom("undefined"), Term::Reference)), _ => BifResult::badarg() }),
+    ets:whereis/1 as EtsWhereis1 => |cx, [name]| Ok(match name { Term::Atom(name) => Value(cx.scheduler.ets.shared().whereis(cx.scheduler.atoms.name_of(name)).map_or(Term::static_atom("undefined"), Term::Reference)), _ => BifResult::badarg() }),
     file:native_name_encoding/0 as FileNativeNameEncoding0 => |_, []| Ok(file::native_name_encoding(filename_encoding())),
     io:printable_range/0 as IoPrintableRange0 => |_, []| Ok(Value(Term::static_atom("latin1"))),
     lists:keyfind/3 as ListsKeyfind3 => |cx, [key, position, list]| Ok(lists::keyfind(cx.scheduler.current_process_mut(), key, position, list)),

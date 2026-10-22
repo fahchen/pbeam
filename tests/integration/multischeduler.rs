@@ -659,21 +659,6 @@ fn shares_an_atomic_array_between_schedulers() {
     assert_eq!(results[1].term, Term::Atom(ok_atom), "the adder");
 }
 
-/// An ETS call in a run with scheduler threads fails with a clear error.
-#[test]
-fn rejects_an_ets_table() {
-    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
-    let error = program
-        .execute_on_schedulers(&[("ping_pong", "ets_new"), ("ping_pong", "info_hold")])
-        .expect_err("ets is unsupported");
-    assert!(
-        error
-            .to_string()
-            .contains("unsupported: ets:new/2 in a run of execute_on_schedulers"),
-        "{error}"
-    );
-}
-
 /// A kill that the caller sent before a read of the registered name of the
 /// target is handled first, so the read reports a dead target.
 #[test]

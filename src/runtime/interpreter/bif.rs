@@ -691,8 +691,7 @@ macro_rules! bifs {
             // A purge needs `check_process_code` on the processes of each
             // scheduler (`erts_code_purger.erl:166-179`), which a scheduler
             // reads only for its own processes.
-            let local_service =
-                module == "ets" || (module == "erts_internal" && name == "purge_module");
+            let local_service = module == "erts_internal" && name == "purge_module";
             if context.scheduler.is_multi() && local_service {
                 return Err(error(format!(
                     "unsupported: {module}:{name}/{arity} in a run of execute_on_schedulers"

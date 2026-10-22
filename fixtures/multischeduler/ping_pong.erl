@@ -9,7 +9,7 @@
          kill_watch/0, kill_hold/0, kill_child/0, port_send/0, port_other/0,
          alive_wait/0, alive_send/0, alive_child/0, scheduler_count/0,
          wall_time/0, name_after_kill/0, name_kill_hold/0, name_kill_child/0,
-         decode_atom/0, persistent_put/0, ets_new/0, port_transfer/0,
+         decode_atom/0, persistent_put/0, port_transfer/0,
          port_transfer_hold/0, ports_list/0, port_use/0, port_give/0,
          port_term/0, port_term_give/0, counters_hold/0, counters_add/0, timer_remote/0,
          timer_hold/0, timer_named/0, timer_read/0, timer_give/0, system_flag_depth/0,
@@ -506,11 +506,6 @@ atom_receive() ->
 %% cannot share the table.
 persistent_put() ->
     persistent_term:put(persistent_probe, 1).
-
-%% The root that makes an ETS table. A run with scheduler threads cannot
-%% share the tables.
-ets_new() ->
-    ets:new(ets_probe, []).
 
 %% The root that connects its port to a process of the other scheduler.
 port_transfer() ->
