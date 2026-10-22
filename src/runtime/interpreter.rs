@@ -43,7 +43,7 @@ pub(crate) use native::has_static_library;
 pub use native::{NifGap, nif_manifest_gaps};
 
 pub(super) use bif::BifResult;
-pub(super) use code_table::{CodeTable, LoadedModule};
+pub(super) use code_table::{CodeSnapshot, CodeTable, LoadedModule};
 
 use code_table::{ExportTarget, ImportTargets};
 
@@ -2620,6 +2620,10 @@ impl BeamProgram {
                     // with its arguments first, as ERTS gives it.
                     let arguments = call_arguments(&process.registers, *arity)?;
                     cursor.commit(process);
+                    // A load of another scheduler that returned patches
+                    // the entry for each later call
+                    // (`beam/erl_nif.c:5043-5098`).
+                    scheduler.sync_code();
                     if let Some((job, result)) = native::call(scheduler, module, name, &arguments) {
                         let outcome = match result? {
                             BifResult::Raise { class, reason } => raise_at_entry(
@@ -2848,6 +2852,9 @@ impl BeamProgram {
         import: u32,
         deallocate: Option<u32>,
     ) -> Result<Option<Outcome>, BeamError> {
+        // An external call sees each code operation that returned on
+        // another scheduler, as the active code index of ERTS gives it.
+        scheduler.sync_code();
         // The loader checks each import index against the import table, and
         // the code table makes one slot for each import.
         let index = import as usize;
@@ -2872,7 +2879,21 @@ impl BeamProgram {
         match *kind {
             ImportKind::LoadNif => {
                 let module_id = current_frame(process).module_id;
-                let result = native::load_nif(scheduler, module_id)?;
+                // `erlang:load_nif/2` runs on the newest code state of the
+                // node and publishes its NIF library record, as the other
+                // code operations do (see `scheduler::code`).
+                let node = scheduler.is_multi().then(|| Arc::clone(scheduler.node()));
+                let mut state = node.as_deref().map(|node| {
+                    let state = node.code.lock();
+                    scheduler.install_code(&state);
+                    state
+                });
+                let result = native::load_nif(scheduler, module_id);
+                if let Some(state) = state.as_mut() {
+                    scheduler.publish_code(state);
+                }
+                drop(state);
+                let result = result?;
                 // The `load_nif/2` and `call_on_load_function/1`
                 // instructions raise with the BIF frame, as each BIF does
                 // (`jit/arm/instr_bif.cpp:994-1067`).
@@ -2927,7 +2948,7 @@ impl BeamProgram {
                 if let Some(target) = slot.get() {
                     return enter_export(process, target.frame(), arity, tail);
                 }
-                match scheduler.code.export_frame(module, name, arity)? {
+                match scheduler.synced_code().export_frame(module, name, arity)? {
                     Some(frame) => {
                         slot.set(Some(ExportTarget::of(&frame)));
                         enter_export(scheduler.current_process_mut(), frame, arity, tail)
@@ -2969,6 +2990,10 @@ impl BeamProgram {
         arity: u32,
         tail: bool,
     ) -> Result<Option<Outcome>, BeamError> {
+        // A BIF that reads the code table, such as `erlang:module_loaded/1`,
+        // and the export of the MFA see each code operation that returned
+        // on another scheduler.
+        scheduler.sync_code();
         let resolved = {
             let atoms = &scheduler.atoms;
             resolve(atoms.name_of(module), atoms.name_of(name), arity)
@@ -3057,7 +3082,7 @@ impl BeamProgram {
             ("erlang", "apply", 3) => return self.apply_mfa(scheduler, tail),
             _ => {}
         }
-        match scheduler.code.export_frame(module, name, arity)? {
+        match scheduler.synced_code().export_frame(module, name, arity)? {
             Some(frame) => enter_export(scheduler.current_process_mut(), frame, arity, tail),
             None => self.undefined_function(scheduler, module, name, arity, tail),
         }
@@ -3419,6 +3444,7 @@ impl BeamProgram {
                 write(process, &Operand::X(register), value)?;
             }
         }
+        scheduler.sync_code();
         let frame = {
             let module = scheduler.atoms.name_of(lambda.module());
             match scheduler.code.fun_frame(module, lambda, total_arity)? {
@@ -3583,7 +3609,9 @@ impl BeamProgram {
                 // is loaded traps to `re:grun/3` or `re:urun/3`, and the
                 // error handler loads `re` and enters that function
                 // (`error_handler.erl:85-98`).
-                let frame = scheduler.code.export_frame(module, function, arity)?;
+                let frame = scheduler
+                    .synced_code()
+                    .export_frame(module, function, arity)?;
                 match frame {
                     Some(frame) => {
                         let process = scheduler.current_process_mut();
@@ -3703,7 +3731,10 @@ impl BeamProgram {
         arity: u32,
         tail: bool,
     ) -> Result<Option<Outcome>, BeamError> {
-        match scheduler.code.export_frame(module, function, arity)? {
+        match scheduler
+            .synced_code()
+            .export_frame(module, function, arity)?
+        {
             Some(frame) => {
                 enter_frame(scheduler.current_process_mut(), frame, tail);
                 Ok(None)
@@ -3879,6 +3910,7 @@ fn create_process(
     // process first runs. The export of a BIF calls the BIF, and not the
     // stub body of the module, which is `erlang:nif_error(undefined)` in
     // `erlang.beam` (`emu/emu_load.c:704-713`, `jit/arm/ops.tab:917-927`).
+    scheduler.sync_code();
     let export = {
         let atoms = &scheduler.atoms;
         let (module, function) = (atoms.name_of(module), atoms.name_of(function));

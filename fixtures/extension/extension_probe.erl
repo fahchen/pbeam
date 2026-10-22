@@ -1,6 +1,6 @@
 -module(extension_probe).
 -export([load/1, calls/1, loaded/0, reload/1, old_load/1, with_load/2, add/2, invalid/0, unbound/1, atom_name/1,
-         dirty_atom_name/1]).
+         dirty_atom_name/1, cross_load/0, cross_call/0]).
 
 %% The functions of the extension library of the test. The library binds
 %% `add/2`, `make_atom/1`, and `dirty_atom/1`; `unbound/1` has no binding,
@@ -29,6 +29,27 @@ old_load(Binary) ->
     true = erlang:delete_module(extension_probe),
     {module, extension_probe} = erlang:load_module(extension_probe, Binary),
     {load(ok), extension_probe:calls(ok)}.
+
+%% The root that loads the library on one scheduler and tells the root of
+%% the other scheduler.
+cross_load() ->
+    ok = load(ok),
+    caller() ! loaded,
+    ok.
+
+%% The root that calls the library that the other scheduler loaded.
+cross_call() ->
+    true = register(extension_caller, self()),
+    receive loaded -> try_add() end.
+
+caller() ->
+    case whereis(extension_caller) of
+        undefined ->
+            erlang:yield(),
+            caller();
+        Pid ->
+            Pid
+    end.
 
 %% Load the library and apply `Name` to `Arguments`.
 with_load(Name, Arguments) ->
