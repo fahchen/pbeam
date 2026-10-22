@@ -124,6 +124,7 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - The work: a process heap with its size, garbage collection with the ERTS reductions, the heap-fragment fallback of the list BIFs, the shared and literal parts of a term for the send copy, the copy of a term in a send, ETS, and `persistent_term` for `maps:merge/2`, and the message place and the adjust signal of `message_queue_data`.
 - **Trigger:** a consumer that needs exact interleaving with large messages or with processes that allocate much, or a task that adds a heap-size limit (row "Heap limit").
 - **Source:** owner decision on PR #249 (#245).
+- **Decision (owner, 2026-10-22):** do not build a GC model. Rust drop keeps freeing the memory (R3 stays), and these differences stay recorded. M13 adds no heap base. The heap accounting layer of M20 (entry "M20: BIF and ETS API completion") only reports sizes and does no GC (Suikou review 01a160b6).
 
 ### Keep the trap state of `maps:from_list/1`, `maps:from_keys/2`, and `unicode:characters_to_list/2`
 
@@ -155,6 +156,7 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - The "Persistent terms" row of `docs/erts-differences.md` records the two suspensions, and this entry owns them. Thread progress depends on all managed threads of the node, so PBeam on one scheduler does not model it.
 - **Trigger:** multiple schedulers (M10, #27), or a consumer that needs the exact interleaving around `persistent_term:put/2`, also a put while `persistent_term:get/0` traps.
 - **Source:** #234 (PR #243), #245 (PR #249), and #258.
+- **Task:** [#932](https://github.com/fahchen/pbeam/issues/932).
 
 ### Complete a trapped `ets:insert/2` in the process that uses the table
 
@@ -169,6 +171,7 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Evidence:** `logger_start_probe:negative_budget/0` makes the budget negative before `length/1`. ERTS returns `ok`, and PBeam returns the runtime error (`tests/integration/logger_start.rs`).
 - **Trigger:** a measured path calls `erts_internal:map_next/3` directly and then a BIF that reads the budget.
 - **Source:** #234 (PR #243).
+- **Task:** [#922](https://github.com/fahchen/pbeam/issues/922).
 
 ### Run `integer_to_list/1` and `integer_to_binary/1` of a large integer with no reductions left
 
@@ -326,13 +329,7 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Option:** move each service to the shared node behind a lock or to an owner scheduler with request messages, as ERTS does for the process table, the atom table, ETS, and timers. The atom table is the first need: an append-only shared table with one global index, and a text fallback for an index that a scheduler did not create.
 - **Trigger:** a multi-scheduler run that creates an atom at runtime, uses ETS or `persistent_term` across schedulers, or needs a timer that wakes a process of another scheduler.
 - **Source:** #842.
-
-### Run a real application on several schedulers
-
-- **Now:** the scheduler mechanics of M10 work in a run of `BeamProgram::execute_on_schedulers`: cross-thread signals, the node process table and roots, the node-wide impossible-wait, work stealing, and the node dirty pools. But `BeamProgram::boot`, `pbeam erl`, the `pbeam` binary, and the bundle launcher use the one-scheduler path (`execute`), so plug_hello and each other release run on one scheduler. A run of `execute_on_schedulers` gives a clear unsupported error for ETS, `persistent_term`, atomics, an atom created at run time, code loading (`erlang:finish_loading/1`, `erlang:delete_module/1`, `erts_internal:prepare_loading/2`, `erts_internal:purge_module/2`), aliases and BIF timers across schedulers, `erlang:load_nif/2` of an extension library or a NIF shared library (a static library such as `prim_file` loads), and `erlang:ports/0`. The OTP kernel boot uses ETS, `persistent_term`, new atoms, and code loading, so a real application cannot boot on several schedulers yet.
-- **Option:** a milestone in two steps. First, move these node services to the shared node, one task for each service ("Share the node services of a multi-scheduler run", "Route alias messages across scheduler threads"), each compared with `erl +S N`. Second, let `BeamProgram::boot`, `pbeam erl`, and the bundle launcher start N schedulers, with the ERTS default of one scheduler for each logical CPU and the `+S` option, and run plug_hello end to end on several schedulers.
-- **Trigger:** the owner opens the milestone, or an application needs more than one CPU core.
-- **Source:** owner question of 2026-10-22 after the tart run of plug_hello ("我们现在支持多个 schedulers 了吗？").
+- **Milestone:** [m14] Shared node services ([#909](https://github.com/fahchen/pbeam/issues/909)). Each M14 task takes its service out of this entry, and the PR that takes out the last service removes the entry.
 
 ### Send the pending monitor signal at the ERTS point across scheduler threads
 
@@ -340,6 +337,7 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Option:** prove that one ERTS node also keeps the causal order of a monitor and a later kill in this case, and record the proof; or send the pending signal at the ERTS points only, and keep the causal order through the inbox path in another way.
 - **Trigger:** the next change of the pending monitor slot or of the cross-scheduler delivery path, or a probe that shows a difference from `erl +S 2`.
 - **Source:** #886, owner comment of 2026-10-22 ("可以，后续对齐").
+- **Task:** [#927](https://github.com/fahchen/pbeam/issues/927).
 
 ### Bind the full function tables of the OTP NIF libraries
 
@@ -354,6 +352,7 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Option:** put the alias owners in the shared node, as the names, and route an alias message to the owner scheduler through its inbox.
 - **Trigger:** the first cross-scheduler alias send, for example a `gen:call` between two schedulers.
 - **Source:** #842.
+- **Task:** [#928](https://github.com/fahchen/pbeam/issues/928).
 
 ## Exceptions
 
@@ -377,6 +376,7 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - The error handler path of [#447](https://github.com/fahchen/pbeam/issues/447) adds the frame of the caller of `error_handler:crash/1` to the frames of `erlang:error/1` in about one of four calls. The reductions of the error handler code match ERTS in a run with a live code server; a run of the library API has no code server and charges the extra reductions of the `init:ensure_loaded/1` round trip.
 - **Trigger:** a consumer needs the location of a frame, or the exact frames of an `undef` exception.
 - **Source:** owner decision of 2026-10-11 (Suikou review 01a1282e, AFK log second batch); [#446](https://github.com/fahchen/pbeam/issues/446), [#447](https://github.com/fahchen/pbeam/issues/447), PR [#473](https://github.com/fahchen/pbeam/pull/473).
+- **Task:** [#926](https://github.com/fahchen/pbeam/issues/926).
 
 ### Raise `undef` for an entry module that the run does not load
 
@@ -582,7 +582,92 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a new `LEAK` in a nextest run, or an owner decision to gate leaks.
 - **Source:** PR for #330.
 
+## Later milestones
+
+The owner opened [m13] Foundation seams ([#908](https://github.com/fahchen/pbeam/issues/908)) and [m14] Shared node services ([#909](https://github.com/fahchen/pbeam/issues/909)) on 2026-10-22 and put the later milestones of the plan here (Suikou review 01a160b6). The plan puts the structure that later work depends on first, so that landed code needs no rewrite. M6 is not part of this plan. Each entry becomes a GitHub milestone with a tracking issue, epics, and tasks when the owner opens it. The other entries of this file that an entry names stay until the task that closes them removes them.
+
+### M15: Run a real application on several schedulers
+
+- **Now:** the scheduler mechanics of M10 work in a run of `BeamProgram::execute_on_schedulers`: cross-thread signals, the node process table and roots, the node-wide impossible-wait, work stealing, and the node dirty pools. But `BeamProgram::boot`, `pbeam erl`, the `pbeam` binary, and the bundle launcher use the one-scheduler path (`execute`), so plug_hello and each other release run on one scheduler. M14 moves the atom table, ETS, `persistent_term`, atomics, compiled expressions and patterns, BIF timers, the time correction, the code table, the NIF library records, and the resources to the node. Ports stay with each scheduler: `erlang:ports/0` returns `unsupported: erlang:ports/0 in a run of execute_on_schedulers` (`src/runtime/interpreter/bif/erlang.rs:5181`), a port of another scheduler gives an unsupported error (`erlang.rs:1035`, `1294`; `src/runtime/interpreter/bif/erts_internal.rs:645`), and a port pins its process (`src/runtime/scheduler/ports.rs:393`).
+- **Work:** e1: a node port table and a poll thread, with the clock check after `ERTS_CHECK_TIME_REDS` reductions. The poll thread also polls fd 0, so fd 0 needs no separate work (entries "Poll fd 0 while processes run" and "Read the clock after `ERTS_CHECK_TIME_REDS` reductions"). e2: the run-end items: keep the run alive after a root `exit(normal)`, run the `at_exit` callbacks, and flush the logger (entries "Keep the run alive after a root `exit(normal)` as ERTS does" and "Run `at_exit` callbacks and flush the logger before the root exit"). e3: `BeamProgram::boot`, `pbeam erl`, and the bundle launcher start N schedulers, with the `+S` option and the ERTS default of one scheduler for each logical CPU.
+- **Order:** after M14, because the OTP kernel boot uses new atoms, ETS, `persistent_term`, and code loading, which M14 moves to the node. In M15, e1 comes first, because each new IO path (TCP `CONNECT`, inet6, udp, `spawn` and `fd` ports, `prim_socket`, fd 0) otherwise adds glue code in `impl Scheduler` that the port table later replaces. e2 comes before e3, so that the node decides the run end once.
+- **Acceptance:** plug_hello serves its requests end to end on N schedulers, compared with `erl +S N`.
+- **Trigger:** the owner opens the milestone, or an application needs more than one CPU core.
+- **Source:** owner question of 2026-10-22 after the tart run of plug_hello ("我们现在支持多个 schedulers 了吗？"); plan of Suikou review 01a160b6.
+
+### M16: Terms and binary syntax
+
+- **Reason:** PBeam has no bitstring term whose size is not a multiple of 8 bits, no fun literal or external fun encoding, a restricted set of map keys, and no native record term.
+- **Evidence:** row "Bitstring terms" of `docs/erts-differences.md` (the loader keeps a `BIT_BINARY_EXT` literal as an unsupported literal); `erlang:fun_info_mfa/1` and `erlang:fun_to_list/1` are `unsupported` (`src/runtime/interpreter/bif/table.rs:178-179`); `unsupported map key` errors (`src/runtime/interpreter.rs:1747`, `src/runtime/interpreter/bif/maps.rs:166`) and row "Map keys"; `put_record` stops the run (row "Unimplemented instructions"); a bignum in a binary segment gives `unsupported bs_create_bin integer segment of N bits of a bignum` (`src/runtime/interpreter.rs:6020`); PBeam writes no 16-bit float (`interpreter.rs:5484`).
+- **Work:** e1: full bitstrings: `BIT_BINARY_EXT` (tag 77) in the loader and the external term format, the bitstring forms of the binary-match and construction paths, `erlang:bitstring_to_list/1`, and the print of a bitstring (entries "Add bitstring terms" and "Run the other binary-match instructions"). e2: funs: the loader keeps the MD5 and the old index, a fun-entry table on the node, `NEW_FUN_EXT` encode and decode, `erlang:fun_to_list/1`, and `erlang:fun_info_mfa/1` (entry "Load local fun literals and run the fun information BIFs"). e3: map keys: allow bignums, maps, funs, and binaries in compound keys, one class at a time, each compared with pinned ERTS. e4: `RECORD_EXT` and native records, 16-bit float construction, and bignum segments in binary syntax.
+- **Order:** e1 needs only the bit-exact binary access of M13 (epic #912), so it can run in parallel with M14. e2 comes after M14, because the fun-entry table lives on the node next to the code table (#937).
+- **Trigger:** the owner opens the milestone.
+- **Source:** plan of Suikou review 01a160b6.
+
+### M17: Exceptions and diagnostics
+
+- **Reason:** BIF errors have no `error_info` cause, a BIF error after a trap has no stack trace, PBeam writes no report for an uncaught exception, and some failures give a runtime error where ERTS raises an exception.
+- **Evidence:** entries "Give the `error_info` cause of BIF errors" (about 60 ERTS raise sites set `EXF_HAS_EXT_INFO`), "Give the stack trace of a BIF error after a trap", "Send the uncaught-exception report to `logger`", "Raise `undef` for an entry module that the run does not load", and "Halt the PBeam boot with the `init` crash text". A `put_map_assoc` of a term that is not a map gives `unsupported BEAM put_map_assoc source: not a map` (`src/runtime/interpreter.rs:1756`), and `maps:keys/1` of such a term gives a runtime error (`src/runtime/interpreter/bif/maps.rs:40-41`), where ERTS raises `{badmap, Map}` (row "Exception raise sites").
+- **Work:** the `error_info` causes; the stack trace of a BIF error after a trap; the uncaught-exception report to `logger`; `undef` for an entry module that the run does not load; the boot halt with the `init` crash text; `{badmap, Map}` as an exception.
+- **Order:** the report to `logger` comes after the line locations of M13 (#926) and the funs of M16 e2, because `io_lib` calls `erlang:fun_to_list/1` and the report holds the frame locations, so the test expectations are set once. The `error_info` changes touch other files than M14 and can run in parallel with it.
+- **Trigger:** the owner opens the milestone.
+- **Source:** plan of Suikou review 01a160b6.
+
+### M18: Network and ports
+
+- **Reason:** the port and socket paths run only the subset that the measured applications use.
+- **Evidence:** rows "Ports" and "tcp_inet ports" of `docs/erts-differences.md`; entry "Run the other port options and port kinds"; `prim_socket` binds only `nif_supports/0,1` (#887), and `net` has a load-check table with no bindings (#868).
+- **Work:** TCP `CONNECT`; inet6 and `local` addresses; full udp; `spawn` and `fd` ports and the busy queue; the `prim_socket` NIF; the `net` NIF.
+- **Order:** after M15, because each new IO path uses the node port table and the poll thread of M15 e1.
+- **Trigger:** the owner opens the milestone.
+- **Source:** plan of Suikou review 01a160b6.
+
+### M19: Crypto and NIF function tables
+
+- **Reason:** `crypto` binds only part of its NIF table, and `asn1rt_nif` has a load-check table with no bindings (entry "Bind the full function tables of the OTP NIF libraries").
+- **Work:** the full `crypto` NIF table and `asn1rt_nif`, each function compared with pinned ERTS.
+- **Decision (owner, 2026-10-22):** link a static OpenSSL 3.5.8 (`openssl-sys` with the `vendored` feature). Reason: the pinned OTP 29.1.1 links OpenSSL 3.5.8. On the pinned `erl`, `crypto:info_lib()` gives `[{<<"OpenSSL">>,810549376,<<"OpenSSL 3.5.8 25 Aug 2026">>}]`, and `crypto:supports()` lists 187 items. With the same library, the algorithm set, the key formats, the padding, and the errors match OTP with the least work. Cost: the build of each target needs a C toolchain and perl, so cross builds and musl builds need more setup. The runtime portability is the same as for the alternatives, because each option links statically.
+- **Alternatives (rejected):** RustCrypto: pure Rust, and the build needs only `rustc`, but its algorithm set is smaller, and the behavior of each function must be matched by hand. aws-lc: compatible with the OpenSSL API, but its algorithm set and its error codes differ from OpenSSL, and it also needs a C toolchain.
+- **Order:** the stateless functions can come earlier. The stateful parts, such as hash and cipher contexts, come after the node resource store of M14 (#938), so a context does not pin its process to one scheduler.
+- **Trigger:** the owner opens the milestone.
+- **Source:** plan of Suikou review 01a160b6; owner decision of 2026-10-22.
+
+### M20: BIF and ETS API completion
+
+- **Reason:** OTP code calls BIFs and ETS functions that are still `unsupported` BIF table entries.
+- **Evidence:** `ets:delete_object/2`, `ets:give_away/3`, `ets:last/1`, and `ets:setopts/2` are `unsupported` (`src/runtime/interpreter/bif/table.rs:442`, `445`, `454`, `483`); entries "Transfer an ETS table to a live heir", "Run the unsupported BIFs that OTP code calls", "Accept every `erlang:spawn_opt/4` option", and "Value checks of `process_flag/2` and `system_flag/2`"; row "Heap limit" (no `max_heap_size` and no heap accounting).
+- **Work:** ETS: an `ordered_set` tree, `ets:last/1` and `ets:prev/2` in key order, `ets:delete_object/2`, `ets:give_away/3` and the heir, `ets:setopts/2`, and the traversal order of `write_concurrency` tables on several schedulers. The other math BIFs, `erlang:exit/3`, and the other unsupported BIFs. The `spawn_opt` options and the process and system flags. A heap accounting layer: the `size_object` walk of `erts_debug:flat_size/1` (`beam_debug.c:71-76`), `min_heap_size`, `max_heap_size`, and the heap items of `process_info/2`. It only reports sizes and does no GC; confirm this scope with the owner when the milestone opens. The remaining items of `module_info` and `system_info`.
+- **Order:** after M14, because the heir and `give_away` go through the ETS accessor (#930) and the tables are on the node; after M15, because the `write_concurrency` order needs several schedulers in a real run.
+- **Trigger:** the owner opens the milestone.
+- **Source:** plan of Suikou review 01a160b6.
+
+### M21: Accuracy and performance
+
+- **Reason:** some ERTS mechanisms are modeled in a simpler form, with the same results but other timing or host cost.
+- **Evidence:** entries "Model the ERTS timer wheels", "Keep the trap state of `maps:from_list/1`, `maps:from_keys/2`, and `unicode:characters_to_list/2`", "Hold the part of the result of a YCF map BIF across a yield", and the performance entries of this file, for example "Combine the measured instruction pairs".
+- **Work:** the timer wheels, the YCF trap states, and the performance entries. Each performance change is measured before it lands (`docs/performance-status.md`).
+- **Order:** last. Instruction fusion comes after the line table of M13 (#926), because the line table is indexed by instruction and fusion changes the indices.
+- **Trigger:** the owner opens the milestone.
+- **Source:** plan of Suikou review 01a160b6.
+
 ## Future features
+
+### Support Erlang distribution
+
+- **Reason:** owner decision of 2026-10-22: PBeam will support Erlang distribution later.
+- **Evidence:** ERTS connects nodes through the distribution layer (`erts/emulator/beam/dist.c`, `dist.h`) and the `erl_dist` protocol, which `net_kernel` and the distribution carriers drive. PBeam has no distribution: `erlang:setnode/2` and the `erlang:dist_ctrl_*` BIFs are `unsupported` BIF table entries (`src/runtime/interpreter/bif/table.rs:141-146`, `302`), and `erlang:node/1` returns `nonode@nohost` (row "Node of a term" of `docs/erts-differences.md`).
+- **Order:** after M21 (entry "M21: Accuracy and performance").
+- **Trigger:** the owner opens the milestone.
+- **Source:** owner decision of 2026-10-22 (Suikou review 01a160b6).
+
+### Add a JIT
+
+- **Reason:** owner decision of 2026-10-22: PBeam will add a JIT later.
+- **Evidence:** ERTS has the BeamAsm JIT (`erts/emulator/beam/jit/`). PBeam interprets the loaded instructions (`src/runtime/interpreter.rs`). Section 3 of `docs/portable-beam-spec.md` excludes a JIT from the initial scope, so the milestone updates that section.
+- **Constraint:** the JIT keeps the rule that no change adds `unsafe`, unless an ADR records an exception, as `docs/adr/0001-unsafe-in-the-nif-abi-layer.md` does for the NIF ABI layer.
+- **Order:** after M21, and after the line table of M13 ([#926](https://github.com/fahchen/pbeam/issues/926)) and the instruction-fusion entries, because generated code must keep the line locations and builds on the fused instructions.
+- **Trigger:** the owner opens the milestone.
+- **Source:** owner decision of 2026-10-22 (Suikou review 01a160b6).
 
 ### Suspend, save, and resume any process
 
