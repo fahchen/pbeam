@@ -18,8 +18,8 @@
 //!
 //! Only a runnable process moves: a process in the run queue that does not
 //! wait, does not exit, is not in a dirty call, and holds nothing that stays
-//! with its scheduler. A process that waits for a receive timer, that a BIF
-//! timer targets, or that used a scheduler service (`pinned`) stays.
+//! with its scheduler. A process that waits for a receive timer or that used
+//! a scheduler service (`pinned`) stays.
 
 use std::sync::Arc;
 
@@ -96,7 +96,6 @@ fn stealable(process: &ProcessState) -> bool {
         && process.exiting.is_none()
         && process.dirty_call.is_none()
         && !process.pinned
-        && process.bif_timers.is_empty()
         && !matches!(process.receive_timer, ReceiveTimer::Set { .. })
 }
 

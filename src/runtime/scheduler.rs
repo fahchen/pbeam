@@ -30,8 +30,7 @@ use super::{
     port::Ports,
     process::{
         DirtyCall, Flush, Frame, LinkId, Monitor, MonitorLinkTree, Origin, OriginMonitor,
-        ProcessState, ReceiveTimer, StackSlot, Start, StartFlags, TargetMonitor, TimerReference,
-        WalkPosition,
+        ProcessState, ReceiveTimer, StackSlot, Start, StartFlags, TargetMonitor, WalkPosition,
     },
     regex_code::RegexCodes,
     resources::Resources,
@@ -1239,14 +1238,16 @@ impl Scheduler {
                     receiver,
                     message,
                 } => {
-                    self.node.remove_timer(reference);
-                    self.forget_bif_timer(&receiver, reference);
+                    // A timer that another scheduler canceled first sends
+                    // nothing, as `bif_timer_timeout` finds it canceled
+                    // (`erl_hl_timer.c:1155-1162`).
+                    let active = self.node.take_timer(reference).is_some();
                     let target = match receiver {
                         Receiver::Process(id) => Some(id),
                         Receiver::Name(name) => self.whereis(self.atoms.name_of(&name)),
                     };
-                    if let Some(target) = target {
-                        self.deliver(target, message);
+                    if active && let Some(target) = target {
+                        self.deliver_timeout(target, message);
                     }
                 }
                 Timer::Accept { port, caller } => self.tcp_accept_timeout(port, caller),
@@ -1849,7 +1850,7 @@ impl Scheduler {
     /// Cancel the BIF timer `reference`, as `cancel_bif_timer` does
     /// (`erl_hl_timer.c:1895-1971`). Return its end tick, or `None` when no
     /// BIF timer with the reference is active. The timer leaves the timer
-    /// tree of its receiver (see [`Self::forget_bif_timer`]).
+    /// tree of its receiver in the node (see [`Node::take_timer`]).
     ///
     /// # Examples
     ///
@@ -1858,31 +1859,43 @@ impl Scheduler {
     /// assert_eq!(scheduler.cancel_bif_timer(reference), None);
     /// ```
     pub(super) fn cancel_bif_timer(&mut self, reference: Reference) -> Option<i64> {
-        let (end, timer) = self.timers.cancel_bif(reference)?;
-        self.node.remove_timer(reference);
-        if let Timer::Bif { receiver, .. } = timer {
-            self.forget_bif_timer(&receiver, reference);
+        let (owner, end) = self.node.take_timer(reference)?;
+        if owner == self.index {
+            self.drop_bif_timer(reference);
+        } else {
+            self.node.cancel_timer_at(owner, reference);
         }
         Some(end)
     }
 
-    /// Remove the BIF timer `reference` from the timer tree of the process
-    /// `receiver` when the process does not exit, as `bif_timer_timeout` and
-    /// `cancel_bif_timer` do (`erl_hl_timer.c:1180-1190`, `1904-1911`). An
-    /// exiting process keeps the timer in its tree, and its exit uses the
-    /// reductions of the timer.
+    /// Remove the BIF timer `reference` from the timer wheel of this
+    /// scheduler, after the node entry left. A timer that expired before
+    /// has no wheel entry.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// scheduler.forget_bif_timer(&Receiver::Process(id), reference);
+    /// scheduler.drop_bif_timer(reference);
     /// ```
-    fn forget_bif_timer(&mut self, receiver: &Receiver, reference: Reference) {
-        if let Receiver::Process(id) = receiver
-            && let Some(process) = self.processes.get_mut(id)
-            && process.exiting.is_none()
-        {
-            process.bif_timers.remove(&TimerReference(reference));
+    fn drop_bif_timer(&mut self, reference: Reference) {
+        let _ = self.timers.cancel_bif(reference);
+    }
+
+    /// Send the message of an expired BIF timer to `target`, as a message
+    /// of the system. A process of another scheduler gets it through the
+    /// inbox of that scheduler.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.deliver_timeout(target, Term::static_atom("tick"));
+    /// ```
+    fn deliver_timeout(&mut self, target: ProcessId, message: Term) {
+        match self.remote_owner(target) {
+            Some(index) if !self.processes.contains_key(&target) => {
+                self.node.send_message(index, None, message, target, None);
+            }
+            _ => self.deliver(target, message),
         }
     }
 
@@ -2743,13 +2756,6 @@ impl Scheduler {
         self.index
     }
 
-    /// Return the scheduler of the active BIF timer `reference` when it is
-    /// a timer of another scheduler of the node.
-    pub(super) fn remote_timer_owner(&self, reference: crate::term::Reference) -> Option<usize> {
-        let owner = self.node.timer_owner(reference)?;
-        (owner != self.index).then_some(owner)
-    }
-
     /// Return the scheduler of the open port `id` when it is a port of
     /// another scheduler of the node.
     pub(super) fn remote_port_owner(&self, id: crate::term::PortId) -> Option<usize> {
@@ -2820,6 +2826,7 @@ impl Scheduler {
                         self.dead_target_signal(target, *signal);
                     }
                 }
+                Delivery::CancelTimer { reference } => self.drop_bif_timer(reference),
                 Delivery::Process { process, low } => self.adopt(*process, low),
             }
         }
@@ -3502,10 +3509,12 @@ impl Scheduler {
                     };
                     self.node.root_result(slot, result);
                 }
-                self.current_process_mut()
-                    .bif_timers
-                    .post_order()
-                    .position()
+                // The exit takes the timer tree from the node after the
+                // process is exiting, so no timer joins it later.
+                let tree = self.node.take_receiver_timers(id);
+                let process = self.current_process_mut();
+                process.bif_timers = tree;
+                process.bif_timers.post_order().position()
             }
         };
         let process = self.current_process_mut();
@@ -3522,9 +3531,8 @@ impl Scheduler {
             let mut walk = tree.post_order_from(position);
             let (&timer, ()) = walk.next().expect("a walk position has an entry");
             next = walk.position();
-            // The receiver exits, so the timer has no tree entry to remove.
-            let _ = self.timers.cancel_bif(timer.0);
-            self.node.remove_timer(timer.0);
+            // The tree left the node, so the cancel removes no tree entry.
+            let _ = self.cancel_bif_timer(timer.0);
             reds -= TIMER_CANCEL_REDUCTIONS;
         }
         if walked && next.is_none() {
