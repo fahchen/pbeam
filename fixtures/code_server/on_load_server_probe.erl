@@ -165,6 +165,7 @@ fake_purger() ->
                Purge(on_load_server_probe_missing, prepare_on_load),
                Purge(on_load_error, prepare_on_load),
                Purge(on_load_error, prepare_on_load),
+               Purge(lists, prepare),
                Purge(lists, complete),
                Purge(on_load_error, complete),
                Purge(on_load_error, complete),
