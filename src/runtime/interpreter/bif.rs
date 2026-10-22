@@ -1138,8 +1138,9 @@ impl BeamProgram {
             [subject @ Term::Binary(bytes), Term::Tuple(state), pattern],
         ) = (module, function, arguments.as_slice())
         {
-            let (process, patterns) = scheduler.current_process_and_patterns_mut();
-            return binary::find_trap(process, patterns, subject, bytes, state, pattern);
+            let stored = scheduler.binary_pattern(pattern);
+            let process = scheduler.current_process_mut();
+            return binary::find_trap(process, stored.as_deref(), subject, bytes, state, pattern);
         }
         if module == "persistent_term"
             && let Some(result) = persistent_term::resume(scheduler, function, &arguments)

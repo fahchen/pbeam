@@ -291,22 +291,23 @@ fn reads_the_queue_length_of_an_idle_child() {
     assert_eq!(results[1].term, Term::Atom(ok_atom), "the holder");
 }
 
-/// A read of another local process counts a message that another scheduler
+/// A compiled binary pattern of another scheduler matches as on `erl +S 2`.
 #[test]
-fn rejects_a_compiled_binary_pattern_of_another_scheduler() {
+fn matches_with_a_compiled_binary_pattern_of_another_scheduler() {
     let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
-    let error = program
+    let ok_atom = program.atom("ok").expect("the fixture names ok");
+    let results = program
         .execute_on_schedulers(&[
             ("ping_pong", "pattern_match"),
             ("ping_pong", "pattern_give"),
         ])
-        .expect_err("the pattern is unsupported");
-    assert!(
-        error
-            .to_string()
-            .contains("unsupported: a compiled binary pattern of another scheduler"),
-        "{error}"
+        .expect("the two schedulers run");
+    assert_eq!(
+        results[0].term,
+        Term::tuple(vec![Term::Integer(0.into()), Term::Integer(3.into())]),
+        "the user"
     );
+    assert_eq!(results[1].term, Term::Atom(ok_atom), "the giver");
 }
 
 /// A group leader request routes to a process of another scheduler, and
@@ -328,21 +329,62 @@ fn routes_a_group_leader_request() {
     assert_eq!(results[1].term, Term::Atom(ok_atom), "the leader");
 }
 
-/// A compiled expression of another scheduler fails with a clear error.
+/// A compiled expression of another scheduler runs as on `erl +S 2`.
 #[test]
-fn rejects_a_compiled_expression_of_another_scheduler() {
-    let re = pinned_beam("re");
-    let prim_tty = pinned_beam("prim_tty");
-    let program = BeamProgram::load(&[PING_PONG, &prim_tty, &re]).expect("the fixture loads");
-    let error = program
+fn runs_a_compiled_expression_of_another_scheduler() {
+    let program = {
+        let re = pinned_beam("re");
+        let prim_tty = pinned_beam("prim_tty");
+        BeamProgram::load(&[PING_PONG, &prim_tty, &re])
+    }
+    .expect("the fixture loads");
+    let ok_atom = program.atom("ok").expect("the fixture names ok");
+    let results = program
         .execute_on_schedulers(&[("ping_pong", "regex_run"), ("ping_pong", "regex_give")])
-        .expect_err("the expression is unsupported");
-    assert!(
-        error
-            .to_string()
-            .contains("unsupported: a compiled regular expression of another scheduler"),
-        "{error}"
+        .expect("the two schedulers run");
+    assert_eq!(
+        results[0].term,
+        Term::tuple(vec![
+            match_atom(&program),
+            Term::list_from([Term::tuple(vec![
+                Term::Integer(0.into()),
+                Term::Integer(3.into())
+            ])])
+        ]),
+        "the user"
     );
+    assert_eq!(results[1].term, Term::Atom(ok_atom), "the giver");
+}
+
+/// A compiled expression and a compiled pattern in a persistent term of
+/// another scheduler run as on `erl +S 2`.
+#[test]
+fn runs_compiled_patterns_of_a_persistent_term_of_another_scheduler() {
+    let program = {
+        let re = pinned_beam("re");
+        let prim_tty = pinned_beam("prim_tty");
+        BeamProgram::load(&[PING_PONG, &prim_tty, &re])
+    }
+    .expect("the fixture loads");
+    let ok_atom = program.atom("ok").expect("the fixture names ok");
+    let results = program
+        .execute_on_schedulers(&[
+            ("ping_pong", "term_patterns_use"),
+            ("ping_pong", "term_patterns_give"),
+        ])
+        .expect("the two schedulers run");
+    assert_eq!(
+        results[0].term,
+        Term::tuple(vec![
+            Term::tuple(vec![
+                match_atom(&program),
+                Term::list_from([Term::binary(b"bc".to_vec()), Term::binary(b"c".to_vec())])
+            ]),
+            Term::tuple(vec![Term::Integer(1.into()), Term::Integer(2.into())])
+        ]),
+        "the user"
+    );
+    assert_eq!(results[1].term, Term::Atom(ok_atom), "the giver");
 }
 
 /// A change of a node flag that stays with a scheduler fails with a clear
@@ -463,42 +505,47 @@ fn fires_a_local_bif_timer() {
     assert_eq!(results[1].term, Term::Atom(ok_atom), "the holder");
 }
 
-/// A split with a compiled pattern of another scheduler fails with a clear
-/// error.
+/// A split with a compiled pattern of another scheduler gives the result of
+/// `erl +S 2`.
 #[test]
-fn rejects_a_split_with_a_pattern_of_another_scheduler() {
+fn splits_with_a_pattern_of_another_scheduler() {
     let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
-    let error = program
+    let ok_atom = program.atom("ok").expect("the fixture names ok");
+    let results = program
         .execute_on_schedulers(&[
             ("ping_pong", "pattern_split"),
             ("ping_pong", "pattern_split_give"),
         ])
-        .expect_err("the pattern is unsupported");
-    assert!(
-        error
-            .to_string()
-            .contains("unsupported: a compiled binary pattern of another scheduler"),
-        "{error}"
+        .expect("the two schedulers run");
+    assert_eq!(
+        results[0].term,
+        Term::list_from([Term::binary(b"a".to_vec()), Term::binary(b"b".to_vec())]),
+        "the user"
     );
+    assert_eq!(results[1].term, Term::Atom(ok_atom), "the giver");
 }
 
-/// A matches call with a compiled pattern of another scheduler fails with a
-/// clear error.
+/// A matches call with a compiled pattern of another scheduler gives the
+/// result of `erl +S 2`.
 #[test]
-fn rejects_a_matches_call_with_a_pattern_of_another_scheduler() {
+fn matches_all_with_a_pattern_of_another_scheduler() {
     let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
-    let error = program
+    let ok_atom = program.atom("ok").expect("the fixture names ok");
+    let results = program
         .execute_on_schedulers(&[
             ("ping_pong", "pattern_matches"),
             ("ping_pong", "pattern_matches_give"),
         ])
-        .expect_err("the pattern is unsupported");
-    assert!(
-        error
-            .to_string()
-            .contains("unsupported: a compiled binary pattern of another scheduler"),
-        "{error}"
+        .expect("the two schedulers run");
+    assert_eq!(
+        results[0].term,
+        Term::list_from([Term::tuple(vec![
+            Term::Integer(1.into()),
+            Term::Integer(1.into())
+        ])]),
+        "the user"
     );
+    assert_eq!(results[1].term, Term::Atom(ok_atom), "the giver");
 }
 
 /// A four-argument BIF timer of a shared run fires.
@@ -1068,4 +1115,9 @@ fn cancels_a_timer_of_another_scheduler_at_the_receiver_exit() {
     timer_pair("timer_exit_use", "timer_exit_hold", |a| {
         [a("false"), a("ok")]
     });
+}
+
+/// Return the atom `match` of the program.
+fn match_atom(program: &BeamProgram) -> Term {
+    Term::Atom(program.atom("match").expect("the program names match"))
 }

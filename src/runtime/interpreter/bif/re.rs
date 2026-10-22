@@ -4,8 +4,8 @@ use std::ffi::c_int;
 
 use super::BifResult::{Trap, Value};
 use super::*;
+use crate::runtime::pcre2;
 use crate::runtime::scheduler::CONTEXT_REDS;
-use crate::runtime::{pcre2, regex_code::RegexCodes};
 
 /// The atom options of `re:compile/2` that set one `PCRE2_*` compile bit
 /// (`parse_options`, `erl_bif_re.c:442-537`).
@@ -492,16 +492,7 @@ fn compile_result(
     );
     let capture_count = code.capture_count();
     let reference = context.scheduler.make_ref()?;
-    context
-        .scheduler
-        .resources
-        .borrow_mut::<RegexCodes>()
-        .0
-        .insert(reference, code);
-    context
-        .scheduler
-        .node()
-        .register_regex(reference, context.scheduler.index());
+    context.scheduler.insert_regex(reference, code);
     Ok(Term::tuple(vec![
         Term::static_atom("re_pattern"),
         Term::Integer(capture_count.into()),
@@ -1090,16 +1081,7 @@ pub(super) fn run(
             return Ok(BifResult::badarg());
         }
         let ovec_pairs = ovec_pairs(count);
-        // The compiled expression stays with its scheduler, so an
-        // expression of another scheduler cannot run here.
-        let remote = context.scheduler.remote_regex_owner(*magic).is_some();
-        let codes = context.scheduler.resources.borrow_mut::<RegexCodes>();
-        let Some(code) = codes.0.get_mut(magic) else {
-            if remote {
-                return Err(error(
-                    "unsupported: a compiled regular expression of another scheduler in a run of execute_on_schedulers",
-                ));
-            }
+        let Some((code, _)) = context.scheduler.regex_code(*magic) else {
             return Ok(BifResult::badarg());
         };
         pairs = ovec_pairs;
@@ -1201,18 +1183,17 @@ pub(super) fn run(
     // the match. A precompiled pattern gives a borrow of the resources of
     // the node, which ends before the reductions below change the process.
     let (capture, mut rc) = {
-        let borrow;
-        let code = match &own_code {
-            Some(code) => code,
+        let (code, atoms) = match &own_code {
+            Some(code) => (code, &context.scheduler.atoms),
             None => {
-                borrow = context.scheduler.resources.borrow_mut::<RegexCodes>();
-                borrow
-                    .0
-                    .get_mut(stored_code.as_ref().expect("a precompiled pattern"))
-                    .expect("the reference holds a compiled expression")
+                let (code, atoms) = context
+                    .scheduler
+                    .regex_code(stored_code.expect("a precompiled pattern"))
+                    .expect("the reference holds a compiled expression");
+                (&*code, atoms)
             }
         };
-        let Some(capture) = build_capture(&context.scheduler.atoms, code, parsed.capture()) else {
+        let Some(capture) = build_capture(atoms, code, parsed.capture()) else {
             return Ok(BifResult::badarg());
         };
         let rc = pcre2::execute(

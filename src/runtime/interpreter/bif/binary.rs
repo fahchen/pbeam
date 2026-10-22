@@ -6,7 +6,7 @@
 
 use super::BifResult::Value;
 use super::*;
-use crate::runtime::binary_pattern::{BinaryPatterns, CompiledPattern};
+use crate::runtime::binary_pattern::CompiledPattern;
 use crate::term::Binary;
 
 /// The option `global`: find each match (`BF_FLAG_GLOBAL`,
@@ -617,11 +617,7 @@ pub(super) fn compile_pattern(
         CompiledPattern::Ac(_) => "ac",
     };
     let id = scheduler.make_ref()?;
-    scheduler.binary_patterns.insert(id, compiled);
-    // The pattern stays with this scheduler, and so does the process that
-    // compiled it (see `ProcessState::pinned`).
-    scheduler.current_process_mut().pinned = true;
-    scheduler.node().register_pattern(id, scheduler.index());
+    scheduler.insert_binary_pattern(id, compiled);
     Ok(Value(Term::tuple(vec![
         Term::static_atom(tag),
         Term::Reference(id),
@@ -676,18 +672,18 @@ fn compile_needle(binary: &Binary) -> Option<Vec<u8>> {
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(matches!(compile(&Term::binary(b",".to_vec()), &patterns), Some(Pattern::Bm(_))));
-/// assert!(compile(&Term::binary(Vec::new()), &patterns).is_none());
+/// assert!(matches!(compile(&Term::binary(b",".to_vec()), None), Some(Pattern::Bm(_))));
+/// assert!(compile(&Term::binary(Vec::new()), None).is_none());
 /// ```
-fn compile(pattern: &Term, patterns: &BinaryPatterns) -> Option<Pattern> {
+fn compile(pattern: &Term, stored: Option<&CompiledPattern>) -> Option<Pattern> {
     if let Term::Tuple(fields) = pattern {
         if fields.len() != 2 {
             return None;
         }
-        let (Term::Atom(tag), reference) = (&fields[0], &fields[1]) else {
+        let Term::Atom(tag) = &fields[0] else {
             return None;
         };
-        return match patterns.pattern(reference)? {
+        return match stored? {
             CompiledPattern::Bm(needle) if tag.is_static("bm") => {
                 Some(Pattern::Bm(Bm::new(needle)))
             }
@@ -1043,27 +1039,6 @@ impl Find {
     }
 }
 
-/// Return true when `pattern` is a compiled pattern of another scheduler,
-/// which this scheduler cannot run.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// assert!(!remote_pattern(&scheduler, &Term::binary(b"a".to_vec())));
-/// ```
-fn remote_pattern(scheduler: &Scheduler, pattern: &Term) -> bool {
-    let Term::Tuple(fields) = pattern else {
-        return false;
-    };
-    if fields.len() != 2 {
-        return false;
-    }
-    let Term::Reference(reference) = &fields[1] else {
-        return false;
-    };
-    scheduler.remote_pattern_owner(*reference).is_some()
-}
-
 /// Run `binary:split/2,3` as ERTS `binary_split` does
 /// (`erl_bif_binary.c:1599-1645`): read the subject, the options, and the
 /// pattern, then search. A subject that is not a binary, options that are
@@ -1083,13 +1058,16 @@ pub(super) fn split(
     pattern: &Term,
     options_term: Option<&Term>,
 ) -> Result<BifResult, BeamError> {
-    if remote_pattern(context.scheduler, pattern) {
-        return Err(error(
-            "unsupported: a compiled binary pattern of another scheduler in a run of execute_on_schedulers",
-        ));
-    }
-    let (process, patterns) = context.scheduler.current_process_and_patterns_mut();
-    find_first_turn(process, patterns, subject, pattern, options_term, 0)
+    let stored = context.scheduler.binary_pattern(pattern);
+    let process = context.scheduler.current_process_mut();
+    find_first_turn(
+        process,
+        stored.as_deref(),
+        subject,
+        pattern,
+        options_term,
+        0,
+    )
 }
 
 /// Run `binary:match/2` as ERTS `binary_match` does with no options
@@ -1116,13 +1094,9 @@ pub(super) fn match_2(
     subject: &Term,
     pattern: &Term,
 ) -> Result<BifResult, BeamError> {
-    if remote_pattern(context.scheduler, pattern) {
-        return Err(error(
-            "unsupported: a compiled binary pattern of another scheduler in a run of execute_on_schedulers",
-        ));
-    }
-    let (process, patterns) = context.scheduler.current_process_and_patterns_mut();
-    find_first_turn(process, patterns, subject, pattern, None, MATCH)
+    let stored = context.scheduler.binary_pattern(pattern);
+    let process = context.scheduler.current_process_mut();
+    find_first_turn(process, stored.as_deref(), subject, pattern, None, MATCH)
 }
 
 /// Run `binary:matches/2` as ERTS `binary_matches_2` does
@@ -1149,13 +1123,16 @@ pub(super) fn matches_2(
     subject: &Term,
     pattern: &Term,
 ) -> Result<BifResult, BeamError> {
-    if remote_pattern(context.scheduler, pattern) {
-        return Err(error(
-            "unsupported: a compiled binary pattern of another scheduler in a run of execute_on_schedulers",
-        ));
-    }
-    let (process, patterns) = context.scheduler.current_process_and_patterns_mut();
-    find_first_turn(process, patterns, subject, pattern, None, GLOBAL | MATCHES)
+    let stored = context.scheduler.binary_pattern(pattern);
+    let process = context.scheduler.current_process_mut();
+    find_first_turn(
+        process,
+        stored.as_deref(),
+        subject,
+        pattern,
+        None,
+        GLOBAL | MATCHES,
+    )
 }
 
 /// Check the arguments of `binary:match/2` or `binary:split/2,3`, and run
@@ -1169,7 +1146,7 @@ pub(super) fn matches_2(
 /// ```
 fn find_first_turn(
     process: &mut ProcessState,
-    patterns: &BinaryPatterns,
+    stored: Option<&CompiledPattern>,
     subject: &Term,
     pattern: &Term,
     options_term: Option<&Term>,
@@ -1184,7 +1161,7 @@ fn find_first_turn(
         bytes
             .bytes()
             .and_then(|whole| options(options_term, whole.len() as u64)),
-        compile(pattern, patterns),
+        compile(pattern, stored),
     ) else {
         return Ok(BifResult::badarg());
     };
@@ -1219,13 +1196,13 @@ fn find_first_turn(
 /// ```
 pub(super) fn find_trap(
     process: &mut ProcessState,
-    patterns: &BinaryPatterns,
+    stored: Option<&CompiledPattern>,
     subject: &Term,
     bytes: &Binary,
     state: &[Term],
     pattern: &Term,
 ) -> Result<BifResult, BeamError> {
-    let compiled = compile(pattern, patterns).expect("the first call checked the pattern");
+    let compiled = compile(pattern, stored).expect("the first call checked the pattern");
     let mut find = Find::from_term(state);
     Ok(match find_turn(process, &compiled, &mut find, bytes)? {
         Some(parts) => Value(parts),

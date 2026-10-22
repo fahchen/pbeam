@@ -23,7 +23,7 @@
          info_idle/0, info_idle_child/0, stuck_child/0, relay_wait/0,
          bounce_ping/0, bounce_pong/0, busy_send/0, timer_send/0,
          port_relay/0, atom_send/0, atom_receive/0, timer_exit_use/0,
-         timer_exit_hold/0]).
+         timer_exit_hold/0, term_patterns_use/0, term_patterns_give/0]).
 
 -define(COUNT, 100).
 
@@ -640,7 +640,8 @@ system_flag_depth() ->
 %% The root that runs the compiled expression of the other scheduler.
 regex_run() ->
     true = register(regex_name, self()),
-    receive {regex, Pattern} ->
+    receive {regex, From, Pattern} ->
+        From ! done,
         re:run(<<"abc">>, Pattern, [])
     end.
 
@@ -648,7 +649,7 @@ regex_run() ->
 regex_give() ->
     {ok, Pattern} = re:compile("abc", []),
     ok = wait_registered(regex_name, 100000),
-    regex_name ! {regex, Pattern},
+    regex_name ! {regex, self(), Pattern},
     receive done -> ok after 6000 -> timeout end.
 
 %% The root that makes a process of the other scheduler its group leader.
@@ -666,7 +667,8 @@ leader_hold() ->
 %% The root that matches with the compiled pattern of the other scheduler.
 pattern_match() ->
     true = register(pattern_name, self()),
-    receive {pattern, Pattern} ->
+    receive {pattern, From, Pattern} ->
+        From ! done,
         binary:match(<<"abc">>, Pattern)
     end.
 
@@ -674,7 +676,7 @@ pattern_match() ->
 pattern_give() ->
     Pattern = binary:compile_pattern(<<"abc">>),
     ok = wait_registered(pattern_name, 100000),
-    pattern_name ! {pattern, Pattern},
+    pattern_name ! {pattern, self(), Pattern},
     receive done -> ok after 6000 -> timeout end.
 
 %% The root that waits for its own BIF timer.
@@ -781,24 +783,30 @@ timer_remote4() ->
 %% The root that splits with the compiled pattern of the other scheduler.
 pattern_split() ->
     true = register(pattern_split_name, self()),
-    receive {pattern, Pattern} -> binary:split(<<"a,b">>, Pattern) end.
+    receive {pattern, From, Pattern} ->
+        From ! done,
+        binary:split(<<"a,b">>, Pattern)
+    end.
 
 pattern_split_give() ->
     Pattern = binary:compile_pattern(<<",">>),
     ok = wait_registered(pattern_split_name, 100000),
-    pattern_split_name ! {pattern, Pattern},
+    pattern_split_name ! {pattern, self(), Pattern},
     receive done -> ok after 6000 -> timeout end.
 
 %% The root that matches all with the compiled pattern of the other
 %% scheduler.
 pattern_matches() ->
     true = register(pattern_matches_name, self()),
-    receive {pattern, Pattern} -> binary:matches(<<"a,b">>, Pattern) end.
+    receive {pattern, From, Pattern} ->
+        From ! done,
+        binary:matches(<<"a,b">>, Pattern)
+    end.
 
 pattern_matches_give() ->
     Pattern = binary:compile_pattern(<<",">>),
     ok = wait_registered(pattern_matches_name, 100000),
-    pattern_matches_name ! {pattern, Pattern},
+    pattern_matches_name ! {pattern, self(), Pattern},
     receive done -> ok after 6000 -> timeout end.
 
 %% The root that reads the queue length of an idle child.
@@ -877,4 +885,23 @@ port_relay() ->
                      [binary, {args, ["-c", "sleep 0.05; echo go"]}]),
     receive {Port, {data, <<"go\n">>}} -> ok end,
     Pid ! go,
+    ok.
+
+%% The root that waits for the other root to store a compiled expression and
+%% a compiled pattern in a persistent term, then runs both.
+term_patterns_use() ->
+    true = register(term_patterns_name, self()),
+    receive go -> ok end,
+    {Regex, Pattern} = persistent_term:get(ping_pong_term_patterns),
+    {re:run(<<"abc">>, Regex, [{capture, all, binary}]),
+     binary:match(<<"abc">>, Pattern)}.
+
+%% The root that stores a compiled expression and a compiled pattern in a
+%% persistent term for the other scheduler.
+term_patterns_give() ->
+    {ok, Regex} = re:compile(<<"b(c)">>, []),
+    Pattern = binary:compile_pattern([<<"c">>, <<"bc">>]),
+    ok = persistent_term:put(ping_pong_term_patterns, {Regex, Pattern}),
+    ok = wait_registered(term_patterns_name, 100000),
+    term_patterns_name ! go,
     ok.

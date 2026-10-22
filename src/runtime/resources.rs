@@ -39,7 +39,7 @@ impl Resources {
     ///
     /// ```rust,ignore
     /// let mut resources = Resources::default();
-    /// resources.put(RegexCodes::default());
+    /// resources.put(Ports::default());
     /// ```
     pub(super) fn put<T: 'static>(&mut self, value: T) {
         self.data.insert(TypeId::of::<T>(), Box::new(value));
@@ -51,8 +51,8 @@ impl Resources {
     ///
     /// ```rust,ignore
     /// let mut resources = Resources::default();
-    /// resources.put(RegexCodes::default());
-    /// resources.borrow_mut::<RegexCodes>().0.insert(reference, code);
+    /// resources.put(Ports::default());
+    /// let _ = resources.borrow_mut::<Ports>();
     /// ```
     ///
     /// # Panics
@@ -73,8 +73,8 @@ impl Resources {
     ///
     /// ```rust,ignore
     /// let mut resources = Resources::default();
-    /// resources.put(RegexCodes::default());
-    /// let _ = resources.borrow_mut::<RegexCodes>();
+    /// resources.put(Ports::default());
+    /// let _ = resources.borrow_mut::<Ports>();
     /// assert!(resources.take_touched());
     /// assert!(!resources.take_touched());
     /// ```

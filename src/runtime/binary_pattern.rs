@@ -2,10 +2,11 @@
 //! ERTS keeps the compiled data of each pattern in a magic binary and returns
 //! the tuple `{bm, Ref}` or `{ac, Ref}` (`binary_compile_pattern_1`,
 //! `erl_bif_binary.c:1103-1116`). PBeam keeps the source needles in this
-//! store, by the reference of the magic binary that ERTS would make.
+//! store of the node, by the reference of the magic binary that ERTS would
+//! make.
 
-use std::cell::Cell;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::term::{Reference, Term};
 
@@ -20,24 +21,21 @@ pub(super) enum CompiledPattern {
 
 /// The compiled patterns of the node, by the reference of the magic binary
 /// that ERTS makes for each one (`erts_mk_magic_ref`,
-/// `erl_bif_binary.c:1112-1114`).
+/// `erl_bif_binary.c:1112-1114`). The node keeps them in its resources, so
+/// a process of any scheduler uses them, as any ERTS scheduler reads a
+/// magic binary.
 #[derive(Debug, Default)]
 pub(super) struct BinaryPatterns {
     /// Each pattern by its reference. ERTS frees a pattern when no term
     /// references it. PBeam keeps each pattern until the run ends: see
     /// "Compiled binary patterns" in `docs/erts-differences.md`.
-    patterns: HashMap<Reference, CompiledPattern>,
-    /// True after a read of a pattern since the last
-    /// [`BinaryPatterns::take_touched`]. The scheduler reads it at the
-    /// switch out of a process, because the patterns stay with their
-    /// scheduler (see `ProcessState::pinned`).
-    touched: Cell<bool>,
+    patterns: HashMap<Reference, Arc<CompiledPattern>>,
 }
 
 impl BinaryPatterns {
-    /// Store `pattern` for the reference `id` and return it, as
-    /// `binary_compile_pattern_1` stores the compiled data in the magic
-    /// binary before it makes the reference.
+    /// Store `pattern` for the reference `id`, as `binary_compile_pattern_1`
+    /// stores the compiled data in the magic binary before it makes the
+    /// reference.
     ///
     /// # Examples
     ///
@@ -47,11 +45,12 @@ impl BinaryPatterns {
     /// assert!(patterns.pattern(&Term::Reference(Reference(0))).is_some());
     /// ```
     pub(super) fn insert(&mut self, id: Reference, pattern: CompiledPattern) {
-        self.patterns.insert(id, pattern);
+        self.patterns.insert(id, Arc::new(pattern));
     }
 
     /// Return the pattern of `term`, or `None` when `term` is not the
-    /// reference of a compiled pattern.
+    /// reference of a compiled pattern. The caller keeps the pattern after
+    /// it releases the lock of the node resources.
     ///
     /// # Examples
     ///
@@ -59,28 +58,10 @@ impl BinaryPatterns {
     /// let patterns = BinaryPatterns::default();
     /// assert!(patterns.pattern(&Term::Reference(Reference(0))).is_none());
     /// ```
-    pub(super) fn pattern(&self, term: &Term) -> Option<&CompiledPattern> {
+    pub(super) fn pattern(&self, term: &Term) -> Option<Arc<CompiledPattern>> {
         let Term::Reference(id) = term else {
             return None;
         };
-        let pattern = self.patterns.get(id);
-        if pattern.is_some() {
-            self.touched.set(true);
-        }
-        pattern
-    }
-
-    /// Return whether a pattern was read since the last call, and clear the
-    /// mark.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// let _ = patterns.pattern(&Term::Reference(id));
-    /// assert!(patterns.take_touched());
-    /// assert!(!patterns.take_touched());
-    /// ```
-    pub(super) fn take_touched(&mut self) -> bool {
-        self.touched.take()
+        self.patterns.get(id).cloned()
     }
 }
