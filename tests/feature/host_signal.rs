@@ -437,6 +437,7 @@ fn run_with_a_full_stdout(command: &mut Command) -> Option<i32> {
     read_until(&read_end, &mut output, b"ready\n");
     // A blocking write fills the pipe and then waits for room. This process
     // reads no more, so the next write of the run waits.
+    let probe = write_end.try_clone().unwrap();
     let filler = thread::spawn(move || {
         let bytes = [b' '; 1 << 16];
         for _ in 0..16 {
@@ -448,6 +449,7 @@ fn run_with_a_full_stdout(command: &mut Command) -> Option<i32> {
             }
         }
     });
+    wait_until_full(&probe);
     send(&child, libc::SIGINT);
     // The kernel coalesces two signals that wait together, so the run must
     // handle the first break before the next signal arrives.
@@ -463,6 +465,34 @@ fn run_with_a_full_stdout(command: &mut Command) -> Option<i32> {
     drop(read_end);
     filler.join().unwrap();
     status
+}
+
+/// Wait until the pipe of the write end `fd` has no room for a write of
+/// `PIPE_BUF` bytes, so that the next menu write of the run waits. Without
+/// this wait, the menu write can end before the filler thread fills the
+/// pipe, and no signal arrives during the write. Panic when the pipe does
+/// not fill in `RUN_TIME_LIMIT`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// wait_until_full(&write_end);
+/// ```
+fn wait_until_full(fd: &OwnedFd) {
+    let start = Instant::now();
+    loop {
+        let mut poll = libc::pollfd {
+            fd: fd.as_raw_fd(),
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        // SAFETY: `poll` reads and writes the one `pollfd` that it gets.
+        if unsafe { libc::poll(&mut poll, 1, 0) } == 0 {
+            return;
+        }
+        assert!(start.elapsed() < RUN_TIME_LIMIT, "the pipe does not fill");
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 /// Read `fd` without a wait until `output` holds `text`. Panic when the text
