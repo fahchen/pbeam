@@ -69,3 +69,24 @@ fn stops_the_ber_decode_at_the_nesting_depth_of_the_pinned_erts() {
         "unknown 909"
     );
 }
+
+#[test]
+fn stops_the_run_where_the_per_complete_of_the_pinned_erts_reads_after_its_input() {
+    // The opcode 10 reads two bytes before a check of the counter
+    // (asn1_erl_nif.c:186-199), so ERTS reads memory outside the term.
+    let program = program();
+    for data in [vec![10], vec![1, 10, 3]] {
+        let arguments = [
+            program.host_term(Term::binary(b"asn1rt_nif".to_vec())),
+            program.host_term(Term::binary(data)),
+        ];
+        let error = program
+            .execute("asn1_probe", "per_complete", &arguments)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "asn1rt_nif:encode_per_complete/1 reads after the end of its input at the opcode 10, which PBeam does not support"
+        );
+    }
+}

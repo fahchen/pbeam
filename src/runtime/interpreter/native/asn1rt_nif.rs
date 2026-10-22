@@ -4,9 +4,11 @@
 //!
 //! The bindings port the C functions of the library. The C code reads and
 //! writes with pointers and `int` values, so the port keeps its counters,
-//! its `int` shifts, and its order of steps. Where the C code reads after
-//! the end of its input, ERTS reads memory that is not part of the term;
-//! PBeam reads the byte 0 (see "NIF stubs" in `docs/erts-differences.md`).
+//! its `int` shifts, and its order of steps. The C code can read the
+//! length bytes of an opcode after the end of its input; the check of
+//! `counter` that follows then gives `ASN1_ERROR` for each value, so PBeam
+//! reads the byte 0 there. The opcode 10 has no such check, and PBeam
+//! stops the run for it (see "NIF stubs" in `docs/erts-differences.md`).
 
 use super::bif::iodata_bytes;
 use super::*;
@@ -97,8 +99,12 @@ fn encode_per_complete(scheduler: &mut Scheduler, data: &Term) -> Result<BifResu
     if input.is_empty() {
         return Ok(BifResult::Value(Term::binary(Vec::new())));
     }
-    match per_complete(&input) {
+    let mut truncated = false;
+    match per_complete(&input, &mut truncated) {
         Some(bytes) => Ok(BifResult::Value(Term::binary(bytes))),
+        None if truncated => Err(error(
+            "asn1rt_nif:encode_per_complete/1 reads after the end of its input at the opcode 10, which PBeam does not support",
+        )),
         None => error_tuple(scheduler, Term::Integer(i64::from(b'1'))),
     }
 }
@@ -366,7 +372,12 @@ fn read_length(per: &mut Per, wide: bool) -> i32 {
 /// reallocation of the cases 40 to 47; `encode_per_complete` shrinks it to
 /// the completed length and does not grow it
 /// (`asn1_erl_nif.c:1227-1228`).
-fn per_complete(input: &[u8]) -> Option<Vec<u8>> {
+///
+/// The opcode 10 reads its two bytes before a check of `counter`
+/// (`asn1_erl_nif.c:186-199`), so in the last two bytes ERTS reads memory
+/// outside the term and gives no stable result. Set `truncated` and return
+/// `None` for that input.
+fn per_complete(input: &[u8], truncated: &mut bool) -> Option<Vec<u8>> {
     let in_len = input.len() as i64;
     let mut per = Per {
         input,
@@ -395,6 +406,10 @@ fn per_complete(input: &[u8]) -> Option<Vec<u8>> {
                 }
             }
             10 => {
+                if counter < 2 {
+                    *truncated = true;
+                    return None;
+                }
                 let no_bits = per.next();
                 let val = per.next();
                 counter -= 2;

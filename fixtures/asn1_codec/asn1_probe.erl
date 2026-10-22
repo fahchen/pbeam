@@ -1,5 +1,5 @@
 -module(asn1_probe).
--export([cases/0, check/0, nested/1, check_text/1, nested_text/2]).
+-export([cases/0, check/0, nested/1, check_text/1, nested_text/2, per_complete/2]).
 
 %% Calls of the asn1rt_nif functions, through the stand-in asn1rt_nif, (asn1_erl_nif.c:1202-1318) and of the
 %% generated BER codec AsnProbe, which calls asn1rt_nif:decode_ber_tlv/1.
@@ -15,6 +15,11 @@ check_text(Lib) ->
         ok -> <<"ok">>;
         Mismatch -> term_to_binary(Mismatch)
     end.
+
+%% encode_per_complete/1 of Data after the load of the NIF library.
+per_complete(Lib, Data) ->
+    _ = asn1rt_nif:load(Lib),
+    asn1rt_nif:encode_per_complete(Data).
 
 nested_text(Lib, N) ->
     _ = asn1rt_nif:load(Lib),
