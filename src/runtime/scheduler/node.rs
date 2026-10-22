@@ -186,6 +186,10 @@ pub(in crate::runtime) struct Node {
     local_node_hash: OnceLock<u32>,
     /// The published code state of the run (see [`super::code`]).
     pub(in crate::runtime) code: super::code::NodeCode,
+    /// The atomic arrays of the node. ERTS keeps each array in a magic
+    /// binary that a process of any scheduler reaches by its reference
+    /// (`erl_bif_atomics.c:90-110`).
+    pub(in crate::runtime) atomics: crate::runtime::atomics::AtomicArrays,
 }
 
 impl Node {
@@ -236,6 +240,7 @@ impl Node {
                 dirty: Pools::new(count),
                 local_node_hash: OnceLock::new(),
                 code: super::code::NodeCode::default(),
+                atomics: Default::default(),
             }),
             readers,
         ))
@@ -300,6 +305,7 @@ impl Node {
             dirty: Pools::new(1),
             local_node_hash: OnceLock::new(),
             code: super::code::NodeCode::default(),
+            atomics: Default::default(),
         })
     }
 

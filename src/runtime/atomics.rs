@@ -1,10 +1,13 @@
 //! The atomic arrays of the node: the shared mutable 64-bit atomics of the
 //! `atomics` module and of the `counters` module (`erl_bif_atomics.c`). All
-//! processes of a run share one store. ERTS holds each array in a magic
+//! processes of a run share one store on the node, and each scheduler thread
+//! uses an array with real atomic operations. ERTS holds each array in a magic
 //! binary and identifies it by the reference of that binary (`AtomicsRef`,
 //! `erl_bif_atomics.c:42-47`, `88`).
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, RwLock};
 
 use crate::term::{Reference, Term};
 
@@ -28,8 +31,10 @@ pub(super) struct Array {
     /// `112-117`).
     signed: bool,
     /// The bits of each atomic. A write wraps around at 64 bits, as the
-    /// `erts_atomic64_*` operations of the C array do.
-    values: Vec<i64>,
+    /// `erts_atomic64_*` operations of the C array do. Each operation is
+    /// sequentially consistent, as the `_mb` (full barrier) operations of
+    /// ERTS are.
+    values: Box<[AtomicI64]>,
 }
 
 impl Array {
@@ -38,7 +43,7 @@ impl Array {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut arrays = AtomicArrays::default();
+    /// let arrays = AtomicArrays::default();
     /// arrays.create(Reference(0), true, 1);
     /// assert!(arrays.array(&Term::Reference(Reference(0))).unwrap().signed());
     /// ```
@@ -51,7 +56,7 @@ impl Array {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut arrays = AtomicArrays::default();
+    /// let arrays = AtomicArrays::default();
     /// arrays.create(Reference(0), true, 2);
     /// assert_eq!(arrays.array(&Term::Reference(Reference(0))).unwrap().len(), 2);
     /// ```
@@ -65,13 +70,13 @@ impl Array {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut arrays = AtomicArrays::default();
+    /// let arrays = AtomicArrays::default();
     /// arrays.create(Reference(0), true, 1);
     /// let array = arrays.array(&Term::Reference(Reference(0))).unwrap();
     /// assert_eq!(array.get(0), 0);
     /// ```
     pub(super) fn get(&self, position: usize) -> i64 {
-        self.values[position]
+        self.values[position].load(Ordering::SeqCst)
     }
 
     /// Set the atomic at `position` to `bits`, as `atomics:put/3` does with
@@ -80,13 +85,13 @@ impl Array {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut arrays = AtomicArrays::default();
+    /// let arrays = AtomicArrays::default();
     /// arrays.create(Reference(0), true, 1);
-    /// arrays.array_mut(&Term::Reference(Reference(0))).unwrap().set(0, -2);
+    /// arrays.array(&Term::Reference(Reference(0))).unwrap().set(0, -2);
     /// assert_eq!(arrays.array(&Term::Reference(Reference(0))).unwrap().get(0), -2);
     /// ```
-    pub(super) fn set(&mut self, position: usize, bits: i64) {
-        self.values[position] = bits;
+    pub(super) fn set(&self, position: usize, bits: i64) {
+        self.values[position].store(bits, Ordering::SeqCst);
     }
 
     /// Add `bits` to the atomic at `position` and wrap around at 64 bits,
@@ -96,15 +101,15 @@ impl Array {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut arrays = AtomicArrays::default();
+    /// let arrays = AtomicArrays::default();
     /// arrays.create(Reference(0), true, 1);
-    /// let array = arrays.array_mut(&Term::Reference(Reference(0))).unwrap();
+    /// let array = arrays.array(&Term::Reference(Reference(0))).unwrap();
     /// array.add(0, i64::MAX);
     /// array.add(0, 1);
     /// assert_eq!(array.get(0), i64::MIN);
     /// ```
-    pub(super) fn add(&mut self, position: usize, bits: i64) {
-        self.values[position] = self.values[position].wrapping_add(bits);
+    pub(super) fn add(&self, position: usize, bits: i64) {
+        self.values[position].fetch_add(bits, Ordering::SeqCst);
     }
 
     /// Return the memory of the array in bytes, as `atomics:info/1` reports
@@ -113,7 +118,7 @@ impl Array {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut arrays = AtomicArrays::default();
+    /// let arrays = AtomicArrays::default();
     /// arrays.create(Reference(0), true, 3);
     /// assert_eq!(arrays.array(&Term::Reference(Reference(0))).unwrap().memory(), 64);
     /// ```
@@ -130,7 +135,9 @@ pub(super) struct AtomicArrays {
     /// references it (`atomics_destructor`, `erl_bif_atomics.c:49-52`).
     /// PBeam keeps each array until the run ends: see "Atomic arrays" in
     /// `docs/erts-differences.md`.
-    arrays: HashMap<Reference, Array>,
+    /// Each scheduler of a run reads the map, and only
+    /// `erts_internal:atomics_new/2` writes it.
+    arrays: RwLock<HashMap<Reference, Arc<Array>>>,
 }
 
 impl AtomicArrays {
@@ -146,18 +153,25 @@ impl AtomicArrays {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut arrays = AtomicArrays::default();
+    /// let arrays = AtomicArrays::default();
     /// assert!(arrays.create(Reference(0), true, 2));
     /// assert!(arrays.array(&Term::Reference(Reference(0))).is_some());
     /// assert!(!arrays.create(Reference(1), true, usize::MAX));
     /// ```
-    pub(super) fn create(&mut self, id: Reference, signed: bool, size: usize) -> bool {
+    pub(super) fn create(&self, id: Reference, signed: bool, size: usize) -> bool {
         let mut values = Vec::new();
         if values.try_reserve_exact(size).is_err() {
             return false;
         }
-        values.resize(size, 0);
-        self.arrays.insert(id, Array { signed, values });
+        values.resize_with(size, || AtomicI64::new(0));
+        let array = Arc::new(Array {
+            signed,
+            values: values.into_boxed_slice(),
+        });
+        self.arrays
+            .write()
+            .expect("the atomics lock is not poisoned")
+            .insert(id, array);
         true
     }
 
@@ -169,34 +183,20 @@ impl AtomicArrays {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut arrays = AtomicArrays::default();
+    /// let arrays = AtomicArrays::default();
     /// arrays.create(Reference(0), true, 1);
     /// assert!(arrays.array(&Term::Reference(Reference(0))).is_some());
     /// assert!(arrays.array(&Term::Integer(0)).is_none());
     /// ```
-    pub(super) fn array(&self, reference: &Term) -> Option<&Array> {
+    pub(super) fn array(&self, reference: &Term) -> Option<Arc<Array>> {
         let Term::Reference(id) = reference else {
             return None;
         };
-        self.arrays.get(id)
-    }
-
-    /// Return the array of `reference` for a write, or `None` when
-    /// `reference` is not the reference of an array.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// let mut arrays = AtomicArrays::default();
-    /// arrays.create(Reference(0), true, 1);
-    /// arrays.array_mut(&Term::Reference(Reference(0))).unwrap().set(0, 1);
-    /// assert!(arrays.array_mut(&Term::Reference(Reference(1))).is_none());
-    /// ```
-    pub(super) fn array_mut(&mut self, reference: &Term) -> Option<&mut Array> {
-        let Term::Reference(id) = reference else {
-            return None;
-        };
-        self.arrays.get_mut(id)
+        self.arrays
+            .read()
+            .expect("the atomics lock is not poisoned")
+            .get(id)
+            .cloned()
     }
 }
 

@@ -683,7 +683,7 @@ macro_rules! bifs {
             // scheduler (`erts_code_purger.erl:166-179`), which a scheduler
             // reads only for its own processes.
             let local_service = matches!(module, "ets" | "persistent_term")
-                || (module == "erts_internal" && matches!(name, "atomics_new" | "purge_module"));
+                || (module == "erts_internal" && name == "purge_module");
             if context.scheduler.is_multi() && local_service {
                 return Err(error(format!(
                     "unsupported: {module}:{name}/{arity} in a run of execute_on_schedulers"

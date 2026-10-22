@@ -35,7 +35,7 @@ fn is_value(result: &BifResult) -> bool {
 
 /// Return an array of `size` signed atomics at the reference 0.
 fn array(size: usize) -> AtomicArrays {
-    let mut arrays = AtomicArrays::default();
+    let arrays = AtomicArrays::default();
     assert!(arrays.create(Reference(0), true, size));
     arrays
 }
@@ -78,13 +78,13 @@ fn checks_an_index_against_the_size_of_the_array() {
     // the index, subtracts one, and checks the result against the size.
     let arrays = array(2);
     let array = arrays.array(&Term::Reference(Reference(0))).unwrap();
-    assert_eq!(position(array, &Term::Integer(1)), Some(0));
-    assert_eq!(position(array, &Term::Integer(2)), Some(1));
-    assert_eq!(position(array, &Term::Integer(0)), None);
-    assert_eq!(position(array, &Term::Integer(3)), None);
-    assert_eq!(position(array, &Term::Integer(i64::MAX)), None);
-    assert_eq!(position(array, &Term::Float(1.5)), None);
-    assert_eq!(position(array, &Term::static_atom("x")), None);
+    assert_eq!(position(&array, &Term::Integer(1)), Some(0));
+    assert_eq!(position(&array, &Term::Integer(2)), Some(1));
+    assert_eq!(position(&array, &Term::Integer(0)), None);
+    assert_eq!(position(&array, &Term::Integer(3)), None);
+    assert_eq!(position(&array, &Term::Integer(i64::MAX)), None);
+    assert_eq!(position(&array, &Term::Float(1.5)), None);
+    assert_eq!(position(&array, &Term::static_atom("x")), None);
 }
 
 #[test]
