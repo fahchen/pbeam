@@ -281,8 +281,10 @@ fn idle_step(scheduler: &mut Scheduler, node: &Node) -> Result<(), BeamError> {
     // delivery into the inbox, and the run loop takes the inbox at the next
     // scheduling step after each wait, so a delivery in the inbox always
     // has a wake byte that ends this wait.
-    // Without a port or a select of fd 0, the wait handles no event, so the
-    // scheduler changes no state while the node counts it as idle.
+    // The wait watches the wake socket of the scheduler, which each delivery
+    // to its inbox writes, and ends at the next time correction check at the
+    // latest. Without a port or a select of fd 0, the wait handles no event,
+    // so the scheduler changes no state while the node counts it as idle.
     let waited = scheduler.wait_events(Some(wait));
     node.leave_idle();
     waited?;
