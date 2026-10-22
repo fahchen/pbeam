@@ -4705,6 +4705,7 @@ fn resumes_a_list_insert_without_a_walk_of_the_checked_objects() {
         vec![vec![object.clone()], vec![object]],
         false,
     ));
+    ets.reserve_result(owner);
     drop(ets);
     scheduler.current_process_mut().fcalls = 1;
     let arguments = vec![
@@ -4988,6 +4989,7 @@ fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
         ],
         false,
     ));
+    scheduler.ets.shared().reserve_result(caller);
     scheduler
         .ets
         .exclusive()
@@ -5019,6 +5021,7 @@ fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
     // (`erl_db.c:2142-2150`, `2223-2244`).
     scheduler.ets.exclusive().delete_table(Reference(0), caller);
     let caller = scheduler.current_process_mut().id;
+    scheduler.ets.shared().reserve_result(caller);
     (scheduler.ets.exclusive()).put_result(caller, Term::static_atom("true"));
     let result = program
         .bif_trap(
@@ -5053,6 +5056,7 @@ fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
         .table_by_id(Reference(0))
         .expect("the table is live")
         .busy = Some(Busy::new(caller, vec![vec![Term::Integer(5)]], false));
+    scheduler.ets.shared().reserve_result(caller);
     let result = program
         .bif(
             &mut scheduler,
