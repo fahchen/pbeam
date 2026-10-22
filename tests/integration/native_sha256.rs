@@ -4,7 +4,7 @@
 //! before a run.
 
 use pbeam_runtime::{
-    BeamError, BeamProgram, NativeResult, Term, register_native, unregister_native,
+    BeamError, BeamProgram, Job, NativeResult, Term, register_native, unregister_native,
 };
 use sha2::{Digest, Sha256};
 
@@ -68,7 +68,7 @@ fn computes_the_declared_sha256_native_as_the_example() {
         caught(&program, "error", "pbeam_native_only")
     );
 
-    register_native("Elixir.NativeHash", "sha256", 1, sha256).unwrap();
+    register_native("Elixir.NativeHash", "sha256", 1, Job::Normal, sha256).unwrap();
 
     // The declaration passes the check, and the known vector returns.
     program.validate_native_declarations().unwrap();

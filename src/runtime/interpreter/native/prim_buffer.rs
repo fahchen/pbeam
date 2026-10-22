@@ -52,46 +52,55 @@ pub(super) const BINDINGS: &[Binding] = &[
     Binding {
         name: "copying_read",
         arity: 2,
+        job: Job::Normal,
         run: |scheduler, arguments| copying_read_nif(scheduler, &arguments[0], &arguments[1]),
     },
     Binding {
         name: "find_byte_index",
         arity: 2,
+        job: Job::Normal,
         run: |scheduler, arguments| find_byte_index_nif(scheduler, &arguments[0], &arguments[1]),
     },
     Binding {
         name: "new",
         arity: 0,
+        job: Job::Normal,
         run: |scheduler, _| new_nif(scheduler),
     },
     Binding {
         name: "peek_head",
         arity: 1,
+        job: Job::Normal,
         run: |scheduler, arguments| peek_head_nif(scheduler, &arguments[0]),
     },
     Binding {
         name: "size",
         arity: 1,
+        job: Job::Normal,
         run: |scheduler, arguments| size_nif(scheduler, &arguments[0]),
     },
     Binding {
         name: "skip",
         arity: 2,
+        job: Job::Normal,
         run: |scheduler, arguments| skip_nif(scheduler, &arguments[0], &arguments[1]),
     },
     Binding {
         name: "try_lock",
         arity: 1,
+        job: Job::Normal,
         run: |scheduler, arguments| try_lock_nif(scheduler, &arguments[0]),
     },
     Binding {
         name: "unlock",
         arity: 1,
+        job: Job::Normal,
         run: |scheduler, arguments| unlock_nif(scheduler, &arguments[0]),
     },
     Binding {
         name: "write",
         arity: 2,
+        job: Job::Normal,
         run: |scheduler, arguments| write_nif(scheduler, &arguments[0], &arguments[1]),
     },
 ];

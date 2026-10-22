@@ -7,8 +7,11 @@ pub(super) use tree::{MonitorLinkTree, TimerReference, WalkPosition};
 use std::collections::BTreeMap;
 
 use super::{
-    capability::SecurityContext, dirty_io::Claim, host::output::IovecWritten, mailbox::Mailbox,
-    scheduler::AliasMode, timer::TimerKey,
+    capability::SecurityContext,
+    dirty::{Claim, Output},
+    mailbox::Mailbox,
+    scheduler::AliasMode,
+    timer::TimerKey,
 };
 use crate::{
     beam::{ModuleId, NameId},
@@ -404,14 +407,14 @@ pub(super) struct ProcessState {
     /// state of the call lives with the process, so the result stays after
     /// the table goes away (`erl_db.c:2142-2150`).
     pub(super) insert_result: Option<Term>,
-    /// The dirty IO call of the process, from the switch out at the call
+    /// The dirty NIF call of the process, from the switch out at the call
     /// until `BeamProgram::run` returns its result, or until a signal ends
-    /// the process. ERTS runs the process on a dirty IO scheduler for this
+    /// the process. ERTS runs the process on a dirty scheduler for this
     /// time (`erl_nif.c:426-543`). While the call runs, the process does not
     /// run Erlang code, and the scheduler handles its signals for it, as
     /// `erts_dirty_process_signal_handler` does
     /// (`erts_dirty_process_signal_handler.erl:52-89`).
-    pub(super) dirty_write: Option<DirtyWrite>,
+    pub(super) dirty_call: Option<DirtyCall>,
     /// The trap state of the guard BIF `length/1`: the arguments of its
     /// trap export, the rest of the list and the count so far. ERTS
     /// `i_length` keeps them in the X registers above the live registers
@@ -500,21 +503,22 @@ pub(super) struct PendingTrap {
     pub(super) tail: bool,
 }
 
-/// A `prim_tty:write_nif/2` call that runs on a dirty IO thread.
+/// A NIF call that runs on a dirty thread.
 #[derive(Debug)]
-pub(super) struct DirtyWrite {
-    /// The identifier of the call in the run. The completion of the call
-    /// gives the same identifier.
+pub(super) struct DirtyCall {
+    /// The identifier of the call in the inbox of the scheduler. The
+    /// completion of the call gives the same identifier.
     pub(super) call: u64,
-    /// True when the NIF call was a tail call: its value then returns from
-    /// the frame.
-    pub(super) tail: bool,
-    /// The result of the host write, or `None` while the call runs.
-    pub(super) written: Option<IovecWritten>,
-    /// The claim of the process on the call. A dirty IO thread runs the
-    /// call only while the claim exists. The claim goes when this record
-    /// goes: at the result, at the start of the exit, or at the end of the
-    /// run.
+    /// The module, the name, and the arguments of the NIF. An exception of
+    /// the call has them as the first entry of its stack trace, as
+    /// `dirty_nif_exception` restores the MFA of the NIF for the error
+    /// (`erl_nif.c:3431-3433`).
+    pub(super) entry: (String, String, Vec<Term>),
+    /// The output of the work, or `None` while the call runs.
+    pub(super) output: Option<Output>,
+    /// The claim of the process on the call. A dirty thread runs the call
+    /// only while the claim exists. The claim goes when this record goes:
+    /// at the result, at the start of the exit, or at the end of the run.
     pub(super) claim: Claim,
 }
 
@@ -614,7 +618,7 @@ impl ProcessState {
             pending_bif: None,
             pending_trap: None,
             insert_result: None,
-            dirty_write: None,
+            dirty_call: None,
             length_trap: None,
             bif_timers: MonitorLinkTree::default(),
             continue_exit: None,
@@ -762,8 +766,9 @@ impl ProcessState {
         Ok(Some(Term::tuple(vec![item.clone(), value])))
     }
 
-    /// Return true while the dirty IO call of the process runs: the
-    /// process waits for its completion and does not run Erlang code.
+    /// Return true while the dirty NIF call of the process runs or waits in
+    /// the queue of its pool: the process waits for its completion and does
+    /// not run Erlang code.
     ///
     /// # Examples
     ///
@@ -771,9 +776,27 @@ impl ProcessState {
     /// assert!(!process.dirty_running());
     /// ```
     pub(super) fn dirty_running(&self) -> bool {
-        self.dirty_write
+        self.dirty_call
             .as_ref()
-            .is_some_and(|write| write.written.is_none())
+            .is_some_and(|call| call.output.is_none())
+    }
+
+    /// Return true while a dirty thread runs the NIF call of the process:
+    /// the thread started the call, and the call did not complete. ERTS
+    /// gives the status `running` to such a process
+    /// (`ERTS_PSFLG_DIRTY_RUNNING`, `erts_process_state2status`,
+    /// `erl_process.c:9319-9328`), and `runnable` while the call waits in
+    /// the queue.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(!process.dirty_started());
+    /// ```
+    pub(super) fn dirty_started(&self) -> bool {
+        self.dirty_call
+            .as_ref()
+            .is_some_and(|call| call.output.is_none() && call.claim.started())
     }
 
     /// Mark the receive timer as expired, as `proc_timeout_common`

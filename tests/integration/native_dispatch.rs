@@ -1,4 +1,6 @@
-use pbeam_runtime::{Atom, BeamProgram, NativeResult, Term, register_native, unregister_native};
+use pbeam_runtime::{
+    Atom, BeamProgram, Job, NativeResult, Term, register_native, unregister_native,
+};
 
 const NATIVE_PROBE: &[u8] = include_bytes!("../../fixtures/native/native_probe.beam");
 
@@ -26,8 +28,8 @@ fn atom(name: &str) -> Term {
 fn registered_mfa_reaches_rust_and_unregistered_resolves_to_beam() {
     let _ = unregister_native("native_probe", "add", 2);
     let _ = unregister_native("native_probe", "hidden", 1);
-    register_native("native_probe", "add", 2, add).unwrap();
-    register_native("native_probe", "hidden", 1, hidden).unwrap();
+    register_native("native_probe", "add", 2, Job::Normal, add).unwrap();
+    register_native("native_probe", "hidden", 1, Job::Normal, hidden).unwrap();
 
     let program = BeamProgram::load(&[NATIVE_PROBE]).unwrap();
 

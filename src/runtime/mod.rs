@@ -2,7 +2,7 @@ mod atomics;
 mod binary_pattern;
 mod buffers;
 mod capability;
-mod dirty_io;
+mod dirty;
 mod ets;
 mod files;
 mod host;
@@ -27,7 +27,8 @@ pub use host::signal::install_start_dispositions;
 pub(crate) use interpreter::bif::{BifId, import_kind, resolve as resolve_bif};
 pub use interpreter::{BeamProgram, nif_manifest_gaps};
 pub use native_registry::{
-    NativeFn, NativeResult, RegistrationError, lookup_native, register_native, unregister_native,
+    Job, NativeFn, NativeResult, RegistrationError, lookup_native, register_native,
+    unregister_native,
 };
 
 use crate::term::Term;

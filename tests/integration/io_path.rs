@@ -29,11 +29,12 @@ fn executes_the_pinned_otp_io_request_path_to_the_writer_nif() {
     // also monitors the writer and returns its exit reason. The `nif_start`
     // instruction of `write_nif/2` runs the PBeam binding. The binding raises
     // `badarg` for the plain reference, as the ERTS NIF does for a term that
-    // is not a TTY resource (prim_tty_nif.c:363-364), so PBeam gives
-    // `{badarg, []}`. On ERTS the reason is
-    // `{badarg, [{prim_tty, write_nif, [Ref, Chars], []}, ...]}`. PBeam gives
-    // the stack trace `[]`, so the ERTS check compares only the class and the
-    // first stack frame.
+    // is not a TTY resource (prim_tty_nif.c:363-364). On ERTS the reason is
+    // `{badarg, [{prim_tty, write_nif, [Ref, Chars], []}, ...]}`, as
+    // `dirty_nif_exception` restores the MFA of the NIF
+    // (erl_nif.c:3431-3433). PBeam gives the same first entry; its later
+    // frames differ (row "Exception stack trace"), so both checks compare the
+    // reason and the first entry.
     let modules = [
         "erlang",
         "erts_internal",
@@ -53,15 +54,34 @@ fn executes_the_pinned_otp_io_request_path_to_the_writer_nif() {
     beams.extend(modules.iter().map(Vec::as_slice));
     let program = BeamProgram::load(&beams).unwrap();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let result = program.execute("io_path_probe", "main", &[]).unwrap().term;
+    let Term::Tuple(ref result) = result else {
+        panic!("main/0 gives a tuple");
+    };
     assert_eq!(
-        program.execute("io_path_probe", "main", &[]).unwrap().term,
-        Term::tuple(vec![
+        result[..4],
+        [
             Term::tuple(vec![atom("error"), atom("badarg")]),
             atom("noise_ok"),
             atom("normal"),
             atom("normal"),
-            Term::tuple(vec![atom("badarg"), Term::nil()]),
-        ])
+        ]
+    );
+    let Term::Tuple(ref writer) = result[4] else {
+        panic!("the writer exit reason is a tuple: {:?}", result[4]);
+    };
+    let first = writer[1].proper_list().unwrap().next().unwrap().clone();
+    let Term::Tuple(ref first) = first else {
+        panic!("a stack trace entry is a tuple: {first:?}");
+    };
+    assert_eq!(
+        (&writer[0], &first[0], &first[1], &first[3]),
+        (
+            &atom("badarg"),
+            &atom("prim_tty"),
+            &atom("write_nif"),
+            &Term::nil()
+        )
     );
 
     let reference = Command::new("erl")

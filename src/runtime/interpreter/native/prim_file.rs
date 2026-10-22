@@ -9,7 +9,7 @@
 //! scheduler (`prim_file_nif.c:179-182`, `185`, `196`, `200-201`, `207`,
 //! `212`). PBeam runs
 //! them on the scheduler thread, so a host call that waits stops all
-//! processes until it returns (row "Dirty IO" of
+//! processes until it returns (row "Dirty NIFs" of
 //! `docs/erts-differences.md`).
 
 use super::*;
@@ -85,41 +85,49 @@ pub(super) const BINDINGS: &[Binding] = &[
     Binding {
         name: "altname_nif",
         arity: 1,
+        job: Job::Normal,
         run: |scheduler, arguments| altname_nif(&mut scheduler.atoms, &arguments[0]),
     },
     Binding {
         name: "close_nif",
         arity: 1,
+        job: Job::Normal,
         run: |scheduler, arguments| close_nif(scheduler, &arguments[0]),
     },
     Binding {
         name: "del_dir_nif",
         arity: 1,
+        job: Job::Normal,
         run: |scheduler, arguments| path_result(scheduler, &arguments[0], file::delete_dir),
     },
     Binding {
         name: "del_file_nif",
         arity: 1,
+        job: Job::Normal,
         run: |scheduler, arguments| path_result(scheduler, &arguments[0], file::delete_file),
     },
     Binding {
         name: "get_cwd_nif",
         arity: 0,
+        job: Job::Normal,
         run: |scheduler, _| get_cwd_nif(&mut scheduler.atoms),
     },
     Binding {
         name: "list_dir_nif",
         arity: 1,
+        job: Job::Normal,
         run: |scheduler, arguments| list_dir_nif(&mut scheduler.atoms, &arguments[0]),
     },
     Binding {
         name: "make_dir_nif",
         arity: 1,
+        job: Job::Normal,
         run: |scheduler, arguments| path_result(scheduler, &arguments[0], file::make_dir),
     },
     Binding {
         name: "make_hard_link_nif",
         arity: 2,
+        job: Job::Normal,
         run: |scheduler, arguments| {
             pair_result(
                 scheduler,
@@ -132,6 +140,7 @@ pub(super) const BINDINGS: &[Binding] = &[
     Binding {
         name: "make_soft_link_nif",
         arity: 2,
+        job: Job::Normal,
         run: |scheduler, arguments| {
             pair_result(
                 scheduler,
@@ -144,31 +153,37 @@ pub(super) const BINDINGS: &[Binding] = &[
     Binding {
         name: "open_nif",
         arity: 2,
+        job: Job::Normal,
         run: |scheduler, arguments| open_nif(scheduler, &arguments[0], &arguments[1]),
     },
     Binding {
         name: "read_file_nif",
         arity: 1,
+        job: Job::Normal,
         run: |scheduler, arguments| read_file_nif(&mut scheduler.atoms, &arguments[0]),
     },
     Binding {
         name: "read_info_nif",
         arity: 2,
+        job: Job::Normal,
         run: |scheduler, arguments| read_info_nif(scheduler, &arguments[0], &arguments[1]),
     },
     Binding {
         name: "read_link_nif",
         arity: 1,
+        job: Job::Normal,
         run: |scheduler, arguments| read_link_nif(&mut scheduler.atoms, &arguments[0]),
     },
     Binding {
         name: "read_nif",
         arity: 2,
+        job: Job::Normal,
         run: |scheduler, arguments| read_nif(scheduler, &arguments[0], &arguments[1]),
     },
     Binding {
         name: "rename_nif",
         arity: 2,
+        job: Job::Normal,
         run: |scheduler, arguments| {
             pair_result(scheduler, &arguments[0], &arguments[1], file::rename)
         },
@@ -176,6 +191,7 @@ pub(super) const BINDINGS: &[Binding] = &[
     Binding {
         name: "seek_nif",
         arity: 3,
+        job: Job::Normal,
         run: |scheduler, arguments| {
             seek_nif(scheduler, &arguments[0], &arguments[1], &arguments[2])
         },
@@ -183,11 +199,13 @@ pub(super) const BINDINGS: &[Binding] = &[
     Binding {
         name: "set_cwd_nif",
         arity: 1,
+        job: Job::Normal,
         run: |scheduler, arguments| path_result(scheduler, &arguments[0], file::set_cwd),
     },
     Binding {
         name: "set_owner_nif",
         arity: 3,
+        job: Job::Normal,
         run: |scheduler, arguments| {
             set_owner_nif(scheduler, &arguments[0], &arguments[1], &arguments[2])
         },
@@ -195,11 +213,13 @@ pub(super) const BINDINGS: &[Binding] = &[
     Binding {
         name: "set_permissions_nif",
         arity: 2,
+        job: Job::Normal,
         run: |scheduler, arguments| set_permissions_nif(scheduler, &arguments[0], &arguments[1]),
     },
     Binding {
         name: "set_time_nif",
         arity: 4,
+        job: Job::Normal,
         run: |scheduler, arguments| {
             set_time_nif(
                 scheduler,
@@ -213,6 +233,7 @@ pub(super) const BINDINGS: &[Binding] = &[
     Binding {
         name: "write_nif",
         arity: 2,
+        job: Job::Normal,
         run: |scheduler, arguments| write_nif(scheduler, &arguments[0], &arguments[1]),
     },
 ];

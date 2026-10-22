@@ -368,6 +368,10 @@ name = "hash"
 path = "tests/integration/hash.rs"
 
 [[test]]
+name = "dirty_nif"
+path = "tests/integration/dirty_nif.rs"
+
+[[test]]
 name = "hibernate"
 path = "tests/integration/hibernate.rs"
 

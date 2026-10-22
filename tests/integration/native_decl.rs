@@ -1,5 +1,5 @@
 use pbeam_runtime::{
-    BeamModule, BeamProgram, NativeResult, Term, register_native, unregister_native,
+    BeamModule, BeamProgram, Job, NativeResult, Term, register_native, unregister_native,
 };
 
 const NATIVE_DECL_PROBE: &[u8] =
@@ -51,7 +51,7 @@ fn reaches_the_registered_native_through_each_call_path() {
     let data = || Term::binary(vec![0x61, 0x62, 0x63]);
 
     let _ = unregister_native("Elixir.NativeDeclProbe", "sha256", 1);
-    register_native("Elixir.NativeDeclProbe", "sha256", 1, sha256).unwrap();
+    register_native("Elixir.NativeDeclProbe", "sha256", 1, Job::Normal, sha256).unwrap();
 
     // A local call enters the frame of the stub.
     assert_eq!(
