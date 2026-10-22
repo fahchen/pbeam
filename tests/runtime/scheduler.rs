@@ -721,6 +721,26 @@ fn wait_completion(scheduler: &mut Scheduler) {
 }
 
 #[test]
+fn gives_the_invariant_error_of_a_dirty_call_with_the_job_normal() {
+    // A `Normal` job has no dirty pool, so the switch out fails and the
+    // process does not record a call.
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
+    let entry = ("m".to_owned(), "f".to_owned(), Vec::new());
+    let write = dirty_write(-1, b"");
+    let error = scheduler
+        .start_dirty_call(Job::Normal, Work::Write(write), entry)
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "invariant error: a NIF with the job Normal switches out to a dirty pool"
+    );
+    assert!(scheduler.processes[&ProcessId(0)].dirty_call.is_none());
+    assert!(!scheduler.dirty.running());
+}
+
+#[test]
 fn resumes_a_dirty_write_once_when_it_completes_before_the_next_poll() {
     // The scheduler records the call on the process before the dirty IO
     // thread gets it. The completion is in the inbox before the scheduler
