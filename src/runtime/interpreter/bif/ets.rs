@@ -77,8 +77,9 @@ fn retry(
     function: &'static str,
     arguments: Vec<Term>,
 ) -> BifResult {
-    let Lacking::Busy { reductions } = lacking else {
-        return BifResult::badarg();
+    let reductions = match lacking {
+        Lacking::Busy { reductions } => reductions,
+        Lacking::Denied(cause) => return denied(cause),
     };
     context
         .scheduler
@@ -88,6 +89,16 @@ fn retry(
         module: "ets",
         function,
         arguments,
+    }
+}
+
+/// Return the `error:badarg` exception with the `error_info` cause `cause`,
+/// as the ETS BIFs raise it with `BADARG | EXF_HAS_EXT_INFO` and
+/// `p->fvalue = Cause` (`erl_db.c:53-63`; `beam_common.c:993-1002`).
+fn denied(cause: &'static str) -> BifResult {
+    BifResult::ErrorWithCause {
+        reason: Term::static_atom("badarg"),
+        cause: Term::static_atom(cause),
     }
 }
 
@@ -282,7 +293,7 @@ pub(super) fn new(
     // (`erl_db.c:1000-1047`) checks the name after `make_btid`
     // (`erl_db.c:2811-2831`).
     if name_text.is_some_and(|name| ets.name_in_use(name)) {
-        return Ok(BifResult::badarg());
+        return Ok(denied("already_exists"));
     }
     if let Some(heir) = heir
         && heir != owner
@@ -381,7 +392,7 @@ fn insert_objects(
         let store = Arc::clone(&context.scheduler.ets);
         let ets = store.shared();
         let Some((id, found)) = ets.find(&context.scheduler.atoms, table) else {
-            return Ok(BifResult::badarg());
+            return Ok(denied(ets.missing(table)));
         };
         let (keypos, bag) = (found.keypos(), found.table_type() == TableType::Bag);
         drop(found);
@@ -564,7 +575,9 @@ pub(super) fn insert_list(
         }
         drop(ets);
         if gone {
-            return Ok(BifResult::badarg());
+            // The table went away: ERTS raises with the cause `id` of the
+            // deleted table (`erl_db.c:2232-2247`).
+            return Ok(denied("id"));
         }
     }
     let process = context.scheduler.current_process_mut();
@@ -597,11 +610,15 @@ pub(super) fn insert_list(
                         .bif_reductions_signed();
                     let ets = context.scheduler.ets.shared();
                     let taken = ets.write(&context.scheduler.atoms, &table, caller, reds);
-                    if let Err(Lacking::Busy { reductions }) = taken {
-                        units.left -= reductions * ITERATIONS_PER_RED;
-                        break 'work None;
+                    match taken {
+                        Err(Lacking::Busy { reductions }) => {
+                            units.left -= reductions * ITERATIONS_PER_RED;
+                            break 'work None;
+                        }
+                        // The denial keeps its cause (`erl_db.c:2040-2048`).
+                        Err(Lacking::Denied(cause)) => break 'work Some(denied(cause)),
+                        Ok(_) => break 'work Some(BifResult::badarg()),
                     }
-                    break 'work Some(BifResult::badarg());
                 }
                 Some(true) => (count, check) = (done, Check::Done(done)),
             }
@@ -629,7 +646,7 @@ pub(super) fn insert_list(
             let ets = context.scheduler.ets.shared();
             let mut table = match ets.write(&context.scheduler.atoms, &table, caller, reds) {
                 Ok(table) => table,
-                Err(Lacking::Denied) => break 'work Some(BifResult::badarg()),
+                Err(Lacking::Denied(cause)) => break 'work Some(denied(cause)),
                 Err(Lacking::Busy { reductions }) => {
                     units.left -= reductions * ITERATIONS_PER_RED;
                     break 'work None;
@@ -701,7 +718,7 @@ pub(super) fn insert_list(
                     }
                     took = true;
                 }
-                Err(Lacking::Denied) => done = 4 * count,
+                Err(Lacking::Denied(_)) => done = 4 * count,
             }
         }
         if took || global {
@@ -720,7 +737,14 @@ pub(super) fn insert_list(
         if !units.run(&mut done, 5 * count) {
             break 'work None;
         }
-        Some(BifResult::badarg())
+        // The refused table keeps the cause of the refusal across the
+        // yields of the free (`erl_db.c:2076-2088`): a live table refused
+        // the access.
+        let ets = context.scheduler.ets.shared();
+        Some(denied(match ets.id(&context.scheduler.atoms, &table) {
+            Some(_) => "access",
+            None => ets.missing(&table),
+        }))
     };
     let process = context.scheduler.current_process_mut();
     process.bump_reductions(((budget - units.left) / ITERATIONS_PER_RED) as i32);
@@ -1481,10 +1505,6 @@ pub(super) fn delete_trap(context: &mut BifContext<'_>) -> Result<BifResult, Bea
 /// # Errors
 ///
 /// Return a runtime error for the items `binary`, `data`, and `stats`.
-/// Also return a runtime error for a reference that is not a live table:
-/// ERTS gives `undefined` for the reference of a deleted table and raises
-/// `badarg` for another reference, and PBeam keeps no record of a deleted
-/// table.
 pub(super) fn info(
     context: &mut BifContext<'_>,
     table: &Term,
@@ -1516,16 +1536,10 @@ pub(super) fn info(
                 vec![table.clone(), item.clone()],
             ));
         }
-        Err(Lacking::Denied) => {
-            return match table {
-                Term::Atom(_) => Ok(Value(Term::static_atom("undefined"))),
-                // ponytail: no record of a deleted table; see "ETS tables" in docs/erts-differences.md.
-                Term::Reference(_) => Err(error(
-                    "unsupported ets:info/2 of a reference that is not a live table",
-                )),
-                _ => Ok(BifResult::badarg()),
-            };
-        }
+        // A table that no longer exists gives `undefined`; another term
+        // raises with the cause `type` (`erl_db.c:4434-4441`, `4544-4551`).
+        Err(Lacking::Denied("id")) => return Ok(Value(Term::static_atom("undefined"))),
+        Err(Lacking::Denied(cause)) => return Ok(denied(cause)),
     };
     let id = (ets.id(atoms, table)).expect("the caller found the table");
     let value = match item {
@@ -1734,7 +1748,7 @@ fn select_objects(
     let store = Arc::clone(&context.scheduler.ets);
     let ets = store.shared();
     let Some(id) = ets.id(atoms, table) else {
-        return Ok(BifResult::badarg());
+        return Ok(denied(ets.missing(table)));
     };
     let table = match ets.read(atoms, &Term::Reference(id), caller, reds) {
         Ok(table) => table,
@@ -1959,7 +1973,7 @@ pub(super) fn select_continue(
     let store = Arc::clone(&context.scheduler.ets);
     let ets = store.shared();
     let Some(id) = ets.id(atoms, table) else {
-        return Ok(BifResult::badarg());
+        return Ok(denied(ets.missing(table)));
     };
     let found = match ets.read(atoms, &Term::Reference(id), caller, reds) {
         Ok(table) => table,
@@ -2463,18 +2477,6 @@ pub(super) fn update_element(
     let atoms = &context.scheduler.atoms;
     let store = Arc::clone(&context.scheduler.ets);
     let ets = store.shared();
-    let Some(found) = ets.find(atoms, table) else {
-        return Ok(BifResult::badarg());
-    };
-    let keypos = found.1.keypos();
-    drop(found);
-    // ERTS compares the unsigned arity with the C `int` key position, so a
-    // negative key position rejects each default (`erl_db.c:1483-1484`).
-    let default_elements = match default {
-        Some(Term::Tuple(elements)) if elements.len() as u32 >= keypos as u32 => Some(elements),
-        Some(_) => return Ok(BifResult::badarg()),
-        None => None,
-    };
     let mut table = match ets.write(atoms, table, caller, reds) {
         Ok(table) => table,
         Err(lacking) => {
@@ -2485,6 +2487,18 @@ pub(super) fn update_element(
             return Ok(retry(context, lacking, "update_element", arguments));
         }
     };
+    let keypos = table.keypos();
+    // ERTS takes the table before it checks the default, and compares the
+    // unsigned arity with the C `int` key position, so a negative key
+    // position rejects each default (`erl_db.c:1481-1488`).
+    let default_elements = match default {
+        Some(Term::Tuple(elements)) if elements.len() as u32 >= keypos as u32 => Some(elements),
+        Some(_) => return Ok(denied("default")),
+        None => None,
+    };
+    // A table of another type sets the cause `table_type`, but the
+    // `DB_ERROR_BADPARAM` return raises `badarg` with no cause
+    // (`erl_db.c:1381-1385`, `1454-1457`).
     if !matches!(table.table_type(), TableType::Set | TableType::OrderedSet) {
         return Ok(BifResult::badarg());
     }
@@ -2500,16 +2514,11 @@ pub(super) fn update_element(
             Some(elements) => elements.len(),
         },
     };
-    let updates = match update_specs(spec, keypos) {
-        Some(updates) => updates,
-        None => return Ok(BifResult::badarg()),
+    let updates = match update_specs(spec, keypos, arity) {
+        Ok(updates) => updates,
+        Err(Some(cause)) => return Ok(denied(cause)),
+        Err(None) => return Ok(BifResult::badarg()),
     };
-    if updates
-        .iter()
-        .any(|(position, _)| *position == 0 || *position > arity)
-    {
-        return Ok(BifResult::badarg());
-    }
     if existing.is_none() {
         let elements = default_elements.expect("the missing key has a default");
         let mut object = elements.as_ref().to_vec();
@@ -2526,32 +2535,44 @@ pub(super) fn update_element(
     Ok(Value(Term::static_atom("true")))
 }
 
-/// Return the positions and values of an `update_element` specification, or
-/// `None` when the term is not a `{Pos, Value}` or a proper list of them
-/// with a small position. A position equal to the key position is
-/// `badarg`; the caller compares it with the key position.
-fn update_specs(spec: &Term, keypos: i32) -> Option<Vec<(usize, Term)>> {
+/// Return the positions and values of an `update_element` specification
+/// for an object of arity `arity`, as the loop of `do_update_element`
+/// (`erl_db.c:1401-1428`) checks it, one element after another. An element
+/// that is not a `{Pos, Value}` with a small position, or an improper tail,
+/// gives `Err(None)`: `badarg` with no cause. A position equal to the key
+/// position gives the cause `keypos`, and a position out of range gives the
+/// cause `position`.
+fn update_specs(
+    spec: &Term,
+    keypos: i32,
+    arity: usize,
+) -> Result<Vec<(usize, Term)>, Option<&'static str>> {
     let single;
-    let list = if matches!(spec, Term::Tuple(_)) {
+    let mut list = if matches!(spec, Term::Tuple(_)) {
         single = Term::list_from(vec![spec.clone()]);
         &single
     } else {
         spec
     };
     let mut updates = Vec::new();
-    for item in list.proper_list()? {
+    while !list.is_nil() {
+        let (item, tail) = list.cons_cell().ok_or(None)?;
         let Term::Tuple(elements) = item else {
-            return None;
+            return Err(None);
         };
         let [Term::Integer(position), value] = elements.as_ref() else {
-            return None;
+            return Err(None);
         };
-        if *position == i64::from(keypos) || *position < 1 {
-            return None;
+        if *position == i64::from(keypos) {
+            return Err(Some("keypos"));
         }
-        updates.push((usize::try_from(*position).ok()?, value.clone()));
+        let position = (usize::try_from(*position).ok())
+            .filter(|position| (1..=arity).contains(position))
+            .ok_or(Some("position"))?;
+        updates.push((position, value.clone()));
+        list = tail;
     }
-    Some(updates)
+    Ok(updates)
 }
 
 /// Run `ets:info(Table)`, as `ets_info_1` (`erl_db.c:4399-4517`) does:
@@ -2570,8 +2591,7 @@ fn update_specs(spec: &Term, keypos: i32) -> Option<Vec<(usize, Term)>> {
 ///
 /// # Errors
 ///
-/// Return a runtime error for the items `binary`, `data`, and `stats`, and
-/// for a reference that is not a live table.
+/// Return a runtime error for the items `binary`, `data`, and `stats`.
 pub(super) fn info_all(context: &mut BifContext<'_>, table: &Term) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
     let reds = context
@@ -2586,15 +2606,10 @@ pub(super) fn info_all(context: &mut BifContext<'_>, table: &Term) -> Result<Bif
         Err(lacking @ Lacking::Busy { .. }) => {
             return Ok(retry(context, lacking, "info", vec![table.clone()]));
         }
-        Err(Lacking::Denied) => {
-            return match table {
-                Term::Atom(_) => Ok(Value(Term::static_atom("undefined"))),
-                Term::Reference(_) => Err(error(
-                    "unsupported ets:info/1 of a reference that is not a live table",
-                )),
-                _ => Ok(BifResult::badarg()),
-            };
-        }
+        // A table that no longer exists gives `undefined`; another term
+        // raises with the cause `type` (`erl_db.c:4434-4441`, `4544-4551`).
+        Err(Lacking::Denied("id")) => return Ok(Value(Term::static_atom("undefined"))),
+        Err(Lacking::Denied(cause)) => return Ok(denied(cause)),
     };
     let id = (ets.id(atoms, table)).expect("the caller found the table");
     let named = ets.named(id);
@@ -2679,7 +2694,7 @@ pub(super) fn internal_delete_all(
     let store = Arc::clone(&context.scheduler.ets);
     let ets = store.shared();
     let Some(id) = ets.id(atoms, table) else {
-        return Ok(BifResult::badarg());
+        return Ok(denied(ets.missing(table)));
     };
     let mut found = match ets.write(atoms, table, caller, left) {
         Ok(table) => table,
@@ -2764,7 +2779,7 @@ pub(super) fn internal_select_delete(
     let store = Arc::clone(&context.scheduler.ets);
     let ets = store.shared();
     let Some(found) = ets.find(atoms, table) else {
-        return Ok(BifResult::badarg());
+        return Ok(denied(ets.missing(table)));
     };
     reject_ordered_set(&found.1, "ets:select_delete/2")?;
     drop(found);

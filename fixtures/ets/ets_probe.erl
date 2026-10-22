@@ -610,8 +610,6 @@ unsupported(Case) ->
             ets:delete(T);
         info_size -> ets:info(ets:new(ets_probe, []), size);
         info_binary -> ets:info(ets:new(ets_probe, []), binary);
-        info_reference -> ets:info(make_ref(), type);
-        info_all_reference -> ets:info(make_ref());
         info_stats -> ets:info(ets:new(ets_probe, []), stats);
         info_data -> ets:info(ets:new(ets_probe, []), data);
         select_unsupported ->
