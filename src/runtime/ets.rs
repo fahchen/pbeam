@@ -6,6 +6,7 @@ pub(super) mod pattern;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::hash::{DefaultHasher, Hasher};
+use std::sync::{PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::term::atom_hash;
 use crate::term::{AtomTable, LiveBytes, ProcessId, Reference, Term, internal_hash};
@@ -38,8 +39,13 @@ const INITIAL_INDEX_SLOTS: usize = 8;
 /// tables.
 #[derive(Debug, Default)]
 pub(super) struct EtsTables {
-    /// Each live table by its table reference.
-    tables: HashMap<Reference, Table>,
+    /// Each live table by its table reference, each with its own lock, as
+    /// each ERTS table has its rwlock (`erl_db_util.h:322`). The ETS BIFs
+    /// reach a table only through [`EtsTables::read`],
+    /// [`EtsTables::write`], [`EtsTables::find`], and [`EtsTables::busy`],
+    /// which take that lock, as `db_get_table` and `db_lock` do
+    /// (`erl_db.c:701-921`).
+    tables: HashMap<Reference, RwLock<Table>>,
     /// The table reference of each named table by its name.
     names: HashMap<String, Reference>,
     /// Each deleted table whose free switched out or trapped, by its table
@@ -434,7 +440,7 @@ impl EtsTables {
     /// ```
     pub(super) fn create(&mut self, id: Reference, name: Option<&str>, mut table: Table) {
         table.owned = self.save_owned();
-        self.tables.insert(id, table);
+        self.tables.insert(id, RwLock::new(table));
         if let Some(name) = name {
             self.names.insert(name.to_owned(), id);
         }
@@ -458,8 +464,9 @@ impl EtsTables {
     /// assert!(live.bytes() > 0);
     /// ```
     pub(super) fn account_terms(&self, live: &mut LiveBytes) {
+        let locked: Vec<_> = self.tables.values().map(read).collect();
         let freeing = self.freeing.values().map(|freeing| &freeing.table);
-        for table in self.tables.values().chain(freeing) {
+        for table in locked.iter().map(|table| &**table).chain(freeing) {
             live.add(table.allocated_bytes());
             let stored = table.objects.iter().flatten();
             let copies = table
@@ -512,13 +519,14 @@ impl EtsTables {
         self.names.values().any(|named| *named == id)
     }
 
-    /// Return the table that `id` identifies, when the process `caller` can
-    /// do `operation` on it, as `db_get_table` (`erl_db.c:800-912`) does. An
-    /// atom finds a named table, and a reference finds its table. Return
-    /// `None` for each other term, a free name, a deleted table, and a
-    /// process that is not the owner and that the access mode does not
-    /// allow (`handle_lacking_permission`, `erl_db.c:769-798`). The ETS BIFs
-    /// then raise `badarg`.
+    /// Return the table that `id` identifies under its read lock, when the
+    /// process `caller` can read it, as `db_get_table` with `DB_READ`
+    /// (`erl_db.c:800-912`) and `db_lock` with `LCK_READ` (`erl_db.c:701`)
+    /// do. An atom finds a named table, and a reference finds its table.
+    /// Return `None` for each other term, a free name, a deleted table, and a
+    /// process that is not the owner of a `private` table
+    /// (`handle_lacking_permission`, `erl_db.c:769-798`). The ETS BIFs then
+    /// raise `badarg`.
     ///
     /// # Examples
     ///
@@ -526,26 +534,70 @@ impl EtsTables {
     /// let mut tables = EtsTables::default();
     /// tables.create(Reference(0), Some("ac_tab"), Table::new(ProcessId(0), Access::Protected, 1, TableType::Set));
     /// let name = Term::static_atom("ac_tab");
-    /// assert!(tables.table(&name, ProcessId(1), Operation::Read).is_some());
-    /// assert!(tables.table(&name, ProcessId(1), Operation::Write).is_none());
-    /// assert!(tables.table(&name, ProcessId(0), Operation::Write).is_some());
-    /// assert!(tables.table(&Term::Integer(1), ProcessId(0), Operation::Read).is_none());
+    /// assert!(tables.read(&atoms, &name, ProcessId(1)).is_some());
+    /// assert!(tables.read(&atoms, &Term::Integer(1), ProcessId(0)).is_none());
     /// ```
-    pub(super) fn table(
+    pub(super) fn read(
+        &self,
+        atoms: &AtomTable,
+        id: &Term,
+        caller: ProcessId,
+    ) -> Option<RwLockReadGuard<'_, Table>> {
+        let table = read(self.lookup(atoms, id)?.1);
+        table.allows(caller, Operation::Read).then_some(table)
+    }
+
+    /// Return the table that `id` identifies under its write lock, when the
+    /// process `caller` can write it, as `db_get_table` with `DB_WRITE`
+    /// (`erl_db.c:800-912`) and `db_lock` with `LCK_WRITE` (`erl_db.c:701`)
+    /// do. Return `None` as [`EtsTables::read`] does, and also for a
+    /// `protected` table of another owner.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut tables = EtsTables::default();
+    /// tables.create(Reference(0), Some("ac_tab"), Table::new(ProcessId(0), Access::Protected, 1, TableType::Set));
+    /// let name = Term::static_atom("ac_tab");
+    /// assert!(tables.write(&atoms, &name, ProcessId(1)).is_none());
+    /// assert!(tables.write(&atoms, &name, ProcessId(0)).is_some());
+    /// ```
+    pub(super) fn write(
         &mut self,
         atoms: &AtomTable,
         id: &Term,
         caller: ProcessId,
-        operation: Operation,
-    ) -> Option<&mut Table> {
-        let (id, _) = self.find(atoms, id)?;
+    ) -> Option<RwLockWriteGuard<'_, Table>> {
+        let table = write(self.lookup(atoms, id)?.1);
+        table.allows(caller, Operation::Write).then_some(table)
+    }
+
+    /// Return the table reference of the live table that `id` identifies,
+    /// with no lock and no access check, as the meta table of ERTS gives it
+    /// (`erl_db.c:800-912`). Return `None` as [`EtsTables::find`] does.
+    pub(super) fn id(&self, atoms: &AtomTable, id: &Term) -> Option<Reference> {
+        self.lookup(atoms, id).map(|(id, _)| id)
+    }
+
+    /// Return the reference and the lock of the live table that `id`
+    /// identifies: an atom finds a named table in the name table, and a
+    /// reference finds its table, as `db_get_table_aux`
+    /// (`erl_db.c:800-912`) does. Return `None` for each other term, a free
+    /// name, and a deleted table.
+    fn lookup(&self, atoms: &AtomTable, id: &Term) -> Option<(Reference, &RwLock<Table>)> {
+        let id = match id {
+            Term::Atom(name) => *self.names.get(atoms.name_of(name))?,
+            Term::Reference(id) => *id,
+            _ => return None,
+        };
+        self.tables.get(&id).map(|table| (id, table))
+    }
+
+    /// Return the live table `id` with no lock, for the work of the table
+    /// store that has the store to itself (`&mut self`).
+    fn live(&mut self, id: Reference) -> Option<&mut Table> {
         let table = self.tables.get_mut(&id)?;
-        let allowed = table.owner == caller
-            || matches!(
-                (table.access, operation),
-                (Access::Public, _) | (Access::Protected, Operation::Read)
-            );
-        allowed.then_some(table)
+        Some(table.get_mut().unwrap_or_else(PoisonError::into_inner))
     }
 
     /// Return the table reference and the table that `id` identifies, with
@@ -564,13 +616,13 @@ impl EtsTables {
     /// assert!(tables.find(&atoms, &Term::Reference(Reference(1))).is_none());
     /// assert!(tables.find(&atoms, &Term::Integer(1)).is_none());
     /// ```
-    pub(super) fn find(&self, atoms: &AtomTable, id: &Term) -> Option<(Reference, &Table)> {
-        let id = match id {
-            Term::Atom(name) => *self.names.get(atoms.name_of(name))?,
-            Term::Reference(id) => *id,
-            _ => return None,
-        };
-        self.tables.get(&id).map(|table| (id, table))
+    pub(super) fn find(
+        &self,
+        atoms: &AtomTable,
+        id: &Term,
+    ) -> Option<(Reference, RwLockReadGuard<'_, Table>)> {
+        let (id, table) = self.lookup(atoms, id)?;
+        Some((id, read(table)))
     }
 
     /// Return the table that `id` identifies when a list insert that took
@@ -588,12 +640,13 @@ impl EtsTables {
     /// tables.create(Reference(0), None, table);
     /// assert!(tables.busy(&atoms, &Term::Reference(Reference(0))).is_some());
     /// ```
-    pub(super) fn busy(&mut self, atoms: &AtomTable, id: &Term) -> Option<&mut Table> {
-        let (id, busy) = {
-            let (id, table) = self.find(atoms, id)?;
-            (id, table.busy.is_some())
-        };
-        busy.then(|| self.tables.get_mut(&id)).flatten()
+    pub(super) fn busy(
+        &mut self,
+        atoms: &AtomTable,
+        id: &Term,
+    ) -> Option<RwLockWriteGuard<'_, Table>> {
+        let table = write(self.lookup(atoms, id)?.1);
+        table.busy.is_some().then_some(table)
     }
 
     /// Remember the compiled match specification `spec` under the reference
@@ -642,7 +695,7 @@ impl EtsTables {
     /// ```
     #[cfg(test)]
     pub(super) fn table_by_id(&mut self, id: Reference) -> Option<&mut Table> {
-        self.tables.get_mut(&id)
+        self.live(id)
     }
 
     /// Mark the next buckets of the clear of the fixed table `id`, as the
@@ -655,7 +708,7 @@ impl EtsTables {
         id: Reference,
         reds: i64,
     ) -> (bool, usize) {
-        let table = self.tables.get_mut(&id).expect("a cleared table is live");
+        let table = self.live(id).expect("a cleared table is live");
         let (owner, count) = {
             let clearing = table
                 .clear
@@ -670,7 +723,7 @@ impl EtsTables {
     /// to the order of the fixations of the process (`fixed_tabs_insert`,
     /// `erl_db.c:135-150`).
     pub(super) fn fix_table(&mut self, id: Reference, process: ProcessId) {
-        let first = !(self.tables.get(&id))
+        let first = !(self.live(id))
             .expect("a fixed table is live")
             .fixed_by
             .contains_key(&process);
@@ -680,17 +733,14 @@ impl EtsTables {
             self.fixed.entry(process).or_default().insert(seq, id);
             self.fixed_seq.insert((process, id), seq);
         }
-        self.tables
-            .get_mut(&id)
-            .expect("a fixed table is live")
-            .fix(process);
+        self.live(id).expect("a fixed table is live").fix(process);
     }
 
     /// Unfix the table `id` for the process `process`, and drop the order
     /// entry of the last fixation of the process (`fixed_tabs_delete`,
     /// `erl_db.c:152-172`).
     pub(super) fn unfix_table(&mut self, id: Reference, process: ProcessId) {
-        let table = self.tables.get_mut(&id).expect("an unfixed table is live");
+        let table = self.live(id).expect("an unfixed table is live");
         table.unfix(process);
         if !table.fixed_by.contains_key(&process) {
             // A process that did not fix the table has no entry here, and a
@@ -814,7 +864,10 @@ impl EtsTables {
     /// ```
     pub(super) fn delete_owned(&mut self, owner: ProcessId, mut reds: i32) -> Option<i32> {
         loop {
-            let live = (self.tables.iter()).map(|(id, table)| (*id, table));
+            let live = (self.tables.iter_mut()).map(|(id, table)| {
+                let table = table.get_mut().unwrap_or_else(PoisonError::into_inner);
+                (*id, &*table)
+            });
             let freeing = (self.freeing.iter()).map(|(id, freeing)| (*id, &freeing.table));
             let Some((_, id)) = live
                 .chain(freeing)
@@ -824,7 +877,8 @@ impl EtsTables {
             else {
                 break;
             };
-            if let Some(mut table) = self.tables.remove(&id) {
+            if let Some(table) = self.tables.remove(&id) {
+                let mut table = table.into_inner().unwrap_or_else(PoisonError::into_inner);
                 let fixers = table.fixers();
                 reds -= i32::try_from(fixers.len()).unwrap_or(i32::MAX);
                 // The table goes, so each fixation of it goes too
@@ -851,7 +905,7 @@ impl EtsTables {
                 self.fixed.remove(&owner);
                 break;
             };
-            match self.tables.get_mut(&id) {
+            match self.live(id) {
                 Some(table) => {
                     reds -= i32::try_from(table.unfix_cost(owner)).unwrap_or(i32::MAX);
                     table.unfix_all(owner);
@@ -901,7 +955,10 @@ impl EtsTables {
     /// assert_eq!(tables.free_segments(ProcessId(2), 100), Some(68));
     /// ```
     pub(super) fn delete_table(&mut self, id: Reference, caller: ProcessId) -> usize {
-        let mut table = self.tables.remove(&id).expect("a deleted table is live");
+        let mut table = (self.tables.remove(&id))
+            .expect("a deleted table is live")
+            .into_inner()
+            .unwrap_or_else(PoisonError::into_inner);
         self.names.retain(|_, named| *named != id);
         self.programs.retain(|_, (table, _)| *table != id);
         if table.owner != caller {
@@ -974,6 +1031,17 @@ impl EtsTables {
         self.freeing.remove(&id);
         Some(reds)
     }
+}
+
+/// Take the read lock of the table `table`. A panic under the lock leaves
+/// no half change that a reader can see, as a BIF panic stops the run.
+fn read(table: &RwLock<Table>) -> RwLockReadGuard<'_, Table> {
+    table.read().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Take the write lock of the table `table`. See [`read`].
+fn write(table: &RwLock<Table>) -> RwLockWriteGuard<'_, Table> {
+    table.write().unwrap_or_else(PoisonError::into_inner)
 }
 
 impl Freeing {
@@ -1106,6 +1174,17 @@ impl Freeing {
 }
 
 impl Table {
+    /// Return whether the process `caller` can do `operation` on the table:
+    /// the owner can do each operation, and the access mode gives the
+    /// rights of each other process (`erl_db.c:877-883`).
+    fn allows(&self, caller: ProcessId, operation: Operation) -> bool {
+        self.owner == caller
+            || matches!(
+                (self.access, operation),
+                (Access::Public, _) | (Access::Protected, Operation::Read)
+            )
+    }
+
     /// Return an empty table of the type `table_type` that the process
     /// `owner` owns, with the access mode `access` and the truncated key
     /// position `keypos`.
