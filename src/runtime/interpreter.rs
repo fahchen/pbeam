@@ -475,7 +475,14 @@ impl BeamProgram {
         function: &str,
         arguments: &[HostTerm],
     ) -> Result<HostTerm, BeamError> {
-        self.execute_issued(module, function, arguments, Issuer::Unchecked, &mut None)
+        self.execute_issued(
+            module,
+            function,
+            arguments,
+            Issuer::Unchecked,
+            &mut None,
+            false,
+        )
     }
 
     /// Run an exported function as the root process, as
@@ -503,7 +510,14 @@ impl BeamProgram {
         arguments: &[HostTerm],
         policy: &dyn Policy,
     ) -> Result<HostTerm, BeamError> {
-        self.execute_issued(module, function, arguments, Issuer::Host(policy), &mut None)
+        self.execute_issued(
+            module,
+            function,
+            arguments,
+            Issuer::Host(policy),
+            &mut None,
+            false,
+        )
     }
 
     /// Run an exported function as the root process, as
@@ -573,7 +587,56 @@ impl BeamProgram {
         boot: bool,
     ) -> Result<HostTerm, BeamError> {
         let issuer = Issuer::Module { policy, boot };
-        self.execute_issued(module, function, arguments, issuer, &mut None)
+        self.execute_issued(module, function, arguments, issuer, &mut None, false)
+    }
+
+    /// Boot the node: run the pinned `erl_init:start(init, Arguments)` as
+    /// the first process, as ERTS `erl_first_process_otp` does
+    /// (`erl_init.c:2540`, `355-399`). `Arguments` is the list of
+    /// `arguments`, each as a binary of its bytes, as the boot arguments of
+    /// the emulator. `erl_init:start/2` runs `init:boot(Arguments)`
+    /// (`erl_init.erl:35-50`, `62-69`), so the first process registers the
+    /// name `init`, reads the boot file of its `-boot` flag, and evaluates
+    /// the boot script in a boot process (`init.erl:586-596`,
+    /// `1192-1358`). The run has no policy, as [`BeamProgram::execute`] has
+    /// none.
+    ///
+    /// The `init` process is the root process of the run and a system
+    /// process, as in ERTS (`erl_init.c:333-353`). It does not exit while
+    /// the node runs (`init.erl:683-797`), so the run ends with a halt:
+    /// `erlang:halt/0,1,2` gives [`BeamError::Halt`]. The exit of a system
+    /// process, also of `init`, stops the run with the runtime error `System
+    /// process <Pid> terminated: <Reason>`, where ERTS stops the emulator
+    /// with this text (`erl_process.c:14186-14188`). The other ends of a run
+    /// are those of [`BeamProgram::execute`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let halted = program.boot(&[b"-root", root, b"-bindir", bindir, b"-boot", b"start"]);
+    /// assert_eq!(halted.unwrap_err(), BeamError::Halt(0));
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`BeamProgram::execute`]. A program without the
+    /// `erl_init` module gives the error `missing BEAM module erl_init`.
+    pub fn boot(&self, arguments: &[&[u8]]) -> Result<HostTerm, BeamError> {
+        let arguments = arguments
+            .iter()
+            .map(|argument| Term::binary(argument.to_vec()));
+        let start = [
+            self.host_term(Term::static_atom("init")),
+            self.host_term(Term::list_from(arguments)),
+        ];
+        self.execute_issued(
+            "erl_init",
+            "start",
+            &start,
+            Issuer::Unchecked,
+            &mut None,
+            true,
+        )
     }
 
     /// Run one root process on each of `roots.len()` scheduler threads.
@@ -822,17 +885,26 @@ impl BeamProgram {
         sample: &mut dyn FnMut(usize),
     ) -> Result<HostTerm, BeamError> {
         let mut sample = Some(sample);
-        self.execute_issued(module, function, arguments, Issuer::Unchecked, &mut sample)
+        self.execute_issued(
+            module,
+            function,
+            arguments,
+            Issuer::Unchecked,
+            &mut sample,
+            false,
+        )
     }
 
     /// Run an exported function as the root process with the initial
     /// capabilities of `issuer`, as [`BeamProgram::execute_with_policy`] and
-    /// [`BeamProgram::execute_with_policy_module`] describe.
+    /// [`BeamProgram::execute_with_policy_module`] describe. With
+    /// `system_root`, the root process is a system process, as the `init`
+    /// process of [`BeamProgram::boot`] is.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let result = program.execute_issued("process_probe", "main", &[], Issuer::Host(&AllowAll))?;
+    /// let result = program.execute_issued("process_probe", "main", &[], Issuer::Host(&AllowAll), &mut None, false)?;
     /// ```
     fn execute_issued(
         &self,
@@ -841,12 +913,16 @@ impl BeamProgram {
         arguments: &[HostTerm],
         issuer: Issuer,
         sample: &mut Option<&mut dyn FnMut(usize)>,
+        system_root: bool,
     ) -> Result<HostTerm, BeamError> {
         let initial_mode = InitialMode::read();
         let mut scheduler = match issuer {
             Issuer::Unchecked => Scheduler::without_checks((*self.atoms).clone()),
             Issuer::Host(_) | Issuer::Module { .. } => Scheduler::new((*self.atoms).clone()),
         };
+        if system_root {
+            scheduler.mark_root_system();
+        }
         scheduler.code = CodeTable::new(self.modules.clone());
         // Each argument of another table is imported into the table of the
         // run. `run_root` then runs with terms of one table.

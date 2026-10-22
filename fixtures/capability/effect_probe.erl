@@ -3,6 +3,7 @@
 -include_lib("kernel/include/file.hrl").
 -export([
     spawn/0,
+    spawn_system_process/0,
     spawn_link/0,
     spawn_opt/0,
     spawn_opt_link/0,
@@ -87,6 +88,7 @@
     inspect_closed/0,
     inspect_names/0,
     module_loaded/0,
+    loaded/0,
     get_module_info/0,
     get_module_info_1/0,
     finish_loading/0,
@@ -110,6 +112,11 @@
 %% changes only the disposition of SIGUSR2.
 
 spawn() -> attempt(fun() -> erlang:spawn(?MODULE, done, []) end).
+
+%% Each test runs it without `spawn`: a system process that exits stops the
+%% run (erl_process.c:14186-14188).
+spawn_system_process() ->
+    attempt(fun() -> erts_internal:spawn_system_process(?MODULE, done, []) end).
 
 spawn_link() -> attempt(fun() -> erlang:spawn_link(?MODULE, done, []) end).
 
@@ -419,6 +426,8 @@ inspect_names() ->
 %% capability with `load`, and `erlang:module_loaded/1` and
 %% `erlang:get_module_info/2` check it with `inspect` for the module name.
 module_loaded() -> attempt(fun() -> erlang:module_loaded(?MODULE) end).
+
+loaded() -> attempt(fun() -> erlang:loaded() end).
 
 get_module_info() -> attempt(fun() -> erlang:get_module_info(?MODULE, module) end).
 
@@ -973,8 +982,10 @@ signals() ->
 %% The `modules` constraint of `code` compares the module atom of the
 %% `inspect` entries, and each module of the list of the `load` entry. An
 %% empty list has no module name, so it only needs the `load` operation.
+%% `erlang:loaded/0` needs `inspect` for each loaded module.
 code_names() ->
     [
+        attempt(fun() -> erlang:loaded() end),
         attempt(fun() -> erlang:module_loaded(?MODULE) end),
         attempt(fun() -> erlang:module_loaded(lists) end),
         attempt(fun() -> erlang:get_module_info(?MODULE, module) end),

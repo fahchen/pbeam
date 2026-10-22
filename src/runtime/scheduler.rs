@@ -42,7 +42,7 @@ use crate::{
     error::{BeamError, error},
     term::{
         Atom, AtomTable, Group, LiveBytes, MapDrain, PortId, ProcessId, Reference,
-        SMALL_INTEGER_MIN, Term, external::block_hash,
+        SMALL_INTEGER_MIN, Term, external::block_hash, print_term,
     },
 };
 
@@ -459,6 +459,11 @@ pub(super) struct Scheduler {
     /// The policy process of a run with a policy module, or `None` with a
     /// Rust policy.
     policy: Option<PolicyProcess>,
+    /// The system processes of this scheduler, as the ERTS
+    /// `ERTS_STC_FLG_SYSTEM_PROC` static flag: the `init` process of a boot
+    /// and each process of `erts_internal:spawn_system_process/3`. The exit
+    /// of one stops the run (see [`Self::finish_current`]).
+    system: HashSet<ProcessId>,
     /// True when the run skips each capability check, as if each effect
     /// entry were `ambient` (section "Capability" of
     /// `docs/effect-inventory.md`). The launcher sets it in
@@ -527,6 +532,7 @@ impl Scheduler {
             delegations: Delegations::default(),
             release: ReleaseStack::new(),
             policy: None,
+            system: HashSet::new(),
             skip_checks: false,
             node: Node::single(),
             multi: false,
@@ -569,6 +575,29 @@ impl Scheduler {
         // so the clocks of the threads agree.
         scheduler.timers = Timers::with_origin(origin);
         scheduler
+    }
+
+    /// Mark the process `id` as a system process (see [`Self::system`]).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.mark_system(pid);
+    /// ```
+    pub(super) fn mark_system(&mut self, id: ProcessId) {
+        self.system.insert(id);
+    }
+
+    /// Mark the root process as a system process, before it starts, as ERTS
+    /// starts its first process `init` (`erl_init.c:355-399`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.mark_root_system();
+    /// ```
+    pub(super) fn mark_root_system(&mut self) {
+        self.system.insert(self.root);
     }
 
     /// Return the node of this scheduler.
@@ -3386,14 +3415,33 @@ impl Scheduler {
     ///
     /// # Errors
     ///
-    /// The error of [`Self::exit_links`].
+    /// The error of [`Self::exit_links`]. The exit of a system process (see
+    /// [`Self::system`]) stops the run with the runtime error `System
+    /// process <Pid> terminated: <Reason>`, with the terms as ERTS prints
+    /// them, before the first step. ERTS stops the emulator with this text
+    /// and a crash dump (`erl_process.c:14186-14188`); PBeam writes no crash
+    /// dump.
     pub(super) fn finish_current(
         &mut self,
         reason: Term,
         result: Option<Term>,
     ) -> Result<(), BeamError> {
+        let id = self.current_process_mut().id;
+        // The first step of the exit of a system process stops the run.
+        if self.current_process_mut().continue_exit.is_none() && self.system.contains(&id) {
+            let text = |term: &Term| -> String {
+                print_term(term, &self.atoms)
+                    .into_iter()
+                    .map(char::from)
+                    .collect()
+            };
+            return Err(error(format!(
+                "System process {} terminated: {}",
+                text(&Term::Pid(id)),
+                text(&reason)
+            )));
+        }
         let process = self.current_process_mut();
-        let id = process.id;
         let mut next = match process.continue_exit.take() {
             Some(next) => next,
             None => {
