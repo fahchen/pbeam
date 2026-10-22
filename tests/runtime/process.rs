@@ -253,3 +253,17 @@ fn gives_the_links_of_a_process_as_process_info_2() {
         ]
     );
 }
+
+#[test]
+fn reads_each_item_of_another_process_that_a_remote_request_carries() {
+    // A request to a process of another scheduler carries only these items,
+    // and its owner reads them as the target, so each one must be supported
+    // for a process that is not the caller.
+    let atoms = AtomTable::new();
+    let process = ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![]);
+    for name in super::OTHER_PROCESS_INFO_ITEMS {
+        let item = Term::static_atom(name);
+        let value = process.info(&atoms, &item, 0, 0, false, None).unwrap();
+        assert!(value.is_some(), "{name}");
+    }
+}
