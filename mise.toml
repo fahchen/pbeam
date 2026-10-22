@@ -149,7 +149,7 @@ for path in "$output" "$bundle"; do
     fi
 done
 if [ -f "examples/$usage_name/mix.exs" ]; then
-    target/release/pbeam_bundle bundle "target/examples/$usage_name" "$bundle" "${usage_name}_run" main "target/examples/$usage_name/pbeam.start.list"
+    target/release/pbeam_bundle bundle "target/examples/$usage_name" "$bundle" "${usage_name}_run" main "target/examples/$usage_name/pbeam.start.list" "examples/$usage_name/nif-allowlist.txt"
 else
     entry=Elixir.$(printf '%s' "$usage_name" | awk -F_ '{ for (i = 1; i <= NF; i++) printf "%s%s", toupper(substr($i, 1, 1)), substr($i, 2) }')
     target/release/pbeam_bundle fixture "$bundle" "$entry" main "target/examples/$usage_name/pbeam.start.list" "target/examples/$usage_name/pbeam.beams" "target/examples/$usage_name/consolidated"

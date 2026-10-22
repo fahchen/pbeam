@@ -38,7 +38,7 @@ use std::sync::Once;
 use common::pinned_beam;
 use pbeam_runtime::{
     BeamError, BeamModule, BeamProgram, Binding, HostTerm, Job, Library, NativeResult, NifContext,
-    RegistrationError, Term, nif_manifest_gaps, register_library,
+    NifGap, RegistrationError, Term, nif_manifest_gaps, register_library,
 };
 
 const EXTENSION_PROBE: &[u8] = include_bytes!("../../fixtures/extension/extension_probe.beam");
@@ -412,6 +412,14 @@ fn shows_the_registered_library_to_the_nif_manifest_gate() {
     let probe = BeamModule::load(EXTENSION_PROBE).unwrap();
     assert_eq!(
         nif_manifest_gaps(&probe),
-        ["extension_probe:unbound/1: NIF function has no PBeam binding"]
+        [NifGap::Unbound {
+            library: "extension_probe".to_owned(),
+            function: "unbound".to_owned(),
+            arity: 1,
+        }]
+    );
+    assert_eq!(
+        nif_manifest_gaps(&probe)[0].to_string(),
+        "extension_probe:unbound/1: NIF function has no PBeam binding"
     );
 }

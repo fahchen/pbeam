@@ -6,6 +6,9 @@ use pbeam_runtime::{BeamModule, nif_manifest_gaps};
 /// Return the items of the gate for the BEAM file `bytes`.
 fn gaps(bytes: &[u8]) -> Vec<String> {
     nif_manifest_gaps(&BeamModule::load(bytes).expect("the fixture loads"))
+        .iter()
+        .map(ToString::to_string)
+        .collect()
 }
 
 #[test]
@@ -57,5 +60,30 @@ fn reports_a_library_name_that_is_not_a_literal_string_with_its_module() {
             "../../fixtures/nif_gate/dynamic/nif_gate_dynamic.beam"
         )),
         [item, item]
+    );
+}
+
+#[test]
+fn passes_a_library_name_that_is_not_a_literal_string_of_a_module_with_a_library() {
+    // `load(Path)` passes its argument, as `crypto` builds its path at run
+    // time. The module selects the PBeam library of `prim_tty`, as ERTS
+    // selects a static library (`beam/erl_nif.c:4743-4757`).
+    assert!(
+        gaps(include_bytes!(
+            "../../fixtures/nif_gate/registered_dynamic/prim_tty.beam"
+        ))
+        .is_empty()
+    );
+}
+
+#[test]
+fn passes_the_windows_only_library_load_of_pubkey_os_cacerts() {
+    // The call of `erlang:load_nif/2` runs only on Windows
+    // (`pubkey_os_cacerts.erl:265-275`), and the module has no library.
+    assert!(
+        gaps(include_bytes!(
+            "../../fixtures/nif_gate/windows_only/pubkey_os_cacerts.beam"
+        ))
+        .is_empty()
     );
 }

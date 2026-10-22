@@ -48,7 +48,7 @@ mod prim_tty;
 mod zlib;
 mod zstd;
 
-pub use manifest::nif_manifest_gaps;
+pub use manifest::{NifGap, nif_manifest_gaps};
 pub(super) use prim_tty::dirty_write_result;
 
 /// The native binding of one NIF of a module. ERTS finds a NIF of a library

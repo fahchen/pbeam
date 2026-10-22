@@ -29,7 +29,7 @@ pub use extension::{
 };
 pub use host::signal::install_start_dispositions;
 pub(crate) use interpreter::bif::{BifId, import_kind, resolve as resolve_bif};
-pub use interpreter::{BeamProgram, nif_manifest_gaps};
+pub use interpreter::{BeamProgram, NifGap, nif_manifest_gaps};
 
 use crate::term::Term;
 

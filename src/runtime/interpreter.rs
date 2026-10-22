@@ -40,7 +40,7 @@ mod code_table;
 mod native;
 
 pub(crate) use native::has_static_library;
-pub use native::nif_manifest_gaps;
+pub use native::{NifGap, nif_manifest_gaps};
 
 pub(super) use bif::BifResult;
 pub(super) use code_table::{CodeTable, LoadedModule};
