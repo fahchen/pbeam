@@ -573,8 +573,29 @@ impl EtsTables {
         id: &Term,
         caller: ProcessId,
     ) -> Option<RwLockReadGuard<'_, Table>> {
-        let table = read(self.lookup(atoms, id)?.1);
+        let lock = self.lookup(atoms, id)?.1;
+        let table = loop {
+            let table = read(lock);
+            if !table.busy_for(caller) {
+                break table;
+            }
+            drop(table);
+            self.complete_busy(atoms, &mut write(lock));
+        };
         table.allows(caller, Operation::Read).then_some(table)
+    }
+
+    /// Complete the list insert of another process that holds the table
+    /// `table` busy, and keep its result for that process. Each operation
+    /// of a process completes such an insert first (`erl_db.c:769-798`).
+    /// The BIFs complete it before they take the table, but a process of
+    /// another scheduler can start an insert between that step and the
+    /// lock of the operation.
+    fn complete_busy(&self, atoms: &AtomTable, table: &mut Table) {
+        let owner = table.busy.as_ref().map(|busy| busy.owner);
+        if let (Some(owner), (_, Some(value))) = (owner, table.step_busy(atoms, i64::MAX)) {
+            self.put_result(owner, value);
+        }
     }
 
     /// Return the table that `id` identifies under its write lock, when the
@@ -598,7 +619,10 @@ impl EtsTables {
         id: &Term,
         caller: ProcessId,
     ) -> Option<RwLockWriteGuard<'_, Table>> {
-        let table = write(self.lookup(atoms, id)?.1);
+        let mut table = write(self.lookup(atoms, id)?.1);
+        if table.busy_for(caller) {
+            self.complete_busy(atoms, &mut table);
+        }
         table.allows(caller, Operation::Write).then_some(table)
     }
 
@@ -1775,6 +1799,12 @@ impl Table {
         if self.fixed_by.is_empty() {
             self.drop_retained();
         }
+    }
+
+    /// Return whether a list insert of a process other than `caller`
+    /// holds the table busy.
+    fn busy_for(&self, caller: ProcessId) -> bool {
+        (self.busy.as_ref()).is_some_and(|busy| busy.owner != caller)
     }
 
     /// Return whether a clear of a fixed table did not finish.

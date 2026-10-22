@@ -624,14 +624,16 @@ pub(super) fn insert_list(
         // The insert ended in another turn: the process reads its result,
         // as the driver reads `ctx->return_value`, also after the table
         // went away (`erl_db.c:2223-2244`).
+        // The check of the table goes first: an insert that another
+        // scheduler completes keeps its result before the table can go.
         let caller = context.scheduler.current_process_mut().id;
-        if let Some(result) = context.scheduler.ets.shared().take_result(caller) {
+        let ets = context.scheduler.ets.shared();
+        let gone = ets.find(&context.scheduler.atoms, &table).is_none();
+        if let Some(result) = ets.take_result(caller) {
             return Ok(Value(result));
         }
-        if (context.scheduler.ets.shared())
-            .find(&context.scheduler.atoms, &table)
-            .is_none()
-        {
+        drop(ets);
+        if gone {
             return Ok(BifResult::badarg());
         }
     }

@@ -1619,3 +1619,29 @@ fn a_clear_step_after_the_end_of_the_clear_does_nothing() {
     );
     assert_eq!(tables.step_clear(&atoms, Reference(0), 8), (true, 0));
 }
+
+#[test]
+fn a_read_or_a_write_completes_the_list_insert_of_another_process() {
+    // A process of another scheduler can start a list insert between the
+    // completion step of a BIF and its lock, so the lock completes it
+    // first and keeps the result for its starter (`erl_db.c:769-798`).
+    let atoms = AtomTable::new();
+    let mut tables = EtsTables::default();
+    for id in 0..2 {
+        let mut table = Table::new(ProcessId(1), Access::Public, 1, TableType::Set);
+        let objects = vec![vec![Term::Integer(id)], vec![Term::Integer(id + 10)]];
+        table.busy = Some(Busy::new(ProcessId(1), objects, false));
+        tables.create(Reference(id as u64), None, table);
+    }
+    let read = tables.read(&atoms, &Term::Reference(Reference(0)), ProcessId(2));
+    assert!(read.is_some_and(|table| table.busy.is_none() && table.len() == 2));
+    let write = tables.write(&atoms, &Term::Reference(Reference(1)), ProcessId(2));
+    assert!(write.is_some_and(|table| table.busy.is_none() && table.len() == 2));
+    assert!(tables.take_result(ProcessId(1)).is_some());
+    // The starter itself takes its busy table with no completion.
+    let mut table = Table::new(ProcessId(1), Access::Public, 1, TableType::Set);
+    table.busy = Some(Busy::new(ProcessId(1), vec![vec![Term::Integer(5)]], false));
+    tables.create(Reference(2), None, table);
+    let own = tables.write(&atoms, &Term::Reference(Reference(2)), ProcessId(1));
+    assert!(own.is_some_and(|table| table.busy.is_some()));
+}
