@@ -12,7 +12,7 @@
 //! literal string, so that the gate can name the library that the module
 //! references.
 
-use super::{binding, library};
+use super::Linked;
 use crate::beam::{BeamModule, ImportKind, code::Instruction, code::Operand};
 use crate::term::Term;
 
@@ -56,7 +56,7 @@ use crate::term::Term;
 pub fn nif_manifest_gaps(module: &BeamModule) -> Vec<String> {
     let name = &module.name;
     let instructions = &module.instructions;
-    let static_library = library(name);
+    let linked = Linked::of(name);
     let mut gaps = Vec::new();
     for (index, instruction) in instructions.iter().enumerate() {
         let Instruction::CallExternal { import, .. } = instruction else {
@@ -69,7 +69,7 @@ pub fn nif_manifest_gaps(module: &BeamModule) -> Vec<String> {
             None => gaps.push(format!(
                 "{name}: the library name of erlang:load_nif/2 is not a literal string"
             )),
-            Some(path) if static_library.is_none() => {
+            Some(path) if linked.is_none() => {
                 gaps.push(format!(
                     "{name}: NIF library \"{path}\" has no PBeam bindings"
                 ));
@@ -77,7 +77,7 @@ pub fn nif_manifest_gaps(module: &BeamModule) -> Vec<String> {
             Some(_) => {}
         }
     }
-    let Some(static_library) = static_library else {
+    let Some(linked) = linked else {
         return gaps;
     };
     let declared: Vec<(&str, u32)> = instructions
@@ -87,8 +87,8 @@ pub fn nif_manifest_gaps(module: &BeamModule) -> Vec<String> {
             _ => None,
         })
         .collect();
-    for &(function, arity) in static_library.functions {
-        if declared.contains(&(function, arity)) && binding(name, function, arity).is_none() {
+    for &(function, arity) in linked.functions() {
+        if declared.contains(&(function, arity)) && !linked.binds(function, arity) {
             gaps.push(format!(
                 "{name}:{function}/{arity}: NIF function has no PBeam binding"
             ));

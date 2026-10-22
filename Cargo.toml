@@ -140,6 +140,10 @@ name = "nif_gate"
 path = "tests/integration/nif_gate.rs"
 
 [[test]]
+name = "extension_library"
+path = "tests/integration/extension_library.rs"
+
+[[test]]
 name = "arith"
 path = "tests/integration/arith.rs"
 

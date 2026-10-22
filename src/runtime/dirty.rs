@@ -45,7 +45,7 @@ use std::{
 };
 
 use super::{
-    Job, NativeFn, NativeResult,
+    Job, NativeFn, NativeResult, NifContext,
     host::output::{IovecWrite, IovecWritten},
     process::Priority,
     scheduler::run_queue::RunQueue,
@@ -70,9 +70,9 @@ const DIRTY_IO_THREADS: usize = 10;
 pub(super) enum Work {
     /// The host write of `prim_tty:write_nif/2`.
     Write(IovecWrite),
-    /// A registered native function with the arguments of its call.
+    /// An extension binding with the arguments of its call.
     Native {
-        /// The function of the registration.
+        /// The run function of the binding.
         function: NativeFn,
         /// The arguments of the call.
         arguments: Vec<Term>,
@@ -94,7 +94,7 @@ impl Work {
             Work::Native {
                 function,
                 arguments,
-            } => Output::Native(function(&arguments)),
+            } => Output::Native(function(&mut NifContext::dirty(), &arguments)),
         }
     }
 }
@@ -105,7 +105,7 @@ impl Work {
 pub(super) enum Output {
     /// The end of a host write.
     Written(IovecWritten),
-    /// The result of a registered native function.
+    /// The result of an extension binding.
     Native(Result<NativeResult, BeamError>),
 }
 

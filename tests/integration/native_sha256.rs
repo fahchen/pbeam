@@ -4,7 +4,7 @@
 //! before a run.
 
 use pbeam_runtime::{
-    BeamError, BeamProgram, Job, NativeResult, Term, register_native, unregister_native,
+    BeamError, BeamProgram, Binding, Job, Library, NativeResult, NifContext, Term, register_library,
 };
 use sha2::{Digest, Sha256};
 
@@ -18,12 +18,12 @@ const SHA256_ABC: [u8; 32] = [
 
 /// Return the SHA-256 digest of a binary argument, and `badarg` for any
 /// other argument, as a NIF of the declaration does.
-fn sha256(arguments: &[Term]) -> Result<NativeResult, BeamError> {
+fn sha256(context: &mut NifContext<'_>, arguments: &[Term]) -> Result<NativeResult, BeamError> {
     match arguments.first() {
         Some(Term::Binary(data)) => Ok(NativeResult::Value(Term::binary(
             Sha256::digest(&data[..]).to_vec(),
         ))),
-        _ => Ok(NativeResult::badarg()),
+        _ => Ok(context.badarg()),
     }
 }
 
@@ -48,13 +48,26 @@ fn caught(program: &BeamProgram, class: &str, reason: &str) -> Term {
     ])
 }
 
+/// The extension library of the example: the declaration `sha256/1` and its
+/// binding.
+static NATIVE_HASH_LIBRARY: Library = Library {
+    module: "Elixir.NativeHash",
+    functions: &[("sha256", 1)],
+    bindings: &[Binding {
+        name: "sha256",
+        arity: 1,
+        job: Job::Normal,
+        run: sha256,
+    }],
+    load: None,
+    unbound_fails: false,
+};
+
 #[test]
 fn computes_the_declared_sha256_native_as_the_example() {
-    // The registry is global. The test unregisters its own MFA first, so a
-    // previous test of this binary leaves no entry, and it unregisters the
-    // MFA again at the end.
+    // The registry is global and keeps a library for the life of the
+    // process. This test is the only test of the binary that registers it.
     let program = BeamProgram::load(&[NATIVE_HASH]).unwrap();
-    let _ = unregister_native("Elixir.NativeHash", "sha256", 1);
 
     // Without a registration, the declarations fail the check with the MFA,
     // and a call still raises the error of the stub before any native runs.
@@ -68,7 +81,7 @@ fn computes_the_declared_sha256_native_as_the_example() {
         caught(&program, "error", "pbeam_native_only")
     );
 
-    register_native("Elixir.NativeHash", "sha256", 1, Job::Normal, sha256).unwrap();
+    register_library(&NATIVE_HASH_LIBRARY).unwrap();
 
     // The declaration passes the check, and the known vector returns.
     program.validate_native_declarations().unwrap();
@@ -85,6 +98,4 @@ fn computes_the_declared_sha256_native_as_the_example() {
         run(&program, "invalid", Term::Integer(1)),
         caught(&program, "error", "badarg")
     );
-
-    unregister_native("Elixir.NativeHash", "sha256", 1);
 }

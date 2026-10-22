@@ -1,22 +1,28 @@
 use pbeam_runtime::{
-    Atom, BeamProgram, Job, NativeResult, Term, register_native, unregister_native,
+    Atom, BeamProgram, Binding, Job, Library, NativeResult, NifContext, Term, register_library,
 };
 
 const NATIVE_PROBE: &[u8] = include_bytes!("../../fixtures/native/native_probe.beam");
 
-fn add(arguments: &[Term]) -> Result<NativeResult, pbeam_runtime::BeamError> {
+fn add(
+    context: &mut NifContext<'_>,
+    arguments: &[Term],
+) -> Result<NativeResult, pbeam_runtime::BeamError> {
     match (arguments.first(), arguments.get(1)) {
         (Some(Term::Integer(left)), Some(Term::Integer(right))) => {
             Ok(NativeResult::Value(Term::Integer(left + right)))
         }
-        _ => Ok(NativeResult::badarg()),
+        _ => Ok(context.badarg()),
     }
 }
 
-fn hidden(arguments: &[Term]) -> Result<NativeResult, pbeam_runtime::BeamError> {
+fn hidden(
+    context: &mut NifContext<'_>,
+    arguments: &[Term],
+) -> Result<NativeResult, pbeam_runtime::BeamError> {
     match arguments.first() {
         Some(Term::Integer(value)) => Ok(NativeResult::Value(Term::Integer(value + 100))),
-        _ => Ok(NativeResult::badarg()),
+        _ => Ok(context.badarg()),
     }
 }
 
@@ -24,12 +30,32 @@ fn atom(name: &str) -> Term {
     Term::Atom(Atom::from_static(name).unwrap())
 }
 
+/// The library of the fixture: both functions of its `-nifs` list have a
+/// binding.
+static NATIVE_PROBE_LIBRARY: Library = Library {
+    module: "native_probe",
+    functions: &[("add", 2), ("hidden", 1)],
+    bindings: &[
+        Binding {
+            name: "add",
+            arity: 2,
+            job: Job::Normal,
+            run: add,
+        },
+        Binding {
+            name: "hidden",
+            arity: 1,
+            job: Job::Normal,
+            run: hidden,
+        },
+    ],
+    load: None,
+    unbound_fails: false,
+};
+
 #[test]
 fn registered_mfa_reaches_rust_and_unregistered_resolves_to_beam() {
-    let _ = unregister_native("native_probe", "add", 2);
-    let _ = unregister_native("native_probe", "hidden", 1);
-    register_native("native_probe", "add", 2, Job::Normal, add).unwrap();
-    register_native("native_probe", "hidden", 1, Job::Normal, hidden).unwrap();
+    register_library(&NATIVE_PROBE_LIBRARY).unwrap();
 
     let program = BeamProgram::load(&[NATIVE_PROBE]).unwrap();
 
@@ -59,7 +85,4 @@ fn registered_mfa_reaches_rust_and_unregistered_resolves_to_beam() {
     assert_eq!(elements.len(), 2);
     assert_eq!(elements[0], atom("error"));
     assert_eq!(elements[1], atom("badarg"));
-
-    let _ = unregister_native("native_probe", "add", 2);
-    let _ = unregister_native("native_probe", "hidden", 1);
 }

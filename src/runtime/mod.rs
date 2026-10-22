@@ -4,11 +4,11 @@ mod buffers;
 mod capability;
 mod dirty;
 mod ets;
+mod extension;
 mod files;
 mod host;
 mod interpreter;
 mod mailbox;
-mod native_registry;
 mod pcre2;
 mod persistent_term;
 mod port;
@@ -23,13 +23,13 @@ mod tty;
 mod unicode;
 
 pub use capability::{AllowAll, Capability, CapabilityKind, Constraint, Operation, Policy};
+pub use extension::{
+    Binding, Job, Library, LoadFn, NativeFn, NativeResult, NifContext, RegistrationError,
+    register_library,
+};
 pub use host::signal::install_start_dispositions;
 pub(crate) use interpreter::bif::{BifId, import_kind, resolve as resolve_bif};
 pub use interpreter::{BeamProgram, nif_manifest_gaps};
-pub use native_registry::{
-    Job, NativeFn, NativeResult, RegistrationError, lookup_native, register_native,
-    unregister_native,
-};
 
 use crate::term::Term;
 

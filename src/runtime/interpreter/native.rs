@@ -17,13 +17,21 @@
 //! A library without bindings, such as `zstd`, has only the function table:
 //! `erlang:load_nif/2` checks it, and each call of a function in it gives
 //! the runtime error of `Library::unbound_fails`.
+//!
+//! An extension crate registers a library of the public type
+//! [`crate::runtime::Library`] before the run (see
+//! [`crate::runtime::register_library`]). A module has at most one
+//! library, so the dispatch, `load_nif`, and the manifest gate find the
+//! library of a module as a [`Linked`]: a library of this file, or else an
+//! extension library.
 
 use super::bif::denial;
 use super::*;
 use crate::runtime::{
-    Job,
+    Job, NifContext,
     capability::{CapabilityKind, Operation},
     dirty::Work,
+    extension,
     host::filename_encoding,
     unicode::is_native_filename,
 };
@@ -206,39 +214,122 @@ fn library(module: &str) -> Option<&'static Library> {
     Some(&LIBRARIES[index.ok()?])
 }
 
-/// Return the registered binding of exactly `module:name/arity`, or `None`
-/// when PBeam has no binding for the MFA.
+/// Return the binding of exactly `name/arity` in the static `library`, or
+/// `None`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(binding("prim_tty", "write_nif", 2).is_some());
-/// assert!(binding("prim_tty", "write_nif", 1).is_none());
-/// assert!(binding("nif_error_probe", "nif_stub", 0).is_none());
+/// let prim_tty = library("prim_tty").unwrap();
+/// assert!(static_binding(prim_tty, "write_nif", 2).is_some());
 /// ```
-fn binding(module: &str, name: &str, arity: u32) -> Option<&'static Binding> {
-    let bindings = library(module)?.bindings;
+fn static_binding(library: &'static Library, name: &str, arity: u32) -> Option<&'static Binding> {
+    let bindings = library.bindings;
     let index =
         bindings.binary_search_by_key(&(name, arity), |binding| (binding.name, binding.arity));
     Some(&bindings[index.ok()?])
 }
 
-/// Return the runtime error of `module:name/arity` when the function is in
-/// a library whose functions without a binding fail, such as `crypto`, or
-/// `None` when the function runs its BEAM stub body.
+/// Return whether PBeam links a static NIF library of `module` itself.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(unbound_error("crypto", "info_lib", 0).is_some());
-/// assert!(unbound_error("prim_file", "open_nif", 2).is_none());
+/// assert!(has_static_library("prim_tty"));
+/// assert!(!has_static_library("native_probe"));
 /// ```
-fn unbound_error(module: &str, name: &str, arity: u32) -> Option<BeamError> {
-    let library = library(module).filter(|library| library.unbound_fails)?;
+pub(crate) fn has_static_library(module: &str) -> bool {
+    library(module).is_some()
+}
+
+/// The NIF library of a module: a static library of this file, or else a
+/// registered extension library. Registration rejects an extension library
+/// of a module with a static library, so a module has at most one library.
+#[derive(Clone, Copy)]
+enum Linked {
+    /// A library that PBeam links itself.
+    Static(&'static Library),
+    /// A library that an extension crate registers.
+    Extension(&'static extension::Library),
+}
+
+impl Linked {
+    /// Return the library of `module`, or `None` when the module has no
+    /// library.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(matches!(Linked::of("prim_tty"), Some(Linked::Static(_))));
+    /// assert!(Linked::of("runtime_tools").is_none());
+    /// ```
+    fn of(module: &str) -> Option<Self> {
+        library(module)
+            .map(Linked::Static)
+            .or_else(|| extension::library(module).map(Linked::Extension))
+    }
+
+    /// Return the functions of the library, in the order of its `funcs`.
+    fn functions(self) -> &'static [(&'static str, u32)] {
+        match self {
+            Linked::Static(library) => library.functions,
+            Linked::Extension(library) => library.functions,
+        }
+    }
+
+    /// Return whether the library has a binding of exactly `name/arity`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(Linked::of("prim_tty").unwrap().binds("write_nif", 2));
+    /// ```
+    fn binds(self, name: &str, arity: u32) -> bool {
+        match self {
+            Linked::Static(library) => static_binding(library, name, arity).is_some(),
+            Linked::Extension(library) => extension_binding(library, name, arity).is_some(),
+        }
+    }
+
+    /// Return the runtime error of `module:name/arity` when the function is
+    /// in a library whose functions without a binding fail, such as
+    /// `crypto`, or `None` when the function runs its BEAM stub body.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let crypto = Linked::of("crypto").unwrap();
+    /// assert!(crypto.unbound_error("crypto", "info_lib", 0).is_some());
+    /// let prim_file = Linked::of("prim_file").unwrap();
+    /// assert!(prim_file.unbound_error("prim_file", "open_nif", 2).is_none());
+    /// ```
+    fn unbound_error(self, module: &str, name: &str, arity: u32) -> Option<BeamError> {
+        let fails = match self {
+            Linked::Static(library) => library.unbound_fails,
+            Linked::Extension(library) => library.unbound_fails,
+        };
+        (fails && self.functions().contains(&(name, arity)))
+            .then(|| error(format!("{module}:{name}/{arity} NIF is not supported")))
+    }
+}
+
+/// Return the binding of exactly `name/arity` in the extension `library`,
+/// or `None`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(extension_binding(&EXTENSION_PROBE, "add", 2).is_some());
+/// ```
+fn extension_binding(
+    library: &'static extension::Library,
+    name: &str,
+    arity: u32,
+) -> Option<&'static extension::Binding> {
     library
-        .functions
-        .contains(&(name, arity))
-        .then(|| error(format!("{module}:{name}/{arity} NIF is not supported")))
+        .bindings
+        .iter()
+        .find(|binding| binding.name == name && binding.arity == arity)
 }
 
 /// Run the native binding of `module:name/arity`, with the arity of
@@ -248,9 +339,9 @@ fn unbound_error(module: &str, name: &str, arity: u32) -> Option<BeamError> {
 /// library whose functions without a binding fail, such as `crypto`, gives
 /// the runtime error `M:F/A NIF is not supported`.
 ///
-/// A registered native function runs at once for the job `Normal`. For a
+/// An extension binding runs at once for the job `Normal`. For a
 /// `CpuBound` or `IoBound` job, the result is `BifResult::Dirty` with the
-/// work of the call, and the function runs on a dirty thread.
+/// work of the call, and the binding runs on a dirty thread.
 ///
 /// # Examples
 ///
@@ -272,32 +363,53 @@ pub(super) fn call(
     arguments: &[Term],
 ) -> Option<(Job, Result<BifResult, BeamError>)> {
     let arity = u32::try_from(arguments.len()).ok()?;
-    // A manually registered native function takes precedence over the
-    // static binding table, so a registered MFA runs as a NIF at function
-    // entry, as ERTS installs NIF dispatch over the first instruction.
-    if let Some((job, function)) = crate::runtime::native_registry::lookup(module, name, arity) {
-        let result = match job {
-            Job::Normal => function(arguments).map(to_bif_result),
-            Job::CpuBound | Job::IoBound => Ok(BifResult::Dirty(Work::Native {
-                function,
-                arguments: arguments.to_vec(),
-            })),
-        };
-        return Some((job, result));
-    }
-    let Some(binding) = binding(module, name, arity) else {
-        return unbound_error(module, name, arity).map(|error| (Job::Normal, Err(error)));
+    let linked = Linked::of(module)?;
+    let bound = match linked {
+        Linked::Static(library) => static_binding(library, name, arity)
+            .map(|binding| (binding.job, (binding.run)(scheduler, arguments))),
+        Linked::Extension(library) => extension_binding(library, name, arity)
+            .map(|binding| (binding.job, run_extension(scheduler, binding, arguments))),
     };
-    Some((binding.job, (binding.run)(scheduler, arguments)))
+    bound.or_else(|| {
+        linked
+            .unbound_error(module, name, arity)
+            .map(|error| (Job::Normal, Err(error)))
+    })
 }
 
-/// Map the narrow result of a registered native function to the interpreter
-/// result. A registered native raises only the class `error`, as a NIF does.
+/// Run the extension `binding` with `arguments`: at once for the job
+/// `Normal`, or as the work of a dirty thread for a `CpuBound` or `IoBound`
+/// job.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(matches!(to_bif_result(NativeResult::badarg()), BifResult::Raise { .. }));
+/// // A `CpuBound` binding gives its work to the dirty CPU pool.
+/// assert!(matches!(run_extension(&mut scheduler, &CPU_BINDING, &[]), Ok(BifResult::Dirty(_))));
+/// ```
+fn run_extension(
+    scheduler: &mut Scheduler,
+    binding: &extension::Binding,
+    arguments: &[Term],
+) -> Result<BifResult, BeamError> {
+    match binding.job {
+        Job::Normal => {
+            (binding.run)(&mut NifContext::new(&mut scheduler.atoms), arguments).map(to_bif_result)
+        }
+        Job::CpuBound | Job::IoBound => Ok(BifResult::Dirty(Work::Native {
+            function: binding.run,
+            arguments: arguments.to_vec(),
+        })),
+    }
+}
+
+/// Map the narrow result of an extension binding to the interpreter result.
+/// A binding raises only the class `error`, as a NIF does.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(to_bif_result(context.badarg()), BifResult::Raise { .. }));
 /// ```
 pub(super) fn to_bif_result(result: crate::runtime::NativeResult) -> BifResult {
     match result {
@@ -322,15 +434,18 @@ pub(super) fn to_bif_result(result: crate::runtime::NativeResult) -> BifResult {
 ///    else the call raises `error:capability_denied` and loads nothing.
 ///    The check comes after the argument check and before the library
 ///    state, so a denied call gives the same result for each library.
-/// 3. A module without a PBeam static library gives a runtime error. ERTS
-///    opens the library with `dlopen` (`beam/erl_nif.c:4778-4787`).
+/// 3. A module without a PBeam static library or a registered extension
+///    library gives a runtime error. ERTS opens the library with `dlopen`
+///    (`beam/erl_nif.c:4778-4787`).
 /// 4. When the library of the module is loaded, the result is
 ///    `{error, {reload, Text}}` (`beam/erl_nif.c:4774-4777`).
 /// 5. In the order of the library functions, a function that the module
 ///    does not define gives `{error, {bad_lib, "Function not found
 ///    M:F/A"}}`. When the module has a `-nifs` list, a function that is not
 ///    in it gives `{error, {bad_lib, "Function not declared as nif
-///    M:F/A"}}` (`beam/erl_nif.c:4845-4866`). The loader keeps the `-nifs`
+///    M:F/A"}}` (`beam/erl_nif.c:4845-4866`). A function that is a second
+///    time in the library gives `{error, {bad_lib, "Duplicate NIF entry
+///    for M:F/A"}}` (`beam/erl_nif.c:4896-4900`). The loader keeps the `-nifs`
 ///    list only when a function of the module starts with `nif_start`
 ///    (`jit/asm_load.c:651-661`, `beam/erl_nif.c:4700-4704`).
 /// 6. The load callback of the library runs with `LoadInfo`. A veto that is
@@ -371,7 +486,7 @@ pub(super) fn load_nif(scheduler: &mut Scheduler, caller: &str) -> Result<BifRes
     if let Some(denied) = denial(scheduler, CapabilityKind::Runtime, Operation::LoadNif, None)? {
         return Ok(denied);
     }
-    let Some(library) = library(caller) else {
+    let Some(linked) = Linked::of(caller) else {
         // ponytail: PBeam opens no NIF library; see "NIF stubs" in docs/erts-differences.md.
         return Err(error(format!(
             "erlang:load_nif/2 from {caller} is not supported: PBeam has no native bindings for the module"
@@ -389,7 +504,8 @@ pub(super) fn load_nif(scheduler: &mut Scheduler, caller: &str) -> Result<BifRes
     let has_nifs = instructions
         .iter()
         .any(|instruction| matches!(instruction, Instruction::NifStart { .. }));
-    for &(name, arity) in library.functions {
+    let functions = linked.functions();
+    for (index, &(name, arity)) in functions.iter().enumerate() {
         let defined = instructions.iter().any(|instruction| {
             matches!(instruction, Instruction::FunctionInfo { name: found, arity: found_arity, .. }
                 if found == name && *found_arity == arity)
@@ -406,10 +522,19 @@ pub(super) fn load_nif(scheduler: &mut Scheduler, caller: &str) -> Result<BifRes
             let text = format!("Function not declared as nif {caller}:{name}/{arity}");
             return load_nif_error(&mut scheduler.atoms, "bad_lib", &text);
         }
+        if functions[..index].contains(&(name, arity)) {
+            let text = format!("Duplicate NIF entry for {caller}:{name}/{arity}");
+            return load_nif_error(&mut scheduler.atoms, "bad_lib", &text);
+        }
     }
-    let veto = library
-        .load
-        .map_or(0, |load| load(&arguments[1], &scheduler.atoms));
+    let veto = match linked {
+        Linked::Static(library) => library
+            .load
+            .map_or(0, |load| load(&arguments[1], &scheduler.atoms)),
+        Linked::Extension(library) => library.load.map_or(0, |load| {
+            load(&mut NifContext::new(&mut scheduler.atoms), &arguments[1])
+        }),
+    };
     if veto != 0 {
         let text = format!("Library load-call unsuccessful ({veto}).");
         return load_nif_error(&mut scheduler.atoms, "load", &text);

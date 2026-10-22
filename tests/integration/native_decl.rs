@@ -1,5 +1,6 @@
 use pbeam_runtime::{
-    BeamModule, BeamProgram, Job, NativeResult, Term, register_native, unregister_native,
+    BeamModule, BeamProgram, Binding, Job, Library, NativeResult, NifContext, Term,
+    register_library,
 };
 
 const NATIVE_DECL_PROBE: &[u8] =
@@ -13,12 +14,30 @@ const MARKER: i64 = 90210;
 
 /// Return the marker for a binary argument, and `badarg` for any other
 /// argument, as a NIF of the fixture would.
-fn sha256(arguments: &[Term]) -> Result<NativeResult, pbeam_runtime::BeamError> {
+fn sha256(
+    context: &mut NifContext<'_>,
+    arguments: &[Term],
+) -> Result<NativeResult, pbeam_runtime::BeamError> {
     match arguments.first() {
         Some(Term::Binary(_)) => Ok(NativeResult::Value(Term::Integer(MARKER))),
-        _ => Ok(NativeResult::badarg()),
+        _ => Ok(context.badarg()),
     }
 }
+
+/// The extension library of the fixture: the declaration `sha256/1` and its
+/// binding.
+static NATIVE_DECL_LIBRARY: Library = Library {
+    module: "Elixir.NativeDeclProbe",
+    functions: &[("sha256", 1)],
+    bindings: &[Binding {
+        name: "sha256",
+        arity: 1,
+        job: Job::Normal,
+        run: sha256,
+    }],
+    load: None,
+    unbound_fails: false,
+};
 
 /// Run an exported function of `program` with `arguments`.
 fn run(program: &BeamProgram, module: &str, function: &str, arguments: Vec<Term>) -> Term {
@@ -50,8 +69,22 @@ fn reaches_the_registered_native_through_each_call_path() {
     let program = BeamProgram::load(&[NATIVE_DECL_PROBE, NATIVE_DECL_CALLER]).unwrap();
     let data = || Term::binary(vec![0x61, 0x62, 0x63]);
 
-    let _ = unregister_native("Elixir.NativeDeclProbe", "sha256", 1);
-    register_native("Elixir.NativeDeclProbe", "sha256", 1, Job::Normal, sha256).unwrap();
+    // Without a registration, the stub body runs and raises
+    // `:pbeam_native_only`. It does not give a value. The registry keeps a
+    // library for the life of the process, so this check comes first.
+    let error = program
+        .execute(
+            "Elixir.NativeDeclProbe",
+            "local",
+            &[program.host_term(data())],
+        )
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("pbeam_native_only"),
+        "expected the stub error, got {error}"
+    );
+
+    register_library(&NATIVE_DECL_LIBRARY).unwrap();
 
     // A local call enters the frame of the stub.
     assert_eq!(
@@ -91,21 +124,5 @@ fn reaches_the_registered_native_through_each_call_path() {
             vec![data()]
         ),
         Term::Integer(MARKER)
-    );
-
-    let _ = unregister_native("Elixir.NativeDeclProbe", "sha256", 1);
-
-    // Without a registration, the stub body runs and raises
-    // `:pbeam_native_only`. It does not give a value.
-    let error = program
-        .execute(
-            "Elixir.NativeDeclProbe",
-            "local",
-            &[program.host_term(data())],
-        )
-        .unwrap_err();
-    assert!(
-        error.to_string().contains("pbeam_native_only"),
-        "expected the stub error, got {error}"
     );
 }

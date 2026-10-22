@@ -39,6 +39,7 @@ mod bits;
 mod code_table;
 mod native;
 
+pub(crate) use native::has_static_library;
 pub use native::nif_manifest_gaps;
 
 pub(super) use code_table::{CodeTable, LoadedModule};
@@ -348,20 +349,20 @@ impl BeamProgram {
     }
 
     /// Check each native declaration of the loaded modules against the
-    /// registered native functions. A declaration without a registered
-    /// function is an error that names the MFA. Call it before a run starts
+    /// bindings of the registered extension libraries. A declaration without
+    /// a binding is an error that names the MFA. Call it before a run starts
     /// the application, so a missing implementation fails before the run
     /// executes the declaration.
     ///
     /// A run that skips this check still stops at the call: the stub raises
-    /// `:pbeam_native_only` when no registered function matches
+    /// `:pbeam_native_only` when no binding matches
     /// (`docs/portable-beam-spec.md`, section "Elixir declaration").
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// let program = BeamProgram::load(&[NATIVE_HASH])?;
-    /// register_native("Elixir.NativeHash", "sha256", 1, Job::Normal, sha256).unwrap();
+    /// register_library(&NATIVE_HASH_LIBRARY).unwrap();
     /// assert!(program.validate_native_declarations().is_ok());
     /// ```
     pub fn validate_native_declarations(&self) -> Result<(), BeamError> {
@@ -370,7 +371,7 @@ impl BeamProgram {
         for name in names {
             let module = &self.modules[name];
             for (function, arity) in module.native_declarations() {
-                if super::lookup_native(name, function, *arity).is_none() {
+                if super::extension::binding(name, function, *arity).is_none() {
                     return Err(error(format!(
                         "native declaration {name}:{function}/{arity} has no registered implementation"
                     )));
