@@ -1620,6 +1620,7 @@ fn a_read_or_a_write_helps_the_list_insert_of_another_process() {
         table.busy = Some(Busy::new(ProcessId(1), objects, false));
         tables.create(Reference(id as u64), None, table);
     }
+    tables.reserve_result(ProcessId(1));
     // The helper runs the insert with its budget under the table lock and
     // traps; its next call takes the table (`erl_db.c:773-787`).
     let id = |n| Term::Reference(Reference(n));
@@ -1710,4 +1711,18 @@ fn keeps_the_buckets_of_a_walk_from_a_clear_of_another_thread() {
         drop(checked);
         assert!(clear.join().expect("the clear ends") < buckets);
     });
+}
+
+#[test]
+fn keeps_no_result_for_an_insert_of_a_dead_process() {
+    // A helper that ends the insert of a process whose exit removed its
+    // entry keeps no result, so nothing waits for a dead process.
+    let tables = EtsTables::default();
+    tables.put_result(ProcessId(1), Term::Integer(1));
+    assert!(tables.take_result(ProcessId(1)).is_none());
+    tables.reserve_result(ProcessId(1));
+    assert!(tables.take_result(ProcessId(1)).is_none());
+    tables.put_result(ProcessId(1), Term::Integer(2));
+    assert_eq!(tables.take_result(ProcessId(1)), Some(Term::Integer(2)));
+    assert!(tables.take_result(ProcessId(1)).is_none());
 }

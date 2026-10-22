@@ -676,6 +676,7 @@ pub(super) fn insert_list(
                     let walk = matches!(new, New::Unlocked);
                     let bif = if walk { "insert_new/2" } else { "insert/2" };
                     check_keypos(&tuples, keypos, bif)?;
+                    ets.reserve_result(caller);
                     taken_table.busy = Some(Busy::new(
                         caller,
                         tuples.iter().map(|object| object.to_vec()).collect(),

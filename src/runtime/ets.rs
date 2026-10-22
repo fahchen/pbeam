@@ -114,7 +114,11 @@ pub(super) struct EtsTables {
     /// the process that started it, which reads it in its next turn
     /// (`erl_db.c:2142-2150`, `2232-2244`). The starter can run on another
     /// scheduler, so the result waits here.
-    results: Mutex<HashMap<ProcessId, Term>>,
+    /// A process gets an entry when its insert takes the table
+    /// ([`EtsTables::reserve_result`]), and its exit removes the entry, so
+    /// a helper that ends the insert of a dead process keeps no result, as
+    /// the continuation of ERTS goes with its process.
+    results: Mutex<HashMap<ProcessId, Option<Term>>>,
 }
 
 /// A deleted table and the count of its segments that are not free yet. ERTS
@@ -842,14 +846,25 @@ impl EtsTables {
     /// `process` started, for its next turn.
     pub(super) fn put_result(&self, process: ProcessId, value: Term) {
         let mut results = self.results.lock().unwrap_or_else(PoisonError::into_inner);
-        results.insert(process, value);
+        if let Some(slot) = results.get_mut(&process) {
+            *slot = Some(value);
+        }
     }
 
     /// Take the result of the list insert of the process `process` that
     /// another process completed.
     pub(super) fn take_result(&self, process: ProcessId) -> Option<Term> {
         let mut results = self.results.lock().unwrap_or_else(PoisonError::into_inner);
-        results.remove(&process)
+        results.get(&process)?.as_ref()?;
+        results.remove(&process).flatten()
+    }
+
+    /// Keep an empty result entry for the process `process`, whose list
+    /// insert takes a table, so a later [`EtsTables::put_result`] keeps its
+    /// result until the process reads it or exits.
+    pub(super) fn reserve_result(&self, process: ProcessId) {
+        let mut results = self.results.lock().unwrap_or_else(PoisonError::into_inner);
+        results.insert(process, None);
     }
 
     /// Fix the table `id` for the process `process`, and add the fixation
