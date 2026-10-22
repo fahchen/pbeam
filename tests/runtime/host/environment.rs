@@ -1,6 +1,6 @@
 use std::os::unix::ffi::OsStrExt;
 
-use super::{put, set, split, unset, variable, variables};
+use super::{erlexec_path, put, set, split, unset, variable, variables};
 
 /// A key that only this test writes. No other test of the binary reads it,
 /// so the change of the copy of the environment is test-scoped.
@@ -65,4 +65,28 @@ fn changes_its_own_copy_and_not_the_environment_of_the_process() {
     unset(KEY);
     assert_eq!(variable(KEY), None);
     unset(KEY);
+}
+
+#[test]
+fn sets_the_path_of_erlexec_with_no_path() {
+    assert_eq!(erlexec_path(None, b"/b", b"/r"), b"/b:/r/bin");
+}
+
+#[test]
+fn puts_the_erlexec_directories_before_a_path_without_the_root() {
+    assert_eq!(
+        erlexec_path(Some(b"/usr/bin:/bin"), b"/b", b"/r"),
+        b"/b:/r/bin:/usr/bin:/bin"
+    );
+}
+
+#[test]
+fn moves_the_bindir_first_in_a_path_with_the_root() {
+    // `erlexec.c:579-619`: each element that is `bindir` is dropped, and
+    // `bindir` is the first element.
+    assert_eq!(
+        erlexec_path(Some(b"/r/bin:/b:/x:/b"), b"/b", b"/r"),
+        b"/b:/r/bin:/x"
+    );
+    assert_eq!(erlexec_path(Some(b"/x"), b"/b", b""), b"/b:/x");
 }

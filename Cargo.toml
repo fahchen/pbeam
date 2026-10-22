@@ -99,6 +99,10 @@ name = "re_global"
 path = "tests/feature/re_global.rs"
 
 [[test]]
+name = "release_boot"
+path = "tests/feature/release_boot.rs"
+
+[[test]]
 name = "run_end"
 path = "tests/feature/run_end.rs"
 

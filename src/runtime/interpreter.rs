@@ -602,6 +602,38 @@ impl BeamProgram {
         self.execute_issued(module, function, arguments, issuer, &mut None, false)
     }
 
+    /// Load the preloaded modules of the pinned ERTS, which
+    /// `erlang:pre_loaded/0` names, from the file `<Module>.beam` of
+    /// `directory` for each module, for example the `ebin` directory of
+    /// `erts`. ERTS builds these modules into the emulator and loads them in
+    /// the order of `PRELOAD_BEAM` and `ESOCK_PRELOAD_BEAM` before the first
+    /// process (`erts/emulator/Makefile.in:804-828`, `erl_init.c:459-484`),
+    /// so a boot script loads none of them. The program loads them in the
+    /// same order, for [`BeamProgram::boot`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let program = BeamProgram::load_preloaded(Path::new("/otp/lib/erts-17.1/ebin"))?;
+    /// program.boot(&arguments)?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The error `cannot read <Path>: <Cause>` for a file that cannot be
+    /// read, and the errors of [`BeamProgram::load`].
+    pub fn load_preloaded(directory: &std::path::Path) -> Result<Self, BeamError> {
+        let modules = bif::PRELOADED
+            .iter()
+            .map(|module| {
+                let path = directory.join(format!("{module}.beam"));
+                std::fs::read(&path)
+                    .map_err(|cause| error(format!("cannot read {}: {cause}", path.display())))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::load(&modules.iter().map(Vec::as_slice).collect::<Vec<_>>())
+    }
+
     /// Boot the node: run the pinned `erl_init:start(init, Arguments)` as
     /// the first process, as ERTS `erl_first_process_otp` does
     /// (`erl_init.c:2540`, `355-399`). `Arguments` is the list of
