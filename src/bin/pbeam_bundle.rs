@@ -10,8 +10,10 @@
 //! example modules and `pbeam_boot.beam` in `pbeam/`, the consolidated
 //! protocols in `releases/pbeam/consolidated/`, and each other module under
 //! its lib directory. A run of the output without arguments extracts the
-//! bundle and starts the entry from it. The `check-nifs` command runs the
-//! NIF manifest gate on each BEAM file of a directory before a bundle build.
+//! bundle and starts the entry from it. The `bundle` command runs the NIF
+//! manifest gate on each BEAM file of the bundle before it writes the bundle,
+//! and the `check-nifs` command runs the gate on each BEAM file of a
+//! directory.
 
 use std::{
     collections::BTreeMap,
@@ -21,7 +23,7 @@ use std::{
     process::ExitCode,
 };
 
-use pbeam_runtime::{BeamModule, BundleWriter, nif_manifest_gaps};
+use pbeam_runtime::{BeamModule, BundleWriter, NifGap, nif_manifest_gaps};
 
 /// The magic of the trailer that follows the bundle at the end of the binary.
 const MAGIC: &[u8; 8] = b"PBEAMEMB";
@@ -37,7 +39,7 @@ const FIXTURE_VERSION: &str = "pbeam";
 
 /// The usage text of the tool.
 const USAGE: &str =
-    "usage: pbeam_bundle bundle <release-dir> <output> <entry-module> <entry-function> <start-list>
+    "usage: pbeam_bundle bundle <release-dir> <output> <entry-module> <entry-function> <start-list> [<nif-allowlist>]
        pbeam_bundle fixture <output> <entry-module> <entry-function> <start-list> <beams-list> <consolidated-dir>
        pbeam_bundle executable <runtime-binary> <bundle> <output>
        pbeam_bundle check-nifs <directory>";
@@ -50,13 +52,18 @@ fn main() -> ExitCode {
     };
     let result = match command.to_str() {
         Some("bundle") => match rest {
-            [directory, output, module, function, start] => build_bundle(
-                Path::new(directory),
-                Path::new(output),
-                &module.to_string_lossy(),
-                &function.to_string_lossy(),
-                Path::new(start),
-            ),
+            [directory, output, module, function, start, allowlist @ ..]
+                if allowlist.len() <= 1 =>
+            {
+                build_bundle(
+                    Path::new(directory),
+                    Path::new(output),
+                    &module.to_string_lossy(),
+                    &function.to_string_lossy(),
+                    Path::new(start),
+                    allowlist.first().map(Path::new),
+                )
+            }
             _ => {
                 eprintln!("{USAGE}");
                 return ExitCode::FAILURE;
@@ -107,17 +114,22 @@ fn main() -> ExitCode {
 }
 
 /// Write the bundle of `directory`, with the start set of `start_list`, to
-/// `output`.
+/// `output`. The NIF manifest gate runs on each BEAM file of the bundle
+/// first, with the items that the file `allowlist` accepts, so a gap stops
+/// the build before the output exists.
 fn build_bundle(
     directory: &Path,
     output: &Path,
     module: &str,
     function: &str,
     start_list: &Path,
+    allowlist: Option<&Path>,
 ) -> Result<(), String> {
     let mut resources = BTreeMap::new();
     collect(directory, directory, &mut resources)?;
     let start = start_modules(start_list, &mut resources)?;
+    let allowlist = allowlist.map_or(Ok(Vec::new()), read_allowlist)?;
+    nif_gate(&resources, &allowlist)?;
     let mut writer = BundleWriter::new(
         env!("PBEAM_OTP_RELEASE"),
         "pbeam_bundle",
@@ -306,10 +318,8 @@ fn module_name(path: &Path) -> String {
     file.strip_suffix(".beam").unwrap_or(&file).to_owned()
 }
 
-/// Run the NIF manifest gate on each BEAM file under `directory`, in the
-/// order of the paths. The result is an error that lists each NIF library
-/// and each `library:function/arity` that PBeam does not bind, one item on
-/// each line, or the error of a BEAM file that does not load.
+/// Run the NIF manifest gate on each BEAM file under `directory`, with no
+/// accepted item.
 ///
 /// # Examples
 ///
@@ -322,18 +332,99 @@ fn module_name(path: &Path) -> String {
 fn check_nifs(directory: &Path) -> Result<(), String> {
     let mut files = BTreeMap::new();
     collect(directory, directory, &mut files)?;
-    let mut gaps = Vec::new();
+    nif_gate(&files, &[])
+}
+
+/// Read the NIF allowlist `path`: the `library:function/arity` items that
+/// the gate accepts, each with its reason. A line `reason: <text>` gives the
+/// reason of each item that follows it, up to the next reason line. Each
+/// other line that is not empty is one item.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // reason: not reached by the application
+/// // crypto:info_lib/0
+/// assert_eq!(read_allowlist(path)?, [("crypto:info_lib/0".into(), "not reached by the application".into())]);
+/// ```
+fn read_allowlist(path: &Path) -> Result<Vec<(String, String)>, String> {
+    let text = fs::read_to_string(path)
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    let mut reason = "";
+    let mut items = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if let Some(text) = line.strip_prefix("reason:") {
+            reason = text.trim();
+        } else if reason.is_empty() && !line.is_empty() {
+            return Err(format!(
+                "{}:{}: the item {line} has no reason",
+                path.display(),
+                index + 1
+            ));
+        } else if !line.is_empty() {
+            items.push((line.to_owned(), reason.to_owned()));
+        }
+    }
+    Ok(items)
+}
+
+/// Run the NIF manifest gate on each BEAM file of `files`, in the order of
+/// the names. The gate prints each item that `allowlist` accepts, with its
+/// reason. Only an unbound `library:function/arity` can be accepted. The
+/// result is an error that lists each other item and each item of
+/// `allowlist` that no file has, one on each line, or the error of a BEAM
+/// file that does not load.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let allowlist = [("prim_tty:isprint/1".to_owned(), "not reached".to_owned())];
+/// // Prints "pbeam_bundle: the NIF manifest gate accepts prim_tty:isprint/1: not reached".
+/// assert!(nif_gate(&no_nifs_files, &allowlist).is_ok());
+/// ```
+fn nif_gate(
+    files: &BTreeMap<String, Vec<u8>>,
+    allowlist: &[(String, String)],
+) -> Result<(), String> {
+    let mut used = vec![false; allowlist.len()];
+    let mut failures = Vec::new();
     for (name, bytes) in files.iter().filter(|(name, _)| name.ends_with(".beam")) {
         let module =
             BeamModule::load(bytes).map_err(|error| format!("cannot load {name}: {error}"))?;
-        gaps.extend(nif_manifest_gaps(&module));
+        for gap in nif_manifest_gaps(&module) {
+            let index = match &gap {
+                NifGap::Unbound {
+                    library,
+                    function,
+                    arity,
+                } => {
+                    let item = format!("{library}:{function}/{arity}");
+                    allowlist.iter().position(|(accepted, _)| *accepted == item)
+                }
+                _ => None,
+            };
+            match index {
+                Some(index) => {
+                    used[index] = true;
+                    let (item, reason) = &allowlist[index];
+                    println!("pbeam_bundle: the NIF manifest gate accepts {item}: {reason}");
+                }
+                None => failures.push(gap.to_string()),
+            }
+        }
     }
-    if gaps.is_empty() {
+    for ((item, _), _) in allowlist.iter().zip(&used).filter(|(_, used)| !**used) {
+        failures.push(format!(
+            "{item}: the NIF allowlist accepts an item that is not a gap"
+        ));
+    }
+    if failures.is_empty() {
         return Ok(());
     }
     Err(format!(
         "the NIF manifest gate failed:\n{}",
-        gaps.join("\n")
+        failures.join("\n")
     ))
 }
 

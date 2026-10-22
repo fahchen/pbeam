@@ -43,7 +43,7 @@ fn a_delivery_at_idle_lets_the_run_wait_again() {
     let root = ProcessId(0);
     scheduler.process_mut(root).unwrap().waiting = true;
     node.send_message(0, Some(root), Term::Integer(1), root, None);
-    super::idle_step(&mut scheduler, &node, false).unwrap();
+    super::idle_step(&mut scheduler, &node).unwrap();
     assert!(
         scheduler
             .process(root)

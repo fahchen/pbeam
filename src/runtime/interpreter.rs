@@ -40,7 +40,7 @@ mod code_table;
 mod native;
 
 pub(crate) use native::has_static_library;
-pub use native::nif_manifest_gaps;
+pub use native::{NifGap, nif_manifest_gaps};
 
 pub(super) use bif::BifResult;
 pub(super) use code_table::{CodeTable, LoadedModule};
@@ -259,14 +259,13 @@ impl Drop for StartGuard<'_> {
     }
 }
 
-/// Wait for input in a run with scheduler threads, or decide that the root
-/// waits for a message that cannot arrive.
-fn idle_step(scheduler: &mut Scheduler, node: &Node, serving: bool) -> Result<(), BeamError> {
-    if serving
-        || scheduler.timers.active()
-        || !scheduler.root_waiting()
-        || scheduler.has_external_sources()
+/// Wait for input in a run with scheduler threads, or decide that a root
+/// waits for a message that cannot arrive: it is the last live process.
+fn idle_step(scheduler: &mut Scheduler, node: &Node) -> Result<(), BeamError> {
+    if scheduler.timers.active()
         || node.live_processes() != 1
+        || !scheduler.local_root_waits()
+        || scheduler.has_external_sources()
     {
         let wait = scheduler.timers.wait_time(scheduler.timers.now());
         scheduler.wait_events(Some(wait))?;
@@ -275,7 +274,7 @@ fn idle_step(scheduler: &mut Scheduler, node: &Node, serving: bool) -> Result<()
     // A delivery of the last other root may already be in the inbox. Apply
     // it and schedule the result before the error: it can make the root
     // runnable or give it a signal that it did not handle.
-    if scheduler.drain_inbox() || !scheduler.root_waiting() {
+    if scheduler.drain_inbox() || !scheduler.local_root_waits() {
         return Ok(());
     }
     Err(error("root process waits for a message that cannot arrive"))
@@ -647,9 +646,12 @@ impl BeamProgram {
     /// process owners, the registered names, the identifier counters, and
     /// the inbox of each scheduler for the messages and signals that cross a
     /// thread boundary. Terms are shared and immutable, and one process runs
-    /// on one scheduler thread only. The run ends when each root exits, and
-    /// the threads join before this function returns. The results keep the
-    /// order of `roots`, and each result is the return value of its root.
+    /// on one scheduler thread only. A root is an ordinary process with a
+    /// root mark. The node counts the roots, and the run ends after the exit
+    /// of the last root completes; the threads join before this function
+    /// returns. The node collects the result of each root. The results keep
+    /// the order of `roots`, and each result is the return value of its
+    /// root.
     ///
     /// # Examples
     ///
@@ -695,15 +697,12 @@ impl BeamProgram {
                     scheduler.code = CodeTable::new(self.modules.clone());
                     // The reset of the terminal mode needs the state of
                     // each scheduler after the run.
-                    match self.run_multi_root(&mut scheduler, module, function, &mut start) {
-                        Ok(()) => {
-                            let selected =
-                                scheduler.resources.borrow_mut::<Ttys>().input_selected();
-                            Ok((scheduler.into_run_result(), selected))
-                        }
+                    let run =
+                        self.run_multi_root(&mut scheduler, index, module, function, &mut start);
+                    let selected = scheduler.resources.borrow_mut::<Ttys>().input_selected();
+                    match run {
+                        Ok(()) => Ok(selected),
                         Err(cause) => {
-                            let selected =
-                                scheduler.resources.borrow_mut::<Ttys>().input_selected();
                             node.abort();
                             Err((cause, selected))
                         }
@@ -750,30 +749,29 @@ impl BeamProgram {
         }
         // Restore the terminal mode of the run, also after a failed root.
         let selected = results.iter().any(|result| match result {
-            Ok((_, selected)) | Err((_, selected)) => *selected,
+            Ok(selected) | Err((_, selected)) => *selected,
         });
         initial_mode.reset(selected);
+        // The atom table of each scheduler is the frozen copy of the
+        // program table, so each root result is a term of the program table.
+        let roots = node.take_root_results();
         // A failed root aborts the run. Report its error before the wait
         // error or the missing result of a root that the abort stopped.
-        for result in &results {
-            if let Ok(((Some(Err(reason)), atoms), _)) = result {
-                return Err(Self::root_error(reason, atoms));
+        for root in &roots {
+            if let Some(Err(reason)) = root {
+                return Err(Self::root_error(reason, &self.atoms));
             }
         }
-        let mut roots = Vec::with_capacity(results.len());
         for result in results {
-            let (root, _) = result.map_err(|(cause, _)| cause)?;
-            roots.push(root);
+            result.map_err(|(cause, _)| cause)?;
         }
-        // A failed root aborts the run. Report its error before the wait
-        // error or the missing result of a root that the abort stopped.
         let mut results_out = Vec::with_capacity(roots.len());
-        for (root, atoms) in roots {
+        for root in roots {
             let root = root.expect("a root that did not exit reports its error");
             let term = root.expect("a failed root returns above");
             results_out.push(HostTerm {
                 term,
-                atoms: Arc::new(atoms),
+                atoms: Arc::clone(&self.atoms),
             });
         }
         Ok(results_out)
@@ -800,11 +798,13 @@ impl BeamProgram {
         Ok(())
     }
 
-    /// Run one root of a multi-scheduler run until its exit completes, and
-    /// then serve the inbox of its scheduler until the last root exits.
+    /// Start the root of the slot `slot` of a multi-scheduler run, and run
+    /// the scheduler until the run ends: after the exit of the last root,
+    /// or after a root or a scheduler failed.
     fn run_multi_root(
         &self,
         scheduler: &mut Scheduler,
+        slot: usize,
         module: &str,
         function: &str,
         start: &mut StartGuard<'_>,
@@ -813,7 +813,7 @@ impl BeamProgram {
         let label = scheduler.code.entry_label(module, function, 0)?;
         let frame = scheduler.code.frame(module, label, 0)?;
         let id = scheduler.next_pid()?;
-        scheduler.start_with_id(id, frame, Vec::new(), Vec::new())?;
+        scheduler.start_with_id(id, slot, frame, Vec::new(), Vec::new())?;
         // Wait until each scheduler created its root, so an idle root cannot
         // decide that its message cannot arrive before another root started.
         let gate = start.0.expect("the start gate is armed");
@@ -822,22 +822,10 @@ impl BeamProgram {
             return Err(error("the multi-scheduler run was cancelled"));
         }
         start.0 = None;
-        // After its root exits, a scheduler keeps running the processes that
-        // its root started, because a process of another scheduler can still
-        // depend on them until the last root exits.
-        let mut serving = false;
-        loop {
-            if !serving && scheduler.root_exited() {
-                if scheduler.root_failed() {
-                    node.abort();
-                    return Ok(());
-                }
-                node.root_done();
-                serving = true;
-            }
-            if serving && node.is_shutdown() {
-                break;
-            }
+        // After a root exits, its scheduler keeps running its other
+        // processes, because a process of another scheduler can still depend
+        // on them until the last root exits.
+        while !node.is_shutdown() {
             let now = scheduler.timers.now();
             scheduler.expire_timers(now);
             scheduler.check_signals()?;
@@ -848,10 +836,7 @@ impl BeamProgram {
                     self.apply_outcome(scheduler, outcome)?;
                 }
                 Turn::Done => {}
-                Turn::Idle => idle_step(scheduler, &node, serving)?,
-            }
-            if node.is_shutdown() {
-                break;
+                Turn::Idle => idle_step(scheduler, &node)?,
             }
         }
         Ok(())
@@ -940,9 +925,11 @@ impl BeamProgram {
         };
         initial_mode.reset(scheduler.resources.borrow_mut::<Ttys>().input_selected());
         run?;
-        // The table of the run holds each name that the run created, so the
-        // host result can name every atom of the root result.
-        let (root, atoms) = scheduler.into_run_result();
+        // The node holds the result of the root. The table of the run holds
+        // each name that the run created, so the host result can name every
+        // atom of the root result.
+        let root = scheduler.node().take_root_results().pop().flatten();
+        let atoms = scheduler.into_atoms();
         match root {
             Some(Ok(result)) => Ok(HostTerm {
                 term: result,
@@ -982,7 +969,7 @@ impl BeamProgram {
     /// let mut scheduler = Scheduler::new((*program.atoms).clone());
     /// scheduler.code = CodeTable::new(program.modules.clone());
     /// program.run_root(&mut scheduler, "process_probe", "main", &[], Issuer::Host(&AllowAll))?;
-    /// assert!(scheduler.into_root_result().is_some());
+    /// assert!(scheduler.node().take_root_results()[0].is_some());
     /// ```
     ///
     /// # Errors
@@ -1028,7 +1015,8 @@ impl BeamProgram {
             }
         };
         sample_live(scheduler, sample);
-        while !scheduler.root_exited() {
+        // The node ends the run after the exit of the root completes.
+        while !scheduler.node().is_shutdown() {
             if let Some(initial) = scheduler.take_policy_initial() {
                 let capabilities = initial.map_err(|cause| {
                     error(format!("the policy denied the root process: {cause}"))
