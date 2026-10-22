@@ -324,8 +324,10 @@ impl Scheduler {
     /// must not pass the monitor signal. ERTS sends the signal only at the
     /// switch out (`erl_process.c:9665-9668`) or with a signal or message to
     /// the same target (`erl_proc_sig_queue.c:1146-1166`,
-    /// `erl_message.c:463-480`); to send it earlier is the same as a switch
-    /// out of the sender at this point.
+    /// `erl_message.c:463-480`). To send it earlier gives the order of an
+    /// ERTS run in which the sender switches out just before the delivery,
+    /// for example at the end of its reductions, and continues in its next
+    /// turn.
     ///
     /// # Examples
     ///
