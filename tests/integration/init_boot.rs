@@ -18,6 +18,7 @@ use common::pinned_beam;
 /// `-boot` flag of `erl` takes it (init.erl:1256-1267).
 const BOOT_FILE: &str = "fixtures/boot/init_boot_probe";
 const PROBE: &[u8] = include_bytes!("../../fixtures/boot/init_boot_probe.beam");
+const LOADED_ORDER_PROBE: &[u8] = include_bytes!("../../fixtures/boot/loaded_order_probe.beam");
 const SYSTEM_PROCESS_PROBE: &[u8] = include_bytes!("../../fixtures/boot/system_process_probe.beam");
 
 /// The environment variable that `boots_init_with_a_fixed_boot_script_as_pinned_erts`
@@ -246,5 +247,50 @@ fn lists_the_loaded_modules_with_the_last_loaded_first() {
     assert_eq!(
         loaded.term,
         Term::list_from(vec![atom("system_process_probe"), atom("init_boot_probe")])
+    );
+}
+
+#[test]
+fn keeps_the_module_table_order_of_loaded_after_a_delete_and_a_reload_as_pinned_erts() {
+    // `erlang:finish_loading/1` puts the module entry at the first load
+    // (beam_bif_load.c:425), and the entry keeps its index after
+    // `erlang:delete_module/1`, so a module with only old code stays in
+    // `erlang:loaded/0` and keeps its place after a later load
+    // (beam_bif_load.c:762-791). `loaded_order_probe:main/0` loads
+    // `loaded_order_b` before `loaded_order_a`, deletes `loaded_order_b`,
+    // and loads it again. It keeps only its own two modules of each list,
+    // because the other loaded modules of ERTS and PBeam differ: ERTS has
+    // its preloaded and boot modules, and PBeam has the start modules.
+    let expected = "{[loaded_order_a,loaded_order_b],[loaded_order_a,loaded_order_b],\
+        [loaded_order_a,loaded_order_b]}\n";
+    let reference = Command::new("erl")
+        .args([
+            "-noshell",
+            "-pa",
+            "fixtures/boot",
+            "-eval",
+            "io:format(\"~w~n\", [loaded_order_probe:main()]), halt().",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(
+        (
+            String::from_utf8_lossy(&reference.stdout).as_ref(),
+            reference.status.code()
+        ),
+        (expected, Some(0)),
+        "ERTS"
+    );
+    let erlang = pinned_beam("erlang");
+    let prim_file = pinned_beam("prim_file");
+    let program = BeamProgram::load(&[&erlang, &prim_file, LOADED_ORDER_PROBE]).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let order = || Term::list_from(vec![atom("loaded_order_a"), atom("loaded_order_b")]);
+    let result = program.execute("loaded_order_probe", "main", &[]).unwrap();
+    assert_eq!(
+        result.term,
+        Term::tuple(vec![order(), order(), order()]),
+        "PBeam"
     );
 }
