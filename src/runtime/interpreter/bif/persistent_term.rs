@@ -21,7 +21,7 @@
 use super::BifResult::Value;
 use super::*;
 use crate::runtime::capability::{CapabilityKind, Operation};
-use crate::runtime::persistent_term::{Change, PersistentTerms};
+use crate::runtime::persistent_term::Change;
 use std::sync::{Arc, atomic::Ordering};
 
 /// Continue a call at a trap export of this module. `get_all_wait/0`,
@@ -264,11 +264,10 @@ fn erase_start(scheduler: &mut Scheduler, key: &Term) -> BifResult {
         }
         Some((first, second)) => {
             if second > 0 {
-                let table = PersistentTerms::with_slots(second - first);
                 scheduler
                     .node()
                     .persistent_terms()
-                    .start_copy(table, Some(key.clone()));
+                    .start_copy(second - first, Some(key.clone()));
             }
             erase_trap(scheduler, key, first, second)
         }
@@ -439,8 +438,10 @@ fn put_start(scheduler: &mut Scheduler, key: &Term, value: &Term) -> BifResult {
         Some(copied) => {
             if copied > 0 {
                 // The copy doubles the table: `copied` is 3 times its size.
-                let table = PersistentTerms::with_slots(copied / 3 * 2);
-                scheduler.node().persistent_terms().start_copy(table, None);
+                scheduler
+                    .node()
+                    .persistent_terms()
+                    .start_copy(copied / 3 * 2, None);
             }
             put_trap(scheduler, key, value, copied)
         }

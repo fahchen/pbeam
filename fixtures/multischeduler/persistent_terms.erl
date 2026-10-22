@@ -1,5 +1,5 @@
 -module(persistent_terms).
--export([writer/0, reader/0, eraser/0, erase_reader/0, turns/0,
+-export([snapshot_writer/0, snapshot_reader/0, writer/0, reader/0, eraser/0, erase_reader/0, turns/0,
          trapped_get/0, pair_reference/0, one_reference/0]).
 
 -define(KEYS, 5000).
@@ -7,7 +7,8 @@
 %% Run each pair of roots on the pinned ERTS, as PBeam runs the two roots of
 %% a pair on two scheduler threads, and return the results of each pair.
 pair_reference() ->
-    [pair(fun writer/0, fun reader/0), pair(fun eraser/0, fun erase_reader/0)].
+    [pair(fun writer/0, fun reader/0), pair(fun eraser/0, fun erase_reader/0),
+     pair(fun snapshot_writer/0, fun snapshot_reader/0)].
 
 %% Run the probes of one scheduler on the pinned ERTS.
 one_reference() ->
@@ -20,6 +21,31 @@ pair(First, Second) ->
     A = receive {first, ResultA} -> ResultA after 60000 -> timeout end,
     B = receive {second, ResultB} -> ResultB after 60000 -> timeout end,
     {A, B}.
+
+-define(SNAPSHOTS, 200).
+
+%% The root that puts a large table, then the keys {snap, 1} to
+%% {snap, SNAPSHOTS} in order, while the root of the other scheduler reads
+%% the whole table with get/0, which traps.
+snapshot_writer() ->
+    [persistent_term:put({fill, I}, I) || I <- lists:seq(1, ?KEYS)],
+    [persistent_term:put({snap, I}, I) || I <- lists:seq(1, ?SNAPSHOTS)],
+    ok.
+
+%% The root that reads the whole table until it holds each {snap, I}. Each
+%% snapshot holds the keys of a prefix of the puts.
+snapshot_reader() ->
+    snapshot_reader(1000000).
+
+snapshot_reader(0) ->
+    timeout;
+snapshot_reader(N) ->
+    Snaps = lists:sort([I || {{snap, I}, _} <- persistent_term:get()]),
+    case Snaps =:= lists:seq(1, length(Snaps)) of
+        false -> {torn, Snaps};
+        true when length(Snaps) =:= ?SNAPSHOTS -> ok;
+        true -> erlang:yield(), snapshot_reader(N - 1)
+    end.
 
 %% The root that puts a term that the root of the other scheduler reads.
 writer() ->

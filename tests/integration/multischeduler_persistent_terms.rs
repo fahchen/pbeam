@@ -52,6 +52,13 @@ fn sees_an_erase_of_the_other_scheduler() {
     run_pair("eraser", "erase_reader");
 }
 
+/// A `get/0` that traps on one scheduler gives a consistent snapshot while
+/// the root of the other scheduler puts keys, and both roots end.
+#[test]
+fn reads_consistent_snapshots_during_puts_of_the_other_scheduler() {
+    run_pair("snapshot_writer", "snapshot_reader");
+}
+
 /// On one scheduler, another process runs at least two turns while
 /// `persistent_term:put/2` waits for thread progress, and a put waits while
 /// `persistent_term:get/0` of another process traps, as with `erl +S 1`.
@@ -97,7 +104,7 @@ fn the_pinned_erts_gives_the_same_results() {
     for schedulers in ["1", "2"] {
         assert_eq!(
             erts(schedulers, expression),
-            "[{ok,ok},{ok,ok}] {ok,ok}\n",
+            "[{ok,ok},{ok,ok},{ok,ok}] {ok,ok}\n",
             "erl +S {schedulers}"
         );
     }

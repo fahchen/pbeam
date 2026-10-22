@@ -47,8 +47,10 @@ struct Progress {
 /// `erl_bif_persistent.c:1034-1139`).
 #[derive(Debug)]
 struct Copy {
-    /// The new table.
+    /// The new table. Its slots are made in the copy steps too.
     table: PersistentTerms,
+    /// The number of slots of the new table.
+    size: usize,
     /// The next slot of the visible table to copy.
     next: usize,
     /// The erased key, which the copy leaves out.
@@ -137,12 +139,17 @@ impl PersistentTermStore {
         self.progress.iter().any(|progress| progress.caller == id)
     }
 
-    /// Start a copy of the visible table into the empty `table`, which
-    /// leaves out the key `skip`. The caller makes `table` outside the lock
-    /// of the node.
-    pub(super) fn start_copy(&mut self, table: PersistentTerms, skip: Option<Term>) {
+    /// Start a copy of the visible table into a new table of `size`
+    /// slots, which leaves out the key `skip`. The copy steps make the
+    /// slots, as `copy_table` clears them in its budget
+    /// (`erl_bif_persistent.c:1082-1103`).
+    pub(super) fn start_copy(&mut self, size: usize, skip: Option<Term>) {
         self.copy = Some(Copy {
-            table,
+            table: PersistentTerms {
+                buckets: Vec::with_capacity(size),
+                num_entries: 0,
+            },
+            size,
             next: 0,
             skip,
         });
@@ -151,6 +158,13 @@ impl PersistentTermStore {
     /// Copy at most `slots` slots of the visible table into the copy.
     pub(super) fn copy_step(&mut self, slots: usize) {
         if let Some(copy) = &mut self.copy {
+            let made = copy.table.buckets.len();
+            let new = (copy.size - made).min(slots);
+            copy.table.buckets.resize(made + new, None);
+            let slots = slots - new;
+            if copy.table.buckets.len() < copy.size {
+                return;
+            }
             let end = copy
                 .next
                 .saturating_add(slots)
@@ -290,14 +304,6 @@ impl Default for PersistentTerms {
 }
 
 impl PersistentTerms {
-    /// Return an empty table of `slots` slots.
-    pub(super) fn with_slots(slots: usize) -> Self {
-        PersistentTerms {
-            buckets: vec![None; slots],
-            num_entries: 0,
-        }
-    }
-
     /// Put the pair of a table copy into its slot.
     fn insert(&mut self, key: Term, value: Term) {
         let slot = self.lookup(&key);
