@@ -146,12 +146,13 @@ fn keeps_each_process_that_cannot_move() {
 fn a_borrow_of_a_scheduler_service_pins_the_process() {
     let (_node, mut scheduler, _thief) = two_schedulers();
     insert(&mut scheduler, &[1, 2]);
-    let _ = scheduler.resources.borrow_mut_or_default::<u8>();
+    scheduler.resources.put(0u8);
+    let _ = scheduler.resources.borrow_mut::<u8>();
     assert_eq!(scheduler.schedule_next().unwrap(), super::super::Turn::Run);
     scheduler.yield_current();
     assert!(!scheduler.processes[&ProcessId(1)].pinned);
     assert_eq!(scheduler.schedule_next().unwrap(), super::super::Turn::Run);
-    let _ = scheduler.resources.borrow_mut_or_default::<u8>();
+    let _ = scheduler.resources.borrow_mut::<u8>();
     scheduler.yield_current();
     assert!(scheduler.processes[&ProcessId(2)].pinned);
 }

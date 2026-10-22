@@ -13,6 +13,7 @@
 //! "Dirty NIFs" of `docs/erts-differences.md`).
 
 use super::*;
+use crate::runtime::resources::lock;
 use crate::runtime::{
     dirty::{FinishFn, Host},
     files::Files,
@@ -274,10 +275,7 @@ fn open_nif(scheduler: &mut Scheduler, path: &Term, modes: &Term) -> Result<BifR
             };
             let reference = scheduler.make_ref()?;
             let caller = scheduler.current_process_mut().id;
-            scheduler
-                .resources
-                .borrow_mut::<Files>()
-                .insert(reference, file, caller);
+            lock(&scheduler.node().resources.kind::<Files>()).insert(reference, file, caller);
             scheduler
                 .send_signal(None, caller, Signal::FileMonitor { file: reference })
                 .expect("the caller is alive");
@@ -344,10 +342,8 @@ fn close_nif(scheduler: &mut Scheduler, fd: &Term) -> Result<BifResult, BeamErro
         return Ok(BifResult::badarg());
     };
     let reference = *reference;
-    let Some((data, owner)) = scheduler
-        .resources
-        .borrow_mut::<Files>()
-        .with_owner(reference)
+    let Some((data, owner)) =
+        lock(&scheduler.node().resources.kind::<Files>()).with_owner(reference)
     else {
         return Ok(BifResult::badarg());
     };
@@ -403,7 +399,7 @@ where
     let Term::Reference(reference) = fd else {
         return Ok(BifResult::badarg());
     };
-    let Some(data) = scheduler.resources.borrow_mut::<Files>().get(*reference) else {
+    let Some(data) = lock(&scheduler.node().resources.kind::<Files>()).get(*reference) else {
         return Ok(BifResult::badarg());
     };
     dirty(

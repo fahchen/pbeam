@@ -9,7 +9,6 @@ use super::{
     Job,
     atomics::AtomicArrays,
     binary_pattern::BinaryPatterns,
-    buffers::Buffers,
     capability::{
         Capability, CapabilityId, CapabilityKind, Delegations, Denied, Operation, Restriction,
         SecurityContext, Source,
@@ -34,7 +33,7 @@ use super::{
         WalkPosition,
     },
     regex_code::RegexCodes,
-    resources::Resources,
+    resources::{Resources, lock},
     signal::Signal,
     timer::{Receiver, Timer, Timers},
     tty::{InitialMode, Ttys},
@@ -393,9 +392,10 @@ pub(super) struct Scheduler {
     /// while it reads its keys (`erl_sys_initial_tty_mode`, `sys.c:428-432`,
     /// `899-923`).
     initial_tty_mode: InitialMode,
-    /// Typed values of the node, one value of each type, such as the
-    /// compiled regular expressions in `RegexCodes` and the TTY resources
-    /// in `Ttys`. All processes of the run share them.
+    /// Typed values of this scheduler, one value of each type: the
+    /// compiled regular expressions in `RegexCodes`, the TTY resources in
+    /// `Ttys`, and the ports in `Ports`. A use pins the process. The values
+    /// that each scheduler reads are in the resources of the node.
     pub(super) resources: Resources,
     /// The atom table of the run, as `erts_atom_table` for one emulator. A
     /// run starts with a copy of the program table, and a BIF such as
@@ -517,8 +517,6 @@ impl Scheduler {
         let mut resources = Resources::default();
         resources.put(RegexCodes::default());
         resources.put(Ttys::default());
-        resources.put(Files::default());
-        resources.put(Buffers::default());
         resources.put(Ports::default());
         let menu_pair = std::os::unix::net::UnixStream::pair().expect("a menu socket pair opens");
         Scheduler {
@@ -3729,7 +3727,7 @@ impl Scheduler {
                                 self.resources.borrow_mut::<Ttys>().monitor_down(id, tty);
                             }
                             TargetMonitor::File(file) => {
-                                self.resources.borrow_mut::<Files>().monitor_down(file);
+                                lock(&self.node().resources.kind::<Files>()).monitor_down(file);
                             }
                             TargetMonitor::Port { port, reference: _ } => {
                                 self.tcp_monitor_down(port, id);

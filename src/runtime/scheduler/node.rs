@@ -25,6 +25,7 @@ use std::{
 
 use super::{Signal, process_table::ProcessTable};
 use crate::runtime::process::ProcessState;
+use crate::runtime::resources::NodeResources;
 use crate::{
     error::{BeamError, error},
     runtime::{dirty::Pools, host::clock},
@@ -157,6 +158,9 @@ pub(in crate::runtime) struct Node {
     /// (`local_node_hash`, external.c:134). The first call on any scheduler
     /// computes it, and each scheduler reads the same value.
     local_node_hash: OnceLock<u32>,
+    /// The resources of the node that each scheduler reads, such as the
+    /// zlib streams and the file resources.
+    pub(in crate::runtime) resources: NodeResources,
 }
 
 impl Node {
@@ -206,6 +210,7 @@ impl Node {
                 clock: (Instant::now(), clock::system_time()),
                 dirty: Pools::new(count),
                 local_node_hash: OnceLock::new(),
+                resources: NodeResources::default(),
             }),
             readers,
         ))
@@ -269,6 +274,7 @@ impl Node {
             clock: (Instant::now(), clock::system_time()),
             dirty: Pools::new(1),
             local_node_hash: OnceLock::new(),
+            resources: NodeResources::default(),
         })
     }
 

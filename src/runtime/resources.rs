@@ -16,6 +16,7 @@
 use std::any::{Any, TypeId, type_name};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 /// The typed values of the node, as `GothamState` of `deno_core`. The
 /// resources hold at most one value of each type.
@@ -65,27 +66,6 @@ impl Resources {
             .unwrap_or_else(|| missing::<T>())
     }
 
-    /// Return a mutable borrow of the value of type `T`, and put
-    /// `T::default()` when the resources have no value of that type. The
-    /// `zlib` streams use this: the first `zlib:open/0` of a run puts the
-    /// empty map, and the scheduler does not know the private type of the
-    /// native bindings.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// let mut resources = Resources::default();
-    /// assert!(resources.borrow_mut_or_default::<RegexCodes>().0.is_empty());
-    /// ```
-    pub(super) fn borrow_mut_or_default<T: Default + 'static>(&mut self) -> &mut T {
-        self.touched = true;
-        self.data
-            .entry(TypeId::of::<T>())
-            .or_insert_with(|| Box::new(T::default()))
-            .downcast_mut()
-            .expect("the value of the key has the type of the key")
-    }
-
     /// Return whether a value was borrowed since the last call, and clear
     /// the mark.
     ///
@@ -93,7 +73,8 @@ impl Resources {
     ///
     /// ```rust,ignore
     /// let mut resources = Resources::default();
-    /// let _ = resources.borrow_mut_or_default::<RegexCodes>();
+    /// resources.put(RegexCodes::default());
+    /// let _ = resources.borrow_mut::<RegexCodes>();
     /// assert!(resources.take_touched());
     /// assert!(!resources.take_touched());
     /// ```
@@ -114,6 +95,56 @@ impl fmt::Debug for Resources {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.debug_struct("Resources").finish_non_exhaustive()
     }
+}
+
+/// The typed values of the node that each scheduler thread reads: one
+/// `Mutex<T>` of each type, keyed by its `TypeId`. A handle in one of these
+/// values resolves on each scheduler, as an ERTS resource does
+/// (`enif_get_resource`, `erl_nif.c`), so a use does not pin the process.
+#[derive(Default)]
+pub(super) struct NodeResources {
+    /// The lock of each kind by the `TypeId` of its type.
+    kinds: Mutex<BTreeMap<TypeId, Arc<dyn Any + Send + Sync>>>,
+}
+
+impl NodeResources {
+    /// Return the lock of the value of type `T`, and put `T::default()`
+    /// when the store has no value of that type. The caller locks it with
+    /// [`lock`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let resources = NodeResources::default();
+    /// let kind = resources.kind::<Buffers>();
+    /// let buffers = lock(&kind);
+    /// ```
+    pub(super) fn kind<T: Default + Send + 'static>(&self) -> Arc<Mutex<T>> {
+        let mut kinds = self
+            .kinds
+            .lock()
+            .expect("the resource kinds are not poisoned");
+        let kind = kinds
+            .entry(TypeId::of::<T>())
+            .or_insert_with(|| Arc::new(Mutex::new(T::default())))
+            .clone();
+        kind.downcast()
+            .expect("the value of the key has the type of the key")
+    }
+}
+
+impl fmt::Debug for NodeResources {
+    /// Write the store without its values.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NodeResources")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Lock one kind of the node resources.
+pub(super) fn lock<T>(kind: &Mutex<T>) -> MutexGuard<'_, T> {
+    kind.lock().expect("the resource kind is not poisoned")
 }
 
 /// Panic because the resources have no value of type `T`.

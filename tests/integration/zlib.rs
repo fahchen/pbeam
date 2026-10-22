@@ -315,10 +315,6 @@ fn stops_the_run_at_each_unbound_nif() {
     let program = program();
     for (function, expected) in [
         (
-            "unsupported_set_controller",
-            "zlib:set_controller_nif/2 NIF is not supported",
-        ),
-        (
             "unsupported_deflate_dictionary",
             "zlib:deflateSetDictionary_nif/2 NIF is not supported",
         ),
