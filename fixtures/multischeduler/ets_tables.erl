@@ -1,11 +1,12 @@
 -module(ets_tables).
--export([owner/0, user/0, fixer/0, deleter/0, reference/0]).
+-export([owner/0, user/0, fixer/0, deleter/0, inserter/0, helper/0, reference/0]).
 
 %% Run each pair of roots on the pinned ERTS, as PBeam runs the two roots of
 %% a pair on two scheduler threads, and return the results of each pair.
 reference() ->
     [pair(fun owner/0, fun user/0),
-     pair(fun fixer/0, fun deleter/0)].
+     pair(fun fixer/0, fun deleter/0),
+     pair(fun inserter/0, fun helper/0)].
 
 pair(First, Second) ->
     Self = self(),
@@ -27,6 +28,8 @@ user() ->
            [undefined, undefined, undefined, undefined]}).
 fixer() -> check(fixer_run(), {true, undefined}).
 deleter() -> check(deleter_run(), ok).
+inserter() -> check(inserter_run(), {true, 100000}).
+helper() -> check(helper_run(), ok).
 
 check(Expected, Expected) -> ok;
 check(Result, _) -> {unexpected, Result}.
@@ -97,3 +100,23 @@ deleter_run() ->
     true = ets:delete(ets_fixed),
     Fixer ! deleted,
     ok.
+
+%% The inserter starts a list insert that traps, and the helper of the
+%% other scheduler uses the busy table, which helps the insert
+%% (erl_db.c:769-798). The inserter still gets the result of its insert.
+inserter_run() ->
+    ets:new(ets_busy, [named_table, public]),
+    register(ets_inserter, self()),
+    Result = ets:insert(ets_busy, [{I} || I <- seq(100000, [])]),
+    Size = ets:info(ets_busy, size),
+    receive done -> ok after 60000 -> timeout end,
+    {Result, Size}.
+
+helper_run() ->
+    Inserter = wait_for(ets_inserter),
+    _ = [ets:member(ets_busy, I) || I <- seq(2000, [])],
+    Inserter ! done,
+    ok.
+
+seq(0, Acc) -> Acc;
+seq(N, Acc) -> seq(N - 1, [N | Acc]).

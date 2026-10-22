@@ -49,6 +49,14 @@ fn deletes_a_table_that_a_process_of_the_other_scheduler_fixed() {
     run_pair("fixer", "deleter");
 }
 
+/// A process of the other scheduler uses a table that a trapped list
+/// insert holds busy, which helps the insert, and the starter still gets
+/// its result.
+#[test]
+fn helps_a_list_insert_of_the_other_scheduler() {
+    run_pair("inserter", "helper");
+}
+
 /// Each pair gives `ok` for each root on the pinned ERTS.
 #[test]
 fn the_pinned_erts_gives_the_same_results() {
@@ -71,6 +79,6 @@ fn the_pinned_erts_gives_the_same_results() {
     assert!(output.status.success(), "{output:?}");
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "[{ok,ok},{ok,ok}]\n"
+        "[{ok,ok},{ok,ok},{ok,ok}]\n"
     );
 }
