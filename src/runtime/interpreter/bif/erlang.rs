@@ -2854,7 +2854,11 @@ const ENDIAN: &str = "little";
 /// build flag (`erl_bif_info.c:2799-2824`). The item `endian` returns
 /// `big` on a big-endian build and `little` on each other build
 /// (`erl_bif_info.c:3101-3106`); PBeam takes the byte order of its own
-/// target, as ERTS takes `WORDS_BIGENDIAN` of its build.
+/// target, as ERTS takes `WORDS_BIGENDIAN` of its build. The item
+/// `wordsize` returns `sizeof(Eterm)` (`erl_bif_info.c:3099-3100`), the
+/// size of a machine word: PBeam gives the size of `usize` of its target.
+/// The item `debug_compiled` returns `false`, as an ERTS build without
+/// `DEBUG` does (`erl_bif_info.c:3382-3387`).
 ///
 /// # Examples
 ///
@@ -2863,7 +2867,7 @@ const ENDIAN: &str = "little";
 /// let os_type = system_info(&mut scheduler, &Term::static_atom("os_type"))?;
 /// // macOS: {unix, darwin}.
 /// assert!(matches!(os_type, BifResult::Value(Term::Tuple(_))));
-/// assert!(system_info(&mut scheduler, &Term::static_atom("wordsize")).is_err());
+/// assert!(matches!(system_info(&mut scheduler, &Term::static_atom("wordsize"))?, BifResult::Value(Term::Integer(8))));
 /// ```
 ///
 /// # Errors
@@ -2896,6 +2900,12 @@ pub(super) fn system_info(scheduler: &mut Scheduler, item: &Term) -> Result<BifR
             Ok(Value(Term::static_atom("opt")))
         }
         Term::Atom(atom) if atoms.name_of(atom) == "endian" => Ok(Value(Term::static_atom(ENDIAN))),
+        Term::Atom(atom) if atom.is_static("wordsize") => {
+            Ok(Value(Term::Integer(size_of::<usize>() as i64)))
+        }
+        Term::Atom(atom) if atoms.name_of(atom) == "debug_compiled" => {
+            Ok(Value(Term::static_atom("false")))
+        }
         // `2 * erts_no_schedulers` (`erl_init.c:1354`). `erlang:system_flag/2`
         // cannot change it in PBeam.
         Term::Atom(atom) if atom.is_static("outstanding_system_requests_limit") => {

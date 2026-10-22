@@ -1,6 +1,6 @@
 -module(io_start_probe).
 -export([lists/0, maps/0, map_keys/0, merge/0, atoms/0, atom_limit/0, system/0,
-         system_other/0, otp_release/0, endian/0, format/0, nots/0,
+         system_other/0, word_size/0, otp_release/0, endian/0, format/0, nots/0,
          keymembers/0, keysearches/0, ands/0, ors/0]).
 
 %% `bif` `erlang:tl/1` with fail label 0, as group:init/1 (group.erl:136)
@@ -138,9 +138,14 @@ otp_release() ->
 endian() ->
     erlang:system_info(id(endian)).
 
+%% The `erlang:system_info/1` items `wordsize` and `debug_compiled`, as
+%% init:has_small_memory/0 (init.erl:1410-1415) reads them.
+word_size() ->
+    {erlang:system_info(id(wordsize)), erlang:system_info(id(debug_compiled))}.
+
 %% A `erlang:system_info/1` item that PBeam does not support.
 system_other() ->
-    erlang:system_info(id(wordsize)).
+    erlang:system_info(id(heap_type)).
 
 %% `io_lib:bformat/2`, as user_drv:init_shell/2 (user_drv.erl:374) runs it
 %% with the empty slogan of `-noshell` (user_drv.erl:271-273).
