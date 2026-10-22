@@ -14,13 +14,13 @@ reference() ->
     {A, B}.
 
 %% The root that sends its clock readings. It sends ROUNDS readings, waits
-%% past the first time correction check of an OS-corrected host (1.5 s),
-%% and sends ROUNDS readings again.
+%% past the first time correction check of the host (1.5 s on Linux, 15 s
+%% on macOS), and sends ROUNDS readings again.
 writer() ->
     true = register(clock_writer, self()),
     Reader = wait_for(clock_reader, 100000),
     ok = send_readings(Reader, ?ROUNDS),
-    receive after 1600 -> ok end,
+    receive after 15100 -> ok end,
     ok = send_readings(Reader, ?ROUNDS),
     Reader ! {done, offsets()},
     ok.
