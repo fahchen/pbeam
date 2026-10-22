@@ -30,7 +30,7 @@ ERTS behaviour that every change must keep:
 - A trapping BIF continues through its export (`BIF_TRAP`, `erts/emulator/beam/emu/bif_instrs.tab:520-575`). `length/1` is the only guard BIF with a trap (`erts/emulator/beam/emu/bif_instrs.tab:150-190`).
 - `map_get/2` has a JIT fast path (`erts/emulator/beam/jit/arm/ops.tab:797-799`), and the HAMT walk charges no reduction (`erts_hashmap_get`, `erts/emulator/beam/erl_map.c:2424-2470`).
 - A process starts at `i_apply_only` of its MFA (`erts/emulator/beam/emu/ops.tab:882`; `erts/emulator/beam/erl_process.c:12616`).
-- A line number reaches a stack trace through the line table of ERTS. PBeam keeps no line table, and the location of each frame is `[]` (row "Exception stack trace" of `docs/erts-differences.md`). The loader reads a `line` operand and drops it (`src/beam/code/instruction.rs:1999-2002`).
+- A line number reaches a stack trace through the line table of the module (`src/beam/code/line.rs`). The table is keyed by instruction index (row "Exception stack trace" of `docs/erts-differences.md`).
 
 ## 1. The dispatch loop
 
@@ -77,7 +77,7 @@ The load cost (estimated): one extra pass over the stream and one pool build for
 The risk to ERTS-exact diagnostics. A line number, an error term, and a stack trace must keep the exact ERTS shape:
 
 - Error terms, exception classes, and reasons come from the BIF body and the instruction arm, not from the encoding. A compact instruction can keep all of them.
-- Line numbers are already lost at the loader (`src/beam/code/instruction.rs:1999-2002`). Thus compaction loses nothing that exists today. It also blocks the later line-table work in the backlog entry "Give caller frames and line locations in stack traces". Keep the line index in the prepared form, or keep the raw `line` operand in a side table, so that work stays possible.
+- The line table of a module is keyed by instruction index (`src/beam/code/line.rs`). A compaction or fusion pass that changes the instruction indexes must remap its entries with the same index map as the labels.
 - Stack traces are built from frames (`src/runtime/interpreter.rs:3758-3790`). A frame keeps the module and the function name for the trace. The prepared form must keep both, through a name ID and the module name table.
 - A malformed module must keep its current runtime error text. The loader tests assert the current text. Keep every check that produces one.
 

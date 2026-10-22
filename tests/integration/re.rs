@@ -359,9 +359,8 @@ fn raises_badarg_for_a_unicode_pattern_that_is_not_chardata() {
     // `erlang:error/2` this first frame, so the match succeeds.
     // `erlang:raise/3` keeps the frame `{re, compile, [RE, Options], []}`
     // (`bif.c:1626-1687`). The raise then also gives the frame of the caller
-    // of the compile, which PBeam takes from the frames of the process. ERTS
-    // also gives the location of each frame; PBeam gives no location (row
-    // "Exception stack trace" in `docs/erts-differences.md`).
+    // of the compile, which PBeam takes from the frames of the process. Each
+    // frame has the location of its call, as in ERTS.
     let program = program();
     let error = program
         .execute(
@@ -372,8 +371,9 @@ fn raises_badarg_for_a_unicode_pattern_that_is_not_chardata() {
         .unwrap_err();
     assert_eq!(
         error.to_string(),
-        "root process exited with {badarg,[{re,compile,[foo,[unicode]],[]},\
-         {re_probe,unsupported,1,[]}]}"
+        "root process exited with {badarg,[{re,compile,[foo,[unicode]],\
+         [{file,\"re.erl\"},{line,1748}]},\
+         {re_probe,unsupported,1,[{file,\"fixtures/re/re_probe.erl\"},{line,227}]}]}"
     );
     assert_eq!(
         reference_of("try re_probe:unsupported(chardata) catch error:R -> R end"),
@@ -459,8 +459,7 @@ fn raises_badarg_for_a_term_that_is_not_an_export() {
     // `re_import_1` raises `badarg` for a term that is not a 5-tuple with
     // the atom `re_exported_pattern` first (erl_bif_re.c:722-728). The
     // first frame holds the `error_info` cause `erl_stdlib_errors`, as the
-    // ERTS frame does. PBeam gives no location of its frames (row
-    // "Exception stack trace" in docs/erts-differences.md).
+    // ERTS frame does, and the caller frame has the location of its call.
     let program = program();
     let error = program
         .execute("re_probe", "imported_badarg", &[])
@@ -469,7 +468,7 @@ fn raises_badarg_for_a_term_that_is_not_an_export() {
         error.to_string(),
         "root process exited with {badarg,[{re,import,[foo],\
          [{error_info,#{module=>erl_stdlib_errors}}]},\
-         {re_probe,imported_badarg,0,[]}]}"
+         {re_probe,imported_badarg,0,[{file,\"fixtures/re/re_probe.erl\"},{line,121}]}]}"
     );
     assert_eq!(
         reference_of("try re_probe:imported_badarg() catch error:R -> R end"),

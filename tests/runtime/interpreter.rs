@@ -2434,7 +2434,9 @@ fn raises_class_error_for_the_raw_stack_trace_nil() {
 #[test]
 fn exits_with_the_error_of_an_error_path_instruction_with_no_catch() {
     // With no catch tag, the exception of `badmatch` and `if_end` ends the
-    // process with `{Reason, Stacktrace}` (`beam_common.c:684-692`).
+    // process with `{Reason, Stacktrace}` (`beam_common.c:684-692`). The
+    // stack trace holds the frame of the current function with its arity
+    // (`beam_common.c:1011-1027`); the fixture has no line table.
     let exit = |instruction: Instruction| {
         make_program(vec![instruction], 0)
             .execute("fixture", "main", &[])
@@ -2446,11 +2448,11 @@ fn exits_with_the_error_of_an_error_path_instruction_with_no_catch() {
             tag: "badmatch",
             value: atom("r"),
         }),
-        "root process exited with {{badmatch,r},[]}"
+        "root process exited with {{badmatch,r},[{fixture,main,0,[]}]}"
     );
     assert_eq!(
         exit(Instruction::IfEnd),
-        "root process exited with {if_clause,[]}"
+        "root process exited with {if_clause,[{fixture,main,0,[]}]}"
     );
 }
 
@@ -4189,7 +4191,7 @@ fn orders_two_references_by_their_number_words() {
 }
 
 #[test]
-fn reads_an_empty_current_stacktrace_of_the_calling_process() {
+fn reads_the_current_stacktrace_of_the_calling_process() {
     // `STACKTRACE()` in the pinned `gen_statem` is
     // `element(2, erlang:process_info(self(), current_stacktrace))`.
     let body = vec![
@@ -4209,14 +4211,21 @@ fn reads_an_empty_current_stacktrace_of_the_calling_process() {
         },
         Instruction::Return,
     ];
-    // ERTS 29.1.1 gives the frames of the caller; PBeam records none.
-    let stacktrace = Term::tuple(vec![test_atom("current_stacktrace"), Term::nil()]);
+    // ERTS 29.1.1 gives the frames of the caller, without the frame of
+    // `process_info/2` (`erl_bif_info.c:2397-2405`).
+    let frames = Term::list_from(vec![Term::tuple(vec![
+        test_atom("fixture"),
+        test_atom("main"),
+        Term::Integer(0),
+        Term::nil(),
+    ])]);
+    let stacktrace = Term::tuple(vec![test_atom("current_stacktrace"), frames.clone()]);
     assert_eq!(
         make_program(body, 0)
             .execute("fixture", "main", &[])
             .unwrap()
             .term,
-        Term::tuple(vec![stacktrace, Term::nil()])
+        Term::tuple(vec![stacktrace, frames])
     );
     let process_info =
         |process: Term, item: Term| call_ext_with("erlang", "process_info", vec![process, item]);

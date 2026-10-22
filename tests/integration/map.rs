@@ -271,17 +271,18 @@ fn takes_the_badmap_path_when_add_gets_a_non_map() {
     // `add/1` tests is_map and then calls erlang:error({badmap, M}), which
     // raises class `error` with the reason `{badmap, 1}`. The stack trace of
     // `erlang:error/1` is the frame of its caller with its arity
-    // (`beam_common.c:1011-1027`, `utils.c:3448-3455`). PBeam gives no
-    // location and no caller frames (row "Exception stack trace" in
-    // `docs/erts-differences.md`); ERTS gives `{file, ...}`, `{line, 7}`, and
-    // the caller frames.
+    // (`beam_common.c:1011-1027`, `utils.c:3430-3455`), with the file and
+    // the line of the call. The root process has no caller frames; on ERTS,
+    // the frames of the `erl -eval` caller follow.
     let program = BeamProgram::load(&[MAP_PROBE]).unwrap();
     let error = program
         .execute("map_probe", "add", &[program.host_term(Term::Integer(1))])
         .unwrap_err()
         .to_string();
     assert!(
-        error.contains("root process exited with {{badmap,1},[{map_probe,add,1,[]}]}"),
+        error.contains(
+            "root process exited with {{badmap,1},[{map_probe,add,1,[{file,\"fixtures/map/map_probe.erl\"},{line,7}]}]}"
+        ),
         "{error}"
     );
 

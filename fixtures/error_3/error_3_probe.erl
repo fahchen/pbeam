@@ -3,7 +3,7 @@
 
 %% The fixture has no line table, so ERTS gives each frame of this module
 %% the location [] or [{error_info, Map}]. stack/1 drops the file and line
-%% of an io frame, because PBeam keeps no line table, and drops the frames
+%% of an io frame, which the test does not compare, and drops the frames
 %% of the erl -eval caller.
 main() ->
     [try_stack(fun() -> erlang:error(r, [a], []) end),
