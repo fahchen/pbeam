@@ -8,6 +8,8 @@
 /examples/plug_hello/_build/
 /examples/plug_hello/cover/
 /examples/plug_hello/deps/
+/fixtures/bcrypt/_build/
+/fixtures/bcrypt/deps/
 
 # Agent scratch files. Skills under .agents/skills/ stay tracked.
 /.agents/.handoff/

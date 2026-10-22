@@ -23,6 +23,7 @@ run = [
   "cd fixtures/hello && mix format --check-formatted && mix compile --warnings-as-errors",
   "mix format --check-formatted && mix compile --warnings-as-errors",
   "cd examples/plug_hello && mix format --check-formatted",
+  "cd fixtures/bcrypt && mix format --check-formatted",
   "mix format --check-formatted 'examples/*/**/*.ex' 'fixtures/*/*.ex'",
   "cargo fmt --all -- --check",
   "cargo clippy --locked --workspace --all-targets --all-features -- -D warnings",

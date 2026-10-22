@@ -1,6 +1,6 @@
 //! The `#[repr(C)]` mirrors of the `erl_nif.h` types that the loader reads,
 //! as the vendored `vendor/erts/include/erl_nif.h` of OTP 29.1.1 defines
-//! them (`erl_nif.h:108-158`), with the C function types of the entry.
+//! them (`erl_nif.h:108-169`), with the C function types of the entry.
 //!
 //! The layout is the LP64 layout of the vendored `erl_int_sizes_config.h`:
 //! `ERL_NIF_TERM` is an `unsigned long` of 8 bytes, as a pointer is. The
@@ -85,6 +85,20 @@ pub(super) struct ErlNifEntry {
     pub(super) min_erts: *const c_char,
 }
 
+/// `ErlNifBinary` (`erl_nif.h:160-169`): the bytes of a binary that
+/// `enif_inspect_binary` gives to a NIF.
+#[repr(C)]
+pub(super) struct ErlNifBinary {
+    /// The number of bytes.
+    pub(super) size: usize,
+    /// The first byte. The NIF reads the bytes and does not write them.
+    pub(super) data: *mut u8,
+    /// The reference of the ERTS binary, NULL for the binary of an inspect.
+    pub(super) ref_bin: *mut c_void,
+    /// Reserved; ERTS does not write it.
+    pub(super) spare: [*mut c_void; 2],
+}
+
 const _: () = {
     assert!(size_of::<NifTerm>() == 8);
     assert!(size_of::<ErlNifFunc>() == 32);
@@ -106,6 +120,11 @@ const _: () = {
     assert!(offset_of!(ErlNifEntry, options) == 72);
     assert!(offset_of!(ErlNifEntry, sizeof_resource_type_init) == 80);
     assert!(offset_of!(ErlNifEntry, min_erts) == 88);
+    assert!(size_of::<ErlNifBinary>() == 40);
+    assert!(offset_of!(ErlNifBinary, size) == 0);
+    assert!(offset_of!(ErlNifBinary, data) == 8);
+    assert!(offset_of!(ErlNifBinary, ref_bin) == 16);
+    assert!(offset_of!(ErlNifBinary, spare) == 24);
 };
 
 #[cfg(test)]

@@ -43,6 +43,10 @@ name = "dirty_io"
 path = "tests/feature/dirty_io.rs"
 
 [[test]]
+name = "nif_bcrypt"
+path = "tests/feature/nif_bcrypt.rs"
+
+[[test]]
 name = "diagnostics_feature"
 path = "tests/feature/diagnostics.rs"
 
