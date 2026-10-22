@@ -22,7 +22,8 @@ user() ->
     check(user_run(),
           {[[{k, 1}], true, [{u, 2}], [{k, 1}], badarg, badarg, true,
             [{auto, true}, {true, false}, {true, true}, {false, false},
-             {false, false}, {{debug_hash_fixed_number_of_locks, 64}, true}]],
+             {false, false}, {{debug_hash_fixed_number_of_locks, 64}, true},
+             {true, true}, {true, true}, {true, false}]],
            [undefined, undefined, undefined, undefined]}).
 fixer() -> check(fixer_run(), {true, undefined}).
 deleter() -> check(deleter_run(), ok).
@@ -60,7 +61,10 @@ user_run() ->
                                  [bag, {write_concurrency, true}, {decentralized_counters, true}],
                                  [private, {write_concurrency, true}],
                                  [{write_concurrency, true}, {write_concurrency, false}],
-                                 [{write_concurrency, {debug_hash_fixed_number_of_locks, 64}}]]]],
+                                 [{write_concurrency, {debug_hash_fixed_number_of_locks, 64}}],
+                                 [ordered_set, {write_concurrency, true}],
+                                 [{write_concurrency, true}, ordered_set],
+                                 [ordered_set, {write_concurrency, true}, {decentralized_counters, false}]]]],
     Monitor = monitor(process, Owner),
     Owner ! {done, self()},
     receive {'DOWN', Monitor, process, Owner, _} -> ok after 60000 -> timeout end,

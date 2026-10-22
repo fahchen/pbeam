@@ -4719,6 +4719,22 @@ fn resumes_a_list_insert_without_a_walk_of_the_checked_objects() {
         .bif_trap(&mut scheduler, "ets", "insert", arguments)
         .unwrap();
     assert!(matches!(result, BifResult::Value(value) if value == Term::static_atom("true")));
+    // A process of another scheduler can complete the insert before a
+    // resume: the step then finds no busy insert and no result, and the
+    // call traps again.
+    scheduler.current_process_mut().fcalls = 1;
+    let arguments = vec![
+        Term::Reference(Reference(0)),
+        Term::Integer(7),
+        Term::Integer(5),
+        Term::Integer(1),
+        Term::list_from([Term::Integer(0)]),
+        Term::Integer(2),
+    ];
+    let result = program
+        .bif_trap(&mut scheduler, "ets", "insert", arguments)
+        .unwrap();
+    assert!(matches!(result, BifResult::TrapBif { .. }));
 }
 
 #[test]

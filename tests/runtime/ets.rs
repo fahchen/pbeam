@@ -1605,3 +1605,17 @@ fn counts_the_bag_comparisons_of_a_fixed_key() {
         vec![0]
     );
 }
+
+#[test]
+fn a_clear_step_after_the_end_of_the_clear_does_nothing() {
+    // A process of another scheduler can end the clear between the check of
+    // the caller and its step, so the step finds no pending clear.
+    let atoms = AtomTable::new();
+    let mut tables = EtsTables::default();
+    tables.create(
+        Reference(0),
+        None,
+        Table::new(ProcessId(0), Access::Public, 1, TableType::Set),
+    );
+    assert_eq!(tables.step_clear(&atoms, Reference(0), 8), (true, 0));
+}

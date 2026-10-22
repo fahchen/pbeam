@@ -6,7 +6,7 @@ pub(super) mod pattern;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::hash::{DefaultHasher, Hasher};
-use std::sync::{PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Mutex, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::term::atom_hash;
 use crate::term::{AtomTable, LiveBytes, ProcessId, Reference, Term, internal_hash};
@@ -114,7 +114,7 @@ pub(super) struct EtsTables {
     /// the process that started it, which reads it in its next turn
     /// (`erl_db.c:2142-2150`, `2232-2244`). The starter can run on another
     /// scheduler, so the result waits here.
-    results: HashMap<ProcessId, Term>,
+    results: Mutex<HashMap<ProcessId, Term>>,
 }
 
 /// A deleted table and the count of its segments that are not free yet. ERTS
@@ -730,26 +730,27 @@ impl EtsTables {
     /// budget of the caller, an `SWord` in ERTS (`erl_db.c:3303`).
     pub(super) fn step_clear(&self, atoms: &AtomTable, id: Reference, reds: i64) -> (bool, usize) {
         let mut table = write(self.tables.get(&id).expect("a cleared table is live"));
-        let (owner, count) = {
-            let clearing = table
-                .clear
-                .as_ref()
-                .expect("a cleared table has a pending clear");
-            (clearing.owner, clearing.count)
+        // A process of another scheduler can end the clear between the
+        // check of the caller and this step.
+        let Some((owner, count)) = (table.clear.as_ref()).map(|clear| (clear.owner, clear.count))
+        else {
+            return (true, 0);
         };
         table.step_clear(atoms, owner, count, reds)
     }
 
     /// Keep the result `value` of the list insert that the process
     /// `process` started, for its next turn.
-    pub(super) fn put_result(&mut self, process: ProcessId, value: Term) {
-        self.results.insert(process, value);
+    pub(super) fn put_result(&self, process: ProcessId, value: Term) {
+        let mut results = self.results.lock().unwrap_or_else(PoisonError::into_inner);
+        results.insert(process, value);
     }
 
     /// Take the result of the list insert of the process `process` that
     /// another process completed.
-    pub(super) fn take_result(&mut self, process: ProcessId) -> Option<Term> {
-        self.results.remove(&process)
+    pub(super) fn take_result(&self, process: ProcessId) -> Option<Term> {
+        let mut results = self.results.lock().unwrap_or_else(PoisonError::into_inner);
+        results.remove(&process)
     }
 
     /// Fix the table `id` for the process `process`, and add the fixation
@@ -967,7 +968,9 @@ impl EtsTables {
             }
         }
         self.pending.remove(&owner);
-        self.results.remove(&owner);
+        (self.results.get_mut())
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&owner);
         Some(reds)
     }
 
