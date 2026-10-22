@@ -1592,33 +1592,31 @@ impl Scheduler {
             written.as_raw_fd()
         };
         let fds = [notify, done];
+        // An interrupted wait gives neither case: the handler wrote the
+        // notify pipe, so the next wait sees it. Which thread gets a signal
+        // is not fixed, so this case has no branch of its own.
         loop {
-            match super::host::input::wait_readable(&fds, None) {
-                super::host::input::Readiness::Ready(ready) if ready.contains(&notify) => {
-                    // A signal wrote to the notify pipe. A SIGINT stops the
-                    // run; each other signal stays for the scheduler
-                    // (`sys.c:611-624`, `break.c:602-604`).
-                    let signals = signal::take_notified();
-                    if signals.contains(&libc::SIGINT) {
-                        return Err(BeamError::Halt(0));
-                    }
-                    deferred.extend(signals);
+            let readiness = super::host::input::wait_readable(&fds, None);
+            if matches!(&readiness, super::host::input::Readiness::Ready(ready) if ready.contains(&notify))
+            {
+                // A signal wrote to the notify pipe. A SIGINT stops the
+                // run; each other signal stays for the scheduler
+                // (`sys.c:611-624`, `break.c:602-604`).
+                let signals = signal::take_notified();
+                if signals.contains(&libc::SIGINT) {
+                    return Err(BeamError::Halt(0));
                 }
+                deferred.extend(signals);
+            } else if readiness.ended(done) {
                 // The write ended, or the wait cannot watch it: the menu
                 // reads its keys in either case. Take the byte of the end
                 // of the write, so that the next menu waits for its own
                 // write.
-                super::host::input::Readiness::Ready(_)
-                | super::host::input::Readiness::Invalid => {
-                    use std::io::Read;
-                    let mut buffer = [0; 8];
-                    let mut written = written;
-                    let _ = written.read(&mut buffer);
-                    return Ok(());
-                }
-                // An interrupted wait: the handler wrote the notify pipe, so
-                // the next wait sees it.
-                super::host::input::Readiness::Pending => {}
+                use std::io::Read;
+                let mut buffer = [0; 8];
+                let mut written = written;
+                let _ = written.read(&mut buffer);
+                return Ok(());
             }
         }
     }
