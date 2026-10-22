@@ -25,11 +25,6 @@ const ITERATIONS_PER_RED: i64 = 8;
 /// there, and another process that uses the table runs the steps too
 /// ([`help_busy`]). Return the units that the steps used, and the result
 /// when the insert ended, else `None`.
-///
-/// # Errors
-///
-/// See [`ProcessState::bif_reductions_left`] for a negative budget of the
-/// current process.
 fn step_inserting(
     context: &mut BifContext<'_>,
     table: &Term,
@@ -104,11 +99,6 @@ enum Take {
 /// insert first, and it charges the units of the work
 /// (`ets_insert_2_list_continuation`, `erl_db.c:2152-2197`). Its own
 /// operation then traps and runs in a later turn (`erl_db.c:782-787`).
-///
-/// # Errors
-///
-/// See [`ProcessState::bif_reductions_left`] for a negative budget of the
-/// current process.
 fn help_busy(context: &mut BifContext<'_>, table: &Term) -> Result<Take, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
     let Some((id, found)) = context.scheduler.ets.find(&context.scheduler.atoms, table) else {
@@ -118,11 +108,15 @@ fn help_busy(context: &mut BifContext<'_>, table: &Term) -> Result<Take, BeamErr
         if started.owner == caller {
             return Ok(Take::Mine);
         }
+        // `ets_insert_2_list_continuation` keeps `ITERATIONS_PER_RED *
+        // ERTS_BIF_REDS_LEFT` in a `long`, and YCF yields when the count is
+        // 0 or less (`erl_db.c:2158`, `ycf_yield_fun.c:592-610`), so a
+        // negative budget does what a budget of 0 does.
         let budget = ITERATIONS_PER_RED
             * context
                 .scheduler
                 .current_process_mut()
-                .bif_reductions_left()? as i64;
+                .bif_reductions_or_zero() as i64;
         let (used, _) = step_inserting(context, &Term::Reference(id), budget, None)?;
         context
             .scheduler
@@ -135,11 +129,12 @@ fn help_busy(context: &mut BifContext<'_>, table: &Term) -> Result<Take, BeamErr
     }
     // A process that uses the table while a fixed clear does not finish
     // helps with the mark, as `delete_all_objects_continue` does
-    // (`erl_db.c:3300-3320`): 8 buckets for each reduction.
+    // (`erl_db.c:3300-3320`): 8 buckets for each reduction. It keeps the
+    // budget signed (`erl_db.c:3303`).
     let reds = context
         .scheduler
         .current_process_mut()
-        .bif_reductions_left()?;
+        .bif_reductions_signed();
     let (_, charge) = context
         .scheduler
         .ets
@@ -376,8 +371,7 @@ pub(super) fn new(
 /// # Errors
 ///
 /// Return a runtime error for a tuple in a table with the key position 0:
-/// ERTS aborts the emulator there (`Invalid tag in make_internal_hash`). Also return the runtime error of
-/// [`ProcessState::bif_reductions_left`] for a negative budget.
+/// ERTS aborts the emulator there (`Invalid tag in make_internal_hash`).
 pub(super) fn insert(
     context: &mut BifContext<'_>,
     table: &Term,
@@ -559,8 +553,7 @@ fn insert_objects(
 /// # Errors
 ///
 /// Return a runtime error for a table with the key position 0: ERTS aborts
-/// the emulator there (`Invalid tag in make_internal_hash`). Also return the runtime error of
-/// [`ProcessState::bif_reductions_left`] for a negative budget.
+/// the emulator there (`Invalid tag in make_internal_hash`).
 pub(super) fn insert_list(
     context: &mut BifContext<'_>,
     id: Reference,
@@ -611,7 +604,9 @@ pub(super) fn insert_list(
     }
     let process = context.scheduler.current_process_mut();
     let caller = process.id;
-    let budget = ITERATIONS_PER_RED * process.bif_reductions_left()? as i64;
+    // A `long` count, and YCF yields when it is 0 or less (`erl_db.c:2258`,
+    // `ycf_yield_fun.c:592-610`): a negative budget does what 0 does.
+    let budget = ITERATIONS_PER_RED * process.bif_reductions_or_zero() as i64;
     let mut units = Units { left: budget };
     // The tuples of the checked list, for the insert. The walk is part of
     // the units of the insert.
@@ -1348,11 +1343,6 @@ pub(super) fn delete(
 /// let result = take(&mut context, &table, &test_atom("k"))?;
 /// assert!(matches!(result, BifResult::Value(objects) if objects.proper_list().is_some_and(|objects| objects.count() == 1)));
 /// ```
-///
-/// # Errors
-///
-/// Return the error of [`ProcessState::bif_reductions_left`] when a busy
-/// table cannot finish its list insert in the turn.
 pub(super) fn take(
     context: &mut BifContext<'_>,
     table: &Term,
@@ -1461,10 +1451,11 @@ pub(super) fn delete_table(
 /// let result = delete_trap(&mut context)?;
 /// assert!(matches!(result, BifResult::Value(value) if value == test_atom("true")));
 /// ```
-///
 /// # Errors
 ///
-/// See [`ProcessState::bif_reductions_left`] for a negative budget.
+/// The invariant error of [`ProcessState::bif_reductions_left`]: the call starts
+/// at the start of a turn, or after [`delete_table`] bumps the reductions
+/// of the fixations, which keeps the budget at 0 or more.
 pub(super) fn delete_trap(context: &mut BifContext<'_>) -> Result<BifResult, BeamError> {
     let process = context.scheduler.current_process_mut();
     let caller = process.id;
@@ -2214,11 +2205,6 @@ fn help_table(context: &mut BifContext<'_>, table: &Term) -> Result<bool, BeamEr
 /// let result = next(&mut context, &table, &test_atom("missing"))?;
 /// assert!(matches!(result, BifResult::Raise { .. }));
 /// ```
-///
-/// # Errors
-///
-/// Return the error of [`ProcessState::bif_reductions_left`] when a busy
-/// table cannot finish its list insert in the turn.
 /// Run `ets:safe_fixtable/2` as ERTS `ets_safe_fixtable_2` does
 /// (`erl_db.c:1136-1164`): `true` fixes the table for the caller, `false`
 /// unfixes it, and each of these gives `true`. A second argument that is
@@ -2321,11 +2307,6 @@ pub(super) fn next(
 /// let result = first(&mut context, &table)?;
 /// assert!(matches!(result, BifResult::Value(value) if value == test_atom("k")));
 /// ```
-///
-/// # Errors
-///
-/// Return the error of [`ProcessState::bif_reductions_left`] when a busy
-/// table cannot finish its list insert in the turn.
 pub(super) fn first(context: &mut BifContext<'_>, table: &Term) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
     if help_table(&mut *context, table)? {
@@ -2363,11 +2344,6 @@ pub(super) fn first(context: &mut BifContext<'_>, table: &Term) -> Result<BifRes
 /// let result = first_lookup(&mut context, &table)?;
 /// assert!(matches!(result, BifResult::Value(value) if value == Term::static_atom("$end_of_table")));
 /// ```
-///
-/// # Errors
-///
-/// Return the error of [`ProcessState::bif_reductions_left`] when a busy
-/// table cannot finish its list insert in the turn.
 pub(super) fn first_lookup(
     context: &mut BifContext<'_>,
     table: &Term,
@@ -2420,11 +2396,6 @@ pub(super) fn first_lookup(
 /// let result = update_element(&mut context, &table, &key, &Term::tuple(vec![Term::Integer(2), Term::Integer(9)]), None)?;
 /// assert!(matches!(result, BifResult::Value(value) if value == Term::static_atom("true")));
 /// ```
-///
-/// # Errors
-///
-/// Return the error of [`ProcessState::bif_reductions_left`] when a busy
-/// table cannot finish its list insert in the turn.
 pub(super) fn update_element(
     context: &mut BifContext<'_>,
     table: &Term,
@@ -2637,11 +2608,6 @@ fn access_name(access: Access) -> &'static str {
 /// let result = internal_delete_all(&mut context, &table, &Term::static_atom("undefined"))?;
 /// assert!(matches!(result, BifResult::Value(Term::Integer(_))));
 /// ```
-///
-/// # Errors
-///
-/// Return the error of [`ProcessState::bif_reductions_left`] when a busy
-/// table cannot finish its list insert in the turn.
 pub(super) fn internal_delete_all(
     context: &mut BifContext<'_>,
     table: &Term,
@@ -2669,10 +2635,11 @@ pub(super) fn internal_delete_all(
         Take::Help => finish_busy(&mut *context, table)?,
         Take::Free | Take::Mine => {}
     }
+    // The signed budget of `ets_internal_delete_all_2` (`erl_db.c:3236`).
     let left = context
         .scheduler
         .current_process_mut()
-        .bif_reductions_left()?;
+        .bif_reductions_signed();
     let atoms = &context.scheduler.atoms;
     let Some((id, _)) = context.scheduler.ets.find(atoms, table) else {
         return Ok(BifResult::badarg());
@@ -2736,9 +2703,7 @@ pub(super) fn internal_delete_all(
 ///
 /// # Errors
 ///
-/// Return a runtime error for a guard function that PBeam does not run yet,
-/// and the error of [`ProcessState::bif_reductions_left`] when a busy table
-/// cannot finish its list insert in the turn.
+/// Return a runtime error for a guard function that PBeam does not run yet.
 pub(super) fn internal_select_delete(
     context: &mut BifContext<'_>,
     table: &Term,

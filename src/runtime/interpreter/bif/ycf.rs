@@ -38,18 +38,15 @@ pub(super) enum YcfTurn {
 /// assert_eq!(run_units(&mut process, 15, &[1; 40], 0)?, YcfTurn::Yield(30));
 /// assert_eq!(process.fcalls, 0);
 /// ```
-///
-/// # Errors
-///
-/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
-/// negative budget.
 pub(super) fn run_units(
     process: &mut ProcessState,
     per_reduction: usize,
     units: &[u32],
     done: usize,
 ) -> Result<YcfTurn, BeamError> {
-    let start = (per_reduction * process.bif_reductions_left()?) as i64;
+    // A `long` count (`utils.c:3743`): a negative budget yields after the
+    // first unit, as a budget of 0 does.
+    let start = per_reduction as i64 * process.bif_reductions_signed();
     let mut counter = start;
     let per_reduction = per_reduction as i64;
     for (index, &unit) in units.iter().enumerate().skip(done) {

@@ -660,24 +660,41 @@ fn returns_badarg_for_an_ordered_path_that_crashes_pinned_erts() {
 }
 
 #[test]
-fn stops_with_a_runtime_error_for_a_negative_budget_after_map_next() {
+fn reads_a_negative_budget_after_map_next_as_pinned_erts() {
     // `logger_start_probe:negative_budget/0` calls `erts_internal:map_next/3`
     // directly until a call makes the reduction budget negative
     // (`erl_map.c:4126`), and the guard BIF `length/1` then reads the budget
-    // before the next call or return. The pinned ERTS reads it as a large
-    // unsigned count (`erl_bif_guard.c:280`) and returns `ok`. PBeam does not
-    // implement this yet: it stops the run with a runtime error that names the
-    // row "Map iteration" in `docs/erts-differences.md`, not with a panic.
-    let failure = load()
+    // before the next call or return. ERTS reads it as a large unsigned count
+    // (`erl_bif_guard.c:280`), so `length/1` counts the whole list.
+    let program = load();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let result = program
         .execute("logger_start_probe", "negative_budget", &[])
-        .unwrap_err()
-        .to_string();
-    assert_eq!(
-        failure,
-        "unsupported negative reduction budget in a BIF after erts_internal:map_next/3 \
-         (see \"Map iteration\" in docs/erts-differences.md)"
-    );
+        .unwrap()
+        .term;
+    assert_eq!(result, atom("ok"));
     assert_eq!(reference("negative_budget"), b"ok\n");
+}
+
+#[test]
+fn reads_a_negative_budget_in_the_form_of_each_bif_as_pinned_erts() {
+    // `logger_start_probe:negative_budget_forms/0` calls BIFs through the
+    // `apply` instruction after `erts_internal:map_next/3`, so some calls
+    // read a negative budget. `lists:member/2`, `erlang:'--'/2`, and
+    // `erlang:iolist_size/1` keep the budget signed and trap or yield at once
+    // (`erl_bif_lists.c:1114-1130`, `574-605`; `erl_iolist.c:133-135`).
+    // `erlang:processes/0` compares the signed budget with 40 and traps
+    // (`erl_ptab.c:770`). `erlang:binary_to_list/1` reads it as an unsigned
+    // count and makes one chunk (`binary.c:329-330`). Each call gives the
+    // value of a positive budget.
+    let program = load();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let result = program
+        .execute("logger_start_probe", "negative_budget_forms", &[])
+        .unwrap()
+        .term;
+    assert_eq!(result, atom("ok"));
+    assert_eq!(reference("negative_budget_forms"), b"ok\n");
 }
 
 #[test]

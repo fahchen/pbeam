@@ -197,13 +197,26 @@ fn walk_cost(init: i64, steps: i64) -> i32 {
 /// assert!(matches!(iolist_size(&mut process, &Term::binary(b"abc".to_vec()))?, BifResult::Value(Term::Integer(3))));
 /// assert_eq!(process.fcalls, 9);
 /// ```
-///
-/// # Errors
-///
-/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
-/// negative budget.
 pub(super) fn iolist_size(process: &mut ProcessState, term: &Term) -> Result<BifResult, BeamError> {
     iolist_size_continue(process, term, &[], 0)
+}
+
+/// Use all reductions before a size walk yields, as `L_yield` of
+/// `generic_iolist_size` does (`erl_iolist.c:280-289`), unless the walk
+/// started with `init` steps of 0 or less. Such a walk yields at once with
+/// no bump (`erl_iolist.c:133-135`), so a negative budget stays negative.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// process.fcalls = -3;
+/// bump_all_after_walk(&mut process, 0);
+/// assert_eq!(process.fcalls, -3);
+/// ```
+fn bump_all_after_walk(process: &mut ProcessState, init: i64) {
+    if init > 0 {
+        process.bump_all_reductions();
+    }
 }
 
 /// Continue `erlang:iolist_size/1` at `term`, with the tails of `stack`
@@ -229,18 +242,13 @@ pub(super) fn iolist_size(process: &mut ProcessState, term: &Term) -> Result<Bif
 /// assert!(matches!(trap, BifResult::TrapBif { function: "iolist_size_continue", .. }));
 /// assert_eq!(process.fcalls, 0);
 /// ```
-///
-/// # Errors
-///
-/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
-/// negative budget.
 pub(super) fn iolist_size_continue(
     process: &mut ProcessState,
     term: &Term,
     stack: &[&Term],
     mut size: usize,
 ) -> Result<BifResult, BeamError> {
-    let init = STEPS_PER_RED * process.bif_reductions_left()? as i64;
+    let init = STEPS_PER_RED * process.bif_reductions_or_zero() as i64;
     let mut steps = init;
     let mut walk = Walk::new(term, stack);
     let step = walk.run(&mut steps, |leaf, _, _| {
@@ -251,7 +259,7 @@ pub(super) fn iolist_size_continue(
         None
     });
     if step == Step::Yield {
-        process.bump_all_reductions();
+        bump_all_after_walk(process, init);
         let (term, stack) = walk.term();
         return Ok(BifResult::TrapBif {
             module: "erts_internal",
@@ -279,11 +287,6 @@ pub(super) fn iolist_size_continue(
 /// assert!(matches!(iolist_to_iovec(&mut process, &hello)?, BifResult::Value(iovec) if iovec == Term::list_from([hello])));
 /// assert!(matches!(iolist_to_iovec(&mut process, &Term::static_atom("foo"))?, BifResult::Raise { .. }));
 /// ```
-///
-/// # Errors
-///
-/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
-/// negative budget.
 pub(super) fn iolist_to_iovec(
     process: &mut ProcessState,
     term: &Term,
@@ -324,24 +327,19 @@ pub(super) fn iolist_to_iovec(
 /// assert!(matches!(iovec, BifResult::Value(binaries) if binaries == Term::list_from([Term::binary(vec![1])])));
 /// assert_eq!(process.fcalls, 8);
 /// ```
-///
-/// # Errors
-///
-/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
-/// negative budget.
 pub(super) fn iovec_size(
     process: &mut ProcessState,
     arg: &Term,
     term: &Term,
     stack: &[&Term],
 ) -> Result<BifResult, BeamError> {
-    let reds_left = process.bif_reductions_left()? as i64;
+    let reds_left = process.bif_reductions_or_zero() as i64;
     let init = STEPS_PER_RED * reds_left;
     let mut steps = init;
     let mut walk = Walk::new(term, stack);
     let step = walk.run(&mut steps, |_, _, _| None);
     if step == Step::Yield {
-        process.bump_all_reductions();
+        bump_all_after_walk(process, init);
         let (term, stack) = walk.term();
         return Ok(iovec_trap(vec![
             Term::static_atom("size"),
@@ -562,21 +560,15 @@ pub(super) fn list_to_binary(
 /// assert!(matches!(list_to_bitstring(&mut scheduler, &list, "list_to_binary")?, BifResult::Value(Term::Binary(bytes)) if bytes == [1, 2]));
 /// assert!(matches!(list_to_bitstring(&mut scheduler, &Term::static_atom("a"), "iolist_to_binary")?, BifResult::Raise { .. }));
 /// ```
-///
-/// # Errors
-///
-/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
-/// negative budget.
 fn list_to_bitstring(
     scheduler: &mut Scheduler,
     term: &Term,
     bif: &'static str,
 ) -> Result<BifResult, BeamError> {
     let process = scheduler.current_process_mut();
-    let mut reds_left = process.bif_reductions_left()? as i64;
+    let mut reds_left = process.bif_reductions_or_zero() as i64;
     if reds_left <= L2B_RESCHED_REDS {
-        let fcalls = process.fcalls;
-        scheduler.vbump_reductions(fcalls);
+        scheduler.vbump_all_reductions();
         return Ok(BifResult::TrapBif {
             module: "erlang",
             function: bif,

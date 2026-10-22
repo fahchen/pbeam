@@ -1696,11 +1696,6 @@ fn or_undefined(value: Option<Term>) -> Term {
 /// assert!(matches!(list, BifResult::Value(list) if list == Term::cons(Term::Integer(1), x.clone())));
 /// assert!(matches!(append(&mut process, &x, &Term::nil())?, BifResult::Raise { .. }));
 /// ```
-///
-/// # Errors
-///
-/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
-/// negative budget.
 pub(super) fn append(
     process: &mut ProcessState,
     left: &Term,
@@ -1746,10 +1741,13 @@ pub(super) fn append(
 /// assert_eq!(process.fcalls, 0);
 /// ```
 ///
-/// # Errors
-///
-/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
-/// negative budget.
+/// A negative budget takes no element and traps, as a budget of 0 does.
+/// `append_empty_rhs` keeps the budget in a `Sint` and walks while
+/// `count < budget` (`erl_bif_lists.c:61-75`). `lists_append_onheap` reads
+/// it into a `Uint`, takes no element, and its `BUMP_REDS` sets the budget
+/// to 0 (`erl_bif_lists.c:182-211`, `bif.h:71-78`), so
+/// `lists_append_alloc` reads 0 and takes no element
+/// (`erl_bif_lists.c:118-161`).
 pub(super) fn append_chunk(
     process: &mut ProcessState,
     left: &Term,
@@ -1758,7 +1756,7 @@ pub(super) fn append_chunk(
 ) -> Result<BifResult, BeamError> {
     let mut elements = rest.list_iter().expect("'++' walks a list");
     let per_reduction = if right.is_nil() { 32 } else { 60 };
-    let budget = per_reduction * process.bif_reductions_left()?;
+    let budget = per_reduction * process.bif_reductions_or_zero();
     let walked = elements.by_ref().take(budget).count();
     process.bump_reductions((walked / per_reduction) as i32);
     let rest = elements.rest();
@@ -1804,10 +1802,8 @@ pub(super) fn append_chunk(
 /// assert!(matches!(trap, BifResult::TrapBif { function: "length", .. }));
 /// ```
 ///
-/// # Errors
-///
-/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
-/// negative budget.
+/// ERTS reads the budget into a `Uint` (`erl_bif_guard.c:273-280`), so a
+/// negative budget counts the whole list in the call.
 pub(super) fn length(
     process: &mut ProcessState,
     list: &Term,
@@ -1816,8 +1812,11 @@ pub(super) fn length(
     let Some(mut elements) = list.list_iter() else {
         return Ok(BifResult::badarg());
     };
-    let max_iter = 16 * process.bif_reductions_left()?;
-    let counted = elements.by_ref().take(max_iter).count();
+    let max_iter = process.bif_reductions_unsigned().wrapping_mul(16);
+    let counted = elements
+        .by_ref()
+        .take(usize::try_from(max_iter).unwrap_or(usize::MAX))
+        .count();
     let rest = elements.rest();
     if rest.is_nonempty_list() {
         process.bump_all_reductions();
@@ -2007,11 +2006,6 @@ const B2L_RESCHED_REDS: usize = CONTEXT_REDS as usize / 40;
 /// let list = binary_to_list_1(&mut scheduler, &Term::binary(vec![1, 2]))?;
 /// assert!(matches!(list, BifResult::Value(codes) if codes == Term::list_from([1, 2].map(Term::Integer))));
 /// ```
-///
-/// # Errors
-///
-/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
-/// negative budget.
 pub(super) fn binary_to_list_1(
     scheduler: &mut Scheduler,
     term: &Term,
@@ -2049,11 +2043,6 @@ pub(super) fn binary_to_list_1(
 /// let list = binary_to_list_3(&mut scheduler, &Term::binary(vec![1, 2, 3]), &Term::Integer(2), &Term::Integer(3))?;
 /// assert!(matches!(list, BifResult::Value(codes) if codes == Term::list_from([2, 3].map(Term::Integer))));
 /// ```
-///
-/// # Errors
-///
-/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
-/// negative budget.
 pub(super) fn binary_to_list_3(
     scheduler: &mut Scheduler,
     term: &Term,
@@ -2093,10 +2082,13 @@ pub(super) fn binary_to_list_3(
 /// chunk costs one reduction for each 256 bytes. Each other binary goes
 /// to [`b2l_chunk`].
 ///
+/// ERTS compares the `Uint` size with the `int` product of the budget,
+/// which C converts to a `Uint` (`binary.c:329-330`, `385-386`,
+/// `436-437`), so a negative budget makes one chunk.
+///
 /// # Errors
 ///
-/// Return the runtime error of [`ProcessState::bif_reductions_left`] for a
-/// negative budget.
+/// Return the invariant error of [`ProcessState::bif_reductions_left`].
 fn b2l_start(
     scheduler: &mut Scheduler,
     bif: &'static str,
@@ -2107,26 +2099,31 @@ fn b2l_start(
     size: usize,
 ) -> Result<BifResult, BeamError> {
     let process = scheduler.current_process_mut();
-    let reds_left = process.bif_reductions_left()?;
-    let short = size < B2L_MIN_EXEC_REDS * B2L_BYTES_PER_REDUCTION;
-    if size >= reds_left * B2L_BYTES_PER_REDUCTION && !short {
-        return Ok(b2l_chunk(
-            process,
-            binary,
-            offset,
-            length,
-            Term::nil(),
-            reds_left,
-        ));
-    }
-    if size >= reds_left * B2L_BYTES_PER_REDUCTION && reds_left <= B2L_RESCHED_REDS {
-        let fcalls = process.fcalls;
-        scheduler.vbump_reductions(fcalls);
-        return Ok(BifResult::TrapBif {
-            module: "erlang",
-            function: bif,
-            arguments,
-        });
+    let one_chunk = (size as u64)
+        < process
+            .bif_reductions_unsigned()
+            .wrapping_mul(B2L_BYTES_PER_REDUCTION as u64);
+    if !one_chunk {
+        // Only a budget of 0 or more does not make one chunk.
+        let reds_left = process.bif_reductions_left()?;
+        if size >= B2L_MIN_EXEC_REDS * B2L_BYTES_PER_REDUCTION {
+            return Ok(b2l_chunk(
+                process,
+                binary,
+                offset,
+                length,
+                Term::nil(),
+                reds_left,
+            ));
+        }
+        if reds_left <= B2L_RESCHED_REDS {
+            scheduler.vbump_all_reductions();
+            return Ok(BifResult::TrapBif {
+                module: "erlang",
+                function: bif,
+                arguments,
+            });
+        }
     }
     process.bump_reductions(((length - 1) / B2L_BYTES_PER_REDUCTION + 1) as i32);
     Ok(Value(b2l_cons(
@@ -2440,8 +2437,10 @@ pub(super) fn integer_to_binary_2(
 /// Return a runtime error for a bignum that costs more than the reductions
 /// left. ERTS then runs the BIF again on a dirty CPU scheduler
 /// (`bif.c:3289-3296`, `3323-3336`; `binary.c:98-105`, `129-142`,
-/// `163-178`), and PBeam has no dirty scheduler. Also return the runtime
-/// error of [`ProcessState::bif_reductions_left`] for a negative budget.
+/// `163-178`), and PBeam has no dirty scheduler. ERTS compares the `Uint`
+/// cost with the `int` budget, which C converts to a `Uint`
+/// (`bif.c:3289`, `binary.c:98`), so a negative budget makes no runtime
+/// error.
 fn integer_digits(
     process: &mut ProcessState,
     term: &Term,
@@ -2458,7 +2457,7 @@ fn integer_digits(
         let cost =
             big_integer_estimate(value.bits(), value.sign() == num_bigint::Sign::Minus, base)
                 / DIGITS_PER_RED;
-        if cost > process.bif_reductions_left()? {
+        if cost as u64 > process.bif_reductions_unsigned() {
             // ponytail: no dirty scheduler; see "Scheduling" in docs/erts-differences.md.
             return Err(error(format!(
                 "unsupported erlang:{name} of a bignum of {} bits with {} reductions left: ERTS runs it on a dirty CPU scheduler",
@@ -6328,7 +6327,9 @@ thread_local! {
 /// when the call starts its read, also an exiting process, as
 /// `erts_ptab_list` (`erl_ptab.c:746-780`, `888-1280`) lists the process
 /// table. A call with fewer than 40 reductions traps before the start
-/// (`erl_ptab.c:766-768`). See [`ptab_list`] for the steps.
+/// (`erl_ptab.c:766-768`). The signed compare of the budget
+/// (`erl_ptab.c:770`) makes a negative budget trap too. See [`ptab_list`]
+/// for the steps.
 ///
 /// # Examples
 ///
@@ -6339,7 +6340,8 @@ thread_local! {
 ///
 /// # Errors
 ///
-/// A budget of the current process that is less than 0.
+/// The invariant error of [`ProcessState::bif_reductions_left`] in
+/// [`ptab_list`].
 pub(super) fn processes(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
     let state = PtabList {
         tix: -1,
@@ -6348,7 +6350,7 @@ pub(super) fn processes(scheduler: &mut Scheduler) -> Result<BifResult, BeamErro
         pid_ix: 0,
         result: Term::Nil,
     };
-    if scheduler.current_process().bif_reductions_left()? < PTAB_CHUNK_REDS {
+    if scheduler.current_process().bif_reductions_signed() < PTAB_CHUNK_REDS as i64 {
         return Ok(ptab_list_trap(scheduler, state));
     }
     ptab_list(scheduler, state)
@@ -6358,8 +6360,7 @@ pub(super) fn processes(scheduler: &mut Scheduler) -> Result<BifResult, BeamErro
 /// trap uses the rest of the budget as virtual reductions
 /// (`ERTS_BIF_PREP_YIELD2`, `bif.h:477-481`).
 fn ptab_list_trap(scheduler: &mut Scheduler, state: PtabList) -> BifResult {
-    let fcalls = scheduler.current_process().fcalls;
-    scheduler.vbump_reductions(fcalls);
+    scheduler.vbump_all_reductions();
     BifResult::TrapBif {
         module: "erts_internal",
         function: "ptab_list_continue",
@@ -6419,7 +6420,9 @@ pub(super) fn hidden_policy(scheduler: &Scheduler) -> Option<ProcessId> {
 ///
 /// # Errors
 ///
-/// A budget of the current process that is less than 0.
+/// The invariant error of [`ProcessState::bif_reductions_left`]: the call
+/// starts with at least 40 reductions or at the start of a turn, and each
+/// step bumps the budget, which keeps it at 0 or more.
 pub(super) fn ptab_list(
     scheduler: &mut Scheduler,
     mut state: PtabList,

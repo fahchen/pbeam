@@ -842,7 +842,8 @@ fn call(atoms: &AtomTable, function: Guard, arguments: &[Term]) -> Option<Term> 
         Guard::IsReference => truth(matches!(arguments[0], Term::Reference(_))),
         Guard::IsTuple => truth(matches!(arguments[0], Term::Tuple(_))),
         Guard::IsMap => truth(matches!(arguments[0], Term::Map(_))),
-        Guard::IsBinary => truth(matches!(arguments[0], Term::Binary(_))),
+        // ERTS calls `is_binary_1` (`erl_db_util.c:641-642`).
+        Guard::IsBinary => truth(arguments[0].is_binary()),
         Guard::IsBitstring => truth(matches!(arguments[0], Term::Binary(_))),
         Guard::IsBoolean => {
             truth(matches!(&arguments[0], Term::Atom(atom) if atom.is_one_of(&["true", "false"])))
@@ -882,6 +883,8 @@ fn call(atoms: &AtomTable, function: Guard, arguments: &[Term]) -> Option<Term> 
             Term::Map(map) => truth(map.get(&arguments[0]).is_some()),
             _ => None,
         },
+        // ERTS calls `size_1` (`erl_db_util.c:731-732`), which floors the bit
+        // size of a bitstring with `BYTE_SIZE` (`erl_bif_guard.c:323-324`).
         Guard::Size => match &arguments[0] {
             Term::Tuple(elements) => Some(Term::Integer(elements.len() as i64)),
             Term::Binary(binary) => Some(Term::Integer((binary.bit_size() / 8) as i64)),
@@ -891,8 +894,10 @@ fn call(atoms: &AtomTable, function: Guard, arguments: &[Term]) -> Option<Term> 
             Term::Binary(binary) => Some(Term::Integer(binary.bit_size() as i64)),
             _ => None,
         },
+        // ERTS calls `byte_size_1` (`erl_db_util.c:761-762`), which rounds the
+        // bit size up with `NBYTES` (`erl_bif_guard.c:385`, `erl_bits.h:27`).
         Guard::ByteSize => match &arguments[0] {
-            Term::Binary(binary) => Some(Term::Integer((binary.bit_size() / 8) as i64)),
+            Term::Binary(binary) => Some(Term::Integer(binary.bit_size().div_ceil(8) as i64)),
             _ => None,
         },
         Guard::TupleSize => match &arguments[0] {

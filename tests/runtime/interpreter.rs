@@ -1157,6 +1157,50 @@ fn recognizes_runtime_process_identifiers_as_pids() {
 }
 
 #[test]
+fn fails_the_is_binary_test_for_a_bitstring_with_tail_bits() {
+    // The `is_binary` instruction fails for a bitstring with tail bits (emu
+    // `instrs.tab:939-943`; JIT `emit_is_binary` in
+    // `jit/arm/instr_common.cpp:1186-1224`). A fixture cannot build such a
+    // bitstring yet, so the test builds it in Rust.
+    let mut program = make_program(
+        vec![
+            Instruction::Test {
+                kind: TestKind::Binary,
+                fail_label: 3,
+                value: Operand::X(0),
+            },
+            Instruction::Move(Operand::Value(test_atom("binary")), Operand::X(0)),
+            Instruction::Return,
+            Instruction::Label(3),
+            Instruction::Move(Operand::Value(test_atom("other")), Operand::X(0)),
+            Instruction::Return,
+        ],
+        1,
+    );
+    let module = Arc::get_mut(program.modules.get_mut("fixture").unwrap()).unwrap();
+    let main = module.tables.name_id("main").unwrap();
+    module.exports.insert((main, 1), 2);
+
+    for (argument, expected) in [
+        (Term::Binary(Binary::from(&[0x20_u8]).bits(0, 3)), "other"),
+        (
+            Term::Binary(Binary::from(&[1_u8, 2, 0xC0]).bits(0, 18)),
+            "other",
+        ),
+        (Term::binary(vec![1, 2]), "binary"),
+    ] {
+        let argument = program.host_term(argument);
+        assert_eq!(
+            program
+                .execute("fixture", "main", &[argument])
+                .unwrap()
+                .term,
+            test_atom(expected)
+        );
+    }
+}
+
+#[test]
 fn updates_and_reads_maps_and_reports_unsupported_map_operands() {
     let map = |pairs: Vec<(&str, i64)>| {
         let pairs = pairs

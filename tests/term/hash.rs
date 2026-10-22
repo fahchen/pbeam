@@ -141,6 +141,35 @@ fn hashes_each_term_kind_as_pinned_erts() {
     }
 }
 
+#[test]
+fn hashes_a_bitstring_by_its_bits_as_pinned_erts() {
+    // Each value is erts_debug:get_internal_state({internal_hash, Term}) on ERTS 29.1.1.
+    // ERTS mixes the size in bits, the whole bytes, and the tail bits
+    // (`erl_term_hashing.c:2029-2091`).
+    let bits = |bytes: &[u8], size| Term::Binary(Binary::from(bytes).bits(0, size));
+    let mut tail = b"0123456789abcdefg".to_vec();
+    tail.push(0xA0);
+    let cases = [
+        (bits(&[0x20], 3), 2772974853977271676),
+        (Term::binary(vec![0x20]), 10090078442021580778),
+        (Term::binary(b"abc".to_vec()), 11766418651593861201),
+        // <<_:4, A:12/bits, _/bits>> = <<"abc">>, A = <<22,2:4>>.
+        (
+            Term::Binary(Binary::from(b"abc".to_vec()).bits(4, 16)),
+            12847386933134786152,
+        ),
+        (bits(&[0x10], 4), 5341495853110203383),
+        (bits(&[0], 3), 2512535726010557823),
+        (bits(&tail, 139), 6506100538193254079),
+    ];
+    for (term, hash) in cases {
+        assert_eq!(internal_hash(&term), hash, "{term:?}");
+    }
+    // The bits after the size do not change the hash, as they do not change
+    // the equality.
+    assert_eq!(internal_hash(&bits(&[0x3F], 3)), 2772974853977271676);
+}
+
 /// Return a local fun of `lists` with a fun entry and free variables.
 fn local(index: i32, old_unique: i32, arity: u32, free: Vec<Term>) -> Term {
     let module = Atom::from_static("lists").unwrap();

@@ -156,6 +156,11 @@ enum Step {
 /// `erl_bif_lists.c:460`), so they agree with the exact equality of the
 /// naive stages, and `[1.0] -- [1]` is `[1.0]`.
 ///
+/// Each stage keeps the budget in a `Sint` and works while its count is
+/// below the budget (`erl_bif_lists.c:577-587`, `634-639`, `725-734`,
+/// `815-824`, `871-880`), so a negative budget does what a budget of 0
+/// does.
+///
 /// # Examples
 ///
 /// ```rust,ignore
@@ -168,8 +173,7 @@ enum Step {
 /// # Errors
 ///
 /// The runtime error of [`Term::compare`] for two different references in
-/// a set stage, and the runtime error of
-/// [`ProcessState::bif_reductions_left`] for a negative budget.
+/// a set stage.
 pub(super) fn subtract(
     process: &mut ProcessState,
     atoms: &AtomTable,
@@ -279,13 +283,9 @@ impl Subtract {
     /// ```rust,ignore
     /// let step = state.length(&mut process, true)?;
     /// ```
-    ///
-    /// # Errors
-    ///
-    /// The runtime error of [`ProcessState::bif_reductions_left`].
     fn length(&mut self, process: &mut ProcessState, left: bool) -> Result<Step, BeamError> {
         const ELEMENTS_PER_RED: usize = 32;
-        let budget = ELEMENTS_PER_RED * process.bif_reductions_left()?;
+        let budget = ELEMENTS_PER_RED * process.bif_reductions_or_zero();
         let mut elements = self.iterator.list_iter().expect("a stage walks a list");
         let count = elements.by_ref().take(budget).count();
         let rest = elements.rest().clone();
@@ -345,13 +345,9 @@ impl Subtract {
     /// ```rust,ignore
     /// let step = state.naive_left(&mut process)?;
     /// ```
-    ///
-    /// # Errors
-    ///
-    /// The runtime error of [`ProcessState::bif_reductions_left`].
     fn naive_left(&mut self, process: &mut ProcessState) -> Result<Step, BeamError> {
         const CHECKS_PER_RED: usize = 16;
-        let budget = CHECKS_PER_RED * process.bif_reductions_left()?;
+        let budget = CHECKS_PER_RED * process.bif_reductions_or_zero();
         let mut checks = 0;
         while checks < budget
             && let Some((value, next)) = self.iterator.cons_cell()
@@ -389,13 +385,9 @@ impl Subtract {
     /// ```rust,ignore
     /// let step = state.naive_right(&mut process)?;
     /// ```
-    ///
-    /// # Errors
-    ///
-    /// The runtime error of [`ProcessState::bif_reductions_left`].
     fn naive_right(&mut self, process: &mut ProcessState) -> Result<Step, BeamError> {
         const CHECKS_PER_RED: usize = 16;
-        let budget = CHECKS_PER_RED * process.bif_reductions_left()?;
+        let budget = CHECKS_PER_RED * process.bif_reductions_or_zero();
         let mut checks = 0;
         while checks < budget
             && let Some((value, next)) = self.iterator.cons_cell()
@@ -438,15 +430,14 @@ impl Subtract {
     ///
     /// # Errors
     ///
-    /// The runtime error of [`Term::compare`] and of
-    /// [`ProcessState::bif_reductions_left`].
+    /// The runtime error of [`Term::compare`].
     fn set_build(
         &mut self,
         process: &mut ProcessState,
         atoms: &AtomTable,
     ) -> Result<Step, BeamError> {
         const INSERTIONS_PER_RED: usize = 16;
-        let budget = INSERTIONS_PER_RED * process.bif_reductions_left()?;
+        let budget = INSERTIONS_PER_RED * process.bif_reductions_or_zero();
         let mut insertions = 0;
         while insertions < budget
             && let Some((value, next)) = self.iterator.cons_cell()
@@ -483,15 +474,14 @@ impl Subtract {
     ///
     /// # Errors
     ///
-    /// The runtime error of [`Term::compare`] and of
-    /// [`ProcessState::bif_reductions_left`].
+    /// The runtime error of [`Term::compare`].
     fn set_finish(
         &mut self,
         process: &mut ProcessState,
         atoms: &AtomTable,
     ) -> Result<Step, BeamError> {
         const CHECKS_PER_RED: usize = 8;
-        let budget = CHECKS_PER_RED * process.bif_reductions_left()?;
+        let budget = CHECKS_PER_RED * process.bif_reductions_or_zero();
         let mut checks = 0;
         while checks < budget
             && let Some((value, next)) = self.iterator.cons_cell()

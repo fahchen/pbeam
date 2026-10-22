@@ -1,5 +1,7 @@
 use super::{MatchSpec, Pattern, SpecError, variable};
-use crate::term::{AtomTable, Fun, Map, PortId, ProcessId, Reference, Term, test_atom_table};
+use crate::term::{
+    AtomTable, Binary, Fun, Map, PortId, ProcessId, Reference, Term, test_atom_table,
+};
 use num_bigint::BigInt;
 
 fn atom(atoms: &mut AtomTable, name: &str) -> Term {
@@ -1098,5 +1100,52 @@ fn shifts_lists_and_boolean_forms_like_the_match_program() {
             Term::tuple(vec![atom(&mut atoms, "const"), Term::Integer(expected)]),
         ]);
         assert_eq!(run_expression(&atoms, less), Some(ok.clone()), "{name}");
+    }
+}
+
+#[test]
+fn tests_and_sizes_a_bitstring_with_tail_bits_like_the_match_program() {
+    // The pinned ERTS gives `[1,3]` for `byte_size`, `[0,2]` for `size`, and
+    // `[<<1,2>>,<<>>]` for the `is_binary` guard on `<<1:3>>`,
+    // `<<1,2,3:2>>`, `<<1,2>>`, and `<<>>` (`erl_db_util.c:641-642`,
+    // `731-732`, `761-762`). A fixture cannot build a bitstring with tail
+    // bits yet, so the test builds it in Rust.
+    let mut atoms = test_atom_table();
+    let var1 = atom(&mut atoms, "$1");
+    let head = Term::tuple(vec![var1.clone()]);
+    let three_bits = Term::Binary(Binary::from(&[0x20_u8]).bits(0, 3));
+    let eighteen_bits = Term::Binary(Binary::from(&[1_u8, 2, 0xC0]).bits(0, 18));
+    let whole = Term::binary(vec![1, 2]);
+    let empty = Term::binary(vec![]);
+    for (name, value, expected) in [
+        ("byte_size", three_bits.clone(), 1),
+        ("byte_size", eighteen_bits.clone(), 3),
+        ("size", three_bits.clone(), 0),
+        ("size", eighteen_bits.clone(), 2),
+    ] {
+        let body = call(&mut atoms, name, vec![var1.clone()]);
+        assert_eq!(
+            run(&atoms, head.clone(), vec![], vec![body], vec![value]),
+            Some(Term::Integer(expected)),
+            "{name}"
+        );
+    }
+    let guard = call(&mut atoms, "is_binary", vec![var1.clone()]);
+    for (value, passes) in [
+        (three_bits, false),
+        (eighteen_bits, false),
+        (whole, true),
+        (empty, true),
+    ] {
+        assert_eq!(
+            run(
+                &atoms,
+                head.clone(),
+                vec![guard.clone()],
+                vec![var1.clone()],
+                vec![value.clone()]
+            ),
+            passes.then_some(value)
+        );
     }
 }

@@ -113,7 +113,7 @@ enum Shape<'a> {
     List(Cells<'a>),
     Tuple(&'a [Term]),
     Map(&'a Map),
-    Binary(&'a [u8]),
+    Binary(&'a Binary),
     /// An integer outside the small-integer range: its sign and its
     /// magnitude in 64-bit digits, least significant first.
     Bignum(bool, Vec<u64>),
@@ -512,10 +512,18 @@ impl State {
                 }
             },
             Shape::Binary(bytes) => {
-                // ERTS mixes the size in bits.
+                // ERTS mixes the size in bits, the whole bytes, and then the
+                // tail bits shifted down, so the bits after the size do not
+                // change the hash (`erl_term_hashing.c:2029-2091`).
+                let size = bytes.bit_size();
+                let whole = size / 8;
+                let tail = size % 8;
                 self.mix_alpha(TYPE_BINARY);
-                self.mix_beta(bytes.len() as u64 * 8);
-                self.mix_bytes(bytes);
+                self.mix_beta(size as u64);
+                self.mix_bytes(&bytes[..whole]);
+                if tail != 0 {
+                    self.mix_alpha(u64::from(bytes[whole] >> (8 - tail)));
+                }
             }
             Shape::Bignum(negative, digits) => {
                 // ERTS mixes the sign and the number of 64-bit digits, then

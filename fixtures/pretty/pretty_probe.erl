@@ -11,11 +11,11 @@ terms() ->
      #{}, #{1 => a, 2 => [b]}, <<>>, {a, [b, #{c => {d, e}}], 2.0},
      [{key, N} || N <- lists:seq(1, 12)]].
 
-%% Binaries that are not empty. On PBeam, `~p` of such a binary runs
-%% `erlang:bit_size/1` in `io_lib_pretty:print_length_binary/7`
-%% (io_lib_pretty.erl:1116), then stops at `erlang:binary_to_list/1` in
-%% `io_lib_pretty:printable_bin/5` (io_lib_pretty.erl:1255-1285), so only
-%% `~w` writes them.
+%% Binaries that are not empty. Only `~w` writes them here. On PBeam,
+%% `~p` of such a binary runs `erlang:bit_size/1` in
+%% `io_lib_pretty:print_length_binary/7` (io_lib_pretty.erl:1116) and
+%% `erlang:binary_to_list/1`, and gives the ERTS text (measured), but the
+%% expected output of the test does not hold it yet.
 binaries() ->
     [<<1, 2>>, <<"text">>, {a, [b, #{c => {d, <<"e">>}}], 2.0}].
 

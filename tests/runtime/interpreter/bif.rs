@@ -477,3 +477,37 @@ fn only_the_oldest_processes_read_pays_the_free_cost_of_the_deleted_pids() {
     assert_eq!(scheduler.current_process().id, ProcessId(0));
     assert_eq!(finish(&mut scheduler, older), 11);
 }
+
+/// Assert that `erlang:is_binary/1` is true only for a bitstring of whole
+/// bytes, as ERTS `is_binary_1` is (`erl_bif_op.c:206-213`). A fixture
+/// cannot build a bitstring with tail bits yet, so the test builds it in
+/// Rust.
+#[test]
+fn is_binary_rejects_a_bitstring_with_tail_bits() {
+    let cases = [
+        (Term::Binary(Binary::from(&[0x20_u8]).bits(0, 3)), "false"),
+        (
+            Term::Binary(Binary::from(&[1_u8, 2, 0xC0]).bits(0, 18)),
+            "false",
+        ),
+        (Term::binary(vec![1, 2]), "true"),
+        (Term::binary(vec![]), "true"),
+        (Term::Integer(1), "false"),
+    ];
+    let mut scheduler = Scheduler::new(AtomTable::new());
+    let mut context = BifContext {
+        scheduler: &mut scheduler,
+    };
+    for (argument, expected) in cases {
+        let result = super::table::dispatch(
+            &mut context,
+            BifId::ErlangIsBinary1,
+            std::slice::from_ref(&argument),
+        )
+        .expect("the owned dispatch runs");
+        assert!(
+            matches!(&result, BifResult::Value(value) if *value == Term::static_atom(expected)),
+            "{argument:?}"
+        );
+    }
+}

@@ -361,6 +361,22 @@ impl Term {
         Term::Atom(Atom::from_static(name).expect("the name is a static atom"))
     }
 
+    /// Return true for a bitstring of whole bytes, as ERTS `is_binary_1`
+    /// does: `is_bitstring(X) && TAIL_BITS(bitstring_size(X)) == 0`
+    /// (`erl_bif_op.c:206-213`). The `is_binary` instruction makes the same
+    /// test (emu `instrs.tab:939-943`; JIT `emit_is_binary` in
+    /// `jit/arm/instr_common.cpp:1186-1224`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(Term::binary(vec![1, 2]).is_binary());
+    /// assert!(!Term::Binary(Binary::from(&[0x20]).bits(0, 3)).is_binary());
+    /// ```
+    pub(crate) fn is_binary(&self) -> bool {
+        matches!(self, Term::Binary(binary) if binary.bit_size().is_multiple_of(8))
+    }
+
     /// Build a tuple of `elements`. The array of the tuple holds the
     /// elements, and copies of the tuple share it. Code outside the term
     /// module builds a tuple with this function, and it does not name
