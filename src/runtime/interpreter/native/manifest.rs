@@ -275,18 +275,21 @@ fn load_gaps(module: &BeamModule, libraries: &[PathBuf]) -> Vec<NifGap> {
 }
 
 /// Return the path that `erlang:load_nif/2` gets for the `.so` file
-/// `path`: the path without its `.so` extension, because the loader adds
-/// it (`sys/unix/erl_unix_sys_ddll.c:107-158`).
+/// `path`: the path without its final `.so`, because the loader adds it
+/// (`sys/unix/erl_unix_sys_ddll.c:107-158`). Each other dot stays, so
+/// `a_nif.debug.so` opens as `a_nif.debug.so`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// assert_eq!(load_name(Path::new("lib/a/priv/a_nif.so")).as_bytes(), b"lib/a/priv/a_nif");
+/// assert_eq!(load_name(Path::new("priv/a_nif.debug.so")).as_bytes(), b"priv/a_nif.debug");
 /// ```
 fn load_name(path: &Path) -> CString {
-    let path = path.with_extension("");
+    let bytes = path.as_os_str().as_bytes();
+    let name = bytes.strip_suffix(b".so").unwrap_or(bytes);
     // A path of the file system has no NUL byte.
-    CString::new(path.as_os_str().as_bytes()).expect("a path has no NUL byte")
+    CString::new(name).expect("a path has no NUL byte")
 }
 
 /// Return the path that the code before a call of `erlang:load_nif/2` puts

@@ -643,20 +643,23 @@ fn checks_a_shipped_nif_library_against_its_module() {
 
     // A library of another module does not take the load, and the library
     // with the name of the module does: the build passes and ships both.
+    // The gate removes only the final `.so` of a name with more dots, as
+    // the loader adds only `.so`.
     nif_add_library(&private.join("a_other.so"), &["-DNIF_ADD_NAME=nif_other"]);
-    nif_add_library(&private.join("nif_add.so"), &[]);
+    nif_add_library(&private.join("nif_add.debug.so"), &[]);
     assert_eq!(
         bundle_release(&release),
         (Some(0), String::new(), String::new(), true)
     );
     let bytes = fs::read(directory.join("out")).unwrap();
     let bundle = pbeam_runtime::Bundle::parse(&bytes).unwrap();
-    for name in ["a_other.so", "nif_add.so"] {
+    for name in ["a_other.so", "nif_add.debug.so"] {
         assert_eq!(
             bundle.resource(&format!("lib/app-1/priv/{name}")),
             Some(&fs::read(private.join(name)).unwrap()[..])
         );
     }
+    fs::remove_file(private.join("nif_add.debug.so")).unwrap();
 
     // A library with a function that the module does not define fails with
     // the erlang:load_nif/2 text (beam/erl_nif.c:4845-4900).
