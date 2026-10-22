@@ -2620,6 +2620,10 @@ impl BeamProgram {
                     // with its arguments first, as ERTS gives it.
                     let arguments = call_arguments(&process.registers, *arity)?;
                     cursor.commit(process);
+                    // A load of another scheduler that returned patches
+                    // the entry for each later call
+                    // (`beam/erl_nif.c:5043-5098`).
+                    scheduler.sync_code();
                     if let Some((job, result)) = native::call(scheduler, module, name, &arguments) {
                         let outcome = match result? {
                             BifResult::Raise { class, reason } => raise_at_entry(
