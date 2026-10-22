@@ -5771,6 +5771,32 @@ fn helps_a_trapped_insert_from_internal_delete_all() {
 }
 
 #[test]
+fn rejects_a_copied_list_insert_into_a_protected_bag_of_another_owner() {
+    // A `bag` list insert copies its objects before it takes the table, so
+    // the access check of the take raises `badarg` after the copy
+    // (`erl_db.c:2072-2110`, `788-795`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let table = Table::new(ProcessId(999), Access::Protected, 1, TableType::Bag);
+    scheduler.ets.exclusive().create(Reference(0), None, table);
+    let object = Term::tuple(vec![Term::Integer(1)]);
+    let result = program
+        .bif(
+            &mut scheduler,
+            "ets",
+            "insert",
+            vec![
+                Term::Reference(Reference(0)),
+                Term::list_from([object.clone(), object]),
+            ],
+        )
+        .unwrap();
+    assert!(matches!(result, BifResult::Raise { .. }));
+}
+
+#[test]
 fn traps_the_initial_clear_with_the_table_reference() {
     // The clear of a fixed table that does not finish traps with the table
     // reference and the object count, so a reused name cannot resume

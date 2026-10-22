@@ -215,9 +215,7 @@ pub(super) fn new(
                         decentralized = true;
                         // ERTS rounds the count down to a power of two, and
                         // at least 64 (`erl_db_hash.c:1043-1050`).
-                        let Term::Integer(count) = locks[1] else {
-                            unreachable!("the check found an integer count")
-                        };
+                        let count = locks[1].small_integer().unwrap_or(1);
                         let count = (1_i64 << count.ilog2()).max(64);
                         concurrency = Term::tuple(vec![locks[0].clone(), Term::Integer(count)]);
                     }
@@ -1741,10 +1739,7 @@ fn select_objects(
     let table = match ets.read(atoms, &Term::Reference(id), caller, reds) {
         Ok(table) => table,
         Err(lacking) => {
-            let trap = select_trap(id, spec, chunk);
-            let BifResult::TrapBif { arguments, .. } = trap else {
-                unreachable!("a select trap is a trap")
-            };
+            let arguments = select_trap_arguments(id, spec, chunk);
             return Ok(retry(context, lacking, "select_trap", arguments));
         }
     };
@@ -1807,24 +1802,21 @@ fn select_objects(
     )
 }
 
-/// Trap a select that found a busy table, as `handle_lacking_permission`
-/// makes the call run again in a later turn (`erl_db.c:769-798`). The
-/// change count `u64::MAX` marks the restart: the insert changes the table,
-/// and the resumed call reads the current count ([`match_trap`]).
-fn select_trap(id: Reference, spec: &Term, chunk: usize) -> BifResult {
-    BifResult::TrapBif {
-        module: "ets",
-        function: "select_trap",
-        arguments: vec![
-            Term::Reference(id),
-            spec.clone(),
-            Term::Integer(0),
-            Term::Integer(chunk as i64),
-            Term::nil(),
-            Term::Integer(0),
-            Term::Integer(u64::MAX as i64),
-        ],
-    }
+/// Return the arguments of the trap of a select that found a busy table,
+/// as `handle_lacking_permission` makes the call run again in a later turn
+/// (`erl_db.c:769-798`). The change count `u64::MAX` marks the restart: the
+/// insert changes the table, and the resumed call reads the current count
+/// ([`match_trap`]).
+fn select_trap_arguments(id: Reference, spec: &Term, chunk: usize) -> Vec<Term> {
+    vec![
+        Term::Reference(id),
+        spec.clone(),
+        Term::Integer(0),
+        Term::Integer(chunk as i64),
+        Term::nil(),
+        Term::Integer(0),
+        Term::Integer(u64::MAX as i64),
+    ]
 }
 
 /// Run the trap export `ets:select_trap/7` of a match: the table reference,

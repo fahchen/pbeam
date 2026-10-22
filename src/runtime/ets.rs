@@ -630,22 +630,21 @@ impl EtsTables {
         operation: Operation,
     ) -> Result<RwLockReadGuard<'_, Table>, Lacking> {
         let (_, lock) = self.lookup(atoms, id).ok_or(Lacking::Denied)?;
-        loop {
-            let table = read(lock);
-            if !table.lacks(caller) {
-                return table
-                    .allows(caller, operation)
-                    .then_some(table)
-                    .ok_or(Lacking::Denied);
-            }
-            drop(table);
-            // `handle_lacking_permission` takes the write lock for the help
-            // (`erl_db.c:773-777`). The table can change between the two
-            // locks, so the check runs again.
-            if let Some(reductions) = self.help(atoms, &mut write(lock), caller, reds) {
-                return Err(Lacking::Busy { reductions });
-            }
+        let table = read(lock);
+        if !table.lacks(caller) {
+            return table
+                .allows(caller, operation)
+                .then_some(table)
+                .ok_or(Lacking::Denied);
         }
+        drop(table);
+        // `handle_lacking_permission` takes the write lock for the help
+        // (`erl_db.c:773-777`). The work can end between the two locks; the
+        // call then traps with no help and runs again.
+        let reductions = self.help(atoms, &mut write(lock), caller, reds);
+        Err(Lacking::Busy {
+            reductions: reductions.unwrap_or(0),
+        })
     }
 
     /// Run the work of the list insert of another process or of the clear
