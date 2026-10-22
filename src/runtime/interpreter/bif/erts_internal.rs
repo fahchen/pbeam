@@ -1683,9 +1683,9 @@ pub(super) fn spawn_system_process(
         function,
         arguments,
         SpawnOptions::default(),
-    )?;
-    if let BifResult::Value(Term::Pid(pid)) = &spawned {
+    );
+    if let Ok(BifResult::Value(Term::Pid(pid))) = &spawned {
         scheduler.mark_system(*pid);
     }
-    Ok(spawned)
+    spawned
 }

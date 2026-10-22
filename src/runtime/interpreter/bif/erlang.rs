@@ -5576,12 +5576,8 @@ pub(super) fn loaded(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> 
         .collect::<Vec<_>>();
     let mut modules = Vec::with_capacity(names.len());
     for name in names.iter().rev() {
-        if let Some(denied) = denial(
-            scheduler,
-            CapabilityKind::Code,
-            Operation::Inspect,
-            Some(name.as_bytes()),
-        )? {
+        let bytes = Some(name.as_bytes());
+        if let Some(denied) = denial(scheduler, CapabilityKind::Code, Operation::Inspect, bytes)? {
             return Ok(denied);
         }
         modules.push(Term::Atom(scheduler.atoms.put(name)?));
