@@ -178,11 +178,11 @@ impl Scheduler {
         signal: Signal,
     ) -> Result<(), Box<Signal>> {
         if let Some(pending) = self.take_pending_monitor(target) {
-            if !self.processes.contains_key(&target) {
+            if self.processes.contains_key(&target) {
+                self.queue_signal(sender, target, monitor_signal(pending));
+            } else {
                 self.pending_monitor_failed(sender, pending);
-                return Err(Box::new(signal));
             }
-            self.queue_signal(sender, target, monitor_signal(pending));
             self.release_held();
         }
         if !self.processes.contains_key(&target) {

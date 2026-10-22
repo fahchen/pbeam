@@ -37,7 +37,8 @@ race_watch() -> check(race_watch_run(), race_log()).
 race_owner() -> check(owner_run(race_owner), ok).
 kill_watch() -> check(kill_watch_run(), [killed]).
 kill_owner() -> check(owner_run(kill_owner), ok).
-slot_watch() -> check(slot_watch_run(), [one, three, three, five]).
+slot_watch() -> check(slot_watch_run(),
+                             [one, three, three, six, five, noproc, noproc, n, n]).
 slot_owner() -> check(owner_run(slot_owner), ok).
 
 check(Expected, Expected) -> ok;
@@ -239,21 +240,34 @@ monitor_kill(Owner, Child) ->
 %% Each monitor signal waits in the pending slot while the watcher sends to
 %% other remote children. A message to the target of the slot sends the
 %% monitor signal first, a second monitor signal replaces it in the slot,
-%% and the switch out sends it. Each monitor reaches its child before the
-%% child exits.
+%% the switch out sends it, and a link to a dead target sends it. Each held
+%% message and exit signal arrives, and each monitor reaches its child
+%% before the child exits.
 slot_watch_run() ->
     Owner = wait_for(slot_owner),
-    [C1, C2, C3, C4, C5, C6] = [remote_child(Owner) || _ <- lists:seq(1, 6)],
+    [C1, C2, C3, C4, C5, C6, C7] = [remote_child(Owner) || _ <- lists:seq(1, 7)],
     R1 = monitor(process, C1),
     C2 ! {go, self(), 0, two},
     C1 ! {go, self(), 0, one},
     R3 = monitor(process, C3),
-    C4 ! {go, self(), 0, four},
+    C4 ! {go, self(), 1, four},
     R4 = monitor(process, C3),
     C3 ! {go, self(), 0, three},
+    R6 = monitor(process, C6),
     R5 = monitor(process, C5),
     true = exit(C6, six),
+    Six = receive {'DOWN', R6, process, _, Reason6} -> Reason6 end,
     C5 ! {go, self(), 0, five},
+    process_flag(trap_exit, true),
+    {Dead, RD} = spawn_monitor(fun() -> ok end),
+    receive {'DOWN', RD, process, _, _} -> ok end,
+    R7 = monitor(process, Dead),
+    C7 ! {go, self(), 1, seven},
+    true = link(Dead),
     Owner ! done,
+    Ns = [receive {n, 1} -> n after 5000 -> timeout end || _ <- [C4, C7]],
+    Exit = receive {'EXIT', Dead, ExitReason} -> ExitReason end,
     [receive {'DOWN', R, process, _, Reason} -> Reason end
-     || R <- [R1, R3, R4, R5]].
+     || R <- [R1, R3, R4]] ++ [Six]
+        ++ [receive {'DOWN', R, process, _, Reason} -> Reason end
+            || R <- [R5, R7]] ++ [Exit | Ns].
