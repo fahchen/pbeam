@@ -2728,8 +2728,7 @@ impl BeamProgram {
         match *kind {
             ImportKind::LoadNif => {
                 let module_id = current_frame(process).module_id;
-                let caller = scheduler.code.module_by_id(module_id)?.name.clone();
-                let result = native::load_nif(scheduler, &caller)?;
+                let result = native::load_nif(scheduler, module_id)?;
                 // The `load_nif/2` and `call_on_load_function/1`
                 // instructions raise with the BIF frame, as each BIF does
                 // (`jit/arm/instr_bif.cpp:994-1067`).

@@ -437,7 +437,7 @@ pub(super) fn to_bif_result(result: crate::runtime::NativeResult) -> BifResult {
     }
 }
 
-/// Run `erlang:load_nif(Path, LoadInfo)` from code of the module `caller`,
+/// Run `erlang:load_nif(Path, LoadInfo)` from code of the module instance `frame`,
 /// with the arguments in `x0` and `x1`, as the ERTS `i_load_nif`
 /// instruction does with `erts_load_nif` (`beam/erl_nif.c:4708-5039`). The
 /// steps are in the ERTS order, with the PBeam capability check as step 2:
@@ -450,7 +450,11 @@ pub(super) fn to_bif_result(result: crate::runtime::NativeResult) -> BifResult {
 ///    else the call raises `error:capability_denied` and loads nothing.
 ///    The check comes after the argument check and before the library
 ///    state, so a denied call gives the same result for each library.
-/// 3. A module without a PBeam static library or a registered extension
+/// 3. A caller frame in old code, which is neither the current code nor
+///    the code that waits for its `-on_load` function, gives `{error,
+///    {old_code, "Calling load_nif from old module 'M' not allowed"}}`
+///    (`beam/erl_nif.c:4758-4772`). Then a module without a PBeam static
+///    library or a registered extension
 ///    library gives a runtime error. ERTS opens the library with `dlopen`
 ///    (`beam/erl_nif.c:4778-4787`).
 /// 4. When the library of the module is loaded, the result is
@@ -481,11 +485,11 @@ pub(super) fn to_bif_result(result: crate::runtime::NativeResult) -> BifResult {
 /// ```rust,ignore
 /// // x0 = "prim_tty", from prim_tty: the first call gives `ok`, the next
 /// // gives the `reload` error.
-/// assert!(matches!(load_nif(&mut scheduler, "prim_tty")?, BifResult::Value(_)));
+/// assert!(matches!(load_nif(&mut scheduler, prim_tty.id)?, BifResult::Value(_)));
 /// // x0 = foo raises `error:badarg`.
-/// assert!(matches!(load_nif(&mut scheduler, "prim_tty")?, BifResult::Raise { .. }));
+/// assert!(matches!(load_nif(&mut scheduler, prim_tty.id)?, BifResult::Raise { .. }));
 /// // x0 = "load_nif_probe", from load_nif_probe.
-/// assert!(load_nif(&mut scheduler, "load_nif_probe").is_err());
+/// assert!(load_nif(&mut scheduler, load_nif_probe.id).is_err());
 /// ```
 ///
 /// # Errors
@@ -494,13 +498,32 @@ pub(super) fn to_bif_result(result: crate::runtime::NativeResult) -> BifResult {
 /// names the module. The load callback of `crypto` gives a runtime error for a
 /// `FipsMode` of `true`. A new error atom or a new `capability_denied` atom in a full
 /// atom table gives the error of `AtomTable::put`.
-pub(super) fn load_nif(scheduler: &mut Scheduler, caller: &str) -> Result<BifResult, BeamError> {
+pub(super) fn load_nif(
+    scheduler: &mut Scheduler,
+    frame: crate::beam::ModuleId,
+) -> Result<BifResult, BeamError> {
+    let caller = scheduler.code.module_by_id(frame)?.name.clone();
+    let caller = caller.as_str();
     let arguments = call_arguments(&scheduler.current_process_mut().registers, 2)?;
     if !is_native_filename(&arguments[0], filename_encoding()) {
         return Ok(BifResult::badarg());
     }
     if let Some(denied) = denial(scheduler, CapabilityKind::Runtime, Operation::LoadNif, None)? {
         return Ok(denied);
+    }
+    // A caller in neither the current code nor the code that waits for its
+    // `-on_load` function runs old code (`beam/erl_nif.c:4758-4772`).
+    let instances = [
+        scheduler
+            .code
+            .waiting_or_loaded(caller)
+            .ok()
+            .map(|module| module.id),
+        scheduler.code.get(caller).map(|module| module.id),
+    ];
+    if !instances.contains(&Some(frame)) {
+        let text = format!("Calling load_nif from old module '{caller}' not allowed");
+        return load_nif_error(&mut scheduler.atoms, "old_code", &text);
     }
     let Some(linked) = Linked::of(caller) else {
         // ponytail: PBeam opens no NIF library; see "NIF stubs" in docs/erts-differences.md.

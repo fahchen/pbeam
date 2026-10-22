@@ -259,6 +259,30 @@ fn starts_the_new_code_of_the_module_without_its_library_as_erts() {
 }
 
 #[test]
+fn refuses_a_load_from_old_code_and_leaves_the_new_code_unloaded_as_erts() {
+    // `extension_probe:old_load(B)` on the pinned ERTS:
+    // {{error,{old_code,"Calling load_nif from old module 'extension_probe' not allowed"}},
+    //  {{error,undef},ok,3,{error,{reload,"NIF library already loaded (...)."}}}}
+    let program = program();
+    let binary = Term::binary(EXTENSION_PROBE.to_vec());
+    let result = execute(&program, "extension_probe", "old_load", vec![binary]).unwrap();
+    let old = "Calling load_nif from old module 'extension_probe' not allowed";
+    let reload = "NIF library already loaded (reload disallowed since OTP 20).";
+    assert_eq!(
+        result.term,
+        Term::tuple(vec![
+            load_error(&result, "old_code", old),
+            Term::tuple(vec![
+                caught(&result, "undef"),
+                atom(&result, "ok"),
+                Term::Integer(3),
+                load_error(&result, "reload", reload),
+            ]),
+        ])
+    );
+}
+
+#[test]
 fn gives_the_load_errors_of_erts_and_the_unbound_behavior_of_the_library() {
     let program = program();
     let twice = execute(&program, "extension_twice", "load", vec![]).unwrap();
