@@ -1,8 +1,8 @@
 //! The state that the scheduler threads of one run share.
 //!
-//! Each scheduler owns the state of its processes, its run queue, its code
-//! table, and its services. The node holds what must be the same for the
-//! whole run: the process table, with the owner of each live process, the
+//! Each scheduler owns the state of its processes, its run queue, its
+//! working copy of the code table, and its services. The node holds what
+//! must be the same for the whole run: the published code table, the process table, with the owner of each live process, the
 //! registered names, the identifier
 //! counters, the inbox of each scheduler for the deliveries that cross a
 //! thread boundary, the roots and their results, and the shutdown state. A sender that runs on another
@@ -184,6 +184,8 @@ pub(in crate::runtime) struct Node {
     /// (`local_node_hash`, external.c:134). The first call on any scheduler
     /// computes it, and each scheduler reads the same value.
     local_node_hash: OnceLock<u32>,
+    /// The published code state of the run (see [`super::code`]).
+    pub(in crate::runtime) code: super::code::NodeCode,
 }
 
 impl Node {
@@ -233,6 +235,7 @@ impl Node {
                 clock: (Instant::now(), clock::system_time()),
                 dirty: Pools::new(count),
                 local_node_hash: OnceLock::new(),
+                code: super::code::NodeCode::default(),
             }),
             readers,
         ))
@@ -296,6 +299,7 @@ impl Node {
             clock: (Instant::now(), clock::system_time()),
             dirty: Pools::new(1),
             local_node_hash: OnceLock::new(),
+            code: super::code::NodeCode::default(),
         })
     }
 

@@ -421,6 +421,9 @@ pub(super) struct Scheduler {
     /// only for its instance. The run keeps each library open until the
     /// scheduler drops, which closes it with `dlclose`.
     pub(super) shared_libraries: HashMap<ModuleId, Arc<abi::Library>>,
+    /// The generation of the node code state that this scheduler installed
+    /// or published last (see [`code`]).
+    code_generation: u64,
     /// The timers of the run and the run clock. All processes of the run
     /// share them.
     pub(super) timers: Timers,
@@ -538,6 +541,7 @@ impl Scheduler {
             nif_libraries: HashSet::new(),
             extension_loads: HashSet::new(),
             shared_libraries: HashMap::new(),
+            code_generation: 0,
             timers: Timers::new(),
             known_nodes: KnownNodes::default(),
             pending_monitor: None,
@@ -2826,6 +2830,9 @@ impl Scheduler {
                 Delivery::Process { process, low } => self.adopt(*process, low),
             }
         }
+        // A delivery that a process sent after a code operation finds the
+        // code of the operation.
+        self.sync_code();
         drained
     }
 
@@ -3784,6 +3791,7 @@ fn named_item(name: &Atom) -> Term {
     Term::tuple(vec![Term::Atom(name.clone()), local_node()])
 }
 
+mod code;
 mod known_nodes;
 pub(super) mod node;
 mod policy;
