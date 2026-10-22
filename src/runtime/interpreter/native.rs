@@ -174,7 +174,7 @@ const LIBRARIES: &[Library] = &[
     Library {
         module: "prim_socket",
         functions: &prim_socket::FUNCTIONS,
-        bindings: &[],
+        bindings: prim_socket::BINDINGS,
         load: Some(prim_socket::load),
         unbound_fails: true,
     },

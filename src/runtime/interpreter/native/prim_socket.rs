@@ -2,11 +2,36 @@
 //! (`erts/emulator/nifs/common/prim_socket_nif.c`), which
 //! `prim_socket:on_load/1` loads (`prim_socket.erl:137-182`).
 //!
-//! PBeam has no binding of a `prim_socket` NIF. A call of a function of the
-//! table stops the run with the runtime error of the static library
-//! (`Library::unbound_fails`).
+//! PBeam binds `nif_supports/0,1` (see `supports`), which the node boot
+//! calls in `prim_socket:init/0` (`prim_socket.erl:184-204`). A call of
+//! each other function of the table stops the run with the runtime error of
+//! the static library (`Library::unbound_fails`).
 
 use super::*;
+
+mod supports;
+
+/// The bindings of the `prim_socket` library.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!((BINDINGS[0].name, BINDINGS[0].arity), ("nif_supports", 0));
+/// ```
+pub(super) const BINDINGS: &[Binding] = &[
+    Binding {
+        name: "nif_supports",
+        arity: 0,
+        job: Job::Normal,
+        run: |scheduler, _| supports::supports_0(scheduler),
+    },
+    Binding {
+        name: "nif_supports",
+        arity: 1,
+        job: Job::Normal,
+        run: |scheduler, arguments| supports::supports_1(scheduler, &arguments[0]),
+    },
+];
 
 /// The functions of the ERTS `prim_socket` NIF library, as `(name, arity)`
 /// in the order of `esock_funcs` (`prim_socket_nif.c:18696-18748`).

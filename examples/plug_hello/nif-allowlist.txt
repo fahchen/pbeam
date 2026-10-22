@@ -107,8 +107,6 @@ prim_net:nif_if_names/0
 reason: plug_hello listens with gen_tcp on the inet driver, not with the socket module. A call fails with the runtime error `prim_socket:F/A NIF is not supported`.
 prim_socket:nif_info/0
 prim_socket:nif_info/1
-prim_socket:nif_supports/0
-prim_socket:nif_supports/1
 prim_socket:nif_command/1
 prim_socket:nif_open/2
 prim_socket:nif_open/4

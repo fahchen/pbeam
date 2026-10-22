@@ -1,7 +1,7 @@
 -module(kernel_boot_probe).
 -behaviour(application).
 -behaviour(supervisor).
--export([main/0, main/1, lookup/0, start/2, stop/1, init/1]).
+-export([main/0, main/1, lookup/0, supports/0, start/2, stop/1, init/1]).
 
 %% `erl -noshell -boot start_clean -pa fixtures/boot -s kernel_boot_probe
 %% main -kernel logger_level warning` runs main/0 in the boot process of init after the boot script
@@ -36,6 +36,23 @@ lookup() ->
     erlang:display({lookup, inet_db:res_option(lookup), inet_db:res_option(domain),
                     inet:gethostbyname(Name), inet:gethostbyname("localhost"),
                     is_pid(whereis(inet_gethost_native))}),
+    init:stop().
+
+%% `erl -noshell -boot start_clean -pa fixtures/boot -s kernel_boot_probe
+%% supports -kernel logger_level warning` runs supports/0. erl_init:start/2
+%% ran prim_socket:on_load/0, which loads the NIF library and stores the
+%% tables of nif_supports/1 as persistent terms (erl_init.erl:42-48,
+%% prim_socket.erl:137-204). supports/0 displays the result of
+%% nif_supports/0, each table as a sorted list, and the results of other
+%% keys, and then calls init:stop/0.
+supports() ->
+    Tables = [{Key, lists:sort(maps:to_list(persistent_term:get({prim_socket, Key})))}
+              || Key <- [protocols, options, ioctl_requests, ioctl_flags, msg_flags]],
+    erlang:display({supports, prim_socket:supports(), Tables,
+                    prim_socket:supports(other), prim_socket:supports("options"),
+                    prim_socket:is_supported(local), prim_socket:is_supported(other),
+                    prim_socket:is_supported(options, {socket, reuseaddr}),
+                    prim_socket:is_supported(other, local)}),
     init:stop().
 
 report() ->

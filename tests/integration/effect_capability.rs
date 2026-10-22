@@ -290,7 +290,7 @@ fn only(names: &[&str]) -> Constraint {
 
 /// Each entry that the column "Capability" of the effect inventory marks
 /// `ambient`. `effect_probe:ambient/0` calls each entry once.
-const AMBIENT: [&str; 97] = [
+const AMBIENT: [&str; 99] = [
     "atomics:add/3",
     "atomics:get/2",
     "atomics:info/1",
@@ -386,6 +386,8 @@ const AMBIENT: [&str; 97] = [
     "prim_file:internal_name2native/1",
     "prim_file:internal_native2name/1",
     "prim_file:read_info_nif/2",
+    "prim_socket:nif_supports/0",
+    "prim_socket:nif_supports/1",
     "re:compile/2",
     "re:import/1",
 ];
@@ -486,12 +488,14 @@ fn program() -> BeamProgram {
     let atomics = pinned_beam("atomics");
     let prim_file = pinned_beam("prim_file");
     let prim_buffer = pinned_beam("prim_buffer");
+    let prim_socket = pinned_beam("prim_socket");
     BeamProgram::load(&[
         &erlang,
         &counters,
         &atomics,
         &prim_file,
         &prim_buffer,
+        &prim_socket,
         PRIM_TTY,
         EFFECT_PROBE,
     ])
@@ -556,7 +560,7 @@ fn calls_each_ambient_and_later_entry_with_no_capability() {
     // The root process holds no capability, so no policy can permit the
     // calls: each `ambient` and `later` entry has no check.
     let program = program();
-    let expected = "[true,true,false,true,true,true,integer,integer,integer,integer,integer,date_time,unix,nonode@nohost,nonode@nohost,[],[nonode@nohost],1,true,{arity,1},{error,badfile},{error,badarg},false,false,true,effect_probe_ambient_atom,effect_probe_ambient_binary,effect_probe_ambient_binary,effect_probe_ambient_atom,ok,[bm,{1,1}],ac,re_pattern,effect_probe_ambient,true,false,[{key,value}],value,value,true,true,[{key,value}],true,set,true,15,eot,eot,first,first_lookup,[{key,value}],[{key,value}],eot,true,true,0,2,reference,true,atom,2,ok,1,error,ok,error,ok,error,[ok,{ok,0},ok],[eof,ok],[11,<<48,49>>,{ok,8},9,ok,0,<<120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120>>,acquired,ok],none,false,{error,notsup},ok,false,reference,ok,1,ok,48,integer,integer,timestamp,date,time,date_time,date_time,integer,timestamp,integer,integer,{error,enotsup},error,error,error,error,error,error,error,ok,ok,ok,true,true,true,true,9,false,true,true,true,true,true,true,{error,badarg}]";
+    let expected = "[true,true,false,true,true,true,integer,integer,integer,integer,integer,date_time,unix,nonode@nohost,nonode@nohost,[],[nonode@nohost],1,true,{arity,1},{error,badfile},{error,badarg},false,false,true,effect_probe_ambient_atom,effect_probe_ambient_binary,effect_probe_ambient_binary,effect_probe_ambient_atom,ok,[bm,{1,1}],ac,re_pattern,effect_probe_ambient,true,false,[{key,value}],value,value,true,true,[{key,value}],true,set,true,15,eot,eot,first,first_lookup,[{key,value}],[{key,value}],eot,true,true,0,2,reference,true,atom,2,ok,1,error,ok,error,ok,error,[ok,{ok,0},ok],[eof,ok],[11,<<48,49>>,{ok,8},9,ok,0,<<120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120>>,acquired,ok],none,false,{error,notsup},ok,false,reference,ok,1,ok,48,integer,integer,timestamp,date,time,date_time,date_time,integer,timestamp,integer,integer,{error,enotsup},error,error,error,error,error,error,error,ok,ok,ok,true,true,true,true,9,false,true,true,true,true,true,true,{error,badarg},true,[]]";
     assert_eq!(run_text(&program, "ambient", &Grants(vec![])), expected);
     assert_eq!(erts_with_stand_in("ambient"), format!("{expected}\n"));
 }
