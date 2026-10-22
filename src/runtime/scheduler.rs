@@ -7,7 +7,6 @@ use std::{
 
 use super::{
     Job,
-    atomics::AtomicArrays,
     binary_pattern::BinaryPatterns,
     buffers::Buffers,
     capability::{
@@ -373,9 +372,6 @@ pub(super) struct Scheduler {
     pub(super) persistent_terms: PersistentTerms,
     /// ETS tables of the node. All processes of the run share them.
     pub(super) ets: EtsTables,
-    /// Atomic arrays of the node, which the `atomics` module and the
-    /// `counters` module use. All processes of the run share them.
-    pub(super) atomics: AtomicArrays,
     /// Compiled patterns of `binary:compile_pattern/1` of the node. All
     /// processes of the run share them.
     pub(super) binary_patterns: BinaryPatterns,
@@ -529,7 +525,6 @@ impl Scheduler {
             runnable: RunQueue::default(),
             persistent_terms: PersistentTerms::default(),
             ets: EtsTables::default(),
-            atomics: AtomicArrays::default(),
             binary_patterns: BinaryPatterns::default(),
             deferred_signals: Vec::new(),
             menu_writer: std::sync::Arc::new(menu_pair.0),
