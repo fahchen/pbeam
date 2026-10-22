@@ -130,6 +130,9 @@ fn get_all_start(scheduler: &mut Scheduler) -> BifResult {
     }
     let table = Arc::clone(&scheduler.node().persistent_terms().terms);
     let pairs = table.get_all();
+    // The release in `get_all_trap` lets a publication change the table in
+    // place, so no reference may stay (`erl_bif_persistent.c:1181-1185`).
+    drop(table);
     let entries = pairs.len();
     get_all_trap(scheduler, Term::list_from(pairs), entries)
 }
