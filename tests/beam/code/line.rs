@@ -96,7 +96,8 @@ fn rejects_a_corrupt_line_chunk() {
     corrupt(&[0, 0, 0, 0, 0, 0, 0, 0, 0]);
     corrupt(&chunk(0, 1, 1, 0, &[], &[]));
     corrupt(&chunk(0, 1, 1, 0, &[0x50], &[]));
-    corrupt(&chunk(0, 1, 1, 0, &[0x12, 0x51], &[]));
+    // File 2 is after the implicit file 0 and its count 1.
+    corrupt(&chunk(0, 1, 1, 0, &[0x22, 0x51], &[]));
     corrupt(&chunk(
         0,
         1,
@@ -111,4 +112,49 @@ fn rejects_a_corrupt_line_chunk() {
     corrupt(&chunk(0, 1, 1, 1, &[0x51], &[0xff, 0xff]));
     corrupt(&chunk(0, 1, 1, 1, &[0x51], &[0, 2, b'a']));
     corrupt(&chunk(0, 1, 1, 1, &[0x51], &[0, 1, 0xff]));
+}
+
+/// Return the location of each item of a table, from an entry per item.
+fn locations(table: &mut LineTable) -> Vec<Term> {
+    let items = table.items.len();
+    (1..items)
+        .map(|item| {
+            table.line(item, item as u64).unwrap();
+            table.location(item, Term::nil())
+        })
+        .collect()
+}
+
+#[test]
+fn keeps_the_low_16_bits_of_a_location_with_no_file_name() {
+    // With no file name, file 1 passes the ERTS check `name_index <=
+    // name_count` (beam_file.c:475, 515-517), and the 16-bit table drops the
+    // file of `MAKE_LOCATION(1, 5)` (beam_file.c:501, asm_load.c:857-870).
+    // `MAKE_LOCATION(1, 0)` keeps 0, the undefined location.
+    let body = [0x12, 0x51, 0x01];
+    let mut table = LineTable::parse(&chunk(0, 2, 2, 0, &body, &[]), "m").unwrap();
+    assert_eq!(locations(&mut table), [location("m.erl", 5), Term::nil()]);
+}
+
+#[test]
+fn cuts_the_file_index_and_the_line_to_32_bits() {
+    // ERTS keeps both as `Sint32` (beam_file.h:112-115). The file index
+    // 2^32 + 1 is file 1, the line 2^32 + 5 is line 5, and the file index
+    // 2^32 - 1 is -1, which `MAKE_LOCATION` rejects (beam_code.h:33-39).
+    let body = [
+        0x7a, 0x01, 0x00, 0x00, 0x00, 0x01, 0x79, 0x01, 0x00, 0x00, 0x00, 0x05, 0x5a, 0xff, 0xff,
+        0xff, 0xff, 0x71,
+    ];
+    let names = [0, 5, b'a', b'.', b'e', b'r', b'l'];
+    let mut table = LineTable::parse(&chunk(0, 2, 2, 1, &body, &names), "m").unwrap();
+    assert_eq!(locations(&mut table), [location("a.erl", 5), Term::nil()]);
+}
+
+#[test]
+fn gives_no_location_for_the_file_index_of_the_name_count() {
+    // ERTS accepts file 2 of a chunk with one file name and reads the word
+    // after its file name table (beam_file.c:515-517, utils.c:3436).
+    let names = [0, 5, b'a', b'.', b'e', b'r', b'l'];
+    let mut table = LineTable::parse(&chunk(0, 1, 1, 1, &[0x22, 0x51], &names), "m").unwrap();
+    assert_eq!(locations(&mut table), [Term::nil()]);
 }

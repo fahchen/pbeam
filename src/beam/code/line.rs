@@ -30,8 +30,14 @@ const LINE_HEADER_SIZE: usize = WORD_SIZE * 5;
 const NAME_LENGTH_SIZE: usize = 2;
 /// The file indexes and line numbers that `MAKE_LOCATION` accepts are below
 /// these limits (`IS_VALID_LOCATION`, `beam_code.h:33-34`).
-const FILE_LIMIT: usize = 255;
-const LINE_LIMIT: u64 = (1 << 24) - 1;
+const FILE_LIMIT: u32 = 255;
+const LINE_LIMIT: u32 = (1 << 24) - 1;
+/// The bit position of the file index in a location (`MAKE_LOCATION`,
+/// `beam_code.h:36-41`).
+const FILE_SHIFT: u32 = 24;
+/// The largest line that fits a 16-bit location table
+/// (`beam_file.c:524-526`).
+const SHORT_LINE_LIMIT: u64 = 0xFFFF;
 /// The largest small integer of a 64-bit ERTS (`MAX_SMALL`). A larger line
 /// does not fit a word, which `parse_line_chunk` rejects
 /// (`beam_file.c:217-220`, `522`).
@@ -94,10 +100,16 @@ impl LineTable {
         let item_count = field(3)? as usize + 1;
         let name_count = field(4)? as usize + 1;
         let mut cursor = LINE_HEADER_SIZE;
-        let mut items = Vec::with_capacity(item_count.min(data.len()));
-        items.push(None);
+        // ERTS keeps the file index and the line of each item as `Sint32`
+        // (`beam_file.h:112-115`; `beam_file.c:513`, `528-529`).
+        let mut raw: Vec<(i32, i32)> = Vec::with_capacity(item_count.min(data.len()));
+        raw.push((0, 0));
         let mut file = 0;
-        while items.len() < item_count {
+        // ERTS stores the locations in 32 bits when the chunk names a file or
+        // has a line above 0xFFFF, else in 16 bits (`beam_file.c:498-501`,
+        // `524-526`).
+        let mut wide = name_count > 1;
+        while raw.len() < item_count {
             let first = *data.get(cursor).ok_or_else(corrupt)?;
             cursor += 1;
             let value = read_integer_after_first(data, &mut cursor, first)?;
@@ -107,14 +119,33 @@ impl LineTable {
             let negative =
                 first & long == long && data[cursor - (usize::from(first >> 5) + 2)] & 0x80 != 0;
             match first & COMPACT_TAG_MASK {
-                TAG_ATOM if (value as usize) < name_count => file = value as usize,
-                TAG_INTEGER if !negative && value <= MAX_SMALL => items.push(
-                    (file < FILE_LIMIT && value < LINE_LIMIT && (file, value) != (0, 0))
-                        .then_some((file, value as u32)),
-                ),
+                // A file index is a word that is not negative. ERTS checks
+                // its `Sint32` value against the count with the implicit file
+                // 0, so the index of the count passes (`beam_file.c:222-224`,
+                // `475`, `512-517`).
+                TAG_ATOM
+                    if value <= i64::MAX as u64 && i64::from(value as i32) <= name_count as i64 =>
+                {
+                    file = value as i32;
+                }
+                TAG_INTEGER if !negative && value <= MAX_SMALL => {
+                    wide |= value > SHORT_LINE_LIMIT;
+                    raw.push((file, value as i32));
+                }
                 _ => return Err(corrupt()),
             }
         }
+        let items = raw
+            .into_iter()
+            .map(|(file, line)| {
+                let location = make_location(file, line);
+                // A 16-bit table keeps the low 16 bits of the location
+                // (`jit/asm_load.c:857-870`).
+                let location = if wide { location } else { location & 0xFFFF };
+                (location != 0)
+                    .then_some(((location >> FILE_SHIFT) as usize, location & LINE_LIMIT))
+            })
+            .collect();
         let mut files = vec![charlist(&format!("{module}.erl"))];
         while files.len() < name_count {
             let length = data
@@ -239,19 +270,44 @@ impl LineTable {
         let end = self
             .entries
             .partition_point(|&(start, _)| start <= instruction);
+        // A file index that is the count of file names passes the ERTS
+        // check, and ERTS then reads the word after its file name table
+        // (`beam_file.c:515-517`, `beam_ranges.c:343`, `utils.c:3436`).
+        // PBeam gives no location for it.
         let Some((file, line)) = end
             .checked_sub(1)
             .and_then(|last| self.items[self.entries[last].1])
+            .and_then(|(file, line)| Some((self.files.get(file)?, line)))
         else {
             return rest;
         };
         Term::list_with_tail(
             vec![
-                Term::tuple(vec![Term::static_atom("file"), self.files[file].clone()]),
+                Term::tuple(vec![Term::static_atom("file"), file.clone()]),
                 Term::tuple(vec![Term::static_atom("line"), Term::Integer(line.into())]),
             ],
             rest,
         )
+    }
+}
+
+/// Return the location of `file` and `line` as `MAKE_LOCATION` builds it
+/// from two `Sint32` values: 0, the undefined location, when the unsigned
+/// file is 255 or more or the unsigned line is `2^24 - 1` or more
+/// (`beam_code.h:31-41`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(make_location(1, 5), (1 << 24) | 5);
+/// assert_eq!(make_location(-1, 5), 0);
+/// ```
+fn make_location(file: i32, line: i32) -> u32 {
+    let (file, line) = (file as u32, line as u32);
+    if file < FILE_LIMIT && line < LINE_LIMIT {
+        (file << FILE_SHIFT) | line
+    } else {
+        0
     }
 }
 
