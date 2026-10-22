@@ -594,7 +594,7 @@ impl Scheduler {
             Signal::Resume => {
                 self.handled(id, node);
                 // A `persistent_term` call waits for this signal.
-                self.activate(id);
+                self.resume(id);
                 0
             }
             Signal::Grant { capability } => {

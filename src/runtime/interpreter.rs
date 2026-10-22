@@ -3630,6 +3630,7 @@ impl BeamProgram {
                 function,
                 arguments,
             } => {
+                process.suspended = true;
                 process.pending_bif = Some(PendingBif {
                     module,
                     function,

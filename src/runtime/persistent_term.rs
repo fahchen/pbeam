@@ -14,16 +14,41 @@ use crate::term::{LiveBytes, ProcessId, Term, internal_hash};
 /// other processes two turns.
 const PROGRESS_STEPS: u8 = 3;
 
-/// A new table that waits for thread progress, and the caller that it
+/// The change of a `put/2` or an `erase/1`.
+#[derive(Debug)]
+pub(in crate::runtime) enum Change {
+    /// Store the value for the key.
+    Put(Term, Term),
+    /// Erase the key.
+    Erase(Term),
+}
+
+/// A change that waits for thread progress, and the caller that it
 /// suspends (`erts_schedule_thr_prgr_later_op`, `erl_bif_persistent.c:774-779`).
 #[derive(Debug)]
 struct Progress {
     /// The suspended caller, which holds the update permission.
     caller: ProcessId,
-    /// The new table.
-    table: Arc<PersistentTerms>,
+    /// The copied table with the change, or `None` for a change in place of
+    /// the visible table (`fast_update_index`, `erl_bif_persistent.c:763-770`).
+    table: Option<PersistentTerms>,
+    /// The change.
+    change: Change,
     /// The scheduling steps that remain.
     steps: u8,
+}
+
+/// The table copy of the holder of the update permission, which goes
+/// through the slots of the visible table in steps (`copy_table`,
+/// `erl_bif_persistent.c:1034-1139`).
+#[derive(Debug)]
+struct Copy {
+    /// The new table.
+    table: PersistentTerms,
+    /// The next slot of the visible table to copy.
+    next: usize,
+    /// The erased key, which the copy leaves out.
+    skip: Option<Term>,
 }
 
 /// The persistent term table of the node and its update permission, as
@@ -41,8 +66,10 @@ pub(in crate::runtime) struct PersistentTermStore {
     updater: Option<ProcessId>,
     /// The processes that wait for the update permission.
     waiters: Vec<ProcessId>,
-    /// The new tables that wait for thread progress.
+    /// The changes that wait for thread progress.
     progress: Vec<Progress>,
+    /// The table copy of the holder of the update permission.
+    copy: Option<Copy>,
 }
 
 impl PersistentTermStore {
@@ -68,6 +95,8 @@ impl PersistentTermStore {
             }
             _ => {
                 self.updater = Some(id);
+                // A copy of a holder that exited ends with no change.
+                self.copy = None;
                 self.waiters.retain(|waiter| *waiter != id);
                 true
             }
@@ -103,12 +132,48 @@ impl PersistentTermStore {
         self.progress.iter().any(|progress| progress.caller == id)
     }
 
-    /// Make `table` visible after thread progress, and keep the update
-    /// permission of `caller` until then.
-    pub(super) fn schedule(&mut self, caller: ProcessId, table: PersistentTerms) {
+    /// Start a copy of the visible table into a table of `size` slots,
+    /// which leaves out the key `skip`.
+    pub(super) fn start_copy(&mut self, size: usize, skip: Option<Term>) {
+        self.copy = Some(Copy {
+            table: PersistentTerms::with_slots(size),
+            next: 0,
+            skip,
+        });
+    }
+
+    /// Copy at most `slots` slots of the visible table into the copy.
+    pub(super) fn copy_step(&mut self, slots: usize) {
+        if let Some(copy) = &mut self.copy {
+            let end = copy
+                .next
+                .saturating_add(slots)
+                .min(self.terms.buckets.len());
+            for (key, value) in self.terms.buckets[copy.next..end].iter().flatten() {
+                if copy.skip.as_ref() != Some(key) {
+                    copy.table.insert(key.clone(), value.clone());
+                }
+            }
+            copy.next = end;
+        }
+    }
+
+    /// Make `change` visible after thread progress, and keep the update
+    /// permission of `caller` until then. A table copy ends first, and the
+    /// change goes into the copy.
+    pub(super) fn schedule(&mut self, caller: ProcessId, change: Change) {
+        self.copy_step(usize::MAX);
+        let table = self.copy.take().map(|copy| {
+            let mut table = copy.table;
+            if let Change::Put(key, value) = &change {
+                table.put(key, value);
+            }
+            table
+        });
         self.progress.push(Progress {
             caller,
-            table: Arc::new(table),
+            table,
+            change,
             steps: PROGRESS_STEPS,
         });
     }
@@ -137,7 +202,15 @@ impl Scheduler {
                 .position(|progress| progress.steps == 0)
             {
                 let progress = store.progress.remove(index);
-                store.terms = progress.table;
+                match (progress.table, progress.change) {
+                    (Some(table), _) => store.terms = Arc::new(table),
+                    (None, Change::Put(key, value)) => {
+                        Arc::make_mut(&mut store.terms).put(&key, &value);
+                    }
+                    (None, Change::Erase(key)) => {
+                        Arc::make_mut(&mut store.terms).erase(&key);
+                    }
+                }
                 done.push(progress.caller);
             }
             let pending = !store.progress.is_empty();
@@ -203,6 +276,21 @@ impl Default for PersistentTerms {
 }
 
 impl PersistentTerms {
+    /// Return an empty table of `slots` slots.
+    fn with_slots(slots: usize) -> Self {
+        PersistentTerms {
+            buckets: vec![None; slots],
+            num_entries: 0,
+        }
+    }
+
+    /// Put the pair of a table copy into its slot.
+    fn insert(&mut self, key: Term, value: Term) {
+        let slot = self.lookup(&key);
+        self.buckets[slot] = Some((key, value));
+        self.num_entries += 1;
+    }
+
     /// Return the value of `key`, or `None` when the key has no value. This
     /// is the lookup of `persistent_term_get_2` in `erl_bif_persistent.c`,
     /// which never raises.

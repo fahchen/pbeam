@@ -21,7 +21,7 @@
 use super::BifResult::Value;
 use super::*;
 use crate::runtime::capability::{CapabilityKind, Operation};
-use crate::runtime::persistent_term::PersistentTerms;
+use crate::runtime::persistent_term::Change;
 use std::sync::{Arc, atomic::Ordering};
 
 /// Continue a call at a trap export of this module. `get_all_wait/0`,
@@ -262,7 +262,16 @@ fn erase_start(scheduler: &mut Scheduler, key: &Term) -> BifResult {
             release(scheduler);
             Value(Term::static_atom("false"))
         }
-        Some((first, second)) => erase_trap(scheduler, key, first, second),
+        Some((first, second)) => {
+            if second > 0 {
+                let size = second - first;
+                scheduler
+                    .node()
+                    .persistent_terms()
+                    .start_copy(size, Some(key.clone()));
+            }
+            erase_trap(scheduler, key, first, second)
+        }
     }
 }
 
@@ -312,6 +321,8 @@ fn erase_trap(
     }
     let mut copied = 0;
     let trapped = step(&mut first, limit, &mut copied) || step(&mut second, limit, &mut copied);
+    scheduler.node().persistent_terms().copy_step(limit);
+    let process = scheduler.current_process_mut();
     if trapped {
         process.bump_all_reductions();
         return BifResult::TrapBif {
@@ -325,10 +336,11 @@ fn erase_trap(
         };
     }
     process.bump_reductions((copied / ITERATIONS_PER_RED) as i32);
-    let table = Arc::clone(&scheduler.node().persistent_terms().terms);
-    let mut table = PersistentTerms::clone(&table);
-    table.erase(key);
-    schedule(scheduler, table, Term::static_atom("true"))
+    schedule(
+        scheduler,
+        Change::Erase(key.clone()),
+        Term::static_atom("true"),
+    )
 }
 
 /// Make `table` visible after thread progress, and suspend the caller
@@ -337,10 +349,10 @@ fn erase_trap(
 /// permission until the table is visible. ERTS builds the new table in the
 /// copy traps; PBeam builds it in the last call, outside the lock of the
 /// node.
-fn schedule(scheduler: &mut Scheduler, table: PersistentTerms, value: Term) -> BifResult {
+fn schedule(scheduler: &mut Scheduler, change: Change, value: Term) -> BifResult {
     let id = scheduler.current_process().id;
     let node = Arc::clone(scheduler.node());
-    node.persistent_terms().schedule(id, table);
+    node.persistent_terms().schedule(id, change);
     node.persistent_progress().store(true, Ordering::Release);
     thread_progress(scheduler, value)
 }
@@ -415,7 +427,16 @@ fn put_start(scheduler: &mut Scheduler, key: &Term, value: &Term) -> BifResult {
             release(scheduler);
             Value(Term::static_atom("ok"))
         }
-        Some(copied) => put_trap(scheduler, key, value, copied),
+        Some(copied) => {
+            if copied > 0 {
+                // The copy doubles the table: `copied` is 3 times its size.
+                scheduler
+                    .node()
+                    .persistent_terms()
+                    .start_copy(copied / 3 * 2, None);
+            }
+            put_trap(scheduler, key, value, copied)
+        }
     }
 }
 
@@ -445,6 +466,8 @@ fn put_trap(scheduler: &mut Scheduler, key: &Term, value: &Term, copied: usize) 
     // `MAX(1, max_iterations)` of a `long` that a negative budget makes
     // negative (`erl_bif_persistent.c:284`, `661-662`).
     let budget = (ITERATIONS_PER_RED * process.bif_reductions_or_zero()).max(1);
+    scheduler.node().persistent_terms().copy_step(budget);
+    let process = scheduler.current_process_mut();
     if copied > budget {
         process.bump_all_reductions();
         return BifResult::TrapBif {
@@ -458,8 +481,9 @@ fn put_trap(scheduler: &mut Scheduler, key: &Term, value: &Term, copied: usize) 
         };
     }
     process.bump_reductions((copied / ITERATIONS_PER_RED) as i32);
-    let table = Arc::clone(&scheduler.node().persistent_terms().terms);
-    let mut table = PersistentTerms::clone(&table);
-    table.put(key, value);
-    schedule(scheduler, table, Term::static_atom("ok"))
+    schedule(
+        scheduler,
+        Change::Put(key.clone(), value.clone()),
+        Term::static_atom("ok"),
+    )
 }

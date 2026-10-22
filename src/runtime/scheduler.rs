@@ -852,7 +852,8 @@ impl Scheduler {
     /// signal and no cost. A process of another scheduler gets a
     /// `Resume` signal. A process that exited needs no resume.
     pub(super) fn resume(&mut self, id: ProcessId) {
-        if self.processes.contains_key(&id) {
+        if let Some(process) = self.processes.get_mut(&id) {
+            process.suspended = false;
             self.activate(id);
         } else {
             let _ = self.send_signal(None, id, Signal::Resume);
@@ -861,7 +862,7 @@ impl Scheduler {
 
     fn activate(&mut self, id: ProcessId) {
         let process = self.processes.get_mut(&id).expect("the process is alive");
-        if std::mem::take(&mut process.waiting) {
+        if !process.suspended && std::mem::take(&mut process.waiting) {
             self.enqueue(id);
         }
     }
