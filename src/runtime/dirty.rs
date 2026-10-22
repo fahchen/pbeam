@@ -47,8 +47,9 @@ use std::{
 use super::{
     Job, NativeFn, NativeResult,
     host::output::{IovecWrite, IovecWritten},
+    interpreter::BifResult,
     process::Priority,
-    scheduler::run_queue::RunQueue,
+    scheduler::{Scheduler, run_queue::RunQueue},
 };
 use crate::{
     error::{BeamError, error},
@@ -65,11 +66,39 @@ use crate::{
 /// ```
 const DIRTY_IO_THREADS: usize = 10;
 
+/// The function of a [`Finish`].
+type FinishFn = dyn FnOnce(&mut Scheduler) -> Result<BifResult, BeamError> + Send;
+
+/// The last part of a static binding that ran on a dirty thread: it makes
+/// the result of the call on the scheduler thread of the caller, with the
+/// atoms and the resources of the scheduler.
+pub(super) struct Finish(pub(super) Box<FinishFn>);
+
+/// The host part of a static binding: the host calls of the NIF, which run
+/// on a dirty thread and give the [`Finish`] of the call. The binding reads
+/// the terms and the resources of its arguments on the scheduler thread
+/// first, because they belong to that thread.
+pub(super) struct Host(pub(super) Box<dyn FnOnce() -> Finish + Send>);
+
+impl std::fmt::Debug for Finish {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Finish")
+    }
+}
+
+impl std::fmt::Debug for Host {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Host")
+    }
+}
+
 /// The work of one dirty NIF call, which a dirty thread runs.
 #[derive(Debug)]
 pub(super) enum Work {
     /// The host write of `prim_tty:write_nif/2`.
     Write(IovecWrite),
+    /// The host part of a static binding, such as a `prim_file` NIF.
+    Host(Host),
     /// A registered native function with the arguments of its call.
     Native {
         /// The function of the registration.
@@ -91,6 +120,7 @@ impl Work {
     fn run(self) -> Output {
         match self {
             Work::Write(write) => Output::Written(write.run()),
+            Work::Host(Host(host)) => Output::Host(host()),
             Work::Native {
                 function,
                 arguments,
@@ -105,6 +135,8 @@ impl Work {
 pub(super) enum Output {
     /// The end of a host write.
     Written(IovecWritten),
+    /// The last part of a static binding.
+    Host(Finish),
     /// The result of a registered native function.
     Native(Result<NativeResult, BeamError>),
 }

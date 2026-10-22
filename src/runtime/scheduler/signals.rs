@@ -584,10 +584,7 @@ impl Scheduler {
             }
             Signal::FileMonitor { file } => {
                 // A close before this signal removed the monitor already.
-                let open = matches!(
-                    self.resources.borrow_mut::<Files>().get(file),
-                    Some(Some(_))
-                );
+                let open = self.resources.borrow_mut::<Files>().is_open(file);
                 let monitors = &mut self.handled(id, node).monitored_by;
                 if open {
                     monitors.push(TargetMonitor::File(file));

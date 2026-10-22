@@ -632,6 +632,10 @@ name = "prim_file"
 path = "tests/integration/prim_file.rs"
 
 [[test]]
+name = "prim_file_dirty"
+path = "tests/integration/prim_file_dirty.rs"
+
+[[test]]
 name = "atomics"
 path = "tests/integration/atomics.rs"
 

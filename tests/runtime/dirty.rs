@@ -14,7 +14,7 @@ const COMPLETION_LIMIT: Duration = Duration::from_secs(10);
 fn written(completion: Completion) -> (ProcessId, u64, Option<IovecWritten>) {
     let written = completion.output.map(|output| match output {
         Output::Written(written) => written,
-        Output::Native(result) => panic!("a write gives no native result: {result:?}"),
+        other => panic!("a write gives no other output: {other:?}"),
     });
     (completion.process, completion.call, written)
 }
@@ -359,4 +359,13 @@ fn runs_cpu_bound_calls_on_one_dirty_cpu_thread_for_each_scheduler() {
     names.sort();
     names.dedup();
     assert_eq!(names, ["erts_dcpus_1", "erts_dcpus_2"]);
+}
+
+#[test]
+fn runs_the_host_part_of_a_static_binding_and_gives_its_finish() {
+    let work = Work::Host(Host(Box::new(|| {
+        Finish(Box::new(|_| Ok(BifResult::Value(Term::nil()))))
+    })));
+    assert_eq!(format!("{work:?}"), "Host(Host)");
+    assert_eq!(format!("{:?}", work.run()), "Host(Finish)");
 }
