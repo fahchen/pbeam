@@ -742,23 +742,38 @@ fn decompress_stream_nif(
     data: &Term,
     flush: &Term,
 ) -> Result<BifResult, BeamError> {
+    let flush_true = matches!(flush, Term::Atom(atom) if scheduler.atoms.name_of(atom) == "true");
     let (contexts, current) = contexts(scheduler);
     let native = match open(&mut contexts.decompress, context, current) {
         Err(reason) => Native::Raise(reason),
-        Ok(decompressor) => decompress(decompressor, data, flush),
+        Ok(decompressor) => decompress(decompressor, data, flush, flush_true),
     };
     result(scheduler, native)
 }
 
 /// Run the stream call of `decompress_stream_nif/3` on an open context.
-fn decompress(decompressor: &mut Decompressor, data: &Term, flush: &Term) -> Native {
+/// `flush_true` is true when the flush is the atom `true`.
+fn decompress(
+    decompressor: &mut Decompressor,
+    data: &Term,
+    flush: &Term,
+    flush_true: bool,
+) -> Native {
     let mut chunk_size = DCtx::out_size();
     if !decompressor.in_use {
         let Some(binary) = whole_binary(data) else {
             return Native::Raise("badarg");
         };
-        // ERTS compares the integer flush with the atom `true` here, so the
-        // early `done` of `zstd_nif.c:751-753` never runs.
+        // An empty binary with the flush atom `true` gives `done` and does
+        // not start the context (`zstd_nif.c:747-753`). `zstd.erl` passes
+        // only an integer flush, so no `zstd` call reaches this result.
+        if binary.is_empty() && flush_true {
+            return Native::Codec {
+                tag: "done",
+                remainder: None,
+                output: Vec::new(),
+            };
+        }
         if let Ok(Some(size)) = find_decompressed_size(binary)
             && size < chunk_size as u64
         {

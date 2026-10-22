@@ -85,3 +85,21 @@ fn raises_badarg_for_a_bitstring_that_is_not_a_whole_number_of_bytes() {
     let result = decompress_stream_nif(&mut scheduler, &decompress, &data, &flush).unwrap();
     assert_eq!(reason(result), Term::static_atom("badarg"));
 }
+
+#[test]
+fn gives_done_for_an_empty_binary_with_the_flush_atom_true_before_a_frame() {
+    // The first call of a frame gives `{done, <<>>}` for an empty binary
+    // and the flush atom `true`, before the flush check, and does not start
+    // the context (zstd_nif.c:747-753).
+    let mut scheduler = scheduler();
+    let decompress = value(init_decompress_nif(&mut scheduler).unwrap());
+    let flush = Term::Atom(scheduler.atoms.put("true").unwrap());
+    let empty = Term::binary(Vec::new());
+    let result = decompress_stream_nif(&mut scheduler, &decompress, &empty, &flush).unwrap();
+    let done = Term::Atom(scheduler.atoms.put("done").unwrap());
+    assert_eq!(value(result), Term::tuple(vec![done, empty.clone()]));
+    // A binary that is not empty reads the flush as an `int`.
+    let data = Term::binary(b"a".to_vec());
+    let result = decompress_stream_nif(&mut scheduler, &decompress, &data, &flush).unwrap();
+    assert_eq!(reason(result), Term::static_atom("badarg"));
+}
