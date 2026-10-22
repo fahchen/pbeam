@@ -313,8 +313,8 @@ fn gives_the_stream_to_a_new_controlling_process() {
     let program = program();
     let actual = binary_text(&run(&program, "set_controller"));
     let expected = reference("io:format(\"~s~n\",[zlib_probe:set_controller()])");
-    assert_eq!(actual, expected.trim());
-    assert_eq!(actual, "badarg badarg ok not_on_controlling_process ");
+    assert_eq!(actual.trim(), expected.trim());
+    assert_eq!(actual.trim(), "badarg badarg ok not_on_controlling_process");
 }
 
 #[test]
