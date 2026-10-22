@@ -16,12 +16,13 @@
 //! result, the stream state, the chunking, the exceptions, and the compressed
 //! format follow `zlib_nif.c`.
 //!
-//! The functions `set_controller_nif/2`, `deflateSetDictionary_nif/2`,
+//! The functions `deflateSetDictionary_nif/2`,
 //! `deflateParams_nif/3`, `inflateSetDictionary_nif/2`, and
 //! `inflateGetDictionary_nif/1` have no binding. A call of one stops the run
 //! with the runtime error of the static library (`Library::unbound_fails`).
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
 
 use zlib_rs::{
     Deflate, DeflateConfig, DeflateError, DeflateFlush, Inflate, InflateError, InflateFlush,
@@ -29,6 +30,7 @@ use zlib_rs::{
 };
 
 use super::*;
+use crate::runtime::resources::lock;
 use crate::term::{Binary, ProcessId, Reference};
 
 /// The bytes of one byte, for the bit range of a [`Binary`].
@@ -190,6 +192,12 @@ pub(super) const BINDINGS: &[Binding] = &[
         job: Job::Normal,
         run: |scheduler, arguments| set_stash_nif(scheduler, &arguments[0], &arguments[1]),
     },
+    Binding {
+        name: "set_controller_nif",
+        arity: 2,
+        job: Job::Normal,
+        run: |scheduler, arguments| set_controller_nif(scheduler, &arguments[0], &arguments[1]),
+    },
 ];
 
 /// The `zlib` streams of the node. ERTS frees a stream resource when no term
@@ -199,7 +207,7 @@ pub(super) const BINDINGS: &[Binding] = &[
 pub(super) struct ZlibStreams {
     /// Each stream by its reference, as the `zlib_data_t` objects of
     /// `zlib_open` (`zlib_nif.c:524-564`).
-    by_reference: HashMap<Reference, ZStream>,
+    by_reference: HashMap<Reference, Arc<Mutex<ZStream>>>,
 }
 
 impl ZlibStreams {
@@ -213,7 +221,8 @@ impl ZlibStreams {
     /// streams.insert(Reference(0), ZStream::new(ProcessId(0)));
     /// ```
     fn insert(&mut self, reference: Reference, stream: ZStream) {
-        self.by_reference.insert(reference, stream);
+        self.by_reference
+            .insert(reference, Arc::new(Mutex::new(stream)));
     }
 
     /// Return the stream of the stream resource `reference`, as
@@ -224,11 +233,11 @@ impl ZlibStreams {
     ///
     /// ```rust,ignore
     /// streams.insert(Reference(0), ZStream::new(ProcessId(0)));
-    /// assert!(streams.get_mut(Reference(0)).is_some());
-    /// assert!(streams.get_mut(Reference(1)).is_none());
+    /// assert!(streams.get(Reference(0)).is_some());
+    /// assert!(streams.get(Reference(1)).is_none());
     /// ```
-    fn get_mut(&mut self, reference: Reference) -> Option<&mut ZStream> {
-        self.by_reference.get_mut(&reference)
+    fn get(&self, reference: Reference) -> Option<Arc<Mutex<ZStream>>> {
+        self.by_reference.get(&reference).cloned()
     }
 }
 
@@ -615,14 +624,11 @@ fn result(scheduler: &mut Scheduler, native: Native) -> Result<BifResult, BeamEr
 /// ```rust,ignore
 /// assert!(stream_argument(&mut scheduler, &Term::nil()).is_none());
 /// ```
-fn stream_argument<'a>(scheduler: &'a mut Scheduler, term: &Term) -> Option<&'a mut ZStream> {
+fn stream_argument(scheduler: &Scheduler, term: &Term) -> Option<Arc<Mutex<ZStream>>> {
     let Term::Reference(reference) = term else {
         return None;
     };
-    scheduler
-        .resources
-        .borrow_mut_or_default::<ZlibStreams>()
-        .get_mut(*reference)
+    lock(&scheduler.node().resources.kind::<ZlibStreams>()).get(*reference)
 }
 
 /// Return the C `int` of an argument, as `enif_get_int` accepts it, and
@@ -729,9 +735,7 @@ fn deflate_config(
 fn open_nif(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
     let reference = scheduler.make_ref()?;
     let controller = scheduler.current_process().id;
-    scheduler
-        .resources
-        .borrow_mut_or_default::<ZlibStreams>()
+    lock(&scheduler.node().resources.kind::<ZlibStreams>())
         .insert(reference, ZStream::new(controller));
     Ok(BifResult::Value(Term::Reference(reference)))
 }
@@ -760,12 +764,50 @@ fn close_nif(scheduler: &mut Scheduler, stream: &Term) -> Result<BifResult, Beam
     let Some(stream) = stream_argument(scheduler, stream) else {
         return Ok(BifResult::badarg());
     };
+    let mut stream = lock(&stream);
     let native = if stream.controller != current {
         Native::Raise("not_on_controlling_process")
     } else if stream.state == State::Closed {
         Native::Raise("not_initialized")
     } else {
         stream.close();
+        Native::Atom("ok")
+    };
+    result(scheduler, native)
+}
+
+/// Run `zlib:set_controlling_process/2`, as the ERTS NIF
+/// `zlib_set_controller` (`zlib_nif.c:583-602`) does: make the local process
+/// `pid` the controller of the stream and give `ok`. A term that is not a
+/// zlib resource or not a local pid raises `badarg`, and another process
+/// that controls the stream raises `not_on_controlling_process`. A closed
+/// stream changes its controller too.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let stream = open_nif(&mut scheduler)?;
+/// assert!(matches!(set_controller_nif(&mut scheduler, &stream, &Term::Pid(ProcessId(1)))?, BifResult::Value(_)));
+/// ```
+///
+/// # Errors
+///
+/// A new result atom in a full atom table gives the error of
+/// `AtomTable::put`.
+fn set_controller_nif(
+    scheduler: &mut Scheduler,
+    stream: &Term,
+    pid: &Term,
+) -> Result<BifResult, BeamError> {
+    let current = scheduler.current_process().id;
+    let (Some(stream), Term::Pid(pid)) = (stream_argument(scheduler, stream), pid) else {
+        return Ok(BifResult::badarg());
+    };
+    let mut stream = lock(&stream);
+    let native = if stream.controller != current {
+        Native::Raise("not_on_controlling_process")
+    } else {
+        stream.controller = *pid;
         Native::Atom("ok")
     };
     result(scheduler, native)
@@ -810,6 +852,7 @@ fn deflate_init_nif(
     let Some(stream) = stream_argument(scheduler, stream) else {
         return Ok(BifResult::badarg());
     };
+    let mut stream = lock(&stream);
     let native = if stream.controller != current {
         Native::Raise("not_on_controlling_process")
     } else if stream.state != State::None {
@@ -851,6 +894,7 @@ fn deflate_reset_nif(scheduler: &mut Scheduler, stream: &Term) -> Result<BifResu
     let Some(stream) = stream_argument(scheduler, stream) else {
         return Ok(BifResult::badarg());
     };
+    let mut stream = lock(&stream);
     let native = if stream.controller != current {
         Native::Raise("not_on_controlling_process")
     } else if stream.state != State::Deflate {
@@ -888,6 +932,7 @@ fn deflate_end_nif(scheduler: &mut Scheduler, stream: &Term) -> Result<BifResult
     let Some(stream) = stream_argument(scheduler, stream) else {
         return Ok(BifResult::badarg());
     };
+    let mut stream = lock(&stream);
     let native = if stream.controller != current {
         Native::Raise("not_on_controlling_process")
     } else if stream.state != State::Deflate {
@@ -973,6 +1018,7 @@ fn inflate_nif(
     let Some(stream) = stream_argument(scheduler, stream) else {
         return Ok(BifResult::badarg());
     };
+    let mut stream = lock(&stream);
     let native = if stream.controller != current {
         Native::Raise("not_on_controlling_process")
     } else if stream.state != State::Inflate {
@@ -1004,7 +1050,7 @@ fn inflate_nif(
             if cut {
                 stream.reset_input();
             }
-            codec(stream, input_chunk_size, output_chunk_size, flush)
+            codec(&mut stream, input_chunk_size, output_chunk_size, flush)
         }
     };
     result(scheduler, native)
@@ -1045,12 +1091,13 @@ fn codec_nif(
     let Some(stream) = stream_argument(scheduler, stream) else {
         return Ok(BifResult::badarg());
     };
+    let mut stream = lock(&stream);
     let native = if stream.controller != current {
         Native::Raise("not_on_controlling_process")
     } else if stream.state != state {
         Native::Raise("not_initialized")
     } else {
-        codec(stream, input_chunk_size, output_chunk_size, flush)
+        codec(&mut stream, input_chunk_size, output_chunk_size, flush)
     };
     result(scheduler, native)
 }
@@ -1238,6 +1285,7 @@ fn inflate_init_nif(
     let Some(stream) = stream_argument(scheduler, stream) else {
         return Ok(BifResult::badarg());
     };
+    let mut stream = lock(&stream);
     let native = if stream.controller != current {
         Native::Raise("not_on_controlling_process")
     } else if stream.state != State::None {
@@ -1352,6 +1400,7 @@ fn inflate_reset_nif(scheduler: &mut Scheduler, stream: &Term) -> Result<BifResu
     let Some(stream) = stream_argument(scheduler, stream) else {
         return Ok(BifResult::badarg());
     };
+    let mut stream = lock(&stream);
     let native = if stream.controller != current {
         Native::Raise("not_on_controlling_process")
     } else if stream.state != State::Inflate {
@@ -1390,6 +1439,7 @@ fn inflate_end_nif(scheduler: &mut Scheduler, stream: &Term) -> Result<BifResult
     let Some(stream) = stream_argument(scheduler, stream) else {
         return Ok(BifResult::badarg());
     };
+    let mut stream = lock(&stream);
     let native = if stream.controller != current {
         Native::Raise("not_on_controlling_process")
     } else if stream.state != State::Inflate {
@@ -1429,6 +1479,7 @@ fn get_stash_nif(scheduler: &mut Scheduler, stream: &Term) -> Result<BifResult, 
     let Some(stream) = stream_argument(scheduler, stream) else {
         return Ok(BifResult::badarg());
     };
+    let stream = lock(&stream);
     let native = if stream.controller != current {
         Native::Raise("not_on_controlling_process")
     } else {
@@ -1461,6 +1512,7 @@ fn clear_stash_nif(scheduler: &mut Scheduler, stream: &Term) -> Result<BifResult
     let Some(stream) = stream_argument(scheduler, stream) else {
         return Ok(BifResult::badarg());
     };
+    let mut stream = lock(&stream);
     let native = if stream.controller != current {
         Native::Raise("not_on_controlling_process")
     } else if stream.stash.is_none() {
@@ -1498,6 +1550,7 @@ fn set_stash_nif(
     let Some(stream) = stream_argument(scheduler, stream) else {
         return Ok(BifResult::badarg());
     };
+    let mut stream = lock(&stream);
     let native = if stream.controller != current {
         Native::Raise("not_on_controlling_process")
     } else if stream.stash.is_some() {
@@ -1537,6 +1590,7 @@ fn enqueue_nif(
     let Some(stream) = stream_argument(scheduler, stream) else {
         return Ok(BifResult::badarg());
     };
+    let mut stream = lock(&stream);
     let native = if stream.controller != current {
         Native::Raise("not_on_controlling_process")
     } else if stream.state != State::Deflate && stream.state != State::Inflate {

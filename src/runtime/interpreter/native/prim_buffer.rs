@@ -15,8 +15,11 @@
 //! (`prim_buffer_nif.c:270`). PBeam has no allocation failure path, so it
 //! never raises that atom.
 
+use std::sync::{Arc, Mutex};
+
 use super::*;
 use crate::runtime::buffers::{Buffer, Buffers};
+use crate::runtime::resources::lock;
 use num_traits::ToPrimitive;
 
 /// The functions of the ERTS `prim_buffer` NIF library, as `(name, arity)`
@@ -125,10 +128,7 @@ const WRITE_MAX_ELEMENTS: usize = 64;
 /// A full reference counter gives the error of `Scheduler::make_ref`.
 fn new_nif(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
     let reference = scheduler.make_ref()?;
-    scheduler
-        .resources
-        .borrow_mut::<Buffers>()
-        .insert(reference, Buffer::default());
+    lock(&scheduler.node().resources.kind::<Buffers>()).insert(reference, Buffer::default());
     Ok(BifResult::Value(Term::Reference(reference)))
 }
 
@@ -152,6 +152,7 @@ fn size_nif(scheduler: &mut Scheduler, buffer: &Term) -> Result<BifResult, BeamE
     let Some(buffer) = buffer_argument(scheduler, buffer) else {
         return Ok(BifResult::badarg());
     };
+    let buffer = lock(&buffer);
     Ok(BifResult::Value(Term::Integer(buffer.size().cast_signed())))
 }
 
@@ -182,6 +183,7 @@ fn peek_head_nif(scheduler: &mut Scheduler, buffer: &Term) -> Result<BifResult, 
     let Some(buffer) = buffer_argument(scheduler, buffer) else {
         return Ok(BifResult::badarg());
     };
+    let mut buffer = lock(&buffer);
     match buffer.peek_head() {
         Some(head) => Ok(BifResult::Value(Term::Binary(head))),
         None => Ok(BifResult::badarg()),
@@ -217,6 +219,7 @@ fn copying_read_nif(
     let Some(buffer) = buffer_argument(scheduler, buffer) else {
         return Ok(BifResult::badarg());
     };
+    let mut buffer = lock(&buffer);
     match buffer.copying_read(size) {
         Some(bytes) => Ok(BifResult::Value(Term::binary(bytes))),
         None => Ok(BifResult::badarg()),
@@ -254,6 +257,7 @@ fn write_nif(
     let Some(buffer) = buffer_argument(scheduler, buffer) else {
         return Ok(BifResult::badarg());
     };
+    let mut buffer = lock(&buffer);
     let mut rest = iovec;
     loop {
         let mut elements = Vec::new();
@@ -308,6 +312,7 @@ fn skip_nif(scheduler: &mut Scheduler, buffer: &Term, size: &Term) -> Result<Bif
     let Some(buffer) = buffer_argument(scheduler, buffer) else {
         return Ok(BifResult::badarg());
     };
+    let mut buffer = lock(&buffer);
     if buffer.skip(size) {
         Ok(BifResult::Value(Term::static_atom("ok")))
     } else {
@@ -350,6 +355,7 @@ fn find_byte_index_nif(
     let Some(buffer) = buffer_argument(scheduler, buffer) else {
         return Ok(BifResult::badarg());
     };
+    let mut buffer = lock(&buffer);
     // `find_nif` flushes the accumulator before it checks the range of the
     // needle (prim_buffer_nif.c:432-436).
     let Some(needle) = u8::try_from(needle).ok() else {
@@ -390,6 +396,7 @@ fn try_lock_nif(scheduler: &mut Scheduler, buffer: &Term) -> Result<BifResult, B
     let Some(buffer) = buffer_argument(scheduler, buffer) else {
         return Ok(BifResult::badarg());
     };
+    let mut buffer = lock(&buffer);
     let name = if buffer.try_lock() {
         "acquired"
     } else {
@@ -420,6 +427,7 @@ fn unlock_nif(scheduler: &mut Scheduler, buffer: &Term) -> Result<BifResult, Bea
     let Some(buffer) = buffer_argument(scheduler, buffer) else {
         return Ok(BifResult::badarg());
     };
+    let mut buffer = lock(&buffer);
     if buffer.unlock() {
         return Ok(BifResult::Value(Term::static_atom("ok")));
     }
@@ -440,14 +448,11 @@ fn unlock_nif(scheduler: &mut Scheduler, buffer: &Term) -> Result<BifResult, Bea
 /// assert!(buffer_argument(&mut scheduler, &buffer).is_some());
 /// assert!(buffer_argument(&mut scheduler, &Term::nil()).is_none());
 /// ```
-fn buffer_argument<'a>(scheduler: &'a mut Scheduler, buffer: &Term) -> Option<&'a mut Buffer> {
+fn buffer_argument(scheduler: &Scheduler, buffer: &Term) -> Option<Arc<Mutex<Buffer>>> {
     let Term::Reference(reference) = buffer else {
         return None;
     };
-    scheduler
-        .resources
-        .borrow_mut::<Buffers>()
-        .get_mut(*reference)
+    lock(&scheduler.node().resources.kind::<Buffers>()).get(*reference)
 }
 
 /// Return the `u64` of a `Size` argument, as `enif_get_uint64` accepts it:

@@ -133,12 +133,10 @@ fn set_controller(scheduler: &mut Scheduler, stream: &Term, controller: ProcessI
     let Term::Reference(reference) = stream else {
         panic!("the stream is a reference");
     };
-    scheduler
-        .resources
-        .borrow_mut::<ZlibStreams>()
-        .get_mut(*reference)
-        .unwrap()
-        .controller = controller;
+    let stream = lock(&scheduler.node().resources.kind::<ZlibStreams>())
+        .get(*reference)
+        .unwrap();
+    lock(&stream).controller = controller;
 }
 
 #[test]
@@ -149,7 +147,7 @@ fn calls_each_binding_of_the_library_through_the_registry() {
     let mut scheduler = scheduler();
     let stream = stream(&mut scheduler);
     let integer = Term::Integer(1);
-    let calls: [(&str, Vec<Term>); 14] = [
+    let calls: [(&str, Vec<Term>); 15] = [
         ("open_nif", vec![]),
         ("close_nif", vec![stream.clone()]),
         (
@@ -193,6 +191,7 @@ fn calls_each_binding_of_the_library_through_the_registry() {
         ("clearStash_nif", vec![stream.clone()]),
         ("setStash_nif", vec![stream.clone(), integer.clone()]),
         ("enqueue_nif", vec![stream.clone(), Term::nil()]),
+        ("set_controller_nif", vec![stream.clone(), integer.clone()]),
     ];
     for (name, arguments) in calls {
         assert!(
@@ -651,6 +650,22 @@ fn rejects_a_term_that_is_not_a_stream_resource() {
     let unknown = Term::Reference(Reference(999));
     let result = close_nif(&mut scheduler, &unknown).unwrap();
     assert_eq!(raise_name(&scheduler, result), "badarg");
+}
+
+#[test]
+fn gives_the_stream_to_a_new_controlling_process() {
+    // `zlib_set_controller` (`zlib_nif.c:583-602`).
+    let mut scheduler = scheduler();
+    let stream = stream(&mut scheduler);
+    let other = Term::Pid(ProcessId(999));
+    let result = set_controller_nif(&mut scheduler, &stream, &Term::Integer(1)).unwrap();
+    assert_eq!(raise_name(&scheduler, result), "badarg");
+    let result = set_controller_nif(&mut scheduler, &Term::nil(), &other).unwrap();
+    assert_eq!(raise_name(&scheduler, result), "badarg");
+    let result = set_controller_nif(&mut scheduler, &stream, &other).unwrap();
+    assert!(matches!(result, BifResult::Value(Term::Atom(_))));
+    let result = set_controller_nif(&mut scheduler, &stream, &other).unwrap();
+    assert_eq!(raise_name(&scheduler, result), "not_on_controlling_process");
 }
 
 #[test]

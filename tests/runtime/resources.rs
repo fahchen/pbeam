@@ -1,4 +1,4 @@
-use super::Resources;
+use super::{NodeResources, Resources, lock};
 
 #[derive(Debug, Default, PartialEq)]
 struct MyStruct {
@@ -27,16 +27,6 @@ fn put_and_borrow_mut_keep_one_value_of_each_type() {
 }
 
 #[test]
-fn borrow_mut_or_default_puts_the_default_value() {
-    let mut resources = Resources::default();
-    resources.borrow_mut_or_default::<MyStruct>().value += 1;
-    assert_eq!(resources.borrow_mut::<MyStruct>(), &MyStruct { value: 1 });
-    resources.put(MyStruct { value: 100 });
-    resources.borrow_mut_or_default::<MyStruct>().value += 1;
-    assert_eq!(resources.borrow_mut::<MyStruct>(), &MyStruct { value: 101 });
-}
-
-#[test]
 fn put_replaces_the_value_of_the_same_type() {
     let mut resources = Resources::default();
     resources.put::<Alias1>("alias1".to_string());
@@ -58,4 +48,20 @@ fn debug_writes_no_values() {
     let mut resources = Resources::default();
     resources.put(MyStruct { value: 1 });
     assert_eq!(format!("{resources:?}"), "Resources { .. }");
+}
+
+#[test]
+fn node_resources_give_one_lock_for_each_kind() {
+    let resources = NodeResources::default();
+    lock(&resources.kind::<MyStruct>()).value += 1;
+    lock(&resources.kind::<MyStruct>()).value += 1;
+    assert_eq!(*lock(&resources.kind::<MyStruct>()), MyStruct { value: 2 });
+    assert_eq!(*lock(&resources.kind::<u8>()), 0);
+    assert_eq!(format!("{resources:?}"), "NodeResources { .. }");
+}
+
+#[test]
+fn node_resources_are_send_and_sync() {
+    fn shared<T: Send + Sync>() {}
+    shared::<NodeResources>();
 }

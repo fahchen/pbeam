@@ -5,6 +5,7 @@
 //! buffer of a file with a read mode (`prim_file.erl:516-517`) and reads,
 //! writes, and searches it through the `prim_buffer` NIFs.
 
+use std::sync::{Arc, Mutex};
 use std::{collections::HashMap, collections::VecDeque};
 
 use crate::term::{Binary, Reference};
@@ -39,7 +40,7 @@ fn held(binary: &Binary) -> &[u8] {
 pub(super) struct Buffers {
     /// Each buffer by its reference, as the `buffer_data_t` objects of
     /// `new_nif` (`prim_buffer_nif.c:252-276`).
-    by_reference: HashMap<Reference, Buffer>,
+    by_reference: HashMap<Reference, Arc<Mutex<Buffer>>>,
 }
 
 impl Buffers {
@@ -53,7 +54,8 @@ impl Buffers {
     /// buffers.insert(Reference(0), Buffer::default());
     /// ```
     pub(super) fn insert(&mut self, reference: Reference, buffer: Buffer) {
-        self.by_reference.insert(reference, buffer);
+        self.by_reference
+            .insert(reference, Arc::new(Mutex::new(buffer)));
     }
 
     /// Return the buffer of the buffer resource `reference`, as
@@ -64,11 +66,11 @@ impl Buffers {
     ///
     /// ```rust,ignore
     /// buffers.insert(Reference(0), Buffer::default());
-    /// assert!(buffers.get_mut(Reference(0)).is_some());
-    /// assert!(buffers.get_mut(Reference(1)).is_none());
+    /// assert!(buffers.get(Reference(0)).is_some());
+    /// assert!(buffers.get(Reference(1)).is_none());
     /// ```
-    pub(super) fn get_mut(&mut self, reference: Reference) -> Option<&mut Buffer> {
-        self.by_reference.get_mut(&reference)
+    pub(super) fn get(&self, reference: Reference) -> Option<Arc<Mutex<Buffer>>> {
+        self.by_reference.get(&reference).cloned()
     }
 }
 
