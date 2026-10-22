@@ -1401,7 +1401,7 @@ fn moves_the_free_variables_of_a_fun_in_batches() {
     let module = Atom::from_static("lists").unwrap();
     let width = 4 * RELEASE_BATCH;
     let free: Vec<Term> = (0..width as i64).map(Term::Integer).collect();
-    let fun = Term::Fun(Fun::new(Lambda::new(module, 0, 7, 53, 1), free));
+    let fun = Term::Fun(Fun::new(Lambda::new(module, 0, 0, 7, 53, 1), free));
     scheduler.start(frame(), vec![fun], allow_all()).unwrap();
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
     scheduler.finish_current(atom("normal"), None).unwrap();

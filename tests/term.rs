@@ -12,7 +12,7 @@ fn map(pairs: Vec<(Term, Term)>) -> Term {
 /// Return a fun of a lambda of `lists` with an index and free variables.
 fn fun(index: i32, free: Vec<Term>) -> Term {
     let module = super::Atom::from_static("lists").unwrap();
-    Term::Fun(Fun::new(Lambda::new(module, index, 7, 53, 1), free))
+    Term::Fun(Fun::new(Lambda::new(module, index, index, 7, 53, 1), free))
 }
 
 fn deep(levels: usize) -> Term {
@@ -186,13 +186,17 @@ fn compares_funs_by_their_lambda_and_free_variables() {
     // value, and arity (`fun_cmp` in `erl_fun.c:79-85`). The entry label
     // is only the address of the code.
     let module = || super::Atom::from_static("lists").unwrap();
-    let entry =
-        |label, arity| Term::Fun(Fun::new(Lambda::new(module(), 0, 7, label, arity), vec![]));
+    let entry = |label, arity| {
+        Term::Fun(Fun::new(
+            Lambda::new(module(), 0, 0, 7, label, arity),
+            vec![],
+        ))
+    };
     assert_eq!(entry(53, 1), entry(61, 1));
     assert_ne!(entry(53, 1), entry(53, 2));
     assert_ne!(
         fun(0, vec![]),
-        Term::Fun(Fun::new(Lambda::new(module(), 0, 8, 53, 1), vec![]))
+        Term::Fun(Fun::new(Lambda::new(module(), 0, 0, 8, 53, 1), vec![]))
     );
 }
 
@@ -226,7 +230,7 @@ fn prints_each_free_variable_of_a_fun() {
     assert_eq!(
         format!("{term:?}"),
         "Fun(Local(Lambda { module: Atom { index: 971 }, index: 0, \
-         old_unique: 7, label: 53, arity: 1 }), [Integer(1), Integer(2)])"
+         old_index: 0, old_unique: 7, label: 53, arity: 1 }), [Integer(1), Integer(2)])"
     );
 }
 

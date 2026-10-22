@@ -465,8 +465,8 @@ fn reads_the_lambda_table_as_parse_lambda_chunk() {
     assert_eq!(
         parse_lambdas(&lambda_table(2, &entries), &atoms).unwrap(),
         vec![
-            (Lambda::new(module.clone(), 0, 31_263_486, 127, 1), 1),
-            (Lambda::new(module, 1, 7, 51, 0), 0),
+            (Lambda::new(module.clone(), 0, 0, 31_263_486, 127, 1), 1),
+            (Lambda::new(module, 1, 1, 7, 51, 0), 0),
         ]
     );
     assert_eq!(

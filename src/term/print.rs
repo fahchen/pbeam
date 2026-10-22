@@ -149,7 +149,7 @@ pub(crate) fn print_term(term: &Term, atoms: &AtomTable) -> Vec<u8> {
                     format!(
                         "#Fun<{}.{}.{}>",
                         atoms.name_of(lambda.module()),
-                        lambda.index,
+                        lambda.old_index,
                         lambda.old_unique
                     )
                     .as_bytes(),
