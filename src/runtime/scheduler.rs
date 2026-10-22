@@ -25,6 +25,7 @@ use super::{
     interpreter::{CodeTable, LoadedModule},
     local_node,
     mailbox::Mailbox,
+    nif::abi,
     persistent_term::PersistentTerms,
     port::Ports,
     process::{
@@ -415,6 +416,12 @@ pub(super) struct Scheduler {
     /// module, after a code load, starts without its library. The bindings
     /// of an extension library run only for these instances.
     pub(super) extension_loads: HashSet<ModuleId>,
+    /// The NIF shared library that `erlang:load_nif/2` opened for each
+    /// module instance in the run, as the `nif` field of the ERTS module
+    /// instance (`beam/erl_nif.c:4990-4997`). The functions of a library run
+    /// only for its instance. The run keeps each library open until the
+    /// scheduler drops, which closes it with `dlclose`.
+    pub(super) shared_libraries: HashMap<ModuleId, Arc<abi::Library>>,
     /// The timers of the run and the run clock. All processes of the run
     /// share them.
     pub(super) timers: Timers,
@@ -526,6 +533,7 @@ impl Scheduler {
             code: CodeTable::default(),
             nif_libraries: HashSet::new(),
             extension_loads: HashSet::new(),
+            shared_libraries: HashMap::new(),
             timers: Timers::new(),
             known_nodes: KnownNodes::default(),
             alias_owners: HashMap::new(),

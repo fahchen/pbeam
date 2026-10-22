@@ -9,6 +9,7 @@ mod files;
 mod host;
 mod interpreter;
 mod mailbox;
+mod nif;
 mod pcre2;
 mod persistent_term;
 mod port;

@@ -8,7 +8,7 @@
 //! `erlang:load_nif/2` opens no file (`beam/erl_nif.c:4751-4757`,
 //! `5324-5331`). PBeam models each module with bindings as such a static
 //! library: `load_nif` runs the checks of `erlang:load_nif/2` against the
-//! function list of the library. PBeam opens no library file. A binding in
+//! function list of the library, and opens no library file. A binding in
 //! this registry is active when its module loads, also before
 //! `erlang:load_nif/2`, and the `nif_start` instruction at the entry of the
 //! function runs it. Each OTP module has one submodule that holds the
@@ -24,6 +24,10 @@
 //! library, so the dispatch, `load_nif`, and the manifest gate find the
 //! library of a module as a [`Linked`]: a library of this file, or else an
 //! extension library.
+//!
+//! A module with neither library loads a NIF shared library: `load_shared`
+//! opens `Path.so` with the NIF ABI loader of `crate::runtime::nif::abi`,
+//! and the functions of the library run for the loaded module instance.
 
 use super::bif::denial;
 use super::*;
@@ -33,7 +37,8 @@ use crate::runtime::{
     dirty::Work,
     extension,
     host::filename_encoding,
-    unicode::is_native_filename,
+    nif::abi,
+    unicode::{is_native_filename, native_filename},
 };
 
 mod asn1rt_nif;
@@ -372,6 +377,10 @@ pub(super) fn call(
     arguments: &[Term],
 ) -> Option<(Job, Result<BifResult, BeamError>)> {
     let arity = u32::try_from(arguments.len()).ok()?;
+    if let Some(library) = scheduler.shared_libraries.get(&module.id).cloned() {
+        let function = library.function(name, arity)?;
+        return Some((Job::Normal, function.call(arguments).map(to_bif_result)));
+    }
     let linked = Linked::of(&module.name)?;
     let bound = match linked {
         Linked::Static(library) => static_binding(library, name, arity)
@@ -456,9 +465,8 @@ pub(super) fn to_bif_result(result: crate::runtime::NativeResult) -> BifResult {
 ///    the code that waits for its `-on_load` function, gives `{error,
 ///    {old_code, "Calling load_nif from old module 'M' not allowed"}}`
 ///    (`beam/erl_nif.c:4758-4772`). Then a module without a PBeam static
-///    library or a registered extension
-///    library gives a runtime error. ERTS opens the library with `dlopen`
-///    (`beam/erl_nif.c:4778-4787`).
+///    library or a registered extension library opens its NIF shared
+///    library, with the steps of `load_shared`.
 /// 4. When the library of the module is loaded, the result is
 ///    `{error, {reload, Text}}` (`beam/erl_nif.c:4774-4777`).
 /// 5. In the order of the library functions, a function that the module
@@ -496,8 +504,8 @@ pub(super) fn to_bif_result(result: crate::runtime::NativeResult) -> BifResult {
 ///
 /// # Errors
 ///
-/// A module without a PBeam static library gives a runtime error that
-/// names the module. The load callback of `crypto` gives a runtime error for a
+/// A NIF shared library gives the runtime errors of `load_shared`. The load
+/// callback of `crypto` gives a runtime error for a
 /// `FipsMode` of `true`. A new error atom or a new `capability_denied` atom in a full
 /// atom table gives the error of `AtomTable::put`.
 pub(super) fn load_nif(
@@ -528,10 +536,7 @@ pub(super) fn load_nif(
         return load_nif_error(&mut scheduler.atoms, "old_code", &text);
     }
     let Some(linked) = Linked::of(caller) else {
-        // ponytail: PBeam opens no NIF library; see "NIF stubs" in docs/erts-differences.md.
-        return Err(error(format!(
-            "erlang:load_nif/2 from {caller} is not supported: PBeam has no native bindings for the module"
-        )));
+        return load_shared(scheduler, caller, &arguments);
     };
     let extension = matches!(linked, Linked::Extension(_));
     if extension && scheduler.is_multi() {
@@ -554,34 +559,15 @@ pub(super) fn load_nif(
             "NIF library already loaded (reload disallowed since OTP 20).",
         );
     }
-    let instructions = &module.instructions;
-    let has_nifs = instructions
+    let functions: Vec<_> = linked
+        .functions()
         .iter()
-        .any(|instruction| matches!(instruction, Instruction::NifStart { .. }));
-    let functions = linked.functions();
-    for (index, &(name, arity)) in functions.iter().enumerate() {
-        let defined = instructions.iter().any(|instruction| {
-            matches!(instruction, Instruction::FunctionInfo { name: found, arity: found_arity, .. }
-                if found == name && *found_arity == arity)
-        });
-        if !defined {
-            let text = format!("Function not found {caller}:{name}/{arity}");
-            return load_nif_error(&mut scheduler.atoms, "bad_lib", &text);
-        }
-        let declared = instructions.iter().any(|instruction| {
-            matches!(instruction, Instruction::NifStart { name: found, arity: found_arity }
-                if found == name && *found_arity == arity)
-        });
-        if has_nifs && !declared {
-            let text = format!("Function not declared as nif {caller}:{name}/{arity}");
-            return load_nif_error(&mut scheduler.atoms, "bad_lib", &text);
-        }
-        if functions[..index].contains(&(name, arity)) {
-            let text = format!("Duplicate NIF entry for {caller}:{name}/{arity}");
-            return load_nif_error(&mut scheduler.atoms, "bad_lib", &text);
-        }
+        .map(|&(name, arity)| (name, arity, 0))
+        .collect();
+    if let Some(text) = function_error(&module, caller, &functions) {
+        return load_nif_error(&mut scheduler.atoms, "bad_lib", &text);
     }
-    if extension && !has_nifs {
+    if extension && !has_nifs(&module) {
         // ERTS replaces each function of the library in a module without
         // `nif_start` (`beam/erl_nif.c:4700-4704`, `5050-5098`). PBeam runs
         // an extension binding only at `nif_start`.
@@ -592,15 +578,7 @@ pub(super) fn load_nif(
     // A library on another instance of the module, such as the code that
     // `erlang:delete_module/1` made old, makes the load an upgrade, and an
     // extension library has no upgrade callback (`beam/erl_nif.c:4956-4961`).
-    // PBeam keeps the code of a deleted module, so the instance stays.
-    let upgrade = scheduler.extension_loads.iter().any(|&id| {
-        id != module.id
-            && scheduler
-                .code
-                .module_by_id(id)
-                .is_ok_and(|other| other.name == caller)
-    });
-    if extension && upgrade {
+    if extension && upgrade(scheduler, scheduler.extension_loads.iter(), &module) {
         let text = "Upgrade not supported by this NIF library.";
         return load_nif_error(&mut scheduler.atoms, "upgrade", text);
     }
@@ -622,6 +600,281 @@ pub(super) fn load_nif(
         scheduler.nif_libraries.insert(caller.to_owned());
     }
     Ok(BifResult::Value(Term::static_atom("ok")))
+}
+
+/// Return whether a function of `module` starts with `nif_start`, so that
+/// the loader kept its `-nifs` list (`jit/asm_load.c:651-661`).
+fn has_nifs(module: &BeamModule) -> bool {
+    module
+        .instructions
+        .iter()
+        .any(|instruction| matches!(instruction, Instruction::NifStart { .. }))
+}
+
+/// Return the `bad_lib` text of the first function of `functions`, as
+/// `(name, arity, flags)` in the order of the library, that `module` cannot
+/// take, or `None`. The checks of each function are in the ERTS order
+/// (`beam/erl_nif.c:4845-4900`):
+///
+/// 1. A function that the module does not define gives `Function not found
+///    M:F/A`.
+/// 2. When the module has a `-nifs` list, a function that is not in it
+///    gives `Function not declared as nif M:F/A` (`beam/erl_nif.c:4700-4704`).
+/// 3. Flags other than 0, `ERL_NIF_DIRTY_JOB_CPU_BOUND`, and
+///    `ERL_NIF_DIRTY_JOB_IO_BOUND` give `Illegal flags field value Flags for
+///    NIF M:F/A`, with the flags as a C `int`.
+/// 4. A function that is a second time in the library gives `Duplicate NIF
+///    entry for M:F/A`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // nif_add defines add/2 and no sub/2.
+/// assert_eq!(function_error(&nif_add, "nif_add", &[("add", 2, 0)]), None);
+/// assert_eq!(function_error(&nif_add, "nif_add", &[("sub", 2, 0)]).unwrap(), "Function not found nif_add:sub/2");
+/// ```
+fn function_error(
+    module: &BeamModule,
+    caller: &str,
+    functions: &[(&str, u32, u32)],
+) -> Option<String> {
+    let instructions = &module.instructions;
+    let has_nifs = has_nifs(module);
+    for (index, &(name, arity, flags)) in functions.iter().enumerate() {
+        let defined = instructions.iter().any(|instruction| {
+            matches!(instruction, Instruction::FunctionInfo { name: found, arity: found_arity, .. }
+                if found == name && *found_arity == arity)
+        });
+        if !defined {
+            return Some(format!("Function not found {caller}:{name}/{arity}"));
+        }
+        let declared = instructions.iter().any(|instruction| {
+            matches!(instruction, Instruction::NifStart { name: found, arity: found_arity }
+                if found == name && *found_arity == arity)
+        });
+        if has_nifs && !declared {
+            return Some(format!(
+                "Function not declared as nif {caller}:{name}/{arity}"
+            ));
+        }
+        if flags > 2 {
+            // ERTS prints the unsigned flags with `%d`.
+            let flags = flags.cast_signed();
+            return Some(format!(
+                "Illegal flags field value {flags} for NIF {caller}:{name}/{arity}"
+            ));
+        }
+        if functions[..index]
+            .iter()
+            .any(|&(earlier, earlier_arity, _)| (earlier, earlier_arity) == (name, arity))
+        {
+            return Some(format!("Duplicate NIF entry for {caller}:{name}/{arity}"));
+        }
+    }
+    None
+}
+
+/// Return whether a module instance of `loaded` other than `module` is an
+/// instance of `module`, so that a load for `module` is an upgrade
+/// (`beam/erl_nif.c:4956-4961`). PBeam keeps the code of a deleted module,
+/// so the instance stays.
+fn upgrade<'a>(
+    scheduler: &Scheduler,
+    mut loaded: impl Iterator<Item = &'a crate::beam::ModuleId>,
+    module: &BeamModule,
+) -> bool {
+    loaded.any(|&id| {
+        id != module.id
+            && scheduler
+                .code
+                .module_by_id(id)
+                .is_ok_and(|other| other.name == module.name)
+    })
+}
+
+/// Return the C string of the library name `path`, which
+/// `is_native_filename` accepted, as `erts_convert_filename_to_encoding`
+/// gives it: the bytes of a binary, else the native bytes of the name, up
+/// to the first NUL byte (`beam/erl_nif.c:4730-4741`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(library_name(&Term::binary(b"/tmp/nif_add".to_vec())).as_ref(), c"/tmp/nif_add");
+/// ```
+fn library_name(path: &Term) -> std::ffi::CString {
+    let bytes = match path {
+        Term::Binary(bytes) => bytes.to_vec(),
+        _ => native_filename(path, filename_encoding()).unwrap_or_default(),
+    };
+    let end = bytes
+        .iter()
+        .position(|&byte| byte == 0)
+        .unwrap_or(bytes.len());
+    std::ffi::CString::new(&bytes[..end]).expect("the name has no NUL byte before its end")
+}
+
+/// Run `erlang:load_nif(Path, LoadInfo)` from the module `caller`, which has
+/// no static or extension library, with the NIF shared library `Path.so`,
+/// as `erts_load_nif` does (`beam/erl_nif.c:4774-5007`). The caller has
+/// done the argument, capability, and old code checks. The steps are:
+///
+/// 1. When the instance has a library, the result is `{error, {reload,
+///    Text}}` (`beam/erl_nif.c:4774-4777`).
+/// 2. A failed `dlopen` gives `{error, {load_failed, Text}}`, a library
+///    with no init function and an init function that returns NULL give
+///    `{error, {bad_lib, Text}}`, and so does a NIF version other than
+///    2.18 (`beam/erl_nif.c:4778-4813`). ERTS loads each version from 2.0
+///    to 2.18 except 2.5, and PBeam gives a `bad_lib` text of its own for
+///    2.0 to 2.17.
+/// 3. A vm variant other than `beam.vanilla` and a library name other than
+///    the module name give `{error, {bad_lib, Text}}`
+///    (`beam/erl_nif.c:4814-4823`).
+/// 4. The function checks of [`function_error`]. A dirty NIF is not
+///    supported yet and gives a runtime error.
+/// 5. A module without `nif_start` gives a runtime error, as for an
+///    extension library.
+/// 6. A load for a second instance of the module is an upgrade: a library
+///    without an upgrade callback gives `{error, {upgrade, Text}}`
+///    (`beam/erl_nif.c:4956-4961`), and the upgrade callback is not
+///    supported yet and gives a runtime error.
+/// 7. The load callback runs with `LoadInfo`, and a veto that is not 0
+///    gives `{error, {load, Text}}` (`beam/erl_nif.c:4980-4987`).
+/// 8. Else the functions of the library run for the instance, and the
+///    result is `ok`.
+///
+/// Each error closes the library (`beam/erl_nif.c:5030-5032`).
+///
+/// # Errors
+///
+/// A run on more than one scheduler, a dirty NIF, a module without
+/// `nif_start`, and an upgrade callback give a runtime error. A new error
+/// atom in a full atom table gives the error of `AtomTable::put`.
+fn load_shared(
+    scheduler: &mut Scheduler,
+    caller: &str,
+    arguments: &[Term],
+) -> Result<BifResult, BeamError> {
+    if scheduler.is_multi() {
+        // Each scheduler of the run keeps its code table, as for an
+        // extension library.
+        return Err(error(format!(
+            "unsupported: erlang:load_nif/2 of the NIF library of {caller} in a run of execute_on_schedulers"
+        )));
+    }
+    let module = Arc::clone(scheduler.code.waiting_or_loaded(caller)?);
+    if scheduler.shared_libraries.contains_key(&module.id) {
+        let text = "NIF library already loaded (reload disallowed since OTP 20).";
+        return load_nif_error(&mut scheduler.atoms, "reload", text);
+    }
+    let name = library_name(&arguments[0]);
+    let library = match abi::open(&name) {
+        Ok(library) => library,
+        Err(failure) => return open_error(&mut scheduler.atoms, caller, &name, failure),
+    };
+    let variant = library.vm_variant();
+    if variant != "beam.vanilla" {
+        let text = format!("Library ({variant}) not compiled for this vm variant (beam.vanilla).");
+        return load_nif_error(&mut scheduler.atoms, "bad_lib", &text);
+    }
+    if library.name() != caller {
+        let name = library.name();
+        let text = format!("Library module name '{name}' does not match calling module '{caller}'");
+        return load_nif_error(&mut scheduler.atoms, "bad_lib", &text);
+    }
+    let functions: Vec<_> = library
+        .functions()
+        .iter()
+        .map(|function| (function.name.as_str(), function.arity, function.flags))
+        .collect();
+    if let Some(text) = function_error(&module, caller, &functions) {
+        return load_nif_error(&mut scheduler.atoms, "bad_lib", &text);
+    }
+    if let Some(dirty) = library
+        .functions()
+        .iter()
+        .find(|function| function.flags != 0)
+    {
+        let (name, arity) = (&dirty.name, dirty.arity);
+        return Err(error(format!(
+            "unsupported: the dirty NIF {caller}:{name}/{arity} of a NIF shared library"
+        )));
+    }
+    if !has_nifs(&module) {
+        return Err(error(format!(
+            "unsupported: erlang:load_nif/2 of the NIF library of {caller}: the module has no nif_start instruction"
+        )));
+    }
+    if upgrade(scheduler, scheduler.shared_libraries.keys(), &module) {
+        if library.upgrades() {
+            return Err(error(format!(
+                "unsupported: the upgrade callback of the NIF library of {caller}"
+            )));
+        }
+        let text = "Upgrade not supported by this NIF library.";
+        return load_nif_error(&mut scheduler.atoms, "upgrade", text);
+    }
+    let veto = library.load(&arguments[1]);
+    if veto != 0 {
+        let text = format!("Library load-call unsuccessful ({veto}).");
+        return load_nif_error(&mut scheduler.atoms, "load", &text);
+    }
+    scheduler
+        .shared_libraries
+        .insert(module.id, Arc::new(library));
+    Ok(BifResult::Value(Term::static_atom("ok")))
+}
+
+/// Return the `erlang:load_nif/2` error of the failed open of the library
+/// `name` of `caller`, with the ERTS text (`beam/erl_nif.c:4778-4813`).
+/// The `dlerror` text of a failed `dlopen` names the library on macOS and
+/// for most Linux errors; ERTS adds the name when it does not.
+///
+/// # Errors
+///
+/// The atom `bad_lib` or `load_failed` in a full atom table gives the error
+/// of `AtomTable::put`.
+fn open_error(
+    atoms: &mut AtomTable,
+    caller: &str,
+    name: &std::ffi::CStr,
+    failure: abi::OpenError,
+) -> Result<BifResult, BeamError> {
+    let name = name.to_string_lossy();
+    let slogan = "Failed to load NIF library";
+    let (kind, text) = match failure {
+        abi::OpenError::Open(text) => {
+            // ERTS adds the name when the text does not hold it, which on
+            // Linux is the text of a missing dependency.
+            let named = (!text.contains(&*name)).then(|| format!(" {name}"));
+            let named = named.unwrap_or_default();
+            ("load_failed", format!("{slogan}{named}: '{text}'"))
+        }
+        abi::OpenError::NoInit(text) => (
+            "bad_lib",
+            format!("Failed to find library init function: '{text}'"),
+        ),
+        abi::OpenError::NullEntry => ("bad_lib", "Library init-call unsuccessful".to_owned()),
+        abi::OpenError::Newer(min_erts) => (
+            "bad_lib",
+            format!(
+                "That '{caller}' NIF library needs {min_erts} or newer. Either try to recompile the NIF lib or use a newer erts runtime."
+            ),
+        ),
+        abi::OpenError::Old(major, minor) => (
+            "bad_lib",
+            format!(
+                "That old NIF library ({major}.{minor}) is not compatible with this erts runtime (2.18). Try recompile the NIF lib."
+            ),
+        ),
+        abi::OpenError::Unsupported(major, minor) => (
+            "bad_lib",
+            format!(
+                "That NIF library ({major}.{minor}) is not supported by PBeam, which supports only NIF version 2.18. Try recompile the NIF lib."
+            ),
+        ),
+    };
+    load_nif_error(atoms, kind, &text)
 }
 
 /// Return `{error, {Kind, Text}}` with `Text` as a list of its bytes, as

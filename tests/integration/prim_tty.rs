@@ -1169,32 +1169,36 @@ fn returns_bad_lib_from_the_bif_for_apply_and_fun_calls() {
 }
 
 #[test]
-fn returns_a_runtime_error_for_a_module_without_bindings() {
-    // `load_nif_probe:other/0` calls `erlang:load_nif("load_nif_probe", 0)`.
-    // ERTS opens the library with `dlopen` and returns `{error,
-    // {load_failed, Text}}` with host text (erl_nif.c:4778-4787). PBeam
-    // opens no library and returns a runtime error.
+fn returns_the_load_failed_error_of_a_missing_library_as_erts() {
+    // `load_nif_probe:other/0` calls `erlang:load_nif("load_nif_probe", 0)`,
+    // and no file `load_nif_probe.so` exists. ERTS and PBeam open the library
+    // with `dlopen` and return `{error, {load_failed, Text}}` with the
+    // `dlerror` text of the host (erl_nif.c:4778-4787).
     let erts = String::from_utf8(run_in_layout(
         &mut erts_load_nif_probe("nif", "other"),
         FILES,
         &[],
     ))
     .unwrap();
-    let slogan = Value::Text("Failed to load NIF library").erts();
-    let prefix = format!(
-        "{{error,{{load_failed,{}",
-        slogan.strip_suffix(']').unwrap()
+    let bytes = erts
+        .strip_prefix("{error,{load_failed,[")
+        .and_then(|rest| rest.trim_end().strip_suffix("]}}"))
+        .unwrap_or_else(|| panic!("{erts}"));
+    let text: Vec<_> = bytes
+        .split(',')
+        .map(|byte| format!("Integer({byte})"))
+        .collect();
+    let expected = format!(
+        r#"Ok(Tuple([Atom("error"), Tuple([Atom("load_failed"), List([{}])])]))"#,
+        text.join(", ")
     );
-    assert!(erts.starts_with(&prefix), "{erts}");
-    assert_eq!(
-        run_isolated(
-            FILES,
-            &[],
-            "load_nif_probe:other",
-            &[LOAD_NIF_PROBE, STAND_IN]
-        ),
-        br#"Err(Runtime("erlang:load_nif/2 from load_nif_probe is not supported: PBeam has no native bindings for the module"))"#
-    );
+    // On macOS, `dlopen` also tries the directories of
+    // `DYLD_FALLBACK_LIBRARY_PATH`, which cargo sets for the test and the
+    // `erl` shell script does not get, so the child runs without it.
+    let mut pbeam = isolated("load_nif_probe:other", &[LOAD_NIF_PROBE, STAND_IN]);
+    pbeam.env_remove("DYLD_FALLBACK_LIBRARY_PATH");
+    let pbeam = run_in_layout(&mut pbeam, FILES, &[]);
+    assert_eq!(String::from_utf8(pbeam).unwrap(), expected);
 }
 
 /// An expected Erlang term, written as ERTS `~w` text and as the `Debug`
