@@ -2768,8 +2768,6 @@ pub(super) fn internal_select_delete(
         return Ok(BifResult::badarg());
     };
     reject_ordered_set(&found.1, "ets:select_delete/2")?;
-    let keypos = found.1.keypos();
-    let buckets = found.1.bucket_count();
     drop(found);
     let mut taken = match ets.write(atoms, table, caller, reds) {
         Ok(taken) => taken,
@@ -2778,6 +2776,11 @@ pub(super) fn internal_select_delete(
             return Ok(retry(context, lacking, "internal_select_delete", arguments));
         }
     };
+    // The write lock covers the whole call, as in ERTS
+    // (`erl_db.c:3443-3458`), so another scheduler cannot clear the table
+    // and shrink its buckets before the walk.
+    let keypos = taken.keypos();
+    let buckets = taken.bucket_count();
     let Some(compiled) = compile_spec(atoms, spec)? else {
         return Ok(BifResult::badarg());
     };
