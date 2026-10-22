@@ -5724,8 +5724,8 @@ fn cleans_a_pending_fixation_when_the_process_is_scheduled() {
 
 #[test]
 fn helps_a_trapped_insert_from_internal_delete_all() {
-    // `ets:internal_delete_all/2` first completes the list insert that
-    // holds the table busy (`handle_lacking_permission`, `erl_db.c:769-798`).
+    // `ets:internal_delete_all/2` first helps the list insert that holds
+    // the table busy (`handle_lacking_permission`, `erl_db.c:769-798`).
     let program = make_program(vec![], 0);
     let mut scheduler = Scheduler::new((*program.atoms).clone());
     scheduler.start(frame(), vec![], allow_all()).unwrap();
@@ -5738,6 +5738,22 @@ fn helps_a_trapped_insert_from_internal_delete_all() {
     scheduler.ets.exclusive().create(Reference(0), None, table);
     let result = program
         .bif(
+            &mut scheduler,
+            "ets",
+            "internal_delete_all",
+            vec![
+                Term::Reference(Reference(0)),
+                Term::static_atom("undefined"),
+            ],
+        )
+        .unwrap();
+    // The help traps, and the next turn runs the clear
+    // (`erl_db.c:773-787`).
+    assert!(
+        matches!(result, BifResult::TrapBif { function, .. } if function == "internal_delete_all")
+    );
+    let result = program
+        .bif_trap(
             &mut scheduler,
             "ets",
             "internal_delete_all",

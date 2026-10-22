@@ -3,10 +3,10 @@
 use super::BifResult::Value;
 use super::*;
 use crate::runtime::ets::pattern::{MatchSpec, SpecError};
-use crate::runtime::ets::{Access, Busy, EtsTables, Table, TableType};
+use crate::runtime::ets::{Access, Busy, ITERATIONS_PER_RED, Lacking, Table, TableType};
 use crate::term::Reference;
 use num_bigint::BigInt;
-use std::sync::{Arc, RwLockReadGuard};
+use std::sync::Arc;
 
 /// The fewest and the most locks that the hidden option
 /// `{write_concurrency, {debug_hash_fixed_number_of_locks, N}}` accepts
@@ -14,17 +14,13 @@ use std::sync::{Arc, RwLockReadGuard};
 /// `erl_db.c:65-66`).
 const LOCKS: std::ops::RangeInclusive<i64> = 1..=32768;
 
-/// `ITERATIONS_PER_RED` (`erl_db.c:2152`): the units of one reduction of
-/// the budget of a list insert.
-const ITERATIONS_PER_RED: i64 = 8;
-
 /// Run up to `units` units of the steps of the list insert that took the
 /// table `table`, as `ets_insert_2_list_continue` runs the steps of a
 /// trapped call (`erl_db.c:2173-2197`): the walk of `ets:insert_new/2` and
 /// the insert of the objects, one step for each object. The steps are in
 /// the table, so a call that traps between two objects leaves the position
 /// there, and another process that uses the table runs the steps too
-/// ([`help_busy`]). Return the units that the steps used, and the result
+/// ([`crate::runtime::ets::EtsTables::read`]). Return the units that the steps used, and the result
 /// when the insert ended, else `None`.
 fn step_inserting(
     context: &mut BifContext<'_>,
@@ -71,104 +67,27 @@ fn step_inserting(
     Ok((used, None))
 }
 
-/// What a process that takes a table finds on it, as
-/// `handle_lacking_permission` (`erl_db.c:769-798`) sees a table with
-/// `DB_BUSY` (`erl_db.c:2310-2319`).
-enum Take {
-    /// The table runs no list insert.
-    Free,
-    /// The table runs the list insert of the calling process, and it does
-    /// not read the result of an ended one.
-    Mine,
-    /// The table holds a clear of a fixed table that did not finish, and
-    /// the call traps and continues in a later turn
-    /// (`delete_all_objects_continue`, `erl_db.c:3300-3320`).
-    Clear(Reference),
-    /// The table runs the list insert of another process, or holds the
-    /// result of one that its process did not read: this process completes
-    /// the steps, and its own operation runs in a later turn.
-    Help(Reference),
-}
-
-/// Complete the list insert that holds the table `table` busy, with the
-/// units of the budget of the current process, as `handle_lacking_permission`
-/// (`erl_db.c:769-798`) runs the continuation of a table that a list insert
-/// took when another process uses it: the process completes the walk and the
-/// insert first, and it charges the units of the work
-/// (`ets_insert_2_list_continuation`, `erl_db.c:2152-2197`). Its own
-/// operation then traps and runs in a later turn (`erl_db.c:782-787`).
-fn help_busy(context: &mut BifContext<'_>, table: &Term) -> Result<Take, BeamError> {
-    let process = context.scheduler.current_process_mut();
-    let caller = process.id;
-    let reds = process.bif_reductions_signed();
-    let ets = context.scheduler.ets.shared();
-    let Some((id, found)) = ets.find(&context.scheduler.atoms, table) else {
-        return Ok(Take::Free);
+/// Return the result of a BIF that could not take its table: `badarg`, or
+/// a trap that runs the call `ets:function(arguments)` again after the
+/// help of a busy table, which charges the reductions of the help
+/// (`handle_lacking_permission`, `erl_db.c:769-798`, `2152-2197`).
+fn retry(
+    context: &mut BifContext<'_>,
+    lacking: Lacking,
+    function: &'static str,
+    arguments: Vec<Term>,
+) -> BifResult {
+    let Lacking::Busy { reductions } = lacking else {
+        return BifResult::badarg();
     };
-    let (started, clearing) = (found.busy.as_ref().map(|busy| busy.owner), found.clearing());
-    drop(found);
-    // The clear step takes the table under the same store lock, so no
-    // other scheduler deletes the table between the check and the step.
-    let charge = (started.is_none() && clearing)
-        .then(|| ets.step_clear(&context.scheduler.atoms, id, reds).1);
-    drop(ets);
-    if let Some(started) = started {
-        if started == caller {
-            return Ok(Take::Mine);
-        }
-        // `ets_insert_2_list_continuation` keeps `ITERATIONS_PER_RED *
-        // ERTS_BIF_REDS_LEFT` in a `long`, and YCF yields when the count is
-        // 0 or less (`erl_db.c:2158`, `ycf_yield_fun.c:592-610`), so a
-        // negative budget does what a budget of 0 does.
-        let budget = ITERATIONS_PER_RED
-            * context
-                .scheduler
-                .current_process_mut()
-                .bif_reductions_or_zero() as i64;
-        let (used, _) = step_inserting(context, &Term::Reference(id), budget, None)?;
-        context
-            .scheduler
-            .current_process_mut()
-            .bump_reductions((used / ITERATIONS_PER_RED) as i32);
-        return Ok(Take::Help(id));
-    }
-    let Some(charge) = charge else {
-        return Ok(Take::Free);
-    };
-    // A process that uses the table while a fixed clear does not finish
-    // helps with the mark, as `delete_all_objects_continue` does
-    // (`erl_db.c:3300-3320`): 8 buckets for each reduction. It keeps the
-    // budget signed (`erl_db.c:3303`).
     context
         .scheduler
         .current_process_mut()
-        .bump_reductions(i32::try_from(charge).unwrap_or(i32::MAX));
-    Ok(Take::Clear(id))
-}
-
-/// Complete the list insert that holds `table` busy, with no turn limit, as
-/// `handle_lacking_permission` completes it before it runs the operation
-/// again (`erl_db.c:769-798`). The steps charge the reductions of their
-/// units. PBeam has one scheduler and no trap export for the other ETS
-/// calls, so the insert finishes in the turn of the caller.
-fn finish_busy(context: &mut BifContext<'_>, table: &Term) -> Result<(), BeamError> {
-    loop {
-        let atoms = &context.scheduler.atoms;
-        let ets = context.scheduler.ets.shared();
-        // A process of another scheduler can complete the insert or delete
-        // the table first.
-        let busy = (ets.find(atoms, table))
-            .filter(|(_, found)| found.busy.is_some())
-            .map(|(id, _)| id);
-        drop(ets);
-        let Some(id) = busy else {
-            return Ok(());
-        };
-        let (used, _) = step_inserting(context, &Term::Reference(id), i64::from(i32::MAX), None)?;
-        context
-            .scheduler
-            .current_process_mut()
-            .bump_reductions((used / ITERATIONS_PER_RED) as i32);
+        .bump_reductions(i32::try_from(reductions).unwrap_or(i32::MAX));
+    BifResult::TrapBif {
+        module: "ets",
+        function,
+        arguments,
     }
 }
 
@@ -455,7 +374,8 @@ fn insert_objects(
     // A cons cell with a tail that is not `[]`: at least two objects, or an
     // improper list.
     if objects.cons_cell().is_some_and(|(_, tail)| !tail.is_nil()) {
-        let ets = context.scheduler.ets.shared();
+        let store = Arc::clone(&context.scheduler.ets);
+        let ets = store.shared();
         let Some((id, found)) = ets.find(&context.scheduler.atoms, table) else {
             return Ok(BifResult::badarg());
         };
@@ -471,16 +391,22 @@ fn insert_objects(
         return insert_list(context, id, objects, keypos, state);
     }
     let caller = context.scheduler.current_process_mut().id;
-    if let Take::Help(_) | Take::Clear(_) = help_busy(&mut *context, table)? {
-        return Ok(BifResult::TrapBif {
-            module: "ets",
-            function: if new { "insert_new" } else { "insert" },
-            arguments: vec![table.clone(), objects.clone()],
-        });
-    }
-    let ets = context.scheduler.ets.shared();
-    let Some(mut table) = ets.write(&context.scheduler.atoms, table, caller) else {
-        return Ok(BifResult::badarg());
+    let reds = context
+        .scheduler
+        .current_process_mut()
+        .bif_reductions_signed();
+    let store = Arc::clone(&context.scheduler.ets);
+    let ets = store.shared();
+    let mut table = match ets.write(&context.scheduler.atoms, table, caller, reds) {
+        Ok(table) => table,
+        Err(lacking) => {
+            return Ok(retry(
+                context,
+                lacking,
+                if new { "insert_new" } else { "insert" },
+                vec![table.clone(), objects.clone()],
+            ));
+        }
     };
     let objects: Vec<&Term> = match objects.proper_list() {
         Some(objects) => objects.collect(),
@@ -554,7 +480,7 @@ fn insert_objects(
 /// `4 * count`. ERTS takes a table lock and walks and inserts the objects
 /// of step 3 one after another, and the table is busy between the objects,
 /// so another process that uses it completes the walk and the insert first
-/// and charges its own units for them ([`help_busy`]). When the owner exit
+/// and charges its own units for them ([`crate::runtime::ets::EtsTables::read`]). When the owner exit
 /// deletes the table during step 3, a later call raises `badarg`, as ERTS
 /// does after it cancels the insert (`erl_db.c:2232-2248`, `5082-5086`). `ets:delete/1` in ERTS first
 /// completes the insert, so that the insert returns `true`, and PBeam
@@ -659,7 +585,16 @@ pub(super) fn insert_list(
                     // ERTS takes the table before it raises `badarg` for a
                     // bad object, so a busy table runs its list insert first
                     // (`erl_db.c:2036-2047`).
-                    if let Take::Help(_) | Take::Clear(_) = help_busy(&mut *context, &table)? {
+                    // The help uses the budget of the process, as
+                    // `ERTS_BIF_REDS_LEFT` gives it (`erl_db.c:2152-2158`).
+                    let reds = context
+                        .scheduler
+                        .current_process_mut()
+                        .bif_reductions_signed();
+                    let ets = context.scheduler.ets.shared();
+                    let taken = ets.write(&context.scheduler.atoms, &table, caller, reds);
+                    if let Err(Lacking::Busy { reductions }) = taken {
+                        units.left -= reductions * ITERATIONS_PER_RED;
                         break 'work None;
                     }
                     break 'work Some(BifResult::badarg());
@@ -681,12 +616,20 @@ pub(super) fn insert_list(
             // A second call completes the list insert that holds the
             // table busy before it takes it, also without a copy of the
             // objects (`erl_db.c:2050-2055`).
-            if let Take::Help(_) | Take::Clear(_) = help_busy(&mut *context, &table)? {
-                break 'work None;
-            }
+            // The help uses the budget of the process, as
+            // `ERTS_BIF_REDS_LEFT` gives it (`erl_db.c:2152-2158`).
+            let reds = context
+                .scheduler
+                .current_process_mut()
+                .bif_reductions_signed();
             let ets = context.scheduler.ets.shared();
-            let Some(mut table) = ets.write(&context.scheduler.atoms, &table, caller) else {
-                break 'work Some(BifResult::badarg());
+            let mut table = match ets.write(&context.scheduler.atoms, &table, caller, reds) {
+                Ok(table) => table,
+                Err(Lacking::Denied) => break 'work Some(BifResult::badarg()),
+                Err(Lacking::Busy { reductions }) => {
+                    units.left -= reductions * ITERATIONS_PER_RED;
+                    break 'work None;
+                }
             };
             let tuples = tuples();
             if !matches!(new, New::No) {
@@ -716,12 +659,19 @@ pub(super) fn insert_list(
             // the units of this call, and this call then takes the table in
             // a later turn (`handle_lacking_permission`, `erl_db.c:769-798`,
             // `2223-2253`).
-            if let Take::Help(_) | Take::Clear(_) = help_busy(&mut *context, &table)? {
-                break 'work None;
-            }
+            // The help uses the budget of the process, as
+            // `ERTS_BIF_REDS_LEFT` gives it (`erl_db.c:2152-2158`).
+            let reds = context
+                .scheduler
+                .current_process_mut()
+                .bif_reductions_signed();
             let ets = context.scheduler.ets.shared();
-            match ets.write(&context.scheduler.atoms, &table, caller) {
-                Some(mut taken_table) => {
+            match ets.write(&context.scheduler.atoms, &table, caller, reds) {
+                Err(Lacking::Busy { reductions }) => {
+                    units.left -= reductions * ITERATIONS_PER_RED;
+                    break 'work None;
+                }
+                Ok(mut taken_table) => {
                     let tuples = tuples();
                     let walk = matches!(new, New::Unlocked);
                     let bif = if walk { "insert_new/2" } else { "insert/2" };
@@ -746,7 +696,7 @@ pub(super) fn insert_list(
                     }
                     took = true;
                 }
-                None => done = 4 * count,
+                Err(Lacking::Denied) => done = 4 * count,
             }
         }
         if took || global {
@@ -1182,18 +1132,19 @@ pub(super) fn lookup_element(
     default: Option<&Term>,
 ) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
-    if let Take::Help(_) | Take::Clear(_) = help_busy(&mut *context, table)? {
-        let mut arguments = vec![table.clone(), key.clone(), index.clone()];
-        arguments.extend(default.cloned());
-        return Ok(BifResult::TrapBif {
-            module: "ets",
-            function: "lookup_element",
-            arguments,
-        });
-    }
-    let ets = context.scheduler.ets.shared();
-    let Some(table) = ets.read(&context.scheduler.atoms, table, caller) else {
-        return Ok(BifResult::badarg());
+    let reds = context
+        .scheduler
+        .current_process_mut()
+        .bif_reductions_signed();
+    let store = Arc::clone(&context.scheduler.ets);
+    let ets = store.shared();
+    let table = match ets.read(&context.scheduler.atoms, table, caller, reds) {
+        Ok(table) => table,
+        Err(lacking) => {
+            let mut arguments = vec![table.clone(), key.clone(), index.clone()];
+            arguments.extend(default.cloned());
+            return Ok(retry(context, lacking, "lookup_element", arguments));
+        }
     };
     let Some(index) = index.small_integer().filter(|index| *index >= 1) else {
         return Ok(BifResult::badarg());
@@ -1248,16 +1199,22 @@ pub(super) fn lookup(
     key: &Term,
 ) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
-    if let Take::Help(_) | Take::Clear(_) = help_busy(&mut *context, table)? {
-        return Ok(BifResult::TrapBif {
-            module: "ets",
-            function: "lookup",
-            arguments: vec![table.clone(), key.clone()],
-        });
-    }
-    let ets = context.scheduler.ets.shared();
-    let Some(table) = ets.read(&context.scheduler.atoms, table, caller) else {
-        return Ok(BifResult::badarg());
+    let reds = context
+        .scheduler
+        .current_process_mut()
+        .bif_reductions_signed();
+    let store = Arc::clone(&context.scheduler.ets);
+    let ets = store.shared();
+    let table = match ets.read(&context.scheduler.atoms, table, caller, reds) {
+        Ok(table) => table,
+        Err(lacking) => {
+            return Ok(retry(
+                context,
+                lacking,
+                "lookup",
+                vec![table.clone(), key.clone()],
+            ));
+        }
     };
     let objects = table.objects(&context.scheduler.atoms, key);
     Ok(Value(Term::list_from(
@@ -1286,16 +1243,22 @@ pub(super) fn member(
     key: &Term,
 ) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
-    if let Take::Help(_) | Take::Clear(_) = help_busy(&mut *context, table)? {
-        return Ok(BifResult::TrapBif {
-            module: "ets",
-            function: "member",
-            arguments: vec![table.clone(), key.clone()],
-        });
-    }
-    let ets = context.scheduler.ets.shared();
-    let Some(table) = ets.read(&context.scheduler.atoms, table, caller) else {
-        return Ok(BifResult::badarg());
+    let reds = context
+        .scheduler
+        .current_process_mut()
+        .bif_reductions_signed();
+    let store = Arc::clone(&context.scheduler.ets);
+    let ets = store.shared();
+    let table = match ets.read(&context.scheduler.atoms, table, caller, reds) {
+        Ok(table) => table,
+        Err(lacking) => {
+            return Ok(retry(
+                context,
+                lacking,
+                "member",
+                vec![table.clone(), key.clone()],
+            ));
+        }
     };
     let found = table.object(&context.scheduler.atoms, key).is_some();
     Ok(Value(Term::static_atom(if found {
@@ -1325,16 +1288,22 @@ pub(super) fn delete(
     key: &Term,
 ) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
-    if let Take::Help(_) | Take::Clear(_) = help_busy(&mut *context, table)? {
-        return Ok(BifResult::TrapBif {
-            module: "ets",
-            function: "delete",
-            arguments: vec![table.clone(), key.clone()],
-        });
-    }
-    let ets = context.scheduler.ets.shared();
-    let Some(mut table) = ets.write(&context.scheduler.atoms, table, caller) else {
-        return Ok(BifResult::badarg());
+    let reds = context
+        .scheduler
+        .current_process_mut()
+        .bif_reductions_signed();
+    let store = Arc::clone(&context.scheduler.ets);
+    let ets = store.shared();
+    let mut table = match ets.write(&context.scheduler.atoms, table, caller, reds) {
+        Ok(table) => table,
+        Err(lacking) => {
+            return Ok(retry(
+                context,
+                lacking,
+                "delete",
+                vec![table.clone(), key.clone()],
+            ));
+        }
     };
     table.delete(&context.scheduler.atoms, key);
     Ok(Value(Term::static_atom("true")))
@@ -1360,16 +1329,22 @@ pub(super) fn take(
     key: &Term,
 ) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
-    if let Take::Help(_) | Take::Clear(_) = help_busy(&mut *context, table)? {
-        return Ok(BifResult::TrapBif {
-            module: "ets",
-            function: "take",
-            arguments: vec![table.clone(), key.clone()],
-        });
-    }
-    let ets = context.scheduler.ets.shared();
-    let Some(mut table) = ets.write(&context.scheduler.atoms, table, caller) else {
-        return Ok(BifResult::badarg());
+    let reds = context
+        .scheduler
+        .current_process_mut()
+        .bif_reductions_signed();
+    let store = Arc::clone(&context.scheduler.ets);
+    let ets = store.shared();
+    let mut table = match ets.write(&context.scheduler.atoms, table, caller, reds) {
+        Ok(table) => table,
+        Err(lacking) => {
+            return Ok(retry(
+                context,
+                lacking,
+                "take",
+                vec![table.clone(), key.clone()],
+            ));
+        }
     };
     let objects: Vec<Term> = table
         .objects(&context.scheduler.atoms, key)
@@ -1411,17 +1386,15 @@ pub(super) fn delete_table(
     table: &Term,
 ) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
-    if help_table(&mut *context, table)? {
-        return Ok(BifResult::TrapBif {
-            module: "ets",
-            function: "delete",
-            arguments: vec![table.clone()],
-        });
-    }
+    let reds = context
+        .scheduler
+        .current_process_mut()
+        .bif_reductions_signed();
     let scheduler = &mut *context.scheduler;
-    let mut ets = scheduler.ets.exclusive();
-    if ets.write(&scheduler.atoms, table, caller).is_none() {
-        return Ok(BifResult::badarg());
+    let store = Arc::clone(&scheduler.ets);
+    let mut ets = store.exclusive();
+    if let Err(lacking) = ets.write(&scheduler.atoms, table, caller, reds) {
+        return Ok(retry(context, lacking, "delete", vec![table.clone()]));
     }
     let id = (ets.id(&scheduler.atoms, table)).expect("the caller found the table");
     if scheduler.traps_ets_insert(id) {
@@ -1520,25 +1493,36 @@ pub(super) fn info(
     // `ets:info/2` asks for `DB_INFO`, so a busy table completes its list
     // insert first, and the call runs again in a later turn
     // (`erl_db.c:769-798`, `4549-4555`).
-    if let Take::Help(_) | Take::Clear(_) = help_busy(&mut *context, table)? {
-        return Ok(BifResult::TrapBif {
-            module: "ets",
-            function: "info",
-            arguments: vec![table.clone(), item.clone()],
-        });
-    }
+    let caller = context.scheduler.current_process_mut().id;
+    let reds = context
+        .scheduler
+        .current_process_mut()
+        .bif_reductions_signed();
     let atoms = &context.scheduler.atoms;
-    let ets = context.scheduler.ets.shared();
-    let Some((id, found)) = ets.find(atoms, table) else {
-        return match table {
-            Term::Atom(_) => Ok(Value(Term::static_atom("undefined"))),
-            // ponytail: no record of a deleted table; see "ETS tables" in docs/erts-differences.md.
-            Term::Reference(_) => Err(error(
-                "unsupported ets:info/2 of a reference that is not a live table",
-            )),
-            _ => Ok(BifResult::badarg()),
-        };
+    let store = Arc::clone(&context.scheduler.ets);
+    let ets = store.shared();
+    let found = match ets.info(atoms, table, caller, reds) {
+        Ok(found) => found,
+        Err(lacking @ Lacking::Busy { .. }) => {
+            return Ok(retry(
+                context,
+                lacking,
+                "info",
+                vec![table.clone(), item.clone()],
+            ));
+        }
+        Err(Lacking::Denied) => {
+            return match table {
+                Term::Atom(_) => Ok(Value(Term::static_atom("undefined"))),
+                // ponytail: no record of a deleted table; see "ETS tables" in docs/erts-differences.md.
+                Term::Reference(_) => Err(error(
+                    "unsupported ets:info/2 of a reference that is not a live table",
+                )),
+                _ => Ok(BifResult::badarg()),
+            };
+        }
     };
+    let id = (ets.id(atoms, table)).expect("the caller found the table");
     let value = match item {
         Term::Atom(atom) if atom.is_static("type") => Term::static_atom(found.table_type().name()),
         Term::Atom(atom) if atom.is_static("size") => Term::from_bigint(BigInt::from(found.size())),
@@ -1708,7 +1692,7 @@ pub(super) fn match_object(
 /// 3. A match specification that does not compile raises `badarg`
 ///    (`erl_db.c:4016-4043`): see [`MatchSpec::compile`].
 ///
-/// Then [`match_turn`] reads the table.
+/// Then [`match_walk`] reads the table.
 ///
 /// # Errors
 ///
@@ -1736,9 +1720,10 @@ fn select_objects(
         Some(Some(chunk)) if chunk > 0 => chunk as usize,
         Some(_) => return Ok(BifResult::badarg()),
     };
-    if let Take::Help(id) | Take::Clear(id) = help_busy(&mut *context, table)? {
-        return Ok(select_trap(id, spec, chunk));
-    }
+    let reds = context
+        .scheduler
+        .current_process_mut()
+        .bif_reductions_signed();
     let atoms = &context.scheduler.atoms;
     // The walk keeps the store lock, so the handle is a clone.
     let store = Arc::clone(&context.scheduler.ets);
@@ -1746,8 +1731,15 @@ fn select_objects(
     let Some(id) = ets.id(atoms, table) else {
         return Ok(BifResult::badarg());
     };
-    let Some(table) = ets.read(atoms, &Term::Reference(id), caller) else {
-        return Ok(BifResult::badarg());
+    let table = match ets.read(atoms, &Term::Reference(id), caller, reds) {
+        Ok(table) => table,
+        Err(lacking) => {
+            let trap = select_trap(id, spec, chunk);
+            let BifResult::TrapBif { arguments, .. } = trap else {
+                unreachable!("a select trap is a trap")
+            };
+            return Ok(retry(context, lacking, "select_trap", arguments));
+        }
     };
     reject_ordered_set(&table, "ets:select/2,3")?;
     let Some(compiled) = compile_spec(atoms, spec)? else {
@@ -1784,8 +1776,28 @@ fn select_objects(
         }));
     }
     let state = MatchState::new(chunk, table.writes());
+    let mut bucket = 0;
+    let mut state = state;
+    let mut iterations = MATCH_ITERATIONS;
+    let end = match_walk(
+        atoms,
+        &table,
+        &compiled,
+        &mut bucket,
+        &mut state,
+        &mut iterations,
+    );
     drop(table);
-    match_turn(context, ets, id, spec, &compiled, 0, state)
+    drop(ets);
+    match_finish(
+        context,
+        id,
+        spec,
+        &compiled,
+        state,
+        end.ok_or(bucket),
+        iterations,
+    )
 }
 
 /// Trap a select that found a busy table, as `handle_lacking_permission`
@@ -1826,7 +1838,7 @@ fn select_trap(id: Reference, spec: &Term, chunk: usize) -> BifResult {
 ///
 /// # Errors
 ///
-/// See [`match_turn`].
+/// See [`match_finish`].
 pub(super) fn match_trap(
     context: &mut BifContext<'_>,
     id: Reference,
@@ -1835,11 +1847,18 @@ pub(super) fn match_trap(
     state: MatchState,
 ) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
-    if let Take::Help(_) | Take::Clear(_) = help_busy(&mut *context, &Term::Reference(id))? {
-        return Ok(BifResult::TrapBif {
-            module: "ets",
-            function: "select_trap",
-            arguments: vec![
+    let reds = context
+        .scheduler
+        .current_process_mut()
+        .bif_reductions_signed();
+    let atoms = &context.scheduler.atoms;
+    // The walk keeps the store lock, so the handle is a clone.
+    let store = Arc::clone(&context.scheduler.ets);
+    let ets = store.shared();
+    let table = match ets.read(atoms, &Term::Reference(id), caller, reds) {
+        Ok(table) => table,
+        Err(lacking) => {
+            let arguments = vec![
                 Term::Reference(id),
                 spec.clone(),
                 Term::Integer(bucket as i64),
@@ -1847,15 +1866,9 @@ pub(super) fn match_trap(
                 state.matches.clone(),
                 Term::Integer(state.got as i64),
                 Term::Integer(state.writes as i64),
-            ],
-        });
-    }
-    let atoms = &context.scheduler.atoms;
-    // The walk keeps the store lock, so the handle is a clone.
-    let store = Arc::clone(&context.scheduler.ets);
-    let ets = store.shared();
-    let Some(table) = ets.read(atoms, &Term::Reference(id), caller) else {
-        return Ok(BifResult::badarg());
+            ];
+            return Ok(retry(context, lacking, "select_trap", arguments));
+        }
     };
     let restart = state.writes == u64::MAX;
     if !restart && table.writes() != state.writes {
@@ -1868,11 +1881,31 @@ pub(super) fn match_trap(
         writes: table.writes(),
         ..state
     };
-    drop(table);
     let Some(compiled) = compile_spec(atoms, spec)? else {
         return Ok(BifResult::badarg());
     };
-    match_turn(context, ets, id, spec, &compiled, bucket, state)
+    let mut bucket = bucket;
+    let mut state = state;
+    let mut iterations = MATCH_ITERATIONS;
+    let end = match_walk(
+        atoms,
+        &table,
+        &compiled,
+        &mut bucket,
+        &mut state,
+        &mut iterations,
+    );
+    drop(table);
+    drop(ets);
+    match_finish(
+        context,
+        id,
+        spec,
+        &compiled,
+        state,
+        end.ok_or(bucket),
+        iterations,
+    )
 }
 
 /// Run `ets:select(Continuation)`, as `ets_select_1` and
@@ -1892,7 +1925,7 @@ pub(super) fn match_trap(
 ///
 /// # Errors
 ///
-/// Return the errors of [`match_turn`].
+/// Return the errors of [`match_finish`].
 pub(super) fn select_continue(
     context: &mut BifContext<'_>,
     continuation: &Term,
@@ -1915,16 +1948,13 @@ pub(super) fn select_continue(
         return Ok(BifResult::badarg());
     }
     let caller = context.scheduler.current_process_mut().id;
+    let reds = context
+        .scheduler
+        .current_process_mut()
+        .bif_reductions_signed();
     // ERTS takes the table with `DB_GET_TABLE`, which helps a clear that
     // does not finish and traps the continuation
     // (`erl_db.c:89-114`, `769-798`, `3965`).
-    if help_table(&mut *context, table)? {
-        return Ok(BifResult::TrapBif {
-            module: "ets",
-            function: "select",
-            arguments: vec![continuation.clone()],
-        });
-    }
     let atoms = &context.scheduler.atoms;
     // The walk keeps the store lock, so the handle is a clone.
     let store = Arc::clone(&context.scheduler.ets);
@@ -1932,12 +1962,19 @@ pub(super) fn select_continue(
     let Some(id) = ets.id(atoms, table) else {
         return Ok(BifResult::badarg());
     };
-    let Some(found) = ets.read(atoms, &Term::Reference(id), caller) else {
-        return Ok(BifResult::badarg());
+    let found = match ets.read(atoms, &Term::Reference(id), caller, reds) {
+        Ok(table) => table,
+        Err(lacking) => {
+            return Ok(retry(
+                context,
+                lacking,
+                "select",
+                vec![continuation.clone()],
+            ));
+        }
     };
     let writes = found.writes();
     let bucket = found.bucket_count();
-    drop(found);
     let Some(compiled) = ets.program(*program) else {
         return Ok(BifResult::badarg());
     };
@@ -1954,10 +1991,33 @@ pub(super) fn select_continue(
         resumed: true,
     };
     if *next < 0 || (state.chunk > 0 && state.got >= state.chunk) {
+        drop(found);
         drop(ets);
         return match_end(context, id, &compiled, state, *next, MATCH_ITERATIONS);
     }
-    match_turn(context, ets, id, &spec, &compiled, *next as usize, state)
+    let table = found;
+    let mut bucket = *next as usize;
+    let mut state = state;
+    let mut iterations = MATCH_ITERATIONS;
+    let end = match_walk(
+        atoms,
+        &table,
+        &compiled,
+        &mut bucket,
+        &mut state,
+        &mut iterations,
+    );
+    drop(table);
+    drop(ets);
+    match_finish(
+        context,
+        id,
+        &spec,
+        &compiled,
+        state,
+        end.ok_or(bucket),
+        iterations,
+    )
 }
 
 /// Return the specification term of a compiled match specification. PBeam
@@ -2042,54 +2102,56 @@ impl MatchState {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = match_turn(&mut context, ets, id, &spec, &compiled, 0, MatchState::new(0, 0))?;
-/// assert!(matches!(result, BifResult::Value(_)));
+/// let mut bucket = 0;
+/// let end = match_walk(&atoms, &table, &compiled, &mut bucket, &mut state, &mut iterations);
+/// assert_eq!(end, Some(-1));
 /// ```
+///
+/// The caller holds the read lock of the table from its check of the change
+/// count and the bucket through the walk, so no other scheduler clears or
+/// deletes the table between them.
+fn match_walk(
+    atoms: &AtomTable,
+    table: &Table,
+    compiled: &MatchSpec,
+    bucket: &mut usize,
+    state: &mut MatchState,
+    iterations: &mut i64,
+) -> Option<i64> {
+    loop {
+        state.read(atoms, compiled, table.chain(*bucket), iterations);
+        *bucket += 1;
+        if *bucket == table.bucket_count() {
+            break Some(-1);
+        }
+        if state.chunk > 0 && state.got >= state.chunk {
+            break Some(*bucket as i64);
+        }
+        if *iterations <= 0 {
+            break None;
+        }
+    }
+}
+
+/// End the turn of a match after [`match_walk`] and the release of the
+/// locks: `Ok(next)` gives the next bucket of the end, and `Err(bucket)` a
+/// trap that continues at `bucket`.
 ///
 /// # Errors
 ///
-/// None. The result type is the one of the BIF bodies.
-fn match_turn(
+/// Return the errors of [`match_end`].
+fn match_finish(
     context: &mut BifContext<'_>,
-    ets: RwLockReadGuard<'_, EtsTables>,
     id: Reference,
     spec: &Term,
     compiled: &MatchSpec,
-    mut bucket: usize,
-    mut state: MatchState,
+    state: MatchState,
+    end: Result<i64, usize>,
+    iterations: i64,
 ) -> Result<BifResult, BeamError> {
-    let mut iterations = MATCH_ITERATIONS;
-    // The read lock of the table covers the walk of the turn, and the end
-    // or the trap of the turn runs after its release: `Some` gives the next
-    // bucket of the end, and `None` the trap.
-    // The caller keeps the store lock from its check, so no other
-    // scheduler deletes the table before the walk.
-    let end = {
-        let table = ets.find(&context.scheduler.atoms, &Term::Reference(id));
-        let (_, table) = table.expect("the caller found the table");
-        loop {
-            state.read(
-                &context.scheduler.atoms,
-                compiled,
-                table.chain(bucket),
-                &mut iterations,
-            );
-            bucket += 1;
-            if bucket == table.bucket_count() {
-                break Some(-1);
-            }
-            if state.chunk > 0 && state.got >= state.chunk {
-                break Some(bucket as i64);
-            }
-            if iterations <= 0 {
-                break None;
-            }
-        }
-    };
-    drop(ets);
     match end {
-        Some(next) => match_end(context, id, compiled, state, next, iterations),
-        None => {
+        Ok(next) => match_end(context, id, compiled, state, next, iterations),
+        Err(bucket) => {
             context
                 .scheduler
                 .current_process_mut()
@@ -2183,20 +2245,6 @@ fn match_end(
     }))
 }
 
-/// Complete the list insert that holds `table` busy, before the caller uses
-/// the table (`erl_db.c:769-798`). The caller found the table, so this call
-/// always runs and one busy path covers each caller.
-fn help_table(context: &mut BifContext<'_>, table: &Term) -> Result<bool, BeamError> {
-    match help_busy(context, table)? {
-        Take::Help(_) => {
-            finish_busy(context, table)?;
-            Ok(false)
-        }
-        Take::Clear(_) => Ok(true),
-        Take::Free | Take::Mine => Ok(false),
-    }
-}
-
 /// Run `ets:next(Table, Key)` or `ets:prev(Table, Key)`, as `ets_next_2`
 /// and `ets_prev_2` (`erl_db.c:1216-1234`, `1309-1327`) do. A hash table
 /// gives its keys in the chain order of its buckets, and `prev` is the same
@@ -2230,29 +2278,32 @@ fn help_table(context: &mut BifContext<'_>, table: &Term) -> Result<bool, BeamEr
 ///
 /// # Errors
 ///
-/// See [`help_busy`] for a table that a list insert took.
+/// See [`crate::runtime::ets::EtsTables::read`] for a table that a list insert or a clear holds busy.
 pub(super) fn safe_fixtable(
     context: &mut BifContext<'_>,
     table: &Term,
     flag: &Term,
 ) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
-    if let Take::Help(_) | Take::Clear(_) = help_busy(&mut *context, table)? {
-        return Ok(BifResult::TrapBif {
-            module: "ets",
-            function: "safe_fixtable",
-            arguments: vec![table.clone(), flag.clone()],
-        });
-    }
+    let reds = context
+        .scheduler
+        .current_process_mut()
+        .bif_reductions_signed();
     // ERTS reads the table before it checks the second argument
     // (`erl_db.c:1146-1161`).
     // The check and the fix take one lock, so no other scheduler deletes
     // the table between them, as ERTS keeps the table lock
     // (`erl_db.c:1146-1162`).
     let atoms = &context.scheduler.atoms;
-    let mut ets = context.scheduler.ets.exclusive();
-    if ets.read(atoms, table, caller).is_none() {
-        return Ok(BifResult::badarg());
+    let store = Arc::clone(&context.scheduler.ets);
+    let mut ets = store.exclusive();
+    if let Err(lacking) = ets.read(atoms, table, caller, reds) {
+        return Ok(retry(
+            context,
+            lacking,
+            "safe_fixtable",
+            vec![table.clone(), flag.clone()],
+        ));
     }
     let id = (ets.id(atoms, table)).expect("the caller found the table");
     let Term::Atom(flag) = flag else {
@@ -2274,17 +2325,23 @@ pub(super) fn next(
     key: &Term,
 ) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
-    if help_table(&mut *context, table)? {
-        return Ok(BifResult::TrapBif {
-            module: "ets",
-            function: "next",
-            arguments: vec![table.clone(), key.clone()],
-        });
-    }
+    let reds = context
+        .scheduler
+        .current_process_mut()
+        .bif_reductions_signed();
     let atoms = &context.scheduler.atoms;
-    let ets = context.scheduler.ets.shared();
-    let Some(table) = ets.read(atoms, table, caller) else {
-        return Ok(BifResult::badarg());
+    let store = Arc::clone(&context.scheduler.ets);
+    let ets = store.shared();
+    let table = match ets.read(atoms, table, caller, reds) {
+        Ok(table) => table,
+        Err(lacking) => {
+            return Ok(retry(
+                context,
+                lacking,
+                "next",
+                vec![table.clone(), key.clone()],
+            ));
+        }
     };
     reject_ordered_set(&table, "ets:next/2")?;
     match table.next_key(atoms, key) {
@@ -2309,17 +2366,18 @@ pub(super) fn next(
 /// ```
 pub(super) fn first(context: &mut BifContext<'_>, table: &Term) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
-    if help_table(&mut *context, table)? {
-        return Ok(BifResult::TrapBif {
-            module: "ets",
-            function: "first",
-            arguments: vec![table.clone()],
-        });
-    }
+    let reds = context
+        .scheduler
+        .current_process_mut()
+        .bif_reductions_signed();
     let atoms = &context.scheduler.atoms;
-    let ets = context.scheduler.ets.shared();
-    let Some(table) = ets.read(atoms, table, caller) else {
-        return Ok(BifResult::badarg());
+    let store = Arc::clone(&context.scheduler.ets);
+    let ets = store.shared();
+    let table = match ets.read(atoms, table, caller, reds) {
+        Ok(table) => table,
+        Err(lacking) => {
+            return Ok(retry(context, lacking, "first", vec![table.clone()]));
+        }
     };
     reject_ordered_set(&table, "ets:first/1")?;
     match table.first_key() {
@@ -2346,17 +2404,18 @@ pub(super) fn first_lookup(
     table: &Term,
 ) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
-    if help_table(&mut *context, table)? {
-        return Ok(BifResult::TrapBif {
-            module: "ets",
-            function: "first_lookup",
-            arguments: vec![table.clone()],
-        });
-    }
+    let reds = context
+        .scheduler
+        .current_process_mut()
+        .bif_reductions_signed();
     let atoms = &context.scheduler.atoms;
-    let ets = context.scheduler.ets.shared();
-    let Some(table) = ets.read(atoms, table, caller) else {
-        return Ok(BifResult::badarg());
+    let store = Arc::clone(&context.scheduler.ets);
+    let ets = store.shared();
+    let table = match ets.read(atoms, table, caller, reds) {
+        Ok(table) => table,
+        Err(lacking) => {
+            return Ok(retry(context, lacking, "first_lookup", vec![table.clone()]));
+        }
     };
     reject_ordered_set(&table, "ets:first_lookup/1")?;
     let Some(key) = table.first_key() else {
@@ -2398,19 +2457,13 @@ pub(super) fn update_element(
     default: Option<&Term>,
 ) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
-    if help_table(&mut *context, table)? {
-        let mut arguments = vec![table.clone(), key.clone(), spec.clone()];
-        if let Some(default) = default {
-            arguments.push(default.clone());
-        }
-        return Ok(BifResult::TrapBif {
-            module: "ets",
-            function: "update_element",
-            arguments,
-        });
-    }
+    let reds = context
+        .scheduler
+        .current_process_mut()
+        .bif_reductions_signed();
     let atoms = &context.scheduler.atoms;
-    let ets = context.scheduler.ets.shared();
+    let store = Arc::clone(&context.scheduler.ets);
+    let ets = store.shared();
     let Some(found) = ets.find(atoms, table) else {
         return Ok(BifResult::badarg());
     };
@@ -2423,8 +2476,15 @@ pub(super) fn update_element(
         Some(_) => return Ok(BifResult::badarg()),
         None => None,
     };
-    let Some(mut table) = ets.write(atoms, table, caller) else {
-        return Ok(BifResult::badarg());
+    let mut table = match ets.write(atoms, table, caller, reds) {
+        Ok(table) => table,
+        Err(lacking) => {
+            let mut arguments = vec![table.clone(), key.clone(), spec.clone()];
+            if let Some(default) = default {
+                arguments.push(default.clone());
+            }
+            return Ok(retry(context, lacking, "update_element", arguments));
+        }
     };
     if !matches!(table.table_type(), TableType::Set | TableType::OrderedSet) {
         return Ok(BifResult::badarg());
@@ -2515,25 +2575,29 @@ fn update_specs(spec: &Term, keypos: i32) -> Option<Vec<(usize, Term)>> {
 /// for a reference that is not a live table.
 pub(super) fn info_all(context: &mut BifContext<'_>, table: &Term) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
-    if help_table(&mut *context, table)? {
-        return Ok(BifResult::TrapBif {
-            module: "ets",
-            function: "info",
-            arguments: vec![table.clone()],
-        });
-    }
+    let reds = context
+        .scheduler
+        .current_process_mut()
+        .bif_reductions_signed();
     let atoms = &context.scheduler.atoms;
-    let ets = context.scheduler.ets.shared();
-    let Some((id, found)) = ets.find(atoms, table) else {
-        return match table {
-            Term::Atom(_) => Ok(Value(Term::static_atom("undefined"))),
-            Term::Reference(_) => Err(error(
-                "unsupported ets:info/1 of a reference that is not a live table",
-            )),
-            _ => Ok(BifResult::badarg()),
-        };
+    let store = Arc::clone(&context.scheduler.ets);
+    let ets = store.shared();
+    let found = match ets.info(atoms, table, caller, reds) {
+        Ok(found) => found,
+        Err(lacking @ Lacking::Busy { .. }) => {
+            return Ok(retry(context, lacking, "info", vec![table.clone()]));
+        }
+        Err(Lacking::Denied) => {
+            return match table {
+                Term::Atom(_) => Ok(Value(Term::static_atom("undefined"))),
+                Term::Reference(_) => Err(error(
+                    "unsupported ets:info/1 of a reference that is not a live table",
+                )),
+                _ => Ok(BifResult::badarg()),
+            };
+        }
     };
-    let _ = caller;
+    let id = (ets.id(atoms, table)).expect("the caller found the table");
     let named = ets.named(id);
     let items = [
         ("id", Term::Reference(id)),
@@ -2607,33 +2671,27 @@ pub(super) fn internal_delete_all(
     holder: &Term,
 ) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
-    match help_busy(&mut *context, table)? {
-        Take::Clear(id) => {
-            // The call keeps its own arguments: a call that has not started
-            // its clear yet runs it after the clear of the other operation
-            // (`erl_db.c:769-798`), and a call after its own trap returns
-            // the count that it holds.
-            return Ok(BifResult::TrapBif {
-                module: "ets",
-                function: "internal_delete_all",
-                arguments: vec![Term::Reference(id), holder.clone()],
-            });
-        }
-        Take::Help(_) => finish_busy(&mut *context, table)?,
-        Take::Free | Take::Mine => {}
-    }
     // The signed budget of `ets_internal_delete_all_2` (`erl_db.c:3236`).
     let left = context
         .scheduler
         .current_process_mut()
         .bif_reductions_signed();
     let atoms = &context.scheduler.atoms;
-    let ets = context.scheduler.ets.shared();
+    let store = Arc::clone(&context.scheduler.ets);
+    let ets = store.shared();
     let Some(id) = ets.id(atoms, table) else {
         return Ok(BifResult::badarg());
     };
-    let Some(mut found) = ets.write(atoms, table, caller) else {
-        return Ok(BifResult::badarg());
+    let mut found = match ets.write(atoms, table, caller, left) {
+        Ok(table) => table,
+        // The call keeps its own arguments: a call that has not started its
+        // clear yet runs it after the clear of the other operation
+        // (`erl_db.c:769-798`), and a call after its own trap returns the
+        // count that it holds.
+        Err(lacking) => {
+            let arguments = vec![Term::Reference(id), holder.clone()];
+            return Ok(retry(context, lacking, "internal_delete_all", arguments));
+        }
     };
     if !matches!(holder, Term::Atom(atom) if atom.is_static("undefined")) {
         return Ok(Value(holder.clone()));
@@ -2699,15 +2757,13 @@ pub(super) fn internal_select_delete(
     spec: &Term,
 ) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
-    if help_table(&mut *context, table)? {
-        return Ok(BifResult::TrapBif {
-            module: "ets",
-            function: "internal_select_delete",
-            arguments: vec![table.clone(), spec.clone()],
-        });
-    }
+    let reds = context
+        .scheduler
+        .current_process_mut()
+        .bif_reductions_signed();
     let atoms = &context.scheduler.atoms;
-    let ets = context.scheduler.ets.shared();
+    let store = Arc::clone(&context.scheduler.ets);
+    let ets = store.shared();
     let Some(found) = ets.find(atoms, table) else {
         return Ok(BifResult::badarg());
     };
@@ -2715,9 +2771,13 @@ pub(super) fn internal_select_delete(
     let keypos = found.1.keypos();
     let buckets = found.1.bucket_count();
     drop(found);
-    if ets.write(atoms, table, caller).is_none() {
-        return Ok(BifResult::badarg());
-    }
+    let mut taken = match ets.write(atoms, table, caller, reds) {
+        Ok(taken) => taken,
+        Err(lacking) => {
+            let arguments = vec![table.clone(), spec.clone()];
+            return Ok(retry(context, lacking, "internal_select_delete", arguments));
+        }
+    };
     let Some(compiled) = compile_spec(atoms, spec)? else {
         return Ok(BifResult::badarg());
     };
@@ -2728,7 +2788,7 @@ pub(super) fn internal_select_delete(
     if compiled.matches_nothing(keypos) {
         return Ok(Value(Term::Integer(0)));
     }
-    let mut table = (ets.write(atoms, table, caller)).expect("the caller can write the table");
+    let table = &mut *taken;
     let mut iterations = 0_usize;
     let mut matches = Vec::new();
     for bucket in 0..buckets {
@@ -2747,7 +2807,7 @@ pub(super) fn internal_select_delete(
         }
     }
     table.shrink();
-    drop(table);
+    drop(taken);
     drop(ets);
     context
         .scheduler

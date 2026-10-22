@@ -417,6 +417,26 @@ impl TableType {
     }
 }
 
+/// `ITERATIONS_PER_RED` (`erl_db.c:2152`): the units of one reduction of
+/// the budget of a list insert.
+pub(super) const ITERATIONS_PER_RED: i64 = 8;
+
+/// Why a process cannot use a table now, as `handle_lacking_permission`
+/// (`erl_db.c:769-798`) returns no table.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum Lacking {
+    /// No live table, or no permission: the BIF raises `badarg`
+    /// (`erl_db.c:788-795`).
+    Denied,
+    /// The list insert of another process or a clear held the table busy.
+    /// The caller helped with the work, which used `reductions`, and the
+    /// BIF traps to run again (`erl_db.c:773-787`).
+    Busy {
+        /// The reductions of the help.
+        reductions: i64,
+    },
+}
+
 /// The access mode of a table: `tb->common.status & (DB_PUBLIC |
 /// DB_PROTECTED | DB_PRIVATE)`.
 #[derive(Debug, Clone, Copy)]
@@ -438,6 +458,8 @@ pub(super) enum Operation {
     Read,
     /// `DB_WRITE`, which only a `public` table allows (`erl_db_util.h:450`).
     Write,
+    /// `DB_INFO`, which each table allows (`erl_db_util.h:451`).
+    Info,
 }
 
 impl EtsTables {
@@ -553,10 +575,13 @@ impl EtsTables {
     /// process `caller` can read it, as `db_get_table` with `DB_READ`
     /// (`erl_db.c:800-912`) and `db_lock` with `LCK_READ` (`erl_db.c:701`)
     /// do. An atom finds a named table, and a reference finds its table.
-    /// Return `None` for each other term, a free name, a deleted table, and a
-    /// process that is not the owner of a `private` table
-    /// (`handle_lacking_permission`, `erl_db.c:769-798`). The ETS BIFs then
-    /// raise `badarg`.
+    /// Return [`Lacking::Denied`] for each other term, a free name, a deleted
+    /// table, and a process that is not the owner of a `private` table
+    /// (`handle_lacking_permission`, `erl_db.c:788-795`). The ETS BIFs then
+    /// raise `badarg`. A table that the list insert of another process or a
+    /// clear holds busy gets the help of the caller under the table lock,
+    /// and gives [`Lacking::Busy`] (`erl_db.c:773-787`). The BIF then charges
+    /// the reductions and traps to run again.
     ///
     /// # Examples
     ///
@@ -564,45 +589,105 @@ impl EtsTables {
     /// let mut tables = EtsTables::default();
     /// tables.create(Reference(0), Some("ac_tab"), Table::new(ProcessId(0), Access::Protected, 1, TableType::Set));
     /// let name = Term::static_atom("ac_tab");
-    /// assert!(tables.read(&atoms, &name, ProcessId(1)).is_some());
-    /// assert!(tables.read(&atoms, &Term::Integer(1), ProcessId(0)).is_none());
+    /// assert!(tables.read(&atoms, &name, ProcessId(1), 4000).is_ok());
+    /// assert!(tables.read(&atoms, &Term::Integer(1), ProcessId(0), 4000).is_err());
     /// ```
     pub(super) fn read(
         &self,
         atoms: &AtomTable,
         id: &Term,
         caller: ProcessId,
-    ) -> Option<RwLockReadGuard<'_, Table>> {
-        let lock = self.lookup(atoms, id)?.1;
-        let table = loop {
-            let table = read(lock);
-            if !table.busy_for(caller) {
-                break table;
-            }
-            drop(table);
-            self.complete_busy(atoms, &mut write(lock));
-        };
-        table.allows(caller, Operation::Read).then_some(table)
+        reds: i64,
+    ) -> Result<RwLockReadGuard<'_, Table>, Lacking> {
+        self.take_read(atoms, id, caller, reds, Operation::Read)
     }
 
-    /// Complete the list insert of another process that holds the table
-    /// `table` busy, and keep its result for that process. Each operation
-    /// of a process completes such an insert first (`erl_db.c:769-798`).
-    /// The BIFs complete it before they take the table, but a process of
-    /// another scheduler can start an insert between that step and the
-    /// lock of the operation.
-    fn complete_busy(&self, atoms: &AtomTable, table: &mut Table) {
-        let owner = table.busy.as_ref().map(|busy| busy.owner);
-        if let (Some(owner), (_, Some(value))) = (owner, table.step_busy(atoms, i64::MAX)) {
-            self.put_result(owner, value);
+    /// Return the table that `id` identifies under its read lock, as
+    /// [`EtsTables::read`] does for `DB_INFO` (`erl_db_util.h:451`), which
+    /// each process has.
+    pub(super) fn info(
+        &self,
+        atoms: &AtomTable,
+        id: &Term,
+        caller: ProcessId,
+        reds: i64,
+    ) -> Result<RwLockReadGuard<'_, Table>, Lacking> {
+        self.take_read(atoms, id, caller, reds, Operation::Info)
+    }
+
+    /// Take the read lock of a table for the operation `operation`. See
+    /// [`EtsTables::read`].
+    fn take_read(
+        &self,
+        atoms: &AtomTable,
+        id: &Term,
+        caller: ProcessId,
+        reds: i64,
+        operation: Operation,
+    ) -> Result<RwLockReadGuard<'_, Table>, Lacking> {
+        let (_, lock) = self.lookup(atoms, id).ok_or(Lacking::Denied)?;
+        loop {
+            let table = read(lock);
+            if !table.lacks(caller) {
+                return table
+                    .allows(caller, operation)
+                    .then_some(table)
+                    .ok_or(Lacking::Denied);
+            }
+            drop(table);
+            // `handle_lacking_permission` takes the write lock for the help
+            // (`erl_db.c:773-777`). The table can change between the two
+            // locks, so the check runs again.
+            if let Some(reductions) = self.help(atoms, &mut write(lock), caller, reds) {
+                return Err(Lacking::Busy { reductions });
+            }
         }
+    }
+
+    /// Run the work of the list insert of another process or of the clear
+    /// that holds the table `table` busy, with the budget `reds` of the
+    /// caller, as `handle_lacking_permission` (`erl_db.c:773-787`) runs
+    /// `ets_insert_2_list_continuation` or `delete_all_objects_continue`
+    /// under the table lock. Return the reductions that the work used, as
+    /// `erl_db.c:2152-2197` and `3300-3320` charge them, or `None` when the
+    /// table is not busy for the caller. A list insert keeps the result of
+    /// its end for the process that started it, before the lock goes, as
+    /// ERTS sets `return_value` before it clears `DB_BUSY`
+    /// (`erl_db.c:2183-2192`).
+    fn help(
+        &self,
+        atoms: &AtomTable,
+        table: &mut Table,
+        caller: ProcessId,
+        reds: i64,
+    ) -> Option<i64> {
+        if let Some(owner) = (table.busy.as_ref()).map(|busy| busy.owner) {
+            if owner == caller {
+                return None;
+            }
+            // `ets_insert_2_list_continuation` keeps `ITERATIONS_PER_RED *
+            // ERTS_BIF_REDS_LEFT` in a `long`, and YCF yields when the count
+            // is 0 or less (`erl_db.c:2158`, `ycf_yield_fun.c:592-610`), so
+            // a negative budget does what a budget of 0 does.
+            let (used, result) = table.step_busy(atoms, ITERATIONS_PER_RED * reds.max(0));
+            if let Some(value) = result {
+                self.put_result(owner, value);
+            }
+            return Some(used / ITERATIONS_PER_RED);
+        }
+        let (owner, count) = (table.clear.as_ref()).map(|clear| (clear.owner, clear.count))?;
+        // A process that uses the table while a fixed clear does not finish
+        // helps with the mark, 8 buckets for each reduction, with a signed
+        // budget (`erl_db.c:3300-3320`).
+        let (_, charge) = table.step_clear(atoms, owner, count, reds);
+        Some(i64::try_from(charge).unwrap_or(i64::MAX))
     }
 
     /// Return the table that `id` identifies under its write lock, when the
     /// process `caller` can write it, as `db_get_table` with `DB_WRITE`
     /// (`erl_db.c:800-912`) and `db_lock` with `LCK_WRITE` (`erl_db.c:701`)
-    /// do. Return `None` as [`EtsTables::read`] does, and also for a
-    /// `protected` table of another owner.
+    /// do. Return the outcomes of [`EtsTables::read`], and also
+    /// [`Lacking::Denied`] for a `protected` table of another owner.
     ///
     /// # Examples
     ///
@@ -610,20 +695,25 @@ impl EtsTables {
     /// let mut tables = EtsTables::default();
     /// tables.create(Reference(0), Some("ac_tab"), Table::new(ProcessId(0), Access::Protected, 1, TableType::Set));
     /// let name = Term::static_atom("ac_tab");
-    /// assert!(tables.write(&atoms, &name, ProcessId(1)).is_none());
-    /// assert!(tables.write(&atoms, &name, ProcessId(0)).is_some());
+    /// assert!(tables.write(&atoms, &name, ProcessId(1), 4000).is_err());
+    /// assert!(tables.write(&atoms, &name, ProcessId(0), 4000).is_ok());
     /// ```
     pub(super) fn write(
         &self,
         atoms: &AtomTable,
         id: &Term,
         caller: ProcessId,
-    ) -> Option<RwLockWriteGuard<'_, Table>> {
-        let mut table = write(self.lookup(atoms, id)?.1);
-        if table.busy_for(caller) {
-            self.complete_busy(atoms, &mut table);
+        reds: i64,
+    ) -> Result<RwLockWriteGuard<'_, Table>, Lacking> {
+        let (_, lock) = self.lookup(atoms, id).ok_or(Lacking::Denied)?;
+        let mut table = write(lock);
+        if let Some(reductions) = self.help(atoms, &mut table, caller, reds) {
+            return Err(Lacking::Busy { reductions });
         }
-        table.allows(caller, Operation::Write).then_some(table)
+        table
+            .allows(caller, Operation::Write)
+            .then_some(table)
+            .ok_or(Lacking::Denied)
     }
 
     /// Return the table reference of the live table that `id` identifies,
@@ -746,21 +836,6 @@ impl EtsTables {
     #[cfg(test)]
     pub(super) fn table_by_id(&mut self, id: Reference) -> Option<&mut Table> {
         self.live(id)
-    }
-
-    /// Mark the next buckets of the clear of the fixed table `id`, as the
-    /// trap of `db_mark_all_deleted_hash` continues it (`erl_db_hash.c:3007-3051`).
-    /// Return `true` when each bucket is marked. `reds` is the signed
-    /// budget of the caller, an `SWord` in ERTS (`erl_db.c:3303`).
-    pub(super) fn step_clear(&self, atoms: &AtomTable, id: Reference, reds: i64) -> (bool, usize) {
-        let mut table = write(self.tables.get(&id).expect("a cleared table is live"));
-        // A process of another scheduler can end the clear between the
-        // check of the caller and this step.
-        let Some((owner, count)) = (table.clear.as_ref()).map(|clear| (clear.owner, clear.count))
-        else {
-            return (true, 0);
-        };
-        table.step_clear(atoms, owner, count, reds)
     }
 
     /// Keep the result `value` of the list insert that the process
@@ -1242,7 +1317,7 @@ impl Table {
         self.owner == caller
             || matches!(
                 (self.access, operation),
-                (Access::Public, _) | (Access::Protected, Operation::Read)
+                (Access::Public, _) | (Access::Protected, Operation::Read) | (_, Operation::Info)
             )
     }
 
@@ -1800,16 +1875,15 @@ impl Table {
             self.drop_retained();
         }
     }
-
-    /// Return whether a list insert of a process other than `caller`
     /// holds the table busy.
-    fn busy_for(&self, caller: ProcessId) -> bool {
-        (self.busy.as_ref()).is_some_and(|busy| busy.owner != caller)
-    }
-
-    /// Return whether a clear of a fixed table did not finish.
-    pub(super) fn clearing(&self) -> bool {
-        self.clear.is_some()
+    /// Return whether the list insert of another process, or a clear with
+    /// no list insert, holds the table busy for `caller` (`DB_BUSY`,
+    /// `erl_db.c:773`).
+    fn lacks(&self, caller: ProcessId) -> bool {
+        match &self.busy {
+            Some(busy) => busy.owner != caller,
+            None => self.clear.is_some(),
+        }
     }
 
     /// Return whether a process fixed the table.
