@@ -25,8 +25,11 @@ const LOADED_ORDER_PROBE: &[u8] = include_bytes!("../../fixtures/boot/loaded_ord
 const SYSTEM_PROCESS_PROBE: &[u8] = include_bytes!("../../fixtures/boot/system_process_probe.beam");
 
 /// The environment variable that `boots_init_with_a_fixed_boot_script_as_pinned_erts`
-/// sets for its child, so the boot runs in a process of its own: the probe
-/// halts the node.
+/// and `starts_kernel_and_stops_at_init_stop_as_pinned_erts` set for their
+/// child, so the boot runs in a process of its own: the probe halts the
+/// node, and the kernel boot starts `user_drv`, which sets signal
+/// dispositions of the process (prim_tty.erl:284-298). For the kernel boot,
+/// the value is the status argument of the probe.
 const ISOLATED: &str = "PBEAM_INIT_BOOT_ISOLATED";
 
 /// The pinned modules that the boot runs before the probe: `erl_init` and
@@ -138,13 +141,22 @@ fn isolated_init_boot() {
 /// Boot the node with `probe` and the boot modules, with the arguments that
 /// `erl -noshell -boot BootFile -pa fixtures/boot` gives the emulator.
 fn boot_probe(probe: &[u8], boot_file: &str) -> Result<pbeam_runtime::HostTerm, BeamError> {
-    let mut beams = BOOT_MODULES.map(pinned_beam).to_vec();
-    beams.push(probe.to_vec());
-    let slices = beams.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    boot_node(
+        &[probe],
+        &[b"-boot", boot_file.as_bytes(), b"-pa", b"fixtures/boot"],
+    )
+}
+
+/// Boot the node with the boot modules and `probes`, with the arguments
+/// that `erl -noshell Flags` gives the emulator.
+fn boot_node(probes: &[&[u8]], flags: &[&[u8]]) -> Result<pbeam_runtime::HostTerm, BeamError> {
+    let beams = BOOT_MODULES.map(pinned_beam);
+    let mut slices = beams.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    slices.extend(probes);
     let program = BeamProgram::load(&slices).unwrap();
     let (root, bindir) = emulator_flags();
     let home = env::var_os("HOME").unwrap();
-    program.boot(&[
+    let mut arguments: Vec<&[u8]> = vec![
         b"-root",
         &root,
         b"-bindir",
@@ -156,11 +168,118 @@ fn boot_probe(probe: &[u8], boot_file: &str) -> Result<pbeam_runtime::HostTerm, 
         home.as_bytes(),
         b"--",
         b"-noshell",
-        b"-boot",
-        boot_file.as_bytes(),
-        b"-pa",
-        b"fixtures/boot",
-    ])
+    ];
+    arguments.extend(flags);
+    program.boot(&arguments)
+}
+
+/// The flags of `erl` for the kernel boot of `kernel_boot_probe`, with the
+/// `-s` arguments of the probe from `status`: none for `init:stop/0`, and
+/// the status for `init:stop/1`.
+fn kernel_boot_flags(status: &str) -> Vec<String> {
+    let mut flags = [
+        "-boot",
+        "start_clean",
+        "-pa",
+        "fixtures/boot",
+        "-s",
+        "kernel_boot_probe",
+        "main",
+    ]
+    .map(String::from)
+    .to_vec();
+    flags.extend(status.split_whitespace().map(String::from));
+    flags.extend(["-kernel", "logger_level", "warning"].map(String::from));
+    flags
+}
+
+#[test]
+fn starts_kernel_and_stops_at_init_stop_as_pinned_erts() {
+    // `-boot start_clean` runs the pinned `start_clean.boot` of
+    // `$ROOT/bin` (init.erl:1256-1308). Its `primLoad` commands load the
+    // kernel and stdlib modules through `erl_prim_loader`
+    // (init.erl:1342, 1360-1408), its `kernelProcess` commands start
+    // `heart`, `logger`, and `application_controller` as linked kernel
+    // processes of `init` (init.erl:1519-1528), and its `apply` commands
+    // start `kernel` and `stdlib` with `application:start_boot/2`.
+    // `kernel_boot_probe:main/0,1` displays the results of the
+    // application API and calls `init:stop/0,1`. `init` shuts down
+    // `application_controller`, which stops each application
+    // (init.erl:924-1062; application_controller.erl:1263-1300), kills
+    // each process that is not a system process (init.erl:1072-1093), and
+    // halts with the status (init.erl:943-948). `-kernel logger_level
+    // warning` keeps the notice of the stop of a temporary application,
+    // which has a time stamp, out of the output.
+    let expected = "{controller,{registered_name,application_controller},\
+        controller_linked_to_init,true,\
+        kernel,[{stdlib,\"ERTS  CXC 138 10\",\"8.1\"},{kernel,\"ERTS  CXC 138 10\",\"11.0.4\"}],\
+        start_kernel,{error,{already_started,kernel}},\
+        start_missing,{error,{\"no such file or directory\",\"kernel_boot_missing.app\"}},\
+        ensure_kernel,{ok,[]},ensure_dep,{ok,[kernel_boot_app,kernel_boot_dep]},\
+        running,[{kernel_boot_dep,\"kernel boot dependency probe\",\"1\"},\
+        {kernel_boot_app,\"kernel boot probe\",\"1\"},\
+        {stdlib,\"ERTS  CXC 138 10\",\"8.1\"},{kernel,\"ERTS  CXC 138 10\",\"11.0.4\"}],\
+        start_again,{error,{already_started,kernel_boot_app}},\
+        stop_dep,ok,stop_dep_again,{error,{not_started,kernel_boot_dep}},\
+        ensure_temporary,{ok,[kernel_boot_dep]},\
+        ensure_missing,{error,{kernel_boot_missing,{\"no such file or directory\",\"kernel_boot_missing.app\"}}},\
+        stop_badarg,{error,badarg},system,[true,false,false],system_badarg,{error,badarg},\
+        status,{starting,started}}\r\n\
+        {stop,kernel_boot_app,[],undefined,{stopping,started}}\r\n";
+    for (status, code) in [("", 0), ("3", 3)] {
+        let reference = Command::new("erl")
+            .args(["-noshell"])
+            .args(kernel_boot_flags(status))
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let child = Command::new(env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "isolated_kernel_boot",
+                "--include-ignored",
+                "--quiet",
+            ])
+            .env(ISOLATED, status)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        // The test harness writes its own lines around the output of the
+        // node.
+        let stdout = String::from_utf8_lossy(&child.stdout);
+        let node = stdout
+            .split_inclusive('\n')
+            .filter(|line| line.starts_with("{controller") || line.starts_with("{stop,"))
+            .collect::<String>();
+        assert_eq!(
+            (
+                String::from_utf8_lossy(&reference.stdout).as_ref(),
+                reference.stderr.as_slice(),
+                reference.status.code()
+            ),
+            (expected, &b""[..], Some(code)),
+            "ERTS with status {status:?}"
+        );
+        assert!(
+            child.status.success(),
+            "child exited with {}\n{stdout}",
+            child.status
+        );
+        assert_eq!(node, expected, "PBeam with status {status:?}");
+    }
+}
+
+/// The child side of `starts_kernel_and_stops_at_init_stop_as_pinned_erts`:
+/// boot the node with `start_clean` and expect the halt of `init:stop/0,1`
+/// with the status of the environment variable [`ISOLATED`].
+#[test]
+#[ignore = "starts_kernel_and_stops_at_init_stop_as_pinned_erts runs it in a child process"]
+fn isolated_kernel_boot() {
+    let status = env::var(ISOLATED).expect("run it through its parent test");
+    let flags = kernel_boot_flags(&status);
+    let flags = flags.iter().map(String::as_bytes).collect::<Vec<_>>();
+    let code = status.parse().unwrap_or(0);
+    assert_eq!(boot_node(&[], &flags).unwrap_err(), BeamError::Halt(code));
 }
 
 #[test]
