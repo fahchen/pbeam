@@ -93,7 +93,7 @@ fn output_bytes(result: &BifResult) -> Vec<u8> {
             let binaries: Vec<&Term> = elements[1].list_iter().unwrap().collect();
             assert_eq!(binaries.len(), 1);
             match binaries[0] {
-                Term::Binary(bytes) => bytes.to_vec(),
+                Term::Binary(bytes) => bytes.bit_bytes().to_vec(),
                 other => panic!("the output is a binary, not {other:?}"),
             }
         }
@@ -1304,12 +1304,12 @@ fn removes_the_consumed_bytes_of_the_queue() {
     let mut queue = VecDeque::from([Binary::from(b"abc".to_vec()), Binary::from(b"de".to_vec())]);
     deq(&mut queue, 4);
     assert_eq!(queue.len(), 1);
-    assert_eq!(&*queue[0], b"e");
+    assert_eq!(queue[0].bit_bytes(), b"e");
     deq(&mut queue, 1);
     assert!(queue.is_empty());
     let mut queue = VecDeque::from([Binary::from(b"abc".to_vec())]);
     deq(&mut queue, 0);
-    assert_eq!(&*queue[0], b"abc");
+    assert_eq!(queue[0].bit_bytes(), b"abc");
 }
 
 #[test]

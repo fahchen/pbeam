@@ -52,6 +52,8 @@ fn write(program: &BeamProgram, term: &Term) -> String {
         Term::Binary(bytes) => format!(
             "<<{}>>",
             bytes
+                .bytes()
+                .unwrap()
                 .iter()
                 .map(u8::to_string)
                 .collect::<Vec<_>>()

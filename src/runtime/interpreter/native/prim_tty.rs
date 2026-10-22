@@ -913,8 +913,10 @@ fn write_nif(scheduler: &mut Scheduler, tty: &Term, iovec: &Term) -> Result<BifR
         let mut buffers = Vec::with_capacity(group.len());
         for &element in group {
             match element {
-                Term::Binary(bytes) if bytes.is_empty() => {}
-                Term::Binary(bytes) => buffers.push(bytes.to_vec()),
+                Term::Binary(bytes) if bytes.bit_size() == 0 => {}
+                Term::Binary(bytes) if let Some(bytes) = bytes.bytes() => {
+                    buffers.push(bytes.to_vec())
+                }
                 _ => return Ok(BifResult::Dirty(Work::Write(write))),
             }
         }

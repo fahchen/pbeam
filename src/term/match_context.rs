@@ -258,7 +258,11 @@ impl MatchState {
     pub(crate) fn read_bits(&self, size: u64) -> Option<Vec<u8>> {
         let start = self.position();
         self.skip(size)?;
-        Some(segment_bits(&self.bytes, start, self.position() - start))
+        Some(segment_bits(
+            self.bytes.bit_bytes(),
+            start,
+            self.position() - start,
+        ))
     }
 
     /// Read `size` bits after the position and move the position past them,
@@ -348,7 +352,7 @@ impl MatchState {
         else {
             return false;
         };
-        if segment_bits(&self.bytes, start, size) != segment_bits(text, 0, size) {
+        if segment_bits(self.bytes.bit_bytes(), start, size) != segment_bits(text, 0, size) {
             return false;
         }
         self.position.fetch_add(size as u64, Ordering::Relaxed);
@@ -372,7 +376,7 @@ impl MatchState {
     /// assert_eq!(context.position(), 8);
     /// ```
     pub(crate) fn tail(&self) -> Option<Binary> {
-        let size = self.bytes.len() * 8;
+        let size = self.bytes.bit_size();
         let position = self.position();
         position
             .is_multiple_of(8)
@@ -389,7 +393,7 @@ impl MatchState {
     /// assert_eq!(MatchState::new(Binary::from(&[][..])).remaining_bits(), 0);
     /// ```
     pub(crate) fn remaining_bits(&self) -> usize {
-        self.bytes.len() * 8 - self.position()
+        self.bytes.bit_size() - self.position()
     }
 
     /// Read a float segment of `size` bits at the position and move the
@@ -418,7 +422,7 @@ impl MatchState {
         let size = usize::try_from(size)
             .ok()
             .filter(|&size| size <= self.remaining_bits() && matches!(size, 16 | 32 | 64))?;
-        let mut bytes = segment_bits(&self.bytes, start, size);
+        let mut bytes = segment_bits(self.bytes.bit_bytes(), start, size);
         if little {
             bytes.reverse();
         }
@@ -463,7 +467,7 @@ impl MatchState {
         // A missing byte is short input, as the `remaining_bits` checks of
         // `erts_bs_get_utf8` give.
         let bits = (self.remaining_bits() / 8).min(4) * 8;
-        let rest = segment_bits(&self.bytes, self.position(), bits);
+        let rest = segment_bits(self.bytes.bit_bytes(), self.position(), bits);
         let first = u32::from(*rest.first()?);
         // A byte of the character that is a continuation byte `10xxxxxx`.
         let continuation = |index: usize| {
@@ -527,7 +531,7 @@ impl MatchState {
     pub(crate) fn get_utf16(&self, little: bool) -> Option<u32> {
         // `erts_bs_get_utf16` copies 32 bits when it has them and else 16.
         let bits = (self.remaining_bits() / 16).min(2) * 16;
-        let rest = segment_bits(&self.bytes, self.position(), bits);
+        let rest = segment_bits(self.bytes.bit_bytes(), self.position(), bits);
         let unit = |index: usize| {
             let pair = rest.get(index..index + 2)?;
             let (high, low) = if little {
@@ -571,7 +575,7 @@ impl MatchState {
         if self.remaining_bits() < 32 {
             return None;
         }
-        let bytes: [u8; 4] = segment_bits(&self.bytes, self.position(), 32)
+        let bytes: [u8; 4] = segment_bits(self.bytes.bit_bytes(), self.position(), 32)
             .try_into()
             .ok()?;
         let code_point = if little {

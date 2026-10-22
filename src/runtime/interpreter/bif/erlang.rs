@@ -1840,10 +1840,10 @@ pub(super) fn length(
 /// signed word (`erl_bif_binary.c:1974-1977`); PBeam gives the same result
 /// because 2^63 is more than each start. In a guard, the `gc_bif3`
 /// instruction goes to its fail label instead. ERTS returns a sub-binary of
-/// the argument; PBeam returns a copy of the bytes. PBeam has no bitstring
-/// that is not a binary and no bignum, so these ERTS `badarg` inputs cannot
-/// occur (rows "Bitstring terms" and "Integer range" of
-/// `docs/erts-differences.md`).
+/// the argument; PBeam returns a copy of the bytes. A bitstring whose size
+/// is not a whole number of bytes raises `badarg`, as in ERTS. PBeam has no
+/// bignum, so the ERTS `badarg` of a bignum start or length cannot occur
+/// (row "Integer range" of `docs/erts-differences.md`).
 ///
 /// # Examples
 ///
@@ -1875,7 +1875,9 @@ pub(super) fn binary_part(binary: &Term, start: &Term, length: &Term) -> BifResu
     // The start is below 2^63 and the length is at most 2^63, so the sum
     // does not overflow.
     let end = start + length;
-    if end > bytes.len() as u64 {
+    // A bitstring whose size is not a whole number of bytes raises
+    // `badarg` (`erts_binary_part`, `erl_bif_binary.c:1995-1997`).
+    if !bytes.bit_size().is_multiple_of(8) || end > (bytes.bit_size() / 8) as u64 {
         return BifResult::badarg();
     }
     // ERTS makes a sub-binary that refers to the source
@@ -1927,7 +1929,7 @@ pub(super) fn bit_size(term: &Term) -> BifResult {
 /// ```
 pub(super) fn byte_size(term: &Term) -> BifResult {
     match term {
-        Term::Binary(bytes) => Value(Term::Integer(bytes.len() as i64)),
+        Term::Binary(bytes) => Value(Term::Integer(bytes.bit_size().div_ceil(8) as i64)),
         _ => BifResult::badarg(),
     }
 }
@@ -1968,11 +1970,17 @@ pub(super) fn tl(list: &Term) -> BifResult {
 /// ```
 pub(super) fn split_binary(binary: &Term, position: &Term) -> BifResult {
     match (binary, position) {
-        (Term::Binary(bytes), Term::Integer(at)) if (0..=bytes.len() as i64).contains(at) => {
-            let (left, right) = bytes.split_at(*at as usize);
+        (Term::Binary(binary), Term::Integer(at))
+            if (0..=(binary.bit_size() / 8) as i64).contains(at) =>
+        {
+            // The right part of a bitstring keeps the bits after the whole
+            // bytes (`split_binary_2`, `binary.c:488-512`).
+            let at = *at as usize;
+            let (left, right) = binary.bit_bytes().split_at(at);
+            let right = Binary::from(right.to_vec()).bits(0, binary.bit_size() - at * 8);
             Value(Term::tuple(vec![
                 Term::binary(left.to_vec()),
-                Term::binary(right.to_vec()),
+                Term::Binary(right),
             ]))
         }
         _ => BifResult::badarg(),
@@ -2723,9 +2731,9 @@ pub(super) fn binary_to_existing_atom(
     let (Term::Binary(bytes), Term::Atom(encoding)) = (binary, encoding) else {
         return BifResult::badarg();
     };
-    if !bytes.bit_size().is_multiple_of(8) {
+    let Some(bytes) = bytes.bytes() else {
         return BifResult::badarg();
-    }
+    };
     let name = if encoding.is_static("latin1") {
         if bytes.len() > MAX_ATOM_CHARACTERS {
             return BifResult::badarg();
@@ -2795,9 +2803,9 @@ pub(super) fn binary_to_atom(
     let (Term::Binary(bytes), Term::Atom(encoding)) = (binary, encoding) else {
         return Ok(BifResult::badarg());
     };
-    if bytes.bit_size() % 8 != 0 {
+    let Some(bytes) = bytes.bytes() else {
         return Ok(BifResult::badarg());
-    }
+    };
     let system_limit = || Raise {
         class: ExceptionClass::Error,
         reason: Term::static_atom("system_limit"),
@@ -5487,10 +5495,10 @@ pub(super) fn display_string(
         }
         bytes
     } else if let Term::Binary(binary) = string {
-        if binary.bit_size() % 8 != 0 {
+        let Some(bytes) = binary.bytes() else {
             return Ok(BifResult::badarg());
-        }
-        binary.to_vec()
+        };
+        bytes.to_vec()
     } else {
         return Ok(BifResult::badarg());
     };

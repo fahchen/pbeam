@@ -201,7 +201,7 @@ fn text(term: &Term, atoms: &AtomTable) -> String {
         }
         Term::Tuple(terms) => format!("{{{}}}", join(terms)),
         Term::Binary(bytes) => {
-            let bytes: Vec<String> = bytes.iter().map(u8::to_string).collect();
+            let bytes: Vec<String> = bytes.bytes().unwrap().iter().map(u8::to_string).collect();
             format!("<<{}>>", bytes.join(","))
         }
         other => panic!("unexpected term {other:?}"),

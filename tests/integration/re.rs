@@ -305,16 +305,19 @@ fn exports_compiled_patterns_as_pinned_erts() {
         else {
             panic!("expected three binaries and an option list, got {elements:?}");
         };
-        assert_eq!(header.len(), 14);
-        assert_eq!(&header[..8], b"re-PCRE2");
-        assert_eq!(header[12..], [1, unicode]);
-        assert_eq!(&pattern[..], source);
+        assert_eq!(header.bytes().unwrap().len(), 14);
+        assert_eq!(&header.bytes().unwrap()[..8], b"re-PCRE2");
+        assert_eq!(header.bytes().unwrap()[12..], [1, unicode]);
+        assert_eq!(pattern.bytes().unwrap(), source);
         assert_eq!(**given, Term::list_from(options));
         bytes.push([header, pattern, encoded]);
     }
     // Each compile option changes `Encoded`. `bsr_unicode` is the default,
     // and a later bsr option replaces an earlier one.
-    let encoded: Vec<&[u8]> = bytes.iter().map(|[_, _, encoded]| &encoded[..]).collect();
+    let encoded: Vec<&[u8]> = bytes
+        .iter()
+        .map(|[_, _, encoded]| encoded.bytes().unwrap())
+        .collect();
     let plain = encoded[0];
     let (by_option, bsr_orders) = encoded[3..].split_at(single_options.len());
     for (option, &bytes) in single_options.iter().zip(by_option) {
@@ -332,7 +335,10 @@ fn exports_compiled_patterns_as_pinned_erts() {
     let exports: Vec<String> = bytes
         .iter()
         .map(|binaries| {
-            let binaries: Vec<String> = binaries.iter().map(|bytes| text(bytes)).collect();
+            let binaries: Vec<String> = binaries
+                .iter()
+                .map(|bytes| text(bytes.bytes().unwrap()))
+                .collect();
             format!("[{}]", binaries.join(","))
         })
         .collect();

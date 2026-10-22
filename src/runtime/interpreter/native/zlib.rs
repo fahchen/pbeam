@@ -377,7 +377,7 @@ impl ZStream {
     /// assert_eq!(stream.queue_bytes(), 2);
     /// ```
     fn queue_bytes(&self) -> usize {
-        self.queue.iter().map(|binary| binary.len()).sum()
+        self.queue.iter().map(|binary| queued(binary).len()).sum()
     }
 
     /// Run one codec call of `zlib_flush_queue` (`zlib_nif.c:339-406`) on
@@ -1094,9 +1094,10 @@ fn codec(
     let mut step = Step::Ok;
     let mut index = 0;
     while step == Step::Ok && index < queue.len() && consumed < input_limit {
-        let block_size = queue[index].len().min(input_limit);
+        let block = queued(&queue[index]);
+        let block_size = block.len().min(input_limit);
         let (next, block_consumed, block_produced) =
-            stream.step(&queue[index][..block_size], &mut output[produced..], 0);
+            stream.step(&block[..block_size], &mut output[produced..], 0);
         consumed += block_consumed;
         produced += block_produced;
         step = next;
@@ -1162,7 +1163,21 @@ fn codec_failure(step: Step) -> Option<Native> {
 /// assert_eq!(queue_bytes(&queue), 2);
 /// ```
 fn queue_bytes(queue: &VecDeque<Binary>) -> usize {
-    queue.iter().map(|binary| binary.len()).sum()
+    queue.iter().map(|binary| queued(binary).len()).sum()
+}
+
+/// Return the bytes of a binary of the input queue. The enqueue takes only
+/// binaries of whole bytes, as `enif_inspect_iovec` does.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(queued(&Binary::from(b"ab".to_vec())), b"ab");
+/// ```
+fn queued(binary: &Binary) -> &[u8] {
+    binary
+        .bytes()
+        .expect("the input queue holds only binaries of whole bytes")
 }
 
 /// Remove the first `consumed` bytes of `queue`, as `enif_ioq_deq` does
@@ -1175,14 +1190,14 @@ fn queue_bytes(queue: &VecDeque<Binary>) -> usize {
 /// ```rust,ignore
 /// let mut queue = VecDeque::from([Binary::from(b"abc".to_vec())]);
 /// deq(&mut queue, 2);
-/// assert_eq!(&*queue[0], b"c");
+/// assert_eq!(queue[0].bytes(), Some(&b"c"[..]));
 /// ```
 fn deq(queue: &mut VecDeque<Binary>, mut consumed: usize) {
     debug_assert!(consumed <= queue_bytes(queue));
     while consumed > 0 {
         let head = queue.front().expect("the queue holds the taken bytes");
-        if head.len() <= consumed {
-            consumed -= head.len();
+        if queued(head).len() <= consumed {
+            consumed -= queued(head).len();
             queue.pop_front();
         } else {
             let front = head.bits(consumed * BITS_PER_BYTE, head.bit_size());
@@ -1540,12 +1555,13 @@ fn enqueue_nif(
             let Some((element, tail)) = rest.cons_cell() else {
                 break rest.is_nil();
             };
-            let Term::Binary(binary) = element else {
+            // `enif_inspect_iovec` rejects a bitstring (`erl_nif.c:4120-4121`).
+            let (Term::Binary(binary), Some(bytes)) = (element, element.binary_bytes()) else {
                 break false;
             };
             // `enqueue_input_1` gives no empty iovec entry
             // (`zlib.erl:920-926`), and `enif_ioq_enqv` adds none.
-            if !binary.is_empty() {
+            if !bytes.is_empty() {
                 binaries.push(binary.clone());
             }
             rest = tail;

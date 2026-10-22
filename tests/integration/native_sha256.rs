@@ -21,7 +21,7 @@ const SHA256_ABC: [u8; 32] = [
 fn sha256(context: &mut NifContext<'_>, arguments: &[Term]) -> Result<NativeResult, BeamError> {
     match arguments.first() {
         Some(Term::Binary(data)) => Ok(NativeResult::Value(Term::binary(
-            Sha256::digest(&data[..]).to_vec(),
+            Sha256::digest(data.bytes().unwrap()).to_vec(),
         ))),
         _ => Ok(context.badarg()),
     }

@@ -259,12 +259,13 @@ fn write_nif(
         let mut elements = Vec::new();
         let mut count = 0;
         while let Some((element, tail)) = rest.cons_cell() {
-            let Term::Binary(binary) = element else {
+            // `examine_iovec_term` rejects a bitstring (erl_nif.c:4120-4121).
+            let (Term::Binary(binary), Some(bytes)) = (element, element.binary_bytes()) else {
                 return Ok(BifResult::badarg());
             };
             // `examine_iovec_term` gives no iovec entry for an empty binary
             // (erl_nif.c:4123-4155).
-            if !binary.is_empty() {
+            if !bytes.is_empty() {
                 elements.push(binary.clone());
             }
             rest = tail;

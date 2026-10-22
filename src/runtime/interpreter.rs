@@ -5469,7 +5469,7 @@ impl BinaryPart<'_> {
     fn has_bits(&self) -> bool {
         match self {
             BinaryPart::Bytes(bytes, _) => !bytes.is_empty(),
-            BinaryPart::Shared(binary, _) => !binary.is_empty(),
+            BinaryPart::Shared(binary, _) => binary.bit_size() > 0,
             BinaryPart::Integer { bits, .. } | BinaryPart::Float { bits, .. } => *bits > 0,
             BinaryPart::Utf8(_) | BinaryPart::Utf16 { .. } | BinaryPart::Utf32 { .. } => true,
         }
@@ -5597,12 +5597,17 @@ fn shared_append_arrays(parts: &[BinaryPart<'_>]) -> Option<Vec<(Arc<Vec<u8>>, u
             BinaryPart::Bytes(bytes, reductions) => {
                 arrays.push((Arc::new(bytes.clone().into_owned()), *reductions));
             }
-            BinaryPart::Shared(binary, reductions) => {
+            // The chunks of a bitstring are not its bits, so the writer
+            // copies its bits.
+            BinaryPart::Shared(binary, reductions) if binary.bit_size().is_multiple_of(8) => {
                 for chunk in binary.chunks() {
                     arrays.push((chunk, *reductions));
                 }
             }
-            BinaryPart::Integer { .. } | BinaryPart::Utf8(_) | BinaryPart::Float { .. } => {
+            BinaryPart::Shared(..)
+            | BinaryPart::Integer { .. }
+            | BinaryPart::Utf8(_)
+            | BinaryPart::Float { .. } => {
                 return None;
             }
             BinaryPart::Utf16 { .. } | BinaryPart::Utf32 { .. } => return None,
@@ -5760,7 +5765,7 @@ fn create_binary(
                         *segment, "binary", "type", value,
                     )));
                 };
-                let reductions = bytes.len() * 8 / BITS_PER_REDUCTION;
+                let reductions = bytes.bit_size() / BITS_PER_REDUCTION;
                 parts.push(BinaryPart::Shared(bytes.clone(), reductions));
             }
             BinarySegment::Append {
@@ -5893,7 +5898,7 @@ fn create_binary(
                 segment, "binary", "type", value,
             )));
         };
-        if unit > 1 && !(start.len() as u64 * 8).is_multiple_of(unit) {
+        if unit > 1 && !(start.bit_size() as u64).is_multiple_of(unit) {
             return Ok(Err(BinarySegmentFailure::badarg(
                 segment, "binary", "unit", value,
             )));
@@ -5913,7 +5918,7 @@ fn create_binary(
             }
             return Ok(Ok(Term::Binary(start.clone())));
         }
-        let reductions = start.len() * 8 / BITS_PER_REDUCTION;
+        let reductions = start.bit_size() / BITS_PER_REDUCTION;
         process.bump_reductions(i32::try_from(reductions).unwrap_or(i32::MAX));
         // The result shares the chunks of the append binary. The writer holds
         // only the later segments, so the old payload stays in its arrays.
@@ -5996,7 +6001,7 @@ fn write_binary_parts(
                 process.bump_reductions(i32::try_from(*reductions).unwrap_or(i32::MAX));
             }
             BinaryPart::Shared(binary, reductions) => {
-                writer.push_bytes(&binary.to_bytes());
+                writer.push_binary(binary);
                 process.bump_reductions(i32::try_from(*reductions).unwrap_or(i32::MAX));
             }
             BinaryPart::Integer {

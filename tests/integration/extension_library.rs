@@ -61,7 +61,12 @@ fn make_atom(context: &mut NifContext<'_>, arguments: &[Term]) -> Result<NativeR
     let [Term::Binary(name)] = arguments else {
         return Ok(context.badarg());
     };
-    let name = String::from_utf8(name.to_vec()).unwrap();
+    let name = String::from_utf8(
+        name.bytes()
+            .expect("the name is a binary of whole bytes")
+            .to_vec(),
+    )
+    .unwrap();
     Ok(NativeResult::Value(Term::Atom(context.atom(&name)?)))
 }
 

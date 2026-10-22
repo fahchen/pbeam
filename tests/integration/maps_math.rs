@@ -142,7 +142,7 @@ fn show(program: &BeamProgram, function: &str) -> Vec<u8> {
     let Term::Binary(text) = &result else {
         panic!("show/1 returns a binary, not {result:?}");
     };
-    text.to_vec()
+    text.bytes().unwrap().to_vec()
 }
 
 /// Check that PBeam runs `maps_math_probe:Function/0` as the pinned ERTS
@@ -223,7 +223,10 @@ fn charges_the_reductions_of_maps_values_as_pinned_erts() {
     let Term::Binary(text) = &result else {
         panic!("show_reductions/1 returns a binary, not {result:?}");
     };
-    assert_eq!(String::from_utf8_lossy(text), ERTS_REDUCTIONS);
+    assert_eq!(
+        String::from_utf8_lossy(text.bytes().unwrap()),
+        ERTS_REDUCTIONS
+    );
     assert_eq!(
         String::from_utf8_lossy(&reference(&format!(
             "maps_math_probe:show_reductions({ERTS_OPTIONS})"

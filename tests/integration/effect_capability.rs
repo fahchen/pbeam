@@ -1105,6 +1105,8 @@ fn text(term: &Term, atoms: &AtomTable) -> String {
         Term::Binary(bytes) => format!(
             "<<{}>>",
             bytes
+                .bytes()
+                .unwrap()
                 .iter()
                 .map(u8::to_string)
                 .collect::<Vec<_>>()

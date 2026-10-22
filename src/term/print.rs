@@ -15,7 +15,7 @@
 //! | other list | `[1,2|x]` |
 //! | tuple | `{a,{b}}` |
 //! | binary of bytes in 32..=126 | `<<"a\"b">>` |
-//! | other binary | `<<>>`, `<<1,2,200>>` |
+//! | other binary | `<<>>`, `<<1,2,200>>`, and a bitstring as `<<1,2:3>>` |
 //! | map | `#{a=>1}`, in the ERTS key order |
 //! | local fun | `#Fun<Module.OldIndex.OldUniq>` |
 //! | external fun | `fun lists:map/2` |
@@ -105,11 +105,13 @@ pub(crate) fn print_term(term: &Term, atoms: &AtomTable) -> Vec<u8> {
                 items.push(Item::Text("}"));
                 push_separated(&mut items, elements.iter());
             }
-            Term::Binary(bytes)
-                if !bytes.is_empty() && bytes.iter().all(|byte| (32..127).contains(byte)) =>
+            Term::Binary(binary)
+                if binary.bytes().is_some_and(|bytes| {
+                    !bytes.is_empty() && bytes.iter().all(|byte| (32..127).contains(byte))
+                }) =>
             {
                 text.extend_from_slice(b"<<\"");
-                for &byte in bytes.iter() {
+                for &byte in binary.bit_bytes() {
                     if byte == b'"' {
                         text.push(b'\\');
                     }
@@ -117,8 +119,16 @@ pub(crate) fn print_term(term: &Term, atoms: &AtomTable) -> Vec<u8> {
                 }
                 text.extend_from_slice(b"\">>");
             }
-            Term::Binary(bytes) => {
-                let numbers: Vec<String> = bytes.iter().map(u8::to_string).collect();
+            Term::Binary(binary) => {
+                // A bitstring prints its whole bytes, then its tail bits as
+                // `Value:Size` (`erl_printf_term.c:615-653`).
+                let size = binary.bit_size();
+                let bits = binary.bit_bytes();
+                let mut numbers: Vec<String> = bits[..size / 8].iter().map(u8::to_string).collect();
+                let tail = size % 8;
+                if tail != 0 {
+                    numbers.push(format!("{}:{tail}", bits[size / 8] >> (8 - tail)));
+                }
                 text.extend_from_slice(format!("<<{}>>", numbers.join(",")).as_bytes());
             }
             Term::Map(map) => {

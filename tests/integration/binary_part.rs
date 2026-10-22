@@ -106,8 +106,14 @@ fn gives_a_part_that_shares_the_bytes_of_its_source() {
     let (Term::Binary(source), Term::Binary(part)) = (parts[0], parts[1]) else {
         panic!("the results are binaries");
     };
-    assert_eq!((&source[..], &part[..]), (&b"hello"[..], &b"ell"[..]));
-    let (source, part) = (source.as_ptr() as usize, part.as_ptr() as usize);
+    assert_eq!(
+        (source.bytes().unwrap(), part.bytes().unwrap()),
+        (&b"hello"[..], &b"ell"[..])
+    );
+    let (source, part) = (
+        source.bytes().unwrap().as_ptr() as usize,
+        part.bytes().unwrap().as_ptr() as usize,
+    );
     assert!(
         (source..source + 5).contains(&part),
         "the part {part:#x} is not in the array of the source {source:#x}"

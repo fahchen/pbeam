@@ -8,7 +8,7 @@ fn array(term: &Term) -> &Arc<Vec<u8>> {
     let Term::Binary(bytes) = term else {
         panic!("not a binary: {term:?}");
     };
-    bytes.bytes()
+    bytes.array()
 }
 
 /// Return the bytes of a binary term as a vector.
@@ -16,7 +16,7 @@ fn bytes(term: &Term) -> Vec<u8> {
     let Term::Binary(bytes) = term else {
         panic!("not a binary: {term:?}");
     };
-    bytes.to_vec()
+    bytes.bit_bytes().to_vec()
 }
 
 #[test]
@@ -161,9 +161,9 @@ fn gives_no_byte_for_a_binary_of_no_bits() {
     // A binary of 0 bits at the end of its array has no byte, as an ERTS
     // bitstring of 0 bits is empty.
     let source = Binary::from(&[1, 2]);
-    assert!(source.bits(16, 16).is_empty());
-    assert_eq!(&source.bits(16, 16)[..], &[]);
-    assert!(Binary::from(Vec::new()).bits(0, 0).is_empty());
+    assert!(source.bits(16, 16).bit_bytes().is_empty());
+    assert_eq!(source.bits(16, 16).bit_bytes(), &[]);
+    assert!(Binary::from(Vec::new()).bits(0, 0).bit_bytes().is_empty());
 }
 
 #[test]
@@ -186,9 +186,9 @@ fn copies_a_view_whose_size_is_not_a_whole_number_of_bytes_in_o1_time() {
     // such a view comes only from a segment that PBeam does not run yet.
     let source = Binary::from(&[0xC3]);
     let view = source.bits(4, 8);
-    assert_eq!(&view[..], &[0b0011_0000]);
+    assert_eq!(view.bit_bytes(), &[0b0011_0000]);
     let copy = view.clone();
-    assert_eq!(&copy[..], &[0b0011_0000]);
+    assert_eq!(copy.bit_bytes(), &[0b0011_0000]);
     assert!(view.same_bytes(&copy));
     let packed = view.packed().expect("the bits of the view are packed");
     let copied = copy.packed().expect("the bits of the copy are packed");
@@ -221,7 +221,7 @@ fn takes_the_bytes_of_the_last_holder_with_no_copy() {
     // `list_to_bitstring_continue` takes the bytes that a turn collected, so
     // a later turn does not copy them again.
     let binary = Binary::from(b"ab".to_vec());
-    let array = binary.bytes().as_ptr();
+    let array = binary.array().as_ptr();
     let bytes = binary.take_bytes();
     assert_eq!(bytes, b"ab".to_vec());
     assert_eq!(bytes.as_ptr(), array);
@@ -231,7 +231,7 @@ fn takes_the_bytes_of_the_last_holder_with_no_copy() {
     assert_eq!(binary.take_bytes(), b"ab".to_vec());
     assert_eq!(copy, Binary::from(b"ab".to_vec()));
     // An empty binary is the value of the state after the take.
-    assert!(Binary::default().is_empty());
+    assert!(Binary::default().bit_bytes().is_empty());
     assert_eq!(Binary::default(), Binary::from(Vec::new()));
     // A sub-binary that owns the array of its source gives only its own
     // bytes.
@@ -298,9 +298,9 @@ fn shares_the_prefix_array_of_a_large_append() {
     assert!(Arc::ptr_eq(&arrays[0], prefix.backing()));
     assert_eq!(arrays[0].len(), 100_000);
     assert_eq!(arrays[1][..], [9]);
-    assert_eq!(result.len(), 100_001);
-    assert_eq!(result[0], 7);
-    assert_eq!(result[100_000], 9);
+    assert_eq!(result.bit_bytes().len(), 100_001);
+    assert_eq!(result.bit_bytes()[0], 7);
+    assert_eq!(result.bit_bytes()[100_000], 9);
     // A chunked view and a flat view never share their bytes.
     assert!(!result.same_bytes(&prefix));
     assert!(!prefix.same_bytes(&result));
@@ -326,7 +326,7 @@ fn shares_every_array_when_a_binary_is_appended_to_itself() {
     assert!(Arc::ptr_eq(&arrays[1], &partial));
     assert!(Arc::ptr_eq(&arrays[2], &full));
     assert!(Arc::ptr_eq(&arrays[3], &partial));
-    assert_eq!(whole.len(), 2 * APPEND_LEAF + 14);
+    assert_eq!(whole.bit_bytes().len(), 2 * APPEND_LEAF + 14);
 }
 
 #[test]
@@ -339,10 +339,10 @@ fn merges_a_small_append_in_the_last_leaf() {
     let result = Binary::concat(&prefix, &[9]);
     assert!(result.chunk_backing().is_none());
     assert!(!Arc::ptr_eq(result.backing(), prefix.backing()));
-    assert_eq!(result.len(), 101);
-    assert_eq!(result[0], 7);
-    assert_eq!(result[99], 7);
-    assert_eq!(result[100], 9);
+    assert_eq!(result.bit_bytes().len(), 101);
+    assert_eq!(result.bit_bytes()[0], 7);
+    assert_eq!(result.bit_bytes()[99], 7);
+    assert_eq!(result.bit_bytes()[100], 9);
     // The merge stops at one leaf: a full leaf keeps its array and the byte
     // starts a new array.
     let full = Arc::new(vec![1_u8; APPEND_LEAF]);
@@ -395,10 +395,10 @@ fn joins_the_arrays_of_a_chunked_prefix_in_one_array() {
         .chunk_backing()
         .expect("a large append keeps its bytes in arrays");
     assert_eq!(arrays.len(), 3);
-    assert_eq!(second.len(), 4108);
-    assert_eq!(second[0], 1);
-    assert_eq!(second[5], 2);
-    assert_eq!(second[4100], 3);
+    assert_eq!(second.bit_bytes().len(), 4108);
+    assert_eq!(second.bit_bytes()[0], 1);
+    assert_eq!(second.bit_bytes()[5], 2);
+    assert_eq!(second.bit_bytes()[4100], 3);
     // The joined array is built once and shared by each later read.
     let joined = second.backing().clone();
     assert!(joined.is_empty());
@@ -407,12 +407,12 @@ fn joins_the_arrays_of_a_chunked_prefix_in_one_array() {
     assert_eq!(second.to_bytes().len(), 4108);
     // A copy of the handle shares the joined array.
     let copy = second.clone();
-    assert_eq!(&copy[..], &second[..]);
+    assert_eq!(copy.bit_bytes(), second.bit_bytes());
     assert!(second.same_bytes(&copy));
     // A sub-binary of an append keeps the joined array, so the two handles
     // keep their bytes in different arrays.
     let part = second.bits(32, 48);
-    assert_eq!(&part[..], &[1, 2]);
+    assert_eq!(part.bit_bytes(), &[1, 2]);
     assert!(!second.same_bytes(&part));
     assert_eq!(second.take_bytes().len(), 4108);
 }
@@ -426,12 +426,12 @@ fn merges_a_sub_binary_prefix_of_an_append_in_one_leaf() {
     let prefix = source.bits(8, 24);
     let result = Binary::concat(&prefix, b"z");
     assert!(result.chunk_backing().is_none());
-    assert_eq!(&result[..], b"bcz");
+    assert_eq!(result.bit_bytes(), b"bcz");
     // A packed prefix packs its bits in one array.
     let packed = Binary::from(&[0xC3]).bits(4, 8);
     let result = Binary::concat(&packed, &[0xFF]);
     assert!(result.chunk_backing().is_none());
-    assert_eq!(&result[..], &[0b0011_0000, 0xFF]);
+    assert_eq!(result.bit_bytes(), &[0b0011_0000, 0xFF]);
     // The take of an append copies its bytes.
     assert_eq!(result.take_bytes(), vec![0b0011_0000, 0xFF]);
 }
@@ -442,45 +442,48 @@ fn appends_in_place_only_to_a_binary_that_one_handle_owns() {
     // (`erl_bits.c:1963-1981`). PBeam writes in the array only when one
     // handle owns the view and the array, so no other term sees the bytes.
     let mut binary = Binary::from(b"ab".to_vec());
-    let start = Arc::as_ptr(binary.bytes());
+    let start = Arc::as_ptr(binary.array());
     assert!(binary.append_in_place(b"c"));
     assert_eq!(
-        (&*binary, Arc::as_ptr(binary.bytes())),
+        (binary.bit_bytes(), Arc::as_ptr(binary.array())),
         (&b"abc"[..], start)
     );
-    assert_eq!(binary.len(), 3);
+    assert_eq!(binary.bit_bytes().len(), 3);
 
     // A copy shares the view, so the append keeps both binaries unchanged.
     let copy = binary.clone();
     assert!(!binary.append_in_place(b"d"));
-    assert_eq!((&*binary, &*copy), (&b"abc"[..], &b"abc"[..]));
+    assert_eq!(
+        (binary.bit_bytes(), copy.bit_bytes()),
+        (&b"abc"[..], &b"abc"[..])
+    );
     drop(copy);
 
     // A sub-binary is a part of its array, so the append does not write in it.
     let mut part = Binary::from(b"abcd".to_vec()).bits(0, 16);
     assert!(!part.append_in_place(b"z"));
-    assert_eq!(&*part, b"ab");
+    assert_eq!(part.bit_bytes(), b"ab");
     let mut tail = Binary::from(b"abcd".to_vec()).bits(8, 32);
     assert!(!tail.append_in_place(b"z"));
-    assert_eq!(&*tail, b"bcd");
+    assert_eq!(tail.bit_bytes(), b"bcd");
 
     // A view that an append built joins its arrays in one array one time,
     // and then appends in that array.
     let large = Binary::from(vec![1; APPEND_LEAF]);
     let mut built = Binary::concat(&large, &[2]);
     assert!(built.append_in_place(&[3]));
-    let joined = Arc::as_ptr(built.bytes());
+    let joined = Arc::as_ptr(built.array());
     assert!(built.append_in_place(&[4]));
-    assert_eq!(Arc::as_ptr(built.bytes()), joined);
-    assert_eq!(built.len(), APPEND_LEAF + 3);
-    assert_eq!(&built[APPEND_LEAF..], &[2, 3, 4]);
+    assert_eq!(Arc::as_ptr(built.array()), joined);
+    assert_eq!(built.bit_bytes().len(), APPEND_LEAF + 3);
+    assert_eq!(&built.bit_bytes()[APPEND_LEAF..], &[2, 3, 4]);
 
     // A joined array that another handle holds stays unchanged.
     let shared = Binary::concat(&large, &[2]);
     let _flat = Arc::clone(shared.flat_backing());
     let mut shared = shared;
     assert!(!shared.append_in_place(&[3]));
-    assert_eq!(shared.len(), APPEND_LEAF + 1);
+    assert_eq!(shared.bit_bytes().len(), APPEND_LEAF + 1);
 }
 
 #[test]
@@ -553,4 +556,20 @@ fn compares_a_view_at_a_bit_offset_by_its_bits() {
     assert_eq!(view.cmp(&Binary::from(vec![0x16])), Ordering::Greater);
     // <<1:3>> at bit offset 3 of <<4>> is equal to <<1:3>> at offset 0.
     assert_eq!(Binary::from(vec![0x04]).bits(3, 6), bits(&[0x20], 3));
+}
+
+#[test]
+fn gives_whole_bytes_only_for_a_binary() {
+    // A size that is not a whole number of bytes gives no bytes, as ERTS
+    // `erts_get_aligned_binary_bytes_extra` gives NULL for it
+    // (`erl_bits.h:605-635`). The bits stay readable with `bit_bytes`.
+    let source = Binary::from(vec![0x3F, 0x80]);
+    assert_eq!(source.bytes(), Some(&[0x3F, 0x80][..]));
+    assert_eq!(source.bits(8, 16).bytes(), Some(&[0x80][..]));
+    let bitstring = source.bits(0, 3);
+    assert_eq!(bitstring.bytes(), None);
+    assert_eq!(bitstring.bit_bytes(), &[0x3F]);
+    assert_eq!(Term::Binary(bitstring).binary_bytes(), None);
+    assert_eq!(Term::Binary(source).binary_bytes(), Some(&[0x3F, 0x80][..]));
+    assert_eq!(Term::Integer(1).binary_bytes(), None);
 }

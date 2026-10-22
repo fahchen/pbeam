@@ -116,7 +116,11 @@ impl<'a> Walk<'a> {
                         self.current = head;
                         continue;
                     }
-                    Term::Integer(0..=255) | Term::Binary(_) => {
+                    // A bitstring is not iodata, as ERTS raises `badarg` for
+                    // `iolist_size([<<1:4>>])`.
+                    _ if matches!(head, Term::Integer(0..=255))
+                        || head.binary_bytes().is_some() =>
+                    {
                         if let Some(taken) = leaf(head, 0, steps) {
                             // The rest of the binary comes first when the walk
                             // continues (`erl_iolist.c:528-537`).
@@ -135,7 +139,7 @@ impl<'a> Walk<'a> {
             }
             match self.current {
                 tail if tail.is_nil() => {}
-                binary @ Term::Binary(_) => {
+                binary if binary.binary_bytes().is_some() => {
                     if let Some(taken) = leaf(binary, self.offset, steps) {
                         self.offset += taken;
                         return Step::Yield;
@@ -164,7 +168,9 @@ impl<'a> Walk<'a> {
     /// ```
     fn term(&self) -> (Term, Term) {
         let current = match self.current {
-            Term::Binary(bytes) if self.offset > 0 => Term::binary(bytes[self.offset..].to_vec()),
+            Term::Binary(bytes) if self.offset > 0 => {
+                Term::binary(leaf_bytes(bytes)[self.offset..].to_vec())
+            }
             current => current.clone(),
         };
         let stack = self.stack.iter().map(|&rest| rest.clone());
@@ -245,7 +251,7 @@ pub(super) fn iolist_size_continue(
     let mut walk = Walk::new(term, stack);
     let step = walk.run(&mut steps, |leaf, _, _| {
         size += match leaf {
-            Term::Binary(bytes) => bytes.len(),
+            Term::Binary(bytes) => leaf_bytes(bytes).len(),
             _ => 1,
         };
         None
@@ -289,14 +295,16 @@ pub(super) fn iolist_to_iovec(
     term: &Term,
 ) -> Result<BifResult, BeamError> {
     match term {
-        Term::Binary(bytes) if bytes.is_empty() => Ok(Value(Term::nil())),
-        Term::Binary(_) => Ok(Value(Term::list_from(vec![term.clone()]))),
+        Term::Binary(bytes) if bytes.bit_size() == 0 => Ok(Value(Term::nil())),
+        _ if term.binary_bytes().is_some() => Ok(Value(Term::list_from(vec![term.clone()]))),
         _ if term.is_nil() => Ok(Value(Term::nil())),
         _ => match term.cons_cell() {
-            Some((Term::Binary(bytes), tail)) if tail.is_nil() && bytes.is_empty() => {
+            Some((Term::Binary(bytes), tail)) if tail.is_nil() && bytes.bit_size() == 0 => {
                 Ok(Value(Term::nil()))
             }
-            Some((Term::Binary(_), tail)) if tail.is_nil() => Ok(Value(term.clone())),
+            Some((head, tail)) if tail.is_nil() && head.binary_bytes().is_some() => {
+                Ok(Value(term.clone()))
+            }
             Some(_) => iovec_size(process, term, term, &[]),
             None => Ok(BifResult::badarg()),
         },
@@ -407,8 +415,8 @@ pub(super) fn iovec_copy(
             merged.push(*byte as u8);
             None
         }
-        Term::Binary(bytes) if bytes.len() <= IOVEC_COPY_LIMIT => {
-            copy_bytes(&mut merged, &bytes[offset..], steps)
+        Term::Binary(bytes) if leaf_bytes(bytes).len() <= IOVEC_COPY_LIMIT => {
+            copy_bytes(&mut merged, &leaf_bytes(bytes)[offset..], steps)
         }
         large => {
             if !merged.is_empty() {
@@ -466,6 +474,21 @@ fn iovec_trap(arguments: Vec<Term>) -> BifResult {
     }
 }
 
+/// Return the bytes of a binary leaf of a [`Walk`]. The walk gives only a
+/// binary whose size is a whole number of bytes, because a bitstring is not
+/// iodata.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(leaf_bytes(&Binary::from(vec![1])), &[1]);
+/// ```
+fn leaf_bytes(binary: &Binary) -> &[u8] {
+    binary
+        .bytes()
+        .expect("the walk gives only a binary of whole bytes")
+}
+
 /// Copy the bytes `rest` of a binary into `bytes`, as
 /// `generic_iolist_copy_bitstring` does with `YieldSupport`
 /// (`erl_iolist.c:354-417`): a copy takes at most 32 bytes for each step
@@ -514,7 +537,7 @@ pub(super) fn iolist_to_binary(
     scheduler: &mut Scheduler,
     term: &Term,
 ) -> Result<BifResult, BeamError> {
-    if let Term::Binary(_) = term {
+    if term.binary_bytes().is_some() {
         return Ok(Value(term.clone()));
     }
     list_to_bitstring(scheduler, term, "iolist_to_binary")
@@ -589,7 +612,9 @@ fn list_to_bitstring(
         return Ok(Value(Term::binary(Vec::new())));
     }
     match term.cons_cell() {
-        Some((binary @ Term::Binary(_), tail)) if tail.is_nil() => Ok(Value(binary.clone())),
+        Some((binary, tail)) if tail.is_nil() && binary.binary_bytes().is_some() => {
+            Ok(Value(binary.clone()))
+        }
         Some(_) => Ok(l2b_size(process, reds_left, term, term, &[], 0)),
         None => Ok(BifResult::badarg()),
     }
@@ -635,7 +660,7 @@ pub(super) fn l2b_size(
     let mut walk = Walk::new(term, stack);
     let step = walk.run(&mut steps, |leaf, _, _| {
         size += match leaf {
-            Term::Binary(bytes) => bytes.len(),
+            Term::Binary(bytes) => leaf_bytes(bytes).len(),
             _ => 1,
         };
         None
@@ -703,7 +728,7 @@ pub(super) fn l2b_copy(
     let mut steps = init;
     let mut walk = Walk::new(term, stack);
     let step = walk.run(&mut steps, |leaf, offset, steps| match leaf {
-        Term::Binary(binary) => copy_bytes(&mut bytes, &binary[offset..], steps),
+        Term::Binary(binary) => copy_bytes(&mut bytes, &leaf_bytes(binary)[offset..], steps),
         byte => {
             if let Term::Integer(byte) = byte {
                 bytes.push(*byte as u8);
@@ -762,7 +787,7 @@ pub(in crate::runtime::interpreter) fn iodata_bytes(term: &Term) -> Option<Vec<u
     let (mut bytes, mut unlimited) = (Vec::new(), i64::MAX);
     let step = Walk::new(term, &[]).run(&mut unlimited, |leaf, _, _| {
         if let Term::Binary(binary) = leaf {
-            bytes.extend_from_slice(binary);
+            bytes.extend_from_slice(leaf_bytes(binary));
         } else if let Term::Integer(byte) = leaf {
             bytes.push(*byte as u8);
         }

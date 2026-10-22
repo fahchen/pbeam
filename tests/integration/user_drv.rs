@@ -181,7 +181,10 @@ fn runs_iolist_to_iovec_of_lists_as_pinned_erts() {
 fn erl_w(term: &Term, atoms: &AtomTable) -> String {
     let join = |items: Vec<String>| items.join(",");
     match term {
-        Term::Binary(bytes) => format!("<<{}>>", join(bytes.iter().map(u8::to_string).collect())),
+        Term::Binary(bytes) => format!(
+            "<<{}>>",
+            join(bytes.bytes().unwrap().iter().map(u8::to_string).collect())
+        ),
         _ if let Some(items) = term.proper_list() => {
             format!("[{}]", join(items.map(|term| erl_w(term, atoms)).collect()))
         }

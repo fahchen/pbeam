@@ -209,7 +209,7 @@ pub(super) fn load(load_info: &Term, _atoms: &AtomTable) -> i32 {
     if version != 302 {
         return 214;
     }
-    if !matches!(path, Term::Binary(path) if path.bit_size() % 8 == 0) {
+    if path.binary_bytes().is_none() {
         return 217;
     }
     match fips_mode {
@@ -368,8 +368,8 @@ fn hash_nif(
         }
         return c_error(scheduler, "badarg", "hash.c", 111, 0, "Bad digest type");
     };
-    let data = match data {
-        Term::Binary(data) if data.bit_size() % 8 == 0 => data,
+    let data = match data.binary_bytes() {
+        Some(data) => data,
         _ => return c_error(scheduler, "badarg", "hash.c", 118, 1, "Not iolist"),
     };
     Ok(BifResult::Value(Term::binary(hash.digest(data))))
@@ -451,12 +451,12 @@ fn pbkdf2_hmac_nif(
             )
         };
     };
-    let password = match password {
-        Term::Binary(password) if password.bit_size() % 8 == 0 => password,
+    let password = match password.binary_bytes() {
+        Some(password) => password,
         _ => return c_error(scheduler, "badarg", "pbkdf2_hmac.c", 43, 1, "Not binary"),
     };
-    let salt = match salt {
-        Term::Binary(salt) if salt.bit_size() % 8 == 0 => salt,
+    let salt = match salt.binary_bytes() {
+        Some(salt) => salt,
         _ => return c_error(scheduler, "badarg", "pbkdf2_hmac.c", 46, 2, "Not binary"),
     };
     // The C code allocates the key before it calls `PKCS5_PBKDF2_HMAC`
@@ -647,8 +647,8 @@ fn strong_rand_bytes_nif(size: &Term) -> BifResult {
 /// assert!(matches!(strong_rand_range_nif(&Term::Integer(10)), BifResult::Raise { .. }));
 /// ```
 fn strong_rand_range_nif(range: &Term) -> BifResult {
-    let range = match range {
-        Term::Binary(range) if range.bit_size() % 8 == 0 => range,
+    let range = match range.binary_bytes() {
+        Some(range) => range,
         _ => return BifResult::badarg(),
     };
     match random_below(range) {

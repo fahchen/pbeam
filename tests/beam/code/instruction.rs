@@ -81,7 +81,7 @@ fn reads_only_supported_move_literals() {
     let literals = vec![Some(Term::binary(b"ok".to_vec())), None];
     assert!(matches!(
         &read_move_operand(&[0x47, 0x00], &mut 0, &[], &literals).unwrap(),
-        Operand::Value(Term::Binary(value)) if &**value == b"ok"
+        Operand::Value(Term::Binary(value)) if value.bit_bytes() == b"ok"
     ));
     let mut cursor = 0;
     assert!(matches!(

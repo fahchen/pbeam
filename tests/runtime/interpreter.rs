@@ -5376,7 +5376,7 @@ fn writes_a_private_append_in_the_array_of_a_binary_with_one_owner() {
     let parts = [BinaryPart::Utf8('z')];
     write(&mut process, &Operand::X(0), Term::binary(b"a".to_vec())).unwrap();
     let start = match read_ref(&process, &Operand::X(0)).unwrap() {
-        Term::Binary(binary) => Arc::as_ptr(binary.bytes()),
+        Term::Binary(binary) => Arc::as_ptr(binary.array()),
         other => panic!("not a binary: {other:?}"),
     };
     let result = private_append(&mut process, &Operand::X(0), &parts).unwrap();
@@ -5384,7 +5384,7 @@ fn writes_a_private_append_in_the_array_of_a_binary_with_one_owner() {
     let Ok(Term::Binary(appended)) = &result else {
         unreachable!()
     };
-    assert_eq!(Arc::as_ptr(appended.bytes()), start);
+    assert_eq!(Arc::as_ptr(appended.array()), start);
     assert_eq!(
         read(&process, &Operand::X(0)).unwrap(),
         Term::binary(b"az".to_vec())

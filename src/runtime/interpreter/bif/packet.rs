@@ -138,7 +138,7 @@ pub(super) fn decode_packet(
         Kind::HttpBin => false,
         Kind::HttpHBin => true,
         Kind::Unsupported(name) => {
-            if binary.bit_size() % 8 != 0 {
+            if binary.bytes().is_none() {
                 return Ok(BifResult::badarg());
             }
             return Err(error(format!(
@@ -146,10 +146,9 @@ pub(super) fn decode_packet(
             )));
         }
     };
-    if binary.bit_size() % 8 != 0 {
+    let Some(bytes) = binary.bytes() else {
         return Ok(BifResult::badarg());
-    }
-    let bytes: &[u8] = binary;
+    };
     let length = packet_length(bytes, packet_size, line_length, header);
     if length < 0 {
         return Ok(Value(Term::tuple(vec![

@@ -728,9 +728,9 @@ fn upgrade<'a>(
 /// assert_eq!(library_name(&Term::binary(b"/tmp/nif_add".to_vec())).as_ref(), c"/tmp/nif_add");
 /// ```
 fn library_name(path: &Term) -> std::ffi::CString {
-    let bytes = match path {
-        Term::Binary(bytes) => bytes.to_vec(),
-        _ => native_filename(path, filename_encoding()).unwrap_or_default(),
+    let bytes = match path.binary_bytes() {
+        Some(bytes) => bytes.to_vec(),
+        None => native_filename(path, filename_encoding()).unwrap_or_default(),
     };
     let end = bytes
         .iter()

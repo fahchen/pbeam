@@ -365,15 +365,14 @@ pub(super) fn import(
     if !is_atom(tag, "re_exported_pattern") {
         return Ok(BifResult::badarg());
     }
-    let Term::Binary(header) = header else {
+    let Some(header) = header.binary_bytes() else {
         return Ok(BifResult::badarg());
     };
-    let header: &[u8] = header;
     if header.len() < EXPORT_HEADER_SIZE || header[..EXPORT_TITLE.len()] != EXPORT_TITLE[..] {
         return Ok(BifResult::badarg());
     }
     if header[EXPORT_VERSION_OFFSET] == EXPORT_VERSION {
-        let Term::Binary(encoded) = encoded else {
+        let Some(encoded) = encoded.binary_bytes() else {
             return Ok(BifResult::badarg());
         };
         let checksum = u32::from_be_bytes(
@@ -416,7 +415,7 @@ fn import_fallback(
     source: &Term,
     options: &Term,
 ) -> Result<BifResult, BeamError> {
-    let Term::Binary(source) = source else {
+    let Some(source) = source.binary_bytes() else {
         return Ok(BifResult::badarg());
     };
     let Some(parsed) = parse_options(&context.scheduler.atoms, options) else {
