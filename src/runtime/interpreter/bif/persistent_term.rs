@@ -173,8 +173,11 @@ pub(super) fn get(
     if let Some(denied) = check? {
         return Ok(denied);
     }
-    let table = Arc::clone(&scheduler.node().persistent_terms().terms);
-    let value = table.get(key).cloned();
+    // The lookup runs under the lock of the node and keeps no reference to
+    // the table, so a publication changes the slot in place with no copy
+    // (`erl_bif_persistent.c:1181-1185`). A `get/0` holds the update
+    // permission, so no publication overlaps its reference.
+    let value = scheduler.node().persistent_terms().terms.get(key).cloned();
     Ok(value
         .or_else(|| default.cloned())
         .map_or_else(BifResult::badarg, Value))
