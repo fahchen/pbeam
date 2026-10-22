@@ -1653,7 +1653,10 @@ impl BeamProgram {
                         TestKind::List => value.is_list(),
                         TestKind::Nil => value.is_nil(),
                         TestKind::NonEmptyList => value.is_nonempty_list(),
-                        TestKind::Binary => matches!(value, Term::Binary(_)),
+                        // `is_binary` fails for a bitstring with tail bits
+                        // (emu `instrs.tab:939-943`; JIT `emit_is_binary` in
+                        // `jit/arm/instr_common.cpp:1186-1224`).
+                        TestKind::Binary => value.is_binary(),
                         // `is_bitstr` loads as `is_bitstring`, which passes for
                         // each boxed term with a bitstring header (emu
                         // `ops.tab:796-802`, `instrs.tab:945-949`; JIT

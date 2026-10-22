@@ -198,7 +198,7 @@ bifs! {
     erlang:iolist_to_binary/1 as ErlangIolistToBinary1 => |cx, [term]| iolist::iolist_to_binary(cx.scheduler, term),
     erlang:iolist_to_iovec/1 as ErlangIolistToIovec1 => |cx, [term]| iolist::iolist_to_iovec(cx.scheduler.current_process_mut(), term),
     erlang:is_atom/1 as ErlangIsAtom1 => |_, [term]| Ok(Value(Term::static_atom(if matches!(term, Term::Atom(_)) { "true" } else { "false" }))),
-    erlang:is_binary/1 as ErlangIsBinary1 => |_, [term]| Ok(Value(Term::static_atom(if matches!(term, Term::Binary(_)) { "true" } else { "false" }))),
+    erlang:is_binary/1 as ErlangIsBinary1 => |_, [term]| Ok(Value(Term::static_atom(if term.is_binary() { "true" } else { "false" }))),
     erlang:is_bitstring/1 as ErlangIsBitstring1 => |_, [term]| Ok(Value(Term::static_atom(if matches!(term, Term::Binary(_)) { "true" } else { "false" }))),
     erlang:is_boolean/1 as ErlangIsBoolean1 => |_, [term]| Ok(Value(Term::static_atom(if matches!(term, Term::Atom(atom) if atom.is_one_of(&["true", "false"])) { "true" } else { "false" }))),
     erlang:is_builtin/3 => unsupported,
