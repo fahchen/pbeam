@@ -291,6 +291,7 @@ impl Signal {
             Signal::MonitorDown { reason, .. } => visit(reason),
             Signal::ProcessInfo { item, .. } => visit(item),
             Signal::AliasMessage { message, .. } => visit(message),
+            Signal::CheckProcessCode { tag, .. } => visit(tag),
             _ => {}
         }
     }
