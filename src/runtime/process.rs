@@ -470,6 +470,11 @@ pub(super) struct ProcessState {
     /// `None` while the call waits. The grant signal sets it, and the call
     /// takes it.
     pub(super) policy_reply: Option<bool>,
+    /// The root mark: the slot of the result of a root process in the
+    /// roots of the node, or `None` for a process that is not a root. The
+    /// mark moves with the state of the process, so the scheduler that runs
+    /// the process records the root exit at the node.
+    pub(super) root: Option<usize>,
 }
 
 /// A BIF call that continues after a switch: the export of a BIF and the
@@ -628,6 +633,7 @@ impl ProcessState {
             frameless_apply: None,
             start_apply: false,
             policy_reply: None,
+            root: None,
         }
     }
 

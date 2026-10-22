@@ -193,6 +193,12 @@ fn switches_out_to_the_end_of_the_run_queue_with_a_new_budget() {
     assert_eq!(scheduler.current_process_mut().fcalls, CONTEXT_REDS);
 }
 
+/// Return the result of the root process of a run with one scheduler, which
+/// the node collects.
+fn root_result(scheduler: &Scheduler) -> Option<Result<Term, Term>> {
+    scheduler.node.take_root_results().pop().flatten()
+}
+
 #[test]
 fn sends_down_and_exit_signals_and_records_the_root_result() {
     let mut scheduler = test_scheduler();
@@ -250,7 +256,7 @@ fn sends_down_and_exit_signals_and_records_the_root_result() {
         .finish_current(atom("normal"), Some(atom("ok")))
         .unwrap();
     assert!(scheduler.processes.is_empty());
-    assert_eq!(scheduler.into_run_result().0, Some(Ok(atom("ok"))));
+    assert_eq!(root_result(&scheduler), Some(Ok(atom("ok"))));
 }
 
 #[test]
@@ -279,7 +285,7 @@ fn ends_the_run_only_after_the_exit_of_the_root_process_completes() {
         scheduler
             .finish_current(atom("normal"), Some(atom("ok")))
             .unwrap();
-        assert!(!scheduler.root_exited());
+        assert!(!scheduler.node.is_shutdown());
         let signals =
             |scheduler: &Scheduler| scheduler.processes[&child].mailbox.has_control_signals();
         assert!(!signals(&scheduler));
@@ -287,11 +293,11 @@ fn ends_the_run_only_after_the_exit_of_the_root_process_completes() {
         assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
         assert_eq!(current(&mut scheduler), child);
         scheduler.yield_current();
-        assert!(!scheduler.root_exited());
+        assert!(!scheduler.node.is_shutdown());
         assert_eq!(scheduler.schedule_next().unwrap(), Turn::Done);
-        assert!(scheduler.root_exited());
+        assert!(scheduler.node.is_shutdown());
         assert!(signals(&scheduler));
-        assert_eq!(scheduler.into_run_result().0, Some(Ok(atom("ok"))));
+        assert_eq!(root_result(&scheduler), Some(Ok(atom("ok"))));
     }
 }
 
@@ -377,7 +383,7 @@ fn ends_a_linked_process_and_rejects_counter_overflow() {
     // The link exit signal ends the root process, which does not trap
     // exits, with the reason of the child.
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Done);
-    assert_eq!(scheduler.into_run_result().0, Some(Err(atom("boom"))));
+    assert_eq!(root_result(&scheduler), Some(Err(atom("boom"))));
 
     let mut scheduler = test_scheduler();
     scheduler.start(frame(), vec![], allow_all()).unwrap();
@@ -385,7 +391,7 @@ fn ends_a_linked_process_and_rejects_counter_overflow() {
     scheduler
         .finish_current(atom("boom"), Some(atom("ok")))
         .unwrap();
-    assert_eq!(scheduler.into_run_result().0, Some(Err(atom("boom"))));
+    assert_eq!(root_result(&scheduler), Some(Err(atom("boom"))));
 
     let mut scheduler = Scheduler {
         node: Node::exhausted(),
@@ -2199,10 +2205,10 @@ fn a_remote_target_adds_and_removes_the_monitor_of_a_watcher() {
         Scheduler::with_shared(AtomTable::new(), Arc::clone(&node), 0, readers.remove(0));
     let (target, watcher) = (ProcessId(0), ProcessId(1));
     owner
-        .start_with_id(target, frame(), vec![], allow_all())
+        .start_with_id(target, 1, frame(), vec![], allow_all())
         .unwrap();
     scheduler
-        .start_with_id(watcher, frame(), vec![], allow_all())
+        .start_with_id(watcher, 0, frame(), vec![], allow_all())
         .unwrap();
     scheduler.schedule_next().unwrap();
     let reference = scheduler
