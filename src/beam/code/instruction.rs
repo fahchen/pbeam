@@ -1790,12 +1790,18 @@ pub(crate) enum BinarySegment {
     /// `{atom,string},0,8,nil,{string,<<"count: ">>},{integer,7}` when atom
     /// 3 is `string` and `StrT` starts with `count: `.
     String(Vec<u8>),
-    /// A `binary` segment of size `all` and unit 8: the binary in `source`.
-    /// `segment` is the segment number of the compiler, which the ERTS
-    /// `error_info` gives. Example: `[0x42, 0x20, 0x80, 0x02, 0x03, 0x52]`
-    /// is `{atom,binary},2,8,nil,{x,0},{atom,all}` when atom 4 is `binary`
-    /// and atom 5 is `all`.
-    BinaryAll { segment: u64, source: Operand },
+    /// A `binary` segment of size `all` and unit 1, 2, 4, or 8: the binary
+    /// in `source`. `segment` is the segment number of the compiler, which
+    /// the ERTS `error_info` gives. The size in bits of the binary must be a
+    /// multiple of `unit` (`erts_bs_put_binary_all`, erl_bits.c:1321-1324).
+    /// Example: `[0x42, 0x20, 0x80, 0x02, 0x03, 0x52]` is
+    /// `{atom,binary},2,8,nil,{x,0},{atom,all}` when atom 4 is `binary` and
+    /// atom 5 is `all`.
+    BinaryAll {
+        segment: u64,
+        unit: u64,
+        source: Operand,
+    },
     /// An `append` segment of size `all` as the first segment: the binary
     /// in `source` is the start of the result. The compiler writes it for
     /// `<<A/binary, ...>>`, and the ERTS JIT runs it only as the first
@@ -3164,7 +3170,11 @@ fn read_binary_segments(
                         && matches!(unit, 1 | 2 | 4 | 8)
                         && size.is_static("all") =>
                 {
-                    BinarySegment::BinaryAll { segment, source }
+                    BinarySegment::BinaryAll {
+                        segment,
+                        unit,
+                        source,
+                    }
                 }
                 Operand::Value(Term::Atom(size))
                     if kind.is_static("append") && index == 0 && size.is_static("all") =>

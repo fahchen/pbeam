@@ -2526,7 +2526,11 @@ fn reads_bs_create_bin_segments_and_rejects_malformed_lists() {
         segments.as_slice(),
         [
             BinarySegment::String(text),
-            BinarySegment::BinaryAll { segment: 2, source: Operand::X(0) },
+            BinarySegment::BinaryAll {
+                segment: 2,
+                unit: 8,
+                source: Operand::X(0)
+            },
         ] if text == b"count: "
     ));
     // {atom,binary} of unit 3 and size all; {atom,binary} of unit 8 and
@@ -2561,6 +2565,7 @@ fn reads_bs_create_bin_segments_and_rejects_malformed_lists() {
             },
             BinarySegment::BinaryAll {
                 segment: 2,
+                unit: 8,
                 source: Operand::X(1)
             },
         ]

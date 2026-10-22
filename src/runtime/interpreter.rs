@@ -5412,9 +5412,10 @@ impl BinarySegmentFailure {
 /// the code point of a `utf8` segment.
 enum BinaryPart<'a> {
     Bytes(Cow<'a, [u8]>, usize),
-    /// A `binary` segment. The handle keeps the arrays of the binary, so an
-    /// append can share them and copy no byte of the segment.
-    Shared(Binary, usize),
+    /// A `binary` segment: its binary, the reductions of its copy, its
+    /// segment number, and its unit. The handle keeps the arrays of the
+    /// binary, so an append can share them and copy no byte of the segment.
+    Shared(Binary, usize, u64, u64),
     Integer {
         segment: u64,
         value: Term,
@@ -5461,6 +5462,19 @@ impl BinaryPart<'_> {
                 bits,
                 ..
             } => float_segment_bits(*segment, value, *bits).err(),
+            // A size in bits that is not a multiple of the unit fails in the
+            // construct pass (`erts_bs_put_binary_all`, erl_bits.c:1321-1324;
+            // `BSC_INFO_UNIT`, jit/arm/instr_bs.cpp:2033-2047).
+            BinaryPart::Shared(binary, _, segment, unit)
+                if !(binary.bit_size() as u64).is_multiple_of(*unit) =>
+            {
+                Some(BinarySegmentFailure::badarg(
+                    *segment,
+                    "binary",
+                    "unit",
+                    Term::Binary(binary.clone()),
+                ))
+            }
             _ => None,
         }
     }
@@ -5469,7 +5483,7 @@ impl BinaryPart<'_> {
     fn has_bits(&self) -> bool {
         match self {
             BinaryPart::Bytes(bytes, _) => !bytes.is_empty(),
-            BinaryPart::Shared(binary, _) => binary.bit_size() > 0,
+            BinaryPart::Shared(binary, ..) => binary.bit_size() > 0,
             BinaryPart::Integer { bits, .. } | BinaryPart::Float { bits, .. } => *bits > 0,
             BinaryPart::Utf8(_) | BinaryPart::Utf16 { .. } | BinaryPart::Utf32 { .. } => true,
         }
@@ -5599,7 +5613,7 @@ fn shared_append_arrays(parts: &[BinaryPart<'_>]) -> Option<Vec<(Arc<Vec<u8>>, u
             }
             // The chunks of a bitstring are not its bits, so the writer
             // copies its bits.
-            BinaryPart::Shared(binary, reductions) if binary.bit_size().is_multiple_of(8) => {
+            BinaryPart::Shared(binary, reductions, ..) if binary.bit_size().is_multiple_of(8) => {
                 for chunk in binary.chunks() {
                     arrays.push((chunk, *reductions));
                 }
@@ -5694,8 +5708,9 @@ fn integer_type_failure(parts: &[BinaryPart], first: usize) -> BinarySegmentFail
 /// `integer_type_failure`; else it writes the integer with no reduction
 /// (`erts_bs_put_integer_be` and `erts_bs_put_integer_le`, erl_bits.c:
 /// 926-1167). A `utf8` segment writes the UTF-8 bytes of its code point
-/// (`emit_construct_utf8`). PBeam has no bitstring that is not a binary,
-/// so the unit 8 test of `erts_bs_put_binary_all` always passes.
+/// (`emit_construct_utf8`). A `binary` part whose size in bits is not a
+/// multiple of its unit fails with `unit` in the construct pass
+/// (`erts_bs_put_binary_all`, erl_bits.c:1321-1324).
 ///
 /// The result of an `append` segment that adds bits keeps the arrays of the
 /// append binary and of each later `binary` or `string` segment, so the
@@ -5712,7 +5727,7 @@ fn integer_type_failure(parts: &[BinaryPart], first: usize) -> BinarySegmentFail
 /// write(&mut process, &Operand::X(0), Term::binary(b"3".to_vec()))?;
 /// let segments = [
 ///     BinarySegment::String(b"count: ".to_vec()),
-///     BinarySegment::BinaryAll { segment: 2, source: Operand::X(0) },
+///     BinarySegment::BinaryAll { segment: 2, unit: 8, source: Operand::X(0) },
 /// ];
 /// assert_eq!(
 ///     create_binary(atoms, &mut process, &segments)?,
@@ -5758,7 +5773,11 @@ fn create_binary(
             BinarySegment::String(text) => {
                 parts.push(BinaryPart::Bytes(Cow::Borrowed(text.as_slice()), 0));
             }
-            BinarySegment::BinaryAll { segment, source } => {
+            BinarySegment::BinaryAll {
+                segment,
+                unit,
+                source,
+            } => {
                 let mut value = read(process, source)?;
                 let Term::Binary(bytes) = &mut value else {
                     return Ok(Err(BinarySegmentFailure::badarg(
@@ -5766,7 +5785,12 @@ fn create_binary(
                     )));
                 };
                 let reductions = bytes.bit_size() / BITS_PER_REDUCTION;
-                parts.push(BinaryPart::Shared(bytes.clone(), reductions));
+                parts.push(BinaryPart::Shared(
+                    bytes.clone(),
+                    reductions,
+                    *segment,
+                    *unit,
+                ));
             }
             BinarySegment::Append {
                 segment,
@@ -6000,7 +6024,10 @@ fn write_binary_parts(
                 writer.push_bytes(bytes);
                 process.bump_reductions(i32::try_from(*reductions).unwrap_or(i32::MAX));
             }
-            BinaryPart::Shared(binary, reductions) => {
+            BinaryPart::Shared(..) if let Some(failure) = part.type_failure() => {
+                return Ok(Err(failure));
+            }
+            BinaryPart::Shared(binary, reductions, ..) => {
                 writer.push_binary(binary);
                 process.bump_reductions(i32::try_from(*reductions).unwrap_or(i32::MAX));
             }

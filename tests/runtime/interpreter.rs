@@ -3,15 +3,16 @@ use std::{cell::RefCell, collections::HashMap, sync::Arc};
 use super::bif::{BIFS, BifId, BifResult, resolve, resolve_calls};
 use super::code_table::export_frame_calls;
 use super::{
-    BeamProgram, BinaryPart, CodeTable, Issuer, Outcome, Register, Scheduler, StackSlot,
-    call_arguments, function_at_label, private_append, read, read_bif_arguments, read_operand,
-    read_owned_bif_arguments, read_ref, take_owned, write, write_operand,
+    BeamProgram, BinaryPart, BinarySegmentFailure, CodeTable, ExceptionClass, Issuer, Outcome,
+    Register, Scheduler, StackSlot, call_arguments, create_binary, function_at_label,
+    private_append, read, read_bif_arguments, read_operand, read_owned_bif_arguments, read_ref,
+    take_owned, write, write_operand,
 };
 use crate::{
     BeamModule, Map, Term,
     beam::{
         Import,
-        code::{BinaryMatchCommand, Instruction, Operand, TestKind, TestOperand},
+        code::{BinaryMatchCommand, BinarySegment, Instruction, Operand, TestKind, TestOperand},
     },
     runtime::{
         capability::{AllowAll, Capability, Policy},
@@ -6008,4 +6009,110 @@ fn a_program_is_send_and_sync_for_a_second_scheduler_thread() {
     // must cross a thread boundary.
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<BeamProgram>();
+}
+
+#[test]
+fn checks_the_unit_of_a_binary_segment_of_a_bitstring() {
+    // ERTS fails a `binary` segment of size `all` whose size in bits is not
+    // a multiple of its unit (`erts_bs_put_binary_all`, erl_bits.c:1321-1324):
+    // `f(B) -> <<0:4, B/binary>>.` raises `badarg` with the cause
+    // `{2,binary,unit,<<1,2:4>>}` for `f(<<1,2:4>>)`. With unit 1, the pinned
+    // ERTS gives `<<0:4, (<<1,2:4>>)/bitstring>>` = <<0,18>>.
+    let atoms = AtomTable::new();
+    let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![]);
+    let bitstring = Term::Binary(Binary::from(vec![1, 2 << 4]).bits(0, 12));
+    write(&mut process, &Operand::X(0), bitstring.clone()).unwrap();
+    let segments = |unit| {
+        [
+            BinarySegment::Integer {
+                segment: 1,
+                unit: 1,
+                little: false,
+                source: Operand::Value(Term::Integer(0)),
+                size: Operand::Value(Term::Integer(4)),
+            },
+            BinarySegment::BinaryAll {
+                segment: 2,
+                unit,
+                source: Operand::X(0),
+            },
+        ]
+    };
+    assert_eq!(
+        create_binary(&atoms, &mut process, &segments(8)).unwrap(),
+        Err(BinarySegmentFailure::badarg(2, "binary", "unit", bitstring))
+    );
+    assert_eq!(
+        create_binary(&atoms, &mut process, &segments(1)).unwrap(),
+        Ok(Term::binary(vec![0, 18]))
+    );
+}
+
+#[test]
+fn writes_the_bits_of_a_bitstring_segment_after_an_append() {
+    // The pinned ERTS gives `<<A/binary, B/bitstring, C/bitstring>>` =
+    // <<97,98,18>> for A = <<"ab">>, B = <<1:4>>, and C = <<2:4>>. The
+    // chunks of a bitstring are not its bits, so the append copies them in
+    // the writer and does not share the arrays.
+    let atoms = AtomTable::new();
+    let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![]);
+    write(&mut process, &Operand::X(0), Term::binary(b"ab".to_vec())).unwrap();
+    let nibble = |value: u8| Term::Binary(Binary::from(vec![value << 4]).bits(0, 4));
+    write(&mut process, &Operand::X(1), nibble(1)).unwrap();
+    write(&mut process, &Operand::X(2), nibble(2)).unwrap();
+    let segments = [
+        BinarySegment::Append {
+            segment: 1,
+            unit: 8,
+            source: Operand::X(0),
+        },
+        BinarySegment::BinaryAll {
+            segment: 2,
+            unit: 1,
+            source: Operand::X(1),
+        },
+        BinarySegment::BinaryAll {
+            segment: 3,
+            unit: 1,
+            source: Operand::X(2),
+        },
+    ];
+    assert_eq!(
+        create_binary(&atoms, &mut process, &segments).unwrap(),
+        Ok(Term::binary(vec![97, 98, 18]))
+    );
+}
+
+#[test]
+fn rejects_a_bitstring_in_the_byte_bifs() {
+    // The pinned ERTS gives, for B = <<1,2:4>>: `iolist_to_binary(B)`,
+    // `list_to_binary([B])`, and `erlang:iolist_to_iovec([B])` raise
+    // `badarg`, and `unicode:bin_is_7bit(B)` gives `false` (measured with
+    // `mise run erts-eval`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let bitstring = || Term::Binary(Binary::from(vec![1, 2 << 4]).bits(0, 12));
+    let mut call = |module, function, argument| {
+        program
+            .bif(&mut scheduler, module, function, vec![argument])
+            .unwrap()
+    };
+    let badarg = |result: BifResult| {
+        matches!(
+            result,
+            BifResult::Raise { class: ExceptionClass::Error, reason }
+                if reason == Term::static_atom("badarg")
+        )
+    };
+    let is_false = |result: BifResult| matches!(result, BifResult::Value(value) if value == Term::static_atom("false"));
+    assert!(badarg(call("erlang", "iolist_to_binary", bitstring())));
+    let listed = || Term::list_from(vec![bitstring()]);
+    assert!(badarg(call("erlang", "list_to_binary", listed())));
+    assert!(badarg(call("erlang", "iolist_to_iovec", listed())));
+    assert!(is_false(call("unicode", "bin_is_7bit", bitstring())));
+    // A bitstring of 7-bit bits is not a binary either.
+    let ascii = Term::Binary(Binary::from(b"ab".to_vec()).bits(0, 12));
+    assert!(is_false(call("unicode", "bin_is_7bit", ascii)));
 }
