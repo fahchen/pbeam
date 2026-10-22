@@ -559,3 +559,130 @@ fn runs_the_nif_manifest_gate_before_the_bundle_build() {
     );
     fs::remove_dir_all(&directory).unwrap();
 }
+
+/// Compile `fixtures/nif/nif_add.c` with `defines` into the shared library
+/// `path` for the host, as `tests/integration/nif_library.rs` does.
+fn nif_add_library(path: &Path, defines: &[&str]) {
+    let shared: &[&str] = if cfg!(target_os = "macos") {
+        &["-bundle", "-undefined", "dynamic_lookup"]
+    } else {
+        &["-shared", "-fPIC"]
+    };
+    let output = Command::new("cc")
+        .args(shared)
+        .arg(concat!(
+            "-I",
+            env!("CARGO_MANIFEST_DIR"),
+            "/vendor/erts/include"
+        ))
+        .arg("-o")
+        .arg(path)
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fixtures/nif/nif_add.c"
+        ))
+        .args(defines)
+        .output()
+        .expect("cc runs");
+    assert!(output.status.success(), "{output:?}");
+}
+
+/// Run `pbeam_bundle check-nifs` on `directory` and return the exit code,
+/// the stdout, and the stderr.
+fn check_nifs(directory: &Path) -> (Option<i32>, String, String) {
+    let result = tool()
+        .arg("check-nifs")
+        .arg(directory)
+        .output()
+        .expect("the tool runs");
+    (
+        result.status.code(),
+        String::from_utf8_lossy(&result.stdout).into_owned(),
+        String::from_utf8_lossy(&result.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn checks_a_shipped_nif_library_against_its_module() {
+    // nif_add: -nifs([add/2, other/0]) and load(Path, Info) ->
+    // erlang:load_nif(Path, Info). The path is not a literal string, so the
+    // gate finds the library by the name in its entry, as erlang:load_nif/2
+    // requires the name of the module (beam/erl_nif.c:4820-4823).
+    let directory = directory("shipped-nif");
+    let release = directory.join("release");
+    let ebin = release.join("lib/app-1/ebin");
+    let private = release.join("lib/app-1/priv");
+    fs::create_dir_all(&ebin).unwrap();
+    fs::create_dir_all(&private).unwrap();
+    fs::copy(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/nif/nif_add.beam"),
+        ebin.join("nif_add.beam"),
+    )
+    .unwrap();
+    let failed = "pbeam_bundle: the NIF manifest gate failed:\n\
+                  nif_add: the library name of erlang:load_nif/2 is not a literal string\n";
+
+    // Without a shipped library, the module fails the build before the
+    // output.
+    assert_eq!(
+        bundle_release(&release),
+        (Some(1), String::new(), failed.to_owned(), false)
+    );
+
+    // A library that the loader cannot open can be the library of the
+    // module, so the gate names it with the erlang:load_nif/2 text.
+    fs::write(private.join("broken.so"), b"not a shared library").unwrap();
+    let (status, stdout, stderr) = check_nifs(&release);
+    let broken = format!(
+        "{failed}nif_add: NIF library \"{}\" does not load: Failed to load NIF library",
+        private.join("broken.so").display()
+    );
+    assert_eq!((status, stdout.as_str()), (Some(1), ""));
+    assert!(stderr.starts_with(&broken), "{stderr}");
+    fs::remove_file(private.join("broken.so")).unwrap();
+
+    // A library of another module does not take the load, and the library
+    // with the name of the module does: the build passes and ships both.
+    nif_add_library(&private.join("a_other.so"), &["-DNIF_ADD_NAME=nif_other"]);
+    nif_add_library(&private.join("nif_add.so"), &[]);
+    assert_eq!(
+        bundle_release(&release),
+        (Some(0), String::new(), String::new(), true)
+    );
+    let bytes = fs::read(directory.join("out")).unwrap();
+    let bundle = pbeam_runtime::Bundle::parse(&bytes).unwrap();
+    for name in ["a_other.so", "nif_add.so"] {
+        assert_eq!(
+            bundle.resource(&format!("lib/app-1/priv/{name}")),
+            Some(&fs::read(private.join(name)).unwrap()[..])
+        );
+    }
+
+    // A library with a function that the module does not define fails with
+    // the erlang:load_nif/2 text (beam/erl_nif.c:4845-4900).
+    nif_add_library(&private.join("nif_add.so"), &["-DNIF_ADD_FUNCTION"]);
+    let mismatch = format!(
+        "pbeam_bundle: the NIF manifest gate failed:\n\
+         nif_add: NIF library \"{}\" does not load: Function not found nif_add:sub/2\n",
+        private.join("nif_add.so").display()
+    );
+    assert_eq!(check_nifs(&release), (Some(1), String::new(), mismatch));
+
+    // PBeam needs nif_start for a NIF shared library; nif_bare has
+    // -nifs([]) and no nif_start.
+    fs::remove_file(private.join("nif_add.so")).unwrap();
+    fs::remove_file(ebin.join("nif_add.beam")).unwrap();
+    fs::copy(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/nif/nif_bare.beam"),
+        ebin.join("nif_bare.beam"),
+    )
+    .unwrap();
+    nif_add_library(&private.join("nif_bare.so"), &["-DNIF_ADD_NAME=nif_bare"]);
+    let bare = format!(
+        "pbeam_bundle: the NIF manifest gate failed:\n\
+         nif_bare: NIF library \"{}\" does not load: the module has no nif_start instruction, which PBeam needs for a NIF shared library\n",
+        private.join("nif_bare.so").display()
+    );
+    assert_eq!(check_nifs(&release), (Some(1), String::new(), bare));
+    fs::remove_dir_all(&directory).unwrap();
+}
