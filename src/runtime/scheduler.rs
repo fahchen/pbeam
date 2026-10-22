@@ -2011,16 +2011,17 @@ impl Scheduler {
 
     /// Start an `erlang:processes/0` read of the process table by the
     /// current process, as `ptab_list_bif_engine` adds its invocation to
-    /// the deleted list (`erl_ptab.c:922-951`).
+    /// the deleted list (`erl_ptab.c:922-951`), and return the pids of its
+    /// first chunk, up to `end` (see `ProcessTable::start_list`).
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// scheduler.ptab_list_start();
+    /// assert_eq!(scheduler.ptab_list_start(1000), vec![ProcessId(0)]);
     /// ```
-    pub(super) fn ptab_list_start(&mut self) {
+    pub(super) fn ptab_list_start(&mut self, end: u64) -> Vec<ProcessId> {
         let id = self.current_process().id;
-        self.node.processes.start_list(id);
+        self.node.processes.start_list(id, end)
     }
 
     /// Return the pid of each process of the next indices of the

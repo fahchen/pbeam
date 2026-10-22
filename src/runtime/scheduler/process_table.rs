@@ -318,15 +318,21 @@ impl ProcessTable {
     }
 
     /// Start an `erlang:processes/0` read of the table by the process
-    /// `reader`: a process that enters the table after this start is not in
-    /// the result.
+    /// `reader`, and return the pid of each process with a table index
+    /// below `end`, in index order: a process that enters the table after
+    /// this start is not in the result. The start and the read of the
+    /// first chunk hold the lock of the read state together, as ERTS holds
+    /// the table lock from the start of the call to the end of its first
+    /// chunk (`erl_ptab.c:905-1020`). A delete between them would have the
+    /// interval of the start, and neither the chunk nor the deleted list
+    /// would give its pid.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// table.start_list(ProcessId(0));
+    /// assert_eq!(table.start_list(ProcessId(0), 1000), vec![ProcessId(0)]);
     /// ```
-    pub(super) fn start_list(&self, reader: ProcessId) {
+    pub(super) fn start_list(&self, reader: ProcessId, end: u64) -> Vec<ProcessId> {
         let mut listing = self
             .listing
             .write()
@@ -342,6 +348,7 @@ impl ProcessTable {
         listing.readers.insert(reader, start);
         count_work(1);
         *listing.positions.entry(pos).or_default() += 1;
+        self.read_chunk(&mut listing, reader, end)
     }
 
     /// Return the pid of each process with a table index from the first
@@ -357,14 +364,20 @@ impl ProcessTable {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(table.list_chunk(ProcessId(0), 1000), vec![ProcessId(0)]);
+    /// assert_eq!(table.list_chunk(ProcessId(0), 2000), vec![ProcessId(1000)]);
     /// ```
     pub(super) fn list_chunk(&self, reader: ProcessId, end: u64) -> Vec<ProcessId> {
         let mut listing = self
             .listing
             .write()
             .expect("the process list state is not poisoned");
-        let listing = &mut *listing;
+        self.read_chunk(&mut listing, reader, end)
+    }
+
+    /// Read the next chunk of the read of `reader` up to `end` while the
+    /// caller holds the lock of the read state `listing` (see
+    /// [`Self::list_chunk`]).
+    fn read_chunk(&self, listing: &mut Listing, reader: ProcessId, end: u64) -> Vec<ProcessId> {
         let reader = listing
             .readers
             .get_mut(&reader)

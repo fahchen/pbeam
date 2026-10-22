@@ -72,9 +72,8 @@ fn gives_the_processes_of_each_block_in_index_order() {
         [(5, ProcessId(wrapped)), (BLOCK - 1, ProcessId(BLOCK - 1))]
     );
     assert_eq!(table.indexed(6, BLOCK - 1, 10, |_| true), []);
-    table.start_list(ProcessId(0));
     assert_eq!(
-        table.list_chunk(ProcessId(0), BLOCK + 2),
+        table.start_list(ProcessId(0), BLOCK + 2),
         [
             ProcessId(0),
             ProcessId(5),
@@ -136,8 +135,7 @@ fn bounds_the_work_of_each_step_of_overlapping_reads() {
     let mut max = 0;
     let mut victims = 1000..2000;
     for (reader, exits) in readers.into_iter().zip([334, 333, 333]) {
-        table.start_list(reader);
-        assert_eq!(table.list_chunk(reader, 1000).len(), 3);
+        assert_eq!(table.start_list(reader, 1000).len(), 3);
         for id in victims.by_ref().take(exits) {
             let ((), cost) = work(&table, |table| table.remove(ProcessId(id), || {}));
             max = max.max(cost);
@@ -186,13 +184,11 @@ fn drops_the_entries_of_an_exited_read_in_bounded_steps() {
     for id in (0..2).chain(1000..1100).chain([5000]) {
         table.insert(ProcessId(id), 0);
     }
-    table.start_list(ProcessId(0));
-    assert_eq!(table.list_chunk(ProcessId(0), PTAB_SIZE).len(), 103);
+    assert_eq!(table.start_list(ProcessId(0), PTAB_SIZE).len(), 103);
     for id in 1000..1050 {
         table.remove(ProcessId(id), || {});
     }
-    table.start_list(ProcessId(1));
-    assert_eq!(table.list_chunk(ProcessId(1), PTAB_SIZE).len(), 53);
+    assert_eq!(table.start_list(ProcessId(1), PTAB_SIZE).len(), 53);
     let ((), cost) = work(&table, |table| table.remove(ProcessId(0), || {}));
     assert!(cost <= 4);
     assert_eq!(table.listing.read().unwrap().deleted.len(), 49);
@@ -210,4 +206,31 @@ fn drops_the_entries_of_an_exited_read_in_bounded_steps() {
     let left = table.listing.read().unwrap().deleted.len();
     table.remove(ProcessId(5000), || {});
     assert_eq!(table.listing.read().unwrap().deleted.len(), left - 2);
+}
+
+/// A process that exists for the whole read is in the result, also when
+/// another scheduler deletes a process of the first chunk and spawns one
+/// right after the start of the read. The start and the first chunk are
+/// one step of the table, as in ERTS (`erl_ptab.c:905-1020`), so each
+/// table step after the start has a later interval than the start: the
+/// first chunk lists the process that exists, and the deleted list gives
+/// the process that left after the first chunk.
+#[test]
+fn lists_each_process_that_exists_for_the_whole_read() {
+    let table = ProcessTable::default();
+    for id in [0, 5, 2000] {
+        table.insert(ProcessId(id), 0);
+    }
+    assert_eq!(
+        table.start_list(ProcessId(0), 1000),
+        [ProcessId(0), ProcessId(5)]
+    );
+    // Another scheduler: a spawn after the start and an exit in the first
+    // chunk.
+    table.insert(ProcessId(7), 1);
+    table.remove(ProcessId(5), || {});
+    assert_eq!(table.list_chunk(ProcessId(0), PTAB_SIZE), [ProcessId(2000)]);
+    assert_eq!(table.next_deleted(ProcessId(0)), Some((None, true)));
+    assert_eq!(table.next_deleted(ProcessId(0)), None);
+    table.end_list(ProcessId(0));
 }
