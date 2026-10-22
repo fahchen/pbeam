@@ -34,10 +34,8 @@ fn step_inserting(
     let scheduler = &mut *context.scheduler;
     // The caller of a step found the table: the take of the call, or the
     // check of its resumption, found it (`erl_db.c:2077-2107`, `2223-2253`).
-    let (id, busy) = scheduler
-        .ets
-        .find(&scheduler.atoms, table)
-        .expect("the caller found the table");
+    let ets = scheduler.ets.shared();
+    let (id, busy) = (ets.find(&scheduler.atoms, table)).expect("the caller found the table");
     // The process that started the insert is the only one that gets its
     // result: a later insert of the same table takes the table after the
     // call of the earlier one returned (`erl_db.c:2223-2253`).
@@ -52,9 +50,7 @@ fn step_inserting(
     // The table of the caller has the list insert that it did not finish:
     // the step of a call of the table, or the completion of the insert,
     // clears it (`erl_db.c:2185-2195`).
-    let mut inserting = scheduler
-        .ets
-        .busy(&scheduler.atoms, &Term::Reference(id))
+    let mut inserting = (ets.busy(&scheduler.atoms, &Term::Reference(id)))
         .expect("the caller found the busy insert");
     let owner = inserting
         .busy
@@ -63,13 +59,15 @@ fn step_inserting(
         .owner;
     let (used, result) = inserting.step_busy(&scheduler.atoms, units);
     drop(inserting);
+    drop(ets);
     if let Some(value) = result {
         // The state of the insert lives with the process that started it,
         // so the result stays for it after the table goes away, and the
         // process reads it in its next turn (`erl_db.c:2142-2150`,
-        // `2232-2244`).
-        if let Some(process) = scheduler.process_mut(owner) {
-            process.insert_result = Some(value);
+        // `2232-2244`). The process can run on another scheduler, so the
+        // result waits in the table store.
+        if scheduler.process(owner).is_some() || scheduler.remote_owner(owner).is_some() {
+            scheduler.ets.exclusive().put_result(owner, value);
         }
     }
     Ok((used, None))
@@ -103,11 +101,13 @@ enum Take {
 /// operation then traps and runs in a later turn (`erl_db.c:782-787`).
 fn help_busy(context: &mut BifContext<'_>, table: &Term) -> Result<Take, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
-    let Some((id, found)) = context.scheduler.ets.find(&context.scheduler.atoms, table) else {
+    let ets = context.scheduler.ets.shared();
+    let Some((id, found)) = ets.find(&context.scheduler.atoms, table) else {
         return Ok(Take::Free);
     };
     let (started, clearing) = (found.busy.as_ref().map(|busy| busy.owner), found.clearing());
     drop(found);
+    drop(ets);
     if let Some(started) = started {
         if started == caller {
             return Ok(Take::Mine);
@@ -139,10 +139,8 @@ fn help_busy(context: &mut BifContext<'_>, table: &Term) -> Result<Take, BeamErr
         .scheduler
         .current_process_mut()
         .bif_reductions_signed();
-    let (_, charge) = context
-        .scheduler
-        .ets
-        .step_clear(&context.scheduler.atoms, id, reds);
+    let (_, charge) =
+        (context.scheduler.ets.shared()).step_clear(&context.scheduler.atoms, id, reds);
     context
         .scheduler
         .current_process_mut()
@@ -158,13 +156,11 @@ fn help_busy(context: &mut BifContext<'_>, table: &Term) -> Result<Take, BeamErr
 fn finish_busy(context: &mut BifContext<'_>, table: &Term) -> Result<(), BeamError> {
     loop {
         let atoms = &context.scheduler.atoms;
-        let (id, found) = context
-            .scheduler
-            .ets
-            .find(atoms, table)
-            .expect("the caller found the table");
+        let ets = context.scheduler.ets.shared();
+        let (id, found) = ets.find(atoms, table).expect("the caller found the table");
         let idle = found.busy.is_none();
         drop(found);
+        drop(ets);
         if idle {
             return Ok(());
         }
@@ -246,6 +242,13 @@ pub(super) fn new(
     let mut heir = None;
     let mut read_concurrency = false;
     let mut compressed = false;
+    // The `write_concurrency` option of a hash table: the value that
+    // `ets:info/2` gives for a fine-locked table, whether the table is fine
+    // locked, and whether its counters are decentralized
+    // (`erl_db.c:2585-2658`, `2714-2716`).
+    let mut concurrency = Term::static_atom("false");
+    let mut decentralized = false;
+    let mut decentralized_option = None;
     for option in options {
         match option {
             Term::Atom(atom) => {
@@ -279,9 +282,17 @@ pub(super) fn new(
                         if value.is_one_of(&["true", "false", "auto"]) =>
                     {
                         explicit_locks = false;
+                        if value.is_static("auto") {
+                            decentralized = true;
+                        } else if value.is_static("true") {
+                            decentralized = false;
+                        }
+                        concurrency = Term::Atom(value.clone());
                     }
                     ("write_concurrency", Term::Tuple(locks)) if is_lock_count(locks) => {
                         explicit_locks = true;
+                        decentralized = true;
+                        concurrency = value.clone();
                     }
                     ("read_concurrency", Term::Atom(value))
                         if value.is_one_of(&["true", "false"]) =>
@@ -289,7 +300,10 @@ pub(super) fn new(
                         read_concurrency = value.is_static("true");
                     }
                     ("decentralized_counters", Term::Atom(value))
-                        if value.is_one_of(&["true", "false"]) => {}
+                        if value.is_one_of(&["true", "false"]) =>
+                    {
+                        decentralized_option = Some(value.is_static("true"));
+                    }
                     ("heir", Term::Atom(value)) if value.is_static("none") => {
                         heir = None;
                     }
@@ -304,46 +318,57 @@ pub(super) fn new(
             _ => return Ok(BifResult::badarg()),
         }
     }
-    if (table_type == TableType::OrderedSet && explicit_locks)
-        || (named
-            && context
-                .scheduler
-                .ets
-                .name_in_use(context.scheduler.atoms.name_of(name)))
-    {
+    if table_type == TableType::OrderedSet && explicit_locks {
         return Ok(BifResult::badarg());
     }
     let owner = context.scheduler.current_process_mut().id;
-    if let Some(heir) = heir
-        && heir != owner
-        && context.scheduler.process(heir).is_some()
-    {
-        // ponytail: no table transfer to a heir; see "ETS tables" in docs/erts-differences.md.
-        return Err(error(format!("unsupported ets:new/2 heir {heir:?}")));
-    }
     let table = context.scheduler.make_ref()?;
     let mut made = Table::new(owner, access, keypos, table_type);
     made.set_name(context.scheduler.atoms.name_of(name));
     let name = named.then_some(name);
-    // A run has one scheduler, so ERTS gives no fine locking
-    // (`DB_LOCK_FREE`, `erl_db.c:2656-2657`) and centralized counters
-    // (`erl_db.c:2776-2779`). `ets:info/2` then gives `false` for
-    // `write_concurrency` and `decentralized_counters`.
+    // A run with one scheduler gives no fine locking (`DB_LOCK_FREE`,
+    // `erl_db.c:2656-2657`), and neither does a `private` table
+    // (`erl_db.c:2743`). A table that is not fine locked has centralized
+    // counters (`erl_db.c:2776-2779`), so `ets:info/2` gives `false` for
+    // `write_concurrency` and `decentralized_counters`. PBeam keeps one
+    // lock for each table in each case.
+    let fine = context.scheduler.is_multi()
+        && !matches!(access, Access::Private)
+        && concurrency != Term::static_atom("false");
+    let decentralized = fine && decentralized_option.unwrap_or(decentralized);
     made.set_options(
-        Term::static_atom("false"),
+        if fine {
+            concurrency
+        } else {
+            Term::static_atom("false")
+        },
         read_concurrency,
-        false,
+        decentralized,
         compressed,
     );
     // A heir that is not alive, or that is another live process, acts as
     // `none` only when it is not alive; the owner as heir stays the owner
     // (`erl_db.c:5319-5337`).
     made.set_heir(heir.filter(|heir| *heir == owner));
-    context.scheduler.ets.create(
-        table,
-        name.map(|name| context.scheduler.atoms.name_of(name)),
-        made,
-    );
+    let name_text = name.map(|name| context.scheduler.atoms.name_of(name));
+    let mut ets = context.scheduler.ets.exclusive();
+    // The name check and the create take one lock, so no other scheduler
+    // takes the name between them, as `insert_named_tab`
+    // (`erl_db.c:1000-1047`) checks the name after `make_btid`
+    // (`erl_db.c:2811-2831`).
+    if name_text.is_some_and(|name| ets.name_in_use(name)) {
+        return Ok(BifResult::badarg());
+    }
+    if let Some(heir) = heir
+        && heir != owner
+        && (context.scheduler.process(heir).is_some()
+            || context.scheduler.remote_owner(heir).is_some())
+    {
+        // ponytail: no table transfer to a heir; see "ETS tables" in docs/erts-differences.md.
+        return Err(error(format!("unsupported ets:new/2 heir {heir:?}")));
+    }
+    ets.create(table, name_text, made);
+    drop(ets);
     Ok(Value(name.map_or(Term::Reference(table), |name| {
         Term::Atom(name.clone())
     })))
@@ -428,11 +453,13 @@ fn insert_objects(
     // A cons cell with a tail that is not `[]`: at least two objects, or an
     // improper list.
     if objects.cons_cell().is_some_and(|(_, tail)| !tail.is_nil()) {
-        let Some((id, found)) = context.scheduler.ets.find(&context.scheduler.atoms, table) else {
+        let ets = context.scheduler.ets.shared();
+        let Some((id, found)) = ets.find(&context.scheduler.atoms, table) else {
             return Ok(BifResult::badarg());
         };
         let (keypos, bag) = (found.keypos(), found.table_type() == TableType::Bag);
         drop(found);
+        drop(ets);
         let state = ListState {
             done: 0,
             bag: bag.then(Term::nil),
@@ -449,11 +476,8 @@ fn insert_objects(
             arguments: vec![table.clone(), objects.clone()],
         });
     }
-    let Some(mut table) = context
-        .scheduler
-        .ets
-        .write(&context.scheduler.atoms, table, caller)
-    else {
+    let ets = context.scheduler.ets.shared();
+    let Some(mut table) = ets.write(&context.scheduler.atoms, table, caller) else {
         return Ok(BifResult::badarg());
     };
     let objects: Vec<&Term> = match objects.proper_list() {
@@ -469,6 +493,7 @@ fn insert_objects(
     }
     let compared = put_objects(&context.scheduler.atoms, &mut table, &tuples, keypos, new)?;
     drop(table);
+    drop(ets);
     let compared: usize = compared.iter().sum();
     // `consumed_reds / ITERATIONS_PER_RED` (`erl_db.c:2379`).
     let reductions = i32::try_from(compared / 8).unwrap_or(i32::MAX);
@@ -597,12 +622,11 @@ pub(super) fn insert_list(
         // The insert ended in another turn: the process reads its result,
         // as the driver reads `ctx->return_value`, also after the table
         // went away (`erl_db.c:2223-2244`).
-        if let Some(result) = context.scheduler.current_process_mut().insert_result.take() {
+        let caller = context.scheduler.current_process_mut().id;
+        if let Some(result) = context.scheduler.ets.exclusive().take_result(caller) {
             return Ok(Value(result));
         }
-        if context
-            .scheduler
-            .ets
+        if (context.scheduler.ets.shared())
             .find(&context.scheduler.atoms, &table)
             .is_none()
         {
@@ -656,12 +680,8 @@ pub(super) fn insert_list(
             if let Take::Help | Take::Clear = help_busy(&mut *context, &table)? {
                 break 'work None;
             }
-            let Some(mut table) =
-                context
-                    .scheduler
-                    .ets
-                    .write(&context.scheduler.atoms, &table, caller)
-            else {
+            let ets = context.scheduler.ets.shared();
+            let Some(mut table) = ets.write(&context.scheduler.atoms, &table, caller) else {
                 break 'work Some(BifResult::badarg());
             };
             let tuples = tuples();
@@ -695,11 +715,8 @@ pub(super) fn insert_list(
             if let Take::Help | Take::Clear = help_busy(&mut *context, &table)? {
                 break 'work None;
             }
-            match context
-                .scheduler
-                .ets
-                .write(&context.scheduler.atoms, &table, caller)
-            {
+            let ets = context.scheduler.ets.shared();
+            match ets.write(&context.scheduler.atoms, &table, caller) {
                 Some(mut taken_table) => {
                     let tuples = tuples();
                     let walk = matches!(new, New::Unlocked);
@@ -736,7 +753,7 @@ pub(super) fn insert_list(
             let (used, _) = step_inserting(&mut *context, &table, units.left, Some(caller))?;
             done += used as usize;
             units.left -= used;
-            match context.scheduler.current_process_mut().insert_result.take() {
+            match context.scheduler.ets.exclusive().take_result(caller) {
                 Some(value) => break 'work Some(Value(value)),
                 None => break 'work None,
             }
@@ -1170,11 +1187,8 @@ pub(super) fn lookup_element(
             arguments,
         });
     }
-    let Some(table) = context
-        .scheduler
-        .ets
-        .read(&context.scheduler.atoms, table, caller)
-    else {
+    let ets = context.scheduler.ets.shared();
+    let Some(table) = ets.read(&context.scheduler.atoms, table, caller) else {
         return Ok(BifResult::badarg());
     };
     let Some(index) = index.small_integer().filter(|index| *index >= 1) else {
@@ -1237,11 +1251,8 @@ pub(super) fn lookup(
             arguments: vec![table.clone(), key.clone()],
         });
     }
-    let Some(table) = context
-        .scheduler
-        .ets
-        .read(&context.scheduler.atoms, table, caller)
-    else {
+    let ets = context.scheduler.ets.shared();
+    let Some(table) = ets.read(&context.scheduler.atoms, table, caller) else {
         return Ok(BifResult::badarg());
     };
     let objects = table.objects(&context.scheduler.atoms, key);
@@ -1278,11 +1289,8 @@ pub(super) fn member(
             arguments: vec![table.clone(), key.clone()],
         });
     }
-    let Some(table) = context
-        .scheduler
-        .ets
-        .read(&context.scheduler.atoms, table, caller)
-    else {
+    let ets = context.scheduler.ets.shared();
+    let Some(table) = ets.read(&context.scheduler.atoms, table, caller) else {
         return Ok(BifResult::badarg());
     };
     let found = table.object(&context.scheduler.atoms, key).is_some();
@@ -1320,11 +1328,8 @@ pub(super) fn delete(
             arguments: vec![table.clone(), key.clone()],
         });
     }
-    let Some(mut table) = context
-        .scheduler
-        .ets
-        .write(&context.scheduler.atoms, table, caller)
-    else {
+    let ets = context.scheduler.ets.shared();
+    let Some(mut table) = ets.write(&context.scheduler.atoms, table, caller) else {
         return Ok(BifResult::badarg());
     };
     table.delete(&context.scheduler.atoms, key);
@@ -1358,11 +1363,8 @@ pub(super) fn take(
             arguments: vec![table.clone(), key.clone()],
         });
     }
-    let Some(mut table) = context
-        .scheduler
-        .ets
-        .write(&context.scheduler.atoms, table, caller)
-    else {
+    let ets = context.scheduler.ets.shared();
+    let Some(mut table) = ets.write(&context.scheduler.atoms, table, caller) else {
         return Ok(BifResult::badarg());
     };
     let objects: Vec<Term> = table
@@ -1413,20 +1415,18 @@ pub(super) fn delete_table(
         });
     }
     let scheduler = &mut *context.scheduler;
-    if scheduler
-        .ets
-        .write(&scheduler.atoms, table, caller)
-        .is_none()
-    {
+    let mut ets = scheduler.ets.exclusive();
+    if ets.write(&scheduler.atoms, table, caller).is_none() {
         return Ok(BifResult::badarg());
     }
-    let id = (scheduler.ets.id(&scheduler.atoms, table)).expect("the caller found the table");
+    let id = (ets.id(&scheduler.atoms, table)).expect("the caller found the table");
     if scheduler.traps_ets_insert(id) {
         return Err(error(
             "unsupported ets:delete/1 of a table that a trapped insert uses: see \"ETS tables\" in docs/erts-differences.md",
         ));
     }
-    let fixations = scheduler.ets.delete_table(id, caller);
+    let fixations = ets.delete_table(id, caller);
+    drop(ets);
     scheduler.schedule_pending_cleanups();
     context
         .scheduler
@@ -1460,7 +1460,7 @@ pub(super) fn delete_trap(context: &mut BifContext<'_>) -> Result<BifResult, Bea
     let process = context.scheduler.current_process_mut();
     let caller = process.id;
     let left = i32::try_from(process.bif_reductions_left()?).unwrap_or(i32::MAX);
-    let Some(rest) = context.scheduler.ets.free_segments(caller, left) else {
+    let Some(rest) = (context.scheduler.ets.exclusive()).free_segments(caller, left) else {
         context
             .scheduler
             .current_process_mut()
@@ -1524,7 +1524,8 @@ pub(super) fn info(
         });
     }
     let atoms = &context.scheduler.atoms;
-    let Some((id, found)) = context.scheduler.ets.find(atoms, table) else {
+    let ets = context.scheduler.ets.shared();
+    let Some((id, found)) = ets.find(atoms, table) else {
         return match table {
             Term::Atom(_) => Ok(Value(Term::static_atom("undefined"))),
             // ponytail: no record of a deleted table; see "ETS tables" in docs/erts-differences.md.
@@ -1545,7 +1546,9 @@ pub(super) fn info(
         Term::Atom(atom) if atom.is_static("protection") => {
             Term::static_atom(access_name(found.access()))
         }
-        Term::Atom(atom) if atom.is_static("write_concurrency") => Term::static_atom("false"),
+        Term::Atom(atom) if atom.is_static("write_concurrency") => {
+            found.write_concurrency().clone()
+        }
         Term::Atom(atom) if atom.is_static("read_concurrency") => {
             boolean_term(found.read_concurrency())
         }
@@ -1556,12 +1559,12 @@ pub(super) fn info(
         ),
         Term::Atom(atom) if atom.is_static("keypos") => Term::Integer(i64::from(found.keypos())),
         Term::Atom(atom) if atom.is_static("node") => Term::static_atom("nonode@nohost"),
-        Term::Atom(atom) if atom.is_static("named_table") => {
-            boolean_term(context.scheduler.ets.named(id))
-        }
+        Term::Atom(atom) if atom.is_static("named_table") => boolean_term(ets.named(id)),
         Term::Atom(atom) if atom.is_static("compressed") => boolean_term(found.compressed()),
         Term::Atom(atom) if atom.is_static("id") => Term::Reference(id),
-        Term::Atom(atom) if atom.is_static("decentralized_counters") => Term::static_atom("false"),
+        Term::Atom(atom) if atom.is_static("decentralized_counters") => {
+            boolean_term(found.decentralized_counters())
+        }
         Term::Atom(atom) if atoms.name_of(atom) == "fixed" => boolean_term(found.is_fixed()),
         Term::Atom(atom)
             if matches!(
@@ -1733,14 +1736,11 @@ fn select_objects(
         return select_trap(context, table, spec, chunk);
     }
     let atoms = &context.scheduler.atoms;
-    let Some(id) = context.scheduler.ets.id(atoms, table) else {
+    let ets = context.scheduler.ets.shared();
+    let Some(id) = ets.id(atoms, table) else {
         return Ok(BifResult::badarg());
     };
-    let Some(table) = context
-        .scheduler
-        .ets
-        .read(atoms, &Term::Reference(id), caller)
-    else {
+    let Some(table) = ets.read(atoms, &Term::Reference(id), caller) else {
         return Ok(BifResult::badarg());
     };
     reject_ordered_set(&table, "ets:select/2,3")?;
@@ -1762,6 +1762,7 @@ fn select_objects(
                 let mut iterations = MATCH_ITERATIONS;
                 state.read(atoms, &compiled, table.chain(bucket), &mut iterations);
                 drop(table);
+                drop(ets);
                 return match_end(context, id, &compiled, state, -1, iterations);
             }
             None => true,
@@ -1778,6 +1779,7 @@ fn select_objects(
     }
     let state = MatchState::new(chunk, table.writes());
     drop(table);
+    drop(ets);
     match_turn(context, id, spec, &compiled, 0, state)
 }
 
@@ -1792,9 +1794,7 @@ fn select_trap(
     chunk: usize,
 ) -> Result<BifResult, BeamError> {
     let atoms = &context.scheduler.atoms;
-    let id = context
-        .scheduler
-        .ets
+    let id = (context.scheduler.ets.shared())
         .id(atoms, table)
         .expect("the caller found the table");
     Ok(BifResult::TrapBif {
@@ -1855,11 +1855,8 @@ pub(super) fn match_trap(
         });
     }
     let atoms = &context.scheduler.atoms;
-    let Some(table) = context
-        .scheduler
-        .ets
-        .read(atoms, &Term::Reference(id), caller)
-    else {
+    let ets = context.scheduler.ets.shared();
+    let Some(table) = ets.read(atoms, &Term::Reference(id), caller) else {
         return Ok(BifResult::badarg());
     };
     let restart = state.writes == u64::MAX;
@@ -1874,6 +1871,7 @@ pub(super) fn match_trap(
         ..state
     };
     drop(table);
+    drop(ets);
     let Some(compiled) = compile_spec(atoms, spec)? else {
         return Ok(BifResult::badarg());
     };
@@ -1931,24 +1929,22 @@ pub(super) fn select_continue(
         });
     }
     let atoms = &context.scheduler.atoms;
-    let Some(id) = context.scheduler.ets.id(atoms, table) else {
+    let ets = context.scheduler.ets.shared();
+    let Some(id) = ets.id(atoms, table) else {
         return Ok(BifResult::badarg());
     };
-    let Some(found) = context
-        .scheduler
-        .ets
-        .read(atoms, &Term::Reference(id), caller)
-    else {
+    let Some(found) = ets.read(atoms, &Term::Reference(id), caller) else {
         return Ok(BifResult::badarg());
     };
     let writes = found.writes();
     let bucket = found.bucket_count();
     drop(found);
-    let Some(compiled) = context.scheduler.ets.program(*program) else {
+    let Some(compiled) = ets.program(*program) else {
         return Ok(BifResult::badarg());
     };
     let spec = match_specification_of(compiled);
     let compiled = compiled.clone();
+    drop(ets);
     if *next >= 0 && *next as usize >= bucket {
         return Ok(BifResult::badarg());
     }
@@ -2067,10 +2063,8 @@ fn match_turn(
     // or the trap of the turn runs after its release: `Some` gives the next
     // bucket of the end, and `None` the trap.
     let end = {
-        let table = context
-            .scheduler
-            .ets
-            .find(&context.scheduler.atoms, &Term::Reference(id));
+        let ets = context.scheduler.ets.shared();
+        let table = ets.find(&context.scheduler.atoms, &Term::Reference(id));
         let (_, table) = table.expect("the caller found the table");
         loop {
             state.read(
@@ -2168,10 +2162,7 @@ fn match_end(
     if !rest.is_empty() || next >= 0 {
         let program = context.scheduler.make_ref()?;
         let size = rest.len() as i64;
-        context
-            .scheduler
-            .ets
-            .remember_program(id, program, compiled.clone());
+        (context.scheduler.ets.exclusive()).remember_program(id, program, compiled.clone());
         let continuation = Term::tuple(vec![
             Term::Reference(id),
             Term::Integer(next),
@@ -2253,23 +2244,25 @@ pub(super) fn safe_fixtable(
     }
     // ERTS reads the table before it checks the second argument
     // (`erl_db.c:1146-1161`).
-    if context
-        .scheduler
-        .ets
+    if (context.scheduler.ets.shared())
         .read(&context.scheduler.atoms, table, caller)
         .is_none()
     {
         return Ok(BifResult::badarg());
     }
-    let id = (context.scheduler.ets.id(&context.scheduler.atoms, table))
-        .expect("the caller found the table");
+    let id = (context
+        .scheduler
+        .ets
+        .shared()
+        .id(&context.scheduler.atoms, table))
+    .expect("the caller found the table");
     let Term::Atom(flag) = flag else {
         return Ok(BifResult::badarg());
     };
     if flag.is_one_of(&["true"]) {
-        context.scheduler.ets.fix_table(id, caller);
+        context.scheduler.ets.exclusive().fix_table(id, caller);
     } else if flag.is_one_of(&["false"]) {
-        context.scheduler.ets.unfix_table(id, caller);
+        context.scheduler.ets.exclusive().unfix_table(id, caller);
     } else {
         return Ok(BifResult::badarg());
     }
@@ -2290,7 +2283,8 @@ pub(super) fn next(
         });
     }
     let atoms = &context.scheduler.atoms;
-    let Some(table) = context.scheduler.ets.read(atoms, table, caller) else {
+    let ets = context.scheduler.ets.shared();
+    let Some(table) = ets.read(atoms, table, caller) else {
         return Ok(BifResult::badarg());
     };
     reject_ordered_set(&table, "ets:next/2")?;
@@ -2324,7 +2318,8 @@ pub(super) fn first(context: &mut BifContext<'_>, table: &Term) -> Result<BifRes
         });
     }
     let atoms = &context.scheduler.atoms;
-    let Some(table) = context.scheduler.ets.read(atoms, table, caller) else {
+    let ets = context.scheduler.ets.shared();
+    let Some(table) = ets.read(atoms, table, caller) else {
         return Ok(BifResult::badarg());
     };
     reject_ordered_set(&table, "ets:first/1")?;
@@ -2360,7 +2355,8 @@ pub(super) fn first_lookup(
         });
     }
     let atoms = &context.scheduler.atoms;
-    let Some(table) = context.scheduler.ets.read(atoms, table, caller) else {
+    let ets = context.scheduler.ets.shared();
+    let Some(table) = ets.read(atoms, table, caller) else {
         return Ok(BifResult::badarg());
     };
     reject_ordered_set(&table, "ets:first_lookup/1")?;
@@ -2415,7 +2411,8 @@ pub(super) fn update_element(
         });
     }
     let atoms = &context.scheduler.atoms;
-    let Some(found) = context.scheduler.ets.find(atoms, table) else {
+    let ets = context.scheduler.ets.shared();
+    let Some(found) = ets.find(atoms, table) else {
         return Ok(BifResult::badarg());
     };
     let keypos = found.1.keypos();
@@ -2427,7 +2424,7 @@ pub(super) fn update_element(
         Some(_) => return Ok(BifResult::badarg()),
         None => None,
     };
-    let Some(mut table) = context.scheduler.ets.write(atoms, table, caller) else {
+    let Some(mut table) = ets.write(atoms, table, caller) else {
         return Ok(BifResult::badarg());
     };
     if !matches!(table.table_type(), TableType::Set | TableType::OrderedSet) {
@@ -2527,7 +2524,8 @@ pub(super) fn info_all(context: &mut BifContext<'_>, table: &Term) -> Result<Bif
         });
     }
     let atoms = &context.scheduler.atoms;
-    let Some((id, found)) = context.scheduler.ets.find(atoms, table) else {
+    let ets = context.scheduler.ets.shared();
+    let Some((id, found)) = ets.find(atoms, table) else {
         return match table {
             Term::Atom(_) => Ok(Value(Term::static_atom("undefined"))),
             Term::Reference(_) => Err(error(
@@ -2537,7 +2535,7 @@ pub(super) fn info_all(context: &mut BifContext<'_>, table: &Term) -> Result<Bif
         };
     };
     let _ = caller;
-    let named = context.scheduler.ets.named(id);
+    let named = ets.named(id);
     let items = [
         ("id", Term::Reference(id)),
         (
@@ -2612,9 +2610,7 @@ pub(super) fn internal_delete_all(
     let caller = context.scheduler.current_process_mut().id;
     match help_busy(&mut *context, table)? {
         Take::Clear => {
-            let id = context
-                .scheduler
-                .ets
+            let id = (context.scheduler.ets.shared())
                 .id(&context.scheduler.atoms, table)
                 .expect("the caller found the table");
             // The call keeps its own arguments: a call that has not started
@@ -2636,10 +2632,11 @@ pub(super) fn internal_delete_all(
         .current_process_mut()
         .bif_reductions_signed();
     let atoms = &context.scheduler.atoms;
-    let Some(id) = context.scheduler.ets.id(atoms, table) else {
+    let ets = context.scheduler.ets.shared();
+    let Some(id) = ets.id(atoms, table) else {
         return Ok(BifResult::badarg());
     };
-    let Some(mut found) = context.scheduler.ets.write(atoms, table, caller) else {
+    let Some(mut found) = ets.write(atoms, table, caller) else {
         return Ok(BifResult::badarg());
     };
     if !matches!(holder, Term::Atom(atom) if atom.is_static("undefined")) {
@@ -2651,6 +2648,7 @@ pub(super) fn internal_delete_all(
         let units = usize::try_from(count).unwrap_or(usize::MAX);
         let done = found.step_clear(atoms, caller, units, left).0;
         drop(found);
+        drop(ets);
         if !done {
             // The clear marks 8 buckets for each reduction. A clear that
             // does not finish marks the table busy, uses the turn, and
@@ -2673,6 +2671,7 @@ pub(super) fn internal_delete_all(
     }
     found.clear(&context.scheduler.atoms);
     drop(found);
+    drop(ets);
     context
         .scheduler
         .current_process_mut()
@@ -2712,14 +2711,15 @@ pub(super) fn internal_select_delete(
         });
     }
     let atoms = &context.scheduler.atoms;
-    let Some(found) = context.scheduler.ets.find(atoms, table) else {
+    let ets = context.scheduler.ets.shared();
+    let Some(found) = ets.find(atoms, table) else {
         return Ok(BifResult::badarg());
     };
     reject_ordered_set(&found.1, "ets:select_delete/2")?;
     let keypos = found.1.keypos();
     let buckets = found.1.bucket_count();
     drop(found);
-    if context.scheduler.ets.write(atoms, table, caller).is_none() {
+    if ets.write(atoms, table, caller).is_none() {
         return Ok(BifResult::badarg());
     }
     let Some(compiled) = compile_spec(atoms, spec)? else {
@@ -2732,11 +2732,7 @@ pub(super) fn internal_select_delete(
     if compiled.matches_nothing(keypos) {
         return Ok(Value(Term::Integer(0)));
     }
-    let mut table = context
-        .scheduler
-        .ets
-        .write(atoms, table, caller)
-        .expect("the caller can write the table");
+    let mut table = (ets.write(atoms, table, caller)).expect("the caller can write the table");
     let mut iterations = 0_usize;
     let mut matches = Vec::new();
     for bucket in 0..buckets {
@@ -2756,6 +2752,7 @@ pub(super) fn internal_select_delete(
     }
     table.shrink();
     drop(table);
+    drop(ets);
     context
         .scheduler
         .current_process_mut()

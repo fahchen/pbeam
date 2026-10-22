@@ -15,7 +15,7 @@ use super::{
         SecurityContext, Source,
     },
     dirty::{Claim, Completion, DirtyCalls, Work},
-    ets::EtsTables,
+    ets::NodeTables,
     files::Files,
     host::{
         self,
@@ -372,8 +372,9 @@ pub(super) struct Scheduler {
     runnable: RunQueue,
     /// Persistent terms of the node. All processes of the run share them.
     pub(super) persistent_terms: PersistentTerms,
-    /// ETS tables of the node. All processes of the run share them.
-    pub(super) ets: EtsTables,
+    /// ETS tables of the node ([`Node::ets`]). All processes of the run
+    /// share them.
+    pub(super) ets: Arc<NodeTables>,
     /// Atomic arrays of the node, which the `atomics` module and the
     /// `counters` module use. All processes of the run share them.
     pub(super) atomics: AtomicArrays,
@@ -521,12 +522,12 @@ impl Scheduler {
         resources.put(Buffers::default());
         resources.put(Ports::default());
         let menu_pair = std::os::unix::net::UnixStream::pair().expect("a menu socket pair opens");
+        let node = Node::single();
         Scheduler {
             processes: ProcessSlots::default(),
             freed: HashMap::new(),
             runnable: RunQueue::default(),
             persistent_terms: PersistentTerms::default(),
-            ets: EtsTables::default(),
             atomics: AtomicArrays::default(),
             binary_patterns: BinaryPatterns::default(),
             deferred_signals: Vec::new(),
@@ -552,7 +553,8 @@ impl Scheduler {
             policy: None,
             system: HashSet::new(),
             skip_checks: false,
-            node: Node::single(),
+            ets: Arc::clone(&node.ets),
+            node,
             multi: false,
             index: 0,
             wake: None,
@@ -580,6 +582,7 @@ impl Scheduler {
         // schedulers share one table, as ERTS shares `erts_atom_table`.
         let origin = node.clock_origin();
         let mut scheduler = Scheduler {
+            ets: Arc::clone(&node.ets),
             node,
             multi: true,
             index,
@@ -809,10 +812,12 @@ impl Scheduler {
     /// resuming its Erlang code (`erts_schedule_ets_free_fixation`,
     /// `erl_db.c:5263-5301`).
     pub(super) fn schedule_pending_cleanups(&mut self) {
-        let processes = self.ets.take_pending_new();
+        let processes = self.ets.exclusive().take_pending_new();
         for id in processes {
             if self.processes.get(&id).is_some() {
                 self.enqueue(id);
+            } else if let Some(index) = self.remote_owner(id) {
+                self.node.schedule_cleanup(index, id);
             }
         }
     }
@@ -1174,12 +1179,12 @@ impl Scheduler {
             let process = self.current_process_mut();
             usize::try_from(process.fcalls.max(0)).unwrap_or(usize::MAX)
         };
-        let drained = self.ets.drain_pending(id, budget.max(1));
+        let drained = self.ets.exclusive().drain_pending(id, budget.max(1));
         if drained > 0 {
             self.current_process_mut()
                 .bump_reductions(i32::try_from(drained).unwrap_or(i32::MAX));
         }
-        let more = self.ets.pending_count(id) > 0;
+        let more = self.ets.shared().pending_count(id) > 0;
         let process = self.current_process_mut();
         if process.fcalls <= 0 || process.waiting {
             if process.waiting {
@@ -2563,7 +2568,7 @@ impl Scheduler {
             process.account(&mut live);
         }
         self.persistent_terms.account_terms(&mut live);
-        self.ets.account_terms(&mut live);
+        self.ets.shared().account_terms(&mut live);
         self.timers.account_terms(&mut live);
         self.node.account_roots(&mut live);
         self.account_release(&mut live);
@@ -2814,6 +2819,11 @@ impl Scheduler {
                 } => {
                     if let Err(signal) = self.send_signal_local(sender, target, signal) {
                         self.dead_target_signal(target, *signal);
+                    }
+                }
+                Delivery::Cleanup { target } => {
+                    if self.processes.get(&target).is_some() {
+                        self.enqueue(target);
                     }
                 }
                 Delivery::Process { process, low } => self.adopt(*process, low),
@@ -3528,7 +3538,7 @@ impl Scheduler {
         // count (`erl_db.c:5044-5045`, `5118`; `erl_process.c:14360-14366`).
         let deleted = reds > 0 && {
             let left = self.current_process_mut().fcalls;
-            let rest = self.ets.delete_owned(id, left);
+            let rest = self.ets.exclusive().delete_owned(id, left);
             if let Some(rest) = rest {
                 self.current_process_mut().bump_reductions(left - rest);
             }

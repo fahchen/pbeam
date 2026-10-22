@@ -27,7 +27,7 @@ use super::{Signal, process_table::ProcessTable};
 use crate::runtime::process::ProcessState;
 use crate::{
     error::{BeamError, error},
-    runtime::{dirty::Pools, host::clock},
+    runtime::{dirty::Pools, ets::NodeTables, host::clock},
     term::{LiveBytes, PortId, ProcessId, Term},
 };
 
@@ -47,6 +47,10 @@ pub(in crate::runtime) enum Delivery {
         sender: Option<ProcessId>,
         signal: Signal,
     },
+    /// A request to run the process `target`, which has a pending cleanup
+    /// of a fixation on a table that another process deleted
+    /// (`erts_schedule_ets_free_fixation`, `erl_db.c:5263-5301`).
+    Cleanup { target: ProcessId },
     /// A runnable process that another scheduler gives to this scheduler
     /// ([`Node::transfer`]). The receiver puts it into its run queue.
     Process {
@@ -157,6 +161,9 @@ pub(in crate::runtime) struct Node {
     /// (`local_node_hash`, external.c:134). The first call on any scheduler
     /// computes it, and each scheduler reads the same value.
     local_node_hash: OnceLock<u32>,
+    /// The ETS tables of the node, which each scheduler shares, as ERTS
+    /// keeps one table store for the node (`erl_db.c:420-433`).
+    pub(super) ets: Arc<NodeTables>,
 }
 
 impl Node {
@@ -206,6 +213,7 @@ impl Node {
                 clock: (Instant::now(), clock::system_time()),
                 dirty: Pools::new(count),
                 local_node_hash: OnceLock::new(),
+                ets: Arc::default(),
             }),
             readers,
         ))
@@ -269,6 +277,7 @@ impl Node {
             clock: (Instant::now(), clock::system_time()),
             dirty: Pools::new(1),
             local_node_hash: OnceLock::new(),
+            ets: Arc::default(),
         })
     }
 
@@ -393,6 +402,21 @@ impl Node {
                 });
             }
             queue.push_back(Delivery::Message { target, from, term });
+            inbox
+        });
+        wake(&inbox.wake);
+    }
+
+    /// Ask the scheduler of `target` to run it for its pending fixation
+    /// cleanup. The scheduler is read as [`Self::send_message`] reads it.
+    pub(in crate::runtime) fn schedule_cleanup(&self, index: usize, target: ProcessId) {
+        let inbox = self.processes.with_owner(target, |owner| {
+            let inbox = &self.inboxes[owner.unwrap_or(index)];
+            inbox
+                .queue
+                .lock()
+                .expect("the scheduler inbox is not poisoned")
+                .push_back(Delivery::Cleanup { target });
             inbox
         });
         wake(&inbox.wake);
@@ -544,7 +568,9 @@ impl Node {
                     // steal gives it a process (`Self::give_work`).
                     let follows = matches!(
                         &delivery,
-                        Delivery::Message { target, .. } | Delivery::Signal { target, .. }
+                        Delivery::Message { target, .. }
+                            | Delivery::Signal { target, .. }
+                            | Delivery::Cleanup { target }
                             if *target == id
                     );
                     if follows {

@@ -58,6 +58,7 @@ fn inbox(node: &Node, index: usize) -> Vec<(char, u64)> {
             Delivery::Process { process, .. } => ('P', process.id.0),
             Delivery::Message { target, .. } => ('M', target.0),
             Delivery::Signal { target, .. } => ('S', target.0),
+            Delivery::Cleanup { target } => ('C', target.0),
         })
         .collect()
 }

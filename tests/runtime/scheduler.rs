@@ -550,15 +550,15 @@ fn deletes_the_tables_of_a_process_when_it_exits() {
 
     scheduler.schedule_next().unwrap();
     let table = scheduler.make_ref().unwrap();
-    scheduler.ets.create(
+    scheduler.ets.exclusive().create(
         table,
         Some("ets_probe_owned"),
         Table::new(child, Access::Protected, 1, TableType::Set),
     );
-    assert!(scheduler.ets.name_in_use("ets_probe_owned"));
+    assert!(scheduler.ets.exclusive().name_in_use("ets_probe_owned"));
     scheduler.finish_current(atom("normal"), None).unwrap();
 
-    assert!(!scheduler.ets.name_in_use("ets_probe_owned"));
+    assert!(!scheduler.ets.exclusive().name_in_use("ets_probe_owned"));
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
     assert_eq!(
         messages(&scheduler, 0),
@@ -1613,7 +1613,7 @@ fn counts_the_persistent_terms_the_ets_objects_and_the_timer_messages() {
         &scheduler.atoms,
         vec![key, Term::tuple(vec![Term::Integer(2)])],
     );
-    scheduler.ets.create(Reference(1), None, table);
+    scheduler.ets.exclusive().create(Reference(1), None, table);
     assert!(scheduler.live_bytes() > before);
     scheduler.timers.start(
         1100,

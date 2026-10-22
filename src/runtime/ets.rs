@@ -31,6 +31,31 @@ const EMPTY: usize = usize::MAX;
 /// The number of slots of the first key index.
 const INITIAL_INDEX_SLOTS: usize = 8;
 
+/// The ETS tables of the node behind the lock of the table store, which
+/// each scheduler of a run shares, as ERTS keeps one meta table for the
+/// node (`meta_name_tab`, `erl_db.c:420-433`). A BIF that reaches one table takes the shared
+/// lock and then the lock of the table ([`EtsTables::read`],
+/// [`EtsTables::write`]). A change of the store itself, such as a create, a
+/// delete, a fix, the exit of an owner, or a clear step, takes the
+/// exclusive lock, which excludes each holder of a table lock too.
+#[derive(Debug, Default)]
+pub(super) struct NodeTables(RwLock<EtsTables>);
+
+impl NodeTables {
+    /// Return the table store under its shared lock. A thread takes this
+    /// lock at most once at a time, so a waiting exclusive lock cannot
+    /// block it.
+    pub(super) fn shared(&self) -> RwLockReadGuard<'_, EtsTables> {
+        self.0.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Return the table store under its exclusive lock. See
+    /// [`NodeTables::shared`].
+    pub(super) fn exclusive(&self) -> RwLockWriteGuard<'_, EtsTables> {
+        self.0.write().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
 /// The ETS tables of the node. ERTS identifies each table by a table
 /// reference that `make_btid` (`erl_db.c:2811`) gives it, also a named
 /// table, and finds a named table by its atom in the meta name table. An
@@ -85,6 +110,11 @@ pub(super) struct EtsTables {
     /// `erl_db_hash.c:2103`, `2229`). Each entry also holds the table
     /// reference, so the delete of the table drops its programs.
     programs: HashMap<Reference, (Reference, pattern::MatchSpec)>,
+    /// The result of each list insert that another process completed, by
+    /// the process that started it, which reads it in its next turn
+    /// (`erl_db.c:2142-2150`, `2232-2244`). The starter can run on another
+    /// scheduler, so the result waits here.
+    results: HashMap<ProcessId, Term>,
 }
 
 /// A deleted table and the count of its segments that are not free yet. ERTS
@@ -563,7 +593,7 @@ impl EtsTables {
     /// assert!(tables.write(&atoms, &name, ProcessId(0)).is_some());
     /// ```
     pub(super) fn write(
-        &mut self,
+        &self,
         atoms: &AtomTable,
         id: &Term,
         caller: ProcessId,
@@ -640,11 +670,7 @@ impl EtsTables {
     /// tables.create(Reference(0), None, table);
     /// assert!(tables.busy(&atoms, &Term::Reference(Reference(0))).is_some());
     /// ```
-    pub(super) fn busy(
-        &mut self,
-        atoms: &AtomTable,
-        id: &Term,
-    ) -> Option<RwLockWriteGuard<'_, Table>> {
+    pub(super) fn busy(&self, atoms: &AtomTable, id: &Term) -> Option<RwLockWriteGuard<'_, Table>> {
         let table = write(self.lookup(atoms, id)?.1);
         table.busy.is_some().then_some(table)
     }
@@ -702,13 +728,8 @@ impl EtsTables {
     /// trap of `db_mark_all_deleted_hash` continues it (`erl_db_hash.c:3007-3051`).
     /// Return `true` when each bucket is marked. `reds` is the signed
     /// budget of the caller, an `SWord` in ERTS (`erl_db.c:3303`).
-    pub(super) fn step_clear(
-        &mut self,
-        atoms: &AtomTable,
-        id: Reference,
-        reds: i64,
-    ) -> (bool, usize) {
-        let table = self.live(id).expect("a cleared table is live");
+    pub(super) fn step_clear(&self, atoms: &AtomTable, id: Reference, reds: i64) -> (bool, usize) {
+        let mut table = write(self.tables.get(&id).expect("a cleared table is live"));
         let (owner, count) = {
             let clearing = table
                 .clear
@@ -717,6 +738,18 @@ impl EtsTables {
             (clearing.owner, clearing.count)
         };
         table.step_clear(atoms, owner, count, reds)
+    }
+
+    /// Keep the result `value` of the list insert that the process
+    /// `process` started, for its next turn.
+    pub(super) fn put_result(&mut self, process: ProcessId, value: Term) {
+        self.results.insert(process, value);
+    }
+
+    /// Take the result of the list insert of the process `process` that
+    /// another process completed.
+    pub(super) fn take_result(&mut self, process: ProcessId) -> Option<Term> {
+        self.results.remove(&process)
     }
 
     /// Fix the table `id` for the process `process`, and add the fixation
@@ -934,6 +967,7 @@ impl EtsTables {
             }
         }
         self.pending.remove(&owner);
+        self.results.remove(&owner);
         Some(reds)
     }
 

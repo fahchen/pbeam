@@ -672,14 +672,11 @@ macro_rules! bifs {
             id: BifId,
             arguments: &[Term],
         ) -> Result<BifResult, BeamError> {
-            // A run with scheduler threads keeps ETS and persistent_term
-            // with each scheduler, so a use of them fails with a clear
-            // error until the services move to the node.
             let (module, name, arity) = mfa(id);
             // A run with scheduler threads keeps these node services with
             // each scheduler, so their use fails with a clear error until
             // the services move to the node.
-            let local_service = matches!(module, "ets" | "persistent_term")
+            let local_service = module == "persistent_term"
                 || (module == "erts_internal" && name == "atomics_new")
                 || matches!(
                     (module, name),
