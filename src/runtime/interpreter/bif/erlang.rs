@@ -537,29 +537,13 @@ pub(super) fn system_flag(
     if let Some(denied) = check? {
         return Ok(denied);
     }
-    // These flags stay with each scheduler, so a change on one scheduler
-    // would not reach the others.
-    if scheduler.is_multi()
-        && matches!(
-            scheduler.atoms.name_of(item),
-            "system_logger" | "backtrace_depth"
-        )
-    {
-        let name = scheduler.atoms.name_of(item).to_owned();
-        return Err(error(format!(
-            "unsupported: erlang:system_flag/2 {name} in a run of execute_on_schedulers"
-        )));
-    }
     Ok(
         match (scheduler.atoms.name_of(item), value.small_integer()) {
-            ("system_logger", _) => Value(std::mem::replace(
-                &mut scheduler.system_logger,
-                value.clone(),
-            )),
+            ("system_logger", _) => Value(scheduler.node().swap_system_logger(value.clone())),
             ("debug_flags", _) => Value(Term::static_atom("true")),
             ("backtrace_depth", Some(depth)) => {
                 let depth = depth.min(MAX_BACKTRACE_SIZE) as usize;
-                let old = std::mem::replace(&mut scheduler.backtrace_depth, depth);
+                let old = scheduler.node().swap_backtrace_depth(depth);
                 Value(Term::Integer(old as i64))
             }
             (name, _) => {
@@ -920,7 +904,7 @@ fn raise_with_args(
     // `backtrace_depth` frames, and one frame for the depth 0
     // (`bif.c:1626-1637`). `error_handler:crash/1` calls `tl/1` on this
     // stack trace (`error_handler.erl:172-178`).
-    let depth = context.scheduler.backtrace_depth;
+    let depth = context.scheduler.node().backtrace_depth();
     let mut frames = mfa_stacktrace(context.scheduler, 0)?;
     frames.truncate(depth.max(1));
     // The apply of the first frame of a process that starts at
@@ -4285,7 +4269,7 @@ pub(super) fn process_info(
                 let stacktrace = match item {
                     Term::Atom(name) if scheduler.atoms.name_of(name) == "current_stacktrace" => {
                         let mut frames = mfa_stacktrace(scheduler, 0)?;
-                        frames.truncate(scheduler.backtrace_depth);
+                        frames.truncate(scheduler.node().backtrace_depth());
                         Some(Term::tuple(vec![item.clone(), Term::list_from(frames)]))
                     }
                     _ => None,
