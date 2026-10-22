@@ -28,7 +28,10 @@ use std::{
 };
 
 use common::pinned_beam;
-use pbeam_runtime::{Atom, BeamError, BeamProgram, Job, NativeResult, Term, register_native};
+use pbeam_runtime::{
+    Atom, BeamError, BeamProgram, Binding, Job, Library, NativeResult, NifContext, Term,
+    register_library,
+};
 
 const DIRTY_NIF_PROBE: &[u8] = include_bytes!("../../fixtures/dirty_nif/dirty_nif_probe.beam");
 
@@ -64,7 +67,7 @@ fn key(arguments: &[Term]) -> i64 {
 }
 
 /// Return the name of the current thread as a binary.
-fn thread_name(_: &[Term]) -> Result<NativeResult, BeamError> {
+fn thread_name(_: &mut NifContext<'_>, _: &[Term]) -> Result<NativeResult, BeamError> {
     let name = thread::current()
         .name()
         .unwrap_or_default()
@@ -74,7 +77,7 @@ fn thread_name(_: &[Term]) -> Result<NativeResult, BeamError> {
 }
 
 /// Mark the key as started, wait until it is released, and return `ok`.
-fn cpu_wait(arguments: &[Term]) -> Result<NativeResult, BeamError> {
+fn cpu_wait(_: &mut NifContext<'_>, arguments: &[Term]) -> Result<NativeResult, BeamError> {
     let key = key(arguments);
     update(key, |gate| gate.0 = true);
     let mut gates = GATES.0.lock().unwrap();
@@ -85,7 +88,7 @@ fn cpu_wait(arguments: &[Term]) -> Result<NativeResult, BeamError> {
 }
 
 /// Return `true` when the call of the key started.
-fn started(arguments: &[Term]) -> Result<NativeResult, BeamError> {
+fn started(_: &mut NifContext<'_>, arguments: &[Term]) -> Result<NativeResult, BeamError> {
     let started = update(key(arguments), |_| {}).0;
     Ok(NativeResult::Value(static_atom(if started {
         "true"
@@ -95,42 +98,65 @@ fn started(arguments: &[Term]) -> Result<NativeResult, BeamError> {
 }
 
 /// Release the key.
-fn release(arguments: &[Term]) -> Result<NativeResult, BeamError> {
+fn release(_: &mut NifContext<'_>, arguments: &[Term]) -> Result<NativeResult, BeamError> {
     update(key(arguments), |gate| gate.1 = true);
     Ok(NativeResult::Value(static_atom("ok")))
 }
 
 /// Raise `error:badarg`.
-fn cpu_raise(_: &[Term]) -> Result<NativeResult, BeamError> {
-    Ok(NativeResult::badarg())
+fn cpu_raise(context: &mut NifContext<'_>, _: &[Term]) -> Result<NativeResult, BeamError> {
+    Ok(context.badarg())
 }
 
 /// Return the next number of a counter of the test binary.
-fn cpu_sequence(_: &[Term]) -> Result<NativeResult, BeamError> {
+fn cpu_sequence(_: &mut NifContext<'_>, _: &[Term]) -> Result<NativeResult, BeamError> {
     static NEXT: AtomicI64 = AtomicI64::new(0);
     Ok(NativeResult::Value(Term::Integer(
         NEXT.fetch_add(1, Ordering::SeqCst),
     )))
 }
 
-/// Register the NIFs of the fixture once for the test binary, and load the
-/// fixture.
+/// Return the binding of `name/arity` with `job` and `run`.
+const fn bind(name: &'static str, arity: u32, job: Job, run: pbeam_runtime::NativeFn) -> Binding {
+    Binding {
+        name,
+        arity,
+        job,
+        run,
+    }
+}
+
+/// The library of the fixture: each function of its `-nifs` list has a
+/// binding.
+static DIRTY_NIF_LIBRARY: Library = Library {
+    module: "dirty_nif_probe",
+    functions: &[
+        ("cpu_thread", 0),
+        ("io_thread", 0),
+        ("cpu_wait", 1),
+        ("started", 1),
+        ("release", 1),
+        ("cpu_raise", 1),
+        ("cpu_sequence", 0),
+    ],
+    bindings: &[
+        bind("cpu_thread", 0, Job::CpuBound, thread_name),
+        bind("io_thread", 0, Job::IoBound, thread_name),
+        bind("cpu_wait", 1, Job::CpuBound, cpu_wait),
+        bind("started", 1, Job::Normal, started),
+        bind("release", 1, Job::Normal, release),
+        bind("cpu_raise", 1, Job::CpuBound, cpu_raise),
+        bind("cpu_sequence", 0, Job::CpuBound, cpu_sequence),
+    ],
+    load: None,
+    unbound_fails: false,
+};
+
+/// Register the library of the fixture once for the test binary, and load
+/// the fixture.
 fn program() -> BeamProgram {
     static REGISTER: Once = Once::new();
-    REGISTER.call_once(|| {
-        let natives: [(&str, u32, Job, pbeam_runtime::NativeFn); 7] = [
-            ("cpu_thread", 0, Job::CpuBound, thread_name),
-            ("io_thread", 0, Job::IoBound, thread_name),
-            ("cpu_wait", 1, Job::CpuBound, cpu_wait),
-            ("started", 1, Job::Normal, started),
-            ("release", 1, Job::Normal, release),
-            ("cpu_raise", 1, Job::CpuBound, cpu_raise),
-            ("cpu_sequence", 0, Job::CpuBound, cpu_sequence),
-        ];
-        for (name, arity, job, function) in natives {
-            register_native("dirty_nif_probe", name, arity, job, function).unwrap();
-        }
-    });
+    REGISTER.call_once(|| register_library(&DIRTY_NIF_LIBRARY).unwrap());
     BeamProgram::load(&[
         &pinned_beam("erlang"),
         &pinned_beam("erts_internal"),

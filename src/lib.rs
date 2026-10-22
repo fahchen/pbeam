@@ -9,8 +9,8 @@ pub use bundle::{Blob, Bundle, BundleWriter, Entry};
 pub mod embedded;
 pub use error::BeamError;
 pub use runtime::{
-    AllowAll, BeamProgram, Capability, CapabilityKind, Constraint, Job, NativeFn, NativeResult,
-    Operation, Policy, RegistrationError, install_start_dispositions, lookup_native,
-    nif_manifest_gaps, register_native, unregister_native,
+    AllowAll, BeamProgram, Binding, Capability, CapabilityKind, Constraint, Job, Library, LoadFn,
+    NativeFn, NativeResult, NifContext, Operation, Policy, RegistrationError,
+    install_start_dispositions, nif_manifest_gaps, register_library,
 };
 pub use term::{Atom, AtomTable, HostTerm, Map, PortId, ProcessId, Reference, Term, debug_term};

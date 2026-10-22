@@ -45,7 +45,7 @@ use std::{
 };
 
 use super::{
-    Job, NativeFn, NativeResult,
+    Job, NativeFn, NativeResult, NifContext,
     host::output::{IovecWrite, IovecWritten},
     interpreter::BifResult,
     process::Priority,
@@ -138,9 +138,9 @@ pub(super) enum Work {
     Write(IovecWrite),
     /// The host part of a static binding, such as a `prim_file` NIF.
     Host(Host),
-    /// A registered native function with the arguments of its call.
+    /// An extension binding with the arguments of its call.
     Native {
-        /// The function of the registration.
+        /// The run function of the binding.
         function: NativeFn,
         /// The arguments of the call.
         arguments: Vec<Term>,
@@ -166,7 +166,7 @@ impl Work {
             Work::Native {
                 function,
                 arguments,
-            } => Output::Native(function(&arguments)),
+            } => Output::Native(function(&mut NifContext::dirty(), &arguments)),
         }
     }
 }
@@ -179,7 +179,7 @@ pub(super) enum Output {
     Written(IovecWritten),
     /// The last part of a static binding.
     Host(Finish),
-    /// The result of a registered native function.
+    /// The result of an extension binding.
     Native(Result<NativeResult, BeamError>),
 }
 

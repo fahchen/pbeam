@@ -39,6 +39,7 @@ use super::{
     tty::{InitialMode, Ttys},
 };
 use crate::{
+    beam::ModuleId,
     error::{BeamError, error},
     term::{
         Atom, AtomTable, Group, LiveBytes, MapDrain, PortId, ProcessId, Reference,
@@ -408,6 +409,12 @@ pub(super) struct Scheduler {
     /// (`beam/erl_nif.c:4774-4777`, `4990-4997`). PBeam has one instance of
     /// each module, so the module name identifies it.
     pub(super) nif_libraries: HashSet<String>,
+    /// The module instances whose extension library `erlang:load_nif/2`
+    /// loaded in the run, as the `nif` field of the ERTS module instance
+    /// (`beam/erl_nif.c:4774-4777`, `4990-4997`). A new instance of the
+    /// module, after a code load, starts without its library. The bindings
+    /// of an extension library run only for these instances.
+    pub(super) extension_loads: HashSet<ModuleId>,
     /// The timers of the run and the run clock. All processes of the run
     /// share them.
     pub(super) timers: Timers,
@@ -521,6 +528,7 @@ impl Scheduler {
             atoms,
             code: CodeTable::default(),
             nif_libraries: HashSet::new(),
+            extension_loads: HashSet::new(),
             timers: Timers::new(),
             known_nodes: KnownNodes::default(),
             alias_owners: HashMap::new(),

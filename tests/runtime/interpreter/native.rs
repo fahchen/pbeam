@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use super::{LIBRARIES, binding};
+use super::{LIBRARIES, Linked};
 use crate::runtime::Job;
 use crate::runtime::interpreter::bif::BIFS;
 
@@ -75,7 +75,7 @@ fn effect_inventory_lists_each_bif_and_native_function() {
     for library in LIBRARIES {
         for &(name, arity) in library.functions {
             let key = format!("{}:{name}/{arity}", library.module);
-            if binding(library.module, name, arity).is_some() {
+            if has_binding(library.module, name, arity) {
                 bound.insert(key);
             } else {
                 unbound.insert(key);
@@ -174,14 +174,20 @@ fn registry_is_sorted_and_matches_the_exact_mfa() {
                 .all(|binding| library.functions.contains(&(binding.name, binding.arity)))
         );
     }
-    assert!(binding("prim_tty", "write_nif", 2).is_some());
-    assert!(binding("prim_tty", "write_nif", 1).is_none());
-    assert!(binding("prim_tty", "write", 2).is_none());
-    assert!(binding("prim_file", "read_info_nif", 2).is_some());
-    assert!(binding("prim_file", "write_nif", 2).is_some());
-    assert!(binding("prim_file", "sync_nif", 2).is_none());
-    assert!(binding("zlib", "inflate_nif", 4).is_some());
-    assert!(binding("zlib", "deflateParams_nif", 3).is_none());
+    assert!(has_binding("prim_tty", "write_nif", 2));
+    assert!(!has_binding("prim_tty", "write_nif", 1));
+    assert!(!has_binding("prim_tty", "write", 2));
+    assert!(has_binding("prim_file", "read_info_nif", 2));
+    assert!(has_binding("prim_file", "write_nif", 2));
+    assert!(!has_binding("prim_file", "sync_nif", 2));
+    assert!(has_binding("zlib", "inflate_nif", 4));
+    assert!(!has_binding("zlib", "deflateParams_nif", 3));
+}
+
+/// Return whether the library of `module` has a binding of exactly
+/// `name/arity`.
+fn has_binding(module: &str, name: &str, arity: u32) -> bool {
+    Linked::of(module).is_some_and(|linked| linked.binds(name, arity))
 }
 
 /// The NIF functions of the static libraries whose pinned-OTP `ErlNifFunc`
@@ -263,92 +269,15 @@ fn each_binding_has_the_job_of_its_pinned_flag() {
     }
 }
 
-/// A registered native function returns its result and a duplicate
-/// registration fails.
-#[test]
-fn native_registry_registers_and_rejects_duplicates() {
-    use crate::BeamError;
-    use crate::Term;
-    use crate::runtime::{Job, NativeResult, register_native};
-    fn add(arguments: &[Term]) -> Result<NativeResult, BeamError> {
-        match (arguments.first(), arguments.get(1)) {
-            (Some(Term::Integer(left)), Some(Term::Integer(right))) => {
-                Ok(NativeResult::Value(Term::Integer(left + right)))
-            }
-            _ => Ok(NativeResult::badarg()),
-        }
-    }
-    let module = "native_probe_dup";
-    let _ = crate::runtime::unregister_native(module, "add", 2);
-    register_native(module, "add", 2, Job::Normal, add).unwrap();
-    assert!(register_native(module, "add", 2, Job::Normal, add).is_err());
-    assert!(crate::runtime::lookup_native(module, "add", 2).is_some());
-    assert!(crate::runtime::lookup_native(module, "add", 1).is_none());
-    crate::runtime::unregister_native(module, "add", 2);
-}
-
-/// Unregistering removes the binding.
-#[test]
-fn native_registry_unregisters() {
-    use crate::runtime::{Job, NativeResult, lookup_native, register_native, unregister_native};
-    fn f(_arguments: &[crate::Term]) -> Result<NativeResult, crate::BeamError> {
-        Ok(NativeResult::Value(crate::Term::Integer(0)))
-    }
-    let _ = unregister_native("m_unreg", "f", 1);
-    register_native("m_unreg", "f", 1, Job::Normal, f).unwrap();
-    assert!(lookup_native("m_unreg", "f", 1).is_some());
-    assert!(unregister_native("m_unreg", "f", 1));
-    assert!(lookup_native("m_unreg", "f", 1).is_none());
-    assert!(!unregister_native("m_unreg", "f", 1));
-}
-
-/// A registered MFA takes precedence over the static binding table, and
-/// removing the registration restores the static binding.
-#[test]
-fn native_registry_takes_precedence_over_the_static_binding() {
-    use super::call;
-    use crate::BeamError;
-    use crate::Term;
-    use crate::runtime::capability::{AllowAll, Policy};
-    use crate::runtime::interpreter::bif::BifResult;
-    use crate::runtime::process::tests::frame;
-    use crate::runtime::scheduler::Scheduler;
-    use crate::runtime::{Job, NativeResult, register_native, unregister_native};
-    use crate::term::AtomTable;
-
-    fn sentinel(_arguments: &[Term]) -> Result<NativeResult, BeamError> {
-        Ok(NativeResult::Value(Term::Integer(0x5EED)))
-    }
-
-    let mut scheduler = Scheduler::new(AtomTable::new());
-    scheduler
-        .start(frame(), vec![], AllowAll.initial())
-        .unwrap();
-    scheduler.schedule_next().unwrap();
-
-    // `prim_file:write_nif/2` has a static binding. An integer file handle
-    // makes the binding raise `error:badarg` (`file_handle_wrapper`).
-    let arguments = [Term::Integer(0), Term::binary(b"x".to_vec())];
-    let _ = unregister_native("prim_file", "write_nif", 2);
-    let static_result = call(&mut scheduler, "prim_file", "write_nif", &arguments)
-        .expect("prim_file has a library")
-        .1
-        .unwrap();
-
-    register_native("prim_file", "write_nif", 2, Job::Normal, sentinel).unwrap();
-    let overridden = call(&mut scheduler, "prim_file", "write_nif", &arguments)
-        .expect("prim_file has a library")
-        .1
-        .unwrap();
-    assert!(matches!(
-        overridden,
-        BifResult::Value(Term::Integer(0x5EED))
-    ));
-
-    unregister_native("prim_file", "write_nif", 2);
-    let restored = call(&mut scheduler, "prim_file", "write_nif", &arguments)
-        .expect("prim_file has a library")
-        .1
-        .unwrap();
-    assert_eq!(format!("{restored:?}"), format!("{static_result:?}"));
+/// Return an empty instance of the module `name`, for a direct call of
+/// `call`.
+pub(crate) fn instance(name: &str) -> crate::beam::BeamModule {
+    use crate::beam::code::Instruction;
+    crate::beam::BeamModule::new(
+        name.into(),
+        std::collections::HashMap::new(),
+        Vec::new(),
+        vec![Instruction::End],
+    )
+    .unwrap()
 }

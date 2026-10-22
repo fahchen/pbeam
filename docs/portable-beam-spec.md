@@ -161,7 +161,7 @@ The declaration alone does not dispatch to a Rust implementation. Task #12 deliv
 
 ### Rust registration and dispatch
 
-A Rust extension exports a registration function. Registration maps an exact MFA such as `Elixir.MyApp.NativeHash:sha256/1` to a Rust implementation. The registry owns this mapping and rejects duplicate entries. A binding accepts BEAM terms and returns a BEAM term or a defined runtime exception. Host operations are available through a call context; platform details stay in `pbeam-host`.
+A Rust extension declares a `Library` for one module and registers it with `register_library` before the run. The library lists the NIF functions of the module, and each of its `Binding` entries maps an exact MFA such as `Elixir.MyApp.NativeHash:sha256/1` to a Rust implementation with its job. The registry owns this mapping and rejects a second library of a module, a binding outside the functions of its library, and a second binding of a function. A binding accepts BEAM terms and returns a BEAM term or a defined runtime exception. Host operations are available through a call context; platform details stay in `pbeam-host`.
 
 Registration is controlled by trusted build/startup code. Guest code cannot register or shadow protected runtime/security MFAs. Native entries declare operation authority, determinism, observability, execution class, and cost separately. The native context exposes checked operations and cannot issue root grants. An allowed native call does not authorize every effect inside the binding.
 

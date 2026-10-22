@@ -196,7 +196,13 @@ fn calls_each_binding_of_the_library_through_the_registry() {
     ];
     for (name, arguments) in calls {
         assert!(
-            call(&mut scheduler, "zlib", name, &arguments).is_some(),
+            call(
+                &mut scheduler,
+                &crate::runtime::interpreter::native::tests::instance("zlib"),
+                name,
+                &arguments
+            )
+            .is_some(),
             "{name}"
         );
     }
