@@ -4,7 +4,9 @@ defmodule Mix.Tasks.Pbeam.Bundle do
 
   The task builds the `pbeam_bundle` tool, compiles the entry and
   `pbeam_boot` stubs into the release, resolves the start set with
-  `scripts/example.sh --no-build --write-start`, and writes one bundle. Run
+  `scripts/example.sh --no-build --write-start`, and writes one bundle. The
+  NIF manifest gate of the tool reads the allowlist `nif-allowlist.txt` of
+  the project and stops the task on an item that the list does not accept. Run
   `mix release` first; the task reads the release that the project config
   names, or the directory of `--release`. Relative paths are relative to the
   directory of the command line.
@@ -66,7 +68,11 @@ defmodule Mix.Tasks.Pbeam.Bundle do
       root
     )
 
-    run!(tool, ["bundle", release, output, "#{app}_run", "main", start], root)
+    # The NIF manifest gate of the tool prints each item that the allowlist
+    # of the project accepts.
+    allowlist = Path.join(cwd, "nif-allowlist.txt")
+    gate = run!(tool, ["bundle", release, output, "#{app}_run", "main", start, allowlist], root)
+    Mix.shell().info(gate)
     Mix.shell().info("Wrote #{output}")
   end
 
@@ -147,5 +153,7 @@ defmodule Mix.Tasks.Pbeam.Bundle do
     if status != 0 do
       Mix.raise("pbeam.bundle: #{command} failed with status #{status}:\n#{output}")
     end
+
+    output
   end
 end
