@@ -95,8 +95,6 @@ impl PersistentTermStore {
             }
             _ => {
                 self.updater = Some(id);
-                // A copy of a holder that exited ends with no change.
-                self.copy = None;
                 self.waiters.retain(|waiter| *waiter != id);
                 true
             }
@@ -123,6 +121,9 @@ impl PersistentTermStore {
             return Vec::new();
         }
         self.updater = None;
+        // The copy of a holder that exited ends with no change, as its trap
+        // state destructor frees it (`erl_bif_persistent.c:295-301`).
+        self.copy = None;
         std::mem::take(&mut self.waiters)
     }
 
