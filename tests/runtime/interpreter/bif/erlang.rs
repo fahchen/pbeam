@@ -15,9 +15,9 @@ fn raises_badarg_for_a_bitstring_that_is_not_a_whole_number_of_bytes() {
     // raises `badarg`. The pinned ERTS gives `badarg` with the frame
     // `{erlang,binary_to_atom,[<<1:1>>,latin1],[{error_info,#{module =>
     // erl_erts_errors}}]}` (measured with `mise run erts-eval`).
-    let mut atoms = AtomTable::new();
+    let atoms = AtomTable::new();
     let bitstring = Term::Binary(Binary::from(vec![1]).bits(0, 1));
-    let result = binary_to_atom(&mut atoms, &bitstring, &Term::static_atom("latin1")).unwrap();
+    let result = binary_to_atom(&atoms, &bitstring, &Term::static_atom("latin1")).unwrap();
     assert!(matches!(
         result,
         BifResult::Raise { class: ExceptionClass::Error, reason }
@@ -181,9 +181,9 @@ fn raises_a_runtime_error_for_the_stdin_display_device() {
     // `display_string_2` writes the string to the standard output or the
     // standard error (`bif.c:4192-4285`). The `stdin` device writes to the
     // terminal input with `TIOCSTI`, which PBeam does not run.
-    let mut atoms = AtomTable::new();
+    let atoms = AtomTable::new();
     let stdin = Term::Atom(atoms.put("stdin").unwrap());
-    let error = display_string(&mut atoms, &stdin, &Term::nil()).unwrap_err();
+    let error = display_string(&atoms, &stdin, &Term::nil()).unwrap_err();
     assert!(
         error
             .to_string()
@@ -192,7 +192,7 @@ fn raises_a_runtime_error_for_the_stdin_display_device() {
     );
     let other = Term::Atom(atoms.put("foo").unwrap());
     assert!(matches!(
-        display_string(&mut atoms, &other, &Term::nil()).unwrap(),
+        display_string(&atoms, &other, &Term::nil()).unwrap(),
         BifResult::Raise { .. }
     ));
 }
@@ -202,11 +202,11 @@ fn raises_badarg_for_a_display_string_that_is_not_whole_bytes() {
     // `erts_get_aligned_binary_bytes` gives NULL for a bitstring that is
     // not byte aligned, so `display_string_2` raises `badarg`
     // (`bif.c:4237-4248`).
-    let mut atoms = AtomTable::new();
+    let atoms = AtomTable::new();
     let device = Term::Atom(atoms.put("foo").unwrap());
     let bitstring = Term::Binary(Binary::from(vec![1]).bits(0, 1));
     assert!(matches!(
-        display_string(&mut atoms, &device, &bitstring).unwrap(),
+        display_string(&atoms, &device, &bitstring).unwrap(),
         BifResult::Raise { .. }
     ));
 }
@@ -392,9 +392,9 @@ fn builds_the_process_info_items_of_an_atom_mfa_and_an_undefined_function() {
     // `initial_call` of a process with an undefined start gives its atoms,
     // and `current_function` is `undefined` only without a frame and a
     // start MFA (`erl_bif_info.c:1650-1665`).
-    let mut atoms = AtomTable::new();
+    let atoms = AtomTable::new();
     let term = process_info_term(
-        &mut atoms,
+        &atoms,
         info_values(Some(MfaNames::Atoms(
             Atom::from_static("erlang").unwrap(),
             Atom::from_static("apply").unwrap(),
@@ -403,7 +403,7 @@ fn builds_the_process_info_items_of_an_atom_mfa_and_an_undefined_function() {
     )
     .unwrap();
     assert!(matches!(term, Term::Cons(_)));
-    let term = process_info_term(&mut atoms, info_values(None)).unwrap();
+    let term = process_info_term(&atoms, info_values(None)).unwrap();
     assert!(matches!(term, Term::Cons(_)));
 }
 

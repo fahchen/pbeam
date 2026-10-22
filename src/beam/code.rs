@@ -235,7 +235,7 @@ const FIRST_LABEL_NUMBER: u32 = 1;
 ///
 /// ```rust,ignore
 /// let mut atoms = AtomTable::new();
-/// let module = parse(&beam_bytes, &mut atoms)?;
+/// let module = parse(&beam_bytes, &atoms)?;
 /// assert_eq!(module.name, "Elixir.Hello");
 /// assert!(atoms.get("Elixir.Hello").is_some());
 /// ```
@@ -244,7 +244,7 @@ const FIRST_LABEL_NUMBER: u32 = 1;
 ///
 /// A malformed or unsupported module is an error. A new atom when the atom
 /// table is full is an error, as in ERTS.
-pub(crate) fn parse(bytes: &[u8], atom_table: &mut AtomTable) -> Result<BeamModule, BeamError> {
+pub(crate) fn parse(bytes: &[u8], atom_table: &AtomTable) -> Result<BeamModule, BeamError> {
     let chunks = read_chunks(bytes)?;
     let atoms = parse_atoms(required_chunk(&chunks, b"AtU8")?, atom_table)?;
     decode(&chunks, atoms, atom_table)
@@ -279,15 +279,15 @@ pub(crate) enum PrepareError {
 ///
 /// ```rust,ignore
 /// let mut atoms = AtomTable::new();
-/// assert_eq!(prepare(LOAD_TARGET, "load_target", &mut atoms)?.name, "load_target");
-/// assert!(matches!(prepare(LOAD_TARGET, "other", &mut atoms), Err(PrepareError::BadFile)));
-/// assert!(matches!(prepare(b"FOR1bad", "load_target", &mut atoms), Err(PrepareError::BadFile)));
-/// assert!(matches!(prepare(LOAD_ON_LOAD, "load_on_load", &mut atoms), Err(PrepareError::Unsupported(_))));
+/// assert_eq!(prepare(LOAD_TARGET, "load_target", &atoms)?.name, "load_target");
+/// assert!(matches!(prepare(LOAD_TARGET, "other", &atoms), Err(PrepareError::BadFile)));
+/// assert!(matches!(prepare(b"FOR1bad", "load_target", &atoms), Err(PrepareError::BadFile)));
+/// assert!(matches!(prepare(LOAD_ON_LOAD, "load_on_load", &atoms), Err(PrepareError::Unsupported(_))));
 /// ```
 pub(crate) fn prepare(
     bytes: &[u8],
     module: &str,
-    atom_table: &mut AtomTable,
+    atom_table: &AtomTable,
 ) -> Result<BeamModule, PrepareError> {
     let form_size = bytes
         .get(WORD_SIZE..WORD_SIZE * 2)
@@ -375,7 +375,7 @@ fn read_chunks(bytes: &[u8]) -> Result<HashMap<Vec<u8>, &[u8]>, BeamError> {
 fn decode(
     chunks: &HashMap<Vec<u8>, &[u8]>,
     atoms: Vec<Atom>,
-    atom_table: &mut AtomTable,
+    atom_table: &AtomTable,
 ) -> Result<BeamModule, BeamError> {
     let exports = parse_exports(required_chunk(chunks, b"ExpT")?, &atoms, atom_table)?;
     let code = required_chunk(chunks, b"Code")?;
@@ -452,7 +452,7 @@ fn decode(
 /// assert_eq!(table.name_of(&atoms[0]), "a");
 /// assert_eq!(table.get("a"), Some(atoms[0].clone()));
 /// ```
-fn parse_atoms(data: &[u8], atom_table: &mut AtomTable) -> Result<Vec<Atom>, BeamError> {
+fn parse_atoms(data: &[u8], atom_table: &AtomTable) -> Result<Vec<Atom>, BeamError> {
     let signed_atom_count = read_u32(data)? as i32;
     let atom_count = usize::try_from(
         signed_atom_count
@@ -670,10 +670,10 @@ fn parse_lambdas(data: &[u8], atoms: &[Atom]) -> Result<Vec<(Lambda, usize)>, Be
 /// # Examples
 ///
 /// ```rust,ignore
-/// let literals = parse_literals(&[0; 8], &mut AtomTable::new())?;
+/// let literals = parse_literals(&[0; 8], &AtomTable::new())?;
 /// assert!(literals.is_empty());
 /// ```
-fn parse_literals(data: &[u8], atom_table: &mut AtomTable) -> Result<Vec<Option<Term>>, BeamError> {
+fn parse_literals(data: &[u8], atom_table: &AtomTable) -> Result<Vec<Option<Term>>, BeamError> {
     if data.len() < WORD_SIZE * 2 {
         return Err(error("truncated BEAM literal table header"));
     }
@@ -711,14 +711,14 @@ fn parse_literals(data: &[u8], atom_table: &mut AtomTable) -> Result<Vec<Option<
 ///
 /// ```rust,ignore
 /// let mut atoms = AtomTable::new();
-/// let term = read_literal(&[131, 109, 0, 0, 0, 2, b'o', b'k'], &mut atoms)?;
+/// let term = read_literal(&[131, 109, 0, 0, 0, 2, b'o', b'k'], &atoms)?;
 /// assert_eq!(term, Some(Term::binary(b"ok".to_vec())));
 /// // [flush]
 /// let bytes = [131, 108, 0, 0, 0, 1, 119, 5, b'f', b'l', b'u', b's', b'h', 106];
-/// let list = read_literal(&bytes, &mut atoms)?;
+/// let list = read_literal(&bytes, &atoms)?;
 /// assert_eq!(list, Some(Term::list_from(vec![Term::static_atom("flush")])));
 /// ```
-fn read_literal(data: &[u8], atom_table: &mut AtomTable) -> Result<Option<Term>, BeamError> {
+fn read_literal(data: &[u8], atom_table: &AtomTable) -> Result<Option<Term>, BeamError> {
     if data.first() != Some(&ETF_VERSION) {
         return Ok(None);
     }
@@ -763,7 +763,7 @@ enum PartialTerm {
 /// let mut cursor = 0;
 /// let mut atoms = AtomTable::new();
 /// // {}
-/// let term = read_external_term(&[104, 0], &mut cursor, &mut atoms)?;
+/// let term = read_external_term(&[104, 0], &mut cursor, &atoms)?;
 /// assert_eq!(term, Some(Term::tuple(vec![])));
 /// assert_eq!(cursor, 2);
 /// ```
@@ -776,7 +776,7 @@ enum PartialTerm {
 fn read_external_term(
     data: &[u8],
     cursor: &mut usize,
-    atom_table: &mut AtomTable,
+    atom_table: &AtomTable,
 ) -> Result<Option<Term>, BeamError> {
     let mut partial = Vec::new();
     loop {

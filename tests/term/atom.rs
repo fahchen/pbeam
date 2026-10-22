@@ -9,7 +9,10 @@ use super::{
 #[test]
 fn starts_with_the_erts_static_atoms() {
     let table = AtomTable::new();
-    assert_eq!(table.indices.len(), 1150 + PRELOADED_ATOM_NAMES.len());
+    assert_eq!(
+        table.read_indices().len(),
+        1150 + PRELOADED_ATOM_NAMES.len()
+    );
     // ERTS 29.1.1 crash dump: false is 0, ok is 506, get_definition is 1149.
     for (name, index) in [("false", 0), ("true", 1), ("", 5), ("ok", 506)] {
         assert_eq!(table.get(name).unwrap().index, index);
@@ -29,20 +32,20 @@ fn starts_with_the_erts_static_atoms() {
 
 #[test]
 fn gives_a_new_atom_the_next_index_and_keeps_existing_indices() {
-    let mut table = AtomTable::new();
+    let table = AtomTable::new();
     let zeta = table.put("pbeam_zeta").unwrap();
     assert_eq!(zeta.index, 1167);
     assert_eq!(table.put("pbeam_alpha").unwrap().index, 1168);
     assert_eq!(table.put("pbeam_zeta").unwrap(), zeta);
     assert_eq!(table.get("pbeam_zeta"), Some(zeta));
     assert_eq!(table.put("ok").unwrap().index, 506);
-    assert_eq!(table.indices.len(), 1169);
+    assert_eq!(table.read_indices().len(), 1169);
 }
 
 #[test]
 fn stops_at_the_erts_atom_limit() {
-    let mut table = AtomTable::new();
-    for index in table.indices.len()..ATOM_LIMIT {
+    let table = AtomTable::new();
+    for index in table.read_indices().len()..ATOM_LIMIT {
         table.put(&index.to_string()).unwrap();
     }
     assert_eq!(table.put("1048575").unwrap().index, 1048575);
@@ -52,7 +55,7 @@ fn stops_at_the_erts_atom_limit() {
         table.put("pbeam_zeta").unwrap_err().to_string(),
         "no more index entries in atom_tab (max=1048576)"
     );
-    assert_eq!(table.indices.len(), ATOM_LIMIT);
+    assert_eq!(table.read_indices().len(), ATOM_LIMIT);
 }
 
 #[test]
@@ -77,8 +80,8 @@ fn imports_a_fun_between_two_atom_tables() {
     // destination does not, so each later name gets a higher index in the
     // source: the module and the function of a fun have different indices
     // in the two tables.
-    let mut source = AtomTable::new();
-    let mut destination = source.clone();
+    let source = AtomTable::new();
+    let destination = source.clone();
     for index in 0..3 {
         source.put(&format!("pbeam_host_filler_{index}")).unwrap();
     }
@@ -171,7 +174,7 @@ fn imports_a_fun_between_two_atom_tables() {
 
     // An index at or above the source table is not a value of the table, for
     // a term atom and for the module of a local fun.
-    let outside_index = u32::try_from(source.names.len()).unwrap();
+    let outside_index = u32::try_from(source.read_indices().len()).unwrap();
     let outside = |index| Atom { index };
     let outside_error =
         format!("atom index {outside_index} is outside the atom table of the host term");
@@ -200,9 +203,9 @@ fn fails_to_import_when_the_destination_table_is_full() {
     // The destination table holds `ATOM_LIMIT` atoms and no `pbeam_zeta`.
     // The import reaches `AtomTable::put` with the name of the source atom
     // and gives the error of the full table.
-    let mut source = AtomTable::new();
-    let mut destination = source.clone();
-    for index in destination.indices.len()..ATOM_LIMIT {
+    let source = AtomTable::new();
+    let destination = source.clone();
+    for index in destination.read_indices().len()..ATOM_LIMIT {
         destination.put(&index.to_string()).unwrap();
     }
     let term = Term::Atom(source.put("pbeam_zeta").unwrap());
@@ -223,7 +226,7 @@ fn keeps_the_sharing_of_a_compound_that_the_source_holds_twice() {
     // shares one allocation. Without the memory the walk would build one
     // allocation for each occurrence.
     let source = AtomTable::new();
-    let mut destination = source.clone();
+    let destination = source.clone();
     let atom = source.get("ok").unwrap();
     let tuple = Term::tuple(vec![Term::Atom(atom.clone()), Term::Integer(1)]);
     let cell = Term::list_from([Term::Integer(2)]);
@@ -291,8 +294,8 @@ fn compares_host_terms_of_two_tables_by_their_names() {
     // indices, and the index order of the two keys differs, so the two maps
     // hold their pairs in a different canonical order. The two host terms
     // hold the same value, so they are equal.
-    let mut first = AtomTable::new();
-    let mut second = first.clone();
+    let first = AtomTable::new();
+    let second = first.clone();
     for index in 0..3 {
         second.put(&format!("pbeam_host_filler_{index}")).unwrap();
     }
@@ -516,7 +519,7 @@ fn preloads_the_fixed_atoms_of_runtime_paths_after_the_static_atoms() {
     // ERTS makes these atoms at emulator start (`os_info_init`,
     // `inet_init`, and the `load` of the `prim_file` and `prim_tty` NIF
     // libraries), so a runtime path uses a constant and puts no name.
-    let mut table = AtomTable::new();
+    let table = AtomTable::new();
     let constants = [
         (Atom::UNIX, "unix"),
         (Atom::TCP, "tcp"),
@@ -537,7 +540,7 @@ fn preloads_the_fixed_atoms_of_runtime_paths_after_the_static_atoms() {
         (Atom::EBADF, "ebadf"),
     ];
     assert_eq!(constants.len(), PRELOADED_ATOM_NAMES.len());
-    let count = table.indices.len();
+    let count = table.read_indices().len();
     for (position, (atom, name)) in (1150..).zip(constants) {
         assert_eq!(atom.index, position);
         assert_eq!(PRELOADED_ATOM_NAMES[(position - 1150) as usize], name);
@@ -546,6 +549,6 @@ fn preloads_the_fixed_atoms_of_runtime_paths_after_the_static_atoms() {
         assert_eq!(table.name_of(&atom), name);
         assert_eq!(table.put(name).unwrap(), atom);
     }
-    assert_eq!(table.indices.len(), count);
+    assert_eq!(table.read_indices().len(), count);
     assert_eq!(table.put("pbeam_zeta").unwrap().index, 1167);
 }

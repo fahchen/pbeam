@@ -7,7 +7,7 @@ use crate::term::{
 
 /// Return a table that holds each name of `names`.
 fn table_of(names: &[&str]) -> AtomTable {
-    let mut table = AtomTable::new();
+    let table = AtomTable::new();
     for name in names {
         table
             .put(name)
@@ -236,9 +236,9 @@ fn prints_funs_as_pinned_erts() {
 fn reads_the_name_from_the_given_table() {
     // The atom keeps its own name today, so a table that gives another name
     // at the same index proves that `print_term` reads the table.
-    let mut source = AtomTable::new();
+    let source = AtomTable::new();
     let named = source.put("pbeam_zeta").expect("the table holds the name");
-    let mut other = AtomTable::new();
+    let other = AtomTable::new();
     other.put("pbeam_other").expect("the table holds the name");
     assert_eq!(other.name(named.index()), Some("pbeam_other"));
     assert_eq!(print_term(&Term::Atom(named), &other), b"pbeam_other");

@@ -2640,21 +2640,21 @@ fn list_name(term: &Term) -> Result<String, NameError> {
 ///
 /// ```rust,ignore
 /// let mut atoms = AtomTable::new();
-/// let ok = list_to_atom(&mut atoms, &Term::list_from(vec![Term::Integer(111), Term::Integer(107)]))?;
+/// let ok = list_to_atom(&atoms, &Term::list_from(vec![Term::Integer(111), Term::Integer(107)]))?;
 /// assert!(matches!(ok, BifResult::Value(atom) if atom == Term::static_atom("ok")));
 /// let surrogate = Term::list_from(vec![Term::Integer(0xD800)]);
-/// assert!(matches!(list_to_atom(&mut atoms, &surrogate)?, BifResult::Raise { .. }));
+/// assert!(matches!(list_to_atom(&atoms, &surrogate)?, BifResult::Raise { .. }));
 /// let long = Term::list_from(vec![Term::Integer(97); 256]);
-/// assert!(matches!(list_to_atom(&mut atoms, &long)?, BifResult::Raise { .. }));
+/// assert!(matches!(list_to_atom(&atoms, &long)?, BifResult::Raise { .. }));
 /// let improper = Term::list_with_tail(vec![Term::Integer(97)], Term::static_atom("x"));
-/// assert!(matches!(list_to_atom(&mut atoms, &improper)?, BifResult::Raise { .. }));
+/// assert!(matches!(list_to_atom(&atoms, &improper)?, BifResult::Raise { .. }));
 /// ```
 ///
 /// # Errors
 ///
 /// A new atom in a full atom table gives the error of `AtomTable::put`,
 /// where ERTS stops the emulator.
-pub(super) fn list_to_atom(atoms: &mut AtomTable, term: &Term) -> Result<BifResult, BeamError> {
+pub(super) fn list_to_atom(atoms: &AtomTable, term: &Term) -> Result<BifResult, BeamError> {
     match list_name(term) {
         Ok(name) => Ok(Value(Term::Atom(atoms.put(&name)?))),
         Err(NameError::TooLong) => Ok(Raise {
@@ -2774,12 +2774,12 @@ pub(super) fn binary_to_existing_atom(
 ///
 /// ```rust,ignore
 /// let mut atoms = AtomTable::new();
-/// let ok = binary_to_atom(&mut atoms, &Term::binary(b"ok".to_vec()), &Term::static_atom("utf8"))?;
+/// let ok = binary_to_atom(&atoms, &Term::binary(b"ok".to_vec()), &Term::static_atom("utf8"))?;
 /// assert!(matches!(ok, BifResult::Value(atom) if atom == Term::static_atom("ok")));
-/// let y = binary_to_atom(&mut atoms, &Term::binary(vec![255]), &Term::static_atom("latin1"))?;
+/// let y = binary_to_atom(&atoms, &Term::binary(vec![255]), &Term::static_atom("latin1"))?;
 /// assert!(matches!(y, BifResult::Value(Term::Atom(atom)) if atoms.name_of(&atom) == "ÿ"));
-/// assert!(matches!(binary_to_atom(&mut atoms, &Term::binary(vec![255]), &Term::static_atom("utf8"))?, BifResult::Raise { .. }));
-/// assert!(matches!(binary_to_atom(&mut atoms, &Term::binary(b"ok".to_vec()), &Term::static_atom("foo"))?, BifResult::Raise { .. }));
+/// assert!(matches!(binary_to_atom(&atoms, &Term::binary(vec![255]), &Term::static_atom("utf8"))?, BifResult::Raise { .. }));
+/// assert!(matches!(binary_to_atom(&atoms, &Term::binary(b"ok".to_vec()), &Term::static_atom("foo"))?, BifResult::Raise { .. }));
 /// ```
 ///
 /// # Errors
@@ -2787,7 +2787,7 @@ pub(super) fn binary_to_existing_atom(
 /// A new atom in a full atom table gives the error of `AtomTable::put`,
 /// where ERTS stops the emulator.
 pub(super) fn binary_to_atom(
-    atoms: &mut AtomTable,
+    atoms: &AtomTable,
     binary: &Term,
     encoding: &Term,
 ) -> Result<BifResult, BeamError> {
@@ -2878,7 +2878,7 @@ const ENDIAN: &str = "little";
 pub(super) fn system_info(scheduler: &mut Scheduler, item: &Term) -> Result<BifResult, BeamError> {
     let schedulers = scheduler.scheduler_count();
     let scheduler_id = i64::try_from(scheduler.index() + 1).expect("a scheduler index fits");
-    let atoms = &mut scheduler.atoms;
+    let atoms = &scheduler.atoms;
     match item {
         Term::Atom(atom) if atom.is_static("os_type") => Ok(Value(Term::tuple(vec![
             Term::Atom(Atom::UNIX),
@@ -4811,7 +4811,7 @@ pub(super) fn process_info_1(
                 let caller = scheduler.current_process();
                 process_info_values(&scheduler.code, caller, current, messages, true, registered)?
             };
-            let info = process_info_term(&mut scheduler.atoms, values)?;
+            let info = process_info_term(&scheduler.atoms, values)?;
             scheduler
                 .current_process_mut()
                 .bump_reductions(PROCESS_INFO_1_KEYS.len() as i32);
@@ -4836,7 +4836,7 @@ pub(super) fn process_info_1(
     let messages = target.mailbox.message_count();
     let registered = scheduler.registered_name_of(*id);
     let values = process_info_values(&scheduler.code, target, 0, messages, false, registered)?;
-    let info = process_info_term(&mut scheduler.atoms, values)?;
+    let info = process_info_term(&scheduler.atoms, values)?;
     scheduler
         .current_process_mut()
         .bump_reductions(PROCESS_INFO_1_KEYS.len() as i32);
@@ -4951,8 +4951,8 @@ fn process_info_values(
 }
 
 /// Build the `erlang:process_info/1` list from the item values.
-fn process_info_term(atoms: &mut AtomTable, values: ProcessInfoValues) -> Result<Term, BeamError> {
-    let mfa = |atoms: &mut AtomTable, mfa: MfaNames| -> Result<Term, BeamError> {
+fn process_info_term(atoms: &AtomTable, values: ProcessInfoValues) -> Result<Term, BeamError> {
+    let mfa = |atoms: &AtomTable, mfa: MfaNames| -> Result<Term, BeamError> {
         let (module, function, arity) = match mfa {
             MfaNames::Names(module, function, arity) => (
                 Term::Atom(atoms.put(&module)?),
@@ -5047,7 +5047,7 @@ fn process_info_term(atoms: &mut AtomTable, values: ProcessInfoValues) -> Result
             (Term::static_atom("kill"), Term::static_atom("true")),
             (Term::static_atom("size"), Term::Integer(0)),
         ],
-        &*atoms,
+        atoms,
     )
     .expect("the max_heap_size map holds atom keys");
     let minor_gcs = atoms.put("minor_gcs")?;
@@ -5453,16 +5453,16 @@ pub(super) fn display(term: &Term, atoms: &AtomTable) -> BifResult {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = display_string(&mut atoms, &Term::static_atom("stdout"), &Term::nil());
+/// let result = display_string(&atoms, &Term::static_atom("stdout"), &Term::nil());
 /// assert!(matches!(result, BifResult::Value(Term::Atom(atom))) if atom.is_static("true"));
-/// assert!(matches!(display_string(&mut atoms, &Term::static_atom("stdin"), &Term::nil()), Err(_)));
+/// assert!(matches!(display_string(&atoms, &Term::static_atom("stdin"), &Term::nil()), Err(_)));
 /// ```
 ///
 /// # Errors
 ///
 /// The `stdin` device, and the errors of `AtomTable::put`.
 pub(super) fn display_string(
-    atoms: &mut AtomTable,
+    atoms: &AtomTable,
     device: &Term,
     string: &Term,
 ) -> Result<BifResult, BeamError> {

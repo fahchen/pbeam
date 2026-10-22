@@ -270,7 +270,7 @@ fn open_nif(scheduler: &mut Scheduler, path: &Term, modes: &Term) -> Result<BifR
         |scheduler, opened| {
             let file = match opened {
                 Ok(file) => file,
-                Err(errno) => return error_tuple(&mut scheduler.atoms, &errno_id(errno)),
+                Err(errno) => return error_tuple(&scheduler.atoms, &errno_id(errno)),
             };
             let reference = scheduler.make_ref()?;
             let caller = scheduler.current_process_mut().id;
@@ -358,7 +358,7 @@ fn close_nif(scheduler: &mut Scheduler, fd: &Term) -> Result<BifResult, BeamErro
             Some(closed) => {
                 scheduler.demonitor_file(owner, reference);
                 let closed = closed.map(|()| Term::static_atom("ok"));
-                value_or_error(&mut scheduler.atoms, closed)
+                value_or_error(&scheduler.atoms, closed)
             }
         },
     )
@@ -394,7 +394,7 @@ fn file_handle_wrapper<A, T>(
     fd: &Term,
     arguments: Result<A, Reject>,
     operation: impl FnOnce(&File, A) -> T + Send + 'static,
-    finish: impl FnOnce(&mut AtomTable, T) -> Result<BifResult, BeamError> + Send + 'static,
+    finish: impl FnOnce(&AtomTable, T) -> Result<BifResult, BeamError> + Send + 'static,
 ) -> Result<BifResult, BeamError>
 where
     A: Send + 'static,
@@ -414,7 +414,7 @@ where
             value
         },
         |scheduler, value| match value {
-            Ok(value) => finish(&mut scheduler.atoms, value),
+            Ok(value) => finish(&scheduler.atoms, value),
             Err(Reject::Badarg) => Ok(BifResult::badarg()),
             Err(Reject::Einval) => einval(),
         },
@@ -430,7 +430,7 @@ where
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = dirty(file::get_cwd, |scheduler, cwd| ok_tuple(&mut scheduler.atoms, cwd.map(Term::binary)))?;
+/// let result = dirty(file::get_cwd, |scheduler, cwd| ok_tuple(&scheduler.atoms, cwd.map(Term::binary)))?;
 /// assert!(matches!(result, BifResult::Dirty(_)));
 /// ```
 fn dirty<T: Send + 'static>(
@@ -456,7 +456,7 @@ fn dirty_value(
     host: impl FnOnce() -> Result<Term, c_int> + Send + 'static,
 ) -> Result<BifResult, BeamError> {
     dirty(host, |scheduler, value| {
-        value_or_error(&mut scheduler.atoms, value)
+        value_or_error(&scheduler.atoms, value)
     })
 }
 
@@ -666,9 +666,9 @@ fn read_info_nif(path: &Term, follow_links: &Term) -> Result<BifResult, BeamErro
 ///
 /// ```rust,ignore
 /// // {ok, <<>>}
-/// let result = read_file_nif(&mut atoms, &Term::binary(b"/dev/null\0".to_vec()))?;
+/// let result = read_file_nif(&atoms, &Term::binary(b"/dev/null\0".to_vec()))?;
 /// // {error, eisdir}
-/// let result = read_file_nif(&mut atoms, &Term::binary(b"/\0".to_vec()))?;
+/// let result = read_file_nif(&atoms, &Term::binary(b"/\0".to_vec()))?;
 /// ```
 ///
 /// # Errors
@@ -693,9 +693,9 @@ fn read_file_nif(path: &Term) -> Result<BifResult, BeamError> {
 ///
 /// ```rust,ignore
 /// // {ok, [<<"b">>, <<"a">>]} when readdir gives "a", then "b"
-/// let result = list_dir_nif(&mut atoms, &Term::binary(b"/tmp/dir\0".to_vec()))?;
+/// let result = list_dir_nif(&atoms, &Term::binary(b"/tmp/dir\0".to_vec()))?;
 /// // {error, enoent}
-/// let result = list_dir_nif(&mut atoms, &Term::binary(b"/pbeam-missing\0".to_vec()))?;
+/// let result = list_dir_nif(&atoms, &Term::binary(b"/pbeam-missing\0".to_vec()))?;
 /// ```
 ///
 /// # Errors
@@ -719,9 +719,9 @@ fn list_dir_nif(path: &Term) -> Result<BifResult, BeamError> {
 ///
 /// ```rust,ignore
 /// // {ok, <<"target">>} for a symbolic link to "target"
-/// let result = read_link_nif(&mut atoms, &Term::binary(b"/tmp/link\0".to_vec()))?;
+/// let result = read_link_nif(&atoms, &Term::binary(b"/tmp/link\0".to_vec()))?;
 /// // {error, einval}
-/// let result = read_link_nif(&mut atoms, &Term::binary(b"/\0".to_vec()))?;
+/// let result = read_link_nif(&atoms, &Term::binary(b"/\0".to_vec()))?;
 /// ```
 ///
 /// # Errors
@@ -742,7 +742,7 @@ fn read_link_nif(path: &Term) -> Result<BifResult, BeamError> {
 ///
 /// ```rust,ignore
 /// // {ok, <<"/home/user">>}
-/// let result = get_cwd_nif(&mut atoms)?;
+/// let result = get_cwd_nif(&atoms)?;
 /// ```
 ///
 /// # Errors
@@ -763,9 +763,9 @@ fn get_cwd_nif() -> Result<BifResult, BeamError> {
 ///
 /// ```rust,ignore
 /// // {error, enotsup}
-/// let result = altname_nif(&mut atoms, &Term::binary(b"/tmp\0".to_vec()))?;
+/// let result = altname_nif(&atoms, &Term::binary(b"/tmp\0".to_vec()))?;
 /// // {error, einval}
-/// let result = altname_nif(&mut atoms, &Term::binary(b"/tmp".to_vec()))?;
+/// let result = altname_nif(&atoms, &Term::binary(b"/tmp".to_vec()))?;
 /// ```
 ///
 /// # Errors
@@ -778,7 +778,7 @@ fn altname_nif(path: &Term) -> Result<BifResult, BeamError> {
     }
     dirty(
         || (),
-        |scheduler, ()| error_tuple(&mut scheduler.atoms, "enotsup"),
+        |scheduler, ()| error_tuple(&scheduler.atoms, "enotsup"),
     )
 }
 
@@ -961,16 +961,16 @@ fn set_time_nif(
 ///
 /// ```rust,ignore
 /// // {ok, <<>>}
-/// let result = ok_tuple(&mut atoms, Ok(Term::binary(vec![])))?;
+/// let result = ok_tuple(&atoms, Ok(Term::binary(vec![])))?;
 /// // {error, enoent}
-/// let result = ok_tuple(&mut atoms, Err(libc::ENOENT))?;
+/// let result = ok_tuple(&atoms, Err(libc::ENOENT))?;
 /// ```
 ///
 /// # Errors
 ///
 /// A new error atom in a full atom table gives the error of
 /// `AtomTable::put`.
-fn ok_tuple(atoms: &mut AtomTable, result: Result<Term, c_int>) -> Result<BifResult, BeamError> {
+fn ok_tuple(atoms: &AtomTable, result: Result<Term, c_int>) -> Result<BifResult, BeamError> {
     value_or_error(atoms, result.map(ok))
 }
 
@@ -1006,19 +1006,16 @@ fn einval() -> Result<BifResult, BeamError> {
 ///
 /// ```rust,ignore
 /// // ok
-/// let result = value_or_error(&mut atoms, Ok(Term::static_atom("ok")))?;
+/// let result = value_or_error(&atoms, Ok(Term::static_atom("ok")))?;
 /// // {error, eio}
-/// let result = value_or_error(&mut atoms, Err(libc::EIO))?;
+/// let result = value_or_error(&atoms, Err(libc::EIO))?;
 /// ```
 ///
 /// # Errors
 ///
 /// A new error atom in a full atom table gives the error of
 /// `AtomTable::put`.
-fn value_or_error(
-    atoms: &mut AtomTable,
-    result: Result<Term, c_int>,
-) -> Result<BifResult, BeamError> {
+fn value_or_error(atoms: &AtomTable, result: Result<Term, c_int>) -> Result<BifResult, BeamError> {
     match result {
         Ok(value) => Ok(BifResult::Value(value)),
         Err(errno) => error_tuple(atoms, &errno_id(errno)),
@@ -1053,14 +1050,14 @@ fn marshal_path(path: &Term) -> Option<&CStr> {
 ///
 /// ```rust,ignore
 /// // {error, enoent}
-/// assert!(matches!(error_tuple(&mut atoms, "enoent")?, BifResult::Value(Term::Tuple(_))));
+/// assert!(matches!(error_tuple(&atoms, "enoent")?, BifResult::Value(Term::Tuple(_))));
 /// ```
 ///
 /// # Errors
 ///
 /// The atom `Reason` in a full atom table gives the error of
 /// `AtomTable::put`.
-fn error_tuple(atoms: &mut AtomTable, reason: &str) -> Result<BifResult, BeamError> {
+fn error_tuple(atoms: &AtomTable, reason: &str) -> Result<BifResult, BeamError> {
     Ok(BifResult::Value(Term::tuple(vec![
         Term::static_atom("error"),
         Term::Atom(atoms.put(reason)?),

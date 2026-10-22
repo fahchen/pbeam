@@ -455,7 +455,7 @@ fn keeps_every_key_through_growth_and_a_delete_wave() {
 fn counts_the_objects_of_the_tables() {
     let mut tables = EtsTables::default();
     let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
-    let mut atoms = test_atom_table();
+    let atoms = test_atom_table();
     let key = atoms.put("k").unwrap();
     table.insert(
         &atoms,
@@ -514,7 +514,7 @@ fn hashes_an_atom_key_by_the_name_as_pinned_erts() {
     // `MAKE_HASH` (`erl_db_hash.c:277-282`) shifts it one bit right for the
     // stored hash of an ETS hash table entry. Erlang has no accessor for the
     // name hash of an atom, so the values come from that algorithm.
-    let mut atoms = AtomTable::new();
+    let atoms = AtomTable::new();
     for (name, hash) in [
         ("ab", 0x672),
         ("\u{e9}", 0xe9),
@@ -863,18 +863,10 @@ fn compares_the_keys_of_an_ordered_set_by_the_arithmetic_order() {
     // and the value of a map key compares by its mode. The ERTS tree frees
     // one node for each reduction (`do_free_tree_continue`,
     // `erl_db_tree.c:2877-2904`).
-    let mut atoms = AtomTable::new();
-    let atom = |atoms: &mut AtomTable, name: &str| Term::Atom(atoms.put(name).unwrap());
-    let (a, b, c) = (
-        atom(&mut atoms, "a"),
-        atom(&mut atoms, "b"),
-        atom(&mut atoms, "c"),
-    );
-    let (t, l, v) = (
-        atom(&mut atoms, "t"),
-        atom(&mut atoms, "l"),
-        atom(&mut atoms, "v"),
-    );
+    let atoms = AtomTable::new();
+    let atom = |atoms: &AtomTable, name: &str| Term::Atom(atoms.put(name).unwrap());
+    let (a, b, c) = (atom(&atoms, "a"), atom(&atoms, "b"), atom(&atoms, "c"));
+    let (t, l, v) = (atom(&atoms, "t"), atom(&atoms, "l"), atom(&atoms, "v"));
     let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::OrderedSet);
     let integer = Term::Integer(1);
     let float = Term::Float(1.0);
@@ -1553,7 +1545,7 @@ fn removes_the_fixations_of_the_exit_in_bounded_turns() {
 fn counts_the_bag_comparisons_after_a_restore() {
     // The restored object moves to the first position, so the second insert
     // of the object compares with it at once (`erl_db_hash.c:1426-1442`).
-    let mut atoms = AtomTable::new();
+    let atoms = AtomTable::new();
     let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Bag);
     let key = Term::Atom(atoms.put("k").unwrap());
     table.insert_all(
@@ -1583,7 +1575,7 @@ fn counts_the_bag_comparisons_of_a_fixed_key() {
     // An insert into a fixed bag compares the new object with each object
     // of the key that the fixation keeps, and each comparison that is not
     // equal uses one unit (`erl_db_hash.c:1422-1444`).
-    let mut atoms = AtomTable::new();
+    let atoms = AtomTable::new();
     let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Bag);
     let key = Term::Atom(atoms.put("k").unwrap());
     table.insert_all(

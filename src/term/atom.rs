@@ -21,7 +21,7 @@ use std::{
     collections::HashMap,
     fmt,
     sync::{
-        Arc, LazyLock,
+        Arc, LazyLock, OnceLock, PoisonError, RwLock, RwLockReadGuard,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -226,23 +226,70 @@ impl ProgramId {
 ///
 /// [`BeamProgram::atoms`]: crate::BeamProgram::atoms
 /// [`Map::from_pairs`]: crate::Map::from_pairs
-#[derive(Debug, Clone)]
+/// The number of names in one chunk of the name storage of an
+/// [`AtomTable`]. `ATOM_LIMIT / ATOM_CHUNK` chunks hold every index.
+const ATOM_CHUNK: usize = 4096;
+
+/// One chunk of the name storage of an [`AtomTable`]. Each slot is set once,
+/// when its atom is created, and never changes after that.
+type NameChunk = Box<[OnceLock<Arc<str>>]>;
+
 pub struct AtomTable {
-    /// The index of each atom, keyed by its name.
-    indices: HashMap<Arc<str>, u32>,
-    /// The name of each atom, by its index. The next new atom gets index
-    /// `names.len()`.
-    names: Vec<Arc<str>>,
+    /// The index of each atom, keyed by its name. The number of entries is
+    /// the next index. A writer holds the write lock while it sets the name
+    /// slot and inserts the entry, so two threads never give one index to
+    /// two names.
+    indices: RwLock<HashMap<Arc<str>, u32>>,
+    /// The name of each atom, by its index, in fixed chunks of
+    /// `ATOM_CHUNK` slots. A slot never moves and is set once, so
+    /// [`AtomTable::name`] returns a name that borrows the table without a
+    /// lock, and the schedulers of a run share one table through an `Arc`.
+    names: Box<[OnceLock<NameChunk>]>,
     /// The program that owns the table. A copy keeps the identity, and the
     /// import compares it with the identity of the destination table.
     program: ProgramId,
-    /// True for the copy of a scheduler in a run with scheduler threads. A
-    /// term crosses a thread with its atom indices, so a new atom in one
-    /// copy can collide with a different new atom in another copy.
-    frozen: bool,
+}
+
+impl fmt::Debug for AtomTable {
+    /// Write the number of atoms and the program of the table.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AtomTable")
+            .field("len", &self.read_indices().len())
+            .field("program", &self.program)
+            .finish()
+    }
+}
+
+impl Clone for AtomTable {
+    /// Return a copy that holds each atom of this table at the same index
+    /// and keeps the program identity. A later atom of one copy does not
+    /// enter the other copy.
+    fn clone(&self) -> Self {
+        let count = self.read_indices().len();
+        let copy = AtomTable::empty(self.program);
+        for index in 0..count {
+            let name = self
+                .name(u32::try_from(index).expect("ATOM_LIMIT fits in u32"))
+                .expect("each index below the count holds a name");
+            copy.put(name).expect("the copy has room for each atom");
+        }
+        copy
+    }
 }
 
 impl AtomTable {
+    /// Return a table without atoms for the program `program`.
+    fn empty(program: ProgramId) -> Self {
+        AtomTable {
+            indices: RwLock::new(HashMap::new()),
+            names: (0..ATOM_LIMIT / ATOM_CHUNK)
+                .map(|_| OnceLock::new())
+                .collect(),
+            program,
+        }
+    }
+
     /// Return a table with the 1150 static atoms at indices 0 to 1149, as
     /// `init_atom_table` makes it, and then the preloaded atoms.
     ///
@@ -253,33 +300,31 @@ impl AtomTable {
     /// assert_eq!(table.get("false"), Atom::from_static("false"));
     /// ```
     pub fn new() -> Self {
-        let count = STATIC_ATOM_NAMES.len() + PRELOADED_ATOM_NAMES.len();
-        let mut indices = HashMap::with_capacity(count);
-        let mut names = Vec::with_capacity(count);
-        let preloaded = STATIC_ATOM_NAMES.iter().chain(&PRELOADED_ATOM_NAMES);
-        for (index, &name) in preloaded.enumerate() {
-            let name: Arc<str> = Arc::from(name);
-            indices.insert(
-                Arc::clone(&name),
-                u32::try_from(index).expect("the preloaded atoms fit in u32"),
-            );
-            names.push(name);
+        let table = AtomTable::empty(ProgramId::next());
+        for name in STATIC_ATOM_NAMES.iter().chain(&PRELOADED_ATOM_NAMES) {
+            table
+                .put(name)
+                .expect("the preloaded atoms fit in the table");
         }
-        AtomTable {
-            indices,
-            names,
-            program: ProgramId::next(),
-            frozen: false,
-        }
+        table
+    }
+
+    /// Return the read guard of the name index. A thread that panicked
+    /// while it held the lock left the map whole, because the insert is the
+    /// last step of [`AtomTable::put`], so the guard ignores the poison.
+    fn read_indices(&self) -> RwLockReadGuard<'_, HashMap<Arc<str>, u32>> {
+        self.indices.read().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Return the atom of a name. Create the atom with the next index when
-    /// it is new, as `erts_atom_put_index` does.
+    /// it is new, as `erts_atom_put_index` does. The schedulers of a run
+    /// share one table, as ERTS shares `erts_atom_table`, so two threads
+    /// that put one name get one index.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let mut table = AtomTable::new();
+    /// let table = AtomTable::new();
     /// let zeta = table.put("pbeam_zeta")?;
     /// assert_eq!(zeta.index, 1167);
     /// assert_eq!(table.put("pbeam_zeta")?, zeta);
@@ -290,19 +335,17 @@ impl AtomTable {
     ///
     /// A new atom when the table holds 1048576 atoms is the error
     /// `no more index entries in atom_tab (max=1048576)`. ERTS exits the
-    /// emulator with this message (`index_put_entry`). A new atom in a
-    /// frozen table is the unsupported error of
-    /// [`AtomTable::freeze_creation`].
-    pub(crate) fn put(&mut self, name: &str) -> Result<Atom, BeamError> {
+    /// emulator with this message (`index_put_entry`).
+    pub(crate) fn put(&self, name: &str) -> Result<Atom, BeamError> {
         if let Some(atom) = self.get(name) {
             return Ok(atom);
         }
-        if self.frozen {
-            return Err(error(format!(
-                "unsupported: a run of execute_on_schedulers cannot create the atom {name} at runtime"
-            )));
+        let mut indices = self.indices.write().unwrap_or_else(PoisonError::into_inner);
+        // Another thread can create the name between the two locks.
+        if let Some(&index) = indices.get(name) {
+            return Ok(Atom { index });
         }
-        let count = self.names.len();
+        let count = indices.len();
         if count >= ATOM_LIMIT {
             return Err(error(format!(
                 "no more index entries in atom_tab (max={ATOM_LIMIT})"
@@ -310,25 +353,12 @@ impl AtomTable {
         }
         let index = u32::try_from(count).expect("ATOM_LIMIT fits in u32");
         let shared: Arc<str> = Arc::from(name);
-        self.indices.insert(Arc::clone(&shared), index);
-        self.names.push(shared);
+        let chunk = self.names[count / ATOM_CHUNK]
+            .get_or_init(|| (0..ATOM_CHUNK).map(|_| OnceLock::new()).collect());
+        // The write lock gives each index to one name, so the slot is empty.
+        let _ = chunk[count % ATOM_CHUNK].set(Arc::clone(&shared));
+        indices.insert(shared, index);
         Ok(Atom { index })
-    }
-
-    /// Freeze the table for the copy of a scheduler in a run with scheduler
-    /// threads. A later run that creates an atom returns the unsupported
-    /// error, because the atom indices of two copies can differ.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// let mut table = AtomTable::new();
-    /// table.freeze_creation();
-    /// assert!(table.put("pbeam_zeta").is_err());
-    /// assert!(table.put("ok").is_ok());
-    /// ```
-    pub(crate) fn freeze_creation(&mut self) {
-        self.frozen = true;
     }
 
     /// Return the atom of a name only when it exists.
@@ -341,7 +371,7 @@ impl AtomTable {
     /// assert_eq!(table.get("pbeam_zeta"), None);
     /// ```
     pub(crate) fn get(&self, name: &str) -> Option<Atom> {
-        self.indices.get(name).map(|&index| Atom { index })
+        self.read_indices().get(name).map(|&index| Atom { index })
     }
 
     /// Return the name of the atom at `index`, or `None` when the table
@@ -358,8 +388,12 @@ impl AtomTable {
     /// assert_eq!(table.name(1048576), None);
     /// ```
     pub(crate) fn name(&self, index: u32) -> Option<&str> {
+        let index = usize::try_from(index).ok()?;
         self.names
-            .get(usize::try_from(index).ok()?)
+            .get(index / ATOM_CHUNK)?
+            .get()?
+            .get(index % ATOM_CHUNK)?
+            .get()
             .map(Arc::as_ref)
     }
 
@@ -429,11 +463,7 @@ impl AtomTable {
     /// let term = Term::Atom(source.get("ok").unwrap());
     /// assert_eq!(destination.import_term(&source, &term)?, Term::Atom(destination.get("ok").unwrap()));
     /// ```
-    pub(crate) fn import_term(
-        &mut self,
-        source: &AtomTable,
-        term: &Term,
-    ) -> Result<Term, BeamError> {
+    pub(crate) fn import_term(&self, source: &AtomTable, term: &Term) -> Result<Term, BeamError> {
         let mut work = vec![ImportStep::Term(term)];
         // The imported terms, in the order that the walk finishes them. A
         // node takes the results of its children from the end.
@@ -592,7 +622,7 @@ impl AtomTable {
     ///
     /// An index that `source` does not hold gives the outside-table error,
     /// and a full destination table gives the error of [`AtomTable::put`].
-    fn import_atom(&mut self, source: &AtomTable, atom: &Atom) -> Result<Atom, BeamError> {
+    fn import_atom(&self, source: &AtomTable, atom: &Atom) -> Result<Atom, BeamError> {
         let name = source
             .name(atom.index())
             .ok_or_else(|| outside_atom_table(atom.index()))?;
@@ -694,7 +724,7 @@ impl PartialEq for HostTerm {
         if Arc::ptr_eq(&self.atoms, &other.atoms) {
             return self.term.eq_shared(&other.term);
         }
-        let mut table = (*self.atoms).clone();
+        let table = (*self.atoms).clone();
         match table.import_term(&other.atoms, &other.term) {
             Ok(imported) => self.term.eq_shared(&imported),
             Err(_) => false,
@@ -751,9 +781,9 @@ impl HostTerm {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let imported = host_term.import_into(&mut scheduler.atoms)?;
+    /// let imported = host_term.import_into(&scheduler.atoms)?;
     /// ```
-    pub(crate) fn import_into(&self, destination: &mut AtomTable) -> Result<Term, BeamError> {
+    pub(crate) fn import_into(&self, destination: &AtomTable) -> Result<Term, BeamError> {
         destination.import_term(&self.atoms, &self.term)
     }
 }

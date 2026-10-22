@@ -446,7 +446,7 @@ fn run_extension(
 ) -> Result<BifResult, BeamError> {
     match binding.job {
         Job::Normal => {
-            (binding.run)(&mut NifContext::new(&mut scheduler.atoms), arguments).map(to_bif_result)
+            (binding.run)(&mut NifContext::new(&scheduler.atoms), arguments).map(to_bif_result)
         }
         Job::CpuBound | Job::IoBound => Ok(BifResult::Dirty(Work::Native {
             function: binding.run,
@@ -558,7 +558,7 @@ pub(super) fn load_nif(
     ];
     if !instances.contains(&Some(frame)) {
         let text = format!("Calling load_nif from old module '{caller}' not allowed");
-        return load_nif_error(&mut scheduler.atoms, "old_code", &text);
+        return load_nif_error(&scheduler.atoms, "old_code", &text);
     }
     let Some(linked) = Linked::of(caller) else {
         return load_shared(scheduler, caller, &arguments);
@@ -579,7 +579,7 @@ pub(super) fn load_nif(
     };
     if loaded {
         return load_nif_error(
-            &mut scheduler.atoms,
+            &scheduler.atoms,
             "reload",
             "NIF library already loaded (reload disallowed since OTP 20).",
         );
@@ -590,7 +590,7 @@ pub(super) fn load_nif(
         .map(|&(name, arity)| (name, arity, 0))
         .collect();
     if let Some(text) = function_error(&module, caller, &functions) {
-        return load_nif_error(&mut scheduler.atoms, "bad_lib", &text);
+        return load_nif_error(&scheduler.atoms, "bad_lib", &text);
     }
     if extension && !has_nifs(&module) {
         // ERTS replaces each function of the library in a module without
@@ -605,19 +605,19 @@ pub(super) fn load_nif(
     // extension library has no upgrade callback (`beam/erl_nif.c:4956-4961`).
     if extension && upgrade(scheduler, scheduler.extension_loads.iter(), &module) {
         let text = "Upgrade not supported by this NIF library.";
-        return load_nif_error(&mut scheduler.atoms, "upgrade", text);
+        return load_nif_error(&scheduler.atoms, "upgrade", text);
     }
     let veto = match linked {
         Linked::Static(library) => library
             .load
             .map_or(0, |load| load(&arguments[1], &scheduler.atoms)),
         Linked::Extension(library) => library.load.map_or(0, |load| {
-            load(&mut NifContext::new(&mut scheduler.atoms), &arguments[1])
+            load(&mut NifContext::new(&scheduler.atoms), &arguments[1])
         }),
     };
     if veto != 0 {
         let text = format!("Library load-call unsuccessful ({veto}).");
-        return load_nif_error(&mut scheduler.atoms, "load", &text);
+        return load_nif_error(&scheduler.atoms, "load", &text);
     }
     if extension {
         scheduler.extension_loads.insert(module.id);
@@ -789,15 +789,15 @@ fn load_shared(
     let module = Arc::clone(scheduler.code.waiting_or_loaded(caller)?);
     if scheduler.shared_libraries.contains_key(&module.id) {
         let text = "NIF library already loaded (reload disallowed since OTP 20).";
-        return load_nif_error(&mut scheduler.atoms, "reload", text);
+        return load_nif_error(&scheduler.atoms, "reload", text);
     }
     let name = library_name(&arguments[0]);
     let library = match abi::open(&name) {
         Ok(library) => library,
-        Err(failure) => return open_error(&mut scheduler.atoms, caller, &name, failure),
+        Err(failure) => return open_error(&scheduler.atoms, caller, &name, failure),
     };
     if let Some(text) = library_error(&module, caller, &library) {
-        return load_nif_error(&mut scheduler.atoms, "bad_lib", &text);
+        return load_nif_error(&scheduler.atoms, "bad_lib", &text);
     }
     if !has_nifs(&module) {
         return Err(error(format!(
@@ -811,12 +811,12 @@ fn load_shared(
             )));
         }
         let text = "Upgrade not supported by this NIF library.";
-        return load_nif_error(&mut scheduler.atoms, "upgrade", text);
+        return load_nif_error(&scheduler.atoms, "upgrade", text);
     }
     let veto = library.load(&arguments[1]);
     if veto != 0 {
         let text = format!("Library load-call unsuccessful ({veto}).");
-        return load_nif_error(&mut scheduler.atoms, "load", &text);
+        return load_nif_error(&scheduler.atoms, "load", &text);
     }
     scheduler
         .shared_libraries
@@ -868,7 +868,7 @@ fn library_error(module: &BeamModule, caller: &str, library: &abi::Library) -> O
 /// The atom `bad_lib` or `load_failed` in a full atom table gives the error
 /// of `AtomTable::put`.
 fn open_error(
-    atoms: &mut AtomTable,
+    atoms: &AtomTable,
     caller: &str,
     name: &std::ffi::CStr,
     failure: abi::OpenError,
@@ -940,7 +940,7 @@ fn open_failure(
 ///
 /// ```rust,ignore
 /// // {error, {reload, "NIF library already loaded (reload disallowed since OTP 20)."}}
-/// let result = load_nif_error(&mut atoms, "reload", "NIF library already loaded (reload disallowed since OTP 20).")?;
+/// let result = load_nif_error(&atoms, "reload", "NIF library already loaded (reload disallowed since OTP 20).")?;
 /// assert!(matches!(result, BifResult::Value(Term::Tuple(_))));
 /// ```
 ///
@@ -949,7 +949,7 @@ fn open_failure(
 /// The atom `Kind` in a full atom table gives the error of
 /// `AtomTable::put`.
 pub(super) fn load_nif_error(
-    atoms: &mut AtomTable,
+    atoms: &AtomTable,
     kind: &str,
     text: &str,
 ) -> Result<BifResult, BeamError> {

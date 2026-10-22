@@ -567,7 +567,7 @@ impl BeamModule {
     /// assert!(BeamModule::load(b"not beam").is_err());
     /// ```
     pub fn load(bytes: &[u8]) -> Result<Self, BeamError> {
-        code::parse(bytes, &mut AtomTable::new())
+        code::parse(bytes, &AtomTable::new())
     }
 
     /// Run an exported function that returns a constant from `x0`. It runs

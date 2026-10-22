@@ -452,7 +452,7 @@ fn decodes_nif_start_at_the_entry_of_the_function_of_the_func_info_before_it() {
         code.push(0x03);
         code
     };
-    let mut table = AtomTable::new();
+    let table = AtomTable::new();
     let atoms = ["prim_tty", "write_nif"].map(|name| table.put(name).unwrap());
     let (instructions, _, _) = parse_code(
         &code(&[
@@ -956,7 +956,7 @@ fn decodes_the_binary_match_instructions_of_is_usascii() {
         &[0xB6, 0x0D, 0x11, 0x03, 0x17, 0x20, 0xF2, 0x00],
     ];
     // Atom 8 is `ensure_at_least` and atom 15 is `ensure_exactly`.
-    let mut table = AtomTable::new();
+    let table = AtomTable::new();
     let atoms: Vec<Atom> = (1..=15)
         .map(|index| match index {
             8 => table.put("ensure_at_least").unwrap(),
@@ -1034,7 +1034,7 @@ fn decodes_the_bs_match_commands_of_the_bs_match_probe_fixture() {
     ];
     // Atom 9 is `ensure_at_least`, 10 is `=:=`, 11 is `get_tail`, and 17
     // is `skip`.
-    let mut table = AtomTable::new();
+    let table = AtomTable::new();
     let atoms: Vec<Atom> = (1..=17)
         .map(|index| match index {
             9 => table.put("ensure_at_least").unwrap(),
@@ -1253,7 +1253,7 @@ fn decodes_the_bs_start_match4_bs_get_binary2_and_bs_get_tail_instructions_of_bs
         &[0x77, 0x35, 0x03, 0x20, 0x42, 0x80, 0x00, 0x13],
     ];
     // Atom 3 is `no_fail`, 4 is `all`, and 11 is `resume`.
-    let mut table = AtomTable::new();
+    let table = AtomTable::new();
     let atoms: Vec<Atom> = (1..=11)
         .map(|index| match index {
             3 => table.put("no_fail").unwrap(),
@@ -1326,7 +1326,7 @@ fn decodes_the_bs_start_match4_bs_get_binary2_and_bs_get_tail_instructions_of_bs
 
 #[test]
 fn reads_each_bs_match_command_and_rejects_bad_command_lists() {
-    let mut table = AtomTable::new();
+    let table = AtomTable::new();
     let names = [
         "ensure_at_least",
         "ensure_exactly",
@@ -1568,7 +1568,7 @@ fn decodes_the_put_map_exact_instruction_of_the_io_start_probe_fixture() {
         0x0A,
         0x13,
     ];
-    let mut table = AtomTable::new();
+    let table = AtomTable::new();
     let atoms: Vec<Atom> = (1..=17)
         .map(|index| format!("atom{index}"))
         .chain(["output".into(), "cooked".into()])
@@ -1615,7 +1615,7 @@ fn decodes_the_has_map_fields_tests_of_the_map_probe_fixture() {
     ];
     // key/2: {test,has_map_fields,{f,20},{x,1},{list,[{x,0}]}}.
     let key = [OPCODE_HAS_MAP_FIELDS, 0x0D, 0x14, 0x13, 0x17, 0x10, 0x03];
-    let mut table = AtomTable::new();
+    let table = AtomTable::new();
     let atoms: Vec<Atom> = (1..=17)
         .map(|index| match index {
             4 => "output".to_owned(),
@@ -2240,7 +2240,7 @@ fn puts_a_test_yield_after_the_entry_label_of_each_function() {
         0x13, // return
         0x03,
     ]);
-    let mut table = AtomTable::new();
+    let table = AtomTable::new();
     let atoms = ["preempt_probe", "body"].map(|name| table.put(name).unwrap());
     let (instructions, _, _) = parse_code(&code, &table, &atoms, &[], &[], &[], &[]).unwrap();
     assert!(matches!(

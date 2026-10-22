@@ -52,7 +52,7 @@ fn keeps_flatmap_keys_in_order_and_replaces_values() {
     // A fresh table for this test makes z before a, so z has the lower
     // atom index. A table shared with other tests could make a first.
     let mut table = AtomTable::new();
-    let atom = |table: &mut AtomTable, name: &str| Term::Atom(table.put(name).unwrap());
+    let atom = |table: &AtomTable, name: &str| Term::Atom(table.put(name).unwrap());
     let mut map = Map::from_pairs(
         vec![
             (atom(&mut table, "z"), atom(&mut table, "z")),
@@ -117,7 +117,7 @@ fn keeps_flatmap_keys_in_order_and_replaces_values() {
 fn orders_atoms_in_list_keys_by_name_in_a_flatmap() {
     // A fresh table for this test makes z before a, so z has the lower atom index.
     let mut table = AtomTable::new();
-    let atom = |table: &mut AtomTable, name: &str| Term::Atom(table.put(name).unwrap());
+    let atom = |table: &AtomTable, name: &str| Term::Atom(table.put(name).unwrap());
     let (z, a, v) = (
         atom(&mut table, "z"),
         atom(&mut table, "a"),

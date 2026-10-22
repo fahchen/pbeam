@@ -65,7 +65,7 @@ fn orders_atoms_by_name_and_not_by_index() {
     // atom index and an order that reads the table name disagree. ERTS
     // 29.1.1: pbeam_order_z >= pbeam_order_a is true and ab >= abc is
     // false, because the term order compares the name bytes.
-    let mut table = AtomTable::new();
+    let table = AtomTable::new();
     let z = Term::Atom(table.put("pbeam_order_z").unwrap());
     let a = Term::Atom(table.put("pbeam_order_a").unwrap());
     let ab = Term::Atom(table.put("ab").unwrap());
@@ -101,7 +101,7 @@ fn orders_each_nested_atom_by_the_owning_table_name() {
     // fresh table gives Z the lower index, so each nested order below
     // disagrees with the index order. The flatmap key order still compares
     // two atom keys by index: maps:keys(#{A => 1, Z => 2}) is [Z, A].
-    let mut table = AtomTable::new();
+    let table = AtomTable::new();
     let z = Term::Atom(table.put("pbeam_order_z").unwrap());
     let a = Term::Atom(table.put("pbeam_order_a").unwrap());
     assert_eq!(z.compare(&a, &table).unwrap(), Greater);

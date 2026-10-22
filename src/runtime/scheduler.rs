@@ -400,7 +400,7 @@ pub(super) struct Scheduler {
     /// The atom table of the run, as `erts_atom_table` for one emulator. A
     /// run starts with a copy of the program table, and a BIF such as
     /// `erlang:list_to_atom/1` adds its new atoms here.
-    pub(super) atoms: AtomTable,
+    pub(super) atoms: Arc<AtomTable>,
     /// The code table of the run, with its prepared code. The launcher puts
     /// the start modules of the program into it before the root process
     /// starts, and `erlang:finish_loading/1` adds a new module.
@@ -488,8 +488,8 @@ pub(super) struct Scheduler {
     /// scheduler thread has a node that wakes no thread.
     node: Arc<Node>,
     /// True when scheduler threads share the node: the inbox of each
-    /// scheduler carries the deliveries of other threads and the atom table
-    /// is frozen.
+    /// scheduler carries the deliveries of other threads and the schedulers
+    /// share one atom table.
     multi: bool,
     /// The index of this scheduler in [`Self::node`].
     index: usize,
@@ -500,7 +500,8 @@ pub(super) struct Scheduler {
 impl Scheduler {
     /// Return a scheduler with no processes and the atom table of the run.
     /// The table is a copy of the table of the loaded program, so each atom
-    /// of the program code keeps its index.
+    /// of the program code keeps its index. The schedulers of a run with
+    /// scheduler threads share one copy.
     ///
     /// # Examples
     ///
@@ -508,7 +509,7 @@ impl Scheduler {
     /// let scheduler = Scheduler::new((*program.atoms).clone());
     /// assert_eq!(scheduler.atoms.get("ok"), Atom::from_static("ok"));
     /// ```
-    pub(super) fn new(atoms: AtomTable) -> Self {
+    pub(super) fn new(atoms: impl Into<Arc<AtomTable>>) -> Self {
         let mut resources = Resources::default();
         resources.put(RegexCodes::default());
         resources.put(Ttys::default());
@@ -529,7 +530,7 @@ impl Scheduler {
             menu_written: menu_pair.1,
             initial_tty_mode: InitialMode::read(),
             resources,
-            atoms,
+            atoms: atoms.into(),
             code: CodeTable::default(),
             nif_libraries: HashSet::new(),
             extension_loads: HashSet::new(),
@@ -562,18 +563,17 @@ impl Scheduler {
     ///
     /// ```rust,ignore
     /// let (node, mut readers) = Node::new(2).unwrap();
-    /// let scheduler = Scheduler::with_shared(AtomTable::new(), node, 0, readers.remove(0));
+    /// let scheduler = Scheduler::with_shared(Arc::new(AtomTable::new()), node, 0, readers.remove(0));
     /// assert_eq!(scheduler.index, 0);
     /// ```
     pub(super) fn with_shared(
-        mut atoms: AtomTable,
+        atoms: Arc<AtomTable>,
         node: Arc<Node>,
         index: usize,
         wake: UnixStream,
     ) -> Self {
-        // A term crosses a scheduler thread with its atom indices, so this
-        // copy of the table cannot add an atom that the other copies lack.
-        atoms.freeze_creation();
+        // A term crosses a scheduler thread with its atom indices, so the
+        // schedulers share one table, as ERTS shares `erts_atom_table`.
         let origin = node.clock_origin();
         let mut scheduler = Scheduler {
             node,
@@ -2533,7 +2533,7 @@ impl Scheduler {
     /// let atoms = scheduler.into_atoms();
     /// assert_eq!(atoms.get("ok"), Atom::from_static("ok"));
     /// ```
-    pub(super) fn into_atoms(self) -> AtomTable {
+    pub(super) fn into_atoms(self) -> Arc<AtomTable> {
         self.atoms
     }
 

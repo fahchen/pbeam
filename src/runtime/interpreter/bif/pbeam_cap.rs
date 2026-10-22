@@ -47,7 +47,7 @@ pub(super) fn revoke(
     };
     match scheduler.revoke_given(*holder, kind) {
         Ok(()) => Ok(Value(Term::static_atom("ok"))),
-        Err(Denied) => BifResult::capability_denied(&mut scheduler.atoms),
+        Err(Denied) => BifResult::capability_denied(&scheduler.atoms),
     }
 }
 
@@ -92,7 +92,7 @@ pub(super) fn policy_revoke(
     };
     match scheduler.policy_revoke(*holder, kind) {
         Ok(()) => Ok(Value(Term::static_atom("ok"))),
-        Err(Denied) => BifResult::capability_denied(&mut scheduler.atoms),
+        Err(Denied) => BifResult::capability_denied(&scheduler.atoms),
     }
 }
 
@@ -135,7 +135,7 @@ pub(super) fn request(
     }
     match scheduler.request_grant(kind.clone(), request.clone())? {
         Ok(()) => Ok(BifResult::AwaitGrant),
-        Err(Denied) => BifResult::capability_denied(&mut scheduler.atoms),
+        Err(Denied) => BifResult::capability_denied(&scheduler.atoms),
     }
 }
 
@@ -243,7 +243,7 @@ pub(super) fn serve(
 pub(super) fn await_grant(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
     match scheduler.current_process_mut().policy_reply.take() {
         Some(true) => Ok(Value(Term::static_atom("ok"))),
-        Some(false) => BifResult::capability_denied(&mut scheduler.atoms),
+        Some(false) => BifResult::capability_denied(&scheduler.atoms),
         None => Ok(BifResult::AwaitGrant),
     }
 }

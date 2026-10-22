@@ -1142,7 +1142,7 @@ pub(super) fn prepare_loading(
     };
     let scheduler = &mut *context.scheduler;
     let module_name = scheduler.atoms.name_of(module).to_owned();
-    match code::prepare(bytes, &module_name, &mut scheduler.atoms) {
+    match code::prepare(bytes, &module_name, &scheduler.atoms) {
         Ok(prepared) => {
             let reference = scheduler.make_ref()?;
             scheduler.code.prepare(reference, prepared);

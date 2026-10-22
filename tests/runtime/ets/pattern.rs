@@ -4,15 +4,15 @@ use crate::term::{
 };
 use num_bigint::BigInt;
 
-fn atom(atoms: &mut AtomTable, name: &str) -> Term {
+fn atom(atoms: &AtomTable, name: &str) -> Term {
     Term::Atom(atoms.put(name).unwrap())
 }
 
 #[test]
 fn reads_the_variable_numbers_as_db_is_variable() {
-    let mut atoms = test_atom_table();
-    let mut number = |name| {
-        let term = atom(&mut atoms, name);
+    let atoms = test_atom_table();
+    let number = |name| {
+        let term = atom(&atoms, name);
         variable(&atoms, &term)
     };
     assert_eq!(number("$0"), Some(0));
@@ -29,10 +29,10 @@ fn reads_the_variable_numbers_as_db_is_variable() {
 
 #[test]
 fn matches_lists_maps_and_ground_tuples() {
-    let mut atoms = test_atom_table();
+    let atoms = test_atom_table();
     let one = Term::Integer(1);
-    let variable = atom(&mut atoms, "$1");
-    let list = Term::list_with_tail(vec![variable.clone(), one.clone()], atom(&mut atoms, "_"));
+    let variable = atom(&atoms, "$1");
+    let list = Term::list_with_tail(vec![variable.clone(), one.clone()], atom(&atoms, "_"));
     let pattern = Pattern::compile(&atoms, &Term::tuple(vec![list])).unwrap();
     let object = Term::list_from([Term::Integer(5), one.clone(), Term::Integer(7)]);
     assert_eq!(
@@ -84,7 +84,7 @@ fn run(
 }
 
 /// Return the guard call `{Name, Arguments...}`.
-fn call(atoms: &mut AtomTable, name: &str, arguments: Vec<Term>) -> Term {
+fn call(atoms: &AtomTable, name: &str, arguments: Vec<Term>) -> Term {
     let mut elements = vec![atom(atoms, name)];
     elements.extend(arguments);
     Term::tuple(elements)
@@ -92,23 +92,22 @@ fn call(atoms: &mut AtomTable, name: &str, arguments: Vec<Term>) -> Term {
 
 #[test]
 fn runs_each_guard_function_of_the_match_specification() {
-    let mut atoms = test_atom_table();
-    let var1 = atom(&mut atoms, "$1");
-    let var2 = atom(&mut atoms, "$2");
+    let atoms = test_atom_table();
+    let var1 = atom(&atoms, "$1");
+    let var2 = atom(&atoms, "$2");
     let head = Term::tuple(vec![var1.clone(), var2.clone()]);
     let ok = Term::static_atom("true");
-    let map = Term::Map(
-        Map::from_pairs(vec![(atom(&mut atoms, "a"), Term::Integer(1))], &atoms).unwrap(),
-    );
+    let map =
+        Term::Map(Map::from_pairs(vec![(atom(&atoms, "a"), Term::Integer(1))], &atoms).unwrap());
     let fun = Term::Fun(Fun::external(
         atoms.put("m").unwrap(),
         atoms.put("f").unwrap(),
         1,
     ));
     let binary = Term::binary(vec![1, 2]);
-    let key_a = atom(&mut atoms, "a");
-    let node = atom(&mut atoms, "nonode@nohost");
-    let equal = |atoms: &mut AtomTable, guard: Term, expected: Term| {
+    let key_a = atom(&atoms, "a");
+    let node = atom(&atoms, "nonode@nohost");
+    let equal = |atoms: &AtomTable, guard: Term, expected: Term| {
         Term::tuple(vec![
             atom(atoms, "=:="),
             guard,
@@ -117,68 +116,58 @@ fn runs_each_guard_function_of_the_match_specification() {
     };
     let bool_cases: Vec<(Term, Term)> = vec![
         (
-            call(&mut atoms, "is_atom", vec![var1.clone()]),
-            atom(&mut atoms, "a"),
+            call(&atoms, "is_atom", vec![var1.clone()]),
+            atom(&atoms, "a"),
         ),
         (
-            call(&mut atoms, "is_float", vec![var1.clone()]),
+            call(&atoms, "is_float", vec![var1.clone()]),
             Term::Float(1.0),
         ),
         (
-            call(&mut atoms, "is_integer", vec![var1.clone()]),
+            call(&atoms, "is_integer", vec![var1.clone()]),
             Term::Integer(1),
         ),
         (
-            call(&mut atoms, "is_list", vec![var1.clone()]),
+            call(&atoms, "is_list", vec![var1.clone()]),
             Term::list_from([Term::Integer(1)]),
         ),
         (
-            call(&mut atoms, "is_number", vec![var1.clone()]),
+            call(&atoms, "is_number", vec![var1.clone()]),
             Term::Integer(1),
         ),
         (
-            call(&mut atoms, "is_pid", vec![var1.clone()]),
+            call(&atoms, "is_pid", vec![var1.clone()]),
             Term::Pid(ProcessId(0)),
         ),
         (
-            call(&mut atoms, "is_port", vec![var1.clone()]),
+            call(&atoms, "is_port", vec![var1.clone()]),
             Term::Port(PortId(0)),
         ),
         (
-            call(&mut atoms, "is_reference", vec![var1.clone()]),
+            call(&atoms, "is_reference", vec![var1.clone()]),
             Term::Reference(Reference(0)),
         ),
         (
-            call(&mut atoms, "is_tuple", vec![var1.clone()]),
+            call(&atoms, "is_tuple", vec![var1.clone()]),
             Term::tuple(vec![Term::Integer(1)]),
         ),
-        (call(&mut atoms, "is_map", vec![var1.clone()]), map.clone()),
+        (call(&atoms, "is_map", vec![var1.clone()]), map.clone()),
         (
-            call(&mut atoms, "is_binary", vec![var1.clone()]),
+            call(&atoms, "is_binary", vec![var1.clone()]),
             binary.clone(),
         ),
         (
-            call(&mut atoms, "is_bitstring", vec![var1.clone()]),
+            call(&atoms, "is_bitstring", vec![var1.clone()]),
             binary.clone(),
         ),
+        (call(&atoms, "is_boolean", vec![var1.clone()]), ok.clone()),
+        (call(&atoms, "is_function", vec![var1.clone()]), fun.clone()),
         (
-            call(&mut atoms, "is_boolean", vec![var1.clone()]),
-            ok.clone(),
-        ),
-        (
-            call(&mut atoms, "is_function", vec![var1.clone()]),
+            call(&atoms, "is_function", vec![var1.clone(), Term::Integer(1)]),
             fun.clone(),
         ),
         (
-            call(
-                &mut atoms,
-                "is_function",
-                vec![var1.clone(), Term::Integer(1)],
-            ),
-            fun.clone(),
-        ),
-        (
-            call(&mut atoms, "is_map_key", vec![key_a.clone(), var1.clone()]),
+            call(&atoms, "is_map_key", vec![key_a.clone(), var1.clone()]),
             map.clone(),
         ),
     ];
@@ -198,149 +187,145 @@ fn runs_each_guard_function_of_the_match_specification() {
     }
     let value_cases: Vec<(Term, Term, Term)> = vec![
         (
-            call(&mut atoms, "abs", vec![var1.clone()]),
+            call(&atoms, "abs", vec![var1.clone()]),
             Term::Integer(-1),
             Term::Integer(1),
         ),
         (
-            call(&mut atoms, "element", vec![Term::Integer(2), var1.clone()]),
+            call(&atoms, "element", vec![Term::Integer(2), var1.clone()]),
             Term::tuple(vec![Term::Integer(1), Term::Integer(2)]),
             Term::Integer(2),
         ),
         (
-            call(&mut atoms, "hd", vec![var1.clone()]),
+            call(&atoms, "hd", vec![var1.clone()]),
             Term::list_from([Term::Integer(1), Term::Integer(2)]),
             Term::Integer(1),
         ),
         (
-            call(&mut atoms, "tl", vec![var1.clone()]),
+            call(&atoms, "tl", vec![var1.clone()]),
             Term::list_from([Term::Integer(1), Term::Integer(2)]),
             Term::list_from([Term::Integer(2)]),
         ),
         (
-            call(&mut atoms, "length", vec![var1.clone()]),
+            call(&atoms, "length", vec![var1.clone()]),
             Term::list_from([Term::Integer(1), Term::Integer(2)]),
             Term::Integer(2),
         ),
         (
-            call(&mut atoms, "map_size", vec![var1.clone()]),
+            call(&atoms, "map_size", vec![var1.clone()]),
             map.clone(),
             Term::Integer(1),
         ),
         (
-            call(&mut atoms, "map_get", vec![key_a.clone(), var1.clone()]),
+            call(&atoms, "map_get", vec![key_a.clone(), var1.clone()]),
             map.clone(),
             Term::Integer(1),
         ),
         (
-            call(&mut atoms, "size", vec![var1.clone()]),
+            call(&atoms, "size", vec![var1.clone()]),
             Term::tuple(vec![Term::Integer(1)]),
             Term::Integer(1),
         ),
         (
-            call(&mut atoms, "size", vec![var1.clone()]),
+            call(&atoms, "size", vec![var1.clone()]),
             binary.clone(),
             Term::Integer(2),
         ),
         (
-            call(&mut atoms, "bit_size", vec![var1.clone()]),
+            call(&atoms, "bit_size", vec![var1.clone()]),
             binary.clone(),
             Term::Integer(16),
         ),
         (
-            call(&mut atoms, "byte_size", vec![var1.clone()]),
+            call(&atoms, "byte_size", vec![var1.clone()]),
             binary.clone(),
             Term::Integer(2),
         ),
         (
-            call(&mut atoms, "tuple_size", vec![var1.clone()]),
+            call(&atoms, "tuple_size", vec![var1.clone()]),
             Term::tuple(vec![Term::Integer(1)]),
             Term::Integer(1),
         ),
+        (call(&atoms, "node", vec![]), Term::Integer(0), node.clone()),
         (
-            call(&mut atoms, "node", vec![]),
-            Term::Integer(0),
-            node.clone(),
-        ),
-        (
-            call(&mut atoms, "node", vec![var1.clone()]),
+            call(&atoms, "node", vec![var1.clone()]),
             Term::Pid(ProcessId(0)),
             node.clone(),
         ),
         (
-            call(&mut atoms, "+", vec![var1.clone()]),
+            call(&atoms, "+", vec![var1.clone()]),
             Term::Integer(1),
             Term::Integer(1),
         ),
         (
-            call(&mut atoms, "-", vec![var1.clone()]),
+            call(&atoms, "-", vec![var1.clone()]),
             Term::Integer(1),
             Term::Integer(-1),
         ),
         (
-            call(&mut atoms, "+", vec![var1.clone(), var2.clone()]),
+            call(&atoms, "+", vec![var1.clone(), var2.clone()]),
             Term::Integer(1),
             Term::Integer(3),
         ),
         (
-            call(&mut atoms, "-", vec![var1.clone(), var2.clone()]),
+            call(&atoms, "-", vec![var1.clone(), var2.clone()]),
             Term::Integer(1),
             Term::Integer(-1),
         ),
         (
-            call(&mut atoms, "*", vec![var1.clone(), var2.clone()]),
+            call(&atoms, "*", vec![var1.clone(), var2.clone()]),
             Term::Integer(1),
             Term::Integer(2),
         ),
         (
-            call(&mut atoms, "/", vec![var1.clone(), var2.clone()]),
+            call(&atoms, "/", vec![var1.clone(), var2.clone()]),
             Term::Integer(1),
             Term::Float(0.5),
         ),
         (
-            call(&mut atoms, "div", vec![var1.clone(), var2.clone()]),
+            call(&atoms, "div", vec![var1.clone(), var2.clone()]),
             Term::Integer(1),
             Term::Integer(0),
         ),
         (
-            call(&mut atoms, "rem", vec![var1.clone(), var2.clone()]),
+            call(&atoms, "rem", vec![var1.clone(), var2.clone()]),
             Term::Integer(1),
             Term::Integer(1),
         ),
         (
-            call(&mut atoms, "band", vec![var1.clone(), var2.clone()]),
+            call(&atoms, "band", vec![var1.clone(), var2.clone()]),
             Term::Integer(1),
             Term::Integer(0),
         ),
         (
-            call(&mut atoms, "bor", vec![var1.clone(), var2.clone()]),
+            call(&atoms, "bor", vec![var1.clone(), var2.clone()]),
             Term::Integer(1),
             Term::Integer(3),
         ),
         (
-            call(&mut atoms, "bxor", vec![var1.clone(), var2.clone()]),
+            call(&atoms, "bxor", vec![var1.clone(), var2.clone()]),
             Term::Integer(1),
             Term::Integer(3),
         ),
         (
-            call(&mut atoms, "bnot", vec![var1.clone()]),
+            call(&atoms, "bnot", vec![var1.clone()]),
             Term::Integer(1),
             Term::Integer(-2),
         ),
         (
-            call(&mut atoms, "bsl", vec![var1.clone(), var2.clone()]),
+            call(&atoms, "bsl", vec![var1.clone(), var2.clone()]),
             Term::Integer(1),
             Term::Integer(4),
         ),
         (
-            call(&mut atoms, "bsr", vec![var1.clone(), var2.clone()]),
+            call(&atoms, "bsr", vec![var1.clone(), var2.clone()]),
             Term::Integer(4),
             Term::Integer(1),
         ),
     ];
     for (guard, value, expected) in value_cases {
         let shown = guard.clone();
-        let guard = equal(&mut atoms, guard, expected.clone());
+        let guard = equal(&atoms, guard, expected.clone());
         let object = vec![value.clone(), Term::Integer(2)];
         assert_eq!(
             run(&atoms, head.clone(), vec![guard], vec![ok.clone()], object),
@@ -357,7 +342,7 @@ fn runs_each_guard_function_of_the_match_specification() {
         ("=:=", Term::Integer(1)),
         ("=/=", Term::Integer(2)),
     ] {
-        let guard = call(&mut atoms, name, vec![var1.clone(), var2.clone()]);
+        let guard = call(&atoms, name, vec![var1.clone(), var2.clone()]);
         assert_eq!(
             run(
                 &atoms,
@@ -370,8 +355,8 @@ fn runs_each_guard_function_of_the_match_specification() {
         );
     }
     for (name, expected) in [("min", Term::Integer(1)), ("max", Term::Integer(2))] {
-        let call = call(&mut atoms, name, vec![var1.clone(), var2.clone()]);
-        let guard = equal(&mut atoms, call, expected);
+        let call = call(&atoms, name, vec![var1.clone(), var2.clone()]);
+        let guard = equal(&atoms, call, expected);
         assert_eq!(
             run(
                 &atoms,
@@ -383,7 +368,7 @@ fn runs_each_guard_function_of_the_match_specification() {
             Some(ok.clone())
         );
     }
-    let guard = call(&mut atoms, "/=", vec![var1.clone(), var2.clone()]);
+    let guard = call(&atoms, "/=", vec![var1.clone(), var2.clone()]);
     assert_eq!(
         run(
             &atoms,
@@ -409,7 +394,7 @@ fn runs_each_guard_function_of_the_match_specification() {
         } else {
             vec![var1.clone(), var2.clone()]
         };
-        let guard = call(&mut atoms, guard, arguments);
+        let guard = call(&atoms, guard, arguments);
         assert_eq!(
             run(
                 &atoms,
@@ -422,13 +407,13 @@ fn runs_each_guard_function_of_the_match_specification() {
         );
     }
     let andalso = Term::tuple(vec![
-        atom(&mut atoms, "andalso"),
-        call(&mut atoms, "is_integer", vec![var1.clone()]),
+        atom(&atoms, "andalso"),
+        call(&atoms, "is_integer", vec![var1.clone()]),
         Term::static_atom("true"),
     ]);
     let orelse = Term::tuple(vec![
-        atom(&mut atoms, "orelse"),
-        call(&mut atoms, "is_atom", vec![var1.clone()]),
+        atom(&atoms, "orelse"),
+        call(&atoms, "is_atom", vec![var1.clone()]),
         Term::static_atom("true"),
     ]);
     assert_eq!(
@@ -443,12 +428,12 @@ fn runs_each_guard_function_of_the_match_specification() {
     );
     // Short-circuit values and a non-boolean operand fail the clause.
     let andalso = Term::tuple(vec![
-        atom(&mut atoms, "andalso"),
+        atom(&atoms, "andalso"),
         Term::static_atom("false"),
         Term::static_atom("true"),
     ]);
     let orelse = Term::tuple(vec![
-        atom(&mut atoms, "orelse"),
+        atom(&atoms, "orelse"),
         Term::static_atom("true"),
         Term::static_atom("false"),
     ]);
@@ -456,7 +441,7 @@ fn runs_each_guard_function_of_the_match_specification() {
         (andalso, Term::static_atom("false")),
         (orelse, Term::static_atom("true")),
     ] {
-        let guard = equal(&mut atoms, guard, expected.clone());
+        let guard = equal(&atoms, guard, expected.clone());
         assert_eq!(
             run(
                 &atoms,
@@ -471,12 +456,12 @@ fn runs_each_guard_function_of_the_match_specification() {
     }
     for guard in [
         Term::tuple(vec![
-            atom(&mut atoms, "andalso"),
+            atom(&atoms, "andalso"),
             Term::Integer(1),
             Term::static_atom("true"),
         ]),
         Term::tuple(vec![
-            atom(&mut atoms, "orelse"),
+            atom(&atoms, "orelse"),
             Term::Integer(1),
             Term::static_atom("true"),
         ]),
@@ -496,21 +481,18 @@ fn runs_each_guard_function_of_the_match_specification() {
 
 #[test]
 fn builds_match_specification_terms_and_rejects_bad_ones() {
-    let mut atoms = test_atom_table();
-    let at = |atoms: &mut AtomTable, name| atom(atoms, name);
-    let head = Term::tuple(vec![at(&mut atoms, "$1"), at(&mut atoms, "$2")]);
+    let atoms = test_atom_table();
+    let at = |atoms: &AtomTable, name| atom(atoms, name);
+    let head = Term::tuple(vec![at(&atoms, "$1"), at(&atoms, "$2")]);
     let ok = Term::static_atom("true");
-    let key_k = atom(&mut atoms, "k");
+    let key_k = atom(&atoms, "k");
     let spec = Term::list_from(vec![Term::tuple(vec![
         head.clone(),
         Term::nil(),
         Term::list_from(vec![
             Term::static_atom("$_"),
             Term::static_atom("$$"),
-            Term::tuple(vec![Term::tuple(vec![
-                at(&mut atoms, "$1"),
-                Term::Integer(1),
-            ])]),
+            Term::tuple(vec![Term::tuple(vec![at(&atoms, "$1"), Term::Integer(1)])]),
             Term::list_with_tail(vec![Term::static_atom("$$")], Term::static_atom("$_")),
         ]),
     ])]);
@@ -528,7 +510,7 @@ fn builds_match_specification_terms_and_rejects_bad_ones() {
     let clauses = Term::list_from(vec![
         Term::tuple(vec![
             head.clone(),
-            Term::list_from([at(&mut atoms, "false")]),
+            Term::list_from([at(&atoms, "false")]),
             Term::list_from([Term::Integer(1)]),
         ]),
         Term::tuple(vec![
@@ -544,7 +526,7 @@ fn builds_match_specification_terms_and_rejects_bad_ones() {
         Some(Term::Integer(2))
     );
     let body = Term::list_from(vec![call(
-        &mut atoms,
+        &atoms,
         "element",
         vec![Term::Integer(3), Term::static_atom("$_")],
     )]);
@@ -557,7 +539,7 @@ fn builds_match_specification_terms_and_rejects_bad_ones() {
     );
     // A large arithmetic result becomes a bignum, and division by zero fails.
     let big = Term::Integer(1 << 40);
-    let body = Term::list_from(vec![call(&mut atoms, "*", vec![big.clone(), big.clone()])]);
+    let body = Term::list_from(vec![call(&atoms, "*", vec![big.clone(), big.clone()])]);
     let spec = Term::list_from(vec![Term::tuple(vec![head.clone(), Term::nil(), body])]);
     assert!(matches!(
         MatchSpec::compile(&atoms, &spec)
@@ -566,7 +548,7 @@ fn builds_match_specification_terms_and_rejects_bad_ones() {
         Some(Term::BigInt(_))
     ));
     let body = Term::list_from(vec![call(
-        &mut atoms,
+        &atoms,
         "/",
         vec![Term::Float(1.0), Term::Float(0.0)],
     )]);
@@ -580,7 +562,7 @@ fn builds_match_specification_terms_and_rejects_bad_ones() {
     // An unsupported guard, a map expression, and a bad specification.
     let unsupported = Term::list_from(vec![Term::tuple(vec![
         head.clone(),
-        Term::list_from([call(&mut atoms, "round", vec![Term::Float(1.0)])]),
+        Term::list_from([call(&atoms, "round", vec![Term::Float(1.0)])]),
         Term::nil(),
     ])]);
     assert!(matches!(
@@ -588,7 +570,7 @@ fn builds_match_specification_terms_and_rejects_bad_ones() {
         Err(SpecError::Unsupported(_))
     ));
     let map =
-        Term::Map(Map::from_pairs(vec![(at(&mut atoms, "a"), Term::Integer(1))], &atoms).unwrap());
+        Term::Map(Map::from_pairs(vec![(at(&atoms, "a"), Term::Integer(1))], &atoms).unwrap());
     let spec = Term::list_from(vec![Term::tuple(vec![
         head.clone(),
         Term::nil(),
@@ -619,12 +601,12 @@ fn builds_match_specification_terms_and_rejects_bad_ones() {
         Term::list_from(vec![Term::tuple(vec![
             head.clone(),
             Term::nil(),
-            Term::list_from([at(&mut atoms, "$3")]),
+            Term::list_from([at(&atoms, "$3")]),
         ])]),
         Term::list_from(vec![Term::tuple(vec![
             head.clone(),
             Term::nil(),
-            Term::list_from([call(&mut atoms, "bogus", vec![])]),
+            Term::list_from([call(&atoms, "bogus", vec![])]),
         ])]),
         Term::list_from(vec![Term::tuple(vec![head.clone(), Term::nil()])]),
         Term::list_from(vec![Term::tuple(vec![
@@ -635,12 +617,12 @@ fn builds_match_specification_terms_and_rejects_bad_ones() {
         Term::list_from(vec![Term::tuple(vec![
             head.clone(),
             Term::nil(),
-            Term::list_from([Term::tuple(vec![atom(&mut atoms, "and")])]),
+            Term::list_from([Term::tuple(vec![atom(&atoms, "and")])]),
         ])]),
         Term::list_from(vec![Term::tuple(vec![
             head.clone(),
             Term::nil(),
-            Term::list_from([Term::tuple(vec![atom(&mut atoms, "andalso")])]),
+            Term::list_from([Term::tuple(vec![atom(&atoms, "andalso")])]),
         ])]),
     ];
     for spec in bad {
@@ -689,7 +671,7 @@ fn builds_match_specification_terms_and_rejects_bad_ones() {
     assert!(!MatchSpec::compile(&atoms, &one).unwrap().matches_nothing(1));
     assert_eq!(MatchSpec::compile(&atoms, &two).unwrap().bound_key(1), None);
     assert!(!MatchSpec::compile(&atoms, &two).unwrap().matches_nothing(1));
-    let nope = atom(&mut atoms, "nope");
+    let nope = atom(&atoms, "nope");
     assert!(
         MatchSpec::compile(
             &atoms,
@@ -707,7 +689,7 @@ fn builds_match_specification_terms_and_rejects_bad_ones() {
     for guard in [
         Term::Integer(1),
         call(
-            &mut atoms,
+            &atoms,
             "element",
             vec![Term::Integer(3), Term::static_atom("$_")],
         ),
@@ -728,12 +710,12 @@ fn builds_match_specification_terms_and_rejects_bad_ones() {
 
 #[test]
 fn fails_each_guard_and_expression_like_the_match_program() {
-    let mut atoms = test_atom_table();
-    let var1 = atom(&mut atoms, "$1");
-    let var2 = atom(&mut atoms, "$2");
+    let atoms = test_atom_table();
+    let var1 = atom(&atoms, "$1");
+    let var2 = atom(&atoms, "$2");
     let head = Term::tuple(vec![var1.clone(), var2.clone()]);
     let ok = Term::static_atom("true");
-    let key_a = atom(&mut atoms, "a");
+    let key_a = atom(&atoms, "a");
     let object = |value: Term| vec![value, Term::Integer(2)];
     let fails = |atoms: &AtomTable, guard: Term, value: Term| {
         assert_eq!(
@@ -750,56 +732,52 @@ fn fails_each_guard_and_expression_like_the_match_program() {
     };
     let map_value =
         Term::Map(Map::from_pairs(vec![(key_a.clone(), Term::Integer(1))], &atoms).unwrap());
-    let size_map = call(&mut atoms, "size", vec![var1.clone()]);
+    let size_map = call(&atoms, "size", vec![var1.clone()]);
     fails(&atoms, size_map, map_value);
-    let map_key = call(&mut atoms, "is_map_key", vec![key_a.clone(), var1.clone()]);
+    let map_key = call(&atoms, "is_map_key", vec![key_a.clone(), var1.clone()]);
     fails(&atoms, map_key, key_a.clone());
     for guard in [
+        call(&atoms, "is_function", vec![var1.clone(), Term::Integer(1)]),
+        call(&atoms, "element", vec![Term::Integer(2), var1.clone()]),
+        call(&atoms, "map_size", vec![var1.clone()]),
+        call(&atoms, "map_get", vec![key_a.clone(), var1.clone()]),
+        call(&atoms, "size", vec![var1.clone()]),
+        call(&atoms, "bit_size", vec![var1.clone()]),
+        call(&atoms, "byte_size", vec![var1.clone()]),
+        call(&atoms, "tuple_size", vec![var1.clone()]),
+        call(&atoms, "node", vec![var1.clone()]),
+        call(&atoms, "not", vec![Term::Integer(1)]),
         call(
-            &mut atoms,
-            "is_function",
-            vec![var1.clone(), Term::Integer(1)],
-        ),
-        call(&mut atoms, "element", vec![Term::Integer(2), var1.clone()]),
-        call(&mut atoms, "map_size", vec![var1.clone()]),
-        call(&mut atoms, "map_get", vec![key_a.clone(), var1.clone()]),
-        call(&mut atoms, "size", vec![var1.clone()]),
-        call(&mut atoms, "bit_size", vec![var1.clone()]),
-        call(&mut atoms, "byte_size", vec![var1.clone()]),
-        call(&mut atoms, "tuple_size", vec![var1.clone()]),
-        call(&mut atoms, "node", vec![var1.clone()]),
-        call(&mut atoms, "not", vec![Term::Integer(1)]),
-        call(
-            &mut atoms,
+            &atoms,
             "and",
             vec![Term::static_atom("false"), Term::static_atom("false")],
         ),
         call(
-            &mut atoms,
+            &atoms,
             "xor",
             vec![Term::Integer(1), Term::static_atom("true")],
         ),
-        call(&mut atoms, "div", vec![Term::Integer(1), Term::Integer(0)]),
-        call(&mut atoms, "rem", vec![Term::Integer(1), Term::Integer(0)]),
-        call(&mut atoms, "bsl", vec![Term::Integer(1), Term::Integer(-1)]),
-        call(&mut atoms, "+", vec![key_a.clone()]),
-        call(&mut atoms, "-", vec![key_a.clone()]),
-        call(&mut atoms, "-", vec![Term::Float(1.5)]),
-        call(&mut atoms, "abs", vec![key_a.clone()]),
-        call(&mut atoms, "abs", vec![Term::Float(-1.5)]),
+        call(&atoms, "div", vec![Term::Integer(1), Term::Integer(0)]),
+        call(&atoms, "rem", vec![Term::Integer(1), Term::Integer(0)]),
+        call(&atoms, "bsl", vec![Term::Integer(1), Term::Integer(-1)]),
+        call(&atoms, "+", vec![key_a.clone()]),
+        call(&atoms, "-", vec![key_a.clone()]),
+        call(&atoms, "-", vec![Term::Float(1.5)]),
+        call(&atoms, "abs", vec![key_a.clone()]),
+        call(&atoms, "abs", vec![Term::Float(-1.5)]),
         call(
-            &mut atoms,
+            &atoms,
             "*",
             vec![Term::Float(1.0e308), Term::Float(1.0e308)],
         ),
-        call(&mut atoms, "+", vec![Term::Float(1.5), Term::Float(2.5)]),
-        call(&mut atoms, "-", vec![Term::Float(1.5), Term::Float(2.5)]),
-        call(&mut atoms, "+", vec![Term::Float(1.0), key_a.clone()]),
+        call(&atoms, "+", vec![Term::Float(1.5), Term::Float(2.5)]),
+        call(&atoms, "-", vec![Term::Float(1.5), Term::Float(2.5)]),
+        call(&atoms, "+", vec![Term::Float(1.0), key_a.clone()]),
     ] {
         fails(&atoms, guard, key_a.clone());
     }
     let big = Term::from_bigint(BigInt::from(1_i32) << 100_usize);
-    let equal = |atoms: &mut AtomTable, guard: Term, expected: Term| {
+    let equal = |atoms: &AtomTable, guard: Term, expected: Term| {
         Term::tuple(vec![
             atom(atoms, "=:="),
             guard,
@@ -807,8 +785,8 @@ fn fails_each_guard_and_expression_like_the_match_program() {
         ])
     };
     // A bignum operand runs the bignum branches of the numeric helpers.
-    let greater = call(&mut atoms, ">", vec![big.clone(), Term::Integer(0)]);
-    let guard = equal(&mut atoms, greater, Term::static_atom("true"));
+    let greater = call(&atoms, ">", vec![big.clone(), Term::Integer(0)]);
+    let guard = equal(&atoms, greater, Term::static_atom("true"));
     assert_eq!(
         run(
             &atoms,
@@ -819,12 +797,12 @@ fn fails_each_guard_and_expression_like_the_match_program() {
         ),
         Some(ok.clone())
     );
-    let negation = call(&mut atoms, "-", vec![big.clone()]);
+    let negation = call(&atoms, "-", vec![big.clone()]);
     let guard = Term::tuple(vec![
-        atom(&mut atoms, "=:="),
+        atom(&atoms, "=:="),
         negation,
         Term::tuple(vec![
-            atom(&mut atoms, "const"),
+            atom(&atoms, "const"),
             Term::from_bigint(-(BigInt::from(1_i32) << 100_usize)),
         ]),
     ]);
@@ -839,14 +817,14 @@ fn fails_each_guard_and_expression_like_the_match_program() {
         Some(ok.clone())
     );
     let absolute = call(
-        &mut atoms,
+        &atoms,
         "abs",
         vec![Term::from_bigint(-(BigInt::from(1_i32) << 100_usize))],
     );
     let guard = Term::tuple(vec![
-        atom(&mut atoms, "=:="),
+        atom(&atoms, "=:="),
         absolute,
-        Term::tuple(vec![atom(&mut atoms, "const"), big.clone()]),
+        Term::tuple(vec![atom(&atoms, "const"), big.clone()]),
     ]);
     assert_eq!(
         run(
@@ -859,10 +837,10 @@ fn fails_each_guard_and_expression_like_the_match_program() {
         Some(ok.clone())
     );
     let guard = Term::tuple(vec![
-        atom(&mut atoms, "=:="),
-        call(&mut atoms, "+", vec![big, Term::Float(1.0)]),
+        atom(&atoms, "=:="),
+        call(&atoms, "+", vec![big, Term::Float(1.0)]),
         Term::tuple(vec![
-            atom(&mut atoms, "const"),
+            atom(&atoms, "const"),
             Term::Float(1.2676506002282294e30),
         ]),
     ]);
@@ -880,7 +858,7 @@ fn fails_each_guard_and_expression_like_the_match_program() {
 
 #[test]
 fn shifts_lists_and_boolean_forms_like_the_match_program() {
-    let mut atoms = test_atom_table();
+    let atoms = test_atom_table();
     let head = Term::static_atom("_");
     let ok = Term::static_atom("true");
     let run_expression = |atoms: &AtomTable, expression: Term| {
@@ -896,44 +874,44 @@ fn shifts_lists_and_boolean_forms_like_the_match_program() {
     let big = |power: u32| Term::from_bigint(BigInt::from(10).pow(power));
     let cases = [
         (
-            call(&mut atoms, "bsl", vec![Term::Integer(8), Term::Integer(-1)]),
+            call(&atoms, "bsl", vec![Term::Integer(8), Term::Integer(-1)]),
             Term::Integer(4),
         ),
         (
-            call(&mut atoms, "bsr", vec![Term::Integer(8), Term::Integer(-1)]),
+            call(&atoms, "bsr", vec![Term::Integer(8), Term::Integer(-1)]),
             Term::Integer(16),
         ),
         (
-            call(&mut atoms, "bsl", vec![Term::Integer(1), Term::Integer(0)]),
+            call(&atoms, "bsl", vec![Term::Integer(1), Term::Integer(0)]),
             Term::Integer(1),
         ),
         (
             call(
-                &mut atoms,
+                &atoms,
                 "bsl",
                 vec![Term::Integer(0), Term::Integer(1_000_000)],
             ),
             Term::Integer(0),
         ),
         (
-            call(&mut atoms, "bsr", vec![Term::Integer(1), big(20)]),
+            call(&atoms, "bsr", vec![Term::Integer(1), big(20)]),
             Term::Integer(0),
         ),
         (
-            call(&mut atoms, "bsr", vec![Term::Integer(-1), big(20)]),
+            call(&atoms, "bsr", vec![Term::Integer(-1), big(20)]),
             Term::Integer(-1),
         ),
         (
-            call(&mut atoms, "bsl", vec![Term::Integer(0), big(20)]),
+            call(&atoms, "bsl", vec![Term::Integer(0), big(20)]),
             Term::Integer(0),
         ),
         (
-            call(&mut atoms, "bsl", vec![Term::Integer(1), big(20)]),
+            call(&atoms, "bsl", vec![Term::Integer(1), big(20)]),
             Term::static_atom("EXIT"),
         ),
         (
             call(
-                &mut atoms,
+                &atoms,
                 "bsl",
                 vec![
                     Term::Integer(1),
@@ -944,7 +922,7 @@ fn shifts_lists_and_boolean_forms_like_the_match_program() {
         ),
         (
             call(
-                &mut atoms,
+                &atoms,
                 "bsr",
                 vec![
                     Term::Integer(1),
@@ -955,7 +933,7 @@ fn shifts_lists_and_boolean_forms_like_the_match_program() {
         ),
         (
             call(
-                &mut atoms,
+                &atoms,
                 "bsl",
                 vec![Term::Integer(1), Term::Integer(4_194_239)],
             ),
@@ -963,7 +941,7 @@ fn shifts_lists_and_boolean_forms_like_the_match_program() {
         ),
         (
             call(
-                &mut atoms,
+                &atoms,
                 "bsl",
                 vec![Term::Integer(1), Term::Integer(4_194_240)],
             ),
@@ -971,7 +949,7 @@ fn shifts_lists_and_boolean_forms_like_the_match_program() {
         ),
         (
             call(
-                &mut atoms,
+                &atoms,
                 "bsl",
                 vec![Term::Integer(1), Term::Integer(i64::MAX)],
             ),
@@ -979,7 +957,7 @@ fn shifts_lists_and_boolean_forms_like_the_match_program() {
         ),
         (
             call(
-                &mut atoms,
+                &atoms,
                 "bsl",
                 vec![Term::Integer(1), Term::Integer(i64::MIN)],
             ),
@@ -995,7 +973,7 @@ fn shifts_lists_and_boolean_forms_like_the_match_program() {
     }
     // A failing list tail keeps the list and gives EXIT in the tail.
     let tail = call(
-        &mut atoms,
+        &atoms,
         "element",
         vec![Term::Integer(5), Term::static_atom("$_")],
     );
@@ -1048,7 +1026,7 @@ fn shifts_lists_and_boolean_forms_like_the_match_program() {
             ok.clone(),
         ),
     ] {
-        let mut elements = vec![atom(&mut atoms, form)];
+        let mut elements = vec![atom(&atoms, form)];
         elements.extend(operands);
         assert_eq!(
             run_expression(&atoms, Term::tuple(elements)),
@@ -1066,13 +1044,13 @@ fn shifts_lists_and_boolean_forms_like_the_match_program() {
         ("and", Term::Integer(1), Term::static_atom("EXIT")),
         ("or", Term::Integer(1), Term::static_atom("EXIT")),
     ] {
-        let one = Term::tuple(vec![atom(&mut atoms, form), operand]);
+        let one = Term::tuple(vec![atom(&atoms, form), operand]);
         assert_eq!(run_expression(&atoms, one), Some(expected), "{form}");
     }
     // A failing nested guard propagates; it does not become `EXIT`.
     let guard = Term::tuple(vec![
-        atom(&mut atoms, "=="),
-        call(&mut atoms, "hd", vec![Term::Integer(1)]),
+        atom(&atoms, "=="),
+        call(&atoms, "hd", vec![Term::Integer(1)]),
         Term::static_atom("EXIT"),
     ]);
     let spec = Term::list_from([Term::tuple(vec![
@@ -1088,16 +1066,16 @@ fn shifts_lists_and_boolean_forms_like_the_match_program() {
     );
     // `min` and `max` keep the first operand on a tie.
     let tie = Term::tuple(vec![
-        atom(&mut atoms, "=:="),
-        call(&mut atoms, "min", vec![Term::Integer(1), Term::Float(1.0)]),
-        Term::tuple(vec![atom(&mut atoms, "const"), Term::Integer(1)]),
+        atom(&atoms, "=:="),
+        call(&atoms, "min", vec![Term::Integer(1), Term::Float(1.0)]),
+        Term::tuple(vec![atom(&atoms, "const"), Term::Integer(1)]),
     ]);
     assert_eq!(run_expression(&atoms, tie), Some(ok.clone()));
     for (name, expected) in [("min", 1), ("max", 2)] {
         let less = Term::tuple(vec![
-            atom(&mut atoms, "=:="),
-            call(&mut atoms, name, vec![Term::Integer(1), Term::Integer(2)]),
-            Term::tuple(vec![atom(&mut atoms, "const"), Term::Integer(expected)]),
+            atom(&atoms, "=:="),
+            call(&atoms, name, vec![Term::Integer(1), Term::Integer(2)]),
+            Term::tuple(vec![atom(&atoms, "const"), Term::Integer(expected)]),
         ]);
         assert_eq!(run_expression(&atoms, less), Some(ok.clone()), "{name}");
     }
@@ -1110,8 +1088,8 @@ fn tests_and_sizes_a_bitstring_with_tail_bits_like_the_match_program() {
     // `<<1,2,3:2>>`, `<<1,2>>`, and `<<>>` (`erl_db_util.c:641-642`,
     // `731-732`, `761-762`). A fixture cannot build a bitstring with tail
     // bits yet, so the test builds it in Rust.
-    let mut atoms = test_atom_table();
-    let var1 = atom(&mut atoms, "$1");
+    let atoms = test_atom_table();
+    let var1 = atom(&atoms, "$1");
     let head = Term::tuple(vec![var1.clone()]);
     let three_bits = Term::Binary(Binary::from(&[0x20_u8]).bits(0, 3));
     let eighteen_bits = Term::Binary(Binary::from(&[1_u8, 2, 0xC0]).bits(0, 18));
@@ -1123,14 +1101,14 @@ fn tests_and_sizes_a_bitstring_with_tail_bits_like_the_match_program() {
         ("size", three_bits.clone(), 0),
         ("size", eighteen_bits.clone(), 2),
     ] {
-        let body = call(&mut atoms, name, vec![var1.clone()]);
+        let body = call(&atoms, name, vec![var1.clone()]);
         assert_eq!(
             run(&atoms, head.clone(), vec![], vec![body], vec![value]),
             Some(Term::Integer(expected)),
             "{name}"
         );
     }
-    let guard = call(&mut atoms, "is_binary", vec![var1.clone()]);
+    let guard = call(&atoms, "is_binary", vec![var1.clone()]);
     for (value, passes) in [
         (three_bits, false),
         (eighteen_bits, false),

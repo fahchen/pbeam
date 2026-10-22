@@ -166,7 +166,7 @@ pub(super) fn decode_packet(
     // An HTTP packet length is at most the size of the subject, so the
     // `packet_sz > bin_sz` case of `decode_packet_3` cannot occur.
     let packet_size = usize::try_from(length).expect("an HTTP packet length fits a usize");
-    let packet = parse_http(&mut context.scheduler.atoms, &bytes[..packet_size], header)?;
+    let packet = parse_http(&context.scheduler.atoms, &bytes[..packet_size], header)?;
     // The rest is a sub-binary of the subject, as
     // `erts_make_sub_binary` gives it (`erl_bif_port.c:1602-1604`).
     let rest = Term::Binary(binary.bits(packet_size * 8, binary.bit_size()));
@@ -243,7 +243,7 @@ fn packet_length(bytes: &[u8], packet_size: u64, line_length: u64, header: bool)
 /// Return the packet of an HTTP line, as `packet_parse_http`
 /// (`packet_parser.c:662-862`) gives it, or the `{http_error, Line}` packet
 /// of a line that it cannot parse (`packet_parse`, `packet_parser.h:155-159`).
-fn parse_http(atoms: &mut AtomTable, bytes: &[u8], header: bool) -> Result<Term, BeamError> {
+fn parse_http(atoms: &AtomTable, bytes: &[u8], header: bool) -> Result<Term, BeamError> {
     match line(atoms, bytes, header)? {
         Some(packet) => Ok(packet),
         None => Ok(Term::tuple(vec![
@@ -256,7 +256,7 @@ fn parse_http(atoms: &mut AtomTable, bytes: &[u8], header: bool) -> Result<Term,
 /// Return the packet of one HTTP line, or `None` for a line that
 /// `packet_parse_http` refuses (`packet_parser.c:662-862`). The line is
 /// `bytes` without the trailing CRLF (`packet_parser.c:669-673`).
-fn line(atoms: &mut AtomTable, bytes: &[u8], header: bool) -> Result<Option<Term>, BeamError> {
+fn line(atoms: &AtomTable, bytes: &[u8], header: bool) -> Result<Option<Term>, BeamError> {
     // `packet_length` gives a packet only after a newline, so the last byte
     // is always `\n`.
     let n = if bytes.len() >= 2 && bytes[bytes.len() - 2] == b'\r' {
@@ -276,7 +276,7 @@ fn line(atoms: &mut AtomTable, bytes: &[u8], header: bool) -> Result<Option<Term
 
 /// Return the packet of a status line, or `None` for a line that the parser
 /// refuses (`packet_parser.c:678-728`).
-fn response_line(atoms: &mut AtomTable, bytes: &[u8], n: usize) -> Result<Option<Term>, BeamError> {
+fn response_line(atoms: &AtomTable, bytes: &[u8], n: usize) -> Result<Option<Term>, BeamError> {
     let mut ptr = 5;
     let mut left = n - 5;
     let start = ptr;
@@ -343,7 +343,7 @@ fn response_line(atoms: &mut AtomTable, bytes: &[u8], n: usize) -> Result<Option
 /// Return the packet of a request line, or `None` for a line that the
 /// parser refuses (`packet_parser.c:729-799`). A line without a version is
 /// HTTP/0.9.
-fn request_line(atoms: &mut AtomTable, bytes: &[u8], n: usize) -> Result<Option<Term>, BeamError> {
+fn request_line(atoms: &AtomTable, bytes: &[u8], n: usize) -> Result<Option<Term>, BeamError> {
     let mut ptr = 0;
     let mut left = n;
     while left > 0 && !tspecial(bytes[ptr]) {
@@ -429,7 +429,7 @@ fn request_line(atoms: &mut AtomTable, bytes: &[u8], n: usize) -> Result<Option<
 /// refuses (`packet_parser.c:801-860`). The name of a known header is an
 /// atom and its bit is the position in [`HEADERS`] plus one; an unknown
 /// name is the name with the case of a known name.
-fn header_line(atoms: &mut AtomTable, bytes: &[u8], n: usize) -> Result<Option<Term>, BeamError> {
+fn header_line(atoms: &AtomTable, bytes: &[u8], n: usize) -> Result<Option<Term>, BeamError> {
     if n == 0 {
         return Ok(Some(Term::Atom(atoms.put("http_eoh")?)));
     }
@@ -491,7 +491,7 @@ fn header_line(atoms: &mut AtomTable, bytes: &[u8], n: usize) -> Result<Option<T
 /// Return the packet of a request URI, as `http_parse_uri` and the callback
 /// `http_bld_uri` give it (`packet_parser.c:615-652`,
 /// `erl_bif_port.c:1315-1356`).
-fn uri(atoms: &mut AtomTable, uri: &[u8]) -> Result<Term, BeamError> {
+fn uri(atoms: &AtomTable, uri: &[u8]) -> Result<Term, BeamError> {
     if uri == b"*" {
         return Ok(Term::Atom(atoms.put("*")?));
     }
@@ -519,7 +519,7 @@ fn uri(atoms: &mut AtomTable, uri: &[u8]) -> Result<Term, BeamError> {
 /// Return the packet of an absolute URI, as `http_parse_absoluteURI` and
 /// `http_bld_uri` give it (`packet_parser.c:520-582`,
 /// `erl_bif_port.c:1331-1343`).
-fn absolute_uri(atoms: &mut AtomTable, scheme: &str, uri: &[u8]) -> Result<Term, BeamError> {
+fn absolute_uri(atoms: &AtomTable, scheme: &str, uri: &[u8]) -> Result<Term, BeamError> {
     let (host, path) = match uri.iter().position(|byte| *byte == b'/') {
         Some(index) => (&uri[..index], &uri[index..]),
         None => (uri, &b"/"[..]),
