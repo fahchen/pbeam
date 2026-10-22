@@ -5,8 +5,9 @@
 use std::sync::Arc;
 
 use super::super::{Delivery, Scheduler, node::Node, run_queue::RunQueue};
+use crate::runtime::dirty::Claim;
 use crate::runtime::process::{
-    Priority, ProcessState, ReceiveTimer, Start, TimerReference, tests::frame,
+    DirtyCall, Priority, ProcessState, ReceiveTimer, Start, TimerReference, tests::frame,
 };
 use crate::runtime::signal::Signal;
 use crate::term::{AtomTable, ProcessId, Reference, Term};
@@ -97,11 +98,12 @@ fn gives_nothing_without_a_hungry_scheduler() {
 }
 
 /// A process that waits, exits, waits for a receive timer, is the target
-/// of a BIF timer, used a scheduler service, or is a system process stays with its scheduler, also when the thief is hungry.
+/// of a BIF timer, used a scheduler service, is a system process, or is in
+/// a dirty call stays with its scheduler, also when the thief is hungry.
 #[test]
 fn keeps_each_process_that_cannot_move() {
     let (node, mut victim, _thief) = two_schedulers();
-    insert(&mut victim, &[1, 2, 3, 4, 5, 6]);
+    insert(&mut victim, &[1, 2, 3, 4, 5, 6, 7]);
     process(&mut victim, 1).waiting = true;
     process(&mut victim, 2).exiting = Some(Term::static_atom("kill"));
     process(&mut victim, 3).receive_timer = ReceiveTimer::Set {
@@ -113,10 +115,18 @@ fn keeps_each_process_that_cannot_move() {
         .insert(TimerReference(Reference(9)), ());
     process(&mut victim, 5).pinned = true;
     victim.mark_system(ProcessId(6));
+    // The dirty call starts after the process is in the run queue, as a
+    // process in a dirty call that has signals to handle is.
+    process(&mut victim, 7).dirty_call = Some(DirtyCall {
+        call: 0,
+        entry: (String::new(), String::new(), Vec::new()),
+        output: None,
+        claim: Claim::default(),
+    });
     node.set_hungry(1, true);
     victim.serve_steal();
     assert!(inbox(&node, 1).is_empty());
-    assert_eq!(victim.runnable.len(), 6);
+    assert_eq!(victim.runnable.len(), 7);
     assert!(node.has_hungry(0), "a steal with no process keeps the mark");
 }
 
