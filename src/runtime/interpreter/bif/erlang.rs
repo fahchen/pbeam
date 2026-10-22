@@ -5530,7 +5530,9 @@ pub(super) fn ref_to_list(term: &Term, atoms: &AtomTable) -> BifResult {
 
 /// The preloaded modules of ERTS, in the order of `PRELOAD_BEAM` and
 /// `ESOCK_PRELOAD_BEAM` (`erts/emulator/Makefile.in:804-828`).
-const PRELOADED: [&str; 22] = [
+/// [`BeamProgram::load_preloaded`](crate::BeamProgram::load_preloaded)
+/// loads them in this order.
+pub(in crate::runtime::interpreter) const PRELOADED: [&str; 22] = [
     "erts_code_purger",
     "erl_init",
     "init",

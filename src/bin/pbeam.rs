@@ -1,13 +1,20 @@
-use std::{ffi::OsString, fs, os::unix::ffi::OsStrExt, path::PathBuf, process::ExitCode};
+use std::{
+    ffi::{OsStr, OsString},
+    fs,
+    os::unix::ffi::OsStrExt,
+    path::PathBuf,
+    process::ExitCode,
+};
 
 use clap::Parser;
-use pbeam_runtime::{BeamError, BeamProgram, Term, install_start_dispositions};
+use pbeam_runtime::{BeamError, BeamProgram, HostTerm, Term, install_start_dispositions};
 
 #[derive(Parser)]
 #[command(
     name = "pbeam",
     version,
-    about = "Load BEAM files and run a function as the root process."
+    about = "Load BEAM files and run a function as the root process.",
+    after_help = "`pbeam erl --root DIR --bindir DIR --preloaded DIR -- ERL_ARGUMENT...` boots the node as `erl` does (see `pbeam erl --help`)."
 )]
 struct Cli {
     /// Module name, such as `pbeam_boot`.
@@ -73,6 +80,69 @@ struct Cli {
     beam_files: Vec<PathBuf>,
 }
 
+/// The command form `pbeam erl`, which boots the node with the arguments of
+/// `erl`, for example the arguments that `bin/<app> start` of a release
+/// gives `erl`. The first argument `erl` selects this form, so the other
+/// form cannot run a module with the name `erl`; the pinned OTP has no such
+/// module.
+#[derive(Parser)]
+#[command(
+    name = "pbeam erl",
+    bin_name = "pbeam erl",
+    about = "Boot the node with the preloaded modules and the arguments of erl."
+)]
+struct ErlCli {
+    /// The root directory of the OTP installation or of the release, as the
+    /// `erl` script finds it and `erlexec` gives it to the emulator with
+    /// `-root DIR`. A boot script reads the `$ROOT` directories below it.
+    #[arg(long, value_name = "DIR")]
+    root: OsString,
+    /// The `bin` directory of `erts`, as the `erl` script sets it, for
+    /// example `$ROOT/erts-17.1/bin`. `erlexec` gives it to the emulator
+    /// with `-bindir DIR`, and the port programs of `erts`, such as
+    /// `inet_gethost`, start from it.
+    #[arg(long, value_name = "DIR")]
+    bindir: OsString,
+    /// The directory of the BEAM files of the preloaded modules, which
+    /// `erlang:pre_loaded/0` names, for example the `ebin` directory of
+    /// `erts`. ERTS builds these modules into the emulator.
+    #[arg(long, value_name = "DIR")]
+    preloaded: PathBuf,
+    /// The arguments of `erl`, after `--`.
+    #[arg(value_name = "ERL_ARGUMENT", last = true)]
+    arguments: Vec<OsString>,
+}
+
+/// The options that `erlexec` reads before it starts the emulator, so that
+/// they change the start or the arguments of the emulator
+/// (`erts/etc/common/erlexec.c:661-861`, `2122-2140`). PBeam has no
+/// `erlexec` for them, and `-name` and `-sname` start the distribution,
+/// which PBeam does not have. `pbeam erl` rejects each of them before
+/// `-extra`.
+const ERLEXEC_OPTIONS: [&str; 17] = [
+    "-args_file",
+    "-compile",
+    "-configfd",
+    "-detached",
+    "-emu_args",
+    "-emu_args_exit",
+    "-emu_name_exit",
+    "-emu_qouted_cmd_exit",
+    "-env",
+    "-epmd",
+    "-keep_window",
+    "-make",
+    "-man",
+    "-name",
+    "-noinput",
+    "-sname",
+    "-version",
+];
+
+/// The environment variables of the flags that `erlexec` adds before and
+/// after the arguments of the command line (`erts/etc/common/erlexec.c`).
+const ERLEXEC_VARIABLES: [&str; 3] = ["ERL_AFLAGS", "ERL_FLAGS", "ERL_ZFLAGS"];
+
 /// Run the command line and exit with one of these statuses:
 ///
 /// - 0: the root process returns. The binary writes nothing to stderr.
@@ -105,20 +175,29 @@ fn main() -> ExitCode {
     {
         return status;
     }
+    if std::env::args_os().nth(1).as_deref() == Some(OsStr::new("erl")) {
+        return exit_status(boot_erl(ErlCli::parse_from(std::env::args_os().skip(1))));
+    }
     let arguments = Cli::parse();
     let extracted = arguments.extracted_root.clone();
-    let status = match run(arguments) {
+    let status = exit_status(run(arguments));
+    // A boot of an extracted release removes its directory at the exit. The
+    // flag reaches only this process, not the programs that it starts.
+    pbeam_runtime::embedded::remove_extraction(extracted);
+    status
+}
+
+/// Return the exit status of the end of a command line, and write the
+/// message of an error to stderr.
+fn exit_status(end: Result<(), Exit>) -> ExitCode {
+    match end {
         Ok(()) => ExitCode::SUCCESS,
         Err(Exit::Halt(status)) => ExitCode::from(status.to_le_bytes()[0]),
         Err(Exit::Error(message)) => {
             eprintln!("pbeam: {message}");
             ExitCode::FAILURE
         }
-    };
-    // A boot of an extracted release removes its directory at the exit. The
-    // flag reaches only this process, not the programs that it starts.
-    pbeam_runtime::embedded::remove_extraction(extracted);
-    status
+    }
 }
 
 /// How a command line ends without a root result.
@@ -204,11 +283,91 @@ fn run(arguments: Cli) -> Result<(), Exit> {
         }
         None => program.execute(module, function, &atoms),
     };
+    run_end(result)
+}
+
+/// Return the end of a command line for the result of its run.
+fn run_end(result: Result<HostTerm, BeamError>) -> Result<(), Exit> {
     match result {
         Ok(_) => Ok(()),
         Err(BeamError::Halt(status)) => Err(Exit::Halt(status)),
         Err(execution_error) => Err(Exit::Error(execution_error.to_string())),
     }
+}
+
+/// Boot the node as `erl` does with the arguments of `pbeam erl`: set the
+/// signal dispositions of the emulator start, load the preloaded modules
+/// (see [`BeamProgram::load_preloaded`]), and run [`BeamProgram::boot`]
+/// with the arguments that `erlexec` gives the emulator for these `erl`
+/// arguments: `-root Root -bindir Bindir -progname erl -- -home Home --`
+/// and then the `erl` arguments unchanged
+/// (`erts/etc/common/erlexec.c:625-640`, `1151-1161`). Without the
+/// variable `HOME`, the arguments have no `-home`, as in `erlexec`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let arguments = ErlCli::parse_from(["pbeam erl", "--root", root, "--bindir", bindir, "--preloaded", ebin, "--", "-boot", "start_clean"]);
+/// boot_erl(arguments)?;
+/// ```
+///
+/// # Errors
+///
+/// An `erl` option of [`ERLEXEC_OPTIONS`] or an emulator flag (an
+/// argument that starts with `+`) before `-extra`, a variable of
+/// [`ERLEXEC_VARIABLES`] that is set and not empty, the errors of
+/// [`BeamProgram::load_preloaded`], and the errors of
+/// [`BeamProgram::boot`]. A halt of the run gives [`Exit::Halt`].
+fn boot_erl(arguments: ErlCli) -> Result<(), Exit> {
+    if let Some(variable) = ERLEXEC_VARIABLES
+        .iter()
+        .find(|variable| std::env::var_os(variable).is_some_and(|value| !value.is_empty()))
+    {
+        return Err(format!(
+            "the environment variable {variable} of erl is not supported: \
+             see \"Release boot\" in docs/erts-differences.md"
+        )
+        .into());
+    }
+    let options = arguments
+        .arguments
+        .iter()
+        .map(|argument| argument.as_bytes());
+    for option in options.take_while(|option| *option != b"-extra") {
+        if option.starts_with(b"+") || ERLEXEC_OPTIONS.iter().any(|name| name.as_bytes() == option)
+        {
+            return Err(format!(
+                "the erl option {} is not supported: see \"Release boot\" in \
+                 docs/erts-differences.md",
+                String::from_utf8_lossy(option)
+            )
+            .into());
+        }
+    }
+    install_start_dispositions();
+    let program = BeamProgram::load_preloaded(&arguments.preloaded)
+        .map_err(|load_error| format!("cannot load the preloaded modules: {load_error}"))?;
+    let home = std::env::var_os("HOME");
+    let mut boot: Vec<&[u8]> = vec![
+        b"-root",
+        arguments.root.as_bytes(),
+        b"-bindir",
+        arguments.bindir.as_bytes(),
+        b"-progname",
+        b"erl",
+        b"--",
+    ];
+    if let Some(home) = &home {
+        boot.extend([&b"-home"[..], home.as_bytes()]);
+    }
+    boot.push(b"--");
+    boot.extend(
+        arguments
+            .arguments
+            .iter()
+            .map(|argument| argument.as_bytes()),
+    );
+    run_end(program.boot(&boot))
 }
 
 /// Make the boot flag list of the `--root`, `--pa`, and `--mode` options:
