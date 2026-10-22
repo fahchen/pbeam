@@ -327,6 +327,13 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a multi-scheduler run that creates an atom at runtime, uses ETS or `persistent_term` across schedulers, or needs a timer that wakes a process of another scheduler.
 - **Source:** #842.
 
+### Run a real application on several schedulers
+
+- **Now:** the scheduler mechanics of M10 work in a run of `BeamProgram::execute_on_schedulers`: cross-thread signals, the node process table and roots, the node-wide impossible-wait, work stealing, and the node dirty pools. But `BeamProgram::boot`, `pbeam erl`, the `pbeam` binary, and the bundle launcher use the one-scheduler path (`execute`), so plug_hello and each other release run on one scheduler. A run of `execute_on_schedulers` gives a clear unsupported error for ETS, `persistent_term`, atomics, an atom created at run time, code loading (`erlang:finish_loading/1`, `erlang:delete_module/1`, `erts_internal:prepare_loading/2`, `erts_internal:purge_module/2`), aliases and BIF timers across schedulers, `erlang:load_nif/2`, and `erlang:ports/0`. The OTP kernel boot uses ETS, `persistent_term`, new atoms, and code loading, so a real application cannot boot on several schedulers yet.
+- **Option:** a milestone in two steps. First, move these node services to the shared node, one task for each service ("Share the node services of a multi-scheduler run", "Route alias messages across scheduler threads"), each compared with `erl +S N`. Second, let `BeamProgram::boot`, `pbeam erl`, and the bundle launcher start N schedulers, with the ERTS default of one scheduler for each logical CPU and the `+S` option, and run plug_hello end to end on several schedulers.
+- **Trigger:** the owner opens the milestone, or an application needs more than one CPU core.
+- **Source:** owner question of 2026-10-22 after the tart run of plug_hello ("我们现在支持多个 schedulers 了吗？").
+
 ### Send the pending monitor signal at the ERTS point across scheduler threads
 
 - **Now:** `Scheduler::pending_before_remote` sends the pending monitor signal of the current process before a delivery to another scheduler (PR #890, #886). ERTS sends it at the switch out of the process, with a delivery to the same target, or when another monitor signal of the process replaces it in the slot (`erl_process.c:9665-9668`, `erl_proc_sig_queue.c:1146-1166`, `erl_message.c:463-480`). The PBeam order is the order of an ERTS run in which the process switches out just before the delivery, so it differs in timing only. The "Signal queue" row of `docs/erts-differences.md` records it.
