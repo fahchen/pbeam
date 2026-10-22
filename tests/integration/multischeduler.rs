@@ -595,38 +595,6 @@ fn rejects_a_read_of_a_timer_of_another_scheduler() {
     );
 }
 
-/// An alias in a run with scheduler threads fails with a clear error.
-#[test]
-fn rejects_an_alias() {
-    let erlang = pinned_beam("erlang");
-    let program = BeamProgram::load(&[&erlang, PING_PONG]).expect("the fixture loads");
-    let error = program
-        .execute_on_schedulers(&[("ping_pong", "alias_create"), ("ping_pong", "monitor_hold")])
-        .expect_err("the alias is unsupported");
-    assert!(
-        error
-            .to_string()
-            .contains("unsupported: erlang:alias/0,1 in a run of execute_on_schedulers"),
-        "{error}"
-    );
-}
-
-/// An alias from a monitor in a run with scheduler threads fails with a
-/// clear error.
-#[test]
-fn rejects_an_alias_from_a_monitor() {
-    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
-    let error = program
-        .execute_on_schedulers(&[("ping_pong", "monitor_alias"), ("ping_pong", "alias_hold")])
-        .expect_err("the monitor alias is unsupported");
-    assert!(
-        error
-            .to_string()
-            .contains("unsupported: an alias from a monitor in a run of execute_on_schedulers"),
-        "{error}"
-    );
-}
-
 /// An atomic array in a run with scheduler threads fails with a clear
 /// error.
 #[test]

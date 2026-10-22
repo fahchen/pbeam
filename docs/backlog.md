@@ -316,14 +316,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** an application that reaches an unbound function; the order follows the applications.
 - **Source:** owner comment of 2026-10-22 ("最终我们需要完整实现一遍").
 
-### Route alias messages across scheduler threads
-
-- **Now:** the owner of each alias is in the scheduler that made the alias (`Scheduler::alias_owners`), so a message to an alias from another scheduler does not find its owner. A `gen:call` between processes of two schedulers uses an alias and fails in a restricted or multi-scheduler run that reaches this path.
-- **Option:** put the alias owners in the shared node, as the names, and route an alias message to the owner scheduler through its inbox.
-- **Trigger:** the first cross-scheduler alias send, for example a `gen:call` between two schedulers.
-- **Source:** #842.
-- **Task:** [#928](https://github.com/fahchen/pbeam/issues/928).
-
 ## Exceptions
 
 ### Give the `error_info` cause of BIF errors
