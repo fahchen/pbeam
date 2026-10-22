@@ -67,6 +67,14 @@ fn a_monitor_that_races_with_a_remote_exit_gets_one_down() {
     run_pair("race_watch", "race_owner");
 }
 
+/// A monitor signal that the watcher sends before its message to the owner
+/// of the target is in the queue of the target before the owner can kill
+/// the target when it gets the message, so each `DOWN` has `killed`.
+#[test]
+fn a_monitor_before_a_message_reaches_the_target_before_a_later_kill() {
+    run_pair("kill_watch", "kill_owner");
+}
+
 /// Each pair gives `ok` for each root on the pinned ERTS.
 #[test]
 fn the_pinned_erts_gives_the_same_results() {
@@ -92,6 +100,6 @@ fn the_pinned_erts_gives_the_same_results() {
     assert!(output.status.success(), "{output:?}");
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "[{ok,ok},{ok,ok},{ok,ok},{ok,ok}]\n"
+        "[{ok,ok},{ok,ok},{ok,ok},{ok,ok},{ok,ok}]\n"
     );
 }

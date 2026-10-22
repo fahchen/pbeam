@@ -2662,6 +2662,8 @@ impl Scheduler {
     /// `erts_queue_proc_message` (`erl_message.c:531-545`) does. A pending
     /// monitor signal of `from` to the same target goes first
     /// (`prepend_pending_sig_maybe`, `erl_message.c:463-480`). A message to a
+    /// process of another scheduler goes after each pending monitor signal
+    /// ([`Self::pending_before_remote`]). A message to a
     /// process that does not exist, or to an exiting process, is dropped,
     /// and the pending signal waits on. A message to the sender itself marks
     /// it as a process that may have signals from itself.
@@ -2675,9 +2677,7 @@ impl Scheduler {
         if !self.processes.contains_key(&target)
             && let Some(index) = self.remote_owner(target)
         {
-            let pending = self
-                .take_pending_monitor(target)
-                .map(signals::monitor_signal);
+            let pending = self.pending_before_remote(target);
             self.node
                 .send_message(index, Some(from), term, target, pending);
             return;
