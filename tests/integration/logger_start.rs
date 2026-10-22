@@ -683,9 +683,10 @@ fn reads_a_negative_budget_in_the_form_of_each_bif_as_pinned_erts() {
     // read a negative budget. `lists:member/2`, `erlang:'--'/2`, and
     // `erlang:iolist_size/1` keep the budget signed and trap or yield at once
     // (`erl_bif_lists.c:1114-1130`, `574-605`; `erl_iolist.c:133-135`).
-    // `erlang:integer_to_list/2` and `erlang:binary_to_list/1` read it as an
-    // unsigned count and do all the work in the call (`bif.c:3289`,
-    // `binary.c:329-330`). Each call gives the value of a positive budget.
+    // `erlang:processes/0` compares the signed budget with 40 and traps
+    // (`erl_ptab.c:770`). `erlang:binary_to_list/1` reads it as an unsigned
+    // count and makes one chunk (`binary.c:329-330`). Each call gives the
+    // value of a positive budget.
     let program = load();
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let result = program

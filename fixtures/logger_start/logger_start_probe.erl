@@ -222,6 +222,8 @@ negative_budget(Map, List, N) ->
 %%   (erl_bif_lists.c:1114-1130), and '--'/2 keeps it in a Sint
 %%   (erl_bif_lists.c:574-605).
 %% - iolist_size/1 yields at once with no bump (erl_iolist.c:133-135).
+%% - processes/0 compares the signed budget with 40 and traps
+%%   (erl_ptab.c:770).
 %% - binary_to_list/1 compares the Uint size with the budget product as a
 %%   Uint and makes one chunk (binary.c:329-330).
 %% Each call gives the same value as with a positive budget.
@@ -233,7 +235,16 @@ negative_budget_forms() ->
     Bytes = binary:copy(<<"ab">>, 30000),
     Expected = binary_to_list(Bytes),
     [Expected] = negative_budget_apply(Map, erlang, binary_to_list, Bytes, 100, []),
+    %% id/1 hides the module and the function, so the compiler keeps the apply.
+    [true] = negative_budget_apply(Map, id(erlang), id(processes), 100, []),
     ok.
+
+negative_budget_apply(_, _, _, 0, Acc) -> lists:usort(Acc);
+negative_budget_apply(Map, M, F, N, Acc) ->
+    [_ | _] = erts_internal:map_next(1, Map, []),
+    [_ | _] = erts_internal:map_next(1, Map, []),
+    Result = is_list(M:F()),
+    negative_budget_apply(Map, M, F, N - 1, [Result | Acc]).
 
 negative_budget_apply(_, _, _, _, 0, Acc) -> lists:usort(Acc);
 negative_budget_apply(Map, M, F, A, N, Acc) ->
