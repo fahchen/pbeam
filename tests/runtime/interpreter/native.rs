@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
 use super::{LIBRARIES, binding};
+use crate::runtime::Job;
 use crate::runtime::interpreter::bif::BIFS;
 
 /// The effect inventory of transition 1 of
@@ -181,6 +182,85 @@ fn registry_is_sorted_and_matches_the_exact_mfa() {
     assert!(binding("prim_file", "sync_nif", 2).is_none());
     assert!(binding("zlib", "inflate_nif", 4).is_some());
     assert!(binding("zlib", "deflateParams_nif", 3).is_none());
+}
+
+/// The NIF functions of the static libraries whose pinned-OTP `ErlNifFunc`
+/// has a dirty job flag (erl_nif.h:239-243), with the job of the flag. Each
+/// other function has no flag and runs on a normal scheduler. The `zstd`
+/// flags (zstd_nif.c:1086-1109) are not listed: PBeam has no `zstd`
+/// binding.
+const DIRTY_FUNCTIONS: &[(&str, &str, u32, Job)] = &[
+    // prim_file_nif.c:179-218: each function except `get_handle_nif/1`
+    // (prim_file_nif.c:215).
+    ("prim_file", "open_nif", 2, Job::IoBound),
+    ("prim_file", "close_nif", 1, Job::IoBound),
+    ("prim_file", "read_nif", 2, Job::IoBound),
+    ("prim_file", "write_nif", 2, Job::IoBound),
+    ("prim_file", "pread_nif", 3, Job::IoBound),
+    ("prim_file", "pwrite_nif", 3, Job::IoBound),
+    ("prim_file", "seek_nif", 3, Job::IoBound),
+    ("prim_file", "sync_nif", 2, Job::IoBound),
+    ("prim_file", "truncate_nif", 1, Job::IoBound),
+    ("prim_file", "allocate_nif", 3, Job::IoBound),
+    ("prim_file", "advise_nif", 4, Job::IoBound),
+    ("prim_file", "read_handle_info_nif", 1, Job::IoBound),
+    ("prim_file", "make_hard_link_nif", 2, Job::IoBound),
+    ("prim_file", "make_soft_link_nif", 2, Job::IoBound),
+    ("prim_file", "rename_nif", 2, Job::IoBound),
+    ("prim_file", "read_info_nif", 2, Job::IoBound),
+    ("prim_file", "set_permissions_nif", 2, Job::IoBound),
+    ("prim_file", "set_owner_nif", 3, Job::IoBound),
+    ("prim_file", "set_time_nif", 4, Job::IoBound),
+    ("prim_file", "read_link_nif", 1, Job::IoBound),
+    ("prim_file", "list_dir_nif", 1, Job::IoBound),
+    ("prim_file", "make_dir_nif", 1, Job::IoBound),
+    ("prim_file", "del_file_nif", 1, Job::IoBound),
+    ("prim_file", "del_dir_nif", 1, Job::IoBound),
+    ("prim_file", "get_device_cwd_nif", 1, Job::IoBound),
+    ("prim_file", "set_cwd_nif", 1, Job::IoBound),
+    ("prim_file", "get_cwd_nif", 0, Job::IoBound),
+    ("prim_file", "ipread_s32bu_p32bu_nif", 3, Job::IoBound),
+    ("prim_file", "read_file_nif", 1, Job::IoBound),
+    ("prim_file", "delayed_close_nif", 1, Job::IoBound),
+    ("prim_file", "altname_nif", 1, Job::IoBound),
+    ("prim_file", "file_desc_to_ref_nif", 1, Job::IoBound),
+    // prim_tty_nif.c:161, 163.
+    ("prim_tty", "write_nif", 2, Job::IoBound),
+    ("prim_tty", "read_nif", 3, Job::IoBound),
+];
+
+/// Each static binding has the job of the flag of its pinned-OTP
+/// `ErlNifFunc`: `crypto` (crypto.c:69-103), `prim_buffer`
+/// (prim_buffer_nif.c:87-95), and `zlib` (zlib_nif.c:148-176) have no
+/// flag on a bound function.
+#[test]
+fn each_binding_has_the_job_of_its_pinned_flag() {
+    for &(module, name, arity, _) in DIRTY_FUNCTIONS {
+        let library = LIBRARIES.iter().find(|library| library.module == module);
+        assert!(
+            library.is_some_and(|library| library.functions.contains(&(name, arity))),
+            "{module}:{name}/{arity}"
+        );
+    }
+    let prim_file = LIBRARIES
+        .iter()
+        .find(|library| library.module == "prim_file");
+    assert!(prim_file.is_some_and(|library| library.functions.contains(&("get_handle_nif", 1))));
+    for library in LIBRARIES {
+        for binding in library.bindings {
+            let expected = DIRTY_FUNCTIONS
+                .iter()
+                .find(|&&(module, name, arity, _)| {
+                    (module, name, arity) == (library.module, binding.name, binding.arity)
+                })
+                .map_or(Job::Normal, |&(.., job)| job);
+            assert_eq!(
+                binding.job, expected,
+                "{}:{}/{}",
+                library.module, binding.name, binding.arity
+            );
+        }
+    }
 }
 
 /// A registered native function returns its result and a duplicate

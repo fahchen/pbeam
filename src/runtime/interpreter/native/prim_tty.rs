@@ -67,7 +67,7 @@ pub(super) const BINDINGS: &[Binding] = &[
     Binding {
         name: "read_nif",
         arity: 3,
-        job: Job::Normal,
+        job: Job::IoBound,
         run: |scheduler, arguments| {
             read_nif(scheduler, &arguments[0], &arguments[1], &arguments[2])
         },
@@ -517,8 +517,9 @@ const READ_LIMIT: u64 = 1024;
 /// and the caller as the recipient (`prim_tty_nif.c:660`; see
 /// [`select_input`]).
 ///
-/// ERTS runs this NIF on a dirty IO scheduler (`prim_tty_nif.c:163`). PBeam
-/// has one scheduler thread, so a `read` that blocks stops all processes
+/// ERTS runs this NIF on a dirty IO scheduler (`prim_tty_nif.c:163`), so
+/// the binding has the job `IoBound`. PBeam runs it on the scheduler
+/// thread, so a `read` that blocks stops the processes of the scheduler
 /// until it returns. The `prim_tty` reader calls `read_nif/3` only after
 /// its select message (prim_tty.erl:467-476), and then fd 0 has input.
 ///
