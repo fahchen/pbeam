@@ -2784,7 +2784,7 @@ impl Scheduler {
                         self.dead_target_signal(target, *signal);
                     }
                 }
-                Delivery::Process(process) => self.adopt(*process),
+                Delivery::Process { process, low } => self.adopt(*process, low),
             }
         }
         drained

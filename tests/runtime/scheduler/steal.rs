@@ -44,7 +44,7 @@ fn inbox(node: &Node, index: usize) -> Vec<(char, u64)> {
     deliveries
         .iter()
         .map(|delivery| match delivery {
-            Delivery::Process(process) => ('P', process.id.0),
+            Delivery::Process { process, .. } => ('P', process.id.0),
             Delivery::Message { target, .. } => ('M', target.0),
             Delivery::Signal { target, .. } => ('S', target.0),
         })
@@ -158,7 +158,7 @@ fn deliveries_in_flight_follow_the_process_in_order() {
         None,
     );
     let process = victim.processes.remove(&ProcessId(1)).unwrap();
-    node.transfer(0, 1, Box::new(process));
+    node.transfer(0, 1, Box::new(process), None);
     node.send_message(0, sender, Term::Integer(3), ProcessId(1), None);
     assert_eq!(node.owner(ProcessId(1)), Some(1));
     assert_eq!(inbox(&node, 0), vec![('M', 2)]);
@@ -195,7 +195,7 @@ fn gives_work_to_the_next_hungry_scheduler_in_cyclic_order() {
     node.set_hungry(0, true);
     node.set_hungry(1, true);
     let process = ProcessState::new(ProcessId(1), Start::Entry(frame()), vec![]);
-    assert_eq!(node.give_work(2, || vec![process]), 1);
+    assert_eq!(node.give_work(2, || vec![(process, None)]), 1);
     assert_eq!(node.owner(ProcessId(1)), Some(0));
     assert_eq!(inbox(&node, 0), vec![('P', 1)]);
     assert!(node.has_hungry(2), "scheduler 1 waits");
@@ -221,11 +221,48 @@ fn a_steal_takes_half_of_the_highest_queue() {
     queue.push(ProcessId(3), Priority::High);
     assert!(queue.steal(|_| true).is_empty(), "one high process stays");
     assert_eq!(queue.pop(), Some(ProcessId(3)));
-    assert_eq!(queue.steal(|_| true), vec![ProcessId(1)]);
+    assert_eq!(queue.steal(|_| true), vec![(ProcessId(1), Some(8))]);
     assert_eq!(queue.pop(), Some(ProcessId(2)));
     for id in 0..250 {
         queue.push(ProcessId(id), Priority::Max);
     }
     assert_eq!(queue.steal(|_| true).len(), 100);
     assert_eq!(queue.len(), 150);
+}
+
+/// A stolen `low` process keeps the count that it has left, and one with no
+/// count runs next.
+#[test]
+fn a_stolen_low_process_keeps_its_count() {
+    let mut queue = RunQueue::default();
+    queue.push_stolen(ProcessId(1), Priority::Low, Some(2));
+    queue.push_stolen(ProcessId(2), Priority::Normal, None);
+    assert_eq!(queue.pop(), Some(ProcessId(2)), "the count of 1 skips it");
+    queue.push_stolen(ProcessId(3), Priority::Low, None);
+    assert_eq!(queue.pop(), Some(ProcessId(1)));
+    assert_eq!(queue.pop(), Some(ProcessId(3)));
+}
+
+/// The first stolen process gives no count, because it runs next on the
+/// receiver, and each other `low` process gives the count that it has left.
+#[test]
+fn the_first_stolen_process_gives_no_count() {
+    let (node, mut victim, _thief) = two_schedulers();
+    for id in 1..=4 {
+        let mut state = ProcessState::new(ProcessId(id), Start::Entry(frame()), vec![]);
+        state.priority = Priority::Low;
+        victim.insert(state);
+    }
+    node.set_hungry(1, true);
+    victim.serve_steal();
+    let mut deliveries = Vec::new();
+    node.take(1, &mut deliveries);
+    let counts: Vec<_> = deliveries
+        .iter()
+        .map(|delivery| match delivery {
+            Delivery::Process { process, low } => (process.id, *low),
+            _ => unreachable!("only processes move"),
+        })
+        .collect();
+    assert_eq!(counts, vec![(ProcessId(1), None), (ProcessId(2), Some(8))]);
 }

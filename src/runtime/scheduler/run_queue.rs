@@ -116,20 +116,21 @@ impl RunQueue {
     /// of the queue without its running process (`try_steal_task_from_victim`,
     /// `erl_process.c:4497-4558`), which is `len / 2` of this queue. ERTS
     /// skips a process bound to its run queue (`erts_try_change_runq_proc`,
-    /// `erl_process.h:2722-2723`), as `stealable` does.
+    /// `erl_process.h:2722-2723`), as `stealable` does. Each stolen `low`
+    /// process gives the count that it has left.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// queue.push(a, Priority::Normal);
     /// queue.push(b, Priority::Normal);
-    /// assert_eq!(queue.steal(|_| true), vec![a]);
+    /// assert_eq!(queue.steal(|_| true), vec![(a, None)]);
     /// assert_eq!(queue.pop(), Some(b));
     /// ```
     pub(in crate::runtime) fn steal(
         &mut self,
         mut stealable: impl FnMut(ProcessId) -> bool,
-    ) -> Vec<ProcessId> {
+    ) -> Vec<(ProcessId, Option<u8>)> {
         let queue = [&mut self.max, &mut self.high, &mut self.normal]
             .into_iter()
             .find(|queue| !queue.is_empty());
@@ -148,10 +149,38 @@ impl RunQueue {
             }
         }
         *queue = kept;
-        for id in &stolen {
-            self.low.remove(id);
-        }
         stolen
+            .into_iter()
+            .map(|id| (id, self.low.remove(&id)))
+            .collect()
+    }
+
+    /// Put the stolen process `id` at the end of the queue of its priority.
+    /// A `low` process keeps the count `low` that it had in the queue of the
+    /// other scheduler, as ERTS links the stolen processes into its queue
+    /// with their `schedule_count` (`erl_process.c:4574-4590`); with no
+    /// count, it is the next of the shared queue to run, as ERTS runs the
+    /// first stolen process at once (`erl_process.c:4567-4572`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// queue.push_stolen(id, Priority::Low, Some(3));
+    /// assert_eq!(queue.len(), 1);
+    /// ```
+    pub(in crate::runtime) fn push_stolen(
+        &mut self,
+        id: ProcessId,
+        priority: Priority,
+        low: Option<u8>,
+    ) {
+        if priority != Priority::Low {
+            return self.push(id, priority);
+        }
+        self.normal.push_back(id);
+        if let Some(count) = low {
+            self.low.insert(id, count);
+        }
     }
 
     #[cfg(test)]

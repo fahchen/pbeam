@@ -49,7 +49,12 @@ pub(in crate::runtime) enum Delivery {
     },
     /// A runnable process that another scheduler gives to this scheduler
     /// ([`Node::transfer`]). The receiver puts it into its run queue.
-    Process(Box<ProcessState>),
+    Process {
+        process: Box<ProcessState>,
+        /// The count that a `low` process has left in the shared queue
+        /// (see [`super::run_queue::RunQueue::push_stolen`]).
+        low: Option<u8>,
+    },
 }
 
 /// The inbox of one scheduler: the deliveries that it did not apply yet,
@@ -460,13 +465,13 @@ impl Node {
     ///
     /// ```rust,ignore
     /// node.set_hungry(1, true);
-    /// assert_eq!(node.give_work(0, || vec![process]), 1);
+    /// assert_eq!(node.give_work(0, || vec![(process, None)]), 1);
     /// assert!(!node.has_hungry(0));
     /// ```
     pub(in crate::runtime) fn give_work(
         &self,
         from: usize,
-        take: impl FnOnce() -> Vec<ProcessState>,
+        take: impl FnOnce() -> Vec<(ProcessState, Option<u8>)>,
     ) -> usize {
         let _idle = self.idle.lock().expect("the idle count is not poisoned");
         let count = self.hungry.len();
@@ -481,8 +486,8 @@ impl Node {
             self.hungry[thief].store(false, Ordering::Relaxed);
         }
         let moved = processes.len();
-        for process in processes {
-            self.transfer(from, thief, Box::new(process));
+        for (process, low) in processes {
+            self.transfer(from, thief, Box::new(process), low);
         }
         moved
     }
@@ -499,10 +504,16 @@ impl Node {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// node.transfer(0, 1, Box::new(process));
+    /// node.transfer(0, 1, Box::new(process), None);
     /// assert_eq!(node.owner(id), Some(1));
     /// ```
-    pub(in crate::runtime) fn transfer(&self, from: usize, to: usize, process: Box<ProcessState>) {
+    pub(in crate::runtime) fn transfer(
+        &self,
+        from: usize,
+        to: usize,
+        process: Box<ProcessState>,
+        low: Option<u8>,
+    ) {
         let id = process.id;
         self.processes.move_owner(id, to, || {
             let mut moved = Vec::new();
@@ -532,7 +543,7 @@ impl Node {
                 .queue
                 .lock()
                 .expect("the scheduler inbox is not poisoned");
-            queue.push_back(Delivery::Process(process));
+            queue.push_back(Delivery::Process { process, low });
             queue.extend(moved);
         });
         wake(&self.inboxes[to].wake);

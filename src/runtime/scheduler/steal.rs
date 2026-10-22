@@ -49,7 +49,8 @@ impl Scheduler {
 
     /// Take the processes of a steal out of the run queue and the slots
     /// ([`super::run_queue::RunQueue::steal`]).
-    fn take_stealable(&mut self) -> Vec<ProcessState> {
+    /// The first process runs next on the receiver, so it gives no count.
+    fn take_stealable(&mut self) -> Vec<(ProcessState, Option<u8>)> {
         let processes = &self.processes;
         let system = &self.system;
         let stolen = self.runnable.steal(|id| {
@@ -59,28 +60,32 @@ impl Scheduler {
         });
         stolen
             .into_iter()
-            .map(|id| {
-                self.processes
+            .enumerate()
+            .map(|(order, (id, low))| {
+                let process = self
+                    .processes
                     .remove(&id)
-                    .expect("a stolen process is in the slots")
+                    .expect("a stolen process is in the slots");
+                (process, low.filter(|_| order > 0))
             })
             .collect()
     }
 
     /// Put the process `process` that another scheduler gave this scheduler
-    /// into its slots and its run queue.
+    /// into its slots and its run queue, with the count `low` that a `low`
+    /// process has left.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// scheduler.adopt(process);
+    /// scheduler.adopt(process, None);
     /// assert!(scheduler.processes.contains_key(&id));
     /// ```
-    pub(super) fn adopt(&mut self, process: ProcessState) {
+    pub(super) fn adopt(&mut self, process: ProcessState, low: Option<u8>) {
         debug_assert!(process.in_run_queue);
         let (id, priority) = (process.id, process.priority);
         self.processes.insert(process);
-        self.runnable.push(id, priority);
+        self.runnable.push_stolen(id, priority, low);
     }
 }
 
