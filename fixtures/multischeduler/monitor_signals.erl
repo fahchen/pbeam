@@ -1,7 +1,8 @@
 -module(monitor_signals).
 -export([order_watch/0, order_owner/0, dead_watch/0, dead_owner/0,
          flush_watch/0, flush_owner/0, race_watch/0, race_owner/0,
-         kill_watch/0, kill_owner/0, reference/0]).
+         kill_watch/0, kill_owner/0, slot_watch/0, slot_owner/0,
+         reference/0]).
 
 -define(RACES, 20).
 -define(KILLS, 200).
@@ -13,7 +14,8 @@ reference() ->
      pair(fun dead_watch/0, fun dead_owner/0),
      pair(fun flush_watch/0, fun flush_owner/0),
      pair(fun race_watch/0, fun race_owner/0),
-     pair(fun kill_watch/0, fun kill_owner/0)].
+     pair(fun kill_watch/0, fun kill_owner/0),
+     pair(fun slot_watch/0, fun slot_owner/0)].
 
 pair(First, Second) ->
     Self = self(),
@@ -35,6 +37,8 @@ race_watch() -> check(race_watch_run(), race_log()).
 race_owner() -> check(owner_run(race_owner), ok).
 kill_watch() -> check(kill_watch_run(), [killed]).
 kill_owner() -> check(owner_run(kill_owner), ok).
+slot_watch() -> check(slot_watch_run(), [one, three, three, five]).
+slot_owner() -> check(owner_run(slot_owner), ok).
 
 check(Expected, Expected) -> ok;
 check(Result, _) -> {unexpected, Result}.
@@ -231,3 +235,25 @@ monitor_kill(Owner, Child) ->
     Owner ! {kill, self(), [Child]},
     receive killed -> ok end,
     receive {'DOWN', Ref, process, Child, Reason} -> Reason end.
+
+%% Each monitor signal waits in the pending slot while the watcher sends to
+%% other remote children. A message to the target of the slot sends the
+%% monitor signal first, a second monitor signal replaces it in the slot,
+%% and the switch out sends it. Each monitor reaches its child before the
+%% child exits.
+slot_watch_run() ->
+    Owner = wait_for(slot_owner),
+    [C1, C2, C3, C4, C5, C6] = [remote_child(Owner) || _ <- lists:seq(1, 6)],
+    R1 = monitor(process, C1),
+    C2 ! {go, self(), 0, two},
+    C1 ! {go, self(), 0, one},
+    R3 = monitor(process, C3),
+    C4 ! {go, self(), 0, four},
+    R4 = monitor(process, C3),
+    C3 ! {go, self(), 0, three},
+    R5 = monitor(process, C5),
+    true = exit(C6, six),
+    C5 ! {go, self(), 0, five},
+    Owner ! done,
+    [receive {'DOWN', R, process, _, Reason} -> Reason end
+     || R <- [R1, R3, R4, R5]].
