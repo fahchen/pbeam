@@ -2363,8 +2363,13 @@ pub(super) fn walk(
         Err(lacking) => return Ok(retry(context, lacking, name, args)),
     };
     let found = match (table.table_type(), args.get(1)) {
-        (TableType::OrderedSet, None) => table.ordered_end(!backward),
-        (TableType::OrderedSet, Some(key)) => table.ordered_step(atoms, key, !backward),
+        (TableType::OrderedSet, None) => table.ordered_end(!backward)?,
+        // A tree table rejects the end marker as a key
+        // (`erl_db_tree.c:654-655`, `729-730`).
+        (TableType::OrderedSet, Some(key)) if *key == Term::static_atom("$end_of_table") => {
+            return Ok(BifResult::badarg());
+        }
+        (TableType::OrderedSet, Some(key)) => table.ordered_step(atoms, key, !backward)?,
         (_, None) => table.first_key(),
         (_, Some(key)) => match table.next_key(atoms, key) {
             Some(next) => next,

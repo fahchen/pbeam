@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::hash::{DefaultHasher, Hasher};
 use std::sync::{Mutex, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
+use crate::error::{BeamError, error};
 use crate::term::atom_hash;
 use crate::term::{AtomTable, LiveBytes, ProcessId, Reference, Term, internal_hash};
 
@@ -272,6 +273,11 @@ pub(super) struct Table {
     /// `cmp_key_eq` (`erl_db_tree.c:758-761`). Two keys that compare equal
     /// (`1` and `1.0`) are one key. The other table types keep it empty.
     order: Vec<Term>,
+    /// Whether a key of the table has no PBeam order with another key, so
+    /// `order` is not current. The order of two different alias references
+    /// is the only such case (`src/term/order.rs`). A walk then returns a
+    /// runtime error, and a key lookup compares each object.
+    unordered: bool,
 }
 
 /// A key that a process deleted while the table was fixed: its stored
@@ -1393,6 +1399,7 @@ impl Table {
             deleted: Vec::new(),
             deleted_objects: 0,
             order: Vec::new(),
+            unordered: false,
         }
     }
 
@@ -1656,18 +1663,25 @@ impl Table {
     /// assert_eq!(table.ordered_step(&atoms, &Term::Float(2.0), true), Some(Term::Integer(3)));
     /// assert_eq!(table.ordered_step(&atoms, &Term::Integer(1), false), None);
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// Return a runtime error when the order of a key is not supported.
     pub(super) fn ordered_step(
         &self,
         atoms: &AtomTable,
         key: &Term,
         forward: bool,
-    ) -> Option<Term> {
-        let index = match (self.order_search(atoms, key), forward) {
+    ) -> Result<Option<Term>, BeamError> {
+        let index = match (self.order_search(atoms, key)?, forward) {
             (Ok(index), true) => index + 1,
             (Err(index), true) => index,
-            (Ok(index) | Err(index), false) => index.checked_sub(1)?,
+            (Ok(index) | Err(index), false) => match index.checked_sub(1) {
+                Some(index) => index,
+                None => return Ok(None),
+            },
         };
-        self.order.get(index).cloned()
+        Ok(self.order.get(index).cloned())
     }
 
     /// Return the least key of an `ordered_set` table when `first` is true,
@@ -1681,37 +1695,75 @@ impl Table {
     /// let table = Table::new(ProcessId(0), Access::Public, 1, TableType::OrderedSet);
     /// assert_eq!(table.ordered_end(true), None);
     /// ```
-    pub(super) fn ordered_end(&self, first: bool) -> Option<Term> {
-        if first {
+    ///
+    /// # Errors
+    ///
+    /// Return a runtime error when the order of a key is not supported.
+    pub(super) fn ordered_end(&self, first: bool) -> Result<Option<Term>, BeamError> {
+        self.check_ordered()?;
+        Ok(if first {
             self.order.first().cloned()
         } else {
             self.order.last().cloned()
+        })
+    }
+
+    /// Return the runtime error of a table whose key order is not current.
+    fn check_ordered(&self) -> Result<(), BeamError> {
+        if self.unordered {
+            return Err(error(
+                "unsupported term order of an alias reference in an ordered_set key (see \"ETS tables\" in docs/erts-differences.md)",
+            ));
         }
+        Ok(())
     }
 
     /// Find the key `key` in the key order of an `ordered_set` table with
     /// the arithmetic term order, so `1` finds `1.0` (`cmp_key_eq`,
     /// `erl_db_tree.c:758-761`). Return the index of the equal key, or the
-    /// index where the key would go. A comparison error orders the key
-    /// below: the order of two different alias references is the only error
-    /// (`src/term/order.rs`).
-    fn order_search(&self, atoms: &AtomTable, key: &Term) -> Result<usize, usize> {
-        self.order
-            .binary_search_by(|stored| stored.compare(key, atoms).unwrap_or(Ordering::Less))
+    /// index where the key would go.
+    ///
+    /// # Errors
+    ///
+    /// Return a runtime error when the order is not current or a key has no
+    /// PBeam order: the order of two different alias references is the only
+    /// such comparison (`src/term/order.rs`).
+    fn order_search(
+        &self,
+        atoms: &AtomTable,
+        key: &Term,
+    ) -> Result<Result<usize, usize>, BeamError> {
+        self.check_ordered()?;
+        let (mut low, mut high) = (0, self.order.len());
+        while low < high {
+            let middle = low + (high - low) / 2;
+            match self.order[middle].compare(key, atoms)? {
+                Ordering::Less => low = middle + 1,
+                Ordering::Greater => high = middle,
+                Ordering::Equal => return Ok(Ok(middle)),
+            }
+        }
+        Ok(Err(low))
     }
 
     /// Put the key `key` of an `ordered_set` table in the key order, in
-    /// place of an equal key.
+    /// place of an equal key. A key with no order makes the order stale.
     fn order_put(&mut self, atoms: &AtomTable, key: Term) {
         match self.order_search(atoms, &key) {
-            Ok(index) => self.order[index] = key,
-            Err(index) => self.order.insert(index, key),
+            Ok(Ok(index)) => self.order[index] = key,
+            Ok(Err(index)) => self.order.insert(index, key),
+            Err(_) => self.unordered = true,
         }
     }
 
     /// Remove the key `key` of an `ordered_set` table from the key order.
+    /// A key with no order makes the order stale.
     fn order_remove(&mut self, atoms: &AtomTable, key: &Term) {
-        if let Ok(index) = self.order_search(atoms, key) {
+        let Ok(found) = self.order_search(atoms, key) else {
+            self.unordered = true;
+            return;
+        };
+        if let Ok(index) = found {
             self.order.remove(index);
         }
     }
@@ -2140,6 +2192,7 @@ impl Table {
     /// (`db_free_table_continue_hash`, `erl_db_hash.c:3140-3149`).
     fn free_segments_objects(&mut self, index: usize) {
         self.order.clear();
+        self.unordered = false;
         let first = match index {
             0 => 0,
             later => FIRST_SEGMENT_SLOTS + (later - 1) * SEGMENT_SLOTS,
@@ -2221,6 +2274,7 @@ impl Table {
     fn reset_cleared(&mut self) {
         self.objects.clear();
         self.order.clear();
+        self.unordered = false;
         self.free.clear();
         self.older.clear();
         self.index = KeyIndex::default();
@@ -3278,8 +3332,19 @@ impl Table {
         if self.table_type != TableType::OrderedSet {
             return None;
         }
-        let stored = &self.order[self.order_search(atoms, key).ok()?];
-        self.position(stored_hash(atoms, stored), stored)
+        match self.order_search(atoms, key) {
+            Ok(Ok(index)) => {
+                let stored = &self.order[index];
+                self.position(stored_hash(atoms, stored), stored)
+            }
+            Ok(Err(_)) => None,
+            // A key with no order compares with each object, and a
+            // comparison error is not equal.
+            Err(_) => self.objects.iter().enumerate().find_map(|(slot, object)| {
+                let object = object.as_ref()?;
+                matches!(self.key(object).compare(key, atoms), Ok(Ordering::Equal)).then_some(slot)
+            }),
+        }
     }
 
     fn position(&self, hash: u64, key: &Term) -> Option<usize> {

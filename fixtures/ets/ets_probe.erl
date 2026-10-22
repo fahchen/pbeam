@@ -8,7 +8,7 @@
          own/2, write/1, select/0, match_object/0, iterate/0,
          update_element/0, info_items/0, delete_all/0, select_reductions/0, first/0,
          private_owner/1, ordered_set/0, ordered_set_reductions/0, take/0,
-         walk/0,
+         walk/0, walk_alias/1,
          safe_fixtable/0, fixtable/0, fixtable_chain/0, fixtable_successor/0,
          fixtable_resize/0, fixtable_fix_count/0, fixtable_insert_after_delete/0,
          fixtable_clear/0, fixtable_delete_object/0, fixtable_same_bucket/0,
@@ -1525,8 +1525,11 @@ walk() ->
                ets:first(O), ets:info(O, size),
                ets:foldl(fun({K, _}, A) -> [K | A] end, [], O),
                ets:foldr(fun({K, _}, A) -> [K | A] end, [], O)],
+    Empty = ets:new(ets_probe, [ordered_set]),
+    End = [walk_error(B, Tab, '$end_of_table')
+           || Tab <- [Empty, O], B <- [next, prev, next_lookup, prev_lookup]],
     Hash = [hash_walk(Type) || Type <- [set, bag, duplicate_bag]],
-    [Ordered, Hash].
+    [Ordered, End, Hash].
 
 hash_walk(Type) ->
     T = ets:new(ets_probe, [Type]),
@@ -1541,4 +1544,30 @@ hash_walk(Type) ->
      lists:sort(ets:foldr(fun(O, A) -> [O | A] end, [], T))].
 
 walk_error(F, T) ->
-    try ets:F(T, 9) catch error:R -> {error, R} end.
+    walk_error(F, T, 9).
+
+walk_error(F, T, K) ->
+    try ets:F(T, K) catch error:R -> {error, R} end.
+
+%% Two different alias references have no PBeam order, so an ordered_set
+%% key that holds one gives a runtime error on a walk.
+walk_alias(Case) ->
+    O = ets:new(ets_probe, [ordered_set]),
+    A = erlang:alias([]),
+    B = erlang:alias([]),
+    true = ets:insert(O, {A, 1}),
+    case Case of
+        step ->
+            ets:next(O, B);
+        unordered ->
+            true = ets:insert(O, [{B, 2}, {1.0, 3}]),
+            [ets:lookup(O, 1), ets:delete(O, A), ets:lookup(O, B)];
+        unordered_first ->
+            true = ets:insert(O, {B, 2}),
+            ets:first(O);
+        cleared ->
+            true = ets:insert(O, {B, 2}),
+            true = ets:delete_all_objects(O),
+            true = ets:insert(O, [{2, b}, {1, a}]),
+            [ets:first(O), ets:last(O)]
+    end.

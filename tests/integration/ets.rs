@@ -1344,3 +1344,41 @@ fn restores_a_bag_object_behind_a_deleted_node_as_pinned_erts() {
         b"[[{k,1},{k,3},{k,4},{k,2}]]\n"
     );
 }
+
+#[test]
+fn returns_a_runtime_error_for_a_walk_over_alias_keys_of_an_ordered_set() {
+    // Two different alias references have no PBeam order (row "Term order"
+    // of docs/erts-differences.md), so a walk of an ordered_set that holds
+    // them returns a runtime error, and a key lookup compares each object.
+    let ets = pinned_beam("ets");
+    let program = BeamProgram::load(&[&ets, ETS_PROBE]).unwrap();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    let run = |case| program.execute("ets_probe", "walk_alias", &[program.host_term(atom(case))]);
+    for case in ["step", "unordered_first"] {
+        let error = run(case).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported term order of an alias reference"),
+            "{case}: {error}"
+        );
+    }
+    let unordered: Vec<Term> = run("unordered")
+        .unwrap()
+        .term
+        .list_iter()
+        .unwrap()
+        .cloned()
+        .collect();
+    assert_eq!(
+        unordered[..2],
+        [
+            Term::list_from([Term::tuple(vec![Term::Float(1.0), Term::Integer(3)])]),
+            atom("true"),
+        ]
+    );
+    assert_eq!(
+        run("cleared").unwrap().term,
+        Term::list_from([Term::Integer(1), Term::Integer(2)])
+    );
+}
