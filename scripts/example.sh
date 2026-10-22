@@ -93,47 +93,43 @@ run() {
   exec cargo run --quiet --locked --bin pbeam -- ${policy[@]+"${policy[@]}"} pbeam_boot start "$entry" main --root "$root" ${options[@]+"${options[@]}"} -- "$@"
 }
 
-# A release example is a Mix project, examples/<name>/mix.exs, with a release that the build writes into target/examples/<name>/. The entry is main/0 of the Erlang module <name>_run of examples/<name>/<name>_run.erl. The build runs `mix release` and compiles the entry and pbeam_boot.erl into target/examples/<name>/pbeam/. The code path of the run is that directory, each lib/*/ebin directory of the release, and releases/<version>/consolidated last, so that the consolidated protocols come first. The start set of the pbeam run is the entry, pbeam_boot.beam, and the files of the boot modules of the pinned OTP. Both runs get RELEASE_ROOT and RELEASE_SYS_CONFIG as bin/<name> sets them. The run does not read the boot script of the release (docs/erts-differences.md, row "Boot").
+# A release example is a Mix project, examples/<name>/mix.exs, with a release that the build writes into target/examples/<name>/. The build runs `mix release`. Both runs boot the release with its boot script, as `bin/<name> start` does with RELEASE_DISTRIBUTION=none: the ERTS run starts the erl of the release, and the pbeam run gives the same erl arguments to `pbeam erl` with the root directory of the release, the bin directory of its erts, and the preloaded modules of the pinned OTP (docs/erts-differences.md, row "Release boot"). The arguments omit -setcookie, which only the distribution reads, and -args_file of vm.args, which `pbeam erl` rejects; the vm.args of `mix release` holds only comments. Both runs get RELEASE_ROOT and RELEASE_SYS_CONFIG, which the release boot reads, as bin/<name> sets them. With --write-start, the start list is the files of the preloaded modules, so that the bundle carries the ebin directory of erts.
 if [[ -f examples/$name/mix.exs ]]; then
   [[ ${#policy[@]} -eq 0 ]] || fail 'a release example has no policy: give no --policy'
   release=${release_directory:-target/examples/$name}
-  output=$release/pbeam
-  entry=${name}_run
   # The build writes the release at the path of the project config.
   [[ -z $release_directory || $build == false ]] || fail '--release needs --no-build: the build writes the release of the project config'
-  [[ -f examples/$name/$entry.erl ]] || fail "examples/$name has no $entry.erl"
   if [[ $build == true ]]; then
     # The output of mix goes to stderr, so that stdout has only the output of the run.
     step "Build the release of examples/$name"
     (cd "examples/$name" && mix deps.get --check-locked && MIX_ENV=prod mix release --overwrite) >&2
-    mkdir -p "$output"
-    step "Compile examples/$name/$entry.erl and examples/hello_world/pbeam_boot.erl"
-    erlc +deterministic -o "$output" "examples/$name/$entry.erl" examples/hello_world/pbeam_boot.erl
   fi
-  # The start list needs the release data only; the entry stubs belong to a run.
   [[ -f $release/releases/start_erl.data ]] || fail "$release has no build. Build the example first: run the script without --no-build"
-  [[ -n $start_file || -f $output/$entry.beam ]] || fail "$release has no build. Build the example first: run the script without --no-build"
+  # The file has no line end, so read(1) would fail.
+  erts_version=$(cut -d' ' -f1 "$release/releases/start_erl.data")
   version=$(cut -d' ' -f2 "$release/releases/start_erl.data")
-  paths=("$output" "$release"/lib/*/ebin "$release/releases/$version/consolidated")
+  # ERTS builds the preloaded modules into the emulator; their BEAM files are in the ebin directory of erts.
+  preloaded=$(erl -noshell -eval 'io:put_chars(filename:join(code:lib_dir(erts), "ebin")), halt().')
+  if [[ -n $start_file ]]; then
+    erl -noshell -eval '[io:put_chars([filename:join(hd(init:get_plain_arguments()), atom_to_list(M) ++ ".beam"), $\n]) || M <- erlang:pre_loaded()], halt().' -extra "$preloaded" >"$start_file"
+    exit 0
+  fi
   RELEASE_ROOT=$(cd "$release" && pwd -P)
   RELEASE_SYS_CONFIG=$RELEASE_ROOT/releases/$version/sys
   export RELEASE_ROOT RELEASE_SYS_CONFIG
-  [[ $erts == false ]] || run
-  # code:which/1 gives preloaded for a preloaded module, such as init, so its file is in the ebin directory of erts.
-  # pbeam_boot spawns erts_code_purger before init, as erl_init.c does, and the other examples get it from @preloaded of scripts/example_beams.exs.
-  read -ra boot_list <<<"$boot_modules erts_code_purger"
-  start_list=$(erl -noshell -eval '[io:put_chars([F, $\n]) || A <- init:get_plain_arguments(), F <- [case code:which(list_to_atom(A)) of preloaded -> filename:join([code:lib_dir(erts), "ebin", A ++ ".beam"]); P -> P end], filelib:is_regular(F)], halt().' -extra "${boot_list[@]}")
-  # The files of the start set, one path for each line: the bundle tool
-  # copies them into the bundle.
-  if [[ -n $start_file ]]; then
-    printf '%s\n' "$start_list" >"$start_file"
-    exit 0
+  bindir=$RELEASE_ROOT/erts-$erts_version/bin
+  arguments=(-noshell -s elixir start_cli -mode embedded -config "$RELEASE_SYS_CONFIG" -boot "$RELEASE_ROOT/releases/$version/start" -boot_var RELEASE_LIB "$RELEASE_ROOT/lib" -extra --no-halt)
+  if [[ $erts == true ]]; then
+    step "Boot the release on the pinned ERTS ($bindir/erl)"
+    exec "$bindir/erl" "${arguments[@]}"
   fi
-  start=("$output/$entry.beam" "$output/pbeam_boot.beam")
-  while IFS= read -r item; do
-    start+=("$item")
-  done <<<"$start_list"
-  run "${start[@]}"
+  boot=(erl --root "$RELEASE_ROOT" --bindir "$bindir" --preloaded "$preloaded" -- "${arguments[@]}")
+  if [[ -n ${PBEAM_BIN:-} ]]; then
+    step "Boot the release on $PBEAM_BIN erl"
+    exec "$PBEAM_BIN" "${boot[@]}"
+  fi
+  step "Build pbeam and boot the release with pbeam erl"
+  exec cargo run --quiet --locked --bin pbeam -- "${boot[@]}"
 fi
 
 # With --no-build, run the last build with the lists that it wrote: the start set of BEAM files, and the code path directories. A policy run loads each other module of the run before the entry: the boot gate denies a message of a runtime process to a boot process (docs/capability-security-migration.md), so a policy run gives the whole list of the build.

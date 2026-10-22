@@ -110,6 +110,11 @@ struct ErlCli {
     /// `erts`. ERTS builds these modules into the emulator.
     #[arg(long, value_name = "DIR")]
     preloaded: PathBuf,
+    /// The extracted release of an embedded run, which the boot removes at
+    /// its exit. The launcher of an appended release bundle sets it; a
+    /// command line does not set it.
+    #[arg(long = "extracted-root", value_name = "DIR", hide = true)]
+    extracted_root: Option<PathBuf>,
     /// The arguments of `erl`, after `--`.
     #[arg(value_name = "ERL_ARGUMENT", last = true)]
     arguments: Vec<OsString>,
@@ -206,7 +211,11 @@ fn main() -> ExitCode {
         return status;
     }
     if std::env::args_os().nth(1).as_deref() == Some(OsStr::new("erl")) {
-        return exit_status(boot_erl(ErlCli::parse_from(std::env::args_os().skip(1))));
+        let arguments = ErlCli::parse_from(std::env::args_os().skip(1));
+        let extracted = arguments.extracted_root.clone();
+        let status = exit_status(boot_erl(arguments));
+        pbeam_runtime::embedded::remove_extraction(extracted);
+        return status;
     }
     let arguments = Cli::parse();
     let extracted = arguments.extracted_root.clone();

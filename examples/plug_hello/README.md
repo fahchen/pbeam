@@ -18,7 +18,7 @@ From the repository root, this task writes the same executable for each example:
 mise run example-executable plug_hello
 ```
 
-It builds the example, the runtime, and the bundle tool, and writes `target/examples/plug_hello.bundle`. `--no-build` uses the build that is already there, and `--output <path>` names the output path. A release example uses the entry `<name>_run:main/0`. A fixture example, such as `hello_world`, uses `main/0` of its module.
+It builds the example, the runtime, and the bundle tool, and writes `target/examples/plug_hello.bundle`. `--no-build` uses the build that is already there, and `--output <path>` names the output path. A release example uses the entry `elixir:start_cli`, which the launcher gives to the boot of the release as `-s elixir start_cli`, as `bin/plug_hello start` does. A fixture example, such as `hello_world`, uses `main/0` of its module.
 
 ## Third-party code
 
@@ -46,7 +46,15 @@ The `curl` command prints `Hello world from PBeam!`. Use `PORT=<port>` before `d
 
 ## Run with the example runner
 
-The `pbeam` binary does not read a boot script, so it cannot run `bin/plug_hello`. The example runner runs the release code without the boot script, on the pinned ERTS and on the `pbeam` binary, with the same code path and the same application environment. From the repository root, these commands start the release code on the pinned ERTS, send a request, and stop the run:
+The example runner boots the release with its boot script `releases/0.1.0/start.boot`, as `bin/plug_hello start` does with `RELEASE_DISTRIBUTION=none`. Both runs get the same `erl` arguments:
+
+```text
+-noshell -s elixir start_cli -mode embedded -config <release>/releases/0.1.0/sys -boot <release>/releases/0.1.0/start -boot_var RELEASE_LIB <release>/lib -extra --no-halt
+```
+
+The ERTS run gives them to the `erl` of the release, `erts-17.1/bin/erl`. The pbeam run gives them to `pbeam erl --root <release> --bindir <release>/erts-17.1/bin --preloaded <ebin directory of the pinned erts>`. The arguments omit `-setcookie`, which only the distribution reads, and `-args_file` of `vm.args`, which `pbeam erl` rejects; the `vm.args` of `mix release` holds only comments. Both runs get `RELEASE_ROOT` and `RELEASE_SYS_CONFIG`, which the release boot reads. `pbeam erl` rejects a set, non-empty `ERL_AFLAGS`, `ERL_FLAGS`, or `ERL_ZFLAGS`: unset them first. The "Release boot" row of [ERTS Differences](../../docs/erts-differences.md) gives the differences.
+
+From the repository root, these commands boot the release on the pinned ERTS, send a request, and stop the run:
 
 ```sh
 mise run example plug_hello --erts &
@@ -54,17 +62,9 @@ curl -s --retry 60 --retry-connrefused --retry-delay 1 http://127.0.0.1:4000/
 kill %1
 ```
 
-The `curl` command prints `Hello world from PBeam!`. Use `PORT=<port>` before `mise run` to use another port.
+The `curl` command prints `Hello world from PBeam!`. Use `PORT=<port>` before `mise run` to use another port. The task builds the release with `mix deps.get --check-locked` and `MIX_ENV=prod mix release --overwrite`, and writes the output of `mix` to stderr. Hex and rebar3 must be installed, as `scripts/test.sh` installs them.
 
-The task builds the release with `mix deps.get --check-locked` and `MIX_ENV=prod mix release --overwrite`, and writes the output of `mix` to stderr. Hex and rebar3 must be installed, as `scripts/test.sh` installs them. The task then compiles `plug_hello_run.erl` and `examples/hello_world/pbeam_boot.erl` into `target/examples/plug_hello/pbeam/`. The code path is that directory, each `lib/*/ebin` directory of the release, and `releases/0.1.0/consolidated`. The task sets `RELEASE_ROOT` and `RELEASE_SYS_CONFIG` as `bin/plug_hello` sets them. The entry `plug_hello_run:main/0` does the steps of the boot script that set the application environment and start the applications:
-
-1. It reads `releases/0.1.0/sys.config` as `application_controller` reads a `-config` file, and sets each value with `application:set_env/2` and `{persistent, true}`.
-2. It calls `'Elixir.Config.Provider':boot/0`, as the boot script does after the start of `kernel` and `stdlib`. This evaluates `releases/0.1.0/runtime.exs`, which sets the key `port` of `plug_hello` from `PORT`, default 4000.
-3. It calls `application:ensure_all_started(plug_hello, permanent)` and waits.
-
-The run is in interactive mode. The release runs in embedded mode. The "Boot" row of [ERTS Differences](../../docs/erts-differences.md) gives the differences.
-
-This command runs the same entry on the `pbeam` binary, sends a request, and stops the run:
+This command boots the same release on the `pbeam` binary, sends a request, and stops the run:
 
 ```sh
 mise run example plug_hello &
@@ -82,4 +82,6 @@ curl -s --retry 300 --retry-connrefused --retry-delay 1 -D - http://127.0.0.1:40
 kill %1
 ```
 
-The `curl` command prints the status line `HTTP/1.1 200 OK`, the headers of the response, and the body `Hello world from PBeam!`. The `scripts/example.sh` runner starts the release code on the pinned ERTS and on the `pbeam` binary. The feature test `serves_hello_world_from_the_plug_example_as_pinned_erts` of `tests/feature/serve.rs` compares the status line, the content type, and the body of both runs.
+The `curl` command prints the status line `HTTP/1.1 200 OK`, the headers of the response, and the body `Hello world from PBeam!`. The feature test `serves_hello_world_from_the_plug_example_as_pinned_erts` of `tests/feature/serve.rs` compares the status line, the headers without `date`, and the body of the ERTS run, the pbeam run, and the one-file executable.
+
+PBeam has no binding of the `zstd` NIF functions. A request whose `Accept-Encoding` accepts `zstd` makes Bandit call `zstd:init_compress_nif/0`, and the run stops with `zstd:init_compress_nif/0 NIF is not supported`.

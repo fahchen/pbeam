@@ -102,12 +102,21 @@ fn trailer(bytes: &[u8]) -> Trailer<'_> {
 }
 
 /// Extract the bundle to `directory`, then replace this process with the
-/// boot of its entry. Return the exit status of a run that fails before the
-/// boot.
+/// boot of its entry: the node boot of a release with a boot script, or the
+/// `pbeam_boot` start of a fixture bundle. Return the exit status of a run
+/// that fails before the boot.
 fn start(executable: &Path, bundle: &Bundle<'_>, directory: &Path) -> ExitCode {
-    let result = extract(directory, bundle)
-        .and_then(|()| start_modules(bundle))
-        .and_then(|modules| boot(executable, bundle.entry(), &modules, directory));
+    let result = extract(directory, bundle).and_then(|()| match release_boot(directory) {
+        Some((erts, version)) => Ok(boot_release(
+            executable,
+            bundle.entry(),
+            directory,
+            &erts,
+            &version,
+        )),
+        None => start_modules(bundle)
+            .and_then(|modules| boot(executable, bundle.entry(), &modules, directory)),
+    });
     remove(directory);
     match result {
         Ok(error) => failure(&format!("cannot start the embedded run: {error}")),
@@ -124,8 +133,32 @@ fn extract(directory: &Path, bundle: &Bundle<'_>) -> Result<(), String> {
             .map_err(|error| format!("cannot make {}: {error}", parent.display()))?;
         fs::write(&path, blob.bytes())
             .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+        // The bundle keeps no file mode, and the boot starts the port
+        // programs of `erts-<Vsn>/bin`, such as `inet_gethost`.
+        if is_erts_program(blob.name()) {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+                .map_err(|error| format!("cannot set the mode of {}: {error}", path.display()))?;
+        }
     }
     Ok(())
+}
+
+/// Return whether the resource `name` is a file of the `bin` directory of
+/// `erts`, such as `erts-17.1/bin/inet_gethost`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(is_erts_program("erts-17.1/bin/inet_gethost"));
+/// assert!(!is_erts_program("lib/erts-17.1/ebin/init.beam"));
+/// ```
+fn is_erts_program(name: &str) -> bool {
+    let mut components = name.split('/');
+    components
+        .next()
+        .is_some_and(|first| first.starts_with("erts-"))
+        && components.next() == Some("bin")
 }
 
 /// Return the modules of the start set of `bundle`, from the resource
@@ -174,6 +207,57 @@ fn boot(
         directory.join("releases").join(&version).join("sys"),
     );
     Ok(command.exec())
+}
+
+/// Return the `erts` version and the release version of the release in
+/// `directory` when the release has the boot script
+/// `releases/<Vsn>/start.boot`, as `mix release` writes it. A fixture
+/// bundle has no boot script.
+fn release_boot(directory: &Path) -> Option<(String, String)> {
+    let (erts, version) = start_erl_data(directory).ok()?;
+    let boot = directory.join("releases").join(&version).join("start.boot");
+    boot.is_file().then_some((erts, version))
+}
+
+/// Replace the process with the node boot of the release in `directory`,
+/// with the `erl` arguments that `bin/<name> start` of a Mix release gives
+/// when `RELEASE_DISTRIBUTION` is `none`: `-s <Module> <Function>` of the
+/// entry, the `embedded` mode, `sys.config`, the boot script `start`, the
+/// boot variable `RELEASE_LIB`, and the plain argument `--no-halt`. The
+/// run gets `RELEASE_ROOT` and `RELEASE_SYS_CONFIG`, which the release
+/// boot reads. The preloaded modules come from `lib/erts-<Vsn>/ebin`,
+/// where the bundle tool writes the start set. Return the error of a
+/// command that the host does not start.
+fn boot_release(
+    executable: &Path,
+    entry: crate::Entry<'_>,
+    directory: &Path,
+    erts: &str,
+    version: &str,
+) -> std::io::Error {
+    use std::os::unix::process::CommandExt;
+
+    let erts = format!("erts-{erts}");
+    let release = directory.join("releases").join(version);
+    let mut command = Command::new(executable);
+    command.arg("erl").arg("--root").arg(directory);
+    command
+        .arg("--bindir")
+        .arg(directory.join(&erts).join("bin"));
+    command
+        .arg("--preloaded")
+        .arg(directory.join("lib").join(&erts).join("ebin"));
+    command.arg("--extracted-root").arg(directory);
+    command.args(["--", "-noshell", "-s", entry.module, entry.function]);
+    command.args(["-mode", "embedded", "-config"]);
+    command.arg(release.join("sys"));
+    command.arg("-boot").arg(release.join("start"));
+    command.args(["-boot_var", "RELEASE_LIB"]);
+    command.arg(directory.join("lib"));
+    command.args(["-extra", "--no-halt"]);
+    command.env("RELEASE_ROOT", directory);
+    command.env("RELEASE_SYS_CONFIG", release.join("sys"));
+    command.exec()
 }
 
 /// Remove the extracted `directory`, and leave a directory that stays.
@@ -278,12 +362,19 @@ fn resolve_module(root: &Path, module: &str) -> Result<PathBuf, String> {
 /// Return the version of the release at `directory` from
 /// `releases/start_erl.data`, as `bin/plug_hello` reads it.
 fn release_version(directory: &Path) -> Result<String, String> {
+    start_erl_data(directory).map(|(_, version)| version)
+}
+
+/// Return the `erts` version and the release version of the release at
+/// `directory`: the two fields of `releases/start_erl.data`.
+fn start_erl_data(directory: &Path) -> Result<(String, String), String> {
     let path = directory.join("releases").join("start_erl.data");
     let data = fs::read_to_string(&path)
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
-    data.split_ascii_whitespace()
-        .nth(1)
-        .map(ToOwned::to_owned)
+    let mut fields = data.split_ascii_whitespace().map(ToOwned::to_owned);
+    fields
+        .next()
+        .zip(fields.next())
         .ok_or_else(|| format!("{} has no release version", path.display()))
 }
 

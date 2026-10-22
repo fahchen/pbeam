@@ -2,9 +2,10 @@ defmodule Mix.Tasks.Pbeam.Bundle do
   @moduledoc """
   Writes the PBeam application bundle of the release.
 
-  The task builds the `pbeam_bundle` tool, compiles the entry and
-  `pbeam_boot` stubs into the release, resolves the start set with
-  `scripts/example.sh --no-build --write-start`, and writes one bundle. The
+  The task builds the `pbeam_bundle` tool, resolves the start set (the
+  preloaded modules) with `scripts/example.sh --no-build --write-start`, and
+  writes one bundle. The entry `elixir:start_cli` is the `-s` call of
+  `bin/<app> start`, which the launcher gives to the boot of the release. The
   NIF manifest gate of the tool reads the allowlist `nif-allowlist.txt` of
   the project and stops the task on an item that the list does not accept. Run
   `mix release` first; the task reads the release that the project config
@@ -52,8 +53,6 @@ defmodule Mix.Tasks.Pbeam.Bundle do
           Path.expand(tool, cwd)
       end
 
-    stubs!(root, release, "#{app}_run")
-
     run!(
       "bash",
       [
@@ -71,7 +70,7 @@ defmodule Mix.Tasks.Pbeam.Bundle do
     # The NIF manifest gate of the tool prints each item that the allowlist
     # of the project accepts.
     allowlist = Path.join(cwd, "nif-allowlist.txt")
-    gate = run!(tool, ["bundle", release, output, "#{app}_run", "main", start, allowlist], root)
+    gate = run!(tool, ["bundle", release, output, "elixir", "start_cli", start, allowlist], root)
     Mix.shell().info(gate)
     Mix.shell().info("Wrote #{output}")
   end
@@ -89,25 +88,6 @@ defmodule Mix.Tasks.Pbeam.Bundle do
 
   defp default_output(release, app) do
     Path.join(Path.dirname(release), "#{app}.pbeamb")
-  end
-
-  # `mix release` writes no entry stub, and the start set of the release
-  # needs the entry and `pbeam_boot` in the `pbeam` directory.
-  defp stubs!(root, release, entry) do
-    directory = Path.join(release, "pbeam")
-    File.mkdir_p!(directory)
-
-    run!(
-      "erlc",
-      [
-        "+deterministic",
-        "-o",
-        directory,
-        Path.join(File.cwd!(), "#{entry}.erl"),
-        Path.join(root, "examples/hello_world/pbeam_boot.erl")
-      ],
-      root
-    )
   end
 
   # Cargo reports the path of each artifact, so a configured target

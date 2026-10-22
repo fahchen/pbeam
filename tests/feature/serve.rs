@@ -1,9 +1,13 @@
 //! Serve `GET /` from `examples/plug_hello` on the pinned ERTS and on the
-//! `pbeam` binary, and compare the status line, the content type, and the
-//! body. The one-file run also compares the SIGTERM shutdown notice and the
-//! exit status with the pinned ERTS. The example starts Bandit on the port
-//! of the `PORT` variable, so each run gets a free port and the runs do not
-//! collide.
+//! `pbeam` binary, and compare the status line, the headers without `date`,
+//! and the body. Each run boots the release with its boot script, as
+//! `bin/plug_hello start` does: the pinned ERTS with the `erl` of the
+//! release, and PBeam with `pbeam erl`. The one-file run also compares the
+//! SIGTERM shutdown notice and the exit status with the pinned ERTS. The
+//! example starts Bandit on the port of the `PORT` variable, so each run
+//! gets a free port and the runs do not collide. The request sends no
+//! `accept-encoding` header: PBeam has no binding of
+//! `zstd:init_compress_nif/0`, which a request that accepts `zstd` calls.
 
 use std::{
     fs,
@@ -20,13 +24,29 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// The status line, the content type, and the body of the response of the
-/// example to `GET /`.
+/// The status line, the headers without `date` in their order, and the
+/// body of the response of the example to `GET /`, as the pinned ERTS
+/// gives them.
 const RESPONSE: (&str, &str, &str) = (
     "HTTP/1.1 200 OK",
-    "text/plain; charset=utf-8",
+    "connection: close\n\
+     content-length: 23\n\
+     vary: accept-encoding\n\
+     cache-control: max-age=0, private, must-revalidate\n\
+     content-type: text/plain; charset=utf-8\n",
     "Hello world from PBeam!",
 );
+
+/// The variables that `pbeam erl` rejects when they are set and not empty,
+/// as the flags of `erlexec` that PBeam does not read. Each run removes
+/// them, so that a shell setting does not change the runs.
+const ERL_FLAG_VARIABLES: [&str; 5] = [
+    "ERL_OTP29_FLAGS",
+    "ERL_AFLAGS",
+    "ERL_FLAGS",
+    "ERL_ZFLAGS",
+    "ERL_EPMD_PORT",
+];
 
 /// The time that the server has to start, and the time that a response has
 /// to arrive.
@@ -241,7 +261,7 @@ fn builds_the_one_file_executable_with_the_mix_task_and_runs_it_clean() {
 /// return the response.
 fn erts_release_response(release: &std::path::Path) -> (String, String, String) {
     let port = free_port();
-    let mut child = Command::new(release.join("bin").join("plug_hello"))
+    let mut child = without_erl_flags(&mut Command::new(release.join("bin").join("plug_hello")))
         .arg("start")
         .env("PORT", port.to_string())
         .stdin(Stdio::null())
@@ -291,7 +311,7 @@ fn serve_one_file() -> (String, String, String) {
         .arg("bundle")
         .arg(release_directory())
         .arg(&bundle)
-        .args(["plug_hello_run", "main"])
+        .args(["elixir", "start_cli"])
         .arg(&start)
         .arg(
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/plug_hello/nif-allowlist.txt"),
@@ -309,7 +329,7 @@ fn serve_one_file() -> (String, String, String) {
         .expect("pbeam_bundle runs");
     assert!(status.success(), "the executable builds");
     let port = free_port();
-    let mut child = Command::new(&output)
+    let mut child = without_erl_flags(&mut Command::new(&output))
         .current_dir(&clean)
         .env("TMPDIR", &temporary)
         .env("PORT", port.to_string())
@@ -375,15 +395,17 @@ fn stop_with_term(mut child: Child) -> ExitStatus {
 /// send `SIGTERM`, and return the exit status and the SIGTERM notice.
 fn shutdown_on_erts() -> (Option<i32>, Option<String>) {
     let port = free_port();
-    let mut child = Command::new(release_directory().join("bin").join("plug_hello"))
-        .arg("start")
-        .env("PORT", port.to_string())
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0)
-        .spawn()
-        .expect("the ERTS release starts");
+    let mut child = without_erl_flags(&mut Command::new(
+        release_directory().join("bin").join("plug_hello"),
+    ))
+    .arg("start")
+    .env("PORT", port.to_string())
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .process_group(0)
+    .spawn()
+    .expect("the ERTS release starts");
     let stdout = Arc::new(Mutex::new(Vec::new()));
     let stdout_reader = collect(child.stdout.take().unwrap(), Arc::clone(&stdout));
     let stderr = Arc::new(Mutex::new(Vec::new()));
@@ -447,6 +469,7 @@ fn serve(arguments: &[&str], pbeam: Option<&str>) -> (String, String, String) {
         // The runner starts mix and erlc, so one process group holds the
         // whole run and a kill reaches each process.
         .process_group(0);
+    without_erl_flags(&mut command);
     if let Some(pbeam) = pbeam {
         command.env("PBEAM_BIN", pbeam);
     }
@@ -515,7 +538,8 @@ fn wait_for_server(child: &mut Child, port: u16) -> Result<TcpStream, String> {
     }
 }
 
-/// Send `GET /` and return the status line, the content type, and the body.
+/// Send `GET /` and return the status line, the headers without `date`, one
+/// `name: value` line for each in their order, and the body.
 fn request(mut stream: TcpStream) -> Result<(String, String, String), String> {
     stream
         .set_read_timeout(Some(READ_TIME_LIMIT))
@@ -529,7 +553,7 @@ fn request(mut stream: TcpStream) -> Result<(String, String, String), String> {
         .read_line(&mut status)
         .map_err(|error| error.to_string())?;
     let status = status.trim_end().to_owned();
-    let mut content_type = String::new();
+    let mut headers = String::new();
     let mut content_length = None;
     loop {
         let mut line = String::new();
@@ -547,10 +571,12 @@ fn request(mut stream: TcpStream) -> Result<(String, String, String), String> {
         let Some((name, value)) = line.split_once(':') else {
             continue;
         };
-        match name.trim().to_ascii_lowercase().as_str() {
-            "content-type" => content_type = value.trim().to_owned(),
-            "content-length" => content_length = value.trim().parse::<usize>().ok(),
-            _ => {}
+        let name = name.trim().to_ascii_lowercase();
+        if name == "content-length" {
+            content_length = value.trim().parse::<usize>().ok();
+        }
+        if name != "date" {
+            headers.push_str(&format!("{name}: {}\n", value.trim()));
         }
     }
     let length = content_length.ok_or("the response has no content-length header")?;
@@ -559,7 +585,16 @@ fn request(mut stream: TcpStream) -> Result<(String, String, String), String> {
         .read_exact(&mut body)
         .map_err(|error| error.to_string())?;
     let body = String::from_utf8(body).map_err(|error| error.to_string())?;
-    Ok((status, content_type, body))
+    Ok((status, headers, body))
+}
+
+/// Remove the variables of [`ERL_FLAG_VARIABLES`] from the environment of
+/// `command`.
+fn without_erl_flags(command: &mut Command) -> &mut Command {
+    for name in ERL_FLAG_VARIABLES {
+        command.env_remove(name);
+    }
+    command
 }
 
 /// Kill the process group of the run, which holds the runner and its build

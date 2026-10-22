@@ -336,3 +336,70 @@ fn a_temporary_directory_reports_a_base_that_fails() {
     assert!(temp_directory(&file).is_err());
     fs::remove_dir_all(&base).unwrap();
 }
+
+#[test]
+fn a_release_with_a_boot_script_boots_with_pbeam_erl() {
+    let directory = directory("release-boot");
+    let release = directory.join("releases/0.1.0");
+    fs::create_dir_all(&release).unwrap();
+    assert_eq!(release_boot(&directory), None);
+    fs::write(directory.join("releases/start_erl.data"), "17.1 0.1.0").unwrap();
+    assert_eq!(release_boot(&directory), None);
+    fs::write(release.join("start.boot"), b"boot").unwrap();
+    assert_eq!(
+        release_boot(&directory),
+        Some(("17.1".to_owned(), "0.1.0".to_owned()))
+    );
+    let entry = crate::Entry {
+        module: "elixir",
+        function: "start_cli",
+        arity: 0,
+    };
+    let error = boot_release(
+        Path::new("/nonexistent/pbeam"),
+        entry,
+        &directory,
+        "17.1",
+        "0.1.0",
+    );
+    assert!(error.to_string().contains("No such file"), "{error}");
+    fs::remove_dir_all(&directory).unwrap();
+}
+
+#[test]
+fn a_start_of_a_release_that_fails_reports_it_and_removes_the_directory() {
+    let directory = directory("release-start-error");
+    let bytes = bundle(&[
+        ("releases/start_erl.data", b"17.1 0.1.0"),
+        ("releases/0.1.0/start.boot", b"boot"),
+    ]);
+    let bundle = Bundle::parse(&bytes).unwrap();
+    assert_eq!(
+        start(Path::new("/nonexistent/pbeam"), &bundle, &directory),
+        ExitCode::FAILURE
+    );
+    assert!(!directory.exists());
+}
+
+#[test]
+fn the_extraction_makes_each_file_of_the_erts_bin_directory_executable() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = directory("erts-mode");
+    let bytes = bundle(&[
+        ("erts-17.1/bin/inet_gethost", b"program"),
+        ("lib/erts-17.1/ebin/init.beam", b"beam"),
+    ]);
+    extract(&directory, &Bundle::parse(&bytes).unwrap()).unwrap();
+    let mode = |name: &str| {
+        fs::metadata(directory.join(name))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777
+    };
+    assert_eq!(mode("erts-17.1/bin/inet_gethost"), 0o755);
+    assert_eq!(mode("lib/erts-17.1/ebin/init.beam") & 0o111, 0);
+    assert!(!is_erts_program("erts-17.1"));
+    assert!(!is_erts_program("lib/erts-17.1/bin/x"));
+    fs::remove_dir_all(&directory).unwrap();
+}
