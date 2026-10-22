@@ -24,8 +24,8 @@ mod unicode;
 
 pub use capability::{AllowAll, Capability, CapabilityKind, Constraint, Operation, Policy};
 pub use host::signal::install_start_dispositions;
-pub use interpreter::BeamProgram;
 pub(crate) use interpreter::bif::{BifId, import_kind, resolve as resolve_bif};
+pub use interpreter::{BeamProgram, nif_manifest_gaps};
 pub use native_registry::{
     NativeFn, NativeResult, RegistrationError, lookup_native, register_native, unregister_native,
 };
