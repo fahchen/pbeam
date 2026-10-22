@@ -32,23 +32,10 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a measured path makes or loads a bitstring that is not a binary.
 - **Source:** #359 and #360.
 
-### Load `SMALL_BIG_EXT` and `LARGE_BIG_EXT` literals that fit in 64 bits
-
-- ERTS `dec_term` makes a small integer when the value fits (`external.c:4457-4495`). PBeam loads `SMALL_INTEGER_EXT` and `INTEGER_EXT` only, so a fixture keeps such integers out of literals with `id/1`.
-- **Trigger:** a measured path loads such a literal.
-- **Source:** review of PR #160 (#138).
-
-### Add bignum terms
-
-- PBeam stores an integer as a 64-bit signed value. An arithmetic result outside this range, an instruction operand outside it, and `erlang:monotonic_time/1` or `os:system_time/1` with `perf_counter` return a runtime error. ERTS makes a bignum for each integer outside -(2^59) to 2^59 - 1. The "Integer range" row of `docs/erts-differences.md` records this. The entry "Load `SMALL_BIG_EXT` and `LARGE_BIG_EXT` literals that fit in 64 bits" covers only the literals that fit in 64 bits.
-- The work: a bignum `Term` variant with the ERTS term order, arithmetic, and internal hash, bignum literals and operands in the loader (`marshal_integer` in `beam_file.c:2132-2214`), and the bignum text in `print_term`.
-- **Trigger:** a measured path makes or loads an integer outside the 64-bit range, for example `erlang:monotonic_time(perf_counter)` or `net:shortest_matching_prefix/3`.
-- **Source:** "Integer range" row (#110, #154).
-
 ### Load local fun literals and run the fun information BIFs
 
-- PBeam loads a `NEW_FUN_EXT` (tag 112) literal as an unsupported literal, so an instruction that reads it returns `unsupported BEAM literal index N`. The pinned compiler makes a local fun with `make_fun3`, not as a literal (measured), so no current path loads one. `erlang:fun_info/2`, `erlang:fun_info_mfa/1`, and `erlang:fun_to_list/1` are `unsupported` BIF table entries (row "Unimplemented BIFs"). `io_lib` calls `erlang:fun_to_list/1` to write a fun (io_lib.erl:699, 826).
-- **Trigger:** a measured path loads a local fun literal, calls one of the three BIFs, or formats a fun.
+- PBeam loads a `NEW_FUN_EXT` (tag 112) literal as an unsupported literal, so an instruction that reads it returns `unsupported BEAM literal index N`. The pinned compiler makes a local fun with `make_fun3`, not as a literal (measured), so no current path loads one. `erlang:fun_info/2` runs (row "Fun information"). `erlang:fun_info_mfa/1` and `erlang:fun_to_list/1` are `unsupported` BIF table entries (row "Unimplemented BIFs"). `io_lib` calls `erlang:fun_to_list/1` to write a fun (io_lib.erl:699, 826).
+- **Trigger:** a measured path loads a local fun literal, calls one of the two BIFs, or formats a fun.
 - **Source:** PR #120 (#109).
 
 ### Cache the decoded modules of a run
@@ -60,7 +47,7 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 ### Build the large tuple tree for a retained-version consumer
 
 - **Reason:** no consumer in this repository updates a tuple of more than 32 slots while an old version stays reachable.
-- **Evidence:** the only tuple write path of this runtime is `update_record` (`src/runtime/interpreter.rs:1363`), which copies the whole array and discards the hint of the instruction (`src/beam/code/instruction.rs:731-743`). The only live compiled consumer is the pinned `gen_statem.beam` with `{update_record,{atom,inplace},6,...}` in `loop_t0q/5` and `{atom,copy},7` in `enter/8`. `fixtures/user_drv/user_drv_state_check.erl:16` updates a tuple of 19 slots through `call_ext erlang:setelement/3`, that BIF is unsupported (`src/runtime/interpreter/bif/table.rs:299`), and the test runs on ERTS only (`tests/integration/user_drv.rs:270`). A retained old version appears only in a hand-built 4-tuple at `tests/runtime/interpreter.rs:1362`.
+- **Evidence:** the tuple write paths of this runtime are `update_record` (`src/runtime/interpreter.rs:2413`) and `erlang:setelement/3` (`src/runtime/interpreter/bif/table.rs:301`, `src/runtime/interpreter/bif/erlang.rs:3525-3537`). Both copy the whole array, and `update_record` discards the hint of the instruction (`src/beam/code/instruction.rs:2529`). The only live compiled consumer of `update_record` is the pinned `gen_statem.beam` with `{update_record,{atom,inplace},6,...}` in `loop_t0q/5` and `{atom,copy},7` in `enter/8`. `fixtures/user_drv/user_drv_state_check.erl:16` updates a tuple of 19 slots through `call_ext erlang:setelement/3`, and its test runs on ERTS only (`tests/integration/user_drv.rs:274-298`). A retained old version appears only in small tuples: a hand-built 4-tuple of `keeps_the_source_record_of_update_record_as_pinned_erts` (`tests/runtime/interpreter.rs`), and the 2-tuple `Original` that `erlang_bifs_probe:tuples/0` returns after `setelement/3` (`fixtures/erlang_bifs/erlang_bifs_probe.erl:46-53`, `tests/integration/erlang_bifs.rs`).
 - **Trigger:** a measured consumer that updates a tuple of more than 32 slots and keeps the old version reachable.
 - **Source:** the consumer audit of the term proposal, and issue #556.
 
@@ -195,18 +182,17 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 ### Run the unsupported BIFs that OTP code calls
 
 - The "Unimplemented BIFs" row lists the `unsupported` BIF table entries that OTP code often calls. Each returns `unresolved external MFA M:F/A`. The groups:
-  - Timers: `erlang:start_timer/4`, `erlang:send_after/3,4`, `erlang:cancel_timer/1`, and `erlang:read_timer/1,2`. `erlang:start_timer/3` and `erlang:cancel_timer/2` already use the timer list of #150 (PR #172).
-  - Aliases: `erlang:alias/1`, which `erlang:alias/0` calls, and `erlang:unalias/1`.
-  - Equality: `erlang:'/='/2`. It gives other results than `=/=` only for floats (see "Add float terms").
-  - Persistent terms: `persistent_term:erase/1`, `persistent_term:put_new/2`, and `persistent_term:info/0`.
+  - Timers: `erlang:read_timer/2`. The other timer BIFs run, `erlang:read_timer/1` among them (`src/runtime/interpreter/bif/table.rs:284`).
+  - Persistent terms: `persistent_term:put_new/2` and `persistent_term:info/0`. `persistent_term:erase/1` runs (`table.rs:545`).
   - Signals: `erlang:exit/3`.
+  - Funs: `erlang:fun_info_mfa/1` and `erlang:fun_to_list/1` (entry "Load local fun literals and run the fun information BIFs").
   - Maps: `maps:get/2` and `maps:is_key/2` through a fun call. The compiler changes a direct call to the `map_get` and `is_map_key` BIFs, which PBeam runs.
 - **Trigger:** a measured path calls one of them. Add each group in its own task.
 - **Source:** audit of the BIF table at the M2 close.
 
 ### Run the remaining test instructions for `io:format/2`
 
-- #662 added `is_any_native_record`, so `io:format/2` with `~p` of an atom, an integer, a float, a list, a tuple, or a map writes as ERTS does under the PBeam boot. `~p` of a binary that is not empty stops with `unresolved external MFA erlang:bit_size/1` in `io_lib_pretty:print_length_binary/7` (io_lib_pretty.erl:1116) (measured). #359 added `is_bitstr`, #399 added `is_ne`, and #302 added `is_port`, which stopped `~w` of a list, a tuple, or a map before (io_lib.erl:820, 823). The "Unimplemented instructions" row records `get_record_elements` and `put_record`. A format without a term argument, `~w` of an integer, a list, a tuple, a map, or a binary, and `~s` of a string already work. PR #188 also named `net_kernel:dflag_unicode_io/1` and `erl_scan:reserved_word/1`. The first is a BIF that PBeam runs (PR #88), and the second is a function of `erl_scan.beam`, which a run gives with the other OTP modules.
+- #662 added `is_any_native_record`, so `io:format/2` with `~p` of an atom, an integer, a float, a list, a tuple, or a map writes as ERTS does under the PBeam boot. `~p` of a binary also writes as ERTS does: `erlang:bit_size/1` runs (`src/runtime/interpreter/bif/table.rs:116`, `tests/integration/bit_size.rs`), and `~p` of `<<1,2>>`, `<<"text">>`, and `{a,[b,#{c => {d,<<"e">>}}],2.0}` gives the ERTS text on the `pbeam` binary under `pbeam_boot` (measured). The remaining work is `get_record_elements` and `put_record`, which a native record needs. #359 added `is_bitstr`, #399 added `is_ne`, and #302 added `is_port`, which stopped `~w` of a list, a tuple, or a map before (io_lib.erl:820, 823). The "Unimplemented instructions" row records `get_record_elements` and `put_record`. A format without a term argument, `~w` of an integer, a list, a tuple, a map, or a binary, and `~s` of a string already work. PR #188 also named `net_kernel:dflag_unicode_io/1` and `erl_scan:reserved_word/1`. The first is a BIF that PBeam runs (PR #88), and the second is a function of `erl_scan.beam`, which a run gives with the other OTP modules.
 - **Trigger:** a consumer or a probe prints a compound term with `io:format/2`, for example to compare its output byte for byte through the `pbeam` binary.
 - **Source:** PR #188 (#179) and measured probes at the M2 close.
 
@@ -562,12 +548,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 ### Correct the stale "no gc_bif2" fixture comment
 
 - `fixtures/user_drv/user_drv_probe.erl` says PBeam has no `gc_bif2`, but the loader now decodes it.
-
-### Use `INSTRUCTION_CALLS` in `erlang:function_exported/3`
-
-- `function_exported/3` in `src/runtime/interpreter/bif/erlang.rs` repeats the entries of `INSTRUCTION_CALLS` (`src/runtime/interpreter/bif.rs`) in a `matches!`. The two lists hold the same entries, so it can call `INSTRUCTION_CALLS.contains`.
-- **Trigger:** the next change to `INSTRUCTION_CALLS` or `function_exported/3`.
-- **Source:** PR #173 (#151).
 
 ### Set `TERM` and `LC_ALL` of the test commands with one helper
 
