@@ -276,6 +276,11 @@ fn idle_step(scheduler: &mut Scheduler, node: &Node) -> Result<(), BeamError> {
     if node.enter_idle() {
         return Err(error("root process waits for a message that cannot arrive"));
     }
+    // The scheduler stays counted as idle for the wait, also when the check
+    // found a delivery. A sender writes the wake byte after it puts its
+    // delivery into the inbox, and the run loop takes the inbox at the next
+    // scheduling step after each wait, so a delivery in the inbox always
+    // has a wake byte that ends this wait.
     // Without a port or a select of fd 0, the wait handles no event, so the
     // scheduler changes no state while the node counts it as idle.
     let waited = scheduler.wait_events(Some(wait));
