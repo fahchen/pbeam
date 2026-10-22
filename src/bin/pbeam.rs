@@ -117,9 +117,11 @@ struct ErlCli {
 /// they change the start or the arguments of the emulator
 /// (`erts/etc/common/erlexec.c:661-861`, `2122-2140`). PBeam has no
 /// `erlexec` for them, and `-name` and `-sname` start the distribution,
-/// which PBeam does not have. `pbeam erl` rejects each of them before
-/// `-extra`.
-const ERLEXEC_OPTIONS: [&str; 17] = [
+/// which PBeam does not have, as `-proto_dist` and `-start_epmd` configure
+/// it. `pbeam erl` rejects each of them before `-extra`. Each `erlexec`
+/// option with an operand is in the list, so the first `-extra` is the one
+/// that `erlexec` reads as an option (`erlexec.c:708-712`).
+const ERLEXEC_OPTIONS: [&str; 19] = [
     "-args_file",
     "-compile",
     "-configfd",
@@ -135,7 +137,9 @@ const ERLEXEC_OPTIONS: [&str; 17] = [
     "-man",
     "-name",
     "-noinput",
+    "-proto_dist",
     "-sname",
+    "-start_epmd",
     "-version",
 ];
 
@@ -143,8 +147,16 @@ const ERLEXEC_OPTIONS: [&str; 17] = [
 /// after the arguments of the command line, and whose `-extra` arguments it
 /// moves to the end (`erts/etc/common/erlexec.c:2177-2260`). `ERL_OTP29_FLAGS`
 /// is the variable of the OTP release 29 (`"ERL_OTP" OTP_SYSTEM_VERSION
-/// "_FLAGS"`).
-const ERLEXEC_VARIABLES: [&str; 4] = ["ERL_OTP29_FLAGS", "ERL_AFLAGS", "ERL_FLAGS", "ERL_ZFLAGS"];
+/// "_FLAGS"`). For `ERL_EPMD_PORT`, `erlexec` gives `-epmd_port Port` to the
+/// emulator (`erlexec.c:633`, `1754-1760`), which only the distribution
+/// reads.
+const ERLEXEC_VARIABLES: [&str; 5] = [
+    "ERL_OTP29_FLAGS",
+    "ERL_AFLAGS",
+    "ERL_FLAGS",
+    "ERL_ZFLAGS",
+    "ERL_EPMD_PORT",
+];
 
 /// Run the command line and exit with one of these statuses:
 ///
