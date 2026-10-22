@@ -6116,3 +6116,31 @@ fn rejects_a_bitstring_in_the_byte_bifs() {
     let ascii = Term::Binary(Binary::from(b"ab".to_vec()).bits(0, 12));
     assert!(is_false(call("unicode", "bin_is_7bit", ascii)));
 }
+
+#[test]
+fn writes_the_bits_of_a_bitstring_append_prefix() {
+    // The pinned ERTS gives `<<B/bitstring, 2:4>>` = <<18>> for B = <<1:4>>:
+    // the append copies the 4 bits of B, not its padded byte.
+    let atoms = AtomTable::new();
+    let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![]);
+    let prefix = Term::Binary(Binary::from(vec![1 << 4]).bits(0, 4));
+    write(&mut process, &Operand::X(0), prefix).unwrap();
+    let segments = [
+        BinarySegment::Append {
+            segment: 1,
+            unit: 1,
+            source: Operand::X(0),
+        },
+        BinarySegment::Integer {
+            segment: 2,
+            unit: 1,
+            little: false,
+            source: Operand::Value(Term::Integer(2)),
+            size: Operand::Value(Term::Integer(4)),
+        },
+    ];
+    assert_eq!(
+        create_binary(&atoms, &mut process, &segments).unwrap(),
+        Ok(Term::binary(vec![18]))
+    );
+}

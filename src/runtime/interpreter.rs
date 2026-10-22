@@ -5946,7 +5946,13 @@ fn create_binary(
         process.bump_reductions(i32::try_from(reductions).unwrap_or(i32::MAX));
         // The result shares the chunks of the append binary. The writer holds
         // only the later segments, so the old payload stays in its arrays.
-        prefix = Some(start.clone());
+        // The chunks of a bitstring are not its bits, so the writer copies
+        // the bits of such a prefix first, with no more reductions.
+        if start.bit_size().is_multiple_of(8) {
+            prefix = Some(start.clone());
+        } else {
+            parts.insert(0, BinaryPart::Shared(start.clone(), 0, segment, 1));
+        }
     }
     // An append whose later segments each write a whole byte range keeps the
     // arrays of the append binary and of each `binary` segment. The result
@@ -6132,7 +6138,9 @@ fn write_binary_parts(
 ///
 /// A term in `source` that is not a binary is a runtime invariant error,
 /// because the compiler gives this segment only a binary that
-/// `bs_init_writable` made. The errors of `write_binary_parts` also apply.
+/// `bs_init_writable` made. That binary holds whole bytes: it starts with no
+/// byte, and `write_binary_parts` stops each append whose bits do not end
+/// on a byte boundary. The errors of `write_binary_parts` also apply.
 fn private_append(
     process: &mut ProcessState,
     source: &Operand,
