@@ -1,15 +1,18 @@
 -module(dirty_nif_probe).
 -export([threads/0, signals/1, signals_with/3, kill/1, kill_with/3, queued/1,
-         raise/1, unfinished/1, waits/1, first_root/0, second_root/0, load/0]).
+         raise/1, unfinished/1, waits/1, priorities/1, priorities_with/4, first_root/0, second_root/0, load/0]).
 
--nifs([cpu_thread/0, io_thread/0, cpu_wait/1, started/1, release/1, cpu_raise/1]).
+-nifs([cpu_thread/0, io_thread/0, cpu_wait/1, started/1, release/1, cpu_raise/1,
+       cpu_sequence/0]).
 
 %% The test registers each NIF of this module as a Rust native function:
-%% `cpu_thread/0`, `cpu_wait/1`, and `cpu_raise/1` with the job `CpuBound`,
+%% `cpu_thread/0`, `cpu_wait/1`, `cpu_raise/1`, and `cpu_sequence/0` with
+%% the job `CpuBound`,
 %% `io_thread/0` with the job `IoBound`, and `started/1` and `release/1`
 %% with the job `Normal`. `cpu_wait(Key)` marks `Key` as started, waits until
 %% `release(Key)`, and returns `ok`, as `erts_debug:dirty_cpu(wait, Ms)`
-%% returns `ok` after `Ms` milliseconds on ERTS.
+%% returns `ok` after `Ms` milliseconds on ERTS. `cpu_sequence/0` returns the
+%% next number of a counter, so its value gives the start order of the calls.
 
 %% The names of the threads that run a `CpuBound` and an `IoBound` call.
 threads() -> {cpu_thread(), io_thread()}.
@@ -81,6 +84,32 @@ queued(Key) ->
     Third = receive {third, Value} -> Value end,
     {Status, Ran, Third}.
 
+priorities(Key) ->
+    priorities_with(fun() -> cpu_wait(Key) end, fun() -> await(Key) end,
+                    fun() -> cpu_sequence() end, fun() -> release(Key) end).
+
+%% The start order of the dirty calls of callers with each priority, which
+%% wait in the queue while `Busy` holds the only dirty CPU thread. Each
+%% caller makes its call before the next caller starts. The tags come in the
+%% order of the values of `Call`. On ERTS with `+S 1 +SDcpu 1:1`, `Busy` is
+%% `erts_debug:dirty_cpu(wait, 300)`, `Started` sleeps 50 ms, `Call` is
+%% `erts_debug:dirty_cpu(wait, 20)` and then `erlang:monotonic_time()`, and
+%% `Release` does nothing.
+priorities_with(Busy, Started, Call, Release) ->
+    Self = self(),
+    spawn(Busy),
+    Started(),
+    Callers = [{normal, n1}, {low, l1}, {max, m1}, {high, h1}, {normal, n2},
+               {max, m2}, {low, l2}],
+    [begin
+         spawn_opt(fun() -> Self ! {calling, Tag}, Value = Call(), Self ! {done, Tag, Value} end,
+                   [{priority, Priority}]),
+         receive {calling, Tag} -> ok end
+     end || {Priority, Tag} <- Callers],
+    Release(),
+    Done = [receive {done, Tag, Value} -> {Value, Tag} end || {_, Tag} <- Callers],
+    [Tag || {_, Tag} <- lists:sort(Done)].
+
 %% The exception of a dirty call, with the first entry of its stack trace.
 raise(Argument) ->
     try cpu_raise(Argument) catch Class:Reason:Stack -> {Class, Reason, hd(Stack)} end.
@@ -115,3 +144,4 @@ cpu_wait(_Key) -> erlang:nif_error(undef).
 started(_Key) -> erlang:nif_error(undef).
 release(_Key) -> erlang:nif_error(undef).
 cpu_raise(_Argument) -> erlang:nif_error(undef).
+cpu_sequence() -> erlang:nif_error(undef).

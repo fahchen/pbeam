@@ -32,11 +32,12 @@
 //! result (`erl_nif.c:507-542`).
 
 use std::{
+    collections::HashMap,
     ffi::c_int,
     io::{Read, Write},
     os::{fd::AsRawFd, unix::net::UnixStream},
     sync::{
-        Arc, Mutex, OnceLock, Weak,
+        Arc, Condvar, Mutex, OnceLock, Weak,
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, Sender},
     },
@@ -46,6 +47,8 @@ use std::{
 use super::{
     Job, NativeFn, NativeResult,
     host::output::{IovecWrite, IovecWritten},
+    process::Priority,
+    scheduler::run_queue::RunQueue,
 };
 use crate::{
     error::{BeamError, error},
@@ -163,7 +166,61 @@ pub(super) struct Completion {
     pub(super) output: Option<Output>,
 }
 
-/// The threads of one dirty pool and the send end of their queue.
+/// The run queue of one dirty pool: the calls that no thread took yet, in
+/// the order of the ERTS dirty run queue of the pool.
+#[derive(Debug, Default)]
+struct Queue {
+    /// The order of the callers, as an ERTS run queue: by the priority of
+    /// the caller at the call, with `normal` and `low` in one queue
+    /// (`select_enqueue_run_queue`, `erl_process.c:6630-6660`). A dirty
+    /// scheduler picks as a normal scheduler does (`erl_process.c:9993-10024`;
+    /// `check_requeue_process`, `erl_process.c:4039-4052`).
+    order: RunQueue,
+    /// The call of each caller in `order`. A process has at most one dirty
+    /// call, and process identifiers are not used again in a run.
+    calls: HashMap<ProcessId, Call>,
+    /// True after the node dropped the pool.
+    closed: bool,
+}
+
+/// The queue of a pool and the condition that wakes its idle threads.
+#[derive(Debug, Default)]
+struct Shared {
+    /// The queue of the calls.
+    queue: Mutex<Queue>,
+    /// The condition that a thread waits on while the queue is empty.
+    ready: Condvar,
+}
+
+impl Shared {
+    /// Return the next call of the queue. Wait while the queue is empty and
+    /// the pool is open. Return `None` when the pool is closed and the queue
+    /// is empty.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// while let Some(call) = shared.take() { /* run call */ }
+    /// ```
+    fn take(&self) -> Option<Call> {
+        let mut queue = self.queue.lock().expect("the dirty queue is not poisoned");
+        loop {
+            if let Some(process) = queue.order.pop() {
+                let call = queue.calls.remove(&process);
+                return Some(call.expect("each caller in the order has its call"));
+            }
+            if queue.closed {
+                return None;
+            }
+            queue = self
+                .ready
+                .wait(queue)
+                .expect("the dirty queue is not poisoned");
+        }
+    }
+}
+
+/// The threads of one dirty pool and their queue.
 #[derive(Debug)]
 struct Pool {
     /// The prefix of the thread names, as ERTS names its dirty scheduler
@@ -171,39 +228,73 @@ struct Pool {
     name: &'static str,
     /// The number of threads.
     threads: usize,
-    /// The send end of the call queue, which the first call sets when it
-    /// starts the threads. When the node drops it, the threads take the
-    /// calls that are still in the queue, but they do not run them,
-    /// because the run dropped the claims. Each thread stops when the
-    /// queue is empty.
-    calls: OnceLock<Sender<Call>>,
+    /// The queue, which the threads share.
+    shared: Arc<Shared>,
+    /// Set when the first call started the threads.
+    started: OnceLock<()>,
 }
 
 impl Pool {
-    /// Give `call` to the threads of the pool. The first call starts the
-    /// threads.
+    /// Return the pool of `threads` threads named `name_N`, with no thread
+    /// started.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let pool = Pool::new("erts_dios", 10);
+    /// ```
+    fn new(name: &'static str, threads: usize) -> Self {
+        Pool {
+            name,
+            threads,
+            shared: Arc::default(),
+            started: OnceLock::new(),
+        }
+    }
+
+    /// Put `call` of a caller with `priority` into the queue of the pool.
+    /// The first call starts the threads.
     ///
     /// # Panics
     ///
     /// The host cannot start a thread. ERTS stops with `Failed to create
     /// dirty cpu scheduler thread` or `Failed to create dirty io scheduler
     /// thread` in this case (`erl_process.c:8962`, `8970`).
-    fn submit(&self, call: Call) {
-        let calls = self.calls.get_or_init(|| {
-            let (sender, receiver) = mpsc::channel::<Call>();
-            let receiver = Arc::new(Mutex::new(receiver));
+    fn submit(&self, priority: Priority, call: Call) {
+        self.started.get_or_init(|| {
             for index in 1..=self.threads {
-                let receiver = Arc::clone(&receiver);
+                let shared = Arc::clone(&self.shared);
                 thread::Builder::new()
                     .name(format!("{}_{index}", self.name))
-                    .spawn(move || run_calls(&receiver))
+                    .spawn(move || run_calls(&shared))
                     .expect("the host starts a dirty scheduler thread");
             }
-            sender
         });
-        calls
-            .send(call)
-            .expect("the dirty threads run until the node ends");
+        let mut queue = self
+            .shared
+            .queue
+            .lock()
+            .expect("the dirty queue is not poisoned");
+        queue.order.push(call.process, priority);
+        queue.calls.insert(call.process, call);
+        drop(queue);
+        self.shared.ready.notify_one();
+    }
+}
+
+impl Drop for Pool {
+    /// Close the queue. The threads take the calls that are still in the
+    /// queue, but they do not run them, because the run dropped the claims.
+    /// Each thread stops when the queue is empty.
+    fn drop(&mut self) {
+        let mut queue = self
+            .shared
+            .queue
+            .lock()
+            .expect("the dirty queue is not poisoned");
+        queue.closed = true;
+        drop(queue);
+        self.shared.ready.notify_all();
     }
 }
 
@@ -228,16 +319,8 @@ impl Pools {
     /// ```
     pub(in crate::runtime) fn new(schedulers: usize) -> Self {
         Pools {
-            cpu: Pool {
-                name: "erts_dcpus",
-                threads: schedulers,
-                calls: OnceLock::new(),
-            },
-            io: Pool {
-                name: "erts_dios",
-                threads: DIRTY_IO_THREADS,
-                calls: OnceLock::new(),
-            },
+            cpu: Pool::new("erts_dcpus", schedulers),
+            io: Pool::new("erts_dios", DIRTY_IO_THREADS),
         }
     }
 
@@ -313,16 +396,17 @@ impl DirtyCalls {
         }
     }
 
-    /// Give the work `work` of a call of `process` to the pool of `job` in
-    /// `pools`, and return the identifier of the call, which is new in the
-    /// inbox. The threads of a pool take the calls in order, and run a call
-    /// only while `claim` exists.
+    /// Give the work `work` of a call of `process`, whose priority is
+    /// `priority`, to the pool of `job` in `pools`, and return the
+    /// identifier of the call, which is new in the inbox. The threads of a
+    /// pool take the calls in the order of an ERTS run queue, and run a
+    /// call only while `claim` exists.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// let claim = Claim::default();
-    /// assert_eq!(dirty.submit(&pools, Job::IoBound, ProcessId(0), &claim, Work::Write(write))?, 0);
+    /// assert_eq!(dirty.submit(&pools, Job::IoBound, ProcessId(0), Priority::Normal, &claim, Work::Write(write))?, 0);
     /// assert!(dirty.running());
     /// ```
     ///
@@ -334,6 +418,7 @@ impl DirtyCalls {
         pools: &Pools,
         job: Job,
         process: ProcessId,
+        priority: Priority,
         claim: &Claim,
         work: Work,
     ) -> Result<u64, BeamError> {
@@ -341,14 +426,17 @@ impl DirtyCalls {
         let call = self.next_call;
         self.next_call += 1;
         self.running += 1;
-        pool.submit(Call {
-            process,
-            call,
-            claim: Arc::downgrade(&claim.0),
-            work,
-            completions: self.completion_sender.clone(),
-            wake: Arc::clone(&self.wake),
-        });
+        pool.submit(
+            priority,
+            Call {
+                process,
+                call,
+                claim: Arc::downgrade(&claim.0),
+                work,
+                completions: self.completion_sender.clone(),
+                wake: Arc::clone(&self.wake),
+            },
+        );
         Ok(call)
     }
 
@@ -406,7 +494,7 @@ impl DirtyCalls {
     }
 }
 
-/// Run the calls of the queue until the node drops the queue and the queue
+/// Run the calls of the queue until the node drops the pool and the queue
 /// is empty: run each call whose claim exists, send its completion to the
 /// inbox of its scheduler, then write one byte to the wake socket of the
 /// scheduler, as `wake_poller` writes to the ERTS wake pipe
@@ -417,22 +505,18 @@ impl DirtyCalls {
 /// # Examples
 ///
 /// ```rust,ignore
-/// thread::spawn(move || run_calls(&receiver));
+/// thread::spawn(move || run_calls(&shared));
 /// ```
-fn run_calls(calls: &Mutex<Receiver<Call>>) {
-    loop {
-        let call = calls.lock().map(|calls| calls.recv());
-        let Ok(Ok(Call {
-            process,
-            call,
-            claim,
-            work,
-            completions,
-            wake,
-        })) = call
-        else {
-            return;
-        };
+fn run_calls(shared: &Shared) {
+    while let Some(Call {
+        process,
+        call,
+        claim,
+        work,
+        completions,
+        wake,
+    }) = shared.take()
+    {
         // The thread does not keep the claim: a caller that exits while the
         // call runs drops it, and the scheduler then drops the result.
         let output = claim.upgrade().map(|claim| {

@@ -1630,8 +1630,11 @@ impl Scheduler {
     /// NIF. The process records the call before the next scheduling step,
     /// so the completion always finds the call. ERTS moves the process to a
     /// dirty scheduler in the same way (`static_schedule_dirty_nif`,
-    /// `erl_nif.c:3437-3477`; `erl_process.c:10244-10262`). The other
-    /// processes run while the call runs.
+    /// `erl_nif.c:3437-3477`; `erl_process.c:10244-10262`). The call goes
+    /// into the run queue of the pool with the priority of the process, as
+    /// the process goes into the dirty run queue of its priority
+    /// (`erl_process.c:6630-6660`). The other processes run while the call
+    /// runs.
     ///
     /// # Examples
     ///
@@ -1654,9 +1657,14 @@ impl Scheduler {
             .current_mut()
             .expect("the scheduler has a current process");
         let claim = Claim::default();
-        let call = self
-            .dirty
-            .submit(self.node.dirty_pools(), job, process.id, &claim, work)?;
+        let call = self.dirty.submit(
+            self.node.dirty_pools(),
+            job,
+            process.id,
+            process.priority,
+            &claim,
+            work,
+        )?;
         process.dirty_call = Some(DirtyCall {
             call,
             entry,
@@ -3668,7 +3676,7 @@ pub(super) mod node;
 mod policy;
 mod ports;
 mod process_table;
-mod run_queue;
+pub(super) mod run_queue;
 mod signals;
 mod tcp_inet;
 mod tcp_stream;

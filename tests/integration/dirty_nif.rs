@@ -18,7 +18,11 @@ mod common;
 
 use std::{
     collections::HashMap,
-    sync::{Condvar, Mutex, Once},
+    process::Command,
+    sync::{
+        Condvar, Mutex, Once,
+        atomic::{AtomicI64, Ordering},
+    },
     thread,
     time::Duration,
 };
@@ -101,18 +105,27 @@ fn cpu_raise(_: &[Term]) -> Result<NativeResult, BeamError> {
     Ok(NativeResult::badarg())
 }
 
+/// Return the next number of a counter of the test binary.
+fn cpu_sequence(_: &[Term]) -> Result<NativeResult, BeamError> {
+    static NEXT: AtomicI64 = AtomicI64::new(0);
+    Ok(NativeResult::Value(Term::Integer(
+        NEXT.fetch_add(1, Ordering::SeqCst),
+    )))
+}
+
 /// Register the NIFs of the fixture once for the test binary, and load the
 /// fixture.
 fn program() -> BeamProgram {
     static REGISTER: Once = Once::new();
     REGISTER.call_once(|| {
-        let natives: [(&str, u32, Job, pbeam_runtime::NativeFn); 6] = [
+        let natives: [(&str, u32, Job, pbeam_runtime::NativeFn); 7] = [
             ("cpu_thread", 0, Job::CpuBound, thread_name),
             ("io_thread", 0, Job::IoBound, thread_name),
             ("cpu_wait", 1, Job::CpuBound, cpu_wait),
             ("started", 1, Job::Normal, started),
             ("release", 1, Job::Normal, release),
             ("cpu_raise", 1, Job::CpuBound, cpu_raise),
+            ("cpu_sequence", 0, Job::CpuBound, cpu_sequence),
         ];
         for (name, arity, job, function) in natives {
             register_native("dirty_nif_probe", name, arity, job, function).unwrap();
@@ -121,6 +134,7 @@ fn program() -> BeamProgram {
     BeamProgram::load(&[
         &pinned_beam("erlang"),
         &pinned_beam("erts_internal"),
+        &pinned_beam("lists"),
         DIRTY_NIF_PROBE,
     ])
     .unwrap()
@@ -252,6 +266,46 @@ fn ends_the_run_without_the_end_of_a_dirty_call() {
     );
     assert_eq!(update(31, |_| {}), (true, false));
     update(31, |gate| gate.1 = true);
+}
+
+#[test]
+fn starts_the_queued_dirty_calls_by_the_priority_of_their_callers_as_erts() {
+    // A process goes to the dirty run queue of its priority
+    // (`select_enqueue_run_queue`, erl_process.c:6630-6660), and a dirty
+    // scheduler picks `max`, then `high`, then the queue that `normal` and
+    // `low` share, where a `low` process waits for 8 turns at the head
+    // (erl_process.c:9993-10024, 4039-4052). The only dirty CPU thread is
+    // busy while seven callers queue their calls: `+SDcpu 1:1` on ERTS, and
+    // the one dirty CPU thread of a PBeam run with one scheduler.
+    let erts = Command::new("erl")
+        .args([
+            "+S",
+            "1",
+            "+SDcpu",
+            "1:1",
+            "-noshell",
+            "-pa",
+            "fixtures/dirty_nif",
+            "-eval",
+            "io:format(\"~w~n\", [dirty_nif_probe:priorities_with(\
+             fun() -> erts_debug:dirty_cpu(wait, 300) end, \
+             fun() -> timer:sleep(50) end, \
+             fun() -> erts_debug:dirty_cpu(wait, 20), erlang:monotonic_time() end, \
+             fun() -> ok end)]), halt().",
+        ])
+        .output()
+        .unwrap();
+    assert!(erts.status.success(), "{erts:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&erts.stdout),
+        "[m1,m2,h1,n1,n2,l1,l2]\n"
+    );
+    let program = program();
+    let tags = ["m1", "m2", "h1", "n1", "n2", "l1", "l2"].map(|tag| atom(&program, tag));
+    assert_eq!(
+        run(&program, "priorities", Term::Integer(41)),
+        Term::list_from(tags)
+    );
 }
 
 #[test]

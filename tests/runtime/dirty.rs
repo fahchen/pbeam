@@ -32,6 +32,7 @@ fn submit_write(
             pools,
             Job::IoBound,
             ProcessId(process),
+            Priority::Normal,
             claim,
             Work::Write(write),
         )
@@ -86,6 +87,7 @@ fn gives_each_call_a_new_identifier_and_no_pool_to_a_normal_job() {
             &pools,
             Job::Normal,
             ProcessId(0),
+            Priority::Normal,
             &claim,
             Work::Write(IovecWrite {
                 fd: -1,
@@ -105,7 +107,7 @@ fn gives_each_call_a_new_identifier_and_no_pool_to_a_normal_job() {
         bad_group: false,
     };
     assert_eq!(submit_write(&mut dirty, &pools, 0, &claim, empty()), 0);
-    assert_eq!(submit_write(&mut dirty, &pools, 0, &claim, empty()), 1);
+    assert_eq!(submit_write(&mut dirty, &pools, 1, &claim, empty()), 1);
     assert!(dirty.running());
 }
 
@@ -318,7 +320,14 @@ fn runs_cpu_bound_calls_on_one_dirty_cpu_thread_for_each_scheduler() {
             arguments: Vec::new(),
         };
         dirty
-            .submit(&pools, Job::CpuBound, ProcessId(process), claim, work)
+            .submit(
+                &pools,
+                Job::CpuBound,
+                ProcessId(process),
+                Priority::Normal,
+                claim,
+                work,
+            )
             .unwrap();
     }
     let (state, changed) = &GATE;

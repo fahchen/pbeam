@@ -12,7 +12,7 @@ const RESCHEDULE_LOW: u8 = 8;
 /// of each `low` process in the shared queue is in `low`; a `normal`
 /// process has the count 1, so it needs no entry.
 #[derive(Debug, Default)]
-pub(super) struct RunQueue {
+pub(in crate::runtime) struct RunQueue {
     max: VecDeque<ProcessId>,
     high: VecDeque<ProcessId>,
     normal: VecDeque<ProcessId>,
@@ -30,7 +30,7 @@ impl RunQueue {
     /// ```rust,ignore
     /// queue.push(ProcessId(1), Priority::Low);
     /// ```
-    pub(super) fn push(&mut self, id: ProcessId, priority: Priority) {
+    pub(in crate::runtime) fn push(&mut self, id: ProcessId, priority: Priority) {
         match priority {
             Priority::Max => self.max.push_back(id),
             Priority::High => self.high.push_back(id),
@@ -55,7 +55,7 @@ impl RunQueue {
     /// ```rust,ignore
     /// assert_eq!(queue.pop(), Some(ProcessId(1)));
     /// ```
-    pub(super) fn pop(&mut self) -> Option<ProcessId> {
+    pub(in crate::runtime) fn pop(&mut self) -> Option<ProcessId> {
         if let Some(id) = self.max.pop_front() {
             return Some(id);
         }
