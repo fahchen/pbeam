@@ -19,7 +19,7 @@ use super::{
     capability::{Capability, CapabilityId},
     process::LinkId,
 };
-use crate::term::{PortId, ProcessId, Reference, Term};
+use crate::term::{Atom, PortId, ProcessId, Reference, Term};
 
 /// A non-message signal in the signal queue of a process.
 #[derive(Debug, PartialEq)]
@@ -192,6 +192,22 @@ pub(super) enum Signal {
         /// The reference of the reply.
         reference: Reference,
     },
+    /// The `check_process_code` system task of
+    /// `erts_internal:request_system_task/3` for a process of another
+    /// scheduler that has signals to handle, which the request must not
+    /// pass (`erl_process.c:11459-11480`). The receiver runs the check when
+    /// it handles the signal, and replies `{check_process_code, Tag,
+    /// Result}`, with `true` when it has a frame in the old code of
+    /// `module` (`beam_bif_load.c:1149-1212`); the cost is 0. At exit it
+    /// replies with `false` (`erl_process.c:11487-11489`).
+    CheckProcessCode {
+        /// The process that gets the reply.
+        requester: ProcessId,
+        /// The request identifier of the reply.
+        tag: Term,
+        /// The module of the old code.
+        module: Atom,
+    },
     /// `ERTS_SIG_Q_OP_PROCESS_INFO` from `erlang:process_info/2`: the
     /// receiver replies `{Ref, Result}` with the item of itself; the cost is
     /// 0 (`handle_process_info`, `erl_proc_sig_queue.c:5312-5420`). At exit
@@ -277,6 +293,7 @@ impl Signal {
             Signal::MonitorDown { reason, .. } => visit(reason),
             Signal::ProcessInfo { item, .. } => visit(item),
             Signal::AliasMessage { message, .. } => visit(message),
+            Signal::CheckProcessCode { tag, .. } => visit(tag),
             _ => {}
         }
     }
@@ -350,6 +367,12 @@ impl Signal {
             | Signal::IsAlive {
                 requester: _,
                 reference: _,
+            }
+            // The tag is a small term, and the exit path replies with it.
+            | Signal::CheckProcessCode {
+                requester: _,
+                tag: _,
+                module: _,
             }
             | Signal::Flush
             | Signal::Revoke { capability: _ }

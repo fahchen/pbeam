@@ -57,7 +57,9 @@ pub(in crate::runtime) enum Delivery {
     /// The `check_process_code` system task of
     /// `erts_internal:request_system_task/3` for the process `target` of
     /// this scheduler (`erl_process.c:11309-11492`). The receiver runs the
-    /// check at once, as for a process of the scheduler of the caller, and
+    /// check at once, as for a process of the scheduler of the caller, or,
+    /// when the process has signals to handle, puts the signal
+    /// `CheckProcessCode` behind them (`erl_process.c:11459-11480`). It
     /// sends `{check_process_code, Tag, Result}` to `requester`: `true`
     /// when the process has a frame in the old code of `module`
     /// (`beam_bif_load.c:1149-1212`), and `false` for a process that is

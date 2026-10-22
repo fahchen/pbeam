@@ -2488,9 +2488,12 @@ fn a_scheduler_registers_a_name_for_a_remote_process() {
 
 #[test]
 fn answers_a_check_process_code_request_of_another_scheduler() {
+    use super::signals::HandlingPoint;
     // The scheduler of the target runs the check when it drains its inbox:
     // a live process with no frame in old code and a process that is gone
-    // give `false` (`erl_process.c:11425-11433`).
+    // give `false` (`erl_process.c:11425-11433`). A process with a signal to
+    // handle gets the request behind it, and replies when it handles it, or
+    // with `false` at its exit (`erl_process.c:11459-11489`).
     let (node, mut readers) = Node::new(1).unwrap();
     let mut scheduler = Scheduler::with_shared(
         Arc::new(AtomTable::new()),
@@ -2499,12 +2502,29 @@ fn answers_a_check_process_code_request_of_another_scheduler() {
         readers.remove(0),
     );
     scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
     let root = ProcessId(0);
-    for (target, tag) in [(root, 1), (ProcessId(99), 2)] {
+    let mut spawn = |id: u64| {
+        let child = ProcessId(id);
+        scheduler.insert(ProcessState::new(child, Start::Entry(frame()), vec![]));
+        let link = Signal::Link { from: root };
+        scheduler
+            .send_signal_local(Some(root), child, link)
+            .unwrap();
+        child
+    };
+    let (handling, exiting) = (spawn(1), spawn(2));
+    for (target, tag) in [(root, 1), (ProcessId(99), 2), (handling, 3), (exiting, 4)] {
         let module = Atom::from_static("erlang").unwrap();
         node.check_process_code(0, target, root, Term::Integer(tag), module);
     }
     scheduler.drain_inbox();
+    scheduler
+        .handle_signals(handling, 100, 100, HandlingPoint::ScheduleIn)
+        .unwrap();
+    let mut process = scheduler.processes.remove(&exiting).unwrap();
+    process.mailbox.fetch();
+    assert!(scheduler.handle_exit_signals(&mut process, 100).unwrap());
     let reply = |tag: i64| {
         Term::tuple(vec![
             atom("check_process_code"),
@@ -2512,5 +2532,9 @@ fn answers_a_check_process_code_request_of_another_scheduler() {
             atom("false"),
         ])
     };
-    assert_eq!(messages(&scheduler, 0), vec![reply(1), reply(2)]);
+    let replies: Vec<Term> = messages(&scheduler, 0)
+        .into_iter()
+        .filter(|message| matches!(message, Term::Tuple(_)))
+        .collect();
+    assert_eq!(replies, vec![reply(1), reply(2), reply(3), reply(4)]);
 }

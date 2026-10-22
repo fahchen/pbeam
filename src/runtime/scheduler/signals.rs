@@ -9,7 +9,7 @@
 
 use super::{
     Files, Flush, LinkId, Monitor, ProcessState, RECEIVE_FETCH_REDUCTIONS, Release,
-    SIGNAL_HANDLING_REDUCTIONS, Scheduler, TargetMonitor, Ttys, lock,
+    SIGNAL_HANDLING_REDUCTIONS, Scheduler, TargetMonitor, Ttys, check_process_code_reply, lock,
 };
 use crate::{
     error::BeamError,
@@ -719,6 +719,16 @@ impl Scheduler {
                 self.send_message(id, requester, reply(reference, Term::static_atom("true")));
                 0
             }
+            Signal::CheckProcessCode {
+                requester,
+                tag,
+                module,
+            } => {
+                self.handled(id, node);
+                let refers = self.check_process_code(id, &module);
+                self.send_message(id, requester, check_process_code_reply(tag, refers));
+                0
+            }
             Signal::ProcessInfo {
                 requester,
                 reference,
@@ -1017,6 +1027,9 @@ impl Scheduler {
                     requester,
                     reference,
                 } => self.send_message(id, requester, reply(reference, Term::static_atom("false"))),
+                Signal::CheckProcessCode { requester, tag, .. } => {
+                    self.send_message(id, requester, check_process_code_reply(tag, false))
+                }
                 Signal::ProcessInfo {
                     requester,
                     reference,

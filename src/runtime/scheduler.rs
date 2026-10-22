@@ -2864,8 +2864,23 @@ impl Scheduler {
                     tag,
                     module,
                 } => {
-                    let refers = self.check_process_code(target, &module);
-                    self.send_message(target, requester, check_process_code_reply(tag, refers));
+                    // A target with signals to handle gets the request as a
+                    // signal behind them, so that the check does not pass
+                    // them (`erl_process.c:11459-11480`).
+                    let queued = self
+                        .live_process(target)
+                        .is_some_and(|process| process.mailbox.has_control_signals());
+                    if queued {
+                        let signal = Signal::CheckProcessCode {
+                            requester,
+                            tag,
+                            module,
+                        };
+                        let _ = self.send_signal_local(Some(requester), target, signal);
+                    } else {
+                        let refers = self.check_process_code(target, &module);
+                        self.send_message(target, requester, check_process_code_reply(tag, refers));
+                    }
                 }
                 Delivery::Signal {
                     target,
