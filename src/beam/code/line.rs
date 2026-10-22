@@ -13,7 +13,8 @@
 //! instruction and the item 1 at line 5 of `Module.erl`.
 
 use super::{
-    COMPACT_TAG_MASK, TAG_ATOM, TAG_INTEGER, WORD_SIZE, read_integer_after_first, read_u32,
+    COMPACT_EXTENDED_FLAG, COMPACT_SIGN_FLAG, COMPACT_TAG_MASK, TAG_ATOM, TAG_INTEGER, WORD_SIZE,
+    read_integer_after_first, read_u32,
 };
 use crate::{
     error::{BeamError, error},
@@ -31,6 +32,10 @@ const NAME_LENGTH_SIZE: usize = 2;
 /// these limits (`IS_VALID_LOCATION`, `beam_code.h:33-34`).
 const FILE_LIMIT: usize = 255;
 const LINE_LIMIT: u64 = (1 << 24) - 1;
+/// The largest small integer of a 64-bit ERTS (`MAX_SMALL`). A larger line
+/// does not fit a word, which `parse_line_chunk` rejects
+/// (`beam_file.c:217-220`, `522`).
+const MAX_SMALL: u64 = (1 << 59) - 1;
 
 /// The line table of one module. The loader builds it once, and a stack
 /// trace reads the location of an instruction from it.
@@ -96,9 +101,14 @@ impl LineTable {
             let first = *data.get(cursor).ok_or_else(corrupt)?;
             cursor += 1;
             let value = read_integer_after_first(data, &mut cursor, first)?;
+            // ERTS sign-extends the bytes of a long integer, so a set top
+            // bit is a negative line (`beam_file.c:206-220`).
+            let long = COMPACT_EXTENDED_FLAG | COMPACT_SIGN_FLAG;
+            let negative =
+                first & long == long && data[cursor - (usize::from(first >> 5) + 2)] & 0x80 != 0;
             match first & COMPACT_TAG_MASK {
                 TAG_ATOM if (value as usize) < name_count => file = value as usize,
-                TAG_INTEGER if value <= i64::MAX as u64 => items.push(
+                TAG_INTEGER if !negative && value <= MAX_SMALL => items.push(
                     (file < FILE_LIMIT && value < LINE_LIMIT && (file, value) != (0, 0))
                         .then_some((file, value as u32)),
                 ),

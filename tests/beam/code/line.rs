@@ -36,7 +36,7 @@ fn reads_the_items_and_the_file_names_of_a_line_chunk() {
     // empty name): 3 = probe.erl:0, 4 = line 2^24 - 1 (rejected), then
     // file 0: 5 = line 0 (rejected).
     let body = [
-        0x51, 0x12, 0x71, 0x22, 0x01, 0x39, 0xff, 0xff, 0xff, 0x02, 0x01,
+        0x51, 0x12, 0x71, 0x22, 0x01, 0x59, 0x00, 0xff, 0xff, 0xff, 0x02, 0x01,
     ];
     let names = [0, 5, b'a', b'.', b'e', b'r', b'l', 0, 0];
     let mut table = LineTable::parse(&chunk(0, 6, 5, 2, &body, &names), "probe").unwrap();
@@ -105,6 +105,8 @@ fn rejects_a_corrupt_line_chunk() {
         &[0xd9, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
         &[],
     ));
+    // The long integer `ff ff` is -1.
+    corrupt(&chunk(0, 1, 1, 0, &[0x19, 0xff, 0xff], &[]));
     corrupt(&chunk(0, 1, 1, 1, &[0x51], &[0]));
     corrupt(&chunk(0, 1, 1, 1, &[0x51], &[0xff, 0xff]));
     corrupt(&chunk(0, 1, 1, 1, &[0x51], &[0, 2, b'a']));
