@@ -209,8 +209,8 @@ fn gives_work_to_the_next_hungry_scheduler_in_cyclic_order() {
     );
 }
 
-/// A steal takes from the queue of the highest priority, at most half of
-/// it and at most 100 processes. The `normal` queue holds the `low`
+/// A steal takes from the queue of the highest priority that gives a
+/// process, at most half of it and at most 100 processes. The `normal` queue holds the `low`
 /// processes.
 #[test]
 fn a_steal_takes_half_of_the_highest_queue() {
@@ -219,10 +219,15 @@ fn a_steal_takes_half_of_the_highest_queue() {
     queue.push(ProcessId(1), Priority::Low);
     queue.push(ProcessId(2), Priority::Normal);
     queue.push(ProcessId(3), Priority::High);
-    assert!(queue.steal(|_| true).is_empty(), "one high process stays");
-    assert_eq!(queue.pop(), Some(ProcessId(3)));
+    // The high queue runs next and gives 1 / 2, so the search goes on to
+    // the normal queue, which gives (2 + 1) / 2.
     assert_eq!(queue.steal(|_| true), vec![(ProcessId(1), Some(8))]);
+    assert_eq!(queue.pop(), Some(ProcessId(3)));
     assert_eq!(queue.pop(), Some(ProcessId(2)));
+    queue.push(ProcessId(4), Priority::Normal);
+    queue.push(ProcessId(5), Priority::Normal);
+    assert_eq!(queue.steal(|_| true), vec![(ProcessId(4), None)]);
+    assert_eq!(queue.pop(), Some(ProcessId(5)));
     for id in 0..250 {
         queue.push(ProcessId(id), Priority::Max);
     }
@@ -265,4 +270,23 @@ fn the_first_stolen_process_gives_no_count() {
         })
         .collect();
     assert_eq!(counts, vec![(ProcessId(1), None), (ProcessId(2), Some(8))]);
+}
+
+/// A pinned `high` process that the scheduler runs next gives no process,
+/// so the steal takes from the `normal` queue: the idle scheduler gets one
+/// of the two `normal` processes, as ERTS goes on to the next queue
+/// (`erl_process.c:4489-4592`).
+#[test]
+fn a_queue_that_gives_nothing_lets_the_steal_take_a_lower_queue() {
+    let (node, mut victim, _thief) = two_schedulers();
+    let mut high = ProcessState::new(ProcessId(1), Start::Entry(frame()), vec![]);
+    high.priority = Priority::High;
+    high.pinned = true;
+    victim.insert(high);
+    insert(&mut victim, &[2, 3]);
+    node.set_hungry(1, true);
+    victim.serve_steal();
+    assert_eq!(node.owner(ProcessId(2)), Some(1));
+    assert_eq!(victim.runnable.ids(), vec![ProcessId(1), ProcessId(3)]);
+    assert_eq!(inbox(&node, 1), vec![('P', 2)]);
 }

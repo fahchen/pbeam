@@ -106,18 +106,24 @@ impl RunQueue {
         self.max.len() + self.high.len() + self.normal.len()
     }
 
-    /// Take the processes that an idle scheduler steals: from the head of
-    /// the queue of the highest priority with a process, at most half of
-    /// that queue and at most [`STEAL_LIMIT`], skipping each process for
-    /// which `stealable` is false. The `normal` queue holds the `low`
-    /// processes too, as the ERTS normal queue does. The scheduler of this
-    /// queue keeps the process that it runs next, so the half counts it as
-    /// the process that the ERTS victim runs: ERTS steals `(len + 1) / 2`
-    /// of the queue without its running process (`try_steal_task_from_victim`,
-    /// `erl_process.c:4497-4558`), which is `len / 2` of this queue. ERTS
-    /// skips a process bound to its run queue (`erts_try_change_runq_proc`,
-    /// `erl_process.h:2722-2723`), as `stealable` does. Each stolen `low`
-    /// process gives the count that it has left.
+    /// Take the processes that an idle scheduler steals. The queues go in
+    /// priority order, `max`, `high`, then `normal`, and the first queue
+    /// that gives a process ends the search; a queue that gives none lets
+    /// the search go on to the next one, as in ERTS
+    /// (`try_steal_task_from_victim`, `erl_process.c:4489-4592`). A queue
+    /// gives at most half of its processes and at most [`STEAL_LIMIT`], from
+    /// its head, and skips each process for which `stealable` is false, as
+    /// ERTS skips a process bound to its run queue
+    /// (`erts_try_change_runq_proc`, `erl_process.h:2722-2723`). The
+    /// `normal` queue holds the `low` processes too, as the ERTS normal
+    /// queue does (`erl_process.c:4510-4517`).
+    ///
+    /// ERTS takes `(len + 1) / 2` of a queue (`erl_process.c:4528-4534`),
+    /// and its victim runs a process that is not in a queue. The scheduler
+    /// of this queue keeps the process that it runs next, at the head of
+    /// the first queue that is not empty, so that queue gives `len / 2`, and
+    /// each later queue gives `(len + 1) / 2`. Each stolen `low` process
+    /// gives the count that it has left.
     ///
     /// # Examples
     ///
@@ -131,24 +137,22 @@ impl RunQueue {
         &mut self,
         mut stealable: impl FnMut(ProcessId) -> bool,
     ) -> Vec<(ProcessId, Option<u8>)> {
-        let queue = [&mut self.max, &mut self.high, &mut self.normal]
-            .into_iter()
-            .find(|queue| !queue.is_empty());
-        let Some(queue) = queue else {
-            return Vec::new();
-        };
-        let mut count = (queue.len() / 2).min(STEAL_LIMIT);
+        let mut next = true;
         let mut stolen = Vec::new();
-        let mut kept = VecDeque::with_capacity(queue.len());
-        for id in queue.drain(..) {
-            if count > 0 && stealable(id) {
-                count -= 1;
-                stolen.push(id);
+        for queue in [&mut self.max, &mut self.high, &mut self.normal] {
+            if queue.is_empty() {
+                continue;
+            }
+            let half = if std::mem::take(&mut next) {
+                queue.len() / 2
             } else {
-                kept.push_back(id);
+                queue.len().div_ceil(2)
+            };
+            stolen = take_head(queue, half.min(STEAL_LIMIT), &mut stealable);
+            if !stolen.is_empty() {
+                break;
             }
         }
-        *queue = kept;
         stolen
             .into_iter()
             .map(|id| (id, self.low.remove(&id)))
@@ -188,4 +192,28 @@ impl RunQueue {
         let queues = self.max.iter().chain(&self.high).chain(&self.normal);
         queues.copied().collect()
     }
+}
+
+/// Take at most `count` processes for which `stealable` is true from the
+/// queue `queue`, from its head, and keep the others in their order.
+fn take_head(
+    queue: &mut VecDeque<ProcessId>,
+    mut count: usize,
+    stealable: &mut impl FnMut(ProcessId) -> bool,
+) -> Vec<ProcessId> {
+    let mut stolen = Vec::new();
+    if count == 0 {
+        return stolen;
+    }
+    let mut kept = VecDeque::with_capacity(queue.len());
+    for id in queue.drain(..) {
+        if count > 0 && stealable(id) {
+            count -= 1;
+            stolen.push(id);
+        } else {
+            kept.push_back(id);
+        }
+    }
+    *queue = kept;
+    stolen
 }
