@@ -535,6 +535,19 @@ impl Frame {
     }
 }
 
+/// The items of `erlang:process_info/2` that [`ProcessState::info`] reads
+/// for a process that is not the caller. A request to a process of another
+/// scheduler carries only these items, because its owner reads the item as
+/// the target process.
+pub(super) const OTHER_PROCESS_INFO_ITEMS: [&str; 6] = [
+    "registered_name",
+    "message_queue_len",
+    "group_leader",
+    "priority",
+    "links",
+    "reductions",
+];
+
 impl ProcessState {
     /// Create a runnable process with argument registers. An entry start
     /// gives one frame. An undefined start gives no frame and keeps the
