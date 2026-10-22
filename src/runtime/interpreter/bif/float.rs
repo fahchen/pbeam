@@ -167,12 +167,9 @@ pub(super) fn from_list(list: &Term) -> BifResult {
 /// assert!(matches!(from_binary(&Term::Integer(1)), BifResult::Raise { .. }));
 /// ```
 pub(super) fn from_binary(binary: &Term) -> BifResult {
-    let Term::Binary(bytes) = binary else {
+    let Some(bytes) = binary.binary_bytes().filter(|bytes| !bytes.is_empty()) else {
         return BifResult::badarg();
     };
-    if bytes.bit_size() == 0 || !bytes.bit_size().is_multiple_of(8) {
-        return BifResult::badarg();
-    }
     match text_to_float(bytes) {
         Some(value) => Value(Term::Float(value)),
         None => BifResult::badarg(),

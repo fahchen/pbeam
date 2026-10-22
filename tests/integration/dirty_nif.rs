@@ -195,7 +195,7 @@ fn runs_cpu_bound_and_io_bound_calls_on_their_dirty_pools() {
     let names: Vec<String> = names
         .iter()
         .map(|name| match name {
-            Term::Binary(bytes) => String::from_utf8(bytes.to_vec()).unwrap(),
+            Term::Binary(bytes) => String::from_utf8(bytes.bytes().unwrap().to_vec()).unwrap(),
             other => panic!("a thread name is a binary: {other:?}"),
         })
         .collect();

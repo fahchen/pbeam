@@ -36,15 +36,15 @@ fn reads_the_bytes_of_a_segment_as_a_view_of_the_binary() {
     // The high four bits of the byte 2 are `0b0000` and its low four bits
     // are `0b0011`, at the top of their byte.
     let high = context.read_bytes(4).expect("4 bits remain");
-    assert_eq!(&high[..], &[0b0000_0011]);
+    assert_eq!(high.bit_bytes(), &[0b0000_0011]);
     assert_eq!(context.position(), 20);
     let low = context.read_bytes(4).expect("4 bits remain");
-    assert_eq!(&low[..], &[0b0011_0000]);
+    assert_eq!(low.bit_bytes(), &[0b0011_0000]);
     assert_eq!(context.position(), 24);
     // A view keeps the offset of its bits in the array of its source.
     let source = Binary::from(&[0xC3]);
     assert!(source.same_bytes(&source.bits(4, 8)));
-    assert_eq!(&source.bits(4, 8)[..], &[0b0011_0000]);
+    assert_eq!(source.bits(4, 8).bit_bytes(), &[0b0011_0000]);
     // Too few bits give no view and keep the position.
     assert_eq!(context.read_bytes(16), None);
     assert_eq!(context.position(), 24);
@@ -179,7 +179,7 @@ fn reads_utf8_at_a_position_that_is_not_byte_aligned() {
 #[test]
 fn reports_the_binary_of_the_state() {
     let context = MatchState::new(Binary::from(&[1, 2]));
-    assert_eq!(context.binary().to_vec(), vec![1, 2]);
+    assert_eq!(context.binary().bit_bytes().to_vec(), vec![1, 2]);
 }
 
 #[test]

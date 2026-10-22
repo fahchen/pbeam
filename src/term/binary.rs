@@ -9,8 +9,10 @@
 //! (`binary_referenced_byte_size_1`, `erl_bif_binary.c:2508-2530`). The
 //! array is immutable, so a view needs no copy.
 //!
-//! `Binary` derefs to `[u8]`, so each reader uses the byte slice operations
-//! and cannot see the sharing. The size is a number of bits, because an
+//! [`Binary::bytes`] gives the bytes only for a whole number of bytes, so
+//! each reader states what it does for a bitstring, and no reader sees the
+//! sharing. [`Binary::bit_bytes`] gives the bytes that hold the bits to a
+//! reader of bits. The size is a number of bits, because an
 //! ERTS sub-bitstring can start and end at any bit
 //! (`erts_bs_get_binary_2`, `erl_bits.c:400-424`). [`Binary::bits`] copies
 //! no byte when the first bit is on a byte boundary. For a first bit that
@@ -71,7 +73,7 @@ struct BinaryView {
     /// The number of bits of this binary.
     size: usize,
     /// The bytes of the view, with the bits of an offset that is not on a
-    /// byte boundary packed as [`Binary::deref`] gives them. `None` when the
+    /// byte boundary packed as [`Binary::bit_bytes`] gives them. `None` when the
     /// offset is on a byte boundary, because the view is then a slice of the
     /// array with no copy. The `Arc` keeps a copy of such a binary O(1), as
     /// a copy of a byte-aligned binary is.
@@ -122,11 +124,48 @@ impl Binary {
     ///
     /// ```rust,ignore
     /// let bytes = Binary::from(b"ab".to_vec());
-    /// assert_eq!(bytes.bytes().len(), 2);
+    /// assert_eq!(bytes.array().len(), 2);
     /// ```
     #[cfg(test)]
-    pub(crate) fn bytes(&self) -> &Arc<Vec<u8>> {
+    pub(crate) fn array(&self) -> &Arc<Vec<u8>> {
         &self.0.bytes
+    }
+
+    /// Return the bytes of this binary when its size is a whole number of
+    /// bytes, or `None` for a bitstring whose size is not. Each caller
+    /// states what it does for a bitstring: most BIFs that take a binary
+    /// raise `badarg` for it, as ERTS `erts_get_aligned_binary_bytes_extra`
+    /// gives no bytes for a bitstring whose size is not a multiple of 8
+    /// (`erl_bits.h:605-635`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Binary::from(b"ab".to_vec()).bytes(), Some(&b"ab"[..]));
+    /// assert_eq!(Binary::from(vec![32]).bits(0, 3).bytes(), None);
+    /// ```
+    pub fn bytes(&self) -> Option<&[u8]> {
+        self.0
+            .size
+            .is_multiple_of(BITS_PER_BYTE)
+            .then(|| self.0.bytes_of_view())
+    }
+
+    /// Return the bytes that hold the bits of this binary, for a caller
+    /// that reads bits and not whole bytes, such as a binary match or the
+    /// order of two bitstrings. The bytes are from the byte of the offset.
+    /// A size that is not a whole number of bytes gives its last bits in the
+    /// high bits of the last byte, as an ERTS bitstring holds them
+    /// (`erl_bits.h`), and [`Binary::bit_size`] gives the number of bits
+    /// to read. The low bits of that last byte are not part of the binary.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Binary::from(vec![0x3F]).bits(0, 3).bit_bytes(), &[0x3F]);
+    /// ```
+    pub(crate) fn bit_bytes(&self) -> &[u8] {
+        self.0.bytes_of_view()
     }
 
     /// Return the shared array of the bytes for the live-byte walk. Two
@@ -204,7 +243,7 @@ impl Binary {
 
     /// Return the number of bits of this binary. The size comes from the
     /// view, so a binary that an append built keeps its chunks and does not
-    /// join them, as [`Binary::deref`] does at its first read.
+    /// join them, as [`Binary::bit_bytes`] does at its first read.
     ///
     /// # Examples
     ///
@@ -285,7 +324,7 @@ impl Binary {
     ///
     /// ```rust,ignore
     /// let bytes = Binary::from(b"abc".to_vec());
-    /// assert_eq!(bytes.bits(4, 20).to_vec(), vec![0x1B, 0xC0]);
+    /// assert_eq!(bytes.bits(4, 20).bytes(), Some(&[0x16, 0x26][..]));
     /// ```
     ///
     /// # Panics
@@ -370,14 +409,14 @@ impl Binary {
     /// ```rust,ignore
     /// let bytes = Binary::from(b"ab".to_vec());
     /// assert_eq!(bytes.to_bytes(), b"ab".to_vec());
-    /// assert_eq!(bytes.len(), 2);
+    /// assert_eq!(bytes.bit_size(), 16);
     /// ```
     pub(crate) fn to_bytes(&self) -> Vec<u8> {
         // The bytes are copied, because a term cannot give up the array of a
         // binary: `Term` has a `Drop`, and the binary lives until the term
         // drops. `take_bytes` moves the array out when the caller owns the
         // binary.
-        self[..].to_vec()
+        self.bit_bytes().to_vec()
     }
 
     /// Build the binary of `prefix` followed by `suffix`, the result of an
@@ -462,7 +501,7 @@ impl Binary {
     /// assert!(bytes.append_in_place(b"c"));
     /// let copy = bytes.clone();
     /// assert!(!bytes.append_in_place(b"d"));
-    /// assert_eq!(&*copy, b"abc");
+    /// assert_eq!(copy.bytes(), Some(&b"abc"[..]));
     /// ```
     pub(crate) fn append_in_place(&mut self, suffix: &[u8]) -> bool {
         let Some(view) = Arc::get_mut(&mut self.0) else {
@@ -534,7 +573,7 @@ impl Binary {
     /// Return the runs of the bytes from byte `start` to byte `end` of this
     /// binary, in order, for a reader of one byte range. A view that an
     /// append built gives the part of each chunk in the range and does not
-    /// join its chunks, as [`Binary::deref`] does at its first read. The call
+    /// join its chunks, as [`Binary::bit_bytes`] does at its first read. The call
     /// copies no byte. It finds the first and the last chunk of the range
     /// with binary searches of the chunk index (`Chunks::ends`),
     /// so it does O(log chunks) work to find the range. It then does O(1)
@@ -551,7 +590,7 @@ impl Binary {
     /// ```
     pub(crate) fn byte_runs(&self, start: usize, end: usize) -> Vec<&[u8]> {
         let Some(chunks) = &self.0.chunks else {
-            return vec![&self[start..end]];
+            return vec![&self.bit_bytes()[start..end]];
         };
         let ends = &chunks.ends;
         chunk_span(ends, start, end)
@@ -660,7 +699,7 @@ impl BinaryView {
         }
     }
 
-    /// Return the bytes of this view, as [`Binary`] derefs to them.
+    /// Return the bytes of this view, as [`Binary::bit_bytes`] gives them.
     fn bytes_of_view(&self) -> &[u8] {
         match &self.packed {
             Some(packed) => packed,
@@ -756,19 +795,6 @@ fn pack_bits(bytes: &[u8], shift: usize, size: usize) -> Vec<u8> {
     packed
 }
 
-impl Deref for Binary {
-    type Target = [u8];
-
-    /// Return the bytes of the binary. The bytes from the byte of the
-    /// offset, and of a size that is not a whole number of bytes the bits
-    /// from the offset onward in the high bits of the last byte, as an ERTS
-    /// bitstring holds them (`erl_bits.h`). No supported path forms such a
-    /// binary yet.
-    fn deref(&self) -> &[u8] {
-        self.0.bytes_of_view()
-    }
-}
-
 impl<const N: usize> From<&[u8; N]> for Binary {
     /// Make a binary of a byte array. The array of the binary holds a copy
     /// of the bytes, and copies of the binary share it.
@@ -777,7 +803,7 @@ impl<const N: usize> From<&[u8; N]> for Binary {
     ///
     /// ```rust,ignore
     /// let binary = Binary::from(&[1, 2]);
-    /// assert_eq!(&*binary, &[1, 2]);
+    /// assert_eq!(binary.bytes(), Some(&[1, 2][..]));
     /// ```
     fn from(bytes: &[u8; N]) -> Self {
         Binary::from(bytes.as_slice())
@@ -792,7 +818,7 @@ impl From<&[u8]> for Binary {
     ///
     /// ```rust,ignore
     /// let binary = Binary::from(&[1, 2][..]);
-    /// assert_eq!(&*binary, &[1, 2]);
+    /// assert_eq!(binary.bytes(), Some(&[1, 2][..]));
     /// ```
     fn from(bytes: &[u8]) -> Self {
         Binary::from(bytes.to_vec())
@@ -820,7 +846,7 @@ impl From<Vec<u8>> for Binary {
     ///
     /// ```rust,ignore
     /// let binary = Binary::from(vec![1, 2]);
-    /// assert_eq!(&*binary, &[1, 2]);
+    /// assert_eq!(binary.bytes(), Some(&[1, 2][..]));
     /// ```
     fn from(bytes: Vec<u8>) -> Self {
         let size = bytes.len() * BITS_PER_BYTE;
@@ -845,7 +871,7 @@ impl fmt::Debug for Binary {
     /// assert_eq!(format!("{:?}", Binary::from(vec![1])), "[1]");
     /// ```
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{:?}", &**self)
+        write!(formatter, "{:?}", self.bit_bytes())
     }
 }
 
@@ -899,6 +925,7 @@ impl Ord for Binary {
 fn cmp_bits(left: &Binary, right: &Binary, size: usize) -> std::cmp::Ordering {
     let whole = byte(size);
     let tail = size % BITS_PER_BYTE;
+    let (left, right) = (left.bit_bytes(), right.bit_bytes());
     left[..whole].cmp(&right[..whole]).then_with(|| {
         if tail == 0 {
             return std::cmp::Ordering::Equal;
@@ -920,6 +947,27 @@ impl Term {
     /// ```
     pub fn binary(bytes: Vec<u8>) -> Term {
         Term::Binary(bytes.into())
+    }
+
+    /// Return the bytes of a binary term whose size is a whole number of
+    /// bytes, or `None` for a bitstring whose size is not and for each term
+    /// that is not a binary. A BIF that takes a binary raises `badarg` for
+    /// each `None`, as ERTS does for a term that
+    /// `erts_get_aligned_binary_bytes_extra` gives no bytes for
+    /// (`erl_bits.h:605-635`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Term::binary(vec![1]).binary_bytes(), Some(&[1][..]));
+    /// assert_eq!(Term::Binary(Binary::from(vec![1]).bits(0, 3)).binary_bytes(), None);
+    /// assert_eq!(Term::Integer(1).binary_bytes(), None);
+    /// ```
+    pub fn binary_bytes(&self) -> Option<&[u8]> {
+        match self {
+            Term::Binary(binary) => binary.bytes(),
+            _ => None,
+        }
     }
 }
 

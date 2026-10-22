@@ -114,7 +114,7 @@ fn text(term: &Term, atoms: &AtomTable) -> String {
         }
         Term::Tuple(terms) => format!("{{{}}}", join(terms)),
         Term::Binary(bytes) => {
-            let bytes: Vec<String> = bytes.iter().map(u8::to_string).collect();
+            let bytes: Vec<String> = bytes.bytes().unwrap().iter().map(u8::to_string).collect();
             format!("<<{}>>", bytes.join(","))
         }
         other => panic!("unexpected term {other:?}"),
@@ -220,22 +220,30 @@ fn gives_parts_that_share_the_bytes_of_their_source_and_copies_that_do_not() {
     let Term::Binary(source) = &terms[0] else {
         panic!("the source is a binary");
     };
-    assert_eq!(&source[..], b"\x01\x02\x03\x04\x05");
-    let start = source.as_ptr() as usize;
-    let end = start + source.len();
+    assert_eq!(source.bytes().unwrap(), b"\x01\x02\x03\x04\x05");
+    let start = source.bytes().unwrap().as_ptr() as usize;
+    let end = start + source.bytes().unwrap().len();
     for (index, term) in terms[1..].iter().enumerate() {
         let Term::Binary(part) = term else {
             panic!("a part or a copy is a binary: {term:?}");
         };
-        let pointer = part.as_ptr() as usize;
+        let pointer = part.bytes().unwrap().as_ptr() as usize;
         if index < 2 {
-            assert_eq!(&part[..], b"\x02\x03\x04", "the parts of the probe");
+            assert_eq!(
+                part.bytes().unwrap(),
+                b"\x02\x03\x04",
+                "the parts of the probe"
+            );
             assert!(
                 (start..end).contains(&pointer),
                 "the part {pointer:#x} is not in the array of the source {start:#x}"
             );
         } else {
-            assert_eq!(&part[..], &source[..], "the copies of the probe");
+            assert_eq!(
+                part.bytes().unwrap(),
+                source.bytes().unwrap(),
+                "the copies of the probe"
+            );
             assert!(
                 !(start..end).contains(&pointer),
                 "the copy {pointer:#x} is in the array of the source {start:#x}"

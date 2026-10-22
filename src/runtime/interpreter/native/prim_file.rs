@@ -516,7 +516,10 @@ fn read_nif(scheduler: &mut Scheduler, fd: &Term, size: &Term) -> Result<BifResu
 fn write_nif(scheduler: &mut Scheduler, fd: &Term, iovec: &Term) -> Result<BifResult, BeamError> {
     let iovec = write_iovec(iovec);
     let operation = |file: &File, (binaries, rest): (Vec<Binary>, Term)| {
-        let mut buffers: Vec<_> = binaries.iter().map(|binary| IoSlice::new(binary)).collect();
+        let mut buffers: Vec<_> = binaries
+            .iter()
+            .map(|binary| IoSlice::new(write_bytes(binary)))
+            .collect();
         (file::write(file, &mut buffers), rest)
     };
     file_handle_wrapper(scheduler, fd, iovec, operation, |atoms, (written, rest)| {
@@ -527,6 +530,20 @@ fn write_nif(scheduler: &mut Scheduler, fd: &Term, iovec: &Term) -> Result<BifRe
         };
         value_or_error(atoms, written.map(|()| value))
     })
+}
+
+/// Return the bytes of a binary that [`write_iovec`] took. `write_iovec`
+/// takes only binaries of whole bytes.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(write_bytes(&Binary::from(vec![1])), &[1]);
+/// ```
+fn write_bytes(binary: &Binary) -> &[u8] {
+    binary
+        .bytes()
+        .expect("write_iovec takes only binaries of whole bytes")
 }
 
 /// Return the binaries that `write_nif/2` writes from `iovec`, with no
@@ -546,12 +563,13 @@ fn write_iovec(iovec: &Term) -> Result<(Vec<Binary>, Term), Reject> {
     let mut rest = iovec;
     let mut elements = 0;
     while let Some((element, tail)) = rest.cons_cell() {
-        let Term::Binary(binary) = element else {
+        // `examine_iovec_term` rejects a bitstring (erl_nif.c:4120-4121).
+        let (Term::Binary(binary), Some(bytes)) = (element, element.binary_bytes()) else {
             return Err(Reject::Badarg);
         };
         // `examine_iovec_term` gives no iovec entry for an empty binary
         // (erl_nif.c:4123-4155).
-        if !binary.is_empty() {
+        if !bytes.is_empty() {
             binaries.push(binary.clone());
         }
         rest = tail;
@@ -1038,9 +1056,7 @@ fn value_or_error(
 /// assert_eq!(marshal_path(&Term::binary(b"/a\0b\0".to_vec())), None);
 /// ```
 fn marshal_path(path: &Term) -> Option<&CStr> {
-    let Term::Binary(bytes) = path else {
-        return None;
-    };
+    let bytes = path.binary_bytes()?;
     let path = CStr::from_bytes_until_nul(bytes).ok()?;
     let rest = &bytes[path.to_bytes().len()..];
     rest.iter().all(|&byte| byte == 0).then_some(path)

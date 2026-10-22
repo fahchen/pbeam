@@ -29,7 +29,7 @@ use ::zstd::zstd_safe::{
 };
 
 use super::*;
-use crate::term::{Binary, ProcessId, Reference};
+use crate::term::{ProcessId, Reference};
 
 /// The bits of one byte, for the bit range of a binary.
 const BITS_PER_BYTE: usize = 8;
@@ -344,15 +344,6 @@ fn integer(term: &Term) -> Option<i32> {
     }
 }
 
-/// Return the binary of a term with a whole number of bytes, as
-/// `enif_inspect_binary` accepts it.
-fn whole_binary(term: &Term) -> Option<&Binary> {
-    match term {
-        Term::Binary(binary) if binary.bit_size() % BITS_PER_BYTE == 0 => Some(binary),
-        _ => None,
-    }
-}
-
 /// Run one stream call of a context, as `codec_nif` does
 /// (`zstd_nif.c:586-672`): check the flush and the input, run `step` into an
 /// output buffer of `chunk_size` bytes until the input is consumed or the
@@ -375,10 +366,10 @@ fn codec(
     let Some(flush) = integer(flush) else {
         return Native::Raise("badarg");
     };
-    let Some(binary) = whole_binary(data) else {
+    // `enif_inspect_binary` accepts only a whole number of bytes.
+    let (Term::Binary(binary), Some(bytes)) = (data, data.binary_bytes()) else {
         return Native::Raise("badarg");
     };
-    let bytes: &[u8] = binary;
     let mut output = vec![0; chunk_size];
     let mut out = OutBuffer::around(&mut output[..]);
     let mut input = InBuffer::around(bytes);
@@ -761,7 +752,7 @@ fn decompress(
 ) -> Native {
     let mut chunk_size = DCtx::out_size();
     if !decompressor.in_use {
-        let Some(binary) = whole_binary(data) else {
+        let Some(binary) = data.binary_bytes() else {
             return Native::Raise("badarg");
         };
         // An empty binary with the flush atom `true` gives `done` and does

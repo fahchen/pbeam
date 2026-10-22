@@ -71,7 +71,7 @@ fn report_allocations(name: &str, count: usize) {
 fn read_binary_view(name: &str, bytes: &Binary) {
     let ns = measure(RUNS, HANDLE_OPERATIONS, || {
         for _ in 0..HANDLE_OPERATIONS {
-            black_box(black_box(bytes).len());
+            black_box(black_box(bytes).bit_bytes().len());
         }
     });
     report(name, ns);

@@ -352,7 +352,7 @@ fn runs_cpu_bound_calls_on_one_dirty_cpu_thread_for_each_scheduler() {
             else {
                 panic!("the call returns the thread name: {completion:?}");
             };
-            names.push(String::from_utf8(name.to_vec()).unwrap());
+            names.push(String::from_utf8(name.bit_bytes().to_vec()).unwrap());
         }
     }
     assert!(claims.iter().all(Claim::started));

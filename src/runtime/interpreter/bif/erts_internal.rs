@@ -587,6 +587,7 @@ fn native_name(atoms: &AtomTable, name: &Term, allow_empty: bool) -> Option<Vec<
     let characters;
     let name = match name {
         Term::Binary(bytes) => {
+            let bytes = bytes.bytes()?;
             let end = bytes.iter().position(|&byte| byte == 0);
             return Some(bytes[..end.unwrap_or(bytes.len())].to_vec());
         }
@@ -1137,7 +1138,7 @@ pub(super) fn prepare_loading(
     module: &Term,
     code: &Term,
 ) -> Result<BifResult, BeamError> {
-    let (Term::Atom(module), Term::Binary(bytes)) = (module, code) else {
+    let (Term::Atom(module), Some(bytes)) = (module, code.binary_bytes()) else {
         return Ok(BifResult::badarg());
     };
     let scheduler = &mut *context.scheduler;
@@ -1287,12 +1288,9 @@ pub(super) fn binary_to_integer(binary: &Term, base: &Term) -> BifResult {
     let Some(base) = base.small_integer().filter(|base| (2..=36).contains(base)) else {
         return badarg();
     };
-    let Term::Binary(bytes) = binary else {
+    let Some(bytes) = binary.binary_bytes() else {
         return badarg();
     };
-    if !bytes.bit_size().is_multiple_of(8) {
-        return badarg();
-    }
     chars_to_integer(bytes, base as u32)
 }
 

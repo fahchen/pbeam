@@ -20,7 +20,7 @@ fn atom(scheduler: &mut Scheduler, name: &str) -> Term {
 /// Return the binary bytes of a `BifResult::Value`.
 fn value_bytes(result: BifResult) -> Vec<u8> {
     match result {
-        BifResult::Value(Term::Binary(ref bytes)) => bytes.to_vec(),
+        BifResult::Value(Term::Binary(ref bytes)) => bytes.bit_bytes().to_vec(),
         other => panic!("{other:?}"),
     }
 }
@@ -539,6 +539,7 @@ fn strong_rand_range_gives_a_binary_or_false_as_erts() {
             panic!("the range {range} gives a binary");
         };
         let number = value
+            .bit_bytes()
             .iter()
             .fold(0u16, |number, byte| (number << 8) | u16::from(*byte));
         assert!(number < u16::from(range), "{range} {value:?}");

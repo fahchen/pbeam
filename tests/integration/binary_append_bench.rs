@@ -175,8 +175,11 @@ fn appends_a_string_and_an_integer_segment_to_a_large_binary() {
     let Term::Binary(bytes) = &with_string else {
         panic!("not a binary: {with_string:?}");
     };
-    assert_eq!(bytes.len(), 5004);
-    assert_eq!(&bytes[..], &[&[b'a'; 5000][..], b"tail"].concat()[..]);
+    assert_eq!(bytes.bytes().unwrap().len(), 5004);
+    assert_eq!(
+        bytes.bytes().unwrap(),
+        &[&[b'a'; 5000][..], b"tail"].concat()[..]
+    );
 
     let with_integer = execute(
         &program,
@@ -186,9 +189,9 @@ fn appends_a_string_and_an_integer_segment_to_a_large_binary() {
     let Term::Binary(bytes) = &with_integer else {
         panic!("not a binary: {with_integer:?}");
     };
-    assert_eq!(bytes.len(), 5001);
-    assert_eq!(bytes[5000], 7);
-    assert_eq!(&bytes[..5000], &[b'a'; 5000][..]);
+    assert_eq!(bytes.bytes().unwrap().len(), 5001);
+    assert_eq!(bytes.bytes().unwrap()[5000], 7);
+    assert_eq!(&bytes.bytes().unwrap()[..5000], &[b'a'; 5000][..]);
 }
 
 trait BinaryLen {
@@ -198,7 +201,7 @@ trait BinaryLen {
 impl BinaryLen for Term {
     fn binary_len(self) -> usize {
         match &self {
-            Term::Binary(bytes) => bytes.len(),
+            Term::Binary(bytes) => bytes.bytes().unwrap().len(),
             other => panic!("not a binary: {other:?}"),
         }
     }

@@ -233,6 +233,23 @@ fn prints_funs_as_pinned_erts() {
 }
 
 #[test]
+fn prints_a_bitstring_as_pinned_erts() {
+    // PBeam builds no bitstring term from a compiled fixture yet, so the
+    // test makes one with `Binary::bits`. The pinned ERTS gives
+    // `erts_internal:term_to_string(<<"ab", 3:5>>)` = "<<97,98,3:5>>" and
+    // `erts_internal:term_to_string(<<5:3>>)` = "<<5:3>>".
+    let table = table_of(&[]);
+    let printable = Binary::from(vec![b'a', b'b', 3 << 3]).bits(0, 21);
+    assert_eq!(
+        print_term(&Term::Binary(printable), &table),
+        b"<<97,98,3:5>>"
+    );
+    // A view at a bit offset packs its bits: <<_:4, 5:3, _:1>> gives <<5:3>>.
+    let offset = Binary::from(vec![0b0000_1010]).bits(4, 7);
+    assert_eq!(print_term(&Term::Binary(offset), &table), b"<<5:3>>");
+}
+
+#[test]
 fn reads_the_name_from_the_given_table() {
     // The atom keeps its own name today, so a table that gives another name
     // at the same index proves that `print_term` reads the table.

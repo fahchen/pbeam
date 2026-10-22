@@ -71,6 +71,8 @@ fn text(term: &Term, atoms: &AtomTable) -> String {
         Term::Binary(bytes) => format!(
             "<<{}>>",
             bytes
+                .bytes()
+                .expect("the term is a binary of whole bytes")
                 .iter()
                 .map(u8::to_string)
                 .collect::<Vec<_>>()

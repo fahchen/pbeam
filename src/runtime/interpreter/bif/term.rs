@@ -362,14 +362,14 @@ fn encode(term: &Term, atoms: &AtomTable, options: &Options) -> Result<Vec<u8>, 
                 }
             }
             Term::Binary(binary) => {
-                if binary.bit_size() % 8 != 0 {
+                let Some(bytes) = binary.bytes() else {
                     return Err(error(
                         "unsupported erlang:term_to_binary/1,2 of a bitstring that is not a whole number of bytes: see \"External term format\" in docs/erts-differences.md",
                     ));
-                }
+                };
                 out.push(109);
-                out.extend_from_slice(&(binary.len() as u32).to_be_bytes());
-                out.extend_from_slice(binary);
+                out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+                out.extend_from_slice(bytes);
             }
             Term::Pid(ProcessId(data)) => {
                 out.push(88);
@@ -568,12 +568,9 @@ pub(super) fn binary_to_term(
     let Some((safe, used)) = binary_options(options) else {
         return Ok(BifResult::badopt());
     };
-    let Term::Binary(binary) = binary else {
+    let Some(binary) = binary.binary_bytes() else {
         return Ok(BifResult::badarg());
     };
-    if binary.bit_size() % 8 != 0 {
-        return Ok(BifResult::badarg());
-    }
     let seed = context.scheduler.local_node_hash();
     let mut decoder = Decoder {
         input: binary,

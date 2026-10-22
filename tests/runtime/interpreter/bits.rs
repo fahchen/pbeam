@@ -1,4 +1,5 @@
 use super::BitWriter;
+use crate::term::Binary;
 
 #[test]
 fn writes_bits_across_byte_boundaries() {
@@ -60,4 +61,15 @@ fn writes_integers_in_each_byte_order_as_erts() {
     );
     assert_eq!(bytes(&[(5, 0, false)]), Ok(Vec::new()));
     assert_eq!(bytes(&[(1, 4, false)]), Err(4));
+}
+
+#[test]
+fn writes_the_bits_of_a_binary() {
+    // The pinned ERTS gives <<(<<1:4>>)/bitstring, (<<2:4>>)/bitstring>> =
+    // <<18>>: the writer copies the 4 bits of each bitstring.
+    let mut writer = BitWriter::default();
+    writer.push_binary(&Binary::from(vec![0x10]).bits(0, 4));
+    writer.push_binary(&Binary::from(vec![0x20]).bits(0, 4));
+    writer.push_binary(&Binary::from(vec![0xAB]));
+    assert_eq!(writer.into_bytes(), Ok(vec![0x12, 0xAB]));
 }

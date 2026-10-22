@@ -62,7 +62,7 @@ fn show(program: &BeamProgram, function: &str) -> Vec<u8> {
     let Term::Binary(text) = &result else {
         panic!("show/1 returns a binary, not {result:?}");
     };
-    text.to_vec()
+    text.bytes().unwrap().to_vec()
 }
 
 /// Check that PBeam prints the result of a fixture function as the pinned

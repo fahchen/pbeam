@@ -308,8 +308,8 @@ pub unsafe extern "C" fn enif_inspect_binary(
     // SAFETY: the C API gives the env of the current call.
     let env = unsafe { env(env_pointer) };
     let (data, size) = match env.slot(term) {
-        Some(Slot::Term(Term::Binary(binary))) if binary.bit_size() % 8 == 0 => {
-            (binary.as_ptr(), binary.len())
+        Some(Slot::Term(Term::Binary(binary))) if let Some(bytes) = binary.bytes() => {
+            (bytes.as_ptr(), bytes.len())
         }
         // `Vec::as_ptr` makes no reference to the bytes, so the address
         // stays valid when the NIF writes the bytes through the address of
