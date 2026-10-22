@@ -27,7 +27,7 @@ writer() ->
 
 %% The root that reads its clock after each reading of the other root. Each
 %% monotonic time must be at or after the time of the other root, and the
-%% time support settings must be the same. The offset can change at a check
+%% time support settings must be the defaults of the pinned ERTS on both. The offset can change at a check
 %% in the `multi_time_warp` mode (`erl_time_sup.c:807-817`), so the root
 %% does not compare the offsets of each reading. After the check, both roots
 %% read the same offset of the node.
@@ -54,7 +54,7 @@ check_readings(Count) ->
         {reading, {M0, M1, O, C, W} = Theirs} ->
             {N0, N1, P, D, X} = Ours = readings(),
             case N0 >= M0 andalso N1 >= M1 andalso is_integer(O) andalso
-                 is_integer(P) andalso {D, X} =:= {C, W} of
+                 is_integer(P) andalso {C, W, D, X} =:= {true, multi_time_warp, true, multi_time_warp} of
                 true -> check_readings(Count + 1);
                 false -> {unexpected, Theirs, Ours}
             end;
