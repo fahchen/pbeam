@@ -435,7 +435,6 @@ pub(super) struct Scheduler {
     /// signal through the reference goes to the owner, which checks the
     /// alias when it handles the signal. The entries of a process leave the
     /// table when it exits.
-    alias_owners: HashMap<Reference, ProcessId>,
     /// A monitor signal that the current process sent and that waits for
     /// the switch out of the process, its next signal or message to the
     /// same target, or the next monitor signal, as `esdp->pending_signal`
@@ -542,7 +541,6 @@ impl Scheduler {
             shared_libraries: HashMap::new(),
             timers: Timers::new(),
             known_nodes: KnownNodes::default(),
-            alias_owners: HashMap::new(),
             pending_monitor: None,
             held: Vec::new(),
             system_logger: Term::static_atom("logger"),
@@ -3126,7 +3124,7 @@ impl Scheduler {
         if options.alias.is_some() {
             // ERTS makes a pid reference for an alias option (`bif.c:765-767`).
             reference = reference.pid_reference();
-            self.alias_owners.insert(reference, watcher);
+            self.node.register_alias(reference, watcher);
         }
         let target_port = match target {
             MonitorTarget::Port(port) => Some(port),
@@ -3290,13 +3288,14 @@ impl Scheduler {
     /// ```
     pub(super) fn send_alias_message(&mut self, alias: Reference, message: Term) {
         let sender = self.current_process_mut().id;
-        let Some(&owner) = self.alias_owners.get(&alias) else {
+        let Some(owner) = self.node.alias_owner(alias) else {
             return;
         };
-        if self.live_process(owner).is_some() {
+        // An owner of another scheduler gets the signal through the inbox
+        // of its scheduler, and a missing or exiting owner drops it.
+        if self.live_process(owner).is_some() || self.remote_live_owner(owner).is_some() {
             let signal = Signal::AliasMessage { alias, message };
-            self.send_signal(Some(sender), owner, signal)
-                .expect("a live process gets the alias message");
+            let _ = self.send_signal(Some(sender), owner, signal);
         }
     }
 
@@ -3312,7 +3311,7 @@ impl Scheduler {
     /// assert_eq!(scheduler.alias_owner(plain_reference), None);
     /// ```
     pub(super) fn alias_owner(&self, reference: Reference) -> Option<ProcessId> {
-        self.alias_owners.get(&reference).copied()
+        self.node.alias_owner(reference)
     }
 
     /// Give the name `name` to the live process `id`, as `erlang:register/2`
@@ -3752,7 +3751,7 @@ impl Scheduler {
             // A walk that ends gives 1 when no reductions are left.
             reds = reds.max(1);
         }
-        self.alias_owners.retain(|_, owner| *owner != id);
+        self.node.remove_aliases(id);
         self.send_pending_monitor();
         if let Some(slot) = process.root {
             self.node.root_exit(slot);
