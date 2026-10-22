@@ -13,8 +13,8 @@ use crate::{
     beam::{
         BeamModule, Import, ImportKind, NameId,
         code::{
-            self, BinaryMatchCommand, BinarySegment, FloatOperation, Instruction, Operand,
-            SelectValueChoices, TestKind, TestOperand,
+            self, BinaryMatchCommand, BinarySegment, FloatOperation, Instruction, LineTable,
+            Operand, SelectValueChoices, TestKind, TestOperand,
         },
     },
     error::{BeamError, error},
@@ -309,7 +309,9 @@ fn idle_wait(scheduler: &mut Scheduler, node: &Node) -> Result<(), BeamError> {
 }
 
 impl BeamProgram {
-    /// Load BEAM files into one program. Module names must be unique. The
+    /// Load BEAM files into one program. Module names must be unique. A
+    /// module with the name of a preloaded module of ERTS keeps no line
+    /// table, as ERTS strips it from the preloaded modules. The
     /// atom table starts with the 1150 static atoms and the preloaded
     /// atoms. Each module, in the
     /// given order, puts its `AtU8` atoms and then its `LitT` atoms into it.
@@ -329,7 +331,13 @@ impl BeamProgram {
         let mut atoms = AtomTable::new();
         let mut loaded = HashMap::new();
         for bytes in modules {
-            let module = code::parse(bytes, &mut atoms)?;
+            let mut module = code::parse(bytes, &mut atoms)?;
+            // ERTS builds each preloaded module into the emulator without
+            // its `Line` chunk (`beam_strip`, `make_preload:143-157`), so
+            // each frame of such a module has the location `[]`.
+            if bif::PRELOADED.contains(&module.name.as_str()) {
+                module.lines = LineTable::default();
+            }
             let name = module.name.clone();
             if module.on_load.is_some() {
                 return Err(error(format!(
@@ -1208,7 +1216,8 @@ impl BeamProgram {
             };
             let outcome = match result {
                 BifResult::Raise { class, reason } => {
-                    raise_at_entry(scheduler, &module, &name, arguments, class, reason)?
+                    let entry = (module.as_str(), name.as_str(), arguments, Term::nil());
+                    raise_at_entry(scheduler, entry, class, reason)?
                 }
                 result => self.finish_bif(scheduler, result, true)?,
             };
@@ -2618,9 +2627,7 @@ impl BeamProgram {
                         let outcome = match result? {
                             BifResult::Raise { class, reason } => raise_at_entry(
                                 scheduler,
-                                &module.name,
-                                name,
-                                arguments,
+                                (&module.name, name, arguments, Term::nil()),
                                 class,
                                 reason,
                             ),
@@ -2687,7 +2694,8 @@ impl BeamProgram {
                 // `expand_error_value` in `beam_common.c:754-768`).
                 Instruction::TaggedError { tag, value } => {
                     let reason = Term::tuple(vec![Term::static_atom(tag), read(process, value)?]);
-                    if let Some(outcome) = raise(process, ExceptionClass::Error, reason) {
+                    cursor.commit(process);
+                    if let Some(outcome) = raise_in_function(scheduler, reason)? {
                         return Ok(outcome);
                     }
                     cursor.refresh(scheduler)?;
@@ -2697,7 +2705,8 @@ impl BeamProgram {
                 // `expand_error_value` in `beam_common.c:769-772`).
                 Instruction::IfEnd => {
                     let reason = Term::static_atom("if_clause");
-                    if let Some(outcome) = raise(process, ExceptionClass::Error, reason) {
+                    cursor.commit(process);
+                    if let Some(outcome) = raise_in_function(scheduler, reason)? {
                         return Ok(outcome);
                     }
                     cursor.refresh(scheduler)?;
@@ -2767,7 +2776,16 @@ impl BeamProgram {
                     name,
                     arity,
                 } => {
-                    if let Some(outcome) = function_clause(scheduler, module, name, *arity)? {
+                    // ERTS finds the location of the function entry, which
+                    // the `line` before `func_info` covers
+                    // (`beam_common.c:1231-1233`).
+                    let location = cursor
+                        .module
+                        .lines
+                        .location(cursor.position - 1, Term::nil());
+                    if let Some(outcome) =
+                        function_clause(scheduler, module, name, *arity, location)?
+                    {
                         return Ok(outcome);
                     }
                     cursor.refresh(scheduler)?;
@@ -6173,8 +6191,8 @@ fn private_append(
 /// jit/beam_jit_bs.cpp:55-74). The stack trace is the frame of the
 /// function that holds the instruction, with the ERTS `error_info`
 /// (`beam_jit_bs_construct_fail_info` in jit/beam_jit_common.cpp:911-1010).
-/// PBeam keeps no line table and no caller frames, so the frame has no
-/// `file` or `line` and is the only frame (row "Exception stack trace" of
+/// This path gives no caller frames and no `file` or `line`, so the frame
+/// is the only frame (row "Exception stack trace" of
 /// `docs/erts-differences.md`).
 ///
 /// # Examples
@@ -6240,21 +6258,22 @@ fn raise_binary_failure(
 /// at its `func_info`, as ERTS `i_func_info` does: it sets the reason and
 /// the current MFA (`emit_i_func_info_shared` in
 /// `jit/arm/beam_asm_module.cpp:484-497`). The first frame of the stack
-/// trace is `{Module, Function, Args, []}`, where `Args` is the list of
-/// the `arity` argument registers (`save_stacktrace`,
+/// trace is `{Module, Function, Args, Location}`, where `Args` is the list
+/// of the `arity` argument registers (`save_stacktrace`,
 /// `beam_common.c:1011-1024`; `make_arglist`, `beam_common.c:1186-1195`).
 /// The next frames are the frames of the callers, as in `erlang:error/2`:
 /// the function has no frame of its own yet, so its caller is the next
 /// frame. The stack trace keeps at most `backtrace_depth` frames, and one
-/// frame for the depth 0 (`beam_common.c:884-885`). PBeam keeps no line
-/// table, so each location is `[]` (row "Exception stack trace" of
-/// `docs/erts-differences.md`). Return the outcome when the process exits.
+/// frame for the depth 0 (`beam_common.c:884-885`). `Location` is the
+/// location of the function entry, which `build_stacktrace` looks up for a
+/// `function_clause` (`beam_common.c:1231-1233`). Return the outcome when
+/// the process exits.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// // x0 = x, x1 = 1 at the func_info of `pick/2`.
-/// let outcome = function_clause(scheduler, "probe", "pick", 2)?;
+/// let outcome = function_clause(scheduler, "probe", "pick", 2, Term::nil())?;
 /// // The stack trace starts with {Module, pick, [x, 1], []}.
 /// ```
 ///
@@ -6268,22 +6287,21 @@ fn function_clause(
     module: &str,
     name: &str,
     arity: u32,
+    location: Term,
 ) -> Result<Option<Outcome>, BeamError> {
     let arguments = call_arguments(&scheduler.current_process().registers, arity)?;
     let reason = Term::static_atom("function_clause");
     raise_at_entry(
         scheduler,
-        module,
-        name,
-        arguments,
+        (module, name, arguments, location),
         ExceptionClass::Error,
         reason,
     )
 }
 
 /// Raise an exception at the entry of the function `module:name` with
-/// `arguments`: the stack trace starts with `{Module, Name, Arguments, []}`
-/// and holds at most `backtrace_depth` frames, with the caller frames
+/// `arguments`: the stack trace starts with `{Module, Name, Arguments,
+/// Location}` and holds at most `backtrace_depth` frames, with the caller frames
 /// below it. A `function_clause` error and an exception of a NIF give this
 /// stack trace, as ERTS `save_stacktrace` keeps the arguments of the
 /// current function (`beam_common.c:880-935`).
@@ -6292,7 +6310,8 @@ fn function_clause(
 ///
 /// ```rust,ignore
 /// // x0 = -1 at the entry of `crypto:strong_rand_bytes_nif/1`.
-/// let outcome = raise_at_entry(scheduler, "crypto", "strong_rand_bytes_nif", vec![Term::Integer(-1)], ExceptionClass::Error, badarg)?;
+/// let entry = ("crypto", "strong_rand_bytes_nif", vec![Term::Integer(-1)], Term::nil());
+/// let outcome = raise_at_entry(scheduler, entry, ExceptionClass::Error, badarg)?;
 /// // The stack trace starts with {crypto, strong_rand_bytes_nif, [-1], []}.
 /// ```
 ///
@@ -6302,9 +6321,7 @@ fn function_clause(
 /// `func_info` before its instruction, is a runtime invariant error.
 fn raise_at_entry(
     scheduler: &mut Scheduler,
-    module: &str,
-    name: &str,
-    arguments: Vec<Term>,
+    (module, name, arguments, location): (&str, &str, Vec<Term>, Term),
     class: ExceptionClass,
     reason: Term,
 ) -> Result<Option<Outcome>, BeamError> {
@@ -6319,7 +6336,7 @@ fn raise_at_entry(
         atom(module)?,
         atom(name)?,
         Term::list_from(arguments),
-        Term::nil(),
+        location,
     ]);
     // The active frame is the frame of the function, at its entry or at a
     // jump to its `func_info`, so the caller frames start below it.
@@ -6329,6 +6346,42 @@ fn raise_at_entry(
         class,
         reason,
         stacktrace,
+    ))
+}
+
+/// Raise the error `reason` of the instruction that the active frame runs,
+/// as ERTS `save_stacktrace` saves the error of an instruction that is not
+/// a BIF call: the first frame is `{Module, Function, Arity, Location}` of
+/// the current function at that instruction, and the caller frames follow
+/// (`beam_common.c:1011-1027`, `1229-1230`). The stack trace keeps at most
+/// `backtrace_depth` frames, and one frame for the depth 0
+/// (`beam_common.c:884-885`). The cursor must be committed, so that the
+/// active frame names the instruction. Return the outcome when the process
+/// exits.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// cursor.commit(process);
+/// let outcome = raise_in_function(scheduler, Term::static_atom("if_clause"))?;
+/// // The stack trace starts with {Module, Function, Arity, [{file, F}, {line, L}]}.
+/// ```
+///
+/// # Errors
+///
+/// A module that the code table does not hold, or an instruction with no
+/// `func_info` before it, is a runtime invariant error.
+fn raise_in_function(
+    scheduler: &mut Scheduler,
+    reason: Term,
+) -> Result<Option<Outcome>, BeamError> {
+    let mut frames = mfa_stacktrace(scheduler, 0)?;
+    frames.truncate(scheduler.backtrace_depth.max(1));
+    Ok(raise_with_stacktrace(
+        scheduler.current_process_mut(),
+        ExceptionClass::Error,
+        reason,
+        Term::list_from(frames),
     ))
 }
 
@@ -6510,10 +6563,11 @@ fn frame_function<'a>(
 /// `build_stacktrace` walks the saved continuation pointers of an
 /// exception (`beam_common.c:1205-1292`). Adjacent frames at the same
 /// return position give one frame. Each frame is
-/// `{Module, Function, Arity, []}`, as `erts_build_mfa_item` gives a
-/// frame without arguments (`utils.c:3448-3455`). PBeam keeps no line
-/// table, so each location is `[]` (row "Exception stack trace" of
-/// `docs/erts-differences.md`). While the first apply of a start at
+/// `{Module, Function, Arity, Location}`, as `erts_build_mfa_item` gives a
+/// frame without arguments (`utils.c:3430-3455`). `Location` is the
+/// location of the instruction before the next instruction of the frame,
+/// which is the call of a caller frame: ERTS looks up each continuation
+/// pointer one byte before it (`beam_common.c:817-877`). While the first apply of a start at
 /// `erlang:apply/3` runs, the first frame of the process is not in the
 /// stack trace.
 ///
@@ -6559,7 +6613,9 @@ fn mfa_stacktrace(scheduler: &mut Scheduler, skip: usize) -> Result<Vec<Term>, B
             Term::Atom(scheduler.atoms.put(&module.name)?),
             Term::Atom(scheduler.atoms.put(function)?),
             Term::Integer(arity.into()),
-            Term::nil(),
+            module
+                .lines
+                .location(frame.next_instruction - 1, Term::nil()),
         ]));
     }
     Ok(stacktrace)

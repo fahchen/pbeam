@@ -772,13 +772,11 @@ impl ProcessState {
     /// - `reductions` gives `{reductions, N}`: the reduction total and
     ///   `current`, the reductions of the current turn when the process runs
     ///   (`erl_bif_info.c:2114-2121`).
-    /// - `current_stacktrace` gives `{current_stacktrace, []}` for the
-    ///   calling process (`caller`), because PBeam records no stack frames.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let length = process.info(&atoms, &Term::static_atom("message_queue_len"), 0, 2, false, None)?;
+    /// let length = process.info(&atoms, &Term::static_atom("message_queue_len"), 0, 2, None)?;
     /// assert_eq!(length, Some(Term::tuple(vec![Term::static_atom("message_queue_len"), Term::Integer(2)])));
     /// ```
     ///
@@ -791,15 +789,12 @@ impl ProcessState {
         item: &Term,
         current: u64,
         messages: usize,
-        caller: bool,
         registered_name: Option<&Atom>,
     ) -> Result<Option<Term>, BeamError> {
         let Term::Atom(name) = item else {
             return Ok(None);
         };
         let value = match (atoms.name_of(name), &self.registered_name) {
-            // ponytail: PBeam records no stack frames; see "Exception stack trace" in docs/erts-differences.md.
-            ("current_stacktrace", _) if caller => Term::nil(),
             ("registered_name", _) => match registered_name {
                 Some(registered) => Term::Atom(registered.clone()),
                 None => return Ok(Some(Term::nil())),

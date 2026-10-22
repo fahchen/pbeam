@@ -4,7 +4,7 @@ use std::{
     sync::atomic::{AtomicU32, Ordering},
 };
 
-use super::code::{self, Instruction, Operand};
+use super::code::{self, Instruction, LineTable, Operand};
 use crate::{
     error::{BeamError, error},
     runtime::BifId,
@@ -168,6 +168,10 @@ pub struct BeamModule {
     /// can check each declaration against the registered native functions
     /// before a run uses the module.
     pub(crate) native_declarations: Vec<(String, u32)>,
+    /// The line table of the `Line` chunk, keyed by instruction index (see
+    /// [`LineTable`]). A module with no `Line` chunk has an empty table, and
+    /// each of its frames has the location `[]`.
+    pub(crate) lines: LineTable,
 }
 
 /// The side tables that the loader builds from the instruction stream of one
@@ -539,6 +543,7 @@ impl BeamModule {
             tables,
             on_load: None,
             native_declarations: Vec::new(),
+            lines: LineTable::default(),
         })
     }
 

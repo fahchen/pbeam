@@ -904,8 +904,8 @@ fn raise_with_args(
         });
     }
     let module_id = current_frame(context.scheduler.current_process_mut()).module_id;
-    let module = Arc::clone(context.scheduler.code.module_by_id(module_id)?);
-    let (module, function, arity) = current_function(context.scheduler, &module)?;
+    let code = Arc::clone(context.scheduler.code.module_by_id(module_id)?);
+    let (module, function, arity) = current_function(context.scheduler, &code)?;
     let args = if args.is_list() {
         args.clone()
     } else {
@@ -925,6 +925,10 @@ fn raise_with_args(
     frames.truncate(depth.max(1));
     // The apply of the first frame of a process that starts at
     // `erlang:apply/2,3` gives no frame, as in ERTS.
+    // `erts_build_mfa_item` puts the file and the line of the call before
+    // the `error_info` location (`utils.c:3430-3446`).
+    let index = current_frame(context.scheduler.current_process_mut()).next_instruction - 1;
+    let location = code.lines.location(index, location);
     if let Some(first) = frames.first_mut() {
         *first = Term::tuple(vec![module, function, args, location]);
     }
@@ -4272,11 +4276,26 @@ pub(super) fn process_info(
             |scheduler| {
                 let current = scheduler.current_reductions();
                 let registered = scheduler.registered_name_of(caller_id);
+                // ERTS builds the frames of the calling process from its
+                // continuation pointers, without the current function, which
+                // is `process_info/2`: at most `backtrace_depth` frames
+                // (`erl_bif_info.c:2397-2460`).
+                let stacktrace = match item {
+                    Term::Atom(name) if scheduler.atoms.name_of(name) == "current_stacktrace" => {
+                        let mut frames = mfa_stacktrace(scheduler, 0)?;
+                        frames.truncate(scheduler.backtrace_depth);
+                        Some(Term::tuple(vec![item.clone(), Term::list_from(frames)]))
+                    }
+                    _ => None,
+                };
                 let (caller, atoms) = scheduler.current_process_and_atoms();
                 let messages = caller.mailbox.message_count();
-                let info = caller
-                    .info(atoms, item, current, messages, true, registered.as_ref())?
-                    .ok_or_else(|| unsupported(atoms))?;
+                let info = match stacktrace {
+                    Some(stacktrace) => stacktrace,
+                    None => caller
+                        .info(atoms, item, current, messages, registered.as_ref())?
+                        .ok_or_else(|| unsupported(atoms))?,
+                };
                 caller.bump_reductions(1 + super::links_reductions(item, &info));
                 Ok(Value(info))
             },
@@ -4323,14 +4342,7 @@ pub(super) fn process_info(
     };
     let messages = target.mailbox.message_count();
     let registered = scheduler.registered_name_of(*id);
-    let values = target.info(
-        &scheduler.atoms,
-        item,
-        0,
-        messages,
-        false,
-        registered.as_ref(),
-    );
+    let values = target.info(&scheduler.atoms, item, 0, messages, registered.as_ref());
     let info = values?.ok_or_else(|| unsupported(&scheduler.atoms))?;
     // A queued reply is built in the target process, but ERTS discards
     // the cost that `handle_process_info` returns

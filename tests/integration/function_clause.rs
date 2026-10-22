@@ -37,7 +37,7 @@ fn raises_function_clause_with_the_arguments_and_the_caller_frames_as_pinned_ert
     // argument registers (`beam_common.c:1011-1024`, `1186-1195`), and the
     // next frames are the callers. `lists:nth(5, [a])` fails in
     // `nth_1(4, [])`. The fixture drops the `file` and `line` location of
-    // the `lists` frame, because PBeam keeps no line table.
+    // the `lists` frame; `tests/integration/line_table.rs` compares them.
     let erlang = pinned_beam("erlang");
     let lists = pinned_beam("lists");
     let program = BeamProgram::load(&[FUNCTION_CLAUSE_PROBE, &erlang, &lists]).unwrap();

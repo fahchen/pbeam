@@ -688,14 +688,8 @@ impl Scheduler {
                 // The item name comes from the atom table, so remove the
                 // node here and keep the two field borrows separate.
                 process.mailbox.remove(node);
-                let values = process.info(
-                    &self.atoms,
-                    &item,
-                    current,
-                    messages,
-                    true,
-                    registered.as_ref(),
-                );
+                let values =
+                    process.info(&self.atoms, &item, current, messages, registered.as_ref());
                 let info = values?.expect("erlang:process_info/2 sends a supported item");
                 self.send_message(id, requester, reply(reference, info));
                 0

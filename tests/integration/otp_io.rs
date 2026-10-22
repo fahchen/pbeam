@@ -56,17 +56,20 @@ fn resolves_calls_into_each_pinned_otp_io_module() {
     // `process_info(undefined, dictionary)` raises `badarg`
     // (`user_drv.erl:159-162`). The pinned ERTS run without `user_drv`
     // (`-nouser`) below gives the same `error:badarg` and the same frames.
-    // ERTS gives the frames of the OTP modules a `file` and `line`
-    // location, and PBeam gives `[]` (row "Exception stack trace" of
-    // `docs/erts-differences.md`).
+    // Each frame of an OTP module has the `file` and `line` location of
+    // its call, as in ERTS.
     let bif_frame = "{erlang,process_info,[undefined,dictionary],\
                      [{error_info,#{module=>erl_erts_errors}}]}";
     for (function, callers) in [
         (
             "group_call",
-            "{user_drv,whereis_group,0,[]},{group,whereis_shell,0,[]}",
+            "{user_drv,whereis_group,0,[{file,\"user_drv.erl\"},{line,161}]},\
+             {group,whereis_shell,0,[{file,\"group.erl\"},{line,185}]}",
         ),
-        ("user_drv_call", "{user_drv,whereis_group,0,[]}"),
+        (
+            "user_drv_call",
+            "{user_drv,whereis_group,0,[{file,\"user_drv.erl\"},{line,161}]}",
+        ),
     ] {
         let error = program.execute("otp_io_calls", function, &[]).unwrap_err();
         assert_eq!(
