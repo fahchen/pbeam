@@ -463,11 +463,13 @@ fn protocol_entries(text: &[u8]) -> Vec<(Vec<&[u8]>, i32)> {
 /// makes it.
 fn protocols(scheduler: &mut Scheduler, entries: &[(Vec<&[u8]>, i32)]) -> Result<Term, BeamError> {
     let mut protocols = Vec::new();
-    for &(name, values) in DEFAULT_PROTOCOLS.iter().rev() {
-        if let Some(number) = values[HOST] {
-            let names = Term::list_from([atom(scheduler, name)?]);
-            protocols.push(Term::tuple(vec![names, Term::Integer(number.into())]));
-        }
+    let defaults = DEFAULT_PROTOCOLS
+        .iter()
+        .rev()
+        .filter_map(|&(name, values)| Some((name, values[HOST]?)));
+    for (name, number) in defaults {
+        let names = Term::list_from([atom(scheduler, name)?]);
+        protocols.push(Term::tuple(vec![names, Term::Integer(number.into())]));
     }
     for (names, number) in entries.iter().rev() {
         let mut atoms = vec![latin1_atom(scheduler, names[0])?];
