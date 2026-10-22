@@ -291,12 +291,20 @@ too_large(Header, Size) ->
         {'EXIT', Port, Reason} -> Reason
     end.
 
-%% The settings of {packet, N} that ERTS does not accept.
+%% The settings of {packet, N} that ERTS does not accept, and the small
+%% integers whose low 32 bits ERTS takes as the header size: each of them
+%% echoes a packet through cat.
 packet_errors() ->
     Sh = {spawn_executable, sh()},
     [erts_internal:open_port(Sh, [binary, {packet, N}])
-     || N <- [0, 3, 8, -1, x, 1 bsl 64]]
-        ++ [catch_error(fun() -> open_port(Sh, [binary, {packet, 3}]) end)].
+     || N <- [0, 3, 8, -1, x, 1 bsl 64, (1 bsl 32) + 3, (1 bsl 59) + 4]]
+        ++ [catch_error(fun() -> open_port(Sh, [binary, {packet, 3}]) end)]
+        ++ [echo(N) || N <- [(1 bsl 32) + 1, (1 bsl 32) + 2, (1 bsl 32) + 4, 1 - (1 bsl 32)]].
+
+echo(Header) ->
+    Port = open_port({spawn_executable, sh()}, [binary, {packet, Header}, {args, ["-c", "cat"]}]),
+    true = port_command(Port, <<"hi">>),
+    receive {Port, {data, Data}} -> port_close(Port), Data end.
 
 %% The eof setting: the end of file sends {Port, eof} after the exit status,
 %% and the port stays open until port_close/1 or a failed write. The

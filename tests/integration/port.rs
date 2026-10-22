@@ -186,13 +186,13 @@ fn frames_the_packets_of_a_packet_port_as_pinned_erts() {
 }
 
 #[test]
-fn gives_badopt_for_a_packet_setting_that_erts_does_not_accept() {
-    // Only a small integer 1, 2, or 4 is a header size
-    // (erl_bif_port.c:849-861), and `erlang:open_port/2` raises `badarg`
-    // for `badopt`.
+fn reads_the_packet_setting_as_pinned_erts() {
+    // Only a small integer whose low 32 bits are 1, 2, or 4 is a header
+    // size, as ERTS keeps it in a C `int` (erl_bif_port.c:849-861), and
+    // `erlang:open_port/2` raises `badarg` for `badopt`.
     assert_runs(
         "packet_errors()",
-        "[badopt,badopt,badopt,badopt,badopt,badopt,{error,badarg}]",
+        "[badopt,badopt,badopt,badopt,badopt,badopt,badopt,badopt,{error,badarg},<<104,105>>,<<104,105>>,<<104,105>>,<<104,105>>]",
     );
 }
 

@@ -229,7 +229,8 @@ struct PortSettings {
     /// (`ERTS_PORT_SFLG_SOFT_EOF`, `erl_bif_port.c:995-996`).
     eof: bool,
     /// The header size of `{packet, N}`: 1, 2, or 4, or 0 without it
-    /// (`packet_bytes`, `erl_bif_port.c:849-861`).
+    /// (`packet_bytes`, `erl_bif_port.c:849-861`). A small integer N whose
+    /// low 32 bits are 1, 2, or 4 also sets it.
     packet: usize,
     /// The native bytes of the strings of `{args, Args}`, or no bytes
     /// without it.
@@ -443,8 +444,11 @@ fn port_settings(atoms: &AtomTable, settings: &Term) -> Result<Option<PortSettin
                     result.args = args;
                     continue;
                 } else if option.is_static("packet") {
-                    match pair[1] {
-                        Term::Integer(size @ (1 | 2 | 4)) => result.packet = size as usize,
+                    // ERTS keeps the small integer in the C `int`
+                    // `packet_bytes`, which holds its low 32 bits
+                    // (`erl_bif_port.c:850-861`).
+                    match pair[1].small_integer().map(|size| size as i32) {
+                        Some(size @ (1 | 2 | 4)) => result.packet = size as usize,
                         _ => return Ok(None),
                     }
                     continue;
