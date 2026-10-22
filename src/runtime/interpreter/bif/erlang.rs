@@ -9,8 +9,8 @@ use crate::runtime::interpreter::DEFAULT_ERROR_HANDLER;
 use crate::runtime::interpreter::code_table::{CodeTable, Finish};
 use crate::runtime::local_node;
 use crate::runtime::port::Ports;
-use crate::runtime::process::InitialCall;
 use crate::runtime::process::{Flush, Origin, Priority, TimerReference};
+use crate::runtime::process::{InitialCall, OTHER_PROCESS_INFO_ITEMS};
 use crate::runtime::process::{LinkId, ProcessState};
 use crate::runtime::scheduler::PTAB_SIZE;
 use crate::runtime::scheduler::{AliasMode, CONTEXT_REDS, Flushed, MonitorOptions, MonitorTarget};
@@ -4262,13 +4262,17 @@ pub(super) fn process_info(
     // deliveries of the target (`erl_bif_info.c:1403-1416`).
     scheduler.drain_inbox();
     let Some(target) = scheduler.process(*id) else {
-        // A live process of another scheduler. The request goes to its
-        // scheduler, so the answer comes after the signals that the caller
-        // sent before (`erl_bif_info.c:1374-1401`). Another item reads the
-        // process state of its scheduler and stays unsupported.
+        // A process of another scheduler, also an exiting one, as
+        // `erts_try_lock_sig_free_proc` finds it with `erts_proc_lookup_raw`
+        // (`erl_process.c:14835-14883`). This thread cannot lock the
+        // process, so the request always goes to its scheduler, as ERTS
+        // sends it to a busy process (`erl_bif_info.c:1384-1390`). The
+        // answer then comes after the signals that the caller sent before.
+        // An item that a read of another process does not support stays
+        // unsupported here, because the owner reads the item as the target.
         if let Some(index) = scheduler.remote_owner(*id) {
             if let Term::Atom(name) = item
-                && scheduler.atoms.name_of(name) == "registered_name"
+                && OTHER_PROCESS_INFO_ITEMS.contains(&scheduler.atoms.name_of(name))
             {
                 let caller = scheduler.current_process_mut().id;
                 let reference = scheduler.make_ref()?;

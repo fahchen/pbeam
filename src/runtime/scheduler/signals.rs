@@ -754,6 +754,7 @@ impl Scheduler {
             reason
         });
         process.waiting = false;
+        self.set_exiting(id);
         Handled::Stop(2)
     }
 
