@@ -1,6 +1,6 @@
 -module(zlib_probe).
 -export([data/0, small/0, exact/0, filtered_large/0, roundtrips/0, flushes/0, safe_chunks/0,
-         eos/0, errors/0, controller/0, controller_child/2, uncompress_hex/1,
+         eos/0, errors/0, controller/0, set_controller/0, controller_child/2, uncompress_hex/1,
          unsupported_deflate_dictionary/0,
          unsupported_deflate_params/0, unsupported_inflate_dictionary/0,
          unsupported_inflate_get_dictionary/0]).
@@ -160,6 +160,17 @@ controller() ->
     receive
         {remote, R} -> R
     end.
+
+%% The results of zlib:set_controlling_process/2 for a non-pid, a
+%% non-stream, a give to another process, and a give after it.
+set_controller() ->
+    Z = zlib:open(),
+    Other = spawn(lists, reverse, [[]]),
+    Results = [catch_error(fun() -> zlib:set_controlling_process(Z, x) end),
+               catch_error(fun() -> zlib:set_controlling_process(make_ref(), self()) end),
+               catch_error(fun() -> zlib:set_controlling_process(Z, Other) end),
+               catch_error(fun() -> zlib:set_controlling_process(Z, self()) end)],
+    << <<(atom_to_binary(R, utf8))/binary, " ">> || R <- Results >>.
 
 controller_child(Parent, Z) ->
     Parent ! {remote, atom_to_binary(catch_error(fun() -> zlib:close(Z) end), utf8)}.

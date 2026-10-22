@@ -309,6 +309,15 @@ fn raises_not_on_controlling_process_for_another_process() {
 }
 
 #[test]
+fn gives_the_stream_to_a_new_controlling_process() {
+    let program = program();
+    let actual = binary_text(&run(&program, "set_controller"));
+    let expected = reference("io:format(\"~s~n\",[zlib_probe:set_controller()])");
+    assert_eq!(actual, expected.trim());
+    assert_eq!(actual, "badarg badarg ok not_on_controlling_process ");
+}
+
+#[test]
 fn stops_the_run_at_each_unbound_nif() {
     // The five functions that this task leaves without a binding have the
     // runtime error of the static library.
