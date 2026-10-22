@@ -61,11 +61,13 @@ pub(super) const BINDINGS: &[Binding] = &[
     Binding {
         name: "isatty",
         arity: 1,
+        job: Job::Normal,
         run: |scheduler, arguments| isatty(scheduler, &arguments[0]),
     },
     Binding {
         name: "read_nif",
         arity: 3,
+        job: Job::Normal,
         run: |scheduler, arguments| {
             read_nif(scheduler, &arguments[0], &arguments[1], &arguments[2])
         },
@@ -73,51 +75,61 @@ pub(super) const BINDINGS: &[Binding] = &[
     Binding {
         name: "setlocale",
         arity: 1,
+        job: Job::Normal,
         run: |scheduler, _| setlocale(scheduler),
     },
     Binding {
         name: "setupterm_nif",
         arity: 0,
+        job: Job::Normal,
         run: |scheduler, _| setupterm_nif(scheduler),
     },
     Binding {
         name: "tigetflag_nif",
         arity: 1,
+        job: Job::Normal,
         run: |scheduler, arguments| tigetflag_nif(scheduler, &arguments[0]),
     },
     Binding {
         name: "tigetnum_nif",
         arity: 1,
+        job: Job::Normal,
         run: |scheduler, arguments| tigetnum_nif(scheduler, &arguments[0]),
     },
     Binding {
         name: "tty_create",
         arity: 1,
+        job: Job::Normal,
         run: |scheduler, arguments| tty_create(scheduler, &arguments[0]),
     },
     Binding {
         name: "tty_encoding",
         arity: 1,
+        job: Job::Normal,
         run: |_, _| Ok(tty_encoding()),
     },
     Binding {
         name: "tty_init",
         arity: 2,
+        job: Job::Normal,
         run: |scheduler, arguments| tty_init(scheduler, &arguments[0], &arguments[1]),
     },
     Binding {
         name: "tty_select",
         arity: 2,
+        job: Job::Normal,
         run: |scheduler, arguments| tty_select(scheduler, &arguments[0], &arguments[1]),
     },
     Binding {
         name: "tty_window_size",
         arity: 1,
+        job: Job::Normal,
         run: |scheduler, arguments| tty_window_size(scheduler, &arguments[0]),
     },
     Binding {
         name: "write_nif",
         arity: 2,
+        job: Job::IoBound,
         run: |scheduler, arguments| write_nif(scheduler, &arguments[0], &arguments[1]),
     },
 ];
@@ -861,10 +873,10 @@ const MAXIOV: usize = libc::UIO_MAXIOV as usize;
 /// ```rust,ignore
 /// let iovec = Term::list_from(vec![Term::binary(b"Hello, ".to_vec()), Term::binary(b"world!\n".to_vec())]);
 /// // Writes "Hello, world!\n" to the output fd of the TTY.
-/// assert!(matches!(write_nif(&mut scheduler, &tty, &iovec)?, BifResult::DirtyWrite(_)));
+/// assert!(matches!(write_nif(&mut scheduler, &tty, &iovec)?, BifResult::Dirty(_)));
 /// // [<<"h">> | <<"i">>] writes nothing, then raises badarg.
 /// let improper = Term::list_with_tail(vec![Term::binary(b"h".to_vec())], Term::binary(b"i".to_vec()));
-/// assert!(matches!(write_nif(&mut scheduler, &tty, &improper)?, BifResult::DirtyWrite(_)));
+/// assert!(matches!(write_nif(&mut scheduler, &tty, &improper)?, BifResult::Dirty(_)));
 /// ```
 ///
 /// # Errors
@@ -880,14 +892,14 @@ fn write_nif(scheduler: &mut Scheduler, tty: &Term, iovec: &Term) -> Result<BifR
     let Some(&TtyResource { ofd, .. }) =
         tty_resource(scheduler.resources.borrow_mut::<Ttys>(), tty)
     else {
-        return Ok(BifResult::DirtyWrite(write));
+        return Ok(BifResult::Dirty(Work::Write(write)));
     };
     if let Some(denied) = denial(scheduler, CapabilityKind::Terminal, Operation::Write, None)? {
         return Ok(denied);
     }
     write.fd = ofd;
     let Some((elements, tail)) = iovec.list_cells() else {
-        return Ok(BifResult::DirtyWrite(write));
+        return Ok(BifResult::Dirty(Work::Write(write)));
     };
     let improper = tail.is_some();
     let elements: Vec<&Term> = elements.collect();
@@ -895,20 +907,20 @@ fn write_nif(scheduler: &mut Scheduler, tty: &Term, iovec: &Term) -> Result<BifR
     while let Some(group) = groups.next() {
         // The group of the last element reads the tail after it.
         if improper && groups.peek().is_none() {
-            return Ok(BifResult::DirtyWrite(write));
+            return Ok(BifResult::Dirty(Work::Write(write)));
         }
         let mut buffers = Vec::with_capacity(group.len());
         for &element in group {
             match element {
                 Term::Binary(bytes) if bytes.is_empty() => {}
                 Term::Binary(bytes) => buffers.push(bytes.to_vec()),
-                _ => return Ok(BifResult::DirtyWrite(write)),
+                _ => return Ok(BifResult::Dirty(Work::Write(write))),
             }
         }
         write.groups.push(buffers);
     }
     write.bad_group = false;
-    Ok(BifResult::DirtyWrite(write))
+    Ok(BifResult::Dirty(Work::Write(write)))
 }
 
 /// Return the result of a `prim_tty:write_nif/2` call from the end of its

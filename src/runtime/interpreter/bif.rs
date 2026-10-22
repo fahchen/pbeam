@@ -11,7 +11,7 @@
 use super::*;
 use crate::runtime::{
     capability::{CapabilityKind, Operation},
-    host::output::IovecWrite,
+    dirty::Work,
     scheduler::Flushed,
 };
 use crate::term::ProcessId;
@@ -110,12 +110,13 @@ pub(super) enum BifResult {
     /// traps to `bif_return_trap`, which returns the value when the process
     /// runs again.
     YieldReturn(Term),
-    /// The NIF continues on a dirty IO thread with this host work, as a NIF
-    /// with the `ERL_NIF_DIRTY_JOB_IO_BOUND` flag does
-    /// (`static_schedule_dirty_nif`, `erl_nif.c:3437-3477`). The calling
-    /// process switches out, and it gets the result of the call when the
-    /// work completes.
-    DirtyWrite(IovecWrite),
+    /// The NIF continues on a thread of the dirty pool of its job with this
+    /// work, as a NIF with the `ERL_NIF_DIRTY_JOB_CPU_BOUND` or
+    /// `ERL_NIF_DIRTY_JOB_IO_BOUND` flag does (`static_schedule_dirty_nif`,
+    /// `erl_nif.c:3437-3477`). The calling process switches out, and it
+    /// gets the result of the call when the work completes. Only a NIF
+    /// entry gives it.
+    Dirty(Work),
     /// PBeam only: the calling process waits for the answer of the policy
     /// process to its `pbeam_cap:request/2` call. It continues through the
     /// export `pbeam_cap:await_grant/0` each time it runs again, until the

@@ -4,7 +4,11 @@ use super::{
 };
 use crate::runtime::capability::{AllowAll, Capability, CapabilityKind, Denied, Policy};
 use crate::runtime::host::input::{Readiness, wait_readable};
-use crate::runtime::host::output::{IovecWrite, IovecWritten};
+use crate::runtime::{
+    Job,
+    dirty::{Output, Work},
+    host::output::{IovecWrite, IovecWritten},
+};
 use crate::term::{AtomTable, test_atom};
 use crate::{
     runtime::ets::{Access, Table, TableType},
@@ -697,6 +701,15 @@ fn dirty_write(fd: i32, bytes: &[u8]) -> IovecWrite {
     }
 }
 
+/// Start the dirty IO call `write` of the current process, as a call of
+/// `prim_tty:write_nif/2` does.
+fn start_write(scheduler: &mut Scheduler, write: IovecWrite) {
+    let entry = ("prim_tty".to_owned(), "write_nif".to_owned(), Vec::new());
+    scheduler
+        .start_dirty_call(Job::IoBound, Work::Write(write), entry)
+        .unwrap();
+}
+
 /// Wait until a dirty IO call completes, then take the completions.
 fn wait_completion(scheduler: &mut Scheduler) {
     assert!(
@@ -704,7 +717,7 @@ fn wait_completion(scheduler: &mut Scheduler) {
             .wait_events(Some(Duration::from_secs(10)))
             .unwrap()
     );
-    scheduler.complete_dirty_writes();
+    scheduler.complete_dirty_calls();
 }
 
 #[test]
@@ -716,14 +729,14 @@ fn resumes_a_dirty_write_once_when_it_completes_before_the_next_poll() {
     let mut scheduler = test_scheduler();
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
-    scheduler.start_dirty_write(dirty_write(writer.as_raw_fd(), b"hi\n"), true);
+    start_write(&mut scheduler, dirty_write(writer.as_raw_fd(), b"hi\n"));
     let process = &scheduler.processes[&ProcessId(0)];
     assert_eq!(
         process
-            .dirty_write
+            .dirty_call
             .as_ref()
-            .map(|write| (write.call, write.tail, &write.written)),
-        Some((0, true, &None))
+            .map(|call| (call.call, call.output.is_none())),
+        Some((0, true))
     );
     assert!(!process.in_run_queue && !process.waiting);
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Idle);
@@ -734,13 +747,16 @@ fn resumes_a_dirty_write_once_when_it_completes_before_the_next_poll() {
     assert_eq!(scheduler.runnable.ids(), [ProcessId(0)]);
     assert_eq!(
         scheduler.processes[&ProcessId(0)]
-            .dirty_write
+            .dirty_call
             .as_ref()
-            .map(|write| &write.written),
-        Some(&Some(IovecWritten::All))
+            .and_then(|call| match &call.output {
+                Some(Output::Written(written)) => Some(written),
+                _ => None,
+            }),
+        Some(&IovecWritten::All)
     );
     // The inbox is empty, and the wait does not wait for the call.
-    scheduler.complete_dirty_writes();
+    scheduler.complete_dirty_calls();
     assert_eq!(scheduler.runnable.ids(), [ProcessId(0)]);
     assert!(!scheduler.wait_events(None).unwrap());
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
@@ -774,8 +790,8 @@ fn runs_other_processes_while_a_dirty_write_waits_and_resumes_it_after() {
         )
         .unwrap()
         .unwrap();
-    scheduler.start_dirty_write(dirty_write(fd, b"later"), true);
-    scheduler.complete_dirty_writes();
+    start_write(&mut scheduler, dirty_write(fd, b"later"));
+    scheduler.complete_dirty_calls();
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
     assert_eq!(current(&mut scheduler), ProcessId(1));
     scheduler.deliver(ProcessId(0), atom("ping"));
@@ -786,7 +802,7 @@ fn runs_other_processes_while_a_dirty_write_waits_and_resumes_it_after() {
             .wait_events(Some(Duration::from_millis(20)))
             .unwrap()
     );
-    scheduler.complete_dirty_writes();
+    scheduler.complete_dirty_calls();
     assert!(scheduler.runnable.ids().is_empty());
     let reading = std::thread::spawn(move || {
         let mut bytes = Vec::new();
@@ -830,7 +846,7 @@ fn drain(reader: PipeReader) -> std::thread::JoinHandle<Vec<u8>> {
 
 /// Take the completions until no dirty IO call runs.
 fn wait_all_completions(scheduler: &mut Scheduler) {
-    while scheduler.dirty_io.running() {
+    while scheduler.dirty.running() {
         wait_completion(scheduler);
     }
 }
@@ -878,7 +894,7 @@ fn start_dirty_writers(
     for id in 1..=count {
         assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
         assert_eq!(current(scheduler), ProcessId(id));
-        scheduler.start_dirty_write(dirty_write(fd(id), bytes), true);
+        start_write(scheduler, dirty_write(fd(id), bytes));
     }
     references
 }
@@ -931,7 +947,7 @@ fn handles_the_signals_of_a_dirty_writer_and_drops_its_late_completion() {
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Done);
     let writer_state = &scheduler.processes[&ProcessId(1)];
     assert_eq!(writer_state.exiting, Some(atom("killed")));
-    assert!(writer_state.dirty_write.is_none());
+    assert!(writer_state.dirty_call.is_none());
     assert_eq!(writer_state.reductions, reductions);
     // The exit runs in the next turn, while the write waits.
     assert_eq!(scheduler.runnable.ids(), [ProcessId(1)]);
@@ -943,7 +959,7 @@ fn handles_the_signals_of_a_dirty_writer_and_drops_its_late_completion() {
     scheduler.park_current();
     // The write continues and completes; its completion does not revive
     // the writer or wake another process.
-    assert!(scheduler.dirty_io.running());
+    assert!(scheduler.dirty.running());
     let reading = drain(reader);
     wait_all_completions(&mut scheduler);
     drop(writer);
@@ -972,7 +988,7 @@ fn drops_the_completion_that_arrives_before_the_exit_of_a_killed_dirty_writer() 
     drop(writer);
     assert_eq!(reading.join().unwrap(), bytes);
     assert_eq!(scheduler.runnable.ids(), [ProcessId(1)]);
-    assert!(scheduler.processes[&ProcessId(1)].dirty_write.is_none());
+    assert!(scheduler.processes[&ProcessId(1)].dirty_call.is_none());
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Done);
     assert!(!scheduler.processes.contains_key(&ProcessId(1)));
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);

@@ -68,7 +68,7 @@ fn calls_each_binding_of_the_library_through_the_registry() {
     for (name, arguments) in calls {
         let result = call(&mut scheduler, "prim_buffer", name, &arguments);
         assert!(
-            matches!(result, Some(Ok(BifResult::Value(_)))),
+            matches!(result, Some((Job::Normal, Ok(BifResult::Value(_))))),
             "{name} gives a value, not {result:?}"
         );
     }
@@ -104,10 +104,13 @@ fn raises_badarg_for_a_term_that_is_not_a_buffer_resource() {
         assert!(
             matches!(
                 result,
-                Some(Ok(BifResult::Raise {
-                    class: ExceptionClass::Error,
-                    ..
-                }))
+                Some((
+                    Job::Normal,
+                    Ok(BifResult::Raise {
+                        class: ExceptionClass::Error,
+                        ..
+                    })
+                ))
             ),
             "{name} raises badarg, not {result:?}"
         );

@@ -5,8 +5,11 @@
 //! `NifStart` instruction of a loaded module, before the static binding
 //! table. A registered function runs only when the BEAM body is a NIF stub,
 //! so an ordinary BEAM implementation keeps its behavior. A registered
-//! function runs as a synchronous BIF: it receives the arguments of the call
-//! and returns a term or the `error:badarg` exception.
+//! function receives the arguments of the call and returns a term or the
+//! `error:badarg` exception. Its [`Job`] tells where it runs: a `Normal`
+//! function runs on the scheduler thread as a synchronous BIF, and a
+//! `CpuBound` or `IoBound` function runs on a dirty thread of the node while
+//! its caller switches out.
 //!
 //! The registry is global and process-safe. Duplicate registration of the
 //! same MFA is an error.
@@ -35,8 +38,8 @@ pub type NativeFn = fn(&[Term]) -> Result<NativeResult, BeamError>;
 /// The result of a registered native function.
 ///
 /// The type is narrow, so the interpreter internals, such as the full
-/// `BifResult`, stay crate-private. It has no trap, yield, or dirty-write
-/// variant: a registered function runs to completion as a synchronous BIF.
+/// `BifResult`, stay crate-private. It has no trap or yield variant: a
+/// registered function runs to completion.
 #[derive(Debug)]
 pub enum NativeResult {
     /// The native returns this value.
@@ -59,6 +62,29 @@ impl NativeResult {
     }
 }
 
+/// The scheduler that runs a NIF, as the `flags` of an ERTS `ErlNifFunc`:
+/// 0, `ERL_NIF_DIRTY_JOB_CPU_BOUND`, or `ERL_NIF_DIRTY_JOB_IO_BOUND`
+/// (`erl_nif.h:239-243`).
+///
+/// # Examples
+///
+/// ```rust
+/// use pbeam_runtime::Job;
+///
+/// assert_ne!(Job::Normal, Job::IoBound);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Job {
+    /// The NIF runs on the scheduler thread of its caller and must be short.
+    Normal,
+    /// The NIF runs on a dirty CPU thread. The node has one dirty CPU
+    /// thread for each scheduler (`erl_init.c:865`).
+    CpuBound,
+    /// The NIF runs on a dirty IO thread. The node has 10 dirty IO threads
+    /// (`erl_init.c:867`).
+    IoBound,
+}
+
 /// The error of a registration that cannot succeed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegistrationError {
@@ -70,7 +96,7 @@ pub enum RegistrationError {
 type Key = (String, String, u32);
 
 /// The registry of native functions.
-type Registry = Mutex<HashMap<Key, NativeFn>>;
+type Registry = Mutex<HashMap<Key, (Job, NativeFn)>>;
 
 /// The registry. The first registration creates the map, so a lookup with no
 /// registration finds no map and takes no lock.
@@ -86,7 +112,8 @@ fn registry() -> &'static Registry {
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Register a Rust function under `module:name/arity`.
+/// Register a Rust function under `module:name/arity`, which runs as `job`
+/// gives.
 ///
 /// # Errors
 ///
@@ -95,6 +122,7 @@ pub fn register_native(
     module: &str,
     name: &str,
     arity: u32,
+    job: Job,
     function: NativeFn,
 ) -> Result<(), RegistrationError> {
     let mut map = registry().lock().unwrap();
@@ -102,13 +130,19 @@ pub fn register_native(
     if map.contains_key(&key) {
         return Err(RegistrationError::Duplicate);
     }
-    map.insert(key, function);
+    map.insert(key, (job, function));
     NON_EMPTY.store(true, Ordering::Release);
     Ok(())
 }
 
 /// Return the registered function of `module:name/arity`, or `None`.
 pub fn lookup_native(module: &str, name: &str, arity: u32) -> Option<NativeFn> {
+    lookup(module, name, arity).map(|(_, function)| function)
+}
+
+/// Return the job and the registered function of `module:name/arity`, or
+/// `None`.
+pub(crate) fn lookup(module: &str, name: &str, arity: u32) -> Option<(Job, NativeFn)> {
     // The fast path: with no registration the registry holds no entry, so
     // skip the lock and the two key allocations of a `NifStart` that runs a
     // static binding.

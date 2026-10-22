@@ -21,7 +21,9 @@
 use super::bif::denial;
 use super::*;
 use crate::runtime::{
+    Job,
     capability::{CapabilityKind, Operation},
+    dirty::Work,
     host::filename_encoding,
     unicode::is_native_filename,
 };
@@ -50,6 +52,7 @@ pub(super) use prim_tty::dirty_write_result;
 /// const WRITE_NIF: Binding = Binding {
 ///     name: "write_nif",
 ///     arity: 2,
+///     job: Job::IoBound,
 ///     run: |scheduler, arguments| write_nif(scheduler, &arguments[0], &arguments[1]),
 /// };
 /// ```
@@ -58,6 +61,11 @@ struct Binding {
     name: &'static str,
     /// The arity of the NIF function.
     arity: u32,
+    /// The scheduler of the NIF, as the `flags` of its ERTS `ErlNifFunc`.
+    /// A `CpuBound` or `IoBound` binding checks its arguments on the
+    /// scheduler thread and returns `BifResult::Dirty` with the work of the
+    /// call, which runs on the dirty pool of the job.
+    job: Job,
     /// Runs the NIF for the current process of the scheduler. The lookup
     /// gives exactly `arity` arguments.
     run: fn(&mut Scheduler, &[Term]) -> Result<BifResult, BeamError>,
@@ -234,17 +242,22 @@ fn unbound_error(module: &str, name: &str, arity: u32) -> Option<BeamError> {
 }
 
 /// Run the native binding of `module:name/arity`, with the arity of
-/// `arguments`, for the current process of `scheduler`. Return `None` when
-/// PBeam has no binding for the MFA; the function then runs its BEAM stub
-/// body. A function of a library whose functions without a binding fail,
-/// such as `crypto`, gives the runtime error `M:F/A NIF is not supported`.
+/// `arguments`, for the current process of `scheduler`, and return the job
+/// of the binding with its result. Return `None` when PBeam has no binding
+/// for the MFA; the function then runs its BEAM stub body. A function of a
+/// library whose functions without a binding fail, such as `crypto`, gives
+/// the runtime error `M:F/A NIF is not supported`.
+///
+/// A registered native function runs at once for the job `Normal`. For a
+/// `CpuBound` or `IoBound` job, the result is `BifResult::Dirty` with the
+/// work of the call, and the function runs on a dirty thread.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// let stdout = Term::Atom(scheduler.atoms.put("stdout")?);
 /// // `false` when stdout is a file.
-/// assert!(matches!(call(&mut scheduler, "prim_tty", "isatty", &[stdout]), Some(Ok(BifResult::Value(_)))));
+/// assert!(matches!(call(&mut scheduler, "prim_tty", "isatty", &[stdout]), Some((Job::Normal, Ok(BifResult::Value(_))))));
 /// assert!(call(&mut scheduler, "nif_error_probe", "nif_stub", &[]).is_none());
 /// ```
 ///
@@ -257,23 +270,36 @@ pub(super) fn call(
     module: &str,
     name: &str,
     arguments: &[Term],
-) -> Option<Result<BifResult, BeamError>> {
+) -> Option<(Job, Result<BifResult, BeamError>)> {
     let arity = u32::try_from(arguments.len()).ok()?;
     // A manually registered native function takes precedence over the
     // static binding table, so a registered MFA runs as a NIF at function
     // entry, as ERTS installs NIF dispatch over the first instruction.
-    if let Some(native) = crate::runtime::lookup_native(module, name, arity) {
-        return Some((native)(arguments).map(to_bif_result));
+    if let Some((job, function)) = crate::runtime::native_registry::lookup(module, name, arity) {
+        let result = match job {
+            Job::Normal => function(arguments).map(to_bif_result),
+            Job::CpuBound | Job::IoBound => Ok(BifResult::Dirty(Work::Native {
+                function,
+                arguments: arguments.to_vec(),
+            })),
+        };
+        return Some((job, result));
     }
     let Some(binding) = binding(module, name, arity) else {
-        return unbound_error(module, name, arity).map(Err);
+        return unbound_error(module, name, arity).map(|error| (Job::Normal, Err(error)));
     };
-    Some((binding.run)(scheduler, arguments))
+    Some((binding.job, (binding.run)(scheduler, arguments)))
 }
 
 /// Map the narrow result of a registered native function to the interpreter
 /// result. A registered native raises only the class `error`, as a NIF does.
-fn to_bif_result(result: crate::runtime::NativeResult) -> BifResult {
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(to_bif_result(NativeResult::badarg()), BifResult::Raise { .. }));
+/// ```
+pub(super) fn to_bif_result(result: crate::runtime::NativeResult) -> BifResult {
     match result {
         crate::runtime::NativeResult::Value(term) => BifResult::Value(term),
         crate::runtime::NativeResult::Raise { reason } => BifResult::Raise {

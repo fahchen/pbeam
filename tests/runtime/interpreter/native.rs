@@ -189,7 +189,7 @@ fn registry_is_sorted_and_matches_the_exact_mfa() {
 fn native_registry_registers_and_rejects_duplicates() {
     use crate::BeamError;
     use crate::Term;
-    use crate::runtime::{NativeResult, register_native};
+    use crate::runtime::{Job, NativeResult, register_native};
     fn add(arguments: &[Term]) -> Result<NativeResult, BeamError> {
         match (arguments.first(), arguments.get(1)) {
             (Some(Term::Integer(left)), Some(Term::Integer(right))) => {
@@ -200,8 +200,8 @@ fn native_registry_registers_and_rejects_duplicates() {
     }
     let module = "native_probe_dup";
     let _ = crate::runtime::unregister_native(module, "add", 2);
-    register_native(module, "add", 2, add).unwrap();
-    assert!(register_native(module, "add", 2, add).is_err());
+    register_native(module, "add", 2, Job::Normal, add).unwrap();
+    assert!(register_native(module, "add", 2, Job::Normal, add).is_err());
     assert!(crate::runtime::lookup_native(module, "add", 2).is_some());
     assert!(crate::runtime::lookup_native(module, "add", 1).is_none());
     crate::runtime::unregister_native(module, "add", 2);
@@ -210,12 +210,12 @@ fn native_registry_registers_and_rejects_duplicates() {
 /// Unregistering removes the binding.
 #[test]
 fn native_registry_unregisters() {
-    use crate::runtime::{NativeResult, lookup_native, register_native, unregister_native};
+    use crate::runtime::{Job, NativeResult, lookup_native, register_native, unregister_native};
     fn f(_arguments: &[crate::Term]) -> Result<NativeResult, crate::BeamError> {
         Ok(NativeResult::Value(crate::Term::Integer(0)))
     }
     let _ = unregister_native("m_unreg", "f", 1);
-    register_native("m_unreg", "f", 1, f).unwrap();
+    register_native("m_unreg", "f", 1, Job::Normal, f).unwrap();
     assert!(lookup_native("m_unreg", "f", 1).is_some());
     assert!(unregister_native("m_unreg", "f", 1));
     assert!(lookup_native("m_unreg", "f", 1).is_none());
@@ -233,7 +233,7 @@ fn native_registry_takes_precedence_over_the_static_binding() {
     use crate::runtime::interpreter::bif::BifResult;
     use crate::runtime::process::tests::frame;
     use crate::runtime::scheduler::Scheduler;
-    use crate::runtime::{NativeResult, register_native, unregister_native};
+    use crate::runtime::{Job, NativeResult, register_native, unregister_native};
     use crate::term::AtomTable;
 
     fn sentinel(_arguments: &[Term]) -> Result<NativeResult, BeamError> {
@@ -252,11 +252,13 @@ fn native_registry_takes_precedence_over_the_static_binding() {
     let _ = unregister_native("prim_file", "write_nif", 2);
     let static_result = call(&mut scheduler, "prim_file", "write_nif", &arguments)
         .expect("prim_file has a library")
+        .1
         .unwrap();
 
-    register_native("prim_file", "write_nif", 2, sentinel).unwrap();
+    register_native("prim_file", "write_nif", 2, Job::Normal, sentinel).unwrap();
     let overridden = call(&mut scheduler, "prim_file", "write_nif", &arguments)
         .expect("prim_file has a library")
+        .1
         .unwrap();
     assert!(matches!(
         overridden,
@@ -266,6 +268,7 @@ fn native_registry_takes_precedence_over_the_static_binding() {
     unregister_native("prim_file", "write_nif", 2);
     let restored = call(&mut scheduler, "prim_file", "write_nif", &arguments)
         .expect("prim_file has a library")
+        .1
         .unwrap();
     assert_eq!(format!("{restored:?}"), format!("{static_result:?}"));
 }

@@ -25,7 +25,7 @@ use std::{
 use super::Signal;
 use crate::{
     error::{BeamError, error},
-    runtime::host::clock,
+    runtime::{dirty::Pools, host::clock},
     term::{PortId, ProcessId, Term},
 };
 
@@ -97,6 +97,9 @@ pub(in crate::runtime) struct Node {
     /// moment. Each scheduler builds its timer service on this pair, so the
     /// time of every scheduler agrees.
     clock: (Instant, i64),
+    /// The dirty CPU pool and the dirty IO pool, which each scheduler of
+    /// the node uses.
+    dirty: Pools,
     /// The seed of the hash of `term_to_binary/2` with `local`
     /// (`local_node_hash`, external.c:134). The first call on any scheduler
     /// computes it, and each scheduler reads the same value.
@@ -146,6 +149,7 @@ impl Node {
                 live: AtomicUsize::new(0),
                 shutdown: AtomicBool::new(false),
                 clock: (Instant::now(), clock::system_time()),
+                dirty: Pools::new(count),
                 local_node_hash: OnceLock::new(),
             }),
             readers,
@@ -155,6 +159,11 @@ impl Node {
     /// Return the number of schedulers of the node.
     pub(in crate::runtime) fn scheduler_count(&self) -> usize {
         self.schedulers
+    }
+
+    /// Return the dirty pools of the node.
+    pub(in crate::runtime) fn dirty_pools(&self) -> &Pools {
+        &self.dirty
     }
 
     /// Return the run start of the node, as the instant and the OS system
@@ -201,6 +210,7 @@ impl Node {
             live: AtomicUsize::new(0),
             shutdown: AtomicBool::new(false),
             clock: (Instant::now(), clock::system_time()),
+            dirty: Pools::new(1),
             local_node_hash: OnceLock::new(),
         })
     }

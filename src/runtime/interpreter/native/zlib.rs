@@ -81,21 +81,25 @@ pub(super) const BINDINGS: &[Binding] = &[
     Binding {
         name: "clearStash_nif",
         arity: 1,
+        job: Job::Normal,
         run: |scheduler, arguments| clear_stash_nif(scheduler, &arguments[0]),
     },
     Binding {
         name: "close_nif",
         arity: 1,
+        job: Job::Normal,
         run: |scheduler, arguments| close_nif(scheduler, &arguments[0]),
     },
     Binding {
         name: "deflateEnd_nif",
         arity: 1,
+        job: Job::Normal,
         run: |scheduler, arguments| deflate_end_nif(scheduler, &arguments[0]),
     },
     Binding {
         name: "deflateInit_nif",
         arity: 6,
+        job: Job::Normal,
         run: |scheduler, arguments| {
             deflate_init_nif(
                 scheduler,
@@ -111,11 +115,13 @@ pub(super) const BINDINGS: &[Binding] = &[
     Binding {
         name: "deflateReset_nif",
         arity: 1,
+        job: Job::Normal,
         run: |scheduler, arguments| deflate_reset_nif(scheduler, &arguments[0]),
     },
     Binding {
         name: "deflate_nif",
         arity: 4,
+        job: Job::Normal,
         run: |scheduler, arguments| {
             deflate_nif(
                 scheduler,
@@ -129,21 +135,25 @@ pub(super) const BINDINGS: &[Binding] = &[
     Binding {
         name: "enqueue_nif",
         arity: 2,
+        job: Job::Normal,
         run: |scheduler, arguments| enqueue_nif(scheduler, &arguments[0], &arguments[1]),
     },
     Binding {
         name: "getStash_nif",
         arity: 1,
+        job: Job::Normal,
         run: |scheduler, arguments| get_stash_nif(scheduler, &arguments[0]),
     },
     Binding {
         name: "inflateEnd_nif",
         arity: 1,
+        job: Job::Normal,
         run: |scheduler, arguments| inflate_end_nif(scheduler, &arguments[0]),
     },
     Binding {
         name: "inflateInit_nif",
         arity: 3,
+        job: Job::Normal,
         run: |scheduler, arguments| {
             inflate_init_nif(scheduler, &arguments[0], &arguments[1], &arguments[2])
         },
@@ -151,11 +161,13 @@ pub(super) const BINDINGS: &[Binding] = &[
     Binding {
         name: "inflateReset_nif",
         arity: 1,
+        job: Job::Normal,
         run: |scheduler, arguments| inflate_reset_nif(scheduler, &arguments[0]),
     },
     Binding {
         name: "inflate_nif",
         arity: 4,
+        job: Job::Normal,
         run: |scheduler, arguments| {
             inflate_nif(
                 scheduler,
@@ -169,11 +181,13 @@ pub(super) const BINDINGS: &[Binding] = &[
     Binding {
         name: "open_nif",
         arity: 0,
+        job: Job::Normal,
         run: |scheduler, _| open_nif(scheduler),
     },
     Binding {
         name: "setStash_nif",
         arity: 2,
+        job: Job::Normal,
         run: |scheduler, arguments| set_stash_nif(scheduler, &arguments[0], &arguments[1]),
     },
 ];

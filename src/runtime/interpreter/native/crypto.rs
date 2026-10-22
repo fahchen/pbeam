@@ -110,21 +110,25 @@ pub(super) const BINDINGS: &[Binding] = &[
     Binding {
         name: "hash_nif",
         arity: 2,
+        job: Job::Normal,
         run: |scheduler, arguments| hash_nif(scheduler, &arguments[0], &arguments[1]),
     },
     Binding {
         name: "info_lib",
         arity: 0,
+        job: Job::Normal,
         run: |_, _| Ok(info_lib()),
     },
     Binding {
         name: "info_nif",
         arity: 0,
+        job: Job::Normal,
         run: |scheduler, _| info_nif(scheduler),
     },
     Binding {
         name: "pbkdf2_hmac_nif",
         arity: 5,
+        job: Job::Normal,
         run: |scheduler, arguments| {
             pbkdf2_hmac_nif(
                 scheduler,
@@ -139,11 +143,13 @@ pub(super) const BINDINGS: &[Binding] = &[
     Binding {
         name: "strong_rand_bytes_nif",
         arity: 1,
+        job: Job::Normal,
         run: |_, arguments| Ok(strong_rand_bytes_nif(&arguments[0])),
     },
     Binding {
         name: "strong_rand_range_nif",
         arity: 1,
+        job: Job::Normal,
         run: |_, arguments| Ok(strong_rand_range_nif(&arguments[0])),
     },
 ];

@@ -469,7 +469,7 @@ pub trait Policy {
     /// each of its copies of that kind that the launcher issued, and the
     /// revocation then goes to each downstream copy. While each process
     /// waits, the run calls this function again only after a timer, a port,
-    /// a terminal, a dirty IO call, or a host signal wakes the scheduler.
+    /// a terminal, a dirty NIF call, or a host signal wakes the scheduler.
     /// With none of them, the run ends. Thus a revocation that a host thread
     /// gives while each process waits takes effect only at the next of
     /// these events. The default revokes nothing.

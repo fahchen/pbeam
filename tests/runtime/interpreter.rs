@@ -5391,6 +5391,41 @@ fn raises_the_reason_of_an_error_with_cause_that_no_call_path_converted() {
 }
 
 #[test]
+fn rejects_dirty_work_outside_a_nif_entry() {
+    // Only the `nif_start` instruction switches a caller out to a dirty
+    // pool. A BIF result with dirty work on another path is an invariant
+    // error, not a switch out without the entry of the NIF.
+    let program =
+        BeamProgram::load(&[include_bytes!("../../fixtures/funs/fun_probe.beam")]).unwrap();
+    let label = program.modules["fun_probe"].exports[&(
+        program.modules["fun_probe"]
+            .tables
+            .name_id("tail_wait")
+            .unwrap(),
+        1,
+    )];
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.code = CodeTable::new(program.modules.clone());
+    let frame = scheduler.code.frame("fun_probe", label, 1).unwrap();
+    scheduler
+        .start(frame, vec![Term::Integer(1)], Vec::new())
+        .unwrap();
+    scheduler.schedule_next().unwrap();
+    let work = crate::runtime::dirty::Work::Write(crate::runtime::host::output::IovecWrite {
+        fd: -1,
+        groups: Vec::new(),
+        bad_group: false,
+    });
+    let error = program
+        .finish_bif(&mut scheduler, BifResult::Dirty(work), true)
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "invariant error: a BIF result switches out to a dirty pool outside a NIF entry"
+    );
+}
+
+#[test]
 fn resumes_a_trap_target_through_its_loaded_export() {
     // A trap that waited for the next turn enters the export of its target
     // when the process runs again. A target that a module exports needs no

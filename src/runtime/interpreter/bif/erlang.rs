@@ -4882,7 +4882,7 @@ fn process_info_values(
     };
     let status = if process.exiting.is_some() {
         "exiting"
-    } else if caller {
+    } else if caller || process.dirty_started() {
         "running"
     } else if process.waiting {
         "waiting"

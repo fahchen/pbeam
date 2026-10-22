@@ -177,21 +177,43 @@ fn raises_badarg_from_the_write_nif_binding_for_a_term_that_is_not_a_tty() {
 
     // The `nif_start` instruction of `write_nif/2` runs the PBeam binding,
     // which raises `badarg` for each term that is not a TTY resource, also a
-    // `make_ref/0` reference and a `re_pattern` reference. Without the binding, the stub
-    // body gives `{undef, []}`. PBeam gives the stack trace `[]`; this is
-    // the "Exception stack trace" row in `docs/erts-differences.md`.
+    // `make_ref/0` reference and a `re_pattern` reference. Without the
+    // binding, the stub body gives `{undef, []}`. The binding raises after
+    // its dirty IO call, so the stack trace starts with `write_nif/2` and
+    // its arguments, as `dirty_nif_exception` restores the MFA of the NIF
+    // (erl_nif.c:3431-3433).
     let modules = ["erlang", "prim_tty"].map(pinned_beam);
     let mut beams = vec![PRIM_TTY_PROBE];
     beams.extend(modules.iter().map(Vec::as_slice));
     let program = BeamProgram::load(&beams).unwrap();
-    let badarg = Term::tuple(vec![
-        Term::Atom(program.atom("badarg").unwrap()),
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    let result = program.execute("prim_tty_probe", "main", &[]).unwrap().term;
+    let heads: Vec<_> = result
+        .proper_list()
+        .unwrap()
+        .map(|exit| {
+            let Term::Tuple(exit) = exit else {
+                panic!("an exit reason is a tuple: {exit:?}");
+            };
+            let first = exit[1].proper_list().unwrap().next().unwrap().clone();
+            let Term::Tuple(ref first) = first else {
+                panic!("a stack trace entry is a tuple: {first:?}");
+            };
+            (
+                exit[0].clone(),
+                first[0].clone(),
+                first[1].clone(),
+                first[3].clone(),
+            )
+        })
+        .collect();
+    let head = (
+        atom("badarg"),
+        atom("prim_tty"),
+        atom("write_nif"),
         Term::nil(),
-    ]);
-    assert_eq!(
-        program.execute("prim_tty_probe", "main", &[]).unwrap().term,
-        Term::list_from(vec![badarg.clone(), badarg.clone(), badarg.clone(), badarg])
     );
+    assert_eq!(heads, vec![head.clone(), head.clone(), head.clone(), head]);
 }
 
 #[test]

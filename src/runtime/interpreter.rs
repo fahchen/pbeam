@@ -1,8 +1,9 @@
 use super::{
+    Job,
     capability::{Policy, Restriction},
-    host::output::IovecWrite,
+    dirty::{Output, Work},
     process::{
-        DirtyWrite, Frame, PendingBif, PendingTrap, ProcessState, ReceiveTimer, StackSlot, Start,
+        DirtyCall, Frame, PendingBif, PendingTrap, ProcessState, ReceiveTimer, StackSlot, Start,
         StartFlags,
     },
     scheduler::{PolicyEnd, Received, Scheduler, Turn, node::Node},
@@ -115,9 +116,14 @@ enum Outcome {
     Yield,
     /// The process exited. `result` is the return value of a normal exit.
     Exit { reason: Term, result: Option<Term> },
-    /// The process waits for its NIF call `write` on a dirty IO thread.
-    /// `tail` tells whether the NIF call was a tail call.
-    DirtyWrite { write: IovecWrite, tail: bool },
+    /// The process switches out to run the work of its NIF call on a
+    /// thread of the dirty pool of `job`. `entry` is the module, the name,
+    /// and the arguments of the NIF.
+    Dirty {
+        job: Job,
+        work: Work,
+        entry: (String, String, Vec<Term>),
+    },
 }
 
 /// The class of an exception.
@@ -355,7 +361,7 @@ impl BeamProgram {
     ///
     /// ```rust,ignore
     /// let program = BeamProgram::load(&[NATIVE_HASH])?;
-    /// register_native("Elixir.NativeHash", "sha256", 1, sha256).unwrap();
+    /// register_native("Elixir.NativeHash", "sha256", 1, Job::Normal, sha256).unwrap();
     /// assert!(program.validate_native_declarations().is_ok());
     /// ```
     pub fn validate_native_declarations(&self) -> Result<(), BeamError> {
@@ -419,14 +425,14 @@ impl BeamProgram {
     /// process can run, it sleeps until the first timer end, as
     /// `scheduler_wait` sleeps until the next timeout
     /// (`erl_process.c:3452-3620`). When fd 0 has a read select, a port
-    /// waits for a pipe, a dirty IO call runs, or a signal handler is
+    /// waits for a pipe, a dirty NIF call runs, or a signal handler is
     /// installed, it waits for fd 0, for the pipes, for the completion of the
     /// call, and for the handled host signals until then (see
     /// `Scheduler::wait_events`). Before each scheduling step, it
     /// sends `{notify, Signal}` to `erl_signal_server` for each handled
     /// signal that arrived (see `Scheduler::check_signals`), and a process
-    /// whose dirty IO call completed goes to the run queue (see
-    /// `Scheduler::complete_dirty_writes`). The run ends at
+    /// whose dirty NIF call completed goes to the run queue (see
+    /// `Scheduler::complete_dirty_calls`). The run ends at
     /// the next scheduling step after the root process exits, also when
     /// another process can run or a timer is active. A process that ends
     /// the root process with an exit signal continues until it waits,
@@ -438,10 +444,10 @@ impl BeamProgram {
     /// as ERTS prints a term (`print_term`), for example
     /// `root process exited with {badarg,[]}`. A root process that
     /// waits when no process can run, no timer is active, fd 0 has no read
-    /// select, no port waits for a pipe, no dirty IO call runs, and no
+    /// select, no port waits for a pipe, no dirty NIF call runs, and no
     /// signal handler is installed gives an error. When the run ends, it
-    /// does not wait for a dirty IO call that runs, and a call in the queue
-    /// does not run (see `DirtyIo`). A call of `erlang:halt/2` with a
+    /// does not wait for a dirty NIF call that runs, and a call in the queue
+    /// does not run (see `DirtyCalls`). A call of `erlang:halt/2` with a
     /// status code ends the run at once with the error
     /// [`BeamError::Halt`]. At the end of the
     /// run, also after an error, fd 0 gets its mode at the start of the run
@@ -724,7 +730,7 @@ impl BeamProgram {
             Outcome::Hibernate => scheduler.hibernate_current(),
             Outcome::Yield => scheduler.yield_current(),
             Outcome::Exit { reason, result } => scheduler.finish_current(reason, result)?,
-            Outcome::DirtyWrite { write, tail } => scheduler.start_dirty_write(write, tail),
+            Outcome::Dirty { job, work, entry } => scheduler.start_dirty_call(job, work, entry)?,
         }
         Ok(())
     }
@@ -770,7 +776,7 @@ impl BeamProgram {
             let now = scheduler.timers.now();
             scheduler.expire_timers(now);
             scheduler.check_signals()?;
-            scheduler.complete_dirty_writes();
+            scheduler.complete_dirty_calls();
             match scheduler.schedule_next()? {
                 Turn::Run => {
                     let outcome = self.run(scheduler)?;
@@ -968,7 +974,7 @@ impl BeamProgram {
                     }
                 }
             }
-            scheduler.complete_dirty_writes();
+            scheduler.complete_dirty_calls();
             match scheduler.schedule_next()? {
                 // A message woke the policy process, but it has no call.
                 Turn::Run if scheduler.policy_idle() => scheduler.park_current(),
@@ -1056,17 +1062,30 @@ impl BeamProgram {
                 return Ok(outcome);
             }
         }
-        // A NIF call that ran on a dirty IO thread returns its result or
-        // raises its exception, as `dirty_nif_finalizer` and
-        // `dirty_nif_exception` do (`erl_nif.c:3386-3435`).
-        if let Some(DirtyWrite {
-            tail,
-            written: Some(written),
+        // A NIF call that ran on a dirty thread returns its result or raises
+        // its exception, as `dirty_nif_finalizer` and `dirty_nif_exception`
+        // do (`erl_nif.c:3386-3435`). The exception has the MFA and the
+        // arguments of the NIF first in its stack trace
+        // (`erl_nif.c:3431-3433`).
+        if let Some(DirtyCall {
+            entry: (module, name, arguments),
+            output: Some(output),
             ..
-        }) = scheduler.current_process_mut().dirty_write.take()
+        }) = scheduler.current_process_mut().dirty_call.take()
         {
-            let result = native::dirty_write_result(&mut scheduler.atoms, written)?;
-            if let Some(outcome) = self.finish_bif(scheduler, result, tail)? {
+            let result = match output {
+                Output::Written(written) => {
+                    native::dirty_write_result(&mut scheduler.atoms, written)?
+                }
+                Output::Native(result) => native::to_bif_result(result?),
+            };
+            let outcome = match result {
+                BifResult::Raise { class, reason } => {
+                    raise_at_entry(scheduler, &module, &name, arguments, class, reason)?
+                }
+                result => self.finish_bif(scheduler, result, true)?,
+            };
+            if let Some(outcome) = outcome {
                 return Ok(outcome);
             }
         }
@@ -2465,7 +2484,9 @@ impl BeamProgram {
                     // with its arguments first, as ERTS gives it.
                     let arguments = call_arguments(&process.registers, *arity)?;
                     cursor.commit(process);
-                    if let Some(result) = native::call(scheduler, &module.name, name, &arguments) {
+                    if let Some((job, result)) =
+                        native::call(scheduler, &module.name, name, &arguments)
+                    {
                         let outcome = match result? {
                             BifResult::Raise { class, reason } => raise_at_entry(
                                 scheduler,
@@ -2475,6 +2496,13 @@ impl BeamProgram {
                                 class,
                                 reason,
                             ),
+                            // The caller switches out, and its next turn
+                            // after the completion returns the result.
+                            BifResult::Dirty(work) => Ok(Some(Outcome::Dirty {
+                                job,
+                                work,
+                                entry: (module.name.clone(), name.clone(), arguments),
+                            })),
                             result => self.finish_bif(scheduler, result, true),
                         };
                         if let Some(outcome) = outcome? {
@@ -3468,7 +3496,10 @@ impl BeamProgram {
                 reason,
                 result: None,
             })),
-            BifResult::DirtyWrite(write) => Ok(Some(Outcome::DirtyWrite { write, tail })),
+            // Only the entry of a NIF switches out to a dirty pool.
+            BifResult::Dirty(_) => Err(error(
+                "invariant error: a BIF result switches out to a dirty pool outside a NIF entry",
+            )),
             BifResult::Hibernate {
                 module,
                 function,
@@ -3531,7 +3562,7 @@ impl BeamProgram {
 /// process is the policy process and runs a call, each end of a turn after
 /// more than `POLICY_REDUCTIONS` reductions of the call ends the call as an
 /// overrun: a switch out for the budget, a wait in `receive`, a
-/// hibernation, a dirty IO call, a return, and an exception. Thus a call
+/// hibernation, a dirty NIF call, a return, and an exception. Thus a call
 /// that waits often cannot pass the limit. Else a return or an exception
 /// that the call does not catch ends the call. The policy process then
 /// waits for the next request (see `Scheduler::end_policy_call`). An exit
