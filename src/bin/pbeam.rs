@@ -140,8 +140,11 @@ const ERLEXEC_OPTIONS: [&str; 17] = [
 ];
 
 /// The environment variables of the flags that `erlexec` adds before and
-/// after the arguments of the command line (`erts/etc/common/erlexec.c`).
-const ERLEXEC_VARIABLES: [&str; 3] = ["ERL_AFLAGS", "ERL_FLAGS", "ERL_ZFLAGS"];
+/// after the arguments of the command line, and whose `-extra` arguments it
+/// moves to the end (`erts/etc/common/erlexec.c:2177-2260`). `ERL_OTP29_FLAGS`
+/// is the variable of the OTP release 29 (`"ERL_OTP" OTP_SYSTEM_VERSION
+/// "_FLAGS"`).
+const ERLEXEC_VARIABLES: [&str; 4] = ["ERL_OTP29_FLAGS", "ERL_AFLAGS", "ERL_FLAGS", "ERL_ZFLAGS"];
 
 /// Run the command line and exit with one of these statuses:
 ///

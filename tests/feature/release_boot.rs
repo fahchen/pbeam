@@ -42,9 +42,9 @@ const RELEASE_ARGUMENTS: [&str; 17] = [
     "x",
 ];
 
-/// The `erl` flags `ERL_AFLAGS`, `ERL_FLAGS`, and `ERL_ZFLAGS` of the
-/// environment, which a run of the tests removes.
-const ERL_VARIABLES: [&str; 3] = ["ERL_AFLAGS", "ERL_FLAGS", "ERL_ZFLAGS"];
+/// The `erl` flags `ERL_OTP29_FLAGS`, `ERL_AFLAGS`, `ERL_FLAGS`, and
+/// `ERL_ZFLAGS` of the environment, which a run of the tests removes.
+const ERL_VARIABLES: [&str; 4] = ["ERL_OTP29_FLAGS", "ERL_AFLAGS", "ERL_FLAGS", "ERL_ZFLAGS"];
 
 /// Return the `root` and `bindir` flags that `erl` gives the pinned
 /// emulator, as `init:get_argument/1` gives them.
@@ -152,7 +152,7 @@ fn rejects_the_options_and_variables_of_erlexec() {
     // (erlexec.c:661-861, 869-964, 2122-2140), and the flags of
     // `ERL_AFLAGS`, `ERL_FLAGS`, and `ERL_ZFLAGS`. `pbeam erl` has no
     // `erlexec` part for them, and no distribution for `-sname`.
-    let cases: [Rejected; 4] = [
+    let cases: [Rejected; 5] = [
         (
             &["-sname", "node", "-extra", "-sname"],
             &[],
@@ -168,6 +168,11 @@ fn rejects_the_options_and_variables_of_erlexec() {
             &["-noshell"],
             &[("ERL_AFLAGS", "-kernel shell_history enabled")],
             "the environment variable ERL_AFLAGS of erl is not supported",
+        ),
+        (
+            &["-noshell"],
+            &[("ERL_OTP29_FLAGS", "-kernel logger_level warning")],
+            "the environment variable ERL_OTP29_FLAGS of erl is not supported",
         ),
     ];
     for (arguments, environment, message) in cases {
