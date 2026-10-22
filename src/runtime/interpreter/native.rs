@@ -796,22 +796,7 @@ fn load_shared(
         Ok(library) => library,
         Err(failure) => return open_error(&mut scheduler.atoms, caller, &name, failure),
     };
-    let variant = library.vm_variant();
-    if variant != "beam.vanilla" {
-        let text = format!("Library ({variant}) not compiled for this vm variant (beam.vanilla).");
-        return load_nif_error(&mut scheduler.atoms, "bad_lib", &text);
-    }
-    if library.name() != caller {
-        let name = library.name();
-        let text = format!("Library module name '{name}' does not match calling module '{caller}'");
-        return load_nif_error(&mut scheduler.atoms, "bad_lib", &text);
-    }
-    let functions: Vec<_> = library
-        .functions()
-        .iter()
-        .map(|function| (function.name.as_str(), function.arity, function.flags))
-        .collect();
-    if let Some(text) = function_error(&module, caller, &functions) {
+    if let Some(text) = library_error(&module, caller, &library) {
         return load_nif_error(&mut scheduler.atoms, "bad_lib", &text);
     }
     if !has_nifs(&module) {
@@ -839,10 +824,44 @@ fn load_shared(
     Ok(BifResult::Value(Term::static_atom("ok")))
 }
 
+/// Return the `bad_lib` text of the opened `library` that the module
+/// `caller` cannot take, or `None`, in the ERTS order: a vm variant other
+/// than `beam.vanilla` and a library name other than the module name
+/// (`beam/erl_nif.c:4814-4823`), then the function checks of
+/// [`function_error`]. The runtime load and the NIF manifest gate use it.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // The library of nif_add.c with the name nif_other.
+/// assert_eq!(
+///     library_error(&nif_add, "nif_add", &library).unwrap(),
+///     "Library module name 'nif_other' does not match calling module 'nif_add'"
+/// );
+/// ```
+fn library_error(module: &BeamModule, caller: &str, library: &abi::Library) -> Option<String> {
+    let variant = library.vm_variant();
+    if variant != "beam.vanilla" {
+        return Some(format!(
+            "Library ({variant}) not compiled for this vm variant (beam.vanilla)."
+        ));
+    }
+    if library.name() != caller {
+        let name = library.name();
+        return Some(format!(
+            "Library module name '{name}' does not match calling module '{caller}'"
+        ));
+    }
+    let functions: Vec<_> = library
+        .functions()
+        .iter()
+        .map(|function| (function.name.as_str(), function.arity, function.flags))
+        .collect();
+    function_error(module, caller, &functions)
+}
+
 /// Return the `erlang:load_nif/2` error of the failed open of the library
-/// `name` of `caller`, with the ERTS text (`beam/erl_nif.c:4778-4813`).
-/// The `dlerror` text of a failed `dlopen` names the library on macOS and
-/// for most Linux errors; ERTS adds the name when it does not.
+/// `name` of `caller`, with the ERTS text of [`open_failure`].
 ///
 /// # Errors
 ///
@@ -854,6 +873,27 @@ fn open_error(
     name: &std::ffi::CStr,
     failure: abi::OpenError,
 ) -> Result<BifResult, BeamError> {
+    let (kind, text) = open_failure(caller, name, failure);
+    load_nif_error(atoms, kind, &text)
+}
+
+/// Return the error kind and the ERTS text of the failed open of the
+/// library `name` of `caller` (`beam/erl_nif.c:4778-4813`). The `dlerror`
+/// text of a failed `dlopen` names the library on macOS and for most Linux
+/// errors; ERTS adds the name when it does not. The runtime load and the
+/// NIF manifest gate use it.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let (kind, text) = open_failure("nif_add", c"/tmp/x", abi::OpenError::NullEntry);
+/// assert_eq!((kind, text.as_str()), ("bad_lib", "Library init-call unsuccessful"));
+/// ```
+fn open_failure(
+    caller: &str,
+    name: &std::ffi::CStr,
+    failure: abi::OpenError,
+) -> (&'static str, String) {
     let name = name.to_string_lossy();
     let slogan = "Failed to load NIF library";
     let (kind, text) = match failure {
@@ -888,7 +928,7 @@ fn open_error(
             ),
         ),
     };
-    load_nif_error(atoms, kind, &text)
+    (kind, text)
 }
 
 /// Return `{error, {Kind, Text}}` with `Text` as a list of its bytes, as

@@ -23,13 +23,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a supported Linux target without `libtinfo.so.6`, for example the musl build of the specification.
 - **Source:** Copilot review of PR #131 (#126).
 
-### Ship a NIF shared library in a bundle
-
-- **Now:** PBeam runs `bcrypt_elixir` 3.3.2 from a code path: the `on_load` function of `Elixir.Bcrypt.Base` opens `priv/bcrypt_nif.so` with `dlopen` (#866). The NIF gate of `pbeam_bundle` (#891, #902) fails the build for a module without a PBeam library that calls `erlang:load_nif/2`. A bundle holds BEAM files only, and `dlopen` needs a file.
-- **Option:** the gate opens the `.so` at build time with the loader of `src/runtime/nif/abi/` and checks its function table against the module, as `erlang:load_nif/2` does; the bundle carries the `.so` and the run writes it to a private directory before the load. The other option is a gate rule that accepts each such module, with the `.so` next to the executable.
-- **Trigger:** an application that a bundle carries depends on a NIF library package, such as `bcrypt_elixir`.
-- **Source:** task #866.
-
 ## Term and loader
 
 ### Add bitstring terms

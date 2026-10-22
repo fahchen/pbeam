@@ -18,6 +18,13 @@ mix test --cover --warnings-as-errors
   mix test --cover --warnings-as-errors
   MIX_ENV=prod mix release --overwrite
 )
+# The bcrypt fixture fetches bcrypt_elixir from Hex and builds its NIF library with the host cc. Its entry module has the same gates: a compile with warnings as errors and a test with 100% coverage.
+(
+  cd fixtures/bcrypt
+  mix deps.get --check-locked
+  MIX_ENV='test' mix compile --warnings-as-errors
+  mix test --cover --warnings-as-errors
+)
 
 # Only the exact empty bootstrap is exempt; any Rust source addition enables coverage.
 rust_sources=$(git ls-files --cached --others --exclude-standard -- '*.rs')

@@ -7,7 +7,7 @@ use pbeam_runtime::{BeamModule, nif_manifest_gaps};
 
 /// Return the items of the gate for the BEAM file `bytes`.
 fn gaps(bytes: &[u8]) -> Vec<String> {
-    nif_manifest_gaps(&BeamModule::load(bytes).expect("the fixture loads"))
+    nif_manifest_gaps(&BeamModule::load(bytes).expect("the fixture loads"), &[])
         .iter()
         .map(ToString::to_string)
         .collect()

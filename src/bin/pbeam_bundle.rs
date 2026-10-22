@@ -109,9 +109,10 @@ fn main() -> ExitCode {
 }
 
 /// Write the bundle of `directory`, with the start set of `start_list`, to
-/// `output`. The NIF manifest gate runs on each BEAM file of the bundle
-/// first, so a module that PBeam has no library for stops the build before
-/// the output exists.
+/// `output`. The bundle holds each file of the directory, so it ships each
+/// NIF shared library of `lib/<app>/priv/` at its path. The NIF manifest
+/// gate runs on each BEAM file of the bundle first, so a module that PBeam
+/// has no library for stops the build before the output exists.
 fn build_bundle(
     directory: &Path,
     output: &Path,
@@ -122,7 +123,7 @@ fn build_bundle(
     let mut resources = BTreeMap::new();
     collect(directory, directory, &mut resources)?;
     let start = start_modules(start_list, &mut resources)?;
-    nif_gate(&resources)?;
+    nif_gate(directory, &resources)?;
     let mut writer = BundleWriter::new(
         env!("PBEAM_OTP_RELEASE"),
         "pbeam_bundle",
@@ -324,28 +325,33 @@ fn module_name(path: &Path) -> String {
 fn check_nifs(directory: &Path) -> Result<(), String> {
     let mut files = BTreeMap::new();
     collect(directory, directory, &mut files)?;
-    nif_gate(&files)
+    nif_gate(directory, &files)
 }
 
-/// Run the NIF manifest gate on each BEAM file of `files`, in the order of
-/// the names. The gate prints each unbound function of a bound library as a
+/// Run the NIF manifest gate on each BEAM file of `files`, the files under
+/// `root` by their relative names, in the order of the names. The shipped
+/// libraries of a BEAM file `<dir>/ebin/<module>.beam` are the `.so` files
+/// under `<dir>/priv/`, which `code:priv_dir/1` gives for the application
+/// `<dir>`. The gate prints each unbound function of a bound library as a
 /// report line, with the result of a call, and does not fail for it. The
-/// result is an error that lists each module that PBeam has no library for,
-/// one on each line, or the error of a BEAM file that does not load.
+/// result is an error that lists each module that PBeam has no library for
+/// and each shipped library that does not load, one on each line, or the
+/// error of a BEAM file that does not load.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// // Prints "pbeam_bundle: the NIF manifest gate reports prim_tty:isprint/1:
 /// // NIF function has no PBeam binding; a call runs the BEAM stub body".
-/// assert!(nif_gate(&missing_binding_files).is_ok());
+/// assert!(nif_gate(root, &missing_binding_files).is_ok());
 /// ```
-fn nif_gate(files: &BTreeMap<String, Vec<u8>>) -> Result<(), String> {
+fn nif_gate(root: &Path, files: &BTreeMap<String, Vec<u8>>) -> Result<(), String> {
     let mut failures = Vec::new();
     for (name, bytes) in files.iter().filter(|(name, _)| name.ends_with(".beam")) {
         let module =
             BeamModule::load(bytes).map_err(|error| format!("cannot load {name}: {error}"))?;
-        for gap in nif_manifest_gaps(&module) {
+        let libraries = shipped_libraries(root, name, files);
+        for gap in nif_manifest_gaps(&module, &libraries) {
             if matches!(gap, NifGap::Unbound { .. }) {
                 println!("pbeam_bundle: the NIF manifest gate reports {gap}");
             } else {
@@ -360,6 +366,33 @@ fn nif_gate(files: &BTreeMap<String, Vec<u8>>) -> Result<(), String> {
         "the NIF manifest gate failed:\n{}",
         failures.join("\n")
     ))
+}
+
+/// Return the paths under `root` of the `.so` files of `files` in the
+/// `priv` directory next to the `ebin` directory of the BEAM file `beam`,
+/// in the order of the names. A BEAM file outside an `ebin` directory has
+/// none.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // files: lib/a-1/ebin/a.beam, lib/a-1/priv/a_nif.so, lib/b-1/priv/b.so
+/// assert_eq!(
+///     shipped_libraries(Path::new("/r"), "lib/a-1/ebin/a.beam", &files),
+///     [PathBuf::from("/r/lib/a-1/priv/a_nif.so")]
+/// );
+/// ```
+fn shipped_libraries(root: &Path, beam: &str, files: &BTreeMap<String, Vec<u8>>) -> Vec<PathBuf> {
+    let ebin = Path::new(beam).parent().unwrap_or(Path::new(""));
+    if ebin.file_name() != Some(std::ffi::OsStr::new("ebin")) {
+        return Vec::new();
+    }
+    let private = ebin.with_file_name("priv");
+    files
+        .keys()
+        .filter(|name| name.ends_with(".so") && Path::new(name).starts_with(&private))
+        .map(|name| root.join(name))
+        .collect()
 }
 
 /// Write the binary, the bundle of `bundle`, and the trailer to `output`.

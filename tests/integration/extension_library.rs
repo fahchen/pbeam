@@ -411,7 +411,7 @@ fn shows_the_registered_library_to_the_nif_manifest_gate() {
     program();
     let probe = BeamModule::load(EXTENSION_PROBE).unwrap();
     assert_eq!(
-        nif_manifest_gaps(&probe),
+        nif_manifest_gaps(&probe, &[]),
         [NifGap::Unbound {
             library: "extension_probe".to_owned(),
             function: "unbound".to_owned(),
@@ -420,7 +420,7 @@ fn shows_the_registered_library_to_the_nif_manifest_gate() {
         }]
     );
     assert_eq!(
-        nif_manifest_gaps(&probe)[0].to_string(),
+        nif_manifest_gaps(&probe, &[])[0].to_string(),
         "extension_probe:unbound/1: NIF function has no PBeam binding; a call runs the BEAM stub body"
     );
 }

@@ -1,5 +1,6 @@
 //! The NIF manifest gate: a build-time check of the NIF references of a
-//! BEAM module against the static NIF libraries of PBeam.
+//! BEAM module against the static NIF libraries of PBeam and the NIF shared
+//! libraries that a bundle ships.
 //!
 //! A bundle build runs the gate on each module before a run, so a module
 //! whose NIF library PBeam cannot load fails the build and not the run. A
@@ -11,18 +12,25 @@
 //! the runtime does (`load_nif` in the parent module). ERTS selects a static
 //! NIF library by the module of the caller and does not use the path for it
 //! (`beam/erl_nif.c:4743-4757`, `5324-5331`), so a module with a library
-//! needs no literal path. A module without a library must have a literal
-//! path, so that the gate can name the library that the module references.
+//! needs no literal path. A module without a library passes when a shipped
+//! NIF shared library has the name of the module and `erlang:load_nif/2`
+//! takes it. Else the module must have a literal path, so that the gate can
+//! name the library that the module references.
 
+use std::ffi::CString;
 use std::fmt;
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 
-use super::Linked;
+use super::{Linked, has_nifs, library_error, open_failure};
 use crate::beam::{BeamModule, ImportKind, code::Instruction, code::Operand};
+use crate::runtime::nif::abi;
 use crate::term::Term;
 
 /// One NIF reference of a module that PBeam does not bind. The text of an
-/// item is its message. `DynamicPath` and `NoBindings` are build errors:
-/// PBeam has no library for the module. `Unbound` is a report item.
+/// item is its message. `DynamicPath`, `NoBindings`, and `Shipped` are
+/// build errors: PBeam has no library for the module, or the shipped
+/// library does not load. `Unbound` is a report item.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NifGap {
     /// `M: the library name of erlang:load_nif/2 is not a literal string`.
@@ -36,6 +44,16 @@ pub enum NifGap {
         module: String,
         /// The literal path of the call.
         path: String,
+    },
+    /// `M: NIF library "File" does not load: Reason`, for a shipped NIF
+    /// shared library that `erlang:load_nif/2` of the module does not take.
+    Shipped {
+        /// The module that calls `erlang:load_nif/2`.
+        module: String,
+        /// The path of the `.so` file.
+        library: String,
+        /// The `erlang:load_nif/2` error text, or the PBeam limit.
+        reason: String,
     },
     /// `M:F/A: NIF function has no PBeam binding; a call ...`, with the
     /// result of a call of the function.
@@ -63,6 +81,14 @@ impl fmt::Display for NifGap {
             NifGap::NoBindings { module, path } => write!(
                 formatter,
                 "{module}: NIF library \"{path}\" has no PBeam bindings"
+            ),
+            NifGap::Shipped {
+                module,
+                library,
+                reason,
+            } => write!(
+                formatter,
+                "{module}: NIF library \"{library}\" does not load: {reason}"
             ),
             NifGap::Unbound {
                 library,
@@ -93,22 +119,37 @@ impl fmt::Display for NifGap {
 const WINDOWS_ONLY_LOADS: &[&str] = &["pubkey_os_cacerts"];
 
 /// Return each NIF reference of `module` that PBeam does not bind, as one
-/// item, in the order of the code of the module. A result without a
-/// `DynamicPath` or `NoBindings` item passes the gate.
+/// item, in the order of the code of the module. `libraries` are the NIF
+/// shared libraries that the bundle ships for the module, as paths of
+/// `.so` files. A result with only `Unbound` items passes the gate.
 ///
-/// The items are:
+/// A module without a NIF library that calls `erlang:load_nif/2` has no
+/// item when a library of `libraries` takes the load. The gate opens each
+/// library in order with the loader of the runtime, which runs the
+/// constructors and the init function of the library on the build host,
+/// until one has the name of the module, as `erlang:load_nif/2` requires
+/// (`beam/erl_nif.c:4820-4823`). That library takes the load when it has
+/// the vm variant `beam.vanilla` and passes the function checks of
+/// `erlang:load_nif/2` (`beam/erl_nif.c:4814-4819`, `4845-4900`), and the
+/// module has `nif_start`, which PBeam requires. The gate does not resolve
+/// the path of the call, which the run computes, such as
+/// `code:priv_dir/1`. Else the items are:
 ///
+/// - `M: NIF library "File" does not load: Reason` for the library with
+///   the name of the module that does not take the load, as the only item.
 /// - `M: the library name of erlang:load_nif/2 is not a literal string`
 ///   for a call of `erlang:load_nif/2` whose path the gate cannot resolve,
-///   in a module without a NIF library. The compiler folds
-///   `atom_to_list(?MODULE)` to a literal string, so
+///   in a module without a NIF library and without a shipped library. The
+///   compiler folds `atom_to_list(?MODULE)` to a literal string, so
 ///   `{move,{literal,"prim_tty"},{x,0}}` directly before the call resolves.
 ///   An instruction without effect, such as `init_yregs`, can be between
 ///   them.
 /// - `M: NIF library "Path" has no PBeam bindings` for a resolved call in
-///   a module without a NIF library. The runtime opens `Path.so` for such a
-///   module, but a bundle cannot hold a NIF shared library yet, so the item
-///   stays a build error.
+///   a module without a NIF library and without a shipped library.
+/// - After them, `M: NIF library "File" does not load: Reason` for each
+///   library of `libraries` that the loader cannot open, with the
+///   `erlang:load_nif/2` error text, because it can be the library of the
+///   module.
 /// - `M:F/A: NIF function has no PBeam binding; a call ...` for each
 ///   function of the library of `M` that the module declares as a NIF and
 ///   that has no binding, with the result of a call: the runtime error of a
@@ -133,22 +174,24 @@ const WINDOWS_ONLY_LOADS: &[&str] = &["pubkey_os_cacerts"];
 /// ```rust,ignore
 /// // prim_tty: -nifs([isatty/1, isprint/1]), load() -> erlang:load_nif("prim_tty", 0).
 /// assert_eq!(
-///     nif_manifest_gaps(&prim_tty)[0].to_string(),
+///     nif_manifest_gaps(&prim_tty, &[])[0].to_string(),
 ///     "prim_tty:isprint/1: NIF function has no PBeam binding; a call runs the BEAM stub body",
 /// );
 /// // nif_gate_dynamic: load(Path) -> erlang:load_nif(Path, 0).
 /// assert_eq!(
-///     nif_manifest_gaps(&dynamic),
+///     nif_manifest_gaps(&dynamic, &[]),
 ///     [NifGap::DynamicPath { module: "nif_gate_dynamic".to_owned() }],
 /// );
+/// // nif_add: -nifs([add/2, other/0]); priv/nif_add.so defines add/2.
+/// assert!(nif_manifest_gaps(&nif_add, &["priv/nif_add.so".into()]).is_empty());
 /// ```
-pub fn nif_manifest_gaps(module: &BeamModule) -> Vec<NifGap> {
+pub fn nif_manifest_gaps(module: &BeamModule, libraries: &[PathBuf]) -> Vec<NifGap> {
     let name = &module.name;
     let Some(linked) = Linked::of(name) else {
         if !cfg!(windows) && WINDOWS_ONLY_LOADS.contains(&name.as_str()) {
             return Vec::new();
         }
-        return load_gaps(module);
+        return load_gaps(module, libraries);
     };
     let declared: Vec<(&str, u32)> = module
         .instructions
@@ -173,17 +216,17 @@ pub fn nif_manifest_gaps(module: &BeamModule) -> Vec<NifGap> {
         .collect()
 }
 
-/// Return one item for each call of `erlang:load_nif/2` in `module`, a
-/// module without a NIF library: the literal path of the call, or the
-/// dynamic path.
+/// Return the items of the calls of `erlang:load_nif/2` in `module`, a
+/// module without a NIF library, with the shipped `libraries`, as
+/// [`nif_manifest_gaps`] gives them.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// // nif_gate_library: load() -> erlang:load_nif("priv/nif_gate_library", 0).
-/// assert_eq!(load_gaps(&library)[0].to_string(), "nif_gate_library: NIF library \"priv/nif_gate_library\" has no PBeam bindings");
+/// assert_eq!(load_gaps(&library, &[])[0].to_string(), "nif_gate_library: NIF library \"priv/nif_gate_library\" has no PBeam bindings");
 /// ```
-fn load_gaps(module: &BeamModule) -> Vec<NifGap> {
+fn load_gaps(module: &BeamModule, libraries: &[PathBuf]) -> Vec<NifGap> {
     let instructions = &module.instructions;
     let mut gaps = Vec::new();
     for (index, instruction) in instructions.iter().enumerate() {
@@ -199,7 +242,54 @@ fn load_gaps(module: &BeamModule) -> Vec<NifGap> {
             Some(path) => NifGap::NoBindings { module, path },
         });
     }
+    if gaps.is_empty() {
+        return gaps;
+    }
+    let caller = &module.name;
+    for path in libraries {
+        let shipped = |reason| NifGap::Shipped {
+            module: caller.clone(),
+            library: path.display().to_string(),
+            reason,
+        };
+        let name = load_name(path);
+        let library = match abi::open(&name) {
+            Ok(library) => library,
+            Err(failure) => {
+                gaps.push(shipped(open_failure(caller, &name, failure).1));
+                continue;
+            }
+        };
+        if library.name() != caller {
+            continue;
+        }
+        let reason = library_error(module, caller, &library).or_else(|| {
+            (!has_nifs(module)).then(|| {
+                "the module has no nif_start instruction, which PBeam needs for a NIF shared library"
+                    .to_owned()
+            })
+        });
+        return reason.map(shipped).into_iter().collect();
+    }
     gaps
+}
+
+/// Return the path that `erlang:load_nif/2` gets for the `.so` file
+/// `path`: the path without its final `.so`, because the loader adds it
+/// (`sys/unix/erl_unix_sys_ddll.c:107-158`). Each other dot stays, so
+/// `a_nif.debug.so` opens as `a_nif.debug.so`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(load_name(Path::new("lib/a/priv/a_nif.so")).as_bytes(), b"lib/a/priv/a_nif");
+/// assert_eq!(load_name(Path::new("priv/a_nif.debug.so")).as_bytes(), b"priv/a_nif.debug");
+/// ```
+fn load_name(path: &Path) -> CString {
+    let bytes = path.as_os_str().as_bytes();
+    let name = bytes.strip_suffix(b".so").unwrap_or(bytes);
+    // A path of the file system has no NUL byte.
+    CString::new(name).expect("a path has no NUL byte")
 }
 
 /// Return the path that the code before a call of `erlang:load_nif/2` puts
