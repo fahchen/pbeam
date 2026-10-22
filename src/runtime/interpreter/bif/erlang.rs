@@ -5987,7 +5987,12 @@ pub(super) fn cancel_timer(
         ));
     }
     let result = match scheduler.cancel_bif_timer(*reference) {
-        Some(end) => Term::Integer(Timers::time_left(scheduler.timers.now(), end)),
+        Some(end) => {
+            // A process that used a timer of this scheduler stays with it,
+            // as a reader of the timer does (see `ProcessState::pinned`).
+            scheduler.current_process_mut().pinned = true;
+            Term::Integer(Timers::time_left(scheduler.timers.now(), end))
+        }
         None => Term::static_atom("false"),
     };
     if !info {
