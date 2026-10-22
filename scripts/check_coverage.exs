@@ -27,7 +27,11 @@ if valid == 0 or covered != valid do
   for class <- :xmerl_xpath.string(~c"//class", document),
       {rate, _} = Float.parse(attribute.(class, "line-rate")),
       rate < 1.0 do
-    IO.puts("Lines without a test: #{attribute.(class, "filename")} (#{rate})")
+    lines =
+      for line <- :xmerl_xpath.string(~c"lines/line[@hits='0']", class),
+          do: attribute.(line, "number")
+
+    IO.puts("Lines without a test: #{attribute.(class, "filename")} (#{rate}): #{Enum.join(lines, ", ")}")
   end
 
   raise("application line coverage must be 100%")
