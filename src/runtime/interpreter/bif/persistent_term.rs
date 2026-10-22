@@ -10,13 +10,13 @@
 //! The node keeps one table, and any scheduler reads it. An update, and a
 //! `get/0` that traps, hold the update permission of the node
 //! (`try_seize_update_permission`, `erl_bif_persistent.c:1311-1335`). A
-//! call that finds the permission with another process waits for it: ERTS
-//! suspends the caller, and PBeam switches the caller out and tries again
-//! in each turn of the caller. A `put/2` or an `erase/1` that changes the
-//! table keeps the permission until thread progress
-//! (`erl_bif_persistent.c:774-779`): PBeam switches the caller out once
-//! after the change, releases the permission in the next turn, and returns
-//! after one more switch.
+//! call that finds the permission with another process suspends until the
+//! release, as ERTS does. A `put/2` or an `erase/1` that changes the table
+//! suspends the caller until thread progress, and ERTS releases the
+//! permission at thread progress, independently of the caller
+//! (`erl_bif_persistent.c:774-779`, `1172-1230`). PBeam releases the
+//! permission when it changes the table, and switches the caller out
+//! twice before the call returns.
 
 use super::BifResult::Value;
 use super::*;
@@ -28,9 +28,8 @@ use crate::runtime::capability::{CapabilityKind, Operation};
 /// `ERTS_BIF_YIELD1` trap to the BIF (`erl_bif_persistent.c:333-335`,
 /// `467-469`, `692-694`). `get_all_trap/2`, `put_common_trap/3`, and
 /// `erase_trap/3` continue a chunk or a table copy. `thread_progress/1`
-/// releases the update permission and returns its argument after one more
-/// switch, as `table_updater` releases the permission and resumes the
-/// caller (`erl_bif_persistent.c:1172-1230`). Return `None` for another
+/// returns its argument after one more switch, as `table_updater` resumes
+/// the caller (`erl_bif_persistent.c:1172-1230`). Return `None` for another
 /// name.
 ///
 /// # Examples
@@ -57,10 +56,7 @@ pub(super) fn resume(
         ("erase_trap", [key, Term::Integer(first), Term::Integer(second)]) => {
             erase_trap(scheduler, key, *first as usize, *second as usize)
         }
-        ("thread_progress", [value]) => {
-            release(scheduler);
-            BifResult::YieldReturn(value.clone())
-        }
+        ("thread_progress", [value]) => BifResult::YieldReturn(value.clone()),
         _ => return None,
     })
 }
@@ -326,11 +322,12 @@ fn erase_trap(
     }
     process.bump_reductions((copied / ITERATIONS_PER_RED) as i32);
     scheduler.node().persistent_terms().terms.erase(key);
+    release(scheduler);
     thread_progress(Term::static_atom("true"))
 }
 
-/// Switch out the caller, which holds the update permission after its
-/// change, and continue at `thread_progress/1` with `value`. ERTS suspends
+/// Switch out the caller after its change, and continue at
+/// `thread_progress/1` with `value`. ERTS suspends
 /// the caller until thread progress (`suspend_updater`,
 /// `erl_bif_persistent.c:774-779`).
 fn thread_progress(value: Term) -> BifResult {
@@ -439,5 +436,6 @@ fn put_trap(scheduler: &mut Scheduler, key: &Term, value: &Term, copied: usize) 
     }
     process.bump_reductions((copied / ITERATIONS_PER_RED) as i32);
     scheduler.node().persistent_terms().terms.put(key, value);
+    release(scheduler);
     thread_progress(Term::static_atom("ok"))
 }

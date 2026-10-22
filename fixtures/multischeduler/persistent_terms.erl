@@ -105,10 +105,11 @@ trapped_get() ->
     Rest = lists:sort([result(), result(), result()]),
     Killed = killed_get(),
     High = high_wait(),
+    Reader = high_reader(),
     [persistent_term:erase({trapped, I}) || I <- lists:seq(1, ?KEYS)],
     _ = persistent_term:erase(late_key),
-    case {First, Rest, Killed, High} of
-        {{got, false}, [erase_done, put_done, {got_again, _}], ok, ok} -> ok;
+    case {First, Rest, Killed, High, Reader} of
+        {{got, false}, [erase_done, put_done, {got_again, _}], ok, ok, ok} -> ok;
         Other -> Other
     end.
 
@@ -129,6 +130,19 @@ high_wait() ->
         {{got, false}, put_done} -> ok;
         Other -> Other
     end.
+
+%% A process of priority high reads until the put of a process of priority
+%% normal is visible, and then puts a key itself. Its put does not wait for
+%% a turn of the first process.
+high_reader() ->
+    Self = self(),
+    _ = spawn_opt(fun() ->
+                      ok = wait_for(reader_key, 1, 1000000),
+                      ok = persistent_term:put(reader_done, 1),
+                      Self ! reader_done
+                  end, [{priority, high}]),
+    ok = persistent_term:put(reader_key, 1),
+    receive reader_done -> ok after 60000 -> timeout end.
 
 killed_get() ->
     Getter = spawn(fun() -> persistent_term:get() end),
