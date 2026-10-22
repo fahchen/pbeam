@@ -9,14 +9,14 @@ use crate::runtime::interpreter::DEFAULT_ERROR_HANDLER;
 use crate::runtime::interpreter::code_table::{CodeTable, Finish};
 use crate::runtime::local_node;
 use crate::runtime::port::Ports;
-use crate::runtime::process::{Flush, Origin, Priority, TimerReference};
+use crate::runtime::process::{Flush, Origin, Priority};
 use crate::runtime::process::{InitialCall, OTHER_PROCESS_INFO_ITEMS};
 use crate::runtime::process::{LinkId, ProcessState};
 use crate::runtime::scheduler::PTAB_SIZE;
 use crate::runtime::scheduler::{AliasMode, CONTEXT_REDS, Flushed, MonitorOptions, MonitorTarget};
 use crate::runtime::signal::Signal;
 use crate::runtime::time::{self, TimeValue};
-use crate::runtime::timer::{Receiver, Timer, Timers};
+use crate::runtime::timer::Timers;
 use num_bigint::BigInt;
 use num_traits::FromPrimitive;
 use std::io::Write;
@@ -2907,6 +2907,15 @@ pub(super) fn system_info(scheduler: &mut Scheduler, item: &Term) -> Result<BifR
         // scheduler gives the number of that scheduler.
         Term::Atom(atom) if atoms.name_of(atom) == "scheduler_id" => {
             Ok(Value(Term::Integer(scheduler_id)))
+        }
+        // The run has the time correction of the node in the
+        // `multi_time_warp` mode, the defaults of the pinned ERTS
+        // (`erl_bif_info.c:2854-2868`, `erl_init.c:226`).
+        Term::Atom(atom) if atoms.name_of(atom) == "time_correction" => {
+            Ok(Value(Term::static_atom("true")))
+        }
+        Term::Atom(atom) if atoms.name_of(atom) == "time_warp_mode" => {
+            Ok(Value(Term::Atom(atoms.put("multi_time_warp")?)))
         }
         Term::Atom(atom) if atoms.name_of(atom) == "build_type" => {
             Ok(Value(Term::static_atom("opt")))
@@ -5882,67 +5891,7 @@ fn bif_timer(
     let Some(end) = end else {
         return Ok(BifResult::badarg());
     };
-    let receiver = match receiver {
-        Term::Pid(id) => Receiver::Process(*id),
-        Term::Atom(name) => Receiver::Name(name.clone()),
-        _ => return Ok(BifResult::badarg()),
-    };
-    if matches!(receiver, Receiver::Name(_)) && scheduler.is_multi() {
-        return Err(error(
-            "unsupported: a named BIF timer in a run of execute_on_schedulers",
-        ));
-    }
-    if let Some(denied) = denial(scheduler, CapabilityKind::Process, Operation::Send, None)? {
-        return Ok(denied);
-    }
-    let target = match &receiver {
-        Receiver::Process(id) => Some(*id),
-        Receiver::Name(name) => scheduler.whereis(scheduler.atoms.name_of(name)),
-    };
-    // The timer queue stays with each scheduler, so a timer that fires on
-    // another scheduler cannot reach its receiver.
-    if target.is_some_and(|target| scheduler.remote_owner(target).is_some()) {
-        return Err(error(
-            "unsupported: a BIF timer to a process of another scheduler in a run of execute_on_schedulers",
-        ));
-    }
-    if let Some(target) = target
-        && let Some(denied) = boot_denial(scheduler, target)?
-    {
-        return Ok(denied);
-    }
-    let reference = scheduler.make_ref()?;
-    if !matches!(receiver, Receiver::Process(id) if scheduler.live_process(id).is_none()) {
-        if let Receiver::Process(id) = receiver
-            && let Some(process) = scheduler.process_mut(id)
-        {
-            process.bif_timers.insert(TimerReference(reference), ());
-        }
-        let message = if wrap {
-            Term::tuple(vec![
-                Term::static_atom("timeout"),
-                Term::Reference(reference),
-                message.clone(),
-            ])
-        } else {
-            message.clone()
-        };
-        scheduler.timers.start(
-            end,
-            Timer::Bif {
-                reference,
-                receiver,
-                message,
-            },
-        );
-        // The timer stays with this scheduler, and so does the process that
-        // can read or cancel it (see `ProcessState::pinned`).
-        scheduler.current_process_mut().pinned = true;
-        scheduler
-            .node()
-            .register_timer(reference, scheduler.index());
-    }
-    Ok(Value(Term::Reference(reference)))
+    super::timer::setup(scheduler, end, receiver, message, wrap)
 }
 
 /// Run `erlang:cancel_timer(TimerRef, Options)`, as ERTS `cancel_timer_2`
@@ -5986,20 +5935,8 @@ pub(super) fn cancel_timer(
         return Ok(BifResult::badarg());
     };
     let scheduler = &mut *context.scheduler;
-    // The timer queue stays with each scheduler, so a timer of another
-    // scheduler cannot be canceled here.
-    if scheduler.remote_timer_owner(*reference).is_some() {
-        return Err(error(
-            "unsupported: a BIF timer of another scheduler in a run of execute_on_schedulers",
-        ));
-    }
     let result = match scheduler.cancel_bif_timer(*reference) {
-        Some(end) => {
-            // A process that used a timer of this scheduler stays with it,
-            // as a reader of the timer does (see `ProcessState::pinned`).
-            scheduler.current_process_mut().pinned = true;
-            Term::Integer(Timers::time_left(scheduler.timers.now(), end))
-        }
+        Some(end) => Term::Integer(Timers::time_left(scheduler.timers.now(), end)),
         None => Term::static_atom("false"),
     };
     if !info {

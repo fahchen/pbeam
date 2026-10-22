@@ -4,7 +4,6 @@
 
 use super::*;
 use crate::runtime::timer::Timers;
-use crate::term::Reference;
 
 #[test]
 fn gives_the_absolute_position_of_pinned_erts() {
@@ -17,12 +16,6 @@ fn gives_the_absolute_position_of_pinned_erts() {
     assert_eq!(Timers::absolute_position(-576_460_753_000), None);
     assert_eq!(Timers::absolute_position(i64::MAX), None);
     assert_eq!(Timers::absolute_position(i64::MIN), None);
-}
-
-#[test]
-fn reads_the_end_of_no_timer_of_a_new_service() {
-    let timers = Timers::new();
-    assert_eq!(timers.bif_timer_end(Reference::ordinary(0).unwrap()), None);
 }
 
 #[test]
@@ -49,11 +42,10 @@ fn parses_the_abs_option_as_pinned_erts() {
     );
 }
 
-/// A process that reads or cancels an active BIF timer of its scheduler is
-/// pinned to the scheduler, so that a steal does not move it away from the
-/// timer. A read of a reference with no timer pins no process.
+/// A process that reads or cancels an active BIF timer is not pinned to
+/// its scheduler: the node holds the timer for each scheduler.
 #[test]
-fn a_user_of_an_active_timer_is_pinned() {
+fn a_user_of_an_active_timer_is_not_pinned() {
     use crate::runtime::process::tests::{frame, test_scheduler};
     use crate::runtime::timer::{Receiver, Timer};
     use crate::term::ProcessId;
@@ -77,7 +69,10 @@ fn a_user_of_an_active_timer_is_pinned() {
                 message: Term::Integer(0),
             },
         );
-        scheduler.current_process_mut().pinned = false;
+        let index = scheduler.index();
+        scheduler
+            .node()
+            .register_timer(reference, index, 1_000_000_000, None, false);
         let mut context = BifContext {
             scheduler: &mut scheduler,
         };
@@ -91,6 +86,6 @@ fn a_user_of_an_active_timer_is_pinned() {
             read_timer(&mut context, &Term::Reference(reference))
         };
         assert!(matches!(result.unwrap(), Value(Term::Integer(_))));
-        assert!(scheduler.current_process_mut().pinned, "cancel {cancel}");
+        assert!(!scheduler.current_process_mut().pinned, "cancel {cancel}");
     }
 }

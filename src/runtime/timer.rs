@@ -5,6 +5,7 @@
 
 use std::{
     collections::{BTreeMap, HashMap},
+    sync::{Arc, RwLock, RwLockReadGuard},
     time::{Duration, Instant},
 };
 
@@ -77,6 +78,63 @@ pub(super) enum Receiver {
     Name(Atom),
 }
 
+/// The time support of the node: the run start and one time correction
+/// state that all schedulers share, as ERTS keeps one `time_sup` for the
+/// node (`erl_time_sup.c:385-412`, `1305-1322`).
+#[derive(Clone, Debug)]
+pub(super) struct NodeClock {
+    /// The run start, at the internal monotonic time `MONOTONIC_BEGIN`.
+    start: Instant,
+    shared: Arc<RwLock<Shared>>,
+}
+
+/// The time correction state of the node and the end tick of its one
+/// check timer, the ERTS `parmon.timer` (`erl_time_sup.c:939-946`).
+#[derive(Debug)]
+struct Shared {
+    correction: Correction,
+    check: i64,
+}
+
+impl NodeClock {
+    /// Return the time support of a node that starts now. The time offset
+    /// and the time correction start as `erts_init_time_sup` sets them
+    /// (`erl_time_sup.c:1240-1270`), and `late_init_time_correction` sets
+    /// the one check timer (`erl_time_sup.c:913-950`, `1305-1322`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let clock = NodeClock::new();
+    /// assert!(clock.now() >= 1_000_000_000);
+    /// ```
+    pub(super) fn new() -> Self {
+        let start = Instant::now();
+        let correction = Correction::new(HOST_CHECK, clock::system_time());
+        let now = correction.monotonic_time(os_monotonic_time(start));
+        let check = Timers::check_position(now, correction.first_timeout());
+        Self {
+            start,
+            shared: Arc::new(RwLock::new(Shared { correction, check })),
+        }
+    }
+
+    fn read(&self) -> RwLockReadGuard<'_, Shared> {
+        self.shared.read().expect("the clock lock is not poisoned")
+    }
+
+    /// Return the internal monotonic time. The OS time is read under the
+    /// read lock of the correction state, as `read_corrected_time` does
+    /// (`erl_time_sup.c:366-389`), so no check runs between the read and
+    /// the selection of the correction instance.
+    fn now(&self) -> i64 {
+        let shared = self.read();
+        shared
+            .correction
+            .monotonic_time(os_monotonic_time(self.start))
+    }
+}
+
 /// All active timers of the run, in expiry order. An ERTS timer wheel slot
 /// is a FIFO list: `insert_timer_into_slot` adds a timer at the tail
 /// (`time.c:647-668`), and `erts_bump_timers` expires slots in tick order
@@ -88,15 +146,14 @@ pub(super) enum Receiver {
 /// order for these timers too (`docs/erts-differences.md`, "Timers").
 #[derive(Debug)]
 pub(super) struct Timers {
-    /// The run start, at the internal monotonic time `MONOTONIC_BEGIN`.
-    start: Instant,
-    /// The time offset and the time correction of the run, as ERTS sets
-    /// them at the emulator start (`erl_time_sup.c:1240-1270`).
-    correction: Correction,
-    /// The key of the internal timer of the time correction check, as the
-    /// ERTS `parmon.timer` in the timer wheel of the scheduler
-    /// (`erl_time_sup.c:772-776`, `827-831`, `944-950`). It is not in
-    /// `queue`, so it does not keep a run alive.
+    /// The time support of the node: the run start, the time offset, and
+    /// the time correction.
+    clock: NodeClock,
+    /// The key of the time correction check in this timer service. ERTS
+    /// has one check timer, `parmon.timer` (`erl_time_sup.c:772-776`,
+    /// `827-831`, `944-950`). Each scheduler holds the end tick of that
+    /// timer, and the first scheduler at that tick does the check. It is
+    /// not in `queue`, so it does not keep a run alive.
     check: TimerKey,
     /// Active timers by key.
     queue: BTreeMap<TimerKey, Timer>,
@@ -117,30 +174,24 @@ impl Timers {
     /// assert!(timers.now() >= 1_000_000_000);
     /// ```
     pub(super) fn new() -> Self {
-        Self::with_origin((Instant::now(), clock::system_time()))
+        Self::with_clock(NodeClock::new())
     }
 
-    /// Return a timer service on the run start `start` and the OS system
-    /// time `sinit` at the same moment. Each scheduler of a run with
-    /// scheduler threads gets the same pair, so `erlang:monotonic_time/0,1`
-    /// and `erlang:time_offset/0,1` agree across the threads.
+    /// Return a timer service on the time support `clock` of the node.
+    /// Each scheduler of a run with scheduler threads gets the same
+    /// support, so `erlang:monotonic_time/0,1` and `erlang:time_offset/0,1`
+    /// agree across the threads.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let start = std::time::Instant::now();
-    /// let timers = Timers::with_origin((start, 5_000_000_000));
+    /// let timers = Timers::with_clock(node.clock());
     /// assert!(timers.now() >= 1_000_000_000);
     /// ```
-    pub(super) fn with_origin((start, sinit): (Instant, i64)) -> Self {
-        let correction = Correction::new(HOST_CHECK, sinit);
-        // `late_init_time_correction` sets the first check timer at the
-        // scheduler start (`erl_time_sup.c:913-950`).
-        let now = correction.monotonic_time(os_monotonic_time(start));
-        let check = Self::check_position(now, correction.first_timeout());
+    pub(super) fn with_clock(clock: NodeClock) -> Self {
+        let check = clock.read().check;
         Self {
-            start,
-            correction,
+            clock,
             check: (check, 0),
             queue: BTreeMap::new(),
             bif_timers: HashMap::new(),
@@ -186,8 +237,7 @@ impl Timers {
     /// assert!(timers.now() <= timers.now());
     /// ```
     pub(super) fn now(&self) -> i64 {
-        self.correction
-            .monotonic_time(os_monotonic_time(self.start))
+        self.clock.now()
     }
 
     /// Return the time offset in nanoseconds, as `erts_get_time_offset`
@@ -200,7 +250,7 @@ impl Timers {
     /// assert_eq!(timers.time_offset(), timers.time_offset());
     /// ```
     pub(super) fn time_offset(&self) -> i64 {
-        self.correction.time_offset()
+        self.clock.read().correction.time_offset()
     }
 
     /// Return the Erlang system time of the run in nanoseconds: the
@@ -216,14 +266,20 @@ impl Timers {
     /// assert!(timers.system_time() > 1_700_000_000_000_000_000);
     /// ```
     pub(super) fn system_time(&self) -> i64 {
-        self.now().saturating_add(self.correction.time_offset())
+        let shared = self.clock.read();
+        let now = shared
+            .correction
+            .monotonic_time(os_monotonic_time(self.clock.start));
+        now.saturating_add(shared.correction.time_offset())
     }
 
     /// Do the time correction check with the OS clocks from `os_times`, and
     /// set the next check timer, as `check_time_offset` and
     /// `check_time_correction` do at their end (`erl_time_sup.c:772-776`,
-    /// `824-831`). The next check starts after each timer that is active,
-    /// so it has the next start number.
+    /// `824-831`). The check is done once for the node: when another
+    /// scheduler did it first, the service takes the next check tick of
+    /// the node. The next check starts after each timer that is active, so
+    /// it has the next start number.
     ///
     /// # Examples
     ///
@@ -231,8 +287,16 @@ impl Timers {
     /// timers.check_time(|| (1_500_000_000, 1_500_000_000));
     /// ```
     fn check_time(&mut self, os_times: impl FnMut() -> (i64, i64)) {
-        let (now, msec) = self.correction.check(os_times);
-        self.check = (Self::check_position(now, msec), self.next);
+        let mut shared = self
+            .clock
+            .shared
+            .write()
+            .expect("the clock lock is not poisoned");
+        if shared.check <= self.check.0 {
+            let (now, msec) = shared.correction.check(os_times);
+            shared.check = Self::check_position(now, msec);
+        }
+        self.check = (shared.check, self.next);
         self.next += 1;
     }
 
@@ -284,21 +348,6 @@ impl Timers {
         (MONOTONIC_BEGIN / UNITS_PER_TICK..=MONOTONIC_END_TICKS)
             .contains(&end)
             .then_some(end)
-    }
-
-    /// Return the end tick of the active BIF timer `reference`, as
-    /// `btm_rbt_lookup` finds the `btm_tree` entry of the timer service
-    /// (`erl_hl_timer.c:1907-1920`), or `None` when no BIF timer with the
-    /// reference is active.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// let timers = Timers::new();
-    /// assert_eq!(timers.bif_timer_end(Reference(0)), None);
-    /// ```
-    pub(super) fn bif_timer_end(&self, reference: Reference) -> Option<i64> {
-        self.bif_timers.get(&reference).map(|key| key.0)
     }
 
     /// Return the milliseconds from the time `now` to the end tick `end`, as
@@ -397,7 +446,7 @@ impl Timers {
     /// assert_eq!(timers.pop_due(1_100_000_000), Some(Timer::Receive(ProcessId(0))));
     /// ```
     pub(super) fn pop_due(&mut self, now: i64) -> Option<Timer> {
-        let start = self.start;
+        let start = self.clock.start;
         self.pop_due_with(now, || (os_monotonic_time(start), clock::system_time()))
     }
 
