@@ -58,7 +58,7 @@ pub(super) fn resume(
         ("erase_trap", [key, Term::Integer(first), Term::Integer(second)]) => {
             erase_trap(scheduler, key, *first as usize, *second as usize)
         }
-        ("thread_progress", [value]) => thread_progress(scheduler, value.clone()),
+        ("thread_progress", [value]) => thread_progress(value.clone()),
         _ => return None,
     })
 }
@@ -368,19 +368,11 @@ fn schedule(scheduler: &mut Scheduler, change: Change, value: Term) -> BifResult
     }
 }
 
-/// Return `value` when the table of the caller is visible. Else suspend the
-/// caller at the export `persistent_term:thread_progress/1` until thread
-/// progress resumes it, as `ERTS_BIF_YIELD_RETURN` after `suspend_updater`
-/// does (`erl_bif_persistent.c:782-783`, `1172-1234`).
-fn thread_progress(scheduler: &mut Scheduler, value: Term) -> BifResult {
-    let id = scheduler.current_process().id;
-    if scheduler.node().persistent_terms().is_progressing(id) {
-        return BifResult::Suspend {
-            module: "persistent_term",
-            function: "thread_progress",
-            arguments: vec![value],
-        };
-    }
+/// Return `value` after thread progress resumed the caller, as the
+/// `ERTS_BIF_YIELD_RETURN` after `suspend_updater` does
+/// (`erl_bif_persistent.c:782-783`, `1172-1234`). Only the publication of
+/// its change resumes the caller, so the change is visible here.
+fn thread_progress(value: Term) -> BifResult {
     Value(value)
 }
 

@@ -1,4 +1,4 @@
-use super::PersistentTerms;
+use super::{PersistentTermStore, PersistentTerms};
 use crate::term::{Term, test_atom as atom};
 
 fn logger_config(name: &str) -> Term {
@@ -169,4 +169,21 @@ fn counts_the_keys_and_values_of_the_table() {
     let mut live = crate::term::LiveBytes::new();
     terms.account_terms(&mut live);
     assert!(live.bytes() > 0);
+}
+
+#[test]
+fn makes_the_slots_of_a_table_copy_within_the_budget() {
+    let mut store = PersistentTermStore::default();
+    let terms = std::sync::Arc::make_mut(&mut store.terms);
+    for key in 0..4 {
+        terms.put(&Term::Integer(key), &Term::Integer(key));
+    }
+    store.start_copy(16, None);
+    // The budget of 4 slots makes 4 of the 16 slots and copies no pair.
+    store.copy_step(4);
+    let copy = store.copy.as_ref().unwrap();
+    assert_eq!((copy.table.buckets.len(), copy.next), (4, 0));
+    store.copy_step(usize::MAX);
+    let copy = store.copy.as_ref().unwrap();
+    assert_eq!((copy.table.buckets.len(), copy.table.num_entries), (16, 4));
 }
