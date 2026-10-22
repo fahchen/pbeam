@@ -334,6 +334,20 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a multi-scheduler run that creates an atom at runtime, uses ETS or `persistent_term` across schedulers, or needs a timer that wakes a process of another scheduler.
 - **Source:** #842.
 
+### Send the pending monitor signal at the ERTS point across scheduler threads
+
+- **Now:** `Scheduler::pending_before_remote` sends the pending monitor signal of the current process before a delivery to another scheduler (PR #890, #886). ERTS sends it only at the switch out of the process or with a delivery to the same target (`erl_process.c:9665-9668`, `erl_proc_sig_queue.c:1146-1166`, `erl_message.c:463-480`). The PBeam order is the order of an ERTS run in which the process switches out just before the delivery, so it differs in timing only. The "Signal queue" row of `docs/erts-differences.md` records it.
+- **Option:** prove that one ERTS node also keeps the causal order of a monitor and a later kill in this case, and record the proof; or send the pending signal at the ERTS points only, and keep the causal order through the inbox path in another way.
+- **Trigger:** the next change of the pending monitor slot or of the cross-scheduler delivery path, or a probe that shows a difference from `erl +S 2`.
+- **Source:** #886, owner comment of 2026-10-22 ("可以，后续对齐").
+
+### Bind the full function tables of the OTP NIF libraries
+
+- **Now:** the OTP NIF libraries `zstd`, `prim_socket`, `net`, `erl_tracer`, and `asn1rt_nif` have load-check tables with no bindings and `unbound_fails` (#868), and `crypto`, `prim_file`, `prim_tty`, and `zlib` bind only part of their tables. A call of an unbound function gives `M:F/A NIF is not supported`.
+- **Option:** bind each library in full against its pinned OTP source, one task for each library or function group, each function compared with pinned ERTS.
+- **Trigger:** an application that reaches an unbound function; the order follows the applications (zstd first, #898).
+- **Source:** owner comment of 2026-10-22 ("最终我们需要完整实现一遍").
+
 ### Route alias messages across scheduler threads
 
 - **Now:** the owner of each alias is in the scheduler that made the alias (`Scheduler::alias_owners`), so a message to an alias from another scheduler does not find its owner. A `gen:call` between processes of two schedulers uses an alias and fails in a restricted or multi-scheduler run that reaches this path.
