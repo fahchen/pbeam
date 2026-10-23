@@ -27,6 +27,7 @@ const CRYPTO_PROBE: &str = "fixtures/code_server/crypto_probe";
 const CRYPTO_SIGN_PROBE: &str = "fixtures/code_server/crypto_sign_probe";
 const CRYPTO_CRYPT_PROBE: &str = "fixtures/code_server/crypto_crypt_probe";
 const CRYPTO_KEYGEN_PROBE: &str = "fixtures/code_server/crypto_keygen_probe";
+const CRYPTO_COMPUTE_KEY_PROBE: &str = "fixtures/code_server/crypto_compute_key_probe";
 
 /// The stand-in `crypto` module that loads the `crypto` NIF library.
 const CRYPTO_STAND_IN: &str = "fixtures/crypto/crypto";
@@ -1469,6 +1470,62 @@ fn stops_on_an_ec_curve_that_key_generation_does_not_support() {
             .stdin(Stdio::null())
             .output()
             .unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            !output.status.success() && stderr.contains(expected),
+            "{function}: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn computes_shared_secrets_as_pinned_erts() {
+    // dh_generate_key_nif/4, dh_compute_key_nif/3, ecdh_compute_key_nif/3,
+    // and evp_compute_key_nif/3 (dh.c:44-271, ecdh.c:38-141,
+    // evp.c:131-218): the sizes of each new DH key, the bytes of each shared
+    // secret of given keys, and the reason and error_info of each failed
+    // check.
+    let erts = run(&mut erts_probe(
+        CRYPTO_COMPUTE_KEY_PROBE,
+        "crypto_compute_key_probe",
+        "main",
+        &[],
+    ));
+    assert!(erts.contains("Can't EVP_PKEY_derive"), "{erts}");
+    assert_eq!(
+        run(&mut pbeam_probe(
+            CRYPTO_COMPUTE_KEY_PROBE,
+            "crypto_compute_key_probe",
+            "main",
+            &[]
+        )),
+        erts
+    );
+}
+
+#[test]
+fn stops_on_a_key_agreement_that_pbeam_does_not_support() {
+    for (function, expected) in [
+        (
+            "unsupported_length",
+            "crypto:dh_generate_key_nif/4 NIF is not supported for a DH private key length",
+        ),
+        (
+            "unsupported_field",
+            "crypto:ecdh_compute_key_nif/3 NIF is not supported for an ECDSA curve over a \
+             characteristic-two field",
+        ),
+    ] {
+        let output = pbeam_probe(
+            CRYPTO_COMPUTE_KEY_PROBE,
+            "crypto_compute_key_probe",
+            function,
+            &[],
+        )
+        .env("TERM", "dumb")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
         let stderr = String::from_utf8(output.stderr).unwrap();
         assert!(
             !output.status.success() && stderr.contains(expected),
