@@ -389,3 +389,7 @@ fn drain(reader: &mut UnixStream) {
     // The socket is non-blocking: an error means that no more bytes wait.
     while matches!(reader.read(&mut bytes), Ok(count) if count > 0) {}
 }
+
+#[cfg(test)]
+#[path = "../../../tests/runtime/scheduler/poll.rs"]
+mod tests;
