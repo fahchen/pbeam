@@ -10,7 +10,7 @@ fn reads_skips_and_gives_the_tail_at_each_bit_position() {
     assert_eq!(context.skip(4), Some(()));
     // The position is on a byte boundary, so the tail is a view of the bytes
     // after it.
-    assert_eq!(context.tail(), Some(Binary::from(&[0xEF])));
+    assert_eq!(context.tail(), Binary::from(&[0xEF]));
     assert_eq!(context.position(), 16);
     assert_eq!(context.read_bits(8), Some(vec![0xEF]));
     assert_eq!(context.remaining_bits(), 0);
@@ -18,7 +18,7 @@ fn reads_skips_and_gives_the_tail_at_each_bit_position() {
     assert_eq!(context.read_bits(1), None);
     assert_eq!(context.skip(1), None);
     assert_eq!(context.position(), 24);
-    assert_eq!(context.tail(), Some(Binary::from(&[])));
+    assert_eq!(context.tail(), Binary::from(&[]));
 }
 
 #[test]
@@ -70,12 +70,10 @@ fn shares_the_bytes_of_the_binary_that_it_matches() {
 }
 
 #[test]
-fn gives_no_tail_view_at_a_position_that_is_not_on_a_byte_boundary() {
-    // PBeam has no bitstring term, so the bits after a position that is not
-    // on a byte boundary have no view.
+fn gives_a_bitstring_tail_at_a_position_that_is_not_on_a_byte_boundary() {
     let context = MatchState::new(Binary::from(&[0xAB, 0xCD]));
     assert_eq!(context.read_bits(4), Some(vec![0xA0]));
-    assert_eq!(context.tail(), None);
+    assert_eq!(context.tail(), Binary::from(&[0xAB, 0xCD]).bits(4, 16));
     assert_eq!(context.position(), 4);
 }
 
