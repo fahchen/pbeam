@@ -1424,7 +1424,10 @@ impl Scheduler {
                     select.reference,
                     Term::static_atom("ready_input"),
                 ]);
-                self.deliver(select.recipient, message);
+                // The recipient can run on another scheduler: ERTS queues
+                // the message to the pid on any scheduler
+                // (`erl_check_io.c:2135-2151`).
+                self.deliver_timeout(select.recipient, message);
                 continue;
             }
             match direction {

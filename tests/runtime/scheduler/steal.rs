@@ -299,3 +299,29 @@ fn a_queue_that_gives_nothing_lets_the_steal_take_a_lower_queue() {
     assert_eq!(victim.runnable.ids(), vec![ProcessId(1), ProcessId(3)]);
     assert_eq!(inbox(&node, 1), vec![('P', 2)]);
 }
+
+/// A reader that selected fd 0 on one scheduler and then moved in a steal
+/// gets the `ready_input` message on its new scheduler: the scheduler that
+/// serves fd 0 sends the message through the node.
+#[test]
+fn the_fd_0_message_follows_a_stolen_reader() {
+    use super::super::poll::Direction;
+    use crate::runtime::tty::InputSelect;
+    use crate::term::Reference;
+    let (node, mut victim, mut thief) = two_schedulers();
+    insert(&mut victim, &[1, 2]);
+    node.set_hungry(1, true);
+    victim.serve_steal();
+    assert!(thief.drain_inbox());
+    assert_eq!(node.owner(ProcessId(1)), Some(1));
+    node.ttys().select_input(InputSelect {
+        tty: Reference(7),
+        recipient: ProcessId(1),
+        reference: Term::Nil,
+    });
+    victim
+        .serve(&[(libc::STDIN_FILENO, Direction::Read)])
+        .unwrap();
+    assert_eq!(inbox(&node, 1), vec![('M', 1)]);
+    assert!(!node.ttys().input_selected());
+}

@@ -18,8 +18,7 @@
 //!
 //! Only a runnable process moves: a process in the run queue that does not
 //! wait, does not exit, is not in a dirty call, and holds nothing that stays
-//! with its scheduler. A process that waits for a receive timer or that used
-//! a scheduler service (`pinned`) stays.
+//! with its scheduler. A process that waits for a receive timer stays.
 
 use std::sync::Arc;
 
