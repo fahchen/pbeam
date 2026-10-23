@@ -1508,17 +1508,31 @@ pub(crate) fn import_kind(module: &str, name: &str, arity: u32) -> ImportKind {
 #[path = "../../../tests/runtime/interpreter/bif.rs"]
 mod tests;
 
-/// Return the extra reductions of a `links` item, `floor(Links / 4)`
-/// (`erl_bif_info.c:1777`), and 0 for another item.
-pub(crate) fn links_reductions(item: &Term, value: &Term) -> i32 {
-    if item != &Term::static_atom("links") {
-        return 0;
-    }
-    let links = value
-        .tuple_elements()
-        .and_then(|elements| elements.get(1))
-        .and_then(|links| links.proper_list())
-        .map(|links| links.count())
-        .unwrap_or(0);
-    i32::try_from(links / 4).unwrap_or(i32::MAX)
+/// Return the extra reductions of a `process_info` item: `floor(Links / 4)`
+/// for `links` (`erl_bif_info.c:1777`), `floor(Messages / 4)` for `memory`
+/// (`erl_bif_info.c:2066-2067`) and for `total_heap_size` of a process with
+/// the message queue on the heap (`erl_bif_info.c:2032-2042`), and 0 for
+/// another item.
+pub(crate) fn item_reductions(
+    item: &Term,
+    value: &Term,
+    messages: usize,
+    off_heap_message_queue: bool,
+) -> i32 {
+    let count = match item {
+        Term::Atom(_) if item == &Term::static_atom("links") => value
+            .tuple_elements()
+            .and_then(|elements| elements.get(1))
+            .and_then(|links| links.proper_list())
+            .map(|links| links.count())
+            .unwrap_or(0),
+        Term::Atom(_) if item == &Term::static_atom("memory") => messages,
+        Term::Atom(_)
+            if item == &Term::static_atom("total_heap_size") && !off_heap_message_queue =>
+        {
+            messages
+        }
+        _ => 0,
+    };
+    i32::try_from(count / 4).unwrap_or(i32::MAX)
 }

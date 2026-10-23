@@ -5,7 +5,9 @@ use super::*;
 use crate::beam::code::Instruction;
 use crate::runtime::capability;
 use crate::runtime::dirty::DIRTY_IO_THREADS;
-use crate::runtime::heap_flags::{HeapFlags, max_heap_size, max_heap_size_map, next_heap_size};
+use crate::runtime::heap_flags::{
+    HeapFlags, garbage_collection_list, max_heap_size, max_heap_size_map, next_heap_size,
+};
 use crate::runtime::host;
 use crate::runtime::interpreter::DEFAULT_ERROR_HANDLER;
 use crate::runtime::interpreter::code_table::{CodeTable, Finish};
@@ -4870,7 +4872,8 @@ pub(super) fn process_info(
                         .info(atoms, item, current, messages, registered.as_ref())?
                         .ok_or_else(|| unsupported(atoms))?,
                 };
-                caller.bump_reductions(1 + super::links_reductions(item, &info));
+                let off_heap = caller.off_heap_message_queue;
+                caller.bump_reductions(1 + super::item_reductions(item, &info, messages, off_heap));
                 Ok(Value(info))
             },
         );
@@ -4922,7 +4925,12 @@ pub(super) fn process_info(
     // the cost that `handle_process_info` returns
     // (`erl_proc_sig_queue.c:6796,7405,5425-5428`), so only the direct
     // read charges the item.
-    if target.exiting.is_some() || target.mailbox.has_incoming() {
+    // ERTS always sends a request for `memory` and `total_heap_size` of
+    // another process (`ERTS_PI_FLAG_FORCE_SIG_SEND`,
+    // `erl_bif_info.c:828,839,1381`) and discards the cost of the request.
+    let forced = matches!(item, Term::Atom(name)
+        if matches!(scheduler.atoms.name_of(name), "memory" | "total_heap_size"));
+    if forced || target.exiting.is_some() || target.mailbox.has_incoming() {
         let caller = scheduler.current_process_mut().id;
         let reference = scheduler.make_ref()?;
         scheduler.current_process_mut().mailbox.set_save_end();
@@ -4940,9 +4948,10 @@ pub(super) fn process_info(
             arguments: vec![Term::Reference(reference)],
         });
     }
-    scheduler
-        .current_process_mut()
-        .bump_reductions(1 + super::links_reductions(item, &info));
+    // Only `links` charges extra here: the items with a queue charge
+    // went as a request above.
+    let extra = super::item_reductions(item, &info, 0, true);
+    scheduler.current_process_mut().bump_reductions(1 + extra);
     Ok(signals_return(scheduler, process, info))
 }
 
@@ -4981,6 +4990,7 @@ fn caller_info_list(
     }
     let caller = scheduler.current_process();
     let messages = caller.mailbox.message_count();
+    let off_heap = caller.off_heap_message_queue;
     let registered = scheduler.registered_name_of(caller.id);
     let values = process_info_values(&scheduler.code, caller, current, messages, true, registered)?;
     let all = process_info_term(&scheduler.atoms, values)?;
@@ -4998,7 +5008,7 @@ fn caller_info_list(
         // ERTS reads a repeated item once and copies its result
         // (`part_res`, `erl_bif_info.c:1134-1145`), so only its first read costs.
         if !items[..index].contains(item) {
-            reductions += 1 + super::links_reductions(item, &pair);
+            reductions += 1 + super::item_reductions(item, &pair, messages, off_heap);
         }
         info.push(pair);
     }
@@ -5563,9 +5573,7 @@ fn process_info_values(
     };
     let reductions = i64::try_from(process.reductions.saturating_add(current))
         .map_err(|_| error("the reduction total exceeds the PBeam integer range"))?;
-    let words = std::mem::size_of::<usize>();
-    let heap_size = i64::try_from(process.allocated_bytes() / words)
-        .map_err(|_| error("the heap size exceeds the PBeam integer range"))?;
+    let heap_size = process.heap_words()?;
     let stack_size = i64::try_from(
         process
             .frames
@@ -5693,27 +5701,9 @@ fn process_info_term(atoms: &AtomTable, values: ProcessInfoValues) -> Result<Ter
             Term::Integer(value),
         ]));
     }
-    let flags = values.heap_flags;
-    let max_heap_size = max_heap_size_map(atoms, flags.max_heap_size, flags.max_heap_flags);
-    let minor_gcs = atoms.put("minor_gcs")?;
     items.push(Term::tuple(vec![
         Term::static_atom("garbage_collection"),
-        Term::list_from(vec![
-            Term::tuple(vec![Term::static_atom("max_heap_size"), max_heap_size]),
-            Term::tuple(vec![
-                Term::static_atom("min_bin_vheap_size"),
-                Term::Integer(flags.min_bin_vheap_size),
-            ]),
-            Term::tuple(vec![
-                Term::static_atom("min_heap_size"),
-                Term::Integer(flags.min_heap_size),
-            ]),
-            Term::tuple(vec![
-                Term::static_atom("fullsweep_after"),
-                Term::Integer(i64::from(flags.fullsweep_after)),
-            ]),
-            Term::tuple(vec![Term::Atom(minor_gcs), Term::Integer(0)]),
-        ]),
+        garbage_collection_list(atoms, values.heap_flags)?,
     ]));
     items.push(Term::tuple(vec![
         Term::static_atom("suspending"),
