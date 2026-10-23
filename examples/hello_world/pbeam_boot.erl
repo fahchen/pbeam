@@ -54,7 +54,42 @@ start(Module, Function, Flags) ->
     ok = pbeam_cap:serve(whereis(user), io),
     ok = pbeam_cap:serve(whereis(standard_error), io),
     ok = pbeam_cap:enter_runtime(Module, Function),
-    Module:Function().
+    try Module:Function() of
+        Result ->
+            at_exit(fun(_Status) -> ok end),
+            Result
+    catch
+        Class:Reason:Stack ->
+            Raise = fun(_Status) -> erlang:raise(Class, Reason, entry_stack(Stack)) end,
+            at_exit(Raise),
+            Raise(1)
+    end.
+
+%% Drop the frames of this module from the stack trace of an exception of
+%% the entry. start_it/1 raises the full stack trace again
+%% (init.erl:1563-1566); the drop is a PBeam choice. The call of the entry
+%% is not a tail call, because at_exit/1 runs after it, so its stack trace
+%% holds a frame of start/3. The drop keeps the root exit line of PBeam,
+%% which holds only the frames of the entry.
+entry_stack(Stack) ->
+    [Frame || {M, _, _, _} = Frame <- Stack, M =/= ?MODULE].
+
+%% When the elixir application runs, finish as elixir -e does after its
+%% commands: 'Elixir.Kernel.CLI':run/1 runs Fun, the at_exit callbacks,
+%% calls Logger.flush() when the module Logger is loaded, and then calls
+%% System.halt(Status) (kernel/cli.ex:58-71, 129-133). For an exception,
+%% Fun raises it again: exec_fun/2 writes the Elixir error and gives the
+%% status 1, the status N of exit({shutdown, N}), or 0 for exit(normal) and
+%% exit(shutdown) (kernel/cli.ex:135-173). Logger.flush() calls filesync/1
+%% of each handler that exports it, so the queue of the async default
+%% handler is written (logger.ex:785-796). The table elixir_config holds
+%% the callbacks; without the elixir application, the root process
+%% returns or raises as after erl -eval.
+at_exit(Fun) ->
+    case ets:whereis(elixir_config) of
+        undefined -> ok;
+        _ -> 'Elixir.Kernel.CLI':run(Fun)
+    end.
 
 %% init.erl:1226-1232.
 get_root(Flags) ->
