@@ -1326,6 +1326,53 @@ pub(super) fn delete(
     Ok(Value(Term::static_atom("true")))
 }
 
+/// Run `ets:delete_object(Table, Object)`, as ERTS `ets_delete_object_2`
+/// (`erl_db.c:3355-3382`) does: remove the objects that are exactly equal to
+/// `Object` ([`Table::erase_object`]) and return `true`. A table that does
+/// not exist or that the caller cannot write raises `badarg` before the
+/// object check (`erl_db.c:3363`). An object that is not a tuple, or a
+/// tuple with fewer elements than the key position, raises `badarg`
+/// (`erl_db.c:3365-3369`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = delete_object(&mut context, &table, &Term::tuple(vec![test_atom("k")]))?;
+/// assert!(matches!(result, BifResult::Value(value) if value == test_atom("true")));
+/// ```
+pub(super) fn delete_object(
+    context: &mut BifContext<'_>,
+    table: &Term,
+    object: &Term,
+) -> Result<BifResult, BeamError> {
+    let caller = context.scheduler.current_process_mut().id;
+    let reds = context
+        .scheduler
+        .current_process_mut()
+        .bif_reductions_signed();
+    let store = Arc::clone(&context.scheduler.ets);
+    let ets = store.shared();
+    let mut found = match ets.write(&context.scheduler.atoms, table, caller, reds) {
+        Ok(found) => found,
+        Err(lacking) => {
+            return Ok(retry(
+                context,
+                lacking,
+                "delete_object",
+                vec![table.clone(), object.clone()],
+            ));
+        }
+    };
+    let Term::Tuple(elements) = object else {
+        return Ok(BifResult::badarg());
+    };
+    if elements.len() < found.keypos() as usize {
+        return Ok(BifResult::badarg());
+    }
+    found.erase_object(&context.scheduler.atoms, elements);
+    Ok(Value(Term::static_atom("true")))
+}
+
 /// Run `ets:take(Table, Key)`, as ERTS `ets_take_2` (`erl_db.c:1355-1373`)
 /// does through `meth->db_take`, and `db_take_hash`
 /// (`erl_db_hash.c:2949-2995`) does for a hash table: return the objects with
