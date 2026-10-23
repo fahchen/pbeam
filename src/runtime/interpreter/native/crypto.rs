@@ -3,7 +3,10 @@
 //! PBeam links `strong_rand_bytes_nif/1`, which reads the entropy of
 //! the host from `/dev/urandom`, which it opens once, and the NIFs that the
 //! `plug_hello` release calls: `hash_nif/2`, `pbkdf2_hmac_nif/5`,
-//! `strong_rand_range_nif/1`, `info_nif/0`, and `info_lib/0`. As ERTS,
+//! `strong_rand_range_nif/1`, `info_nif/0`, and `info_lib/0`. It links
+//! `info_fips/0`, `enable_fips_mode_nif/1`, and the algorithm lists of
+//! `crypto:supports/0,1`, which name only the algorithms that PBeam can
+//! run. As ERTS,
 //! PBeam computes the digests with a static OpenSSL, through the safe
 //! `openssl` crate (`vendored`, OpenSSL 3.5.5).
 //! Each other function of the library gives the runtime error
@@ -107,10 +110,44 @@ pub(super) const FUNCTIONS: [(&str, u32); 70] = [
 /// ```
 pub(super) const BINDINGS: &[Binding] = &[
     Binding {
+        name: "cipher_algorithms",
+        arity: 0,
+        job: Job::Normal,
+        run: |_, _| Ok(BifResult::Value(Term::Nil)),
+    },
+    Binding {
+        name: "curve_algorithms",
+        arity: 0,
+        job: Job::Normal,
+        run: |_, _| Ok(BifResult::Value(Term::Nil)),
+    },
+    Binding {
+        name: "enable_fips_mode_nif",
+        arity: 1,
+        job: Job::Normal,
+        run: |_, arguments| Ok(enable_fips_mode_nif(&arguments[0])),
+    },
+    Binding {
+        name: "hash_algorithms",
+        arity: 0,
+        job: Job::Normal,
+        run: |scheduler, _| hash_algorithms(scheduler),
+    },
+    Binding {
         name: "hash_nif",
         arity: 2,
         job: Job::Normal,
         run: |scheduler, arguments| hash_nif(scheduler, &arguments[0], &arguments[1]),
+    },
+    Binding {
+        name: "info_fips",
+        arity: 0,
+        job: Job::Normal,
+        run: |scheduler, _| {
+            Ok(BifResult::Value(Term::Atom(
+                scheduler.atoms.put("not_supported")?,
+            )))
+        },
     },
     Binding {
         name: "info_lib",
@@ -123,6 +160,18 @@ pub(super) const BINDINGS: &[Binding] = &[
         arity: 0,
         job: Job::Normal,
         run: |scheduler, _| info_nif(scheduler),
+    },
+    Binding {
+        name: "kem_algorithms_nif",
+        arity: 0,
+        job: Job::Normal,
+        run: |_, _| Ok(BifResult::Value(Term::Nil)),
+    },
+    Binding {
+        name: "mac_algorithms",
+        arity: 0,
+        job: Job::Normal,
+        run: |_, _| Ok(BifResult::Value(Term::Nil)),
     },
     Binding {
         name: "pbkdf2_hmac_nif",
@@ -138,6 +187,18 @@ pub(super) const BINDINGS: &[Binding] = &[
                 &arguments[4],
             )
         },
+    },
+    Binding {
+        name: "pubkey_algorithms",
+        arity: 0,
+        job: Job::Normal,
+        run: |_, _| Ok(BifResult::Value(Term::Nil)),
+    },
+    Binding {
+        name: "rsa_opts_algorithms",
+        arity: 0,
+        job: Job::Normal,
+        run: |_, _| Ok(BifResult::Value(Term::Nil)),
     },
     Binding {
         name: "strong_rand_bytes_nif",
@@ -649,6 +710,55 @@ fn random_below(range: &[u8]) -> Option<Vec<u8>> {
                 .unwrap_or(candidate.len());
             return Some(candidate[start..].to_vec());
         }
+    }
+}
+
+/// The digests that `hash_algorithms/0` gives: the digests that PBeam
+/// computes, in the order of the pinned ERTS. ERTS builds the list from
+/// the digest table in reverse (`digest.c:226-242`, `algorithms.c:86-89`),
+/// and lists each digest that the linked OpenSSL has. PBeam lists only the
+/// digests of `Hash`, so a caller that reads the list does not select a
+/// digest that PBeam does not compute (row "NIF stubs" of
+/// `docs/erts-differences.md`).
+const HASH_ALGORITHMS: [&str; 7] = [
+    "sha512_256",
+    "sha512_224",
+    "sha512",
+    "sha384",
+    "sha256",
+    "sha224",
+    "sha",
+];
+
+/// Run `crypto:hash_algorithms/0`: the list of `HASH_ALGORITHMS`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(hash_algorithms(&mut scheduler)?, BifResult::Value(Term::List(_))));
+/// ```
+fn hash_algorithms(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
+    let names = HASH_ALGORITHMS
+        .iter()
+        .map(|name| Ok(Term::Atom(scheduler.atoms.put(name)?)))
+        .collect::<Result<Vec<_>, BeamError>>()?;
+    Ok(BifResult::Value(Term::list_from(names)))
+}
+
+/// Run `crypto:enable_fips_mode_nif/1` as the ERTS NIF of a build without
+/// FIPS support (`fips.c:56-62`): `false` for `true`, `true` for `false`,
+/// and `badarg` for each other term.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(enable_fips_mode_nif(&Term::static_atom("true")), BifResult::Value(_)));
+/// ```
+fn enable_fips_mode_nif(mode: &Term) -> BifResult {
+    match mode {
+        Term::Atom(atom) if atom.is_static("true") => BifResult::Value(Term::static_atom("false")),
+        Term::Atom(atom) if atom.is_static("false") => BifResult::Value(Term::static_atom("true")),
+        _ => BifResult::badarg(),
     }
 }
 
