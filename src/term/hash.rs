@@ -29,7 +29,7 @@
 use num_bigint::Sign;
 
 use super::{
-    Atom, AtomTable, Binary, Fun, Map, PortId, ProcessId, Reference, Target, Term,
+    Atom, AtomTable, Binary, Fun, Map, PortId, ProcessId, Record, Reference, Target, Term,
     map::{Child, Form, Node},
     match_context::MATCH_CONTEXT_ESCAPE,
 };
@@ -58,6 +58,7 @@ const TYPE_CAR: u64 = 3;
 const TYPE_CDR: u64 = 4;
 const TYPE_STRING: u64 = 5;
 const TYPE_TUPLE: u64 = 6;
+const TYPE_RECORD: u64 = 7;
 const TYPE_FLATMAP: u64 = 8;
 const TYPE_HASHMAP_HEAD_ARRAY: u64 = 9;
 const TYPE_HASHMAP_HEAD_BITMAP: u64 = 10;
@@ -112,6 +113,7 @@ enum Shape<'a> {
     /// The cells of a list that is not empty.
     List(Cells<'a>),
     Tuple(&'a [Term]),
+    Record(&'a Record),
     Map(&'a Map),
     Binary(&'a Binary),
     /// An integer outside the small-integer range: its sign and its
@@ -158,6 +160,7 @@ fn shape(term: &Term) -> Shape<'_> {
         ),
         Term::Float(value) => Shape::Float(value.to_bits()),
         Term::Tuple(elements) => Shape::Tuple(elements),
+        Term::Record(record) => Shape::Record(record),
         Term::Map(map) => Shape::Map(map),
         Term::Binary(bytes) => Shape::Binary(bytes),
         Term::Reference(reference) => Shape::Reference(*reference),
@@ -522,6 +525,21 @@ impl State {
                 }
                 return Some(Item::Term(last));
             }
+            // ERTS mixes the type and the header arity, then the hash of
+            // the definition and the values (`erl_term_hashing.c:1850-1875`).
+            Shape::Record(record) => {
+                let values = record.values();
+                self.mix_alpha(TYPE_RECORD);
+                self.mix_beta(values.len() as u64 + 1);
+                self.mix_immediate(
+                    (u64::from(record.def().hash) << IMMED1_TAG_BITS) | SMALL_INTEGER_TAG,
+                );
+                let (last, values) = values.split_last()?;
+                for value in values {
+                    self.push_term(stack, value);
+                }
+                return Some(Item::Term(last));
+            }
             Shape::Map(map) => match map.form() {
                 Form::Flat(pairs) => {
                     self.mix_alpha(TYPE_FLATMAP);
@@ -781,6 +799,7 @@ const FUNNY_11: u32 = 268_440_577;
 const FUNNY_12: u32 = 268_440_581;
 const FUNNY_13: u32 = 268_440_593;
 const FUNNY_14: u32 = 268_440_611;
+const FUNNY_15: u32 = 268_440_629;
 
 /// The golden-ratio mix value of `make_hash2` (`HCONST`,
 /// `erl_term_hashing.c:437`).
@@ -803,6 +822,7 @@ const HCONST_14: u32 = 0xa708_a81e;
 const HCONST_15: u32 = 0x4540_21d7;
 const HCONST_16: u32 = 0xe377_9b90;
 const HCONST_19: u32 = 0xbe1e_08bb;
+const HCONST_23: u32 = 0x36fb_ef9f;
 
 /// The `NIL_DEF` tag value of `[]` in a `make_hash2` mix
 /// (`erl_term.h:1442-1443`).
@@ -845,6 +865,14 @@ enum HashStep<'a> {
         /// The elements of the tuple.
         elements: &'a [Term],
         /// The element to hash next.
+        index: usize,
+    },
+    /// Hash the definition tuple and then the values of a record from
+    /// `index`, then mix the arity (`MAKE_HASH_RECORD_OP`).
+    Record {
+        /// The record.
+        record: &'a Record,
+        /// The term to hash next: 0 for the definition, then each value.
         index: usize,
     },
     /// Hash the free variables of a local fun from `index`
@@ -927,6 +955,7 @@ pub(crate) fn make_hash(atoms: &AtomTable, term: &Term) -> u32 {
                     hash = uint32_step(hash, number, FUNNY_9).wrapping_mul(FUNNY_10);
                 }
                 Term::Tuple(elements) => stack.push(HashStep::Tuple { elements, index: 0 }),
+                Term::Record(record) => stack.push(HashStep::Record { record, index: 0 }),
                 Term::Map(_) => {
                     hash = hash
                         .wrapping_mul(FUNNY_13)
@@ -951,6 +980,29 @@ pub(crate) fn make_hash(atoms: &AtomTable, term: &Term) -> u32 {
                         .wrapping_add(elements.len() as u32);
                 }
             },
+            // ERTS hashes the definition word as a tuple term and then the
+            // values (`erl_term_hashing.c:369-405`).
+            HashStep::Record { record, index } => {
+                let values = record.values();
+                let element = match index {
+                    0 => Some(&record.def().tuple),
+                    _ => values.get(index - 1),
+                };
+                match element {
+                    Some(element) => {
+                        next = Some(HashStep::Term(element));
+                        stack.push(HashStep::Record {
+                            record,
+                            index: index + 1,
+                        });
+                    }
+                    None => {
+                        hash = hash
+                            .wrapping_mul(FUNNY_15)
+                            .wrapping_add(values.len() as u32 + 1);
+                    }
+                }
+            }
             HashStep::Array { elements, index } => {
                 if let Some(element) = elements.get(index) {
                     next = Some(HashStep::Term(element));
@@ -1548,6 +1600,19 @@ pub(crate) fn make_hash2(atoms: &AtomTable, term: &Term) -> (u32, u64) {
                 if let Some((first, rest)) = elements.split_first() {
                     for element in rest.iter().rev() {
                         stack.push(Hash2Item::Term(element));
+                        iterations += 1;
+                    }
+                    next = Some(first);
+                }
+            }
+            // ERTS mixes the field count and the definition hash, then the
+            // values in the sorted key order (`erl_term_hashing.c:1082-1110`).
+            Term::Record(record) => {
+                let values = record.values();
+                hash = hash2_with(hash, values.len() as u32, record.def().hash, HCONST_23);
+                if let Some((first, rest)) = values.split_first() {
+                    for value in rest.iter().rev() {
+                        stack.push(Hash2Item::Term(value));
                         iterations += 1;
                     }
                     next = Some(first);

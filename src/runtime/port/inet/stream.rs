@@ -120,6 +120,20 @@ pub(in crate::runtime) enum Event {
         /// The bytes of the datagram.
         data: Vec<u8>,
     },
+    /// `{udp, S, Address, Port, Data}` to the owner of an active
+    /// `udp_inet` port (`packet_binary_message`, inet_drv.c:4106-4160).
+    ActiveDatagram {
+        /// `[Family, P1, P0, A, B, C, D]` of the sender.
+        address: Vec<u8>,
+        /// The bytes of the datagram.
+        data: Vec<u8>,
+    },
+    /// `{udp_passive, S}` to the owner at the end of `{active, N}`
+    /// (`packet_passive_message`, inet_drv.c:4215-4239).
+    Passive,
+    /// `{udp_error, S, Reason}` to the owner of an active `udp_inet` port
+    /// (`packet_error_message`, inet_drv.c:4245-4267).
+    DatagramError(String),
     /// `{inet_async, S, Ref, ok}` or `{inet_async, S, Ref, {error,
     /// Reason}}` of the connect of `connector` (`async_ok` and
     /// `async_error`, inet_drv.c:2563-2572).

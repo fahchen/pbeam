@@ -12,7 +12,10 @@ clap = { version = "4", features = ["derive"] }
 crc32fast = "1.5.2"
 flate2 = { version = "1.1.10", features = ["zlib"] }
 libc = "0.2"
-nix = { version = "0.31.3", default-features = false, features = ["fs"] }
+nix = { version = "0.31.3", default-features = false, features = [
+  "fs",
+  "hostname",
+] }
 num-bigint = "0.5"
 num-integer = "0.1"
 num-traits = "0.2"
@@ -792,6 +795,10 @@ name = "heap_flags"
 path = "tests/integration/heap_flags.rs"
 
 [[test]]
+name = "spawn_opt"
+path = "tests/integration/spawn_opt.rs"
+
+[[test]]
 name = "bif_cause"
 path = "tests/integration/bif_cause.rs"
 
@@ -804,5 +811,13 @@ name = "magic_ref"
 path = "tests/integration/magic_ref.rs"
 
 [[test]]
+name = "native_record"
+path = "tests/integration/native_record.rs"
+
+[[test]]
 name = "chksum"
 path = "tests/integration/chksum.rs"
+
+[[test]]
+name = "net"
+path = "tests/integration/net.rs"

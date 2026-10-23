@@ -7,6 +7,7 @@
 
 use std::sync::LazyLock;
 
+use crate::error::BeamError;
 use crate::term::{AtomTable, Map, Term};
 
 /// The heap flags of one process, or the node defaults that a new process
@@ -175,4 +176,43 @@ pub(in crate::runtime) fn max_heap_size_map(
     // ponytail: each key is an atom, so `from_pairs` cannot fail.
     .expect("the max_heap_size map holds atom keys");
     Term::Map(map)
+}
+
+/// Return the list of the `garbage_collection` item of `process_info/1`
+/// and `process_info/2`, as `process_info_aux` builds it
+/// (`erl_bif_info.c:2072-2094`): `max_heap_size`, `min_bin_vheap_size`,
+/// `min_heap_size`, `fullsweep_after`, and `minor_gcs`, which is 0 because
+/// PBeam does no garbage collection.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let list = garbage_collection_list(&atoms, HeapFlags::default())?;
+/// ```
+///
+/// # Errors
+///
+/// A full atom table cannot hold the atom `minor_gcs`.
+pub(in crate::runtime) fn garbage_collection_list(
+    atoms: &AtomTable,
+    flags: HeapFlags,
+) -> Result<Term, BeamError> {
+    let max_heap_size = max_heap_size_map(atoms, flags.max_heap_size, flags.max_heap_flags);
+    let minor_gcs = atoms.put("minor_gcs")?;
+    Ok(Term::list_from(vec![
+        Term::tuple(vec![Term::static_atom("max_heap_size"), max_heap_size]),
+        Term::tuple(vec![
+            Term::static_atom("min_bin_vheap_size"),
+            Term::Integer(flags.min_bin_vheap_size),
+        ]),
+        Term::tuple(vec![
+            Term::static_atom("min_heap_size"),
+            Term::Integer(flags.min_heap_size),
+        ]),
+        Term::tuple(vec![
+            Term::static_atom("fullsweep_after"),
+            Term::Integer(i64::from(flags.fullsweep_after)),
+        ]),
+        Term::tuple(vec![Term::Atom(minor_gcs), Term::Integer(0)]),
+    ]))
 }

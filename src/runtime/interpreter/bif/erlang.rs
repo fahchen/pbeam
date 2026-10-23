@@ -4,7 +4,10 @@ use super::BifResult::{Raise, Trap, Value};
 use super::*;
 use crate::beam::code::Instruction;
 use crate::runtime::capability;
-use crate::runtime::heap_flags::{HeapFlags, max_heap_size, max_heap_size_map, next_heap_size};
+use crate::runtime::dirty::DIRTY_IO_THREADS;
+use crate::runtime::heap_flags::{
+    HeapFlags, garbage_collection_list, max_heap_size, max_heap_size_map, next_heap_size,
+};
 use crate::runtime::host;
 use crate::runtime::interpreter::DEFAULT_ERROR_HANDLER;
 use crate::runtime::interpreter::code_table::{CodeTable, Finish};
@@ -14,6 +17,7 @@ use crate::runtime::process::{InitialCall, OTHER_PROCESS_INFO_ITEMS};
 use crate::runtime::process::{LinkId, ProcessState};
 use crate::runtime::scheduler::PTAB_SIZE;
 use crate::runtime::scheduler::{AliasMode, CONTEXT_REDS, Flushed, MonitorOptions, MonitorTarget};
+use crate::runtime::schedulers::{Schedulers, logical_processors_available};
 use crate::runtime::signal::Signal;
 use crate::runtime::time::{self, TimeValue};
 use crate::runtime::timer::Timers;
@@ -312,9 +316,7 @@ fn boolean_flag(flag: &mut bool, value: Option<&str>) -> BifResult {
 ///
 /// Each flag of `UNSUPPORTED_PROCESS_FLAGS` gives a runtime error for a
 /// value that passes the check, and so does [`process_heap_flag`] where
-/// ERTS stops the emulator. ERTS raises `badarg`
-/// for a `scheduler` value above the scheduler count, which PBeam does not
-/// model, and PBeam gives the runtime error.
+/// ERTS stops the emulator.
 pub(super) fn process_flag(
     context: &mut BifContext<'_>,
     flag: &Term,
@@ -396,7 +398,10 @@ pub(super) fn process_flag(
             } else if flag.is_static("save_calls") {
                 small.is_some_and(|calls| (0..=10_000).contains(&calls))
             } else {
-                small.is_some_and(|scheduler| scheduler >= 0)
+                // `process_flag_2` takes a scheduler from 0 to the scheduler
+                // count (`bif.c:2072-2076`).
+                let schedulers = context.scheduler.scheduler_count();
+                small.is_some_and(|scheduler| (0..=schedulers).contains(&scheduler))
             };
             if !valid {
                 // `process_flag_aux` sets the cause `none` for `save_calls`
@@ -589,6 +594,7 @@ pub(super) fn system_flag(
         _ => false,
     };
     let defaults = context.scheduler.node().heap_flags();
+    let schedulers = context.scheduler.scheduler_count();
     let atoms = &context.scheduler.atoms;
     let size = value.small_integer().filter(|size| *size >= 0);
     let valid = match (atoms.name_of(item), value) {
@@ -600,7 +606,7 @@ pub(super) fn system_flag(
         ("backtrace_depth", _) => value.small_integer().is_some_and(|depth| depth >= 0),
         ("time_offset", Term::Atom(finalize)) if atoms.name_of(finalize) == "finalize" => true,
         (name, _) if UNSUPPORTED_SYSTEM_FLAGS.contains(&name) => {
-            unsupported_system_flag_value(name, atoms, value)
+            unsupported_system_flag_value(name, atoms, value, schedulers)
         }
         _ => return Ok(BifResult::badopt()),
     };
@@ -676,12 +682,12 @@ pub(super) fn system_flag(
 /// - `multi_scheduling` takes `block`, `unblock`, `block_normal`, or
 ///   `unblock_normal`.
 /// - `schedulers_online` and `dirty_cpu_schedulers_online` take a small
-///   integer of 1 or more (`erts_set_schedulers_online`,
-///   `erl_process.c:8241-8242`).
+///   integer from 1 to the scheduler count `schedulers`
+///   (`erts_set_schedulers_online`, `erl_process.c:8241-8246`).
 /// - `trace_control_word` takes an integer from 0 to `u32::MAX`
 ///   (`db_set_trace_control_word`, `erl_db_util.c:1091-1103`).
-/// - `sequential_tracer` takes `false`, a pid, or `{Module, State}` with an
-///   atom `Module` (`erts_term_to_tracer`, `erl_trace.c:3090-3129`).
+/// - `sequential_tracer` takes `false`, a pid, a port, or `{Module, State}`
+///   with an atom `Module` (`erts_term_to_tracer`, `erl_trace.c:3090-3129`).
 /// - `scheduler_wall_time` takes `true` or `false`, and
 ///   `microstate_accounting` takes `true`, `false`, or `reset`.
 /// - `outstanding_system_requests_limit` takes an integer from 1 to
@@ -690,23 +696,29 @@ pub(super) fn system_flag(
 /// - `scheduling_statistics` takes `disable`, `enable`, or `clear`.
 /// - `internal_cpu_topology` takes `undefined` or a non-empty proper list of
 ///   tuples `{cpu, Node, Processor, ProcessorNode, Core, Thread, Logical}`
-///   (`erts_set_cpu_topology`, `erl_cpu_topology.c:1348-1400`).
-/// - `erts_alloc` takes `{Allocator, Parameter, Value}` with two atoms and
-///   an integer (`erts_alloc_set_dyn_param`, `erl_alloc.c:3445-3462`).
+///   (`erts_set_cpu_topology`, `erl_cpu_topology.c:1348-1450`) that
+///   [`valid_cpu_topology`] accepts.
+/// - `erts_alloc` takes `{Allocator, Parameter, Value}` with an allocator
+///   name of `ALLOCATORS`, an atom, and an integer
+///   (`erts_alloc_set_dyn_param`, `erl_alloc.c:3445-3469`).
 ///
 /// `reset_seq_trace`, `cpu_topology`, and `scheduler_bind_type` accept each
 /// value here. ERTS also rejects a value that this check accepts when the
-/// value needs the state of the missing subsystem: the scheduler count, the
-/// tracer module, the allocator names, the CPU topology checks, and the CPU
-/// binding support of the host.
+/// value needs the state of the missing subsystem: the dirty CPU scheduler
+/// count, the tracer module, and the CPU binding support of the host.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(!unsupported_system_flag_value("multi_scheduling", &AtomTable::new(), &Term::static_atom("foo")));
-/// assert!(!unsupported_system_flag_value("schedulers_online", &AtomTable::new(), &Term::Integer(0)));
+/// assert!(!unsupported_system_flag_value("multi_scheduling", &AtomTable::new(), &Term::static_atom("foo"), 1));
+/// assert!(!unsupported_system_flag_value("schedulers_online", &AtomTable::new(), &Term::Integer(2), 1));
 /// ```
-fn unsupported_system_flag_value(name: &str, atoms: &AtomTable, value: &Term) -> bool {
+fn unsupported_system_flag_value(
+    name: &str,
+    atoms: &AtomTable,
+    value: &Term,
+    schedulers: i64,
+) -> bool {
     let atom = match value {
         Term::Atom(atom) => Some(atoms.name_of(atom)),
         _ => None,
@@ -716,23 +728,17 @@ fn unsupported_system_flag_value(name: &str, atoms: &AtomTable, value: &Term) ->
         _ => None,
     };
     let small = value.small_integer();
-    let cpu = |cpu: &Term| match cpu {
-        Term::Tuple(elements) => {
-            matches!(elements.as_ref(), [Term::Atom(tag), _, _, _, _, _, _] if tag.is_static("cpu"))
-        }
-        _ => false,
-    };
     match name {
         "multi_scheduling" => matches!(
             atom,
             Some("block" | "unblock" | "block_normal" | "unblock_normal")
         ),
         "schedulers_online" | "dirty_cpu_schedulers_online" => {
-            small.is_some_and(|count| count >= 1)
+            small.is_some_and(|count| (1..=schedulers).contains(&count))
         }
         "trace_control_word" => integer.is_some_and(|word| u32::try_from(word).is_ok()),
         "sequential_tracer" => match value {
-            Term::Pid(_) => true,
+            Term::Pid(_) | Term::Port(_) => true,
             Term::Tuple(elements) => matches!(elements.as_ref(), [Term::Atom(_), _]),
             _ => atom == Some("false"),
         },
@@ -743,18 +749,137 @@ fn unsupported_system_flag_value(name: &str, atoms: &AtomTable, value: &Term) ->
         }
         "scheduling_statistics" => matches!(atom, Some("disable" | "enable" | "clear")),
         "internal_cpu_topology" => match value.proper_list() {
-            Some(cpus) => !value.is_nil() && cpus.clone().all(cpu),
+            Some(cpus) => !value.is_nil() && valid_cpu_topology(cpus),
             None => atom == Some("undefined"),
         },
         "erts_alloc" => match value {
-            Term::Tuple(elements) => matches!(
-                elements.as_ref(),
-                [Term::Atom(_), Term::Atom(_), Term::Integer(_)]
-            ),
+            Term::Tuple(elements) => match elements.as_ref() {
+                [
+                    Term::Atom(allocator),
+                    Term::Atom(parameter),
+                    size @ (Term::Integer(_) | Term::BigInt(_)),
+                ] => {
+                    let allocator = atoms.name_of(allocator);
+                    // An allocator of the default `alloc_util` set reads the
+                    // `sbct` value as a `Uint` (`erl_alloc.c:3471-3481`).
+                    let uint = match size {
+                        Term::Integer(size) => *size >= 0,
+                        size => {
+                            matches!(size, Term::BigInt(size) if u64::try_from(size.as_ref()).is_ok())
+                        }
+                    };
+                    ALLOCATORS.contains(&allocator)
+                        && (!parameter.is_static("sbct")
+                            || !ALLOC_UTIL_ALLOCATORS.contains(&allocator)
+                            || uint)
+                }
+                _ => false,
+            },
             _ => false,
         },
         _ => true,
     }
+}
+
+/// The allocator names of ERTS (`erl_alloc.types:71-85`), which
+/// `erts_alloc_set_dyn_param` looks up (`erl_alloc.c:3464-3469`).
+const ALLOCATORS: &[&str] = &[
+    "sys_alloc",
+    "temp_alloc",
+    "sl_alloc",
+    "std_alloc",
+    "ll_alloc",
+    "eheap_alloc",
+    "ets_alloc",
+    "fix_alloc",
+    "literal_alloc",
+    "binary_alloc",
+    "driver_alloc",
+    "test_alloc",
+];
+
+/// The allocators of `ALLOCATORS` that the default emulator flags enable as
+/// `alloc_util` allocators: each one except `sys_alloc` and `test_alloc`
+/// (`erl_alloc.c:3471-3474`; the pinned ERTS gives `notsup` for the two).
+const ALLOC_UTIL_ALLOCATORS: &[&str] = &[
+    "temp_alloc",
+    "sl_alloc",
+    "std_alloc",
+    "ll_alloc",
+    "eheap_alloc",
+    "ets_alloc",
+    "fix_alloc",
+    "literal_alloc",
+    "binary_alloc",
+    "driver_alloc",
+];
+
+/// The largest identifier of a CPU topology, `ERTS_MAX_CPU_TOPOLOGY_ID`
+/// (`erl_cpu_topology.c:139`).
+const MAX_CPU_TOPOLOGY_ID: i64 = 0xffff;
+
+/// Tell whether `erts_set_cpu_topology` accepts the list `cpus`
+/// (`erl_cpu_topology.c:1388-1450`). Each element is a tuple
+/// `{cpu, Node, Processor, ProcessorNode, Core, Thread, Logical}` of small
+/// integers from -1 to `MAX_CPU_TOPOLOGY_ID`, and `verify_topology`
+/// (`erl_cpu_topology.c:1188-1248`) accepts the list: the logical
+/// identifiers are unique, the entities are unique, and the NUMA nodes in
+/// processor order (`processor_order_cmp`, `erl_cpu_topology.c:425-441`)
+/// are consistent.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let cpu = Term::tuple([Term::static_atom("cpu"), 0, 0, 0, 0, 0, 0].map(...));
+/// assert!(valid_cpu_topology(Term::list_from([cpu.clone()]).proper_list().unwrap()));
+/// assert!(!valid_cpu_topology(Term::list_from([cpu.clone(), cpu]).proper_list().unwrap()));
+/// ```
+fn valid_cpu_topology<'a>(cpus: impl Iterator<Item = &'a Term>) -> bool {
+    // [processor, node, processor_node, core, thread], logical.
+    let mut entries = Vec::new();
+    for cpu in cpus {
+        let Term::Tuple(elements) = cpu else {
+            return false;
+        };
+        let [Term::Atom(tag), ids @ ..] = elements.as_ref() else {
+            return false;
+        };
+        if !tag.is_static("cpu") || ids.len() != 6 {
+            return false;
+        }
+        let mut id = [0; 6];
+        for (slot, term) in id.iter_mut().zip(ids) {
+            match term.small_integer() {
+                Some(value) if (-1..=MAX_CPU_TOPOLOGY_ID).contains(&value) => *slot = value,
+                _ => return false,
+            }
+        }
+        let [node, processor, processor_node, core, thread, logical] = id;
+        entries.push(([processor, node, processor_node, core, thread], logical));
+    }
+    let mut logical: Vec<i64> = entries.iter().map(|(_, logical)| *logical).collect();
+    logical.sort_unstable();
+    if logical.windows(2).any(|pair| pair[0] == pair[1]) {
+        return false;
+    }
+    entries.sort_unstable();
+    if entries.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return false;
+    }
+    let [processor, node, processor_node, ..] = entries[0].0;
+    let no_nodes = node < 0 && processor_node < 0;
+    let (mut node, mut processor) = (node, processor);
+    entries[1..].iter().all(
+        |([next_processor, next_node, next_processor_node, ..], _)| {
+            if no_nodes {
+                return *next_node < 0 && *next_processor_node < 0;
+            }
+            let same = *next_processor != processor || *next_node == node;
+            node = *next_node;
+            processor = *next_processor;
+            same && (node < 0) != (*next_processor_node < 0)
+        },
+    )
 }
 
 /// Run `erlang:error(Reason)` as ERTS `error_1` (`bif.c:1436-1440`) does:
@@ -1537,30 +1662,42 @@ pub(super) fn spawn_link(
     create_process(context.scheduler, module, function, arguments, options)
 }
 
-/// Run `erlang:spawn_opt/4`, which `erlang:spawn_monitor/3` in `erlang.beam`
-/// calls with the options `[monitor]`: start a process with the spawn
-/// options in `options`, as ERTS `spawn_opt_4` (`bif.c`) does. The option
-/// `link` links the new process and `monitor` monitors it. The option
-/// `{monitor, MonitorOpts}` monitors it with the `tag` of `MonitorOpts`,
-/// which `code_server:schedule_on_load/4` gives (code_server.erl:1396), and
-/// `MonitorOpts` that `erlang:monitor/3` rejects raise `badarg`
-/// (`erl_process.c:12406-12418`). An `alias` or `priority` monitor option
-/// gives a runtime error. With a monitor the result is `{Pid, Reference}`,
-/// else `Pid`. The option
-/// `{message_queue_data, on_heap | off_heap}` sets the start value of the
-/// `message_queue_data` flag of the new process, and the last such option
-/// wins (`erl_process.c:12305-12319`). The option `{priority, Level}` sets
-/// the start priority of the new process, else it is `normal`
-/// (`erl_process.c:12246`, `12275-12287`). `options` that are not a proper
-/// list, and a `message_queue_data` or `priority` option with another
-/// value, raise `badarg` with the `error_info` cause `badopt`, as
-/// `erts_parse_spawn_opts` (`erl_process.c:12222-12434`) and
-/// `spawn_opt_4` (`bif.c:1040-1051`) do. The PBeam
-/// option `{capabilities, Map}` restricts the capabilities of the new process
-/// (see `capability::restrictions`), and the last such option wins. A `Map`
-/// that is not valid raises the same `badarg`. Any other option gives a runtime
-/// error. After the options, a `module` or `function` that is not an atom
-/// raises `badarg`, as in `spawn/3`.
+/// Run `erlang:spawn_opt/4`: start a process with the spawn options in
+/// `options`, as ERTS `spawn_opt_4` (`bif.c:1027-1074`) and
+/// `erts_parse_spawn_opts` (`erl_process.c:12222-12434`) do:
+///
+/// - `link` and `{link, []}` link the new process (`erl_process.c:12256`,
+///   `12396-12405`). `monitor` and `{monitor, MonitorOpts}` monitor it, with
+///   the `tag` of `MonitorOpts`, and the result is `{Pid, Reference}`
+///   (`erl_process.c:12260-12265`, `12406-12417`).
+/// - `{message_queue_data, on_heap | off_heap}`, `{priority, Level}`, and
+///   `{async_dist, true | false}` set the start values of these flags
+///   (`erl_process.c:12275-12320`).
+/// - `{min_heap_size, Size}` and `{min_bin_vheap_size, Size}` take a small
+///   integer of 0 or more: a size below the node default gives the node
+///   default, else the next heap size. `{fullsweep_after, N}` keeps a small
+///   integer of 0 or more in a `Uint16`. `{max_heap_size, Max}` takes a
+///   value of `max_heap_size`, and the size is 0 or at least the minimum
+///   heap size of the options (`erl_process.c:12321-12360`, `12429-12431`).
+/// - `{scheduler, N}` takes a small integer from 0 to the scheduler count
+///   (`erl_process.c:12361-12369`); 0 does not bind the process.
+/// - The PBeam option `{capabilities, Map}` restricts the capabilities of
+///   the new process (see `capability::restrictions`).
+///
+/// The last option of a kind wins. As in ERTS, the heap flags of the options
+/// apply only when the options include `min_heap_size`, `priority`,
+/// `fullsweep_after`, `max_heap_size`, or `scheduler` (`SPO_USE_ARGS`,
+/// `erl_process.h:1515-1520`), else the new process has the node heap flags.
+/// Each other option, a value that is not valid, and `options` that are not
+/// a proper list raise `badarg` with the `error_info` cause `badopt`
+/// (`bif.c:1039-1051`). After the options, a `module` or `function` that is
+/// not an atom raises `badarg`, as in `spawn/3`.
+///
+/// # Errors
+///
+/// The monitor options `alias` and `priority`, the link option `priority`,
+/// `{scheduler, N}` with `N` above 0, and a minimum heap size at or above the largest heap size of ERTS give a
+/// runtime error when all options are valid.
 ///
 /// # Examples
 ///
@@ -1568,7 +1705,6 @@ pub(super) fn spawn_link(
 /// let result = spawn_opt(&mut context, &module, &function, &Term::nil(), &Term::list_from(vec![monitor]))?;
 /// assert!(matches!(result, BifResult::Value(Term::Tuple(_))));
 /// assert!(matches!(spawn_opt(&mut context, &module, &function, &Term::nil(), &link_x)?, BifResult::Raise { .. }));
-/// assert!(spawn_opt(&mut context, &module, &function, &Term::nil(), &Term::list_from(vec![priority])).is_err());
 /// ```
 pub(super) fn spawn_opt(
     context: &mut BifContext<'_>,
@@ -1580,68 +1716,148 @@ pub(super) fn spawn_opt(
     let Some(options) = options.proper_list() else {
         return Ok(BifResult::badopt());
     };
+    let node = context.scheduler.node().heap_flags();
+    let schedulers = context.scheduler.scheduler_count();
+    let atoms = &context.scheduler.atoms;
     let mut spawn_options = SpawnOptions::default();
+    let mut heap = node;
+    let mut use_heap = false;
+    // ERTS reads each option before it fails (`erl_process.c:12253-12424`),
+    // so an option that is not valid gives `badarg` also after an option
+    // that PBeam does not support.
+    let mut valid = true;
+    // The runtime error of an option that PBeam does not support. A later
+    // option of the same kind replaces the link and monitor flags
+    // (`erl_process.c:12260-12265`, `12396-12417`) and the scheduler
+    // (`erl_process.c:12369`). ERTS stops at once for a huge heap size.
+    let (mut link_error, mut monitor_error, mut scheduler_error) = (None, None, None);
+    let mut heap_error = None;
+    let not_supported = |option: &Term| {
+        error(format!(
+            "unsupported spawn option {}",
+            debug_term(option, atoms)
+        ))
+    };
+    let minimum = |size: Option<i64>, default: i64| match size.filter(|size| *size >= 0) {
+        None => None,
+        Some(size) if size < default => Some(Ok(default)),
+        Some(size) => Some(next_heap_size(size).ok_or_else(|| no_heap_size(size))),
+    };
+    let is_priority = |item: &Term| matches!(item, Term::Atom(item) if item.is_static("priority"));
     for option in options {
-        match option {
-            Term::Atom(option) if option.is_static("link") => spawn_options.link = true,
-            Term::Atom(option) if option.is_static("monitor") => {
+        let pair = match option {
+            Term::Tuple(pair) => match pair.as_ref() {
+                [Term::Atom(name), value] => Some((atoms.name_of(name), value)),
+                _ => None,
+            },
+            _ => None,
+        };
+        match (option, pair) {
+            (Term::Atom(name), _) if name.is_static("link") => spawn_options.link = true,
+            (Term::Atom(name), _) if name.is_static("monitor") => {
                 spawn_options.monitor = Some(Term::static_atom("DOWN"));
+                monitor_error = None;
             }
-            Term::Tuple(option) if matches!(option.as_ref(), [Term::Atom(name), _] if name.is_static("monitor")) =>
+            // `erts_link_opts` takes a proper list of `priority`
+            // (`bif.c:675-699`).
+            (_, Some(("link", value)))
+                if value
+                    .proper_list()
+                    .is_some_and(|mut link| link.all(is_priority)) =>
             {
-                let Some(monitor) = monitor_options(&option[1]) else {
-                    return Ok(BifResult::badopt());
-                };
-                if monitor.alias.is_some() || monitor.priority {
-                    return Err(error(format!(
-                        "unsupported spawn option {}",
-                        debug_term(&Term::Tuple(option.clone()), &context.scheduler.atoms)
-                    )));
+                spawn_options.link = true;
+                link_error = (!value.is_nil()).then(|| not_supported(option));
+            }
+            (_, Some(("monitor", value))) => match monitor_options(value) {
+                Some(monitor) => {
+                    monitor_error = (monitor.alias.is_some() || monitor.priority)
+                        .then(|| not_supported(option));
+                    spawn_options.monitor = Some(monitor.tag);
                 }
-                spawn_options.monitor = Some(monitor.tag);
-            }
-            Term::Tuple(option) if matches!(option.as_ref(), [Term::Atom(name), _] if name.is_static("message_queue_data")) =>
+                None => valid = false,
+            },
+            (_, Some(("message_queue_data", Term::Atom(value))))
+                if value.is_one_of(&["on_heap", "off_heap"]) =>
             {
-                spawn_options.flags.off_heap_message_queue = match &option[1] {
-                    Term::Atom(value) if value.is_static("on_heap") => false,
-                    Term::Atom(value) if value.is_static("off_heap") => true,
-                    _ => return Ok(BifResult::badopt()),
-                };
+                spawn_options.flags.off_heap_message_queue = value.is_static("off_heap");
             }
-            Term::Tuple(option) if matches!(option.as_ref(), [Term::Atom(name), _] if name.is_static("priority")) =>
+            (_, Some(("priority", Term::Atom(value))))
+                if let Some(priority) = Priority::from_name(atoms.name_of(value)) =>
             {
-                // `erts_parse_spawn_opts` takes `max`, `high`, `normal`, or
-                // `low`, and gives `badarg` for each other value
-                // (`erl_process.c:12275-12287`).
-                let priority = match &option[1] {
-                    Term::Atom(value) => {
-                        Priority::from_name(context.scheduler.atoms.name_of(value))
-                    }
-                    _ => None,
-                };
-                let Some(priority) = priority else {
-                    return Ok(BifResult::badopt());
-                };
                 spawn_options.flags.priority = priority;
+                use_heap = true;
             }
-            Term::Tuple(option) if matches!(option.as_ref(), [Term::Atom(name), _] if context.scheduler.atoms.name_of(name) == "capabilities") =>
+            (_, Some(("async_dist", Term::Atom(value)))) if value.is_one_of(&["true", "false"]) => {
+                spawn_options.flags.async_dist = value.is_static("true");
+            }
+            (_, Some(("min_heap_size", value)))
+                if let Some(size) = minimum(value.small_integer(), node.min_heap_size) =>
             {
-                let Some(restrictions) =
-                    capability::restrictions(&context.scheduler.atoms, &option[1])
-                else {
-                    return Ok(BifResult::badopt());
-                };
+                use_heap = true;
+                match size {
+                    Ok(size) => heap.min_heap_size = size,
+                    Err(huge) => _ = heap_error.get_or_insert(huge),
+                }
+            }
+            (_, Some(("min_bin_vheap_size", value)))
+                if let Some(size) = minimum(value.small_integer(), node.min_bin_vheap_size) =>
+            {
+                match size {
+                    Ok(size) => heap.min_bin_vheap_size = size,
+                    Err(huge) => _ = heap_error.get_or_insert(huge),
+                }
+            }
+            (_, Some(("fullsweep_after", value)))
+                if let Some(count) = value.small_integer().filter(|count| *count >= 0) =>
+            {
+                // `max_gen_gcs` is a `Uint16` (`erl_process.h:1145`).
+                heap.fullsweep_after = count as u16;
+                use_heap = true;
+            }
+            (_, Some(("max_heap_size", value)))
+                if let Some((size, flags)) = max_heap_size(value, node.max_heap_flags) =>
+            {
+                heap.max_heap_size = size;
+                heap.max_heap_flags = flags;
+                use_heap = true;
+            }
+            (_, Some(("scheduler", value)))
+                if value
+                    .small_integer()
+                    .is_some_and(|index| (0..=schedulers).contains(&index)) =>
+            {
+                // ERTS binds the process to scheduler `N` above 0
+                // (`erl_process.c:12500-12507`).
+                scheduler_error =
+                    (!matches!(value, Term::Integer(0))).then(|| not_supported(option));
+                use_heap = true;
+            }
+            (_, Some(("capabilities", value)))
+                if let Some(restrictions) = capability::restrictions(atoms, value) =>
+            {
                 spawn_options.capabilities = Some(restrictions);
             }
-            // ponytail: ERTS accepts more options; see "Spawn options" in docs/erts-differences.md.
-            _ => {
-                return Err(error(format!(
-                    "unsupported spawn option {}",
-                    debug_term(option, &context.scheduler.atoms)
-                )));
-            }
+            _ => valid = false,
         }
     }
+    if !valid || (heap.max_heap_size != 0 && heap.max_heap_size < heap.min_heap_size) {
+        return Ok(BifResult::badopt());
+    }
+    if let Some(unsupported) = heap_error
+        .or(link_error)
+        .or(monitor_error)
+        .or(scheduler_error)
+    {
+        // `erl_create_process` checks the MFA types before it uses an option
+        // (`erl_process.c:12490-12492`).
+        if !matches!((module, function), (Term::Atom(_), Term::Atom(_)))
+            || arguments.proper_list().is_none()
+        {
+            return Ok(BifResult::badarg());
+        }
+        return Err(unsupported);
+    }
+    spawn_options.flags.heap_flags = use_heap.then_some(heap);
     create_process(
         context.scheduler,
         module,
@@ -3097,6 +3313,54 @@ pub(super) fn system_info(scheduler: &mut Scheduler, item: &Term) -> Result<BifR
         Term::Atom(atom) if atoms.name_of(atom) == "scheduler_id" => {
             Ok(Value(Term::Integer(scheduler_id)))
         }
+        // As many dirty CPU schedulers as schedulers, at most the default
+        // count of the host (`erl_init.c:865-866`, `erl_init.c:1193-1201`,
+        // `erl_bif_info.c:3337-3344`).
+        Term::Atom(atom) if atoms.name_of(atom) == "dirty_cpu_schedulers" => {
+            Ok(Value(Term::Integer(schedulers.min(host_count()))))
+        }
+        Term::Atom(atom) if atoms.name_of(atom) == "dirty_cpu_schedulers_online" => {
+            Ok(Value(Term::Integer(online.min(host_count()))))
+        }
+        // `erl_init.c:867`, `erl_bif_info.c:3345-3348`.
+        Term::Atom(atom) if atoms.name_of(atom) == "dirty_io_schedulers" => Ok(Value(
+            Term::Integer(i64::try_from(DIRTY_IO_THREADS).expect("a thread count fits")),
+        )),
+        // PBeam cannot block multi-scheduling, so no process blocks it
+        // (`erl_bif_info.c:2790-2798`, `erl_bif_info.c:3390-3399`).
+        Term::Atom(atom) if atoms.name_of(atom) == "multi_scheduling" => {
+            Ok(Value(Term::Atom(atoms.put("enabled")?)))
+        }
+        Term::Atom(atom)
+            if atoms.name_of(atom) == "multi_scheduling_blockers"
+                || atoms.name_of(atom) == "normal_multi_scheduling_blockers" =>
+        {
+            Ok(Value(Term::Nil))
+        }
+        // PBeam does not bind a scheduler to a processor: the bind type is
+        // `unbound`, and each scheduler is `unbound`
+        // (`erl_bif_info.c:3251-3254`, `erts_get_schedulers_binds` in
+        // `erl_cpu_topology.c`).
+        Term::Atom(atom) if atoms.name_of(atom) == "scheduler_bind_type" => {
+            Ok(Value(Term::Atom(atoms.put("unbound")?)))
+        }
+        Term::Atom(atom) if atoms.name_of(atom) == "scheduler_bindings" => {
+            let unbound = Term::Atom(atoms.put("unbound")?);
+            let count = usize::try_from(schedulers).expect("a scheduler count fits");
+            Ok(Value(Term::tuple(vec![unbound; count])))
+        }
+        // ERTS reads no processor topology on this host
+        // (`erl_misc_utils.c`), so the item is `undefined`
+        // (`erl_bif_info.c:3111-3113`).
+        #[cfg(not(target_os = "linux"))]
+        Term::Atom(atom) if atoms.name_of(atom) == "cpu_topology" => {
+            Ok(Value(Term::static_atom("undefined")))
+        }
+        // `erl_bif_info.c:3212-3221`. The count is never 0, so the item is
+        // never `unknown`.
+        Term::Atom(atom) if atoms.name_of(atom) == "logical_processors_available" => Ok(Value(
+            Term::Integer(i64::try_from(logical_processors_available()).expect("a count fits")),
+        )),
         // The run has the time correction of the node in the
         // `multi_time_warp` mode, the defaults of the pinned ERTS
         // (`erl_bif_info.c:2854-2868`, `erl_init.c:226`).
@@ -3131,6 +3395,11 @@ pub(super) fn system_info(scheduler: &mut Scheduler, item: &Term) -> Result<BifR
             debug_term(item, atoms)
         ))),
     }
+}
+
+/// Return the default scheduler count of the host (see [`Schedulers::host`]).
+fn host_count() -> i64 {
+    i64::try_from(Schedulers::host().total()).expect("a scheduler count fits")
 }
 
 /// Run a float operation on two numbers, at least one a float, or on the
@@ -3952,11 +4221,11 @@ pub(in crate::runtime::interpreter) fn is_function(term: &Term, arity: &Term) ->
 /// return `true` when `term` is a tuple whose first element is the atom
 /// `name`, and whose size is `size` when `size` is given, as ERTS
 /// `is_record_2` and `is_record_3` (`erl_bif_op.c:293-350`) do. A `name`
-/// that is not an atom raises `badarg`. A `size` that is an atom selects
-/// the native-record test, and a `size` that is not an atom and not an ERTS
-/// small integer (-(2^59) to 2^59 - 1) raises `badarg`. PBeam has no native
-/// record term, so the native-record test gives `false` (row
-/// "Unimplemented instructions" of `docs/erts-differences.md`).
+/// that is not an atom raises `badarg`. With no `size`, a native record
+/// whose name is `name` also gives `true`, whatever its module. A `size`
+/// that is an atom selects the native-record test: `name` is then the
+/// module and `size` the record name. A `size` that is not an atom and not
+/// an ERTS small integer (-(2^59) to 2^59 - 1) raises `badarg`.
 ///
 /// # Examples
 ///
@@ -3970,20 +4239,29 @@ pub(in crate::runtime::interpreter) fn is_record(
     name: &Term,
     size: Option<&Term>,
 ) -> BifResult {
-    if !matches!(name, Term::Atom(_)) {
+    let Term::Atom(name_atom) = name else {
         return BifResult::badarg();
-    }
+    };
     let size = match size {
         None => None,
-        Some(Term::Atom(_)) => return Value(Term::static_atom("false")),
+        Some(Term::Atom(record)) => {
+            let matches = matches!(term, Term::Record(native)
+                if native.def().module == *name_atom && native.def().name == *record);
+            return Value(Term::static_atom(if matches { "true" } else { "false" }));
+        }
         Some(&Term::Integer(size)) if (SMALL_INTEGER_MIN..=SMALL_INTEGER_MAX).contains(&size) => {
             Some(size)
         }
         Some(_) => return BifResult::badarg(),
     };
-    let matches = matches!(term, Term::Tuple(tuple)
-        if tuple.first() == Some(name)
-            && size.is_none_or(|size| i64::try_from(tuple.len()) == Ok(size)));
+    let matches = match term {
+        Term::Tuple(tuple) => {
+            tuple.first() == Some(name)
+                && size.is_none_or(|size| i64::try_from(tuple.len()) == Ok(size))
+        }
+        Term::Record(native) => size.is_none() && native.def().name == *name_atom,
+        _ => false,
+    };
     Value(Term::static_atom(if matches { "true" } else { "false" }))
 }
 
@@ -4594,7 +4872,8 @@ pub(super) fn process_info(
                         .info(atoms, item, current, messages, registered.as_ref())?
                         .ok_or_else(|| unsupported(atoms))?,
                 };
-                caller.bump_reductions(1 + super::links_reductions(item, &info));
+                let off_heap = caller.off_heap_message_queue;
+                caller.bump_reductions(1 + super::item_reductions(item, &info, messages, off_heap));
                 Ok(Value(info))
             },
         );
@@ -4646,7 +4925,12 @@ pub(super) fn process_info(
     // the cost that `handle_process_info` returns
     // (`erl_proc_sig_queue.c:6796,7405,5425-5428`), so only the direct
     // read charges the item.
-    if target.exiting.is_some() || target.mailbox.has_incoming() {
+    // ERTS always sends a request for `memory` and `total_heap_size` of
+    // another process (`ERTS_PI_FLAG_FORCE_SIG_SEND`,
+    // `erl_bif_info.c:828,839,1381`) and discards the cost of the request.
+    let forced = matches!(item, Term::Atom(name)
+        if matches!(scheduler.atoms.name_of(name), "memory" | "total_heap_size"));
+    if forced || target.exiting.is_some() || target.mailbox.has_incoming() {
         let caller = scheduler.current_process_mut().id;
         let reference = scheduler.make_ref()?;
         scheduler.current_process_mut().mailbox.set_save_end();
@@ -4664,9 +4948,10 @@ pub(super) fn process_info(
             arguments: vec![Term::Reference(reference)],
         });
     }
-    scheduler
-        .current_process_mut()
-        .bump_reductions(1 + super::links_reductions(item, &info));
+    // Only `links` charges extra here: the items with a queue charge
+    // went as a request above.
+    let extra = super::item_reductions(item, &info, 0, true);
+    scheduler.current_process_mut().bump_reductions(1 + extra);
     Ok(signals_return(scheduler, process, info))
 }
 
@@ -4705,6 +4990,7 @@ fn caller_info_list(
     }
     let caller = scheduler.current_process();
     let messages = caller.mailbox.message_count();
+    let off_heap = caller.off_heap_message_queue;
     let registered = scheduler.registered_name_of(caller.id);
     let values = process_info_values(&scheduler.code, caller, current, messages, true, registered)?;
     let all = process_info_term(&scheduler.atoms, values)?;
@@ -4722,7 +5008,7 @@ fn caller_info_list(
         // ERTS reads a repeated item once and copies its result
         // (`part_res`, `erl_bif_info.c:1134-1145`), so only its first read costs.
         if !items[..index].contains(item) {
-            reductions += 1 + super::links_reductions(item, &pair);
+            reductions += 1 + super::item_reductions(item, &pair, messages, off_heap);
         }
         info.push(pair);
     }
@@ -5287,9 +5573,7 @@ fn process_info_values(
     };
     let reductions = i64::try_from(process.reductions.saturating_add(current))
         .map_err(|_| error("the reduction total exceeds the PBeam integer range"))?;
-    let words = std::mem::size_of::<usize>();
-    let heap_size = i64::try_from(process.allocated_bytes() / words)
-        .map_err(|_| error("the heap size exceeds the PBeam integer range"))?;
+    let heap_size = process.heap_words()?;
     let stack_size = i64::try_from(
         process
             .frames
@@ -5417,27 +5701,9 @@ fn process_info_term(atoms: &AtomTable, values: ProcessInfoValues) -> Result<Ter
             Term::Integer(value),
         ]));
     }
-    let flags = values.heap_flags;
-    let max_heap_size = max_heap_size_map(atoms, flags.max_heap_size, flags.max_heap_flags);
-    let minor_gcs = atoms.put("minor_gcs")?;
     items.push(Term::tuple(vec![
         Term::static_atom("garbage_collection"),
-        Term::list_from(vec![
-            Term::tuple(vec![Term::static_atom("max_heap_size"), max_heap_size]),
-            Term::tuple(vec![
-                Term::static_atom("min_bin_vheap_size"),
-                Term::Integer(flags.min_bin_vheap_size),
-            ]),
-            Term::tuple(vec![
-                Term::static_atom("min_heap_size"),
-                Term::Integer(flags.min_heap_size),
-            ]),
-            Term::tuple(vec![
-                Term::static_atom("fullsweep_after"),
-                Term::Integer(i64::from(flags.fullsweep_after)),
-            ]),
-            Term::tuple(vec![Term::Atom(minor_gcs), Term::Integer(0)]),
-        ]),
+        garbage_collection_list(atoms, values.heap_flags)?,
     ]));
     items.push(Term::tuple(vec![
         Term::static_atom("suspending"),
@@ -5984,7 +6250,10 @@ pub(super) fn pre_loaded(scheduler: &mut Scheduler) -> Result<BifResult, BeamErr
 /// calls, as ERTS `get_module_info_2` and `module_info_1`
 /// (`erl_bif_info.c:5918-5945`, `5986-6030`) do. A `Module` that is not an
 /// atom or that names no loaded module raises `badarg`. The key `module`
-/// returns `Module`. A term that is not a key of `get_module_info/3`
+/// returns `Module`, `md5` the MD5 of the module, `functions` the functions
+/// in code order, and
+/// `nifs` the functions of its NIF shared library or `[]`. A term that is
+/// not a key of `get_module_info/3`
 /// (`md5`, `exports`, `functions`, `nifs`, `attributes`, `compile`,
 /// `native_addresses`, `native`, or `module`) raises `badarg`. The caller
 /// needs a `code` capability that permits `inspect` for the module name
@@ -6003,8 +6272,11 @@ pub(super) fn pre_loaded(scheduler: &mut Scheduler) -> Result<BifResult, BeamErr
 ///
 /// # Errors
 ///
-/// Each other key of `get_module_info/3` is the runtime error
-/// `erlang:get_module_info/2 key K is not implemented`. A new
+/// The keys `exports`, `attributes`, `compile`, `native_addresses`, and
+/// `native` are
+/// the runtime error `erlang:get_module_info/2 key K is not implemented`.
+/// The key `nifs` of a module with a linked static or extension library is
+/// a runtime error. A new
 /// `capability_denied` atom in a full atom table gives the error of
 /// `AtomTable::put`.
 pub(super) fn get_module_info(
@@ -6030,11 +6302,11 @@ const MODULE_INFO_MISSING_KEY: &str = "exports";
 /// caller needs a `code` capability that permits `inspect` for the module
 /// name, as for `erlang:get_module_info/2`.
 ///
-/// PBeam can give the pair of the key `module` only: the key `exports`
-/// needs the order of the ERTS export table, and the keys `attributes`,
-/// `compile`, and `md5` need the chunks of the beam file, which the loader
-/// does not keep (row "Module information" of `docs/erts-differences.md`).
-/// Thus the call of a loaded module stops the run with the runtime error
+/// PBeam cannot give the key `exports`, which needs the order of the ERTS
+/// export table, and the keys `attributes` and `compile`, which need the
+/// chunks of the beam file that the loader does not keep (row "Module
+/// information" of `docs/erts-differences.md`). Thus the call of a loaded
+/// module stops the run with the runtime error
 /// `erlang:get_module_info/1 key exports is not implemented`, as
 /// `erlang:get_module_info/2` stops at a key that it does not implement.
 /// The release `examples/plug_hello` imports this BIF for the
@@ -6094,21 +6366,52 @@ fn get_module_info_key(
     if let Some(denied) = check? {
         return Ok(denied);
     }
-    if context
+    let Some(code) = context
         .scheduler
         .code
         .get(context.scheduler.atoms.name_of(name))
-        .is_none()
-    {
+        .cloned()
+    else {
         return Ok(BifResult::badarg());
-    }
+    };
     if key.is_static("module") {
         Ok(Value(module.clone()))
+    } else if key.is_static("md5") {
+        // `md5_of_module` (`erl_bif_info.c:5911-5916`).
+        Ok(Value(Term::binary(code.md5.to_vec())))
+    } else if key.is_static("functions") {
+        // `functions_in_module` (`erl_bif_info.c:5732-5767`) gives each
+        // function of the code in code order.
+        let pairs = code
+            .tables
+            .functions
+            .iter()
+            .map(|&(function, arity)| (code.tables.name(function), arity))
+            .rev();
+        function_pairs(context, pairs)
+    } else if key.is_static("nifs") {
+        // `nifs_in_module` (`erl_bif_info.c:5769-5805`) gives the functions
+        // of the NIF library of the module in library order, and `[]` for a
+        // module without a library.
+        let module_name = context.scheduler.atoms.name_of(name).to_owned();
+        if context.scheduler.nif_libraries.contains(&module_name)
+            || context.scheduler.extension_loads.contains(&code.id)
+        {
+            return Err(error(format!(
+                "erlang:{bif} key nifs is not implemented for the linked NIF library of {module_name}"
+            )));
+        }
+        let library = context.scheduler.shared_libraries.get(&code.id).cloned();
+        let functions = library
+            .as_ref()
+            .map_or(&[][..], |library| library.functions());
+        let pairs = functions
+            .iter()
+            .map(|function| (function.name.as_str(), function.arity))
+            .rev();
+        function_pairs(context, pairs)
     } else if key.is_one_of(&[
-        "md5",
         "exports",
-        "functions",
-        "nifs",
         "attributes",
         "compile",
         "native_addresses",
@@ -6121,6 +6424,28 @@ fn get_module_info_key(
     } else {
         Ok(BifResult::badarg())
     }
+}
+
+/// Return the list of the `{Name, Arity}` pairs of `pairs` in reverse
+/// order, as ERTS prepends each pair (`erl_bif_info.c:5748-5763`,
+/// `5787-5800`).
+///
+/// # Errors
+///
+/// The atom table cannot take a new function name.
+fn function_pairs<'a>(
+    context: &mut BifContext<'_>,
+    pairs: impl Iterator<Item = (&'a str, u32)>,
+) -> Result<BifResult, BeamError> {
+    let mut list = Term::nil();
+    for (function, arity) in pairs {
+        let pair = Term::tuple(vec![
+            Term::Atom(context.scheduler.atoms.put(function)?),
+            Term::Integer(arity.into()),
+        ]);
+        list = Term::cons(pair, list);
+    }
+    Ok(Value(list))
 }
 
 /// Run `erlang:start_timer(Time, Dest, Msg)`, as ERTS `start_timer_3` and

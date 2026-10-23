@@ -1,5 +1,5 @@
 -module(heap_flags_probe).
--export([process_flags/0, process_errors/0, system_flags/0, huge/1]).
+-export([process_flags/0, process_errors/0, system_flags/0, heap_items/0, queue_costs/0, huge/1]).
 
 %% The heap flags of process_flag/2 (bif.c:2101-2166): fullsweep_after
 %% keeps a Uint16, min_heap_size and min_bin_vheap_size keep the node
@@ -65,6 +65,73 @@ system_flags() ->
                erlang:system_flag(fullsweep_after, 65535),
                map(erlang:system_flag(max_heap_size, #{size => 0, kill => true}))],
     {Set, Child, Error, Wrap, WrapChild, Restore}.
+
+%% The heap items of process_info/2 for another process and for the
+%% caller (erl_bif_info.c:1982-2094). The sizes depend on the heap, so the
+%% probe checks their form: heap_size and total_heap_size are positive
+%% words, and memory holds more bytes than the words of the total heap.
+%% garbage_collection gives the flags of the target with minor_gcs 0.
+heap_items() ->
+    Self = self(),
+    Pid = spawn(fun() ->
+        process_flag(fullsweep_after, 3),
+        process_flag(min_heap_size, 300),
+        Self ! ready,
+        receive stop -> ok end
+    end),
+    receive ready -> ok end,
+    Other = sizes(Pid),
+    Gc = process_info(Pid, garbage_collection),
+    Pid ! stop,
+    {Other, sizes(self()), map_gc(Gc)}.
+
+sizes(Pid) ->
+    {heap_size, Heap} = process_info(Pid, heap_size),
+    {total_heap_size, Total} = process_info(Pid, total_heap_size),
+    {memory, Memory} = process_info(Pid, memory),
+    [is_integer(Heap) andalso Heap > 0, is_integer(Total) andalso Total >= Heap,
+     is_integer(Memory) andalso Memory > 8 * Total].
+
+map_gc({garbage_collection, Gc}) ->
+    {garbage_collection, [{Key, map(Value)} || {Key, Value} <- Gc]}.
+
+%% The extra reductions of a read of the caller with 400 queued messages
+%% against an empty queue: floor(400 / 4) for memory
+%% (erl_bif_info.c:2066-2067) and for total_heap_size with the queue on
+%% the heap (erl_bif_info.c:2032-2042), 0 for heap_size and for
+%% total_heap_size with the queue off the heap. A read of another process
+%% sends a request for memory and total_heap_size
+%% (ERTS_PI_FLAG_FORCE_SIG_SEND, erl_bif_info.c:828,839,1381), and ERTS
+%% discards the cost of the request, so the last element reads another
+%% process with 400 messages and gives the cost of an empty one, and a
+%% request costs the caller more than the direct read of heap_size.
+queue_costs() ->
+    Self = [in_new(fun() -> extra(Item, Data) end)
+            || {Item, Data} <- [{memory, on_heap}, {total_heap_size, on_heap},
+                                {heap_size, on_heap}, {total_heap_size, off_heap}]],
+    Pid = spawn(fun() -> receive stop -> ok end end),
+    Empty = cost(Pid, memory),
+    send(Pid, 400),
+    Other = cost(Pid, memory) - Empty,
+    Direct = cost(Pid, heap_size),
+    Pid ! stop,
+    Self ++ [Other, Empty - Direct > 0].
+
+extra(Item, Data) ->
+    process_flag(message_queue_data, Data),
+    Empty = cost(self(), Item),
+    send(self(), 400),
+    cost(self(), Item) - Empty.
+
+send(_Pid, 0) -> ok;
+send(Pid, N) -> Pid ! N, send(Pid, N - 1).
+
+cost(Pid, Item) ->
+    erlang:yield(),
+    {reductions, Before} = process_info(self(), reductions),
+    _ = process_info(Pid, Item),
+    {reductions, After} = process_info(self(), reductions),
+    After - Before.
 
 %% A heap size at or above the largest heap size of ERTS. ERTS stops the
 %% emulator in erts_next_heap_size (erl_gc.c:335).

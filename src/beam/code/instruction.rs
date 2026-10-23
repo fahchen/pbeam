@@ -8,7 +8,7 @@ use super::{
 };
 use crate::error::{BeamError, error};
 use crate::runtime::{BifId, resolve_bif};
-use crate::term::{Atom, AtomTable, Lambda, Term, flatmap_order};
+use crate::term::{Atom, AtomTable, Lambda, RecordDef, Term, flatmap_order};
 use std::cmp::Ordering;
 use std::num::NonZeroU64;
 use std::sync::Arc;
@@ -181,6 +181,12 @@ const OPCODE_PUT_MAP_ASSOC: u8 = 154;
 const OPCODE_HAS_MAP_FIELDS: u8 = 157;
 const OPCODE_GET_RECORD_ELEMENTS: u8 = 188;
 const OPCODE_PUT_RECORD: u8 = 189;
+/// `is_native_record Lbl Rec Module Name` (genop.tab:726-729).
+const OPCODE_IS_NATIVE_RECORD: u8 = 187;
+/// `is_record_accessible Lbl Rec Scope` (genop.tab:742-751).
+const OPCODE_IS_RECORD_ACCESSIBLE: u8 = 190;
+/// `get_record_field Lbl Rec Id Field Dst` (genop.tab:753-757).
+const OPCODE_GET_RECORD_FIELD: u8 = 191;
 const OPCODE_MAKE_FUN3: u8 = 171;
 /// `bs_match Fail Ctx {commands,Commands}` (genop.tab:685-696).
 const OPCODE_BS_MATCH: u8 = 182;
@@ -593,8 +599,6 @@ pub(crate) enum Instruction {
         tail: bool,
         deallocate: u32,
     },
-    /// An instruction that is parsed so the module can load, but cannot run.
-    Unsupported(u8),
     /// Writes a catch tag to a Y register. While the tag is live, an
     /// exception continues after `label`. `try` (opcode 104) and `catch`
     /// (opcode 62) both map here, because the ERTS loader rewrites
@@ -845,6 +849,59 @@ pub(crate) enum Instruction {
         fail_label: u32,
         map: Operand,
         keys: Vec<Operand>,
+    },
+    /// Jumps to `fail_label` unless the native record in `value` has the
+    /// definition of `name` in `module` (`erl_is_native_record`,
+    /// `erl_record.c:214-221`). Erlang: the match `#r{} = R` compiles to
+    /// `{test,is_native_record,{f,5},[{x,0},{atom,m},{atom,r}]}`.
+    IsNativeRecord {
+        fail_label: u32,
+        value: Operand,
+        module: Atom,
+        name: Atom,
+    },
+    /// Jumps to `fail_label` unless the fields of the native record in
+    /// `value` are accessible (`erl_record.c:452-468`): with `external`,
+    /// only an exported record passes; otherwise (`auto_local`), an
+    /// exported record or a record of the running module passes. Erlang:
+    /// `#m:r{} = R` compiles to
+    /// `{test,is_record_accessible,{f,5},[{x,0},{atom,external}]}`.
+    IsRecordAccessible {
+        fail_label: u32,
+        value: Operand,
+        external: bool,
+    },
+    /// Writes the value of each field of the native record in `value` to its
+    /// register, in the sorted key order, and jumps to `fail_label` when a
+    /// field is missing, after the writes of the fields before it
+    /// (`erl_get_record_elements`, `erl_record.c:223-252`). Erlang:
+    /// `#r{x = X} = R` compiles to
+    /// `{get_record_elements,{f,5},{x,0},{list,[{atom,x},{x,1}]}}`.
+    GetRecordElements {
+        fail_label: u32,
+        value: Operand,
+        pairs: Vec<(Atom, Operand)>,
+    },
+    /// Writes a new native record to `destination` (`put_record`,
+    /// `erl_record.c:254-450`). `updates` holds each field and its value in
+    /// the sorted key order. Erlang: `#r{x = 1}` compiles to
+    /// `{put_record,{f,0},{atom,r},nil,{x,0},1,{list,[{atom,x},{integer,1}]}}`.
+    PutRecord {
+        kind: PutRecord,
+        destination: Operand,
+        updates: Vec<(Atom, Operand)>,
+    },
+    /// Writes the value of `field` of the native record in `value` to
+    /// `destination` (`erl_get_local_record_field` and
+    /// `erl_get_record_field`, `erl_record.c:470-568`). It raises when
+    /// `fail_label` is 0, and jumps to it otherwise. Erlang: `R#r.x`
+    /// compiles to `{get_record_field,{f,0},{x,0},{atom,r},{atom,x},{x,0}}`.
+    GetRecordField {
+        fail_label: u32,
+        value: Operand,
+        id: RecordId,
+        field: Atom,
+        destination: Operand,
     },
     /// Writes a copy of a map with each key set to its value. `pairs` holds
     /// each key and value. The fail label and live-register count are not
@@ -1741,6 +1798,31 @@ pub(crate) enum TestKind {
     AnyNativeRecord,
 }
 
+/// The source of a `put_record` instruction (`ops.tab:1641-1647`).
+#[derive(Debug, Clone)]
+pub enum PutRecord {
+    /// Create a record of the module from its definition
+    /// (`create_local_record`, `generators.tab:255-300`).
+    Local(Arc<RecordDef>),
+    /// Create a record from the active exported definition of `name` in
+    /// `module` (`erl_create_native_record`, `erl_record.c:344-379`).
+    Remote { module: Atom, name: Atom },
+    /// Update the record in a register (`erl_update_native_record`,
+    /// `erl_record.c:381-450`).
+    Update(Operand),
+}
+
+/// The record name of a `get_record_field` instruction (`ops.tab:1669-1678`).
+#[derive(Debug, Clone)]
+pub enum RecordId {
+    /// A record name of any module, or `'_'` for any record
+    /// (`erl_get_local_record_field`, `erl_record.c:470-510`).
+    Local(Atom),
+    /// The exported record `name` of `module` (`erl_get_record_field`,
+    /// `erl_record.c:512-568`).
+    Remote { module: Atom, name: Atom },
+}
+
 /// One command of `bs_match` (genop.tab:685-696).
 #[derive(Debug, Clone)]
 pub(crate) enum BinaryMatchCommand {
@@ -2010,6 +2092,7 @@ pub(super) fn parse_code(
     literals: &[Option<Term>],
     lambdas: &[(Arc<Lambda>, usize)],
     strings: &[u8],
+    records: &[Arc<RecordDef>],
     lines: &mut LineTable,
 ) -> Result<(Vec<Instruction>, u32, Option<u32>), BeamError> {
     if data.len() < CODE_HEADER_SIZE
@@ -2756,6 +2839,80 @@ pub(super) fn parse_code(
                     value,
                 }
             }
+            OPCODE_IS_NATIVE_RECORD => {
+                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let value = read_record_source(data, &mut cursor, atoms, literals)?;
+                Instruction::IsNativeRecord {
+                    fail_label,
+                    value,
+                    module: read_atom(data, &mut cursor, atoms)?,
+                    name: read_atom(data, &mut cursor, atoms)?,
+                }
+            }
+            OPCODE_IS_RECORD_ACCESSIBLE => Instruction::IsRecordAccessible {
+                fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
+                value: read_record_source(data, &mut cursor, atoms, literals)?,
+                external: read_atom(data, &mut cursor, atoms)?.is_one_of(&["external"]),
+            },
+            OPCODE_GET_RECORD_ELEMENTS => Instruction::GetRecordElements {
+                fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
+                value: read_record_source(data, &mut cursor, atoms, literals)?,
+                pairs: read_record_pairs(data, &mut cursor, atoms, literals)?,
+            },
+            OPCODE_PUT_RECORD => {
+                // The label is reserved and must be 0 (genop.tab:736-740).
+                (read_operand(data, &mut cursor, TAG_LABEL)? == 0)
+                    .then_some(())
+                    .ok_or_else(|| error("BEAM put_record has a fail label"))?;
+                let id = read_move_operand(data, &mut cursor, atoms, literals)?;
+                let source = read_move_operand(data, &mut cursor, atoms, literals)?;
+                let destination = read_register(data, &mut cursor)?;
+                skip_live_registers(data, &mut cursor)?;
+                let updates = read_record_pairs(data, &mut cursor, atoms, literals)?;
+                let kind = match (source, &id) {
+                    (Operand::Value(Term::Nil), Operand::Value(Term::Atom(name))) => {
+                        // The loader finds the definition in the `Recs`
+                        // chunk of the module (`generators.tab:255-300`).
+                        let def =
+                            records
+                                .iter()
+                                .find(|def| def.name == *name)
+                                .ok_or_else(|| {
+                                    error("BEAM put_record names no record of the module")
+                                })?;
+                        PutRecord::Local(Arc::clone(def))
+                    }
+                    (Operand::Value(Term::Nil), id) => {
+                        let (module, name) = record_id_pair(id)?;
+                        PutRecord::Remote { module, name }
+                    }
+                    (source @ (Operand::X(_) | Operand::Y(_)), _) => PutRecord::Update(source),
+                    _ => return Err(error("unsupported BEAM put_record source")),
+                };
+                Instruction::PutRecord {
+                    kind,
+                    destination,
+                    updates,
+                }
+            }
+            OPCODE_GET_RECORD_FIELD => {
+                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let value = read_move_operand(data, &mut cursor, atoms, literals)?;
+                let id = match read_move_operand(data, &mut cursor, atoms, literals)? {
+                    Operand::Value(Term::Atom(ref name)) => RecordId::Local(name.clone()),
+                    id => {
+                        let (module, name) = record_id_pair(&id)?;
+                        RecordId::Remote { module, name }
+                    }
+                };
+                Instruction::GetRecordField {
+                    fail_label,
+                    value,
+                    id,
+                    field: read_atom(data, &mut cursor, atoms)?,
+                    destination: read_register(data, &mut cursor)?,
+                }
+            }
             OPCODE_TEST_IS_FUNCTION2 => Instruction::TestFunctionArity {
                 fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
                 value: read_move_operand(data, &mut cursor, atoms, literals)?,
@@ -2919,10 +3076,7 @@ pub(super) fn parse_code(
                 instructions.push(Instruction::End);
                 return Ok((instructions, number_of_labels, on_load));
             }
-            _ => {
-                skip_unsupported_instruction(opcode, data, &mut cursor)?;
-                Instruction::Unsupported(opcode)
-            }
+            _ => return Err(error(format!("unsupported BEAM opcode {opcode}"))),
         };
         instructions.push(instruction);
     }
@@ -3299,6 +3453,85 @@ fn is_little_endian(flags: &Operand) -> bool {
     })))
 }
 
+/// Read the source of a record test or of `get_record_elements`, which ERTS
+/// loads only from an x or a y register (`ops.tab:1631-1667`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(read_record_source(&[0x03], &mut 0, &[], &[])?, Operand::X(0)));
+/// ```
+fn read_record_source(
+    data: &[u8],
+    cursor: &mut usize,
+    atoms: &[Atom],
+    literals: &[Option<Term>],
+) -> Result<Operand, BeamError> {
+    match read_move_operand(data, cursor, atoms, literals)? {
+        source @ (Operand::X(_) | Operand::Y(_)) => Ok(source),
+        _ => Err(error("BEAM native record source is not a register")),
+    }
+}
+
+/// Read an atom operand.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(read_atom(&[0x12], &mut 0, &atoms)?, atoms[0]);
+/// ```
+fn read_atom(data: &[u8], cursor: &mut usize, atoms: &[Atom]) -> Result<Atom, BeamError> {
+    match &read_value(data, cursor, atoms)? {
+        Term::Atom(atom) => Ok(atom.clone()),
+        _ => Err(error("BEAM record operand is not an atom")),
+    }
+}
+
+/// Read the `{Module, Name}` literal of a remote record.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let id = Operand::Value(Term::tuple(vec![Term::Atom(m), Term::Atom(r)]));
+/// assert_eq!(record_id_pair(&id)?, (m, r));
+/// ```
+fn record_id_pair(id: &Operand) -> Result<(Atom, Atom), BeamError> {
+    match id {
+        Operand::Value(Term::Tuple(pair)) => match &pair[..] {
+            [Term::Atom(module), Term::Atom(name)] => Ok((module.clone(), name.clone())),
+            _ => Err(error("unsupported BEAM record identifier")),
+        },
+        _ => Err(error("unsupported BEAM record identifier")),
+    }
+}
+
+/// Read the field and operand pairs of a record instruction and sort them in
+/// flatmap key order, as `map_key_sort` does (`ops.tab:1638-1651`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // {list,[{atom,y},{x,1},{atom,x},{x,2}]}
+/// let pairs = read_record_pairs(&[0x17, 0x40, 0x22, 0x13, 0x12, 0x23], &mut 0, &atoms, &[])?;
+/// assert_eq!(pairs[0].0, atoms[0]);
+/// ```
+fn read_record_pairs(
+    data: &[u8],
+    cursor: &mut usize,
+    atoms: &[Atom],
+    literals: &[Option<Term>],
+) -> Result<Vec<(Atom, Operand)>, BeamError> {
+    let mut pairs = read_operand_pairs(data, cursor, atoms, literals)?
+        .into_iter()
+        .map(|(field, operand)| match &field {
+            Operand::Value(Term::Atom(field)) => Ok((field.clone(), operand)),
+            _ => Err(error("BEAM record field is not an atom")),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    pairs.sort_by_key(|(field, _)| field.index());
+    Ok(pairs)
+}
+
 /// Read the extended list of `update_record`: an unsigned 1-based position
 /// and a value operand for each update.
 ///
@@ -3343,12 +3576,7 @@ fn skip_unsupported_instruction(
     skip_operands(data, cursor, operand_count)?;
     if matches!(
         opcode,
-        OPCODE_PUT_MAP_ASSOC
-            | OPCODE_GET_MAP_ELEMENTS
-            | OPCODE_GET_RECORD_ELEMENTS
-            | OPCODE_PUT_RECORD
-            | OPCODE_PUT_TUPLE2
-            | OPCODE_INIT_YREGS
+        OPCODE_PUT_MAP_ASSOC | OPCODE_PUT_TUPLE2 | OPCODE_INIT_YREGS
     ) {
         skip_counted_operands(data, cursor)?;
     }
@@ -3376,8 +3604,6 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         | OPCODE_TEST_IS_LIST
         | OPCODE_TEST_IS_MAP => Some(2),
         OPCODE_PUT_MAP_ASSOC => Some(5),
-        OPCODE_GET_MAP_ELEMENTS | OPCODE_GET_RECORD_ELEMENTS => Some(3),
-        OPCODE_PUT_RECORD => Some(6),
         OPCODE_PUT_TUPLE2 => Some(2),
         OPCODE_INIT_YREGS => Some(1),
         _ => None,

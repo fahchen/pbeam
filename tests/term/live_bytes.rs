@@ -207,3 +207,40 @@ fn counts_a_bignum_once_for_its_copies() {
     let shared = Term::tuple(vec![big.clone(), big]);
     assert_eq!(bytes(&shared), 2 * size_of::<Term>() + one);
 }
+
+#[test]
+fn counts_the_thing_of_a_record_once_for_its_copies() {
+    use crate::term::{AtomTable, Record, RecordDef, record::RecordThing};
+    let atoms = AtomTable::new();
+    let z = atoms.put("z").unwrap();
+    let def = RecordDef::new(z.clone(), z.clone(), false, vec![(z, None)], &atoms);
+    let record = Term::Record(Record::new(Arc::new(def), vec![Term::Integer(1)]));
+    let thing = size_of::<RecordThing>() + size_of::<Term>();
+    assert_eq!(bytes(&record), thing);
+    // The two copies share one thing, and the tuple array is one more
+    // allocation.
+    let shared = Term::tuple(vec![record.clone(), record]);
+    assert_eq!(bytes(&shared), thing + 2 * size_of::<Term>());
+}
+
+#[test]
+fn counts_a_transient_record_definition_once() {
+    use crate::term::{AtomTable, Record, RecordDef, record::RecordThing};
+    let atoms = AtomTable::new();
+    let z = atoms.put("z").unwrap();
+    let mut def = RecordDef::new(z.clone(), z.clone(), false, vec![(z, None)], &atoms);
+    def.transient = true;
+    let def = Arc::new(def);
+    let thing = size_of::<RecordThing>() + size_of::<Term>();
+    let definition = size_of::<RecordDef>()
+        + size_of_val(&*def.keys)
+        + size_of_val(&*def.order)
+        + size_of_val(&*def.defaults)
+        + bytes(&def.tuple);
+    let first = Term::Record(Record::new(Arc::clone(&def), vec![Term::Integer(1)]));
+    assert_eq!(bytes(&first), thing + definition);
+    // Two records of one definition count the definition once.
+    let second = Term::Record(Record::new(def, vec![Term::Integer(2)]));
+    let both = Term::tuple(vec![first, second]);
+    assert_eq!(bytes(&both), 2 * thing + definition + 2 * size_of::<Term>());
+}

@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use super::{
     capability::SecurityContext,
     dirty::{Claim, Output},
-    heap_flags::{HeapFlags, max_heap_size_map},
+    heap_flags::{HeapFlags, garbage_collection_list, max_heap_size_map},
     mailbox::Mailbox,
     scheduler::AliasMode,
     timer::TimerKey,
@@ -298,6 +298,14 @@ pub(super) struct StartFlags {
     pub(super) off_heap_message_queue: bool,
     /// The priority of the option `{priority, Level}` (`SPO_PRIORITY`).
     pub(super) priority: Priority,
+    /// The option `{async_dist, true}` sets the `async_dist` flag
+    /// (`SPO_ASYNC_DIST`, `erl_process.c:12552-12553`).
+    pub(super) async_dist: bool,
+    /// The heap flags of the options, or `None` to give the new process the
+    /// node heap flags. ERTS uses the heap flags of the options only when
+    /// an option of `SPO_USE_ARGS` is given (`erl_process.h:1515-1520`,
+    /// `erl_process.c:12561-12573`).
+    pub(super) heap_flags: Option<HeapFlags>,
 }
 
 /// The execution state and mailbox of one process.
@@ -593,8 +601,12 @@ impl Frame {
 /// for a process that is not the caller. A request to a process of another
 /// scheduler carries only these items, because its owner reads the item as
 /// the target process.
-pub(super) const OTHER_PROCESS_INFO_ITEMS: [&str; 10] = [
+pub(super) const OTHER_PROCESS_INFO_ITEMS: [&str; 14] = [
     "registered_name",
+    "heap_size",
+    "total_heap_size",
+    "memory",
+    "garbage_collection",
     "min_heap_size",
     "min_bin_vheap_size",
     "fullsweep_after",
@@ -816,6 +828,13 @@ impl ProcessState {
     /// - `min_heap_size`, `min_bin_vheap_size`, `fullsweep_after`, and
     ///   `max_heap_size` give the heap flags of the process
     ///   (`erl_bif_info.c:1990-2020`).
+    /// - `garbage_collection` gives the heap flags with `minor_gcs` 0
+    ///   (`erl_bif_info.c:2072-2094`).
+    /// - `heap_size` and `total_heap_size` give [`Self::heap_words`], and
+    ///   `memory` gives the bytes of the `ProcessState` value and of its
+    ///   containers (`erl_bif_info.c:1982-1988`, `2021-2048`, `2059-2070`).
+    ///   PBeam has no process heap, so the values are reports only (row
+    ///   "Heap limit" in `docs/erts-differences.md`).
     /// - `reductions` gives `{reductions, N}`: the reduction total and
     ///   `current`, the reductions of the current turn when the process runs
     ///   (`erl_bif_info.c:2114-2121`).
@@ -871,6 +890,12 @@ impl ProcessState {
                 atoms,
                 self.heap_flags.max_heap_size,
                 self.heap_flags.max_heap_flags,
+            ),
+            ("garbage_collection", _) => garbage_collection_list(atoms, self.heap_flags)?,
+            ("heap_size" | "total_heap_size", _) => Term::Integer(self.heap_words()?),
+            ("memory", _) => Term::Integer(
+                i64::try_from(std::mem::size_of::<Self>() + self.allocated_bytes())
+                    .map_err(|_| error("the process memory exceeds the PBeam integer range"))?,
             ),
             ("reductions", _) => Term::Integer(
                 i64::try_from(self.reductions + current)
@@ -964,6 +989,24 @@ impl ProcessState {
             bytes += frame.allocated_bytes();
         }
         bytes
+    }
+
+    /// Return the `heap_size` and `total_heap_size` of `process_info/1`
+    /// and `process_info/2`: [`Self::allocated_bytes`] in 8-byte words.
+    /// PBeam has no separate old heap, so the two sizes are equal.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(process.heap_words()? > 0);
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// A size above the PBeam integer range is an error.
+    pub(super) fn heap_words(&self) -> Result<i64, BeamError> {
+        i64::try_from(self.allocated_bytes() / std::mem::size_of::<usize>())
+            .map_err(|_| error("the heap size exceeds the PBeam integer range"))
     }
 
     /// Return the bytes of the process dictionary: the capacity of its pair,

@@ -1,6 +1,6 @@
 use super::{
     atom_at, atom_chunk_name, parse_atoms, parse_exports, parse_lambdas, parse_literals,
-    read_literal, read_u32,
+    parse_records, read_literal, read_u32,
 };
 use crate::term::{AtomTable, Binary, Fun, Lambda, Map, Term, debug_term};
 
@@ -546,4 +546,52 @@ fn reads_the_lambda_table_as_parse_lambda_chunk() {
             "BEAM lambda has more free variables than arguments"
         );
     }
+}
+
+/// Return a `Recs` chunk of version `version` with `count` records and
+/// the bytes `body`.
+fn recs(version: i32, count: i32, body: &[u8]) -> Vec<u8> {
+    let mut data: Vec<u8> = [version, count, 0]
+        .iter()
+        .flat_map(|word| word.to_be_bytes())
+        .collect();
+    data.extend_from_slice(body);
+    data
+}
+
+#[test]
+fn parses_the_records_chunk_as_pinned_erts() {
+    let table = AtomTable::new();
+    // Atom 1 is the module, 2 the name, 3 `true`, 4 the key, 5 not a flag.
+    let atoms: Vec<_> = ["nr_def", "priv", "true", "z", "other"]
+        .iter()
+        .map(|name| table.put(name).unwrap())
+        .collect();
+    let literals = [Some(Term::tuple(vec![]))];
+    // Op 5, name, `true`, a list of 2 elements, the key, and the default.
+    let record = |flag: u8, length: u8, default: &[u8]| {
+        let mut body = vec![5, 0x22, flag, 0x17, length, 0x42];
+        body.extend_from_slice(default);
+        recs(0, 1, &body)
+    };
+    let parse = |data: &[u8]| parse_records(data, &atoms, &literals, &table);
+    for bad in [
+        recs(1, 0, &[]),
+        recs(0, -1, &[]),
+        recs(0, 1, &[6]),
+        recs(0, 1, &[5, 0x02]),
+        recs(0, 1, &[5, 0x01]),
+        record(0x52, 0x20, &[0x00]),
+        record(0x32, 0x10, &[0x00]),
+        record(0x32, 0x20, &[0x03]),
+        record(0x32, 0x20, &[0x47, 0x10]),
+    ] {
+        assert_eq!(
+            parse(&bad).unwrap_err().to_string(),
+            "malformed BEAM Recs chunk"
+        );
+    }
+    let defs = parse(&record(0x32, 0x20, &[0x47, 0x00])).unwrap();
+    assert!(defs[0].is_exported);
+    assert_eq!(defs[0].defaults[..], [Some(Term::tuple(vec![]))]);
 }

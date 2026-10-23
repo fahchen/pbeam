@@ -333,6 +333,46 @@ fn sets_the_scheduler_counts_of_the_s_flag_as_pinned_erts() {
     );
 }
 
+/// The `-eval` expression of the scheduler item probe: the value of each
+/// scheduler item of `erlang:system_info/1`. Linux leaves out
+/// `cpu_topology`, which PBeam does not read there (row "System
+/// information" of docs/erts-differences.md). The probe leaves out
+/// `scheduler_id`, which depends on the scheduler that runs the probe.
+fn scheduler_items_eval() -> String {
+    let topology = if cfg!(target_os = "linux") {
+        ""
+    } else {
+        "cpu_topology,"
+    };
+    format!(
+        "io:format(\"~p~n\", [[erlang:system_info(I) || I <- [schedulers_online, \
+         dirty_cpu_schedulers, dirty_cpu_schedulers_online, dirty_io_schedulers, \
+         multi_scheduling, multi_scheduling_blockers, normal_multi_scheduling_blockers, \
+         scheduler_bindings, scheduler_bind_type, {topology} \
+         logical_processors_available]]]), halt()."
+    )
+}
+
+#[test]
+fn gives_the_scheduler_items_of_system_info_as_pinned_erts() {
+    // erl_bif_info.c:2790-2798, 3111-3113, 3212-3221, 3251-3254,
+    // 3337-3348, 3390-3399.
+    let eval = scheduler_items_eval();
+    for value in ["1", "2", "4:2"] {
+        let arguments = ["+S", value, "-noshell", "-eval", eval.as_str()];
+        let mut reference = Command::new("erl");
+        reference.args(arguments);
+        let reference = isolate(&mut reference).output().unwrap();
+        let actual = pbeam_erl(&arguments, &[]);
+        assert!(reference.status.success(), "{reference:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&actual.stdout),
+            String::from_utf8_lossy(&reference.stdout),
+            "+S {value}: {actual:?}"
+        );
+    }
+}
+
 #[test]
 fn rejects_a_bad_s_flag_as_pinned_erts() {
     // erl_init.c:1103-1149 writes the error, then the usage text, and

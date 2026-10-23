@@ -43,10 +43,9 @@
 //!
 //! A `udp_inet` port runs the requests of `packet_inet_ctl`, which runs
 //! `OPEN`, replies `exbadport` to `LISTEN`, and gives each other request
-//! to `inet_ctl` (inet_drv.c:14564-14892). A passive port sends and
-//! receives datagrams (see `inet/datagram.rs`). It reads no datagram for
-//! an active socket: the socket is in the idle wait, and a ready socket
-//! stops the run (row "udp_inet ports" of `docs/erts-differences.md`).
+//! to `inet_ctl` (inet_drv.c:14564-14892). The port sends datagrams,
+//! and receives them for a receive in passive mode or for the owner in
+//! active mode (see `inet/datagram.rs`).
 
 mod connect;
 mod datagram;
@@ -166,9 +165,17 @@ pub(in crate::runtime) struct Inet {
     /// The option `mode`: 0 for `list` (the start value), 1 for `binary`.
     mode: i32,
     /// The option `active`: 0 for `false` (the start value), 1 for `true`,
-    /// and 2 for `once`. A delivery in `once` mode sets it to 0
-    /// (`INET_CHECK_ACTIVE_TO_PASSIVE`, inet_drv.c:1551-1559).
+    /// 2 for `once`, and 3 for `{active, N}` (`INET_MULTI`, only on a
+    /// `udp_inet` port). A delivery in `once` mode sets it to 0, and the
+    /// last delivery of `{active, N}` sets it to 0
+    /// (`INET_CHECK_ACTIVE_TO_PASSIVE`, inet_drv.c:1551-1560).
     active: i32,
+    /// The count of `{active, N}` (`active_count`, inet_drv.c:6975-7000).
+    active_count: i16,
+    /// The option `read_packets` of a `udp_inet` port: the most datagrams
+    /// that one poll event reads (`INET_PACKET_POLL`, 5, at the start,
+    /// inet_drv.c:1072, 14508).
+    read_packets: i32,
     /// The option `send_timeout` in milliseconds, -1 for `infinity` (the
     /// start value, `INET_INFINITY`).
     send_timeout: i32,
@@ -210,6 +217,15 @@ pub(in crate::runtime) enum Control {
         /// The port reads the socket.
         read: bool,
     },
+    /// A `SETOPTS` that ended `{active, N}` this many times
+    /// (inet_drv.c:6993-6998): the port sends `{udp_passive, S}` to the
+    /// owner for each, and the reply follows.
+    Passive {
+        /// The reply bytes.
+        reply: Vec<u8>,
+        /// The number of `{udp_passive, S}` messages.
+        count: usize,
+    },
     /// A valid `TCP_REQ_RECV` with this timeout in milliseconds,
     /// `u32::MAX` for `infinity`, and this length. The scheduler runs it,
     /// as it makes an async reference, a timer, and messages.
@@ -241,6 +257,8 @@ impl Inet {
             state: State::Closed,
             mode: 0,
             active: 0,
+            active_count: 0,
+            read_packets: 5,
             send_timeout: -1,
             send_timeout_close: 0,
             delay_send: false,
@@ -329,10 +347,9 @@ impl Inet {
         (!self.acceptors.is_empty()).then(|| socket.as_raw_fd())
     }
 
-    /// Return the fd of an active datagram socket, which ERTS reads for
-    /// datagrams (`sock_select(desc, FD_READ, 1)`, inet_drv.c:14619-14621),
-    /// else `None`. PBeam reads no datagram: a ready fd stops the run with
-    /// [`DATAGRAM_RECEIVE`].
+    /// Return the fd of an active datagram socket, which the port reads for
+    /// datagrams (`sock_select(desc, FD_READ, 1)`, inet_drv.c:7960-7967,
+    /// 14619-14621), else `None`.
     ///
     /// # Examples
     ///
@@ -371,7 +388,11 @@ impl Inet {
             6 => self.bind(request)?,
             7 => {
                 let old = self.active;
-                let reply = self.set_options(request)?;
+                let mut count = 0;
+                let reply = self.set_options(request, &mut count)?;
+                if count > 0 {
+                    return Ok(Control::Passive { reply, count });
+                }
                 return Ok(self.set_active_result(old, reply));
             }
             8 => self.get_options(request)?,
@@ -610,7 +631,18 @@ impl Inet {
     /// stream socket, so they change nothing before `OPEN` and nothing on a
     /// `udp_inet` port (inet_drv.c:7099-7131). Without `SO_PRIORITY`, as on macOS,
     /// `priority` changes nothing (inet_drv.c:7389-7398).
-    fn set_options(&mut self, mut request: &[u8]) -> Result<Vec<u8>, BeamError> {
+    ///
+    /// `{active, N}` on a `udp_inet` port takes 2 more bytes, the signed
+    /// count, and adds it to the count: a sum outside `i16` gives `einval`,
+    /// a sum below 0 becomes 0, and a count of 0 makes the socket passive
+    /// and adds 1 to `passive`, the number of `{udp_passive, S}` messages
+    /// (inet_drv.c:6974-7000). `read_packets` below 1 gives `einval`
+    /// (inet_drv.c:7138-7148).
+    fn set_options(
+        &mut self,
+        mut request: &[u8],
+        passive: &mut usize,
+    ) -> Result<Vec<u8>, BeamError> {
         while let [option, v3, v2, v1, v0, rest @ ..] = request {
             let value = i32::from_be_bytes([*v3, *v2, *v1, *v0]);
             request = rest;
@@ -619,9 +651,38 @@ impl Inet {
                     self.mode = value;
                     true
                 }
-                22 if value == 3 => return Err(error(ACTIVE_N)),
+                22 if value == 3 && self.socket_type == SocketType::Stream => {
+                    return Err(error(ACTIVE_N));
+                }
+                22 if value == 3 => {
+                    let [n1, n0, rest @ ..] = request else {
+                        return Err(
+                            self.unsupported("option active with a count of", "fewer than 2 bytes")
+                        );
+                    };
+                    request = rest;
+                    self.active = value;
+                    let Ok(count) = i16::try_from(
+                        i32::from(self.active_count) + i32::from(i16::from_be_bytes([*n1, *n0])),
+                    ) else {
+                        return Ok(error_reply("einval"));
+                    };
+                    self.active_count = count.max(0);
+                    if self.active_count == 0 {
+                        self.active = 0;
+                        *passive += 1;
+                    }
+                    true
+                }
+                33 if self.socket_type == SocketType::Datagram => {
+                    if value > 0 {
+                        self.read_packets = value;
+                    }
+                    value > 0
+                }
                 22 => {
                     self.active = value;
+                    self.active_count = 0;
                     // The end of the port skips the next options
                     // (inet_drv.c:7001-7011).
                     if value != 0 && self.stream.ended {
@@ -757,7 +818,18 @@ impl Inet {
             };
             let value = match option {
                 24 => Some(self.mode),
+                22 if self.active == 3 => {
+                    // The count needs 2 more bytes (inet_drv.c:9179-9183).
+                    if reply.len() + 7 > MAX_OPT_BUFFER {
+                        return Ok(error_reply("einval"));
+                    }
+                    reply.push(option);
+                    reply.extend(self.active.to_be_bytes());
+                    reply.extend(self.active_count.to_be_bytes());
+                    continue;
+                }
                 22 => Some(self.active),
+                33 if self.socket_type == SocketType::Datagram => Some(self.read_packets),
                 30 => self.has_stream_socket().then_some(self.send_timeout),
                 35 => self.has_stream_socket().then_some(self.send_timeout_close),
                 31 => self
@@ -813,11 +885,6 @@ impl Inet {
         })
     }
 }
-
-/// The runtime error of a datagram that arrives on an active `udp_inet`
-/// socket (see [`Inet::receive_fd`]).
-pub(in crate::runtime) const DATAGRAM_RECEIVE: &str =
-    "unsupported udp_inet datagram receive: see \"udp_inet ports\" in docs/erts-differences.md";
 
 /// The runtime error of `{active, N}`.
 const ACTIVE_N: &str = "unsupported tcp_inet option active with a count: see \"tcp_inet ports\" in docs/erts-differences.md";

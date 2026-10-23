@@ -141,13 +141,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a measured path converts such an integer at the end of a budget, or a task adds dirty schedulers.
 - **Source:** #234 (PR #243), #268, #399.
 
-### Run the unsupported BIFs that OTP code calls
-
-- The "Unimplemented BIFs" row lists the `unsupported` BIF table entries that OTP code often calls. Each returns `unresolved external MFA M:F/A`. The groups:
-  - Maps: `maps:get/2` and `maps:is_key/2` through a fun call. The compiler changes a direct call to the `map_get` and `is_map_key` BIFs, which PBeam runs.
-- **Trigger:** a measured path calls one of them. Add each group in its own task.
-- **Source:** audit of the BIF table at the M2 close.
-
 ### Run the remaining test instructions for `io:format/2`
 
 - #662 added `is_any_native_record`, so `io:format/2` with `~p` of an atom, an integer, a float, a list, a tuple, or a map writes as ERTS does under the PBeam boot. `~p` of a binary also writes as ERTS does: `erlang:bit_size/1` runs (`src/runtime/interpreter/bif/table.rs:116`, `tests/integration/bit_size.rs`), and `~p` of `<<1,2>>`, `<<"text">>`, and `{a,[b,#{c => {d,<<"e">>}}],2.0}` gives the ERTS text on the `pbeam` binary under `pbeam_boot` (measured). The remaining work is `get_record_elements` and `put_record`, which a native record needs. #359 added `is_bitstr`, #399 added `is_ne`, and #302 added `is_port`, which stopped `~w` of a list, a tuple, or a map before (io_lib.erl:820, 823). The "Unimplemented instructions" row records `get_record_elements` and `put_record`. A format without a term argument, `~w` of an integer, a list, a tuple, a map, or a binary, and `~s` of a string already work. PR #188 also named `net_kernel:dflag_unicode_io/1` and `erl_scan:reserved_word/1`. The first is a BIF that PBeam runs (PR #88), and the second is a function of `erl_scan.beam`, which a run gives with the other OTP modules.
@@ -193,12 +186,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - After #150 (PR #172), PBeam keeps one timer list ordered by end time. ERTS uses soon and later wheels and a high-level timer tree, so a timer of 16384 ms or more that moves into a soon slot expires after the timers with the same end that are already in the slot (pinned probe gives `[b,a]`).
 - **Trigger:** a measured path depends on the order of timers with the same end.
 - **Source:** review of #150.
-
-### Accept every `erlang:spawn_opt/4` option
-
-- PBeam accepts only `link` and `monitor` and gives a runtime error for each other option. ERTS accepts many more and raises `badarg` for an option it does not know (`erts_parse_spawn_opts`). The "Spawn options" row records this.
-- **Trigger:** a consumer needs another spawn option.
-- **Source:** review of #152.
 
 ### Parse BIF option lists with one shared function
 
@@ -264,12 +251,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Source:** Fable review of PR #1117.
 
 ## Exceptions
-
-### Value checks of `process_flag/2` and `system_flag/2`
-
-- After #155 (PR #177), `{monitor_nodes, Options}` (`dist.c:6732-6799`), a `scheduler` value above the scheduler count, and the `system_flag/2` sub-checks of `internal_cpu_topology`, `erts_alloc`, `sequential_tracer`, `schedulers_online`, and `dirty_cpu_schedulers_online` give the runtime error where ERTS raises `badarg`. The "System flags" row of PR #177 records them.
-- **Trigger:** a consumer sets one of these flags.
-- **Source:** review of #155.
 
 ### Check the ordered map iterator crash of ERTS at each OTP pin change
 
@@ -489,7 +470,7 @@ The owner opened [m13] Foundation seams ([#908](https://github.com/fahchen/pbeam
 ### M20: BIF and ETS API completion
 
 - **Reason:** OTP code calls BIFs and ETS functions that are still `unsupported` BIF table entries.
-- **Evidence:** `ets:setopts/2` is `unsupported` (`src/runtime/interpreter/bif/table.rs:482`); entries "Run the unsupported BIFs that OTP code calls", "Accept every `erlang:spawn_opt/4` option", and "Value checks of `process_flag/2` and `system_flag/2`"; row "Heap limit" (no `max_heap_size` and no heap accounting).
+- **Evidence:** `ets:setopts/2` is `unsupported` (`src/runtime/interpreter/bif/table.rs:482`); entry "Accept every `erlang:spawn_opt/4` option"; row "Heap limit" (no `max_heap_size` and no heap accounting).
 - **Work:** ETS: an `ordered_set` tree, `ets:last/1` and `ets:prev/2` in key order, `ets:delete_object/2`, `ets:give_away/3` and the heir, `ets:setopts/2`, and the traversal order of `write_concurrency` tables on several schedulers. The other math BIFs, `erlang:exit/3`, and the other unsupported BIFs. The `spawn_opt` options and the process and system flags. A heap accounting layer: the `size_object` walk of `erts_debug:flat_size/1` (`beam_debug.c:71-76`), `min_heap_size`, `max_heap_size`, and the heap items of `process_info/2`. It only reports sizes and does no GC; confirm this scope with the owner when the milestone opens. The remaining items of `module_info` and `system_info`.
 - **Order:** after M14, because the heir and `give_away` go through the ETS accessor (#930) and the tables are on the node; after M15, because the `write_concurrency` order needs several schedulers in a real run.
 - **Trigger:** the owner opens the milestone.

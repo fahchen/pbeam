@@ -1648,3 +1648,60 @@ fn orders_a_hashmap_of_pid_keys_as_pinned_erts() {
         expected
     );
 }
+
+const MAPS_FUN_PROBE: &[u8] = include_bytes!("../../fixtures/map/maps_fun_probe.beam");
+
+#[test]
+fn runs_maps_get_and_is_key_through_a_fun_and_apply_as_pinned_erts() {
+    // A fun call, `apply`, and `apply_last` of `maps:get/2` and
+    // `maps:is_key/2` run the `maps_get_2` and `maps_is_key_2` BIFs
+    // (`erl_map.c:250-264`, `erl_map.c:1185-1191`). The stack frame of each
+    // error holds the `error_info` of `erl_stdlib_errors`
+    // (`beam_common.c:939-991`).
+    let erlang = pinned_beam("erlang");
+    let program = BeamProgram::load(&[&erlang, MAPS_FUN_PROBE]).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let map =
+        Term::Map(Map::from_pairs(vec![(atom("a"), Term::Integer(1))], &AtomTable::new()).unwrap());
+    let error = |reason: &str, value: Term, name: &str, arguments: Vec<Term>| {
+        let info = Term::Map(
+            Map::from_pairs(
+                vec![(atom("module"), atom("erl_stdlib_errors"))],
+                &AtomTable::new(),
+            )
+            .unwrap(),
+        );
+        Term::tuple(vec![
+            Term::tuple(vec![atom(reason), value]),
+            Term::tuple(vec![
+                atom("maps"),
+                atom(name),
+                Term::list_from(arguments),
+                Term::list_from(vec![Term::tuple(vec![atom("error_info"), info])]),
+            ]),
+        ])
+    };
+    let badkey = error("badkey", atom("b"), "get", vec![atom("b"), map.clone()]);
+    assert_eq!(
+        program.execute("maps_fun_probe", "main", &[]).unwrap().term,
+        Term::list_from(vec![
+            Term::Integer(1),
+            atom("true"),
+            atom("false"),
+            Term::Integer(1),
+            atom("false"),
+            badkey.clone(),
+            error("badmap", atom("x"), "get", vec![atom("a"), atom("x")]),
+            error("badmap", atom("x"), "is_key", vec![atom("a"), atom("x")]),
+            badkey.clone(),
+            error("badmap", atom("x"), "is_key", vec![atom("a"), atom("x")]),
+            Term::Integer(1),
+            badkey,
+        ])
+    );
+    let expected: &[u8] = b"[1,true,false,1,false,{{badkey,b},{maps,get,[b,#{a => 1}],[{error_info,#{module => erl_stdlib_errors}}]}},{{badmap,x},{maps,get,[a,x],[{error_info,#{module => erl_stdlib_errors}}]}},{{badmap,x},{maps,is_key,[a,x],[{error_info,#{module => erl_stdlib_errors}}]}},{{badkey,b},{maps,get,[b,#{a => 1}],[{error_info,#{module => erl_stdlib_errors}}]}},{{badmap,x},{maps,is_key,[a,x],[{error_info,#{module => erl_stdlib_errors}}]}},1,{{badkey,b},{maps,get,[b,#{a => 1}],[{error_info,#{module => erl_stdlib_errors}}]}}]\n";
+    assert_eq!(
+        erl_reference("io:format(\"~w~n\", [maps_fun_probe:main()])"),
+        expected
+    );
+}
