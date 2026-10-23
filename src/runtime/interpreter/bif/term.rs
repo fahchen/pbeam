@@ -3,7 +3,7 @@
 //! (`external.c`).
 //!
 //! The encoder writes the tags of `external.h` for each term that PBeam can
-//! make. A record and a pid, port, or reference of another node fail with a
+//! make. A pid, port, or reference of another node fails with a
 //! runtime error. Row "External term format" of
 //! `docs/erts-differences.md` gives these differences.
 //!
@@ -24,8 +24,8 @@ use super::BifResult::Value;
 use super::*;
 use crate::runtime::interpreter::code_table::CodeTable;
 use crate::term::{
-    AtomTable, Fun, Lambda, MAX_ATOM_CHARACTERS, MAX_TUPLE_SIZE, ProcessId, Reference, Target,
-    external, float_text,
+    AtomTable, Fun, Lambda, MAX_ATOM_CHARACTERS, MAX_TUPLE_SIZE, ProcessId, Record, RecordDef,
+    Reference, Target, external, float_text,
 };
 
 /// `VERSION_MAGIC`, the first byte of the external term format
@@ -647,10 +647,20 @@ fn encode_parts(
                     pending.extend(fun.free().iter().rev());
                 }
             },
-            Term::Record(_) => {
-                return Err(error(
-                    "unsupported erlang:term_to_binary/1,2 of a native record: see \"External term format\" in docs/erts-differences.md",
-                ));
+            // The field count, the export flag, the module, the name, the
+            // field names, and the values, both in definition order
+            // (`enc_term`, `external.c:4006-4036`).
+            Term::Record(record) => {
+                let def = record.def();
+                out.push(67);
+                out.extend_from_slice(&(def.order.len() as u32).to_be_bytes());
+                out.push(u8::from(def.is_exported));
+                encode_atom(atoms.name_of(&def.module), options, &mut out);
+                encode_atom(atoms.name_of(&def.name), options, &mut out);
+                for &index in &def.order {
+                    encode_atom(atoms.name_of(&def.keys[index]), options, &mut out);
+                }
+                pending.extend(def.order.iter().rev().map(|&index| &record.values()[index]));
             }
             Term::MatchContext(_) => {
                 return Err(error(
@@ -914,6 +924,9 @@ enum FrameKind {
         uniq: [u8; 16],
         index: i32,
     },
+    /// A `RECORD_EXT` with its export flag, of the module, the name, the
+    /// field names, and the values.
+    Record { exported: bool },
     /// A `LOCAL_EXT` with its hash, the start of the wrapped term, and the
     /// local flag of the enclosing term.
     Local {
@@ -1576,7 +1589,19 @@ impl Decoder<'_> {
                     continue 'parse;
                 }
                 117 => return Err(DecodeError::Unsupported("an old local fun")),
-                67 => return Err(DecodeError::Unsupported("a record")),
+                67 => {
+                    // The field count, the export flag that `validate`
+                    // checks, then the module, the name, the field names,
+                    // and the values (`dec_term`, `external.c:5257-5380`).
+                    let count = self.u32()? as usize;
+                    let exported = self.u8()? == 1;
+                    frames.push(Frame {
+                        kind: FrameKind::Record { exported },
+                        remaining: 2 + 2 * count,
+                        items: Vec::with_capacity(2 + 2 * count),
+                    });
+                    continue 'parse;
+                }
                 121 => {
                     let hash = u32::from_be_bytes(
                         self.take(4)?
@@ -1660,6 +1685,16 @@ impl Decoder<'_> {
                         }
                         break;
                     }
+                    FrameKind::Record { exported } => {
+                        frame.items.push(term);
+                        frame.remaining -= 1;
+                        if frame.remaining == 0 {
+                            let frame = frames.pop().expect("a record frame");
+                            term = self.complete_record(exported, frame.items)?;
+                            continue;
+                        }
+                        break;
+                    }
                     FrameKind::Local { hash, start, prior } => {
                         frames.pop();
                         self.local = prior;
@@ -1671,6 +1706,33 @@ impl Decoder<'_> {
                 }
             }
         }
+    }
+
+    /// Build the record of a `RECORD_EXT` from the module, the name, the
+    /// field names, and the values in definition order. A module, a name,
+    /// or a field name that is not an atom, or a field name that occurs
+    /// twice, is `badarg`. The definition is the loaded one when it has the
+    /// same export flag and fields (`dec_term`, `external.c:5300-5367`).
+    fn complete_record(&self, exported: bool, items: Vec<Term>) -> Result<Term, DecodeError> {
+        let count = (items.len() - 2) / 2;
+        let mut atoms = items[..2 + count].iter().map(|item| match item {
+            Term::Atom(atom) => Ok(atom.clone()),
+            _ => Err(DecodeError::Badarg),
+        });
+        let module = atoms.next().expect("a module")?;
+        let name = atoms.next().expect("a name")?;
+        let keys = atoms.collect::<Result<Vec<_>, _>>()?;
+        let fields = keys.into_iter().map(|key| (key, None)).collect();
+        let def = RecordDef::new(module, name, exported, fields, self.atoms);
+        if def.keys.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(DecodeError::Badarg);
+        }
+        let def = records::canonical(self.code, self.atoms, def);
+        let mut values = vec![Term::Nil; count];
+        for (position, value) in items.into_iter().skip(2 + count).enumerate() {
+            values[def.order[position]] = value;
+        }
+        Ok(Term::Record(Record::new(def, values)))
     }
 
     /// Decode `FLOAT_EXT`: 31 bytes of C text, as `sys_chars_to_double`
