@@ -173,7 +173,7 @@ fn gives_the_posix_time_of_a_date_in_range() {
         ((2100, 3, 1, 0, 0, 0), 4_107_542_400),
         ((2_147_483_646, 12, 31, 23, 59, 59), 67_767_976_201_996_799),
     ] {
-        assert_eq!(univ_to_clock(date), Some(clock), "{date:?}");
+        assert_eq!(univ_to_seconds(date, BASEYEAR), Some(clock), "{date:?}");
     }
     for date in [
         (1901, 12, 31, 23, 59, 59),
@@ -191,8 +191,18 @@ fn gives_the_posix_time_of_a_date_in_range() {
         (2026, 1, 1, 0, 0, -1),
         (2026, 1, 1, 0, 0, 60),
     ] {
-        assert_eq!(univ_to_clock(date), None, "{date:?}");
+        assert_eq!(univ_to_seconds(date, BASEYEAR), None, "{date:?}");
     }
+    // `univ_to_seconds` accepts the years from 1600
+    // (`erl_time_sup.c:1707`).
+    assert_eq!(
+        univ_to_seconds((1600, 1, 1, 0, 0, 0), FIRST_POSIX_YEAR),
+        Some(-11_676_096_000)
+    );
+    assert_eq!(
+        univ_to_seconds((1599, 12, 31, 23, 59, 59), FIRST_POSIX_YEAR),
+        None
+    );
 }
 
 #[test]
@@ -213,4 +223,16 @@ fn splits_a_time_in_the_native_unit_into_timestamp_parts() {
     assert_eq!(make_timestamp_value(1_000_000_000), (0, 1, 0));
     assert_eq!(make_timestamp_value(1_000_000_000_000), (0, 1000, 0));
     assert_eq!(make_timestamp_value(0), (0, 0, 0));
+}
+
+#[test]
+fn gives_a_larger_now_value_than_each_earlier_call() {
+    // `get_now` (`erl_time_sup.c:1863-1876`) gives the system time in
+    // microseconds, or one more than the last value when the clock did not
+    // advance.
+    let prev = std::sync::atomic::AtomicI64::new(0);
+    assert_eq!(next_now(&prev, 5_000_999), 5_000);
+    assert_eq!(next_now(&prev, 5_000_999), 5_001);
+    assert_eq!(next_now(&prev, 4_000_000), 5_002);
+    assert_eq!(next_now(&prev, 9_000_000), 9_000);
 }

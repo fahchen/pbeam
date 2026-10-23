@@ -3654,7 +3654,7 @@ pub(super) fn posixtime_to_universaltime(time: &Term) -> BifResult {
 /// of a UTC date and time `{{Year, Month, Day}, {Hour, Minute, Second}}` in
 /// the host time zone, as ERTS `universaltime_to_localtime_1`
 /// (`bif.c:3975-3995`) does. A term that [`time::time_to_parts`] does not
-/// read, a value that [`time::univ_to_clock`] does not accept, and a
+/// read, a value that [`time::univ_to_seconds`] does not accept, and a
 /// failed `localtime_r` ([`host::clock::local_time`]) raise `badarg`.
 ///
 /// # Examples
@@ -3669,9 +3669,49 @@ pub(super) fn posixtime_to_universaltime(time: &Term) -> BifResult {
 /// ```
 pub(super) fn universaltime_to_localtime(date: &Term) -> BifResult {
     time::time_to_parts(date)
-        .and_then(time::univ_to_clock)
+        .and_then(|date| time::univ_to_seconds(date, time::BASEYEAR))
         .and_then(host::clock::local_time)
         .map_or_else(BifResult::badarg, |local| Value(date_time(local)))
+}
+
+/// Run `erlang:universaltime_to_posixtime(Universaltime)`: return the POSIX
+/// seconds of a UTC date and time, as ERTS `universaltime_to_posixtime_1`
+/// (`bif.c:4001-4021`) does with `univ_to_seconds`
+/// (`erl_time_sup.c:1704-1727`). A term that [`time::time_to_parts`] does
+/// not read and a value out of range raise `badarg`; the year can be 1600
+/// to 2147483646.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let triple = |a, b, c| Term::tuple(vec![Term::Integer(a), Term::Integer(b), Term::Integer(c)]);
+/// let date = Term::tuple(vec![triple(1970, 1, 1), triple(0, 0, 0)]);
+/// assert!(matches!(universaltime_to_posixtime(&date), BifResult::Value(Term::Integer(0))));
+/// ```
+pub(super) fn universaltime_to_posixtime(date: &Term) -> BifResult {
+    time::time_to_parts(date)
+        .and_then(|date| time::univ_to_seconds(date, time::FIRST_POSIX_YEAR))
+        .map_or_else(BifResult::badarg, |seconds| Value(Term::Integer(seconds)))
+}
+
+/// The last value of `erlang:now/0` in microseconds, `now_prev`
+/// (`erl_time_sup.c:1864`). ERTS keeps one for the runtime system; PBeam
+/// keeps one for the host process.
+static NOW_PREV: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+/// Run `erlang:now()`: return the system time of the run as
+/// `{MegaSecs, Secs, MicroSecs}`, larger than the value of each earlier
+/// call, as ERTS `now_0` (`bif.c:4057-4067`) does with `get_now`
+/// (`erl_time_sup.c:1852-1887`). The system time is the value that
+/// `erlang:timestamp/0` reads.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(now(1_792_192_300_076_209_000), BifResult::Value(Term::Tuple(parts)) if parts.len() == 3));
+/// ```
+pub(super) fn now(system_time: i64) -> BifResult {
+    timestamp(time::next_now(&NOW_PREV, system_time) * 1_000)
 }
 
 /// Return the term `{{Year, Month, Day}, {Hour, Minute, Second}}` of a date
