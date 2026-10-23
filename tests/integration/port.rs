@@ -272,6 +272,8 @@ fn stops_the_run_for_each_port_part_that_is_not_implemented() {
             "line",
             "unsupported open_port/2 option {line, L} whose low 32 bits are not positive",
         ),
+        ("env", "unsupported open_port/2 option env"),
+        ("hide", "unsupported open_port/2 option hide"),
         (
             "empty_line",
             "unsupported open_port/2 option {line, L} whose low 32 bits are not positive",

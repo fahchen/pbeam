@@ -183,15 +183,14 @@ impl Scheduler {
         let cell = self.node.port(id);
         let mut slot = cell.as_ref().map(port::lock);
         let state = slot.as_mut().and_then(|slot| slot.as_mut()).map(|port| {
-            let (soft, lines) = match &mut port.driver {
-                Driver::Spawn(spawn) => {
-                    if spawn.soft_eof {
-                        spawn.input = Input::Ended;
-                    }
-                    (spawn.soft_eof, spawn.flush_lines())
+            // Only a spawn port reads an end of file.
+            let (mut soft, mut lines) = (false, Vec::new());
+            if let Driver::Spawn(spawn) = &mut port.driver {
+                if spawn.soft_eof {
+                    spawn.input = Input::Ended;
                 }
-                _ => (false, Vec::new()),
-            };
+                (soft, lines) = (spawn.soft_eof, spawn.flush_lines());
+            }
             (port.owner, soft, lines)
         });
         // A port that another scheduler closed after the read sends nothing.

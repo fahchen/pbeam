@@ -456,6 +456,10 @@ high_fd() ->
 %% Each call stops the PBeam run with a runtime error.
 unsupported(line) ->
     open_port({spawn_executable, sh()}, [binary, {line, 1 bsl 31}]);
+unsupported(env) ->
+    open_port({spawn_executable, sh()}, [binary, {env, []}]);
+unsupported(hide) ->
+    open_port({spawn_executable, sh()}, [binary, hide]);
 unsupported(empty_line) ->
     open_port({spawn_executable, sh()}, [binary, {line, 1 bsl 32}]);
 unsupported(fd) ->
