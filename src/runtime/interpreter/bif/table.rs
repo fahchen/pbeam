@@ -299,7 +299,7 @@ bifs! {
     erlang:seq_trace_print/2 => unsupported,
     erlang:setelement/3 as ErlangSetelement3 => |_, [index, tuple, value]| Ok(erlang::setelement(index, tuple, value)),
     erlang:setnode/2 => unsupported,
-    erlang:size/1 => unsupported,
+    erlang:size/1 as ErlangSize1 => |_, [term]| Ok(erlang::size(term)),
     erlang:spawn/3 as ErlangSpawn3 => |cx, [module, function, arguments]| erlang::spawn(cx, module, function, arguments),
     erlang:spawn_link/3 as ErlangSpawnLink3 => |cx, [module, function, arguments]| erlang::spawn_link(cx, module, function, arguments),
     erlang:spawn_opt/4 as ErlangSpawnOpt4 => |cx, [module, function, arguments, options]| erlang::spawn_opt(cx, module, function, arguments, options),
