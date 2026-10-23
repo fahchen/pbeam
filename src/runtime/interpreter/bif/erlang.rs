@@ -4620,8 +4620,8 @@ pub(super) fn process_info(
 /// Return the result of `erlang:process_info/2` for a list of items of the
 /// caller, or `None` when an item is not a key of `erlang:process_info/1`.
 /// ERTS reads each item with `process_info_aux` in the order of the list,
-/// also a repeated item, and charges one reduction for each read
-/// (`erl_bif_info.c:1601`). In a list, `registered_name` gives
+/// also a repeated item, and charges one reduction for each read of a
+/// distinct item (`erl_bif_info.c:1601`). In a list, `registered_name` gives
 /// `{registered_name, []}` for a process without a name
 /// (`ERTS_PI_FLAG_ALWAYS_WRAP`, `erl_bif_info.c:1606-1632`). `proc_lib`
 /// reads such a list of the crashing process for its crash report
@@ -4658,15 +4658,19 @@ fn caller_info_list(
     let all: Vec<Term> = all.proper_list().expect("a proper list").cloned().collect();
     let mut reductions = 0;
     let mut info = Vec::with_capacity(items.len());
-    for item in items {
+    for (index, item) in items.iter().enumerate() {
         let found = all
             .iter()
-            .find(|pair| matches!(pair, Term::Tuple(elements) if elements[0] == item));
+            .find(|pair| matches!(pair, Term::Tuple(elements) if elements[0] == *item));
         let pair = match found {
             Some(pair) => pair.clone(),
             None => Term::tuple(vec![item.clone(), Term::nil()]),
         };
-        reductions += 1 + super::links_reductions(&item, &pair);
+        // ERTS reads a repeated item once and copies its result
+        // (`part_res`, `erl_bif_info.c:1134-1145`), so only its first read costs.
+        if !items[..index].contains(item) {
+            reductions += 1 + super::links_reductions(item, &pair);
+        }
         info.push(pair);
     }
     scheduler.current_process_mut().bump_reductions(reductions);

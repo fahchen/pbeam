@@ -185,3 +185,18 @@ fn reads_a_list_of_process_info_items_of_the_caller_as_pinned_erts() {
         format!("{expected}\n")
     );
 }
+
+#[test]
+fn charges_a_repeated_process_info_item_once_as_pinned_erts() {
+    // `process_info_bif` reads each distinct item once into `part_res`
+    // (`erl_bif_info.c:1134-1145`), and each read costs one reduction
+    // (`erl_bif_info.c:1601`).
+    let erlang = pinned_beam("erlang");
+    let lists = pinned_beam("lists");
+    let program = BeamProgram::load(&[PROBE, TARGET, &erlang, &lists]).unwrap();
+    let result = program
+        .execute("diagnostics_probe", "info_list_cost", &[])
+        .unwrap();
+    assert_eq!(text(&result.term, result.atoms()), "[2,2,5]");
+    assert_eq!(reference("diagnostics_probe:info_list_cost()"), "[2,2,5]\n");
+}
