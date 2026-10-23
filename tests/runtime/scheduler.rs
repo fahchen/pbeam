@@ -1967,7 +1967,7 @@ fn sends_the_messages_of_an_active_socket_to_the_owner_and_ends_the_port() {
         Event::Closed,
         Event::Exit("etimedout".to_owned()),
     ];
-    scheduler.deliver_events(port, events).unwrap();
+    scheduler.tcp_step(port, |_| Some(events)).unwrap();
     let name = |text| Term::Atom(scheduler.atoms.put(text).unwrap());
     let (tcp_error, etimedout, tcp_closed) =
         (name("tcp_error"), name("etimedout"), name("tcp_closed"));
@@ -2014,7 +2014,7 @@ fn unlinks_the_new_owner_after_its_queued_link_signal_at_a_driver_exit() {
         .unwrap();
     assert!(scheduler.connect_port(port, child));
     let events = vec![Event::Exit("normal".to_owned())];
-    scheduler.deliver_events(port, events).unwrap();
+    scheduler.tcp_step(port, |_| Some(events)).unwrap();
     scheduler
         .handle_signals(child, 100, 100, HandlingPoint::ScheduleIn)
         .unwrap();
@@ -2601,4 +2601,70 @@ fn ignores_a_writable_fd_of_no_port_with_queued_output() {
     let mut scheduler = test_scheduler();
     scheduler.port_writable(i32::MAX).unwrap();
     assert!(scheduler.processes.is_empty());
+}
+
+/// Open a `tcp_inet` port of a connected socket pair, owned by the current
+/// process of a new scheduler, and return the scheduler, the owner, the
+/// port, and the peer socket.
+fn tcp_port() -> (Scheduler, ProcessId, crate::term::PortId, socket2::Socket) {
+    use crate::runtime::port::{
+        Driver,
+        inet::{Inet, SocketType},
+    };
+    use socket2::{Domain, Socket, Type};
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let id = current(&mut scheduler);
+    let (local, peer) = Socket::pair(Domain::UNIX, Type::STREAM, None).unwrap();
+    let tcp = Inet::new(SocketType::Stream).copy(local);
+    let port = scheduler
+        .open_port(b"tcp_inet".to_vec(), Driver::Inet(tcp))
+        .unwrap();
+    (scheduler, id, port, peer)
+}
+
+#[test]
+fn sends_the_messages_of_a_step_before_a_close_on_another_scheduler() {
+    use crate::runtime::port::{self, inet::Event};
+    // The driver sends the messages of its callback under the port lock of
+    // the step (`erts_port_control`, io.c:4268-4420), so a close after the
+    // lock does not drop them.
+    let (mut scheduler, id, port, _peer) = tcp_port();
+    let cell = scheduler.node.port(port).unwrap();
+    let mut slot = port::lock(&cell);
+    let item = slot.as_mut().unwrap();
+    let exit = scheduler
+        .send_events(port, item, vec![Event::Data(vec![7])])
+        .unwrap();
+    // Another scheduler closes the port after the step.
+    let closed = slot.take();
+    drop(slot);
+    scheduler.node.ports().remove(port);
+    assert!(closed.is_some() && exit.is_none());
+    let tcp = Term::Atom(scheduler.atoms.put("tcp").unwrap());
+    let data = Term::list_from(vec![Term::Integer(7)]);
+    assert_eq!(
+        messages(&scheduler, id.0),
+        [Term::tuple(vec![tcp, Term::Port(port), data])]
+    );
+}
+
+#[test]
+fn drops_the_io_event_of_a_port_that_another_scheduler_closed() {
+    use crate::runtime::port;
+    // ERTS drops the IO event of a port that is gone. The poll took its
+    // handles before the close.
+    let (mut scheduler, id, port, mut peer) = tcp_port();
+    std::io::Write::write_all(&mut peer, &[1]).unwrap();
+    let cell = scheduler.node.port(port).unwrap();
+    assert!(port::lock(&cell).take().is_some());
+    // First the slot is empty, then the port leaves the table.
+    for _ in 0..2 {
+        scheduler.tcp_receive_ready(port).unwrap();
+        scheduler.tcp_send_ready(port).unwrap();
+        scheduler.tcp_accept_ready(port).unwrap();
+        scheduler.node.ports().remove(port);
+    }
+    assert!(messages(&scheduler, id.0).is_empty());
 }

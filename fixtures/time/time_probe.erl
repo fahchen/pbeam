@@ -4,7 +4,10 @@
          wall_time/0, wall_time_on/0, wall_time_order/0, wall_time_reds/0,
          clock/0, time_offset_units/0, timestamp/0, perf/0, pid/0, pid_value/0,
          environment/0, clock_utc/0, clock_jst/0, leap_local/0,
+         posix_seconds/0, now/0,
          ping/1]).
+
+-compile({nowarn_deprecated_function, [{erlang, now, 0}]}).
 
 %% The Erlang monotonic time at the emulator start in `native`
 %% (`erlang:system_info(start_time)` on the pinned ERTS).
@@ -322,6 +325,29 @@ leap_check() ->
                      {{2026,1,15},{12,0,0}} -> <<"posix2time\n">>;
                      {{2026,1,15},{11,59,33}} -> <<"localtime_r\n">>
                  end).
+
+posix_seconds() ->
+    [catch_error(fun() -> erlang:universaltime_to_posixtime(id(T)) end)
+     || T <- [{{1970,1,1},{0,0,0}}, {{1969,12,31},{23,59,59}}, {{1600,1,1},{0,0,0}},
+              {{1599,12,31},{23,59,59}}, {{2000,2,29},{1,2,3}},
+              {{2147483646,12,31},{23,59,59}}, {{2147483647,1,1},{0,0,0}},
+              {{2100,2,29},{0,0,0}}, {{2026,1,1},{0,60,0}}, {{2026,1,1},{0,0,-1}},
+              {{2026,1,1},{0,0,0},x}, {{2026,1,1},{0,0}}, {{1.0,1,1},{0,0,0}}, foo]].
+
+%% Check that `erlang:now/0` gives `{MegaSecs, Secs, MicroSecs}`, larger
+%% than each earlier value (erl_time_sup.c:1863-1876), and not before
+%% `erlang:timestamp/0` read before it.
+now() ->
+    T = erlang:timestamp(),
+    A = erlang:now(),
+    B = erlang:now(),
+    C = erlang:now(),
+    [le(T, A), A < B, B < C, now_form(A), now_form(C)].
+
+now_form({Mega, Sec, Micro}) when is_integer(Mega), Mega > 0, is_integer(Sec), 0 =< Sec,
+                                  Sec < 1000000, is_integer(Micro), 0 =< Micro,
+                                  Micro < 1000000 -> true;
+now_form(Now) -> {false, Now}.
 
 catch_error(F) -> try F() catch error:R -> {error, R} end.
 

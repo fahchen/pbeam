@@ -2,6 +2,8 @@
 //! conversion of `erlang:monotonic_time/1` and `os:system_time/1`, the
 //! date of a POSIX time, and the POSIX time of a UTC date.
 
+use std::sync::atomic::{AtomicI64, Ordering};
+
 use num_bigint::Sign;
 
 use crate::term::{SMALL_INTEGER_MIN, Term};
@@ -198,12 +200,16 @@ pub(super) fn seconds_to_univ(time: i64) -> DateTime {
     )
 }
 
-/// The first year that `univ_to_local` accepts, `BASEYEAR`
-/// (`erl_time_sup.c:1598-1600`).
-const BASEYEAR: i64 = 1902;
+/// The first year that `univ_to_local` and `local_to_univ` accept,
+/// `BASEYEAR` (`erl_time_sup.c:1598-1600`, `1744`, `1808`).
+pub(super) const BASEYEAR: i64 = 1902;
 
-/// The last year that `univ_to_local` accepts, `INT_MAX - 1`
-/// (`erl_time_sup.c:1808`).
+/// The first year that `univ_to_seconds` accepts (`erl_time_sup.c:1707`).
+pub(super) const FIRST_POSIX_YEAR: i64 = 1600;
+
+/// The last year that `univ_to_local`, `local_to_univ`, and
+/// `univ_to_seconds` accept, `INT_MAX - 1` (`erl_time_sup.c:1707`, `1744`,
+/// `1808`).
 const LAST_YEAR: i64 = i32::MAX as i64 - 1;
 
 /// The days in each month of a year that is not a leap year, `mdays`
@@ -256,29 +262,71 @@ fn small_triple(elements: &[Term]) -> Option<[i64; 3]> {
     ])
 }
 
-/// Return the POSIX time of a UTC date and time, as the first part of ERTS
-/// `univ_to_local` (`erl_time_sup.c:1802-1821`) does before it calls
-/// `localtime_r`. Return `None` when a value is out of range: the year
-/// must be 1902 to 2147483646, the month 1 to 12, the day in the month
-/// (29 days in February of a leap year), the hour 0 to 23, and the minute
-/// and the second 0 to 59.
+/// Return whether a date and time is in the range that ERTS
+/// `univ_to_seconds`, `local_to_univ`, and `univ_to_local` check
+/// (`erl_time_sup.c:1707-1717`, `1744-1754`, `1808-1818`): the year must be
+/// `first_year` to 2147483646, the month 1 to 12, the day in the month (29
+/// days in February of a leap year), the hour 0 to 23, and the minute and
+/// the second 0 to 59.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(univ_to_clock((1970, 1, 1, 0, 0, 0)), Some(0));
-/// assert_eq!(univ_to_clock((2000, 2, 29, 23, 59, 59)), Some(951_868_799));
-/// assert_eq!(univ_to_clock((1901, 12, 31, 23, 59, 59)), None);
-/// assert_eq!(univ_to_clock((2100, 2, 29, 0, 0, 0)), None);
+/// assert!(in_range((1902, 1, 1, 0, 0, 0), BASEYEAR));
+/// assert!(!in_range((1901, 12, 31, 23, 59, 59), BASEYEAR));
+/// assert!(in_range((1600, 1, 1, 0, 0, 0), FIRST_POSIX_YEAR));
+/// assert!(!in_range((2100, 2, 29, 0, 0, 0), BASEYEAR));
 /// ```
-pub(super) fn univ_to_clock((year, month, day, hour, minute, second): DateTime) -> Option<i64> {
-    let valid = (BASEYEAR..=LAST_YEAR).contains(&year)
+pub(super) fn in_range(
+    (year, month, day, hour, minute, second): DateTime,
+    first_year: i64,
+) -> bool {
+    (first_year..=LAST_YEAR).contains(&year)
         && (1..=12).contains(&month)
         && (1..=MDAYS[month as usize] + i64::from(month == 2 && is_leap_year(year))).contains(&day)
         && (0..=23).contains(&hour)
         && (0..=59).contains(&minute)
-        && (0..=59).contains(&second);
-    valid.then(|| second + 60 * (minute + 60 * (hour + 24 * gregday(year, month, day))))
+        && (0..=59).contains(&second)
+}
+
+/// Return the POSIX time of a UTC date and time with a year from
+/// `first_year`, or `None` when [`in_range`] rejects it. ERTS
+/// `univ_to_seconds` (`erl_time_sup.c:1704-1727`) accepts the years from
+/// 1600, and the first part of `univ_to_local` (`erl_time_sup.c:1808-1821`)
+/// accepts the years from 1902 before it calls `localtime_r`. Both compute
+/// the seconds from `gregday` in the same way.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(univ_to_seconds((1970, 1, 1, 0, 0, 0), BASEYEAR), Some(0));
+/// assert_eq!(univ_to_seconds((2000, 2, 29, 23, 59, 59), BASEYEAR), Some(951_868_799));
+/// assert_eq!(univ_to_seconds((1901, 12, 31, 23, 59, 59), BASEYEAR), None);
+/// assert_eq!(univ_to_seconds((1600, 1, 1, 0, 0, 0), FIRST_POSIX_YEAR), Some(-11_676_096_000));
+/// ```
+pub(super) fn univ_to_seconds(date: DateTime, first_year: i64) -> Option<i64> {
+    let (year, month, day, hour, minute, second) = date;
+    in_range(date, first_year)
+        .then(|| second + 60 * (minute + 60 * (hour + 24 * gregday(year, month, day))))
+}
+
+/// Return the next `erlang:now/0` value in microseconds, as ERTS `get_now`
+/// (`erl_time_sup.c:1852-1887`) does: the system time `system_time` in the
+/// native unit converted to microseconds, or one more than the last value
+/// in `prev` when the result is not larger. `prev` then holds the result,
+/// so each call gives a larger value than each earlier call.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let prev = AtomicI64::new(0);
+/// assert_eq!(next_now(&prev, 5_000), 5);
+/// assert_eq!(next_now(&prev, 5_000), 6);
+/// ```
+pub(super) fn next_now(prev: &AtomicI64, system_time: i64) -> i64 {
+    let now = system_time / 1_000;
+    let last = prev.update(Ordering::SeqCst, Ordering::SeqCst, |last| now.max(last + 1));
+    now.max(last + 1)
 }
 
 /// Return the days from 1970-01-01 to a date with a year from 1600, as

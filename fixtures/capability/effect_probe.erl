@@ -1,6 +1,7 @@
 -module(effect_probe).
 
 -include_lib("kernel/include/file.hrl").
+-compile({nowarn_deprecated_function, [{erlang, now, 0}]}).
 -export([
     spawn/0,
     spawn_system_process/0,
@@ -594,6 +595,7 @@ ambient() ->
         time(erlang:time()),
         date_time(erlang:localtime()),
         date_time(erlang:universaltime()),
+        timestamp(erlang:now()),
         integer(os:system_time()),
         timestamp(os:timestamp()),
         integer(os:perf_counter()),

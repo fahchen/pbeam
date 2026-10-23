@@ -821,11 +821,11 @@ fn rejects_invalid_tuple_access_receives_and_bifs() {
     assert!(
         error(vec![Instruction::Bif {
             fail_label: 0,
-            bif: resolve("erlang", "now", 0).unwrap(),
+            bif: resolve("erl_ddll", "loaded_drivers", 0).unwrap(),
             arguments: Vec::new(),
             destination: Operand::X(0),
         }])
-        .contains("unresolved external MFA erlang:now/0")
+        .contains("unresolved external MFA erl_ddll:loaded_drivers/0")
     );
 }
 
@@ -4416,12 +4416,12 @@ fn reads_the_current_stacktrace_of_the_calling_process() {
         );
     }
     // ERTS 29.1.1: process_info(self(), {dictionary, k}) is
-    // {{dictionary, k}, undefined}, process_info(self(), [registered_name])
-    // is [{registered_name, []}], and process_info(self(), status) is
+    // {{dictionary, k}, undefined}, process_info(self(), [messages]) is
+    // [{messages, []}], and process_info(self(), status) is
     // {status, running}. PBeam does not implement them yet.
     for (process, item) in [
         (root(), dictionary()),
-        (root(), Term::list_from(vec![test_atom("registered_name")])),
+        (root(), Term::list_from(vec![test_atom("messages")])),
         (root(), test_atom("status")),
     ] {
         assert_eq!(

@@ -3654,7 +3654,7 @@ pub(super) fn posixtime_to_universaltime(time: &Term) -> BifResult {
 /// of a UTC date and time `{{Year, Month, Day}, {Hour, Minute, Second}}` in
 /// the host time zone, as ERTS `universaltime_to_localtime_1`
 /// (`bif.c:3975-3995`) does. A term that [`time::time_to_parts`] does not
-/// read, a value that [`time::univ_to_clock`] does not accept, and a
+/// read, a value that [`time::univ_to_seconds`] does not accept, and a
 /// failed `localtime_r` ([`host::clock::local_time`]) raise `badarg`.
 ///
 /// # Examples
@@ -3669,9 +3669,49 @@ pub(super) fn posixtime_to_universaltime(time: &Term) -> BifResult {
 /// ```
 pub(super) fn universaltime_to_localtime(date: &Term) -> BifResult {
     time::time_to_parts(date)
-        .and_then(time::univ_to_clock)
+        .and_then(|date| time::univ_to_seconds(date, time::BASEYEAR))
         .and_then(host::clock::local_time)
         .map_or_else(BifResult::badarg, |local| Value(date_time(local)))
+}
+
+/// Run `erlang:universaltime_to_posixtime(Universaltime)`: return the POSIX
+/// seconds of a UTC date and time, as ERTS `universaltime_to_posixtime_1`
+/// (`bif.c:4001-4021`) does with `univ_to_seconds`
+/// (`erl_time_sup.c:1704-1727`). A term that [`time::time_to_parts`] does
+/// not read and a value out of range raise `badarg`; the year can be 1600
+/// to 2147483646.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let triple = |a, b, c| Term::tuple(vec![Term::Integer(a), Term::Integer(b), Term::Integer(c)]);
+/// let date = Term::tuple(vec![triple(1970, 1, 1), triple(0, 0, 0)]);
+/// assert!(matches!(universaltime_to_posixtime(&date), BifResult::Value(Term::Integer(0))));
+/// ```
+pub(super) fn universaltime_to_posixtime(date: &Term) -> BifResult {
+    time::time_to_parts(date)
+        .and_then(|date| time::univ_to_seconds(date, time::FIRST_POSIX_YEAR))
+        .map_or_else(BifResult::badarg, |seconds| Value(Term::Integer(seconds)))
+}
+
+/// The last value of `erlang:now/0` in microseconds, `now_prev`
+/// (`erl_time_sup.c:1864`). ERTS keeps one for the runtime system; PBeam
+/// keeps one for the host process.
+static NOW_PREV: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+/// Run `erlang:now()`: return the system time of the run as
+/// `{MegaSecs, Secs, MicroSecs}`, larger than the value of each earlier
+/// call, as ERTS `now_0` (`bif.c:4057-4067`) does with `get_now`
+/// (`erl_time_sup.c:1852-1887`). The system time is the value that
+/// `erlang:timestamp/0` reads.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(now(1_792_192_300_076_209_000), BifResult::Value(Term::Tuple(parts)) if parts.len() == 3));
+/// ```
+pub(super) fn now(system_time: i64) -> BifResult {
+    timestamp(time::next_now(&NOW_PREV, system_time) * 1_000)
 }
 
 /// Return the term `{{Year, Month, Day}, {Hour, Minute, Second}}` of a date
@@ -4492,8 +4532,9 @@ fn is_process_info_item(atoms: &AtomTable, item: &Term) -> bool {
 ///
 /// # Errors
 ///
-/// A list of items, another item, and the `current_stacktrace` of another
-/// process give a runtime error.
+/// A list of items of another process, a list with an item that is not a
+/// key of `erlang:process_info/1`, another item, and the
+/// `current_stacktrace` of another process give a runtime error.
 pub(super) fn process_info(
     context: &mut BifContext<'_>,
     process: &Term,
@@ -4513,7 +4554,7 @@ pub(super) fn process_info(
     }
     let caller = scheduler.current_process_mut();
     let caller_id = caller.id;
-    // ponytail: lists of items, other items, and the frames of another process need more state; see "BIF arguments" in docs/erts-differences.md.
+    // ponytail: lists of items with other items or of another process, other items, and the frames of another process need more state; see "BIF arguments" in docs/erts-differences.md.
     let unsupported = |atoms: &AtomTable| {
         error(format!(
             "unsupported erlang:process_info/2 arguments {}, {}",
@@ -4528,6 +4569,11 @@ pub(super) fn process_info(
             |scheduler| {
                 let current = scheduler.current_reductions();
                 let registered = scheduler.registered_name_of(caller_id);
+                if let Some(items) = item.proper_list() {
+                    let info = caller_info_list(scheduler, items.cloned().collect(), current)?
+                        .ok_or_else(|| unsupported(&scheduler.atoms))?;
+                    return Ok(Value(info));
+                }
                 // ERTS builds the frames of the calling process from its
                 // continuation pointers, without the current function, which
                 // is `process_info/2`: at most `backtrace_depth` frames
@@ -4622,6 +4668,66 @@ pub(super) fn process_info(
         .current_process_mut()
         .bump_reductions(1 + super::links_reductions(item, &info));
     Ok(signals_return(scheduler, process, info))
+}
+
+/// Return the result of `erlang:process_info/2` for a list of items of the
+/// caller, or `None` when an item is not a key of `erlang:process_info/1`.
+/// ERTS reads each item with `process_info_aux` in the order of the list,
+/// also a repeated item, and charges one reduction for each read of a
+/// distinct item (`erl_bif_info.c:1601`). In a list, `registered_name` gives
+/// `{registered_name, []}` for a process without a name
+/// (`ERTS_PI_FLAG_ALWAYS_WRAP`, `erl_bif_info.c:1606-1632`). `proc_lib`
+/// reads such a list of the crashing process for its crash report
+/// (`proc_lib.erl:968-971`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let items = vec![Term::static_atom("registered_name"), Term::static_atom("status")];
+/// let info = caller_info_list(scheduler, items, 0)?;
+/// assert!(matches!(info, Some(Term::Cons(_))));
+/// ```
+///
+/// # Errors
+///
+/// The errors of `process_info_values` and `process_info_term`.
+fn caller_info_list(
+    scheduler: &mut Scheduler,
+    items: Vec<Term>,
+    current: u64,
+) -> Result<Option<Term>, BeamError> {
+    let atoms = &scheduler.atoms;
+    let supported = items.iter().all(|item| {
+        matches!(item, Term::Atom(name) if PROCESS_INFO_1_KEYS.contains(&atoms.name_of(name)))
+    });
+    if !supported {
+        return Ok(None);
+    }
+    let caller = scheduler.current_process();
+    let messages = caller.mailbox.message_count();
+    let registered = scheduler.registered_name_of(caller.id);
+    let values = process_info_values(&scheduler.code, caller, current, messages, true, registered)?;
+    let all = process_info_term(&scheduler.atoms, values)?;
+    let all: Vec<Term> = all.proper_list().expect("a proper list").cloned().collect();
+    let mut reductions = 0;
+    let mut info = Vec::with_capacity(items.len());
+    for (index, item) in items.iter().enumerate() {
+        let found = all
+            .iter()
+            .find(|pair| matches!(pair, Term::Tuple(elements) if elements[0] == *item));
+        let pair = match found {
+            Some(pair) => pair.clone(),
+            None => Term::tuple(vec![item.clone(), Term::nil()]),
+        };
+        // ERTS reads a repeated item once and copies its result
+        // (`part_res`, `erl_bif_info.c:1134-1145`), so only its first read costs.
+        if !items[..index].contains(item) {
+            reductions += 1 + super::links_reductions(item, &pair);
+        }
+        info.push(pair);
+    }
+    scheduler.current_process_mut().bump_reductions(reductions);
+    Ok(Some(Term::list_from(info)))
 }
 
 /// Run `erlang:is_process_alive/1` as `is_process_alive_1`
