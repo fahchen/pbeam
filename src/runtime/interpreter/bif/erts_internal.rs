@@ -1185,7 +1185,7 @@ pub(super) fn prepare_loading(
     let module_name = scheduler.atoms.name_of(module).to_owned();
     match code::prepare(bytes, &module_name, &scheduler.atoms) {
         Ok(prepared) => {
-            let reference = scheduler.make_ref()?;
+            let reference = scheduler.make_magic_ref()?;
             scheduler.code.prepare(reference, prepared);
             Ok(Value(Term::Reference(reference)))
         }

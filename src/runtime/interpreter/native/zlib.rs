@@ -733,7 +733,7 @@ fn deflate_config(
 ///
 /// A full reference counter gives the error of `Scheduler::make_ref`.
 fn open_nif(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
-    let reference = scheduler.make_ref()?;
+    let reference = scheduler.make_magic_ref()?;
     let controller = scheduler.current_process().id;
     lock(&scheduler.node().resources.kind::<ZlibStreams>())
         .insert(reference, ZStream::new(controller));

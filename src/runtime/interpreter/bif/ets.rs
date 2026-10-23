@@ -2353,7 +2353,7 @@ fn match_end(
         rest.reverse();
     }
     if !rest.is_empty() || next >= 0 {
-        let program = context.scheduler.make_ref()?;
+        let program = context.scheduler.make_magic_ref()?;
         let size = rest.len() as i64;
         (context.scheduler.ets.exclusive()).remember_program(id, program, compiled.clone());
         let continuation = Term::tuple(vec![

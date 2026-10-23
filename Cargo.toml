@@ -789,3 +789,7 @@ path = "tests/integration/bif_cause.rs"
 [[test]]
 name = "undef_frames"
 path = "tests/integration/undef_frames.rs"
+
+[[test]]
+name = "magic_ref"
+path = "tests/integration/magic_ref.rs"
