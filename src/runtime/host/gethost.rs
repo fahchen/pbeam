@@ -10,14 +10,18 @@
 //! program does with its fds 0 and 1 (`inet_gethost.c:139-146`). It does
 //! each lookup with the host call that the worker of the program uses on
 //! a host with `getaddrinfo` and `getnameinfo` (`inet_gethost.c:1707-1992`).
-//! It has one worker and no request queue: it answers the requests in
-//! order, and `OP_CANCEL_REQUEST` changes nothing (see "Ports" in
-//! `docs/erts-differences.md`).
+//! It runs the worker pool and the request queues of the program with
+//! one thread for each worker (see [`pool`]).
 
 use std::{
-    ffi::{CStr, c_char, c_int},
+    collections::VecDeque,
+    ffi::{CStr, CString, c_char, c_int},
     io::{Read, Write},
-    sync::Mutex,
+    sync::{
+        Arc, Mutex,
+        mpsc::{self, Sender},
+    },
+    thread,
 };
 
 /// `OP_GETHOSTBYNAME` (`inet_gethost.c:154`).
@@ -70,54 +74,415 @@ unsafe extern "C" {
     static h_errno: c_int;
 }
 
-/// Serve the requests of `input` and write the replies to `output` until
-/// the end of file of `input`, as the main loop and the worker loop of the
-/// program do (`inet_gethost.c:856-980`, `1725-1992`). Return the exit
-/// status of the program: 0 at the end of file, and 1 for a fatal error
-/// (`fatal`, `inet_gethost.c:2643-2667`): a request with a size below 5
-/// or a part of a request (`inet_gethost.c:1325-1351`), and `OP_CONTROL`
-/// with a serial that is not `INVALID_SERIAL` (`inet_gethost.c:896-901`).
-/// The program writes the message of a fatal error to its fd 2; the
-/// thread writes nothing.
+/// The answer of a worker to a query: the reply after the serial.
+pub(crate) type Answer = Arc<dyn Fn(&Query) -> Vec<u8> + Send + Sync>;
+
+/// Serve the requests of `input` with the arguments `args` of the program
+/// and write the replies to `output`, with the host calls of [`answer`].
+/// See [`pool`].
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let status = serve(&mut input, &mut output);
+/// let status = serve(&args, input, &mut output);
 /// ```
-pub(crate) fn serve(input: &mut impl Read, output: &mut impl Write) -> i32 {
+pub(crate) fn serve(
+    args: &[Vec<u8>],
+    input: impl Read + Send + 'static,
+    output: &mut impl Write,
+) -> i32 {
+    pool(args, input, output, Arc::new(answer))
+}
+
+/// Serve the requests of `input` and write the replies to `output` until
+/// the end of file of `input`, as `main` and the main loop of the program
+/// do (`inet_gethost.c:449-538`, `727-1043`): a thread reads the requests,
+/// and a pool of worker threads runs `answer`. Return the exit status of
+/// the program: 0 at the end of file, and 1 for a fatal error (`fatal`,
+/// `inet_gethost.c:2643-2667`): a worker count below 1, which `malloc`
+/// cannot allocate (`inet_gethost.c:1049-1060`, `2669-2677`), a request
+/// with a size below 5 or a part of a request (`inet_gethost.c:1325-1351`),
+/// `OP_CONTROL` with a serial that is not `INVALID_SERIAL`
+/// (`inet_gethost.c:896-901`), and a failed write of a reply
+/// (`inet_gethost.c:1477-1492`). The program writes the message of a fatal
+/// error to its fd 2; the thread writes nothing.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let status = pool(&[b"4".to_vec()], input, &mut output, Arc::new(answer));
+/// ```
+pub(crate) fn pool(
+    args: &[Vec<u8>],
+    mut input: impl Read + Send + 'static,
+    output: &mut impl Write,
+    answer: Answer,
+) -> i32 {
+    let Some((max, threshold)) = options(args) else {
+        return 1;
+    };
+    let (events, receiver) = mpsc::channel();
+    let requests = events.clone();
+    thread::spawn(move || {
+        loop {
+            let event = read_request(&mut input);
+            let end = !matches!(event, Event::Request(_));
+            if requests.send(event).is_err() || end {
+                break;
+            }
+        }
+    });
+    let mut pool = Pool {
+        events,
+        answer,
+        max,
+        threshold,
+        next_id: 0,
+        free: Vec::new(),
+        busy: Vec::new(),
+        queue: VecDeque::new(),
+    };
     loop {
-        let mut size = [0; 4];
-        match read_exact(input, &mut size) {
-            Some(0) => return 0,
-            Some(4) => {}
-            _ => return 1,
-        }
-        let mut request = vec![0; u32::from_be_bytes(size) as usize];
-        if read_exact(input, &mut request) != Some(request.len()) || request.len() < 5 {
-            return 1;
-        }
-        let serial = u32::from_be_bytes(request[..4].try_into().expect("4 bytes"));
-        let reply = match request[4] {
-            OP_CANCEL_REQUEST => continue,
-            // `SETOPT_DEBUG_LEVEL` and other controls change no reply.
-            OP_CONTROL if serial == INVALID_SERIAL => continue,
-            OP_CONTROL => return 1,
-            op @ (OP_GETHOSTBYNAME | OP_GETHOSTBYADDR) => match lookup(op, &request[5..]) {
-                Some(reply) => reply,
-                None => continue,
-            },
-            // "Unknown operation requested from erlang", discarded.
-            _ => continue,
+        let request = match receiver.recv().expect("the pool keeps a sender") {
+            Event::Request(request) => request,
+            Event::End => return 0,
+            Event::Fatal => return 1,
+            Event::Reply(id, packet) => {
+                if let Some(index) = pool.busy.iter().position(|worker| worker.id == id) {
+                    if output.write_all(&packet).is_err() {
+                        return 1;
+                    }
+                    pool.replied(index);
+                }
+                pool.check_queue();
+                continue;
+            }
         };
-        let mut packet = Vec::with_capacity(8 + reply.len());
-        packet.extend_from_slice(&u32::try_from(4 + reply.len()).unwrap_or(0).to_be_bytes());
-        packet.extend_from_slice(&serial.to_be_bytes());
-        packet.extend_from_slice(&reply);
-        if output.write_all(&packet).is_err() {
-            return 1;
+        let serial = u32::from_be_bytes(request[..4].try_into().expect("4 bytes"));
+        match request[4] {
+            OP_CANCEL_REQUEST => pool.cancel(serial),
+            // `SETOPT_DEBUG_LEVEL` and other controls change no reply.
+            OP_CONTROL if serial == INVALID_SERIAL => {}
+            OP_CONTROL => return 1,
+            op @ (OP_GETHOSTBYNAME | OP_GETHOSTBYADDR) => {
+                if let Some((query, domain)) = parse(op, &request[5..]) {
+                    pool.start(Job { serial, query }, domain);
+                }
+            }
+            // "Unknown operation requested from erlang", discarded.
+            _ => {}
         }
     }
+}
+
+/// Return the worker count and the greedy threshold of the arguments, as
+/// `main` reads them (`inet_gethost.c:449-502`), or `None` for a worker
+/// count below 1, which `init_workers` cannot allocate
+/// (`inet_gethost.c:1049-1060`). `-d` changes no reply. An argument that
+/// `atoi` reads as 0 is a usage message and changes nothing.
+fn options(args: &[Vec<u8>]) -> Option<(usize, i32)> {
+    let mut workers = 1;
+    let mut threshold = 0;
+    let mut greedy = true;
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_slice() {
+            b"-d" => {}
+            b"-g" if rest.len() > 0 => match rest.next().map_or(0, |next| atoi(next)) {
+                0 => {}
+                value => threshold = value,
+            },
+            b"-ng" => greedy = false,
+            _ => match atoi(arg) {
+                0 => {}
+                value => workers = value,
+            },
+        }
+    }
+    if threshold == 0 {
+        threshold = match workers.wrapping_mul(3) / 4 {
+            0 => workers,
+            value => value,
+        };
+    }
+    if !greedy {
+        threshold = workers.wrapping_add(1);
+    }
+    Some((
+        usize::try_from(workers).ok().filter(|&max| max > 0)?,
+        threshold,
+    ))
+}
+
+/// Read a number as glibc `atoi` does: `(int) strtol(text, NULL, 10)`,
+/// with leading white space, a sign, the digits, and a clamp to `long`.
+fn atoi(text: &[u8]) -> i32 {
+    let text = text.trim_ascii_start();
+    let (negative, digits) = match text.split_first() {
+        Some((b'-', rest)) => (true, rest),
+        Some((b'+', rest)) => (false, rest),
+        _ => (false, text),
+    };
+    let magnitude = digits
+        .iter()
+        .take_while(|byte| byte.is_ascii_digit())
+        .fold(0i128, |value, &digit| {
+            (value * 10 + i128::from(digit - b'0')).min(i128::from(i64::MAX) + 1)
+        });
+    let value = if negative { -magnitude } else { magnitude };
+    // `strtol` clamps to `long`; the cast to `int` keeps the low 32 bits.
+    let long = i64::try_from(value).unwrap_or(i64::MAX);
+    long as i32
+}
+
+/// An event of the main loop.
+enum Event {
+    /// A request of the input.
+    Request(Vec<u8>),
+    /// The end of file of the input.
+    End,
+    /// A failed read or a short request.
+    Fatal,
+    /// The packet of the reply of the worker with the given id.
+    Reply(u64, Vec<u8>),
+}
+
+/// Read a request as `read_request` does (`inet_gethost.c:1325-1351`).
+fn read_request(input: &mut impl Read) -> Event {
+    let mut size = [0; 4];
+    match read_exact(input, &mut size) {
+        Some(0) => return Event::End,
+        Some(4) => {}
+        _ => return Event::Fatal,
+    }
+    let mut request = vec![0; u32::from_be_bytes(size) as usize];
+    if read_exact(input, &mut request) != Some(request.len()) || request.len() < 5 {
+        return Event::Fatal;
+    }
+    Event::Request(request)
+}
+
+/// A lookup request: the serial and the query.
+struct Job {
+    serial: u32,
+    query: Query,
+}
+
+/// A worker thread of the pool, as the `Worker` of the program
+/// (`inet_gethost.c:276-292`).
+struct Worker {
+    /// The id of the thread, which its replies carry.
+    id: u64,
+    /// The channel of the jobs of the thread.
+    jobs: Sender<Job>,
+    /// The serial of the running job.
+    serial: u32,
+    /// The domain of the last job that the main loop gave to the worker,
+    /// which a job of the global queue does not change
+    /// (`inet_gethost.c:643-649`, `1037-1040`).
+    domain: Option<Vec<u8>>,
+    /// The jobs of the same domain that wait for the worker.
+    queue: VecDeque<Job>,
+}
+
+/// The worker pool and the global request queue of the main loop.
+struct Pool {
+    events: Sender<Event>,
+    answer: Answer,
+    max: usize,
+    threshold: i32,
+    next_id: u64,
+    free: Vec<Worker>,
+    busy: Vec<Worker>,
+    queue: VecDeque<Job>,
+}
+
+impl Pool {
+    /// Start a worker thread with the given queue, as `create_worker` does.
+    fn create(&mut self, domain: Option<Vec<u8>>, queue: VecDeque<Job>) -> Worker {
+        let (jobs, receiver) = mpsc::channel::<Job>();
+        let (id, events, answer) = (self.next_id, self.events.clone(), self.answer.clone());
+        self.next_id += 1;
+        thread::spawn(move || {
+            while let Ok(job) = receiver.recv() {
+                let reply = answer(&job.query);
+                let mut packet = Vec::with_capacity(8 + reply.len());
+                packet
+                    .extend_from_slice(&u32::try_from(4 + reply.len()).unwrap_or(0).to_be_bytes());
+                packet.extend_from_slice(&job.serial.to_be_bytes());
+                packet.extend_from_slice(&reply);
+                if events.send(Event::Reply(id, packet)).is_err() {
+                    break;
+                }
+            }
+        });
+        Worker {
+            id,
+            jobs,
+            serial: 0,
+            domain,
+            queue,
+        }
+    }
+
+    /// Return the index of a busy worker for a job, as `pick_worker` does
+    /// (`inet_gethost.c:1149-1180`): a free worker, or a new worker when
+    /// fewer than the maximum are busy.
+    fn pick(&mut self) -> Option<usize> {
+        let worker = match self.free.pop() {
+            Some(worker) => worker,
+            None if self.busy.len() == self.max => return None,
+            None => self.create(None, VecDeque::new()),
+        };
+        self.busy.push(worker);
+        Some(self.busy.len() - 1)
+    }
+
+    /// Give `job` to the busy worker at `index`.
+    fn send(&mut self, index: usize, job: Job) {
+        let worker = &mut self.busy[index];
+        worker.serial = job.serial;
+        // The thread ends only after the pool drops `jobs`.
+        let _ = worker.jobs.send(job);
+    }
+
+    /// Start a job of the domain `domain`, as the main loop does
+    /// (`inet_gethost.c:982-1040`): when `BEE_GREEDY`, queue it to the busy
+    /// worker of the same domain with the shortest queue; else give it to
+    /// a worker, or queue it.
+    fn start(&mut self, job: Job, domain: Vec<u8>) {
+        if i32::try_from(self.busy.len()).unwrap_or(i32::MAX) >= self.threshold {
+            let mut found: Option<usize> = None;
+            for (index, worker) in self.busy.iter().enumerate() {
+                if worker.domain.as_ref() == Some(&domain)
+                    && found.is_none_or(|best| worker.queue.len() < self.busy[best].queue.len())
+                {
+                    found = Some(index);
+                }
+            }
+            if let Some(index) = found {
+                self.busy[index].queue.push_back(job);
+                return;
+            }
+        }
+        match self.pick() {
+            Some(index) => {
+                self.send(index, job);
+                self.busy[index].domain = Some(domain);
+            }
+            None => self.queue.push_back(job),
+        }
+    }
+
+    /// Handle the reply of the busy worker at `index`, as `handle_io_busy`
+    /// does (`inet_gethost.c:552-585`).
+    fn replied(&mut self, index: usize) {
+        match self.busy[index].queue.pop_front() {
+            Some(job) => self.send(index, job),
+            None => {
+                let worker = self.busy.swap_remove(index);
+                self.free.push(worker);
+            }
+        }
+    }
+
+    /// Give the jobs of the global queue to workers, as `check_que` does
+    /// (`inet_gethost.c:620-662`).
+    fn check_queue(&mut self) {
+        while !self.queue.is_empty() {
+            let Some(index) = self.pick() else { break };
+            let job = self.queue.pop_front().expect("a job");
+            self.send(index, job);
+        }
+    }
+
+    /// Cancel the request `serial`, as the main loop does
+    /// (`inet_gethost.c:876-891`, `664-725`): remove it from the global
+    /// queue or a worker queue, or stop the worker that runs it. The
+    /// program kills a stopped worker process; the thread of a stopped
+    /// worker ends its lookup, and the pool drops its reply.
+    fn cancel(&mut self, serial: u32) {
+        if let Some(position) = self.queue.iter().position(|job| job.serial == serial) {
+            self.queue.remove(position);
+            return;
+        }
+        for worker in &mut self.busy {
+            if let Some(position) = worker.queue.iter().position(|job| job.serial == serial) {
+                worker.queue.remove(position);
+                return;
+            }
+        }
+        let Some(index) = self.busy.iter().position(|worker| worker.serial == serial) else {
+            return;
+        };
+        if self.busy[index].queue.is_empty() {
+            self.busy.swap_remove(index);
+            self.check_queue();
+        } else {
+            let old = &mut self.busy[index];
+            let (domain, mut queue) = (old.domain.take(), std::mem::take(&mut old.queue));
+            let job = queue.pop_front().expect("a job");
+            self.busy[index] = self.create(domain, queue);
+            self.send(index, job);
+        }
+    }
+}
+
+/// A validated lookup query.
+pub(crate) enum Query {
+    /// `OP_GETHOSTBYNAME` with the protocol and the name.
+    Name(u8, CString),
+    /// `OP_GETHOSTBYADDR` of `PROTO_IPV4`.
+    Address4([u8; 4]),
+    /// `OP_GETHOSTBYADDR` of `PROTO_IPV6`.
+    Address6([u8; 16]),
+}
+
+/// Return the query and the domain of the operation `op` with the protocol
+/// and the data of `rest`, or `None` for a request that the main loop
+/// discards: a protocol that is not `PROTO_IPV4` or `PROTO_IPV6`, a name
+/// without a byte 0, and an address of the wrong size
+/// (`inet_gethost.c:963-979`, `1548-1585`). The domain is the operation,
+/// the protocol, and the name from its first `.` with at most 255 bytes, or
+/// the address without its last byte (`domaincopy`,
+/// `inet_gethost.c:1504-1527`).
+fn parse(op: u8, rest: &[u8]) -> Option<(Query, Vec<u8>)> {
+    let (&proto, data) = rest.split_first()?;
+    let mut domain = vec![op, proto];
+    let query = match (op, proto) {
+        (OP_GETHOSTBYNAME, PROTO_IPV4 | PROTO_IPV6) => {
+            let name = CStr::from_bytes_until_nul(data).ok()?;
+            let bytes = name.to_bytes();
+            let dot = bytes.iter().position(|&byte| byte == b'.');
+            let suffix = &bytes[dot.unwrap_or(bytes.len())..];
+            domain.extend_from_slice(&suffix[..suffix.len().min(255)]);
+            Query::Name(proto, name.to_owned())
+        }
+        (OP_GETHOSTBYADDR, PROTO_IPV4) => {
+            let address = <[u8; 4]>::try_from(data).ok()?;
+            domain.extend_from_slice(&address[..3]);
+            Query::Address4(address)
+        }
+        (OP_GETHOSTBYADDR, PROTO_IPV6) => {
+            let address = <[u8; 16]>::try_from(data).ok()?;
+            domain.extend_from_slice(&address[..15]);
+            Query::Address6(address)
+        }
+        _ => return None,
+    };
+    Some((query, domain))
+}
+
+/// Return the reply of `query` with the host calls of the worker
+/// (`inet_gethost.c:1791-1976`).
+fn answer(query: &Query) -> Vec<u8> {
+    let result = match query {
+        Query::Name(PROTO_IPV4, name) => host_by_name(name),
+        Query::Name(_, name) => address_info(name),
+        Query::Address4(address) => host_by_address(*address),
+        Query::Address6(address) => name_info(*address),
+    };
+    result.unwrap_or_else(error_reply)
 }
 
 /// Read bytes into `buffer` until it is full or `input` ends, and return
@@ -133,29 +498,6 @@ fn read_exact(input: &mut impl Read, buffer: &mut [u8]) -> Option<usize> {
         }
     }
     Some(done)
-}
-
-/// Return the reply after the serial for the operation `op` with the
-/// protocol and the data of `rest`, or `None` for a request that the main
-/// loop discards: a protocol that is not `PROTO_IPV4` or `PROTO_IPV6`, a
-/// name without a byte 0, and an address of the wrong size
-/// (`inet_gethost.c:963-979`, `1548-1585`).
-fn lookup(op: u8, rest: &[u8]) -> Option<Vec<u8>> {
-    let (&proto, data) = rest.split_first()?;
-    let result = match (op, proto) {
-        (OP_GETHOSTBYNAME, PROTO_IPV4 | PROTO_IPV6) => {
-            let name = CStr::from_bytes_until_nul(data).ok()?;
-            if proto == PROTO_IPV4 {
-                host_by_name(name)
-            } else {
-                address_info(name)
-            }
-        }
-        (OP_GETHOSTBYADDR, PROTO_IPV4) => host_by_address(<[u8; 4]>::try_from(data).ok()?),
-        (OP_GETHOSTBYADDR, PROTO_IPV6) => name_info(<[u8; 16]>::try_from(data).ok()?),
-        _ => return None,
-    };
-    Some(result.unwrap_or_else(error_reply))
 }
 
 /// The reply of an error code: the unit 0 and the string of
