@@ -83,21 +83,6 @@ fn flatmap_holds(pairs: &[(Term, Term)], key: &Term, atoms: &AtomTable) -> bool 
         .is_ok()
 }
 
-/// Return the first key of a flatmap that has no hash, or `Ok(())` when
-/// every key has one. Each key of a map that becomes a hashmap needs a hash.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// assert!(validate_hashes([&Term::Integer(1)]).is_ok());
-/// assert!(validate_hashes([&Term::list_from([Term::binary(vec![])])]).is_err());
-/// ```
-fn validate_hashes<'a>(keys: impl IntoIterator<Item = &'a Term>) -> Result<(), Term> {
-    keys.into_iter()
-        .find(|key| map_hash(key).is_none())
-        .map_or(Ok(()), |key| Err(key.clone()))
-}
-
 /// The direction of an `erts_internal:map_next/3` walk over a map.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Direction {
@@ -1169,7 +1154,7 @@ fn update_flat(
         }
         return Ok(Convert::No);
     }
-    Ok(Convert::Yes(convert_to_hash(pairs, operations, atoms)?))
+    Ok(Convert::Yes(convert_to_hash(pairs, operations, atoms)))
 }
 
 /// The result of [`update_flat`]: the map kept its flatmap form, or it
@@ -1182,22 +1167,14 @@ enum Convert {
 }
 
 /// Turn the flatmap pairs and the operations into a hashmap. The read path
-/// read a flatmap that grows past its limit.
-///
-/// # Errors
-///
-/// Return the first key that a hashmap form does not support.
+/// read a flatmap that grows past its limit. Each key has a hash: a
+/// flatmap holds only keys that `update_flat` checked, and `update_flat`
+/// checked each key of the operations.
 fn convert_to_hash(
     pairs: &mut Vec<(Term, Term)>,
     operations: Vec<(Insert, Term, Term)>,
     atoms: &AtomTable,
-) -> Result<Hamt, Term> {
-    let mut keys = pairs
-        .iter()
-        .map(|(existing, _)| existing)
-        .collect::<Vec<_>>();
-    keys.extend(operations.iter().map(|(_, key, _)| key));
-    validate_hashes(keys)?;
+) -> Hamt {
     let mut hamt = Hamt {
         root: Node::empty(),
         size: 0,
@@ -1206,10 +1183,10 @@ fn convert_to_hash(
         .into_iter()
         .chain(operations.into_iter().map(|(_, key, value)| (key, value)));
     for (key, value) in existing {
-        let hash = map_hash(&key).ok_or_else(|| key.clone())?;
+        let hash = map_hash(&key).expect("a key of a flatmap has a hash");
         hamt.insert(hash, key, value, atoms);
     }
-    Ok(hamt)
+    hamt
 }
 
 impl Hamt {

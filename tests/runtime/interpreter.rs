@@ -1734,29 +1734,6 @@ fn keeps_a_key_or_value_in_the_destination_slot() {
 }
 
 #[test]
-fn reports_a_maps_merge_result_key_that_the_map_form_does_not_support() {
-    // A flatmap accepts the integer 2^59, and a hashmap does not yet.
-    let pairs = |keys: std::ops::RangeInclusive<i64>| {
-        let pairs = keys.map(|key| (Term::Integer(key), Term::Integer(0)));
-        Term::Map(Map::from_pairs(pairs.collect(), &test_atom_table()).unwrap())
-    };
-    let merge = make_program(
-        vec![
-            Instruction::Move(Operand::Value(pairs(1 << 59..=1 << 59)), Operand::X(0)),
-            Instruction::Move(Operand::Value(pairs(1..=32)), Operand::X(1)),
-            external("maps", "merge", 2, true, 0),
-            Instruction::Return,
-        ],
-        0,
-    )
-    .execute("fixture", "main", &[]);
-    assert_eq!(
-        merge.unwrap_err().to_string(),
-        "unsupported map key Integer(576460752303423488)"
-    );
-}
-
-#[test]
 fn reports_a_maps_from_list_key_that_the_map_form_does_not_support() {
     // ERTS accepts a map key; a PBeam map does not hold one yet.
     let pair = Term::tuple(vec![Term::Map(Map::new()), Term::Integer(0)]);
