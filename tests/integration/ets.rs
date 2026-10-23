@@ -459,6 +459,7 @@ fn text(term: &Term, atoms: &pbeam_runtime::AtomTable) -> String {
         }
         Term::Atom(atom) => format!("'{}'", atoms.name_of(atom)),
         Term::Integer(value) => value.to_string(),
+        Term::BigInt(value) => value.to_string(),
         Term::Float(value) => format!("{value:?}"),
         Term::Binary(bytes) => format!(
             "<<{}>>",
@@ -710,6 +711,7 @@ fn runs_the_select_and_iteration_bifs_as_pinned_erts() {
         "first",
         "walk",
         "delete_object",
+        "update_counter",
     ] {
         assert_probe_matches_erts(&program, function);
     }
