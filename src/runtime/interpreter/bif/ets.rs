@@ -6,6 +6,7 @@ use crate::runtime::ets::pattern::{MatchSpec, SpecError};
 use crate::runtime::ets::{Access, Busy, EtsTables, ITERATIONS_PER_RED, Lacking, Table, TableType};
 use crate::term::Reference;
 use num_bigint::BigInt;
+use std::cmp::Ordering;
 use std::sync::Arc;
 
 mod tree;
@@ -2651,6 +2652,188 @@ fn update_specs(
         list = tail;
     }
     Ok(updates)
+}
+
+/// Run `ets:update_counter/3` or `ets:update_counter/4`, as
+/// `ets_update_counter_3` and `ets_update_counter_4` (`erl_db.c:1699-1730`)
+/// do with `do_update_counter` (`erl_db.c:1494-1691`):
+///
+/// - A table that does not exist or that the caller cannot write raises
+///   `badarg` (`erl_db.c:1703`, `1719`).
+/// - A default object that is not a tuple with at least `keypos` elements
+///   raises `badarg` with the cause `default` (`erl_db.c:1721-1726`).
+/// - A table of another type than `set` or `ordered_set` raises `badarg`
+///   with the cause `table_type` (`erl_db.c:1515-1519`).
+/// - An integer `Incr` updates the position after the key position, and a
+///   tuple is one operation; both give an integer. Another term is a list
+///   of operations and gives a list (`erl_db.c:1520-1531`).
+/// - A missing key without a default raises `badarg` with the cause
+///   `badkey` (`erl_db.c:1533-1538`).
+/// - ERTS checks each operation before it changes the object
+///   (`erl_db.c:1540-1604`), so a bad operation leaves the table as it was,
+///   and a default object stays out of the table (`erl_db.c:1677`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = update_counter(&mut context, &table, &key, &Term::Integer(1), None)?;
+/// assert!(matches!(result, BifResult::Value(Term::Integer(_))));
+/// ```
+pub(super) fn update_counter(
+    context: &mut BifContext<'_>,
+    table: &Term,
+    key: &Term,
+    spec: &Term,
+    default: Option<&Term>,
+) -> Result<BifResult, BeamError> {
+    let caller = context.scheduler.current_process_mut().id;
+    let reds = context
+        .scheduler
+        .current_process_mut()
+        .bif_reductions_signed();
+    let atoms = &context.scheduler.atoms;
+    let store = Arc::clone(&context.scheduler.ets);
+    let ets = store.shared();
+    let mut table = match ets.write(atoms, table, caller, reds) {
+        Ok(table) => table,
+        Err(lacking) => {
+            let mut arguments = vec![table.clone(), key.clone(), spec.clone()];
+            if let Some(default) = default {
+                arguments.push(default.clone());
+            }
+            return Ok(retry(context, lacking, "update_counter", arguments));
+        }
+    };
+    let keypos = table.keypos();
+    // ERTS compares the unsigned arity with the C `int` key position
+    // (`erl_db.c:1721-1722`).
+    let default_elements = match default {
+        Some(Term::Tuple(elements)) if elements.len() as u32 >= keypos as u32 => Some(elements),
+        Some(_) => return Ok(denied("default")),
+        None => None,
+    };
+    if !matches!(table.table_type(), TableType::Set | TableType::OrderedSet) {
+        return Ok(denied("table_type"));
+    }
+    let single;
+    let (operations, as_list) = match spec {
+        Term::Integer(_) | Term::BigInt(_) => {
+            single = Term::list_from(vec![Term::tuple(vec![
+                Term::Integer(i64::from(keypos) + 1),
+                spec.clone(),
+            ])]);
+            (&single, false)
+        }
+        Term::Tuple(_) => {
+            single = Term::list_from(vec![spec.clone()]);
+            (&single, false)
+        }
+        _ => (spec, true),
+    };
+    let existing = table
+        .objects(atoms, key)
+        .first()
+        .map(|object| object.to_vec());
+    let missing = existing.is_none();
+    let mut object = match (existing, default_elements) {
+        (Some(object), _) => object,
+        (None, None) => return Ok(denied("badkey")),
+        (None, Some(elements)) => {
+            let mut object = elements.as_ref().to_vec();
+            object[keypos as usize - 1] = key.clone();
+            object
+        }
+    };
+    let counters = match counter_operations(operations, keypos, &object) {
+        Ok(counters) => counters,
+        Err(Some(cause)) => return Ok(denied(cause)),
+        Err(None) => return Ok(BifResult::badarg()),
+    };
+    // The second loop of `do_update_counter` adds each increment to the
+    // element as the earlier operations left it, and stops after the first
+    // operation unless it returns a list (`erl_db.c:1625-1662`).
+    let mut updates = Vec::new();
+    for (position, incr, warp) in counters {
+        let old = object[position - 1].bigint().expect("a checked counter");
+        let sum = old.as_ref() + incr.bigint().expect("a checked increment").as_ref();
+        let mut new = Term::from_bigint(sum);
+        if let Some((threshold, set_value)) = warp {
+            let below = incr.integer_order(&Term::Integer(0)) == Some(Ordering::Less);
+            let order = new.integer_order(threshold).expect("a checked threshold");
+            let passed = if below {
+                Ordering::Less
+            } else {
+                Ordering::Greater
+            };
+            if order == passed {
+                new = set_value.clone();
+            }
+        }
+        object[position - 1] = new.clone();
+        updates.push((position, new));
+        if !as_list {
+            break;
+        }
+    }
+    if missing {
+        table.insert(atoms, object);
+    } else {
+        table.update_elements(atoms, key, &updates);
+    }
+    Ok(Value(if as_list {
+        Term::list_from(updates.into_iter().map(|(_, value)| value))
+    } else {
+        updates.pop().expect("one operation").1
+    }))
+}
+
+/// One checked counter operation: the 1-based position, the increment, and
+/// the threshold and the set value of the four-element form.
+type CounterOperation<'a> = (usize, &'a Term, Option<(&'a Term, &'a Term)>);
+
+/// Check the operations of `update_counter` against the object `object`,
+/// as the first loop of `do_update_counter` (`erl_db.c:1540-1604`) does,
+/// one element after another. A bad element or tail gives `Err(None)`:
+/// `badarg` with no cause. A position equal to the key position gives the
+/// cause `keypos`, and a position out of range gives the cause `position`.
+fn counter_operations<'a>(
+    mut list: &'a Term,
+    keypos: i32,
+    object: &[Term],
+) -> Result<Vec<CounterOperation<'a>>, Option<&'static str>> {
+    let mut operations = Vec::new();
+    while !list.is_nil() {
+        let (item, tail) = list.cons_cell().ok_or(None)?;
+        let Term::Tuple(elements) = item else {
+            return Err(None);
+        };
+        let (position, incr, warp) = match elements.as_ref() {
+            [position, incr] => (position, incr, None),
+            [position, incr, threshold, set_value] => {
+                if !threshold.is_integer() || !set_value.is_integer() {
+                    return Err(None);
+                }
+                (position, incr, Some((threshold, set_value)))
+            }
+            _ => return Err(None),
+        };
+        let position = position.small_integer().ok_or(None)?;
+        if !incr.is_integer() {
+            return Err(None);
+        }
+        if position == i64::from(keypos) {
+            return Err(Some("keypos"));
+        }
+        let position = (usize::try_from(position).ok())
+            .filter(|position| (1..=object.len()).contains(position))
+            .ok_or(Some("position"))?;
+        if !object[position - 1].is_integer() {
+            return Err(None);
+        }
+        operations.push((position, incr, warp));
+        list = tail;
+    }
+    Ok(operations)
 }
 
 /// Run `ets:info(Table)`, as `ets_info_1` (`erl_db.c:4399-4517`) does:
