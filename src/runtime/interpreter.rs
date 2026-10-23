@@ -288,6 +288,7 @@ fn idle_wait(scheduler: &mut Scheduler, node: &Node) -> Result<(), BeamError> {
     let wait = scheduler.timers.wait_time(scheduler.timers.now());
     if scheduler.timers.active() || scheduler.has_external_sources() {
         scheduler.wait_events(Some(wait))?;
+        scheduler.timers.now();
         return Ok(());
     }
     if node.enter_idle() {
@@ -304,6 +305,10 @@ fn idle_wait(scheduler: &mut Scheduler, node: &Node) -> Result<(), BeamError> {
     // so the scheduler changes no state while the node counts it as idle.
     let waited = scheduler.wait_events(Some(wait));
     node.leave_idle();
+    // A scheduler reads the clock after each wake, so a timer that is due
+    // at the wake expires before the next process runs
+    // (`erl_process.c:3568`, `3605`, `3613-3614`).
+    scheduler.timers.now();
     waited?;
     Ok(())
 }
@@ -374,7 +379,8 @@ impl BeamProgram {
     /// this program when no loaded module holds it, as `list_to_atom/1`
     /// does. The `pbeam` binary makes the atom of each argument with it, as
     /// `init` makes the atoms of the `-s` arguments with `list_to_atom/1`
-    /// (`init.erl:613-627`).
+    /// (`init.erl:613-627`). It also makes the atom of the `bindir` boot
+    /// flag, as `erlexec` always gives `-bindir` (erlexec.c:1154-1155).
     ///
     /// # Examples
     ///
@@ -918,7 +924,7 @@ impl BeamProgram {
         // processes, because a process of another scheduler can still depend
         // on them until the last root exits.
         while !node.is_shutdown() {
-            let now = scheduler.timers.now();
+            let now = scheduler.timers.timer_time();
             scheduler.expire_timers(now);
             scheduler.check_signals()?;
             scheduler.complete_dirty_calls();
@@ -1121,7 +1127,7 @@ impl BeamProgram {
                     None => scheduler.enter_runtime(capabilities),
                 }
             }
-            let now = scheduler.timers.now();
+            let now = scheduler.timers.timer_time();
             scheduler.expire_timers(now);
             scheduler.check_signals()?;
             match issuer {
@@ -1155,6 +1161,7 @@ impl BeamProgram {
                         }
                         std::thread::sleep(wait);
                     }
+                    scheduler.timers.now();
                 }
             }
             sample_live(scheduler, sample);

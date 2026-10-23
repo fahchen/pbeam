@@ -141,12 +141,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a measured path converts such an integer at the end of a budget, or a task adds dirty schedulers.
 - **Source:** #234 (PR #243), #268, #399.
 
-### Read the clock after `ERTS_CHECK_TIME_REDS` reductions
-
-- PBeam reads the run clock and expires each due timer before it takes the next process. An ERTS scheduler reads the clock only when its processes used `ERTS_CHECK_TIME_REDS` (`CONTEXT_REDS`, 4000) reductions after the last read, and before it sleeps. Between two reads, it expires the timers on the last time that it read (`erl_process.c:59`, `9797-9810`; `erl_process.h:528-535`; `erl_time_sup.c:280`). Thus on ERTS a due timer can expire some turns later than on PBeam. The "Timers" row of `docs/erts-differences.md` records this, and this entry owns it.
-- **Trigger:** a measured path depends on the turn in which a timer expires while other processes run.
-- **Source:** #229 (PR #236).
-
 ### Run the unsupported BIFs that OTP code calls
 
 - The "Unimplemented BIFs" row lists the `unsupported` BIF table entries that OTP code often calls. Each returns `unresolved external MFA M:F/A`. The groups:
@@ -206,8 +200,7 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### Set the start variables and `init` flags of the `erl` script
 
-- PBeam has no `erl` script and no `erlexec`. Thus `os:getenv/1` gives the host value or `false` for `EMU`, `ROOTDIR`, `BINDIR`, and `PROGNAME`, and `PATH` has no `BINDIR` prefix. The `init` request process of `pbeam_boot` has only the flag `noshell`. The `erl` script exports the four variables (`erl.src.src:52-58`), `erlexec` puts `BINDIR` and `ROOTDIR/bin` at the front of `PATH` (`erlexec.c:553-621`), and the flags of `init` also have `root`, `bindir`, `progname`, and `home`. The "OS environment" and "Boot" rows record this.
-- On Linux, the `inet_db` start calls `inet:gethostbyname/1` for the host name when the domain is empty (inet_config.erl:112-134). Before `kernel_safe_sup` starts, `inet_gethost_native` spawns `run_once/0` (inet_gethost_native.erl:575-577). In PBeam, `init:get_argument(bindir)` gives `error`, so that process exits with `{badmatch,error}` (inet_gethost_native.erl:416). `inet_config` ignores the error result, so the domain stays empty. In ERTS, the `inet_gethost` port program resolves the name. When the result is a long name, `set_hostname/1` sets the domain (inet_config.erl:122-127). The port also needs the `{packet,4}` and `eof` options of `open_port/2`. Observed in PR #717 (#449).
+- PBeam has no `erl` script and no `erlexec`. Thus `os:getenv/1` gives the host value or `false` for `EMU`, `ROOTDIR`, `BINDIR`, and `PROGNAME`, and `PATH` has no `BINDIR` prefix in the `pbeam_boot` form. The `init` request process of `pbeam_boot` has the flag `noshell`, and the `root` and `bindir` flags of `--root` (#1083). The `erl` script exports the four variables (`erl.src.src:52-58`), `erlexec` puts `BINDIR` and `ROOTDIR/bin` at the front of `PATH` (`erlexec.c:553-621`), and the flags of `init` also have `progname` and `home`. The "OS environment" and "Boot" rows record this.
 - **Trigger:** a consumer reads one of these variables or flags, for example `init:get_argument(root)`.
 - **Source:** PR #191 (#185).
 
@@ -282,6 +275,14 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Option:** bind each library in full against its pinned OTP source, one task for each library or function group, each function compared with pinned ERTS.
 - **Trigger:** an application that reaches an unbound function; the order follows the applications.
 - **Source:** owner comment of 2026-10-22 ("最终我们需要完整实现一遍").
+
+### Free crypto hash contexts with their last term
+
+- **Now:** `HashContexts` of `src/runtime/interpreter/native/crypto.rs` never removes a context (#1016). `Term::Reference` has no count, so a context cannot drop with its last term. ERTS frees an `EVP_MD_CTX` resource when no term refers to it (`hash.c:45-51`).
+- **Evidence:** each `hash_update_nif/2` call adds one context, so `crypto:hash/2` on N bytes keeps ceil(N/20000)+1 contexts for the run (`crypto.erl:4535-4553`).
+- **Option:** back the context resource term with an `Arc`, so the Rust drop of the last term frees the context. The owner chose Rust drop over a resource garbage collection.
+- **Trigger:** a long run or a run that hashes large data.
+- **Source:** Fable review of PR #1117.
 
 ## Exceptions
 
