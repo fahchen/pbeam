@@ -181,6 +181,83 @@ pub(super) fn add(
     Ok(Value(Term::static_atom("ok")))
 }
 
+/// Run `atomics:add_get(Ref, Ix, Incr)`: add `Incr` to the atomic at the
+/// index with 64-bit wrap and return the new value, as `atomics_add_get_3`
+/// (`erl_bif_atomics.c:187-198`) does. The checks and the `badarg` cases
+/// are those of [`add`], and the value has the form of [`get`]
+/// (`bld_atomic`, `erl_bif_atomics.c:125-146`).
+pub(super) fn add_get(
+    scheduler: &mut Scheduler,
+    reference: &Term,
+    index: &Term,
+    increment: &Term,
+) -> Result<BifResult, BeamError> {
+    let Some(array) = scheduler.node().atomics.array(reference) else {
+        return Ok(BifResult::badarg());
+    };
+    let Some(position) = position(&array, index) else {
+        return Ok(BifResult::badarg());
+    };
+    let Some(bits) = increment_bits(increment) else {
+        return Ok(BifResult::badarg());
+    };
+    Ok(Value(value(array.signed(), array.add_get(position, bits))))
+}
+
+/// Run `atomics:exchange(Ref, Ix, Desired)`: write `Desired` to the atomic
+/// at the index and return the old value, as `atomics_exchange_3`
+/// (`erl_bif_atomics.c:200-212`) does. The checks and the `badarg` cases
+/// are those of [`put`], and the value has the form of [`get`].
+pub(super) fn exchange(
+    scheduler: &mut Scheduler,
+    reference: &Term,
+    index: &Term,
+    desired: &Term,
+) -> Result<BifResult, BeamError> {
+    let Some(array) = scheduler.node().atomics.array(reference) else {
+        return Ok(BifResult::badarg());
+    };
+    let Some(position) = position(&array, index) else {
+        return Ok(BifResult::badarg());
+    };
+    let Some(bits) = value_bits(array.signed(), desired) else {
+        return Ok(BifResult::badarg());
+    };
+    Ok(Value(value(array.signed(), array.exchange(position, bits))))
+}
+
+/// Run `atomics:compare_exchange(Ref, Ix, Expected, Desired)`: write
+/// `Desired` to the atomic at the index when it holds `Expected`, as
+/// `atomics_compare_exchange_4` (`erl_bif_atomics.c:214-227`) does. A
+/// write gives `ok`, and a miss gives the value of the atomic in the form
+/// of [`get`]. `Expected` and `Desired` take the range of the array, as in
+/// [`put`], and each failed check raises `badarg`.
+pub(super) fn compare_exchange(
+    scheduler: &mut Scheduler,
+    reference: &Term,
+    index: &Term,
+    expected: &Term,
+    desired: &Term,
+) -> Result<BifResult, BeamError> {
+    let Some(array) = scheduler.node().atomics.array(reference) else {
+        return Ok(BifResult::badarg());
+    };
+    let Some(position) = position(&array, index) else {
+        return Ok(BifResult::badarg());
+    };
+    let (Some(expected), Some(desired)) = (
+        value_bits(array.signed(), expected),
+        value_bits(array.signed(), desired),
+    ) else {
+        return Ok(BifResult::badarg());
+    };
+    let was = array.compare_exchange(position, expected, desired);
+    if was == expected {
+        return Ok(Value(Term::static_atom("ok")));
+    }
+    Ok(Value(value(array.signed(), was)))
+}
+
 /// Run `atomics:info(Ref)`: return the information map of the array, as
 /// `atomics_info_1` (`erl_bif_atomics.c:229-268`) does. The map holds the
 /// keys `max`, `min`, `size`, and `memory`, and `memory` is the memory of

@@ -112,6 +112,36 @@ impl Array {
         self.values[position].fetch_add(bits, Ordering::SeqCst);
     }
 
+    /// Add `bits` to the atomic at `position` with 64-bit wrap and return
+    /// the new bits, as `atomics:add_get/3` does with
+    /// `erts_atomic64_add_read_mb` (`erl_bif_atomics.c:197`).
+    pub(super) fn add_get(&self, position: usize, bits: i64) -> i64 {
+        self.values[position]
+            .fetch_add(bits, Ordering::SeqCst)
+            .wrapping_add(bits)
+    }
+
+    /// Set the atomic at `position` to `bits` and return the old bits, as
+    /// `atomics:exchange/3` does with `erts_atomic64_xchg_mb`
+    /// (`erl_bif_atomics.c:210`).
+    pub(super) fn exchange(&self, position: usize, bits: i64) -> i64 {
+        self.values[position].swap(bits, Ordering::SeqCst)
+    }
+
+    /// Set the atomic at `position` to `desired` when it holds `expected`,
+    /// and return the bits that it held, as `atomics:compare_exchange/4`
+    /// does with `erts_atomic64_cmpxchg_mb` (`erl_bif_atomics.c:225`).
+    pub(super) fn compare_exchange(&self, position: usize, expected: i64, desired: i64) -> i64 {
+        match self.values[position].compare_exchange(
+            expected,
+            desired,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            Ok(was) | Err(was) => was,
+        }
+    }
+
     /// Return the memory of the array in bytes, as `atomics:info/1` reports
     /// it (`atomics_info_1`, `erl_bif_atomics.c:229-268`).
     ///
