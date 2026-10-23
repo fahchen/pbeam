@@ -214,14 +214,16 @@ const ZSTD_PROBE: &str = "fixtures/zstd/zstd_probe";
 const RECORD_RELOAD_PROBE: &str = "fixtures/native_record/nr_reload";
 
 /// The output of `nr_reload:main/0` on the pinned ERTS (OTP 29.1.1).
-const RECORD_RELOAD_OUTPUT: &str = "[{badrecord,{nr_def,pub}},1,{badrecord,{nr_def,pub}},1]\n";
+const RECORD_RELOAD_OUTPUT: &str =
+    "[{badrecord,{nr_def,pub}},1,{badrecord,{nr_def,pub}},[{badfield,{{nr_def,pub},a}},3],1]\n";
 
 #[test]
 fn reads_remote_record_definitions_of_the_current_code_as_pinned_erts() {
     // A remote record reads the definition of the current code
     // (`erl_record.c:344-379`): none before the load, the definition that
     // the load puts (`asm_load.c:1250-1256`), and none after
-    // `code:delete/1` (`beam_bif_load.c:2451`, `erl_record.c:194-202`). A
+    // `code:delete/1` (`beam_bif_load.c:2451`, `erl_record.c:194-202`), and
+    // the definitions of the new version after `erlang:load_module/2`. A
     // record value keeps its own definition.
     let flags = ["--pa", "fixtures/native_record"];
     let erts = run(&mut erts_probe(
