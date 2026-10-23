@@ -565,6 +565,26 @@ fn runs_the_mac_context_nifs_as_pinned_erts() {
         &[],
     ));
     assert!(erts.contains("Can't initialize EVP_MAC_CTX"), "{erts}");
+    // The end of an HMAC context, md4, des_cbc, and CMAC with a cipher that
+    // is not CBC depend on the libcrypto of the host. PBeam links a vendored
+    // OpenSSL 3.5.5, so its output does not depend on the host; the Linux CI
+    // ERTS links a libcrypto that takes each of them.
+    let host = run(&mut pbeam_probe(
+        CRYPTO_PROBE,
+        "crypto_probe",
+        "mac_contexts_host",
+        &[],
+    ));
+    assert_eq!(host, MAC_CONTEXTS_HOST);
+    if cfg!(target_os = "macos") {
+        let erts_host = run(&mut erts_probe(
+            CRYPTO_PROBE,
+            "crypto_probe",
+            "mac_contexts_host",
+            &[],
+        ));
+        assert_eq!(erts_host, MAC_CONTEXTS_HOST);
+    }
     assert_eq!(
         run(&mut pbeam_probe(
             CRYPTO_PROBE,
@@ -944,6 +964,17 @@ fn stops_when_the_start_modules_do_not_hold_the_atom_of_a_boot_flag() {
 fn erts(flags: &[&str]) -> Command {
     erts_probe(CODE_SERVER_PROBE, "code_server_probe", "main", flags)
 }
+
+/// The output of `crypto_probe:mac_contexts_host/0` on PBeam and on the
+/// pinned macOS ERTS (OpenSSL 3.5.8).
+const MAC_CONTEXTS_HOST: &str = "[[{error,{error,{\"mac.c\",840},\"mac update\"}},
+  {error,{error,{\"mac.c\",879},\"Signing\"}},
+  {error,{error,{\"mac.c\",879},\"Signing\"}}],
+ [{error,{error,{\"mac.c\",750},\"Can't initialize EVP_MAC_CTX\"}},
+  {error,{notsup,{\"mac.c\",688},\"Unsupported cipher algorithm\"}},
+  {error,{error,{\"mac.c\",750},\"Can't initialize EVP_MAC_CTX\"}},
+  {error,{error,{\"mac.c\",750},\"Can't initialize EVP_MAC_CTX\"}}]]
+";
 
 /// Return the command of `module:function()` of the probe file `probe` on
 /// the pinned ERTS, as [`erts`] gives it.
