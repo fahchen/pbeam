@@ -97,6 +97,75 @@ fn runs_the_at_exit_callbacks_and_flushes_the_logger_after_the_entry_returns() {
     }
 }
 
+/// Run `at_exit_probe:<entry>()` with `elixir -e` and with PBeam, and
+/// return the output of each run.
+fn run_both(entry: &str) -> [(&'static str, std::process::Output); 2] {
+    let lib = elixir_lib();
+    let beams = BOOT_MODULES.map(pinned_beam_path);
+    let erts = run_dumb_utf8(
+        Command::new("elixir").args([
+            "-pa",
+            "fixtures/at_exit",
+            "-e",
+            &format!(":at_exit_probe.{entry}()"),
+        ]),
+        Stdio::piped(),
+        RUN_TIME_LIMIT,
+    );
+    let pbeam = run_dumb_utf8(
+        Command::new(env!("CARGO_BIN_EXE_pbeam"))
+            .args(["pbeam_boot", "start", "at_exit_probe", entry, "--root"])
+            .arg(otp_root())
+            .arg("--pa")
+            .arg(lib.join("elixir/ebin"))
+            .args(["--", AT_EXIT_PROBE])
+            .args(&beams)
+            .arg(boot_beam()),
+        Stdio::piped(),
+        RUN_TIME_LIMIT,
+    );
+    [("ERTS", erts), ("PBeam", pbeam)]
+}
+
+/// Drop the stack frames of an OTP or Elixir application, which start
+/// with `    (`: `elixir -e` evaluates the command through `erl_eval` and
+/// `Code`, and the PBeam boot calls the entry directly.
+fn drop_library_frames(text: &str) -> String {
+    text.lines()
+        .filter(|line| !line.starts_with("    ("))
+        .map(|line| format!("{line}\n"))
+        .collect()
+}
+
+#[test]
+fn runs_the_at_exit_callbacks_with_the_status_of_an_exception_of_the_entry() {
+    // `Kernel.CLI.run/1` runs the command in `exec_fun/2`, which writes the
+    // Elixir error of an exception and gives the status 1, and gives the
+    // status N for `exit({shutdown, N})` without an error text
+    // (kernel/cli.ex:135-173). The `at_exit` callbacks get the status, and
+    // `System.halt/1` ends the run with it (kernel/cli.ex:58-71).
+    for (entry, stderr, status) in [
+        (
+            "error",
+            "** (ErlangError) Erlang error: :boom\n    fixtures/at_exit/at_exit_probe.erl:21: :at_exit_probe.error/0\nhook 1\n",
+            1,
+        ),
+        ("shutdown", "hook 3\n", 3),
+    ] {
+        for (name, output) in run_both(entry) {
+            assert_eq!(
+                (
+                    String::from_utf8_lossy(&output.stdout).as_ref(),
+                    drop_library_frames(&String::from_utf8_lossy(&output.stderr)).as_str(),
+                    output.status.code()
+                ),
+                ("", stderr, Some(status)),
+                "{name} {entry}"
+            );
+        }
+    }
+}
+
 #[test]
 fn keeps_a_line_without_a_time() {
     assert_eq!(mask_time("ab\n12:34:56,789 x\n"), "ab\n12:34:56,789 x\n");
