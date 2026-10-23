@@ -345,7 +345,7 @@ fn runs_read_timer_2_as_pinned_erts() {
     .into_iter()
     .map(atom)
     .collect();
-    expected.push(Term::list_from(vec![badarg(); 8]));
+    expected.push(Term::list_from(vec![badarg(); 9]));
     expected.extend([badarg(), badarg(), atom("none")]);
     assert_eq!(result.term, Term::list_from(expected));
 
@@ -362,7 +362,7 @@ fn runs_read_timer_2_as_pinned_erts() {
     assert!(reference.status.success());
     assert_eq!(
         reference.stdout,
-        b"[true,true,ok,read_timer,true,ok,ok,true,true,ok,false,false,ok,false,[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}],{error,badarg},{error,badarg},none]\n"
+        b"[true,true,ok,read_timer,true,ok,ok,true,true,ok,false,false,ok,false,[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}],{error,badarg},{error,badarg},none]\n"
     );
 }
 

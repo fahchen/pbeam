@@ -270,7 +270,7 @@ read_timer_2() ->
     Unknown = make_ref(),
     N = erlang:read_timer(Unknown, [{async, true}]),
     O = receive {read_timer, Unknown, L4} -> L4 end,
-    Bad = [[{info, true}], [{abs, false}], [{async, 1}], [async], {async, true},
+    Bad = [[{info, true}], [{abs, false}], [{async, 1}], [{async, yes}], [async], {async, true},
            [{async, true} | x], [{async, true, x}], foo],
     P = [catch_error(fun() -> erlang:read_timer(R2, Opts) end) || Opts <- Bad],
     Q = catch_error(fun() -> erlang:read_timer(foo, []) end),
