@@ -1,5 +1,5 @@
 -module(operator_fun_probe).
--export([main/0, tail/3]).
+-export([main/0, limit/0, tail/3]).
 
 %% The operator BIFs and the BIFs that the compiler changes to an
 %% instruction, through `apply/3`, a fun call, and a tail call of `apply/3`
@@ -30,6 +30,13 @@ main() ->
     Called = [result(fun() -> call(erlang:make_fun(Erlang, F, length(A)), A) end, A) || {F, A} <- Cases],
     Tail = [result(fun() -> tail(Erlang, F, A) end, A) || {F, A} <- Cases],
     [Applied, Called, Tail, flush()].
+
+%% `append_element/2` of a tuple of `ERTS_MAX_TUPLE_SIZE` elements raises
+%% `badarg` (`bif.c:3097-3098`).
+limit() ->
+    Erlang = binary_to_atom(id(<<"erlang">>)),
+    Full = erlang:make_tuple(id(16777215), a),
+    result(fun() -> apply(Erlang, append_element, [Full, b]) end, [Full, b]).
 
 %% A tail call of `apply/3`, which the compiler emits as `apply_last`.
 tail(Module, Name, Arguments) -> apply(Module, Name, Arguments).

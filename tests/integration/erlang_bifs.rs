@@ -120,3 +120,30 @@ fn runs_the_operator_bifs_through_apply_and_a_fun_call_as_pinned_erts() {
         format!("{OPERATOR_FUN_RESULT}\n")
     );
 }
+
+#[test]
+fn raises_badarg_for_append_element_of_a_full_tuple_as_pinned_erts() {
+    // `append_element_2` raises `badarg` when the tuple has
+    // `ERTS_MAX_TUPLE_SIZE` elements (`bif.c:3097-3098`).
+    let erlang = pinned_beam("erlang");
+    let program = BeamProgram::load(&[&erlang, OPERATOR_FUN_PROBE]).unwrap();
+    let result = program.execute("operator_fun_probe", "limit", &[]).unwrap();
+    let expected =
+        "{error,badarg,erlang,[97,112,112,101,110,100,95,101,108,101,109,101,110,116],true,true}";
+    assert_eq!(text(&result.term, result.atoms()), expected);
+
+    let reference = Command::new("erl")
+        .args([
+            "-noshell",
+            "-pa",
+            "fixtures/erlang_bifs",
+            "-eval",
+            "io:format(\"~w~n\", [operator_fun_probe:limit()]), halt().",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(reference.stdout).unwrap(),
+        format!("{expected}\n")
+    );
+}
