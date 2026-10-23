@@ -851,7 +851,9 @@ fn calls_a_module_export_without_a_bif_search() {
     ];
     let exports = HashMap::from([(("main".into(), 0), 2), (("guest".into(), 1), 11)]);
     let program = program_of(fixture_instructions(0, body, extra), exports);
-    let before = resolve_calls();
+    // The start of the root checks `BIFS` once for its MFA, as a spawn
+    // does.
+    let before = resolve_calls() + 1;
     assert_eq!(
         program.execute("fixture", "main", &[]).unwrap().term,
         Term::Integer(7)
@@ -3271,8 +3273,8 @@ fn puts_a_new_atom_into_the_atom_table_of_the_run() {
     // ERTS has one atom table for each emulator, and
     // `erlang:list_to_atom/1` gives a new atom the next index
     // (`erts_atom_put`). A run starts with a copy of the table of the
-    // loaded modules, so `pbeam_alpha` gets index 1168 after
-    // `pbeam_zeta` (1167). The table of the loaded modules does not
+    // loaded modules, so `pbeam_alpha` gets index 1170 after
+    // `pbeam_zeta` (1169). The table of the loaded modules does not
     // change, so each run gives the same index.
     let program = make_program(
         vec![
@@ -3289,14 +3291,18 @@ fn puts_a_new_atom_into_the_atom_table_of_the_run() {
         ],
         0,
     );
-    assert_eq!(program.atoms.put("pbeam_zeta").unwrap().index(), 1167);
+    // A loaded module holds the atoms of its name and of its functions,
+    // so the start of the root makes no atom.
+    program.atoms.put("fixture").unwrap();
+    program.atoms.put("main").unwrap();
+    assert_eq!(program.atoms.put("pbeam_zeta").unwrap().index(), 1169);
     for _ in 0..2 {
         let result = program.execute("fixture", "main", &[]).unwrap();
         let Term::Atom(alpha) = &result.term else {
             panic!("the run returns the atom pbeam_alpha");
         };
         assert_eq!(result.atoms().name_of(alpha), "pbeam_alpha");
-        assert_eq!(alpha.index(), 1168);
+        assert_eq!(alpha.index(), 1170);
     }
     assert_eq!(program.atom("pbeam_alpha"), None);
 }
