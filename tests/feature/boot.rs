@@ -79,6 +79,59 @@ fn boots_the_standard_io_servers_before_the_entry_of_the_pbeam_binary() {
 }
 
 #[test]
+fn boots_with_fd_0_closed_as_pinned_erts() {
+    // `user_drv` selects fd 0 for read (prim_tty_nif.c:1227). With fd 0
+    // closed, the select ends without a message, as a select that
+    // `erts_poll_control` cannot add (erl_check_io.c:1422-1434), and the
+    // run writes its output and ends.
+    let beams = BOOT_MODULES.map(pinned_beam_path);
+    let pbeam = env!("CARGO_BIN_EXE_pbeam");
+    let root = otp_root();
+    let mut pbeam_args = vec![
+        pbeam,
+        "pbeam_boot",
+        "start",
+        "boot_probe",
+        "main",
+        "--root",
+        root.to_str().unwrap(),
+        "--",
+        BOOT_PROBE,
+    ];
+    let beam_paths: Vec<String> = beams
+        .iter()
+        .map(|path| path.to_str().unwrap().to_owned())
+        .chain([boot_beam().to_str().unwrap().to_owned()])
+        .collect();
+    pbeam_args.extend(beam_paths.iter().map(String::as_str));
+    let erts_args = [
+        "erl",
+        "-noshell",
+        "-pa",
+        "fixtures/boot",
+        "-eval",
+        "boot_probe:main(), halt().",
+    ];
+    for (name, args) in [("ERTS", &erts_args[..]), ("PBeam", &pbeam_args[..])] {
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg("exec \"$@\" <&-")
+            .arg("sh")
+            .args(args)
+            .env("TERM", "dumb")
+            .env("LC_ALL", "C.UTF-8")
+            .output()
+            .unwrap();
+        assert_eq!(
+            (output.stdout.as_slice(), output.status.code()),
+            (&b"Hello, world!\n"[..], Some(0)),
+            "{name}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
 fn starts_the_logger_and_the_application_controller_as_pinned_erts() {
     // `pbeam_boot:start/2` starts `logger_server` and
     // `application_controller` as kernel processes through its `init`

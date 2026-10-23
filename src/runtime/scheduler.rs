@@ -1428,8 +1428,10 @@ impl Scheduler {
                 continue;
             }
             match direction {
+                poll::Direction::Read => self.port_ready(fd)?,
                 poll::Direction::Write => self.port_writable(fd)?,
-                _ => self.port_ready(fd)?,
+                // The port closed the fd; its entry left the table.
+                poll::Direction::Invalid => {}
             }
         }
         Ok(())

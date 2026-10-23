@@ -43,7 +43,7 @@ pub(in crate::runtime) enum Direction {
     Read,
     /// A `write` of the fd does not block.
     Write,
-    /// The fd is not open (`ERTS_POLL_EV_NVAL`). Only fd 0 gets it.
+    /// The fd is not open (`ERTS_POLL_EV_NVAL`).
     Invalid,
 }
 
@@ -254,15 +254,6 @@ impl NodePoll {
         self.served(index).owned = false;
         self.changed();
     }
-
-    /// Add `ready` to the ready list of the scheduler `index`, leave the
-    /// fds out of the wait, and return true when the list was empty.
-    fn report(&self, index: usize, ready: Ready) -> bool {
-        let mut served = self.served(index);
-        served.ready.push(ready);
-        served.disarmed.push(ready);
-        !self.marks[index].swap(true, Ordering::SeqCst)
-    }
 }
 
 /// An fd that the thread waits on, with the scheduler that serves it.
@@ -286,6 +277,23 @@ fn run(node: &Weak<Node>, mut reader: UnixStream) {
         let (readiness, writable) = wait(&owned, Some(wake_fd), None);
         let Some(strong) = node.upgrade() else { return };
         strong.poll.sleeping.store(false, Ordering::SeqCst);
+        let found: Vec<Owned> = match readiness {
+            Readiness::Ready(ready) => {
+                if ready.contains(&wake_fd) {
+                    drain(&mut reader);
+                }
+                owned
+                    .iter()
+                    .copied()
+                    .filter(|&((fd, direction), _)| match direction {
+                        Direction::Write => writable.contains(&fd),
+                        _ => ready.contains(&fd),
+                    })
+                    .collect()
+            }
+            Readiness::Pending => Vec::new(),
+            Readiness::Invalid => invalid(&strong.poll, &owned),
+        };
         // The reports go out before a scheduler takes its fds over.
         let mut served: Vec<_> = (0..strong.poll.served.len())
             .map(|index| strong.poll.served(index))
@@ -293,32 +301,8 @@ fn run(node: &Weak<Node>, mut reader: UnixStream) {
         for slot in &mut served {
             slot.polled = false;
         }
-        let ready = match readiness {
-            Readiness::Ready(ready) => ready,
-            Readiness::Pending => Vec::new(),
-            Readiness::Invalid => {
-                drop(served);
-                for released in &strong.poll.released {
-                    released.notify_all();
-                }
-                for (entry, index) in invalid(&strong.poll, &owned) {
-                    if strong.poll.report(index, entry) {
-                        strong.wake_scheduler(index);
-                    }
-                }
-                continue;
-            }
-        };
-        if ready.contains(&wake_fd) {
-            drain(&mut reader);
-        }
-        let found = owned.iter().filter(|((fd, direction), _)| match direction {
-            Direction::Read => ready.contains(fd),
-            Direction::Write => writable.contains(fd),
-            Direction::Invalid => false,
-        });
         let mut woken = Vec::new();
-        for &(entry, index) in found {
+        for (entry, index) in found {
             served[index].ready.push(entry);
             served[index].disarmed.push(entry);
             if !strong.poll.marks[index].swap(true, Ordering::SeqCst) {
@@ -352,21 +336,18 @@ pub(in crate::runtime) fn wait(
     input::wait(&reads, &writes, timeout)
 }
 
-/// Find the fds of `owned` that are not open after a wait that saw one. A
-/// port closed the fd after the collect: its entry leaves the table, as the
-/// close of the port removes it. Return a closed fd 0 for the scheduler
-/// that has its select.
+/// Find the fds of `owned` that are not open after a wait that saw one,
+/// and return them with the direction [`Direction::Invalid`]. A port closed
+/// the fd after the collect: its entry leaves the table, as the close of
+/// the port removes it. A closed fd 0 ends its select with no message (see
+/// `Scheduler::check_io`).
 pub(in crate::runtime) fn invalid(poll: &NodePoll, owned: &[Owned]) -> Vec<Owned> {
     let mut closed = Vec::new();
     for &(entry, index) in owned {
         let (readiness, _) = wait(&[(entry, index)], None, Some(Duration::ZERO));
-        if readiness != Readiness::Invalid {
-            continue;
-        }
-        if entry.0 == libc::STDIN_FILENO && poll.stdin.load(Ordering::SeqCst) == index {
-            closed.push(((entry.0, Direction::Invalid), index));
-        } else {
+        if readiness == Readiness::Invalid {
             poll.fds().remove(&entry);
+            closed.push(((entry.0, Direction::Invalid), index));
         }
     }
     closed
