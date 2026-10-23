@@ -374,7 +374,8 @@ impl BeamProgram {
     /// this program when no loaded module holds it, as `list_to_atom/1`
     /// does. The `pbeam` binary makes the atom of each argument with it, as
     /// `init` makes the atoms of the `-s` arguments with `list_to_atom/1`
-    /// (`init.erl:613-627`).
+    /// (`init.erl:613-627`). It also makes the atom of the `bindir` boot
+    /// flag, as `erlexec` always gives `-bindir` (erlexec.c:1154-1155).
     ///
     /// # Examples
     ///

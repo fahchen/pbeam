@@ -428,11 +428,17 @@ fn boot_erl(arguments: ErlCli) -> Result<(), Exit> {
     run_end(program.boot(&boot))
 }
 
+/// The version of the pinned `erts` (erts/vsn.mk:23), which the `erl`
+/// script puts in `BINDIR` as `%VSN%` (erl.src.src:52).
+const ERTS_VSN: &str = "17.1";
+
 /// Make the boot flag list of the `--root`, `--pa`, and `--mode` options:
-/// `{root, [Root]}` first, then one `{pa, [Dir]}` tuple for each directory
+/// `{root, [Root]}` first, then `{bindir, [Root/erts-Vsn/bin]}`, then one `{pa, [Dir]}` tuple for each directory
 /// in the command line order, then `{mode, [Mode]}`, with each value a
 /// binary of its bytes. ERTS gives the same tuples for `erl -pa D1 -pa D2
-/// -mode embedded`: `erlexec` gives `-root` before the user flags, the
+/// -mode embedded`: the `erl` script sets `BINDIR` to
+/// `$ROOTDIR/erts-%VSN%/bin` (erl.src.src:52), and `erlexec` gives `-root`
+/// and `-bindir` before the user flags (erlexec.c:1152-1155), the
 /// emulator gives each boot argument to `init` as a binary of its bytes
 /// (`erl_init.c:373-384`), and `init:parse_boot_args/1` makes one flag tuple
 /// for each flag (`init.erl:1699-1702`, `1724`). A flag that the command
@@ -442,12 +448,12 @@ fn boot_erl(arguments: ErlCli) -> Result<(), Exit> {
 ///
 /// ```rust,ignore
 /// let flags = boot_flags(&program, Some(&OsString::from("/otp")), &[OsString::from("d1")], None)?;
-/// // [{root, [<<"/otp">>]}, {pa, [<<"d1">>]}]
+/// // [{root, [<<"/otp">>]}, {bindir, [<<"/otp/erts-17.1/bin">>]}, {pa, [<<"d1">>]}]
 /// ```
 ///
 /// # Errors
 ///
-/// A flag name `root`, `pa`, or `mode` that is not an atom of the loaded
+/// A flag name `root`, `bindir`, `pa`, or `mode` that is not an atom of the loaded
 /// modules. The pinned `init` module has each of them.
 fn boot_flags(
     program: &BeamProgram,
@@ -455,9 +461,14 @@ fn boot_flags(
     code_path: &[OsString],
     mode: Option<&String>,
 ) -> Result<Term, String> {
+    // The `--root` option gives the `bindir` flag too, as the `erl` script
+    // and `erlexec` always give both.
+    let bindir =
+        root.map(|root| [root.as_bytes(), b"/erts-", ERTS_VSN.as_bytes(), b"/bin"].concat());
     let flags = root
         .map(|root| ("root", root.as_bytes()))
         .into_iter()
+        .chain(bindir.as_deref().map(|bindir| ("bindir", bindir)))
         .chain(
             code_path
                 .iter()
@@ -465,9 +476,13 @@ fn boot_flags(
         )
         .chain(mode.map(|mode| ("mode", mode.as_bytes())))
         .map(|(name, value)| {
-            let flag = program
-                .atom(name)
-                .ok_or_else(|| format!("boot flag {name} is not an atom of the loaded modules"))?;
+            let flag = if name == "bindir" {
+                program.put_atom(name).map_err(|error| error.to_string())?
+            } else {
+                program.atom(name).ok_or_else(|| {
+                    format!("boot flag {name} is not an atom of the loaded modules")
+                })?
+            };
             let value = Term::binary(value.to_vec());
             Ok(Term::tuple(vec![
                 Term::Atom(flag),
