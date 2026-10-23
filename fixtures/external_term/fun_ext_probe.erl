@@ -1,5 +1,5 @@
 -module(fun_ext_probe).
--export([round_trip/0, unloaded/0, call_unloaded/0, errors/0, other_md5/0, no_lambda_handler/0]).
+-export([round_trip/0, unloaded/0, call_unloaded/0, errors/0, other_md5/0, no_lambda_handler/0, deleted/0]).
 
 make(Tag) ->
     fun(X, Y) -> {Tag, X, Y} end.
@@ -77,3 +77,10 @@ other_md5() ->
     <<Head:22/binary, Last, Rest/binary>> = term_to_binary(F),
     D = binary_to_term(<<Head/binary, (Last bxor 1), Rest/binary>>),
     {D =:= F, D == F, try D() catch C:R -> {C, R =:= {badfun, D}} end}.
+
+%% After `erlang:delete_module/1`, the fun entry keeps the old code, and a
+%% call of the fun runs it.
+deleted() ->
+    F = make(t),
+    true = erlang:delete_module(?MODULE),
+    F(1, 2).

@@ -251,7 +251,7 @@ const FUN_PROBE: &[u8] = include_bytes!("../../fixtures/external_term/fun_ext_pr
 /// The module MD5 of `fun_ext_probe.beam`, which the pinned ERTS writes in
 /// each `NEW_FUN_EXT` of the module.
 const FUN_PROBE_MD5: [u8; 16] = [
-    187, 8, 8, 16, 2, 166, 130, 213, 71, 15, 116, 147, 141, 172, 46, 194,
+    25, 55, 129, 47, 162, 238, 211, 150, 19, 2, 67, 246, 20, 149, 199, 192,
 ];
 
 /// Return the program of `fun_ext_probe` with the pinned `erlang` module.
@@ -262,13 +262,13 @@ fn load_fun_probe() -> BeamProgram {
 
 /// Return the `NEW_FUN_EXT` bytes of the pinned ERTS for a fun of
 /// `fun_ext_probe`: the size, the arity, the index, the free count, the old
-/// index, and the old unique value `[98, 5, 216, 64, 64]`, then `free`.
+/// index, and the old unique value `[98, 0, 201, 188, 9]`, then `free`.
 fn probe_fun_bytes(size: u8, arity: u8, index: u8, free_count: u8, free: &[u8]) -> Vec<u8> {
     let mut bytes = vec![131, 112, 0, 0, 0, size, arity];
     bytes.extend_from_slice(&FUN_PROBE_MD5);
     bytes.extend_from_slice(&[0, 0, 0, index, 0, 0, 0, free_count, 119, 13]);
     bytes.extend_from_slice(b"fun_ext_probe");
-    bytes.extend_from_slice(&[97, index, 98, 5, 216, 64, 64, 88, 119, 13]);
+    bytes.extend_from_slice(&[97, index, 98, 0, 201, 188, 9, 88, 119, 13]);
     bytes.extend_from_slice(b"nonode@nohost");
     bytes.extend_from_slice(&[0; 12]);
     bytes.extend_from_slice(free);
@@ -368,6 +368,25 @@ fn decodes_a_fun_of_a_module_that_is_not_loaded_as_pinned_erts() {
             .unwrap()
             .term,
         Term::tuple(vec![atom("error"), atom("undef")])
+    );
+}
+
+#[test]
+fn calls_the_old_code_of_a_fun_after_delete_module_as_pinned_erts() {
+    // `fun_ext_probe:deleted/0` on the pinned ERTS gives `{t, 1, 2}`: the
+    // fun entry keeps the old code until a purge, and only an unloaded
+    // entry reaches the error handler (`beam_common.c:1681-1685`).
+    let program = load_fun_probe();
+    assert_eq!(
+        program
+            .execute("fun_ext_probe", "deleted", &[])
+            .unwrap()
+            .term,
+        Term::tuple(vec![
+            atom(&program, "t"),
+            Term::Integer(1),
+            Term::Integer(2)
+        ])
     );
 }
 

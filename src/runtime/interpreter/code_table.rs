@@ -637,17 +637,22 @@ impl CodeTable {
         lambda: &Lambda,
         arity: u32,
     ) -> Result<Option<Frame>, BeamError> {
-        let loaded = self.waiting_or_loaded(module)?;
-        loaded
-            .tables
-            .fun_entries
-            .get(&lambda.index())
-            .filter(|entry| {
-                entry.lambda.old_unique() == lambda.old_unique()
-                    && entry.lambda.uniq() == lambda.uniq()
-            })
-            .map(|entry| frame(loaded, entry.lambda.label(), arity))
-            .transpose()
+        // ERTS keeps the fun entry at the old code after
+        // `erlang:delete_module/1` until a purge, so the old code runs the
+        // fun; only an unloaded entry reaches the error handler
+        // (`beam_common.c:1681-1685`).
+        let waiting = self.waiting_or_loaded(module).ok();
+        for loaded in waiting.into_iter().chain(self.codes(module)) {
+            if let Some(entry) = loaded
+                .tables
+                .fun_entries
+                .get(&lambda.index())
+                .filter(|entry| entry.lambda.uniq() == lambda.uniq())
+            {
+                return frame(loaded, entry.lambda.label(), arity).map(Some);
+            }
+        }
+        Ok(None)
     }
 
     /// Return the fun entry of the code of `module` with the module MD5
@@ -712,10 +717,7 @@ impl CodeTable {
                 .tables
                 .fun_entries
                 .get(&lambda.index())
-                .filter(|entry| {
-                    entry.lambda.old_unique() == lambda.old_unique()
-                        && entry.lambda.uniq() == lambda.uniq()
-                })
+                .filter(|entry| entry.lambda.uniq() == lambda.uniq())
             else {
                 continue;
             };

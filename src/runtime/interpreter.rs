@@ -3519,38 +3519,27 @@ impl BeamProgram {
                 module, function, ..
             } => return self.call_mfa(scheduler, module, function, arity, tail),
         };
-        // A fun of a module with no current code calls
-        // `undefined_lambda/3` of the error handler of the process with
-        // the module, the fun, and the argument list, or raises `undef`
-        // when the handler has no such export (`beam_common.c:1708-1728`).
-        let module = scheduler.atoms.name_of(lambda.module()).to_owned();
-        if scheduler.synced_code().waiting_or_loaded(&module).is_err() {
-            let module_atom = Term::Atom(lambda.module().clone());
-            return self.undefined_lambda(scheduler, &module, module_atom, fun, arity, tail);
-        }
         let total_arity = arity + free.len() as u32;
-        {
-            let process = scheduler.current_process_mut();
-            for (register, value) in (arity..).zip(free) {
-                write(process, &Operand::X(register), value)?;
-            }
-        }
         scheduler.sync_code();
-        let frame = {
-            let module = scheduler.atoms.name_of(lambda.module());
-            match scheduler.code.fun_frame(module, lambda, total_arity)? {
-                Some(frame) => frame,
-                // The loaded code of the module name of the fun holds no
-                // entry of the fun, so the code of the fun is not loaded and
-                // the call raises `error:{badfun, Fun}`
-                // (`beam_common.c:1697-1706`).
-                None => {
-                    let process = scheduler.current_process_mut();
-                    let reason = Term::tuple(vec![Term::static_atom("badfun"), fun]);
-                    return Ok(raise(process, ExceptionClass::Error, reason));
-                }
+        let module = scheduler.atoms.name_of(lambda.module()).to_owned();
+        let Some(frame) = scheduler.code.fun_frame(&module, lambda, total_arity)? else {
+            // No code holds the entry of the fun. A loaded module raises
+            // `error:{badfun, Fun}` (`beam_common.c:1697-1706`). A module
+            // with no current code calls `undefined_lambda/3` of the error
+            // handler of the process, or raises `undef` when the handler
+            // has no such export (`beam_common.c:1708-1728`).
+            if scheduler.code.waiting_or_loaded(&module).is_err() {
+                let module_atom = Term::Atom(lambda.module().clone());
+                return self.undefined_lambda(scheduler, &module, module_atom, fun, arity, tail);
             }
+            let process = scheduler.current_process_mut();
+            let reason = Term::tuple(vec![Term::static_atom("badfun"), fun]);
+            return Ok(raise(process, ExceptionClass::Error, reason));
         };
+        let process = scheduler.current_process_mut();
+        for (register, value) in (arity..).zip(free) {
+            write(process, &Operand::X(register), value)?;
+        }
         enter_frame(scheduler.current_process_mut(), frame, tail);
         Ok(None)
     }
