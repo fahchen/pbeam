@@ -11,7 +11,10 @@
 //! `hash_update_nif/2`, `hash_final_nif/1`, and `hash_final_xof_nif/2`,
 //! which keep each context in [`HashContexts`], and the MAC context NIFs
 //! `mac_init_nif/3`, `mac_update_nif/2`, and `mac_final_nif/1`, which keep
-//! each context in `MacContexts`, and the sign and verify NIFs
+//! each context in `MacContexts`, and the cipher context NIFs
+//! `ng_crypto_init_nif/4`, `ng_crypto_update_nif/2`, `ng_crypto_final_nif/1`,
+//! `ng_crypto_get_data_nif/1`, `aead_cipher_init_nif/4`, and
+//! `aead_cipher_nif/4` of `cipher_context`, and the sign and verify NIFs
 //! `pkey_sign_nif/5`, `pkey_sign_heavy_nif/5`, and `pkey_verify_nif/6`. As ERTS, PBeam computes the digests and MACs with
 //! a static OpenSSL, through the safe `openssl` crate (`vendored`, OpenSSL
 //! 3.5.5).
@@ -20,6 +23,7 @@
 //! `docs/erts-differences.md`).
 
 mod cipher;
+mod cipher_context;
 mod mac_context;
 mod pkey;
 
@@ -29,6 +33,10 @@ use crate::runtime::resources::lock;
 use crate::term::Reference;
 use cipher::{
     aead_cipher_nif, cipher_algorithms, cipher_info_nif, do_exor, ng_crypto_one_time_nif,
+};
+use cipher_context::{
+    aead_cipher_context_nif, aead_cipher_init_nif, ng_crypto_final_nif, ng_crypto_get_data_nif,
+    ng_crypto_init_nif, ng_crypto_update_nif,
 };
 use mac_context::{mac_final_nif, mac_init_nif, mac_update_nif};
 use num_traits::ToPrimitive;
@@ -132,6 +140,18 @@ pub(super) const FUNCTIONS: [(&str, u32); 70] = [
 /// assert_eq!((BINDINGS[0].name, BINDINGS[0].arity), ("hash_nif", 2));
 /// ```
 pub(super) const BINDINGS: &[Binding] = &[
+    Binding {
+        name: "aead_cipher_init_nif",
+        arity: 4,
+        job: Job::Normal,
+        run: aead_cipher_init_nif,
+    },
+    Binding {
+        name: "aead_cipher_nif",
+        arity: 4,
+        job: Job::Normal,
+        run: aead_cipher_context_nif,
+    },
     Binding {
         name: "aead_cipher_nif",
         arity: 7,
@@ -285,10 +305,34 @@ pub(super) const BINDINGS: &[Binding] = &[
         run: |scheduler, arguments| mac_update_nif(scheduler, &arguments[0], &arguments[1]),
     },
     Binding {
+        name: "ng_crypto_final_nif",
+        arity: 1,
+        job: Job::Normal,
+        run: |scheduler, arguments| ng_crypto_final_nif(scheduler, &arguments[0]),
+    },
+    Binding {
+        name: "ng_crypto_get_data_nif",
+        arity: 1,
+        job: Job::Normal,
+        run: |scheduler, arguments| ng_crypto_get_data_nif(scheduler, &arguments[0]),
+    },
+    Binding {
+        name: "ng_crypto_init_nif",
+        arity: 4,
+        job: Job::Normal,
+        run: ng_crypto_init_nif,
+    },
+    Binding {
         name: "ng_crypto_one_time_nif",
         arity: 5,
         job: Job::Normal,
         run: ng_crypto_one_time_nif,
+    },
+    Binding {
+        name: "ng_crypto_update_nif",
+        arity: 2,
+        job: Job::Normal,
+        run: |scheduler, arguments| ng_crypto_update_nif(scheduler, &arguments[0], &arguments[1]),
     },
     Binding {
         name: "pbkdf2_hmac_nif",

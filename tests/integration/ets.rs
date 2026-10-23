@@ -709,6 +709,7 @@ fn runs_the_select_and_iteration_bifs_as_pinned_erts() {
         "take",
         "first",
         "walk",
+        "delete_object",
     ] {
         assert_probe_matches_erts(&program, function);
     }

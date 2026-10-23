@@ -558,6 +558,28 @@ fn runs_the_crypto_hash_contexts_as_pinned_erts() {
 }
 
 #[test]
+fn runs_the_cipher_context_nifs_as_pinned_erts() {
+    // ng_crypto_init_nif/4, ng_crypto_update_nif/2, ng_crypto_final_nif/1,
+    // ng_crypto_get_data_nif/1 (api_ng.c:91-892), aead_cipher_init_nif/4,
+    // and aead_cipher_nif/4 (aead.c:69-377), with the error tuple of each
+    // failed check.
+    let erts = run(&mut erts_probe(
+        CRYPTO_PROBE,
+        "crypto_probe",
+        "cipher_contexts",
+        &[],
+    ));
+    assert!(erts.contains("Expected cipher name atom"), "{erts}");
+    let pbeam = run(&mut pbeam_probe(
+        CRYPTO_PROBE,
+        "crypto_probe",
+        "cipher_contexts",
+        &[],
+    ));
+    assert_eq!(pbeam, erts);
+}
+
+#[test]
 fn runs_the_mac_context_nifs_as_pinned_erts() {
     let erts = run(&mut erts_probe(
         CRYPTO_PROBE,

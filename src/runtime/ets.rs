@@ -2514,10 +2514,6 @@ impl Table {
         while slot != EMPTY {
             if !self.is_deleted(slot) && self.object_of(slot).as_slice() == object {
                 if self.is_fixed() && self.table_type != TableType::OrderedSet {
-                    // The object stays as a pseudo-deleted object of its key
-                    // (`erl_db_hash.c:2634-2648`).
-                    self.mark_deleted(slot);
-                    self.deleted_objects += 1;
                     // The select delete adds one delete record for each
                     // bucket that it changes (`erl_db_hash.c:2636-2640`).
                     let bucket = self.bucket(hash);
@@ -2525,28 +2521,7 @@ impl Table {
                         self.fixdels += 1;
                         self.select_slot = bucket;
                     }
-                    let node = self
-                        .chain_node(hash, &key)
-                        .expect("a live key has a chain node");
-                    // A select delete marks objects without a change of the
-                    // chain, so the first removal registers the chain and
-                    // each later one keeps it (`erl_db_hash.c:2622-2653`).
-                    let registered = self.retained.get(&hash).is_some_and(|records| {
-                        records
-                            .iter()
-                            .rev()
-                            .any(|record| record.key == key && record.newest == node)
-                    });
-                    if !registered {
-                        self.retain_record(hash, &key, node);
-                    }
-                    if slot == index_slot {
-                        match self.next_live_object(slot) {
-                            Some(next_live) => self.index.replace(hash, slot, next_live),
-                            None => self.index.remove(hash, slot),
-                        }
-                    }
-                    self.writes += 1;
+                    self.pseudo_delete(hash, &key, slot, index_slot);
                     return true;
                 }
                 self.delete_live_object(hash, slot, previous);
@@ -2556,6 +2531,119 @@ impl Table {
             slot = self.older[slot];
         }
         false
+    }
+
+    /// Keep the live object in the slot `slot` of a fixed hash table as a
+    /// pseudo-deleted object of its key `key`, whose chain starts at the
+    /// slot `index_slot` (`erl_db_hash.c:1695-1698`, `2634-2648`). The
+    /// caller counts the delete record.
+    fn pseudo_delete(&mut self, hash: u64, key: &Term, slot: usize, index_slot: usize) {
+        self.mark_deleted(slot);
+        self.deleted_objects += 1;
+        let node = self
+            .chain_node(hash, key)
+            .expect("a live key has a chain node");
+        // A select delete marks objects without a change of the
+        // chain, so the first removal registers the chain and
+        // each later one keeps it (`erl_db_hash.c:2622-2653`).
+        let registered = self.retained.get(&hash).is_some_and(|records| {
+            records
+                .iter()
+                .rev()
+                .any(|record| &record.key == key && record.newest == node)
+        });
+        if !registered {
+            self.retain_record(hash, key, node);
+        }
+        if slot == index_slot {
+            match self.next_live_object(slot) {
+                Some(next_live) => self.index.replace(hash, slot, next_live),
+                None => self.index.remove(hash, slot),
+            }
+        }
+        self.writes += 1;
+    }
+
+    /// Remove the objects that are exactly equal to `object`, as
+    /// `db_erase_object_hash` (`erl_db_hash.c:1669-1730`) and
+    /// `db_erase_object_tree_common` (`erl_db_tree.c:1120-1131`) do for
+    /// `ets:delete_object/2`. A `set` or `ordered_set` table removes the
+    /// object of the key when it is exactly equal; an `ordered_set` finds
+    /// the key by term order, so `{1.0, a}` does not remove `{1, a}`. A
+    /// `bag` table removes its one equal object, and a `duplicate_bag`
+    /// table removes each equal object. A fixed hash table keeps the
+    /// removed object as a pseudo-deleted object only when it is the first
+    /// live object of its key, and frees the others
+    /// (`erl_db_hash.c:1695-1704`). A removal tries one shrink
+    /// (`erl_db_hash.c:1724-1726`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::DuplicateBag);
+    /// let atoms = AtomTable::new();
+    /// let object = vec![Term::static_atom("k"), Term::Integer(1)];
+    /// table.insert(&atoms, object.clone());
+    /// table.insert(&atoms, object.clone());
+    /// table.erase_object(&atoms, &object);
+    /// assert!(table.objects(&atoms, &Term::static_atom("k")).is_empty());
+    /// ```
+    pub(super) fn erase_object(&mut self, atoms: &AtomTable, object: &[Term]) {
+        let key = self.key(object).clone();
+        if matches!(self.table_type, TableType::Set | TableType::OrderedSet) {
+            if self.object(atoms, &key) == Some(object) {
+                self.delete(atoms, &key);
+            }
+            return;
+        }
+        let hash = stored_hash(atoms, &key);
+        let Some(index_slot) = self.position(hash, &key) else {
+            return;
+        };
+        let mut live = 0;
+        let mut removed = false;
+        let mut previous = EMPTY;
+        // The walk starts at the chain node, which a fixed table can keep
+        // as a pseudo-deleted object before the first live object.
+        let mut slot = self
+            .chain_node(hash, &key)
+            .expect("a live key has a chain node");
+        while slot != EMPTY {
+            let older = self.older[slot];
+            if self.is_deleted(slot) {
+                previous = slot;
+                slot = older;
+                continue;
+            }
+            live += 1;
+            if self.object_of(slot).as_slice() == object {
+                removed = true;
+                if live == 1 && self.is_fixed() {
+                    self.fixdels += 1;
+                    self.pseudo_delete(hash, &key, slot, index_slot);
+                    previous = slot;
+                } else {
+                    // The pseudo delete of the first live object moved the
+                    // key index to this object.
+                    if previous != EMPTY && self.position(hash, &key) == Some(slot) {
+                        match self.next_live_object(slot) {
+                            Some(next_live) => self.index.replace(hash, slot, next_live),
+                            None => self.index.remove(hash, slot),
+                        }
+                    }
+                    self.delete_live_object(hash, slot, previous);
+                }
+                if self.table_type != TableType::DuplicateBag {
+                    break;
+                }
+            } else {
+                previous = slot;
+            }
+            slot = older;
+        }
+        if removed {
+            self.shrink();
+        }
     }
 
     /// Remove the live object in the slot `slot` of the object chain whose
@@ -2577,6 +2665,13 @@ impl Table {
             }
         } else {
             self.older[previous] = next;
+        }
+        // A fixed table frees a later live object of a key that can have a
+        // retained record; the record must not keep the freed slot.
+        if let Some(records) = self.retained.get_mut(&hash) {
+            for record in records {
+                record.slots.retain(|&kept| kept != slot);
+            }
         }
         self.objects[slot] = None;
         self.older[slot] = EMPTY;

@@ -266,7 +266,7 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 ### Free crypto hash contexts with their last term
 
 - **Now:** `HashContexts` of `src/runtime/interpreter/native/crypto.rs` never removes a context (#1016). `Term::Reference` has no count, so a context cannot drop with its last term. ERTS frees an `EVP_MD_CTX` resource when no term refers to it (`hash.c:45-51`).
-- **Also:** `MacContexts` of `src/runtime/interpreter/native/crypto/mac_context.rs` never removes a MAC context (#1018); ERTS frees a `mac_context` resource with its last term (`mac.c:544-556`).
+- **Also:** `MacContexts` of `src/runtime/interpreter/native/crypto/mac_context.rs` never removes a MAC context (#1018); ERTS frees a `mac_context` resource with its last term (`mac.c:544-556`). `CipherContexts` and `AeadContexts` of `src/runtime/interpreter/native/crypto/cipher_context.rs` never remove a cipher context (#1022); ERTS frees an `evp_cipher_ctx` and an `aead_cipher_ctx` resource with its last term (`cipher.c:179-190`, `aead.c:43-51`).
 - **Evidence:** each `hash_update_nif/2` call adds one context, so `crypto:hash/2` on N bytes keeps ceil(N/20000)+1 contexts for the run (`crypto.erl:4535-4553`).
 - **Option:** back the context resource term with an `Arc`, so the Rust drop of the last term frees the context. The owner chose Rust drop over a resource garbage collection.
 - **Trigger:** a long run or a run that hashes large data.
@@ -280,13 +280,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Evidence:** `fixtures/bif_cause/bif_cause_probe.erl`, `fixtures/bif_cause/timer_cause_probe.erl`, and `fixtures/ets/ets_cause_probe.erl` match the causes of the BIFs that PBeam runs against the pinned ERTS; the BIFs of the other files give no cause.
 - **Trigger:** a consumer reads the cause of a BIF error, for example the error text of a shell or a logger report, or OTP code that matches the cause.
 - **Source:** [#715](https://github.com/fahchen/pbeam/issues/715).
-
-### Give the exact caller frames of an `undef` exception
-
-- The error handler path of [#447](https://github.com/fahchen/pbeam/issues/447) adds the frame of the caller of `error_handler:crash/1` to the frames of `erlang:error/1` in about one of four calls. The reductions of the error handler code match ERTS in a run with a live code server; a run of the library API has no code server and charges the extra reductions of the `init:ensure_loaded/1` round trip.
-- **Trigger:** a consumer needs the exact frames of an `undef` exception.
-- **Source:** owner decision of 2026-10-11 (Suikou review 01a1282e, AFK log second batch); [#446](https://github.com/fahchen/pbeam/issues/446), [#447](https://github.com/fahchen/pbeam/issues/447), PR [#473](https://github.com/fahchen/pbeam/pull/473).
-- **Task:** none. [#926](https://github.com/fahchen/pbeam/issues/926) added the line locations.
 
 ### Value checks of `process_flag/2` and `system_flag/2`
 
