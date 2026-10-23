@@ -1330,6 +1330,9 @@ impl Freeing {
             let slot = self.next;
             self.next = self.table.next[slot];
             self.table.objects[slot] = None;
+            // Drop one key of the key order with each object, so the free
+            // of the keys also stays in the budget of the turn.
+            self.table.order.pop();
             freed += 1;
             if self.next == EMPTY {
                 self.bucket += 1;
