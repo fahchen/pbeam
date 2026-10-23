@@ -215,6 +215,21 @@ fn sends_eof_and_keeps_the_port_open_as_pinned_erts() {
 }
 
 #[test]
+fn runs_the_command_of_a_spawn_port_as_pinned_erts() {
+    // `{spawn, Command}` runs `sh -c "exec Command"` (sys_drivers.c:474-475,
+    // 528-544; erl_child_setup.c:364-366), so `exit 3` after the `exec` of
+    // `echo` does not run, and `$0` is `sh`. A command that the shell does
+    // not find exits with 127. A first word that names a driver opens the
+    // driver (io.c:599-622). `exit_status` with a driver (io.c:625-628) and
+    // `{args, Args}` without `spawn_executable` (erl_bif_port.c:1086-1092)
+    // give `badarg`.
+    assert_runs(
+        "spawn()",
+        "[{name,[101,99,104,111,32,104,105,59,32,101,120,105,116,32,51]},[{data,<<104,105,10>>},{exit_status,0}],[{data,<<115,104,32,48,10>>},{exit_status,0}],{data,<<120>>},127,{name,[116,99,112,95,105,110,101,116]},{name,[117,100,112,95,105,110,101,116,32,120]},[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}],[{'EXIT',port,normal},{'EXIT',port,normal},{'EXIT',port,normal},{'EXIT',port,normal},{'EXIT',port,normal},{'EXIT',port,normal}]]",
+    );
+}
+
+#[test]
 fn gives_the_port_name_before_the_first_byte_0_as_pinned_erts() {
     // ERTS copies a binary name into a C string, and the port name is that
     // C string (erl_unicode.c:2107-2108, io.c:323, 366-367).
@@ -239,7 +254,7 @@ fn stops_the_run_for_each_port_part_that_is_not_implemented() {
         ("line", "unsupported open_port/2 option line"),
         ("stream", "unsupported open_port/2 option stream"),
         ("list", "unsupported open_port/2 without the binary option"),
-        ("spawn", "unsupported open_port/2 port kind spawn"),
+        ("fd", "unsupported open_port/2 port kind fd"),
         (
             "exec",
             "unsupported open_port/2 of a program that posix_spawn does not start: eacces",
