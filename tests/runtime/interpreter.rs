@@ -2774,6 +2774,14 @@ fn gives_an_invariant_error_for_a_match_context_outside_binary_matching() {
                   is not a binary match";
     assert_eq!(run(vec![erlang_call("hd", 1, false)]), escape);
     assert_eq!(
+        run(vec![Instruction::TestFunctionArity {
+            fail_label: 1,
+            value: Operand::X(0),
+            arity: Operand::Value(Term::Integer(1)),
+        }]),
+        escape
+    );
+    assert_eq!(
         run(vec![Instruction::Bif {
             fail_label: 0,
             bif: BifId::ErlangHd1,
