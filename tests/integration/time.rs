@@ -577,3 +577,86 @@ fn gives_the_local_time_of_the_host_time_zone_as_the_default_arity_bifs() {
         }
     }
 }
+
+#[test]
+fn gives_the_utc_time_of_a_local_time_in_the_host_time_zone_as_pinned_erts() {
+    // `erlang:localtime_to_universaltime/2` gives `tm_isdst` 1, 0, or -1 for
+    // `true`, `false`, or `undefined` to `mktime` (`bif.c:3948-3951`,
+    // `erl_time_sup.c:1756-1771`), which reads `TZ`. A zone without
+    // daylight saving time uses 0 (`erl_time_sup.c:1764-1769`), so `true`
+    // gives the `false` result in UTC. The local time of the POSIX time -1
+    // takes the second `mktime` call of `erl_mktime`
+    // (`erl_time_sup.c:1617-1632`). The second list holds the terms that
+    // raise `badarg` (`bif.c:3948-3954`, `erl_time_sup.c:1744-1754`).
+    let badarg = ["{error,badarg}"; 10].join(",");
+    for (tz, good) in [
+        (
+            "EST5EDT,M3.2.0,M11.1.0",
+            "[[{{2026,1,15},{11,0,0}},{{2026,1,15},{12,0,0}},{{2026,1,15},{12,0,0}}],\
+[{{2026,7,15},{12,0,0}},{{2026,7,15},{13,0,0}},{{2026,7,15},{12,0,0}}],\
+[{{1902,1,1},{4,0,0}},{{1902,1,1},{5,0,0}},{{1902,1,1},{5,0,0}}],\
+[{{1969,12,31},{22,59,59}},{{1969,12,31},{23,59,59}},{{1969,12,31},{23,59,59}}],\
+[{{1970,1,1},{3,59,59}},{{1970,1,1},{4,59,59}},{{1970,1,1},{4,59,59}}],\
+[{{2000,2,29},{16,0,0}},{{2000,2,29},{17,0,0}},{{2000,2,29},{17,0,0}}],\
+[{{2147483647,1,1},{3,59,59}},{{2147483647,1,1},{4,59,59}},{{2147483647,1,1},{4,59,59}}]]",
+        ),
+        (
+            "UTC",
+            "[[{{2026,1,15},{7,0,0}},{{2026,1,15},{7,0,0}},{{2026,1,15},{7,0,0}}],\
+[{{2026,7,15},{8,0,0}},{{2026,7,15},{8,0,0}},{{2026,7,15},{8,0,0}}],\
+[{{1902,1,1},{0,0,0}},{{1902,1,1},{0,0,0}},{{1902,1,1},{0,0,0}}],\
+[{{1969,12,31},{18,59,59}},{{1969,12,31},{18,59,59}},{{1969,12,31},{18,59,59}}],\
+[{{1969,12,31},{23,59,59}},{{1969,12,31},{23,59,59}},{{1969,12,31},{23,59,59}}],\
+[{{2000,2,29},{12,0,0}},{{2000,2,29},{12,0,0}},{{2000,2,29},{12,0,0}}],\
+[{{2147483646,12,31},{23,59,59}},{{2147483646,12,31},{23,59,59}},{{2147483646,12,31},{23,59,59}}]]",
+        ),
+    ] {
+        let stdout = format!("{{{good},[{badarg}]}}\n");
+        for (name, output) in run_with_time_zone("universal", tz) {
+            assert_printed(&format!("{name} {tz}"), &output, stdout.as_bytes());
+        }
+    }
+}
+
+#[test]
+fn gives_the_posix_seconds_of_a_utc_time_as_pinned_erts() {
+    // `erlang:universaltime_to_posixtime/1` accepts the years from 1600 to
+    // 2147483646 (`univ_to_seconds`, `erl_time_sup.c:1704-1727`), and
+    // raises `badarg` for a term that `time_to_parts` does not read
+    // (`bif.c:4010-4016`).
+    let program = program();
+    let badarg = Term::tuple(vec![
+        Term::Atom(program.atom("error").unwrap()),
+        Term::Atom(program.atom("badarg").unwrap()),
+    ]);
+    let mut expected = [0, -1, -11_676_096_000].map(Term::Integer).to_vec();
+    expected.push(badarg.clone());
+    expected.extend([951_786_123, 67_767_976_201_996_799].map(Term::Integer));
+    expected.extend(std::iter::repeat_n(badarg, 8));
+    assert_eq!(
+        program
+            .execute("time_probe", "posix_seconds", &[])
+            .unwrap()
+            .term,
+        Term::list_from(expected)
+    );
+    assert_eq!(
+        reference("posix_seconds"),
+        b"[0,-1,-11676096000,{error,badarg},951786123,67767976201996799,\
+{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},\
+{error,badarg},{error,badarg},{error,badarg}]\n"
+    );
+}
+
+#[test]
+fn gives_increasing_now_values_as_pinned_erts() {
+    // `erlang:now/0` gives `{MegaSecs, Secs, MicroSecs}` of the system time,
+    // larger than each earlier value (`bif.c:4057-4067`,
+    // `erl_time_sup.c:1852-1887`).
+    let program = program();
+    assert_eq!(
+        program.execute("time_probe", "now", &[]).unwrap().term,
+        Term::list_from(vec![Term::Atom(program.atom("true").unwrap()); 5])
+    );
+    assert_eq!(reference("now"), b"[true,true,true,true,true]\n");
+}
