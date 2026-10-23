@@ -1,6 +1,6 @@
 -module(notify_probe).
 -behaviour(gen_event).
--export([notify/0, busy/0, wait/0, done/0, hold/0, init/1, handle_event/2, handle_call/2]).
+-export([notify/0, busy/0, wait/0, done/0, hold/0, exit_normal/0, init/1, handle_event/2, handle_call/2]).
 
 %% Handle sighup and sigusr2, and add a handler to erl_signal_server that
 %% sends each event to the probe. Write "ready", then write each of the two
@@ -55,3 +55,12 @@ hold() ->
 wait() ->
     io:put_chars("ready\n"),
     receive after infinity -> ok end.
+
+%% Start a process that writes "late" after 300 ms, write "ready", and exit
+%% with the reason normal. On ERTS the boot process exits normal, init goes
+%% to its main loop (init.erl:700-704), and the other process still runs, so
+%% only a host signal or a halt ends the run.
+exit_normal() ->
+    _ = spawn(fun() -> receive after 300 -> io:put_chars("late\n") end end),
+    io:put_chars("ready\n"),
+    exit(normal).

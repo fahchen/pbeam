@@ -2412,6 +2412,8 @@ impl Scheduler {
     pub(super) fn account_turn(&mut self) {
         let used = self.current_reductions();
         self.virtual_reductions = 0;
+        self.timers
+            .add_reductions(i32::try_from(used).unwrap_or(i32::MAX));
         let process = self.current_process_mut();
         process.reductions += used;
         process.fcalls = CONTEXT_REDS;
@@ -2429,6 +2431,8 @@ impl Scheduler {
     fn schedule_out(&mut self) -> &mut ProcessState {
         let used = self.current_reductions();
         self.virtual_reductions = 0;
+        self.timers
+            .add_reductions(i32::try_from(used).unwrap_or(i32::MAX));
         let touched = self.multi && self.resources.take_touched();
         let process = self
             .processes

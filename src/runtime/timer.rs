@@ -10,6 +10,11 @@ use std::{
 };
 
 use super::time::MONOTONIC_BEGIN;
+use std::cell::Cell;
+
+/// The reductions after which a scheduler reads the clock again, as
+/// `ERTS_CHECK_TIME_REDS` (`erl_process.c:59`).
+const CHECK_TIME_REDS: i32 = 4000;
 use crate::runtime::host::clock;
 
 mod correction;
@@ -162,6 +167,12 @@ pub(super) struct Timers {
     bif_timers: HashMap<Reference, TimerKey>,
     /// Start number of the next timer.
     next: u64,
+    /// The last time that this scheduler read, as
+    /// `esdp->last_monotonic_time` (`erl_time_sup.c:279`).
+    last: Cell<i64>,
+    /// The reductions that processes used after the last read, as
+    /// `esdp->check_time_reds` (`erl_process.h:535`, `erl_time_sup.c:280`).
+    check_reds: Cell<i32>,
 }
 
 impl Timers {
@@ -196,6 +207,8 @@ impl Timers {
             queue: BTreeMap::new(),
             bif_timers: HashMap::new(),
             next: 1,
+            last: Cell::new(0),
+            check_reds: Cell::new(0),
         }
     }
 
@@ -237,7 +250,43 @@ impl Timers {
     /// assert!(timers.now() <= timers.now());
     /// ```
     pub(super) fn now(&self) -> i64 {
-        self.clock.now()
+        let now = self.clock.now();
+        self.last.set(now);
+        self.check_reds.set(0);
+        now
+    }
+
+    /// Add the actual reductions `reductions` of a turn, as
+    /// `ERTS_PROC_REDUCTIONS_EXECUTED` does (`erl_process.h:529-536`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// timers.add_reductions(4000);
+    /// ```
+    pub(super) fn add_reductions(&self, reductions: i32) {
+        self.check_reds
+            .set(self.check_reds.get().saturating_add(reductions));
+    }
+
+    /// Return the time at which a scheduler expires its timers before it
+    /// takes the next process. It reads the clock only when processes used
+    /// `ERTS_CHECK_TIME_REDS` (`CONTEXT_REDS`, 4000) reductions after the
+    /// last read; otherwise it gives the last time read
+    /// (`erl_process.c:59`, `9803-9810`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let now = timers.now();
+    /// assert_eq!(timers.timer_time(), now);
+    /// ```
+    pub(super) fn timer_time(&self) -> i64 {
+        if self.check_reds.get() >= CHECK_TIME_REDS {
+            self.now()
+        } else {
+            self.last.get()
+        }
     }
 
     /// Return the time offset in nanoseconds, as `erts_get_time_offset`

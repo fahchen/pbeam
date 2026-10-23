@@ -150,24 +150,26 @@ pub(crate) fn spawn(path: &[u8], args: &[Vec<u8>], streams: Streams) -> Result<C
 /// Start a port program of ERTS that PBeam runs in a thread, not as an
 /// external program: make the pipes as [`spawn`] does, and run
 /// `program(input, output)` in a new thread with the child ends of the
-/// input and output pipes. When `program` returns its exit status, the
-/// thread closes the output pipe and writes the wait status of that exit
+/// input and output pipes. `program` owns the input pipe. When `program`
+/// returns its exit status, the thread closes the output pipe and writes the wait status of that exit
 /// status to the status pipe. The `os_pid` of the port is the pid of the
 /// node process.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let child = serve(|input, output| gethost::serve(input, output))?;
+/// let child = serve(move |input, output| gethost::serve(&args, input, output))?;
 /// ```
-pub(crate) fn serve(program: fn(&mut File, &mut File) -> i32) -> Result<Child, SpawnError> {
+pub(crate) fn serve(
+    program: impl FnOnce(File, &mut File) -> i32 + Send + 'static,
+) -> Result<Child, SpawnError> {
     let (output, child_output) = pipe().map_err(SpawnError::Open)?;
     let (child_input, input) = pipe().map_err(SpawnError::Open)?;
     let (status, status_writer) = pipe().map_err(SpawnError::Open)?;
     thread::spawn(move || {
-        let (mut input, mut output) = (File::from(child_input), File::from(child_output));
-        let code = program(&mut input, &mut output);
-        drop((input, output));
+        let mut output = File::from(child_output);
+        let code = program(File::from(child_input), &mut output);
+        drop(output);
         // The wait status of `exit(code)`, which `WEXITSTATUS` reads.
         let _ = File::from(status_writer).write_all(&((code & 0xff) << 8).to_ne_bytes());
     });

@@ -202,3 +202,22 @@ fn does_the_check_once_for_the_schedulers_of_the_node() {
     assert_eq!(second.pop_due_with(2_501_000_000, || unreachable!()), None);
     assert_eq!(second.check, (62_501, 1));
 }
+
+#[test]
+fn reads_the_clock_for_timers_after_check_time_reds_reductions() {
+    // `erl_process.c:9803-9810`, `erl_time_sup.c:279-280`.
+    let timers = Timers::with_clock(NodeClock::new());
+    let last = timers.now();
+    std::thread::sleep(Duration::from_millis(2));
+    assert_eq!(timers.timer_time(), last);
+    timers.add_reductions(3999);
+    assert_eq!(timers.timer_time(), last);
+    timers.add_reductions(1);
+    let read = timers.timer_time();
+    assert!(read > last);
+    assert_eq!(timers.timer_time(), read);
+    timers.add_reductions(4000);
+    let now = timers.now();
+    std::thread::sleep(Duration::from_millis(2));
+    assert_eq!(timers.timer_time(), now);
+}

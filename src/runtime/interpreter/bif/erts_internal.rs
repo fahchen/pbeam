@@ -305,7 +305,8 @@ pub(super) fn open_port(
         return Ok(denied);
     }
     let started = if is_gethost(&path) {
-        spawn::serve(gethost::serve)
+        let args = settings.args.clone();
+        spawn::serve(move |input, output| gethost::serve(&args, input, output))
     } else {
         spawn::spawn(&path, &settings.args, settings.streams)
     };

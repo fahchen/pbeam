@@ -1019,11 +1019,19 @@ impl Node {
 
     /// Record that the exit of the root of the slot `slot` completed. A
     /// failed root stops the run, as [`Self::abort`] does. The last root
-    /// sets the shutdown state. Each root exit wakes each scheduler.
+    /// sets the shutdown state when it returned. A root that exited with the
+    /// reason `normal` does not stop the run: on ERTS the boot process exits
+    /// `normal`, and `init` goes to its main loop (`init.erl:700-704`), so
+    /// the run continues until a halt, a host signal, or no process can
+    /// wake. Each root exit wakes each scheduler.
     pub(in crate::runtime) fn root_exit(&self, slot: usize) {
         let mut roots = self.roots.lock().expect("the roots are not poisoned");
         roots.live -= 1;
-        if roots.live == 0 || matches!(roots.results[slot], Some(Err(_))) {
+        let stop = match &roots.results[slot] {
+            Some(Err(reason)) => *reason != Term::static_atom("normal"),
+            _ => roots.live == 0,
+        };
+        if stop {
             self.shutdown.store(true, Ordering::Release);
         }
         drop(roots);

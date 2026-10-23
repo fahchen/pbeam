@@ -244,6 +244,21 @@ fn raises_the_erts_error_for_a_bad_digest_type_or_data() {
 }
 
 #[test]
+fn raises_not_iolist_for_hash_update_data_that_is_not_a_binary() {
+    // crypto:hash_update/2 converts the data first (crypto.erl:1186), so
+    // only a direct NIF call reaches hash.c:221-222.
+    let mut scheduler = scheduler();
+    let sha = atom(&mut scheduler, "sha");
+    let context = value(hash_init_nif(&mut scheduler, &sha).unwrap());
+    let result = hash_update_nif(&mut scheduler, &context, &Term::Integer(1)).unwrap();
+    assert_c_error(
+        result,
+        &scheduler.atoms.clone(),
+        ("badarg", "hash.c", 222, 1, "Not iolist"),
+    );
+}
+
+#[test]
 fn gives_the_pinned_erts_pbkdf2_value_for_each_eligible_digest() {
     let mut scheduler = scheduler();
     let password = Term::binary(b"password".to_vec());
