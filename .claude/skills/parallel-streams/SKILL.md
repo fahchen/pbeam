@@ -19,16 +19,16 @@ The main session drives several milestones at once. Each milestone is one stream
 
 - A PR merges when a review gives "No findings." and CI is green. The owner accepted Codex and Fable as reviewers (2026-10-22). When Codex reports its usage limit, run `pbeam-erts-skeptic` with `model: fable`.
 - After fixes, run a delta review: name the previous head, so the skeptic reads only the new diff, plus the callers and tests of added code.
-- Skip the re-review when a fix changes only tests, comments, or the PR body exactly as the reviewer asked. Fix a prose-only finding (a wrong count or citation in the PR body) yourself with `gh pr edit`.
+- Skip the re-review only when a fix changes comments or the PR body exactly as the reviewer asked; a changed test still gets a delta review, because a test that does not fail on revert is a finding. Fix a prose-only finding (a wrong count or citation in the PR body) yourself with `gh pr edit`.
 - A finding that widens the scope becomes a new task under the right epic, with a blocked-by link. Comment on the PR.
 
 ## Merge queue
 
 - Agents never merge `origin/main` on their own. When a PR is ready or conflicts, the agent reports its PR number and its touched files (`gh pr diff <n> --name-only`).
-- Merge ready PRs whose files do not overlap first. A PR that overlaps a queued PR waits; after the earlier PR merges, tell its agent to merge main once.
-- Before a merge, read `mergeable`. GitHub often reports `UNKNOWN` for a few seconds after a push; read it again. A squash merge with the PR head SHA (`gh api -X PUT repos/<repo>/pulls/<n>/merge -f merge_method=squash -f sha=<head>`) fails safely on a conflict.
+- Merge ready PRs whose files do not overlap first. A PR that overlaps a queued PR waits; after the earlier PR merges, read its `mergeable` again. Only on `CONFLICTING` does it merge main, once: the PR CI already tests `refs/pull/<n>/merge`, so a clean PR squash-merges after green CI with no extra main merge (owner rule of 2026-10-22).
+- Before a merge, read `mergeable`. GitHub often reports `UNKNOWN` for a few seconds after a push; read it again. A squash merge with the PR head SHA (`gh api -X PUT repos/<repo>/pulls/<n>/merge -f merge_method=squash -f sha=<head>`) fails safely on a conflict. GitHub refuses that call for a PR in a stack; use `gh api -X PUT repos/<repo>/pulls/<n>/merge-async -f merge_method=squash -f merge_action=direct_merge` there.
 - When main moved after a PR's CI and the PR changes code next to a merged PR, run `cargo check --all-targets` on a local merge before the squash merge.
-- A conflict only in `docs/erts-differences.md` or `docs/backlog.md`: resolve it yourself. These rows are very long. Merge by sentence: take the base, ours and theirs of each conflicting line, and apply each side's changed sentences to the other side. Then run `cargo check` and `mise run lint`, push, and wait for CI.
+- To merge main into a conflicting PR, use `pbeam-merge-prep`, or the PR's own agent if it is still running. Merge-prep resolves conflicts in docs only, by sentence for the long rows of `docs/erts-differences.md` and `docs/backlog.md`, and stops on any other conflict; then the main session or the PR's agent resolves it, and the PR gets a delta review.
 
 ## After each merge
 
@@ -40,10 +40,10 @@ The main session drives several milestones at once. Each milestone is one stream
 
 ## Budgets and restarts
 
-- An implementer stops at about 90 tool calls and writes "Next steps" in the PR body. Start a new implementer in the same worktree with those steps; do not resume an agent that hit its budget.
+- An implementer stops at about 90 tool calls and writes "Next steps" in the PR body. Start a new implementer without `isolation: worktree`, give it the existing worktree path and those steps, and tell it to use no other worktree; do not resume an agent that hit its budget.
 - After an API session limit, resume each stopped agent with `SendMessage` once the limit resets.
 - Keep reports short: ask for at most 15 lines. Do not read an agent's transcript file.
 
 ## Owner decisions
 
-Stop and ask the owner only for a real product or design decision (for example a new dependency, an ADR for new `unsafe`, a platform behavior). Record the question in the progress document, keep the other streams running, and let the blocked stream take another ready task.
+Stop and ask the owner only for a real product or design decision (for example a new dependency, an ADR for new `unsafe`, a platform behavior). Set `status:needs-input` on the task and write the question in its issue body, as AGENTS.md says; add it to the session's progress document if there is one. Keep the other streams running, and let the blocked stream take another ready task.
