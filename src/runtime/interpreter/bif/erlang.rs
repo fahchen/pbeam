@@ -3586,9 +3586,11 @@ pub(super) fn setelement(index: &Term, tuple: &Term, value: &Term) -> BifResult 
 /// `erl_bif_info.c:3985-3990`). A term that is not a fun raises `badarg`
 /// (`erl_bif_info.c:3924-3926`), and so does an item that the BIF does not
 /// know, which includes `native` and `native_address`
-/// (`erl_bif_info.c:4003-4004`). A local fun gives a clear runtime error
-/// for `index`, `new_uniq`, and `pid`, because the loader of PBeam keeps
-/// no such value (row "Fun information" of `docs/erts-differences.md`).
+/// (`erl_bif_info.c:4003-4004`). A local fun gives the position of its
+/// `FunT` entry for `index` (`erl_bif_info.c:3964-3967`), the module MD5 of
+/// its fun entry as a binary of 16 bytes for `new_uniq`
+/// (`erl_bif_info.c:3958-3963`), and the pid of the first process `init`,
+/// `<0.0.0>`, for `pid` (`erl_bif_info.c:3943-3946`, `erl_init.c:2540`).
 ///
 /// # Examples
 ///
@@ -3626,11 +3628,9 @@ pub(super) fn fun_info(
             "refc" => Term::Integer(1),
             "new_index" => Term::Integer(i64::from(lambda.index())),
             "uniq" => Term::Integer(i64::from(lambda.old_unique())),
-            "index" | "new_uniq" | "pid" => {
-                return Err(error(format!(
-                    "unsupported erlang:fun_info/2 item {item} (see \"Fun information\" in docs/erts-differences.md)"
-                )));
-            }
+            "index" => Term::Integer(i64::from(lambda.old_index())),
+            "new_uniq" => Term::binary(lambda.uniq().to_vec()),
+            "pid" => Term::Pid(ProcessId(0)),
             _ => return Ok(BifResult::badarg()),
         },
         Target::External {

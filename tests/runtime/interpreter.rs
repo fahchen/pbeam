@@ -310,7 +310,7 @@ fn tests_a_fun_with_a_register_arity_as_erl_is_function() {
         make_program(
             vec![
                 Instruction::MakeFun {
-                    lambda: Box::new(lambda),
+                    lambda: std::sync::Arc::new(lambda),
                     free: Vec::new(),
                     destination: Operand::X(0),
                 },

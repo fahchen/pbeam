@@ -11,6 +11,7 @@ use crate::runtime::{BifId, resolve_bif};
 use crate::term::{Atom, AtomTable, Lambda, Term, flatmap_order};
 use std::cmp::Ordering;
 use std::num::NonZeroU64;
+use std::sync::Arc;
 
 const CODE_HEADER_SIZE: usize = WORD_SIZE * 5;
 const CODE_HEADER_SUB_SIZE: u32 = 16;
@@ -559,7 +560,7 @@ pub(crate) enum Instruction {
     /// Erlang: `make_pair(T) -> fun(X) -> {T, X} end.` compiles to
     /// `{make_fun3,{f,112},0,0,{x,0},{list,[{x,0}]}}`.
     MakeFun {
-        lambda: Box<Lambda>,
+        lambda: Arc<Lambda>,
         free: Vec<Operand>,
         destination: Operand,
     },
@@ -2002,7 +2003,7 @@ pub(super) fn parse_code(
     atoms: &[Atom],
     imports: &[(String, String, u32)],
     literals: &[Option<Term>],
-    lambdas: &[(Lambda, usize)],
+    lambdas: &[(Arc<Lambda>, usize)],
     strings: &[u8],
     lines: &mut LineTable,
 ) -> Result<(Vec<Instruction>, u32, Option<u32>), BeamError> {
@@ -2656,7 +2657,7 @@ pub(super) fn parse_code(
                     .map(|_| read_move_operand(data, &mut cursor, atoms, literals))
                     .collect::<Result<_, _>>()?;
                 Instruction::MakeFun {
-                    lambda: Box::new(lambda.clone()),
+                    lambda: Arc::clone(lambda),
                     free,
                     destination,
                 }

@@ -2433,11 +2433,11 @@ fn decodes_the_fun_instructions_of_the_fun_probe_fixture() {
     // The first five `FunT` entries of the fixture, with their free
     // variable counts.
     let lambdas = vec![
-        (lambda(0, 127, 1), 1),
-        (lambda(1, 125, 0), 0),
-        (lambda(2, 123, 1), 1),
-        (lambda(3, 121, 0), 0),
-        (lambda(4, 112, 1), 1),
+        (std::sync::Arc::new(lambda(0, 127, 1)), 1),
+        (std::sync::Arc::new(lambda(1, 125, 0)), 0),
+        (std::sync::Arc::new(lambda(2, 123, 1)), 1),
+        (std::sync::Arc::new(lambda(3, 121, 0)), 0),
+        (std::sync::Arc::new(lambda(4, 112, 1)), 1),
     ];
     let parse = |instructions: &[u8]| {
         parse_code(
@@ -2479,9 +2479,9 @@ fn decodes_the_fun_instructions_of_the_fun_probe_fixture() {
             Instruction::CallFun { arity: 1, function: Operand::X(1), tail: false, .. },
             Instruction::CallFun { arity: 0, function: Operand::Y(0), tail: false, .. },
             Instruction::End,
-        ] if **first == lambdas[4].0
+        ] if **first == *lambdas[4].0
             && matches!(free.as_slice(), [Operand::X(0)])
-            && **second == lambdas[1].0
+            && **second == *lambdas[1].0
             && empty.is_empty()
     ));
     let error = |instructions: &[u8]| parse(instructions).unwrap_err().to_string();

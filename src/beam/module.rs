@@ -1,14 +1,17 @@
 use std::{
     collections::HashMap,
     hash::{BuildHasherDefault, Hasher},
-    sync::atomic::{AtomicU32, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    },
 };
 
 use super::code::{self, Instruction, LineTable, Operand};
 use crate::{
     error::{BeamError, error},
     runtime::BifId,
-    term::{AtomTable, Term},
+    term::{AtomTable, Lambda, Term},
 };
 
 const X0_REGISTER: u32 = 0;
@@ -172,6 +175,11 @@ pub struct BeamModule {
     /// [`LineTable`]). A module with no `Line` chunk has an empty table, and
     /// each of its frames has the location `[]`.
     pub(crate) lines: LineTable,
+    /// The fun entry of each `FunT` entry, by its position in the chunk
+    /// (`ErlFunEntry.old_index`). A `make_fun3` of the code holds the same
+    /// entry, and the loader puts each entry in the fun-entry table of the
+    /// node, as `erts_fun_entry_put` does (`jit/asm_load.c:1208-1244`).
+    pub(crate) lambdas: Vec<Arc<Lambda>>,
 }
 
 /// The side tables that the loader builds from the instruction stream of one
@@ -544,6 +552,7 @@ impl BeamModule {
             on_load: None,
             native_declarations: Vec::new(),
             lines: LineTable::default(),
+            lambdas: Vec::new(),
         })
     }
 

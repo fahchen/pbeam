@@ -1,6 +1,7 @@
 //! Unit tests of the fun newtype of `src/term/fun.rs`.
 
 use std::rc::Rc;
+use std::sync::Arc;
 
 use super::*;
 
@@ -141,11 +142,11 @@ fn prints_the_cost_of_a_fun_payload() {
     let lambda = Lambda::new(Atom::from_static("lists").unwrap(), 0, 0, 7, 53, 1);
     let free = vec![Term::Integer(1), Term::Integer(2)];
     let arc: Arc<FunThing> = Arc::new(FunThing {
-        target: Target::Local(lambda.clone()),
+        target: Target::Local(Arc::new(lambda.clone())),
         free: free.clone(),
     });
     let rc: Rc<FunThing> = Rc::new(FunThing {
-        target: Target::Local(lambda.clone()),
+        target: Target::Local(Arc::new(lambda.clone())),
         free: free.clone(),
     });
     let costs = super::super::costs::HANDLE_OPERATIONS;

@@ -17,6 +17,9 @@ const PING_PONG: &[u8] = include_bytes!("../../fixtures/multischeduler/ping_pong
 /// the other.
 const CODE_LOADING: &[u8] = include_bytes!("../../fixtures/multischeduler/code_loading.beam");
 
+/// The fixture that makes local funs of two versions of `fun_target`.
+const FUN_ENTRIES: &[u8] = include_bytes!("../../fixtures/multischeduler/fun_entries.beam");
+
 /// The fixture whose two roots purge code on one scheduler while a process
 /// of the other scheduler runs it.
 const CODE_PURGE: &[u8] = include_bytes!("../../fixtures/multischeduler/code_purge.beam");
@@ -1107,4 +1110,124 @@ fn cancels_a_timer_of_another_scheduler_at_the_receiver_exit() {
 /// Return the atom `match` of the program.
 fn match_atom(program: &BeamProgram) -> Term {
     Term::Atom(program.atom("match").expect("the program names match"))
+}
+
+/// The MD5 of version 1 and version 2 of `fun_target`, which `erl +S 2`
+/// gives for `erlang:fun_info(F, new_uniq)`.
+const FUN_TARGET_MD5: [[u8; 16]; 2] = [
+    [
+        85, 226, 106, 132, 50, 37, 76, 123, 119, 49, 23, 113, 186, 185, 144, 210,
+    ],
+    [
+        220, 232, 137, 3, 146, 143, 59, 198, 32, 142, 210, 51, 8, 0, 84, 90,
+    ],
+];
+
+/// Return the `fun_info` items of `fun_entries:info/1` for a fun of
+/// version `version` of `fun_target`, with the `pid` item `pid`.
+fn fun_entry_info(program: &BeamProgram, version: usize, pid: &Term) -> Term {
+    let atom = |name: &str| Term::Atom(program.atom(name).expect("the fixture names the atom"));
+    let pair = |name: &str, value: Term| Term::tuple(vec![atom(name), value]);
+    let uniq = [45_028_180, 115_819_592][version - 1];
+    Term::list_from([
+        pair("index", Term::Integer(0)),
+        pair("new_index", Term::Integer(0)),
+        pair("uniq", Term::Integer(uniq)),
+        pair(
+            "new_uniq",
+            Term::binary(FUN_TARGET_MD5[version - 1].to_vec()),
+        ),
+        pair("pid", pid.clone()),
+    ])
+}
+
+/// Return the `pid` item of the first `fun_info` list of `info`, and check
+/// that it is `<0.0.0>`, the pid of the first process (`erl_bif_info.c:3943-3946`).
+fn first_process(info: &Term) -> Term {
+    let (items, _) = info.list_elements().expect("a list of items");
+    let pid = items[4].tuple_elements().expect("an item")[1].clone();
+    assert_eq!(format!("{pid:?}"), "Pid(ProcessId(0))");
+    pid
+}
+
+/// The loader keeps the module MD5 and the old index of each `FunT` entry in
+/// the fun-entry table of the node (`erl_fun.c:62-132`,
+/// `jit/asm_load.c:1208-1244`), so `erlang:fun_info/2` gives `index`,
+/// `new_uniq`, and `pid` as `erl +S 2` does, with one scheduler and with two
+/// (`erl_bif_info.c:3943-3967`). A fun of another version is not equal, and
+/// two funs of one entry are (`utils.c:2157-2177`).
+#[test]
+fn keeps_fun_entries_in_the_node_table_as_pinned_erts() {
+    let modules = ["erlang", "zlib", "erts_code_purger"].map(pinned_beam);
+    let program = BeamProgram::load(&[&modules[0], &modules[1], &modules[2], FUN_ENTRIES])
+        .expect("the fixture loads");
+    let atom = |name: &str| Term::Atom(program.atom(name).expect("the fixture names the atom"));
+    let single = program
+        .execute("fun_entries", "single", &[])
+        .expect("the single run");
+    let (items, _) = single.term.list_elements().expect("a list");
+    let pid = first_process(&items[0]);
+    let expected_single = Term::list_from([
+        fun_entry_info(&program, 1, &pid),
+        fun_entry_info(&program, 2, &pid),
+        atom("false"),
+        atom("true"),
+        Term::tuple(vec![Term::Integer(2), atom("a")]),
+    ]);
+    assert_eq!(single.term, expected_single, "one scheduler");
+    for _ in 0..10 {
+        let results = program
+            .execute_on_schedulers(&[("fun_entries", "loader"), ("fun_entries", "maker")])
+            .expect("the two schedulers run");
+        let pid = first_process(&results[1].term);
+        let loader = Term::tuple(vec![
+            fun_entry_info(&program, 1, &pid),
+            atom("true"),
+            Term::tuple(vec![Term::Integer(1), atom("a")]),
+        ]);
+        assert_eq!(results[0].term, loader, "the loader");
+        assert_eq!(
+            results[1].term,
+            fun_entry_info(&program, 1, &pid),
+            "the maker"
+        );
+    }
+    let directory = std::env::temp_dir().join(format!(
+        "pbeam-multischeduler-{}-fun-entries",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).expect("the directory of the reference run");
+    std::fs::write(directory.join("fun_entries.beam"), FUN_ENTRIES).expect("the fixture file");
+    let output = std::process::Command::new("erl")
+        .args(["+S", "2", "-noshell"])
+        .args([
+            "-eval",
+            "io:format(\"~w~n\", [fun_entries:reference()]), halt().",
+        ])
+        .arg("-pa")
+        .arg(&directory)
+        .output()
+        .expect("the pinned ERTS runs");
+    std::fs::remove_dir_all(&directory).expect("the reference directory leaves");
+    assert!(output.status.success(), "{output:?}");
+    let info = |version: usize| {
+        let uniq = [45_028_180, 115_819_592][version - 1];
+        let md5 = FUN_TARGET_MD5[version - 1]
+            .map(|byte| byte.to_string())
+            .join(",");
+        format!(
+            "[{{index,0}},{{new_index,0}},{{uniq,{uniq}}},{{new_uniq,<<{md5}>>}},{{pid,<0.0.0>}}]"
+        )
+    };
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!(
+            "{{[{},{},false,true,{{2,a}}],{{{},true,{{1,a}}}},{}}}\n",
+            info(1),
+            info(2),
+            info(1),
+            info(1)
+        )
+    );
 }
