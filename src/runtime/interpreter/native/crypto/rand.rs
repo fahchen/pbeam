@@ -31,10 +31,7 @@ pub(super) fn strong_rand_bytes_nif(size: &Term) -> BifResult {
         return BifResult::badarg();
     };
     let mut bytes = vec![0; size];
-    match openssl::rand::rand_bytes(&mut bytes) {
-        Ok(()) => BifResult::Value(Term::binary(bytes)),
-        Err(_) => BifResult::Value(Term::static_atom("false")),
-    }
+    binary_or_false(openssl::rand::rand_bytes(&mut bytes).map(|()| bytes))
 }
 
 /// Run `crypto:strong_rand_range_nif(Range)` (`rand.c:54-85`). `Range` is a
@@ -57,8 +54,15 @@ pub(super) fn strong_rand_range_nif(range: &Term) -> BifResult {
         return BifResult::badarg();
     };
     let value = BigNum::from_slice(range).and_then(|range| random_below(&range));
-    match value {
-        Ok(value) => BifResult::Value(Term::binary(value.to_vec())),
+    binary_or_false(value.map(|value| value.to_vec()))
+}
+
+/// Return the binary of `bytes`, or `false` for a failed OpenSSL call, as
+/// `strong_rand_bytes_nif` and `strong_rand_range_nif` do (`rand.c:41`, `rand.c:51`,
+/// `rand.c:66`, `rand.c:77`).
+fn binary_or_false(bytes: Result<Vec<u8>, ErrorStack>) -> BifResult {
+    match bytes {
+        Ok(bytes) => BifResult::Value(Term::binary(bytes)),
         Err(_) => BifResult::Value(Term::static_atom("false")),
     }
 }
