@@ -494,6 +494,7 @@ ambient() ->
         ets:safe_fixtable(Name, true),
         ets:take(Name, key),
         ets:delete(Name, key),
+        ets:delete_object(Name, {key, value}),
         ets:info(Name, type),
         ets:insert(Name, {key, value}),
         length(ets:info(Name)),
