@@ -141,12 +141,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a measured path converts such an integer at the end of a budget, or a task adds dirty schedulers.
 - **Source:** #234 (PR #243), #268, #399.
 
-### Read the clock after `ERTS_CHECK_TIME_REDS` reductions
-
-- PBeam reads the run clock and expires each due timer before it takes the next process. An ERTS scheduler reads the clock only when its processes used `ERTS_CHECK_TIME_REDS` (`CONTEXT_REDS`, 4000) reductions after the last read, and before it sleeps. Between two reads, it expires the timers on the last time that it read (`erl_process.c:59`, `9797-9810`; `erl_process.h:528-535`; `erl_time_sup.c:280`). Thus on ERTS a due timer can expire some turns later than on PBeam. The "Timers" row of `docs/erts-differences.md` records this, and this entry owns it.
-- **Trigger:** a measured path depends on the turn in which a timer expires while other processes run.
-- **Source:** #229 (PR #236).
-
 ### Run the unsupported BIFs that OTP code calls
 
 - The "Unimplemented BIFs" row lists the `unsupported` BIF table entries that OTP code often calls. Each returns `unresolved external MFA M:F/A`. The groups:
