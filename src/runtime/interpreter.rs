@@ -7,7 +7,7 @@ use super::{
         Start, StartFlags,
     },
     scheduler::{PolicyEnd, Received, Scheduler, Turn, node::Node},
-    tty::{InitialMode, Ttys},
+    tty::InitialMode,
 };
 use crate::{
     beam::{
@@ -798,7 +798,7 @@ impl BeamProgram {
                     // each scheduler after the run.
                     let run =
                         self.run_multi_root(&mut scheduler, index, module, function, &mut start);
-                    let selected = scheduler.resources.borrow_mut::<Ttys>().input_selected();
+                    let selected = scheduler.node().ttys().input_selected();
                     match run {
                         Ok(()) => Ok(selected),
                         Err(cause) => {
@@ -1022,7 +1022,7 @@ impl BeamProgram {
             }
             Err(import_error) => Err(import_error),
         };
-        initial_mode.reset(scheduler.resources.borrow_mut::<Ttys>().input_selected());
+        initial_mode.reset(scheduler.node().ttys().input_selected());
         run?;
         // The node holds the result of the root. The table of the run holds
         // each name that the run created, so the host result can name every

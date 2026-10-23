@@ -29,6 +29,7 @@ use crate::runtime::{
     port::{self, Port, PortCell, Ports},
     process::{MonitorLinkTree, ProcessState, TimerReference},
     resources::NodeResources,
+    tty::Ttys,
 };
 use crate::{
     error::{BeamError, error},
@@ -168,6 +169,10 @@ pub(in crate::runtime) struct Node {
     /// `erl_ptab.c`): each open port with the scheduler that serves its I/O.
     /// Any scheduler reads and changes a port through it.
     ports: Mutex<Ports>,
+    /// The TTY resources of `prim_tty` and the read select of fd 0. ERTS
+    /// keeps one resource object for the node (`prim_tty_nif.c:988-1072`),
+    /// and a NIF call on any scheduler uses it.
+    ttys: Mutex<Ttys>,
     /// The persistent terms of the node and their update permission. ERTS
     /// keeps one table for the node, and any scheduler reads it
     /// (`the_hash_table`, `erl_bif_persistent.c:358-398`).
@@ -279,6 +284,7 @@ impl Node {
                 processes: ProcessTable::default(),
                 names: Mutex::new(HashMap::new()),
                 ports: Mutex::default(),
+                ttys: Mutex::default(),
                 persistent_terms: Mutex::default(),
                 persistent_progress: AtomicBool::new(false),
                 aliases: Mutex::new(Aliases::default()),
@@ -353,6 +359,7 @@ impl Node {
             processes: ProcessTable::default(),
             names: Mutex::new(HashMap::new()),
             ports: Mutex::default(),
+            ttys: Mutex::default(),
             persistent_terms: Mutex::default(),
             persistent_progress: AtomicBool::new(false),
             aliases: Mutex::new(Aliases::default()),
@@ -769,6 +776,13 @@ impl Node {
     /// Lock the port table of the node.
     pub(in crate::runtime) fn ports(&self) -> MutexGuard<'_, Ports> {
         self.ports.lock().expect("the port table is not poisoned")
+    }
+
+    /// Lock the TTY resources of the node.
+    pub(in crate::runtime) fn ttys(&self) -> MutexGuard<'_, Ttys> {
+        self.ttys
+            .lock()
+            .expect("the TTY resources are not poisoned")
     }
 
     /// Return the handle of the port `id`, or `None` when it is not in the

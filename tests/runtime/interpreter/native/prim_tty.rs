@@ -46,7 +46,7 @@ fn gives_the_tcsetattr_errno_and_keeps_no_owner() {
         .unwrap();
     scheduler.schedule_next().unwrap();
     let reference = scheduler.make_ref().unwrap();
-    scheduler.resources.borrow_mut::<Ttys>().insert(
+    scheduler.node().ttys().insert(
         reference,
         TtyResource {
             ofd: -1,
@@ -69,10 +69,7 @@ fn gives_the_tcsetattr_errno_and_keeps_no_owner() {
         debug_bif(&result, &scheduler.atoms),
         r#"Value(Tuple([Atom("error"), Tuple([Atom("tcsetattr"), Atom("ebadf")])]))"#
     );
-    let tty = scheduler
-        .resources
-        .borrow_mut::<Ttys>()
-        .get(reference)
-        .unwrap();
+    let ttys = scheduler.node().ttys();
+    let tty = ttys.get(reference).unwrap();
     assert_eq!((&tty.state, tty.owner), (&TtyState::Enabled, None));
 }

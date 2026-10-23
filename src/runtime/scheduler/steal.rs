@@ -95,7 +95,6 @@ fn stealable(process: &ProcessState) -> bool {
     !process.waiting
         && process.exiting.is_none()
         && process.dirty_call.is_none()
-        && !process.pinned
         && !matches!(process.receive_timer, ReceiveTimer::Set { .. })
 }
 

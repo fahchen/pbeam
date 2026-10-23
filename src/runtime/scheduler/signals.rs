@@ -9,7 +9,7 @@
 
 use super::{
     Files, Flush, LinkId, Monitor, ProcessState, RECEIVE_FETCH_REDUCTIONS, Release,
-    SIGNAL_HANDLING_REDUCTIONS, Scheduler, TargetMonitor, Ttys, check_process_code_reply, lock,
+    SIGNAL_HANDLING_REDUCTIONS, Scheduler, TargetMonitor, check_process_code_reply, lock,
 };
 use crate::{
     error::BeamError,
@@ -984,7 +984,7 @@ impl Scheduler {
                 }
                 Signal::TtyMonitor { tty } => {
                     count += 4;
-                    self.resources.borrow_mut::<Ttys>().monitor_down(id, tty);
+                    self.node.ttys().monitor_down(id, tty);
                 }
                 Signal::FileMonitor { file } => {
                     count += 4;
