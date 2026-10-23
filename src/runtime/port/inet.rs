@@ -57,7 +57,7 @@ use crate::{
     error::{BeamError, error},
     runtime::{
         host::{errno::errno_id, host_name},
-        timer::TimerKey,
+        timer::PortTimer,
     },
     term::{ProcessId, Reference},
 };
@@ -111,7 +111,7 @@ pub(in crate::runtime) struct Acceptor {
     pub(in crate::runtime) monitor: Reference,
     /// The timer of the accept, or `None` for `infinity`. The timer service
     /// owns it; the end of the accept cancels it.
-    pub(in crate::runtime) timer: Option<TimerKey>,
+    pub(in crate::runtime) timer: Option<PortTimer>,
 }
 
 /// The socket type of a port: the driver that `open_port/2` names.

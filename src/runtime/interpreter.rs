@@ -20,7 +20,7 @@ use crate::{
     error::{BeamError, error},
     term::{
         Atom, AtomTable, Binary, Fun, HostTerm, Insert, Map, MatchState, Target, Term, debug_term,
-        low_64_bits, print_term, segment_equals, segment_integer,
+        fits_big_arity, print_term, segment_equals, segment_integer,
     },
 };
 #[cfg(test)]
@@ -2138,20 +2138,13 @@ impl BeamProgram {
                 } => {
                     let (process, atoms) = scheduler.current_process_and_atoms();
                     let state = match_context(process, context, atoms)?;
-                    let bits = binary_field_size(read_ref(process, size)?, *unit)
-                        .and_then(|bits| state.read_bits(bits).map(|read| (bits as usize, read)));
-                    match bits {
-                        Some((bits, read)) => {
-                            let value = segment_integer(&read, bits, *little, *signed).ok_or_else(
-                                || {
-                                    error(
-                                        "unsupported bs_get_integer2 integer outside the 64-bit \
-                                         range: needs a bignum",
-                                    )
-                                },
-                            )?;
-                            write(process, destination, Term::Integer(value))?;
-                        }
+                    let value =
+                        binary_field_size(read_ref(process, size)?, *unit).and_then(|bits| {
+                            let read = state.read_bits(bits)?;
+                            bounded_segment_integer(&read, bits as usize, *little, *signed)
+                        });
+                    match value {
+                        Some(value) => write(process, destination, value)?,
                         None => cursor.position = label_position(*fail_label)?,
                     }
                 }
@@ -5496,6 +5489,24 @@ fn equal_read_end(commands: &[BinaryMatchCommand], failed: usize, test_heap: boo
     failed_read.0 + failed_read.1
 }
 
+/// Return the value of an integer segment as `segment_integer` gives it,
+/// or `None` for a bignum of more than `BIG_ARITY_MAX` digits: ERTS
+/// `bytes_to_big` then gives `THE_NON_VALUE` (erl_bits.c:343-353), and the
+/// match fails (emu/bs_instrs.tab:942-944).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(bounded_segment_integer(&[0xFF], 8, false, true), Some(Term::Integer(-1)));
+/// ```
+fn bounded_segment_integer(bits: &[u8], size: usize, little: bool, signed: bool) -> Option<Term> {
+    let value = segment_integer(bits, size, little, signed);
+    match &value {
+        Term::BigInt(big) if !fits_big_arity(big) => None,
+        _ => Some(value),
+    }
+}
+
 /// Run the commands of a `bs_match` instruction in order on the match
 /// context in `context`, as the ERTS JIT does (`gen.bs_match`,
 /// jit/arm/generators.tab:532-604; `emit_i_bs_match_test_heap`,
@@ -5517,9 +5528,7 @@ fn equal_read_end(commands: &[BinaryMatchCommand], failed: usize, test_heap: boo
 /// # Errors
 ///
 /// A command that reads more bits than remain gives a runtime invariant
-/// error. An integer outside the 64-bit signed range needs a bignum and
-/// gives a runtime error (row "Integer range" of
-/// docs/erts-differences.md).
+/// error.
 ///
 /// # Examples
 ///
@@ -5568,13 +5577,18 @@ fn binary_match(
                 destination,
             } => {
                 let bits = state.read_bits(*size).ok_or_else(|| too_few_bits(size))?;
-                let value =
-                    segment_integer(&bits, *size as usize, *little, *signed).ok_or_else(|| {
-                        error(
-                            "unsupported bs_match integer outside the 64-bit range: needs a bignum",
-                        )
+                // The JIT writes the `THE_NON_VALUE` of a bignum above
+                // `BIG_ARITY_MAX` digits to the register with no check
+                // (`GET_INTEGER`, jit/arm/instr_bs.cpp:3110-3134), and the
+                // pinned ERTS then fails the `tag_val_def` assertion.
+                let value = bounded_segment_integer(&bits, *size as usize, *little, *signed)
+                    .ok_or_else(|| {
+                        error(format!(
+                            "bs_match integer segment of {size} bits is a bignum above \
+                             BIG_ARITY_MAX digits"
+                        ))
                     })?;
-                write(process, destination, Term::Integer(value))?;
+                write(process, destination, value)?;
             }
             BinaryMatchCommand::Binary { size, destination } => {
                 // ERTS reads a segment of any size at any bit position: a
@@ -6341,10 +6355,6 @@ fn utf_segment_code_point(value: &Term) -> Option<u32> {
 /// let parts = [BinaryPart::Utf8('a')];
 /// assert_eq!(write_binary_parts(&mut process, &parts)?, Ok((b"a".to_vec(), 8)));
 /// ```
-///
-/// # Errors
-///
-/// A bignum `integer` part of more than 64 bits is a runtime error.
 fn write_binary_parts(
     process: &mut ProcessState,
     parts: &[BinaryPart<'_>],
@@ -6386,23 +6396,14 @@ fn write_binary_parts(
                 ..
             } => writer.push_integer(*value, *bits, *little),
             // A segment keeps the low bits of the two's complement value
-            // (`erts_new_bs_put_integer`, `erl_bits.c`), so a segment of at
-            // most 64 bits takes the low 64 bits of a bignum.
+            // and repeats the sign bit above the value (`fmt_big_be` and
+            // `fmt_big_le`, erl_bits.c:989-1015 and 1119-1145).
             BinaryPart::Integer {
                 value: Term::BigInt(value),
                 bits,
                 little,
                 ..
-            } if *bits <= 64 => writer.push_integer(low_64_bits(value), *bits, *little),
-            BinaryPart::Integer {
-                value: Term::BigInt(_),
-                bits,
-                ..
-            } => {
-                return Err(error(format!(
-                    "unsupported bs_create_bin integer segment of {bits} bits of a bignum"
-                )));
-            }
+            } => writer.push_bigint(value, *bits, *little),
             BinaryPart::Integer { .. } => return Ok(Err(integer_type_failure(parts, index))),
             BinaryPart::Utf8(code_point) => {
                 writer.push_bytes(code_point.encode_utf8(&mut [0; 4]).as_bytes());

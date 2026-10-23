@@ -45,3 +45,47 @@ fn the_pinned_erts_gives_the_same_result() {
     assert!(output.status.success(), "{output:?}");
     assert_eq!(String::from_utf8_lossy(&output.stdout), REFERENCE);
 }
+
+const PORT_TASKS: &[u8] = include_bytes!("../../fixtures/poll/port_tasks.beam");
+
+/// The result of `port_tasks:main/0` on the pinned ERTS with `erl +S 2`.
+const PORT_TASKS_REFERENCE: &str = "{ok,true,{ok,<<104,105>>}}\n";
+
+/// A process of one scheduler starts an accept on a listen socket, and
+/// then a receive on the accepted socket, that the other scheduler serves
+/// while that scheduler waits on its own fds. Each new fd wakes the waiting
+/// scheduler, as `erts_poll_control` wakes the poller
+/// (`erl_poll.c:1447-1448`); without the wake the request times out.
+#[test]
+fn wakes_the_idle_scheduler_of_a_new_fd() {
+    let modules = ["erlang", "erts_internal", "lists", "prim_inet"].map(pinned_beam);
+    let mut all: Vec<&[u8]> = modules.iter().map(Vec::as_slice).collect();
+    all.push(PORT_TASKS);
+    let program = BeamProgram::load(&all).expect("the fixture loads");
+    let atom = |name| Term::Atom(program.atom(name).expect("the fixture names the atom"));
+    let results = program
+        .execute_on_schedulers(&[("port_tasks", "owner"), ("port_tasks", "holder")])
+        .expect("the two schedulers run");
+    let received = Term::tuple(vec![atom("ok"), Term::binary(b"hi".to_vec())]);
+    assert_eq!(results[0].term, atom("ok"), "the owner");
+    assert_eq!(
+        results[1].term,
+        Term::tuple(vec![atom("ok"), atom("true"), received]),
+        "the holder"
+    );
+}
+
+/// The pinned ERTS gives the same result with two schedulers.
+#[test]
+fn the_pinned_erts_gives_the_same_port_task_result() {
+    let output = std::process::Command::new("erl")
+        .args(["+S", "2", "-noshell", "-pa", "fixtures/poll", "-eval"])
+        .arg("io:format(\"~w~n\", [port_tasks:main()]), halt().")
+        .output()
+        .expect("the pinned ERTS runs");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        PORT_TASKS_REFERENCE
+    );
+}
