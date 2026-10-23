@@ -28,10 +28,9 @@
 //! contain no term, so the drop of a deep term does not walk them, and a
 //! recursive drop needs no work stack.
 //!
-//! A sub-binary keeps the offset (`docs/portable-beam-spec.md:97`). PBeam
-//! does not implement `binary:referenced_byte_size/1`, which reports the
-//! size of the whole array of a sub-binary, so no code reads the size of
-//! the array.
+//! A sub-binary keeps the offset (`docs/portable-beam-spec.md:97`).
+//! `binary:referenced_byte_size/1` reads the size of the whole array of a
+//! view of more than 64 bytes ([`Binary::referenced_bytes`]).
 //!
 //! [`Binary`] is one `Arc` to a [`BinaryView`], so a binary term is one
 //! pointer and holds no descriptor of its own. A copy of a term then copies
@@ -237,6 +236,32 @@ impl Binary {
     /// ```
     pub(super) fn view_bytes(&self) -> usize {
         std::mem::size_of::<BinaryView>()
+    }
+
+    /// Return the result of `binary:referenced_byte_size/1` for this binary
+    /// (`binary_referenced_byte_size_1`, `erl_bif_binary.c:2508-2534`). ERTS
+    /// gives the size of the bytes of a heap binary, which holds at most 64
+    /// bytes (`ERL_ONHEAP_BINARY_LIMIT`, `erl_bits.h:166-167`), and the size
+    /// of the whole refc binary that a larger view refers to. PBeam keeps no
+    /// heap binary, so a view of at most 64 bytes gives its own size, and a
+    /// larger view gives the size of its source array, or of its chunks.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let bytes = Binary::from(vec![0; 200]);
+    /// assert_eq!(bytes.bits(8, 80).referenced_bytes(), 9);
+    /// assert_eq!(bytes.bits(8, 1600).referenced_bytes(), 200);
+    /// ```
+    pub(crate) fn referenced_bytes(&self) -> usize {
+        let size = self.0.size.div_ceil(BITS_PER_BYTE);
+        if size <= 64 {
+            return size;
+        }
+        match &self.0.chunks {
+            Some(chunks) => chunks.iter().map(|chunk| chunk.len()).sum(),
+            None => self.0.bytes.len(),
+        }
     }
 
     /// Return the number of bits of this binary. The size comes from the

@@ -573,3 +573,17 @@ fn gives_whole_bytes_only_for_a_binary() {
     assert_eq!(Term::Binary(source).binary_bytes(), Some(&[0x3F, 0x80][..]));
     assert_eq!(Term::Integer(1).binary_bytes(), None);
 }
+
+#[test]
+fn gives_the_referenced_size_of_the_erts_binary_kind() {
+    // A view of at most 64 bytes is an ERTS heap binary and gives its own
+    // size, and a larger view gives the size of the array that it refers to
+    // (`binary_referenced_byte_size_1`, `erl_bif_binary.c:2508-2534`).
+    let source = Binary::from(vec![0; 200]);
+    assert_eq!(source.bits(8, 80).referenced_bytes(), 9);
+    assert_eq!(source.bits(3, 3 + 8 * 64).referenced_bytes(), 64);
+    assert_eq!(source.bits(8, 8 + 8 * 65).referenced_bytes(), 200);
+    // A view that an append built refers to its chunks.
+    let chunks = Binary::from_chunks(vec![Arc::new(vec![1; 40]), Arc::new(vec![2; 40])]);
+    assert_eq!(chunks.referenced_bytes(), 80);
+}
