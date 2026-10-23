@@ -217,7 +217,12 @@ fn options(args: &[Vec<u8>]) -> Option<(usize, i32)> {
 /// Read a number as glibc `atoi` does: `(int) strtol(text, NULL, 10)`,
 /// with leading white space, a sign, the digits, and a clamp to `long`.
 fn atoi(text: &[u8]) -> i32 {
-    let text = text.trim_ascii_start();
+    // The C `isspace` set, with the `\v` that `trim_ascii_start` does not skip.
+    let start = text
+        .iter()
+        .position(|byte| !b" \t\n\x0b\x0c\r".contains(byte))
+        .unwrap_or(text.len());
+    let text = &text[start..];
     let (negative, digits) = match text.split_first() {
         Some((b'-', rest)) => (true, rest),
         Some((b'+', rest)) => (false, rest),

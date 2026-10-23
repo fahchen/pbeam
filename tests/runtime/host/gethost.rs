@@ -312,6 +312,8 @@ fn reads_the_arguments_as_main() {
         1
     );
     assert_eq!(atoi(b"+12"), 12);
+    assert_eq!(atoi(b"\x0b\x0c\r 4"), 4);
+    assert_eq!(atoi(b" \t\n"), 0);
     assert_eq!(atoi(b"4294967297"), 1);
     assert_eq!(atoi(b"99999999999999999999"), -1);
     assert_eq!(atoi(b"-99999999999999999999"), 0);
