@@ -66,7 +66,7 @@ fn reads_consistent_snapshots_during_puts_of_the_other_scheduler() {
 fn runs_other_processes_while_a_put_waits() {
     let program = program();
     let ok = Term::Atom(program.atom("ok").expect("the fixture names ok"));
-    for root in ["turns", "trapped_get"] {
+    for root in ["turns", "trapped_get", "trapped_info"] {
         let result = program
             .execute("persistent_terms", root, &[])
             .expect("the run ends");
@@ -104,7 +104,7 @@ fn the_pinned_erts_gives_the_same_results() {
     for schedulers in ["1", "2"] {
         assert_eq!(
             erts(schedulers, expression),
-            "[{ok,ok},{ok,ok},{ok,ok}] {ok,ok}\n",
+            "[{ok,ok},{ok,ok},{ok,ok}] {ok,ok,ok}\n",
             "erl +S {schedulers}"
         );
     }

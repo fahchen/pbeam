@@ -1,7 +1,7 @@
 //! Bodies of the `persistent_term` BIFs that do not fit on one table line.
 //!
 //! Each BIF entry first checks the `persistent_term` capability of the
-//! caller: `read` for `get/0,1,2` and `write` for `put/2`. ERTS checks no
+//! caller: `read` for `get/0,1,2` and `info/0`, and `write` for `put/2`, `put_new/2`, and `erase/1`. ERTS checks no
 //! argument of these BIFs, so the check comes before the table access, and
 //! a denied call raises `error:capability_denied` and has no effect. The
 //! trap exports of [`resume`] continue a call that passed its check, so
@@ -48,9 +48,15 @@ pub(super) fn resume(
     Some(match (function, arguments) {
         ("get_all_wait", []) => get_all_start(scheduler),
         ("get_all_trap", [all, Term::Integer(entries)]) => {
-            get_all_trap(scheduler, all.clone(), *entries as usize)
+            chunk_trap(scheduler, "get_all_trap", all.clone(), *entries as usize)
         }
-        ("put_wait", [key, value]) => put_start(scheduler, key, value),
+        ("info_wait", []) => info_start(scheduler),
+        ("info_trap", [info, Term::Integer(entries)]) => {
+            chunk_trap(scheduler, "info_trap", info.clone(), *entries as usize)
+        }
+        ("put_wait", [key, value, Term::Atom(new)]) => {
+            put_start(scheduler, key, value, new.is_static("true"))
+        }
         ("put_common_trap", [key, value, Term::Integer(copied)]) => {
             put_trap(scheduler, key, value, *copied as usize)
         }
@@ -134,7 +140,57 @@ fn get_all_start(scheduler: &mut Scheduler) -> BifResult {
     // place, so no reference may stay (`erl_bif_persistent.c:1181-1185`).
     drop(table);
     let entries = pairs.len();
-    get_all_trap(scheduler, Term::list_from(pairs), entries)
+    chunk_trap(scheduler, "get_all_trap", Term::list_from(pairs), entries)
+}
+
+/// Run `persistent_term:info/0`: return `#{count => Count, memory => Bytes}`
+/// of the table, as ERTS `persistent_term_info_0` does
+/// (`erl_bif_persistent.c:569-602`, `929-979`). The call holds the update
+/// permission until its last chunk, so the result is the table at the
+/// call. See [`chunk_trap`] for the chunks and `PersistentTerms::info` for
+/// the bytes.
+///
+/// The caller needs a `persistent_term` capability that permits `read`,
+/// else the call raises `error:capability_denied` and uses no reduction.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let info = info(&mut context)?;
+/// assert!(matches!(info, BifResult::Value(Term::Map(_))));
+/// ```
+///
+/// # Errors
+///
+/// A new `capability_denied` atom in a full atom table gives the error of
+/// `AtomTable::put`.
+pub(super) fn info(context: &mut BifContext<'_>) -> Result<BifResult, BeamError> {
+    let scheduler = &mut *context.scheduler;
+    let check = denial(
+        scheduler,
+        CapabilityKind::PersistentTerm,
+        Operation::Read,
+        None,
+    );
+    if let Some(denied) = check? {
+        return Ok(denied);
+    }
+    Ok(info_start(scheduler))
+}
+
+/// Seize the update permission and measure the table for `info/0`.
+fn info_start(scheduler: &mut Scheduler) -> BifResult {
+    if let Some(wait) = seize(scheduler, "info_wait", Vec::new()) {
+        return wait;
+    }
+    let (count, memory) = scheduler.node().persistent_terms().terms.info();
+    let pairs = vec![
+        (Term::static_atom("count"), Term::Integer(count as i64)),
+        (Term::static_atom("memory"), Term::Integer(memory as i64)),
+    ];
+    // ponytail: each key is a static atom, so `from_pairs` cannot fail.
+    let map = Map::from_pairs(pairs, &scheduler.atoms).expect("static atom keys fit each map form");
+    chunk_trap(scheduler, "info_trap", Term::Map(map), count)
 }
 
 /// Run `persistent_term:get/1` with no `default` and `persistent_term:get/2`
@@ -187,15 +243,18 @@ pub(super) fn get(
 }
 
 /// Use the reductions of the `entries` pairs that remain of the result
-/// `all` of `persistent_term:get/0`, and return `all`, as `do_get_all`
-/// does (`erl_bif_persistent.c:830-900`). A call takes at most one pair for
+/// `all` of `persistent_term:get/0` or `persistent_term:info/0`, and
+/// return `all`, as `do_get_all` and `do_info` do
+/// (`erl_bif_persistent.c:830-900`, `929-959`). A call takes at most one pair for
 /// each reduction of the budget. ERTS reads the budget as an unsigned
 /// number, so a negative budget takes all pairs. When the pairs end, the
 /// call bumps one reduction for each pair that remained at the call and
 /// releases the update permission (`erl_bif_persistent.c:347-351`,
 /// `816-826`). Else it uses all reductions and traps to the export
 /// `persistent_term:get_all_trap/2` (`erl_bif_persistent.c:263-265`,
-/// `352-355`, `819-821`), which continues with no cost in the next turn.
+/// `352-355`, `819-821`), or to `persistent_term:info_trap/2`
+/// (`erl_bif_persistent.c:593-601`, `912-924`), with the name `function`.
+/// The trap continues with no cost in the next turn.
 /// ERTS keeps the table and the result so far in the trap state. PBeam
 /// keeps the full result and the number of pairs that remain.
 ///
@@ -203,16 +262,21 @@ pub(super) fn get(
 ///
 /// ```rust,ignore
 /// scheduler.current_process_mut().fcalls = 10;
-/// assert!(matches!(get_all_trap(&mut scheduler, Term::nil(), 4), BifResult::Value(_)));
+/// assert!(matches!(chunk_trap(&mut scheduler, "get_all_trap", Term::nil(), 4), BifResult::Value(_)));
 /// ```
-fn get_all_trap(scheduler: &mut Scheduler, all: Term, entries: usize) -> BifResult {
+fn chunk_trap(
+    scheduler: &mut Scheduler,
+    function: &'static str,
+    all: Term,
+    entries: usize,
+) -> BifResult {
     let process = scheduler.current_process_mut();
     let max_iter = usize::try_from(process.fcalls).unwrap_or(usize::MAX);
     if entries > max_iter {
         process.bump_all_reductions();
         return BifResult::TrapBif {
             module: "persistent_term",
-            function: "get_all_trap",
+            function,
             arguments: vec![all, Term::Integer((entries - max_iter) as i64)],
         };
     }
@@ -379,11 +443,15 @@ fn thread_progress(value: Term) -> BifResult {
     Value(value)
 }
 
-/// Run `persistent_term:put/2`: store `value` for `key`, as ERTS
-/// `put_common` does (`erl_bif_persistent.c:642-784`). The call first
+/// Run `persistent_term:put/2`, or `persistent_term:put_new/2` when `new`
+/// is true: store `value` for `key`, as ERTS `put_common` does
+/// (`erl_bif_persistent.c:314-322`, `642-784`). The call first
 /// seizes the update permission. A key that has exactly this value already
 /// releases it and returns `ok` with no cost (`erl_bif_persistent.c:726-729`).
-/// Else the copy of a doubled table goes through its slots ([`put_trap`]).
+/// A `put_new/2` of a key that has another value releases it and raises
+/// `badarg` (`erl_bif_persistent.c:730-734`); another value is a value that
+/// is not exactly equal, so `1.0` is another value than `1`. Else the copy
+/// of a doubled table goes through its slots ([`put_trap`]).
 ///
 /// The caller needs a `persistent_term` capability that permits `write`,
 /// else the call raises `error:capability_denied` and stores nothing, also
@@ -392,7 +460,7 @@ fn thread_progress(value: Term) -> BifResult {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = put(&mut context, &Term::static_atom("key"), &Term::Integer(1))?;
+/// let result = put(&mut context, &Term::static_atom("key"), &Term::Integer(1), false)?;
 /// assert!(matches!(result, BifResult::TrapBif { function: "thread_progress", .. }));
 /// ```
 ///
@@ -404,6 +472,7 @@ pub(super) fn put(
     context: &mut BifContext<'_>,
     key: &Term,
     value: &Term,
+    new: bool,
 ) -> Result<BifResult, BeamError> {
     let scheduler = &mut *context.scheduler;
     let check = denial(
@@ -415,23 +484,31 @@ pub(super) fn put(
     if let Some(denied) = check? {
         return Ok(denied);
     }
-    Ok(put_start(scheduler, key, value))
+    Ok(put_start(scheduler, key, value, new))
 }
 
 /// Seize the update permission and start `put/2` of `key` and `value`.
-fn put_start(scheduler: &mut Scheduler, key: &Term, value: &Term) -> BifResult {
-    if let Some(wait) = seize(scheduler, "put_wait", vec![key.clone(), value.clone()]) {
+fn put_start(scheduler: &mut Scheduler, key: &Term, value: &Term, new: bool) -> BifResult {
+    let new_atom = Term::static_atom(if new { "true" } else { "false" });
+    let wait = vec![key.clone(), value.clone(), new_atom];
+    if let Some(wait) = seize(scheduler, "put_wait", wait) {
         return wait;
     }
-    let cost = scheduler
-        .node()
-        .persistent_terms()
-        .terms
-        .put_cost(key, value);
+    let (cost, stored) = {
+        let store = scheduler.node().persistent_terms();
+        (
+            store.terms.put_cost(key, value),
+            store.terms.get(key).is_some(),
+        )
+    };
     match cost {
         None => {
             release(scheduler);
             Value(Term::static_atom("ok"))
+        }
+        Some(_) if new && stored => {
+            release(scheduler);
+            BifResult::badarg()
         }
         Some(copied) => {
             if copied > 0 {
