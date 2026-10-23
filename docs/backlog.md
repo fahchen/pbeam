@@ -27,7 +27,7 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### Add bitstring terms
 
-- PBeam loads a `BIT_BINARY_EXT` literal as a bitstring term (#1005), but no instruction or BIF makes a bitstring whose size is not a multiple of 8 bits at run time. The "Bitstring terms" row records this.
+- PBeam loads a `BIT_BINARY_EXT` literal as a bitstring term (#1005), but the binary-match and construction instructions do not make a bitstring whose size is not a multiple of 8 bits. The "Bitstring terms" row records this.
 - The work: the bitstring forms of the binary instructions and BIFs, such as the `binary` and `get_tail` commands of `bs_match`, `bs_get_binary2`, and `bs_get_tail` of a size that is not a multiple of 8 bits.
 - **Trigger:** a measured path makes or loads a bitstring that is not a binary.
 - **Source:** #359 and #360.
