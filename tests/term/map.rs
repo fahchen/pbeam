@@ -3,7 +3,9 @@ use std::{hint::black_box, rc::Rc, sync::Arc, time::Instant};
 use super::{
     Child, Direction, Drain, HAMT_MAX_LEVEL, Hamt, Insert, Map, Node, Repr, encode_path, map_hash,
 };
-use crate::term::{AtomTable, Reference, Term, internal_hash, test_atom as atom, test_atom_table};
+use crate::term::{
+    AtomTable, PortId, Reference, Term, internal_hash, test_atom as atom, test_atom_table,
+};
 
 fn integers(keys: impl IntoIterator<Item = i64>) -> Map {
     Map::from_pairs(
@@ -166,6 +168,8 @@ fn hashes_tuple_keys_with_the_internal_hash() {
 #[test]
 fn rejects_list_and_tuple_keys_with_unsupported_elements() {
     assert_eq!(map_hash(&Term::nil()), Some(internal_hash(&Term::nil())));
+    // A port key alone is not supported.
+    assert_eq!(map_hash(&Term::Port(PortId(0))), None);
     // A map that holds a binary: #{1 => <<>>}.
     let binary_map = || {
         Term::Map(
