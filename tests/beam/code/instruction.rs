@@ -2428,7 +2428,8 @@ fn decodes_the_fun_instructions_of_the_fun_probe_fixture() {
     };
     let atoms = vec![Atom::from_static("safe").unwrap()];
     let module = AtomTable::new().put("fun_probe").unwrap();
-    let lambda = |index, label, arity| Lambda::new(module.clone(), index, 31_263_486, label, arity);
+    let lambda =
+        |index, label, arity| Lambda::new(module.clone(), index, index, 31_263_486, label, arity);
     // The first five `FunT` entries of the fixture, with their free
     // variable counts.
     let lambdas = vec![
@@ -2478,9 +2479,9 @@ fn decodes_the_fun_instructions_of_the_fun_probe_fixture() {
             Instruction::CallFun { arity: 1, function: Operand::X(1), tail: false, .. },
             Instruction::CallFun { arity: 0, function: Operand::Y(0), tail: false, .. },
             Instruction::End,
-        ] if *first == lambdas[4].0
+        ] if **first == lambdas[4].0
             && matches!(free.as_slice(), [Operand::X(0)])
-            && *second == lambdas[1].0
+            && **second == lambdas[1].0
             && empty.is_empty()
     ));
     let error = |instructions: &[u8]| parse(instructions).unwrap_err().to_string();

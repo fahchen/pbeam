@@ -539,18 +539,10 @@ fn rejects_tables_that_pbeam_cannot_model() {
         ("info_binary", "info/2 item binary"),
         ("info_stats", "info/2 item stats"),
         ("info_data", "info/2 item data"),
-        (
-            "info_all_reference",
-            "info/1 of a reference that is not a live table",
-        ),
         ("select_unsupported", "match specification function round/1"),
         (
             "select_delete_unsupported",
             "match specification function round/1",
-        ),
-        (
-            "info_reference",
-            "info/2 of a reference that is not a live table",
         ),
         ("ordered_select", "select/2,3 on an ordered_set table"),
         (

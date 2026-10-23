@@ -440,9 +440,10 @@ pub(super) const ITERATIONS_PER_RED: i64 = 8;
 /// (`erl_db.c:769-798`) returns no table.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum Lacking {
-    /// No live table, or no permission: the BIF raises `badarg`
-    /// (`erl_db.c:788-795`).
-    Denied,
+    /// No live table, or no permission: the BIF raises `badarg` with the
+    /// `error_info` cause `id`, `type`, or `access` (`erl_db.c:280-306`,
+    /// `788-795`, `834-836`, `906-908`).
+    Denied(&'static str),
     /// The list insert of another process or a clear held the table busy.
     /// The caller helped with the work, which used `reductions`, and the
     /// BIF traps to run again (`erl_db.c:773-787`).
@@ -643,13 +644,14 @@ impl EtsTables {
         reds: i64,
         operation: Operation,
     ) -> Result<RwLockReadGuard<'_, Table>, Lacking> {
-        let (_, lock) = self.lookup(atoms, id).ok_or(Lacking::Denied)?;
+        let (_, lock) =
+            (self.lookup(atoms, id)).ok_or_else(|| Lacking::Denied(Self::missing(id)))?;
         let table = read(lock);
         if !table.lacks(caller) {
             return table
                 .allows(caller, operation)
                 .then_some(table)
-                .ok_or(Lacking::Denied);
+                .ok_or(Lacking::Denied("access"));
         }
         drop(table);
         // `handle_lacking_permission` takes the write lock for the help
@@ -722,7 +724,8 @@ impl EtsTables {
         caller: ProcessId,
         reds: i64,
     ) -> Result<RwLockWriteGuard<'_, Table>, Lacking> {
-        let (_, lock) = self.lookup(atoms, id).ok_or(Lacking::Denied)?;
+        let (_, lock) =
+            (self.lookup(atoms, id)).ok_or_else(|| Lacking::Denied(Self::missing(id)))?;
         let mut table = write(lock);
         if let Some(reductions) = self.help(atoms, &mut table, caller, reds) {
             return Err(Lacking::Busy { reductions });
@@ -730,7 +733,19 @@ impl EtsTables {
         table
             .allows(caller, Operation::Write)
             .then_some(table)
-            .ok_or(Lacking::Denied)
+            .ok_or(Lacking::Denied("access"))
+    }
+
+    /// Return the `error_info` cause for the term `id` that identifies no live table:
+    /// the cause `id` for an atom and for the reference of a deleted table,
+    /// and the cause `type` for each other term (`tid2tab`,
+    /// `erl_db.c:280-306`; `db_get_table_aux`, `erl_db.c:817-836`).
+    pub(super) fn missing(id: &Term) -> &'static str {
+        match id {
+            Term::Atom(_) => "id",
+            Term::Reference(reference) if reference.is_table_reference() => "id",
+            _ => "type",
+        }
     }
 
     /// Return the table reference of the live table that `id` identifies,

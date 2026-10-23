@@ -559,7 +559,7 @@ pub(crate) enum Instruction {
     /// Erlang: `make_pair(T) -> fun(X) -> {T, X} end.` compiles to
     /// `{make_fun3,{f,112},0,0,{x,0},{list,[{x,0}]}}`.
     MakeFun {
-        lambda: Lambda,
+        lambda: Box<Lambda>,
         free: Vec<Operand>,
         destination: Operand,
     },
@@ -2645,7 +2645,7 @@ pub(super) fn parse_code(
                     .map(|_| read_move_operand(data, &mut cursor, atoms, literals))
                     .collect::<Result<_, _>>()?;
                 Instruction::MakeFun {
-                    lambda: lambda.clone(),
+                    lambda: Box::new(lambda.clone()),
                     free,
                     destination,
                 }

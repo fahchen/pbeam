@@ -306,11 +306,11 @@ fn tests_a_fun_with_a_register_arity_as_erl_is_function() {
     // (`jit/arm/instr_common.cpp:1266-1283`), so a `badarg` arity fails
     // the test and raises nothing.
     let run = |arity| {
-        let lambda = Lambda::new(Atom::from_static("erlang").unwrap(), 0, 0, 2, 1);
+        let lambda = Lambda::new(Atom::from_static("erlang").unwrap(), 0, 0, 0, 2, 1);
         make_program(
             vec![
                 Instruction::MakeFun {
-                    lambda,
+                    lambda: Box::new(lambda),
                     free: Vec::new(),
                     destination: Operand::X(0),
                 },
@@ -5807,7 +5807,9 @@ fn rejects_a_copied_list_insert_into_a_protected_bag_of_another_owner() {
             ],
         )
         .unwrap();
-    assert!(matches!(result, BifResult::Raise { .. }));
+    assert!(
+        matches!(result, BifResult::ErrorWithCause { cause, .. } if cause == Term::static_atom("access"))
+    );
 }
 
 #[test]
@@ -6028,7 +6030,9 @@ fn rejects_a_select_delete_of_a_private_table_of_another_process() {
             vec![Term::Reference(Reference(0)), spec],
         )
         .unwrap();
-    assert!(matches!(result, BifResult::Raise { .. }));
+    assert!(
+        matches!(result, BifResult::ErrorWithCause { cause, .. } if cause == Term::static_atom("access"))
+    );
 }
 
 #[test]

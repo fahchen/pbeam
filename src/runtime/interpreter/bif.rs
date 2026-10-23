@@ -1001,6 +1001,9 @@ impl BeamProgram {
                 bag: bag.is_list().then(|| bag.clone()),
                 check: ets::Check::from_term(check),
                 new: new.first().map_or(ets::New::No, ets::New::from_term),
+                refused: ["id", "type", "access"]
+                    .into_iter()
+                    .find(|cause| matches!(bag, Term::Atom(atom) if atom.is_static(cause))),
             };
             return ets::insert_list(&mut context, *id, objects, *keypos as i32, state);
         }

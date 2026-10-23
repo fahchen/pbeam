@@ -34,8 +34,8 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### Load local fun literals and run the fun information BIFs
 
-- PBeam loads a `NEW_FUN_EXT` (tag 112) literal as an unsupported literal, so an instruction that reads it returns `unsupported BEAM literal index N`. The pinned compiler makes a local fun with `make_fun3`, not as a literal (measured), so no current path loads one. `erlang:fun_info/2` runs (row "Fun information"). `erlang:fun_info_mfa/1` and `erlang:fun_to_list/1` are `unsupported` BIF table entries (row "Unimplemented BIFs"). `io_lib` calls `erlang:fun_to_list/1` to write a fun (io_lib.erl:699, 826).
-- **Trigger:** a measured path loads a local fun literal, calls one of the two BIFs, or formats a fun.
+- PBeam loads a `NEW_FUN_EXT` (tag 112) literal as an unsupported literal, so an instruction that reads it returns `unsupported BEAM literal index N`. The pinned compiler makes a local fun with `make_fun3`, not as a literal (measured), so no current path loads one. `erlang:fun_info/2` runs (row "Fun information"). `erlang:fun_to_list/1` runs (#1017). `erlang:fun_info_mfa/1` is an `unsupported` BIF table entry (row "Unimplemented BIFs").
+- **Trigger:** a measured path loads a local fun literal or calls `erlang:fun_info_mfa/1`.
 - **Source:** PR #120 (#109).
 
 ### Cache the decoded modules of a run
@@ -167,7 +167,7 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
   - Timers: `erlang:read_timer/2`. The other timer BIFs run, `erlang:read_timer/1` among them (`src/runtime/interpreter/bif/table.rs:284`).
   - Persistent terms: `persistent_term:put_new/2` and `persistent_term:info/0`. `persistent_term:erase/1` runs (`table.rs:545`).
   - Signals: `erlang:exit/3`.
-  - Funs: `erlang:fun_info_mfa/1` and `erlang:fun_to_list/1` (entry "Load local fun literals and run the fun information BIFs").
+  - Funs: `erlang:fun_info_mfa/1` (entry "Load local fun literals and run the fun information BIFs").
   - Maps: `maps:get/2` and `maps:is_key/2` through a fun call. The compiler changes a direct call to the `map_get` and `is_map_key` BIFs, which PBeam runs.
 - **Trigger:** a measured path calls one of them. Add each group in its own task.
 - **Source:** audit of the BIF table at the M2 close.
@@ -310,7 +310,7 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### Give the `error_info` cause of BIF errors
 
-- PBeam gives the `error_info` map `#{module => Format}` with no `cause` for each BIF error except `erlang:spawn_opt/4`. ERTS adds `cause => Cause` when the BIF raises with `EXF_HAS_EXT_INFO` (`beam_common.c:993-1002`), for example `none` or `notalive` for `register/2` (`bif.c:2310-2316`), `badopt` for `monitor/3` (`bif.c:988-995`), and the causes of the `ets` BIFs (`erl_db.c:794-931`). `erl_erts_errors:format_error/2` and `erl_stdlib_errors:format_error/2` read the cause to write the error text.
+- PBeam gives the `error_info` map `#{module => Format}` with no `cause` for each BIF error except `erlang:spawn_opt/4` and the `ets` BIFs (#968). ERTS adds `cause => Cause` when the BIF raises with `EXF_HAS_EXT_INFO` (`beam_common.c:993-1002`), for example `none` or `notalive` for `register/2` (`bif.c:2310-2316`), `badopt` for `monitor/3` (`bif.c:988-995`), and the causes of the `ets` BIFs (`erl_db.c:794-931`). `erl_erts_errors:format_error/2` and `erl_stdlib_errors:format_error/2` read the cause to write the error text.
 - **Evidence:** `catch register(1, self())` gives `[{error_info, #{cause => none, module => erl_erts_errors}}]` on the pinned ERTS and `[{error_info, #{module => erl_erts_errors}}]` on PBeam (`registers_a_name_or_raises_badarg_as_pinned_erts` in `tests/runtime/interpreter.rs`).
 - **Trigger:** a consumer reads the cause of a BIF error, for example the error text of a shell or a logger report, or OTP code that matches the cause.
 - **Source:** [#715](https://github.com/fahchen/pbeam/issues/715).

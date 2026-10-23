@@ -26,7 +26,7 @@ fn map(pairs: Vec<(Term, Term)>) -> Term {
 fn fun(module: &str, index: i32, old_unique: i32, free: Vec<Term>) -> Term {
     let module = Atom::from_static(module).unwrap();
     Term::Fun(Fun::new(
-        Lambda::new(module, index, old_unique, 53, 1),
+        Lambda::new(module, index, index, old_unique, 53, 1),
         free,
     ))
 }
@@ -117,7 +117,7 @@ fn orders_each_nested_atom_by_the_owning_table_name() {
     // entry, so two funs of one lambda compare their free atoms by name.
     let fun = |free: Term| {
         Term::Fun(Fun::new(
-            Lambda::new(Atom::from_static("lists").unwrap(), 0, 0, 53, 1),
+            Lambda::new(Atom::from_static("lists").unwrap(), 0, 0, 0, 53, 1),
             vec![free],
         ))
     };

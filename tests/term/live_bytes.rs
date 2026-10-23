@@ -8,7 +8,7 @@ use crate::term::{Atom, Binary, Fun, Lambda, Map, MatchState, Term, list::Cons};
 /// Return a local fun with the free variables `free`.
 fn fun(free: Vec<Term>) -> Fun {
     Fun::new(
-        Lambda::new(Atom::from_static("ok").unwrap(), 0, 1, 53, 1),
+        Lambda::new(Atom::from_static("ok").unwrap(), 0, 0, 1, 53, 1),
         free,
     )
 }
