@@ -13,8 +13,11 @@ You implement one task issue as one pull request.
 At most 90 minutes, 120 tool calls, and about 60k output tokens. Truncate tool output. Start from the spike diff and numbers when you get them; do not explore again what the spike found.
 
 - Batch commands: one Bash call can build, test, and print a short result.
-- At about 90 tool calls, stop new work. Commit, push, and write the state into the PR body under "Next steps" (what is done, what is left, the exact next command). A new agent then continues from the PR with no new research.
+- Open the PR by about 60 tool calls. At about 90 tool calls, stop new work. Commit, push, and write the state into the PR body under "Next steps" (what is done, what is left, the exact next command). A new agent then continues from the PR with no new research.
 - Never `Read` `docs/erts-differences.md` or `docs/backlog.md` whole: their rows are very long. Find the row with `rg -n '^\| <Row name> '` and edit it by sentence.
+- Read the OTP source with `mise run otp-src <file> <start> <end>` on narrow ranges, never whole files. When a probe answers faster than the code, run `mise run erts-eval` first.
+- Run a focused test once after each change, not repeatedly.
+- Watch CI once: run `gh pr checks <n> --watch` one time, then report the state you saw. Do not wait in a loop.
 
 ## Rules that reviews enforced
 
@@ -33,10 +36,13 @@ Most second review rounds came from these classes. Check each one before you ask
 1. Each OTP citation: open the cited lines with `mise run otp-src` and confirm they say what the text says.
 2. Each claim in the PR body (a case count, "covers X", "the same as ERTS", "no regression") matches a test or a measured number. Do not write a gain or a "faster" without a `docs/performance/` record; write "no regression against main at <sha>" instead.
 3. No field, function, or table without a reader in this PR.
-4. Each new branch has a probe or a test that fails on revert. Do not join lines or move code to satisfy the coverage counter; remove a branch that cannot run.
-5. A probe whose ERTS output depends on the host libcrypto or kernel still asserts the exact PBeam output on the Linux CI host, which is the only CI host.
-6. A dispatch change covers every call path: `call_ext`, `apply`, `apply_last`, and a fun call. Make the module atom invisible to the compiler (`binary_to_atom(id(<<"m">>))`) and check with `mise run disasm`.
-7. Fixed-width ERTS values (`int`, `Uint16`, `Sint32`) wrap or truncate as in C.
+4. Each new line is covered on the Linux CI host. A branch that Erlang code cannot reach gets a `--lib` unit test. A path that only a race reaches gets a deterministic unit test. Remove a branch that cannot run. Do not join lines or move code to satisfy the coverage counter.
+5. Revert check: revert the change locally once and see each new test fail.
+6. A probe whose ERTS output depends on the host libcrypto or kernel asserts the exact PBeam output on every host, and compares with ERTS only on macOS. Linux is the only CI host.
+7. A new BIF or NIF also adds its row and its unsupported-list entry to `docs/effect-inventory.md`, and adds an entry with an `effect_probe` call to the `AMBIENT` list in `tests/integration/effect_capability.rs`.
+8. Each `docs/erts-differences.md` row that you touch has no stale sentence: search the row for the old behavior. Record each known gap in that file or in a new task issue.
+9. A dispatch change covers every call path: `call_ext`, `apply`, `apply_last`, and a fun call. Make the module atom invisible to the compiler (`binary_to_atom(id(<<"m">>))`) and check with `mise run disasm`.
+10. Fixed-width ERTS values (`int`, `Uint16`, `Sint32`) wrap or truncate as in C.
 
 ## Steps
 
@@ -47,7 +53,7 @@ Most second review rounds came from these classes. Check each one before you ask
 5. Run fmt, `clippy -D warnings`, and the focused tests before each commit. Run `mise run check-brief` only when CI cannot give the evidence.
 6. Push. Open the PR with `.github/pull_request_template.md`. Keep the body under 50 lines: Closes, epic, tracker, decisions with ERTS citations, commands, result table, known gaps. Every claim in the body must match a test or the record.
 7. Run the Codex review once with the command the main session gives. If Codex reports its usage limit, skip it; the main session runs a Fable review, which the owner accepted as a review gate on 2026-10-22 ("fable 和 codex 都可以作为 reviewer"). Fix real findings in new commits and push. Set the board Status to In Review.
-8. When the PR is ready, or when GitHub reports a conflict, do not merge `origin/main` yourself. Report the PR and its touched files; the main session orders the merges and tells you when to merge main once.
+8. Merge `origin/main` into the branch yourself only when GitHub reports `CONFLICTING`: merge once, resolve doc rows by sentence and keep both sides, run the focused checks, and push. Do not merge it when the PR is `MERGEABLE`. Report the PR and its touched files (`gh pr diff <n> --name-only`); the main session orders the merges.
 
 ## Return
 
