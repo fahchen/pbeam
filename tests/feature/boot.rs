@@ -1,6 +1,7 @@
 use std::{
     env, fs,
     os::unix::ffi::OsStrExt,
+    path::Path,
     process::{Command, Stdio},
 };
 
@@ -228,15 +229,21 @@ fn isolated_init_stop() {
     );
 }
 
-/// Return the boot flags `[{root, [Root]}]` of `pbeam_boot:start/3`, as the
-/// `pbeam` binary gives them for `--root` (row "Boot" of
+/// Return the boot flags `[{root, [Root]}, {bindir, [Bindir]}]` of
+/// `pbeam_boot:start/3`, as the `pbeam` binary gives them for `--root`: it
+/// gives `{bindir, [Root/erts-17.1/bin]}` (row "Boot" of
 /// `docs/erts-differences.md`).
 fn root_flags(program: &BeamProgram) -> Term {
-    let root = Term::binary(otp_root().as_os_str().as_bytes().to_vec());
-    Term::list_from(vec![Term::tuple(vec![
-        Term::Atom(program.atom("root").unwrap()),
-        Term::list_from(vec![root]),
-    ])])
+    let flag = |name: &str, dir: &Path| {
+        Term::tuple(vec![
+            Term::Atom(program.atom(name).unwrap()),
+            Term::list_from(vec![Term::binary(dir.as_os_str().as_bytes().to_vec())]),
+        ])
+    };
+    Term::list_from(vec![
+        flag("root", otp_root()),
+        flag("bindir", &otp_root().join("erts-17.1/bin")),
+    ])
 }
 
 /// Load the pinned boot modules, `probe`, and the boot module.
