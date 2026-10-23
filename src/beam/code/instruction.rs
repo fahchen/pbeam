@@ -1690,9 +1690,8 @@ pub(crate) enum TestKind {
     /// `bitstr_probe:kind/1` fails to label 5 unless `x0` is a bitstring.
     /// Erlang: `kind(Term) when is_bitstring(Term) -> Term;` compiles to
     /// `{test,is_bitstr,{f,5},[{x,0}]}`, as the consolidated
-    /// `String.Chars.impl_for/1` of Elixir does. PBeam has no bitstring
-    /// whose size is not a multiple of 8, so the test passes only for a
-    /// binary.
+    /// `String.Chars.impl_for/1` of Elixir does. The test passes for each
+    /// bitstring, also one whose size is not a multiple of 8.
     Bitstring,
     Map,
     /// `is_function`, opcode 77. Example: `[0x4D, 0x0D, 0x65, 0x57, 0x03,

@@ -69,20 +69,15 @@ fn gives_the_binary_part_like_erts() {
 }
 
 #[test]
-fn stops_at_a_bitstring_literal() {
-    // ERTS raises `badarg` for a bitstring whose size is not a multiple of 8.
-    // PBeam has no bitstring that is not a binary: the loader keeps a
-    // `BIT_BINARY_EXT` literal as an unsupported literal, so the run stops
-    // when `move` reads it (row "Bitstring terms" of
-    // `docs/erts-differences.md`).
+fn raises_badarg_for_a_bitstring_literal() {
+    // ERTS raises `badarg` for a bitstring whose size is not a multiple of 8
+    // (`erts_binary_part` in `erl_bif_binary.c:1995-1997`).
     let program = BeamProgram::load(&[BINARY_PART_PROBE]).unwrap();
-    let error = program
-        .execute("binary_part_probe", "bits", &[])
-        .unwrap_err()
-        .to_string();
-    assert!(
-        error.starts_with("unsupported BEAM literal index "),
-        "{error}"
+    let result = program.execute("binary_part_probe", "bits", &[]).unwrap();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    assert_eq!(
+        result.term,
+        Term::tuple(vec![atom("error"), atom("badarg")])
     );
 
     assert_eq!(
