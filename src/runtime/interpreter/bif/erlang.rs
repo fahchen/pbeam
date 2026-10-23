@@ -2040,6 +2040,19 @@ pub(super) fn byte_size(term: &Term) -> BifResult {
     }
 }
 
+/// Run `erlang:size/1`: return the arity of a tuple, or the number of
+/// whole bytes of a bitstring, as ERTS `size_1` (`erl_bif_guard.c:315-335`)
+/// does. ERTS rounds the size of a bitstring down (`BYTE_SIZE`), so
+/// `<<1:3>>` gives 0, unlike `byte_size/1`. Each other term raises `badarg`.
+/// In a guard, the `gc_bif` instruction goes to its fail label instead.
+pub(super) fn size(term: &Term) -> BifResult {
+    match term {
+        Term::Tuple(elements) => Value(Term::Integer(elements.len() as i64)),
+        Term::Binary(bytes) => Value(Term::Integer((bytes.bit_size() / 8) as i64)),
+        _ => BifResult::badarg(),
+    }
+}
+
 /// Run `erlang:tl/1`: return the tail of the first cons cell of a nonempty
 /// list, as ERTS `tl_1` (`bif.c:2931-2938`) does. The tail of a proper list
 /// is a proper list, and the tail of `[1|x]` is `x`. `[]` and a term that is

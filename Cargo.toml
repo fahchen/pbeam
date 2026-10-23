@@ -284,6 +284,10 @@ name = "bit_size"
 path = "tests/integration/bit_size.rs"
 
 [[test]]
+name = "size"
+path = "tests/integration/size.rs"
+
+[[test]]
 name = "byte_size"
 path = "tests/integration/byte_size.rs"
 

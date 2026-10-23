@@ -1,6 +1,6 @@
 -module(persistent_terms).
 -export([snapshot_writer/0, snapshot_reader/0, writer/0, reader/0, eraser/0, erase_reader/0, turns/0,
-         trapped_get/0, pair_reference/0, one_reference/0]).
+         trapped_get/0, trapped_info/0, pair_reference/0, one_reference/0]).
 
 -define(KEYS, 5000).
 
@@ -12,7 +12,7 @@ pair_reference() ->
 
 %% Run the probes of one scheduler on the pinned ERTS.
 one_reference() ->
-    {turns(), trapped_get()}.
+    {turns(), trapped_get(), trapped_info()}.
 
 pair(First, Second) ->
     Self = self(),
@@ -204,4 +204,23 @@ result() ->
         put_done -> put_done;
         erase_done -> erase_done
     after 60000 -> timeout
+    end.
+
+%% A put_new and an info wait while the info/0 of another process traps.
+%% The trapped info does not see the new key.
+trapped_info() ->
+    [persistent_term:put({info, I}, I) || I <- lists:seq(1, ?KEYS)],
+    #{count := Count} = persistent_term:info(),
+    Self = self(),
+    _ = spawn(fun() -> #{count := C} = persistent_term:info(), Self ! {first, C} end),
+    _ = spawn(fun() -> ok = persistent_term:put_new(info_new, 1), Self ! put_done end),
+    _ = spawn(fun() -> #{count := C} = persistent_term:info(), Self ! {second, C} end),
+    First = receive {first, F} -> F after 60000 -> timeout end,
+    Put = receive put_done -> put_done after 60000 -> timeout end,
+    Second = receive {second, S} -> S after 60000 -> timeout end,
+    [persistent_term:erase({info, I}) || I <- lists:seq(1, ?KEYS)],
+    _ = persistent_term:erase(info_new),
+    case {First, Put, Second - Count} of
+        {Count, put_done, Late} when Late =:= 0; Late =:= 1 -> ok;
+        Other -> Other
     end.
