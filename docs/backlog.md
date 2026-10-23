@@ -287,13 +287,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a consumer reads the cause of a BIF error, for example the error text of a shell or a logger report, or OTP code that matches the cause.
 - **Source:** [#715](https://github.com/fahchen/pbeam/issues/715).
 
-### Give the exact caller frames of an `undef` exception
-
-- The error handler path of [#447](https://github.com/fahchen/pbeam/issues/447) adds the frame of the caller of `error_handler:crash/1` to the frames of `erlang:error/1` in about one of four calls. The reductions of the error handler code match ERTS in a run with a live code server; a run of the library API has no code server and charges the extra reductions of the `init:ensure_loaded/1` round trip.
-- **Trigger:** a consumer needs the exact frames of an `undef` exception.
-- **Source:** owner decision of 2026-10-11 (Suikou review 01a1282e, AFK log second batch); [#446](https://github.com/fahchen/pbeam/issues/446), [#447](https://github.com/fahchen/pbeam/issues/447), PR [#473](https://github.com/fahchen/pbeam/pull/473).
-- **Task:** none. [#926](https://github.com/fahchen/pbeam/issues/926) added the line locations.
-
 ### Halt the PBeam boot with the `init` crash text
 
 - After #6 (PR #195), the `pbeam` binary writes `pbeam: root process exited with <Reason>` for a root exit. Under `erl -noshell -eval`, ERTS writes `Error! Failed to eval: ...` and then `Runtime terminating during boot (<Reason>)` through `init:crash/2` and `erlang:halt/1` (init.erl:665-679, 1552-1567). Doing the same needs `erlang:halt/1` with a string, which writes the slogan and a crash dump (`erlang:halt/2` with an integer status runs since #301), `erts_internal:term_to_string/2` (it can use the `print_term` of #6), and an `init` process that watches the boot process.
