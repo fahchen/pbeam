@@ -37,7 +37,7 @@ use std::{
 use super::{Control, Inet, MAX_OPT_BUFFER, OK, SocketType, State, errno_name, error_reply};
 use crate::{
     error::BeamError,
-    runtime::timer::TimerKey,
+    runtime::timer::PortTimer,
     term::{ProcessId, Reference, Term, external},
 };
 
@@ -69,7 +69,7 @@ pub(in crate::runtime) struct Receiver {
     pub(in crate::runtime) caller: ProcessId,
     /// The timer of the receive, or `None` without one. The timer service
     /// owns it; the end of the receive cancels it.
-    pub(in crate::runtime) timer: Option<TimerKey>,
+    pub(in crate::runtime) timer: Option<PortTimer>,
 }
 
 /// The caller of a send and the monitor reference of its header, which

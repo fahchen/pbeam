@@ -1,5 +1,5 @@
 -module(ets_probe).
--export([delete_object/0, new/0, owner_exit/0, insert/0, lookup/0, lookup_loop/0, insert_loop/0,
+-export([heir_transfer/0, give_away/0, delete_object/0, new/0, owner_exit/0, insert/0, lookup/0, lookup_loop/0, insert_loop/0,
          access/0, main/0, env/0, bag/0, info/0, match/0, match_deep/0,
          match_write_concurrency/0, delete_table/0, delete_trap/0,
          delete_order/0, deleter/2,
@@ -623,8 +623,6 @@ unsupported(Case) ->
             T = ets:new(ets_probe, []),
             true = ets:insert(T, {a, 1}),
             ets:internal_select_delete(T, [{{'$1', '$2'}, [], [{round, 1.0}]}]);
-        heir -> ets:new(ets_probe, [{heir, element(1, start([]))}]);
-        heir_data -> ets:new(ets_probe, [{heir, element(1, start([])), data}]);
         keypos -> ets:insert(ets:new(ets_probe, [{keypos, id(1 bsl 32)}]), {a});
         keypos_new -> ets:insert_new(ets:new(ets_probe, [{keypos, id(1 bsl 32)}]), {a});
         index ->
@@ -1865,6 +1863,114 @@ delete_object_fixed_copies() ->
     Fixed = {ets:lookup(T, k), ets:first(T), ets:next(T, k)},
     true = ets:safe_fixtable(T, false),
     {Fixed, ets:lookup(T, k), ets:info(T, size)}.
+
+%% The exit of an owner gives each table to its live heir, which keeps the
+%% heir and gets {'ETS-TRANSFER', Table, Owner, Data} before the 'DOWN'
+%% message of the owner (erl_db.c:5077-5081, 4865-4933; erl_process.c
+%% 14360-14368). {heir, Pid} sends no message (erl_db.c:2670-2673). A heir
+%% that is dead at ets:new/2 or at the exit, and the owner as heir, give
+%% no transfer. The exit of the heir then deletes the table, because the
+%% heir is the owner (erl_db.c:5077-5078).
+heir_transfer() ->
+    Self = self(),
+    Heir = spawn(fun() -> heir_watch(Self) end),
+    Late = spawn(fun() -> receive stop -> ok end end),
+    Dead = dead(),
+    Owner = spawn(fun() ->
+                          T1 = ets:new(ets_probe, [{heir, Heir, {data, 1}}]),
+                          T2 = ets:new(ets_probe_heir2, [named_table, {heir, Heir}]),
+                          T3 = ets:new(ets_probe, [{heir, Dead, x}]),
+                          T4 = ets:new(ets_probe, [{heir, self(), x}]),
+                          T5 = ets:new(ets_probe, [{heir, Late, x}]),
+                          T6 = ets:new(ets_probe_heir6, [named_table, {heir, Heir, named}]),
+                          Self ! {tables, [T1, T2, T3, T4, T5, T6]},
+                          receive stop -> ok end
+                  end),
+    Tables = receive {tables, Ts} -> Ts end,
+    Before = [ets:info(T, heir) =:= Heir || T <- Tables],
+    LateRef = monitor(process, Late),
+    Late ! stop,
+    receive {'DOWN', LateRef, _, _, _} -> ok end,
+    Heir ! {watch, Owner},
+    receive watching -> ok end,
+    Owner ! stop,
+    Seen = receive {seen, S} -> S end,
+    [T1, _, _, _, _, T6] = Tables,
+    Messages = [case M of
+                    {'ETS-TRANSFER', T, From, Data} ->
+                        {transfer, T =:= T1 orelse T, From =:= Owner, Data};
+                    {'DOWN', _, process, From, Reason} -> {down, From =:= Owner, Reason}
+                end || M <- Seen],
+    After = [{ets:info(T, owner) =:= Heir, ets:info(T, heir) =:= Heir} || T <- Tables],
+    HeirRef = monitor(process, Heir),
+    Heir ! stop,
+    receive {'DOWN', HeirRef, _, _, _} -> ok end,
+    Gone = [ets:info(T, owner) || T <- [T1, T6]],
+    {Before, Messages, After, Gone}.
+
+heir_watch(Parent) ->
+    receive {watch, Owner} -> ok end,
+    Ref = monitor(process, Owner),
+    Parent ! watching,
+    Parent ! {seen, heir_collect(Ref, [])},
+    receive stop -> ok end.
+
+heir_collect(Ref, Seen) ->
+    receive
+        {'DOWN', Ref, _, _, _} = Down -> lists:reverse([Down | Seen]);
+        Message -> heir_collect(Ref, [Message | Seen])
+    end.
+
+%% ets:give_away/3 (erl_db.c:3087-3144): the result, the message, the owner
+%% and the heir after the call, and each badarg with its cause in the ERTS
+%% order.
+give_away() ->
+    Self = self(),
+    Receiver = spawn(fun() -> give_receiver(Self) end),
+    Dead = dead(),
+    T = ets:new(ets_probe, [{heir, Dead, x}]),
+    N = ets:new(ets_probe_gift, [named_table, public, {heir, self(), h}]),
+    true = ets:insert(N, {k, 1}),
+    {Other, OtherTable} = start([public]),
+    {_, Protected} = start([]),
+    Errors = [give_cause(F) || F <- [fun() -> ets:give_away(T, self(), x) end,
+                                     fun() -> ets:give_away(T, Dead, x) end,
+                                     fun() -> ets:give_away(T, not_a_pid, x) end,
+                                     fun() -> ets:give_away(OtherTable, self(), x) end,
+                                     fun() -> ets:give_away(OtherTable, Dead, x) end,
+                                     fun() -> ets:give_away(Protected, self(), x) end,
+                                     fun() -> ets:give_away(no_table, Dead, x) end]],
+    R1 = ets:give_away(T, Receiver, {gift, 1}),
+    R2 = ets:give_away(N, Receiver, gift),
+    Got = receive {got, G} -> G end,
+    Seen = [{Table =:= T orelse Table, From =:= Self, Data}
+            || {'ETS-TRANSFER', Table, From, Data} <- Got],
+    State = [{ets:info(X, owner) =:= Receiver, ets:info(X, heir) =:= Self} || X <- [T, N]],
+    Lost = give_cause(fun() -> ets:give_away(N, Receiver, again) end),
+    Receiver ! {back, N},
+    Back = receive {back, Result, Message} -> {Result, Message} end,
+    Mine = ets:info(N, owner) =:= Self,
+    _ = stop({Other, x}),
+    {Errors, R1, R2, Seen, State, Lost, Back, Mine, ets:lookup(N, k)}.
+
+give_receiver(Parent) ->
+    M1 = receive {'ETS-TRANSFER', _, _, _} = A -> A end,
+    M2 = receive {'ETS-TRANSFER', _, _, _} = B -> B end,
+    Parent ! {got, [M1, M2]},
+    receive {back, N} -> ok end,
+    Result = ets:give_away(N, Parent, back),
+    Message = receive {'ETS-TRANSFER', Table, From, Data} -> {Table, From =:= self(), Data}
+              after 0 -> none end,
+    Parent ! {back, Result, Message},
+    receive stop -> ok end.
+
+%% Return the reason and the error_info cause of the first stack frame.
+give_cause(Fun) ->
+    try Fun()
+    catch error:Reason:Stack ->
+            [{_, _, _, Info} | _] = Stack,
+            {Reason, maps:get(cause, proplists:get_value(error_info, Info), none)}
+    end.
 
 %% ets:update_counter/3,4 (erl_db.c:1494-1730).
 update_counter() ->

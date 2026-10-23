@@ -4,7 +4,8 @@
 //!
 //! ERTS runs a port operation at once when no other thread holds the port
 //! (`try_imm_drv_call`, `io.c:923-1002`), else it schedules a port task.
-//! PBeam has one thread, so each operation runs at once. The IO poll reads
+//! PBeam runs each operation at once under the lock of its port, on the
+//! scheduler of the caller. The IO poll reads
 //! the pipes of the ports only when no process can run (see
 //! [`Scheduler::wait_input`]).
 
@@ -85,10 +86,17 @@ impl Scheduler {
         };
         self.node.ports().insert_at(id, port);
         super::poll::NodePoll::start(&self.node);
-        self.process_mut(owner)
-            .expect("the owner of a port exists")
-            .links
-            .insert(LinkId::Port(id), 0);
+        // An owner of another scheduler, which an accept of this scheduler
+        // can give, gets the link signal, as `driver_create_port` sends it
+        // (io.c:837-844).
+        match self.process_mut(owner) {
+            Some(process) => {
+                process.links.insert(LinkId::Port(id), 0);
+            }
+            None => {
+                let _ = self.send_signal(None, owner, Signal::PortLink { port: id });
+            }
+        }
         Ok(id)
     }
 
@@ -444,12 +452,6 @@ impl Scheduler {
             return false;
         }
         port.owner = pid;
-        drop(slot);
-        // The scheduler that serves the port keeps a new owner of its own:
-        // the owner stays with it (see `ProcessState::pinned`).
-        if let Some(process) = self.processes.get_mut(&pid) {
-            process.pinned = true;
-        }
         true
     }
 
@@ -568,7 +570,7 @@ impl Scheduler {
     /// `target`, on this scheduler or on another (`erts_port_output`
     /// queues the message of the port to the process, `io.c`). A target
     /// that does not exist drops the message.
-    fn port_send(&mut self, target: ProcessId, term: Term) {
+    pub(super) fn port_send(&mut self, target: ProcessId, term: Term) {
         match self.remote_owner(target) {
             Some(index) if !self.processes.contains_key(&target) => {
                 self.node.send_message(index, None, term, target, None);

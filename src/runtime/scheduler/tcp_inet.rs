@@ -27,7 +27,7 @@ use crate::{
             inet::{Acceptor, Inet, OK, errno_name, try_reply},
         },
         signal::Signal,
-        timer::{Timer, Timers},
+        timer::{PortTimer, Timer},
     },
     term::{Atom, PortId, ProcessId, Term},
 };
@@ -72,7 +72,7 @@ impl Scheduler {
             drop(ports);
             return try_reply(accepted, |(id, accepted)| {
                 let port = self.open_accepted(caller, accepted)?;
-                self.deliver(caller, self.async_message(listen, id, ok_port(port)));
+                self.port_send(caller, self.async_message(listen, id, ok_port(port)));
                 Ok(async_reply(id))
             });
         }
@@ -86,15 +86,11 @@ impl Scheduler {
         // The caller runs this request, so it exists.
         let _ = self.send_signal(None, caller, signal);
         let timer = (timeout != INFINITY).then(|| {
-            let end = Timers::timeout_position(self.timers.now(), timeout.into())
-                .expect("a timeout of 32 bits has an end");
-            self.timers.start(
-                end,
-                Timer::Accept {
-                    port: listen,
-                    caller,
-                },
-            )
+            self.start_port_timer(timeout, |key| Timer::Accept {
+                port: listen,
+                caller,
+                key,
+            })
         });
         let acceptor = Acceptor {
             id,
@@ -154,7 +150,7 @@ impl Scheduler {
         let reason = failure.map(|name| self.atoms.put(&name)).transpose()?;
         let error = reason.map(|reason| error_status(Term::Atom(reason)));
         let status = port.map(ok_port).or(error).expect("an accept or an error");
-        self.deliver(
+        self.port_send(
             acceptor.caller,
             self.async_message(listen, acceptor.id, status),
         );
@@ -171,13 +167,20 @@ impl Scheduler {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// scheduler.tcp_accept_timeout(listen, caller);
+    /// scheduler.tcp_accept_timeout(listen, caller, timer);
     /// ```
-    pub(super) fn tcp_accept_timeout(&mut self, listen: PortId, caller: ProcessId) {
-        if let Some(acceptor) = self.remove_acceptor(listen, caller) {
+    pub(super) fn tcp_accept_timeout(
+        &mut self,
+        listen: PortId,
+        caller: ProcessId,
+        timer: PortTimer,
+    ) {
+        // A timer that a port task of another scheduler canceled first
+        // finds no accept that holds it (`erl_hl_timer.c:708-720`).
+        if let Some(acceptor) = self.remove_acceptor(listen, caller, Some(timer)) {
             self.demonitor_acceptor(listen, acceptor);
             let status = error_status(Term::static_atom("timeout"));
-            self.deliver(caller, self.async_message(listen, acceptor.id, status));
+            self.port_send(caller, self.async_message(listen, acceptor.id, status));
         }
     }
 
@@ -193,10 +196,10 @@ impl Scheduler {
     /// scheduler.tcp_monitor_down(listen, pid);
     /// ```
     pub(in crate::runtime) fn tcp_monitor_down(&mut self, listen: PortId, pid: ProcessId) {
-        if let Some(acceptor) = self.remove_acceptor(listen, pid)
+        if let Some(acceptor) = self.remove_acceptor(listen, pid, None)
             && let Some(timer) = acceptor.timer
         {
-            self.timers.cancel(timer);
+            self.cancel_port_timer(timer);
         }
     }
 
@@ -216,18 +219,18 @@ impl Scheduler {
     pub(super) fn tcp_stop(&mut self, listen: PortId, tcp: Inet, notify: bool) {
         if let Some(receiver) = tcp.stream.receiver {
             if let Some(timer) = receiver.timer {
-                self.timers.cancel(timer);
+                self.cancel_port_timer(timer);
             }
             let status = error_status(Term::static_atom("closed"));
             let message = self.async_message(listen, receiver.id, status);
             if notify {
-                self.deliver(receiver.caller, message);
+                self.port_send(receiver.caller, message);
             }
         }
         for acceptor in tcp.acceptors {
             self.end_accept(listen, acceptor);
             let status = error_status(Term::static_atom("closed"));
-            self.deliver(
+            self.port_send(
                 acceptor.caller,
                 self.async_message(listen, acceptor.id, status),
             );
@@ -236,15 +239,20 @@ impl Scheduler {
 
     /// Remove the first accept of `caller` from the queue of the listen
     /// port `listen` (`remove_multi_op`, inet_drv.c:2379-2411), or return
-    /// `None` when the port closed or the caller is not in the queue.
-    fn remove_acceptor(&mut self, listen: PortId, caller: ProcessId) -> Option<Acceptor> {
+    /// `None` when the port closed or the caller is not in the queue. With
+    /// `timer`, the accept must hold that timer.
+    fn remove_acceptor(
+        &mut self,
+        listen: PortId,
+        caller: ProcessId,
+        timer: Option<PortTimer>,
+    ) -> Option<Acceptor> {
         let cell = self.node.port(listen)?;
         let mut ports = port::lock(&cell);
         let tcp = ports.as_mut().and_then(Port::inet_mut)?;
-        let position = tcp
-            .acceptors
-            .iter()
-            .position(|item| item.caller == caller)?;
+        let position = tcp.acceptors.iter().position(|item| {
+            item.caller == caller && timer.is_none_or(|t| item.timer == Some(t))
+        })?;
         tcp.acceptors.remove(position)
     }
 
@@ -252,7 +260,7 @@ impl Scheduler {
     /// `listen`.
     fn end_accept(&mut self, listen: PortId, acceptor: Acceptor) {
         if let Some(timer) = acceptor.timer {
-            self.timers.cancel(timer);
+            self.cancel_port_timer(timer);
         }
         self.demonitor_acceptor(listen, acceptor);
     }

@@ -262,26 +262,6 @@ fn uses_a_port_of_another_scheduler() {
     assert_eq!(results[1].term, atom("ok"), "the giver");
 }
 
-/// A transfer of a tcp_inet port to a process of another scheduler fails
-/// with a clear error.
-#[test]
-fn rejects_an_inet_port_transfer_across_schedulers() {
-    let erlang = pinned_beam("erlang");
-    let program = BeamProgram::load(&[&erlang, PING_PONG]).expect("the fixture loads");
-    let error = program
-        .execute_on_schedulers(&[
-            ("ping_pong", "port_transfer"),
-            ("ping_pong", "port_transfer_hold"),
-        ])
-        .expect_err("the port transfer is unsupported");
-    assert!(
-        error
-            .to_string()
-            .contains("unsupported: an inet port of another scheduler"),
-        "{error}"
-    );
-}
-
 /// A read of an idle local child takes the direct path.
 #[test]
 fn reads_the_queue_length_of_an_idle_child() {
@@ -615,23 +595,21 @@ fn cancels_a_bif_timer_at_an_exit() {
     assert_eq!(results[1].term, Term::Atom(ok_atom), "the holder");
 }
 
-/// A link to a tcp_inet port of another scheduler fails with a clear error.
+/// A link to a tcp_inet port of another scheduler gives `true`, as on
+/// `erl +S 2`: a port task runs on any scheduler (`erl_port_task.c`).
 #[test]
-fn rejects_a_link_to_an_inet_port_of_another_scheduler() {
+fn links_to_an_inet_port_of_another_scheduler() {
     let erlang = pinned_beam("erlang");
     let program = BeamProgram::load(&[&erlang, PING_PONG]).expect("the fixture loads");
-    let error = program
+    let atom = |name| Term::Atom(program.atom(name).expect("the fixture names the atom"));
+    let results = program
         .execute_on_schedulers(&[
             ("ping_pong", "port_link_use"),
             ("ping_pong", "port_link_give"),
         ])
-        .expect_err("the port link is unsupported");
-    assert!(
-        error
-            .to_string()
-            .contains("unsupported: an inet port of another scheduler"),
-        "{error}"
-    );
+        .expect("the two schedulers run");
+    assert_eq!(results[0].term, atom("true"), "the user");
+    assert_eq!(results[1].term, atom("ok"), "the giver");
 }
 
 /// Two roots on two schedulers add to one counter array and one unsigned
