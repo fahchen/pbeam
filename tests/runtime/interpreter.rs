@@ -4416,12 +4416,12 @@ fn reads_the_current_stacktrace_of_the_calling_process() {
         );
     }
     // ERTS 29.1.1: process_info(self(), {dictionary, k}) is
-    // {{dictionary, k}, undefined}, process_info(self(), [registered_name])
-    // is [{registered_name, []}], and process_info(self(), status) is
+    // {{dictionary, k}, undefined}, process_info(self(), [messages]) is
+    // [{messages, []}], and process_info(self(), status) is
     // {status, running}. PBeam does not implement them yet.
     for (process, item) in [
         (root(), dictionary()),
-        (root(), Term::list_from(vec![test_atom("registered_name")])),
+        (root(), Term::list_from(vec![test_atom("messages")])),
         (root(), test_atom("status")),
     ] {
         assert_eq!(

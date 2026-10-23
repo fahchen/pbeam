@@ -1,5 +1,5 @@
 -module(diagnostics_probe).
--export([main/0, display/0, display_bad/0, alias_priority/0, delete_old/0, prepared/2]).
+-export([main/0, info_list/0, display/0, display_bad/0, alias_priority/0, delete_old/0, prepared/2]).
 
 %% Return the class and the reason of a raised term.
 t(F) ->
@@ -159,3 +159,19 @@ display() ->
     true = erlang:display_string(stderr, <<"err">>),
     true = erlang:display_string(stdout, [16#1F600, $\n]),
     ok.
+
+%% Read a list of erlang:process_info/2 items of the caller, as the crash
+%% report of proc_lib does (proc_lib.erl:968-971): the items in the order of
+%% the list, a repeated item, {registered_name, []} without a name, and the
+%% name after register/2. The heap and stack sizes give their kinds.
+info_list() ->
+    process_flag(trap_exit, true),
+    put(probe_key, probe_value),
+    Keys = [registered_name, dictionary, message_queue_len,
+            trap_exit, status, trap_exit],
+    Unnamed = erlang:process_info(self(), Keys),
+    true = register(diagnostics_info_list, self()),
+    Named = erlang:process_info(self(), [registered_name]),
+    true = unregister(diagnostics_info_list),
+    Sizes = [{K, kind(V)} || {K, V} <- erlang:process_info(self(), [heap_size, stack_size, reductions])],
+    {Unnamed, Named, Sizes}.
