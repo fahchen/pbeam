@@ -3499,6 +3499,94 @@ impl Scheduler {
         self.node.name_get(name)
     }
 
+    /// Send the error report of the uncaught exception that ends the
+    /// process `id` with `reason`, as `terminate_proc` does
+    /// (`beam_common.c:696-718`). The message is `{log, error, Format,
+    /// [Pid, Reason], Metadata}` (`utils.c:770-858`, `1011`). The metadata
+    /// holds the group leader, the pid, the OS system time in microseconds
+    /// (`utils.c:792`), and `error_logger => #{emulator => true, tag =>
+    /// error}`. PBeam is never alive (no distribution), so the format has no
+    /// `on node ~p`. The system logger gets the message as
+    /// `sys_msg_dispatcher_func` gives it (`erl_trace.c:2780-2824`): a live
+    /// pid gets it; a pid that does not exist makes `logger` the system
+    /// logger again; `logger` sends it to the process registered as
+    /// `logger`; and `undefined` drops it. When no process is registered as
+    /// `logger`, ERTS writes the message to stderr
+    /// (`erl_trace.c:2564-2605`). ERTS queues the message to its dispatcher
+    /// thread, which runs after the exit of a sender that is itself the
+    /// logger process removed its name, so PBeam writes that message to
+    /// stderr too (measured on the pinned ERTS).
+    fn send_exit_report(&mut self, id: ProcessId, reason: &Term) -> Result<(), BeamError> {
+        let format = "Error in process ~p with exit value:~n~p~n";
+        // `gl` is not a static atom; ERTS makes it at its first use
+        // (`ERTS_MAKE_AM`, utils.c:846). A full atom table fails the run.
+        let gl = self.atoms.put("gl")?;
+        let process = self.current_process();
+        let metadata = crate::term::Map::from_pairs(
+            vec![
+                (
+                    Term::static_atom("error_logger"),
+                    Term::Map(
+                        crate::term::Map::from_pairs(
+                            vec![
+                                (Term::static_atom("emulator"), Term::static_atom("true")),
+                                (Term::static_atom("tag"), Term::static_atom("error")),
+                            ],
+                            &self.atoms,
+                        )
+                        .expect("atom keys fit each map form"),
+                    ),
+                ),
+                (Term::Atom(gl), Term::Pid(process.group_leader)),
+                (Term::static_atom("pid"), Term::Pid(id)),
+                (
+                    Term::static_atom("time"),
+                    Term::Integer(host::clock::system_time() / 1000),
+                ),
+            ],
+            &self.atoms,
+        )
+        .expect("atom keys fit each map form");
+        let message = Term::tuple(vec![
+            Term::static_atom("log"),
+            Term::static_atom("error"),
+            Term::list_from(format.bytes().map(|byte| Term::Integer(byte.into()))),
+            Term::list_from(vec![Term::Pid(id), reason.clone()]),
+            Term::Map(metadata),
+        ]);
+        // The dispatcher runs after the exit of the sender, so the sender is
+        // a process that does not exist. An exiting process does not take
+        // the message either (`erts_whereis_process`, register.c:356).
+        let live = |scheduler: &Self, target: ProcessId| {
+            target != id
+                && match scheduler.processes.get(&target) {
+                    Some(process) => process.exiting.is_none(),
+                    None => scheduler.node.live_owner(target).is_some(),
+                }
+        };
+        let target = match self.node.system_logger() {
+            Term::Pid(target) if live(self, target) => Some(target),
+            Term::Pid(_) => {
+                self.node.swap_system_logger(Term::static_atom("logger"));
+                self.whereis("logger")
+            }
+            logger if logger == Term::static_atom("logger") => self.whereis("logger"),
+            _ => return Ok(()),
+        };
+        match target {
+            Some(target) if live(self, target) => self.send_message(id, target, message),
+            _ => {
+                // `erts_printf` adds a carriage return to the standard error
+                // (`sys/unix/sys.c:342-343`). A failed write changes nothing.
+                let mut text = b"(no logger present) unexpected logger message: ".to_vec();
+                text.extend(print_term(&message, &self.atoms));
+                text.extend_from_slice(b"\r\n");
+                let _ = std::io::Write::write_all(&mut std::io::stderr(), &text);
+            }
+        }
+        Ok(())
+    }
+
     /// Run the exit of the current process, as `erts_do_exit_process` and
     /// `erts_continue_exit_process` do (`erl_process.c:14170-14833`). The
     /// exit counts its reductions from the reductions left in the turn, and
@@ -3572,6 +3660,13 @@ impl Scheduler {
         let mut next = match process.continue_exit.take() {
             Some(next) => next,
             None => {
+                // A root process stands for the `-eval` process of `erl`,
+                // whose exception `init:start_it/1` catches
+                // (init.erl:1552-1567), so it sends no report.
+                if std::mem::take(&mut process.log_exit) && process.root.is_none() {
+                    self.send_exit_report(id, &reason)?;
+                }
+                let process = self.current_process_mut();
                 process.bump_reductions(EXIT_REDUCTIONS);
                 self.set_exiting(id);
                 self.release_persistent_terms(id);
