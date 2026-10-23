@@ -1,0 +1,11 @@
+AsnProbe DEFINITIONS AUTOMATIC TAGS ::=
+BEGIN
+Record ::= SEQUENCE {
+  number INTEGER,
+  flag BOOLEAN,
+  bytes OCTET STRING,
+  bits BIT STRING,
+  name IA5String OPTIONAL,
+  items SEQUENCE OF INTEGER
+}
+END
