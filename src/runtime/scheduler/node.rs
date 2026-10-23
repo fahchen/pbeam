@@ -264,6 +264,12 @@ pub(in crate::runtime) struct Node {
     /// each for the node (`H_MIN_SIZE`, `BIN_VH_MIN_SIZE`,
     /// `erts_max_gen_gcs`, `H_MAX_SIZE`, `H_MAX_FLAGS`; `erl_init.c:808-811`).
     heap_flags: Mutex<HeapFlags>,
+    /// The system processes of the node. ERTS keeps the
+    /// `ERTS_STC_FLG_SYSTEM_PROC` flag in the process
+    /// and `erts_internal:is_system_process/1` looks up the process of any
+    /// scheduler (`erl_bif_info.c:4932-4938`), so a process
+    /// of any scheduler reads it.
+    system_processes: Mutex<std::collections::HashSet<ProcessId>>,
 }
 
 impl Node {
@@ -335,6 +341,7 @@ impl Node {
                 system_logger: Mutex::new(Term::static_atom("logger")),
                 backtrace_depth: AtomicUsize::new(8),
                 heap_flags: Mutex::new(HeapFlags::default()),
+                system_processes: Mutex::default(),
             }),
             readers,
         ))
@@ -420,6 +427,7 @@ impl Node {
             system_logger: Mutex::new(Term::static_atom("logger")),
             backtrace_depth: AtomicUsize::new(8),
             heap_flags: Mutex::new(HeapFlags::default()),
+            system_processes: Mutex::default(),
         });
         (node, reader)
     }
@@ -806,6 +814,22 @@ impl Node {
     /// Lock the port table of the node.
     pub(in crate::runtime) fn ports(&self) -> MutexGuard<'_, Ports> {
         self.ports.lock().expect("the port table is not poisoned")
+    }
+
+    /// Mark the process `id` as a system process of the node.
+    pub(in crate::runtime) fn mark_system(&self, id: ProcessId) {
+        self.system_processes
+            .lock()
+            .expect("system processes")
+            .insert(id);
+    }
+
+    /// Return true when the process `id` is a system process of the node.
+    pub(in crate::runtime) fn is_system(&self, id: ProcessId) -> bool {
+        self.system_processes
+            .lock()
+            .expect("system processes")
+            .contains(&id)
     }
 
     /// Lock the TTY resources of the node.

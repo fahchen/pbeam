@@ -576,10 +576,12 @@ impl Scheduler {
     /// ```
     pub(super) fn mark_system(&mut self, id: ProcessId) {
         self.system.insert(id);
+        self.node.mark_system(id);
     }
 
-    /// Return true when the process `id` is a system process of this
-    /// scheduler (see [`Self::system`]).
+    /// Return true when the process `id` is a system process of the node.
+    /// A system process stays on its scheduler, but a process of any
+    /// scheduler asks for it.
     ///
     /// # Examples
     ///
@@ -587,7 +589,7 @@ impl Scheduler {
     /// assert!(!scheduler.is_system(pid));
     /// ```
     pub(super) fn is_system(&self, id: ProcessId) -> bool {
-        self.system.contains(&id)
+        self.node.is_system(id)
     }
 
     /// Mark the root process as a system process, before it starts, as ERTS
@@ -600,6 +602,7 @@ impl Scheduler {
     /// ```
     pub(super) fn mark_root_system(&mut self) {
         self.system.insert(ROOT);
+        self.node.mark_system(ROOT);
     }
 
     /// Return the node of this scheduler.
