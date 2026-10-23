@@ -1032,6 +1032,9 @@ impl Scheduler {
         // batches.
         if let Some(bif) = process.pending_bif.take() {
             self.release.push(Release::Terms(bif.arguments));
+            if let Some(origin) = bif.origin {
+                self.release.push(Release::Terms(origin.arguments));
+            }
         }
         if let Some(arguments) = process.length_trap.take() {
             self.release.push(Release::Terms(arguments));

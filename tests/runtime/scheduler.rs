@@ -13,8 +13,8 @@ use crate::term::{AtomTable, test_atom};
 use crate::{
     runtime::ets::{Access, Table, TableType},
     runtime::process::{
-        Monitor, Origin, OriginMonitor, PendingBif, ProcessState, ReceiveTimer, StackSlot, Start,
-        TimerReference,
+        BifCall, Monitor, Origin, OriginMonitor, PendingBif, ProcessState, ReceiveTimer, StackSlot,
+        Start, TimerReference,
         tests::{frame, test_scheduler, test_scheduler_without_checks},
     },
     runtime::signal::Signal,
@@ -1154,6 +1154,12 @@ fn moves_the_containers_of_an_exiting_process_to_the_release_work_list() {
             function: "length",
             arguments: vec![marker(6)],
             tail: false,
+            origin: Some(BifCall {
+                module: "erlang".to_owned(),
+                name: "length".to_owned(),
+                arguments: vec![marker(6)],
+                skip: 0,
+            }),
         });
         process.length_trap = Some(vec![marker(7)]);
         process.monitors.insert(
@@ -1172,15 +1178,16 @@ fn moves_the_containers_of_an_exiting_process_to_the_release_work_list() {
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
     scheduler.finish_current(atom("normal"), None).unwrap();
     let items: Vec<&Release> = scheduler.release.iter().collect();
-    assert_eq!(items.len(), 8, "the exit moves eight containers");
+    assert_eq!(items.len(), 9, "the exit moves nine containers");
     assert!(matches!(items[0], Release::Terms(_)));
     assert!(matches!(items[1], Release::Terms(_)));
-    assert!(matches!(items[2], Release::Term(reason) if *reason == atom("normal")));
-    assert!(matches!(items[3], Release::Registers(_)));
-    assert!(matches!(items[4], Release::Frames(_)));
-    assert!(matches!(items[5], Release::Mailbox(_)));
-    assert!(matches!(items[6], Release::Dictionary(_)));
-    assert!(matches!(items[7], Release::Monitors(_)));
+    assert!(matches!(items[2], Release::Terms(_)));
+    assert!(matches!(items[3], Release::Term(reason) if *reason == atom("normal")));
+    assert!(matches!(items[4], Release::Registers(_)));
+    assert!(matches!(items[5], Release::Frames(_)));
+    assert!(matches!(items[6], Release::Mailbox(_)));
+    assert!(matches!(items[7], Release::Dictionary(_)));
+    assert!(matches!(items[8], Release::Monitors(_)));
     release_all(&mut scheduler);
     assert!(scheduler.release.is_empty());
 }
@@ -1217,6 +1224,7 @@ fn releases_the_terms_of_every_container_of_an_exiting_process() {
             function: "length",
             arguments: vec![pending.clone()],
             tail: false,
+            origin: None,
         });
         process.length_trap = Some(vec![length_trap.clone()]);
         process.monitors.insert(
@@ -1669,6 +1677,7 @@ fn counts_the_bytes_of_the_release_work_list() {
             function: "length",
             arguments: vec![marker(8)],
             tail: false,
+            origin: None,
         });
         process.length_trap = Some(vec![marker(9)]);
         process.monitors.insert(
