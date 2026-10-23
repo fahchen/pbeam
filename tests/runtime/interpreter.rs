@@ -1930,7 +1930,7 @@ fn runs_maps_keys_as_a_bif_and_reports_unsupported_arguments() {
     );
     assert_eq!(
         keys(atom("ok")).unwrap_err().to_string(),
-        "unsupported maps:keys/1 argument: not a map"
+        "root process exited with {{badmap,ok},[{maps,keys,[ok],[{error_info,#{module=>erl_stdlib_errors}}]},{fixture,main,0,[]}]}"
     );
 }
 

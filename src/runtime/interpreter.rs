@@ -1759,8 +1759,11 @@ impl BeamProgram {
                     })? {
                         Update::Written => {}
                         // `put_map_assoc` has no fail label and no exception
-                        // of its own. ERTS raises `{badmap, Map}`; see
-                        // "Exception raise sites" in docs/erts-differences.md.
+                        // of its own. The compiler puts an `is_map` test and
+                        // an `erlang:error({badmap, Map})` call before it, so
+                        // compiled code gives it only a map. ERTS asserts a
+                        // map and has no exception for another term
+                        // (`beam_common.c:1981-1985`).
                         Update::Missing(_) | Update::Reason(_) => {
                             return Err(error("unsupported BEAM put_map_assoc source: not a map"));
                         }
