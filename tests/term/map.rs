@@ -115,7 +115,7 @@ fn keeps_flatmap_keys_in_order_and_replaces_values() {
     );
     assert_eq!(map.len(), 4);
     // A key type that the flatmap does not support leaves the map unchanged.
-    let unsupported = Term::tuple(vec![Term::binary(vec![])]);
+    let unsupported = Term::tuple(vec![Term::Port(PortId(0))]);
     assert_eq!(
         map.insert(unsupported.clone(), atom(&mut table, "v"), &table),
         Err(unsupported)
@@ -170,28 +170,28 @@ fn rejects_list_and_tuple_keys_with_unsupported_elements() {
     assert_eq!(map_hash(&Term::nil()), Some(internal_hash(&Term::nil())));
     // A port key alone is not supported.
     assert_eq!(map_hash(&Term::Port(PortId(0))), None);
-    // A map that holds a binary: #{1 => <<>>}.
-    let binary_map = || {
+    // A map that holds a port.
+    let port_map = || {
         Term::Map(
             Map::from_pairs(
-                vec![(Term::Integer(1), Term::binary(vec![]))],
+                vec![(Term::Integer(1), Term::Port(PortId(0)))],
                 &test_atom_table(),
             )
             .unwrap(),
         )
     };
     let unsupported = [
-        Term::list_from(vec![Term::Integer(1), binary_map()]),
-        Term::list_from(vec![Term::list_from(vec![binary_map()])]),
-        // {<<>>} and {1, #{}}: a tuple with an element that is not supported.
-        Term::tuple(vec![Term::binary(vec![])]),
-        Term::tuple(vec![Term::Integer(1), binary_map()]),
-        // [1|#{}], [1|<<>>], and [[1|#{}]]: an improper list tail that is not supported.
-        Term::list_with_tail(vec![Term::Integer(1)], binary_map()),
-        Term::list_with_tail(vec![Term::Integer(1)], Term::binary(vec![])),
+        Term::list_from(vec![Term::Integer(1), port_map()]),
+        Term::list_from(vec![Term::list_from(vec![port_map()])]),
+        // A tuple with an element that is not supported.
+        Term::tuple(vec![Term::Port(PortId(0))]),
+        Term::tuple(vec![Term::Integer(1), port_map()]),
+        // An improper list tail that is not supported.
+        Term::list_with_tail(vec![Term::Integer(1)], port_map()),
+        Term::list_with_tail(vec![Term::Integer(1)], Term::Port(PortId(0))),
         Term::list_from(vec![Term::list_with_tail(
             vec![Term::Integer(1)],
-            binary_map(),
+            port_map(),
         )]),
     ];
     for key in unsupported {

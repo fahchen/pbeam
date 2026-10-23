@@ -189,18 +189,13 @@ fn raises_the_errors_of_bignum_sizes_as_pinned_erts() {
 }
 
 #[test]
-fn reports_a_wide_binary_segment_of_a_bignum() {
+fn writes_a_wide_binary_segment_of_a_bignum() {
     // ERTS writes the low 72 bits of the two's complement value
-    // (`erl_bits.c`). PBeam writes a bignum segment of at most 64 bits and
-    // returns a runtime error for a wider one (row "Integer range" of
-    // `docs/erts-differences.md`).
+    // (`fmt_big_be`, erl_bits.c:989-1015).
     let program = BeamProgram::load(&[BIGNUM_PROBE]).unwrap();
-    let error = program
+    let result = program
         .execute("bignum_probe", "wide_segment", &[])
-        .unwrap_err();
-    assert_eq!(
-        error.to_string(),
-        "unsupported bs_create_bin integer segment of 72 bits of a bignum"
-    );
+        .unwrap();
+    assert_eq!(result.term, Term::binary(vec![1, 0, 0, 0, 0, 0, 0, 0, 1]));
     assert_eq!(reference("wide_segment"), "<<1,0,0,0,0,0,0,0,1>>");
 }

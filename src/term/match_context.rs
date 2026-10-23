@@ -19,7 +19,9 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use super::Binary;
+use num_bigint::BigInt;
+
+use super::{Binary, Term};
 
 /// The panic message of a term operation, such as printing or hashing,
 /// that gets a match context. The interpreter gives a runtime error before
@@ -554,19 +556,19 @@ fn segment_bits(bytes: &[u8], start: usize, size: usize) -> Vec<u8> {
 /// bytes in order and then its last `size % 8` bits. A little-endian
 /// segment has its last `size % 8` bits as the most significant part, and
 /// then its bytes from the last byte to the first. A signed segment uses
-/// two's complement. Return `None` for a value outside the 64-bit signed
-/// range, which ERTS gives as a bignum.
+/// two's complement. A value outside the 64-bit signed range is a bignum,
+/// as `bytes_to_big` makes it (`erl_bits.c:280-356`).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(segment_integer(&[0x01, 0x20], 12, false, false), Some(0x012));
-/// assert_eq!(segment_integer(&[0x23, 0x10], 12, true, false), Some(0x123));
-/// assert_eq!(segment_integer(&[0xFF], 8, false, true), Some(-1));
-/// assert_eq!(segment_integer(&[0x80, 0, 0, 0, 0, 0, 0, 0], 64, false, false), None);
-/// assert_eq!(segment_integer(&[], 0, false, true), Some(0));
+/// assert_eq!(segment_integer(&[0x01, 0x20], 12, false, false), Term::Integer(0x012));
+/// assert_eq!(segment_integer(&[0x23, 0x10], 12, true, false), Term::Integer(0x123));
+/// assert_eq!(segment_integer(&[0xFF], 8, false, true), Term::Integer(-1));
+/// assert_eq!(segment_integer(&[0x80, 0, 0, 0, 0, 0, 0, 0], 64, false, false), Term::from_bigint(BigInt::from(1u64 << 63)));
+/// assert_eq!(segment_integer(&[], 0, false, true), Term::Integer(0));
 /// ```
-pub(crate) fn segment_integer(bits: &[u8], size: usize, little: bool, signed: bool) -> Option<i64> {
+pub(crate) fn segment_integer(bits: &[u8], size: usize, little: bool, signed: bool) -> Term {
     let (full, partial) = (size / 8, size % 8);
     // The parts of the segment, each a value and its width in bits, from
     // the most significant part.
@@ -578,18 +580,30 @@ pub(crate) fn segment_integer(bits: &[u8], size: usize, little: bool, signed: bo
         bytes.chain(last).collect()
     };
     let Some((&(first, width), rest)) = parts.split_first() else {
-        return Some(0);
+        return Term::Integer(0);
     };
     let negative = signed && first >> (width - 1) == 1;
     let mut value = i64::from(first) - if negative { 1 << width } else { 0 };
     // Each step moves the value away from 0 or keeps it, so a value that
-    // leaves the 64-bit range does not come back.
-    for &(part, width) in rest {
-        value = value
-            .checked_mul(1 << width)?
-            .checked_add(i64::from(part))?;
+    // leaves the 64-bit range does not come back: the steps after it use a
+    // bignum.
+    for (index, &(part, width)) in rest.iter().enumerate() {
+        match value
+            .checked_mul(1 << width)
+            .and_then(|value| value.checked_add(i64::from(part)))
+        {
+            Some(next) => value = next,
+            None => {
+                let big = rest[index..]
+                    .iter()
+                    .fold(BigInt::from(value), |big, &(part, width)| {
+                        (big << width) + part
+                    });
+                return Term::from_bigint(big);
+            }
+        }
     }
-    Some(value)
+    Term::Integer(value)
 }
 
 /// Return the value of the IEEE 754 half-precision float `half`, as

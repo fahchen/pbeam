@@ -343,11 +343,13 @@ fn reads_nested_literals_and_marks_unsupported_tags_at_any_depth() {
             Map::from_pairs(vec![], &AtomTable::new()).unwrap()
         ))
     );
-    // A map key that `Map` does not support yet makes the literal unsupported: #{{<<>>} => []}.
+    // A map key that `Map` does not support yet makes the literal unsupported: #{{fun a:b/0} => []}.
     assert_eq!(
         read(
             &atoms,
-            &[131, 116, 0, 0, 0, 1, 104, 1, 109, 0, 0, 0, 0, 106]
+            &[
+                131, 116, 0, 0, 0, 1, 104, 1, 113, 119, 1, b'a', 119, 1, b'b', 97, 0, 106
+            ]
         )
         .unwrap(),
         None

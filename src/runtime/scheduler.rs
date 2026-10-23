@@ -13,7 +13,7 @@ use super::{
         SecurityContext, Source,
     },
     dirty::{Claim, Completion, DirtyCalls, Work},
-    ets::NodeTables,
+    ets::{NodeTables, Transfer},
     files::Files,
     host::{
         self,
@@ -32,7 +32,7 @@ use super::{
     regex_code::{RegexCodes, RegexSources},
     resources::{Resources, lock},
     signal::Signal,
-    timer::{Receiver, Timer, Timers},
+    timer::{PortTimer, Receiver, Timer, TimerKey, Timers},
     tty::{InitialMode, Ttys},
 };
 use crate::{
@@ -1245,8 +1245,12 @@ impl Scheduler {
                         self.deliver_timeout(target, message);
                     }
                 }
-                Timer::Accept { port, caller } => self.tcp_accept_timeout(port, caller),
-                Timer::SocketReceive { port } => self.tcp_receive_timeout(port),
+                Timer::Accept { port, caller, key } => {
+                    self.tcp_accept_timeout(port, caller, (self.index, key));
+                }
+                Timer::SocketReceive { port, key } => {
+                    self.tcp_receive_timeout(port, (self.index, key));
+                }
             }
         }
     }
@@ -2868,30 +2872,36 @@ impl Scheduler {
         }
     }
 
+    /// Start a port timer that `timer` makes from its key, at the end of
+    /// `timeout` milliseconds, in the timer wheel of this scheduler, as
+    /// `erts_set_port_timer` does on the scheduler of the caller
+    /// (`erl_hl_timer.c:3031-3060`).
+    pub(super) fn start_port_timer(
+        &mut self,
+        timeout: u32,
+        timer: impl FnOnce(TimerKey) -> Timer,
+    ) -> PortTimer {
+        let end = Timers::timeout_position(self.timers.now(), timeout.into())
+            .expect("a timeout of 32 bits has an end");
+        (self.index, self.timers.start_keyed(end, timer))
+    }
+
+    /// Cancel the port timer `timer`. A timer of another scheduler goes to
+    /// that scheduler, as `continue_cancel_ptimer` does
+    /// (`erl_hl_timer.c:1777-1791`). Its expiry before the cancel arrives
+    /// finds that the port no longer holds it and does nothing, as
+    /// `port_timeout_common` does (`erl_hl_timer.c:708-720`).
+    pub(super) fn cancel_port_timer(&mut self, (index, key): PortTimer) {
+        if index == self.index {
+            self.timers.cancel(key);
+        } else {
+            self.node.cancel_port_timer_at(index, key);
+        }
+    }
+
     /// Return the index of this scheduler in its node.
     pub(super) fn index(&self) -> usize {
         self.index
-    }
-
-    /// Return the unsupported error when the open port `id` is an inet
-    /// port that the scheduler `index` does not serve. The receive and accept timers of
-    /// an inet port stay with the scheduler that serves it until port tasks
-    /// run on any scheduler (row "Ports" of `docs/erts-differences.md`).
-    /// A spawn port, a port of `index`, and a closed port give `Ok`.
-    pub(super) fn inet_port_served(
-        &self,
-        id: crate::term::PortId,
-        index: usize,
-    ) -> Result<(), BeamError> {
-        let remote = self.node.with_port(id, |port| {
-            port.scheduler != index && matches!(port.driver, crate::runtime::port::Driver::Inet(_))
-        }) == Some(true);
-        if remote {
-            return Err(error(
-                "unsupported: an inet port of another scheduler in a run of execute_on_schedulers: see \"Ports\" in docs/erts-differences.md",
-            ));
-        }
-        Ok(())
     }
 
     /// Return the scheduler of the live process `target` when it is another
@@ -2907,6 +2917,34 @@ impl Scheduler {
     pub(super) fn remote_live_owner(&self, target: ProcessId) -> Option<usize> {
         let owner = self.node.live_owner(target)?;
         (owner != self.index).then_some(owner)
+    }
+
+    /// Return true when the process `target` of the node is alive and does
+    /// not exit, as `erts_pid2proc` and `erts_proc_lookup` find it for the
+    /// heir and the receiver of an ETS table (`erl_db.c:3100`, `4877`,
+    /// `5330`).
+    pub(super) fn ets_alive(&self, target: ProcessId) -> bool {
+        match self.processes.get(&target) {
+            Some(process) => process.exiting.is_none(),
+            None => self.remote_live_owner(target).is_some(),
+        }
+    }
+
+    /// Send `{'ETS-TRANSFER', Table, From, Data}` from the process `from`
+    /// to the new owner of a table, as `send_ets_transfer_message`
+    /// (`erl_db.c:4935-4971`) does. A named table goes as its name.
+    pub(super) fn send_ets_transfer(&mut self, from: ProcessId, transfer: Transfer) {
+        let table = match transfer.name {
+            Some(name) => Term::Atom(self.atoms.get(&name).expect("a table name is an atom")),
+            None => Term::Reference(transfer.table),
+        };
+        let message = Term::tuple(vec![
+            Term::static_atom("ETS-TRANSFER"),
+            table,
+            Term::Pid(from),
+            transfer.data,
+        ]);
+        self.send_message(from, transfer.heir, message);
     }
 
     /// Make the process `id` exiting for the other schedulers of a run with
@@ -2987,6 +3025,7 @@ impl Scheduler {
                     }
                 }
                 Delivery::CancelTimer { reference } => self.drop_bif_timer(reference),
+                Delivery::CancelPortTimer { key } => self.timers.cancel(key),
                 Delivery::Process { process, low } => self.adopt(*process, low),
             }
         }
@@ -3801,7 +3840,19 @@ impl Scheduler {
         // count (`erl_db.c:5044-5045`, `5118`; `erl_process.c:14360-14366`).
         let deleted = reds > 0 && {
             let left = self.current_process_mut().fcalls;
-            let rest = self.ets.exclusive().delete_owned(id, left);
+            let store = Arc::clone(&self.ets);
+            let mut transfers = Vec::new();
+            // The heir check takes the table store lock, so a heir that
+            // starts its exit later finds the table in its own exit.
+            let rest = store.exclusive().delete_owned(
+                id,
+                left,
+                |heir| self.ets_alive(heir),
+                &mut transfers,
+            );
+            for transfer in transfers {
+                self.send_ets_transfer(id, transfer);
+            }
             if let Some(rest) = rest {
                 self.current_process_mut().bump_reductions(left - rest);
             }

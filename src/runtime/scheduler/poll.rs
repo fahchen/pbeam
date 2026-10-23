@@ -67,6 +67,9 @@ struct Served {
 pub(in crate::runtime) struct NodePoll {
     /// The write end of the wake socket of the thread, after it started.
     wake: OnceLock<UnixStream>,
+    /// The node, after the thread started, to wake a scheduler that waits
+    /// on its own fds (see [`NodePoll::register`]).
+    node: OnceLock<Weak<Node>>,
     /// True while the thread waits on its last fd set.
     sleeping: AtomicBool,
     /// True when an fd set changed after the thread collected its set.
@@ -90,6 +93,7 @@ impl NodePoll {
     pub(in crate::runtime) fn new(count: usize) -> Arc<Self> {
         Arc::new(Self {
             wake: OnceLock::new(),
+            node: OnceLock::new(),
             sleeping: AtomicBool::new(false),
             changed: AtomicBool::new(false),
             fds: Mutex::default(),
@@ -111,6 +115,7 @@ impl NodePoll {
                     .expect("the poll wake socket is non-blocking");
             }
             let node = Arc::downgrade(node);
+            let _ = poll.node.set(node.clone());
             thread::Builder::new()
                 .name("pbeam-poll".into())
                 .spawn(move || run(&node, reader))
@@ -144,7 +149,10 @@ impl NodePoll {
     /// Change the fd that the port `port` of the scheduler `index` waits on
     /// in `direction` from `before` to `after`, as `erts_poll_control`
     /// changes the pollset (`erl_check_io.c:1422-1434`). A new fd wakes the
-    /// thread. A removed fd wakes no thread: the next wait leaves it out.
+    /// thread, or the scheduler `index` when it waits on its own fds in its
+    /// idle wait, as `erts_poll_control` wakes the poller of the pollset
+    /// (`erl_poll.c:1447-1448`): a port task of another scheduler can add
+    /// the fd. A removed fd wakes nothing: the next wait leaves it out.
     pub(in crate::runtime) fn register(
         &self,
         port: PortId,
@@ -168,6 +176,11 @@ impl NodePoll {
             fds.insert((fd, direction), (index, port));
             drop(fds);
             self.changed();
+            if self.served(index).owned
+                && let Some(node) = self.node.get().and_then(Weak::upgrade)
+            {
+                node.wake_scheduler(index);
+            }
         }
     }
 
@@ -205,6 +218,14 @@ impl NodePoll {
         let mut served = self.served(index);
         self.marks[index].store(false, Ordering::SeqCst);
         std::mem::take(&mut served.ready)
+    }
+
+    /// Add `entry` to the ready list of the scheduler `index`, as the
+    /// thread does when it finds the fd ready.
+    #[cfg(test)]
+    pub(in crate::runtime) fn report(&self, index: usize, entry: Ready) {
+        self.served(index).ready.push(entry);
+        self.marks[index].store(true, Ordering::SeqCst);
     }
 
     /// Make the thread wait again on the fds of `ready`, which the
@@ -381,3 +402,7 @@ fn drain(reader: &mut UnixStream) {
     // The socket is non-blocking: an error means that no more bytes wait.
     while matches!(reader.read(&mut bytes), Ok(count) if count > 0) {}
 }
+
+#[cfg(test)]
+#[path = "../../../tests/runtime/scheduler/poll.rs"]
+mod tests;

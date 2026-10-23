@@ -27,20 +27,6 @@ pub(crate) fn fits_big_arity(value: &BigInt) -> bool {
     value.bits() <= MAX_BIG_DIGITS * 64
 }
 
-/// Return the low 64 bits of the two's complement form of `value` as an
-/// `i64`, as a binary segment of at most 64 bits keeps them.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// assert_eq!(low_64_bits(&((BigInt::from(1) << 64) + 5)), 5);
-/// assert_eq!(low_64_bits(&-(BigInt::from(1) << 64)), 0);
-/// ```
-pub(crate) fn low_64_bits(value: &BigInt) -> i64 {
-    let low = value & BigInt::from(u64::MAX);
-    low.to_u64().expect("the mask keeps 64 bits") as i64
-}
-
 impl Term {
     /// Return the integer `value` in its canonical form: [`Term::Integer`]
     /// for a value in the signed 64-bit range, else [`Term::BigInt`]. ERTS
