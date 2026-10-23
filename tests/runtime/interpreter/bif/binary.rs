@@ -146,6 +146,10 @@ fn raises_badarg_for_a_bitstring_subject() {
 fn limits_the_common_affix_list_to_the_tuple_arity() {
     // `MAX_ARITYVAL` (`erl_term.h:322`) binaries or more raise
     // `system_limit` (`erl_bif_binary.c:2212-2213`).
-    assert!(!over_arity_limit((1 << 24) - 2));
-    assert!(over_arity_limit((1 << 24) - 1));
+    let limit = |count| match list_error(count, &Term::Integer(1)) {
+        Some(BifResult::Raise { reason, .. }) => reason == Term::static_atom("system_limit"),
+        _ => false,
+    };
+    assert!(!limit((1 << 24) - 2));
+    assert!(limit((1 << 24) - 1));
 }

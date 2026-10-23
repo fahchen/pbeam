@@ -1625,17 +1625,25 @@ pub(super) fn referenced_byte_size(subject: &Term) -> BifResult {
 /// `erts/configure.ac:300-322`, default 64).
 const COMMON_STRIDE_BITS: u64 = 512;
 
-/// Return whether `count` binaries are too many for the tuple of
-/// `binary:longest_common_prefix/1`: `MAX_ARITYVAL` (`2^24 - 1`,
-/// `erl_term.h:322`) or more (`erl_bif_binary.c:2212`).
+/// Return the error of a list of `count` binaries with the tail `tail` for
+/// `binary:longest_common_prefix/1`, in the ERTS order
+/// (`erl_bif_binary.c:2212-2216`): `system_limit` for `MAX_ARITYVAL`
+/// (`2^24 - 1`, `erl_term.h:322`) or more binaries, then `badarg` for an
+/// improper tail or no binary, else `None`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(over_arity_limit((1 << 24) - 1));
+/// assert!(list_error(2, &Term::nil()).is_none());
 /// ```
-fn over_arity_limit(count: usize) -> bool {
-    count >= (1 << 24) - 1
+fn list_error(count: usize, tail: &Term) -> Option<BifResult> {
+    if count >= (1 << 24) - 1 {
+        return Some(BifResult::Raise {
+            class: ExceptionClass::Error,
+            reason: Term::static_atom("system_limit"),
+        });
+    }
+    (!tail.is_nil() || count == 0).then(BifResult::badarg)
 }
 
 /// Start `binary:longest_common_prefix/1` (`suffix` false) or
@@ -1665,14 +1673,8 @@ pub(super) fn longest_common(process: &mut ProcessState, list: &Term, suffix: bo
         binaries.push(head.clone());
         tail = rest;
     }
-    if over_arity_limit(binaries.len()) {
-        return BifResult::Raise {
-            class: ExceptionClass::Error,
-            reason: Term::static_atom("system_limit"),
-        };
-    }
-    if !tail.is_nil() || binaries.is_empty() {
-        return BifResult::badarg();
+    if let Some(error) = list_error(binaries.len(), tail) {
+        return error;
     }
     if smallest == 0 || binaries.len() == 1 {
         return Value(Term::Integer((smallest / 8) as i64));
