@@ -181,10 +181,12 @@ const ERLEXEC_VARIABLES: [&str; 5] = [
 /// Run the command line and exit with one of these statuses:
 ///
 /// - 0: the root process returns. The binary writes nothing to stderr.
-/// - 1: the root process exits. The binary writes the one stderr line
+/// - 1: the root process exits with a reason other than `normal`, or it
+///   exits `normal` and later no process can wake. The binary writes the one stderr line
 ///   `pbeam: root process exited with <Reason>`, with `<Reason>` in the ERTS
 ///   term text (`print_term`, erl_printf_term.c:352-811). ERTS also exits
-///   with status 1 when a boot process exit halts the runtime.
+///   with status 1 when a boot process exit halts the runtime. After a root
+///   exit `normal`, a halt or SIGTERM ends the run with its own status.
 /// - 1: a runtime error, a file that cannot be read, a BEAM file that does
 ///   not load, or a boot flag name that is not an atom of the loaded
 ///   modules. The binary writes the one stderr line
