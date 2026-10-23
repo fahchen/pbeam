@@ -16,12 +16,16 @@ burn(0) -> ok;
 burn(N) -> burn(N - 1).
 
 all() ->
-    %% A run of the library API has no init process, so start the responder
-    %% of `fixtures/undef/undef_init` that answers `init:ensure_loaded/1`.
-    case erlang:function_exported(undef_init, start, 0) of
-        true -> undef_init:start();
-        false -> ok
+    %% A run of the library API has no code server. Register a process as
+    %% `code_server`, so `error_handler:ensure_loaded/1` takes the
+    %% `code:ensure_loaded/1` branch without a round trip, as on ERTS
+    %% (`error_handler.erl:182-198`, `code.erl:581-583`). The first call
+    %% loads the target module on ERTS before the measured calls.
+    case whereis(code_server) of
+        undefined -> register(code_server, spawn(fun() -> receive stop -> ok end end));
+        _ -> ok
     end,
+    ok = undef_frames_target:present(),
     [{K, N, run(K, N)} || K <- [k_call, k_last, k_only, k_apply, k_apply_last, k_fun, k_fun_last,
                                k_bif_apply, k_bif_apply2, k_deep, k_deep_last,
                                k_ext, k_ext_last, k_ext_only],

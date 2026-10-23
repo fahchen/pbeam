@@ -12,21 +12,19 @@ use std::process::Command;
 use common::pinned_beam;
 use pbeam_runtime::{AtomTable, BeamProgram, Term};
 
-const UNDEF_INIT: &[u8] = include_bytes!("../../fixtures/undef/undef_init.beam");
 const PROBE: &[u8] = include_bytes!("../../fixtures/undef_frames/undef_frames.beam");
 const TARGET: &[u8] = include_bytes!("../../fixtures/undef_frames/undef_frames_target.beam");
 
 #[test]
 fn gives_the_full_undef_stack_trace_of_each_call_kind_as_pinned_erts() {
-    // `undef_frames:all/0` runs each call kind in a new process after 0 to 9 and 3939 to 3999
-    // reductions of `burn/1`, so the frames do not depend on the caller of
+    // `undef_frames:all/0` runs each call kind in a new process after `burn(N)` for N in 0..=9
+    // and 3940..=4000, so the frames do not depend on the caller of
     // the probe.
     let program = BeamProgram::load(&[
         &pinned_beam("erlang"),
         &pinned_beam("error_handler"),
-        &pinned_beam("init"),
+        &pinned_beam("code"),
         &pinned_beam("lists"),
-        UNDEF_INIT,
         PROBE,
         TARGET,
     ])
