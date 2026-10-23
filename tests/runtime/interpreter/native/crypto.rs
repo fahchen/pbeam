@@ -465,6 +465,38 @@ fn truncates_the_pbkdf2_iterations_to_a_c_int_as_erts() {
 }
 
 #[test]
+fn bounds_the_key_length_to_a_c_int() {
+    let mut scheduler = scheduler();
+    let sha = atom(&mut scheduler, "sha256");
+    let password = Term::binary(b"p".to_vec());
+    let salt = Term::binary(b"s".to_vec());
+    // The reservation is virtual: no page of it is written.
+    let negative = pbkdf2_hmac_nif(
+        &mut scheduler,
+        &sha,
+        &password,
+        &salt,
+        &Term::Integer(1),
+        &Term::Integer(1 << 31),
+    )
+    .unwrap();
+    assert_c_error(
+        negative,
+        &scheduler.atoms.clone(),
+        ("error", "pbkdf2_hmac.c", 63, -1, "Low-level call failed"),
+    );
+    let wrapped = pbkdf2_hmac_nif(
+        &mut scheduler,
+        &sha,
+        &password,
+        &salt,
+        &Term::Integer(1),
+        &Term::Integer((1 << 32) + 1),
+    );
+    assert!(wrapped.is_err());
+}
+
+#[test]
 fn gives_the_allocation_error_of_a_key_length_that_does_not_fit() {
     let mut scheduler = scheduler();
     let sha = atom(&mut scheduler, "sha");
@@ -487,9 +519,13 @@ fn gives_the_allocation_error_of_a_key_length_that_does_not_fit() {
 #[test]
 fn hashes_keys_longer_than_the_digest_block() {
     let mut long = Vec::new();
-    Hash::Sha256.pbkdf2(&[7; 100], b"salt", 1, 32, &mut long);
+    Hash::Sha256
+        .pbkdf2(&[7; 100], b"salt", 1, 32, &mut long)
+        .unwrap();
     let mut short = Vec::new();
-    Hash::Sha256.pbkdf2(b"password", b"salt", 1, 32, &mut short);
+    Hash::Sha256
+        .pbkdf2(b"password", b"salt", 1, 32, &mut short)
+        .unwrap();
     assert_eq!(long.len(), 32);
     assert_ne!(long, short);
 }

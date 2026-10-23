@@ -488,17 +488,44 @@ fn pbkdf2_hmac_nif(
     // (pbkdf2_hmac.c:58-61), so the high 32 bits do not count.
     let iterations = (iterations as u32) as i32;
     if iterations <= 0 {
-        return c_error(
-            scheduler,
-            "error",
-            "pbkdf2_hmac.c",
-            63,
-            -1,
-            "Low-level call failed",
-        );
+        return low_level_call_failed(scheduler);
     }
-    hash.pbkdf2(password, salt, iterations, key_length, &mut output);
-    Ok(BifResult::Value(Term::binary(output)))
+    // `PKCS5_PBKDF2_HMAC` also takes the lengths as C `int`s
+    // (pbkdf2_hmac.c:58-61). A key length whose `int` is 0 or less fails
+    // the call; another length above `INT_MAX` stops the run (row "NIF
+    // stubs" of `docs/erts-differences.md`).
+    let int_max = i32::MAX as usize;
+    if key_length > int_max && (key_length as u32) as i32 <= 0 {
+        return low_level_call_failed(scheduler);
+    }
+    if key_length > int_max || password.len() > int_max || salt.len() > int_max {
+        return Err(error(
+            "crypto:pbkdf2_hmac_nif/5 does not support a key, password, or salt longer than INT_MAX bytes"
+                .to_owned(),
+        ));
+    }
+    let derived = hash.pbkdf2(password, salt, iterations, key_length, &mut output);
+    let derived = derived.map(|()| BifResult::Value(Term::binary(output)));
+    derived.or_else(|_| low_level_call_failed(scheduler))
+}
+
+/// Return the `error` tuple of a failed `PKCS5_PBKDF2_HMAC` call
+/// (`pbkdf2_hmac.c:63`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(low_level_call_failed(&mut scheduler)?, BifResult::Raise { .. }));
+/// ```
+fn low_level_call_failed(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
+    c_error(
+        scheduler,
+        "error",
+        "pbkdf2_hmac.c",
+        63,
+        -1,
+        "Low-level call failed",
+    )
 }
 
 impl Hash {
@@ -520,7 +547,7 @@ impl Hash {
         iterations: i32,
         key_length: usize,
         output: &mut Vec<u8>,
-    ) {
+    ) -> Result<(), openssl::error::ErrorStack> {
         let start = output.len();
         output.resize(start + key_length, 0);
         openssl::pkcs5::pbkdf2_hmac(
@@ -530,7 +557,6 @@ impl Hash {
             self.message_digest(),
             &mut output[start..],
         )
-        .expect("OpenSSL derives each PBKDF2-HMAC key of `Hash`");
     }
 }
 
