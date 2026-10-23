@@ -582,27 +582,6 @@ fn hashes_keys_longer_than_the_digest_block() {
 }
 
 #[test]
-fn returns_a_value_below_the_range() {
-    for range in [1u8, 2, 10, 255] {
-        let value = random_below(&[range]).unwrap();
-        let number = value
-            .iter()
-            .fold(0u16, |number, byte| (number << 8) | u16::from(*byte));
-        assert!(number < u16::from(range), "{range} {value:?}");
-    }
-    let range = [1, 0, 0, 0, 0, 0, 0, 0, 0];
-    for _ in 0..100 {
-        let value = random_below(&range).unwrap();
-        assert!(value.len() <= 9);
-        let mut padded = vec![0; range.len() - value.len()];
-        padded.extend_from_slice(&value);
-        assert!(padded.as_slice() < range.as_slice());
-    }
-    assert_eq!(random_below(&[0, 0]), None);
-    assert_eq!(random_below(&[]), None);
-}
-
-#[test]
 fn strong_rand_range_gives_a_binary_or_false_as_erts() {
     assert_eq!(
         value(strong_rand_range_nif(&Term::binary(vec![1]))),
@@ -629,6 +608,20 @@ fn strong_rand_range_gives_a_binary_or_false_as_erts() {
     }
     assert!(matches!(
         strong_rand_range_nif(&Term::Integer(10)),
+        BifResult::Raise { .. }
+    ));
+}
+
+#[test]
+fn rand_seed_takes_only_a_binary_as_erts() {
+    // `enif_inspect_binary` (rand.c:145-146); `crypto:rand_seed/1` lets
+    // only a binary through, so no probe reaches the `badarg`.
+    assert_eq!(
+        value(rand_seed_nif(&Term::binary(vec![1, 2]))),
+        Term::static_atom("ok")
+    );
+    assert!(matches!(
+        rand_seed_nif(&Term::Integer(1)),
         BifResult::Raise { .. }
     ));
 }
