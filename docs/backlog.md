@@ -163,13 +163,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a path calls a `prim_tty` NIF before `erlang:load_nif/2` or after a failed load, or a second module gets native bindings.
 - **Source:** PR #132 (#127).
 
-### Poll fd 0 while processes run
-
-- PBeam waits for the read select of fd 0 and for the pipes of the ports only when no process can run (#299, #302). ERTS also waits for it in a poll thread while processes run (erl_process.c:3339-3372), so input arrives while other processes run. Thus in PBeam, a run in which a process can always run never gets the `{select, TTY, Ref, ready_input}` message. The "Input select" row of `docs/erts-differences.md` records this.
-- The work: a poll of fd 0 with no timeout at a scheduler switch point, for example after a number of reductions, as an ERTS scheduler checks its own poll set (erl_process.c:9946-9960).
-- **Trigger:** a program reads standard input or the output of a port program while one of its processes can always run, for example a busy worker.
-- **Source:** PR for #299.
-
 ### Run the other port options and port kinds
 
 - `open_port/2` runs only `{spawn_executable, Name}` with `binary`, `exit_status`, `use_stdio`, `nouse_stdio`, `stderr_to_stdout`, and `{args, Args}` (#302). Each other option, the list data mode, the port kinds `spawn`, `spawn_driver`, and `fd`, the port BIFs other than `port_command/2`, `port_close/1`, and `port_info/1`, and a message, link, monitor, exit signal, or name of a port give a runtime error (row "Ports" of `docs/erts-differences.md`).
@@ -184,12 +177,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - The work: a crash dump writer with the ERTS file and messages.
 - **Trigger:** a consumer needs a crash dump, which a break command `A` and `erlang:halt/2` with a slogan also request.
 - **Source:** PR for #301.
-
-### Run `at_exit` callbacks and flush the logger before the root exit
-
-- The PBeam boot does not run `at_exit` callbacks and does not flush the logger before the root process returns. Thus a log event that is still in the queue of the async default handler at the root exit is lost. `elixir -e` runs the callbacks, then `Logger.flush()`, and then `System.halt/1` (kernel/cli.ex:58-71). The "Run end" row records this. `fixtures/io_fail` calls `logger_std_h:filesync(default)` so that its report is written before the root exit.
-- **Trigger:** a consumer logs an event just before it returns and needs the event, or a program registers `at_exit` callbacks.
-- **Source:** PR #182 (#169).
 
 ### Compose decomposed UTF-8 native names on macOS
 
@@ -279,6 +266,7 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 ### Free crypto hash contexts with their last term
 
 - **Now:** `HashContexts` of `src/runtime/interpreter/native/crypto.rs` never removes a context (#1016). `Term::Reference` has no count, so a context cannot drop with its last term. ERTS frees an `EVP_MD_CTX` resource when no term refers to it (`hash.c:45-51`).
+- **Also:** `MacContexts` of `src/runtime/interpreter/native/crypto/mac_context.rs` never removes a MAC context (#1018); ERTS frees a `mac_context` resource with its last term (`mac.c:544-556`).
 - **Evidence:** each `hash_update_nif/2` call adds one context, so `crypto:hash/2` on N bytes keeps ceil(N/20000)+1 contexts for the run (`crypto.erl:4535-4553`).
 - **Option:** back the context resource term with an `Arc`, so the Rust drop of the last term frees the context. The owner chose Rust drop over a resource garbage collection.
 - **Trigger:** a long run or a run that hashes large data.
@@ -299,12 +287,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a consumer needs the exact frames of an `undef` exception.
 - **Source:** owner decision of 2026-10-11 (Suikou review 01a1282e, AFK log second batch); [#446](https://github.com/fahchen/pbeam/issues/446), [#447](https://github.com/fahchen/pbeam/issues/447), PR [#473](https://github.com/fahchen/pbeam/pull/473).
 - **Task:** none. [#926](https://github.com/fahchen/pbeam/issues/926) added the line locations.
-
-### Send the uncaught-exception report to `logger`
-
-- PBeam writes no report for an uncaught exception. For an uncaught `error` or `throw`, ERTS sends `{log, error, "Error in process ~p with exit value:~n~p~n", Args, Metadata}` to the registered `logger` process (beam_common.c:697-718, erl_trace.c:2812-2820). The "Error report" row records this. `pbeam_boot` starts `logger` (PR #188), so the receiver exists. PR #188 said that #73 tracks this work, but #73 is closed.
-- **Trigger:** a consumer needs the report of a process that crashes.
-- **Source:** PR #188 (#179).
 
 ### Value checks of `process_flag/2` and `system_flag/2`
 

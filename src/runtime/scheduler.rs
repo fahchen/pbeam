@@ -503,7 +503,7 @@ impl Scheduler {
         let mut resources = Resources::default();
         resources.put(Ttys::default());
         let menu_pair = std::os::unix::net::UnixStream::pair().expect("a menu socket pair opens");
-        let node = Node::single();
+        let (node, wake) = Node::single();
         Scheduler {
             processes: ProcessSlots::default(),
             freed: HashMap::new(),
@@ -535,7 +535,7 @@ impl Scheduler {
             node,
             multi: false,
             index: 0,
-            wake: None,
+            wake: Some(wake),
         }
     }
 
@@ -1262,12 +1262,9 @@ impl Scheduler {
     /// assert!(!scheduler.has_external_sources());
     /// ```
     pub(super) fn has_external_sources(&mut self) -> bool {
-        // The table lock is released before the scans lock each port.
-        let handles = self.node.ports().handles(self.index);
         self.resources.borrow_mut::<Ttys>().input_selected()
             || self.dirty.running()
-            || !crate::runtime::port::wait_fds(&handles).is_empty()
-            || !crate::runtime::port::write_fds(&handles).is_empty()
+            || self.node.poll.serves(self.index)
             // A handled host signal becomes a message to `erl_signal_server`.
             || self.whereis("erl_signal_server").is_some()
     }
@@ -1278,18 +1275,14 @@ impl Scheduler {
     /// handled host signal arrives, when a handler is installed. ERTS waits
     /// for these events in its poll thread (`erl_process.c:3372`), and an
     /// idle scheduler sleeps in its poll until the next timer end
-    /// (`erl_process.c:3536-3567`). PBeam has one thread, so it waits only
-    /// when no process can run. A signal stops the wait with `EINTR`, or
+    /// (`erl_process.c:3536-3567`). A scheduler waits here when no process
+    /// can run. The node poll thread waits on fd 0 and on the fds of the
+    /// ports, and writes the wake socket of the scheduler when one is ready
+    /// (see [`Self::check_io`]). A signal stops the wait with `EINTR`, or
     /// makes the notify pipe readable when it arrives before the wait.
     ///
-    /// When fd 0 has input, its end of file, or an error, the select ends,
-    /// and its recipient gets `{select, TTY, Reference, ready_input}`
-    /// (`erl_check_io.c:2135-2171`, `prepare_select_msg` at
-    /// `erl_check_io.c:699-760`). A message to a process that does not exist
-    /// is dropped (`erl_check_io.c:851-856`). When fd 0 is not open, the
-    /// select ends without a message, as a select that `erts_poll_control`
-    /// cannot add (`erl_check_io.c:1422-1434`). Each ready pipe of a port
-    /// goes to [`Self::port_ready`]. A completion only wakes the scheduler;
+    /// After the wait, the scheduler serves the ready fds (see
+    /// [`Self::check_io`]). A completion only wakes the scheduler;
     /// [`Self::complete_dirty_calls`] takes it. The next scheduling step
     /// reads the signals in the notify pipe (see [`Self::check_signals`]).
     ///
@@ -1310,26 +1303,55 @@ impl Scheduler {
     /// ```
     pub(super) fn wait_events(&mut self, timeout: Option<Duration>) -> Result<bool, BeamError> {
         let selected = self.resources.borrow_mut::<Ttys>().input_selected();
+        if !selected {
+            // The select of fd 0 ended without a message (see
+            // `Ttys::monitor_down`): the poll thread stops waiting on fd 0.
+            self.node.poll.clear_stdin(self.index);
+        }
         let dirty = self.dirty.running();
-        let handles = self.node.ports().handles(self.index);
-        let ports = crate::runtime::port::wait_fds(&handles);
-        let writes = crate::runtime::port::write_fds(&handles);
-        drop(handles);
+        // The fds that the poll thread found ready go first; the wait would
+        // not see them. A served fd can send a message and close its port,
+        // so the run loop schedules again before it waits or decides that
+        // no event can arrive.
+        if self.check_io()? {
+            return Ok(true);
+        }
         let wake = self.wake.as_ref().map(|wake| wake.as_raw_fd());
-        let fds: Vec<_> = [
-            selected.then_some(libc::STDIN_FILENO),
+        let own: Vec<_> = [
             dirty.then(|| self.dirty.wake_fd()),
             signal::notify_fd(),
-            wake,
+            wake.filter(|_| self.multi),
         ]
         .into_iter()
         .flatten()
-        .chain(ports)
         .collect();
-        if fds.is_empty() && writes.is_empty() {
+        if own.is_empty() && !selected && !self.node.poll.serves(self.index) {
             return Ok(false);
         }
-        let (readiness, writable) = input::wait(&fds, &writes, timeout);
+        // In its idle wait the scheduler is the only waiter on fd 0 and on
+        // the fds of its ports, as an ERTS scheduler polls its own pollset
+        // when it sleeps (`erl_process.c:3536-3567`). The poll thread waits
+        // on them while the scheduler runs processes (see `poll`).
+        let index = self.index;
+        let owned: Vec<_> = self
+            .node
+            .poll
+            .take_over(index)
+            .into_iter()
+            .map(|entry| (entry, index))
+            .collect();
+        let mut reads: Vec<_> = own
+            .into_iter()
+            .chain(wake.filter(|_| !self.multi))
+            .collect();
+        let mut writes = Vec::new();
+        for &((fd, direction), _) in &owned {
+            match direction {
+                poll::Direction::Write => writes.push(fd),
+                _ => reads.push(fd),
+            }
+        }
+        let (readiness, writable) = input::wait(&reads, &writes, timeout);
         if let (Some(wake), Some(fd)) = (&mut self.wake, wake)
             && matches!(&readiness, Readiness::Ready(ready) if ready.contains(&fd))
         {
@@ -1340,13 +1362,70 @@ impl Scheduler {
         {
             self.dirty.clear_wake();
         }
-        // Only fd 0 can be closed: the pipes of a port, the notify pipe, and
-        // the wake socket stay open while the scheduler waits for them. The
-        // select of fd 0 ends when fd 0 is ready or not open.
-        if selected && readiness.ended(libc::STDIN_FILENO) {
-            let ttys = self.resources.borrow_mut::<Ttys>();
-            let select = ttys.take_input_select().expect("fd 0 has a select");
-            if readiness != Readiness::Invalid {
+        let reads = match readiness {
+            Readiness::Ready(fds) => fds,
+            Readiness::Pending | Readiness::Invalid => Vec::new(),
+        };
+        let ready: Vec<poll::Ready> = poll::ready(&owned, &reads, &writable)
+            .into_iter()
+            .map(|(entry, _)| entry)
+            .collect();
+        // The scheduler serves its fds before the thread waits on them
+        // again, so that the thread does not report them a second time.
+        let result = self.serve(&ready);
+        self.node.poll.hand_back(index);
+        result?;
+        self.check_io()?;
+        Ok(true)
+    }
+
+    /// Serve the fds that the poll thread of the node found ready for this
+    /// scheduler, as an ERTS scheduler runs the port tasks of the poll
+    /// thread at a switch point (`erl_process.c:9946-9960`). The check
+    /// reads one flag and makes no system call when no fd is ready. Then the
+    /// thread waits on the served fds again.
+    ///
+    /// When fd 0 has input, its end of file, or an error, the select ends,
+    /// and its recipient gets `{select, TTY, Reference, ready_input}`
+    /// (`erl_check_io.c:2135-2171`, `prepare_select_msg` at
+    /// `erl_check_io.c:699-760`). A message to a process that does not exist
+    /// is dropped (`erl_check_io.c:851-856`). A wait that finds an fd that
+    /// is not open reports no fd: a port removed its closed fd from the
+    /// poll, so the next wait leaves it out. Each ready fd of a port
+    /// goes to [`Self::port_ready`] or [`Self::port_writable`].
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`Self::port_ready`] and [`Self::port_writable`].
+    ///
+    /// Return true when the check served a ready fd.
+    pub(super) fn check_io(&mut self) -> Result<bool, BeamError> {
+        let ready = self.node.poll.take_ready(self.index);
+        if ready.is_empty() {
+            return Ok(false);
+        }
+        let result = self.serve(&ready);
+        self.node.poll.rearm(self.index, &ready);
+        result.map(|()| true)
+    }
+
+    /// Serve each fd of `ready` (see [`Self::check_io`]).
+    fn serve(&mut self, ready: &[poll::Ready]) -> Result<(), BeamError> {
+        // The writes go before the reads, as ERTS runs the output event of
+        // one fd before its input event (`erl_check_io.c:2099-2110`).
+        let reads = ready
+            .iter()
+            .filter(|(_, direction)| *direction == poll::Direction::Read);
+        let writes = ready
+            .iter()
+            .filter(|(_, direction)| *direction == poll::Direction::Write);
+        for &(fd, direction) in writes.chain(reads) {
+            if fd == libc::STDIN_FILENO && direction == poll::Direction::Read {
+                let ttys = self.resources.borrow_mut::<Ttys>();
+                let Some(select) = ttys.take_input_select() else {
+                    continue;
+                };
+                self.node.poll.clear_stdin(self.index);
                 let message = Term::tuple(vec![
                     Term::static_atom("select"),
                     Term::Reference(select.tty),
@@ -1354,15 +1433,14 @@ impl Scheduler {
                     Term::static_atom("ready_input"),
                 ]);
                 self.deliver(select.recipient, message);
+                continue;
+            }
+            match direction {
+                poll::Direction::Read => self.port_ready(fd)?,
+                poll::Direction::Write => self.port_writable(fd)?,
             }
         }
-        for fd in readiness.into_ready() {
-            self.port_ready(fd)?;
-        }
-        for fd in writable {
-            self.port_writable(fd)?;
-        }
-        Ok(true)
+        Ok(())
     }
 
     /// Pass each handled host signal that arrived since the last scheduling
@@ -3503,6 +3581,94 @@ impl Scheduler {
         self.node.name_get(name)
     }
 
+    /// Send the error report of the uncaught exception that ends the
+    /// process `id` with `reason`, as `terminate_proc` does
+    /// (`beam_common.c:696-718`). The message is `{log, error, Format,
+    /// [Pid, Reason], Metadata}` (`utils.c:770-858`, `1011`). The metadata
+    /// holds the group leader, the pid, the OS system time in microseconds
+    /// (`utils.c:792`), and `error_logger => #{emulator => true, tag =>
+    /// error}`. PBeam is never alive (no distribution), so the format has no
+    /// `on node ~p`. The system logger gets the message as
+    /// `sys_msg_dispatcher_func` gives it (`erl_trace.c:2780-2824`): a live
+    /// pid gets it; a pid that does not exist makes `logger` the system
+    /// logger again; `logger` sends it to the process registered as
+    /// `logger`; and `undefined` drops it. When no process is registered as
+    /// `logger`, ERTS writes the message to stderr
+    /// (`erl_trace.c:2564-2605`). ERTS queues the message to its dispatcher
+    /// thread, which runs after the exit of a sender that is itself the
+    /// logger process removed its name, so PBeam writes that message to
+    /// stderr too (measured on the pinned ERTS).
+    fn send_exit_report(&mut self, id: ProcessId, reason: &Term) -> Result<(), BeamError> {
+        let format = "Error in process ~p with exit value:~n~p~n";
+        // `gl` is not a static atom; ERTS makes it at its first use
+        // (`ERTS_MAKE_AM`, utils.c:846). A full atom table fails the run.
+        let gl = self.atoms.put("gl")?;
+        let process = self.current_process();
+        let metadata = crate::term::Map::from_pairs(
+            vec![
+                (
+                    Term::static_atom("error_logger"),
+                    Term::Map(
+                        crate::term::Map::from_pairs(
+                            vec![
+                                (Term::static_atom("emulator"), Term::static_atom("true")),
+                                (Term::static_atom("tag"), Term::static_atom("error")),
+                            ],
+                            &self.atoms,
+                        )
+                        .expect("atom keys fit each map form"),
+                    ),
+                ),
+                (Term::Atom(gl), Term::Pid(process.group_leader)),
+                (Term::static_atom("pid"), Term::Pid(id)),
+                (
+                    Term::static_atom("time"),
+                    Term::Integer(host::clock::system_time() / 1000),
+                ),
+            ],
+            &self.atoms,
+        )
+        .expect("atom keys fit each map form");
+        let message = Term::tuple(vec![
+            Term::static_atom("log"),
+            Term::static_atom("error"),
+            Term::list_from(format.bytes().map(|byte| Term::Integer(byte.into()))),
+            Term::list_from(vec![Term::Pid(id), reason.clone()]),
+            Term::Map(metadata),
+        ]);
+        // The dispatcher runs after the exit of the sender, so the sender is
+        // a process that does not exist. An exiting process does not take
+        // the message either (`erts_whereis_process`, register.c:356).
+        let live = |scheduler: &Self, target: ProcessId| {
+            target != id
+                && match scheduler.processes.get(&target) {
+                    Some(process) => process.exiting.is_none(),
+                    None => scheduler.node.live_owner(target).is_some(),
+                }
+        };
+        let target = match self.node.system_logger() {
+            Term::Pid(target) if live(self, target) => Some(target),
+            Term::Pid(_) => {
+                self.node.swap_system_logger(Term::static_atom("logger"));
+                self.whereis("logger")
+            }
+            logger if logger == Term::static_atom("logger") => self.whereis("logger"),
+            _ => return Ok(()),
+        };
+        match target {
+            Some(target) if live(self, target) => self.send_message(id, target, message),
+            _ => {
+                // `erts_printf` adds a carriage return to the standard error
+                // (`sys/unix/sys.c:342-343`). A failed write changes nothing.
+                let mut text = b"(no logger present) unexpected logger message: ".to_vec();
+                text.extend(print_term(&message, &self.atoms));
+                text.extend_from_slice(b"\r\n");
+                let _ = std::io::Write::write_all(&mut std::io::stderr(), &text);
+            }
+        }
+        Ok(())
+    }
+
     /// Run the exit of the current process, as `erts_do_exit_process` and
     /// `erts_continue_exit_process` do (`erl_process.c:14170-14833`). The
     /// exit counts its reductions from the reductions left in the turn, and
@@ -3576,6 +3742,13 @@ impl Scheduler {
         let mut next = match process.continue_exit.take() {
             Some(next) => next,
             None => {
+                // A root process stands for the `-eval` process of `erl`,
+                // whose exception `init:start_it/1` catches
+                // (init.erl:1552-1567), so it sends no report.
+                if std::mem::take(&mut process.log_exit) && process.root.is_none() {
+                    self.send_exit_report(id, &reason)?;
+                }
+                let process = self.current_process_mut();
                 process.bump_reductions(EXIT_REDUCTIONS);
                 self.set_exiting(id);
                 self.release_persistent_terms(id);
@@ -3880,6 +4053,7 @@ mod code;
 mod known_nodes;
 pub(super) mod node;
 mod policy;
+pub(super) mod poll;
 mod ports;
 mod process_slots;
 mod process_table;

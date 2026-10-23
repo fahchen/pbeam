@@ -175,6 +175,9 @@ pub(in crate::runtime) struct Node {
     timers: Mutex<BifTimers>,
     /// The inbox of each scheduler.
     inboxes: Vec<Inbox>,
+    /// The write end of the wake socket of the scheduler of a node of one
+    /// scheduler, which has no inbox. The poll thread writes it.
+    single_wake: Option<UnixStream>,
     /// The next process identifier.
     next_pid: AtomicU64,
     /// The next ordinary reference.
@@ -225,6 +228,8 @@ pub(in crate::runtime) struct Node {
     /// The resources of the node that each scheduler reads, such as the
     /// zlib streams and the file resources.
     pub(in crate::runtime) resources: NodeResources,
+    /// The poll thread of the node (see [`super::poll`]).
+    pub(in crate::runtime) poll: Arc<super::poll::NodePoll>,
     /// The process that gets the error reports of the emulator: `logger`,
     /// `undefined`, or a pid. ERTS keeps one value for the node
     /// (`system_logger`, `erl_trace.c:339`). The start value is `logger`.
@@ -272,6 +277,7 @@ impl Node {
                 aliases: Mutex::new(Aliases::default()),
                 timers: Mutex::new(BifTimers::default()),
                 inboxes,
+                single_wake: None,
                 next_pid: AtomicU64::new(0),
                 next_reference: AtomicU64::new(0),
                 unique: AtomicU64::new(0),
@@ -290,6 +296,7 @@ impl Node {
                 code: super::code::NodeCode::default(),
                 atomics: Default::default(),
                 resources: NodeResources::default(),
+                poll: super::poll::NodePoll::new(count),
                 system_logger: Mutex::new(Term::static_atom("logger")),
                 backtrace_depth: AtomicUsize::new(8),
                 heap_flags: Mutex::new(HeapFlags::default()),
@@ -319,18 +326,23 @@ impl Node {
         *self.local_node_hash.get_or_init(compute)
     }
 
-    /// Return the node of one scheduler that has no other scheduler. It has
-    /// no inbox, so a one-thread run never wakes a scheduler, and one root
-    /// slot.
+    /// Return the node of one scheduler that has no other scheduler, and
+    /// the read end of the wake socket of its scheduler. It has no inbox,
+    /// so only the poll thread wakes the scheduler, and one root slot.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let node = Node::single();
+    /// let (node, _wake) = Node::single();
     /// assert_eq!(node.scheduler_count(), 1);
     /// ```
-    pub(in crate::runtime) fn single() -> Arc<Self> {
-        Arc::new(Node {
+    pub(in crate::runtime) fn single() -> (Arc<Self>, UnixStream) {
+        let (reader, writer) = UnixStream::pair().expect("the wake socket opens");
+        for end in [&reader, &writer] {
+            end.set_nonblocking(true)
+                .expect("the wake socket is non-blocking");
+        }
+        let node = Arc::new(Node {
             processes: ProcessTable::default(),
             names: Mutex::new(HashMap::new()),
             ports: Mutex::default(),
@@ -339,6 +351,7 @@ impl Node {
             aliases: Mutex::new(Aliases::default()),
             timers: Mutex::new(BifTimers::default()),
             inboxes: Vec::new(),
+            single_wake: Some(writer),
             // A run with one scheduler creates its root as `ProcessId(0)`
             // before it starts a process, so the first other pid is 1.
             next_pid: AtomicU64::new(1),
@@ -359,17 +372,19 @@ impl Node {
             code: super::code::NodeCode::default(),
             atomics: Default::default(),
             resources: NodeResources::default(),
+            poll: super::poll::NodePoll::new(1),
             system_logger: Mutex::new(Term::static_atom("logger")),
             backtrace_depth: AtomicUsize::new(8),
             heap_flags: Mutex::new(HeapFlags::default()),
-        })
+        });
+        (node, reader)
     }
 
     /// Return a node whose identifier counters are at their last value, for
     /// a test of the overflow errors.
     #[cfg(test)]
     pub(in crate::runtime) fn exhausted() -> Arc<Self> {
-        let mut node = Node::single();
+        let (mut node, _wake) = Node::single();
         let inner = Arc::get_mut(&mut node).expect("the test holds the only reference");
         inner.next_pid = AtomicU64::new(u64::MAX);
         inner.next_reference = AtomicU64::new(u64::MAX);
@@ -773,6 +788,8 @@ impl Node {
     pub(in crate::runtime) fn wake_scheduler(&self, index: usize) {
         if let Some(inbox) = self.inboxes.get(index) {
             wake(&inbox.wake);
+        } else if let Some(writer) = &self.single_wake {
+            wake(writer);
         }
     }
 

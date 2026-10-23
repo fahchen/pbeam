@@ -73,7 +73,7 @@ fn a_failed_root_ends_the_run_while_another_root_lives() {
 #[test]
 #[should_panic(expected = "the node has the root slot")]
 fn a_root_needs_a_slot_of_the_node() {
-    Node::single().add_root(1);
+    Node::single().0.add_root(1);
 }
 
 /// The last scheduler that becomes idle decides the impossible wait, and a

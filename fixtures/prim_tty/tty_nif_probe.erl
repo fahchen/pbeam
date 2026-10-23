@@ -2,7 +2,7 @@
 -export([isatty/0, create/0, window_size/0, setlocale/0, setupterm/0, terminfo/0, init/0, monitor/0,
          owner/1, holder/3, select/0, encoding/0, select_monitor/0, selector/1, link/0,
          linker/1, linked_owner/1, root_exit/0, root_free/0, write/0, write_error/0, read/0,
-         read_error/0, loop/0, loop_reader/2]).
+         read_error/0, loop/0, loop_reader/2, busy_read/0, spin/0]).
 
 isatty() ->
     [catch_error(fun() -> prim_tty:isatty(A) end)
@@ -234,3 +234,17 @@ copies(N, Binary) -> [Binary | copies(N - 1, Binary)].
 
 catch_error(Fun) ->
     try Fun() catch error:Reason -> Reason end.
+
+%% Stdin is a pipe that holds "hello\nworld\n". A process that always can
+%% run shares the scheduler, and the select message of fd 0 still arrives,
+%% as the ERTS poll thread waits for fd 0 while processes run
+%% (erl_process.c:3339-3372).
+busy_read() ->
+    Busy = spawn(?MODULE, spin, []),
+    {ok, Out} = prim_tty:tty_create(stdout),
+    ok = prim_tty:tty_select(Out, first),
+    Ready = ready(Out, first),
+    exit(Busy, kill),
+    Ready.
+
+spin() -> spin().

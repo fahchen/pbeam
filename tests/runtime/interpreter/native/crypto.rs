@@ -259,6 +259,44 @@ fn raises_not_iolist_for_hash_update_data_that_is_not_a_binary() {
 }
 
 #[test]
+fn raises_bad_key_for_a_mac_init_key_that_is_not_iodata() {
+    // crypto:mac_init/3 converts the key first (crypto.erl:1432), so only
+    // a direct NIF call reaches mac.c:594-598.
+    let mut scheduler = scheduler();
+    let (hmac, sha) = (atom(&mut scheduler, "hmac"), atom(&mut scheduler, "sha"));
+    let result = mac_init_nif(&mut scheduler, &hmac, &sha, &Term::Integer(1)).unwrap();
+    assert_c_error(
+        result,
+        &scheduler.atoms.clone(),
+        ("badarg", "mac.c", 596, 2, "Bad key"),
+    );
+}
+
+#[test]
+fn gives_the_argument_number_of_each_mac_context_error() {
+    // crypto.erl drops `c_function_arg_num` (crypto.erl:761-775).
+    let mut scheduler = scheduler();
+    let (hmac, sha) = (atom(&mut scheduler, "hmac"), atom(&mut scheduler, "sha"));
+    let key = Term::binary(b"k".to_vec());
+    let context = value(mac_init_nif(&mut scheduler, &hmac, &sha, &key).unwrap());
+    let atoms = scheduler.atoms.clone();
+    let result = mac_update_nif(&mut scheduler, &Term::Integer(1), &Term::Integer(1)).unwrap();
+    assert_c_error(result, &atoms, ("badarg", "mac.c", 807, 1, "Bad text"));
+    let result = mac_update_nif(&mut scheduler, &Term::Integer(1), &key).unwrap();
+    assert_c_error(result, &atoms, ("badarg", "mac.c", 830, 0, "Bad ref"));
+    let result = mac_final_nif(&mut scheduler, &Term::Integer(1)).unwrap();
+    assert_c_error(result, &atoms, ("badarg", "mac.c", 860, 0, "Bad ref"));
+    assert_eq!(
+        value_bytes(mac_final_nif(&mut scheduler, &context).unwrap()).len(),
+        20
+    );
+    let result = mac_update_nif(&mut scheduler, &context, &key).unwrap();
+    assert_c_error(result, &atoms, ("error", "mac.c", 840, -1, "mac update"));
+    let result = mac_final_nif(&mut scheduler, &context).unwrap();
+    assert_c_error(result, &atoms, ("error", "mac.c", 879, -1, "Signing"));
+}
+
+#[test]
 fn gives_the_pinned_erts_pbkdf2_value_for_each_eligible_digest() {
     let mut scheduler = scheduler();
     let password = Term::binary(b"password".to_vec());

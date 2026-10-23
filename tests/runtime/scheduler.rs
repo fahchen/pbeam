@@ -2576,3 +2576,14 @@ fn answers_a_check_process_code_request_of_another_scheduler() {
         .collect();
     assert_eq!(replies, vec![reply(1), reply(2), reply(3), reply(4)]);
 }
+
+#[test]
+fn ignores_a_writable_fd_of_no_port_with_queued_output() {
+    // The poll thread can report an fd ready for write after the port of
+    // the fd closed and before the check of IO takes the report. Such an
+    // fd changes nothing, as ERTS drops the event of a deselected fd
+    // (`erl_check_io.c:2206-2214`).
+    let mut scheduler = test_scheduler();
+    scheduler.port_writable(i32::MAX).unwrap();
+    assert!(scheduler.processes.is_empty());
+}

@@ -37,22 +37,6 @@ impl Readiness {
             Readiness::Invalid => true,
         }
     }
-
-    /// Return the ready fds: none when the timeout ended or an fd is not
-    /// open.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert_eq!(Readiness::Ready(vec![5]).into_ready(), vec![5]);
-    /// assert!(Readiness::Invalid.into_ready().is_empty());
-    /// ```
-    pub(crate) fn into_ready(self) -> Vec<c_int> {
-        match self {
-            Readiness::Ready(fds) => fds,
-            Readiness::Pending | Readiness::Invalid => Vec::new(),
-        }
-    }
 }
 
 /// Read at most `size` bytes from `fd` with one `read`, as `tty_read_nif`
