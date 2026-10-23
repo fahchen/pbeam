@@ -98,6 +98,8 @@ busy_close(Path) ->
     ok = prim_inet:send(S, double(<<"0123456789abcdef">>, 19)),
     Parent = self(),
     Busy = spawn(fun() -> Parent ! {self(), prim_inet:send(S, <<"tail">>)} end),
+    %% The wait lets Busy run until its send waits for the queue.
+    receive after 50 -> ok end,
     [1, R1, R0] = erlang:port_control(S, 42 + ?MAGIC, [255, 255, 255, 255, 0, 0, 0, 0]),
     step(Path, 2, "close"),
     Ref = R1 * 256 + R0,
