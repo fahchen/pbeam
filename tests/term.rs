@@ -249,7 +249,7 @@ fn matches_the_derived_debug_text_and_compares_every_variant() {
     assert_eq!(
         debug_term(&term, &test_atom_table()),
         "Tuple([List([Atom(\"ok\"), Binary([1, 2]), Integer(-3), Float(-0.0), Pid(ProcessId(4)), \
-         Reference(Reference(5)), MatchContext(MatchState { bytes: [6], position: 0, position_known: true })]), \
+         Reference(Reference(5)), MatchContext(MatchState { bytes: [6], position: 0 })]), \
          List([])])"
     );
     for (index, leaf) in leaves.iter().enumerate() {

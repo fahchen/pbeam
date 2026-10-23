@@ -1162,6 +1162,7 @@ fn decodes_the_binary_match_instructions_of_is_usascii() {
                     fail_label: 16,
                     context: Operand::X(0),
                     commands: at_least,
+                    test_heap: false,
                 },
                 Instruction::BinarySetPosition {
                     context: Operand::X(0),
@@ -1171,6 +1172,7 @@ fn decodes_the_binary_match_instructions_of_is_usascii() {
                     fail_label: 17,
                     context: Operand::X(0),
                     commands: exactly,
+                    test_heap: false,
                 },
                 Instruction::End,
             ] if matches!(
@@ -1238,11 +1240,13 @@ fn decodes_the_bs_match_commands_of_the_bs_match_probe_fixture() {
                     fail_label: 28,
                     context: Operand::X(0),
                     commands: tail,
+                    test_heap: false,
                 },
                 Instruction::BinaryMatch {
                     fail_label: 15,
                     context: Operand::X(0),
                     commands: prefix,
+                    test_heap: false,
                 },
                 Instruction::End,
             ] if matches!(
@@ -1520,9 +1524,20 @@ fn decodes_the_bs_start_match4_bs_get_binary2_and_bs_get_tail_instructions_of_bs
                     source: Operand::X(0),
                     destination: Operand::X(1),
                 },
-                Instruction::Unsupported(119),
+                Instruction::BinaryMatch {
+                    fail_label: 3,
+                    context: Operand::X(0),
+                    commands: all,
+                    test_heap: false,
+                },
                 Instruction::End,
-            ]
+            ] if matches!(
+                all.as_slice(),
+                [
+                    BinaryMatchCommand::EnsureAtLeast { size: 0, unit },
+                    BinaryMatchCommand::GetTail { destination: Operand::X(1) },
+                ] if unit.get() == 8
+            )
         ),
         "{instructions:?}"
     );
@@ -3446,7 +3461,13 @@ fn arm_field_bytes(instruction: &Instruction) -> usize {
             fail_label,
             context,
             commands,
-        } => size_of_val(fail_label) + size_of_val(context) + size_of_val(commands),
+            test_heap,
+        } => {
+            size_of_val(fail_label)
+                + size_of_val(context)
+                + size_of_val(commands)
+                + size_of_val(test_heap)
+        }
         Instruction::BinaryMatchString {
             fail_label,
             context,
