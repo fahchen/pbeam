@@ -166,6 +166,10 @@ pub(super) enum Failure {
     /// The exception `{Tag, #{c_file_name => "pkey.c", ...}, Message}` of
     /// the check at a line of `pkey.c`.
     Check(&'static str, i64, i64, &'static str),
+    /// The exception of a check in a helper of another C file, such as the
+    /// curve checks of `ec.c` that `ecdh.c` calls: the file, then the
+    /// fields of [`Failure::Check`].
+    CheckIn(&'static str, &'static str, i64, i64, &'static str),
     /// A part that PBeam does not implement, which gives a runtime error.
     Unsupported(String),
 }
@@ -254,6 +258,9 @@ pub(super) fn finish_in(
     match result {
         Ok(value) => Ok(BifResult::Value(value)),
         Err(Failure::Check(tag, line, argument, message)) => {
+            c_error(scheduler, tag, file, line, argument, message)
+        }
+        Err(Failure::CheckIn(file, tag, line, argument, message)) => {
             c_error(scheduler, tag, file, line, argument, message)
         }
         Err(Failure::Unsupported(part)) => Err(error(format!(

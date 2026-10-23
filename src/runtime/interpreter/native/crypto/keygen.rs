@@ -278,6 +278,6 @@ fn evp_generate_key(
 }
 
 /// Return whether `term` is the atom `undefined`.
-fn is_undefined(scheduler: &Scheduler, term: &Term) -> bool {
+pub(super) fn is_undefined(scheduler: &Scheduler, term: &Term) -> bool {
     matches!(term, Term::Atom(_)) && atom_name(scheduler, term) == "undefined"
 }

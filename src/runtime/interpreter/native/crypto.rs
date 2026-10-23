@@ -23,6 +23,7 @@
 //! `crypto:F/A NIF is not supported` (row "NIF stubs" of
 //! `docs/erts-differences.md`).
 
+mod agreement;
 mod cipher;
 mod cipher_context;
 mod keygen;
@@ -33,6 +34,9 @@ use super::bif::iodata_bytes;
 use super::*;
 use crate::runtime::resources::lock;
 use crate::term::Reference;
+use agreement::{
+    dh_compute_key_nif, dh_generate_key_nif, ecdh_compute_key_nif, evp_compute_key_nif,
+};
 use cipher::{
     aead_cipher_nif, cipher_algorithms, cipher_info_nif, do_exor, ng_crypto_one_time_nif,
 };
@@ -180,6 +184,18 @@ pub(super) const BINDINGS: &[Binding] = &[
         run: |_, _| Ok(BifResult::Value(Term::Nil)),
     },
     Binding {
+        name: "dh_compute_key_nif",
+        arity: 3,
+        job: Job::Normal,
+        run: dh_compute_key_nif,
+    },
+    Binding {
+        name: "dh_generate_key_nif",
+        arity: 4,
+        job: Job::Normal,
+        run: dh_generate_key_nif,
+    },
+    Binding {
         name: "do_exor",
         arity: 2,
         job: Job::Normal,
@@ -192,10 +208,22 @@ pub(super) const BINDINGS: &[Binding] = &[
         run: ec_generate_key_nif,
     },
     Binding {
+        name: "ecdh_compute_key_nif",
+        arity: 3,
+        job: Job::Normal,
+        run: ecdh_compute_key_nif,
+    },
+    Binding {
         name: "enable_fips_mode_nif",
         arity: 1,
         job: Job::Normal,
         run: |_, arguments| Ok(enable_fips_mode_nif(&arguments[0])),
+    },
+    Binding {
+        name: "evp_compute_key_nif",
+        arity: 3,
+        job: Job::Normal,
+        run: evp_compute_key_nif,
     },
     Binding {
         name: "evp_generate_key_nif",
