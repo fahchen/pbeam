@@ -1,7 +1,8 @@
 //! Native bindings of the `crypto` NIFs (`lib/crypto/c_src/crypto.c`).
 //!
 //! PBeam links the random NIFs `strong_rand_bytes_nif/1`,
-//! `strong_rand_range_nif/1`, and `rand_uniform_nif/2` of `rand`, and the NIFs that the `plug_hello` release calls:
+//! `strong_rand_range_nif/1`, `rand_uniform_nif/2`, and `rand_seed_nif/1` of
+//! `rand`, and the NIFs that the `plug_hello` release calls:
 //! `hash_nif/2`, `pbkdf2_hmac_nif/5`, `info_nif/0`, and `info_lib/0`. It links
 //! `info_fips/0`, `enable_fips_mode_nif/1`, and the algorithm lists of
 //! `crypto:supports/0,1`, which name only the algorithms that PBeam can
@@ -58,7 +59,7 @@ use openssl::{
     sign::Signer,
 };
 use pkey::{pkey_crypt_nif, pkey_sign_nif, pkey_verify_nif};
-use rand::{rand_uniform_nif, strong_rand_bytes_nif, strong_rand_range_nif};
+use rand::{rand_seed_nif, rand_uniform_nif, strong_rand_bytes_nif, strong_rand_range_nif};
 use std::collections::HashMap;
 
 /// The functions of the ERTS `crypto` NIF library, as `(name, arity)` in
@@ -444,6 +445,12 @@ pub(super) const BINDINGS: &[Binding] = &[
         arity: 0,
         job: Job::Normal,
         run: |_, _| Ok(BifResult::Value(Term::Nil)),
+    },
+    Binding {
+        name: "rand_seed_nif",
+        arity: 1,
+        job: Job::Normal,
+        run: |_, arguments| Ok(rand_seed_nif(&arguments[0])),
     },
     Binding {
         name: "rand_uniform_nif",

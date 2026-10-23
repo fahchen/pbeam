@@ -1,7 +1,6 @@
-//! The random NIFs of `crypto` (`rand.c:26-137` of OTP 29.1.1):
+//! The random NIFs of `crypto` (`rand.c:26-155` of OTP 29.1.1):
 //! `strong_rand_bytes_nif/1`, `strong_rand_range_nif/1`,
-//! and `rand_uniform_nif/2`. PBeam does not link `rand_seed_nif/1`
-//! (row "NIF stubs" of `docs/erts-differences.md`). As ERTS, PBeam takes the
+//! `rand_uniform_nif/2`, and `rand_seed_nif/1`. As ERTS, PBeam takes the
 //! bytes from the OpenSSL RAND generator, through the safe `openssl` crate.
 
 use super::*;
@@ -120,4 +119,24 @@ fn mpint(term: &Term) -> Option<BigNum> {
     (length == number.len())
         .then(|| BigNum::from_slice(number).ok())
         .flatten()
+}
+
+/// Run `crypto:rand_seed_nif(Seed)` (`rand.c:139-155`): give `ok` for a
+/// binary and raise `error:badarg` for another term. ERTS mixes the bytes
+/// into the OpenSSL generator with `RAND_seed` (`rand.c:150`). The safe
+/// `openssl` crate has no `RAND_seed`, so PBeam does not feed the bytes to
+/// OpenSSL. The seed only adds entropy to the generator, so the result and
+/// the observable behavior are the same.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(rand_seed_nif(&Term::binary(vec![1])), BifResult::Value(Term::Atom(_))));
+/// assert!(matches!(rand_seed_nif(&Term::Integer(1)), BifResult::Raise { .. }));
+/// ```
+pub(super) fn rand_seed_nif(seed: &Term) -> BifResult {
+    match seed.binary_bytes() {
+        Some(_) => BifResult::Value(Term::static_atom("ok")),
+        None => BifResult::badarg(),
+    }
 }

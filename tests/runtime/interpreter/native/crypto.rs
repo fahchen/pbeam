@@ -613,6 +613,20 @@ fn strong_rand_range_gives_a_binary_or_false_as_erts() {
 }
 
 #[test]
+fn rand_seed_takes_only_a_binary_as_erts() {
+    // `enif_inspect_binary` (rand.c:145-146); `crypto:rand_seed/1` lets
+    // only a binary through, so no probe reaches the `badarg`.
+    assert_eq!(
+        value(rand_seed_nif(&Term::binary(vec![1, 2]))),
+        Term::static_atom("ok")
+    );
+    assert!(matches!(
+        rand_seed_nif(&Term::Integer(1)),
+        BifResult::Raise { .. }
+    ));
+}
+
+#[test]
 fn gives_the_pinned_erts_info() {
     let mut scheduler = scheduler();
     let BifResult::Value(info) = info_nif(&mut scheduler).unwrap() else {

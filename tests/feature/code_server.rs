@@ -64,6 +64,7 @@ const CRYPTO_RAND_OUTPUT: &str = "[[{0,1,true},
   {error,badarg},
   {error,badarg},
   {error,badarg}],
+ [ok,ok,{error,function_clause}],
  [{true,true,5},{true,true,5},{true,true,5},{error,function_clause}],
  [true,9]]
 ";
