@@ -906,6 +906,15 @@ struct Decoder<'a> {
     ets: &'a crate::runtime::ets::NodeTables,
 }
 
+/// Return the record of `def` with `items`, the values in definition order.
+fn record_term(def: Arc<RecordDef>, items: Vec<Term>) -> Term {
+    let mut values = vec![Term::Nil; items.len()];
+    for (position, value) in items.into_iter().enumerate() {
+        values[def.order[position]] = value;
+    }
+    Term::Record(Record::new(def, values))
+}
+
 /// The container that the decoder walk still fills.
 enum FrameKind {
     /// A tuple of the remaining elements.
@@ -925,8 +934,12 @@ enum FrameKind {
         index: i32,
     },
     /// A `RECORD_EXT` with its export flag, of the module, the name, the
-    /// field names, and the values.
-    Record { exported: bool },
+    /// field names, and then the values of the definition that the header
+    /// gives.
+    Record {
+        exported: bool,
+        def: Option<Arc<RecordDef>>,
+    },
     /// A `LOCAL_EXT` with its hash, the start of the wrapped term, and the
     /// local flag of the enclosing term.
     Local {
@@ -1430,11 +1443,9 @@ impl Decoder<'_> {
             // The module, the name, and the field names of a `RECORD_EXT`
             // take only an atom tag (`dec_atom`, `external.c:5300-5318`).
             if let Some(Frame {
-                kind: FrameKind::Record { .. },
-                remaining,
-                items,
+                kind: FrameKind::Record { def: None, .. },
+                ..
             }) = frames.last()
-                && items.len() < 2 + (items.len() + remaining - 2) / 2
                 && !matches!(tag, 100 | 115 | 118 | 119)
             {
                 return Err(DecodeError::Badarg);
@@ -1608,7 +1619,10 @@ impl Decoder<'_> {
                     let count = self.u32()? as usize;
                     let exported = self.u8()? == 1;
                     frames.push(Frame {
-                        kind: FrameKind::Record { exported },
+                        kind: FrameKind::Record {
+                            exported,
+                            def: None,
+                        },
                         remaining: 2 + 2 * count,
                         items: Vec::with_capacity(2 + 2 * count),
                     });
@@ -1697,12 +1711,23 @@ impl Decoder<'_> {
                         }
                         break;
                     }
-                    FrameKind::Record { exported } => {
+                    FrameKind::Record {
+                        exported,
+                        ref mut def,
+                    } => {
                         frame.items.push(term);
                         frame.remaining -= 1;
+                        // The header ends when the values remain.
+                        if def.is_none() && frame.items.len() == frame.remaining + 2 {
+                            let header = std::mem::take(&mut frame.items);
+                            *def = Some(self.record_def(exported, header)?);
+                        }
                         if frame.remaining == 0 {
                             let frame = frames.pop().expect("a record frame");
-                            term = self.complete_record(exported, frame.items)?;
+                            let FrameKind::Record { def: Some(def), .. } = frame.kind else {
+                                unreachable!("a record frame has its definition");
+                            };
+                            term = record_term(def, frame.items);
                             continue;
                         }
                         break;
@@ -1720,15 +1745,14 @@ impl Decoder<'_> {
         }
     }
 
-    /// Build the record of a `RECORD_EXT` from the module, the name, the
-    /// field names, and the values in definition order. A module, a name,
-    /// or a field name that is not an atom, or a field name that occurs
-    /// twice, is `badarg`. The definition is the loaded one when it has the
-    /// same export flag and fields (`dec_term`, `external.c:5300-5367`).
-    fn complete_record(&self, exported: bool, items: Vec<Term>) -> Result<Term, DecodeError> {
-        let count = (items.len() - 2) / 2;
-        // The parse loop takes only atom tags at these positions.
-        let mut atoms = items[..2 + count].iter().map(|item| {
+    /// Return the definition of a `RECORD_EXT` header: the module, the
+    /// name, and the field names in definition order. A field name that
+    /// occurs twice is `badarg` before any value is decoded. The definition
+    /// is the loaded one when it has the same export flag and fields
+    /// (`dec_term`, `external.c:5300-5367`).
+    fn record_def(&self, exported: bool, header: Vec<Term>) -> Result<Arc<RecordDef>, DecodeError> {
+        // The parse loop takes only atom tags in the header.
+        let mut atoms = header.iter().map(|item| {
             let Term::Atom(atom) = item else {
                 unreachable!()
             };
@@ -1736,18 +1760,12 @@ impl Decoder<'_> {
         });
         let module = atoms.next().expect("a module");
         let name = atoms.next().expect("a name");
-        let keys: Vec<_> = atoms.collect();
-        let fields = keys.into_iter().map(|key| (key, None)).collect();
+        let fields = atoms.map(|key| (key, None)).collect();
         let def = RecordDef::new(module, name, exported, fields, self.atoms);
         if def.keys.windows(2).any(|pair| pair[0] == pair[1]) {
             return Err(DecodeError::Badarg);
         }
-        let def = records::canonical(self.code, self.atoms, def);
-        let mut values = vec![Term::Nil; count];
-        for (position, value) in items.into_iter().skip(2 + count).enumerate() {
-            values[def.order[position]] = value;
-        }
-        Ok(Term::Record(Record::new(def, values)))
+        Ok(records::canonical(self.code, self.atoms, def))
     }
 
     /// Decode `FLOAT_EXT`: 31 bytes of C text, as `sys_chars_to_double`
