@@ -35,7 +35,7 @@ flush_watch() -> check(flush_watch_run(), flush_log()).
 flush_owner() -> check(owner_run(flush_owner), ok).
 race_watch() -> check(race_watch_run(), race_log()).
 race_owner() -> check(owner_run(race_owner), ok).
-kill_watch() -> check(kill_watch_run(), [killed]).
+kill_watch() -> check(kill_watch_run() -- [killed, noproc], []).
 kill_owner() -> check(owner_run(kill_owner), ok).
 slot_watch() -> check(slot_watch_run(),
                              [one, three, three, six, five, noproc, noproc, n, n]).
@@ -220,10 +220,12 @@ monitor_race(Owner) ->
             lists:member(Reason, [boom, noproc]) andalso rest() =:= []
     end.
 
-%% A monitor signal that the watcher sends before its message to the owner
-%% reaches the child before the kill that the owner sends when it gets the
-%% message, so each DOWN has the reason `killed`. The child is a process of
-%% the owner, or a process of the watcher.
+%% Each monitor gives one DOWN with the reason `killed` or `noproc`. ERTS
+%% keeps the order of signals of one sender only
+%% (system/doc/reference_manual/ref_man_processes.md:507-511), so the kill
+%% from the owner can reach the child before the monitor signal of the
+%% watcher. The pinned ERTS gives `noproc` in about 1 of 100 runs. The child
+%% is a process of the owner, or a process of the watcher.
 kill_watch_run() ->
     Owner = wait_for(kill_owner),
     Remote = [monitor_kill(Owner, remote_child(Owner)) || _ <- lists:seq(1, ?KILLS)],

@@ -559,17 +559,20 @@ port_term_give() ->
 
 %% The root that makes an atomic array. A run with scheduler threads
 %% cannot share the arrays.
-%% The root that makes a counter array and an unsigned atomic array, gives
-%% them to the other root, and adds to the counter. Each root adds to the
+%% The root that makes a counter array, a `write_concurrency` counter
+%% array, and an unsigned atomic array, gives them to the other root, and
+%% adds to the counters. Each root adds to the
 %% same arrays from its own scheduler.
 counters_hold() ->
     Counter = counters:new(1, []),
+    Concurrent = counters:new(1, [write_concurrency]),
     Unsigned = atomics:new(1, [{signed, false}]),
     true = register(counters_hold, self()),
-    receive {arrays, From} -> From ! {arrays, Counter, Unsigned} end,
+    receive {arrays, From} -> From ! {arrays, Counter, Concurrent, Unsigned} end,
     ok = counters:add(Counter, 1, 3),
+    ok = counters:add(Concurrent, 1, 3),
     receive added -> ok end,
-    {counters:get(Counter, 1), atomics:get(Unsigned, 1)}.
+    {counters:get(Counter, 1), counters:get(Concurrent, 1), atomics:get(Unsigned, 1)}.
 
 %% The root that adds to the arrays of `counters_hold/0`. The subtraction
 %% wraps the unsigned atomic around at 64 bits.
@@ -577,8 +580,9 @@ counters_add() ->
     Pid = wait_for(counters_hold, 100000),
     Pid ! {arrays, self()},
     receive
-        {arrays, Counter, Unsigned} ->
+        {arrays, Counter, Concurrent, Unsigned} ->
             ok = counters:add(Counter, 1, 5),
+            ok = counters:sub(Concurrent, 1, -5),
             ok = atomics:sub(Unsigned, 1, 1),
             Pid ! added,
             ok
