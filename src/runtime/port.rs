@@ -12,7 +12,11 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
-use super::{host::spawn::Child, process::MonitorLinkTree, scheduler::poll::NodePoll};
+use super::{
+    host::spawn::Child,
+    process::MonitorLinkTree,
+    scheduler::poll::{Direction, NodePoll},
+};
 use crate::term::{PortId, ProcessId, Reference, Term};
 use inet::Inet;
 
@@ -84,6 +88,8 @@ pub(super) struct Port {
     /// The poll thread of the node, which a new fd of the port wakes (see
     /// [`PortGuard`]).
     pub(super) poll: Arc<NodePoll>,
+    /// The identifier of the port, which names its fds in the poll.
+    pub(super) id: PortId,
 }
 
 /// The driver of a port and the data of the driver.
@@ -239,7 +245,10 @@ pub(super) enum PortEvent {
 
 impl Port {
     /// Return the fd that the poll waits to read for the port, as the read
-    /// select of its driver (see [`wait_fds`]).
+    /// select of its driver: the output pipe of a spawn port before its end
+    /// of file, and then its status pipe, the socket of a `tcp_inet` listen
+    /// port with a caller in its accept queue, or the socket of an active
+    /// `udp_inet` port.
     fn wait_fd(&self) -> Option<c_int> {
         match &self.driver {
             Driver::Spawn(spawn) => match spawn.input {
@@ -254,8 +263,8 @@ impl Port {
         }
     }
 
-    /// Return the fd that the poll waits to write for the port (see
-    /// [`write_fds`]).
+    /// Return the fd that the poll waits to write for the port: the socket
+    /// of a `tcp_inet` port with queued output.
     fn write_fd(&self) -> Option<c_int> {
         match &self.driver {
             Driver::Inet(inet) => inet.send_fd(),
@@ -297,29 +306,39 @@ pub(super) type PortCell = Arc<Mutex<Option<Port>>>;
 /// ```
 pub(super) fn lock(cell: &PortCell) -> PortGuard<'_> {
     let slot = cell.lock().expect("a port lock is not poisoned");
-    let before = interest(&slot);
+    let before = slot.as_ref().map(Interest::of);
     PortGuard { slot, before }
 }
 
-/// The fds that the poll waits to read and to write for a port slot.
-type Interest = (Option<c_int>, Option<c_int>);
-
-/// Return the [`Interest`] of `slot`: none for a closed port.
-fn interest(slot: &Option<Port>) -> Interest {
-    slot.as_ref()
-        .map_or((None, None), |port| (port.wait_fd(), port.write_fd()))
+/// The fds that the poll waits on for a port, with the port.
+#[derive(Debug)]
+struct Interest {
+    read: Option<c_int>,
+    write: Option<c_int>,
+    id: PortId,
+    scheduler: usize,
+    poll: Arc<NodePoll>,
 }
 
-/// The held lock of one port. When the port waits for an fd at the
-/// release that it did not wait for at the lock, the release wakes the
-/// poll thread of the node, so that the thread waits on the new fd, as
-/// `erts_poll_control` adds an fd to the poll set of ERTS
-/// (`erl_check_io.c:1422-1434`). A removed fd wakes no thread: the next
-/// wait of the thread leaves it out.
+impl Interest {
+    fn of(port: &Port) -> Self {
+        Self {
+            read: port.wait_fd(),
+            write: port.write_fd(),
+            id: port.id,
+            scheduler: port.scheduler,
+            poll: Arc::clone(&port.poll),
+        }
+    }
+}
+
+/// The held lock of one port. At the release, the guard gives each fd of
+/// the port that changed to the poll thread of the node (see
+/// [`NodePoll::register`]), and a closed port removes its fds.
 #[derive(Debug)]
 pub(super) struct PortGuard<'a> {
     slot: MutexGuard<'a, Option<Port>>,
-    before: Interest,
+    before: Option<Interest>,
 }
 
 impl std::ops::Deref for PortGuard<'_> {
@@ -338,13 +357,23 @@ impl std::ops::DerefMut for PortGuard<'_> {
 
 impl Drop for PortGuard<'_> {
     fn drop(&mut self) {
-        let Some(port) = self.slot.as_ref() else {
+        let after = self.slot.as_ref().map(Interest::of);
+        let Some(owner) = after.as_ref().or(self.before.as_ref()) else {
             return;
         };
-        let (read, write) = (port.wait_fd(), port.write_fd());
-        if (read.is_some() && read != self.before.0) || (write.is_some() && write != self.before.1)
-        {
-            port.poll.changed();
+        let fd = |interest: &Option<Interest>, read: bool| {
+            interest
+                .as_ref()
+                .and_then(|interest| if read { interest.read } else { interest.write })
+        };
+        for (direction, read) in [(Direction::Read, true), (Direction::Write, false)] {
+            owner.poll.register(
+                owner.id,
+                owner.scheduler,
+                direction,
+                fd(&self.before, read),
+                fd(&after, read),
+            );
         }
     }
 }
@@ -358,6 +387,10 @@ impl Ports {
     /// ports.insert_at(PortId(7), port);
     /// ```
     pub(super) fn insert_at(&mut self, id: PortId, port: Port) {
+        port.poll
+            .register(id, port.scheduler, Direction::Read, None, port.wait_fd());
+        port.poll
+            .register(id, port.scheduler, Direction::Write, None, port.write_fd());
         self.by_id
             .insert(id, (port.scheduler, Arc::new(Mutex::new(Some(port)))));
     }
@@ -421,38 +454,6 @@ impl Ports {
 /// after the table lock is released.
 fn served(handles: &[(PortId, PortCell)]) -> impl Iterator<Item = (PortId, PortGuard<'_>)> {
     handles.iter().map(|(id, cell)| (*id, lock(cell)))
-}
-
-/// Return the fds that the IO poll waits for: the output pipe of each
-/// spawn port before its end of file, and then its status pipe, and the
-/// socket of each `tcp_inet` listen port with a caller in its accept
-/// queue, and the socket of each active `udp_inet` port. A port with
-/// `exit_status` waits for its status pipe after its end of file. A port
-/// with `eof` that sent `{Port, eof}` waits for no fd.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// assert_eq!(wait_fds(&handles), vec![child.output_fd()]);
-/// ```
-pub(super) fn wait_fds(handles: &[(PortId, PortCell)]) -> Vec<c_int> {
-    served(handles)
-        .filter_map(|(_, slot)| slot.as_ref()?.wait_fd())
-        .collect()
-}
-
-/// Return the fds that the IO poll waits to write: the socket of each
-/// `tcp_inet` port with queued output.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// assert_eq!(write_fds(&handles), vec![]);
-/// ```
-pub(super) fn write_fds(handles: &[(PortId, PortCell)]) -> Vec<c_int> {
-    served(handles)
-        .filter_map(|(_, slot)| slot.as_ref()?.write_fd())
-        .collect()
 }
 
 /// Return the `tcp_inet` port of `handles` whose fd for `select` is `fd`.

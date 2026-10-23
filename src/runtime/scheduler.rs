@@ -503,7 +503,7 @@ impl Scheduler {
         let mut resources = Resources::default();
         resources.put(Ttys::default());
         let menu_pair = std::os::unix::net::UnixStream::pair().expect("a menu socket pair opens");
-        let node = Node::single();
+        let (node, wake) = Node::single();
         Scheduler {
             processes: ProcessSlots::default(),
             freed: HashMap::new(),
@@ -535,7 +535,7 @@ impl Scheduler {
             node,
             multi: false,
             index: 0,
-            wake: None,
+            wake: Some(wake),
         }
     }
 
@@ -1259,12 +1259,9 @@ impl Scheduler {
     /// assert!(!scheduler.has_external_sources());
     /// ```
     pub(super) fn has_external_sources(&mut self) -> bool {
-        // The table lock is released before the scans lock each port.
-        let handles = self.node.ports().handles(self.index);
         self.resources.borrow_mut::<Ttys>().input_selected()
             || self.dirty.running()
-            || !crate::runtime::port::wait_fds(&handles).is_empty()
-            || !crate::runtime::port::write_fds(&handles).is_empty()
+            || self.node.poll.serves(self.index)
             // A handled host signal becomes a message to `erl_signal_server`.
             || self.whereis("erl_signal_server").is_some()
     }
@@ -1276,18 +1273,13 @@ impl Scheduler {
     /// for these events in its poll thread (`erl_process.c:3372`), and an
     /// idle scheduler sleeps in its poll until the next timer end
     /// (`erl_process.c:3536-3567`). A scheduler waits here when no process
-    /// can run, and with no timeout when the node poll thread marked it (see
-    /// [`Self::check_io`]). A signal stops the wait with `EINTR`, or
+    /// can run. The node poll thread waits on fd 0 and on the fds of the
+    /// ports, and writes the wake socket of the scheduler when one is ready
+    /// (see [`Self::check_io`]). A signal stops the wait with `EINTR`, or
     /// makes the notify pipe readable when it arrives before the wait.
     ///
-    /// When fd 0 has input, its end of file, or an error, the select ends,
-    /// and its recipient gets `{select, TTY, Reference, ready_input}`
-    /// (`erl_check_io.c:2135-2171`, `prepare_select_msg` at
-    /// `erl_check_io.c:699-760`). A message to a process that does not exist
-    /// is dropped (`erl_check_io.c:851-856`). When fd 0 is not open, the
-    /// select ends without a message, as a select that `erts_poll_control`
-    /// cannot add (`erl_check_io.c:1422-1434`). Each ready pipe of a port
-    /// goes to [`Self::port_ready`]. A completion only wakes the scheduler;
+    /// After the wait, the scheduler serves the ready fds (see
+    /// [`Self::check_io`]). A completion only wakes the scheduler;
     /// [`Self::complete_dirty_calls`] takes it. The next scheduling step
     /// reads the signals in the notify pipe (see [`Self::check_signals`]).
     ///
@@ -1314,25 +1306,45 @@ impl Scheduler {
             self.node.poll.clear_stdin(self.index);
         }
         let dirty = self.dirty.running();
-        let handles = self.node.ports().handles(self.index);
-        let ports = crate::runtime::port::wait_fds(&handles);
-        let writes = crate::runtime::port::write_fds(&handles);
-        drop(handles);
+        // The fds that the poll thread found ready go first; the wait would
+        // not see them.
+        self.check_io()?;
         let wake = self.wake.as_ref().map(|wake| wake.as_raw_fd());
-        let fds: Vec<_> = [
-            selected.then_some(libc::STDIN_FILENO),
+        let own: Vec<_> = [
             dirty.then(|| self.dirty.wake_fd()),
             signal::notify_fd(),
-            wake,
+            wake.filter(|_| self.multi),
         ]
         .into_iter()
         .flatten()
-        .chain(ports)
         .collect();
-        if fds.is_empty() && writes.is_empty() {
+        if own.is_empty() && !selected && !self.node.poll.serves(self.index) {
             return Ok(false);
         }
-        let (readiness, writable) = input::wait(&fds, &writes, timeout);
+        // In its idle wait the scheduler is the only waiter on fd 0 and on
+        // the fds of its ports, as an ERTS scheduler polls its own pollset
+        // when it sleeps (`erl_process.c:3536-3567`). The poll thread waits
+        // on them while the scheduler runs processes (see `poll`).
+        let index = self.index;
+        let owned: Vec<_> = self
+            .node
+            .poll
+            .take_over(index)
+            .into_iter()
+            .map(|entry| (entry, index))
+            .collect();
+        let mut reads: Vec<_> = own
+            .into_iter()
+            .chain(wake.filter(|_| !self.multi))
+            .collect();
+        let mut writes = Vec::new();
+        for &((fd, direction), _) in &owned {
+            match direction {
+                poll::Direction::Write => writes.push(fd),
+                _ => reads.push(fd),
+            }
+        }
+        let (readiness, writable) = input::wait(&reads, &writes, timeout);
         if let (Some(wake), Some(fd)) = (&mut self.wake, wake)
             && matches!(&readiness, Readiness::Ready(ready) if ready.contains(&fd))
         {
@@ -1343,48 +1355,83 @@ impl Scheduler {
         {
             self.dirty.clear_wake();
         }
-        // Only fd 0 can be closed: the pipes of a port, the notify pipe, and
-        // the wake socket stay open while the scheduler waits for them. The
-        // select of fd 0 ends when fd 0 is ready or not open.
-        if selected && readiness.ended(libc::STDIN_FILENO) {
-            let ttys = self.resources.borrow_mut::<Ttys>();
-            let select = ttys.take_input_select().expect("fd 0 has a select");
-            self.node.poll.clear_stdin(self.index);
-            if readiness != Readiness::Invalid {
-                let message = Term::tuple(vec![
-                    Term::static_atom("select"),
-                    Term::Reference(select.tty),
-                    select.reference,
-                    Term::static_atom("ready_input"),
-                ]);
-                self.deliver(select.recipient, message);
-            }
-        }
-        for fd in readiness.into_ready() {
-            self.port_ready(fd)?;
-        }
-        for fd in writable {
-            self.port_writable(fd)?;
-        }
+        let ready: Vec<poll::Ready> = match &readiness {
+            Readiness::Ready(fds) => owned
+                .iter()
+                .map(|&(entry, _)| entry)
+                .filter(|&(fd, direction)| match direction {
+                    poll::Direction::Write => writable.contains(&fd),
+                    _ => fds.contains(&fd),
+                })
+                .collect(),
+            Readiness::Pending => Vec::new(),
+            Readiness::Invalid => poll::invalid(&self.node.poll, &owned)
+                .into_iter()
+                .map(|(entry, _)| entry)
+                .collect(),
+        };
+        // The scheduler serves its fds before the thread waits on them
+        // again, so that the thread does not report them a second time.
+        let result = self.serve(&ready);
+        self.node.poll.hand_back(index);
+        result?;
+        self.check_io()?;
         Ok(true)
     }
 
-    /// Handle the I/O that the poll thread of the node found ready for this
-    /// scheduler, when it set the I/O mark, as an ERTS scheduler checks for
-    /// I/O at a switch point (`erl_process.c:9946-9960`). The check reads one
-    /// flag and makes no system call when the mark is clear. The scheduler
-    /// waits on its own fds with no timeout, and then the thread waits on
-    /// the fds of the scheduler again.
+    /// Serve the fds that the poll thread of the node found ready for this
+    /// scheduler, as an ERTS scheduler runs the port tasks of the poll
+    /// thread at a switch point (`erl_process.c:9946-9960`). The check
+    /// reads one flag and makes no system call when no fd is ready. Then the
+    /// thread waits on the served fds again.
+    ///
+    /// When fd 0 has input, its end of file, or an error, the select ends,
+    /// and its recipient gets `{select, TTY, Reference, ready_input}`
+    /// (`erl_check_io.c:2135-2171`, `prepare_select_msg` at
+    /// `erl_check_io.c:699-760`). A message to a process that does not exist
+    /// is dropped (`erl_check_io.c:851-856`). When fd 0 is not open, the
+    /// select ends without a message, as a select that `erts_poll_control`
+    /// cannot add (`erl_check_io.c:1422-1434`). Each ready fd of a port
+    /// goes to [`Self::port_ready`] or [`Self::port_writable`].
     ///
     /// # Errors
     ///
-    /// The errors of [`Self::wait_events`].
+    /// The errors of [`Self::port_ready`] and [`Self::port_writable`].
     pub(super) fn check_io(&mut self) -> Result<(), BeamError> {
-        if !self.node.poll.take_mark(self.index) {
+        let ready = self.node.poll.take_ready(self.index);
+        if ready.is_empty() {
             return Ok(());
         }
-        self.wait_events(Some(Duration::ZERO))?;
-        self.node.poll.changed();
+        let result = self.serve(&ready);
+        self.node.poll.rearm(self.index, &ready);
+        result
+    }
+
+    /// Serve each fd of `ready` (see [`Self::check_io`]).
+    fn serve(&mut self, ready: &[poll::Ready]) -> Result<(), BeamError> {
+        for &(fd, direction) in ready {
+            if fd == libc::STDIN_FILENO && direction != poll::Direction::Write {
+                let ttys = self.resources.borrow_mut::<Ttys>();
+                let Some(select) = ttys.take_input_select() else {
+                    continue;
+                };
+                self.node.poll.clear_stdin(self.index);
+                if direction == poll::Direction::Read {
+                    let message = Term::tuple(vec![
+                        Term::static_atom("select"),
+                        Term::Reference(select.tty),
+                        select.reference,
+                        Term::static_atom("ready_input"),
+                    ]);
+                    self.deliver(select.recipient, message);
+                }
+                continue;
+            }
+            match direction {
+                poll::Direction::Write => self.port_writable(fd)?,
+                _ => self.port_ready(fd)?,
+            }
+        }
         Ok(())
     }
 

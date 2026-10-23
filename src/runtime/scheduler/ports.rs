@@ -66,7 +66,11 @@ impl Scheduler {
     ) -> Result<PortId, BeamError> {
         let mut links = MonitorLinkTree::default();
         links.insert(owner, ());
+        // The identifiers belong to the node, so a port of one scheduler
+        // never compares equal to a port of another.
+        let id = self.node.next_port()?;
         let port = Port {
+            id,
             owner,
             links,
             name,
@@ -79,9 +83,6 @@ impl Scheduler {
             scheduler: self.index,
             poll: std::sync::Arc::clone(&self.node.poll),
         };
-        // The identifiers belong to the node, so a port of one scheduler
-        // never compares equal to a port of another.
-        let id = self.node.next_port()?;
         self.node.ports().insert_at(id, port);
         super::poll::NodePoll::start(&self.node);
         self.process_mut(owner)
