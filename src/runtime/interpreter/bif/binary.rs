@@ -1539,6 +1539,242 @@ pub(super) fn copy(process: &mut ProcessState, subject: &Term, count: &Term) -> 
     Value(Term::binary(copied))
 }
 
+/// Return whether `endianness` is `little`, or `None` for a term that is
+/// not `big` or `little`, as `do_encode_unsigned` and `do_decode_unsigned`
+/// check it (`erl_bif_binary.c:2575-2576`, `2656-2657`).
+fn little_endian(endianness: &Term) -> Option<bool> {
+    if *endianness == Term::static_atom("little") {
+        Some(true)
+    } else {
+        (*endianness == Term::static_atom("big")).then_some(false)
+    }
+}
+
+/// Run `binary:encode_unsigned/1,2` as `do_encode_unsigned` does
+/// (`erl_bif_binary.c:2572-2647`): return the bytes of a non-negative
+/// integer in the fewest bytes, and at least one, with the most significant
+/// byte first for `big` and last for `little`. A negative integer, a term
+/// that is not an integer, and an endianness that is not `big` or `little`
+/// raise `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // <<1, 2>>
+/// let bytes = encode_unsigned(&Term::Integer(258), &Term::static_atom("big"));
+/// ```
+pub(super) fn encode_unsigned(value: &Term, endianness: &Term) -> BifResult {
+    let (Some(value), Some(little)) = (value.bigint(), little_endian(endianness)) else {
+        return BifResult::badarg();
+    };
+    let (sign, mut bytes) = value.to_bytes_be();
+    if sign == num_bigint::Sign::Minus {
+        return BifResult::badarg();
+    }
+    if little {
+        bytes.reverse();
+    }
+    Value(Term::binary(bytes))
+}
+
+/// Run `binary:decode_unsigned/1,2` as `do_decode_unsigned` does
+/// (`erl_bif_binary.c:2649-2816`): return the non-negative integer of the
+/// bytes of a binary, with the most significant byte first for `big` and
+/// last for `little`. The empty binary gives 0. A bitstring that is not a
+/// whole number of bytes, a term that is not a bitstring, and an
+/// endianness that is not `big` or `little` raise `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let value = decode_unsigned(&Term::binary(vec![1, 2]), &Term::static_atom("big"));
+/// assert!(matches!(value, BifResult::Value(Term::Integer(258))));
+/// ```
+pub(super) fn decode_unsigned(subject: &Term, endianness: &Term) -> BifResult {
+    let (Some(bytes), Some(little)) = (subject.binary_bytes(), little_endian(endianness)) else {
+        return BifResult::badarg();
+    };
+    let value = if little {
+        num_bigint::BigInt::from_bytes_le(num_bigint::Sign::Plus, bytes)
+    } else {
+        num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, bytes)
+    };
+    Value(Term::from_bigint(value))
+}
+
+/// Run `binary:referenced_byte_size/1` as `binary_referenced_byte_size_1`
+/// does (`erl_bif_binary.c:2508-2534`): the size of the binary that a
+/// bitstring refers to ([`Binary::referenced_bytes`]), or `badarg` for a
+/// term that is not a bitstring.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(referenced_byte_size(&Term::binary(vec![1])), BifResult::Value(Term::Integer(1))));
+/// ```
+pub(super) fn referenced_byte_size(subject: &Term) -> BifResult {
+    match subject {
+        Term::Binary(bytes) => Value(Term::Integer(bytes.referenced_bytes() as i64)),
+        _ => BifResult::badarg(),
+    }
+}
+
+/// The number of bits that one step of `binary:longest_common_prefix/1`
+/// compares: the bits of one cache line of 64 bytes
+/// (`erl_bif_binary.c:2101`, `2120`; `ASSUMED_CACHE_LINE_SIZE`,
+/// `erts/configure.ac:300-322`, default 64).
+const COMMON_STRIDE_BITS: u64 = 512;
+
+/// Return the error of a list of `count` binaries with the tail `tail` for
+/// `binary:longest_common_prefix/1`, in the ERTS order
+/// (`erl_bif_binary.c:2212-2216`): `system_limit` for `MAX_ARITYVAL`
+/// (`2^24 - 1`, `erl_term.h:322`) or more binaries, then `badarg` for an
+/// improper tail or no binary, else `None`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(list_error(2, &Term::nil()).is_none());
+/// ```
+fn list_error(count: usize, tail: &Term) -> Option<BifResult> {
+    if count >= (1 << 24) - 1 {
+        return Some(BifResult::Raise {
+            class: ExceptionClass::Error,
+            reason: Term::static_atom("system_limit"),
+        });
+    }
+    (!tail.is_nil() || count == 0).then(BifResult::badarg)
+}
+
+/// Start `binary:longest_common_prefix/1` (`suffix` false) or
+/// `binary:longest_common_suffix/1` (`suffix` true) as
+/// `start_longest_common` does (`erl_bif_binary.c:2182-2239`). Each element
+/// must be a binary of whole bytes, and the list must be proper and not
+/// empty, else the call raises `badarg`. A list of `MAX_ARITYVAL` or more
+/// binaries raises `system_limit` before the tail check
+/// (`erl_bif_binary.c:2212-2216`). One binary, or an empty binary, gives
+/// the smallest size with no step.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let list = Term::list_from([Term::binary(b"ab".to_vec()), Term::binary(b"ac".to_vec())]);
+/// assert!(matches!(longest_common(&mut process, &list, false), BifResult::Value(Term::Integer(1))));
+/// ```
+pub(super) fn longest_common(process: &mut ProcessState, list: &Term, suffix: bool) -> BifResult {
+    let mut binaries = Vec::new();
+    let mut smallest = u64::MAX;
+    let mut tail = list;
+    while let Some((head, rest)) = tail.cons_cell() {
+        let Some(bytes) = head.binary_bytes() else {
+            return BifResult::badarg();
+        };
+        smallest = smallest.min(bytes.len() as u64 * 8);
+        binaries.push(head.clone());
+        tail = rest;
+    }
+    if let Some(error) = list_error(binaries.len(), tail) {
+        return error;
+    }
+    if smallest == 0 || binaries.len() == 1 {
+        return Value(Term::Integer((smallest / 8) as i64));
+    }
+    longest_common_turn(process, &binaries, 1, smallest, 0, suffix)
+}
+
+/// Run one turn of `binary:longest_common_prefix/1` or
+/// `binary:longest_common_suffix/1` as `continue_longest_common` does
+/// (`erl_bif_binary.c:2078-2180`), from the binary `index` at the bit
+/// `position` with the common size `smallest` in bits. Each step compares
+/// up to [`COMMON_STRIDE_BITS`] bits of one binary with the first binary,
+/// and costs the bits that the window kept from a budget of 10 for each
+/// reduction left. A mismatch makes the common size smaller. When the
+/// budget is used, the call uses all reductions and traps to
+/// `erlang:binary_longest_prefix_trap/4` or
+/// `erlang:binary_longest_suffix_trap/4`. Else it bumps one reduction for
+/// each 10 bits used and returns the common size in bytes.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = longest_common_turn(&mut process, &binaries, 1, 16, 0, false);
+/// ```
+pub(super) fn longest_common_turn(
+    process: &mut ProcessState,
+    binaries: &[Term],
+    mut index: usize,
+    mut smallest: u64,
+    mut position: u64,
+    suffix: bool,
+) -> BifResult {
+    let bytes = |index: usize| {
+        binaries[index]
+            .binary_bytes()
+            .expect("a checked binary of whole bytes")
+    };
+    // `get_reds` gives an `Uint`, which the `Sint` budget reads as negative
+    // for a negative count (`erl_bif_binary.c:2085`, `2098`).
+    let initial = process
+        .bif_reductions_unsigned()
+        .wrapping_mul(LOOP_FACTOR)
+        .max(1) as i64;
+    let mut reds = initial;
+    while position < smallest {
+        if reds < 0 {
+            process.bump_all_reductions();
+            return BifResult::TrapBif {
+                module: "erlang",
+                function: if suffix {
+                    "binary_longest_suffix_trap"
+                } else {
+                    "binary_longest_prefix_trap"
+                },
+                arguments: vec![
+                    Term::tuple(binaries.to_vec()),
+                    Term::Integer(index as i64),
+                    Term::Integer(smallest as i64),
+                    Term::Integer(position as i64),
+                ],
+            };
+        }
+        let mut stride = (smallest - position).min(COMMON_STRIDE_BITS);
+        while reds >= 0 && position < smallest {
+            // The window of `stride` bits at `position` from the start, or
+            // from the end for a suffix.
+            let (start, len) = ((position / 8) as usize, (stride / 8) as usize);
+            let (first, other) = (bytes(0), bytes(index));
+            let (first, other) = if suffix {
+                (
+                    &first[first.len() - start - len..first.len() - start],
+                    &other[other.len() - start - len..other.len() - start],
+                )
+            } else {
+                (&first[start..start + len], &other[start..start + len])
+            };
+            let pairs = first.iter().zip(other);
+            let mismatch = if suffix {
+                pairs.rev().position(|(a, b)| a != b)
+            } else {
+                pairs.into_iter().position(|(a, b)| a != b)
+            };
+            if let Some(offset) = mismatch {
+                stride = offset as u64 * 8;
+                smallest = position + stride;
+            }
+            index += 1;
+            reds -= stride as i64;
+            if index == binaries.len() {
+                position += stride;
+                index = 1;
+                break;
+            }
+        }
+    }
+    process
+        .bump_reductions(i32::try_from((initial - reds) / LOOP_FACTOR as i64).unwrap_or(i32::MAX));
+    Value(Term::Integer((position / 8) as i64))
+}
+
 #[cfg(test)]
 #[path = "../../../../tests/runtime/interpreter/bif/binary.rs"]
 mod tests;
