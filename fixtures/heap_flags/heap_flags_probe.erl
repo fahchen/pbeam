@@ -43,7 +43,7 @@ process_errors() ->
 %% system_flag/2 sets the node defaults that a new process takes
 %% (bif.c:5037-5105): fullsweep_after keeps at most 65535, and
 %% min_heap_size and min_bin_vheap_size keep the next heap size, also for
-%% 0. The probe restores the start values at the end.
+%% 0, as an int that wraps to 32 bits (erl_init.c:110-111). The probe restores the start values at the end.
 system_flags() ->
     Set = [erlang:system_flag(min_heap_size, 0),
            erlang:system_flag(min_heap_size, 300),
@@ -58,11 +58,13 @@ system_flags() ->
          map(process_flag(max_heap_size, #{size => 1000}))}
     end),
     Error = badarg(fun() -> erlang:system_flag(max_heap_size, 300) end),
+    Wrap = erlang:system_flag(min_bin_vheap_size, 1 bsl 33),
+    WrapChild = in_new(fun() -> info(self()) end),
     Restore = [erlang:system_flag(min_heap_size, 233),
                erlang:system_flag(min_bin_vheap_size, 46422),
                erlang:system_flag(fullsweep_after, 65535),
                map(erlang:system_flag(max_heap_size, #{size => 0, kill => true}))],
-    {Set, Child, Error, Restore}.
+    {Set, Child, Error, Wrap, WrapChild, Restore}.
 
 %% A heap size at or above the largest heap size of ERTS. ERTS stops the
 %% emulator in erts_next_heap_size (erl_gc.c:335).

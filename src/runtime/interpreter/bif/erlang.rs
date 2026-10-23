@@ -531,7 +531,7 @@ const MAX_BACKTRACE_SIZE: i64 = 64;
 /// and return the old default (`bif.c:5037-5105`): `fullsweep_after`
 /// takes a small integer of 0 or more and keeps at most 65535,
 /// `min_heap_size` and `min_bin_vheap_size` take a small integer of 0 or
-/// more and keep the next heap size, also for 0, and `max_heap_size` takes
+/// more and keep the next heap size as an `int` that wraps to 32 bits, also for 0, and `max_heap_size` takes
 /// a value that `max_heap_size` reads with a size of 0 or at least the
 /// node minimum heap size. An item that ERTS does not
 /// know raises `badarg`, also `time_offset` with a value that is not
@@ -629,6 +629,9 @@ pub(super) fn system_flag(
             }
             ("min_heap_size" | "min_bin_vheap_size", Some(size)) => {
                 let new = next_heap_size(size).ok_or_else(|| no_heap_size(size))?;
+                // ERTS keeps `H_MIN_SIZE` and `BIN_VH_MIN_SIZE` as `int`
+                // (`erl_init.c:110-111`), so the value wraps to 32 bits.
+                let new = i64::from(new as i32);
                 let mut flags = scheduler.node().heap_flags_mut();
                 let HeapFlags {
                     min_heap_size,

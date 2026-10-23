@@ -41,8 +41,8 @@ fn results() -> Vec<(&'static str, String)> {
         (
             "system_flags",
             format!(
-                "{{[233,12,46422,65535,65535,{DEFAULT_MAX}],{{[376,12,7,{small}],376,{small}}},badarg,\
-                 [376,12,7,{small}]}}"
+                "{{[233,12,46422,65535,65535,{DEFAULT_MAX}],{{[376,12,7,{small}],376,{small}}},badarg,12,\
+                 [376,507125831,7,{small}],[376,507125831,7,{small}]}}"
             ),
         ),
     ]
