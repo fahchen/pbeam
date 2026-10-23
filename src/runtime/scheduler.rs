@@ -3533,7 +3533,11 @@ impl Scheduler {
             Term::Map(metadata),
         ]);
         let target = match self.node.system_logger() {
-            Term::Pid(target) if self.node.live_owner(target).is_some() => Some(target),
+            // The dispatcher runs after the exit of the sender, so a sender
+            // that is the system logger is a pid that does not exist.
+            Term::Pid(target) if target != id && self.node.live_owner(target).is_some() => {
+                Some(target)
+            }
             Term::Pid(_) => {
                 self.node.swap_system_logger(Term::static_atom("logger"));
                 self.whereis("logger")

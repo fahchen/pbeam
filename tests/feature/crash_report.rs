@@ -121,7 +121,7 @@ fn writes_the_report_to_stderr_when_no_logger_takes_it() {
     // caller and then the crashing process as `logger`
     // (erl_trace.c:2780-2824). The report of a sender that is itself the
     // logger process goes to stderr (erl_trace.c:2564-2605).
-    let stderr = "(no logger present) unexpected logger message: {log,error,\"Error in process ~p with exit value:~n~p~n\",[<PID>,{boom,[{crash_report_probe,'-routes/0-fun-5-',0,[]}]}],#{error_logger=>#{emulator=>true,tag=>error},pid=><PID>,time=>TIME,gl=><PID>}}\r\n";
+    let stderr = "(no logger present) unexpected logger message: {log,error,\"Error in process ~p with exit value:~n~p~n\",[<PID>,{boom,[{crash_report_probe,'-routes/0-fun-6-',0,[]}]}],#{error_logger=>#{emulator=>true,tag=>error},pid=><PID>,time=>TIME,gl=><PID>}}\r\n";
     let erts = run_dumb_utf8(
         Command::new("erl").args([
             "-noshell",

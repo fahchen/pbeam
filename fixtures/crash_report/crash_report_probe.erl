@@ -47,11 +47,15 @@ routes() ->
     Dead = receive {log, error, _, [Thrown, R2], _} -> {erlang:system_info(system_logger), R2}
            after 1000 -> none
            end,
+    Own = wait(fun() -> erlang:system_flag(system_logger, self()), erlang:error(own) end),
+    Itself = receive {log, error, _, [Own, R3], _} -> {erlang:system_info(system_logger), R3}
+             after 1000 -> none
+             end,
     unregister(logger),
     wait(fun() -> register(logger, self()), erlang:error(boom) end),
     Sender = flush(),
     erlang:system_flag(system_logger, Old),
-    [Old, Live, Undefined, Dead, Sender].
+    [Old, Live, Undefined, Dead, Itself, Sender].
 
 wait(Fun) ->
     {Pid, Ref} = spawn_monitor(Fun),
