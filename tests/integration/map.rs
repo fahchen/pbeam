@@ -1498,3 +1498,100 @@ fn runs_map_operations_with_fun_keys_as_pinned_erts() {
           [true,false,true,true,true]\n[1,2,[3,1,2]]\n"
     );
 }
+
+const PORT_KEY_PROBE: &[u8] = include_bytes!("../../fixtures/map/port_key_probe.beam");
+
+#[test]
+fn runs_map_operations_with_port_keys_as_pinned_erts() {
+    // A port is a map key, alone and inside a tuple, a list, or a map key.
+    // A hashmap hashes a port by its immediate word
+    // (`erl_term_hashing.c:2211-2213`). ERTS spreads the port number over
+    // the port table index bits in that word (`erts_ptab_make_id`,
+    // `erl_ptab.h:320-326`), and PBeam does not, so the hashmap pair order
+    // is exact only for PBeam on the CI host; the ERTS run checks the same
+    // set of values. The probe returns no port.
+    let erlang = pinned_beam("erlang");
+    let lists = pinned_beam("lists");
+    let maps = pinned_beam("maps");
+    let program = BeamProgram::load(&[&erlang, &lists, &maps, PORT_KEY_PROBE]).unwrap();
+    let int = Term::Integer;
+    let ints = |values: &[i64]| Term::list_from(values.iter().map(|&v| int(v)));
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let run = |function| {
+        program
+            .execute("port_key_probe", function, &[])
+            .unwrap()
+            .term
+    };
+    let hash_order = [
+        21, 30, 28, 8, 38, 25, 15, 39, 10, 22, 17, 31, 13, 19, 26, 4, 6, 16, 14, 36, 32, 23, 3, 1,
+        40, 18, 27, 24, 33, 34, 37, 2, 12, 9, 7, 5, 20, 29, 35, 11,
+    ];
+    let removed: Vec<i64> = hash_order.iter().copied().filter(|&n| n != 17).collect();
+    let nested_order = [
+        34, 12, 30, 28, 11, 25, 20, -1, 14, 19, 101, 17, 22, 24, 6, 8, 32, 21, 23, 27, 102, 10, 18,
+        -3, 9, 31, 7, 13, 5, 4, 3, 33, 16, -4, 1, 2, 26, -2, 29, 15,
+    ];
+    assert_eq!(
+        run("flat"),
+        Term::list_from(vec![
+            int(8),
+            int(1),
+            int(5),
+            int(6),
+            atom("false"),
+            atom("false"),
+            int(7),
+            ints(&[4, 3, 1, 2, 7, 5, 6, 8]),
+            ints(&[4, 3, 1, 7, 5, 6, 8]),
+        ])
+    );
+    assert_eq!(
+        run("hash"),
+        Term::list_from(vec![
+            int(40),
+            int(17),
+            atom("false"),
+            atom("false"),
+            ints(&hash_order),
+            ints(&removed),
+        ])
+    );
+    assert_eq!(
+        run("nested"),
+        Term::list_from(vec![
+            int(40),
+            int(-2),
+            int(5),
+            int(102),
+            ints(&nested_order)
+        ])
+    );
+    let (yes, no) = (atom("true"), atom("false"));
+    assert_eq!(
+        run("order"),
+        Term::list_from(vec![
+            yes.clone(),
+            no.clone(),
+            yes.clone(),
+            yes.clone(),
+            no,
+            yes.clone(),
+            yes.clone(),
+            yes,
+        ])
+    );
+    assert_eq!(
+        erl_reference(
+            "[S, K, F, R, A, B] = port_key_probe:hash(), \
+             [N1, N2, N3, N4, L] = port_key_probe:nested(), \
+             io:format(\"~w~n~w~n~w~n~w~n\", [port_key_probe:flat(), \
+             [S, K, F, R, lists:sort(A), lists:sort(B)], \
+             [N1, N2, N3, N4, lists:sort(L)], port_key_probe:order()])"
+        ),
+        b"[8,1,5,6,false,false,7,[4,3,1,2,7,5,6,8],[4,3,1,7,5,6,8]]\n\
+          [40,17,false,false,[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40],[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40]]\n\
+          [40,-2,5,102,[-4,-3,-2,-1,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,101,102]]\n\
+          [true,false,true,true,false,true,true,true]\n"
+    );
+}
