@@ -594,3 +594,22 @@ fn preloads_the_fixed_atoms_of_runtime_paths_after_the_static_atoms() {
     assert_eq!(table.read_indices().len(), count);
     assert_eq!(table.put("pbeam_zeta").unwrap().index, 1167);
 }
+
+#[test]
+fn fails_to_import_a_native_record() {
+    let source = AtomTable::new();
+    let destination = source.clone();
+    let z = source.put("z").unwrap();
+    let def = crate::term::RecordDef::new(z.clone(), z.clone(), false, vec![(z, None)], &source);
+    let record = Term::Record(crate::term::Record::new(
+        Arc::new(def),
+        vec![Term::Integer(1)],
+    ));
+    let error = destination.import_term(&source, &record).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported import of a native record into another atom table"),
+        "{error}"
+    );
+}

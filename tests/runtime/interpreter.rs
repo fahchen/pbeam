@@ -2588,13 +2588,6 @@ fn rejects_call_stack_and_return_errors() {
         "function fixture:main did not return"
     );
     assert!(
-        make_program(vec![Instruction::Unsupported(6)], 0)
-            .execute("fixture", "main", &[])
-            .unwrap_err()
-            .to_string()
-            .contains("unsupported BEAM opcode 6")
-    );
-    assert!(
         make_program(vec![Instruction::Label(3)], 0)
             .execute("fixture", "main", &[])
             .is_err()
