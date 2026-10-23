@@ -55,6 +55,71 @@ fn gets_socket_and_port_input_while_a_process_always_can_run() {
     }
 }
 
+#[test]
+fn flushes_a_full_socket_while_a_process_always_can_run() {
+    // `busy_io:flush/0` fills the send buffer of a socket and then runs a
+    // busy loop of 3 s while the client drains the socket. The ERTS poll
+    // thread reports the write fd while the process runs
+    // (`erl_process.c:3339-3372`), so the send ends before the loop ends.
+    let mut erts = Command::new("erl");
+    erts.args([
+        "+S",
+        "1",
+        "-noshell",
+        "-boot",
+        "start_clean",
+        "-pa",
+        "fixtures/poll",
+        "-eval",
+        "busy_io:flush(), halt().",
+    ]);
+    let mut pbeam = Command::new(env!("CARGO_BIN_EXE_pbeam"));
+    pbeam
+        .args(["pbeam_boot", "start", "busy_io", "flush", "--root"])
+        .arg(otp_root())
+        .args(["--", BUSY_IO])
+        .args(BOOT_MODULES.map(pinned_beam_path))
+        .arg(boot_beam());
+    for (name, command) in [("ERTS", &mut erts), ("PBeam", &mut pbeam)] {
+        assert_eq!(with_drain(command), "sent_while_busy\n", "{name}");
+    }
+}
+
+/// Run `command`, read the listen port from the first line of its standard
+/// output, drain 8 MiB with a small receive buffer, and send one byte.
+/// Return the rest of the standard output.
+fn with_drain(command: &mut Command) -> String {
+    let mut child = command
+        .env("TERM", "dumb")
+        .env("LC_ALL", "C.UTF-8")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut first = String::new();
+    stdout.read_line(&mut first).unwrap();
+    let port: u16 = first.trim_end().parse().unwrap();
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    let mut bytes = vec![0; 1 << 16];
+    let mut count = 0;
+    while count < 8 << 20 {
+        match stream.read(&mut bytes) {
+            Ok(0) | Err(_) => break,
+            Ok(read) => count += read,
+        }
+    }
+    stream.write_all(b"d").unwrap();
+    let mut output = String::new();
+    stdout.read_to_string(&mut output).unwrap();
+    assert!(child.wait().unwrap().success());
+    output
+}
+
 /// Run `command`, read the listen port from the first line of its standard
 /// output, send "ab", wait, send "cd", and read until the probe closes.
 /// Return the rest of the standard output.

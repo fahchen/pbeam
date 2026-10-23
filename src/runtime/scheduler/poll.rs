@@ -275,24 +275,16 @@ fn run(node: &Weak<Node>, mut reader: UnixStream) {
         let (readiness, writable) = wait(&owned, Some(wake_fd), None);
         let Some(strong) = node.upgrade() else { return };
         strong.poll.sleeping.store(false, Ordering::SeqCst);
-        let found: Vec<Owned> = match readiness {
-            Readiness::Ready(ready) => {
-                if ready.contains(&wake_fd) {
-                    drain(&mut reader);
-                }
-                owned
-                    .iter()
-                    .copied()
-                    .filter(|&((fd, direction), _)| match direction {
-                        Direction::Read => ready.contains(&fd),
-                        Direction::Write => writable.contains(&fd),
-                    })
-                    .collect()
-            }
+        let reads = match readiness {
+            Readiness::Ready(ready) => ready,
             // An fd that a port closed after the collect: the close removed
             // it from the table, and the next collect leaves it out.
             Readiness::Pending | Readiness::Invalid => Vec::new(),
         };
+        if reads.contains(&wake_fd) {
+            drain(&mut reader);
+        }
+        let found = ready(&owned, &reads, &writable);
         // The reports go out before a scheduler takes its fds over.
         let mut served: Vec<_> = (0..strong.poll.served.len())
             .map(|index| strong.poll.served(index))
@@ -316,6 +308,20 @@ fn run(node: &Weak<Node>, mut reader: UnixStream) {
             }
         }
     }
+}
+
+/// Return the entries of `owned` that are ready: a read entry in `reads`
+/// or a write entry in `writes`. A wait in which only write fds are ready
+/// gives no read fds, and its write fds still count.
+pub(in crate::runtime) fn ready(owned: &[Owned], reads: &[c_int], writes: &[c_int]) -> Vec<Owned> {
+    owned
+        .iter()
+        .copied()
+        .filter(|&((fd, direction), _)| match direction {
+            Direction::Read => reads.contains(&fd),
+            Direction::Write => writes.contains(&fd),
+        })
+        .collect()
 }
 
 /// Wait on the read and write fds of `owned` and on `wake`.

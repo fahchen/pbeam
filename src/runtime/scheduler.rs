@@ -1355,17 +1355,14 @@ impl Scheduler {
         {
             self.dirty.clear_wake();
         }
-        let ready: Vec<poll::Ready> = match &readiness {
-            Readiness::Ready(fds) => owned
-                .iter()
-                .map(|&(entry, _)| entry)
-                .filter(|&(fd, direction)| match direction {
-                    poll::Direction::Write => writable.contains(&fd),
-                    _ => fds.contains(&fd),
-                })
-                .collect(),
+        let reads = match readiness {
+            Readiness::Ready(fds) => fds,
             Readiness::Pending | Readiness::Invalid => Vec::new(),
         };
+        let ready: Vec<poll::Ready> = poll::ready(&owned, &reads, &writable)
+            .into_iter()
+            .map(|(entry, _)| entry)
+            .collect();
         // The scheduler serves its fds before the thread waits on them
         // again, so that the thread does not report them a second time.
         let result = self.serve(&ready);
