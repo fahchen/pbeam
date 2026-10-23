@@ -1796,6 +1796,7 @@ delete_object() ->
          ets:delete_object(B, {a, 2}), ets:lookup(B, a),
          ets:delete_object(B, {a, 1}), ets:lookup(B, a),
          ets:delete_object(B, {a, 1.0}), ets:lookup(B, a),
+         ets:delete_object(B, {missing, 1}), ets:lookup(B, b),
          ets:delete_object(D, {a, 1}), ets:lookup(D, a),
          ets:delete_object(D, {a, 2}), ets:lookup(D, a), ets:lookup(D, b),
          ets:delete_object(K, {x, k, z}), ets:lookup(K, k),
