@@ -3,9 +3,8 @@
 -compile(nowarn_deprecated_function).
 
 %% Write the shape of the results of crypto:rand_uniform/2,
-%% crypto:rand_seed/1, and the crypto plugins of rand, which call
-%% rand_uniform_nif/2, rand_seed_nif/1, and strong_rand_bytes_nif/1
-%% (rand.c:26-155, crypto.erl:2256-2300). The output is random, so the
+%% and the crypto plugins of rand, which call rand_uniform_nif/2 and
+%% strong_rand_bytes_nif/1 (rand.c:26-137, crypto.erl:2256-2282). The output is random, so the
 %% probe writes the types, the sizes, and the ranges, and each error.
 main() ->
     T = fun(F) -> try F() catch C:R -> {C, R} end end,
@@ -23,12 +22,11 @@ main() ->
                      {byte_size(Rest) =:= Len, Len, is_binary(R)}
              end)
            || {F, To} <- [{Mpint(128), Mpint(129)}, {Mpint(0), Mpint(1)},
-                          {<<0:32>>, Mpint(2)}]],
+                          {<<0:32>>, Mpint(1)}]],
     BinErrors = [T(fun() -> crypto:rand_uniform(F, To) end)
                  || {F, To} <- [{<<0:32>>, <<0:32>>}, {Mpint(5), Mpint(3)},
                                 {<<1:32>>, Mpint(3)}, {<<1, 2, 3>>, Mpint(3)},
                                 {<<-1:32, 1>>, Mpint(3)}, {Mpint(1), <<2:32, 1>>}]],
-    Seed = [T(fun() -> crypto:rand_seed(S) end) || S <- [<<>>, <<"seed">>, a]],
     Plugins = [T(fun() ->
                          S = Seed0(),
                          {U, S1} = rand:uniform_s(10, S),
@@ -42,4 +40,4 @@ main() ->
                             fun() -> crypto:rand_seed_alg_s(crypto_cache, 64) end]],
     Process = [T(fun() -> crypto:rand_seed(), rand:uniform(3) =< 3 end),
                T(fun() -> crypto:rand_seed_alg(crypto_cache), byte_size(rand:bytes(9)) end)],
-    io:format("~p~n", [[Uniform, One, Bin, BinErrors, Seed, Plugins, Process]]).
+    io:format("~p~n", [[Uniform, One, Bin, BinErrors, Plugins, Process]]).

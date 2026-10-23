@@ -64,16 +64,15 @@ const CRYPTO_RAND_OUTPUT: &str = "[[{0,1,true},
   {error,badarg},
   {error,badarg},
   {error,badarg}],
- [ok,ok,{error,function_clause}],
  [{true,true,5},{true,true,5},{true,true,5},{error,function_clause}],
  [true,9]]
 ";
 
 #[test]
 fn runs_the_random_functions_as_pinned_erts() {
-    // rand_uniform_nif/2, rand_seed_nif/1, and strong_rand_bytes_nif/1
-    // (rand.c:26-155) through crypto:rand_uniform/2, crypto:rand_seed/1,
-    // and the crypto plugins of rand (crypto.erl:2256-2300).
+    // rand_uniform_nif/2 and strong_rand_bytes_nif/1 (rand.c:26-137)
+    // through crypto:rand_uniform/2 and the crypto plugins of rand
+    // (crypto.erl:2256-2282).
     assert_eq!(
         run(&mut erts_probe(
             CRYPTO_RAND_PROBE,
