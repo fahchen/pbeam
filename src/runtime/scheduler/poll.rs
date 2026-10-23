@@ -207,6 +207,14 @@ impl NodePoll {
         std::mem::take(&mut served.ready)
     }
 
+    /// Add `entry` to the ready list of the scheduler `index`, as the
+    /// thread does when it finds the fd ready.
+    #[cfg(test)]
+    pub(in crate::runtime) fn report(&self, index: usize, entry: Ready) {
+        self.served(index).ready.push(entry);
+        self.marks[index].store(true, Ordering::SeqCst);
+    }
+
     /// Make the thread wait again on the fds of `ready`, which the
     /// scheduler `index` served.
     pub(in crate::runtime) fn rearm(&self, index: usize, ready: &[Ready]) {
@@ -381,3 +389,7 @@ fn drain(reader: &mut UnixStream) {
     // The socket is non-blocking: an error means that no more bytes wait.
     while matches!(reader.read(&mut bytes), Ok(count) if count > 0) {}
 }
+
+#[cfg(test)]
+#[path = "../../../tests/runtime/scheduler/poll.rs"]
+mod tests;
