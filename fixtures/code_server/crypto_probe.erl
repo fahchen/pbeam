@@ -202,7 +202,9 @@ run_ciphers() ->
 ciphers() ->
     {Plain, Aead} = lists:split(26, run_ciphers()),
     Aliases = [aes_cbc, aes_ccm, aes_cfb128, aes_cfb8, aes_ctr, aes_ecb, aes_gcm],
-    Infos = [bad_reason(fun() -> lists:sort(maps:to_list(crypto:cipher_info(C))) end)
+    %% The type of des_ede3_cfb depends on the libcrypto of the host, so
+    %% ciphers_host/0 prints the types.
+    Infos = [bad_reason(fun() -> lists:sort(maps:to_list(maps:remove(type, crypto:cipher_info(C)))) end)
              || C <- run_ciphers() ++ Aliases ++ [nosuch, "aes_128_cbc"]],
     Data = <<"The quick brown fox jumps over th">>,
     OneTime = [one_time(C, Data) || C <- Plain],
