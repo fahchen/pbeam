@@ -34,6 +34,11 @@ impl BitWriter {
     /// assert_eq!(writer.into_bytes(), (vec![0xAB, 0xCD], 16));
     /// ```
     pub(super) fn push_bits(&mut self, chunk: u8, count: u32) {
+        if count == 8 && self.bits.is_multiple_of(8) {
+            self.bytes.push(chunk);
+            self.bits += 8;
+            return;
+        }
         let chunk = chunk & (u8::MAX >> (8 - count));
         let free = (8 - self.bits % 8) as u32 % 8;
         match self.bytes.last_mut() {

@@ -107,7 +107,7 @@ impl<'a> Walk<'a> {
     /// Return whether `term` is a bitstring whose size is a multiple of the
     /// unit of this walk.
     fn is_leaf_binary(&self, term: &Term) -> bool {
-        matches!(term, Term::Binary(binary) if binary.bit_size() % self.unit == 0)
+        matches!(term, Term::Binary(binary) if self.unit == 1 || binary.bit_size().is_multiple_of(8))
     }
 
     /// Walk the iodata with `steps` steps, as `generic_iolist_size` and
