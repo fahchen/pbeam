@@ -18,6 +18,7 @@ use crate::term::ProcessId;
 
 mod atomics;
 mod binary;
+mod chksum;
 mod erlang;
 mod erts_internal;
 mod ets;

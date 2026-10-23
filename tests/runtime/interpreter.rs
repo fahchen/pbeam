@@ -9,7 +9,7 @@ use super::{
     take_owned, write, write_operand,
 };
 use crate::{
-    BeamModule, Map, PortId, Term,
+    BeamModule, Map, Term,
     beam::{
         Import,
         code::{BinaryMatchCommand, BinarySegment, Instruction, Operand, TestKind, TestOperand},
@@ -1287,11 +1287,13 @@ fn updates_and_reads_maps_and_reports_unsupported_map_operands() {
             map: map(vec![]),
             destination: Operand::X(0),
             pairs: vec![(
-                Operand::Value(Term::tuple(vec![Term::Port(PortId(0))])),
+                Operand::Value(Term::tuple(vec![Term::Reference(
+                    Reference(0).pid_reference()
+                )])),
                 Operand::Value(Term::Integer(1))
             )],
         }])
-        .contains("unsupported map key Tuple([Port(PortId(0))])")
+        .contains("unsupported map key Tuple([Reference(Reference(9223372036854775808))])")
     );
 }
 
@@ -1475,7 +1477,9 @@ fn raises_or_jumps_when_put_map_exact_gets_no_map_or_no_key() {
             map: Operand::Value(Term::Map(Map::new())),
             destination: Operand::X(0),
             pairs: vec![(
-                Operand::Value(Term::tuple(vec![Term::Port(PortId(0))])),
+                Operand::Value(Term::tuple(vec![Term::Reference(
+                    Reference(0).pid_reference(),
+                )])),
                 atom("a"),
             )],
         }],
@@ -1483,7 +1487,7 @@ fn raises_or_jumps_when_put_map_exact_gets_no_map_or_no_key() {
     )
     .execute("fixture", "main", &[]);
     let error = unsupported.unwrap_err().to_string();
-    assert!(error.contains("badkey,{#Port<0.0>}"), "{error}");
+    assert!(error.contains("badkey,{#Ref<0.2147483648.1.0>}"), "{error}");
     // An alias reference has no PBeam order, so the exact change reports
     // that order instead of comparing the keys.
     let alias = make_program(
@@ -1526,7 +1530,9 @@ fn raises_or_jumps_when_put_map_exact_gets_no_map_or_no_key() {
                 map: Operand::X(0),
                 destination: Operand::X(0),
                 pairs: vec![(
-                    Operand::Value(Term::tuple(vec![Term::Port(PortId(0))])),
+                    Operand::Value(Term::tuple(vec![Term::Reference(
+                        Reference(0).pid_reference(),
+                    )])),
                     atom("a"),
                 )],
             },
@@ -1737,7 +1743,7 @@ fn keeps_a_key_or_value_in_the_destination_slot() {
 fn reports_a_maps_from_list_key_that_the_map_form_does_not_support() {
     // ERTS accepts a tuple key with a port; a PBeam map does not hold one yet.
     let pair = Term::tuple(vec![
-        Term::tuple(vec![Term::Port(PortId(0))]),
+        Term::tuple(vec![Term::Reference(Reference(0).pid_reference())]),
         Term::Integer(0),
     ]);
     let from_list = make_program(
@@ -1751,7 +1757,7 @@ fn reports_a_maps_from_list_key_that_the_map_form_does_not_support() {
     .execute("fixture", "main", &[]);
     assert_eq!(
         from_list.unwrap_err().to_string(),
-        "unsupported map key Tuple([Port(PortId(0))])"
+        "unsupported map key Tuple([Reference(Reference(9223372036854775808))])"
     );
 }
 
@@ -1761,7 +1767,9 @@ fn reports_a_maps_put_key_that_the_map_form_does_not_support() {
     let put = make_program(
         vec![
             Instruction::Move(
-                Operand::Value(Term::tuple(vec![Term::Port(PortId(0))])),
+                Operand::Value(Term::tuple(vec![Term::Reference(
+                    Reference(0).pid_reference(),
+                )])),
                 Operand::X(0),
             ),
             Instruction::Move(Operand::Value(Term::Integer(0)), Operand::X(1)),
@@ -1774,7 +1782,7 @@ fn reports_a_maps_put_key_that_the_map_form_does_not_support() {
     .execute("fixture", "main", &[]);
     assert_eq!(
         put.unwrap_err().to_string(),
-        "unsupported map key Tuple([Port(PortId(0))])"
+        "unsupported map key Tuple([Reference(Reference(9223372036854775808))])"
     );
 }
 

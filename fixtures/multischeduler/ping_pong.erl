@@ -11,7 +11,8 @@
          wall_time/0, name_after_kill/0, name_kill_hold/0, name_kill_child/0,
          decode_atom/0, persistent_put/0, port_use/0, port_give/0,
          port_term/0, port_term_give/0, counters_hold/0, counters_add/0, timer_remote/0,
-         timer_hold/0, timer_named/0, timer_read/0, timer_give/0, 
+         timer_hold/0, timer_named/0, timer_read/0, timer_give/0,
+         exit3_target/0, exit3_send/0, 
          regex_run/0, regex_give/0,
          group_leader_remote/0, leader_hold/0, pattern_match/0, pattern_give/0,
          timer_fire/0, timer_cancel/0, timer_child_exit/0, timer_child/0,
@@ -624,6 +625,18 @@ timer_read() ->
         is_integer(Left) andalso Left > 0 andalso Left =< 60000
             andalso is_integer(Async) andalso Async =< Left
     end.
+
+%% The root that traps exits and waits for the erlang:exit/3 signal of the
+%% other scheduler.
+exit3_target() ->
+    process_flag(trap_exit, true),
+    true = register(exit3_target_name, self()),
+    receive {'EXIT', _, Reason} -> Reason after 6000 -> timeout end.
+
+%% The root that sends an exit signal with erlang:exit/3 to a process of the
+%% other scheduler.
+exit3_send() ->
+    exit(wait_for(exit3_target_name, 100000), boom, [priority]).
 
 %% The root that sends its timer reference to the other scheduler. The read
 %% leaves the timer active.

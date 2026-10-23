@@ -13,7 +13,9 @@ The main session drives several milestones at once. Each milestone is one stream
 
 1. The owner names the milestones that run in parallel. Each needs its GitHub structure first: milestone, tracker, epics, tasks, sub-issue links, blocked-by links, and board items. Use one planner agent for each milestone, in parallel. Planners edit no repository file.
 2. Copy `references/implementer-prompt.md` to a scratch file (for example `/tmp/impl-common.md`). Each implementer prompt starts with "Read <that file> first", then gives only the task-specific part: the issue, the prior PRs it builds on, the files that a queued PR also touches.
-3. Start the first ready task of each stream with `pbeam-implementer`, `isolation: worktree`, and the model and effort that the owner set (see the memory or the session).
+3. Copy the review rules (budgets, worktree rule, reply format) to a second scratch file (for example `/tmp/review-common.md`). Each review prompt starts with "Read <that file> first".
+4. For a large or unclear task, first run a read-only spec agent. It reads the OTP source and runs `mise run erts-eval`, then writes a spec file. Pass that file to the implementer. Split an oversized task into sub-issues before coding.
+5. Start the first ready task of each stream with `pbeam-implementer`, `isolation: worktree`, and the model and effort that the owner set (see the memory or the session).
 
 ## Review gate
 
@@ -24,11 +26,12 @@ The main session drives several milestones at once. Each milestone is one stream
 
 ## Merge queue
 
-- Agents never merge `origin/main` on their own. When a PR is ready or conflicts, the agent reports its PR number and its touched files (`gh pr diff <n> --name-only`).
+- An implementer merges `origin/main` once only when GitHub reports `CONFLICTING` for its PR. When a PR is ready or conflicts, the agent reports its PR number and its touched files (`gh pr diff <n> --name-only`).
 - Merge ready PRs whose files do not overlap first. A PR that overlaps a queued PR waits; after the earlier PR merges, read its `mergeable` again. Only on `CONFLICTING` does it merge main, once: the PR CI already tests `refs/pull/<n>/merge`, so a clean PR squash-merges after green CI with no extra main merge (owner rule of 2026-10-22).
 - Before a merge, read `mergeable`. GitHub often reports `UNKNOWN` for a few seconds after a push; read it again. A squash merge with the PR head SHA (`gh api -X PUT repos/<repo>/pulls/<n>/merge -f merge_method=squash -f sha=<head>`) fails safely on a conflict. GitHub refuses that call for a PR in a stack; use `gh api -X PUT repos/<repo>/pulls/<n>/merge-async -f merge_method=squash -f merge_action=direct_merge` there.
-- When main moved after a PR's CI and the PR changes code next to a merged PR, run `cargo check --all-targets` on a local merge before the squash merge.
-- To merge main into a conflicting PR, use `pbeam-merge-prep`, or the PR's own agent if it is still running. Merge-prep resolves conflicts in docs only, by sentence for the long rows of `docs/erts-differences.md` and `docs/backlog.md`, and stops on any other conflict; then the main session or the PR's agent resolves it, and the PR gets a delta review.
+- Before each squash merge, run `cargo check --all-targets` on a local merge with `origin/main`. A clean text merge can still fail to build, for example on an array length.
+- When a PR is only stale (behind main, no conflict), update it with `gh api -X PUT repos/<repo>/pulls/<n>/update-branch`. Use `pbeam-merge-prep` only on a real conflict.
+- To merge main into a conflicting PR, use `pbeam-merge-prep` (sonnet for a docs-only conflict), or the PR's own agent if it is still running. Merge-prep resolves conflicts in docs only, by sentence for the long rows of `docs/erts-differences.md` and `docs/backlog.md`, and stops on any other conflict; then the main session or the PR's agent resolves it, and the PR gets a delta review.
 
 ## After each merge
 
@@ -40,7 +43,8 @@ The main session drives several milestones at once. Each milestone is one stream
 
 ## Budgets and restarts
 
-- An implementer stops at about 90 tool calls and writes "Next steps" in the PR body. Start a new implementer without `isolation: worktree`, give it the existing worktree path and those steps, and tell it to use no other worktree; do not resume an agent that hit its budget.
+- An implementer stops at about 90 tool calls and writes "Next steps" in the PR body. Start a new implementer without `isolation: worktree`, give it the existing worktree path and those steps, and tell it to use no other worktree. Do not resume an agent past about 90 tool calls: its context costs more than a restart.
+- Use smaller models (sonnet or haiku) for bookkeeping: board status, epic ticks, and docs-only merge-prep.
 - After an API session limit, resume each stopped agent with `SendMessage` once the limit resets.
 - Keep reports short: ask for at most 15 lines. Do not read an agent's transcript file.
 

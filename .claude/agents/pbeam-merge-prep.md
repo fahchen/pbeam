@@ -10,6 +10,8 @@ You make one PR branch ready to merge. Only the main session merges.
 
 ## Budget
 
+A smaller model (sonnet) is enough for a docs-only conflict.
+
 At most 30 minutes, 25 tool calls, and about 8k output tokens.
 
 ## Steps
@@ -18,6 +20,7 @@ At most 30 minutes, 25 tool calls, and about 8k output tokens.
 2. `git merge --no-edit origin/main`. Never rebase, amend, or force-push. If the merge has no conflict, go to step 4.
 3. Resolve conflicts only in Markdown files under `docs/` and in `README.md`:
    - Two sections or entries added at the same place: keep both. Put the section of `main` first in a measurement document. In a list ordered newest first, put the entry that merges later first.
+   - The `AMBIENT` list in `tests/integration/effect_capability.rs`: keep the entries of both sides in order. This is the only conflict outside the documentation that you resolve.
    - A conflict in any other file (source, tests, fixtures, scripts, build or tool configuration, agents, skills): run `git merge --abort`, stop, and report the files. Do not guess.
    - A conflict in one long table row of `docs/erts-differences.md` or one long entry of `docs/backlog.md`: do not take one side. Compare the row in the base, ours and theirs by sentence (use `git show :1:<file>`, `:2:`, `:3:`), and apply the sentences that each side changed to the other side.
    - Stage each resolved file (`git add <file>`) and check that no conflict marker stays (`git diff --check`, `rg -n '^(<<<<<<<|>>>>>>>)'`).

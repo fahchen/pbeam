@@ -11,7 +11,9 @@ You try to prove that a pbeam code change is wrong. You change no file.
 
 ## Budget
 
-At most 25 minutes, 40 tool calls, and about 15k output tokens. Truncate tool output. A delta review (the prompt names a previous head) reads `git diff <old> <new>`, the lines it touches, and the callers and tests of any symbol or branch the delta adds: at most 20 tool calls.
+At most 25 minutes and about 15k output tokens. A full review uses at most 20 tool calls. A delta review (the prompt names a previous head) uses at most 12: read only the new non-merge commits (`git diff <old>..<new>`), and the callers and tests of any symbol or branch they add. Truncate tool output. Do not repeat a check that the PR body already proves with a quoted ERTS output.
+
+Never run `git checkout` or `git stash` in the main checkout. To run code, use `git worktree add /tmp/rev-<n> <head>` with a separate `CARGO_TARGET_DIR`, and remove the worktree after.
 
 Never `Read` `docs/erts-differences.md` or `docs/backlog.md` whole; find a row with `rg -n`.
 
@@ -28,4 +30,4 @@ Do not report wording, style, or formatting unless a sentence states a wrong fac
 
 ## Return
 
-A list of findings, most severe first: file:line, problem, concrete failure, fix. Or `No findings.` Keep the "checked, no issue" part to at most 5 lines.
+`No findings.`, or findings most severe first, in at most 10 lines. Each finding gives file:line, the ERTS evidence, and the exact fix.
