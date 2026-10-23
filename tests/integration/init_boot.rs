@@ -245,11 +245,15 @@ fn run_kernel_boot(
     environment(&mut child);
     let child = child.output().unwrap();
     let stdout = String::from_utf8_lossy(&child.stdout);
-    assert_eq!(
-        String::from_utf8_lossy(&reference.stderr),
-        "",
-        "ERTS with {arguments:?}"
-    );
+    // The `inet_gethost` program writes its warnings and fatal errors to
+    // fd 2 (inet_gethost.c:2643-2667); PBeam writes none (see "Ports" in
+    // docs/erts-differences.md).
+    let errors = String::from_utf8_lossy(&reference.stderr);
+    let errors: Vec<&str> = errors
+        .split_inclusive('\n')
+        .filter(|line| !line.contains("/inet_gethost["))
+        .collect();
+    assert_eq!(errors, Vec::<&str>::new(), "ERTS with {arguments:?}");
     assert!(
         child.status.success(),
         "child exited with {}\n{stdout}",
@@ -328,6 +332,29 @@ fn looks_up_the_host_name_at_the_kernel_boot_as_pinned_erts() {
     let (reference, status, node) = run_kernel_boot("lookup", false, &["{lookup,"]);
     assert_eq!(status, Some(0), "ERTS");
     assert!(reference.starts_with("{lookup,[native],"), "{reference}");
+    assert_eq!(node, reference, "PBeam");
+}
+
+#[test]
+fn serves_the_inet_gethost_port_program_as_pinned_erts() {
+    // PBeam runs the `inet_gethost` port program in a thread of the node.
+    // `kernel_boot_probe:gethost/0` sends it requests that it answers
+    // (inet_gethost.c:1791-1976), discards (inet_gethost.c:876-979,
+    // 1548-1585), and ends on with a fatal error (inet_gethost.c:896-901,
+    // 1325-1351, 2643-2667), and calls `inet_gethost_native` and `inet`
+    // for localhost, 127.0.0.1, ::1, and an unknown name. The replies
+    // depend on the resolver of the host, so the test compares the two
+    // runs on the host.
+    let (reference, status, node) = run_kernel_boot("gethost", false, &["{gethost,"]);
+    assert_eq!(status, Some(0), "ERTS");
+    assert!(
+        reference.starts_with("{gethost,[none,none,none,none,none,none],[{data,"),
+        "{reference}"
+    );
+    assert!(
+        reference.contains("[[{exit_status,1},eof],[{exit_status,1},eof]]"),
+        "{reference}"
+    );
     assert_eq!(node, reference, "PBeam");
 }
 

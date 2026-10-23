@@ -1,7 +1,7 @@
 -module(kernel_boot_probe).
 -behaviour(application).
 -behaviour(supervisor).
--export([main/0, main/1, lookup/0, supports/0, start/2, stop/1, init/1]).
+-export([main/0, main/1, lookup/0, gethost/0, supports/0, start/2, stop/1, init/1]).
 
 %% `erl -noshell -boot start_clean -pa fixtures/boot -s kernel_boot_probe
 %% main -kernel logger_level warning` runs main/0 in the boot process of init after the boot script
@@ -37,6 +37,48 @@ lookup() ->
                     inet:gethostbyname(Name), inet:gethostbyname("localhost"),
                     is_pid(whereis(inet_gethost_native))}),
     init:stop().
+
+%% `erl -noshell -boot start_clean -pa fixtures/boot -s kernel_boot_probe
+%% gethost -kernel logger_level warning` runs gethost/0. It displays the
+%% replies of the inet_gethost port program (inet_gethost.c:180-249) to
+%% requests that it answers, discards, or ends on, and the results of
+%% inet_gethost_native and inet for localhost, addresses, and an unknown
+%% name, and then calls init:stop/0.
+gethost() ->
+    Ask = fun(Requests, Timeout) ->
+                  Port = gethost_port(),
+                  [begin true = port_command(Port, R),
+                         receive {Port, M} -> M after Timeout -> none end
+                   end || R <- Requests]
+          end,
+    Discarded = Ask([<<1:32, 3>>, <<16#FFFFFFFF:32, 4, 0, 0:32>>, <<2:32, 9, 1>>,
+                     <<3:32, 1, 7, "x", 0>>, <<4:32, 1, 1, "localhost">>,
+                     <<5:32, 2, 1, 1, 2, 3>>], 300),
+    Answered = Ask([<<6:32, 1, 1, "localhost", 0>>, <<7:32, 2, 2, 0:120, 1>>,
+                    <<8:32, 2, 1, 127, 0, 0, 1>>,
+                    <<9:32, 1, 2, "no-such-host.invalid", 0>>,
+                    <<10:32, 2, 2, 16#20010db8:32, 0:96>>], 20000),
+    Drain = fun Drain(Port, Timeout) ->
+                    receive {Port, M} -> [M | Drain(Port, 1000)]
+                    after Timeout -> []
+                    end
+            end,
+    Fatal = [begin Port = gethost_port(), true = port_command(Port, R), Drain(Port, 20000) end
+             || R <- [<<1, 2, 3>>, <<1:32, 4, 0, 1:32>>]],
+    Native = [inet_gethost_native:gethostbyname("localhost"),
+              inet_gethost_native:gethostbyname("localhost", inet6),
+              inet_gethost_native:gethostbyname("127.0.0.1"),
+              inet_gethost_native:gethostbyname("no-such-host.invalid"),
+              inet_gethost_native:gethostbyaddr("127.0.0.1"),
+              inet_gethost_native:gethostbyaddr("::1"),
+              inet:gethostbyname("localhost")],
+    erlang:display({gethost, Discarded, Answered, Fatal, Native}),
+    init:stop().
+
+gethost_port() ->
+    {ok, [BinDir]} = init:get_argument(bindir),
+    open_port({spawn_executable, filename:join(BinDir, "inet_gethost")},
+              [{args, ["4"]}, {packet, 4}, eof, exit_status, binary]).
 
 %% `erl -noshell -boot start_clean -pa fixtures/boot -s kernel_boot_probe
 %% supports -kernel logger_level warning` runs supports/0. erl_init:start/2
