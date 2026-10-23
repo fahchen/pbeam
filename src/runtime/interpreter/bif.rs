@@ -935,9 +935,9 @@ impl BeamProgram {
     ///   `ordered_set` table, the reversed list so far, and the rest of the
     ///   result ([`ets::reverse`]), as ERTS traps to the same export
     ///   (`erl_db_tree.c:553-555`, `1199-1245`).
-    /// - `ets:select_delete_trap/5`, with the fields of the continuation of a
-    ///   select delete on an `ordered_set` table ([`ets::select_delete_trap`]).
-    ///   ERTS traps to `ets:select_delete_trap/1` with the continuation tuple (`erl_db.c:3387-3427`, `4817-4819`).
+    /// - `ets:select_delete_trap/1`, with the continuation of a select delete
+    ///   on an `ordered_set` table ([`ets::select_delete_trap`]), as ERTS
+    ///   traps to the same export (`erl_db.c:3387-3427`, `4817-4819`).
     /// - `ets:delete_trap/0`, which frees the segments of the table that
     ///   `ets:delete/1` deleted ([`ets::delete_trap`]). The segments that
     ///   remain stay in the ETS store under the caller. ERTS traps to
@@ -1068,19 +1068,17 @@ impl BeamProgram {
                 rest,
             ));
         }
-        if let (
-            "ets",
-            "select_delete_trap",
-            [
-                Term::Reference(id),
-                _,
-                _,
+        if let ("ets", "select_delete_trap", [Term::Tuple(continuation)]) =
+            (module, function, arguments.as_slice())
+            && let [
+                table,
+                last,
+                least,
                 Term::Reference(program),
                 Term::Integer(count),
-            ],
-        ) = (module, function, arguments.as_slice())
+            ] = &continuation[..]
         {
-            let fields = (*id, *program, *count);
+            let fields = (table, last, least, *program, *count);
             return ets::select_delete_trap(&mut BifContext { scheduler }, &arguments, fields);
         }
         if let ("ets", "info", [table, item]) = (module, function, arguments.as_slice()) {

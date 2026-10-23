@@ -219,7 +219,7 @@ fn chunk_end(
 /// Return a runtime error when the references of the run are used up.
 pub(super) fn finish(
     context: &mut BifContext<'_>,
-    id: Reference,
+    (table, id): (&Term, Reference),
     spec: &MatchSpec,
     chunk: i64,
     reverse: bool,
@@ -239,7 +239,7 @@ pub(super) fn finish(
     };
     let continuation = |last, end, program, accum, got| {
         Term::tuple(vec![
-            Term::Reference(id),
+            table.clone(),
             last,
             end,
             Term::Integer(chunk),
@@ -441,7 +441,7 @@ pub(super) fn next_turn(
 pub(super) enum DeleteTurn {
     /// Return the number of deleted objects.
     Done(i64),
-    /// Trap to `ets:select_delete_trap/5` with the last key, the least key
+    /// Trap to `ets:select_delete_trap/1` with the last key, the least key
     /// or `[]`, and the number of deleted objects.
     Trap(Term, Term, i64),
 }
@@ -514,7 +514,7 @@ pub(super) fn select_delete_next(
 }
 
 /// Return the result of a turn of a select delete: the number of deleted
-/// objects, or a trap to `ets:select_delete_trap/5` with the fields of the
+/// objects, or a trap to `ets:select_delete_trap/1` with the fields of the
 /// continuation `{Table, LastKey, LeastKey, Program, Count}`
 /// (`erl_db_tree.c:2072-2079`, `2198-2210`). The first trap puts a new
 /// reference in `Program` and keeps the compiled specification under it.
@@ -524,7 +524,7 @@ pub(super) fn select_delete_next(
 /// Return a runtime error when the references of the run are used up.
 pub(super) fn delete_finish(
     context: &mut BifContext<'_>,
-    id: Reference,
+    (table, id): (&Term, Reference),
     spec: &MatchSpec,
     program: Option<Reference>,
     (turn, reductions): (DeleteTurn, i64),
@@ -548,13 +548,13 @@ pub(super) fn delete_finish(
     Ok(BifResult::TrapBif {
         module: "ets",
         function: "select_delete_trap",
-        arguments: vec![
-            Term::Reference(id),
+        arguments: vec![Term::tuple(vec![
+            table.clone(),
             last,
             least,
             Term::Reference(program),
             Term::Integer(count),
-        ],
+        ])],
     })
 }
 

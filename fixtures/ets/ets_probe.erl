@@ -25,7 +25,7 @@
          fixtable_bag_restore_behind_node/0, fixtable_delete_table/0,
          fixtable_clear_large/0, fixtable_clear_help/0, clear_task/2,
          fixtable_take/0, fixtable_take_clear/0, fixtable_insert_new/0,
-         fixtable_insert_new_list/0, ordered_select/0, ordered_select_large/0,
+         fixtable_insert_new_list/0, ordered_select/0, select_delete_worker/2, ordered_select_large/0,
          select_reverse/0]).
 
 %% ets:new/2 return values and badarg cases (erl_db.c:2555-2840).
@@ -1600,7 +1600,56 @@ ordered_select() ->
     ++ [select_delete_count(Keys, S)
         || S <- [[{{{1, '_'}, '_'}, [], [true]}], [{{a, '_'}, [], [true]}],
                  [{{'$1', '_'}, [{is_number, '$1'}], [true]}], [{foo, [], [true]}], [{{nokey, '_'}, [], [true]}],
-                 [{{a, '_'}, [], [false]}]]].
+                 [{{a, '_'}, [], [false]}]]]
+    ++ [named_select(), forged_select(), select_delete_yield()].
+
+%% The continuation of a named ordered_set table holds the name
+%% (erl_db_tree.c:1937, 1960).
+named_select() ->
+    N = ets_probe_named,
+    N = ets:new(N, [ordered_set, named_table]),
+    true = ets:insert(N, [{K} || K <- seq(3)]),
+    {First, C} = ets:select(N, [{'_', [], ['$_']}], 1),
+    {Next, C2} = ets:select(C),
+    true = ets:insert(N, {0}),
+    {Last, _} = ets:select(C2),
+    true = ets:delete(N),
+    {First, element(1, C), Next, element(1, C2), Last}.
+
+%% A continuation with a known program and a bad Got or Matches raises
+%% badarg (erl_db_tree.c:1287-1302).
+forged_select() ->
+    T = ets:new(ets_probe, [ordered_set]),
+    true = ets:insert(T, [{K} || K <- seq(3)]),
+    {_, C} = ets:select(T, [{'_', [], ['$_']}], 1),
+    Try = fun(X) -> try ets:select(X) catch Class:Reason -> {Class, Reason} end end,
+    [Try(setelement(8, C, foo)), Try(setelement(6, C, foo))].
+
+%% A table deleted while a select delete traps raises badarg in
+%% ets:select_delete_trap/1 (erl_db.c:3387-3427, erl_db_tree.c:2198-2210).
+%% The probe drops the stack trace: PBeam gives `[]` after a trap (backlog
+%% "Give the stack trace of a BIF error after a trap").
+select_delete_yield() ->
+    T = ets:new(ets_probe, [ordered_set, public]),
+    true = ets:insert(T, [{K} || K <- seq(20000)]),
+    Self = self(),
+    P = spawn(?MODULE, select_delete_worker, [T, Self]),
+    P ! go,
+    Wait = fun W() ->
+                   case ets:info(T, size) of
+                       20000 -> erlang:yield(), W();
+                       Size -> Size > 0
+                   end
+           end,
+    Current = Wait(),
+    true = ets:delete(T),
+    receive {done, R} -> {Current, R} end.
+
+select_delete_worker(T, Parent) ->
+    receive go -> ok end,
+    Parent ! {done, try ets:select_delete(T, [{{'$1'}, [{'>', '$1', 0}], [true]}])
+                    catch Class:Reason -> {Class, Reason}
+                    end}.
 
 select_delete_count(Keys, Spec) ->
     T = ets:new(ets_probe, [ordered_set]),

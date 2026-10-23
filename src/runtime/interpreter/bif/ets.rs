@@ -1746,6 +1746,7 @@ fn select_objects(
     let Some(id) = ets.id(atoms, table) else {
         return Ok(denied(EtsTables::missing(table)));
     };
+    let name = table;
     let table = match ets.read(atoms, &Term::Reference(id), caller, reds) {
         Ok(table) => table,
         Err(lacking) => {
@@ -1761,7 +1762,7 @@ fn select_objects(
         let turn = tree::first_turn(atoms, &table, &compiled, chunk, reverse)?;
         drop(table);
         drop(ets);
-        return tree::finish(context, id, &compiled, chunk, reverse, turn);
+        return tree::finish(context, (name, id), &compiled, chunk, reverse, turn);
     }
     // A key position below 1 compares as a large unsigned number with the
     // arity of the pattern (`db_getkey`, `erl_db_util.c:3940-3960`).
@@ -1988,7 +1989,7 @@ pub(super) fn select_continue(
         let turn = tree::next_turn(atoms, &found, &compiled, state)?;
         drop(found);
         drop(ets);
-        return tree::finish(context, id, &compiled, chunk, reverse, turn);
+        return tree::finish(context, (table, id), &compiled, chunk, reverse, turn);
     }
     let [_, next, chunk, program, rest, size] = elements.as_ref() else {
         return Ok(BifResult::badarg());
@@ -2052,9 +2053,7 @@ pub(super) fn select_continue(
 /// `ordered_set` table with the continuation
 /// `{Table, LastKey, LeastKey, Program, Count}`, as
 /// `ets_select_delete_trap_1` does (`erl_db.c:3387-3427`): a table that the
-/// caller cannot write any more raises `badarg`. ERTS traps with the
-/// continuation tuple, and PBeam passes its fields as the arguments of
-/// `ets:select_delete_trap/5`.
+/// caller cannot write any more raises `badarg`.
 ///
 /// # Errors
 ///
@@ -2062,9 +2061,8 @@ pub(super) fn select_continue(
 pub(super) fn select_delete_trap(
     context: &mut BifContext<'_>,
     arguments: &[Term],
-    (id, program, count): (Reference, Reference, i64),
+    (table, last, least, program, count): (&Term, &Term, &Term, Reference, i64),
 ) -> Result<BifResult, BeamError> {
-    let (last, least) = (&arguments[1], &arguments[2]);
     let caller = context.scheduler.current_process_mut().id;
     let reds = context
         .scheduler
@@ -2073,13 +2071,14 @@ pub(super) fn select_delete_trap(
     let atoms = &context.scheduler.atoms;
     let store = Arc::clone(&context.scheduler.ets);
     let ets = store.shared();
-    let mut taken = match ets.write(atoms, &Term::Reference(id), caller, reds) {
+    let mut taken = match ets.write(atoms, table, caller, reds) {
         Ok(taken) => taken,
         Err(lacking) => {
             let arguments = arguments.to_vec();
             return Ok(retry(context, lacking, "select_delete_trap", arguments));
         }
     };
+    let id = ets.id(atoms, table).expect("the table exists");
     let compiled = ets
         .program(program)
         .cloned()
@@ -2088,7 +2087,7 @@ pub(super) fn select_delete_trap(
     let turn = tree::select_delete_next(atoms, &mut taken, &compiled, last, least, count)?;
     drop(taken);
     drop(ets);
-    tree::delete_finish(context, id, &compiled, Some(program), turn)
+    tree::delete_finish(context, (table, id), &compiled, Some(program), turn)
 }
 
 /// Run the trap export `ets:reverse/3` of a select with a limit on an
@@ -2838,7 +2837,7 @@ pub(super) fn internal_select_delete(
         let turn = tree::select_delete(atoms, &mut taken, &compiled)?;
         drop(taken);
         drop(ets);
-        return tree::delete_finish(context, id, &compiled, None, turn);
+        return tree::delete_finish(context, (table, id), &compiled, None, turn);
     }
     if compiled.matches_nothing(keypos) {
         return Ok(Value(Term::Integer(0)));
