@@ -276,6 +276,15 @@ impl Spawn {
             .collect()
     }
 
+    /// Take the end of file of the port: a port with `eof` reads nothing
+    /// more (`io.c:7191-7209`), and the line that is not complete goes out.
+    fn end_of_file(&mut self) -> End {
+        if self.soft_eof {
+            self.input = Input::Ended;
+        }
+        (self.soft_eof, self.flush_lines())
+    }
+
     /// Return the data terms of the lines that the line buffer holds at the
     /// end of file, as `flush_linebuf_messages` does before the port closes
     /// or sends `{Port, eof}` (`io.c:3469-3493`, `7204-7205`).
@@ -286,7 +295,7 @@ impl Spawn {
     /// // The child wrote "ab" without a newline.
     /// assert_eq!(spawn.flush_lines().len(), 1);
     /// ```
-    pub(super) fn flush_lines(&mut self) -> Vec<Term> {
+    fn flush_lines(&mut self) -> Vec<Term> {
         let mut lines = Vec::new();
         if let Some(buffer) = &mut self.lines {
             buffer.flush(&mut lines);
@@ -412,11 +421,16 @@ pub(super) enum PortEvent {
     Data(Vec<Term>),
     /// The output pipe of a port without `exit_status` gave its end of
     /// file. The bytes of a packet that is not complete go.
-    EndOfFile,
+    EndOfFile(End),
     /// The child exited with this exit status, or `None` when the host
     /// reaped the child (see [`Child::read_status`]).
-    ExitStatus(Option<i32>),
+    ExitStatus(Option<i32>, End),
 }
+
+/// The end of file of a spawn port: true when the port has `eof` and
+/// stays open, and the data terms of the line that is not complete in
+/// line mode (`driver_failure_eof`, `io.c:7191-7219`).
+pub(super) type End = (bool, Vec<Term>);
 
 impl Port {
     /// Return the fd that the poll waits to read for the port, as the read
@@ -688,14 +702,15 @@ pub(super) type Read<'a> = (PortId, ProcessId, PortEvent, PortGuard<'a>);
 /// to `input`.
 fn read_spawn(spawn: &mut Spawn, input: &mut u64) -> Option<PortEvent> {
     if spawn.input == Input::Status {
-        return Some(PortEvent::ExitStatus(spawn.child.read_status()));
+        let status = spawn.child.read_status();
+        return Some(PortEvent::ExitStatus(status, spawn.end_of_file()));
     }
     let bytes = spawn.child.read_output().ok()?;
     if bytes.is_empty() && spawn.exit_status {
         spawn.input = Input::Status;
         return None;
     } else if bytes.is_empty() {
-        return Some(PortEvent::EndOfFile);
+        return Some(PortEvent::EndOfFile(spawn.end_of_file()));
     }
     let packets = spawn.packets.split(bytes);
     *input += packets.iter().map(|bytes| bytes.len() as u64).sum::<u64>();

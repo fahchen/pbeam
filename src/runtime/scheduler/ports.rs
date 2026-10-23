@@ -13,7 +13,7 @@ use super::{LinkId, Scheduler};
 use crate::{
     error::{BeamError, error},
     runtime::{
-        port::{self, Driver, Input, Port, PortEvent, inet, inet::Inet},
+        port::{self, Driver, Port, PortEvent, inet, inet::Inet},
         process::MonitorLinkTree,
         signal::Signal,
     },
@@ -146,58 +146,49 @@ impl Scheduler {
         };
         // The messages go out under the port lock; the lock is released
         // before the port closes at its end of file.
-        let end = match event {
+        let (status, (soft, lines)) = match event {
             PortEvent::Data(parts) => {
                 for data in parts {
                     self.port_send(owner, port_message(id, "data", data));
                 }
-                false
+                return Ok(());
             }
-            PortEvent::EndOfFile => true,
-            PortEvent::ExitStatus(Some(status)) => {
-                let status = Term::Integer(status.into());
-                self.port_send(owner, port_message(id, "exit_status", status));
-                true
-            }
-            PortEvent::ExitStatus(None) => {
+            PortEvent::EndOfFile(end) => (None, end),
+            PortEvent::ExitStatus(Some(status), end) => (Some(status), end),
+            PortEvent::ExitStatus(None, _) => {
                 return Err(error(
                     "unsupported exit status of a port program after os:set_signal(sigchld, ignore): see \"Ports\" in docs/erts-differences.md",
                 ));
             }
         };
-        drop(slot);
-        if end {
-            self.port_end_of_file(id);
+        if let Some(status) = status {
+            let status = Term::Integer(status.into());
+            self.port_send(owner, port_message(id, "exit_status", status));
         }
+        for data in lines {
+            self.port_send(owner, port_message(id, "data", data));
+        }
+        drop(slot);
+        self.port_end_of_file(id, soft);
         Ok(())
     }
 
     /// Handle the end of file of the spawn port `id`, after its exit status
-    /// with `exit_status`, as `driver_failure_eof` does
-    /// (`io.c:7191-7219`): a port with `eof` sends `{Port, eof}` to the
-    /// owner and stays open, and it reads nothing more. Each other port
-    /// closes with the reason `normal`.
-    pub(super) fn port_end_of_file(&mut self, id: PortId) {
+    /// and the line that is not complete, as `driver_failure_eof` does
+    /// (`io.c:7191-7219`): a port with `eof` (`soft`) sends `{Port, eof}`
+    /// to the owner and stays open, and it reads nothing more. Each other
+    /// port closes with the reason `normal`.
+    pub(super) fn port_end_of_file(&mut self, id: PortId, soft: bool) {
         // `{Port, eof}` goes out under the port lock, as in
         // `driver_failure_eof` (io.c:7191-7209).
         let cell = self.node.port(id);
-        let mut slot = cell.as_ref().map(port::lock);
-        let state = slot.as_mut().and_then(|slot| slot.as_mut()).map(|port| {
-            // Only a spawn port reads an end of file.
-            let (mut soft, mut lines) = (false, Vec::new());
-            if let Driver::Spawn(spawn) = &mut port.driver {
-                if spawn.soft_eof {
-                    spawn.input = Input::Ended;
-                }
-                (soft, lines) = (spawn.soft_eof, spawn.flush_lines());
-            }
-            (port.owner, soft, lines)
-        });
+        let slot = cell.as_ref().map(port::lock);
         // A port that another scheduler closed after the read sends nothing.
-        if let Some((owner, soft, lines)) = state {
-            for data in lines {
-                self.port_send(owner, port_message(id, "data", data));
-            }
+        let owner = slot
+            .as_ref()
+            .and_then(|slot| slot.as_ref())
+            .map(|port| port.owner);
+        if let Some(owner) = owner {
             if soft {
                 let eof = Term::tuple(vec![Term::Port(id), Term::static_atom("eof")]);
                 self.port_send(owner, eof);
