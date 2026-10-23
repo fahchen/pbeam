@@ -2663,15 +2663,15 @@ fn update_specs(
 /// - A default object that is not a tuple with at least `keypos` elements
 ///   raises `badarg` with the cause `default` (`erl_db.c:1721-1726`).
 /// - A table of another type than `set` or `ordered_set` raises `badarg`
-///   with the cause `table_type` (`erl_db.c:1515-1519`).
+///   with the cause `table_type` (`erl_db.c:1514-1518`).
 /// - An integer `Incr` updates the position after the key position, and a
 ///   tuple is one operation; both give an integer. Another term is a list
 ///   of operations and gives a list (`erl_db.c:1520-1531`).
 /// - A missing key without a default raises `badarg` with the cause
-///   `badkey` (`erl_db.c:1533-1538`).
+///   `badkey` (`erl_db.c:1532-1537`).
 /// - ERTS checks each operation before it changes the object
-///   (`erl_db.c:1540-1604`), so a bad operation leaves the table as it was,
-///   and a default object stays out of the table (`erl_db.c:1677`).
+///   (`erl_db.c:1542-1604`), so a bad operation leaves the table as it was,
+///   and a default object stays out of the table (`erl_db.c:1673`).
 ///
 /// # Examples
 ///
@@ -2751,7 +2751,7 @@ pub(super) fn update_counter(
     };
     // The second loop of `do_update_counter` adds each increment to the
     // element as the earlier operations left it, and stops after the first
-    // operation unless it returns a list (`erl_db.c:1625-1662`).
+    // operation unless it returns a list (`erl_db.c:1627-1662`).
     let mut updates = Vec::new();
     for (position, incr, warp) in counters {
         let old = object[position - 1].bigint().expect("a checked counter");
@@ -2792,7 +2792,7 @@ pub(super) fn update_counter(
 type CounterOperation<'a> = (usize, &'a Term, Option<(&'a Term, &'a Term)>);
 
 /// Check the operations of `update_counter` against the object `object`,
-/// as the first loop of `do_update_counter` (`erl_db.c:1540-1604`) does,
+/// as the first loop of `do_update_counter` (`erl_db.c:1542-1604`) does,
 /// one element after another. A bad element or tail gives `Err(None)`:
 /// `badarg` with no cause. A position equal to the key position gives the
 /// cause `keypos`, and a position out of range gives the cause `position`.
