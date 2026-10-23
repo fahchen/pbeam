@@ -35,7 +35,16 @@ const TCP_CLOSE: &[u8] = include_bytes!("../../fixtures/tcp/tcp_close.beam");
 /// which call the `erts_internal` port BIFs, and `prim_inet` makes the
 /// requests of `gen_tcp` (prim_inet.erl). `gen_tcp:controlling_process/2`
 /// calls `inet_db:lookup_socket/1` and `inet:tcp_controlling_process/2`.
-const MODULES: [&str; 6] = ["erlang", "lists", "prim_inet", "gen_tcp", "inet", "inet_db"];
+/// `timer` has `sleep/1`.
+const MODULES: [&str; 7] = [
+    "erlang",
+    "lists",
+    "prim_inet",
+    "gen_tcp",
+    "inet",
+    "inet_db",
+    "timer",
+];
 
 /// A policy module whose `initial/1` gives no capability.
 const PROCESSES_POLICY: &[u8] = include_bytes!("../../fixtures/processes/processes_policy.beam");
@@ -332,9 +341,10 @@ fn stops_the_run_for_each_udp_inet_part_that_is_not_implemented() {
         ("seqpacket", "unsupported udp_inet type 3"),
         ("sctp", "unsupported udp_inet protocol 3"),
         ("accept", "unsupported udp_inet request 26"),
+        ("inet6", "unsupported udp_inet output address family 2"),
         (
-            "command",
-            "unsupported udp_inet output of erlang:port_command/2",
+            "ancillary",
+            "unsupported udp_inet output with ancillary data",
         ),
     ] {
         let argument = Term::Atom(program.atom(case).unwrap());
@@ -344,6 +354,42 @@ fn stops_the_run_for_each_udp_inet_part_that_is_not_implemented() {
             .to_string();
         assert!(error.starts_with(message), "{case}: {error}");
     }
+}
+
+#[test]
+fn sends_and_receives_datagrams_on_a_passive_udp_inet_port_as_pinned_erts() {
+    // The `prim_inet` calls of `gen_udp:send/4` and `gen_udp:recv/2,3` (inet_drv.c:14968-14998,
+    // 15037-15316, 15361-15576): the waiter gets its datagram from the IO
+    // poll, and the output and `PACKET_REQ_RECV` errors match.
+    let expected = "[ok,{ok,{{127,0,0,1},true,<<104,105>>}},[{error,timeout},{error,timeout}],{ok,{{127,0,0,1},true,<<>>}},{ok,{{127,0,0,1},true,[97,98]}},{error,ealready},{ok,{{127,0,0,1},true,[119]}},{ok,[{recv_oct,5},{recv_cnt,4},{recv_max,2},{recv_avg,1},{recv_dvi,0},{send_oct,5},{send_cnt,4},{send_max,2},{send_avg,1},{send_pend,0}]},[{error,einval},{error,eafnosupport},{error,einval},{error,einval},{error,einval}],[[0,101,105,110,118,97,108],[1],[0,101,105,110,118,97,108]],[{error,einval},[0,101,120,98,97,100,112,111,114,116]],{'EXIT',port,einval}]";
+    assert_eq!(erts_text("udp_probe", "passive"), expected, "ERTS");
+    assert_eq!(pbeam_text("udp_probe", "passive"), expected, "PBeam");
+}
+
+#[test]
+fn truncates_a_long_datagram_as_pinned_erts() {
+    // The read takes at most the 9216 bytes of the buffer
+    // (inet_drv.c:15469-15470); macOS sends at most 9216 bytes.
+    let expected = if cfg!(target_vendor = "apple") {
+        "{error,emsgsize}"
+    } else {
+        "{ok,9216,{ok,[{recv_oct,9216},{send_oct,9300}]}}"
+    };
+    assert_eq!(erts_text("udp_probe", "truncate"), expected, "ERTS");
+    assert_eq!(pbeam_text("udp_probe", "truncate"), expected, "PBeam");
+}
+
+#[test]
+fn gives_the_errno_of_a_failed_datagram_send_as_pinned_erts() {
+    // A failed `sendto` gives its errno (inet_drv.c:15240-15253): xnu
+    // rejects the port 0 with `EADDRNOTAVAIL`, and Linux with `EINVAL`.
+    let expected = if cfg!(target_vendor = "apple") {
+        "{error,eaddrnotavail}"
+    } else {
+        "{error,einval}"
+    };
+    assert_eq!(erts_text("udp_probe", "port_zero"), expected, "ERTS");
+    assert_eq!(pbeam_text("udp_probe", "port_zero"), expected, "PBeam");
 }
 
 #[test]

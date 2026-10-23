@@ -43,10 +43,12 @@
 //!
 //! A `udp_inet` port runs the requests of `packet_inet_ctl`, which runs
 //! `OPEN`, replies `exbadport` to `LISTEN`, and gives each other request
-//! to `inet_ctl` (inet_drv.c:14564-14892). It reads no datagram: the
-//! socket of an active port is in the idle wait, and a ready socket stops
-//! the run (row "udp_inet ports" of `docs/erts-differences.md`).
+//! to `inet_ctl` (inet_drv.c:14564-14892). A passive port sends and
+//! receives datagrams (see `inet/datagram.rs`). It reads no datagram for
+//! an active socket: the socket is in the idle wait, and a ready socket
+//! stops the run (row "udp_inet ports" of `docs/erts-differences.md`).
 
+mod datagram;
 mod stream;
 
 use std::{collections::VecDeque, ffi::c_int, io, os::fd::AsRawFd, time::Duration};
@@ -363,6 +365,9 @@ impl Inet {
             // `LISTEN` is only for an SCTP socket (inet_drv.c:14846-14858).
             27 => error_reply("exbadport"),
             42 if self.socket_type == SocketType::Stream => return self.receive_request(request),
+            60 if self.socket_type == SocketType::Datagram => {
+                return Ok(self.datagram_receive_request(request));
+            }
             other => return Err(self.unsupported("request", other)),
         };
         Ok(Control::Reply(reply))
