@@ -5477,6 +5477,15 @@ enum BinaryPart<'a> {
     /// segment number, and its unit. The handle keeps the arrays of the
     /// binary, so an append can share them and copy no byte of the segment.
     Shared(Binary, usize, u64, u64),
+    /// A `binary` segment with a size: its segment number, its term, and
+    /// the number of bits that it copies from the start of the term. ERTS
+    /// checks the term at the construct pass (`erts_bs_put_binary`,
+    /// erl_bits.c:1285-1308).
+    Sized {
+        segment: u64,
+        value: Term,
+        bits: u64,
+    },
     Integer {
         segment: u64,
         value: Term,
@@ -5526,6 +5535,29 @@ impl BinaryPart<'_> {
             // A size in bits that is not a multiple of the unit fails in the
             // construct pass (`erts_bs_put_binary_all`, erl_bits.c:1321-1324;
             // `BSC_INFO_UNIT`, jit/arm/instr_bs.cpp:2033-2047).
+            // A term that is not a bitstring, or that has fewer bits than
+            // the size, fails with the info `type` or `short`
+            // (`erts_bs_put_binary`, erl_bits.c:1290-1300; `BSC_INFO_DEPENDS`,
+            // jit/arm/instr_bs.cpp:2068-2071).
+            BinaryPart::Sized {
+                segment,
+                value,
+                bits,
+            } => match value {
+                Term::Binary(binary) if binary.bit_size() as u64 >= *bits => None,
+                Term::Binary(_) => Some(BinarySegmentFailure::badarg(
+                    *segment,
+                    "binary",
+                    "short",
+                    value.clone(),
+                )),
+                _ => Some(BinarySegmentFailure::badarg(
+                    *segment,
+                    "binary",
+                    "type",
+                    value.clone(),
+                )),
+            },
             BinaryPart::Shared(binary, _, segment, unit)
                 if !(binary.bit_size() as u64).is_multiple_of(*unit) =>
             {
@@ -5545,7 +5577,9 @@ impl BinaryPart<'_> {
         match self {
             BinaryPart::Bytes(bytes, _) => !bytes.is_empty(),
             BinaryPart::Shared(binary, ..) => binary.bit_size() > 0,
-            BinaryPart::Integer { bits, .. } | BinaryPart::Float { bits, .. } => *bits > 0,
+            BinaryPart::Integer { bits, .. }
+            | BinaryPart::Float { bits, .. }
+            | BinaryPart::Sized { bits, .. } => *bits > 0,
             BinaryPart::Utf8(_) | BinaryPart::Utf16 { .. } | BinaryPart::Utf32 { .. } => true,
         }
     }
@@ -5680,6 +5714,7 @@ fn shared_append_arrays(parts: &[BinaryPart<'_>]) -> Option<Vec<(Arc<Vec<u8>>, u
                 }
             }
             BinaryPart::Shared(..)
+            | BinaryPart::Sized { .. }
             | BinaryPart::Integer { .. }
             | BinaryPart::Utf8(_)
             | BinaryPart::Float { .. } => {
@@ -5852,6 +5887,32 @@ fn create_binary(
                     *segment,
                     *unit,
                 ));
+            }
+            BinarySegment::Binary {
+                segment,
+                unit,
+                source,
+                size,
+            } => {
+                // The size pass checks the size as the size of an `integer`
+                // segment (jit/arm/instr_bs.cpp:1639-1689). A literal size
+                // has no check (jit/arm/instr_bs.cpp:1493-1505, 2005-2018).
+                let fixed = matches!(size, Operand::Value(Term::Integer(literal)) if (0..1 << 56).contains(literal));
+                let size = read(process, size)?;
+                let bits = match integer_segment_bits(fixed, &size, *unit) {
+                    Ok(bits) => bits,
+                    Err(reason) => {
+                        return Ok(Err(BinarySegmentFailure {
+                            reason,
+                            ..BinarySegmentFailure::badarg(*segment, "binary", "size", size)
+                        }));
+                    }
+                };
+                parts.push(BinaryPart::Sized {
+                    segment: *segment,
+                    value: read(process, source)?,
+                    bits,
+                });
             }
             BinarySegment::Append {
                 segment,
@@ -6031,14 +6092,18 @@ fn create_binary(
         }
         return Ok(Ok(Term::Binary(Binary::concat_arrays(start, chunks))));
     }
-    let bytes = match write_binary_parts(process, &parts)? {
-        Ok(bytes) => bytes,
+    let (bytes, bits) = match write_binary_parts(process, &parts)? {
+        Ok(written) => written,
         Err(failure) => return Ok(Err(failure)),
     };
-    Ok(Ok(match &prefix {
-        Some(start) => Term::Binary(Binary::concat(start, &bytes)),
-        None => Term::binary(bytes),
-    }))
+    Ok(Ok(Term::Binary(match &prefix {
+        Some(start) if bits.is_multiple_of(8) => Binary::concat(start, &bytes),
+        Some(start) => {
+            let size = start.bit_size() + bits as usize;
+            Binary::concat(start, &bytes).bits(0, size)
+        }
+        None => bitstring(bytes, bits),
+    })))
 }
 
 /// Return the code point of a `utf16` or `utf32` segment of the term
@@ -6064,7 +6129,7 @@ fn utf_segment_code_point(value: &Term) -> Option<u32> {
 }
 
 /// Run the construct pass of `bs_create_bin` over `parts` and return the
-/// bytes that the parts write, or the failure of the first part in the
+/// bytes and the number of bits that the parts write, or the failure of the first part in the
 /// order of `integer_type_failure`. A `string` or `binary` part uses its
 /// reductions. A `float` part writes the bits of `float_segment_bits`, as
 /// `erts_bs_put_float` writes them (erl_bits.c:1454-1520).
@@ -6073,17 +6138,17 @@ fn utf_segment_code_point(value: &Term) -> Option<u32> {
 ///
 /// ```rust,ignore
 /// let parts = [BinaryPart::Utf8('a')];
-/// assert_eq!(write_binary_parts(&mut process, &parts)?, Ok(b"a".to_vec()));
+/// assert_eq!(write_binary_parts(&mut process, &parts)?, Ok((b"a".to_vec(), 8)));
 /// ```
 ///
 /// # Errors
 ///
-/// A bignum `integer` part of more than 64 bits, a 16-bit `float` part, or
-/// bytes whose size in bits is not a multiple of 8 is a runtime error.
+/// A bignum `integer` part of more than 64 bits or a 16-bit `float` part is
+/// a runtime error.
 fn write_binary_parts(
     process: &mut ProcessState,
     parts: &[BinaryPart<'_>],
-) -> Result<Result<Vec<u8>, BinarySegmentFailure>, BeamError> {
+) -> Result<Result<(Vec<u8>, u64), BinarySegmentFailure>, BeamError> {
     let mut writer = BitWriter::default();
     for (index, part) in parts.iter().enumerate() {
         match part {
@@ -6095,8 +6160,24 @@ fn write_binary_parts(
                 return Ok(Err(failure));
             }
             BinaryPart::Shared(binary, reductions, ..) => {
-                writer.push_binary(binary);
+                writer.push_binary(binary, binary.bit_size());
                 process.bump_reductions(i32::try_from(*reductions).unwrap_or(i32::MAX));
+            }
+            BinaryPart::Sized {
+                value: Term::Binary(binary),
+                bits,
+                ..
+            } if binary.bit_size() as u64 >= *bits => {
+                // `erts_bs_put_binary` uses one reduction for each 8192
+                // copied bits (erl_bits.c:1306).
+                writer.push_binary(binary, *bits as usize);
+                let reductions = *bits / BITS_PER_REDUCTION as u64;
+                process.bump_reductions(i32::try_from(reductions).unwrap_or(i32::MAX));
+            }
+            BinaryPart::Sized { .. } => {
+                return Ok(Err(part
+                    .type_failure()
+                    .expect("a sized part that cannot be written has a failure")));
             }
             BinaryPart::Integer {
                 value: Term::Integer(value),
@@ -6165,11 +6246,25 @@ fn write_binary_parts(
             },
         }
     }
-    writer.into_bytes().map(Ok).map_err(|bits| {
-        error(format!(
-            "unsupported bs_create_bin result: a bitstring of {bits} bits, which is not a binary"
-        ))
-    })
+    Ok(Ok(writer.into_bytes()))
+}
+
+/// Return the bitstring of the `bits` bits at the start of `bytes`, the
+/// output of a `BitWriter`. A size that is not a multiple of 8 bits gives a
+/// view of the first `bits` bits, which copies no byte.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(bitstring(vec![0x10], 4).bit_size(), 4);
+/// ```
+fn bitstring(bytes: Vec<u8>, bits: u64) -> Binary {
+    let binary = Binary::from(bytes);
+    if bits.is_multiple_of(8) {
+        binary
+    } else {
+        binary.bits(0, bits as usize)
+    }
 }
 
 /// Run a `bs_create_bin` whose first segment is `private_append`, as ERTS
@@ -6199,16 +6294,15 @@ fn write_binary_parts(
 ///
 /// A term in `source` that is not a binary is a runtime invariant error,
 /// because the compiler gives this segment only a binary that
-/// `bs_init_writable` made. That binary holds whole bytes: it starts with no
-/// byte, and `write_binary_parts` stops each append whose bits do not end
-/// on a byte boundary. The errors of `write_binary_parts` also apply.
+/// `bs_init_writable` made or that an earlier `private_append` gave. The
+/// errors of `write_binary_parts` also apply.
 fn private_append(
     process: &mut ProcessState,
     source: &Operand,
     parts: &[BinaryPart<'_>],
 ) -> Result<Result<Term, BinarySegmentFailure>, BeamError> {
-    let bytes = match write_binary_parts(process, parts)? {
-        Ok(bytes) => bytes,
+    let (bytes, bits) = match write_binary_parts(process, parts)? {
+        Ok(written) => written,
         Err(failure) => return Ok(Err(failure)),
     };
     let mut value = read(process, source)?;
@@ -6218,8 +6312,22 @@ fn private_append(
         )));
     };
     write(process, source, Term::Nil)?;
-    if !binary.append_in_place(&bytes) {
-        *binary = Binary::concat(binary, &bytes);
+    if !binary.bit_size().is_multiple_of(8) {
+        // The bits of the old bitstring do not end on a byte boundary, so
+        // the writer copies them, and then the new bits.
+        let mut writer = BitWriter::default();
+        writer.push_binary(binary, binary.bit_size());
+        writer.push_binary(&bitstring(bytes, bits), bits as usize);
+        let (bytes, bits) = writer.into_bytes();
+        *binary = bitstring(bytes, bits);
+    } else {
+        let size = binary.bit_size() + bits as usize;
+        if !binary.append_in_place(&bytes) {
+            *binary = Binary::concat(binary, &bytes);
+        }
+        if !bits.is_multiple_of(8) {
+            *binary = binary.bits(0, size);
+        }
     }
     write(process, source, value.clone())?;
     Ok(Ok(value))

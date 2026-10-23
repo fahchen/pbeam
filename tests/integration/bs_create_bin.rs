@@ -15,6 +15,8 @@ const BS_CREATE_BIN_WRITABLE_PROBE: &[u8] =
     include_bytes!("../../fixtures/bs_create_bin/bs_create_bin_writable_probe.beam");
 const BS_CREATE_BIN_ALLOC_LIMIT: &[u8] =
     include_bytes!("../../fixtures/bs_create_bin/bs_create_bin_alloc_limit.beam");
+const BS_CREATE_BIN_BITS_PROBE: &[u8] =
+    include_bytes!("../../fixtures/bs_create_bin/bs_create_bin_bits_probe.beam");
 
 /// Evaluate an expression on the pinned ERTS with `bs_create_bin_probe` in
 /// the code path and return its `~w` output.
@@ -1215,24 +1217,37 @@ fn uses_no_reduction_for_an_integer_segment() {
 }
 
 #[test]
-fn stops_at_a_bitstring_that_is_not_a_binary() {
-    // `nibble/1` is `<<X:4>>`. ERTS gives the bitstring `<<1:4>>`. PBeam
-    // has no bitstring term and stops (row "Binary construction").
-    let program = BeamProgram::load(&[BS_CREATE_BIN_INTEGER_PROBE]).unwrap();
-    assert_eq!(
-        program
-            .execute(
-                "bs_create_bin_integer_probe",
-                "nibble",
-                &[program.host_term(Term::Integer(1))],
-            )
-            .unwrap_err()
-            .to_string(),
-        "unsupported bs_create_bin result: a bitstring of 4 bits, which is not a binary"
+fn builds_bitstrings_and_their_failures_as_pinned_erts() {
+    // `cases/0` exits with the result of each case of
+    // `fixtures/bs_create_bin/bs_create_bin_bits_probe.erl`: `integer`,
+    // `bits`, `binary` with a unit or a size, `append`, and `private_append`
+    // segments that give a bitstring, and the `error_info` cause of each
+    // failure. The exit reason of PBeam and the `~w` output of the pinned
+    // ERTS show each bitstring by its bits.
+    let program = BeamProgram::load(&[BS_CREATE_BIN_BITS_PROBE]).unwrap();
+    let error = program
+        .execute("bs_create_bin_bits_probe", "cases", &[])
+        .unwrap_err()
+        .to_string();
+    let shown = format!(
+        "{}\n",
+        error
+            .strip_prefix("root process exited with ")
+            .unwrap_or(&error)
     );
+    let erts = reference("try bs_create_bin_bits_probe:cases() catch exit:R -> R end");
+    assert_eq!(shown, erts);
     assert_eq!(
-        reference("bs_create_bin_integer_probe:nibble(1)"),
-        "<<1:4>>\n"
+        erts,
+        "[<<1:4>>,<<15:4>>,<<37,1:2>>,<<1:7>>,<<1:6>>,{error,badarg,{1,binary,unit,<<1:4>>}},\
+         {error,badarg,{1,binary,type,a}},<<1,2>>,{error,badarg,{1,binary,short,<<1,2>>}},\
+         {error,badarg,{1,binary,size,-1}},{error,badarg,{1,binary,size,a}},\
+         {error,badarg,{1,binary,type,a}},{error,badarg,{1,binary,size,a}},<<16>>,\
+         {error,system_limit,{1,binary,size,1180591620717411303424}},\
+         {error,badarg,{1,binary,size,-1180591620717411303424}},<<>>,<<15:4>>,\
+         {error,badarg,{1,binary,short,<<1:3>>}},{error,badarg,{1,binary,type,a}},<<15>>,\
+         <<1,2,7:3>>,{error,badarg,{1,binary,type,a}},<<21:5>>,<<>>,<<170,170,1:1>>,\
+         <<16,32,1:4>>,<<255,1:1>>,{error,badarg,{2,binary,unit,<<1:1>>}}]\n"
     );
 }
 
@@ -1462,10 +1477,10 @@ fn builds_float_segments_and_raises_their_failures_as_pinned_erts() {
 }
 
 #[test]
-fn stops_at_a_16_bit_float_and_at_a_private_append_of_a_bitstring() {
-    // PBeam does not write 16-bit floats, and has no bitstring that is not
-    // a binary, so these runs stop with a runtime error where ERTS gives a
-    // binary.
+fn stops_at_a_16_bit_float_and_appends_a_bitstring_as_pinned_erts() {
+    // PBeam does not write 16-bit floats, so that run stops with a runtime
+    // error where ERTS gives a binary. `bits/1` appends 4 bits in each step
+    // with a `private_append` segment, and gives the binary of ERTS.
     let program = BeamProgram::load(&[BS_CREATE_BIN_WRITABLE_PROBE]).unwrap();
     assert_eq!(
         [
@@ -1478,10 +1493,7 @@ fn stops_at_a_16_bit_float_and_at_a_private_append_of_a_bitstring() {
         ],
         [
             Err("unsupported bs_create_bin float segment of 16 bits".into()),
-            Err(
-                "unsupported bs_create_bin result: a bitstring of 4 bits, which is not a binary"
-                    .into()
-            ),
+            Ok(Term::binary(vec![33])),
         ]
     );
     assert_eq!(
@@ -1887,11 +1899,9 @@ fn raises_the_erts_error_info_for_utf16_and_utf32_segments() {
 }
 
 #[test]
-fn stops_at_a_binary_segment_of_a_size_in_a_register() {
+fn builds_a_binary_segment_of_a_size_in_a_register() {
     // `binary_sized/2` is `<<X:Size/binary>>`: a `binary` segment of a size
-    // that is not `all`. The loader keeps it as an unsupported segment, so
-    // the run stops (row "Binary construction"). ERTS gives the prefix of
-    // the size.
+    // that is not `all`. ERTS gives the prefix of the size.
     let program = BeamProgram::load(&[BS_CREATE_BIN_PROBE]).unwrap();
     assert_eq!(
         program
@@ -1903,9 +1913,9 @@ fn stops_at_a_binary_segment_of_a_size_in_a_register() {
                     program.host_term(Term::Integer(2)),
                 ],
             )
-            .unwrap_err()
-            .to_string(),
-        "unsupported bs_create_bin segment binary"
+            .unwrap()
+            .term,
+        Term::binary(vec![1, 2])
     );
     assert_eq!(
         reference("bs_create_bin_probe:binary_sized(<<1,2,3>>, 2)"),
