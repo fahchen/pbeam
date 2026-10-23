@@ -573,7 +573,18 @@ fn read_spawn(spawn: &mut Spawn, input: &mut u64) -> Option<PortEvent> {
         let child = spawn.program.child()?;
         return Some(PortEvent::ExitStatus(child.read_status()));
     }
-    let bytes = spawn.program.read_output().ok()?;
+    let bytes = match spawn.program.read_output() {
+        Ok(bytes) => bytes,
+        // A read that fails with an errno other than `EINTR` and `EAGAIN`
+        // stops the read select, and the port stays open
+        // (`sys_drivers.c:1339-1342`, `1211-1214`).
+        Err(errno) => {
+            if errno != libc::EINTR && errno != libc::EAGAIN {
+                spawn.input = Input::Ended;
+            }
+            return None;
+        }
+    };
     if bytes.is_empty() && spawn.exit_status {
         spawn.input = Input::Status;
         return None;
@@ -584,3 +595,7 @@ fn read_spawn(spawn: &mut Spawn, input: &mut u64) -> Option<PortEvent> {
     *input += packets.iter().map(|bytes| bytes.len() as u64).sum::<u64>();
     (!packets.is_empty()).then_some(PortEvent::Data(packets))
 }
+
+#[cfg(test)]
+#[path = "../../tests/runtime/port.rs"]
+mod tests;
