@@ -252,12 +252,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ## Exceptions
 
-### Value checks of `process_flag/2` and `system_flag/2`
-
-- After #155 (PR #177), `{monitor_nodes, Options}` (`dist.c:6732-6799`), a `scheduler` value above the scheduler count, and the `system_flag/2` sub-checks of `internal_cpu_topology`, `erts_alloc`, `sequential_tracer`, `schedulers_online`, and `dirty_cpu_schedulers_online` give the runtime error where ERTS raises `badarg`. The "System flags" row of PR #177 records them.
-- **Trigger:** a consumer sets one of these flags.
-- **Source:** review of #155.
-
 ### Check the ordered map iterator crash of ERTS at each OTP pin change
 
 - Pinned ERTS 29.1.1 crashes with SIGSEGV in `erts_internal:map_next/3` when an ordered iterator path holds a key that the map does not hold, or ends with a tail that is not `[]`. It crashes in about one run in four, and in every run with `MallocScribble=1`. The BIF raises `badarg` with a half-built tuple left in its heap fragment, and the GC after the BIF reads the unset element (`erl_map.c:3670-3707`). OTP master has the same code. The "Map iteration" row of `docs/erts-differences.md` records it (PR #177). `tests/integration/logger_start.rs` checks this input on PBeam only (`returns_badarg_for_an_ordered_path_that_crashes_pinned_erts`), and the live `erl` reference run leaves it out. The owner decided not to report it to OTP.
@@ -476,7 +470,7 @@ The owner opened [m13] Foundation seams ([#908](https://github.com/fahchen/pbeam
 ### M20: BIF and ETS API completion
 
 - **Reason:** OTP code calls BIFs and ETS functions that are still `unsupported` BIF table entries.
-- **Evidence:** `ets:setopts/2` is `unsupported` (`src/runtime/interpreter/bif/table.rs:482`); entries "Accept every `erlang:spawn_opt/4` option", and "Value checks of `process_flag/2` and `system_flag/2`"; row "Heap limit" (no `max_heap_size` and no heap accounting).
+- **Evidence:** `ets:setopts/2` is `unsupported` (`src/runtime/interpreter/bif/table.rs:482`); entry "Accept every `erlang:spawn_opt/4` option"; row "Heap limit" (no `max_heap_size` and no heap accounting).
 - **Work:** ETS: an `ordered_set` tree, `ets:last/1` and `ets:prev/2` in key order, `ets:delete_object/2`, `ets:give_away/3` and the heir, `ets:setopts/2`, and the traversal order of `write_concurrency` tables on several schedulers. The other math BIFs, `erlang:exit/3`, and the other unsupported BIFs. The `spawn_opt` options and the process and system flags. A heap accounting layer: the `size_object` walk of `erts_debug:flat_size/1` (`beam_debug.c:71-76`), `min_heap_size`, `max_heap_size`, and the heap items of `process_info/2`. It only reports sizes and does no GC; confirm this scope with the owner when the milestone opens. The remaining items of `module_info` and `system_info`.
 - **Order:** after M14, because the heir and `give_away` go through the ETS accessor (#930) and the tables are on the node; after M15, because the `write_concurrency` order needs several schedulers in a real run.
 - **Trigger:** the owner opens the milestone.
