@@ -13,7 +13,7 @@ const PROBE: &[u8] = include_bytes!("../../fixtures/native_record/nr_probe.beam"
 const DEF: &[u8] = include_bytes!("../../fixtures/native_record/nr_def.beam");
 
 /// The `~w` print of `nr_probe:results()` on the pinned ERTS (OTP 29.1.1).
-const EXPECTED: &str = "[{1,2},{0,5},{9,2},{error,{badrecord,{point,1,2}}},{error,{badrecord,pub}},2,{error,{badrecord,pub}},{error,{badrecord,7}},1,{error,{badfield,{{nr_probe,point},zz}}},point,record,other,record,one,other,other,[true,true,false,false],true,false,true,false,true,{error,badarg},true,false,false,true,{error,badarg},false,{error,badarg},{error,badarg},false,false,true,false,true,true,true,true,false,true,true,true,false,false,false,false,true,true,44816085,127471339,73805464,3845231052,1409962566,3073056421,15,8,33,[9,2,5,6,10,1,8,11,4,7,3],[{5,1},1,{error,{badrecord,{nr_def,priv}}},{error,{novalue,{{nr_def,pub},a}}},{error,{badfield,{{nr_def,pub},zz}}},{error,{badrecord,{nr_none,pub}}},{3,1},{5,4},{error,{badfield,{{nr_def,pub},zz}}},{error,{badrecord,priv}},{error,{badrecord,priv}},{error,{badrecord,priv}},{error,{badrecord,priv}},{error,{badfield,{{nr_def,pub},zz}}},1,{error,{badfield,{{nr_def,priv},a}}},{8,1},nomatch,nomatch,pub,true,false]]\n";
+const EXPECTED: &str = "[{1,2},{0,5},{9,2},{error,{badrecord,{point,1,2}}},{error,{badrecord,pub}},2,{error,{badrecord,pub}},{error,{badrecord,7}},1,{error,{badfield,{{nr_probe,point},zz}}},point,record,other,record,one,other,other,[true,true,false,false],true,false,true,false,true,{error,badarg},true,false,false,true,{error,badarg},false,{error,badarg},{error,badarg},false,false,true,false,true,true,true,true,false,true,true,true,false,false,false,false,true,true,44816085,127471339,73805464,3845231052,1409962566,3073056421,15,8,33,[9,2,5,6,10,1,8,11,4,7,3],[{5,1},1,{error,{badrecord,{nr_def,priv}}},{error,{novalue,{{nr_def,pub},a}}},{error,{badfield,{{nr_def,pub},zz}}},{error,{badrecord,{nr_none,pub}}},{3,1},{5,4},{error,{badfield,{{nr_def,pub},zz}}},{error,{badrecord,priv}},{error,{badrecord,priv}},{error,{badrecord,priv}},{error,{badrecord,priv}},{error,{badfield,{{nr_def,pub},zz}}},1,{error,{badfield,{{nr_def,priv},a}}},{8,1},nomatch,nomatch,pub,true,false],{[],[a]}]\n";
 
 /// Return the `~w` print of `nr_probe:results()` on the pinned ERTS.
 fn reference() -> String {
@@ -58,4 +58,19 @@ fn runs_native_records_as_pinned_erts() {
             .unwrap_or_else(|| panic!("{error}"))
     );
     assert_eq!(shown, EXPECTED);
+}
+
+#[test]
+fn stops_the_run_at_term_to_binary_of_a_record() {
+    // ERTS encodes a native record (`external.c`); PBeam stops the run
+    // until #1039 (row "External term format").
+    let program = BeamProgram::load(&[PROBE, DEF, &pinned_beam("erlang")]).unwrap();
+    let error = program
+        .execute("nr_probe", "t2b", &[])
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("unsupported erlang:term_to_binary/1,2 of a native record"),
+        "{error}"
+    );
 }

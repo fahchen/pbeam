@@ -1,5 +1,5 @@
 -module(nr_probe).
--export([results/0, show/0, id/1]).
+-export([results/0, show/0, id/1, t2b/0]).
 -compile([{nowarn_deprecated_function, [{erlang, phash, 2}]}]).
 
 -record #point{x = 0, y}.
@@ -42,7 +42,7 @@ results() ->
      erlang:phash(P, 1 bsl 32), erlang:phash(E, 1 bsl 32), erlang:phash(Priv, 1 bsl 32),
      erts_debug:flat_size(P), erts_debug:flat_size(E), erts_debug:flat_size({P, P}),
      pdict([P, E, Priv, U, D, #point{x = 2, y = 3}, 1, {3}, [4], 2.5, P#point{y = 7}]),
-     remote(Pub, Priv)].
+     remote(Pub, Priv), ets_range(Pub)].
 
 %% The remote record operations of OTP 29 (`erl_record.c:344-568`).
 remote(Pub, Priv) ->
@@ -109,6 +109,18 @@ catch_error(Fun) ->
         error:{badrecord, R} when is_record(R, nr_def, priv) -> {error, {badrecord, priv}};
         error:Reason -> {error, Reason}
     end.
+
+%% A partly bound ordered_set key walks past a record key
+%% (`erl_db_tree.c` `partly_bound_can_match_lesser`).
+ets_range(Pub) ->
+    T = ets:new(t, [ordered_set]),
+    ets:insert(T, [{Pub, 1}, {{a, b}, 2}, {3, 3}]),
+    {ets:select(T, [{{{x, q, 7}, 2}, [], [true]}]),
+     ets:select(T, [{{{'$1', b}, '_'}, [], ['$1']}])}.
+
+%% Encode a record; PBeam stops the run until #1039.
+t2b() ->
+    term_to_binary(#point{y = 1}).
 
 %% Exit with the result of results/0, so the host reads it.
 show() ->
