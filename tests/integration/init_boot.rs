@@ -351,7 +351,7 @@ fn serves_the_inet_gethost_port_program_as_pinned_erts() {
         reference.starts_with("{gethost,[none,none,none,none,none,none],[{data,"),
         "{reference}"
     );
-    assert!(reference.contains("[[eof],[eof]]"), "{reference}");
+    assert!(reference.contains("[[{exit_status,1},eof],[{exit_status,1},eof]]"), "{reference}");
     assert_eq!(node, reference, "PBeam");
 }
 

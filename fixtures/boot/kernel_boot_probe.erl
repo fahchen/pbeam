@@ -58,7 +58,13 @@ gethost() ->
                     <<8:32, 2, 1, 127, 0, 0, 1>>,
                     <<9:32, 1, 2, "no-such-host.invalid", 0>>,
                     <<10:32, 2, 2, 16#20010db8:32, 0:96>>], 20000),
-    Fatal = [Ask([R], 20000) || R <- [<<1, 2, 3>>, <<1:32, 4, 0, 1:32>>]],
+    Drain = fun Drain(Port, Timeout) ->
+                    receive {Port, M} -> [M | Drain(Port, 1000)]
+                    after Timeout -> []
+                    end
+            end,
+    Fatal = [begin Port = gethost_port(), true = port_command(Port, R), Drain(Port, 20000) end
+             || R <- [<<1, 2, 3>>, <<1:32, 4, 0, 1:32>>]],
     Native = [inet_gethost_native:gethostbyname("localhost"),
               inet_gethost_native:gethostbyname("localhost", inet6),
               inet_gethost_native:gethostbyname("127.0.0.1"),
@@ -72,7 +78,7 @@ gethost() ->
 gethost_port() ->
     {ok, [BinDir]} = init:get_argument(bindir),
     open_port({spawn_executable, filename:join(BinDir, "inet_gethost")},
-              [{args, ["4"]}, {packet, 4}, eof, binary]).
+              [{args, ["4"]}, {packet, 4}, eof, exit_status, binary]).
 
 %% `erl -noshell -boot start_clean -pa fixtures/boot -s kernel_boot_probe
 %% supports -kernel logger_level warning` runs supports/0. erl_init:start/2
