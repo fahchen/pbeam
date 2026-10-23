@@ -260,8 +260,8 @@ fn hostent_reply(host: *mut libc::hostent) -> Result<Vec<u8>, Code> {
         return Err(netdb_code(h_errno_value()));
     }
     // SAFETY: a `hostent` that is not null has a NUL-terminated name, a
-    // null-terminated alias list (or a null list), and a null-terminated
-    // list of addresses of `h_length` bytes. `NETDB` keeps it valid.
+    // null-terminated alias list, and a null-terminated list of addresses
+    // of `h_length` bytes (POSIX `<netdb.h>`). `NETDB` keeps it valid.
     unsafe {
         let host = &*host;
         let unit = u8::try_from(host.h_length).unwrap_or(0);
@@ -276,24 +276,19 @@ fn hostent_reply(host: *mut libc::hostent) -> Result<Vec<u8>, Code> {
     }
 }
 
-/// Return the elements of the null-terminated pointer list `list`, or no
-/// elements when `list` is null.
+/// Return the elements of the null-terminated pointer list `list`. POSIX
+/// gives `h_aliases` as a list, so the null check of `build_reply`
+/// (`inet_gethost.c:2145`) has no case here.
 ///
 /// # Safety
 ///
-/// `list` is null or a valid null-terminated list.
+/// `list` is a valid null-terminated list.
 unsafe fn c_list(list: *mut *mut c_char) -> impl Iterator<Item = *mut c_char> {
     (0..)
         // SAFETY: the list ends at its first null element. The list of
         // macOS `gethostbyaddr` can be misaligned, so the read is
         // unaligned, as the C code of the program reads it.
-        .map(move |index| {
-            if list.is_null() {
-                std::ptr::null_mut()
-            } else {
-                unsafe { list.add(index).read_unaligned() }
-            }
-        })
+        .map(move |index| unsafe { list.add(index).read_unaligned() })
         .take_while(|element| !element.is_null())
 }
 
