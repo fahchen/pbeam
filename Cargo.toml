@@ -773,3 +773,7 @@ path = "tests/integration/heap_flags.rs"
 [[test]]
 name = "bif_cause"
 path = "tests/integration/bif_cause.rs"
+
+[[test]]
+name = "undef_frames"
+path = "tests/integration/undef_frames.rs"
