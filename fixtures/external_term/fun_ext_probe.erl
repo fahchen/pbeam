@@ -1,5 +1,5 @@
 -module(fun_ext_probe).
--export([round_trip/0, unloaded/0, call_unloaded/0, errors/0, other_md5/0, no_lambda_handler/0, deleted/0]).
+-export([round_trip/0, unloaded/0, call_unloaded/0, errors/0, other_md5/0, no_lambda_handler/0, deleted/0, wrong_arity/0]).
 
 make(Tag) ->
     fun(X, Y) -> {Tag, X, Y} end.
@@ -84,3 +84,11 @@ deleted() ->
     F = make(t),
     true = erlang:delete_module(?MODULE),
     F(1, 2).
+
+%% A decoded fun with the MD5 and index of a loaded entry but another arity
+%% gets another fun entry (`erl_fun.c:79-85`), and a call raises badfun
+%% (`beam_common.c:1697-1706`).
+wrong_arity() ->
+    <<Head:6/binary, 2, Rest/binary>> = term_to_binary(make(t)),
+    D = binary_to_term(<<Head/binary, 1, Rest/binary>>),
+    try D(1) catch C:R -> {C, R =:= {badfun, D}} end.

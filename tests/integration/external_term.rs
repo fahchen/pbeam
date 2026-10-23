@@ -251,7 +251,7 @@ const FUN_PROBE: &[u8] = include_bytes!("../../fixtures/external_term/fun_ext_pr
 /// The module MD5 of `fun_ext_probe.beam`, which the pinned ERTS writes in
 /// each `NEW_FUN_EXT` of the module.
 const FUN_PROBE_MD5: [u8; 16] = [
-    25, 55, 129, 47, 162, 238, 211, 150, 19, 2, 67, 246, 20, 149, 199, 192,
+    254, 246, 110, 211, 24, 126, 81, 84, 8, 71, 200, 231, 70, 55, 202, 243,
 ];
 
 /// Return the program of `fun_ext_probe` with the pinned `erlang` module.
@@ -262,13 +262,13 @@ fn load_fun_probe() -> BeamProgram {
 
 /// Return the `NEW_FUN_EXT` bytes of the pinned ERTS for a fun of
 /// `fun_ext_probe`: the size, the arity, the index, the free count, the old
-/// index, and the old unique value `[98, 0, 201, 188, 9]`, then `free`.
+/// index, and the old unique value `[98, 7, 247, 179, 118]`, then `free`.
 fn probe_fun_bytes(size: u8, arity: u8, index: u8, free_count: u8, free: &[u8]) -> Vec<u8> {
     let mut bytes = vec![131, 112, 0, 0, 0, size, arity];
     bytes.extend_from_slice(&FUN_PROBE_MD5);
     bytes.extend_from_slice(&[0, 0, 0, index, 0, 0, 0, free_count, 119, 13]);
     bytes.extend_from_slice(b"fun_ext_probe");
-    bytes.extend_from_slice(&[97, index, 98, 0, 201, 188, 9, 88, 119, 13]);
+    bytes.extend_from_slice(&[97, index, 98, 7, 247, 179, 118, 88, 119, 13]);
     bytes.extend_from_slice(b"nonode@nohost");
     bytes.extend_from_slice(&[0; 12]);
     bytes.extend_from_slice(free);
@@ -387,6 +387,22 @@ fn calls_the_old_code_of_a_fun_after_delete_module_as_pinned_erts() {
             Term::Integer(1),
             Term::Integer(2)
         ])
+    );
+}
+
+#[test]
+fn raises_badfun_for_a_decoded_fun_with_another_arity_as_pinned_erts() {
+    // `fun_ext_probe:wrong_arity/0` on the pinned ERTS gives
+    // `{error, true}`: another fun entry (`erl_fun.c:79-85`) with no code
+    // in a loaded module raises badfun (`beam_common.c:1697-1706`).
+    let program = load_fun_probe();
+    let atom = |name| atom(&program, name);
+    assert_eq!(
+        program
+            .execute("fun_ext_probe", "wrong_arity", &[])
+            .unwrap()
+            .term,
+        Term::tuple(vec![atom("error"), atom("true")])
     );
 }
 

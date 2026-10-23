@@ -647,7 +647,9 @@ impl CodeTable {
                 .tables
                 .fun_entries
                 .get(&lambda.index())
-                .filter(|entry| entry.lambda.uniq() == lambda.uniq())
+                .filter(|entry| {
+                    entry.lambda.uniq() == lambda.uniq() && entry.lambda.arity() == lambda.arity()
+                })
             {
                 return frame(loaded, entry.lambda.label(), arity).map(Some);
             }
@@ -717,7 +719,9 @@ impl CodeTable {
                 .tables
                 .fun_entries
                 .get(&lambda.index())
-                .filter(|entry| entry.lambda.uniq() == lambda.uniq())
+                .filter(|entry| {
+                    entry.lambda.uniq() == lambda.uniq() && entry.lambda.arity() == lambda.arity()
+                })
             else {
                 continue;
             };
