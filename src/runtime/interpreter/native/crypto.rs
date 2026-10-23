@@ -491,11 +491,12 @@ fn pbkdf2_hmac_nif(
         return low_level_call_failed(scheduler);
     }
     // `PKCS5_PBKDF2_HMAC` also takes the lengths as C `int`s
-    // (pbkdf2_hmac.c:58-61). A key length whose `int` is 0 or less fails
-    // the call; another length above `INT_MAX` stops the run (row "NIF
-    // stubs" of `docs/erts-differences.md`).
+    // (pbkdf2_hmac.c:58-61). A key length whose `int` is negative fails
+    // the call (OpenSSL `pbkdf2.c:397`); another length above `INT_MAX`,
+    // with an `int` of 0 for which ERTS gives uninitialized bytes, stops
+    // the run (row "NIF stubs" of `docs/erts-differences.md`).
     let int_max = i32::MAX as usize;
-    if key_length > int_max && (key_length as u32) as i32 <= 0 {
+    if key_length > int_max && ((key_length as u32) as i32) < 0 {
         return low_level_call_failed(scheduler);
     }
     if key_length > int_max || password.len() > int_max || salt.len() > int_max {

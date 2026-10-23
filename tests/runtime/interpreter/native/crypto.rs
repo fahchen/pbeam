@@ -493,7 +493,26 @@ fn bounds_the_key_length_to_a_c_int() {
         &Term::Integer(1),
         &Term::Integer((1 << 32) + 1),
     );
-    assert!(wrapped.is_err());
+    assert_int_max_error(wrapped);
+    let zero = pbkdf2_hmac_nif(
+        &mut scheduler,
+        &sha,
+        &password,
+        &salt,
+        &Term::Integer(1),
+        &Term::Integer(1 << 32),
+    );
+    assert_int_max_error(zero);
+}
+
+fn assert_int_max_error(result: Result<BifResult, BeamError>) {
+    let Err(error) = result else {
+        panic!("a key length above INT_MAX stops the run");
+    };
+    assert!(
+        format!("{error:?}").contains("longer than INT_MAX bytes"),
+        "{error:?}"
+    );
 }
 
 #[test]
