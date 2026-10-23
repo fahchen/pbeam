@@ -552,7 +552,7 @@ bifs! {
     prim_file:internal_native2name/1 as PrimFileInternalNative2name1 => |_, [name]| file::internal_native2name(name, filename_encoding()),
     prim_file:internal_normalize_utf8/1 => unsupported,
     prim_file:is_translatable/1 => unsupported,
-    re:compile/1 => unsupported,
+    re:compile/1 as ReCompile1 => |cx, [pattern]| re::compile(cx, pattern, &Term::nil()),
     re:compile/2 as ReCompile2 => |cx, [pattern, options]| re::compile(cx, pattern, options),
     re:import/1 as ReImport1 => |cx, [exported]| re::import(cx, exported),
     re:inspect/2 => unsupported,
