@@ -275,16 +275,11 @@ fn decodes_the_large_tuple_bitstring_and_guards() {
         decode_with(&atoms, &[105, 0, 0, 0, 3, 97, 1], false),
         Err(DecodeError::Badarg)
     ));
-    // A bitstring of whole bytes is a binary, and another tail raises the
-    // runtime error of the missing bitstring term.
+    // A bitstring of whole bytes is a binary.
     assert_eq!(
         decode_with(&atoms, &[77, 0, 0, 0, 1, 8, 5], false).unwrap(),
         Term::binary(vec![5])
     );
-    assert!(matches!(
-        decode_with(&atoms, &[77, 0, 0, 0, 1, 7, 5], false),
-        Err(DecodeError::Unsupported(_))
-    ));
     // A bit count of 0 or 9, and a payload of no bytes, raise badarg
     // (`external.c:4895-4920`).
     assert!(matches!(
@@ -866,10 +861,13 @@ fn encodes_the_large_and_unsupported_forms() {
     let large = crate::term::Map::from_pairs(pairs, &atoms).unwrap();
     let bytes = encode(&Term::Map(large), &atoms, &options).unwrap();
     assert_eq!(&bytes[..5], [116, 0, 0, 0, 40]);
-    // A bitstring that is not a whole number of bytes has no bytes
-    // (`enc_term` writes `BIT_BINARY_EXT` for it, `external.c:3861-3880`).
-    let partial = Term::Binary(Binary::from(vec![1]).bits(0, 1));
-    assert!(encode(&partial, &atoms, &options).is_err());
+    // A bitstring at a bit offset is written from its first bit
+    // (`external.c:3916-3935`).
+    let partial = Term::Binary(Binary::from(vec![0x5A, 0xFF]).bits(1, 12));
+    assert_eq!(
+        encode(&partial, &atoms, &options).unwrap(),
+        [77, 0, 0, 0, 2, 3, 0xB5, 0xE0]
+    );
     // `deterministic` sorts map keys in exact term order, where an integer
     // is less than a float (`erl_utils.h:267-272`, `utils.c:2121-2130`).
     let pairs: Vec<(Term, Term)> = vec![

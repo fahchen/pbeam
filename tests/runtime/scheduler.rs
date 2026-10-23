@@ -508,15 +508,15 @@ fn frees_the_name_of_a_process_when_it_exits() {
         .unwrap();
     let name = Term::Atom(scheduler.atoms.put("pbeam_probe_reg").unwrap());
     assert_eq!(scheduler.whereis("pbeam_probe_reg"), None);
-    assert!(scheduler.register(&name, &Term::Pid(child)));
-    assert!(!scheduler.register(&name, &Term::Pid(ProcessId(0))));
+    assert_eq!(scheduler.register(&name, &Term::Pid(child)), Ok(()));
+    assert!(scheduler.register(&name, &Term::Pid(ProcessId(0))).is_err());
     assert_eq!(scheduler.whereis("pbeam_probe_reg"), Some(child));
     scheduler.park_current();
 
     scheduler.schedule_next().unwrap();
     scheduler.finish_current(atom("normal"), None).unwrap();
     assert_eq!(scheduler.whereis("pbeam_probe_reg"), None);
-    assert!(scheduler.register(&name, &Term::Pid(ProcessId(0))));
+    assert_eq!(scheduler.register(&name, &Term::Pid(ProcessId(0))), Ok(()));
     assert_eq!(scheduler.whereis("pbeam_probe_reg"), Some(ProcessId(0)));
     assert_eq!(
         scheduler.processes[&ProcessId(0)]
@@ -2501,10 +2501,16 @@ fn a_scheduler_registers_a_name_for_a_remote_process() {
         Scheduler::with_shared(Arc::new(atoms), Arc::clone(&node), 0, readers.remove(0));
     let remote = ProcessId(7);
     node.register(remote, 1);
-    assert!(scheduler.register(&Term::Atom(first.clone()), &Term::Pid(remote)));
+    assert_eq!(
+        scheduler.register(&Term::Atom(first.clone()), &Term::Pid(remote)),
+        Ok(())
+    );
     assert_eq!(scheduler.registered_name_of(remote), Some(first.clone()));
     // One process has one name.
-    assert!(!scheduler.register(&Term::Atom(second), &Term::Pid(remote)));
+    assert_eq!(
+        scheduler.register(&Term::Atom(second), &Term::Pid(remote)),
+        Err("registered_name")
+    );
     assert!(scheduler.unregister(&Term::Atom(first)));
     assert_eq!(scheduler.registered_name_of(remote), None);
 }

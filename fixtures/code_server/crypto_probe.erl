@@ -1,5 +1,5 @@
 -module(crypto_probe).
--export([main/0, nifs/0, info/0, hash_init/0, hash_large/0]).
+-export([main/0, nifs/0, info/0, supports/0, fips/0, hash_init/0, hash_large/0]).
 
 %% Write the results of crypto:strong_rand_bytes/1, one term on each line.
 %% The first call loads crypto on demand, and its -on_load function loads
@@ -73,6 +73,29 @@ info() ->
                         maps:get(fips_provider_available, Fields),
                         maps:get(otp_crypto_version, Fields),
                         {Name, is_integer(Number), is_binary(Text)}]]).
+
+%% Write the count of the items of crypto:supports/0, the items that PBeam
+%% can run, and whether the list has only those items. The NIFs of the lists
+%% are in algorithms.c:86-224 and digest.c:226-242; supports/0 builds the
+%% list (crypto.erl:843-895). The pinned ERTS lists each algorithm of its
+%% OpenSSL. PBeam lists only the algorithms that it can run: the digests of
+%% hash_nif/2.
+supports() ->
+    Run = [sha512_256, sha512_224, sha512, sha384, sha256, sha224, sha],
+    All = crypto:supports(),
+    Items = [{Type, [Item || Item <- List, lists:member(Item, Run)]} || {Type, List} <- All],
+    Lists = [crypto:supports(Type) || {Type, _} <- All],
+    io:format("~p~n", [[length(lists:append([List || {_, List} <- All])), Items,
+                        All =:= Items, Lists =:= [List || {_, List} <- All]]]).
+
+%% Write the FIPS status and the results of crypto:enable_fips_mode/1. A
+%% build without FIPS support gives not_supported, false for true, true
+%% for false, and badarg for each other term (fips.c:27-62). The calls of
+%% the deprecated enable_fips_mode/1 go through apply/3 (crypto.erl:183).
+fips() ->
+    Enable = fun(Mode) -> apply(crypto, enable_fips_mode, [Mode]) end,
+    io:format("~p~n", [[crypto:info_fips(), Enable(true), Enable(false),
+                        bad_reason(fun() -> Enable(yes) end)]]).
 
 %% Call crypto:hash_init/1, whose NIF hash_init_nif/1 PBeam does not link.
 hash_init() ->

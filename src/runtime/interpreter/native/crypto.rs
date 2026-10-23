@@ -3,17 +3,19 @@
 //! PBeam links `strong_rand_bytes_nif/1`, which reads the entropy of
 //! the host from `/dev/urandom`, which it opens once, and the NIFs that the
 //! `plug_hello` release calls: `hash_nif/2`, `pbkdf2_hmac_nif/5`,
-//! `strong_rand_range_nif/1`, `info_nif/0`, and `info_lib/0`. ERTS computes
-//! the digests with OpenSSL; PBeam uses the RustCrypto `sha1` and `sha2`
-//! implementations, because the repository has no hash implementation.
+//! `strong_rand_range_nif/1`, `info_nif/0`, and `info_lib/0`. It links
+//! `info_fips/0`, `enable_fips_mode_nif/1`, and the algorithm lists of
+//! `crypto:supports/0,1`, which name only the algorithms that PBeam can
+//! run. As ERTS,
+//! PBeam computes the digests with a static OpenSSL, through the safe
+//! `openssl` crate (`vendored`, OpenSSL 3.5.5).
 //! Each other function of the library gives the runtime error
 //! `crypto:F/A NIF is not supported` (row "NIF stubs" of
 //! `docs/erts-differences.md`).
 
 use super::*;
 use num_traits::ToPrimitive;
-use sha1::Sha1;
-use sha2::{Digest, Sha224, Sha256, Sha384, Sha512, Sha512_224, Sha512_256};
+use openssl::hash::MessageDigest;
 use std::{fs::File, io::Read, sync::OnceLock};
 
 /// The functions of the ERTS `crypto` NIF library, as `(name, arity)` in
@@ -108,10 +110,44 @@ pub(super) const FUNCTIONS: [(&str, u32); 70] = [
 /// ```
 pub(super) const BINDINGS: &[Binding] = &[
     Binding {
+        name: "cipher_algorithms",
+        arity: 0,
+        job: Job::Normal,
+        run: |_, _| Ok(BifResult::Value(Term::Nil)),
+    },
+    Binding {
+        name: "curve_algorithms",
+        arity: 0,
+        job: Job::Normal,
+        run: |_, _| Ok(BifResult::Value(Term::Nil)),
+    },
+    Binding {
+        name: "enable_fips_mode_nif",
+        arity: 1,
+        job: Job::Normal,
+        run: |_, arguments| Ok(enable_fips_mode_nif(&arguments[0])),
+    },
+    Binding {
+        name: "hash_algorithms",
+        arity: 0,
+        job: Job::Normal,
+        run: |scheduler, _| hash_algorithms(scheduler),
+    },
+    Binding {
         name: "hash_nif",
         arity: 2,
         job: Job::Normal,
         run: |scheduler, arguments| hash_nif(scheduler, &arguments[0], &arguments[1]),
+    },
+    Binding {
+        name: "info_fips",
+        arity: 0,
+        job: Job::Normal,
+        run: |scheduler, _| {
+            Ok(BifResult::Value(Term::Atom(
+                scheduler.atoms.put("not_supported")?,
+            )))
+        },
     },
     Binding {
         name: "info_lib",
@@ -124,6 +160,18 @@ pub(super) const BINDINGS: &[Binding] = &[
         arity: 0,
         job: Job::Normal,
         run: |scheduler, _| info_nif(scheduler),
+    },
+    Binding {
+        name: "kem_algorithms_nif",
+        arity: 0,
+        job: Job::Normal,
+        run: |_, _| Ok(BifResult::Value(Term::Nil)),
+    },
+    Binding {
+        name: "mac_algorithms",
+        arity: 0,
+        job: Job::Normal,
+        run: |_, _| Ok(BifResult::Value(Term::Nil)),
     },
     Binding {
         name: "pbkdf2_hmac_nif",
@@ -141,6 +189,18 @@ pub(super) const BINDINGS: &[Binding] = &[
         },
     },
     Binding {
+        name: "pubkey_algorithms",
+        arity: 0,
+        job: Job::Normal,
+        run: |_, _| Ok(BifResult::Value(Term::Nil)),
+    },
+    Binding {
+        name: "rsa_opts_algorithms",
+        arity: 0,
+        job: Job::Normal,
+        run: |_, _| Ok(BifResult::Value(Term::Nil)),
+    },
+    Binding {
         name: "strong_rand_bytes_nif",
         arity: 1,
         job: Job::Normal,
@@ -154,26 +214,19 @@ pub(super) const BINDINGS: &[Binding] = &[
     },
 ];
 
-/// The OpenSSL version that the pinned ERTS 29.1.1 links, which
-/// `crypto:info/0` and `crypto:info_lib/0` report (`info.c:110-204`). The
-/// pinned ERTS links OpenSSL statically, so the version is constant.
+/// Return the version text of the linked OpenSSL, which `crypto:info/0`
+/// and `crypto:info_lib/0` report (`info.c:110-204`). PBeam links OpenSSL
+/// 3.5.5 statically; the pinned ERTS links 3.5.8 (row "NIF stubs" of
+/// `docs/erts-differences.md`).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(OPENSSL_VERSION, "OpenSSL 3.5.8 25 Aug 2026");
+/// assert!(openssl_version().starts_with("OpenSSL 3.5."));
 /// ```
-const OPENSSL_VERSION: &str = "OpenSSL 3.5.8 25 Aug 2026";
-
-/// The `OPENSSL_VERSION_NUMBER` of the pinned ERTS: `0x30500080`
-/// (`openssl/opensslv.h`), as `crypto:info_lib/0` reports it.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// assert_eq!(OPENSSL_VERSION_NUMBER, 810549376);
-/// ```
-const OPENSSL_VERSION_NUMBER: i64 = 810549376;
+fn openssl_version() -> &'static str {
+    openssl::version::version()
+}
 
 /// Run the load callback of the `crypto` library on `load_info`, as
 /// `initialize` (`crypto.c:182-357`) does, and return its veto: 0 when the
@@ -260,24 +313,42 @@ impl Hash {
         }
     }
 
-    /// Return the digest bytes of `data`. The values match the OpenSSL
-    /// digests of the pinned ERTS.
+    /// Return the OpenSSL digest of `self`, as `init_digest_types`
+    /// (`digest.c:181-188`) fetches it.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(digest_bytes(Hash::Sha, b"abc").len(), 20);
+    /// assert_eq!(Hash::Sha.message_digest().size(), 20);
+    /// ```
+    fn message_digest(self) -> MessageDigest {
+        match self {
+            Hash::Sha => MessageDigest::sha1(),
+            Hash::Sha224 => MessageDigest::sha224(),
+            Hash::Sha256 => MessageDigest::sha256(),
+            Hash::Sha384 => MessageDigest::sha384(),
+            Hash::Sha512 => MessageDigest::sha512(),
+            Hash::Sha512_224 => {
+                MessageDigest::from_name("SHA512-224").expect("OpenSSL has SHA512-224")
+            }
+            Hash::Sha512_256 => {
+                MessageDigest::from_name("SHA512-256").expect("OpenSSL has SHA512-256")
+            }
+        }
+    }
+
+    /// Return the OpenSSL digest bytes of `data`, as `EVP_Digest` gives
+    /// them to `hash_nif` (`hash.c`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Hash::Sha.digest(b"abc").len(), 20);
     /// ```
     fn digest(self, data: &[u8]) -> Vec<u8> {
-        match self {
-            Hash::Sha => Sha1::digest(data).to_vec(),
-            Hash::Sha224 => Sha224::digest(data).to_vec(),
-            Hash::Sha256 => Sha256::digest(data).to_vec(),
-            Hash::Sha384 => Sha384::digest(data).to_vec(),
-            Hash::Sha512 => Sha512::digest(data).to_vec(),
-            Hash::Sha512_224 => Sha512_224::digest(data).to_vec(),
-            Hash::Sha512_256 => Sha512_256::digest(data).to_vec(),
-        }
+        openssl::hash::hash(self.message_digest(), data)
+            .expect("OpenSSL computes each digest of `Hash`")
+            .to_vec()
     }
 }
 
@@ -478,17 +549,45 @@ fn pbkdf2_hmac_nif(
     // (pbkdf2_hmac.c:58-61), so the high 32 bits do not count.
     let iterations = (iterations as u32) as i32;
     if iterations <= 0 {
-        return c_error(
-            scheduler,
-            "error",
-            "pbkdf2_hmac.c",
-            63,
-            -1,
-            "Low-level call failed",
-        );
+        return low_level_call_failed(scheduler);
     }
-    hash.pbkdf2(password, salt, iterations, key_length, &mut output);
-    Ok(BifResult::Value(Term::binary(output)))
+    // `PKCS5_PBKDF2_HMAC` also takes the lengths as C `int`s
+    // (pbkdf2_hmac.c:58-61). A key length whose `int` is negative fails
+    // the call (OpenSSL `pbkdf2.c:397`); another length above `INT_MAX`,
+    // with an `int` of 0 for which ERTS gives uninitialized bytes, stops
+    // the run (row "NIF stubs" of `docs/erts-differences.md`).
+    let int_max = i32::MAX as usize;
+    if key_length > int_max && ((key_length as u32) as i32) < 0 {
+        return low_level_call_failed(scheduler);
+    }
+    if key_length > int_max || password.len() > int_max || salt.len() > int_max {
+        return Err(error(
+            "crypto:pbkdf2_hmac_nif/5 does not support a key, password, or salt longer than INT_MAX bytes"
+                .to_owned(),
+        ));
+    }
+    let derived = hash.pbkdf2(password, salt, iterations, key_length, &mut output);
+    let derived = derived.map(|()| BifResult::Value(Term::binary(output)));
+    derived.or_else(|_| low_level_call_failed(scheduler))
+}
+
+/// Return the `error` tuple of a failed `PKCS5_PBKDF2_HMAC` call
+/// (`pbkdf2_hmac.c:63`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(low_level_call_failed(&mut scheduler)?, BifResult::Raise { .. }));
+/// ```
+fn low_level_call_failed(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
+    c_error(
+        scheduler,
+        "error",
+        "pbkdf2_hmac.c",
+        63,
+        -1,
+        "Low-level call failed",
+    )
 }
 
 impl Hash {
@@ -510,94 +609,17 @@ impl Hash {
         iterations: i32,
         key_length: usize,
         output: &mut Vec<u8>,
-    ) {
-        match self {
-            Hash::Sha => pbkdf2_blocks::<Sha1>(64, password, salt, iterations, key_length, output),
-            Hash::Sha224 => {
-                pbkdf2_blocks::<Sha224>(64, password, salt, iterations, key_length, output)
-            }
-            Hash::Sha256 => {
-                pbkdf2_blocks::<Sha256>(64, password, salt, iterations, key_length, output)
-            }
-            Hash::Sha384 => {
-                pbkdf2_blocks::<Sha384>(128, password, salt, iterations, key_length, output)
-            }
-            Hash::Sha512 => {
-                pbkdf2_blocks::<Sha512>(128, password, salt, iterations, key_length, output)
-            }
-            Hash::Sha512_224 => {
-                pbkdf2_blocks::<Sha512_224>(128, password, salt, iterations, key_length, output)
-            }
-            Hash::Sha512_256 => {
-                pbkdf2_blocks::<Sha512_256>(128, password, salt, iterations, key_length, output)
-            }
-        }
+    ) -> Result<(), openssl::error::ErrorStack> {
+        let start = output.len();
+        output.resize(start + key_length, 0);
+        openssl::pkcs5::pbkdf2_hmac(
+            password,
+            salt,
+            iterations as usize,
+            self.message_digest(),
+            &mut output[start..],
+        )
     }
-}
-
-/// Append `key_length` bytes of the PBKDF2-HMAC blocks of the digest `D`,
-/// which processes `block_size` bytes at a time, to `output`.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// let mut output = Vec::new();
-/// pbkdf2_blocks::<Sha256>(64, b"password", b"salt", 1, 32, &mut output);
-/// assert_eq!(output.len(), 32);
-/// ```
-fn pbkdf2_blocks<D: Digest>(
-    block_size: usize,
-    password: &[u8],
-    salt: &[u8],
-    iterations: i32,
-    key_length: usize,
-    output: &mut Vec<u8>,
-) {
-    let mut index: u32 = 1;
-    while output.len() < key_length {
-        let mut message = salt.to_vec();
-        message.extend_from_slice(&index.to_be_bytes());
-        let mut chain = hmac::<D>(block_size, password, &message);
-        let mut block = chain.clone();
-        for _ in 1..iterations {
-            chain = hmac::<D>(block_size, password, &chain);
-            for (block_byte, chain_byte) in block.iter_mut().zip(chain.iter()) {
-                *block_byte ^= chain_byte;
-            }
-        }
-        output.extend_from_slice(&block);
-        index += 1;
-    }
-    output.truncate(key_length);
-}
-
-/// Return the HMAC of `data` with the key `key`, as RFC 2104 gives it for
-/// the digest `D`, which processes `block_size` bytes at a time: the digest
-/// of the outer pad and the digest of the inner pad and `data`. OpenSSL
-/// computes the same value for `PKCS5_PBKDF2_HMAC`.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// assert_eq!(hmac::<Sha1>(64, b"key", b"data").len(), 20);
-/// ```
-fn hmac<D: Digest>(block_size: usize, key: &[u8], data: &[u8]) -> Vec<u8> {
-    let mut key_block = if key.len() > block_size {
-        D::digest(key).to_vec()
-    } else {
-        key.to_vec()
-    };
-    key_block.resize(block_size, 0);
-    let inner: Vec<u8> = key_block.iter().map(|byte| byte ^ 0x36).collect();
-    let outer: Vec<u8> = key_block.iter().map(|byte| byte ^ 0x5c).collect();
-    let mut inner_digest = D::new();
-    inner_digest.update(&inner);
-    inner_digest.update(data);
-    let inner_digest = inner_digest.finalize();
-    let mut outer_digest = D::new();
-    outer_digest.update(&outer);
-    outer_digest.update(&inner_digest);
-    outer_digest.finalize().to_vec()
 }
 
 /// Run `crypto:strong_rand_bytes_nif(Bytes)`, as the ERTS NIF
@@ -691,6 +713,55 @@ fn random_below(range: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
+/// The digests that `hash_algorithms/0` gives: the digests that PBeam
+/// computes, in the order of the pinned ERTS. ERTS builds the list from
+/// the digest table in reverse (`digest.c:226-242`, `algorithms.c:86-89`),
+/// and lists each digest that the linked OpenSSL has. PBeam lists only the
+/// digests of `Hash`, so a caller that reads the list does not select a
+/// digest that PBeam does not compute (row "NIF stubs" of
+/// `docs/erts-differences.md`).
+const HASH_ALGORITHMS: [&str; 7] = [
+    "sha512_256",
+    "sha512_224",
+    "sha512",
+    "sha384",
+    "sha256",
+    "sha224",
+    "sha",
+];
+
+/// Run `crypto:hash_algorithms/0`: the list of `HASH_ALGORITHMS`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(hash_algorithms(&mut scheduler)?, BifResult::Value(Term::List(_))));
+/// ```
+fn hash_algorithms(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
+    let names = HASH_ALGORITHMS
+        .iter()
+        .map(|name| Ok(Term::Atom(scheduler.atoms.put(name)?)))
+        .collect::<Result<Vec<_>, BeamError>>()?;
+    Ok(BifResult::Value(Term::list_from(names)))
+}
+
+/// Run `crypto:enable_fips_mode_nif/1` as the ERTS NIF of a build without
+/// FIPS support (`fips.c:56-62`): `false` for `true`, `true` for `false`,
+/// and `badarg` for each other term.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(enable_fips_mode_nif(&Term::static_atom("true")), BifResult::Value(_)));
+/// ```
+fn enable_fips_mode_nif(mode: &Term) -> BifResult {
+    match mode {
+        Term::Atom(atom) if atom.is_static("true") => BifResult::Value(Term::static_atom("false")),
+        Term::Atom(atom) if atom.is_static("false") => BifResult::Value(Term::static_atom("true")),
+        _ => BifResult::badarg(),
+    }
+}
+
 /// Run `crypto:info_nif/0`, as the ERTS NIF `info_nif` (`info.c:110-159`)
 /// does: the map of the compilation and linking of the pinned libcrypto.
 /// `crypto:info/0` adds the key `otp_crypto_version` to this map
@@ -713,11 +784,11 @@ fn info_nif(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
         ),
         (
             Term::Atom(scheduler.atoms.put("cryptolib_version_compiled")?),
-            string(OPENSSL_VERSION),
+            string(openssl_version()),
         ),
         (
             Term::Atom(scheduler.atoms.put("cryptolib_version_linked")?),
-            string(OPENSSL_VERSION),
+            string(openssl_version()),
         ),
         (
             Term::Atom(scheduler.atoms.put("fips_provider_available")?),
@@ -740,8 +811,8 @@ fn info_nif(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
 fn info_lib() -> BifResult {
     BifResult::Value(Term::list_from([Term::tuple(vec![
         Term::binary(b"OpenSSL".to_vec()),
-        Term::Integer(OPENSSL_VERSION_NUMBER),
-        Term::binary(OPENSSL_VERSION.as_bytes().to_vec()),
+        Term::Integer(openssl::version::number()),
+        Term::binary(openssl_version().as_bytes().to_vec()),
     ])]))
 }
 

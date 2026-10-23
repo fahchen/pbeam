@@ -15,8 +15,8 @@ nix = { version = "0.31.3", default-features = false, features = ["fs"] }
 num-bigint = "0.5"
 num-integer = "0.1"
 num-traits = "0.2"
-sha1 = "0.10"
-sha2 = "0.10"
+openssl = { version = "=0.10.75", features = ["vendored"] }
+openssl-src = "=300.5.5+3.5.5"
 socket2 = { version = "0.6", features = ["all"] }
 zlib-rs = "0.6"
 zstd = { version = "0.13", default-features = false, features = [
@@ -741,3 +741,7 @@ path = "tests/integration/multischeduler_clock.rs"
 [[test]]
 name = "ets_cause"
 path = "tests/integration/ets_cause.rs"
+
+[[test]]
+name = "bif_cause"
+path = "tests/integration/bif_cause.rs"
