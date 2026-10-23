@@ -259,44 +259,63 @@ pub(super) fn term_to_iovec_2(
         return Ok(result);
     }
     let bytes = binary.bytes().unwrap_or_default();
-    let mut ranges = Vec::new();
+    // Each element: its byte range in `bytes`, and the source bitstring of
+    // a payload, which the element refers to as ERTS does
+    // (`external.c:3958`). The other elements refer to one binary of the
+    // bytes between the payloads, as the result binary of ERTS holds them
+    // (`external.c:2585-2587`).
+    let mut pieces: Vec<(Range<usize>, Option<Binary>)> = Vec::new();
     let mut cursor = 0;
     // `LOCAL_EXT` and its hash end one element, and the hash covers the
     // elements after it (`external.c:3305-3310`, `4051-4056`).
     let local = bytes.get(1) == Some(&LOCAL_EXT);
     if local {
-        ranges.push(0..6);
+        pieces.push((0..6, None));
         cursor = 6;
     }
-    for range in refs
+    for (range, source) in refs
         .into_iter()
-        .chain(std::iter::once(bytes.len()..bytes.len()))
+        .map(|(range, source)| (range, Some(source)))
+        .chain(std::iter::once((bytes.len()..bytes.len(), None)))
     {
         if cursor < range.start {
-            ranges.push(cursor..range.start);
+            pieces.push((cursor..range.start, None));
         }
         if range.start < range.end {
-            ranges.push(range.clone());
+            pieces.push((range.clone(), source));
         }
         cursor = range.end;
     }
-    let mut elements: Vec<Term> = ranges
-        .iter()
-        .map(|range| Term::Binary(binary.bits(range.start * 8, range.end * 8)))
-        .collect();
+    let mut common = Vec::new();
+    for (range, source) in &pieces {
+        if source.is_none() {
+            common.extend_from_slice(&bytes[range.clone()]);
+        }
+    }
     if local {
-        let last = ranges.last().map_or(0, |range| range.len());
+        let last = pieces.last().map_or(0, |(range, _)| range.len());
         let seed = context.scheduler.local_node_hash();
         let hash = external::iov_block_hash(&bytes[6..], last, seed);
-        let header = [&bytes[..2], &hash.to_be_bytes()[..]].concat();
-        elements[0] = Term::binary(header);
+        common[2..6].copy_from_slice(&hash.to_be_bytes());
     }
+    let common = Binary::from(common);
+    let mut offset = 0;
+    let elements: Vec<Term> = pieces
+        .into_iter()
+        .map(|(range, source)| match source {
+            Some(source) => Term::Binary(source),
+            None => {
+                offset += range.len();
+                Term::Binary(common.bits((offset - range.len()) * 8, offset * 8))
+            }
+        })
+        .collect();
     Ok(Value(Term::list_from(elements)))
 }
 
 /// Return the result of [`term_to_binary_2`], and put in `refs` the byte
-/// range of each payload of the result that `term_to_iovec/2` gives as its
-/// own element.
+/// range and the source bitstring of each payload of the result that
+/// `term_to_iovec/2` gives as its own element.
 ///
 /// # Errors
 ///
@@ -305,7 +324,7 @@ fn external_term(
     context: &mut BifContext<'_>,
     term: &Term,
     options: &Term,
-    refs: &mut Vec<Range<usize>>,
+    refs: &mut Vec<(Range<usize>, Binary)>,
 ) -> Result<BifResult, BeamError> {
     let Some(parsed) = parse_options(options) else {
         return Ok(BifResult::badarg());
@@ -333,7 +352,7 @@ fn external_term(
     }
     let bytes = compress_term(&body, options.level);
     let shift = bytes.len().saturating_sub(unprefixed);
-    for range in refs.iter_mut() {
+    for (range, _) in refs.iter_mut() {
         *range = range.start + shift..range.end + shift;
     }
     Ok(Value(Term::binary(bytes)))
@@ -447,8 +466,8 @@ fn encode(term: &Term, atoms: &AtomTable, options: &Options) -> Result<Vec<u8>, 
     encode_parts(term, atoms, options, &mut Vec::new())
 }
 
-/// Return the bytes of [`encode`], and put in `refs` the byte range of the
-/// payload of each bitstring of more than `ERL_ONHEAP_BITS_LIMIT` bits
+/// Return the bytes of [`encode`], and put in `refs` the byte range and the
+/// whole bytes of the payload of each bitstring of more than `ERL_ONHEAP_BITS_LIMIT` bits
 /// (`erl_bits.h:166-168`) that starts on a byte boundary: the payload that
 /// `enc_term_int` refers to in an iovec, without its trailing bits
 /// (`external.c:3864-3867`, `3953-3960`).
@@ -460,7 +479,7 @@ fn encode_parts(
     term: &Term,
     atoms: &AtomTable,
     options: &Options,
-    refs: &mut Vec<Range<usize>>,
+    refs: &mut Vec<(Range<usize>, Binary)>,
 ) -> Result<Vec<u8>, BeamError> {
     let mut out = Vec::new();
     let mut pending = vec![term];
@@ -546,7 +565,8 @@ fn encode_parts(
                     // The tag, the 4-byte size, and the tail-bit byte of
                     // `BIT_BINARY_EXT` come before the payload.
                     let start = out.len() + if binary.bit_size() % 8 == 0 { 5 } else { 6 };
-                    refs.push(start..start + binary.bit_size() / 8);
+                    let whole = binary.bit_size() / 8;
+                    refs.push((start..start + whole, binary.bits(0, whole * 8)));
                 }
                 if let Some(bytes) = binary.bytes() {
                     out.push(109);

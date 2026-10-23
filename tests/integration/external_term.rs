@@ -473,12 +473,21 @@ fn runs_term_to_iovec_and_external_size_2_as_pinned_erts() {
     // bitstring with `local` does not decode. Compression gives the binary
     // of `term_to_binary/2` without a list (`external.c:2495-2502`), and
     // `external_size/2` ignores the compression (`external.c:2220-2246`).
+    // A payload element refers to its source binary (`external.c:3958`),
+    // and an element of more than 64 bytes between payloads refers to all
+    // those bytes (`external.c:2585-2587`).
     let program = load();
     let ok = |value: bool| atom(&program, if value { "true" } else { "false" });
     let badarg = Term::tuple(vec![atom(&program, "error"), atom(&program, "badarg")]);
     let pair = |i: i64, j: i64| Term::tuple(vec![Term::Integer(i), Term::Integer(j)]);
     let single = Term::list_from(vec![binary(&[131, 119, 1, 97])]);
+    let referenced = Term::list_from([
+        Term::list_from([154, 100, 154].map(Term::Integer)),
+        Term::Integer(100),
+        Term::Integer(101),
+    ]);
     let expected = Term::tuple(vec![
+        referenced,
         sizes(&[
             &[4],
             &[6, 100],

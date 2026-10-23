@@ -139,7 +139,10 @@ iovec() ->
                        fun() -> erlang:term_to_iovec(x, [local, deterministic]) end,
                        fun() -> erlang:external_size(x, [{compressed, 10}]) end,
                        fun() -> erlang:external_size(x, [foo | bar]) end]],
-    {Sizes, OptionSizes, Differ, Local, Compressed, External, Errors,
+    Str = repeat(70, $a),
+    Referenced = [[binary:referenced_byte_size(E) || E <- erlang:term_to_iovec({Str, B, Str})]
+                  | [binary:referenced_byte_size(hd(tl(erlang:term_to_iovec(X)))) || X <- [B, T]]],
+    {Referenced, Sizes, OptionSizes, Differ, Local, Compressed, External, Errors,
      erlang:term_to_iovec(a), erlang:apply(erlang, term_to_iovec, [a, []])}.
 
 number(List) ->
