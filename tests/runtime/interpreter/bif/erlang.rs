@@ -384,6 +384,7 @@ fn info_values(current_function: Option<MfaNames>) -> ProcessInfoValues {
         heap_size: 0,
         stack_size: 0,
         reductions: 0,
+        heap_flags: HeapFlags::default(),
     }
 }
 

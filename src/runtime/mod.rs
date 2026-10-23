@@ -6,6 +6,7 @@ mod dirty;
 mod ets;
 mod extension;
 mod files;
+mod heap_flags;
 mod host;
 mod interpreter;
 mod mailbox;

@@ -747,5 +747,9 @@ name = "ets_cause"
 path = "tests/integration/ets_cause.rs"
 
 [[test]]
+name = "heap_flags"
+path = "tests/integration/heap_flags.rs"
+
+[[test]]
 name = "bif_cause"
 path = "tests/integration/bif_cause.rs"

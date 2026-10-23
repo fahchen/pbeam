@@ -24,6 +24,7 @@ use std::{
 
 use super::{Signal, process_table::ProcessTable};
 use crate::runtime::{
+    heap_flags::HeapFlags,
     persistent_term::PersistentTermStore,
     port::{self, Port, PortCell, Ports},
     process::{MonitorLinkTree, ProcessState, TimerReference},
@@ -232,6 +233,10 @@ pub(in crate::runtime) struct Node {
     /// for the node (`erts_backtrace_depth`, `erl_init.c:805`). The start
     /// value is 8 (`DEFAULT_BACKTRACE_SIZE`, `error.h:207`).
     backtrace_depth: AtomicUsize,
+    /// The heap flags that a new process takes. ERTS keeps one value of
+    /// each for the node (`H_MIN_SIZE`, `BIN_VH_MIN_SIZE`,
+    /// `erts_max_gen_gcs`, `H_MAX_SIZE`, `H_MAX_FLAGS`; `erl_init.c:808-811`).
+    heap_flags: Mutex<HeapFlags>,
 }
 
 impl Node {
@@ -287,6 +292,7 @@ impl Node {
                 resources: NodeResources::default(),
                 system_logger: Mutex::new(Term::static_atom("logger")),
                 backtrace_depth: AtomicUsize::new(8),
+                heap_flags: Mutex::new(HeapFlags::default()),
             }),
             readers,
         ))
@@ -355,6 +361,7 @@ impl Node {
             resources: NodeResources::default(),
             system_logger: Mutex::new(Term::static_atom("logger")),
             backtrace_depth: AtomicUsize::new(8),
+            heap_flags: Mutex::new(HeapFlags::default()),
         })
     }
 
@@ -1042,6 +1049,18 @@ impl Node {
     /// Set the backtrace depth of the node and return the old value.
     pub(in crate::runtime) fn swap_backtrace_depth(&self, depth: usize) -> usize {
         self.backtrace_depth.swap(depth, Ordering::Relaxed)
+    }
+
+    /// Return the heap flags that a new process takes.
+    pub(in crate::runtime) fn heap_flags(&self) -> HeapFlags {
+        *self.heap_flags_mut()
+    }
+
+    /// Lock and return the heap flags that a new process takes.
+    pub(in crate::runtime) fn heap_flags_mut(&self) -> MutexGuard<'_, HeapFlags> {
+        self.heap_flags
+            .lock()
+            .expect("the heap flags are not poisoned")
     }
 
     /// Lock and return the persistent terms of the node.
