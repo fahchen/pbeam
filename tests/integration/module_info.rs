@@ -7,12 +7,10 @@ const MODULE_INFO_PROBE: &[u8] =
 const MODULE_INFO_KEYS: &[u8] = include_bytes!("../../fixtures/module_info/module_info_keys.beam");
 
 /// `module_info_keys:main()` on the pinned ERTS, as `io:format("~w")`
-/// prints it, after `code:load_file/1` loads the module, so that no export
-/// entry of the module exists before its load.
-const ERTS_KEYS: &str = "[[{zeta,0},{alpha,1},{stub,1},{main,0},{module_info,0},{module_info,1}],\
-    [{zeta,0},{alpha,1},{stub,1},{local,1},{main,0},{module_info,0},{module_info,1},\
+/// prints it.
+const ERTS_KEYS: &str = "[[{zeta,0},{alpha,1},{stub,1},{local,1},{main,0},{module_info,0},{module_info,1},\
     {'-main/0-lc$^0/1-0-',1},{'-alpha/1-fun-0-',1}],[],\
-    <<5,129,59,117,112,43,182,19,93,107,167,32,196,180,109,114>>]";
+    <<1,165,140,141,80,2,65,251,244,250,234,50,182,67,75,34>>]";
 
 /// `module_info_probe:main()` on the pinned ERTS, as `io:format("~w")`
 /// prints it.
@@ -109,10 +107,8 @@ fn gives_preloaded_modules_and_module_info_as_pinned_erts() {
 }
 
 #[test]
-fn gives_exports_functions_nifs_and_md5_as_pinned_erts() {
-    // `exported_from_module` gives the exports in reverse export table
-    // order, and the loader puts them in `ExpT` order (erl_bif_info.c:
-    // 5822-5862, jit/asm_load.c:1180-1196). `functions_in_module` gives the
+fn gives_functions_nifs_and_md5_as_pinned_erts() {
+    // `functions_in_module` gives the
     // functions in code order (erl_bif_info.c:5732-5767). A module without
     // a NIF library has no NIFs (erl_bif_info.c:5769-5805). `md5_of_module`
     // gives the MD5 of beam_file.c:1751-1830 (erl_bif_info.c:5911-5916).
@@ -126,8 +122,7 @@ fn gives_exports_functions_nifs_and_md5_as_pinned_erts() {
             "-pa",
             "fixtures/module_info",
             "-eval",
-            "M = list_to_atom(\"module_info_keys\"), {module, M} = code:load_file(M), \
-             io:format(\"~w~n\", [apply(M, main, [])]), halt().",
+            "io:format(\"~w~n\", [module_info_keys:main()]), halt().",
         ])
         .output()
         .unwrap();
@@ -161,7 +156,7 @@ fn stops_get_module_info_for_a_key_that_pbeam_does_not_implement() {
 fn stops_get_module_info_1_for_a_loaded_module() {
     // ERTS returns the pair list of the keys `module`, `exports`,
     // `attributes`, `compile`, and `md5` (erl_bif_info.c:5946-5984). PBeam
-    // cannot give the key `attributes`, so the call of a loaded module stops
+    // cannot give the key `exports`, so the call of a loaded module stops
     // the run at that key (row "Module information" of
     // docs/erts-differences.md).
     let program = BeamProgram::load(&[MODULE_INFO_PROBE]).unwrap();
@@ -170,7 +165,7 @@ fn stops_get_module_info_1_for_a_loaded_module() {
         .unwrap_err()
         .to_string();
     assert!(
-        failure.contains("erlang:get_module_info/1 key attributes is not implemented"),
+        failure.contains("erlang:get_module_info/1 key exports is not implemented"),
         "{failure}"
     );
 }

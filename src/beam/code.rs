@@ -383,8 +383,7 @@ fn decode(
     atoms: Vec<Atom>,
     atom_table: &AtomTable,
 ) -> Result<BeamModule, BeamError> {
-    let (exports, export_order) =
-        parse_exports(required_chunk(chunks, b"ExpT")?, &atoms, atom_table)?;
+    let exports = parse_exports(required_chunk(chunks, b"ExpT")?, &atoms, atom_table)?;
     let md5 = module_md5(chunks);
     let code = required_chunk(chunks, b"Code")?;
     let name = atom_table
@@ -449,7 +448,6 @@ fn decode(
     let mut module = BeamModule::new(name, exports, imports, instructions)?;
     module.on_load = on_load;
     module.lines = lines;
-    module.export_order = export_order;
     module.md5 = md5;
     module.native_declarations = chunks
         .get(b"Attr".as_slice())
@@ -533,8 +531,7 @@ fn atom_chunk_name(bytes: &[u8]) -> Result<&str, BeamError> {
     }
 }
 
-/// Read exported function names, arities, and labels from an `ExpT` chunk,
-/// and the names and arities in the order of the chunk.
+/// Read exported function names, arities, and labels from an `ExpT` chunk.
 ///
 /// # Examples
 ///
@@ -542,16 +539,14 @@ fn atom_chunk_name(bytes: &[u8]) -> Result<&str, BeamError> {
 /// let mut atoms = AtomTable::new();
 /// let names = vec![atoms.put("main")?];
 /// let table = &[0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1];
-/// let (exports, order) = parse_exports(table, &names, &atoms)?;
+/// let exports = parse_exports(table, &names, &atoms)?;
 /// assert_eq!(exports.get(&("main".to_owned(), 0)), Some(&1));
-/// assert_eq!(order, [("main".to_owned(), 0)]);
 /// ```
-#[expect(clippy::type_complexity, reason = "the map and the order of one chunk")]
 fn parse_exports(
     data: &[u8],
     atoms: &[Atom],
     atom_table: &AtomTable,
-) -> Result<(HashMap<(String, u32), u32>, Vec<(String, u32)>), BeamError> {
+) -> Result<HashMap<(String, u32), u32>, BeamError> {
     let export_count = read_u32(data)? as usize;
     let expected_table_size = WORD_SIZE
         .checked_add(
@@ -564,18 +559,16 @@ fn parse_exports(
         return Err(error("invalid export table size"));
     }
     let mut exports = HashMap::new();
-    let mut order = Vec::with_capacity(export_count);
     for entry in data[WORD_SIZE..].chunks(EXPORT_ENTRY_SIZE) {
         let atom_index = read_u32(&entry[..WORD_SIZE])? as usize;
         let arity = read_u32(&entry[WORD_SIZE..WORD_SIZE * 2])?;
         let label = read_u32(&entry[WORD_SIZE * 2..])?;
         let name = atom_table.name_of(atom_at(atoms, atom_index)?).to_owned();
-        if exports.insert((name.clone(), arity), label).is_some() {
+        if exports.insert((name, arity), label).is_some() {
             return Err(error("duplicate BEAM export"));
         }
-        order.push((name, arity));
     }
-    Ok((exports, order))
+    Ok(exports)
 }
 
 /// Read external module, function, and arity entries from an `ImpT` chunk.

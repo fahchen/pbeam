@@ -152,10 +152,6 @@ pub struct BeamModule {
     /// name and its arity. The name itself stays in the name table of the
     /// module tables.
     pub(crate) exports: HashMap<(NameId, u32), u32>,
-    /// The name and the arity of each export, in the order of the `ExpT`
-    /// chunk, the order in which the ERTS loader puts them into the export
-    /// table (`jit/asm_load.c:1180-1196`).
-    pub(crate) export_order: Vec<(String, u32)>,
     /// The MD5 of the module, as `beam_file.c:1751-1830` computes it.
     pub(crate) md5: [u8; 16],
     /// The imports of the module, in the order of its `ImpT` chunk. A
@@ -547,7 +543,6 @@ impl BeamModule {
             name,
             id: ModuleId::next(),
             exports,
-            export_order: Vec::new(),
             md5: [0; 16],
             imports,
             instructions,

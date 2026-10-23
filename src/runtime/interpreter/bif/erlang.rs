@@ -5984,8 +5984,8 @@ pub(super) fn pre_loaded(scheduler: &mut Scheduler) -> Result<BifResult, BeamErr
 /// calls, as ERTS `get_module_info_2` and `module_info_1`
 /// (`erl_bif_info.c:5918-5945`, `5986-6030`) do. A `Module` that is not an
 /// atom or that names no loaded module raises `badarg`. The key `module`
-/// returns `Module`, `md5` the MD5 of the module, `exports` the exports in
-/// reverse `ExpT` order, `functions` the functions in code order, and
+/// returns `Module`, `md5` the MD5 of the module, `functions` the functions
+/// in code order, and
 /// `nifs` the functions of its NIF shared library or `[]`. A term that is
 /// not a key of `get_module_info/3`
 /// (`md5`, `exports`, `functions`, `nifs`, `attributes`, `compile`,
@@ -6006,7 +6006,8 @@ pub(super) fn pre_loaded(scheduler: &mut Scheduler) -> Result<BifResult, BeamErr
 ///
 /// # Errors
 ///
-/// The keys `attributes`, `compile`, `native_addresses`, and `native` are
+/// The keys `exports`, `attributes`, `compile`, `native_addresses`, and
+/// `native` are
 /// the runtime error `erlang:get_module_info/2 key K is not implemented`.
 /// The key `nifs` of a module with a linked static or extension library is
 /// a runtime error. A new
@@ -6024,7 +6025,7 @@ pub(super) fn get_module_info(
 /// the list (`erl_bif_info.c:5970-5984`): the `BUILD_INFO` calls run from
 /// `md5` to `module` and each prepends its pair, so the first pair of the
 /// list is `module`, and the second pair is the one below.
-const MODULE_INFO_MISSING_KEY: &str = "attributes";
+const MODULE_INFO_MISSING_KEY: &str = "exports";
 
 /// Run `erlang:get_module_info(Module)`, which `Module:module_info/0`
 /// calls, as ERTS `get_module_info_1` and `module_info_0`
@@ -6035,11 +6036,12 @@ const MODULE_INFO_MISSING_KEY: &str = "attributes";
 /// caller needs a `code` capability that permits `inspect` for the module
 /// name, as for `erlang:get_module_info/2`.
 ///
-/// PBeam cannot give the keys `attributes` and `compile`: they need the
-/// chunks of the beam file, which the loader does not keep (row "Module
+/// PBeam cannot give the key `exports`, which needs the order of the ERTS
+/// export table, and the keys `attributes` and `compile`, which need the
+/// chunks of the beam file that the loader does not keep (row "Module
 /// information" of `docs/erts-differences.md`). Thus the call of a loaded
 /// module stops the run with the runtime error
-/// `erlang:get_module_info/1 key attributes is not implemented`, as
+/// `erlang:get_module_info/1 key exports is not implemented`, as
 /// `erlang:get_module_info/2` stops at a key that it does not implement.
 /// The release `examples/plug_hello` imports this BIF for the
 /// `module_info/0` of each of its modules and calls it nowhere.
@@ -6111,16 +6113,6 @@ fn get_module_info_key(
     } else if key.is_static("md5") {
         // `md5_of_module` (`erl_bif_info.c:5911-5916`).
         Ok(Value(Term::binary(code.md5.to_vec())))
-    } else if key.is_static("exports") {
-        // `exported_from_module` (`erl_bif_info.c:5822-5862`) walks the
-        // export table and prepends each export of the module, so the last
-        // entry comes first. The loader puts the exports in `ExpT` order
-        // (`jit/asm_load.c:1180-1196`).
-        let pairs = code
-            .export_order
-            .iter()
-            .map(|(function, arity)| (function.as_str(), *arity));
-        function_pairs(context, pairs)
     } else if key.is_static("functions") {
         // `functions_in_module` (`erl_bif_info.c:5732-5767`) gives each
         // function of the code in code order.
@@ -6152,7 +6144,13 @@ fn get_module_info_key(
             .map(|function| (function.name.as_str(), function.arity))
             .rev();
         function_pairs(context, pairs)
-    } else if key.is_one_of(&["attributes", "compile", "native_addresses", "native"]) {
+    } else if key.is_one_of(&[
+        "exports",
+        "attributes",
+        "compile",
+        "native_addresses",
+        "native",
+    ]) {
         Err(error(format!(
             "erlang:{bif} key {} is not implemented",
             context.scheduler.atoms.name_of(key)
@@ -6163,7 +6161,8 @@ fn get_module_info_key(
 }
 
 /// Return the list of the `{Name, Arity}` pairs of `pairs` in reverse
-/// order, as ERTS prepends each pair (`erl_bif_info.c:5748-5763`).
+/// order, as ERTS prepends each pair (`erl_bif_info.c:5748-5763`,
+/// `5787-5800`).
 ///
 /// # Errors
 ///

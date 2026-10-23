@@ -19,5 +19,5 @@ attributes() -> erlang:get_module_info(module_info_probe, attributes).
 %% erlang:get_module_info/1, which Module:module_info/0 calls
 %% (erl_bif_info.c:5946-5984, 6010-6019). A module that is not an atom or
 %% that names no loaded module raises badarg. PBeam cannot give the key
-%% `attributes`, so the call of a loaded module stops the run at that key.
+%% `exports`, so the call of a loaded module stops the run at that key.
 info() -> erlang:get_module_info(module_info_probe).
