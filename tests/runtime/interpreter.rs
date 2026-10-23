@@ -1984,22 +1984,22 @@ fn never_runs_the_stub_of_a_table_bif_that_pbeam_does_not_implement() {
             Instruction::Move(atom("a"), Operand::X(0)),
             Instruction::Move(Operand::Value(Term::Integer(1)), Operand::X(1)),
             Instruction::Move(Operand::Value(Term::nil()), Operand::X(2)),
-            external("atomics", "add_get", 3, true, 0),
+            external("erl_ddll", "try_load", 3, true, 0),
             Instruction::Return,
         ],
         0,
     );
     program.modules.insert(
-        "atomics".into(),
+        "erl_ddll".into(),
         Arc::new(
             BeamModule::new(
-                "atomics".into(),
-                HashMap::from([(("add_get".into(), 3), 1)]),
+                "erl_ddll".into(),
+                HashMap::from([(("try_load".into(), 3), 1)]),
                 Vec::new(),
                 vec![
                     Instruction::FunctionInfo {
-                        module: "atomics".into(),
-                        name: "add_get".into(),
+                        module: "erl_ddll".into(),
+                        name: "try_load".into(),
                         arity: 3,
                     },
                     Instruction::Label(1),
@@ -2010,15 +2010,15 @@ fn never_runs_the_stub_of_a_table_bif_that_pbeam_does_not_implement() {
             .expect("the fixture module loads"),
         ),
     );
-    // `atomics:add_get/3` is in the ERTS 29.1.1 `bif.tab`, and the PBeam table
+    // `erl_ddll:try_load/3` is in the ERTS 29.1.1 `bif.tab`, and the PBeam table
     // marks it `unsupported`. ERTS runs the BIF, so the BEAM stub body of
-    // the loaded `atomics` module must not run.
+    // the loaded `erl_ddll` module must not run.
     assert_eq!(
         program
             .execute("fixture", "main", &[])
             .unwrap_err()
             .to_string(),
-        "unresolved external MFA atomics:add_get/3"
+        "unresolved external MFA erl_ddll:try_load/3"
     );
     // `is_bif` finds an entry with a binary search.
     // Strictly increasing: sorted for a binary search, with no duplicate entry.
