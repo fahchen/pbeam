@@ -114,6 +114,62 @@ impl Schedulers {
     }
 }
 
+/// Return the count of logical processors that the process can use, as
+/// `erts_cpu_info_update` (`erl_misc_utils.c:338-419`) counts them: the
+/// processors of the affinity mask of the process, at most the processors
+/// online. On Linux PBeam reads the mask from `Cpus_allowed_list` of
+/// `/proc/self/status` and the processors online from
+/// `/sys/devices/system/cpu/online`, and counts the processors in both, as
+/// `sched_getaffinity` gives only the active processors of the mask.
+#[cfg(target_os = "linux")]
+pub(in crate::runtime) fn logical_processors_available() -> usize {
+    available_of(
+        &std::fs::read_to_string("/proc/self/status").unwrap_or_default(),
+        &std::fs::read_to_string("/sys/devices/system/cpu/online").unwrap_or_default(),
+        Schedulers::host().total(),
+    )
+}
+
+/// Count the processors of `Cpus_allowed_list` in the text `status` of
+/// `/proc/self/status` that are also in the CPU list `online`. No such
+/// processor gives `fallback`, the count online (`erl_misc_utils.c:418-419`).
+#[cfg(target_os = "linux")]
+fn available_of(status: &str, online: &str, fallback: usize) -> usize {
+    let allowed = status
+        .lines()
+        .find_map(|line| line.strip_prefix("Cpus_allowed_list:"))
+        .map(cpu_list)
+        .unwrap_or_default();
+    let online = cpu_list(online);
+    match allowed.iter().filter(|cpu| online.contains(cpu)).count() {
+        0 => fallback,
+        available => available,
+    }
+}
+
+/// Return the count of logical processors that the process can use. A
+/// host without an affinity mask gives the processors online
+/// (`erl_misc_utils.c:418-419`), which `available_parallelism` reads with
+/// `sysconf(_SC_NPROCESSORS_ONLN)`, as ERTS does
+/// (`erl_misc_utils.c:302-306`).
+#[cfg(not(target_os = "linux"))]
+pub(in crate::runtime) fn logical_processors_available() -> usize {
+    Schedulers::host().total()
+}
+
+/// Return the processors of a Linux CPU list such as `0-3,6`.
+#[cfg(target_os = "linux")]
+fn cpu_list(text: &str) -> Vec<u32> {
+    text.trim()
+        .split(',')
+        .filter_map(|range| match range.split_once('-') {
+            Some((first, last)) => Some(first.parse().ok()?..=last.parse().ok()?),
+            None => range.parse().ok().map(|cpu| cpu..=cpu),
+        })
+        .flatten()
+        .collect()
+}
+
 /// Scan one `%d` conversion of `sscanf` at the start of `text`: white space,
 /// an optional sign, and at least one digit. Return the value and the rest
 /// of `text`. The C library reads the digits as a `long`, which saturates,

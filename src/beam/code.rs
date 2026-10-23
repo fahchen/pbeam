@@ -384,6 +384,7 @@ fn decode(
     atom_table: &AtomTable,
 ) -> Result<BeamModule, BeamError> {
     let exports = parse_exports(required_chunk(chunks, b"ExpT")?, &atoms, atom_table)?;
+    let md5 = module_md5(chunks);
     let code = required_chunk(chunks, b"Code")?;
     let name = atom_table
         .name_of(
@@ -405,7 +406,7 @@ fn decode(
     let lambdas = chunks
         .get(b"FunT".as_slice())
         .filter(|data| !data.is_empty())
-        .map(|data| parse_lambdas(data, &atoms, module_md5(chunks)))
+        .map(|data| parse_lambdas(data, &atoms, md5))
         .transpose()?
         .unwrap_or_default();
     let strings = chunks.get(b"StrT".as_slice()).copied().unwrap_or_default();
@@ -452,6 +453,7 @@ fn decode(
     let mut module = BeamModule::new(name, exports, imports, instructions)?;
     module.on_load = on_load;
     module.lines = lines;
+    module.md5 = md5;
     module.records = records;
     module.native_declarations = chunks
         .get(b"Attr".as_slice())
@@ -696,7 +698,7 @@ fn parse_lambdas(
 /// where each `OldUniq` field of the `FunT` entries counts as zero. A chunk
 /// that the module does not have adds no bytes. The caller reads the `FunT`
 /// chunk only when it is not empty and has whole entries, as
-/// [`parse_lambdas`] checks.
+/// [`parse_lambdas`] checks, so the digest of a corrupt chunk is never used.
 ///
 /// # Examples
 ///
