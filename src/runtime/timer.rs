@@ -36,6 +36,12 @@ const MONOTONIC_END_TICKS: i64 = i64::MAX / MONOTONIC_BEGIN * MONOTONIC_BEGIN / 
 /// number.
 pub(super) type TimerKey = (i64, u64);
 
+/// A port timer: the scheduler whose timer wheel holds it, and its key
+/// there. A port of any scheduler holds it, so the scheduler and the key
+/// together name the timer in the node, as the `port->common.timer`
+/// pointer of ERTS does (`erl_hl_timer.c:708-720`).
+pub(super) type PortTimer = (usize, TimerKey);
+
 /// What a timer does when it expires.
 #[derive(Debug, PartialEq)]
 pub(super) enum Timer {
@@ -62,6 +68,8 @@ pub(super) enum Timer {
         port: PortId,
         /// The process that waits in the accept queue.
         caller: ProcessId,
+        /// The key of this timer, which the accept holds while it waits.
+        key: TimerKey,
     },
     /// The timer of the receive on the connected port `port`, which
     /// `TCP_REQ_RECV` starts with a timeout (`add_multi_timer`,
@@ -69,6 +77,8 @@ pub(super) enum Timer {
     SocketReceive {
         /// The connected port.
         port: PortId,
+        /// The key of this timer, which the receive holds while it waits.
+        key: TimerKey,
     },
 }
 
@@ -431,6 +441,22 @@ impl Timers {
         }
         self.queue.insert(key, timer);
         key
+    }
+
+    /// Add the timer that `timer` makes from its own key, which expires at
+    /// the end tick `end`. Return its key.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let key = timers.start_keyed(1100, |key| Timer::SocketReceive { port, key });
+    /// ```
+    pub(super) fn start_keyed(
+        &mut self,
+        end: i64,
+        timer: impl FnOnce(TimerKey) -> Timer,
+    ) -> TimerKey {
+        self.start(end, timer((end, self.next)))
     }
 
     /// Remove the timer with the key `key`, as `erts_cancel_proc_timer`

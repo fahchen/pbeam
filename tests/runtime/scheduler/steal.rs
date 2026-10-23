@@ -60,7 +60,7 @@ fn inbox(node: &Node, index: usize) -> Vec<(char, u64)> {
             Delivery::Message { target, .. } => ('M', target.0),
             Delivery::Signal { target, .. } => ('S', target.0),
             Delivery::Cleanup { target } => ('C', target.0),
-            Delivery::CancelTimer { .. } => ('T', 0),
+            Delivery::CancelTimer { .. } | Delivery::CancelPortTimer { .. } => ('T', 0),
             Delivery::CheckProcessCode { target, .. } => ('K', target.0),
         })
         .collect()

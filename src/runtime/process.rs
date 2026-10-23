@@ -495,7 +495,7 @@ pub(super) struct ProcessState {
     /// the process records the root exit at the node.
     pub(super) root: Option<usize>,
     /// True when the process used a service that stays with its scheduler:
-    /// a port, a file, a terminal, a compiled expression or pattern, a
+    /// a file, a terminal, a compiled expression or pattern, a
     /// buffer, or a zlib stream. Such a process stays with its scheduler,
     /// as ERTS keeps a
     /// process bound to its run queue (`erts_try_change_runq_proc`,
