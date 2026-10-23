@@ -63,7 +63,7 @@ pub(super) fn keys(
     }
 }
 
-/// Run `erlang:map_get/2`: return the value of a key in a map, as ERTS
+/// Run `erlang:map_get/2` and `maps:get/2`: return the value of a key in a map, as ERTS
 /// `maps_get_2` does (`erl_map.c:250-269`). A key that the map does not
 /// hold raises `error:{badkey, Key}`, and a term that is not a map raises
 /// `error:{badmap, Map}`.
@@ -335,7 +335,7 @@ pub(super) fn from_keys(
     }
 }
 
-/// Run `erlang:is_map_key/2`: return `true` when the map holds the key and
+/// Run `erlang:is_map_key/2` and `maps:is_key/2`: return `true` when the map holds the key and
 /// `false` when it does not, as ERTS `maps_is_key_2` does
 /// (`erl_map.c:1185-1196`). A term that is not a map raises
 /// `error:{badmap, Map}`. In a guard, the `bif` instruction goes to its fail

@@ -153,6 +153,8 @@ pub struct BeamModule {
     /// name and its arity. The name itself stays in the name table of the
     /// module tables.
     pub(crate) exports: HashMap<(NameId, u32), u32>,
+    /// The MD5 of the module, as `beam_file.c:1751-1830` computes it.
+    pub(crate) md5: [u8; 16],
     /// The imports of the module, in the order of its `ImpT` chunk. A
     /// [`Instruction::CallExternal`] names its import by the index in this
     /// vector.
@@ -551,6 +553,7 @@ impl BeamModule {
             name,
             id: ModuleId::next(),
             exports,
+            md5: [0; 16],
             imports,
             instructions,
             tables,
