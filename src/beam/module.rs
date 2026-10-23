@@ -8,6 +8,7 @@ use std::{
 };
 
 use super::code::{self, Instruction, LineTable, Operand};
+use crate::term::RecordDef;
 use crate::{
     error::{BeamError, error},
     runtime::BifId,
@@ -177,6 +178,11 @@ pub struct BeamModule {
     /// [`LineTable`]). A module with no `Line` chunk has an empty table, and
     /// each of its frames has the location `[]`.
     pub(crate) lines: LineTable,
+    /// The native record definitions of the `Recs` chunk. A remote
+    /// `put_record` reads the definition of another module here, as
+    /// `erts_record_find_entry` finds the active definition
+    /// (`erl_record.c:344-379`).
+    pub(crate) records: Vec<Arc<RecordDef>>,
 }
 
 /// The side tables that the loader builds from the instruction stream of one
@@ -434,6 +440,10 @@ fn resolve(
         | Instruction::TestArity { fail_label, .. }
         | Instruction::GetMapElements { fail_label, .. }
         | Instruction::HasMapFields { fail_label, .. }
+        | Instruction::IsNativeRecord { fail_label, .. }
+        | Instruction::IsRecordAccessible { fail_label, .. }
+        | Instruction::GetRecordElements { fail_label, .. }
+        | Instruction::GetRecordField { fail_label, .. }
         | Instruction::PutMapExact { fail_label, .. }
         | Instruction::TestExactEqual { fail_label, .. }
         | Instruction::TestExactEqualOperands { fail_label, .. }
@@ -550,6 +560,7 @@ impl BeamModule {
             on_load: None,
             native_declarations: Vec::new(),
             lines: LineTable::default(),
+            records: Vec::new(),
         })
     }
 
