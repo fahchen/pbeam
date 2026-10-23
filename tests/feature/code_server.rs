@@ -1057,6 +1057,71 @@ fn signs_and_verifies_as_pinned_erts() {
     }
 }
 
+/// The output of `crypto_sign_probe:post_quantum/0` on the pinned macOS
+/// ERTS (OpenSSL 3.5.8). The Linux CI ERTS links OpenSSL 3.0.x, which has no
+/// ML-DSA or SLH-DSA (`pkey.c:90-172`).
+const POST_QUANTUM_HOST: &str = r#"{[{mldsa44,2420,true,true,false},
+  {mldsa65,3309,true,true,false},
+  {mldsa87,4627,true,true,false}],
+ [{slh_dsa_shake_128s,7856,true,true,false},
+  {slh_dsa_shake_128s,7856,true,true,false},
+  {slh_dsa_shake_128f,17088,true,true,false},
+  {slh_dsa_shake_128f,17088,true,true,false},
+  {slh_dsa_sha2_128s,7856,true,true,false},
+  {slh_dsa_sha2_128s,7856,true,true,false},
+  {slh_dsa_sha2_128f,17088,true,true,false},
+  {slh_dsa_sha2_128f,17088,true,true,false},
+  {slh_dsa_shake_192s,16224,true,true,false},
+  {slh_dsa_shake_192s,16224,true,true,false},
+  {slh_dsa_shake_192f,35664,true,true,false},
+  {slh_dsa_shake_192f,35664,true,true,false},
+  {slh_dsa_sha2_192s,16224,true,true,false},
+  {slh_dsa_sha2_192s,16224,true,true,false},
+  {slh_dsa_sha2_192f,35664,true,true,false},
+  {slh_dsa_sha2_192f,35664,true,true,false},
+  {slh_dsa_shake_256s,29792,true,true,false},
+  {slh_dsa_shake_256s,29792,true,true,false},
+  {slh_dsa_shake_256f,49856,true,true,false},
+  {slh_dsa_shake_256f,49856,true,true,false},
+  {slh_dsa_sha2_256s,29792,true,true,false},
+  {slh_dsa_sha2_256s,29792,true,true,false},
+  {slh_dsa_sha2_256f,49856,true,true,false},
+  {slh_dsa_sha2_256f,49856,true,true,false}],
+ [{badarg,{"pkey.c",552},"Seed key not allowed"},
+  {badarg,{"pkey.c",556},"Invalid key tuple format"},
+  {error,{"pkey.c",649},"Can't create PKEY fromdata"},
+  {error,{"pkey.c",621},"Invalid public key"},
+  {error,{"pkey.c",649},"Can't create PKEY fromdata"},
+  {error,{"pkey.c",621},"Invalid public key"},
+  {error,{"pkey.c",649},"Can't create PKEY fromdata"},
+  {error,{"pkey.c",621},"Invalid public key"},
+  false,
+  {badarg,{"pkey.c",417},"Only RSA supports Options"}],
+ [true,true,true]}
+"#;
+
+#[test]
+fn signs_and_verifies_with_ml_dsa_and_slh_dsa() {
+    assert_eq!(
+        run(&mut pbeam_probe(
+            CRYPTO_SIGN_PROBE,
+            "crypto_sign_probe",
+            "post_quantum",
+            &[]
+        )),
+        POST_QUANTUM_HOST
+    );
+    if cfg!(target_os = "macos") {
+        let erts = run(&mut erts_probe(
+            CRYPTO_SIGN_PROBE,
+            "crypto_sign_probe",
+            "post_quantum",
+            &[],
+        ));
+        assert_eq!(erts, POST_QUANTUM_HOST);
+    }
+}
+
 #[test]
 fn encrypts_and_decrypts_as_pinned_erts() {
     // pkey_crypt_nif/6 (pkey.c:1173-1581) with RSA keys, and the error
@@ -1124,21 +1189,8 @@ const CRYPT_HOST: &str = r#"[{error,{error,{"pkey.c",1410},"Couldn't set rsa pad
 fn stops_with_a_runtime_error_for_each_unsupported_signature() {
     for (function, expected) in [
         (
-            "unsupported_sign",
-            "crypto:pkey_sign_nif/5 NIF is not supported for the algorithm mldsa44",
-        ),
-        (
             "unsupported_name",
             "crypto:pkey_sign_nif/5 NIF is not supported for the algorithm dh",
-        ),
-        (
-            "unsupported_heavy",
-            "crypto:pkey_sign_heavy_nif/5 NIF is not supported for the algorithm \
-             slh_dsa_sha2_128s",
-        ),
-        (
-            "unsupported_verify",
-            "crypto:pkey_verify_nif/6 NIF is not supported for the algorithm mldsa44",
         ),
         (
             "unsupported_curve",
