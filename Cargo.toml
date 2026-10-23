@@ -795,6 +795,10 @@ name = "heap_flags"
 path = "tests/integration/heap_flags.rs"
 
 [[test]]
+name = "spawn_opt"
+path = "tests/integration/spawn_opt.rs"
+
+[[test]]
 name = "bif_cause"
 path = "tests/integration/bif_cause.rs"
 

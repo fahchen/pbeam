@@ -453,3 +453,68 @@ fn rejects_bad_new_fun_ext_fields_as_pinned_erts() {
         Term::list_from(expected)
     );
 }
+
+/// Return a list of integer lists.
+fn sizes(rows: &[&[i64]]) -> Term {
+    Term::list_from(
+        rows.iter()
+            .map(|row| Term::list_from(row.iter().map(|&size| Term::Integer(size)))),
+    )
+}
+
+#[test]
+fn runs_term_to_iovec_and_external_size_2_as_pinned_erts() {
+    // `external_term_probe:iovec/0` on the pinned ERTS, measured with
+    // `mise run erts-eval --pa <dir>`. The payload of a bitstring of more
+    // than 64 bytes that starts on a byte boundary is its own element
+    // (`external.c:3864-3867`, `3953-3960`), `LOCAL_EXT` and its hash end
+    // one element, and the hash of the elements adds only the last piece of
+    // a final partial block (erl_term_hashing.c:655-673), so the iovec of a
+    // bitstring with `local` does not decode. Compression gives the binary
+    // of `term_to_binary/2` without a list (`external.c:2495-2502`), and
+    // `external_size/2` ignores the compression (`external.c:2220-2246`).
+    // A payload element refers to its source binary (`external.c:3958`),
+    // and an element of more than 64 bytes between payloads refers to all
+    // those bytes (`external.c:2585-2587`).
+    let program = load();
+    let ok = |value: bool| atom(&program, if value { "true" } else { "false" });
+    let badarg = Term::tuple(vec![atom(&program, "error"), atom(&program, "badarg")]);
+    let pair = |i: i64, j: i64| Term::tuple(vec![Term::Integer(i), Term::Integer(j)]);
+    let single = Term::list_from(vec![binary(&[131, 119, 1, 97])]);
+    let referenced = Term::list_from([
+        Term::list_from([154, 100, 154].map(Term::Integer)),
+        Term::Integer(100),
+        Term::Integer(101),
+    ]);
+    let expected = Term::tuple(vec![
+        referenced,
+        sizes(&[
+            &[4],
+            &[6, 100],
+            &[70],
+            &[6, 65],
+            &[8, 100, 8, 100],
+            &[11, 100, 5, 100],
+            &[7, 100, 1],
+            &[8],
+            &[108],
+            &[7, 99, 1],
+            &[6, 70],
+        ]),
+        sizes(&[
+            &[8, 100, 3],
+            &[8, 100, 4],
+            &[6, 7, 100, 3],
+            &[8, 100, 3],
+            &[8, 100, 3],
+        ]),
+        Term::list_from(vec![pair(7, 3), pair(10, 3)]),
+        Term::list_from(vec![ok(true), badarg.clone(), ok(true), ok(true)]),
+        Term::list_from(vec![ok(true), ok(true), ok(true)]),
+        Term::list_from([1006, 5, 33, 9, 4, 106, 106].into_iter().map(Term::Integer)),
+        Term::list_from(vec![badarg.clone(), badarg.clone(), badarg.clone(), badarg]),
+        single.clone(),
+        single,
+    ]);
+    assert_eq!(run(&program, "iovec"), expected);
+}

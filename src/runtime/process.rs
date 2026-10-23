@@ -298,6 +298,14 @@ pub(super) struct StartFlags {
     pub(super) off_heap_message_queue: bool,
     /// The priority of the option `{priority, Level}` (`SPO_PRIORITY`).
     pub(super) priority: Priority,
+    /// The option `{async_dist, true}` sets the `async_dist` flag
+    /// (`SPO_ASYNC_DIST`, `erl_process.c:12552-12553`).
+    pub(super) async_dist: bool,
+    /// The heap flags of the options, or `None` to give the new process the
+    /// node heap flags. ERTS uses the heap flags of the options only when
+    /// an option of `SPO_USE_ARGS` is given (`erl_process.h:1515-1520`,
+    /// `erl_process.c:12561-12573`).
+    pub(super) heap_flags: Option<HeapFlags>,
 }
 
 /// The execution state and mailbox of one process.

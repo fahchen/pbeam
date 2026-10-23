@@ -27,6 +27,7 @@ mod agreement;
 mod bn;
 mod cipher;
 mod cipher_context;
+mod engine;
 mod kem;
 mod keygen;
 mod mac_context;
@@ -47,6 +48,10 @@ use cipher::{
 use cipher_context::{
     aead_cipher_context_nif, aead_cipher_init_nif, ng_crypto_final_nif, ng_crypto_get_data_nif,
     ng_crypto_init_nif, ng_crypto_update_nif,
+};
+use engine::{
+    engine_by_id_nif, engine_get_all_methods_nif, engine_get_first_nif, engine_load_dynamic_nif,
+    engine_resource_nif, ensure_engine_loaded_nif,
 };
 use kem::{decapsulate_key_nif, encapsulate_key_nif};
 use keygen::{ec_generate_key_nif, evp_generate_key_nif, rsa_generate_key_nif};
@@ -236,6 +241,96 @@ pub(super) const BINDINGS: &[Binding] = &[
         arity: 2,
         job: Job::Normal,
         run: encapsulate_key_nif,
+    },
+    Binding {
+        name: "engine_add_nif",
+        arity: 1,
+        job: Job::Normal,
+        run: engine_resource_nif,
+    },
+    Binding {
+        name: "engine_by_id_nif",
+        arity: 1,
+        job: Job::Normal,
+        run: engine_by_id_nif,
+    },
+    Binding {
+        name: "engine_ctrl_cmd_strings_nif",
+        arity: 3,
+        job: Job::Normal,
+        run: engine_resource_nif,
+    },
+    Binding {
+        name: "engine_free_nif",
+        arity: 1,
+        job: Job::Normal,
+        run: engine_resource_nif,
+    },
+    Binding {
+        name: "engine_get_all_methods_nif",
+        arity: 0,
+        job: Job::Normal,
+        run: engine_get_all_methods_nif,
+    },
+    Binding {
+        name: "engine_get_first_nif",
+        arity: 0,
+        job: Job::Normal,
+        run: engine_get_first_nif,
+    },
+    Binding {
+        name: "engine_get_id_nif",
+        arity: 1,
+        job: Job::Normal,
+        run: engine_resource_nif,
+    },
+    Binding {
+        name: "engine_get_name_nif",
+        arity: 1,
+        job: Job::Normal,
+        run: engine_resource_nif,
+    },
+    Binding {
+        name: "engine_get_next_nif",
+        arity: 1,
+        job: Job::Normal,
+        run: engine_resource_nif,
+    },
+    Binding {
+        name: "engine_init_nif",
+        arity: 1,
+        job: Job::Normal,
+        run: engine_resource_nif,
+    },
+    Binding {
+        name: "engine_load_dynamic_nif",
+        arity: 0,
+        job: Job::Normal,
+        run: engine_load_dynamic_nif,
+    },
+    Binding {
+        name: "engine_register_nif",
+        arity: 2,
+        job: Job::Normal,
+        run: engine_resource_nif,
+    },
+    Binding {
+        name: "engine_remove_nif",
+        arity: 1,
+        job: Job::Normal,
+        run: engine_resource_nif,
+    },
+    Binding {
+        name: "engine_unregister_nif",
+        arity: 2,
+        job: Job::Normal,
+        run: engine_resource_nif,
+    },
+    Binding {
+        name: "ensure_engine_loaded_nif",
+        arity: 2,
+        job: Job::Normal,
+        run: ensure_engine_loaded_nif,
     },
     Binding {
         name: "evp_compute_key_nif",

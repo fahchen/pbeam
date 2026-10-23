@@ -265,6 +265,20 @@ impl Binary {
         }
     }
 
+    /// Return whether the first bit of this binary is on a byte boundary of
+    /// its source array, as `BIT_OFFSET(offset) == 0` tells for an ERTS
+    /// bitstring (`external.c:3864-3867`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let bytes = Binary::from(b"abc".to_vec());
+    /// assert!(!bytes.bits(4, 12).starts_on_byte());
+    /// ```
+    pub(crate) fn starts_on_byte(&self) -> bool {
+        self.0.offset.is_multiple_of(BITS_PER_BYTE)
+    }
+
     /// Return the number of bits of this binary. The size comes from the
     /// view, so a binary that an append built keeps its chunks and does not
     /// join them, as [`Binary::bit_bytes`] does at its first read.
