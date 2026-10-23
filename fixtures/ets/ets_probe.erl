@@ -8,6 +8,7 @@
          own/2, write/1, select/0, match_object/0, iterate/0,
          update_element/0, info_items/0, delete_all/0, select_reductions/0, first/0,
          private_owner/1, ordered_set/0, ordered_set_reductions/0, take/0,
+         walk/0, walk_alias/1,
          safe_fixtable/0, fixtable/0, fixtable_chain/0, fixtable_successor/0,
          fixtable_resize/0, fixtable_fix_count/0, fixtable_insert_after_delete/0,
          fixtable_clear/0, fixtable_delete_object/0, fixtable_same_bucket/0,
@@ -620,18 +621,6 @@ unsupported(Case) ->
             T = ets:new(ets_probe, []),
             true = ets:insert(T, {a, 1}),
             ets:internal_select_delete(T, [{{'$1', '$2'}, [], [{round, 1.0}]}]);
-        ordered_first ->
-            T = ets:new(ets_probe, [ordered_set]),
-            true = ets:insert(T, {a, 1}),
-            ets:first(T);
-        ordered_first_lookup ->
-            T = ets:new(ets_probe, [ordered_set]),
-            true = ets:insert(T, {a, 1}),
-            ets:first_lookup(T);
-        ordered_next ->
-            T = ets:new(ets_probe, [ordered_set]),
-            true = ets:insert(T, {a, 1}),
-            ets:next(T, a);
         ordered_select ->
             T = ets:new(ets_probe, [ordered_set]),
             true = ets:insert(T, {a, 1}),
@@ -1514,3 +1503,69 @@ first() ->
      ets:first(Dup), ets:first_lookup(Dup),
      ets:first(Empty), ets:first_lookup(Empty),
      Invalid, catch_error(fun() -> ets:first_lookup(not_a_table) end)].
+
+%% The eight walk BIFs, ets:foldl/3, and ets:foldr/3 on each table type.
+%% An ordered_set walks its keys in the term order, with 1 and 1.0 as one
+%% key, and a step from a key that is not in the table gives the next key.
+%% A hash table gives last as first and prev as next.
+walk() ->
+    O = ets:new(ets_probe, [ordered_set]),
+    E = ets:first(O),
+    true = ets:insert(O, [{1, a}, {2.5, b}, {x, c}, {{1}, d}, {1.0, e}, {-3, f}]),
+    true = ets:insert(O, {"s", g}),
+    true = ets:delete(O, x),
+    Ordered = [E, ets:last(O), ets:first_lookup(O), ets:last_lookup(O),
+               ets:first(O), ets:last(O), ets:next(O, 1), ets:next(O, 1.0),
+               ets:next(O, 2), ets:prev(O, 2.5), ets:prev(O, -3),
+               ets:next(O, "s"), ets:next(O, zzz), ets:prev(O, x),
+               ets:next_lookup(O, 1), ets:prev_lookup(O, {9}),
+               ets:prev_lookup(O, -9), ets:lookup(O, 1), ets:take(O, 1),
+               ets:first(O), ets:info(O, size),
+               ets:foldl(fun({K, _}, A) -> [K | A] end, [], O),
+               ets:foldr(fun({K, _}, A) -> [K | A] end, [], O)],
+    Empty = ets:new(ets_probe, [ordered_set]),
+    End = [walk_error(B, Tab, '$end_of_table')
+           || Tab <- [Empty, O], B <- [next, prev, next_lookup, prev_lookup]],
+    Hash = [hash_walk(Type) || Type <- [set, bag, duplicate_bag]],
+    [Ordered, End, Hash].
+
+hash_walk(Type) ->
+    T = ets:new(ets_probe, [Type]),
+    E = [ets:first(T), ets:last(T), ets:first_lookup(T), ets:last_lookup(T)],
+    true = ets:insert(T, [{1, a}, {2, b}, {1, c}, {k, d}]),
+    F = ets:first(T),
+    L = ets:last(T),
+    [E, F, L, ets:last_lookup(T), ets:next(T, F), ets:prev(T, F),
+     ets:next_lookup(T, F), ets:prev_lookup(T, F),
+     [walk_error(B, T) || B <- [next, prev, next_lookup, prev_lookup]],
+     lists:sort(ets:foldl(fun(O, A) -> [O | A] end, [], T)),
+     lists:sort(ets:foldr(fun(O, A) -> [O | A] end, [], T))].
+
+walk_error(F, T) ->
+    walk_error(F, T, 9).
+
+walk_error(F, T, K) ->
+    try ets:F(T, K) catch error:R -> {error, R} end.
+
+%% Two different alias references have no PBeam order, so an ordered_set
+%% key that holds one gives a runtime error on a walk.
+walk_alias(Case) ->
+    O = ets:new(ets_probe, [ordered_set]),
+    A = erlang:alias([]),
+    B = erlang:alias([]),
+    true = ets:insert(O, {A, 1}),
+    case Case of
+        step ->
+            ets:next(O, B);
+        unordered ->
+            true = ets:insert(O, [{B, 2}, {1.0, 3}]),
+            [ets:lookup(O, 1), ets:delete(O, A), ets:lookup(O, B)];
+        unordered_first ->
+            true = ets:insert(O, {B, 2}),
+            ets:first(O);
+        cleared ->
+            true = ets:insert(O, {B, 2}),
+            true = ets:delete_all_objects(O),
+            true = ets:insert(O, [{2, b}, {1, a}]),
+            [ets:first(O), ets:last(O)]
+    end.

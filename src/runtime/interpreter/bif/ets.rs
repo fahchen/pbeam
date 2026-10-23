@@ -1076,7 +1076,7 @@ fn check_keypos(tuples: &[&[Term]], keypos: i32, bif: &str) -> Result<(), BeamEr
 ///
 /// ```rust,ignore
 /// let table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
-/// assert!(reject_ordered_set(&table, "ets:next/2").is_ok());
+/// assert!(reject_ordered_set(&table, "ets:select/2,3").is_ok());
 /// ```
 ///
 /// # Errors
@@ -2342,89 +2342,37 @@ pub(super) fn safe_fixtable(
     Ok(Value(Term::static_atom("true")))
 }
 
-pub(super) fn next(
-    context: &mut BifContext<'_>,
-    table: &Term,
-    key: &Term,
-) -> Result<BifResult, BeamError> {
-    let caller = context.scheduler.current_process_mut().id;
-    let reds = context
-        .scheduler
-        .current_process_mut()
-        .bif_reductions_signed();
-    let atoms = &context.scheduler.atoms;
-    let store = Arc::clone(&context.scheduler.ets);
-    let ets = store.shared();
-    let table = match ets.read(atoms, table, caller, reds) {
-        Ok(table) => table,
-        Err(lacking) => {
-            return Ok(retry(
-                context,
-                lacking,
-                "next",
-                vec![table.clone(), key.clone()],
-            ));
-        }
-    };
-    reject_ordered_set(&table, "ets:next/2")?;
-    match table.next_key(atoms, key) {
-        Some(Some(next)) => Ok(Value(next)),
-        Some(None) => Ok(Value(Term::static_atom("$end_of_table"))),
-        None => Ok(BifResult::badarg()),
-    }
-}
-
-/// Run `ets:first/1`, as `ets_first_1` (`erl_db.c:1170-1188`) and
-/// `db_first_hash_common` (`erl_db_hash.c:1117-1140`) do: return the key of
-/// the first live object in bucket order, or `'$end_of_table'` for an empty
-/// table. A table that does not exist or that the caller cannot read raises
-/// `badarg` (`erl_db.c:769-912`). An `ordered_set` gives the clear runtime
-/// error of the unsupported type, as `ets:next/2` does.
+/// Run one of the eight walk BIFs of a table: `ets:first/1`,
+/// `ets:last/1`, `ets:next/2`, `ets:prev/2`, and their `_lookup` forms, as
+/// `ets_first_1`, `ets_last_1`, `ets_next_2`, `ets_prev_2`, and the lookup
+/// BIFs do (`erl_db.c:1170-1350`). `args` holds the table and, for a step,
+/// the key. `backward` selects `last` or `prev`, and `lookup` the form that
+/// returns `{Key, Objects}`.
+///
+/// - A table that does not exist or that the caller cannot read raises
+///   `badarg` (`erl_db.c:769-912`).
+/// - An `ordered_set` walks its keys in the term order (`db_first_tree`,
+///   `db_next_tree`, `db_last_tree`, `db_prev_tree`,
+///   `erl_db_tree.c:635-757`). A step from a key that is not in the
+///   table gives the next key in the order.
+/// - A hash table walks its buckets (`db_first_hash_common`,
+///   `erl_db_hash.c:1117-1140`, `db_next_hash`). `last` acts as `first`
+///   and `prev` as `next` (`erl_db_hash.c:853-856`). A step from a key that is not in the table
+///   raises `badarg`.
+/// - The end of the table gives `'$end_of_table'`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = first(&mut context, &table)?;
-/// assert!(matches!(result, BifResult::Value(value) if value == test_atom("k")));
-/// ```
-pub(super) fn first(context: &mut BifContext<'_>, table: &Term) -> Result<BifResult, BeamError> {
-    let caller = context.scheduler.current_process_mut().id;
-    let reds = context
-        .scheduler
-        .current_process_mut()
-        .bif_reductions_signed();
-    let atoms = &context.scheduler.atoms;
-    let store = Arc::clone(&context.scheduler.ets);
-    let ets = store.shared();
-    let table = match ets.read(atoms, table, caller, reds) {
-        Ok(table) => table,
-        Err(lacking) => {
-            return Ok(retry(context, lacking, "first", vec![table.clone()]));
-        }
-    };
-    reject_ordered_set(&table, "ets:first/1")?;
-    match table.first_key() {
-        Some(key) => Ok(Value(key)),
-        None => Ok(Value(Term::static_atom("$end_of_table"))),
-    }
-}
-
-/// Run `ets:first_lookup/1`, as `ets_first_lookup_1` (`erl_db.c:1193-1211`)
-/// and `db_first_lookup_hash` (`erl_db_hash.c:1142-1145`) do: return
-/// `{Key, Objects}` for the first live object in bucket order, where
-/// `Objects` is the list of the live objects with that key, or
-/// `'$end_of_table'` for an empty table. The rest of the behavior is the
-/// same as for `ets:first/1`.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// let result = first_lookup(&mut context, &table)?;
+/// let result = walk(&mut context, "last", vec![table], true, false)?;
 /// assert!(matches!(result, BifResult::Value(value) if value == Term::static_atom("$end_of_table")));
 /// ```
-pub(super) fn first_lookup(
+pub(super) fn walk(
     context: &mut BifContext<'_>,
-    table: &Term,
+    name: &'static str,
+    args: Vec<Term>,
+    backward: bool,
+    lookup: bool,
 ) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
     let reds = context
@@ -2434,16 +2382,30 @@ pub(super) fn first_lookup(
     let atoms = &context.scheduler.atoms;
     let store = Arc::clone(&context.scheduler.ets);
     let ets = store.shared();
-    let table = match ets.read(atoms, table, caller, reds) {
+    let table = match ets.read(atoms, &args[0], caller, reds) {
         Ok(table) => table,
-        Err(lacking) => {
-            return Ok(retry(context, lacking, "first_lookup", vec![table.clone()]));
-        }
+        Err(lacking) => return Ok(retry(context, lacking, name, args)),
     };
-    reject_ordered_set(&table, "ets:first_lookup/1")?;
-    let Some(key) = table.first_key() else {
+    let found = match (table.table_type(), args.get(1)) {
+        (TableType::OrderedSet, None) => table.ordered_end(!backward)?,
+        // A tree table rejects the end marker as a key
+        // (`erl_db_tree.c:654-655`, `729-730`).
+        (TableType::OrderedSet, Some(key)) if *key == Term::static_atom("$end_of_table") => {
+            return Ok(BifResult::badarg());
+        }
+        (TableType::OrderedSet, Some(key)) => table.ordered_step(atoms, key, !backward)?,
+        (_, None) => table.first_key(),
+        (_, Some(key)) => match table.next_key(atoms, key) {
+            Some(next) => next,
+            None => return Ok(BifResult::badarg()),
+        },
+    };
+    let Some(key) = found else {
         return Ok(Value(Term::static_atom("$end_of_table")));
     };
+    if !lookup {
+        return Ok(Value(key));
+    }
     let objects = table
         .objects(atoms, &key)
         .into_iter()
