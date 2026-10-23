@@ -600,10 +600,13 @@ fn raises_badfun_for_the_funs_of_removed_code_as_pinned_erts() {
     // (beam_common.c:1626-1630, 1697-1706). The name of a fun of code that
     // is not loaded is `[]` (`erl_bif_info.c:3998-4001`), also after the
     // code_server purged the module and before a load of another version.
+    // `erlang:fun_info_mfa/1` gives the module, `[]`, and the arity of such
+    // a fun (`erl_bif_info.c:4027-4035`).
     let expected = "[{error,{badfun,fun_term}},{error,{badfun,fun_term}},\
                     [{name,'-make_first/1-fun-0-'},\
                      {name,'-make_second/1-fun-0-'}],\
-                    [{name,[]},{name,[]}],[{name,[]},{name,[]}]]\n";
+                    [{name,[]},{name,[]}],[{name,[]},{name,[]}],\
+                    [{fun_entry_send,[],0},{fun_entry_send,[],0}]]\n";
     let erts = run(&mut erts_probe(
         FUN_ENTRY_PROBE,
         "fun_entry_probe",

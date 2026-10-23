@@ -174,7 +174,7 @@ bifs! {
     erlang:float_to_list/2 as ErlangFloatToList2 => |_, [float, options]| Ok(float::to_list(float, options)),
     erlang:floor/1 as ErlangFloor1 => |_, [term]| Ok(erlang::round_to_integer(term, f64::floor)),
     erlang:fun_info/2 as ErlangFunInfo2 => |cx, [fun, what]| erlang::fun_info(cx, fun, what),
-    erlang:fun_info_mfa/1 => unsupported,
+    erlang:fun_info_mfa/1 as ErlangFunInfoMfa1 => |cx, [fun]| erlang::fun_info_mfa(cx, fun),
     erlang:fun_to_list/1 as ErlangFunToList1 => |cx, [term]| Ok(erlang::fun_to_list(term, &cx.scheduler.atoms)),
     erlang:function_exported/3 as ErlangFunctionExported3 => |cx, [module, name, arity]| Ok(erlang::function_exported(&cx.scheduler.atoms, &cx.scheduler.code, module, name, arity)),
     erlang:get/0 as ErlangGet0 => |cx, []| Ok(erlang::get_all(cx)),

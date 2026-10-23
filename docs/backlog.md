@@ -27,8 +27,8 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### Load local fun literals and run the fun information BIFs
 
-- PBeam loads a `NEW_FUN_EXT` (tag 112) literal as an unsupported literal, so an instruction that reads it returns `unsupported BEAM literal index N`. The pinned compiler makes a local fun with `make_fun3`, not as a literal (measured), so no current path loads one. `erlang:fun_info/2` runs (row "Fun information"). `erlang:fun_to_list/1` runs (#1017). `erlang:fun_info_mfa/1` is an `unsupported` BIF table entry (row "Unimplemented BIFs").
-- **Trigger:** a measured path loads a local fun literal or calls `erlang:fun_info_mfa/1`.
+- PBeam loads a `NEW_FUN_EXT` (tag 112) literal as an unsupported literal, so an instruction that reads it returns `unsupported BEAM literal index N`. The pinned compiler makes a local fun with `make_fun3`, not as a literal (measured), so no current path loads one. `erlang:fun_info/2` runs (row "Fun information"). `erlang:fun_to_list/1` runs (#1017). `erlang:fun_info_mfa/1` runs (#1021).
+- **Trigger:** a measured path loads a local fun literal.
 - **Source:** PR #120 (#109).
 
 ### Cache the decoded modules of a run
@@ -153,7 +153,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
   - Timers: `erlang:read_timer/2`. The other timer BIFs run, `erlang:read_timer/1` among them (`src/runtime/interpreter/bif/table.rs:284`).
   - Persistent terms: `persistent_term:put_new/2` and `persistent_term:info/0`. `persistent_term:erase/1` runs (`table.rs:545`).
   - Signals: `erlang:exit/3`.
-  - Funs: `erlang:fun_info_mfa/1` (entry "Load local fun literals and run the fun information BIFs").
   - Maps: `maps:get/2` and `maps:is_key/2` through a fun call. The compiler changes a direct call to the `map_get` and `is_map_key` BIFs, which PBeam runs.
 - **Trigger:** a measured path calls one of them. Add each group in its own task.
 - **Source:** audit of the BIF table at the M2 close.
