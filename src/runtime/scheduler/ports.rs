@@ -166,7 +166,7 @@ impl Scheduler {
     /// (`io.c:7191-7219`): a port with `eof` sends `{Port, eof}` to the
     /// owner and stays open, and it reads nothing more. Each other port
     /// closes with the reason `normal`.
-    fn port_end_of_file(&mut self, id: PortId) {
+    pub(super) fn port_end_of_file(&mut self, id: PortId) {
         // `{Port, eof}` goes out under the port lock, as in
         // `driver_failure_eof` (io.c:7191-7209).
         let cell = self.node.port(id);

@@ -2348,6 +2348,7 @@ fn changes_nothing_on_a_port_that_closed() {
     // scheduler in between, changes nothing and does not panic.
     assert!(!scheduler.close_port(port, atom("normal")));
     scheduler.driver_exit(port, atom("normal"));
+    scheduler.port_end_of_file(port);
     assert!(!scheduler.connect_port(port, owner));
     scheduler.tcp_flushed(port);
     assert!(node.ports().get(port).is_none());
