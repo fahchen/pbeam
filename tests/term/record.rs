@@ -94,4 +94,8 @@ fn gives_no_record_of_another_term_and_prints_indexes_without_a_table() {
             def.name.index()
         )
     );
+    assert_eq!(
+        crate::term::debug_term(&record, &atoms),
+        "Record(nr_def:priv, [Integer(1)])"
+    );
 }
