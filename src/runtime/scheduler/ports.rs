@@ -401,25 +401,22 @@ impl Scheduler {
     /// assert!(scheduler.connect_port(port, handler));
     /// ```
     pub(in crate::runtime) fn connect_port(&mut self, id: PortId, pid: ProcessId) -> bool {
-        let linked = self
-            .node
-            .ports()
-            .get(id)
-            .expect("the port to connect is open")
-            .links
-            .get(&pid)
-            .is_some();
-        if !linked {
-            let link = Signal::PortLink { port: id };
-            if self.send_signal(None, pid, link).is_err() {
-                return false;
-            }
-        }
+        // The port side of the link goes in before the link signal, as
+        // `erts_port_connect` does (`io.c:2367-2375`): an exit of the new
+        // owner after the signal then finds the link.
         let mut ports = self.node.ports();
         let port = ports.get_mut(id).expect("the port to connect is open");
-        port.links.insert(pid, ());
-        port.owner = pid;
+        let linked = port.links.insert(pid, ()).is_some();
+        let owner = std::mem::replace(&mut port.owner, pid);
         drop(ports);
+        let link = Signal::PortLink { port: id };
+        if !linked && self.send_signal(None, pid, link).is_err() {
+            let mut ports = self.node.ports();
+            let port = ports.get_mut(id).expect("the port to connect is open");
+            port.links.remove(&pid);
+            port.owner = owner;
+            return false;
+        }
         // The scheduler that serves the port keeps a new owner of its own:
         // the owner stays with it (see `ProcessState::pinned`).
         if let Some(process) = self.processes.get_mut(&pid) {
