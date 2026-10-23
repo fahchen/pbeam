@@ -25,8 +25,8 @@ struct Cli {
     /// Function name to run.
     #[arg(value_name = "FUNCTION")]
     function: String,
-    /// Arguments of the function. Each argument is an atom that the
-    /// loaded modules hold, such as a module or function name.
+    /// Arguments of the function. Each argument is an atom, such as a
+    /// module or function name.
     #[arg(value_name = "ATOM")]
     arguments: Vec<String>,
     /// A loaded policy module, which exports `initial/1` and `grant/3`.
@@ -186,8 +186,8 @@ const ERLEXEC_VARIABLES: [&str; 5] = [
 ///   term text (`print_term`, erl_printf_term.c:352-811). ERTS also exits
 ///   with status 1 when a boot process exit halts the runtime.
 /// - 1: a runtime error, a file that cannot be read, a BEAM file that does
-///   not load, or an argument or a boot flag name that is not an atom of the
-///   loaded modules. The binary writes the one stderr line
+///   not load, or a boot flag name that is not an atom of the loaded
+///   modules. The binary writes the one stderr line
 ///   `pbeam: <message>`.
 /// - the low 8 bits of the status code of `erlang:halt/2`, as the C `exit`
 ///   of ERTS gives (`bif.c:4346-4362`). The binary writes nothing to
@@ -260,6 +260,23 @@ impl From<String> for Exit {
     }
 }
 
+impl From<BeamError> for Exit {
+    /// Make the end of a run error: a halt gives its status code, and each
+    /// other error gives its message.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(matches!(Exit::from(BeamError::Halt(3)), Exit::Halt(3)));
+    /// ```
+    fn from(run_error: BeamError) -> Self {
+        match run_error {
+            BeamError::Halt(status) => Self::Halt(status),
+            run_error => Self::Error(run_error.to_string()),
+        }
+    }
+}
+
 /// Set the signal dispositions of the ERTS emulator start, read and load
 /// the BEAM files, and run `Module:Function(Atoms...)` as the root process,
 /// or `Module:Function(Atoms..., Flags)` with the boot flag list of
@@ -279,9 +296,8 @@ impl From<String> for Exit {
 ///
 /// # Errors
 ///
-/// A file that cannot be read, a BEAM file that does not load, an argument
-/// or a boot flag name that is not an atom of the loaded modules, and the
-/// errors of
+/// A file that cannot be read, a BEAM file that does not load, a boot flag
+/// name that is not an atom of the loaded modules, and the errors of
 /// [`BeamProgram::execute`] and [`BeamProgram::execute_with_policy_module`].
 /// A halt of the run gives [`Exit::Halt`].
 fn run(arguments: Cli) -> Result<(), Exit> {
@@ -301,11 +317,10 @@ fn run(arguments: Cli) -> Result<(), Exit> {
         .iter()
         .map(|name| {
             program
-                .atom(name)
+                .put_atom(name)
                 .map(|atom| program.host_term(Term::Atom(atom)))
-                .ok_or_else(|| format!("argument {name} is not an atom of the loaded modules"))
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, BeamError>>()?;
     if arguments.root.is_some() || !arguments.code_path.is_empty() {
         let flags = boot_flags(
             &program,
@@ -327,11 +342,8 @@ fn run(arguments: Cli) -> Result<(), Exit> {
 
 /// Return the end of a command line for the result of its run.
 fn run_end(result: Result<HostTerm, BeamError>) -> Result<(), Exit> {
-    match result {
-        Ok(_) => Ok(()),
-        Err(BeamError::Halt(status)) => Err(Exit::Halt(status)),
-        Err(execution_error) => Err(Exit::Error(execution_error.to_string())),
-    }
+    result?;
+    Ok(())
 }
 
 /// Boot the node as `erl` does with the arguments of `pbeam erl`: set the

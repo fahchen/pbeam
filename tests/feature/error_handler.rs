@@ -183,3 +183,39 @@ fn run(command: &mut Command) -> String {
     );
     String::from_utf8(output.stdout).unwrap()
 }
+
+#[test]
+fn starts_an_entry_module_that_the_start_files_do_not_hold_as_pinned_erts() {
+    let erts_loaded = run(&mut erts("error_handler_load_probe:main()."));
+    assert_eq!(
+        run(&mut pbeam("error_handler_load_probe", "main", &[])),
+        erts_loaded
+    );
+
+    let erts_absent = output(&mut erts("pbeam_absent_entry:main()."));
+    let erts_stderr = String::from_utf8_lossy(&erts_absent.stderr);
+    assert_eq!(erts_absent.status.code(), Some(1), "{erts_absent:?}");
+    assert!(
+        erts_stderr.contains("({undef,[{pbeam_absent_entry,main,[],[]},"),
+        "{erts_stderr}"
+    );
+    let pbeam_absent = output(&mut pbeam("pbeam_absent_entry", "main", &[]));
+    let pbeam_stderr = String::from_utf8_lossy(&pbeam_absent.stderr);
+    assert_eq!(pbeam_absent.status.code(), Some(1), "{pbeam_absent:?}");
+    // `pbeam_boot:start/3` calls the entry as its last call, so the stack
+    // trace holds only the frame of the entry.
+    assert_eq!(
+        pbeam_stderr,
+        "pbeam: root process exited with {undef,[{pbeam_absent_entry,main,[],[]}]}\n"
+    );
+}
+
+/// Run `command` and return its output, with the environment of [`run`].
+fn output(command: &mut Command) -> Output {
+    command
+        .env("TERM", "dumb")
+        .env("LC_ALL", "C.UTF-8")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap()
+}

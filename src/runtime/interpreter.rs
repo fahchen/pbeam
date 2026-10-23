@@ -370,6 +370,28 @@ impl BeamProgram {
         self.atoms.get(name)
     }
 
+    /// Return the atom of `name`, and add the name to the atom table of
+    /// this program when no loaded module holds it, as `list_to_atom/1`
+    /// does. The `pbeam` binary makes the atom of each argument with it, as
+    /// `init` makes the atoms of the `-s` arguments with `list_to_atom/1`
+    /// (`init.erl:613-627`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let program = BeamProgram::load(&[ATOM_MAP_PROBE])?;
+    /// let atom = program.put_atom("pbeam_unknown")?;
+    /// assert_eq!(program.atom("pbeam_unknown"), Some(atom));
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// A table that holds `ATOM_LIMIT` atoms gives the error `no more index
+    /// entries in atom_tab (max=N)`.
+    pub fn put_atom(&self, name: &str) -> Result<Atom, BeamError> {
+        self.atoms.put(name)
+    }
+
     /// Return the atom table of this program. A caller passes it as the
     /// owning table of a term that it builds from [`BeamProgram::atom`], for
     /// example to [`Map::from_pairs`].
@@ -880,7 +902,7 @@ impl BeamProgram {
         let label = scheduler.code.entry_label(module, function, 0)?;
         let frame = scheduler.code.frame(module, label, 0)?;
         let id = scheduler.next_pid()?;
-        scheduler.start_with_id(id, slot, frame, Vec::new(), Vec::new())?;
+        scheduler.start_with_id(id, slot, frame.into(), Vec::new(), Vec::new())?;
         // Wait until each scheduler created its root, so an idle root cannot
         // decide that its message cannot arrive before another root started.
         let gate = start.0.expect("the start gate is armed");
@@ -1053,10 +1075,13 @@ impl BeamProgram {
         issuer: Issuer,
         sample: &mut Option<&mut dyn FnMut(usize)>,
     ) -> Result<(), BeamError> {
-        let arity =
-            u32::try_from(arguments.len()).map_err(|_| error("arity exceeds BEAM limit"))?;
-        let label = scheduler.code.entry_label(module, function, arity)?;
-        let frame = scheduler.code.frame(module, label, arity)?;
+        // The root starts as `erl_create_process` starts a process: a
+        // module that the run does not load, or a function that the module
+        // does not export, goes to the error handler when the root first
+        // runs (`erl_process.c:12616`, `beam_common.c:1294-1342`).
+        let module_atom = scheduler.atoms.put(module)?;
+        let function_atom = scheduler.atoms.put(function)?;
+        let frame = initial_start(scheduler, &module_atom, &function_atom, arguments.len())?;
         let mut root = match issuer {
             Issuer::Unchecked => {
                 scheduler.start(frame, arguments.to_vec(), Vec::new())?;
@@ -3920,39 +3945,7 @@ fn create_process(
         return Ok(BifResult::badarg());
     };
     let arguments: Vec<Term> = arguments.cloned().collect();
-    let arity = u32::try_from(arguments.len()).map_err(|_| error("arity exceeds BEAM limit"))?;
-    // A function that the loaded module does not export gives an undefined
-    // start, which goes to `undefined_function` when the process first
-    // runs, as the `i_apply_only` start of ERTS goes to its export entry.
-    // More than `APPLY_MAX_ARGUMENTS` arguments also give an undefined start,
-    // which raises `system_limit` when the process first runs. The `apply`
-    // of ERTS checks this limit before it looks up the export, so the module
-    // can be not loaded.
-    //
-    // A BIF also gives an undefined start, which runs the BIF when the
-    // process first runs. The export of a BIF calls the BIF, and not the
-    // stub body of the module, which is `erlang:nif_error(undefined)` in
-    // `erlang.beam` (`emu/emu_load.c:704-713`, `jit/arm/ops.tab:917-927`).
-    scheduler.sync_code();
-    let export = {
-        let atoms = &scheduler.atoms;
-        let (module, function) = (atoms.name_of(module), atoms.name_of(function));
-        if arguments.len() > APPLY_MAX_ARGUMENTS
-            || resolve(module, function, arity).is_some()
-            || is_pbeam_bif(module, function, arity)
-        {
-            None
-        } else {
-            scheduler.code.export_frame(module, function, arity)?
-        }
-    };
-    let start = match export {
-        Some(frame) => Start::Entry(frame),
-        None => Start::Undefined {
-            module: module.clone(),
-            function: function.clone(),
-        },
-    };
+    let start = initial_start(scheduler, module, function, arguments.len())?;
     let SpawnOptions {
         link,
         monitor,
@@ -3974,6 +3967,64 @@ fn create_process(
         Some(reference) => Term::tuple(vec![Term::Pid(pid), Term::Reference(reference)]),
         None => Term::Pid(pid),
     }))
+}
+
+/// Return the start of a new process at `module:function` with `arity`
+/// arguments, as the `i_apply_only` start of ERTS enters the export entry of
+/// its MFA (`erl_process.c:12616`). An exported function of a loaded module
+/// starts at its entry frame. Each other function, a BIF, and more than 1023
+/// arguments give an undefined start, which calls the export entry, and
+/// thus the BIF or the error handler, when the process first runs.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let start = initial_start(&mut scheduler, &module, &function, 0)?;
+/// ```
+///
+/// # Errors
+///
+/// The errors of `CodeTable::export_frame`.
+fn initial_start(
+    scheduler: &mut Scheduler,
+    module: &Atom,
+    function: &Atom,
+    arity: usize,
+) -> Result<Start, BeamError> {
+    let arguments_len = arity;
+    let arity = u32::try_from(arity).map_err(|_| error("arity exceeds BEAM limit"))?;
+    // A function that the loaded module does not export gives an undefined
+    // start, which goes to `undefined_function` when the process first
+    // runs, as the `i_apply_only` start of ERTS goes to its export entry.
+    // More than `APPLY_MAX_ARGUMENTS` arguments also give an undefined start,
+    // which raises `system_limit` when the process first runs. The `apply`
+    // of ERTS checks this limit before it looks up the export, so the module
+    // can be not loaded.
+    //
+    // A BIF also gives an undefined start, which runs the BIF when the
+    // process first runs. The export of a BIF calls the BIF, and not the
+    // stub body of the module, which is `erlang:nif_error(undefined)` in
+    // `erlang.beam` (`emu/emu_load.c:704-713`, `jit/arm/ops.tab:917-927`).
+    scheduler.sync_code();
+    let export = {
+        let atoms = &scheduler.atoms;
+        let (module, function) = (atoms.name_of(module), atoms.name_of(function));
+        if arguments_len > APPLY_MAX_ARGUMENTS
+            || resolve(module, function, arity).is_some()
+            || is_pbeam_bif(module, function, arity)
+        {
+            None
+        } else {
+            scheduler.code.export_frame(module, function, arity)?
+        }
+    };
+    Ok(match export {
+        Some(frame) => Start::Entry(frame),
+        None => Start::Undefined {
+            module: module.clone(),
+            function: function.clone(),
+        },
+    })
 }
 
 /// The execution position of the run loop: the code of the active frame and

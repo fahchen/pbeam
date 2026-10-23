@@ -315,12 +315,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Source:** owner decision of 2026-10-11 (Suikou review 01a1282e, AFK log second batch); [#446](https://github.com/fahchen/pbeam/issues/446), [#447](https://github.com/fahchen/pbeam/issues/447), PR [#473](https://github.com/fahchen/pbeam/pull/473).
 - **Task:** none. [#926](https://github.com/fahchen/pbeam/issues/926) added the line locations.
 
-### Raise `undef` for an entry module that the run does not load
-
-- After #42 (PR #194), the `pbeam` binary accepts only an argument atom that a loaded module holds and stops with `argument <M> is not an atom of the loaded modules`, and it stops with `missing BEAM module M` for an entry module that the start BEAM files do not hold. #447 runs the pinned `error_handler` for a call of a module that the run does not load, so the undefined-module path of `error_handler` exists now. The remaining work is a `BeamProgram` API that adds the atom of the entry module and of each argument, and an entry that loads its module through the error handler. The "Run arguments" and "Undefined functions" rows record the difference.
-- **Trigger:** a consumer runs an entry module, or gives an argument atom, that the start BEAM files do not hold.
-- **Source:** review of #42; the remaining work of [#447](https://github.com/fahchen/pbeam/issues/447).
-
 ### Halt the PBeam boot with the `init` crash text
 
 - After #6 (PR #195), the `pbeam` binary writes `pbeam: root process exited with <Reason>` for a root exit. Under `erl -noshell -eval`, ERTS writes `Error! Failed to eval: ...` and then `Runtime terminating during boot (<Reason>)` through `init:crash/2` and `erlang:halt/1` (init.erl:665-679, 1552-1567). Doing the same needs `erlang:halt/1` with a string, which writes the slogan and a crash dump (`erlang:halt/2` with an integer status runs since #301), `erts_internal:term_to_string/2` (it can use the `print_term` of #6), and an `init` process that watches the boot process.

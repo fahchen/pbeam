@@ -2235,10 +2235,10 @@ fn a_remote_target_adds_and_removes_the_monitor_of_a_watcher() {
     );
     let (target, watcher) = (ProcessId(0), ProcessId(1));
     owner
-        .start_with_id(target, 1, frame(), vec![], allow_all())
+        .start_with_id(target, 1, frame().into(), vec![], allow_all())
         .unwrap();
     scheduler
-        .start_with_id(watcher, 0, frame(), vec![], allow_all())
+        .start_with_id(watcher, 0, frame().into(), vec![], allow_all())
         .unwrap();
     scheduler.schedule_next().unwrap();
     let reference = scheduler

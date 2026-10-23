@@ -851,7 +851,9 @@ fn calls_a_module_export_without_a_bif_search() {
     ];
     let exports = HashMap::from([(("main".into(), 0), 2), (("guest".into(), 1), 11)]);
     let program = program_of(fixture_instructions(0, body, extra), exports);
-    let before = resolve_calls();
+    // The start of the root checks `BIFS` once for its MFA, as a spawn
+    // does.
+    let before = resolve_calls() + 1;
     assert_eq!(
         program.execute("fixture", "main", &[]).unwrap().term,
         Term::Integer(7)
@@ -960,20 +962,23 @@ fn keeps_no_export_target_for_an_import_with_no_export() {
 
 #[test]
 fn rejects_missing_modules_exports_and_function_arities() {
+    // The root starts at the export entry of its MFA, as a spawn does. A run
+    // of the library API has no init process that loads a module, and no
+    // `error_handler` (row "Undefined functions").
     let program = make_program(vec![Instruction::Return], 0);
-    assert!(
+    assert_eq!(
         program
             .execute("missing", "main", &[])
             .unwrap_err()
-            .to_string()
-            .contains("missing BEAM module")
+            .to_string(),
+        "unresolved external MFA missing:main/0"
     );
-    assert!(
+    assert_eq!(
         program
             .execute("fixture", "missing", &[])
             .unwrap_err()
-            .to_string()
-            .contains("missing export")
+            .to_string(),
+        "root process exited with {undef,[{fixture,missing,[],[]}]}"
     );
     assert_eq!(
         make_program(vec![Instruction::Return], 1)
@@ -3268,8 +3273,8 @@ fn puts_a_new_atom_into_the_atom_table_of_the_run() {
     // ERTS has one atom table for each emulator, and
     // `erlang:list_to_atom/1` gives a new atom the next index
     // (`erts_atom_put`). A run starts with a copy of the table of the
-    // loaded modules, so `pbeam_alpha` gets index 1168 after
-    // `pbeam_zeta` (1167). The table of the loaded modules does not
+    // loaded modules, so `pbeam_alpha` gets index 1170 after
+    // `pbeam_zeta` (1169). The table of the loaded modules does not
     // change, so each run gives the same index.
     let program = make_program(
         vec![
@@ -3286,14 +3291,19 @@ fn puts_a_new_atom_into_the_atom_table_of_the_run() {
         ],
         0,
     );
-    assert_eq!(program.atoms.put("pbeam_zeta").unwrap().index(), 1167);
+    // The hand-built fixture lacks the atoms `fixture` and `main`, which
+    // `run_root` adds. The test adds them before the run to keep the index
+    // that a real module gives.
+    program.atoms.put("fixture").unwrap();
+    program.atoms.put("main").unwrap();
+    assert_eq!(program.atoms.put("pbeam_zeta").unwrap().index(), 1169);
     for _ in 0..2 {
         let result = program.execute("fixture", "main", &[]).unwrap();
         let Term::Atom(alpha) = &result.term else {
             panic!("the run returns the atom pbeam_alpha");
         };
         assert_eq!(result.atoms().name_of(alpha), "pbeam_alpha");
-        assert_eq!(alpha.index(), 1168);
+        assert_eq!(alpha.index(), 1170);
     }
     assert_eq!(program.atom("pbeam_alpha"), None);
 }
