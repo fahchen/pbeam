@@ -1573,6 +1573,12 @@ impl Table {
         self.heir_data = data;
     }
 
+    /// Set the access mode, as `ets:setopts/2` does with `{protection, P}`
+    /// (`erl_db.c:3214-3217`).
+    pub(super) fn set_access(&mut self, access: Access) {
+        self.access = access;
+    }
+
     /// Set the options that `ets:info/2` gives. `ets:new/2` accepts them
     /// and keeps no other effect of them, as it does not compress objects
     /// and has one scheduler.

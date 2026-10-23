@@ -343,17 +343,16 @@ fn reads_nested_literals_and_marks_unsupported_tags_at_any_depth() {
             Map::from_pairs(vec![], &AtomTable::new()).unwrap()
         ))
     );
-    // A map key that `Map` does not support yet makes the literal unsupported: #{{fun a:b/0} => []}.
-    assert_eq!(
-        read(
-            &atoms,
-            &[
-                131, 116, 0, 0, 0, 1, 104, 1, 113, 119, 1, b'a', 119, 1, b'b', 97, 0, 106
-            ]
-        )
-        .unwrap(),
-        None
-    );
+    // A fun key loads: #{{fun a:b/0} => []}.
+    let fun_key = read(
+        &atoms,
+        &[
+            131, 116, 0, 0, 0, 1, 104, 1, 113, 119, 1, b'a', 119, 1, b'b', 97, 0, 106,
+        ],
+    )
+    .unwrap()
+    .unwrap();
+    assert!(matches!(&fun_key, Term::Map(map) if map.len() == 1));
     // ERTS rejects a MAP_EXT with a duplicate key: #{1 => [], 1 => []}.
     assert_eq!(
         read(&atoms, &[131, 116, 0, 0, 0, 2, 97, 1, 106, 97, 1, 106])

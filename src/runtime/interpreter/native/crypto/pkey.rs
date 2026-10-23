@@ -1,6 +1,7 @@
-//! The sign and verify NIFs of `crypto`: `pkey_sign_nif/5`,
-//! `pkey_sign_heavy_nif/5`, and `pkey_verify_nif/6` (`pkey.c:212-1122` of
-//! OTP 29.1.1, with the OpenSSL 3 API and engine support). The safe
+//! The sign, verify, encrypt, and decrypt NIFs of `crypto`:
+//! `pkey_sign_nif/5`, `pkey_sign_heavy_nif/5`, `pkey_verify_nif/6`, and
+//! `pkey_crypt_nif/6` (`pkey.c:212-1581` of OTP 29.1.1, with the OpenSSL 3
+//! API and engine support). The safe
 //! `openssl` crate makes each OpenSSL call.
 //!
 //! PBeam signs with the algorithms `rsa`, `dss`, `ecdsa`, `eddsa`, and the
@@ -13,6 +14,7 @@ use super::*;
 use openssl::bn::{BigNum, BigNumContext};
 use openssl::dsa::Dsa;
 use openssl::ec::{EcGroup, EcKey, EcPoint};
+use openssl::error::ErrorStack;
 use openssl::pkey::{Id, Private, Public};
 use openssl::pkey_ctx::PkeyCtx;
 use openssl::rsa::{Padding, Rsa, RsaPrivateKeyBuilder};
@@ -251,7 +253,7 @@ fn finish(
 /// Sign as `pkey_sign_nif` does with the OpenSSL 3 API (`pkey.c:789-904`).
 fn sign(scheduler: &Scheduler, arguments: &[Term]) -> Result<Vec<u8>, Failure> {
     let input = sign_input(scheduler, arguments, 4)?;
-    let pkey = private_key(scheduler, &input.algorithm, &arguments[0], &arguments[3])?;
+    let pkey = private_key(scheduler, &input.algorithm, &arguments[0], &arguments[3], 3)?;
     if input.algorithm == "eddsa" {
         let mut signer = Signer::new_without_digest(&pkey)
             .map_err(|_| failed(811, "Can't EVP_DigestSignInit"))?;
@@ -294,7 +296,7 @@ fn verify(scheduler: &Scheduler, arguments: &[Term]) -> Result<bool, Failure> {
     let signature = arguments[3]
         .binary_bytes()
         .ok_or_else(|| badarg(1041, 3, "Expected a binary"))?;
-    let pkey = public_key(scheduler, &input.algorithm, &arguments[0], &arguments[4])?;
+    let pkey = public_key(scheduler, &input.algorithm, &arguments[0], &arguments[4], 4)?;
     if input.algorithm == "eddsa" {
         let mut verifier = Verifier::new_without_digest(&pkey)
             .map_err(|_| failed(1055, "Can't EVP_DigestVerifyInit"))?;
@@ -510,17 +512,18 @@ fn sign_options(
 }
 
 /// Return the private key `term` of `algorithm`, as `get_pkey_private_key`
-/// (`pkey.c:476-584`) gives it.
+/// (`pkey.c:476-584`) gives it. The errors name the argument `argument`.
 fn private_key(
     scheduler: &Scheduler,
     algorithm: &str,
     name: &Term,
     term: &Term,
+    argument: i64,
 ) -> Result<PKey<Private>, Failure> {
     // PBeam has no engine resource, so each map fails
     // `get_engine_and_key_id` (engine.c:62-82).
     if matches!(term, Term::Map(_)) {
-        return Err(badarg(494, 3, "Couldn't get engine and/or key id"));
+        return Err(badarg(494, argument, "Couldn't get engine and/or key id"));
     }
     let (key, line, message) = match algorithm {
         "rsa" => (rsa_private_key(term), 506, "Couldn't get RSA private key"),
@@ -553,23 +556,24 @@ fn private_key(
             (key, 530, "Couldn't get DSA private key")
         }
         _ if PKEY_TYPES.contains(&algorithm) => {
-            return pkey_type_private_key(scheduler, algorithm, term);
+            return pkey_type_private_key(scheduler, algorithm, term, argument);
         }
         _ => return Err(octet_string_key(scheduler, algorithm, name, Some(term))),
     };
-    key.ok_or_else(|| badarg(line, 3, message))
+    key.ok_or_else(|| badarg(line, argument, message))
 }
 
 /// Return the public key `term` of `algorithm`, as `get_pkey_public_key`
-/// (`pkey.c:669-754`) gives it.
+/// (`pkey.c:669-754`) gives it. The errors name the argument `argument`.
 fn public_key(
     scheduler: &Scheduler,
     algorithm: &str,
     name: &Term,
     term: &Term,
+    argument: i64,
 ) -> Result<PKey<Public>, Failure> {
     if matches!(term, Term::Map(_)) {
-        return Err(badarg(686, 4, "Couldn't get engine and/or key id"));
+        return Err(badarg(686, argument, "Couldn't get engine and/or key id"));
     }
     let (key, line, message) = match algorithm {
         "rsa" => (rsa_public_key(term), 698, "Couldn't get RSA public key"),
@@ -599,7 +603,7 @@ fn public_key(
         }
         _ => return Err(octet_string_key(scheduler, algorithm, name, None)),
     };
-    key.ok_or_else(|| badarg(line, 4, message))
+    key.ok_or_else(|| badarg(line, argument, message))
 }
 
 /// Return the failure of the key of an algorithm outside `rsa`, `ecdsa`,
@@ -645,6 +649,7 @@ fn pkey_type_private_key(
     scheduler: &Scheduler,
     algorithm: &str,
     term: &Term,
+    argument: i64,
 ) -> Result<PKey<Private>, Failure> {
     let mut key = term;
     let mut seed = false;
@@ -653,12 +658,12 @@ fn pkey_type_private_key(
             Term::Atom(_) if atom_name(scheduler, tag) == "seed" => {
                 // Only ML-DSA sets `allow_seed` (`pkey.c:90-110`).
                 if !algorithm.starts_with("mldsa") {
-                    return Err(badarg(552, 3, "Seed key not allowed"));
+                    return Err(badarg(552, argument, "Seed key not allowed"));
                 }
                 seed = true;
             }
             Term::Atom(_) if atom_name(scheduler, tag) == "expandedkey" => {}
-            _ => return Err(badarg(556, 3, "Invalid key tuple format")),
+            _ => return Err(badarg(556, argument, "Invalid key tuple format")),
         }
         key = value;
     }
@@ -873,4 +878,243 @@ fn prime_group(
 /// (`digest.c:181-200`).
 fn fetch(hash: Hash) -> Md {
     Md::fetch(None, hash.fetch_name(), None).expect("OpenSSL fetches each `Hash`")
+}
+
+/// The OpenSSL value of the padding `rsa_pkcs1_oaep_padding`
+/// (`pkey.c:1223-1224`).
+const RSA_PKCS1_OAEP_PADDING: i32 = 4;
+
+/// The values of the options of an encrypt or decrypt
+/// (`PKeyCryptOptions`).
+struct CryptOptions {
+    padding: i32,
+    signature_md: Option<Hash>,
+    mgf1: Option<Hash>,
+    oaep_md: Option<Hash>,
+    label: Vec<u8>,
+}
+
+/// Run `pkey_crypt_nif/6` (`pkey.c:1313-1581`): encrypt or decrypt the
+/// binary with the public or the private key, and give the result. The
+/// public and private encrypt and decrypt functions of `crypto.erl`
+/// (`crypto.erl:3476-3599`) call it.
+///
+/// # Errors
+///
+/// None: each failure is an exception.
+pub(super) fn pkey_crypt_nif(
+    scheduler: &mut Scheduler,
+    arguments: &[Term],
+) -> Result<BifResult, BeamError> {
+    let result = crypt(scheduler, arguments).map(Term::binary);
+    finish(scheduler, "pkey_crypt_nif", 6, result)
+}
+
+/// Encrypt or decrypt as `pkey_crypt_nif` does with the OpenSSL 3 API
+/// (`pkey.c:1335-1474`).
+fn crypt(scheduler: &Scheduler, arguments: &[Term]) -> Result<Vec<u8>, Failure> {
+    let is_private = is_true(scheduler, &arguments[4]);
+    let is_encrypt = is_true(scheduler, &arguments[5]);
+    // `check_pkey_algorithm_type` without unknown algorithms
+    // (`pkey.c:212-250`).
+    let algorithm = atom_name(scheduler, &arguments[0]).to_owned();
+    if !matches!(arguments[0], Term::Atom(_))
+        || !["rsa", "dss", "ecdsa", "eddsa"].contains(&algorithm.as_str())
+    {
+        return Err(badarg(244, 0, "Bad algorithm"));
+    }
+    let data = arguments[1]
+        .binary_bytes()
+        .ok_or_else(|| badarg(1342, 1, "Binary expected"))?;
+    let name = &arguments[0];
+    if is_private {
+        let pkey = private_key(scheduler, &algorithm, name, &arguments[2], 2)?;
+        let options = crypt_options(scheduler, &algorithm, &arguments[3])?;
+        let mut context = new_context(&pkey)?;
+        let init = if is_encrypt {
+            context.sign_init()
+        } else {
+            context.decrypt_init()
+        };
+        run_crypt(context, init, &algorithm, &options, |context, out| {
+            if is_encrypt {
+                context.sign(data, out)
+            } else {
+                context.decrypt(data, out)
+            }
+        })
+    } else {
+        let pkey = public_key(scheduler, &algorithm, name, &arguments[2], 2)?;
+        let options = crypt_options(scheduler, &algorithm, &arguments[3])?;
+        let mut context = new_context(&pkey)?;
+        let init = if is_encrypt {
+            context.encrypt_init()
+        } else {
+            context.verify_recover_init()
+        };
+        run_crypt(context, init, &algorithm, &options, |context, out| {
+            if is_encrypt {
+                context.encrypt(data, out)
+            } else {
+                context.verify_recover(data, out)
+            }
+        })
+    }
+}
+
+/// Return `true` for the atom `true`, as `argv[N] == atom_true` does
+/// (`pkey.c:1335-1336`).
+fn is_true(scheduler: &Scheduler, term: &Term) -> bool {
+    matches!(term, Term::Atom(_)) && atom_name(scheduler, term) == "true"
+}
+
+/// Return a new `EVP_PKEY_CTX` of `pkey` (`pkey.c:1364-1365`).
+fn new_context<T>(pkey: &PKey<T>) -> Result<PkeyCtx<T>, Failure> {
+    PkeyCtx::new(pkey).map_err(|_| failed(1365, "Can't allocate new EVP_PKEY_CTX"))
+}
+
+/// Check the result `init` of the init call, set the RSA options of
+/// `context`, and run `operation` once for the size and once for the
+/// result (`pkey.c:1380-1474`).
+fn run_crypt<T>(
+    mut context: PkeyCtx<T>,
+    init: Result<(), ErrorStack>,
+    algorithm: &str,
+    options: &CryptOptions,
+    mut operation: impl FnMut(&mut PkeyCtx<T>, Option<&mut [u8]>) -> Result<usize, ErrorStack>,
+) -> Result<Vec<u8>, Failure> {
+    if init.is_err() {
+        return Err(Failure::Check(
+            "notsup",
+            1381,
+            -1,
+            "Can't initiate encrypt/decrypt",
+        ));
+    }
+    if algorithm == "rsa" {
+        if let Some(digest) = options.signature_md {
+            context
+                .set_signature_md(&fetch(digest))
+                .map_err(|_| failed(1387, "Can't EVP_PKEY_CTX_set_signature_md"))?;
+        }
+        context
+            .set_rsa_padding(Padding::from_raw(options.padding))
+            .map_err(|_| failed(1410, "Couldn't set rsa padding"))?;
+        if options.padding == RSA_PKCS1_OAEP_PADDING {
+            if let Some(digest) = options.oaep_md {
+                context
+                    .set_rsa_oaep_md(&fetch(digest))
+                    .map_err(|_| failed(1416, "Couldn't EVP_PKEY_CTX_set_rsa_oaep_md"))?;
+            }
+            if let Some(digest) = options.mgf1 {
+                context
+                    .set_rsa_mgf1_md(&fetch(digest))
+                    .map_err(|_| failed(1421, "Couldn't EVP_PKEY_CTX_set_rsa_mgf1_md"))?;
+            }
+            if !options.label.is_empty() {
+                context
+                    .set_rsa_oaep_label(&options.label)
+                    .map_err(|_| failed(1435, "Couldn't set RSA oaep label"))?;
+            }
+        }
+    }
+    let length =
+        operation(&mut context, None).map_err(|_| failed(1455, "Couldn't get size of result"))?;
+    let mut out = vec![0; length];
+    let length = operation(&mut context, Some(&mut out))
+        .map_err(|_| failed(1474, "Couldn't get the result"))?;
+    out.truncate(length);
+    Ok(out)
+}
+
+/// Return the options of an encrypt or decrypt, as
+/// `get_pkey_crypt_options` (`pkey.c:1173-1294`) gives them from the
+/// argument 3.
+fn crypt_options(
+    scheduler: &Scheduler,
+    algorithm: &str,
+    term: &Term,
+) -> Result<CryptOptions, Failure> {
+    if !matches!(term, Term::Nil) && term.cons_cell().is_none() {
+        return Err(badarg(1185, 3, "Expected a list"));
+    }
+    let rsa = algorithm == "rsa";
+    let mut options = CryptOptions {
+        padding: if rsa { RSA_PKCS1_PADDING } else { 0 },
+        signature_md: None,
+        mgf1: None,
+        oaep_md: None,
+        label: Vec::new(),
+    };
+    if matches!(term, Term::Nil) {
+        return Ok(options);
+    }
+    if !rsa {
+        return Err(badarg(1208, 3, "Only RSA supports Options"));
+    }
+    let mut tail = term;
+    while let Some((head, rest)) = tail.cons_cell() {
+        tail = rest;
+        let pair = match head {
+            Term::Tuple(items) if items.len() == 2 => items,
+            _ => return Err(badarg(1214, 3, "Expect only two-tuples in the list")),
+        };
+        let value = &pair[1];
+        let atom = matches!(value, Term::Atom(_));
+        let key = if matches!(pair[0], Term::Atom(_)) {
+            atom_name(scheduler, &pair[0])
+        } else {
+            ""
+        };
+        match key {
+            "rsa_padding" | "rsa_pad" => {
+                options.padding = match atom.then(|| atom_name(scheduler, value)) {
+                    Some("rsa_pkcs1_padding") => RSA_PKCS1_PADDING,
+                    Some("rsa_pkcs1_oaep_padding") => RSA_PKCS1_OAEP_PADDING,
+                    Some("rsa_x931_padding") => RSA_X931_PADDING,
+                    Some("rsa_no_padding") => RSA_NO_PADDING,
+                    _ => return Err(badarg(1239, 3, "Bad padding type in option rsa_padding")),
+                };
+            }
+            "signature_md" => {
+                if !atom {
+                    return Err(badarg(
+                        1243,
+                        3,
+                        "Atom expected as argument to option signature_md",
+                    ));
+                }
+                options.signature_md = digest_type(scheduler, algorithm, value, 3)?;
+            }
+            "rsa_mgf1_md" => {
+                if !atom {
+                    return Err(badarg(
+                        1254,
+                        3,
+                        "Atom expected as argument to option rsa_mgf1_md",
+                    ));
+                }
+                options.mgf1 = digest_type(scheduler, algorithm, value, 3)?;
+            }
+            "rsa_oaep_label" => {
+                options.label = value
+                    .binary_bytes()
+                    .ok_or_else(|| badarg(1268, 3, "Binary expected for option rsa_oaep_label"))?
+                    .to_vec();
+            }
+            "rsa_oaep_md" => {
+                if !atom {
+                    return Err(Failure::Check(
+                        "notsup",
+                        1276,
+                        3,
+                        "Atom expected as argument to option rsa_oaep_md",
+                    ));
+                }
+                options.oaep_md = digest_type(scheduler, algorithm, value, 3)?;
+            }
+            _ => return Err(badarg(1287, 3, "Unknown option")),
+        }
+    }
+    Ok(options)
 }
