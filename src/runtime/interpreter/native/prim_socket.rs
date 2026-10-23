@@ -13,6 +13,7 @@ use super::*;
 use crate::runtime::resources::lock;
 use crate::runtime::sockets::Sockets;
 
+mod atoms;
 mod socket;
 mod supports;
 
@@ -155,6 +156,14 @@ pub(super) const FUNCTIONS: [(&str, u32); 40] = [
 /// assert_eq!(load(&Term::Integer(0), &scheduler), 1);
 /// ```
 pub(super) fn load(load_info: &Term, scheduler: &Scheduler) -> i32 {
+    // ERTS makes its atoms before it reads the load info
+    // (`prim_socket_nif.c:18842-18857`). The atom indexes set the key order
+    // of the maps of `nif_info/0,1`. A full atom table stops ERTS here; in
+    // PBeam the first use of a missing atom gives the error of
+    // `AtomTable::put`.
+    for name in atoms::LOAD_ATOMS {
+        let _ = scheduler.atoms.put(name);
+    }
     let registry = match (load_info, scheduler.atoms.get("registry")) {
         (Term::Map(map), Some(key)) => map.get(&Term::Atom(key)),
         _ => None,

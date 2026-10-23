@@ -402,7 +402,8 @@ fn send_registry(
     };
     let socket_tag = atom(scheduler, "$socket")?;
     let socket = Term::tuple(vec![socket_tag.clone(), Term::Reference(reference)]);
-    let message = Term::tuple(vec![socket_tag, Term::static_atom(tag), socket]);
+    let tag = atom(scheduler, tag)?;
+    let message = Term::tuple(vec![socket_tag, tag, socket]);
     let caller = scheduler.current_process().id;
     scheduler.send_message(caller, registry, message);
     Ok(())
