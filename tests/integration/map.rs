@@ -1329,3 +1329,33 @@ fn runs_map_operations_with_bignum_keys_as_pinned_erts() {
         format!("[{}]\n", pbeam.join(","))
     );
 }
+
+const MAP_IN_KEY_PROBE: &[u8] = include_bytes!("../../fixtures/map/map_in_key_probe.beam");
+
+#[test]
+fn runs_map_operations_with_map_keys_as_pinned_erts() {
+    // A map is a map key, alone and inside a list, a tuple, or another map,
+    // in a flatmap and in a hashmap of 52 keys. The keys include flatmaps
+    // and hashmaps of 40 and 41 keys. A hashmap orders the keys in the order
+    // of the internal hash, whose map path mixes the flatmap pairs or the
+    // hashmap nodes. `encoded/0` returns the external term format of the
+    // keys, the pairs, the lookups, and the comparisons, so each byte of the
+    // two runs must be equal.
+    let erlang = pinned_beam("erlang");
+    let program = BeamProgram::load(&[&erlang, MAP_IN_KEY_PROBE]).unwrap();
+    let encoded = program
+        .execute("map_in_key_probe", "encoded", &[])
+        .unwrap()
+        .term;
+    let Term::Binary(bytes) = &encoded else {
+        panic!("encoded/0 returns a binary");
+    };
+    let pbeam: Vec<String> = bytes.bytes().unwrap().iter().map(u8::to_string).collect();
+    assert_eq!(
+        String::from_utf8(erl_reference(
+            "io:format(\"~w~n\", [binary_to_list(map_in_key_probe:encoded())])"
+        ))
+        .unwrap(),
+        format!("[{}]\n", pbeam.join(","))
+    );
+}

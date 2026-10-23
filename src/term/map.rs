@@ -1682,7 +1682,9 @@ fn encode_path(elements: Vec<usize>) -> Result<i64, BeamError> {
 /// key hashes with the pid path of `make_internal_hash`. An ordinary
 /// reference key hashes with the reference path
 /// (`erl_term_hashing.c`); an alias reference has no comparison order, so
-/// it is not a supported key. A binary in a list or a tuple key is not
+/// it is not a supported key. A map key hashes with the flatmap or
+/// hashmap path of `make_internal_hash`, and its keys and values must be
+/// such keys too. A binary in a list, a tuple, or a map key is not
 /// supported yet.
 ///
 /// # Examples
@@ -1701,7 +1703,8 @@ fn encode_path(elements: Vec<usize>) -> Result<i64, BeamError> {
 /// assert_eq!(map_hash(&Term::tuple(vec![Term::binary(vec![])])), None);
 /// let improper = |tail| Term::cons(Term::Integer(1), tail);
 /// assert!(map_hash(&improper(Term::Integer(2))).is_some());
-/// assert_eq!(map_hash(&improper(Term::Map(Map::new()))), None);
+/// assert!(map_hash(&improper(Term::Map(Map::new()))).is_some());
+/// assert!(map_hash(&Term::Map(Map::new())).is_some());
 /// ```
 fn map_hash(key: &Term) -> Option<u64> {
     match key {
@@ -1709,7 +1712,7 @@ fn map_hash(key: &Term) -> Option<u64> {
         // allocates nothing.
         Term::Atom(_) | Term::Nil | Term::Binary(_) | Term::Float(_) | Term::Pid(_) => {}
         Term::Reference(reference) if !reference.is_pid_reference() => {}
-        Term::Cons(_) | Term::Tuple(_) => {
+        Term::Cons(_) | Term::Tuple(_) | Term::Map(_) => {
             let mut pending = vec![key];
             while let Some(term) = pending.pop() {
                 match term {
@@ -1717,6 +1720,9 @@ fn map_hash(key: &Term) -> Option<u64> {
                     Term::Reference(reference) if !reference.is_pid_reference() => {}
                     Term::Cons(cell) => pending.extend([&cell.tail, &cell.head]),
                     Term::Tuple(elements) => pending.extend(elements.iter()),
+                    Term::Map(map) => {
+                        pending.extend(map.iter().flat_map(|(key, value)| [key, value]));
+                    }
                     _ if term.is_integer() => {}
                     _ => return None,
                 }
