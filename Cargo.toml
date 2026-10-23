@@ -471,6 +471,10 @@ name = "maps_math"
 path = "tests/integration/maps_math.rs"
 
 [[test]]
+name = "math_bifs"
+path = "tests/integration/math_bifs.rs"
+
+[[test]]
 name = "module_info"
 path = "tests/integration/module_info.rs"
 
