@@ -234,3 +234,120 @@ fn keeps_the_erts_table_order_after_an_erase() {
         Term::list_from(vec![pair(Term::Integer(39), 2), pair(atom("ok"), 3),])
     );
 }
+
+#[test]
+fn puts_new_persistent_terms_as_pinned_erts() {
+    // `put_new/0` puts a new key, the same value again, another value, and
+    // a value that is equal but not exactly equal. The key starts with the
+    // probe module name, so the persistent terms of the ERTS boot do not
+    // change the result.
+    let reference = Command::new("erl")
+        .args([
+            "-noshell",
+            "-pa",
+            "fixtures/persistent_term",
+            "-eval",
+            "io:format(\"~w~n\", [persistent_term_probe:put_new()]), halt().",
+        ])
+        .output()
+        .unwrap();
+    assert!(reference.status.success());
+    assert!(reference.stderr.is_empty());
+    assert_eq!(
+        reference.stdout,
+        b"{ok,ok,{badarg,{persistent_term,put_new,[{persistent_term_probe,put_new},2]}},\
+{badarg,{persistent_term,put_new,[{persistent_term_probe,put_new},1.0]}},1}\n"
+    );
+
+    let program = BeamProgram::load(&[PERSISTENT_TERM_PROBE]).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let key = Term::tuple(vec![atom("persistent_term_probe"), atom("put_new")]);
+    let badarg = |value: Term| {
+        Term::tuple(vec![
+            atom("badarg"),
+            Term::tuple(vec![
+                atom("persistent_term"),
+                atom("put_new"),
+                Term::list_from(vec![key.clone(), value]),
+            ]),
+        ])
+    };
+    assert_eq!(
+        program
+            .execute("persistent_term_probe", "put_new", &[])
+            .unwrap()
+            .term,
+        Term::tuple(vec![
+            atom("ok"),
+            atom("ok"),
+            badarg(Term::Integer(2)),
+            badarg(Term::Float(1.0)),
+            Term::Integer(1),
+        ])
+    );
+}
+
+#[test]
+fn gives_the_persistent_term_info_of_the_pinned_erts() {
+    // `info/0` reads the info of an empty table, after a new key, after the
+    // same value again, after a nested value with a heap binary and a
+    // float, after a binary of more than 64 bytes, after a resize to 16
+    // slots, and after an erase. The reference run resets the table to 8
+    // empty slots as in `returns_all_persistent_terms_in_the_erts_table_order`.
+    let reference = Command::new("erl")
+        .args([
+            "-noshell",
+            "-pa",
+            "fixtures/persistent_term",
+            "-eval",
+            "{module, M} = code:ensure_loaded(persistent_term_probe), \
+             Saved = persistent_term:get(), \
+             true = erts_internal:erase_persistent_terms(), \
+             Result = M:info(), \
+             true = erts_internal:erase_persistent_terms(), \
+             [persistent_term:put(K, V) || {K, V} <- Saved], \
+             io:format(\"~w~n\", [Result]), halt().",
+        ])
+        .output()
+        .unwrap();
+    assert!(reference.status.success());
+    assert!(reference.stderr.is_empty());
+    let infos = [
+        (0, 160),
+        (1, 200),
+        (1, 200),
+        (2, 352),
+        (3, 456),
+        (7, 776),
+        (6, 736),
+    ];
+    let text = infos
+        .iter()
+        .map(|(count, memory)| format!("#{{count => {count},memory => {memory}}}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    assert_eq!(
+        String::from_utf8(reference.stdout).unwrap(),
+        format!("{{{text}}}\n")
+    );
+
+    let program = BeamProgram::load(&[PERSISTENT_TERM_PROBE]).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let expected = infos
+        .iter()
+        .map(|(count, memory)| {
+            let pairs = vec![
+                (atom("count"), Term::Integer(*count)),
+                (atom("memory"), Term::Integer(*memory)),
+            ];
+            Term::Map(Map::from_pairs(pairs, program.atoms()).unwrap())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        program
+            .execute("persistent_term_probe", "info", &[])
+            .unwrap()
+            .term,
+        Term::tuple(expected)
+    );
+}
