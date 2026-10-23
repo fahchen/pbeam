@@ -142,3 +142,7 @@ fn scan_int(text: &[u8]) -> Option<(i32, &[u8])> {
     });
     Some((value as i32, &digits[end..]))
 }
+
+#[cfg(test)]
+#[path = "../../tests/runtime/schedulers.rs"]
+mod tests;
