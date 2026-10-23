@@ -645,6 +645,7 @@ Each row is a BIF entry of `BIFS` that has a body.
 | `re:run/2` | `process.self` | `none` | `host` | `host-call`, `trap` | Matches the subject with the PCRE2 code of a pattern, or with a code that it compiles, and gives `{match, Captures}`, `match`, `nomatch`, or an error tuple. `global` traps to `re:grun/3`, and a `unicode` run that needs the subject or pattern conversion traps to `re:urun/3`. The match uses the reductions of each turn of `CONTEXT_REDS` and continues at its loop limit, as `erlang:re_run_trap/3` does. A capture group name stops the run. | `unknown` | `src/runtime/interpreter/bif/re.rs`, `src/runtime/pcre2.rs` |
 | `re:run/3` | `process.self` | `none` | `host` | `host-call`, `trap` | Matches as `re:run/2` does with the options of the third argument. | `unknown` | `src/runtime/interpreter/bif/re.rs`, `src/runtime/pcre2.rs` |
 | `re:internal_run/4` | `process.self` | `none` | `host` | `host-call`, `trap` | Matches as `re:run/3` does with the `first` flag of `re:grun/3`; the fourth argument must be `true` or `false`. | `unknown` | `src/runtime/interpreter/bif/re.rs`, `src/runtime/pcre2.rs` |
+| `re:compile/1` | `runtime.resource` | `ambient`: It only computes; a limit of its resources is a budget, not a capability. | `host` | `host-call` | Runs `re:compile/2` with the options `[]`. | `unknown` | `src/runtime/interpreter/bif/re.rs`, `src/runtime/pcre2.rs` |
 | `re:compile/2` | `runtime.resource` | `ambient`: It only computes; a limit of its resources is a budget, not a capability. | `host` | `host-call`, `trap` | Compiles a pattern with the linked PCRE2 C code and keeps the code in `RegexCodes` until the run ends. A `unicode` pattern that is not a binary traps to `re:ucompile/2`. The result depends on the free stack of the scheduler thread: the PCRE2 stack guard rejects a deeply nested pattern on a small stack. | `unknown` | `src/runtime/interpreter/bif/re.rs`, `src/runtime/pcre2.rs` |
 | `re:import/1` | `runtime.resource` | `ambient`: It only computes; a limit of its resources is a budget, not a capability. | `host` | `host-call` | Imports the pattern tuple of a `re:compile/2` export. With encode version 1, PCRE2 decodes the encoded code after the checksum check. When the encode version, the PCRE2 version, or the architecture differs, it compiles the source with the options again. Keeps the code in `RegexCodes` until the run ends. A term that is not an export, a bad header, a checksum mismatch, and a failed compile raise `badarg`. | `O(n)` | `src/runtime/interpreter/bif/re.rs`, `src/runtime/pcre2.rs` |
 | `unicode:bin_is_7bit/1` | `none` | `none` | `pure` | `inline` | Gives `true` for a binary with only bytes below 128, else `false`. | `O(n)` | `src/runtime/interpreter/bif/table.rs` |
@@ -671,7 +672,7 @@ Each entry is a BIF entry of `BIFS` with the form `unsupported`. A call gives th
 - `math`: `acosh/1`, `asinh/1`, `atanh/1`, `erf/1`, `erfc/1`
 - `persistent_term`: `info/0`, `put_new/2`
 - `prim_file`: `internal_normalize_utf8/1`, `is_translatable/1`
-- `re`: `compile/1`, `inspect/2`, `version/0`
+- `re`: `inspect/2`, `version/0`
 - `records`: `create/4`, `get/2`, `get_definition/2`, `get_field_names/1`, `get_module/1`, `get_name/1`, `is_exported/1`, `update/4`
 - `string`: `list_to_float/1`
 
