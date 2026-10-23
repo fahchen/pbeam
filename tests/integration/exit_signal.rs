@@ -98,3 +98,54 @@ fn sends_exit_signals_with_exit_2_as_erts_does() {
         b"[normal,boom,killed,{returned,true,true},{returned,true,true},killed,{alive,none},boom,killed,{alive,{normal,true}},killed,badarg,badarg,true,true,true,{linked,boom}]\n"
     );
 }
+
+#[test]
+fn sends_exit_signals_with_exit_3_as_erts_does() {
+    // `erlang:exit/3` takes a list of the atom `priority` and sends the
+    // signal of `erlang:exit/2`; another option raises `badarg` with the
+    // cause `badopt` before `Id` is checked (`bif.c:1727-1744`, `1877-1880`).
+    let erlang = pinned_beam("erlang");
+    let re = pinned_beam("re");
+    let program = BeamProgram::load(&[&erlang, &re, EXIT_PROBE]).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let pair = |tag: &str, value: &str| Term::tuple(vec![atom(tag), atom(value)]);
+    let alive = |value: Term| Term::tuple(vec![atom("alive"), value]);
+    let badopt = || pair("badarg", "badopt");
+    assert_eq!(
+        program.execute("exit_probe", "exit3", &[]).unwrap().term,
+        Term::list_from(vec![
+            atom("normal"),
+            Term::tuple(vec![atom("returned"), atom("true"), atom("true")]),
+            atom("killed"),
+            alive(pair("boom", "true")),
+            alive(atom("none")),
+            atom("killed"),
+            atom("true"),
+            badopt(),
+            badopt(),
+            badopt(),
+            badopt(),
+            badopt(),
+            pair("badarg", "none"),
+            atom("true"),
+        ])
+    );
+    let expected = "[normal,{returned,true,true},killed,{alive,{boom,true}},{alive,none},killed,true,{badarg,badopt},{badarg,badopt},{badarg,badopt},{badarg,badopt},{badarg,badopt},{badarg,none},true]";
+
+    let reference = Command::new("erl")
+        .args([
+            "-noshell",
+            "-pa",
+            "fixtures/exit_signal",
+            "-eval",
+            "io:format(\"~w~n\", [exit_probe:exit3()]), halt().",
+        ])
+        .output()
+        .unwrap();
+    assert!(reference.status.success());
+    assert!(reference.stderr.is_empty());
+    assert_eq!(
+        String::from_utf8(reference.stdout).unwrap(),
+        format!("{expected}\n")
+    );
+}
