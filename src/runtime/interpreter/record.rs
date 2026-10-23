@@ -10,17 +10,14 @@ use crate::term::{Atom, Record, RecordDef, Term};
 /// # Examples
 ///
 /// ```rust,ignore
-/// let reason = field_reason("badfield", &def, &zz);
+/// let reason = field_reason("badfield", &def, Term::Atom(zz));
 /// ```
-fn field_reason(tag: &str, def: &RecordDef, field: &Atom) -> Term {
+pub(super) fn field_reason(tag: &str, def: &RecordDef, field: Term) -> Term {
     let id = Term::tuple(vec![
         Term::Atom(def.module.clone()),
         Term::Atom(def.name.clone()),
     ]);
-    Term::tuple(vec![
-        Term::static_atom(tag),
-        Term::tuple(vec![id, Term::Atom(field.clone())]),
-    ])
+    Term::tuple(vec![Term::static_atom(tag), Term::tuple(vec![id, field])])
 }
 
 /// Return the reason `{badrecord, Value}`.
@@ -55,8 +52,8 @@ pub(super) fn create(def: &Arc<RecordDef>, updates: Vec<(&Atom, Term)>) -> Resul
         }
     }
     match (updates.next(), novalue) {
-        (Some((field, _)), _) => Err(field_reason("badfield", def, field)),
-        (None, Some(key)) => Err(field_reason("novalue", def, key)),
+        (Some((field, _)), _) => Err(field_reason("badfield", def, Term::Atom(field.clone()))),
+        (None, Some(key)) => Err(field_reason("novalue", def, Term::Atom(key.clone()))),
         (None, None) => Ok(Term::Record(Record::new(Arc::clone(def), values))),
     }
 }
@@ -85,7 +82,7 @@ pub(super) fn update(record: &Record, updates: Vec<(&Atom, Term)>) -> Result<Ter
         )
         .collect();
     match updates.next() {
-        Some((field, _)) => Err(field_reason("badfield", def, field)),
+        Some((field, _)) => Err(field_reason("badfield", def, Term::Atom(field.clone()))),
         None => Ok(Term::Record(Record::new(Arc::clone(def), values))),
     }
 }
@@ -121,5 +118,5 @@ pub(super) fn get_field(
     }
     def.index_of(field)
         .map(|index| record.values()[index].clone())
-        .ok_or_else(|| field_reason("badfield", def, field))
+        .ok_or_else(|| field_reason("badfield", def, Term::Atom(field.clone())))
 }

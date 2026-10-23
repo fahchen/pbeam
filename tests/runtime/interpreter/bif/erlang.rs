@@ -506,16 +506,23 @@ fn charges_a_quarter_reduction_for_each_group_of_four_links() {
     let item = Term::static_atom("links");
     for (count, reductions) in [(0, 0), (3, 0), (4, 1), (9, 2)] {
         assert_eq!(
-            links_reductions(&item, &Term::tuple(vec![item.clone(), links(count)])),
+            item_reductions(
+                &item,
+                &Term::tuple(vec![item.clone(), links(count)]),
+                0,
+                false
+            ),
             reductions,
             "{count}"
         );
     }
     let status = Term::static_atom("status");
     assert_eq!(
-        links_reductions(
+        item_reductions(
             &status,
-            &Term::tuple(vec![status.clone(), Term::static_atom("running")])
+            &Term::tuple(vec![status.clone(), Term::static_atom("running")]),
+            8,
+            false
         ),
         0
     );

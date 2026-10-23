@@ -7,7 +7,7 @@ mod common;
 use std::process::Command;
 
 use common::pinned_beam;
-use pbeam_runtime::BeamProgram;
+use pbeam_runtime::{BeamProgram, Term};
 
 const PROBE: &[u8] = include_bytes!("../../fixtures/native_record/nr_probe.beam");
 const DEF: &[u8] = include_bytes!("../../fixtures/native_record/nr_def.beam");
@@ -73,5 +73,59 @@ fn stops_the_run_at_term_to_binary_of_a_record() {
     assert!(
         error.contains("unsupported erlang:term_to_binary/1,2 of a native record"),
         "{error}"
+    );
+}
+
+const BIF: &[u8] = include_bytes!("../../fixtures/native_record/nr_bif.beam");
+
+/// The `~w` print of `nr_bif:results()` on the pinned ERTS (OTP 29.1.1).
+const BIF_EXPECTED: &str = include_str!("../../fixtures/native_record/nr_bif.expected");
+
+#[test]
+fn runs_the_records_bifs_and_prints_records_as_pinned_erts() {
+    // `records:get_module/1`, `get_name/1`, `get/2`, `get_field_names/1`,
+    // `is_exported/1`, `get_definition/2`, `create/4`, and `update/4` with
+    // their errors (`erl_record.c:592-1092`), and the `~p`, `~w`, `~P`,
+    // `~W`, and `~tp` print of records (`io_lib.erl:857-871`,
+    // `io_lib_pretty.erl:983-1007`).
+    let reference = Command::new("erl")
+        .args([
+            "-noshell",
+            "-pa",
+            "fixtures/native_record",
+            "-eval",
+            "io:format(\"~w~n\", [nr_bif:results()]), halt().",
+        ])
+        .output()
+        .unwrap();
+    assert!(reference.status.success(), "{reference:?}");
+    assert_eq!(String::from_utf8(reference.stdout).unwrap(), BIF_EXPECTED);
+    let modules: Vec<Vec<u8>> = [
+        "erlang",
+        "lists",
+        "maps",
+        "unicode",
+        "io_lib",
+        "io_lib_format",
+        "io_lib_pretty",
+        "string",
+        "epp",
+        "erl_scan",
+        "erl_features",
+        "ets",
+    ]
+    .iter()
+    .map(|module| pinned_beam(module))
+    .collect();
+    let mut beams: Vec<&[u8]> = modules.iter().map(Vec::as_slice).collect();
+    beams.extend([BIF, DEF]);
+    let program = BeamProgram::load(&beams).unwrap();
+    let shown = program.execute("nr_bif", "show", &[]).unwrap().term;
+    let Term::Binary(shown) = &shown else {
+        panic!("not a binary: {shown:?}");
+    };
+    assert_eq!(
+        String::from_utf8(shown.bytes().unwrap().to_vec()).unwrap(),
+        BIF_EXPECTED
     );
 }

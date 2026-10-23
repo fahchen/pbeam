@@ -481,6 +481,7 @@ ambient() ->
         erlang:nodes(this),
         length(erlang:nodes(this, #{})),
         erlang:function_exported(?MODULE, ambient, 0),
+        attempt(fun() -> records:get_definition(?MODULE, none) end),
         erlang:fun_info(fun(X) -> X end, arity),
         element(3, erlang:fun_info_mfa(fun(X) -> X end)),
         erts_internal:prepare_loading(effect_probe_missing, <<"FOR1">>),

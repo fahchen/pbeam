@@ -75,6 +75,7 @@ fn rejects_a_definition_that_holds_no_tuple() {
         defaults: def.defaults.clone(),
         hash: def.hash,
         tuple: Term::Nil,
+        transient: false,
     };
     let _ = broken.key_terms();
 }
