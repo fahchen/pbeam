@@ -19,6 +19,7 @@ use super::*;
 use num_traits::ToPrimitive;
 use openssl::{
     hash::{Hasher, MessageDigest},
+    md::Md,
     pkey::{Id, PKey},
     sign::Signer,
 };
@@ -411,6 +412,37 @@ impl Hash {
         }
     }
 
+    /// Return the OpenSSL 3 fetch name of `self` (`str_v3`,
+    /// `digest.c:25-179`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Hash::Sha.fetch_name(), "SHA1");
+    /// ```
+    fn fetch_name(self) -> &'static str {
+        match self {
+            Hash::Md5 => "MD5",
+            Hash::Ripemd160 => "RIPEMD160",
+            Hash::Sha => "SHA1",
+            Hash::Sha224 => "SHA2-224",
+            Hash::Sha256 => "SHA2-256",
+            Hash::Sha384 => "SHA2-384",
+            Hash::Sha512 => "SHA2-512",
+            Hash::Sha512_224 => "SHA2-512/224",
+            Hash::Sha512_256 => "SHA2-512/256",
+            Hash::Sha3_224 => "SHA3-224",
+            Hash::Sha3_256 => "SHA3-256",
+            Hash::Sha3_384 => "SHA3-384",
+            Hash::Sha3_512 => "SHA3-512",
+            Hash::Shake128 => "SHAKE-128",
+            Hash::Shake256 => "SHAKE-256",
+            Hash::Sm3 => "SM3",
+            Hash::Blake2b => "BLAKE2b512",
+            Hash::Blake2s => "BLAKE2s256",
+        }
+    }
+
     /// Return whether PBKDF2 takes `self` (`PBKDF2_ELIGIBLE_DIGEST`,
     /// `digest.c:51-101`): `sha` and the SHA-2 family.
     ///
@@ -479,9 +511,10 @@ fn atom_name<'a>(scheduler: &'a Scheduler, term: &Term) -> &'a str {
 /// Run `crypto:hash_info(Type)` as the ERTS NIF `hash_info_nif`
 /// (`hash.c:74-99`): the map of the OpenSSL type, size, and block size of
 /// the digest. A name that is not a digest raises `error:badarg`, and
-/// `md4`, whose `md.p` is NULL, raises `error:notsup`. The OpenSSL 3.5.8 of
-/// the pinned ERTS gives the size 0 for SHAKE, where the OpenSSL 3.5.5 of
-/// PBeam gives the default output length, so PBeam gives 0.
+/// `md4`, whose `md.p` is NULL, raises `error:notsup`. As ERTS, PBeam reads
+/// the values from the fetched digest (`digest.c:186-188`): a fetched md
+/// gives the size 0 for an XOF (`evp_lib.c:1041`), where the legacy
+/// `EVP_shake*` gives bitlen/8.
 ///
 /// # Examples
 ///
@@ -500,7 +533,7 @@ fn hash_info(scheduler: &mut Scheduler, digest_type: &Term) -> Result<BifResult,
             BifResult::badarg()
         });
     };
-    let digest = hash.message_digest();
+    let digest = Md::fetch(None, hash.fetch_name(), None).expect("OpenSSL fetches each `Hash`");
     let pairs = vec![
         (
             Term::Atom(scheduler.atoms.put("type")?),
@@ -508,10 +541,7 @@ fn hash_info(scheduler: &mut Scheduler, digest_type: &Term) -> Result<BifResult,
         ),
         (
             Term::Atom(scheduler.atoms.put("size")?),
-            Term::Integer(match hash {
-                Hash::Shake128 | Hash::Shake256 => 0,
-                _ => digest.size() as i64,
-            }),
+            Term::Integer(digest.size() as i64),
         ),
         (
             Term::Atom(scheduler.atoms.put("block_size")?),

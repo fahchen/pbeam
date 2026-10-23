@@ -377,9 +377,9 @@ fn runs_the_one_shot_crypto_hashes_and_macs_as_pinned_erts() {
         )),
         erts
     );
-    // The OpenSSL 3.5.8 of the pinned macOS ERTS gives the SHAKE size 0
-    // (hash.c:94); the libcrypto of the Linux CI host gives the default
-    // output length.
+    // A fetched md gives the SHAKE size 0 (hash.c:90-94, evp_lib.c:1041),
+    // as the pinned macOS ERTS gives it; the legacy `EVP_shake*` of an
+    // older libcrypto on the Linux CI host gives bitlen/8.
     let erts = run(&mut erts_probe(
         CRYPTO_PROBE,
         "crypto_probe",

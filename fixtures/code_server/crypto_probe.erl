@@ -144,8 +144,8 @@ oneshot() ->
                             {<<1:7>>, <<1:7>>}]],
     io:format("~p~n", [[Infos, Hashes, Hmacs, Cmacs, Poly, MacErrors, Equals]]).
 
-%% Write the sizes of hash_info/1 for the SHAKE digests: 0 with the
-%% OpenSSL 3.5.8 of the pinned macOS ERTS (hash.c:94).
+%% Write the sizes of hash_info/1 for the SHAKE digests. A fetched md gives
+%% 0 for an XOF (evp_lib.c:1041); the legacy EVP_shake* gives bitlen/8.
 xof_sizes() ->
     io:format("~p~n", [[maps:get(size, crypto:hash_info(Type)) || Type <- [shake128, shake256]]]).
 
