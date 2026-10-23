@@ -218,10 +218,16 @@ pub(super) struct Table {
     /// objects more than the buckets (`GROW_LIMIT`, `erl_db_hash.c:153`,
     /// `1349-1354`, `3648-3740`), and joins buckets when a delete makes the
     /// objects fewer than the shrink limit (`erl_db_hash.c:757-762`,
-    /// `3350-3392`, `3743-3818`). With one scheduler, no table has fine
-    /// locks (`erl_db.c:2656-2657`; `erl_db_util.h:388-389`), so the object
-    /// count of these decisions is exact.
+    /// `3350-3392`, `3743-3818`). The decisions use the exact object count,
+    /// as ERTS does for a table with centralized counters
+    /// (`erl_db_hash.c:106-117`).
     buckets: usize,
+    /// The number of bucket locks (`nlocks`): 1 for a table that is not fine
+    /// locked, else 64 or the count of `debug_hash_fixed_number_of_locks`
+    /// (`erl_db_hash.c:1023-1051`). A traversal visits the buckets of one
+    /// lock before the buckets of the next lock (`next_slot`,
+    /// `erl_db_hash.c:539-555`).
+    locks: usize,
     /// The position of the table in the owned list of its owner, from
     /// `EtsTables::saved`. ERTS appends a table to the list when
     /// `ets:new/2` makes it and when `ets:delete/1` of another process
@@ -1466,6 +1472,7 @@ impl Table {
             next: Vec::new(),
             writes: 0,
             buckets: FIRST_SEGMENT_SLOTS,
+            locks: 1,
             owned: 0,
             name: String::new(),
             write_concurrency: Term::static_atom("false"),
@@ -1593,6 +1600,30 @@ impl Table {
         self.read_concurrency = read_concurrency;
         self.decentralized_counters = decentralized_counters;
         self.compressed = compressed;
+    }
+
+    /// Set the number of bucket locks of a fine-locked hash table. A table
+    /// with more locks than slots gets segments with active buckets until
+    /// it has a slot for each lock (`erl_db_hash.c:1053-1059`, `alloc_seg`,
+    /// `erl_db_hash.c:3409-3445`).
+    pub(super) fn set_locks(&mut self, locks: usize) {
+        self.locks = locks;
+        while self.segment_slots() < locks {
+            self.buckets += SEGMENT_SLOTS;
+        }
+        self.heads.resize(self.buckets, EMPTY);
+    }
+
+    /// Return the bucket that a traversal visits after the bucket `bucket`,
+    /// or `None` at the end of the table: the next bucket of the same lock,
+    /// else the first bucket of the next lock (`next_slot`,
+    /// `erl_db_hash.c:539-555`).
+    pub(super) fn next_bucket(&self, bucket: usize) -> Option<usize> {
+        let next = bucket + self.locks;
+        if next < self.buckets {
+            return Some(next);
+        }
+        Some((next + 1) & (self.locks - 1)).filter(|&next| next != 0)
     }
 
     /// Return the number of objects.
@@ -1987,10 +2018,7 @@ impl Table {
                 }
                 slot = self.next[slot];
             }
-            bucket += 1;
-            if bucket == self.buckets {
-                return None;
-            }
+            bucket = self.next_bucket(bucket)?;
             slot = self.heads[bucket];
         }
     }
@@ -3843,8 +3871,9 @@ impl Table {
     }
 
     /// Return the object count below which a delete joins buckets: half the
-    /// slots without the top segment, or 0 below 4352 slots
-    /// (`calc_shrink_limit`, `erl_db_hash.c:3350-3407`).
+    /// slots without the top segment, or 0 below 4352 slots or below the
+    /// lock count and one segment (`calc_shrink_limit`,
+    /// `erl_db_hash.c:3350-3407`).
     ///
     /// # Examples
     ///
@@ -3853,7 +3882,7 @@ impl Table {
     /// ```
     fn shrink_limit(&self) -> usize {
         let slots = self.segment_slots();
-        if slots >= SHRINK_SLOTS {
+        if slots >= SHRINK_SLOTS.max(self.locks + SEGMENT_SLOTS) {
             (slots - SEGMENT_SLOTS) / 2
         } else {
             0
