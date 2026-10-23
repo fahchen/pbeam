@@ -14,7 +14,7 @@ use crate::runtime::{
     },
     port::{
         self, Driver, Input, Lines, Packets, Port, PortCell, Spawn,
-        inet::{Control, Inet, OK, Output, SocketType},
+        inet::{Control, Event, Inet, OK, Output, SocketType},
     },
     signal::Signal,
     unicode::native_filename,
@@ -965,6 +965,10 @@ pub(super) fn port_control(
         Control::Receive { timeout, length } => {
             let (reply, received) = scheduler.tcp_receive(id, tcp, timeout, length);
             events = Some(received);
+            Accept::Queued(reply)
+        }
+        Control::Passive { reply, count } => {
+            events = Some((0..count).map(|_| Event::Passive).collect());
             Accept::Queued(reply)
         }
         Control::Active { read } => {

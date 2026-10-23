@@ -2651,6 +2651,44 @@ fn sends_the_messages_of_a_step_before_a_close_on_another_scheduler() {
 }
 
 #[test]
+fn sends_the_active_datagram_messages_of_a_step_to_the_owner() {
+    use crate::runtime::port::{self, inet::Event};
+    // `{udp, S, {A, B, C, D}, Port, Data}` (`packet_binary_message`,
+    // inet_drv.c:4106-4160) and `{udp_error, S, Reason}`
+    // (`packet_error_message`, inet_drv.c:4245-4267) go to the owner.
+    let (mut scheduler, id, port, _peer) = tcp_port();
+    let cell = scheduler.node.port(port).unwrap();
+    let mut slot = port::lock(&cell);
+    let item = slot.as_mut().unwrap();
+    let events = vec![
+        Event::ActiveDatagram {
+            address: vec![1, 0x12, 0x34, 127, 0, 0, 1],
+            data: vec![7],
+        },
+        Event::DatagramError("econnrefused".to_string()),
+    ];
+    let exit = scheduler.send_events(port, item, events).unwrap();
+    drop(slot);
+    assert!(exit.is_none());
+    let atom = |name| Term::Atom(scheduler.atoms.put(name).unwrap());
+    let (udp, udp_error, reason) = (atom("udp"), atom("udp_error"), atom("econnrefused"));
+    let ip = [127, 0, 0, 1].map(Term::Integer).to_vec();
+    assert_eq!(
+        messages(&scheduler, id.0),
+        [
+            Term::tuple(vec![
+                udp,
+                Term::Port(port),
+                Term::tuple(ip),
+                Term::Integer(0x1234),
+                Term::list_from(vec![Term::Integer(7)]),
+            ]),
+            Term::tuple(vec![udp_error, Term::Port(port), reason]),
+        ]
+    );
+}
+
+#[test]
 fn drops_the_io_event_of_a_port_that_another_scheduler_closed() {
     use crate::runtime::port;
     // ERTS drops the IO event of a port that is gone. The poll took its

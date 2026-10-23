@@ -1,4 +1,4 @@
-//! The send and the receive of a passive `udp_inet` port: the output of
+//! The send and the receive of a `udp_inet` port: the output of
 //! `prim_inet:sendto/4` (prim_inet.erl:652-699) and `PACKET_REQ_RECV` of
 //! `prim_inet:recvfrom/3` (prim_inet.erl:853-889), as `packet_inet_command`,
 //! `packet_inet_ctl`, and `packet_inet_input` run them
@@ -16,6 +16,10 @@ use socket2::SockAddr;
 
 use super::{AF_INET, Control, Event, Inet, State, errno_name, error_reply, stream::Sender};
 use crate::error::BeamError;
+
+/// The bytes of a datagram and `[Family, P1, P0, A, B, C, D]` of its
+/// sender.
+type Datagram = (Vec<u8>, Vec<u8>);
 
 impl Inet {
     /// Check `PACKET_REQ_RECV` with `[T3, T2, T1, T0, N3, N2, N1, N0]`
@@ -48,6 +52,60 @@ impl Inet {
         if self.stream.receiver.is_none() {
             return Vec::new();
         }
+        let (data, address) = match self.read_datagram() {
+            Ok(Some(read)) => read,
+            Ok(None) => return Vec::new(),
+            Err(name) => return self.end_receive(Err(name)),
+        };
+        let receiver = self.stream.receiver.take().expect("the receive waits");
+        vec![Event::Datagram {
+            receiver,
+            address,
+            data,
+        }]
+    }
+
+    /// Read at most `read_packets` datagrams of an active socket for the
+    /// owner, as `packet_inet_input` does (inet_drv.c:15361-15588): each
+    /// datagram gives `{udp, S, Address, Port, Data}`, and then `once`
+    /// becomes passive, and the last datagram of `{active, N}` makes the
+    /// socket passive and gives `{udp_passive, S}`
+    /// (`packet_reply_binary_data`, inet_drv.c:4335-4355). A passive
+    /// socket reads no more. A read error gives `{udp_error, S, Reason}`
+    /// and ends the step; no datagram ends it too.
+    pub(in crate::runtime) fn receive_active_datagrams(&mut self) -> Vec<Event> {
+        let mut events = Vec::new();
+        for _ in 0..self.read_packets {
+            match self.read_datagram() {
+                Ok(Some((data, address))) => events.push(Event::ActiveDatagram { address, data }),
+                Ok(None) => break,
+                Err(name) => {
+                    events.push(Event::DatagramError(name));
+                    break;
+                }
+            }
+            match self.active {
+                2 => self.active = 0,
+                3 => {
+                    self.active_count -= 1;
+                    if self.active_count == 0 {
+                        self.active = 0;
+                        events.push(Event::Passive);
+                    }
+                }
+                _ => {}
+            }
+            if self.active == 0 {
+                break;
+            }
+        }
+        events
+    }
+
+    /// Read one datagram of at most `buffer` bytes, and count it: the bytes
+    /// and the address of the sender, `None` for `ERRNO_BLOCK`, or the
+    /// error name of the read (inet_drv.c:15469-15528).
+    fn read_datagram(&mut self) -> Result<Option<Datagram>, String> {
         // The host socket moves into a `UdpSocket` for the read into an
         // initialized buffer, and back; the fd does not change.
         let socket = UdpSocket::from(self.socket.take().expect("an open port has a socket"));
@@ -56,17 +114,12 @@ impl Inet {
         self.socket = Some(socket.into());
         let (count, from) = match read {
             Ok(read) => read,
-            Err(failure) if failure.kind() == io::ErrorKind::WouldBlock => return Vec::new(),
-            Err(failure) => return self.end_receive(Err(errno_name(&failure))),
+            Err(failure) if failure.kind() == io::ErrorKind::WouldBlock => return Ok(None),
+            Err(failure) => return Err(errno_name(&failure)),
         };
         self.stream.statistics.input(count as u64);
         data.truncate(count);
-        let receiver = self.stream.receiver.take().expect("the receive waits");
-        vec![Event::Datagram {
-            receiver,
-            address: super::address_bytes(&SockAddr::from(from)),
-            data,
-        }]
+        Ok(Some((data, super::address_bytes(&SockAddr::from(from)))))
     }
 
     /// Send the datagram of the output `bytes` of `sender`, after the tag,
