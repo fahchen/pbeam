@@ -3715,6 +3715,27 @@ pub(super) fn insert_element(index: &Term, tuple: &Term, value: &Term) -> BifRes
     Value(Term::tuple(elements))
 }
 
+/// Run `erlang:append_element/2`: return the tuple with `value` after its
+/// last element, as ERTS `append_element_2` (`bif.c:3083-3108`) does. A
+/// `tuple` that is not a tuple, or that already has [`MAX_TUPLE_SIZE`]
+/// elements, raises `badarg`. The BIF uses no reduction.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let tuple = Term::tuple(vec![Term::static_atom("a")]);
+/// assert!(matches!(append_element(&tuple, &Term::static_atom("b")), BifResult::Value(Term::Tuple(elements)) if elements.len() == 2));
+/// assert!(matches!(append_element(&Term::nil(), &Term::static_atom("b")), BifResult::Raise { .. }));
+/// ```
+pub(super) fn append_element(tuple: &Term, value: &Term) -> BifResult {
+    match tuple {
+        Term::Tuple(elements) if elements.len() < MAX_TUPLE_SIZE => Value(Term::tuple(
+            elements.iter().chain([value]).cloned().collect(),
+        )),
+        _ => BifResult::badarg(),
+    }
+}
+
 /// Run `erlang:delete_element/2`: return the tuple without the element at
 /// the 1-based `index`, as ERTS `delete_element_2` (`bif.c:3144-3180`)
 /// does. An `index` of the only element gives `{}`. An `index` that is not
