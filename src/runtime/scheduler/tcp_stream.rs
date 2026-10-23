@@ -267,14 +267,12 @@ impl Scheduler {
                 Event::ActiveDatagram { address, data } => {
                     // `{udp, S, {A, B, C, D}, Port, Data}` (`load_address`,
                     // inet_drv.c:4124-4158).
-                    let [_, p1, p0, ip @ ..] = address.as_slice() else {
-                        unreachable!("an IPv4 address has 7 bytes")
-                    };
-                    let ip = ip
+                    // `address` is `[Family, P1, P0, A, B, C, D]`.
+                    let ip = address[3..]
                         .iter()
                         .map(|byte| Term::Integer((*byte).into()))
                         .collect();
-                    let from = Term::Integer(u16::from_be_bytes([*p1, *p0]).into());
+                    let from = Term::Integer(u16::from_be_bytes([address[1], address[2]]).into());
                     let message = Term::tuple(vec![
                         Term::Atom(self.atoms.put("udp")?),
                         Term::Port(port),
