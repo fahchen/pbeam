@@ -281,13 +281,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a consumer reads the cause of a BIF error, for example the error text of a shell or a logger report, or OTP code that matches the cause.
 - **Source:** [#715](https://github.com/fahchen/pbeam/issues/715).
 
-### Give the exact caller frames of an `undef` exception
-
-- The error handler path of [#447](https://github.com/fahchen/pbeam/issues/447) adds the frame of the caller of `error_handler:crash/1` to the frames of `erlang:error/1` in about one of four calls. The reductions of the error handler code match ERTS in a run with a live code server; a run of the library API has no code server and charges the extra reductions of the `init:ensure_loaded/1` round trip.
-- **Trigger:** a consumer needs the exact frames of an `undef` exception.
-- **Source:** owner decision of 2026-10-11 (Suikou review 01a1282e, AFK log second batch); [#446](https://github.com/fahchen/pbeam/issues/446), [#447](https://github.com/fahchen/pbeam/issues/447), PR [#473](https://github.com/fahchen/pbeam/pull/473).
-- **Task:** none. [#926](https://github.com/fahchen/pbeam/issues/926) added the line locations.
-
 ### Value checks of `process_flag/2` and `system_flag/2`
 
 - After #155 (PR #177), `{monitor_nodes, Options}` (`dist.c:6732-6799`), a `scheduler` value above the scheduler count, and the `system_flag/2` sub-checks of `internal_cpu_topology`, `erts_alloc`, `sequential_tracer`, `schedulers_online`, and `dirty_cpu_schedulers_online` give the runtime error where ERTS raises `badarg`. The "System flags" row of PR #177 records them.
