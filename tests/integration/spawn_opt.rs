@@ -48,7 +48,7 @@ fn results() -> Vec<(&'static str, String)> {
         ("flags", format!("[{}]", cases.join(","))),
         (
             "links",
-            "[{true,none},{true,none},{false,down},{false,down},{true,t}]".to_owned(),
+            "[{true,none},{true,none},{false,down},{false,down},{true,t},{false,down},{false,down},{true,none}]".to_owned(),
         ),
         ("errors", format!("[{}]", vec!["badarg"; 29].join(","))),
     ]
@@ -117,6 +117,10 @@ fn gives_a_runtime_error_for_an_option_that_pbeam_does_not_run() {
         (
             "link",
             r#"unsupported spawn option Tuple([Atom("link"), List([Atom("priority")])])"#,
+        ),
+        (
+            "scheduler",
+            r#"unsupported spawn option Tuple([Atom("scheduler"), Integer(1)])"#,
         ),
         (
             "min_heap_size",

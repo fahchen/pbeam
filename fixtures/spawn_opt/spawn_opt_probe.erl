@@ -20,11 +20,12 @@ flags() ->
          [{max_heap_size, 0}, {min_bin_vheap_size, 200000}],
          [{async_dist, true}],
          [{async_dist, true}, {async_dist, false}],
-         [{scheduler, 1}],
+         [{scheduler, 1}, {scheduler, 0}],
          [{message_queue_data, off_heap}, {priority, low}]]].
 
 %% link, {link, []}, monitor, and {monitor, []} link or monitor the new
-%% process (erl_process.c:12256-12265, 12396-12417).
+%% process (erl_process.c:12256-12265, 12396-12417). A later monitor or
+%% {link, []} replaces the options of an earlier one.
 links() ->
     [begin
          Result = erlang:spawn_opt(?MODULE, report, [none], Options),
@@ -38,7 +39,10 @@ links() ->
                end,
          {lists:member(Pid, Links), Tag}
      end || Options <- [[link], [{link, []}], [monitor], [{monitor, []}],
-                        [{monitor, [{tag, t}]}, link]]].
+                        [{monitor, [{tag, t}]}, link],
+                        [{monitor, [{alias, demonitor}]}, monitor],
+                        [{monitor, [priority]}, {monitor, []}],
+                        [{link, [priority]}, {link, []}]]].
 
 %% Each option that is not valid raises badarg (bif.c:1039-1051), also
 %% after an option that PBeam does not support.
@@ -65,7 +69,9 @@ errors() ->
 unsupported(monitor) ->
     erlang:spawn_opt(?MODULE, report, [none], [{monitor, [{alias, demonitor}]}]);
 unsupported(link) ->
-    erlang:spawn_opt(?MODULE, report, [none], [{link, [priority]}]);
+    erlang:spawn_opt(?MODULE, report, [none], [{link, [priority]}, link]);
+unsupported(scheduler) ->
+    erlang:spawn_opt(?MODULE, report, [none], [{scheduler, 1}]);
 unsupported(Option) ->
     erlang:spawn_opt(?MODULE, report, [none], [{Option, 1 bsl 55}]).
 

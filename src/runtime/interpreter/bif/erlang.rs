@@ -1555,7 +1555,7 @@ pub(super) fn spawn_link(
 ///   value of `max_heap_size`, and the size is 0 or at least the minimum
 ///   heap size of the options (`erl_process.c:12321-12360`, `12429-12431`).
 /// - `{scheduler, N}` takes a small integer from 0 to the scheduler count
-///   and changes nothing else (`erl_process.c:12361-12369`).
+///   (`erl_process.c:12361-12369`); 0 does not bind the process.
 /// - The PBeam option `{capabilities, Map}` restricts the capabilities of
 ///   the new process (see `capability::restrictions`).
 ///
@@ -1571,7 +1571,7 @@ pub(super) fn spawn_link(
 /// # Errors
 ///
 /// The monitor options `alias` and `priority`, the link option `priority`,
-/// and a minimum heap size at or above the largest heap size of ERTS give a
+/// `{scheduler, N}` with `N` above 0, and a minimum heap size at or above the largest heap size of ERTS give a
 /// runtime error when all options are valid.
 ///
 /// # Examples
@@ -1601,7 +1601,12 @@ pub(super) fn spawn_opt(
     // so an option that is not valid gives `badarg` also after an option
     // that PBeam does not support.
     let mut valid = true;
-    let mut unsupported = None;
+    // The runtime error of an option that PBeam does not support. A later
+    // option of the same kind replaces the link and monitor flags
+    // (`erl_process.c:12260-12265`, `12396-12417`) and the scheduler
+    // (`erl_process.c:12369`). ERTS stops at once for a huge heap size.
+    let (mut link_error, mut monitor_error, mut scheduler_error) = (None, None, None);
+    let mut heap_error = None;
     let not_supported = |option: &Term| {
         error(format!(
             "unsupported spawn option {}",
@@ -1626,6 +1631,7 @@ pub(super) fn spawn_opt(
             (Term::Atom(name), _) if name.is_static("link") => spawn_options.link = true,
             (Term::Atom(name), _) if name.is_static("monitor") => {
                 spawn_options.monitor = Some(Term::static_atom("DOWN"));
+                monitor_error = None;
             }
             // `erts_link_opts` takes a proper list of `priority`
             // (`bif.c:675-699`).
@@ -1634,17 +1640,15 @@ pub(super) fn spawn_opt(
                     .proper_list()
                     .is_some_and(|mut link| link.all(is_priority)) =>
             {
-                if value.is_nil() {
-                    spawn_options.link = true;
-                } else {
-                    unsupported.get_or_insert_with(|| not_supported(option));
-                }
+                spawn_options.link = true;
+                link_error = (!value.is_nil()).then(|| not_supported(option));
             }
             (_, Some(("monitor", value))) => match monitor_options(value) {
-                Some(monitor) if monitor.alias.is_some() || monitor.priority => {
-                    unsupported.get_or_insert_with(|| not_supported(option));
+                Some(monitor) => {
+                    monitor_error = (monitor.alias.is_some() || monitor.priority)
+                        .then(|| not_supported(option));
+                    spawn_options.monitor = Some(monitor.tag);
                 }
-                Some(monitor) => spawn_options.monitor = Some(monitor.tag),
                 None => valid = false,
             },
             (_, Some(("message_queue_data", Term::Atom(value))))
@@ -1667,7 +1671,7 @@ pub(super) fn spawn_opt(
                 use_heap = true;
                 match size {
                     Ok(size) => heap.min_heap_size = size,
-                    Err(huge) => _ = unsupported.get_or_insert(huge),
+                    Err(huge) => _ = heap_error.get_or_insert(huge),
                 }
             }
             (_, Some(("min_bin_vheap_size", value)))
@@ -1675,7 +1679,7 @@ pub(super) fn spawn_opt(
             {
                 match size {
                     Ok(size) => heap.min_bin_vheap_size = size,
-                    Err(huge) => _ = unsupported.get_or_insert(huge),
+                    Err(huge) => _ = heap_error.get_or_insert(huge),
                 }
             }
             (_, Some(("fullsweep_after", value)))
@@ -1697,6 +1701,10 @@ pub(super) fn spawn_opt(
                     .small_integer()
                     .is_some_and(|index| (0..=schedulers).contains(&index)) =>
             {
+                // ERTS binds the process to scheduler `N` above 0
+                // (`erl_process.c:12500-12507`).
+                scheduler_error =
+                    (!matches!(value, Term::Integer(0))).then(|| not_supported(option));
                 use_heap = true;
             }
             (_, Some(("capabilities", value)))
@@ -1710,7 +1718,11 @@ pub(super) fn spawn_opt(
     if !valid || (heap.max_heap_size != 0 && heap.max_heap_size < heap.min_heap_size) {
         return Ok(BifResult::badopt());
     }
-    if let Some(unsupported) = unsupported {
+    if let Some(unsupported) = heap_error
+        .or(link_error)
+        .or(monitor_error)
+        .or(scheduler_error)
+    {
         return Err(unsupported);
     }
     spawn_options.flags.heap_flags = use_heap.then_some(heap);
