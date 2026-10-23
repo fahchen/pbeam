@@ -5872,7 +5872,9 @@ pub(super) fn send_after(
 }
 
 /// Start the BIF timer of [`start_timer`] and [`send_after`], as
-/// `setup_bif_timer` (`erl_hl_timer.c:1804-1871`) does. `wrap` makes the
+/// `setup_bif_timer` (`erl_hl_timer.c:1804-1871`) does. A bad time gives
+/// `badarg` with the `error_info` cause `time`, as `BIF_P->fvalue` does
+/// (`erl_hl_timer.c:2573-2576`, `2612-2615`). `wrap` makes the
 /// message `{timeout, Reference, Msg}`, and else the message is `Msg`.
 ///
 /// # Examples
@@ -5898,7 +5900,7 @@ fn bif_timer(
         _ => None,
     };
     let Some(end) = end else {
-        return Ok(BifResult::badarg());
+        return Ok(BifResult::badarg_with_cause("time"));
     };
     super::timer::setup(scheduler, end, receiver, message, wrap)
 }
