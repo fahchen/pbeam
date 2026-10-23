@@ -44,10 +44,14 @@ results() ->
      pdict([P, E, Priv, U, D, #point{x = 2, y = 3}, 1, {3}, [4], 2.5, P#point{y = 7}]),
      remote(Pub, Priv), ets_range(Pub), map_key(P, E, Pub), caught()].
 
-%% A badrecord that a try of the same function catches.
+%% A badrecord that no catch handles ends the process.
 caught() ->
-    [try #nr_none:pub{a = id(1)} catch error:R1 -> R1 end,
-     try (id(7))#point.y catch error:R2 -> R2 end].
+    [down(fun() -> #nr_none:pub{a = id(1)} end),
+     down(fun() -> (id(7))#point.y end)].
+
+down(Fun) ->
+    {_, Ref} = spawn_monitor(Fun),
+    receive {'DOWN', Ref, process, _, {Reason, _}} -> Reason end.
 
 %% The remote record operations of OTP 29 (`erl_record.c:344-568`).
 remote(Pub, Priv) ->
