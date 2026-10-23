@@ -1,5 +1,5 @@
 -module(fun_probe).
--export([mfas/0, locals/0, tests/0, applies/0, spawned/0, externals/0, infos/0, fun_info_unsupported/1, texts/0, tail_wait/1, id/1]).
+-export([mfas/0, locals/0, tests/0, applies/0, spawned/0, externals/0, infos/0, fun_info_unsupported/1, info_mfas/0, texts/0, tail_wait/1, id/1]).
 
 %% erlang:apply/3 and the apply instruction, as proc_lib:init_p_do_apply/3
 %% runs them. apply/3 takes at most 1023 arguments.
@@ -165,3 +165,14 @@ texts() ->
     [erlang:fun_to_list(F) || F <- [Pair, Const, Ext, Quoted, Missing]] ++
     [lists:flatten(io_lib:format("~p ~w", [F, F])) || F <- [Pair, Ext, Quoted]] ++
     [try erlang:fun_to_list(id(42)) catch error:R -> R end].
+
+%% erlang:fun_info_mfa/1 on a local fun with free variables, a local fun
+%% without free variables, an external fun, and a term that is not a fun.
+info_mfas() ->
+    Tag = id(tag),
+    Pair = fun(X, Y) -> {Tag, X, Y} end,
+    Const = fun() -> const end,
+    [erlang:fun_info_mfa(Pair), erlang:fun_info_mfa(Const),
+     erlang:fun_info_mfa(fun lists:reverse/1),
+     erlang:fun_info_mfa(erlang:make_fun(id(no_such_module), id(f), id(3))),
+     try erlang:fun_info_mfa(id(42)) catch error:R -> R end].

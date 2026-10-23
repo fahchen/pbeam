@@ -9,7 +9,7 @@ use crate::runtime::{
     capability::{CapabilityKind, Operation},
     host::{
         errno::errno_id,
-        filename_encoding,
+        filename_encoding, gethost,
         spawn::{self, SpawnError, Streams},
     },
     port::{
@@ -254,7 +254,8 @@ struct PortSettings {
 ///    `error:capability_denied` and starts no program. The constraint
 ///    compares the name as the caller gives it. It does not resolve a
 ///    relative name or a symbolic link.
-/// 4. Start the program (see [`spawn::spawn`]). A pipe, the fd limit, and
+/// 4. Start the program (see [`spawn::spawn`]). A program named
+///    `inet_gethost` runs in a thread of the node (see [`is_gethost`]). A pipe, the fd limit, and
 ///    the access check give the `erl_errno_id` atom of their failure, for
 ///    example `enoent`.
 /// 5. Open the port, owned by and linked to the caller, and return a new
@@ -303,7 +304,12 @@ pub(super) fn open_port(
     if let Some(denied) = check? {
         return Ok(denied);
     }
-    let child = match spawn::spawn(&path, &settings.args, settings.streams) {
+    let started = if is_gethost(&path) {
+        spawn::serve(gethost::serve)
+    } else {
+        spawn::spawn(&path, &settings.args, settings.streams)
+    };
+    let child = match started {
         Ok(child) => child,
         Err(SpawnError::Open(errno)) => {
             return Ok(Value(Term::Atom(scheduler.atoms.put(&errno_id(errno))?)));
@@ -328,6 +334,16 @@ pub(super) fn open_port(
     let ack = Term::tuple(vec![Term::Reference(reference), Term::Port(port)]);
     scheduler.deliver(caller, ack);
     Ok(Value(Term::Reference(reference)))
+}
+
+/// Return true when the last component of the native path `path` is
+/// `inet_gethost`, the port program that `inet_gethost_native` opens as
+/// `filename:join(BinDir, "inet_gethost")` (inet_gethost_native.erl:412-421).
+/// PBeam serves that program itself (see [`gethost::serve`]), without the
+/// `access` check of the file and without the arguments: a bundle has no
+/// `erts/bin` directory.
+fn is_gethost(path: &[u8]) -> bool {
+    path.rsplit(|&byte| byte == b'/').next() == Some(b"inet_gethost".as_slice())
 }
 
 /// Open the port of `{spawn_driver, Name}` with the driver name `driver`

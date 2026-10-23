@@ -10,6 +10,7 @@ use pbeam_runtime::{BeamProgram, Term};
 const BINARY_MATCH_PROBE: &[u8] =
     include_bytes!("../../fixtures/binary_match/binary_match_probe.beam");
 const BS_MATCH_PROBE: &[u8] = include_bytes!("../../fixtures/binary_match/bs_match_probe.beam");
+const BS_ALL_PROBE: &[u8] = include_bytes!("../../fixtures/binary_match/bs_all_probe.beam");
 const BS_GET_PROBE: &[u8] = include_bytes!("../../fixtures/binary_match/bs_get_probe.beam");
 const BS_FLOAT_PROBE: &[u8] = include_bytes!("../../fixtures/binary_match/bs_float_probe.beam");
 const BS_UTF_PROBE: &[u8] = include_bytes!("../../fixtures/binary_match/bs_utf_probe.beam");
@@ -1559,5 +1560,19 @@ fn runs_bs_skip_utf8_as_pinned_erts() {
              <<240,159,152,128,66>>,<<128,66>>,<<195>>,<<>>,<<237,160,128,66>>]]"
         ),
         b"[<<66>>,<<66>>,<<66>>,short,short,short,short]\n"
+    );
+}
+
+/// `bs_get_binary2` with the size `all` runs `{ensure_at_least,0,Unit}`
+/// and `get_tail` (`emit_i_bs_get_binary_all2`, jit/arm/instr_bs.cpp:
+/// 386-405): a rest that is not a multiple of the unit fails.
+#[test]
+fn runs_bs_get_binary2_with_the_size_all_as_pinned_erts() {
+    let program = BeamProgram::load(&[BS_ALL_PROBE]).unwrap();
+    let run = |function| program.execute("bs_all_probe", function, &[]).unwrap().term;
+    assert_eq!(run("run"), run("expected"));
+    assert_eq!(
+        reference("bs_all_probe:run() =:= bs_all_probe:expected()"),
+        b"true\n"
     );
 }
