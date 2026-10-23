@@ -53,4 +53,7 @@ fn decodes_only_its_own_local_reference() {
     let mut other = bytes.clone();
     other[15] ^= 1;
     assert_eq!(decode_local_reference(&other, 3), None);
+    let magic = reference.magic_reference();
+    let bytes = local_reference(magic, 3);
+    assert_eq!(decode_local_reference(&bytes, 3), Some(magic));
 }

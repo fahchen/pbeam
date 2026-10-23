@@ -1095,7 +1095,7 @@ pub struct PortId(pub(crate) u64);
 /// pid reference marker in its high bit. The order of identifiers is their
 /// creation order; the runtime uses it to visit the monitors of a process in
 /// one fixed order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy)]
 pub struct Reference(pub(crate) u64);
 
 /// The bit of a reference value that marks a pid reference: the reference
@@ -1251,6 +1251,24 @@ impl Ord for Reference {
     /// also for a pid reference and a magic reference.
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         (self.0 & !REFERENCE_MARKERS).cmp(&(other.0 & !REFERENCE_MARKERS))
+    }
+}
+
+impl PartialEq for Reference {
+    /// Compare the values without [`TABLE_REFERENCE_MARKER`]: ERTS compares
+    /// the reference numbers, and `binary_to_term/1` gives the live magic
+    /// reference of a table identifier (`external.c:4845-4851`), which PBeam
+    /// rebuilds from the numbers with only [`MAGIC_REFERENCE_MARKER`].
+    fn eq(&self, other: &Self) -> bool {
+        self.0 & !TABLE_REFERENCE_MARKER == other.0 & !TABLE_REFERENCE_MARKER
+    }
+}
+
+impl Eq for Reference {}
+
+impl std::hash::Hash for Reference {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        (self.0 & !TABLE_REFERENCE_MARKER).hash(state);
     }
 }
 

@@ -54,6 +54,9 @@ const MAX_REFERENCE: u32 = 1 << 18;
 const REF_NUMBER_1_MASK: u32 = 0xFFFC_0000;
 /// The scheduler number of the references of PBeam (`REF_THREAD`).
 const REF_THREAD: u32 = 1;
+/// The magic reference marker bit of the second reference number
+/// (`ERTS_REF1_MAGIC_MARKER_BIT__`, `erl_bif_unique.h:102-105`).
+const MAGIC_REFERENCE_BIT: u32 = 1 << 17;
 /// The bit of the second reference number that marks a pid reference
 /// (`ERTS_REF1_PID_MARKER_BIT__`, `erl_bif_unique.h:106-109`).
 const PID_REFERENCE_BIT: u32 = 1 << 30;
@@ -1741,7 +1744,15 @@ impl Decoder<'_> {
         // A PBeam reference belongs to the first scheduler, whose number is
         // in the low bits of the second reference number (`REF_THREAD`,
         // `erl_bif_unique.h:117-131`).
-        if numbers[1] & !REF_NUMBER_1_MASK != REF_THREAD {
+        // ERTS marks a magic reference in bit 17 of the second reference
+        // number (`ERTS_REF1_MAGIC_MARKER_BIT__`, `erl_bif_unique.h:102-105`).
+        // `dec_term` gives the live magic reference, or an ordinary
+        // reference with the same numbers when the magic binary is gone
+        // (`external.c:4845-4851`). The two compare equal, and PBeam keys its
+        // tables and resources by the magic value, so the magic value finds
+        // the live object.
+        let magic = numbers[1] & MAGIC_REFERENCE_BIT != 0;
+        if numbers[1] & !(REF_NUMBER_1_MASK | MAGIC_REFERENCE_BIT) != REF_THREAD {
             return Err(DecodeError::Unsupported("a reference of another scheduler"));
         }
         let value = (u64::from(numbers[2]) << 32)
@@ -1751,7 +1762,13 @@ impl Decoder<'_> {
         // ERTS, and PBeam keeps its pid marker in bit 63 of the value, so
         // PBeam cannot hold such an ordinary reference.
         Reference::ordinary(value)
-            .map(Term::Reference)
+            .map(|reference| {
+                Term::Reference(if magic {
+                    reference.magic_reference()
+                } else {
+                    reference
+                })
+            })
             .ok_or(DecodeError::Unsupported(
                 "a reference with the high bit of its third number",
             ))

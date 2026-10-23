@@ -73,6 +73,13 @@ pub(crate) fn decode_local_reference(bytes: &[u8], seed: u32) -> Option<Referenc
     };
     let value = (number(2) << 32) | (number(1) & 0xFFFC_0000) | number(0);
     let reference = Reference::ordinary(value)?;
+    // Bit 17 of `N1` marks a magic reference (`ERTS_REF1_MAGIC_MARKER_BIT__`,
+    // erl_bif_unique.h:102-105).
+    let reference = if number(1) & (1 << 17) != 0 {
+        reference.magic_reference()
+    } else {
+        reference
+    };
     (local_reference(reference, seed) == bytes).then_some(reference)
 }
 

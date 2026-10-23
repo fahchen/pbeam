@@ -23,7 +23,17 @@ main() ->
     Cause = try ets:lookup(A, k) catch error:badarg:S -> cause(S) end,
     {[{is_reference(X), printed_bit(X), encoded_bit(X)} || X <- Refs],
      [[order(X, Y) || Y <- Refs] || X <- Refs],
-     Cause}.
+     Cause,
+     round_trip(T, A)}.
+
+%% dec_term gives the live magic reference of a magic binary
+%% (erts_magic_ref_lookup_bin, external.c:4845-4851).
+round_trip(T, A) ->
+    ok = atomics:put(A, 1, 7),
+    [DT, DA] = [binary_to_term(term_to_binary(X)) || X <- [T, A]],
+    LT = binary_to_term(term_to_binary(T, [local])),
+    {DT =:= T, ets:lookup(DT, 1), LT =:= T, ets:lookup(LT, 1),
+     DA =:= A, atomics:get(DA, 1)}.
 
 order(X, Y) when X < Y -> lt;
 order(X, Y) when X > Y -> gt;
