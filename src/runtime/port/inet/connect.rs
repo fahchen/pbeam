@@ -18,6 +18,14 @@ impl Inet {
     /// FD_CONNECT, 1)`), and the scheduler starts the timer and replies
     /// with the async reference (see [`Control::Connect`]).
     ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let request = [0, 0, 3, 232, 1, 0, 80, 127, 0, 0, 1];
+    /// assert_eq!(port.connect(&request, caller)?, Control::Connect(1000));
+    /// assert_eq!(port.connect(&request, caller)?, Control::Reply(b"\0einval".to_vec()));
+    /// ```
+    ///
     /// # Errors
     ///
     /// An address family other than `inet` that PBeam does not run.
@@ -70,6 +78,13 @@ impl Inet {
     /// (inet_drv.c:14242-14288): the error of `SO_ERROR` gives `{error,
     /// Reason}` and the socket is open again, else the socket is connected
     /// and the caller gets `ok`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let [Event::Connected { result, .. }] = &port.connect_ready()[..] else { panic!() };
+    /// assert_eq!(result, &Err("econnrefused".to_owned()));
+    /// ```
     pub(super) fn connect_ready(&mut self) -> Vec<Event> {
         let connector = self.stream.connector.take().expect("the socket connects");
         let socket = self.socket.as_ref().expect("a socket that connects");
@@ -89,6 +104,13 @@ impl Inet {
     /// End the connect of the timer, as `tcp_inet_timeout` does in
     /// `INET_STATE_CONNECTING` (inet_drv.c:12569-12580): the socket closes
     /// (`tcp_desc_close`), and the caller gets `{error, timeout}`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let events = port.connect_timeout();
+    /// assert!(matches!(events.last(), Some(Event::Connected { result: Err(_), .. })));
+    /// ```
     pub(in crate::runtime) fn connect_timeout(&mut self) -> Vec<Event> {
         let connector = self.stream.connector.take().expect("the socket connects");
         let mut events = self.close_socket();

@@ -523,6 +523,18 @@ impl Inet {
     /// request `what`: another family code of `inet_int.hrl` is not
     /// implemented, an unknown code gives `eafnosupport`, and a short
     /// address `einval`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let address = port.address(&[1, 0, 80, 127, 0, 0, 1], "bind")?;
+    /// assert_eq!(address, Ok("127.0.0.1:80".parse().unwrap()));
+    /// assert_eq!(port.address(&[9, 0], "bind")?, Err(b"\0eafnosupport".to_vec()));
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The family codes 2 to 5, which PBeam does not run.
     fn address(
         &self,
         request: &[u8],
