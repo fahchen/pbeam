@@ -1364,11 +1364,7 @@ impl Scheduler {
                     _ => fds.contains(&fd),
                 })
                 .collect(),
-            Readiness::Pending => Vec::new(),
-            Readiness::Invalid => poll::invalid(&self.node.poll, &owned)
-                .into_iter()
-                .map(|(entry, _)| entry)
-                .collect(),
+            Readiness::Pending | Readiness::Invalid => Vec::new(),
         };
         // The scheduler serves its fds before the thread waits on them
         // again, so that the thread does not report them a second time.
@@ -1389,9 +1385,9 @@ impl Scheduler {
     /// and its recipient gets `{select, TTY, Reference, ready_input}`
     /// (`erl_check_io.c:2135-2171`, `prepare_select_msg` at
     /// `erl_check_io.c:699-760`). A message to a process that does not exist
-    /// is dropped (`erl_check_io.c:851-856`). When fd 0 is not open, the
-    /// select ends without a message, as a select that `erts_poll_control`
-    /// cannot add (`erl_check_io.c:1422-1434`). Each ready fd of a port
+    /// is dropped (`erl_check_io.c:851-856`). A wait that finds an fd that
+    /// is not open reports no fd: a port removed its closed fd from the
+    /// poll, so the next wait leaves it out. Each ready fd of a port
     /// goes to [`Self::port_ready`] or [`Self::port_writable`].
     ///
     /// # Errors
@@ -1410,28 +1406,24 @@ impl Scheduler {
     /// Serve each fd of `ready` (see [`Self::check_io`]).
     fn serve(&mut self, ready: &[poll::Ready]) -> Result<(), BeamError> {
         for &(fd, direction) in ready {
-            if fd == libc::STDIN_FILENO && direction != poll::Direction::Write {
+            if fd == libc::STDIN_FILENO && direction == poll::Direction::Read {
                 let ttys = self.resources.borrow_mut::<Ttys>();
                 let Some(select) = ttys.take_input_select() else {
                     continue;
                 };
                 self.node.poll.clear_stdin(self.index);
-                if direction == poll::Direction::Read {
-                    let message = Term::tuple(vec![
-                        Term::static_atom("select"),
-                        Term::Reference(select.tty),
-                        select.reference,
-                        Term::static_atom("ready_input"),
-                    ]);
-                    self.deliver(select.recipient, message);
-                }
+                let message = Term::tuple(vec![
+                    Term::static_atom("select"),
+                    Term::Reference(select.tty),
+                    select.reference,
+                    Term::static_atom("ready_input"),
+                ]);
+                self.deliver(select.recipient, message);
                 continue;
             }
             match direction {
                 poll::Direction::Read => self.port_ready(fd)?,
                 poll::Direction::Write => self.port_writable(fd)?,
-                // The port closed the fd; its entry left the table.
-                poll::Direction::Invalid => {}
             }
         }
         Ok(())

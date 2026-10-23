@@ -43,8 +43,6 @@ pub(in crate::runtime) enum Direction {
     Read,
     /// A `write` of the fd does not block.
     Write,
-    /// The fd is not open (`ERTS_POLL_EV_NVAL`).
-    Invalid,
 }
 
 /// An fd and its direction.
@@ -286,13 +284,14 @@ fn run(node: &Weak<Node>, mut reader: UnixStream) {
                     .iter()
                     .copied()
                     .filter(|&((fd, direction), _)| match direction {
+                        Direction::Read => ready.contains(&fd),
                         Direction::Write => writable.contains(&fd),
-                        _ => ready.contains(&fd),
                     })
                     .collect()
             }
-            Readiness::Pending => Vec::new(),
-            Readiness::Invalid => invalid(&strong.poll, &owned),
+            // An fd that a port closed after the collect: the close removed
+            // it from the table, and the next collect leaves it out.
+            Readiness::Pending | Readiness::Invalid => Vec::new(),
         };
         // The reports go out before a scheduler takes its fds over.
         let mut served: Vec<_> = (0..strong.poll.served.len())
@@ -328,29 +327,12 @@ pub(in crate::runtime) fn wait(
     let (mut reads, mut writes) = (Vec::new(), Vec::new());
     for &((fd, direction), _) in owned {
         match direction {
+            Direction::Read => reads.push(fd),
             Direction::Write => writes.push(fd),
-            _ => reads.push(fd),
         }
     }
     reads.extend(wake);
     input::wait(&reads, &writes, timeout)
-}
-
-/// Find the fds of `owned` that are not open after a wait that saw one,
-/// and return them with the direction [`Direction::Invalid`]. A port closed
-/// the fd after the collect: its entry leaves the table, as the close of
-/// the port removes it. A closed fd 0 ends its select with no message (see
-/// `Scheduler::check_io`).
-pub(in crate::runtime) fn invalid(poll: &NodePoll, owned: &[Owned]) -> Vec<Owned> {
-    let mut closed = Vec::new();
-    for &(entry, index) in owned {
-        let (readiness, _) = wait(&[(entry, index)], None, Some(Duration::ZERO));
-        if readiness == Readiness::Invalid {
-            poll.fds().remove(&entry);
-            closed.push(((entry.0, Direction::Invalid), index));
-        }
-    }
-    closed
 }
 
 /// Return the registered fds and fd 0, each with its scheduler, without
