@@ -1,5 +1,5 @@
 -module(ets_probe).
--export([heir_transfer/0, give_away/0, delete_object/0, new/0, owner_exit/0, insert/0, lookup/0, lookup_loop/0, insert_loop/0,
+-export([heir_transfer/0, give_away/0, setopts/0, delete_object/0, new/0, owner_exit/0, insert/0, lookup/0, lookup_loop/0, insert_loop/0,
          access/0, main/0, env/0, bag/0, info/0, match/0, match_deep/0,
          match_write_concurrency/0, delete_table/0, delete_trap/0,
          delete_order/0, deleter/2,
@@ -1963,6 +1963,45 @@ give_receiver(Parent) ->
               after 0 -> none end,
     Parent ! {back, Result, Message},
     receive stop -> ok end.
+
+%% ets:setopts/2 (erl_db.c:3146-3229): the result, ets:info/2 after each
+%% call, the heir that set_heir drops (erl_db.c:5319-5337), and each badarg
+%% with its cause.
+setopts() ->
+    Self = self(),
+    Dead = dead(),
+    T = ets:new(ets_probe, []),
+    Info = fun() -> {ets:info(T, protection), ets:info(T, heir) =:= Self} end,
+    R = [{ets:setopts(T, {heir, Self, data}), Info()},
+         {ets:setopts(T, [{heir, none}]), Info()},
+         {ets:setopts(T, {heir, Self}), Info()},
+         {ets:setopts(T, {protection, public}), Info()},
+         {ets:setopts(T, [{protection, private}, {heir, none}]), Info()},
+         {ets:setopts(T, []), Info()},
+         {ets:setopts(T, [{heir, Dead, x}, {protection, protected}]), Info(), ets:info(T, heir)}],
+    {Other, OtherTable} = start([public]),
+    {_, Protected} = start([]),
+    Errors = [give_cause(fun() -> ets:setopts(Tab, Opts) end)
+              || {Tab, Opts} <- [{OtherTable, {heir, none}},
+                                 {OtherTable, {protection, bad}},
+                                 {Protected, {heir, none}},
+                                 {no_table, {heir, none}},
+                                 {1, {heir, none}},
+                                 {T, {heir, none, x}},
+                                 {T, {heir, Self, x, y}},
+                                 {T, {heir, not_a_pid}},
+                                 {T, {heir}},
+                                 {T, [{heir, none}, {heir, none}]},
+                                 {T, [{protection, public}, {protection, public}]},
+                                 {T, {protection, public, x}},
+                                 {T, {protection, none}},
+                                 {T, {keypos, 2}},
+                                 {T, heir},
+                                 {T, [{heir, none} | tail]},
+                                 {T, [{protection, public}, bad]}]],
+    After = Info(),
+    _ = stop({Other, x}),
+    {R, Errors, After}.
 
 %% Return the reason and the error_info cause of the first stack frame.
 give_cause(Fun) ->

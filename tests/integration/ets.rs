@@ -719,12 +719,13 @@ fn transfers_tables_to_heirs_and_receivers_as_pinned_erts() {
     // `ets_probe:heir_transfer/0` and `give_away/0`: the exit of an owner
     // gives each table to its live heir before the 'DOWN' message
     // (erl_db.c:5077-5081, 4865-4933), and ets:give_away/3 keeps the checks
-    // and the causes of erl_db.c:3087-3144.
+    // and the causes of erl_db.c:3087-3144. `ets_probe:setopts/0` sets the heir
+    // and the protection with the checks of erl_db.c:3146-3229.
     let beams = ["erlang", "ets", "lists", "proplists", "maps"].map(pinned_beam);
     let mut modules: Vec<&[u8]> = beams.iter().map(Vec::as_slice).collect();
     modules.push(ETS_PROBE);
     let program = BeamProgram::load(&modules).unwrap();
-    for function in ["heir_transfer", "give_away"] {
+    for function in ["heir_transfer", "give_away", "setopts"] {
         assert_probe_matches_erts(&program, function);
     }
 }
