@@ -479,7 +479,7 @@ bifs! {
     ets:select_reverse/1 as EtsSelectReverse1 => |cx, [continuation]| ets::select_continue(cx, continuation, "select_reverse"),
     ets:select_reverse/2 as EtsSelectReverse2 => |cx, [table, spec]| ets::select(cx, table, spec, None, true),
     ets:select_reverse/3 as EtsSelectReverse3 => |cx, [table, spec, limit]| ets::select(cx, table, spec, Some(limit), true),
-    ets:setopts/2 => unsupported,
+    ets:setopts/2 as EtsSetopts2 => |cx, [table, options]| ets::setopts(cx, table, options),
     ets:slot/2 => unsupported,
     ets:take/2 as EtsTake2 => |cx, [table, key]| ets::take(cx, table, key),
     ets:update_counter/3 as EtsUpdateCounter3 => |cx, [table, key, spec]| ets::update_counter(cx, table, key, spec, None),
