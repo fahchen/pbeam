@@ -14,7 +14,7 @@
 //! assert_eq!(bytes, [97, 1]);
 //! ```
 
-use std::{cmp::Ordering, io::Write, sync::Arc};
+use std::{cmp::Ordering, io::Write, ops::Range, sync::Arc};
 
 use flate2::{Compression, Decompress, FlushDecompress, Status, write::ZlibEncoder};
 use num_bigint::{BigInt, Sign};
@@ -71,6 +71,10 @@ const MAX_TINY_CREATION: u32 = 3;
 /// (`ERTS_MAX_INTERNAL_PORT_NUMBER`, `erl_node_container_utils.h:250`):
 /// 2^60 - 1 on a 64-bit host (`_PORT_DATA_SIZE`, `erl_term.h:696`).
 const MAX_PORT_NUMBER: u64 = (1 << 60) - 1;
+
+/// The largest bitstring of a heap binary, in bits
+/// (`ERL_ONHEAP_BITS_LIMIT`, `erl_bits.h:166-168`).
+const ONHEAP_BITS_LIMIT: usize = 64 * 8;
 
 /// The options of `erlang:term_to_binary/2`, as `parse_t2b_opts`
 /// (`external.c:1483-1557`) reads them.
@@ -197,6 +201,112 @@ pub(super) fn term_to_binary_2(
     term: &Term,
     options: &Term,
 ) -> Result<BifResult, BeamError> {
+    external_term(context, term, options, &mut Vec::new())
+}
+
+/// Run `erlang:term_to_iovec(Term)`, as `term_to_iovec_1`
+/// (`external.c:1461-1480`) does with the default options.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = term_to_iovec(&mut context, &Term::Integer(1))?;
+/// assert!(matches!(result, BifResult::Value(Term::List(_))));
+/// ```
+///
+/// # Errors
+///
+/// The errors of [`term_to_binary_2`].
+pub(super) fn term_to_iovec(
+    context: &mut BifContext<'_>,
+    term: &Term,
+) -> Result<BifResult, BeamError> {
+    term_to_iovec_2(context, term, &Term::nil())
+}
+
+/// Run `erlang:term_to_iovec(Term, Options)`, as `term_to_iovec_2`
+/// (`external.c:1592-1616`) does. Without compression the result is a list
+/// of binaries whose bytes are the bytes of `term_to_binary/2`: the payload
+/// of each bitstring of more than `ERL_ONHEAP_BITS_LIMIT` bits that starts
+/// on a byte boundary is its own element, and the other bytes between them
+/// are one element each (`external.c:3864-3867`, `3953-3960`,
+/// `store_in_vec`, `4210-4245`). A level other than 0 clears the iovec
+/// flag (`external.c:2495-2502`), so the result is the binary of
+/// `term_to_binary/2` without a list (`external.c:2541-2550`, `2806-2813`,
+/// `2844-2850`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = term_to_iovec_2(&mut context, &Term::Integer(1), &Term::nil())?;
+/// assert!(matches!(result, BifResult::Value(Term::List(_))));
+/// ```
+///
+/// # Errors
+///
+/// The errors of [`term_to_binary_2`].
+pub(super) fn term_to_iovec_2(
+    context: &mut BifContext<'_>,
+    term: &Term,
+    options: &Term,
+) -> Result<BifResult, BeamError> {
+    let mut refs = Vec::new();
+    let result = external_term(context, term, options, &mut refs)?;
+    let Value(Term::Binary(binary)) = &result else {
+        return Ok(result);
+    };
+    if parse_options(options).is_some_and(|parsed| parsed.level != 0) {
+        return Ok(result);
+    }
+    let bytes = binary.bytes().unwrap_or_default();
+    let mut ranges = Vec::new();
+    let mut cursor = 0;
+    // `LOCAL_EXT` and its hash end one element, and the hash covers the
+    // elements after it (`external.c:3305-3310`, `4051-4056`).
+    let local = bytes.get(1) == Some(&LOCAL_EXT);
+    if local {
+        ranges.push(0..6);
+        cursor = 6;
+    }
+    for range in refs
+        .into_iter()
+        .chain(std::iter::once(bytes.len()..bytes.len()))
+    {
+        if cursor < range.start {
+            ranges.push(cursor..range.start);
+        }
+        if range.start < range.end {
+            ranges.push(range.clone());
+        }
+        cursor = range.end;
+    }
+    let mut elements: Vec<Term> = ranges
+        .iter()
+        .map(|range| Term::Binary(binary.bits(range.start * 8, range.end * 8)))
+        .collect();
+    if local {
+        let last = ranges.last().map_or(0, |range| range.len());
+        let seed = context.scheduler.local_node_hash();
+        let hash = external::iov_block_hash(&bytes[6..], last, seed);
+        let header = [&bytes[..2], &hash.to_be_bytes()[..]].concat();
+        elements[0] = Term::binary(header);
+    }
+    Ok(Value(Term::list_from(elements)))
+}
+
+/// Return the result of [`term_to_binary_2`], and put in `refs` the byte
+/// range of each payload of the result that `term_to_iovec/2` gives as its
+/// own element.
+///
+/// # Errors
+///
+/// The errors of [`term_to_binary_2`].
+fn external_term(
+    context: &mut BifContext<'_>,
+    term: &Term,
+    options: &Term,
+    refs: &mut Vec<Range<usize>>,
+) -> Result<BifResult, BeamError> {
     let Some(parsed) = parse_options(options) else {
         return Ok(BifResult::badarg());
     };
@@ -215,12 +325,17 @@ pub(super) fn term_to_binary_2(
     let options = parsed;
     let scheduler = &mut *context.scheduler;
     let seed = scheduler.local_node_hash();
-    let mut body = encode(term, &scheduler.atoms, &options)?;
+    let mut body = encode_parts(term, &scheduler.atoms, &options, refs)?;
+    let unprefixed = body.len();
     if options.local {
         let hash = external::block_hash(&body, seed);
         body = [&[LOCAL_EXT][..], &hash.to_be_bytes(), &body].concat();
     }
     let bytes = compress_term(&body, options.level);
+    let shift = bytes.len().saturating_sub(unprefixed);
+    for range in refs.iter_mut() {
+        *range = range.start + shift..range.end + shift;
+    }
     Ok(Value(Term::binary(bytes)))
 }
 
@@ -283,6 +398,36 @@ pub(super) fn external_size(atoms: &AtomTable, term: &Term) -> Result<BifResult,
     Ok(Value(Term::Integer(1 + body.len() as i64)))
 }
 
+/// Run `erlang:external_size(Term, Options)`, as `external_size_2`
+/// (`external.c:2220-2246`) does: a bad option list raises `badarg`, and
+/// the result is the size of `term_to_binary(Term, Options)` without
+/// compression (`erts_encode_ext_size_2`, `external.c:735-743`), with the
+/// `LOCAL_EXT` tag and its 4-byte hash for `local`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let atoms = AtomTable::new();
+/// let size = external_size_2(&atoms, &Term::Integer(1), &Term::nil());
+/// assert!(matches!(size, BifResult::Value(Term::Integer(3))));
+/// ```
+///
+/// # Errors
+///
+/// The errors of [`encode`].
+pub(super) fn external_size_2(
+    atoms: &AtomTable,
+    term: &Term,
+    options: &Term,
+) -> Result<BifResult, BeamError> {
+    let Some(options) = parse_options(options) else {
+        return Ok(BifResult::badarg());
+    };
+    let body = encode(term, atoms, &options)?;
+    let local = if options.local { 5 } else { 0 };
+    Ok(Value(Term::Integer(1 + local + body.len() as i64)))
+}
+
 /// Return the external term bytes of `term` without `VERSION_MAGIC`, as
 /// `enc_term` (`external.c:3252-4060`) writes them. The work list holds the
 /// terms that the walk still writes, so a deep term uses no Rust stack.
@@ -299,6 +444,24 @@ pub(super) fn external_size(atoms: &AtomTable, term: &Term) -> Result<BifResult,
 /// A match context and a pid reference give a runtime error, and a
 /// full atom table gives its error.
 fn encode(term: &Term, atoms: &AtomTable, options: &Options) -> Result<Vec<u8>, BeamError> {
+    encode_parts(term, atoms, options, &mut Vec::new())
+}
+
+/// Return the bytes of [`encode`], and put in `refs` the byte range of the
+/// payload of each bitstring of more than `ERL_ONHEAP_BITS_LIMIT` bits
+/// (`erl_bits.h:166-168`) that starts on a byte boundary: the payload that
+/// `enc_term_int` refers to in an iovec, without its trailing bits
+/// (`external.c:3864-3867`, `3953-3960`).
+///
+/// # Errors
+///
+/// The errors of [`encode`].
+fn encode_parts(
+    term: &Term,
+    atoms: &AtomTable,
+    options: &Options,
+    refs: &mut Vec<Range<usize>>,
+) -> Result<Vec<u8>, BeamError> {
     let mut out = Vec::new();
     let mut pending = vec![term];
     // Each open `NEW_FUN_EXT`: the length of `pending` below its free
@@ -379,6 +542,12 @@ fn encode(term: &Term, atoms: &AtomTable, options: &Options) -> Result<Vec<u8>, 
                 }
             }
             Term::Binary(binary) => {
+                if binary.bit_size() > ONHEAP_BITS_LIMIT && binary.starts_on_byte() {
+                    // The tag, the 4-byte size, and the tail-bit byte of
+                    // `BIT_BINARY_EXT` come before the payload.
+                    let start = out.len() + if binary.bit_size() % 8 == 0 { 5 } else { 6 };
+                    refs.push(start..start + binary.bit_size() / 8);
+                }
                 if let Some(bytes) = binary.bytes() {
                     out.push(109);
                     out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
