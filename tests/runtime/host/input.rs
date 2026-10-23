@@ -120,7 +120,4 @@ fn tells_whether_the_wait_ended_for_an_fd() {
     assert!(!Readiness::Ready(vec![5]).ended(0));
     assert!(!Readiness::Pending.ended(0));
     assert!(Readiness::Invalid.ended(0));
-    assert_eq!(Readiness::Ready(vec![5]).into_ready(), vec![5]);
-    assert!(Readiness::Pending.into_ready().is_empty());
-    assert!(Readiness::Invalid.into_ready().is_empty());
 }

@@ -66,6 +66,14 @@ name = "gen_tcp"
 path = "tests/feature/gen_tcp.rs"
 
 [[test]]
+name = "busy_io"
+path = "tests/feature/busy_io.rs"
+
+[[test]]
+name = "busy_io_schedulers"
+path = "tests/integration/busy_io.rs"
+
+[[test]]
 name = "get_line"
 path = "tests/feature/get_line.rs"
 

@@ -163,13 +163,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a path calls a `prim_tty` NIF before `erlang:load_nif/2` or after a failed load, or a second module gets native bindings.
 - **Source:** PR #132 (#127).
 
-### Poll fd 0 while processes run
-
-- PBeam waits for the read select of fd 0 and for the pipes of the ports only when no process can run (#299, #302). ERTS also waits for it in a poll thread while processes run (erl_process.c:3339-3372), so input arrives while other processes run. Thus in PBeam, a run in which a process can always run never gets the `{select, TTY, Ref, ready_input}` message. The "Input select" row of `docs/erts-differences.md` records this.
-- The work: a poll of fd 0 with no timeout at a scheduler switch point, for example after a number of reductions, as an ERTS scheduler checks its own poll set (erl_process.c:9946-9960).
-- **Trigger:** a program reads standard input or the output of a port program while one of its processes can always run, for example a busy worker.
-- **Source:** PR for #299.
-
 ### Run the other port options and port kinds
 
 - `open_port/2` runs only `{spawn_executable, Name}` with `binary`, `exit_status`, `use_stdio`, `nouse_stdio`, `stderr_to_stdout`, and `{args, Args}` (#302). Each other option, the list data mode, the port kinds `spawn`, `spawn_driver`, and `fd`, the port BIFs other than `port_command/2`, `port_close/1`, and `port_info/1`, and a message, link, monitor, exit signal, or name of a port give a runtime error (row "Ports" of `docs/erts-differences.md`).

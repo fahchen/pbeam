@@ -487,6 +487,9 @@ fn select_input(scheduler: &mut Scheduler, tty: Reference, reference: &Term) {
             recipient,
             reference: reference.clone(),
         });
+    let index = scheduler.index();
+    scheduler.node().poll.select_stdin(Some(index));
+    crate::runtime::scheduler::poll::NodePoll::start(scheduler.node());
 }
 
 /// The most bytes of one `read_nif/3` (`prim_tty_nif.c:449`).
