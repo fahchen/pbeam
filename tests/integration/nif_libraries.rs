@@ -11,7 +11,7 @@ const STAND_INS: [&[u8]; 4] = [
 
 #[test]
 fn stops_the_run_at_a_function_of_a_library_without_bindings() {
-    // PBeam has no binding of these libraries, so a call of a function of
+    // PBeam has no binding of these functions, so a call of a function of
     // a table stops the run with the runtime error of the static library
     // (`Library::unbound_fails`).
     let program = BeamProgram::load(&STAND_INS).unwrap();
@@ -22,7 +22,7 @@ fn stops_the_run_at_a_function_of_a_library_without_bindings() {
             1,
             "zstd:get_frame_header_nif/1",
         ),
-        ("prim_net", "nif_info", 0, "prim_net:nif_info/0"),
+        ("prim_net", "nif_if_names", 0, "prim_net:nif_if_names/0"),
         ("erl_tracer", "enabled", 3, "erl_tracer:enabled/3"),
         ("prim_socket", "nif_info", 0, "prim_socket:nif_info/0"),
     ] {

@@ -20,16 +20,20 @@
 //! `Arc::ptr_eq` and a list of the containers that it already visited. It
 //! never dereferences a raw pointer and never uses `unsafe`.
 
-use std::{mem::size_of, sync::Arc};
+use std::{
+    mem::{size_of, size_of_val},
+    sync::Arc,
+};
 
 use num_bigint::BigInt;
 
 use super::{
-    Binary, Fun, Map, Term,
+    Binary, Fun, Map, Record, Term,
     fun::FunThing,
     list::{Cons, ConsRef},
     map::{Child, Node, Repr},
     match_context::MatchState,
+    record::RecordThing,
     tuple::Tuple,
 };
 
@@ -55,6 +59,7 @@ enum Shared {
     BinaryView(Binary),
     Binary(Arc<Vec<u8>>),
     Fun(Arc<FunThing>),
+    Record(Arc<RecordThing>),
     Match(Arc<MatchState>),
     BigInt(Arc<BigInt>),
 }
@@ -75,6 +80,7 @@ fn owned_once(term: &Term) -> bool {
         Term::Cons(cell) => Arc::strong_count(cell.arc()) == 1,
         Term::Map(map) => Arc::strong_count(map.arc()) == 1,
         Term::Fun(fun) => Arc::strong_count(fun.arc()) == 1,
+        Term::Record(record) => Arc::strong_count(record.arc()) == 1,
         Term::MatchContext(state) => Arc::strong_count(state) == 1,
         Term::BigInt(value) => Arc::strong_count(value) == 1,
         Term::Atom(_)
@@ -99,6 +105,7 @@ impl Shared {
             (Shared::BinaryView(left), Shared::BinaryView(right)) => left.same_view(right),
             (Shared::Binary(left), Shared::Binary(right)) => Arc::ptr_eq(left, right),
             (Shared::Fun(left), Shared::Fun(right)) => Arc::ptr_eq(left, right),
+            (Shared::Record(left), Shared::Record(right)) => Arc::ptr_eq(left, right),
             (Shared::Match(left), Shared::Match(right)) => Arc::ptr_eq(left, right),
             (Shared::BigInt(left), Shared::BigInt(right)) => Arc::ptr_eq(left, right),
             _ => false,
@@ -208,6 +215,7 @@ impl LiveBytes {
                 Term::Map(map) => self.map(map, unique),
                 Term::Binary(binary) => self.binary(binary),
                 Term::Fun(fun) => self.fun(fun, unique),
+                Term::Record(record) => self.record(record, unique),
                 Term::MatchContext(state) => self.match_context(state, unique),
                 Term::BigInt(value) => self.bigint(value, unique),
                 Term::Atom(_)
@@ -330,6 +338,18 @@ impl LiveBytes {
         self.bytes += fun.allocated_bytes();
         for free in fun.free() {
             self.push(free);
+        }
+    }
+
+    /// Count the thing of `record` and walk its values. The definition is
+    /// shared by the module, so the walk does not count it.
+    fn record(&mut self, record: &Record, unique: bool) {
+        if !unique && !self.fresh(Shared::Record(Arc::clone(record.arc()))) {
+            return;
+        }
+        self.bytes += size_of::<RecordThing>() + size_of_val(record.values());
+        for value in record.values() {
+            self.push(value);
         }
     }
 

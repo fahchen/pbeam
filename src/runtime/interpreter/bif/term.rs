@@ -458,6 +458,11 @@ fn encode(term: &Term, atoms: &AtomTable, options: &Options) -> Result<Vec<u8>, 
                     pending.extend(fun.free().iter().rev());
                 }
             },
+            Term::Record(_) => {
+                return Err(error(
+                    "unsupported erlang:term_to_binary/1,2 of a native record: see \"External term format\" in docs/erts-differences.md",
+                ));
+            }
             Term::MatchContext(_) => {
                 return Err(error(
                     "unsupported erlang:term_to_binary/1,2 of a match context: see \"External term format\" in docs/erts-differences.md",

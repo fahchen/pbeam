@@ -281,3 +281,27 @@ fn prints_a_float_with_six_digits_as_pinned_erts() {
         b"[1.500000e+00,-0.000000e+00,1.000000e+300]"
     );
 }
+
+#[test]
+fn prints_a_native_record_as_pinned_erts() {
+    // OTP 29 `erlang:display` of `#nr_def:priv{z=1}` prints `#nr_def:priv{z=1}`, and a second
+    // field prints in the sorted key order.
+    let atoms = table_of(&["nr_def", "priv", "z", "y"]);
+    let def = crate::term::RecordDef::new(
+        atom_of(&atoms, "nr_def"),
+        atom_of(&atoms, "priv"),
+        false,
+        vec![(atom_of(&atoms, "z"), None), (atom_of(&atoms, "y"), None)],
+        &atoms,
+    );
+    let record = Term::Record(crate::term::Record::new(
+        Arc::new(def),
+        vec![Term::Integer(1), Term::Integer(2)],
+    ));
+    assert_eq!(print_term(&record, &atoms), b"#nr_def:priv{y=1,z=2}");
+    // The count runs out after the module name, so the text stops there.
+    assert_eq!(
+        super::print_term_counted(&record, &atoms, &mut 6),
+        b"#nr_def"
+    );
+}
