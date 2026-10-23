@@ -113,6 +113,7 @@ fn start(executable: &Path, bundle: &Bundle<'_>, directory: &Path) -> ExitCode {
             directory,
             &erts,
             &version,
+            env::var_os("ELIXIR_ERL_OPTIONS").as_deref(),
         )),
         None => start_modules(bundle)
             .and_then(|modules| boot(executable, bundle.entry(), &modules, directory)),
@@ -225,7 +226,8 @@ fn release_boot(directory: &Path) -> Option<(String, String)> {
 /// entry, the `embedded` mode, `sys.config`, the boot script `start`, the
 /// boot variable `RELEASE_LIB`, and the plain argument `--no-halt`. The
 /// words of `ELIXIR_ERL_OPTIONS` come after `-noshell`, as the `elixir`
-/// script of the release gives them unquoted (`elixir:229`), so
+/// script of the release gives them unquoted (`elixir:229`); `options` is
+/// the value of the variable. So
 /// `ELIXIR_ERL_OPTIONS="+S 4"` starts 4 schedulers. The
 /// run gets `RELEASE_ROOT` and `RELEASE_SYS_CONFIG`, which the release
 /// boot reads. The preloaded modules come from `lib/erts-<Vsn>/ebin`,
@@ -237,6 +239,7 @@ fn boot_release(
     directory: &Path,
     erts: &str,
     version: &str,
+    options: Option<&std::ffi::OsStr>,
 ) -> std::io::Error {
     use std::{ffi::OsStr, os::unix::ffi::OsStrExt, os::unix::process::CommandExt};
 
@@ -252,7 +255,7 @@ fn boot_release(
         .arg(directory.join("lib").join(&erts).join("ebin"));
     command.arg("--extracted-root").arg(directory);
     command.args(["--", "-noshell"]);
-    if let Some(options) = env::var_os("ELIXIR_ERL_OPTIONS") {
+    if let Some(options) = options {
         command.args(
             options
                 .as_bytes()
