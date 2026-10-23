@@ -84,13 +84,14 @@ supports() ->
     Run = [blake2s, blake2b, sm3, shake256, shake128, sha3_512, sha3_384, sha3_256,
            sha3_224, sha512_256, sha512_224, sha512, sha384, sha256, sha224, sha,
            ripemd160, md5, cmac, hmac, poly1305] ++ run_ciphers() ++
-          [aes_cbc, aes_ccm, aes_cfb128, aes_cfb8, aes_ctr, aes_ecb, aes_gcm],
+          [sm4_gcm, sm4_ccm, aes_cbc, aes_ccm, aes_cfb128, aes_cfb8, aes_ctr, aes_ecb, aes_gcm],
     All = crypto:supports(),
     Items = [{Type, [Item || Item <- List, lists:member(Item, Run)]} || {Type, List} <- All],
     Lists = [crypto:supports(Type) || {Type, _} <- All],
     %% The probe cipher_order/0 checks the order of the ciphers, so this probe
-    %% sorts them.
-    Sorted = [{Type, case Type of ciphers -> lists:sort(List); _ -> List end}
+    %% sorts them. The libcrypto of the Linux CI host has no sm4_gcm and
+    %% sm4_ccm, so the list leaves them out.
+    Sorted = [{Type, case Type of ciphers -> lists:sort(List) -- [sm4_gcm, sm4_ccm]; _ -> List end}
               || {Type, List} <- Items],
     io:format("~p~n", [[length(lists:append([List || {_, List} <- All])), Sorted,
                         All =:= Items, Lists =:= [List || {_, List} <- All]]]).
@@ -178,17 +179,20 @@ cipher_order() ->
     %% ERTS makes the atom des_ede3_cbc at boot, which PBeam does not run (row
     %% "Atom table" of docs/erts-differences.md), so the probe prints it apart.
     Order = [C || C <- crypto:supports(ciphers), lists:member(C, Run)],
+    %% Run has no sm4_gcm and sm4_ccm, which the Linux CI host does not list.
     io:format("~p~n", [{Order -- [des_ede3_cbc], lists:member(des_ede3_cbc, Order)}]).
 
 %% The ciphers of the table cipher.c:30-173 that the OpenSSL 3 default
-%% provider has. The AEAD ciphers are the last nine.
+%% provider has and that the libcrypto of the Linux CI host also has. The
+%% AEAD ciphers are the last seven. sm4_gcm and sm4_ccm are in
+%% ciphers_host/0.
 run_ciphers() ->
     [des_ede3_cbc, des_ede3_cfb, sm4_cbc, sm4_ecb, sm4_cfb, sm4_ofb, sm4_ctr,
      aes_128_cbc, aes_192_cbc, aes_256_cbc, aes_128_ofb, aes_192_ofb, aes_256_ofb,
      aes_128_cfb8, aes_192_cfb8, aes_256_cfb8, aes_128_cfb128, aes_192_cfb128,
      aes_256_cfb128, aes_128_ecb, aes_192_ecb, aes_256_ecb, aes_128_ctr, aes_192_ctr,
      aes_256_ctr, chacha20,
-     chacha20_poly1305, sm4_gcm, sm4_ccm, aes_128_gcm, aes_192_gcm, aes_256_gcm,
+     chacha20_poly1305, aes_128_gcm, aes_192_gcm, aes_256_gcm,
      aes_128_ccm, aes_192_ccm, aes_256_ccm].
 
 %% Write the results of cipher_info_nif/1, ng_crypto_one_time_nif/5 with
@@ -292,16 +296,18 @@ aead(Cipher) ->
 
 %% Write the results of the ciphers that depend on the libcrypto of the
 %% host. The OpenSSL 3.5.8 of the pinned macOS ERTS cannot fetch rc2, rc4,
-%% des, or blowfish (cipher.c:216-218), so these give notsup.
+%% des, or blowfish (cipher.c:216-218), so these give notsup. The
+%% libcrypto of the Linux CI host has no sm4_gcm and sm4_ccm.
 ciphers_host() ->
     Legacy = [rc2_cbc, rc4, des_cbc, des_cfb, des_ecb, blowfish_cbc, blowfish_cfb64,
               blowfish_ofb64, blowfish_ecb],
     Infos = [bad_reason(fun() -> crypto:cipher_info(C) end) || C <- Legacy],
+    Sm4 = [aead(C) || C <- [sm4_gcm, sm4_ccm]],
     OneTime = [bad_reason(fun() -> crypto:crypto_one_time(C, binary:copy(<<1>>, 16),
                                                           binary:copy(<<2>>, 8),
                                                           <<"text">>, true) end)
                || C <- Legacy],
-    io:format("~p~n", [[Infos, OneTime]]).
+    io:format("~p~n", [[Infos, OneTime, Sm4]]).
 
 %% Call crypto:hash_init/1, whose NIF hash_init_nif/1 PBeam does not link.
 hash_init() ->

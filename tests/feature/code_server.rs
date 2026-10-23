@@ -462,7 +462,8 @@ fn runs_the_one_shot_crypto_ciphers_as_pinned_erts() {
     );
     // The ERTS of the Linux CI host links a libcrypto with the legacy
     // ciphers, so only the pinned macOS ERTS (OpenSSL 3.5.8) is the
-    // reference for rc2, rc4, des, and blowfish (cipher.c:216-218).
+    // reference for rc2, rc4, des, and blowfish (cipher.c:216-218). It also has
+    // no sm4_gcm and sm4_ccm.
     let pbeam = run(&mut pbeam_probe(
         CRYPTO_PROBE,
         "crypto_probe",
@@ -509,8 +510,8 @@ fn gives_the_crypto_algorithm_lists_and_fips_status_as_pinned_erts() {
                  aes_192_ofb,aes_256_cbc,aes_256_ccm,aes_256_cfb128,aes_256_cfb8,\n            \
                  aes_256_ctr,aes_256_ecb,aes_256_gcm,aes_256_ofb,aes_cbc,aes_ccm,\n            \
                  aes_cfb128,aes_cfb8,aes_ctr,aes_ecb,aes_gcm,chacha20,\n            \
-                 chacha20_poly1305,des_ede3_cbc,des_ede3_cfb,sm4_cbc,sm4_ccm,\n            \
-                 sm4_cfb,sm4_ctr,sm4_ecb,sm4_gcm,sm4_ofb]},\n  \
+                 chacha20_poly1305,des_ede3_cbc,des_ede3_cfb,sm4_cbc,sm4_cfb,\n            \
+                 sm4_ctr,sm4_ecb,sm4_ofb]},\n  \
                  {kems,[]},\n  \
                  {public_keys,[]},\n  \
                  {macs,[cmac,hmac,poly1305]},\n  \
@@ -1011,7 +1012,7 @@ fn run(command: &mut Command) -> String {
 
 /// The output of `crypto_probe:ciphers_host/0` on PBeam and on the pinned
 /// macOS ERTS: `notsup` for each legacy cipher (cipher.c:282-283,
-/// api_ng.c:284-287).
+/// api_ng.c:284-287), and the AEAD results of sm4_gcm and sm4_ccm.
 const CIPHERS_HOST: &str = r#"[[{error,notsup},
   {error,notsup},
   {error,notsup},
@@ -1038,5 +1039,19 @@ const CIPHERS_HOST: &str = r#"[[{error,notsup},
   {error,{notsup,{"api_ng.c",286},
                  "Cipher not supported in this libcrypto version"}},
   {error,{notsup,{"api_ng.c",286},
-                 "Cipher not supported in this libcrypto version"}}]]
+                 "Cipher not supported in this libcrypto version"}}],
+ [{sm4_gcm,{<<203,180,174,141,189,248,170,187,99,31>>,
+            <<163,50,144,65,156,39,236,69,248,146,217,89,39,62,24,144>>},
+           {<<203,180,174,141,189,248,170,187,99,31>>,
+            <<163,50,144,65,156,39,236,69,248,146,217,89>>},
+           {<<207,189,183,144>>,
+            <<52,228,94,5,194,200,243,208,128,223,76,173,240,182,70,141>>},
+           [<<"plain text">>,error,<<"plain text">>]},
+  {sm4_ccm,{<<85,149,167,141,192,12,141,183,179,255>>,
+            <<198,214,173,145,194,170,12,155,203,131,206,1,194,77,161,88>>},
+           {<<85,149,167,141,192,12,141,183,179,255>>,
+            <<156,133,7,167,239,92,51,235,150,61,225,73>>},
+           {<<81,156,190,144>>,
+            <<238,134,79,88,94,103,180,117,75,217,119,49,223,226,20,43>>},
+           [<<"plain text">>,error,error]}]]
 "#;
