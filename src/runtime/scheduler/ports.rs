@@ -29,7 +29,7 @@ impl Scheduler {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let spawn = Spawn { exit_status: true, soft_eof: false, packets: Packets::new(0), child, input: Input::Open };
+    /// let spawn = Spawn { exit_status: true, soft_eof: false, packets: Packets::new(0), program: Program::Child(child), input: Input::Open };
     /// let port = scheduler.open_port(b"/bin/sh".to_vec(), Driver::Spawn(spawn))?;
     /// assert_eq!(port, PortId(0));
     /// ```
