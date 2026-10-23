@@ -18,8 +18,9 @@
 //! no byte when the first bit is on a byte boundary. For a first bit that
 //! is not on a byte boundary, it packs the bits of the view in a vector at
 //! that call, and the vector is in one `Arc`, so a copy of such a view is
-//! O(1). The `binary` command of `bs_match` reads a whole number of bytes
-//! at a bit position (`GET_BITSTRING`, jit/arm/instr_bs.cpp:3136-3176), so
+//! O(1). The `binary` command of `bs_match` reads a segment of any size at
+//! a bit position (`GET_BITSTRING`, jit/arm/instr_bs.cpp:3136-3176, and
+//! `EXTRACT_BITSTRING`, instr_bs.cpp:3047-3054, for 64 bits or fewer), so
 //! the packed view of that command is a supported path. A view whose size
 //! is not a whole number of bytes is a bitstring.
 //! [`Binary::to_bytes`] gives an owned vector to the code that changes

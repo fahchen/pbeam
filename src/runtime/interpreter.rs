@@ -5370,10 +5370,13 @@ fn binary_match(
                 write(process, destination, Term::Integer(value))?;
             }
             BinaryMatchCommand::Binary { size, destination } => {
-                // ERTS reads a segment of any size at any bit position as
-                // a sub-bitstring (`GET_BITSTRING`,
-                // jit/arm/instr_bs.cpp:3136-3176), and `read_bytes` gives
-                // the segment a view of its bits.
+                // ERTS reads a segment of any size at any bit position: a
+                // segment of more than 64 bits as a sub-bitstring
+                // (`GET_BITSTRING`, jit/arm/instr_bs.cpp:3136-3176), and a
+                // smaller one as a heap bitstring copy (`READ` and
+                // `EXTRACT_BITSTRING`, instr_bs.cpp:3047-3054). The value is
+                // the same, and `read_bytes` gives the segment a view of its
+                // bits.
                 let bytes = state.read_bytes(*size).ok_or_else(|| too_few_bits(size))?;
                 write(process, destination, Term::Binary(bytes))?;
             }
