@@ -1064,6 +1064,10 @@ fn stops_with_a_runtime_error_for_each_unsupported_signature() {
             "crypto:pkey_sign_nif/5 NIF is not supported for the algorithm mldsa44",
         ),
         (
+            "unsupported_name",
+            "crypto:pkey_sign_nif/5 NIF is not supported for the algorithm dh",
+        ),
+        (
             "unsupported_heavy",
             "crypto:pkey_sign_heavy_nif/5 NIF is not supported for the algorithm \
              slh_dsa_sha2_128s",

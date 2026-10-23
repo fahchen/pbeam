@@ -38,6 +38,119 @@ const PKEY_TYPES: [&str; 15] = [
     "slh_dsa_sha2_256f",
 ];
 
+/// The names and aliases of the key managers of the OpenSSL 3.5 default
+/// provider (`openssl list -key-managers`), which
+/// `EVP_PKEY_CTX_new_from_name` matches without case (`pkey.c:614`).
+const OPENSSL_KEY_NAMES: [&str; 107] = [
+    "1.2.840.113549.1.1.1",
+    "2.5.8.1.1",
+    "RSA",
+    "rsaEncryption",
+    "1.2.840.113549.1.1.10",
+    "RSA-PSS",
+    "RSASSA-PSS",
+    "rsassaPss",
+    "1.2.840.113549.1.3.1",
+    "DH",
+    "dhKeyAgreement",
+    "1.2.840.10046.2.1",
+    "dhpublicnumber",
+    "DHX",
+    "X9.42 DH",
+    "1.2.840.10040.4.1",
+    "1.3.14.3.2.12",
+    "DSA",
+    "DSA-old",
+    "dsaEncryption",
+    "dsaEncryption-old",
+    "1.2.840.10045.2.1",
+    "EC",
+    "id-ecPublicKey",
+    "1.3.101.110",
+    "X25519",
+    "1.3.101.111",
+    "X448",
+    "1.3.101.112",
+    "ED25519",
+    "1.3.101.113",
+    "ED448",
+    "1.2.156.10197.1.301",
+    "SM2",
+    "TLS1-PRF",
+    "HKDF",
+    "1.3.6.1.4.1.11591.4.11",
+    "id-scrypt",
+    "SCRYPT",
+    "HMAC",
+    "SIPHASH",
+    "POLY1305",
+    "CMAC",
+    "X25519MLKEM768",
+    "X448MLKEM1024",
+    "SecP256r1MLKEM768",
+    "SecP384r1MLKEM1024",
+    "2.16.840.1.101.3.4.4.1",
+    "id-alg-ml-kem-512",
+    "ML-KEM-512",
+    "MLKEM512",
+    "2.16.840.1.101.3.4.4.2",
+    "id-alg-ml-kem-768",
+    "ML-KEM-768",
+    "MLKEM768",
+    "2.16.840.1.101.3.4.4.3",
+    "id-alg-ml-kem-1024",
+    "ML-KEM-1024",
+    "MLKEM1024",
+    "2.16.840.1.101.3.4.3.17",
+    "id-ml-dsa-44",
+    "ML-DSA-44",
+    "MLDSA44",
+    "2.16.840.1.101.3.4.3.18",
+    "id-ml-dsa-65",
+    "ML-DSA-65",
+    "MLDSA65",
+    "2.16.840.1.101.3.4.3.19",
+    "id-ml-dsa-87",
+    "ML-DSA-87",
+    "MLDSA87",
+    "2.16.840.1.101.3.4.3.20",
+    "id-slh-dsa-sha2-128s",
+    "SLH-DSA-SHA2-128s",
+    "2.16.840.1.101.3.4.3.21",
+    "id-slh-dsa-sha2-128f",
+    "SLH-DSA-SHA2-128f",
+    "2.16.840.1.101.3.4.3.22",
+    "id-slh-dsa-sha2-192s",
+    "SLH-DSA-SHA2-192s",
+    "2.16.840.1.101.3.4.3.23",
+    "id-slh-dsa-sha2-192f",
+    "SLH-DSA-SHA2-192f",
+    "2.16.840.1.101.3.4.3.24",
+    "id-slh-dsa-sha2-256s",
+    "SLH-DSA-SHA2-256s",
+    "2.16.840.1.101.3.4.3.25",
+    "id-slh-dsa-sha2-256f",
+    "SLH-DSA-SHA2-256f",
+    "2.16.840.1.101.3.4.3.26",
+    "id-slh-dsa-shake-128s",
+    "SLH-DSA-SHAKE-128s",
+    "2.16.840.1.101.3.4.3.27",
+    "id-slh-dsa-shake-128f",
+    "SLH-DSA-SHAKE-128f",
+    "2.16.840.1.101.3.4.3.28",
+    "id-slh-dsa-shake-192s",
+    "SLH-DSA-SHAKE-192s",
+    "2.16.840.1.101.3.4.3.29",
+    "id-slh-dsa-shake-192f",
+    "SLH-DSA-SHAKE-192f",
+    "2.16.840.1.101.3.4.3.30",
+    "id-slh-dsa-shake-256s",
+    "SLH-DSA-SHAKE-256s",
+    "2.16.840.1.101.3.4.3.31",
+    "id-slh-dsa-shake-256f",
+    "SLH-DSA-SHAKE-256f",
+];
+
 /// The OpenSSL padding values of the option `rsa_padding`
 /// (`pkey.c:437-458`).
 const RSA_PKCS1_PADDING: i32 = 1;
@@ -416,7 +529,7 @@ fn private_key(
             });
             (key, 530, "Couldn't get DSA private key")
         }
-        _ => return Err(unsupported_algorithm(algorithm)),
+        _ => return Err(octet_string_key(scheduler, algorithm, Some(term))),
     };
     key.ok_or_else(|| badarg(line, 3, message))
 }
@@ -452,9 +565,41 @@ fn public_key(
             });
             (key, 722, "Couldn't get DSA public key")
         }
-        _ => return Err(unsupported_algorithm(algorithm)),
+        _ => return Err(octet_string_key(scheduler, algorithm, None)),
     };
     key.ok_or_else(|| badarg(line, 4, message))
+}
+
+/// Return the failure of the key of an algorithm outside `rsa`, `ecdsa`,
+/// `eddsa`, and `dss`, which ERTS gives to `get_pkey_from_octet_string`
+/// (`pkey.c:536-565`, `728-731`). `private` is the private key term, which
+/// passes the key tuple checks first (`pkey.c:544-559`). An algorithm of
+/// `pkey_types`, or a name that OpenSSL loads a key type from
+/// (`pkey.c:614`), gives a runtime error: ERTS then reads the key bytes.
+fn octet_string_key(scheduler: &Scheduler, algorithm: &str, private: Option<&Term>) -> Failure {
+    if PKEY_TYPES.contains(&algorithm) {
+        return unsupported_algorithm(algorithm);
+    }
+    if let Some([tag, _]) = private.and_then(Term::tuple_elements) {
+        match tag {
+            Term::Atom(_) if atom_name(scheduler, tag) == "seed" => {
+                return badarg(552, 3, "Seed key not allowed");
+            }
+            Term::Atom(_) if atom_name(scheduler, tag) == "expandedkey" => {}
+            _ => return badarg(556, 3, "Invalid key tuple format"),
+        }
+    }
+    // `enif_get_atom` fails for a name of 40 bytes or more (`pkey.c:610-613`).
+    if algorithm.len() >= 40 {
+        return Failure::Check("error", 612, 0, "Invalid key type");
+    }
+    if OPENSSL_KEY_NAMES
+        .iter()
+        .any(|name| name.eq_ignore_ascii_case(algorithm))
+    {
+        return unsupported_algorithm(algorithm);
+    }
+    failed(616, "Can't create PKEY_CTX from name")
 }
 
 /// Return the failure of an algorithm that PBeam does not sign with.

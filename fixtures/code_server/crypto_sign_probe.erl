@@ -1,5 +1,5 @@
 -module(crypto_sign_probe).
--export([main/0, host/0, unsupported_sign/0, unsupported_heavy/0, unsupported_verify/0, unsupported_curve/0]).
+-export([main/0, host/0, unsupported_sign/0, unsupported_name/0, unsupported_heavy/0, unsupported_verify/0, unsupported_curve/0]).
 
 %% Write the results of crypto:sign/5 and crypto:verify/6, which call
 %% pkey_sign_nif/5 and pkey_verify_nif/6 (crypto.erl:3285-3389,
@@ -162,7 +162,18 @@ errors() ->
                 fun() -> crypto:sign(rsa, sha256, Msg, #{}) end,
                 fun() -> crypto:sign(rsa, sha256, Msg, #{engine => a, key_id => "k"}) end,
                 fun() -> crypto:verify(rsa, sha256, Msg, <<>>, #{engine => a, key_id => <<"k">>,
-                                                               password => "p"}) end]].
+                                                               password => "p"}) end,
+                fun() -> crypto:sign(foo, sha256, Msg, <<1>>) end,
+                fun() -> crypto:sign(foo, sha256, Msg, [1]) end,
+                fun() -> crypto:sign(foo, sha256, Msg, {seed, <<1>>}) end,
+                fun() -> crypto:sign(foo, sha256, Msg, {expandedkey, <<1>>}) end,
+                fun() -> crypto:sign(foo, sha256, Msg, {a, b}) end,
+                fun() -> crypto:sign(foo, none, Msg, <<1>>) end,
+                fun() -> crypto:sign(list_to_atom(lists:duplicate(39, $a)), sha256, Msg, <<1>>) end,
+                fun() -> crypto:sign(list_to_atom(lists:duplicate(40, $a)), sha256, Msg, <<1>>) end,
+                fun() -> crypto:verify(foo, sha256, Msg, <<1>>, {seed, <<1>>}) end,
+                fun() -> crypto:verify(list_to_atom(lists:duplicate(40, $a)), sha256, Msg,
+                                       <<1>>, <<1>>) end]].
 
 %% Write the result that depends on the libcrypto of the host: md4 is in
 %% the legacy provider of OpenSSL 3, so its digest fetch can fail
@@ -212,6 +223,9 @@ bad_reason(Fun) ->
 %% implement, which stops the run with a runtime error.
 unsupported_sign() ->
     crypto:sign(mldsa44, none, <<"abc">>, <<1>>).
+
+unsupported_name() ->
+    crypto:sign(dh, sha256, <<"abc">>, <<1>>).
 
 unsupported_heavy() ->
     crypto:sign(slh_dsa_sha2_128s, none, <<"abc">>, <<1>>).
