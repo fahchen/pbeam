@@ -62,7 +62,7 @@ use crate::{
     term::{ProcessId, Reference},
 };
 use stream::Stream;
-pub(in crate::runtime) use stream::{Event, Output, Receiver};
+pub(in crate::runtime) use stream::{DataMode, Event, Output, Receiver};
 
 /// The number that `prim_inet` adds to each request code
 /// (`ERTS_INET_DRV_CONTROL_MAGIC_NUMBER`, prim_inet.erl:2969).

@@ -4,7 +4,7 @@ use super::BifResult::Value;
 use super::erlang::signals_return;
 use super::*;
 use crate::beam::code::PrepareError;
-use crate::runtime::scheduler::{PTAB_SIZE, check_process_code_reply};
+use crate::runtime::scheduler::{Accept, PTAB_SIZE, check_process_code_reply};
 use crate::runtime::{
     capability::{CapabilityKind, Operation},
     host::{
@@ -14,7 +14,7 @@ use crate::runtime::{
     },
     port::{
         self, Driver, Input, Packets, Port, PortCell, Spawn,
-        inet::{Control, Inet, SocketType},
+        inet::{Control, Inet, OK, SocketType},
     },
     signal::Signal,
     unicode::native_filename,
@@ -711,8 +711,9 @@ pub(super) fn port_command(
     }
     let scheduler = &mut *context.scheduler;
     // One lock of the port covers the check, the capability, and the
-    // write, as the port lock does in `erts_port_output` (io.c:1715-2088).
-    // The write of a spawn port holds this port lock only.
+    // write or the send of the `tcp_inet` driver, as the port lock does in
+    // `erts_port_output` (io.c:1715-2088). The messages of the send go
+    // after the lock.
     let found = found_port(scheduler, port)?;
     let mut slot = lock_found(&found);
     let (Some(port_state), Some(bytes), Some(&(id, _))) =
@@ -727,11 +728,17 @@ pub(super) fn port_command(
     scheduler
         .current_process_mut()
         .bump_reductions(PORT_REDUCTIONS);
-    let Driver::Spawn(spawn) = &mut port_state.driver else {
-        port_state.output += bytes.len() as u64;
-        drop(slot);
-        scheduler.tcp_send(id, &bytes)?;
-        return Ok(signals_return(scheduler, port, Term::static_atom("true")));
+    let spawn = match &mut port_state.driver {
+        Driver::Spawn(spawn) => spawn,
+        Driver::Inet(tcp) => {
+            let caller = scheduler.current_process_mut().id;
+            let sent = tcp.send(&bytes, caller, scheduler.local_node_hash())?;
+            let mode = tcp.data_mode();
+            port_state.output += bytes.len() as u64;
+            drop(slot);
+            scheduler.tcp_sent(id, sent, mode)?;
+            return Ok(signals_return(scheduler, port, Term::static_atom("true")));
+        }
     };
     // A packet that does not fit in its header fails with `EINVAL`
     // (`sys_drivers.c:1153-1158`).
@@ -855,24 +862,45 @@ pub(super) fn port_control(
         return Ok(denied);
     }
     let caller = scheduler.current_process_mut().id;
-    let reply = match port_state.inet_mut() {
-        Some(driver) => driver.control(command, &bytes, caller),
-        None if command == SPAWN_CONTROL => {
+    let Some(tcp) = port_state.inet_mut() else {
+        drop(slot);
+        if command == SPAWN_CONTROL {
             return Err(error(
                 "unsupported erlang:port_control/3 command 16#04c76a00 on a spawn port: see \"Ports\" in docs/erts-differences.md",
             ));
         }
-        None => Ok(Control::Badarg),
+        return Ok(signals_return(scheduler, port, Term::static_atom("badarg")));
     };
-    drop(slot);
-    let reply = match reply? {
-        Control::Reply(reply) => reply,
-        Control::Accept(timeout) => scheduler.tcp_accept(id, timeout)?,
-        Control::Receive { timeout, length } => scheduler.tcp_receive(id, timeout, length)?,
-        Control::Active { read } => scheduler.tcp_activate(id, read)?,
+    // The step of the request runs under the port lock of the control, as
+    // in `erts_port_control` (io.c:4268-4420), so a close on another
+    // scheduler comes before it or after it. The messages go after the
+    // lock.
+    let mut events = None;
+    let reply = match tcp.control(command, &bytes, caller)? {
+        Control::Reply(reply) => Accept::Queued(reply),
+        Control::Accept(timeout) => scheduler.tcp_accept(id, tcp, timeout)?,
+        Control::Receive { timeout, length } => {
+            let (reply, received) = scheduler.tcp_receive(id, tcp, timeout, length);
+            events = Some(received);
+            Accept::Queued(reply)
+        }
+        Control::Active { read } => {
+            events = Some(tcp.activate(read));
+            Accept::Queued(vec![OK])
+        }
         Control::Badarg => {
+            drop(slot);
             return Ok(signals_return(scheduler, port, Term::static_atom("badarg")));
         }
+    };
+    let mode = tcp.data_mode();
+    drop(slot);
+    if let Some(events) = events {
+        scheduler.deliver_events(id, events, mode)?;
+    }
+    let reply = match reply {
+        Accept::Queued(reply) => reply,
+        Accept::Now(accepted) => scheduler.tcp_accepted(id, accepted)?,
     };
     scheduler
         .current_process_mut()

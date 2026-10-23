@@ -1967,7 +1967,9 @@ fn sends_the_messages_of_an_active_socket_to_the_owner_and_ends_the_port() {
         Event::Closed,
         Event::Exit("etimedout".to_owned()),
     ];
-    scheduler.deliver_events(port, events).unwrap();
+    scheduler
+        .deliver_events(port, events, Inet::new(SocketType::Stream).data_mode())
+        .unwrap();
     let name = |text| Term::Atom(scheduler.atoms.put(text).unwrap());
     let (tcp_error, etimedout, tcp_closed) =
         (name("tcp_error"), name("etimedout"), name("tcp_closed"));
@@ -2014,7 +2016,9 @@ fn unlinks_the_new_owner_after_its_queued_link_signal_at_a_driver_exit() {
         .unwrap();
     assert!(scheduler.connect_port(port, child));
     let events = vec![Event::Exit("normal".to_owned())];
-    scheduler.deliver_events(port, events).unwrap();
+    scheduler
+        .deliver_events(port, events, Inet::new(SocketType::Stream).data_mode())
+        .unwrap();
     scheduler
         .handle_signals(child, 100, 100, HandlingPoint::ScheduleIn)
         .unwrap();

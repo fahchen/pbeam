@@ -18,6 +18,8 @@
 //! `docs/erts-differences.md`), so an acceptor that exits leaves the queue
 //! before the next accept.
 
+use std::io;
+
 use super::{Scheduler, ports::port_cell};
 use crate::{
     error::BeamError,
@@ -32,52 +34,55 @@ use crate::{
     term::{Atom, PortId, ProcessId, Term},
 };
 
+/// The result of [`Scheduler::tcp_accept`] under the port lock.
+pub(in crate::runtime) enum Accept {
+    /// The caller waits in the queue; the reply bytes.
+    Queued(Vec<u8>),
+    /// The accept at once: the async reference and the descriptor of the
+    /// connection, or the error of `accept`.
+    Now(io::Result<(u16, Inet)>),
+}
+
 /// The timeout of an accept without end (`INET_INFINITY`).
 pub(super) const INFINITY: u32 = u32::MAX;
 
 impl Scheduler {
     /// Run `INET_REQ_ACCEPT` of the current process on the listen port
-    /// `listen` with the timeout `timeout` in milliseconds, and return the
-    /// reply bytes (inet_drv.c:12144-12258).
+    /// `listen` with its descriptor `tcp` and the timeout `timeout` in
+    /// milliseconds (inet_drv.c:12144-12258). The caller holds the port lock
+    /// of its control, as `erts_port_control` does (io.c:4268-4420), so a
+    /// close of the port comes before the accept or after it, and then ends
+    /// it with `{error, closed}` (see [`Self::tcp_stop`]).
     ///
-    /// With an empty queue, the port accepts at once: a pending connection
-    /// gives a new port and the message `{inet_async, L, Ref, {ok, S}}`
-    /// before the reply, and an error of `accept` other than `EAGAIN` gives
-    /// its error reply. Else the caller goes to the end of the queue with a
-    /// monitor and, for a timeout other than `infinity`, a timer, and the
-    /// listen socket joins the IO poll.
+    /// With an empty queue, the port accepts at once: the result is the
+    /// accepted connection or the error of `accept` other than `EAGAIN`,
+    /// for [`Self::tcp_accepted`] after the port lock. Else the caller goes
+    /// to the end of the queue with a monitor and, for a timeout other than
+    /// `infinity`, a timer, and the listen socket joins the IO poll.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(scheduler.tcp_accept(listen, u32::MAX)?, vec![1, 0, 0]);
+    /// let accept = scheduler.tcp_accept(listen, tcp, u32::MAX)?;
     /// ```
     ///
     /// # Errors
     ///
-    /// The port number or the reference number overflows.
+    /// The reference number overflows.
     pub(in crate::runtime) fn tcp_accept(
         &mut self,
         listen: PortId,
+        tcp: &mut Inet,
         timeout: u32,
-    ) -> Result<Vec<u8>, BeamError> {
-        let caller = self.current_process_mut().id;
-        let cell = port_cell(&self.node, listen);
-        let mut ports = port::lock(&cell);
-        let tcp = tcp_inet(&mut ports);
+    ) -> Result<Accept, BeamError> {
         if tcp.acceptors.is_empty()
             && let Some(accepted) = tcp.accept_now().transpose()
         {
             let accepted = accepted.map(|socket| (tcp.next_async_id(), tcp.copy(socket)));
-            drop(ports);
-            return try_reply(accepted, |(id, accepted)| {
-                let port = self.open_accepted(caller, accepted)?;
-                self.port_send(caller, self.async_message(listen, id, ok_port(port)));
-                Ok(async_reply(id))
-            });
+            return Ok(Accept::Now(accepted));
         }
+        let caller = self.current_process_mut().id;
         let id = tcp.next_async_id();
-        drop(ports);
         let monitor = self.make_ref()?;
         let signal = Signal::PortMonitor {
             port: listen,
@@ -92,16 +97,40 @@ impl Scheduler {
                 key,
             })
         });
-        let acceptor = Acceptor {
+        tcp.acceptors.push_back(Acceptor {
             id,
             caller,
             monitor,
             timer,
-        };
-        tcp_inet(&mut port::lock(&port_cell(&self.node, listen)))
-            .acceptors
-            .push_back(acceptor);
-        Ok(async_reply(id))
+        });
+        Ok(Accept::Queued(async_reply(id)))
+    }
+
+    /// End the accept at once of [`Self::tcp_accept`] on the listen port
+    /// `listen` after the port lock, and return the reply bytes: a new port
+    /// and the message `{inet_async, L, Ref, {ok, S}}` before the reply, or
+    /// the error reply of `accept`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let reply = scheduler.tcp_accepted(listen, accepted)?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The port number overflows.
+    pub(in crate::runtime) fn tcp_accepted(
+        &mut self,
+        listen: PortId,
+        accepted: io::Result<(u16, Inet)>,
+    ) -> Result<Vec<u8>, BeamError> {
+        let caller = self.current_process_mut().id;
+        try_reply(accepted, |(id, accepted)| {
+            let port = self.open_accepted(caller, accepted)?;
+            self.port_send(caller, self.async_message(listen, id, ok_port(port)));
+            Ok(async_reply(id))
+        })
     }
 
     /// Accept the pending connections of the listen port `listen`, which

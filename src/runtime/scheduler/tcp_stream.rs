@@ -20,7 +20,7 @@ use crate::{
     runtime::{
         port::{
             self, Driver, Port,
-            inet::{Event, Inet, OK, Output, Receiver},
+            inet::{DataMode, Event, Inet, OK, Output, Receiver},
         },
         timer::{PortTimer, Timer},
     },
@@ -29,31 +29,29 @@ use crate::{
 
 impl Scheduler {
     /// Run `TCP_REQ_RECV` of the current process on the connected port
-    /// `port` with the timeout `timeout` in milliseconds and the length
-    /// `length`, and return the reply `[1, R1, R0]` (inet_drv.c:12306-12322).
-    /// The port reads at once; when the receive waits, a timeout of 0 ends
-    /// it with `{error, timeout}`, and another timeout other than
-    /// `infinity` starts its timer.
+    /// `port` with its descriptor `tcp`, the timeout `timeout` in
+    /// milliseconds, and the length `length`. Return the reply `[1, R1, R0]`
+    /// (inet_drv.c:12306-12322) and the messages of the step. The caller
+    /// holds the port lock of its control, as `erts_port_control` does
+    /// (io.c:4268-4420), so a close of the port comes before the receive or
+    /// after it, and then ends it with `{error, closed}` (see
+    /// [`Self::tcp_stop`]). The port reads at once; when the receive waits,
+    /// a timeout of 0 ends it with `{error, timeout}`, and another timeout
+    /// other than `infinity` starts its timer.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(scheduler.tcp_receive(port, u32::MAX, 0)?, vec![1, 0, 0]);
+    /// let (reply, events) = scheduler.tcp_receive(port, tcp, u32::MAX, 0);
     /// ```
-    ///
-    /// # Errors
-    ///
-    /// The atom of an error name in a full atom table.
     pub(in crate::runtime) fn tcp_receive(
         &mut self,
         port: PortId,
+        tcp: &mut Inet,
         timeout: u32,
         length: usize,
-    ) -> Result<Vec<u8>, BeamError> {
+    ) -> (Vec<u8>, Vec<Event>) {
         let caller = self.current_process_mut().id;
-        let cell = port_cell(&self.node, port);
-        let mut ports = port::lock(&cell);
-        let tcp = stream(&mut ports);
         let id = tcp.next_async_id();
         tcp.stream.receiver = Some(Receiver {
             id,
@@ -71,44 +69,7 @@ impl Scheduler {
                 receiver.timer = Some(timer);
             }
         }
-        drop(ports);
-        self.deliver_events(port, events)?;
-        Ok([&[OK][..], &id.to_be_bytes()].concat())
-    }
-
-    /// Deliver the data of the port `port` that a `SETOPTS` of the current
-    /// process made active (see [`Inet::activate`]), and return the reply
-    /// `[1]` (inet_drv.c:11131-11148). The messages and the end of the
-    /// port come before the reply, as the driver runs them in its control.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert_eq!(scheduler.tcp_activate(port, true)?, vec![1]);
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// The errors of [`Self::deliver_events`].
-    pub(in crate::runtime) fn tcp_activate(
-        &mut self,
-        port: PortId,
-        read: bool,
-    ) -> Result<Vec<u8>, BeamError> {
-        // The control of the caller ran under the port lock, and another
-        // scheduler can close the port after that lock. ERTS runs the whole
-        // control under one port lock (`erts_port_control`, io.c), so the
-        // activation came before the close, which sends no more data.
-        let Some(events) = self.node.port(port).and_then(|cell| {
-            let mut slot = port::lock(&cell);
-            slot.as_mut()
-                .and_then(Port::inet_mut)
-                .map(|tcp| tcp.activate(read))
-        }) else {
-            return Ok(vec![OK]);
-        };
-        self.deliver_events(port, events)?;
-        Ok(vec![OK])
+        ([&[OK][..], &id.to_be_bytes()].concat(), events)
     }
 
     /// End the receive of the timer on the port `port`, open or closing,
@@ -128,11 +89,11 @@ impl Scheduler {
             .with_port(port, |item| {
                 item.inet_mut()
                     .filter(|tcp| tcp.stream.receiver.is_some_and(|r| r.timer == Some(timer)))
-                    .map(Inet::receive_timeout)
+                    .map(|tcp| (tcp.receive_timeout(), tcp.data_mode()))
             })
             .flatten();
-        if let Some(events) = events {
-            self.deliver_events(port, events)
+        if let Some((events, mode)) = events {
+            self.deliver_events(port, events, mode)
                 .expect("a timeout makes no new atom");
         }
     }
@@ -150,8 +111,12 @@ impl Scheduler {
     ///
     /// The atom of an error name in a full atom table.
     pub(super) fn tcp_receive_ready(&mut self, port: PortId) -> Result<(), BeamError> {
-        let events = stream(&mut port::lock(&port_cell(&self.node, port))).receive(0);
-        self.deliver_events(port, events)
+        let cell = port_cell(&self.node, port);
+        let mut slot = port::lock(&cell);
+        let tcp = stream(&mut slot);
+        let (events, mode) = (tcp.receive(0), tcp.data_mode());
+        drop(slot);
+        self.deliver_events(port, events, mode)
     }
 
     /// Write the queue of the port `port`, which the IO poll found ready
@@ -167,46 +132,38 @@ impl Scheduler {
     ///
     /// The atom of an error name in a full atom table.
     pub(super) fn tcp_send_ready(&mut self, port: PortId) -> Result<(), BeamError> {
-        let events = stream(&mut port::lock(&port_cell(&self.node, port))).send_ready();
-        self.deliver_events(port, events)
+        let cell = port_cell(&self.node, port);
+        let mut slot = port::lock(&cell);
+        let tcp = stream(&mut slot);
+        let (events, mode) = (tcp.send_ready(), tcp.data_mode());
+        drop(slot);
+        self.deliver_events(port, events, mode)
     }
 
-    /// Run the output `bytes` of the current process on the `tcp_inet`
-    /// port `port` (`tcp_inet_commandv`, inet_drv.c:12657-12731). A header
-    /// that is too short fails the port with the reason `einval`
-    /// (`driver_failure_posix`, io.c:7267-7270).
+    /// End the output of the current process on the `tcp_inet` port
+    /// `port` with the result `sent` of [`Inet::send`], which ran under the
+    /// port lock of `port_command` (`tcp_inet_commandv`,
+    /// inet_drv.c:12657-12731), and the mode `mode` of the port at the
+    /// send. A header that is too short fails the port with the reason
+    /// `einval` (`driver_failure_posix`, io.c:7267-7270).
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// scheduler.tcp_send(port, &[0, 0])?;
+    /// scheduler.tcp_sent(port, sent, mode)?;
     /// ```
     ///
     /// # Errors
     ///
-    /// An output that PBeam does not run (see [`Inet::send`]), and the atom
-    /// of an error name in a full atom table.
-    pub(in crate::runtime) fn tcp_send(
+    /// The errors of [`Self::deliver_events`].
+    pub(in crate::runtime) fn tcp_sent(
         &mut self,
         port: PortId,
-        bytes: &[u8],
+        sent: Output,
+        mode: DataMode,
     ) -> Result<(), BeamError> {
-        // As for `tcp_activate`: a port that another scheduler closed after
-        // the check of `port_command` took the output before its close,
-        // and the close drops the queue of the port.
-        let caller = self.current_process_mut().id;
-        let seed = self.local_node_hash();
-        let Some(sent) = self.node.port(port).and_then(|cell| {
-            let mut slot = port::lock(&cell);
-            slot.as_mut()
-                .and_then(Port::inet_mut)
-                .map(|tcp| tcp.send(bytes, caller, seed))
-        }) else {
-            return Ok(());
-        };
-        let sent = sent?;
         match sent {
-            Output::Sent(events) => self.deliver_events(port, events),
+            Output::Sent(events) => self.deliver_events(port, events, mode),
             Output::Failed => {
                 self.fail_port(port, Term::static_atom("einval"));
                 Ok(())
@@ -214,17 +171,22 @@ impl Scheduler {
         }
     }
 
-    /// Send the messages `events` of the port `port`, and cancel the timer
-    /// of each receive that ends. The messages of active mode go to the
+    /// Send the messages `events` of a step of the port `port`, with its
+    /// mode `mode` at the step, and cancel the timer of each receive that
+    /// ends. The step ran under the port lock, and this function takes no
+    /// port lock for the data, so another scheduler can close the port
+    /// before the messages: the messages of a port that closed go nowhere,
+    /// as for a port in the `CLOSING` state. The messages of active mode go to the
     /// owner of the port (`erl_drv_output_term`), and [`Event::Exit`]
     /// closes the port (see [`Self::driver_exit`]). A port in the
     /// `CLOSING` state sends no message (see [`Self::port_deliver`]), its
     /// end terminates it (io.c:7206-7207), and so does an empty queue after
     /// the events (see [`Self::tcp_flushed`]).
-    pub(super) fn deliver_events(
+    pub(in crate::runtime) fn deliver_events(
         &mut self,
         port: PortId,
         events: Vec<Event>,
+        mode: DataMode,
     ) -> Result<(), BeamError> {
         for event in events {
             match event {
@@ -233,11 +195,7 @@ impl Scheduler {
                         self.cancel_port_timer(timer);
                     }
                     let status = match result {
-                        Ok(bytes) => {
-                            let data = stream(&mut port::lock(&port_cell(&self.node, port)))
-                                .data_term(bytes);
-                            Term::tuple(vec![Term::static_atom("ok"), data])
-                        }
+                        Ok(bytes) => Term::tuple(vec![Term::static_atom("ok"), mode.term(bytes)]),
                         Err(name) => error_status(Term::Atom(self.atoms.put(&name)?)),
                     };
                     let message = self.async_message(port, receiver.id, status);
@@ -256,11 +214,7 @@ impl Scheduler {
                     ]);
                     self.port_deliver(port, sender.caller, message);
                 }
-                Event::Data(bytes) => {
-                    let data =
-                        stream(&mut port::lock(&port_cell(&self.node, port))).data_term(bytes);
-                    self.deliver_active(port, Atom::TCP, Some(data));
-                }
+                Event::Data(bytes) => self.deliver_active(port, Atom::TCP, Some(mode.term(bytes))),
                 Event::Closed => self.deliver_active(port, Atom::TCP_CLOSED, None),
                 Event::Error(name) => {
                     let reason = Term::Atom(self.atoms.put(&name)?);
@@ -320,15 +274,13 @@ impl Scheduler {
     }
 
     /// Send `{Tag, S}`, or `{Tag, S, Value}` with `value`, of the port
-    /// `port` to its owner.
+    /// `port` to its owner. A port that closed sends nothing.
     fn deliver_active(&mut self, port: PortId, tag: Atom, value: Option<Term>) {
         let tag = Term::Atom(tag);
         let message = Term::tuple([tag, Term::Port(port)].into_iter().chain(value).collect());
-        let owner = self
-            .node
-            .with_port(port, |item| item.owner)
-            .expect("the port of a message is open");
-        self.port_deliver(port, owner, message);
+        if let Some(owner) = self.node.with_port(port, |item| item.owner) {
+            self.port_deliver(port, owner, message);
+        }
     }
 }
 

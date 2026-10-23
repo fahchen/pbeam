@@ -1,9 +1,13 @@
-//! The driver steps of a `tcp_inet` port that another scheduler closed
-//! after the port lock of the BIF of the caller.
+//! The steps of a `tcp_inet` port run under the port lock of the BIF of
+//! the caller, and their messages go after it, when another scheduler can
+//! close the port.
 
 use std::sync::Arc;
 
+use socket2::{Domain, Socket, Type};
+
 use super::super::{Scheduler, node::Node};
+use crate::runtime::port::inet::{Event, Inet, Receiver, SocketType};
 use crate::runtime::process::{ProcessState, Start, tests::frame};
 use crate::term::{AtomTable, PortId, ProcessId};
 
@@ -22,15 +26,41 @@ fn scheduler() -> Scheduler {
 }
 
 #[test]
-fn activates_a_port_that_another_scheduler_closed_without_a_step() {
-    // ERTS runs the control under one port lock (`erts_port_control`,
-    // io.c:4268), so the activation comes before the close.
-    assert_eq!(scheduler().tcp_activate(PortId(7), true).unwrap(), vec![1]);
+fn receives_on_the_locked_descriptor_without_the_port_table() {
+    // The step takes the descriptor that the control locked
+    // (`erts_port_control`, io.c:4268-4420): port 7 is not in the table.
+    let (local, _peer) = Socket::pair(Domain::UNIX, Type::STREAM, None).unwrap();
+    let mut tcp = Inet::new(SocketType::Stream).copy(local);
+    let (reply, events) = scheduler().tcp_receive(PortId(7), &mut tcp, u32::MAX, 0);
+    let id = u16::from_be_bytes([reply[1], reply[2]]);
+    assert_eq!((reply[0], events), (1, Vec::new()));
+    assert_eq!(
+        tcp.stream.receiver,
+        Some(Receiver {
+            id,
+            caller: ProcessId(0),
+            timer: None
+        })
+    );
 }
 
 #[test]
-fn drops_the_output_of_a_port_that_another_scheduler_closed() {
-    // The close drops the queue of the port, as for an output that came
-    // before the close (`erts_port_output`, io.c:1715).
-    scheduler().tcp_send(PortId(7), &[1, 2]).unwrap();
+fn drops_the_messages_of_a_step_of_a_port_that_another_scheduler_closed() {
+    // The data term comes from the mode of the step, so the delivery takes
+    // no lock of the closed port.
+    let mode = Inet::new(SocketType::Stream).data_mode();
+    let receiver = Receiver {
+        id: 1,
+        caller: ProcessId(0),
+        timer: None,
+    };
+    let events = vec![
+        Event::Received {
+            receiver,
+            result: Ok(vec![1]),
+        },
+        Event::Data(vec![2]),
+        Event::Closed,
+    ];
+    scheduler().deliver_events(PortId(7), events, mode).unwrap();
 }
