@@ -158,8 +158,8 @@ cmacs(Ciphers) ->
                          end)}
      || {Cipher, Size} <- Ciphers].
 
-%% Write the sizes of hash_info/1 for the SHAKE digests. A fetched md gives
-%% 0 for an XOF (evp_lib.c:1041); the legacy EVP_shake* gives bitlen/8.
+%% Write the sizes of hash_info/1 for the SHAKE digests. A fetched SHAKE md
+%% gives 16/32 on OpenSSL 3.0-3.3 and 0 from 3.4 (evp_lib.c:1041 in 3.5.5).
 xof_sizes() ->
     io:format("~p~n", [[maps:get(size, crypto:hash_info(Type)) || Type <- [shake128, shake256]]]).
 

@@ -512,9 +512,9 @@ fn atom_name<'a>(scheduler: &'a Scheduler, term: &Term) -> &'a str {
 /// (`hash.c:74-99`): the map of the OpenSSL type, size, and block size of
 /// the digest. A name that is not a digest raises `error:badarg`, and
 /// `md4`, whose `md.p` is NULL, raises `error:notsup`. As ERTS, PBeam reads
-/// the values from the fetched digest (`digest.c:186-188`): a fetched md
-/// gives the size 0 for an XOF (`evp_lib.c:1041`), where the legacy
-/// `EVP_shake*` gives bitlen/8.
+/// the values from the fetched digest (`digest.c:186-188`): a fetched SHAKE
+/// md gives 16/32 on OpenSSL 3.0-3.3 and 0 from 3.4 (`evp_lib.c:1041` in
+/// 3.5.5).
 ///
 /// # Examples
 ///
