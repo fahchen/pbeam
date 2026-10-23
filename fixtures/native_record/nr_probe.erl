@@ -24,6 +24,7 @@ results() ->
      catch_error(fun() -> (id(7))#point.y end),
      (id(P))#_.x, catch_error(fun() -> (id(P))#_.zz end),
      guard(P), guard(Pub), guard({point, 1, 2}), guard(E),
+     field_guard(P), field_guard(U), field_guard(Pub),
      [is_record(Term) || Term <- [P, E, {point, 1, 2}, #{}]],
      bif(is_record, [P]), bif(is_record, [{point, 1, 2}]),
      bif(is_record, [P, point]), bif(is_record, [P, empty]),
@@ -89,6 +90,9 @@ pub_fields(#nr_def:pub{a = A, b = B}) ->
 guard(R) when is_record(R, nr_probe, point) -> point;
 guard(R) when is_record(R) -> record;
 guard(_) -> other.
+
+field_guard(R) when R#point.x =:= 1 -> one;
+field_guard(_) -> other.
 
 bif(Name, Args) ->
     catch_error(fun() -> apply(erlang, id(Name), id(Args)) end).
