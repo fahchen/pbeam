@@ -2,7 +2,8 @@
 -export([unsigned/1, flagged/1, wide/1, prefix/1, skip/1, binaries/1, bits/1,
          tail/1, bit_tail/1, unaligned_utf8/1, match_string/1,
          match_string_offset/1, match_string_bits/1, skip_size/2,
-         skip_size_bits/2, get_size/2, get_size_flagged/2]).
+         skip_size_bits/2, get_size/2, get_size_flagged/2,
+         bitstrings/0, literals/0]).
 
 %% The integer command: unsigned big-endian integers below, at, and above
 %% one byte, also at positions that are not byte-aligned, and a size with a
@@ -96,3 +97,28 @@ get_size_flagged(Bin, Size) when is_binary(Bin) ->
         <<X:Size/little-signed, Rest/binary>> -> {X, Rest};
         _ -> false
     end.
+
+%% `bits` and `bitstring` segments, and the unit check of a `binary` tail,
+%% on bitstring literals whose size is not a multiple of 8 bits.
+bitstrings() ->
+    Inputs = [<<1:12>>, <<5:13>>, <<1, 2>>, <<1:3>>, <<>>],
+    [{split_bits(B), split_binary_tail(B), split_unit(B)} || B <- Inputs].
+
+split_bits(<<A:3/bits, B:2/bitstring, Rest/bits>>) -> {A, B, Rest};
+split_bits(_) -> false.
+
+split_binary_tail(<<A:4/bits, Rest/binary>>) -> {A, Rest};
+split_binary_tail(_) -> false.
+
+split_unit(<<A:1/bits, Rest/binary-unit:4>>) -> {A, Rest};
+split_unit(_) -> false.
+
+%% The bitstring literals that the tests expect, which the loader reads as
+%% `BIT_BINARY_EXT` terms.
+literals() ->
+    {<<5:3>>, <<5:4>>, <<0:3>>, <<8, 2:5>>, <<242, 3:4>>,
+     [{{<<0:3>>, <<0:2>>, <<1:7>>}, {<<0:4>>, <<1>>}, false},
+      {{<<0:3>>, <<0:2>>, <<5>>}, false, {<<0:1>>, <<0, 5:4>>}},
+      {{<<0:3>>, <<0:2>>, <<32, 2:3>>}, false, false},
+      {false, false, false},
+      {false, false, false}]}.

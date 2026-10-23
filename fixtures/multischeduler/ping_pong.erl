@@ -10,14 +10,14 @@
          alive_wait/0, alive_send/0, alive_child/0, scheduler_count/0,
          wall_time/0, name_after_kill/0, name_kill_hold/0, name_kill_child/0,
          decode_atom/0, persistent_put/0, port_transfer/0,
-         port_transfer_hold/0, ports_list/0, port_use/0, port_give/0,
+         port_transfer_hold/0, port_use/0, port_give/0,
          port_term/0, port_term_give/0, counters_hold/0, counters_add/0, timer_remote/0,
          timer_hold/0, timer_named/0, timer_read/0, timer_give/0, 
          regex_run/0, regex_give/0,
          group_leader_remote/0, leader_hold/0, pattern_match/0, pattern_give/0,
          timer_fire/0, timer_cancel/0, timer_child_exit/0, timer_child/0,
          timer_cancel_use/0, timer_cancel_give/0, port_link_use/0,
-         port_link_give/0, port_monitor_use/0, port_monitor_give/0,
+         port_link_give/0, 
          timer_fire4/0, timer_named4/0, timer_remote4/0, pattern_split/0,
          pattern_split_give/0, pattern_matches/0, pattern_matches_give/0,
          info_idle/0, info_idle_child/0, stuck_child/0, relay_wait/0,
@@ -507,10 +507,11 @@ atom_receive() ->
 persistent_put() ->
     persistent_term:put(persistent_probe, 1).
 
-%% The root that connects its port to a process of the other scheduler.
+%% The root that connects its tcp_inet port to a process of the other
+%% scheduler.
 port_transfer() ->
     Pid = wait_for(transfer_name, 100000),
-    Port = open_port({spawn_executable, "/usr/bin/true"}, [binary]),
+    Port = open_port({spawn_driver, "tcp_inet"}, [binary]),
     true = port_connect(Port, Pid),
     ok.
 
@@ -519,24 +520,35 @@ port_transfer_hold() ->
     true = register(transfer_name, self()),
     receive stop -> ok after 6000 -> timeout end.
 
-%% The root that lists the ports of the node.
-ports_list() ->
-    erlang:ports().
-
-%% The root that receives the port of the other scheduler and asks for its
-%% information.
+%% The root that receives the port of the other scheduler and uses it with
+%% each port BIF: erlang:ports/0, port_info/1,2, link/1, port_connect/2,
+%% port_command/2, port_control/3, monitor/2, and port_close/1.
 port_use() ->
     true = register(port_use_name, self()),
-    receive {port, Port} ->
-        erlang:port_info(Port)
-    end.
+    {From, Port} = receive {port, Giver, Given} -> {Giver, Given} end,
+    Listed = lists:member(Port, erlang:ports()),
+    {connected, From} = erlang:port_info(Port, connected),
+    {name, Name} = lists:keyfind(name, 1, erlang:port_info(Port)),
+    true = link(Port),
+    {links, Links} = erlang:port_info(Port, links),
+    true = port_connect(Port, self()),
+    true = port_command(Port, <<"hi">>),
+    Data = receive {Port, {data, Bytes}} -> Bytes after 60000 -> timeout end,
+    Control = try port_control(Port, 0, []) catch error:Error -> Error end,
+    Ref = monitor(port, Port),
+    true = port_close(Port),
+    Down = receive {'DOWN', Ref, port, Port, Reason} -> Reason after 60000 -> timeout end,
+    Closed = lists:member(Port, erlang:ports()),
+    From ! done,
+    {Listed, Name, lists:sort(Links) =:= lists:sort([From, self()]), Data, Control, Down,
+     Closed, erlang:port_info(Port)}.
 
 %% The root that sends its port to the other scheduler.
 port_give() ->
     %% The port stays open until the receiver uses it.
     Port = open_port({spawn_executable, "/bin/cat"}, [binary]),
     ok = wait_registered(port_use_name, 100000),
-    port_use_name ! {port, Port},
+    port_use_name ! {port, self(), Port},
     receive done -> ok after 6000 -> timeout end.
 
 %% The root that uses the port of the other scheduler only as a term.
@@ -729,26 +741,15 @@ timer_exit_hold() ->
     true = register(timer_exit_name, self()),
     receive stop -> ok after 6000 -> timeout end.
 
-%% The root that links to a port of the other scheduler.
+%% The root that links to a tcp_inet port of the other scheduler.
 port_link_use() ->
     true = register(port_link_name, self()),
     receive {port, Port} -> erlang:link(Port) end.
 
 port_link_give() ->
-    Port = open_port({spawn_executable, "/bin/cat"}, [binary]),
+    Port = open_port({spawn_driver, "tcp_inet"}, [binary]),
     ok = wait_registered(port_link_name, 100000),
     port_link_name ! {port, Port},
-    receive done -> ok after 6000 -> timeout end.
-
-%% The root that monitors a port of the other scheduler.
-port_monitor_use() ->
-    true = register(port_monitor_name, self()),
-    receive {port, Port} -> erlang:monitor(port, Port) end.
-
-port_monitor_give() ->
-    Port = open_port({spawn_executable, "/bin/cat"}, [binary]),
-    ok = wait_registered(port_monitor_name, 100000),
-    port_monitor_name ! {port, Port},
     receive done -> ok after 6000 -> timeout end.
 
 %% The root that waits for its own four-argument BIF timer.

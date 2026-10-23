@@ -471,6 +471,10 @@ name = "maps_math"
 path = "tests/integration/maps_math.rs"
 
 [[test]]
+name = "math_bifs"
+path = "tests/integration/math_bifs.rs"
+
+[[test]]
 name = "module_info"
 path = "tests/integration/module_info.rs"
 
@@ -669,6 +673,10 @@ path = "tests/integration/atomics.rs"
 [[test]]
 name = "nif_libraries"
 path = "tests/integration/nif_libraries.rs"
+
+[[test]]
+name = "asn1rt_nif"
+path = "tests/integration/asn1rt_nif.rs"
 
 [[test]]
 name = "zlib"

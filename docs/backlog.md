@@ -27,8 +27,8 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### Add bitstring terms
 
-- PBeam loads a `BIT_BINARY_EXT` literal as a bitstring term (#1005), but the binary-match and construction instructions do not make a bitstring whose size is not a multiple of 8 bits. The "Bitstring terms" row records this.
-- The work: the bitstring forms of the binary instructions and BIFs, such as the `binary` and `get_tail` commands of `bs_match`, `bs_get_binary2`, and `bs_get_tail` of a size that is not a multiple of 8 bits.
+- PBeam loads a `BIT_BINARY_EXT` literal as a bitstring term (#1005), and the binary-match instructions make one (#1008), but the construction instructions do not make a bitstring whose size is not a multiple of 8 bits. The "Bitstring terms" row records this.
+- The work: the bitstring forms of the binary instructions and BIFs, such as `bs_create_bin` of a size that is not a multiple of 8 bits (#1010).
 - **Trigger:** a measured path makes or loads a bitstring that is not a binary.
 - **Source:** #359 and #360.
 
@@ -156,8 +156,8 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### Run the other binary-match instructions
 
-- PBeam runs `bs_start_match3`, `bs_start_match4`, `bs_get_position`, `bs_set_position`, `bs_get_utf8`, `bs_skip_utf8`, `bs_get_utf16`, `bs_skip_utf16`, `bs_get_utf32`, `bs_skip_utf32`, `bs_get_tail`, `bs_get_binary2` with a size in a register or a literal integer, `bs_get_integer2`, `bs_skip_bits2`, `bs_match_string`, and `bs_match` with each command that the ERTS loader accepts. `move`, `bs_start_match3`, and `bs_start_match4` share a match context that they copy to another register, and `byte_size/1` reads a match context. `swap` and `bit_size/1` of a match context stop the run with `invariant error: the match context in <Operand> reached an instruction that is not a binary match`. After a failed `=:=` command of `bs_match`, PBeam does not know the position, so a read of the match context before `bs_set_position` stops the run with `unsupported read of the match context in <Operand> after a failed bs_match =:= command`. The remaining binary-match instruction, `bs_get_binary2` with the size `all`, stops the run with `unsupported BEAM opcode N`. The "Binary matching" row of `docs/erts-differences.md` records this, and this entry owns it. The entry "Add bitstring terms" owns the `binary` and `get_tail` commands, and the `bs_get_binary2` and `bs_get_tail` instructions, of a size that is not a multiple of 8 bits.
-- **Evidence:** `bs_match_probe:bits(<<165>>)` stops with `unsupported bs_match binary of 3 bits: needs a bitstring term`. The test `gives_a_runtime_error_for_a_read_after_a_failed_equal_command` of `tests/runtime/interpreter.rs` stops at a `skip` command after a failed `=:=`.
+- PBeam runs `bs_start_match3`, `bs_start_match4`, `bs_get_position`, `bs_set_position`, `bs_get_utf8`, `bs_skip_utf8`, `bs_get_utf16`, `bs_skip_utf16`, `bs_get_utf32`, `bs_skip_utf32`, `bs_get_tail`, `bs_get_binary2` with a size in a register or a literal integer, `bs_get_integer2`, `bs_skip_bits2`, `bs_match_string`, and `bs_match` with each command that the ERTS loader accepts. `move`, `bs_start_match3`, and `bs_start_match4` share a match context that they copy to another register, and `byte_size/1` reads a match context. `swap` and `bit_size/1` of a match context stop the run with `invariant error: the match context in <Operand> reached an instruction that is not a binary match`. After a failed `=:=` command of `bs_match`, PBeam does not know the position, so a read of the match context before `bs_set_position` stops the run with `unsupported read of the match context in <Operand> after a failed bs_match =:= command`. The remaining binary-match instruction, `bs_get_binary2` with the size `all`, stops the run with `unsupported BEAM opcode N`. The "Binary matching" row of `docs/erts-differences.md` records this, and this entry owns it.
+- **Evidence:** The test `gives_a_runtime_error_for_a_read_after_a_failed_equal_command` of `tests/runtime/interpreter.rs` stops at a `skip` command after a failed `=:=`.
 - **Trigger:** a measured path matches a binary with one of these instructions, gives a match context to `swap` or `bit_size/1`, or reads a match context after a failed `=:=` command without `bs_set_position`. Add only the instructions that the path needs.
 - **Source:** #219 (PR #227), #395, #396, #421.
 
@@ -301,7 +301,7 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### Bind the full function tables of the OTP NIF libraries
 
-- **Now:** the OTP NIF libraries `net`, `erl_tracer`, and `asn1rt_nif` have load-check tables with no bindings and `unbound_fails` (#868); `prim_socket` binds only `nif_supports/0,1` (#887); `zstd` binds only its context functions (#898); and `crypto`, `prim_file`, `prim_tty`, and `zlib` bind only part of their tables. A call of an unbound function of a library with `unbound_fails` gives `M:F/A NIF is not supported`; for `prim_file` and `prim_tty`, which do not set it, the call runs the BEAM stub body, which gives `erlang:nif_error(undef)`.
+- **Now:** the OTP NIF libraries `net` and `erl_tracer` have load-check tables with no bindings and `unbound_fails` (#868); `prim_socket` binds only `nif_supports/0,1` (#887); `zstd` binds only its context functions (#898); and `crypto`, `prim_file`, `prim_tty`, and `zlib` bind only part of their tables. A call of an unbound function of a library with `unbound_fails` gives `M:F/A NIF is not supported`; for `prim_file` and `prim_tty`, which do not set it, the call runs the BEAM stub body, which gives `erlang:nif_error(undef)`.
 - **Option:** bind each library in full against its pinned OTP source, one task for each library or function group, each function compared with pinned ERTS.
 - **Trigger:** an application that reaches an unbound function; the order follows the applications.
 - **Source:** owner comment of 2026-10-22 ("最终我们需要完整实现一遍").
@@ -622,3 +622,10 @@ The owner opened [m13] Foundation seams ([#908](https://github.com/fahchen/pbeam
 - **Open questions:** the identity of pids, references, ports, and timers after a resume; the resources that cannot move (ports, sockets, NIF resources, and ETS tables that the process does not own); a check that the saved code matches; and the capabilities that a saved state carries.
 - **Trigger:** an owner decision after M10, or a consumer such as live migration of a process, debugging, or a test that replays a run.
 - **Source:** owner request in chat, 2026-10-16.
+
+### Run `math:acosh/1`, `asinh/1`, `atanh/1`, `erf/1`, and `erfc/1` bit for bit
+
+- **Reason:** ERTS calls these functions of the C library of the platform (`erl_math.c:180-232`). Safe Rust has no stable binding of them: `f64::erf` and `f64::erfc` are unstable, `f64::atanh` gives a different result for `-0.5`, and an `extern` block needs `unsafe`. The `libm` crate differs by up to one unit in the last place from glibc and by up to two units (`erfc(2)`) from macOS arm64. Task #1052 keeps them `unsupported`.
+- **Evidence:** PR #1080: a comparison of the `libm` crate with glibc (Docker `gcc:14`) and with the pinned ERTS on macOS arm64.
+- **Trigger:** a consumer of one of these BIFs, and an owner decision on an `unsafe` C binding (an ADR) or on a stable `f64::erf`.
+- **Source:** Codex review of PR #1080, 2026-10-23.
