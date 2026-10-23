@@ -429,7 +429,7 @@ where
 /// let result = dirty(file::get_cwd, |scheduler, cwd| ok_tuple(&scheduler.atoms, cwd.map(Term::binary)))?;
 /// assert!(matches!(result, BifResult::Dirty(_)));
 /// ```
-fn dirty<T: Send + 'static>(
+pub(super) fn dirty<T: Send + 'static>(
     host: impl FnOnce() -> T + Send + 'static,
     finish: impl FnOnce(&mut Scheduler, T) -> Result<BifResult, BeamError> + Send + 'static,
 ) -> Result<BifResult, BeamError> {

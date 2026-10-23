@@ -14,6 +14,7 @@ pub(crate) mod errno;
 pub(crate) mod file;
 pub(crate) mod gethost;
 pub(crate) mod input;
+pub(crate) mod netdb;
 pub(crate) mod output;
 pub(crate) mod signal;
 pub(crate) mod spawn;
