@@ -5,8 +5,7 @@
 //! The encoder writes the tags of `external.h` for each term that PBeam can
 //! make. A local fun has no bytes that PBeam can compute: the `NEW_FUN_EXT`
 //! form holds the 16-byte unique value of the `FunT` entry, and PBeam does
-//! not load that value. A local fun, a record, a bitstring of a size that is
-//! not a whole number of bytes, and a pid, port, or reference of another
+//! not load that value. A local fun, a record, and a pid, port, or reference of another
 //! node fail with a runtime error. Row "External term format" of
 //! `docs/erts-differences.md` gives these differences.
 //!
@@ -295,9 +294,8 @@ pub(super) fn external_size(atoms: &AtomTable, term: &Term) -> Result<BifResult,
 ///
 /// # Errors
 ///
-/// A local fun, a match context, a bitstring that is not a whole number of
-/// bytes, and a record give a runtime error, and a full atom table gives
-/// its error.
+/// A local fun, a match context, and a record give a runtime error, and a
+/// full atom table gives its error.
 fn encode(term: &Term, atoms: &AtomTable, options: &Options) -> Result<Vec<u8>, BeamError> {
     let mut out = Vec::new();
     let mut pending = vec![term];
@@ -362,14 +360,25 @@ fn encode(term: &Term, atoms: &AtomTable, options: &Options) -> Result<Vec<u8>, 
                 }
             }
             Term::Binary(binary) => {
-                let Some(bytes) = binary.bytes() else {
-                    return Err(error(
-                        "unsupported erlang:term_to_binary/1,2 of a bitstring that is not a whole number of bytes: see \"External term format\" in docs/erts-differences.md",
-                    ));
-                };
-                out.push(109);
-                out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
-                out.extend_from_slice(bytes);
+                if let Some(bytes) = binary.bytes() {
+                    out.push(109);
+                    out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+                    out.extend_from_slice(bytes);
+                } else {
+                    // `BIT_BINARY_EXT` holds the byte count, the count of
+                    // the bits of the last byte, and the bytes with the
+                    // unused low bits of the last byte cleared
+                    // (`external.c:3861`, `3916-3935`).
+                    let tail = binary.bit_size() % 8;
+                    let bytes = &binary.bit_bytes()[..binary.bit_size().div_ceil(8)];
+                    out.push(77);
+                    out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+                    out.push(tail as u8);
+                    out.extend_from_slice(bytes);
+                    if let Some(last) = out.last_mut() {
+                        *last &= 0xFF << (8 - tail);
+                    }
+                }
             }
             Term::Pid(ProcessId(data)) => {
                 out.push(88);
@@ -1268,13 +1277,10 @@ impl Decoder<'_> {
                     if count == 0 || !(1..=8).contains(&bits) {
                         return Err(DecodeError::Badarg);
                     }
-                    let bytes = self.take(count)?;
-                    if bits != 8 {
-                        return Err(DecodeError::Unsupported(
-                            "a bitstring that is not a whole number of bytes",
-                        ));
-                    }
-                    Term::binary(bytes.to_vec())
+                    // `dec_term` keeps the high `bits` bits of the last
+                    // byte (`external.c:4895-4923`).
+                    let bytes = Binary::from(self.take(count)?.to_vec());
+                    Term::Binary(bytes.bits(0, count * 8 - (8 - usize::from(bits))))
                 }
                 110 => {
                     let count = usize::from(self.u8()?);

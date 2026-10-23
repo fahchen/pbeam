@@ -30,6 +30,41 @@ fn binary(bytes: &[u8]) -> Term {
     Term::binary(bytes.to_vec())
 }
 
+#[test]
+fn encodes_and_decodes_bitstrings_as_pinned_erts() {
+    // `external_term_probe:bits/0` on the pinned ERTS, measured with
+    // `mise run erts-eval --pa fixtures/external_term`. `enc_term` writes
+    // `BIT_BINARY_EXT` with the bit count of the last byte and clears its
+    // unused bits (`external.c:3861`, `3916-3935`); `dec_term` raises
+    // `badarg` for a bit count outside 1 to 8 or no bytes
+    // (`external.c:4895-4923`).
+    let program = load();
+    let nested = [
+        131, 104, 3, 77, 0, 0, 0, 1, 1, 128, 108, 0, 0, 0, 1, 77, 0, 0, 0, 1, 2, 128, 106, 116, 0,
+        0, 0, 1, 119, 1, 97, 77, 0, 0, 0, 1, 7, 6,
+    ];
+    let encoded = Term::list_from(vec![
+        binary(&[131, 77, 0, 0, 0, 1, 3, 32]),
+        binary(&[131, 77, 0, 0, 0, 2, 4, 1, 32]),
+        binary(&[131, 77, 0, 0, 0, 2, 3, 255, 224]),
+        binary(&nested),
+        binary(&[
+            131, 80, 0, 0, 0, 132, 120, 156, 243, 101, 96, 96, 168, 99, 102, 24, 72, 160, 0, 0,
+            104, 213, 0, 239,
+        ]),
+        binary(&nested),
+        binary(&[131, 77, 0, 0, 0, 6, 4, 1, 2, 3, 4, 5, 96]),
+    ]);
+    let badarg = Term::tuple(vec![atom(&program, "error"), atom(&program, "badarg")]);
+    let expected = Term::tuple(vec![
+        encoded,
+        Term::Integer(9),
+        Term::list_from(vec![atom(&program, "true"); 7]),
+        Term::list_from(vec![badarg; 4]),
+    ]);
+    assert_eq!(run(&program, "bits"), expected);
+}
+
 /// Return the elements of the proper list `term`.
 fn elements(term: &Term) -> Vec<Term> {
     term.proper_list()

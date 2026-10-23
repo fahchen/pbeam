@@ -43,6 +43,10 @@ pub(crate) struct Lambda {
     pub(super) old_index: i32,
     /// The old unique value of the `FunT` entry (`ErlFunEntry.old_uniq`).
     pub(super) old_unique: i32,
+    /// The MD5 of the module (`ErlFunEntry.uniq`), which the loader gives
+    /// each fun entry of the module (`jit/asm_load.c:1218-1223`,
+    /// `beam_file.c:1751-1830`).
+    uniq: [u8; 16],
     /// The entry label of the code of the lambda.
     label: u32,
     /// The number of arguments of a call of the fun, without the free
@@ -72,9 +76,46 @@ impl Lambda {
             index,
             old_index,
             old_unique,
+            uniq: [0; 16],
             label,
             arity,
         }
+    }
+
+    /// Return the fun entry with the module MD5 `uniq`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Lambda::new(atom, 0, 0, 1, 53, 1).with_uniq([7; 16]).uniq(), &[7; 16]);
+    /// ```
+    pub(crate) fn with_uniq(self, uniq: [u8; 16]) -> Self {
+        Self { uniq, ..self }
+    }
+
+    /// Return the MD5 of the module, as the loader keeps it in the `uniq`
+    /// field of the `ErlFunEntry` of the lambda (`jit/asm_load.c:1218-1223`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Lambda::new(atom, 0, 0, 1, 53, 1).uniq(), &[0; 16]);
+    /// ```
+    pub(crate) fn uniq(&self) -> &[u8; 16] {
+        &self.uniq
+    }
+
+    /// Return the position of the entry in the `FunT` chunk, as the loader
+    /// keeps it in the `old_index` field of the `ErlFunEntry` of the lambda
+    /// (`jit/asm_load.c:1218-1223`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Lambda::new(atom, 3, 2, 1, 53, 1).old_index(), 2);
+    /// ```
+    pub(crate) fn old_index(&self) -> i32 {
+        self.old_index
     }
 
     /// Return the module that defines the lambda.
@@ -193,8 +234,10 @@ impl Eq for Lambda {}
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Target {
-    /// A local fun of a lambda, which `make_fun3` makes.
-    Local(Lambda),
+    /// A local fun of a lambda, which `make_fun3` makes. The fun points to
+    /// the entry that the `make_fun3` of the code holds, as an ERTS fun
+    /// thing points to its `ErlFunEntry`.
+    Local(Arc<Lambda>),
     /// An external fun of `module:function/arity`, which
     /// `erlang:make_fun/3` makes. ERTS does not check that the function
     /// exists (`erts_export_get_or_make_stub` in `bif.c:4467-4485`).
@@ -335,8 +378,8 @@ impl Fun {
     /// let fun = Fun::new(lambda, vec![]);
     /// assert!(fun.free().is_empty());
     /// ```
-    pub(crate) fn new(lambda: Lambda, free: Vec<Term>) -> Self {
-        Self::of(Target::Local(lambda), free)
+    pub(crate) fn new(lambda: impl Into<Arc<Lambda>>, free: Vec<Term>) -> Self {
+        Self::of(Target::Local(lambda.into()), free)
     }
 
     /// Return the external fun of `module:function/arity`, as

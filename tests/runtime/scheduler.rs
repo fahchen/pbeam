@@ -13,8 +13,8 @@ use crate::term::{AtomTable, test_atom};
 use crate::{
     runtime::ets::{Access, Table, TableType},
     runtime::process::{
-        Monitor, Origin, OriginMonitor, PendingBif, ProcessState, ReceiveTimer, StackSlot, Start,
-        TimerReference,
+        BifCall, Monitor, Origin, OriginMonitor, PendingBif, ProcessState, ReceiveTimer, StackSlot,
+        Start, TimerReference,
         tests::{frame, test_scheduler, test_scheduler_without_checks},
     },
     runtime::signal::Signal,
@@ -508,15 +508,15 @@ fn frees_the_name_of_a_process_when_it_exits() {
         .unwrap();
     let name = Term::Atom(scheduler.atoms.put("pbeam_probe_reg").unwrap());
     assert_eq!(scheduler.whereis("pbeam_probe_reg"), None);
-    assert!(scheduler.register(&name, &Term::Pid(child)));
-    assert!(!scheduler.register(&name, &Term::Pid(ProcessId(0))));
+    assert_eq!(scheduler.register(&name, &Term::Pid(child)), Ok(()));
+    assert!(scheduler.register(&name, &Term::Pid(ProcessId(0))).is_err());
     assert_eq!(scheduler.whereis("pbeam_probe_reg"), Some(child));
     scheduler.park_current();
 
     scheduler.schedule_next().unwrap();
     scheduler.finish_current(atom("normal"), None).unwrap();
     assert_eq!(scheduler.whereis("pbeam_probe_reg"), None);
-    assert!(scheduler.register(&name, &Term::Pid(ProcessId(0))));
+    assert_eq!(scheduler.register(&name, &Term::Pid(ProcessId(0))), Ok(()));
     assert_eq!(scheduler.whereis("pbeam_probe_reg"), Some(ProcessId(0)));
     assert_eq!(
         scheduler.processes[&ProcessId(0)]
@@ -1154,6 +1154,12 @@ fn moves_the_containers_of_an_exiting_process_to_the_release_work_list() {
             function: "length",
             arguments: vec![marker(6)],
             tail: false,
+            origin: Some(BifCall {
+                module: "erlang".to_owned(),
+                name: "length".to_owned(),
+                arguments: vec![marker(6)],
+                skip: 0,
+            }),
         });
         process.length_trap = Some(vec![marker(7)]);
         process.monitors.insert(
@@ -1172,15 +1178,16 @@ fn moves_the_containers_of_an_exiting_process_to_the_release_work_list() {
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
     scheduler.finish_current(atom("normal"), None).unwrap();
     let items: Vec<&Release> = scheduler.release.iter().collect();
-    assert_eq!(items.len(), 8, "the exit moves eight containers");
+    assert_eq!(items.len(), 9, "the exit moves nine containers");
     assert!(matches!(items[0], Release::Terms(_)));
     assert!(matches!(items[1], Release::Terms(_)));
-    assert!(matches!(items[2], Release::Term(reason) if *reason == atom("normal")));
-    assert!(matches!(items[3], Release::Registers(_)));
-    assert!(matches!(items[4], Release::Frames(_)));
-    assert!(matches!(items[5], Release::Mailbox(_)));
-    assert!(matches!(items[6], Release::Dictionary(_)));
-    assert!(matches!(items[7], Release::Monitors(_)));
+    assert!(matches!(items[2], Release::Terms(_)));
+    assert!(matches!(items[3], Release::Term(reason) if *reason == atom("normal")));
+    assert!(matches!(items[4], Release::Registers(_)));
+    assert!(matches!(items[5], Release::Frames(_)));
+    assert!(matches!(items[6], Release::Mailbox(_)));
+    assert!(matches!(items[7], Release::Dictionary(_)));
+    assert!(matches!(items[8], Release::Monitors(_)));
     release_all(&mut scheduler);
     assert!(scheduler.release.is_empty());
 }
@@ -1217,6 +1224,7 @@ fn releases_the_terms_of_every_container_of_an_exiting_process() {
             function: "length",
             arguments: vec![pending.clone()],
             tail: false,
+            origin: None,
         });
         process.length_trap = Some(vec![length_trap.clone()]);
         process.monitors.insert(
@@ -1669,6 +1677,7 @@ fn counts_the_bytes_of_the_release_work_list() {
             function: "length",
             arguments: vec![marker(8)],
             tail: false,
+            origin: None,
         });
         process.length_trap = Some(vec![marker(9)]);
         process.monitors.insert(
@@ -1852,7 +1861,7 @@ fn counts_the_terms_of_a_map_drain_that_is_the_only_item() {
 #[test]
 fn removes_the_accept_of_a_process_that_exits_with_its_port_monitor_signal_pending() {
     use crate::runtime::port::{
-        Driver, Ports,
+        Driver,
         inet::{Acceptor, Inet, SocketType},
     };
     // At exit, a monitor signal that the process did not handle runs the
@@ -1890,16 +1899,18 @@ fn removes_the_accept_of_a_process_that_exits_with_its_port_monitor_signal_pendi
     };
     scheduler.send_signal(None, child, signal).unwrap();
     scheduler.finish_current(atom("normal"), None).unwrap();
-    let ports = scheduler.resources.borrow_mut::<Ports>();
-    let port = ports.get_mut(listen).unwrap().inet_mut().unwrap();
-    assert!(port.acceptors.is_empty());
+    let acceptors = scheduler
+        .node
+        .with_port(listen, |port| port.inet_mut().unwrap().acceptors.len())
+        .unwrap();
+    assert_eq!(acceptors, 0);
 }
 
 #[test]
 fn removes_a_reply_demonitor_port_monitor_from_the_port_at_the_alias_message() {
     use super::{AliasMode, signals::HandlingPoint};
     use crate::runtime::port::{
-        Driver, Ports,
+        Driver,
         inet::{Inet, SocketType},
     };
     // The first message through a `reply_demonitor` alias removes its port
@@ -1928,15 +1939,15 @@ fn removes_a_reply_demonitor_port_monitor_from_the_port_at_the_alias_message() {
         .handle_signals(id, 100, 100, HandlingPoint::ScheduleIn)
         .unwrap();
     assert!(scheduler.processes[&id].monitors.get(&alias).is_none());
-    let ports = scheduler.resources.borrow_mut::<Ports>();
-    assert!(ports.get_mut(port).unwrap().monitors.is_empty());
+    let monitors = scheduler.node.with_port(port, |port| port.monitors.len());
+    assert_eq!(monitors, Some(0));
 }
 
 #[test]
 fn sends_the_messages_of_an_active_socket_to_the_owner_and_ends_the_port() {
     use super::signals::HandlingPoint;
     use crate::runtime::port::{
-        Driver, Ports,
+        Driver,
         inet::{Event, Inet, SocketType},
     };
     use socket2::{Domain, Socket, Type};
@@ -1963,13 +1974,7 @@ fn sends_the_messages_of_an_active_socket_to_the_owner_and_ends_the_port() {
     let error = Term::tuple(vec![tcp_error, Term::Port(port), etimedout]);
     let closed = Term::tuple(vec![tcp_closed, Term::Port(port)]);
     assert_eq!(messages(&scheduler, id.0), [error, closed]);
-    assert!(
-        scheduler
-            .resources
-            .borrow_mut::<Ports>()
-            .get(port)
-            .is_none()
-    );
+    assert!(scheduler.node.ports().get(port).is_none());
     scheduler
         .handle_signals(id, 100, 100, HandlingPoint::ScheduleIn)
         .unwrap();
@@ -2021,7 +2026,7 @@ fn unlinks_the_new_owner_after_its_queued_link_signal_at_a_driver_exit() {
 fn drops_the_link_exit_signal_of_a_process_that_the_port_does_not_link() {
     use super::signals::HandlingPoint;
     use crate::runtime::port::{
-        Driver, Ports,
+        Driver,
         inet::{Inet, SocketType},
     };
     use socket2::{Domain, Socket, Type};
@@ -2049,8 +2054,11 @@ fn drops_the_link_exit_signal_of_a_process_that_the_port_does_not_link() {
         .open_port(b"tcp_inet".to_vec(), Driver::Inet(tcp))
         .unwrap();
     assert!(scheduler.connect_port(port, child));
-    let ports = scheduler.resources.borrow_mut::<Ports>();
-    assert!(ports.get_mut(port).unwrap().links.remove(&child).is_some());
+    let removed = scheduler
+        .node
+        .with_port(port, |port| port.links.remove(&child))
+        .unwrap();
+    assert!(removed.is_some());
     scheduler
         .handle_signals(child, 100, 100, HandlingPoint::ScheduleIn)
         .unwrap();
@@ -2058,8 +2066,7 @@ fn drops_the_link_exit_signal_of_a_process_that_the_port_does_not_link() {
     assert_eq!(links.get(&LinkId::Port(port)), Some(&0));
     let killed = Term::static_atom("killed");
     scheduler.port_link_exit(port, child, &killed);
-    let ports = scheduler.resources.borrow_mut::<Ports>();
-    assert!(ports.get(port).is_some());
+    assert!(scheduler.node.ports().get(port).is_some());
 }
 
 #[test]
@@ -2297,7 +2304,7 @@ fn a_host_signal_notification_reaches_a_remote_signal_server() {
 fn a_flushed_port_leaves_the_shared_port_table() {
     use super::node::Node;
     use crate::runtime::port::{
-        Driver, Ports,
+        Driver,
         inet::{Inet, SocketType},
     };
     let (node, mut readers) = Node::new(1).unwrap();
@@ -2313,22 +2320,47 @@ fn a_flushed_port_leaves_the_shared_port_table() {
     let port = scheduler
         .open_port(b"tcp_inet".to_vec(), Driver::Inet(tcp))
         .unwrap();
-    assert!(node.port_owner(port).is_some());
-    scheduler
-        .resources
-        .borrow_mut::<Ports>()
-        .get_mut(port)
-        .unwrap()
-        .closing = true;
+    assert!(node.ports().get(port).is_some());
+    scheduler.node.with_port(port, |port| port.closing = true);
     scheduler.tcp_flushed(port);
-    assert!(node.port_owner(port).is_none());
-    assert!(
-        scheduler
-            .resources
-            .borrow_mut::<Ports>()
-            .get(port)
-            .is_none()
+    assert!(node.ports().get(port).is_none());
+    assert!(scheduler.node.ports().get(port).is_none());
+}
+
+#[test]
+fn changes_nothing_on_a_port_that_closed() {
+    use crate::runtime::port::{
+        Driver,
+        inet::{Inet, SocketType},
+    };
+    let (node, mut readers) = Node::new(1).unwrap();
+    let mut scheduler = Scheduler::with_shared(
+        Arc::new(AtomTable::new()),
+        Arc::clone(&node),
+        0,
+        readers.remove(0),
     );
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let owner = current(&mut scheduler);
+    let tcp = Inet::new(SocketType::Stream);
+    let port = scheduler
+        .open_port(b"tcp_inet".to_vec(), Driver::Inet(tcp))
+        .unwrap();
+    // A handle that a scheduler took before the close sees the closed port
+    // under the port lock.
+    let cell = node.port(port).unwrap();
+    assert!(scheduler.close_port(port, atom("normal")));
+    assert!(crate::runtime::port::lock(&cell).is_none());
+    assert!(node.with_port(port, |_| ()).is_none());
+    // Each operation of a closed port, as after a close of another
+    // scheduler in between, changes nothing and does not panic.
+    assert!(!scheduler.close_port(port, atom("normal")));
+    scheduler.driver_exit(port, atom("normal"));
+    scheduler.port_end_of_file(port);
+    assert!(!scheduler.connect_port(port, owner));
+    scheduler.tcp_flushed(port);
+    assert!(node.ports().get(port).is_none());
 }
 
 #[test]
@@ -2478,10 +2510,16 @@ fn a_scheduler_registers_a_name_for_a_remote_process() {
         Scheduler::with_shared(Arc::new(atoms), Arc::clone(&node), 0, readers.remove(0));
     let remote = ProcessId(7);
     node.register(remote, 1);
-    assert!(scheduler.register(&Term::Atom(first.clone()), &Term::Pid(remote)));
+    assert_eq!(
+        scheduler.register(&Term::Atom(first.clone()), &Term::Pid(remote)),
+        Ok(())
+    );
     assert_eq!(scheduler.registered_name_of(remote), Some(first.clone()));
     // One process has one name.
-    assert!(!scheduler.register(&Term::Atom(second), &Term::Pid(remote)));
+    assert_eq!(
+        scheduler.register(&Term::Atom(second), &Term::Pid(remote)),
+        Err("registered_name")
+    );
     assert!(scheduler.unregister(&Term::Atom(first)));
     assert_eq!(scheduler.registered_name_of(remote), None);
 }

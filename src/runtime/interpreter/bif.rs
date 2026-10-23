@@ -181,9 +181,23 @@ impl BifResult {
     /// assert!(matches!(BifResult::badopt(), BifResult::ErrorWithCause { .. }));
     /// ```
     pub(super) fn badopt() -> BifResult {
+        BifResult::badarg_with_cause("badopt")
+    }
+
+    /// Return the `error:badarg` exception with the `error_info` cause
+    /// `cause`, as `BIF_ERROR(p, BADARG | EXF_HAS_EXT_INFO)` raises it
+    /// after `p->fvalue = Cause`, for example the cause `badtype` of
+    /// `monitor/2` (`bif.c:966-967`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(matches!(BifResult::badarg_with_cause("none"), BifResult::ErrorWithCause { .. }));
+    /// ```
+    pub(super) fn badarg_with_cause(cause: &'static str) -> BifResult {
         BifResult::ErrorWithCause {
             reason: Term::static_atom("badarg"),
-            cause: Term::static_atom("badopt"),
+            cause: Term::static_atom(cause),
         }
     }
 
@@ -931,13 +945,21 @@ impl BeamProgram {
     ///   change count of the table ([`ets::match_trap`]). ERTS traps to
     ///   `ets:select_trap/1` with a tuple that holds a magic reference to the
     ///   compiled pattern (`erl_db_hash.c:2264-2307`).
+    /// - `ets:reverse/3`, with the matches of a select with a limit on an
+    ///   `ordered_set` table, the reversed list so far, and the rest of the
+    ///   result ([`ets::reverse`]), as ERTS traps to the same export
+    ///   (`erl_db_tree.c:553-555`, `1199-1245`).
+    /// - `ets:select_delete_trap/1`, with the continuation of a select delete
+    ///   on an `ordered_set` table ([`ets::select_delete_trap`]), as ERTS
+    ///   traps to the same export (`erl_db.c:3387-3427`, `4817-4819`).
     /// - `ets:delete_trap/0`, which frees the segments of the table that
     ///   `ets:delete/1` deleted ([`ets::delete_trap`]). The segments that
     ///   remain stay in the ETS store under the caller. ERTS traps to
     ///   `ets:delete_trap/1` with a bignum that holds the table pointer
     ///   (`erl_db.c:3064-3077`, `5378-5397`).
-    /// - `erts_internal:list_to_bitstring_continue/5`, with the phase and the
-    ///   walk state of `erlang:iolist_to_binary/1` and `erlang:list_to_binary/1`
+    /// - `erts_internal:list_to_bitstring_continue/5,6`, with the phase and the
+    ///   walk state of `erlang:iolist_to_binary/1`, `erlang:list_to_binary/1`,
+    ///   and `erlang:list_to_bitstring/1`
     ///   ([`iolist::l2b_size`], [`iolist::l2b_copy`]). ERTS traps to
     ///   `erts_internal:list_to_bitstring_continue/1` with a magic reference
     ///   to the walk state (`erl_iolist.c:53-55`, `764-835`).
@@ -1053,6 +1075,27 @@ impl BeamProgram {
             let mut context = BifContext { scheduler };
             return ets::match_objects(&mut context, table, pattern, Some(limit));
         }
+        if let ("ets", "reverse", [list, result, rest]) = (module, function, arguments.as_slice()) {
+            return Ok(ets::reverse(
+                &mut BifContext { scheduler },
+                list,
+                result,
+                rest,
+            ));
+        }
+        if let ("ets", "select_delete_trap", [Term::Tuple(continuation)]) =
+            (module, function, arguments.as_slice())
+            && let [
+                table,
+                last,
+                least,
+                Term::Reference(program),
+                Term::Integer(count),
+            ] = &continuation[..]
+        {
+            let fields = (table, last, least, *program, *count);
+            return ets::select_delete_trap(&mut BifContext { scheduler }, &arguments, fields);
+        }
         if let ("ets", "info", [table, item]) = (module, function, arguments.as_slice()) {
             let mut context = BifContext { scheduler };
             return ets::info(&mut context, table, item);
@@ -1082,7 +1125,8 @@ impl BeamProgram {
         ) = (module, function, arguments.as_mut_slice())
             && let Some(stack) = stack.proper_list()
         {
-            let bytes = std::mem::take(bytes).take_bytes();
+            let bits = bytes.bit_size() as u64;
+            let bytes = BitWriter::from_bytes(std::mem::take(bytes).take_bytes(), bits);
             let process = scheduler.current_process_mut();
             let reds_left = process.bif_reductions_left()? as i64;
             return Ok(iolist::l2b_copy(
@@ -1268,10 +1312,23 @@ impl BeamProgram {
             (
                 "erts_internal",
                 "list_to_bitstring_continue",
-                [Term::Atom(phase), arg, term, stack, Term::Integer(size)],
+                [
+                    Term::Atom(phase),
+                    arg,
+                    term,
+                    stack,
+                    Term::Integer(size),
+                    Term::Integer(unit),
+                ],
             ) if phase.is_static("size")
                 && let Some(stack) = stack.proper_list() =>
             {
+                // Only `l2b_size` makes this trap, with the unit 1 or 8.
+                let unit = iolist::Unit::from_bits(*unit).ok_or_else(|| {
+                    error(format!(
+                        "invariant error: the unit {unit} of a list_to_bitstring trap is not 1 or 8"
+                    ))
+                })?;
                 let reds_left = process.bif_reductions_left()? as i64;
                 Ok(iolist::l2b_size(
                     process,
@@ -1280,6 +1337,7 @@ impl BeamProgram {
                     term,
                     &stack.collect::<Vec<_>>(),
                     *size as usize,
+                    unit,
                 ))
             }
             ("erlang", "bif_handle_signals_return", [_, value]) => {

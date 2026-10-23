@@ -1,5 +1,5 @@
 -module(external_term_probe).
--export([literals/0, options/0, decode/0, used/0, sizes/0, errors/0, decode_fun/0]).
+-export([literals/0, options/0, decode/0, used/0, sizes/0, errors/0, decode_fun/0, bits/0]).
 
 -define(VALUES,
         [0, 255, 256, -1, 1 bsl 40, -(1 bsl 40), 1 bsl 70, -(1 bsl 70),
@@ -91,3 +91,27 @@ decode_fun() ->
     binary_to_term(<<131, 112, 0:232, 119, 6, "erlang", 97, 0, 97, 0,
                      88, 119, 13, "nonode@nohost", 0, 0, 0, 5,
                      0, 0, 0, 0, 0, 0, 0, 0>>).
+
+bits() ->
+    Tail = id(<<255, 7:3>>),
+    Nested = {<<1:1>>, [<<2:2>>], #{a => <<3:7>>}},
+    Encoded = [term_to_binary(<<1:3>>), term_to_binary(<<1, 2:4>>),
+               term_to_binary(Tail), term_to_binary(Nested),
+               term_to_binary(<<0:1000, 1:3>>, [compressed]),
+               term_to_binary(Nested, [deterministic]),
+               term_to_binary(<<1, 2, 3, 4, 5, 6:4>>, [{minor_version, 1}])],
+    Decoded = [binary_to_term(B) =:= T
+               || {B, T} <- [{<<131, 77, 0, 0, 0, 1, 3, 255>>, <<7:3>>},
+                             {<<131, 77, 0, 0, 0, 1, 8, 255>>, <<255>>}]]
+        ++ [binary_to_term(term_to_binary(T)) =:= T
+            || T <- [<<1:3>>, <<1, 2:4>>, Tail, Nested]]
+        ++ [binary_to_term(<<131, 77, 0, 0, 0, 1, 3, 255>>, [safe]) =:= <<7:3>>],
+    Errors = [try binary_to_term(B) catch C:R -> {C, R} end
+              || B <- [<<131, 77, 0, 0, 0, 1, 0, 255>>,
+                       <<131, 77, 0, 0, 0, 1, 9, 255>>,
+                       <<131, 77, 0, 0, 0, 0, 3>>,
+                       <<131, 77, 0, 0, 0, 2, 3, 1>>]],
+    {Encoded, erlang:external_size(Tail), Decoded, Errors}.
+
+id(X) ->
+    X.

@@ -117,8 +117,8 @@ infos() ->
      try erlang:fun_info(Pair, native) catch error:R3 -> R3 end,
      try erlang:fun_info(Ext, native_address) catch error:R4 -> R4 end].
 
-%% The fun_info/2 items that PBeam refuses with a runtime error because the
-%% loader keeps no such value.
+%% The fun_info/2 items of the fun entry of a local fun: index, new_uniq,
+%% and pid.
 fun_info_unsupported(Item) ->
     Tag = id(tag),
     Pair = fun(X) -> {Tag, X} end,

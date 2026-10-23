@@ -3,8 +3,8 @@ use super::{
     capability::{Policy, Restriction},
     dirty::{Output, Work},
     process::{
-        DirtyCall, Frame, PendingBif, PendingTrap, ProcessState, ReceiveTimer, StackSlot, Start,
-        StartFlags,
+        BifCall, DirtyCall, Frame, PendingBif, PendingTrap, ProcessState, ReceiveTimer, StackSlot,
+        Start, StartFlags,
     },
     scheduler::{PolicyEnd, Received, Scheduler, Turn, node::Node},
     tty::{InitialMode, Ttys},
@@ -1229,12 +1229,40 @@ impl BeamProgram {
             function,
             arguments,
             tail,
+            origin,
         }) = scheduler.current_process_mut().pending_bif.take()
         {
-            // ponytail: an error after the trap keeps the stack trace `[]`;
-            // see the backlog entry "Give the stack trace of a BIF error
-            // after a trap".
+            // The `lists` BIFs trap to their own export with the rest of
+            // the list in the registers, and an error after the trap keeps
+            // these registers (`BIF_TRAP2` and `BIF_ERROR`,
+            // `erl_bif_lists.c:1129-1139`, `1191`, `1240-1243`). The other
+            // BIFs put the original arguments back
+            // (`ERTS_BIF_ERROR_TRAPPED1`, `bif.h:242-249`).
+            let registers = (module == "lists").then(|| arguments.clone());
             let result = self.bif_trap(scheduler, module, function, arguments)?;
+            let result = match origin {
+                Some(call)
+                    if matches!(
+                        result,
+                        BifResult::Raise { .. } | BifResult::ErrorWithCause { .. }
+                    ) =>
+                {
+                    let BifCall {
+                        module,
+                        name,
+                        arguments,
+                        skip,
+                    } = call;
+                    let arguments = registers.unwrap_or(arguments);
+                    bif_error(scheduler, &module, &name, arguments, result, skip)?
+                }
+                // The BIF traps again and keeps the call.
+                Some(call) if matches!(result, BifResult::TrapBif { .. }) => {
+                    scheduler.current_process_mut().trap_origin = Some(call);
+                    result
+                }
+                _ => result,
+            };
             if let Some(outcome) = self.finish_bif(scheduler, result, tail)? {
                 return Ok(outcome);
             }
@@ -1455,7 +1483,7 @@ impl BeamProgram {
                         .iter()
                         .map(|operand| read(process, operand))
                         .collect::<Result<_, _>>()?;
-                    let fun = Term::Fun(Fun::new((**lambda).clone(), free));
+                    let fun = Term::Fun(Fun::new(Arc::clone(lambda), free));
                     write(process, destination, fun)?;
                 }
                 Instruction::CallFun {
@@ -1759,8 +1787,11 @@ impl BeamProgram {
                     })? {
                         Update::Written => {}
                         // `put_map_assoc` has no fail label and no exception
-                        // of its own. ERTS raises `{badmap, Map}`; see
-                        // "Exception raise sites" in docs/erts-differences.md.
+                        // of its own. The compiler puts an `is_map` test and
+                        // an `erlang:error({badmap, Map})` call before it, so
+                        // compiled code gives it only a map. ERTS asserts a
+                        // map and has no exception for another term
+                        // (`beam_common.c:1981-1985`).
                         Update::Missing(_) | Update::Reason(_) => {
                             return Err(error("unsupported BEAM put_map_assoc source: not a map"));
                         }
@@ -1980,21 +2011,14 @@ impl BeamProgram {
                 // ERTS `bs_get_tail` writes the bits after the position as
                 // a sub-bitstring and keeps the position
                 // (`emit_bs_get_tail` and `emit_bs_get_tail_shared` in
-                // jit/arm/instr_bs.cpp:407-454). PBeam has no bitstring
-                // term (row "Binary matching" of docs/erts-differences.md).
+                // jit/arm/instr_bs.cpp:407-454).
                 Instruction::BinaryGetTail {
                     context,
                     destination,
                 } => {
                     let (process, atoms) = scheduler.current_process_and_atoms();
                     let state = match_context(process, context, atoms)?;
-                    let bits = state.remaining_bits();
-                    let Some(tail) = state.tail() else {
-                        return Err(error(format!(
-                            "unsupported bs_get_tail of {bits} bits: needs a bitstring term"
-                        )));
-                    };
-                    write(process, destination, Term::Binary(tail))?;
+                    write(process, destination, Term::Binary(state.tail()))?;
                 }
                 // ERTS `i_bs_get_binary2` checks the size
                 // (`binary_field_size`), then reads the bits as a
@@ -2022,16 +2046,9 @@ impl BeamProgram {
                         .and_then(|bits| Some((bits, state.advance(bits)?)));
                     match bytes {
                         Some((bits, ())) => {
-                            if !bits.is_multiple_of(8) {
-                                return Err(error(format!(
-                                    "unsupported bs_get_binary2 of {bits} bits: needs a bitstring term"
-                                )));
-                            }
                             let position = state.position();
-                            let bytes = state.bits_at(position - bits as usize, position).expect(
-                                "the size of a bs_get_binary2 view is a whole number of bytes",
-                            );
-                            write(process, destination, Term::Binary(bytes))?;
+                            let bits = state.bits_at(position - bits as usize, position);
+                            write(process, destination, Term::Binary(bits))?;
                         }
                         None => cursor.position = label_position(*fail_label)?,
                     }
@@ -3022,10 +3039,12 @@ impl BeamProgram {
             };
             // A tail apply or a tail fun call removed the frame of the
             // caller in ERTS, so its return address is in the function
-            // before it.
+            // before it. A trap keeps the call for an error after the trap.
             let result = if matches!(
                 result,
-                BifResult::Raise { .. } | BifResult::ErrorWithCause { .. }
+                BifResult::Raise { .. }
+                    | BifResult::ErrorWithCause { .. }
+                    | BifResult::TrapBif { .. }
             ) {
                 let (module_name, name) = {
                     let atoms = &scheduler.atoms;
@@ -3645,11 +3664,13 @@ impl BeamProgram {
                 function,
                 arguments,
             } => {
+                let origin = process.trap_origin.take();
                 process.pending_bif = Some(PendingBif {
                     module,
                     function,
                     arguments,
                     tail,
+                    origin,
                 });
                 Ok(Some(Outcome::Yield))
             }
@@ -3664,6 +3685,7 @@ impl BeamProgram {
                     function,
                     arguments,
                     tail,
+                    origin: None,
                 });
                 Ok(Some(Outcome::Wait))
             }
@@ -3673,6 +3695,7 @@ impl BeamProgram {
                     function: "await_grant",
                     arguments: Vec::new(),
                     tail,
+                    origin: None,
                 });
                 Ok(Some(Outcome::Wait))
             }
@@ -5326,10 +5349,9 @@ fn match_context_escape(operand: &Operand) -> BeamError {
 /// # Errors
 ///
 /// A command that reads more bits than remain gives a runtime invariant
-/// error. An integer outside the 64-bit signed range needs a bignum, and
-/// a `binary` or `get_tail` of a size that is not a multiple of 8 bits
-/// needs a bitstring term: each gives a runtime error (rows "Integer
-/// range" and "Binary matching" of docs/erts-differences.md).
+/// error. An integer outside the 64-bit signed range needs a bignum and
+/// gives a runtime error (row "Integer range" of
+/// docs/erts-differences.md).
 ///
 /// # Examples
 ///
@@ -5351,16 +5373,6 @@ fn binary_match(
 ) -> Result<bool, BeamError> {
     let context = match_context(process, context, atoms)?;
     let state = &*context;
-    // A binary of `size` bits, or a runtime error for a bitstring.
-    let binary_size = |command: &str, size: u64| {
-        if size.is_multiple_of(8) {
-            Ok(())
-        } else {
-            Err(error(format!(
-                "unsupported bs_match {command} of {size} bits: needs a bitstring term"
-            )))
-        }
-    };
     for command in commands {
         let remaining = state.remaining_bits() as u64;
         let too_few_bits = |size: &u64| {
@@ -5395,13 +5407,13 @@ fn binary_match(
                 write(process, destination, Term::Integer(value))?;
             }
             BinaryMatchCommand::Binary { size, destination } => {
-                // `binary_size` gives the runtime error for a size that is
-                // not a whole number of bytes, which is a bitstring. ERTS
-                // also reads a binary segment at a bit position that is not
-                // on a byte boundary (`GET_BITSTRING`,
-                // jit/arm/instr_bs.cpp:3136-3176), and `read_bytes` gives
-                // such a segment a view of its bits.
-                binary_size("binary", *size)?;
+                // ERTS reads a segment of any size at any bit position: a
+                // segment of more than 64 bits as a sub-bitstring
+                // (`GET_BITSTRING`, jit/arm/instr_bs.cpp:3136-3176), and a
+                // smaller one as a heap bitstring copy (`READ` and
+                // `EXTRACT_BITSTRING`, instr_bs.cpp:3047-3054). The value is
+                // the same, and `read_bytes` gives the segment a view of its
+                // bits.
                 let bytes = state.read_bytes(*size).ok_or_else(|| too_few_bits(size))?;
                 write(process, destination, Term::Binary(bytes))?;
             }
@@ -5414,17 +5426,10 @@ fn binary_match(
                 }
             }
             BinaryMatchCommand::GetTail { destination } => {
-                // `binary_size` gives the runtime error for a size that is
-                // not a whole number of bytes, which is a bitstring. ERTS
-                // writes the bits after the position as a sub-bitstring
-                // (`emit_bs_get_tail_shared`, jit/arm/instr_bs.cpp:407-439),
-                // and a position that is not on a byte boundary gives a
-                // bitstring, which PBeam does not have.
-                binary_size("get_tail", remaining)?;
-                let tail = state
-                    .tail()
-                    .expect("binary_size checked the size of a get_tail");
-                write(process, destination, Term::Binary(tail))?;
+                // ERTS writes the bits after the position as a
+                // sub-bitstring (`emit_bs_get_tail_shared`,
+                // jit/arm/instr_bs.cpp:407-439), at any bit position.
+                write(process, destination, Term::Binary(state.tail()))?;
             }
             BinaryMatchCommand::Skip { size } => {
                 state.skip(*size).ok_or_else(|| too_few_bits(size))?;
@@ -5477,6 +5482,15 @@ enum BinaryPart<'a> {
     /// segment number, and its unit. The handle keeps the arrays of the
     /// binary, so an append can share them and copy no byte of the segment.
     Shared(Binary, usize, u64, u64),
+    /// A `binary` segment with a size: its segment number, its term, and
+    /// the number of bits that it copies from the start of the term. ERTS
+    /// checks the term at the construct pass (`erts_bs_put_binary`,
+    /// erl_bits.c:1285-1308).
+    Sized {
+        segment: u64,
+        value: Term,
+        bits: u64,
+    },
     Integer {
         segment: u64,
         value: Term,
@@ -5526,6 +5540,29 @@ impl BinaryPart<'_> {
             // A size in bits that is not a multiple of the unit fails in the
             // construct pass (`erts_bs_put_binary_all`, erl_bits.c:1321-1324;
             // `BSC_INFO_UNIT`, jit/arm/instr_bs.cpp:2033-2047).
+            // A term that is not a bitstring, or that has fewer bits than
+            // the size, fails with the info `type` or `short`
+            // (`erts_bs_put_binary`, erl_bits.c:1290-1300; `BSC_INFO_DEPENDS`,
+            // jit/arm/instr_bs.cpp:2068-2071).
+            BinaryPart::Sized {
+                segment,
+                value,
+                bits,
+            } => match value {
+                Term::Binary(binary) if binary.bit_size() as u64 >= *bits => None,
+                Term::Binary(_) => Some(BinarySegmentFailure::badarg(
+                    *segment,
+                    "binary",
+                    "short",
+                    value.clone(),
+                )),
+                _ => Some(BinarySegmentFailure::badarg(
+                    *segment,
+                    "binary",
+                    "type",
+                    value.clone(),
+                )),
+            },
             BinaryPart::Shared(binary, _, segment, unit)
                 if !(binary.bit_size() as u64).is_multiple_of(*unit) =>
             {
@@ -5545,7 +5582,9 @@ impl BinaryPart<'_> {
         match self {
             BinaryPart::Bytes(bytes, _) => !bytes.is_empty(),
             BinaryPart::Shared(binary, ..) => binary.bit_size() > 0,
-            BinaryPart::Integer { bits, .. } | BinaryPart::Float { bits, .. } => *bits > 0,
+            BinaryPart::Integer { bits, .. }
+            | BinaryPart::Float { bits, .. }
+            | BinaryPart::Sized { bits, .. } => *bits > 0,
             BinaryPart::Utf8(_) | BinaryPart::Utf16 { .. } | BinaryPart::Utf32 { .. } => true,
         }
     }
@@ -5680,6 +5719,7 @@ fn shared_append_arrays(parts: &[BinaryPart<'_>]) -> Option<Vec<(Arc<Vec<u8>>, u
                 }
             }
             BinaryPart::Shared(..)
+            | BinaryPart::Sized { .. }
             | BinaryPart::Integer { .. }
             | BinaryPart::Utf8(_)
             | BinaryPart::Float { .. } => {
@@ -5853,6 +5893,15 @@ fn create_binary(
                     *unit,
                 ));
             }
+            BinarySegment::Binary {
+                segment,
+                unit,
+                source,
+                size,
+            } => match sized_binary_part(process, *segment, *unit, source, size)? {
+                Ok(part) => parts.push(part),
+                Err(failure) => return Ok(Err(failure)),
+            },
             BinarySegment::Append {
                 segment,
                 unit,
@@ -6031,14 +6080,18 @@ fn create_binary(
         }
         return Ok(Ok(Term::Binary(Binary::concat_arrays(start, chunks))));
     }
-    let bytes = match write_binary_parts(process, &parts)? {
-        Ok(bytes) => bytes,
+    let (bytes, bits) = match write_binary_parts(process, &parts)? {
+        Ok(written) => written,
         Err(failure) => return Ok(Err(failure)),
     };
-    Ok(Ok(match &prefix {
-        Some(start) => Term::Binary(Binary::concat(start, &bytes)),
-        None => Term::binary(bytes),
-    }))
+    Ok(Ok(Term::Binary(match &prefix {
+        Some(start) if bits.is_multiple_of(8) => Binary::concat(start, &bytes),
+        Some(start) => {
+            let size = start.bit_size() + bits as usize;
+            Binary::concat(start, &bytes).bits(0, size)
+        }
+        None => bitstring(bytes, bits),
+    })))
 }
 
 /// Return the code point of a `utf16` or `utf32` segment of the term
@@ -6064,7 +6117,7 @@ fn utf_segment_code_point(value: &Term) -> Option<u32> {
 }
 
 /// Run the construct pass of `bs_create_bin` over `parts` and return the
-/// bytes that the parts write, or the failure of the first part in the
+/// bytes and the number of bits that the parts write, or the failure of the first part in the
 /// order of `integer_type_failure`. A `string` or `binary` part uses its
 /// reductions. A `float` part writes the bits of `float_segment_bits`, as
 /// `erts_bs_put_float` writes them (erl_bits.c:1454-1520).
@@ -6073,17 +6126,17 @@ fn utf_segment_code_point(value: &Term) -> Option<u32> {
 ///
 /// ```rust,ignore
 /// let parts = [BinaryPart::Utf8('a')];
-/// assert_eq!(write_binary_parts(&mut process, &parts)?, Ok(b"a".to_vec()));
+/// assert_eq!(write_binary_parts(&mut process, &parts)?, Ok((b"a".to_vec(), 8)));
 /// ```
 ///
 /// # Errors
 ///
-/// A bignum `integer` part of more than 64 bits, a 16-bit `float` part, or
-/// bytes whose size in bits is not a multiple of 8 is a runtime error.
+/// A bignum `integer` part of more than 64 bits or a 16-bit `float` part is
+/// a runtime error.
 fn write_binary_parts(
     process: &mut ProcessState,
     parts: &[BinaryPart<'_>],
-) -> Result<Result<Vec<u8>, BinarySegmentFailure>, BeamError> {
+) -> Result<Result<(Vec<u8>, u64), BinarySegmentFailure>, BeamError> {
     let mut writer = BitWriter::default();
     for (index, part) in parts.iter().enumerate() {
         match part {
@@ -6095,8 +6148,24 @@ fn write_binary_parts(
                 return Ok(Err(failure));
             }
             BinaryPart::Shared(binary, reductions, ..) => {
-                writer.push_binary(binary);
+                writer.push_binary(binary, binary.bit_size());
                 process.bump_reductions(i32::try_from(*reductions).unwrap_or(i32::MAX));
+            }
+            BinaryPart::Sized {
+                value: Term::Binary(binary),
+                bits,
+                ..
+            } if binary.bit_size() as u64 >= *bits => {
+                // `erts_bs_put_binary` uses one reduction for each 8192
+                // copied bits (erl_bits.c:1306).
+                writer.push_binary(binary, *bits as usize);
+                let reductions = *bits / BITS_PER_REDUCTION as u64;
+                process.bump_reductions(i32::try_from(reductions).unwrap_or(i32::MAX));
+            }
+            BinaryPart::Sized { .. } => {
+                return Ok(Err(part
+                    .type_failure()
+                    .expect("a sized part that cannot be written has a failure")));
             }
             BinaryPart::Integer {
                 value: Term::Integer(value),
@@ -6165,11 +6234,62 @@ fn write_binary_parts(
             },
         }
     }
-    writer.into_bytes().map(Ok).map_err(|bits| {
-        error(format!(
-            "unsupported bs_create_bin result: a bitstring of {bits} bits, which is not a binary"
-        ))
+    Ok(Ok(writer.into_bytes()))
+}
+
+/// Return the part of a `binary` segment of a size, or the failure of its
+/// size. The size pass checks the size as the size of an `integer` segment
+/// (jit/arm/instr_bs.cpp:1639-1689). A literal size has no check
+/// (jit/arm/instr_bs.cpp:1493-1505, 2005-2018). The function stays out of
+/// line, so the code of the other segments keeps its size.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // <<A:2/binary>> with A in x0
+/// let part = sized_binary_part(&mut process, 1, 8, &Operand::X(0), &Operand::Value(Term::Integer(2)))?;
+/// assert!(matches!(part, Ok(BinaryPart::Sized { bits: 16, .. })));
+/// ```
+#[inline(never)]
+fn sized_binary_part(
+    process: &mut ProcessState,
+    segment: u64,
+    unit: u64,
+    source: &Operand,
+    size: &Operand,
+) -> Result<Result<BinaryPart<'static>, BinarySegmentFailure>, BeamError> {
+    let fixed =
+        matches!(size, Operand::Value(Term::Integer(literal)) if (0..1 << 56).contains(literal));
+    let size = read(process, size)?;
+    Ok(match integer_segment_bits(fixed, &size, unit) {
+        Ok(bits) => Ok(BinaryPart::Sized {
+            segment,
+            value: read(process, source)?,
+            bits,
+        }),
+        Err(reason) => Err(BinarySegmentFailure {
+            reason,
+            ..BinarySegmentFailure::badarg(segment, "binary", "size", size)
+        }),
     })
+}
+
+/// Return the bitstring of the `bits` bits at the start of `bytes`, the
+/// output of a `BitWriter`. A size that is not a multiple of 8 bits gives a
+/// view of the first `bits` bits, which copies no byte.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(bitstring(vec![0x10], 4).bit_size(), 4);
+/// ```
+fn bitstring(bytes: Vec<u8>, bits: u64) -> Binary {
+    let binary = Binary::from(bytes);
+    if bits.is_multiple_of(8) {
+        binary
+    } else {
+        binary.bits(0, bits as usize)
+    }
 }
 
 /// Run a `bs_create_bin` whose first segment is `private_append`, as ERTS
@@ -6199,16 +6319,15 @@ fn write_binary_parts(
 ///
 /// A term in `source` that is not a binary is a runtime invariant error,
 /// because the compiler gives this segment only a binary that
-/// `bs_init_writable` made. That binary holds whole bytes: it starts with no
-/// byte, and `write_binary_parts` stops each append whose bits do not end
-/// on a byte boundary. The errors of `write_binary_parts` also apply.
+/// `bs_init_writable` made or that an earlier `private_append` gave. The
+/// errors of `write_binary_parts` also apply.
 fn private_append(
     process: &mut ProcessState,
     source: &Operand,
     parts: &[BinaryPart<'_>],
 ) -> Result<Result<Term, BinarySegmentFailure>, BeamError> {
-    let bytes = match write_binary_parts(process, parts)? {
-        Ok(bytes) => bytes,
+    let (bytes, bits) = match write_binary_parts(process, parts)? {
+        Ok(written) => written,
         Err(failure) => return Ok(Err(failure)),
     };
     let mut value = read(process, source)?;
@@ -6218,8 +6337,22 @@ fn private_append(
         )));
     };
     write(process, source, Term::Nil)?;
-    if !binary.append_in_place(&bytes) {
-        *binary = Binary::concat(binary, &bytes);
+    if !binary.bit_size().is_multiple_of(8) {
+        // The bits of the old bitstring do not end on a byte boundary, so
+        // the writer copies them, and then the new bits.
+        let mut writer = BitWriter::default();
+        writer.push_binary(binary, binary.bit_size());
+        writer.push_binary(&bitstring(bytes, bits), bits as usize);
+        let (bytes, bits) = writer.into_bytes();
+        *binary = bitstring(bytes, bits);
+    } else {
+        let size = binary.bit_size() + bits as usize;
+        if !binary.append_in_place(&bytes) {
+            *binary = Binary::concat(binary, &bytes);
+        }
+        if !bits.is_multiple_of(8) {
+            *binary = binary.bits(0, size);
+        }
     }
     write(process, source, value.clone())?;
     Ok(Ok(value))
@@ -6466,7 +6599,9 @@ fn stacktrace_from(scheduler: &mut Scheduler, first: Term, skip: usize) -> Resul
 /// the caller of that function, and else 0. The error BIFs
 /// `erlang:error/1,2,3`, `erlang:exit/1`, and `erlang:throw/1` give their
 /// own stack trace (`beam_common.c:907-924`) as
-/// [`BifResult::RaiseWithStacktrace`], so they keep it.
+/// [`BifResult::RaiseWithStacktrace`], so they keep it. A
+/// [`BifResult::TrapBif`] keeps the call in `trap_origin` of the process,
+/// so that an error after the trap gets the frame of the call.
 ///
 /// # Examples
 ///
@@ -6492,6 +6627,15 @@ fn bif_error(
     let (class, reason, cause) = match result {
         BifResult::Raise { class, reason } => (class, reason, None),
         BifResult::ErrorWithCause { reason, cause } => (ExceptionClass::Error, reason, Some(cause)),
+        result @ BifResult::TrapBif { .. } => {
+            scheduler.current_process_mut().trap_origin = Some(BifCall {
+                module: module.to_owned(),
+                name: name.to_owned(),
+                arguments,
+                skip,
+            });
+            return Ok(result);
+        }
         result => return Ok(result),
     };
     // The format modules of `save_stacktrace` (`beam_common.c:939-991`).
