@@ -232,6 +232,7 @@ fn tag(term: &Term) -> u8 {
         Term::Cons(_) => 10,
         Term::Binary(_) | Term::MatchContext(_) => 11,
         Term::Map(_) => 12,
+        Term::Record(_) => 13,
     }
 }
 

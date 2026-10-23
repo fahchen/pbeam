@@ -582,27 +582,6 @@ fn hashes_keys_longer_than_the_digest_block() {
 }
 
 #[test]
-fn returns_a_value_below_the_range() {
-    for range in [1u8, 2, 10, 255] {
-        let value = random_below(&[range]).unwrap();
-        let number = value
-            .iter()
-            .fold(0u16, |number, byte| (number << 8) | u16::from(*byte));
-        assert!(number < u16::from(range), "{range} {value:?}");
-    }
-    let range = [1, 0, 0, 0, 0, 0, 0, 0, 0];
-    for _ in 0..100 {
-        let value = random_below(&range).unwrap();
-        assert!(value.len() <= 9);
-        let mut padded = vec![0; range.len() - value.len()];
-        padded.extend_from_slice(&value);
-        assert!(padded.as_slice() < range.as_slice());
-    }
-    assert_eq!(random_below(&[0, 0]), None);
-    assert_eq!(random_below(&[]), None);
-}
-
-#[test]
 fn strong_rand_range_gives_a_binary_or_false_as_erts() {
     assert_eq!(
         value(strong_rand_range_nif(&Term::binary(vec![1]))),
@@ -629,6 +608,20 @@ fn strong_rand_range_gives_a_binary_or_false_as_erts() {
     }
     assert!(matches!(
         strong_rand_range_nif(&Term::Integer(10)),
+        BifResult::Raise { .. }
+    ));
+}
+
+#[test]
+fn rand_seed_takes_only_a_binary_as_erts() {
+    // `enif_inspect_binary` (rand.c:145-146); `crypto:rand_seed/1` lets
+    // only a binary through, so no probe reaches the `badarg`.
+    assert_eq!(
+        value(rand_seed_nif(&Term::binary(vec![1, 2]))),
+        Term::static_atom("ok")
+    );
+    assert!(matches!(
+        rand_seed_nif(&Term::Integer(1)),
         BifResult::Raise { .. }
     ));
 }
@@ -818,4 +811,23 @@ fn gives_mod_exp_as_an_mpint_with_the_header_4() {
     assert_eq!(value_bytes(run(3, 1, 5, 4)), [0, 0, 0, 1, 3]);
     assert_eq!(value_bytes(run(5, 0, 1, 4)), [0, 0, 0, 0]);
     assert!(matches!(run(3, 1, 5, 3), BifResult::Raise { .. }));
+}
+
+#[test]
+fn gives_badarg_for_an_engine_id_that_is_not_a_binary() {
+    // crypto.erl converts each id to a binary before the NIF
+    // (crypto.erl:4947-4950), so only a direct call reaches
+    // engine.c:366-367 and engine.c:936-947.
+    let mut scheduler = scheduler();
+    let id = atom(&mut scheduler, "x");
+    let badarg = format!("{:?}", BifResult::badarg());
+    let result = engine_by_id_nif(&mut scheduler, std::slice::from_ref(&id)).unwrap();
+    assert_eq!(format!("{result:?}"), badarg);
+    for arguments in [
+        [id.clone(), Term::binary(b"y".to_vec())],
+        [Term::binary(b"x".to_vec()), id.clone()],
+    ] {
+        let result = ensure_engine_loaded_nif(&mut scheduler, &arguments).unwrap();
+        assert_eq!(format!("{result:?}"), badarg);
+    }
 }

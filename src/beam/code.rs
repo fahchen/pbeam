@@ -8,8 +8,8 @@ use crate::{
     error::{BeamError, error},
     runtime::import_kind,
     term::{
-        Atom, AtomTable, Binary, Fun, Lambda, MAX_ATOM_CHARACTERS, MAX_TUPLE_SIZE, Map, Term,
-        fits_big_arity,
+        Atom, AtomTable, Binary, Fun, Lambda, MAX_ATOM_CHARACTERS, MAX_TUPLE_SIZE, Map, RecordDef,
+        Term, fits_big_arity,
     },
 };
 
@@ -17,8 +17,8 @@ const WORD_SIZE: usize = 4;
 mod instruction;
 mod line;
 pub(crate) use instruction::{
-    BinaryMatchCommand, BinarySegment, FloatOperation, Instruction, Operand, SelectValueChoices,
-    TestKind, TestOperand,
+    BinaryMatchCommand, BinarySegment, FloatOperation, Instruction, Operand, PutRecord, RecordId,
+    SelectValueChoices, TestKind, TestOperand,
 };
 pub(crate) use line::LineTable;
 
@@ -384,6 +384,7 @@ fn decode(
     atom_table: &AtomTable,
 ) -> Result<BeamModule, BeamError> {
     let exports = parse_exports(required_chunk(chunks, b"ExpT")?, &atoms, atom_table)?;
+    let md5 = module_md5(chunks);
     let code = required_chunk(chunks, b"Code")?;
     let name = atom_table
         .name_of(
@@ -405,10 +406,15 @@ fn decode(
     let lambdas = chunks
         .get(b"FunT".as_slice())
         .filter(|data| !data.is_empty())
-        .map(|data| parse_lambdas(data, &atoms, module_md5(chunks)))
+        .map(|data| parse_lambdas(data, &atoms, md5))
         .transpose()?
         .unwrap_or_default();
     let strings = chunks.get(b"StrT".as_slice()).copied().unwrap_or_default();
+    let records = chunks
+        .get(b"Recs".as_slice())
+        .map(|data| parse_records(data, &atoms, &literals, atom_table))
+        .transpose()?
+        .unwrap_or_default();
     // ERTS reads a `Line` chunk that is not empty (`beam_file.c:1706-1711`).
     let mut lines = chunks
         .get(b"Line".as_slice())
@@ -417,7 +423,7 @@ fn decode(
         .transpose()?
         .unwrap_or_default();
     let (instructions, number_of_labels, on_load) = instruction::parse_code(
-        code, atom_table, &atoms, &imports, &literals, &lambdas, strings, &mut lines,
+        code, atom_table, &atoms, &imports, &literals, &lambdas, strings, &records, &mut lines,
     )?;
     if let Some(label) = exports
         .values()
@@ -447,6 +453,8 @@ fn decode(
     let mut module = BeamModule::new(name, exports, imports, instructions)?;
     module.on_load = on_load;
     module.lines = lines;
+    module.md5 = md5;
+    module.records = records;
     module.native_declarations = chunks
         .get(b"Attr".as_slice())
         .map(|data| attributes::native_declarations(data))
@@ -690,7 +698,7 @@ fn parse_lambdas(
 /// where each `OldUniq` field of the `FunT` entries counts as zero. A chunk
 /// that the module does not have adds no bytes. The caller reads the `FunT`
 /// chunk only when it is not empty and has whole entries, as
-/// [`parse_lambdas`] checks.
+/// [`parse_lambdas`] checks, so the digest of a corrupt chunk is never used.
 ///
 /// # Examples
 ///
@@ -1324,6 +1332,107 @@ fn read_integer_after_first(
         .fold(0u64, |value, byte| (value << 8) | u64::from(*byte));
     *cursor = end;
     Ok(value)
+}
+
+/// The genop number of `call_last/3`, the op of each record of a `Recs`
+/// chunk (`genop.tab`, `beam_file.c:1132`).
+const RECORD_OP: u8 = 5;
+
+/// Read a `Recs` chunk as `parse_record_chunk` and
+/// `parse_record_chunk_data` do (`beam_file.c:1077-1348`): the version 0,
+/// the record count, the total field count, and then one `call_last/3` op
+/// per record with the name, the export flag, and the extended list of
+/// field and default pairs.
+///
+/// recs_chunk ::= "Recs" chunk_size 0:i32be record_count:i32be field_count:i32be record*
+/// record ::= 5 atom (atom_true | atom_false) list_count (atom default)*
+/// default ::= u0 (no default) | atom | nil | integer | literal
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let data = [0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 5, 50, 10, 16, 23, 64, 66, 1, 82, 0];
+/// let records = parse_records(&data, &atoms, &[], &atom_table)?;
+/// assert_eq!(records[0].keys.len(), 2);
+/// ```
+///
+/// # Errors
+///
+/// A chunk that `parse_record_chunk_data` rejects gives the error
+/// `malformed BEAM Recs chunk`.
+fn parse_records(
+    data: &[u8],
+    atoms: &[Atom],
+    literals: &[Option<Term>],
+    atom_table: &AtomTable,
+) -> Result<Vec<Arc<RecordDef>>, BeamError> {
+    let bad = || error("malformed BEAM Recs chunk");
+    let header = |index: usize| {
+        data.get(index * WORD_SIZE..)
+            .and_then(|bytes| read_u32(bytes).ok())
+            .map(|word| word as i32)
+            .ok_or_else(bad)
+    };
+    // A version other than 0 fails the load (`beam_file.c:1341-1347`).
+    (header(0)? == 0).then_some(()).ok_or_else(bad)?;
+    let record_count = usize::try_from(header(1)?).map_err(|_| bad())?;
+    header(2)?;
+    let module = atoms.first().ok_or_else(bad)?;
+    let mut cursor = 3 * WORD_SIZE;
+    let mut records = Vec::new();
+    for _ in 0..record_count {
+        (data.get(cursor) == Some(&RECORD_OP))
+            .then_some(())
+            .ok_or_else(bad)?;
+        cursor += 1;
+        let atom = |cursor: &mut usize| match data.get(*cursor).map(|b| b & COMPACT_TAG_MASK) {
+            Some(TAG_ATOM) => match &read_value(data, cursor, atoms) {
+                Ok(Term::Atom(atom)) => Ok(atom.clone()),
+                _ => Err(bad()),
+            },
+            _ => Err(bad()),
+        };
+        let name = atom(&mut cursor)?;
+        let is_exported = match atom(&mut cursor)? {
+            flag if flag.is_one_of(&["true", "false"]) => flag.is_one_of(&["true"]),
+            _ => return Err(bad()),
+        };
+        (read_integer(data, &mut cursor, TAG_LITERAL)? == LIST_SUBTAG)
+            .then_some(())
+            .ok_or_else(bad)?;
+        let count = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
+        (count % 2 == 0 && count as usize <= data.len())
+            .then_some(())
+            .ok_or_else(bad)?;
+        let mut fields = Vec::with_capacity(count as usize / 2);
+        for _ in 0..count / 2 {
+            let key = atom(&mut cursor)?;
+            let default = match data.get(cursor).map(|b| b & COMPACT_TAG_MASK) {
+                Some(TAG_UNSIGNED) => {
+                    read_operand(data, &mut cursor, TAG_UNSIGNED)?;
+                    None
+                }
+                Some(TAG_ATOM | TAG_INTEGER) => Some(read_value(data, &mut cursor, atoms)?),
+                Some(TAG_LITERAL) if read_integer(data, &mut cursor, TAG_LITERAL)? == 4 => {
+                    let index = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
+                    let literal = usize::try_from(index)
+                        .ok()
+                        .and_then(|index| literals.get(index));
+                    Some(literal.cloned().flatten().ok_or_else(bad)?)
+                }
+                _ => return Err(bad()),
+            };
+            fields.push((key, default));
+        }
+        records.push(Arc::new(RecordDef::new(
+            module.clone(),
+            name,
+            is_exported,
+            fields,
+            atom_table,
+        )));
+    }
+    Ok(records)
 }
 
 /// Read one unsigned, big-endian 32-bit field.

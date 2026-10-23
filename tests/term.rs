@@ -447,3 +447,47 @@ fn compares_a_shared_term_and_an_equal_term_of_another_storage() {
     assert_eq!(held, held.clone());
     assert_eq!(held, fun(0, vec![Term::Integer(1)]));
 }
+
+/// Return a record `#nr_def:priv{z=1}` and its table.
+fn record() -> (Term, AtomTable) {
+    let atoms = test_atom_table();
+    let def = super::RecordDef::new(
+        atoms.put("nr_def").unwrap(),
+        atoms.put("priv").unwrap(),
+        false,
+        vec![
+            (atoms.put("z").unwrap(), None),
+            (atoms.put("y").unwrap(), None),
+        ],
+        &atoms,
+    );
+    let values = vec![Term::Integer(1), Term::Integer(2)];
+    (
+        Term::Record(super::Record::new(Arc::new(def), values)),
+        atoms,
+    )
+}
+
+#[test]
+fn walks_compares_and_formats_a_native_record() {
+    let (term, atoms) = record();
+    assert!(term.record().is_some());
+    assert!(!term.contains_fun());
+    assert!(term.clone() == term);
+    assert_eq!(
+        debug_term(&term, &atoms),
+        "Record(nr_def:priv, [Integer(1), Integer(2)])"
+    );
+    let Some(record) = term.record() else {
+        unreachable!()
+    };
+    let def = record.def();
+    assert_eq!(
+        format!("{term:?}"),
+        format!(
+            "Record({}:{}, [Integer(1), Integer(2)])",
+            def.module.index(),
+            def.name.index()
+        )
+    );
+}

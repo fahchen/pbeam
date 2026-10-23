@@ -172,7 +172,7 @@ const LIBRARIES: &[Library] = &[
     Library {
         module: "prim_net",
         functions: &prim_net::FUNCTIONS,
-        bindings: &[],
+        bindings: prim_net::BINDINGS,
         load: None,
         unbound_fails: true,
     },

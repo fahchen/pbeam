@@ -185,6 +185,25 @@ fn runs_the_functions_of_the_library_only_after_its_load_as_erts() {
 }
 
 #[test]
+fn gives_the_functions_of_the_library_as_the_nifs_of_the_module_as_erts() {
+    // `nifs_in_module` gives `[]` for a module without a NIF library, and
+    // the functions of its library in library order after the load
+    // (erl_bif_info.c:5769-5805).
+    let program = program();
+    let path = build("nifs", &[], &[]);
+    let result = execute(&program, "nif_add", "nifs", vec![string(&path)]).unwrap();
+    let add = Term::tuple(vec![atom(&result, "add"), Term::Integer(2)]);
+    assert_eq!(
+        result.term,
+        Term::tuple(vec![
+            Term::nil(),
+            atom(&result, "ok"),
+            Term::list_from(vec![add])
+        ])
+    );
+}
+
+#[test]
 fn raises_badarg_with_the_frame_of_the_nif_as_erts() {
     let program = program();
     let path = build("trace", &[], &[]);

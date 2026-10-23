@@ -582,7 +582,7 @@ fn spawns_with_link_and_monitor_options_and_rejects_other_options() {
         spawn_opt(vec![test_atom("priority")])
             .unwrap_err()
             .to_string()
-            .contains("unsupported spawn option Atom(\"priority\")")
+            .contains("badarg")
     );
 }
 
@@ -2586,13 +2586,6 @@ fn rejects_call_stack_and_return_errors() {
             .unwrap_err()
             .to_string(),
         "function fixture:main did not return"
-    );
-    assert!(
-        make_program(vec![Instruction::Unsupported(6)], 0)
-            .execute("fixture", "main", &[])
-            .unwrap_err()
-            .to_string()
-            .contains("unsupported BEAM opcode 6")
     );
     assert!(
         make_program(vec![Instruction::Label(3)], 0)

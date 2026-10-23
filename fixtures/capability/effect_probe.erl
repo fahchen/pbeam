@@ -616,6 +616,9 @@ ambient() ->
         erlang:binary_to_term(erlang:term_to_binary(1)) =:= 1,
         erlang:binary_to_term(erlang:term_to_binary(1), []) =:= 1,
         erlang:external_size(<<1, 2, 3>>),
+        erlang:external_size(<<1, 2, 3>>, []),
+        is_list(erlang:term_to_iovec(1)),
+        is_list(erlang:term_to_iovec(1, [])),
         erlang:read_timer(make_ref()),
         is_reference(erlang:alias([explicit_unalias])),
         alias_unalias(),
@@ -625,7 +628,10 @@ ambient() ->
         erlang:display(effect_probe_ambient_display),
         attempt(fun() -> erlang:has_prepared_code_on_load(make_ref()) end),
         is_list(prim_socket:supports()),
-        prim_socket:supports(other)
+        prim_socket:supports(other),
+        element(1, prim_net:gethostname()),
+        maps:get(netns, prim_net:info()),
+        prim_net:debug(false)
     ].
 
 %% Each metadata probe makes a temporary file, so `write_file_info/3`

@@ -556,7 +556,7 @@ ciphers_host() ->
 %% Call crypto:engine_list/0, whose NIF engine_get_first_nif/0 PBeam does
 %% not link.
 unsupported() ->
-    io:format("~p~n", [crypto:engine_list()]).
+    io:format("~p~n", [crypto:privkey_to_pubkey(rsa, #{engine => e, key_id => <<"k">>})]).
 
 bad(Fun) ->
     try Fun() catch Class:Reason:Stack -> {Class, Reason, hd(Stack)} end.

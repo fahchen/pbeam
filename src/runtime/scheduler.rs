@@ -3085,7 +3085,8 @@ impl Scheduler {
         let mut child = ProcessState::new(self.next_pid()?, start, arguments);
         child.off_heap_message_queue = flags.off_heap_message_queue;
         child.priority = flags.priority;
-        child.heap_flags = self.node.heap_flags();
+        child.async_dist = flags.async_dist;
+        child.heap_flags = flags.heap_flags.unwrap_or_else(|| self.node.heap_flags());
         child.security = if boot {
             SecurityContext::boot()
         } else {
