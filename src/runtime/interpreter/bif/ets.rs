@@ -3,7 +3,9 @@
 use super::BifResult::Value;
 use super::*;
 use crate::runtime::ets::pattern::{MatchSpec, SpecError};
-use crate::runtime::ets::{Access, Busy, EtsTables, ITERATIONS_PER_RED, Lacking, Table, TableType};
+use crate::runtime::ets::{
+    Access, Busy, EtsTables, ITERATIONS_PER_RED, Lacking, Table, TableType, Transfer,
+};
 use crate::term::Reference;
 use num_bigint::BigInt;
 use std::sync::Arc;
@@ -129,14 +131,13 @@ fn denied(cause: &'static str) -> BifResult {
 /// 4. A name that a live named table has raises `badarg`
 ///    (`erl_db.c:2821-2831`).
 ///
-/// Then the final type `ordered_set`, and a heir that is a live process
-/// other than the caller, give a runtime error: ERTS makes such a table, and
-/// PBeam cannot model it yet. The final type `set`, `bag`, or
+/// Then the final type `ordered_set` gives a runtime error: ERTS makes such
+/// a table, and PBeam cannot model it yet. The final type `set`, `bag`, or
 /// `duplicate_bag` gives a hash table of that type. A heir that is not
-/// alive acts as `none`, as `set_heir` (`erl_db.c:5319-5337`) does. A heir
-/// that is the caller also acts as `none`: at the owner exit, ERTS gives the
-/// table to no process when the heir is the owner (`erl_db.c:5076-5078`),
-/// and no BIF that PBeam has reads the heir. The table keeps
+/// alive, or that exits, acts as `none`, as `set_heir`
+/// (`erl_db.c:5319-5337`) does. `{heir, Pid}` keeps no data, so the heir
+/// gets the table at the owner exit with no `ETS-TRANSFER` message
+/// (`erl_db.c:2670-2673`, `4919-4930`). The table keeps
 /// the last access mode, `protected` changes nothing (`erl_db.c:2705-2706`),
 /// and the key position keeps only the low 32 bits, as the C `int`
 /// `tb->common.keypos` (`erl_db_util.h:346`).
@@ -155,8 +156,7 @@ fn denied(cause: &'static str) -> BifResult {
 ///
 /// # Errors
 ///
-/// Return a runtime error for the table type `ordered_set`, and for a heir
-/// that is a live process other than the caller.
+/// Return a runtime error for the table type `ordered_set`.
 pub(super) fn new(
     context: &mut BifContext<'_>,
     name: &Term,
@@ -171,6 +171,7 @@ pub(super) fn new(
     let mut keypos = 1;
     let mut explicit_locks = false;
     let mut heir = None;
+    let mut heir_data = None;
     let mut read_concurrency = false;
     let mut compressed = false;
     // The `write_concurrency` option of a hash table: the value that
@@ -244,12 +245,17 @@ pub(super) fn new(
                     }
                     ("heir", Term::Atom(value)) if value.is_static("none") => {
                         heir = None;
+                        heir_data = None;
                     }
-                    ("heir", Term::Pid(pid)) => heir = Some(*pid),
+                    ("heir", Term::Pid(pid)) => {
+                        heir = Some(*pid);
+                        heir_data = None;
+                    }
                     _ => return Ok(BifResult::badarg()),
                 },
-                [Term::Atom(key), Term::Pid(pid), _] if key.is_static("heir") => {
+                [Term::Atom(key), Term::Pid(pid), data] if key.is_static("heir") => {
                     heir = Some(*pid);
+                    heir_data = Some(data.clone());
                 }
                 _ => return Ok(BifResult::badarg()),
             },
@@ -284,10 +290,6 @@ pub(super) fn new(
         decentralized,
         compressed,
     );
-    // A heir that is not alive, or that is another live process, acts as
-    // `none` only when it is not alive; the owner as heir stays the owner
-    // (`erl_db.c:5319-5337`).
-    made.set_heir(heir.filter(|heir| *heir == owner));
     let name_text = name.map(|name| context.scheduler.atoms.name_of(name));
     let mut ets = context.scheduler.ets.exclusive();
     // The name check and the create take one lock, so no other scheduler
@@ -297,14 +299,10 @@ pub(super) fn new(
     if name_text.is_some_and(|name| ets.name_in_use(name)) {
         return Ok(denied("already_exists"));
     }
-    if let Some(heir) = heir
-        && heir != owner
-        && (context.scheduler.process(heir).is_some()
-            || context.scheduler.remote_owner(heir).is_some())
-    {
-        // ponytail: no table transfer to a heir; see "ETS tables" in docs/erts-differences.md.
-        return Err(error(format!("unsupported ets:new/2 heir {heir:?}")));
-    }
+    // The heir check takes the table store lock, so a heir that starts its
+    // exit later finds the table in its own exit.
+    let heir = heir.filter(|heir| *heir == owner || context.scheduler.ets_alive(*heir));
+    made.set_heir(heir, heir.and(heir_data));
     ets.create(table, name_text, made);
     drop(ets);
     Ok(Value(name.map_or(Term::Reference(table), |name| {
@@ -1474,6 +1472,85 @@ pub(super) fn delete_table(
         .current_process_mut()
         .bump_reductions(i32::try_from(fixations).unwrap_or(i32::MAX));
     delete_trap(context)
+}
+
+/// Run `ets:give_away(Table, To, Data)`, as ERTS `ets_give_away_3`
+/// (`erl_db.c:3087-3144`) does: make the process `To` the owner of the
+/// table, at the end of its owned list, send it
+/// `{'ETS-TRANSFER', Table, Caller, Data}`, and return `true`. A named table
+/// goes in the message as its name (`erl_db.c:4959-4962`). The heir of the
+/// table stays. The checks keep the ERTS order:
+///
+/// 1. A table that does not exist or that the caller cannot write raises
+///    `badarg` with the cause of the lookup (`erl_db.c:3105-3107`).
+/// 2. A `To` that is not a live local process, or that exits, raises
+///    `badarg` (`erl_db.c:3100`, `3109-3112`).
+/// 3. A caller that is not the owner raises `badarg` with the cause
+///    `not_owner` (`erl_db.c:3114-3118`).
+/// 4. A `To` that is the caller raises `badarg` with the cause `owner`
+///    (`erl_db.c:3120-3125`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = give_away(&mut context, &table, &Term::Pid(to), &test_atom("data"))?;
+/// assert!(matches!(result, BifResult::Value(value) if value == test_atom("true")));
+/// ```
+///
+/// # Errors
+///
+/// None: each outcome is a value or an exception.
+pub(super) fn give_away(
+    context: &mut BifContext<'_>,
+    table: &Term,
+    to: &Term,
+    data: &Term,
+) -> Result<BifResult, BeamError> {
+    let caller = context.scheduler.current_process_mut().id;
+    let reds = context
+        .scheduler
+        .current_process_mut()
+        .bif_reductions_signed();
+    let store = Arc::clone(&context.scheduler.ets);
+    let mut ets = store.exclusive();
+    let found =
+        (ets.write(&context.scheduler.atoms, table, caller, reds)).map(|found| found.owner());
+    let owner = match found {
+        Ok(owner) => owner,
+        Err(lacking) => {
+            drop(ets);
+            return Ok(retry(
+                context,
+                lacking,
+                "give_away",
+                vec![table.clone(), to.clone(), data.clone()],
+            ));
+        }
+    };
+    // The receiver check takes the table store lock, so a receiver that
+    // starts its exit later finds the table in its own exit.
+    let to = match to {
+        Term::Pid(to) if context.scheduler.ets_alive(*to) => *to,
+        _ => return Ok(BifResult::badarg()),
+    };
+    if owner != caller {
+        return Ok(denied("not_owner"));
+    }
+    if to == caller {
+        return Ok(denied("owner"));
+    }
+    let id = (ets.id(&context.scheduler.atoms, table)).expect("the caller found the table");
+    let name = ets.named_as(id);
+    ets.give(id, to);
+    drop(ets);
+    let transfer = Transfer {
+        heir: to,
+        table: id,
+        name,
+        data: data.clone(),
+    };
+    context.scheduler.send_ets_transfer(caller, transfer);
+    Ok(Value(Term::static_atom("true")))
 }
 
 /// Free the segments of the table that `ets:delete/1` deleted, as

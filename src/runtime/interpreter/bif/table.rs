@@ -441,7 +441,7 @@ bifs! {
     ets:delete_object/2 as EtsDeleteObject2 => |cx, [table, object]| ets::delete_object(cx, table, object),
     ets:first/1 as EtsFirst1 => |cx, [table]| ets::walk(cx, "first", vec![table.clone()], false, false),
     ets:first_lookup/1 as EtsFirstLookup1 => |cx, [table]| ets::walk(cx, "first_lookup", vec![table.clone()], false, true),
-    ets:give_away/3 => unsupported,
+    ets:give_away/3 as EtsGiveAway3 => |cx, [table, to, data]| ets::give_away(cx, table, to, data),
     ets:info/1 as EtsInfo1 => |cx, [table]| ets::info_all(cx, table),
     ets:info/2 as EtsInfo2 => |cx, [table, item]| ets::info(cx, table, item),
     ets:insert/2 as EtsInsert2 => |cx, [table, objects]| ets::insert(cx, table, objects),
