@@ -1930,7 +1930,7 @@ fn runs_maps_keys_as_a_bif_and_reports_unsupported_arguments() {
     );
     assert_eq!(
         keys(atom("ok")).unwrap_err().to_string(),
-        "unsupported maps:keys/1 argument: not a map"
+        "root process exited with {{badmap,ok},[{maps,keys,[ok],[{error_info,#{module=>erl_stdlib_errors}}]},{fixture,main,0,[]}]}"
     );
 }
 
@@ -3546,7 +3546,7 @@ fn returns_the_local_node_for_node_0_and_a_pid() {
         node(BifId::ErlangNode1, vec![atom("foo")])
             .unwrap_err()
             .to_string(),
-        "unsupported erlang:node/1 argument Atom(\"foo\"): not a pid"
+        "root process exited with {badarg,[{erlang,node,[foo],[{error_info,#{module=>erl_erts_errors}}]},{fixture,main,0,[]}]}"
     );
 }
 
