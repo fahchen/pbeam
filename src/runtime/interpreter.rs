@@ -5893,27 +5893,10 @@ fn create_binary(
                 unit,
                 source,
                 size,
-            } => {
-                // The size pass checks the size as the size of an `integer`
-                // segment (jit/arm/instr_bs.cpp:1639-1689). A literal size
-                // has no check (jit/arm/instr_bs.cpp:1493-1505, 2005-2018).
-                let fixed = matches!(size, Operand::Value(Term::Integer(literal)) if (0..1 << 56).contains(literal));
-                let size = read(process, size)?;
-                let bits = match integer_segment_bits(fixed, &size, *unit) {
-                    Ok(bits) => bits,
-                    Err(reason) => {
-                        return Ok(Err(BinarySegmentFailure {
-                            reason,
-                            ..BinarySegmentFailure::badarg(*segment, "binary", "size", size)
-                        }));
-                    }
-                };
-                parts.push(BinaryPart::Sized {
-                    segment: *segment,
-                    value: read(process, source)?,
-                    bits,
-                });
-            }
+            } => match sized_binary_part(process, *segment, *unit, source, size)? {
+                Ok(part) => parts.push(part),
+                Err(failure) => return Ok(Err(failure)),
+            },
             BinarySegment::Append {
                 segment,
                 unit,
@@ -6247,6 +6230,43 @@ fn write_binary_parts(
         }
     }
     Ok(Ok(writer.into_bytes()))
+}
+
+/// Return the part of a `binary` segment of a size, or the failure of its
+/// size. The size pass checks the size as the size of an `integer` segment
+/// (jit/arm/instr_bs.cpp:1639-1689). A literal size has no check
+/// (jit/arm/instr_bs.cpp:1493-1505, 2005-2018). The function stays out of
+/// line, so the code of the other segments keeps its size.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // <<A:2/binary>> with A in x0
+/// let part = sized_binary_part(&mut process, 1, 8, &Operand::X(0), &Operand::Value(Term::Integer(2)))?;
+/// assert!(matches!(part, Ok(BinaryPart::Sized { bits: 16, .. })));
+/// ```
+#[inline(never)]
+fn sized_binary_part(
+    process: &mut ProcessState,
+    segment: u64,
+    unit: u64,
+    source: &Operand,
+    size: &Operand,
+) -> Result<Result<BinaryPart<'static>, BinarySegmentFailure>, BeamError> {
+    let fixed =
+        matches!(size, Operand::Value(Term::Integer(literal)) if (0..1 << 56).contains(literal));
+    let size = read(process, size)?;
+    Ok(match integer_segment_bits(fixed, &size, unit) {
+        Ok(bits) => Ok(BinaryPart::Sized {
+            segment,
+            value: read(process, source)?,
+            bits,
+        }),
+        Err(reason) => Err(BinarySegmentFailure {
+            reason,
+            ..BinarySegmentFailure::badarg(segment, "binary", "size", size)
+        }),
+    })
 }
 
 /// Return the bitstring of the `bits` bits at the start of `bytes`, the
