@@ -243,6 +243,10 @@ name = "bitstr"
 path = "tests/integration/bitstr.rs"
 
 [[test]]
+name = "bitstring_list"
+path = "tests/integration/bitstring_list.rs"
+
+[[test]]
 name = "body_bif"
 path = "tests/integration/body_bif.rs"
 
@@ -659,6 +663,10 @@ name = "bif_stack"
 path = "tests/integration/bif_stack.rs"
 
 [[test]]
+name = "bif_trap_stack"
+path = "tests/integration/bif_trap_stack.rs"
+
+[[test]]
 name = "prim_file"
 path = "tests/integration/prim_file.rs"
 
@@ -737,6 +745,10 @@ path = "tests/integration/multischeduler_clock.rs"
 [[test]]
 name = "ets_cause"
 path = "tests/integration/ets_cause.rs"
+
+[[test]]
+name = "heap_flags"
+path = "tests/integration/heap_flags.rs"
 
 [[test]]
 name = "bif_cause"

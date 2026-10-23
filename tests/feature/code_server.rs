@@ -369,16 +369,18 @@ fn runs_the_one_shot_crypto_hashes_and_macs_as_pinned_erts() {
     ));
     assert!(erts.contains("Couldn't get mac"), "{erts}");
     // md4 and cmac with a cipher that is not CBC depend on the libcrypto of
-    // the host. The ERTS of the Linux CI host links a libcrypto with md4,
-    // the legacy ciphers, and cmac for each mode, so only the pinned macOS
-    // ERTS (OpenSSL 3.5.8) is the reference (digest.c:186-188,
-    // mac.c:344-347, 400-405).
+    // the host (digest.c:186-188, mac.c:344-347, 400-405). PBeam links a
+    // vendored OpenSSL 3.5.5 without the legacy provider, so its output does
+    // not depend on the host. The literal is the output of the pinned macOS
+    // ERTS (OpenSSL 3.5.8); the Linux CI ERTS links a libcrypto with md4,
+    // the legacy ciphers, and cmac for each mode.
     let pbeam = run(&mut pbeam_probe(
         CRYPTO_PROBE,
         "crypto_probe",
         "oneshot_host",
         &[],
     ));
+    assert_eq!(pbeam, ONESHOT_HOST);
     if cfg!(target_os = "macos") {
         let erts = run(&mut erts_probe(
             CRYPTO_PROBE,
@@ -386,14 +388,7 @@ fn runs_the_one_shot_crypto_hashes_and_macs_as_pinned_erts() {
             "oneshot_host",
             &[],
         ));
-        assert_eq!(pbeam, erts);
-    }
-    for expected in [
-        "Digest type not supported in this cryptolib",
-        "Unsupported cipher algorithm",
-        "Couldn't get mac",
-    ] {
-        assert!(pbeam.contains(expected), "{pbeam}");
+        assert_eq!(erts, ONESHOT_HOST);
     }
     assert_eq!(
         run(&mut pbeam_probe(
@@ -404,9 +399,9 @@ fn runs_the_one_shot_crypto_hashes_and_macs_as_pinned_erts() {
         )),
         erts
     );
-    // A fetched md gives the SHAKE size 0 (hash.c:90-94, evp_lib.c:1041),
-    // as the pinned macOS ERTS gives it; the legacy `EVP_shake*` of an
-    // older libcrypto on the Linux CI host gives bitlen/8.
+    // A fetched SHAKE md gives 16/32 on OpenSSL 3.0-3.3 and 0 from 3.4
+    // (hash.c:90-94, evp_lib.c:1041 in 3.5.5). The pinned macOS ERTS gives
+    // 0; the Linux CI ERTS links OpenSSL 3.0.x.
     let erts = run(&mut erts_probe(
         CRYPTO_PROBE,
         "crypto_probe",
@@ -457,6 +452,7 @@ fn runs_the_one_shot_crypto_ciphers_as_pinned_erts() {
         "ciphers_host",
         &[],
     ));
+    assert_eq!(pbeam, CIPHERS_HOST);
     if cfg!(target_os = "macos") {
         let erts = run(&mut erts_probe(
             CRYPTO_PROBE,
@@ -464,12 +460,8 @@ fn runs_the_one_shot_crypto_ciphers_as_pinned_erts() {
             "ciphers_host",
             &[],
         ));
-        assert_eq!(pbeam, erts);
+        assert_eq!(erts, CIPHERS_HOST);
     }
-    assert!(
-        pbeam.contains("Cipher not supported in this libcrypto version"),
-        "{pbeam}"
-    );
 }
 
 #[test]
@@ -876,6 +868,42 @@ fn erts(flags: &[&str]) -> Command {
 /// ```rust,ignore
 /// let output = run(&mut erts_probe(ON_LOAD_PROBE, "on_load_server_probe", "main", &[]));
 /// ```
+/// The output of `crypto_probe:oneshot_host/0` on the pinned macOS ERTS.
+const ONESHOT_HOST: &str = r#"[[{error,notsup},
+  {error,{notsup,{"hash.c",115},
+                 "Digest type not supported in this cryptolib"}},
+  {error,{error,{"mac.c",405},"Couldn't get mac"}}],
+ [{rc2_cbc,{error,{notsup,{"mac.c",346},"Unsupported cipher algorithm"}}},
+  {rc4,{error,{notsup,{"mac.c",346},"Unsupported cipher algorithm"}}},
+  {des_cbc,{error,{notsup,{"mac.c",346},"Unsupported cipher algorithm"}}},
+  {des_cfb,{error,{notsup,{"mac.c",346},"Unsupported cipher algorithm"}}},
+  {des_ecb,{error,{notsup,{"mac.c",346},"Unsupported cipher algorithm"}}},
+  {des_ede3_cbc,{error,{error,{"mac.c",405},"Couldn't get mac"}}},
+  {des_ede3_cfb,{error,{error,{"mac.c",405},"Couldn't get mac"}}},
+  {blowfish_cbc,{error,{notsup,{"mac.c",346},"Unsupported cipher algorithm"}}},
+  {blowfish_cfb64,{error,{notsup,{"mac.c",346},
+                                 "Unsupported cipher algorithm"}}},
+  {blowfish_ofb64,{error,{notsup,{"mac.c",346},
+                                 "Unsupported cipher algorithm"}}},
+  {blowfish_ecb,{error,{notsup,{"mac.c",346},"Unsupported cipher algorithm"}}},
+  {sm4_ecb,{error,{error,{"mac.c",405},"Couldn't get mac"}}},
+  {sm4_cfb,{error,{error,{"mac.c",405},"Couldn't get mac"}}},
+  {sm4_ofb,{error,{error,{"mac.c",405},"Couldn't get mac"}}},
+  {sm4_ctr,{error,{error,{"mac.c",405},"Couldn't get mac"}}},
+  {sm4_gcm,{error,{error,{"mac.c",405},"Couldn't get mac"}}},
+  {sm4_ccm,{error,{error,{"mac.c",405},"Couldn't get mac"}}},
+  {aes_128_ofb,{error,{error,{"mac.c",405},"Couldn't get mac"}}},
+  {aes_128_cfb8,{error,{error,{"mac.c",405},"Couldn't get mac"}}},
+  {aes_128_cfb128,{error,{error,{"mac.c",405},"Couldn't get mac"}}},
+  {aes_128_ecb,{error,{error,{"mac.c",405},"Couldn't get mac"}}},
+  {aes_128_ctr,{error,{error,{"mac.c",405},"Couldn't get mac"}}},
+  {chacha20,{error,{error,{"mac.c",405},"Couldn't get mac"}}},
+  {chacha20_poly1305,{error,{error,{"mac.c",405},"Couldn't get mac"}}},
+  {aes_128_gcm,{error,{error,{"mac.c",405},"Couldn't get mac"}}},
+  {aes_256_ccm,{error,{error,{"mac.c",405},"Couldn't get mac"}}},
+  {aes_ecb,{error,{error,{"mac.c",405},"Couldn't get mac"}}}]]
+"#;
+
 fn erts_probe(probe: &str, module: &str, function: &str, flags: &[&str]) -> Command {
     let mut command = Command::new("erl");
     command.args([
@@ -963,3 +991,35 @@ fn run(command: &mut Command) -> String {
     );
     String::from_utf8(output.stdout).unwrap()
 }
+
+/// The output of `crypto_probe:ciphers_host/0` on PBeam and on the pinned
+/// macOS ERTS: `notsup` for each legacy cipher (cipher.c:282-283,
+/// api_ng.c:284-287).
+const CIPHERS_HOST: &str = r#"[[{error,notsup},
+  {error,notsup},
+  {error,notsup},
+  {error,notsup},
+  {error,notsup},
+  {error,notsup},
+  {error,notsup},
+  {error,notsup},
+  {error,notsup}],
+ [{error,{notsup,{"api_ng.c",286},
+                 "Cipher not supported in this libcrypto version"}},
+  {error,{notsup,{"api_ng.c",286},
+                 "Cipher not supported in this libcrypto version"}},
+  {error,{notsup,{"api_ng.c",286},
+                 "Cipher not supported in this libcrypto version"}},
+  {error,{notsup,{"api_ng.c",286},
+                 "Cipher not supported in this libcrypto version"}},
+  {error,{notsup,{"api_ng.c",286},
+                 "Cipher not supported in this libcrypto version"}},
+  {error,{notsup,{"api_ng.c",286},
+                 "Cipher not supported in this libcrypto version"}},
+  {error,{notsup,{"api_ng.c",286},
+                 "Cipher not supported in this libcrypto version"}},
+  {error,{notsup,{"api_ng.c",286},
+                 "Cipher not supported in this libcrypto version"}},
+  {error,{notsup,{"api_ng.c",286},
+                 "Cipher not supported in this libcrypto version"}}]]
+"#;

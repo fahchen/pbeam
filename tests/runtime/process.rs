@@ -165,6 +165,7 @@ fn walks_the_terms_of_the_monitors_the_pending_bif_and_the_length_trap() {
         function: "member",
         arguments: vec![Term::tuple(vec![Term::Integer(2)])],
         tail: false,
+        origin: None,
     });
     process.length_trap = Some(vec![Term::tuple(vec![Term::Integer(3)])]);
     let mut live = crate::term::LiveBytes::new();
@@ -183,6 +184,7 @@ fn reports_the_bytes_of_the_pending_bif_arguments_and_the_length_trap() {
         function: "member",
         arguments: vec![Term::Integer(1), Term::Integer(2)],
         tail: false,
+        origin: None,
     });
     let arguments = process.pending_bif.as_ref().unwrap().arguments.capacity();
     assert_eq!(

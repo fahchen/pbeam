@@ -303,16 +303,9 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### Give the `error_info` cause of BIF errors
 
-- PBeam gives the `error_info` map `#{module => Format}` with no `cause` for each BIF error except `erlang:spawn_opt/4`, the `ets` BIFs (#968), the BIFs of `bif.c` that PBeam runs (#969), and the timer BIFs of `erl_hl_timer.c` (#971). ERTS adds `cause => Cause` when the BIF raises with `EXF_HAS_EXT_INFO` (`beam_common.c:993-1002`), for example `badopt` for `link/2` (`bif.c:146-149`), which PBeam does not run yet. `erl_erts_errors:format_error/2` and `erl_stdlib_errors:format_error/2` read the cause to write the error text.
+- PBeam gives the `error_info` map `#{module => Format}` with no `cause` for each BIF error except `erlang:spawn_opt/4`, the `ets` BIFs (#968), the BIFs of `bif.c` that PBeam runs (#969), the timer BIFs of `erl_hl_timer.c` (#971), and the BIFs of `erl_bif_re.c`, `erl_bif_os.c`, `erl_bif_port.c`, and `external.c` (#972). PBeam does not run `erlang:monitor_node/3`, so its cause `badopt` (`dist.c:6499`, `6503`) is missing. ERTS adds `cause => Cause` when the BIF raises with `EXF_HAS_EXT_INFO` (`beam_common.c:993-1002`), for example `badopt` for `link/2` (`bif.c:146-149`), which PBeam does not run yet. `erl_erts_errors:format_error/2` and `erl_stdlib_errors:format_error/2` read the cause to write the error text.
 - **Evidence:** `fixtures/bif_cause/bif_cause_probe.erl`, `fixtures/bif_cause/timer_cause_probe.erl`, and `fixtures/ets/ets_cause_probe.erl` match the causes of the BIFs that PBeam runs against the pinned ERTS; the BIFs of the other files give no cause.
 - **Trigger:** a consumer reads the cause of a BIF error, for example the error text of a shell or a logger report, or OTP code that matches the cause.
-- **Source:** [#715](https://github.com/fahchen/pbeam/issues/715).
-
-### Give the stack trace of a BIF error after a trap
-
-- A BIF that traps to a BIF export (`BifResult::TrapBif`) continues through `PendingBif`, and an error after the trap gets the stack trace `[]`. ERTS gives the BIF frame with the arguments in the registers, which are BIF-specific: `lists:member/2` gives the rest of the list (`[x, Rest]`), and `length/1` puts the first list back (`erl_bif_guard.c:243-247`). The PBeam trap arguments are internal continuation state (for example `[Rest, Count]` of `length/1`, three arguments of `erlang:'++'/2`), and a copy of them breaks the owned output of `list_to_bitstring_continue`.
-- **Evidence:** on the pinned ERTS, `lists:member(x, lists:seq(1, 100000) ++ a)` raises `badarg` with the first frame `{lists, member, [x, Rest], [{error_info, #{module => erl_stdlib_errors}}]}`; PBeam gives `[]`. Codex review of PR #736.
-- **Trigger:** a consumer reads the stack trace of a BIF error after a trap.
 - **Source:** [#715](https://github.com/fahchen/pbeam/issues/715).
 
 ### Give the exact caller frames of an `undef` exception
@@ -342,7 +335,7 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### Value checks of `process_flag/2` and `system_flag/2`
 
-- After #155 (PR #177), `max_heap_size` (`erl_gc.c:3824-3872`, needs the process minimum heap size), `{monitor_nodes, Options}` (`dist.c:6732-6799`), a `scheduler` value above the scheduler count, and the `system_flag/2` sub-checks of `internal_cpu_topology`, `erts_alloc`, `sequential_tracer`, `schedulers_online`, and `dirty_cpu_schedulers_online` give the runtime error where ERTS raises `badarg`. The "System flags" row of PR #177 records them.
+- After #155 (PR #177), `{monitor_nodes, Options}` (`dist.c:6732-6799`), a `scheduler` value above the scheduler count, and the `system_flag/2` sub-checks of `internal_cpu_topology`, `erts_alloc`, `sequential_tracer`, `schedulers_online`, and `dirty_cpu_schedulers_online` give the runtime error where ERTS raises `badarg`. The "System flags" row of PR #177 records them.
 - **Trigger:** a consumer sets one of these flags.
 - **Source:** review of #155.
 

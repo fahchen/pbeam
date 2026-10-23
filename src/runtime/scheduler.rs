@@ -1032,6 +1032,9 @@ impl Scheduler {
         // batches.
         if let Some(bif) = process.pending_bif.take() {
             self.release.push(Release::Terms(bif.arguments));
+            if let Some(origin) = bif.origin {
+                self.release.push(Release::Terms(origin.arguments));
+            }
         }
         if let Some(arguments) = process.length_trap.take() {
             self.release.push(Release::Terms(arguments));
@@ -2973,6 +2976,7 @@ impl Scheduler {
         let mut child = ProcessState::new(self.next_pid()?, start, arguments);
         child.off_heap_message_queue = flags.off_heap_message_queue;
         child.priority = flags.priority;
+        child.heap_flags = self.node.heap_flags();
         child.security = if boot {
             SecurityContext::boot()
         } else {

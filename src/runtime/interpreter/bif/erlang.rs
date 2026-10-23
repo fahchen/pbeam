@@ -4,6 +4,7 @@ use super::BifResult::{Raise, Trap, Value};
 use super::*;
 use crate::beam::code::Instruction;
 use crate::runtime::capability;
+use crate::runtime::heap_flags::{HeapFlags, max_heap_size, max_heap_size_map, next_heap_size};
 use crate::runtime::host;
 use crate::runtime::interpreter::DEFAULT_ERROR_HANDLER;
 use crate::runtime::interpreter::code_table::{CodeTable, Finish};
@@ -147,16 +148,8 @@ pub(super) fn nodes(
 
 /// The flags of ERTS `process_flag_2` (`bif.c:2028-2237`) that need a
 /// subsystem that PBeam does not have: the error handler, schedulers,
-/// the garbage collector, tracing, and saved calls.
-const UNSUPPORTED_PROCESS_FLAGS: &[&str] = &[
-    "scheduler",
-    "fullsweep_after",
-    "min_heap_size",
-    "min_bin_vheap_size",
-    "max_heap_size",
-    "sensitive",
-    "save_calls",
-];
+/// tracing, and saved calls.
+const UNSUPPORTED_PROCESS_FLAGS: &[&str] = &["scheduler", "sensitive", "save_calls"];
 
 /// The option bits of a node monitor, `ERTS_NODES_MON_OPT_*` of ERTS
 /// (`dist.c:6698-6702`): the node type `visible`, the node type `hidden`,
@@ -288,11 +281,13 @@ fn boolean_flag(flag: &mut bool, value: Option<&str>) -> BifResult {
 /// `{monitor_nodes, Options}`. PBeam has no distribution, so `async_dist`
 /// has no other effect and a node monitor never gets a message.
 ///
-/// Each flag of `UNSUPPORTED_PROCESS_FLAGS` except `max_heap_size` first
-/// checks its value as ERTS does, and raises `badarg` for a value that is
-/// not valid: `sensitive` takes a boolean, `save_calls` takes a small integer from 0 to
-/// 10000 (`process_flag_aux`, `bif.c:1907-1915`), and `scheduler`,
-/// `fullsweep_after`, `min_heap_size`, and `min_bin_vheap_size` take a small
+/// The heap flags `fullsweep_after`, `min_heap_size`,
+/// `min_bin_vheap_size`, and `max_heap_size` go to [`process_heap_flag`].
+///
+/// Each flag of `UNSUPPORTED_PROCESS_FLAGS` first checks its value as ERTS
+/// does, and raises `badarg` for a value that is not valid: `sensitive`
+/// takes a boolean, `save_calls` takes a small integer from 0 to 10000
+/// (`process_flag_aux`, `bif.c:1907-1915`), and `scheduler` takes a small
 /// integer of 0 or more.
 ///
 /// PBeam has no process heap, so `message_queue_data` does not change where
@@ -316,8 +311,8 @@ fn boolean_flag(flag: &mut bool, value: Option<&str>) -> BifResult {
 /// # Errors
 ///
 /// Each flag of `UNSUPPORTED_PROCESS_FLAGS` gives a runtime error for a
-/// value that passes the check, and `max_heap_size` gives it for each
-/// value. ERTS raises `badarg`
+/// value that passes the check, and so does [`process_heap_flag`] where
+/// ERTS stops the emulator. ERTS raises `badarg`
 /// for a `scheduler` value above the scheduler count, which PBeam does not
 /// model, and PBeam gives the runtime error.
 pub(super) fn process_flag(
@@ -389,6 +384,9 @@ pub(super) fn process_flag(
             let old = std::mem::replace(&mut process.priority, priority);
             Value(Term::static_atom(old.name()))
         }
+        Term::Atom(flag) if flag.is_one_of(HEAP_FLAGS) => {
+            return process_heap_flag(context, flag, term);
+        }
         Term::Atom(flag)
             if UNSUPPORTED_PROCESS_FLAGS.contains(&context.scheduler.atoms.name_of(flag)) =>
         {
@@ -398,9 +396,7 @@ pub(super) fn process_flag(
             } else if flag.is_static("save_calls") {
                 small.is_some_and(|calls| (0..=10_000).contains(&calls))
             } else {
-                // The name `max_heap_size` takes every value. Each other name
-                // needs a small integer that is not negative.
-                flag.is_static("max_heap_size") || small.is_some_and(|size| size >= 0)
+                small.is_some_and(|scheduler| scheduler >= 0)
             };
             if !valid {
                 // `process_flag_aux` sets the cause `none` for `save_calls`
@@ -422,17 +418,87 @@ pub(super) fn process_flag(
     })
 }
 
-/// The items of ERTS `system_flag_2` (`bif.c:4972-5304`) that need a
-/// subsystem that PBeam does not have: schedulers, the garbage collector,
-/// tracing, the time offset, statistics, the CPU topology, and the memory
-/// allocators.
-const UNSUPPORTED_SYSTEM_FLAGS: &[&str] = &[
-    "multi_scheduling",
-    "schedulers_online",
+/// The heap flags of `process_flag/2` and `system_flag/2`.
+const HEAP_FLAGS: &[&str] = &[
     "fullsweep_after",
     "min_heap_size",
     "min_bin_vheap_size",
     "max_heap_size",
+];
+
+/// Return the error of a heap size at or above the largest heap size of
+/// ERTS, where `erts_next_heap_size` stops the emulator (`erl_gc.c:335`).
+fn no_heap_size(size: i64) -> BeamError {
+    error(format!("no next heap size found: {size}"))
+}
+
+/// Set the heap flag `flag` of the calling process to `value` and return
+/// the old value, as ERTS `process_flag_2` (`bif.c:2101-2166`) does:
+///
+/// - `fullsweep_after` takes a small integer of 0 or more and keeps it in a
+///   `Uint16`, so a value above 65535 keeps its low 16 bits.
+/// - `min_heap_size` and `min_bin_vheap_size` take a small integer of 0 or
+///   more. A value below the node default gives the node default, and each
+///   other value gives the next heap size (`erts_next_heap_size`).
+/// - `max_heap_size` takes a value that `max_heap_size` reads, with the
+///   node flags as the defaults of the flags that a map does not give. The
+///   size is 0 or at least the minimum heap size of the process. The old
+///   value is the map of `max_heap_size_map`.
+///
+/// Each other value raises `badarg`. PBeam does not measure the heap, so a
+/// max heap size with `kill => true` does not kill the process.
+///
+/// # Errors
+///
+/// A minimum heap size at or above the largest heap size of ERTS gives a
+/// runtime error, where ERTS stops the emulator.
+fn process_heap_flag(
+    context: &mut BifContext<'_>,
+    flag: &Atom,
+    value: &Term,
+) -> Result<BifResult, BeamError> {
+    let node = context.scheduler.node().heap_flags();
+    let (process, atoms) = context.scheduler.current_process_and_atoms();
+    let flags = &mut process.heap_flags;
+    if flag.is_static("max_heap_size") {
+        let Some((size, max_flags)) = max_heap_size(value, node.max_heap_flags)
+            .filter(|(size, _)| *size == 0 || *size >= flags.min_heap_size)
+        else {
+            return Ok(BifResult::badarg());
+        };
+        let old = max_heap_size_map(atoms, flags.max_heap_size, flags.max_heap_flags);
+        flags.max_heap_size = size;
+        flags.max_heap_flags = max_flags;
+        return Ok(Value(old));
+    }
+    let Some(size) = value.small_integer().filter(|size| *size >= 0) else {
+        return Ok(BifResult::badarg());
+    };
+    let minimum = |default: i64| {
+        if size < default {
+            Ok(default)
+        } else {
+            next_heap_size(size).ok_or_else(|| no_heap_size(size))
+        }
+    };
+    let old = if flag.is_static("fullsweep_after") {
+        // `max_gen_gcs` is a `Uint16` (`erl_process.h:1145`).
+        i64::from(std::mem::replace(&mut flags.fullsweep_after, size as u16))
+    } else if flag.is_static("min_heap_size") {
+        std::mem::replace(&mut flags.min_heap_size, minimum(node.min_heap_size)?)
+    } else {
+        let new = minimum(node.min_bin_vheap_size)?;
+        std::mem::replace(&mut flags.min_bin_vheap_size, new)
+    };
+    Ok(Value(Term::Integer(old)))
+}
+
+/// The items of ERTS `system_flag_2` (`bif.c:4972-5304`) that need a
+/// subsystem that PBeam does not have: schedulers, tracing, the time offset, statistics, the CPU topology, and the memory
+/// allocators.
+const UNSUPPORTED_SYSTEM_FLAGS: &[&str] = &[
+    "multi_scheduling",
+    "schedulers_online",
     "trace_control_word",
     "sequential_tracer",
     "reset_seq_trace",
@@ -446,12 +512,6 @@ const UNSUPPORTED_SYSTEM_FLAGS: &[&str] = &[
     "scheduler_bind_type",
     "erts_alloc",
 ];
-
-/// The minimum heap size in words, `H_MIN_SIZE` of ERTS. ERTS starts it at
-/// `H_DEFAULT_SIZE` (`erl_vm.h:66`, `erl_init.c:808`). Only the emulator
-/// flag `+hms` and the item `min_heap_size` change it, and PBeam has
-/// neither, so the value stays 233.
-const MIN_HEAP_SIZE: i64 = 233;
 
 /// The largest value of `backtrace_depth`, `MAX_BACKTRACE_SIZE` of ERTS
 /// (`error.h:206`). `system_flag(backtrace_depth, Depth)` sets a larger
@@ -467,7 +527,13 @@ const MAX_BACKTRACE_SIZE: i64 = 64;
 /// `debug_flags` returns `true` for each value. `backtrace_depth` takes a
 /// small integer of 0 or more, sets the depth of the run to at most 64, and
 /// returns the old depth (`bif.c:5108-5115`). Each other value raises
-/// `badarg`. An item that ERTS does not
+/// `badarg`. The heap flags set the node defaults that a new process takes
+/// and return the old default (`bif.c:5037-5105`): `fullsweep_after`
+/// takes a small integer of 0 or more and keeps at most 65535,
+/// `min_heap_size` and `min_bin_vheap_size` take a small integer of 0 or
+/// more and keep the next heap size as an `int` that wraps to 32 bits, also for 0, and `max_heap_size` takes
+/// a value that `max_heap_size` reads with a size of 0 or at least the
+/// node minimum heap size. An item that ERTS does not
 /// know raises `badarg`, also `time_offset` with a value that is not
 /// `finalize`. Each item of `UNSUPPORTED_SYSTEM_FLAGS` first checks its
 /// value as ERTS does (`unsupported_system_flag_value`), and raises
@@ -500,7 +566,8 @@ const MAX_BACKTRACE_SIZE: i64 = 64;
 /// # Errors
 ///
 /// Each item of `UNSUPPORTED_SYSTEM_FLAGS` with a value that passes the
-/// check, and `time_offset` with `finalize`, give a runtime error. A new
+/// check, `time_offset` with `finalize`, and a minimum heap size at or
+/// above the largest heap size of ERTS give a runtime error. A new
 /// `capability_denied` atom in a full atom table gives the error of
 /// `AtomTable::put`.
 pub(super) fn system_flag(
@@ -521,9 +588,14 @@ pub(super) fn system_flag(
         Term::Atom(logger) => logger.is_one_of(&["logger", "undefined"]),
         _ => false,
     };
+    let defaults = context.scheduler.node().heap_flags();
     let atoms = &context.scheduler.atoms;
+    let size = value.small_integer().filter(|size| *size >= 0);
     let valid = match (atoms.name_of(item), value) {
         ("system_logger", _) => logger,
+        ("fullsweep_after" | "min_heap_size" | "min_bin_vheap_size", _) => size.is_some(),
+        ("max_heap_size", _) => max_heap_size(value, defaults.max_heap_flags)
+            .is_some_and(|(size, _)| size == 0 || size >= defaults.min_heap_size),
         ("debug_flags", _) => true,
         ("backtrace_depth", _) => value.small_integer().is_some_and(|depth| depth >= 0),
         ("time_offset", Term::Atom(finalize)) if atoms.name_of(finalize) == "finalize" => true,
@@ -549,6 +621,40 @@ pub(super) fn system_flag(
         match (scheduler.atoms.name_of(item), value.small_integer()) {
             ("system_logger", _) => Value(scheduler.node().swap_system_logger(value.clone())),
             ("debug_flags", _) => Value(Term::static_atom("true")),
+            ("fullsweep_after", Some(size)) => {
+                let mut flags = scheduler.node().heap_flags_mut();
+                let new = u16::try_from(size).unwrap_or(u16::MAX);
+                let old = std::mem::replace(&mut flags.fullsweep_after, new);
+                Value(Term::Integer(i64::from(old)))
+            }
+            ("min_heap_size" | "min_bin_vheap_size", Some(size)) => {
+                let new = next_heap_size(size).ok_or_else(|| no_heap_size(size))?;
+                // ERTS keeps `H_MIN_SIZE` and `BIN_VH_MIN_SIZE` as `int`
+                // (`erl_init.c:110-111`), so the value wraps to 32 bits.
+                let new = i64::from(new as i32);
+                let mut flags = scheduler.node().heap_flags_mut();
+                let HeapFlags {
+                    min_heap_size,
+                    min_bin_vheap_size,
+                    ..
+                } = &mut *flags;
+                let field = if item.is_static("min_heap_size") {
+                    min_heap_size
+                } else {
+                    min_bin_vheap_size
+                };
+                Value(Term::Integer(std::mem::replace(field, new)))
+            }
+            ("max_heap_size", _) => {
+                let mut flags = scheduler.node().heap_flags_mut();
+                let (size, max_flags) =
+                    max_heap_size(value, flags.max_heap_flags).expect("the value passed the check");
+                let old =
+                    max_heap_size_map(&scheduler.atoms, flags.max_heap_size, flags.max_heap_flags);
+                flags.max_heap_size = size;
+                flags.max_heap_flags = max_flags;
+                Value(old)
+            }
             ("backtrace_depth", Some(depth)) => {
                 let depth = depth.min(MAX_BACKTRACE_SIZE) as usize;
                 let old = scheduler.node().swap_backtrace_depth(depth);
@@ -572,8 +678,6 @@ pub(super) fn system_flag(
 /// - `schedulers_online` and `dirty_cpu_schedulers_online` take a small
 ///   integer of 1 or more (`erts_set_schedulers_online`,
 ///   `erl_process.c:8241-8242`).
-/// - `fullsweep_after`, `min_heap_size`, and `min_bin_vheap_size` take a
-///   small integer of 0 or more.
 /// - `trace_control_word` takes an integer from 0 to `u32::MAX`
 ///   (`db_set_trace_control_word`, `erl_db_util.c:1091-1103`).
 /// - `sequential_tracer` takes `false`, a pid, or `{Module, State}` with an
@@ -589,11 +693,6 @@ pub(super) fn system_flag(
 ///   (`erts_set_cpu_topology`, `erl_cpu_topology.c:1348-1400`).
 /// - `erts_alloc` takes `{Allocator, Parameter, Value}` with two atoms and
 ///   an integer (`erts_alloc_set_dyn_param`, `erl_alloc.c:3445-3462`).
-/// - `max_heap_size` takes a small integer `Size`, or a map with a small
-///   integer `size` key and the optional boolean keys `kill`,
-///   `error_logger`, and `include_shared_binaries` (`erts_max_heap_size`,
-///   `erl_gc.c:3824-3872`). `Size` is 0 or at least the minimum heap size
-///   (`bif.c:5089-5090`).
 ///
 /// `reset_seq_trace`, `cpu_topology`, and `scheduler_bind_type` accept each
 /// value here. ERTS also rejects a value that this check accepts when the
@@ -604,8 +703,7 @@ pub(super) fn system_flag(
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(!unsupported_system_flag_value("min_heap_size", &AtomTable::new(), &Term::static_atom("foo")));
-/// assert!(unsupported_system_flag_value("min_heap_size", &AtomTable::new(), &Term::Integer(8)));
+/// assert!(!unsupported_system_flag_value("multi_scheduling", &AtomTable::new(), &Term::static_atom("foo")));
 /// assert!(!unsupported_system_flag_value("schedulers_online", &AtomTable::new(), &Term::Integer(0)));
 /// ```
 fn unsupported_system_flag_value(name: &str, atoms: &AtomTable, value: &Term) -> bool {
@@ -632,9 +730,6 @@ fn unsupported_system_flag_value(name: &str, atoms: &AtomTable, value: &Term) ->
         "schedulers_online" | "dirty_cpu_schedulers_online" => {
             small.is_some_and(|count| count >= 1)
         }
-        "fullsweep_after" | "min_heap_size" | "min_bin_vheap_size" => {
-            small.is_some_and(|size| size >= 0)
-        }
         "trace_control_word" => integer.is_some_and(|word| u32::try_from(word).is_ok()),
         "sequential_tracer" => match value {
             Term::Pid(_) => true,
@@ -658,27 +753,6 @@ fn unsupported_system_flag_value(name: &str, atoms: &AtomTable, value: &Term) ->
             ),
             _ => false,
         },
-        "max_heap_size" => {
-            let size = match value {
-                Term::Map(map) => {
-                    let flag = |key| {
-                        map.get(&Term::static_atom(key)).is_none_or(
-                            |flag| matches!(flag, Term::Atom(flag) if flag.is_one_of(&["true", "false"])),
-                        )
-                    };
-                    if !["kill", "error_logger", "include_shared_binaries"]
-                        .into_iter()
-                        .all(flag)
-                    {
-                        return false;
-                    }
-                    map.get(&Term::static_atom("size"))
-                        .and_then(Term::small_integer)
-                }
-                _ => small,
-            };
-            size.is_some_and(|size| size == 0 || size >= MIN_HEAP_SIZE)
-        }
         _ => true,
     }
 }
@@ -2013,9 +2087,9 @@ pub(super) fn binary_to_list_1(
                 "binary_to_list",
                 vec![term.clone()],
                 binary,
-                0,
+                0..size,
                 size,
-                size,
+                Term::nil(),
             )
         }
         _ => Ok(BifResult::badarg()),
@@ -2059,14 +2133,62 @@ pub(super) fn binary_to_list_3(
         "binary_to_list",
         arguments,
         binary,
-        *first as usize - 1,
-        length,
+        *first as usize - 1..*first as usize - 1 + length,
         size as usize,
+        Term::nil(),
     )
 }
 
-/// Start the list of the `length` bytes at `offset` of `binary`, of `size`
-/// bytes, for `erlang:<bif>` with `arguments`, as ERTS `binary_to_list`
+/// Run `erlang:bitstring_to_list/1`, as ERTS `bitstring_to_list_1`
+/// (`binary.c:413-474`): `<<>>` gives `[]`, and a term that is not a
+/// bitstring raises `badarg`. The list has one integer for each whole byte.
+/// A size that is not a whole number of bytes adds the last bits as a
+/// bitstring at the end (`binary.c:452-469`). ERTS decides on one chunk
+/// with one cell for each byte and one cell for the last bits
+/// (`NBYTES(size)`, `binary.c:434-437`), and [`b2l_start`] does the same.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let list = bitstring_to_list(&mut scheduler, &Term::Binary(Binary::from(vec![1, 0x40]).bits(0, 11)))?;
+/// assert!(matches!(list, BifResult::Value(codes) if codes.proper_list().is_some_and(|codes| codes.len() == 2)));
+/// ```
+///
+/// # Errors
+///
+/// Return the invariant error of [`ProcessState::bif_reductions_left`].
+pub(super) fn bitstring_to_list(
+    scheduler: &mut Scheduler,
+    term: &Term,
+) -> Result<BifResult, BeamError> {
+    let Term::Binary(binary) = term else {
+        return Ok(BifResult::badarg());
+    };
+    let size = binary.bit_size();
+    if size == 0 {
+        return Ok(Value(Term::nil()));
+    }
+    let length = size / 8;
+    let (bytes, tail) = if size.is_multiple_of(8) {
+        (binary.clone(), Term::nil())
+    } else {
+        let last = Term::Binary(binary.bits(length * 8, size));
+        (binary.bits(0, length * 8), Term::cons(last, Term::nil()))
+    };
+    b2l_start(
+        scheduler,
+        "bitstring_to_list",
+        vec![term.clone()],
+        &bytes,
+        0..length,
+        size.div_ceil(8),
+        tail,
+    )
+}
+
+/// Start the list of the byte range `bytes` of `binary`, in front
+/// of the list `tail`, for a term of `size` cells, for `erlang:<bif>` with
+/// `arguments`, as ERTS `binary_to_list`
 /// does (`binary.c:258-290`, `329-351`). A binary of fewer than 256 bytes
 /// for each reduction left is one chunk. A binary of fewer than
 /// `B2L_MIN_EXEC_REDS * 256` bytes is also one chunk with a budget of 1000.
@@ -2088,10 +2210,11 @@ fn b2l_start(
     bif: &'static str,
     arguments: Vec<Term>,
     binary: &Binary,
-    offset: usize,
-    length: usize,
+    bytes: std::ops::Range<usize>,
     size: usize,
+    tail: Term,
 ) -> Result<BifResult, BeamError> {
+    let (offset, length) = (bytes.start, bytes.len());
     let process = scheduler.current_process_mut();
     let one_chunk = (size as u64)
         < process
@@ -2101,14 +2224,7 @@ fn b2l_start(
         // Only a budget of 0 or more does not make one chunk.
         let reds_left = process.bif_reductions_left()?;
         if size >= B2L_MIN_EXEC_REDS * B2L_BYTES_PER_REDUCTION {
-            return Ok(b2l_chunk(
-                process,
-                binary,
-                offset,
-                length,
-                Term::nil(),
-                reds_left,
-            ));
+            return Ok(b2l_chunk(process, binary, offset, length, tail, reds_left));
         }
         if reds_left <= B2L_RESCHED_REDS {
             scheduler.vbump_all_reductions();
@@ -2119,13 +2235,14 @@ fn b2l_start(
             });
         }
     }
-    process.bump_reductions(((length - 1) / B2L_BYTES_PER_REDUCTION + 1) as i32);
-    Ok(Value(b2l_cons(
-        binary,
-        offset,
-        offset + length,
-        Term::nil(),
-    )))
+    // ERTS computes `(size - 1) / 256 + 1` as a `Uint` and passes it as an
+    // `int` (`binary.c:265-266`), so 0 bytes wrap to `2^56`, which is 0 as
+    // an `int`: a bitstring of fewer than 8 bits costs no reduction.
+    let cost = length
+        .checked_sub(1)
+        .map_or(0, |last| last / B2L_BYTES_PER_REDUCTION + 1);
+    process.bump_reductions(cost as i32);
+    Ok(Value(b2l_cons(binary, offset, offset + length, tail)))
 }
 
 /// Make the list of the last chunk of the `remaining` bytes at `offset` of
@@ -4801,6 +4918,7 @@ struct ProcessInfoValues {
     heap_size: i64,
     stack_size: i64,
     reductions: i64,
+    heap_flags: HeapFlags,
 }
 
 /// Run `erlang:process_info/1` as `process_info_bif` with `pi_1_keys_list`
@@ -4811,8 +4929,8 @@ struct ProcessInfoValues {
 /// frames or start MFA, and the heap and stack sizes are the words of its
 /// PBeam containers (`heap_size` and `total_heap_size` are equal, because
 /// PBeam has no separate old heap). The garbage collection item gives the
-/// ERTS defaults with `minor_gcs` 0, because PBeam has no garbage
-/// collection.
+/// heap flags of the process (`erl_bif_info.c:2072-2094`) with `minor_gcs`
+/// 0, because PBeam has no garbage collection.
 ///
 /// A pid that no process has gives `undefined`. A read of another process
 /// needs the `process` capability with `inspect`, as for
@@ -4990,6 +5108,7 @@ fn process_info_values(
         heap_size,
         stack_size,
         reductions,
+        heap_flags: process.heap_flags,
     })
 }
 
@@ -5080,35 +5199,24 @@ fn process_info_term(atoms: &AtomTable, values: ProcessInfoValues) -> Result<Ter
             Term::Integer(value),
         ]));
     }
-    let max_heap_size = Map::from_pairs(
-        vec![
-            (Term::static_atom("error_logger"), Term::static_atom("true")),
-            (
-                Term::static_atom("include_shared_binaries"),
-                Term::static_atom("false"),
-            ),
-            (Term::static_atom("kill"), Term::static_atom("true")),
-            (Term::static_atom("size"), Term::Integer(0)),
-        ],
-        atoms,
-    )
-    .expect("the max_heap_size map holds atom keys");
+    let flags = values.heap_flags;
+    let max_heap_size = max_heap_size_map(atoms, flags.max_heap_size, flags.max_heap_flags);
     let minor_gcs = atoms.put("minor_gcs")?;
     items.push(Term::tuple(vec![
         Term::static_atom("garbage_collection"),
         Term::list_from(vec![
-            Term::tuple(vec![
-                Term::static_atom("max_heap_size"),
-                Term::Map(max_heap_size),
-            ]),
+            Term::tuple(vec![Term::static_atom("max_heap_size"), max_heap_size]),
             Term::tuple(vec![
                 Term::static_atom("min_bin_vheap_size"),
-                Term::Integer(46422),
+                Term::Integer(flags.min_bin_vheap_size),
             ]),
-            Term::tuple(vec![Term::static_atom("min_heap_size"), Term::Integer(233)]),
+            Term::tuple(vec![
+                Term::static_atom("min_heap_size"),
+                Term::Integer(flags.min_heap_size),
+            ]),
             Term::tuple(vec![
                 Term::static_atom("fullsweep_after"),
-                Term::Integer(65535),
+                Term::Integer(i64::from(flags.fullsweep_after)),
             ]),
             Term::tuple(vec![Term::Atom(minor_gcs), Term::Integer(0)]),
         ]),
