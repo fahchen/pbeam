@@ -312,9 +312,7 @@ fn boolean_flag(flag: &mut bool, value: Option<&str>) -> BifResult {
 ///
 /// Each flag of `UNSUPPORTED_PROCESS_FLAGS` gives a runtime error for a
 /// value that passes the check, and so does [`process_heap_flag`] where
-/// ERTS stops the emulator. ERTS raises `badarg`
-/// for a `scheduler` value above the scheduler count, which PBeam does not
-/// model, and PBeam gives the runtime error.
+/// ERTS stops the emulator.
 pub(super) fn process_flag(
     context: &mut BifContext<'_>,
     flag: &Term,
@@ -396,7 +394,10 @@ pub(super) fn process_flag(
             } else if flag.is_static("save_calls") {
                 small.is_some_and(|calls| (0..=10_000).contains(&calls))
             } else {
-                small.is_some_and(|scheduler| scheduler >= 0)
+                // `process_flag_2` takes a scheduler from 0 to the scheduler
+                // count (`bif.c:2072-2076`).
+                let schedulers = context.scheduler.scheduler_count();
+                small.is_some_and(|scheduler| (0..=schedulers).contains(&scheduler))
             };
             if !valid {
                 // `process_flag_aux` sets the cause `none` for `save_calls`
@@ -589,6 +590,7 @@ pub(super) fn system_flag(
         _ => false,
     };
     let defaults = context.scheduler.node().heap_flags();
+    let schedulers = context.scheduler.scheduler_count();
     let atoms = &context.scheduler.atoms;
     let size = value.small_integer().filter(|size| *size >= 0);
     let valid = match (atoms.name_of(item), value) {
@@ -600,7 +602,7 @@ pub(super) fn system_flag(
         ("backtrace_depth", _) => value.small_integer().is_some_and(|depth| depth >= 0),
         ("time_offset", Term::Atom(finalize)) if atoms.name_of(finalize) == "finalize" => true,
         (name, _) if UNSUPPORTED_SYSTEM_FLAGS.contains(&name) => {
-            unsupported_system_flag_value(name, atoms, value)
+            unsupported_system_flag_value(name, atoms, value, schedulers)
         }
         _ => return Ok(BifResult::badopt()),
     };
@@ -676,12 +678,12 @@ pub(super) fn system_flag(
 /// - `multi_scheduling` takes `block`, `unblock`, `block_normal`, or
 ///   `unblock_normal`.
 /// - `schedulers_online` and `dirty_cpu_schedulers_online` take a small
-///   integer of 1 or more (`erts_set_schedulers_online`,
-///   `erl_process.c:8241-8242`).
+///   integer from 1 to the scheduler count `schedulers`
+///   (`erts_set_schedulers_online`, `erl_process.c:8241-8246`).
 /// - `trace_control_word` takes an integer from 0 to `u32::MAX`
 ///   (`db_set_trace_control_word`, `erl_db_util.c:1091-1103`).
-/// - `sequential_tracer` takes `false`, a pid, or `{Module, State}` with an
-///   atom `Module` (`erts_term_to_tracer`, `erl_trace.c:3090-3129`).
+/// - `sequential_tracer` takes `false`, a pid, a port, or `{Module, State}`
+///   with an atom `Module` (`erts_term_to_tracer`, `erl_trace.c:3090-3129`).
 /// - `scheduler_wall_time` takes `true` or `false`, and
 ///   `microstate_accounting` takes `true`, `false`, or `reset`.
 /// - `outstanding_system_requests_limit` takes an integer from 1 to
@@ -690,23 +692,29 @@ pub(super) fn system_flag(
 /// - `scheduling_statistics` takes `disable`, `enable`, or `clear`.
 /// - `internal_cpu_topology` takes `undefined` or a non-empty proper list of
 ///   tuples `{cpu, Node, Processor, ProcessorNode, Core, Thread, Logical}`
-///   (`erts_set_cpu_topology`, `erl_cpu_topology.c:1348-1400`).
-/// - `erts_alloc` takes `{Allocator, Parameter, Value}` with two atoms and
-///   an integer (`erts_alloc_set_dyn_param`, `erl_alloc.c:3445-3462`).
+///   (`erts_set_cpu_topology`, `erl_cpu_topology.c:1348-1450`) that
+///   [`valid_cpu_topology`] accepts.
+/// - `erts_alloc` takes `{Allocator, Parameter, Value}` with an allocator
+///   name of `ALLOCATORS`, an atom, and an integer
+///   (`erts_alloc_set_dyn_param`, `erl_alloc.c:3445-3469`).
 ///
 /// `reset_seq_trace`, `cpu_topology`, and `scheduler_bind_type` accept each
 /// value here. ERTS also rejects a value that this check accepts when the
-/// value needs the state of the missing subsystem: the scheduler count, the
-/// tracer module, the allocator names, the CPU topology checks, and the CPU
-/// binding support of the host.
+/// value needs the state of the missing subsystem: the dirty CPU scheduler
+/// count, the tracer module, and the CPU binding support of the host.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(!unsupported_system_flag_value("multi_scheduling", &AtomTable::new(), &Term::static_atom("foo")));
-/// assert!(!unsupported_system_flag_value("schedulers_online", &AtomTable::new(), &Term::Integer(0)));
+/// assert!(!unsupported_system_flag_value("multi_scheduling", &AtomTable::new(), &Term::static_atom("foo"), 1));
+/// assert!(!unsupported_system_flag_value("schedulers_online", &AtomTable::new(), &Term::Integer(2), 1));
 /// ```
-fn unsupported_system_flag_value(name: &str, atoms: &AtomTable, value: &Term) -> bool {
+fn unsupported_system_flag_value(
+    name: &str,
+    atoms: &AtomTable,
+    value: &Term,
+    schedulers: i64,
+) -> bool {
     let atom = match value {
         Term::Atom(atom) => Some(atoms.name_of(atom)),
         _ => None,
@@ -716,23 +724,17 @@ fn unsupported_system_flag_value(name: &str, atoms: &AtomTable, value: &Term) ->
         _ => None,
     };
     let small = value.small_integer();
-    let cpu = |cpu: &Term| match cpu {
-        Term::Tuple(elements) => {
-            matches!(elements.as_ref(), [Term::Atom(tag), _, _, _, _, _, _] if tag.is_static("cpu"))
-        }
-        _ => false,
-    };
     match name {
         "multi_scheduling" => matches!(
             atom,
             Some("block" | "unblock" | "block_normal" | "unblock_normal")
         ),
         "schedulers_online" | "dirty_cpu_schedulers_online" => {
-            small.is_some_and(|count| count >= 1)
+            small.is_some_and(|count| (1..=schedulers).contains(&count))
         }
         "trace_control_word" => integer.is_some_and(|word| u32::try_from(word).is_ok()),
         "sequential_tracer" => match value {
-            Term::Pid(_) => true,
+            Term::Pid(_) | Term::Port(_) => true,
             Term::Tuple(elements) => matches!(elements.as_ref(), [Term::Atom(_), _]),
             _ => atom == Some("false"),
         },
@@ -743,18 +745,104 @@ fn unsupported_system_flag_value(name: &str, atoms: &AtomTable, value: &Term) ->
         }
         "scheduling_statistics" => matches!(atom, Some("disable" | "enable" | "clear")),
         "internal_cpu_topology" => match value.proper_list() {
-            Some(cpus) => !value.is_nil() && cpus.clone().all(cpu),
+            Some(cpus) => !value.is_nil() && valid_cpu_topology(cpus),
             None => atom == Some("undefined"),
         },
         "erts_alloc" => match value {
             Term::Tuple(elements) => matches!(
                 elements.as_ref(),
-                [Term::Atom(_), Term::Atom(_), Term::Integer(_)]
+                [Term::Atom(allocator), Term::Atom(_), Term::Integer(_)]
+                    if ALLOCATORS.contains(&atoms.name_of(allocator))
             ),
             _ => false,
         },
         _ => true,
     }
+}
+
+/// The allocator names of ERTS (`erl_alloc.types:71-85`), which
+/// `erts_alloc_set_dyn_param` looks up (`erl_alloc.c:3464-3469`).
+const ALLOCATORS: &[&str] = &[
+    "sys_alloc",
+    "temp_alloc",
+    "sl_alloc",
+    "std_alloc",
+    "ll_alloc",
+    "eheap_alloc",
+    "ets_alloc",
+    "fix_alloc",
+    "literal_alloc",
+    "binary_alloc",
+    "driver_alloc",
+    "test_alloc",
+];
+
+/// The largest identifier of a CPU topology, `ERTS_MAX_CPU_TOPOLOGY_ID`
+/// (`erl_cpu_topology.c:139`).
+const MAX_CPU_TOPOLOGY_ID: i64 = 0xffff;
+
+/// Tell whether `erts_set_cpu_topology` accepts the list `cpus`
+/// (`erl_cpu_topology.c:1388-1450`). Each element is a tuple
+/// `{cpu, Node, Processor, ProcessorNode, Core, Thread, Logical}` of small
+/// integers from -1 to `MAX_CPU_TOPOLOGY_ID`, and `verify_topology`
+/// (`erl_cpu_topology.c:1188-1248`) accepts the list: the logical
+/// identifiers are unique, the entities are unique, and the NUMA nodes in
+/// processor order (`processor_order_cmp`, `erl_cpu_topology.c:425-441`)
+/// are consistent.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let cpu = Term::tuple([Term::static_atom("cpu"), 0, 0, 0, 0, 0, 0].map(...));
+/// assert!(valid_cpu_topology(Term::list_from([cpu.clone()]).proper_list().unwrap()));
+/// assert!(!valid_cpu_topology(Term::list_from([cpu.clone(), cpu]).proper_list().unwrap()));
+/// ```
+fn valid_cpu_topology<'a>(cpus: impl Iterator<Item = &'a Term>) -> bool {
+    // [processor, node, processor_node, core, thread], logical.
+    let mut entries = Vec::new();
+    for cpu in cpus {
+        let Term::Tuple(elements) = cpu else {
+            return false;
+        };
+        let [Term::Atom(tag), ids @ ..] = elements.as_ref() else {
+            return false;
+        };
+        if !tag.is_static("cpu") || ids.len() != 6 {
+            return false;
+        }
+        let mut id = [0; 6];
+        for (slot, term) in id.iter_mut().zip(ids) {
+            match term.small_integer() {
+                Some(value) if (-1..=MAX_CPU_TOPOLOGY_ID).contains(&value) => *slot = value,
+                _ => return false,
+            }
+        }
+        let [node, processor, processor_node, core, thread, logical] = id;
+        entries.push(([processor, node, processor_node, core, thread], logical));
+    }
+    let mut logical: Vec<i64> = entries.iter().map(|(_, logical)| *logical).collect();
+    logical.sort_unstable();
+    if logical.windows(2).any(|pair| pair[0] == pair[1]) {
+        return false;
+    }
+    entries.sort_unstable();
+    if entries.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return false;
+    }
+    let [processor, node, processor_node, ..] = entries[0].0;
+    let no_nodes = node < 0 && processor_node < 0;
+    let (mut node, mut processor) = (node, processor);
+    entries[1..].iter().all(
+        |([next_processor, next_node, next_processor_node, ..], _)| {
+            if no_nodes {
+                return *next_node < 0 && *next_processor_node < 0;
+            }
+            let same = *next_processor != processor || *next_node == node;
+            node = *next_node;
+            processor = *next_processor;
+            same && (node < 0) != (*next_processor_node < 0)
+        },
+    )
 }
 
 /// Run `erlang:error(Reason)` as ERTS `error_1` (`bif.c:1436-1440`) does:

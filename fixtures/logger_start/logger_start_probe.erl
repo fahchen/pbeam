@@ -452,6 +452,10 @@ system_logger() ->
 %% that PBeam does not have also raises badarg for a value that ERTS rejects
 %% before it uses the subsystem.
 system_flag() ->
+    Schedulers = erlang:system_info(schedulers),
+    Cpu = fun(Node, Processor, ProcessorNode, Core, Thread, Logical) ->
+              {cpu, Node, Processor, ProcessorNode, Core, Thread, Logical}
+          end,
     [catch_error(fun() -> erlang:system_flag(id(no_such_flag), 1) end),
      catch_error(fun() -> erlang:system_flag(id(1), 1) end),
      catch_error(fun() -> erlang:system_flag(id(time_offset), id(preliminary)) end),
@@ -460,6 +464,8 @@ system_flag() ->
      catch_error(fun() -> erlang:system_flag(schedulers_online, id(0)) end),
      catch_error(fun() -> erlang:system_flag(schedulers_online, id(a)) end),
      catch_error(fun() -> erlang:system_flag(dirty_cpu_schedulers_online, id(0)) end),
+     catch_error(fun() -> erlang:system_flag(schedulers_online, id(Schedulers + 1)) end),
+     catch_error(fun() -> erlang:system_flag(dirty_cpu_schedulers_online, id(Schedulers + 1)) end),
      catch_error(fun() -> erlang:system_flag(fullsweep_after, id(-1)) end),
      catch_error(fun() -> erlang:system_flag(fullsweep_after, id(1 bsl 59)) end),
      catch_error(fun() -> erlang:system_flag(min_heap_size, id(a)) end),
@@ -481,10 +487,20 @@ system_flag() ->
      catch_error(fun() -> erlang:system_flag(internal_cpu_topology, id([])) end),
      catch_error(fun() -> erlang:system_flag(internal_cpu_topology, id([foo])) end),
      catch_error(fun() -> erlang:system_flag(internal_cpu_topology, id([{foo, 1}])) end),
+     catch_error(fun() -> erlang:system_flag(internal_cpu_topology, id([{1, 2}])) end),
      catch_error(fun() -> erlang:system_flag(internal_cpu_topology, id([{cpu, 0, 0, -1, 0, 0, 0} | x])) end),
+     catch_error(fun() -> erlang:system_flag(internal_cpu_topology, id([Cpu(-2, 0, 0, 0, 0, 0)])) end),
+     catch_error(fun() -> erlang:system_flag(internal_cpu_topology, id([Cpu(0, 65536, -1, 0, 0, 0)])) end),
+     catch_error(fun() -> erlang:system_flag(internal_cpu_topology, id([Cpu(0, 0, -1, 0, 0, 0), Cpu(0, 0, -1, 1, 0, 0)])) end),
+     catch_error(fun() -> erlang:system_flag(internal_cpu_topology, id([Cpu(0, 0, -1, 0, 0, 0), Cpu(0, 0, -1, 0, 0, 1)])) end),
+     catch_error(fun() -> erlang:system_flag(internal_cpu_topology, id([Cpu(-1, 0, -1, 0, 0, 0), Cpu(0, 1, -1, 0, 0, 1)])) end),
+     catch_error(fun() -> erlang:system_flag(internal_cpu_topology, id([Cpu(0, 0, -1, 0, 0, 0), Cpu(1, 0, -1, 0, 1, 1)])) end),
+     catch_error(fun() -> erlang:system_flag(internal_cpu_topology, id([Cpu(0, 0, -1, 0, 0, 0), Cpu(0, 1, 0, 0, 0, 1)])) end),
+     catch_error(fun() -> erlang:system_flag(internal_cpu_topology, id([Cpu(0, 0, -1, 0, 0, 0), Cpu(-1, 1, -1, 0, 0, 1)])) end),
      catch_error(fun() -> erlang:system_flag(erts_alloc, id(foo)) end),
      catch_error(fun() -> erlang:system_flag(erts_alloc, id({a, b})) end),
      catch_error(fun() -> erlang:system_flag(erts_alloc, id({a, b, c})) end),
+     catch_error(fun() -> erlang:system_flag(erts_alloc, id({exec_alloc, sbct, 1})) end),
      catch_error(fun() -> erlang:system_flag(max_heap_size, id(foo)) end),
      catch_error(fun() -> erlang:system_flag(max_heap_size, id(-1)) end),
      catch_error(fun() -> erlang:system_flag(max_heap_size, id(232)) end),
@@ -550,6 +566,11 @@ process_flag() ->
      catch_error(fun() -> process_flag(save_calls, id(a)) end),
      catch_error(fun() -> process_flag(scheduler, id(-1)) end),
      catch_error(fun() -> process_flag(scheduler, id(a)) end),
+     catch_error(fun() -> process_flag(scheduler, id(erlang:system_info(schedulers) + 1)) end),
+     catch_error(fun() -> process_flag(id({monitor_nodes, 1}), true) end),
+     catch_error(fun() -> process_flag(id({monitor_nodes, #{foo => true}}), true) end),
+     catch_error(fun() -> process_flag(id({monitor_nodes, #{node_type => foo}}), true) end),
+     catch_error(fun() -> process_flag(id({monitor_nodes, #{list => 1}}), true) end),
      catch_error(fun() -> process_flag(fullsweep_after, id(-1)) end),
      catch_error(fun() -> process_flag(fullsweep_after, id(1 bsl 59)) end),
      catch_error(fun() -> process_flag(min_heap_size, id(a)) end),
@@ -557,10 +578,17 @@ process_flag() ->
 
 %% A flag that needs a subsystem that PBeam does not have: the time offset,
 %% the trace control word, the sequential tracer, sequential trace tokens,
-%% and saved calls. ERTS gives volatile, 0, false, true, and 0.
+%% the CPU topology, scheduler binding, and saved calls. ERTS gives volatile,
+%% 0, false, false, the old topology, 0, true, and 0.
 unsupported_flag(time_offset) -> erlang:system_flag(time_offset, finalize);
 unsupported_flag(trace_control_word) -> erlang:system_flag(trace_control_word, 0);
 unsupported_flag(sequential_tracer) -> erlang:system_flag(sequential_tracer, self());
+unsupported_flag(sequential_tracer_port) ->
+    Port = open_port({spawn, "cat"}, [binary]),
+    erlang:system_flag(sequential_tracer, Port);
+unsupported_flag(internal_cpu_topology) ->
+    erlang:system_flag(internal_cpu_topology, [{cpu, -1, 0, -1, 0, 0, 0}, {cpu, -1, 0, -1, 0, 1, 1}]);
+unsupported_flag(scheduler) -> process_flag(scheduler, erlang:system_info(schedulers));
 unsupported_flag(reset_seq_trace) -> erlang:system_flag(reset_seq_trace, foo);
 unsupported_flag(save_calls) -> process_flag(save_calls, 0).
 
