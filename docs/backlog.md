@@ -141,12 +141,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a measured path converts such an integer at the end of a budget, or a task adds dirty schedulers.
 - **Source:** #234 (PR #243), #268, #399.
 
-### Read the clock after `ERTS_CHECK_TIME_REDS` reductions
-
-- PBeam reads the run clock and expires each due timer before it takes the next process. An ERTS scheduler reads the clock only when its processes used `ERTS_CHECK_TIME_REDS` (`CONTEXT_REDS`, 4000) reductions after the last read, and before it sleeps. Between two reads, it expires the timers on the last time that it read (`erl_process.c:59`, `9797-9810`; `erl_process.h:528-535`; `erl_time_sup.c:280`). Thus on ERTS a due timer can expire some turns later than on PBeam. The "Timers" row of `docs/erts-differences.md` records this, and this entry owns it.
-- **Trigger:** a measured path depends on the turn in which a timer expires while other processes run.
-- **Source:** #229 (PR #236).
-
 ### Run the other binary-match instructions
 
 - PBeam runs `bs_start_match3`, `bs_start_match4`, `bs_get_position`, `bs_set_position`, `bs_get_utf8`, `bs_skip_utf8`, `bs_get_utf16`, `bs_skip_utf16`, `bs_get_utf32`, `bs_skip_utf32`, `bs_get_tail`, `bs_get_binary2` with a size in a register or a literal integer, `bs_get_integer2`, `bs_skip_bits2`, `bs_match_string`, and `bs_match` with each command that the ERTS loader accepts. `move`, `bs_start_match3`, and `bs_start_match4` share a match context that they copy to another register, and `byte_size/1` reads a match context. `swap` and `bit_size/1` of a match context stop the run with `invariant error: the match context in <Operand> reached an instruction that is not a binary match`. After a failed `=:=` command of `bs_match`, PBeam does not know the position, so a read of the match context before `bs_set_position` stops the run with `unsupported read of the match context in <Operand> after a failed bs_match =:= command`. The remaining binary-match instruction, `bs_get_binary2` with the size `all`, stops the run with `unsupported BEAM opcode N`. The "Binary matching" row of `docs/erts-differences.md` records this, and this entry owns it.

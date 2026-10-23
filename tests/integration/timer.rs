@@ -314,3 +314,22 @@ fn runs_the_absolute_timer_bifs_and_read_timer_as_pinned_erts() {
         b"[[true,true,true,true,none,[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}]],[true,true,true,true,true,none,[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}]],[true,true,true,false,false,false,{error,badarg},none]]\n"
     );
 }
+
+const CHECK_TIME_PROBE: &[u8] = include_bytes!("../../fixtures/timer/check_time_probe.beam");
+
+#[test]
+fn reads_the_clock_after_check_time_reds_reductions_as_pinned_erts() {
+    // Two processes exchange messages in short turns after a timer of 1 ms
+    // starts. The scheduler does not sleep, so it reads the clock only after
+    // the processes used `ERTS_CHECK_TIME_REDS` (4000) reductions after the
+    // last read (`erl_process.c:9803-9810`), and the timer message cannot
+    // arrive before then. `erl +S 1` gives `true` in each of 20 runs.
+    let erlang = pinned_beam("erlang");
+    let program = BeamProgram::load(&[&erlang, CHECK_TIME_PROBE]).unwrap();
+    for _ in 0..5 {
+        let result = program
+            .execute("check_time_probe", "short_turns", &[])
+            .unwrap();
+        assert_eq!(result.term, Term::Atom(program.atom("true").unwrap()));
+    }
+}

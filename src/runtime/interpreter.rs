@@ -893,7 +893,7 @@ impl BeamProgram {
         // processes, because a process of another scheduler can still depend
         // on them until the last root exits.
         while !node.is_shutdown() {
-            let now = scheduler.timers.now();
+            let now = scheduler.timers.timer_time();
             scheduler.expire_timers(now);
             scheduler.check_signals()?;
             scheduler.complete_dirty_calls();
@@ -1093,7 +1093,7 @@ impl BeamProgram {
                     None => scheduler.enter_runtime(capabilities),
                 }
             }
-            let now = scheduler.timers.now();
+            let now = scheduler.timers.timer_time();
             scheduler.expire_timers(now);
             scheduler.check_signals()?;
             match issuer {
