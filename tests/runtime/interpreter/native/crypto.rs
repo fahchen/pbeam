@@ -758,6 +758,14 @@ fn gives_the_argument_number_of_each_aead_context_error() {
         &atoms,
         ("badarg", "aead.c", 105, 1, "non-binary key"),
     );
+    // crypto.erl:2057 takes only an integer tag length.
+    let bad = [gcm.clone(), key.clone(), truth.clone(), truth.clone()];
+    let result = aead_cipher_init_nif(&mut scheduler, &bad).unwrap();
+    assert_c_error(
+        result,
+        &atoms,
+        ("badarg", "aead.c", 109, 2, "Bad Tag length"),
+    );
     let bad = [
         gcm.clone(),
         key.clone(),
