@@ -1402,17 +1402,15 @@ impl Scheduler {
 
     /// Serve each fd of `ready` (see [`Self::check_io`]).
     fn serve(&mut self, ready: &[poll::Ready]) -> Result<(), BeamError> {
-        // The reads go before the writes, in the order of the wait before
-        // the poll thread. ERTS runs the output event of one fd first
-        // (`erl_check_io.c:2099-2109`); the "Input select" row of
-        // `docs/erts-differences.md` records this.
+        // The writes go before the reads, as ERTS runs the output event of
+        // one fd before its input event (`erl_check_io.c:2099-2110`).
         let reads = ready
             .iter()
             .filter(|(_, direction)| *direction == poll::Direction::Read);
         let writes = ready
             .iter()
             .filter(|(_, direction)| *direction == poll::Direction::Write);
-        for &(fd, direction) in reads.chain(writes) {
+        for &(fd, direction) in writes.chain(reads) {
             if fd == libc::STDIN_FILENO && direction == poll::Direction::Read {
                 let ttys = self.resources.borrow_mut::<Ttys>();
                 let Some(select) = ttys.take_input_select() else {
