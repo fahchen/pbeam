@@ -86,6 +86,19 @@ pub(super) enum Start {
     },
 }
 
+impl From<Frame> for Start {
+    /// Return the start at the entry frame `frame`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.start(frame, vec![], Vec::new())?;
+    /// ```
+    fn from(frame: Frame) -> Self {
+        Start::Entry(frame)
+    }
+}
+
 /// One Y register of a frame.
 #[derive(Clone, Debug)]
 pub(super) enum StackSlot {

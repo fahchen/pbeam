@@ -960,20 +960,23 @@ fn keeps_no_export_target_for_an_import_with_no_export() {
 
 #[test]
 fn rejects_missing_modules_exports_and_function_arities() {
+    // The root starts at the export entry of its MFA, as a spawn does. A run
+    // of the library API has no init process that loads a module, and no
+    // `error_handler` (row "Undefined functions").
     let program = make_program(vec![Instruction::Return], 0);
-    assert!(
+    assert_eq!(
         program
             .execute("missing", "main", &[])
             .unwrap_err()
-            .to_string()
-            .contains("missing BEAM module")
+            .to_string(),
+        "unresolved external MFA missing:main/0"
     );
-    assert!(
+    assert_eq!(
         program
             .execute("fixture", "missing", &[])
             .unwrap_err()
-            .to_string()
-            .contains("missing export")
+            .to_string(),
+        "root process exited with {undef,[{fixture,missing,[],[]}]}"
     );
     assert_eq!(
         make_program(vec![Instruction::Return], 1)
