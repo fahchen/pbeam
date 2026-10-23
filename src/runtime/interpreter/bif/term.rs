@@ -363,10 +363,11 @@ fn encode(term: &Term, atoms: &AtomTable, options: &Options) -> Result<Vec<u8>, 
                 let mut pairs: Vec<(&Term, &Term)> = map.iter().collect();
                 if options.deterministic {
                     pairs.sort_by(|(left, _), (right, _)| exact_map_key_order(left, right, atoms));
-                } else {
-                    // ERTS writes a flatmap in descending key order
-                    // (`erl_map.c`) and a hashmap in the reverse of the HAMT
-                    // traversal order (`enc_term`, `external.c:3819-3825`).
+                } else if map.is_hashmap() {
+                    // ERTS writes a flatmap in its key order
+                    // (`ENC_MAP_PAIR`, `external.c:3391-3403`, 3766-3768)
+                    // and a hashmap in the reverse of the HAMT traversal
+                    // order (`enc_term`, `external.c:3819-3825`).
                     pairs.reverse();
                 }
                 for (key, value) in pairs.into_iter().rev() {

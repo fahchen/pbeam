@@ -14,7 +14,8 @@
 //! each context in `MacContexts`, and the cipher context NIFs
 //! `ng_crypto_init_nif/4`, `ng_crypto_update_nif/2`, `ng_crypto_final_nif/1`,
 //! `ng_crypto_get_data_nif/1`, `aead_cipher_init_nif/4`, and
-//! `aead_cipher_nif/4` of `cipher_context`. As ERTS, PBeam computes the digests and MACs with
+//! `aead_cipher_nif/4` of `cipher_context`, and the sign and verify NIFs
+//! `pkey_sign_nif/5`, `pkey_sign_heavy_nif/5`, and `pkey_verify_nif/6`. As ERTS, PBeam computes the digests and MACs with
 //! a static OpenSSL, through the safe `openssl` crate (`vendored`, OpenSSL
 //! 3.5.5).
 //! Each other function of the library gives the runtime error
@@ -24,6 +25,7 @@
 mod cipher;
 mod cipher_context;
 mod mac_context;
+mod pkey;
 
 use super::bif::iodata_bytes;
 use super::*;
@@ -44,6 +46,7 @@ use openssl::{
     pkey::{Id, PKey},
     sign::Signer,
 };
+use pkey::{pkey_sign_nif, pkey_verify_nif};
 use std::{collections::HashMap, fs::File, io::Read, sync::OnceLock};
 
 /// The functions of the ERTS `crypto` NIF library, as `(name, arity)` in
@@ -345,6 +348,24 @@ pub(super) const BINDINGS: &[Binding] = &[
                 &arguments[4],
             )
         },
+    },
+    Binding {
+        name: "pkey_sign_heavy_nif",
+        arity: 5,
+        job: Job::CpuBound,
+        run: |scheduler, arguments| pkey_sign_nif(scheduler, "pkey_sign_heavy_nif", arguments),
+    },
+    Binding {
+        name: "pkey_sign_nif",
+        arity: 5,
+        job: Job::Normal,
+        run: |scheduler, arguments| pkey_sign_nif(scheduler, "pkey_sign_nif", arguments),
+    },
+    Binding {
+        name: "pkey_verify_nif",
+        arity: 6,
+        job: Job::Normal,
+        run: pkey_verify_nif,
     },
     Binding {
         name: "pubkey_algorithms",

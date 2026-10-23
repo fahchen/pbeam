@@ -230,6 +230,8 @@ const DIRTY_FUNCTIONS: &[(&str, &str, u32, Job)] = &[
     ("prim_file", "delayed_close_nif", 1, Job::IoBound),
     ("prim_file", "altname_nif", 1, Job::IoBound),
     ("prim_file", "file_desc_to_ref_nif", 1, Job::IoBound),
+    // crypto.c:105.
+    ("crypto", "pkey_sign_heavy_nif", 5, Job::CpuBound),
     // prim_tty_nif.c:161, 163.
     ("prim_tty", "write_nif", 2, Job::IoBound),
     ("prim_tty", "read_nif", 3, Job::IoBound),
@@ -241,7 +243,7 @@ const DIRTY_FUNCTIONS: &[(&str, &str, u32, Job)] = &[
 ];
 
 /// Each static binding has the job of the flag of its pinned-OTP
-/// `ErlNifFunc`: `crypto` (crypto.c:69-103), `prim_buffer`
+/// `ErlNifFunc`: `crypto` (crypto.c:69-103) except `pkey_sign_heavy_nif/5`, `prim_buffer`
 /// (prim_buffer_nif.c:87-95), `zlib` (zlib_nif.c:148-176), and `zstd`
 /// (zstd_nif.c:1082-1116) have no flag on a bound function.
 #[test]

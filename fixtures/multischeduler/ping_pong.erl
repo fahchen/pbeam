@@ -9,8 +9,7 @@
          kill_watch/0, kill_hold/0, kill_child/0, port_send/0, port_other/0,
          alive_wait/0, alive_send/0, alive_child/0, scheduler_count/0,
          wall_time/0, name_after_kill/0, name_kill_hold/0, name_kill_child/0,
-         decode_atom/0, persistent_put/0, port_transfer/0,
-         port_transfer_hold/0, port_use/0, port_give/0,
+         decode_atom/0, persistent_put/0, port_use/0, port_give/0,
          port_term/0, port_term_give/0, counters_hold/0, counters_add/0, timer_remote/0,
          timer_hold/0, timer_named/0, timer_read/0, timer_give/0, 
          regex_run/0, regex_give/0,
@@ -507,19 +506,6 @@ atom_receive() ->
 persistent_put() ->
     persistent_term:put(persistent_probe, 1).
 
-%% The root that connects its tcp_inet port to a process of the other
-%% scheduler.
-port_transfer() ->
-    Pid = wait_for(transfer_name, 100000),
-    Port = open_port({spawn_driver, "tcp_inet"}, [binary]),
-    true = port_connect(Port, Pid),
-    ok.
-
-%% The root that holds a name for the port transfer of the other root.
-port_transfer_hold() ->
-    true = register(transfer_name, self()),
-    receive stop -> ok after 6000 -> timeout end.
-
 %% The root that receives the port of the other scheduler and uses it with
 %% each port BIF: erlang:ports/0, port_info/1,2, link/1, port_connect/2,
 %% port_command/2, port_control/3, monitor/2, and port_close/1.
@@ -748,12 +734,16 @@ timer_exit_hold() ->
 %% The root that links to a tcp_inet port of the other scheduler.
 port_link_use() ->
     true = register(port_link_name, self()),
-    receive {port, Port} -> erlang:link(Port) end.
+    receive {port, From, Port} ->
+        Linked = erlang:link(Port),
+        From ! done,
+        Linked
+    end.
 
 port_link_give() ->
     Port = open_port({spawn_driver, "tcp_inet"}, [binary]),
     ok = wait_registered(port_link_name, 100000),
-    port_link_name ! {port, Port},
+    port_link_name ! {port, self(), Port},
     receive done -> ok after 6000 -> timeout end.
 
 %% The root that waits for its own four-argument BIF timer.

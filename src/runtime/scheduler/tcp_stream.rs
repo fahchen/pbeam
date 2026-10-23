@@ -22,7 +22,7 @@ use crate::{
             self, Driver, Port,
             inet::{Event, Inet, OK, Output, Receiver},
         },
-        timer::{Timer, Timers},
+        timer::{PortTimer, Timer},
     },
     term::{Atom, PortId, ProcessId, Term},
 };
@@ -65,9 +65,8 @@ impl Scheduler {
             if timeout == 0 {
                 events.extend(tcp.receive_now_timeout());
             } else if timeout != INFINITY {
-                let end = Timers::timeout_position(self.timers.now(), timeout.into())
-                    .expect("a timeout of 32 bits has an end");
-                let timer = self.timers.start(end, Timer::SocketReceive { port });
+                let timer =
+                    self.start_port_timer(timeout, |key| Timer::SocketReceive { port, key });
                 let receiver = tcp.stream.receiver.as_mut().expect("the receive waits");
                 receiver.timer = Some(timer);
             }
@@ -108,12 +107,18 @@ impl Scheduler {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// scheduler.tcp_receive_timeout(port);
+    /// scheduler.tcp_receive_timeout(port, timer);
     /// ```
-    pub(super) fn tcp_receive_timeout(&mut self, port: PortId) {
+    pub(super) fn tcp_receive_timeout(&mut self, port: PortId, timer: PortTimer) {
+        // A timer that a port task of another scheduler canceled first
+        // finds no receive that holds it (`erl_hl_timer.c:708-720`).
         let events = self
             .node
-            .with_port(port, |item| item.inet_mut().map(Inet::receive_timeout))
+            .with_port(port, |item| {
+                item.inet_mut()
+                    .filter(|tcp| tcp.stream.receiver.is_some_and(|r| r.timer == Some(timer)))
+                    .map(Inet::receive_timeout)
+            })
             .flatten();
         if let Some(events) = events {
             self.deliver_events(port, events)
@@ -204,7 +209,7 @@ impl Scheduler {
             match event {
                 Event::Received { receiver, result } => {
                     if let Some(timer) = receiver.timer {
-                        self.timers.cancel(timer);
+                        self.cancel_port_timer(timer);
                     }
                     let status = match result {
                         Ok(bytes) => {
@@ -289,7 +294,7 @@ impl Scheduler {
     fn port_deliver(&mut self, port: PortId, to: ProcessId, message: Term) {
         let closing = self.node.with_port(port, |item| item.closing) != Some(false);
         if !closing {
-            self.deliver(to, message);
+            self.port_send(to, message);
         }
     }
 

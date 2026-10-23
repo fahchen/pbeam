@@ -7,6 +7,8 @@
 //! the number of bits written, and fills the bits of each byte from the
 //! most significant bit, as ERTS does.
 
+use num_bigint::{BigInt, Sign};
+
 use crate::term::Binary;
 
 /// A byte buffer that grows by any number of bits.
@@ -125,19 +127,48 @@ impl BitWriter {
     /// assert_eq!(writer.into_bytes(), (vec![0xBC, 0xAD], 16));
     /// ```
     pub(super) fn push_integer(&mut self, value: i64, bits: u64, little: bool) {
-        let byte_at = |shift: u64| (value >> shift.min(63)) as u8;
+        self.push_integer_bytes(|index| (value >> (index * 8).min(63)) as u8, bits, little);
+    }
+
+    /// Write the bignum `value` in `bits` bits, as `push_integer` writes a
+    /// small integer (`fmt_big_be` and `fmt_big_le`, erl_bits.c:989-1015 and
+    /// 1119-1145).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut writer = BitWriter::default();
+    /// writer.push_bigint(&-(BigInt::from(1) << 64), 72, false);
+    /// assert_eq!(writer.into_bytes(), (vec![0xFF, 0, 0, 0, 0, 0, 0, 0, 0], 72));
+    /// ```
+    pub(super) fn push_bigint(&mut self, value: &BigInt, bits: u64, little: bool) {
+        let bytes = value.to_signed_bytes_le();
+        let sign = if value.sign() == Sign::Minus { 0xFF } else { 0 };
+        let byte_at = |index: u64| {
+            usize::try_from(index)
+                .ok()
+                .and_then(|index| bytes.get(index))
+                .copied()
+                .unwrap_or(sign)
+        };
+        self.push_integer_bytes(byte_at, bits, little);
+    }
+
+    /// Write `bits` bits of the two's complement integer whose byte at
+    /// `index`, from the least significant byte, is `byte_at(index)`.
+    fn push_integer_bytes(&mut self, byte_at: impl Fn(u64) -> u8, bits: u64, little: bool) {
         let (whole, rest) = (bits / 8, (bits % 8) as u32);
         if little {
             for index in 0..whole {
-                self.push_bits(byte_at(index * 8), 8);
+                self.push_bits(byte_at(index), 8);
             }
         }
         if rest > 0 {
-            self.push_bits(byte_at(whole * 8), rest);
+            self.push_bits(byte_at(whole), rest);
         }
         if !little {
             for index in (0..whole).rev() {
-                self.push_bits(byte_at(index * 8), 8);
+                self.push_bits(byte_at(index), 8);
             }
         }
     }

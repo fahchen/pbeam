@@ -3,7 +3,9 @@ use std::{hint::black_box, rc::Rc, sync::Arc, time::Instant};
 use super::{
     Child, Direction, Drain, HAMT_MAX_LEVEL, Hamt, Insert, Map, Node, Repr, encode_path, map_hash,
 };
-use crate::term::{AtomTable, Reference, Term, internal_hash, test_atom as atom, test_atom_table};
+use crate::term::{
+    AtomTable, PortId, Reference, Term, internal_hash, test_atom as atom, test_atom_table,
+};
 
 fn integers(keys: impl IntoIterator<Item = i64>) -> Map {
     Map::from_pairs(
@@ -113,9 +115,10 @@ fn keeps_flatmap_keys_in_order_and_replaces_values() {
     );
     assert_eq!(map.len(), 4);
     // A key type that the flatmap does not support leaves the map unchanged.
+    let unsupported = Term::tuple(vec![Term::binary(vec![])]);
     assert_eq!(
-        map.insert(Term::Map(Map::new()), atom(&mut table, "v"), &table),
-        Err(Term::Map(Map::new()))
+        map.insert(unsupported.clone(), atom(&mut table, "v"), &table),
+        Err(unsupported)
     );
     assert_eq!(map.len(), 4);
 }
@@ -165,19 +168,30 @@ fn hashes_tuple_keys_with_the_internal_hash() {
 #[test]
 fn rejects_list_and_tuple_keys_with_unsupported_elements() {
     assert_eq!(map_hash(&Term::nil()), Some(internal_hash(&Term::nil())));
-    let empty_map = || Term::Map(Map::new());
+    // A port key alone is not supported.
+    assert_eq!(map_hash(&Term::Port(PortId(0))), None);
+    // A map that holds a binary: #{1 => <<>>}.
+    let binary_map = || {
+        Term::Map(
+            Map::from_pairs(
+                vec![(Term::Integer(1), Term::binary(vec![]))],
+                &test_atom_table(),
+            )
+            .unwrap(),
+        )
+    };
     let unsupported = [
-        Term::list_from(vec![Term::Integer(1), empty_map()]),
-        Term::list_from(vec![Term::list_from(vec![empty_map()])]),
+        Term::list_from(vec![Term::Integer(1), binary_map()]),
+        Term::list_from(vec![Term::list_from(vec![binary_map()])]),
         // {<<>>} and {1, #{}}: a tuple with an element that is not supported.
         Term::tuple(vec![Term::binary(vec![])]),
-        Term::tuple(vec![Term::Integer(1), empty_map()]),
+        Term::tuple(vec![Term::Integer(1), binary_map()]),
         // [1|#{}], [1|<<>>], and [[1|#{}]]: an improper list tail that is not supported.
-        Term::list_with_tail(vec![Term::Integer(1)], empty_map()),
+        Term::list_with_tail(vec![Term::Integer(1)], binary_map()),
         Term::list_with_tail(vec![Term::Integer(1)], Term::binary(vec![])),
         Term::list_from(vec![Term::list_with_tail(
             vec![Term::Integer(1)],
-            empty_map(),
+            binary_map(),
         )]),
     ];
     for key in unsupported {

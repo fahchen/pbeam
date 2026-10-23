@@ -76,6 +76,13 @@ pub(in crate::runtime) enum Delivery {
     /// another scheduler took from the node timer table. The receiver
     /// removes the timer from its timer wheel.
     CancelTimer { reference: crate::term::Reference },
+    /// A cancel of the port timer `key` of this scheduler, which a port
+    /// task on another scheduler ended. The receiver removes the timer from
+    /// its timer wheel, as `queue_canceled_timer` hands a canceled timer to
+    /// its scheduler (`erl_hl_timer.c:1768-1791`).
+    CancelPortTimer {
+        key: crate::runtime::timer::TimerKey,
+    },
     /// A runnable process that another scheduler gives to this scheduler
     /// ([`Node::transfer`]). The receiver puts it into its run queue.
     Process {
@@ -936,6 +943,22 @@ impl Node {
             .lock()
             .expect("the scheduler inbox is not poisoned")
             .push_back(Delivery::CancelTimer { reference });
+        wake(&inbox.wake);
+    }
+
+    /// Send the cancel of the port timer `key` to the scheduler `index`
+    /// (see [`Delivery::CancelPortTimer`]).
+    pub(in crate::runtime) fn cancel_port_timer_at(
+        &self,
+        index: usize,
+        key: crate::runtime::timer::TimerKey,
+    ) {
+        let inbox = &self.inboxes[index];
+        inbox
+            .queue
+            .lock()
+            .expect("the scheduler inbox is not poisoned")
+            .push_back(Delivery::CancelPortTimer { key });
         wake(&inbox.wake);
     }
 
