@@ -481,31 +481,56 @@ fn runs_the_skip_and_binary_commands_as_pinned_erts() {
     assert_eq!(erts, b"[<<2,3>>,false]\n");
 }
 
+/// Element `index` of the tuple of expected bitstring literals that
+/// `bs_match_probe:literals/0` gives. The loader reads each literal as a
+/// `BIT_BINARY_EXT` term, so the values compare by bits.
+fn literal(index: usize) -> Term {
+    let program = BeamProgram::load(&[BS_MATCH_PROBE]).unwrap();
+    let literals = program
+        .execute("bs_match_probe", "literals", &[])
+        .unwrap()
+        .term;
+    match literals {
+        Term::Tuple(ref elements) => elements[index].clone(),
+        other => panic!("literals/0 gave {other:?}"),
+    }
+}
+
 #[test]
-fn stops_at_a_binary_or_get_tail_command_that_needs_a_bitstring() {
+fn runs_binary_and_get_tail_commands_that_give_bitstrings_as_pinned_erts() {
     // `bs_match_probe:bits/1` reads a binary of 3 bits, and
-    // `bs_match_probe:bit_tail/1` reads a tail of 4 bits. ERTS gives the
-    // bitstrings `<<5:3>>` and `<<5:4>>`. PBeam has no bitstring term, so
-    // it stops the run (row "Binary matching").
+    // `bs_match_probe:bit_tail/1` reads a tail of 4 bits. ERTS gives a
+    // sub-bitstring of each size at each position (`GET_BITSTRING` and
+    // `emit_bs_get_tail_shared`, jit/arm/instr_bs.cpp:407-439, 3136-3176).
     let inputs: [&[u8]; 2] = [&[0xA5], b""];
     let (results, erts) = bs_match_each("bits", &inputs);
-    assert_eq!(
-        results,
-        [
-            Err("unsupported bs_match binary of 3 bits: needs a bitstring term".into()),
-            Ok(probe_atom("false"))
-        ]
-    );
+    assert_eq!(results, [Ok(literal(0)), Ok(probe_atom("false"))]);
     assert_eq!(erts, b"[<<5:3>>,false]\n");
     let (results, erts) = bs_match_each("bit_tail", &inputs);
-    assert_eq!(
-        results,
-        [
-            Err("unsupported bs_match get_tail of 4 bits: needs a bitstring term".into()),
-            Ok(probe_atom("false"))
-        ]
-    );
+    assert_eq!(results, [Ok(literal(1)), Ok(probe_atom("false"))]);
     assert_eq!(erts, b"[<<5:4>>,false]\n");
+}
+
+#[test]
+fn matches_bits_segments_and_unit_tails_of_bitstrings_as_pinned_erts() {
+    // `bs_match_probe:bitstrings/0` matches `bits` and `bitstring`
+    // segments, a `binary` tail (unit 8), and a tail of unit 4 on bitstring
+    // literals. `ensure_at_least` tests the unit of the bits after the
+    // segments (jit/arm/instr_bs.cpp:2916-3205).
+    let program = BeamProgram::load(&[BS_MATCH_PROBE]).unwrap();
+    let result = program
+        .execute("bs_match_probe", "bitstrings", &[])
+        .unwrap()
+        .term;
+    let expected = "[{{<<0:3>>,<<0:2>>,<<1:7>>},{<<0:4>>,<<1>>},false},\
+                    {{<<0:3>>,<<0:2>>,<<5>>},false,{<<0:1>>,<<0,5:4>>}},\
+                    {{<<0:3>>,<<0:2>>,<<32,2:3>>},false,false},\
+                    {false,false,false},{false,false,false}]";
+    assert_eq!(result, literal(5));
+    assert_eq!(
+        reference("bs_match_probe:bitstrings()"),
+        format!("{expected}\n").into_bytes()
+    );
 }
 
 #[test]
@@ -649,10 +674,10 @@ fn multiplies_the_bs_get_binary2_size_by_its_unit_as_pinned_erts() {
 }
 
 #[test]
-fn stops_at_a_bs_get_binary2_that_needs_a_bitstring() {
+fn runs_a_bs_get_binary2_that_gives_a_bitstring_as_pinned_erts() {
     // `bs_get_probe:split_bits/2` runs `bs_get_binary2` with unit 1. ERTS
-    // gives the bitstring `<<0:3>>` for 3 bits. PBeam has no bitstring
-    // term, so it stops the run (row "Binary matching").
+    // gives the sub-bitstring `<<0:3>>` for 3 bits and the tail
+    // `<<8,2:5>>` (`erts_bs_get_binary_2`, erl_bits.c:400-424).
     let calls: Vec<Vec<Term>> = [8, 16, 17, 3]
         .into_iter()
         .map(|size| vec![Term::binary(vec![1, 2]), Term::Integer(size)])
@@ -663,7 +688,7 @@ fn stops_at_a_bs_get_binary2_that_needs_a_bitstring() {
             halves(&[1], &[2]),
             halves(&[1, 2], b""),
             Ok(bs_get_atom("short")),
-            Err("unsupported bs_get_binary2 of 3 bits: needs a bitstring term".into()),
+            Ok(Term::tuple(vec![literal(2), literal(3)])),
         ]
     );
     assert_eq!(
@@ -676,25 +701,21 @@ fn stops_at_a_bs_get_binary2_that_needs_a_bitstring() {
 fn resumes_a_match_context_and_reads_its_tail_as_pinned_erts() {
     // `bs_get_probe:nibbles/2` gets the match context of `nibbles/1` and
     // runs `bs_start_match4` with `resume`. At the fail label, it runs
-    // `bs_set_position` and then `bs_get_tail`. A tail of 12 bits is a
-    // bitstring in ERTS, so PBeam stops the run (row "Binary matching").
+    // `bs_set_position` and then `bs_get_tail`, which gives a tail of 12
+    // bits as a sub-bitstring (jit/arm/instr_bs.cpp:407-454).
     let calls: Vec<Vec<Term>> = [&b"a"[..], b"a\x12\xF3", b"a\x1F\x23", b"a\x12", b"b"]
         .into_iter()
         .map(|input| vec![Term::binary(input.to_vec())])
         .collect();
-    let nibbles = |values: &[i64], tail: &[u8]| {
-        Ok(Term::tuple(vec![
-            Term::list_from(values.iter().copied().map(Term::Integer)),
-            Term::binary(tail.to_vec()),
-        ]))
-    };
+    let nibbles = |values: &[i64], tail: Term| Ok(Term::tuple(vec![integers(values), tail]));
+    let bytes = |tail: &[u8]| Term::binary(tail.to_vec());
     assert_eq!(
         bs_get_each("nibbles", &calls),
         [
-            nibbles(&[], b""),
-            nibbles(&[2, 1], &[0xF3]),
-            Err("unsupported bs_get_tail of 12 bits: needs a bitstring term".into()),
-            nibbles(&[2, 1], b""),
+            nibbles(&[], bytes(b"")),
+            nibbles(&[2, 1], bytes(&[0xF3])),
+            nibbles(&[1], literal(4)),
+            nibbles(&[2, 1], bytes(b"")),
             Ok(bs_get_atom("none")),
         ]
     );

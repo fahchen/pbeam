@@ -1980,21 +1980,14 @@ impl BeamProgram {
                 // ERTS `bs_get_tail` writes the bits after the position as
                 // a sub-bitstring and keeps the position
                 // (`emit_bs_get_tail` and `emit_bs_get_tail_shared` in
-                // jit/arm/instr_bs.cpp:407-454). PBeam has no bitstring
-                // term (row "Binary matching" of docs/erts-differences.md).
+                // jit/arm/instr_bs.cpp:407-454).
                 Instruction::BinaryGetTail {
                     context,
                     destination,
                 } => {
                     let (process, atoms) = scheduler.current_process_and_atoms();
                     let state = match_context(process, context, atoms)?;
-                    let bits = state.remaining_bits();
-                    let Some(tail) = state.tail() else {
-                        return Err(error(format!(
-                            "unsupported bs_get_tail of {bits} bits: needs a bitstring term"
-                        )));
-                    };
-                    write(process, destination, Term::Binary(tail))?;
+                    write(process, destination, Term::Binary(state.tail()))?;
                 }
                 // ERTS `i_bs_get_binary2` checks the size
                 // (`binary_field_size`), then reads the bits as a
@@ -2022,16 +2015,9 @@ impl BeamProgram {
                         .and_then(|bits| Some((bits, state.advance(bits)?)));
                     match bytes {
                         Some((bits, ())) => {
-                            if !bits.is_multiple_of(8) {
-                                return Err(error(format!(
-                                    "unsupported bs_get_binary2 of {bits} bits: needs a bitstring term"
-                                )));
-                            }
                             let position = state.position();
-                            let bytes = state.bits_at(position - bits as usize, position).expect(
-                                "the size of a bs_get_binary2 view is a whole number of bytes",
-                            );
-                            write(process, destination, Term::Binary(bytes))?;
+                            let bits = state.bits_at(position - bits as usize, position);
+                            write(process, destination, Term::Binary(bits))?;
                         }
                         None => cursor.position = label_position(*fail_label)?,
                     }
@@ -5326,10 +5312,9 @@ fn match_context_escape(operand: &Operand) -> BeamError {
 /// # Errors
 ///
 /// A command that reads more bits than remain gives a runtime invariant
-/// error. An integer outside the 64-bit signed range needs a bignum, and
-/// a `binary` or `get_tail` of a size that is not a multiple of 8 bits
-/// needs a bitstring term: each gives a runtime error (rows "Integer
-/// range" and "Binary matching" of docs/erts-differences.md).
+/// error. An integer outside the 64-bit signed range needs a bignum and
+/// gives a runtime error (row "Integer range" of
+/// docs/erts-differences.md).
 ///
 /// # Examples
 ///
@@ -5351,16 +5336,6 @@ fn binary_match(
 ) -> Result<bool, BeamError> {
     let context = match_context(process, context, atoms)?;
     let state = &*context;
-    // A binary of `size` bits, or a runtime error for a bitstring.
-    let binary_size = |command: &str, size: u64| {
-        if size.is_multiple_of(8) {
-            Ok(())
-        } else {
-            Err(error(format!(
-                "unsupported bs_match {command} of {size} bits: needs a bitstring term"
-            )))
-        }
-    };
     for command in commands {
         let remaining = state.remaining_bits() as u64;
         let too_few_bits = |size: &u64| {
@@ -5395,13 +5370,13 @@ fn binary_match(
                 write(process, destination, Term::Integer(value))?;
             }
             BinaryMatchCommand::Binary { size, destination } => {
-                // `binary_size` gives the runtime error for a size that is
-                // not a whole number of bytes, which is a bitstring. ERTS
-                // also reads a binary segment at a bit position that is not
-                // on a byte boundary (`GET_BITSTRING`,
-                // jit/arm/instr_bs.cpp:3136-3176), and `read_bytes` gives
-                // such a segment a view of its bits.
-                binary_size("binary", *size)?;
+                // ERTS reads a segment of any size at any bit position: a
+                // segment of more than 64 bits as a sub-bitstring
+                // (`GET_BITSTRING`, jit/arm/instr_bs.cpp:3136-3176), and a
+                // smaller one as a heap bitstring copy (`READ` and
+                // `EXTRACT_BITSTRING`, instr_bs.cpp:3047-3054). The value is
+                // the same, and `read_bytes` gives the segment a view of its
+                // bits.
                 let bytes = state.read_bytes(*size).ok_or_else(|| too_few_bits(size))?;
                 write(process, destination, Term::Binary(bytes))?;
             }
@@ -5414,17 +5389,10 @@ fn binary_match(
                 }
             }
             BinaryMatchCommand::GetTail { destination } => {
-                // `binary_size` gives the runtime error for a size that is
-                // not a whole number of bytes, which is a bitstring. ERTS
-                // writes the bits after the position as a sub-bitstring
-                // (`emit_bs_get_tail_shared`, jit/arm/instr_bs.cpp:407-439),
-                // and a position that is not on a byte boundary gives a
-                // bitstring, which PBeam does not have.
-                binary_size("get_tail", remaining)?;
-                let tail = state
-                    .tail()
-                    .expect("binary_size checked the size of a get_tail");
-                write(process, destination, Term::Binary(tail))?;
+                // ERTS writes the bits after the position as a
+                // sub-bitstring (`emit_bs_get_tail_shared`,
+                // jit/arm/instr_bs.cpp:407-439), at any bit position.
+                write(process, destination, Term::Binary(state.tail()))?;
             }
             BinaryMatchCommand::Skip { size } => {
                 state.skip(*size).ok_or_else(|| too_few_bits(size))?;

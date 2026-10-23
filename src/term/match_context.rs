@@ -272,8 +272,7 @@ impl MatchState {
     /// sub-bitstring that refers to the original binary
     /// (`erts_bs_get_binary_2`, `erl_bits.c:400-424`). Return `None` and
     /// keep the position when fewer than `size` bits remain. A size that is
-    /// not a whole number of bytes is a bitstring, which PBeam does not
-    /// have: each caller checks the size before it uses the view.
+    /// not a whole number of bytes gives a bitstring.
     ///
     /// # Examples
     ///
@@ -308,19 +307,18 @@ impl MatchState {
 
     /// Return the bits between the bit positions `start` and `end` as a view
     /// of the bytes of the binary, as an ERTS sub-bitstring refers to its
-    /// binary. Return `None` when the size is not a whole number of bytes,
-    /// because PBeam has no bitstring term. The `start` position stays with
-    /// the size, so the view keeps the bit offset.
+    /// binary. The size can be any number of bits, so the view can be a
+    /// bitstring. The view keeps the bit offset of `start`.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// let context = MatchState::new(Binary::from(&[1, 2, 3][..]));
-    /// assert_eq!(context.bits_at(0, 16), Some(Binary::from(&[1, 2][..])));
-    /// assert_eq!(context.bits_at(0, 4), None);
+    /// assert_eq!(context.bits_at(0, 16), Binary::from(&[1, 2][..]));
+    /// assert_eq!(context.bits_at(0, 4).bit_size(), 4);
     /// ```
-    pub(crate) fn bits_at(&self, start: usize, end: usize) -> Option<Binary> {
-        ((end - start).is_multiple_of(8)).then(|| self.bytes.bits(start, end))
+    pub(crate) fn bits_at(&self, start: usize, end: usize) -> Binary {
+        self.bytes.bits(start, end)
     }
 
     /// Compare the `size` bits after the position with the first `size`
@@ -363,24 +361,19 @@ impl MatchState {
     /// binary, and keep the position, as the `get_tail` command of
     /// `bs_match` does (`emit_bs_get_tail_shared`, jit/arm/instr_bs.cpp:
     /// 407-439). The view shares the bytes of the binary, as an ERTS
-    /// sub-bitstring refers to its binary. Return `None` when the position
-    /// is not on a byte boundary, because PBeam has no bitstring term (row
-    /// "Bitstring terms" of `docs/erts-differences.md`).
+    /// sub-bitstring refers to its binary. The position can be at any bit,
+    /// so the tail can be a bitstring.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// let context = MatchState::new(Binary::from(&[1, 2, 3][..]));
     /// context.skip(8);
-    /// assert_eq!(context.tail(), Some(Binary::from(&[2, 3][..])));
+    /// assert_eq!(context.tail(), Binary::from(&[2, 3][..]));
     /// assert_eq!(context.position(), 8);
     /// ```
-    pub(crate) fn tail(&self) -> Option<Binary> {
-        let size = self.bytes.bit_size();
-        let position = self.position();
-        position
-            .is_multiple_of(8)
-            .then(|| self.bytes.bits(position, size))
+    pub(crate) fn tail(&self) -> Binary {
+        self.bytes.bits(self.position(), self.bytes.bit_size())
     }
 
     /// Return the number of bits after the position (`sb->end -
