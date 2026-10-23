@@ -401,6 +401,10 @@ pub(super) struct ProcessState {
     /// (`jit/arm/instr_bif.cpp:525-536`, `676-701`). `BeamProgram::run` runs
     /// it first.
     pub(super) pending_bif: Option<PendingBif>,
+    /// The BIF call of a [`PendingBif`] that the next BIF trap creates:
+    /// the BIF frame of an error after the trap. `bif_error` sets it when
+    /// a BIF call traps, and the trap moves it into the [`PendingBif`].
+    pub(super) trap_origin: Option<BifCall>,
     /// A BIF trap whose target had no loaded export at the trap. `run`
     /// resolves the target when the process runs again, after the switch
     /// out of the trap.
@@ -493,6 +497,26 @@ pub(super) struct PendingBif {
     /// True when the BIF call was a tail call through the export: its
     /// value then returns from the frame with no reduction.
     pub(super) tail: bool,
+    /// The BIF call that trapped, or `None` when the call did not give
+    /// the BIF frame of its errors.
+    pub(super) origin: Option<BifCall>,
+}
+
+/// A BIF call that trapped: the BIF frame of an error after the trap.
+/// ERTS keeps the export of the BIF in `c_p->current`, and a trapped BIF
+/// error puts the original arguments back in the registers
+/// (`ERTS_BIF_ERROR_TRAPPED1`, `bif.h:242-249`), so the stack trace starts
+/// with the frame of the original call.
+#[derive(Debug)]
+pub(super) struct BifCall {
+    /// Module of the BIF, for example `erlang`.
+    pub(super) module: String,
+    /// Name of the BIF, for example `list_to_binary`.
+    pub(super) name: String,
+    /// Arguments of the original call.
+    pub(super) arguments: Vec<Term>,
+    /// The `skip` of `bif_error` at the call.
+    pub(super) skip: usize,
 }
 
 /// A BIF trap that waits for the next turn of the process: the trap target
@@ -625,6 +649,7 @@ impl ProcessState {
             fcalls: 0,
             reductions: 0,
             pending_bif: None,
+            trap_origin: None,
             pending_trap: None,
             dirty_call: None,
             length_trap: None,
@@ -934,12 +959,16 @@ impl ProcessState {
     ///
     /// ```rust,ignore
     /// let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame), vec![]);
-    /// process.pending_bif = Some(PendingBif { module: "lists", function: "member", arguments: vec![Term::Integer(1)], tail: false });
+    /// process.pending_bif = Some(PendingBif { module: "lists", function: "member", arguments: vec![Term::Integer(1)], tail: false, origin: None });
     /// assert!(process.pending_bif_bytes() > 0);
     /// ```
     pub(super) fn pending_bif_bytes(&self) -> usize {
         self.pending_bif.as_ref().map_or(0, |pending| {
-            pending.arguments.capacity() * std::mem::size_of::<Term>()
+            let origin = pending
+                .origin
+                .as_ref()
+                .map_or(0, |call| call.arguments.capacity());
+            (pending.arguments.capacity() + origin) * std::mem::size_of::<Term>()
         })
     }
 
@@ -1002,7 +1031,8 @@ impl ProcessState {
             }
         }
         if let Some(pending) = &self.pending_bif {
-            for argument in &pending.arguments {
+            let origin = pending.origin.iter().flat_map(|call| &call.arguments);
+            for argument in pending.arguments.iter().chain(origin) {
                 live.term(argument);
             }
         }

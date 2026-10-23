@@ -663,6 +663,10 @@ name = "bif_stack"
 path = "tests/integration/bif_stack.rs"
 
 [[test]]
+name = "bif_trap_stack"
+path = "tests/integration/bif_trap_stack.rs"
+
+[[test]]
 name = "prim_file"
 path = "tests/integration/prim_file.rs"
 
