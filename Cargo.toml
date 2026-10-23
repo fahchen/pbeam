@@ -243,6 +243,10 @@ name = "bitstr"
 path = "tests/integration/bitstr.rs"
 
 [[test]]
+name = "bitstring_list"
+path = "tests/integration/bitstring_list.rs"
+
+[[test]]
 name = "body_bif"
 path = "tests/integration/body_bif.rs"
 
