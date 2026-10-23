@@ -300,12 +300,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Source:** owner decision of 2026-10-11 (Suikou review 01a1282e, AFK log second batch); [#446](https://github.com/fahchen/pbeam/issues/446), [#447](https://github.com/fahchen/pbeam/issues/447), PR [#473](https://github.com/fahchen/pbeam/pull/473).
 - **Task:** none. [#926](https://github.com/fahchen/pbeam/issues/926) added the line locations.
 
-### Halt the PBeam boot with the `init` crash text
-
-- After #6 (PR #195), the `pbeam` binary writes `pbeam: root process exited with <Reason>` for a root exit. Under `erl -noshell -eval`, ERTS writes `Error! Failed to eval: ...` and then `Runtime terminating during boot (<Reason>)` through `init:crash/2` and `erlang:halt/1` (init.erl:665-679, 1552-1567). Doing the same needs `erlang:halt/1` with a string, which writes the slogan and a crash dump (`erlang:halt/2` with an integer status runs since #301), `erts_internal:term_to_string/2` (it can use the `print_term` of #6), and an `init` process that watches the boot process.
-- **Trigger:** a consumer needs the ERTS crash text byte for byte.
-- **Source:** design of #6.
-
 ### Send the uncaught-exception report to `logger`
 
 - PBeam writes no report for an uncaught exception. For an uncaught `error` or `throw`, ERTS sends `{log, error, "Error in process ~p with exit value:~n~p~n", Args, Metadata}` to the registered `logger` process (beam_common.c:697-718, erl_trace.c:2812-2820). The "Error report" row records this. `pbeam_boot` starts `logger` (PR #188), so the receiver exists. PR #188 said that #73 tracks this work, but #73 is closed.
@@ -517,7 +511,7 @@ The owner opened [m13] Foundation seams ([#908](https://github.com/fahchen/pbeam
 ### M17: Exceptions and diagnostics
 
 - **Reason:** BIF errors have no `error_info` cause, a BIF error after a trap has no stack trace, PBeam writes no report for an uncaught exception, and some failures give a runtime error where ERTS raises an exception.
-- **Evidence:** entries "Give the `error_info` cause of BIF errors" (about 60 ERTS raise sites set `EXF_HAS_EXT_INFO`), "Give the stack trace of a BIF error after a trap", "Send the uncaught-exception report to `logger`", "Raise `undef` for an entry module that the run does not load", and "Halt the PBeam boot with the `init` crash text". A `put_map_assoc` of a term that is not a map gives `unsupported BEAM put_map_assoc source: not a map` (`src/runtime/interpreter.rs:1756`), and `maps:keys/1` of such a term gives a runtime error (`src/runtime/interpreter/bif/maps.rs:40-41`), where ERTS raises `{badmap, Map}` (row "Exception raise sites").
+- **Evidence:** entries "Give the `error_info` cause of BIF errors" (about 60 ERTS raise sites set `EXF_HAS_EXT_INFO`), "Give the stack trace of a BIF error after a trap", "Send the uncaught-exception report to `logger`", and "Raise `undef` for an entry module that the run does not load". A `put_map_assoc` of a term that is not a map gives `unsupported BEAM put_map_assoc source: not a map` (`src/runtime/interpreter.rs:1756`), and `maps:keys/1` of such a term gives a runtime error (`src/runtime/interpreter/bif/maps.rs:40-41`), where ERTS raises `{badmap, Map}` (row "Exception raise sites").
 - **Work:** the `error_info` causes; the stack trace of a BIF error after a trap; the uncaught-exception report to `logger`; `undef` for an entry module that the run does not load; the boot halt with the `init` crash text; `{badmap, Map}` as an exception.
 - **Order:** the report to `logger` comes after the line locations of M13 (#926) and the funs of M16 e2, because `io_lib` calls `erlang:fun_to_list/1` and the report holds the frame locations, so the test expectations are set once. The `error_info` changes touch other files than M14 and can run in parallel with it.
 - **Trigger:** the owner opens the milestone.

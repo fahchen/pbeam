@@ -391,6 +391,10 @@ name = "group"
 path = "tests/integration/group.rs"
 
 [[test]]
+name = "term_to_string"
+path = "tests/integration/term_to_string.rs"
+
+[[test]]
 name = "halt"
 path = "tests/integration/halt.rs"
 
