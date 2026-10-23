@@ -1359,3 +1359,33 @@ fn runs_map_operations_with_map_keys_as_pinned_erts() {
         format!("[{}]\n", pbeam.join(","))
     );
 }
+
+const BINARY_IN_KEY_PROBE: &[u8] = include_bytes!("../../fixtures/map/binary_in_key_probe.beam");
+
+#[test]
+fn runs_map_operations_with_binaries_in_compound_keys_as_pinned_erts() {
+    // Tuple, list, and map keys hold a heap binary, a refc binary, a
+    // sub-binary, an unaligned sub-binary, and a bitstring of 3 bits, in a
+    // flatmap of 12 keys and in a hashmap of 53 keys. A hashmap orders the
+    // keys in the order of the internal hash, whose binary path mixes the
+    // size in bits and the bytes. `encoded/0` returns the external term
+    // format of the keys, the pairs, the lookups, and the comparisons, so
+    // each byte of the two runs must be equal.
+    let erlang = pinned_beam("erlang");
+    let program = BeamProgram::load(&[&erlang, BINARY_IN_KEY_PROBE]).unwrap();
+    let encoded = program
+        .execute("binary_in_key_probe", "encoded", &[])
+        .unwrap()
+        .term;
+    let Term::Binary(bytes) = &encoded else {
+        panic!("encoded/0 returns a binary");
+    };
+    let pbeam: Vec<String> = bytes.bytes().unwrap().iter().map(u8::to_string).collect();
+    assert_eq!(
+        String::from_utf8(erl_reference(
+            "io:format(\"~w~n\", [binary_to_list(binary_in_key_probe:encoded())])"
+        ))
+        .unwrap(),
+        format!("[{}]\n", pbeam.join(","))
+    );
+}

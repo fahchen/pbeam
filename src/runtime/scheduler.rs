@@ -13,7 +13,7 @@ use super::{
         SecurityContext, Source,
     },
     dirty::{Claim, Completion, DirtyCalls, Work},
-    ets::NodeTables,
+    ets::{NodeTables, Transfer},
     files::Files,
     host::{
         self,
@@ -2919,6 +2919,34 @@ impl Scheduler {
         (owner != self.index).then_some(owner)
     }
 
+    /// Return true when the process `target` of the node is alive and does
+    /// not exit, as `erts_pid2proc` and `erts_proc_lookup` find it for the
+    /// heir and the receiver of an ETS table (`erl_db.c:3100`, `4877`,
+    /// `5330`).
+    pub(super) fn ets_alive(&self, target: ProcessId) -> bool {
+        match self.processes.get(&target) {
+            Some(process) => process.exiting.is_none(),
+            None => self.remote_live_owner(target).is_some(),
+        }
+    }
+
+    /// Send `{'ETS-TRANSFER', Table, From, Data}` from the process `from`
+    /// to the new owner of a table, as `send_ets_transfer_message`
+    /// (`erl_db.c:4935-4971`) does. A named table goes as its name.
+    pub(super) fn send_ets_transfer(&mut self, from: ProcessId, transfer: Transfer) {
+        let table = match transfer.name {
+            Some(name) => Term::Atom(self.atoms.get(&name).expect("a table name is an atom")),
+            None => Term::Reference(transfer.table),
+        };
+        let message = Term::tuple(vec![
+            Term::static_atom("ETS-TRANSFER"),
+            table,
+            Term::Pid(from),
+            transfer.data,
+        ]);
+        self.send_message(from, transfer.heir, message);
+    }
+
     /// Make the process `id` exiting for the other schedulers of a run with
     /// scheduler threads (see [`Node::set_exiting`]). A run with one
     /// scheduler has no other reader.
@@ -3812,7 +3840,19 @@ impl Scheduler {
         // count (`erl_db.c:5044-5045`, `5118`; `erl_process.c:14360-14366`).
         let deleted = reds > 0 && {
             let left = self.current_process_mut().fcalls;
-            let rest = self.ets.exclusive().delete_owned(id, left);
+            let store = Arc::clone(&self.ets);
+            let mut transfers = Vec::new();
+            // The heir check takes the table store lock, so a heir that
+            // starts its exit later finds the table in its own exit.
+            let rest = store.exclusive().delete_owned(
+                id,
+                left,
+                |heir| self.ets_alive(heir),
+                &mut transfers,
+            );
+            for transfer in transfers {
+                self.send_ets_transfer(id, transfer);
+            }
             if let Some(rest) = rest {
                 self.current_process_mut().bump_reductions(left - rest);
             }
