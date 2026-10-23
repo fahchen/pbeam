@@ -13,7 +13,7 @@ use super::{LinkId, Scheduler};
 use crate::{
     error::{BeamError, error},
     runtime::{
-        port::{self, Driver, Input, Port, PortEvent, inet, inet::Inet},
+        port::{self, Driver, Input, Port, PortEvent, inet::Inet},
         process::MonitorLinkTree,
         signal::Signal,
     },
@@ -113,8 +113,8 @@ impl Scheduler {
     ///   waits for the exit of the child (`dd->alive == 1`), and then sends
     ///   `{Port, {exit_status, Status}}` to the owner before the end of
     ///   file (`driver_report_exit`).
-    /// - A datagram on an active `udp_inet` socket stops the run: PBeam does
-    ///   not send `{udp, Socket, Address, Port, Data}` (inet_drv.c:14619-14621).
+    /// - An active `udp_inet` socket sends its datagrams to the owner (see
+    ///   `Inet::receive_active_datagrams`).
     ///
     /// An fd that no port waits for changes nothing.
     ///
@@ -128,15 +128,14 @@ impl Scheduler {
     ///
     /// A port with `exit_status` whose child the host reaped returns a
     /// runtime error: PBeam has no exit status for it after
-    /// `os:set_signal(sigchld, ignore)`. A ready active `udp_inet` socket
-    /// returns a runtime error.
+    /// `os:set_signal(sigchld, ignore)`. The errors of `Scheduler::send_events`.
     pub(in crate::runtime) fn port_ready(&mut self, fd: libc::c_int) -> Result<(), BeamError> {
         let handles = self.node.ports().handles(self.index);
         if let Some(listen) = port::inet_port(&handles, fd, Inet::accept_fd) {
             return self.tcp_accept_ready(listen);
         }
-        if port::inet_port(&handles, fd, Inet::receive_fd).is_some() {
-            return Err(error(inet::DATAGRAM_RECEIVE));
+        if let Some(port) = port::inet_port(&handles, fd, Inet::receive_fd) {
+            return self.tcp_step(port, |udp| Some(udp.receive_active_datagrams()));
         }
         if let Some(port) = port::inet_port(&handles, fd, Inet::stream_receive_fd) {
             return self.tcp_receive_ready(port);

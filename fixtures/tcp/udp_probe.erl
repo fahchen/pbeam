@@ -1,5 +1,5 @@
 -module(udp_probe).
--export([active/1, host_name/0, open/0, passive/0, port_zero/0, truncate/0, unsupported/1]).
+-export([active/0, host_name/0, open/0, passive/0, port_zero/0, truncate/0, unsupported/1]).
 
 %% The requests of the udp_inet driver that inet_config:set_hostname/0
 %% sends through inet_udp:open(0, []), inet:gethostname/1, and
@@ -31,19 +31,50 @@ host_name() ->
     Exit = receive {'EXIT', P, Reason} -> {'EXIT', port, Reason} after 100 -> none end,
     [Replies, P1 * 256 + P0 > 0, Name, Rest, Exit].
 
-%% The first datagram of an active socket on 127.0.0.1 and the port Port
-%% (inet_drv.c:14619-14621). The test sends the datagrams. The result
-%% gives the port of the sender as `true` when it is above 0.
-active(Port) ->
-    P = open_port({spawn_driver, "udp_inet"}, [binary]),
-    C = fun(Request, Bytes) -> control(P, Request, Bytes) end,
-    [1] = C(1, [1, 2, 2]),
-    [1] = C(7, [22, [0, 0, 0, 1]]),
-    [1 | _] = C(6, [1, [Port bsr 8, Port band 255], 127, 0, 0, 1]),
-    receive
-        {udp, P, Address, From, Data} -> {udp, port, Address, From > 0, Data}
-    after 5000 -> timeout
-    end.
+%% The messages of an active socket on 127.0.0.1 that sends to itself
+%% (inet_drv.c:1551-1560, 4106-4160, 4215-4239, 6968-7000, 15361-15576):
+%% `true`, `once`, `{active, N}` with `{udp_passive, S}`, a negative
+%% count on a passive socket, a count above 32767, a change of `active`
+%% with prim_inet:setopts/2, and `read_packets`. A datagram that comes
+%% after `once` stays in the socket until the next change to active.
+active() ->
+    process_flag(trap_exit, true),
+    Lo = {127, 0, 0, 1},
+    {ok, S} = udp(),
+    {ok, {_, P}} = prim_inet:sockname(S),
+    Send = fun(Data) -> ok = prim_inet:sendto(S, Lo, P, Data) end,
+    Next = fun() -> receive M -> message(M, S, P) after 200 -> none end end,
+    ok = prim_inet:setopts(S, [{active, true}]),
+    Send(<<"a">>),
+    Send(<<"b">>),
+    True = [Next(), Next()],
+    ok = prim_inet:setopts(S, [{active, once}, list]),
+    Send("c"),
+    Send("d"),
+    Once = [Next(), Next(), prim_inet:getopts(S, [active])],
+    ok = prim_inet:setopts(S, [{active, 2}]),
+    Two = [prim_inet:getopts(S, [active]), Next(), Send("e"), Next(), Next(), Next(),
+           prim_inet:getopts(S, [active])],
+    Negative = [prim_inet:setopts(S, [{active, -5}]), Next(), prim_inet:getopts(S, [active])],
+    Count = [prim_inet:setopts(S, [{active, 32767}]), prim_inet:setopts(S, [{active, 1}]),
+             prim_inet:getopts(S, [active]), prim_inet:setopts(S, [{active, -32767}]),
+             prim_inet:getopts(S, [active]), Next()],
+    ok = prim_inet:setopts(S, [{active, false}]),
+    Send("f"),
+    Passive = [Next(), prim_inet:recvfrom(S, 0, 1000) =/= none],
+    Packets = [prim_inet:getopts(S, [read_packets]), prim_inet:setopts(S, [{read_packets, 0}]),
+               prim_inet:setopts(S, [{read_packets, 1}]), prim_inet:getopts(S, [read_packets])],
+    [Send(D) || D <- ["g", "h", "i"]],
+    ok = prim_inet:setopts(S, [{active, true}]),
+    Burst = [Next(), Next(), Next(), Next()],
+    [True, Once, Two, Negative, Count, Passive, Packets, Burst].
+
+%% A message of the socket S with the port P of the sender as `true` and
+%% the socket as the atom socket, because the numbers of ERTS and PBeam
+%% differ.
+message({udp, S, Address, P, Data}, S, P) -> {udp, socket, Address, true, Data};
+message({udp_passive, S}, S, _) -> {udp_passive, socket};
+message(Other, _, _) -> Other.
 
 %% The errors of OPEN, GETHOSTNAME, LISTEN, and PEER (inet_drv.c:11219-11233,
 %% 11272-11300, 14577-14636, 14846-14858). PEER of a socket that is not
@@ -75,6 +106,9 @@ unsupported(recvtos) ->
 unsupported(ancillary) ->
     {ok, S} = udp(),
     command(S, [1, 0, 1, 127, 0, 0, 1, 0, 0, 0, 1, 0]);
+unsupported(short_count) ->
+    {ok, S} = udp(),
+    control(S, 7, [22, 0, 0, 0, 3]);
 unsupported(accept) ->
     P = open_port({spawn_driver, "udp_inet"}, [binary]),
     [1] = control(P, 1, [1, 2, 2]),

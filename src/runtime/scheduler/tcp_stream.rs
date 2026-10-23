@@ -264,6 +264,35 @@ impl Scheduler {
                         self.async_message(port, receiver.id, status),
                     )]
                 }
+                Event::ActiveDatagram { address, data } => {
+                    // `{udp, S, {A, B, C, D}, Port, Data}` (`load_address`,
+                    // inet_drv.c:4124-4158).
+                    let [_, p1, p0, ip @ ..] = address.as_slice() else {
+                        unreachable!("an IPv4 address has 7 bytes")
+                    };
+                    let ip = ip
+                        .iter()
+                        .map(|byte| Term::Integer((*byte).into()))
+                        .collect();
+                    let from = Term::Integer(u16::from_be_bytes([*p1, *p0]).into());
+                    let message = Term::tuple(vec![
+                        Term::Atom(self.atoms.put("udp")?),
+                        Term::Port(port),
+                        Term::tuple(ip),
+                        from,
+                        tcp.data_term(data),
+                    ]);
+                    vec![(owner, message)]
+                }
+                Event::Passive => {
+                    let tag = Term::Atom(self.atoms.put("udp_passive")?);
+                    vec![(owner, Term::tuple(vec![tag, Term::Port(port)]))]
+                }
+                Event::DatagramError(name) => {
+                    let reason = Term::Atom(self.atoms.put(&name)?);
+                    let tag = Term::Atom(self.atoms.put("udp_error")?);
+                    vec![(owner, Term::tuple(vec![tag, Term::Port(port), reason]))]
+                }
                 Event::Connected { connector, result } => {
                     if let Some(timer) = connector.timer {
                         self.cancel_port_timer(timer);

@@ -1,6 +1,6 @@
 use std::{
     io::{Read, Write},
-    net::{SocketAddr, TcpStream, UdpSocket},
+    net::{SocketAddr, TcpStream},
     path::{Path, PathBuf},
     process::Command,
     sync::{
@@ -350,6 +350,10 @@ fn stops_the_run_for_each_udp_inet_part_that_is_not_implemented() {
             "unsupported udp_inet output with ancillary data",
         ),
         ("recvtos", "unsupported udp_inet option recvtos with true"),
+        (
+            "short_count",
+            "unsupported udp_inet option active with a count of fewer than 2 bytes",
+        ),
     ] {
         let argument = Term::Atom(program.atom(case).unwrap());
         let error = program
@@ -397,62 +401,15 @@ fn gives_the_errno_of_a_failed_datagram_send_as_pinned_erts() {
 }
 
 #[test]
-fn stops_the_run_at_a_datagram_on_an_active_udp_inet_port() {
-    // ERTS reads an active datagram socket (`sock_select(desc, FD_READ, 1)`,
-    // inet_drv.c:14619-14621) and sends each datagram to the owner as
-    // `{udp, Socket, Address, Port, Data}` in `list` mode. PBeam does not
-    // read it: the ready socket stops the run.
-    let erts = with_datagrams(|port| {
-        let output = Command::new("erl")
-            .args(["+S", "1", "-noshell", "-pa", "fixtures/tcp", "-eval"])
-            .arg(format!(
-                "io:format(\"~w~n\", [udp_probe:active({port})]), halt()."
-            ))
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "{output:?}");
-        String::from_utf8_lossy(&output.stdout)
-            .trim_end()
-            .to_owned()
-    });
-    assert_eq!(erts, "{udp,port,{127,0,0,1},true,[104,105]}", "ERTS");
-    let error = with_datagrams(|port| {
-        let program = load();
-        let port = Term::Integer(port.into());
-        program
-            .execute("udp_probe", "active", &[program.host_term(port)])
-            .unwrap_err()
-            .to_string()
-    });
-    assert!(
-        error.starts_with("unsupported udp_inet datagram receive: see \"udp_inet ports\""),
-        "{error}"
-    );
-}
-
-/// Run `run` with a free UDP port of `127.0.0.1`, and send the datagram
-/// `"hi"` to that port every 2 ms until `run` returns.
-fn with_datagrams<T>(run: impl FnOnce(u16) -> T) -> T {
-    let port = UdpSocket::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-    let stop = Arc::new(AtomicBool::new(false));
-    let sender = {
-        let stop = Arc::clone(&stop);
-        thread::spawn(move || {
-            let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
-            while !stop.load(Ordering::SeqCst) {
-                let _ = socket.send_to(b"hi", ("127.0.0.1", port));
-                thread::sleep(Duration::from_millis(2));
-            }
-        })
-    };
-    let result = run(port);
-    stop.store(true, Ordering::SeqCst);
-    sender.join().unwrap();
-    result
+fn delivers_datagrams_to_the_owner_of_an_active_udp_inet_port_as_pinned_erts() {
+    // `packet_inet_input` (inet_drv.c:15361-15588) sends `{udp, S, Address,
+    // Port, Data}` for `true`, `once`, and `{active, N}`, which ends with
+    // `{udp_passive, S}` (inet_drv.c:1551-1560, 4215-4239); `SETOPTS` adds
+    // the count of `{active, N}` (inet_drv.c:6968-7000), and
+    // `read_packets` below 1 gives `einval` (inet_drv.c:7138-7148).
+    let expected = "[[{udp,socket,{127,0,0,1},true,<<97>>},{udp,socket,{127,0,0,1},true,<<98>>}],[{udp,socket,{127,0,0,1},true,[99]},none,{ok,[{active,false}]}],[{ok,[{active,2}]},{udp,socket,{127,0,0,1},true,[100]},ok,{udp,socket,{127,0,0,1},true,[101]},{udp_passive,socket},none,{ok,[{active,false}]}],[ok,{udp_passive,socket},{ok,[{active,false}]}],[ok,{error,einval},{ok,[{active,32767}]},ok,{ok,[{active,false}]},{udp_passive,socket}],[none,true],[{ok,[{read_packets,5}]},{error,einval},ok,{ok,[{read_packets,1}]}],[{udp,socket,{127,0,0,1},true,[103]},{udp,socket,{127,0,0,1},true,[104]},{udp,socket,{127,0,0,1},true,[105]},none]]";
+    assert_eq!(erts_text("udp_probe", "active"), expected, "ERTS");
+    assert_eq!(pbeam_text("udp_probe", "active"), expected, "PBeam");
 }
 
 /// A client of the test: it reads `"Port Count"` from the file `path` and
