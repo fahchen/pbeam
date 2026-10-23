@@ -1930,7 +1930,7 @@ fn runs_maps_keys_as_a_bif_and_reports_unsupported_arguments() {
     );
     assert_eq!(
         keys(atom("ok")).unwrap_err().to_string(),
-        "unsupported maps:keys/1 argument: not a map"
+        "root process exited with {{badmap,ok},[{maps,keys,[ok],[{error_info,#{module=>erl_stdlib_errors}}]},{fixture,main,0,[]}]}"
     );
 }
 
@@ -3546,7 +3546,7 @@ fn returns_the_local_node_for_node_0_and_a_pid() {
         node(BifId::ErlangNode1, vec![atom("foo")])
             .unwrap_err()
             .to_string(),
-        "unsupported erlang:node/1 argument Atom(\"foo\"): not a pid"
+        "root process exited with {badarg,[{erlang,node,[foo],[{error_info,#{module=>erl_erts_errors}}]},{fixture,main,0,[]}]}"
     );
 }
 
@@ -4385,21 +4385,22 @@ fn registers_a_name_or_raises_badarg_as_pinned_erts() {
     );
     // ERTS 29.1.1 raises badarg for register(1, self()), register(a, x),
     // and register(a, Pid) with a process that is not alive.
-    // ERTS adds the `error_info` causes `none`, `none`, and `notalive`,
-    // which PBeam does not give (row "Exception stack trace" of
-    // `docs/erts-differences.md`).
-    for (name, id, texts) in [
-        (Term::Integer(1), root, ["1", "<0.0.0>"]),
-        (test_atom("a"), test_atom("x"), ["a", "x"]),
+    // ERTS adds the `error_info` causes `none`, `none`, and `notalive`
+    // (`register.c:183-215`).
+    for (name, id, texts, cause) in [
+        (Term::Integer(1), root, ["1", "<0.0.0>"], "none"),
+        (test_atom("a"), test_atom("x"), ["a", "x"], "none"),
         (
             test_atom("a"),
             Term::Pid(crate::ProcessId(99)),
             ["a", "<0.99.0>"],
+            "notalive",
         ),
     ] {
         assert_eq!(
             register(name, id).unwrap_err().to_string(),
             bif_badarg_exit("erlang", "register", &texts, ERTS_ERRORS)
+                .replace("#{module=>", &format!("#{{cause=>{cause},module=>"))
         );
     }
 }

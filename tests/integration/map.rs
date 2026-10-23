@@ -1248,3 +1248,54 @@ fn runs_map_operations_with_pid_keys_as_pinned_erts() {
         b"[4,1,3,4,true,false,true]\n[34,pid,17,true]\n[true,true,true,true]\n"
     );
 }
+
+const BADMAP_ASSOC_PROBE: &[u8] = include_bytes!("../../fixtures/map/badmap_assoc_probe.beam");
+
+#[test]
+fn raises_badmap_for_maps_keys_and_a_map_update_of_a_non_map_like_erts() {
+    // `main/0` catches the `{badmap, Term}` of a map update, which the
+    // compiler raises with `erlang:error/1`, and of `maps:keys/1`
+    // (`erl_map.c:1235-1237`), with the top frame of each stack trace.
+    let program = BeamProgram::load(&[BADMAP_ASSOC_PROBE]).unwrap();
+    let atom = |name| Term::Atom(program.atom(name).unwrap());
+    let not_a_map = atom("not_a_map");
+    let badmap = Term::tuple(vec![static_atom("badmap"), not_a_map.clone()]);
+    let error_info = Map::from_pairs(
+        vec![(atom("module"), atom("erl_stdlib_errors"))],
+        program.atoms(),
+    )
+    .unwrap();
+    let expected = Term::list_from([
+        Term::tuple(vec![
+            static_atom("error"),
+            badmap.clone(),
+            Term::tuple(vec![
+                atom("badmap_assoc_probe"),
+                atom("assoc"),
+                Term::Integer(1),
+                Term::nil(),
+            ]),
+        ]),
+        Term::tuple(vec![
+            static_atom("error"),
+            badmap,
+            Term::tuple(vec![
+                atom("maps"),
+                atom("keys"),
+                Term::list_from([not_a_map]),
+                Term::list_from([Term::tuple(vec![atom("error_info"), Term::Map(error_info)])]),
+            ]),
+        ]),
+    ]);
+    assert_eq!(
+        program
+            .execute("badmap_assoc_probe", "main", &[])
+            .unwrap()
+            .term,
+        expected
+    );
+    assert_eq!(
+        erl_reference("io:format(\"~w~n\", [badmap_assoc_probe:main()])"),
+        b"[{error,{badmap,not_a_map},{badmap_assoc_probe,assoc,1,[]}},{error,{badmap,not_a_map},{maps,keys,[not_a_map],[{error_info,#{module => erl_stdlib_errors}}]}}]\n"
+    );
+}
