@@ -498,10 +498,15 @@ fn reads_the_lambda_table_as_parse_lambda_chunk() {
         parse_lambdas(&lambda_table(2, &entries), &atoms, [9; 16]).unwrap(),
         vec![
             (
-                std::sync::Arc::new(Lambda::new(module.clone(), 0, 0, 31_263_486, 127, 1)),
+                std::sync::Arc::new(
+                    Lambda::new(module.clone(), 0, 0, 31_263_486, 127, 1).with_uniq([9; 16])
+                ),
                 1
             ),
-            (std::sync::Arc::new(Lambda::new(module, 1, 1, 7, 51, 0)), 0),
+            (
+                std::sync::Arc::new(Lambda::new(module, 1, 1, 7, 51, 0).with_uniq([9; 16])),
+                0
+            ),
         ]
     );
     assert_eq!(

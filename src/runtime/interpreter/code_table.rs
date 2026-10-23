@@ -637,14 +637,52 @@ impl CodeTable {
         lambda: &Lambda,
         arity: u32,
     ) -> Result<Option<Frame>, BeamError> {
-        let loaded = self.waiting_or_loaded(module)?;
-        loaded
-            .tables
-            .fun_entries
-            .get(&lambda.index())
-            .filter(|entry| entry.old_unique == lambda.old_unique())
-            .map(|entry| frame(loaded, entry.label, arity))
-            .transpose()
+        // ERTS keeps the fun entry at the old code after
+        // `erlang:delete_module/1` until a purge, so the old code runs the
+        // fun; only an unloaded entry reaches the error handler
+        // (`beam_common.c:1681-1685`).
+        let waiting = self.waiting_or_loaded(module).ok();
+        for loaded in waiting.into_iter().chain(self.codes(module)) {
+            if let Some(entry) = loaded
+                .tables
+                .fun_entries
+                .get(&lambda.index())
+                .filter(|entry| {
+                    entry.lambda.uniq() == lambda.uniq() && entry.lambda.arity() == lambda.arity()
+                })
+            {
+                return frame(loaded, entry.lambda.label(), arity).map(Some);
+            }
+        }
+        Ok(None)
+    }
+
+    /// Return the fun entry of the code of `module` with the module MD5
+    /// `uniq`, the index `index`, and the arity `arity`, as
+    /// `erts_fun_entry_get_or_make_stub` (`erl_fun.c:299-309`) finds it by
+    /// the key of `fun_cmp` (`erl_fun.c:79-85`). The code is the current
+    /// code, the code that waits for its `-on_load` function, or the old
+    /// code that `erlang:delete_module/1` kept. Return `None` when no code
+    /// holds the entry, so that the caller makes a stub entry.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(code.fun_entry("fun_ext_probe", lambda.uniq(), 0, 2).is_some());
+    /// assert!(code.fun_entry("missing", &[0; 16], 0, 2).is_none());
+    /// ```
+    pub(in crate::runtime) fn fun_entry(
+        &self,
+        module: &str,
+        uniq: &[u8; 16],
+        index: i32,
+        arity: u32,
+    ) -> Option<Arc<Lambda>> {
+        self.codes(module)
+            .filter_map(|loaded| loaded.tables.fun_entries.get(&index))
+            .map(|entry| &entry.lambda)
+            .find(|lambda| lambda.uniq() == uniq && lambda.arity() == arity)
+            .cloned()
     }
 
     /// Return the name of the function that holds the code of `lambda`, as
@@ -681,11 +719,13 @@ impl CodeTable {
                 .tables
                 .fun_entries
                 .get(&lambda.index())
-                .filter(|entry| entry.old_unique == lambda.old_unique())
+                .filter(|entry| {
+                    entry.lambda.uniq() == lambda.uniq() && entry.lambda.arity() == lambda.arity()
+                })
             else {
                 continue;
             };
-            let function = super::function_at_label(loaded, entry.label)?;
+            let function = super::function_at_label(loaded, entry.lambda.label())?;
             return Ok(Some(loaded.tables.name(function.name).to_owned()));
         }
         Ok(None)

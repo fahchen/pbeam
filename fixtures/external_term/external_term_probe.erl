@@ -1,5 +1,5 @@
 -module(external_term_probe).
--export([literals/0, options/0, decode/0, used/0, sizes/0, errors/0, decode_fun/0, bits/0]).
+-export([literals/0, options/0, decode/0, used/0, sizes/0, errors/0, decode_record/0, bits/0]).
 
 -define(VALUES,
         [0, 255, 256, -1, 1 bsl 40, -(1 bsl 40), 1 bsl 70, -(1 bsl 70),
@@ -86,11 +86,9 @@ check(F) ->
     end.
 
 %% A term that PBeam cannot hold gives a runtime error. The bytes are a
-%% well-formed `NEW_FUN_EXT` of a local fun with no free variables.
-decode_fun() ->
-    binary_to_term(<<131, 112, 0:232, 119, 6, "erlang", 97, 0, 97, 0,
-                     88, 119, 13, "nonode@nohost", 0, 0, 0, 5,
-                     0, 0, 0, 0, 0, 0, 0, 0>>).
+%% well-formed `RECORD_EXT` of the record `m:r` with no fields.
+decode_record() ->
+    binary_to_term(<<131, 67, 0, 0, 0, 0, 1, 119, 1, "m", 119, 1, "r">>).
 
 bits() ->
     Tail = id(<<255, 7:3>>),
