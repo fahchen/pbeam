@@ -79,8 +79,9 @@ pub(super) const BINDINGS: &[Binding] = &[
 ];
 
 /// Run `nif_info/0` (`prim_net_nif.c:848-870`): the map of the `debug`
-/// flag and of `netns`. The debug flag of PBeam is always `false`, because
-/// [`command`] does not set it. `netns` is `false` on each host: the
+/// flag and of `netns`. The debug flag of PBeam is always `false`: [`command`]
+/// does not set it, and the load info `#{debug => true}` is not checked
+/// (row "NIF stubs" of `docs/erts-differences.md`). `netns` is `false` on each host: the
 /// pinned OTP build defines `HAVE_SETNS`, but no OTP file defines the
 /// `HAVE_NETNS` that `nif_info` reads (`prim_net_nif.c:853-857`).
 ///
