@@ -475,6 +475,17 @@ impl MatchSpec {
         self.specification.clone()
     }
 
+    /// Return the head pattern of each clause, in the order of the list.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(spec.heads().count(), 1);
+    /// ```
+    pub(in crate::runtime) fn heads(&self) -> impl Iterator<Item = &Term> {
+        self.clauses.iter().map(|clause| &clause.head.term)
+    }
+
     /// Run the clauses against the object with the elements `object` and
     /// return the value of the first clause whose head matches and whose
     /// guards are all `true`, else `None`.
@@ -1212,7 +1223,7 @@ fn integer_term(value: BigInt) -> Term {
 /// assert_eq!(variable(&atoms, &atom("$12")), Some(12));
 /// assert_eq!(variable(&atoms, &atom("$01")), None);
 /// ```
-fn variable(atoms: &AtomTable, term: &Term) -> Option<i32> {
+pub(super) fn variable(atoms: &AtomTable, term: &Term) -> Option<i32> {
     let Term::Atom(atom) = term else {
         return None;
     };
@@ -1238,7 +1249,7 @@ fn variable(atoms: &AtomTable, term: &Term) -> Option<i32> {
 /// ```rust,ignore
 /// assert!(is_skip(&atoms, &atom("_")));
 /// ```
-fn is_skip(atoms: &AtomTable, term: &Term) -> bool {
+pub(super) fn is_skip(atoms: &AtomTable, term: &Term) -> bool {
     matches!(term, Term::Atom(atom) if atoms.name_of(atom) == "_")
 }
 
@@ -1278,7 +1289,7 @@ fn collect_variables(atoms: &AtomTable, term: &Term, numbers: &mut Vec<i32>) {
 /// assert!(fully_bound(&atoms, &Term::tuple(vec![atom("a")])));
 /// assert!(!fully_bound(&atoms, &Term::tuple(vec![atom("_")])));
 /// ```
-fn fully_bound(atoms: &AtomTable, term: &Term) -> bool {
+pub(super) fn fully_bound(atoms: &AtomTable, term: &Term) -> bool {
     let mut stack = vec![term];
     while let Some(term) = stack.pop() {
         match term {

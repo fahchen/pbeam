@@ -3,8 +3,8 @@ use super::{
     capability::{Policy, Restriction},
     dirty::{Output, Work},
     process::{
-        DirtyCall, Frame, PendingBif, PendingTrap, ProcessState, ReceiveTimer, StackSlot, Start,
-        StartFlags,
+        BifCall, DirtyCall, Frame, PendingBif, PendingTrap, ProcessState, ReceiveTimer, StackSlot,
+        Start, StartFlags,
     },
     scheduler::{PolicyEnd, Received, Scheduler, Turn, node::Node},
     tty::{InitialMode, Ttys},
@@ -1229,12 +1229,40 @@ impl BeamProgram {
             function,
             arguments,
             tail,
+            origin,
         }) = scheduler.current_process_mut().pending_bif.take()
         {
-            // ponytail: an error after the trap keeps the stack trace `[]`;
-            // see the backlog entry "Give the stack trace of a BIF error
-            // after a trap".
+            // The `lists` BIFs trap to their own export with the rest of
+            // the list in the registers, and an error after the trap keeps
+            // these registers (`BIF_TRAP2` and `BIF_ERROR`,
+            // `erl_bif_lists.c:1129-1139`, `1191`, `1240-1243`). The other
+            // BIFs put the original arguments back
+            // (`ERTS_BIF_ERROR_TRAPPED1`, `bif.h:242-249`).
+            let registers = (module == "lists").then(|| arguments.clone());
             let result = self.bif_trap(scheduler, module, function, arguments)?;
+            let result = match origin {
+                Some(call)
+                    if matches!(
+                        result,
+                        BifResult::Raise { .. } | BifResult::ErrorWithCause { .. }
+                    ) =>
+                {
+                    let BifCall {
+                        module,
+                        name,
+                        arguments,
+                        skip,
+                    } = call;
+                    let arguments = registers.unwrap_or(arguments);
+                    bif_error(scheduler, &module, &name, arguments, result, skip)?
+                }
+                // The BIF traps again and keeps the call.
+                Some(call) if matches!(result, BifResult::TrapBif { .. }) => {
+                    scheduler.current_process_mut().trap_origin = Some(call);
+                    result
+                }
+                _ => result,
+            };
             if let Some(outcome) = self.finish_bif(scheduler, result, tail)? {
                 return Ok(outcome);
             }
@@ -1759,8 +1787,11 @@ impl BeamProgram {
                     })? {
                         Update::Written => {}
                         // `put_map_assoc` has no fail label and no exception
-                        // of its own. ERTS raises `{badmap, Map}`; see
-                        // "Exception raise sites" in docs/erts-differences.md.
+                        // of its own. The compiler puts an `is_map` test and
+                        // an `erlang:error({badmap, Map})` call before it, so
+                        // compiled code gives it only a map. ERTS asserts a
+                        // map and has no exception for another term
+                        // (`beam_common.c:1981-1985`).
                         Update::Missing(_) | Update::Reason(_) => {
                             return Err(error("unsupported BEAM put_map_assoc source: not a map"));
                         }
@@ -3008,10 +3039,12 @@ impl BeamProgram {
             };
             // A tail apply or a tail fun call removed the frame of the
             // caller in ERTS, so its return address is in the function
-            // before it.
+            // before it. A trap keeps the call for an error after the trap.
             let result = if matches!(
                 result,
-                BifResult::Raise { .. } | BifResult::ErrorWithCause { .. }
+                BifResult::Raise { .. }
+                    | BifResult::ErrorWithCause { .. }
+                    | BifResult::TrapBif { .. }
             ) {
                 let (module_name, name) = {
                     let atoms = &scheduler.atoms;
@@ -3631,11 +3664,13 @@ impl BeamProgram {
                 function,
                 arguments,
             } => {
+                let origin = process.trap_origin.take();
                 process.pending_bif = Some(PendingBif {
                     module,
                     function,
                     arguments,
                     tail,
+                    origin,
                 });
                 Ok(Some(Outcome::Yield))
             }
@@ -3650,6 +3685,7 @@ impl BeamProgram {
                     function,
                     arguments,
                     tail,
+                    origin: None,
                 });
                 Ok(Some(Outcome::Wait))
             }
@@ -3659,6 +3695,7 @@ impl BeamProgram {
                     function: "await_grant",
                     arguments: Vec::new(),
                     tail,
+                    origin: None,
                 });
                 Ok(Some(Outcome::Wait))
             }
@@ -6562,7 +6599,9 @@ fn stacktrace_from(scheduler: &mut Scheduler, first: Term, skip: usize) -> Resul
 /// the caller of that function, and else 0. The error BIFs
 /// `erlang:error/1,2,3`, `erlang:exit/1`, and `erlang:throw/1` give their
 /// own stack trace (`beam_common.c:907-924`) as
-/// [`BifResult::RaiseWithStacktrace`], so they keep it.
+/// [`BifResult::RaiseWithStacktrace`], so they keep it. A
+/// [`BifResult::TrapBif`] keeps the call in `trap_origin` of the process,
+/// so that an error after the trap gets the frame of the call.
 ///
 /// # Examples
 ///
@@ -6588,6 +6627,15 @@ fn bif_error(
     let (class, reason, cause) = match result {
         BifResult::Raise { class, reason } => (class, reason, None),
         BifResult::ErrorWithCause { reason, cause } => (ExceptionClass::Error, reason, Some(cause)),
+        result @ BifResult::TrapBif { .. } => {
+            scheduler.current_process_mut().trap_origin = Some(BifCall {
+                module: module.to_owned(),
+                name: name.to_owned(),
+                arguments,
+                skip,
+            });
+            return Ok(result);
+        }
         result => return Ok(result),
     };
     // The format modules of `save_stacktrace` (`beam_common.c:939-991`).

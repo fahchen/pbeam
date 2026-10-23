@@ -26,24 +26,20 @@ use crate::term::{
     Reference, SMALL_INTEGER_MAX, SMALL_INTEGER_MIN, debug_term, external, print_term,
 };
 
-/// Run `erlang:node/1`: return the node of a pid. A term that is not a pid
-/// gives a runtime error.
+/// Run `erlang:node/1`: return the node of a pid, a port, or a reference,
+/// which is the local node, and raise `badarg` for another term, as ERTS
+/// `node_1` does (`dist.c:6219-6225`).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let atoms = AtomTable::new();
-/// let result = node(&Term::Pid(pid), &atoms)?;
-/// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.is_static("nonode@nohost"));
-/// assert!(node(&Term::Integer(1), &atoms).is_err());
+/// assert!(matches!(node(&Term::Pid(pid)), BifResult::Value(Term::Atom(atom)) if atom.is_static("nonode@nohost")));
+/// assert!(matches!(node(&Term::Integer(1)), BifResult::Raise { .. }));
 /// ```
-pub(super) fn node(term: &Term, atoms: &AtomTable) -> Result<BifResult, BeamError> {
+pub(super) fn node(term: &Term) -> BifResult {
     match term {
-        Term::Pid(_) => Ok(Value(local_node())),
-        _ => Err(error(format!(
-            "unsupported erlang:node/1 argument {}: not a pid",
-            debug_term(term, atoms)
-        ))),
+        Term::Pid(_) | Term::Port(_) | Term::Reference(_) => Value(local_node()),
+        _ => BifResult::badarg(),
     }
 }
 
@@ -403,14 +399,22 @@ pub(super) fn process_flag(
                 small.is_some_and(|scheduler| scheduler >= 0)
             };
             if !valid {
-                return Ok(BifResult::badarg());
+                // `process_flag_aux` sets the cause `none` for `save_calls`
+                // (`bif.c:1910-1912`, `2229-2233`).
+                return Ok(if flag.is_static("save_calls") {
+                    BifResult::badarg_with_cause("none")
+                } else {
+                    BifResult::badarg()
+                });
             }
             return Err(error(format!(
                 "unsupported erlang:process_flag/2 flag {}",
                 context.scheduler.atoms.name_of(flag)
             )));
         }
-        _ => BifResult::badarg(),
+        // `process_flag_aux` sets the cause `badopt` for an unknown flag
+        // (`bif.c:1902`, `2229-2233`).
+        _ => BifResult::badopt(),
     })
 }
 
@@ -571,8 +575,13 @@ pub(super) fn system_flag(
     item: &Term,
     value: &Term,
 ) -> Result<BifResult, BeamError> {
+    // `system_flag_2` raises `badarg` with no cause for a bad value of an
+    // item (`bif.c:5302-5303`) and `badopt` for each other call
+    // (`bif.c:5297-5299`). The item `time_offset` takes only `finalize`
+    // in the same test (`bif.c:5203-5204`), so another value gives
+    // `badopt`.
     let Term::Atom(item) = item else {
-        return Ok(BifResult::badarg());
+        return Ok(BifResult::badopt());
     };
     let logger = match value {
         Term::Pid(_) => true,
@@ -589,11 +598,11 @@ pub(super) fn system_flag(
             .is_some_and(|(size, _)| size == 0 || size >= defaults.min_heap_size),
         ("debug_flags", _) => true,
         ("backtrace_depth", _) => value.small_integer().is_some_and(|depth| depth >= 0),
-        ("time_offset", Term::Atom(finalize)) => atoms.name_of(finalize) == "finalize",
+        ("time_offset", Term::Atom(finalize)) if atoms.name_of(finalize) == "finalize" => true,
         (name, _) if UNSUPPORTED_SYSTEM_FLAGS.contains(&name) => {
             unsupported_system_flag_value(name, atoms, value)
         }
-        _ => false,
+        _ => return Ok(BifResult::badopt()),
     };
     if !valid {
         return Ok(BifResult::badarg());
@@ -1326,12 +1335,18 @@ pub(super) fn monitor(
     target: &Term,
     options: &Term,
 ) -> Result<BifResult, BeamError> {
+    // `monitor_3` raises `badopt` for the options before it reads the type
+    // (`bif.c:991-995`), and `monitor` raises `badtype` for a type that is
+    // not `process`, `port`, or `time_offset` (`bif.c:965-967`).
     let Some(options) = monitor_options(options) else {
-        return Ok(BifResult::badarg());
+        return Ok(BifResult::badopt());
     };
     let Term::Atom(kind) = kind else {
-        return Ok(BifResult::badarg());
+        return Ok(BifResult::badarg_with_cause("badtype"));
     };
+    if !kind.is_one_of(&["process", "port", "time_offset"]) {
+        return Ok(BifResult::badarg_with_cause("badtype"));
+    }
     // An `Err` is the runtime error of a valid target that PBeam does not
     // support. It comes after the capability check.
     let target = match (context.scheduler.atoms.name_of(kind), target) {
@@ -2069,9 +2084,9 @@ pub(super) fn binary_to_list_1(
                 "binary_to_list",
                 vec![term.clone()],
                 binary,
-                0,
+                0..size,
                 size,
-                size,
+                Term::nil(),
             )
         }
         _ => Ok(BifResult::badarg()),
@@ -2115,14 +2130,62 @@ pub(super) fn binary_to_list_3(
         "binary_to_list",
         arguments,
         binary,
-        *first as usize - 1,
-        length,
+        *first as usize - 1..*first as usize - 1 + length,
         size as usize,
+        Term::nil(),
     )
 }
 
-/// Start the list of the `length` bytes at `offset` of `binary`, of `size`
-/// bytes, for `erlang:<bif>` with `arguments`, as ERTS `binary_to_list`
+/// Run `erlang:bitstring_to_list/1`, as ERTS `bitstring_to_list_1`
+/// (`binary.c:413-474`): `<<>>` gives `[]`, and a term that is not a
+/// bitstring raises `badarg`. The list has one integer for each whole byte.
+/// A size that is not a whole number of bytes adds the last bits as a
+/// bitstring at the end (`binary.c:452-469`). ERTS decides on one chunk
+/// with one cell for each byte and one cell for the last bits
+/// (`NBYTES(size)`, `binary.c:434-437`), and [`b2l_start`] does the same.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let list = bitstring_to_list(&mut scheduler, &Term::Binary(Binary::from(vec![1, 0x40]).bits(0, 11)))?;
+/// assert!(matches!(list, BifResult::Value(codes) if codes.proper_list().is_some_and(|codes| codes.len() == 2)));
+/// ```
+///
+/// # Errors
+///
+/// Return the invariant error of [`ProcessState::bif_reductions_left`].
+pub(super) fn bitstring_to_list(
+    scheduler: &mut Scheduler,
+    term: &Term,
+) -> Result<BifResult, BeamError> {
+    let Term::Binary(binary) = term else {
+        return Ok(BifResult::badarg());
+    };
+    let size = binary.bit_size();
+    if size == 0 {
+        return Ok(Value(Term::nil()));
+    }
+    let length = size / 8;
+    let (bytes, tail) = if size.is_multiple_of(8) {
+        (binary.clone(), Term::nil())
+    } else {
+        let last = Term::Binary(binary.bits(length * 8, size));
+        (binary.bits(0, length * 8), Term::cons(last, Term::nil()))
+    };
+    b2l_start(
+        scheduler,
+        "bitstring_to_list",
+        vec![term.clone()],
+        &bytes,
+        0..length,
+        size.div_ceil(8),
+        tail,
+    )
+}
+
+/// Start the list of the byte range `bytes` of `binary`, in front
+/// of the list `tail`, for a term of `size` cells, for `erlang:<bif>` with
+/// `arguments`, as ERTS `binary_to_list`
 /// does (`binary.c:258-290`, `329-351`). A binary of fewer than 256 bytes
 /// for each reduction left is one chunk. A binary of fewer than
 /// `B2L_MIN_EXEC_REDS * 256` bytes is also one chunk with a budget of 1000.
@@ -2144,10 +2207,11 @@ fn b2l_start(
     bif: &'static str,
     arguments: Vec<Term>,
     binary: &Binary,
-    offset: usize,
-    length: usize,
+    bytes: std::ops::Range<usize>,
     size: usize,
+    tail: Term,
 ) -> Result<BifResult, BeamError> {
+    let (offset, length) = (bytes.start, bytes.len());
     let process = scheduler.current_process_mut();
     let one_chunk = (size as u64)
         < process
@@ -2157,14 +2221,7 @@ fn b2l_start(
         // Only a budget of 0 or more does not make one chunk.
         let reds_left = process.bif_reductions_left()?;
         if size >= B2L_MIN_EXEC_REDS * B2L_BYTES_PER_REDUCTION {
-            return Ok(b2l_chunk(
-                process,
-                binary,
-                offset,
-                length,
-                Term::nil(),
-                reds_left,
-            ));
+            return Ok(b2l_chunk(process, binary, offset, length, tail, reds_left));
         }
         if reds_left <= B2L_RESCHED_REDS {
             scheduler.vbump_all_reductions();
@@ -2175,13 +2232,14 @@ fn b2l_start(
             });
         }
     }
-    process.bump_reductions(((length - 1) / B2L_BYTES_PER_REDUCTION + 1) as i32);
-    Ok(Value(b2l_cons(
-        binary,
-        offset,
-        offset + length,
-        Term::nil(),
-    )))
+    // ERTS computes `(size - 1) / 256 + 1` as a `Uint` and passes it as an
+    // `int` (`binary.c:265-266`), so 0 bytes wrap to `2^56`, which is 0 as
+    // an `int`: a bitstring of fewer than 8 bits costs no reduction.
+    let cost = length
+        .checked_sub(1)
+        .map_or(0, |last| last / B2L_BYTES_PER_REDUCTION + 1);
+    process.bump_reductions(cost as i32);
+    Ok(Value(b2l_cons(binary, offset, offset + length, tail)))
 }
 
 /// Make the list of the last chunk of the `remaining` bytes at `offset` of
@@ -3877,15 +3935,17 @@ pub(super) fn send3(
     message: &Term,
     options: &Term,
 ) -> Result<BifResult, BeamError> {
+    // `send_3` raises `badopt` for an unknown option and for an improper
+    // list (`bif.c:2713-2730`).
     let Some(options) = options.proper_list() else {
-        return Ok(BifResult::badarg());
+        return Ok(BifResult::badopt());
     };
     let mut connect = true;
     for option in options {
         match option {
             Term::Atom(option) if option.is_static("noconnect") => connect = false,
             Term::Atom(option) if option.is_one_of(&["nosuspend", "priority"]) => {}
-            _ => return Ok(BifResult::badarg()),
+            _ => return Ok(BifResult::badopt()),
         }
     }
     Ok(
@@ -5917,7 +5977,9 @@ pub(super) fn send_after(
 }
 
 /// Start the BIF timer of [`start_timer`] and [`send_after`], as
-/// `setup_bif_timer` (`erl_hl_timer.c:1804-1871`) does. `wrap` makes the
+/// `setup_bif_timer` (`erl_hl_timer.c:1804-1871`) does. A bad time gives
+/// `badarg` with the `error_info` cause `time`, as `BIF_P->fvalue` does
+/// (`erl_hl_timer.c:2573-2576`, `2612-2615`). `wrap` makes the
 /// message `{timeout, Reference, Msg}`, and else the message is `Msg`.
 ///
 /// # Examples
@@ -5943,7 +6005,7 @@ fn bif_timer(
         _ => None,
     };
     let Some(end) = end else {
-        return Ok(BifResult::badarg());
+        return Ok(BifResult::badarg_with_cause("time"));
     };
     super::timer::setup(scheduler, end, receiver, message, wrap)
 }
@@ -6099,8 +6161,10 @@ pub(super) fn halt(
     status: &Term,
     options: &Term,
 ) -> Result<BifResult, BeamError> {
+    // `halt_2` raises `badopt` for each option error (`bif.c:4316-4343`,
+    // `4395-4397`).
     let Some(options) = options.proper_list() else {
-        return Ok(BifResult::badarg());
+        return Ok(BifResult::badopt());
     };
     let mut flush = true;
     let mut timeout = None;
@@ -6115,12 +6179,12 @@ pub(super) fn halt(
                 [Term::Atom(name), value] if name.is_static("flush_timeout") => {
                     match value.small_integer() {
                         Some(value @ 0..) => timeout = Some(value & i64::from(u32::MAX)),
-                        _ => return Ok(BifResult::badarg()),
+                        _ => return Ok(BifResult::badopt()),
                     }
                 }
-                _ => return Ok(BifResult::badarg()),
+                _ => return Ok(BifResult::badopt()),
             },
-            _ => return Ok(BifResult::badarg()),
+            _ => return Ok(BifResult::badopt()),
         }
     }
     let stop = match status {

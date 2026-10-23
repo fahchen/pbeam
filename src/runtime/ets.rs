@@ -2,6 +2,7 @@
 //! processes of a run share one store.
 
 pub(super) mod pattern;
+pub(super) mod range;
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -1727,6 +1728,121 @@ impl Table {
         } else {
             self.order.last().cloned()
         })
+    }
+
+    /// Return the object of an `ordered_set` table whose key is equal to
+    /// `key` in the arithmetic term order, as `find_node` finds it
+    /// (`erl_db_tree.c:3388-3410`), or `None`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(table.ordered_get(&atoms, &Term::Float(1.0))?, Some(&[Term::Integer(1)][..]));
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Return a runtime error when the order of a key is not supported.
+    pub(super) fn ordered_get(
+        &self,
+        atoms: &AtomTable,
+        key: &Term,
+    ) -> Result<Option<&[Term]>, BeamError> {
+        Ok(match self.order_search(atoms, key)? {
+            Ok(index) => Some(self.ordered_object(atoms, index)),
+            Err(_) => None,
+        })
+    }
+
+    /// Return the objects of an `ordered_set` table in key order, up when
+    /// `forward` is true and else down, from the key next to `after`, or
+    /// from the first or the last key when `after` is `None`, as
+    /// `traverse_forward` and `traverse_backwards` step with `find_next` and
+    /// `find_prev` (`erl_db_tree.c:3659-3762`). The key `after` does not have
+    /// to be in the table.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let objects: Vec<_> = table.ordered_walk(&atoms, None, true)?.collect();
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Return a runtime error when the order of a key is not supported.
+    pub(super) fn ordered_walk<'a>(
+        &'a self,
+        atoms: &'a AtomTable,
+        after: Option<&Term>,
+        forward: bool,
+    ) -> Result<impl Iterator<Item = &'a [Term]> + 'a, BeamError> {
+        self.check_ordered()?;
+        let start = match after {
+            None if forward => 0,
+            None => self.order.len(),
+            Some(key) => match (self.order_search(atoms, key)?, forward) {
+                (Ok(index), true) => index + 1,
+                (Ok(index) | Err(index), _) => index,
+            },
+        };
+        let count = if forward {
+            self.order.len() - start
+        } else {
+            start
+        };
+        Ok((0..count).map(move |step| {
+            let index = if forward {
+                start + step
+            } else {
+                start - 1 - step
+            };
+            self.ordered_object(atoms, index)
+        }))
+    }
+
+    /// Split the keys of an `ordered_set` table where `below` stops to give
+    /// `true`, and return the last key before the split and the first key
+    /// after it, as `find_prev_from_pb_key` and `find_next_from_pb_key`
+    /// search the tree with a partially bound key
+    /// (`erl_db_tree.c:3294-3382`). `below` gives `true` for each key of a
+    /// prefix of the key order.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let (before, after) = table.ordered_split(|key| Ok(key < &limit))?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Return the error of `below`, or a runtime error when the order is not
+    /// current.
+    pub(super) fn ordered_split(
+        &self,
+        mut below: impl FnMut(&Term) -> Result<bool, BeamError>,
+    ) -> Result<(Option<&Term>, Option<&Term>), BeamError> {
+        self.check_ordered()?;
+        let (mut low, mut high) = (0, self.order.len());
+        while low < high {
+            let middle = low + (high - low) / 2;
+            if below(&self.order[middle])? {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        Ok((
+            low.checked_sub(1).map(|index| &self.order[index]),
+            self.order.get(low),
+        ))
+    }
+
+    /// Return the object of the key at the index `index` of the key order.
+    fn ordered_object(&self, atoms: &AtomTable, index: usize) -> &[Term] {
+        let slot = self
+            .key_slot(atoms, &self.order[index])
+            .expect("each key of the order has an object");
+        self.object_of(slot)
     }
 
     /// Return the runtime error of a table whose key order is not current.
