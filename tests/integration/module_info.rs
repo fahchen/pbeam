@@ -4,6 +4,15 @@ use pbeam_runtime::{AtomTable, BeamProgram, Term};
 
 const MODULE_INFO_PROBE: &[u8] =
     include_bytes!("../../fixtures/module_info/module_info_probe.beam");
+const MODULE_INFO_KEYS: &[u8] = include_bytes!("../../fixtures/module_info/module_info_keys.beam");
+
+/// `module_info_keys:main()` on the pinned ERTS, as `io:format("~w")`
+/// prints it, after `code:load_file/1` loads the module, so that no export
+/// entry of the module exists before its load.
+const ERTS_KEYS: &str = "[[{zeta,0},{alpha,1},{stub,1},{main,0},{module_info,0},{module_info,1}],\
+    [{zeta,0},{alpha,1},{stub,1},{local,1},{main,0},{module_info,0},{module_info,1},\
+    {'-main/0-lc$^0/1-0-',1},{'-alpha/1-fun-0-',1}],[],\
+    <<5,129,59,117,112,43,182,19,93,107,167,32,196,180,109,114>>]";
 
 /// `module_info_probe:main()` on the pinned ERTS, as `io:format("~w")`
 /// prints it.
@@ -14,8 +23,9 @@ const ERTS_RESULT: &str = "[[persistent_term,counters,atomics,\
     erts_code_purger],module_info_probe,[{error,badarg},{error,badarg}],\
     module_info_probe,{error,badarg},{error,badarg},{error,badarg},{error,badarg}]";
 
-/// Return a term as `io:format("~w")` prints it, for the atoms, lists, and
-/// tuples of the probe result.
+/// Return a term as `io:format("~w")` prints it, for the atoms, integers,
+/// binaries, lists, and tuples of the probe results. An atom that is not a
+/// lowercase letter followed by letters, digits, and `_` gets quotes.
 ///
 /// The atom names come from `atoms`, the table that owns the term.
 ///
@@ -33,11 +43,31 @@ fn text(term: &Term, atoms: &AtomTable) -> String {
             .join(",")
     };
     match term {
-        Term::Atom(atom) => atoms.name_of(atom).to_owned(),
+        Term::Atom(atom) => {
+            let name = atoms.name_of(atom);
+            let plain = name.starts_with(|c: char| c.is_ascii_lowercase())
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            if plain {
+                name.to_owned()
+            } else {
+                format!("'{name}'")
+            }
+        }
         _ if let Some(terms) = term.proper_list() => {
             format!("[{}]", join(&terms.cloned().collect::<Vec<_>>()))
         }
         Term::Tuple(terms) => format!("{{{}}}", join(terms)),
+        Term::Integer(value) => value.to_string(),
+        Term::Binary(bytes) => format!(
+            "<<{}>>",
+            bytes
+                .bytes()
+                .unwrap()
+                .iter()
+                .map(u8::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
         other => panic!("unexpected term {other:?}"),
     }
 }
@@ -79,17 +109,50 @@ fn gives_preloaded_modules_and_module_info_as_pinned_erts() {
 }
 
 #[test]
+fn gives_exports_functions_nifs_and_md5_as_pinned_erts() {
+    // `exported_from_module` gives the exports in reverse export table
+    // order, and the loader puts them in `ExpT` order (erl_bif_info.c:
+    // 5822-5862, jit/asm_load.c:1180-1196). `functions_in_module` gives the
+    // functions in code order (erl_bif_info.c:5732-5767). A module without
+    // a NIF library has no NIFs (erl_bif_info.c:5769-5805). `md5_of_module`
+    // gives the MD5 of beam_file.c:1751-1830 (erl_bif_info.c:5911-5916).
+    let program = BeamProgram::load(&[MODULE_INFO_KEYS]).unwrap();
+    let result = program.execute("module_info_keys", "main", &[]).unwrap();
+    assert_eq!(text(&result.term, result.atoms()), ERTS_KEYS);
+
+    let reference = Command::new("erl")
+        .args([
+            "-noshell",
+            "-pa",
+            "fixtures/module_info",
+            "-eval",
+            "M = list_to_atom(\"module_info_keys\"), {module, M} = code:load_file(M), \
+             io:format(\"~w~n\", [apply(M, main, [])]), halt().",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        reference.status.success() && reference.stderr.is_empty(),
+        "{reference:?}"
+    );
+    assert_eq!(
+        String::from_utf8(reference.stdout).unwrap(),
+        format!("{ERTS_KEYS}\n")
+    );
+}
+
+#[test]
 fn stops_get_module_info_for_a_key_that_pbeam_does_not_implement() {
-    // ERTS returns the MD5 of the code chunks (erl_bif_info.c:5912-5917).
-    // PBeam implements only the key `module` (row "Module information" of
-    // docs/erts-differences.md).
+    // ERTS returns the attributes of the `Attr` chunk
+    // (erl_bif_info.c:5864-5885). PBeam does not keep the chunk (row
+    // "Module information" of docs/erts-differences.md).
     let program = BeamProgram::load(&[MODULE_INFO_PROBE]).unwrap();
     let failure = program
-        .execute("module_info_probe", "md5", &[])
+        .execute("module_info_probe", "attributes", &[])
         .unwrap_err()
         .to_string();
     assert!(
-        failure.contains("erlang:get_module_info/2 key md5 is not implemented"),
+        failure.contains("erlang:get_module_info/2 key attributes is not implemented"),
         "{failure}"
     );
 }
@@ -98,16 +161,16 @@ fn stops_get_module_info_for_a_key_that_pbeam_does_not_implement() {
 fn stops_get_module_info_1_for_a_loaded_module() {
     // ERTS returns the pair list of the keys `module`, `exports`,
     // `attributes`, `compile`, and `md5` (erl_bif_info.c:5946-5984). PBeam
-    // can give the pair of the key `module` only, so the call of a loaded
-    // module stops the run at the first key that it cannot give (row
-    // "Module information" of docs/erts-differences.md).
+    // cannot give the key `attributes`, so the call of a loaded module stops
+    // the run at that key (row "Module information" of
+    // docs/erts-differences.md).
     let program = BeamProgram::load(&[MODULE_INFO_PROBE]).unwrap();
     let failure = program
         .execute("module_info_probe", "info", &[])
         .unwrap_err()
         .to_string();
     assert!(
-        failure.contains("erlang:get_module_info/1 key exports is not implemented"),
+        failure.contains("erlang:get_module_info/1 key attributes is not implemented"),
         "{failure}"
     );
 }
