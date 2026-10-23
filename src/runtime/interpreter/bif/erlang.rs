@@ -3729,13 +3729,7 @@ pub(super) fn fun_info(
         Target::Local(lambda) => match item {
             "type" => Term::static_atom("local"),
             "module" => Term::Atom(lambda.module().clone()),
-            "name" => {
-                let module = context.scheduler.atoms.name_of(lambda.module());
-                match context.scheduler.code.function_name_of(module, lambda)? {
-                    Some(name) => Term::Atom(context.scheduler.atoms.put(&name)?),
-                    None => Term::nil(),
-                }
-            }
+            "name" => lambda_name(context, lambda)?,
             "arity" => Term::Integer(i64::from(lambda.arity())),
             "env" => Term::list_from(fun.free().to_vec()),
             "refc" => Term::Integer(1),
@@ -3763,6 +3757,66 @@ pub(super) fn fun_info(
         },
     };
     Ok(Value(Term::tuple(vec![Term::Atom(what.clone()), value])))
+}
+
+/// Return the name of the function of `lambda` as an atom, or `[]` when no
+/// code of its module holds its fun entry (`erl_bif_info.c:3998-4001`).
+fn lambda_name(
+    context: &mut BifContext<'_>,
+    lambda: &crate::term::Lambda,
+) -> Result<Term, BeamError> {
+    let module = context.scheduler.atoms.name_of(lambda.module());
+    Ok(
+        match context.scheduler.code.function_name_of(module, lambda)? {
+            Some(name) => Term::Atom(context.scheduler.atoms.put(&name)?),
+            None => Term::nil(),
+        },
+    )
+}
+
+/// Run `erlang:fun_info_mfa/1`: return `{Module, Name, Arity}` of a fun, as
+/// ERTS `fun_info_mfa_1` (`erl_bif_info.c:4011-4047`) does. A local fun of
+/// code that is not loaded gives `[]` for the name
+/// (`erl_bif_info.c:4027-4035`). A term that is not a fun raises `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = fun_info_mfa(&mut context, &fun)?;
+/// assert!(matches!(result, BifResult::Value(_)));
+/// ```
+///
+/// # Errors
+///
+/// A full atom table gives the error of `AtomTable::put`.
+pub(super) fn fun_info_mfa(
+    context: &mut BifContext<'_>,
+    fun: &Term,
+) -> Result<BifResult, BeamError> {
+    let Term::Fun(fun) = fun else {
+        return Ok(BifResult::badarg());
+    };
+    let (module, name, arity) = match fun.target() {
+        Target::Local(lambda) => (
+            Term::Atom(lambda.module().clone()),
+            lambda_name(context, lambda)?,
+            lambda.arity(),
+        ),
+        Target::External {
+            module,
+            function,
+            arity,
+        } => (
+            Term::Atom(module.clone()),
+            Term::Atom(function.clone()),
+            *arity,
+        ),
+    };
+    Ok(Value(Term::tuple(vec![
+        module,
+        name,
+        Term::Integer(i64::from(arity)),
+    ])))
 }
 
 /// Run `erlang:is_function/2`: return `true` when `term` is a fun of
