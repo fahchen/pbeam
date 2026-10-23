@@ -10,7 +10,7 @@ use openssl::cipher_ctx::{CipherCtx, CipherCtxRef};
 /// The index in `CIPHERS` of the first AEAD cipher. ERTS gives the flag
 /// `AEAD_CIPHER` to `chacha20_poly1305` and to each GCM and CCM cipher
 /// (`cipher.c:128-168`), which are the last entries of the table.
-const FIRST_AEAD: usize = 35;
+pub(super) const FIRST_AEAD: usize = 35;
 
 /// The `EVP_CIPHER_type` of each cipher that PBeam runs and that the
 /// pinned ERTS gives as an integer in `cipher_info_nif/1`
@@ -61,7 +61,7 @@ const CIPHER_TYPES: [(&str, i64); 28] = [
 /// assert!(fetch_cipher(16).is_some());
 /// assert!(fetch_cipher(2).is_none());
 /// ```
-fn fetch_cipher(index: usize) -> Option<Cipher> {
+pub(super) fn fetch_cipher(index: usize) -> Option<Cipher> {
     Cipher::fetch(None, CIPHERS[index].1, None).ok()
 }
 
@@ -73,7 +73,7 @@ fn fetch_cipher(index: usize) -> Option<Cipher> {
 /// ```rust,ignore
 /// assert_eq!(cipher_index(&scheduler, &Term::static_atom("rc4")), Some(1));
 /// ```
-fn cipher_index(scheduler: &Scheduler, term: &Term) -> Option<usize> {
+pub(super) fn cipher_index(scheduler: &Scheduler, term: &Term) -> Option<usize> {
     let name = atom_name(scheduler, term);
     CIPHERS.iter().position(|cipher| cipher.0 == name)
 }
@@ -195,11 +195,11 @@ fn cipher_mode(name: &str) -> &'static str {
 /// A failed check or OpenSSL call of a cipher NIF: the exception tag, the C
 /// line, the argument number, and the message of `raise_exception`
 /// (`common.c:29-90`).
-type CipherFailure = (&'static str, i64, i64, &'static str);
+pub(super) type CipherFailure = (&'static str, i64, i64, &'static str);
 
 /// The `padding` option of `ng_crypto_one_time_nif/5` (`api_ng.c:156-171`).
 #[derive(Clone, Copy, PartialEq)]
-enum Padding {
+pub(super) enum Padding {
     Undefined,
     None,
     Zero,
@@ -217,7 +217,10 @@ enum Padding {
 /// ```rust,ignore
 /// assert!(matches!(cipher_options(&scheduler, &Term::static_atom("true")), Ok((1, Padding::Undefined))));
 /// ```
-fn cipher_options(scheduler: &Scheduler, options: &Term) -> Result<(i8, Padding), (i64, Vec<u8>)> {
+pub(super) fn cipher_options(
+    scheduler: &Scheduler,
+    options: &Term,
+) -> Result<(i8, Padding), (i64, Vec<u8>)> {
     match atom_name(scheduler, options) {
         "true" => return Ok((1, Padding::Undefined)),
         "false" => return Ok((0, Padding::Undefined)),
@@ -284,7 +287,7 @@ fn cipher_options(scheduler: &Scheduler, options: &Term) -> Result<(i8, Padding)
 /// ```rust,ignore
 /// cipher_init(&mut context, true, Some(&cipher), None, None)?;
 /// ```
-fn cipher_init(
+pub(super) fn cipher_init(
     context: &mut CipherCtxRef,
     encrypt: bool,
     cipher: Option<&CipherRef>,
@@ -357,6 +360,39 @@ fn one_time(
     encrypt: i8,
     padding: Padding,
 ) -> Result<Vec<u8>, CipherFailure> {
+    let mut context = init_context(scheduler, arguments, encrypt, padding)?;
+    let mut output = Vec::new();
+    context
+        .cipher_update_vec(data, &mut output)
+        .map_err(|_| ("error", 475, -1, "Can't update"))?;
+    let size = data.len() as u32;
+    let mut padded_size = -1;
+    final_output(
+        &mut context,
+        encrypt != 0,
+        padding,
+        size,
+        &mut padded_size,
+        &mut output,
+    )?;
+    Ok(output)
+}
+
+/// Start a cipher context of `get_init_args` (`api_ng.c:227-397`) from the
+/// cipher, key, and IV in `arguments[..3]`, after the check of the
+/// options: the checks of the key, the cipher, and the IV in the ERTS
+/// order, then `EVP_CipherInit_ex` in the direction `encrypt` and the
+/// padding.
+///
+/// # Errors
+///
+/// The failure of the first check or OpenSSL call that fails.
+pub(super) fn init_context(
+    scheduler: &Scheduler,
+    arguments: &[Term],
+    encrypt: i8,
+    padding: Padding,
+) -> Result<CipherCtx, CipherFailure> {
     let key = iodata_bytes(&arguments[1]).ok_or(("badarg", 230, 1, "Bad key"))?;
     if !matches!(arguments[0], Term::Atom(_)) {
         return Err(("badarg", 237, 0, "Cipher id is not an atom"));
@@ -400,29 +436,33 @@ fn one_time(
     if padding != Padding::Pkcs {
         context.set_padding(false);
     }
-    let mut output = Vec::new();
-    context
-        .cipher_update_vec(data, &mut output)
-        .map_err(|_| ("error", 475, -1, "Can't update"))?;
-    one_time_final(&mut context, encrypt != 0, padding, data.len(), &mut output)?;
-    Ok(output)
+    Ok(context)
 }
 
-/// Append the output of `get_final_args` (`api_ng.c:503-664`) to `output`:
-/// nothing for the padding `undefined`; else the zero or random padding of
-/// an encryption, then `EVP_CipherFinal_ex`. The encrypt flag -1 takes the
-/// encryption branch (`api_ng.c:541`).
+/// Append the output of `get_final_args` (`api_ng.c:503-664`) to `output`
+/// for the input `size` (a C `unsigned int`), and set `padded_size` for
+/// an encryption (`api_ng.c:545-583`): nothing for the padding
+/// `undefined`; else the zero or random padding of an encryption, then
+/// `EVP_CipherFinal_ex`. The encrypt flag -1 takes the encryption branch
+/// (`api_ng.c:541`).
 ///
 /// # Errors
 ///
 /// The failure of the padding or of `EVP_CipherFinal_ex`.
-fn one_time_final(
+pub(super) fn final_output(
     context: &mut CipherCtxRef,
     encrypt: bool,
     padding: Padding,
-    size: usize,
+    size: u32,
+    padded_size: &mut i32,
     output: &mut Vec<u8>,
 ) -> Result<(), CipherFailure> {
+    let block_size = context.block_size();
+    let pad_size = (block_size - size as usize % block_size) % block_size;
+    if encrypt {
+        let pkcs_block = padding == Padding::Pkcs && pad_size == 0;
+        *padded_size = if pkcs_block { block_size } else { pad_size } as i32;
+    }
     if padding == Padding::Undefined {
         return Ok(());
     }
@@ -432,8 +472,6 @@ fn one_time_final(
         (true, Padding::Pkcs) => ("error", 610, -1, "Can't finalize"),
         _ => ("error", 612, -1, "Padding failed"),
     };
-    let block_size = context.block_size();
-    let pad_size = (block_size - size % block_size) % block_size;
     if encrypt && matches!(padding, Padding::Zero | Padding::Random) && pad_size != 0 {
         let mut pad = vec![0; pad_size];
         if padding == Padding::Random {

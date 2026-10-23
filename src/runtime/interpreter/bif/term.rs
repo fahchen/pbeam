@@ -3,10 +3,8 @@
 //! (`external.c`).
 //!
 //! The encoder writes the tags of `external.h` for each term that PBeam can
-//! make. A local fun has no bytes that PBeam can compute: the `NEW_FUN_EXT`
-//! form holds the 16-byte unique value of the `FunT` entry, and PBeam does
-//! not load that value. A local fun, a record, and a pid, port, or reference of another
-//! node fail with a runtime error. Row "External term format" of
+//! make. A record and a pid, port, or reference of another node fail with a
+//! runtime error. Row "External term format" of
 //! `docs/erts-differences.md` gives these differences.
 //!
 //! # Examples
@@ -24,9 +22,10 @@ use num_traits::ToPrimitive;
 
 use super::BifResult::Value;
 use super::*;
+use crate::runtime::interpreter::code_table::CodeTable;
 use crate::term::{
-    AtomTable, Fun, MAX_ATOM_CHARACTERS, MAX_TUPLE_SIZE, ProcessId, Reference, Target, external,
-    float_text,
+    AtomTable, Fun, Lambda, MAX_ATOM_CHARACTERS, MAX_TUPLE_SIZE, ProcessId, Reference, Target,
+    external, float_text,
 };
 
 /// `VERSION_MAGIC`, the first byte of the external term format
@@ -294,12 +293,28 @@ pub(super) fn external_size(atoms: &AtomTable, term: &Term) -> Result<BifResult,
 ///
 /// # Errors
 ///
-/// A local fun, a match context, and a record give a runtime error, and a
+/// A match context and a pid reference give a runtime error, and a
 /// full atom table gives its error.
 fn encode(term: &Term, atoms: &AtomTable, options: &Options) -> Result<Vec<u8>, BeamError> {
     let mut out = Vec::new();
     let mut pending = vec![term];
-    while let Some(term) = pending.pop() {
+    // Each open `NEW_FUN_EXT`: the length of `pending` below its free
+    // variables and the position of its size field, which the walk patches
+    // when it has written the free variables (`ENC_PATCH_FUN_SIZE`,
+    // `external.c:3350-3370`).
+    let mut fun_sizes: Vec<(usize, usize)> = Vec::new();
+    loop {
+        while let Some(&(_, start)) = fun_sizes
+            .last()
+            .filter(|(depth, _)| *depth == pending.len())
+        {
+            fun_sizes.pop();
+            let size = (out.len() - start) as u32;
+            out[start..start + 4].copy_from_slice(&size.to_be_bytes());
+        }
+        let Some(term) = pending.pop() else {
+            break;
+        };
         match term {
             Term::Nil => out.push(106),
             Term::Atom(atom) => encode_atom(atoms.name_of(atom), options, &mut out),
@@ -348,10 +363,11 @@ fn encode(term: &Term, atoms: &AtomTable, options: &Options) -> Result<Vec<u8>, 
                 let mut pairs: Vec<(&Term, &Term)> = map.iter().collect();
                 if options.deterministic {
                     pairs.sort_by(|(left, _), (right, _)| exact_map_key_order(left, right, atoms));
-                } else {
-                    // ERTS writes a flatmap in descending key order
-                    // (`erl_map.c`) and a hashmap in the reverse of the HAMT
-                    // traversal order (`enc_term`, `external.c:3819-3825`).
+                } else if map.is_hashmap() {
+                    // ERTS writes a flatmap in its key order
+                    // (`ENC_MAP_PAIR`, `external.c:3391-3403`, 3766-3768)
+                    // and a hashmap in the reverse of the HAMT traversal
+                    // order (`enc_term`, `external.c:3819-3825`).
                     pairs.reverse();
                 }
                 for (key, value) in pairs.into_iter().rev() {
@@ -418,10 +434,25 @@ fn encode(term: &Term, atoms: &AtomTable, options: &Options) -> Result<Vec<u8>, 
                     encode_atom(atoms.name_of(function), options, &mut out);
                     encode_integer(i64::from(*arity), &mut out);
                 }
-                Target::Local(_) => {
-                    return Err(error(
-                        "unsupported erlang:term_to_binary/1,2 of a local fun: see \"External term format\" in docs/erts-differences.md",
-                    ));
+                // The size, the arity, the module MD5, the index, the free
+                // count, the module, the old index, the old unique value,
+                // the creator pid `<0.0.0>` (`erts_init_process_id`), and
+                // the free variables (`enc_term`, `external.c:3970-3993`).
+                Target::Local(lambda) => {
+                    out.push(112);
+                    fun_sizes.push((pending.len(), out.len()));
+                    out.extend_from_slice(&[0; 4]);
+                    out.push(lambda.arity() as u8);
+                    out.extend_from_slice(lambda.uniq());
+                    out.extend_from_slice(&lambda.index().to_be_bytes());
+                    out.extend_from_slice(&(fun.free().len() as u32).to_be_bytes());
+                    encode_atom(atoms.name_of(lambda.module()), options, &mut out);
+                    encode_integer(i64::from(lambda.old_index()), &mut out);
+                    encode_integer(i64::from(lambda.old_unique()), &mut out);
+                    out.push(88);
+                    encode_sysname(atoms, options, &mut out);
+                    out.extend_from_slice(&[0; 12]);
+                    pending.extend(fun.free().iter().rev());
                 }
             },
             Term::MatchContext(_) => {
@@ -588,6 +619,7 @@ pub(super) fn binary_to_term(
         local: false,
         atoms: &context.scheduler.atoms,
         seed,
+        code: &context.scheduler.code,
     };
     match decoder.decode_input(seed) {
         Ok((term, used_bytes)) if used => Ok(Value(Term::tuple(vec![
@@ -658,6 +690,9 @@ struct Decoder<'a> {
     atoms: &'a AtomTable,
     /// The seed of the block hash of `LOCAL_EXT`.
     seed: u32,
+    /// The code table of the run, which holds the fun entries of the loaded
+    /// code.
+    code: &'a CodeTable,
 }
 
 /// The container that the decoder walk still fills.
@@ -670,6 +705,14 @@ enum FrameKind {
     Map,
     /// An `EXPORT_EXT` of the module, the function, and the arity.
     Export,
+    /// A `NEW_FUN_EXT` with its arity, module MD5, and index, of the module,
+    /// the old index, the old unique value, the creator pid, and the free
+    /// variables.
+    Fun {
+        arity: u8,
+        uniq: [u8; 16],
+        index: i32,
+    },
     /// A `LOCAL_EXT` with its hash, the start of the wrapped term, and the
     /// local flag of the enclosing term.
     Local {
@@ -1067,6 +1110,7 @@ impl Decoder<'_> {
             local: false,
             atoms: self.atoms,
             seed,
+            code: self.code,
         };
         let term = decoder.term()?;
         // The compressed header counts the bytes of the stream, and the
@@ -1311,7 +1355,24 @@ impl Decoder<'_> {
                     });
                     continue 'parse;
                 }
-                112 => return Err(DecodeError::Unsupported("a local fun")),
+                112 => {
+                    // The size, which the decoder skips, the arity, the
+                    // module MD5, the index, and the free count; then the
+                    // module, the old index, the old unique value, the
+                    // creator pid, and the free variables (`dec_term`,
+                    // `external.c:5102-5176`).
+                    self.take(4)?;
+                    let arity = self.take(1)?[0];
+                    let uniq: [u8; 16] = self.take(16)?.try_into().expect("16 bytes of the MD5");
+                    let index = self.u32()? as i32;
+                    let free = self.u32()? as usize;
+                    frames.push(Frame {
+                        kind: FrameKind::Fun { arity, uniq, index },
+                        remaining: 4 + free,
+                        items: Vec::with_capacity(4 + free),
+                    });
+                    continue 'parse;
+                }
                 117 => return Err(DecodeError::Unsupported("an old local fun")),
                 67 => return Err(DecodeError::Unsupported("a record")),
                 121 => {
@@ -1383,6 +1444,16 @@ impl Decoder<'_> {
                         if frame.remaining == 0 {
                             let frame = frames.pop().expect("an export frame");
                             term = self.complete_export(frame.items)?;
+                            continue;
+                        }
+                        break;
+                    }
+                    FrameKind::Fun { arity, uniq, index } => {
+                        frame.items.push(term);
+                        frame.remaining -= 1;
+                        if frame.remaining == 0 {
+                            let frame = frames.pop().expect("a fun frame");
+                            term = self.complete_fun(arity, uniq, index, frame.items)?;
                             continue;
                         }
                         break;
@@ -1705,6 +1776,46 @@ impl Decoder<'_> {
         // number is 0 (`dec_term`, `external.c:4786-4855`). PBeam holds the
         // references of its first scheduler only.
         Err(DecodeError::Unsupported("a reference of another scheduler"))
+    }
+
+    /// Build the local fun of a decoded `NEW_FUN_EXT` as its case in
+    /// `dec_term` (`external.c:5102-5176`) does. The module must be an atom,
+    /// the old index and the old unique value small integers, and the
+    /// creator a pid, else the decode gives badarg. ERTS keeps the old index
+    /// and the old unique value in a C `int` (`erl_fun.c:299-304`), so they
+    /// wrap to 32 bits. The fun gets the entry of the loaded code with the
+    /// key of `fun_cmp` (`erl_fun.c:79-85`), or else a new stub entry with
+    /// the decoded values (`erts_fun_entry_get_or_make_stub`,
+    /// `erl_fun.c:299-309`).
+    fn complete_fun(
+        &mut self,
+        arity: u8,
+        uniq: [u8; 16],
+        index: i32,
+        mut items: Vec<Term>,
+    ) -> Result<Term, DecodeError> {
+        let free = items.split_off(4);
+        let [Term::Atom(module), old_index, old_unique, Term::Pid(_)] = &items[..] else {
+            return Err(DecodeError::Badarg);
+        };
+        let small = |term: &Term| match term {
+            Term::Integer(value) if (integer::MIN_SMALL..=integer::MAX_SMALL).contains(value) => {
+                Ok(*value as i32)
+            }
+            _ => Err(DecodeError::Badarg),
+        };
+        let (old_index, old_unique) = (small(old_index)?, small(old_unique)?);
+        let arity = u32::from(arity);
+        let lambda = self
+            .code
+            .fun_entry(self.atoms.name_of(module), &uniq, index, arity)
+            .unwrap_or_else(|| {
+                Arc::new(
+                    Lambda::new(module.clone(), index, old_index, old_unique, 0, arity)
+                        .with_uniq(uniq),
+                )
+            });
+        Ok(Term::Fun(Fun::new(lambda, free)))
     }
 
     /// Build the external fun of a decoded `EXPORT_EXT` as its case in

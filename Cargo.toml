@@ -34,6 +34,10 @@ opt-level = 1
 
 # Feature tests run the pbeam binary or a mise task.
 [[test]]
+name = "at_exit"
+path = "tests/feature/at_exit.rs"
+
+[[test]]
 name = "boot"
 path = "tests/feature/boot.rs"
 
@@ -120,6 +124,14 @@ path = "tests/feature/release_boot.rs"
 [[test]]
 name = "run_end"
 path = "tests/feature/run_end.rs"
+
+[[test]]
+name = "crash_report"
+path = "tests/feature/crash_report.rs"
+
+[[test]]
+name = "crash_report_routes"
+path = "tests/integration/crash_report.rs"
 
 [[test]]
 name = "bundle"
@@ -397,6 +409,10 @@ path = "tests/integration/init_boot.rs"
 [[test]]
 name = "group"
 path = "tests/integration/group.rs"
+
+[[test]]
+name = "term_to_string"
+path = "tests/integration/term_to_string.rs"
 
 [[test]]
 name = "halt"
@@ -765,3 +781,7 @@ path = "tests/integration/heap_flags.rs"
 [[test]]
 name = "bif_cause"
 path = "tests/integration/bif_cause.rs"
+
+[[test]]
+name = "undef_frames"
+path = "tests/integration/undef_frames.rs"

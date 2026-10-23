@@ -1,5 +1,5 @@
 -module(crypto_probe).
--export([main/0, nifs/0, info/0, supports/0, fips/0, oneshot/0, oneshot_host/0, xof_sizes/0, ciphers/0, ciphers_host/0, cipher_order/0, contexts/0, unsupported/0]).
+-export([main/0, nifs/0, info/0, supports/0, fips/0, oneshot/0, oneshot_host/0, xof_sizes/0, ciphers/0, ciphers_host/0, cipher_order/0, contexts/0, mac_contexts/0, mac_contexts_host/0, cipher_contexts/0, mac_poly1305_final/0, mac_poly1305_update/0, unsupported/0]).
 
 %% Write the results of crypto:strong_rand_bytes/1, one term on each line.
 %% The first call loads crypto on demand, and its -on_load function loads
@@ -204,11 +204,218 @@ contexts() ->
                          fun() -> crypto:hash_final_xof(S0, 64) end]],
     io:format("~p~n", [[is_reference(S0), Finals, Digests, Xofs, Large, Errors]]).
 
+%% Write the results of the MAC context NIFs (mac.c:564-887). A context
+%% changes in place: mac_update/2 gives back its argument. After a final, an
+%% CMAC context goes on from its moved CBC chain, and a Poly1305 context
+%% keeps a short update.
+mac_contexts() ->
+    H = crypto:mac_init(hmac, sha256, <<"key">>),
+    Same = [H =:= crypto:mac_update(H, <<"abc">>), H =:= crypto:mac_update(H, ["d", <<"e">>])],
+    H1 = crypto:mac_final(H),
+    Hmacs = [crypto:mac_final(crypto:mac_update(crypto:mac_init(hmac, Type, Key), <<"abc">>))
+             || Type <- [md5, ripemd160, sha, sha512, sha3_256, sm3, blake2b, blake2s],
+                Key <- [<<>>, <<"k">>, binary:copy(<<7>>, 200)]],
+    Cmacs = [cmac(Cipher, Key, Parts)
+             || {Cipher, Key} <- [{aes_128_cbc, binary:copy(<<1>>, 16)},
+                                  {aes_cbc, binary:copy(<<2>>, 32)},
+                                  {des_ede3_cbc, binary:copy(<<3>>, 24)}],
+                Parts <- [[], [<<"abc">>], [binary:copy(<<4>>, 16)],
+                          [<<"a">>, binary:copy(<<5>>, 15), <<"b">>],
+                          [binary:copy(<<6>>, 33), <<>>, binary:copy(<<7>>, 40)]]],
+    P = crypto:mac_init(poly1305, binary:copy(<<8>>, 32)),
+    P = crypto:mac_update(P, binary:copy(<<9>>, 20)),
+    P1 = crypto:mac_final(P),
+    PAfter = [P =:= crypto:mac_update(P, <<1, 2, 3>>), P =:= crypto:mac_update(P, <<>>)],
+    Short = crypto:mac_finalN(crypto:mac_update(crypto:mac_init(hmac, sha, <<"k">>), <<"a">>), 4),
+    Large = crypto:mac(hmac, sha, <<"k">>, binary:copy(<<1>>, 70000))
+        =:= crypto:mac_final(crypto:mac_update(crypto:mac_init(hmac, sha, <<"k">>),
+                                               binary:copy(<<1>>, 70000))),
+    Errors = [bad_reason(Fun)
+              || Fun <- [fun() -> crypto:mac_init(nosuch, sha, <<"k">>) end,
+                         fun() -> crypto:mac_init(poly1305, <<"k">>) end,
+                         fun() -> crypto:mac_init(hmac, nosuch, <<"k">>) end,
+                         fun() -> crypto:mac_init(hmac, shake128, <<"k">>) end,
+                         fun() -> crypto:mac_init(cmac, nosuch, <<"k">>) end,
+                         fun() -> crypto:mac_init(cmac, chacha20, <<"k">>) end,
+                         fun() -> crypto:mac_init(cmac, des_ede3_cbc, binary:copy(<<1>>, 16)) end,
+                         fun() -> crypto:mac_update(make_ref(), a) end,
+                         fun() -> crypto:mac_update(make_ref(), <<"a">>) end,
+                         fun() -> crypto:mac_final(make_ref()) end,
+                         fun() -> crypto:mac_final(nosuch) end,
+                         fun() -> crypto:mac_final(crypto:hash_init(sha)) end,
+                         fun() -> crypto:hash_update(P, <<"a">>) end]],
+    io:format("~p~n", [[is_reference(H), Same, H1, Hmacs, Cmacs, P1, PAfter,
+                        Short, Large, Errors]]).
+
+%% Write the results of the MAC context NIFs that depend on the libcrypto
+%% of the host. With the OpenSSL 3.5.8 of the pinned macOS ERTS, an HMAC
+%% context fails after its final (mac.c:840, 879), md4 and a cipher that is
+%% not CBC fail EVP_MAC_init (mac.c:750), and des_cbc has no cipher
+%% (mac.c:688).
+mac_contexts_host() ->
+    H = crypto:mac_init(hmac, sha256, <<"key">>),
+    crypto:mac_final(H),
+    Ended = [bad_reason(Fun)
+             || Fun <- [fun() -> crypto:mac_update(H, <<"f">>) end,
+                        fun() -> crypto:mac_final(H) end,
+                        fun() -> crypto:mac_finalN(H, 3) end]],
+    Empty = H =:= crypto:mac_update(H, <<>>),
+    Inits = [bad_reason(fun() -> crypto:mac_init(Type, Sub, binary:copy(<<1>>, Size)) end)
+             || {Type, Sub, Size} <- [{hmac, md4, 1}, {cmac, des_cbc, 8},
+                                      {cmac, aes_128_ecb, 16}, {cmac, aes_128_gcm, 16}]],
+    io:format("~p~n", [[Ended, Empty, Inits]]).
+
+%% Give the CMAC of the parts, a second final, and the final after one more
+%% update. CMAC_Final pads the last block in place and moves the CBC chain
+%% (OpenSSL cmac.c:247-276), so the three values differ.
+cmac(Cipher, Key, Parts) ->
+    C = crypto:mac_init(cmac, Cipher, Key),
+    [C = crypto:mac_update(C, Part) || Part <- Parts],
+    F1 = crypto:mac_final(C),
+    F2 = crypto:mac_final(C),
+    C = crypto:mac_update(C, <<"tail">>),
+    [F1, F2, crypto:mac_final(C)].
+
+%% Use a Poly1305 context after its final in a way that stops the pinned
+%% ERTS: Poly1305_Final clears the context (OpenSSL poly1305.c), so a second
+%% final, or an update that fills a block, calls a cleared function pointer.
+mac_poly1305_final() ->
+    crypto:mac_final(ended_poly1305()).
+
+mac_poly1305_update() ->
+    crypto:mac_update(ended_poly1305(), binary:copy(<<1>>, 16)).
+
+ended_poly1305() ->
+    P = crypto:mac_init(poly1305, binary:copy(<<8>>, 32)),
+    crypto:mac_final(P),
+    P.
+
 %% Write crypto:supports(ciphers) in its order. cipher_algorithms/0 sorts the
 %% table by atom (cipher.c:239, 395-416), and the atom indexes come from the
 %% atom chunks of the modules that load first, so the order is the same on
 %% each run. The probe keeps only the ciphers that PBeam runs, because the
 %% libcrypto of the Linux CI host also has the legacy ciphers.
+%% Write the results of the cipher context NIFs ng_crypto_init_nif/4,
+%% ng_crypto_update_nif/2, ng_crypto_final_nif/1, ng_crypto_get_data_nif/1
+%% (api_ng.c:91-892), aead_cipher_init_nif/4, and aead_cipher_nif/4
+%% (aead.c:69-377), with the error tuple of each failed check. A context
+%% changes in place. Random padding prints only its size.
+cipher_contexts() ->
+    Key = binary:copy(<<1>>, 16),
+    Iv = binary:copy(<<2>>, 16),
+    Data = <<"The quick brown fox jumps over th">>,
+    Stream = fun(Cipher, K, I, Opts, Parts) ->
+                 bad_reason(fun() ->
+                     S = crypto:crypto_init(Cipher, K, I, Opts),
+                     D0 = crypto:crypto_get_data(S),
+                     Outs = [crypto:crypto_update(S, P) || P <- Parts],
+                     D1 = crypto:crypto_get_data(S),
+                     F = bad_reason(fun() -> crypto:crypto_final(S) end),
+                     D2 = crypto:crypto_get_data(S),
+                     F2 = bad_reason(fun() -> crypto:crypto_final(S) end),
+                     {D0, Outs, D1, F, D2, F2}
+                 end)
+             end,
+    Parts = [<<"The quick ">>, [<<"brown">>, $\s], <<>>, <<"fox jumps over th">>],
+    Pads = [Stream(C, binary:copy(<<1>>, KL), binary:copy(<<2>>, IL), [{padding, P}], Parts)
+            || {C, KL, IL} <- [{aes_128_cbc, 16, 16}, {aes_256_ecb, 32, 0}, {aes_128_ctr, 16, 16},
+                               {des_ede3_cbc, 24, 8}, {aes_192_cfb8, 24, 16}, {chacha20, 32, 16},
+                               {aes_cbc, 16, 16}],
+               P <- [undefined, none, zero, pkcs_padding]],
+    Random = bad_reason(fun() ->
+                 S = crypto:crypto_init(aes_128_cbc, Key, Iv, [{padding, random}]),
+                 <<_/binary>> = crypto:crypto_update(S, Data),
+                 {byte_size(crypto:crypto_final(S)), crypto:crypto_get_data(S)}
+             end),
+    Opts = [Stream(aes_128_cbc, Key, Iv, O, [Data])
+            || O <- [true, false, undefined, [], [{encrypt, false}], [{encrypt, undefined}],
+                     [{encrypt, false}, {padding, pkcs_padding}], [{encrypt, true}, {encrypt, true}],
+                     [{padding, bad}], [{bad, 1}], [x], 1]],
+    Enc = crypto:crypto_one_time(aes_128_cbc, Key, Iv, Data, [{padding, pkcs_padding}]),
+    Dec = [Stream(aes_128_cbc, Key, Iv, [{encrypt, false}, {padding, P}],
+                  [binary:part(Enc, 0, 20), binary:part(Enc, 20, 28)])
+           || P <- [pkcs_padding, none, undefined, zero]],
+    NoIv = bad_reason(fun() ->
+               S = crypto:crypto_init(aes_128_ecb, Key, true),
+               {crypto:crypto_update(S, binary:copy(<<7>>, 16)), crypto:crypto_get_data(S)}
+           end),
+    Reinit = bad_reason(fun() ->
+                 S = crypto:crypto_init(aes_128_ctr, Key, Iv, true),
+                 A = crypto:crypto_update(S, <<"abc">>),
+                 S = crypto:crypto_init(S, <<>>, <<>>, false),
+                 B = crypto:crypto_update(S, <<"def">>),
+                 D = crypto:crypto_get_data(S),
+                 E = bad_reason(fun() -> crypto:crypto_init(S, <<>>, <<>>, perhaps) end),
+                 {A, B, D, E}
+             end),
+    Mac = crypto:mac_init(hmac, sha256, <<"k">>),
+    InitErrors = [bad_reason(fun() -> crypto:crypto_init(C, K, I, true) end)
+                  || {C, K, I} <- [{aes_128_cbc, <<1>>, Iv}, {aes_128_cbc, a, Iv},
+                                   {nosuch, Key, Iv}, {"aes", Key, Iv}, {Mac, Key, Iv},
+                                   {make_ref(), Key, Iv}, {aes_128_gcm, Key, Iv},
+                                   {aes_128_cbc, Key, <<1>>}, {aes_128_cbc, Key, a},
+                                   {aes_128_cbc, Key, undefined}]],
+    S0 = crypto:crypto_init(aes_128_cbc, Key, Iv, true),
+    StateErrors = [bad_reason(F)
+                   || F <- [fun() -> crypto:crypto_update(S0, a) end,
+                            fun() -> crypto:crypto_update(Mac, <<"a">>) end,
+                            fun() -> crypto:crypto_update(make_ref(), a) end,
+                            fun() -> crypto:crypto_final(Mac) end,
+                            fun() -> crypto:crypto_get_data(Mac) end,
+                            fun() -> crypto:crypto_get_data(a) end]],
+    io:format("~p~n", [[Pads, Random, Opts, Dec, NoIv, Reinit, InitErrors, StateErrors,
+                        aead_contexts()]]).
+
+aead_contexts() ->
+    Run = fun(Cipher, KL, IL) ->
+              Key = binary:copy(<<5>>, KL),
+              Iv = binary:copy(<<6>>, IL),
+              E = crypto:crypto_one_time_aead_init(Cipher, Key, 16, true),
+              Out1 = bad_reason(fun() -> crypto:crypto_one_time_aead(E, Iv, <<"plain text">>, <<"aad">>) end),
+              Out2 = bad_reason(fun() -> crypto:crypto_one_time_aead(E, Iv, [<<"plain">>], <<"aad">>) end),
+              D = crypto:crypto_one_time_aead_init(Cipher, Key, 16, false),
+              Back = case Out1 of
+                         <<_/binary>> ->
+                             [bad_reason(fun() -> crypto:crypto_one_time_aead(D, Iv, T, A) end)
+                              || {T, A} <- [{Out1, <<"aad">>}, {Out1, <<"bad">>},
+                                            {binary:part(Out1, 0, 9), <<"aad">>}]];
+                         _ -> []
+                     end,
+              Short = crypto:crypto_one_time_aead_init(Cipher, Key, 8, true),
+              S = bad_reason(fun() -> crypto:crypto_one_time_aead(Short, Iv, <<"text">>, <<>>) end),
+              Zero = crypto:crypto_one_time_aead_init(Cipher, Key, 0, true),
+              Z = bad_reason(fun() -> crypto:crypto_one_time_aead(Zero, Iv, <<"text">>, <<>>) end),
+              {Cipher, Out1, Out2, Back, S, Z}
+          end,
+    Ciphers = [Run(C, KL, IL) || {C, KL, IL} <- [{aes_128_gcm, 16, 12}, {aes_256_gcm, 32, 12},
+                                                 {aes_128_ccm, 16, 12}, {aes_192_ccm, 24, 7},
+                                                 {chacha20_poly1305, 32, 12}, {aes_gcm, 16, 12}]],
+    Key = binary:copy(<<1>>, 16),
+    InitErrors = [case bad_reason(fun() -> crypto:crypto_one_time_aead_init(C, K, L, E) end) of
+                      R when is_reference(R) -> state;
+                      R -> R
+                  end
+                  || {C, K, L, E} <- [{aes_128_gcm, Key, 16, perhaps}, {"gcm", Key, 16, true},
+                                      {aes_128_gcm, Key, -1, true}, {aes_128_gcm, Key, 1 bsl 32, true},
+                                      {aes_128_gcm, Key, 1 bsl 31, true}, {aes_128_gcm, <<1>>, 16, true},
+                                      {nosuch, Key, 16, true}, {aes_128_cbc, Key, 16, true},
+                                      {aes_128_gcm, [Key], 16, false}]],
+    E = crypto:crypto_one_time_aead_init(aes_128_gcm, Key, 16, true),
+    D = crypto:crypto_one_time_aead_init(aes_128_gcm, Key, 16, false),
+    C = crypto:crypto_one_time_aead_init(aes_128_ccm, Key, 3, true),
+    Iv = binary:copy(<<2>>, 12),
+    Errors = [bad_reason(F)
+              || F <- [fun() -> crypto:crypto_one_time_aead(make_ref(), Iv, <<>>, <<>>) end,
+                       fun() -> crypto:crypto_one_time_aead(a, Iv, <<>>, <<>>) end,
+                       fun() -> crypto:crypto_one_time_aead(E, a, <<>>, <<>>) end,
+                       fun() -> crypto:crypto_one_time_aead(E, Iv, a, <<>>) end,
+                       fun() -> crypto:crypto_one_time_aead(E, Iv, <<>>, a) end,
+                       fun() -> crypto:crypto_one_time_aead(E, <<>>, <<"t">>, <<>>) end,
+                       fun() -> crypto:crypto_one_time_aead(D, Iv, <<"short">>, <<>>) end,
+                       fun() -> crypto:crypto_one_time_aead(C, Iv, <<"t">>, <<>>) end,
+                       fun() -> crypto:crypto_one_time_aead(C, <<>>, <<"t">>, <<>>) end]],
+    [Ciphers, InitErrors, Errors].
+
 cipher_order() ->
     Run = run_ciphers() ++ [aes_cbc, aes_ccm, aes_cfb128, aes_cfb8, aes_ctr, aes_ecb, aes_gcm],
     Order = [C || C <- crypto:supports(ciphers), lists:member(C, Run)],

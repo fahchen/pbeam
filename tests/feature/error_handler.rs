@@ -81,6 +81,24 @@ fn loads_a_module_that_the_run_does_not_load_as_pinned_erts() {
 }
 
 #[test]
+fn calls_undefined_lambda_for_a_fun_of_a_module_that_is_not_loaded_as_pinned_erts() {
+    // `call_fun` calls `error_handler:undefined_lambda/3` for a fun of a
+    // module with no current code (`beam_common.c:1708-1728`). The module
+    // load fails, so the handler raises undef with the frame
+    // `{Fun, Args, []}` (`error_handler.erl:117-127,162-178`).
+    let erts = run(&mut erts("error_handler_load_probe:lambda()."));
+    assert_eq!(erts, "{error,undef,{#Fun<no_such.2.-1>,[1],[]}}\n");
+    assert_eq!(
+        run(&mut pbeam(
+            "error_handler_load_probe",
+            "lambda",
+            &[format!("{LOAD_PROBE}.beam")]
+        )),
+        erts
+    );
+}
+
+#[test]
 fn charges_the_reductions_of_the_error_handler_path_as_pinned_erts() {
     // The reductions of the error handler path depend on the load path of
     // `error_handler:ensure_loaded/1`: a run with a live code server calls

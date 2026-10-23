@@ -9,7 +9,12 @@
 //! run, and the one-shot hash and MAC NIFs `hash_info/1`, `mac_nif/4`, and
 //! `hash_equals_nif/2`, and the hash context NIFs `hash_init_nif/1`,
 //! `hash_update_nif/2`, `hash_final_nif/1`, and `hash_final_xof_nif/2`,
-//! which keep each context in [`HashContexts`]. As ERTS, PBeam computes the digests and MACs with
+//! which keep each context in [`HashContexts`], and the MAC context NIFs
+//! `mac_init_nif/3`, `mac_update_nif/2`, and `mac_final_nif/1`, which keep
+//! each context in `MacContexts`, and the cipher context NIFs
+//! `ng_crypto_init_nif/4`, `ng_crypto_update_nif/2`, `ng_crypto_final_nif/1`,
+//! `ng_crypto_get_data_nif/1`, `aead_cipher_init_nif/4`, and
+//! `aead_cipher_nif/4` of `cipher_context`. As ERTS, PBeam computes the digests and MACs with
 //! a static OpenSSL, through the safe `openssl` crate (`vendored`, OpenSSL
 //! 3.5.5).
 //! Each other function of the library gives the runtime error
@@ -17,6 +22,8 @@
 //! `docs/erts-differences.md`).
 
 mod cipher;
+mod cipher_context;
+mod mac_context;
 
 use super::bif::iodata_bytes;
 use super::*;
@@ -25,6 +32,11 @@ use crate::term::Reference;
 use cipher::{
     aead_cipher_nif, cipher_algorithms, cipher_info_nif, do_exor, ng_crypto_one_time_nif,
 };
+use cipher_context::{
+    aead_cipher_context_nif, aead_cipher_init_nif, ng_crypto_final_nif, ng_crypto_get_data_nif,
+    ng_crypto_init_nif, ng_crypto_update_nif,
+};
+use mac_context::{mac_final_nif, mac_init_nif, mac_update_nif};
 use num_traits::ToPrimitive;
 use openssl::{
     hash::{Hasher, MessageDigest},
@@ -125,6 +137,18 @@ pub(super) const FUNCTIONS: [(&str, u32); 70] = [
 /// assert_eq!((BINDINGS[0].name, BINDINGS[0].arity), ("hash_nif", 2));
 /// ```
 pub(super) const BINDINGS: &[Binding] = &[
+    Binding {
+        name: "aead_cipher_init_nif",
+        arity: 4,
+        job: Job::Normal,
+        run: aead_cipher_init_nif,
+    },
+    Binding {
+        name: "aead_cipher_nif",
+        arity: 4,
+        job: Job::Normal,
+        run: aead_cipher_context_nif,
+    },
     Binding {
         name: "aead_cipher_nif",
         arity: 7,
@@ -244,6 +268,20 @@ pub(super) const BINDINGS: &[Binding] = &[
         run: |scheduler, _| atom_list(scheduler, &MAC_ALGORITHMS),
     },
     Binding {
+        name: "mac_final_nif",
+        arity: 1,
+        job: Job::Normal,
+        run: |scheduler, arguments| mac_final_nif(scheduler, &arguments[0]),
+    },
+    Binding {
+        name: "mac_init_nif",
+        arity: 3,
+        job: Job::Normal,
+        run: |scheduler, arguments| {
+            mac_init_nif(scheduler, &arguments[0], &arguments[1], &arguments[2])
+        },
+    },
+    Binding {
         name: "mac_nif",
         arity: 4,
         job: Job::Normal,
@@ -258,10 +296,40 @@ pub(super) const BINDINGS: &[Binding] = &[
         },
     },
     Binding {
+        name: "mac_update_nif",
+        arity: 2,
+        job: Job::Normal,
+        run: |scheduler, arguments| mac_update_nif(scheduler, &arguments[0], &arguments[1]),
+    },
+    Binding {
+        name: "ng_crypto_final_nif",
+        arity: 1,
+        job: Job::Normal,
+        run: |scheduler, arguments| ng_crypto_final_nif(scheduler, &arguments[0]),
+    },
+    Binding {
+        name: "ng_crypto_get_data_nif",
+        arity: 1,
+        job: Job::Normal,
+        run: |scheduler, arguments| ng_crypto_get_data_nif(scheduler, &arguments[0]),
+    },
+    Binding {
+        name: "ng_crypto_init_nif",
+        arity: 4,
+        job: Job::Normal,
+        run: ng_crypto_init_nif,
+    },
+    Binding {
         name: "ng_crypto_one_time_nif",
         arity: 5,
         job: Job::Normal,
         run: ng_crypto_one_time_nif,
+    },
+    Binding {
+        name: "ng_crypto_update_nif",
+        arity: 2,
+        job: Job::Normal,
+        run: |scheduler, arguments| ng_crypto_update_nif(scheduler, &arguments[0], &arguments[1]),
     },
     Binding {
         name: "pbkdf2_hmac_nif",
@@ -1136,36 +1204,56 @@ fn hmac(scheduler: &mut Scheduler, sub_type: &Term, key: &[u8], text: &[u8]) -> 
 /// assert!(matches!(cmac(&mut scheduler, &Term::static_atom("aes_128_cbc"), &key, b"t"), Ok(Ok(_))));
 /// ```
 fn cmac(scheduler: &mut Scheduler, sub_type: &Term, key: &[u8], text: &[u8]) -> MacResult {
+    let cipher = cmac_cipher(scheduler, sub_type, key.len(), [331, 334, 346])?;
+    let cipher = openssl::symm::Cipher::from_nid(cipher.nid());
+    let cipher = cipher.ok_or_else(openssl::error::ErrorStack::get);
+    Ok(cipher
+        .and_then(|cipher| PKey::cmac(&cipher, key))
+        .and_then(|key| Signer::new_without_digest(&key)?.sign_oneshot_to_vec(text)))
+}
+
+/// Fetch the cipher `sub_type` of a CMAC with a key of `key_length` bytes.
+/// `lines` gives the ERTS lines of the three failures: a name that is not a
+/// cipher (`badarg`, argument 1), a key length that the cipher does not take
+/// (`badarg`, argument 2), and a cipher that the default provider does not
+/// have, such as `des_cbc` (`notsup`, argument 1).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(cmac_cipher(&mut scheduler, &Term::static_atom("aes_128_cbc"), 16, [331, 334, 346]).is_ok());
+/// ```
+fn cmac_cipher(
+    scheduler: &mut Scheduler,
+    sub_type: &Term,
+    key_length: usize,
+    lines: [i64; 3],
+) -> Result<openssl::cipher::Cipher, Result<BifResult, BeamError>> {
     let name = atom_name(scheduler, sub_type);
     let Some(&(_, fetch_name, length)) = CIPHERS.iter().find(|cipher| cipher.0 == name) else {
         return Err(c_error(
             scheduler,
             "badarg",
             "mac.c",
-            331,
+            lines[0],
             1,
             "Unknown cipher",
         ));
     };
-    if length != 0 && length != key.len() {
+    if length != 0 && length != key_length {
         return Err(c_error(
             scheduler,
             "badarg",
             "mac.c",
-            334,
+            lines[1],
             2,
             "Bad key size",
         ));
     }
-    let Ok(cipher) = openssl::cipher::Cipher::fetch(None, fetch_name, None) else {
+    openssl::cipher::Cipher::fetch(None, fetch_name, None).map_err(|_| {
         let message = "Unsupported cipher algorithm";
-        return Err(c_error(scheduler, "notsup", "mac.c", 346, 1, message));
-    };
-    let cipher = openssl::symm::Cipher::from_nid(cipher.nid());
-    let cipher = cipher.ok_or_else(openssl::error::ErrorStack::get);
-    Ok(cipher
-        .and_then(|cipher| PKey::cmac(&cipher, key))
-        .and_then(|key| Signer::new_without_digest(&key)?.sign_oneshot_to_vec(text)))
+        c_error(scheduler, "notsup", "mac.c", lines[2], 1, message)
+    })
 }
 
 /// Compute the Poly1305 MAC of `text` with the 32-byte `key`

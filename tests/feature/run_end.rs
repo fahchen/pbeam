@@ -126,3 +126,53 @@ fn exits_with_the_low_8_bits_of_the_halt_status_code() {
         (Some(3), &b""[..], &b""[..])
     );
 }
+
+#[test]
+fn writes_the_slogan_of_a_crash_dump_halt_as_pinned_erts() {
+    // `halt/1` with a string writes the slogan, cut to 1023 characters, as
+    // UTF-8 and a newline to stderr, with `\r\n` for each `\n`, and exits
+    // with status 1 (bif.c:4372-4386, erl_init.c:2712-2713, 2738-2739,
+    // sys/unix/sys.c:343). With `ERL_CRASH_DUMP_SECONDS=0`, ERTS writes no
+    // crash dump and no line about it; PBeam never writes one.
+    for (function, stderr) in [
+        ("line_slogan", "\u{e9}\r\nb\r\n".to_owned()),
+        ("long_slogan", format!("{}\r\n", "a".repeat(1023))),
+    ] {
+        let erts = run_dumb_utf8(
+            Command::new("erl")
+                .args([
+                    "-noshell",
+                    "-pa",
+                    "fixtures/halt",
+                    "-eval",
+                    &format!("halt_probe:{function}()."),
+                ])
+                .env("ERL_CRASH_DUMP_SECONDS", "0"),
+            Stdio::piped(),
+            RUN_TIME_LIMIT,
+        );
+        let pbeam = run_dumb_utf8(
+            Command::new(env!("CARGO_BIN_EXE_pbeam"))
+                .args([
+                    "halt_probe",
+                    function,
+                    "--",
+                    "fixtures/halt/halt_probe.beam",
+                ])
+                .arg(pinned_beam_path("erlang")),
+            Stdio::piped(),
+            RUN_TIME_LIMIT,
+        );
+        for (name, output) in [("ERTS", erts), ("PBeam", pbeam)] {
+            assert_eq!(
+                (
+                    output.status.code(),
+                    String::from_utf8_lossy(&output.stdout).as_ref(),
+                    String::from_utf8_lossy(&output.stderr).as_ref()
+                ),
+                (Some(1), "", stderr.as_str()),
+                "{name} {function}"
+            );
+        }
+    }
+}

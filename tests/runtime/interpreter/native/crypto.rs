@@ -259,6 +259,44 @@ fn raises_not_iolist_for_hash_update_data_that_is_not_a_binary() {
 }
 
 #[test]
+fn raises_bad_key_for_a_mac_init_key_that_is_not_iodata() {
+    // crypto:mac_init/3 converts the key first (crypto.erl:1432), so only
+    // a direct NIF call reaches mac.c:594-598.
+    let mut scheduler = scheduler();
+    let (hmac, sha) = (atom(&mut scheduler, "hmac"), atom(&mut scheduler, "sha"));
+    let result = mac_init_nif(&mut scheduler, &hmac, &sha, &Term::Integer(1)).unwrap();
+    assert_c_error(
+        result,
+        &scheduler.atoms.clone(),
+        ("badarg", "mac.c", 596, 2, "Bad key"),
+    );
+}
+
+#[test]
+fn gives_the_argument_number_of_each_mac_context_error() {
+    // crypto.erl drops `c_function_arg_num` (crypto.erl:761-775).
+    let mut scheduler = scheduler();
+    let (hmac, sha) = (atom(&mut scheduler, "hmac"), atom(&mut scheduler, "sha"));
+    let key = Term::binary(b"k".to_vec());
+    let context = value(mac_init_nif(&mut scheduler, &hmac, &sha, &key).unwrap());
+    let atoms = scheduler.atoms.clone();
+    let result = mac_update_nif(&mut scheduler, &Term::Integer(1), &Term::Integer(1)).unwrap();
+    assert_c_error(result, &atoms, ("badarg", "mac.c", 807, 1, "Bad text"));
+    let result = mac_update_nif(&mut scheduler, &Term::Integer(1), &key).unwrap();
+    assert_c_error(result, &atoms, ("badarg", "mac.c", 830, 0, "Bad ref"));
+    let result = mac_final_nif(&mut scheduler, &Term::Integer(1)).unwrap();
+    assert_c_error(result, &atoms, ("badarg", "mac.c", 860, 0, "Bad ref"));
+    assert_eq!(
+        value_bytes(mac_final_nif(&mut scheduler, &context).unwrap()).len(),
+        20
+    );
+    let result = mac_update_nif(&mut scheduler, &context, &key).unwrap();
+    assert_c_error(result, &atoms, ("error", "mac.c", 840, -1, "mac update"));
+    let result = mac_final_nif(&mut scheduler, &context).unwrap();
+    assert_c_error(result, &atoms, ("error", "mac.c", 879, -1, "Signing"));
+}
+
+#[test]
 fn gives_the_pinned_erts_pbkdf2_value_for_each_eligible_digest() {
     let mut scheduler = scheduler();
     let password = Term::binary(b"password".to_vec());
@@ -657,5 +695,112 @@ fn reads_unsigned_values_and_text_as_erts_nif_arguments() {
     assert_eq!(
         string("ab"),
         Term::list_from(vec![Term::Integer(97), Term::Integer(98)])
+    );
+}
+
+#[test]
+fn gives_the_argument_number_of_each_cipher_context_error() {
+    // crypto.erl drops `c_function_arg_num` (crypto.erl:761-775), so the
+    // probe `crypto_probe:cipher_contexts/0` does not compare it.
+    let mut scheduler = scheduler();
+    let atoms = scheduler.atoms.clone();
+    let cbc = atom(&mut scheduler, "aes_128_cbc");
+    let key = Term::binary(vec![1; 16]);
+    let iv = Term::binary(vec![2; 16]);
+    let flag = atom(&mut scheduler, "perhaps");
+    let truth = atom(&mut scheduler, "true");
+    let bad = [cbc.clone(), key.clone(), iv.clone(), flag.clone()];
+    let result = ng_crypto_init_nif(&mut scheduler, &bad).unwrap();
+    let message = "Options are not a boolean or a proper list";
+    assert_c_error(result, &atoms, ("badarg", "api_ng.c", 122, 3, message));
+    let bad = [cbc.clone(), Term::Integer(1), iv.clone(), truth.clone()];
+    let result = ng_crypto_init_nif(&mut scheduler, &bad).unwrap();
+    assert_c_error(result, &atoms, ("badarg", "api_ng.c", 230, 1, "Bad key"));
+    let bad = [Term::Integer(1), key.clone(), iv.clone(), truth.clone()];
+    let result = ng_crypto_init_nif(&mut scheduler, &bad).unwrap();
+    let message = "Expected cipher name atom";
+    assert_c_error(result, &atoms, ("badarg", "api_ng.c", 707, 0, message));
+    let state = value(ng_crypto_init_nif(&mut scheduler, &[cbc, key, iv, truth]).unwrap());
+    let bad = [state.clone(), Term::Nil, Term::Nil, flag];
+    let result = ng_crypto_init_nif(&mut scheduler, &bad).unwrap();
+    let message = "Expected true or false";
+    assert_c_error(result, &atoms, ("badarg", "api_ng.c", 695, 3, message));
+    let result = ng_crypto_update_nif(&mut scheduler, &state, &Term::Integer(1)).unwrap();
+    assert_c_error(
+        result,
+        &atoms,
+        ("badarg", "api_ng.c", 745, 1, "expected binary"),
+    );
+    let result = ng_crypto_update_nif(&mut scheduler, &Term::Nil, &Term::Nil).unwrap();
+    assert_c_error(result, &atoms, ("badarg", "api_ng.c", 729, 0, "Bad State"));
+    let result = ng_crypto_final_nif(&mut scheduler, &Term::Nil).unwrap();
+    assert_c_error(result, &atoms, ("badarg", "api_ng.c", 771, 0, "Bad State"));
+    let result = ng_crypto_get_data_nif(&mut scheduler, &Term::Nil).unwrap();
+    assert_c_error(result, &atoms, ("badarg", "api_ng.c", 882, 0, "Bad State"));
+}
+
+#[test]
+fn gives_the_argument_number_of_each_aead_context_error() {
+    // crypto:crypto_one_time_aead_init/4 converts the key with
+    // iolist_to_binary/1 (crypto.erl:2058), so only a direct NIF call
+    // reaches the `non-binary key` check of aead.c:104-105.
+    let mut scheduler = scheduler();
+    let atoms = scheduler.atoms.clone();
+    let gcm = atom(&mut scheduler, "aes_128_gcm");
+    let truth = atom(&mut scheduler, "true");
+    let key = Term::binary(vec![1; 16]);
+    let tag = Term::Integer(16);
+    let list_key = Term::list_from([key.clone()]);
+    let bad = [gcm.clone(), list_key, tag.clone(), truth.clone()];
+    let result = aead_cipher_init_nif(&mut scheduler, &bad).unwrap();
+    assert_c_error(
+        result,
+        &atoms,
+        ("badarg", "aead.c", 105, 1, "non-binary key"),
+    );
+    // crypto.erl:2057 takes only an integer tag length.
+    let bad = [gcm.clone(), key.clone(), truth.clone(), truth.clone()];
+    let result = aead_cipher_init_nif(&mut scheduler, &bad).unwrap();
+    assert_c_error(
+        result,
+        &atoms,
+        ("badarg", "aead.c", 109, 2, "Bad Tag length"),
+    );
+    let bad = [
+        gcm.clone(),
+        key.clone(),
+        Term::Integer(1 << 31),
+        truth.clone(),
+    ];
+    let result = aead_cipher_init_nif(&mut scheduler, &bad).unwrap();
+    let message = "key or tag too long";
+    assert_c_error(result, &atoms, ("badarg", "aead.c", 113, 1, message));
+    let state = value(aead_cipher_init_nif(&mut scheduler, &[gcm, key, tag, truth]).unwrap());
+    let empty = Term::binary(Vec::new());
+    let bad = [Term::Nil, empty.clone(), empty.clone(), empty.clone()];
+    let result = aead_cipher_context_nif(&mut scheduler, &bad).unwrap();
+    assert_c_error(result, &atoms, ("badarg", "aead.c", 244, 0, "Bad State"));
+    let checks = [
+        (1, 249, "non-binary iv"),
+        (2, 251, "non-binary text"),
+        (3, 256, "non-binary AAD"),
+    ];
+    for (index, line, message) in checks {
+        let mut bad = [state.clone(), empty.clone(), empty.clone(), empty.clone()];
+        bad[index] = Term::Integer(1);
+        let result = aead_cipher_context_nif(&mut scheduler, &bad).unwrap();
+        let argument = index as i64;
+        assert_c_error(
+            result,
+            &atoms,
+            ("badarg", "aead.c", line, argument, message),
+        );
+    }
+    let bad = [state, empty.clone(), empty.clone(), empty];
+    let result = aead_cipher_context_nif(&mut scheduler, &bad).unwrap();
+    assert_c_error(
+        result,
+        &atoms,
+        ("badarg", "aead.c", 281, 2, "Bad IV length"),
     );
 }

@@ -32,7 +32,7 @@ pub use map::Map;
 pub(crate) use map::{Direction, Drain as MapDrain, Insert, flatmap_order, from_list_units};
 pub use match_context::MatchState;
 pub(crate) use match_context::{segment_equals, segment_integer};
-pub(crate) use print::print_term;
+pub(crate) use print::{print_term, print_term_limited};
 use tuple::Tuple;
 
 use num_bigint::BigInt;
@@ -784,7 +784,12 @@ impl Term {
                         true
                     } else {
                         pairs.extend(left.free().iter().zip(right.free()));
-                        left.target() == right.target() && left.free().len() == right.free().len()
+                        let same_target = if arith {
+                            left.target().compare_equal(right.target())
+                        } else {
+                            left.target() == right.target()
+                        };
+                        same_target && left.free().len() == right.free().len()
                     }
                 }
                 (Term::Map(left), Term::Map(right)) => {
