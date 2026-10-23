@@ -47,6 +47,30 @@ impl Sockets {
     pub(super) fn get(&self, reference: Reference) -> Option<Arc<Mutex<SocketState>>> {
         self.by_reference.get(&reference).cloned()
     }
+
+    /// Run the monitor of the socket `reference` on its owner after the
+    /// owner exits, as `essio_down` and `esock_close_socket` do
+    /// (`unix_socket_syncio.c:9735-9750`, `10532-10570`,
+    /// `prim_socket_nif.c:7648-7705`): clear the owner, and when the socket
+    /// is still open, close the host socket, add the states `closing` and
+    /// `closed`, and count the socket out. Return the registry to send
+    /// `{'$socket', del, Socket}` to, if the registry knows the socket.
+    pub(super) fn owner_down(&mut self, reference: Reference) -> Option<ProcessId> {
+        let socket = self.by_reference.get(&reference)?;
+        let mut socket = socket.lock().unwrap_or_else(|poison| poison.into_inner());
+        socket.owner = None;
+        if socket.read & (CLOSING | CLOSED) != 0 {
+            return None;
+        }
+        socket.socket = None;
+        socket.read |= CLOSING | CLOSED;
+        socket.write |= CLOSING | CLOSED;
+        let (domain, kind, protocol) = (socket.domain, socket.kind, socket.protocol);
+        let registered = socket.registered;
+        drop(socket);
+        self.counters.count(domain, kind, protocol, -1);
+        registered.then_some(self.registry).flatten()
+    }
 }
 
 /// The global socket counters of `esock_global_info`

@@ -4040,6 +4040,9 @@ impl Scheduler {
                             TargetMonitor::File(file) => {
                                 lock(&self.node().resources.kind::<Files>()).monitor_down(file);
                             }
+                            TargetMonitor::Socket(socket) => {
+                                self.socket_owner_down(id, socket);
+                            }
                             TargetMonitor::Port { port, reference: _ } => {
                                 self.tcp_monitor_down(port, id);
                             }

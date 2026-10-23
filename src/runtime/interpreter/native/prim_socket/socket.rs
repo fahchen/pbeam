@@ -19,6 +19,7 @@ use super::supports::atom;
 use super::*;
 use crate::runtime::port::inet::errno_name;
 use crate::runtime::resources::lock;
+use crate::runtime::signal::Signal;
 use crate::runtime::sockets::{BOUND, CLOSED, CLOSING, SocketState, Sockets};
 use crate::term::{ProcessId, Reference};
 
@@ -363,6 +364,10 @@ pub(super) fn open_4(
     if registered {
         send_registry(scheduler, registry, "add", reference)?;
     }
+    // The socket monitors its owner (`unix_socket_syncio.c:1785-1788`).
+    scheduler
+        .send_signal(None, owner, Signal::SocketMonitor { socket: reference })
+        .expect("the caller is alive");
     Ok(BifResult::Value(Term::tuple(vec![
         Term::static_atom("ok"),
         Term::Reference(reference),
