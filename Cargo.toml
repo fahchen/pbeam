@@ -355,6 +355,10 @@ name = "existing_atom"
 path = "tests/integration/existing_atom.rs"
 
 [[test]]
+name = "flat_size"
+path = "tests/integration/flat_size.rs"
+
+[[test]]
 name = "float"
 path = "tests/integration/float.rs"
 

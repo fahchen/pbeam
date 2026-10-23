@@ -348,7 +348,7 @@ bifs! {
     erts_debug:dirty_io/2 => unsupported,
     erts_debug:disassemble/1 => unsupported,
     erts_debug:dist_ext_to_term/2 => unsupported,
-    erts_debug:flat_size/1 => unsupported,
+    erts_debug:flat_size/1 as ErtsDebugFlatSize1 => |_, [term]| Ok(Value(Term::Integer(crate::term::flat_size(term) as i64))),
     erts_debug:get_internal_state/1 => unsupported,
     erts_debug:instructions/0 => unsupported,
     erts_debug:interpreter_size/0 => unsupported,
