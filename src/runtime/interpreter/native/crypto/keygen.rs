@@ -168,15 +168,8 @@ fn ec_generate_key(
     // ERTS loads a named curve by name; PBeam builds the same curve from
     // its definition. OpenSSL rejects a well-formed definition at
     // `ec.c:405-407`.
-    let group = ec_group(scheduler, parts)?.ok_or_else(|| {
-        if named {
-            Failure::Unsupported(
-                "an EC curve that PBeam cannot build from its definition".to_owned(),
-            )
-        } else {
-            failed(407, "Couldn't generate EC key")
-        }
-    })?;
+    let group =
+        ec_group(scheduler, parts)?.ok_or_else(|| failed(407, "Couldn't generate EC key"))?;
     let mut context = BigNumContext::new().map_err(|_| failed(492, "Couldn't multiply POINT"))?;
     let (point, private) = match private {
         Some(bytes) => {

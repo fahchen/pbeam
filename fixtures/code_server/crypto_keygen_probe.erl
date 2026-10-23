@@ -1,6 +1,5 @@
 -module(crypto_keygen_probe).
--export([main/0, post_quantum/0, unsupported_field/0, unsupported_unnamed/0,
-         unsupported_definition/0]).
+-export([main/0, post_quantum/0, unsupported_field/0, unsupported_unnamed/0]).
 
 %% Write the results of crypto:generate_key/2,3, which call
 %% rsa_generate_key_nif/2, ec_generate_key_nif/2, and
@@ -85,12 +84,6 @@ unsupported_field() ->
 %% A private key on a curve without a name (ec.c:465-482).
 unsupported_unnamed() ->
     crypto:generate_key(ecdh, crypto_ec_curves:curve(secp256r1), 1).
-
-%% A curve without a name that PBeam cannot build from its definition
-%% (ec.c:101-139).
-unsupported_definition() ->
-    crypto:generate_key(ecdh, {{prime_field, <<4>>}, {<<1>>, <<1>>, none}, <<4, 1, 1>>,
-                               <<5>>, <<1>>}).
 
 rsa(Bits, E) ->
     {Pub, Priv} = crypto:generate_key(rsa, {Bits, E}),

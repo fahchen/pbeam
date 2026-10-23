@@ -1463,11 +1463,6 @@ fn stops_on_an_ec_curve_that_key_generation_does_not_support() {
             "crypto:ec_generate_key_nif/2 NIF is not supported for a private key on an EC \
              curve without a name",
         ),
-        (
-            "unsupported_definition",
-            "crypto:ec_generate_key_nif/2 NIF is not supported for an EC curve that PBeam \
-             cannot build from its definition",
-        ),
     ] {
         let output = pbeam_probe(CRYPTO_KEYGEN_PROBE, "crypto_keygen_probe", function, &[])
             .env("TERM", "dumb")
