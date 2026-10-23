@@ -27,7 +27,11 @@ long() ->
     {bit_size(L2B), L2B =:= << <<B/bitstring>> || B <- Bits >>,
      bit_size(D2B), D2B =:= << <<(erlang:list_to_bitstring(D))/bitstring>> || D <- Deep >>,
      length(B2L), lists:last(B2L), lists:sum(lists:droplast(B2L)),
-     try erlang:list_to_bitstring(Bits ++ [a]) catch error:Reason -> Reason end}.
+     try erlang:list_to_bitstring(Bits ++ [a]) catch error:Reason -> Reason end,
+     %% The copy of the tail takes 62500 steps, more than one turn, so it
+     %% stops in the tail at a bit offset that is not a whole byte of the
+     %% result.
+     erlang:list_to_bitstring(id([<<1:1>> | <<0:(8 * 2000000)>>])) =:= <<1:1, 0:(8 * 2000000)>>}.
 
 run(Fun, Term) ->
     try Fun(Term)

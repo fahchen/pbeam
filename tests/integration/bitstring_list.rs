@@ -66,13 +66,14 @@ fn converts_bitstrings_and_lists_as_pinned_erts() {
 fn converts_long_bitstrings_and_lists_as_pinned_erts() {
     // The size walk and the copy walk of `list_to_bitstring/1` trap to
     // `erts_internal:list_to_bitstring_continue` (`erl_iolist.c:764-835`),
-    // and a copy stops inside a bitstring at a bit offset that is not a
-    // whole byte of the result. `bitstring_to_list/1` of more than
+    // and the copy of `[<<1:1>> | <<0:16000000>>]` takes 62500 steps, so it
+    // always stops inside the tail at a bit offset that is not a whole byte
+    // of the result and resumes there. `bitstring_to_list/1` of more than
     // 256000 bytes builds its list in chunks (`binary.c:436-450`).
     let printed = shown("long");
     assert_eq!(printed, reference("long"));
     assert_eq!(
         printed,
-        "{90000,true,2703600,true,300001,<<5:3>>,0,badarg}\n"
+        "{90000,true,2703600,true,300001,<<5:3>>,0,badarg,true}\n"
     );
 }
