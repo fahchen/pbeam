@@ -1099,11 +1099,7 @@ pub(super) fn raise(depth: usize, class: &Term, reason: &Term, stacktrace: &Term
 pub(super) fn link(scheduler: &mut Scheduler, target: &Term) -> Result<BifResult, BeamError> {
     let target = match *target {
         Term::Pid(pid) => LinkId::Process(pid),
-        Term::Port(port) => {
-            let index = scheduler.index();
-            scheduler.inet_port_served(port, index)?;
-            LinkId::Port(port)
-        }
+        Term::Port(port) => LinkId::Port(port),
         _ => return Ok(BifResult::badarg()),
     };
     if let Some(denied) = denial(scheduler, CapabilityKind::Process, Operation::Link, None)? {
@@ -1355,12 +1351,7 @@ pub(super) fn monitor(
     let target = match (context.scheduler.atoms.name_of(kind), target) {
         ("process", Term::Pid(id)) => Some(Ok(MonitorTarget::Process(*id))),
         ("process", target) => local_name(target).map(|name| Ok(MonitorTarget::ProcessName(name))),
-        ("port", Term::Port(port)) => Some(
-            context
-                .scheduler
-                .inet_port_served(*port, context.scheduler.index())
-                .map(|()| MonitorTarget::Port(*port)),
-        ),
+        ("port", Term::Port(port)) => Some(Ok(MonitorTarget::Port(*port))),
         ("port", target) => local_name(target).map(|name| Ok(MonitorTarget::PortName(name))),
         ("time_offset", Term::Atom(service)) if service.is_static("clock_service") => {
             // ponytail: no time offset service yet; add it when a measured path monitors it.

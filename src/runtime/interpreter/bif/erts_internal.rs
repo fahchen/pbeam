@@ -644,9 +644,6 @@ pub(super) fn found_port(scheduler: &mut Scheduler, port: &Term) -> Result<Found
     let Term::Port(id) = port else {
         return Ok(None);
     };
-    // The timers of an inet port stay with the scheduler that serves it.
-    let index = scheduler.index();
-    scheduler.inet_port_served(*id, index)?;
     Ok(scheduler.node.port(*id).map(|cell| (*id, cell)))
 }
 
@@ -1122,11 +1119,6 @@ pub(super) fn port_connect(
             let boot = boot_denial(scheduler, pid)?;
             if let Some(denied) = port_denial(scheduler, &name, Operation::Command)?.or(boot) {
                 return Ok(denied);
-            }
-            // The timers of an inet port stay with the scheduler that serves
-            // it, so the exit of an owner on another scheduler cannot stop it.
-            if let Some(index) = scheduler.remote_owner(pid) {
-                scheduler.inet_port_served(id, index)?;
             }
             let connected = scheduler.connect_port(id, pid);
             if connected {
