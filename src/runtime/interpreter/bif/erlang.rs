@@ -4,7 +4,9 @@ use super::BifResult::{Raise, Trap, Value};
 use super::*;
 use crate::beam::code::Instruction;
 use crate::runtime::capability;
-use crate::runtime::heap_flags::{HeapFlags, max_heap_size, max_heap_size_map, next_heap_size};
+use crate::runtime::heap_flags::{
+    HeapFlags, garbage_collection_list, max_heap_size, max_heap_size_map, next_heap_size,
+};
 use crate::runtime::host;
 use crate::runtime::interpreter::DEFAULT_ERROR_HANDLER;
 use crate::runtime::interpreter::code_table::{CodeTable, Finish};
@@ -5296,9 +5298,7 @@ fn process_info_values(
     };
     let reductions = i64::try_from(process.reductions.saturating_add(current))
         .map_err(|_| error("the reduction total exceeds the PBeam integer range"))?;
-    let words = std::mem::size_of::<usize>();
-    let heap_size = i64::try_from(process.allocated_bytes() / words)
-        .map_err(|_| error("the heap size exceeds the PBeam integer range"))?;
+    let heap_size = process.heap_words()?;
     let stack_size = i64::try_from(
         process
             .frames
@@ -5426,27 +5426,9 @@ fn process_info_term(atoms: &AtomTable, values: ProcessInfoValues) -> Result<Ter
             Term::Integer(value),
         ]));
     }
-    let flags = values.heap_flags;
-    let max_heap_size = max_heap_size_map(atoms, flags.max_heap_size, flags.max_heap_flags);
-    let minor_gcs = atoms.put("minor_gcs")?;
     items.push(Term::tuple(vec![
         Term::static_atom("garbage_collection"),
-        Term::list_from(vec![
-            Term::tuple(vec![Term::static_atom("max_heap_size"), max_heap_size]),
-            Term::tuple(vec![
-                Term::static_atom("min_bin_vheap_size"),
-                Term::Integer(flags.min_bin_vheap_size),
-            ]),
-            Term::tuple(vec![
-                Term::static_atom("min_heap_size"),
-                Term::Integer(flags.min_heap_size),
-            ]),
-            Term::tuple(vec![
-                Term::static_atom("fullsweep_after"),
-                Term::Integer(i64::from(flags.fullsweep_after)),
-            ]),
-            Term::tuple(vec![Term::Atom(minor_gcs), Term::Integer(0)]),
-        ]),
+        garbage_collection_list(atoms, values.heap_flags)?,
     ]));
     items.push(Term::tuple(vec![
         Term::static_atom("suspending"),

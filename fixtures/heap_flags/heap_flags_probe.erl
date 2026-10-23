@@ -1,5 +1,5 @@
 -module(heap_flags_probe).
--export([process_flags/0, process_errors/0, system_flags/0, huge/1]).
+-export([process_flags/0, process_errors/0, system_flags/0, heap_items/0, huge/1]).
 
 %% The heap flags of process_flag/2 (bif.c:2101-2166): fullsweep_after
 %% keeps a Uint16, min_heap_size and min_bin_vheap_size keep the node
@@ -65,6 +65,35 @@ system_flags() ->
                erlang:system_flag(fullsweep_after, 65535),
                map(erlang:system_flag(max_heap_size, #{size => 0, kill => true}))],
     {Set, Child, Error, Wrap, WrapChild, Restore}.
+
+%% The heap items of process_info/2 for another process and for the
+%% caller (erl_bif_info.c:1982-2094). The sizes depend on the heap, so the
+%% probe checks their form: heap_size and total_heap_size are positive
+%% words, and memory holds more bytes than the words of the total heap.
+%% garbage_collection gives the flags of the target with minor_gcs 0.
+heap_items() ->
+    Self = self(),
+    Pid = spawn(fun() ->
+        process_flag(fullsweep_after, 3),
+        process_flag(min_heap_size, 300),
+        Self ! ready,
+        receive stop -> ok end
+    end),
+    receive ready -> ok end,
+    Other = sizes(Pid),
+    Gc = process_info(Pid, garbage_collection),
+    Pid ! stop,
+    {Other, sizes(self()), map_gc(Gc)}.
+
+sizes(Pid) ->
+    {heap_size, Heap} = process_info(Pid, heap_size),
+    {total_heap_size, Total} = process_info(Pid, total_heap_size),
+    {memory, Memory} = process_info(Pid, memory),
+    [is_integer(Heap) andalso Heap > 0, is_integer(Total) andalso Total >= Heap,
+     is_integer(Memory) andalso Memory > 8 * Total].
+
+map_gc({garbage_collection, Gc}) ->
+    {garbage_collection, [{Key, map(Value)} || {Key, Value} <- Gc]}.
 
 %% A heap size at or above the largest heap size of ERTS. ERTS stops the
 %% emulator in erts_next_heap_size (erl_gc.c:335).

@@ -39,6 +39,13 @@ fn results() -> Vec<(&'static str, String)> {
             format!("[badarg,badarg,badarg,badarg,badarg,233,badarg,{DEFAULT_MAX}]"),
         ),
         (
+            "heap_items",
+            format!(
+                "{{[true,true,true],[true,true,true],{{garbage_collection,[{{max_heap_size,{DEFAULT_MAX}}},\
+                 {{min_bin_vheap_size,46422}},{{min_heap_size,376}},{{fullsweep_after,3}},{{minor_gcs,0}}]}}}}"
+            ),
+        ),
+        (
             "system_flags",
             format!(
                 "{{[233,12,46422,65535,65535,{DEFAULT_MAX}],{{[376,12,7,{small}],376,{small}}},badarg,12,\
