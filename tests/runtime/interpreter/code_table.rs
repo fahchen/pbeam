@@ -42,7 +42,7 @@ fn fixture() -> CodeTable {
             },
             Instruction::Label(1),
             Instruction::MakeFun {
-                lambda: Box::new(lambda),
+                lambda: std::sync::Arc::new(lambda),
                 free: Vec::new(),
                 destination: Operand::X(0),
             },
