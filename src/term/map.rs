@@ -90,7 +90,7 @@ fn flatmap_holds(pairs: &[(Term, Term)], key: &Term, atoms: &AtomTable) -> bool 
 ///
 /// ```rust,ignore
 /// assert!(validate_hashes([&Term::Integer(1)]).is_ok());
-/// assert!(validate_hashes([&Term::Integer(1 << 59)]).is_err());
+/// assert!(validate_hashes([&Term::list_from([Term::binary(vec![])])]).is_err());
 /// ```
 fn validate_hashes<'a>(keys: impl IntoIterator<Item = &'a Term>) -> Result<(), Term> {
     keys.into_iter()
@@ -1147,7 +1147,7 @@ fn update_flat(
 ) -> Result<Convert, Term> {
     let mut added: Vec<&Term> = Vec::new();
     for ((kind, key, _), hash) in operations.iter().zip(&hashes) {
-        if hash.is_none() && !key.is_integer() {
+        if hash.is_none() {
             return Err(key.clone());
         }
         match kind {
@@ -1697,7 +1697,8 @@ fn encode_path(elements: Vec<usize>) -> Result<i64, BeamError> {
 /// `(index << 6) | 0xB`, a small integer as its word `(value << 4) | 0xF`, and
 /// a list key that is not empty with the list path of `make_internal_hash`,
 /// also an improper list whose tail is an atom, a small integer, or a
-/// supported tuple. A float key hashes with the float path
+/// supported tuple. An integer key outside the small range hashes with the
+/// bignum path (`erl_term_hashing.c:2101-2127`). A float key hashes with the float path
 /// (`erl_term_hashing.c:2193-2202`). A tuple key hashes with the tuple path
 /// (`erl_term_hashing.c:1878-1893`): its type and arity, then its elements.
 /// A binary key hashes with the binary path of `make_internal_hash`. A pid
@@ -1715,7 +1716,7 @@ fn encode_path(elements: Vec<usize>) -> Result<i64, BeamError> {
 /// assert_eq!(map_hash(&Term::static_atom("true")), Some(14558535449716669319));
 /// assert_eq!(map_hash(&Term::nil()), Some(internal_hash(&Term::nil())));
 /// assert!(map_hash(&Term::list_from([Term::Integer(97)])).is_some());
-/// assert_eq!(map_hash(&Term::Integer(1 << 59)), None);
+/// assert!(map_hash(&Term::Integer(1 << 59)).is_some());
 /// assert_eq!(map_hash(&Term::tuple(vec![])), Some(4510301282025278020));
 /// assert_eq!(map_hash(&Term::binary(vec![])), Some(10873612744977862784));
 /// assert!(map_hash(&Term::Float(1.0)).is_some());
@@ -1739,15 +1740,13 @@ fn map_hash(key: &Term) -> Option<u64> {
                     Term::Reference(reference) if !reference.is_pid_reference() => {}
                     Term::Cons(cell) => pending.extend([&cell.tail, &cell.head]),
                     Term::Tuple(elements) => pending.extend(elements.iter()),
-                    _ => {
-                        term.small_integer()?;
-                    }
+                    _ if term.is_integer() => {}
+                    _ => return None,
                 }
             }
         }
-        _ => {
-            key.small_integer()?;
-        }
+        _ if key.is_integer() => {}
+        _ => return None,
     }
     Some(internal_hash(key))
 }
