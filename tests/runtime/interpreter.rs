@@ -6277,3 +6277,27 @@ fn stops_a_list_to_bitstring_trap_with_a_unit_that_is_not_1_or_8() {
         .unwrap_err();
     assert!(error.to_string().contains("unit 2"), "{error}");
 }
+
+/// An idle scheduler reads the clock after its wait ends, so it expires a
+/// timer that is due at the wake before the next process runs
+/// (`erl_process.c:3605`, `3613-3614`).
+#[test]
+fn an_idle_wait_reads_the_clock_after_the_wake() {
+    use crate::runtime::scheduler::node::Node;
+    use crate::runtime::timer::{Timer, Timers};
+    let (node, mut readers) = Node::new(1).unwrap();
+    let mut scheduler = Scheduler::with_shared(
+        Arc::new(AtomTable::new()),
+        Arc::clone(&node),
+        0,
+        readers.remove(0),
+    );
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    let root = ProcessId(0);
+    scheduler.process_mut(root).unwrap().waiting = true;
+    let before = scheduler.timers.now();
+    let end = Timers::timeout_position(before, 1).unwrap();
+    scheduler.timers.start(end, Timer::Receive(root));
+    super::idle_wait(&mut scheduler, &node).unwrap();
+    assert!(scheduler.timers.timer_time() >= before + 1_000_000);
+}
