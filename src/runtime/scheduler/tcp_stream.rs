@@ -95,7 +95,18 @@ impl Scheduler {
         port: PortId,
         read: bool,
     ) -> Result<Vec<u8>, BeamError> {
-        let events = stream(&mut port::lock(&port_cell(&self.node, port))).activate(read);
+        // The control of the caller ran under the port lock, and another
+        // scheduler can close the port after that lock. ERTS runs the whole
+        // control under one port lock (`erts_port_control`, io.c), so the
+        // activation came before the close, which sends no more data.
+        let Some(events) = self.node.port(port).and_then(|cell| {
+            let mut slot = port::lock(&cell);
+            slot.as_mut()
+                .and_then(Port::inet_mut)
+                .map(|tcp| tcp.activate(read))
+        }) else {
+            return Ok(vec![OK]);
+        };
         self.deliver_events(port, events)?;
         Ok(vec![OK])
     }
@@ -180,10 +191,20 @@ impl Scheduler {
         port: PortId,
         bytes: &[u8],
     ) -> Result<(), BeamError> {
+        // As for `tcp_activate`: a port that another scheduler closed after
+        // the check of `port_command` took the output before its close,
+        // and the close drops the queue of the port.
         let caller = self.current_process_mut().id;
         let seed = self.local_node_hash();
-        let sent =
-            stream(&mut port::lock(&port_cell(&self.node, port))).send(bytes, caller, seed)?;
+        let Some(sent) = self.node.port(port).and_then(|cell| {
+            let mut slot = port::lock(&cell);
+            slot.as_mut()
+                .and_then(Port::inet_mut)
+                .map(|tcp| tcp.send(bytes, caller, seed))
+        }) else {
+            return Ok(());
+        };
+        let sent = sent?;
         match sent {
             Output::Sent(events) => self.deliver_events(port, events),
             Output::Failed => {
@@ -317,3 +338,7 @@ fn stream(slot: &mut Option<Port>) -> &mut Inet {
         .and_then(Port::inet_mut)
         .expect("the port of a receive or a send is an open or closing tcp_inet port")
 }
+
+#[cfg(test)]
+#[path = "../../../tests/runtime/scheduler/tcp_stream.rs"]
+mod tests;
