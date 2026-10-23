@@ -45,6 +45,7 @@ fn results() -> Vec<(&'static str, String)> {
                  {{min_bin_vheap_size,46422}},{{min_heap_size,376}},{{fullsweep_after,3}},{{minor_gcs,0}}]}}}}"
             ),
         ),
+        ("queue_costs", "[100,100,0,0,0]".to_owned()),
         (
             "system_flags",
             format!(

@@ -4605,7 +4605,8 @@ pub(super) fn process_info(
                         .info(atoms, item, current, messages, registered.as_ref())?
                         .ok_or_else(|| unsupported(atoms))?,
                 };
-                caller.bump_reductions(1 + super::links_reductions(item, &info));
+                let off_heap = caller.off_heap_message_queue;
+                caller.bump_reductions(1 + super::item_reductions(item, &info, messages, off_heap));
                 Ok(Value(info))
             },
         );
@@ -4675,9 +4676,12 @@ pub(super) fn process_info(
             arguments: vec![Term::Reference(reference)],
         });
     }
-    scheduler
-        .current_process_mut()
-        .bump_reductions(1 + super::links_reductions(item, &info));
+    // ERTS always sends a request for `memory` and `total_heap_size` of
+    // another process (`ERTS_PI_FLAG_FORCE_SIG_SEND`,
+    // `erl_bif_info.c:828,839,1381`) and discards its cost, so their
+    // queue charge applies only to a read of the caller.
+    let extra = super::item_reductions(item, &info, 0, true);
+    scheduler.current_process_mut().bump_reductions(1 + extra);
     Ok(signals_return(scheduler, process, info))
 }
 
@@ -4716,6 +4720,7 @@ fn caller_info_list(
     }
     let caller = scheduler.current_process();
     let messages = caller.mailbox.message_count();
+    let off_heap = caller.off_heap_message_queue;
     let registered = scheduler.registered_name_of(caller.id);
     let values = process_info_values(&scheduler.code, caller, current, messages, true, registered)?;
     let all = process_info_term(&scheduler.atoms, values)?;
@@ -4733,7 +4738,7 @@ fn caller_info_list(
         // ERTS reads a repeated item once and copies its result
         // (`part_res`, `erl_bif_info.c:1134-1145`), so only its first read costs.
         if !items[..index].contains(item) {
-            reductions += 1 + super::links_reductions(item, &pair);
+            reductions += 1 + super::item_reductions(item, &pair, messages, off_heap);
         }
         info.push(pair);
     }

@@ -1,5 +1,5 @@
 -module(heap_flags_probe).
--export([process_flags/0, process_errors/0, system_flags/0, heap_items/0, huge/1]).
+-export([process_flags/0, process_errors/0, system_flags/0, heap_items/0, queue_costs/0, huge/1]).
 
 %% The heap flags of process_flag/2 (bif.c:2101-2166): fullsweep_after
 %% keeps a Uint16, min_heap_size and min_bin_vheap_size keep the node
@@ -94,6 +94,42 @@ sizes(Pid) ->
 
 map_gc({garbage_collection, Gc}) ->
     {garbage_collection, [{Key, map(Value)} || {Key, Value} <- Gc]}.
+
+%% The extra reductions of a read of the caller with 400 queued messages
+%% against an empty queue: floor(400 / 4) for memory
+%% (erl_bif_info.c:2066-2067) and for total_heap_size with the queue on
+%% the heap (erl_bif_info.c:2032-2042), 0 for heap_size and for
+%% total_heap_size with the queue off the heap. A read of another process
+%% sends a request for memory and total_heap_size
+%% (ERTS_PI_FLAG_FORCE_SIG_SEND, erl_bif_info.c:828,839,1381), and ERTS
+%% discards the cost of the request, so the last element reads another
+%% process with 400 messages and gives the cost of an empty one.
+queue_costs() ->
+    Self = [in_new(fun() -> extra(Item, Data) end)
+            || {Item, Data} <- [{memory, on_heap}, {total_heap_size, on_heap},
+                                {heap_size, on_heap}, {total_heap_size, off_heap}]],
+    Pid = spawn(fun() -> receive stop -> ok end end),
+    Empty = cost(Pid, memory),
+    send(Pid, 400),
+    Other = cost(Pid, memory) - Empty,
+    Pid ! stop,
+    Self ++ [Other].
+
+extra(Item, Data) ->
+    process_flag(message_queue_data, Data),
+    Empty = cost(self(), Item),
+    send(self(), 400),
+    cost(self(), Item) - Empty.
+
+send(_Pid, 0) -> ok;
+send(Pid, N) -> Pid ! N, send(Pid, N - 1).
+
+cost(Pid, Item) ->
+    erlang:yield(),
+    {reductions, Before} = process_info(self(), reductions),
+    _ = process_info(Pid, Item),
+    {reductions, After} = process_info(self(), reductions),
+    After - Before.
 
 %% A heap size at or above the largest heap size of ERTS. ERTS stops the
 %% emulator in erts_next_heap_size (erl_gc.c:335).
