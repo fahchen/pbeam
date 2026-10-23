@@ -6190,10 +6190,11 @@ const HALT_FLUSH_TIMEOUT_STATUS: i32 = 255;
 /// timer ends before the flush, and the node exits with status 255
 /// (`erl_process.c:15244-15248`, `erl_init.c:2771-2774`; measured 5 of 5).
 ///
-/// `abort` (a core dump) and a slogan `Status` (a crash dump with the
-/// string as its slogan, see [`is_slogan`]) give a runtime error: PBeam
-/// writes no core dump and no crash dump. Each other `Status` raises
-/// `badarg` (`bif.c:4379`, `4388-4393`).
+/// `abort` (a core dump) gives a runtime error: PBeam writes no core dump.
+/// A slogan `Status` (see [`slogan`]) writes the slogan to the standard
+/// error and stops the run with the status code 1, as `ERTS_DUMP_EXIT`
+/// does (`bif.c:4372-4386`, `erl_init.c:2738-2739`), without a crash dump.
+/// Each other `Status` raises `badarg` (`bif.c:4379`, `4388-4393`).
 ///
 /// After the checks of the options and of `Status`, the caller needs a
 /// `runtime` capability that permits `halt`, else the call raises
@@ -6210,7 +6211,7 @@ const HALT_FLUSH_TIMEOUT_STATUS: i32 = 255;
 ///
 /// # Errors
 ///
-/// A halt gives [`BeamError::Halt`]. `abort` and a slogan give a runtime
+/// A halt and a slogan give [`BeamError::Halt`]. `abort` gives a runtime
 /// error. A new `capability_denied` atom in a full atom table gives the
 /// error of `AtomTable::put`.
 pub(super) fn halt(
@@ -6244,6 +6245,7 @@ pub(super) fn halt(
             _ => return Ok(BifResult::badopt()),
         }
     }
+    let mut text_of_slogan = None;
     let stop = match status {
         Term::Integer(code) if *code >= 0 => {
             if flush && timeout == Some(0) {
@@ -6256,47 +6258,73 @@ pub(super) fn halt(
         Term::Atom(abort) if abort.is_static("abort") => {
             error("unsupported erlang:halt/2 with abort: PBeam writes no core dump")
         }
-        _ if is_slogan(status) => {
-            error("unsupported erlang:halt/2 with a crash dump slogan: PBeam writes no crash dump")
-        }
-        _ => return Ok(BifResult::badarg()),
+        _ => match slogan(status) {
+            Some(text) => {
+                text_of_slogan = Some(text);
+                BeamError::Halt(1)
+            }
+            None => return Ok(BifResult::badarg()),
+        },
     };
     if let Some(denied) = denial(scheduler, CapabilityKind::Runtime, Operation::Halt, None)? {
         return Ok(denied);
     }
+    if let Some(text) = text_of_slogan {
+        write_slogan(&text);
+    }
     Err(stop)
+}
+
+/// Write the slogan of a crash dump halt and a newline to the standard
+/// error, as `erts_exit(ERTS_DUMP_EXIT, "%s\n", halt_msg)` does
+/// (`bif.c:4386`, `erl_init.c:2712-2713`, `240-243`). `erts_printf` writes
+/// `\r\n` for each `\n` on Unix (`sys/unix/sys.c:343`). PBeam writes no
+/// crash dump and no line about it, as ERTS does with
+/// `ERL_CRASH_DUMP_SECONDS=0`; a failed write is not checked, as in ERTS.
+fn write_slogan(text: &[u8]) {
+    let mut bytes = Vec::with_capacity(text.len() + 2);
+    for &byte in text.iter().chain(b"\n") {
+        if byte == b'\n' {
+            bytes.push(b'\r');
+        }
+        bytes.push(byte);
+    }
+    let mut stderr = std::io::stderr();
+    let _ = stderr.write_all(&bytes);
+    let _ = stderr.flush();
 }
 
 /// The most characters of a crash dump slogan, as `HALT_MSG_SIZE`
 /// (`bif.c:4373`).
 const HALT_MSG_SIZE: usize = 1023;
 
-/// Return whether `status` is a crash dump slogan of `erlang:halt/2`: a list
-/// for which `erts_unicode_list_to_buf` with at most `HALT_MSG_SIZE`
-/// characters does not give a type error (`bif.c:4372-4380`,
-/// `utils.c:2862-2942`). Each of the first 1023 elements must be a code
-/// point outside `0xD800..=0xDFFF`. The tail must be `[]`, unless the list
-/// has more than 1023 elements: ERTS cuts the slogan before it reads the
-/// tail.
+/// Return the UTF-8 bytes of a crash dump slogan of `erlang:halt/2`, or
+/// `None` when `status` is not a slogan: a list for which
+/// `erts_unicode_list_to_buf` with at most `HALT_MSG_SIZE` characters does
+/// not give a type error (`bif.c:4372-4380`, `utils.c:2862-2942`). Each of
+/// the first 1023 elements must be a code point outside `0xD800..=0xDFFF`.
+/// The tail must be `[]`, unless the list has more than 1023 elements: ERTS
+/// cuts the slogan to 1023 characters before it reads the tail.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(is_slogan(&Term::list_from(vec![Term::Integer(65)])));
-/// assert!(!is_slogan(&Term::list_from(vec![Term::static_atom("foo")])));
-/// assert!(!is_slogan(&Term::list_with_tail(vec![Term::Integer(65)], Term::static_atom("foo"))));
+/// assert_eq!(slogan(&Term::list_from(vec![Term::Integer(233)])), Some("\u{e9}".into()));
+/// assert_eq!(slogan(&Term::list_from(vec![Term::static_atom("foo")])), None);
+/// assert_eq!(slogan(&Term::list_with_tail(vec![Term::Integer(65)], Term::static_atom("foo"))), None);
 /// ```
-fn is_slogan(status: &Term) -> bool {
-    let Some(mut elements) = status.list_iter() else {
-        return false;
-    };
-    let characters = elements.by_ref().take(HALT_MSG_SIZE).all(|element| {
-        matches!(element, Term::Integer(code)
-            if u32::try_from(*code).ok().and_then(char::from_u32).is_some())
-    });
+fn slogan(status: &Term) -> Option<Vec<u8>> {
+    let mut elements = status.list_iter()?;
+    let mut text = String::new();
+    for element in elements.by_ref().take(HALT_MSG_SIZE) {
+        let Term::Integer(code) = element else {
+            return None;
+        };
+        text.push(u32::try_from(*code).ok().and_then(char::from_u32)?);
+    }
     // The rest is `[]` after the last element of a proper list, and a cons
     // cell after 1023 elements of a longer list.
-    characters && elements.rest().is_list()
+    elements.rest().is_list().then(|| text.into_bytes())
 }
 
 /// Run `erlang:port_set_data(Port, Data)`, as `port_set_data_2` does
