@@ -350,7 +350,7 @@ pub(super) struct ProcessState {
     pub(super) async_dist: bool,
     /// The heap flags of the process. A new process takes the node
     /// defaults, as ERTS copies `H_MIN_SIZE` and the other defaults into
-    /// the spawn options (`erl_init.c:420-427`). PBeam has no garbage
+    /// the spawn options (`erl_process.c:12242-12247`, `12568-12572`). PBeam has no garbage
     /// collector, so the flags only change what the BIFs report.
     pub(super) heap_flags: HeapFlags,
     /// The node monitors of the process (`ERTS_MON_TYPE_NODES`): the count

@@ -235,7 +235,7 @@ pub(in crate::runtime) struct Node {
     backtrace_depth: AtomicUsize,
     /// The heap flags that a new process takes. ERTS keeps one value of
     /// each for the node (`H_MIN_SIZE`, `BIN_VH_MIN_SIZE`,
-    /// `erts_max_gen_gcs`, `H_MAX_SIZE`, `H_MAX_FLAGS`; `erl_init.c:812-815`).
+    /// `erts_max_gen_gcs`, `H_MAX_SIZE`, `H_MAX_FLAGS`; `erl_init.c:808-811`).
     heap_flags: Mutex<HeapFlags>,
 }
 

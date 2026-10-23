@@ -39,7 +39,7 @@ pub(in crate::runtime) struct MaxHeapFlags {
 }
 
 impl Default for HeapFlags {
-    /// The start values of ERTS (`erl_init.c:812-815`): `H_DEFAULT_SIZE`
+    /// The start values of ERTS (`erl_init.c:808-811`): `H_DEFAULT_SIZE`
     /// 233, `VH_DEFAULT_SIZE` 46422, `fullsweep_after` 65535, no max heap
     /// size, and the flags `kill` and `error_logger`.
     fn default() -> Self {
