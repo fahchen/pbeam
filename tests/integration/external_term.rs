@@ -251,7 +251,7 @@ const FUN_PROBE: &[u8] = include_bytes!("../../fixtures/external_term/fun_ext_pr
 /// The module MD5 of `fun_ext_probe.beam`, which the pinned ERTS writes in
 /// each `NEW_FUN_EXT` of the module.
 const FUN_PROBE_MD5: [u8; 16] = [
-    77, 47, 206, 122, 4, 233, 94, 226, 67, 58, 214, 118, 101, 166, 226, 53,
+    187, 8, 8, 16, 2, 166, 130, 213, 71, 15, 116, 147, 141, 172, 46, 194,
 ];
 
 /// Return the program of `fun_ext_probe` with the pinned `erlang` module.
@@ -262,13 +262,13 @@ fn load_fun_probe() -> BeamProgram {
 
 /// Return the `NEW_FUN_EXT` bytes of the pinned ERTS for a fun of
 /// `fun_ext_probe`: the size, the arity, the index, the free count, the old
-/// index, and the old unique value `[98, 2, 105, 126, 115]`, then `free`.
+/// index, and the old unique value `[98, 5, 216, 64, 64]`, then `free`.
 fn probe_fun_bytes(size: u8, arity: u8, index: u8, free_count: u8, free: &[u8]) -> Vec<u8> {
     let mut bytes = vec![131, 112, 0, 0, 0, size, arity];
     bytes.extend_from_slice(&FUN_PROBE_MD5);
     bytes.extend_from_slice(&[0, 0, 0, index, 0, 0, 0, free_count, 119, 13]);
     bytes.extend_from_slice(b"fun_ext_probe");
-    bytes.extend_from_slice(&[97, index, 98, 2, 105, 126, 115, 88, 119, 13]);
+    bytes.extend_from_slice(&[97, index, 98, 5, 216, 64, 64, 88, 119, 13]);
     bytes.extend_from_slice(b"nonode@nohost");
     bytes.extend_from_slice(&[0; 12]);
     bytes.extend_from_slice(free);
@@ -347,12 +347,50 @@ fn decodes_a_fun_of_a_module_that_is_not_loaded_as_pinned_erts() {
     );
 
     // ERTS calls `error_handler:undefined_lambda/3`, which needs a code
-    // server; PBeam stops the run with a runtime error.
+    // server or an init process to load the module (`error_handler.erl:182-198`);
+    // this run has neither, so PBeam stops the run with a runtime error.
+    // `tests/feature/error_handler.rs` runs the call with a boot.
     let error = program
         .execute("fun_ext_probe", "call_unloaded", &[])
         .unwrap_err()
         .to_string();
-    assert!(error.contains("missing BEAM module no_such"), "{error}");
+    assert!(
+        error.contains("unresolved fun of the module no_such"),
+        "{error}"
+    );
+
+    // `fun_ext_probe:no_lambda_handler/0` on the pinned ERTS: an error
+    // handler without `undefined_lambda/3` gives undef
+    // (`beam_common.c:1713-1717`).
+    assert_eq!(
+        program
+            .execute("fun_ext_probe", "no_lambda_handler", &[])
+            .unwrap()
+            .term,
+        Term::tuple(vec![atom("error"), atom("undef")])
+    );
+}
+
+#[test]
+fn compares_a_decoded_fun_with_another_md5_as_pinned_erts() {
+    // `fun_ext_probe:other_md5/0` on the pinned ERTS gives
+    // `{false, true, {error, true}}`: another fun entry (`erl_fun.c:79-85`,
+    // `utils.c:1257-1260`), a compare that ignores the MD5
+    // (`utils.c:2157-2179`), and badfun for the stub entry
+    // (`beam_common.c:1697-1706`).
+    let program = load_fun_probe();
+    let atom = |name| atom(&program, name);
+    assert_eq!(
+        program
+            .execute("fun_ext_probe", "other_md5", &[])
+            .unwrap()
+            .term,
+        Term::tuple(vec![
+            atom("false"),
+            atom("true"),
+            Term::tuple(vec![atom("error"), atom("true")]),
+        ])
+    );
 }
 
 #[test]

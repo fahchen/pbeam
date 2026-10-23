@@ -642,7 +642,10 @@ impl CodeTable {
             .tables
             .fun_entries
             .get(&lambda.index())
-            .filter(|entry| entry.lambda.old_unique() == lambda.old_unique())
+            .filter(|entry| {
+                entry.lambda.old_unique() == lambda.old_unique()
+                    && entry.lambda.uniq() == lambda.uniq()
+            })
             .map(|entry| frame(loaded, entry.lambda.label(), arity))
             .transpose()
     }
@@ -709,7 +712,10 @@ impl CodeTable {
                 .tables
                 .fun_entries
                 .get(&lambda.index())
-                .filter(|entry| entry.lambda.old_unique() == lambda.old_unique())
+                .filter(|entry| {
+                    entry.lambda.old_unique() == lambda.old_unique()
+                        && entry.lambda.uniq() == lambda.uniq()
+                })
             else {
                 continue;
             };

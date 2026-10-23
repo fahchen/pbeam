@@ -1,5 +1,5 @@
 -module(fun_ext_probe).
--export([round_trip/0, unloaded/0, call_unloaded/0, errors/0]).
+-export([round_trip/0, unloaded/0, call_unloaded/0, errors/0, other_md5/0, no_lambda_handler/0]).
 
 make(Tag) ->
     fun(X, Y) -> {Tag, X, Y} end.
@@ -36,7 +36,16 @@ unloaded() ->
 
 %% A call of the fun, which goes to `error_handler:undefined_lambda/3`.
 call_unloaded() ->
-    (unloaded_fun())(1).
+    try (unloaded_fun())(1) catch C:R:S -> {C, R, hd(S)} end.
+
+%% An error handler without `undefined_lambda/3` gives undef
+%% (`beam_common.c:1713-1717`).
+no_lambda_handler() ->
+    F = unloaded_fun(),
+    Old = process_flag(error_handler, ?MODULE),
+    Result = try F(1) catch C:R -> {C, R} end,
+    process_flag(error_handler, Old),
+    Result.
 
 %% A module that is not an atom, an old index or an old unique value that is
 %% not a small integer, a creator that is not a pid, and a truncated fun give
@@ -57,3 +66,14 @@ errors() ->
               <<Head/binary, 119, 1, "m", 97, 0, 97, 0>>,
               <<Head/binary, 119, 1, "m", 110, 8, 0, 1, 0, 0, 0, 0, 0, 8, 0, 97, 0,
                 Pid/binary>>]].
+
+%% A decoded fun with another module MD5 gets another fun entry
+%% (`erl_fun.c:79-85`), so it is not exactly equal to the fun
+%% (`utils.c:1257-1260`). The compare ignores the MD5 (`utils.c:2157-2179`),
+%% and a call raises badfun: the module is loaded, and the stub entry has no
+%% code (`beam_common.c:1697-1706`).
+other_md5() ->
+    F = fun() -> ok end,
+    <<Head:22/binary, Last, Rest/binary>> = term_to_binary(F),
+    D = binary_to_term(<<Head/binary, (Last bxor 1), Rest/binary>>),
+    {D =:= F, D == F, try D() catch C:R -> {C, R =:= {badfun, D}} end}.

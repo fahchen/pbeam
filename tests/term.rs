@@ -182,9 +182,9 @@ fn compares_funs_by_their_lambda_and_free_variables() {
     assert_ne!(tagged("a"), fun(0, vec![]));
     assert_ne!(fun(0, vec![]), Term::tuple(vec![]));
     assert_eq!(fun(0, vec![]), fun(0, vec![]));
-    // ERTS identifies a fun entry by its module, index, old unique
-    // value, and arity (`fun_cmp` in `erl_fun.c:79-85`). The entry label
-    // is only the address of the code.
+    // ERTS identifies a fun entry by its module, index, arity, and module
+    // MD5, and not by its old unique value (`fun_cmp` in
+    // `erl_fun.c:79-85`). The entry label is only the address of the code.
     let module = || super::Atom::from_static("lists").unwrap();
     let entry = |label, arity| {
         Term::Fun(Fun::new(
@@ -194,7 +194,7 @@ fn compares_funs_by_their_lambda_and_free_variables() {
     };
     assert_eq!(entry(53, 1), entry(61, 1));
     assert_ne!(entry(53, 1), entry(53, 2));
-    assert_ne!(
+    assert_eq!(
         fun(0, vec![]),
         Term::Fun(Fun::new(Lambda::new(module(), 0, 0, 8, 53, 1), vec![]))
     );

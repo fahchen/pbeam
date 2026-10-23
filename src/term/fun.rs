@@ -201,9 +201,12 @@ impl Lambda {
 
 impl PartialEq for Lambda {
     /// Compare two fun entries by the fields that identify an ERTS fun
-    /// entry: the module, the index, the old unique value, and the arity
-    /// (`fun_cmp` in `erl_fun.c:79-85`). The entry label is only the
-    /// address of the code, so two entries with other labels can be equal.
+    /// entry: the module, the index, the arity, and the module MD5
+    /// (`fun_cmp` in `erl_fun.c:79-85`). ERTS `eq` compares the entry
+    /// pointers of two local funs (`utils.c:1257-1260`), so a decoded fun
+    /// with another MD5 is not exactly equal to the fun of the loaded code.
+    /// The entry label is only the address of the code, so two entries with
+    /// other labels can be equal.
     ///
     /// # Examples
     ///
@@ -214,8 +217,8 @@ impl PartialEq for Lambda {
     fn eq(&self, other: &Self) -> bool {
         self.module == other.module
             && self.index == other.index
-            && self.old_unique == other.old_unique
             && self.arity == other.arity
+            && self.uniq == other.uniq
     }
 }
 
@@ -300,6 +303,28 @@ impl Target {
         match self {
             Target::Local(lambda) => lambda.arity(),
             Target::External { arity, .. } => *arity,
+        }
+    }
+
+    /// Return whether `erts_cmp` orders two targets as equal, as `==`
+    /// compares them: two local funs compare by the module, the index, and
+    /// the old unique value of their entries, and not by the module MD5
+    /// (`utils.c:2157-2179`), and two external funs compare by their
+    /// export.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(Target::Local(decoded_with_other_md5).compare_equal(&Target::Local(loaded)));
+    /// ```
+    pub(super) fn compare_equal(&self, other: &Target) -> bool {
+        match (self, other) {
+            (Target::Local(left), Target::Local(right)) => {
+                left.module == right.module
+                    && left.index == right.index
+                    && left.old_unique == right.old_unique
+            }
+            _ => self == other,
         }
     }
 
