@@ -450,11 +450,9 @@ fn boot_flags(
     mode: Option<&String>,
 ) -> Result<Term, String> {
     // The `--root` option gives the `bindir` flag too, as the `erl` script
-    // gives both. A start set without the atom `bindir` has no module that
-    // can read the flag, so the flag is left out.
-    let bindir = root
-        .filter(|_| program.atom("bindir").is_some())
-        .map(|root| [root.as_bytes(), b"/erts-", ERTS_VSN.as_bytes(), b"/bin"].concat());
+    // and `erlexec` always give both.
+    let bindir =
+        root.map(|root| [root.as_bytes(), b"/erts-", ERTS_VSN.as_bytes(), b"/bin"].concat());
     let flags = root
         .map(|root| ("root", root.as_bytes()))
         .into_iter()
@@ -466,9 +464,13 @@ fn boot_flags(
         )
         .chain(mode.map(|mode| ("mode", mode.as_bytes())))
         .map(|(name, value)| {
-            let flag = program
-                .atom(name)
-                .ok_or_else(|| format!("boot flag {name} is not an atom of the loaded modules"))?;
+            let flag = if name == "bindir" {
+                program.put_atom(name).map_err(|error| error.to_string())?
+            } else {
+                program.atom(name).ok_or_else(|| {
+                    format!("boot flag {name} is not an atom of the loaded modules")
+                })?
+            };
             let value = Term::binary(value.to_vec());
             Ok(Term::tuple(vec![
                 Term::Atom(flag),

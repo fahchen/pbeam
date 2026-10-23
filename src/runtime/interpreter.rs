@@ -370,6 +370,26 @@ impl BeamProgram {
         self.atoms.get(name)
     }
 
+    /// Return the atom `name` of this program, and add it to the atom table
+    /// when no loaded module holds it, as `erlang:list_to_atom/1` does. The
+    /// `pbeam` binary gives the `bindir` boot flag with it, as `erlexec`
+    /// always gives `-bindir` (erlexec.c:1154-1155).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let program = BeamProgram::load(&[ATOM_MAP_PROBE])?;
+    /// let atom = program.put_atom("pbeam_new_atom")?;
+    /// assert_eq!(program.atom("pbeam_new_atom"), Some(atom));
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The atom table is full, or `name` is longer than 255 characters.
+    pub fn put_atom(&self, name: &str) -> Result<Atom, BeamError> {
+        self.atoms.put(name)
+    }
+
     /// Return the atom table of this program. A caller passes it as the
     /// owning table of a term that it builds from [`BeamProgram::atom`], for
     /// example to [`Map::from_pairs`].
