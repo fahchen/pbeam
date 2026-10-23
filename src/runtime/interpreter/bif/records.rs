@@ -214,7 +214,7 @@ pub(super) fn create(
     }
     let (keys, values): (Vec<Atom>, Vec<Term>) = pairs.into_iter().unzip();
     let scheduler = &cx.scheduler;
-    let def = RecordDef::new(
+    let mut def = RecordDef::new(
         module.clone(),
         name.clone(),
         exported,
@@ -230,7 +230,13 @@ pub(super) fn create(
                 && loaded.keys == def.keys
                 && loaded.order == def.order
         });
-    let def = canonical.map_or_else(|| Arc::new(def), Arc::clone);
+    let def = canonical.map_or_else(
+        || {
+            def.transient = true;
+            Arc::new(def)
+        },
+        Arc::clone,
+    );
     let mut sorted_values = vec![Term::Nil; values.len()];
     for (position, value) in values.into_iter().enumerate() {
         sorted_values[def.order[position]] = value;
