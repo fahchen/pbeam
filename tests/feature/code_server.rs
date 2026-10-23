@@ -357,12 +357,54 @@ fn runs_the_linked_crypto_nifs_as_pinned_erts() {
 }
 
 #[test]
+fn runs_the_one_shot_crypto_hashes_and_macs_as_pinned_erts() {
+    // hash_info/1, hash_nif/2 for each digest, mac_nif/4 for hmac, cmac,
+    // and poly1305, and hash_equals_nif/2 (hash.c:74-164, mac.c:188-505,
+    // hash_equals.c:27-53), with the error tuple of each failed check.
+    let erts = run(&mut erts_probe(
+        CRYPTO_PROBE,
+        "crypto_probe",
+        "oneshot",
+        &[],
+    ));
+    assert!(erts.contains("Couldn't get mac"), "{erts}");
+    assert_eq!(
+        run(&mut pbeam_probe(
+            CRYPTO_PROBE,
+            "crypto_probe",
+            "oneshot",
+            &[]
+        )),
+        erts
+    );
+    // The OpenSSL 3.5.8 of the pinned macOS ERTS gives the SHAKE size 0
+    // (hash.c:94); the libcrypto of the Linux CI host gives the default
+    // output length.
+    let erts = run(&mut erts_probe(
+        CRYPTO_PROBE,
+        "crypto_probe",
+        "xof_sizes",
+        &[],
+    ));
+    assert!(matches!(erts.as_str(), "[0,0]\n" | "[16,32]\n"), "{erts}");
+    assert_eq!(
+        run(&mut pbeam_probe(
+            CRYPTO_PROBE,
+            "crypto_probe",
+            "xof_sizes",
+            &[]
+        )),
+        "[0,0]\n"
+    );
+}
+
+#[test]
 fn gives_the_crypto_algorithm_lists_and_fips_status_as_pinned_erts() {
     // The pinned ERTS lists each algorithm of its OpenSSL: 187 on macOS
     // and 177 with the libcrypto of the Linux CI host (algorithms.c:86-224,
-    // digest.c:226-242, crypto.erl:843-895). PBeam lists only the 7 digests
-    // that it computes, in the ERTS order, so the items that PBeam can run
-    // are the same.
+    // digest.c:226-242, crypto.erl:843-895). PBeam lists only the 18 digests
+    // and 3 MACs that it computes, in the ERTS order, so the items that
+    // PBeam can run are the same.
     let erts = run(&mut erts_probe(
         CRYPTO_PROBE,
         "crypto_probe",
@@ -375,11 +417,13 @@ fn gives_the_crypto_algorithm_lists_and_fips_status_as_pinned_erts() {
         "supports",
         &[],
     ));
-    let items = "[{hashs,[sha512_256,sha512_224,sha512,sha384,sha256,sha224,sha]},\n  \
+    let items = "[{hashs,[blake2s,blake2b,sm3,shake256,shake128,sha3_512,sha3_384,sha3_256,\n          \
+                 sha3_224,sha512_256,sha512_224,sha512,sha384,sha256,sha224,sha,\n          \
+                 ripemd160,md5]},\n  \
                  {ciphers,[]},\n  \
                  {kems,[]},\n  \
                  {public_keys,[]},\n  \
-                 {macs,[]},\n  \
+                 {macs,[cmac,hmac,poly1305]},\n  \
                  {curves,[]},\n  \
                  {rsa_opts,[]}]";
     let rest = format!(",\n {items},\n false,true]\n");
@@ -387,7 +431,7 @@ fn gives_the_crypto_algorithm_lists_and_fips_status_as_pinned_erts() {
         .strip_suffix(rest.as_str())
         .and_then(|head| head.strip_prefix('['));
     assert!(matches!(count, Some("187" | "177")), "{erts}");
-    assert_eq!(pbeam, format!("[7,\n {items},\n true,true]\n"));
+    assert_eq!(pbeam, format!("[21,\n {items},\n true,true]\n"));
     // A build without FIPS support (fips.c:27-62).
     let erts = run(&mut erts_probe(CRYPTO_PROBE, "crypto_probe", "fips", &[]));
     assert_eq!(erts, "[not_supported,false,true,{error,badarg}]\n");
