@@ -116,6 +116,18 @@ fn fails_on_two_equal_floats_because_pbeam_does_not_box_a_float() {
 }
 
 #[test]
+fn fails_on_two_equal_bignums_because_pbeam_does_not_box_a_64_bit_integer() {
+    // A 64-bit integer above the ERTS small range is a boxed bignum, and
+    // ERTS compares the term words (`beam_debug.c:65-68`). On the pinned
+    // ERTS, `size_probe:int_pair()` gives 5.
+    let error = program()
+        .execute("size_probe", "int_pair", &[])
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("erts_debug:same/2 cannot tell"), "{error}");
+}
+
+#[test]
 fn fails_on_the_term_type_of_a_binary() {
     // PBeam does not keep the ERTS form of a binary, so it cannot name it
     // as `heap_binary`, `refc_binary`, or `sub_binary`.

@@ -1,5 +1,5 @@
 -module(size_probe).
--export([sizes/0, show/0, hashmap/0, flatmap/0, float_pair/0,
+-export([sizes/0, show/0, hashmap/0, flatmap/0, float_pair/0, int_pair/0,
          binary_type/0, binary_size/0, id/1]).
 
 -record #pt{x = 0}.
@@ -54,6 +54,11 @@ flatmap() ->
 float_pair() ->
     F = id(1.5),
     erts_debug:size({F, F}).
+
+%% Return erts_debug:size/1 of a tuple of one 64-bit bignum twice.
+int_pair() ->
+    I = id(1 bsl 62),
+    erts_debug:size({I, I}).
 
 %% Return erts_debug:size/1 of a binary built by appends.
 binary_size() ->
