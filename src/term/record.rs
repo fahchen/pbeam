@@ -34,6 +34,11 @@ pub(crate) struct RecordDef {
     /// IsExported, Key...}` (`erl_record.h:43-61`). `phash/2`, equality, and
     /// the flat size read it, as ERTS reads the definition as a tuple.
     pub(crate) tuple: Term,
+    /// Whether only record terms hold the definition: `records:create/4`
+    /// made it, and no module code has it. The live-heap count counts such
+    /// a definition, as ERTS builds it on the process heap
+    /// (`erl_record.c:645-656`).
+    pub(crate) transient: bool,
 }
 
 impl RecordDef {
@@ -99,6 +104,7 @@ impl RecordDef {
             defaults: defaults.into(),
             hash,
             tuple: Term::tuple(tuple),
+            transient: false,
         }
     }
 
