@@ -109,6 +109,17 @@ pub(in crate::runtime) enum Event {
         /// The bytes, or the error name.
         result: Result<Vec<u8>, String>,
     },
+    /// `{inet_async, S, Ref, {ok, [Family, P1, P0, A, B, C, D | Data]}}`
+    /// of the receive of `receiver` on a `udp_inet` port
+    /// (`packet_binary_message`, inet_drv.c:4106-4160).
+    Datagram {
+        /// The receive that ends.
+        receiver: Receiver,
+        /// `[Family, P1, P0, A, B, C, D]` of the sender.
+        address: Vec<u8>,
+        /// The bytes of the datagram.
+        data: Vec<u8>,
+    },
     /// `{inet_async, S, Ref, ok}` or `{inet_async, S, Ref, {error,
     /// Reason}}` of the connect of `connector` (`async_ok` and
     /// `async_error`, inet_drv.c:2563-2572).
@@ -141,7 +152,7 @@ pub(in crate::runtime) enum Output {
 /// The counts of `INET_REQ_GETSTAT` (`inet_input_count` and
 /// `inet_output_count`, inet_drv.c:11560-11610).
 #[derive(Debug, Default)]
-struct Statistics {
+pub(super) struct Statistics {
     /// The delivered packets (`recv_cnt`).
     receive_count: u64,
     /// The largest delivered packet (`recv_max`).
@@ -164,7 +175,7 @@ struct Statistics {
 
 impl Statistics {
     /// Count a delivered packet of `length` bytes (`inet_input_count`).
-    fn input(&mut self, length: u64) {
+    pub(super) fn input(&mut self, length: u64) {
         let count = self.receive_count.wrapping_add(1).max(1);
         self.receive_bytes = self.receive_bytes.wrapping_add(length);
         let average = self.receive_average + (length as f64 - self.receive_average) / count as f64;
@@ -176,7 +187,7 @@ impl Statistics {
     }
 
     /// Count a send of `length` bytes (`inet_output_count`).
-    fn output(&mut self, length: u64) {
+    pub(super) fn output(&mut self, length: u64) {
         let count = self.send_count.wrapping_add(1).max(1);
         self.send_bytes = self.send_bytes.wrapping_add(length);
         self.send_average += (length as f64 - self.send_average) / count as f64;
@@ -224,7 +235,7 @@ pub(in crate::runtime) struct Stream {
     /// `OPEN` does not have (inet_drv.c:5215, 10925).
     pub(super) ended: bool,
     /// The counts of `GETSTAT`.
-    statistics: Statistics,
+    pub(super) statistics: Statistics,
 }
 
 impl Stream {
@@ -316,6 +327,9 @@ impl Inet {
     /// the receive when the peer closed or the read failed. No message
     /// means that the receive waits.
     pub(in crate::runtime) fn receive(&mut self, length: usize) -> Vec<Event> {
+        if self.socket_type == SocketType::Datagram {
+            return self.receive_datagram();
+        }
         let stream = &mut self.stream;
         let read = if stream.input_size == 0 {
             let size = if length > 0 { length } else { stream.buffer };
@@ -436,7 +450,7 @@ impl Inet {
 
     /// Return the message of the end of the receive that waits, or no
     /// message without one.
-    fn end_receive(&mut self, result: Result<Vec<u8>, String>) -> Vec<Event> {
+    pub(super) fn end_receive(&mut self, result: Result<Vec<u8>, String>) -> Vec<Event> {
         self.stream
             .receiver
             .take()
@@ -546,8 +560,8 @@ impl Inet {
     ///
     /// # Errors
     ///
-    /// The output of a `udp_inet` port, a tag that is not the reference
-    /// bytes of `term_to_binary/2` with `[local]`, a send while a send waits for the queue (ERTS suspends the
+    /// The errors of [`Inet::send_datagram`], a tag that is not the
+    /// reference bytes of `term_to_binary/2` with `[local]`, a send while a send waits for the queue (ERTS suspends the
     /// caller of a busy port), a send that would wait with a `send_timeout`
     /// other than `infinity` and 0, and a send with `delay_send`.
     pub(in crate::runtime) fn send(
@@ -556,9 +570,6 @@ impl Inet {
         caller: ProcessId,
         seed: u32,
     ) -> Result<Output, BeamError> {
-        if self.socket_type == SocketType::Datagram {
-            return Err(self.unsupported("output", "of erlang:port_command/2"));
-        }
         let header = bytes
             .split_first_chunk::<2>()
             .and_then(|(&size, rest)| rest.split_at_checked(usize::from(u16::from_be_bytes(size))));
@@ -572,6 +583,9 @@ impl Inet {
             return Err(self.unsupported("output", "to a busy port"));
         }
         let sender = Sender { caller, tag };
+        if self.socket_type == SocketType::Datagram {
+            return self.send_datagram(data, sender).map(Output::Sent);
+        }
         let reply = |result| Ok(Output::Sent(vec![Event::Replied { sender, result }]));
         if self.state != State::Connected {
             if std::mem::take(&mut self.stream.closed_send) {
@@ -678,14 +692,14 @@ impl Inet {
         events
     }
 
-    /// Return the fd of a connected stream socket with a receive that
-    /// waits (`sock_select(desc, FD_READ, 1)`, inet_drv.c:12317) or in
-    /// active mode (inet_drv.c:7966), else `None`.
+    /// Return the fd of a socket with a receive that waits
+    /// (`sock_select(desc, FD_READ, 1)`, inet_drv.c:12317, 15496) or of a
+    /// connected stream socket in active mode (inet_drv.c:7966), else
+    /// `None`.
     pub(in crate::runtime) fn stream_receive_fd(&self) -> Option<c_int> {
         let socket = self.socket.as_ref()?;
         let active = self.active != 0 && self.state == State::Connected;
-        (self.socket_type == SocketType::Stream && (self.stream.receiver.is_some() || active))
-            .then(|| socket.as_raw_fd())
+        (self.stream.receiver.is_some() || active).then(|| socket.as_raw_fd())
     }
 
     /// Return the fd of a socket with queued output (`sock_select(desc,

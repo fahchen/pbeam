@@ -246,6 +246,24 @@ impl Scheduler {
                     let message = self.async_message(port, receiver.id, status);
                     vec![(receiver.caller, message)]
                 }
+                Event::Datagram {
+                    receiver,
+                    address,
+                    data,
+                } => {
+                    if let Some(timer) = receiver.timer {
+                        self.cancel_port_timer(timer);
+                    }
+                    // `[H1, ..., H7 | Data]`, all bytes in `list` mode
+                    // (inet_drv.c:4142-4152).
+                    let address = address.into_iter().map(|byte| Term::Integer(byte.into()));
+                    let packet = Term::list_with_tail(address.collect(), tcp.data_term(data));
+                    let status = Term::tuple(vec![Term::static_atom("ok"), packet]);
+                    vec![(
+                        receiver.caller,
+                        self.async_message(port, receiver.id, status),
+                    )]
+                }
                 Event::Connected { connector, result } => {
                     if let Some(timer) = connector.timer {
                         self.cancel_port_timer(timer);

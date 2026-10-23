@@ -1,0 +1,52 @@
+use super::*;
+use crate::runtime::port::inet::{Receiver, SocketType};
+
+#[test]
+fn reads_no_datagram_without_a_receive() {
+    // A poll event that comes after the end of the receive, as after a
+    // timeout on another scheduler, leaves the datagram in the socket.
+    let mut port = Inet::new(SocketType::Datagram);
+    let caller = crate::term::ProcessId(1);
+    assert_eq!(
+        port.control(0x03f1_a301, &[1, 2, 2], caller).unwrap(),
+        Control::Reply(vec![1])
+    );
+    assert!(port.receive_datagram().is_empty());
+}
+
+#[test]
+fn ends_the_receive_at_a_failed_read() {
+    // A read error other than `ERRNO_BLOCK` ends the receive with its name
+    // (`async_error`, inet_drv.c:15473-15489): a connected socket gets the
+    // ICMP error of a send to a closed port as `econnrefused`.
+    let closed = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let to = closed.local_addr().unwrap();
+    drop(closed);
+    let caller = crate::term::ProcessId(1);
+    let mut port = Inet::new(SocketType::Datagram);
+    port.control(0x03f1_a301, &[1, 2, 2], caller).unwrap();
+    let socket = port.socket.as_ref().unwrap();
+    socket.connect(&to.into()).unwrap();
+    socket.send(b"x").unwrap();
+    let receiver = Receiver {
+        id: 0,
+        caller,
+        timer: None,
+    };
+    let mut events = Vec::new();
+    for _ in 0..100 {
+        port.stream.receiver = Some(receiver);
+        events = port.receive_datagram();
+        if !events.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(
+        events,
+        vec![Event::Received {
+            receiver,
+            result: Err("econnrefused".to_owned()),
+        }]
+    );
+}

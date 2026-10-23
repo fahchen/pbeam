@@ -43,11 +43,13 @@
 //!
 //! A `udp_inet` port runs the requests of `packet_inet_ctl`, which runs
 //! `OPEN`, replies `exbadport` to `LISTEN`, and gives each other request
-//! to `inet_ctl` (inet_drv.c:14564-14892). It reads no datagram: the
-//! socket of an active port is in the idle wait, and a ready socket stops
-//! the run (row "udp_inet ports" of `docs/erts-differences.md`).
+//! to `inet_ctl` (inet_drv.c:14564-14892). A passive port sends and
+//! receives datagrams (see `inet/datagram.rs`). It reads no datagram for
+//! an active socket: the socket is in the idle wait, and a ready socket
+//! stops the run (row "udp_inet ports" of `docs/erts-differences.md`).
 
 mod connect;
+mod datagram;
 mod stream;
 
 use std::{collections::VecDeque, ffi::c_int, io, os::fd::AsRawFd, time::Duration};
@@ -373,6 +375,9 @@ impl Inet {
             // `LISTEN` is only for an SCTP socket (inet_drv.c:14846-14858).
             27 => error_reply("exbadport"),
             42 if self.socket_type == SocketType::Stream => return self.receive_request(request),
+            60 if self.socket_type == SocketType::Datagram => {
+                return Ok(self.datagram_receive_request(request));
+            }
             other => return Err(self.unsupported("request", other)),
         };
         Ok(Control::Reply(reply))
@@ -604,6 +609,11 @@ impl Inet {
                 8 => self.set_priority(value),
                 9 => self.set_socket(libc::IP_TOS, true, |socket| socket.set_tos_v4(value as u32)),
                 46 => self.set_socket(libc::IP_TTL, true, |socket| socket.set_ttl_v4(value as u32)),
+                // A datagram receive reads no ancillary data, so it cannot
+                // give `{tos, TOS}` (inet_drv.c:15452-15466).
+                43 if value != 0 && self.socket_type == SocketType::Datagram => {
+                    return Err(error(UDP_RECVTOS_ON));
+                }
                 43 => self.set_socket(libc::IP_RECVTOS, true, |socket| {
                     socket.set_recv_tos_v4(value != 0)
                 }),
@@ -769,6 +779,9 @@ const RECVTTL_ON: &str =
 /// does: a time with `linger` off, which `SO_LINGER` keeps, and on macOS
 /// each time, where `socket2` sets `SO_LINGER_SEC` and ERTS sets
 /// `SO_LINGER`, which xnu reads in clock ticks.
+/// The runtime error of `{recvtos, true}` on a `udp_inet` port.
+const UDP_RECVTOS_ON: &str = "unsupported udp_inet option recvtos with true: see \"udp_inet ports\" in docs/erts-differences.md";
+
 const LINGER_TIME: &str = "unsupported tcp_inet option linger with a time: see \"tcp_inet ports\" in docs/erts-differences.md";
 
 /// The flag bits that xnu gives for an option that is on: `SO_REUSEADDR`,
