@@ -257,7 +257,7 @@ bifs! {
     erlang:nif_error/1 as ErlangNifError1 => |_, [reason]| Ok(Raise { class: ExceptionClass::Error, reason: reason.clone() }),
     erlang:nif_error/2 => unsupported,
     erlang:node/0 as ErlangNode0 => |_, []| Ok(Value(crate::runtime::local_node())),
-    erlang:node/1 as ErlangNode1 => |cx, [term]| erlang::node(term, &cx.scheduler.atoms),
+    erlang:node/1 as ErlangNode1 => |_, [term]| Ok(erlang::node(term)),
     erlang:nodes/0 as ErlangNodes0 => |cx, []| Ok(erlang::nodes(&Term::static_atom("visible"), None, cx.scheduler)),
     erlang:nodes/1 as ErlangNodes1 => |cx, [node_types]| Ok(erlang::nodes(node_types, None, cx.scheduler)),
     erlang:nodes/2 as ErlangNodes2 => |cx, [node_types, options]| Ok(erlang::nodes(node_types, Some(options), cx.scheduler)),

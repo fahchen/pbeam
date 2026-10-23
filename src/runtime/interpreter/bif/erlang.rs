@@ -25,24 +25,20 @@ use crate::term::{
     Reference, SMALL_INTEGER_MAX, SMALL_INTEGER_MIN, debug_term, external, print_term,
 };
 
-/// Run `erlang:node/1`: return the node of a pid. A term that is not a pid
-/// gives a runtime error.
+/// Run `erlang:node/1`: return the node of a pid, a port, or a reference,
+/// which is the local node, and raise `badarg` for another term, as ERTS
+/// `node_1` does (`dist.c:6219-6225`).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let atoms = AtomTable::new();
-/// let result = node(&Term::Pid(pid), &atoms)?;
-/// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.is_static("nonode@nohost"));
-/// assert!(node(&Term::Integer(1), &atoms).is_err());
+/// assert!(matches!(node(&Term::Pid(pid)), BifResult::Value(Term::Atom(atom)) if atom.is_static("nonode@nohost")));
+/// assert!(matches!(node(&Term::Integer(1)), BifResult::Raise { .. }));
 /// ```
-pub(super) fn node(term: &Term, atoms: &AtomTable) -> Result<BifResult, BeamError> {
+pub(super) fn node(term: &Term) -> BifResult {
     match term {
-        Term::Pid(_) => Ok(Value(local_node())),
-        _ => Err(error(format!(
-            "unsupported erlang:node/1 argument {}: not a pid",
-            debug_term(term, atoms)
-        ))),
+        Term::Pid(_) | Term::Port(_) | Term::Reference(_) => Value(local_node()),
+        _ => BifResult::badarg(),
     }
 }
 
