@@ -1541,6 +1541,22 @@ fn decodes_the_bs_start_match4_bs_get_binary2_and_bs_get_tail_instructions_of_bs
         ),
         "{instructions:?}"
     );
+    // A size `all` with unit 0 has no `ensure_at_least` command.
+    assert_eq!(
+        parse_code(
+            &code(&[&[0x77, 0x35, 0x03, 0x20, 0x42, 0x00, 0x00, 0x13]]),
+            &table,
+            &atoms,
+            &[],
+            &[],
+            &[],
+            &[],
+            &mut LineTable::default()
+        )
+        .unwrap_err()
+        .to_string(),
+        "BEAM bs_get_binary2 has unit 0"
+    );
     // The ERTS loader has no form of `bs_start_match4` with another atom
     // (jit/arm/ops.tab:1036-1052).
     assert_eq!(
