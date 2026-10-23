@@ -2659,9 +2659,12 @@ fn drops_the_io_event_of_a_port_that_another_scheduler_closed() {
     std::io::Write::write_all(&mut peer, &[1]).unwrap();
     let cell = scheduler.node.port(port).unwrap();
     assert!(port::lock(&cell).take().is_some());
-    scheduler.node.ports().remove(port);
-    scheduler.tcp_receive_ready(port).unwrap();
-    scheduler.tcp_send_ready(port).unwrap();
-    scheduler.tcp_accept_ready(port).unwrap();
+    // First the slot is empty, then the port leaves the table.
+    for _ in 0..2 {
+        scheduler.tcp_receive_ready(port).unwrap();
+        scheduler.tcp_send_ready(port).unwrap();
+        scheduler.tcp_accept_ready(port).unwrap();
+        scheduler.node.ports().remove(port);
+    }
     assert!(messages(&scheduler, id.0).is_empty());
 }
