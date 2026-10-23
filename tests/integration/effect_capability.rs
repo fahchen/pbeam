@@ -290,7 +290,7 @@ fn only(names: &[&str]) -> Constraint {
 
 /// Each entry that the column "Capability" of the effect inventory marks
 /// `ambient`. `effect_probe:ambient/0` calls each entry once.
-const AMBIENT: [&str; 119] = [
+const AMBIENT: &[&str] = &[
     "atomics:add/3",
     "atomics:get/2",
     "atomics:info/1",
@@ -575,7 +575,10 @@ fn each_effect_entry_with_a_capability_denies_without_its_operation() {
 
 #[test]
 fn calls_each_ambient_and_later_entry_with_no_capability() {
-    assert_eq!(inventory_marked("`ambient`"), BTreeSet::from(AMBIENT));
+    assert_eq!(
+        inventory_marked("`ambient`"),
+        AMBIENT.iter().copied().collect::<BTreeSet<_>>()
+    );
     assert_eq!(inventory_marked("`later`"), BTreeSet::from(LATER));
     // The root process holds no capability, so no policy can permit the
     // calls: each `ambient` and `later` entry has no check.
