@@ -3,9 +3,9 @@
 //! OTP 29.1.1, with the OpenSSL 3 API and engine support). The safe
 //! `openssl` crate makes each OpenSSL call.
 //!
-//! PBeam signs with the algorithms `rsa`, `dss`, `ecdsa`, and `eddsa`. The
-//! ML-DSA and SLH-DSA algorithms, each other algorithm that ERTS gives to
-//! `EVP_PKEY_CTX_new_from_name`, and the ECDSA curves over a
+//! PBeam signs with the algorithms `rsa`, `dss`, `ecdsa`, `eddsa`, and the
+//! ML-DSA and SLH-DSA algorithms of `pkey_types`. Each other algorithm that
+//! ERTS gives to `EVP_PKEY_CTX_new_from_name`, and the ECDSA curves over a
 //! characteristic-two field give a runtime error (row "NIF stubs" of
 //! `docs/erts-differences.md`).
 
@@ -13,10 +13,10 @@ use super::*;
 use openssl::bn::{BigNum, BigNumContext};
 use openssl::dsa::Dsa;
 use openssl::ec::{EcGroup, EcKey, EcPoint};
-use openssl::pkey::{Private, Public};
+use openssl::pkey::{Id, Private, Public};
 use openssl::pkey_ctx::PkeyCtx;
 use openssl::rsa::{Padding, Rsa, RsaPrivateKeyBuilder};
-use openssl::sign::{RsaPssSaltlen, Verifier};
+use openssl::sign::{RsaPssSaltlen, Signer, Verifier};
 
 /// The algorithms of `pkey_types` (`pkey.c:91-172`), for which the digest
 /// type `none` gives no digest (`pkey.c:263-270`).
@@ -253,11 +253,22 @@ fn sign(scheduler: &Scheduler, arguments: &[Term]) -> Result<Vec<u8>, Failure> {
     let input = sign_input(scheduler, arguments, 4)?;
     let pkey = private_key(scheduler, &input.algorithm, &arguments[0], &arguments[3])?;
     if input.algorithm == "eddsa" {
-        let mut signer = openssl::sign::Signer::new_without_digest(&pkey)
+        let mut signer = Signer::new_without_digest(&pkey)
             .map_err(|_| failed(811, "Can't EVP_DigestSignInit"))?;
         return signer
             .sign_oneshot_to_vec(&input.data)
             .map_err(|_| failed(813, "Can't EVP_DigestSign"));
+    }
+    if PKEY_TYPES.contains(&input.algorithm.as_str()) {
+        // `EVP_DigestSignInit` without a digest starts the same message
+        // signature as `EVP_PKEY_sign_message_init` with the algorithm name
+        // and no parameters (`pkey.c:835-837`). ERTS then sets the digest
+        // (`pkey.c:847-850`), which ML-DSA and SLH-DSA do not read.
+        let mut signer = Signer::new_without_digest(&pkey)
+            .map_err(|_| failed(837, "Can't EVP_PKEY_sign_message_init"))?;
+        return signer
+            .sign_oneshot_to_vec(&input.data)
+            .map_err(|_| failed(874, "Can't EVP_PKEY_sign"));
     }
     let mut context =
         PkeyCtx::new(&pkey).map_err(|_| failed(832, "Can't allocate new EVP_PKEY_CTX"))?;
@@ -287,6 +298,16 @@ fn verify(scheduler: &Scheduler, arguments: &[Term]) -> Result<bool, Failure> {
     if input.algorithm == "eddsa" {
         let mut verifier = Verifier::new_without_digest(&pkey)
             .map_err(|_| failed(1055, "Can't EVP_DigestVerifyInit"))?;
+        return Ok(matches!(
+            verifier.verify_oneshot(signature, &input.data),
+            Ok(true)
+        ));
+    }
+    if PKEY_TYPES.contains(&input.algorithm.as_str()) {
+        // As in `sign`, for `EVP_PKEY_verify_message_init`
+        // (`pkey.c:1070-1072`).
+        let mut verifier = Verifier::new_without_digest(&pkey)
+            .map_err(|_| failed(1072, "Can't EVP_PKEY_verify_message_init"))?;
         return Ok(matches!(
             verifier.verify_oneshot(signature, &input.data),
             Ok(true)
@@ -531,6 +552,9 @@ fn private_key(
             });
             (key, 530, "Couldn't get DSA private key")
         }
+        _ if PKEY_TYPES.contains(&algorithm) => {
+            return pkey_type_private_key(scheduler, algorithm, term);
+        }
         _ => return Err(octet_string_key(scheduler, algorithm, name, Some(term))),
     };
     key.ok_or_else(|| badarg(line, 3, message))
@@ -568,26 +592,28 @@ fn public_key(
             });
             (key, 722, "Couldn't get DSA public key")
         }
+        _ if PKEY_TYPES.contains(&algorithm) => {
+            let bytes = octet_string(term)?;
+            return PKey::public_key_from_raw_bytes(bytes, pkey_type_id(algorithm))
+                .map_err(|_| fromdata_failed());
+        }
         _ => return Err(octet_string_key(scheduler, algorithm, name, None)),
     };
     key.ok_or_else(|| badarg(line, 4, message))
 }
 
 /// Return the failure of the key of an algorithm outside `rsa`, `ecdsa`,
-/// `eddsa`, and `dss`, which ERTS gives to `get_pkey_from_octet_string`
-/// (`pkey.c:536-565`, `728-731`). `private` is the private key term, which
-/// passes the key tuple checks first (`pkey.c:544-559`). An algorithm of
-/// `pkey_types`, or a name that OpenSSL loads a key type from
-/// (`pkey.c:614`), gives a runtime error: ERTS then reads the key bytes.
+/// `eddsa`, `dss`, and `pkey_types`, which ERTS gives to
+/// `get_pkey_from_octet_string` (`pkey.c:536-565`, `728-731`). `private` is
+/// the private key term, which passes the key tuple checks first
+/// (`pkey.c:544-559`). A name that OpenSSL loads a key type from
+/// (`pkey.c:614`) gives a runtime error: ERTS then reads the key bytes.
 fn octet_string_key(
     scheduler: &Scheduler,
     algorithm: &str,
     name: &Term,
     private: Option<&Term>,
 ) -> Failure {
-    if PKEY_TYPES.contains(&algorithm) {
-        return unsupported_algorithm(algorithm);
-    }
     if let Some([tag, _]) = private.and_then(Term::tuple_elements) {
         match tag {
             Term::Atom(_) if atom_name(scheduler, tag) == "seed" => {
@@ -609,6 +635,92 @@ fn octet_string_key(
         return unsupported_algorithm(algorithm);
     }
     failed(616, "Can't create PKEY_CTX from name")
+}
+
+/// Return the private key `term` of the algorithm `algorithm` of
+/// `pkey_types`, as `get_pkey_private_key` (`pkey.c:539-565`) and
+/// `get_pkey_from_octet_string` (`pkey.c:587-660`) give it: the tuple
+/// `{seed, Seed}` of ML-DSA or `{expandedkey, Key}`, or the key bytes.
+fn pkey_type_private_key(
+    scheduler: &Scheduler,
+    algorithm: &str,
+    term: &Term,
+) -> Result<PKey<Private>, Failure> {
+    let mut key = term;
+    let mut seed = false;
+    if let Some([tag, value]) = term.tuple_elements() {
+        match tag {
+            Term::Atom(_) if atom_name(scheduler, tag) == "seed" => {
+                // Only ML-DSA sets `allow_seed` (`pkey.c:90-110`).
+                if !algorithm.starts_with("mldsa") {
+                    return Err(badarg(552, 3, "Seed key not allowed"));
+                }
+                seed = true;
+            }
+            Term::Atom(_) if atom_name(scheduler, tag) == "expandedkey" => {}
+            _ => return Err(badarg(556, 3, "Invalid key tuple format")),
+        }
+        key = value;
+    }
+    let bytes = octet_string(key)?;
+    let id = pkey_type_id(algorithm);
+    if !seed {
+        return PKey::private_key_from_raw_bytes(bytes, id).map_err(|_| fromdata_failed());
+    }
+    // The safe `openssl` crate has no `EVP_PKEY_fromdata`, so PBeam gives
+    // the seed as the seed-only PKCS #8 form of RFC 9881. OpenSSL takes only
+    // a seed of 32 bytes (`ml_dsa_kmgmt.c:219` of OpenSSL 3.5).
+    if bytes.len() != 32 {
+        return Err(fromdata_failed());
+    }
+    let mut der = vec![
+        0x30, 0x34, 0x02, 0x01, 0x00, 0x30, 0x0b, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03,
+        0x04, 0x03,
+    ];
+    der.push(match algorithm {
+        "mldsa44" => 0x11,
+        "mldsa65" => 0x12,
+        _ => 0x13,
+    });
+    der.extend([0x04, 0x22, 0x80, 0x20]);
+    der.extend_from_slice(bytes);
+    PKey::private_key_from_pkcs8(&der).map_err(|_| fromdata_failed())
+}
+
+/// Return the bytes of the key binary `term`, as `pkey.c:620-622` does.
+fn octet_string(term: &Term) -> Result<&[u8], Failure> {
+    term.binary_bytes()
+        .ok_or(Failure::Check("error", 621, 1, "Invalid public key"))
+}
+
+/// Return the failure of `EVP_PKEY_fromdata` (`pkey.c:648-650`).
+fn fromdata_failed() -> Failure {
+    failed(649, "Can't create PKEY fromdata")
+}
+
+/// Return the key type of the algorithm `algorithm` of `pkey_types`
+/// (`pkey.c:90-172`). `EVP_PKEY_new_raw_private_key` and
+/// `EVP_PKEY_new_raw_public_key` give the key bytes to `EVP_PKEY_fromdata`
+/// as the parameter `priv` or `pub`, as `pkey.c:630-637` does.
+fn pkey_type_id(algorithm: &str) -> Id {
+    // The NIDs of `obj_mac.h` of OpenSSL 3.5.
+    Id::from_raw(match algorithm {
+        "mldsa44" => 1457,
+        "mldsa65" => 1458,
+        "mldsa87" => 1459,
+        "slh_dsa_sha2_128s" => 1460,
+        "slh_dsa_sha2_128f" => 1461,
+        "slh_dsa_sha2_192s" => 1462,
+        "slh_dsa_sha2_192f" => 1463,
+        "slh_dsa_sha2_256s" => 1464,
+        "slh_dsa_sha2_256f" => 1465,
+        "slh_dsa_shake_128s" => 1466,
+        "slh_dsa_shake_128f" => 1467,
+        "slh_dsa_shake_192s" => 1468,
+        "slh_dsa_shake_192f" => 1469,
+        "slh_dsa_shake_256s" => 1470,
+        _ => 1471,
+    })
 }
 
 /// Return the failure of an algorithm that PBeam does not sign with.
