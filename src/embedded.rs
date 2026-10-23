@@ -113,6 +113,7 @@ fn start(executable: &Path, bundle: &Bundle<'_>, directory: &Path) -> ExitCode {
             directory,
             &erts,
             &version,
+            env::var_os("ELIXIR_ERL_OPTIONS").as_deref(),
         )),
         None => start_modules(bundle)
             .and_then(|modules| boot(executable, bundle.entry(), &modules, directory)),
@@ -224,6 +225,10 @@ fn release_boot(directory: &Path) -> Option<(String, String)> {
 /// when `RELEASE_DISTRIBUTION` is `none`: `-s <Module> <Function>` of the
 /// entry, the `embedded` mode, `sys.config`, the boot script `start`, the
 /// boot variable `RELEASE_LIB`, and the plain argument `--no-halt`. The
+/// words of `ELIXIR_ERL_OPTIONS` come after `-noshell`, as the `elixir`
+/// script of the release gives them unquoted (`elixir:229`); `options` is
+/// the value of the variable. So
+/// `ELIXIR_ERL_OPTIONS="+S 4"` starts 4 schedulers. The
 /// run gets `RELEASE_ROOT` and `RELEASE_SYS_CONFIG`, which the release
 /// boot reads. The preloaded modules come from `lib/erts-<Vsn>/ebin`,
 /// where the bundle tool writes the start set. Return the error of a
@@ -234,6 +239,7 @@ fn boot_release(
     directory: &Path,
     erts: &str,
     version: &str,
+    options: Option<&std::ffi::OsStr>,
 ) -> std::io::Error {
     use std::os::unix::process::CommandExt;
 
@@ -248,7 +254,11 @@ fn boot_release(
         .arg("--preloaded")
         .arg(directory.join("lib").join(&erts).join("ebin"));
     command.arg("--extracted-root").arg(directory);
-    command.args(["--", "-noshell", "-s", entry.module, entry.function]);
+    command.args(["--", "-noshell"]);
+    if let Some(options) = options {
+        command.args(option_words(options));
+    }
+    command.args(["-s", entry.module, entry.function]);
     command.args(["-mode", "embedded", "-config"]);
     command.arg(release.join("sys"));
     command.arg("-boot").arg(release.join("start"));
@@ -258,6 +268,18 @@ fn boot_release(
     command.env("RELEASE_ROOT", directory);
     command.env("RELEASE_SYS_CONFIG", release.join("sys"));
     command.exec()
+}
+
+/// Return the words of `options` as the shell splits an unquoted variable
+/// with the default `IFS`: at space, tab, and newline only.
+fn option_words(options: &std::ffi::OsStr) -> Vec<&std::ffi::OsStr> {
+    use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+    options
+        .as_bytes()
+        .split(|byte| matches!(byte, b' ' | b'\t' | b'\n'))
+        .filter(|word| !word.is_empty())
+        .map(OsStr::from_bytes)
+        .collect()
 }
 
 /// Remove the extracted `directory`, and leave a directory that stays.
