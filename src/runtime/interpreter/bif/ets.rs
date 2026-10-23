@@ -1554,6 +1554,115 @@ pub(super) fn give_away(
     Ok(Value(Term::static_atom("true")))
 }
 
+/// Run `ets:setopts(Table, Options)`, as ERTS `ets_setopts_2`
+/// (`erl_db.c:3146-3229`) does, and return `true`. `Options` is one tuple
+/// or a proper list of tuples (`erl_db.c:3164-3166`, `3204-3205`). The
+/// options are `{heir, none}`, `{heir, Pid}`, `{heir, Pid, Data}`
+/// (`erl_db.c:3174-3188`), and `{protection, P}` with `private`,
+/// `protected`, or `public` (`erl_db.c:3190-3198`). Each option comes at
+/// most once. The checks keep the ERTS order:
+///
+/// 1. A table that does not exist or that the caller cannot write raises
+///    `badarg` with the cause of the lookup (`erl_db.c:3158-3161`).
+/// 2. An option that is not valid raises `badarg` with no cause, and the
+///    call changes nothing (`erl_db.c:3169-3205`, `3223-3228`).
+/// 3. A caller that is not the owner raises `badarg` with no cause
+///    (`erl_db.c:3207-3208`).
+///
+/// A heir that is not the caller and not alive acts as `none`, as
+/// `set_heir` (`erl_db.c:5319-5337`) does.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let options = Term::tuple(vec![test_atom("protection"), test_atom("public")]);
+/// let result = setopts(&mut context, &table, &options)?;
+/// assert!(matches!(result, BifResult::Value(value) if value == test_atom("true")));
+/// ```
+///
+/// # Errors
+///
+/// None: each outcome is a value or an exception.
+pub(super) fn setopts(
+    context: &mut BifContext<'_>,
+    table: &Term,
+    options: &Term,
+) -> Result<BifResult, BeamError> {
+    let caller = context.scheduler.current_process_mut().id;
+    let reds = context
+        .scheduler
+        .current_process_mut()
+        .bif_reductions_signed();
+    let store = Arc::clone(&context.scheduler.ets);
+    let ets = store.exclusive();
+    let mut found = match ets.write(&context.scheduler.atoms, table, caller, reds) {
+        Ok(found) => found,
+        Err(lacking) => {
+            return Ok(retry(
+                context,
+                lacking,
+                "setopts",
+                vec![table.clone(), options.clone()],
+            ));
+        }
+    };
+    let single = [options.clone()];
+    let items: Vec<&Term> = match options {
+        Term::Tuple(_) => single.iter().collect(),
+        _ => match options.proper_list() {
+            Some(items) => items.collect(),
+            None => return Ok(BifResult::badarg()),
+        },
+    };
+    let mut heir = None;
+    let mut access = None;
+    for item in items {
+        let Term::Tuple(fields) = item else {
+            return Ok(BifResult::badarg());
+        };
+        match fields.as_ref() {
+            [Term::Atom(key), Term::Atom(none)]
+                if key.is_static("heir") && none.is_static("none") && heir.is_none() =>
+            {
+                heir = Some((None, None));
+            }
+            [Term::Atom(key), Term::Pid(pid)] if key.is_static("heir") && heir.is_none() => {
+                heir = Some((Some(*pid), None));
+            }
+            [Term::Atom(key), Term::Pid(pid), data] if key.is_static("heir") && heir.is_none() => {
+                heir = Some((Some(*pid), Some(data.clone())));
+            }
+            [Term::Atom(key), Term::Atom(value)]
+                if key.is_static("protection") && access.is_none() =>
+            {
+                access = Some(if value.is_static("private") {
+                    Access::Private
+                } else if value.is_static("protected") {
+                    Access::Protected
+                } else if value.is_static("public") {
+                    Access::Public
+                } else {
+                    return Ok(BifResult::badarg());
+                });
+            }
+            _ => return Ok(BifResult::badarg()),
+        }
+    }
+    if found.owner() != caller {
+        return Ok(BifResult::badarg());
+    }
+    if let Some((pid, data)) = heir {
+        // The heir check takes the table store lock, so a heir that starts
+        // its exit later finds the table in its own exit.
+        let pid = pid.filter(|pid| *pid == caller || context.scheduler.ets_alive(*pid));
+        found.set_heir(pid, pid.and(data));
+    }
+    if let Some(access) = access {
+        found.set_access(access);
+    }
+    Ok(Value(Term::static_atom("true")))
+}
+
 /// Free the segments of the table that `ets:delete/1` deleted, as
 /// `free_table_continue` and `ets_delete_trap` (`erl_db.c:5378-5426`) do.
 /// The work starts with the reductions that are left in the turn

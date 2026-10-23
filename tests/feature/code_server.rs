@@ -25,6 +25,7 @@ const FUN_ENTRY_PROBE: &str = "fixtures/code_server/fun_entry_probe";
 /// The probe of `crypto:strong_rand_bytes/1`.
 const CRYPTO_PROBE: &str = "fixtures/code_server/crypto_probe";
 const CRYPTO_SIGN_PROBE: &str = "fixtures/code_server/crypto_sign_probe";
+const CRYPTO_CRYPT_PROBE: &str = "fixtures/code_server/crypto_crypt_probe";
 
 /// The stand-in `crypto` module that loads the `crypto` NIF library.
 const CRYPTO_STAND_IN: &str = "fixtures/crypto/crypto";
@@ -1055,6 +1056,69 @@ fn signs_and_verifies_as_pinned_erts() {
         assert_eq!(erts, host);
     }
 }
+
+#[test]
+fn encrypts_and_decrypts_as_pinned_erts() {
+    // pkey_crypt_nif/6 (pkey.c:1173-1581) with RSA keys, and the error
+    // tuple of each failed check.
+    let erts = run(&mut erts_probe(
+        CRYPTO_CRYPT_PROBE,
+        "crypto_crypt_probe",
+        "main",
+        &[],
+    ));
+    assert!(
+        erts.contains("Expect only two-tuples in the list"),
+        "{erts}"
+    );
+    assert_eq!(
+        run(&mut pbeam_probe(
+            CRYPTO_CRYPT_PROBE,
+            "crypto_crypt_probe",
+            "main",
+            &[]
+        )),
+        erts
+    );
+    // The provider of the host libcrypto decides these results: X9.31
+    // padding for a sign, the implicit rejection of a bad PKCS #1 v1.5
+    // cipher text (OpenSSL 3.2 and later), and the operations of the DSA,
+    // ECDSA, and EdDSA keys. PBeam links a vendored OpenSSL 3.5.5; the
+    // literal is the output of the pinned macOS ERTS (OpenSSL 3.5.8). The
+    // Linux CI ERTS links OpenSSL 3.0.x.
+    assert_eq!(
+        run(&mut pbeam_probe(
+            CRYPTO_CRYPT_PROBE,
+            "crypto_crypt_probe",
+            "host",
+            &[]
+        )),
+        CRYPT_HOST
+    );
+    if cfg!(target_os = "macos") {
+        let erts = run(&mut erts_probe(
+            CRYPTO_CRYPT_PROBE,
+            "crypto_crypt_probe",
+            "host",
+            &[],
+        ));
+        assert_eq!(erts, CRYPT_HOST);
+    }
+}
+
+/// The output of `crypto_crypt_probe:host/0` on the pinned macOS ERTS.
+const CRYPT_HOST: &str = r#"[{error,{error,{"pkey.c",1410},"Couldn't set rsa padding"}},
+ <<246,255,136,76,65,131,10,181,77,171>>,
+ {error,{notsup,{"pkey.c",1381},"Can't initiate encrypt/decrypt"}},
+ {error,{notsup,{"pkey.c",1381},"Can't initiate encrypt/decrypt"}},
+ {error,{notsup,{"pkey.c",1381},"Can't initiate encrypt/decrypt"}},
+ true,
+ {error,{error,{"pkey.c",1474},"Couldn't get the result"}},
+ {error,{notsup,{"pkey.c",1381},"Can't initiate encrypt/decrypt"}},
+ {error,{notsup,{"pkey.c",1381},"Can't initiate encrypt/decrypt"}},
+ {error,{notsup,{"pkey.c",1381},"Can't initiate encrypt/decrypt"}},
+ true]
+"#;
 
 #[test]
 fn stops_with_a_runtime_error_for_each_unsupported_signature() {
