@@ -18,6 +18,7 @@ mod process;
 mod regex_code;
 mod resources;
 mod scheduler;
+mod schedulers;
 mod signal;
 mod time;
 mod timer;
@@ -33,6 +34,7 @@ pub use host::environment::add_erlexec_path;
 pub use host::signal::install_start_dispositions;
 pub(crate) use interpreter::bif::{BifId, import_kind, resolve as resolve_bif};
 pub use interpreter::{BeamProgram, NifGap, nif_manifest_gaps};
+pub use schedulers::Schedulers;
 
 use crate::term::Term;
 

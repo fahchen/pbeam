@@ -43,6 +43,7 @@
     monitor2/0,
     monitor3/0,
     exit_other/0,
+    exit_other3/0,
     send_instruction/0,
     send2/0,
     send3/0,
@@ -232,6 +233,10 @@ monitor3() -> attempt(fun() -> erlang:monitor(process, self(), []) end).
 exit_other() ->
     Child = erlang:spawn(?MODULE, done, []),
     attempt(fun() -> erlang:exit(Child, normal) end).
+
+exit_other3() ->
+    Child = erlang:spawn(?MODULE, done, []),
+    attempt(fun() -> erlang:exit(Child, normal, [priority]) end).
 
 %% `!` compiles to the send instruction, and erlang:send/2 to a call of the
 %% BIF.

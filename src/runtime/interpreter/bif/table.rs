@@ -160,7 +160,7 @@ bifs! {
     erlang:error/3 as ErlangError3 => |cx, [reason, args, options]| erlang::error_3(cx, reason, args, options),
     erlang:exit/1 as ErlangExit1 => |cx, [reason]| erlang::exit_1(cx, reason),
     erlang:exit/2 as ErlangExit2 => |cx, [id, reason]| erlang::exit(cx, id, reason),
-    erlang:exit/3 => unsupported,
+    erlang:exit/3 as ErlangExit3 => |cx, [id, reason, options]| erlang::exit_3(cx, id, reason, options),
     erlang:exit_signal/2 => unsupported,
     erlang:exit_signal/3 => unsupported,
     erlang:external_size/1 as ErlangExternalSize1 => |cx, [term]| term::external_size(&cx.scheduler.atoms, term),

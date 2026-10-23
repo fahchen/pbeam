@@ -205,8 +205,13 @@ pub(in crate::runtime) struct Node {
     next_unlink_id: AtomicU64,
     /// The roots of the run and their results.
     roots: Mutex<Roots>,
-    /// The number of schedulers of the node.
+    /// The number of schedulers of the node: one thread for each.
     schedulers: usize,
+    /// The number of schedulers that `erlang:system_info(schedulers)`
+    /// gives. It is more than [`Self::schedulers`] when the `+S` option
+    /// sets fewer schedulers online than schedulers (see
+    /// [`crate::Schedulers`]).
+    configured: usize,
     /// The number of schedulers that wait in the idle state (see
     /// [`Self::enter_idle`]).
     idle: Mutex<usize>,
@@ -259,6 +264,12 @@ pub(in crate::runtime) struct Node {
     /// each for the node (`H_MIN_SIZE`, `BIN_VH_MIN_SIZE`,
     /// `erts_max_gen_gcs`, `H_MAX_SIZE`, `H_MAX_FLAGS`; `erl_init.c:808-811`).
     heap_flags: Mutex<HeapFlags>,
+    /// The system processes of the node. ERTS keeps the
+    /// `ERTS_STC_FLG_SYSTEM_PROC` flag in the process
+    /// and `erts_internal:is_system_process/1` looks up the process of any
+    /// scheduler (`erl_bif_info.c:4932-4938`), so a process
+    /// of any scheduler reads it.
+    system_processes: Mutex<std::collections::HashSet<ProcessId>>,
 }
 
 impl Node {
@@ -271,7 +282,17 @@ impl Node {
     /// let (node, readers) = Node::new(2).unwrap();
     /// assert_eq!(readers.len(), 2);
     /// ```
+    #[cfg(test)]
     pub(in crate::runtime) fn new(count: usize) -> io::Result<(Arc<Self>, Vec<UnixStream>)> {
+        Self::with_configured(count, count)
+    }
+
+    /// Return the node of `count` schedulers, as [`Self::new`] does, for
+    /// which `erlang:system_info(schedulers)` gives `configured`.
+    pub(in crate::runtime) fn with_configured(
+        count: usize,
+        configured: usize,
+    ) -> io::Result<(Arc<Self>, Vec<UnixStream>)> {
         let mut inboxes = Vec::with_capacity(count);
         let mut readers = Vec::with_capacity(count);
         for _ in 0..count {
@@ -304,6 +325,7 @@ impl Node {
                 next_unlink_id: AtomicU64::new(1),
                 roots: Roots::new(count),
                 schedulers: count,
+                configured,
                 idle: Mutex::new(0),
                 hungry: (0..count).map(|_| AtomicBool::new(false)).collect(),
                 shutdown: AtomicBool::new(false),
@@ -319,6 +341,7 @@ impl Node {
                 system_logger: Mutex::new(Term::static_atom("logger")),
                 backtrace_depth: AtomicUsize::new(8),
                 heap_flags: Mutex::new(HeapFlags::default()),
+                system_processes: Mutex::default(),
             }),
             readers,
         ))
@@ -327,6 +350,12 @@ impl Node {
     /// Return the number of schedulers of the node.
     pub(in crate::runtime) fn scheduler_count(&self) -> usize {
         self.schedulers
+    }
+
+    /// Return the number of schedulers that `erlang:system_info(schedulers)`
+    /// gives (see [`Self::configured`]).
+    pub(in crate::runtime) fn configured_count(&self) -> usize {
+        self.configured
     }
 
     /// Return the dirty pools of the node.
@@ -382,6 +411,7 @@ impl Node {
             next_unlink_id: AtomicU64::new(1),
             roots: Roots::new(1),
             schedulers: 1,
+            configured: 1,
             idle: Mutex::new(0),
             hungry: Vec::new(),
             shutdown: AtomicBool::new(false),
@@ -397,6 +427,7 @@ impl Node {
             system_logger: Mutex::new(Term::static_atom("logger")),
             backtrace_depth: AtomicUsize::new(8),
             heap_flags: Mutex::new(HeapFlags::default()),
+            system_processes: Mutex::default(),
         });
         (node, reader)
     }
@@ -439,6 +470,12 @@ impl Node {
             let mut names = self.names.lock().expect("the name table is not poisoned");
             names.retain(|_, owner| *owner != id);
         });
+        // ERTS finds no process for the pid of an exited process, so
+        // `is_system_process/1` gives `false` (erl_bif_info.c:4934-4938).
+        self.system_processes
+            .lock()
+            .expect("system processes")
+            .remove(&id);
     }
 
     /// Count the scheduler that calls as idle, and return true when the run
@@ -783,6 +820,22 @@ impl Node {
     /// Lock the port table of the node.
     pub(in crate::runtime) fn ports(&self) -> MutexGuard<'_, Ports> {
         self.ports.lock().expect("the port table is not poisoned")
+    }
+
+    /// Mark the process `id` as a system process of the node.
+    pub(in crate::runtime) fn mark_system(&self, id: ProcessId) {
+        self.system_processes
+            .lock()
+            .expect("system processes")
+            .insert(id);
+    }
+
+    /// Return true when the process `id` is a system process of the node.
+    pub(in crate::runtime) fn is_system(&self, id: ProcessId) -> bool {
+        self.system_processes
+            .lock()
+            .expect("system processes")
+            .contains(&id)
     }
 
     /// Lock the TTY resources of the node.
