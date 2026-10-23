@@ -896,6 +896,7 @@ impl BeamProgram {
             let now = scheduler.timers.now();
             scheduler.expire_timers(now);
             scheduler.check_signals()?;
+            scheduler.check_io()?;
             scheduler.complete_dirty_calls();
             match scheduler.schedule_next()? {
                 Turn::Run => {
@@ -1096,6 +1097,7 @@ impl BeamProgram {
             let now = scheduler.timers.now();
             scheduler.expire_timers(now);
             scheduler.check_signals()?;
+            scheduler.check_io()?;
             match issuer {
                 Issuer::Unchecked => {}
                 Issuer::Host(policy) => scheduler.revoke_issued(&policy.revocations()),

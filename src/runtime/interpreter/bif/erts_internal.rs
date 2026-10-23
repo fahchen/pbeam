@@ -20,7 +20,6 @@ use crate::runtime::{
     unicode::native_filename,
 };
 use crate::term::PortId;
-use std::sync::MutexGuard;
 
 /// Run `erts_internal:group_leader(Leader, Target)`, which
 /// `erlang:group_leader/2` in `erlang.beam` calls, as
@@ -608,7 +607,7 @@ fn native_name(atoms: &AtomTable, name: &Term, allow_empty: bool) -> Option<Vec<
 pub(super) type Found = Option<(PortId, PortCell)>;
 
 /// The guard of the lock of a found port.
-pub(super) type Slot<'a> = Option<MutexGuard<'a, Option<Port>>>;
+pub(super) type Slot<'a> = Option<port::PortGuard<'a>>;
 
 /// Return the port table entry of `port`, as `sig_lookup_port` and
 /// `data_lookup_port` find the port (erl_bif_port.c:133-160), or `None`

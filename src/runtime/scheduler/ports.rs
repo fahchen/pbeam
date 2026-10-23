@@ -77,11 +77,13 @@ impl Scheduler {
             monitors: Vec::new(),
             closing: false,
             scheduler: self.index,
+            poll: std::sync::Arc::clone(&self.node.poll),
         };
         // The identifiers belong to the node, so a port of one scheduler
         // never compares equal to a port of another.
         let id = self.node.next_port()?;
         self.node.ports().insert_at(id, port);
+        super::poll::NodePoll::start(&self.node);
         self.process_mut(owner)
             .expect("the owner of a port exists")
             .links

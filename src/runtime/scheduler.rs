@@ -1275,8 +1275,9 @@ impl Scheduler {
     /// handled host signal arrives, when a handler is installed. ERTS waits
     /// for these events in its poll thread (`erl_process.c:3372`), and an
     /// idle scheduler sleeps in its poll until the next timer end
-    /// (`erl_process.c:3536-3567`). PBeam has one thread, so it waits only
-    /// when no process can run. A signal stops the wait with `EINTR`, or
+    /// (`erl_process.c:3536-3567`). A scheduler waits here when no process
+    /// can run, and with no timeout when the node poll thread marked it (see
+    /// [`Self::check_io`]). A signal stops the wait with `EINTR`, or
     /// makes the notify pipe readable when it arrives before the wait.
     ///
     /// When fd 0 has input, its end of file, or an error, the select ends,
@@ -1307,6 +1308,11 @@ impl Scheduler {
     /// ```
     pub(super) fn wait_events(&mut self, timeout: Option<Duration>) -> Result<bool, BeamError> {
         let selected = self.resources.borrow_mut::<Ttys>().input_selected();
+        if !selected {
+            // The select of fd 0 ended without a message (see
+            // `Ttys::monitor_down`): the poll thread stops waiting on fd 0.
+            self.node.poll.clear_stdin(self.index);
+        }
         let dirty = self.dirty.running();
         let handles = self.node.ports().handles(self.index);
         let ports = crate::runtime::port::wait_fds(&handles);
@@ -1343,6 +1349,7 @@ impl Scheduler {
         if selected && readiness.ended(libc::STDIN_FILENO) {
             let ttys = self.resources.borrow_mut::<Ttys>();
             let select = ttys.take_input_select().expect("fd 0 has a select");
+            self.node.poll.clear_stdin(self.index);
             if readiness != Readiness::Invalid {
                 let message = Term::tuple(vec![
                     Term::static_atom("select"),
@@ -1360,6 +1367,25 @@ impl Scheduler {
             self.port_writable(fd)?;
         }
         Ok(true)
+    }
+
+    /// Handle the I/O that the poll thread of the node found ready for this
+    /// scheduler, when it set the I/O mark, as an ERTS scheduler checks for
+    /// I/O at a switch point (`erl_process.c:9946-9960`). The check reads one
+    /// flag and makes no system call when the mark is clear. The scheduler
+    /// waits on its own fds with no timeout, and then the thread waits on
+    /// the fds of the scheduler again.
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`Self::wait_events`].
+    pub(super) fn check_io(&mut self) -> Result<(), BeamError> {
+        if !self.node.poll.take_mark(self.index) {
+            return Ok(());
+        }
+        self.wait_events(Some(Duration::ZERO))?;
+        self.node.poll.changed();
+        Ok(())
     }
 
     /// Pass each handled host signal that arrived since the last scheduling
@@ -3871,6 +3897,7 @@ mod code;
 mod known_nodes;
 pub(super) mod node;
 mod policy;
+pub(super) mod poll;
 mod ports;
 mod process_slots;
 mod process_table;

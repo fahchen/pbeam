@@ -224,6 +224,8 @@ pub(in crate::runtime) struct Node {
     /// The resources of the node that each scheduler reads, such as the
     /// zlib streams and the file resources.
     pub(in crate::runtime) resources: NodeResources,
+    /// The poll thread of the node (see [`super::poll`]).
+    pub(in crate::runtime) poll: Arc<super::poll::NodePoll>,
     /// The process that gets the error reports of the emulator: `logger`,
     /// `undefined`, or a pid. ERTS keeps one value for the node
     /// (`system_logger`, `erl_trace.c:339`). The start value is `logger`.
@@ -285,6 +287,7 @@ impl Node {
                 code: super::code::NodeCode::default(),
                 atomics: Default::default(),
                 resources: NodeResources::default(),
+                poll: super::poll::NodePoll::new(count),
                 system_logger: Mutex::new(Term::static_atom("logger")),
                 backtrace_depth: AtomicUsize::new(8),
             }),
@@ -353,6 +356,7 @@ impl Node {
             code: super::code::NodeCode::default(),
             atomics: Default::default(),
             resources: NodeResources::default(),
+            poll: super::poll::NodePoll::new(1),
             system_logger: Mutex::new(Term::static_atom("logger")),
             backtrace_depth: AtomicUsize::new(8),
         })

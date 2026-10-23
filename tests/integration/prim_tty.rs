@@ -633,6 +633,27 @@ fn reads_fd_0_with_read_nif_and_selects_it_again() {
 }
 
 #[test]
+fn selects_fd_0_while_a_process_always_can_run() {
+    // `tty_nif_probe:busy_read/0` spawns a process that always can run and
+    // then selects fd 0, a pipe that holds input. The ERTS poll thread
+    // waits for fd 0 while processes run (erl_process.c:3339-3372), so
+    // `{select, Out, first, ready_input}` arrives. The PBeam node poll
+    // thread does the same; without it, the probe gives `none`.
+    let layout = [Stream::Input(b"hello\nworld\n"), Stream::File, Stream::File];
+    assert_eq!(run_erts_nif_probe(layout, &[], "busy_read"), b"ready\n");
+    assert_eq!(
+        String::from_utf8(run_isolated(
+            layout,
+            &[],
+            "tty_nif_probe:busy_read",
+            &[TTY_NIF_PROBE, STAND_IN]
+        ))
+        .unwrap(),
+        r#"Ok(Atom("ready"))"#
+    );
+}
+
+#[test]
 fn gives_the_errno_of_a_failed_read_and_selects_nothing() {
     // `tty_nif_probe:read_error/0` runs with stdin the write end of a pipe,
     // so `read` fails with `EBADF`. `read_nif/3` gives
