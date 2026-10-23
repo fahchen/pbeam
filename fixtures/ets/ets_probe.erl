@@ -1,5 +1,5 @@
 -module(ets_probe).
--export([new/0, owner_exit/0, insert/0, lookup/0, lookup_loop/0, insert_loop/0,
+-export([delete_object/0, new/0, owner_exit/0, insert/0, lookup/0, lookup_loop/0, insert_loop/0,
          access/0, main/0, env/0, bag/0, info/0, match/0, match_deep/0,
          match_write_concurrency/0, delete_table/0, delete_trap/0,
          delete_order/0, deleter/2,
@@ -1769,3 +1769,81 @@ select_delete_gone() ->
     try ets:select_delete(T, [{{'$1'}, [{'<', '$1', 0}], [true]}])
     catch error:badarg -> badarg
     end.
+
+%% Delete objects that are exactly equal to an object (ets_delete_object_2,
+%% erl_db.c:3355-3382; db_erase_object_hash, erl_db_hash.c:1669-1730;
+%% db_erase_object_tree_common, erl_db_tree.c:1120-1131).
+delete_object() ->
+    S = ets:new(ets_probe, []),
+    true = ets:insert(S, [{a, 1}, {b, 2}]),
+    O = ets:new(ets_probe, [ordered_set]),
+    true = ets:insert(O, [{1, a}, {2, b}]),
+    B = ets:new(ets_probe, [bag]),
+    true = ets:insert(B, [{a, 1}, {a, 2}, {a, 3}, {b, 1}]),
+    D = ets:new(ets_probe, [duplicate_bag]),
+    true = ets:insert(D, [{a, 1}, {a, 2}, {a, 1}, {a, 1}, {b, 1}]),
+    K = ets:new(ets_probe, [{keypos, 2}]),
+    true = ets:insert(K, {x, k, y}),
+    Protected = start([protected]),
+    Public = start([public]),
+    true = ets:insert(tid(Public), {k, v}),
+    R = [ets:delete_object(S, {a, 2}), ets:lookup(S, a),
+         ets:delete_object(S, {a, 1}), ets:lookup(S, a),
+         ets:delete_object(S, {missing, 1}), ets:lookup(S, b),
+         ets:delete_object(S, {b}), ets:lookup(S, b),
+         ets:delete_object(O, {1.0, a}), ets:lookup(O, 1),
+         ets:delete_object(O, {1, a}), ets:lookup(O, 1), ets:first(O),
+         ets:delete_object(B, {a, 2}), ets:lookup(B, a),
+         ets:delete_object(B, {a, 1}), ets:lookup(B, a),
+         ets:delete_object(B, {a, 1.0}), ets:lookup(B, a),
+         ets:delete_object(D, {a, 1}), ets:lookup(D, a),
+         ets:delete_object(D, {a, 2}), ets:lookup(D, a), ets:lookup(D, b),
+         ets:delete_object(K, {x, k, z}), ets:lookup(K, k),
+         ets:delete_object(K, {x, k, y}), ets:lookup(K, k),
+         catch_error(fun() -> ets:delete_object(K, {x}) end),
+         catch_error(fun() -> ets:delete_object(S, [a, 1]) end),
+         catch_error(fun() -> ets:delete_object(S, b) end),
+         catch_error(fun() -> ets:delete_object(make_ref(), {a, 1}) end),
+         catch_error(fun() -> ets:delete_object(ets_probe_missing, {a}) end),
+         catch_error(fun() -> ets:delete_object(tid(Protected), {k, v}) end),
+         catch_error(fun() -> ets:delete_object(tid(Protected), bad) end),
+         ets:delete_object(tid(Public), {k, v}), ets:lookup(tid(Public), k),
+         delete_object_fixed(bag), delete_object_fixed(duplicate_bag),
+         delete_object_fixed(set), delete_object_fixed(ordered_set),
+         delete_object_fixed_copies()],
+    stop(Protected),
+    stop(Public),
+    R.
+
+%% Delete objects from a fixed table, then walk it and read it after the
+%% release. A select delete first leaves pseudo-deleted objects inside the
+%% chains (erl_db_hash.c:1695-1704, 2622-2653).
+delete_object_fixed(Type) ->
+    T = ets:new(ets_probe, [Type]),
+    Objects = [{I rem 7, I rem 3} || I <- lists:seq(1, 40)],
+    true = ets:insert(T, Objects),
+    true = ets:safe_fixtable(T, true),
+    First = ets:first(T),
+    Selected = ets:select_delete(T, [{{'_', 1}, [], [true]}]),
+    Deleted = [ets:delete_object(T, {I, J}) || I <- [First, 2, 4], J <- [0, 2]],
+    Walk = delete_object_walk(T, First, []),
+    true = ets:safe_fixtable(T, false),
+    true = ets:insert(T, {First, 9}),
+    {Selected, Deleted, Walk, ets:info(T, size),
+     lists:sort(ets:select(T, [{'_', [], ['$_']}])), ets:first(T)}.
+
+delete_object_walk(_T, '$end_of_table', Keys) ->
+    lists:reverse(Keys);
+delete_object_walk(T, Key, Keys) ->
+    delete_object_walk(T, ets:next(T, Key), [Key | Keys]).
+
+%% Delete two copies of the newest object of a key in a fixed duplicate_bag
+%% table: the first stays pseudo-deleted and the second goes.
+delete_object_fixed_copies() ->
+    T = ets:new(ets_probe, [duplicate_bag]),
+    true = ets:insert(T, [{k, 1}, {k, 2}, {k, 2}]),
+    true = ets:safe_fixtable(T, true),
+    true = ets:delete_object(T, {k, 2}),
+    Fixed = {ets:lookup(T, k), ets:first(T), ets:next(T, k)},
+    true = ets:safe_fixtable(T, false),
+    {Fixed, ets:lookup(T, k), ets:info(T, size)}.
