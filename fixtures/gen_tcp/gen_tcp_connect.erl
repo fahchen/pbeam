@@ -80,8 +80,11 @@ ipv6() ->
                 Addr
             end || Opts <- [[inet6], [inet6, {ip, any}], [inet6, {ip, loopback}],
                             [{ip, any}], [{ip, loopback}]]],
-    [ok = gen_tcp:close(X) || X <- [V6, V4]],
-    io:format("~w~n", [[Names, Transfer, Only, Option, Tags, flush()]]).
+    {ok, Short} = prim_inet:open(tcp, inet, stream),
+    %% A tag any or loopback without a port gives einval (inet_drv.c:4821).
+    ShortBind = [erlang:port_control(Short, 16#03f1a306, [Tag, 0]) || Tag <- [3, 4]],
+    [ok = gen_tcp:close(X) || X <- [V6, V4, Short]],
+    io:format("~w~n", [[Names, Transfer, Only, Option, Tags, ShortBind, flush()]]).
 
 flush() ->
     receive Message -> [Message | flush()] after 0 -> [] end.

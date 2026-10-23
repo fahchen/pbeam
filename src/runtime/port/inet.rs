@@ -582,7 +582,7 @@ impl Inet {
                 let port = u16::from_be_bytes([p1, p0]);
                 SocketAddrV6::new(ip.into(), port, word(16), word(20)).into()
             }
-            (AF_INET | AF_INET6, _) => return Ok(Err(error_reply("einval"))),
+            (AF_INET | AF_INET6 | 3 | 4, _) => return Ok(Err(error_reply("einval"))),
             (3 | 4, &[p1, p0, ..]) => {
                 let port = u16::from_be_bytes([p1, p0]);
                 match (self.family, tag) {
