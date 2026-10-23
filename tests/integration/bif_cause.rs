@@ -9,6 +9,7 @@ use common::pinned_beam;
 
 const BIF_CAUSE_PROBE: &[u8] = include_bytes!("../../fixtures/bif_cause/bif_cause_probe.beam");
 const TIMER_CAUSE_PROBE: &[u8] = include_bytes!("../../fixtures/bif_cause/timer_cause_probe.beam");
+const PORT_CAUSE_PROBE: &[u8] = include_bytes!("../../fixtures/bif_cause/port_cause_probe.beam");
 
 /// The `%T` text of the exit reason of `bif_cause_probe:uncaught()` on the
 /// pinned ERTS. Each case gives the reason, the BIF, the `error_info` map
@@ -99,5 +100,59 @@ fn gives_the_error_info_cause_of_the_timer_bifs_as_pinned_erts() {
     assert_eq!(
         format!("{error}\n"),
         format!("root process exited with {TIMER_EXPECTED}")
+    );
+}
+
+/// The `%T` text of the exit reason of `port_cause_probe:uncaught()` on the
+/// pinned ERTS. An option error of `re:compile/2` and `re:run/3`
+/// (`erl_bif_re.c:908-911`, `1501-1503`), a bad mode of `os:set_signal/2`
+/// (`erl_bif_os.c:146-150`), a bad type of `erlang:decode_packet/3`
+/// (`erl_bif_port.c:1508-1510`), and a bad option of `binary_to_term/2`
+/// (`external.c:2191-2193`) set the cause `badopt`. The other errors give
+/// no cause.
+const PORT_EXPECTED: &str = include_str!("../../fixtures/bif_cause/port_cause_probe.expected");
+
+#[test]
+fn gives_the_error_info_cause_of_the_re_os_port_and_external_bifs_as_pinned_erts() {
+    let reference = Command::new("erl")
+        .args([
+            "-noshell",
+            "-pa",
+            "fixtures/bif_cause",
+            "-eval",
+            "{'EXIT', R} = (catch port_cause_probe:uncaught()), io:format(\"~s~n\", [erts_internal:term_to_string(R, 100000)]), halt().",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        reference.status.success() && reference.stderr.is_empty(),
+        "{reference:?}"
+    );
+    assert_eq!(String::from_utf8(reference.stdout).unwrap(), PORT_EXPECTED);
+
+    let modules: Vec<Vec<u8>> = [
+        "erlang",
+        "erl_erts_errors",
+        "erl_stdlib_errors",
+        "erl_kernel_errors",
+        "re",
+        "os",
+        "lists",
+        "maps",
+        "proplists",
+        "unicode",
+    ]
+    .into_iter()
+    .map(pinned_beam)
+    .collect();
+    let mut beams: Vec<&[u8]> = modules.iter().map(Vec::as_slice).collect();
+    beams.push(PORT_CAUSE_PROBE);
+    let program = BeamProgram::load(&beams).unwrap();
+    let error = program
+        .execute("port_cause_probe", "uncaught", &[])
+        .unwrap_err();
+    assert_eq!(
+        format!("{error}\n"),
+        format!("root process exited with {PORT_EXPECTED}")
     );
 }
