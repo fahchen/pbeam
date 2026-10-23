@@ -179,8 +179,8 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### Run the crash dump of `SIGUSR1`
 
-- `SIGUSR1` stops a `pbeam` run with `pbeam: unsupported erlang:halt/2 with a crash dump slogan: PBeam writes no crash dump` and status 1. ERTS writes `Received SIGUSR1` and `erl_crash.dump` and exits with status 1 (erl_signal_handler.erl:39-41, bif.c:4370-4387). The "OS signals" row records this. The break menu of `SIGINT` runs (`break.c:571-687`).
-- **Evidence:** `tests/feature/host_signal.rs` (`gives_a_runtime_error_for_a_crash_dump`).
+- `SIGUSR1` makes a `pbeam` run write the slogan `Received SIGUSR1` and exit with status 1, but PBeam writes no `erl_crash.dump`. ERTS writes `Received SIGUSR1` and `erl_crash.dump` and exits with status 1 (erl_signal_handler.erl:39-41, bif.c:4370-4387). The "OS signals" row records this. The break menu of `SIGINT` runs (`break.c:571-687`).
+- **Evidence:** `tests/feature/host_signal.rs` (`halts_with_the_slogan_of_a_sigusr1`).
 - The work: a crash dump writer with the ERTS file and messages.
 - **Trigger:** a consumer needs a crash dump, which a break command `A` and `erlang:halt/2` with a slogan also request.
 - **Source:** PR for #301.
