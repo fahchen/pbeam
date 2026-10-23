@@ -37,6 +37,11 @@ holder() ->
     Accepted = request(Client, L, fun() -> prim_inet:async_accept(L, 5000) end),
     {ok, S} = Accepted,
     {connected, Connected} = erlang:port_info(S, connected),
+    %% Move the accepted socket to the owner root of the other scheduler and
+    %% back, then use it (erts_internal:port_connect/2).
+    true = erlang:port_connect(S, Owner),
+    {connected, Owner} = erlang:port_info(S, connected),
+    true = erlang:port_connect(S, self()),
     Received = request(Client, S, fun() -> prim_inet:async_recv(S, 0, 5000) end),
     Owner ! done,
     {element(1, Accepted), Connected =:= self(), Received}.
