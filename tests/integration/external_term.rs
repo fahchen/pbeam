@@ -234,6 +234,16 @@ fn raises_badarg_as_pinned_erts() {
         run(&program, "errors"),
         Term::list_from(std::iter::repeat_n(badarg, 19))
     );
+
+    // A term that PBeam cannot hold stops the run with a runtime error.
+    let error = program
+        .execute("external_term_probe", "decode_record", &[])
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.starts_with("unsupported erlang:binary_to_term/1,2"),
+        "{error}"
+    );
 }
 
 const FUN_PROBE: &[u8] = include_bytes!("../../fixtures/external_term/fun_ext_probe.beam");
