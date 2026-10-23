@@ -3002,17 +3002,27 @@ fn reads_bs_create_bin_segments_and_rejects_malformed_lists() {
     ));
     // {atom,binary} of unit 3 and size all; {atom,binary} of unit 8 and
     // size 8.
-    for segment in [
-        [0x22, 0x20, 0x30, 0x02, 0x03, 0x32],
-        [0x22, 0x20, 0x80, 0x02, 0x03, 0x81],
-    ] {
-        let mut bytes = vec![0x17, 0x60];
-        bytes.extend(segment);
-        assert!(matches!(
-            read(&bytes, b"").unwrap().as_slice(),
-            [BinarySegment::Unsupported(kind)] if kind == &atoms[segment[0] as usize / 16 - 1]
-        ));
-    }
+    assert!(matches!(
+        read(&[0x17, 0x60, 0x22, 0x20, 0x30, 0x02, 0x03, 0x32], b"")
+            .unwrap()
+            .as_slice(),
+        [BinarySegment::BinaryAll {
+            segment: 2,
+            unit: 3,
+            source: Operand::X(0)
+        }]
+    ));
+    assert!(matches!(
+        read(&[0x17, 0x60, 0x22, 0x20, 0x80, 0x02, 0x03, 0x81], b"")
+            .unwrap()
+            .as_slice(),
+        [BinarySegment::Binary {
+            segment: 2,
+            unit: 8,
+            source: Operand::X(0),
+            size: Operand::Value(Term::Integer(8)),
+        }]
+    ));
     // {atom,append},1,16,nil,{x,0},{atom,all} as the first segment.
     let segments = read(
         &[

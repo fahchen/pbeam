@@ -25,13 +25,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ## Term and loader
 
-### Add bitstring terms
-
-- PBeam loads a `BIT_BINARY_EXT` literal as a bitstring term (#1005), and the binary-match instructions make one (#1008), but the construction instructions do not make a bitstring whose size is not a multiple of 8 bits. The "Bitstring terms" row records this.
-- The work: the bitstring forms of the binary instructions and BIFs, such as `bs_create_bin` of a size that is not a multiple of 8 bits (#1010).
-- **Trigger:** a measured path makes or loads a bitstring that is not a binary.
-- **Source:** #359 and #360.
-
 ### Load local fun literals and run the fun information BIFs
 
 - PBeam loads a `NEW_FUN_EXT` (tag 112) literal as an unsupported literal, so an instruction that reads it returns `unsupported BEAM literal index N`. The pinned compiler makes a local fun with `make_fun3`, not as a literal (measured), so no current path loads one. `erlang:fun_info/2` runs (row "Fun information"). `erlang:fun_to_list/1` runs (#1017). `erlang:fun_info_mfa/1` is an `unsupported` BIF table entry (row "Unimplemented BIFs").
