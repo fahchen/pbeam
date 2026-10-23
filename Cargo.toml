@@ -737,3 +737,7 @@ path = "tests/integration/multischeduler_clock.rs"
 [[test]]
 name = "ets_cause"
 path = "tests/integration/ets_cause.rs"
+
+[[test]]
+name = "heap_flags"
+path = "tests/integration/heap_flags.rs"

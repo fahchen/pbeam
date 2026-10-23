@@ -2973,6 +2973,7 @@ impl Scheduler {
         let mut child = ProcessState::new(self.next_pid()?, start, arguments);
         child.off_heap_message_queue = flags.off_heap_message_queue;
         child.priority = flags.priority;
+        child.heap_flags = self.node.heap_flags();
         child.security = if boot {
             SecurityContext::boot()
         } else {

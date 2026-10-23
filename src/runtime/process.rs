@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use super::{
     capability::SecurityContext,
     dirty::{Claim, Output},
+    heap_flags::{HeapFlags, max_heap_size_map},
     mailbox::Mailbox,
     scheduler::AliasMode,
     timer::TimerKey,
@@ -347,6 +348,11 @@ pub(super) struct ProcessState {
     /// `erl_process.h:1656`). PBeam has no distribution, so the flag has no
     /// other effect.
     pub(super) async_dist: bool,
+    /// The heap flags of the process. A new process takes the node
+    /// defaults, as ERTS copies `H_MIN_SIZE` and the other defaults into
+    /// the spawn options (`erl_init.c:420-427`). PBeam has no garbage
+    /// collector, so the flags only change what the BIFs report.
+    pub(super) heap_flags: HeapFlags,
     /// The node monitors of the process (`ERTS_MON_TYPE_NODES`): the count
     /// of each by the bits of its options (`erts_monitor_nodes`,
     /// `dist.c:6731-6845`). PBeam has no distribution, so a node monitor
@@ -551,8 +557,12 @@ impl Frame {
 /// for a process that is not the caller. A request to a process of another
 /// scheduler carries only these items, because its owner reads the item as
 /// the target process.
-pub(super) const OTHER_PROCESS_INFO_ITEMS: [&str; 6] = [
+pub(super) const OTHER_PROCESS_INFO_ITEMS: [&str; 10] = [
     "registered_name",
+    "min_heap_size",
+    "min_bin_vheap_size",
+    "fullsweep_after",
+    "max_heap_size",
     "message_queue_len",
     "group_leader",
     "priority",
@@ -613,6 +623,7 @@ impl ProcessState {
             trap_exit: false,
             off_heap_message_queue: false,
             async_dist: false,
+            heap_flags: HeapFlags::default(),
             node_monitors: BTreeMap::new(),
             priority: Priority::Normal,
             links: MonitorLinkTree::default(),
@@ -765,6 +776,9 @@ impl ProcessState {
     /// - `priority` gives `{priority, Level}`, the priority that
     ///   `process_flag/2` or the spawn option set
     ///   (`erts_get_process_priority`, `erl_process.c:9443-9453`).
+    /// - `min_heap_size`, `min_bin_vheap_size`, `fullsweep_after`, and
+    ///   `max_heap_size` give the heap flags of the process
+    ///   (`erl_bif_info.c:1990-2020`).
     /// - `reductions` gives `{reductions, N}`: the reduction total and
     ///   `current`, the reductions of the current turn when the process runs
     ///   (`erl_bif_info.c:2114-2121`).
@@ -813,6 +827,14 @@ impl ProcessState {
                     .collect();
                 Term::list_from(links.into_iter().rev())
             }
+            ("min_heap_size", _) => Term::Integer(self.heap_flags.min_heap_size),
+            ("min_bin_vheap_size", _) => Term::Integer(self.heap_flags.min_bin_vheap_size),
+            ("fullsweep_after", _) => Term::Integer(i64::from(self.heap_flags.fullsweep_after)),
+            ("max_heap_size", _) => max_heap_size_map(
+                atoms,
+                self.heap_flags.max_heap_size,
+                self.heap_flags.max_heap_flags,
+            ),
             ("reductions", _) => Term::Integer(
                 i64::try_from(self.reductions + current)
                     .map_err(|_| error("the reduction total exceeds the PBeam integer range"))?,
