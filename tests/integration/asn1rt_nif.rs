@@ -59,6 +59,23 @@ fn stops_the_ber_decode_at_the_nesting_depth_of_the_pinned_erts() {
     // ERTS stops `ber_decode_value` at a stack distance of 8192 pointer
     // words (asn1_erl_nif.c:954-958): 453 nested values decode, and 454
     // give `unknown` at the index of the innermost length.
+    // The limit depends on the frame size of the compiled C code, so the
+    // test checks it on the pinned ERTS of each CI host.
+    let output = Command::new("erl")
+        .args([
+            "-noshell",
+            "-pa",
+            "fixtures/asn1_codec",
+            "-eval",
+            "L = filename:join([code:priv_dir(asn1), \"lib\", \"asn1rt_nif\"]), \
+             io:format(\"~s ~s~n\", [asn1_probe:nested_text(L, 453), asn1_probe:nested_text(L, 454)]), halt().",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "decoded unknown 909\n"
+    );
     let program = program();
     assert_eq!(
         run(&program, "nested_text", &[Term::Integer(453)]),
