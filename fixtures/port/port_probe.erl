@@ -1,6 +1,6 @@
 -module(port_probe).
 -export([exit_status/0, output/0, command/0, close/0, owner_exit/0, epipe/0, errors/0,
-         nul_name/0, spawn/0, sigchld_ignored/0, packet/0, packet_errors/0, eof/0, monitor/0, fd/3, fd_steal/2, unsupported/1, terminal/0, high_fd/0, costs/1, measure/2]).
+         nul_name/0, spawn/0, sigchld_ignored/0, packet/0, packet_errors/0, eof/0, monitor/0, fd/3, fd_steal/2, unsupported/1, terminal/0, high_fd/0, fd_closed/0, costs/1, measure/2]).
 
 %% Each result replaces a port with the atom port, because the port numbers
 %% of ERTS and PBeam differ.
@@ -199,7 +199,8 @@ os_pid(Port) ->
 write(Port) ->
     receive {Port, {data, <<"ready">>}} -> ok end,
     Sent = port_command(Port, <<"x">>),
-    [Sent, flush(), erlang:port_info(Port)].
+    Exit = receive {'EXIT', Port, Reason} -> [{'EXIT', port, Reason}] after 5000 -> [] end,
+    [Sent, Exit, erlang:port_info(Port)].
 
 %% Send SIGTERM to the two programs, and wait until kill ends. The program
 %% runs sleep with exec, so its OS pid is the pid of sleep.
@@ -423,6 +424,17 @@ high_fd() ->
                                                 {args, ["-c", "printf hi; exit 5"]}]),
     collect(Port, []).
 
+%% A port on fd 200, which is not open, opens; its write fails with ebadf.
+%% An fd at or above the soft RLIMIT_NOFILE gives einval.
+fd_closed() ->
+    process_flag(trap_exit, true),
+    Port = open_port({fd, 200, 200}, [binary]),
+    Idle = flush(),
+    Sent = port_command(Port, <<"x">>),
+    Exit = receive {'EXIT', Port, Reason} -> [{'EXIT', port, Reason}] after 5000 -> [] end,
+    High = catch_error(fun() -> open_port({fd, 2000000, 2000000}, [binary]) end),
+    [Idle, Sent, Exit, erlang:port_info(Port), High].
+
 %% Each call stops the PBeam run with a runtime error.
 unsupported(line) ->
     open_port({spawn_executable, sh()}, [binary, {line, 80}]);
@@ -431,9 +443,7 @@ unsupported(stream) ->
 unsupported(list) ->
     open_port({spawn_executable, sh()}, []);
 unsupported(fd_list) ->
-    open_port({fd, 9999, 9999}, []);
-unsupported(fd) ->
-    open_port({fd, 9999, 9999}, [binary]);
+    open_port({fd, 200, 200}, []);
 unsupported(exec) ->
     open_port({spawn_executable, "/"}, [binary, exit_status]);
 unsupported(force) ->
