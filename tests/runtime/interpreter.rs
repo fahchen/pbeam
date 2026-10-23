@@ -582,7 +582,7 @@ fn spawns_with_link_and_monitor_options_and_rejects_other_options() {
         spawn_opt(vec![test_atom("priority")])
             .unwrap_err()
             .to_string()
-            .contains("unsupported spawn option Atom(\"priority\")")
+            .contains("badarg")
     );
 }
 

@@ -1537,30 +1537,42 @@ pub(super) fn spawn_link(
     create_process(context.scheduler, module, function, arguments, options)
 }
 
-/// Run `erlang:spawn_opt/4`, which `erlang:spawn_monitor/3` in `erlang.beam`
-/// calls with the options `[monitor]`: start a process with the spawn
-/// options in `options`, as ERTS `spawn_opt_4` (`bif.c`) does. The option
-/// `link` links the new process and `monitor` monitors it. The option
-/// `{monitor, MonitorOpts}` monitors it with the `tag` of `MonitorOpts`,
-/// which `code_server:schedule_on_load/4` gives (code_server.erl:1396), and
-/// `MonitorOpts` that `erlang:monitor/3` rejects raise `badarg`
-/// (`erl_process.c:12406-12418`). An `alias` or `priority` monitor option
-/// gives a runtime error. With a monitor the result is `{Pid, Reference}`,
-/// else `Pid`. The option
-/// `{message_queue_data, on_heap | off_heap}` sets the start value of the
-/// `message_queue_data` flag of the new process, and the last such option
-/// wins (`erl_process.c:12305-12319`). The option `{priority, Level}` sets
-/// the start priority of the new process, else it is `normal`
-/// (`erl_process.c:12246`, `12275-12287`). `options` that are not a proper
-/// list, and a `message_queue_data` or `priority` option with another
-/// value, raise `badarg` with the `error_info` cause `badopt`, as
-/// `erts_parse_spawn_opts` (`erl_process.c:12222-12434`) and
-/// `spawn_opt_4` (`bif.c:1040-1051`) do. The PBeam
-/// option `{capabilities, Map}` restricts the capabilities of the new process
-/// (see `capability::restrictions`), and the last such option wins. A `Map`
-/// that is not valid raises the same `badarg`. Any other option gives a runtime
-/// error. After the options, a `module` or `function` that is not an atom
-/// raises `badarg`, as in `spawn/3`.
+/// Run `erlang:spawn_opt/4`: start a process with the spawn options in
+/// `options`, as ERTS `spawn_opt_4` (`bif.c:1027-1074`) and
+/// `erts_parse_spawn_opts` (`erl_process.c:12222-12434`) do:
+///
+/// - `link` and `{link, []}` link the new process (`erl_process.c:12256`,
+///   `12396-12405`). `monitor` and `{monitor, MonitorOpts}` monitor it, with
+///   the `tag` of `MonitorOpts`, and the result is `{Pid, Reference}`
+///   (`erl_process.c:12260-12265`, `12406-12417`).
+/// - `{message_queue_data, on_heap | off_heap}`, `{priority, Level}`, and
+///   `{async_dist, true | false}` set the start values of these flags
+///   (`erl_process.c:12275-12320`).
+/// - `{min_heap_size, Size}` and `{min_bin_vheap_size, Size}` take a small
+///   integer of 0 or more: a size below the node default gives the node
+///   default, else the next heap size. `{fullsweep_after, N}` keeps a small
+///   integer of 0 or more in a `Uint16`. `{max_heap_size, Max}` takes a
+///   value of `max_heap_size`, and the size is 0 or at least the minimum
+///   heap size of the options (`erl_process.c:12321-12360`, `12429-12431`).
+/// - `{scheduler, N}` takes a small integer from 0 to the scheduler count
+///   and changes nothing else (`erl_process.c:12361-12369`).
+/// - The PBeam option `{capabilities, Map}` restricts the capabilities of
+///   the new process (see `capability::restrictions`).
+///
+/// The last option of a kind wins. As in ERTS, the heap flags of the options
+/// apply only when the options include `min_heap_size`, `priority`,
+/// `fullsweep_after`, `max_heap_size`, or `scheduler` (`SPO_USE_ARGS`,
+/// `erl_process.h:1515-1520`), else the new process has the node heap flags.
+/// Each other option, a value that is not valid, and `options` that are not
+/// a proper list raise `badarg` with the `error_info` cause `badopt`
+/// (`bif.c:1039-1051`). After the options, a `module` or `function` that is
+/// not an atom raises `badarg`, as in `spawn/3`.
+///
+/// # Errors
+///
+/// The monitor options `alias` and `priority`, the link option `priority`,
+/// and a minimum heap size at or above the largest heap size of ERTS give a
+/// runtime error when all options are valid.
 ///
 /// # Examples
 ///
@@ -1568,7 +1580,6 @@ pub(super) fn spawn_link(
 /// let result = spawn_opt(&mut context, &module, &function, &Term::nil(), &Term::list_from(vec![monitor]))?;
 /// assert!(matches!(result, BifResult::Value(Term::Tuple(_))));
 /// assert!(matches!(spawn_opt(&mut context, &module, &function, &Term::nil(), &link_x)?, BifResult::Raise { .. }));
-/// assert!(spawn_opt(&mut context, &module, &function, &Term::nil(), &Term::list_from(vec![priority])).is_err());
 /// ```
 pub(super) fn spawn_opt(
     context: &mut BifContext<'_>,
@@ -1580,68 +1591,129 @@ pub(super) fn spawn_opt(
     let Some(options) = options.proper_list() else {
         return Ok(BifResult::badopt());
     };
+    let node = context.scheduler.node().heap_flags();
+    let schedulers = context.scheduler.scheduler_count();
+    let atoms = &context.scheduler.atoms;
     let mut spawn_options = SpawnOptions::default();
+    let mut heap = node;
+    let mut use_heap = false;
+    // ERTS reads each option before it fails (`erl_process.c:12253-12424`),
+    // so an option that is not valid gives `badarg` also after an option
+    // that PBeam does not support.
+    let mut valid = true;
+    let mut unsupported = None;
+    let not_supported = |option: &Term| {
+        error(format!(
+            "unsupported spawn option {}",
+            debug_term(option, atoms)
+        ))
+    };
+    let minimum = |size: Option<i64>, default: i64| match size.filter(|size| *size >= 0) {
+        None => None,
+        Some(size) if size < default => Some(Ok(default)),
+        Some(size) => Some(next_heap_size(size).ok_or_else(|| no_heap_size(size))),
+    };
+    let is_priority = |item: &Term| matches!(item, Term::Atom(item) if item.is_static("priority"));
     for option in options {
-        match option {
-            Term::Atom(option) if option.is_static("link") => spawn_options.link = true,
-            Term::Atom(option) if option.is_static("monitor") => {
+        let pair = match option {
+            Term::Tuple(pair) => match pair.as_ref() {
+                [Term::Atom(name), value] => Some((atoms.name_of(name), value)),
+                _ => None,
+            },
+            _ => None,
+        };
+        match (option, pair) {
+            (Term::Atom(name), _) if name.is_static("link") => spawn_options.link = true,
+            (Term::Atom(name), _) if name.is_static("monitor") => {
                 spawn_options.monitor = Some(Term::static_atom("DOWN"));
             }
-            Term::Tuple(option) if matches!(option.as_ref(), [Term::Atom(name), _] if name.is_static("monitor")) =>
+            // `erts_link_opts` takes a proper list of `priority`
+            // (`bif.c:675-699`).
+            (_, Some(("link", value)))
+                if value
+                    .proper_list()
+                    .is_some_and(|mut link| link.all(is_priority)) =>
             {
-                let Some(monitor) = monitor_options(&option[1]) else {
-                    return Ok(BifResult::badopt());
-                };
-                if monitor.alias.is_some() || monitor.priority {
-                    return Err(error(format!(
-                        "unsupported spawn option {}",
-                        debug_term(&Term::Tuple(option.clone()), &context.scheduler.atoms)
-                    )));
+                if value.is_nil() {
+                    spawn_options.link = true;
+                } else {
+                    unsupported.get_or_insert_with(|| not_supported(option));
                 }
-                spawn_options.monitor = Some(monitor.tag);
             }
-            Term::Tuple(option) if matches!(option.as_ref(), [Term::Atom(name), _] if name.is_static("message_queue_data")) =>
+            (_, Some(("monitor", value))) => match monitor_options(value) {
+                Some(monitor) if monitor.alias.is_some() || monitor.priority => {
+                    unsupported.get_or_insert_with(|| not_supported(option));
+                }
+                Some(monitor) => spawn_options.monitor = Some(monitor.tag),
+                None => valid = false,
+            },
+            (_, Some(("message_queue_data", Term::Atom(value))))
+                if value.is_one_of(&["on_heap", "off_heap"]) =>
             {
-                spawn_options.flags.off_heap_message_queue = match &option[1] {
-                    Term::Atom(value) if value.is_static("on_heap") => false,
-                    Term::Atom(value) if value.is_static("off_heap") => true,
-                    _ => return Ok(BifResult::badopt()),
-                };
+                spawn_options.flags.off_heap_message_queue = value.is_static("off_heap");
             }
-            Term::Tuple(option) if matches!(option.as_ref(), [Term::Atom(name), _] if name.is_static("priority")) =>
+            (_, Some(("priority", Term::Atom(value))))
+                if let Some(priority) = Priority::from_name(atoms.name_of(value)) =>
             {
-                // `erts_parse_spawn_opts` takes `max`, `high`, `normal`, or
-                // `low`, and gives `badarg` for each other value
-                // (`erl_process.c:12275-12287`).
-                let priority = match &option[1] {
-                    Term::Atom(value) => {
-                        Priority::from_name(context.scheduler.atoms.name_of(value))
-                    }
-                    _ => None,
-                };
-                let Some(priority) = priority else {
-                    return Ok(BifResult::badopt());
-                };
                 spawn_options.flags.priority = priority;
+                use_heap = true;
             }
-            Term::Tuple(option) if matches!(option.as_ref(), [Term::Atom(name), _] if context.scheduler.atoms.name_of(name) == "capabilities") =>
+            (_, Some(("async_dist", Term::Atom(value)))) if value.is_one_of(&["true", "false"]) => {
+                spawn_options.flags.async_dist = value.is_static("true");
+            }
+            (_, Some(("min_heap_size", value)))
+                if let Some(size) = minimum(value.small_integer(), node.min_heap_size) =>
             {
-                let Some(restrictions) =
-                    capability::restrictions(&context.scheduler.atoms, &option[1])
-                else {
-                    return Ok(BifResult::badopt());
-                };
+                use_heap = true;
+                match size {
+                    Ok(size) => heap.min_heap_size = size,
+                    Err(huge) => _ = unsupported.get_or_insert(huge),
+                }
+            }
+            (_, Some(("min_bin_vheap_size", value)))
+                if let Some(size) = minimum(value.small_integer(), node.min_bin_vheap_size) =>
+            {
+                match size {
+                    Ok(size) => heap.min_bin_vheap_size = size,
+                    Err(huge) => _ = unsupported.get_or_insert(huge),
+                }
+            }
+            (_, Some(("fullsweep_after", value)))
+                if let Some(count) = value.small_integer().filter(|count| *count >= 0) =>
+            {
+                // `max_gen_gcs` is a `Uint16` (`erl_process.h:1145`).
+                heap.fullsweep_after = count as u16;
+                use_heap = true;
+            }
+            (_, Some(("max_heap_size", value)))
+                if let Some((size, flags)) = max_heap_size(value, node.max_heap_flags) =>
+            {
+                heap.max_heap_size = size;
+                heap.max_heap_flags = flags;
+                use_heap = true;
+            }
+            (_, Some(("scheduler", value)))
+                if value
+                    .small_integer()
+                    .is_some_and(|index| (0..=schedulers).contains(&index)) =>
+            {
+                use_heap = true;
+            }
+            (_, Some(("capabilities", value)))
+                if let Some(restrictions) = capability::restrictions(atoms, value) =>
+            {
                 spawn_options.capabilities = Some(restrictions);
             }
-            // ponytail: ERTS accepts more options; see "Spawn options" in docs/erts-differences.md.
-            _ => {
-                return Err(error(format!(
-                    "unsupported spawn option {}",
-                    debug_term(option, &context.scheduler.atoms)
-                )));
-            }
+            _ => valid = false,
         }
     }
+    if !valid || (heap.max_heap_size != 0 && heap.max_heap_size < heap.min_heap_size) {
+        return Ok(BifResult::badopt());
+    }
+    if let Some(unsupported) = unsupported {
+        return Err(unsupported);
+    }
+    spawn_options.flags.heap_flags = use_heap.then_some(heap);
     create_process(
         context.scheduler,
         module,

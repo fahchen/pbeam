@@ -194,12 +194,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a measured path depends on the order of timers with the same end.
 - **Source:** review of #150.
 
-### Accept every `erlang:spawn_opt/4` option
-
-- PBeam accepts only `link` and `monitor` and gives a runtime error for each other option. ERTS accepts many more and raises `badarg` for an option it does not know (`erts_parse_spawn_opts`). The "Spawn options" row records this.
-- **Trigger:** a consumer needs another spawn option.
-- **Source:** review of #152.
-
 ### Parse BIF option lists with one shared function
 
 - Each BIF that takes an option list has its own parser: `timer_options` for `erlang:cancel_timer/2` (PR #172), `parse_options` for `re:compile/2`, and the `spawn_opt/4` options. Extract one function that takes the option term and a schema of the accepted options, and returns the parsed values or `badarg` for an option list that is not valid. Each BIF then gives only its schema.
