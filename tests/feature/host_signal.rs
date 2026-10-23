@@ -137,30 +137,22 @@ fn keeps_the_run_alive_after_a_root_exit_normal_as_pinned_erts() {
 const BREAKS: &str = "ready\n\r\nBREAK: (a)bort (A)bort with dump (c)ontinue (p)roc info (i)nfo\r\n       (l)oaded (v)ersion (k)ill (D)b-tables (d)istribution\r\n";
 
 #[test]
-fn gives_a_runtime_error_for_a_crash_dump() {
+fn halts_with_the_slogan_of_a_sigusr1() {
     // `erl_signal_handler` calls `erlang:halt/1` with a slogan for SIGUSR1
-    // (erl_signal_handler.erl:39-41), which writes a crash dump. PBeam
-    // writes no crash dump, so the run gives a runtime error.
-    assert_eq!(
-        run_with_signals(&mut erts("wait"), b"", &[("ready\n", libc::SIGUSR1)]),
-        (
-            Some(1),
-            String::from("ready\n"),
-            String::from("Received SIGUSR1\r\n")
-        ),
-        "ERTS"
-    );
-    assert_eq!(
-        run_with_signals(&mut pbeam("wait"), b"", &[("ready\n", libc::SIGUSR1)]),
-        (
-            Some(1),
-            String::from("ready\n"),
-            String::from(
-                "pbeam: unsupported erlang:halt/2 with a crash dump slogan: PBeam writes no crash dump\n"
-            )
-        ),
-        "PBeam"
-    );
+    // (erl_signal_handler.erl:39-41). ERTS writes the slogan and a crash
+    // dump, and exits with status 1 (bif.c:4372-4386, erl_init.c:2738-2739).
+    // PBeam writes the slogan and no crash dump.
+    for (name, mut command) in [("ERTS", erts("wait")), ("PBeam", pbeam("wait"))] {
+        assert_eq!(
+            run_with_signals(&mut command, b"", &[("ready\n", libc::SIGUSR1)]),
+            (
+                Some(1),
+                String::from("ready\n"),
+                String::from("Received SIGUSR1\r\n")
+            ),
+            "{name}"
+        );
+    }
 }
 
 #[test]

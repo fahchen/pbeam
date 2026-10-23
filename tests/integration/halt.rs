@@ -96,20 +96,17 @@ fn stops_the_run_with_the_status_code_of_halt() {
 }
 
 #[test]
-fn gives_a_runtime_error_for_a_core_dump_or_a_crash_dump() {
+fn gives_a_runtime_error_for_a_core_dump_and_status_1_for_a_crash_dump() {
     // ERTS aborts with a core dump for `abort` (status 134, `SIGABRT`), and
     // writes the slogan and `erl_crash.dump` for a string (status 1). A
     // slogan of 1024 characters with a tail that is not `[]` is also a
     // crash dump, as ERTS cuts it to 1023 characters (measured status 1).
+    // PBeam writes the slogan and no crash dump (tests/feature/run_end.rs).
     assert_eq!(
         pbeam("abort").unwrap_err().to_string(),
         "unsupported erlang:halt/2 with abort: PBeam writes no core dump"
     );
     for function in ["slogan", "long_slogan"] {
-        assert_eq!(
-            pbeam(function).unwrap_err().to_string(),
-            "unsupported erlang:halt/2 with a crash dump slogan: PBeam writes no crash dump",
-            "{function}"
-        );
+        assert_eq!(pbeam(function), Err(BeamError::Halt(1)), "{function}");
     }
 }

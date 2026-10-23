@@ -172,17 +172,11 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### Run the crash dump of `SIGUSR1`
 
-- `SIGUSR1` stops a `pbeam` run with `pbeam: unsupported erlang:halt/2 with a crash dump slogan: PBeam writes no crash dump` and status 1. ERTS writes `Received SIGUSR1` and `erl_crash.dump` and exits with status 1 (erl_signal_handler.erl:39-41, bif.c:4370-4387). The "OS signals" row records this. The break menu of `SIGINT` runs (`break.c:571-687`).
-- **Evidence:** `tests/feature/host_signal.rs` (`gives_a_runtime_error_for_a_crash_dump`).
+- `SIGUSR1` makes a `pbeam` run write the slogan `Received SIGUSR1` and exit with status 1, but PBeam writes no `erl_crash.dump`. ERTS writes `Received SIGUSR1` and `erl_crash.dump` and exits with status 1 (erl_signal_handler.erl:39-41, bif.c:4370-4387). The "OS signals" row records this. The break menu of `SIGINT` runs (`break.c:571-687`).
+- **Evidence:** `tests/feature/host_signal.rs` (`halts_with_the_slogan_of_a_sigusr1`).
 - The work: a crash dump writer with the ERTS file and messages.
 - **Trigger:** a consumer needs a crash dump, which a break command `A` and `erlang:halt/2` with a slogan also request.
 - **Source:** PR for #301.
-
-### Run `at_exit` callbacks and flush the logger before the root exit
-
-- The PBeam boot does not run `at_exit` callbacks and does not flush the logger before the root process returns. Thus a log event that is still in the queue of the async default handler at the root exit is lost. `elixir -e` runs the callbacks, then `Logger.flush()`, and then `System.halt/1` (kernel/cli.ex:58-71). The "Run end" row records this. `fixtures/io_fail` calls `logger_std_h:filesync(default)` so that its report is written before the root exit.
-- **Trigger:** a consumer logs an event just before it returns and needs the event, or a program registers `at_exit` callbacks.
-- **Source:** PR #182 (#169).
 
 ### Compose decomposed UTF-8 native names on macOS
 
@@ -286,12 +280,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Evidence:** `fixtures/bif_cause/bif_cause_probe.erl`, `fixtures/bif_cause/timer_cause_probe.erl`, and `fixtures/ets/ets_cause_probe.erl` match the causes of the BIFs that PBeam runs against the pinned ERTS; the BIFs of the other files give no cause.
 - **Trigger:** a consumer reads the cause of a BIF error, for example the error text of a shell or a logger report, or OTP code that matches the cause.
 - **Source:** [#715](https://github.com/fahchen/pbeam/issues/715).
-
-### Halt the PBeam boot with the `init` crash text
-
-- After #6 (PR #195), the `pbeam` binary writes `pbeam: root process exited with <Reason>` for a root exit. Under `erl -noshell -eval`, ERTS writes `Error! Failed to eval: ...` and then `Runtime terminating during boot (<Reason>)` through `init:crash/2` and `erlang:halt/1` (init.erl:665-679, 1552-1567). Doing the same needs `erlang:halt/1` with a string, which writes the slogan and a crash dump (`erlang:halt/2` with an integer status runs since #301), `erts_internal:term_to_string/2` (it can use the `print_term` of #6), and an `init` process that watches the boot process.
-- **Trigger:** a consumer needs the ERTS crash text byte for byte.
-- **Source:** design of #6.
 
 ### Value checks of `process_flag/2` and `system_flag/2`
 
@@ -498,7 +486,7 @@ The owner opened [m13] Foundation seams ([#908](https://github.com/fahchen/pbeam
 ### M17: Exceptions and diagnostics
 
 - **Reason:** BIF errors have no `error_info` cause, a BIF error after a trap has no stack trace, PBeam writes no report for an uncaught exception, and some failures give a runtime error where ERTS raises an exception.
-- **Evidence:** entries "Give the `error_info` cause of BIF errors" (about 60 ERTS raise sites set `EXF_HAS_EXT_INFO`), "Give the stack trace of a BIF error after a trap", "Send the uncaught-exception report to `logger`", "Raise `undef` for an entry module that the run does not load", and "Halt the PBeam boot with the `init` crash text". A `put_map_assoc` of a term that is not a map gives `unsupported BEAM put_map_assoc source: not a map` (`src/runtime/interpreter.rs:1756`), and `maps:keys/1` of such a term gives a runtime error (`src/runtime/interpreter/bif/maps.rs:40-41`), where ERTS raises `{badmap, Map}` (row "Exception raise sites").
+- **Evidence:** entries "Give the `error_info` cause of BIF errors" (about 60 ERTS raise sites set `EXF_HAS_EXT_INFO`), "Give the stack trace of a BIF error after a trap", "Send the uncaught-exception report to `logger`", and "Raise `undef` for an entry module that the run does not load". A `put_map_assoc` of a term that is not a map gives `unsupported BEAM put_map_assoc source: not a map` (`src/runtime/interpreter.rs:1756`), and `maps:keys/1` of such a term gives a runtime error (`src/runtime/interpreter/bif/maps.rs:40-41`), where ERTS raises `{badmap, Map}` (row "Exception raise sites").
 - **Work:** the `error_info` causes; the stack trace of a BIF error after a trap; the uncaught-exception report to `logger`; `undef` for an entry module that the run does not load; the boot halt with the `init` crash text; `{badmap, Map}` as an exception.
 - **Order:** the report to `logger` comes after the line locations of M13 (#926) and the funs of M16 e2, because `io_lib` calls `erlang:fun_to_list/1` and the report holds the frame locations, so the test expectations are set once. The `error_info` changes touch other files than M14 and can run in parallel with it.
 - **Trigger:** the owner opens the milestone.

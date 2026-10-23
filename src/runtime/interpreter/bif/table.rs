@@ -422,7 +422,7 @@ bifs! {
     erts_internal:system_check/1 => unsupported,
     erts_internal:system_monitor/1 => unsupported,
     erts_internal:system_monitor/3 => unsupported,
-    erts_internal:term_to_string/2 => unsupported,
+    erts_internal:term_to_string/2 as ErtsInternalTermToString2 => |cx, [term, limit]| Ok(erts_internal::term_to_string(&cx.scheduler.atoms, term, limit)),
     erts_internal:term_type/1 => unsupported,
     erts_internal:time_unit/0 as ErtsInternalTimeUnit0 => |_, []| Ok(erts_internal::time_unit()),
     erts_internal:trace/3 => unsupported,

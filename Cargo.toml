@@ -34,6 +34,10 @@ opt-level = 1
 
 # Feature tests run the pbeam binary or a mise task.
 [[test]]
+name = "at_exit"
+path = "tests/feature/at_exit.rs"
+
+[[test]]
 name = "boot"
 path = "tests/feature/boot.rs"
 
@@ -405,6 +409,10 @@ path = "tests/integration/init_boot.rs"
 [[test]]
 name = "group"
 path = "tests/integration/group.rs"
+
+[[test]]
+name = "term_to_string"
+path = "tests/integration/term_to_string.rs"
 
 [[test]]
 name = "halt"
