@@ -10,8 +10,8 @@
 //! - an atom: `(index << 6) | 0xB`, so `true` (index 1) is `0x4B`;
 //! - a small integer: `(value << 4) | 0xF`, so `1` is `0x1F`;
 //! - `[]`: `0x3B`;
-//! - a pid: `(number << 4) | 0x3`, with the PBeam process number as the
-//!   ERTS pid data.
+//! - a pid: `(pixdata(number) << 4) | 0x3`, with the PBeam process number
+//!   as the ERTS pid data, spread over the table index bits.
 //!
 //! Any other term goes through `make_internal_hash`, a MurmurHash3 variant
 //! with two 64-bit states. It reads the term with a work stack, as ERTS does,
@@ -135,8 +135,12 @@ enum Shape<'a> {
 fn shape(term: &Term) -> Shape<'_> {
     match term {
         Term::Atom(atom) => Shape::Immediate(atom_word(atom.index())),
-        Term::Pid(ProcessId(number)) => Shape::Immediate((number << IMMED1_TAG_BITS) | PID_TAG),
-        Term::Port(PortId(number)) => Shape::Immediate((number << IMMED1_TAG_BITS) | PORT_TAG),
+        Term::Pid(ProcessId(number)) => {
+            Shape::Immediate((pixdata(*number) << IMMED1_TAG_BITS) | PID_TAG)
+        }
+        Term::Port(PortId(number)) => {
+            Shape::Immediate((pixdata(*number) << IMMED1_TAG_BITS) | PORT_TAG)
+        }
         Term::Nil => Shape::Immediate(NIL),
         Term::Cons(_) => Shape::List(Cells {
             first: None,
@@ -160,6 +164,30 @@ fn shape(term: &Term) -> Shape<'_> {
         Term::Fun(fun) => Shape::Fun(fun),
         Term::MatchContext(_) => unreachable!("{MATCH_CONTEXT_ESCAPE}"),
     }
+}
+
+/// The index bits of the ERTS process and port tables: `log2` of the
+/// default `process_limit` (`ERTS_DEFAULT_MAX_PROCESSES`,
+/// `erl_process.h:86`) and of the `port_limit` that `erl +Q 1048576` gives.
+const PTAB_BITS: u32 = 20;
+
+/// Spread a pid or port number over the table index bits, as ERTS
+/// `erts_ptab_data2pixdata` does (`erl_ptab.h:301-317`) with 8 slots per
+/// cache line (`erl_ptab.c:405-415`). The word of a local pid or port holds
+/// this value (`erts_ptab_make_id`, `erl_ptab.h:320-326`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(pixdata(1), 8);
+/// assert_eq!(pixdata(1 << 17), 1);
+/// assert_eq!(pixdata(1 << 20), 1 << 20);
+/// ```
+fn pixdata(number: u64) -> u64 {
+    let cli_shift = PTAB_BITS - 3;
+    (number & !((1 << PTAB_BITS) - 1))
+        | ((number & ((1 << cli_shift) - 1)) << 3)
+        | ((number >> cli_shift) & 7)
 }
 
 /// Return the ERTS word of the atom with an atom-table index.
