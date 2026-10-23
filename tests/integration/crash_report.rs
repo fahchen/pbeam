@@ -30,7 +30,7 @@ fn routes_the_error_report_as_the_system_logger_says() {
             "-pa",
             "fixtures/crash_report",
             "-eval",
-            "io:format(\"~w~n\", [crash_report_probe:routes()]), halt().",
+            "io:format(\"~w~n~w~n\", [whereis(logger), crash_report_probe:routes()]), halt().",
         ])
         .output()
         .unwrap();
@@ -41,7 +41,11 @@ fn routes_the_error_report_as_the_system_logger_says() {
         )
     };
     let stdout = String::from_utf8(erts.stdout).unwrap();
-    assert_eq!(stdout, format!("{}\n", tail("<0.72.0>")));
+    // The first value is the pid of the `logger` process that the ERTS boot
+    // starts. Its number depends on the host: `<0.72.0>` on macOS and
+    // `<0.73.0>` on the Linux CI host.
+    let (logger, routes) = stdout.split_once('\n').unwrap();
+    assert_eq!(routes, format!("{}\n", tail(logger)));
     let erlang = pinned_beam("erlang");
     let maps = pinned_beam("maps");
     let program = BeamProgram::load(&[&erlang, &maps, CRASH_REPORT_PROBE]).unwrap();
