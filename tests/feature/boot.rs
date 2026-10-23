@@ -1,7 +1,7 @@
 use std::{
     env, fs,
-    os::unix::ffi::OsStrExt,
-    path::Path,
+    os::unix::ffi::{OsStrExt, OsStringExt},
+    path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
@@ -231,7 +231,7 @@ fn isolated_init_stop() {
 
 /// Return the boot flags `[{root, [Root]}, {bindir, [Bindir]}]` of
 /// `pbeam_boot:start/3`, as the `pbeam` binary gives them for `--root`: it
-/// gives `{bindir, [Root/erts-17.1/bin]}` (row "Boot" of
+/// gives `{bindir, [Bindir]}` (row "Boot" of
 /// `docs/erts-differences.md`).
 fn root_flags(program: &BeamProgram) -> Term {
     let flag = |name: &str, dir: &Path| {
@@ -242,8 +242,54 @@ fn root_flags(program: &BeamProgram) -> Term {
     };
     Term::list_from(vec![
         flag("root", otp_root()),
-        flag("bindir", &otp_root().join("erts-17.1/bin")),
+        flag("bindir", &erts_bindir()),
     ])
+}
+
+/// Return the `bindir` flag that `erl` gives the pinned emulator, as
+/// `init:get_argument(bindir)` gives it.
+fn erts_bindir() -> PathBuf {
+    let output = Command::new("erl")
+        .args([
+            "-noshell",
+            "-eval",
+            "{ok, [[B]]} = init:get_argument(bindir), io:put_chars(B), halt().",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    PathBuf::from(String::from_utf8(output.stdout).unwrap())
+}
+
+#[test]
+fn gives_the_bindir_flag_of_the_root_as_erlexec_does() {
+    // The `erl` script sets `BINDIR` to `$ROOTDIR/erts-%VSN%/bin`
+    // (erl.src.src:52), and `erlexec` gives it with `-bindir`
+    // (erlexec.c:1154-1155). With `--root`, the `pbeam` binary gives the
+    // same `bindir` flag to `pbeam_boot`.
+    let beams = BOOT_MODULES.map(pinned_beam_path);
+    let output = Command::new(env!("CARGO_BIN_EXE_pbeam"))
+        .args(["pbeam_boot", "start", "boot_probe", "bindir", "--root"])
+        .arg(otp_root())
+        .arg("--")
+        .arg(BOOT_PROBE)
+        .args(&beams)
+        .arg(boot_beam())
+        .env("TERM", "dumb")
+        .env("LC_ALL", "C.UTF-8")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let mut expected = erts_bindir().into_os_string().into_vec();
+    expected.push(b'\n');
+    assert_eq!(
+        (
+            output.stdout,
+            output.stderr.as_slice(),
+            output.status.code()
+        ),
+        (expected, &b""[..], Some(0))
+    );
 }
 
 /// Load the pinned boot modules, `probe`, and the boot module.
