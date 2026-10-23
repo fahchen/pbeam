@@ -484,14 +484,24 @@ fn open_fd_port(
     else {
         return Ok(Value(Term::static_atom("einval")));
     };
-    // An fd that is not open has no entry in the fd directory of the
-    // process (`/dev/fd`, which is `/proc/self/fd` on Linux).
-    let closed = |fd| std::fs::symlink_metadata(format!("/dev/fd/{fd}")).is_err();
-    if closed(input) || closed(output) {
-        return Err(error(format!(
-            "unsupported open_port/2 of an fd that is not open: {{fd,{input},{output}}}: see \"Ports\" in docs/erts-differences.md"
-        )));
+    // `fd_start` refuses an fd at or above `sys_max_files()`, the soft
+    // `RLIMIT_NOFILE` (sys_drivers.c:822-824), which `open_port` gives as
+    // `einval`.
+    let max = nix::sys::resource::getrlimit(nix::sys::resource::Resource::RLIMIT_NOFILE)
+        .map_or(u64::MAX, |(soft, _)| soft);
+    if input as u64 >= max || output as u64 >= max {
+        return Ok(Value(Term::static_atom("einval")));
     }
+    // ERTS opens a port on an fd that is not open: the select of the input
+    // fails without a message, and a write fails with `ebadf`. An fd that
+    // is not open has no entry in the fd directory of the process
+    // (`/dev/fd`, which is `/proc/self/fd` on Linux).
+    let closed = |fd| std::fs::symlink_metadata(format!("/dev/fd/{fd}")).is_err();
+    let port_input = if closed(input) {
+        Input::Ended
+    } else {
+        Input::Open
+    };
     let name = format!("{input}/{output}").into_bytes();
     let scheduler = &mut *context.scheduler;
     let check = denial(
@@ -508,7 +518,7 @@ fn open_fd_port(
         soft_eof: settings.eof,
         packets: Packets::new(settings.packet),
         program: Program::Fds(Fds { input, output }),
-        input: Input::Open,
+        input: port_input,
     };
     let port = scheduler.open_port(name, Driver::Spawn(spawn))?;
     Ok(Value(Term::Port(port)))

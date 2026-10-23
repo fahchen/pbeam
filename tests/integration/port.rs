@@ -325,13 +325,22 @@ fn monitors_a_port_as_pinned_erts() {
 }
 
 #[test]
+fn opens_a_port_on_an_fd_that_is_not_open_as_pinned_erts() {
+    // `fd_start` checks only `sys_max_files()` (sys_drivers.c:822-824): the
+    // port opens, and its write fails with `ebadf` (sys_drivers.c:1180-1184).
+    assert_runs(
+        "fd_closed()",
+        "[[],true,[{'EXIT',port,ebadf}],undefined,{error,einval}]",
+    );
+}
+
+#[test]
 fn stops_the_run_for_each_port_part_that_is_not_implemented() {
     let program = load();
     for (case, message) in [
         ("line", "unsupported open_port/2 option line"),
         ("stream", "unsupported open_port/2 option stream"),
         ("list", "unsupported open_port/2 without the binary option"),
-        ("fd", "unsupported open_port/2 of an fd that is not open"),
         (
             "fd_list",
             "unsupported open_port/2 without the binary option",
