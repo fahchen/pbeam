@@ -42,7 +42,7 @@ results() ->
      erlang:phash(P, 1 bsl 32), erlang:phash(E, 1 bsl 32), erlang:phash(Priv, 1 bsl 32),
      erts_debug:flat_size(P), erts_debug:flat_size(E), erts_debug:flat_size({P, P}),
      pdict([P, E, Priv, U, D, #point{x = 2, y = 3}, 1, {3}, [4], 2.5, P#point{y = 7}]),
-     remote(Pub, Priv), ets_range(Pub)].
+     remote(Pub, Priv), ets_range(Pub), map_key(P, E, Pub)].
 
 %% The remote record operations of OTP 29 (`erl_record.c:344-568`).
 remote(Pub, Priv) ->
@@ -117,6 +117,11 @@ ets_range(Pub) ->
     ets:insert(T, [{Pub, 1}, {{a, b}, 2}, {3, 3}]),
     {ets:select(T, [{{{x, q, 7}, 2}, [], [true]}]),
      ets:select(T, [{{{'$1', b}, '_'}, [], ['$1']}])}.
+
+%% Records as flatmap keys: lookup and key order (`erl_map.c`).
+map_key(P, E, Pub) ->
+    M = #{P => 1, E => 2, a => 3, Pub => 4, {t} => 5},
+    {maps:get(P, M), maps:get(Pub, M), [V || {_, V} <- maps:to_list(M)]}.
 
 %% Encode a record; PBeam stops the run until #1039.
 t2b() ->

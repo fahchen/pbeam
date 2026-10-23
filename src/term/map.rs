@@ -1714,7 +1714,7 @@ fn map_hash(key: &Term) -> Option<u64> {
         // allocates nothing.
         Term::Atom(_) | Term::Nil | Term::Binary(_) | Term::Float(_) | Term::Pid(_) => {}
         Term::Reference(reference) if !reference.is_pid_reference() => {}
-        Term::Cons(_) | Term::Tuple(_) | Term::Map(_) | Term::Fun(_) => {
+        Term::Cons(_) | Term::Tuple(_) | Term::Map(_) | Term::Fun(_) | Term::Record(_) => {
             let mut pending = vec![key];
             while let Some(term) = pending.pop() {
                 match term {
@@ -1727,6 +1727,7 @@ fn map_hash(key: &Term) -> Option<u64> {
                         pending.extend(map.iter().flat_map(|(key, value)| [key, value]));
                     }
                     Term::Fun(fun) => pending.extend(fun.free()),
+                    Term::Record(record) => pending.extend(record.values()),
                     _ if term.is_integer() => {}
                     _ => return None,
                 }
