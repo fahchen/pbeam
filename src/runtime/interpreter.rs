@@ -1286,7 +1286,13 @@ impl BeamProgram {
             // `erl_bif_lists.c:1129-1139`, `1191`, `1240-1243`). The other
             // BIFs put the original arguments back
             // (`ERTS_BIF_ERROR_TRAPPED1`, `bif.h:242-249`).
-            let registers = (module == "lists").then(|| arguments.clone());
+            //
+            // The checksum BIFs trap to the export of `crc32/2` or
+            // `adler32/2`, which raises with its own frame and arguments
+            // (`BIF_TRAP2` and `BIF_ERROR`, `erl_bif_chksum.c:300-307`,
+            // `328-334`).
+            let target = matches!((module, function), ("erlang", "crc32" | "adler32"));
+            let registers = (module == "lists" || target).then(|| arguments.clone());
             let result = self.bif_trap(scheduler, module, function, arguments)?;
             let result = match origin {
                 Some(call)
@@ -1302,6 +1308,7 @@ impl BeamProgram {
                         skip,
                     } = call;
                     let arguments = registers.unwrap_or(arguments);
+                    let name = if target { function.to_owned() } else { name };
                     bif_error(scheduler, &module, &name, arguments, result, skip)?
                 }
                 // The BIF traps again and keeps the call.
