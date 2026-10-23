@@ -7,7 +7,7 @@ use std::{
     process::{Command, Stdio},
 };
 
-use pbeam_runtime::{BeamError, BeamProgram, Term};
+use pbeam_runtime::{BeamError, BeamProgram, Schedulers, Term};
 
 #[path = "../common/mod.rs"]
 mod common;
@@ -170,7 +170,7 @@ fn boot_node(probes: &[&[u8]], flags: &[&[u8]]) -> Result<pbeam_runtime::HostTer
         b"-noshell",
     ];
     arguments.extend(flags);
-    program.boot(&arguments)
+    Err(program.boot(&arguments, Schedulers::host()))
 }
 
 /// The environment of the kernel boot: a home directory and a user
@@ -578,5 +578,25 @@ fn keeps_the_module_table_order_of_loaded_after_a_delete_and_a_reload_as_pinned_
         result.term,
         Term::tuple(vec![order(), order(), order()]),
         "PBeam"
+    );
+}
+
+#[test]
+fn stops_the_boot_when_the_first_process_exits_normally() {
+    // `erl_init:start/2` calls `init:boot/1` (erl_init.erl `run/3`). A boot
+    // module whose `boot/1` returns makes the first process exit with the
+    // reason `normal`. The first process is a system process, so its exit
+    // stops the run (erl_process.c:14186-14188).
+    let mut beams = BOOT_MODULES
+        .iter()
+        .filter(|name| **name != "init")
+        .map(|name| pinned_beam(name))
+        .collect::<Vec<_>>();
+    beams.push(include_bytes!("../../fixtures/boot_return/init.beam").to_vec());
+    let slices = beams.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    let program = BeamProgram::load(&slices).unwrap();
+    assert_eq!(
+        program.boot(&[], Schedulers::host()),
+        BeamError::Runtime("System process <0.0.0> terminated: normal".to_owned())
     );
 }

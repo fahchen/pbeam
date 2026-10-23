@@ -3004,6 +3004,7 @@ const ENDIAN: &str = "little";
 /// `AtomTable::put`.
 pub(super) fn system_info(scheduler: &mut Scheduler, item: &Term) -> Result<BifResult, BeamError> {
     let schedulers = scheduler.scheduler_count();
+    let online = i64::try_from(scheduler.node().scheduler_count()).expect("a scheduler count fits");
     let scheduler_id = i64::try_from(scheduler.index() + 1).expect("a scheduler index fits");
     let atoms = &scheduler.atoms;
     match item {
@@ -3019,10 +3020,11 @@ pub(super) fn system_info(scheduler: &mut Scheduler, item: &Term) -> Result<BifR
         Term::Atom(atom) if atoms.name_of(atom) == "schedulers" => {
             Ok(Value(Term::Integer(schedulers)))
         }
+        // Each scheduler thread of the run is online, and
         // `erlang:system_flag/2` cannot change the count of online
-        // schedulers, so each scheduler of the run is online.
+        // schedulers (`erl_init.c:1104-1141`).
         Term::Atom(atom) if atoms.name_of(atom) == "schedulers_online" => {
-            Ok(Value(Term::Integer(schedulers)))
+            Ok(Value(Term::Integer(online)))
         }
         // The scheduler that runs the caller, numbered from 1 (`esdp->no`,
         // `erl_bif_info.c:2784-2786`). A process that moves to another
