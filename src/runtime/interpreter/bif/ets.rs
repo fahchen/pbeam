@@ -2084,14 +2084,8 @@ pub(super) fn select_delete_trap(
         .program(program)
         .cloned()
         .expect("a trapped select delete keeps its program");
-    let turn = tree::select_delete_next(
-        atoms,
-        &mut taken,
-        &compiled,
-        last.clone(),
-        least.clone(),
-        count,
-    )?;
+    let (last, least) = (last.clone(), least.clone());
+    let turn = tree::select_delete_next(atoms, &mut taken, &compiled, last, least, count)?;
     drop(taken);
     drop(ets);
     tree::delete_finish(context, id, &compiled, Some(program), turn)

@@ -128,6 +128,8 @@ fn compares_a_partially_bound_key_as_cmp_partly_bound() {
         Ordering::Greater
     );
     assert_eq!(cmp(&list, &a), Ordering::Greater);
+    let one = Term::list_from(vec![Term::Integer(1)]);
+    assert_eq!(cmp(&one, &one), Ordering::Equal);
     // Two tails that are the same word are equal before the variable check
     // (erl_db_tree.c:3880-3881), so the next element decides.
     let tail = Term::cons(Term::Integer(1), var.clone());

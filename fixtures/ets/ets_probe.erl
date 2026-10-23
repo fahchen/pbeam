@@ -1599,7 +1599,8 @@ ordered_select() ->
         ets:select(T, [{{'$1', '_'}, [{is_atom, '$1'}], ['$1']}], 1000)]
     ++ [select_delete_count(Keys, S)
         || S <- [[{{{1, '_'}, '_'}, [], [true]}], [{{a, '_'}, [], [true]}],
-                 [{{'$1', '_'}, [{is_number, '$1'}], [true]}], [{foo, [], [true]}]]].
+                 [{{'$1', '_'}, [{is_number, '$1'}], [true]}], [{foo, [], [true]}], [{{nokey, '_'}, [], [true]}],
+                 [{{a, '_'}, [], [false]}]]].
 
 select_delete_count(Keys, Spec) ->
     T = ets:new(ets_probe, [ordered_set]),
@@ -1697,6 +1698,7 @@ select_reverse() ->
                            fun() -> ets:select(forged(fun(R) -> {k, [], x, R, [], 0, 0} end)) end,
                            fun() -> ets:select(forged(fun(R) -> {k, [], 1, R, x, 0, 0} end)) end,
                            fun() -> ets:select(forged(fun(_) -> {k} end)) end,
+                           fun() -> ets:select({ets:new(ets_probe, []), k}) end,
                            fun select_delete_gone/0]].
 
 caught(F) ->

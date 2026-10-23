@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::runtime::ets::range::{KeyRange, cmp_partly_bound, key_range};
+use std::cmp::Ordering;
 
 /// The most objects that one turn of a walk reads (`sc.max = 1000`,
 /// `erl_db_tree.c:1309`, `1471`, `1841`, `2132`).
@@ -417,23 +418,21 @@ pub(super) fn next_turn(
     let Turn::Trap(last, end, accum, got, program) = turn else {
         return Ok((turn, reductions));
     };
-    if !end.is_nil() {
-        let order = cmp_partly_bound(atoms, &end, &last)?;
-        // The walk down of a call without a limit ends below the end key,
-        // and each other walk ends above it.
-        if (state.chunk != 0) != state.reverse {
-            if order.is_lt() {
-                return Ok((
-                    chunk_end(state.chunk, 1, got, None, accum, end, program),
-                    reductions,
-                ));
-            }
-        } else if order.is_gt() {
-            return Ok((
-                chunk_end(state.chunk, 1, got, None, accum, end, program),
-                reductions,
-            ));
-        }
+    // The walk down of a call without a limit ends below the end key, and
+    // each other walk ends above it.
+    let above = (state.chunk != 0) != state.reverse;
+    let past = !end.is_nil()
+        && cmp_partly_bound(atoms, &end, &last)?
+            == if above {
+                Ordering::Less
+            } else {
+                Ordering::Greater
+            };
+    if past {
+        return Ok((
+            chunk_end(state.chunk, 1, got, None, accum, end, program),
+            reductions,
+        ));
     }
     Ok((Turn::Trap(last, end, accum, got, program), reductions))
 }
