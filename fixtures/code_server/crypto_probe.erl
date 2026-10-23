@@ -1,5 +1,5 @@
 -module(crypto_probe).
--export([main/0, nifs/0, info/0, supports/0, fips/0, oneshot/0, oneshot_host/0, xof_sizes/0, ciphers/0, ciphers_host/0, hash_init/0, hash_large/0]).
+-export([main/0, nifs/0, info/0, supports/0, fips/0, oneshot/0, oneshot_host/0, xof_sizes/0, ciphers/0, ciphers_host/0, cipher_order/0, hash_init/0, hash_large/0]).
 
 %% Write the results of crypto:strong_rand_bytes/1, one term on each line.
 %% The first call loads crypto on demand, and its -on_load function loads
@@ -88,8 +88,8 @@ supports() ->
     All = crypto:supports(),
     Items = [{Type, [Item || Item <- List, lists:member(Item, Run)]} || {Type, List} <- All],
     Lists = [crypto:supports(Type) || {Type, _} <- All],
-    %% The order of the ciphers follows the atom indexes, which change from
-    %% run to run (cipher.c:239, 395-416), so the probe sorts them.
+    %% The probe cipher_order/0 checks the order of the ciphers, so this probe
+    %% sorts them.
     Sorted = [{Type, case Type of ciphers -> lists:sort(List); _ -> List end}
               || {Type, List} <- Items],
     io:format("~p~n", [[length(lists:append([List || {_, List} <- All])), Sorted,
@@ -167,6 +167,18 @@ cmacs(Ciphers) ->
 %% gives 16/32 on OpenSSL 3.0-3.3 and 0 from 3.4 (evp_lib.c:1041 in 3.5.5).
 xof_sizes() ->
     io:format("~p~n", [[maps:get(size, crypto:hash_info(Type)) || Type <- [shake128, shake256]]]).
+
+%% Write crypto:supports(ciphers) in its order. cipher_algorithms/0 sorts the
+%% table by atom (cipher.c:239, 395-416), and the atom indexes come from the
+%% atom chunks of the modules that load first, so the order is the same on
+%% each run. The probe keeps only the ciphers that PBeam runs, because the
+%% libcrypto of the Linux CI host also has the legacy ciphers.
+cipher_order() ->
+    Run = run_ciphers() ++ [aes_cbc, aes_ccm, aes_cfb128, aes_cfb8, aes_ctr, aes_ecb, aes_gcm],
+    %% ERTS makes the atom des_ede3_cbc at boot, which PBeam does not run (row
+    %% "Atom table" of docs/erts-differences.md), so the probe prints it apart.
+    Order = [C || C <- crypto:supports(ciphers), lists:member(C, Run)],
+    io:format("~p~n", [{Order -- [des_ede3_cbc], lists:member(des_ede3_cbc, Order)}]).
 
 %% The ciphers of the table cipher.c:30-173 that the OpenSSL 3 default
 %% provider has. The AEAD ciphers are the last nine.

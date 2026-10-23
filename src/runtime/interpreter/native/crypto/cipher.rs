@@ -100,7 +100,10 @@ pub(super) fn put_cipher_atoms(atoms: &AtomTable) {
 /// (`cipher_types_as_list`, `cipher.c:395-416`): each cipher of `CIPHERS`
 /// that the static OpenSSL has. ERTS sorts the table by the atom of each
 /// name (`cipher.c:239`) and builds the list in reverse, so the order is
-/// that of the atom indexes, from the highest to the lowest.
+/// that of the atom indexes, from the highest to the lowest. The atom
+/// chunks of the modules that load before the library, such as
+/// `crypto.beam`, fix these indexes, so the order is the same on each run
+/// and equal to that of the pinned ERTS for the same modules.
 ///
 /// # Examples
 ///

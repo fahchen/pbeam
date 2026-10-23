@@ -434,6 +434,23 @@ fn runs_the_one_shot_crypto_ciphers_as_pinned_erts() {
         &[],
     ));
     assert!(erts.contains("Bad tag in option"), "{erts}");
+    // cipher_algorithms/0 lists the ciphers in the order of their atom
+    // indexes (cipher.c:239, 395-416), which is the same on each run.
+    let order = run(&mut erts_probe(
+        CRYPTO_PROBE,
+        "crypto_probe",
+        "cipher_order",
+        &[],
+    ));
+    assert_eq!(
+        run(&mut pbeam_probe(
+            CRYPTO_PROBE,
+            "crypto_probe",
+            "cipher_order",
+            &[]
+        )),
+        order
+    );
     assert_eq!(
         run(&mut pbeam_probe(
             CRYPTO_PROBE,
