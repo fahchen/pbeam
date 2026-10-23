@@ -72,6 +72,8 @@ kem_errors() ->
         fun() -> crypto:encapsulate_key("mlkem512", <<1>>) end,
         fun() -> crypto:encapsulate_key(Long, <<1>>) end,
         fun() -> crypto:encapsulate_key(foo, <<1>>) end,
+        fun() -> crypto:encapsulate_key(rsa, a) end,
+        fun() -> crypto:decapsulate_key(mldsa44, a, <<>>) end,
         fun() -> crypto:decapsulate_key(mlkem768, <<1>>, a) end,
         fun() -> crypto:decapsulate_key(mlkem768, <<1>>, <<>>) end,
         fun() -> crypto:decapsulate_key(foo, a, <<>>) end]]]).

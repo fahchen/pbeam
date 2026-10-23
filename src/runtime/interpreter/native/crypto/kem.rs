@@ -28,18 +28,33 @@ const ML_KEM_NAMES: [(&str, i32); 12] = [
     ("MLKEM1024", 1456),
 ];
 
-/// Return the key type of the ML-KEM name of the atom `name`, or the
-/// failure of `pkey.c:610-617` for another name.
-fn kem_id(scheduler: &Scheduler, name: &Term) -> Result<Id, Failure> {
+/// Return the key type of the ML-KEM name of the atom `name` and the bytes
+/// of the key binary `key`, or the failure of `pkey.c:610-622`. Another
+/// name that OpenSSL loads a key type from gives a runtime error after the
+/// check of the key binary (`pkey.c:620-622`).
+fn kem_key<'a>(
+    scheduler: &Scheduler,
+    name: &Term,
+    key: &'a Term,
+) -> Result<(Id, &'a [u8]), Failure> {
     let algorithm = match name {
         Term::Atom(_) => atom_name(scheduler, name),
         _ => "",
     };
-    ML_KEM_NAMES
+    let id = ML_KEM_NAMES
         .iter()
         .find(|(known, _)| known.eq_ignore_ascii_case(algorithm))
-        .map(|&(_, nid)| Id::from_raw(nid))
-        .ok_or_else(|| octet_string_key(scheduler, algorithm, name, None))
+        .map(|&(_, nid)| Id::from_raw(nid));
+    match id {
+        Some(id) => Ok((id, octet_string(key)?)),
+        None => match octet_string_key(scheduler, algorithm, name, None) {
+            Failure::Unsupported(part) => {
+                octet_string(key)?;
+                Err(Failure::Unsupported(part))
+            }
+            check => Err(check),
+        },
+    }
 }
 
 /// Return the failure of the operation that the safe `openssl` crate does
@@ -91,12 +106,12 @@ pub(super) fn decapsulate_key_nif(
 
 /// Build the public key of `get_pkey_from_octet_string` with `PKEY_PUB`.
 fn public_key(scheduler: &Scheduler, name: &Term, key: &Term) -> Result<PKey<Public>, Failure> {
-    let id = kem_id(scheduler, name)?;
-    PKey::public_key_from_raw_bytes(octet_string(key)?, id).map_err(|_| fromdata_failed())
+    let (id, bytes) = kem_key(scheduler, name, key)?;
+    PKey::public_key_from_raw_bytes(bytes, id).map_err(|_| fromdata_failed())
 }
 
 /// Build the private key of `get_pkey_from_octet_string` with `PKEY_PRIV`.
 fn private_key(scheduler: &Scheduler, name: &Term, key: &Term) -> Result<PKey<Private>, Failure> {
-    let id = kem_id(scheduler, name)?;
-    PKey::private_key_from_raw_bytes(octet_string(key)?, id).map_err(|_| fromdata_failed())
+    let (id, bytes) = kem_key(scheduler, name, key)?;
+    PKey::private_key_from_raw_bytes(bytes, id).map_err(|_| fromdata_failed())
 }
