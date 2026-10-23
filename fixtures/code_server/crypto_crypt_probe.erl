@@ -78,7 +78,7 @@ errors() ->
                 fun() -> crypto:public_decrypt(rsa, Msg, rsa_pub(), []) end,
                 fun() -> crypto:public_encrypt(rsa, binary:copy(Msg, 50), rsa_pub(), []) end,
                 fun() -> crypto:public_encrypt(rsa, Msg, rsa_pub(), rsa_no_padding) end,
-                fun() -> crypto:public_encrypt(ecdsa, Msg, [ec_priv(), secp256r1], [a]) end,
+                fun() -> crypto:public_encrypt(ecdsa, Msg, [ec_pub(), secp256r1], [a]) end,
                 fun() -> crypto:public_encrypt(ecdsa, Msg, [<<1>>, secp256r1], []) end,
                 fun() -> crypto:private_encrypt(dss, Msg, [<<1>>], []) end,
                 fun() -> crypto:private_encrypt(eddsa, Msg, [<<1>>, ed25519], []) end]].
