@@ -83,6 +83,7 @@ fn serves_hello_world_from_the_plug_example_as_pinned_erts() {
         Some(env!("CARGO_BIN_EXE_pbeam")),
     );
     let bundled = serve_one_file();
+    serves_concurrent_requests_on_several_schedulers_as_pinned_erts();
     // The NIF record of this acceptance: each module of a NIF library that
     // the release boot loads. A module with an `on_load` function is loaded
     // only when the function returns `ok`, so `erlang:load_nif/2` gave `ok`
@@ -127,7 +128,9 @@ const SCHEDULER_OPTIONS: &str =
 /// The count of concurrent requests of the run on several schedulers.
 const CONCURRENT_REQUESTS: usize = 16;
 
-#[test]
+/// Check the one-file run on several schedulers. The serve test calls it
+/// after its build of the release, so that no other test rewrites
+/// `target/examples/plug_hello` while the pinned ERTS runs it.
 fn serves_concurrent_requests_on_several_schedulers_as_pinned_erts() {
     // The one-file executable boots the release on 4 schedulers with
     // `ELIXIR_ERL_OPTIONS="+S 4"`, as `bin/plug_hello start` does on the
