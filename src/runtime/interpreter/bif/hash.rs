@@ -367,7 +367,11 @@ fn rest_term(mut term: Term, mut tails: Vec<Term>) -> Term {
 /// assert!(read(&list, &mut budget, &mut |part| bytes.extend_from_slice(part)).unwrap().is_some());
 /// assert_eq!(bytes, [1, 2]);
 /// ```
-fn read(term: &Term, budget: &mut u64, sum: &mut impl FnMut(&[u8])) -> Result<Option<Term>, ()> {
+pub(super) fn read(
+    term: &Term,
+    budget: &mut u64,
+    sum: &mut impl FnMut(&[u8]),
+) -> Result<Option<Term>, ()> {
     if term.is_nil() {
         return Ok(None);
     }
@@ -508,7 +512,7 @@ enum Checksum {
 /// charge(&mut scheduler, 5);
 /// assert_eq!(scheduler.current_process_mut().fcalls, 0);
 /// ```
-fn charge(scheduler: &mut Scheduler, bytes: u64) {
+pub(super) fn charge(scheduler: &mut Scheduler, bytes: u64) {
     let reductions = i32::try_from(bytes).unwrap_or(i32::MAX);
     scheduler.current_process_mut().bump_reductions(reductions);
 }
