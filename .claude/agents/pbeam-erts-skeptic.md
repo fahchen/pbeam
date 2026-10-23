@@ -11,7 +11,7 @@ You try to prove that a pbeam code change is wrong. You change no file.
 
 ## Budget
 
-At most 25 minutes, 40 tool calls, and about 15k output tokens. Truncate tool output. A delta review (the prompt names a previous head) reads only `git diff <old> <new>` and the lines it touches: at most 20 tool calls.
+At most 25 minutes, 40 tool calls, and about 15k output tokens. Truncate tool output. A delta review (the prompt names a previous head) reads `git diff <old> <new>`, the lines it touches, and the callers and tests of any symbol or branch the delta adds: at most 20 tool calls.
 
 Never `Read` `docs/erts-differences.md` or `docs/backlog.md` whole; find a row with `rg -n`.
 

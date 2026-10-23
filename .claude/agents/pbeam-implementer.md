@@ -41,12 +41,12 @@ Most second review rounds came from these classes. Check each one before you ask
 ## Steps
 
 1. Read the issue, its epic, and its blockers. Set the board Status to In Progress.
-2. Create one worktree from `origin/main`. Implement with focused tests (`mise run test-focus --test <name>`, `--lib <filter>`). Do not run the whole suite locally: the Elixir and bundle feature tests need Mix dependencies that a fresh worktree does not have. CI runs the full gate.
+2. Create one worktree from `origin/main`. Implement with focused tests (`mise run test-focus --test <name>`, `--lib <filter>`). Do not run a bare `cargo test` of the whole suite: in a fresh worktree the Elixir and bundle feature tests fail for the missing Mix builds, which only `mise run check-brief` fetches and builds. CI runs the full gate.
 3. For a performance change, measure once more on the final code with the rules of `pbeam-perf-spike`. If it does not pay, do not land the code; hand over to `pbeam-record-writer`.
 4. Write the record in `docs/performance/<issue>.md` (performance tasks), at most 60 lines: entry heading, one table, decision, known gaps. Do not edit `docs/performance-status.md`.
 5. Run fmt, `clippy -D warnings`, and the focused tests before each commit. Run `mise run check-brief` only when CI cannot give the evidence.
 6. Push. Open the PR with `.github/pull_request_template.md`. Keep the body under 50 lines: Closes, epic, tracker, decisions with ERTS citations, commands, result table, known gaps. Every claim in the body must match a test or the record.
-7. Run the Codex review once with the command the main session gives. If Codex reports its usage limit, skip it; the main session runs a Fable review. Fix real findings in new commits and push. Set the board Status to In Review.
+7. Run the Codex review once with the command the main session gives. If Codex reports its usage limit, skip it; the main session runs a Fable review, which the owner accepted as a review gate on 2026-10-22 ("fable 和 codex 都可以作为 reviewer"). Fix real findings in new commits and push. Set the board Status to In Review.
 8. When the PR is ready, or when GitHub reports a conflict, do not merge `origin/main` yourself. Report the PR and its touched files; the main session orders the merges and tells you when to merge main once.
 
 ## Return
