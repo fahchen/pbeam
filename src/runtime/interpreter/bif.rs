@@ -2,7 +2,7 @@
 //!
 //! The `bifs!` table in `table.rs` lists each BIF with its implementation.
 //! The `binary`, `erlang`, `erts_internal`, `ets`, `file`, `hash`, `iolist`,
-//! `lists`, `maps`, `math`, `os`, `re`, and `unicode` modules hold the BIF
+//! `lists`, `maps`, `math`, `os`, `re`, `records`, and `unicode` modules hold the BIF
 //! bodies that do not fit on one table line.
 //! The `pbeam_cap` module holds the bodies of the PBeam BIFs, which are not
 //! in `bif.tab`. The `io_service` module holds the IO service entry of the
@@ -36,6 +36,7 @@ mod packet;
 mod pbeam_cap;
 mod persistent_term;
 mod re;
+mod records;
 mod subtract;
 mod term;
 mod timer;
