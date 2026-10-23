@@ -20,9 +20,9 @@ use integer::{Arith, Bitwise};
 
 bifs! {
     atomics:add/3 as AtomicsAdd3 => |cx, [reference, index, increment]| atomics::add(cx.scheduler, reference, index, increment),
-    atomics:add_get/3 => unsupported,
-    atomics:compare_exchange/4 => unsupported,
-    atomics:exchange/3 => unsupported,
+    atomics:add_get/3 as AtomicsAddGet3 => |cx, [reference, index, increment]| atomics::add_get(cx.scheduler, reference, index, increment),
+    atomics:compare_exchange/4 as AtomicsCompareExchange4 => |cx, [reference, index, expected, desired]| atomics::compare_exchange(cx.scheduler, reference, index, expected, desired),
+    atomics:exchange/3 as AtomicsExchange3 => |cx, [reference, index, desired]| atomics::exchange(cx.scheduler, reference, index, desired),
     atomics:get/2 as AtomicsGet2 => |cx, [reference, index]| atomics::get(cx.scheduler, reference, index),
     atomics:info/1 as AtomicsInfo1 => |cx, [reference]| atomics::info(cx.scheduler, reference),
     atomics:put/3 as AtomicsPut3 => |cx, [reference, index, value]| atomics::put(cx.scheduler, reference, index, value),

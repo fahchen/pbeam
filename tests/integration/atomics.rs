@@ -485,20 +485,51 @@ fn runs_the_write_concurrency_counters_as_pinned_erts() {
     );
 }
 
+/// The value of each root of the race of `atomics_probe:race_owner/0` and
+/// `atomics_probe:race_peer/0`: 2 * 20000 increments on each atomic.
+const RACE: &str = "[{40000,40000},{40000,40000}]\n";
+
 #[test]
-fn gives_a_clear_runtime_error_for_the_parts_that_pbeam_does_not_implement() {
-    // `atomics:add_get/3` and `atomics:exchange/3` are `atomics` functions
-    // that the `counters` module does not call. PBeam does not implement
-    // them, and `docs/erts-differences.md` records that each call gives an
-    // unresolved MFA error.
+fn runs_add_get_exchange_and_compare_exchange_as_pinned_erts() {
+    // `atomics_probe:exchange/0` gives `ok` when each case of
+    // `atomics:add_get/3`, `atomics:exchange/3`, and
+    // `atomics:compare_exchange/4` gives the term that the pinned ERTS gives
+    // (`erl_bif_atomics.c:187-227`), and else the cases that differ.
     let program = program();
-    let error = program
-        .execute("atomics_probe", "atomics_only", &[])
-        .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("unresolved external MFA atomics:add_get/3"),
-        "{error}"
+    let actual = program
+        .execute("atomics_probe", "exchange", &[])
+        .unwrap()
+        .term;
+    assert_eq!(
+        actual,
+        Term::Atom(program.atom("ok").unwrap()),
+        "{actual:?}"
     );
+    assert_eq!(reference("exchange"), b"ok\n");
+}
+
+#[test]
+fn runs_compare_exchange_and_add_get_on_two_schedulers_as_pinned_erts() {
+    // Two roots on two scheduler threads increment one array, atomic 1
+    // with `compare_exchange/4` retries and atomic 2 with `add_get/3`. No
+    // increment is lost, as with `erts_atomic64_cmpxchg_mb` and
+    // `erts_atomic64_add_read_mb` on ERTS (`erl_bif_atomics.c:197`, `225`).
+    let program = program();
+    let results = program
+        .execute_on_schedulers(&[
+            ("atomics_probe", "race_owner"),
+            ("atomics_probe", "race_peer"),
+        ])
+        .unwrap();
+    let pair = Term::tuple(vec![Term::Integer(40000), Term::Integer(40000)]);
+    for result in results {
+        assert_eq!(result.term, pair);
+    }
+    let output = Command::new("erl")
+        .args(["+S", "2", "-noshell", "-pa", "fixtures/atomics", "-eval"])
+        .arg("P = self(), [spawn(fun() -> P ! atomics_probe:F() end) || F <- [race_owner, race_peer]], io:format(\"~w~n\", [[receive R -> R end || _ <- [1, 2]]]), halt().")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), RACE);
 }

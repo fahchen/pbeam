@@ -1,6 +1,7 @@
 -module(atomics_probe).
 -export([main/0, allocation_failure/0, write_concurrency/0,
-         write_concurrency_allocation_failure/0, atomics_only/0]).
+         write_concurrency_allocation_failure/0, exchange/0,
+         race_owner/0, race_peer/0]).
 
 %% The `counters` calls of the Elixir Logger start of the plug_hello
 %% release: `counters:new(1, [atomics])` in
@@ -120,11 +121,120 @@ write_concurrency() ->
 write_concurrency_allocation_failure() ->
     reason(fun() -> counters:new((1 bsl 59) - 1, [write_concurrency]) end).
 
-%% The `atomics` functions that the `counters` module does not call, which
-%% PBeam does not implement. Only a PBeam run calls it.
-atomics_only() ->
-    Ref = atomics:new(1, []),
-    [atomics:add_get(Ref, 1, 1), atomics:exchange(Ref, 1, 1)].
+%% `atomics:add_get/3`, `atomics:exchange/3`, and
+%% `atomics:compare_exchange/4` (`erl_bif_atomics.c:187-227`). Give `ok`
+%% when each case gives the expected term, or the list of the cases that
+%% do not.
+exchange() ->
+    MaxS = (1 bsl 63) - 1,
+    MinS = -(1 bsl 63),
+    MaxU = (1 bsl 64) - 1,
+    Badarg = fun(F, A) ->
+                     {error, badarg,
+                      {atomics, F, A, [{error_info, #{module => erl_erts_errors}}]}}
+             end,
+    Cases =
+        [{add_get, call(fun() -> atomics:add_get(signed(2), 1, 5) end), 7},
+         {add_get_signed_wrap, call(fun() -> atomics:add_get(signed(MaxS), 1, 1) end), MinS},
+         {add_get_unsigned_wrap, call(fun() -> atomics:add_get(unsigned(MaxU), 1, 1) end), 0},
+         {add_get_unsigned_negative, call(fun() -> atomics:add_get(unsigned(0), 1, -1) end), MaxU},
+         {add_get_signed_unsigned_incr, call(fun() -> atomics:add_get(signed(0), 1, MaxU) end), -1},
+         {add_get_unsigned_bignum, call(fun() -> atomics:add_get(unsigned(0), 1, 1 bsl 63) end), 1 bsl 63},
+         {add_get_stores, call(fun() -> atomics:get(add_get(signed(1), 1, -3), 1) end), -2},
+         {exchange_signed, call(fun() -> atomics:exchange(signed(-3), 1, 7) end), -3},
+         {exchange_unsigned, call(fun() -> atomics:exchange(unsigned(MaxU), 1, 1) end), MaxU},
+         {exchange_stores, call(fun() -> atomics:get(exchange(unsigned(0), 1, MaxU), 1) end), MaxU},
+         {cas_hit, call(fun() -> atomics:compare_exchange(signed(1), 1, 1, 2) end), ok},
+         {cas_hit_stores, call(fun() -> atomics:get(cas(signed(1), 1, 1, MinS), 1) end), MinS},
+         {cas_miss, call(fun() -> atomics:compare_exchange(signed(MinS), 1, 0, 2) end), MinS},
+         {cas_miss_keeps, call(fun() -> atomics:get(cas(signed(5), 1, 0, 2), 1) end), 5},
+         {cas_miss_unsigned, call(fun() -> atomics:compare_exchange(unsigned(MaxU), 1, 0, 1) end), MaxU},
+         {cas_hit_unsigned, call(fun() -> atomics:compare_exchange(unsigned(MaxU), 1, MaxU, 0) end), ok},
+         {add_get_not_a_reference, call(fun() -> atomics:add_get(5, 1, 1) end),
+          Badarg(add_get, [5, 1, 1])},
+         {add_get_index_zero, call(fun() -> atomics:add_get(signed(0), 0, 1) end),
+          Badarg(add_get, [reference, 0, 1])},
+         {add_get_index_above_size, call(fun() -> atomics:add_get(signed(0), 2, 1) end),
+          Badarg(add_get, [reference, 2, 1])},
+         {add_get_above_both_ranges, call(fun() -> atomics:add_get(signed(0), 1, 1 bsl 64) end),
+          Badarg(add_get, [reference, 1, 1 bsl 64])},
+         {add_get_not_an_integer, call(fun() -> atomics:add_get(signed(0), 1, 1.0) end),
+          Badarg(add_get, [reference, 1, 1.0])},
+         {exchange_not_a_reference, call(fun() -> atomics:exchange(make_ref(), 1, 1) end),
+          Badarg(exchange, [reference, 1, 1])},
+         {exchange_index_not_an_integer, call(fun() -> atomics:exchange(signed(0), x, 1) end),
+          Badarg(exchange, [reference, x, 1])},
+         {exchange_above_signed_range, call(fun() -> atomics:exchange(signed(0), 1, 1 bsl 63) end),
+          Badarg(exchange, [reference, 1, 1 bsl 63])},
+         {exchange_below_unsigned_range, call(fun() -> atomics:exchange(unsigned(0), 1, -1) end),
+          Badarg(exchange, [reference, 1, -1])},
+         {cas_not_a_reference, call(fun() -> atomics:compare_exchange(5, 1, 0, 0) end),
+          Badarg(compare_exchange, [5, 1, 0, 0])},
+         {cas_index_above_size, call(fun() -> atomics:compare_exchange(signed(0), 2, 0, 0) end),
+          Badarg(compare_exchange, [reference, 2, 0, 0])},
+         {cas_bad_expected, call(fun() -> atomics:compare_exchange(unsigned(0), 1, -1, 0) end),
+          Badarg(compare_exchange, [reference, 1, -1, 0])},
+         {cas_bad_desired, call(fun() -> atomics:compare_exchange(signed(0), 1, 0, MaxU) end),
+          Badarg(compare_exchange, [reference, 1, 0, MaxU])},
+         {cas_bad_desired_not_an_integer, call(fun() -> atomics:compare_exchange(signed(0), 1, 0, 1.0) end),
+          Badarg(compare_exchange, [reference, 1, 0, 1.0])}],
+    case [{Label, Got} || {Label, Got, Want} <- Cases, Got =/= Want] of
+        [] -> ok;
+        Failed -> Failed
+    end.
+
+%% The rounds of each process of the race.
+-define(ROUNDS, 20000).
+
+%% The first root of a race of two schedulers on one array. It makes the
+%% array and publishes it through `persistent_term`, and then runs the
+%% race.
+race_owner() ->
+    Ref = atomics:new(2, []),
+    persistent_term:put(atomics_probe_race, Ref),
+    race(Ref).
+
+%% The second root of the race. It waits for the array of the owner.
+race_peer() ->
+    race(wait_for_array()).
+
+wait_for_array() ->
+    case persistent_term:get(atomics_probe_race, undefined) of
+        undefined -> erlang:yield(), wait_for_array();
+        Ref -> Ref
+    end.
+
+%% Increment atomic 1 with `compare_exchange/4` retries and atomic 2 with
+%% `add_get/3`, then wait until the other root is done. Each atomic holds
+%% the count of the increments of the two roots when both are done.
+race(Ref) ->
+    cas_rounds(Ref, ?ROUNDS),
+    add_get_rounds(Ref, ?ROUNDS),
+    wait_until(Ref, 2 * ?ROUNDS),
+    {atomics:get(Ref, 1), atomics:exchange(Ref, 2, 2 * ?ROUNDS)}.
+
+cas_rounds(_Ref, 0) -> ok;
+cas_rounds(Ref, N) ->
+    cas_increment(Ref, atomics:get(Ref, 1)),
+    cas_rounds(Ref, N - 1).
+
+cas_increment(Ref, Old) ->
+    case atomics:compare_exchange(Ref, 1, Old, Old + 1) of
+        ok -> ok;
+        Current -> cas_increment(Ref, Current)
+    end.
+
+add_get_rounds(_Ref, 0) -> ok;
+add_get_rounds(Ref, N) ->
+    New = atomics:add_get(Ref, 2, 1),
+    true = New >= 1 andalso New =< 2 * ?ROUNDS,
+    add_get_rounds(Ref, N - 1).
+
+wait_until(Ref, Total) ->
+    case atomics:get(Ref, 1) =:= Total andalso atomics:get(Ref, 2) =:= Total of
+        true -> ok;
+        false -> erlang:yield(), wait_until(Ref, Total)
+    end.
 
 %% A signed array of one atomic with the value `Value`.
 signed(Value) ->
@@ -141,6 +251,21 @@ unsigned(Value) ->
 %% Add `Increment` to the atomic `Index` of `Ref`.
 add(Ref, Index, Increment) ->
     ok = atomics:add(Ref, Index, Increment),
+    Ref.
+
+%% Add `Increment` to the atomic `Index` of `Ref` with `add_get/3`.
+add_get(Ref, Index, Increment) ->
+    _ = atomics:add_get(Ref, Index, Increment),
+    Ref.
+
+%% Exchange the atomic `Index` of `Ref` for `Value`.
+exchange(Ref, Index, Value) ->
+    _ = atomics:exchange(Ref, Index, Value),
+    Ref.
+
+%% Run `compare_exchange/4` on the atomic `Index` of `Ref`.
+cas(Ref, Index, Expected, Desired) ->
+    _ = atomics:compare_exchange(Ref, Index, Expected, Desired),
     Ref.
 
 %% Write `Value` to the atomic `Index` of `Ref`.

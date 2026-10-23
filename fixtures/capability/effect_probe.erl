@@ -580,6 +580,9 @@ ambient() ->
         atomics:get(Array, 1),
         atomics:put(Array, 1, 7),
         maps:get(memory, atomics:info(Array)),
+        atomics:add_get(Array, 1, 1),
+        atomics:exchange(Array, 1, 3),
+        atomics:compare_exchange(Array, 1, 3, 4),
         %% The default arity clock BIFs and the host identifiers, each
         %% reduced to a stable sign by the helpers below. The sibling task
         %% #754 already calls `erlang:monotonic_time/0` and
