@@ -3639,7 +3639,10 @@ impl Scheduler {
         let mut next = match process.continue_exit.take() {
             Some(next) => next,
             None => {
-                if std::mem::take(&mut process.log_exit) {
+                // A root process stands for the `-eval` process of `erl`,
+                // whose exception `init:start_it/1` catches
+                // (init.erl:1552-1567), so it sends no report.
+                if std::mem::take(&mut process.log_exit) && process.root.is_none() {
                     self.send_exit_report(id, &reason)?;
                 }
                 let process = self.current_process_mut();
