@@ -2943,9 +2943,6 @@ impl BeamProgram {
                         cursor.module.tables.name(frame.function)
                     )));
                 }
-                Instruction::Unsupported(opcode) => {
-                    return Err(error(format!("unsupported BEAM opcode {opcode}")));
-                }
                 // ERTS `i_func_info` raises class `error` with the reason
                 // `function_clause` (`emit_i_func_info_shared` in
                 // `jit/arm/beam_asm_module.cpp:484-497`; emu

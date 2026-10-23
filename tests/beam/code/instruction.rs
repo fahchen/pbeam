@@ -2968,8 +2968,6 @@ fn skips_pinned_module_instruction_operands_and_rejects_truncation() {
         (OPCODE_TEST_TAGGED_TUPLE, 4),
         (OPCODE_TEST_IS_MAP, 2),
         (OPCODE_PUT_MAP_ASSOC, 5),
-        (OPCODE_GET_RECORD_ELEMENTS, 3),
-        (OPCODE_PUT_RECORD, 6),
         (OPCODE_PUT_TUPLE2, 2),
         (OPCODE_INIT_YREGS, 1),
     ] {
@@ -3335,7 +3333,6 @@ fn arm_field_bytes(instruction: &Instruction) -> usize {
         } => {
             size_of_val(arity) + size_of_val(function) + size_of_val(tail) + size_of_val(deallocate)
         }
-        Instruction::Unsupported(field_0) => size_of_val(field_0),
         Instruction::Catch { register, label } => size_of_val(register) + size_of_val(label),
         Instruction::TryEnd { register } => size_of_val(register),
         Instruction::TryCase { register } => size_of_val(register),
@@ -4130,15 +4127,9 @@ fn code_with(parts: &[&[u8]]) -> Vec<u8> {
 }
 
 #[test]
-fn keeps_a_known_unsupported_opcode_with_its_operands_skipped() {
-    // `get_record_elements` (188) and `put_record` (189) are the opcodes
-    // that the loader accepts and the runtime cannot execute (row
-    // "Unimplemented instructions"). The skip list holds the operand count
-    // of each opcode, and the two record opcodes also hold an operand
-    // list. `get_record_elements` with the three operands 1, 1, 1 and no
-    // listed operand gives `Instruction::Unsupported`.
-    let parts: [&[u8]; 1] = [&[188, 0x10, 0x10, 0x10, 0x00]];
-    let (instructions, _, _) = parse_code(
+fn rejects_an_opcode_that_the_loader_does_not_decode() {
+    let parts: [&[u8]; 1] = [&[250, 0x10]];
+    let error = parse_code(
         &code_with(&parts),
         &AtomTable::new(),
         &[],
@@ -4149,13 +4140,10 @@ fn keeps_a_known_unsupported_opcode_with_its_operands_skipped() {
         &[],
         &mut LineTable::default(),
     )
-    .unwrap();
+    .unwrap_err();
     assert!(
-        matches!(
-            instructions.as_slice(),
-            [Instruction::Unsupported(188), Instruction::End]
-        ),
-        "{instructions:?}"
+        error.to_string().contains("unsupported BEAM opcode 250"),
+        "{error}"
     );
 }
 

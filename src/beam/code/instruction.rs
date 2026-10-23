@@ -599,8 +599,6 @@ pub(crate) enum Instruction {
         tail: bool,
         deallocate: u32,
     },
-    /// An instruction that is parsed so the module can load, but cannot run.
-    Unsupported(u8),
     /// Writes a catch tag to a Y register. While the tag is live, an
     /// exception continues after `label`. `try` (opcode 104) and `catch`
     /// (opcode 62) both map here, because the ERTS loader rewrites
@@ -3078,10 +3076,7 @@ pub(super) fn parse_code(
                 instructions.push(Instruction::End);
                 return Ok((instructions, number_of_labels, on_load));
             }
-            _ => {
-                skip_unsupported_instruction(opcode, data, &mut cursor)?;
-                Instruction::Unsupported(opcode)
-            }
+            _ => return Err(error(format!("unsupported BEAM opcode {opcode}"))),
         };
         instructions.push(instruction);
     }
