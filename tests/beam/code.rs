@@ -579,6 +579,8 @@ fn parses_the_records_chunk_as_pinned_erts() {
         recs(1, 0, &[]),
         recs(0, -1, &[]),
         recs(0, 1, &[6]),
+        recs(0, 1, &[5, 0x02]),
+        recs(0, 1, &[5, 0x01]),
         record(0x52, 0x20, &[0x00]),
         record(0x32, 0x10, &[0x00]),
         record(0x32, 0x20, &[0x03]),

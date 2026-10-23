@@ -42,7 +42,12 @@ results() ->
      erlang:phash(P, 1 bsl 32), erlang:phash(E, 1 bsl 32), erlang:phash(Priv, 1 bsl 32),
      erts_debug:flat_size(P), erts_debug:flat_size(E), erts_debug:flat_size({P, P}),
      pdict([P, E, Priv, U, D, #point{x = 2, y = 3}, 1, {3}, [4], 2.5, P#point{y = 7}]),
-     remote(Pub, Priv), ets_range(Pub), map_key(P, E, Pub)].
+     remote(Pub, Priv), ets_range(Pub), map_key(P, E, Pub), caught()].
+
+%% A badrecord that a try of the same function catches.
+caught() ->
+    [try #nr_none:pub{a = id(1)} catch error:R1 -> R1 end,
+     try (id(7))#point.y catch error:R2 -> R2 end].
 
 %% The remote record operations of OTP 29 (`erl_record.c:344-568`).
 remote(Pub, Priv) ->
@@ -116,7 +121,8 @@ ets_range(Pub) ->
     T = ets:new(t, [ordered_set]),
     ets:insert(T, [{Pub, 1}, {{a, b}, 2}, {3, 3}]),
     {ets:select(T, [{{{x, q, 7}, 2}, [], [true]}]),
-     ets:select(T, [{{{'$1', b}, '_'}, [], ['$1']}])}.
+     ets:select(T, [{{{'$1', b}, '_'}, [], ['$1']}]),
+     ets:select(T, [{{Pub, '$1'}, [], ['$1']}, {{3, '$1'}, [], ['$1']}])}.
 
 %% Records as flatmap keys: lookup and key order (`erl_map.c`).
 map_key(P, E, Pub) ->

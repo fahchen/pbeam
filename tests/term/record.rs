@@ -59,3 +59,39 @@ fn compares_two_definitions_by_the_keys_last() {
     let same = Record::new(def(&atoms, &["pbeam_rec_a"]), vec![Term::Integer(2)]);
     assert_eq!(left.compare_defs(&same, &atoms), Ordering::Equal);
 }
+
+#[test]
+#[should_panic(expected = "a record definition is a tuple")]
+fn rejects_a_definition_that_holds_no_tuple() {
+    // `RecordDef::new` always builds the tuple, so only a test can break it.
+    let atoms = AtomTable::new();
+    let def = def(&atoms, &["pbeam_rec_a"]);
+    let broken = RecordDef {
+        module: def.module.clone(),
+        name: def.name.clone(),
+        is_exported: def.is_exported,
+        keys: def.keys.clone(),
+        order: def.order.clone(),
+        defaults: def.defaults.clone(),
+        hash: def.hash,
+        tuple: Term::Nil,
+    };
+    let _ = broken.key_terms();
+}
+
+#[test]
+fn gives_no_record_of_another_term_and_prints_indexes_without_a_table() {
+    let atoms = AtomTable::new();
+    let def = def(&atoms, &["pbeam_rec_a"]);
+    assert!(Term::Integer(1).record().is_none());
+    let record = Term::Record(Record::new(Arc::clone(&def), vec![Term::Integer(1)]));
+    assert!(record.record().is_some());
+    assert_eq!(
+        format!("{record:?}"),
+        format!(
+            "Record({}:{}, [Integer(1)])",
+            def.module.index(),
+            def.name.index()
+        )
+    );
+}
