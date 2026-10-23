@@ -120,17 +120,17 @@ impl Scheduler {
     /// `os:set_signal(sigchld, ignore)`. A ready active `udp_inet` socket
     /// returns a runtime error.
     pub(in crate::runtime) fn port_ready(&mut self, fd: libc::c_int) -> Result<(), BeamError> {
-        let handles = self.node.ports().handles();
-        if let Some(listen) = port::inet_port(&handles, self.index, fd, Inet::accept_fd) {
+        let handles = self.node.ports().handles(self.index);
+        if let Some(listen) = port::inet_port(&handles, fd, Inet::accept_fd) {
             return self.tcp_accept_ready(listen);
         }
-        if port::inet_port(&handles, self.index, fd, Inet::receive_fd).is_some() {
+        if port::inet_port(&handles, fd, Inet::receive_fd).is_some() {
             return Err(error(inet::DATAGRAM_RECEIVE));
         }
-        if let Some(port) = port::inet_port(&handles, self.index, fd, Inet::stream_receive_fd) {
+        if let Some(port) = port::inet_port(&handles, fd, Inet::stream_receive_fd) {
             return self.tcp_receive_ready(port);
         }
-        let Some((id, owner, event)) = port::read(&handles, self.index, fd) else {
+        let Some((id, owner, event)) = port::read(&handles, fd) else {
             return Ok(());
         };
         drop(handles);
@@ -197,8 +197,8 @@ impl Scheduler {
     ///
     /// The error of [`Self::tcp_send_ready`].
     pub(in crate::runtime) fn port_writable(&mut self, fd: libc::c_int) -> Result<(), BeamError> {
-        let handles = self.node.ports().handles();
-        let sending = port::inet_port(&handles, self.index, fd, Inet::send_fd);
+        let handles = self.node.ports().handles(self.index);
+        let sending = port::inet_port(&handles, fd, Inet::send_fd);
         match sending {
             Some(port) => self.tcp_send_ready(port),
             None => Ok(()),
@@ -409,21 +409,22 @@ impl Scheduler {
         // The port side of the link goes in before the link signal, as
         // `erts_port_connect` does (`io.c:2367-2375`): an exit of the new
         // owner after the signal then finds the link.
-        let Some((linked, owner)) = self.node.with_port(id, |port| {
-            let linked = port.links.insert(pid, ()).is_some();
-            (linked, std::mem::replace(&mut port.owner, pid))
-        }) else {
+        // One lock of the port covers the link, the link signal, and the
+        // new owner, as in `erts_port_connect` (io.c:2359-2400): a close
+        // on another scheduler comes before or after the whole connect.
+        let cell = self.node.port(id);
+        let mut slot = cell.as_ref().map(port::lock);
+        let Some(port) = slot.as_mut().and_then(|slot| slot.as_mut()) else {
             return false;
         };
+        let linked = port.links.insert(pid, ()).is_some();
         let link = Signal::PortLink { port: id };
         if !linked && self.send_signal(None, pid, link).is_err() {
-            // A port that closed in between has no link or owner to undo.
-            self.node.with_port(id, |port| {
-                port.links.remove(&pid);
-                port.owner = owner;
-            });
+            port.links.remove(&pid);
             return false;
         }
+        port.owner = pid;
+        drop(slot);
         // The scheduler that serves the port keeps a new owner of its own:
         // the owner stays with it (see `ProcessState::pinned`).
         if let Some(process) = self.processes.get_mut(&pid) {

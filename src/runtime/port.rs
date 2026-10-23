@@ -22,7 +22,9 @@ use inet::Inet;
 #[derive(Debug, Default)]
 pub(super) struct Ports {
     /// Each open port.
-    by_id: BTreeMap<PortId, PortCell>,
+    /// Each open port, with the scheduler that serves it, which does not
+    /// change, so that a scan of one scheduler locks only its own ports.
+    by_id: BTreeMap<PortId, (usize, PortCell)>,
 }
 
 /// One open port: the ERTS `Port` (`erl_port.h`) with the data of its
@@ -278,7 +280,8 @@ impl Ports {
     /// ports.insert_at(PortId(7), port);
     /// ```
     pub(super) fn insert_at(&mut self, id: PortId, port: Port) {
-        self.by_id.insert(id, Arc::new(Mutex::new(Some(port))));
+        self.by_id
+            .insert(id, (port.scheduler, Arc::new(Mutex::new(Some(port)))));
     }
 
     /// Return the identifiers of the open ports, in no order, as
@@ -303,7 +306,7 @@ impl Ports {
     /// assert!(ports.get(PortId(0)).is_some());
     /// ```
     pub(super) fn get(&self, id: PortId) -> Option<PortCell> {
-        self.by_id.get(&id).cloned()
+        self.by_id.get(&id).map(|(_, cell)| Arc::clone(cell))
     }
 
     /// Remove the port `id` from the table. The port closed before: its
@@ -319,37 +322,29 @@ impl Ports {
         self.by_id.remove(&id);
     }
 
-    /// Return the handles of all ports. The caller releases the table lock
-    /// before it locks a port.
+    /// Return the handles of the ports that the scheduler `index` serves.
+    /// The caller releases the table lock before it locks a port.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(ports.handles().len(), 1);
+    /// assert_eq!(ports.handles(0).len(), 1);
     /// ```
-    pub(super) fn handles(&self) -> Vec<(PortId, PortCell)> {
+    pub(super) fn handles(&self, index: usize) -> Vec<(PortId, PortCell)> {
         self.by_id
             .iter()
-            .map(|(&id, cell)| (id, Arc::clone(cell)))
+            .filter(|(_, (scheduler, _))| *scheduler == index)
+            .map(|(&id, (_, cell))| (id, Arc::clone(cell)))
             .collect()
     }
 }
 
-/// The handles of the open ports that the scheduler `index` serves, from
-/// the handles of the table.
-///
-/// The scans below lock one port at a time, after the table lock is
-/// released.
-fn served<'a>(
-    handles: &'a [(PortId, PortCell)],
-    index: usize,
-) -> impl Iterator<Item = (PortId, MutexGuard<'a, Option<Port>>)> {
-    handles.iter().filter_map(move |(id, cell)| {
-        let slot = lock(cell);
-        slot.as_ref()
-            .is_some_and(|port| port.scheduler == index)
-            .then_some((*id, slot))
-    })
+/// Lock the ports of `handles` (see [`Ports::handles`]), one at a time,
+/// after the table lock is released.
+fn served(
+    handles: &[(PortId, PortCell)],
+) -> impl Iterator<Item = (PortId, MutexGuard<'_, Option<Port>>)> {
+    handles.iter().map(|(id, cell)| (*id, lock(cell)))
 }
 
 /// Return the fds that the IO poll waits for: the output pipe of each
@@ -362,10 +357,10 @@ fn served<'a>(
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(wait_fds(&handles, 0), vec![child.output_fd()]);
+/// assert_eq!(wait_fds(&handles), vec![child.output_fd()]);
 /// ```
-pub(super) fn wait_fds(handles: &[(PortId, PortCell)], index: usize) -> Vec<c_int> {
-    served(handles, index)
+pub(super) fn wait_fds(handles: &[(PortId, PortCell)]) -> Vec<c_int> {
+    served(handles)
         .filter_map(|(_, slot)| match &slot.as_ref()?.driver {
             Driver::Spawn(spawn) => match spawn.input {
                 Input::Open => Some(spawn.child.output_fd()),
@@ -386,10 +381,10 @@ pub(super) fn wait_fds(handles: &[(PortId, PortCell)], index: usize) -> Vec<c_in
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(write_fds(&handles, 0), vec![]);
+/// assert_eq!(write_fds(&handles), vec![]);
 /// ```
-pub(super) fn write_fds(handles: &[(PortId, PortCell)], index: usize) -> Vec<c_int> {
-    served(handles, index)
+pub(super) fn write_fds(handles: &[(PortId, PortCell)]) -> Vec<c_int> {
+    served(handles)
         .filter_map(|(_, slot)| match &slot.as_ref()?.driver {
             Driver::Inet(inet) => inet.send_fd(),
             Driver::Spawn(_) => None,
@@ -397,40 +392,38 @@ pub(super) fn write_fds(handles: &[(PortId, PortCell)], index: usize) -> Vec<c_i
         .collect()
 }
 
-/// Return the `tcp_inet` port of `index` whose fd for `select` is `fd`.
+/// Return the `tcp_inet` port of `handles` whose fd for `select` is `fd`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(inet_port(&handles, 0, fd, Inet::send_fd), Some(port));
+/// assert_eq!(inet_port(&handles, fd, Inet::send_fd), Some(port));
 /// ```
 pub(super) fn inet_port(
     handles: &[(PortId, PortCell)],
-    index: usize,
     fd: c_int,
     select: impl Fn(&Inet) -> Option<c_int>,
 ) -> Option<PortId> {
-    served(handles, index).find_map(|(id, slot)| match &slot.as_ref()?.driver {
+    served(handles).find_map(|(id, slot)| match &slot.as_ref()?.driver {
         Driver::Inet(inet) if select(inet) == Some(fd) => Some(id),
         _ => None,
     })
 }
 
-/// Read the pipe `fd` of a spawn port of `index`, and return the port
+/// Read the pipe `fd` of a spawn port of `handles`, and return the port
 /// and the event of the read, or `None` when the read gives nothing to
 /// deliver. The read adds the bytes to the input count of the port.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let (id, event) = read(&handles, 0, fd).unwrap();
+/// let (id, event) = read(&handles, fd).unwrap();
 /// ```
 pub(super) fn read(
     handles: &[(PortId, PortCell)],
-    index: usize,
     fd: c_int,
 ) -> Option<(PortId, ProcessId, PortEvent)> {
-    served(handles, index)
+    served(handles)
         .find_map(|(id, mut slot)| {
             let port = slot.as_mut()?;
             let owner = port.owner;
