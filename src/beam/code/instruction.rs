@@ -3576,7 +3576,7 @@ fn skip_unsupported_instruction(
     skip_operands(data, cursor, operand_count)?;
     if matches!(
         opcode,
-        OPCODE_PUT_MAP_ASSOC | OPCODE_GET_MAP_ELEMENTS | OPCODE_PUT_TUPLE2 | OPCODE_INIT_YREGS
+        OPCODE_PUT_MAP_ASSOC | OPCODE_PUT_TUPLE2 | OPCODE_INIT_YREGS
     ) {
         skip_counted_operands(data, cursor)?;
     }
@@ -3604,7 +3604,6 @@ fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
         | OPCODE_TEST_IS_LIST
         | OPCODE_TEST_IS_MAP => Some(2),
         OPCODE_PUT_MAP_ASSOC => Some(5),
-        OPCODE_GET_MAP_ELEMENTS => Some(3),
         OPCODE_PUT_TUPLE2 => Some(2),
         OPCODE_INIT_YREGS => Some(1),
         _ => None,

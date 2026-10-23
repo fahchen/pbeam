@@ -4190,3 +4190,62 @@ fn marks_a_bs_match_that_a_test_heap_follows() {
     assert!(fused(&[bs_match, test_heap]));
     assert!(!fused(&[bs_match, set_position, test_heap]));
 }
+
+#[test]
+fn rejects_malformed_native_record_operands() {
+    // Atom 1 is `point`; literal 0 is `{1}`. No `Recs` record is loaded.
+    let table = AtomTable::new();
+    let atoms = [table.put("point").unwrap()];
+    let literals = [Some(Term::tuple(vec![Term::Integer(1)]))];
+    let parse = |stream: &[u8]| {
+        let mut code = vec![0, 0, 0, 16];
+        code.extend([0; 16]);
+        code.extend(stream);
+        code.push(0x03);
+        parse_code(
+            &code,
+            &table,
+            &atoms,
+            &[],
+            &literals,
+            &[],
+            &[],
+            &[],
+            &mut LineTable::default(),
+        )
+        .unwrap_err()
+        .to_string()
+    };
+    for (stream, message) in [
+        (
+            &[0xBB, 0x15, 0x01][..],
+            "BEAM native record source is not a register",
+        ),
+        (
+            &[0xBB, 0x15, 0x03, 0x01],
+            "BEAM record operand is not an atom",
+        ),
+        (
+            &[0xBD, 0x05, 0x12, 0x02, 0x03, 0x00, 0x17, 0x00],
+            "BEAM put_record names no record of the module",
+        ),
+        (
+            &[0xBD, 0x05, 0x12, 0x01, 0x03, 0x00, 0x17, 0x00],
+            "unsupported BEAM put_record source",
+        ),
+        (
+            &[0xBD, 0x05, 0x01, 0x02, 0x03, 0x00, 0x17, 0x00],
+            "unsupported BEAM record identifier",
+        ),
+        (
+            &[0xBD, 0x05, 0x47, 0x00, 0x02, 0x03, 0x00, 0x17, 0x00],
+            "unsupported BEAM record identifier",
+        ),
+        (
+            &[0xBD, 0x05, 0x12, 0x03, 0x03, 0x00, 0x17, 0x20, 0x11, 0x13],
+            "BEAM record field is not an atom",
+        ),
+    ] {
+        assert_eq!(parse(stream), message, "{stream:?}");
+    }
+}
