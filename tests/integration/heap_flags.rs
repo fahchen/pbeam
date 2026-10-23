@@ -45,7 +45,7 @@ fn results() -> Vec<(&'static str, String)> {
                  {{min_bin_vheap_size,46422}},{{min_heap_size,376}},{{fullsweep_after,3}},{{minor_gcs,0}}]}}}}"
             ),
         ),
-        ("queue_costs", "[100,100,0,0,0]".to_owned()),
+        ("queue_costs", "[100,100,0,0,0,true]".to_owned()),
         (
             "system_flags",
             format!(
@@ -78,7 +78,8 @@ fn text(term: &Term, atoms: &AtomTable) -> String {
 #[test]
 fn sets_and_reports_the_heap_flags_as_pinned_erts() {
     let erlang = pinned_beam("erlang");
-    let program = BeamProgram::load(&[&erlang, HEAP_FLAGS_PROBE]).unwrap();
+    let erts_internal = pinned_beam("erts_internal");
+    let program = BeamProgram::load(&[&erlang, &erts_internal, HEAP_FLAGS_PROBE]).unwrap();
     let results = results();
     for (function, expected) in &results {
         let result = program.execute("heap_flags_probe", function, &[]).unwrap();

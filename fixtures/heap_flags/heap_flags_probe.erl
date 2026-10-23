@@ -103,7 +103,8 @@ map_gc({garbage_collection, Gc}) ->
 %% sends a request for memory and total_heap_size
 %% (ERTS_PI_FLAG_FORCE_SIG_SEND, erl_bif_info.c:828,839,1381), and ERTS
 %% discards the cost of the request, so the last element reads another
-%% process with 400 messages and gives the cost of an empty one.
+%% process with 400 messages and gives the cost of an empty one, and a
+%% request costs the caller more than the direct read of heap_size.
 queue_costs() ->
     Self = [in_new(fun() -> extra(Item, Data) end)
             || {Item, Data} <- [{memory, on_heap}, {total_heap_size, on_heap},
@@ -112,8 +113,9 @@ queue_costs() ->
     Empty = cost(Pid, memory),
     send(Pid, 400),
     Other = cost(Pid, memory) - Empty,
+    Direct = cost(Pid, heap_size),
     Pid ! stop,
-    Self ++ [Other].
+    Self ++ [Other, Empty - Direct > 0].
 
 extra(Item, Data) ->
     process_flag(message_queue_data, Data),

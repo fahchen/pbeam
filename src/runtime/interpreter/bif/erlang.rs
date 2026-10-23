@@ -4658,7 +4658,12 @@ pub(super) fn process_info(
     // the cost that `handle_process_info` returns
     // (`erl_proc_sig_queue.c:6796,7405,5425-5428`), so only the direct
     // read charges the item.
-    if target.exiting.is_some() || target.mailbox.has_incoming() {
+    // ERTS always sends a request for `memory` and `total_heap_size` of
+    // another process (`ERTS_PI_FLAG_FORCE_SIG_SEND`,
+    // `erl_bif_info.c:828,839,1381`) and discards the cost of the request.
+    let forced = matches!(item, Term::Atom(name)
+        if matches!(scheduler.atoms.name_of(name), "memory" | "total_heap_size"));
+    if forced || target.exiting.is_some() || target.mailbox.has_incoming() {
         let caller = scheduler.current_process_mut().id;
         let reference = scheduler.make_ref()?;
         scheduler.current_process_mut().mailbox.set_save_end();
@@ -4676,10 +4681,8 @@ pub(super) fn process_info(
             arguments: vec![Term::Reference(reference)],
         });
     }
-    // ERTS always sends a request for `memory` and `total_heap_size` of
-    // another process (`ERTS_PI_FLAG_FORCE_SIG_SEND`,
-    // `erl_bif_info.c:828,839,1381`) and discards its cost, so their
-    // queue charge applies only to a read of the caller.
+    // Only `links` charges extra here: the items with a queue charge
+    // went as a request above.
     let extra = super::item_reductions(item, &info, 0, true);
     scheduler.current_process_mut().bump_reductions(1 + extra);
     Ok(signals_return(scheduler, process, info))
