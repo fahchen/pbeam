@@ -3495,10 +3495,11 @@ impl Scheduler {
     /// thread, which runs after the exit of a sender that is itself the
     /// logger process removed its name, so PBeam writes that message to
     /// stderr too (measured on the pinned ERTS).
-    fn send_exit_report(&mut self, id: ProcessId, reason: &Term) {
+    fn send_exit_report(&mut self, id: ProcessId, reason: &Term) -> Result<(), BeamError> {
         let format = "Error in process ~p with exit value:~n~p~n";
-        // ponytail: `gl` is not a static atom; the table has room for one name.
-        let gl = self.atoms.put("gl").expect("the atom table has room");
+        // `gl` is not a static atom; ERTS makes it at its first use
+        // (`ERTS_MAKE_AM`, utils.c:846). A full atom table fails the run.
+        let gl = self.atoms.put("gl")?;
         let process = self.current_process();
         let metadata = crate::term::Map::from_pairs(
             vec![
@@ -3549,7 +3550,7 @@ impl Scheduler {
                 self.whereis("logger")
             }
             logger if logger == Term::static_atom("logger") => self.whereis("logger"),
-            _ => return,
+            _ => return Ok(()),
         };
         match target {
             Some(target) if live(self, target) => self.send_message(id, target, message),
@@ -3562,6 +3563,7 @@ impl Scheduler {
                 let _ = std::io::Write::write_all(&mut std::io::stderr(), &text);
             }
         }
+        Ok(())
     }
 
     /// Run the exit of the current process, as `erts_do_exit_process` and
@@ -3638,7 +3640,7 @@ impl Scheduler {
             Some(next) => next,
             None => {
                 if std::mem::take(&mut process.log_exit) {
-                    self.send_exit_report(id, &reason);
+                    self.send_exit_report(id, &reason)?;
                 }
                 let process = self.current_process_mut();
                 process.bump_reductions(EXIT_REDUCTIONS);
