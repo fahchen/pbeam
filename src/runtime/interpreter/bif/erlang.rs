@@ -6139,7 +6139,10 @@ pub(super) fn pre_loaded(scheduler: &mut Scheduler) -> Result<BifResult, BeamErr
 /// calls, as ERTS `get_module_info_2` and `module_info_1`
 /// (`erl_bif_info.c:5918-5945`, `5986-6030`) do. A `Module` that is not an
 /// atom or that names no loaded module raises `badarg`. The key `module`
-/// returns `Module`. A term that is not a key of `get_module_info/3`
+/// returns `Module`, `md5` the MD5 of the module, `functions` the functions
+/// in code order, and
+/// `nifs` the functions of its NIF shared library or `[]`. A term that is
+/// not a key of `get_module_info/3`
 /// (`md5`, `exports`, `functions`, `nifs`, `attributes`, `compile`,
 /// `native_addresses`, `native`, or `module`) raises `badarg`. The caller
 /// needs a `code` capability that permits `inspect` for the module name
@@ -6158,8 +6161,11 @@ pub(super) fn pre_loaded(scheduler: &mut Scheduler) -> Result<BifResult, BeamErr
 ///
 /// # Errors
 ///
-/// Each other key of `get_module_info/3` is the runtime error
-/// `erlang:get_module_info/2 key K is not implemented`. A new
+/// The keys `exports`, `attributes`, `compile`, `native_addresses`, and
+/// `native` are
+/// the runtime error `erlang:get_module_info/2 key K is not implemented`.
+/// The key `nifs` of a module with a linked static or extension library is
+/// a runtime error. A new
 /// `capability_denied` atom in a full atom table gives the error of
 /// `AtomTable::put`.
 pub(super) fn get_module_info(
@@ -6185,11 +6191,11 @@ const MODULE_INFO_MISSING_KEY: &str = "exports";
 /// caller needs a `code` capability that permits `inspect` for the module
 /// name, as for `erlang:get_module_info/2`.
 ///
-/// PBeam can give the pair of the key `module` only: the key `exports`
-/// needs the order of the ERTS export table, and the keys `attributes`,
-/// `compile`, and `md5` need the chunks of the beam file, which the loader
-/// does not keep (row "Module information" of `docs/erts-differences.md`).
-/// Thus the call of a loaded module stops the run with the runtime error
+/// PBeam cannot give the key `exports`, which needs the order of the ERTS
+/// export table, and the keys `attributes` and `compile`, which need the
+/// chunks of the beam file that the loader does not keep (row "Module
+/// information" of `docs/erts-differences.md`). Thus the call of a loaded
+/// module stops the run with the runtime error
 /// `erlang:get_module_info/1 key exports is not implemented`, as
 /// `erlang:get_module_info/2` stops at a key that it does not implement.
 /// The release `examples/plug_hello` imports this BIF for the
@@ -6249,21 +6255,52 @@ fn get_module_info_key(
     if let Some(denied) = check? {
         return Ok(denied);
     }
-    if context
+    let Some(code) = context
         .scheduler
         .code
         .get(context.scheduler.atoms.name_of(name))
-        .is_none()
-    {
+        .cloned()
+    else {
         return Ok(BifResult::badarg());
-    }
+    };
     if key.is_static("module") {
         Ok(Value(module.clone()))
+    } else if key.is_static("md5") {
+        // `md5_of_module` (`erl_bif_info.c:5911-5916`).
+        Ok(Value(Term::binary(code.md5.to_vec())))
+    } else if key.is_static("functions") {
+        // `functions_in_module` (`erl_bif_info.c:5732-5767`) gives each
+        // function of the code in code order.
+        let pairs = code
+            .tables
+            .functions
+            .iter()
+            .map(|&(function, arity)| (code.tables.name(function), arity))
+            .rev();
+        function_pairs(context, pairs)
+    } else if key.is_static("nifs") {
+        // `nifs_in_module` (`erl_bif_info.c:5769-5805`) gives the functions
+        // of the NIF library of the module in library order, and `[]` for a
+        // module without a library.
+        let module_name = context.scheduler.atoms.name_of(name).to_owned();
+        if context.scheduler.nif_libraries.contains(&module_name)
+            || context.scheduler.extension_loads.contains(&code.id)
+        {
+            return Err(error(format!(
+                "erlang:{bif} key nifs is not implemented for the linked NIF library of {module_name}"
+            )));
+        }
+        let library = context.scheduler.shared_libraries.get(&code.id).cloned();
+        let functions = library
+            .as_ref()
+            .map_or(&[][..], |library| library.functions());
+        let pairs = functions
+            .iter()
+            .map(|function| (function.name.as_str(), function.arity))
+            .rev();
+        function_pairs(context, pairs)
     } else if key.is_one_of(&[
-        "md5",
         "exports",
-        "functions",
-        "nifs",
         "attributes",
         "compile",
         "native_addresses",
@@ -6276,6 +6313,28 @@ fn get_module_info_key(
     } else {
         Ok(BifResult::badarg())
     }
+}
+
+/// Return the list of the `{Name, Arity}` pairs of `pairs` in reverse
+/// order, as ERTS prepends each pair (`erl_bif_info.c:5748-5763`,
+/// `5787-5800`).
+///
+/// # Errors
+///
+/// The atom table cannot take a new function name.
+fn function_pairs<'a>(
+    context: &mut BifContext<'_>,
+    pairs: impl Iterator<Item = (&'a str, u32)>,
+) -> Result<BifResult, BeamError> {
+    let mut list = Term::nil();
+    for (function, arity) in pairs {
+        let pair = Term::tuple(vec![
+            Term::Atom(context.scheduler.atoms.put(function)?),
+            Term::Integer(arity.into()),
+        ]);
+        list = Term::cons(pair, list);
+    }
+    Ok(Value(list))
 }
 
 /// Run `erlang:start_timer(Time, Dest, Msg)`, as ERTS `start_timer_3` and
