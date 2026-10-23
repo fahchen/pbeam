@@ -546,6 +546,9 @@ impl EtsTables {
                     live.term(term);
                 }
             }
+            for key in &table.order {
+                live.term(key);
+            }
             for walk in table
                 .busy
                 .as_ref()
@@ -3263,6 +3266,7 @@ impl Table {
                 .map(|retained| retained.slots.capacity() * std::mem::size_of::<usize>())
                 .sum::<usize>()
             + self.deleted.capacity() * std::mem::size_of::<bool>()
+            + self.order.capacity() * std::mem::size_of::<Term>()
             + self.busy.as_ref().map_or(0, |busy| {
                 busy.objects.capacity() * std::mem::size_of::<Vec<Term>>()
                     + busy
