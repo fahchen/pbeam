@@ -2,3 +2,8 @@
 # names it, before the 15-minute limit of the CI job (#1169).
 [profile.default]
 slow-timeout = { period = "60s", terminate-after = 7 }
+
+# The deep-term tests took up to 306 s in green CI runs.
+[[profile.default.overrides]]
+filter = 'test(hashes_a_deep) | test(clones_compares_formats)'
+slow-timeout = { period = "60s", terminate-after = 10 }

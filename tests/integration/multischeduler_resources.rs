@@ -38,12 +38,14 @@ fn a_zlib_stream_resolves_on_another_scheduler() {
 /// A worker that used its zlib stream can move to the idle scheduler and
 /// use the stream there, and each stream gives back its data. ERTS does not
 /// guarantee that a worker moves (`steal_reference/0` accepts each
-/// boolean), so the test accepts `{ok, true}` and `{ok, false}`.
+/// boolean), so each run accepts `{ok, true}` and `{ok, false}`, and one run
+/// at least must move a worker.
 #[test]
 fn a_process_that_used_a_zlib_stream_can_move() {
     let (zlib, lists) = (pinned_beam("zlib"), pinned_beam("lists"));
     let program = BeamProgram::load(&[&zlib, &lists, NODE_RESOURCES]).expect("the fixture loads");
     let atom = |name| Term::Atom(program.atom(name).expect("the fixture names the atom"));
+    let mut moved_once = false;
     for _ in 0..RUNS {
         let results = program
             .execute_on_schedulers(&[
@@ -54,7 +56,9 @@ fn a_process_that_used_a_zlib_stream_can_move() {
         let moved = [atom("true"), atom("false")].map(|moved| Term::tuple(vec![atom("ok"), moved]));
         assert!(moved.contains(&results[0].term), "{:?}", results[0].term);
         assert_eq!(results[1].term, atom("ok"));
+        moved_once |= results[0].term == Term::tuple(vec![atom("ok"), atom("true")]);
     }
+    assert!(moved_once, "no run moved a worker");
 }
 
 /// The two roots give the same results on the pinned ERTS with two
