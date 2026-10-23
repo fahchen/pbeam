@@ -52,6 +52,7 @@ fn rejects_invalid_operands_and_code_headers() {
             &[],
             &[],
             &[],
+            &[],
             &mut LineTable::default()
         )
         .is_err()
@@ -65,6 +66,7 @@ fn rejects_invalid_operands_and_code_headers() {
             &[],
             &[],
             &[],
+            &[],
             &mut LineTable::default()
         )
         .is_err()
@@ -73,6 +75,7 @@ fn rejects_invalid_operands_and_code_headers() {
         parse_code(
             &[0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             &AtomTable::new(),
+            &[],
             &[],
             &[],
             &[],
@@ -184,6 +187,7 @@ fn rejects_unsupported_select_val_forms() {
             &[],
             &[],
             &[],
+            &[],
             &mut LineTable::default()
         )
         .is_err()
@@ -192,6 +196,7 @@ fn rejects_unsupported_select_val_forms() {
         parse_code(
             &code(&[59, 3, 21, 23, 16]),
             &AtomTable::new(),
+            &[],
             &[],
             &[],
             &[],
@@ -211,6 +216,7 @@ fn rejects_unsupported_select_val_forms() {
             &[],
             &[],
             &[],
+            &[],
             &mut LineTable::default()
         )
         .unwrap_err()
@@ -223,6 +229,7 @@ fn rejects_unsupported_select_val_forms() {
             parse_code(
                 &code(&[opcode, 3, 21, 23, 32, 3]),
                 &AtomTable::new(),
+                &[],
                 &[],
                 &[],
                 &[],
@@ -328,6 +335,7 @@ fn decodes_build_stacktrace_without_operands() {
         &[],
         &[],
         &[],
+        &[],
         &mut LineTable::default(),
     )
     .unwrap();
@@ -352,6 +360,7 @@ fn decodes_raise_with_a_raw_stack_trace_and_a_reason() {
     let (instructions, _, _) = parse_code(
         &code,
         &AtomTable::new(),
+        &[],
         &[],
         &[],
         &[],
@@ -390,6 +399,7 @@ fn decodes_the_error_path_instructions() {
     let (instructions, _, _) = parse_code(
         &code,
         &AtomTable::new(),
+        &[],
         &[],
         &[],
         &[],
@@ -456,6 +466,7 @@ fn decodes_try_and_catch_instructions_with_a_y_register() {
         &[],
         &[],
         &[],
+        &[],
         &mut LineTable::default(),
     )
     .unwrap();
@@ -485,6 +496,7 @@ fn decodes_try_and_catch_instructions_with_a_y_register() {
         parse_code(
             &code(&[0x68, 0x03, 0x75]),
             &AtomTable::new(),
+            &[],
             &[],
             &[],
             &[],
@@ -523,6 +535,7 @@ fn decodes_nif_start_at_the_entry_of_the_function_of_the_func_info_before_it() {
         &[],
         &[],
         &[],
+        &[],
         &mut LineTable::default(),
     )
     .unwrap();
@@ -552,6 +565,7 @@ fn decodes_nif_start_at_the_entry_of_the_function_of_the_func_info_before_it() {
         &[],
         &[],
         &[],
+        &[],
         &mut LineTable::default(),
     )
     .unwrap();
@@ -571,6 +585,7 @@ fn decodes_nif_start_at_the_entry_of_the_function_of_the_func_info_before_it() {
             &code(&[0xB3]),
             &table,
             &atoms,
+            &[],
             &[],
             &[],
             &[],
@@ -607,6 +622,7 @@ fn decodes_bif0_and_bif1_into_one_bif_instruction_with_its_fail_label() {
         &AtomTable::new(),
         &[],
         &imports,
+        &[],
         &[],
         &[],
         &[],
@@ -649,6 +665,7 @@ fn decodes_bif0_and_bif1_into_one_bif_instruction_with_its_fail_label() {
                 &[],
                 &[],
                 &[],
+                &[],
                 &mut LineTable::default()
             )
             .unwrap_err()
@@ -666,6 +683,7 @@ fn decodes_bif0_and_bif1_into_one_bif_instruction_with_its_fail_label() {
             &AtomTable::new(),
             &[],
             &imports,
+            &[],
             &[],
             &[],
             &[],
@@ -698,6 +716,7 @@ fn decodes_bif2_into_a_bif_instruction_with_its_fail_label() {
         &AtomTable::new(),
         &[],
         &imports,
+        &[],
         &[],
         &[],
         &[],
@@ -746,6 +765,7 @@ fn decodes_is_ne_exact_with_its_fail_label() {
         &[],
         &[],
         &[],
+        &[],
         &mut LineTable::default(),
     )
     .unwrap();
@@ -781,6 +801,7 @@ fn selects_the_classified_operand_form_of_is_eq_exact() {
             &code,
             &AtomTable::new(),
             &atoms,
+            &[],
             &[],
             &[],
             &[],
@@ -881,6 +902,7 @@ fn decodes_is_ge_with_a_typed_register() {
         &[],
         &[],
         &[],
+        &[],
         &mut LineTable::default(),
     )
     .unwrap();
@@ -911,6 +933,7 @@ fn decodes_the_is_lt_is_integer_and_is_boolean_tests_of_the_compare_probe_fixtur
     let (instructions, _, _) = parse_code(
         &code,
         &AtomTable::new(),
+        &[],
         &[],
         &[],
         &[],
@@ -966,6 +989,7 @@ fn decodes_is_any_native_record_with_a_register_source_as_the_erts_loader() {
             &[],
             &[],
             &[],
+            &[],
             &mut LineTable::default(),
         )
     };
@@ -1016,6 +1040,7 @@ fn decodes_the_is_eq_test_of_the_compare_probe_fixture() {
         &[],
         &[],
         &[],
+        &[],
         &mut LineTable::default(),
     )
     .unwrap();
@@ -1043,6 +1068,7 @@ fn decodes_the_is_ne_test_of_the_compare_probe_fixture() {
     let (instructions, _, _) = parse_code(
         &code,
         &AtomTable::new(),
+        &[],
         &[],
         &[],
         &[],
@@ -1076,6 +1102,7 @@ fn decodes_the_bs_start_match3_test_of_the_binary_match_probe_fixture() {
     let (instructions, _, _) = parse_code(
         &code,
         &AtomTable::new(),
+        &[],
         &[],
         &[],
         &[],
@@ -1133,6 +1160,7 @@ fn decodes_the_binary_match_instructions_of_is_usascii() {
         &code,
         &table,
         &atoms,
+        &[],
         &[],
         &[],
         &[],
@@ -1229,6 +1257,7 @@ fn decodes_the_bs_match_commands_of_the_bs_match_probe_fixture() {
         &[],
         &[],
         &[],
+        &[],
         &mut LineTable::default(),
     )
     .unwrap();
@@ -1296,6 +1325,7 @@ fn decodes_each_operand_of_the_utf16_and_utf32_instructions_of_bs_utf_probe() {
     let (instructions, _, _) = parse_code(
         &code,
         &table,
+        &[],
         &[],
         &[],
         &[],
@@ -1377,6 +1407,7 @@ fn decodes_each_operand_of_the_bs_get_float2_instructions_of_bs_float_probe() {
         &[],
         &[],
         &[],
+        &[],
         &mut LineTable::default(),
     )
     .unwrap();
@@ -1423,6 +1454,7 @@ fn decodes_each_operand_of_the_bs_get_float2_instructions_of_bs_float_probe() {
     let (instructions, _, _) = parse_code(
         &code,
         &table,
+        &[],
         &[],
         &[],
         &[],
@@ -1492,6 +1524,7 @@ fn decodes_the_bs_start_match4_bs_get_binary2_and_bs_get_tail_instructions_of_bs
         &[],
         &[],
         &[],
+        &[],
         &mut LineTable::default(),
     )
     .unwrap();
@@ -1551,6 +1584,7 @@ fn decodes_the_bs_start_match4_bs_get_binary2_and_bs_get_tail_instructions_of_bs
             &[],
             &[],
             &[],
+            &[],
             &mut LineTable::default()
         )
         .unwrap_err()
@@ -1564,6 +1598,7 @@ fn decodes_the_bs_start_match4_bs_get_binary2_and_bs_get_tail_instructions_of_bs
             &code(&[&[0xAA, 0x12, 0x20, 0x03, 0x03]]),
             &table,
             &atoms,
+            &[],
             &[],
             &[],
             &[],
@@ -1702,6 +1737,7 @@ fn decodes_the_fconv_instruction_of_the_float_test_probe_fixture() {
         &[],
         &[],
         &[],
+        &[],
         &mut LineTable::default(),
     )
     .unwrap();
@@ -1728,6 +1764,7 @@ fn decodes_the_is_float_test_of_the_float_test_probe_fixture() {
     let (instructions, _, _) = parse_code(
         &code,
         &AtomTable::new(),
+        &[],
         &[],
         &[],
         &[],
@@ -1765,6 +1802,7 @@ fn decodes_the_is_number_test_of_the_type_test_probe_fixture() {
         &[],
         &[],
         &[],
+        &[],
         &mut LineTable::default(),
     )
     .unwrap();
@@ -1797,6 +1835,7 @@ fn decodes_the_is_bitstr_test_of_the_bitstr_probe_fixture() {
         &[],
         &[],
         &[],
+        &[],
         &mut LineTable::default(),
     )
     .unwrap();
@@ -1824,6 +1863,7 @@ fn decodes_the_get_tl_instruction_of_the_io_start_probe_fixture() {
     let (instructions, _, _) = parse_code(
         &code,
         &AtomTable::new(),
+        &[],
         &[],
         &[],
         &[],
@@ -1878,6 +1918,7 @@ fn decodes_the_put_map_exact_instruction_of_the_io_start_probe_fixture() {
         &code,
         &table,
         &atoms,
+        &[],
         &[],
         &[],
         &[],
@@ -1938,6 +1979,7 @@ fn decodes_the_has_map_fields_tests_of_the_map_probe_fixture() {
         &code,
         &table,
         &atoms,
+        &[],
         &[],
         &[],
         &[],
@@ -2045,6 +2087,7 @@ fn sorts_get_map_elements_keys_in_flatmap_key_order_like_the_erts_loader() {
             &[],
             &[],
             &[],
+            &[],
             &mut LineTable::default()
         )
         .unwrap_err()
@@ -2062,6 +2105,7 @@ fn rejects_malformed_has_map_fields_key_lists() {
         parse_code(
             &code,
             &AtomTable::new(),
+            &[],
             &[],
             &[],
             &[],
@@ -2101,6 +2145,7 @@ fn decodes_the_list_record_and_receive_wait_instructions_of_pinned_gen_statem() 
     let (instructions, _, _) = parse_code(
         &code,
         &AtomTable::new(),
+        &[],
         &[],
         &[],
         &[],
@@ -2174,6 +2219,7 @@ fn decodes_the_apply_instructions_of_pinned_gen_statem() {
         &[],
         &[],
         &[],
+        &[],
         &mut LineTable::default(),
     )
     .unwrap();
@@ -2204,6 +2250,7 @@ fn decodes_the_apply_instructions_of_pinned_gen_statem() {
         parse_code(
             &code,
             &AtomTable::new(),
+            &[],
             &[],
             &[],
             &[],
@@ -2243,6 +2290,7 @@ fn decodes_gc_bif1_and_gc_bif2_of_the_arith_probe_fixture_into_a_bif_instruction
         &AtomTable::new(),
         &[],
         &imports,
+        &[],
         &[],
         &[],
         &[],
@@ -2289,6 +2337,7 @@ fn decodes_gc_bif1_and_gc_bif2_of_the_arith_probe_fixture_into_a_bif_instruction
             &[],
             &[],
             &[],
+            &[],
             &mut LineTable::default()
         )
         .is_err()
@@ -2314,6 +2363,7 @@ fn decodes_gc_bif3_of_the_binary_part_probe_fixture_into_a_bif_instruction() {
         &AtomTable::new(),
         &[],
         &imports,
+        &[],
         &[],
         &[],
         &[],
@@ -2356,6 +2406,7 @@ fn decodes_gc_bif3_of_the_binary_part_probe_fixture_into_a_bif_instruction() {
             &[],
             &[],
             &[],
+            &[],
             &mut LineTable::default()
         )
         .is_err()
@@ -2383,6 +2434,7 @@ fn decodes_bif3_of_the_is_integer_probe_fixture_into_a_bif_instruction() {
         &AtomTable::new(),
         &[],
         &imports,
+        &[],
         &[],
         &[],
         &[],
@@ -2427,6 +2479,7 @@ fn decodes_bif3_of_the_is_integer_probe_fixture_into_a_bif_instruction() {
             &[],
             &[],
             &[],
+            &[],
             &mut LineTable::default()
         )
         .is_err()
@@ -2439,6 +2492,7 @@ fn decodes_bif3_of_the_is_integer_probe_fixture_into_a_bif_instruction() {
             &AtomTable::new(),
             &[],
             &imports,
+            &[],
             &[],
             &[],
             &[],
@@ -2478,6 +2532,7 @@ fn decodes_the_fun_instructions_of_the_fun_probe_fixture() {
             &[],
             &[],
             &lambdas,
+            &[],
             &[],
             &mut LineTable::default(),
         )
@@ -2562,6 +2617,7 @@ fn joins_a_fun_call_in_a_tail_position_as_the_erts_loader() {
         &[],
         &[],
         &[],
+        &[],
         &mut LineTable::default(),
     )
     .unwrap();
@@ -2612,6 +2668,7 @@ fn turns_a_call_of_erlang_hibernate_into_the_erts_hibernate_instruction() {
             &[],
             &[],
             &[],
+            &[],
             &mut LineTable::default(),
         )
         .unwrap()
@@ -2655,6 +2712,7 @@ fn turns_a_call_of_erlang_yield_into_the_erts_yield_instruction() {
             &AtomTable::new(),
             &[],
             &imports,
+            &[],
             &[],
             &[],
             &[],
@@ -2708,6 +2766,7 @@ fn puts_a_test_yield_after_the_entry_label_of_each_function() {
         &[],
         &[],
         &[],
+        &[],
         &mut LineTable::default(),
     )
     .unwrap();
@@ -2740,6 +2799,7 @@ fn puts_the_deallocate_and_the_return_of_a_tail_call_after_call_ext() {
             &AtomTable::new(),
             &[],
             &imports,
+            &[],
             &[],
             &[],
             &[],
@@ -2799,6 +2859,7 @@ fn decodes_the_is_function_tests_of_the_fun_probe_fixture() {
         &[],
         &[],
         &[],
+        &[],
         &mut LineTable::default(),
     )
     .unwrap();
@@ -2847,6 +2908,7 @@ fn rejects_a_put_tuple2_without_an_element_list() {
         parse_code(
             &code,
             &AtomTable::new(),
+            &[],
             &[],
             &[],
             &[],
@@ -3210,6 +3272,40 @@ fn arm_field_bytes(instruction: &Instruction) -> usize {
         } => size_of_val(import) + size_of_val(tail) + size_of_val(deallocate),
         Instruction::Hibernate => 0,
         Instruction::Yield => 0,
+        Instruction::IsNativeRecord {
+            fail_label,
+            value,
+            module,
+            name,
+        } => size_of_val(fail_label) + size_of_val(value) + size_of_val(module) + size_of_val(name),
+        Instruction::IsRecordAccessible {
+            fail_label,
+            value,
+            external,
+        } => size_of_val(fail_label) + size_of_val(value) + size_of_val(external),
+        Instruction::GetRecordElements {
+            fail_label,
+            value,
+            pairs,
+        } => size_of_val(fail_label) + size_of_val(value) + size_of_val(pairs),
+        Instruction::PutRecord {
+            kind,
+            destination,
+            updates,
+        } => size_of_val(kind) + size_of_val(destination) + size_of_val(updates),
+        Instruction::GetRecordField {
+            fail_label,
+            value,
+            id,
+            field,
+            destination,
+        } => {
+            size_of_val(fail_label)
+                + size_of_val(value)
+                + size_of_val(id)
+                + size_of_val(field)
+                + size_of_val(destination)
+        }
         Instruction::Apply {
             arity,
             tail,
@@ -3685,6 +3781,7 @@ fn decodes_the_float_register_instructions_of_the_float_probe_fixture() {
         &[],
         &[],
         &[],
+        &[],
         &mut LineTable::default(),
     )
     .unwrap();
@@ -3743,6 +3840,7 @@ fn decodes_the_float_register_instructions_of_the_float_probe_fixture() {
                 &[],
                 &[],
                 &[],
+                &[],
                 &mut LineTable::default()
             )
             .is_err()
@@ -3768,6 +3866,7 @@ fn decodes_the_bs_match_string_instructions_of_the_bs_match_probe_fixture() {
         &[],
         &[],
         b"icrosoft.icon",
+        &[],
         &mut LineTable::default(),
     )
     .unwrap();
@@ -3841,6 +3940,7 @@ fn decodes_the_bs_skip_bits2_instructions_of_the_bs_match_probe_fixture() {
         &[],
         &[],
         &[],
+        &[],
         &mut LineTable::default(),
     )
     .unwrap();
@@ -3890,6 +3990,7 @@ fn decodes_the_bs_get_integer2_instructions_of_the_bs_match_probe_fixture() {
         &[],
         &[],
         &[],
+        &[],
         &mut LineTable::default(),
     )
     .unwrap();
@@ -3931,6 +4032,7 @@ fn decodes_the_bs_skip_utf8_instruction_of_the_bs_utf_probe_fixture() {
     let (instructions, _, _) = parse_code(
         &code_with(&parts),
         &AtomTable::new(),
+        &[],
         &[],
         &[],
         &[],
@@ -4044,6 +4146,7 @@ fn keeps_a_known_unsupported_opcode_with_its_operands_skipped() {
         &[],
         &[],
         &[],
+        &[],
         &mut LineTable::default(),
     )
     .unwrap();
@@ -4083,6 +4186,7 @@ fn marks_a_bs_match_that_a_test_heap_follows() {
             &code,
             &table,
             &atoms,
+            &[],
             &[],
             &[],
             &[],

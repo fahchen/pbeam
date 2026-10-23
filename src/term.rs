@@ -12,6 +12,7 @@ mod map;
 mod match_context;
 mod order;
 mod print;
+mod record;
 mod tuple;
 
 pub use atom::Atom;
@@ -33,6 +34,8 @@ pub(crate) use map::{Direction, Drain as MapDrain, Insert, flatmap_order, from_l
 pub use match_context::MatchState;
 pub(crate) use match_context::{segment_equals, segment_integer};
 pub(crate) use print::{print_term, print_term_limited};
+pub use record::Record;
+pub(crate) use record::RecordDef;
 use tuple::Tuple;
 
 use num_bigint::BigInt;
@@ -106,6 +109,10 @@ pub enum Term {
     /// also accepts any integer. Top-level atom keys are ordered by their
     /// atom index, and all atoms are hashed by their atom index, as in ERTS.
     Map(Map),
+    /// A native record of OTP 29: a shared definition and the values of its
+    /// fields (`erl_record.h:63-71`). It orders between a tuple and a map
+    /// (`erl_term.h:1441-1457`).
+    Record(Record),
     /// A process identifier owned by this runtime.
     Pid(ProcessId),
     /// A port identifier owned by this runtime.
@@ -453,6 +460,7 @@ impl Term {
                     pending.push(&cell.head);
                 }
                 Term::Map(map) => pending.extend(map.iter().flat_map(|(key, value)| [key, value])),
+                Term::Record(record) => pending.extend(record.values()),
                 _ => {}
             }
         }
@@ -517,6 +525,7 @@ impl Term {
             }
             Term::Fun(fun) => pending.extend(fun.take_last().unwrap_or_default()),
             Term::Map(map) => map.drain_into(pending),
+            Term::Record(record) => pending.extend(record.take_last().unwrap_or_default()),
             _ => {}
         }
     }
@@ -551,6 +560,10 @@ impl Term {
                 .filter(|arguments| !arguments.is_empty())
                 .map(Group::Terms),
             Term::Map(map) => map::Drain::take(map).map(Group::Map),
+            Term::Record(record) => record
+                .take_last()
+                .filter(|values| !values.is_empty())
+                .map(Group::Terms),
             _ => None,
         }
     }
@@ -616,6 +629,11 @@ impl Drop for Term {
                 map.drain_into(&mut pending);
                 drop_nested(pending);
             }
+            Term::Record(record) => {
+                if let Some(pending) = record.take_last() {
+                    drop_nested(pending);
+                }
+            }
             _ => {}
         }
     }
@@ -668,6 +686,7 @@ impl Clone for Term {
             Term::Port(port) => Term::Port(*port),
             Term::Reference(reference) => Term::Reference(*reference),
             Term::Fun(fun) => Term::Fun(fun.clone()),
+            Term::Record(record) => Term::Record(record.clone()),
             Term::MatchContext(context) => Term::MatchContext(Arc::clone(context)),
         }
     }
@@ -721,6 +740,21 @@ impl Term {
     /// ```
     pub(crate) fn arith_eq(&self, other: &Term) -> bool {
         self.equal(other, true)
+    }
+
+    /// Return the native record of a record term, or `None` for each other
+    /// term.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(Term::Integer(1).record().is_none());
+    /// ```
+    pub(crate) fn record(&self) -> Option<&Record> {
+        match self {
+            Term::Record(record) => Some(record),
+            _ => None,
+        }
     }
 
     /// Return the value of a float term, or `None` for each other term.
@@ -790,6 +824,18 @@ impl Term {
                             left.target() == right.target()
                         };
                         same_target && left.free().len() == right.free().len()
+                    }
+                }
+                // ERTS compares the headers, the definition tuples, and
+                // then the values in the sorted key order
+                // (`utils.c:1181-1193`).
+                (Term::Record(left), Term::Record(right)) => {
+                    if left.same_thing(right) {
+                        true
+                    } else {
+                        pairs.extend(left.values().iter().zip(right.values()));
+                        left.values().len() == right.values().len()
+                            && left.def().tuple == right.def().tuple
                     }
                 }
                 (Term::Map(left), Term::Map(right)) => {
@@ -1033,6 +1079,25 @@ fn write_debug(term: &Term, atoms: Option<&AtomTable>, out: &mut impl fmt::Write
                 out.write_str("Tuple([")?;
                 items.push(Item::Text("])"));
                 for (index, element) in elements.iter().enumerate().rev() {
+                    items.push(Item::Term(element));
+                    if index > 0 {
+                        items.push(Item::Text(", "));
+                    }
+                }
+            }
+            Term::Record(record) => {
+                let def = record.def();
+                match atoms {
+                    Some(atoms) => write!(
+                        out,
+                        "Record({}:{}, [",
+                        atoms.name_of(&def.module),
+                        atoms.name_of(&def.name)
+                    )?,
+                    None => write!(out, "Record({}:{}, [", def.module.index(), def.name.index())?,
+                }
+                items.push(Item::Text("])"));
+                for (index, element) in record.values().iter().enumerate().rev() {
                     items.push(Item::Term(element));
                     if index > 0 {
                         items.push(Item::Text(", "));

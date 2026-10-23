@@ -559,6 +559,11 @@ impl AtomTable {
                             }
                         }
                     }
+                    Term::Record(_) => {
+                        return Err(error(
+                            "unsupported import of a native record into another atom table",
+                        ));
+                    }
                     Term::Binary(_)
                     | Term::Integer(_)
                     | Term::BigInt(_)

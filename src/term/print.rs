@@ -242,6 +242,31 @@ fn print_term_counted(term: &Term, atoms: &AtomTable, dcount: &mut i64) -> Vec<u
                 let [n0, n1, n2] = reference.numbers();
                 text.extend_from_slice(format!("#Ref<0.{n2}.{n1}.{n0}>").as_bytes());
             }
+            // `#Module:Name{Key=Value,...}` in the sorted key order
+            // (`erl_printf_term.c:558-585`).
+            Term::Record(record) => {
+                let def = record.def();
+                text.push(b'#');
+                for (index, atom) in [&def.module, &def.name].into_iter().enumerate() {
+                    let name = atoms.name_of(atom);
+                    *dcount -= len(name);
+                    print_atom(name, &mut text);
+                    if *dcount <= 0 {
+                        return text;
+                    }
+                    text.push(if index == 0 { b':' } else { b'{' });
+                }
+                items.push(Item::Text("}"));
+                let pairs = def.key_terms().iter().zip(record.values());
+                for (index, (key, value)) in pairs.enumerate().rev() {
+                    items.push(Item::Term(value));
+                    items.push(Item::Text("="));
+                    items.push(Item::Term(key));
+                    if index > 0 {
+                        items.push(Item::Text(","));
+                    }
+                }
+            }
             Term::MatchContext(_) => unreachable!("{MATCH_CONTEXT_ESCAPE}"),
         }
     }

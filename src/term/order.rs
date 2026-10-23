@@ -52,9 +52,9 @@ use super::{AtomTable, Term, match_context::MATCH_CONTEXT_ESCAPE};
 use crate::error::{BeamError, error};
 
 /// The rank of `[]` in the ERTS term order (`NIL_DEF`).
-const NIL_RANK: u8 = 8;
+const NIL_RANK: u8 = 9;
 /// The rank of a list that is not empty in the ERTS term order (`LIST_DEF`).
-const LIST_RANK: u8 = 9;
+const LIST_RANK: u8 = 10;
 
 /// One step of a comparison on the work stack: compare two terms, exactly
 /// when the flag is true.
@@ -252,6 +252,19 @@ fn compare_pair<'a>(
             Ordering::Equal
         }
         (Term::Tuple(left), Term::Tuple(right)) => left.len().cmp(&right.len()),
+        // ERTS compares the definitions, then the values in definition
+        // order (`erts_cmp_compound`, `utils.c:1878-1953`).
+        (Term::Record(left), Term::Record(right)) => {
+            let order = left.compare_defs(right, atoms);
+            if order.is_eq() {
+                steps.extend(
+                    left.value_pairs(right)
+                        .rev()
+                        .map(|(l, r)| Step(l, r, exact)),
+                );
+            }
+            order
+        }
         (Term::Map(left), Term::Map(right)) if left.len() == right.len() => {
             // ERTS compares all keys first, exactly, then the values in the
             // mode of the map (`erts_cmp_compound`, `utils.c:2506-2550`).
@@ -406,10 +419,11 @@ fn type_rank(term: &Term) -> u8 {
         Term::Port(_) => 4,
         Term::Pid(_) => 5,
         Term::Tuple(_) => 6,
-        Term::Map(_) => 7,
+        Term::Record(_) => 7,
+        Term::Map(_) => 8,
         Term::Nil => NIL_RANK,
         Term::Cons(_) => LIST_RANK,
-        Term::Binary(_) => 10,
+        Term::Binary(_) => 11,
         Term::MatchContext(_) => unreachable!("{MATCH_CONTEXT_ESCAPE}"),
     }
 }

@@ -14,7 +14,7 @@ use crate::{
         BeamModule, Import, ImportKind, NameId,
         code::{
             self, BinaryMatchCommand, BinarySegment, FloatOperation, Instruction, LineTable,
-            Operand, SelectValueChoices, TestKind, TestOperand,
+            Operand, PutRecord, RecordId, SelectValueChoices, TestKind, TestOperand,
         },
     },
     error::{BeamError, error},
@@ -38,6 +38,7 @@ pub(crate) mod bif;
 mod bits;
 mod code_table;
 mod native;
+mod record;
 
 pub(crate) use native::has_static_library;
 pub use native::{NifGap, nif_manifest_gaps};
@@ -1758,9 +1759,8 @@ impl BeamProgram {
                         // `instrs.tab:1323-1327`; JIT
                         // `emit_is_any_native_record` in
                         // `jit/arm/instr_records.cpp:30-45`;
-                        // `erl_term.h:139`, `167`). PBeam has no native record
-                        // term, so the test fails for each term.
-                        TestKind::AnyNativeRecord => false,
+                        // `erl_term.h:139`, `167`).
+                        TestKind::AnyNativeRecord => matches!(value, Term::Record(_)),
                     };
                     if !passed {
                         cursor.position = label_position(*fail_label)?;
@@ -1779,6 +1779,134 @@ impl BeamProgram {
                     let map = map.clone();
                     if !get_map_elements(process, &map, pairs)? {
                         cursor.position = label_position(*fail_label)?;
+                    }
+                }
+                // `i_is_native_record` (`instrs.tab:1329-1333`,
+                // `erl_record.c:214-221`).
+                Instruction::IsNativeRecord {
+                    fail_label,
+                    value,
+                    module,
+                    name,
+                } => {
+                    let value = read_ref(process, value)?;
+                    let passed = matches!(value, Term::Record(record)
+                        if record.def().module == *module && record.def().name == *name);
+                    if !passed {
+                        cursor.position = label_position(*fail_label)?;
+                    }
+                }
+                // `i_is_record_accessible` and
+                // `i_is_wildcard_record_accessible` with the running module
+                // (`ops.tab:1661-1667`, `erl_record.c:452-468`).
+                Instruction::IsRecordAccessible {
+                    fail_label,
+                    value,
+                    external,
+                } => {
+                    let (process, atoms) = scheduler.current_process_and_atoms();
+                    let passed = matches!(read_ref(process, value)?, Term::Record(record)
+                        if record.def().is_exported
+                            || (!external && atoms.name_of(&record.def().module) == module.name));
+                    if !passed {
+                        cursor.position = label_position(*fail_label)?;
+                    }
+                }
+                // `erl_get_record_elements` writes each found field in the
+                // sorted key order and fails at a missing field after the
+                // writes before it (`erl_record.c:223-252`).
+                Instruction::GetRecordElements {
+                    fail_label,
+                    value,
+                    pairs,
+                } => {
+                    let record = read_ref(process, value)?
+                        .record()
+                        .ok_or_else(|| error("BEAM get_record_elements source is not a record"))?
+                        .clone();
+                    let mut wanted = pairs.iter().peekable();
+                    for (key, value) in record.def().keys.iter().zip(record.values()) {
+                        if let Some((_, destination)) = wanted.next_if(|(field, _)| field == key) {
+                            write(process, destination, value.clone())?;
+                        }
+                    }
+                    if wanted.peek().is_some() {
+                        cursor.position = label_position(*fail_label)?;
+                    }
+                }
+                Instruction::PutRecord {
+                    kind,
+                    destination,
+                    updates,
+                } => {
+                    let mut values = Vec::with_capacity(updates.len());
+                    for (field, value) in updates {
+                        values.push((field, read(process, value)?));
+                    }
+                    let result = match kind {
+                        PutRecord::Local(def) => record::create(def, values),
+                        PutRecord::Update(source) => record::update(
+                            read_ref(process, source)?
+                                .record()
+                                .ok_or_else(|| error("BEAM put_record source is not a record"))?,
+                            values,
+                        ),
+                        // `erl_create_native_record` reads the active
+                        // definition and loads no module (`erl_record.c:344-379`).
+                        PutRecord::Remote { module, name } => {
+                            let def = scheduler
+                                .code
+                                .get(scheduler.atoms.name_of(module))
+                                .and_then(|code| {
+                                    code.records
+                                        .iter()
+                                        .find(|def| def.name == *name && def.is_exported)
+                                });
+                            match def {
+                                Some(def) => record::create(def, values),
+                                None => Err(record::badrecord(Term::tuple(vec![
+                                    Term::Atom(module.clone()),
+                                    Term::Atom(name.clone()),
+                                ]))),
+                            }
+                        }
+                    };
+                    let process = scheduler.current_process_mut();
+                    match result {
+                        Ok(record) => write(process, destination, record)?,
+                        Err(reason) => {
+                            cursor.commit(process);
+                            if let Some(outcome) = raise_in_function(scheduler, reason)? {
+                                return Ok(outcome);
+                            }
+                            cursor.refresh(scheduler)?;
+                        }
+                    }
+                }
+                Instruction::GetRecordField {
+                    fail_label,
+                    value,
+                    id,
+                    field,
+                    destination,
+                } => {
+                    let value = read_ref(process, value)?;
+                    let result = match id {
+                        RecordId::Local(name) => record::get_field(value, None, name, field),
+                        RecordId::Remote { module, name } => {
+                            record::get_field(value, Some(module), name, field)
+                        }
+                    };
+                    match result {
+                        Ok(value) => write(process, destination, value)?,
+                        Err(_) if *fail_label != 0 => cursor.position = *fail_label as usize,
+                        Err(reason) => {
+                            cursor.commit(process);
+                            if let Some(outcome) = raise_in_function(scheduler, reason)? {
+                                return Ok(outcome);
+                            }
+                            cursor.refresh(scheduler)?;
+                        }
                     }
                 }
                 // ERTS loads `has_map_fields` as `get_map_elements` with
