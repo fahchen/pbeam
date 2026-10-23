@@ -87,8 +87,9 @@ deleted() ->
 
 %% A decoded fun with the MD5 and index of a loaded entry but another arity
 %% gets another fun entry (`erl_fun.c:79-85`), and a call raises badfun
-%% (`beam_common.c:1697-1706`).
+%% (`beam_common.c:1697-1706`). The name of the stub entry is `[]`.
 wrong_arity() ->
     <<Head:6/binary, 2, Rest/binary>> = term_to_binary(make(t)),
     D = binary_to_term(<<Head/binary, 1, Rest/binary>>),
-    try D(1) catch C:R -> {C, R =:= {badfun, D}} end.
+    {erlang:fun_info(D, name), erlang:fun_info(make(t), name),
+     try D(1) catch C:R -> {C, R =:= {badfun, D}} end}.
