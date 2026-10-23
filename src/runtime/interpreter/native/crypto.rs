@@ -27,6 +27,7 @@ mod agreement;
 mod bn;
 mod cipher;
 mod cipher_context;
+mod engine;
 mod kem;
 mod keygen;
 mod mac_context;
@@ -46,6 +47,10 @@ use cipher::{
 use cipher_context::{
     aead_cipher_context_nif, aead_cipher_init_nif, ng_crypto_final_nif, ng_crypto_get_data_nif,
     ng_crypto_init_nif, ng_crypto_update_nif,
+};
+use engine::{
+    engine_by_id_nif, engine_get_all_methods_nif, engine_get_first_nif, engine_load_dynamic_nif,
+    engine_resource_nif, ensure_engine_loaded_nif,
 };
 use kem::{decapsulate_key_nif, encapsulate_key_nif};
 use keygen::{ec_generate_key_nif, evp_generate_key_nif, rsa_generate_key_nif};
@@ -239,91 +244,91 @@ pub(super) const BINDINGS: &[Binding] = &[
         name: "engine_add_nif",
         arity: 1,
         job: Job::Normal,
-        run: engine_notsup,
+        run: engine_resource_nif,
     },
     Binding {
         name: "engine_by_id_nif",
         arity: 1,
         job: Job::Normal,
-        run: engine_notsup,
+        run: engine_by_id_nif,
     },
     Binding {
         name: "engine_ctrl_cmd_strings_nif",
         arity: 3,
         job: Job::Normal,
-        run: engine_notsup,
+        run: engine_resource_nif,
     },
     Binding {
         name: "engine_free_nif",
         arity: 1,
         job: Job::Normal,
-        run: engine_notsup,
+        run: engine_resource_nif,
     },
     Binding {
         name: "engine_get_all_methods_nif",
         arity: 0,
         job: Job::Normal,
-        run: engine_notsup,
+        run: engine_get_all_methods_nif,
     },
     Binding {
         name: "engine_get_first_nif",
         arity: 0,
         job: Job::Normal,
-        run: engine_notsup,
+        run: engine_get_first_nif,
     },
     Binding {
         name: "engine_get_id_nif",
         arity: 1,
         job: Job::Normal,
-        run: engine_notsup,
+        run: engine_resource_nif,
     },
     Binding {
         name: "engine_get_name_nif",
         arity: 1,
         job: Job::Normal,
-        run: engine_notsup,
+        run: engine_resource_nif,
     },
     Binding {
         name: "engine_get_next_nif",
         arity: 1,
         job: Job::Normal,
-        run: engine_notsup,
+        run: engine_resource_nif,
     },
     Binding {
         name: "engine_init_nif",
         arity: 1,
         job: Job::Normal,
-        run: engine_notsup,
+        run: engine_resource_nif,
     },
     Binding {
         name: "engine_load_dynamic_nif",
         arity: 0,
         job: Job::Normal,
-        run: engine_notsup,
+        run: engine_load_dynamic_nif,
     },
     Binding {
         name: "engine_register_nif",
         arity: 2,
         job: Job::Normal,
-        run: engine_notsup,
+        run: engine_resource_nif,
     },
     Binding {
         name: "engine_remove_nif",
         arity: 1,
         job: Job::Normal,
-        run: engine_notsup,
+        run: engine_resource_nif,
     },
     Binding {
         name: "engine_unregister_nif",
         arity: 2,
         job: Job::Normal,
-        run: engine_notsup,
+        run: engine_resource_nif,
     },
     Binding {
         name: "ensure_engine_loaded_nif",
         arity: 2,
         job: Job::Normal,
-        run: engine_notsup,
+        run: ensure_engine_loaded_nif,
     },
     Binding {
         name: "evp_compute_key_nif",
@@ -840,24 +845,6 @@ fn atom_name<'a>(scheduler: &'a Scheduler, term: &Term) -> &'a str {
         Term::Atom(atom) => scheduler.atoms.name_of(atom),
         _ => "",
     }
-}
-
-/// Run an engine function of `crypto` (`engine.c:353-1045`) as an ERTS
-/// build without `HAS_ENGINE_SUPPORT` does: raise `error:notsup`
-/// (`RAISE_NOTSUP`, `common.h:51`). OpenSSL 3 deprecates engines, and the
-/// safe `openssl` crate has no engine API (row "NIF stubs" of
-/// `docs/erts-differences.md`).
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// assert!(matches!(engine_notsup(&mut scheduler, &[])?, BifResult::Raise { .. }));
-/// ```
-fn engine_notsup(scheduler: &mut Scheduler, _: &[Term]) -> Result<BifResult, BeamError> {
-    Ok(BifResult::Raise {
-        class: ExceptionClass::Error,
-        reason: Term::Atom(scheduler.atoms.put("notsup")?),
-    })
 }
 
 /// Run `crypto:hash_info(Type)` as the ERTS NIF `hash_info_nif`

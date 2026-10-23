@@ -22,21 +22,73 @@ const ON_LOAD_PROBE: &str = "fixtures/code_server/on_load_server_probe";
 /// function.
 const FUN_ENTRY_PROBE: &str = "fixtures/code_server/fun_entry_probe";
 
+/// The output of `crypto_engine_probe:main/0` on PBeam and on the pinned
+/// macOS ERTS (OpenSSL 3.5.8), which has no engine in its list.
+const ENGINE_RESULTS: &str =
+    "[[engine_method_rsa,engine_method_dsa,engine_method_dh,engine_method_rand,
+  engine_method_ciphers,engine_method_digests,engine_method_pkey_meths,
+  engine_method_pkey_asn1_meths,engine_method_ec],
+ [],
+ {error,bad_engine_id},
+ {error,bad_engine_id},
+ {error,badarg},
+ {error,badarg},
+ {error,badarg},
+ {error,badarg},
+ {error,badarg},
+ {error,badarg},
+ {error,badarg},
+ {error,badarg},
+ {error,badarg},
+ {error,badarg},
+ {error,badarg},
+ {error,badarg}]
+";
+
 #[test]
-fn raises_notsup_for_each_engine_function() {
-    // PBeam runs the engine NIFs as an ERTS build without
-    // HAS_ENGINE_SUPPORT (openssl_config.h:387-388): each raises
-    // error:notsup (engine.c:403-405 and the other #else branches up to
-    // 1043). The pinned ERTS has engine support, so the probe asserts the
-    // exact PBeam output and does not compare it with ERTS.
-    let output = run(&mut pbeam_probe(
+fn runs_the_engine_functions_as_pinned_erts() {
+    // engine.c:353-1045: PBeam has no engine, so each call that needs no
+    // loaded engine gives the ERTS result. The Linux CI ERTS links another
+    // OpenSSL, whose engine list can differ, so only macOS compares.
+    let pbeam = run(&mut pbeam_probe(
         CRYPTO_ENGINE_PROBE,
         "crypto_engine_probe",
         "main",
         &[],
     ));
-    let expected = format!("[{}]\n", vec!["{error,notsup}"; 13].join(",\n "));
-    assert_eq!(output, expected);
+    assert_eq!(pbeam, ENGINE_RESULTS);
+    if cfg!(target_os = "macos") {
+        let erts = run(&mut erts_probe(
+            CRYPTO_ENGINE_PROBE,
+            "crypto_engine_probe",
+            "main",
+            &[],
+        ));
+        assert_eq!(erts, ENGINE_RESULTS);
+    }
+}
+
+#[test]
+fn reports_an_engine_load_as_unsupported() {
+    // The safe openssl crate has no ENGINE_by_id (engine.c:375, 959).
+    for (function, expected) in [
+        (
+            "dynamic",
+            "crypto:engine_by_id_nif/1 NIF is not supported for the engine dynamic",
+        ),
+        (
+            "ensure",
+            "crypto:ensure_engine_loaded_nif/2 NIF is not supported for an engine load",
+        ),
+    ] {
+        let output = pbeam_probe(CRYPTO_ENGINE_PROBE, "crypto_engine_probe", function, &[])
+            .env("TERM", "dumb")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains(expected), "{function}: {stderr}");
+    }
 }
 
 #[test]

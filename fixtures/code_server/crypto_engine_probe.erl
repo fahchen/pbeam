@@ -1,10 +1,10 @@
 -module(crypto_engine_probe).
--export([main/0]).
+-export([main/0, dynamic/0, ensure/0]).
 
 %% Write the result of each public engine function of crypto
 %% (crypto.erl:3996-4415), which call the engine NIFs (engine.c:353-1045).
-%% The reference is not an engine, so a build with engine support checks
-%% it, and a build without engine support raises error:notsup.
+%% The reference is not an engine, so each NIF that takes an engine
+%% gives badarg.
 main() ->
     T = fun(F) -> try F() catch C:R -> {C, R} end end,
     R = make_ref(),
@@ -21,4 +21,15 @@ main() ->
         fun() -> crypto:engine_get_id(R) end,
         fun() -> crypto:engine_get_name(R) end,
         fun() -> crypto:engine_ctrl_cmd_string(R, <<"a">>, <<"b">>) end,
-        fun() -> crypto:ensure_engine_loaded(<<"x">>, <<"y">>) end]]]).
+        fun() -> crypto:engine_by_id(a) end,
+        fun() -> crypto:engine_by_id(<<1:1>>) end,
+        fun() -> crypto:ensure_engine_loaded(a, <<"y">>) end,
+        fun() -> crypto:ensure_engine_loaded(<<"x">>, a) end]]]).
+
+%% Load the built-in engine dynamic.
+dynamic() ->
+    io:format("~p~n", [crypto:engine_by_id(<<"dynamic">>)]).
+
+%% Load an engine from a library path.
+ensure() ->
+    io:format("~p~n", [crypto:ensure_engine_loaded(<<"x">>, <<"y">>)]).
