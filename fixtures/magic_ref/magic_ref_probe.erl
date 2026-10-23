@@ -39,8 +39,10 @@ round_trip(T, A) ->
 %% the table is deleted (tid2tab, erl_db.c:280-306).
 dead(T) ->
     D = binary_to_term(term_to_binary(T)),
+    B = term_to_binary(T),
     true = ets:delete(T),
-    {ets:info(D, size), try ets:lookup(D, 1) catch error:badarg:S -> cause(S) end}.
+    L = binary_to_term(B),
+    [{L =:= T, ets:info(X, size), try ets:lookup(X, 1) catch error:badarg:S -> cause(S) end} || X <- [D, L]].
 
 order(X, Y) when X < Y -> lt;
 order(X, Y) when X > Y -> gt;

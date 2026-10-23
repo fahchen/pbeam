@@ -1779,15 +1779,16 @@ impl Decoder<'_> {
             ))
     }
 
-    /// Return the identifier of the live table of the magic reference
-    /// `reference`, else `reference`. ERTS gives the live magic reference
-    /// itself (`external.c:4845-4851`), which stays a table identifier after
-    /// the table is deleted (`tid2tab`, `erl_db.c:280-306`).
+    /// Return the identifier of the live or deleted table of the magic
+    /// reference `reference`, else `reference`. ERTS gives the magic
+    /// reference itself (`external.c:4845-4851`), which stays a table
+    /// identifier after the table is deleted (`tid2tab`, `erl_db.c:280-306`).
+    /// ERTS gives an ordinary reference, and so the cause `type`, only after
+    /// the garbage collector frees each holder of the identifier. PBeam has
+    /// no such collector, so the deleted set of the tables keeps the common
+    /// case.
     fn live_magic(&self, reference: Reference) -> Reference {
-        self.ets
-            .shared()
-            .id(self.atoms, &Term::Reference(reference))
-            .unwrap_or(reference)
+        self.ets.shared().decoded(self.atoms, reference)
     }
 
     /// Decode an old `REFERENCE_EXT`, as `dec_term`
