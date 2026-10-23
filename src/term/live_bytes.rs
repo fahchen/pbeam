@@ -33,7 +33,7 @@ use super::{
     list::{Cons, ConsRef},
     map::{Child, Node, Repr},
     match_context::MatchState,
-    record::RecordThing,
+    record::{RecordDef, RecordThing},
     tuple::Tuple,
 };
 
@@ -60,6 +60,7 @@ enum Shared {
     Binary(Arc<Vec<u8>>),
     Fun(Arc<FunThing>),
     Record(Arc<RecordThing>),
+    RecordDef(Arc<RecordDef>),
     Match(Arc<MatchState>),
     BigInt(Arc<BigInt>),
 }
@@ -106,6 +107,7 @@ impl Shared {
             (Shared::Binary(left), Shared::Binary(right)) => Arc::ptr_eq(left, right),
             (Shared::Fun(left), Shared::Fun(right)) => Arc::ptr_eq(left, right),
             (Shared::Record(left), Shared::Record(right)) => Arc::ptr_eq(left, right),
+            (Shared::RecordDef(left), Shared::RecordDef(right)) => Arc::ptr_eq(left, right),
             (Shared::Match(left), Shared::Match(right)) => Arc::ptr_eq(left, right),
             (Shared::BigInt(left), Shared::BigInt(right)) => Arc::ptr_eq(left, right),
             _ => false,
@@ -341,8 +343,9 @@ impl LiveBytes {
         }
     }
 
-    /// Count the thing of `record` and walk its values. The definition is
-    /// shared by the module, so the walk does not count it.
+    /// Count the thing of `record` and walk its values. The walk counts a
+    /// transient definition once and its tuple; module code holds each
+    /// other definition, so the walk does not count it.
     fn record(&mut self, record: &Record, unique: bool) {
         if !unique && !self.fresh(Shared::Record(Arc::clone(record.arc()))) {
             return;
@@ -350,6 +353,14 @@ impl LiveBytes {
         self.bytes += size_of::<RecordThing>() + size_of_val(record.values());
         for value in record.values() {
             self.push(value);
+        }
+        let def = record.def();
+        if def.transient && self.fresh(Shared::RecordDef(Arc::clone(def))) {
+            self.bytes += size_of::<RecordDef>()
+                + size_of_val(&*def.keys)
+                + size_of_val(&*def.order)
+                + size_of_val(&*def.defaults);
+            self.push(&def.tuple);
         }
     }
 

@@ -1,5 +1,5 @@
 -module(external_term_probe).
--export([literals/0, options/0, decode/0, used/0, sizes/0, errors/0, decode_record/0, bits/0]).
+-export([literals/0, options/0, decode/0, used/0, sizes/0, errors/0, decode_record/0, bits/0, iovec/0]).
 
 -define(VALUES,
         [0, 255, 256, -1, 1 bsl 40, -(1 bsl 40), 1 bsl 70, -(1 bsl 70),
@@ -113,3 +113,42 @@ bits() ->
 
 id(X) ->
     X.
+
+iovec() ->
+    B = binary:copy(<<1>>, 100),
+    <<_:3, S/bitstring>> = <<B/binary, 0:5>>,
+    <<_:8, T/bitstring>> = <<B/binary, 0:5>>,
+    Terms = [a, B, binary:copy(<<1>>, 64), binary:copy(<<1>>, 65), {B, x, B},
+             [B | B], <<B/binary, 1:3>>, <<1:3>>, S, T, binary:part(B, 1, 70)],
+    Options = [[], [{minor_version, 1}], [local], [{compressed, 0}], [deterministic]],
+    Sizes = [[byte_size(E) || E <- erlang:term_to_iovec(X)] || X <- Terms],
+    OptionSizes = [[byte_size(E) || E <- erlang:term_to_iovec({B, x}, O)] || O <- Options],
+    Differ = [{I, J} || {I, X} <- number(Terms), {J, O} <- number(Options),
+                        iolist_to_binary(erlang:term_to_iovec(X, O)) =/= term_to_binary(X, O)],
+    Local = [try binary_to_term(iolist_to_binary(erlang:term_to_iovec(X, [local]))) =:= X
+             catch C:R -> {C, R} end
+             || X <- [B, <<B/binary, 1:3>>, <<B/binary, 1:3, 7>>, binary:copy(<<1>>, 98)]],
+    Compressed = [erlang:term_to_iovec(X, [compressed]) =:= term_to_binary(X, [compressed])
+                  || X <- [a, B, binary:copy(<<0>>, 1000)]],
+    External = [erlang:external_size(X, O)
+                || {X, O} <- [{binary:copy(<<0>>, 1000), [compressed]}, {x, [{minor_version, 1}]},
+                              {1.0, [{minor_version, 0}]}, {a, [local]}, {a, [deterministic]},
+                              {B, [{compressed, 9}]}, {B, []}]],
+    Errors = [try F() catch C:R -> {C, R} end
+              || F <- [fun() -> erlang:term_to_iovec(x, bad) end,
+                       fun() -> erlang:term_to_iovec(x, [local, deterministic]) end,
+                       fun() -> erlang:external_size(x, [{compressed, 10}]) end,
+                       fun() -> erlang:external_size(x, [foo | bar]) end]],
+    Str = repeat(70, $a),
+    Referenced = [[binary:referenced_byte_size(E) || E <- erlang:term_to_iovec({Str, B, Str})]
+                  | [binary:referenced_byte_size(hd(tl(erlang:term_to_iovec(X)))) || X <- [B, T]]],
+    {Referenced, Sizes, OptionSizes, Differ, Local, Compressed, External, Errors,
+     erlang:term_to_iovec(a), erlang:apply(erlang, term_to_iovec, [a, []])}.
+
+number(List) ->
+    number(1, List).
+
+number(_, []) ->
+    [];
+number(I, [X | Rest]) ->
+    [{I, X} | number(I + 1, Rest)].
