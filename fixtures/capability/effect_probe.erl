@@ -631,7 +631,8 @@ ambient() ->
         prim_socket:supports(other),
         element(1, prim_net:gethostname()),
         maps:get(netns, prim_net:info()),
-        prim_net:debug(false)
+        prim_net:debug(false),
+        erts_internal:term_type(id(a))
     ].
 
 %% Each metadata probe makes a temporary file, so `write_file_info/3`

@@ -1882,3 +1882,65 @@ pub(super) fn term_to_string(atoms: &AtomTable, term: &Term, limit: &Term) -> Bi
         text.into_iter().map(|byte| Term::Integer(i64::from(byte))),
     ))
 }
+
+/// Return the ERTS name of the kind of `term`, as
+/// `erts_internal:term_type/1` does (`erl_map.c:3336-3417`). PBeam does
+/// not keep the ERTS form of a binary (heap, reference-counted, or
+/// sub-binary), so a binary and a native record raise an unsupported error
+/// (`docs/erts-differences.md`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(term_type(&atoms, &Term::Nil)?, Value(Term::static_atom("nil")));
+/// ```
+pub(super) fn term_type(atoms: &AtomTable, term: &Term) -> Result<BifResult, BeamError> {
+    let name = match term {
+        Term::Cons(_) => "list",
+        Term::Tuple(_) => "tuple",
+        Term::Fun(fun) => match fun.target() {
+            Target::Local(_) => "fun",
+            Target::External { .. } => "export",
+        },
+        Term::Map(map) if map.is_hashmap() => "hashmap",
+        Term::Map(_) => "flatmap",
+        Term::Integer(_) if term.small_integer().is_some() => "fixnum",
+        Term::Integer(_) | Term::BigInt(_) => "bignum",
+        Term::Reference(_) => "reference",
+        Term::Float(_) => "hfloat",
+        Term::Pid(_) => "pid",
+        Term::Port(_) => "port",
+        Term::Atom(_) => "atom",
+        Term::Nil => "nil",
+        Term::Binary(_) | Term::Record(_) | Term::MatchContext(_) => {
+            return Err(error(
+                "erts_internal:term_type/1 cannot name the ERTS form of a binary or a native record"
+                    .to_owned(),
+            ));
+        }
+    };
+    Ok(Value(Term::Atom(atoms.put(name)?)))
+}
+
+/// Return the key tuple of a flatmap, as
+/// `erts_internal:map_to_tuple_keys/1` does (`erl_map.c:3318-3328`): a
+/// hashmap raises `error:badarg`, and another term raises
+/// `error:{badmap, Term}`. PBeam keeps no key tuple, so each call makes a
+/// new tuple that no other map shares (`docs/erts-differences.md`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(map_to_tuple_keys(&Term::Map(Map::new())), Value(Term::tuple(vec![])));
+/// ```
+pub(super) fn map_to_tuple_keys(term: &Term) -> BifResult {
+    let Term::Map(map) = term else {
+        return maps::error_with("badmap", term);
+    };
+    match map.flat_pairs() {
+        Some(pairs) => Value(Term::tuple(
+            pairs.iter().map(|(key, _)| key.clone()).collect(),
+        )),
+        None => BifResult::badarg(),
+    }
+}
