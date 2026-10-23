@@ -406,7 +406,7 @@ fn decode(
     let lambdas = chunks
         .get(b"FunT".as_slice())
         .filter(|data| !data.is_empty())
-        .map(|data| parse_lambdas(data, &atoms, module_md5(chunks)?))
+        .map(|data| parse_lambdas(data, &atoms, module_md5(chunks)))
         .transpose()?
         .unwrap_or_default();
     let strings = chunks.get(b"StrT".as_slice()).copied().unwrap_or_default();
@@ -701,10 +701,10 @@ fn parse_lambdas(
 /// assert_eq!(md5.len(), 16);
 /// ```
 ///
-/// # Errors
+/// # Panics
 ///
-/// An error of OpenSSL gives an error.
-fn module_md5(chunks: &HashMap<Vec<u8>, &[u8]>) -> Result<[u8; 16], BeamError> {
+/// The vendored OpenSSL always has MD5, so the hash does not fail.
+fn module_md5(chunks: &HashMap<Vec<u8>, &[u8]>) -> [u8; 16] {
     let chunk = |id: &[u8]| chunks.get(id).copied().unwrap_or_default();
     let mut bytes = Vec::new();
     for id in [b"AtU8", b"Code", b"StrT", b"ImpT", b"ExpT"] {
@@ -722,11 +722,11 @@ fn module_md5(chunks: &HashMap<Vec<u8>, &[u8]>) -> Result<[u8; 16], BeamError> {
         bytes.extend_from_slice(chunk(id));
     }
     let digest = openssl::hash::hash(openssl::hash::MessageDigest::md5(), &bytes)
-        .map_err(|cause| error(format!("cannot compute the module MD5: {cause}")))?;
-    Ok(digest
+        .expect("the vendored OpenSSL has MD5");
+    digest
         .as_ref()
         .try_into()
-        .expect("an MD5 digest has 16 bytes"))
+        .expect("an MD5 digest has 16 bytes")
 }
 
 /// Read supported terms from an uncompressed `LitT` chunk. Put the atoms of
