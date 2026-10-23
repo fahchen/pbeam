@@ -4055,3 +4055,46 @@ fn keeps_a_known_unsupported_opcode_with_its_operands_skipped() {
         "{instructions:?}"
     );
 }
+
+/// The ERTS loader fuses `bs_match` and the `test_heap` right after it
+/// into `i_bs_match_test_heap` (JIT jit/arm/ops.tab:962-963).
+#[test]
+fn marks_a_bs_match_that_a_test_heap_follows() {
+    // bs_match f16 x0 {list,[ensure_at_least,0,8]}
+    let bs_match: &[u8] = &[0xB6, 0x0D, 0x10, 0x03, 0x17, 0x30, 0x82, 0x00, 0x80];
+    // test_heap 3 2
+    let test_heap: &[u8] = &[0x10, 0x30, 0x20];
+    // bs_set_position x0 x1
+    let set_position: &[u8] = &[0xA8, 0x03, 0x13];
+    // Atom 8 is `ensure_at_least`.
+    let table = AtomTable::new();
+    let atoms: Vec<Atom> = (1..=8)
+        .map(|index| match index {
+            8 => table.put("ensure_at_least").unwrap(),
+            _ => table.put(&format!("atom{index}")).unwrap(),
+        })
+        .collect();
+    let fused = |parts: &[&[u8]]| {
+        let mut code = vec![0, 0, 0, 16];
+        code.extend([0; 16]);
+        code.extend(parts.concat());
+        code.push(0x03);
+        let (instructions, _, _) = parse_code(
+            &code,
+            &table,
+            &atoms,
+            &[],
+            &[],
+            &[],
+            &[],
+            &mut LineTable::default(),
+        )
+        .unwrap();
+        match instructions.first() {
+            Some(Instruction::BinaryMatch { test_heap, .. }) => *test_heap,
+            other => panic!("{other:?}"),
+        }
+    };
+    assert!(fused(&[bs_match, test_heap]));
+    assert!(!fused(&[bs_match, set_position, test_heap]));
+}
