@@ -3546,7 +3546,7 @@ fn returns_the_local_node_for_node_0_and_a_pid() {
         node(BifId::ErlangNode1, vec![atom("foo")])
             .unwrap_err()
             .to_string(),
-        "unsupported erlang:node/1 argument Atom(\"foo\"): not a pid"
+        "root process exited with {badarg,[{erlang,node,[foo],[{error_info,#{module=>erl_erts_errors}}]},{fixture,main,0,[]}]}"
     );
 }
 
