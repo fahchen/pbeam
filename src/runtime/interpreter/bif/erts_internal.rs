@@ -252,8 +252,8 @@ struct PortSettings {
 ///    `badarg`. A first word of `Command` that names a driver opens the
 ///    driver (see [`open_driver_port`]).
 /// 3. Check the capabilities of the caller: without a `port` capability
-///    with `spawn` that permits the native bytes of `Name`, or `/bin/sh`
-///    for `{spawn, Command}`, the BIF raises
+///    with `spawn` that permits the native bytes of `Name` or `Command`,
+///    the BIF raises
 ///    `error:capability_denied` and starts no program. The constraint
 ///    compares the name as the caller gives it. It does not resolve a
 ///    relative name or a symbolic link.
@@ -316,17 +316,12 @@ pub(super) fn open_port(
         ));
     }
     let scheduler = &mut *context.scheduler;
-    // A command runs in `/bin/sh`, the program that the capability checks.
-    let program = if is_command {
-        b"/bin/sh".as_slice()
-    } else {
-        &path
-    };
+    // The check uses the port name, which the later port operations check.
     let check = denial(
         scheduler,
         CapabilityKind::Port,
         Operation::Spawn,
-        Some(program),
+        Some(&path),
     );
     if let Some(denied) = check? {
         return Ok(denied);
