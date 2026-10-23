@@ -3532,12 +3532,18 @@ impl Scheduler {
             Term::list_from(vec![Term::Pid(id), reason.clone()]),
             Term::Map(metadata),
         ]);
+        // The dispatcher runs after the exit of the sender, so the sender is
+        // a process that does not exist. An exiting process does not take
+        // the message either (`erts_whereis_process`, register.c:356).
+        let live = |scheduler: &Self, target: ProcessId| {
+            target != id
+                && match scheduler.processes.get(&target) {
+                    Some(process) => process.exiting.is_none(),
+                    None => scheduler.node.live_owner(target).is_some(),
+                }
+        };
         let target = match self.node.system_logger() {
-            // The dispatcher runs after the exit of the sender, so a sender
-            // that is the system logger is a pid that does not exist.
-            Term::Pid(target) if target != id && self.node.live_owner(target).is_some() => {
-                Some(target)
-            }
+            Term::Pid(target) if live(self, target) => Some(target),
             Term::Pid(_) => {
                 self.node.swap_system_logger(Term::static_atom("logger"));
                 self.whereis("logger")
@@ -3546,7 +3552,7 @@ impl Scheduler {
             _ => return,
         };
         match target {
-            Some(target) if target != id => self.send_message(id, target, message),
+            Some(target) if live(self, target) => self.send_message(id, target, message),
             _ => {
                 // `erts_printf` adds a carriage return to the standard error
                 // (`sys/unix/sys.c:342-343`). A failed write changes nothing.
