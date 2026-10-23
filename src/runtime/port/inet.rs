@@ -389,6 +389,7 @@ impl Inet {
             8 => self.get_options(request)?,
             11 => return Ok(self.statistics(request)),
             3 if self.socket_type == SocketType::Stream => return self.connect(request, caller),
+            3 => self.datagram_connect(request)?,
             12 => get_host_name(request),
             24 => return Ok(self.subscribe(request, caller)),
             26 if self.socket_type == SocketType::Stream => return Ok(self.accept(request)),
@@ -492,7 +493,8 @@ impl Inet {
     }
 
     /// Run `INET_REQ_PEER` (inet_drv.c:11272-11300): the address of the
-    /// peer of a connected socket. Each other state gives `enotconn`.
+    /// peer of a connected socket, also of a `udp_inet` socket after
+    /// `CONNECT`. Each other state gives `enotconn`.
     fn peer(&self) -> Vec<u8> {
         let (State::Connected, Some(socket)) = (self.state, &self.socket) else {
             return error_reply("enotconn");

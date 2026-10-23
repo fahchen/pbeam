@@ -14,14 +14,62 @@ use std::{io, net::UdpSocket};
 
 use socket2::SockAddr;
 
-use super::{AF_INET, Control, Event, Inet, State, errno_name, error_reply, stream::Sender};
-use crate::error::BeamError;
+use super::{
+    AF_INET, Control, Event, Inet, OK, State, errno_name, errno_reply, error_reply, stream::Sender,
+};
+use crate::error::{BeamError, error};
+
+/// The address tag `INET_AF_ANY` (inet_drv.c:759).
+const ANY: u8 = 3;
+/// The address tag `INET_AF_LOOPBACK` (inet_drv.c:760).
+const LOOPBACK: u8 = 4;
 
 /// The bytes of a datagram and `[Family, P1, P0, A, B, C, D]` of its
 /// sender.
 type Datagram = (Vec<u8>, Vec<u8>);
 
 impl Inet {
+    /// Run `INET_REQ_CONNECT` of a `udp_inet` socket with `[T3, T2, T1, T0,
+    /// 1, P1, P0, A, B, C, D]` (inet_drv.c:14710-14842): a port without a
+    /// socket gives `exbadport`, a request of 1 to 5 bytes gives `einval`,
+    /// and the address gives the errors of `inet_set_faddress`. The connect
+    /// sets the default peer at once, so `PEER` gives the peer and a send
+    /// ignores its address. A failed connect gives the errno, and the socket
+    /// is not connected.
+    ///
+    /// # Errors
+    ///
+    /// The request without an address, which dissolves the association,
+    /// and a failed connect of a connected socket: both need a connect to
+    /// an `AF_UNSPEC` address (inet_drv.c:14803-14806, 14832-14836), which
+    /// safe Rust cannot make. The `any`, `loopback`, `inet6`, and `local`
+    /// address tags.
+    pub(super) fn datagram_connect(&mut self, request: &[u8]) -> Result<Vec<u8>, BeamError> {
+        if self.state == State::Closed {
+            return Ok(error_reply("exbadport"));
+        }
+        let address = match request {
+            [] => return Err(self.unsupported("request", "CONNECT without an address")),
+            [_, _, _, _, address @ ..] if address.len() >= 2 => address,
+            _ => return Ok(error_reply("einval")),
+        };
+        let remote = match self.address(address, "connect")? {
+            Ok(remote) => remote,
+            Err(reply) => return Ok(reply),
+        };
+        let socket = self.socket.as_ref().expect("an open port has a socket");
+        match socket.connect(&remote.into()) {
+            Ok(()) => {
+                self.state = State::Connected;
+                Ok(vec![OK])
+            }
+            Err(_) if self.state == State::Connected => Err(error(
+                "unsupported failed udp_inet connect of a connected socket: see \"udp_inet ports\" in docs/erts-differences.md",
+            )),
+            Err(failure) => Ok(errno_reply(&failure)),
+        }
+    }
+
     /// Check `PACKET_REQ_RECV` with `[T3, T2, T1, T0, N3, N2, N1, N0]`
     /// (inet_drv.c:14981-14991): a port without a socket gives
     /// `exbadport`, an active socket and a request that is not 8 bytes give
@@ -127,12 +175,15 @@ impl Inet {
     /// 15240-15316): a port without a socket, a short address or size, and
     /// a size larger than the rest give `einval`, and a family code that is
     /// not 1 to 5 gives `eafnosupport` (`inet_set_faddress`,
-    /// inet_drv.c:4795-4880). The send counts the data before `sendto`,
-    /// and a failed `sendto` gives its errno.
+    /// inet_drv.c:4795-4880). The tags `any` and `loopback` take only the
+    /// port, for the address 0.0.0.0 or 127.0.0.1 (inet_drv.c:4817-4844).
+    /// The send counts the data before `sendto`, and a failed `sendto`
+    /// gives its errno. A connected socket ignores the address and sends
+    /// to its peer (inet_drv.c:15142-15182).
     ///
     /// # Errors
     ///
-    /// A family other than IPv4, the codes 2 to 5, and ancillary data.
+    /// A family other than IPv4, the codes 2 and 5, and ancillary data.
     pub(super) fn send_datagram(
         &mut self,
         bytes: &[u8],
@@ -145,14 +196,14 @@ impl Inet {
         let Some(socket) = self.socket.as_ref() else {
             return reply(Err("einval"));
         };
-        match bytes.first() {
-            None => return reply(Err("einval")),
-            Some(&AF_INET) => {}
-            Some(&family @ 2..=5) => return Err(self.unsupported("output address family", family)),
-            Some(_) => return reply(Err("eafnosupport")),
-        }
-        let [_, p1, p0, a, b, c, d, rest @ ..] = bytes else {
-            return reply(Err("einval"));
+        let (ip, p1, p0, rest) = match bytes {
+            [] => return reply(Err("einval")),
+            [AF_INET, p1, p0, a, b, c, d, rest @ ..] => ([*a, *b, *c, *d], p1, p0, rest),
+            [ANY, p1, p0, rest @ ..] => ([0, 0, 0, 0], p1, p0, rest),
+            [LOOPBACK, p1, p0, rest @ ..] => ([127, 0, 0, 1], p1, p0, rest),
+            [AF_INET | ANY | LOOPBACK, ..] => return reply(Err("einval")),
+            [family @ (2 | 5), ..] => return Err(self.unsupported("output address family", family)),
+            _ => return reply(Err("eafnosupport")),
         };
         let [l3, l2, l1, l0, data @ ..] = rest else {
             return reply(Err("einval"));
@@ -163,9 +214,13 @@ impl Inet {
             _ => return Err(self.unsupported("output", "with ancillary data")),
         }
         self.stream.statistics.output(data.len() as u64);
-        let to =
-            std::net::SocketAddrV4::new([*a, *b, *c, *d].into(), u16::from_be_bytes([*p1, *p0]));
-        match socket.send_to(data, &to.into()) {
+        let to = std::net::SocketAddrV4::new(ip.into(), u16::from_be_bytes([*p1, *p0]));
+        let sent = if self.state == State::Connected {
+            socket.send(data)
+        } else {
+            socket.send_to(data, &to.into())
+        };
+        match sent {
             Ok(_) => reply(Ok(())),
             Err(failure) => reply(Err(&errno_name(&failure))),
         }
