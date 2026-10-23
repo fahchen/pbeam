@@ -143,14 +143,14 @@ fn writes_the_report_to_stderr_when_no_logger_takes_it() {
     );
     for (name, output) in [("ERTS", erts), ("PBeam", pbeam)] {
         let text = mask(&String::from_utf8_lossy(&output.stderr));
-        let start = text.find("time=>").map_or(text.len(), |start| start + 6);
-        let end = text[start..].find(',').map_or(start, |end| start + end);
-        let text = format!("{}TIME{}", &text[..start], &text[end..]);
         // ERTS drops the report when its dispatcher runs before the exit
         // marks the sender as exiting (erl_trace.c:2817-2818, register.c:356).
         if name == "ERTS" && text.is_empty() {
             continue;
         }
+        let start = text.find("time=>").map_or(text.len(), |start| start + 6);
+        let end = text[start..].find(',').map_or(start, |end| start + end);
+        let text = format!("{}TIME{}", &text[..start], &text[end..]);
         assert_eq!(text, stderr, "{name}");
     }
 }
