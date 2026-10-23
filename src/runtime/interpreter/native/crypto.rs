@@ -6,16 +6,23 @@
 //! `strong_rand_range_nif/1`, `info_nif/0`, and `info_lib/0`. It links
 //! `info_fips/0`, `enable_fips_mode_nif/1`, and the algorithm lists of
 //! `crypto:supports/0,1`, which name only the algorithms that PBeam can
-//! run. As ERTS,
-//! PBeam computes the digests with a static OpenSSL, through the safe
-//! `openssl` crate (`vendored`, OpenSSL 3.5.5).
+//! run, and the one-shot hash and MAC NIFs `hash_info/1`, `mac_nif/4`, and
+//! `hash_equals_nif/2`. As ERTS, PBeam computes the digests and MACs with
+//! a static OpenSSL, through the safe `openssl` crate (`vendored`, OpenSSL
+//! 3.5.5).
 //! Each other function of the library gives the runtime error
 //! `crypto:F/A NIF is not supported` (row "NIF stubs" of
 //! `docs/erts-differences.md`).
 
+use super::bif::iodata_bytes;
 use super::*;
 use num_traits::ToPrimitive;
-use openssl::hash::MessageDigest;
+use openssl::{
+    hash::{Hasher, MessageDigest},
+    md::Md,
+    pkey::{Id, PKey},
+    sign::Signer,
+};
 use std::{fs::File, io::Read, sync::OnceLock};
 
 /// The functions of the ERTS `crypto` NIF library, as `(name, arity)` in
@@ -131,7 +138,19 @@ pub(super) const BINDINGS: &[Binding] = &[
         name: "hash_algorithms",
         arity: 0,
         job: Job::Normal,
-        run: |scheduler, _| hash_algorithms(scheduler),
+        run: |scheduler, _| atom_list(scheduler, &HASH_ALGORITHMS),
+    },
+    Binding {
+        name: "hash_equals_nif",
+        arity: 2,
+        job: Job::Normal,
+        run: |_, arguments| Ok(hash_equals_nif(&arguments[0], &arguments[1])),
+    },
+    Binding {
+        name: "hash_info",
+        arity: 1,
+        job: Job::Normal,
+        run: |scheduler, arguments| hash_info(scheduler, &arguments[0]),
     },
     Binding {
         name: "hash_nif",
@@ -171,7 +190,21 @@ pub(super) const BINDINGS: &[Binding] = &[
         name: "mac_algorithms",
         arity: 0,
         job: Job::Normal,
-        run: |_, _| Ok(BifResult::Value(Term::Nil)),
+        run: |scheduler, _| atom_list(scheduler, &MAC_ALGORITHMS),
+    },
+    Binding {
+        name: "mac_nif",
+        arity: 4,
+        job: Job::Normal,
+        run: |scheduler, arguments| {
+            mac_nif(
+                scheduler,
+                &arguments[0],
+                &arguments[1],
+                &arguments[2],
+                &arguments[3],
+            )
+        },
     },
     Binding {
         name: "pbkdf2_hmac_nif",
@@ -271,16 +304,23 @@ pub(super) fn load(load_info: &Term, _atoms: &AtomTable) -> i32 {
     }
 }
 
-/// A digest that `hash_nif/2` and `pbkdf2_hmac_nif/5` compute.
+/// A digest of the pinned libcrypto that `hash_nif/2`, `hash_info/1`,
+/// `mac_nif/4`, and `pbkdf2_hmac_nif/5` use. The names and their OpenSSL
+/// digests are those of `digest.c:25-179`. MD4 is not a `Hash`: ERTS
+/// fetches each digest from the default provider of OpenSSL 3.5, which has
+/// no MD4, so its `md.p` is NULL (`digest.c:186-188`). The static OpenSSL
+/// of PBeam also loads only the default provider.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(Hash::from_name("sha256").is_some());
-/// assert!(Hash::from_name("md5").is_none());
+/// assert!(Hash::from_name("md5").is_some());
+/// assert!(Hash::from_name("md4").is_none());
 /// ```
 #[derive(Clone, Copy)]
 enum Hash {
+    Md5,
+    Ripemd160,
     Sha,
     Sha224,
     Sha256,
@@ -288,29 +328,49 @@ enum Hash {
     Sha512,
     Sha512_224,
     Sha512_256,
+    Sha3_224,
+    Sha3_256,
+    Sha3_384,
+    Sha3_512,
+    Shake128,
+    Shake256,
+    Sm3,
+    Blake2b,
+    Blake2s,
 }
 
 impl Hash {
-    /// Return the digest of `name`, or `None` when PBeam does not compute
-    /// it. The names and their OpenSSL digests are those of `digest.c:25-179`.
+    /// Return the digest of `name`, or `None` for `md4` and for a name that
+    /// is not in `digest.c:25-179`.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert!(Hash::from_name("sha").is_some());
-    /// assert!(Hash::from_name("sha3_256").is_none());
+    /// assert!(Hash::from_name("sha3_256").is_some());
+    /// assert!(Hash::from_name("nosuch").is_none());
     /// ```
     fn from_name(name: &str) -> Option<Self> {
-        match name {
-            "sha" => Some(Hash::Sha),
-            "sha224" => Some(Hash::Sha224),
-            "sha256" => Some(Hash::Sha256),
-            "sha384" => Some(Hash::Sha384),
-            "sha512" => Some(Hash::Sha512),
-            "sha512_224" => Some(Hash::Sha512_224),
-            "sha512_256" => Some(Hash::Sha512_256),
-            _ => None,
-        }
+        Some(match name {
+            "md5" => Hash::Md5,
+            "ripemd160" => Hash::Ripemd160,
+            "sha" => Hash::Sha,
+            "sha224" => Hash::Sha224,
+            "sha256" => Hash::Sha256,
+            "sha384" => Hash::Sha384,
+            "sha512" => Hash::Sha512,
+            "sha512_224" => Hash::Sha512_224,
+            "sha512_256" => Hash::Sha512_256,
+            "sha3_224" => Hash::Sha3_224,
+            "sha3_256" => Hash::Sha3_256,
+            "sha3_384" => Hash::Sha3_384,
+            "sha3_512" => Hash::Sha3_512,
+            "shake128" => Hash::Shake128,
+            "shake256" => Hash::Shake256,
+            "sm3" => Hash::Sm3,
+            "blake2b" => Hash::Blake2b,
+            "blake2s" => Hash::Blake2s,
+            _ => return None,
+        })
     }
 
     /// Return the OpenSSL digest of `self`, as `init_digest_types`
@@ -323,6 +383,8 @@ impl Hash {
     /// ```
     fn message_digest(self) -> MessageDigest {
         match self {
+            Hash::Md5 => MessageDigest::md5(),
+            Hash::Ripemd160 => MessageDigest::ripemd160(),
             Hash::Sha => MessageDigest::sha1(),
             Hash::Sha224 => MessageDigest::sha224(),
             Hash::Sha256 => MessageDigest::sha256(),
@@ -334,72 +396,160 @@ impl Hash {
             Hash::Sha512_256 => {
                 MessageDigest::from_name("SHA512-256").expect("OpenSSL has SHA512-256")
             }
+            Hash::Sha3_224 => MessageDigest::sha3_224(),
+            Hash::Sha3_256 => MessageDigest::sha3_256(),
+            Hash::Sha3_384 => MessageDigest::sha3_384(),
+            Hash::Sha3_512 => MessageDigest::sha3_512(),
+            Hash::Shake128 => MessageDigest::shake_128(),
+            Hash::Shake256 => MessageDigest::shake_256(),
+            Hash::Sm3 => MessageDigest::sm3(),
+            Hash::Blake2b => {
+                MessageDigest::from_name("BLAKE2b512").expect("OpenSSL has BLAKE2b512")
+            }
+            Hash::Blake2s => {
+                MessageDigest::from_name("BLAKE2s256").expect("OpenSSL has BLAKE2s256")
+            }
         }
     }
 
-    /// Return the OpenSSL digest bytes of `data`, as `EVP_Digest` gives
-    /// them to `hash_nif` (`hash.c`).
+    /// Return the OpenSSL 3 fetch name of `self` (`str_v3`,
+    /// `digest.c:25-179`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Hash::Sha.fetch_name(), "SHA1");
+    /// ```
+    fn fetch_name(self) -> &'static str {
+        match self {
+            Hash::Md5 => "MD5",
+            Hash::Ripemd160 => "RIPEMD160",
+            Hash::Sha => "SHA1",
+            Hash::Sha224 => "SHA2-224",
+            Hash::Sha256 => "SHA2-256",
+            Hash::Sha384 => "SHA2-384",
+            Hash::Sha512 => "SHA2-512",
+            Hash::Sha512_224 => "SHA2-512/224",
+            Hash::Sha512_256 => "SHA2-512/256",
+            Hash::Sha3_224 => "SHA3-224",
+            Hash::Sha3_256 => "SHA3-256",
+            Hash::Sha3_384 => "SHA3-384",
+            Hash::Sha3_512 => "SHA3-512",
+            Hash::Shake128 => "SHAKE-128",
+            Hash::Shake256 => "SHAKE-256",
+            Hash::Sm3 => "SM3",
+            Hash::Blake2b => "BLAKE2b512",
+            Hash::Blake2s => "BLAKE2s256",
+        }
+    }
+
+    /// Return whether PBKDF2 takes `self` (`PBKDF2_ELIGIBLE_DIGEST`,
+    /// `digest.c:51-101`): `sha` and the SHA-2 family.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(Hash::Sha256.pbkdf2_eligible());
+    /// assert!(!Hash::Md5.pbkdf2_eligible());
+    /// ```
+    fn pbkdf2_eligible(self) -> bool {
+        matches!(
+            self,
+            Hash::Sha
+                | Hash::Sha224
+                | Hash::Sha256
+                | Hash::Sha384
+                | Hash::Sha512
+                | Hash::Sha512_224
+                | Hash::Sha512_256
+        )
+    }
+
+    /// Return the OpenSSL digest bytes of `data`, as `hash_nif` gives them:
+    /// `EVP_Digest`, or for SHAKE `EVP_DigestFinalXOF` with the default
+    /// `xoflen` of 16 or 32 bytes (`digest.c:135-151`, `hash.c:120-158`).
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// assert_eq!(Hash::Sha.digest(b"abc").len(), 20);
+    /// assert_eq!(Hash::Shake128.digest(b"abc").len(), 16);
     /// ```
     fn digest(self, data: &[u8]) -> Vec<u8> {
-        openssl::hash::hash(self.message_digest(), data)
-            .expect("OpenSSL computes each digest of `Hash`")
-            .to_vec()
+        let length = match self {
+            Hash::Shake128 => 16,
+            Hash::Shake256 => 32,
+            _ => {
+                return openssl::hash::hash(self.message_digest(), data)
+                    .expect("OpenSSL computes each digest of `Hash`")
+                    .to_vec();
+            }
+        };
+        let mut output = vec![0; length];
+        let mut hasher = Hasher::new(self.message_digest()).expect("OpenSSL has SHAKE");
+        hasher.update(data).expect("OpenSSL updates SHAKE");
+        hasher.finish_xof(&mut output).expect("OpenSSL ends SHAKE");
+        output
     }
 }
 
-/// Return whether `name` is a digest of the pinned libcrypto
-/// (`digest.c:25-179`). A known digest that PBeam does not compute stops
-/// the run with a clear runtime error, where ERTS gives the digest.
+/// Return the name of `term` when it is an atom, else `""`, which names
+/// no algorithm.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(known_digest("md5"));
-/// assert!(!known_digest("nosuch"));
+/// assert_eq!(atom_name(&scheduler, &Term::Integer(1)), "");
 /// ```
-fn known_digest(name: &str) -> bool {
-    matches!(
-        name,
-        "md4"
-            | "md5"
-            | "ripemd160"
-            | "sha"
-            | "sha224"
-            | "sha256"
-            | "sha384"
-            | "sha512"
-            | "sha512_224"
-            | "sha512_256"
-            | "sha3_224"
-            | "sha3_256"
-            | "sha3_384"
-            | "sha3_512"
-            | "shake128"
-            | "shake256"
-            | "sm3"
-            | "blake2b"
-            | "blake2s"
-    )
+fn atom_name<'a>(scheduler: &'a Scheduler, term: &Term) -> &'a str {
+    match term {
+        Term::Atom(atom) => scheduler.atoms.name_of(atom),
+        _ => "",
+    }
 }
 
-/// Return whether the pinned libcrypto was built without `name`, so its
-/// `md.p` is NULL (`digest.c:25-179`). The pinned macOS ERTS has no MD4
-/// support, and its `crypto:pbkdf2_hmac(md4, ...)` gives `"md.p is not
-/// NULL"` at `pbkdf2_hmac.c:38`.
+/// Run `crypto:hash_info(Type)` as the ERTS NIF `hash_info_nif`
+/// (`hash.c:74-99`): the map of the OpenSSL type, size, and block size of
+/// the digest. A name that is not a digest raises `error:badarg`, and
+/// `md4`, whose `md.p` is NULL, raises `error:notsup`. As ERTS, PBeam reads
+/// the values from the fetched digest (`digest.c:186-188`): a fetched SHAKE
+/// md gives 16/32 on OpenSSL 3.0-3.3 and 0 from 3.4 (`evp_lib.c:1041` in
+/// 3.5.5).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(unavailable_digest("md4"));
-/// assert!(!unavailable_digest("md5"));
+/// assert!(matches!(hash_info(&mut scheduler, &Term::static_atom("sha"))?, BifResult::Value(Term::Map(_))));
 /// ```
-fn unavailable_digest(name: &str) -> bool {
-    name == "md4"
+fn hash_info(scheduler: &mut Scheduler, digest_type: &Term) -> Result<BifResult, BeamError> {
+    let name = atom_name(scheduler, digest_type);
+    let Some(hash) = Hash::from_name(name) else {
+        return Ok(if name == "md4" {
+            BifResult::Raise {
+                class: ExceptionClass::Error,
+                reason: Term::Atom(scheduler.atoms.put("notsup")?),
+            }
+        } else {
+            BifResult::badarg()
+        });
+    };
+    let digest = Md::fetch(None, hash.fetch_name(), None).expect("OpenSSL fetches each `Hash`");
+    let pairs = vec![
+        (
+            Term::Atom(scheduler.atoms.put("type")?),
+            Term::Integer(i64::from(digest.type_().as_raw())),
+        ),
+        (
+            Term::Atom(scheduler.atoms.put("size")?),
+            Term::Integer(digest.size() as i64),
+        ),
+        (
+            Term::Atom(scheduler.atoms.put("block_size")?),
+            Term::Integer(digest.block_size() as i64),
+        ),
+    ];
+    let map = Map::from_pairs(pairs, &scheduler.atoms).expect("atom keys fit each map form");
+    Ok(BifResult::Value(Term::Map(map)))
 }
 
 /// Run `crypto:hash_nif(Type, Data)` as the ERTS NIF `hash_nif`
@@ -407,13 +557,12 @@ fn unavailable_digest(name: &str) -> bool {
 /// `crypto:hash/2`, converts the iodata first (`crypto.erl:1092-1095`).
 /// `crypto:hash/2` sends an input of more than 20000 bytes through
 /// `hash_init_nif/1` (`crypto.erl:4535-4540`), which PBeam does not link, so
-/// that input stops the run with a runtime error. A digest type that PBeam
-/// does not compute, such as `md5`, stops the run with a clear runtime
-/// error. A name that is not a digest type raises the
-/// ERTS error `{badarg, #{c_file_name => "hash.c", c_file_line_num => 111,
-/// c_function_arg_num => 0}, "Bad digest type"}`, which `crypto:hash/2`
-/// gives as `error:{badarg, {"hash.c", 111}, "Bad digest type"}`
-/// (`crypto.erl:761-775`).
+/// that input stops the run with a runtime error. A name that is not a
+/// digest type raises the ERTS error `{badarg, #{c_file_name => "hash.c",
+/// c_file_line_num => 111, c_function_arg_num => 0}, "Bad digest type"}`,
+/// which `crypto:hash/2` gives as `error:{badarg, {"hash.c", 111}, "Bad
+/// digest type"}` (`crypto.erl:761-775`). `md4`, whose `md.p` is NULL,
+/// raises the `notsup` error of `hash.c:115`.
 ///
 /// # Examples
 ///
@@ -427,15 +576,17 @@ fn hash_nif(
     digest_type: &Term,
     data: &Term,
 ) -> Result<BifResult, BeamError> {
-    let name = match digest_type {
-        Term::Atom(atom) => scheduler.atoms.name_of(atom),
-        _ => "",
-    };
+    let name = atom_name(scheduler, digest_type);
     let Some(hash) = Hash::from_name(name) else {
-        if known_digest(name) {
-            return Err(error(format!(
-                "crypto:hash_nif/2 does not support the digest type {name}"
-            )));
+        if name == "md4" {
+            return c_error(
+                scheduler,
+                "notsup",
+                "hash.c",
+                115,
+                0,
+                "Digest type not supported in this cryptolib",
+            );
         }
         return c_error(scheduler, "badarg", "hash.c", 111, 0, "Bad digest type");
     };
@@ -488,39 +639,18 @@ fn pbkdf2_hmac_nif(
     if key_length < 1 {
         return c_error(scheduler, "badarg", "pbkdf2_hmac.c", 84, 4, "Must be > 0");
     }
-    let name = match digest_type {
-        Term::Atom(atom) => scheduler.atoms.name_of(atom),
-        _ => "",
+    let name = atom_name(scheduler, digest_type);
+    let hash = match Hash::from_name(name) {
+        Some(hash) if hash.pbkdf2_eligible() => Ok(hash),
+        Some(_) => Err((40, "Not eligible digest type")),
+        None if name == "md4" => Err((38, "md.p is not NULL")),
+        None => Err((36, "Bad digest type")),
     };
-    let Some(hash) = Hash::from_name(name) else {
-        return if unavailable_digest(name) {
-            c_error(
-                scheduler,
-                "badarg",
-                "pbkdf2_hmac.c",
-                38,
-                0,
-                "md.p is not NULL",
-            )
-        } else if known_digest(name) {
-            c_error(
-                scheduler,
-                "badarg",
-                "pbkdf2_hmac.c",
-                40,
-                0,
-                "Not eligible digest type",
-            )
-        } else {
-            c_error(
-                scheduler,
-                "badarg",
-                "pbkdf2_hmac.c",
-                36,
-                0,
-                "Bad digest type",
-            )
-        };
+    let hash = match hash {
+        Ok(hash) => hash,
+        Err((line, message)) => {
+            return c_error(scheduler, "badarg", "pbkdf2_hmac.c", line, 0, message);
+        }
     };
     let password = match password.binary_bytes() {
         Some(password) => password,
@@ -622,6 +752,234 @@ impl Hash {
     }
 }
 
+/// The ciphers of the pinned libcrypto that `get_cipher_type` finds
+/// (`cipher.c:30-173`): the name, the OpenSSL fetch name, and the key
+/// length, where 0 takes each length. Each name is in the table once, so a
+/// linear search gives the result of the `bsearch` of `cipher.c:242-263`.
+const CIPHERS: [(&str, &str, usize); 44] = [
+    ("rc2_cbc", "rc2-cbc", 0),
+    ("rc4", "rc4", 0),
+    ("des_cbc", "des-cbc", 0),
+    ("des_cfb", "des-cfb", 0),
+    ("des_ecb", "des-ecb", 0),
+    ("des_ede3_cbc", "des-ede3-cbc", 0),
+    ("des_ede3_cfb", "des-ede3-cfb", 0),
+    ("blowfish_cbc", "BF-CBC", 0),
+    ("blowfish_cfb64", "BF-CFB", 0),
+    ("blowfish_ofb64", "BF-OFB", 0),
+    ("blowfish_ecb", "BF-ECB", 0),
+    ("sm4_cbc", "sm4-cbc", 16),
+    ("sm4_ecb", "sm4-ecb", 16),
+    ("sm4_cfb", "sm4-cfb", 16),
+    ("sm4_ofb", "sm4-ofb", 16),
+    ("sm4_ctr", "sm4-ctr", 16),
+    ("aes_128_cbc", "aes-128-cbc", 16),
+    ("aes_192_cbc", "aes-192-cbc", 24),
+    ("aes_256_cbc", "aes-256-cbc", 32),
+    ("aes_128_ofb", "aes-128-ofb", 16),
+    ("aes_192_ofb", "aes-192-ofb", 24),
+    ("aes_256_ofb", "aes-256-ofb", 32),
+    ("aes_128_cfb8", "aes-128-cfb8", 16),
+    ("aes_192_cfb8", "aes-192-cfb8", 24),
+    ("aes_256_cfb8", "aes-256-cfb8", 32),
+    ("aes_128_cfb128", "aes-128-cfb", 16),
+    ("aes_192_cfb128", "aes-192-cfb", 24),
+    ("aes_256_cfb128", "aes-256-cfb", 32),
+    ("aes_128_ecb", "aes-128-ecb", 16),
+    ("aes_192_ecb", "aes-192-ecb", 24),
+    ("aes_256_ecb", "aes-256-ecb", 32),
+    ("aes_128_ctr", "aes-128-ctr", 16),
+    ("aes_192_ctr", "aes-192-ctr", 24),
+    ("aes_256_ctr", "aes-256-ctr", 32),
+    ("chacha20", "chacha20", 32),
+    ("chacha20_poly1305", "chacha20-poly1305", 32),
+    ("sm4_gcm", "sm4-gcm", 16),
+    ("sm4_ccm", "sm4-ccm", 16),
+    ("aes_128_gcm", "aes-128-gcm", 16),
+    ("aes_192_gcm", "aes-192-gcm", 24),
+    ("aes_256_gcm", "aes-256-gcm", 32),
+    ("aes_128_ccm", "aes-128-ccm", 16),
+    ("aes_192_ccm", "aes-192-ccm", 24),
+    ("aes_256_ccm", "aes-256-ccm", 32),
+];
+
+/// Run `crypto:mac_nif(Type, SubType, Key, Text)` as the ERTS NIF `mac_nif`
+/// with the OpenSSL 3 code of `mac_one_time` (`mac.c:188-505`). ERTS checks
+/// `Text`, then `Key`, then the MAC type and its key length, then the
+/// subtype, and it computes the MAC with `EVP_Q_mac`. PBeam computes it with
+/// an OpenSSL `EVP_PKEY` of the same algorithm through the safe `openssl`
+/// crate. Each failure of the computation, such as a digest that HMAC does
+/// not take or a cipher that is not CBC for CMAC, raises the `error` of
+/// `mac.c:405`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let (hmac, sha) = (Term::static_atom("hmac"), Term::static_atom("sha"));
+/// let key = Term::binary(b"k".to_vec());
+/// assert!(matches!(mac_nif(&mut scheduler, &hmac, &sha, &key, &key)?, BifResult::Value(Term::Binary(_))));
+/// ```
+fn mac_nif(
+    scheduler: &mut Scheduler,
+    mac_type: &Term,
+    sub_type: &Term,
+    key: &Term,
+    text: &Term,
+) -> Result<BifResult, BeamError> {
+    // The checks of `Text` and `Key` in the ERTS order (mac.c:192-196,
+    // 236-240). The only caller, `crypto:mac/4`, passes `Key` as a binary
+    // (crypto.erl:1300-1302).
+    let (text, key) = (iodata_bytes(text), iodata_bytes(key));
+    let failed = [
+        (text.is_none(), 193, 3, "Bad text"),
+        (
+            text.as_ref()
+                .is_some_and(|text| text.len() > i32::MAX as usize),
+            196,
+            3,
+            "Too long text",
+        ),
+        (key.is_none(), 238, 2, "Bad key"),
+    ];
+    if let Some(&(_, line, argument, message)) = failed.iter().find(|check| check.0) {
+        return c_error(scheduler, "badarg", "mac.c", line, argument, message);
+    }
+    let (text, key) = (text.unwrap_or_default(), key.unwrap_or_default());
+    let mac = match atom_name(scheduler, mac_type) {
+        "hmac" => hmac(scheduler, sub_type, &key, &text),
+        "cmac" => cmac(scheduler, sub_type, &key, &text),
+        "poly1305" if key.len() == 32 => Ok(poly1305(&key, &text)),
+        "poly1305" => return c_error(scheduler, "badarg", "mac.c", 253, 2, "Bad key length"),
+        _ => {
+            return c_error(
+                scheduler,
+                "badarg",
+                "mac.c",
+                251,
+                0,
+                "Unknown mac algorithm",
+            );
+        }
+    };
+    match mac {
+        Ok(Ok(mac)) => Ok(BifResult::Value(Term::binary(mac))),
+        Ok(Err(_)) => c_error(scheduler, "error", "mac.c", 405, -1, "Couldn't get mac"),
+        Err(raise) => raise,
+    }
+}
+
+/// The result of a MAC computation: the MAC, or the OpenSSL error that
+/// `mac_nif` gives as `"Couldn't get mac"`, inside `Ok`; or the raise of a
+/// failed check of the subtype in `Err`.
+type MacResult = Result<Result<Vec<u8>, openssl::error::ErrorStack>, Result<BifResult, BeamError>>;
+
+/// Compute the HMAC of `text` with the digest `sub_type` (`mac.c:275-318`).
+/// A name that is not a digest raises the `badarg` of `mac.c:281`. ERTS
+/// gives the OpenSSL 3 name of the digest to `EVP_Q_mac`, which cannot
+/// fetch MD4, so `md4` fails as the computation.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(hmac(&mut scheduler, &Term::static_atom("sha"), b"k", b"t"), Ok(Ok(_))));
+/// ```
+fn hmac(scheduler: &mut Scheduler, sub_type: &Term, key: &[u8], text: &[u8]) -> MacResult {
+    let name = atom_name(scheduler, sub_type);
+    let Some(hash) = Hash::from_name(name) else {
+        if name == "md4" {
+            return Ok(Err(openssl::error::ErrorStack::get()));
+        }
+        let message = "Bad digest algorithm for HMAC";
+        return Err(c_error(scheduler, "badarg", "mac.c", 281, 1, message));
+    };
+    // HMAC pads the key with zero bytes to the block size (RFC 2104), so
+    // the empty key, which `EVP_PKEY_new_mac_key` rejects and `EVP_Q_mac`
+    // takes, gives the MAC of the key <<0>>.
+    let key = if key.is_empty() { &[0][..] } else { key };
+    let key = PKey::hmac(key).expect("OpenSSL makes each HMAC key");
+    Ok(Signer::new(hash.message_digest(), &key)
+        .and_then(|mut signer| signer.sign_oneshot_to_vec(text)))
+}
+
+/// Compute the CMAC of `text` with the cipher `sub_type` (`mac.c:324-365`).
+/// A name that is not a cipher raises the `badarg` of `mac.c:331`, a key
+/// length that the cipher does not take the `badarg` of `mac.c:334`, and a
+/// cipher that the default provider does not have, such as `des_cbc`, the
+/// `notsup` of `mac.c:346`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let key = [0; 16];
+/// assert!(matches!(cmac(&mut scheduler, &Term::static_atom("aes_128_cbc"), &key, b"t"), Ok(Ok(_))));
+/// ```
+fn cmac(scheduler: &mut Scheduler, sub_type: &Term, key: &[u8], text: &[u8]) -> MacResult {
+    let name = atom_name(scheduler, sub_type);
+    let Some(&(_, fetch_name, length)) = CIPHERS.iter().find(|cipher| cipher.0 == name) else {
+        return Err(c_error(
+            scheduler,
+            "badarg",
+            "mac.c",
+            331,
+            1,
+            "Unknown cipher",
+        ));
+    };
+    if length != 0 && length != key.len() {
+        return Err(c_error(
+            scheduler,
+            "badarg",
+            "mac.c",
+            334,
+            2,
+            "Bad key size",
+        ));
+    }
+    let Ok(cipher) = openssl::cipher::Cipher::fetch(None, fetch_name, None) else {
+        let message = "Unsupported cipher algorithm";
+        return Err(c_error(scheduler, "notsup", "mac.c", 346, 1, message));
+    };
+    let cipher = openssl::symm::Cipher::from_nid(cipher.nid());
+    let cipher = cipher.ok_or_else(openssl::error::ErrorStack::get);
+    Ok(cipher
+        .and_then(|cipher| PKey::cmac(&cipher, key))
+        .and_then(|key| Signer::new_without_digest(&key)?.sign_oneshot_to_vec(text)))
+}
+
+/// Compute the Poly1305 MAC of `text` with the 32-byte `key`
+/// (`mac.c:372-383`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(poly1305(&[0; 32], b"t").unwrap(), vec![0; 16]);
+/// ```
+fn poly1305(key: &[u8], text: &[u8]) -> Result<Vec<u8>, openssl::error::ErrorStack> {
+    let key = PKey::private_key_from_raw_bytes(key, Id::POLY1305)?;
+    Signer::new_without_digest(&key)?.sign_oneshot_to_vec(text)
+}
+
+/// Run `crypto:hash_equals_nif(A, B)` as the ERTS NIF `hash_equals_nif`
+/// (`hash_equals.c:27-53`): `true` or `false` from `CRYPTO_memcmp` for two
+/// binaries of the same size, and `error:badarg` for a term that is not a
+/// binary or for two sizes that are not equal.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let a = Term::binary(b"a".to_vec());
+/// assert!(matches!(hash_equals_nif(&a, &a), BifResult::Value(_)));
+/// ```
+fn hash_equals_nif(first: &Term, second: &Term) -> BifResult {
+    match (first.binary_bytes(), second.binary_bytes()) {
+        (Some(first), Some(second)) if first.len() == second.len() => {
+            let equal = openssl::memcmp::eq(first, second);
+            BifResult::Value(Term::static_atom(if equal { "true" } else { "false" }))
+        }
+        _ => BifResult::badarg(),
+    }
+}
+
 /// Run `crypto:strong_rand_bytes_nif(Bytes)`, as the ERTS NIF
 /// `strong_rand_bytes_nif` (`rand.c:26-50`) does. A `Bytes` that is not an
 /// unsigned C `int` raises `error:badarg`, and the result is a binary of
@@ -716,11 +1074,18 @@ fn random_below(range: &[u8]) -> Option<Vec<u8>> {
 /// The digests that `hash_algorithms/0` gives: the digests that PBeam
 /// computes, in the order of the pinned ERTS. ERTS builds the list from
 /// the digest table in reverse (`digest.c:226-242`, `algorithms.c:86-89`),
-/// and lists each digest that the linked OpenSSL has. PBeam lists only the
-/// digests of `Hash`, so a caller that reads the list does not select a
-/// digest that PBeam does not compute (row "NIF stubs" of
-/// `docs/erts-differences.md`).
-const HASH_ALGORITHMS: [&str; 7] = [
+/// and lists each digest that the linked OpenSSL has: each digest of `Hash`.
+/// It does not list `md4`, whose `md.p` is NULL.
+const HASH_ALGORITHMS: [&str; 18] = [
+    "blake2s",
+    "blake2b",
+    "sm3",
+    "shake256",
+    "shake128",
+    "sha3_512",
+    "sha3_384",
+    "sha3_256",
+    "sha3_224",
     "sha512_256",
     "sha512_224",
     "sha512",
@@ -728,17 +1093,24 @@ const HASH_ALGORITHMS: [&str; 7] = [
     "sha256",
     "sha224",
     "sha",
+    "ripemd160",
+    "md5",
 ];
 
-/// Run `crypto:hash_algorithms/0`: the list of `HASH_ALGORITHMS`.
+/// The MACs that `mac_algorithms/0` gives: the MAC table in reverse
+/// (`mac.c:60-102`, `mac.c:139-158`).
+const MAC_ALGORITHMS: [&str; 3] = ["cmac", "hmac", "poly1305"];
+
+/// Return the list of the atoms of `names`, which `hash_algorithms/0` and
+/// `mac_algorithms/0` give.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(matches!(hash_algorithms(&mut scheduler)?, BifResult::Value(Term::List(_))));
+/// assert!(matches!(atom_list(&mut scheduler, &MAC_ALGORITHMS)?, BifResult::Value(Term::List(_))));
 /// ```
-fn hash_algorithms(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
-    let names = HASH_ALGORITHMS
+fn atom_list(scheduler: &mut Scheduler, names: &[&str]) -> Result<BifResult, BeamError> {
+    let names = names
         .iter()
         .map(|name| Ok(Term::Atom(scheduler.atoms.put(name)?)))
         .collect::<Result<Vec<_>, BeamError>>()?;
