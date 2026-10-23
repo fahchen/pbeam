@@ -3291,8 +3291,9 @@ fn puts_a_new_atom_into_the_atom_table_of_the_run() {
         ],
         0,
     );
-    // A loaded module holds the atoms of its name and of its functions,
-    // so the start of the root makes no atom.
+    // The hand-built fixture lacks the atoms `fixture` and `main`, which
+    // `run_root` adds. The test adds them before the run to keep the index
+    // that a real module gives.
     program.atoms.put("fixture").unwrap();
     program.atoms.put("main").unwrap();
     assert_eq!(program.atoms.put("pbeam_zeta").unwrap().index(), 1169);
