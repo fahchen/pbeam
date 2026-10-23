@@ -570,6 +570,11 @@ impl Inet {
                 8 => self.set_priority(value),
                 9 => self.set_socket(libc::IP_TOS, true, |socket| socket.set_tos_v4(value as u32)),
                 46 => self.set_socket(libc::IP_TTL, true, |socket| socket.set_ttl_v4(value as u32)),
+                // A datagram receive reads no ancillary data, so it cannot
+                // give `{tos, TOS}` (inet_drv.c:15452-15466).
+                43 if value != 0 && self.socket_type == SocketType::Datagram => {
+                    return Err(error(UDP_RECVTOS_ON));
+                }
                 43 => self.set_socket(libc::IP_RECVTOS, true, |socket| {
                     socket.set_recv_tos_v4(value != 0)
                 }),
@@ -735,6 +740,9 @@ const RECVTTL_ON: &str =
 /// does: a time with `linger` off, which `SO_LINGER` keeps, and on macOS
 /// each time, where `socket2` sets `SO_LINGER_SEC` and ERTS sets
 /// `SO_LINGER`, which xnu reads in clock ticks.
+/// The runtime error of `{recvtos, true}` on a `udp_inet` port.
+const UDP_RECVTOS_ON: &str = "unsupported udp_inet option recvtos with true: see \"udp_inet ports\" in docs/erts-differences.md";
+
 const LINGER_TIME: &str = "unsupported tcp_inet option linger with a time: see \"tcp_inet ports\" in docs/erts-differences.md";
 
 /// The flag bits that xnu gives for an option that is on: `SO_REUSEADDR`,

@@ -69,6 +69,9 @@ unsupported(sctp) -> open_with([1, 2, 3]);
 unsupported(inet6) ->
     {ok, S} = udp(),
     command(S, [2, 0, 1 | lists:duplicate(16, 0)] ++ [0, 0, 0, 0]);
+unsupported(recvtos) ->
+    {ok, S} = udp(),
+    prim_inet:setopts(S, [{recvtos, true}]);
 unsupported(ancillary) ->
     {ok, S} = udp(),
     command(S, [1, 0, 1, 127, 0, 0, 1, 0, 0, 0, 1, 0]);

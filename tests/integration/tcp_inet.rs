@@ -346,6 +346,7 @@ fn stops_the_run_for_each_udp_inet_part_that_is_not_implemented() {
             "ancillary",
             "unsupported udp_inet output with ancillary data",
         ),
+        ("recvtos", "unsupported udp_inet option recvtos with true"),
     ] {
         let argument = Term::Atom(program.atom(case).unwrap());
         let error = program
