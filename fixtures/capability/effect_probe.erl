@@ -4,6 +4,7 @@
 -compile({nowarn_deprecated_function, [{erlang, now, 0}]}).
 -export([
     socket_open/0,
+    socket_open_netns/0,
     spawn/0,
     spawn_system_process/0,
     spawn_link/0,
@@ -626,7 +627,10 @@ ambient() ->
         erlang:display(effect_probe_ambient_display),
         attempt(fun() -> erlang:has_prepared_code_on_load(make_ref()) end),
         is_list(prim_socket:supports()),
-        prim_socket:supports(other)
+        prim_socket:supports(other),
+        element(1, prim_net:gethostname()),
+        maps:get(netns, prim_net:info()),
+        prim_net:debug(false)
     ].
 
 %% Each metadata probe makes a temporary file, so `write_file_info/3`
@@ -1075,3 +1079,9 @@ done() -> ok.
 %% with a policy, PBeam stops the run for an open by a runtime process.
 socket_open() ->
     prim_socket:open(inet, stream, 0, #{}).
+
+%% prim_socket:open/4 with the option netns. ERTS on Linux enters the
+%% network namespace first, and the macOS build ignores the option.
+socket_open_netns() ->
+    {ok, Socket} = prim_socket:open(inet, stream, 0, #{netns => "/var/run/netns/pbeam"}),
+    prim_socket:close(Socket).

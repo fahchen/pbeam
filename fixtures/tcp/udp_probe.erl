@@ -1,5 +1,5 @@
 -module(udp_probe).
--export([active/1, host_name/0, open/0, unsupported/1]).
+-export([active/1, host_name/0, open/0, passive/0, port_zero/0, truncate/0, unsupported/1]).
 
 %% The requests of the udp_inet driver that inet_config:set_hostname/0
 %% sends through inet_udp:open(0, []), inet:gethostname/1, and
@@ -66,9 +66,15 @@ open() ->
 unsupported(stream) -> open_with([1, 1, 0]);
 unsupported(seqpacket) -> open_with([1, 3, 0]);
 unsupported(sctp) -> open_with([1, 2, 3]);
-unsupported(command) ->
-    P = open_port({spawn_driver, "udp_inet"}, [binary]),
-    erlang:port_command(P, <<"x">>);
+unsupported(inet6) ->
+    {ok, S} = udp(),
+    command(S, [2, 0, 1 | lists:duplicate(16, 0)] ++ [0, 0, 0, 0]);
+unsupported(recvtos) ->
+    {ok, S} = udp(),
+    prim_inet:setopts(S, [{recvtos, true}]);
+unsupported(ancillary) ->
+    {ok, S} = udp(),
+    command(S, [1, 0, 1, 127, 0, 0, 1, 0, 0, 0, 1, 0]);
 unsupported(accept) ->
     P = open_port({spawn_driver, "udp_inet"}, [binary]),
     [1] = control(P, 1, [1, 2, 2]),
@@ -77,3 +83,84 @@ unsupported(accept) ->
 open_with(Bytes) ->
     P = open_port({spawn_driver, "udp_inet"}, [binary]),
     control(P, 1, Bytes).
+
+%% The output of Bytes after the caller tag, as prim_inet:sendto/4 sends
+%% it (prim_inet.erl:652-699), and the reply.
+command(S, Bytes) ->
+    Ref = make_ref(),
+    Tag = term_to_binary(Ref, [local]),
+    true = erlang:port_command(S, [<<(byte_size(Tag)):16, Tag/binary>>, Bytes]),
+    receive {inet_reply, S, Reply, Ref} -> Reply after 1000 -> none end.
+
+%% The sender of a received datagram as {Address, true} when it is the
+%% port Port, because the numbers of ERTS and PBeam differ.
+sender({ok, {Address, Port, Data}}, Port) -> {ok, {Address, true, Data}};
+sender(Other, _) -> Other.
+
+%% The calls of gen_udp:send/4 and gen_udp:recv/2,3, which inet_udp gives
+%% to prim_inet:sendto/4 and prim_inet:recvfrom/3, on a passive socket
+%% on 127.0.0.1
+%% (inet_drv.c:14968-14998, 15037-15316, 15361-15576): the data in binary
+%% and list mode, an empty datagram, a timeout of 0 and of 30 ms, a
+%% receive while another process waits (ealready), a datagram that comes
+%% while a receive waits in the IO poll, the errors of the output and of
+%% PACKET_REQ_RECV, and the GETSTAT counts.
+passive() ->
+    process_flag(trap_exit, true),
+    Lo = {127, 0, 0, 1},
+    {ok, S} = udp(),
+    {ok, {_, P}} = prim_inet:sockname(S),
+    Sent = prim_inet:sendto(S, Lo, P, <<"hi">>),
+    Data = sender(prim_inet:recvfrom(S, 0, 1000), P),
+    Timeouts = [prim_inet:recvfrom(S, 0, 0), prim_inet:recvfrom(S, 5, 30)],
+    ok = prim_inet:sendto(S, Lo, P, <<>>),
+    Empty = sender(prim_inet:recvfrom(S, 0), P),
+    ok = prim_inet:setopts(S, [list]),
+    ok = prim_inet:sendto(S, Lo, P, "ab"),
+    List = sender(prim_inet:recvfrom(S, 0), P),
+    Self = self(),
+    spawn(fun() -> Self ! {waiter, sender(prim_inet:recvfrom(S, 0, 5000), P)} end),
+    timer:sleep(50),
+    Already = prim_inet:recvfrom(S, 0, 10),
+    ok = prim_inet:sendto(S, Lo, P, "w"),
+    Waited = receive {waiter, W} -> W after 1000 -> none end,
+    Stat = prim_inet:getstat(S, [recv_oct, recv_cnt, recv_max, recv_avg, recv_dvi,
+                                   send_oct, send_cnt, send_max, send_avg, send_pend]),
+    Output = [command(S, Bytes) || Bytes <- [[], [9], [1, 0], [1, 0, 1, 127, 0, 0, 1, 0, 0],
+                                            [1, 0, 1, 127, 0, 0, 1, 0, 0, 0, 2, 0]]],
+    C = fun(Request, Bytes) -> erlang:port_control(S, Request + ?MAGIC, Bytes) end,
+    Control = [C(60, [0, 0, 0, 0, 0, 0, 0]), C(7, [22, 0, 0, 0, 1]), C(60, [0, 0, 0, 0, 0, 0, 0, 0])],
+    Unopened = open_port({spawn_driver, "udp_inet"}, [binary]),
+    Closed = [command(Unopened, [1, 0, 1, 127, 0, 0, 1, 0, 0, 0, 0]),
+              control(Unopened, 60, [0, 0, 0, 0, 0, 0, 0, 0])],
+    true = erlang:port_command(Unopened, <<0>>),
+    Exit = receive {'EXIT', Unopened, Reason} -> {'EXIT', port, Reason} after 1000 -> none end,
+    [Sent, Data, Timeouts, Empty, List, Already, Waited, Stat, Output, Control, Closed, Exit].
+
+%% A datagram longer than the buffer of 9216 bytes: the host drops the
+%% rest (inet_drv.c:15469-15470). macOS sends at most 9216 bytes, so the
+%% send gives emsgsize.
+truncate() ->
+    {ok, S} = udp(),
+    {ok, {_, P}} = prim_inet:sockname(S),
+    case prim_inet:sendto(S, {127, 0, 0, 1}, P, binary:copy(<<"x">>, 9300)) of
+        ok ->
+            {ok, {_, _, Data}} = prim_inet:recvfrom(S, 0, 1000),
+            {ok, byte_size(Data), prim_inet:getstat(S, [recv_oct, send_oct])};
+        Error ->
+            Error
+    end.
+
+%% A passive binary socket on a port that the host selects, as
+%% inet_udp:open/2 makes it without the inet_db table.
+udp() ->
+    {ok, S} = prim_inet:open(udp, inet, dgram),
+    ok = prim_inet:setopts(S, [binary, {active, false}]),
+    {ok, _} = prim_inet:bind(S, {0, 0, 0, 0}, 0),
+    {ok, S}.
+
+%% A send to the port 0 gives the errno of sendto/6 of the host
+%% (inet_drv.c:15181, 15240-15253).
+port_zero() ->
+    {ok, S} = udp(),
+    prim_inet:sendto(S, {127, 0, 0, 1}, 0, <<"x">>).

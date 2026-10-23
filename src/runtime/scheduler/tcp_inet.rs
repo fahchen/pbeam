@@ -242,7 +242,7 @@ impl Scheduler {
     /// descriptor `tcp`, as `tcp_close_check` does (inet_drv.c:11859-11890):
     /// each caller in the queue, in order, loses its timer and its monitor
     /// and gets `{inet_async, L, Ref, {error, closed}}`, and so does the
-    /// receive that waits. Without `notify`, for a port that terminates in
+    /// receive or the connect that waits (inet_drv.c:11883-11885). Without `notify`, for a port that terminates in
     /// the `CLOSING` state, the receive gets no message (io.c:6212-6227); a
     /// connected port has no accept.
     ///
@@ -252,7 +252,8 @@ impl Scheduler {
     /// scheduler.tcp_stop(listen, tcp, true);
     /// ```
     pub(super) fn tcp_stop(&mut self, listen: PortId, tcp: Inet, notify: bool) {
-        if let Some(receiver) = tcp.stream.receiver {
+        let waiting = tcp.stream.receiver.or(tcp.stream.connector);
+        if let Some(receiver) = waiting {
             if let Some(timer) = receiver.timer {
                 self.cancel_port_timer(timer);
             }

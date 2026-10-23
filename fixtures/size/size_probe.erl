@@ -1,6 +1,9 @@
 -module(size_probe).
 -export([main/0, body/1, guard/1, last/1, id/1]).
 
+%% A native record is not a tuple, so size/1 raises badarg.
+-record #r{a = 1}.
+
 %% erlang:size/1 (`size_1`, erl_bif_guard.c:315-335). The compiler emits each
 %% `size/1` call as `gc_bif`: with the fail label 0 in a body, and with a fail
 %% label in a guard. The fun, `apply/3`, and the tail `apply/3` of `last/1`
@@ -11,8 +14,8 @@ main() ->
     [size(id({})), size(id({a, b, c})), size(id(<<>>)), size(id(<<"abc">>)),
      size(id(<<1:3>>)), size(id(<<1, 2, 3:4>>)),
      (id(fun erlang:size/1))(id({a})), apply(M, size, id([<<"ab">>])), last(id(<<1, 2, 3:7>>)),
-     guard(id({a, b, c})), guard(id(<<1:7>>)), guard(id(foo)), guard(id(#{a => 1})),
-     body(foo), body("abc"), body(1), body(#{}), body(id(fun id/1)),
+     guard(id({a, b, c})), guard(id(<<1:7>>)), guard(id(foo)), guard(id(#{a => 1})), guard(id(#r{})),
+     body(foo), body("abc"), body(1), body(#{}), body(id(fun id/1)), body(id(#r{})),
      try apply(M, size, id([[1]])) catch Class:Reason -> {Class, Reason} end].
 
 last(Term) ->

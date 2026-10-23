@@ -71,6 +71,14 @@ pub(super) enum Timer {
         /// The key of this timer, which the accept holds while it waits.
         key: TimerKey,
     },
+    /// The timer of the connect of the port `port`, which `INET_REQ_CONNECT`
+    /// starts with a timeout (`driver_set_timer`, inet_drv.c:12111-12112).
+    Connect {
+        /// The port that connects.
+        port: PortId,
+        /// The key of this timer, which the connect holds while it waits.
+        key: TimerKey,
+    },
     /// The timer of the receive on the connected port `port`, which
     /// `TCP_REQ_RECV` starts with a timeout (`add_multi_timer`,
     /// inet_drv.c:12313-12315).

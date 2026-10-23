@@ -283,6 +283,7 @@ fn closed() -> BifResult {
 /// (`prim_socket_nif.c:5840-5847`). The socket registry gets
 /// `{'$socket', add, {'$socket', Ref}}` when the option `use_registry` is
 /// not `false` (`unix_socket_syncio.c:1795`, `prim_socket_nif.c:17551-17558`).
+/// On Linux, the option `netns` stops the run with a runtime error.
 ///
 /// # Errors
 ///
@@ -323,6 +324,15 @@ pub(super) fn open_4(
     if !scheduler.skips_checks() && !scheduler.current_process().security.is_boot() {
         return Err(error(
             "unsupported prim_socket:nif_open/4 in a run with a policy: no capability permits a network effect: see \"NIF stubs\" in docs/erts-differences.md",
+        ));
+    }
+    // ERTS on Linux enters the network namespace of the option `netns`
+    // before `socket(2)` (`unix_socket_syncio.c:1729-1745`); PBeam does not
+    // implement it. The macOS build has no `HAVE_SETNS` and ignores it.
+    #[cfg(target_os = "linux")]
+    if field(scheduler, options, "netns").is_some() {
+        return Err(error(
+            "prim_socket:nif_open/4 option netns is not supported: see \"NIF stubs\" in docs/erts-differences.md",
         ));
     }
     let socket = match Socket::new(
