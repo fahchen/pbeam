@@ -1427,6 +1427,18 @@ impl Decoder<'_> {
         let mut frames: Vec<Frame> = Vec::new();
         'parse: loop {
             let tag = self.u8()?;
+            // The module, the name, and the field names of a `RECORD_EXT`
+            // take only an atom tag (`dec_atom`, `external.c:5300-5318`).
+            if let Some(Frame {
+                kind: FrameKind::Record { .. },
+                remaining,
+                items,
+            }) = frames.last()
+                && items.len() < 2 + (items.len() + remaining - 2) / 2
+                && !matches!(tag, 100 | 115 | 118 | 119)
+            {
+                return Err(DecodeError::Badarg);
+            }
             let mut term = match tag {
                 97 => Term::Integer(i64::from(self.u8()?)),
                 98 => Term::Integer(i64::from(i32::from_be_bytes(
@@ -1715,13 +1727,16 @@ impl Decoder<'_> {
     /// same export flag and fields (`dec_term`, `external.c:5300-5367`).
     fn complete_record(&self, exported: bool, items: Vec<Term>) -> Result<Term, DecodeError> {
         let count = (items.len() - 2) / 2;
-        let mut atoms = items[..2 + count].iter().map(|item| match item {
-            Term::Atom(atom) => Ok(atom.clone()),
-            _ => Err(DecodeError::Badarg),
+        // The parse loop takes only atom tags at these positions.
+        let mut atoms = items[..2 + count].iter().map(|item| {
+            let Term::Atom(atom) = item else {
+                unreachable!()
+            };
+            atom.clone()
         });
-        let module = atoms.next().expect("a module")?;
-        let name = atoms.next().expect("a name")?;
-        let keys = atoms.collect::<Result<Vec<_>, _>>()?;
+        let module = atoms.next().expect("a module");
+        let name = atoms.next().expect("a name");
+        let keys: Vec<_> = atoms.collect();
         let fields = keys.into_iter().map(|key| (key, None)).collect();
         let def = RecordDef::new(module, name, exported, fields, self.atoms);
         if def.keys.windows(2).any(|pair| pair[0] == pair[1]) {
