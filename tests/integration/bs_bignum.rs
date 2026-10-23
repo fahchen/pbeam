@@ -172,7 +172,7 @@ fn fails_a_read_of_more_than_big_arity_max_digits() {
     };
     assert_eq!(run("get_wide_sized", &[ones.clone(), size]), Ok(nomatch));
     assert_eq!(
-        run("get_wide_signed", &[ones.clone()]),
+        run("get_wide_signed", std::slice::from_ref(&ones)),
         Ok(Term::Integer(1))
     );
     assert_eq!(
