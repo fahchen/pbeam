@@ -27,12 +27,6 @@ use super::Binary;
 pub(crate) const MATCH_CONTEXT_ESCAPE: &str =
     "a match context reached a term operation: only binary-match instructions read it";
 
-/// The bit of the state of a match context that marks a known position.
-const POSITION_KNOWN: u64 = 1 << 63;
-/// The mask of the bit position in the state of a match context. The other
-/// 63 bits hold the position, which is enough for the bits of a binary.
-const POSITION_MASK: u64 = POSITION_KNOWN - 1;
-
 /// The state of a binary match: the binary and the bit position of the
 /// next segment (`sb->start`). The match ends at the end of the binary
 /// (`sb->end`). ERTS makes a match context of the binary itself, with no
@@ -59,22 +53,14 @@ pub struct MatchState {
     /// The bytes of the binary. A copy of the state shares them, as an
     /// ERTS sub-bitstring refers to its binary.
     bytes: Binary,
-    /// The bit offset of the next segment from the start of the binary, and
-    /// the flag of a known position, in one `AtomicU64`. The low 63 bits
-    /// hold the offset, and the top bit is [`POSITION_KNOWN`]. The
+    /// The bit offset of the next segment from the start of the binary. The
     /// `integer`, `binary`, `skip`, and `=:=` commands of `bs_match` can
-    /// move the offset by any number of bits. The flag is `false` after a
-    /// failed `=:=` command of `bs_match` and until `bs_set_position`.
-    /// ERTS then has the position at the end of the read that holds the
-    /// command, which PBeam does not model (row "Binary matching" of
-    /// `docs/erts-differences.md`).
+    /// move the offset by any number of bits.
     position: AtomicU64,
 }
 
 impl fmt::Debug for MatchState {
-    /// Write the state as `MatchState { bytes: [1], position: 0, position_known: true }`.
-    /// The derived text of the atomic word shows the flag bit as a large
-    /// number, which hides the position.
+    /// Write the state as `MatchState { bytes: [1], position: 0 }`.
     ///
     /// # Examples
     ///
@@ -82,7 +68,7 @@ impl fmt::Debug for MatchState {
     /// let context = MatchState::new(Binary::from(&[1][..]));
     /// assert_eq!(
     ///     format!("{context:?}"),
-    ///     "MatchState { bytes: [1], position: 0, position_known: true }"
+    ///     "MatchState { bytes: [1], position: 0 }"
     /// );
     /// ```
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -90,7 +76,6 @@ impl fmt::Debug for MatchState {
             .debug_struct("MatchState")
             .field("bytes", &self.bytes)
             .field("position", &self.position())
-            .field("position_known", &self.position_known())
             .finish()
     }
 }
@@ -108,7 +93,7 @@ impl MatchState {
     pub(crate) fn new(bytes: Binary) -> Self {
         Self {
             bytes,
-            position: AtomicU64::new(POSITION_KNOWN),
+            position: AtomicU64::new(0),
         }
     }
 
@@ -122,18 +107,6 @@ impl MatchState {
     /// ```
     pub(super) fn binary(&self) -> &Binary {
         &self.bytes
-    }
-
-    /// Return the atomic state: the bit position and the flag of a known
-    /// position.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert_eq!(MatchState::new(Binary::from(&[1][..])).state(), 1 << 63);
-    /// ```
-    fn state(&self) -> u64 {
-        self.position.load(Ordering::Relaxed)
     }
 
     /// Return the bytes of the binary of this match context, as the match
@@ -160,7 +133,7 @@ impl MatchState {
     /// assert_eq!(MatchState::new(Binary::from(&[1][..])).position(), 0);
     /// ```
     pub(crate) fn position(&self) -> usize {
-        (self.state() & POSITION_MASK) as usize
+        self.position.load(Ordering::Relaxed) as usize
     }
 
     /// Set the bit position of the next segment, as `bs_set_position`
@@ -176,44 +149,7 @@ impl MatchState {
     /// assert_eq!(context.remaining_bits(), 8);
     /// ```
     pub(crate) fn set_position(&self, position: usize) {
-        self.position.store(
-            (position as u64 & POSITION_MASK) | POSITION_KNOWN,
-            Ordering::Relaxed,
-        );
-    }
-
-    /// Mark the position as unknown after a failed `=:=` command of
-    /// `bs_match`. The ERTS JIT reads up to 64 bits of segments at a time
-    /// and writes the position after the read before it compares a value
-    /// (`beam_jit_opt_bsm_segments`, jit/beam_jit_bs.cpp:366-521; `READ`
-    /// and `EQ` in `emit_i_bs_match_test_heap`, jit/arm/instr_bs.cpp:
-    /// 2995-3045). Thus after a failed `=:=` the position is at the end of
-    /// that read. The compiler restores the position before it reads the
-    /// context again (`bs_restores`, beam_ssa_pre_codegen.erl:308-437).
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// let context = MatchState::new(Binary::from(&[1][..]));
-    /// context.forget_position();
-    /// assert!(!context.position_known());
-    /// context.set_position(0);
-    /// assert!(context.position_known());
-    /// ```
-    pub(crate) fn forget_position(&self) {
-        self.position.fetch_and(!POSITION_KNOWN, Ordering::Relaxed);
-    }
-
-    /// Return `false` after a failed `=:=` command and until
-    /// `set_position`.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert!(MatchState::new(Binary::from(&[1][..])).position_known());
-    /// ```
-    pub(crate) fn position_known(&self) -> bool {
-        self.state() & POSITION_KNOWN != 0
+        self.position.store(position as u64, Ordering::Relaxed);
     }
 
     /// Move the position by `size` bits, as the `skip` command of
@@ -272,8 +208,7 @@ impl MatchState {
     /// sub-bitstring that refers to the original binary
     /// (`erts_bs_get_binary_2`, `erl_bits.c:400-424`). Return `None` and
     /// keep the position when fewer than `size` bits remain. A size that is
-    /// not a whole number of bytes is a bitstring, which PBeam does not
-    /// have: each caller checks the size before it uses the view.
+    /// not a whole number of bytes gives a bitstring.
     ///
     /// # Examples
     ///
@@ -308,19 +243,18 @@ impl MatchState {
 
     /// Return the bits between the bit positions `start` and `end` as a view
     /// of the bytes of the binary, as an ERTS sub-bitstring refers to its
-    /// binary. Return `None` when the size is not a whole number of bytes,
-    /// because PBeam has no bitstring term. The `start` position stays with
-    /// the size, so the view keeps the bit offset.
+    /// binary. The size can be any number of bits, so the view can be a
+    /// bitstring. The view keeps the bit offset of `start`.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// let context = MatchState::new(Binary::from(&[1, 2, 3][..]));
-    /// assert_eq!(context.bits_at(0, 16), Some(Binary::from(&[1, 2][..])));
-    /// assert_eq!(context.bits_at(0, 4), None);
+    /// assert_eq!(context.bits_at(0, 16), Binary::from(&[1, 2][..]));
+    /// assert_eq!(context.bits_at(0, 4).bit_size(), 4);
     /// ```
-    pub(crate) fn bits_at(&self, start: usize, end: usize) -> Option<Binary> {
-        ((end - start).is_multiple_of(8)).then(|| self.bytes.bits(start, end))
+    pub(crate) fn bits_at(&self, start: usize, end: usize) -> Binary {
+        self.bytes.bits(start, end)
     }
 
     /// Compare the `size` bits after the position with the first `size`
@@ -363,24 +297,19 @@ impl MatchState {
     /// binary, and keep the position, as the `get_tail` command of
     /// `bs_match` does (`emit_bs_get_tail_shared`, jit/arm/instr_bs.cpp:
     /// 407-439). The view shares the bytes of the binary, as an ERTS
-    /// sub-bitstring refers to its binary. Return `None` when the position
-    /// is not on a byte boundary, because PBeam has no bitstring term (row
-    /// "Bitstring terms" of `docs/erts-differences.md`).
+    /// sub-bitstring refers to its binary. The position can be at any bit,
+    /// so the tail can be a bitstring.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// let context = MatchState::new(Binary::from(&[1, 2, 3][..]));
     /// context.skip(8);
-    /// assert_eq!(context.tail(), Some(Binary::from(&[2, 3][..])));
+    /// assert_eq!(context.tail(), Binary::from(&[2, 3][..]));
     /// assert_eq!(context.position(), 8);
     /// ```
-    pub(crate) fn tail(&self) -> Option<Binary> {
-        let size = self.bytes.bit_size();
-        let position = self.position();
-        position
-            .is_multiple_of(8)
-            .then(|| self.bytes.bits(position, size))
+    pub(crate) fn tail(&self) -> Binary {
+        self.bytes.bits(self.position(), self.bytes.bit_size())
     }
 
     /// Return the number of bits after the position (`sb->end -

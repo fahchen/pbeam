@@ -22,12 +22,14 @@ use crate::term::{AtomTable, Direction, debug_term, from_list_units};
 /// ```rust,ignore
 /// let result = keys(&mut process, &Term::Map(map_of_a_to_1), 0)?;
 /// assert!(matches!(result, BifResult::Value(keys) if keys == Term::list_from([test_atom("a")])));
-/// assert!(keys(&mut process, &Term::Integer(1), 0).is_err());
+/// assert!(matches!(keys(&mut process, &Term::Integer(1), 0)?, BifResult::Raise { .. }));
 /// ```
 ///
 /// # Errors
 ///
-/// Return a runtime error for a term that is not a map.
+/// Return a runtime error when the reduction count fails. A term that is not
+/// a map raises `error:{badmap, Term}`, as ERTS `maps_keys_1_helper` does
+/// (`erl_map.c:1235-1237`).
 pub(super) fn keys(
     process: &mut ProcessState,
     map: &Term,
@@ -36,8 +38,7 @@ pub(super) fn keys(
     /// `iterations_per_red` of `maps_keys_1` (`erl_map.c:1242`).
     const PER_REDUCTION: usize = 15;
     let Term::Map(entries) = map else {
-        // ponytail: ERTS raises error {badmap, Map}; see "Exception raise sites" in docs/erts-differences.md.
-        return Err(error("unsupported maps:keys/1 argument: not a map"));
+        return Ok(error_with("badmap", map));
     };
     let units = vec![
         1;

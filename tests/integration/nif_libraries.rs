@@ -2,12 +2,11 @@ use pbeam_runtime::{BeamProgram, Term};
 
 /// The stand-ins of the modules of the OTP NIF libraries without bindings.
 /// Each defines the functions of the `nif_funcs` table of its library.
-const STAND_INS: [&[u8]; 5] = [
+const STAND_INS: [&[u8]; 4] = [
     include_bytes!("../../fixtures/nif_libraries/zstd.beam"),
     include_bytes!("../../fixtures/nif_libraries/prim_net.beam"),
     include_bytes!("../../fixtures/nif_libraries/erl_tracer.beam"),
     include_bytes!("../../fixtures/nif_libraries/prim_socket.beam"),
-    include_bytes!("../../fixtures/nif_libraries/asn1rt_nif.beam"),
 ];
 
 #[test]
@@ -26,12 +25,6 @@ fn stops_the_run_at_a_function_of_a_library_without_bindings() {
         ("prim_net", "nif_info", 0, "prim_net:nif_info/0"),
         ("erl_tracer", "enabled", 3, "erl_tracer:enabled/3"),
         ("prim_socket", "nif_info", 0, "prim_socket:nif_info/0"),
-        (
-            "asn1rt_nif",
-            "encode_ber_tlv",
-            1,
-            "asn1rt_nif:encode_ber_tlv/1",
-        ),
     ] {
         let arguments = vec![program.host_term(Term::Integer(0)); arity];
         let error = program

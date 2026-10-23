@@ -1736,3 +1736,20 @@ fn keeps_no_program_of_a_deleted_table() {
     tables.remember_program(Reference(0), Reference(1), spec);
     assert!(tables.program(Reference(1)).is_none());
 }
+
+#[test]
+fn counts_the_key_order_of_an_ordered_set_in_the_live_bytes() {
+    // The sorted keys of an ordered_set count as allocated bytes of the
+    // table, and each key counts as a live term.
+    let atoms = AtomTable::new();
+    let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::OrderedSet);
+    let before = table.allocated_bytes();
+    table.insert(&atoms, vec![Term::tuple(vec![Term::Integer(1)])]);
+    assert_eq!(table.order.len(), 1);
+    assert!(table.allocated_bytes() > before);
+    let mut tables = EtsTables::default();
+    tables.create(Reference(0), None, table);
+    let mut live = crate::term::LiveBytes::new();
+    tables.account_terms(&mut live);
+    assert!(live.bytes() > 0);
+}

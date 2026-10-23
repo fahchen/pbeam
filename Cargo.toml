@@ -15,8 +15,8 @@ nix = { version = "0.31.3", default-features = false, features = ["fs"] }
 num-bigint = "0.5"
 num-integer = "0.1"
 num-traits = "0.2"
-sha1 = "0.10"
-sha2 = "0.10"
+openssl = { version = "=0.10.75", features = ["vendored"] }
+openssl-src = "=300.5.5+3.5.5"
 socket2 = { version = "0.6", features = ["all"] }
 zlib-rs = "0.6"
 zstd = { version = "0.13", default-features = false, features = [
@@ -251,6 +251,10 @@ name = "bitstr"
 path = "tests/integration/bitstr.rs"
 
 [[test]]
+name = "bitstring_list"
+path = "tests/integration/bitstring_list.rs"
+
+[[test]]
 name = "body_bif"
 path = "tests/integration/body_bif.rs"
 
@@ -357,6 +361,10 @@ path = "tests/integration/find_executable.rs"
 [[test]]
 name = "existing_atom"
 path = "tests/integration/existing_atom.rs"
+
+[[test]]
+name = "flat_size"
+path = "tests/integration/flat_size.rs"
 
 [[test]]
 name = "float"
@@ -477,6 +485,10 @@ path = "tests/integration/map.rs"
 [[test]]
 name = "maps_math"
 path = "tests/integration/maps_math.rs"
+
+[[test]]
+name = "math_bifs"
+path = "tests/integration/math_bifs.rs"
 
 [[test]]
 name = "module_info"
@@ -663,6 +675,10 @@ name = "bif_stack"
 path = "tests/integration/bif_stack.rs"
 
 [[test]]
+name = "bif_trap_stack"
+path = "tests/integration/bif_trap_stack.rs"
+
+[[test]]
 name = "prim_file"
 path = "tests/integration/prim_file.rs"
 
@@ -677,6 +693,10 @@ path = "tests/integration/atomics.rs"
 [[test]]
 name = "nif_libraries"
 path = "tests/integration/nif_libraries.rs"
+
+[[test]]
+name = "asn1rt_nif"
+path = "tests/integration/asn1rt_nif.rs"
 
 [[test]]
 name = "zlib"
@@ -733,3 +753,15 @@ path = "tests/integration/multischeduler_resources.rs"
 [[test]]
 name = "multischeduler_clock"
 path = "tests/integration/multischeduler_clock.rs"
+
+[[test]]
+name = "ets_cause"
+path = "tests/integration/ets_cause.rs"
+
+[[test]]
+name = "heap_flags"
+path = "tests/integration/heap_flags.rs"
+
+[[test]]
+name = "bif_cause"
+path = "tests/integration/bif_cause.rs"

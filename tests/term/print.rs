@@ -234,8 +234,9 @@ fn prints_funs_as_pinned_erts() {
 
 #[test]
 fn prints_a_bitstring_as_pinned_erts() {
-    // PBeam builds no bitstring term from a compiled fixture yet, so the
-    // test makes one with `Binary::bits`. The pinned ERTS gives
+    // The test makes a bitstring with `Binary::bits`; the test
+    // `loads_a_bitstring_literal_as_pinned_erts` of `tests/integration/bitstr.rs`
+    // prints the loaded literals. The pinned ERTS gives
     // `erts_internal:term_to_string(<<"ab", 3:5>>)` = "<<97,98,3:5>>" and
     // `erts_internal:term_to_string(<<5:3>>)` = "<<5:3>>".
     let table = table_of(&[]);

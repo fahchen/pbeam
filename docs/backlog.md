@@ -25,17 +25,10 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ## Term and loader
 
-### Add bitstring terms
-
-- PBeam has no bitstring term whose size is not a multiple of 8 bits, so `is_bitstr` passes only for a binary. The loader keeps a `BIT_BINARY_EXT` literal as an unsupported literal, so `byte_size(<<1:3>>)` stops with `unsupported BEAM literal index N`. ERTS gives `1` (`erl_bif_guard.c:376-393`). The "Bitstring terms" row records this.
-- The work: a bitstring `Term` variant with the ERTS term order, `BIT_BINARY_EXT` literals in the loader, the bit count in `erlang:byte_size/1`, and the bitstring forms of the binary instructions and BIFs, such as the `binary` and `get_tail` commands of `bs_match`, `bs_get_binary2`, and `bs_get_tail` of a size that is not a multiple of 8 bits.
-- **Trigger:** a measured path makes or loads a bitstring that is not a binary.
-- **Source:** #359 and #360.
-
 ### Load local fun literals and run the fun information BIFs
 
-- PBeam loads a `NEW_FUN_EXT` (tag 112) literal as an unsupported literal, so an instruction that reads it returns `unsupported BEAM literal index N`. The pinned compiler makes a local fun with `make_fun3`, not as a literal (measured), so no current path loads one. `erlang:fun_info/2` runs (row "Fun information"). `erlang:fun_to_list/1` runs (#1017). `erlang:fun_info_mfa/1` is an `unsupported` BIF table entry (row "Unimplemented BIFs").
-- **Trigger:** a measured path loads a local fun literal or calls `erlang:fun_info_mfa/1`.
+- PBeam loads a `NEW_FUN_EXT` (tag 112) literal as an unsupported literal, so an instruction that reads it returns `unsupported BEAM literal index N`. The pinned compiler makes a local fun with `make_fun3`, not as a literal (measured), so no current path loads one. `erlang:fun_info/2` runs (row "Fun information"). `erlang:fun_to_list/1` runs (#1017). `erlang:fun_info_mfa/1` runs (#1021).
+- **Trigger:** a measured path loads a local fun literal.
 - **Source:** PR #120 (#109).
 
 ### Cache the decoded modules of a run
@@ -154,20 +147,12 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a measured path depends on the turn in which a timer expires while other processes run.
 - **Source:** #229 (PR #236).
 
-### Run the other binary-match instructions
-
-- PBeam runs `bs_start_match3`, `bs_start_match4`, `bs_get_position`, `bs_set_position`, `bs_get_utf8`, `bs_skip_utf8`, `bs_get_utf16`, `bs_skip_utf16`, `bs_get_utf32`, `bs_skip_utf32`, `bs_get_tail`, `bs_get_binary2` with a size in a register or a literal integer, `bs_get_integer2`, `bs_skip_bits2`, `bs_match_string`, and `bs_match` with each command that the ERTS loader accepts. `move`, `bs_start_match3`, and `bs_start_match4` share a match context that they copy to another register, and `byte_size/1` reads a match context. `swap` and `bit_size/1` of a match context stop the run with `invariant error: the match context in <Operand> reached an instruction that is not a binary match`. After a failed `=:=` command of `bs_match`, PBeam does not know the position, so a read of the match context before `bs_set_position` stops the run with `unsupported read of the match context in <Operand> after a failed bs_match =:= command`. The remaining binary-match instruction, `bs_get_binary2` with the size `all`, stops the run with `unsupported BEAM opcode N`. The "Binary matching" row of `docs/erts-differences.md` records this, and this entry owns it. The entry "Add bitstring terms" owns the `binary` and `get_tail` commands, and the `bs_get_binary2` and `bs_get_tail` instructions, of a size that is not a multiple of 8 bits.
-- **Evidence:** `bs_match_probe:bits(<<165>>)` stops with `unsupported bs_match binary of 3 bits: needs a bitstring term`. The test `gives_a_runtime_error_for_a_read_after_a_failed_equal_command` of `tests/runtime/interpreter.rs` stops at a `skip` command after a failed `=:=`.
-- **Trigger:** a measured path matches a binary with one of these instructions, gives a match context to `swap` or `bit_size/1`, or reads a match context after a failed `=:=` command without `bs_set_position`. Add only the instructions that the path needs.
-- **Source:** #219 (PR #227), #395, #396, #421.
-
 ### Run the unsupported BIFs that OTP code calls
 
 - The "Unimplemented BIFs" row lists the `unsupported` BIF table entries that OTP code often calls. Each returns `unresolved external MFA M:F/A`. The groups:
   - Timers: `erlang:read_timer/2`. The other timer BIFs run, `erlang:read_timer/1` among them (`src/runtime/interpreter/bif/table.rs:284`).
   - Persistent terms: `persistent_term:put_new/2` and `persistent_term:info/0`. `persistent_term:erase/1` runs (`table.rs:545`).
   - Signals: `erlang:exit/3`.
-  - Funs: `erlang:fun_info_mfa/1` (entry "Load local fun literals and run the fun information BIFs").
   - Maps: `maps:get/2` and `maps:is_key/2` through a fun call. The compiler changes a direct call to the `map_get` and `is_map_key` BIFs, which PBeam runs.
 - **Trigger:** a measured path calls one of them. Add each group in its own task.
 - **Source:** audit of the BIF table at the M2 close.
@@ -221,8 +206,7 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### Set the start variables and `init` flags of the `erl` script
 
-- PBeam has no `erl` script and no `erlexec`. Thus `os:getenv/1` gives the host value or `false` for `EMU`, `ROOTDIR`, `BINDIR`, and `PROGNAME`, and `PATH` has no `BINDIR` prefix. The `init` request process of `pbeam_boot` has only the flag `noshell`. The `erl` script exports the four variables (`erl.src.src:52-58`), `erlexec` puts `BINDIR` and `ROOTDIR/bin` at the front of `PATH` (`erlexec.c:553-621`), and the flags of `init` also have `root`, `bindir`, `progname`, and `home`. The "OS environment" and "Boot" rows record this.
-- On Linux, the `inet_db` start calls `inet:gethostbyname/1` for the host name when the domain is empty (inet_config.erl:112-134). Before `kernel_safe_sup` starts, `inet_gethost_native` spawns `run_once/0` (inet_gethost_native.erl:575-577). In PBeam, `init:get_argument(bindir)` gives `error`, so that process exits with `{badmatch,error}` (inet_gethost_native.erl:416). `inet_config` ignores the error result, so the domain stays empty. In ERTS, the `inet_gethost` port program resolves the name. When the result is a long name, `set_hostname/1` sets the domain (inet_config.erl:122-127). The port also needs the `{packet,4}` and `eof` options of `open_port/2`. Observed in PR #717 (#449).
+- PBeam has no `erl` script and no `erlexec`. Thus `os:getenv/1` gives the host value or `false` for `EMU`, `ROOTDIR`, `BINDIR`, and `PROGNAME`, and `PATH` has no `BINDIR` prefix in the `pbeam_boot` form. The `init` request process of `pbeam_boot` has the flag `noshell`, and the `root` and `bindir` flags of `--root` (#1083). The `erl` script exports the four variables (`erl.src.src:52-58`), `erlexec` puts `BINDIR` and `ROOTDIR/bin` at the front of `PATH` (`erlexec.c:553-621`), and the flags of `init` also have `progname` and `home`. The "OS environment" and "Boot" rows record this.
 - **Trigger:** a consumer reads one of these variables or flags, for example `init:get_argument(root)`.
 - **Source:** PR #191 (#185).
 
@@ -301,7 +285,7 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### Bind the full function tables of the OTP NIF libraries
 
-- **Now:** the OTP NIF libraries `net`, `erl_tracer`, and `asn1rt_nif` have load-check tables with no bindings and `unbound_fails` (#868); `prim_socket` binds only `nif_supports/0,1` (#887); `zstd` binds only its context functions (#898); and `crypto`, `prim_file`, `prim_tty`, and `zlib` bind only part of their tables. A call of an unbound function of a library with `unbound_fails` gives `M:F/A NIF is not supported`; for `prim_file` and `prim_tty`, which do not set it, the call runs the BEAM stub body, which gives `erlang:nif_error(undef)`.
+- **Now:** the OTP NIF libraries `net` and `erl_tracer` have load-check tables with no bindings and `unbound_fails` (#868); `prim_socket` binds only `nif_supports/0,1` (#887); `zstd` binds only its context functions (#898); and `crypto`, `prim_file`, `prim_tty`, and `zlib` bind only part of their tables. A call of an unbound function of a library with `unbound_fails` gives `M:F/A NIF is not supported`; for `prim_file` and `prim_tty`, which do not set it, the call runs the BEAM stub body, which gives `erlang:nif_error(undef)`.
 - **Option:** bind each library in full against its pinned OTP source, one task for each library or function group, each function compared with pinned ERTS.
 - **Trigger:** an application that reaches an unbound function; the order follows the applications.
 - **Source:** owner comment of 2026-10-22 ("最终我们需要完整实现一遍").
@@ -310,16 +294,9 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### Give the `error_info` cause of BIF errors
 
-- PBeam gives the `error_info` map `#{module => Format}` with no `cause` for each BIF error except `erlang:spawn_opt/4`. ERTS adds `cause => Cause` when the BIF raises with `EXF_HAS_EXT_INFO` (`beam_common.c:993-1002`), for example `none` or `notalive` for `register/2` (`bif.c:2310-2316`), `badopt` for `monitor/3` (`bif.c:988-995`), and the causes of the `ets` BIFs (`erl_db.c:794-931`). `erl_erts_errors:format_error/2` and `erl_stdlib_errors:format_error/2` read the cause to write the error text.
-- **Evidence:** `catch register(1, self())` gives `[{error_info, #{cause => none, module => erl_erts_errors}}]` on the pinned ERTS and `[{error_info, #{module => erl_erts_errors}}]` on PBeam (`registers_a_name_or_raises_badarg_as_pinned_erts` in `tests/runtime/interpreter.rs`).
+- PBeam gives the `error_info` map `#{module => Format}` with no `cause` for each BIF error except `erlang:spawn_opt/4`, the `ets` BIFs (#968), the BIFs of `bif.c` that PBeam runs (#969), the timer BIFs of `erl_hl_timer.c` (#971), and the BIFs of `erl_bif_re.c`, `erl_bif_os.c`, `erl_bif_port.c`, and `external.c` (#972). PBeam does not run `erlang:monitor_node/3`, so its cause `badopt` (`dist.c:6499`, `6503`) is missing. ERTS adds `cause => Cause` when the BIF raises with `EXF_HAS_EXT_INFO` (`beam_common.c:993-1002`), for example `badopt` for `link/2` (`bif.c:146-149`), which PBeam does not run yet. `erl_erts_errors:format_error/2` and `erl_stdlib_errors:format_error/2` read the cause to write the error text.
+- **Evidence:** `fixtures/bif_cause/bif_cause_probe.erl`, `fixtures/bif_cause/timer_cause_probe.erl`, and `fixtures/ets/ets_cause_probe.erl` match the causes of the BIFs that PBeam runs against the pinned ERTS; the BIFs of the other files give no cause.
 - **Trigger:** a consumer reads the cause of a BIF error, for example the error text of a shell or a logger report, or OTP code that matches the cause.
-- **Source:** [#715](https://github.com/fahchen/pbeam/issues/715).
-
-### Give the stack trace of a BIF error after a trap
-
-- A BIF that traps to a BIF export (`BifResult::TrapBif`) continues through `PendingBif`, and an error after the trap gets the stack trace `[]`. ERTS gives the BIF frame with the arguments in the registers, which are BIF-specific: `lists:member/2` gives the rest of the list (`[x, Rest]`), and `length/1` puts the first list back (`erl_bif_guard.c:243-247`). The PBeam trap arguments are internal continuation state (for example `[Rest, Count]` of `length/1`, three arguments of `erlang:'++'/2`), and a copy of them breaks the owned output of `list_to_bitstring_continue`.
-- **Evidence:** on the pinned ERTS, `lists:member(x, lists:seq(1, 100000) ++ a)` raises `badarg` with the first frame `{lists, member, [x, Rest], [{error_info, #{module => erl_stdlib_errors}}]}`; PBeam gives `[]`. Codex review of PR #736.
-- **Trigger:** a consumer reads the stack trace of a BIF error after a trap.
 - **Source:** [#715](https://github.com/fahchen/pbeam/issues/715).
 
 ### Give the exact caller frames of an `undef` exception
@@ -329,12 +306,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Source:** owner decision of 2026-10-11 (Suikou review 01a1282e, AFK log second batch); [#446](https://github.com/fahchen/pbeam/issues/446), [#447](https://github.com/fahchen/pbeam/issues/447), PR [#473](https://github.com/fahchen/pbeam/pull/473).
 - **Task:** none. [#926](https://github.com/fahchen/pbeam/issues/926) added the line locations.
 
-### Raise `undef` for an entry module that the run does not load
-
-- After #42 (PR #194), the `pbeam` binary accepts only an argument atom that a loaded module holds and stops with `argument <M> is not an atom of the loaded modules`, and it stops with `missing BEAM module M` for an entry module that the start BEAM files do not hold. #447 runs the pinned `error_handler` for a call of a module that the run does not load, so the undefined-module path of `error_handler` exists now. The remaining work is a `BeamProgram` API that adds the atom of the entry module and of each argument, and an entry that loads its module through the error handler. The "Run arguments" and "Undefined functions" rows record the difference.
-- **Trigger:** a consumer runs an entry module, or gives an argument atom, that the start BEAM files do not hold.
-- **Source:** review of #42; the remaining work of [#447](https://github.com/fahchen/pbeam/issues/447).
-
 ### Halt the PBeam boot with the `init` crash text
 
 - After #6 (PR #195), the `pbeam` binary writes `pbeam: root process exited with <Reason>` for a root exit. Under `erl -noshell -eval`, ERTS writes `Error! Failed to eval: ...` and then `Runtime terminating during boot (<Reason>)` through `init:crash/2` and `erlang:halt/1` (init.erl:665-679, 1552-1567). Doing the same needs `erlang:halt/1` with a string, which writes the slogan and a crash dump (`erlang:halt/2` with an integer status runs since #301), `erts_internal:term_to_string/2` (it can use the `print_term` of #6), and an `init` process that watches the boot process.
@@ -343,7 +314,7 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### Value checks of `process_flag/2` and `system_flag/2`
 
-- After #155 (PR #177), `max_heap_size` (`erl_gc.c:3824-3872`, needs the process minimum heap size), `{monitor_nodes, Options}` (`dist.c:6732-6799`), a `scheduler` value above the scheduler count, and the `system_flag/2` sub-checks of `internal_cpu_topology`, `erts_alloc`, `sequential_tracer`, `schedulers_online`, and `dirty_cpu_schedulers_online` give the runtime error where ERTS raises `badarg`. The "System flags" row of PR #177 records them.
+- After #155 (PR #177), `{monitor_nodes, Options}` (`dist.c:6732-6799`), a `scheduler` value above the scheduler count, and the `system_flag/2` sub-checks of `internal_cpu_topology`, `erts_alloc`, `sequential_tracer`, `schedulers_online`, and `dirty_cpu_schedulers_online` give the runtime error where ERTS raises `badarg`. The "System flags" row of PR #177 records them.
 - **Trigger:** a consumer sets one of these flags.
 - **Source:** review of #155.
 
@@ -538,7 +509,7 @@ The owner opened [m13] Foundation seams ([#908](https://github.com/fahchen/pbeam
 
 - **Reason:** PBeam has no bitstring term whose size is not a multiple of 8 bits, no local fun literal and no `NEW_FUN_EXT` encode or decode (export funs load and encode), a restricted set of map keys, and no native record term.
 - **Evidence:** row "Bitstring terms" of `docs/erts-differences.md` (the loader keeps a `BIT_BINARY_EXT` literal as an unsupported literal); `erlang:fun_info_mfa/1` and `erlang:fun_to_list/1` are `unsupported` (`src/runtime/interpreter/bif/table.rs:178-179`); `unsupported map key` errors (`src/runtime/interpreter.rs:1747`, `src/runtime/interpreter/bif/maps.rs:166`) and row "Map keys"; `put_record` stops the run (row "Unimplemented instructions"); a bignum in an integer segment of more than 64 bits gives `unsupported bs_create_bin integer segment of N bits of a bignum` (`src/runtime/interpreter.rs:6014-6021`), and a `bs_match` integer outside the 64-bit range gives `unsupported bs_match integer outside the 64-bit range: needs a bignum` (`interpreter.rs:5328`); PBeam writes no 16-bit float (`interpreter.rs:5484`).
-- **Work:** e1: full bitstrings: `BIT_BINARY_EXT` (tag 77) in the loader and the external term format, the bitstring forms of the binary-match and construction paths, `erlang:bitstring_to_list/1`, and the print of a bitstring (entries "Add bitstring terms" and "Run the other binary-match instructions"). e2: funs: the loader keeps the MD5 and the old index, a fun-entry table on the node, `NEW_FUN_EXT` encode and decode, `erlang:fun_to_list/1`, and `erlang:fun_info_mfa/1` (entry "Load local fun literals and run the fun information BIFs"). e3: map keys: allow bignums, maps, funs, and binaries in compound keys, one class at a time, each compared with pinned ERTS. e4: `RECORD_EXT` and native records, 16-bit float construction, and bignum integer segments of more than 64 bits in binary construction and matching.
+- **Work:** e1: full bitstrings: `BIT_BINARY_EXT` (tag 77) in the loader, the bitstring forms of the binary-match and construction paths, `erlang:bitstring_to_list/1`, and the print of a bitstring (entries "Add bitstring terms" and "Run the other binary-match instructions"). e2: funs: the loader keeps the MD5 and the old index, a fun-entry table on the node, `NEW_FUN_EXT` encode and decode, `erlang:fun_to_list/1`, and `erlang:fun_info_mfa/1` (entry "Load local fun literals and run the fun information BIFs"). e3: map keys: allow bignums, maps, funs, and binaries in compound keys, one class at a time, each compared with pinned ERTS. e4: `RECORD_EXT` and native records, 16-bit float construction, and bignum integer segments of more than 64 bits in binary construction and matching.
 - **Order:** e1 needs only the bit-exact binary access of M13 (epic #912), so it can run in parallel with M14. e2 comes after M14, because the fun-entry table lives on the node next to the code table (#937).
 - **Trigger:** the owner opens the milestone.
 - **Source:** plan of Suikou review 01a160b6.
@@ -565,7 +536,7 @@ The owner opened [m13] Foundation seams ([#908](https://github.com/fahchen/pbeam
 
 - **Reason:** `crypto` binds only part of its NIF table, and `asn1rt_nif` has a load-check table with no bindings (entry "Bind the full function tables of the OTP NIF libraries").
 - **Work:** the full `crypto` NIF table and `asn1rt_nif`, each function compared with pinned ERTS.
-- **Decision (owner, 2026-10-22):** link a static OpenSSL 3.5.8 (`openssl-sys` with the `vendored` feature). Reason: the pinned OTP 29.1.1 links OpenSSL 3.5.8. On the pinned `erl`, `crypto:info_lib()` gives `[{<<"OpenSSL">>,810549376,<<"OpenSSL 3.5.8 25 Aug 2026">>}]`, and `crypto:supports()` lists 187 items. With the same library, the algorithm set, the key formats, the padding, and the errors match OTP with the least work. Cost: the build of each target needs a C toolchain and perl, so cross builds and musl builds need more setup. The runtime portability is the same as for the alternatives, because each option links statically.
+- **Decision (owner, 2026-10-22):** link a static OpenSSL 3.5.5 (the safe `openssl` crate with the `vendored` feature, `openssl-src = "=300.5.5+3.5.5"`; owner, 2026-10-23: crates.io has no build of 3.5.8, and 3.5.5 is the same 3.5 LTS line). Reason: the pinned OTP 29.1.1 links OpenSSL 3.5.8. On the pinned `erl`, `crypto:info_lib()` gives `[{<<"OpenSSL">>,810549376,<<"OpenSSL 3.5.8 25 Aug 2026">>}]`, and `crypto:supports()` lists 187 items. With the same library, the algorithm set, the key formats, the padding, and the errors match OTP with the least work. Cost: the build of each target needs a C toolchain and perl, so cross builds and musl builds need more setup. The runtime portability is the same as for the alternatives, because each option links statically.
 - **Alternatives (rejected):** RustCrypto: pure Rust, and the build needs only `rustc`, but its algorithm set is smaller, and the behavior of each function must be matched by hand. aws-lc: compatible with the OpenSSL API, but its algorithm set and its error codes differ from OpenSSL, and it also needs a C toolchain.
 - **Order:** the stateless functions can come earlier. The stateful parts, such as hash and cipher contexts, come after the node resource store of M14 (#938), so a context does not pin its process to one scheduler.
 - **Trigger:** the owner opens the milestone.
@@ -616,3 +587,10 @@ The owner opened [m13] Foundation seams ([#908](https://github.com/fahchen/pbeam
 - **Open questions:** the identity of pids, references, ports, and timers after a resume; the resources that cannot move (ports, sockets, NIF resources, and ETS tables that the process does not own); a check that the saved code matches; and the capabilities that a saved state carries.
 - **Trigger:** an owner decision after M10, or a consumer such as live migration of a process, debugging, or a test that replays a run.
 - **Source:** owner request in chat, 2026-10-16.
+
+### Run `math:acosh/1`, `asinh/1`, `atanh/1`, `erf/1`, and `erfc/1` bit for bit
+
+- **Reason:** ERTS calls these functions of the C library of the platform (`erl_math.c:180-232`). Safe Rust has no stable binding of them: `f64::erf` and `f64::erfc` are unstable, `f64::atanh` gives a different result for `-0.5`, and an `extern` block needs `unsafe`. The `libm` crate differs by up to one unit in the last place from glibc and by up to two units (`erfc(2)`) from macOS arm64. Task #1052 keeps them `unsupported`.
+- **Evidence:** PR #1080: a comparison of the `libm` crate with glibc (Docker `gcc:14`) and with the pinned ERTS on macOS arm64.
+- **Trigger:** a consumer of one of these BIFs, and an owner decision on an `unsafe` C binding (an ADR) or on a stable `f64::erf`.
+- **Source:** Codex review of PR #1080, 2026-10-23.

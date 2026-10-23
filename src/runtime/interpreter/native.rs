@@ -137,7 +137,7 @@ const LIBRARIES: &[Library] = &[
     Library {
         module: "asn1rt_nif",
         functions: &asn1rt_nif::FUNCTIONS,
-        bindings: &[],
+        bindings: asn1rt_nif::BINDINGS,
         load: Some(asn1rt_nif::load),
         unbound_fails: true,
     },

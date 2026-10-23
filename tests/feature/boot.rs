@@ -1,6 +1,7 @@
 use std::{
     env, fs,
-    os::unix::ffi::OsStrExt,
+    os::unix::ffi::{OsStrExt, OsStringExt},
+    path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
@@ -228,15 +229,96 @@ fn isolated_init_stop() {
     );
 }
 
-/// Return the boot flags `[{root, [Root]}]` of `pbeam_boot:start/3`, as the
-/// `pbeam` binary gives them for `--root` (row "Boot" of
+/// Return the boot flags `[{root, [Root]}, {bindir, [Bindir]}]` of
+/// `pbeam_boot:start/3`, as the `pbeam` binary gives them for `--root`: it
+/// gives `{bindir, [Bindir]}` (row "Boot" of
 /// `docs/erts-differences.md`).
 fn root_flags(program: &BeamProgram) -> Term {
-    let root = Term::binary(otp_root().as_os_str().as_bytes().to_vec());
-    Term::list_from(vec![Term::tuple(vec![
-        Term::Atom(program.atom("root").unwrap()),
-        Term::list_from(vec![root]),
-    ])])
+    let flag = |name: &str, dir: &Path| {
+        Term::tuple(vec![
+            Term::Atom(program.atom(name).unwrap()),
+            Term::list_from(vec![Term::binary(dir.as_os_str().as_bytes().to_vec())]),
+        ])
+    };
+    Term::list_from(vec![
+        flag("root", otp_root()),
+        flag("bindir", &erts_bindir()),
+    ])
+}
+
+/// Return the `bindir` flag that `erl` gives the pinned emulator, as
+/// `init:get_argument(bindir)` gives it.
+fn erts_bindir() -> PathBuf {
+    let output = Command::new("erl")
+        .args([
+            "-noshell",
+            "-eval",
+            "{ok, [[B]]} = init:get_argument(bindir), io:put_chars(B), halt().",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    PathBuf::from(String::from_utf8(output.stdout).unwrap())
+}
+
+#[test]
+fn gives_the_bindir_flag_of_the_root_as_erlexec_does() {
+    // The `erl` script sets `BINDIR` to `$ROOTDIR/erts-%VSN%/bin`
+    // (erl.src.src:52), and `erlexec` gives it with `-bindir`
+    // (erlexec.c:1154-1155). With `--root`, the `pbeam` binary gives the
+    // same `bindir` flag to `pbeam_boot`.
+    let beams = BOOT_MODULES.map(pinned_beam_path);
+    let output = Command::new(env!("CARGO_BIN_EXE_pbeam"))
+        .args(["pbeam_boot", "start", "boot_probe", "bindir", "--root"])
+        .arg(otp_root())
+        .arg("--")
+        .arg(BOOT_PROBE)
+        .args(&beams)
+        .arg(boot_beam())
+        .env("TERM", "dumb")
+        .env("LC_ALL", "C.UTF-8")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let mut expected = erts_bindir().into_os_string().into_vec();
+    expected.push(b'\n');
+    assert_eq!(
+        (
+            output.stdout,
+            output.stderr.as_slice(),
+            output.status.code()
+        ),
+        (expected, &b""[..], Some(0))
+    );
+}
+
+#[test]
+fn gives_the_bindir_flag_when_no_loaded_module_holds_the_atom() {
+    // `erlexec` always gives `-bindir` (erlexec.c:1154-1155). The start set
+    // has only `flags_probe` and `pbeam_boot`, and neither holds the atom
+    // `bindir`, so the `pbeam` binary adds it. The probe displays its flag
+    // list.
+    let output = Command::new(env!("CARGO_BIN_EXE_pbeam"))
+        .args(["flags_probe", "main", "--root"])
+        .arg(otp_root())
+        .args(["--", "fixtures/boot/flags_probe.beam"])
+        .arg(boot_beam())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let expected = format!(
+        "[{{root,[<<\"{}\">>]}},{{bindir,[<<\"{}\">>]}}]\r\n",
+        otp_root().display(),
+        erts_bindir().display()
+    );
+    assert_eq!(
+        (
+            String::from_utf8(output.stdout).unwrap(),
+            output.stderr.as_slice(),
+            output.status.code()
+        ),
+        (expected, &b""[..], Some(0))
+    );
 }
 
 /// Load the pinned boot modules, `probe`, and the boot module.

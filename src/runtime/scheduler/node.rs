@@ -24,7 +24,9 @@ use std::{
 
 use super::{Signal, process_table::ProcessTable};
 use crate::runtime::{
+    heap_flags::HeapFlags,
     persistent_term::PersistentTermStore,
+    port::{self, Port, PortCell, Ports},
     process::{MonitorLinkTree, ProcessState, TimerReference},
     resources::NodeResources,
 };
@@ -155,8 +157,10 @@ pub(in crate::runtime) struct Node {
     pub(super) processes: ProcessTable,
     /// The registered names of the node, as the ERTS `process_reg` table.
     names: Mutex<HashMap<String, ProcessId>>,
-    /// The scheduler of each open port.
-    ports: Mutex<HashMap<PortId, usize>>,
+    /// The port table of the node, as the ERTS `erts_port` table (`io.c:76`,
+    /// `erl_ptab.c`): each open port with the scheduler that serves its I/O.
+    /// Any scheduler reads and changes a port through it.
+    ports: Mutex<Ports>,
     /// The persistent terms of the node and their update permission. ERTS
     /// keeps one table for the node, and any scheduler reads it
     /// (`the_hash_table`, `erl_bif_persistent.c:358-398`).
@@ -229,6 +233,10 @@ pub(in crate::runtime) struct Node {
     /// for the node (`erts_backtrace_depth`, `erl_init.c:805`). The start
     /// value is 8 (`DEFAULT_BACKTRACE_SIZE`, `error.h:207`).
     backtrace_depth: AtomicUsize,
+    /// The heap flags that a new process takes. ERTS keeps one value of
+    /// each for the node (`H_MIN_SIZE`, `BIN_VH_MIN_SIZE`,
+    /// `erts_max_gen_gcs`, `H_MAX_SIZE`, `H_MAX_FLAGS`; `erl_init.c:808-811`).
+    heap_flags: Mutex<HeapFlags>,
 }
 
 impl Node {
@@ -258,7 +266,7 @@ impl Node {
             Arc::new(Node {
                 processes: ProcessTable::default(),
                 names: Mutex::new(HashMap::new()),
-                ports: Mutex::new(HashMap::new()),
+                ports: Mutex::default(),
                 persistent_terms: Mutex::default(),
                 persistent_progress: AtomicBool::new(false),
                 aliases: Mutex::new(Aliases::default()),
@@ -284,6 +292,7 @@ impl Node {
                 resources: NodeResources::default(),
                 system_logger: Mutex::new(Term::static_atom("logger")),
                 backtrace_depth: AtomicUsize::new(8),
+                heap_flags: Mutex::new(HeapFlags::default()),
             }),
             readers,
         ))
@@ -324,7 +333,7 @@ impl Node {
         Arc::new(Node {
             processes: ProcessTable::default(),
             names: Mutex::new(HashMap::new()),
-            ports: Mutex::new(HashMap::new()),
+            ports: Mutex::default(),
             persistent_terms: Mutex::default(),
             persistent_progress: AtomicBool::new(false),
             aliases: Mutex::new(Aliases::default()),
@@ -352,6 +361,7 @@ impl Node {
             resources: NodeResources::default(),
             system_logger: Mutex::new(Term::static_atom("logger")),
             backtrace_depth: AtomicUsize::new(8),
+            heap_flags: Mutex::new(HeapFlags::default()),
         })
     }
 
@@ -734,29 +744,36 @@ impl Node {
         self.unique_monotonic.fetch_add(1, Ordering::Relaxed) + 1
     }
 
-    /// Make the port `id` a port of the scheduler `index`.
-    pub(in crate::runtime) fn register_port(&self, id: PortId, index: usize) {
-        self.ports
-            .lock()
-            .expect("the port table is not poisoned")
-            .insert(id, index);
+    /// Lock the port table of the node.
+    pub(in crate::runtime) fn ports(&self) -> MutexGuard<'_, Ports> {
+        self.ports.lock().expect("the port table is not poisoned")
     }
 
-    /// Remove the port `id` from the node.
-    pub(in crate::runtime) fn remove_port(&self, id: PortId) {
-        self.ports
-            .lock()
-            .expect("the port table is not poisoned")
-            .remove(&id);
+    /// Return the handle of the port `id`, or `None` when it is not in the
+    /// port table. The table lock is released on return.
+    pub(in crate::runtime) fn port(&self, id: PortId) -> Option<PortCell> {
+        self.ports().get(id)
     }
 
-    /// Return the scheduler of the open port `id`.
-    pub(in crate::runtime) fn port_owner(&self, id: PortId) -> Option<usize> {
-        self.ports
-            .lock()
-            .expect("the port table is not poisoned")
-            .get(&id)
-            .copied()
+    /// Run `f` on the port `id` under its own lock, and return its value,
+    /// or `None` when the port closed. The table lock is released before
+    /// the port lock is taken.
+    pub(in crate::runtime) fn with_port<R>(
+        &self,
+        id: PortId,
+        f: impl FnOnce(&mut Port) -> R,
+    ) -> Option<R> {
+        let cell = self.port(id)?;
+        let mut slot = port::lock(&cell);
+        slot.as_mut().map(f)
+    }
+
+    /// Wake the scheduler `index` from its wait, so that it waits again for
+    /// the fds of its ports after another scheduler changed them.
+    pub(in crate::runtime) fn wake_scheduler(&self, index: usize) {
+        if let Some(inbox) = self.inboxes.get(index) {
+            wake(&inbox.wake);
+        }
     }
 
     /// Record the process `owner` as the owner of the alias `reference`.
@@ -1032,6 +1049,18 @@ impl Node {
     /// Set the backtrace depth of the node and return the old value.
     pub(in crate::runtime) fn swap_backtrace_depth(&self, depth: usize) -> usize {
         self.backtrace_depth.swap(depth, Ordering::Relaxed)
+    }
+
+    /// Return the heap flags that a new process takes.
+    pub(in crate::runtime) fn heap_flags(&self) -> HeapFlags {
+        *self.heap_flags_mut()
+    }
+
+    /// Lock and return the heap flags that a new process takes.
+    pub(in crate::runtime) fn heap_flags_mut(&self) -> MutexGuard<'_, HeapFlags> {
+        self.heap_flags
+            .lock()
+            .expect("the heap flags are not poisoned")
     }
 
     /// Lock and return the persistent terms of the node.

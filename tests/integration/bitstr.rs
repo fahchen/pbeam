@@ -61,19 +61,53 @@ fn runs_the_is_bitstr_test_as_pinned_erts() {
     );
 }
 
+/// Run `bitstr_probe:show(Name)` on PBeam and return the print of the exit
+/// reason, which is the print of the result of `Name/0`.
+fn shown(program: &BeamProgram, name: &str) -> String {
+    let name = Term::Atom(program.atom(name).unwrap());
+    let error = program
+        .execute("bitstr_probe", "show", &[program.host_term(name)])
+        .unwrap_err()
+        .to_string();
+    format!(
+        "{}\n",
+        error.strip_prefix("root process exited with ").unwrap()
+    )
+}
+
 #[test]
-fn stops_at_a_bitstring_literal_that_is_not_a_binary() {
-    // `bitstr_probe:bits/0` moves the literal `<<1:3>>` to `x0`. PBeam has
-    // no bitstring whose size is not a multiple of 8, so the `move` stops
-    // the run before `is_bitstr` runs. ERTS passes the test and returns the
-    // bitstring.
+fn loads_a_bitstring_literal_as_pinned_erts() {
+    // The loader decodes `BIT_BINARY_EXT` (tag 77): a byte count, the
+    // number of bits of the last byte, and the bytes
+    // (`external.c:4895-4923`). `is_bitstr` passes for the bitstring
+    // (emu `instrs.tab:945-949`).
     let program = load();
+    assert_eq!(shown(&program, "bits"), reference("bitstr_probe:bits()"));
+    assert_eq!(shown(&program, "bits"), "<<1:3>>\n");
+    // A bitstring prints its whole bytes, then its tail bits as
+    // `Value:Size` (`erl_printf_term.c:615-653`).
+    let printed = shown(&program, "print");
+    assert_eq!(printed, "{<<1:3>>,<<1,2:4>>,<<97,98,1:1>>}\n");
     assert_eq!(
-        program
-            .execute("bitstr_probe", "bits", &[])
-            .unwrap_err()
-            .to_string(),
-        "unsupported BEAM literal index 8"
+        reference("catch bitstr_probe:print()"),
+        format!("{{'EXIT',{}}}\n", printed.trim_end())
     );
-    assert_eq!(reference("bitstr_probe:bits()"), "<<1:3>>\n");
+}
+
+#[test]
+fn reads_the_sizes_of_a_bitstring_literal_as_pinned_erts() {
+    // `bit_size/1` gives the bits, `byte_size/1` rounds up to the next
+    // byte (`erl_bif_guard.c:376-393`), and `is_binary/1` is false for a
+    // size that is not a multiple of 8 (`erl_term.h:384-391`).
+    let program = load();
+    assert_eq!(shown(&program, "sizes"), reference("bitstr_probe:sizes()"));
+}
+
+#[test]
+fn orders_bitstrings_as_pinned_erts() {
+    // ERTS compares two bitstrings by their bits, and a shorter prefix is
+    // less (`erts_cmp_bits` in `utils.c:2320-2335`).
+    let program =
+        BeamProgram::load(&[BITSTR_PROBE, &pinned_beam("erlang"), &pinned_beam("lists")]).unwrap();
+    assert_eq!(shown(&program, "order"), reference("bitstr_probe:order()"));
 }

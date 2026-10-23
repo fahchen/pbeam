@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use num_bigint::{BigInt, Sign};
 
@@ -8,7 +8,7 @@ use crate::{
     error::{BeamError, error},
     runtime::import_kind,
     term::{
-        Atom, AtomTable, Fun, Lambda, MAX_ATOM_CHARACTERS, MAX_TUPLE_SIZE, Map, Term,
+        Atom, AtomTable, Binary, Fun, Lambda, MAX_ATOM_CHARACTERS, MAX_TUPLE_SIZE, Map, Term,
         fits_big_arity,
     },
 };
@@ -70,6 +70,11 @@ const ETF_NIL_EXT: u8 = 106;
 const ETF_STRING_EXT: u8 = 107;
 const ETF_LIST_EXT: u8 = 108;
 const ETF_BINARY_EXT: u8 = 109;
+/// `BIT_BINARY_EXT`, a bitstring such as `<<1:3>>` as `[77, 0, 0, 0, 1, 3,
+/// 32]`: a four-byte big-endian byte count, the number of bits (1 to 8) of
+/// the last byte that are part of the bitstring, and the bytes
+/// (`external.c:4895-4923`).
+const ETF_BIT_BINARY_EXT: u8 = 77;
 /// `EXPORT_EXT`, an external fun such as `fun lists:reverse/1`.
 const ETF_EXPORT_EXT: u8 = 113;
 const ETF_MAP_EXT: u8 = 116;
@@ -401,7 +406,7 @@ fn decode(
     let lambdas = chunks
         .get(b"FunT".as_slice())
         .filter(|data| !data.is_empty())
-        .map(|data| parse_lambdas(data, &atoms))
+        .map(|data| parse_lambdas(data, &atoms, module_md5(chunks)))
         .transpose()?
         .unwrap_or_default();
     let strings = chunks.get(b"StrT".as_slice()).copied().unwrap_or_default();
@@ -626,7 +631,11 @@ fn parse_imports(
 /// that are not whole entries, a function atom index outside
 /// `0..=atom_count`, and a number of free variables outside
 /// `0..=total_arity` are errors.
-fn parse_lambdas(data: &[u8], atoms: &[Atom]) -> Result<Vec<(Lambda, usize)>, BeamError> {
+fn parse_lambdas(
+    data: &[u8],
+    atoms: &[Atom],
+    uniq: [u8; 16],
+) -> Result<Vec<(Arc<Lambda>, usize)>, BeamError> {
     let field = |entry: &[u8], position: usize| {
         let bytes = &entry[position * WORD_SIZE..(position + 1) * WORD_SIZE];
         i32::from_be_bytes(bytes.try_into().expect("a FunT entry has six fields"))
@@ -669,10 +678,56 @@ fn parse_lambdas(data: &[u8], atoms: &[Atom]) -> Result<Vec<(Lambda, usize)>, Be
                 old_unique,
                 label as u32,
                 arity as u32,
-            );
-            Ok((lambda, free_count as usize))
+            )
+            .with_uniq(uniq);
+            Ok((Arc::new(lambda), free_count as usize))
         })
         .collect()
+}
+
+/// Return the MD5 of the module, as `beamfile_read` computes it
+/// (`beam_file.c:1751-1830`): the MD5 of the `AtU8`, `Code`, `StrT`, `ImpT`,
+/// `ExpT`, `FunT`, `LitT`, `Meta`, `Recs`, and `DbgB` chunks in this order,
+/// where each `OldUniq` field of the `FunT` entries counts as zero. A chunk
+/// that the module does not have adds no bytes. The caller reads the `FunT`
+/// chunk only when it is not empty and has whole entries, as
+/// [`parse_lambdas`] checks.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let md5 = module_md5(&read_chunks(&beam_bytes)?)?;
+/// assert_eq!(md5.len(), 16);
+/// ```
+///
+/// # Panics
+///
+/// The vendored OpenSSL always has MD5, so the hash does not fail.
+fn module_md5(chunks: &HashMap<Vec<u8>, &[u8]>) -> [u8; 16] {
+    let chunk = |id: &[u8]| chunks.get(id).copied().unwrap_or_default();
+    let mut bytes = Vec::new();
+    for id in [b"AtU8", b"Code", b"StrT", b"ImpT", b"ExpT"] {
+        bytes.extend_from_slice(chunk(id));
+    }
+    let lambdas = chunk(b"FunT");
+    // A `FunT` chunk of fewer than 4 bytes, or with a partial entry, is
+    // corrupt (`beam_file.c:1799-1802`), and `parse_lambdas` rejects it, so
+    // its digest is never used.
+    let (count, entries) = lambdas.split_at(WORD_SIZE.min(lambdas.len()));
+    bytes.extend_from_slice(count);
+    for entry in entries.as_chunks::<LAMBDA_ENTRY_SIZE>().0 {
+        bytes.extend_from_slice(&entry[..LAMBDA_ENTRY_SIZE - WORD_SIZE]);
+        bytes.extend_from_slice(&[0; WORD_SIZE]);
+    }
+    for id in [b"LitT", b"Meta", b"Recs", b"DbgB"] {
+        bytes.extend_from_slice(chunk(id));
+    }
+    let digest = openssl::hash::hash(openssl::hash::MessageDigest::md5(), &bytes)
+        .expect("the vendored OpenSSL has MD5");
+    digest
+        .as_ref()
+        .try_into()
+        .expect("an MD5 digest has 16 bytes")
 }
 
 /// Read supported terms from an uncompressed `LitT` chunk. Put the atoms of
@@ -797,6 +852,17 @@ fn read_external_term(
             ETF_BINARY_EXT => {
                 let size = read_u32(take(data, cursor, WORD_SIZE)?)? as usize;
                 Term::binary(take(data, cursor, size)?.to_vec())
+            }
+            ETF_BIT_BINARY_EXT => {
+                let size = read_u32(take(data, cursor, WORD_SIZE)?)? as usize;
+                let trailing = usize::from(take(data, cursor, 1)?[0]);
+                // ERTS rejects a trailing bit count outside 1 to 8 and an
+                // empty byte list (`external.c:4913-4917`).
+                if !(1..=8).contains(&trailing) || size == 0 {
+                    return Err(error("invalid BIT_BINARY_EXT trailing bit count"));
+                }
+                let bytes = Binary::from(take(data, cursor, size)?.to_vec());
+                Term::Binary(bytes.bits(0, size * 8 - (8 - trailing)))
             }
             ETF_STRING_EXT => {
                 let size_bytes = take(data, cursor, 2)?;

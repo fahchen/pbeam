@@ -290,7 +290,7 @@ fn only(names: &[&str]) -> Constraint {
 
 /// Each entry that the column "Capability" of the effect inventory marks
 /// `ambient`. `effect_probe:ambient/0` calls each entry once.
-const AMBIENT: [&str; 99] = [
+const AMBIENT: [&str; 108] = [
     "atomics:add/3",
     "atomics:get/2",
     "atomics:info/1",
@@ -311,6 +311,7 @@ const AMBIENT: [&str; 99] = [
     "erlang:external_size/1",
     "erlang:finish_after_on_load/2",
     "erlang:fun_info/2",
+    "erlang:fun_info_mfa/1",
     "erlang:function_exported/3",
     "erlang:has_prepared_code_on_load/1",
     "erlang:list_to_atom/1",
@@ -359,6 +360,8 @@ const AMBIENT: [&str; 99] = [
     "ets:insert_new/2",
     "ets:internal_delete_all/2",
     "ets:internal_select_delete/2",
+    "ets:last/1",
+    "ets:last_lookup/1",
     "ets:lookup/2",
     "ets:lookup_element/3",
     "ets:lookup_element/4",
@@ -369,10 +372,15 @@ const AMBIENT: [&str; 99] = [
     "ets:take/2",
     "ets:new/2",
     "ets:next/2",
+    "ets:next_lookup/2",
     "ets:prev/2",
+    "ets:prev_lookup/2",
     "ets:select/1",
     "ets:select/2",
     "ets:select/3",
+    "ets:select_reverse/1",
+    "ets:select_reverse/2",
+    "ets:select_reverse/3",
     "ets:safe_fixtable/2",
     "ets:update_element/3",
     "ets:update_element/4",
@@ -388,6 +396,7 @@ const AMBIENT: [&str; 99] = [
     "prim_file:read_info_nif/2",
     "prim_socket:nif_supports/0",
     "prim_socket:nif_supports/1",
+    "re:compile/1",
     "re:compile/2",
     "re:import/1",
 ];
@@ -560,7 +569,7 @@ fn calls_each_ambient_and_later_entry_with_no_capability() {
     // The root process holds no capability, so no policy can permit the
     // calls: each `ambient` and `later` entry has no check.
     let program = program();
-    let expected = "[true,true,false,true,true,true,integer,integer,integer,integer,integer,date_time,unix,nonode@nohost,nonode@nohost,[],[nonode@nohost],1,true,{arity,1},{error,badfile},{error,badarg},false,false,true,effect_probe_ambient_atom,effect_probe_ambient_binary,effect_probe_ambient_binary,effect_probe_ambient_atom,ok,[bm,{1,1}],ac,re_pattern,effect_probe_ambient,true,false,[{key,value}],value,value,true,true,[{key,value}],true,set,true,15,eot,eot,first,first_lookup,[{key,value}],[{key,value}],eot,true,true,0,2,reference,true,atom,2,ok,1,error,ok,error,ok,error,[ok,{ok,0},ok],[eof,ok],[11,<<48,49>>,{ok,8},9,ok,0,<<120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120>>,acquired,ok],none,false,{error,notsup},ok,false,reference,ok,1,ok,48,integer,integer,timestamp,date,time,date_time,date_time,integer,timestamp,integer,integer,{error,enotsup},error,error,error,error,error,error,error,ok,ok,ok,true,true,true,true,9,false,true,true,true,true,true,true,{error,badarg},true,[]]";
+    let expected = "[true,true,false,true,true,true,integer,integer,integer,integer,integer,date_time,unix,nonode@nohost,nonode@nohost,[],[nonode@nohost],1,true,{arity,1},1,{error,badfile},{error,badarg},false,false,true,effect_probe_ambient_atom,effect_probe_ambient_binary,effect_probe_ambient_binary,effect_probe_ambient_atom,ok,[bm,{1,1}],ac,re_pattern,effect_probe_ambient,true,false,[{key,value}],value,value,true,true,[{key,value}],true,set,true,15,eot,eot,first,first_lookup,last,last_lookup,eot,eot,[{key,value}],[{key,value}],eot,true,true,0,2,reference,true,atom,2,ok,1,error,ok,error,ok,error,[ok,{ok,0},ok],[eof,ok],[11,<<48,49>>,{ok,8},9,ok,0,<<120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120>>,acquired,ok],none,false,{error,notsup},ok,false,reference,ok,1,ok,48,integer,integer,timestamp,date,time,date_time,date_time,integer,timestamp,integer,integer,{error,enotsup},error,error,error,error,error,error,error,ok,ok,ok,true,true,true,true,9,false,true,true,true,true,true,true,{error,badarg},true,[]]";
     assert_eq!(run_text(&program, "ambient", &Grants(vec![])), expected);
     assert_eq!(erts_with_stand_in("ambient"), format!("{expected}\n"));
 }

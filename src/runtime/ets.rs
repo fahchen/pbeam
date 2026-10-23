@@ -2,12 +2,14 @@
 //! processes of a run share one store.
 
 pub(super) mod pattern;
+pub(super) mod range;
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::hash::{DefaultHasher, Hasher};
 use std::sync::{Mutex, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
+use crate::error::{BeamError, error};
 use crate::term::atom_hash;
 use crate::term::{AtomTable, LiveBytes, ProcessId, Reference, Term, internal_hash};
 
@@ -267,6 +269,16 @@ pub(super) struct Table {
     /// The number of pseudo-deleted objects, which `object_count` leaves
     /// out.
     deleted_objects: usize,
+    /// The key of each object of an `ordered_set` table, in the ERTS term
+    /// order, as the AVL tree of `erl_db_tree.c` orders them with
+    /// `cmp_key_eq` (`erl_db_tree.c:758-761`). Two keys that compare equal
+    /// (`1` and `1.0`) are one key. The other table types keep it empty.
+    order: Vec<Term>,
+    /// Whether a key of the table has no PBeam order with another key, so
+    /// `order` is not current. The order of two different alias references
+    /// is the only such case (`src/term/order.rs`). A walk then returns a
+    /// runtime error, and a key lookup compares each object.
+    unordered: bool,
 }
 
 /// A key that a process deleted while the table was fixed: its stored
@@ -429,9 +441,10 @@ pub(super) const ITERATIONS_PER_RED: i64 = 8;
 /// (`erl_db.c:769-798`) returns no table.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum Lacking {
-    /// No live table, or no permission: the BIF raises `badarg`
-    /// (`erl_db.c:788-795`).
-    Denied,
+    /// No live table, or no permission: the BIF raises `badarg` with the
+    /// `error_info` cause `id`, `type`, or `access` (`erl_db.c:280-306`,
+    /// `788-795`, `834-836`, `906-908`).
+    Denied(&'static str),
     /// The list insert of another process or a clear held the table busy.
     /// The caller helped with the work, which used `reductions`, and the
     /// BIF traps to run again (`erl_db.c:773-787`).
@@ -535,6 +548,9 @@ impl EtsTables {
                     live.term(term);
                 }
             }
+            for key in &table.order {
+                live.term(key);
+            }
             for walk in table
                 .busy
                 .as_ref()
@@ -629,13 +645,14 @@ impl EtsTables {
         reds: i64,
         operation: Operation,
     ) -> Result<RwLockReadGuard<'_, Table>, Lacking> {
-        let (_, lock) = self.lookup(atoms, id).ok_or(Lacking::Denied)?;
+        let (_, lock) =
+            (self.lookup(atoms, id)).ok_or_else(|| Lacking::Denied(Self::missing(id)))?;
         let table = read(lock);
         if !table.lacks(caller) {
             return table
                 .allows(caller, operation)
                 .then_some(table)
-                .ok_or(Lacking::Denied);
+                .ok_or(Lacking::Denied("access"));
         }
         drop(table);
         // `handle_lacking_permission` takes the write lock for the help
@@ -708,7 +725,8 @@ impl EtsTables {
         caller: ProcessId,
         reds: i64,
     ) -> Result<RwLockWriteGuard<'_, Table>, Lacking> {
-        let (_, lock) = self.lookup(atoms, id).ok_or(Lacking::Denied)?;
+        let (_, lock) =
+            (self.lookup(atoms, id)).ok_or_else(|| Lacking::Denied(Self::missing(id)))?;
         let mut table = write(lock);
         if let Some(reductions) = self.help(atoms, &mut table, caller, reds) {
             return Err(Lacking::Busy { reductions });
@@ -716,7 +734,19 @@ impl EtsTables {
         table
             .allows(caller, Operation::Write)
             .then_some(table)
-            .ok_or(Lacking::Denied)
+            .ok_or(Lacking::Denied("access"))
+    }
+
+    /// Return the `error_info` cause for the term `id` that identifies no live table:
+    /// the cause `id` for an atom and for the reference of a deleted table,
+    /// and the cause `type` for each other term (`tid2tab`,
+    /// `erl_db.c:280-306`; `db_get_table_aux`, `erl_db.c:817-836`).
+    pub(super) fn missing(id: &Term) -> &'static str {
+        match id {
+            Term::Atom(_) => "id",
+            Term::Reference(reference) if reference.is_table_reference() => "id",
+            _ => "type",
+        }
     }
 
     /// Return the table reference of the live table that `id` identifies,
@@ -1319,6 +1349,9 @@ impl Freeing {
             let slot = self.next;
             self.next = self.table.next[slot];
             self.table.objects[slot] = None;
+            // Drop one key of the key order with each object, so the free
+            // of the keys also stays in the budget of the turn.
+            self.table.order.pop();
             freed += 1;
             if self.next == EMPTY {
                 self.bucket += 1;
@@ -1387,6 +1420,8 @@ impl Table {
             select_slot: EMPTY,
             deleted: Vec::new(),
             deleted_objects: 0,
+            order: Vec::new(),
+            unordered: false,
         }
     }
 
@@ -1631,6 +1666,243 @@ impl Table {
     /// ```
     pub(super) fn first_key(&self) -> Option<Term> {
         self.next_live_after(0, self.heads[0])
+    }
+
+    /// Return the key of an `ordered_set` table next to the key `key` in the
+    /// term order: the least key above it when `forward` is true, as
+    /// `db_next_tree` does with `find_next` (`erl_db_tree.c:665-711`,
+    /// `erl_db_tree.c:3167-3224`), else the greatest key below it, as
+    /// `db_prev_tree` does with `find_prev` (`erl_db_tree.c:740-757`,
+    /// `erl_db_tree.c:3225-3282`). The key `key` does not have to be in the
+    /// table. Return `None` at the end of the table.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::OrderedSet);
+    /// table.insert(&atoms, vec![Term::Integer(1)]);
+    /// table.insert(&atoms, vec![Term::Integer(3)]);
+    /// assert_eq!(table.ordered_step(&atoms, &Term::Float(2.0), true), Some(Term::Integer(3)));
+    /// assert_eq!(table.ordered_step(&atoms, &Term::Integer(1), false), None);
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Return a runtime error when the order of a key is not supported.
+    pub(super) fn ordered_step(
+        &self,
+        atoms: &AtomTable,
+        key: &Term,
+        forward: bool,
+    ) -> Result<Option<Term>, BeamError> {
+        let index = match (self.order_search(atoms, key)?, forward) {
+            (Ok(index), true) => index + 1,
+            (Err(index), true) => index,
+            (Ok(index) | Err(index), false) => match index.checked_sub(1) {
+                Some(index) => index,
+                None => return Ok(None),
+            },
+        };
+        Ok(self.order.get(index).cloned())
+    }
+
+    /// Return the least key of an `ordered_set` table when `first` is true,
+    /// as `db_first_tree` does (`erl_db_tree.c:635-663`), else the
+    /// greatest key, as `db_last_tree` does (`erl_db_tree.c:712-738`).
+    /// Return `None` for an empty table.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let table = Table::new(ProcessId(0), Access::Public, 1, TableType::OrderedSet);
+    /// assert_eq!(table.ordered_end(true), None);
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Return a runtime error when the order of a key is not supported.
+    pub(super) fn ordered_end(&self, first: bool) -> Result<Option<Term>, BeamError> {
+        self.check_ordered()?;
+        Ok(if first {
+            self.order.first().cloned()
+        } else {
+            self.order.last().cloned()
+        })
+    }
+
+    /// Return the object of an `ordered_set` table whose key is equal to
+    /// `key` in the arithmetic term order, as `find_node` finds it
+    /// (`erl_db_tree.c:3388-3410`), or `None`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(table.ordered_get(&atoms, &Term::Float(1.0))?, Some(&[Term::Integer(1)][..]));
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Return a runtime error when the order of a key is not supported.
+    pub(super) fn ordered_get(
+        &self,
+        atoms: &AtomTable,
+        key: &Term,
+    ) -> Result<Option<&[Term]>, BeamError> {
+        Ok(match self.order_search(atoms, key)? {
+            Ok(index) => Some(self.ordered_object(atoms, index)),
+            Err(_) => None,
+        })
+    }
+
+    /// Return the objects of an `ordered_set` table in key order, up when
+    /// `forward` is true and else down, from the key next to `after`, or
+    /// from the first or the last key when `after` is `None`, as
+    /// `traverse_forward` and `traverse_backwards` step with `find_next` and
+    /// `find_prev` (`erl_db_tree.c:3659-3762`). The key `after` does not have
+    /// to be in the table.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let objects: Vec<_> = table.ordered_walk(&atoms, None, true)?.collect();
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Return a runtime error when the order of a key is not supported.
+    pub(super) fn ordered_walk<'a>(
+        &'a self,
+        atoms: &'a AtomTable,
+        after: Option<&Term>,
+        forward: bool,
+    ) -> Result<impl Iterator<Item = &'a [Term]> + 'a, BeamError> {
+        self.check_ordered()?;
+        let start = match after {
+            None if forward => 0,
+            None => self.order.len(),
+            Some(key) => match (self.order_search(atoms, key)?, forward) {
+                (Ok(index), true) => index + 1,
+                (Ok(index) | Err(index), _) => index,
+            },
+        };
+        let count = if forward {
+            self.order.len() - start
+        } else {
+            start
+        };
+        Ok((0..count).map(move |step| {
+            let index = if forward {
+                start + step
+            } else {
+                start - 1 - step
+            };
+            self.ordered_object(atoms, index)
+        }))
+    }
+
+    /// Split the keys of an `ordered_set` table where `below` stops to give
+    /// `true`, and return the last key before the split and the first key
+    /// after it, as `find_prev_from_pb_key` and `find_next_from_pb_key`
+    /// search the tree with a partially bound key
+    /// (`erl_db_tree.c:3294-3382`). `below` gives `true` for each key of a
+    /// prefix of the key order.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let (before, after) = table.ordered_split(|key| Ok(key < &limit))?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Return the error of `below`, or a runtime error when the order is not
+    /// current.
+    pub(super) fn ordered_split(
+        &self,
+        mut below: impl FnMut(&Term) -> Result<bool, BeamError>,
+    ) -> Result<(Option<&Term>, Option<&Term>), BeamError> {
+        self.check_ordered()?;
+        let (mut low, mut high) = (0, self.order.len());
+        while low < high {
+            let middle = low + (high - low) / 2;
+            if below(&self.order[middle])? {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        Ok((
+            low.checked_sub(1).map(|index| &self.order[index]),
+            self.order.get(low),
+        ))
+    }
+
+    /// Return the object of the key at the index `index` of the key order.
+    fn ordered_object(&self, atoms: &AtomTable, index: usize) -> &[Term] {
+        let slot = self
+            .key_slot(atoms, &self.order[index])
+            .expect("each key of the order has an object");
+        self.object_of(slot)
+    }
+
+    /// Return the runtime error of a table whose key order is not current.
+    fn check_ordered(&self) -> Result<(), BeamError> {
+        if self.unordered {
+            return Err(error(
+                "unsupported term order of an alias reference in an ordered_set key (see \"ETS tables\" in docs/erts-differences.md)",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Find the key `key` in the key order of an `ordered_set` table with
+    /// the arithmetic term order, so `1` finds `1.0` (`cmp_key_eq`,
+    /// `erl_db_tree.c:758-761`). Return the index of the equal key, or the
+    /// index where the key would go.
+    ///
+    /// # Errors
+    ///
+    /// Return a runtime error when the order is not current or a key has no
+    /// PBeam order: the order of two different alias references is the only
+    /// such comparison (`src/term/order.rs`).
+    fn order_search(
+        &self,
+        atoms: &AtomTable,
+        key: &Term,
+    ) -> Result<Result<usize, usize>, BeamError> {
+        self.check_ordered()?;
+        let (mut low, mut high) = (0, self.order.len());
+        while low < high {
+            let middle = low + (high - low) / 2;
+            match self.order[middle].compare(key, atoms)? {
+                Ordering::Less => low = middle + 1,
+                Ordering::Greater => high = middle,
+                Ordering::Equal => return Ok(Ok(middle)),
+            }
+        }
+        Ok(Err(low))
+    }
+
+    /// Put the key `key` of an `ordered_set` table in the key order, in
+    /// place of an equal key. A key with no order makes the order stale.
+    fn order_put(&mut self, atoms: &AtomTable, key: Term) {
+        match self.order_search(atoms, &key) {
+            Ok(Ok(index)) => self.order[index] = key,
+            Ok(Err(index)) => self.order.insert(index, key),
+            Err(_) => self.unordered = true,
+        }
+    }
+
+    /// Remove the key `key` of an `ordered_set` table from the key order.
+    /// A key with no order makes the order stale.
+    fn order_remove(&mut self, atoms: &AtomTable, key: &Term) {
+        let Ok(found) = self.order_search(atoms, key) else {
+            self.unordered = true;
+            return;
+        };
+        if let Ok(index) = found {
+            self.order.remove(index);
+        }
     }
 
     /// Return the key of the first slot that is not deleted after the slot
@@ -2056,6 +2328,8 @@ impl Table {
     /// chains, so the objects of one segment go in the turn that frees it
     /// (`db_free_table_continue_hash`, `erl_db_hash.c:3140-3149`).
     fn free_segments_objects(&mut self, index: usize) {
+        self.order.clear();
+        self.unordered = false;
         let first = match index {
             0 => 0,
             later => FIRST_SEGMENT_SLOTS + (later - 1) * SEGMENT_SLOTS,
@@ -2136,6 +2410,8 @@ impl Table {
     /// does for a table without a fixation (`erl_db_hash.c:4036-4037`).
     fn reset_cleared(&mut self) {
         self.objects.clear();
+        self.order.clear();
+        self.unordered = false;
         self.free.clear();
         self.older.clear();
         self.index = KeyIndex::default();
@@ -2154,6 +2430,11 @@ impl Table {
     /// below 0. A table without a fixation removes the objects as a delete
     /// does.
     pub(super) fn take_key(&mut self, atoms: &AtomTable, key: &Term) {
+        // An ordered_set finds the key with `==` (`erl_db_tree.c:758-761`).
+        if self.table_type == TableType::OrderedSet {
+            self.delete(atoms, key);
+            return;
+        }
         let hash = stored_hash(atoms, key);
         let Some(index_slot) = self.position(hash, key) else {
             return;
@@ -2351,6 +2632,9 @@ impl Table {
             let hash = stored_hash(atoms, key);
             (self.key_slot(atoms, key), hash)
         };
+        if found.is_none() && self.table_type == TableType::OrderedSet {
+            self.order_put(atoms, self.key(&object).clone());
+        }
         if found.is_none() && self.is_fixed() {
             let key = self.key(&object);
             if let Some(records) = self.retained.get(&hash)
@@ -2373,6 +2657,9 @@ impl Table {
             (Some(slot), TableType::Set | TableType::OrderedSet) => {
                 let old = stored_hash(atoms, self.key(self.object_of(slot)));
                 self.rekey(slot, old, hash);
+                if self.table_type == TableType::OrderedSet {
+                    self.order_put(atoms, self.key(&object).clone());
+                }
                 self.objects[slot] = Some(object);
                 self.writes += 1;
                 return;
@@ -3110,6 +3397,7 @@ impl Table {
                 .map(|retained| retained.slots.capacity() * std::mem::size_of::<usize>())
                 .sum::<usize>()
             + self.deleted.capacity() * std::mem::size_of::<bool>()
+            + self.order.capacity() * std::mem::size_of::<Term>()
             + self.busy.as_ref().map_or(0, |busy| {
                 busy.objects.capacity() * std::mem::size_of::<Vec<Term>>()
                     + busy
@@ -3182,10 +3470,19 @@ impl Table {
         if self.table_type != TableType::OrderedSet {
             return None;
         }
-        self.objects.iter().enumerate().find_map(|(slot, object)| {
-            let object = object.as_ref()?;
-            matches!(self.key(object).compare(key, atoms), Ok(Ordering::Equal)).then_some(slot)
-        })
+        match self.order_search(atoms, key) {
+            Ok(Ok(index)) => {
+                let stored = &self.order[index];
+                self.position(stored_hash(atoms, stored), stored)
+            }
+            Ok(Err(_)) => None,
+            // A key with no order compares with each object, and a
+            // comparison error is not equal.
+            Err(_) => self.objects.iter().enumerate().find_map(|(slot, object)| {
+                let object = object.as_ref()?;
+                matches!(self.key(object).compare(key, atoms), Ok(Ordering::Equal)).then_some(slot)
+            }),
+        }
     }
 
     fn position(&self, hash: u64, key: &Term) -> Option<usize> {
@@ -3278,10 +3575,9 @@ impl Table {
         };
         let hash = stored_hash(atoms, self.key(self.object_of(newest)));
         self.writes += 1;
-        // An ordered_set has no supported traversal, and its compaction
-        // moves the last object into the freed slot, so a fixed ordered_set
-        // deletes as an unfixed one does (row "ETS tables" of
-        // docs/erts-differences.md).
+        // A fixed ordered_set deletes as an unfixed one does: the tree of
+        // ERTS keeps no pseudo-deleted object, and a walk steps from a key
+        // that is not in the table (`erl_db_tree.c:3167-3282`).
         if self.is_fixed() && self.table_type != TableType::OrderedSet {
             let node = self
                 .chain_node(hash, key)
@@ -3301,6 +3597,7 @@ impl Table {
             slot = std::mem::replace(&mut self.older[slot], EMPTY);
         }
         if self.table_type == TableType::OrderedSet {
+            self.order_remove(atoms, key);
             self.compact(atoms, newest);
         }
         for _ in 0..RESIZE_STEPS {

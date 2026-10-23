@@ -8,6 +8,7 @@
          own/2, write/1, select/0, match_object/0, iterate/0,
          update_element/0, info_items/0, delete_all/0, select_reductions/0, first/0,
          private_owner/1, ordered_set/0, ordered_set_reductions/0, take/0,
+         walk/0, walk_alias/1,
          safe_fixtable/0, fixtable/0, fixtable_chain/0, fixtable_successor/0,
          fixtable_resize/0, fixtable_fix_count/0, fixtable_insert_after_delete/0,
          fixtable_clear/0, fixtable_delete_object/0, fixtable_same_bucket/0,
@@ -24,7 +25,8 @@
          fixtable_bag_restore_behind_node/0, fixtable_delete_table/0,
          fixtable_clear_large/0, fixtable_clear_help/0, clear_task/2,
          fixtable_take/0, fixtable_take_clear/0, fixtable_insert_new/0,
-         fixtable_insert_new_list/0]).
+         fixtable_insert_new_list/0, ordered_select/0, select_delete_worker/2, ordered_select_large/0,
+         select_reverse/0]).
 
 %% ets:new/2 return values and badarg cases (erl_db.c:2555-2840).
 new() ->
@@ -610,8 +612,6 @@ unsupported(Case) ->
             ets:delete(T);
         info_size -> ets:info(ets:new(ets_probe, []), size);
         info_binary -> ets:info(ets:new(ets_probe, []), binary);
-        info_reference -> ets:info(make_ref(), type);
-        info_all_reference -> ets:info(make_ref());
         info_stats -> ets:info(ets:new(ets_probe, []), stats);
         info_data -> ets:info(ets:new(ets_probe, []), data);
         select_unsupported ->
@@ -622,26 +622,6 @@ unsupported(Case) ->
             T = ets:new(ets_probe, []),
             true = ets:insert(T, {a, 1}),
             ets:internal_select_delete(T, [{{'$1', '$2'}, [], [{round, 1.0}]}]);
-        ordered_first ->
-            T = ets:new(ets_probe, [ordered_set]),
-            true = ets:insert(T, {a, 1}),
-            ets:first(T);
-        ordered_first_lookup ->
-            T = ets:new(ets_probe, [ordered_set]),
-            true = ets:insert(T, {a, 1}),
-            ets:first_lookup(T);
-        ordered_next ->
-            T = ets:new(ets_probe, [ordered_set]),
-            true = ets:insert(T, {a, 1}),
-            ets:next(T, a);
-        ordered_select ->
-            T = ets:new(ets_probe, [ordered_set]),
-            true = ets:insert(T, {a, 1}),
-            ets:select(T, [{{'$1', '$2'}, [], ['$1']}]);
-        ordered_select_delete ->
-            T = ets:new(ets_probe, [ordered_set]),
-            true = ets:insert(T, {a, 1}),
-            ets:internal_select_delete(T, [{{'$1', '$2'}, [], [true]}]);
         heir -> ets:new(ets_probe, [{heir, element(1, start([]))}]);
         heir_data -> ets:new(ets_probe, [{heir, element(1, start([])), data}]);
         keypos -> ets:insert(ets:new(ets_probe, [{keypos, id(1 bsl 32)}]), {a});
@@ -1516,3 +1496,276 @@ first() ->
      ets:first(Dup), ets:first_lookup(Dup),
      ets:first(Empty), ets:first_lookup(Empty),
      Invalid, catch_error(fun() -> ets:first_lookup(not_a_table) end)].
+
+%% The eight walk BIFs, ets:foldl/3, and ets:foldr/3 on each table type.
+%% An ordered_set walks its keys in the term order, with 1 and 1.0 as one
+%% key, and a step from a key that is not in the table gives the next key.
+%% A hash table gives last as first and prev as next.
+walk() ->
+    O = ets:new(ets_probe, [ordered_set]),
+    E = ets:first(O),
+    true = ets:insert(O, [{1, a}, {2.5, b}, {x, c}, {{1}, d}, {1.0, e}, {-3, f}]),
+    true = ets:insert(O, {"s", g}),
+    true = ets:delete(O, x),
+    Ordered = [E, ets:last(O), ets:first_lookup(O), ets:last_lookup(O),
+               ets:first(O), ets:last(O), ets:next(O, 1), ets:next(O, 1.0),
+               ets:next(O, 2), ets:prev(O, 2.5), ets:prev(O, -3),
+               ets:next(O, "s"), ets:next(O, zzz), ets:prev(O, x),
+               ets:next_lookup(O, 1), ets:prev_lookup(O, {9}),
+               ets:prev_lookup(O, -9), ets:lookup(O, 1), ets:take(O, 1),
+               ets:first(O), ets:info(O, size),
+               ets:foldl(fun({K, _}, A) -> [K | A] end, [], O),
+               ets:foldr(fun({K, _}, A) -> [K | A] end, [], O)],
+    Empty = ets:new(ets_probe, [ordered_set]),
+    End = [walk_error(B, Tab, '$end_of_table')
+           || Tab <- [Empty, O], B <- [next, prev, next_lookup, prev_lookup]],
+    Hash = [hash_walk(Type) || Type <- [set, bag, duplicate_bag]],
+    [Ordered, End, Hash].
+
+hash_walk(Type) ->
+    T = ets:new(ets_probe, [Type]),
+    E = [ets:first(T), ets:last(T), ets:first_lookup(T), ets:last_lookup(T)],
+    true = ets:insert(T, [{1, a}, {2, b}, {1, c}, {k, d}]),
+    F = ets:first(T),
+    L = ets:last(T),
+    [E, F, L, ets:last_lookup(T), ets:next(T, F), ets:prev(T, F),
+     ets:next_lookup(T, F), ets:prev_lookup(T, F),
+     [walk_error(B, T) || B <- [next, prev, next_lookup, prev_lookup]],
+     lists:sort(ets:foldl(fun(O, A) -> [O | A] end, [], T)),
+     lists:sort(ets:foldr(fun(O, A) -> [O | A] end, [], T))].
+
+walk_error(F, T) ->
+    walk_error(F, T, 9).
+
+walk_error(F, T, K) ->
+    try ets:F(T, K) catch error:R -> {error, R} end.
+
+%% Two different alias references have no PBeam order, so an ordered_set
+%% key that holds one gives a runtime error on a walk.
+walk_alias(Case) ->
+    O = ets:new(ets_probe, [ordered_set]),
+    A = erlang:alias([]),
+    B = erlang:alias([]),
+    true = ets:insert(O, {A, 1}),
+    case Case of
+        step ->
+            ets:next(O, B);
+        unordered ->
+            true = ets:insert(O, [{B, 2}, {1.0, 3}]),
+            [ets:lookup(O, 1), ets:delete(O, A), ets:lookup(O, B)];
+        unordered_first ->
+            true = ets:insert(O, {B, 2}),
+            ets:first(O);
+        cleared ->
+            true = ets:insert(O, {B, 2}),
+            true = ets:delete_all_objects(O),
+            true = ets:insert(O, [{2, b}, {1, a}]),
+            [ets:first(O), ets:last(O)]
+    end.
+
+%% ets:select/1,2,3, ets:select_reverse/1,2,3, ets:match/2,3,
+%% ets:match_object/2, ets:tab2list/1, and ets:select_delete/2 walk an
+%% `ordered_set` table in key order (erl_db_tree.c:1263-2215). A bound or
+%% partially bound key limits the walk to a key range (analyze_pattern,
+%% erl_db_tree.c:2756-2875).
+ordered_select() ->
+    Keys = [3, 1.5, b, a, {1, x}, {1, y}, {2, z}, {1, x, w}, [1, 2], [1 | c],
+            "ab", <<"c">>, {[1, 2], q}, 7],
+    T = ets:new(ets_probe, [ordered_set]),
+    true = ets:insert(T, [{K, v} || K <- Keys]),
+    Specs = [[{'$1', [], ['$1']}],
+             [{{'$1', v}, [], ['$1']}],
+             [{{{1, '_'}, '$1'}, [], ['$_']}],
+             [{{{1, '$2'}, '_'}, [{'=/=', '$2', x}], ['$2']}],
+             [{{a, '_'}, [], ['$_']}],
+             [{{3.0, '_'}, [], ['$_']}],
+             [{{a, '_'}, [], [a]}, {{b, '_'}, [], [b]}],
+             [{{b, '_'}, [], [b]}, {{{2, '_'}, '_'}, [], [two]}],
+             [{{[1 | '_'], '_'}, [], ['$_']}],
+             [{{{'$1', q}, '_'}, [], ['$1']}],
+             [{{{[1 | '$1'], '_'}, '_'}, [], ['$1']}],
+             [{foo, [], [x]}],
+             [{{nokey, '_'}, [], [x]}],
+             [{{{0, '_'}, '_'}, [], [x]}],
+             [{{{1, x, '_'}, '_'}, [], ['$_']}, {{1.5, '_'}, [], ['$_']}],
+             []],
+    [{ets:select(T, S), ets:select_reverse(T, S),
+      [chain(ets:select(T, S, N), fun ets:select/1) || N <- [1, 2, 5, 100]],
+      [chain(ets:select_reverse(T, S, N), fun ets:select_reverse/1) || N <- [1, 3]]}
+     || S <- Specs]
+    ++ [ets:match(T, {'$1', '_'}), ets:match(T, {{1, '$1'}, '$2'}),
+        chain(ets:match(T, {'$1', '_'}, 4), fun ets:select/1),
+        ets:match_object(T, {{'_', '_'}, '_'}), ets:tab2list(T),
+        ets:select(T, [{{'$1', '_'}, [{is_atom, '$1'}], ['$1']}], 1000)]
+    ++ [select_delete_count(Keys, S)
+        || S <- [[{{{1, '_'}, '_'}, [], [true]}], [{{a, '_'}, [], [true]}],
+                 [{{'$1', '_'}, [{is_number, '$1'}], [true]}], [{foo, [], [true]}], [{{nokey, '_'}, [], [true]}],
+                 [{{a, '_'}, [], [false]}]]]
+    ++ [named_select(), forged_select(), select_delete_yield()].
+
+%% The continuation of a named ordered_set table holds the name
+%% (erl_db_tree.c:1937, 1960).
+named_select() ->
+    N = ets_probe_named,
+    N = ets:new(N, [ordered_set, named_table]),
+    true = ets:insert(N, [{K} || K <- seq(3)]),
+    {First, C} = ets:select(N, [{'_', [], ['$_']}], 1),
+    {Next, C2} = ets:select(C),
+    true = ets:insert(N, {0}),
+    {Last, _} = ets:select(C2),
+    true = ets:delete(N),
+    {First, element(1, C), Next, element(1, C2), Last}.
+
+%% A continuation with a known program and a bad Got or Matches raises
+%% badarg (erl_db_tree.c:1287-1302).
+forged_select() ->
+    T = ets:new(ets_probe, [ordered_set]),
+    true = ets:insert(T, [{K} || K <- seq(3)]),
+    {_, C} = ets:select(T, [{'_', [], ['$_']}], 1),
+    Try = fun(X) -> try ets:select(X) catch Class:Reason -> {Class, Reason} end end,
+    [Try(setelement(8, C, foo)), Try(setelement(6, C, foo))].
+
+%% A table deleted while a select delete traps raises badarg in
+%% ets:select_delete_trap/1 (erl_db.c:3387-3427, erl_db_tree.c:2198-2210).
+%% The probe drops the stack trace: PBeam gives `[]` after a trap (backlog
+%% "Give the stack trace of a BIF error after a trap").
+select_delete_yield() ->
+    T = ets:new(ets_probe, [ordered_set, public]),
+    true = ets:insert(T, [{K} || K <- seq(20000)]),
+    Self = self(),
+    P = spawn(?MODULE, select_delete_worker, [T, Self]),
+    P ! go,
+    Wait = fun W() ->
+                   case ets:info(T, size) of
+                       20000 -> erlang:yield(), W();
+                       Size -> Size > 0
+                   end
+           end,
+    Current = Wait(),
+    true = ets:delete(T),
+    receive {done, R} -> {Current, R} end.
+
+select_delete_worker(T, Parent) ->
+    receive go -> ok end,
+    Parent ! {done, try ets:select_delete(T, [{{'$1'}, [{'>', '$1', 0}], [true]}])
+                    catch Class:Reason -> {Class, Reason}
+                    end}.
+
+select_delete_count(Keys, Spec) ->
+    T = ets:new(ets_probe, [ordered_set]),
+    true = ets:insert(T, [{K, v} || K <- Keys]),
+    Count = ets:select_delete(T, Spec),
+    {Count, ets:tab2list(T)}.
+
+%% Follow a select with a limit to its end, and show each continuation
+%% without its table and program references.
+chain('$end_of_table', _) -> ['$end_of_table'];
+chain({Matches, '$end_of_table'}, _) -> [{Matches, '$end_of_table'}];
+chain({Matches, C}, Next) -> [{Matches, cont(C)} | chain(Next(C), Next)].
+
+cont(C) when tuple_size(C) =:= 8 ->
+    {element(2, C), element(3, C), element(4, C), element(6, C), element(7, C), element(8, C)};
+cont(C) -> {element(2, C), element(3, C), element(5, C), element(6, C)}.
+
+%% The traps and reductions of a walk of an `ordered_set` table with more
+%% than 1000 objects (erl_db_tree.c:1309-1417, 1537-1561, 1199-1245).
+ordered_select_large() ->
+    T = ets:new(ets_probe, [ordered_set]),
+    true = ets:insert(T, [{{I div 1000, I}, I} || I <- seq(4500)]),
+    Call = fun(F) ->
+                   Before = reductions(),
+                   R = F(),
+                   Reductions = reductions() - Before,
+                   {Reductions, summary(R)}
+           end,
+    All = [{'_', [], ['$_']}],
+    Range = [{{{2, '_'}, '_'}, [], ['$_']}],
+    Odd = [{{'_', '$1'}, [{'=:=', {'rem', '$1', 2}, 1}], ['$1']}],
+    None = [{{'_', '$1'}, [{'<', '$1', 0}], ['$1']}],
+    %% A walk that builds a large result also collects garbage on ERTS, which
+    %% costs reductions that PBeam does not charge (row "Garbage collection
+    %% reductions"), so these calls show only their result.
+    Result = fun(F) -> summary(F()) end,
+    [Result(fun() -> ets:select(T, All) end),
+     Call(fun() -> ets:select_reverse(T, All) end),
+     Result(fun() -> ets:select(T, Range) end),
+     Call(fun() -> ets:select_reverse(T, Range) end),
+     Call(fun() -> ets:select(T, Odd) end),
+     Result(fun() -> ets:select(T, All, 1500) end),
+     Call(fun() -> ets:select(T, All, 999) end),
+     Result(fun() -> ets:select(T, All, 1000) end),
+     Call(fun() -> ets:select(T, None) end),
+     Call(fun() -> ets:select(T, None, 10) end),
+     Call(fun() -> ets:select_reverse(T, None) end),
+     Call(fun() -> ets:select_reverse(T, Range, 1200) end),
+     Call(fun() -> ets:select(T, Odd, 2000) end),
+     Call(fun() -> ets:select(T, [{{{3, 3500}, '_'}, [], ['$_']}]) end),
+     Call(fun() -> ets:select(T, [{{{3, 3500}, '_'}, [], ['$_']}], 1) end),
+     Result(fun() -> ets:select(T, All, 5000) end),
+     Result(fun() -> chain_summary(ets:select(T, Range, 600)) end),
+     Result(fun() -> chain_summary(ets:select_reverse(T, All, 2000)) end),
+     Call(fun() -> ets:match(T, {{1, '$1'}, '_'}) end),
+     Call(fun() -> ets:select_delete(T, [{{{1, '_'}, '$1'}, [{'<', '$1', 1500}], [true]}]) end),
+     Call(fun() -> ets:select_delete(T, [{{'_', '$1'}, [{'>', '$1', 4000}], [true]}]) end),
+     Call(fun() -> ets:select_delete(T, [{{{0, 5}, '_'}, [], [true]}]) end),
+     Call(fun() -> ets:select_delete(T, [{{{3, '_'}, '$1'}, [{'<', '$1', 0}], [true]}]) end),
+     Call(fun() -> ets:info(T, size) end),
+     Result(fun() -> U = ets:new(ets_probe, [ordered_set]),
+                     true = ets:insert(U, [{I} || I <- seq(41000)]),
+                     element(1, ets:select(U, [{'_', [], ['$_']}], 50000))
+            end)].
+
+summary(L) when is_list(L) -> {length(L), erlang:phash2(L)};
+summary({L, C}) when is_list(L) -> {length(L), erlang:phash2(L), cont_summary(C)};
+summary(X) -> X.
+
+cont_summary('$end_of_table') -> '$end_of_table';
+cont_summary(C) -> cont(setelement(6, C, length(element(6, C)))).
+
+chain_summary('$end_of_table') -> [];
+chain_summary({L, '$end_of_table'}) -> [length(L)];
+chain_summary({L, C}) -> [length(L) | chain_summary(ets:select(C))].
+
+%% ets:select_reverse/1,2,3 on a hash table give the ets:select/1,2,3
+%% result (erl_db_hash.c:2308-2318).
+select_reverse() ->
+    [begin
+         T = ets:new(ets_probe, [Type]),
+         true = ets:insert(T, [{K, V} || K <- [a, b, c, d], V <- [1, 2]]),
+         S = [{{'$1', '$2'}, [], [{{'$2', '$1'}}]}],
+         {Type, ets:select_reverse(T, S) =:= ets:select(T, S),
+          element(1, ets:select_reverse(T, S, 3)),
+          element(1, ets:select_reverse(element(2, ets:select_reverse(T, S, 3)))),
+          ets:select_reverse('$end_of_table')}
+     end || Type <- [set, bag, duplicate_bag, ordered_set]]
+    ++ [caught(F) || F <- [fun() -> ets:select_reverse(foo, []) end,
+                           fun() -> ets:select_reverse(foo, [], 1) end,
+                           fun() -> ets:select_reverse(ets:new(ets_probe, [ordered_set]), [], 0) end,
+                           fun() -> ets:select_reverse({}) end,
+                           fun() -> ets:select_reverse(x) end,
+                           fun() -> ets:select(forged(fun(R) -> {k, [], 1, R, [], 0, 0} end)) end,
+                           fun() -> ets:select(forged(fun(R) -> {k, [], x, R, [], 0, 0} end)) end,
+                           fun() -> ets:select(forged(fun(R) -> {k, [], 1, R, x, 0, 0} end)) end,
+                           fun() -> ets:select(forged(fun(_) -> {k} end)) end,
+                           fun() -> ets:select({ets:new(ets_probe, []), k}) end,
+                           fun select_delete_gone/0]].
+
+caught(F) ->
+    try F() catch Class:Reason -> {Class, Reason} end.
+
+%% A continuation of an `ordered_set` table whose fields are not valid
+%% raises badarg (erl_db_tree.c:1287-1302).
+forged(Fields) ->
+    T = ets:new(ets_probe, [ordered_set]),
+    true = ets:insert(T, {k}),
+    list_to_tuple([T | tuple_to_list(Fields(make_ref()))]).
+
+%% A process that deletes the table while ets:select_delete/2 traps makes
+%% the next turn raise badarg (erl_db.c:3387-3427).
+select_delete_gone() ->
+    T = ets:new(ets_probe, [ordered_set, public]),
+    true = ets:insert(T, [{I} || I <- seq(20000)]),
+    spawn(ets, delete, [T]),
+    try ets:select_delete(T, [{{'$1'}, [{'<', '$1', 0}], [true]}])
+    catch error:badarg -> badarg
+    end.

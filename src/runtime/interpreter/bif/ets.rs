@@ -3,10 +3,12 @@
 use super::BifResult::Value;
 use super::*;
 use crate::runtime::ets::pattern::{MatchSpec, SpecError};
-use crate::runtime::ets::{Access, Busy, ITERATIONS_PER_RED, Lacking, Table, TableType};
+use crate::runtime::ets::{Access, Busy, EtsTables, ITERATIONS_PER_RED, Lacking, Table, TableType};
 use crate::term::Reference;
 use num_bigint::BigInt;
 use std::sync::Arc;
+
+mod tree;
 
 /// The fewest and the most locks that the hidden option
 /// `{write_concurrency, {debug_hash_fixed_number_of_locks, N}}` accepts
@@ -77,8 +79,9 @@ fn retry(
     function: &'static str,
     arguments: Vec<Term>,
 ) -> BifResult {
-    let Lacking::Busy { reductions } = lacking else {
-        return BifResult::badarg();
+    let reductions = match lacking {
+        Lacking::Busy { reductions } => reductions,
+        Lacking::Denied(cause) => return denied(cause),
     };
     context
         .scheduler
@@ -88,6 +91,16 @@ fn retry(
         module: "ets",
         function,
         arguments,
+    }
+}
+
+/// Return the `error:badarg` exception with the `error_info` cause `cause`,
+/// as the ETS BIFs raise it with `BADARG | EXF_HAS_EXT_INFO` and
+/// `p->fvalue = Cause` (`erl_db.c:53-63`; `beam_common.c:993-1002`).
+fn denied(cause: &'static str) -> BifResult {
+    BifResult::ErrorWithCause {
+        reason: Term::static_atom("badarg"),
+        cause: Term::static_atom(cause),
     }
 }
 
@@ -247,7 +260,7 @@ pub(super) fn new(
         return Ok(BifResult::badarg());
     }
     let owner = context.scheduler.current_process_mut().id;
-    let table = context.scheduler.make_ref()?;
+    let table = context.scheduler.make_ref()?.table_reference();
     let mut made = Table::new(owner, access, keypos, table_type);
     made.set_name(context.scheduler.atoms.name_of(name));
     let name = named.then_some(name);
@@ -282,7 +295,7 @@ pub(super) fn new(
     // (`erl_db.c:1000-1047`) checks the name after `make_btid`
     // (`erl_db.c:2811-2831`).
     if name_text.is_some_and(|name| ets.name_in_use(name)) {
-        return Ok(BifResult::badarg());
+        return Ok(denied("already_exists"));
     }
     if let Some(heir) = heir
         && heir != owner
@@ -381,7 +394,7 @@ fn insert_objects(
         let store = Arc::clone(&context.scheduler.ets);
         let ets = store.shared();
         let Some((id, found)) = ets.find(&context.scheduler.atoms, table) else {
-            return Ok(BifResult::badarg());
+            return Ok(denied(EtsTables::missing(table)));
         };
         let (keypos, bag) = (found.keypos(), found.table_type() == TableType::Bag);
         drop(found);
@@ -391,6 +404,7 @@ fn insert_objects(
             bag: bag.then(Term::nil),
             check: Check::Rest(objects.clone()),
             new: if new { New::Unlocked } else { New::No },
+            refused: None,
         };
         return insert_list(context, id, objects, keypos, state);
     }
@@ -509,7 +523,7 @@ fn insert_objects(
 /// process.fcalls = 10;
 /// let objects = Term::list_from(vec![Term::tuple(vec![test_atom("k")]); 8]);
 /// // 8 units of the check and 16 units of the insert: 3 reductions.
-/// let state = ListState { done: 0, bag: None, check: Check::Rest(objects.clone()), new: New::No };
+/// let state = ListState { done: 0, bag: None, check: Check::Rest(objects.clone()), new: New::No, refused: None };
 /// assert!(matches!(insert_list(&mut context, id, &objects, 1, state)?, BifResult::Value(_)));
 /// assert_eq!(context.scheduler.current_process_mut().fcalls, 7);
 /// ```
@@ -530,6 +544,7 @@ pub(super) fn insert_list(
         mut bag,
         mut check,
         mut new,
+        mut refused,
     } = state;
     let table = Term::Reference(id);
     let inserting = |bag: &Option<Term>| bag.as_ref().is_some_and(|steps| !steps.is_nil());
@@ -564,7 +579,9 @@ pub(super) fn insert_list(
         }
         drop(ets);
         if gone {
-            return Ok(BifResult::badarg());
+            // The table went away: ERTS raises with the cause `id` of the
+            // deleted table (`erl_db.c:2232-2247`).
+            return Ok(denied("id"));
         }
     }
     let process = context.scheduler.current_process_mut();
@@ -597,11 +614,15 @@ pub(super) fn insert_list(
                         .bif_reductions_signed();
                     let ets = context.scheduler.ets.shared();
                     let taken = ets.write(&context.scheduler.atoms, &table, caller, reds);
-                    if let Err(Lacking::Busy { reductions }) = taken {
-                        units.left -= reductions * ITERATIONS_PER_RED;
-                        break 'work None;
+                    match taken {
+                        Err(Lacking::Busy { reductions }) => {
+                            units.left -= reductions * ITERATIONS_PER_RED;
+                            break 'work None;
+                        }
+                        // The denial keeps its cause (`erl_db.c:2040-2048`).
+                        Err(Lacking::Denied(cause)) => break 'work Some(denied(cause)),
+                        Ok(_) => break 'work Some(BifResult::badarg()),
                     }
-                    break 'work Some(BifResult::badarg());
                 }
                 Some(true) => (count, check) = (done, Check::Done(done)),
             }
@@ -629,7 +650,7 @@ pub(super) fn insert_list(
             let ets = context.scheduler.ets.shared();
             let mut table = match ets.write(&context.scheduler.atoms, &table, caller, reds) {
                 Ok(table) => table,
-                Err(Lacking::Denied) => break 'work Some(BifResult::badarg()),
+                Err(Lacking::Denied(cause)) => break 'work Some(denied(cause)),
                 Err(Lacking::Busy { reductions }) => {
                     units.left -= reductions * ITERATIONS_PER_RED;
                     break 'work None;
@@ -701,7 +722,10 @@ pub(super) fn insert_list(
                     }
                     took = true;
                 }
-                Err(Lacking::Denied) => done = 4 * count,
+                Err(Lacking::Denied(cause)) => {
+                    done = 4 * count;
+                    refused = Some(cause);
+                }
             }
         }
         if took || global {
@@ -720,7 +744,11 @@ pub(super) fn insert_list(
         if !units.run(&mut done, 5 * count) {
             break 'work None;
         }
-        Some(BifResult::badarg())
+        // The call keeps the cause of the refusal across the yields of the
+        // free (`erl_db.c:2076-2088`).
+        Some(denied(
+            refused.expect("only a refused insert frees its copies"),
+        ))
     };
     let process = context.scheduler.current_process_mut();
     process.bump_reductions(((budget - units.left) / ITERATIONS_PER_RED) as i32);
@@ -730,7 +758,12 @@ pub(super) fn insert_list(
             objects.clone(),
             Term::Integer(done as i64),
             Term::Integer(i64::from(keypos)),
-            bag.unwrap_or_else(|| Term::static_atom("false")),
+            // A refused insert keeps no `bag` steps, and the slot keeps the
+            // cause of the refusal.
+            match refused {
+                Some(cause) => Term::static_atom(cause),
+                None => bag.unwrap_or_else(|| Term::static_atom("false")),
+            },
             check.into_term(),
         ];
         let function = match new.into_term() {
@@ -759,6 +792,9 @@ pub(super) struct ListState {
     pub(super) check: Check,
     /// The `ets:insert_new/2` state.
     pub(super) new: New,
+    /// The `error_info` cause of the table that refused the insert, which
+    /// the call raises after it frees its copies (`erl_db.c:2076-2088`).
+    pub(super) refused: Option<&'static str>,
 }
 
 /// The `ets:insert_new/2` state of a list insert ([`insert_list`]).
@@ -1028,30 +1064,6 @@ fn check_keypos(tuples: &[&[Term]], keypos: i32, bif: &str) -> Result<(), BeamEr
         // ponytail: ERTS aborts here; see "ETS tables" in docs/erts-differences.md.
         return Err(error(format!(
             "unsupported ets:{bif} in a table with key position 0"
-        )));
-    }
-    Ok(())
-}
-
-/// Return a runtime error for an operation whose result depends on the key
-/// order of an `ordered_set` table. PBeam keeps the hash structure of the
-/// table, so it cannot give the ERTS key order; see "ETS tables" in
-/// `docs/erts-differences.md`.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// let table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
-/// assert!(reject_ordered_set(&table, "ets:next/2").is_ok());
-/// ```
-///
-/// # Errors
-///
-/// Return the runtime error for an `ordered_set` table.
-fn reject_ordered_set(table: &Table, bif: &str) -> Result<(), BeamError> {
-    if table.table_type() == TableType::OrderedSet {
-        return Err(error(format!(
-            "unsupported {bif} on an ordered_set table (see \"ETS tables\" in docs/erts-differences.md)"
         )));
     }
     Ok(())
@@ -1481,10 +1493,6 @@ pub(super) fn delete_trap(context: &mut BifContext<'_>) -> Result<BifResult, Bea
 /// # Errors
 ///
 /// Return a runtime error for the items `binary`, `data`, and `stats`.
-/// Also return a runtime error for a reference that is not a live table:
-/// ERTS gives `undefined` for the reference of a deleted table and raises
-/// `badarg` for another reference, and PBeam keeps no record of a deleted
-/// table.
 pub(super) fn info(
     context: &mut BifContext<'_>,
     table: &Term,
@@ -1516,16 +1524,10 @@ pub(super) fn info(
                 vec![table.clone(), item.clone()],
             ));
         }
-        Err(Lacking::Denied) => {
-            return match table {
-                Term::Atom(_) => Ok(Value(Term::static_atom("undefined"))),
-                // ponytail: no record of a deleted table; see "ETS tables" in docs/erts-differences.md.
-                Term::Reference(_) => Err(error(
-                    "unsupported ets:info/2 of a reference that is not a live table",
-                )),
-                _ => Ok(BifResult::badarg()),
-            };
-        }
+        // A table that no longer exists gives `undefined`; another term
+        // raises with the cause `type` (`erl_db.c:4434-4441`, `4544-4551`).
+        Err(Lacking::Denied("id")) => return Ok(Value(Term::static_atom("undefined"))),
+        Err(Lacking::Denied(cause)) => return Ok(denied(cause)),
     };
     let id = (ets.id(atoms, table)).expect("the caller found the table");
     let value = match item {
@@ -1661,7 +1663,7 @@ pub(super) fn match_objects(
     pattern: &Term,
     limit: Option<&Term>,
 ) -> Result<BifResult, BeamError> {
-    select_objects(context, table, &match_specification(pattern), limit)
+    select_objects(context, table, &match_specification(pattern), limit, false)
 }
 
 /// Run `ets:match_object(Table, Pattern)`, as `ets_match_object_2`
@@ -1683,7 +1685,13 @@ pub(super) fn match_object(
     table: &Term,
     pattern: &Term,
 ) -> Result<BifResult, BeamError> {
-    select_objects(context, table, &match_object_specification(pattern), None)
+    select_objects(
+        context,
+        table,
+        &match_object_specification(pattern),
+        None,
+        false,
+    )
 }
 
 /// Run `ets:select(Table, MatchSpec)` or, with `Some(Limit)`,
@@ -1708,8 +1716,9 @@ pub(super) fn select(
     table: &Term,
     spec: &Term,
     limit: Option<&Term>,
+    reverse: bool,
 ) -> Result<BifResult, BeamError> {
-    select_objects(context, table, spec, limit)
+    select_objects(context, table, spec, limit, reverse)
 }
 
 /// Run [`select`] over the match specification `spec`.
@@ -1718,6 +1727,7 @@ fn select_objects(
     table: &Term,
     spec: &Term,
     limit: Option<&Term>,
+    reverse: bool,
 ) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
     let chunk = match limit.map(Term::small_integer) {
@@ -1734,8 +1744,9 @@ fn select_objects(
     let store = Arc::clone(&context.scheduler.ets);
     let ets = store.shared();
     let Some(id) = ets.id(atoms, table) else {
-        return Ok(BifResult::badarg());
+        return Ok(denied(EtsTables::missing(table)));
     };
+    let name = table;
     let table = match ets.read(atoms, &Term::Reference(id), caller, reds) {
         Ok(table) => table,
         Err(lacking) => {
@@ -1743,10 +1754,16 @@ fn select_objects(
             return Ok(retry(context, lacking, "select_trap", arguments));
         }
     };
-    reject_ordered_set(&table, "ets:select/2,3")?;
     let Some(compiled) = compile_spec(atoms, spec)? else {
         return Ok(BifResult::badarg());
     };
+    if table.table_type() == TableType::OrderedSet {
+        let chunk = chunk as i64;
+        let turn = tree::first_turn(atoms, &table, &compiled, chunk, reverse)?;
+        drop(table);
+        drop(ets);
+        return tree::finish(context, (name, id), &compiled, chunk, reverse, turn);
+    }
     // A key position below 1 compares as a large unsigned number with the
     // arity of the pattern (`db_getkey`, `erl_db_util.c:3940-3960`).
     let keypos = usize::try_from(table.keypos())
@@ -1928,6 +1945,7 @@ pub(super) fn match_trap(
 pub(super) fn select_continue(
     context: &mut BifContext<'_>,
     continuation: &Term,
+    bif: &'static str,
 ) -> Result<BifResult, BeamError> {
     if matches!(continuation, Term::Atom(atom) if atom.is_static("$end_of_table")) {
         return Ok(Value(Term::static_atom("$end_of_table")));
@@ -1935,17 +1953,9 @@ pub(super) fn select_continue(
     let Term::Tuple(elements) = continuation else {
         return Ok(BifResult::badarg());
     };
-    let [table, next, chunk, program, rest, size] = elements.as_ref() else {
+    let Some(table) = elements.first() else {
         return Ok(BifResult::badarg());
     };
-    let (Term::Integer(next), Term::Integer(chunk), Term::Reference(program), Term::Integer(size)) =
-        (next, chunk, program, size)
-    else {
-        return Ok(BifResult::badarg());
-    };
-    if *chunk < 0 || *size < 0 || !(rest.is_nil() || rest.cons_cell().is_some()) {
-        return Ok(BifResult::badarg());
-    }
     let caller = context.scheduler.current_process_mut().id;
     let reds = context
         .scheduler
@@ -1959,19 +1969,39 @@ pub(super) fn select_continue(
     let store = Arc::clone(&context.scheduler.ets);
     let ets = store.shared();
     let Some(id) = ets.id(atoms, table) else {
-        return Ok(BifResult::badarg());
+        return Ok(denied(EtsTables::missing(table)));
     };
     let found = match ets.read(atoms, &Term::Reference(id), caller, reds) {
         Ok(table) => table,
         Err(lacking) => {
-            return Ok(retry(
-                context,
-                lacking,
-                "select",
-                vec![continuation.clone()],
-            ));
+            return Ok(retry(context, lacking, bif, vec![continuation.clone()]));
         }
     };
+    if found.table_type() == TableType::OrderedSet {
+        let Some(state) = tree::Continuation::read(elements) else {
+            return Ok(BifResult::badarg());
+        };
+        let Some(compiled) = ets.program(state.program) else {
+            return Ok(BifResult::badarg());
+        };
+        let compiled = compiled.clone();
+        let (chunk, reverse) = (state.chunk, state.reverse);
+        let turn = tree::next_turn(atoms, &found, &compiled, state)?;
+        drop(found);
+        drop(ets);
+        return tree::finish(context, (table, id), &compiled, chunk, reverse, turn);
+    }
+    let [_, next, chunk, program, rest, size] = elements.as_ref() else {
+        return Ok(BifResult::badarg());
+    };
+    let (Term::Integer(next), Term::Integer(chunk), Term::Reference(program), Term::Integer(size)) =
+        (next, chunk, program, size)
+    else {
+        return Ok(BifResult::badarg());
+    };
+    if *chunk < 0 || *size < 0 || !(rest.is_nil() || rest.cons_cell().is_some()) {
+        return Ok(BifResult::badarg());
+    }
     let writes = found.writes();
     let bucket = found.bucket_count();
     let Some(compiled) = ets.program(*program) else {
@@ -2017,6 +2047,58 @@ pub(super) fn select_continue(
         end.ok_or(bucket),
         iterations,
     )
+}
+
+/// Run the trap export `ets:select_delete_trap/1` of a select delete on an
+/// `ordered_set` table with the continuation
+/// `{Table, LastKey, LeastKey, Program, Count}`, as
+/// `ets_select_delete_trap_1` does (`erl_db.c:3387-3427`): a table that the
+/// caller cannot write any more raises `badarg`.
+///
+/// # Errors
+///
+/// Return the errors of [`tree::select_delete_next`].
+pub(super) fn select_delete_trap(
+    context: &mut BifContext<'_>,
+    arguments: &[Term],
+    (table, last, least, program, count): (&Term, &Term, &Term, Reference, i64),
+) -> Result<BifResult, BeamError> {
+    let caller = context.scheduler.current_process_mut().id;
+    let reds = context
+        .scheduler
+        .current_process_mut()
+        .bif_reductions_signed();
+    let atoms = &context.scheduler.atoms;
+    let store = Arc::clone(&context.scheduler.ets);
+    let ets = store.shared();
+    let mut taken = match ets.write(atoms, table, caller, reds) {
+        Ok(taken) => taken,
+        Err(lacking) => {
+            let arguments = arguments.to_vec();
+            return Ok(retry(context, lacking, "select_delete_trap", arguments));
+        }
+    };
+    let id = ets.id(atoms, table).expect("the table exists");
+    let compiled = ets
+        .program(program)
+        .cloned()
+        .expect("a trapped select delete keeps its program");
+    let (last, least) = (last.clone(), least.clone());
+    let turn = tree::select_delete_next(atoms, &mut taken, &compiled, last, least, count)?;
+    drop(taken);
+    drop(ets);
+    tree::delete_finish(context, (table, id), &compiled, Some(program), turn)
+}
+
+/// Run the trap export `ets:reverse/3` of a select with a limit on an
+/// `ordered_set` table ([`tree::reverse`]).
+pub(super) fn reverse(
+    context: &mut BifContext<'_>,
+    list: &Term,
+    result: &Term,
+    rest: &Term,
+) -> BifResult {
+    tree::reverse(context, list, result, rest)
 }
 
 /// Return the specification term of a compiled match specification. PBeam
@@ -2318,89 +2400,37 @@ pub(super) fn safe_fixtable(
     Ok(Value(Term::static_atom("true")))
 }
 
-pub(super) fn next(
-    context: &mut BifContext<'_>,
-    table: &Term,
-    key: &Term,
-) -> Result<BifResult, BeamError> {
-    let caller = context.scheduler.current_process_mut().id;
-    let reds = context
-        .scheduler
-        .current_process_mut()
-        .bif_reductions_signed();
-    let atoms = &context.scheduler.atoms;
-    let store = Arc::clone(&context.scheduler.ets);
-    let ets = store.shared();
-    let table = match ets.read(atoms, table, caller, reds) {
-        Ok(table) => table,
-        Err(lacking) => {
-            return Ok(retry(
-                context,
-                lacking,
-                "next",
-                vec![table.clone(), key.clone()],
-            ));
-        }
-    };
-    reject_ordered_set(&table, "ets:next/2")?;
-    match table.next_key(atoms, key) {
-        Some(Some(next)) => Ok(Value(next)),
-        Some(None) => Ok(Value(Term::static_atom("$end_of_table"))),
-        None => Ok(BifResult::badarg()),
-    }
-}
-
-/// Run `ets:first/1`, as `ets_first_1` (`erl_db.c:1170-1188`) and
-/// `db_first_hash_common` (`erl_db_hash.c:1117-1140`) do: return the key of
-/// the first live object in bucket order, or `'$end_of_table'` for an empty
-/// table. A table that does not exist or that the caller cannot read raises
-/// `badarg` (`erl_db.c:769-912`). An `ordered_set` gives the clear runtime
-/// error of the unsupported type, as `ets:next/2` does.
+/// Run one of the eight walk BIFs of a table: `ets:first/1`,
+/// `ets:last/1`, `ets:next/2`, `ets:prev/2`, and their `_lookup` forms, as
+/// `ets_first_1`, `ets_last_1`, `ets_next_2`, `ets_prev_2`, and the lookup
+/// BIFs do (`erl_db.c:1170-1350`). `args` holds the table and, for a step,
+/// the key. `backward` selects `last` or `prev`, and `lookup` the form that
+/// returns `{Key, Objects}`.
+///
+/// - A table that does not exist or that the caller cannot read raises
+///   `badarg` (`erl_db.c:769-912`).
+/// - An `ordered_set` walks its keys in the term order (`db_first_tree`,
+///   `db_next_tree`, `db_last_tree`, `db_prev_tree`,
+///   `erl_db_tree.c:635-757`). A step from a key that is not in the
+///   table gives the next key in the order.
+/// - A hash table walks its buckets (`db_first_hash_common`,
+///   `erl_db_hash.c:1117-1140`, `db_next_hash`). `last` acts as `first`
+///   and `prev` as `next` (`erl_db_hash.c:853-856`). A step from a key that is not in the table
+///   raises `badarg`.
+/// - The end of the table gives `'$end_of_table'`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = first(&mut context, &table)?;
-/// assert!(matches!(result, BifResult::Value(value) if value == test_atom("k")));
-/// ```
-pub(super) fn first(context: &mut BifContext<'_>, table: &Term) -> Result<BifResult, BeamError> {
-    let caller = context.scheduler.current_process_mut().id;
-    let reds = context
-        .scheduler
-        .current_process_mut()
-        .bif_reductions_signed();
-    let atoms = &context.scheduler.atoms;
-    let store = Arc::clone(&context.scheduler.ets);
-    let ets = store.shared();
-    let table = match ets.read(atoms, table, caller, reds) {
-        Ok(table) => table,
-        Err(lacking) => {
-            return Ok(retry(context, lacking, "first", vec![table.clone()]));
-        }
-    };
-    reject_ordered_set(&table, "ets:first/1")?;
-    match table.first_key() {
-        Some(key) => Ok(Value(key)),
-        None => Ok(Value(Term::static_atom("$end_of_table"))),
-    }
-}
-
-/// Run `ets:first_lookup/1`, as `ets_first_lookup_1` (`erl_db.c:1193-1211`)
-/// and `db_first_lookup_hash` (`erl_db_hash.c:1142-1145`) do: return
-/// `{Key, Objects}` for the first live object in bucket order, where
-/// `Objects` is the list of the live objects with that key, or
-/// `'$end_of_table'` for an empty table. The rest of the behavior is the
-/// same as for `ets:first/1`.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// let result = first_lookup(&mut context, &table)?;
+/// let result = walk(&mut context, "last", vec![table], true, false)?;
 /// assert!(matches!(result, BifResult::Value(value) if value == Term::static_atom("$end_of_table")));
 /// ```
-pub(super) fn first_lookup(
+pub(super) fn walk(
     context: &mut BifContext<'_>,
-    table: &Term,
+    name: &'static str,
+    args: Vec<Term>,
+    backward: bool,
+    lookup: bool,
 ) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
     let reds = context
@@ -2410,16 +2440,30 @@ pub(super) fn first_lookup(
     let atoms = &context.scheduler.atoms;
     let store = Arc::clone(&context.scheduler.ets);
     let ets = store.shared();
-    let table = match ets.read(atoms, table, caller, reds) {
+    let table = match ets.read(atoms, &args[0], caller, reds) {
         Ok(table) => table,
-        Err(lacking) => {
-            return Ok(retry(context, lacking, "first_lookup", vec![table.clone()]));
-        }
+        Err(lacking) => return Ok(retry(context, lacking, name, args)),
     };
-    reject_ordered_set(&table, "ets:first_lookup/1")?;
-    let Some(key) = table.first_key() else {
+    let found = match (table.table_type(), args.get(1)) {
+        (TableType::OrderedSet, None) => table.ordered_end(!backward)?,
+        // A tree table rejects the end marker as a key
+        // (`erl_db_tree.c:654-655`, `729-730`).
+        (TableType::OrderedSet, Some(key)) if *key == Term::static_atom("$end_of_table") => {
+            return Ok(BifResult::badarg());
+        }
+        (TableType::OrderedSet, Some(key)) => table.ordered_step(atoms, key, !backward)?,
+        (_, None) => table.first_key(),
+        (_, Some(key)) => match table.next_key(atoms, key) {
+            Some(next) => next,
+            None => return Ok(BifResult::badarg()),
+        },
+    };
+    let Some(key) = found else {
         return Ok(Value(Term::static_atom("$end_of_table")));
     };
+    if !lookup {
+        return Ok(Value(key));
+    }
     let objects = table
         .objects(atoms, &key)
         .into_iter()
@@ -2463,18 +2507,6 @@ pub(super) fn update_element(
     let atoms = &context.scheduler.atoms;
     let store = Arc::clone(&context.scheduler.ets);
     let ets = store.shared();
-    let Some(found) = ets.find(atoms, table) else {
-        return Ok(BifResult::badarg());
-    };
-    let keypos = found.1.keypos();
-    drop(found);
-    // ERTS compares the unsigned arity with the C `int` key position, so a
-    // negative key position rejects each default (`erl_db.c:1483-1484`).
-    let default_elements = match default {
-        Some(Term::Tuple(elements)) if elements.len() as u32 >= keypos as u32 => Some(elements),
-        Some(_) => return Ok(BifResult::badarg()),
-        None => None,
-    };
     let mut table = match ets.write(atoms, table, caller, reds) {
         Ok(table) => table,
         Err(lacking) => {
@@ -2485,6 +2517,18 @@ pub(super) fn update_element(
             return Ok(retry(context, lacking, "update_element", arguments));
         }
     };
+    let keypos = table.keypos();
+    // ERTS takes the table before it checks the default, and compares the
+    // unsigned arity with the C `int` key position, so a negative key
+    // position rejects each default (`erl_db.c:1481-1488`).
+    let default_elements = match default {
+        Some(Term::Tuple(elements)) if elements.len() as u32 >= keypos as u32 => Some(elements),
+        Some(_) => return Ok(denied("default")),
+        None => None,
+    };
+    // A table of another type sets the cause `table_type`, but the
+    // `DB_ERROR_BADPARAM` return raises `badarg` with no cause
+    // (`erl_db.c:1381-1385`, `1454-1457`).
     if !matches!(table.table_type(), TableType::Set | TableType::OrderedSet) {
         return Ok(BifResult::badarg());
     }
@@ -2500,16 +2544,11 @@ pub(super) fn update_element(
             Some(elements) => elements.len(),
         },
     };
-    let updates = match update_specs(spec, keypos) {
-        Some(updates) => updates,
-        None => return Ok(BifResult::badarg()),
+    let updates = match update_specs(spec, keypos, arity) {
+        Ok(updates) => updates,
+        Err(Some(cause)) => return Ok(denied(cause)),
+        Err(None) => return Ok(BifResult::badarg()),
     };
-    if updates
-        .iter()
-        .any(|(position, _)| *position == 0 || *position > arity)
-    {
-        return Ok(BifResult::badarg());
-    }
     if existing.is_none() {
         let elements = default_elements.expect("the missing key has a default");
         let mut object = elements.as_ref().to_vec();
@@ -2526,32 +2565,45 @@ pub(super) fn update_element(
     Ok(Value(Term::static_atom("true")))
 }
 
-/// Return the positions and values of an `update_element` specification, or
-/// `None` when the term is not a `{Pos, Value}` or a proper list of them
-/// with a small position. A position equal to the key position is
-/// `badarg`; the caller compares it with the key position.
-fn update_specs(spec: &Term, keypos: i32) -> Option<Vec<(usize, Term)>> {
+/// Return the positions and values of an `update_element` specification
+/// for an object of arity `arity`, as the loop of `do_update_element`
+/// (`erl_db.c:1401-1428`) checks it, one element after another. An element
+/// that is not a `{Pos, Value}` with a small position, or an improper tail,
+/// gives `Err(None)`: `badarg` with no cause. A position equal to the key
+/// position gives the cause `keypos`, and a position out of range gives the
+/// cause `position`.
+fn update_specs(
+    spec: &Term,
+    keypos: i32,
+    arity: usize,
+) -> Result<Vec<(usize, Term)>, Option<&'static str>> {
     let single;
-    let list = if matches!(spec, Term::Tuple(_)) {
+    let mut list = if matches!(spec, Term::Tuple(_)) {
         single = Term::list_from(vec![spec.clone()]);
         &single
     } else {
         spec
     };
     let mut updates = Vec::new();
-    for item in list.proper_list()? {
+    while !list.is_nil() {
+        let (item, tail) = list.cons_cell().ok_or(None)?;
         let Term::Tuple(elements) = item else {
-            return None;
+            return Err(None);
         };
-        let [Term::Integer(position), value] = elements.as_ref() else {
-            return None;
+        let [position, value] = elements.as_ref() else {
+            return Err(None);
         };
-        if *position == i64::from(keypos) || *position < 1 {
-            return None;
+        let position = position.small_integer().ok_or(None)?;
+        if position == i64::from(keypos) {
+            return Err(Some("keypos"));
         }
-        updates.push((usize::try_from(*position).ok()?, value.clone()));
+        let position = (usize::try_from(position).ok())
+            .filter(|position| (1..=arity).contains(position))
+            .ok_or(Some("position"))?;
+        updates.push((position, value.clone()));
+        list = tail;
     }
-    Some(updates)
+    Ok(updates)
 }
 
 /// Run `ets:info(Table)`, as `ets_info_1` (`erl_db.c:4399-4517`) does:
@@ -2570,8 +2622,7 @@ fn update_specs(spec: &Term, keypos: i32) -> Option<Vec<(usize, Term)>> {
 ///
 /// # Errors
 ///
-/// Return a runtime error for the items `binary`, `data`, and `stats`, and
-/// for a reference that is not a live table.
+/// Return a runtime error for the items `binary`, `data`, and `stats`.
 pub(super) fn info_all(context: &mut BifContext<'_>, table: &Term) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
     let reds = context
@@ -2586,15 +2637,10 @@ pub(super) fn info_all(context: &mut BifContext<'_>, table: &Term) -> Result<Bif
         Err(lacking @ Lacking::Busy { .. }) => {
             return Ok(retry(context, lacking, "info", vec![table.clone()]));
         }
-        Err(Lacking::Denied) => {
-            return match table {
-                Term::Atom(_) => Ok(Value(Term::static_atom("undefined"))),
-                Term::Reference(_) => Err(error(
-                    "unsupported ets:info/1 of a reference that is not a live table",
-                )),
-                _ => Ok(BifResult::badarg()),
-            };
-        }
+        // A table that no longer exists gives `undefined`; another term
+        // raises with the cause `type` (`erl_db.c:4434-4441`, `4544-4551`).
+        Err(Lacking::Denied("id")) => return Ok(Value(Term::static_atom("undefined"))),
+        Err(Lacking::Denied(cause)) => return Ok(denied(cause)),
     };
     let id = (ets.id(atoms, table)).expect("the caller found the table");
     let named = ets.named(id);
@@ -2679,7 +2725,7 @@ pub(super) fn internal_delete_all(
     let store = Arc::clone(&context.scheduler.ets);
     let ets = store.shared();
     let Some(id) = ets.id(atoms, table) else {
-        return Ok(BifResult::badarg());
+        return Ok(denied(EtsTables::missing(table)));
     };
     let mut found = match ets.write(atoms, table, caller, left) {
         Ok(table) => table,
@@ -2764,9 +2810,8 @@ pub(super) fn internal_select_delete(
     let store = Arc::clone(&context.scheduler.ets);
     let ets = store.shared();
     let Some(found) = ets.find(atoms, table) else {
-        return Ok(BifResult::badarg());
+        return Ok(denied(EtsTables::missing(table)));
     };
-    reject_ordered_set(&found.1, "ets:select_delete/2")?;
     drop(found);
     let mut taken = match ets.write(atoms, table, caller, reds) {
         Ok(taken) => taken,
@@ -2787,6 +2832,13 @@ pub(super) fn internal_select_delete(
         .ok()
         .filter(|&keypos| keypos > 0)
         .unwrap_or(usize::MAX);
+    if taken.table_type() == TableType::OrderedSet {
+        let id = ets.id(atoms, table).expect("the table exists");
+        let turn = tree::select_delete(atoms, &mut taken, &compiled)?;
+        drop(taken);
+        drop(ets);
+        return tree::delete_finish(context, (table, id), &compiled, None, turn);
+    }
     if compiled.matches_nothing(keypos) {
         return Ok(Value(Term::Integer(0)));
     }

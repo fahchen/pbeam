@@ -11,6 +11,7 @@ use crate::runtime::{BifId, resolve_bif};
 use crate::term::{Atom, AtomTable, Lambda, Term, flatmap_order};
 use std::cmp::Ordering;
 use std::num::NonZeroU64;
+use std::sync::Arc;
 
 const CODE_HEADER_SIZE: usize = WORD_SIZE * 5;
 const CODE_HEADER_SUB_SIZE: u32 = 16;
@@ -559,7 +560,7 @@ pub(crate) enum Instruction {
     /// Erlang: `make_pair(T) -> fun(X) -> {T, X} end.` compiles to
     /// `{make_fun3,{f,112},0,0,{x,0},{list,[{x,0}]}}`.
     MakeFun {
-        lambda: Box<Lambda>,
+        lambda: Arc<Lambda>,
         free: Vec<Operand>,
         destination: Operand,
     },
@@ -1204,7 +1205,7 @@ pub(crate) enum Instruction {
     /// `[0x77, 0x35, 0x57, 0x03, 0x10, 0x20, 0x13, 0x80, 0x00, 0x13]`: fail
     /// label 3, the typed register `x0`, live count 2, size `x1`, unit 8,
     /// flags 0, and the destination `x1`. The size `all` decodes as
-    /// `Instruction::Unsupported`.
+    /// `Instruction::BinaryMatch`, as the ERTS loader loads it.
     ///
     /// Erlang: `<<Head:N/binary, Tail/binary>>` compiles to
     /// `{test,bs_get_binary2,{f,3},2,[{tr,{x,0},...},{x,1},8,{field_flags,[]}],{x,1}}`
@@ -1405,6 +1406,11 @@ pub(crate) enum Instruction {
         fail_label: u32,
         context: Operand,
         commands: Vec<BinaryMatchCommand>,
+        /// `true` when a `test_heap` follows, as the ERTS loader fuses the
+        /// two into `i_bs_match_test_heap` (JIT jit/arm/ops.tab:962-963).
+        /// The fused heap need changes how the JIT groups the reads, and
+        /// thus the position after a failed `=:=` command.
+        test_heap: bool,
     },
     /// Compares the `bits` bits after the position of the match context in
     /// `context` with the first `bits` bits of `text`, moves the position
@@ -1690,9 +1696,8 @@ pub(crate) enum TestKind {
     /// `bitstr_probe:kind/1` fails to label 5 unless `x0` is a bitstring.
     /// Erlang: `kind(Term) when is_bitstring(Term) -> Term;` compiles to
     /// `{test,is_bitstr,{f,5},[{x,0}]}`, as the consolidated
-    /// `String.Chars.impl_for/1` of Elixir does. PBeam has no bitstring
-    /// whose size is not a multiple of 8, so the test passes only for a
-    /// binary.
+    /// `String.Chars.impl_for/1` of Elixir does. The test passes for each
+    /// bitstring, also one whose size is not a multiple of 8.
     Bitstring,
     Map,
     /// `is_function`, opcode 77. Example: `[0x4D, 0x0D, 0x65, 0x57, 0x03,
@@ -1790,7 +1795,7 @@ pub(crate) enum BinarySegment {
     /// `{atom,string},0,8,nil,{string,<<"count: ">>},{integer,7}` when atom
     /// 3 is `string` and `StrT` starts with `count: `.
     String(Vec<u8>),
-    /// A `binary` segment of size `all` and unit 1, 2, 4, or 8: the binary
+    /// A `binary` segment of size `all`: the bitstring
     /// in `source`. `segment` is the segment number of the compiler, which
     /// the ERTS `error_info` gives. The size in bits of the binary must be a
     /// multiple of `unit` (`erts_bs_put_binary_all`, erl_bits.c:1321-1324).
@@ -1801,6 +1806,18 @@ pub(crate) enum BinarySegment {
         segment: u64,
         unit: u64,
         source: Operand,
+    },
+    /// A `binary` segment with a size: the first `size` times `unit` bits
+    /// of the bitstring in `source`. The size pass checks `size` as the size
+    /// of an `integer` segment, and the construct pass fails for a term that
+    /// is not a bitstring or is shorter (`erts_bs_put_binary`,
+    /// erl_bits.c:1285-1308; jit/arm/instr_bs.cpp:1639-1689, 2048-2071).
+    /// Example: `{atom,binary},1,8,nil,{x,0},{x,1}` is `<<A:N/binary>>`.
+    Binary {
+        segment: u64,
+        unit: u64,
+        source: Operand,
+        size: Operand,
     },
     /// An `append` segment of size `all` as the first segment: the binary
     /// in `source` is the start of the result. The compiler writes it for
@@ -1991,7 +2008,7 @@ pub(super) fn parse_code(
     atoms: &[Atom],
     imports: &[(String, String, u32)],
     literals: &[Option<Term>],
-    lambdas: &[(Lambda, usize)],
+    lambdas: &[(Arc<Lambda>, usize)],
     strings: &[u8],
     lines: &mut LineTable,
 ) -> Result<(Vec<Instruction>, u32, Option<u32>), BeamError> {
@@ -2279,10 +2296,23 @@ pub(super) fn parse_code(
                 let _flags = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
                 let destination = read_register(data, &mut cursor)?;
                 // ERTS loads the size `all` as `i_bs_get_binary_all2` (JIT
-                // jit/arm/ops.tab:999-1000). The pinned compiler makes it
-                // only with `no_ssa_opt`.
+                // jit/arm/ops.tab:999-1000), which runs the `bs_match`
+                // commands `{ensure_at_least,0,Unit}` and `get_tail`
+                // (`emit_i_bs_get_binary_all2`, jit/arm/instr_bs.cpp:
+                // 386-405). The pinned compiler makes it only with
+                // `no_ssa_opt`.
                 if matches!(&size, Operand::Value(Term::Atom(all)) if all.is_static("all")) {
-                    Instruction::Unsupported(opcode)
+                    let unit = NonZeroU64::new(unit)
+                        .ok_or_else(|| error("BEAM bs_get_binary2 has unit 0"))?;
+                    Instruction::BinaryMatch {
+                        fail_label,
+                        context,
+                        commands: vec![
+                            BinaryMatchCommand::EnsureAtLeast { size: 0, unit },
+                            BinaryMatchCommand::GetTail { destination },
+                        ],
+                        test_heap: false,
+                    }
                 } else {
                     Instruction::BinaryGetBinary {
                         fail_label,
@@ -2405,6 +2435,7 @@ pub(super) fn parse_code(
                     fail_label,
                     context,
                     commands,
+                    test_heap: false,
                 }
             }
             OPCODE_BS_MATCH_STRING => {
@@ -2645,7 +2676,7 @@ pub(super) fn parse_code(
                     .map(|_| read_move_operand(data, &mut cursor, atoms, literals))
                     .collect::<Result<_, _>>()?;
                 Instruction::MakeFun {
-                    lambda: Box::new(lambda.clone()),
+                    lambda: Arc::clone(lambda),
                     free,
                     destination,
                 }
@@ -2739,6 +2770,14 @@ pub(super) fn parse_code(
             }
             OPCODE_TEST_HEAP | OPCODE_INIT_YREGS => {
                 skip_unsupported_instruction(opcode, data, &mut cursor)?;
+                // ERTS fuses `bs_match` and the `test_heap` after it
+                // (JIT jit/arm/ops.tab:962-963).
+                if opcode == OPCODE_TEST_HEAP
+                    && let Some(Instruction::BinaryMatch { test_heap, .. }) =
+                        instructions.last_mut()
+                {
+                    *test_heap = true;
+                }
                 Instruction::Noop
             }
             OPCODE_PUT_LIST => Instruction::PutList {
@@ -3184,9 +3223,7 @@ fn read_binary_segments(
             let size = read_move_operand(data, cursor, atoms, literals)?;
             Ok(match &size {
                 Operand::Value(Term::Atom(size))
-                    if kind.is_static("binary")
-                        && matches!(unit, 1 | 2 | 4 | 8)
-                        && size.is_static("all") =>
+                    if kind.is_static("binary") && size.is_static("all") =>
                 {
                     BinarySegment::BinaryAll {
                         segment,
@@ -3203,6 +3240,12 @@ fn read_binary_segments(
                         source,
                     }
                 }
+                _ if kind.is_static("binary") => BinarySegment::Binary {
+                    segment,
+                    unit,
+                    source,
+                    size,
+                },
                 _ if kind.is_static("integer") => BinarySegment::Integer {
                     segment,
                     unit,

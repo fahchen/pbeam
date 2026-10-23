@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use super::{
     capability::SecurityContext,
     dirty::{Claim, Output},
+    heap_flags::{HeapFlags, max_heap_size_map},
     mailbox::Mailbox,
     scheduler::AliasMode,
     timer::TimerKey,
@@ -84,6 +85,19 @@ pub(super) enum Start {
         /// The function of the start MFA.
         function: Atom,
     },
+}
+
+impl From<Frame> for Start {
+    /// Return the start at the entry frame `frame`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.start(frame, vec![], Vec::new())?;
+    /// ```
+    fn from(frame: Frame) -> Self {
+        Start::Entry(frame)
+    }
 }
 
 /// One Y register of a frame.
@@ -347,6 +361,11 @@ pub(super) struct ProcessState {
     /// `erl_process.h:1656`). PBeam has no distribution, so the flag has no
     /// other effect.
     pub(super) async_dist: bool,
+    /// The heap flags of the process. A new process takes the node
+    /// defaults, as ERTS copies `H_MIN_SIZE` and the other defaults into
+    /// the spawn options (`erl_process.c:12242-12247`, `12568-12572`). PBeam has no garbage
+    /// collector, so the flags only change what the BIFs report.
+    pub(super) heap_flags: HeapFlags,
     /// The node monitors of the process (`ERTS_MON_TYPE_NODES`): the count
     /// of each by the bits of its options (`erts_monitor_nodes`,
     /// `dist.c:6731-6845`). PBeam has no distribution, so a node monitor
@@ -401,6 +420,10 @@ pub(super) struct ProcessState {
     /// (`jit/arm/instr_bif.cpp:525-536`, `676-701`). `BeamProgram::run` runs
     /// it first.
     pub(super) pending_bif: Option<PendingBif>,
+    /// The BIF call of a [`PendingBif`] that the next BIF trap creates:
+    /// the BIF frame of an error after the trap. `bif_error` sets it when
+    /// a BIF call traps, and the trap moves it into the [`PendingBif`].
+    pub(super) trap_origin: Option<BifCall>,
     /// A BIF trap whose target had no loaded export at the trap. `run`
     /// resolves the target when the process runs again, after the switch
     /// out of the trap.
@@ -499,6 +522,26 @@ pub(super) struct PendingBif {
     /// True when the BIF call was a tail call through the export: its
     /// value then returns from the frame with no reduction.
     pub(super) tail: bool,
+    /// The BIF call that trapped, or `None` when the call did not give
+    /// the BIF frame of its errors.
+    pub(super) origin: Option<BifCall>,
+}
+
+/// A BIF call that trapped: the BIF frame of an error after the trap.
+/// ERTS keeps the export of the BIF in `c_p->current`, and a trapped BIF
+/// error puts the original arguments back in the registers
+/// (`ERTS_BIF_ERROR_TRAPPED1`, `bif.h:242-249`), so the stack trace starts
+/// with the frame of the original call.
+#[derive(Debug)]
+pub(super) struct BifCall {
+    /// Module of the BIF, for example `erlang`.
+    pub(super) module: String,
+    /// Name of the BIF, for example `list_to_binary`.
+    pub(super) name: String,
+    /// Arguments of the original call.
+    pub(super) arguments: Vec<Term>,
+    /// The `skip` of `bif_error` at the call.
+    pub(super) skip: usize,
 }
 
 /// A BIF trap that waits for the next turn of the process: the trap target
@@ -557,8 +600,12 @@ impl Frame {
 /// for a process that is not the caller. A request to a process of another
 /// scheduler carries only these items, because its owner reads the item as
 /// the target process.
-pub(super) const OTHER_PROCESS_INFO_ITEMS: [&str; 6] = [
+pub(super) const OTHER_PROCESS_INFO_ITEMS: [&str; 10] = [
     "registered_name",
+    "min_heap_size",
+    "min_bin_vheap_size",
+    "fullsweep_after",
+    "max_heap_size",
     "message_queue_len",
     "group_leader",
     "priority",
@@ -619,6 +666,7 @@ impl ProcessState {
             trap_exit: false,
             off_heap_message_queue: false,
             async_dist: false,
+            heap_flags: HeapFlags::default(),
             node_monitors: BTreeMap::new(),
             priority: Priority::Normal,
             links: MonitorLinkTree::default(),
@@ -631,6 +679,7 @@ impl ProcessState {
             fcalls: 0,
             reductions: 0,
             pending_bif: None,
+            trap_origin: None,
             pending_trap: None,
             dirty_call: None,
             length_trap: None,
@@ -772,6 +821,9 @@ impl ProcessState {
     /// - `priority` gives `{priority, Level}`, the priority that
     ///   `process_flag/2` or the spawn option set
     ///   (`erts_get_process_priority`, `erl_process.c:9443-9453`).
+    /// - `min_heap_size`, `min_bin_vheap_size`, `fullsweep_after`, and
+    ///   `max_heap_size` give the heap flags of the process
+    ///   (`erl_bif_info.c:1990-2020`).
     /// - `reductions` gives `{reductions, N}`: the reduction total and
     ///   `current`, the reductions of the current turn when the process runs
     ///   (`erl_bif_info.c:2114-2121`).
@@ -820,6 +872,14 @@ impl ProcessState {
                     .collect();
                 Term::list_from(links.into_iter().rev())
             }
+            ("min_heap_size", _) => Term::Integer(self.heap_flags.min_heap_size),
+            ("min_bin_vheap_size", _) => Term::Integer(self.heap_flags.min_bin_vheap_size),
+            ("fullsweep_after", _) => Term::Integer(i64::from(self.heap_flags.fullsweep_after)),
+            ("max_heap_size", _) => max_heap_size_map(
+                atoms,
+                self.heap_flags.max_heap_size,
+                self.heap_flags.max_heap_flags,
+            ),
             ("reductions", _) => Term::Integer(
                 i64::try_from(self.reductions + current)
                     .map_err(|_| error("the reduction total exceeds the PBeam integer range"))?,
@@ -941,12 +1001,16 @@ impl ProcessState {
     ///
     /// ```rust,ignore
     /// let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame), vec![]);
-    /// process.pending_bif = Some(PendingBif { module: "lists", function: "member", arguments: vec![Term::Integer(1)], tail: false });
+    /// process.pending_bif = Some(PendingBif { module: "lists", function: "member", arguments: vec![Term::Integer(1)], tail: false, origin: None });
     /// assert!(process.pending_bif_bytes() > 0);
     /// ```
     pub(super) fn pending_bif_bytes(&self) -> usize {
         self.pending_bif.as_ref().map_or(0, |pending| {
-            pending.arguments.capacity() * std::mem::size_of::<Term>()
+            let origin = pending
+                .origin
+                .as_ref()
+                .map_or(0, |call| call.arguments.capacity());
+            (pending.arguments.capacity() + origin) * std::mem::size_of::<Term>()
         })
     }
 
@@ -1009,7 +1073,8 @@ impl ProcessState {
             }
         }
         if let Some(pending) = &self.pending_bif {
-            for argument in &pending.arguments {
+            let origin = pending.origin.iter().flat_map(|call| &call.arguments);
+            for argument in pending.arguments.iter().chain(origin) {
                 live.term(argument);
             }
         }

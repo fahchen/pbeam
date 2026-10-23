@@ -230,7 +230,7 @@ fn prints_each_free_variable_of_a_fun() {
     assert_eq!(
         format!("{term:?}"),
         "Fun(Local(Lambda { module: Atom { index: 971 }, index: 0, \
-         old_index: 0, old_unique: 7, label: 53, arity: 1 }), [Integer(1), Integer(2)])"
+         old_index: 0, old_unique: 7, uniq: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], label: 53, arity: 1 }), [Integer(1), Integer(2)])"
     );
 }
 
@@ -249,7 +249,7 @@ fn matches_the_derived_debug_text_and_compares_every_variant() {
     assert_eq!(
         debug_term(&term, &test_atom_table()),
         "Tuple([List([Atom(\"ok\"), Binary([1, 2]), Integer(-3), Float(-0.0), Pid(ProcessId(4)), \
-         Reference(Reference(5)), MatchContext(MatchState { bytes: [6], position: 0, position_known: true })]), \
+         Reference(Reference(5)), MatchContext(MatchState { bytes: [6], position: 0 })]), \
          List([])])"
     );
     for (index, leaf) in leaves.iter().enumerate() {

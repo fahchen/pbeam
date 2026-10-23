@@ -2,7 +2,7 @@ use super::{
     atom_at, atom_chunk_name, parse_atoms, parse_exports, parse_lambdas, parse_literals,
     read_literal, read_u32,
 };
-use crate::term::{AtomTable, Fun, Lambda, Map, Term, debug_term};
+use crate::term::{AtomTable, Binary, Fun, Lambda, Map, Term, debug_term};
 
 /// Return a `FunT` payload with a count and entries. Each entry gives
 /// its function atom index, total arity, label, index, number of free
@@ -130,6 +130,38 @@ fn reads_uncompressed_binary_literals() {
     );
     assert!(read_literal(&[131, 107], &atoms).is_err());
     assert!(read_literal(&[131, 107, 0, 2, b'x'], &atoms).is_err());
+}
+
+#[test]
+fn reads_bit_binary_literals() {
+    // BIT_BINARY_EXT (77): a byte count, the number of bits of the last byte
+    // (1 to 8), and the bytes (`external.c:4895-4923`). <<1:3>> is
+    // [77, 0, 0, 0, 1, 3, 32]. The low bits of the last byte are not part of
+    // the bitstring, and a count of 8 gives a binary.
+    let atoms = AtomTable::new();
+    let bits = Term::Binary(Binary::from(vec![32]).bits(0, 3));
+    assert_eq!(
+        read_literal(&[131, 77, 0, 0, 0, 1, 3, 32], &atoms).unwrap(),
+        Some(bits.clone())
+    );
+    assert_eq!(
+        read_literal(&[131, 77, 0, 0, 0, 1, 3, 0x3F], &atoms).unwrap(),
+        Some(bits)
+    );
+    assert_eq!(
+        read_literal(&[131, 77, 0, 0, 0, 2, 8, 1, 2], &atoms).unwrap(),
+        Some(Term::binary(vec![1, 2]))
+    );
+    // ERTS rejects a count outside 1 to 8 and an empty byte list
+    // (`external.c:4913-4917`).
+    for bad in [
+        &[131, 77, 0, 0, 0, 1, 0, 32][..],
+        &[131, 77, 0, 0, 0, 1, 9, 32],
+        &[131, 77, 0, 0, 0, 0, 1],
+        &[131, 77, 0, 0, 0, 1],
+    ] {
+        assert!(read_literal(bad, &atoms).is_err(), "{bad:?}");
+    }
 }
 
 #[test]
@@ -463,19 +495,26 @@ fn reads_the_lambda_table_as_parse_lambda_chunk() {
     // slot.
     let entries = [[2, 2, 127, 0, 1, 31_263_486], [0, 0, 51, 1, 0, 7]];
     assert_eq!(
-        parse_lambdas(&lambda_table(2, &entries), &atoms).unwrap(),
+        parse_lambdas(&lambda_table(2, &entries), &atoms, [9; 16]).unwrap(),
         vec![
-            (Lambda::new(module.clone(), 0, 0, 31_263_486, 127, 1), 1),
-            (Lambda::new(module, 1, 1, 7, 51, 0), 0),
+            (
+                std::sync::Arc::new(Lambda::new(module.clone(), 0, 0, 31_263_486, 127, 1)),
+                1
+            ),
+            (std::sync::Arc::new(Lambda::new(module, 1, 1, 7, 51, 0)), 0),
         ]
     );
     assert_eq!(
-        parse_lambdas(&lambda_table(1, &entries), &atoms)
+        parse_lambdas(&lambda_table(1, &entries), &atoms, [9; 16])
             .unwrap()
             .len(),
         1
     );
-    let error = |bytes: Vec<u8>| parse_lambdas(&bytes, &atoms).unwrap_err().to_string();
+    let error = |bytes: Vec<u8>| {
+        parse_lambdas(&bytes, &atoms, [9; 16])
+            .unwrap_err()
+            .to_string()
+    };
     assert_eq!(error(lambda_table(-1, &[])), "negative BEAM lambda count");
     assert_eq!(
         error(lambda_table(2, &entries[..1])),

@@ -19,11 +19,12 @@ At most 30 minutes, 25 tool calls, and about 8k output tokens.
 3. Resolve conflicts only in Markdown files under `docs/` and in `README.md`:
    - Two sections or entries added at the same place: keep both. Put the section of `main` first in a measurement document. In a list ordered newest first, put the entry that merges later first.
    - A conflict in any other file (source, tests, fixtures, scripts, build or tool configuration, agents, skills): run `git merge --abort`, stop, and report the files. Do not guess.
+   - A conflict in one long table row of `docs/erts-differences.md` or one long entry of `docs/backlog.md`: do not take one side. Compare the row in the base, ours and theirs by sentence (use `git show :1:<file>`, `:2:`, `:3:`), and apply the sentences that each side changed to the other side.
    - Stage each resolved file (`git add <file>`) and check that no conflict marker stays (`git diff --check`, `rg -n '^(<<<<<<<|>>>>>>>)'`).
-4. Run `mise run check-brief`. It retries the known pty flake by itself. If it fails, stop and report.
+4. Run `cargo check --all-targets` and `mise run lint`. If the merge touched code, also run the test targets that the prompt names; if it names none, report that CI runs them. CI runs the full gate on the push. If a check fails, stop and report.
 5. If step 3 resolved conflicts, complete the merge with `git commit --no-edit`. Then check that `git merge-base --is-ancestor origin/main HEAD` succeeds; a fast-forward or an already-current branch also passes.
 6. Push with `git push origin HEAD:<branch>` (never `--force`). Remove the worktree and delete the local branch `merge-<pr>`.
 
 ## Return
 
-New head, the files that conflicted, whether the conflicts were in documentation only, and the check-brief line. A conflict outside the documentation files stops this agent; the main session resolves it and runs Codex again.
+New head, the files that conflicted, whether the conflicts were in documentation only, and the check results. A conflict outside the documentation files stops this agent; the main session resolves it and runs Codex again.

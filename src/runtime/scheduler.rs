@@ -25,7 +25,6 @@ use super::{
     mailbox::Mailbox,
     nif::abi,
     pcre2::{self, Code, Deserialized},
-    port::Ports,
     process::{
         DirtyCall, Flush, Frame, LinkId, Monitor, MonitorLinkTree, Origin, OriginMonitor,
         ProcessState, ReceiveTimer, StackSlot, Start, StartFlags, TargetMonitor, WalkPosition,
@@ -477,7 +476,7 @@ pub(super) struct Scheduler {
     skip_checks: bool,
     /// The node of this scheduler. Every scheduler has one; a run with one
     /// scheduler thread has a node that wakes no thread.
-    node: Arc<Node>,
+    pub(in crate::runtime) node: Arc<Node>,
     /// True when scheduler threads share the node: the inbox of each
     /// scheduler carries the deliveries of other threads and the schedulers
     /// share one atom table.
@@ -503,7 +502,6 @@ impl Scheduler {
     pub(super) fn new(atoms: impl Into<Arc<AtomTable>>) -> Self {
         let mut resources = Resources::default();
         resources.put(Ttys::default());
-        resources.put(Ports::default());
         let menu_pair = std::os::unix::net::UnixStream::pair().expect("a menu socket pair opens");
         let node = Node::single();
         Scheduler {
@@ -666,11 +664,11 @@ impl Scheduler {
     /// ```
     pub(super) fn start(
         &mut self,
-        frame: Frame,
+        start: impl Into<Start>,
         arguments: Vec<Term>,
         capabilities: Vec<Capability>,
     ) -> Result<(), BeamError> {
-        self.start_with_id(ROOT, 0, frame, arguments, capabilities)
+        self.start_with_id(ROOT, 0, start.into(), arguments, capabilities)
     }
 
     /// Create the root process with the pid `id` and the root slot `slot`
@@ -682,11 +680,11 @@ impl Scheduler {
         &mut self,
         id: ProcessId,
         slot: usize,
-        frame: Frame,
+        start: Start,
         arguments: Vec<Term>,
         capabilities: Vec<Capability>,
     ) -> Result<(), BeamError> {
-        let mut root = ProcessState::new(id, Start::Entry(frame), arguments);
+        let mut root = ProcessState::new(id, start, arguments);
         root.root = Some(slot);
         self.node.add_root(slot);
         let issued = capabilities
@@ -708,8 +706,8 @@ impl Scheduler {
     /// scheduler.start_boot(frame, vec![]);
     /// assert!(scheduler.process(ProcessId(0)).unwrap().security.is_boot());
     /// ```
-    pub(super) fn start_boot(&mut self, frame: Frame, arguments: Vec<Term>) {
-        let mut root = ProcessState::new(ROOT, Start::Entry(frame), arguments);
+    pub(super) fn start_boot(&mut self, start: Start, arguments: Vec<Term>) {
+        let mut root = ProcessState::new(ROOT, start, arguments);
         root.root = Some(0);
         self.node.add_root(0);
         root.security = SecurityContext::boot();
@@ -1034,6 +1032,9 @@ impl Scheduler {
         // batches.
         if let Some(bif) = process.pending_bif.take() {
             self.release.push(Release::Terms(bif.arguments));
+            if let Some(origin) = bif.origin {
+                self.release.push(Release::Terms(origin.arguments));
+            }
         }
         if let Some(arguments) = process.length_trap.take() {
             self.release.push(Release::Terms(arguments));
@@ -1261,10 +1262,12 @@ impl Scheduler {
     /// assert!(!scheduler.has_external_sources());
     /// ```
     pub(super) fn has_external_sources(&mut self) -> bool {
+        // The table lock is released before the scans lock each port.
+        let handles = self.node.ports().handles(self.index);
         self.resources.borrow_mut::<Ttys>().input_selected()
             || self.dirty.running()
-            || !self.resources.borrow_mut::<Ports>().wait_fds().is_empty()
-            || !self.resources.borrow_mut::<Ports>().write_fds().is_empty()
+            || !crate::runtime::port::wait_fds(&handles).is_empty()
+            || !crate::runtime::port::write_fds(&handles).is_empty()
             // A handled host signal becomes a message to `erl_signal_server`.
             || self.whereis("erl_signal_server").is_some()
     }
@@ -1308,8 +1311,10 @@ impl Scheduler {
     pub(super) fn wait_events(&mut self, timeout: Option<Duration>) -> Result<bool, BeamError> {
         let selected = self.resources.borrow_mut::<Ttys>().input_selected();
         let dirty = self.dirty.running();
-        let ports = self.resources.borrow_mut::<Ports>().wait_fds();
-        let writes = self.resources.borrow_mut::<Ports>().write_fds();
+        let handles = self.node.ports().handles(self.index);
+        let ports = crate::runtime::port::wait_fds(&handles);
+        let writes = crate::runtime::port::write_fds(&handles);
+        drop(handles);
         let wake = self.wake.as_ref().map(|wake| wake.as_raw_fd());
         let fds: Vec<_> = [
             selected.then_some(libc::STDIN_FILENO),
@@ -2786,11 +2791,25 @@ impl Scheduler {
         self.index
     }
 
-    /// Return the scheduler of the open port `id` when it is a port of
-    /// another scheduler of the node.
-    pub(super) fn remote_port_owner(&self, id: crate::term::PortId) -> Option<usize> {
-        let owner = self.node.port_owner(id)?;
-        (owner != self.index).then_some(owner)
+    /// Return the unsupported error when the open port `id` is an inet
+    /// port that the scheduler `index` does not serve. The receive and accept timers of
+    /// an inet port stay with the scheduler that serves it until port tasks
+    /// run on any scheduler (row "Ports" of `docs/erts-differences.md`).
+    /// A spawn port, a port of `index`, and a closed port give `Ok`.
+    pub(super) fn inet_port_served(
+        &self,
+        id: crate::term::PortId,
+        index: usize,
+    ) -> Result<(), BeamError> {
+        let remote = self.node.with_port(id, |port| {
+            port.scheduler != index && matches!(port.driver, crate::runtime::port::Driver::Inet(_))
+        }) == Some(true);
+        if remote {
+            return Err(error(
+                "unsupported: an inet port of another scheduler in a run of execute_on_schedulers: see \"Ports\" in docs/erts-differences.md",
+            ));
+        }
+        Ok(())
     }
 
     /// Return the scheduler of the live process `target` when it is another
@@ -2957,6 +2976,7 @@ impl Scheduler {
         let mut child = ProcessState::new(self.next_pid()?, start, arguments);
         child.off_heap_message_queue = flags.off_heap_message_queue;
         child.priority = flags.priority;
+        child.heap_flags = self.node.heap_flags();
         child.security = if boot {
             SecurityContext::boot()
         } else {
@@ -3388,39 +3408,40 @@ impl Scheduler {
     }
 
     /// Give the name `name` to the live process `id`, as `erlang:register/2`
-    /// does. Return `false` and change nothing when ERTS
-    /// `erts_register_name` (`register.c`) fails: `name` is not an atom or
-    /// is `undefined`, `id` is not a pid, the process is not alive, the
-    /// process has a name, or another process has the name.
+    /// does. Return the `error_info` cause and change nothing when ERTS
+    /// `erts_register_name` fails (`register.c:183-253`): `none` when `name`
+    /// is not an atom or is `undefined`, when `id` is not a pid, or when
+    /// another process has the name; `notalive` when the process is not
+    /// alive; and `registered_name` when the process has a name.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// let name = Term::Atom(program.atom("pbeam_probe_reg").unwrap());
-    /// assert!(scheduler.register(&name, &Term::Pid(ProcessId(0))));
-    /// assert!(!scheduler.register(&name, &Term::Pid(ProcessId(0))));
+    /// assert_eq!(scheduler.register(&name, &Term::Pid(ProcessId(0))), Ok(()));
+    /// assert_eq!(scheduler.register(&name, &Term::Pid(ProcessId(0))), Err("registered_name"));
     /// ```
-    pub(super) fn register(&mut self, name: &Term, id: &Term) -> bool {
+    pub(super) fn register(&mut self, name: &Term, id: &Term) -> Result<(), &'static str> {
         let (Term::Atom(name), Term::Pid(id)) = (name, id) else {
-            return false;
+            return Err("none");
         };
         if name.is_static("undefined") {
-            return false;
+            return Err("none");
         }
         if self.processes.get(id).is_none() && self.remote_owner(*id).is_none() {
-            return false;
+            return Err("notalive");
         }
         if self.registered_name_of(*id).is_some() {
-            return false;
+            return Err("registered_name");
         }
         let name_text = self.atoms.name_of(name).to_owned();
         if !self.name_insert(&name_text, *id) {
-            return false;
+            return Err("none");
         }
         if let Some(process) = self.processes.get_mut(id) {
             process.registered_name = Some(name.clone());
         }
-        true
+        Ok(())
     }
 
     /// Register `name` for `id` unless another process has it. Return false
@@ -3443,7 +3464,7 @@ impl Scheduler {
     ///
     /// ```rust,ignore
     /// let name = Term::Atom(program.atom("pbeam_probe_reg").unwrap());
-    /// assert!(scheduler.register(&name, &Term::Pid(ProcessId(0))));
+    /// assert!(scheduler.register(&name, &Term::Pid(ProcessId(0))).is_ok());
     /// assert!(scheduler.unregister(&name));
     /// assert!(!scheduler.unregister(&name));
     /// ```
@@ -3471,7 +3492,7 @@ impl Scheduler {
     /// ```rust,ignore
     /// let name = Term::Atom(program.atom("pbeam_probe_reg").unwrap());
     /// assert_eq!(scheduler.whereis("pbeam_probe_reg"), None);
-    /// assert!(scheduler.register(&name, &Term::Pid(ProcessId(0))));
+    /// assert!(scheduler.register(&name, &Term::Pid(ProcessId(0))).is_ok());
     /// assert_eq!(scheduler.whereis("pbeam_probe_reg"), Some(ProcessId(0)));
     /// ```
     pub(super) fn whereis(&self, name: &str) -> Option<ProcessId> {

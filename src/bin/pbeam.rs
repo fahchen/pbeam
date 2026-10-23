@@ -25,8 +25,8 @@ struct Cli {
     /// Function name to run.
     #[arg(value_name = "FUNCTION")]
     function: String,
-    /// Arguments of the function. Each argument is an atom that the
-    /// loaded modules hold, such as a module or function name.
+    /// Arguments of the function. Each argument is an atom, such as a
+    /// module or function name.
     #[arg(value_name = "ATOM")]
     arguments: Vec<String>,
     /// A loaded policy module, which exports `initial/1` and `grant/3`.
@@ -186,8 +186,8 @@ const ERLEXEC_VARIABLES: [&str; 5] = [
 ///   term text (`print_term`, erl_printf_term.c:352-811). ERTS also exits
 ///   with status 1 when a boot process exit halts the runtime.
 /// - 1: a runtime error, a file that cannot be read, a BEAM file that does
-///   not load, or an argument or a boot flag name that is not an atom of the
-///   loaded modules. The binary writes the one stderr line
+///   not load, or a boot flag name that is not an atom of the loaded
+///   modules. The binary writes the one stderr line
 ///   `pbeam: <message>`.
 /// - the low 8 bits of the status code of `erlang:halt/2`, as the C `exit`
 ///   of ERTS gives (`bif.c:4346-4362`). The binary writes nothing to
@@ -260,6 +260,23 @@ impl From<String> for Exit {
     }
 }
 
+impl From<BeamError> for Exit {
+    /// Make the end of a run error: a halt gives its status code, and each
+    /// other error gives its message.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(matches!(Exit::from(BeamError::Halt(3)), Exit::Halt(3)));
+    /// ```
+    fn from(run_error: BeamError) -> Self {
+        match run_error {
+            BeamError::Halt(status) => Self::Halt(status),
+            run_error => Self::Error(run_error.to_string()),
+        }
+    }
+}
+
 /// Set the signal dispositions of the ERTS emulator start, read and load
 /// the BEAM files, and run `Module:Function(Atoms...)` as the root process,
 /// or `Module:Function(Atoms..., Flags)` with the boot flag list of
@@ -279,9 +296,8 @@ impl From<String> for Exit {
 ///
 /// # Errors
 ///
-/// A file that cannot be read, a BEAM file that does not load, an argument
-/// or a boot flag name that is not an atom of the loaded modules, and the
-/// errors of
+/// A file that cannot be read, a BEAM file that does not load, a boot flag
+/// name that is not an atom of the loaded modules, and the errors of
 /// [`BeamProgram::execute`] and [`BeamProgram::execute_with_policy_module`].
 /// A halt of the run gives [`Exit::Halt`].
 fn run(arguments: Cli) -> Result<(), Exit> {
@@ -301,11 +317,10 @@ fn run(arguments: Cli) -> Result<(), Exit> {
         .iter()
         .map(|name| {
             program
-                .atom(name)
+                .put_atom(name)
                 .map(|atom| program.host_term(Term::Atom(atom)))
-                .ok_or_else(|| format!("argument {name} is not an atom of the loaded modules"))
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, BeamError>>()?;
     if arguments.root.is_some() || !arguments.code_path.is_empty() {
         let flags = boot_flags(
             &program,
@@ -327,11 +342,8 @@ fn run(arguments: Cli) -> Result<(), Exit> {
 
 /// Return the end of a command line for the result of its run.
 fn run_end(result: Result<HostTerm, BeamError>) -> Result<(), Exit> {
-    match result {
-        Ok(_) => Ok(()),
-        Err(BeamError::Halt(status)) => Err(Exit::Halt(status)),
-        Err(execution_error) => Err(Exit::Error(execution_error.to_string())),
-    }
+    result?;
+    Ok(())
 }
 
 /// Boot the node as `erl` does with the arguments of `pbeam erl`: set the
@@ -416,11 +428,17 @@ fn boot_erl(arguments: ErlCli) -> Result<(), Exit> {
     run_end(program.boot(&boot))
 }
 
+/// The version of the pinned `erts` (erts/vsn.mk:23), which the `erl`
+/// script puts in `BINDIR` as `%VSN%` (erl.src.src:52).
+const ERTS_VSN: &str = "17.1";
+
 /// Make the boot flag list of the `--root`, `--pa`, and `--mode` options:
-/// `{root, [Root]}` first, then one `{pa, [Dir]}` tuple for each directory
+/// `{root, [Root]}` first, then `{bindir, [Root/erts-Vsn/bin]}`, then one `{pa, [Dir]}` tuple for each directory
 /// in the command line order, then `{mode, [Mode]}`, with each value a
 /// binary of its bytes. ERTS gives the same tuples for `erl -pa D1 -pa D2
-/// -mode embedded`: `erlexec` gives `-root` before the user flags, the
+/// -mode embedded`: the `erl` script sets `BINDIR` to
+/// `$ROOTDIR/erts-%VSN%/bin` (erl.src.src:52), and `erlexec` gives `-root`
+/// and `-bindir` before the user flags (erlexec.c:1152-1155), the
 /// emulator gives each boot argument to `init` as a binary of its bytes
 /// (`erl_init.c:373-384`), and `init:parse_boot_args/1` makes one flag tuple
 /// for each flag (`init.erl:1699-1702`, `1724`). A flag that the command
@@ -430,12 +448,12 @@ fn boot_erl(arguments: ErlCli) -> Result<(), Exit> {
 ///
 /// ```rust,ignore
 /// let flags = boot_flags(&program, Some(&OsString::from("/otp")), &[OsString::from("d1")], None)?;
-/// // [{root, [<<"/otp">>]}, {pa, [<<"d1">>]}]
+/// // [{root, [<<"/otp">>]}, {bindir, [<<"/otp/erts-17.1/bin">>]}, {pa, [<<"d1">>]}]
 /// ```
 ///
 /// # Errors
 ///
-/// A flag name `root`, `pa`, or `mode` that is not an atom of the loaded
+/// A flag name `root`, `bindir`, `pa`, or `mode` that is not an atom of the loaded
 /// modules. The pinned `init` module has each of them.
 fn boot_flags(
     program: &BeamProgram,
@@ -443,9 +461,14 @@ fn boot_flags(
     code_path: &[OsString],
     mode: Option<&String>,
 ) -> Result<Term, String> {
+    // The `--root` option gives the `bindir` flag too, as the `erl` script
+    // and `erlexec` always give both.
+    let bindir =
+        root.map(|root| [root.as_bytes(), b"/erts-", ERTS_VSN.as_bytes(), b"/bin"].concat());
     let flags = root
         .map(|root| ("root", root.as_bytes()))
         .into_iter()
+        .chain(bindir.as_deref().map(|bindir| ("bindir", bindir)))
         .chain(
             code_path
                 .iter()
@@ -453,9 +476,13 @@ fn boot_flags(
         )
         .chain(mode.map(|mode| ("mode", mode.as_bytes())))
         .map(|(name, value)| {
-            let flag = program
-                .atom(name)
-                .ok_or_else(|| format!("boot flag {name} is not an atom of the loaded modules"))?;
+            let flag = if name == "bindir" {
+                program.put_atom(name).map_err(|error| error.to_string())?
+            } else {
+                program.atom(name).ok_or_else(|| {
+                    format!("boot flag {name} is not an atom of the loaded modules")
+                })?
+            };
             let value = Term::binary(value.to_vec());
             Ok(Term::tuple(vec![
                 Term::Atom(flag),

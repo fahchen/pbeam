@@ -1,12 +1,11 @@
 //! The declared SHA-256 native example. A Rust function registered for the
 //! `sha256/1` declaration of an Elixir module computes the digest with the
-//! `sha2` crate, and the declarations are checked against the registry
+//! `openssl` crate, and the declarations are checked against the registry
 //! before a run.
 
 use pbeam_runtime::{
     BeamError, BeamProgram, Binding, Job, Library, NativeResult, NifContext, Term, register_library,
 };
-use sha2::{Digest, Sha256};
 
 const NATIVE_HASH: &[u8] = include_bytes!("../../fixtures/native_sha256/Elixir.NativeHash.beam");
 
@@ -21,7 +20,7 @@ const SHA256_ABC: [u8; 32] = [
 fn sha256(context: &mut NifContext<'_>, arguments: &[Term]) -> Result<NativeResult, BeamError> {
     match arguments.first() {
         Some(Term::Binary(data)) => Ok(NativeResult::Value(Term::binary(
-            Sha256::digest(data.bytes().unwrap()).to_vec(),
+            openssl::sha::sha256(data.bytes().unwrap()).to_vec(),
         ))),
         _ => Ok(context.badarg()),
     }
