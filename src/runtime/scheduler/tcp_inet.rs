@@ -20,7 +20,7 @@
 
 use std::io;
 
-use super::{Scheduler, ports::port_cell};
+use super::Scheduler;
 use crate::{
     error::BeamError,
     runtime::{
@@ -159,9 +159,15 @@ impl Scheduler {
     /// first caller in the queue. Return `true` when the next caller can
     /// take the next connection.
     fn accept_one(&mut self, listen: PortId) -> Result<bool, BeamError> {
-        let cell = port_cell(&self.node, listen);
+        // A listen port that another scheduler closed after the IO poll
+        // drops the event.
+        let Some(cell) = self.node.port(listen) else {
+            return Ok(false);
+        };
         let mut ports = port::lock(&cell);
-        let tcp = tcp_inet(&mut ports);
+        let Some(tcp) = ports.as_mut().and_then(Port::inet_mut) else {
+            return Ok(false);
+        };
         if tcp.acceptors.is_empty() {
             return Ok(false);
         }
@@ -327,13 +333,6 @@ impl Scheduler {
             status,
         ])
     }
-}
-
-/// Return the descriptor of the open `tcp_inet` port `id`.
-fn tcp_inet(slot: &mut Option<Port>) -> &mut Inet {
-    slot.as_mut()
-        .and_then(Port::inet_mut)
-        .expect("the port of an accept is an open tcp_inet port")
 }
 
 /// Return the `ACCEPT` reply `[1, R1, R0]` of the async reference `id`.

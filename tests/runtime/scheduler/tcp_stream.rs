@@ -7,7 +7,7 @@ use std::sync::Arc;
 use socket2::{Domain, Socket, Type};
 
 use super::super::{Scheduler, node::Node};
-use crate::runtime::port::inet::{Event, Inet, Receiver, SocketType};
+use crate::runtime::port::inet::{Inet, Receiver, SocketType};
 use crate::runtime::process::{ProcessState, Start, tests::frame};
 use crate::term::{AtomTable, PortId, ProcessId};
 
@@ -42,25 +42,4 @@ fn receives_on_the_locked_descriptor_without_the_port_table() {
             timer: None
         })
     );
-}
-
-#[test]
-fn drops_the_messages_of_a_step_of_a_port_that_another_scheduler_closed() {
-    // The data term comes from the mode of the step, so the delivery takes
-    // no lock of the closed port.
-    let mode = Inet::new(SocketType::Stream).data_mode();
-    let receiver = Receiver {
-        id: 1,
-        caller: ProcessId(0),
-        timer: None,
-    };
-    let events = vec![
-        Event::Received {
-            receiver,
-            result: Ok(vec![1]),
-        },
-        Event::Data(vec![2]),
-        Event::Closed,
-    ];
-    scheduler().deliver_events(PortId(7), events, mode).unwrap();
 }

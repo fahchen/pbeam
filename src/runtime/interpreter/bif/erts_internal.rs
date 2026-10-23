@@ -14,7 +14,7 @@ use crate::runtime::{
     },
     port::{
         self, Driver, Input, Packets, Port, PortCell, Spawn,
-        inet::{Control, Inet, OK, SocketType},
+        inet::{Control, Inet, OK, Output, SocketType},
     },
     signal::Signal,
     unicode::native_filename,
@@ -711,9 +711,8 @@ pub(super) fn port_command(
     }
     let scheduler = &mut *context.scheduler;
     // One lock of the port covers the check, the capability, and the
-    // write or the send of the `tcp_inet` driver, as the port lock does in
-    // `erts_port_output` (io.c:1715-2088). The messages of the send go
-    // after the lock.
+    // write or the send of the `tcp_inet` driver with its messages, as the
+    // port lock does in `erts_port_output` (io.c:1715-2088).
     let found = found_port(scheduler, port)?;
     let mut slot = lock_found(&found);
     let (Some(port_state), Some(bytes), Some(&(id, _))) =
@@ -733,10 +732,18 @@ pub(super) fn port_command(
         Driver::Inet(tcp) => {
             let caller = scheduler.current_process_mut().id;
             let sent = tcp.send(&bytes, caller, scheduler.local_node_hash())?;
-            let mode = tcp.data_mode();
             port_state.output += bytes.len() as u64;
+            // A header that is too short fails the port with the reason
+            // `einval` (`driver_failure_posix`, io.c:7267-7270).
+            let exit = match sent {
+                Output::Sent(events) => Some(scheduler.send_events(id, port_state, events)?),
+                Output::Failed => None,
+            };
             drop(slot);
-            scheduler.tcp_sent(id, sent, mode)?;
+            match exit {
+                Some(exit) => scheduler.end_step(id, exit),
+                None => scheduler.fail_port(id, Term::static_atom("einval")),
+            }
             return Ok(signals_return(scheduler, port, Term::static_atom("true")));
         }
     };
@@ -873,8 +880,8 @@ pub(super) fn port_control(
     };
     // The step of the request runs under the port lock of the control, as
     // in `erts_port_control` (io.c:4268-4420), so a close on another
-    // scheduler comes before it or after it. The messages go after the
-    // lock.
+    // scheduler comes before it or after it. The messages of the step go
+    // out under the same lock; the end of the port comes after it.
     let mut events = None;
     let reply = match tcp.control(command, &bytes, caller)? {
         Control::Reply(reply) => Accept::Queued(reply),
@@ -893,10 +900,12 @@ pub(super) fn port_control(
             return Ok(signals_return(scheduler, port, Term::static_atom("badarg")));
         }
     };
-    let mode = tcp.data_mode();
+    let exit = events
+        .map(|events| scheduler.send_events(id, port_state, events))
+        .transpose()?;
     drop(slot);
-    if let Some(events) = events {
-        scheduler.deliver_events(id, events, mode)?;
+    if let Some(exit) = exit {
+        scheduler.end_step(id, exit);
     }
     let reply = match reply {
         Accept::Queued(reply) => reply,

@@ -82,22 +82,6 @@ pub(in crate::runtime) struct Sender {
     pub(in crate::runtime) tag: Reference,
 }
 
-/// The option `mode` of a port at a step of its driver.
-#[derive(Debug, Clone, Copy)]
-pub(in crate::runtime) struct DataMode(i32);
-
-impl DataMode {
-    /// Return the term of received `bytes`: a binary, or a list of bytes in
-    /// `list` mode (`inet_async_data`, inet_drv.c:3162-3200).
-    pub(in crate::runtime) fn term(self, bytes: Vec<u8>) -> Term {
-        if self.0 == 0 {
-            Term::list_from(bytes.into_iter().map(|byte| Term::Integer(byte.into())))
-        } else {
-            Term::binary(bytes)
-        }
-    }
-}
-
 /// A message that a step of the driver sends, or the end of the port.
 #[derive(Debug, PartialEq, Eq)]
 pub(in crate::runtime) enum Event {
@@ -695,10 +679,15 @@ impl Inet {
         (!self.stream.output.is_empty()).then(|| socket.as_raw_fd())
     }
 
-    /// Return the `mode` of the port, which gives the term of the received
-    /// bytes of this step after the port lock.
-    pub(in crate::runtime) fn data_mode(&self) -> DataMode {
-        DataMode(self.mode)
+    /// Return the term of received `bytes` in the `mode` of the port: a
+    /// binary, or a list of bytes in `list` mode (`inet_async_data`,
+    /// inet_drv.c:3162-3200).
+    pub(in crate::runtime) fn data_term(&self, bytes: Vec<u8>) -> Term {
+        if self.mode == 0 {
+            Term::list_from(bytes.into_iter().map(|byte| Term::Integer(byte.into())))
+        } else {
+            Term::binary(bytes)
+        }
     }
 
     /// Return true when the queue of the port holds bytes.
