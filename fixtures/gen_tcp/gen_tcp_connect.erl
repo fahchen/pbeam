@@ -83,8 +83,18 @@ ipv6() ->
     {ok, Short} = prim_inet:open(tcp, inet, stream),
     %% A tag any or loopback without a port gives einval (inet_drv.c:4821).
     ShortBind = [erlang:port_control(Short, 16#03f1a306, [Tag, 0]) || Tag <- [3, 4]],
+    %% gen_tcp sends explicit addresses, so the tags run on raw ports.
+    Raw = [begin
+               {ok, R} = prim_inet:open(tcp, Family, stream),
+               [1 | _] = erlang:port_control(R, 16#03f1a306, [Tag, 0, 0]),
+               {ok, {RawAddr, _}} = inet:sockname(R),
+               ok = gen_tcp:close(R),
+               RawAddr
+           end || Family <- [inet, inet6], Tag <- [3, 4]],
+    Class = [inet:setopts(V6, [{tclass, 8}, {recvtclass, true}]),
+             inet:getopts(V6, [tclass, recvtclass])],
     [ok = gen_tcp:close(X) || X <- [V6, V4, Short]],
-    io:format("~w~n", [[Names, Transfer, Only, Option, Tags, ShortBind, flush()]]).
+    io:format("~w~n", [[Names, Transfer, Only, Option, Tags, ShortBind, Raw, Class, flush()]]).
 
 flush() ->
     receive Message -> [Message | flush()] after 0 -> [] end.
