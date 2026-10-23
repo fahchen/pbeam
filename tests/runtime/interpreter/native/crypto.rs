@@ -812,3 +812,22 @@ fn gives_mod_exp_as_an_mpint_with_the_header_4() {
     assert_eq!(value_bytes(run(5, 0, 1, 4)), [0, 0, 0, 0]);
     assert!(matches!(run(3, 1, 5, 3), BifResult::Raise { .. }));
 }
+
+#[test]
+fn gives_badarg_for_an_engine_id_that_is_not_a_binary() {
+    // crypto.erl converts each id to a binary before the NIF
+    // (crypto.erl:4947-4950), so only a direct call reaches
+    // engine.c:366-367 and engine.c:936-947.
+    let mut scheduler = scheduler();
+    let id = atom(&mut scheduler, "x");
+    let badarg = format!("{:?}", BifResult::badarg());
+    let result = engine_by_id_nif(&mut scheduler, std::slice::from_ref(&id)).unwrap();
+    assert_eq!(format!("{result:?}"), badarg);
+    for arguments in [
+        [id.clone(), Term::binary(b"y".to_vec())],
+        [Term::binary(b"x".to_vec()), id.clone()],
+    ] {
+        let result = ensure_engine_loaded_nif(&mut scheduler, &arguments).unwrap();
+        assert_eq!(format!("{result:?}"), badarg);
+    }
+}

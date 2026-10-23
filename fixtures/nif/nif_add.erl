@@ -1,5 +1,5 @@
 -module(nif_add).
--export([load/2, calls/1, trace/1, vetoed/1, reload/2, probes/1, probe/3, add/2,
+-export([load/2, nifs/1, calls/1, trace/1, vetoed/1, reload/2, probes/1, probe/3, add/2,
          other/0, cross_load/0, cross_call/0]).
 
 %% The C library nif_add.c implements add/2. other/0 is a NIF function
@@ -7,6 +7,10 @@
 -nifs([add/2, other/0]).
 
 load(Path, Info) -> erlang:load_nif(Path, Info).
+
+%% The NIFs of the module before and after a load of `Path`
+%% (erl_bif_info.c:5769-5805).
+nifs(Path) -> {erlang:get_module_info(nif_add, nifs), load(Path, 0), erlang:get_module_info(nif_add, nifs)}.
 
 %% Call add/2 before a load of `Path`, load it, call add/2 and other/0, and
 %% load again.
