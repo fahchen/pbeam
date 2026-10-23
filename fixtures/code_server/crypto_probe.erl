@@ -1,5 +1,5 @@
 -module(crypto_probe).
--export([main/0, nifs/0, info/0, supports/0, fips/0, oneshot/0, oneshot_host/0, xof_sizes/0, hash_init/0, hash_large/0]).
+-export([main/0, nifs/0, info/0, supports/0, fips/0, oneshot/0, oneshot_host/0, xof_sizes/0, contexts/0, unsupported/0]).
 
 %% Write the results of crypto:strong_rand_bytes/1, one term on each line.
 %% The first call loads crypto on demand, and its -on_load function loads
@@ -141,6 +141,7 @@ oneshot() ->
 oneshot_host() ->
     Md4 = [bad_reason(Fun) || Fun <- [fun() -> crypto:hash_info(md4) end,
                                        fun() -> crypto:hash(md4, <<"abc">>) end,
+                                       fun() -> crypto:hash_init(md4) end,
                                        fun() -> crypto:mac(hmac, md4, <<"key">>, <<"text">>) end]],
     Ciphers = [{rc2_cbc, 16}, {rc4, 16}, {des_cbc, 8}, {des_cfb, 8}, {des_ecb, 8},
                {des_ede3_cbc, 16}, {des_ede3_cfb, 24}, {blowfish_cbc, 16},
@@ -163,15 +164,44 @@ cmacs(Ciphers) ->
 xof_sizes() ->
     io:format("~p~n", [[maps:get(size, crypto:hash_info(Type)) || Type <- [shake128, shake256]]]).
 
-%% Call crypto:hash_init/1, whose NIF hash_init_nif/1 PBeam does not link.
-hash_init() ->
-    io:format("~p~n", [crypto:hash_init(sha)]).
+%% Write the results of the hash context NIFs (hash.c:168-273, 561-589).
+%% An update gives a new context and leaves the old one as it was, and a
+%% final call reads a copy, so each context stays usable. A SHAKE context
+%% gives the default xoflen of 16 or 32 bytes (hash.c:194-201), and
+%% hash_final_xof/2 takes the length in bits. crypto:hash/2 sends an input
+%% of more than 20000 bytes through the contexts (crypto.erl:4535-4540).
+contexts() ->
+    S0 = crypto:hash_init(sha256),
+    S1 = crypto:hash_update(S0, <<"abc">>),
+    S2 = crypto:hash_update(S1, ["d", <<"e">>]),
+    Finals = [crypto:hash_final(S) || S <- [S0, S1, S1, S2]],
+    Digests = [crypto:hash_final(crypto:hash_update(crypto:hash_init(Type), <<"abc">>))
+               || Type <- [md5, ripemd160, sha, sha512, sha3_256, shake128, shake256,
+                           sm3, blake2b, blake2s]],
+    X0 = crypto:hash_init(shake256),
+    X1 = crypto:hash_update(X0, <<"abc">>),
+    Xofs = [crypto:hash_final_xof(X, Length) || X <- [X0, X1], Length <- [0, 7, 8, 100, 256]],
+    Large = crypto:hash(sha, binary:copy(<<1>>, 20001))
+        =:= crypto:hash_final(crypto:hash_update(crypto:hash_init(sha),
+                                                 binary:copy(<<1>>, 20001))),
+    Errors = [bad_reason(Fun)
+              || Fun <- [fun() -> crypto:hash_init(nosuch) end,
+                         fun() -> crypto:hash_init("sha") end,
+                         fun() -> crypto:hash_update(make_ref(), <<"a">>) end,
+                         fun() -> crypto:hash_update(S0, a) end,
+                         fun() -> crypto:hash_final(make_ref()) end,
+                         fun() -> crypto:hash_final(S0 =/= x) end,
+                         fun() -> crypto:hash_final_xof(make_ref(), 8) end,
+                         fun() -> crypto:hash_final_xof(X0, -1) end,
+                         fun() -> crypto:hash_final_xof(X0, 1 bsl 32) end,
+                         fun() -> crypto:hash_final_xof(X0, 8.0) end,
+                         fun() -> crypto:hash_final_xof(S0, 64) end]],
+    io:format("~p~n", [[is_reference(S0), Finals, Digests, Xofs, Large, Errors]]).
 
-%% Call crypto:hash/2 with more than the 20000 bytes that hash_nif/2 takes.
-%% crypto:hash/2 sends the input through hash_init_nif/1, which PBeam does
-%% not link (crypto.erl:4535-4540).
-hash_large() ->
-    io:format("~p~n", [crypto:hash(sha, binary:copy(<<0>>, 20001))]).
+%% Call crypto:engine_list/0, whose NIF engine_get_first_nif/0 PBeam does
+%% not link.
+unsupported() ->
+    io:format("~p~n", [crypto:engine_list()]).
 
 bad(Fun) ->
     try Fun() catch Class:Reason:Stack -> {Class, Reason, hd(Stack)} end.
