@@ -1873,10 +1873,9 @@ pub(super) fn binary_part(binary: &Term, start: &Term, length: &Term) -> BifResu
 /// ERTS `bit_size_1` (`erl_bif_guard.c:354-371`) and the JIT
 /// `emit_bif_bit_size` (`jit/arm/instr_guard_bifs.cpp:336-441`) do. A term
 /// that is not a bitstring raises `badarg`. In a guard, the `gc_bif`
-/// instruction goes to its fail label instead. PBeam has no bitstring that
-/// is not a binary (row "Bitstring terms" of `docs/erts-differences.md`),
-/// so the size is 8 times the byte size. The size comes from the view, so
-/// a binary that an append built is not joined.
+/// instruction goes to its fail label instead. A bitstring such as
+/// `<<1:3>>` gives its size in bits. The size comes from the view, so a
+/// binary that an append built is not joined.
 ///
 /// # Examples
 ///
@@ -1897,8 +1896,7 @@ pub(super) fn bit_size(term: &Term) -> BifResult {
 /// `emit_bif_byte_size` (`jit/arm/instr_guard_bifs.cpp:438-509`) do. A
 /// term that is not a bitstring raises `badarg`. In a guard, the `gc_bif`
 /// instruction goes to its fail label instead. ERTS rounds the size of a
-/// bitstring up to the next byte. PBeam has no bitstring that is not a
-/// binary (row "Bitstring terms" of `docs/erts-differences.md`).
+/// bitstring up to the next byte, so `<<1:3>>` gives 1.
 ///
 /// # Examples
 ///

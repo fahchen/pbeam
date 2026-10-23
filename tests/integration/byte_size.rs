@@ -64,19 +64,14 @@ fn gives_the_byte_size_like_erts() {
 }
 
 #[test]
-fn stops_at_a_bitstring_literal() {
-    // ERTS rounds the size of a bitstring up to the next byte. PBeam has no
-    // bitstring that is not a binary: the loader keeps a `BIT_BINARY_EXT`
-    // literal as an unsupported literal, so the run stops when `move` reads
-    // it (row "Bitstring terms" of `docs/erts-differences.md`).
+fn rounds_the_size_of_a_bitstring_literal_up() {
+    // ERTS rounds the size of a bitstring up to the next byte (`NBYTES` in
+    // `byte_size_1`, `erl_bif_guard.c:376-393`).
     let program = BeamProgram::load(&[BYTE_SIZE_PROBE]).unwrap();
-    let error = program
-        .execute("byte_size_probe", "bits", &[])
-        .unwrap_err()
-        .to_string();
-    assert!(
-        error.starts_with("unsupported BEAM literal index "),
-        "{error}"
+    let result = program.execute("byte_size_probe", "bits", &[]).unwrap();
+    assert_eq!(
+        result.term,
+        Term::list_from(vec![Term::Integer(1), Term::Integer(4)])
     );
 
     assert_eq!(erl_reference("byte_size_probe:bits()"), "[1,4]\n");

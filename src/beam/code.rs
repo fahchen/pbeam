@@ -8,7 +8,7 @@ use crate::{
     error::{BeamError, error},
     runtime::import_kind,
     term::{
-        Atom, AtomTable, Fun, Lambda, MAX_ATOM_CHARACTERS, MAX_TUPLE_SIZE, Map, Term,
+        Atom, AtomTable, Binary, Fun, Lambda, MAX_ATOM_CHARACTERS, MAX_TUPLE_SIZE, Map, Term,
         fits_big_arity,
     },
 };
@@ -70,6 +70,11 @@ const ETF_NIL_EXT: u8 = 106;
 const ETF_STRING_EXT: u8 = 107;
 const ETF_LIST_EXT: u8 = 108;
 const ETF_BINARY_EXT: u8 = 109;
+/// `BIT_BINARY_EXT`, a bitstring such as `<<1:3>>` as `[77, 0, 0, 0, 1, 3,
+/// 32]`: a four-byte big-endian byte count, the number of bits (1 to 8) of
+/// the last byte that are part of the bitstring, and the bytes
+/// (`external.c:4895-4923`).
+const ETF_BIT_BINARY_EXT: u8 = 77;
 /// `EXPORT_EXT`, an external fun such as `fun lists:reverse/1`.
 const ETF_EXPORT_EXT: u8 = 113;
 const ETF_MAP_EXT: u8 = 116;
@@ -797,6 +802,17 @@ fn read_external_term(
             ETF_BINARY_EXT => {
                 let size = read_u32(take(data, cursor, WORD_SIZE)?)? as usize;
                 Term::binary(take(data, cursor, size)?.to_vec())
+            }
+            ETF_BIT_BINARY_EXT => {
+                let size = read_u32(take(data, cursor, WORD_SIZE)?)? as usize;
+                let trailing = usize::from(take(data, cursor, 1)?[0]);
+                // ERTS rejects a trailing bit count outside 1 to 8 and an
+                // empty byte list (`external.c:4913-4917`).
+                if !(1..=8).contains(&trailing) || size == 0 {
+                    return Err(error("invalid BIT_BINARY_EXT trailing bit count"));
+                }
+                let bytes = Binary::from(take(data, cursor, size)?.to_vec());
+                Term::Binary(bytes.bits(0, size * 8 - (8 - trailing)))
             }
             ETF_STRING_EXT => {
                 let size_bytes = take(data, cursor, 2)?;

@@ -27,8 +27,8 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### Add bitstring terms
 
-- PBeam has no bitstring term whose size is not a multiple of 8 bits, so `is_bitstr` passes only for a binary. The loader keeps a `BIT_BINARY_EXT` literal as an unsupported literal, so `byte_size(<<1:3>>)` stops with `unsupported BEAM literal index N`. ERTS gives `1` (`erl_bif_guard.c:376-393`). The "Bitstring terms" row records this.
-- The work: a bitstring `Term` variant with the ERTS term order, `BIT_BINARY_EXT` literals in the loader, the bit count in `erlang:byte_size/1`, and the bitstring forms of the binary instructions and BIFs, such as the `binary` and `get_tail` commands of `bs_match`, `bs_get_binary2`, and `bs_get_tail` of a size that is not a multiple of 8 bits.
+- PBeam loads a `BIT_BINARY_EXT` literal as a bitstring term (#1005), but no instruction or BIF makes a bitstring whose size is not a multiple of 8 bits at run time. The "Bitstring terms" row records this.
+- The work: the bitstring forms of the binary instructions and BIFs, such as the `binary` and `get_tail` commands of `bs_match`, `bs_get_binary2`, and `bs_get_tail` of a size that is not a multiple of 8 bits.
 - **Trigger:** a measured path makes or loads a bitstring that is not a binary.
 - **Source:** #359 and #360.
 
