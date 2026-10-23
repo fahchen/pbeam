@@ -28,30 +28,32 @@ fn unsupported(name: &str, arity: u32, part: &str) -> BeamError {
 }
 
 /// Run `engine_by_id_nif/1` (`engine.c:353-406`). An argument that is not
-/// a binary gives `badarg` (`engine.c:366-367`). PBeam loads no engine, so
-/// `ENGINE_by_id` finds none and the NIF gives `{error, bad_engine_id}`
-/// (`engine.c:375-379`). The built-in `dynamic` engine gives a runtime
+/// a binary gives `badarg` (`engine.c:366-367`). `ENGINE_by_id`
+/// (`engine.c:375`) adds the built-in engine `dynamic` to the OpenSSL
+/// list and can load an engine library, so each binary gives a runtime
 /// error.
 pub(super) fn engine_by_id_nif(
-    scheduler: &mut Scheduler,
+    _: &mut Scheduler,
     arguments: &[Term],
 ) -> Result<BifResult, BeamError> {
-    match arguments[0].binary_bytes() {
-        None => Ok(BifResult::badarg()),
-        Some(b"dynamic") => Err(unsupported("engine_by_id_nif", 1, "the engine dynamic")),
-        Some(_) => Ok(BifResult::Value(Term::tuple(vec![
-            Term::static_atom("error"),
-            Term::Atom(scheduler.atoms.put("bad_engine_id")?),
-        ]))),
+    if arguments[0].binary_bytes().is_none() {
+        return Ok(BifResult::badarg());
     }
+    Err(unsupported("engine_by_id_nif", 1, "an engine lookup"))
 }
 
-/// Run `engine_load_dynamic_nif/0` (`engine.c:469-483`): `ok`.
+/// Run `engine_load_dynamic_nif/0` (`engine.c:469-483`). The call
+/// `OPENSSL_init_crypto(OPENSSL_INIT_ENGINE_DYNAMIC, NULL)` adds the engine
+/// `dynamic` to the OpenSSL list, so it gives a runtime error.
 pub(super) fn engine_load_dynamic_nif(
     _: &mut Scheduler,
     _: &[Term],
 ) -> Result<BifResult, BeamError> {
-    Ok(BifResult::Value(Term::static_atom("ok")))
+    Err(unsupported(
+        "engine_load_dynamic_nif",
+        0,
+        "the engine dynamic",
+    ))
 }
 
 /// Run an engine NIF whose first argument is an engine resource
@@ -63,7 +65,7 @@ pub(super) fn engine_resource_nif(_: &mut Scheduler, _: &[Term]) -> Result<BifRe
 }
 
 /// Run `engine_get_first_nif/0` (`engine.c:696-733`). PBeam adds no engine
-/// to the OpenSSL list, so `ENGINE_get_first` gives NULL and the NIF gives
+/// to the OpenSSL list (each call that adds one gives a runtime error), so `ENGINE_get_first` gives NULL and the NIF gives
 /// `{ok, <<>>}` (`engine.c:706-710`).
 pub(super) fn engine_get_first_nif(_: &mut Scheduler, _: &[Term]) -> Result<BifResult, BeamError> {
     Ok(BifResult::Value(Term::tuple(vec![

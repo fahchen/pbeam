@@ -23,14 +23,13 @@ const ON_LOAD_PROBE: &str = "fixtures/code_server/on_load_server_probe";
 const FUN_ENTRY_PROBE: &str = "fixtures/code_server/fun_entry_probe";
 
 /// The output of `crypto_engine_probe:main/0` on PBeam and on the pinned
-/// macOS ERTS (OpenSSL 3.5.8), which has no engine in its list.
+/// macOS ERTS (OpenSSL 3.5.8), which has no engine in its list before
+/// the first engine lookup.
 const ENGINE_RESULTS: &str =
     "[[engine_method_rsa,engine_method_dsa,engine_method_dh,engine_method_rand,
   engine_method_ciphers,engine_method_digests,engine_method_pkey_meths,
   engine_method_pkey_asn1_meths,engine_method_ec],
  [],
- {error,bad_engine_id},
- {error,bad_engine_id},
  {error,badarg},
  {error,badarg},
  {error,badarg},
@@ -70,11 +69,15 @@ fn runs_the_engine_functions_as_pinned_erts() {
 
 #[test]
 fn reports_an_engine_load_as_unsupported() {
-    // The safe openssl crate has no ENGINE_by_id (engine.c:375, 959).
+    // The safe openssl crate has no engine API (engine.c:375, 477, 959).
     for (function, expected) in [
         (
-            "dynamic",
-            "crypto:engine_by_id_nif/1 NIF is not supported for the engine dynamic",
+            "by_id",
+            "crypto:engine_by_id_nif/1 NIF is not supported for an engine lookup",
+        ),
+        (
+            "load",
+            "crypto:engine_load_dynamic_nif/0 NIF is not supported for the engine dynamic",
         ),
         (
             "ensure",
@@ -835,8 +838,8 @@ fn stops_with_a_runtime_error_for_a_poly1305_context_after_its_final() {
 
 #[test]
 fn stops_with_a_runtime_error_for_an_unsupported_crypto_nif() {
-    // PBeam does not link `engine_get_first_nif/0`, which
-    // `crypto:engine_list/0` calls.
+    // PBeam does not link `privkey_to_pubkey_nif/2`, which
+    // `crypto:privkey_to_pubkey/2` calls.
     let output = pbeam_probe(CRYPTO_PROBE, "crypto_probe", "unsupported", &[])
         .env("TERM", "dumb")
         .stdin(Stdio::null())
@@ -845,7 +848,7 @@ fn stops_with_a_runtime_error_for_an_unsupported_crypto_nif() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
         !output.status.success()
-            && stderr.contains("crypto:engine_get_first_nif/0 NIF is not supported"),
+            && stderr.contains("crypto:privkey_to_pubkey_nif/2 NIF is not supported"),
         "{stderr}"
     );
 }

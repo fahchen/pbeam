@@ -1,5 +1,5 @@
 -module(crypto_engine_probe).
--export([main/0, dynamic/0, ensure/0]).
+-export([main/0, by_id/0, load/0, ensure/0]).
 
 %% Write the result of each public engine function of crypto
 %% (crypto.erl:3996-4415), which call the engine NIFs (engine.c:353-1045).
@@ -11,8 +11,6 @@ main() ->
     io:format("~p~n", [[T(F) || F <- [
         fun() -> crypto:engine_get_all_methods() end,
         fun() -> crypto:engine_list() end,
-        fun() -> crypto:engine_load(<<"x">>, [], []) end,
-        fun() -> crypto:engine_by_id(<<"x">>) end,
         fun() -> crypto:engine_unload(R) end,
         fun() -> crypto:engine_add(R) end,
         fun() -> crypto:engine_remove(R) end,
@@ -26,9 +24,13 @@ main() ->
         fun() -> crypto:ensure_engine_loaded(a, <<"y">>) end,
         fun() -> crypto:ensure_engine_loaded(<<"x">>, a) end]]]).
 
-%% Load the built-in engine dynamic.
-dynamic() ->
-    io:format("~p~n", [crypto:engine_by_id(<<"dynamic">>)]).
+%% Look up an engine id.
+by_id() ->
+    io:format("~p~n", [crypto:engine_by_id(<<"x">>)]).
+
+%% Load an engine with the engine dynamic.
+load() ->
+    io:format("~p~n", [crypto:engine_load(<<"x">>, [], [])]).
 
 %% Load an engine from a library path.
 ensure() ->
