@@ -224,3 +224,7 @@ impl Record {
             .map(|(&l, &r)| (&left.values[l], &right.values[r]))
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/term/record.rs"]
+mod tests;
