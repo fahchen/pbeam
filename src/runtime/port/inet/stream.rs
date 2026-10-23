@@ -109,6 +109,26 @@ pub(in crate::runtime) enum Event {
         /// The bytes, or the error name.
         result: Result<Vec<u8>, String>,
     },
+    /// `{inet_async, S, Ref, {ok, [Family, P1, P0, A, B, C, D | Data]}}`
+    /// of the receive of `receiver` on a `udp_inet` port
+    /// (`packet_binary_message`, inet_drv.c:4106-4160).
+    Datagram {
+        /// The receive that ends.
+        receiver: Receiver,
+        /// `[Family, P1, P0, A, B, C, D]` of the sender.
+        address: Vec<u8>,
+        /// The bytes of the datagram.
+        data: Vec<u8>,
+    },
+    /// `{inet_async, S, Ref, ok}` or `{inet_async, S, Ref, {error,
+    /// Reason}}` of the connect of `connector` (`async_ok` and
+    /// `async_error`, inet_drv.c:2563-2572).
+    Connected {
+        /// The connect that ends.
+        connector: Receiver,
+        /// `Ok` or the error name.
+        result: Result<(), String>,
+    },
     /// `{inet_reply, S, ok, Tag}` or `{inet_reply, S, {error, Reason},
     /// Tag}` of the send of `sender`.
     Replied {
@@ -132,7 +152,7 @@ pub(in crate::runtime) enum Output {
 /// The counts of `INET_REQ_GETSTAT` (`inet_input_count` and
 /// `inet_output_count`, inet_drv.c:11560-11610).
 #[derive(Debug, Default)]
-struct Statistics {
+pub(super) struct Statistics {
     /// The delivered packets (`recv_cnt`).
     receive_count: u64,
     /// The largest delivered packet (`recv_max`).
@@ -155,7 +175,7 @@ struct Statistics {
 
 impl Statistics {
     /// Count a delivered packet of `length` bytes (`inet_input_count`).
-    fn input(&mut self, length: u64) {
+    pub(super) fn input(&mut self, length: u64) {
         let count = self.receive_count.wrapping_add(1).max(1);
         self.receive_bytes = self.receive_bytes.wrapping_add(length);
         let average = self.receive_average + (length as f64 - self.receive_average) / count as f64;
@@ -167,7 +187,7 @@ impl Statistics {
     }
 
     /// Count a send of `length` bytes (`inet_output_count`).
-    fn output(&mut self, length: u64) {
+    pub(super) fn output(&mut self, length: u64) {
         let count = self.send_count.wrapping_add(1).max(1);
         self.send_bytes = self.send_bytes.wrapping_add(length);
         self.send_average += (length as f64 - self.send_average) / count as f64;
@@ -193,6 +213,8 @@ pub(in crate::runtime) struct Stream {
     remain: usize,
     /// The receive that waits for data.
     pub(in crate::runtime) receiver: Option<Receiver>,
+    /// The connect that waits for the write select of the socket.
+    pub(in crate::runtime) connector: Option<Receiver>,
     /// The bytes that the socket did not take yet (the queue of the port).
     output: VecDeque<u8>,
     /// The send that waits until the queue is small (`INET_F_BUSY`).
@@ -213,7 +235,7 @@ pub(in crate::runtime) struct Stream {
     /// `OPEN` does not have (inet_drv.c:5215, 10925).
     pub(super) ended: bool,
     /// The counts of `GETSTAT`.
-    statistics: Statistics,
+    pub(super) statistics: Statistics,
 }
 
 impl Stream {
@@ -232,6 +254,7 @@ impl Stream {
             input_size: 0,
             remain: 0,
             receiver: None,
+            connector: None,
             output: VecDeque::new(),
             busy: None,
             subscribers: Vec::new(),
@@ -304,6 +327,9 @@ impl Inet {
     /// the receive when the peer closed or the read failed. No message
     /// means that the receive waits.
     pub(in crate::runtime) fn receive(&mut self, length: usize) -> Vec<Event> {
+        if self.socket_type == SocketType::Datagram {
+            return self.receive_datagram();
+        }
         let stream = &mut self.stream;
         let read = if stream.input_size == 0 {
             let size = if length > 0 { length } else { stream.buffer };
@@ -424,7 +450,7 @@ impl Inet {
 
     /// Return the message of the end of the receive that waits, or no
     /// message without one.
-    fn end_receive(&mut self, result: Result<Vec<u8>, String>) -> Vec<Event> {
+    pub(super) fn end_receive(&mut self, result: Result<Vec<u8>, String>) -> Vec<Event> {
         self.stream
             .receiver
             .take()
@@ -516,7 +542,7 @@ impl Inet {
     /// Close the socket and drop the buffers, as `tcp_desc_close` does
     /// (inet_drv.c:11932-11937, 5053-5080), and return `{empty_out_q, S}`
     /// for the subscribers. The port stays open.
-    fn close_socket(&mut self) -> Vec<Event> {
+    pub(super) fn close_socket(&mut self) -> Vec<Event> {
         self.socket = None;
         self.state = State::Closed;
         self.stream.ended = true;
@@ -534,8 +560,8 @@ impl Inet {
     ///
     /// # Errors
     ///
-    /// The output of a `udp_inet` port, a tag that is not the reference
-    /// bytes of `term_to_binary/2` with `[local]`, a send while a send waits for the queue (ERTS suspends the
+    /// The errors of [`Inet::send_datagram`], a tag that is not the
+    /// reference bytes of `term_to_binary/2` with `[local]`, a send while a send waits for the queue (ERTS suspends the
     /// caller of a busy port), a send that would wait with a `send_timeout`
     /// other than `infinity` and 0, and a send with `delay_send`.
     pub(in crate::runtime) fn send(
@@ -544,9 +570,6 @@ impl Inet {
         caller: ProcessId,
         seed: u32,
     ) -> Result<Output, BeamError> {
-        if self.socket_type == SocketType::Datagram {
-            return Err(self.unsupported("output", "of erlang:port_command/2"));
-        }
         let header = bytes
             .split_first_chunk::<2>()
             .and_then(|(&size, rest)| rest.split_at_checked(usize::from(u16::from_be_bytes(size))));
@@ -560,6 +583,9 @@ impl Inet {
             return Err(self.unsupported("output", "to a busy port"));
         }
         let sender = Sender { caller, tag };
+        if self.socket_type == SocketType::Datagram {
+            return self.send_datagram(data, sender).map(Output::Sent);
+        }
         let reply = |result| Ok(Output::Sent(vec![Event::Replied { sender, result }]));
         if self.state != State::Connected {
             if std::mem::take(&mut self.stream.closed_send) {
@@ -599,8 +625,12 @@ impl Inet {
     /// does (inet_drv.c:14234-14370), and return the messages: the reply of
     /// the send that waits when the queue holds 4096 bytes or fewer, then
     /// `{empty_out_q, S}` when the queue is empty (inet_drv.c:14301-14306),
-    /// or the end of the socket after a failed write.
+    /// or the end of the socket after a failed write. A socket that
+    /// connects ends its connect instead (see [`Self::connect_ready`]).
     pub(in crate::runtime) fn send_ready(&mut self) -> Vec<Event> {
+        if self.state == State::Connecting {
+            return self.connect_ready();
+        }
         let mut events = Vec::new();
         while !self.stream.output.is_empty() {
             let socket = self
@@ -662,21 +692,23 @@ impl Inet {
         events
     }
 
-    /// Return the fd of a connected stream socket with a receive that
-    /// waits (`sock_select(desc, FD_READ, 1)`, inet_drv.c:12317) or in
-    /// active mode (inet_drv.c:7966), else `None`.
+    /// Return the fd of a socket with a receive that waits
+    /// (`sock_select(desc, FD_READ, 1)`, inet_drv.c:12317, 15496) or of a
+    /// connected stream socket in active mode (inet_drv.c:7966), else
+    /// `None`.
     pub(in crate::runtime) fn stream_receive_fd(&self) -> Option<c_int> {
         let socket = self.socket.as_ref()?;
         let active = self.active != 0 && self.state == State::Connected;
-        (self.socket_type == SocketType::Stream && (self.stream.receiver.is_some() || active))
-            .then(|| socket.as_raw_fd())
+        (self.stream.receiver.is_some() || active).then(|| socket.as_raw_fd())
     }
 
     /// Return the fd of a socket with queued output (`sock_select(desc,
-    /// FD_WRITE, 1)`, inet_drv.c:13846), else `None`.
+    /// FD_WRITE, 1)`, inet_drv.c:13846) or that connects (`sock_select(desc,
+    /// FD_CONNECT, 1)`, inet_drv.c:12109), else `None`.
     pub(in crate::runtime) fn send_fd(&self) -> Option<c_int> {
         let socket = self.socket.as_ref()?;
-        (!self.stream.output.is_empty()).then(|| socket.as_raw_fd())
+        (!self.stream.output.is_empty() || self.state == State::Connecting)
+            .then(|| socket.as_raw_fd())
     }
 
     /// Return the term of received `bytes` in the `mode` of the port: a

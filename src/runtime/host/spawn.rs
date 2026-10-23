@@ -116,14 +116,43 @@ pub(crate) struct Child {
 /// assert_eq!(spawn(b"/nonexistent", &[], streams).unwrap_err(), SpawnError::Open(libc::ENOENT));
 /// ```
 pub(crate) fn spawn(path: &[u8], args: &[Vec<u8>], streams: Streams) -> Result<Child, SpawnError> {
+    start(path, path, args, streams)
+}
+
+/// Start the command `command` of `open_port({spawn, Command}, Settings)`
+/// as `spawn_start` and `erl_child_setup` do: run `/bin/sh` with the
+/// arguments `sh`, `-c`, and `exec Command` (`sys_drivers.c:474-475`,
+/// `528-544`; `erl_child_setup.c:364-366`). The other steps are the steps
+/// of [`spawn`]. ERTS has no access check for `spawn`; the access check of
+/// `/bin/sh` passes, because `/bin/sh` is executable.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let child = spawn_shell(b"echo hi", streams)?;
+/// ```
+pub(crate) fn spawn_shell(command: &[u8], streams: Streams) -> Result<Child, SpawnError> {
+    let line = [b"exec ".as_slice(), command].concat();
+    start(b"/bin/sh", b"sh", &[b"-c".to_vec(), line], streams)
+}
+
+/// Start the program at the native path `path` with `argv[0]` `arg0` and
+/// the other arguments `args`, as [`spawn`] describes.
+fn start(
+    path: &[u8],
+    arg0: &[u8],
+    args: &[Vec<u8>],
+    streams: Streams,
+) -> Result<Child, SpawnError> {
     let (output, child_output) = pipe().map_err(SpawnError::Open)?;
     let (child_input, input) = pipe().map_err(SpawnError::Open)?;
     let (status, status_writer) = pipe().map_err(SpawnError::Open)?;
     let path = c_string(path);
     // SAFETY: `path` is a NUL-terminated string.
     os_result(unsafe { libc::access(path.as_ptr(), libc::X_OK) }).map_err(SpawnError::Open)?;
+    let arg0 = c_string(arg0);
     let args: Vec<CString> = args.iter().map(|arg| c_string(arg)).collect();
-    let mut argv: Vec<*const c_char> = [path.as_ptr()]
+    let mut argv: Vec<*const c_char> = [arg0.as_ptr()]
         .into_iter()
         .chain(args.iter().map(|arg| arg.as_ptr()))
         .collect();

@@ -232,29 +232,32 @@ struct PortSettings {
     /// (`packet_bytes`, `erl_bif_port.c:849-861`). A small integer N whose
     /// low 32 bits are 1, 2, or 4 also sets it.
     packet: usize,
-    /// The native bytes of the strings of `{args, Args}`, or no bytes
+    /// The native bytes of the strings of `{args, Args}`, or `None`
     /// without it.
-    args: Vec<Vec<u8>>,
+    args: Option<Vec<Vec<u8>>>,
 }
 
 /// Run `erts_internal:open_port(PortName, PortSettings)`, which
 /// `erlang:open_port/2` calls, as `erts_internal_open_port_2` and
 /// `open_port` do (`erl_bif_port.c:60-130`, `795-1171`) for
-/// `{spawn_executable, Name}` (see [`open_driver_port`] for
+/// `{spawn_executable, Name}` and `{spawn, Command}` (see [`open_driver_port`] for
 /// `{spawn_driver, Name}`):
 ///
 /// 1. Read the settings in order (see [`port_settings`]). A list that is
 ///    not proper, an element that ERTS does not accept, and
 ///    `stderr_to_stdout` with `nouse_stdio` give the atom `badopt`.
-/// 2. Read the name. A term that is not `{spawn_executable, Name}`, or a
-///    `Name` that is not a file name (see [`native_name`]), gives the atom
-///    `badarg`.
+/// 2. Read the name. A term that is not `{spawn_executable, Name}` or
+///    `{spawn, Command}`, a `Name` that is not a file name (see
+///    [`native_name`]), and `{args, Args}` with `spawn` give the atom
+///    `badarg`. A first word of `Command` that names a driver opens the
+///    driver (see [`open_driver_port`]).
 /// 3. Check the capabilities of the caller: without a `port` capability
-///    with `spawn` that permits the native bytes of `Name`, the BIF raises
+///    with `spawn` that permits the native bytes of `Name` or `Command`,
+///    the BIF raises
 ///    `error:capability_denied` and starts no program. The constraint
 ///    compares the name as the caller gives it. It does not resolve a
 ///    relative name or a symbolic link.
-/// 4. Start the program (see [`spawn::spawn`]). A program named
+/// 4. Start the program (see [`spawn::spawn`] and [`spawn::spawn_shell`]). A program named
 ///    `inet_gethost` runs in a thread of the node (see [`is_gethost`]). A pipe, the fd limit, and
 ///    the access check give the `erl_errno_id` atom of their failure, for
 ///    example `enoent`.
@@ -272,8 +275,8 @@ struct PortSettings {
 ///
 /// # Errors
 ///
-/// An option that ERTS accepts and PBeam does not support, the port kinds
-/// `spawn` and `fd`, a port without `binary`, and a failed `posix_spawn`
+/// An option that ERTS accepts and PBeam does not support, the port kind
+/// `fd`, a port without `binary`, and a failed `posix_spawn`
 /// return a runtime error. A new atom in a full atom table gives the error
 /// of `AtomTable::put`.
 pub(super) fn open_port(
@@ -284,17 +287,36 @@ pub(super) fn open_port(
     let Some(settings) = port_settings(&context.scheduler.atoms, settings)? else {
         return Ok(Value(Term::static_atom("badopt")));
     };
-    let path = match port_name(&context.scheduler.atoms, name)? {
-        Some(PortName::Executable(path)) => path,
-        Some(PortName::Driver(driver)) => return open_driver_port(context, driver, &settings),
-        None => return Ok(Value(Term::static_atom("badarg"))),
-    };
+    let (path, args, is_command) =
+        match (port_name(&context.scheduler.atoms, name)?, &settings.args) {
+            (Some(PortName::Executable(path)), args) => {
+                (path, args.clone().unwrap_or_default(), false)
+            }
+            // An argument vector only with `spawn_executable`
+            // (`erl_bif_port.c:1086-1092`).
+            (Some(_), Some(_)) | (None, _) => return Ok(Value(Term::static_atom("badarg"))),
+            (Some(PortName::Driver(driver)), None) => {
+                return open_driver_port(context, driver, &settings);
+            }
+            (Some(PortName::Command(command)), None) => {
+                // The first word of the command names a driver, or the spawn
+                // driver runs the command (`io.c:599-622`).
+                if matches!(
+                    first_word(&command),
+                    b"tcp_inet" | b"udp_inet" | b"ram_file_drv" | b"fd"
+                ) {
+                    return open_driver_port(context, command, &settings);
+                }
+                (command, Vec::new(), true)
+            }
+        };
     if !settings.binary {
         return Err(error(
             "unsupported open_port/2 without the binary option: see \"Ports\" in docs/erts-differences.md",
         ));
     }
     let scheduler = &mut *context.scheduler;
+    // The check uses the port name, which the later port operations check.
     let check = denial(
         scheduler,
         CapabilityKind::Port,
@@ -304,11 +326,12 @@ pub(super) fn open_port(
     if let Some(denied) = check? {
         return Ok(denied);
     }
-    let started = if is_gethost(&path) {
-        let args = settings.args.clone();
+    let started = if is_command {
+        spawn::spawn_shell(&path, settings.streams)
+    } else if is_gethost(&path) {
         spawn::serve(move |input, output| gethost::serve(&args, input, output))
     } else {
-        spawn::spawn(&path, &settings.args, settings.streams)
+        spawn::spawn(&path, &args, settings.streams)
     };
     let child = match started {
         Ok(child) => child,
@@ -375,7 +398,11 @@ fn open_driver_port(
     driver: Vec<u8>,
     settings: &PortSettings,
 ) -> Result<BifResult, BeamError> {
-    let socket_type = match driver.as_slice() {
+    // `exit_status` only with the spawn driver (`io.c:625-628`).
+    if settings.exit_status {
+        return Ok(Value(Term::static_atom("badarg")));
+    }
+    let socket_type = match first_word(&driver) {
         b"tcp_inet" => SocketType::Stream,
         b"udp_inet" => SocketType::Datagram,
         _ => {
@@ -396,8 +423,8 @@ fn open_driver_port(
             exit_status: false,
             eof: false,
             packet: 0,
-            args,
-        } if args.is_empty()
+            args: None,
+        }
     );
     if !only_binary {
         return Err(error(
@@ -412,6 +439,12 @@ fn open_driver_port(
     }
     let port = scheduler.open_port(driver, Driver::Inet(Inet::new(socket_type)))?;
     Ok(Value(Term::Port(port)))
+}
+
+/// Return the bytes of `name` before its first space, the driver name that
+/// `erts_open_driver` looks up for `spawn` and `spawn_driver` (`io.c:599-622`).
+fn first_word(name: &[u8]) -> &[u8] {
+    name.split(|&byte| byte == b' ').next().unwrap_or_default()
 }
 
 /// Read the settings of `open_port/2` in order, as `open_port` does
@@ -446,7 +479,7 @@ fn port_settings(atoms: &AtomTable, settings: &Term) -> Result<Option<PortSettin
         exit_status: false,
         eof: false,
         packet: 0,
-        args: Vec::new(),
+        args: None,
     };
     for element in elements {
         let option = match element {
@@ -458,7 +491,7 @@ fn port_settings(atoms: &AtomTable, settings: &Term) -> Result<Option<PortSettin
                     let Some(args) = port_args(atoms, &pair[1]) else {
                         return Ok(None);
                     };
-                    result.args = args;
+                    result.args = Some(args);
                     continue;
                 } else if option.is_static("packet") {
                     // ERTS keeps the small integer in the C `int`
@@ -545,6 +578,8 @@ enum PortName {
     Executable(Vec<u8>),
     /// The native bytes of the driver name of `{spawn_driver, Name}`.
     Driver(Vec<u8>),
+    /// The native bytes of the command of `{spawn, Command}`.
+    Command(Vec<u8>),
 }
 
 /// Return the name of `{spawn_executable, Name}` or `{spawn_driver,
@@ -561,7 +596,7 @@ enum PortName {
 ///
 /// # Errors
 ///
-/// The port kinds `spawn` and `fd` return a runtime error.
+/// The port kind `fd` returns a runtime error.
 fn port_name(atoms: &AtomTable, name: &Term) -> Result<Option<PortName>, BeamError> {
     let Term::Tuple(elements) = name else {
         return Ok(None);
@@ -573,10 +608,12 @@ fn port_name(atoms: &AtomTable, name: &Term) -> Result<Option<PortName>, BeamErr
         [Term::Atom(kind), name] if kind.is_static("spawn_driver") => {
             Ok(native_name(atoms, name, false).map(PortName::Driver))
         }
-        [Term::Atom(kind), ..] if kind.is_one_of(&["spawn", "fd"]) => Err(error(format!(
-            "unsupported open_port/2 port kind {}: see \"Ports\" in docs/erts-differences.md",
-            atoms.name_of(kind)
-        ))),
+        [Term::Atom(kind), name] if kind.is_static("spawn") => {
+            Ok(native_name(atoms, name, false).map(PortName::Command))
+        }
+        [Term::Atom(kind), ..] if kind.is_static("fd") => Err(error(
+            "unsupported open_port/2 port kind fd: see \"Ports\" in docs/erts-differences.md",
+        )),
         _ => Ok(None),
     }
 }
@@ -886,6 +923,7 @@ pub(super) fn port_control(
     let reply = match tcp.control(command, &bytes, caller)? {
         Control::Reply(reply) => Accept::Queued(reply),
         Control::Accept(timeout) => scheduler.tcp_accept(id, tcp, timeout)?,
+        Control::Connect(timeout) => Accept::Queued(scheduler.tcp_connect(id, tcp, timeout)),
         Control::Receive { timeout, length } => {
             let (reply, received) = scheduler.tcp_receive(id, tcp, timeout, length);
             events = Some(received);

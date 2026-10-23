@@ -71,6 +71,49 @@ impl Scheduler {
         ([&[OK][..], &id.to_be_bytes()].concat(), events)
     }
 
+    /// Start the timer of the connect that waits on the port `port` with its
+    /// descriptor `tcp`, for a timeout other than `infinity`
+    /// (inet_drv.c:12111-12112), and return the reply `[1, R1, R0]` of its
+    /// async reference (inet_drv.c:12113-12114). The caller holds the port
+    /// lock of its control.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let reply = scheduler.tcp_connect(port, tcp, u32::MAX);
+    /// ```
+    pub(in crate::runtime) fn tcp_connect(
+        &mut self,
+        port: PortId,
+        tcp: &mut Inet,
+        timeout: u32,
+    ) -> Vec<u8> {
+        let timer = (timeout != INFINITY)
+            .then(|| self.start_port_timer(timeout, |key| Timer::Connect { port, key }));
+        let connector = tcp.stream.connector.as_mut().expect("the connect waits");
+        connector.timer = timer;
+        [&[OK][..], &connector.id.to_be_bytes()].concat()
+    }
+
+    /// End the connect of the timer on the port `port` with `{error,
+    /// timeout}` (see [`Inet::connect_timeout`]). A port that closed and a
+    /// connect that does not hold the timer change nothing.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.tcp_connect_timeout(port, timer);
+    /// ```
+    pub(super) fn tcp_connect_timeout(&mut self, port: PortId, timer: PortTimer) {
+        self.tcp_step(port, |tcp| {
+            tcp.stream
+                .connector
+                .is_some_and(|c| c.timer == Some(timer))
+                .then(|| tcp.connect_timeout())
+        })
+        .expect("a timeout makes no new atom");
+    }
+
     /// End the receive of the timer on the port `port`, open or closing,
     /// with `{error, timeout}` (`tcp_inet_recv_timeout`,
     /// inet_drv.c:11941-11949). A port that terminated changes nothing.
@@ -202,6 +245,37 @@ impl Scheduler {
                     };
                     let message = self.async_message(port, receiver.id, status);
                     vec![(receiver.caller, message)]
+                }
+                Event::Datagram {
+                    receiver,
+                    address,
+                    data,
+                } => {
+                    if let Some(timer) = receiver.timer {
+                        self.cancel_port_timer(timer);
+                    }
+                    // `[H1, ..., H7 | Data]`, all bytes in `list` mode
+                    // (inet_drv.c:4142-4152).
+                    let address = address.into_iter().map(|byte| Term::Integer(byte.into()));
+                    let packet = Term::list_with_tail(address.collect(), tcp.data_term(data));
+                    let status = Term::tuple(vec![Term::static_atom("ok"), packet]);
+                    vec![(
+                        receiver.caller,
+                        self.async_message(port, receiver.id, status),
+                    )]
+                }
+                Event::Connected { connector, result } => {
+                    if let Some(timer) = connector.timer {
+                        self.cancel_port_timer(timer);
+                    }
+                    let status = match result {
+                        Ok(()) => Term::static_atom("ok"),
+                        Err(name) => error_status(Term::Atom(self.atoms.put(&name)?)),
+                    };
+                    vec![(
+                        connector.caller,
+                        self.async_message(port, connector.id, status),
+                    )]
                 }
                 Event::Replied { sender, result } => {
                     let status = match result {

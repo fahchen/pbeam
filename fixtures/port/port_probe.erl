@@ -1,6 +1,6 @@
 -module(port_probe).
 -export([exit_status/0, output/0, command/0, close/0, owner_exit/0, epipe/0, errors/0,
-         nul_name/0, sigchld_ignored/0, packet/0, packet_errors/0, eof/0, monitor/0, unsupported/1, terminal/0, high_fd/0, costs/1, measure/2]).
+         nul_name/0, spawn/0, sigchld_ignored/0, packet/0, packet_errors/0, eof/0, monitor/0, unsupported/1, terminal/0, high_fd/0, costs/1, measure/2]).
 
 %% Each result replaces a port with the atom port, because the port numbers
 %% of ERTS and PBeam differ.
@@ -331,6 +331,35 @@ eof() ->
     [normal(Messages), Open, Write, Exit, PlainMessages, Quiet, Close, PlainExit,
      GethostMessages, flush()].
 
+%% The spawn port kind: a command runs as `sh -c "exec Command"`, and the
+%% port name is the command, and $0 is sh. {args, Args} gives badarg. A command that
+%% the shell does not find exits with 127. A first word that names a
+%% driver opens the driver, and exit_status with a driver gives badarg.
+spawn() ->
+    process_flag(trap_exit, true),
+    Echo = open_port({spawn, "echo hi; exit 3"}, [binary, exit_status]),
+    Name = erlang:port_info(Echo, name),
+    EchoMessages = [receive {Echo, M} -> M end || _ <- [1, 2]],
+    Args = open_port({spawn, <<"echo $0 $#">>}, [binary, exit_status]),
+    ArgsMessages = [receive {Args, M} -> M end || _ <- [1, 2]],
+    Cat = open_port({spawn, cat}, [binary]),
+    true = port_command(Cat, <<"x">>),
+    CatData = receive {Cat, C} -> C end,
+    true = port_close(Cat),
+    Missing = open_port({spawn, "pbeam_no_such_command"}, [binary, exit_status]),
+    MissingStatus = receive {Missing, {exit_status, S}} -> S end,
+    Tcp = open_port({spawn, "tcp_inet"}, [binary]),
+    TcpName = erlang:port_info(Tcp, name),
+    true = port_close(Tcp),
+    Udp = open_port({spawn, "udp_inet x"}, [binary]),
+    UdpName = erlang:port_info(Udp, name),
+    true = port_close(Udp),
+    Errors = [catch_error(fun() -> open_port(Kind, [binary, exit_status]) end)
+              || Kind <- [{spawn, "tcp_inet"}, {spawn, []}, {spawn, 42}, {spawn, "a", b}]]
+        ++ [catch_error(fun() -> open_port(Kind, [binary, {args, Vector}]) end)
+            || Kind <- [{spawn, "true"}, {spawn, "tcp_inet"}, {spawn_driver, "tcp_inet"}], Vector <- [[], ["a"]]],
+    [Name, EchoMessages, ArgsMessages, CatData, MissingStatus, TcpName, UdpName, Errors, flush()].
+
 %% The port name of a binary path ends at its first byte 0.
 nul_name() ->
     Port = open_port({spawn_executable, <<"/bin/sh", 0, "junk">>}, [binary, {args, ["-c", "cat"]}]),
@@ -401,8 +430,8 @@ unsupported(stream) ->
     open_port({spawn_executable, sh()}, [binary, stream]);
 unsupported(list) ->
     open_port({spawn_executable, sh()}, []);
-unsupported(spawn) ->
-    open_port({spawn, "ls"}, [binary]);
+unsupported(fd) ->
+    open_port({fd, 0, 1}, [binary]);
 unsupported(exec) ->
     open_port({spawn_executable, "/"}, [binary, exit_status]);
 unsupported(force) ->
