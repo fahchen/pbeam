@@ -50,3 +50,34 @@ fn ends_the_receive_at_a_failed_read() {
         }]
     );
 }
+
+#[test]
+fn gives_the_error_of_a_failed_read_to_the_owner_of_an_active_socket() {
+    // A read error other than `ERRNO_BLOCK` on an active socket gives
+    // `{udp_error, S, Reason}` (`packet_error_message`,
+    // inet_drv.c:4245-4267, 15484-15488). `udp_inet` has no connect, so
+    // the test connects the host socket to a closed port.
+    let closed = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let to = closed.local_addr().unwrap();
+    drop(closed);
+    let caller = crate::term::ProcessId(1);
+    let mut port = Inet::new(SocketType::Datagram);
+    port.control(0x03f1_a301, &[1, 2, 2], caller).unwrap();
+    port.control(0x03f1_a307, &[22, 0, 0, 0, 1], caller)
+        .unwrap();
+    let socket = port.socket.as_ref().unwrap();
+    socket.connect(&to.into()).unwrap();
+    socket.send(b"x").unwrap();
+    let mut events = Vec::new();
+    for _ in 0..100 {
+        events = port.receive_active_datagrams();
+        if !events.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(
+        events,
+        vec![Event::DatagramError("econnrefused".to_owned())]
+    );
+}
