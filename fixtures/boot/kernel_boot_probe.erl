@@ -1,7 +1,8 @@
 -module(kernel_boot_probe).
+-compile(nowarn_deprecated_catch).
 -behaviour(application).
 -behaviour(supervisor).
--export([main/0, main/1, lookup/0, gethost/0, supports/0, start/2, stop/1, init/1]).
+-export([main/0, main/1, lookup/0, gethost/0, supports/0, socket/0, start/2, stop/1, init/1]).
 
 %% `erl -noshell -boot start_clean -pa fixtures/boot -s kernel_boot_probe
 %% main -kernel logger_level warning` runs main/0 in the boot process of init after the boot script
@@ -96,6 +97,73 @@ supports() ->
                     prim_socket:is_supported(options, {socket, reuseaddr}),
                     prim_socket:is_supported(other, local)}),
     init:stop().
+
+%% `erl -noshell -boot start_clean -pa fixtures/boot -s kernel_boot_probe
+%% socket -kernel logger_level warning` runs socket/0. It opens, binds,
+%% and closes sockets with socket:open/2,3,4, socket:bind/2,
+%% socket:sockname/1, and socket:close/1, and displays socket:info/0,1 and
+%% the error returns. It replaces each socket, pid, and port number that
+%% differs between runs with an atom or a boolean. It displays only the
+%% results that are the same on Linux and macOS.
+socket() ->
+    process_flag(trap_exit, true),
+    Owner = fun(Info) -> maps:update_with(owner, fun(P) -> P =:= self() end, Info) end,
+    Info0 = socket:info(),
+    {ok, S} = socket:open(inet, stream, tcp),
+    Opened = Owner(socket:info(S)),
+    Bound = socket:bind(S, #{family => inet, addr => loopback, port => 0}),
+    {ok, #{family := inet, addr := {127, 0, 0, 1}, port := Port}} = socket:sockname(S),
+    Listed = lists:member(S, socket:which_sockets()),
+    During = maps:get(counters, socket:info()),
+    BoundInfo = maps:get(rstates, socket:info(S)),
+    {_, Ref} = S,
+    Early = (catch prim_socket:finalize_close(Ref)),
+    Closed = socket:close(S),
+    After = Owner(socket:info(S)),
+    Again = [socket:close(S), socket:sockname(S),
+             socket:bind(S, #{family => inet, addr => loopback}),
+             prim_socket:finalize_close(Ref), lists:member(S, socket:which_sockets())],
+    {ok, D} = socket:open(inet6, dgram, #{use_registry => false}),
+    Wrap = socket:bind(D, #{family => inet6, addr => loopback, port => 65536}),
+    {ok, #{family := inet6, addr := {0, 0, 0, 0, 0, 0, 0, 1}, port := Port6,
+           flowinfo := 0, scope_id := 0}} = socket:sockname(D),
+    Unlisted = lists:member(D, socket:which_sockets()),
+    {_, DRef} = D,
+    ok = prim_socket:close(DRef),
+    ok = prim_socket:finalize_close(DRef),
+    {ok, U} = socket:open(local, stream),
+    Path = list_to_binary("/tmp/pbeam_socket_probe_" ++ os:getpid()),
+    _ = file:delete(Path),
+    Local = [socket:sockname(U), socket:bind(U, #{family => local, path => Path}),
+             socket:sockname(U) =:= {ok, #{family => local, path => Path}},
+             maps:get(domain, socket:info(U))],
+    ok = socket:close(U),
+    _ = file:delete(Path),
+    {ok, B} = socket:open(inet, dgram),
+    BindErrors = [socket:bind(B, A) || A <- [#{family => inet, addr => {1, 2, 3}},
+                                             #{family => inet, port => 1 bsl 40},
+                                             #{family => inet, addr => {256, 0, 0, 1}},
+                                             #{family => inet6, addr => {1, 2}},
+                                             #{family => local, path => binary:copy(<<"a">>, 200)},
+                                             #{family => inet, addr => {1, 2, 3, 4}},
+                                             #{family => foo}, #{}, foo]],
+    ok = socket:close(B),
+    OpenErrors = [socket:open(foo, stream), socket:open(inet, foo),
+                  socket:open(inet, stream, foo),
+                  catch socket:open(inet, stream, 1 bsl 40),
+                  socket:open(1 bsl 40, stream), socket:open(inet, 1 bsl 40)],
+    Badargs = [catch prim_socket:info(make_ref()), catch prim_socket:bind(make_ref(), #{family => inet}),
+               catch prim_socket:sockname(foo), catch prim_socket:close(make_ref()),
+               catch prim_socket:finalize_close(make_ref()), catch prim_socket:finalize_close(foo)],
+    erlang:display({socket, Info0, Opened, Bound, Port > 0, Listed, During, BoundInfo,
+                    element(1, element(2, Early)), Closed, After, Again, Wrap, Port6 > 0,
+                    Unlisted, Local, BindErrors,
+                    [strip(E) || E <- OpenErrors], [strip(E) || E <- Badargs],
+                    maps:get(counters, socket:info())}),
+    init:stop().
+
+strip({'EXIT', {Reason, _}}) -> {'EXIT', Reason};
+strip(Other) -> Other.
 
 report() ->
     Controller = whereis(application_controller),

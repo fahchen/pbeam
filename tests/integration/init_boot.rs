@@ -378,6 +378,24 @@ fn reports_the_socket_support_of_the_host_at_the_kernel_boot_as_pinned_erts() {
     assert_eq!(node, reference, "PBeam");
 }
 
+#[test]
+fn opens_binds_and_closes_sockets_at_the_kernel_boot_as_pinned_erts() {
+    // `kernel_boot_probe:socket/0` runs `socket:open/2,3,4`,
+    // `socket:bind/2`, `socket:sockname/1`, `socket:close/1`, and
+    // `socket:info/0,1` on the NIFs `nif_open/4`, `nif_bind/2`,
+    // `nif_sockname/1`, `nif_close/1`, `nif_finalize_close/1`, and
+    // `nif_info/0,1` (prim_socket_nif.c:4546-4743, 5733-5960, 13468-13545;
+    // unix_socket_syncio.c:1689-1938, 4544-4853), the socket registry
+    // messages of an open and a close (prim_socket_nif.c:17300-17338), the
+    // global counters (prim_socket_nif.c:17127-17218), and the error
+    // returns. The probe displays only the results that are the same on
+    // Linux and macOS.
+    let (reference, status, node) = run_kernel_boot("socket", false, &["{socket,"]);
+    assert_eq!(status, Some(0), "ERTS");
+    assert!(reference.starts_with("{socket,#{counters=>"), "{reference}");
+    assert_eq!(node, reference, "PBeam");
+}
+
 /// The pinned modules of the socket NIF libraries, which the pinned ERTS
 /// preloads (erts/emulator/Makefile.in:804-817), and which the kernel boot
 /// loads as preloaded modules.

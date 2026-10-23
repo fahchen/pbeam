@@ -519,7 +519,8 @@ fn openssl_version() -> &'static str {
 /// assert_eq!(load(&info, &atoms), 0);
 /// assert_eq!(load(&Term::Integer(302), &atoms), 205);
 /// ```
-pub(super) fn load(load_info: &Term, atoms: &AtomTable) -> i32 {
+pub(super) fn load(load_info: &Term, scheduler: &Scheduler) -> i32 {
+    let atoms = &scheduler.atoms;
     let Term::Tuple(elements) = load_info else {
         return 205;
     };

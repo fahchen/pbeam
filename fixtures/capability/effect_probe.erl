@@ -3,6 +3,7 @@
 -include_lib("kernel/include/file.hrl").
 -compile({nowarn_deprecated_function, [{erlang, now, 0}]}).
 -export([
+    socket_open/0,
     spawn/0,
     spawn_system_process/0,
     spawn_link/0,
@@ -1069,3 +1070,8 @@ badarg(Call) ->
     end.
 
 done() -> ok.
+
+%% prim_socket:open/4 calls nif_open/4, which opens a host socket. In a run
+%% with a policy, PBeam stops the run for an open by a runtime process.
+socket_open() ->
+    prim_socket:open(inet, stream, 0, #{}).
