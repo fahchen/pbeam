@@ -649,69 +649,80 @@ fn decode_ber_tlv_raw(scheduler: &mut Scheduler, data: &Term) -> Result<BifResul
 /// assert!(matches!(encode_ber_tlv(&mut scheduler, &tlv)?, BifResult::Value(_)));
 /// ```
 fn encode_ber_tlv(scheduler: &mut Scheduler, tlv: &Term) -> Result<BifResult, BeamError> {
-    match ber_encode(tlv) {
-        Some(bytes) => Ok(BifResult::Value(Term::binary(bytes))),
+    let mut reversed = Vec::new();
+    match ber_encode(tlv, &mut reversed) {
+        Some(()) => {
+            reversed.reverse();
+            Ok(BifResult::Value(Term::binary(reversed)))
+        }
         None => error_tuple(scheduler, Term::Integer(-1)),
     }
 }
 
 /// `ber_encode` (`asn1_erl_nif.c:1027-1100`): encode `{Tag, Value}`, where
-/// a list `Value` is constructed and a binary `Value` is primitive. The
-/// C function reads the first two elements of a tuple without a check of
-/// the arity; PBeam rejects a tuple of fewer than two elements.
-fn ber_encode(tlv: &Term) -> Option<Vec<u8>> {
+/// a list `Value` is constructed and a binary `Value` is primitive. As the
+/// C function writes each chunk from its end, the bytes go to `reversed`
+/// in reverse order: the value, the length, then the tag, and the elements
+/// of a list from the last one. The C function reads the first two
+/// elements of a tuple without a check of the arity; PBeam rejects a tuple
+/// of fewer than two elements.
+fn ber_encode(tlv: &Term, reversed: &mut Vec<u8>) -> Option<()> {
     let Term::Tuple(elements) = tlv else {
         return None;
     };
     let (tag, value) = (elements.first()?, elements.get(1)?);
-    let (form, content) = if value.is_nil() || value.cons_cell().is_some() {
-        let mut content = Vec::new();
-        for element in value.proper_list()? {
-            content.extend(ber_encode(element)?);
+    let start = reversed.len();
+    let form = if value.is_nil() || value.cons_cell().is_some() {
+        let items: Vec<&Term> = value.proper_list()?.collect();
+        for element in items.into_iter().rev() {
+            ber_encode(element, reversed)?;
         }
-        (0x20, content)
+        0x20
     } else {
-        (0, value.binary_bytes()?.to_vec())
+        reversed.extend(value.binary_bytes()?.iter().rev());
+        0
     };
     let Term::Integer(tag) = tag else {
         return None;
     };
     let tag = u32::try_from(*tag).ok()?;
-    let mut bytes = ber_encode_tag(tag, form);
-    ber_encode_length(content.len(), &mut bytes);
-    bytes.extend(content);
-    Some(bytes)
+    ber_encode_length(reversed.len() - start, reversed);
+    ber_encode_tag(tag, form, reversed);
+    Some(())
 }
 
 /// `ber_encode_tag` (`asn1_erl_nif.c:1102-1135`): the class from bits 16
-/// and 17 of `tag`, and the tag number from its low 16 bits.
-fn ber_encode_tag(tag: u32, form: u8) -> Vec<u8> {
+/// and 17 of `tag`, and the tag number from its low 16 bits, in reverse
+/// order.
+fn ber_encode_tag(tag: u32, form: u8, reversed: &mut Vec<u8>) {
     let head = form | ((tag & 0x30000) >> 10) as u8;
-    let number = tag & 0xffff;
+    let mut number = tag & 0xffff;
     if number <= 30 {
-        return vec![head | number as u8];
-    }
-    let mut bytes = vec![head | 0x1f];
-    let mut groups = vec![(number & 127) as u8];
-    let mut rest = number >> 7;
-    while rest > 0 {
-        groups.push((rest & 127) as u8 | 0x80);
-        rest >>= 7;
-    }
-    bytes.extend(groups.into_iter().rev());
-    bytes
-}
-
-/// `ber_encode_length` (`asn1_erl_nif.c:1137-1163`).
-fn ber_encode_length(size: usize, bytes: &mut Vec<u8>) {
-    if size < 128 {
-        bytes.push(size as u8);
+        reversed.push(head | number as u8);
         return;
     }
-    let significant = size.to_be_bytes();
-    let start = significant.iter().position(|&byte| byte != 0).unwrap_or(0);
-    bytes.push(0x80 | (significant.len() - start) as u8);
-    bytes.extend(&significant[start..]);
+    reversed.push((number & 127) as u8);
+    number >>= 7;
+    while number > 0 {
+        reversed.push((number & 127) as u8 | 0x80);
+        number >>= 7;
+    }
+    reversed.push(head | 0x1f);
+}
+
+/// `ber_encode_length` (`asn1_erl_nif.c:1137-1163`), in reverse order.
+fn ber_encode_length(mut size: usize, reversed: &mut Vec<u8>) {
+    if size < 128 {
+        reversed.push(size as u8);
+        return;
+    }
+    let mut chunks = 0u8;
+    while size > 0 {
+        reversed.push((size & 0xff) as u8);
+        size >>= 8;
+        chunks += 1;
+    }
+    reversed.push(chunks | 0x80);
 }
 
 #[cfg(test)]
