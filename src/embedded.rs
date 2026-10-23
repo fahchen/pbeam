@@ -241,7 +241,7 @@ fn boot_release(
     version: &str,
     options: Option<&std::ffi::OsStr>,
 ) -> std::io::Error {
-    use std::{ffi::OsStr, os::unix::ffi::OsStrExt, os::unix::process::CommandExt};
+    use std::os::unix::process::CommandExt;
 
     let erts = format!("erts-{erts}");
     let release = directory.join("releases").join(version);
@@ -256,13 +256,7 @@ fn boot_release(
     command.arg("--extracted-root").arg(directory);
     command.args(["--", "-noshell"]);
     if let Some(options) = options {
-        command.args(
-            options
-                .as_bytes()
-                .split(u8::is_ascii_whitespace)
-                .filter(|word| !word.is_empty())
-                .map(OsStr::from_bytes),
-        );
+        command.args(option_words(options));
     }
     command.args(["-s", entry.module, entry.function]);
     command.args(["-mode", "embedded", "-config"]);
@@ -274,6 +268,18 @@ fn boot_release(
     command.env("RELEASE_ROOT", directory);
     command.env("RELEASE_SYS_CONFIG", release.join("sys"));
     command.exec()
+}
+
+/// Return the words of `options` as the shell splits an unquoted variable
+/// with the default `IFS`: at space, tab, and newline only.
+fn option_words(options: &std::ffi::OsStr) -> Vec<&std::ffi::OsStr> {
+    use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+    options
+        .as_bytes()
+        .split(|byte| matches!(byte, b' ' | b'\t' | b'\n'))
+        .filter(|word| !word.is_empty())
+        .map(OsStr::from_bytes)
+        .collect()
 }
 
 /// Remove the extracted `directory`, and leave a directory that stays.
