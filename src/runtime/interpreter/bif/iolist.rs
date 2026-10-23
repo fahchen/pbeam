@@ -38,6 +38,50 @@ const L2B_MIN_REDS: i64 = 1000;
 /// (`erl_iolist.c:35`), `CONTEXT_REDS / 40`.
 const L2B_RESCHED_REDS: i64 = 100;
 
+/// The unit of the bitstrings that are iodata, as the `Unit` of
+/// `generic_iolist_size` (`erl_iolist.c:182-184`, `217-219`): bytes for the
+/// binary BIFs, and bits for `erlang:list_to_bitstring/1`. ERTS has only
+/// these two units (`erl_iolist.c:864`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Unit {
+    /// The unit 1: a bitstring of each size.
+    Bit,
+    /// The unit 8: a bitstring of a whole number of bytes.
+    Byte,
+}
+
+impl Unit {
+    /// Return the unit of `bits` bits, or `None` for a number that is not 1
+    /// or 8.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Unit::from_bits(8), Some(Unit::Byte));
+    /// assert_eq!(Unit::from_bits(2), None);
+    /// ```
+    pub(super) fn from_bits(bits: i64) -> Option<Unit> {
+        match bits {
+            1 => Some(Unit::Bit),
+            8 => Some(Unit::Byte),
+            _ => None,
+        }
+    }
+
+    /// Return the number of bits of this unit.
+    fn bits(self) -> i64 {
+        match self {
+            Unit::Bit => 1,
+            Unit::Byte => 8,
+        }
+    }
+
+    /// Return whether the size of `binary` is a multiple of this unit.
+    fn holds(self, binary: &Binary) -> bool {
+        self == Unit::Bit || binary.bit_size().is_multiple_of(8)
+    }
+}
+
 /// How a walk of [`Walk::run`] ends.
 #[derive(Debug, PartialEq)]
 enum Step {
@@ -64,12 +108,10 @@ struct Walk<'a> {
     /// The rests of the lists above the current list, as the `ESTACK` of
     /// the walk.
     stack: Vec<&'a Term>,
-    /// The unit of the bitstrings that are iodata: 8 for the binary BIFs,
-    /// and 1 for `erlang:list_to_bitstring/1`, as the `Unit` of
-    /// `generic_iolist_size` (`erl_iolist.c:182-184`, `217-219`). A walk of
-    /// unit 1 counts the offset of a binary in bits, and each other walk
+    /// The unit of the bitstrings that are iodata. A walk of [`Unit::Bit`]
+    /// counts the offset of a binary in bits, and a walk of [`Unit::Byte`]
     /// counts it in bytes.
-    unit: usize,
+    unit: Unit,
 }
 
 impl<'a> Walk<'a> {
@@ -87,27 +129,28 @@ impl<'a> Walk<'a> {
             current: term,
             offset: 0,
             stack: stack.to_vec(),
-            unit: 8,
+            unit: Unit::Byte,
         }
     }
 
-    /// Return this walk with the unit 1, so that a bitstring of each size is
+    /// Return this walk with the unit [`Unit::Bit`], so that a bitstring of each size is
     /// iodata, as for `erlang:list_to_bitstring/1`.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(Walk::new(&Term::nil(), &[]).bits().unit, 1);
+    /// assert_eq!(Walk::new(&Term::nil(), &[]).bits().unit, Unit::Bit);
     /// ```
     fn bits(mut self) -> Self {
-        self.unit = 1;
+        self.unit = Unit::Bit;
         self
     }
 
-    /// Return whether `term` is a bitstring whose size is a multiple of the
-    /// unit of this walk.
+    /// Return whether `term` is a bitstring that is iodata for the unit of
+    /// this walk: each bitstring for [`Unit::Bit`], and a bitstring of a
+    /// whole number of bytes for [`Unit::Byte`].
     fn is_leaf_binary(&self, term: &Term) -> bool {
-        matches!(term, Term::Binary(binary) if self.unit == 1 || binary.bit_size().is_multiple_of(8))
+        matches!(term, Term::Binary(binary) if self.unit.holds(binary))
     }
 
     /// Walk the iodata with `steps` steps, as `generic_iolist_size` and
@@ -199,7 +242,7 @@ impl<'a> Walk<'a> {
     /// ```
     fn term(&self) -> (Term, Term) {
         let current = match self.current {
-            Term::Binary(bits) if self.offset > 0 && self.unit == 1 => {
+            Term::Binary(bits) if self.offset > 0 && self.unit == Unit::Bit => {
                 Term::Binary(bits.bits(self.offset, bits.bit_size()))
             }
             Term::Binary(bytes) if self.offset > 0 => {
@@ -570,7 +613,7 @@ pub(super) fn iolist_to_binary(
     if term.is_binary() {
         return Ok(Value(term.clone()));
     }
-    list_to_bitstring(scheduler, term, "iolist_to_binary", 8)
+    list_to_bitstring(scheduler, term, "iolist_to_binary", Unit::Byte)
 }
 
 /// Run `erlang:list_to_binary/1` as ERTS `list_to_binary_1` does
@@ -593,7 +636,7 @@ pub(super) fn list_to_binary(
     scheduler: &mut Scheduler,
     term: &Term,
 ) -> Result<BifResult, BeamError> {
-    list_to_bitstring(scheduler, term, "list_to_binary", 8)
+    list_to_bitstring(scheduler, term, "list_to_binary", Unit::Byte)
 }
 
 /// Run `erlang:list_to_bitstring/1` as ERTS `list_to_bitstring_1` does
@@ -615,7 +658,7 @@ pub(super) fn list_to_bitstring_1(
     scheduler: &mut Scheduler,
     term: &Term,
 ) -> Result<BifResult, BeamError> {
-    list_to_bitstring(scheduler, term, "list_to_bitstring", 1)
+    list_to_bitstring(scheduler, term, "list_to_bitstring", Unit::Bit)
 }
 
 /// Run the shared part of `erlang:iolist_to_binary/1`,
@@ -635,14 +678,14 @@ pub(super) fn list_to_bitstring_1(
 /// ```rust,ignore
 /// scheduler.current_process_mut().fcalls = 4000;
 /// let list = Term::list_from(vec![Term::Integer(1), Term::binary(vec![2])]);
-/// assert!(matches!(list_to_bitstring(&mut scheduler, &list, "list_to_binary", 8)?, BifResult::Value(Term::Binary(bytes)) if bytes == [1, 2]));
-/// assert!(matches!(list_to_bitstring(&mut scheduler, &Term::static_atom("a"), "iolist_to_binary", 8)?, BifResult::Raise { .. }));
+/// assert!(matches!(list_to_bitstring(&mut scheduler, &list, "list_to_binary", Unit::Byte)?, BifResult::Value(Term::Binary(bytes)) if bytes == [1, 2]));
+/// assert!(matches!(list_to_bitstring(&mut scheduler, &Term::static_atom("a"), "iolist_to_binary", Unit::Byte)?, BifResult::Raise { .. }));
 /// ```
 fn list_to_bitstring(
     scheduler: &mut Scheduler,
     term: &Term,
     bif: &'static str,
-    unit: usize,
+    unit: Unit,
 ) -> Result<BifResult, BeamError> {
     let process = scheduler.current_process_mut();
     let mut reds_left = process.bif_reductions_or_zero() as i64;
@@ -660,9 +703,7 @@ fn list_to_bitstring(
         return Ok(Value(Term::binary(Vec::new())));
     }
     match term.cons_cell() {
-        Some((binary @ Term::Binary(bits), tail))
-            if tail.is_nil() && bits.bit_size() % unit == 0 =>
-        {
+        Some((binary @ Term::Binary(bits), tail)) if tail.is_nil() && unit.holds(bits) => {
             Ok(Value(binary.clone()))
         }
         Some(_) => Ok(l2b_size(process, reds_left, term, term, &[], 0, unit)),
@@ -693,7 +734,7 @@ fn list_to_bitstring(
 /// ```rust,ignore
 /// process.fcalls = 4000;
 /// let list = Term::list_from(vec![Term::Integer(1)]);
-/// let binary = l2b_size(&mut process, 4000, &list, &list, &[], 0, 8);
+/// let binary = l2b_size(&mut process, 4000, &list, &list, &[], 0, Unit::Byte);
 /// assert!(matches!(binary, BifResult::Value(Term::Binary(bytes)) if bytes == [1]));
 /// assert_eq!(process.fcalls, 3998);
 /// ```
@@ -704,7 +745,7 @@ pub(super) fn l2b_size(
     term: &Term,
     stack: &[&Term],
     mut size: usize,
-    unit: usize,
+    unit: Unit,
 ) -> BifResult {
     let init = STEPS_PER_RED * reds_left;
     let mut steps = init;
@@ -726,7 +767,7 @@ pub(super) fn l2b_size(
             term,
             stack,
             Term::Integer(size as i64),
-            Term::Integer(unit as i64),
+            Term::Integer(unit.bits()),
         ]);
     }
     let cost = walk_cost(init, steps);

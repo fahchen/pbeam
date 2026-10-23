@@ -1281,6 +1281,12 @@ impl BeamProgram {
             ) if phase.is_static("size")
                 && let Some(stack) = stack.proper_list() =>
             {
+                // Only `l2b_size` makes this trap, with the unit 1 or 8.
+                let unit = iolist::Unit::from_bits(*unit).ok_or_else(|| {
+                    error(format!(
+                        "invariant error: the unit {unit} of a list_to_bitstring trap is not 1 or 8"
+                    ))
+                })?;
                 let reds_left = process.bif_reductions_left()? as i64;
                 Ok(iolist::l2b_size(
                     process,
@@ -1289,7 +1295,7 @@ impl BeamProgram {
                     term,
                     &stack.collect::<Vec<_>>(),
                     *size as usize,
-                    *unit as usize,
+                    unit,
                 ))
             }
             ("erlang", "bif_handle_signals_return", [_, value]) => {
