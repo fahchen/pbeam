@@ -54,9 +54,21 @@ start(Module, Function, Flags) ->
     ok = pbeam_cap:serve(whereis(user), io),
     ok = pbeam_cap:serve(whereis(standard_error), io),
     ok = pbeam_cap:enter_runtime(Module, Function),
-    Result = Module:Function(),
+    Result = try Module:Function()
+             catch
+                 Class:Reason:Stack ->
+                     erlang:raise(Class, Reason, entry_stack(Stack))
+             end,
     at_exit(),
     Result.
+
+%% Drop the frame of this module from the stack trace of an exception of
+%% the entry, and raise it again as start_it/1 does (init.erl:1563-1566).
+%% The call of the entry is not a tail call, because at_exit/0 runs after
+%% it, so its stack trace holds a frame of start/3. The root exit reason
+%% keeps only the frames of the entry, as before the call of at_exit/0.
+entry_stack(Stack) ->
+    [Frame || {M, _, _, _} = Frame <- Stack, M =/= ?MODULE].
 
 %% When the elixir application runs, finish as elixir -e does after its
 %% commands: 'Elixir.Kernel.CLI':run/1 runs the at_exit callbacks, calls
