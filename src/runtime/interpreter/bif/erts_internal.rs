@@ -1973,31 +1973,3 @@ pub(super) fn erts_debug_same(left: &Term, right: &Term) -> Result<BifResult, Be
         )),
     }
 }
-
-/// Return the ERTS heap word size of `term`, as `erts_debug:flat_size/1`
-/// does (`copy.c:88`). PBeam does not keep the ERTS form of a binary, so the
-/// word count of a binary can differ from ERTS. `erts_debug:size/1` gives
-/// the size of a binary with this BIF (`erts_debug.erl:289-297`): a binary
-/// in a call from module `erts_debug` stops the run with an unsupported
-/// error (`docs/erts-differences.md`).
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// assert_eq!(flat_size(scheduler, &Term::Float(1.0))?, Value(Term::Integer(2)));
-/// ```
-pub(super) fn flat_size(scheduler: &mut Scheduler, term: &Term) -> Result<BifResult, BeamError> {
-    if let Term::Binary(_) = term
-        && let Some(module_id) = scheduler
-            .current_process_mut()
-            .frames
-            .last()
-            .map(|frame| frame.module_id)
-        && scheduler.code.module_by_id(module_id)?.name == "erts_debug"
-    {
-        return Err(error(
-            "erts_debug:size/1 cannot give the ERTS word count of a binary".to_owned(),
-        ));
-    }
-    Ok(Value(Term::Integer(crate::term::flat_size(term) as i64)))
-}

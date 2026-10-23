@@ -130,16 +130,13 @@ fn fails_on_the_term_type_of_a_binary() {
 }
 
 #[test]
-fn fails_on_the_size_of_a_binary() {
-    // ERTS gives 8 for this binary built by appends, but PBeam does not keep
-    // the ERTS form of a binary, so `erts_debug:size/1` stops the run.
+fn counts_a_binary_as_flat_size_does() {
+    // `size/1` counts a binary with `erts_debug:flat_size/1`
+    // (`erts_debug.erl:289-297`). PBeam does not keep the ERTS form of a
+    // binary: that is the recorded `flat_size/1` binary-form departure
+    // (`docs/erts-differences.md`, row "Message copy", #1103). ERTS gives 8
+    // for this binary built by appends, and PBeam gives 3.
     assert_eq!(reference_of("binary_size"), "8\n");
-    let error = program()
-        .execute("size_probe", "binary_size", &[])
-        .unwrap_err()
-        .to_string();
-    assert!(
-        error.contains("erts_debug:size/1 cannot give the ERTS word count of a binary"),
-        "{error}"
-    );
+    let value = program().execute("size_probe", "binary_size", &[]).unwrap();
+    assert_eq!(value.term, pbeam_runtime::Term::Integer(3));
 }
