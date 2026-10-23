@@ -50,7 +50,7 @@ fn results() -> Vec<(&'static str, String)> {
             "links",
             "[{true,none},{true,none},{false,down},{false,down},{true,t},{false,down},{false,down},{true,none}]".to_owned(),
         ),
-        ("errors", format!("[{}]", vec!["badarg"; 29].join(","))),
+        ("errors", format!("[{}]", vec!["badarg"; 32].join(","))),
     ]
 }
 

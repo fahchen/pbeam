@@ -1723,6 +1723,13 @@ pub(super) fn spawn_opt(
         .or(monitor_error)
         .or(scheduler_error)
     {
+        // `erl_create_process` checks the MFA types before it uses an option
+        // (`erl_process.c:12490-12492`).
+        if !matches!((module, function), (Term::Atom(_), Term::Atom(_)))
+            || arguments.proper_list().is_none()
+        {
+            return Ok(BifResult::badarg());
+        }
         return Err(unsupported);
     }
     spawn_options.flags.heap_flags = use_heap.then_some(heap);

@@ -62,7 +62,10 @@ errors() ->
          [{scheduler, Over}], [{link, [x]}], [{link, a}], [{monitor, x}],
          [{reply, yes}], [{reply_tag, x}], [sensitive], [{sensitive, true}],
          [{a, b, c}], [foo], [{1, 2}], [link | x], x,
-         [{monitor, [{alias, demonitor}]}, foo], [{link, [priority]}, foo]]].
+         [{monitor, [{alias, demonitor}]}, foo], [{link, [priority]}, foo]]]
+    ++ [try erlang:spawn_opt(M, F, A, [{scheduler, 1}]) of _ -> ok
+        catch error:Reason -> Reason end
+        || {M, F, A} <- [{1, report, []}, {?MODULE, 1, []}, {?MODULE, report, x}]].
 
 %% An option that PBeam does not support, and a heap size at or above the
 %% largest heap size, where ERTS stops the emulator (erl_gc.c:335).
