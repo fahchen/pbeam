@@ -2341,12 +2341,12 @@ fn changes_nothing_on_a_port_that_closed() {
     // A handle that a scheduler took before the close sees the closed port
     // under the port lock.
     let cell = node.port(port).unwrap();
-    scheduler.close_port(port, atom("normal"));
+    assert!(scheduler.close_port(port, atom("normal")));
     assert!(crate::runtime::port::lock(&cell).is_none());
     assert!(node.with_port(port, |_| ()).is_none());
     // Each operation of a closed port, as after a close of another
     // scheduler in between, changes nothing and does not panic.
-    scheduler.close_port(port, atom("normal"));
+    assert!(!scheduler.close_port(port, atom("normal")));
     scheduler.driver_exit(port, atom("normal"));
     assert!(!scheduler.connect_port(port, owner));
     scheduler.tcp_flushed(port);

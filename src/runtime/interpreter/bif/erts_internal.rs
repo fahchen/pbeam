@@ -775,10 +775,11 @@ pub(super) fn port_close(
     scheduler
         .current_process_mut()
         .bump_reductions(PORT_REDUCTIONS);
-    // A close of another scheduler in between leaves nothing to close (see
-    // `Scheduler::exit_port`).
-    scheduler.close_port(id, Term::static_atom("normal"));
-    Ok(signals_return(scheduler, port, Term::static_atom("true")))
+    // Of two closes on two schedulers, only the first closes the port; the
+    // other gives `badarg`, as in ERTS (io.c:2241-2290).
+    let closed = scheduler.close_port(id, Term::static_atom("normal"));
+    let result = if closed { "true" } else { "badarg" };
+    Ok(signals_return(scheduler, port, Term::static_atom(result)))
 }
 
 /// The only command that the control of the spawn driver runs

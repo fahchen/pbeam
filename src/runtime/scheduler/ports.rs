@@ -130,27 +130,33 @@ impl Scheduler {
         if let Some(port) = port::inet_port(&handles, fd, Inet::stream_receive_fd) {
             return self.tcp_receive_ready(port);
         }
-        let Some((id, owner, event)) = port::read(&handles, fd) else {
+        let Some((id, owner, event, slot)) = port::read(&handles, fd) else {
             return Ok(());
         };
-        drop(handles);
-        match event {
+        // The messages go out under the port lock; the lock is released
+        // before the port closes at its end of file.
+        let end = match event {
             PortEvent::Data(parts) => {
                 for bytes in parts {
                     self.port_send(owner, port_message(id, "data", Term::binary(bytes)));
                 }
+                false
             }
-            PortEvent::EndOfFile => self.port_end_of_file(id),
+            PortEvent::EndOfFile => true,
             PortEvent::ExitStatus(Some(status)) => {
                 let status = Term::Integer(status.into());
                 self.port_send(owner, port_message(id, "exit_status", status));
-                self.port_end_of_file(id);
+                true
             }
             PortEvent::ExitStatus(None) => {
                 return Err(error(
                     "unsupported exit status of a port program after os:set_signal(sigchld, ignore): see \"Ports\" in docs/erts-differences.md",
                 ));
             }
+        };
+        drop(slot);
+        if end {
+            self.port_end_of_file(id);
         }
         Ok(())
     }
@@ -224,8 +230,8 @@ impl Scheduler {
     /// ```rust,ignore
     /// scheduler.close_port(port, Term::static_atom("normal"));
     /// ```
-    pub(in crate::runtime) fn close_port(&mut self, id: PortId, reason: Term) {
-        self.exit_port(id, reason, true);
+    pub(in crate::runtime) fn close_port(&mut self, id: PortId, reason: Term) -> bool {
+        self.exit_port(id, reason, true)
     }
 
     /// Close the open port `id` with the reason `reason` from its driver,
@@ -240,13 +246,17 @@ impl Scheduler {
     /// scheduler.fail_port(port, Term::static_atom("einval"));
     /// ```
     pub(super) fn fail_port(&mut self, id: PortId, reason: Term) {
-        self.exit_port(id, reason, false);
+        let _ = self.exit_port(id, reason, false);
     }
 
     /// Close the open port `id` with the reason `reason` (see
     /// [`Self::close_port`]), and keep a port that flushes in the `CLOSING`
     /// state only with `flush`.
-    fn exit_port(&mut self, id: PortId, reason: Term, flush: bool) {
+    /// Return true when this exit closed an open port, false for a port
+    /// that closed before or is in the `CLOSING` state, so that one of two
+    /// concurrent `erlang:port_close/1` calls gives `badarg`
+    /// (io.c:2241-2290).
+    fn exit_port(&mut self, id: PortId, reason: Term, flush: bool) -> bool {
         // The port lock comes first. The table lock is taken only after the
         // port lock is released, to remove the port.
         let cell = self.node.port(id);
@@ -254,8 +264,9 @@ impl Scheduler {
         // A port that closed before, also on another scheduler, sends no
         // second exit.
         let Some(port) = slot.as_mut().and_then(|slot| slot.as_mut()) else {
-            return;
+            return false;
         };
+        let open = !port.closing;
         // `erts_deliver_port_exit` sets `CLOSING` for each queue that holds
         // bytes before `flush_port` (io.c:3939-3948). With `linger {true,
         // 0}`, `tcp_inet_flush` drops the queue and the port terminates with
@@ -304,6 +315,7 @@ impl Scheduler {
         if let Some(port) = port {
             self.stop_port(id, port);
         }
+        open
     }
 
     /// Close the open port `id` with the reason `reason` from its driver,

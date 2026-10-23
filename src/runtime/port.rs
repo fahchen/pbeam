@@ -412,33 +412,38 @@ pub(super) fn inet_port(
 
 /// Read the pipe `fd` of a spawn port of `handles`, and return the port
 /// and the event of the read, or `None` when the read gives nothing to
-/// deliver. The read adds the bytes to the input count of the port.
+/// deliver. The read adds the bytes to the input count of the port. The
+/// lock of the port stays held (see [`Read`]).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// let (id, event) = read(&handles, fd).unwrap();
 /// ```
-pub(super) fn read(
-    handles: &[(PortId, PortCell)],
-    fd: c_int,
-) -> Option<(PortId, ProcessId, PortEvent)> {
+pub(super) fn read(handles: &[(PortId, PortCell)], fd: c_int) -> Option<Read<'_>> {
     served(handles)
         .find_map(|(id, mut slot)| {
             let port = slot.as_mut()?;
             let owner = port.owner;
-            match &mut port.driver {
+            let event = match &mut port.driver {
                 Driver::Spawn(spawn)
                     if (spawn.input == Input::Open && spawn.child.output_fd() == fd)
                         || (spawn.input == Input::Status && spawn.child.status_fd() == fd) =>
                 {
-                    Some(read_spawn(spawn, &mut port.input).map(|event| (id, owner, event)))
+                    read_spawn(spawn, &mut port.input)
                 }
-                _ => None,
-            }
+                _ => return None,
+            };
+            Some(event.map(|event| (id, owner, event, slot)))
         })
         .flatten()
 }
+
+/// A read of a spawn port: the port, its owner, the event, and the still
+/// held lock of the port, so that the data goes out before a close on
+/// another scheduler sends the exit signals of the port, as the driver
+/// sends its data in the locked `ready_input` (`sys_drivers.c:1336-1348`).
+pub(super) type Read<'a> = (PortId, ProcessId, PortEvent, MutexGuard<'a, Option<Port>>);
 
 /// Read the pipe of `spawn` that is ready, and add the bytes of the data
 /// to `input`.
