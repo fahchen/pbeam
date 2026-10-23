@@ -90,10 +90,7 @@ fn setup_4(
         _ => None,
     };
     let Some(end) = end else {
-        return Ok(BifResult::ErrorWithCause {
-            reason: Term::static_atom("badarg"),
-            cause: Term::static_atom("time"),
-        });
+        return Ok(BifResult::badarg_with_cause("time"));
     };
     setup(scheduler, end, receiver, message, wrap)
 }
