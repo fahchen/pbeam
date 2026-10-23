@@ -15,6 +15,8 @@ const BS_CREATE_BIN_WRITABLE_PROBE: &[u8] =
     include_bytes!("../../fixtures/bs_create_bin/bs_create_bin_writable_probe.beam");
 const BS_CREATE_BIN_ALLOC_LIMIT: &[u8] =
     include_bytes!("../../fixtures/bs_create_bin/bs_create_bin_alloc_limit.beam");
+const BS_CREATE_BIN_APPEND_SECOND: &[u8] =
+    include_bytes!("../../fixtures/bs_create_bin/bs_create_bin_append_second.beam");
 const BS_CREATE_BIN_BITS_PROBE: &[u8] =
     include_bytes!("../../fixtures/bs_create_bin/bs_create_bin_bits_probe.beam");
 
@@ -1245,7 +1247,8 @@ fn builds_bitstrings_and_their_failures_as_pinned_erts() {
          {error,badarg,{1,binary,type,a}},{error,badarg,{1,binary,size,a}},<<16>>,\
          {error,system_limit,{1,binary,size,1180591620717411303424}},\
          {error,badarg,{1,binary,size,-1180591620717411303424}},<<>>,<<15:4>>,\
-         {error,badarg,{1,binary,short,<<1:3>>}},{error,badarg,{1,binary,type,a}},<<15>>,\
+         {error,badarg,{1,binary,short,<<1:3>>}},{error,badarg,{1,binary,type,a}},<<15:4>>,\
+         {error,badarg,{1,binary,short,<<1:2>>}},<<15>>,\
          <<1,2,7:3>>,{error,badarg,{1,binary,type,a}},<<21:5>>,<<>>,<<170,170,1:1>>,\
          <<16,32,1:4>>,<<255,1:1>>,{error,badarg,{2,binary,unit,<<1:1>>}}]\n"
     );
@@ -1895,6 +1898,30 @@ fn raises_the_erts_error_info_for_utf16_and_utf32_segments() {
          {1,utf32,type,other},{1,utf32,type,18446744073709551616},\
          {1,utf32,type,1114112},{1,utf16,type,other},{2,integer,size,-1},\
          {2,integer,size,other},{2,integer,size,-1},{1,utf16,type,other}]\n"
+    );
+}
+
+#[test]
+fn stops_at_an_append_segment_that_is_not_the_first_segment() {
+    // `fixtures/bs_create_bin/bs_create_bin_append_second.asm` gives
+    // `<<"a", X/binary>>` an `append` segment as the second segment, which
+    // erlc does not emit. The loader keeps it as an unsupported segment, so
+    // the run stops (row "Binary construction"). ERTS gives `<<"a">>`.
+    let program = BeamProgram::load(&[BS_CREATE_BIN_APPEND_SECOND]).unwrap();
+    assert_eq!(
+        program
+            .execute(
+                "bs_create_bin_append_second",
+                "second",
+                &[program.host_term(Term::binary(b"b".to_vec()))],
+            )
+            .unwrap_err()
+            .to_string(),
+        "unsupported bs_create_bin segment append"
+    );
+    assert_eq!(
+        reference("bs_create_bin_append_second:second(<<\"b\">>)"),
+        "<<97>>\n"
     );
 }
 
