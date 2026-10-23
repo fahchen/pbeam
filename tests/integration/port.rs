@@ -293,6 +293,27 @@ fn opens_an_fd_port_as_pinned_erts() {
 }
 
 #[test]
+fn gives_the_fd_to_the_last_fd_port_as_pinned_erts() {
+    // The last `driver_select` of a read fd takes it from the port that
+    // selected it before (erl_check_io.c:1080-1085, 1711-1719).
+    let expected = "{[<<104,105>>,eof],none,true,true}";
+    let script = "printf hi | erl +S 1 -noshell -kernel logger_level none -pa fixtures/port -eval 'io:format(\"~w~n\", [port_probe:fd_steal(3, 1)]), halt().' 3<&0 0</dev/null";
+    let reference = Command::new("sh").args(["-c", script]).output().unwrap();
+    assert!(reference.status.success(), "{reference:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&reference.stdout),
+        format!("{expected}\n")
+    );
+    let (input, mut writer) = std::io::pipe().unwrap();
+    writer.write_all(b"hi").unwrap();
+    drop(writer);
+    let program = load();
+    let args = [input.as_raw_fd(), 1].map(|fd| program.host_term(Term::Integer(fd.into())));
+    let result = program.execute("port_probe", "fd_steal", &args).unwrap();
+    assert_eq!(text(&result.term, result.atoms()), expected);
+}
+
+#[test]
 fn monitors_a_port_as_pinned_erts() {
     // A port that closes sends `{'DOWN', Ref, port, Port, Reason}` with its
     // exit reason to each monitor, after its link exit signal; a port that

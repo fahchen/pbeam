@@ -141,7 +141,8 @@ impl Scheduler {
         if let Some(port) = port::inet_port(&handles, fd, Inet::stream_receive_fd) {
             return self.tcp_receive_ready(port);
         }
-        let Some((id, owner, event, slot)) = port::read(&handles, fd) else {
+        let Some((id, owner, event, slot)) = port::read(&handles, fd, self.node.poll.reader(fd))
+        else {
             return Ok(());
         };
         // The messages go out under the port lock; the lock is released

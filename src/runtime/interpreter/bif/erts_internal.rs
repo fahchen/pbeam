@@ -494,12 +494,13 @@ fn open_fd_port(
     }
     let name = format!("{input}/{output}").into_bytes();
     let scheduler = &mut *context.scheduler;
-    if let Some(denied) = denial(
+    let check = denial(
         scheduler,
         CapabilityKind::Port,
         Operation::Spawn,
         Some(&name),
-    )? {
+    );
+    if let Some(denied) = check? {
         return Ok(denied);
     }
     let spawn = Spawn {

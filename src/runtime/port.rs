@@ -529,10 +529,19 @@ pub(super) fn inet_port(
 /// # Examples
 ///
 /// ```rust,ignore
-/// let (id, event) = read(&handles, fd).unwrap();
+/// let (id, event) = read(&handles, fd, Some(port)).unwrap();
 /// ```
-pub(super) fn read(handles: &[(PortId, PortCell)], fd: c_int) -> Option<Read<'_>> {
+///
+/// Only the port `reader`, which the poll waits to read `fd` for, reads
+/// it: two fd ports can read the same fd, and the last `driver_select`
+/// takes the fd from the first port (`erl_check_io.c:1080-1085`, `1711-1719`).
+pub(super) fn read(
+    handles: &[(PortId, PortCell)],
+    fd: c_int,
+    reader: Option<PortId>,
+) -> Option<Read<'_>> {
     served(handles)
+        .filter(|&(id, _)| Some(id) == reader)
         .find_map(|(id, mut slot)| {
             let port = slot.as_mut()?;
             let owner = port.owner;

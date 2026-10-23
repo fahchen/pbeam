@@ -1,6 +1,6 @@
 -module(port_probe).
 -export([exit_status/0, output/0, command/0, close/0, owner_exit/0, epipe/0, errors/0,
-         nul_name/0, spawn/0, sigchld_ignored/0, packet/0, packet_errors/0, eof/0, monitor/0, fd/3, unsupported/1, terminal/0, high_fd/0, costs/1, measure/2]).
+         nul_name/0, spawn/0, sigchld_ignored/0, packet/0, packet_errors/0, eof/0, monitor/0, fd/3, fd_steal/2, unsupported/1, terminal/0, high_fd/0, costs/1, measure/2]).
 
 %% Each result replaces a port with the atom port, because the port numbers
 %% of ERTS and PBeam differ.
@@ -526,3 +526,13 @@ fd_read(Port) ->
 
 fd_error(Name, Settings) ->
     try open_port(Name, Settings) catch error:Reason -> Reason end.
+
+%% Open two fd ports on the pipe `In`: the second port takes the read
+%% select of `In` from the first, so only the second port gets the data
+%% and the end of file.
+fd_steal(In, Out) ->
+    P1 = open_port({fd, In, Out}, [binary]),
+    P2 = open_port({fd, In, Out}, [binary, eof]),
+    Data = fd_read(P2),
+    Stray = receive {P1, Message} -> Message after 100 -> none end,
+    {Data, Stray, port_close(P1), port_close(P2)}.
