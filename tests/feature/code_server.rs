@@ -426,6 +426,53 @@ fn runs_the_one_shot_crypto_hashes_and_macs_as_pinned_erts() {
 }
 
 #[test]
+fn runs_the_one_shot_crypto_ciphers_as_pinned_erts() {
+    // cipher_info_nif/1, ng_crypto_one_time_nif/5 with each padding,
+    // aead_cipher_nif/7, and do_exor/2 for each cipher that the OpenSSL 3
+    // default provider has (cipher.c:266-371, api_ng.c:91-864,
+    // aead.c:150-377, math.c:25-54), with the error tuple of each failed
+    // check.
+    let erts = run(&mut erts_probe(
+        CRYPTO_PROBE,
+        "crypto_probe",
+        "ciphers",
+        &[],
+    ));
+    assert!(erts.contains("Bad tag in option"), "{erts}");
+    assert_eq!(
+        run(&mut pbeam_probe(
+            CRYPTO_PROBE,
+            "crypto_probe",
+            "ciphers",
+            &[]
+        )),
+        erts
+    );
+    // The ERTS of the Linux CI host links a libcrypto with the legacy
+    // ciphers, so only the pinned macOS ERTS (OpenSSL 3.5.8) is the
+    // reference for rc2, rc4, des, and blowfish (cipher.c:216-218).
+    let pbeam = run(&mut pbeam_probe(
+        CRYPTO_PROBE,
+        "crypto_probe",
+        "ciphers_host",
+        &[],
+    ));
+    if cfg!(target_os = "macos") {
+        let erts = run(&mut erts_probe(
+            CRYPTO_PROBE,
+            "crypto_probe",
+            "ciphers_host",
+            &[],
+        ));
+        assert_eq!(pbeam, erts);
+    }
+    assert!(
+        pbeam.contains("Cipher not supported in this libcrypto version"),
+        "{pbeam}"
+    );
+}
+
+#[test]
 fn gives_the_crypto_algorithm_lists_and_fips_status_as_pinned_erts() {
     // The pinned ERTS lists each algorithm of its OpenSSL: 187 on macOS
     // and 177 with the libcrypto of the Linux CI host (algorithms.c:86-224,
@@ -447,7 +494,14 @@ fn gives_the_crypto_algorithm_lists_and_fips_status_as_pinned_erts() {
     let items = "[{hashs,[blake2s,blake2b,sm3,shake256,shake128,sha3_512,sha3_384,sha3_256,\n          \
                  sha3_224,sha512_256,sha512_224,sha512,sha384,sha256,sha224,sha,\n          \
                  ripemd160,md5]},\n  \
-                 {ciphers,[]},\n  \
+                 {ciphers,[aes_128_cbc,aes_128_ccm,aes_128_cfb128,aes_128_cfb8,aes_128_ctr,\n            \
+                 aes_128_ecb,aes_128_gcm,aes_128_ofb,aes_192_cbc,aes_192_ccm,\n            \
+                 aes_192_cfb128,aes_192_cfb8,aes_192_ctr,aes_192_ecb,aes_192_gcm,\n            \
+                 aes_192_ofb,aes_256_cbc,aes_256_ccm,aes_256_cfb128,aes_256_cfb8,\n            \
+                 aes_256_ctr,aes_256_ecb,aes_256_gcm,aes_256_ofb,aes_cbc,aes_ccm,\n            \
+                 aes_cfb128,aes_cfb8,aes_ctr,aes_ecb,aes_gcm,chacha20,\n            \
+                 chacha20_poly1305,des_ede3_cbc,des_ede3_cfb,sm4_cbc,sm4_ccm,\n            \
+                 sm4_cfb,sm4_ctr,sm4_ecb,sm4_gcm,sm4_ofb]},\n  \
                  {kems,[]},\n  \
                  {public_keys,[]},\n  \
                  {macs,[cmac,hmac,poly1305]},\n  \
@@ -458,7 +512,7 @@ fn gives_the_crypto_algorithm_lists_and_fips_status_as_pinned_erts() {
         .strip_suffix(rest.as_str())
         .and_then(|head| head.strip_prefix('['));
     assert!(matches!(count, Some("187" | "177")), "{erts}");
-    assert_eq!(pbeam, format!("[21,\n {items},\n true,true]\n"));
+    assert_eq!(pbeam, format!("[63,\n {items},\n true,true]\n"));
     // A build without FIPS support (fips.c:27-62).
     let erts = run(&mut erts_probe(CRYPTO_PROBE, "crypto_probe", "fips", &[]));
     assert_eq!(erts, "[not_supported,false,true,{error,badarg}]\n");
