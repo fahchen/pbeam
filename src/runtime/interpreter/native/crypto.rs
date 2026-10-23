@@ -16,10 +16,15 @@
 //! `crypto:F/A NIF is not supported` (row "NIF stubs" of
 //! `docs/erts-differences.md`).
 
+mod cipher;
+
 use super::bif::iodata_bytes;
 use super::*;
 use crate::runtime::resources::lock;
 use crate::term::Reference;
+use cipher::{
+    aead_cipher_nif, cipher_algorithms, cipher_info_nif, do_exor, ng_crypto_one_time_nif,
+};
 use num_traits::ToPrimitive;
 use openssl::{
     hash::{Hasher, MessageDigest},
@@ -121,16 +126,34 @@ pub(super) const FUNCTIONS: [(&str, u32); 70] = [
 /// ```
 pub(super) const BINDINGS: &[Binding] = &[
     Binding {
+        name: "aead_cipher_nif",
+        arity: 7,
+        job: Job::Normal,
+        run: aead_cipher_nif,
+    },
+    Binding {
         name: "cipher_algorithms",
         arity: 0,
         job: Job::Normal,
-        run: |_, _| Ok(BifResult::Value(Term::Nil)),
+        run: |scheduler, _| cipher_algorithms(scheduler),
+    },
+    Binding {
+        name: "cipher_info_nif",
+        arity: 1,
+        job: Job::Normal,
+        run: |scheduler, arguments| cipher_info_nif(scheduler, &arguments[0]),
     },
     Binding {
         name: "curve_algorithms",
         arity: 0,
         job: Job::Normal,
         run: |_, _| Ok(BifResult::Value(Term::Nil)),
+    },
+    Binding {
+        name: "do_exor",
+        arity: 2,
+        job: Job::Normal,
+        run: |_, arguments| Ok(do_exor(&arguments[0], &arguments[1])),
     },
     Binding {
         name: "enable_fips_mode_nif",
@@ -235,6 +258,12 @@ pub(super) const BINDINGS: &[Binding] = &[
         },
     },
     Binding {
+        name: "ng_crypto_one_time_nif",
+        arity: 5,
+        job: Job::Normal,
+        run: ng_crypto_one_time_nif,
+    },
+    Binding {
         name: "pbkdf2_hmac_nif",
         arity: 5,
         job: Job::Normal,
@@ -306,7 +335,7 @@ fn openssl_version() -> &'static str {
 /// assert_eq!(load(&info, &atoms), 0);
 /// assert_eq!(load(&Term::Integer(302), &atoms), 205);
 /// ```
-pub(super) fn load(load_info: &Term, _atoms: &AtomTable) -> i32 {
+pub(super) fn load(load_info: &Term, atoms: &AtomTable) -> i32 {
     let Term::Tuple(elements) = load_info else {
         return 205;
     };
@@ -327,7 +356,10 @@ pub(super) fn load(load_info: &Term, _atoms: &AtomTable) -> i32 {
         return 217;
     }
     match fips_mode {
-        Term::Atom(atom) if atom.is_static("false") => 0,
+        Term::Atom(atom) if atom.is_static("false") => {
+            cipher::put_cipher_atoms(atoms);
+            0
+        }
         _ => 287,
     }
 }
@@ -1398,6 +1430,25 @@ fn c_error(
     argument: i64,
     message: &str,
 ) -> Result<BifResult, BeamError> {
+    c_error_text(scheduler, tag, file, line, argument, message.as_bytes())
+}
+
+/// Return the exception of [`c_error`] with a message of bytes, such as
+/// the `%T` text of a term that `enif_snprintf` prints.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(c_error_text(&mut scheduler, "badarg", "api_ng.c", 176, 4, b"Bad tag in option: a")?, BifResult::Raise { .. }));
+/// ```
+fn c_error_text(
+    scheduler: &mut Scheduler,
+    tag: &str,
+    file: &str,
+    line: i64,
+    argument: i64,
+    message: &[u8],
+) -> Result<BifResult, BeamError> {
     let pairs = vec![
         (
             Term::Atom(scheduler.atoms.put("c_file_name")?),
@@ -1418,7 +1469,7 @@ fn c_error(
         reason: Term::tuple(vec![
             Term::Atom(scheduler.atoms.put(tag)?),
             Term::Map(map),
-            string(message),
+            Term::list_from(message.iter().map(|byte| Term::Integer(i64::from(*byte)))),
         ]),
     })
 }

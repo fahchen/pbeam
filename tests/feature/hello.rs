@@ -289,11 +289,17 @@ fn raises_terminated_in_the_entry_after_a_failed_stdout_write() {
 #[test]
 fn reports_missing_entry_and_input_failures() {
     let hello = beam_file("Elixir.Hello.beam");
+    // A function that the module does not export, and a new argument atom,
+    // go to the error handler when the root first runs. The run loads no
+    // `error_handler`, so the root raises `undef` with the frame of the
+    // entry (row "Undefined functions").
     let output = run_pbeam(&["Elixir.Hello", "missing", "--", hello.to_str().unwrap()]);
-    assert_eq!(output.status.code(), Some(1));
-    assert!(output.stdout.is_empty());
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("missing export Elixir.Hello:missing/0")
+    assert_eq!(
+        (output.stderr.as_slice(), output.status.code()),
+        (
+            &b"pbeam: root process exited with {undef,[{'Elixir.Hello',missing,[],[]}]}\n"[..],
+            Some(1)
+        )
     );
 
     let output = run_pbeam(&[
@@ -311,7 +317,7 @@ fn reports_missing_entry_and_input_failures() {
         ),
         (
             &b""[..],
-            &b"pbeam: argument pbeam_unknown is not an atom of the loaded modules\n"[..],
+            &b"pbeam: root process exited with {undef,[{'Elixir.Hello',main,[pbeam_unknown],[]}]}\n"[..],
             Some(1)
         )
     );
@@ -344,7 +350,7 @@ fn prints_help_and_exits_successfully() {
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("Load BEAM files and run a function as the root process."));
-    assert!(stdout.contains("Each argument is an atom that the loaded modules hold"));
+    assert!(stdout.contains("Each argument is an atom, such as a module or function"));
     assert!(
         stdout.contains("Usage: pbeam [OPTIONS] <MODULE> <FUNCTION> [ATOM]... -- <BEAM_FILE>...")
     );

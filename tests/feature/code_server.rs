@@ -421,6 +421,68 @@ fn runs_the_one_shot_crypto_hashes_and_macs_as_pinned_erts() {
 }
 
 #[test]
+fn runs_the_one_shot_crypto_ciphers_as_pinned_erts() {
+    // cipher_info_nif/1, ng_crypto_one_time_nif/5 with each padding,
+    // aead_cipher_nif/7, and do_exor/2 for each cipher that the OpenSSL 3
+    // default provider has (cipher.c:266-371, api_ng.c:91-864,
+    // aead.c:150-377, math.c:25-54), with the error tuple of each failed
+    // check.
+    let erts = run(&mut erts_probe(
+        CRYPTO_PROBE,
+        "crypto_probe",
+        "ciphers",
+        &[],
+    ));
+    assert!(erts.contains("Bad tag in option"), "{erts}");
+    // cipher_algorithms/0 lists the ciphers in the order of their atom
+    // indexes (cipher.c:239, 395-416), which is the same on each run.
+    let order = run(&mut erts_probe(
+        CRYPTO_PROBE,
+        "crypto_probe",
+        "cipher_order",
+        &[],
+    ));
+    assert_eq!(
+        run(&mut pbeam_probe(
+            CRYPTO_PROBE,
+            "crypto_probe",
+            "cipher_order",
+            &[]
+        )),
+        order
+    );
+    assert_eq!(
+        run(&mut pbeam_probe(
+            CRYPTO_PROBE,
+            "crypto_probe",
+            "ciphers",
+            &[]
+        )),
+        erts
+    );
+    // The ERTS of the Linux CI host links a libcrypto with the legacy
+    // ciphers, so only the pinned macOS ERTS (OpenSSL 3.5.8) is the
+    // reference for rc2, rc4, des, and blowfish (cipher.c:216-218). It also has
+    // no sm4_gcm and sm4_ccm.
+    let pbeam = run(&mut pbeam_probe(
+        CRYPTO_PROBE,
+        "crypto_probe",
+        "ciphers_host",
+        &[],
+    ));
+    assert_eq!(pbeam, CIPHERS_HOST);
+    if cfg!(target_os = "macos") {
+        let erts = run(&mut erts_probe(
+            CRYPTO_PROBE,
+            "crypto_probe",
+            "ciphers_host",
+            &[],
+        ));
+        assert_eq!(erts, CIPHERS_HOST);
+    }
+}
+
+#[test]
 fn gives_the_crypto_algorithm_lists_and_fips_status_as_pinned_erts() {
     // The pinned ERTS lists each algorithm of its OpenSSL: 187 on macOS
     // and 177 with the libcrypto of the Linux CI host (algorithms.c:86-224,
@@ -442,7 +504,14 @@ fn gives_the_crypto_algorithm_lists_and_fips_status_as_pinned_erts() {
     let items = "[{hashs,[blake2s,blake2b,sm3,shake256,shake128,sha3_512,sha3_384,sha3_256,\n          \
                  sha3_224,sha512_256,sha512_224,sha512,sha384,sha256,sha224,sha,\n          \
                  ripemd160,md5]},\n  \
-                 {ciphers,[]},\n  \
+                 {ciphers,[aes_128_cbc,aes_128_ccm,aes_128_cfb128,aes_128_cfb8,aes_128_ctr,\n            \
+                 aes_128_ecb,aes_128_gcm,aes_128_ofb,aes_192_cbc,aes_192_ccm,\n            \
+                 aes_192_cfb128,aes_192_cfb8,aes_192_ctr,aes_192_ecb,aes_192_gcm,\n            \
+                 aes_192_ofb,aes_256_cbc,aes_256_ccm,aes_256_cfb128,aes_256_cfb8,\n            \
+                 aes_256_ctr,aes_256_ecb,aes_256_gcm,aes_256_ofb,aes_cbc,aes_ccm,\n            \
+                 aes_cfb128,aes_cfb8,aes_ctr,aes_ecb,aes_gcm,chacha20,\n            \
+                 chacha20_poly1305,des_ede3_cbc,des_ede3_cfb,sm4_cbc,sm4_cfb,\n            \
+                 sm4_ctr,sm4_ecb,sm4_ofb]},\n  \
                  {kems,[]},\n  \
                  {public_keys,[]},\n  \
                  {macs,[cmac,hmac,poly1305]},\n  \
@@ -453,7 +522,7 @@ fn gives_the_crypto_algorithm_lists_and_fips_status_as_pinned_erts() {
         .strip_suffix(rest.as_str())
         .and_then(|head| head.strip_prefix('['));
     assert!(matches!(count, Some("187" | "177")), "{erts}");
-    assert_eq!(pbeam, format!("[21,\n {items},\n true,true]\n"));
+    assert_eq!(pbeam, format!("[63,\n {items},\n true,true]\n"));
     // A build without FIPS support (fips.c:27-62).
     let erts = run(&mut erts_probe(CRYPTO_PROBE, "crypto_probe", "fips", &[]));
     assert_eq!(erts, "[not_supported,false,true,{error,badarg}]\n");
@@ -621,10 +690,13 @@ fn raises_badfun_for_the_funs_of_removed_code_as_pinned_erts() {
     // (beam_common.c:1626-1630, 1697-1706). The name of a fun of code that
     // is not loaded is `[]` (`erl_bif_info.c:3998-4001`), also after the
     // code_server purged the module and before a load of another version.
+    // `erlang:fun_info_mfa/1` gives the module, `[]`, and the arity of such
+    // a fun (`erl_bif_info.c:4027-4035`).
     let expected = "[{error,{badfun,fun_term}},{error,{badfun,fun_term}},\
                     [{name,'-make_first/1-fun-0-'},\
                      {name,'-make_second/1-fun-0-'}],\
-                    [{name,[]},{name,[]}],[{name,[]},{name,[]}]]\n";
+                    [{name,[]},{name,[]}],[{name,[]},{name,[]}],\
+                    [{fun_entry_send,[],0},{fun_entry_send,[],0}]]\n";
     let erts = run(&mut erts_probe(
         FUN_ENTRY_PROBE,
         "fun_entry_probe",
@@ -929,7 +1001,6 @@ fn pbeam_probe(probe: &str, module: &str, function: &str, flags: &[&str]) -> Com
         .args(["--pa", CODE_PATH])
         .args(flags)
         .arg("--")
-        .arg(format!("{probe}.beam"))
         .arg(boot_beam())
         .args(
             BOOT_MODULES
@@ -937,7 +1008,10 @@ fn pbeam_probe(probe: &str, module: &str, function: &str, flags: &[&str]) -> Com
                 .chain(&CODE_SERVER_MODULES)
                 .chain(&KERNEL_START_MODULES)
                 .map(|module| pinned_beam_path(module)),
-        );
+        )
+        // ERTS loads the probe on demand after the boot modules, so the
+        // probe comes last and its atoms take the higher indexes.
+        .arg(format!("{probe}.beam"));
     command
 }
 
@@ -962,3 +1036,52 @@ fn run(command: &mut Command) -> String {
     );
     String::from_utf8(output.stdout).unwrap()
 }
+
+/// The output of `crypto_probe:ciphers_host/0` on PBeam and on the pinned
+/// macOS ERTS: `notsup` for each legacy cipher (cipher.c:282-283,
+/// api_ng.c:284-287), the AEAD results of sm4_gcm and sm4_ccm, and the type of each cipher.
+const CIPHERS_HOST: &str = r#"[[{error,notsup},
+  {error,notsup},
+  {error,notsup},
+  {error,notsup},
+  {error,notsup},
+  {error,notsup},
+  {error,notsup},
+  {error,notsup},
+  {error,notsup}],
+ [{error,{notsup,{"api_ng.c",286},
+                 "Cipher not supported in this libcrypto version"}},
+  {error,{notsup,{"api_ng.c",286},
+                 "Cipher not supported in this libcrypto version"}},
+  {error,{notsup,{"api_ng.c",286},
+                 "Cipher not supported in this libcrypto version"}},
+  {error,{notsup,{"api_ng.c",286},
+                 "Cipher not supported in this libcrypto version"}},
+  {error,{notsup,{"api_ng.c",286},
+                 "Cipher not supported in this libcrypto version"}},
+  {error,{notsup,{"api_ng.c",286},
+                 "Cipher not supported in this libcrypto version"}},
+  {error,{notsup,{"api_ng.c",286},
+                 "Cipher not supported in this libcrypto version"}},
+  {error,{notsup,{"api_ng.c",286},
+                 "Cipher not supported in this libcrypto version"}},
+  {error,{notsup,{"api_ng.c",286},
+                 "Cipher not supported in this libcrypto version"}}],
+ [{sm4_gcm,{<<203,180,174,141,189,248,170,187,99,31>>,
+            <<163,50,144,65,156,39,236,69,248,146,217,89,39,62,24,144>>},
+           {<<203,180,174,141,189,248,170,187,99,31>>,
+            <<163,50,144,65,156,39,236,69,248,146,217,89>>},
+           {<<207,189,183,144>>,
+            <<52,228,94,5,194,200,243,208,128,223,76,173,240,182,70,141>>},
+           [<<"plain text">>,error,<<"plain text">>]},
+  {sm4_ccm,{<<85,149,167,141,192,12,141,183,179,255>>,
+            <<198,214,173,145,194,170,12,155,203,131,206,1,194,77,161,88>>},
+           {<<85,149,167,141,192,12,141,183,179,255>>,
+            <<156,133,7,167,239,92,51,235,150,61,225,73>>},
+           {<<81,156,190,144>>,
+            <<238,134,79,88,94,103,180,117,75,217,119,49,223,226,20,43>>},
+           [<<"plain text">>,error,error]}],
+ [44,61,1134,1133,1137,1135,1139,419,423,427,420,424,428,421,425,429,421,425,
+  429,418,422,426,undefined,undefined,undefined,undefined,undefined,895,898,
+  901,896,899,902]]
+"#;
