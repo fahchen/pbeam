@@ -560,7 +560,7 @@ bifs! {
     re:run/2 as ReRun2 => |cx, [subject, pattern]| re::run(cx, subject, pattern, &Term::nil(), true),
     re:run/3 as ReRun3 => |cx, [subject, pattern, options]| re::run(cx, subject, pattern, options, true),
     re:version/0 => unsupported,
-    records:create/4 as RecordsCreate4 => |cx, [module, name, fields, options]| Ok(records::create(&cx.scheduler.atoms, module, name, fields, options)),
+    records:create/4 as RecordsCreate4 => |cx, [module, name, fields, options]| Ok(records::create(cx, module, name, fields, options)),
     records:get/2 as RecordsGet2 => |_, [key, record]| Ok(records::get(key, record)),
     records:get_definition/2 as RecordsGetDefinition2 => |cx, [module, name]| Ok(records::get_definition(cx, module, name)),
     records:get_field_names/1 as RecordsGetFieldNames1 => |_, [record]| Ok(records::get_field_names(record)),

@@ -157,19 +157,17 @@ fn exported_map(exported: bool, atoms: &AtomTable) -> Term {
 /// `#{is_exported => true | false}` and an improper list raise `badarg`;
 /// then each element in list order raises `badarg` when it is not a pair or
 /// `{badfield, {{Module, Name}, Key}}` when its key is not an atom; then a
-/// duplicate key raises `badarg`.
+/// duplicate key raises `badarg`. The record shares the definition of the
+/// current code of the module when it has the same `is_exported`, keys, and
+/// field order, as `erts_canonical_record_def` does (`erl_record.c:106-153`).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(matches!(create(&atoms, &m, &n, &fields, &opts), BifResult::Value(_)));
+/// assert!(matches!(create(cx, &m, &n, &fields, &opts), BifResult::Value(_)));
 /// ```
-///
-/// # Errors
-///
-/// Return a runtime error when the sort of the keys fails.
 pub(super) fn create(
-    atoms: &AtomTable,
+    cx: &mut BifContext<'_>,
     module: &Term,
     name: &Term,
     fields: &Term,
@@ -215,18 +213,29 @@ pub(super) fn create(
         return BifResult::badarg();
     }
     let (keys, values): (Vec<Atom>, Vec<Term>) = pairs.into_iter().unzip();
+    let scheduler = &cx.scheduler;
     let def = RecordDef::new(
         module.clone(),
         name.clone(),
         exported,
         keys.into_iter().map(|key| (key, None)).collect(),
-        atoms,
+        &scheduler.atoms,
     );
+    let canonical = scheduler
+        .code
+        .get(scheduler.atoms.name_of(module))
+        .and_then(|code| code.records.iter().find(|loaded| loaded.name == *name))
+        .filter(|loaded| {
+            loaded.is_exported == def.is_exported
+                && loaded.keys == def.keys
+                && loaded.order == def.order
+        });
+    let def = canonical.map_or_else(|| Arc::new(def), Arc::clone);
     let mut sorted_values = vec![Term::Nil; values.len()];
     for (position, value) in values.into_iter().enumerate() {
         sorted_values[def.order[position]] = value;
     }
-    Value(Term::Record(Record::new(Arc::new(def), sorted_values)))
+    Value(Term::Record(Record::new(def, sorted_values)))
 }
 
 /// Run `records:update/4`: return a copy of the record with the fields of
