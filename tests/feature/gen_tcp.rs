@@ -204,6 +204,21 @@ fn ends_a_connect_at_its_timeout_and_at_a_close_as_pinned_erts() {
     );
 }
 
+#[test]
+fn connects_ipv6_sockets_and_binds_the_address_tags_as_pinned_erts() {
+    // `inet6` listen, connect, and accept on `::1`, the names of each
+    // socket, `ipv6_v6only` on an IPv6 and an IPv4 socket, and a bind to
+    // `any` and `loopback` of both families (inet_drv.c:4706-4913,
+    // 7806-7823, 9538-9552, 11969-11984).
+    assert_connect_runs(
+        "ipv6",
+        "[[true,{0,0,0,0,0,0,0,1},true,{0,0,0,0,0,0,0,1},true,{0,0,0,0,0,0,0,1}],\
+         [ok,{ok,<<104,105>>}],[{ok,[{ipv6_v6only,false}]},{ok,[{ipv6_v6only,false}]}],\
+         [{ok,[{ipv6_v6only,true}]},{ok,[]},{error,einval}],\
+         [{0,0,0,0,0,0,0,0},{0,0,0,0,0,0,0,0},{0,0,0,0,0,0,0,1},{0,0,0,0},{127,0,0,1}],[]]\n",
+    );
+}
+
 /// Run `gen_tcp_connect:Function()` on the pinned ERTS and on PBeam, as
 /// [`runs_the_gen_tcp_calls_of_thousand_island_as_pinned_erts`] runs its
 /// probe, and check that each run writes `expected`.
