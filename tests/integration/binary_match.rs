@@ -350,11 +350,10 @@ fn runs_little_native_and_signed_integer_commands_as_pinned_erts() {
 }
 
 #[test]
-fn runs_wide_integer_commands_and_stops_at_a_bignum() {
+fn runs_wide_integer_commands_as_pinned_erts() {
     // `bs_match_probe:wide/1` reads integers of 64, 68, 60, and 59 bits.
     // The 68-bit segment uses `erts_bs_get_integer_2` (erl_bits.c:170-398).
-    // ERTS gives 2^63 as a bignum. PBeam has no bignum term, so it stops
-    // the run (row "Integer range").
+    // ERTS gives 2^63 as a bignum.
     let mut first = vec![
         0, 0, 0, 0, 0, 0, 0, 1, 255, 255, 255, 255, 255, 255, 255, 254, 253,
     ];
@@ -371,8 +370,11 @@ fn runs_wide_integer_commands_and_stops_at_a_bignum() {
     little_big[23] = 128;
     let inputs: [&[u8]; 4] = [&first, &second, &big, &little_big];
     let (results, erts) = bs_match_each("wide", &inputs);
-    let bignum =
-        Err("unsupported bs_match integer outside the 64-bit range: needs a bignum".into());
+    let big = Term::BigInt(Arc::new(BigInt::from(1u64 << 63)));
+    let mut bignum = vec![big.clone()];
+    bignum.extend(vec![Term::Integer(0); 5]);
+    let mut little_bignum = vec![Term::Integer(0); 6];
+    little_bignum[2] = big;
     assert_eq!(
         results,
         [
@@ -385,8 +387,8 @@ fn runs_wide_integer_commands_and_stops_at_a_bignum() {
                 (1 << 58) - 1,
                 0
             ])),
-            bignum.clone(),
-            bignum
+            Ok(Term::list_from(bignum)),
+            Ok(Term::list_from(little_bignum))
         ]
     );
     assert_eq!(
@@ -1505,16 +1507,16 @@ fn runs_bs_get_integer2_as_pinned_erts() {
 }
 
 #[test]
-fn stops_at_a_bs_get_integer2_that_needs_a_bignum() {
+fn reads_a_bignum_with_bs_get_integer2() {
     // `bs_match_probe:get_size/2` with a size of 64 reads the bignum
-    // 2^64 - 1, which PBeam has no term for (row "Integer range"). ERTS
-    // gives it.
+    // 2^64 - 1, as ERTS does.
     let calls = [vec![Term::binary(vec![0xFF; 8]), Term::Integer(64)]];
     assert_eq!(
         match_probe_each("get_size", &calls),
-        [Err(
-            "unsupported bs_get_integer2 integer outside the 64-bit range: needs a bignum".into()
-        )]
+        [Ok(Term::tuple(vec![
+            Term::BigInt(Arc::new(BigInt::from(u64::MAX))),
+            Term::binary(Vec::new()),
+        ]))]
     );
     assert_eq!(
         reference("bs_match_probe:get_size(<<255,255,255,255,255,255,255,255>>, 64)"),
