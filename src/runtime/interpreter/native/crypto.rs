@@ -24,8 +24,10 @@
 //! `docs/erts-differences.md`).
 
 mod agreement;
+mod bn;
 mod cipher;
 mod cipher_context;
+mod kem;
 mod keygen;
 mod mac_context;
 mod pkey;
@@ -37,6 +39,7 @@ use crate::term::Reference;
 use agreement::{
     dh_compute_key_nif, dh_generate_key_nif, ecdh_compute_key_nif, evp_compute_key_nif,
 };
+use bn::{mod_exp_nif, srp_host_secret_nif, srp_user_secret_nif, srp_value_b_nif};
 use cipher::{
     aead_cipher_nif, cipher_algorithms, cipher_info_nif, do_exor, ng_crypto_one_time_nif,
 };
@@ -44,6 +47,7 @@ use cipher_context::{
     aead_cipher_context_nif, aead_cipher_init_nif, ng_crypto_final_nif, ng_crypto_get_data_nif,
     ng_crypto_init_nif, ng_crypto_update_nif,
 };
+use kem::{decapsulate_key_nif, encapsulate_key_nif};
 use keygen::{ec_generate_key_nif, evp_generate_key_nif, rsa_generate_key_nif};
 use mac_context::{mac_final_nif, mac_init_nif, mac_update_nif};
 use num_traits::ToPrimitive;
@@ -184,6 +188,12 @@ pub(super) const BINDINGS: &[Binding] = &[
         run: |_, _| Ok(BifResult::Value(Term::Nil)),
     },
     Binding {
+        name: "decapsulate_key_nif",
+        arity: 3,
+        job: Job::Normal,
+        run: decapsulate_key_nif,
+    },
+    Binding {
         name: "dh_compute_key_nif",
         arity: 3,
         job: Job::Normal,
@@ -218,6 +228,12 @@ pub(super) const BINDINGS: &[Binding] = &[
         arity: 1,
         job: Job::Normal,
         run: |_, arguments| Ok(enable_fips_mode_nif(&arguments[0])),
+    },
+    Binding {
+        name: "encapsulate_key_nif",
+        arity: 2,
+        job: Job::Normal,
+        run: encapsulate_key_nif,
     },
     Binding {
         name: "evp_compute_key_nif",
@@ -348,6 +364,12 @@ pub(super) const BINDINGS: &[Binding] = &[
         run: |scheduler, arguments| mac_update_nif(scheduler, &arguments[0], &arguments[1]),
     },
     Binding {
+        name: "mod_exp_nif",
+        arity: 4,
+        job: Job::Normal,
+        run: |_, arguments| Ok(mod_exp_nif(arguments)),
+    },
+    Binding {
         name: "ng_crypto_final_nif",
         arity: 1,
         job: Job::Normal,
@@ -433,6 +455,24 @@ pub(super) const BINDINGS: &[Binding] = &[
         arity: 0,
         job: Job::Normal,
         run: |_, _| Ok(BifResult::Value(Term::Nil)),
+    },
+    Binding {
+        name: "srp_host_secret_nif",
+        arity: 5,
+        job: Job::Normal,
+        run: |_, arguments| Ok(srp_host_secret_nif(arguments)),
+    },
+    Binding {
+        name: "srp_user_secret_nif",
+        arity: 7,
+        job: Job::Normal,
+        run: |_, arguments| Ok(srp_user_secret_nif(arguments)),
+    },
+    Binding {
+        name: "srp_value_B_nif",
+        arity: 5,
+        job: Job::Normal,
+        run: |_, arguments| Ok(srp_value_b_nif(arguments)),
     },
     Binding {
         name: "strong_rand_bytes_nif",
