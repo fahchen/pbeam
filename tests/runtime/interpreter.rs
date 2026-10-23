@@ -4385,21 +4385,22 @@ fn registers_a_name_or_raises_badarg_as_pinned_erts() {
     );
     // ERTS 29.1.1 raises badarg for register(1, self()), register(a, x),
     // and register(a, Pid) with a process that is not alive.
-    // ERTS adds the `error_info` causes `none`, `none`, and `notalive`,
-    // which PBeam does not give (row "Exception stack trace" of
-    // `docs/erts-differences.md`).
-    for (name, id, texts) in [
-        (Term::Integer(1), root, ["1", "<0.0.0>"]),
-        (test_atom("a"), test_atom("x"), ["a", "x"]),
+    // ERTS adds the `error_info` causes `none`, `none`, and `notalive`
+    // (`register.c:183-215`).
+    for (name, id, texts, cause) in [
+        (Term::Integer(1), root, ["1", "<0.0.0>"], "none"),
+        (test_atom("a"), test_atom("x"), ["a", "x"], "none"),
         (
             test_atom("a"),
             Term::Pid(crate::ProcessId(99)),
             ["a", "<0.99.0>"],
+            "notalive",
         ),
     ] {
         assert_eq!(
             register(name, id).unwrap_err().to_string(),
             bif_badarg_exit("erlang", "register", &texts, ERTS_ERRORS)
+                .replace("#{module=>", &format!("#{{cause=>{cause},module=>"))
         );
     }
 }

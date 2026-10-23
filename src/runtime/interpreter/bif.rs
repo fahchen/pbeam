@@ -181,9 +181,23 @@ impl BifResult {
     /// assert!(matches!(BifResult::badopt(), BifResult::ErrorWithCause { .. }));
     /// ```
     pub(super) fn badopt() -> BifResult {
+        BifResult::badarg_with_cause("badopt")
+    }
+
+    /// Return the `error:badarg` exception with the `error_info` cause
+    /// `cause`, as `BIF_ERROR(p, BADARG | EXF_HAS_EXT_INFO)` raises it
+    /// after `p->fvalue = Cause`, for example the cause `badtype` of
+    /// `monitor/2` (`bif.c:966-967`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(matches!(BifResult::badarg_with_cause("none"), BifResult::ErrorWithCause { .. }));
+    /// ```
+    pub(super) fn badarg_with_cause(cause: &'static str) -> BifResult {
         BifResult::ErrorWithCause {
             reason: Term::static_atom("badarg"),
-            cause: Term::static_atom("badopt"),
+            cause: Term::static_atom(cause),
         }
     }
 
