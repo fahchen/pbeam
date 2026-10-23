@@ -592,7 +592,6 @@ ambient() ->
         time(erlang:time()),
         date_time(erlang:localtime()),
         date_time(erlang:universaltime()),
-        date_time(erlang:localtime_to_universaltime({{2026, 10, 11}, {12, 0, 0}}, false)),
         timestamp(erlang:now()),
         integer(os:system_time()),
         timestamp(os:timestamp()),

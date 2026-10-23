@@ -42,11 +42,6 @@ unsafe extern "C" {
     /// POSIX `tzset`: read the time zone of the `TZ` environment variable
     /// into the C library. libc 0.2.190 has no binding for Unix.
     fn tzset();
-
-    /// POSIX `daylight`: nonzero when the time zone that `tzset` read has
-    /// a daylight saving time rule. ERTS reads it as `sys_daylight`
-    /// (`sys/unix/erl_unix_sys.h:154-156`). libc 0.2.190 has no binding.
-    static daylight: libc::c_int;
 }
 
 #[cfg(target_os = "macos")]
@@ -54,10 +49,6 @@ unsafe extern "C" {
     /// macOS `posix2time`: add the leap seconds of the time zone to a POSIX
     /// time. libc 0.2.190 has no binding.
     fn posix2time(time: libc::time_t) -> libc::time_t;
-
-    /// macOS `time2posix`: subtract the leap seconds of the time zone from
-    /// a time. libc 0.2.190 has no binding.
-    fn time2posix(time: libc::time_t) -> libc::time_t;
 }
 
 /// Return the performance counter of the host in nanoseconds since
@@ -139,56 +130,4 @@ pub(crate) fn local_zone_time(clock: i64) -> Option<DateTime> {
             i64::from(tm.tm_sec),
         )
     })
-}
-
-/// Return the POSIX time of a local date and time in the host time zone,
-/// as ERTS `local_to_univ` (`erl_time_sup.c:1756-1778`) finds it before
-/// `gmtime_r`. `isdst` is the `tm_isdst` of `mktime`: 1, 0, or -1 for
-/// unknown. A time zone without daylight saving time (`sys_daylight` is 0)
-/// uses 0. `erl_mktime` (`erl_time_sup.c:1607-1635`) calls `mktime`; when
-/// `mktime` gives -1, it calls `mktime` again with one second less, and
-/// the result -2 means that the time was -1. On macOS, ERTS has
-/// `time2posix` (`HAVE_TIME2POSIX`) and subtracts the leap seconds of the
-/// time zone. Return `None` when `mktime` fails.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// // TZ=EST5EDT,M3.2.0,M11.1.0
-/// assert_eq!(local_to_posix((1970, 1, 1, 0, 0, 0), -1), Some(18_000));
-/// ```
-pub(crate) fn local_to_posix(
-    (year, month, day, hour, minute, second): DateTime,
-    isdst: libc::c_int,
-) -> Option<i64> {
-    // The caller checks the range (`erl_time_sup.c:1744-1754`), so each
-    // field fits in an `int`.
-    let field = |value: i64| libc::c_int::try_from(value).expect("a checked field fits in an int");
-    // SAFETY: all zeros is a valid `tm`. `tzset` changes only the time zone
-    // data of the C library, `daylight` is an `int` that only `tzset`
-    // writes, and `mktime` reads the time zone data and normalizes only the
-    // struct that the pointer gives.
-    let clock = unsafe {
-        let mut tm: libc::tm = std::mem::zeroed();
-        tm.tm_year = field(year - 1900);
-        tm.tm_mon = field(month - 1);
-        tm.tm_mday = field(day);
-        tm.tm_hour = field(hour);
-        tm.tm_min = field(minute);
-        tm.tm_sec = field(second);
-        tzset();
-        tm.tm_isdst = if daylight == 0 { 0 } else { isdst };
-        match libc::mktime(&raw mut tm) {
-            -1 => {
-                tm.tm_sec -= 1;
-                (libc::mktime(&raw mut tm) == -2).then_some(-1)
-            }
-            clock => Some(clock),
-        }
-    }?;
-    #[cfg(target_os = "macos")]
-    // SAFETY: `time2posix` reads only its argument and the time zone data
-    // of the C library.
-    let clock = unsafe { time2posix(clock) };
-    Some(clock)
 }

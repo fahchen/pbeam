@@ -233,7 +233,7 @@ bifs! {
     erlang:load_nif/2 as ErlangLoadNif2 => |cx, [_, _]| native::load_nif_error(&cx.scheduler.atoms, "bad_lib", "load_nif/2 must be explicitly called from the NIF module. It cannot be called through apply/3."),
     erlang:loaded/0 as ErlangLoaded0 => |cx, []| erlang::loaded(cx.scheduler),
     erlang:localtime/0 as ErlangLocaltime0 => |_, []| Ok(erlang::localtime()),
-    erlang:localtime_to_universaltime/2 as ErlangLocaltimeToUniversaltime2 => |_, [date, dst]| Ok(erlang::localtime_to_universaltime(date, dst)),
+    erlang:localtime_to_universaltime/2 => unsupported,
     erlang:make_fun/3 as ErlangMakeFun3 => |_, [module, function, arity]| Ok(erlang::make_fun(module, function, arity)),
     erlang:make_ref/0 as ErlangMakeRef0 => |cx, []| Ok(Value(Term::Reference(cx.scheduler.make_ref()?))),
     erlang:make_tuple/2 as ErlangMakeTuple2 => |_, [size, value]| Ok(erlang::make_tuple(size, value)),

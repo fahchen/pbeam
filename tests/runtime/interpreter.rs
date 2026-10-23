@@ -821,11 +821,11 @@ fn rejects_invalid_tuple_access_receives_and_bifs() {
     assert!(
         error(vec![Instruction::Bif {
             fail_label: 0,
-            bif: resolve("erlang", "now", 0).unwrap(),
+            bif: resolve("erl_ddll", "loaded_drivers", 0).unwrap(),
             arguments: Vec::new(),
             destination: Operand::X(0),
         }])
-        .contains("unresolved external MFA erlang:now/0")
+        .contains("unresolved external MFA erl_ddll:loaded_drivers/0")
     );
 }
 

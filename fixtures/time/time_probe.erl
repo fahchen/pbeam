@@ -4,7 +4,7 @@
          wall_time/0, wall_time_on/0, wall_time_order/0, wall_time_reds/0,
          clock/0, time_offset_units/0, timestamp/0, perf/0, pid/0, pid_value/0,
          environment/0, clock_utc/0, clock_jst/0, leap_local/0,
-         universal/0, posix_seconds/0, now/0,
+         posix_seconds/0, now/0,
          ping/1]).
 
 -compile({nowarn_deprecated_function, [{erlang, now, 0}]}).
@@ -325,27 +325,6 @@ leap_check() ->
                      {{2026,1,15},{12,0,0}} -> <<"posix2time\n">>;
                      {{2026,1,15},{11,59,33}} -> <<"localtime_r\n">>
                  end).
-
-%% Print the results of `erlang:localtime_to_universaltime/2` for `true`,
-%% `false`, and `undefined`, and for terms that raise `badarg`. `mktime`
-%% reads `TZ`. The dates are not in a change of daylight saving time.
-%% Local 1969-12-31 18:59:59 in EST and 23:59:59 in UTC is the POSIX time
-%% -1, for which `erl_mktime` calls `mktime` again (erl_time_sup.c:1617-1632).
-universal() ->
-    Dates = [{{2026,1,15},{7,0,0}}, {{2026,7,15},{8,0,0}}, {{1902,1,1},{0,0,0}},
-             {{1969,12,31},{18,59,59}}, {{1969,12,31},{23,59,59}},
-             {{2000,2,29},{12,0,0}}, {{2147483646,12,31},{23,59,59}}],
-    Good = [[catch_error(fun() -> erlang:localtime_to_universaltime(D, id(Dst)) end)
-             || Dst <- [true, false, undefined]]
-            || D <- Dates],
-    Bad = [catch_error(fun() -> erlang:localtime_to_universaltime(id(D), id(Dst)) end)
-           || {D, Dst} <- [{{{2026,1,1},{0,0,0}}, other}, {{{2026,1,1},{0,0,0}}, 1},
-                           {{{1901,12,31},{23,59,59}}, false},
-                           {{{2147483647,1,1},{0,0,0}}, false},
-                           {{{2026,2,29},{0,0,0}}, true}, {{{2026,1,1},{24,0,0}}, false},
-                           {{{2026,1,1},{0,0,60}}, undefined}, {bad, false},
-                           {{{2026,1,1},{0,0}}, false}, {{{2026,1,1.0},{0,0,0}}, false}]],
-    io:format("~w~n", [{Good, Bad}]).
 
 posix_seconds() ->
     [catch_error(fun() -> erlang:universaltime_to_posixtime(id(T)) end)
