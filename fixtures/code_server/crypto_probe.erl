@@ -1,5 +1,5 @@
 -module(crypto_probe).
--export([main/0, nifs/0, info/0, supports/0, fips/0, oneshot/0, oneshot_host/0, xof_sizes/0, ciphers/0, ciphers_host/0, cipher_order/0, contexts/0, unsupported/0]).
+-export([main/0, nifs/0, info/0, supports/0, fips/0, oneshot/0, oneshot_host/0, xof_sizes/0, ciphers/0, ciphers_host/0, cipher_order/0, contexts/0, mac_contexts/0, mac_poly1305_final/0, mac_poly1305_update/0, unsupported/0]).
 
 %% Write the results of crypto:strong_rand_bytes/1, one term on each line.
 %% The first call loads crypto on demand, and its -on_load function loads
@@ -203,6 +203,81 @@ contexts() ->
                          fun() -> crypto:hash_final_xof(X0, 8.0) end,
                          fun() -> crypto:hash_final_xof(S0, 64) end]],
     io:format("~p~n", [[is_reference(S0), Finals, Digests, Xofs, Large, Errors]]).
+
+%% Write the results of the MAC context NIFs (mac.c:564-887). A context
+%% changes in place: mac_update/2 gives back its argument. After a final, an
+%% HMAC context fails (mac.c:840, 879), a CMAC context goes on from its moved
+%% CBC chain, and a Poly1305 context keeps a short update.
+mac_contexts() ->
+    H = crypto:mac_init(hmac, sha256, <<"key">>),
+    Same = [H =:= crypto:mac_update(H, <<"abc">>), H =:= crypto:mac_update(H, ["d", <<"e">>])],
+    H1 = crypto:mac_final(H),
+    HEnded = [bad_reason(fun() -> crypto:mac_update(H, <<"f">>) end),
+              bad_reason(fun() -> crypto:mac_final(H) end)],
+    Hmacs = [crypto:mac_final(crypto:mac_update(crypto:mac_init(hmac, Type, Key), <<"abc">>))
+             || Type <- [md5, ripemd160, sha, sha512, sha3_256, sm3, blake2b, blake2s],
+                Key <- [<<>>, <<"k">>, binary:copy(<<7>>, 200)]],
+    Cmacs = [cmac(Cipher, Key, Parts)
+             || {Cipher, Key} <- [{aes_128_cbc, binary:copy(<<1>>, 16)},
+                                  {aes_cbc, binary:copy(<<2>>, 32)},
+                                  {des_ede3_cbc, binary:copy(<<3>>, 24)}],
+                Parts <- [[], [<<"abc">>], [binary:copy(<<4>>, 16)],
+                          [<<"a">>, binary:copy(<<5>>, 15), <<"b">>],
+                          [binary:copy(<<6>>, 33), <<>>, binary:copy(<<7>>, 40)]]],
+    P = crypto:mac_init(poly1305, binary:copy(<<8>>, 32)),
+    P = crypto:mac_update(P, binary:copy(<<9>>, 20)),
+    P1 = crypto:mac_final(P),
+    PAfter = [P =:= crypto:mac_update(P, <<1, 2, 3>>), P =:= crypto:mac_update(P, <<>>)],
+    Short = crypto:mac_finalN(crypto:mac_update(crypto:mac_init(hmac, sha, <<"k">>), <<"a">>), 4),
+    Large = crypto:mac(hmac, sha, <<"k">>, binary:copy(<<1>>, 70000))
+        =:= crypto:mac_final(crypto:mac_update(crypto:mac_init(hmac, sha, <<"k">>),
+                                               binary:copy(<<1>>, 70000))),
+    Errors = [bad_reason(Fun)
+              || Fun <- [fun() -> crypto:mac_init(nosuch, sha, <<"k">>) end,
+                         fun() -> crypto:mac_init(poly1305, <<"k">>) end,
+                         fun() -> crypto:mac_init(hmac, nosuch, <<"k">>) end,
+                         fun() -> crypto:mac_init(hmac, md4, <<"k">>) end,
+                         fun() -> crypto:mac_init(hmac, shake128, <<"k">>) end,
+                         fun() -> crypto:mac_init(cmac, nosuch, <<"k">>) end,
+                         fun() -> crypto:mac_init(cmac, chacha20, <<"k">>) end,
+                         fun() -> crypto:mac_init(cmac, des_cbc, binary:copy(<<1>>, 8)) end,
+                         fun() -> crypto:mac_init(cmac, aes_128_ecb, binary:copy(<<1>>, 16)) end,
+                         fun() -> crypto:mac_init(cmac, aes_128_gcm, binary:copy(<<1>>, 16)) end,
+                         fun() -> crypto:mac_init(cmac, des_ede3_cbc, binary:copy(<<1>>, 16)) end,
+                         fun() -> crypto:mac_update(make_ref(), a) end,
+                         fun() -> crypto:mac_update(make_ref(), <<"a">>) end,
+                         fun() -> crypto:mac_final(make_ref()) end,
+                         fun() -> crypto:mac_final(nosuch) end,
+                         fun() -> crypto:mac_final(crypto:hash_init(sha)) end,
+                         fun() -> crypto:hash_update(P, <<"a">>) end,
+                         fun() -> crypto:mac_finalN(H, 3) end]],
+    io:format("~p~n", [[is_reference(H), Same, H1, HEnded, Hmacs, Cmacs, P1, PAfter,
+                        Short, Large, Errors]]).
+
+%% Give the CMAC of the parts, a second final, and the final after one more
+%% update. CMAC_Final pads the last block in place and moves the CBC chain
+%% (OpenSSL cmac.c:247-276), so the three values differ.
+cmac(Cipher, Key, Parts) ->
+    C = crypto:mac_init(cmac, Cipher, Key),
+    [C = crypto:mac_update(C, Part) || Part <- Parts],
+    F1 = crypto:mac_final(C),
+    F2 = crypto:mac_final(C),
+    C = crypto:mac_update(C, <<"tail">>),
+    [F1, F2, crypto:mac_final(C)].
+
+%% Use a Poly1305 context after its final in a way that stops the pinned
+%% ERTS: Poly1305_Final clears the context (OpenSSL poly1305.c), so a second
+%% final, or an update that fills a block, calls a cleared function pointer.
+mac_poly1305_final() ->
+    crypto:mac_final(ended_poly1305()).
+
+mac_poly1305_update() ->
+    crypto:mac_update(ended_poly1305(), binary:copy(<<1>>, 16)).
+
+ended_poly1305() ->
+    P = crypto:mac_init(poly1305, binary:copy(<<8>>, 32)),
+    crypto:mac_final(P),
+    P.
 
 %% Write crypto:supports(ciphers) in its order. cipher_algorithms/0 sorts the
 %% table by atom (cipher.c:239, 395-416), and the atom indexes come from the

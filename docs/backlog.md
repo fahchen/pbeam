@@ -287,6 +287,7 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 ### Free crypto hash contexts with their last term
 
 - **Now:** `HashContexts` of `src/runtime/interpreter/native/crypto.rs` never removes a context (#1016). `Term::Reference` has no count, so a context cannot drop with its last term. ERTS frees an `EVP_MD_CTX` resource when no term refers to it (`hash.c:45-51`).
+- **Also:** `MacContexts` of `src/runtime/interpreter/native/crypto/mac_context.rs` never removes a MAC context (#1018); ERTS frees a `mac_context` resource with its last term (`mac.c:544-556`).
 - **Evidence:** each `hash_update_nif/2` call adds one context, so `crypto:hash/2` on N bytes keeps ceil(N/20000)+1 contexts for the run (`crypto.erl:4535-4553`).
 - **Option:** back the context resource term with an `Arc`, so the Rust drop of the last term frees the context. The owner chose Rust drop over a resource garbage collection.
 - **Trigger:** a long run or a run that hashes large data.
