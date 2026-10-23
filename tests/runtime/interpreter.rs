@@ -6250,3 +6250,30 @@ fn writes_the_bits_of_a_bitstring_append_prefix() {
         Ok(Term::binary(vec![18]))
     );
 }
+
+#[test]
+fn stops_a_list_to_bitstring_trap_with_a_unit_that_is_not_1_or_8() {
+    // Only `l2b_size` makes the size trap, with the unit 1 or 8
+    // (`erl_iolist.c:864`), so another unit is an invariant error.
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let list = Term::list_from([Term::Integer(1)]);
+    let error = program
+        .bif_trap(
+            &mut scheduler,
+            "erts_internal",
+            "list_to_bitstring_continue",
+            vec![
+                Term::static_atom("size"),
+                list.clone(),
+                list,
+                Term::nil(),
+                Term::Integer(0),
+                Term::Integer(2),
+            ],
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("unit 2"), "{error}");
+}
