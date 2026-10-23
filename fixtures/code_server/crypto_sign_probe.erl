@@ -172,6 +172,9 @@ errors() ->
                 fun() -> crypto:sign(list_to_atom(lists:duplicate(39, $a)), sha256, Msg, <<1>>) end,
                 fun() -> crypto:sign(list_to_atom(lists:duplicate(40, $a)), sha256, Msg, <<1>>) end,
                 fun() -> crypto:verify(foo, sha256, Msg, <<1>>, {seed, <<1>>}) end,
+                fun() -> crypto:sign("foo", sha256, Msg, <<1>>) end,
+                fun() -> crypto:sign('', sha256, Msg, <<1>>) end,
+                fun() -> crypto:verify(1, sha256, Msg, <<1>>, <<1>>) end,
                 fun() -> crypto:verify(list_to_atom(lists:duplicate(40, $a)), sha256, Msg,
                                        <<1>>, <<1>>) end]].
 

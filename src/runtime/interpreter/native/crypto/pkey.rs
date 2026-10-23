@@ -39,7 +39,8 @@ const PKEY_TYPES: [&str; 15] = [
 ];
 
 /// The names and aliases of the key managers of the OpenSSL 3.5 default
-/// provider (`openssl list -key-managers`), which
+/// provider (`providers/defltprov.c` of the vendored 3.5.5) and 5 aliases of
+/// the OBJ database, which
 /// `EVP_PKEY_CTX_new_from_name` matches without case (`pkey.c:614`).
 const OPENSSL_KEY_NAMES: [&str; 107] = [
     "1.2.840.113549.1.1.1",
@@ -250,7 +251,7 @@ fn finish(
 /// Sign as `pkey_sign_nif` does with the OpenSSL 3 API (`pkey.c:789-904`).
 fn sign(scheduler: &Scheduler, arguments: &[Term]) -> Result<Vec<u8>, Failure> {
     let input = sign_input(scheduler, arguments, 4)?;
-    let pkey = private_key(scheduler, &input.algorithm, &arguments[3])?;
+    let pkey = private_key(scheduler, &input.algorithm, &arguments[0], &arguments[3])?;
     if input.algorithm == "eddsa" {
         let mut signer = openssl::sign::Signer::new_without_digest(&pkey)
             .map_err(|_| failed(811, "Can't EVP_DigestSignInit"))?;
@@ -282,7 +283,7 @@ fn verify(scheduler: &Scheduler, arguments: &[Term]) -> Result<bool, Failure> {
     let signature = arguments[3]
         .binary_bytes()
         .ok_or_else(|| badarg(1041, 3, "Expected a binary"))?;
-    let pkey = public_key(scheduler, &input.algorithm, &arguments[4])?;
+    let pkey = public_key(scheduler, &input.algorithm, &arguments[0], &arguments[4])?;
     if input.algorithm == "eddsa" {
         let mut verifier = Verifier::new_without_digest(&pkey)
             .map_err(|_| failed(1055, "Can't EVP_DigestVerifyInit"))?;
@@ -492,6 +493,7 @@ fn sign_options(
 fn private_key(
     scheduler: &Scheduler,
     algorithm: &str,
+    name: &Term,
     term: &Term,
 ) -> Result<PKey<Private>, Failure> {
     // PBeam has no engine resource, so each map fails
@@ -529,7 +531,7 @@ fn private_key(
             });
             (key, 530, "Couldn't get DSA private key")
         }
-        _ => return Err(octet_string_key(scheduler, algorithm, Some(term))),
+        _ => return Err(octet_string_key(scheduler, algorithm, name, Some(term))),
     };
     key.ok_or_else(|| badarg(line, 3, message))
 }
@@ -539,6 +541,7 @@ fn private_key(
 fn public_key(
     scheduler: &Scheduler,
     algorithm: &str,
+    name: &Term,
     term: &Term,
 ) -> Result<PKey<Public>, Failure> {
     if matches!(term, Term::Map(_)) {
@@ -565,7 +568,7 @@ fn public_key(
             });
             (key, 722, "Couldn't get DSA public key")
         }
-        _ => return Err(octet_string_key(scheduler, algorithm, None)),
+        _ => return Err(octet_string_key(scheduler, algorithm, name, None)),
     };
     key.ok_or_else(|| badarg(line, 4, message))
 }
@@ -576,7 +579,12 @@ fn public_key(
 /// passes the key tuple checks first (`pkey.c:544-559`). An algorithm of
 /// `pkey_types`, or a name that OpenSSL loads a key type from
 /// (`pkey.c:614`), gives a runtime error: ERTS then reads the key bytes.
-fn octet_string_key(scheduler: &Scheduler, algorithm: &str, private: Option<&Term>) -> Failure {
+fn octet_string_key(
+    scheduler: &Scheduler,
+    algorithm: &str,
+    name: &Term,
+    private: Option<&Term>,
+) -> Failure {
     if PKEY_TYPES.contains(&algorithm) {
         return unsupported_algorithm(algorithm);
     }
@@ -589,8 +597,9 @@ fn octet_string_key(scheduler: &Scheduler, algorithm: &str, private: Option<&Ter
             _ => return badarg(556, 3, "Invalid key tuple format"),
         }
     }
-    // `enif_get_atom` fails for a name of 40 bytes or more (`pkey.c:610-613`).
-    if algorithm.len() >= 40 {
+    // `enif_get_atom` fails for a term that is not an atom, or for a name of
+    // 40 bytes or more (`pkey.c:610-613`).
+    if !matches!(name, Term::Atom(_)) || algorithm.len() >= 40 {
         return Failure::Check("error", 612, 0, "Invalid key type");
     }
     if OPENSSL_KEY_NAMES
