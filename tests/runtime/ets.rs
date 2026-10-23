@@ -82,7 +82,10 @@ fn deletes_only_the_tables_of_the_owner() {
     tables.create(Reference(2), Some("ets_probe_named"), table(2));
     tables.create(Reference(3), None, table(2));
 
-    assert_eq!(tables.delete_owned(ProcessId(1), 100), Some(36));
+    assert_eq!(
+        tables.delete_owned(ProcessId(1), 100, |_| false, &mut Vec::new()),
+        Some(36)
+    );
     assert!(!tables.name_in_use("ets_probe_owned"));
     assert!(tables.name_in_use("ets_probe_named"));
     let mut live: Vec<_> = tables.tables.keys().copied().collect();
@@ -240,7 +243,10 @@ fn finds_a_named_table_of_each_access_mode() {
     );
     assert_eq!(tables.whereis("ets_probe_private"), Some(Reference(1)));
     assert_eq!(tables.whereis("ets_probe_missing"), None);
-    assert_eq!(tables.delete_owned(ProcessId(1), 100), Some(36));
+    assert_eq!(
+        tables.delete_owned(ProcessId(1), 100, |_| false, &mut Vec::new()),
+        Some(36)
+    );
     assert_eq!(tables.whereis("ets_probe_private"), None);
 }
 
@@ -831,7 +837,11 @@ fn drops_the_match_programs_of_a_deleted_table() {
     );
     let spec = super::pattern::MatchSpec::compile(&atoms, &Term::nil()).unwrap();
     tables.remember_program(Reference(2), Reference(3), spec);
-    assert!(tables.delete_owned(ProcessId(5), 1000).is_some());
+    assert!(
+        tables
+            .delete_owned(ProcessId(5), 1000, |_| false, &mut Vec::new())
+            .is_some()
+    );
     assert!(tables.program(Reference(3)).is_none());
 }
 
@@ -1277,7 +1287,10 @@ fn charges_one_delete_record_for_a_fixed_clear() {
     }
     tables.fix_table(Reference(0), ProcessId(1));
     tables.table_by_id(Reference(0)).unwrap().clear(&atoms);
-    assert_eq!(tables.delete_owned(ProcessId(1), 1000), Some(898));
+    assert_eq!(
+        tables.delete_owned(ProcessId(1), 1000, |_| false, &mut Vec::new()),
+        Some(898)
+    );
 }
 
 #[test]
@@ -1360,9 +1373,15 @@ fn deletes_the_owned_tables_before_the_fixations_as_pinned_erts() {
         .table_by_id(Reference(1))
         .unwrap()
         .delete(&atoms, &Term::Integer(1));
-    assert_eq!(tables.delete_owned(ProcessId(1), 10), None);
+    assert_eq!(
+        tables.delete_owned(ProcessId(1), 10, |_| false, &mut Vec::new()),
+        None
+    );
     assert!(tables.table_by_id(Reference(1)).unwrap().is_fixed());
-    assert_eq!(tables.delete_owned(ProcessId(1), 100), Some(97));
+    assert_eq!(
+        tables.delete_owned(ProcessId(1), 100, |_| false, &mut Vec::new()),
+        Some(97)
+    );
     assert!(!tables.table_by_id(Reference(1)).unwrap().is_fixed());
 }
 
@@ -1379,7 +1398,10 @@ fn charges_one_reduction_for_each_process_that_fixed_an_owned_table() {
     tables.fix_table(Reference(0), ProcessId(1));
     tables.fix_table(Reference(0), ProcessId(2));
     tables.fix_table(Reference(0), ProcessId(2));
-    assert_eq!(tables.delete_owned(ProcessId(1), 100), Some(66));
+    assert_eq!(
+        tables.delete_owned(ProcessId(1), 100, |_| false, &mut Vec::new()),
+        Some(66)
+    );
 }
 
 #[test]
@@ -1395,7 +1417,10 @@ fn charges_one_reduction_for_a_fixation_that_leaves_the_table_fixed() {
     );
     tables.fix_table(Reference(0), ProcessId(1));
     tables.fix_table(Reference(0), ProcessId(2));
-    assert_eq!(tables.delete_owned(ProcessId(1), 100), Some(99));
+    assert_eq!(
+        tables.delete_owned(ProcessId(1), 100, |_| false, &mut Vec::new()),
+        Some(99)
+    );
     assert!(tables.table_by_id(Reference(0)).unwrap().is_fixed());
 }
 
@@ -1415,7 +1440,10 @@ fn drains_the_cleanup_of_a_deleted_table_when_the_process_runs() {
     assert_eq!(tables.drain_pending(ProcessId(3), 5), 0);
     assert_eq!(tables.drain_pending(ProcessId(2), 1), 1);
     // The entry is gone, so the exit charges nothing more.
-    assert_eq!(tables.delete_owned(ProcessId(2), 100), Some(100));
+    assert_eq!(
+        tables.delete_owned(ProcessId(2), 100, |_| false, &mut Vec::new()),
+        Some(100)
+    );
 }
 
 #[test]
@@ -1434,7 +1462,10 @@ fn drains_the_cleanup_of_a_deleted_table_within_the_budget() {
     }
     assert_eq!(tables.drain_pending(ProcessId(2), 1), 1);
     assert_eq!(tables.drain_pending(ProcessId(2), 5), 1);
-    assert_eq!(tables.delete_owned(ProcessId(2), 100), Some(100));
+    assert_eq!(
+        tables.delete_owned(ProcessId(2), 100, |_| false, &mut Vec::new()),
+        Some(100)
+    );
 }
 
 #[test]
@@ -1450,7 +1481,10 @@ fn charges_the_cleanup_of_a_deleted_table_at_the_exit() {
     );
     tables.fix_table(Reference(0), ProcessId(2));
     assert_eq!(tables.delete_table(Reference(0), ProcessId(1)), 1);
-    assert_eq!(tables.delete_owned(ProcessId(2), 100), Some(99));
+    assert_eq!(
+        tables.delete_owned(ProcessId(2), 100, |_| false, &mut Vec::new()),
+        Some(99)
+    );
 }
 
 #[test]
@@ -1506,7 +1540,10 @@ fn removes_the_fixations_of_the_exit_in_their_insertion_order() {
     }
     tables.fix_table(Reference(1), ProcessId(1));
     tables.fix_table(Reference(0), ProcessId(1));
-    assert_eq!(tables.delete_owned(ProcessId(1), 1), None);
+    assert_eq!(
+        tables.delete_owned(ProcessId(1), 1, |_| false, &mut Vec::new()),
+        None
+    );
     assert!(!tables.table_by_id(Reference(1)).unwrap().is_fixed());
     assert!(tables.table_by_id(Reference(0)).unwrap().is_fixed());
 }
@@ -1535,10 +1572,16 @@ fn removes_the_fixations_of_the_exit_in_bounded_turns() {
             .unwrap()
             .delete(&atoms, &Term::Integer(1));
     }
-    assert_eq!(tables.delete_owned(ProcessId(1), 3), None);
+    assert_eq!(
+        tables.delete_owned(ProcessId(1), 3, |_| false, &mut Vec::new()),
+        None
+    );
     assert!(!tables.table_by_id(Reference(0)).unwrap().is_fixed());
     assert!(tables.table_by_id(Reference(1)).unwrap().is_fixed());
-    assert_eq!(tables.delete_owned(ProcessId(1), 100), Some(97));
+    assert_eq!(
+        tables.delete_owned(ProcessId(1), 100, |_| false, &mut Vec::new()),
+        Some(97)
+    );
 }
 
 #[test]

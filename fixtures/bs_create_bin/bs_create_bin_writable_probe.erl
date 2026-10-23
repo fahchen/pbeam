@@ -1,5 +1,5 @@
 -module(bs_create_bin_writable_probe).
--export([bytes/1, chunks/1, floats/1, sizes/1, shared/1, float_bad/1, float_size/2, append_float/3, bits/1, cause/2, ints/1, reds/1]).
+-export([bytes/1, chunks/1, floats/1, sizes/1, shared/1, float_bad/1, float_size/2, append_float/3, half/1, bits/1, cause/2, ints/1, reds/1]).
 
 %% A loop that appends one byte: bs_init_writable and an integer segment
 %% after a private_append segment.
@@ -42,6 +42,9 @@ float_size(F, S) -> <<F:S/float>>.
 
 %% An append segment and a float segment with a size in a register.
 append_float(A, F, S) -> <<A/binary, F:S/float>>.
+
+%% A 16-bit float segment, big and little endian, with a literal size.
+half(F) -> {<<F:16/float>>, <<F:16/float-little>>}.
 
 %% A loop that appends 4 bits, which gives a bitstring.
 bits(N) -> bits(N, <<>>).

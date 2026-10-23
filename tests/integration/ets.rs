@@ -528,9 +528,8 @@ fn gives_the_table_type_as_pinned_erts() {
 
 #[test]
 fn rejects_tables_that_pbeam_cannot_model() {
-    // ERTS 29.1.1 gives the binary item, and it makes two set tables whose
-    // heir is a live process other than the caller. PBeam gives no binary
-    // item, keeps no record of a deleted table, and keeps no such heir. ERTS
+    // ERTS 29.1.1 gives the binary item. PBeam gives no binary item and
+    // keeps no record of a deleted table. ERTS
     // aborts the emulator for an insert with the key position 0 (status
     // 134, `Invalid tag in make_internal_hash`) and crashes for a found key
     // and an index that becomes 0 (status 139). This is the "ETS tables"
@@ -549,8 +548,6 @@ fn rejects_tables_that_pbeam_cannot_model() {
             "select_delete_unsupported",
             "match specification function round/1",
         ),
-        ("heir", "new/2 heir ProcessId("),
-        ("heir_data", "new/2 heir ProcessId("),
         ("keypos", "insert/2 in a table with key position 0"),
         ("keypos_new", "insert_new/2 in a table with key position 0"),
         ("index", "lookup_element/4 index 4294967296 with position 0"),
@@ -713,6 +710,22 @@ fn runs_the_select_and_iteration_bifs_as_pinned_erts() {
         "delete_object",
         "update_counter",
     ] {
+        assert_probe_matches_erts(&program, function);
+    }
+}
+
+#[test]
+fn transfers_tables_to_heirs_and_receivers_as_pinned_erts() {
+    // `ets_probe:heir_transfer/0` and `give_away/0`: the exit of an owner
+    // gives each table to its live heir before the 'DOWN' message
+    // (erl_db.c:5077-5081, 4865-4933), and ets:give_away/3 keeps the checks
+    // and the causes of erl_db.c:3087-3144. `ets_probe:setopts/0` sets the heir
+    // and the protection with the checks of erl_db.c:3146-3229.
+    let beams = ["erlang", "ets", "lists", "proplists", "maps"].map(pinned_beam);
+    let mut modules: Vec<&[u8]> = beams.iter().map(Vec::as_slice).collect();
+    modules.push(ETS_PROBE);
+    let program = BeamProgram::load(&modules).unwrap();
+    for function in ["heir_transfer", "give_away", "setopts"] {
         assert_probe_matches_erts(&program, function);
     }
 }

@@ -612,9 +612,10 @@ fn links_to_an_inet_port_of_another_scheduler() {
     assert_eq!(results[1].term, atom("ok"), "the giver");
 }
 
-/// Two roots on two schedulers add to one counter array and one unsigned
-/// atomic array. The pinned ERTS on `erl +S 10`, with the roots on the
-/// schedulers 1 and 2, gives `{8, 18446744073709551615}` and `ok`.
+/// Two roots on two schedulers add to one counter array, one
+/// `write_concurrency` counter array, and one unsigned atomic array. The
+/// pinned ERTS on `erl +S 10`, with the roots on the schedulers 1 and 2,
+/// gives `{8, 8, 18446744073709551615}` and `ok`.
 #[test]
 fn shares_an_atomic_array_between_schedulers() {
     let program = BeamProgram::load(&[
@@ -634,6 +635,7 @@ fn shares_an_atomic_array_between_schedulers() {
     assert_eq!(
         results[0].term,
         Term::tuple(vec![
+            Term::Integer(8),
             Term::Integer(8),
             Term::BigInt(std::sync::Arc::new(num_bigint::BigInt::from(u64::MAX))),
         ]),

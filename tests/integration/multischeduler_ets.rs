@@ -19,7 +19,7 @@ const RUNS: usize = 10;
 /// Run the roots `first` and `second` on two scheduler threads `RUNS` times,
 /// and check that each root returns `ok`.
 fn run_pair(first: &str, second: &str) {
-    let beams = ["erlang", "erts_internal", "ets"].map(pinned_beam);
+    let beams = ["erlang", "erts_internal", "ets", "lists"].map(pinned_beam);
     let mut modules: Vec<&[u8]> = beams.iter().map(Vec::as_slice).collect();
     modules.push(ETS_TABLES);
     let program = BeamProgram::load(&modules).expect("the fixture loads");
@@ -57,6 +57,14 @@ fn helps_a_list_insert_of_the_other_scheduler() {
     run_pair("inserter", "helper");
 }
 
+/// A heir on the other scheduler gets a table through `ets:give_away/3`
+/// and a table at the exit of its owner, each with its `ETS-TRANSFER`
+/// message before the 'DOWN' message of the owner.
+#[test]
+fn transfers_tables_to_a_heir_on_the_other_scheduler() {
+    run_pair("testator", "heir");
+}
+
 /// Each pair gives `ok` for each root on the pinned ERTS.
 #[test]
 fn the_pinned_erts_gives_the_same_results() {
@@ -79,6 +87,6 @@ fn the_pinned_erts_gives_the_same_results() {
     assert!(output.status.success(), "{output:?}");
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "[{ok,ok},{ok,ok},{ok,ok}]\n"
+        "[{ok,ok},{ok,ok},{ok,ok},{ok,ok}]\n"
     );
 }

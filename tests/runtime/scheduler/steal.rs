@@ -67,14 +67,14 @@ fn inbox(node: &Node, index: usize) -> Vec<(char, u64)> {
 }
 
 /// A scheduler with four runnable processes gives two of them, from the
-/// head of its queue, to the hungry scheduler, and skips a pinned process.
+/// head of its queue, to the hungry scheduler, and skips a system process.
 /// The owner in the process table moves with the state, and the thief runs
 /// the processes in their order.
 #[test]
 fn gives_half_of_the_queue_to_a_hungry_scheduler() {
     let (node, mut victim, mut thief) = two_schedulers();
     insert(&mut victim, &[1, 2, 3, 4]);
-    victim.processes.get_mut(&ProcessId(1)).unwrap().pinned = true;
+    victim.mark_system(ProcessId(1));
     node.set_hungry(1, true);
     victim.serve_steal();
     assert_eq!(node.owner(ProcessId(2)), Some(1));
@@ -124,8 +124,8 @@ fn keeps_each_process_that_cannot_move() {
         key: (1100, 0),
         resume: 7,
     };
-    process(&mut victim, 4).pinned = true;
-    process(&mut victim, 5).pinned = true;
+    victim.mark_system(ProcessId(4));
+    victim.mark_system(ProcessId(5));
     victim.mark_system(ProcessId(6));
     // The dirty call starts after the process is in the run queue, as a
     // process in a dirty call that has signals to handle is.
@@ -140,23 +140,6 @@ fn keeps_each_process_that_cannot_move() {
     assert!(inbox(&node, 1).is_empty());
     assert_eq!(victim.runnable.len(), 7);
     assert!(node.has_hungry(0), "a steal with no process keeps the mark");
-}
-
-/// A process that uses a scheduler service in its turn is pinned at its
-/// switch out. A borrow outside the turn of a process pins no process.
-#[test]
-fn a_borrow_of_a_scheduler_service_pins_the_process() {
-    let (_node, mut scheduler, _thief) = two_schedulers();
-    insert(&mut scheduler, &[1, 2]);
-    scheduler.resources.put(0u8);
-    let _ = scheduler.resources.borrow_mut::<u8>();
-    assert_eq!(scheduler.schedule_next().unwrap(), super::super::Turn::Run);
-    scheduler.yield_current();
-    assert!(!scheduler.processes[&ProcessId(1)].pinned);
-    assert_eq!(scheduler.schedule_next().unwrap(), super::super::Turn::Run);
-    let _ = scheduler.resources.borrow_mut::<u8>();
-    scheduler.yield_current();
-    assert!(scheduler.processes[&ProcessId(2)].pinned);
 }
 
 /// The deliveries for a process that wait in the inbox of its old
@@ -298,7 +281,7 @@ fn the_first_stolen_process_gives_no_count() {
     assert_eq!(counts, vec![(ProcessId(1), None), (ProcessId(2), Some(8))]);
 }
 
-/// A pinned `high` process that the scheduler runs next gives no process,
+/// A system `high` process that the scheduler runs next gives no process,
 /// so the steal takes from the `normal` queue: the idle scheduler gets one
 /// of the two `normal` processes, as ERTS goes on to the next queue
 /// (`erl_process.c:4489-4592`).
@@ -307,12 +290,38 @@ fn a_queue_that_gives_nothing_lets_the_steal_take_a_lower_queue() {
     let (node, mut victim, _thief) = two_schedulers();
     let mut high = ProcessState::new(ProcessId(1), Start::Entry(frame()), vec![]);
     high.priority = Priority::High;
-    high.pinned = true;
     victim.insert(high);
+    victim.mark_system(ProcessId(1));
     insert(&mut victim, &[2, 3]);
     node.set_hungry(1, true);
     victim.serve_steal();
     assert_eq!(node.owner(ProcessId(2)), Some(1));
     assert_eq!(victim.runnable.ids(), vec![ProcessId(1), ProcessId(3)]);
     assert_eq!(inbox(&node, 1), vec![('P', 2)]);
+}
+
+/// A reader that selected fd 0 on one scheduler and then moved in a steal
+/// gets the `ready_input` message on its new scheduler: the scheduler that
+/// serves fd 0 sends the message through the node.
+#[test]
+fn the_fd_0_message_follows_a_stolen_reader() {
+    use super::super::poll::Direction;
+    use crate::runtime::tty::InputSelect;
+    use crate::term::Reference;
+    let (node, mut victim, mut thief) = two_schedulers();
+    insert(&mut victim, &[1, 2]);
+    node.set_hungry(1, true);
+    victim.serve_steal();
+    assert!(thief.drain_inbox());
+    assert_eq!(node.owner(ProcessId(1)), Some(1));
+    node.ttys().select_input(InputSelect {
+        tty: Reference(7),
+        recipient: ProcessId(1),
+        reference: Term::Nil,
+    });
+    victim
+        .serve(&[(libc::STDIN_FILENO, Direction::Read)])
+        .unwrap();
+    assert_eq!(inbox(&node, 1), vec![('M', 1)]);
+    assert!(!node.ttys().input_selected());
 }

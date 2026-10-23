@@ -42,10 +42,10 @@ fn parses_the_abs_option_as_pinned_erts() {
     );
 }
 
-/// A process that reads or cancels an active BIF timer is not pinned to
-/// its scheduler: the node holds the timer for each scheduler.
+/// A process reads or cancels an active BIF timer through the node, which
+/// holds the timer for each scheduler.
 #[test]
-fn a_user_of_an_active_timer_is_not_pinned() {
+fn reads_and_cancels_an_active_timer_of_the_node() {
     use crate::runtime::process::tests::{frame, test_scheduler};
     use crate::runtime::timer::{Receiver, Timer};
     use crate::term::ProcessId;
@@ -58,7 +58,6 @@ fn a_user_of_an_active_timer_is_not_pinned() {
     };
     let result = read_timer(&mut context, &Term::Reference(unknown)).unwrap();
     assert!(matches!(result, Value(Term::Atom(_))));
-    assert!(!scheduler.current_process_mut().pinned);
     for cancel in [false, true] {
         let reference = scheduler.make_ref().unwrap();
         scheduler.timers.start(
@@ -86,6 +85,5 @@ fn a_user_of_an_active_timer_is_not_pinned() {
             read_timer(&mut context, &Term::Reference(reference))
         };
         assert!(matches!(result.unwrap(), Value(Term::Integer(_))));
-        assert!(!scheduler.current_process_mut().pinned, "cancel {cancel}");
     }
 }

@@ -1359,3 +1359,113 @@ fn runs_map_operations_with_map_keys_as_pinned_erts() {
         format!("[{}]\n", pbeam.join(","))
     );
 }
+
+const BINARY_IN_KEY_PROBE: &[u8] = include_bytes!("../../fixtures/map/binary_in_key_probe.beam");
+
+#[test]
+fn runs_map_operations_with_binaries_in_compound_keys_as_pinned_erts() {
+    // Tuple, list, and map keys hold a heap binary, a refc binary, a
+    // sub-binary, an unaligned sub-binary, and a bitstring of 3 bits, in a
+    // flatmap of 12 keys and in a hashmap of 53 keys. A hashmap orders the
+    // keys in the order of the internal hash, whose binary path mixes the
+    // size in bits and the bytes. `encoded/0` returns the external term
+    // format of the keys, the pairs, the lookups, and the comparisons, so
+    // each byte of the two runs must be equal.
+    let erlang = pinned_beam("erlang");
+    let program = BeamProgram::load(&[&erlang, BINARY_IN_KEY_PROBE]).unwrap();
+    let encoded = program
+        .execute("binary_in_key_probe", "encoded", &[])
+        .unwrap()
+        .term;
+    let Term::Binary(bytes) = &encoded else {
+        panic!("encoded/0 returns a binary");
+    };
+    let pbeam: Vec<String> = bytes.bytes().unwrap().iter().map(u8::to_string).collect();
+    assert_eq!(
+        String::from_utf8(erl_reference(
+            "io:format(\"~w~n\", [binary_to_list(binary_in_key_probe:encoded())])"
+        ))
+        .unwrap(),
+        format!("[{}]\n", pbeam.join(","))
+    );
+}
+
+const FUN_KEY_PROBE: &[u8] = include_bytes!("../../fixtures/map/fun_key_probe.beam");
+
+#[test]
+fn runs_map_operations_with_fun_keys_as_pinned_erts() {
+    // A fun is a map key, alone and inside a tuple or a list. A hashmap
+    // hashes a local fun by its free variable count, index, old unique
+    // value, module, and free variables (`erl_term_hashing.c:1987-2010`).
+    // The module atom index differs between ERTS and PBeam, so the
+    // hashmap pair order is exact only for PBeam on the CI host; the ERTS
+    // run checks the same set of values. The probe returns no fun.
+    let erlang = pinned_beam("erlang");
+    let lists = pinned_beam("lists");
+    let maps = pinned_beam("maps");
+    let program = BeamProgram::load(&[&erlang, &lists, &maps, FUN_KEY_PROBE]).unwrap();
+    let int = Term::Integer;
+    let ints = |values: &[i64]| Term::list_from(values.iter().map(|&v| int(v)));
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let run = |function| {
+        program
+            .execute("fun_key_probe", function, &[])
+            .unwrap()
+            .term
+    };
+    let hash_order = [
+        33, 32, 3, 11, 8, 30, 22, 6, 21, 18, 16, 35, 37, 5, 31, 28, 14, 1, 26, 38, 23, 20, 10, 17,
+        39, 9, 25, 13, 24, 2, 29, 34, 27, 12, 19, 7, 4, 36, 15, 40,
+    ];
+    let nested_order = [
+        9, 11, 12, 6, 2, -2, 30, 31, 25, 27, 34, -3, 1, 21, 5, 26, 16, 3, 24, 20, 32, 23, 10, 17,
+        7, 13, 28, 4, 8, -1, 33, 15, 14, 18, 19, 22, 29, -4,
+    ];
+    assert_eq!(
+        run("flat"),
+        Term::list_from(vec![
+            int(5),
+            int(1),
+            int(2),
+            int(3),
+            int(4),
+            int(5),
+            atom("false"),
+            ints(&[1, 2, 3, 4, 5]),
+        ])
+    );
+    assert_eq!(
+        run("hash"),
+        Term::list_from(vec![int(40), int(17), atom("false"), ints(&hash_order)])
+    );
+    assert_eq!(
+        run("nested"),
+        Term::list_from(vec![int(38), int(-2), ints(&nested_order)])
+    );
+    assert_eq!(
+        run("order"),
+        Term::list_from(vec![
+            atom("true"),
+            atom("false"),
+            atom("true"),
+            atom("true"),
+            atom("true"),
+        ])
+    );
+    assert_eq!(
+        run("external"),
+        Term::list_from(vec![int(1), int(2), ints(&[3, 1, 2])])
+    );
+    assert_eq!(
+        erl_reference(
+            "io:format(\"~w~n~w~n~w~n~w~n~w~n\", [fun_key_probe:flat(), \
+             lists:sort(lists:last(fun_key_probe:hash())), \
+             lists:sort(lists:last(fun_key_probe:nested())), \
+             fun_key_probe:order(), fun_key_probe:external()])"
+        ),
+        b"[5,1,2,3,4,5,false,[1,2,3,4,5]]\n\
+          [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40]\n\
+          [-4,-3,-2,-1,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34]\n\
+          [true,false,true,true,true]\n[1,2,[3,1,2]]\n"
+    );
+}

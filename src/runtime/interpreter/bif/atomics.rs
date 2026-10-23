@@ -1,7 +1,8 @@
 //! Bodies of the `atomics` BIFs and of the `erts_internal:atomics_new/2`
-//! BIF that makes an atomic array. The preloaded `counters` module of the
-//! node calls them in its default `atomics` mode
-//! (`erts/preloaded/src/counters.erl:100-247`).
+//! BIF that makes an atomic array, and of the `erts_internal` counters BIFs
+//! (`erl_bif_counters.c`). The preloaded `counters` module of the node
+//! calls the first in its default `atomics` mode and the second in its
+//! `write_concurrency` mode (`erts/preloaded/src/counters.erl:100-247`).
 
 use num_bigint::{BigInt, Sign};
 use num_traits::ToPrimitive;
@@ -10,6 +11,7 @@ use super::BifResult::Value;
 use super::*;
 use crate::runtime::atomics::{ATOMIC_BYTES, Array};
 use crate::term::Map;
+use std::sync::Arc;
 
 /// The bit of the encoded options of `atomics:new/2` that selects signed
 /// atomics (`?OPT_SIGNED`, `atomics.erl:63`; `OPT_SIGNED`,
@@ -210,6 +212,198 @@ pub(super) fn info(scheduler: &mut Scheduler, reference: &Term) -> Result<BifRes
     // ponytail: each key is a static atom, so `from_pairs` cannot fail.
     let map = Map::from_pairs(pairs, &scheduler.atoms).expect("static atom keys fit each map form");
     Ok(Value(Term::Map(map)))
+}
+
+/// The bytes of an ERTS cache line, `ERTS_CACHE_LINE_SIZE` on the 64-bit
+/// hosts of PBeam. A `write_concurrency` array keeps its atomics in cache
+/// lines (`erl_bif_counters.c:52-64`).
+const CACHE_LINE_BYTES: u64 = 64;
+
+/// The bytes before the cache lines of a `write_concurrency` array in its
+/// `memory`: the magic binary header that `orig_size` counts
+/// (`ERTS_MAGIC_BIN_ORIG_SIZE`, `erl_binary.h:137-140`) and the `arity`
+/// field of `CountersRef` (`erl_bif_counters.c:54-64`). The pinned ERTS
+/// with 10 schedulers reports 736 bytes for 1 counter and 1440 for 9.
+const COUNTERS_HEADER_BYTES: u64 = 32;
+
+/// Run `erts_internal:counters_new(Size)`: make a `write_concurrency`
+/// counter array of `Size` counters and return its reference, as
+/// `erts_internal_counters_new_1` (`erl_bif_counters.c:77-113`) does.
+///
+/// ERTS keeps one atomic for each scheduler and one base atomic for each
+/// counter, and a read gives their sum with 64-bit wrap. PBeam keeps one
+/// signed atomic for each counter, which gives the same values: each add
+/// and put wraps at 64 bits in the same way.
+///
+/// The checks keep the ERTS order:
+///
+/// 1. A `Size` that is not a non-negative integer raises `badarg`, and a
+///    positive integer above the machine word raises `system_limit`
+///    (`erl_bif_counters.c:85-87`).
+/// 2. A `Size` of 0 raises `badarg` (`erl_bif_counters.c:88-90`).
+/// 3. A `Size` above the machine word divided by 16 bytes for each atomic
+///    of a counter raises `system_limit` (`erl_bif_counters.c:92-93`).
+/// 4. An allocation that fails raises `system_limit`, where ERTS ends the
+///    emulator (see "Atomic arrays" in `docs/erts-differences.md`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = counters_new(&mut scheduler, &Term::Integer(1))?;
+/// assert!(matches!(result, BifResult::Value(Term::Reference(_))));
+/// ```
+///
+/// # Errors
+///
+/// A full reference counter gives the error of [`Scheduler::make_ref`].
+pub(super) fn counters_new(scheduler: &mut Scheduler, size: &Term) -> Result<BifResult, BeamError> {
+    let size = match to_uword(size) {
+        Ok(size) => size,
+        Err(exception) => return Ok(exception),
+    };
+    if size == 0 {
+        return Ok(BifResult::badarg());
+    }
+    if size > u64::MAX / (ATOMIC_BYTES * 2 * atomics_per_counter(scheduler)) {
+        return Ok(system_limit());
+    }
+    let id = scheduler.make_ref()?;
+    if !scheduler.node().counters.create(id, true, size as usize) {
+        return Ok(system_limit());
+    }
+    Ok(Value(Term::Reference(id)))
+}
+
+/// Run `erts_internal:counters_get(Ref, Ix)`: return the signed value of
+/// the counter, as `erts_internal_counters_get_2`
+/// (`erl_bif_counters.c:180-195`) does. A reference that is not the
+/// reference of a counter array and an index outside the array raise
+/// `badarg` (`get_ref_cnt`, `erl_bif_counters.c:128-143`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(counters_get(&mut scheduler, &reference, &Term::Integer(1))?, BifResult::Value(Term::Integer(0)));
+/// ```
+pub(super) fn counters_get(
+    scheduler: &mut Scheduler,
+    reference: &Term,
+    index: &Term,
+) -> Result<BifResult, BeamError> {
+    let Some((array, position)) = counter(scheduler, reference, index) else {
+        return Ok(BifResult::badarg());
+    };
+    Ok(Value(Term::Integer(array.get(position))))
+}
+
+/// Run `erts_internal:counters_add(Ref, Ix, Incr)`: add `Incr` to the
+/// counter with 64-bit wrap, as `erts_internal_counters_add_3`
+/// (`erl_bif_counters.c:197-210`) does. A bad reference, a bad index, and
+/// an increment outside the signed and the unsigned 64-bit ranges raise
+/// `badarg` (`get_incr`, `erl_bif_counters.c:162-166`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = counters_add(&mut scheduler, &reference, &Term::Integer(1), &Term::Integer(1))?;
+/// assert!(matches!(result, BifResult::Value(Term::Atom(_))));
+/// ```
+pub(super) fn counters_add(
+    scheduler: &mut Scheduler,
+    reference: &Term,
+    index: &Term,
+    increment: &Term,
+) -> Result<BifResult, BeamError> {
+    let Some((array, position)) = counter(scheduler, reference, index) else {
+        return Ok(BifResult::badarg());
+    };
+    let Some(bits) = increment_bits(increment) else {
+        return Ok(BifResult::badarg());
+    };
+    array.add(position, bits);
+    Ok(Value(Term::static_atom("ok")))
+}
+
+/// Run `erts_internal:counters_put(Ref, Ix, Value)`: write `Value` to the
+/// counter, as `erts_internal_counters_put_3`
+/// (`erl_bif_counters.c:212-236`) does. A bad reference, a bad index, and
+/// a value outside the signed 64-bit range raise `badarg`
+/// (`erl_bif_counters.c:221-224`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = counters_put(&mut scheduler, &reference, &Term::Integer(1), &Term::Integer(-1))?;
+/// assert!(matches!(result, BifResult::Value(Term::Atom(_))));
+/// ```
+pub(super) fn counters_put(
+    scheduler: &mut Scheduler,
+    reference: &Term,
+    index: &Term,
+    value: &Term,
+) -> Result<BifResult, BeamError> {
+    let Some((array, position)) = counter(scheduler, reference, index) else {
+        return Ok(BifResult::badarg());
+    };
+    let Some(bits) = signed_bits(value) else {
+        return Ok(BifResult::badarg());
+    };
+    array.set(position, bits);
+    Ok(Value(Term::static_atom("ok")))
+}
+
+/// Run `erts_internal:counters_info(Ref)`: return the map with the keys
+/// `memory` and `size`, as `erts_internal_counters_info_1`
+/// (`erl_bif_counters.c:238-259`) does. `memory` is the size of the ERTS
+/// magic binary: the header and one cache line of 8 atomics for each
+/// scheduler and the base value (`erl_bif_counters.c:95-96`). A reference
+/// that is not the reference of a counter array raises `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // One counter on one scheduler holds `#{memory => 160, size => 1}`.
+/// assert!(matches!(counters_info(&mut scheduler, &reference)?, BifResult::Value(Term::Map(_))));
+/// ```
+pub(super) fn counters_info(
+    scheduler: &mut Scheduler,
+    reference: &Term,
+) -> Result<BifResult, BeamError> {
+    let Some(array) = scheduler.node().counters.array(reference) else {
+        return Ok(BifResult::badarg());
+    };
+    let size = array.len() as u64;
+    let per_line = CACHE_LINE_BYTES / ATOMIC_BYTES;
+    let cache_lines = atomics_per_counter(scheduler) * size.div_ceil(per_line);
+    let memory = COUNTERS_HEADER_BYTES + cache_lines * CACHE_LINE_BYTES;
+    let pairs = vec![
+        (
+            Term::static_atom("memory"),
+            Term::from_bigint(BigInt::from(memory)),
+        ),
+        (
+            Term::static_atom("size"),
+            Term::from_bigint(BigInt::from(size)),
+        ),
+    ];
+    // ponytail: each key is a static atom, so `from_pairs` cannot fail.
+    let map = Map::from_pairs(pairs, &scheduler.atoms).expect("static atom keys fit each map form");
+    Ok(Value(Term::Map(map)))
+}
+
+/// Return the atomics of one counter in ERTS: one for each scheduler and
+/// one for the base value (`ATOMICS_PER_COUNTER`, `erl_bif_counters.c:50`).
+fn atomics_per_counter(scheduler: &Scheduler) -> u64 {
+    scheduler.scheduler_count() as u64 + 1
+}
+
+/// Return the counter array of `reference` and the position that `index`
+/// names, or `None` when either is not valid (`get_ref_cnt`,
+/// `erl_bif_counters.c:128-143`).
+fn counter(scheduler: &Scheduler, reference: &Term, index: &Term) -> Option<(Arc<Array>, usize)> {
+    let array = scheduler.node().counters.array(reference)?;
+    let position = position(&array, index)?;
+    Some((array, position))
 }
 
 /// Return the machine word of `term`, as ERTS `term_to_UWord` gives it

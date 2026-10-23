@@ -500,13 +500,6 @@ pub(super) struct ProcessState {
     /// mark moves with the state of the process, so the scheduler that runs
     /// the process records the root exit at the node.
     pub(super) root: Option<usize>,
-    /// True when the process used a service that stays with its scheduler:
-    /// a file, a terminal, a compiled expression or pattern, a
-    /// buffer, or a zlib stream. Such a process stays with its scheduler,
-    /// as ERTS keeps a
-    /// process bound to its run queue (`erts_try_change_runq_proc`,
-    /// `erl_process.h:2722-2723`). The mark does not clear.
-    pub(super) pinned: bool,
 }
 
 /// A BIF call that continues after a switch: the export of a BIF and the
@@ -693,7 +686,6 @@ impl ProcessState {
             start_apply: false,
             policy_reply: None,
             root: None,
-            pinned: false,
         }
     }
 

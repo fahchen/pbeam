@@ -290,7 +290,7 @@ fn only(names: &[&str]) -> Constraint {
 
 /// Each entry that the column "Capability" of the effect inventory marks
 /// `ambient`. `effect_probe:ambient/0` calls each entry once.
-const AMBIENT: [&str; 111] = [
+const AMBIENT: [&str; 118] = [
     "atomics:add/3",
     "atomics:get/2",
     "atomics:info/1",
@@ -345,6 +345,11 @@ const AMBIENT: [&str; 111] = [
     "erlang:unregister/1",
     "erlang:whereis/1",
     "erts_internal:atomics_new/2",
+    "erts_internal:counters_add/3",
+    "erts_internal:counters_get/2",
+    "erts_internal:counters_info/1",
+    "erts_internal:counters_new/1",
+    "erts_internal:counters_put/3",
     "erts_internal:is_system_process/1",
     "erts_internal:prepare_loading/2",
     "erts_internal:processes_next/1",
@@ -353,6 +358,8 @@ const AMBIENT: [&str; 111] = [
     "ets:delete/1",
     "ets:delete/2",
     "ets:delete_object/2",
+    "ets:give_away/3",
+    "ets:setopts/2",
     "ets:first/1",
     "ets:first_lookup/1",
     "ets:info/1",

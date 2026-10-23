@@ -123,6 +123,22 @@ pub(super) struct EtsTables {
     results: Mutex<HashMap<ProcessId, Option<Term>>>,
 }
 
+/// A table that the exit of its owner gave to its heir, for the
+/// `{'ETS-TRANSFER', Table, From, Data}` message that the exit sends to the
+/// heir (`send_ets_transfer_message`, `erl_db.c:4935-4971`).
+#[derive(Debug)]
+pub(super) struct Transfer {
+    /// The heir, which now owns the table.
+    pub(super) heir: ProcessId,
+    /// The table reference.
+    pub(super) table: Reference,
+    /// The name of a named table, which the message holds in place of the
+    /// reference (`erl_db.c:4959-4962`).
+    pub(super) name: Option<String>,
+    /// The heir data of the table.
+    pub(super) data: Term,
+}
+
 /// A deleted table and the count of its segments that are not free yet. ERTS
 /// frees the segments from the top segment down and keeps the position in
 /// the table (`erl_db_hash.c:3140-3149`), so a later turn continues at the
@@ -227,6 +243,10 @@ pub(super) struct Table {
     /// The heir that `ets:new/2` accepted and that is the owner, as
     /// `ets:info(Table, heir)` gives it (`table_info`, `erl_db.c:5478-5479`).
     heir: Option<ProcessId>,
+    /// The data of `{heir, Pid, Data}`, which the `ETS-TRANSFER` message to
+    /// the heir holds, or `None` for `{heir, Pid}`, which sends no message
+    /// (`heir_data`, `erl_db.c:2670-2687`, `4919-4930`).
+    heir_data: Option<Term>,
     /// The list insert that took the table and yields between its objects
     /// (`tb->common.status & DB_BUSY`, `erl_db.c:2077-2107`, `2310-2319`),
     /// else `None`. Each process that uses the table while it is busy
@@ -1041,10 +1061,16 @@ impl EtsTables {
     /// ```rust,ignore
     /// let mut tables = EtsTables::default();
     /// tables.create(Reference(0), Some("ac_tab"), Table::new(ProcessId(1), Access::Public, 1, TableType::Set));
-    /// assert_eq!(tables.delete_owned(ProcessId(1), 100), Some(68));
+    /// assert_eq!(tables.delete_owned(ProcessId(1), 100, |_| false, &mut Vec::new()), Some(68));
     /// assert!(!tables.name_in_use("ac_tab"));
     /// ```
-    pub(super) fn delete_owned(&mut self, owner: ProcessId, mut reds: i32) -> Option<i32> {
+    pub(super) fn delete_owned(
+        &mut self,
+        owner: ProcessId,
+        mut reds: i32,
+        alive: impl Fn(ProcessId) -> bool,
+        transfers: &mut Vec<Transfer>,
+    ) -> Option<i32> {
         loop {
             let live = (self.tables.iter_mut()).map(|(id, table)| {
                 let table = table.get_mut().unwrap_or_else(PoisonError::into_inner);
@@ -1059,6 +1085,25 @@ impl EtsTables {
             else {
                 break;
             };
+            // A live heir other than the owner takes the table, and the
+            // heir stays (`erl_db.c:5077-5081`, `give_away_to_heir`,
+            // `erl_db.c:4865-4933`). The transfer uses no reduction.
+            if let Some(table) = self.live(id)
+                && let Some(heir) = table.heir.filter(|heir| *heir != owner && alive(*heir))
+            {
+                let data = table.heir_data.clone();
+                self.give(id, heir);
+                if let Some(data) = data {
+                    let name = self.named_as(id);
+                    transfers.push(Transfer {
+                        heir,
+                        table: id,
+                        name,
+                        data,
+                    });
+                }
+                continue;
+            }
             if let Some(table) = self.tables.remove(&id) {
                 let mut table = table.into_inner().unwrap_or_else(PoisonError::into_inner);
                 let fixers = table.fixers();
@@ -1161,6 +1206,24 @@ impl EtsTables {
         let charge = fixers.len();
         self.freeing.insert(id, Freeing::new(table));
         charge
+    }
+
+    /// Return the name of the table `id` when it is a named table.
+    pub(super) fn named_as(&self, id: Reference) -> Option<String> {
+        (self.names.iter())
+            .find(|(_, named)| **named == id)
+            .map(|(name, _)| name.clone())
+    }
+
+    /// Make the process `to` the owner of the live table `id`, at the end of
+    /// its owned list, as `ets_give_away_3` and `give_away_to_heir` do
+    /// (`delete_owned_table`, `save_owned_table`, `erl_db.c:3127-3130`,
+    /// `4913-4916`). The heir of the table stays.
+    pub(super) fn give(&mut self, id: Reference, to: ProcessId) {
+        let owned = self.save_owned();
+        let table = self.live(id).expect("a given table is live");
+        table.owner = to;
+        table.owned = owned;
     }
 
     /// Return the position of the next table that goes into an owned list,
@@ -1410,6 +1473,7 @@ impl Table {
             decentralized_counters: false,
             compressed: false,
             heir: None,
+            heir_data: None,
             busy: None,
             clear: None,
             fixed_by: HashMap::new(),
@@ -1502,9 +1566,17 @@ impl Table {
         self.heir
     }
 
-    /// Set the heir that `ets:new/2` accepted and that is the owner.
-    pub(super) fn set_heir(&mut self, heir: Option<ProcessId>) {
+    /// Set the heir that `ets:new/2` accepted and the data of its
+    /// `ETS-TRANSFER` message (`set_heir`, `erl_db.c:5319-5337`).
+    pub(super) fn set_heir(&mut self, heir: Option<ProcessId>, data: Option<Term>) {
         self.heir = heir;
+        self.heir_data = data;
+    }
+
+    /// Set the access mode, as `ets:setopts/2` does with `{protection, P}`
+    /// (`erl_db.c:3214-3217`).
+    pub(super) fn set_access(&mut self, access: Access) {
+        self.access = access;
     }
 
     /// Set the options that `ets:info/2` gives. `ets:new/2` accepts them

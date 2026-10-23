@@ -1,12 +1,13 @@
 -module(ets_tables).
--export([owner/0, user/0, fixer/0, deleter/0, inserter/0, helper/0, reference/0]).
+-export([owner/0, user/0, fixer/0, deleter/0, inserter/0, helper/0, testator/0, heir/0, reference/0]).
 
 %% Run each pair of roots on the pinned ERTS, as PBeam runs the two roots of
 %% a pair on two scheduler threads, and return the results of each pair.
 reference() ->
     [pair(fun owner/0, fun user/0),
      pair(fun fixer/0, fun deleter/0),
-     pair(fun inserter/0, fun helper/0)].
+     pair(fun inserter/0, fun helper/0),
+     pair(fun testator/0, fun heir/0)].
 
 pair(First, Second) ->
     Self = self(),
@@ -32,6 +33,14 @@ fixer() -> check(fixer_run(), {true, undefined}).
 deleter() -> check(deleter_run(), ok).
 inserter() -> check(inserter_run(), {true, 100000}).
 helper() -> check(helper_run(), ok).
+
+testator() -> check(testator_run(), true).
+heir() ->
+    check(heir_run(),
+          {[{'ETS-TRANSFER', ets_gift, true, gift},
+            {'ETS-TRANSFER', ets_inherit, true, legacy},
+            {'DOWN', true, normal}],
+           true, [{k, 1}]}).
 
 check(Expected, Expected) -> ok;
 check(Result, _) -> {unexpected, Result}.
@@ -124,3 +133,33 @@ helper_run() ->
 
 seq(0, Acc) -> Acc;
 seq(N, Acc) -> seq(N - 1, [N | Acc]).
+
+%% The testator gives one table to the heir of the other scheduler with
+%% ets:give_away/3, and the heir gets the other table at the exit of the
+%% testator, with each ETS-TRANSFER message before the 'DOWN' message.
+testator_run() ->
+    register(ets_testator, self()),
+    Heir = wait_for(ets_heir),
+    ets:new(ets_inherit, [named_table, {heir, Heir, legacy}]),
+    true = ets:insert(ets_inherit, {k, 1}),
+    ets:new(ets_gift, [named_table]),
+    receive go -> ok after 60000 -> timeout end,
+    ets:give_away(ets_gift, Heir, gift).
+
+heir_run() ->
+    register(ets_heir, self()),
+    Testator = wait_for(ets_testator),
+    Monitor = monitor(process, Testator),
+    Testator ! go,
+    Seen = [case M of
+                {'ETS-TRANSFER', T, From, Data} -> {'ETS-TRANSFER', T, From =:= Testator, Data};
+                {'DOWN', Monitor, process, From, Reason} -> {'DOWN', From =:= Testator, Reason}
+            end || M <- collect(Monitor, [])],
+    {Seen, ets:info(ets_inherit, owner) =:= self(), ets:lookup(ets_inherit, k)}.
+
+collect(Monitor, Seen) ->
+    receive
+        {'DOWN', Monitor, _, _, _} = Down -> lists:reverse([Down | Seen]);
+        Message -> collect(Monitor, [Message | Seen])
+    after 60000 -> lists:reverse(Seen)
+    end.

@@ -13,89 +13,10 @@
 //! so the scheduler does not hold one store type that mixes data of
 //! different owners. The fork keeps only the functions that PBeam calls.
 
-use std::any::{Any, TypeId, type_name};
+use std::any::{Any, TypeId};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
-
-/// The typed values of the node, as `GothamState` of `deno_core`. The
-/// resources hold at most one value of each type.
-#[derive(Default)]
-pub(super) struct Resources {
-    /// Each value by the `TypeId` of its type.
-    data: BTreeMap<TypeId, Box<dyn Any>>,
-    /// True after a borrow of a value since the last
-    /// [`Resources::take_touched`]. The scheduler reads it at the switch
-    /// out of a process, because each value stays with its scheduler.
-    touched: bool,
-}
-
-impl Resources {
-    /// Put the value `value` into the resources. The resources keep one
-    /// value of each type, so a new value replaces the value of the same
-    /// type.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// let mut resources = Resources::default();
-    /// resources.put(Ports::default());
-    /// ```
-    pub(super) fn put<T: 'static>(&mut self, value: T) {
-        self.data.insert(TypeId::of::<T>(), Box::new(value));
-    }
-
-    /// Return a mutable borrow of the value of type `T`.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// let mut resources = Resources::default();
-    /// resources.put(Ports::default());
-    /// let _ = resources.borrow_mut::<Ports>();
-    /// ```
-    ///
-    /// # Panics
-    ///
-    /// Panic when the resources have no value of type `T`.
-    pub(super) fn borrow_mut<T: 'static>(&mut self) -> &mut T {
-        self.touched = true;
-        self.data
-            .get_mut(&TypeId::of::<T>())
-            .and_then(|value| value.downcast_mut())
-            .unwrap_or_else(|| missing::<T>())
-    }
-
-    /// Return whether a value was borrowed since the last call, and clear
-    /// the mark.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// let mut resources = Resources::default();
-    /// resources.put(Ports::default());
-    /// let _ = resources.borrow_mut::<Ports>();
-    /// assert!(resources.take_touched());
-    /// assert!(!resources.take_touched());
-    /// ```
-    pub(super) fn take_touched(&mut self) -> bool {
-        std::mem::take(&mut self.touched)
-    }
-}
-
-impl fmt::Debug for Resources {
-    /// Write the resources without their values: a value of `dyn Any` has no
-    /// `Debug` implementation.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert_eq!(format!("{:?}", Resources::default()), "Resources { .. }");
-    /// ```
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.debug_struct("Resources").finish_non_exhaustive()
-    }
-}
 
 /// The typed values of the node that each scheduler thread reads: one
 /// `Mutex<T>` of each type, keyed by its `TypeId`. A handle in one of these
@@ -145,21 +66,6 @@ impl fmt::Debug for NodeResources {
 /// Lock one kind of the node resources.
 pub(super) fn lock<T>(kind: &Mutex<T>) -> MutexGuard<'_, T> {
     kind.lock().expect("the resource kind is not poisoned")
-}
-
-/// Panic because the resources have no value of type `T`.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// // panics with "required type u8 is not present in Resources"
-/// missing::<u8>();
-/// ```
-fn missing<T: 'static>() -> ! {
-    panic!(
-        "required type {} is not present in Resources",
-        type_name::<T>()
-    );
 }
 
 #[cfg(test)]

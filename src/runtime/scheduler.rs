@@ -13,7 +13,7 @@ use super::{
         SecurityContext, Source,
     },
     dirty::{Claim, Completion, DirtyCalls, Work},
-    ets::NodeTables,
+    ets::{NodeTables, Transfer},
     files::Files,
     host::{
         self,
@@ -30,10 +30,10 @@ use super::{
         ProcessState, ReceiveTimer, StackSlot, Start, StartFlags, TargetMonitor, WalkPosition,
     },
     regex_code::{RegexCodes, RegexSources},
-    resources::{Resources, lock},
+    resources::lock,
     signal::Signal,
     timer::{PortTimer, Receiver, Timer, TimerKey, Timers},
-    tty::{InitialMode, Ttys},
+    tty::InitialMode,
 };
 use crate::{
     beam::ModuleId,
@@ -385,10 +385,6 @@ pub(super) struct Scheduler {
     /// while it reads its keys (`erl_sys_initial_tty_mode`, `sys.c:428-432`,
     /// `899-923`).
     initial_tty_mode: InitialMode,
-    /// Typed values of this scheduler, one value of each type: the
-    /// TTY resources in `Ttys` and the ports in `Ports`. A use pins the process. The values
-    /// that each scheduler reads are in the resources of the node.
-    pub(super) resources: Resources,
     /// The atom table of the run, as `erts_atom_table` for one emulator. A
     /// run starts with a copy of the program table, and a BIF such as
     /// `erlang:list_to_atom/1` adds its new atoms here.
@@ -500,8 +496,6 @@ impl Scheduler {
     /// assert_eq!(scheduler.atoms.get("ok"), Atom::from_static("ok"));
     /// ```
     pub(super) fn new(atoms: impl Into<Arc<AtomTable>>) -> Self {
-        let mut resources = Resources::default();
-        resources.put(Ttys::default());
         let menu_pair = std::os::unix::net::UnixStream::pair().expect("a menu socket pair opens");
         let (node, wake) = Node::single();
         Scheduler {
@@ -513,7 +507,6 @@ impl Scheduler {
             menu_writer: std::sync::Arc::new(menu_pair.0),
             menu_written: menu_pair.1,
             initial_tty_mode: InitialMode::read(),
-            resources,
             atoms: atoms.into(),
             code: CodeTable::default(),
             nif_libraries: HashSet::new(),
@@ -1137,10 +1130,6 @@ impl Scheduler {
             self.handle_dirty_signals(id)?;
             return Ok(Turn::Done);
         }
-        if self.multi {
-            // Only a use in the turn of this process pins it.
-            self.resources.take_touched();
-        }
         let process = self.processes.set_current(id);
         process.in_run_queue = false;
         process.fcalls = CONTEXT_REDS;
@@ -1266,7 +1255,7 @@ impl Scheduler {
     /// assert!(!scheduler.has_external_sources());
     /// ```
     pub(super) fn has_external_sources(&mut self) -> bool {
-        self.resources.borrow_mut::<Ttys>().input_selected()
+        self.node.ttys().input_selected()
             || self.dirty.running()
             || self.node.poll.serves(self.index)
             // A handled host signal becomes a message to `erl_signal_server`.
@@ -1306,7 +1295,7 @@ impl Scheduler {
     /// assert!(!scheduler.wait_events(None)?);
     /// ```
     pub(super) fn wait_events(&mut self, timeout: Option<Duration>) -> Result<bool, BeamError> {
-        let selected = self.resources.borrow_mut::<Ttys>().input_selected();
+        let selected = self.node.ttys().input_selected();
         if !selected {
             // The select of fd 0 ended without a message (see
             // `Ttys::monitor_down`): the poll thread stops waiting on fd 0.
@@ -1425,8 +1414,7 @@ impl Scheduler {
             .filter(|(_, direction)| *direction == poll::Direction::Write);
         for &(fd, direction) in writes.chain(reads) {
             if fd == libc::STDIN_FILENO && direction == poll::Direction::Read {
-                let ttys = self.resources.borrow_mut::<Ttys>();
-                let Some(select) = ttys.take_input_select() else {
+                let Some(select) = self.node.ttys().take_input_select() else {
                     continue;
                 };
                 self.node.poll.clear_stdin(self.index);
@@ -1436,7 +1424,10 @@ impl Scheduler {
                     select.reference,
                     Term::static_atom("ready_input"),
                 ]);
-                self.deliver(select.recipient, message);
+                // The recipient can run on another scheduler: ERTS queues
+                // the message to the pid on any scheduler
+                // (`erl_check_io.c:2135-2151`).
+                self.deliver_timeout(select.recipient, message);
                 continue;
             }
             match direction {
@@ -2437,15 +2428,11 @@ impl Scheduler {
         self.virtual_reductions = 0;
         self.timers
             .add_reductions(i32::try_from(used).unwrap_or(i32::MAX));
-        let touched = self.multi && self.resources.take_touched();
         let process = self
             .processes
             .take_current()
             .expect("the scheduler has a current process");
         process.reductions += used;
-        // A process that used a scheduler service in this turn stays with
-        // the scheduler (see `ProcessState::pinned`).
-        process.pinned |= touched;
         process
     }
 
@@ -2919,6 +2906,34 @@ impl Scheduler {
     pub(super) fn remote_live_owner(&self, target: ProcessId) -> Option<usize> {
         let owner = self.node.live_owner(target)?;
         (owner != self.index).then_some(owner)
+    }
+
+    /// Return true when the process `target` of the node is alive and does
+    /// not exit, as `erts_pid2proc` and `erts_proc_lookup` find it for the
+    /// heir and the receiver of an ETS table (`erl_db.c:3100`, `4877`,
+    /// `5330`).
+    pub(super) fn ets_alive(&self, target: ProcessId) -> bool {
+        match self.processes.get(&target) {
+            Some(process) => process.exiting.is_none(),
+            None => self.remote_live_owner(target).is_some(),
+        }
+    }
+
+    /// Send `{'ETS-TRANSFER', Table, From, Data}` from the process `from`
+    /// to the new owner of a table, as `send_ets_transfer_message`
+    /// (`erl_db.c:4935-4971`) does. A named table goes as its name.
+    pub(super) fn send_ets_transfer(&mut self, from: ProcessId, transfer: Transfer) {
+        let table = match transfer.name {
+            Some(name) => Term::Atom(self.atoms.get(&name).expect("a table name is an atom")),
+            None => Term::Reference(transfer.table),
+        };
+        let message = Term::tuple(vec![
+            Term::static_atom("ETS-TRANSFER"),
+            table,
+            Term::Pid(from),
+            transfer.data,
+        ]);
+        self.send_message(from, transfer.heir, message);
     }
 
     /// Make the process `id` exiting for the other schedulers of a run with
@@ -3814,7 +3829,19 @@ impl Scheduler {
         // count (`erl_db.c:5044-5045`, `5118`; `erl_process.c:14360-14366`).
         let deleted = reds > 0 && {
             let left = self.current_process_mut().fcalls;
-            let rest = self.ets.exclusive().delete_owned(id, left);
+            let store = Arc::clone(&self.ets);
+            let mut transfers = Vec::new();
+            // The heir check takes the table store lock, so a heir that
+            // starts its exit later finds the table in its own exit.
+            let rest = store.exclusive().delete_owned(
+                id,
+                left,
+                |heir| self.ets_alive(heir),
+                &mut transfers,
+            );
+            for transfer in transfers {
+                self.send_ets_transfer(id, transfer);
+            }
             if let Some(rest) = rest {
                 self.current_process_mut().bump_reductions(left - rest);
             }
@@ -4012,7 +4039,7 @@ impl Scheduler {
                                 reason.clone(),
                             ),
                             TargetMonitor::Tty(tty) => {
-                                self.resources.borrow_mut::<Ttys>().monitor_down(id, tty);
+                                self.node.ttys().monitor_down(id, tty);
                             }
                             TargetMonitor::File(file) => {
                                 lock(&self.node().resources.kind::<Files>()).monitor_down(file);
