@@ -288,6 +288,7 @@ fn idle_wait(scheduler: &mut Scheduler, node: &Node) -> Result<(), BeamError> {
     let wait = scheduler.timers.wait_time(scheduler.timers.now());
     if scheduler.timers.active() || scheduler.has_external_sources() {
         scheduler.wait_events(Some(wait))?;
+        scheduler.timers.now();
         return Ok(());
     }
     if node.enter_idle() {
@@ -304,6 +305,10 @@ fn idle_wait(scheduler: &mut Scheduler, node: &Node) -> Result<(), BeamError> {
     // so the scheduler changes no state while the node counts it as idle.
     let waited = scheduler.wait_events(Some(wait));
     node.leave_idle();
+    // A scheduler reads the clock after each wake, so a timer that is due
+    // at the wake expires before the next process runs
+    // (`erl_process.c:3568`, `3605`, `3613-3614`).
+    scheduler.timers.now();
     waited?;
     Ok(())
 }
@@ -1127,6 +1132,7 @@ impl BeamProgram {
                         }
                         std::thread::sleep(wait);
                     }
+                    scheduler.timers.now();
                 }
             }
             sample_live(scheduler, sample);
