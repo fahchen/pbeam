@@ -1,0 +1,24 @@
+-module(crypto_engine_probe).
+-export([main/0]).
+
+%% Write the result of each public engine function of crypto
+%% (crypto.erl:3996-4415), which call the engine NIFs (engine.c:353-1045).
+%% The reference is not an engine, so a build with engine support checks
+%% it, and a build without engine support raises error:notsup.
+main() ->
+    T = fun(F) -> try F() catch C:R -> {C, R} end end,
+    R = make_ref(),
+    io:format("~p~n", [[T(F) || F <- [
+        fun() -> crypto:engine_get_all_methods() end,
+        fun() -> crypto:engine_list() end,
+        fun() -> crypto:engine_load(<<"x">>, [], []) end,
+        fun() -> crypto:engine_by_id(<<"x">>) end,
+        fun() -> crypto:engine_unload(R) end,
+        fun() -> crypto:engine_add(R) end,
+        fun() -> crypto:engine_remove(R) end,
+        fun() -> crypto:engine_register(R, [engine_method_rsa]) end,
+        fun() -> crypto:engine_unregister(R, [engine_method_rsa]) end,
+        fun() -> crypto:engine_get_id(R) end,
+        fun() -> crypto:engine_get_name(R) end,
+        fun() -> crypto:engine_ctrl_cmd_string(R, <<"a">>, <<"b">>) end,
+        fun() -> crypto:ensure_engine_loaded(<<"x">>, <<"y">>) end]]]).

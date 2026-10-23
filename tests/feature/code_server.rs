@@ -23,6 +23,23 @@ const ON_LOAD_PROBE: &str = "fixtures/code_server/on_load_server_probe";
 const FUN_ENTRY_PROBE: &str = "fixtures/code_server/fun_entry_probe";
 
 #[test]
+fn raises_notsup_for_each_engine_function() {
+    // PBeam runs the engine NIFs as an ERTS build without
+    // HAS_ENGINE_SUPPORT (openssl_config.h:387-388): each raises
+    // error:notsup (engine.c:403-405 and the other #else branches up to
+    // 1043). The pinned ERTS has engine support, so the probe asserts the
+    // exact PBeam output and does not compare it with ERTS.
+    let output = run(&mut pbeam_probe(
+        CRYPTO_ENGINE_PROBE,
+        "crypto_engine_probe",
+        "main",
+        &[],
+    ));
+    let expected = format!("[{}]\n", vec!["{error,notsup}"; 13].join(",\n "));
+    assert_eq!(output, expected);
+}
+
+#[test]
 fn computes_mod_pow_and_srp_as_pinned_erts() {
     // mod_exp_nif/4 (bn.c:101-165) and the SRP NIFs (srp.c:26-300): the
     // bytes of each result with fixed inputs, `badarg`, and `error`.
@@ -145,6 +162,7 @@ const CRYPTO_SIGN_PROBE: &str = "fixtures/code_server/crypto_sign_probe";
 const CRYPTO_CRYPT_PROBE: &str = "fixtures/code_server/crypto_crypt_probe";
 const CRYPTO_KEYGEN_PROBE: &str = "fixtures/code_server/crypto_keygen_probe";
 const CRYPTO_BN_PROBE: &str = "fixtures/code_server/crypto_bn_probe";
+const CRYPTO_ENGINE_PROBE: &str = "fixtures/code_server/crypto_engine_probe";
 const CRYPTO_COMPUTE_KEY_PROBE: &str = "fixtures/code_server/crypto_compute_key_probe";
 
 /// The stand-in `crypto` module that loads the `crypto` NIF library.

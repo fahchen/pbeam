@@ -236,6 +236,96 @@ pub(super) const BINDINGS: &[Binding] = &[
         run: encapsulate_key_nif,
     },
     Binding {
+        name: "engine_add_nif",
+        arity: 1,
+        job: Job::Normal,
+        run: engine_notsup,
+    },
+    Binding {
+        name: "engine_by_id_nif",
+        arity: 1,
+        job: Job::Normal,
+        run: engine_notsup,
+    },
+    Binding {
+        name: "engine_ctrl_cmd_strings_nif",
+        arity: 3,
+        job: Job::Normal,
+        run: engine_notsup,
+    },
+    Binding {
+        name: "engine_free_nif",
+        arity: 1,
+        job: Job::Normal,
+        run: engine_notsup,
+    },
+    Binding {
+        name: "engine_get_all_methods_nif",
+        arity: 0,
+        job: Job::Normal,
+        run: engine_notsup,
+    },
+    Binding {
+        name: "engine_get_first_nif",
+        arity: 0,
+        job: Job::Normal,
+        run: engine_notsup,
+    },
+    Binding {
+        name: "engine_get_id_nif",
+        arity: 1,
+        job: Job::Normal,
+        run: engine_notsup,
+    },
+    Binding {
+        name: "engine_get_name_nif",
+        arity: 1,
+        job: Job::Normal,
+        run: engine_notsup,
+    },
+    Binding {
+        name: "engine_get_next_nif",
+        arity: 1,
+        job: Job::Normal,
+        run: engine_notsup,
+    },
+    Binding {
+        name: "engine_init_nif",
+        arity: 1,
+        job: Job::Normal,
+        run: engine_notsup,
+    },
+    Binding {
+        name: "engine_load_dynamic_nif",
+        arity: 0,
+        job: Job::Normal,
+        run: engine_notsup,
+    },
+    Binding {
+        name: "engine_register_nif",
+        arity: 2,
+        job: Job::Normal,
+        run: engine_notsup,
+    },
+    Binding {
+        name: "engine_remove_nif",
+        arity: 1,
+        job: Job::Normal,
+        run: engine_notsup,
+    },
+    Binding {
+        name: "engine_unregister_nif",
+        arity: 2,
+        job: Job::Normal,
+        run: engine_notsup,
+    },
+    Binding {
+        name: "ensure_engine_loaded_nif",
+        arity: 2,
+        job: Job::Normal,
+        run: engine_notsup,
+    },
+    Binding {
         name: "evp_compute_key_nif",
         arity: 3,
         job: Job::Normal,
@@ -750,6 +840,24 @@ fn atom_name<'a>(scheduler: &'a Scheduler, term: &Term) -> &'a str {
         Term::Atom(atom) => scheduler.atoms.name_of(atom),
         _ => "",
     }
+}
+
+/// Run an engine function of `crypto` (`engine.c:353-1045`) as an ERTS
+/// build without `HAS_ENGINE_SUPPORT` does: raise `error:notsup`
+/// (`RAISE_NOTSUP`, `common.h:51`). OpenSSL 3 deprecates engines, and the
+/// safe `openssl` crate has no engine API (row "NIF stubs" of
+/// `docs/erts-differences.md`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(engine_notsup(&mut scheduler, &[])?, BifResult::Raise { .. }));
+/// ```
+fn engine_notsup(scheduler: &mut Scheduler, _: &[Term]) -> Result<BifResult, BeamError> {
+    Ok(BifResult::Raise {
+        class: ExceptionClass::Error,
+        reason: Term::Atom(scheduler.atoms.put("notsup")?),
+    })
 }
 
 /// Run `crypto:hash_info(Type)` as the ERTS NIF `hash_info_nif`
