@@ -749,11 +749,28 @@ fn unsupported_system_flag_value(
             None => atom == Some("undefined"),
         },
         "erts_alloc" => match value {
-            Term::Tuple(elements) => matches!(
-                elements.as_ref(),
-                [Term::Atom(allocator), Term::Atom(_), Term::Integer(_)]
-                    if ALLOCATORS.contains(&atoms.name_of(allocator))
-            ),
+            Term::Tuple(elements) => match elements.as_ref() {
+                [
+                    Term::Atom(allocator),
+                    Term::Atom(parameter),
+                    size @ (Term::Integer(_) | Term::BigInt(_)),
+                ] => {
+                    let allocator = atoms.name_of(allocator);
+                    // An allocator of the default `alloc_util` set reads the
+                    // `sbct` value as a `Uint` (`erl_alloc.c:3471-3481`).
+                    let uint = match size {
+                        Term::Integer(size) => *size >= 0,
+                        size => {
+                            matches!(size, Term::BigInt(size) if u64::try_from(size.as_ref()).is_ok())
+                        }
+                    };
+                    ALLOCATORS.contains(&allocator)
+                        && (!parameter.is_static("sbct")
+                            || !ALLOC_UTIL_ALLOCATORS.contains(&allocator)
+                            || uint)
+                }
+                _ => false,
+            },
             _ => false,
         },
         _ => true,
@@ -775,6 +792,22 @@ const ALLOCATORS: &[&str] = &[
     "binary_alloc",
     "driver_alloc",
     "test_alloc",
+];
+
+/// The allocators of `ALLOCATORS` that the default emulator flags enable as
+/// `alloc_util` allocators: each one except `sys_alloc` and `test_alloc`
+/// (`erl_alloc.c:3471-3474`; the pinned ERTS gives `notsup` for the two).
+const ALLOC_UTIL_ALLOCATORS: &[&str] = &[
+    "temp_alloc",
+    "sl_alloc",
+    "std_alloc",
+    "ll_alloc",
+    "eheap_alloc",
+    "ets_alloc",
+    "fix_alloc",
+    "literal_alloc",
+    "binary_alloc",
+    "driver_alloc",
 ];
 
 /// The largest identifier of a CPU topology, `ERTS_MAX_CPU_TOPOLOGY_ID`

@@ -810,7 +810,7 @@ fn rejects_system_flag_items_as_pinned_erts() {
     let badarg = Term::tuple(vec![atom("error"), atom("badarg")]);
     let mut expected = vec![badarg.clone(); 3];
     expected.push(atom("true"));
-    expected.extend(vec![badarg; 50]);
+    expected.extend(vec![badarg; 52]);
     assert_eq!(
         program
             .execute("logger_start_probe", "system_flag", &[])
@@ -823,7 +823,7 @@ fn rejects_system_flag_items_as_pinned_erts() {
         format!(
             "[{},true,{}]\n",
             ["{error,badarg}"; 3].join(","),
-            ["{error,badarg}"; 50].join(",")
+            ["{error,badarg}"; 52].join(",")
         )
     );
 }
@@ -925,6 +925,16 @@ fn returns_a_runtime_error_for_a_flag_that_needs_a_missing_subsystem() {
             "internal_cpu_topology",
             "unsupported erlang:system_flag/2 item internal_cpu_topology",
             None,
+        ),
+        (
+            "erts_alloc_sys",
+            "unsupported erlang:system_flag/2 item erts_alloc",
+            Some("notsup"),
+        ),
+        (
+            "erts_alloc_param",
+            "unsupported erlang:system_flag/2 item erts_alloc",
+            Some("notsup"),
         ),
         (
             "scheduler",

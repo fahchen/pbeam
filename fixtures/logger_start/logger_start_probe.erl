@@ -501,6 +501,8 @@ system_flag() ->
      catch_error(fun() -> erlang:system_flag(erts_alloc, id({a, b})) end),
      catch_error(fun() -> erlang:system_flag(erts_alloc, id({a, b, c})) end),
      catch_error(fun() -> erlang:system_flag(erts_alloc, id({exec_alloc, sbct, 1})) end),
+     catch_error(fun() -> erlang:system_flag(erts_alloc, id({ets_alloc, sbct, -1})) end),
+     catch_error(fun() -> erlang:system_flag(erts_alloc, id({binary_alloc, sbct, 1 bsl 64})) end),
      catch_error(fun() -> erlang:system_flag(max_heap_size, id(foo)) end),
      catch_error(fun() -> erlang:system_flag(max_heap_size, id(-1)) end),
      catch_error(fun() -> erlang:system_flag(max_heap_size, id(232)) end),
@@ -588,6 +590,8 @@ unsupported_flag(sequential_tracer_port) ->
     erlang:system_flag(sequential_tracer, Port);
 unsupported_flag(internal_cpu_topology) ->
     erlang:system_flag(internal_cpu_topology, [{cpu, -1, 0, -1, 0, 0, 0}, {cpu, -1, 0, -1, 0, 1, 1}]);
+unsupported_flag(erts_alloc_sys) -> erlang:system_flag(erts_alloc, {sys_alloc, sbct, -1});
+unsupported_flag(erts_alloc_param) -> erlang:system_flag(erts_alloc, {ets_alloc, foo, 1 bsl 64});
 unsupported_flag(scheduler) -> process_flag(scheduler, erlang:system_info(schedulers));
 unsupported_flag(reset_seq_trace) -> erlang:system_flag(reset_seq_trace, foo);
 unsupported_flag(save_calls) -> process_flag(save_calls, 0).
