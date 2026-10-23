@@ -1,5 +1,5 @@
 -module(crypto_bn_probe).
--export([main/0, kem_errors/0, kem/0, encapsulate/0, decapsulate/0]).
+-export([main/0, kem_errors/0, kem/0, encapsulate/0, decapsulate/0, other_key_type/0]).
 
 %% Write the results of crypto:mod_pow/3 and of the SRP functions of
 %% crypto:generate_key/3 and crypto:compute_key/4, which call
@@ -96,3 +96,8 @@ encapsulate() ->
 decapsulate() ->
     {_, Priv} = crypto:generate_key(mlkem512, []),
     crypto:decapsulate_key(mlkem512, Priv, <<1>>).
+
+%% A key type that OpenSSL loads by name and that is not ML-KEM, with a key
+%% binary (pkey.c:614-650).
+other_key_type() ->
+    crypto:encapsulate_key(rsa, <<1>>).

@@ -121,6 +121,10 @@ fn reports_ml_kem_encapsulation_as_unsupported() {
             "crypto:decapsulate_key_nif/3 NIF is not supported for an ML-KEM key: the safe \
              openssl crate has no EVP_PKEY_decapsulate",
         ),
+        (
+            "other_key_type",
+            "crypto:encapsulate_key_nif/2 NIF is not supported for the algorithm rsa",
+        ),
     ] {
         let output = pbeam_probe(CRYPTO_BN_PROBE, "crypto_bn_probe", function, &[])
             .env("TERM", "dumb")
