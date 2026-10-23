@@ -431,6 +431,12 @@ pub(super) struct ProcessState {
     /// (`erl_rbtree.h:1392-1396`). `None` until the exit switches out. The
     /// exit then continues with no new bump.
     pub(super) continue_exit: Option<Option<WalkPosition>>,
+    /// The ERTS flag `EXF_LOG` of the exception that ends the process
+    /// (`error.h:73`, `112`). An uncaught `error`, or an uncaught `throw`
+    /// that becomes the error `{nocatch, Reason}`, sets it
+    /// (`beam_common.c:509-516`). The exit then sends the error report to
+    /// the system logger (`beam_common.c:696-718`).
+    pub(super) log_exit: bool,
     /// The copies of the capabilities of the process. The root process gets
     /// the capabilities of the policy of the run, and a child gets its copies
     /// from its parent at spawn (`Scheduler::spawn`). A handled revocation
@@ -630,6 +636,7 @@ impl ProcessState {
             length_trap: None,
             bif_timers: MonitorLinkTree::default(),
             continue_exit: None,
+            log_exit: false,
             security: SecurityContext::default(),
             parent: None,
             initial_call,
