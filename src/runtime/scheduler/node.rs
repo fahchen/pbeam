@@ -470,6 +470,12 @@ impl Node {
             let mut names = self.names.lock().expect("the name table is not poisoned");
             names.retain(|_, owner| *owner != id);
         });
+        // ERTS finds no process for the pid of an exited process, so
+        // `is_system_process/1` gives `false` (erl_bif_info.c:4934-4938).
+        self.system_processes
+            .lock()
+            .expect("system processes")
+            .remove(&id);
     }
 
     /// Count the scheduler that calls as idle, and return true when the run
