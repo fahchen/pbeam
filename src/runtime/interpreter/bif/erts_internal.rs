@@ -1789,3 +1789,29 @@ pub(super) fn spawn_system_process(
     }
     spawned
 }
+
+/// Run `erts_internal:term_to_string(Term, Limit)` as
+/// `erts_internal_term_to_string_2` (`bif.c:4156-4190`) does: return the
+/// bytes of the `%.*T` text of `Term` with the precision `Limit` as a list
+/// of integers (see [`crate::term::print_term_limited`]). `Limit` is
+/// a small integer in `2..INT_MAX`, or `undefined` for `INT_MAX`; each other
+/// `Limit` raises `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let text = term_to_string(&atoms, &Term::static_atom("ab"), &Term::Integer(2));
+/// // The list of the bytes of "ab... ".
+/// ```
+pub(super) fn term_to_string(atoms: &AtomTable, term: &Term, limit: &Term) -> BifResult {
+    const INT_MAX: i64 = i32::MAX as i64;
+    let limit = match limit {
+        Term::Integer(limit) if (2..INT_MAX).contains(limit) => *limit,
+        Term::Atom(atom) if atom.is_static("undefined") => INT_MAX,
+        _ => return BifResult::badarg(),
+    };
+    let text = crate::term::print_term_limited(term, atoms, limit);
+    Value(Term::list_from(
+        text.into_iter().map(|byte| Term::Integer(i64::from(byte))),
+    ))
+}

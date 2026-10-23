@@ -56,6 +56,39 @@ enum Item<'a> {
 /// assert_eq!(print_term(&Term::binary(vec![1, 2]), &atoms), b"<<1,2>>");
 /// ```
 pub(crate) fn print_term(term: &Term, atoms: &AtomTable) -> Vec<u8> {
+    let mut count = i64::MAX;
+    print_term_counted(term, atoms, &mut count)
+}
+
+/// Return the `%.*T` text of a term with the precision `limit`, as
+/// `erts_printf_term` (`erl_printf_term.c:813-824`) prints it: the text of
+/// [`print_term`] up to the point where the count runs out, then `... ` when
+/// the count is at most 0 at the end.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let atoms = AtomTable::new();
+/// assert_eq!(print_term_limited(&Term::static_atom("ab"), &atoms, 2), b"ab... ");
+/// ```
+pub(crate) fn print_term_limited(term: &Term, atoms: &AtomTable, limit: i64) -> Vec<u8> {
+    let mut count = limit;
+    let mut text = print_term_counted(term, atoms, &mut count);
+    if count <= 0 {
+        text.extend_from_slice(b"... ");
+    }
+    text
+}
+
+/// Return the text of `print_term` (`erl_printf_term.c:352-811`) with the
+/// count `dcount`. Each term takes 1 from the count before it prints, and
+/// the print stops when the count was at most 0 (`:428-429`). An atom also
+/// takes the byte length of its name (`:263`), and the print stops after
+/// an atom when the count is at most 0 (`:106-114`), and an external fun the
+/// lengths of its module and function names (`:698-718`). Each character
+/// of a string takes 1 before it prints (`:537-538`), and each byte of a
+/// binary takes 1 after it prints (`:631-632`, `:667-668`).
+fn print_term_counted(term: &Term, atoms: &AtomTable, dcount: &mut i64) -> Vec<u8> {
     let mut text = Vec::new();
     let mut items = vec![Item::Term(term)];
     while let Some(item) = items.pop() {
@@ -64,10 +97,20 @@ pub(crate) fn print_term(term: &Term, atoms: &AtomTable) -> Vec<u8> {
                 text.extend_from_slice(fixed.as_bytes());
                 continue;
             }
+            Item::Term(_) if take(dcount) => break,
             Item::Term(term) => term,
         };
         match term {
-            Term::Atom(atom) => print_atom(atoms.name_of(atom), &mut text),
+            Term::Atom(atom) => {
+                let name = atoms.name_of(atom);
+                *dcount -= len(name);
+                print_atom(name, &mut text);
+                // `PRINT_ATOM` stops when the count is at most 0
+                // (`erl_printf_term.c:106-114`).
+                if *dcount <= 0 {
+                    break;
+                }
+            }
             Term::Integer(value) => text.extend_from_slice(value.to_string().as_bytes()),
             Term::BigInt(value) => text.extend_from_slice(value.to_string().as_bytes()),
             // `PRINT_DOUBLE(res, fn, arg, 'e', 6, 0, ff.fd)`
@@ -82,6 +125,9 @@ pub(crate) fn print_term(term: &Term, atoms: &AtomTable) -> Vec<u8> {
             {
                 text.push(b'"');
                 for byte in bytes {
+                    if take(dcount) {
+                        return text;
+                    }
                     match byte {
                         b'\n' => text.extend_from_slice(b"\\n"),
                         b'"' => text.extend_from_slice(b"\\\""),
@@ -116,6 +162,9 @@ pub(crate) fn print_term(term: &Term, atoms: &AtomTable) -> Vec<u8> {
                         text.push(b'\\');
                     }
                     text.push(byte);
+                    if take(dcount) {
+                        return text;
+                    }
                 }
                 text.extend_from_slice(b"\">>");
             }
@@ -124,12 +173,25 @@ pub(crate) fn print_term(term: &Term, atoms: &AtomTable) -> Vec<u8> {
                 // `Value:Size` (`erl_printf_term.c:615-653`).
                 let size = binary.bit_size();
                 let bits = binary.bit_bytes();
-                let mut numbers: Vec<String> = bits[..size / 8].iter().map(u8::to_string).collect();
                 let tail = size % 8;
-                if tail != 0 {
-                    numbers.push(format!("{}:{tail}", bits[size / 8] >> (8 - tail)));
+                text.extend_from_slice(b"<<");
+                for (index, byte) in bits[..size / 8].iter().enumerate() {
+                    if index > 0 {
+                        text.push(b',');
+                    }
+                    text.extend_from_slice(byte.to_string().as_bytes());
+                    if take(dcount) {
+                        return text;
+                    }
                 }
-                text.extend_from_slice(format!("<<{}>>", numbers.join(",")).as_bytes());
+                if tail != 0 {
+                    if size >= 8 {
+                        text.push(b',');
+                    }
+                    let value = bits[size / 8] >> (8 - tail);
+                    text.extend_from_slice(format!("{value}:{tail}").as_bytes());
+                }
+                text.extend_from_slice(b">>");
             }
             Term::Map(map) => {
                 text.extend_from_slice(b"#{");
@@ -160,9 +222,11 @@ pub(crate) fn print_term(term: &Term, atoms: &AtomTable) -> Vec<u8> {
                     arity,
                 } => {
                     text.extend_from_slice(b"fun ");
-                    print_atom(atoms.name_of(module), &mut text);
+                    let (module, function) = (atoms.name_of(module), atoms.name_of(function));
+                    *dcount -= len(module) + len(function);
+                    print_atom(module, &mut text);
                     text.push(b':');
-                    print_atom(atoms.name_of(function), &mut text);
+                    print_atom(function, &mut text);
                     text.extend_from_slice(format!("/{arity}").as_bytes());
                 }
             },
@@ -182,6 +246,20 @@ pub(crate) fn print_term(term: &Term, atoms: &AtomTable) -> Vec<u8> {
         }
     }
     text
+}
+
+/// Take 1 from the count, as `(*dcount)-- <= 0` does, and return whether
+/// the count was at most 0 before, which stops the print.
+fn take(dcount: &mut i64) -> bool {
+    let before = *dcount;
+    *dcount = before.saturating_sub(1);
+    before <= 0
+}
+
+/// Return the byte length of an atom name as the count type, as
+/// `entry->len` (`erl_printf_term.c:261-263`).
+fn len(name: &str) -> i64 {
+    i64::try_from(name.len()).expect("an atom name is short")
 }
 
 /// Push the items of `elements` separated by commas, so that the first

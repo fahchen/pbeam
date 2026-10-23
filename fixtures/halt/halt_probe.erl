@@ -1,6 +1,6 @@
 -module(halt_probe).
 -export([badargs/0, mask/0, status/0, options/0, no_flush/0, timeout/0, others/0, abort/0,
-         slogan/0, long_slogan/0]).
+         slogan/0, long_slogan/0, line_slogan/0]).
 
 %% Each badarg of halt_2 (bif.c:4316-4343, 4390-4391): the options are
 %% checked before the status, so {abort, bad} and {"x", [{flush, 1}]} also
@@ -62,6 +62,12 @@ slogan() ->
 %% tail is checked, so it is a crash dump (bif.c:4373-4386).
 long_slogan() ->
     halt(chars(1024, foo)).
+
+%% A slogan with a character that is not ASCII and a newline. ERTS writes
+%% its UTF-8 bytes and "\r\n" for each "\n" (bif.c:4377-4386,
+%% sys/unix/sys.c:343).
+line_slogan() ->
+    halt([16#e9, $\n, $b]).
 
 %% N characters $a and the tail Tail.
 chars(0, Tail) ->

@@ -501,9 +501,9 @@ fn halts_when_a_kernel_process_exits_as_init_does() {
     // of `init`. `init` waits 500 ms and halts with the text
     // `Kernel pid terminated (Name) (Reason)`, which
     // `erts_internal:term_to_string/2` makes (init.erl:665-679, 783-787,
-    // 1139-1148). PBeam does not run that BIF, so the run stops there with
-    // status 1 (row "Boot" of docs/erts-differences.md). The ERTS run
-    // writes its crash dump to `/dev/null`.
+    // 1139-1148). PBeam writes the same text and writes no crash dump
+    // (row "Run end" of docs/erts-differences.md). The ERTS run writes its
+    // crash dump to `/dev/null`.
     let mut erts = Command::new("erl");
     erts.args([
         "+S",
@@ -534,7 +534,7 @@ fn halts_when_a_kernel_process_exits_as_init_does() {
         (
             "PBeam",
             &mut pbeam,
-            "pbeam: unresolved external MFA erts_internal:term_to_string/2\n",
+            "Kernel pid terminated (erl_prim_loader) (killed)\r\n",
         ),
     ];
     for (name, command, stderr) in expected {

@@ -255,3 +255,36 @@ fn reports_a_preloaded_module_that_cannot_be_read() {
         (Some(1), None)
     );
 }
+
+#[test]
+fn halts_with_the_init_crash_text_when_the_eval_fails() {
+    // `start_it/1` writes `Error! Failed to eval: <Expression>` and raises
+    // again (init.erl:1552-1567). At the boot process exit, `init` calls
+    // `crash("Runtime terminating during boot", [Reason])`, which makes the
+    // text with `erts_internal:term_to_string(Reason, 32768)` and halts
+    // with it as the slogan (init.erl:665-679, 710-712, bif.c:4372-4386):
+    // status 1. With `ERL_CRASH_DUMP_SECONDS=0`, ERTS writes no crash dump,
+    // and PBeam never writes one (row "Run end").
+    let arguments = ["-noshell", "-eval", "foo:bar()"];
+    let mut erts = Command::new("erl");
+    erts.args(arguments);
+    let erts = isolate(&mut erts)
+        .env("ERL_CRASH_DUMP_SECONDS", "0")
+        .output()
+        .unwrap();
+    let pbeam = pbeam_erl(&arguments, &[]);
+    let stderr = "Error! Failed to eval: foo:bar()\r\n\r\nRuntime terminating during boot \
+                  ({undef,[{foo,bar,[],[]},{erl_eval,do_apply,7,[{file,\"erl_eval.erl\"},{line,1044}]},\
+                  {init,start_it,1,[]},{init,start_em,1,[]},{init,do_boot,3,[]}]})\r\n";
+    for (name, output) in [("ERTS", erts), ("PBeam", pbeam)] {
+        assert_eq!(
+            (
+                String::from_utf8_lossy(&output.stdout).as_ref(),
+                String::from_utf8_lossy(&output.stderr).as_ref(),
+                output.status.code()
+            ),
+            ("", stderr, Some(1)),
+            "{name}"
+        );
+    }
+}
