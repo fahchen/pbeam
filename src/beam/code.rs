@@ -711,12 +711,14 @@ fn module_md5(chunks: &HashMap<Vec<u8>, &[u8]>) -> [u8; 16] {
         bytes.extend_from_slice(chunk(id));
     }
     let lambdas = chunk(b"FunT");
-    if let Some((count, entries)) = lambdas.split_at_checked(WORD_SIZE) {
-        bytes.extend_from_slice(count);
-        for entry in entries.as_chunks::<LAMBDA_ENTRY_SIZE>().0 {
-            bytes.extend_from_slice(&entry[..LAMBDA_ENTRY_SIZE - WORD_SIZE]);
-            bytes.extend_from_slice(&[0; WORD_SIZE]);
-        }
+    // A `FunT` chunk of fewer than 4 bytes, or with a partial entry, is
+    // corrupt (`beam_file.c:1799-1802`), and `parse_lambdas` rejects it, so
+    // its digest is never used.
+    let (count, entries) = lambdas.split_at(WORD_SIZE.min(lambdas.len()));
+    bytes.extend_from_slice(count);
+    for entry in entries.as_chunks::<LAMBDA_ENTRY_SIZE>().0 {
+        bytes.extend_from_slice(&entry[..LAMBDA_ENTRY_SIZE - WORD_SIZE]);
+        bytes.extend_from_slice(&[0; WORD_SIZE]);
     }
     for id in [b"LitT", b"Meta", b"Recs", b"DbgB"] {
         bytes.extend_from_slice(chunk(id));
