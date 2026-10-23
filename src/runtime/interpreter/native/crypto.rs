@@ -397,7 +397,7 @@ pub(super) const BINDINGS: &[Binding] = &[
     Binding {
         name: "rsa_generate_key_nif",
         arity: 2,
-        job: Job::Normal,
+        job: Job::CpuBound,
         run: rsa_generate_key_nif,
     },
     Binding {

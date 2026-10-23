@@ -89,6 +89,19 @@ pub(super) fn ec_generate_key_nif(
     finish_in(scheduler, "ec.c", "ec_generate_key_nif", 2, result)
 }
 
+/// Return whether the curve definition passes the checks of
+/// `ec.c:103-139`: a binary generator, order, and cofactor, a tuple
+/// `{A, B, Seed}` with binary `A` and `B`, and a field `{prime_field, P}`
+/// with a binary `P`.
+fn well_formed(scheduler: &Scheduler, definition: &[Term]) -> bool {
+    let binary = |term: &Term| term.binary_bytes().is_some();
+    let prime = matches!(&definition[1], Term::Tuple(prime)
+        if prime.len() == 3 && binary(&prime[0]) && binary(&prime[1]));
+    let field = matches!(&definition[0], Term::Tuple(field)
+        if field.len() == 2 && atom_name(scheduler, &field[0]) == "prime_field" && binary(&field[1]));
+    binary(&definition[2]) && binary(&definition[4]) && prime && field
+}
+
 /// Generate or compute the EC key as `ec.c:365-432` does.
 fn ec_generate_key(
     scheduler: &Scheduler,
@@ -147,10 +160,22 @@ fn ec_generate_key(
             "Bad order",
         )));
     };
+    // The checks of `ec.c:103-139`; without a private key, each failure
+    // gives the failure of `ec.c:391`.
+    if !named && !well_formed(scheduler, definition) {
+        return Err(badarg(391, 0, "Couldn't get Curve definition"));
+    }
     // ERTS loads a named curve by name; PBeam builds the same curve from
-    // its definition.
+    // its definition. OpenSSL rejects a well-formed definition at
+    // `ec.c:405-407`.
     let group = ec_group(scheduler, parts)?.ok_or_else(|| {
-        Failure::Unsupported("an EC curve that PBeam cannot build from its definition".to_owned())
+        if named {
+            Failure::Unsupported(
+                "an EC curve that PBeam cannot build from its definition".to_owned(),
+            )
+        } else {
+            failed(407, "Couldn't generate EC key")
+        }
     })?;
     let mut context = BigNumContext::new().map_err(|_| failed(492, "Couldn't multiply POINT"))?;
     let (point, private) = match private {
