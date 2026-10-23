@@ -3774,6 +3774,9 @@ fn policy_turn(scheduler: &mut Scheduler, outcome: Outcome) -> Outcome {
         Outcome::Exit { reason, .. } => PolicyEnd::Raised(reason),
         outcome => return outcome,
     };
+    // The policy process waits for the next request, so a raise that ended
+    // the call does not log at a later exit.
+    scheduler.current_process_mut().log_exit = false;
     scheduler.end_policy_call(end);
     Outcome::Wait
 }
@@ -4475,6 +4478,7 @@ fn raise_with_stacktrace(
                 })
         });
     let Some((depth, slot, handler)) = tag else {
+        process.log_exit = !matches!(class, ExceptionClass::Exit);
         let reason = match class {
             ExceptionClass::Error => Term::tuple(vec![reason, stacktrace]),
             ExceptionClass::Exit => reason,
