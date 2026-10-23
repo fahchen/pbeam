@@ -83,21 +83,6 @@ fn flatmap_holds(pairs: &[(Term, Term)], key: &Term, atoms: &AtomTable) -> bool 
         .is_ok()
 }
 
-/// Return the first key of a flatmap that has no hash, or `Ok(())` when
-/// every key has one. Each key of a map that becomes a hashmap needs a hash.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// assert!(validate_hashes([&Term::Integer(1)]).is_ok());
-/// assert!(validate_hashes([&Term::Integer(1 << 59)]).is_err());
-/// ```
-fn validate_hashes<'a>(keys: impl IntoIterator<Item = &'a Term>) -> Result<(), Term> {
-    keys.into_iter()
-        .find(|key| map_hash(key).is_none())
-        .map_or(Ok(()), |key| Err(key.clone()))
-}
-
 /// The direction of an `erts_internal:map_next/3` walk over a map.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Direction {
@@ -1147,7 +1132,7 @@ fn update_flat(
 ) -> Result<Convert, Term> {
     let mut added: Vec<&Term> = Vec::new();
     for ((kind, key, _), hash) in operations.iter().zip(&hashes) {
-        if hash.is_none() && !key.is_integer() {
+        if hash.is_none() {
             return Err(key.clone());
         }
         match kind {
@@ -1169,7 +1154,7 @@ fn update_flat(
         }
         return Ok(Convert::No);
     }
-    Ok(Convert::Yes(convert_to_hash(pairs, operations, atoms)?))
+    Ok(Convert::Yes(convert_to_hash(pairs, operations, atoms)))
 }
 
 /// The result of [`update_flat`]: the map kept its flatmap form, or it
@@ -1182,22 +1167,14 @@ enum Convert {
 }
 
 /// Turn the flatmap pairs and the operations into a hashmap. The read path
-/// read a flatmap that grows past its limit.
-///
-/// # Errors
-///
-/// Return the first key that a hashmap form does not support.
+/// read a flatmap that grows past its limit. Each key has a hash: a
+/// flatmap holds only keys that `update_flat` checked, and `update_flat`
+/// checked each key of the operations.
 fn convert_to_hash(
     pairs: &mut Vec<(Term, Term)>,
     operations: Vec<(Insert, Term, Term)>,
     atoms: &AtomTable,
-) -> Result<Hamt, Term> {
-    let mut keys = pairs
-        .iter()
-        .map(|(existing, _)| existing)
-        .collect::<Vec<_>>();
-    keys.extend(operations.iter().map(|(_, key, _)| key));
-    validate_hashes(keys)?;
+) -> Hamt {
     let mut hamt = Hamt {
         root: Node::empty(),
         size: 0,
@@ -1206,10 +1183,10 @@ fn convert_to_hash(
         .into_iter()
         .chain(operations.into_iter().map(|(_, key, value)| (key, value)));
     for (key, value) in existing {
-        let hash = map_hash(&key).ok_or_else(|| key.clone())?;
+        let hash = map_hash(&key).expect("a key of a flatmap has a hash");
         hamt.insert(hash, key, value, atoms);
     }
-    Ok(hamt)
+    hamt
 }
 
 impl Hamt {
@@ -1697,7 +1674,8 @@ fn encode_path(elements: Vec<usize>) -> Result<i64, BeamError> {
 /// `(index << 6) | 0xB`, a small integer as its word `(value << 4) | 0xF`, and
 /// a list key that is not empty with the list path of `make_internal_hash`,
 /// also an improper list whose tail is an atom, a small integer, or a
-/// supported tuple. A float key hashes with the float path
+/// supported tuple. An integer key outside the small range hashes with the
+/// bignum path (`erl_term_hashing.c:2101-2127`). A float key hashes with the float path
 /// (`erl_term_hashing.c:2193-2202`). A tuple key hashes with the tuple path
 /// (`erl_term_hashing.c:1878-1893`): its type and arity, then its elements.
 /// A binary key hashes with the binary path of `make_internal_hash`. A pid
@@ -1715,7 +1693,7 @@ fn encode_path(elements: Vec<usize>) -> Result<i64, BeamError> {
 /// assert_eq!(map_hash(&Term::static_atom("true")), Some(14558535449716669319));
 /// assert_eq!(map_hash(&Term::nil()), Some(internal_hash(&Term::nil())));
 /// assert!(map_hash(&Term::list_from([Term::Integer(97)])).is_some());
-/// assert_eq!(map_hash(&Term::Integer(1 << 59)), None);
+/// assert!(map_hash(&Term::Integer(1 << 59)).is_some());
 /// assert_eq!(map_hash(&Term::tuple(vec![])), Some(4510301282025278020));
 /// assert_eq!(map_hash(&Term::binary(vec![])), Some(10873612744977862784));
 /// assert!(map_hash(&Term::Float(1.0)).is_some());
@@ -1739,15 +1717,13 @@ fn map_hash(key: &Term) -> Option<u64> {
                     Term::Reference(reference) if !reference.is_pid_reference() => {}
                     Term::Cons(cell) => pending.extend([&cell.tail, &cell.head]),
                     Term::Tuple(elements) => pending.extend(elements.iter()),
-                    _ => {
-                        term.small_integer()?;
-                    }
+                    _ if term.is_integer() => {}
+                    _ => return None,
                 }
             }
         }
-        _ => {
-            key.small_integer()?;
-        }
+        _ if key.is_integer() => {}
+        _ => return None,
     }
     Some(internal_hash(key))
 }
