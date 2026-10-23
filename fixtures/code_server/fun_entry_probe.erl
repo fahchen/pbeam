@@ -16,7 +16,10 @@ stale() ->
     Before = [erlang:fun_info(F, name) || F <- [First, Second]],
     {module, fun_entry_send} = code:load_abs("fixtures/fun_entry_rev/fun_entry_send"),
     After = [erlang:fun_info(F, name) || F <- [First, Second]],
-    io:format("~w~n", [[call(First), call(Second), Waiting, Before, After]]).
+    %% erlang:fun_info_mfa/1 gives the module, `[]`, and the arity of a fun
+    %% of code that is not loaded (erl_bif_info.c:4027-4035).
+    Mfas = [erlang:fun_info_mfa(F) || F <- [First, Second]],
+    io:format("~w~n", [[call(First), call(Second), Waiting, Before, After, Mfas]]).
 
 %% `erlang:delete_module/1` moves the code of a module to old code, which
 %% keeps the name of the function of each fun until the purge

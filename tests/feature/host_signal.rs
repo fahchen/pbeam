@@ -103,6 +103,35 @@ fn runs_the_default_handler_of_a_start_signal_as_pinned_erts() {
     }
 }
 
+#[test]
+fn keeps_the_run_alive_after_a_root_exit_normal_as_pinned_erts() {
+    // `notify_probe:exit_normal/0` starts a process that writes "late" after
+    // 300 ms, writes "ready", and exits with the reason `normal`. ERTS:
+    // `start_it/1` writes the `Error!` line and raises the exit again
+    // (init.erl:1552-1567), the boot process exits `normal`, and `init` goes
+    // to its main loop (init.erl:700-704). The other process still writes
+    // "late", and the run waits until SIGTERM, which `erl_signal_handler`
+    // turns into `init:stop/0` (erl_signal_handler.erl:39-48). PBeam keeps the
+    // run alive in the same way, but writes no `Error!` line (row "Run end").
+    let report = "ready\nlate\n=INFO REPORT==== <time> ===\nSIGTERM received - shutting down\n\n";
+    for (name, mut command, stderr) in [
+        (
+            "ERTS",
+            erts("exit_normal"),
+            "Error! Failed to eval: notify_probe:exit_normal(), halt().\r\n\r\n",
+        ),
+        ("PBeam", pbeam("exit_normal"), ""),
+    ] {
+        let (status, stdout, actual_stderr) =
+            run_with_signals(&mut command, b"", &[("late\n", libc::SIGTERM)]);
+        assert_eq!(
+            (status, mask_time(&stdout), actual_stderr),
+            (Some(0), String::from(report), String::from(stderr)),
+            "{name}"
+        );
+    }
+}
+
 /// The break menu of ERTS on stdout, with the line endings of the console
 /// writer (`erts_printf`, `break.c:574-575`, `600`).
 const BREAKS: &str = "ready\n\r\nBREAK: (a)bort (A)bort with dump (c)ontinue (p)roc info (i)nfo\r\n       (l)oaded (v)ersion (k)ill (D)b-tables (d)istribution\r\n";

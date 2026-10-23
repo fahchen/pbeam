@@ -288,6 +288,7 @@ fn idle_wait(scheduler: &mut Scheduler, node: &Node) -> Result<(), BeamError> {
     let wait = scheduler.timers.wait_time(scheduler.timers.now());
     if scheduler.timers.active() || scheduler.has_external_sources() {
         scheduler.wait_events(Some(wait))?;
+        scheduler.timers.now();
         return Ok(());
     }
     if node.enter_idle() {
@@ -304,6 +305,10 @@ fn idle_wait(scheduler: &mut Scheduler, node: &Node) -> Result<(), BeamError> {
     // so the scheduler changes no state while the node counts it as idle.
     let waited = scheduler.wait_events(Some(wait));
     node.leave_idle();
+    // A scheduler reads the clock after each wake, so a timer that is due
+    // at the wake expires before the next process runs
+    // (`erl_process.c:3568`, `3605`, `3613-3614`).
+    scheduler.timers.now();
     waited?;
     Ok(())
 }
@@ -368,6 +373,29 @@ impl BeamProgram {
     /// ```
     pub fn atom(&self, name: &str) -> Option<Atom> {
         self.atoms.get(name)
+    }
+
+    /// Return the atom of `name`, and add the name to the atom table of
+    /// this program when no loaded module holds it, as `list_to_atom/1`
+    /// does. The `pbeam` binary makes the atom of each argument with it, as
+    /// `init` makes the atoms of the `-s` arguments with `list_to_atom/1`
+    /// (`init.erl:613-627`). It also makes the atom of the `bindir` boot
+    /// flag, as `erlexec` always gives `-bindir` (erlexec.c:1154-1155).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let program = BeamProgram::load(&[ATOM_MAP_PROBE])?;
+    /// let atom = program.put_atom("pbeam_unknown")?;
+    /// assert_eq!(program.atom("pbeam_unknown"), Some(atom));
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// A table that holds `ATOM_LIMIT` atoms gives the error `no more index
+    /// entries in atom_tab (max=N)`.
+    pub fn put_atom(&self, name: &str) -> Result<Atom, BeamError> {
+        self.atoms.put(name)
     }
 
     /// Return the atom table of this program. A caller passes it as the
@@ -471,7 +499,10 @@ impl BeamProgram {
     /// whose dirty NIF call completed goes to the run queue (see
     /// `Scheduler::complete_dirty_calls`). The run ends at
     /// the next scheduling step after the root process exits, also when
-    /// another process can run or a timer is active. A process that ends
+    /// another process can run or a timer is active, unless the exit
+    /// reason is `normal`. After a root exit with the reason `normal`, the
+    /// other processes keep running until a halt, and the run ends when no
+    /// process can wake (`init.erl:700-704`). A process that ends
     /// the root process with an exit signal continues until it waits,
     /// exits, or switches out. This is as
     /// `halt()` after `-eval` stops the ERTS node
@@ -880,7 +911,7 @@ impl BeamProgram {
         let label = scheduler.code.entry_label(module, function, 0)?;
         let frame = scheduler.code.frame(module, label, 0)?;
         let id = scheduler.next_pid()?;
-        scheduler.start_with_id(id, slot, frame, Vec::new(), Vec::new())?;
+        scheduler.start_with_id(id, slot, frame.into(), Vec::new(), Vec::new())?;
         // Wait until each scheduler created its root, so an idle root cannot
         // decide that its message cannot arrive before another root started.
         let gate = start.0.expect("the start gate is armed");
@@ -893,7 +924,7 @@ impl BeamProgram {
         // processes, because a process of another scheduler can still depend
         // on them until the last root exits.
         while !node.is_shutdown() {
-            let now = scheduler.timers.now();
+            let now = scheduler.timers.timer_time();
             scheduler.expire_timers(now);
             scheduler.check_signals()?;
             scheduler.complete_dirty_calls();
@@ -1053,10 +1084,13 @@ impl BeamProgram {
         issuer: Issuer,
         sample: &mut Option<&mut dyn FnMut(usize)>,
     ) -> Result<(), BeamError> {
-        let arity =
-            u32::try_from(arguments.len()).map_err(|_| error("arity exceeds BEAM limit"))?;
-        let label = scheduler.code.entry_label(module, function, arity)?;
-        let frame = scheduler.code.frame(module, label, arity)?;
+        // The root starts as `erl_create_process` starts a process: a
+        // module that the run does not load, or a function that the module
+        // does not export, goes to the error handler when the root first
+        // runs (`erl_process.c:12616`, `beam_common.c:1294-1342`).
+        let module_atom = scheduler.atoms.put(module)?;
+        let function_atom = scheduler.atoms.put(function)?;
+        let frame = initial_start(scheduler, &module_atom, &function_atom, arguments.len())?;
         let mut root = match issuer {
             Issuer::Unchecked => {
                 scheduler.start(frame, arguments.to_vec(), Vec::new())?;
@@ -1093,7 +1127,7 @@ impl BeamProgram {
                     None => scheduler.enter_runtime(capabilities),
                 }
             }
-            let now = scheduler.timers.now();
+            let now = scheduler.timers.timer_time();
             scheduler.expire_timers(now);
             scheduler.check_signals()?;
             match issuer {
@@ -1127,6 +1161,7 @@ impl BeamProgram {
                         }
                         std::thread::sleep(wait);
                     }
+                    scheduler.timers.now();
                 }
             }
             sample_live(scheduler, sample);
@@ -1843,9 +1878,11 @@ impl BeamProgram {
                         }
                     }
                 }
+                // The BEAM validator lets `swap` copy a match context
+                // (`beam_validator.erl:2783-2785`), so it reads each term.
                 Instruction::Swap(left, right) => {
-                    let left_value = read(process, left)?;
-                    let right_value = read(process, right)?;
+                    let left_value = read_any(process, left)?;
+                    let right_value = read_any(process, right)?;
                     write(process, left, right_value)?;
                     write(process, right, left_value)?;
                 }
@@ -2005,7 +2042,7 @@ impl BeamProgram {
                     destination,
                 } => {
                     let (process, atoms) = scheduler.current_process_and_atoms();
-                    let context = any_match_context(process, source, atoms)?;
+                    let context = match_context(process, source, atoms)?;
                     write(process, destination, Term::MatchContext(context))?;
                 }
                 // ERTS `bs_get_tail` writes the bits after the position as
@@ -2131,7 +2168,7 @@ impl BeamProgram {
                 // compiler gives it a position that `bs_get_position` made.
                 Instruction::BinarySetPosition { context, position } => {
                     let (process, atoms) = scheduler.current_process_and_atoms();
-                    let state = any_match_context(process, context, atoms)?;
+                    let state = match_context(process, context, atoms)?;
                     match read_ref(process, position)? {
                         Term::Integer(value) if let Ok(value) = usize::try_from(*value) => {
                             state.set_position(value);
@@ -2227,9 +2264,10 @@ impl BeamProgram {
                     fail_label,
                     context,
                     commands,
+                    test_heap,
                 } => {
                     let (process, atoms) = scheduler.current_process_and_atoms();
-                    if !binary_match(process, context, commands, atoms)? {
+                    if !binary_match(process, context, commands, *test_heap, atoms)? {
                         cursor.position = label_position(*fail_label)?;
                     }
                 }
@@ -3920,39 +3958,7 @@ fn create_process(
         return Ok(BifResult::badarg());
     };
     let arguments: Vec<Term> = arguments.cloned().collect();
-    let arity = u32::try_from(arguments.len()).map_err(|_| error("arity exceeds BEAM limit"))?;
-    // A function that the loaded module does not export gives an undefined
-    // start, which goes to `undefined_function` when the process first
-    // runs, as the `i_apply_only` start of ERTS goes to its export entry.
-    // More than `APPLY_MAX_ARGUMENTS` arguments also give an undefined start,
-    // which raises `system_limit` when the process first runs. The `apply`
-    // of ERTS checks this limit before it looks up the export, so the module
-    // can be not loaded.
-    //
-    // A BIF also gives an undefined start, which runs the BIF when the
-    // process first runs. The export of a BIF calls the BIF, and not the
-    // stub body of the module, which is `erlang:nif_error(undefined)` in
-    // `erlang.beam` (`emu/emu_load.c:704-713`, `jit/arm/ops.tab:917-927`).
-    scheduler.sync_code();
-    let export = {
-        let atoms = &scheduler.atoms;
-        let (module, function) = (atoms.name_of(module), atoms.name_of(function));
-        if arguments.len() > APPLY_MAX_ARGUMENTS
-            || resolve(module, function, arity).is_some()
-            || is_pbeam_bif(module, function, arity)
-        {
-            None
-        } else {
-            scheduler.code.export_frame(module, function, arity)?
-        }
-    };
-    let start = match export {
-        Some(frame) => Start::Entry(frame),
-        None => Start::Undefined {
-            module: module.clone(),
-            function: function.clone(),
-        },
-    };
+    let start = initial_start(scheduler, module, function, arguments.len())?;
     let SpawnOptions {
         link,
         monitor,
@@ -3974,6 +3980,64 @@ fn create_process(
         Some(reference) => Term::tuple(vec![Term::Pid(pid), Term::Reference(reference)]),
         None => Term::Pid(pid),
     }))
+}
+
+/// Return the start of a new process at `module:function` with `arity`
+/// arguments, as the `i_apply_only` start of ERTS enters the export entry of
+/// its MFA (`erl_process.c:12616`). An exported function of a loaded module
+/// starts at its entry frame. Each other function, a BIF, and more than 1023
+/// arguments give an undefined start, which calls the export entry, and
+/// thus the BIF or the error handler, when the process first runs.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let start = initial_start(&mut scheduler, &module, &function, 0)?;
+/// ```
+///
+/// # Errors
+///
+/// The errors of `CodeTable::export_frame`.
+fn initial_start(
+    scheduler: &mut Scheduler,
+    module: &Atom,
+    function: &Atom,
+    arity: usize,
+) -> Result<Start, BeamError> {
+    let arguments_len = arity;
+    let arity = u32::try_from(arity).map_err(|_| error("arity exceeds BEAM limit"))?;
+    // A function that the loaded module does not export gives an undefined
+    // start, which goes to `undefined_function` when the process first
+    // runs, as the `i_apply_only` start of ERTS goes to its export entry.
+    // More than `APPLY_MAX_ARGUMENTS` arguments also give an undefined start,
+    // which raises `system_limit` when the process first runs. The `apply`
+    // of ERTS checks this limit before it looks up the export, so the module
+    // can be not loaded.
+    //
+    // A BIF also gives an undefined start, which runs the BIF when the
+    // process first runs. The export of a BIF calls the BIF, and not the
+    // stub body of the module, which is `erlang:nif_error(undefined)` in
+    // `erlang.beam` (`emu/emu_load.c:704-713`, `jit/arm/ops.tab:917-927`).
+    scheduler.sync_code();
+    let export = {
+        let atoms = &scheduler.atoms;
+        let (module, function) = (atoms.name_of(module), atoms.name_of(function));
+        if arguments_len > APPLY_MAX_ARGUMENTS
+            || resolve(module, function, arity).is_some()
+            || is_pbeam_bif(module, function, arity)
+        {
+            None
+        } else {
+            scheduler.code.export_frame(module, function, arity)?
+        }
+    };
+    Ok(match export {
+        Some(frame) => Start::Entry(frame),
+        None => Start::Undefined {
+            module: module.clone(),
+            function: function.clone(),
+        },
+    })
 }
 
 /// The execution position of the run loop: the code of the active frame and
@@ -4818,53 +4882,6 @@ fn read_any_ref<'a>(
     read_operand(operand, &process.registers, stack)
 }
 
-/// Read the match context of a binary-match instruction that reads its
-/// position. A match context after a failed `=:=` command of `bs_match`
-/// has no known position until `bs_set_position`, and gives a runtime
-/// error (row "Binary matching" of docs/erts-differences.md). Return the
-/// shared match context, so a change of its position is also in each
-/// copy of it.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// let atoms = AtomTable::new();
-/// let context = Arc::new(MatchState::new(b"a"));
-/// write(&mut process, &Operand::X(0), Term::MatchContext(context))?;
-/// assert_eq!(match_context(&process, &Operand::X(0), &atoms)?.position(), 0);
-/// ```
-fn match_context(
-    process: &ProcessState,
-    operand: &Operand,
-    atoms: &AtomTable,
-) -> Result<Arc<MatchState>, BeamError> {
-    let context = any_match_context(process, operand, atoms)?;
-    check_known_position(&context, operand)?;
-    Ok(context)
-}
-
-/// Check that the position of the match context in `operand` is known.
-/// After a failed `=:=` command of `bs_match`, a read gives a runtime
-/// error (row "Binary matching" of docs/erts-differences.md).
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// let context = Arc::new(MatchState::new(b"a"));
-/// assert!(check_known_position(&context, &Operand::X(0)).is_ok());
-/// context.forget_position();
-/// assert!(check_known_position(&context, &Operand::X(0)).is_err());
-/// ```
-fn check_known_position(context: &MatchState, operand: &Operand) -> Result<(), BeamError> {
-    if context.position_known() {
-        Ok(())
-    } else {
-        Err(error(format!(
-            "unsupported read of the match context in {operand:?} after a failed bs_match =:= command"
-        )))
-    }
-}
-
 /// Return the `bit_size/1` or `byte_size/1` result of a match context in
 /// `values`, the argument values of the BIF `module:name`, or `None` for
 /// each other BIF or argument. The BEAM validator lets these two BIFs get
@@ -4879,8 +4896,7 @@ fn check_known_position(context: &MatchState, operand: &Operand) -> Result<(), B
 /// # Errors
 ///
 /// A match context in an argument of another BIF is a runtime invariant
-/// error. A match context with no known position gives the error of
-/// `match_context`.
+/// error.
 ///
 /// # Examples
 ///
@@ -4901,7 +4917,6 @@ fn match_context_size<T: Borrow<Term>>(
         && let [value] = values
         && let Term::MatchContext(context) = Borrow::<Term>::borrow(value)
     {
-        check_known_position(context, &arguments[0])?;
         let bits = context.remaining_bits();
         let size = if bif == BifId::ErlangBitSize1 {
             bits
@@ -4919,10 +4934,10 @@ fn match_context_size<T: Borrow<Term>>(
     }
 }
 
-/// Read the shared match context of a binary-match instruction, also when
-/// its position is not known. Each other term is a runtime invariant
-/// error: the BEAM validator gives these instructions only a match
-/// context.
+/// Read the shared match context of a binary-match instruction, so a
+/// change of its position is also in each copy of it. Each other term is a
+/// runtime invariant error: the BEAM validator gives these instructions
+/// only a match context.
 ///
 /// # Examples
 ///
@@ -4930,10 +4945,10 @@ fn match_context_size<T: Borrow<Term>>(
 /// let atoms = AtomTable::new();
 /// let context = Arc::new(MatchState::new(b"a"));
 /// write(&mut process, &Operand::X(0), Term::MatchContext(context))?;
-/// assert_eq!(any_match_context(&process, &Operand::X(0), &atoms)?.position(), 0);
-/// assert!(any_match_context(&process, &Operand::Value(Term::Integer(1)), &atoms).is_err());
+/// assert_eq!(match_context(&process, &Operand::X(0), &atoms)?.position(), 0);
+/// assert!(match_context(&process, &Operand::Value(Term::Integer(1)), &atoms).is_err());
 /// ```
-fn any_match_context(
+fn match_context(
     process: &ProcessState,
     operand: &Operand,
     atoms: &AtomTable,
@@ -5328,6 +5343,92 @@ fn match_context_escape(operand: &Operand) -> BeamError {
     ))
 }
 
+/// Return the end of the JIT read that holds the `=:=` command at
+/// `failed`, in bits from the position at the start of `commands`. ERTS
+/// writes the position there before it compares the value, so a failed
+/// `=:=` leaves the position at that end (`READ` and `EQ` in
+/// `emit_i_bs_match_test_heap`, jit/arm/instr_bs.cpp:2995-3045). The JIT
+/// groups the `integer`, `binary`, `=:=`, and `skip` segments into reads
+/// of at most 64 bits (`beam_jit_opt_bsm_segments`,
+/// jit/beam_jit_bs.cpp:366-521). A heap need, from a fused `test_heap`
+/// (`test_heap`), a `binary` or `get_tail` command, or an integer of at
+/// least 60 bits, starts a new read at the first `integer`, `binary`, or
+/// `get_tail` command (jit/beam_jit_bs.cpp:378-411).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let equal = BinaryMatchCommand::Equal { size: 8, value: 1 };
+/// let skip = BinaryMatchCommand::Skip { size: 8 };
+/// assert_eq!(equal_read_end(&[skip.clone(), equal, skip], 1, false), 24);
+/// ```
+fn equal_read_end(commands: &[BinaryMatchCommand], failed: usize, test_heap: bool) -> u64 {
+    let mut heap_need = test_heap
+        || commands.iter().any(|command| match command {
+            BinaryMatchCommand::Integer { size, .. } => *size >= 60,
+            BinaryMatchCommand::Binary { .. } | BinaryMatchCommand::GetTail { .. } => true,
+            _ => false,
+        });
+    let mut offset = 0;
+    // The start and the size in bits of the open read.
+    let mut read: Option<(u64, u64)> = None;
+    let mut failed_read = (0, 0);
+    for (index, command) in commands.iter().enumerate() {
+        let needs_heap = matches!(
+            command,
+            BinaryMatchCommand::Integer { .. }
+                | BinaryMatchCommand::Binary { .. }
+                | BinaryMatchCommand::GetTail { .. }
+        );
+        if heap_need && needs_heap {
+            heap_need = false;
+            read = None;
+        }
+        // Add `size` bits to the open read, or open a new read.
+        let extend = |read: Option<(u64, u64)>, size: u64| match read {
+            Some((start, total)) if total + size <= 64 => Some((start, total + size)),
+            _ => Some((offset, size)),
+        };
+        let size = match command {
+            BinaryMatchCommand::Integer { size, .. } | BinaryMatchCommand::Binary { size, .. } => {
+                let last_common = read.is_none()
+                    && matches!(command, BinaryMatchCommand::Integer { .. })
+                    && matches!(size, 8 | 16 | 32)
+                    && index + 1 == commands.len();
+                read = if *size > 64 || last_common {
+                    None
+                } else {
+                    extend(read, *size)
+                };
+                *size
+            }
+            BinaryMatchCommand::Equal { size, .. } => {
+                read = extend(read, *size);
+                *size
+            }
+            BinaryMatchCommand::Skip { size } => {
+                read = read
+                    .filter(|(_, total)| total + size <= 64)
+                    .map(|(start, total)| (start, total + size));
+                *size
+            }
+            _ => {
+                read = None;
+                0
+            }
+        };
+        offset += size;
+        match read {
+            Some(current) if index == failed || current.0 == failed_read.0 && index > failed => {
+                failed_read = current;
+            }
+            _ if index > failed => break,
+            _ => {}
+        }
+    }
+    failed_read.0 + failed_read.1
+}
+
 /// Run the commands of a `bs_match` instruction in order on the match
 /// context in `context`, as the ERTS JIT does (`gen.bs_match`,
 /// jit/arm/generators.tab:532-604; `emit_i_bs_match_test_heap`,
@@ -5343,8 +5444,8 @@ fn match_context_escape(operand: &Operand) -> BeamError {
 ///   the position and keeps the position. These commands do not fail:
 ///   the compiler puts an `ensure_at_least` or `ensure_exactly` for their
 ///   bits first (beam_ssa_codegen.erl:2759-2868).
-/// - `=:=` fails when the bits are not its value. The position is then
-///   not known (`MatchState::forget_position`).
+/// - `=:=` fails when the bits are not its value. The position is then at
+///   the end of the JIT read that holds the command (`equal_read_end`).
 ///
 /// # Errors
 ///
@@ -5361,19 +5462,21 @@ fn match_context_escape(operand: &Operand) -> BeamError {
 /// write(&mut process, &Operand::X(0), Term::MatchContext(context))?;
 /// let unit = NonZeroU64::new(8).unwrap();
 /// let byte = BinaryMatchCommand::Integer { size: 8, little: false, signed: false, destination: Operand::X(1) };
-/// assert!(binary_match(&mut process, &Operand::X(0), &[BinaryMatchCommand::EnsureAtLeast { size: 8, unit }, byte], &atoms)?);
+/// assert!(binary_match(&mut process, &Operand::X(0), &[BinaryMatchCommand::EnsureAtLeast { size: 8, unit }, byte], false, &atoms)?);
 /// assert_eq!(read(&process, &Operand::X(1))?, Term::Integer(7));
-/// assert!(!binary_match(&mut process, &Operand::X(0), &[BinaryMatchCommand::EnsureExactly { size: 0 }], &atoms)?);
+/// assert!(!binary_match(&mut process, &Operand::X(0), &[BinaryMatchCommand::EnsureExactly { size: 0 }], false, &atoms)?);
 /// ```
 fn binary_match(
     process: &mut ProcessState,
     context: &Operand,
     commands: &[BinaryMatchCommand],
+    test_heap: bool,
     atoms: &AtomTable,
 ) -> Result<bool, BeamError> {
     let context = match_context(process, context, atoms)?;
     let state = &*context;
-    for command in commands {
+    let start = state.position();
+    for (index, command) in commands.iter().enumerate() {
         let remaining = state.remaining_bits() as u64;
         let too_few_bits = |size: &u64| {
             error(format!(
@@ -5421,7 +5524,7 @@ fn binary_match(
                 let bits = state.read_bits(*size).ok_or_else(|| too_few_bits(size))?;
                 let equal = segment_equals(&bits, *size as usize, *value);
                 if !equal {
-                    state.forget_position();
+                    state.set_position(start + equal_read_end(commands, index, test_heap) as usize);
                     return Ok(false);
                 }
             }

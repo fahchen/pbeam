@@ -27,8 +27,8 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### Load local fun literals and run the fun information BIFs
 
-- PBeam loads a `NEW_FUN_EXT` (tag 112) literal as an unsupported literal, so an instruction that reads it returns `unsupported BEAM literal index N`. The pinned compiler makes a local fun with `make_fun3`, not as a literal (measured), so no current path loads one. `erlang:fun_info/2` runs (row "Fun information"). `erlang:fun_to_list/1` runs (#1017). `erlang:fun_info_mfa/1` is an `unsupported` BIF table entry (row "Unimplemented BIFs").
-- **Trigger:** a measured path loads a local fun literal or calls `erlang:fun_info_mfa/1`.
+- PBeam loads a `NEW_FUN_EXT` (tag 112) literal as an unsupported literal, so an instruction that reads it returns `unsupported BEAM literal index N`. The pinned compiler makes a local fun with `make_fun3`, not as a literal (measured), so no current path loads one. `erlang:fun_info/2` runs (row "Fun information"). `erlang:fun_to_list/1` runs (#1017). `erlang:fun_info_mfa/1` runs (#1021).
+- **Trigger:** a measured path loads a local fun literal.
 - **Source:** PR #120 (#109).
 
 ### Cache the decoded modules of a run
@@ -141,26 +141,12 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a measured path converts such an integer at the end of a budget, or a task adds dirty schedulers.
 - **Source:** #234 (PR #243), #268, #399.
 
-### Read the clock after `ERTS_CHECK_TIME_REDS` reductions
-
-- PBeam reads the run clock and expires each due timer before it takes the next process. An ERTS scheduler reads the clock only when its processes used `ERTS_CHECK_TIME_REDS` (`CONTEXT_REDS`, 4000) reductions after the last read, and before it sleeps. Between two reads, it expires the timers on the last time that it read (`erl_process.c:59`, `9797-9810`; `erl_process.h:528-535`; `erl_time_sup.c:280`). Thus on ERTS a due timer can expire some turns later than on PBeam. The "Timers" row of `docs/erts-differences.md` records this, and this entry owns it.
-- **Trigger:** a measured path depends on the turn in which a timer expires while other processes run.
-- **Source:** #229 (PR #236).
-
-### Run the other binary-match instructions
-
-- PBeam runs `bs_start_match3`, `bs_start_match4`, `bs_get_position`, `bs_set_position`, `bs_get_utf8`, `bs_skip_utf8`, `bs_get_utf16`, `bs_skip_utf16`, `bs_get_utf32`, `bs_skip_utf32`, `bs_get_tail`, `bs_get_binary2` with a size in a register or a literal integer, `bs_get_integer2`, `bs_skip_bits2`, `bs_match_string`, and `bs_match` with each command that the ERTS loader accepts. `move`, `bs_start_match3`, and `bs_start_match4` share a match context that they copy to another register, and `byte_size/1` reads a match context. `swap` and `bit_size/1` of a match context stop the run with `invariant error: the match context in <Operand> reached an instruction that is not a binary match`. After a failed `=:=` command of `bs_match`, PBeam does not know the position, so a read of the match context before `bs_set_position` stops the run with `unsupported read of the match context in <Operand> after a failed bs_match =:= command`. The remaining binary-match instruction, `bs_get_binary2` with the size `all`, stops the run with `unsupported BEAM opcode N`. The "Binary matching" row of `docs/erts-differences.md` records this, and this entry owns it.
-- **Evidence:** The test `gives_a_runtime_error_for_a_read_after_a_failed_equal_command` of `tests/runtime/interpreter.rs` stops at a `skip` command after a failed `=:=`.
-- **Trigger:** a measured path matches a binary with one of these instructions, gives a match context to `swap` or `bit_size/1`, or reads a match context after a failed `=:=` command without `bs_set_position`. Add only the instructions that the path needs.
-- **Source:** #219 (PR #227), #395, #396, #421.
-
 ### Run the unsupported BIFs that OTP code calls
 
 - The "Unimplemented BIFs" row lists the `unsupported` BIF table entries that OTP code often calls. Each returns `unresolved external MFA M:F/A`. The groups:
   - Timers: `erlang:read_timer/2`. The other timer BIFs run, `erlang:read_timer/1` among them (`src/runtime/interpreter/bif/table.rs:284`).
   - Persistent terms: `persistent_term:put_new/2` and `persistent_term:info/0`. `persistent_term:erase/1` runs (`table.rs:545`).
   - Signals: `erlang:exit/3`.
-  - Funs: `erlang:fun_info_mfa/1` (entry "Load local fun literals and run the fun information BIFs").
   - Maps: `maps:get/2` and `maps:is_key/2` through a fun call. The compiler changes a direct call to the `map_get` and `is_map_key` BIFs, which PBeam runs.
 - **Trigger:** a measured path calls one of them. Add each group in its own task.
 - **Source:** audit of the BIF table at the M2 close.
@@ -214,8 +200,7 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### Set the start variables and `init` flags of the `erl` script
 
-- PBeam has no `erl` script and no `erlexec`. Thus `os:getenv/1` gives the host value or `false` for `EMU`, `ROOTDIR`, `BINDIR`, and `PROGNAME`, and `PATH` has no `BINDIR` prefix. The `init` request process of `pbeam_boot` has only the flag `noshell`. The `erl` script exports the four variables (`erl.src.src:52-58`), `erlexec` puts `BINDIR` and `ROOTDIR/bin` at the front of `PATH` (`erlexec.c:553-621`), and the flags of `init` also have `root`, `bindir`, `progname`, and `home`. The "OS environment" and "Boot" rows record this.
-- On Linux, the `inet_db` start calls `inet:gethostbyname/1` for the host name when the domain is empty (inet_config.erl:112-134). Before `kernel_safe_sup` starts, `inet_gethost_native` spawns `run_once/0` (inet_gethost_native.erl:575-577). In PBeam, `init:get_argument(bindir)` gives `error`, so that process exits with `{badmatch,error}` (inet_gethost_native.erl:416). `inet_config` ignores the error result, so the domain stays empty. In ERTS, the `inet_gethost` port program resolves the name. When the result is a long name, `set_hostname/1` sets the domain (inet_config.erl:122-127). The port also needs the `{packet,4}` and `eof` options of `open_port/2`. Observed in PR #717 (#449).
+- PBeam has no `erl` script and no `erlexec`. Thus `os:getenv/1` gives the host value or `false` for `EMU`, `ROOTDIR`, `BINDIR`, and `PROGNAME`, and `PATH` has no `BINDIR` prefix in the `pbeam_boot` form. The `init` request process of `pbeam_boot` has the flag `noshell`, and the `root` and `bindir` flags of `--root` (#1083). The `erl` script exports the four variables (`erl.src.src:52-58`), `erlexec` puts `BINDIR` and `ROOTDIR/bin` at the front of `PATH` (`erlexec.c:553-621`), and the flags of `init` also have `progname` and `home`. The "OS environment" and "Boot" rows record this.
 - **Trigger:** a consumer reads one of these variables or flags, for example `init:get_argument(root)`.
 - **Source:** PR #191 (#185).
 
@@ -262,14 +247,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** the first consumer of `ets:give_away/3`, `ets:setopts/2`, or a live heir.
 - **Source:** #112.
 
-### Keep the run alive after a root `exit(normal)` as ERTS does
-
-- When the root process calls `exit(normal)`, the `pbeam` binary writes `pbeam: root process exited with normal` and exits with status 1. On ERTS, `start_it/1` writes `Error! Failed to eval: <expression>` and raises the exit again (init.erl:1552-1567). The boot process exits `normal`, `init` goes to its main loop (init.erl:700-704), and the run does not end. The "Run end" row of `docs/erts-differences.md` records this.
-- **Evidence:** a module `haltp` with `exit_normal() -> exit(normal).`. On pinned ERTS, `timeout 10 erl -noshell -pa <dir> -eval 'haltp:exit_normal()'` writes `Error! Failed to eval: haltp:exit_normal()`, then `SIGTERM received - shutting down` at the timeout, and exits with status 124. On the `pbeam` binary, `pbeam pbeam_boot start haltp exit_normal`, with the BEAM files of `examples/hello_world/README.md`, writes `pbeam: root process exited with normal` and exits with status 1.
-- The work: an `init` process that links to the boot process and keeps the run alive after a `normal` exit, as "Halt the PBeam boot with the `init` crash text" needs for the other exits.
-- **Trigger:** a consumer needs the ERTS result of a root `exit(normal)`, for example a program that ends its root process and keeps its other processes alive.
-- **Source:** M2 exit check (#220).
-
 ### Read code files from the bundle as a read-only code path root
 
 - In interactive mode, a bundle is a read-only code path root. `prim_file` reads a path under this root from the bundle, not from the host file system. Thus `erl_prim_loader` and `code_server` run the pinned code path search on a bundle as on a directory (design section 13 of `docs/code-loading.md`). The bundle format does not exist yet, so no task can define the root or its paths now.
@@ -299,6 +276,14 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** an application that reaches an unbound function; the order follows the applications.
 - **Source:** owner comment of 2026-10-22 ("最终我们需要完整实现一遍").
 
+### Free crypto hash contexts with their last term
+
+- **Now:** `HashContexts` of `src/runtime/interpreter/native/crypto.rs` never removes a context (#1016). `Term::Reference` has no count, so a context cannot drop with its last term. ERTS frees an `EVP_MD_CTX` resource when no term refers to it (`hash.c:45-51`).
+- **Evidence:** each `hash_update_nif/2` call adds one context, so `crypto:hash/2` on N bytes keeps ceil(N/20000)+1 contexts for the run (`crypto.erl:4535-4553`).
+- **Option:** back the context resource term with an `Arc`, so the Rust drop of the last term frees the context. The owner chose Rust drop over a resource garbage collection.
+- **Trigger:** a long run or a run that hashes large data.
+- **Source:** Fable review of PR #1117.
+
 ## Exceptions
 
 ### Give the `error_info` cause of BIF errors
@@ -314,12 +299,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a consumer needs the exact frames of an `undef` exception.
 - **Source:** owner decision of 2026-10-11 (Suikou review 01a1282e, AFK log second batch); [#446](https://github.com/fahchen/pbeam/issues/446), [#447](https://github.com/fahchen/pbeam/issues/447), PR [#473](https://github.com/fahchen/pbeam/pull/473).
 - **Task:** none. [#926](https://github.com/fahchen/pbeam/issues/926) added the line locations.
-
-### Raise `undef` for an entry module that the run does not load
-
-- After #42 (PR #194), the `pbeam` binary accepts only an argument atom that a loaded module holds and stops with `argument <M> is not an atom of the loaded modules`, and it stops with `missing BEAM module M` for an entry module that the start BEAM files do not hold. #447 runs the pinned `error_handler` for a call of a module that the run does not load, so the undefined-module path of `error_handler` exists now. The remaining work is a `BeamProgram` API that adds the atom of the entry module and of each argument, and an entry that loads its module through the error handler. The "Run arguments" and "Undefined functions" rows record the difference.
-- **Trigger:** a consumer runs an entry module, or gives an argument atom, that the start BEAM files do not hold.
-- **Source:** review of #42; the remaining work of [#447](https://github.com/fahchen/pbeam/issues/447).
 
 ### Halt the PBeam boot with the `init` crash text
 

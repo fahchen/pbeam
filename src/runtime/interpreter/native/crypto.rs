@@ -7,15 +7,24 @@
 //! `info_fips/0`, `enable_fips_mode_nif/1`, and the algorithm lists of
 //! `crypto:supports/0,1`, which name only the algorithms that PBeam can
 //! run, and the one-shot hash and MAC NIFs `hash_info/1`, `mac_nif/4`, and
-//! `hash_equals_nif/2`. As ERTS, PBeam computes the digests and MACs with
+//! `hash_equals_nif/2`, and the hash context NIFs `hash_init_nif/1`,
+//! `hash_update_nif/2`, `hash_final_nif/1`, and `hash_final_xof_nif/2`,
+//! which keep each context in [`HashContexts`]. As ERTS, PBeam computes the digests and MACs with
 //! a static OpenSSL, through the safe `openssl` crate (`vendored`, OpenSSL
 //! 3.5.5).
 //! Each other function of the library gives the runtime error
 //! `crypto:F/A NIF is not supported` (row "NIF stubs" of
 //! `docs/erts-differences.md`).
 
+mod cipher;
+
 use super::bif::iodata_bytes;
 use super::*;
+use crate::runtime::resources::lock;
+use crate::term::Reference;
+use cipher::{
+    aead_cipher_nif, cipher_algorithms, cipher_info_nif, do_exor, ng_crypto_one_time_nif,
+};
 use num_traits::ToPrimitive;
 use openssl::{
     hash::{Hasher, MessageDigest},
@@ -23,7 +32,7 @@ use openssl::{
     pkey::{Id, PKey},
     sign::Signer,
 };
-use std::{fs::File, io::Read, sync::OnceLock};
+use std::{collections::HashMap, fs::File, io::Read, sync::OnceLock};
 
 /// The functions of the ERTS `crypto` NIF library, as `(name, arity)` in
 /// the order of `nif_funcs` (`crypto.c:68-145`). `erlang:load_nif/2`
@@ -117,16 +126,34 @@ pub(super) const FUNCTIONS: [(&str, u32); 70] = [
 /// ```
 pub(super) const BINDINGS: &[Binding] = &[
     Binding {
+        name: "aead_cipher_nif",
+        arity: 7,
+        job: Job::Normal,
+        run: aead_cipher_nif,
+    },
+    Binding {
         name: "cipher_algorithms",
         arity: 0,
         job: Job::Normal,
-        run: |_, _| Ok(BifResult::Value(Term::Nil)),
+        run: |scheduler, _| cipher_algorithms(scheduler),
+    },
+    Binding {
+        name: "cipher_info_nif",
+        arity: 1,
+        job: Job::Normal,
+        run: |scheduler, arguments| cipher_info_nif(scheduler, &arguments[0]),
     },
     Binding {
         name: "curve_algorithms",
         arity: 0,
         job: Job::Normal,
         run: |_, _| Ok(BifResult::Value(Term::Nil)),
+    },
+    Binding {
+        name: "do_exor",
+        arity: 2,
+        job: Job::Normal,
+        run: |_, arguments| Ok(do_exor(&arguments[0], &arguments[1])),
     },
     Binding {
         name: "enable_fips_mode_nif",
@@ -147,16 +174,40 @@ pub(super) const BINDINGS: &[Binding] = &[
         run: |_, arguments| Ok(hash_equals_nif(&arguments[0], &arguments[1])),
     },
     Binding {
+        name: "hash_final_nif",
+        arity: 1,
+        job: Job::Normal,
+        run: |scheduler, arguments| hash_final_nif(scheduler, &arguments[0]),
+    },
+    Binding {
+        name: "hash_final_xof_nif",
+        arity: 2,
+        job: Job::Normal,
+        run: |scheduler, arguments| hash_final_xof_nif(scheduler, &arguments[0], &arguments[1]),
+    },
+    Binding {
         name: "hash_info",
         arity: 1,
         job: Job::Normal,
         run: |scheduler, arguments| hash_info(scheduler, &arguments[0]),
     },
     Binding {
+        name: "hash_init_nif",
+        arity: 1,
+        job: Job::Normal,
+        run: |scheduler, arguments| hash_init_nif(scheduler, &arguments[0]),
+    },
+    Binding {
         name: "hash_nif",
         arity: 2,
         job: Job::Normal,
         run: |scheduler, arguments| hash_nif(scheduler, &arguments[0], &arguments[1]),
+    },
+    Binding {
+        name: "hash_update_nif",
+        arity: 2,
+        job: Job::Normal,
+        run: |scheduler, arguments| hash_update_nif(scheduler, &arguments[0], &arguments[1]),
     },
     Binding {
         name: "info_fips",
@@ -205,6 +256,12 @@ pub(super) const BINDINGS: &[Binding] = &[
                 &arguments[3],
             )
         },
+    },
+    Binding {
+        name: "ng_crypto_one_time_nif",
+        arity: 5,
+        job: Job::Normal,
+        run: ng_crypto_one_time_nif,
     },
     Binding {
         name: "pbkdf2_hmac_nif",
@@ -278,7 +335,7 @@ fn openssl_version() -> &'static str {
 /// assert_eq!(load(&info, &atoms), 0);
 /// assert_eq!(load(&Term::Integer(302), &atoms), 205);
 /// ```
-pub(super) fn load(load_info: &Term, _atoms: &AtomTable) -> i32 {
+pub(super) fn load(load_info: &Term, atoms: &AtomTable) -> i32 {
     let Term::Tuple(elements) = load_info else {
         return 205;
     };
@@ -299,7 +356,10 @@ pub(super) fn load(load_info: &Term, _atoms: &AtomTable) -> i32 {
         return 217;
     }
     match fips_mode {
-        Term::Atom(atom) if atom.is_static("false") => 0,
+        Term::Atom(atom) if atom.is_static("false") => {
+            cipher::put_cipher_atoms(atoms);
+            0
+        }
         _ => 287,
     }
 }
@@ -555,9 +615,8 @@ fn hash_info(scheduler: &mut Scheduler, digest_type: &Term) -> Result<BifResult,
 /// Run `crypto:hash_nif(Type, Data)` as the ERTS NIF `hash_nif`
 /// (`hash.c:101-164`) does. `Data` is a binary: the only caller,
 /// `crypto:hash/2`, converts the iodata first (`crypto.erl:1092-1095`).
-/// `crypto:hash/2` sends an input of more than 20000 bytes through
-/// `hash_init_nif/1` (`crypto.erl:4535-4540`), which PBeam does not link, so
-/// that input stops the run with a runtime error. A name that is not a
+/// `crypto:hash/2` sends an input of more than 20000 bytes through the
+/// hash context NIFs (`crypto.erl:4535-4540`). A name that is not a
 /// digest type raises the ERTS error `{badarg, #{c_file_name => "hash.c",
 /// c_file_line_num => 111, c_function_arg_num => 0}, "Bad digest type"}`,
 /// which `crypto:hash/2` gives as `error:{badarg, {"hash.c", 111}, "Bad
@@ -595,6 +654,169 @@ fn hash_nif(
         _ => return c_error(scheduler, "badarg", "hash.c", 118, 1, "Not iolist"),
     };
     Ok(BifResult::Value(Term::binary(hash.digest(data))))
+}
+
+/// The hash contexts of the node, as the `evp_md_ctx` resources of
+/// `hash.c:38-51`. ERTS frees a context when no term refers to it. PBeam
+/// has no garbage collection of resources, so it keeps each context until
+/// the end of the run. Each update makes a new context, as
+/// `hash_update_nif` does (`hash.c:224-233`), so a context does not change
+/// after its insert.
+#[derive(Default)]
+pub(super) struct HashContexts {
+    /// The digest and the OpenSSL context of each context resource.
+    by_reference: HashMap<Reference, (Hash, Hasher)>,
+}
+
+/// Return a copy of the context of `term`, as `enif_get_resource` with the
+/// `EVP_MD_CTX` type and `EVP_MD_CTX_copy` give it: `None` for a term that
+/// is not a hash context resource.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(hash_context(&scheduler, &Term::nil()).is_none());
+/// ```
+fn hash_context(scheduler: &Scheduler, term: &Term) -> Option<(Hash, Hasher)> {
+    let Term::Reference(reference) = term else {
+        return None;
+    };
+    lock(&scheduler.node().resources.kind::<HashContexts>())
+        .by_reference
+        .get(reference)
+        .cloned()
+}
+
+/// Keep `context` as a new hash context resource and give its reference,
+/// as `enif_make_resource` does.
+///
+/// # Errors
+///
+/// A full reference counter gives the error of `Scheduler::make_ref`.
+fn new_hash_context(
+    scheduler: &mut Scheduler,
+    context: (Hash, Hasher),
+) -> Result<BifResult, BeamError> {
+    let reference = scheduler.make_ref()?;
+    lock(&scheduler.node().resources.kind::<HashContexts>())
+        .by_reference
+        .insert(reference, context);
+    Ok(BifResult::Value(Term::Reference(reference)))
+}
+
+/// Run `crypto:hash_init_nif(Type)` as the ERTS NIF `hash_init_nif`
+/// (`hash.c:168-210`): a new context of the digest. A name that is not a
+/// digest raises `badarg` (`hash.c:174-175`), and `md4`, whose `md.p` is
+/// NULL, raises `notsup` (`hash.c:179-180`).
+///
+/// # Errors
+///
+/// A full reference counter gives the error of `Scheduler::make_ref`.
+fn hash_init_nif(scheduler: &mut Scheduler, digest_type: &Term) -> Result<BifResult, BeamError> {
+    let name = atom_name(scheduler, digest_type);
+    let Some(hash) = Hash::from_name(name) else {
+        if name == "md4" {
+            return c_error(
+                scheduler,
+                "notsup",
+                "hash.c",
+                180,
+                0,
+                "Unsupported digest type",
+            );
+        }
+        return c_error(scheduler, "badarg", "hash.c", 175, 0, "Bad digest type");
+    };
+    let hasher = Hasher::new(hash.message_digest()).expect("OpenSSL starts each digest of `Hash`");
+    new_hash_context(scheduler, (hash, hasher))
+}
+
+/// Run `crypto:hash_update_nif(Context, Data)` as the ERTS NIF
+/// `hash_update_nif` (`hash.c:212-240`): a new context with the data of a
+/// copy of `Context`, which does not change. A term that is not a context
+/// raises `badarg` (`hash.c:218-219`), and data that is not a binary raises
+/// `badarg` (`hash.c:221-222`).
+///
+/// # Errors
+///
+/// A full reference counter gives the error of `Scheduler::make_ref`.
+fn hash_update_nif(
+    scheduler: &mut Scheduler,
+    context: &Term,
+    data: &Term,
+) -> Result<BifResult, BeamError> {
+    let Some((hash, mut hasher)) = hash_context(scheduler, context) else {
+        return c_error(scheduler, "badarg", "hash.c", 219, 0, "Bad state");
+    };
+    let Some(data) = data.binary_bytes() else {
+        return c_error(scheduler, "badarg", "hash.c", 222, 1, "Not iolist");
+    };
+    hasher
+        .update(data)
+        .expect("OpenSSL updates each digest of `Hash`");
+    new_hash_context(scheduler, (hash, hasher))
+}
+
+/// Run `crypto:hash_final_nif(Context)` as the ERTS NIF `hash_final_nif`
+/// (`hash.c:242-273`): the digest of a copy of `Context`, which stays
+/// usable. A SHAKE context gives the default `xoflen` of 16 or 32 bytes
+/// that `hash_init_nif` sets (`hash.c:194-201`, `digest.c:135-151`). A term
+/// that is not a context raises `badarg` (`hash.c:252-253`).
+///
+/// # Errors
+///
+/// A new atom in a full atom table gives the error of `AtomTable::put`.
+fn hash_final_nif(scheduler: &mut Scheduler, context: &Term) -> Result<BifResult, BeamError> {
+    let Some((hash, mut hasher)) = hash_context(scheduler, context) else {
+        return c_error(scheduler, "badarg", "hash.c", 253, 0, "Bad state");
+    };
+    let length = match hash {
+        Hash::Shake128 => 16,
+        Hash::Shake256 => 32,
+        _ => {
+            let digest = hasher.finish().expect("OpenSSL ends each digest of `Hash`");
+            return Ok(BifResult::Value(Term::binary(digest.to_vec())));
+        }
+    };
+    let mut output = vec![0; length];
+    hasher.finish_xof(&mut output).expect("OpenSSL ends SHAKE");
+    Ok(BifResult::Value(Term::binary(output)))
+}
+
+/// Run `crypto:hash_final_xof_nif(Context, Length)` as the ERTS NIF
+/// `hash_final_xof_nif` (`hash.c:561-589`): `Length >> 3` bytes of
+/// `EVP_DigestFinalXOF` on a copy of `Context`, as `Length` is a count of
+/// bits. A term that is not a context raises `badarg` (`hash.c:570-571`),
+/// a `Length` that is not a C `unsigned int` raises `badarg`
+/// (`hash.c:572-573`), and a context of a digest that is not XOF raises the
+/// `error` of `hash.c:582-583`.
+///
+/// # Errors
+///
+/// A new atom in a full atom table gives the error of `AtomTable::put`.
+fn hash_final_xof_nif(
+    scheduler: &mut Scheduler,
+    context: &Term,
+    length: &Term,
+) -> Result<BifResult, BeamError> {
+    let Some((_, mut hasher)) = hash_context(scheduler, context) else {
+        return c_error(scheduler, "badarg", "hash.c", 571, 0, "Bad state");
+    };
+    let Some(length) = unsigned(length).and_then(|length| u32::try_from(length).ok()) else {
+        return c_error(scheduler, "badarg", "hash.c", 573, 1, "Bad len");
+    };
+    let mut output = vec![0; (length >> 3) as usize];
+    match hasher.finish_xof(&mut output) {
+        Ok(()) => Ok(BifResult::Value(Term::binary(output))),
+        Err(_) => c_error(
+            scheduler,
+            "error",
+            "hash.c",
+            583,
+            -1,
+            "Low-level call EVP_DigestFinalXOF failed",
+        ),
+    }
 }
 
 /// Run `crypto:pbkdf2_hmac_nif(Digest, Pass, Salt, Iter, KeyLen)` as the
@@ -1208,6 +1430,25 @@ fn c_error(
     argument: i64,
     message: &str,
 ) -> Result<BifResult, BeamError> {
+    c_error_text(scheduler, tag, file, line, argument, message.as_bytes())
+}
+
+/// Return the exception of [`c_error`] with a message of bytes, such as
+/// the `%T` text of a term that `enif_snprintf` prints.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(c_error_text(&mut scheduler, "badarg", "api_ng.c", 176, 4, b"Bad tag in option: a")?, BifResult::Raise { .. }));
+/// ```
+fn c_error_text(
+    scheduler: &mut Scheduler,
+    tag: &str,
+    file: &str,
+    line: i64,
+    argument: i64,
+    message: &[u8],
+) -> Result<BifResult, BeamError> {
     let pairs = vec![
         (
             Term::Atom(scheduler.atoms.put("c_file_name")?),
@@ -1228,7 +1469,7 @@ fn c_error(
         reason: Term::tuple(vec![
             Term::Atom(scheduler.atoms.put(tag)?),
             Term::Map(map),
-            string(message),
+            Term::list_from(message.iter().map(|byte| Term::Integer(i64::from(*byte)))),
         ]),
     })
 }

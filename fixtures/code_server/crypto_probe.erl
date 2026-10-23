@@ -1,5 +1,5 @@
 -module(crypto_probe).
--export([main/0, nifs/0, info/0, supports/0, fips/0, oneshot/0, oneshot_host/0, xof_sizes/0, hash_init/0, hash_large/0]).
+-export([main/0, nifs/0, info/0, supports/0, fips/0, oneshot/0, oneshot_host/0, xof_sizes/0, ciphers/0, ciphers_host/0, cipher_order/0, contexts/0, unsupported/0]).
 
 %% Write the results of crypto:strong_rand_bytes/1, one term on each line.
 %% The first call loads crypto on demand, and its -on_load function loads
@@ -83,11 +83,17 @@ info() ->
 supports() ->
     Run = [blake2s, blake2b, sm3, shake256, shake128, sha3_512, sha3_384, sha3_256,
            sha3_224, sha512_256, sha512_224, sha512, sha384, sha256, sha224, sha,
-           ripemd160, md5, cmac, hmac, poly1305],
+           ripemd160, md5, cmac, hmac, poly1305] ++ run_ciphers() ++
+          [sm4_gcm, sm4_ccm, aes_cbc, aes_ccm, aes_cfb128, aes_cfb8, aes_ctr, aes_ecb, aes_gcm],
     All = crypto:supports(),
     Items = [{Type, [Item || Item <- List, lists:member(Item, Run)]} || {Type, List} <- All],
     Lists = [crypto:supports(Type) || {Type, _} <- All],
-    io:format("~p~n", [[length(lists:append([List || {_, List} <- All])), Items,
+    %% The probe cipher_order/0 checks the order of the ciphers, so this probe
+    %% sorts them. The libcrypto of the Linux CI host has no sm4_gcm and
+    %% sm4_ccm, so the list leaves them out.
+    Sorted = [{Type, case Type of ciphers -> lists:sort(List) -- [sm4_gcm, sm4_ccm]; _ -> List end}
+              || {Type, List} <- Items],
+    io:format("~p~n", [[length(lists:append([List || {_, List} <- All])), Sorted,
                         All =:= Items, Lists =:= [List || {_, List} <- All]]]).
 
 %% Write the FIPS status and the results of crypto:enable_fips_mode/1. A
@@ -141,6 +147,7 @@ oneshot() ->
 oneshot_host() ->
     Md4 = [bad_reason(Fun) || Fun <- [fun() -> crypto:hash_info(md4) end,
                                        fun() -> crypto:hash(md4, <<"abc">>) end,
+                                       fun() -> crypto:hash_init(md4) end,
                                        fun() -> crypto:mac(hmac, md4, <<"key">>, <<"text">>) end]],
     Ciphers = [{rc2_cbc, 16}, {rc4, 16}, {des_cbc, 8}, {des_cfb, 8}, {des_ecb, 8},
                {des_ede3_cbc, 16}, {des_ede3_cfb, 24}, {blowfish_cbc, 16},
@@ -163,15 +170,186 @@ cmacs(Ciphers) ->
 xof_sizes() ->
     io:format("~p~n", [[maps:get(size, crypto:hash_info(Type)) || Type <- [shake128, shake256]]]).
 
-%% Call crypto:hash_init/1, whose NIF hash_init_nif/1 PBeam does not link.
-hash_init() ->
-    io:format("~p~n", [crypto:hash_init(sha)]).
+%% Write the results of the hash context NIFs (hash.c:168-273, 561-589).
+%% An update gives a new context and leaves the old one as it was, and a
+%% final call reads a copy, so each context stays usable. A SHAKE context
+%% gives the default xoflen of 16 or 32 bytes (hash.c:194-201), and
+%% hash_final_xof/2 takes the length in bits. crypto:hash/2 sends an input
+%% of more than 20000 bytes through the contexts (crypto.erl:4535-4540).
+contexts() ->
+    S0 = crypto:hash_init(sha256),
+    S1 = crypto:hash_update(S0, <<"abc">>),
+    S2 = crypto:hash_update(S1, ["d", <<"e">>]),
+    Finals = [crypto:hash_final(S) || S <- [S0, S1, S1, S2]],
+    Digests = [crypto:hash_final(crypto:hash_update(crypto:hash_init(Type), <<"abc">>))
+               || Type <- [md5, ripemd160, sha, sha512, sha3_256, shake128, shake256,
+                           sm3, blake2b, blake2s]],
+    X0 = crypto:hash_init(shake256),
+    X1 = crypto:hash_update(X0, <<"abc">>),
+    Xofs = [crypto:hash_final_xof(X, Length) || X <- [X0, X1], Length <- [0, 7, 8, 100, 256]],
+    Large = crypto:hash(sha, binary:copy(<<1>>, 20001))
+        =:= crypto:hash_final(crypto:hash_update(crypto:hash_init(sha),
+                                                 binary:copy(<<1>>, 20001))),
+    Errors = [bad_reason(Fun)
+              || Fun <- [fun() -> crypto:hash_init(nosuch) end,
+                         fun() -> crypto:hash_init("sha") end,
+                         fun() -> crypto:hash_update(make_ref(), <<"a">>) end,
+                         fun() -> crypto:hash_update(S0, a) end,
+                         fun() -> crypto:hash_final(make_ref()) end,
+                         fun() -> crypto:hash_final(S0 =/= x) end,
+                         fun() -> crypto:hash_final_xof(make_ref(), 8) end,
+                         fun() -> crypto:hash_final_xof(X0, -1) end,
+                         fun() -> crypto:hash_final_xof(X0, 1 bsl 32) end,
+                         fun() -> crypto:hash_final_xof(X0, 8.0) end,
+                         fun() -> crypto:hash_final_xof(S0, 64) end]],
+    io:format("~p~n", [[is_reference(S0), Finals, Digests, Xofs, Large, Errors]]).
 
-%% Call crypto:hash/2 with more than the 20000 bytes that hash_nif/2 takes.
-%% crypto:hash/2 sends the input through hash_init_nif/1, which PBeam does
-%% not link (crypto.erl:4535-4540).
-hash_large() ->
-    io:format("~p~n", [crypto:hash(sha, binary:copy(<<0>>, 20001))]).
+%% Write crypto:supports(ciphers) in its order. cipher_algorithms/0 sorts the
+%% table by atom (cipher.c:239, 395-416), and the atom indexes come from the
+%% atom chunks of the modules that load first, so the order is the same on
+%% each run. The probe keeps only the ciphers that PBeam runs, because the
+%% libcrypto of the Linux CI host also has the legacy ciphers.
+cipher_order() ->
+    Run = run_ciphers() ++ [aes_cbc, aes_ccm, aes_cfb128, aes_cfb8, aes_ctr, aes_ecb, aes_gcm],
+    Order = [C || C <- crypto:supports(ciphers), lists:member(C, Run)],
+    %% Run has no sm4_gcm and sm4_ccm, which the Linux CI host does not list.
+    io:format("~p~n", [Order]).
+
+%% The ciphers of the table cipher.c:30-173 that the OpenSSL 3 default
+%% provider has and that the libcrypto of the Linux CI host also has. The
+%% AEAD ciphers are the last seven. sm4_gcm and sm4_ccm are in
+%% ciphers_host/0.
+run_ciphers() ->
+    [des_ede3_cbc, des_ede3_cfb, sm4_cbc, sm4_ecb, sm4_cfb, sm4_ofb, sm4_ctr,
+     aes_128_cbc, aes_192_cbc, aes_256_cbc, aes_128_ofb, aes_192_ofb, aes_256_ofb,
+     aes_128_cfb8, aes_192_cfb8, aes_256_cfb8, aes_128_cfb128, aes_192_cfb128,
+     aes_256_cfb128, aes_128_ecb, aes_192_ecb, aes_256_ecb, aes_128_ctr, aes_192_ctr,
+     aes_256_ctr, chacha20,
+     chacha20_poly1305, aes_128_gcm, aes_192_gcm, aes_256_gcm,
+     aes_128_ccm, aes_192_ccm, aes_256_ccm].
+
+%% Write the results of cipher_info_nif/1, ng_crypto_one_time_nif/5 with
+%% each padding, aead_cipher_nif/7, and do_exor/2 (cipher.c:266-371,
+%% api_ng.c:91-664, 782-864, aead.c:150-377, math.c:25-54), with the error
+%% tuple of each failed check. Random padding prints only its size.
+ciphers() ->
+    {Plain, Aead} = lists:split(26, run_ciphers()),
+    Aliases = [aes_cbc, aes_ccm, aes_cfb128, aes_cfb8, aes_ctr, aes_ecb, aes_gcm],
+    %% The type of des_ede3_cfb depends on the libcrypto of the host, so
+    %% ciphers_host/0 prints the types.
+    Infos = [bad_reason(fun() -> lists:sort(maps:to_list(maps:remove(type, crypto:cipher_info(C)))) end)
+             || C <- run_ciphers() ++ Aliases ++ [nosuch, "aes_128_cbc"]],
+    Data = <<"The quick brown fox jumps over th">>,
+    OneTime = [one_time(C, Data) || C <- Plain],
+    Aes = fun(Iv, D, Opts) -> bad_reason(fun() ->
+              crypto:crypto_one_time(aes_128_cbc, binary:copy(<<1>>, 16), Iv, D, Opts) end) end,
+    Iv = binary:copy(<<2>>, 16),
+    Block = binary:copy(<<3>>, 16),
+    Enc = crypto:crypto_one_time(aes_128_cbc, binary:copy(<<1>>, 16), Iv, Block, true),
+    OneTimeErrors =
+        [Aes(Iv, Block, Opts)
+         || Opts <- [[], undefined, [{encrypt, undefined}, {padding, pkcs_padding}],
+                     [{encrypt, true}, {encrypt, true}], [{padding, none}, {padding, zero}],
+                     [{encrypt, perhaps}], [{padding, bad}], [{bad, 1}], [{"tag", 1}],
+                     [{binary:copy(<<"long">>, 20), 1}], [x], [{encrypt}], [a | b], 1, perhaps]]
+        ++ [Aes(Iv, D, [{encrypt, false}, {padding, pkcs_padding}]) || D <- [Enc, Block, <<1>>]]
+        ++ [Aes(Iv, <<1>>, [{padding, none}]), Aes(<<1>>, Block, true), Aes(a, Block, true),
+            Aes(undefined, Block, true), Aes(Iv, a, true), Aes(Iv, [Block, $a], true)]
+        ++ [bad_reason(fun() -> crypto:crypto_one_time(C, K, Iv, Block, true) end)
+            || {C, K} <- [{aes_128_cbc, <<1>>}, {aes_128_cbc, a}, {nosuch, <<1>>},
+                          {"aes", <<1>>}, {aes_128_gcm, binary:copy(<<1>>, 16)},
+                          {aes_cbc, <<1>>}]]
+        ++ [bad_reason(fun() -> crypto:crypto_one_time(aes_128_ecb, binary:copy(<<1>>, 16),
+                                                       a, Block, true) end),
+            bad_reason(fun() -> crypto:crypto_one_time(aes_128_ecb, binary:copy(<<1>>, 16),
+                                                       Block, true) end)],
+    Aeads = [aead(C) || C <- Aead],
+    Key = binary:copy(<<1>>, 16),
+    Gcm = fun(K, I, T, A, TL, E) -> bad_reason(fun() ->
+              crypto:crypto_one_time_aead(aes_128_gcm, K, I, T, A, TL, E) end) end,
+    AeadErrors =
+        [Gcm(Key, Iv, <<"t">>, <<>>, 16, perhaps), Gcm(a, Iv, <<"t">>, <<>>, 16, true),
+         Gcm(Key, a, <<"t">>, <<>>, 16, true), Gcm(Key, Iv, a, <<>>, 16, true),
+         Gcm(Key, Iv, <<"t">>, a, 16, true), Gcm(Key, Iv, <<"t">>, <<>>, -1, true),
+         Gcm(Key, Iv, <<"t">>, <<>>, a, false), Gcm(<<1>>, Iv, <<"t">>, <<>>, 16, true),
+         Gcm(Key, <<>>, <<"t">>, <<>>, 16, true), Gcm(Key, Iv, <<"t">>, <<>>, 17, true),
+         Gcm(Key, Iv, <<"t">>, <<>>, 0, true), Gcm(Key, Iv, <<"t">>, <<>>, 16, undefined),
+         Gcm(Key, Iv, <<"t">>, <<>>, <<>>, false), Gcm(Key, Iv, [<<"t">>], [<<"a">>], 4, true),
+         bad_reason(fun() -> crypto:crypto_one_time_aead(aes_128_cbc, Key, Iv, <<"t">>,
+                                                         <<>>, 16, true) end),
+         bad_reason(fun() -> crypto:crypto_one_time_aead("gcm", Key, Iv, <<"t">>,
+                                                         <<>>, 16, true) end),
+         bad_reason(fun() -> crypto:crypto_one_time_aead(aes_128_ccm, Key, <<1:56>>,
+                                                         <<"t">>, <<>>, 3, true) end),
+         bad_reason(fun() -> crypto:crypto_one_time_aead(aes_128_ccm, Key, <<1:56>>,
+                                                         <<"t">>, <<>>, 16, undefined) end),
+         bad_reason(fun() -> crypto:crypto_one_time_aead(aes_128_ccm, Key, <<>>,
+                                                         <<"t">>, <<>>, 16, true) end),
+         bad_reason(fun() -> crypto:crypto_one_time_aead(chacha20_poly1305,
+                                                         binary:copy(<<1>>, 32), <<1:104>>,
+                                                         <<"t">>, <<>>, 16, true) end)],
+    Exor = [bad_reason(fun() -> crypto:exor(A, B) end)
+            || {A, B} <- [{<<1, 2, 3>>, <<3, 2, 1>>}, {<<>>, <<>>}, {[<<1>>, 2], <<3, 4>>},
+                          {<<1>>, <<1, 2>>}, {a, <<1>>}, {<<1:7>>, <<1:7>>}]],
+    io:format("~p~n", [[Infos, OneTime, OneTimeErrors, Aeads, AeadErrors, Exor]]).
+
+one_time(Cipher, Data) ->
+    #{key_length := KeyLength, iv_length := IvLength} = crypto:cipher_info(Cipher),
+    Key = binary:copy(<<5>>, KeyLength),
+    Iv = binary:copy(<<6>>, IvLength),
+    Run = fun(D, Opts) -> bad_reason(fun() -> crypto:crypto_one_time(Cipher, Key, Iv, D, Opts) end) end,
+    Pads = [Run(Data, [{padding, P}]) || P <- [undefined, none, zero, pkcs_padding]],
+    Random = case Run(Data, [{padding, random}]) of
+                 Bin when is_binary(Bin) -> byte_size(Bin);
+                 Other -> Other
+             end,
+    Pkcs = Run(Data, [{padding, pkcs_padding}]),
+    Back = case Pkcs of
+               Bin2 when is_binary(Bin2) ->
+                   [Run(Bin2, [{encrypt, false}, {padding, P}]) || P <- [pkcs_padding, none, undefined]];
+               _ -> []
+           end,
+    {Cipher, Run(Data, true), Run(Data, false), Pads, Random, Back}.
+
+aead(Cipher) ->
+    #{key_length := KeyLength, iv_length := IvLength} = crypto:cipher_info(Cipher),
+    Key = binary:copy(<<5>>, KeyLength),
+    Iv = binary:copy(<<6>>, IvLength),
+    Run = fun(T, A, TL, E) -> bad_reason(fun() ->
+              crypto:crypto_one_time_aead(Cipher, Key, Iv, T, A, TL, E) end) end,
+    Enc = Run(<<"plain text">>, <<"aad">>, 16, true),
+    Short = Run(<<"plain text">>, <<"aad">>, 12, true),
+    Default = bad_reason(fun() ->
+                  crypto:crypto_one_time_aead(Cipher, Key, Iv, <<"text">>, <<"aad">>, true) end),
+    Dec = case Enc of
+              {Out, Tag} ->
+                  [Run(Out, <<"aad">>, Tag, false), Run(Out, <<"bad">>, Tag, false),
+                   Run(Out, <<"aad">>, binary:part(Tag, 0, 12), false)];
+              _ -> []
+          end,
+    {Cipher, Enc, Short, Default, Dec}.
+
+%% Write the results of the ciphers that depend on the libcrypto of the
+%% host. The OpenSSL 3.5.8 of the pinned macOS ERTS cannot fetch rc2, rc4,
+%% des, or blowfish (cipher.c:216-218), so these give notsup. The
+%% libcrypto of the Linux CI host has no sm4_gcm and sm4_ccm. Its
+%% des_ede3_cfb has the type 30, where OpenSSL 3.5.8 gives 61.
+ciphers_host() ->
+    Legacy = [rc2_cbc, rc4, des_cbc, des_cfb, des_ecb, blowfish_cbc, blowfish_cfb64,
+              blowfish_ofb64, blowfish_ecb],
+    Infos = [bad_reason(fun() -> crypto:cipher_info(C) end) || C <- Legacy],
+    Sm4 = [aead(C) || C <- [sm4_gcm, sm4_ccm]],
+    Types = [maps:get(type, crypto:cipher_info(C)) || C <- run_ciphers()],
+    OneTime = [bad_reason(fun() -> crypto:crypto_one_time(C, binary:copy(<<1>>, 16),
+                                                          binary:copy(<<2>>, 8),
+                                                          <<"text">>, true) end)
+               || C <- Legacy],
+    io:format("~p~n", [[Infos, OneTime, Sm4, Types]]).
+
+%% Call crypto:engine_list/0, whose NIF engine_get_first_nif/0 PBeam does
+%% not link.
+unsupported() ->
+    io:format("~p~n", [crypto:engine_list()]).
 
 bad(Fun) ->
     try Fun() catch Class:Reason:Stack -> {Class, Reason, hd(Stack)} end.

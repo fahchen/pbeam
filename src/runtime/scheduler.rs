@@ -664,11 +664,11 @@ impl Scheduler {
     /// ```
     pub(super) fn start(
         &mut self,
-        frame: Frame,
+        start: impl Into<Start>,
         arguments: Vec<Term>,
         capabilities: Vec<Capability>,
     ) -> Result<(), BeamError> {
-        self.start_with_id(ROOT, 0, frame, arguments, capabilities)
+        self.start_with_id(ROOT, 0, start.into(), arguments, capabilities)
     }
 
     /// Create the root process with the pid `id` and the root slot `slot`
@@ -680,11 +680,11 @@ impl Scheduler {
         &mut self,
         id: ProcessId,
         slot: usize,
-        frame: Frame,
+        start: Start,
         arguments: Vec<Term>,
         capabilities: Vec<Capability>,
     ) -> Result<(), BeamError> {
-        let mut root = ProcessState::new(id, Start::Entry(frame), arguments);
+        let mut root = ProcessState::new(id, start, arguments);
         root.root = Some(slot);
         self.node.add_root(slot);
         let issued = capabilities
@@ -706,8 +706,8 @@ impl Scheduler {
     /// scheduler.start_boot(frame, vec![]);
     /// assert!(scheduler.process(ProcessId(0)).unwrap().security.is_boot());
     /// ```
-    pub(super) fn start_boot(&mut self, frame: Frame, arguments: Vec<Term>) {
-        let mut root = ProcessState::new(ROOT, Start::Entry(frame), arguments);
+    pub(super) fn start_boot(&mut self, start: Start, arguments: Vec<Term>) {
+        let mut root = ProcessState::new(ROOT, start, arguments);
         root.root = Some(0);
         self.node.add_root(0);
         root.security = SecurityContext::boot();
@@ -2334,6 +2334,8 @@ impl Scheduler {
     pub(super) fn account_turn(&mut self) {
         let used = self.current_reductions();
         self.virtual_reductions = 0;
+        self.timers
+            .add_reductions(i32::try_from(used).unwrap_or(i32::MAX));
         let process = self.current_process_mut();
         process.reductions += used;
         process.fcalls = CONTEXT_REDS;
@@ -2351,6 +2353,8 @@ impl Scheduler {
     fn schedule_out(&mut self) -> &mut ProcessState {
         let used = self.current_reductions();
         self.virtual_reductions = 0;
+        self.timers
+            .add_reductions(i32::try_from(used).unwrap_or(i32::MAX));
         let touched = self.multi && self.resources.take_touched();
         let process = self
             .processes
