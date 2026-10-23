@@ -14,7 +14,7 @@ use crate::runtime::{
     tty::{InputSelect, TtyResource, TtyState, Ttys},
 };
 use crate::term::Reference;
-use std::ffi::CString;
+use std::{ffi::CString, sync::Arc};
 
 /// The functions of the ERTS `prim_tty` NIF library, as `(name, arity)` in
 /// the order of `nif_funcs` (`prim_tty_nif.c:153-174`). `erlang:load_nif/2`
@@ -246,7 +246,7 @@ fn tty_create(scheduler: &mut Scheduler, fd: &Term) -> Result<BifResult, BeamErr
         None => (TtyState::Unavailable, terminal::EMPTY_MODE),
     };
     let reference = scheduler.make_ref()?;
-    scheduler.resources.borrow_mut::<Ttys>().insert(
+    scheduler.node().ttys().insert(
         reference,
         TtyResource {
             ofd,
@@ -284,9 +284,7 @@ fn tty_create(scheduler: &mut Scheduler, fd: &Term) -> Result<BifResult, BeamErr
 /// The atom `enotsup` or `capability_denied` in a full atom table gives the
 /// error of `AtomTable::put`.
 fn tty_window_size(scheduler: &mut Scheduler, tty: &Term) -> Result<BifResult, BeamError> {
-    let Some(&TtyResource { ofd, .. }) =
-        tty_resource(scheduler.resources.borrow_mut::<Ttys>(), tty)
-    else {
+    let Some(&TtyResource { ofd, .. }) = tty_resource(&scheduler.node().ttys(), tty) else {
         return Ok(BifResult::badarg());
     };
     let check = denial(
@@ -349,12 +347,7 @@ fn tty_init(scheduler: &mut Scheduler, tty: &Term, options: &Term) -> Result<Bif
     let Term::Reference(reference) = tty else {
         return Ok(BifResult::badarg());
     };
-    if scheduler
-        .resources
-        .borrow_mut::<Ttys>()
-        .get(*reference)
-        .is_none()
-    {
+    if scheduler.node().ttys().get(*reference).is_none() {
         return Ok(BifResult::badarg());
     }
     let Some(input) = options.get(&Term::static_atom("input")) else {
@@ -369,7 +362,8 @@ fn tty_init(scheduler: &mut Scheduler, tty: &Term, options: &Term) -> Result<Bif
     if let Some(denied) = check? {
         return Ok(denied);
     }
-    let ttys = scheduler.resources.borrow_mut::<Ttys>();
+    let node = Arc::clone(scheduler.node());
+    let mut ttys = node.ttys();
     let tty = ttys.get_mut(*reference).expect("the TTY resource exists");
     let raw = *input == Term::static_atom("raw");
     if tty.state == TtyState::Unavailable {
@@ -397,6 +391,7 @@ fn tty_init(scheduler: &mut Scheduler, tty: &Term, options: &Term) -> Result<Bif
         }
     }
     tty.owner = Some(caller);
+    drop(ttys);
     monitor_caller(scheduler, *reference);
     Ok(BifResult::Value(Term::static_atom("ok")))
 }
@@ -452,15 +447,16 @@ fn tty_select(
     let Term::Reference(tty) = tty else {
         return Ok(BifResult::badarg());
     };
-    if scheduler.resources.borrow_mut::<Ttys>().get(*tty).is_none() {
+    if scheduler.node().ttys().get(*tty).is_none() {
         return Ok(BifResult::badarg());
     }
     if let Some(denied) = denial(scheduler, CapabilityKind::Terminal, Operation::Read, None)? {
         return Ok(denied);
     }
     let caller = scheduler.current_process_mut().id;
-    let resource = scheduler.resources.borrow_mut::<Ttys>().get_mut(*tty);
-    resource.expect("the TTY resource exists").reader = Some(caller);
+    let mut ttys = scheduler.node().ttys();
+    ttys.get_mut(*tty).expect("the TTY resource exists").reader = Some(caller);
+    drop(ttys);
     select_input(scheduler, *tty, reference);
     monitor_caller(scheduler, *tty);
     Ok(BifResult::Value(Term::static_atom("ok")))
@@ -479,14 +475,11 @@ fn tty_select(
 /// ```
 fn select_input(scheduler: &mut Scheduler, tty: Reference, reference: &Term) {
     let recipient = scheduler.current_process_mut().id;
-    scheduler
-        .resources
-        .borrow_mut::<Ttys>()
-        .select_input(InputSelect {
-            tty,
-            recipient,
-            reference: reference.clone(),
-        });
+    scheduler.node().ttys().select_input(InputSelect {
+        tty,
+        recipient,
+        reference: reference.clone(),
+    });
     let index = scheduler.index();
     scheduler.node().poll.select_stdin(Some(index));
     crate::runtime::scheduler::poll::NodePoll::start(scheduler.node());
@@ -548,7 +541,7 @@ fn read_nif(
     let Term::Reference(tty) = tty else {
         return Ok(BifResult::badarg());
     };
-    if scheduler.resources.borrow_mut::<Ttys>().get(*tty).is_none() {
+    if scheduler.node().ttys().get(*tty).is_none() {
         return Ok(BifResult::badarg());
     }
     let Term::Integer(size) = size else {
@@ -889,9 +882,7 @@ fn write_nif(scheduler: &mut Scheduler, tty: &Term, iovec: &Term) -> Result<BifR
         groups: Vec::new(),
         bad_group: true,
     };
-    let Some(&TtyResource { ofd, .. }) =
-        tty_resource(scheduler.resources.borrow_mut::<Ttys>(), tty)
-    else {
+    let Some(&TtyResource { ofd, .. }) = tty_resource(&scheduler.node().ttys(), tty) else {
         return Ok(BifResult::Dirty(Work::Write(write)));
     };
     if let Some(denied) = denial(scheduler, CapabilityKind::Terminal, Operation::Write, None)? {

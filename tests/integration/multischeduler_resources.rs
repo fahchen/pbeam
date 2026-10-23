@@ -83,3 +83,30 @@ fn the_pinned_erts_gives_the_same_results() {
         "{not_on_controlling_process,true}\n{ok,ok}\n"
     );
 }
+
+/// The fixture with the two roots that share one TTY resource.
+const TTY_RESOURCES: &[u8] = include_bytes!("../../fixtures/multischeduler/tty_resources.beam");
+
+/// The stand-in `prim_tty` with the NIF stubs of the pinned module.
+const PRIM_TTY: &[u8] = include_bytes!("../../fixtures/prim_tty/nif/prim_tty.beam");
+
+/// A TTY resource that `prim_tty:tty_create/1` makes on one scheduler
+/// resolves on the other scheduler: `tty_window_size/1` and `tty_select/2`
+/// find it, as ERTS keeps one resource object for the node
+/// (`prim_tty_nif.c:988-1072`). The pinned ERTS cannot load the stand-in
+/// `prim_tty`, so this test checks only PBeam.
+#[test]
+fn a_tty_resource_resolves_on_another_scheduler() {
+    let program = BeamProgram::load(&[PRIM_TTY, TTY_RESOURCES]).expect("the fixture loads");
+    let atom = |name| Term::Atom(program.atom(name).expect("the fixture names the atom"));
+    for _ in 0..RUNS {
+        let results = program
+            .execute_on_schedulers(&[
+                ("tty_resources", "tty_create"),
+                ("tty_resources", "tty_use"),
+            ])
+            .expect("the two schedulers run");
+        assert_eq!(results[0].term, atom("ok"));
+        assert_eq!(results[1].term, Term::tuple(vec![atom("ok"), atom("ok")]));
+    }
+}

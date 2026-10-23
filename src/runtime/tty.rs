@@ -1,6 +1,6 @@
 //! The TTY resources of the node, as the `TTYResource` objects of
 //! `prim_tty_nif.c` and their magic references (`erl_binary.h`). The
-//! scheduler keeps them as the `Ttys` value of its `Resources`, and all
+//! node keeps them as its `Ttys` value, and each scheduler and all
 //! processes of a run share them. Each process keeps the monitors of these
 //! resources on it in its target monitor list. The module also keeps the
 //! mode of fd 0 at the start of a run, which the run sets again at its end.
