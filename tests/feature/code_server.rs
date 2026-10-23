@@ -44,6 +44,56 @@ fn computes_mod_pow_and_srp_as_pinned_erts() {
     );
 }
 
+/// The output of `crypto_rand_probe:main/0` on the pinned ERTS: the
+/// shapes, the ranges, and the errors do not depend on the random bytes.
+const CRYPTO_RAND_OUTPUT: &str = "[[{0,1,true},
+  {0,10,true},
+  {5,6,true},
+  {-5,5,true},
+  {-10,-9,true},
+  {18446744073709551616,18446744073709551619,true},
+  {0,1606938044258990275541962092341162602522202993782792835301376,true},
+  {255,256,true},
+  {10,10,{error,badarg}},
+  {10,5,{error,badarg}}],
+ 7,
+ [{true,2,true},{true,0,true},{true,0,true}],
+ [{error,badarg},
+  {error,badarg},
+  {error,badarg},
+  {error,badarg},
+  {error,badarg},
+  {error,badarg}],
+ [ok,ok,{error,function_clause}],
+ [{true,true,5},{true,true,5},{true,true,5},{error,function_clause}],
+ [true,9]]
+";
+
+#[test]
+fn runs_the_random_functions_as_pinned_erts() {
+    // rand_uniform_nif/2, rand_seed_nif/1, and strong_rand_bytes_nif/1
+    // (rand.c:26-155) through crypto:rand_uniform/2, crypto:rand_seed/1,
+    // and the crypto plugins of rand (crypto.erl:2256-2300).
+    assert_eq!(
+        run(&mut erts_probe(
+            CRYPTO_RAND_PROBE,
+            "crypto_rand_probe",
+            "main",
+            &[]
+        )),
+        CRYPTO_RAND_OUTPUT
+    );
+    assert_eq!(
+        run(&mut pbeam_probe(
+            CRYPTO_RAND_PROBE,
+            "crypto_rand_probe",
+            "main",
+            &[]
+        )),
+        CRYPTO_RAND_OUTPUT
+    );
+}
+
 /// The output of `crypto_bn_probe:kem_errors/0` on the pinned macOS ERTS
 /// (OpenSSL 3.5.8). The Linux CI ERTS links OpenSSL 3.0.x, which has no
 /// ML-KEM (`evp.c:32`, `73-75`).
@@ -145,6 +195,9 @@ const CRYPTO_SIGN_PROBE: &str = "fixtures/code_server/crypto_sign_probe";
 const CRYPTO_CRYPT_PROBE: &str = "fixtures/code_server/crypto_crypt_probe";
 const CRYPTO_KEYGEN_PROBE: &str = "fixtures/code_server/crypto_keygen_probe";
 const CRYPTO_BN_PROBE: &str = "fixtures/code_server/crypto_bn_probe";
+
+/// The probe of the random functions of `crypto` and its `rand` plugins.
+const CRYPTO_RAND_PROBE: &str = "fixtures/code_server/crypto_rand_probe";
 const CRYPTO_COMPUTE_KEY_PROBE: &str = "fixtures/code_server/crypto_compute_key_probe";
 
 /// The stand-in `crypto` module that loads the `crypto` NIF library.

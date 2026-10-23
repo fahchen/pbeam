@@ -1,9 +1,9 @@
 //! Native bindings of the `crypto` NIFs (`lib/crypto/c_src/crypto.c`).
 //!
-//! PBeam links `strong_rand_bytes_nif/1`, which reads the entropy of
-//! the host from `/dev/urandom`, which it opens once, and the NIFs that the
-//! `plug_hello` release calls: `hash_nif/2`, `pbkdf2_hmac_nif/5`,
-//! `strong_rand_range_nif/1`, `info_nif/0`, and `info_lib/0`. It links
+//! PBeam links the random NIFs `strong_rand_bytes_nif/1`,
+//! `strong_rand_range_nif/1`, `rand_uniform_nif/2`, and `rand_seed_nif/1`
+//! of `rand`, and the NIFs that the `plug_hello` release calls:
+//! `hash_nif/2`, `pbkdf2_hmac_nif/5`, `info_nif/0`, and `info_lib/0`. It links
 //! `info_fips/0`, `enable_fips_mode_nif/1`, and the algorithm lists of
 //! `crypto:supports/0,1`, which name only the algorithms that PBeam can
 //! run, and the one-shot hash and MAC NIFs `hash_info/1`, `mac_nif/4`, and
@@ -31,6 +31,7 @@ mod kem;
 mod keygen;
 mod mac_context;
 mod pkey;
+mod rand;
 
 use super::bif::iodata_bytes;
 use super::*;
@@ -58,7 +59,8 @@ use openssl::{
     sign::Signer,
 };
 use pkey::{pkey_crypt_nif, pkey_sign_nif, pkey_verify_nif};
-use std::{collections::HashMap, fs::File, io::Read, sync::OnceLock};
+use rand::{rand_seed_nif, rand_uniform_nif, strong_rand_bytes_nif, strong_rand_range_nif};
+use std::collections::HashMap;
 
 /// The functions of the ERTS `crypto` NIF library, as `(name, arity)` in
 /// the order of `nif_funcs` (`crypto.c:68-145`). `erlang:load_nif/2`
@@ -443,6 +445,18 @@ pub(super) const BINDINGS: &[Binding] = &[
         arity: 0,
         job: Job::Normal,
         run: |_, _| Ok(BifResult::Value(Term::Nil)),
+    },
+    Binding {
+        name: "rand_seed_nif",
+        arity: 1,
+        job: Job::Normal,
+        run: |_, arguments| Ok(rand_seed_nif(&arguments[0])),
+    },
+    Binding {
+        name: "rand_uniform_nif",
+        arity: 2,
+        job: Job::Normal,
+        run: |_, arguments| Ok(rand_uniform_nif(arguments)),
     },
     Binding {
         name: "rsa_generate_key_nif",
@@ -1406,97 +1420,6 @@ fn hash_equals_nif(first: &Term, second: &Term) -> BifResult {
     }
 }
 
-/// Run `crypto:strong_rand_bytes_nif(Bytes)`, as the ERTS NIF
-/// `strong_rand_bytes_nif` (`rand.c:26-50`) does. A `Bytes` that is not an
-/// unsigned C `int` raises `error:badarg`, and the result is a binary of
-/// `Bytes` random bytes. ERTS returns `false` when it cannot make the
-/// bytes; PBeam returns `false` when it cannot open `/dev/urandom` or
-/// read the bytes from it.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// assert!(matches!(strong_rand_bytes_nif(&Term::Integer(16)), BifResult::Value(Term::Binary(_))));
-/// assert!(matches!(strong_rand_bytes_nif(&Term::Integer(-1)), BifResult::Raise { .. }));
-/// ```
-fn strong_rand_bytes_nif(size: &Term) -> BifResult {
-    // `enif_get_uint` and the `INT_MAX` check: an integer in 0..=i32::MAX.
-    let size = match *size {
-        Term::Integer(size) => i32::try_from(size)
-            .ok()
-            .and_then(|size| usize::try_from(size).ok()),
-        _ => None,
-    };
-    let Some(size) = size else {
-        return BifResult::badarg();
-    };
-    let mut bytes = vec![0; size];
-    let read = urandom().and_then(|mut file| file.read_exact(&mut bytes));
-    let bytes = read.map(|()| Term::binary(bytes));
-    BifResult::Value(bytes.unwrap_or(Term::static_atom("false")))
-}
-
-/// Run `crypto:strong_rand_range_nif(Range)`, as the ERTS NIF
-/// `strong_rand_range_nif` (`rand.c:54-85`) does. `Range` is a big-endian
-/// unsigned binary, and the result is a binary of a uniform value below
-/// the range, with no leading zero bytes: `<<>>` is the value 0. A range
-/// of 0 gives `false`, like the failed `BN_rand_range`, and so does a
-/// failed read of `/dev/urandom`; `crypto:strong_rand_range/1` then raises
-/// `error:badarg` (`crypto.erl:2332-2344`). A term that is not a binary
-/// raises `error:badarg` (`enif_inspect_binary`, `rand.c:61-62`).
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// assert!(matches!(strong_rand_range_nif(&Term::binary(vec![10])), BifResult::Value(Term::Binary(_))));
-/// assert!(matches!(strong_rand_range_nif(&Term::binary(vec![0])), BifResult::Value(Term::Atom(_))));
-/// assert!(matches!(strong_rand_range_nif(&Term::Integer(10)), BifResult::Raise { .. }));
-/// ```
-fn strong_rand_range_nif(range: &Term) -> BifResult {
-    let range = match range.binary_bytes() {
-        Some(range) => range,
-        _ => return BifResult::badarg(),
-    };
-    match random_below(range) {
-        Some(value) => BifResult::Value(Term::binary(value)),
-        None => BifResult::Value(Term::static_atom("false")),
-    }
-}
-
-/// Return a uniform value below the big-endian unsigned `range`, as
-/// `BN_rand_range` gives it (`bn.h`): draw as many bytes as the range
-/// needs, clear the bits above its highest bit, and draw again while the
-/// value is not below the range. The value has no leading zero byte, so
-/// the value 0 is `<<>>`. Return `None` for a range of 0, which
-/// `BN_rand_range` rejects, and for a failed read of `/dev/urandom`.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// assert_eq!(random_below(&[0]), None);
-/// assert_eq!(random_below(&[1]), Some(vec![]));
-/// assert!(random_below(&[10]).is_some_and(|value| value.len() <= 1));
-/// ```
-fn random_below(range: &[u8]) -> Option<Vec<u8>> {
-    let start = range.iter().position(|&byte| byte != 0)?;
-    let range = &range[start..];
-    let highest_bits = 8 - range[0].leading_zeros() as usize;
-    let mask = 0xff >> (8 - highest_bits);
-    let mut candidate = vec![0; range.len()];
-    loop {
-        let mut file = urandom().ok()?;
-        file.read_exact(&mut candidate).ok()?;
-        candidate[0] &= mask;
-        if candidate.as_slice() < range {
-            let start = candidate
-                .iter()
-                .position(|&byte| byte != 0)
-                .unwrap_or(candidate.len());
-            return Some(candidate[start..].to_vec());
-        }
-    }
-}
-
 /// The digests that `hash_algorithms/0` gives: the digests that PBeam
 /// computes, in the order of the pinned ERTS. ERTS builds the list from
 /// the digest table in reverse (`digest.c:226-242`, `algorithms.c:86-89`),
@@ -1706,21 +1629,6 @@ fn unsigned(term: &Term) -> Option<u64> {
         Term::BigInt(value) => value.to_u64(),
         _ => None,
     }
-}
-
-/// Give `/dev/urandom`, which the first call opens and each later call
-/// shares. A failed open is not kept, so the next call opens it again.
-///
-/// # Errors
-///
-/// The error of the open.
-fn urandom() -> std::io::Result<&'static File> {
-    static URANDOM: OnceLock<File> = OnceLock::new();
-    if let Some(file) = URANDOM.get() {
-        return Ok(file);
-    }
-    let file = File::open("/dev/urandom")?;
-    Ok(URANDOM.get_or_init(|| file))
 }
 
 #[cfg(test)]
