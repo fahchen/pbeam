@@ -793,7 +793,7 @@ fn new_hash_context(
     scheduler: &mut Scheduler,
     context: (Hash, Hasher),
 ) -> Result<BifResult, BeamError> {
-    let reference = scheduler.make_ref()?;
+    let reference = scheduler.make_magic_ref()?;
     lock(&scheduler.node().resources.kind::<HashContexts>())
         .by_reference
         .insert(reference, context);

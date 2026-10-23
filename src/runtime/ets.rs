@@ -5,7 +5,7 @@ pub(super) mod pattern;
 pub(super) mod range;
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::hash::{DefaultHasher, Hasher};
 use std::sync::{Mutex, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
@@ -81,6 +81,13 @@ pub(super) struct EtsTables {
     /// by its name or its reference at that time, but it stays in the owned
     /// list of its owner until each segment is free (`erl_db.c:5405-5426`).
     freeing: HashMap<Reference, Freeing>,
+    /// The identifier of each deleted table. ERTS decodes the identifier of
+    /// a deleted table to the same table identifier while a term still
+    /// holds its magic binary (`erts_magic_ref_lookup_bin`,
+    /// `external.c:4846`), and to an ordinary reference only after the
+    /// garbage collector frees each holder. PBeam has no such collector, so
+    /// it keeps each identifier.
+    deleted: HashSet<Reference>,
     /// The count of the tables that went into an owned list
     /// (`save_owned_table`, `erl_db.c:628-650`), so the next table gets
     /// this position, at the end of the list of its owner.
@@ -776,6 +783,14 @@ impl EtsTables {
         self.lookup(atoms, id).map(|(id, _)| id)
     }
 
+    /// Return the identifier of the live or deleted table of the decoded
+    /// magic reference `reference`, else `reference` (`external.c:4845-4851`).
+    pub(super) fn decoded(&self, atoms: &AtomTable, reference: Reference) -> Reference {
+        self.id(atoms, &Term::Reference(reference))
+            .or_else(|| self.deleted.get(&reference).copied())
+            .unwrap_or(reference)
+    }
+
     /// Return the reference and the lock of the live table that `id`
     /// identifies: an atom finds a named table in the name table, and a
     /// reference finds its table, as `db_get_table_aux`
@@ -787,7 +802,11 @@ impl EtsTables {
             Term::Reference(id) => *id,
             _ => return None,
         };
-        self.tables.get(&id).map(|table| (id, table))
+        // The stored key keeps the table marker of the identifier, which a
+        // decoded magic reference does not have (`Reference::eq`).
+        self.tables
+            .get_key_value(&id)
+            .map(|(id, table)| (*id, table))
     }
 
     /// Return the live table `id` with no lock, for the work of the table
@@ -1105,6 +1124,7 @@ impl EtsTables {
                 continue;
             }
             if let Some(table) = self.tables.remove(&id) {
+                self.deleted.insert(id);
                 let mut table = table.into_inner().unwrap_or_else(PoisonError::into_inner);
                 let fixers = table.fixers();
                 reds -= i32::try_from(fixers.len()).unwrap_or(i32::MAX);
@@ -1189,6 +1209,7 @@ impl EtsTables {
             .expect("a deleted table is live")
             .into_inner()
             .unwrap_or_else(PoisonError::into_inner);
+        self.deleted.insert(id);
         self.names.retain(|_, named| *named != id);
         self.programs.retain(|_, (table, _)| *table != id);
         if table.owner != caller {

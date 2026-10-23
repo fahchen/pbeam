@@ -341,11 +341,20 @@ fn formats_and_compares_maps_by_their_pairs() {
 #[test]
 fn gives_a_reference_its_erts_reference_numbers() {
     // ERTS 29.1.1 prints the reference with the counter value
-    // 0xF55F56815BA88196 of scheduler 1 as
-    // #Ref<0.4116665985.1537736705.33174>: `#Ref<0.N2.N1.N0>`.
+    // 0x155F56815BA88196 of scheduler 1 as
+    // #Ref<0.358569601.1537736705.33174>: `#Ref<0.N2.N1.N0>`. A magic
+    // reference has bit 17 of `N1` (`ERTS_REF1_MAGIC_MARKER_BIT__`).
     assert_eq!(
-        Reference(0xF55F_5681_5BA8_8196).numbers(),
-        [33174, 1537736705, 4116665985]
+        Reference(0x155F_5681_5BA8_8196).numbers(),
+        [33174, 1537736705, 358569601]
+    );
+    assert_eq!(
+        Reference(0x155F_5681_5BA8_8196).magic_reference().numbers(),
+        [33174, 1537867777, 358569601]
+    );
+    assert_eq!(
+        Reference(0x155F_5681_5BA8_8196).table_reference().numbers(),
+        [33174, 1537867777, 358569601]
     );
     assert_eq!(Reference(0).numbers(), [0, 1, 0]);
 }

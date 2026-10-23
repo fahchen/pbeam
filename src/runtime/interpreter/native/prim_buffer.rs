@@ -127,7 +127,7 @@ const WRITE_MAX_ELEMENTS: usize = 64;
 ///
 /// A full reference counter gives the error of `Scheduler::make_ref`.
 fn new_nif(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
-    let reference = scheduler.make_ref()?;
+    let reference = scheduler.make_magic_ref()?;
     lock(&scheduler.node().resources.kind::<Buffers>()).insert(reference, Buffer::default());
     Ok(BifResult::Value(Term::Reference(reference)))
 }
