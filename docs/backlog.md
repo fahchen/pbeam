@@ -262,14 +262,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** the first consumer of `ets:give_away/3`, `ets:setopts/2`, or a live heir.
 - **Source:** #112.
 
-### Keep the run alive after a root `exit(normal)` as ERTS does
-
-- When the root process calls `exit(normal)`, the `pbeam` binary writes `pbeam: root process exited with normal` and exits with status 1. On ERTS, `start_it/1` writes `Error! Failed to eval: <expression>` and raises the exit again (init.erl:1552-1567). The boot process exits `normal`, `init` goes to its main loop (init.erl:700-704), and the run does not end. The "Run end" row of `docs/erts-differences.md` records this.
-- **Evidence:** a module `haltp` with `exit_normal() -> exit(normal).`. On pinned ERTS, `timeout 10 erl -noshell -pa <dir> -eval 'haltp:exit_normal()'` writes `Error! Failed to eval: haltp:exit_normal()`, then `SIGTERM received - shutting down` at the timeout, and exits with status 124. On the `pbeam` binary, `pbeam pbeam_boot start haltp exit_normal`, with the BEAM files of `examples/hello_world/README.md`, writes `pbeam: root process exited with normal` and exits with status 1.
-- The work: an `init` process that links to the boot process and keeps the run alive after a `normal` exit, as "Halt the PBeam boot with the `init` crash text" needs for the other exits.
-- **Trigger:** a consumer needs the ERTS result of a root `exit(normal)`, for example a program that ends its root process and keeps its other processes alive.
-- **Source:** M2 exit check (#220).
-
 ### Read code files from the bundle as a read-only code path root
 
 - In interactive mode, a bundle is a read-only code path root. `prim_file` reads a path under this root from the bundle, not from the host file system. Thus `erl_prim_loader` and `code_server` run the pinned code path search on a bundle as on a directory (design section 13 of `docs/code-loading.md`). The bundle format does not exist yet, so no task can define the root or its paths now.
