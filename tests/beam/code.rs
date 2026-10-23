@@ -343,9 +343,13 @@ fn reads_nested_literals_and_marks_unsupported_tags_at_any_depth() {
             Map::from_pairs(vec![], &AtomTable::new()).unwrap()
         ))
     );
-    // A map key that `Map` does not support yet makes the literal unsupported: #{#{} => []}.
+    // A map key that `Map` does not support yet makes the literal unsupported: #{{<<>>} => []}.
     assert_eq!(
-        read(&atoms, &[131, 116, 0, 0, 0, 1, 116, 0, 0, 0, 0, 106]).unwrap(),
+        read(
+            &atoms,
+            &[131, 116, 0, 0, 0, 1, 104, 1, 109, 0, 0, 0, 0, 106]
+        )
+        .unwrap(),
         None
     );
     // ERTS rejects a MAP_EXT with a duplicate key: #{1 => [], 1 => []}.

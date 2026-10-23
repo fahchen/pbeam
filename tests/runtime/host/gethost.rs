@@ -114,6 +114,9 @@ struct Fake {
     erlang: UnixStream,
     replies: UnixStream,
     gate: Arc<(Mutex<bool>, Condvar)>,
+    /// A clone of the answer: each worker thread holds one more clone
+    /// until it ends, after it sent its last reply.
+    answer: Answer,
     status: JoinHandle<i32>,
 }
 
@@ -143,11 +146,13 @@ impl Fake {
             .iter()
             .map(|arg| arg.as_bytes().to_vec())
             .collect::<Vec<_>>();
-        let status = thread::spawn(move || pool(&args, input, &mut output, answer));
+        let shared = answer.clone();
+        let status = thread::spawn(move || pool(&args, input, &mut output, shared));
         Self {
             erlang,
             replies,
             gate,
+            answer,
             status,
         }
     }
@@ -175,6 +180,15 @@ impl Fake {
         let (open, signal) = &*self.gate;
         *open.lock().expect("lock") = true;
         signal.notify_all();
+    }
+
+    /// Wait until at most `count` worker threads run, so that the replies
+    /// of the ended threads wait in the event channel before a later
+    /// request. The test and the pool hold the two other clones.
+    fn wait_workers(&self, count: usize) {
+        while Arc::strong_count(&self.answer) > count + 2 {
+            thread::yield_now();
+        }
     }
 
     fn reply(&mut self) -> (u32, String) {
@@ -258,13 +272,16 @@ fn cancels_a_request_of_the_global_queue_or_a_worker_queue() {
 fn cancels_a_running_request() {
     // One worker: a cancel of the running `slow.x` stops the worker
     // (inet_gethost.c:884-887), so a new worker runs `b.y` from the global
-    // queue, and the reply of `slow.x` never comes.
+    // queue, and the reply of `slow.x` never comes. The old worker sends
+    // its late reply before it ends, and the pool drops the reply, as the
+    // stopped worker of ERTS sends none.
     let mut fake = Fake::start(&[]);
     fake.lookup(1, "slow.x");
     fake.lookup(2, "b.y");
     fake.cancel(1);
     assert_eq!(fake.reply(), (2, "b.y".into()));
     fake.open();
+    fake.wait_workers(1);
     fake.lookup(3, "c.z");
     assert_eq!(fake.reply(), (3, "c.z".into()));
     assert_eq!(fake.end(), 0);

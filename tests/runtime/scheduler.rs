@@ -1,6 +1,6 @@
 use super::{
     CONTEXT_REDS, ExitPhase, LinkId, MonitorOptions, MonitorTarget, RELEASE_BATCH, RELEASE_CHUNK,
-    Release, Scheduler, StartFlags, Turn, node::Node,
+    Release, Scheduler, StartFlags, Turn, node::Node, poll,
 };
 use crate::runtime::capability::{AllowAll, Capability, CapabilityKind, Denied, Policy};
 use crate::runtime::host::input::{Readiness, wait_readable};
@@ -2575,6 +2575,21 @@ fn answers_a_check_process_code_request_of_another_scheduler() {
         .filter(|message| matches!(message, Term::Tuple(_)))
         .collect();
     assert_eq!(replies, vec![reply(1), reply(2), reply(3), reply(4)]);
+}
+
+#[test]
+fn schedules_again_when_the_poll_thread_reported_an_fd_before_the_wait() {
+    // The poll thread can report an fd after the last check of IO of the
+    // run loop and before the idle wait. The wait serves the fd and returns
+    // at once, as a served fd can send a message.
+    let mut scheduler = test_scheduler();
+    let index = scheduler.index;
+    scheduler
+        .node
+        .poll
+        .report(index, (i32::MAX, poll::Direction::Write));
+    assert!(scheduler.wait_events(None).unwrap());
+    assert!(scheduler.node.poll.take_ready(index).is_empty());
 }
 
 #[test]

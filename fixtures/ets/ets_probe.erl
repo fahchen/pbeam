@@ -26,7 +26,8 @@
          fixtable_clear_large/0, fixtable_clear_help/0, clear_task/2,
          fixtable_take/0, fixtable_take_clear/0, fixtable_insert_new/0,
          fixtable_insert_new_list/0, ordered_select/0, select_delete_worker/2, ordered_select_large/0,
-         select_reverse/0]).
+         select_reverse/0,
+         update_counter/0]).
 
 %% ets:new/2 return values and badarg cases (erl_db.c:2555-2840).
 new() ->
@@ -1970,3 +1971,63 @@ give_cause(Fun) ->
             [{_, _, _, Info} | _] = Stack,
             {Reason, maps:get(cause, proplists:get_value(error_info, Info), none)}
     end.
+
+%% ets:update_counter/3,4 (erl_db.c:1494-1730).
+update_counter() ->
+    T = ets:new(ets_probe, []),
+    O = ets:new(ets_probe, [ordered_set, {keypos, 2}]),
+    B = ets:new(ets_probe, [bag]),
+    true = ets:insert(T, [{a, 1, 2, x}, {b}, {1, 0}]),
+    true = ets:insert(O, [{0, a, 10}, {0, 1, 5}]),
+    true = ets:insert(B, [{a, 1}]),
+    Big = 1 bsl 62,
+    [ets:update_counter(T, a, 1),
+     ets:update_counter(T, a, {3, -1}),
+     ets:update_counter(T, a, [{2, Big}, {2, Big}, {3, -5, 0, 7}, {3, 1, 7, -1}]),
+     ets:lookup(T, a),
+     ets:update_counter(T, a, [{2, -Big}, {2, -Big}]),
+     ets:update_counter(T, a, [{2, 10, 5, 2}, {3, -1, 0, 9}, {3, -1, -1, 4}]),
+     ets:update_counter(T, a, {2, 1, Big, Big}),
+     ets:update_counter(T, a, []),
+     ets:lookup(T, a),
+     ets:update_counter(T, 1.0, 1, {x, 0}),
+     ets:lookup(T, 1.0),
+     ets:update_counter(T, z, {2, 1}, {q, 5}),
+     ets:update_counter(T, y, [], {q, 5, 6}),
+     ets:update_counter(T, w, [{3, 2}, {2, 1}], {q, 5, 6}),
+     lists:sort(ets:tab2list(T)),
+     ets:update_counter(O, a, 1),
+     ets:update_counter(O, 1.0, [{3, 2}, {1, 4}]),
+     ets:update_counter(O, c, {3, 1}, {d, e, 0}),
+     ets:tab2list(O),
+     catch_error(fun() -> ets:update_counter(B, a, 1) end),
+     catch_error(fun() -> ets:update_counter(T, a, {1, 1}) end),
+     catch_error(fun() -> ets:update_counter(T, a, {5, 1}) end),
+     catch_error(fun() -> ets:update_counter(T, a, {0, 1}) end),
+     catch_error(fun() -> ets:update_counter(T, a, {4, 1}) end),
+     catch_error(fun() -> ets:update_counter(T, b, 1) end),
+     catch_error(fun() -> ets:update_counter(T, missing, 1) end),
+     catch_error(fun() -> ets:update_counter(T, a, foo) end),
+     catch_error(fun() -> ets:update_counter(T, a, [{2, 1} | bad]) end),
+     catch_error(fun() -> ets:update_counter(T, a, [{2, 1}, bad]) end),
+     catch_error(fun() -> ets:update_counter(T, a, {2, a}) end),
+     catch_error(fun() -> ets:update_counter(T, a, {2, 1, a, 1}) end),
+     catch_error(fun() -> ets:update_counter(T, a, {2, 1, 1, a}) end),
+     catch_error(fun() -> ets:update_counter(T, a, {2, 1, 1}) end),
+     catch_error(fun() -> ets:update_counter(T, a, {1 bsl 60, 1}) end),
+     catch_error(fun() -> ets:update_counter(T, a, {2.0, 1}) end),
+     catch_error(fun() -> ets:update_counter(T, a, [{2, 1}, {1, 1}]) end),
+     catch_error(fun() -> ets:update_counter(T, v, {2, a}, {q, 0}) end),
+     catch_error(fun() -> ets:update_counter(T, v, 1, bad) end),
+     catch_error(fun() -> ets:update_counter(O, v, 1, {v}) end),
+     catch_error(fun() -> ets:update_counter(T, v, 1, {v}) end),
+     ets:lookup(T, v),
+     ets:lookup(T, a),
+     catch_error(fun() -> ets:update_counter(ets_probe_missing, a, 1) end),
+     begin
+         {PrivateOwner, Private, _} = private_table(),
+         Result = [catch_error(fun() -> ets:update_counter(Private, a, 1) end),
+                   catch_error(fun() -> ets:update_counter(Private, a, 1, bad) end)],
+         PrivateOwner ! stop,
+         Result
+     end].
