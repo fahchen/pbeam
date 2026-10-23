@@ -1699,8 +1699,8 @@ fn encode_path(elements: Vec<usize>) -> Result<i64, BeamError> {
 /// assert_eq!(map_hash(&Term::tuple(vec![])), Some(4510301282025278020));
 /// assert_eq!(map_hash(&Term::binary(vec![])), Some(10873612744977862784));
 /// assert!(map_hash(&Term::Float(1.0)).is_some());
-/// assert_eq!(map_hash(&Term::list_from([Term::binary(vec![])])), None);
-/// assert_eq!(map_hash(&Term::tuple(vec![Term::binary(vec![])])), None);
+/// assert!(map_hash(&Term::list_from([Term::binary(vec![])])).is_some());
+/// assert_eq!(map_hash(&Term::tuple(vec![Term::Port(PortId(0))])), None);
 /// let improper = |tail| Term::cons(Term::Integer(1), tail);
 /// assert!(map_hash(&improper(Term::Integer(2))).is_some());
 /// assert!(map_hash(&improper(Term::Map(Map::new()))).is_some());
@@ -1716,7 +1716,8 @@ fn map_hash(key: &Term) -> Option<u64> {
             let mut pending = vec![key];
             while let Some(term) = pending.pop() {
                 match term {
-                    Term::Atom(_) | Term::Nil | Term::Float(_) | Term::Pid(_) => {}
+                    Term::Atom(_) | Term::Nil | Term::Binary(_) | Term::Float(_) | Term::Pid(_) => {
+                    }
                     Term::Reference(reference) if !reference.is_pid_reference() => {}
                     Term::Cons(cell) => pending.extend([&cell.tail, &cell.head]),
                     Term::Tuple(elements) => pending.extend(elements.iter()),
