@@ -1,5 +1,6 @@
 -module(atomics_probe).
--export([main/0, allocation_failure/0, write_concurrency/0, atomics_only/0]).
+-export([main/0, allocation_failure/0, write_concurrency/0,
+         write_concurrency_allocation_failure/0, atomics_only/0]).
 
 %% The `counters` calls of the Elixir Logger start of the plug_hello
 %% release: `counters:new(1, [atomics])` in
@@ -68,11 +69,51 @@ counter() ->
 %% `erl_alloc.c:2105-2109`), so only a PBeam run calls this case.
 allocation_failure() -> call(fun() -> counters:new(1 bsl 60, []) end).
 
-%% The `write_concurrency` mode of `counters:new/2`, which PBeam does not
-%% implement. Only a PBeam run calls it.
+%% The `write_concurrency` mode of `counters:new/2`, whose BIFs are
+%% `erts_internal:counters_new/1`, `counters_get/2`, `counters_add/3`,
+%% `counters_put/3`, and `counters_info/1` (`erl_bif_counters.c`). The
+%% `memory` of `counters:info/1` depends on the count of schedulers, so the
+%% pinned ERTS runs it with `+S 1`.
 write_concurrency() ->
     Ref = counters:new(1, [write_concurrency]),
-    [counters:get(Ref, 1), counters:add(Ref, 1, 1), counters:get(Ref, 1)].
+    Atomics = counters:new(1, [atomics]),
+    {write_concurrency, Raw} = Ref,
+    {atomics, RawAtomics} = Atomics,
+    [counters:info(Ref),
+     counters:info(counters:new(9, [write_concurrency])),
+     counters:get(Ref, 1),
+     counters:add(Ref, 1, 5),
+     counters:get(Ref, 1),
+     counters:sub(Ref, 1, 2),
+     counters:get(Ref, 1),
+     counters:put(Ref, 1, -1),
+     counters:get(Ref, 1),
+     counters:put(Ref, 1, (1 bsl 63) - 1),
+     counters:add(Ref, 1, 1),
+     counters:get(Ref, 1),
+     counters:add(Ref, 1, (1 bsl 64) - 1),
+     counters:get(Ref, 1),
+     reason(fun() -> counters:new(0, [write_concurrency]) end),
+     reason(fun() -> counters:new(-1, [write_concurrency]) end),
+     reason(fun() -> counters:new(1.0, [write_concurrency]) end),
+     reason(fun() -> counters:new(1 bsl 64, [write_concurrency]) end),
+     reason(fun() -> counters:new((1 bsl 59) + 1, [write_concurrency]) end),
+     reason(fun() -> counters:get(Ref, 0) end),
+     reason(fun() -> counters:get(Ref, 2) end),
+     reason(fun() -> counters:put(Ref, 1, 1 bsl 63) end),
+     reason(fun() -> counters:put(Ref, 1, 1.0) end),
+     reason(fun() -> counters:add(Ref, 1, 1 bsl 64) end),
+     reason(fun() -> counters:add(Ref, 1, 1.0) end),
+     reason(fun() -> erts_internal:counters_get(RawAtomics, 1) end),
+     reason(fun() -> erts_internal:counters_info(RawAtomics) end),
+     reason(fun() -> erts_internal:counters_info(5) end),
+     reason(fun() -> atomics:get(Raw, 1) end)].
+
+%% A `write_concurrency` array of 2^59 counters, the largest size that one
+%% scheduler takes, which is 4 EiB in PBeam. ERTS ends the emulator when
+%% its allocation fails, so only a PBeam run calls this case.
+write_concurrency_allocation_failure() ->
+    reason(fun() -> counters:new(1 bsl 59, [write_concurrency]) end).
 
 %% The `atomics` functions that the `counters` module does not call, which
 %% PBeam does not implement. Only a PBeam run calls it.
@@ -101,6 +142,10 @@ add(Ref, Index, Increment) ->
 put(Ref, Index, Value) ->
     ok = atomics:put(Ref, Index, Value),
     Ref.
+
+%% Give the class and the reason of the exception of the call.
+reason(Fun) ->
+    try Fun() catch Class:Reason -> {Class, Reason} end.
 
 %% Give the result of the call, or the class, the reason, and the first
 %% frame of its exception, with each reference of the term as the atom

@@ -414,22 +414,71 @@ fn gives_system_limit_for_an_array_that_pbeam_cannot_allocate() {
 }
 
 #[test]
-fn gives_a_clear_runtime_error_for_the_parts_that_pbeam_does_not_implement() {
-    // The `write_concurrency` mode of `counters:new/2` uses the BIFs of
-    // `erl_bif_counters.c`, and `atomics:add_get/3` and `atomics:exchange/3`
-    // are `atomics` functions that the `counters` module does not call.
-    // PBeam does not implement them, and `docs/erts-differences.md`
-    // records that each call gives an unresolved MFA error.
+fn runs_the_write_concurrency_counters_as_pinned_erts() {
+    // The `write_concurrency` mode of `counters` calls the BIFs of
+    // `erl_bif_counters.c:77-259`. A read gives the signed 64-bit sum, an
+    // add wraps at 64 bits and takes the signed and the unsigned ranges
+    // (`get_incr`, `erl_bif_counters.c:162-166`), and a put takes the
+    // signed range only (`erl_bif_counters.c:221-224`). `memory` counts one
+    // cache line of 8 atomics for each scheduler and the base value
+    // (`erl_bif_counters.c:95-96`); the run and the pinned ERTS have one
+    // scheduler. A reference of an atomic array is not a counter array, and
+    // the reverse (`get_ref`, `erl_bif_counters.c:115-126`).
     let program = program();
-    let error = program
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let info = |memory: i64, size: i64| {
+        let pairs = vec![
+            (atom("memory"), Term::Integer(memory)),
+            (atom("size"), Term::Integer(size)),
+        ];
+        Term::Map(Map::from_pairs(pairs, program.atoms()).unwrap())
+    };
+    let error = |reason: &str| Term::tuple(vec![atom("error"), atom(reason)]);
+    let mut cases = vec![
+        info(160, 1),
+        info(288, 9),
+        Term::Integer(0),
+        atom("ok"),
+        Term::Integer(5),
+        atom("ok"),
+        Term::Integer(3),
+        atom("ok"),
+        Term::Integer(-1),
+        atom("ok"),
+        atom("ok"),
+        Term::Integer(i64::MIN),
+        atom("ok"),
+        Term::Integer(i64::MAX),
+    ];
+    cases.extend(["badarg", "badarg", "badarg", "system_limit", "system_limit"].map(error));
+    cases.extend(std::iter::repeat_n(error("badarg"), 10));
+    let actual = program
         .execute("atomics_probe", "write_concurrency", &[])
-        .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("unresolved external MFA erts_internal:counters_new/1"),
-        "{error}"
+        .unwrap()
+        .term;
+    assert_eq!(actual, Term::list_from(cases));
+    assert_eq!(
+        reference("write_concurrency"),
+        include_str!("../../fixtures/atomics/write_concurrency.expected").as_bytes()
     );
+    // ERTS ends the emulator when the allocation of the largest array
+    // fails; PBeam raises `system_limit`, as for the atomic arrays.
+    assert_eq!(
+        program
+            .execute("atomics_probe", "write_concurrency_allocation_failure", &[])
+            .unwrap()
+            .term,
+        error("system_limit")
+    );
+}
+
+#[test]
+fn gives_a_clear_runtime_error_for_the_parts_that_pbeam_does_not_implement() {
+    // `atomics:add_get/3` and `atomics:exchange/3` are `atomics` functions
+    // that the `counters` module does not call. PBeam does not implement
+    // them, and `docs/erts-differences.md` records that each call gives an
+    // unresolved MFA error.
+    let program = program();
     let error = program
         .execute("atomics_probe", "atomics_only", &[])
         .unwrap_err();

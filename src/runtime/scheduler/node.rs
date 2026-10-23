@@ -225,6 +225,11 @@ pub(in crate::runtime) struct Node {
     /// binary that a process of any scheduler reaches by its reference
     /// (`erl_bif_atomics.c:90-110`).
     pub(in crate::runtime) atomics: crate::runtime::atomics::AtomicArrays,
+    /// The `write_concurrency` counter arrays of the node. ERTS keeps them
+    /// in magic binaries of their own destructor, so a reference of an
+    /// atomic array is not a counter array (`get_ref`,
+    /// `erl_bif_counters.c:115-126`). Each counter is one signed atomic.
+    pub(in crate::runtime) counters: crate::runtime::atomics::AtomicArrays,
     /// The resources of the node that each scheduler reads, such as the
     /// zlib streams and the file resources.
     pub(in crate::runtime) resources: NodeResources,
@@ -295,6 +300,7 @@ impl Node {
                 ets: Arc::default(),
                 code: super::code::NodeCode::default(),
                 atomics: Default::default(),
+                counters: Default::default(),
                 resources: NodeResources::default(),
                 poll: super::poll::NodePoll::new(count),
                 system_logger: Mutex::new(Term::static_atom("logger")),
@@ -371,6 +377,7 @@ impl Node {
             ets: Arc::default(),
             code: super::code::NodeCode::default(),
             atomics: Default::default(),
+            counters: Default::default(),
             resources: NodeResources::default(),
             poll: super::poll::NodePoll::new(1),
             system_logger: Mutex::new(Term::static_atom("logger")),
