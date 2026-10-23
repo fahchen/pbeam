@@ -167,7 +167,11 @@ impl Scheduler {
     /// owner and stays open, and it reads nothing more. Each other port
     /// closes with the reason `normal`.
     fn port_end_of_file(&mut self, id: PortId) {
-        let state = self.node.with_port(id, |port| {
+        // `{Port, eof}` goes out under the port lock, as in
+        // `driver_failure_eof` (io.c:7191-7209).
+        let cell = self.node.port(id);
+        let mut slot = cell.as_ref().map(port::lock);
+        let state = slot.as_mut().and_then(|slot| slot.as_mut()).map(|port| {
             let soft = match &mut port.driver {
                 Driver::Spawn(spawn) if spawn.soft_eof => {
                     spawn.input = Input::Ended;
@@ -183,6 +187,7 @@ impl Scheduler {
                 let eof = Term::tuple(vec![Term::Port(id), Term::static_atom("eof")]);
                 self.port_send(owner, eof);
             } else {
+                drop(slot);
                 self.close_port(id, Term::static_atom("normal"));
             }
         }
