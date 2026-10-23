@@ -26,6 +26,8 @@ const FUN_ENTRY_PROBE: &str = "fixtures/code_server/fun_entry_probe";
 const CRYPTO_PROBE: &str = "fixtures/code_server/crypto_probe";
 const CRYPTO_SIGN_PROBE: &str = "fixtures/code_server/crypto_sign_probe";
 const CRYPTO_CRYPT_PROBE: &str = "fixtures/code_server/crypto_crypt_probe";
+const CRYPTO_KEYGEN_PROBE: &str = "fixtures/code_server/crypto_keygen_probe";
+const CRYPTO_COMPUTE_KEY_PROBE: &str = "fixtures/code_server/crypto_compute_key_probe";
 
 /// The stand-in `crypto` module that loads the `crypto` NIF library.
 const CRYPTO_STAND_IN: &str = "fixtures/crypto/crypto";
@@ -1385,3 +1387,149 @@ const CIPHERS_HOST: &str = r#"[[{error,notsup},
   429,418,422,426,undefined,undefined,undefined,undefined,undefined,895,898,
   901,896,899,902]]
 "#;
+
+#[test]
+fn generates_keys_as_pinned_erts() {
+    // rsa_generate_key_nif/2, ec_generate_key_nif/2, and
+    // evp_generate_key_nif/2 (rsa.c:453-543, ec.c:353-517, evp.c:221-300):
+    // the sizes of each new key and a sign and verify with it, the bytes of
+    // each key from a given private key, and the error tuple of each
+    // failed check.
+    let erts = run(&mut erts_probe(
+        CRYPTO_KEYGEN_PROBE,
+        "crypto_keygen_probe",
+        "main",
+        &[],
+    ));
+    assert!(erts.contains("Can't generate RSA key-pair"), "{erts}");
+    assert_eq!(
+        run(&mut pbeam_probe(
+            CRYPTO_KEYGEN_PROBE,
+            "crypto_keygen_probe",
+            "main",
+            &[]
+        )),
+        erts
+    );
+}
+
+/// The output of `crypto_keygen_probe:post_quantum/0` on the pinned macOS
+/// ERTS (OpenSSL 3.5.8). The Linux CI ERTS links OpenSSL 3.0.x, which has no
+/// ML-DSA, ML-KEM, or SLH-DSA (`evp.c:232-257`).
+const KEYGEN_POST_QUANTUM_HOST: &str = r#"{[{mldsa44,1312,2560,true,true},
+  {mldsa65,1952,4032,true,true},
+  {mldsa87,2592,4896,true,true},
+  {slh_dsa_shake_128f,32,64,true,true},
+  {slh_dsa_sha2_128f,32,64,true,true}],
+ [{mlkem512,800,1632,true},
+  {mlkem768,1184,2400,true},
+  {mlkem1024,1568,3168,true}],
+ [{slh_dsa_shake_192f,48,96},{slh_dsa_sha2_256f,64,128}],
+ [{error,{"evp.c",273},"Can't EVP_PKEY_new_raw_private_key"},
+  {error,{"evp.c",273},"Can't EVP_PKEY_new_raw_private_key"}]}
+"#;
+
+#[test]
+fn generates_ml_dsa_ml_kem_and_slh_dsa_keys() {
+    assert_eq!(
+        run(&mut pbeam_probe(
+            CRYPTO_KEYGEN_PROBE,
+            "crypto_keygen_probe",
+            "post_quantum",
+            &[]
+        )),
+        KEYGEN_POST_QUANTUM_HOST
+    );
+    if cfg!(target_os = "macos") {
+        let erts = run(&mut erts_probe(
+            CRYPTO_KEYGEN_PROBE,
+            "crypto_keygen_probe",
+            "post_quantum",
+            &[],
+        ));
+        assert_eq!(erts, KEYGEN_POST_QUANTUM_HOST);
+    }
+}
+
+#[test]
+fn stops_on_an_ec_curve_that_key_generation_does_not_support() {
+    for (function, expected) in [
+        (
+            "unsupported_field",
+            "crypto:ec_generate_key_nif/2 NIF is not supported for an ECDSA curve over a \
+             characteristic-two field",
+        ),
+        (
+            "unsupported_unnamed",
+            "crypto:ec_generate_key_nif/2 NIF is not supported for a private key on an EC \
+             curve without a name",
+        ),
+    ] {
+        let output = pbeam_probe(CRYPTO_KEYGEN_PROBE, "crypto_keygen_probe", function, &[])
+            .env("TERM", "dumb")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            !output.status.success() && stderr.contains(expected),
+            "{function}: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn computes_shared_secrets_as_pinned_erts() {
+    // dh_generate_key_nif/4, dh_compute_key_nif/3, ecdh_compute_key_nif/3,
+    // and evp_compute_key_nif/3 (dh.c:44-271, ecdh.c:38-141,
+    // evp.c:131-218): the sizes of each new DH key, the bytes of each shared
+    // secret of given keys, and the reason and error_info of each failed
+    // check.
+    let erts = run(&mut erts_probe(
+        CRYPTO_COMPUTE_KEY_PROBE,
+        "crypto_compute_key_probe",
+        "main",
+        &[],
+    ));
+    assert!(erts.contains("Can't EVP_PKEY_derive"), "{erts}");
+    assert_eq!(
+        run(&mut pbeam_probe(
+            CRYPTO_COMPUTE_KEY_PROBE,
+            "crypto_compute_key_probe",
+            "main",
+            &[]
+        )),
+        erts
+    );
+}
+
+#[test]
+fn stops_on_a_key_agreement_that_pbeam_does_not_support() {
+    for (function, expected) in [
+        (
+            "unsupported_length",
+            "crypto:dh_generate_key_nif/4 NIF is not supported for a DH private key length",
+        ),
+        (
+            "unsupported_field",
+            "crypto:ecdh_compute_key_nif/3 NIF is not supported for an ECDSA curve over a \
+             characteristic-two field",
+        ),
+    ] {
+        let output = pbeam_probe(
+            CRYPTO_COMPUTE_KEY_PROBE,
+            "crypto_compute_key_probe",
+            function,
+            &[],
+        )
+        .env("TERM", "dumb")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            !output.status.success() && stderr.contains(expected),
+            "{function}: {stderr}"
+        );
+    }
+}

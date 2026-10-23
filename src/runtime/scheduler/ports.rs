@@ -9,11 +9,11 @@
 //! the pipes of the ports only when no process can run (see
 //! [`Scheduler::wait_input`]).
 
-use super::{LinkId, Scheduler, node::Node};
+use super::{LinkId, Scheduler};
 use crate::{
     error::{BeamError, error},
     runtime::{
-        port::{self, Driver, Input, Port, PortCell, PortEvent, inet, inet::Inet},
+        port::{self, Driver, Input, Port, PortEvent, inet, inet::Inet},
         process::MonitorLinkTree,
         signal::Signal,
     },
@@ -261,7 +261,7 @@ impl Scheduler {
     /// ```rust,ignore
     /// scheduler.fail_port(port, Term::static_atom("einval"));
     /// ```
-    pub(super) fn fail_port(&mut self, id: PortId, reason: Term) {
+    pub(in crate::runtime) fn fail_port(&mut self, id: PortId, reason: Term) {
         let _ = self.exit_port(id, reason, false);
     }
 
@@ -578,13 +578,6 @@ impl Scheduler {
             _ => self.deliver(target, term),
         }
     }
-}
-
-/// Return the handle of the port `id` of a driver step of the scheduler
-/// that serves it: the step runs only while the port is in the table.
-pub(super) fn port_cell(node: &Node, id: PortId) -> PortCell {
-    node.port(id)
-        .expect("the port of a driver step is in the port table")
 }
 
 fn port_message(id: PortId, tag: &str, value: Term) -> Term {

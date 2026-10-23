@@ -35,7 +35,7 @@ const INVENTORY: &str = include_str!("../../docs/effect-inventory.md");
 /// Each capability of the column "Capability" of the effect inventory, as
 /// `(entry, kind:operation)`, with the `effect_probe` function that calls
 /// the entry once.
-const PROBES: [(&str, &str, &str); 64] = [
+const PROBES: [(&str, &str, &str); 66] = [
     ("erlang:exit/2", "process:exit_other", "exit_other"),
     ("erlang:exit/3", "process:exit_other", "exit_other3"),
     ("erlang:delete_module/1", "code:load", "delete_module"),
@@ -114,7 +114,13 @@ const PROBES: [(&str, &str, &str); 64] = [
     ("persistent_term:get/0", "persistent_term:read", "pt_get0"),
     ("persistent_term:get/1", "persistent_term:read", "pt_get1"),
     ("persistent_term:get/2", "persistent_term:read", "pt_get2"),
+    ("persistent_term:info/0", "persistent_term:read", "pt_info"),
     ("persistent_term:put/2", "persistent_term:write", "pt_put"),
+    (
+        "persistent_term:put_new/2",
+        "persistent_term:write",
+        "pt_put_new",
+    ),
     (
         "persistent_term:erase/1",
         "persistent_term:write",
@@ -325,6 +331,7 @@ const AMBIENT: &[&str] = &[
     "erlang:nodes/0",
     "erlang:nodes/1",
     "erlang:nodes/2",
+    "erlang:now/0",
     "erlang:ports/0",
     "erlang:processes/0",
     "erlang:registered/0",
@@ -584,7 +591,7 @@ fn calls_each_ambient_and_later_entry_with_no_capability() {
     // The root process holds no capability, so no policy can permit the
     // calls: each `ambient` and `later` entry has no check.
     let program = program();
-    let expected = "[true,true,false,true,true,true,integer,integer,integer,integer,integer,date_time,unix,nonode@nohost,nonode@nohost,[],[nonode@nohost],1,true,{arity,1},1,{error,badfile},{error,badarg},false,false,true,effect_probe_ambient_atom,effect_probe_ambient_binary,effect_probe_ambient_binary,effect_probe_ambient_atom,ok,[bm,{1,1}],ac,re_pattern,effect_probe_ambient,true,false,[{key,value}],value,value,true,true,[{key,value}],true,true,set,true,15,eot,eot,first,first_lookup,last,last_lookup,eot,eot,[{key,value}],[{key,value}],eot,true,true,0,2,reference,true,atom,2,ok,1,error,ok,error,ok,error,[ok,{ok,0},ok],[eof,ok],[11,<<48,49>>,{ok,8},9,ok,0,<<120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120>>,acquired,ok],none,false,{error,notsup},ok,false,reference,ok,1,ok,48,integer,integer,timestamp,date,time,date_time,date_time,integer,timestamp,integer,integer,{error,enotsup},error,error,error,error,error,error,error,ok,ok,ok,true,true,true,true,9,false,true,true,true,true,true,true,{error,badarg},true,[]]";
+    let expected = "[true,true,false,true,true,true,integer,integer,integer,integer,integer,date_time,unix,nonode@nohost,nonode@nohost,[],[nonode@nohost],1,true,{arity,1},1,{error,badfile},{error,badarg},false,false,true,effect_probe_ambient_atom,effect_probe_ambient_binary,effect_probe_ambient_binary,effect_probe_ambient_atom,ok,[bm,{1,1}],ac,re_pattern,effect_probe_ambient,true,false,[{key,value}],value,value,true,true,[{key,value}],true,true,set,true,15,eot,eot,first,first_lookup,last,last_lookup,eot,eot,[{key,value}],[{key,value}],eot,true,true,0,2,reference,true,atom,2,ok,1,error,ok,error,ok,error,[ok,{ok,0},ok],[eof,ok],[11,<<48,49>>,{ok,8},9,ok,0,<<120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120>>,acquired,ok],none,false,{error,notsup},ok,false,reference,ok,1,ok,48,integer,integer,timestamp,date,time,date_time,date_time,timestamp,integer,timestamp,integer,integer,{error,enotsup},error,error,error,error,error,error,error,ok,ok,ok,true,true,true,true,9,false,true,true,true,true,true,true,{error,badarg},true,[]]";
     assert_eq!(run_text(&program, "ambient", &Grants(vec![])), expected);
     assert_eq!(erts_with_stand_in("ambient"), format!("{expected}\n"));
 }

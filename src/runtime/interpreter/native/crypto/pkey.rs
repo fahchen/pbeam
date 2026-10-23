@@ -22,7 +22,7 @@ use openssl::sign::{RsaPssSaltlen, Signer, Verifier};
 
 /// The algorithms of `pkey_types` (`pkey.c:91-172`), for which the digest
 /// type `none` gives no digest (`pkey.c:263-270`).
-const PKEY_TYPES: [&str; 15] = [
+pub(super) const PKEY_TYPES: [&str; 15] = [
     "mldsa44",
     "mldsa65",
     "mldsa87",
@@ -162,23 +162,27 @@ const RSA_X931_PADDING: i32 = 5;
 const RSA_PKCS1_PSS_PADDING: i32 = 6;
 
 /// The cause of a failed sign or verify.
-enum Failure {
+pub(super) enum Failure {
     /// The exception `{Tag, #{c_file_name => "pkey.c", ...}, Message}` of
     /// the check at a line of `pkey.c`.
     Check(&'static str, i64, i64, &'static str),
+    /// The exception of a check in a helper of another C file, such as the
+    /// curve checks of `ec.c` that `ecdh.c` calls: the file, then the
+    /// fields of [`Failure::Check`].
+    CheckIn(&'static str, &'static str, i64, i64, &'static str),
     /// A part that PBeam does not implement, which gives a runtime error.
     Unsupported(String),
 }
 
 /// Return the [`Failure::Check`] of the `badarg` check at `line` for the
 /// argument `argument`.
-fn badarg(line: i64, argument: i64, message: &'static str) -> Failure {
+pub(super) fn badarg(line: i64, argument: i64, message: &'static str) -> Failure {
     Failure::Check("badarg", line, argument, message)
 }
 
 /// Return the [`Failure::Check`] of the `error` check at `line`, which
 /// names no argument (`EXCP_ERROR`).
-fn failed(line: i64, message: &'static str) -> Failure {
+pub(super) fn failed(line: i64, message: &'static str) -> Failure {
     Failure::Check("error", line, -1, message)
 }
 
@@ -239,10 +243,25 @@ fn finish(
     arity: u32,
     result: Result<Term, Failure>,
 ) -> Result<BifResult, BeamError> {
+    finish_in(scheduler, "pkey.c", name, arity, result)
+}
+
+/// Give the value of `result`, or the exception of its failed check at a
+/// line of the C file `file`, or the runtime error of its failure.
+pub(super) fn finish_in(
+    scheduler: &mut Scheduler,
+    file: &str,
+    name: &str,
+    arity: u32,
+    result: Result<Term, Failure>,
+) -> Result<BifResult, BeamError> {
     match result {
         Ok(value) => Ok(BifResult::Value(value)),
         Err(Failure::Check(tag, line, argument, message)) => {
-            c_error(scheduler, tag, "pkey.c", line, argument, message)
+            c_error(scheduler, tag, file, line, argument, message)
+        }
+        Err(Failure::CheckIn(file, tag, line, argument, message)) => {
+            c_error(scheduler, tag, file, line, argument, message)
         }
         Err(Failure::Unsupported(part)) => Err(error(format!(
             "crypto:{name}/{arity} NIF is not supported for {part}"
@@ -707,7 +726,7 @@ fn fromdata_failed() -> Failure {
 /// (`pkey.c:90-172`). `EVP_PKEY_new_raw_private_key` and
 /// `EVP_PKEY_new_raw_public_key` give the key bytes to `EVP_PKEY_fromdata`
 /// as the parameter `priv` or `pub`, as `pkey.c:630-637` does.
-fn pkey_type_id(algorithm: &str) -> Id {
+pub(super) fn pkey_type_id(algorithm: &str) -> Id {
     // The NIDs of `obj_mac.h` of OpenSSL 3.5.
     Id::from_raw(match algorithm {
         "mldsa44" => 1457,
@@ -829,7 +848,7 @@ fn ec_parts<'a>(
 /// Return the curve of `{CurveDef, CurveName}` (`ec.c:31-226`) with the
 /// field `{prime_field, P}`: `Ok(None)` for a definition that fails a
 /// check.
-fn ec_group(scheduler: &Scheduler, curve: &[Term]) -> Result<Option<EcGroup>, Failure> {
+pub(super) fn ec_group(scheduler: &Scheduler, curve: &[Term]) -> Result<Option<EcGroup>, Failure> {
     let [Term::Tuple(definition), _] = curve else {
         return Ok(None);
     };

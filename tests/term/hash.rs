@@ -118,8 +118,9 @@ fn hashes_each_term_kind_as_pinned_erts() {
             map((1..=200).map(|key| (Term::Integer(key), integers(&[key])))),
             5428453677902343107,
         ),
-        // <0.10.0> has the pid word 0x503, so its ERTS pid data is 0x50.
-        (Term::Pid(ProcessId(0x50)), 8954564308403532307),
+        // <0.10.0> has the pid data 10 and the pid word 0x503: ERTS spreads
+        // the data over the process table index bits (`erl_ptab.h:301-326`).
+        (Term::Pid(ProcessId(10)), 8954564308403532307),
         // #Ref<0.358569601.1537736705.33174> has the numbers 0x8196, 0x5BA80001, and
         // 0x155F5681: the counter value 0x155F56815BA88196 of scheduler 1.
         (
@@ -366,9 +367,9 @@ fn hashes_a_deep_term_without_recursion() {
 fn hashes_a_port_as_pinned_erts() {
     // ERTS: erts_debug:get_internal_state({internal_hash, list_to_port("#Port<0.5>")})
     // after erts_debug:set_internal_state(available_internal_state, true).
-    // The port has the port data 0x28, which `port_info/1` gives as its id
-    // 40, so its word is 0x287.
-    assert_eq!(internal_hash(&Term::Port(PortId(0x28))), 589508649189025146);
+    // The port has the port data 5. ERTS spreads the data over the port
+    // table index bits (`erl_ptab.h:301-326`), so its word is 0x287.
+    assert_eq!(internal_hash(&Term::Port(PortId(5))), 589508649189025146);
 }
 
 #[test]

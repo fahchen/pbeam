@@ -1505,11 +1505,9 @@ const PORT_KEY_PROBE: &[u8] = include_bytes!("../../fixtures/map/port_key_probe.
 fn runs_map_operations_with_port_keys_as_pinned_erts() {
     // A port is a map key, alone and inside a tuple, a list, or a map key.
     // A hashmap hashes a port by its immediate word
-    // (`erl_term_hashing.c:2211-2213`). ERTS spreads the port number over
-    // the port table index bits in that word (`erts_ptab_make_id`,
-    // `erl_ptab.h:320-326`), and PBeam does not, so the hashmap pair order
-    // is exact only for PBeam on the CI host; the ERTS run checks the same
-    // set of values. The probe returns no port.
+    // (`erl_term_hashing.c:2211-2213`), which holds the port number spread
+    // over the port table index bits (`erts_ptab_make_id`,
+    // `erl_ptab.h:320-326`). The probe returns no port.
     let erlang = pinned_beam("erlang");
     let lists = pinned_beam("lists");
     let maps = pinned_beam("maps");
@@ -1524,13 +1522,13 @@ fn runs_map_operations_with_port_keys_as_pinned_erts() {
             .term
     };
     let hash_order = [
-        21, 30, 28, 8, 38, 25, 15, 39, 10, 22, 17, 31, 13, 19, 26, 4, 6, 16, 14, 36, 32, 23, 3, 1,
-        40, 18, 27, 24, 33, 34, 37, 2, 12, 9, 7, 5, 20, 29, 35, 11,
+        20, 25, 27, 1, 22, 40, 17, 37, 15, 12, 10, 36, 14, 30, 32, 13, 19, 28, 18, 38, 39, 2, 21,
+        7, 4, 26, 29, 23, 5, 24, 3, 34, 8, 33, 6, 11, 31, 35, 16, 9,
     ];
     let removed: Vec<i64> = hash_order.iter().copied().filter(|&n| n != 17).collect();
     let nested_order = [
-        34, 12, 30, 28, 11, 25, 20, -1, 14, 19, 101, 17, 22, 24, 6, 8, 32, 21, 23, 27, 102, 10, 18,
-        -3, 9, 31, 7, 13, 5, 4, 3, 33, 16, -4, 1, 2, 26, -2, 29, 15,
+        11, 5, -2, 20, 31, 6, -1, 17, 15, 33, 19, 13, 28, 32, 9, 29, 34, 10, 25, 14, 3, -3, -4,
+        102, 22, 21, 30, 1, 7, 23, 27, 24, 18, 2, 101, 26, 16, 4, 12, 8,
     ];
     assert_eq!(
         run("flat"),
@@ -1567,6 +1565,23 @@ fn runs_map_operations_with_port_keys_as_pinned_erts() {
             ints(&nested_order)
         ])
     );
+    // PBeam spreads a port number over the 16 index bits of the default
+    // ERTS port table (`ERTS_DEFAULT_MAX_PORTS`, `erl_port.h:41`). ERTS
+    // raises the table size to the host file limit (`io.c:2997-3006`), so
+    // the ERTS run checks the order only on a host with `port_limit` 65536,
+    // such as the Linux CI host.
+    let high = "[8206,8195,8219,8221,8207,8222,8202,8227,8217,8198,8194,8218,8203,8200,8190,8216,8208,8225,8229,8197,8199,8223,8220,8191,8192,8201,8210,8196,8205,8213,8214,8204,8226,8215,8228,8211,8193,8209,8224,8212]";
+    let high_order: Vec<i64> = high[1..high.len() - 1]
+        .split(',')
+        .map(|n| n.parse().unwrap())
+        .collect();
+    assert_eq!(run("high"), ints(&high_order));
+    let reference = erl_reference(
+        "io:format(\"~w~n~w~n\", [erlang:system_info(port_limit), port_key_probe:high()])",
+    );
+    if reference.starts_with(b"65536\n") {
+        assert_eq!(reference, format!("65536\n{high}\n").into_bytes());
+    }
     let (yes, no) = (atom("true"), atom("false"));
     assert_eq!(
         run("order"),
@@ -1583,15 +1598,53 @@ fn runs_map_operations_with_port_keys_as_pinned_erts() {
     );
     assert_eq!(
         erl_reference(
-            "[S, K, F, R, A, B] = port_key_probe:hash(), \
-             [N1, N2, N3, N4, L] = port_key_probe:nested(), \
-             io:format(\"~w~n~w~n~w~n~w~n\", [port_key_probe:flat(), \
-             [S, K, F, R, lists:sort(A), lists:sort(B)], \
-             [N1, N2, N3, N4, lists:sort(L)], port_key_probe:order()])"
+            "io:format(\"~w~n~w~n~w~n~w~n\", [port_key_probe:flat(), \
+             port_key_probe:hash(), port_key_probe:nested(), \
+             port_key_probe:order()])"
         ),
         b"[8,1,5,6,false,false,7,[4,3,1,2,7,5,6,8],[4,3,1,7,5,6,8]]\n\
-          [40,17,false,false,[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40],[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40]]\n\
-          [40,-2,5,102,[-4,-3,-2,-1,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,101,102]]\n\
+          [40,17,false,false,[20,25,27,1,22,40,17,37,15,12,10,36,14,30,32,13,19,28,18,38,39,2,21,7,4,26,29,23,5,24,3,34,8,33,6,11,31,35,16,9],[20,25,27,1,22,40,37,15,12,10,36,14,30,32,13,19,28,18,38,39,2,21,7,4,26,29,23,5,24,3,34,8,33,6,11,31,35,16,9]]\n\
+          [40,-2,5,102,[11,5,-2,20,31,6,-1,17,15,33,19,13,28,32,9,29,34,10,25,14,3,-3,-4,102,22,21,30,1,7,23,27,24,18,2,101,26,16,4,12,8]]\n\
           [true,false,true,true,false,true,true,true]\n"
+    );
+}
+
+const PID_ORDER_PROBE: &[u8] = include_bytes!("../../fixtures/map/pid_order_probe.beam");
+
+#[test]
+fn orders_a_hashmap_of_pid_keys_as_pinned_erts() {
+    // A hashmap hashes a pid by its immediate word, which holds the pid
+    // number spread over the process table index bits (`make_internal_pid`,
+    // `erl_node_container_utils.h:124-126`; `erl_ptab.h:320-326`). The probe
+    // returns no pid.
+    let erlang = pinned_beam("erlang");
+    let lists = pinned_beam("lists");
+    let maps = pinned_beam("maps");
+    let program = BeamProgram::load(&[&erlang, &lists, &maps, PID_ORDER_PROBE]).unwrap();
+    let order = [
+        36, 35, 31, 15, 30, 25, 26, 19, 10, 2, 13, 1, 16, 24, 28, 4, 3, 32, 11, 17, 18, 6, 22, 23,
+        14, 37, 40, 39, 8, 12, 7, 20, 27, 9, 34, 38, 33, 5, 29, 21,
+    ];
+    let removed: Vec<i64> = order.iter().copied().filter(|&n| n != 17).collect();
+    let ints = |values: &[i64]| Term::list_from(values.iter().map(|&v| Term::Integer(v)));
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    assert_eq!(
+        program
+            .execute("pid_order_probe", "hash", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![
+            Term::Integer(40),
+            Term::Integer(17),
+            atom("false"),
+            atom("false"),
+            ints(&order),
+            ints(&removed),
+        ])
+    );
+    let expected: &[u8] = b"[40,17,false,false,[36,35,31,15,30,25,26,19,10,2,13,1,16,24,28,4,3,32,11,17,18,6,22,23,14,37,40,39,8,12,7,20,27,9,34,38,33,5,29,21],[36,35,31,15,30,25,26,19,10,2,13,1,16,24,28,4,3,32,11,18,6,22,23,14,37,40,39,8,12,7,20,27,9,34,38,33,5,29,21]]\n";
+    assert_eq!(
+        erl_reference("io:format(\"~w~n\", [pid_order_probe:hash()])"),
+        expected
     );
 }

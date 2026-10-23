@@ -5,7 +5,7 @@
 use std::sync::{Arc, atomic::Ordering};
 
 use super::scheduler::Scheduler;
-use crate::term::{LiveBytes, ProcessId, Term, internal_hash};
+use crate::term::{LiveBytes, ProcessId, Term, flat_size, internal_hash};
 
 /// The number of scheduling steps of the node after which a new table is
 /// visible. ERTS waits for thread progress, and with `erl +S 1` other
@@ -414,6 +414,39 @@ impl PersistentTerms {
             }
             None => Some(0),
         }
+    }
+
+    /// Return the number of stored keys and the bytes that ERTS gives as
+    /// the `memory` item of `persistent_term:info/0`: the `HashTable`
+    /// struct with one slot word, the other slot words, and the literal
+    /// area of each `{Key, Value}` tuple (`do_info`,
+    /// `erl_bif_persistent.c:949-971`). A literal area is two header words
+    /// and the words of the tuple (`ERTS_LITERAL_AREA_ALLOC_SIZE`,
+    /// `global.h:948-959`). PBeam counts the words with [`flat_size`], so a
+    /// subterm that the pair shares counts once for each reference, where
+    /// `copy_shared_calculate` counts it once (`erl_bif_persistent.c:751`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(PersistentTerms::default().info(), (0, 160));
+    /// ```
+    pub(super) fn info(&self) -> (usize, usize) {
+        /// `sizeof(HashTable)` of a 64-bit emulator: five `Uint` fields,
+        /// the `DeleteOp`, and one slot (`erl_bif_persistent.c:51-66`).
+        const HASH_TABLE_BYTES: usize = 104;
+        /// The `off_heap` and `end` words of an `ErtsLiteralArea`.
+        const AREA_HEADER_WORDS: usize = 2;
+        /// The header and the two elements of a `{Key, Value}` tuple.
+        const PAIR_WORDS: usize = 3;
+        let areas: usize = self
+            .buckets
+            .iter()
+            .flatten()
+            .map(|(key, value)| AREA_HEADER_WORDS + PAIR_WORDS + flat_size(key) + flat_size(value))
+            .sum();
+        let memory = HASH_TABLE_BYTES + (self.buckets.len() - 1 + areas) * size_of::<u64>();
+        (self.num_entries, memory)
     }
 
     /// Return what [`Self::erase`] of `key` would return, and change

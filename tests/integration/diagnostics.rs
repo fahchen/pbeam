@@ -164,3 +164,39 @@ fn reads_prepared_code_on_load_as_pinned_erts() {
         format!("{expected}\n")
     );
 }
+
+#[test]
+fn reads_a_list_of_process_info_items_of_the_caller_as_pinned_erts() {
+    // `process_info_bif` reads the items of a list in their order, also a
+    // repeated item, and `registered_name` gives `{registered_name, []}`
+    // for a process without a name (`erl_bif_info.c:1555-1558`,
+    // `1606-1632`). The crash report of `proc_lib` reads such a list of the
+    // crashing process (`proc_lib.erl:968-971`).
+    let erlang = pinned_beam("erlang");
+    let lists = pinned_beam("lists");
+    let program = BeamProgram::load(&[PROBE, TARGET, &erlang, &lists]).unwrap();
+    let result = program
+        .execute("diagnostics_probe", "info_list", &[])
+        .unwrap();
+    let expected = "{[{registered_name,[]},{dictionary,[{probe_key,probe_value}]},{message_queue_len,0},{trap_exit,true},{status,running},{trap_exit,true}],[{registered_name,diagnostics_info_list}],[{heap_size,integer},{stack_size,integer},{reductions,integer}]}";
+    assert_eq!(text(&result.term, result.atoms()), expected);
+    assert_eq!(
+        reference("diagnostics_probe:info_list()"),
+        format!("{expected}\n")
+    );
+}
+
+#[test]
+fn charges_a_repeated_process_info_item_once_as_pinned_erts() {
+    // `process_info_bif` reads each distinct item once into `part_res`
+    // (`erl_bif_info.c:1134-1145`), and each read costs one reduction
+    // (`erl_bif_info.c:1601`).
+    let erlang = pinned_beam("erlang");
+    let lists = pinned_beam("lists");
+    let program = BeamProgram::load(&[PROBE, TARGET, &erlang, &lists]).unwrap();
+    let result = program
+        .execute("diagnostics_probe", "info_list_cost", &[])
+        .unwrap();
+    assert_eq!(text(&result.term, result.atoms()), "[2,2,5]");
+    assert_eq!(reference("diagnostics_probe:info_list_cost()"), "[2,2,5]\n");
+}

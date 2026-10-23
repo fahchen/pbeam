@@ -361,9 +361,18 @@ fn a_release_with_a_boot_script_boots_with_pbeam_erl() {
         &directory,
         "17.1",
         "0.1.0",
+        Some(std::ffi::OsStr::new(" +S  4\t")),
     );
     assert!(error.to_string().contains("No such file"), "{error}");
     fs::remove_dir_all(&directory).unwrap();
+}
+
+#[test]
+fn splits_the_erl_options_at_space_tab_and_newline_only() {
+    // The default `IFS` of sh is space, tab, and newline, so `\r` and
+    // `\x0C` stay in a word (`releases/<vsn>/elixir:229`).
+    let words = option_words(std::ffi::OsStr::new(" +S\t4\n-a\rb\x0Cc  "));
+    assert_eq!(words, ["+S", "4", "-a\rb\x0Cc"]);
 }
 
 #[test]

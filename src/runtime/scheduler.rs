@@ -4097,6 +4097,7 @@ pub(super) mod run_queue;
 mod signals;
 mod steal;
 mod tcp_inet;
+pub(in crate::runtime) use tcp_inet::Accept;
 mod tcp_stream;
 
 pub(super) use code::check_process_code_reply;

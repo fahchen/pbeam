@@ -83,6 +83,7 @@ fn serves_hello_world_from_the_plug_example_as_pinned_erts() {
         Some(env!("CARGO_BIN_EXE_pbeam")),
     );
     let bundled = serve_one_file();
+    serves_concurrent_requests_on_several_schedulers_as_pinned_erts();
     // The NIF record of this acceptance: each module of a NIF library that
     // the release boot loads. A module with an `on_load` function is loaded
     // only when the function returns `ok`, so `erlang:load_nif/2` gave `ok`
@@ -115,6 +116,106 @@ fn serves_hello_world_from_the_plug_example_as_pinned_erts() {
             RESPONSE.2.to_owned(),
         )
     );
+}
+
+/// The `ELIXIR_ERL_OPTIONS` of the run on several schedulers: 4 schedulers,
+/// and an `-eval` that writes the count of schedulers online. The words have
+/// no space, because the `elixir` script splits the variable at white space
+/// (`elixir:229`).
+const SCHEDULER_OPTIONS: &str =
+    "+S 4 -eval io:format(\"schedulers:~w~n\",[erlang:system_info(schedulers_online)])";
+
+/// The count of concurrent requests of the run on several schedulers.
+const CONCURRENT_REQUESTS: usize = 16;
+
+/// Check the one-file run on several schedulers. The serve test calls it
+/// after its build of the release, so that no other test rewrites
+/// `target/examples/plug_hello` while the pinned ERTS runs it.
+fn serves_concurrent_requests_on_several_schedulers_as_pinned_erts() {
+    // The one-file executable boots the release on 4 schedulers with
+    // `ELIXIR_ERL_OPTIONS="+S 4"`, as `bin/plug_hello start` does on the
+    // pinned ERTS, and serves concurrent requests.
+    let directory = test_directory("schedulers");
+    let clean = directory.join("clean");
+    let temporary = directory.join("tmp");
+    fs::create_dir_all(&clean).unwrap();
+    fs::create_dir_all(&temporary).unwrap();
+    let output = build_one_file(&directory, &clean);
+    let mut pbeam = Command::new(&output);
+    pbeam.current_dir(&clean).env("TMPDIR", &temporary);
+    let pbeam = serve_concurrently(&mut pbeam);
+    let mut erts = Command::new(release_directory().join("bin").join("plug_hello"));
+    erts.arg("start");
+    let erts = serve_concurrently(&mut erts);
+    fs::remove_dir_all(&directory).unwrap();
+    assert_eq!(pbeam, erts);
+    let expected = (
+        RESPONSE.0.to_owned(),
+        RESPONSE.1.to_owned(),
+        RESPONSE.2.to_owned(),
+    );
+    assert_eq!(
+        pbeam,
+        (
+            Some("schedulers:4".to_owned()),
+            vec![expected; CONCURRENT_REQUESTS]
+        )
+    );
+}
+
+/// Start `command` with [`SCHEDULER_OPTIONS`] on a free port, send
+/// [`CONCURRENT_REQUESTS`] requests of `GET /` at the same time, stop the
+/// run with `SIGTERM`, and return the line of the scheduler count and the
+/// responses.
+fn serve_concurrently(command: &mut Command) -> (Option<String>, Vec<Response<String>>) {
+    let port = free_port();
+    let mut child = without_erl_flags(command)
+        .env("ELIXIR_ERL_OPTIONS", SCHEDULER_OPTIONS)
+        .env("PORT", port.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .spawn()
+        .expect("the run starts");
+    let stdout = Arc::new(Mutex::new(Vec::new()));
+    let stdout_reader = collect(child.stdout.take().unwrap(), Arc::clone(&stdout));
+    let stderr = Arc::new(Mutex::new(Vec::new()));
+    let stderr_reader = collect(child.stderr.take().unwrap(), Arc::clone(&stderr));
+    let responses = wait_for_server(&mut child, port).and_then(|_| {
+        let requests: Vec<_> = (0..CONCURRENT_REQUESTS)
+            .map(|_| {
+                thread::spawn(move || {
+                    TcpStream::connect(("127.0.0.1", port))
+                        .map_err(|error| error.to_string())
+                        .and_then(request)
+                })
+            })
+            .collect();
+        requests
+            .into_iter()
+            .map(|request| request.join().unwrap())
+            .collect::<Result<Vec<_>, _>>()
+    });
+    let status = stop_with_term(child);
+    stdout_reader.join().unwrap();
+    stderr_reader.join().unwrap();
+    let stdout = String::from_utf8_lossy(&stdout.lock().unwrap()).into_owned();
+    let responses = responses.unwrap_or_else(|error| {
+        panic!(
+            "the run on port {port}: {error}\nstatus: {status:?}\nstdout: {stdout}\nstderr: {}",
+            String::from_utf8_lossy(&stderr.lock().unwrap())
+        )
+    });
+    assert!(
+        status.success(),
+        "the run exits 0 after SIGTERM: {status:?}"
+    );
+    let count = stdout
+        .lines()
+        .find(|line| line.starts_with("schedulers:"))
+        .map(ToOwned::to_owned);
+    (count, responses)
 }
 
 #[test]
@@ -269,7 +370,14 @@ fn builds_the_one_file_executable_with_the_mix_task_and_runs_it_clean() {
     let status = stop_with_term(child);
     stdout_reader.join().unwrap();
     stderr_reader.join().unwrap();
-    assert!(status.success(), "the clean run exits 0: {status:?}");
+    let text =
+        |bytes: &Arc<Mutex<Vec<u8>>>| String::from_utf8_lossy(&bytes.lock().unwrap()).into_owned();
+    assert!(
+        status.success(),
+        "the clean run exits 0: {status:?}\nstdout: {}\nstderr: {}",
+        text(&stdout),
+        text(&stderr)
+    );
     let entries: Vec<_> = fs::read_dir(&clean)
         .unwrap()
         .map(|entry| entry.unwrap().file_name())
@@ -284,9 +392,6 @@ fn builds_the_one_file_executable_with_the_mix_task_and_runs_it_clean() {
     let erts = erts_release_response(&release);
     fs::remove_dir_all(&directory).unwrap();
     let response = response.unwrap_or_else(|error| {
-        let text = |bytes: &Arc<Mutex<Vec<u8>>>| {
-            String::from_utf8_lossy(&bytes.lock().unwrap()).into_owned()
-        };
         panic!(
             "the clean run on port {port}: {error}\nstatus: {status:?}\nstdout: {}\nstderr: {}",
             text(&stdout),
@@ -318,7 +423,12 @@ fn erts_release_response(release: &std::path::Path) -> (String, String, String) 
     let status = stop_with_term(child);
     stdout_reader.join().unwrap();
     stderr_reader.join().unwrap();
-    assert!(status.success(), "the ERTS release exits 0: {status:?}");
+    assert!(
+        status.success(),
+        "the ERTS release exits 0: {status:?}\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&stdout.lock().unwrap()),
+        String::from_utf8_lossy(&stderr.lock().unwrap())
+    );
     response.unwrap_or_else(|error| {
         panic!(
             "the ERTS release on port {port}: {error}\nstdout: {}\nstderr: {}",
@@ -336,34 +446,7 @@ fn serve_one_file() -> (String, String, String) {
     let temporary = directory.join("tmp");
     fs::create_dir_all(&clean).unwrap();
     fs::create_dir_all(&temporary).unwrap();
-    let start = directory.join("start.list");
-    let status = Command::new("bash")
-        .arg("scripts/example.sh")
-        .args(["plug_hello", "--no-build", "--write-start"])
-        .arg(&start)
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .status()
-        .expect("scripts/example.sh runs");
-    assert!(status.success(), "the start list builds");
-    let bundle = directory.join("plug_hello.pbeamb");
-    let status = Command::new(env!("CARGO_BIN_EXE_pbeam_bundle"))
-        .arg("bundle")
-        .arg(release_directory())
-        .arg(&bundle)
-        .args(["elixir", "start_cli"])
-        .arg(&start)
-        .status()
-        .expect("pbeam_bundle runs");
-    assert!(status.success(), "the bundle builds");
-    let output = clean.join("plug_hello");
-    let status = Command::new(env!("CARGO_BIN_EXE_pbeam_bundle"))
-        .arg("executable")
-        .arg(env!("CARGO_BIN_EXE_pbeam"))
-        .arg(&bundle)
-        .arg(&output)
-        .status()
-        .expect("pbeam_bundle runs");
-    assert!(status.success(), "the executable builds");
+    let output = build_one_file(&directory, &clean);
     let port = free_port();
     let mut child = without_erl_flags(&mut Command::new(&output))
         .current_dir(&clean)
@@ -396,7 +479,9 @@ fn serve_one_file() -> (String, String, String) {
     // ERTS.
     assert!(
         status.success(),
-        "the one-file run exits 0 after SIGTERM: {status:?}"
+        "the one-file run exits 0 after SIGTERM: {status:?}\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&stdout.lock().unwrap()),
+        String::from_utf8_lossy(&stderr.lock().unwrap())
     );
     let one_file_stdout = String::from_utf8_lossy(&stdout.lock().unwrap()).into_owned();
     let notice = shutdown_notice(&one_file_stdout);
@@ -418,6 +503,40 @@ fn serve_one_file() -> (String, String, String) {
             text(&stderr)
         )
     })
+}
+
+/// Build `examples/plug_hello` as one executable `clean/plug_hello`, with
+/// the work files in `directory`, and return its path.
+fn build_one_file(directory: &std::path::Path, clean: &std::path::Path) -> PathBuf {
+    let start = directory.join("start.list");
+    let status = Command::new("bash")
+        .arg("scripts/example.sh")
+        .args(["plug_hello", "--no-build", "--write-start"])
+        .arg(&start)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .status()
+        .expect("scripts/example.sh runs");
+    assert!(status.success(), "the start list builds");
+    let bundle = directory.join("plug_hello.pbeamb");
+    let status = Command::new(env!("CARGO_BIN_EXE_pbeam_bundle"))
+        .arg("bundle")
+        .arg(release_directory())
+        .arg(&bundle)
+        .args(["elixir", "start_cli"])
+        .arg(&start)
+        .status()
+        .expect("pbeam_bundle runs");
+    assert!(status.success(), "the bundle builds");
+    let output = clean.join("plug_hello");
+    let status = Command::new(env!("CARGO_BIN_EXE_pbeam_bundle"))
+        .arg("executable")
+        .arg(env!("CARGO_BIN_EXE_pbeam"))
+        .arg(&bundle)
+        .arg(&output)
+        .status()
+        .expect("pbeam_bundle runs");
+    assert!(status.success(), "the executable builds");
+    output
 }
 
 /// Send `SIGTERM` to the process group of the run, and wait for the run.

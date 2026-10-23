@@ -1,6 +1,7 @@
 -module(effect_probe).
 
 -include_lib("kernel/include/file.hrl").
+-compile({nowarn_deprecated_function, [{erlang, now, 0}]}).
 -export([
     spawn/0,
     spawn_system_process/0,
@@ -62,6 +63,8 @@
     pt_get1/0,
     pt_get2/0,
     pt_put/0,
+    pt_put_new/0,
+    pt_info/0,
     pt_erase/0,
     permitted/0,
     runtime_permitted/0,
@@ -281,11 +284,15 @@ other(Call) ->
 %% the check raises badarg.
 pt_get0() -> attempt(fun() -> persistent_term:get() end).
 
+pt_info() -> attempt(fun() -> persistent_term:info() end).
+
 pt_get1() -> attempt(fun() -> persistent_term:get({?MODULE, missing}) end).
 
 pt_get2() -> attempt(fun() -> persistent_term:get({?MODULE, missing}, none) end).
 
 pt_put() -> attempt(fun() -> persistent_term:put({?MODULE, put}, 1) end).
+
+pt_put_new() -> attempt(fun() -> persistent_term:put_new({?MODULE, put_new}, 1) end).
 
 pt_erase() -> attempt(fun() -> persistent_term:erase({?MODULE, put}) end).
 
@@ -585,6 +592,7 @@ ambient() ->
         time(erlang:time()),
         date_time(erlang:localtime()),
         date_time(erlang:universaltime()),
+        timestamp(erlang:now()),
         integer(os:system_time()),
         timestamp(os:timestamp()),
         integer(os:perf_counter()),
