@@ -976,7 +976,6 @@ fn pbeam_probe(probe: &str, module: &str, function: &str, flags: &[&str]) -> Com
         .args(["--pa", CODE_PATH])
         .args(flags)
         .arg("--")
-        .arg(format!("{probe}.beam"))
         .arg(boot_beam())
         .args(
             BOOT_MODULES
@@ -984,7 +983,10 @@ fn pbeam_probe(probe: &str, module: &str, function: &str, flags: &[&str]) -> Com
                 .chain(&CODE_SERVER_MODULES)
                 .chain(&KERNEL_START_MODULES)
                 .map(|module| pinned_beam_path(module)),
-        );
+        )
+        // ERTS loads the probe on demand after the boot modules, so the
+        // probe comes last and its atoms take the higher indexes.
+        .arg(format!("{probe}.beam"));
     command
 }
 

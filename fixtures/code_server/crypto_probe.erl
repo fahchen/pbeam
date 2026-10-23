@@ -176,11 +176,9 @@ xof_sizes() ->
 %% libcrypto of the Linux CI host also has the legacy ciphers.
 cipher_order() ->
     Run = run_ciphers() ++ [aes_cbc, aes_ccm, aes_cfb128, aes_cfb8, aes_ctr, aes_ecb, aes_gcm],
-    %% ERTS makes the atom des_ede3_cbc at boot, which PBeam does not run (row
-    %% "Atom table" of docs/erts-differences.md), so the probe prints it apart.
     Order = [C || C <- crypto:supports(ciphers), lists:member(C, Run)],
     %% Run has no sm4_gcm and sm4_ccm, which the Linux CI host does not list.
-    io:format("~p~n", [{Order -- [des_ede3_cbc], lists:member(des_ede3_cbc, Order)}]).
+    io:format("~p~n", [Order]).
 
 %% The ciphers of the table cipher.c:30-173 that the OpenSSL 3 default
 %% provider has and that the libcrypto of the Linux CI host also has. The
