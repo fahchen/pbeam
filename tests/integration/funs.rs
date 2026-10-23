@@ -294,7 +294,7 @@ fn gives_fun_information_as_pinned_erts() {
             ]),
         ),
         pair("refc", Term::Integer(1)),
-        pair("uniq", Term::Integer(133_604_777)),
+        pair("uniq", Term::Integer(45_737_141)),
         pair("new_index", Term::Integer(6)),
         pair("type", atom("local")),
         pair("module", atom("fun_probe")),
@@ -302,7 +302,7 @@ fn gives_fun_information_as_pinned_erts() {
         pair("arity", Term::Integer(0)),
         pair("env", Term::nil()),
         pair("refc", Term::Integer(1)),
-        pair("uniq", Term::Integer(133_604_777)),
+        pair("uniq", Term::Integer(45_737_141)),
         pair("new_index", Term::Integer(7)),
         pair("type", atom("external")),
         pair("module", atom("lists")),
@@ -324,9 +324,9 @@ fn gives_fun_information_as_pinned_erts() {
     assert_eq!(
         reference("infos"),
         b"[{type,local},{module,fun_probe},{name,'-infos/0-fun-0-'},\
-          {arity,1},{env,[7,{a,b}]},{refc,1},{uniq,133604777},{new_index,6},\
+          {arity,1},{env,[7,{a,b}]},{refc,1},{uniq,45737141},{new_index,6},\
           {type,local},{module,fun_probe},{name,'-infos/0-fun-1-'},\
-          {arity,0},{env,[]},{refc,1},{uniq,133604777},{new_index,7},\
+          {arity,0},{env,[]},{refc,1},{uniq,45737141},{new_index,7},\
           {type,external},{module,lists},{name,reverse},\
           {arity,1},{env,[]},{refc,undefined},{index,undefined},\
           {new_index,undefined},{uniq,undefined},{new_uniq,undefined},\
@@ -408,11 +408,11 @@ fn prints_funs_as_pinned_erts() {
     let mut beams: Vec<&[u8]> = modules.iter().map(Vec::as_slice).collect();
     beams.push(FUN_PROBE);
     let program = BeamProgram::load(&beams).unwrap();
-    let local = "#Fun<fun_probe.10.133604777>";
+    let local = "#Fun<fun_probe.10.45737141>";
     let both = format!("{local} {local}");
     let texts = [
         local,
-        "#Fun<fun_probe.11.133604777>",
+        "#Fun<fun_probe.11.45737141>",
         "fun lists:reverse/1",
         "fun 'A b':'c d'/0",
         "fun no_such_module:f/3",
@@ -468,5 +468,34 @@ fn prints_the_fun_entry_position_as_pinned_erts() {
     assert_eq!(
         String::from_utf8(reference_of("fun_index", "texts")).unwrap(),
         format!("[{}]\n", codes.join(","))
+    );
+}
+
+#[test]
+fn gives_the_mfa_of_funs_as_pinned_erts() {
+    // `fun_info_mfa_1` gives `{Module, Name, Arity}` of a local fun from
+    // the function of its fun entry and of an external fun from its export
+    // entry, also of a module that is not loaded, and raises `badarg` for a
+    // term that is not a fun (`erl_bif_info.c:4011-4047`). The arity of a
+    // local fun leaves out its free variables.
+    let program = BeamProgram::load(&[FUN_PROBE]).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let mfa = |module: &str, name: &str, arity: i64| {
+        Term::tuple(vec![atom(module), atom(name), Term::Integer(arity)])
+    };
+    assert_eq!(
+        program.execute("fun_probe", "info_mfas", &[]).unwrap().term,
+        Term::list_from(vec![
+            mfa("fun_probe", "-info_mfas/0-fun-0-", 2),
+            mfa("fun_probe", "-info_mfas/0-fun-1-", 0),
+            mfa("lists", "reverse", 1),
+            mfa("no_such_module", "f", 3),
+            atom("badarg"),
+        ])
+    );
+    assert_eq!(
+        reference("info_mfas"),
+        b"[{fun_probe,'-info_mfas/0-fun-0-',2},{fun_probe,'-info_mfas/0-fun-1-',0},\
+          {lists,reverse,1},{no_such_module,f,3},badarg]\n"
     );
 }

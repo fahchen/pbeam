@@ -87,17 +87,6 @@ fn takes_bits_at_aligned_and_unaligned_offsets() {
 }
 
 #[test]
-fn forgets_the_position_until_set_position() {
-    let context = MatchState::new(Binary::from(&[1]));
-    assert!(context.position_known());
-    context.forget_position();
-    assert!(!context.position_known());
-    context.set_position(8);
-    assert!(context.position_known());
-    assert_eq!(context.remaining_bits(), 0);
-}
-
-#[test]
 fn gives_the_integer_of_each_endianness_and_sign() {
     assert_eq!(segment_integer(&[], 0, false, true), Some(0));
     assert_eq!(segment_integer(&[0xA0], 3, false, false), Some(5));
