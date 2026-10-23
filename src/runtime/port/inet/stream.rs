@@ -109,6 +109,15 @@ pub(in crate::runtime) enum Event {
         /// The bytes, or the error name.
         result: Result<Vec<u8>, String>,
     },
+    /// `{inet_async, S, Ref, ok}` or `{inet_async, S, Ref, {error,
+    /// Reason}}` of the connect of `connector` (`async_ok` and
+    /// `async_error`, inet_drv.c:2563-2572).
+    Connected {
+        /// The connect that ends.
+        connector: Receiver,
+        /// `Ok` or the error name.
+        result: Result<(), String>,
+    },
     /// `{inet_reply, S, ok, Tag}` or `{inet_reply, S, {error, Reason},
     /// Tag}` of the send of `sender`.
     Replied {
@@ -193,6 +202,8 @@ pub(in crate::runtime) struct Stream {
     remain: usize,
     /// The receive that waits for data.
     pub(in crate::runtime) receiver: Option<Receiver>,
+    /// The connect that waits for the write select of the socket.
+    pub(in crate::runtime) connector: Option<Receiver>,
     /// The bytes that the socket did not take yet (the queue of the port).
     output: VecDeque<u8>,
     /// The send that waits until the queue is small (`INET_F_BUSY`).
@@ -232,6 +243,7 @@ impl Stream {
             input_size: 0,
             remain: 0,
             receiver: None,
+            connector: None,
             output: VecDeque::new(),
             busy: None,
             subscribers: Vec::new(),
@@ -516,7 +528,7 @@ impl Inet {
     /// Close the socket and drop the buffers, as `tcp_desc_close` does
     /// (inet_drv.c:11932-11937, 5053-5080), and return `{empty_out_q, S}`
     /// for the subscribers. The port stays open.
-    fn close_socket(&mut self) -> Vec<Event> {
+    pub(super) fn close_socket(&mut self) -> Vec<Event> {
         self.socket = None;
         self.state = State::Closed;
         self.stream.ended = true;
@@ -599,8 +611,12 @@ impl Inet {
     /// does (inet_drv.c:14234-14370), and return the messages: the reply of
     /// the send that waits when the queue holds 4096 bytes or fewer, then
     /// `{empty_out_q, S}` when the queue is empty (inet_drv.c:14301-14306),
-    /// or the end of the socket after a failed write.
+    /// or the end of the socket after a failed write. A socket that
+    /// connects ends its connect instead (see [`Self::connect_ready`]).
     pub(in crate::runtime) fn send_ready(&mut self) -> Vec<Event> {
+        if self.state == State::Connecting {
+            return self.connect_ready();
+        }
         let mut events = Vec::new();
         while !self.stream.output.is_empty() {
             let socket = self
@@ -673,10 +689,12 @@ impl Inet {
     }
 
     /// Return the fd of a socket with queued output (`sock_select(desc,
-    /// FD_WRITE, 1)`, inet_drv.c:13846), else `None`.
+    /// FD_WRITE, 1)`, inet_drv.c:13846) or that connects (`sock_select(desc,
+    /// FD_CONNECT, 1)`, inet_drv.c:12109), else `None`.
     pub(in crate::runtime) fn send_fd(&self) -> Option<c_int> {
         let socket = self.socket.as_ref()?;
-        (!self.stream.output.is_empty()).then(|| socket.as_raw_fd())
+        (!self.stream.output.is_empty() || self.state == State::Connecting)
+            .then(|| socket.as_raw_fd())
     }
 
     /// Return the term of received `bytes` in the `mode` of the port: a

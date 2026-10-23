@@ -923,6 +923,7 @@ pub(super) fn port_control(
     let reply = match tcp.control(command, &bytes, caller)? {
         Control::Reply(reply) => Accept::Queued(reply),
         Control::Accept(timeout) => scheduler.tcp_accept(id, tcp, timeout)?,
+        Control::Connect(timeout) => Accept::Queued(scheduler.tcp_connect(id, tcp, timeout)),
         Control::Receive { timeout, length } => {
             let (reply, received) = scheduler.tcp_receive(id, tcp, timeout, length);
             events = Some(received);
