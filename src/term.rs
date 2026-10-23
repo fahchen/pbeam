@@ -1087,15 +1087,14 @@ fn write_debug(term: &Term, atoms: Option<&AtomTable>, out: &mut impl fmt::Write
             }
             Term::Record(record) => {
                 let def = record.def();
-                match atoms {
-                    Some(atoms) => write!(
-                        out,
-                        "Record({}:{}, [",
-                        atoms.name_of(&def.module),
-                        atoms.name_of(&def.name)
-                    )?,
-                    None => write!(out, "Record({}:{}, [", def.module.index(), def.name.index())?,
-                }
+                let (module, name) = match atoms {
+                    Some(atoms) => (
+                        atoms.name_of(&def.module).to_owned(),
+                        atoms.name_of(&def.name).to_owned(),
+                    ),
+                    None => (def.module.index().to_string(), def.name.index().to_string()),
+                };
+                write!(out, "Record({module}:{name}, [")?;
                 items.push(Item::Text("])"));
                 for (index, element) in record.values().iter().enumerate().rev() {
                     items.push(Item::Term(element));
