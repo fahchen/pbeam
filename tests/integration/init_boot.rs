@@ -393,7 +393,7 @@ fn opens_binds_and_closes_sockets_at_the_kernel_boot_as_pinned_erts() {
     let (reference, status, node) = run_kernel_boot("socket", false, &["{socket,"]);
     assert_eq!(status, Some(0), "ERTS");
     assert!(
-        reference.starts_with("{socket,[#{owner=>false,"),
+        reference.starts_with("{socket,[#{num_cnt_bits=>64,"),
         "{reference}"
     );
     assert_eq!(node, reference, "PBeam");
