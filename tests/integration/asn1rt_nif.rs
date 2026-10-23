@@ -55,12 +55,11 @@ fn gives_the_results_of_the_pinned_erts_for_each_asn1rt_nif_function() {
 }
 
 #[test]
-fn stops_the_ber_decode_at_the_nesting_depth_of_the_pinned_erts() {
+fn stops_the_run_for_a_ber_nesting_deeper_than_each_pinned_erts_build_decodes() {
     // ERTS stops `ber_decode_value` at a stack distance of 8192 pointer
-    // words (asn1_erl_nif.c:954-958): 453 nested values decode, and 454
-    // give `unknown` at the index of the innermost length.
-    // The limit depends on the frame size of the compiled C code, so the
-    // test checks it on the pinned ERTS of each CI host.
+    // words (asn1_erl_nif.c:954-958), so the depth of its `unknown` error
+    // depends on the build. Each pinned ERTS host decodes 453 nested
+    // values, and PBeam stops the run for a deeper input.
     let output = Command::new("erl")
         .args([
             "-noshell",
@@ -68,22 +67,27 @@ fn stops_the_ber_decode_at_the_nesting_depth_of_the_pinned_erts() {
             "fixtures/asn1_codec",
             "-eval",
             "L = filename:join([code:priv_dir(asn1), \"lib\", \"asn1rt_nif\"]), \
-             io:format(\"~s ~s~n\", [asn1_probe:nested_text(L, 453), asn1_probe:nested_text(L, 454)]), halt().",
+             io:format(\"~s~n\", [asn1_probe:nested_text(L, 453)]), halt().",
         ])
         .output()
         .unwrap();
-    assert_eq!(
-        String::from_utf8(output.stdout).unwrap(),
-        "decoded unknown 909\n"
-    );
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "decoded\n");
     let program = program();
     assert_eq!(
         run(&program, "nested_text", &[Term::Integer(453)]),
         "decoded"
     );
+    let arguments = [
+        program.host_term(Term::binary(b"asn1rt_nif".to_vec())),
+        program.host_term(Term::Integer(454)),
+    ];
+    let error = program
+        .execute("asn1_probe", "nested_text", &arguments)
+        .unwrap_err()
+        .to_string();
     assert_eq!(
-        run(&program, "nested_text", &[Term::Integer(454)]),
-        "unknown 909"
+        error,
+        "asn1rt_nif:decode_ber_tlv_raw/1 nests more than 453 values, where the ERTS result depends on the C stack frame size of the build, which PBeam does not support"
     );
 }
 

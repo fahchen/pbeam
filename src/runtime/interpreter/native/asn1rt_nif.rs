@@ -474,11 +474,18 @@ fn per_complete(input: &[u8], truncated: &mut bool) -> Option<Vec<u8>> {
     Some(per.out)
 }
 
-/// The deepest nesting of `ber_decode_value` that the pinned ERTS decodes.
-/// The C function stops at a stack distance of 8192 pointer words
-/// (`asn1_erl_nif.c:954-958`), which is the call depth 455 of the pinned
-/// ERTS on aarch64-apple-darwin.
+/// The deepest nesting of `ber_decode_value` that PBeam decodes. The C
+/// function stops at a stack distance of 8192 pointer words
+/// (`asn1_erl_nif.c:954-958`), so the depth of the `unknown` error depends
+/// on the stack frame size of the ERTS build: the pinned ERTS on
+/// aarch64-apple-darwin decodes 454 calls and stops at 455, and the pinned
+/// ERTS on x86_64 Linux decodes more. PBeam decodes the depth that each
+/// build decodes and stops the run for a deeper input.
 const MAX_DECODE_DEPTH: u32 = 454;
+
+/// The reason of [`BerError`] for an input that nests deeper than
+/// [`MAX_DECODE_DEPTH`].
+const TOO_DEEP: &str = "too_deep";
 
 /// A BER decode error: the return code and the index `ib_index` at the
 /// error (`asn1_erl_nif.c:848-853`).
@@ -553,7 +560,7 @@ impl Ber<'_> {
         depth: u32,
     ) -> Result<Term, BerError> {
         if depth > MAX_DECODE_DEPTH {
-            return self.fail("unknown");
+            return self.fail(TOO_DEEP);
         }
         let first = self.input[self.ib];
         let mut len = 0usize;
@@ -630,6 +637,11 @@ fn decode_ber_tlv_raw(scheduler: &mut Scheduler, data: &Term) -> Result<BifResul
             let rest = Term::binary(input[ber.ib..].to_vec());
             Ok(BifResult::Value(Term::tuple(vec![term, rest])))
         }
+        Err(BerError {
+            reason: TOO_DEEP, ..
+        }) => Err(error(
+            "asn1rt_nif:decode_ber_tlv_raw/1 nests more than 453 values, where the ERTS result depends on the C stack frame size of the build, which PBeam does not support",
+        )),
         Err(BerError { reason, position }) => {
             let reason = Term::Atom(scheduler.atoms.put(reason)?);
             let detail = Term::tuple(vec![reason, Term::Integer(position as i64)]);
