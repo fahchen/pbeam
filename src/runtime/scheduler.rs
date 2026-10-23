@@ -1227,6 +1227,9 @@ impl Scheduler {
                 Timer::Accept { port, caller, key } => {
                     self.tcp_accept_timeout(port, caller, (self.index, key));
                 }
+                Timer::Connect { port, key } => {
+                    self.tcp_connect_timeout(port, (self.index, key));
+                }
                 Timer::SocketReceive { port, key } => {
                     self.tcp_receive_timeout(port, (self.index, key));
                 }
