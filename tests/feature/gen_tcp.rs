@@ -209,17 +209,26 @@ fn connects_ipv6_sockets_and_binds_the_address_tags_as_pinned_erts() {
     // `inet6` listen, connect, and accept on `::1`, the names of each
     // socket, `ipv6_v6only` on an IPv6 and an IPv4 socket, and a bind to
     // `any` and `loopback` of both families (inet_drv.c:4706-4913,
-    // 7806-7823, 9538-9552, 11969-11984).
-    assert_connect_runs(
-        "ipv6",
-        "[[true,{0,0,0,0,0,0,0,1},true,{0,0,0,0,0,0,0,1},true,{0,0,0,0,0,0,0,1}],\
-         [ok,{ok,<<104,105>>}],[{ok,[{ipv6_v6only,false}]},{ok,[{ipv6_v6only,false}]}],\
+    // 7806-7823, 9538-9552, 11969-11984). Neither OTP nor PBeam sets
+    // `IPV6_V6ONLY` on a socket that does not ask for it, so both read the
+    // host default: `net.ipv6.bindv6only` on Linux, off on macOS.
+    let only = if cfg!(target_os = "linux") {
+        std::fs::read_to_string("/proc/sys/net/ipv6/bindv6only")
+            .unwrap()
+            .trim()
+            == "1"
+    } else {
+        false
+    };
+    let expected = "[[true,{0,0,0,0,0,0,0,1},true,{0,0,0,0,0,0,0,1},true,{0,0,0,0,0,0,0,1}],\
+         [ok,{ok,<<104,105>>}],[{ok,[{ipv6_v6only,ONLY}]},{ok,[{ipv6_v6only,ONLY}]}],\
          [{ok,[{ipv6_v6only,true}]},{ok,[]},{error,einval}],\
          [{0,0,0,0,0,0,0,0},{0,0,0,0,0,0,0,0},{0,0,0,0,0,0,0,1},{0,0,0,0},{127,0,0,1}],\
          [[0,101,105,110,118,97,108],[0,101,105,110,118,97,108]],\
          [{0,0,0,0},{127,0,0,1},{0,0,0,0,0,0,0,0},{0,0,0,0,0,0,0,1}],\
-         [ok,{ok,[{tclass,8},{recvtclass,true}]}],[]]\n",
-    );
+         [ok,{ok,[{tclass,8},{recvtclass,true}]}],[]]\n"
+        .replace("ONLY", &only.to_string());
+    assert_connect_runs("ipv6", &expected);
 }
 
 /// Run `gen_tcp_connect:Function()` on the pinned ERTS and on PBeam, as
