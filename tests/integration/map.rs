@@ -1390,6 +1390,35 @@ fn runs_map_operations_with_binaries_in_compound_keys_as_pinned_erts() {
     );
 }
 
+const BITSTRING_KEY_PROBE: &[u8] = include_bytes!("../../fixtures/map/bitstring_key_probe.beam");
+
+#[test]
+fn runs_map_operations_with_bitstring_keys_as_pinned_erts() {
+    // Top-level bitstring keys of 1 to 403 bits, a sub-bitstring of a refc
+    // binary, and unaligned sub-bitstrings, in a flatmap of 13 keys and in a
+    // hashmap of 46 keys. The binary path of `make_internal_hash` hashes the
+    // trailing bits of a bitstring. `encoded/0` returns the external term
+    // format of the keys, the pairs, and the lookups, so each byte of the
+    // two runs must be equal.
+    let erlang = pinned_beam("erlang");
+    let program = BeamProgram::load(&[&erlang, BITSTRING_KEY_PROBE]).unwrap();
+    let encoded = program
+        .execute("bitstring_key_probe", "encoded", &[])
+        .unwrap()
+        .term;
+    let Term::Binary(bytes) = &encoded else {
+        panic!("encoded/0 returns a binary");
+    };
+    let pbeam: Vec<String> = bytes.bytes().unwrap().iter().map(u8::to_string).collect();
+    assert_eq!(
+        String::from_utf8(erl_reference(
+            "io:format(\"~w~n\", [binary_to_list(bitstring_key_probe:encoded())])"
+        ))
+        .unwrap(),
+        format!("[{}]\n", pbeam.join(","))
+    );
+}
+
 const FUN_KEY_PROBE: &[u8] = include_bytes!("../../fixtures/map/fun_key_probe.beam");
 
 #[test]
