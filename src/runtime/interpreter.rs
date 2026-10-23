@@ -3037,10 +3037,12 @@ impl BeamProgram {
             };
             // A tail apply or a tail fun call removed the frame of the
             // caller in ERTS, so its return address is in the function
-            // before it.
+            // before it. A trap keeps the call for an error after the trap.
             let result = if matches!(
                 result,
-                BifResult::Raise { .. } | BifResult::ErrorWithCause { .. }
+                BifResult::Raise { .. }
+                    | BifResult::ErrorWithCause { .. }
+                    | BifResult::TrapBif { .. }
             ) {
                 let (module_name, name) = {
                     let atoms = &scheduler.atoms;
