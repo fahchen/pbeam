@@ -2777,12 +2777,15 @@ fn gives_an_invariant_error_for_a_match_context_outside_binary_matching() {
     };
     let escape = "invariant error: the match context in X(0) reached an instruction that \
                   is not a binary match";
-    // `swap` of a match context is not implemented yet.
+    assert_eq!(run(vec![erlang_call("hd", 1, false)]), escape);
     assert_eq!(
-        run(vec![Instruction::Swap(Operand::X(0), Operand::X(1))]),
+        run(vec![Instruction::TestFunctionArity {
+            fail_label: 1,
+            value: Operand::X(0),
+            arity: Operand::Value(Term::Integer(1)),
+        }]),
         escape
     );
-    assert_eq!(run(vec![erlang_call("hd", 1, false)]), escape);
     assert_eq!(
         run(vec![Instruction::Bif {
             fail_label: 0,
@@ -2946,6 +2949,7 @@ fn run_binary_match(
             fail_label: 3,
             context: Operand::X(0),
             commands,
+            test_heap: false,
         },
     ];
     body.extend(then);
@@ -2997,104 +3001,192 @@ fn gives_the_byte_size_of_a_match_context_from_its_position() {
     assert_eq!(size(24), Ok(Term::Integer(0)));
 }
 
-/// A failed `=:=` command of `bs_match` leaves the position unknown until
-/// `bs_set_position`. ERTS has it at the end of the read of the command
-/// (jit/arm/instr_bs.cpp:2995-3045), which PBeam does not model.
+/// A failed `=:=` command of `bs_match` leaves the position at the end of
+/// the JIT read that holds it (`beam_jit_opt_bsm_segments`,
+/// jit/beam_jit_bs.cpp:366-521; jit/arm/instr_bs.cpp:2995-3045). The
+/// values are those of the same instructions, assembled with the pinned
+/// `erlc` from a `.S` file, on the pinned ERTS.
 #[test]
-fn gives_a_runtime_error_for_a_read_after_a_failed_equal_command() {
-    let unit = std::num::NonZeroU64::new(8).unwrap();
-    let skip = BinaryMatchCommand::Skip { size: 8 };
-    let byte = |destination| BinaryMatchCommand::Integer {
+fn sets_the_position_after_a_failed_equal_command_as_the_jit_read() {
+    let ensure = |size| BinaryMatchCommand::EnsureAtLeast {
+        size,
+        unit: std::num::NonZeroU64::new(1).unwrap(),
+    };
+    let equal = |size| BinaryMatchCommand::Equal { size, value: 1 };
+    let skip = |size| BinaryMatchCommand::Skip { size };
+    let byte = || BinaryMatchCommand::Integer {
         size: 8,
         little: false,
         signed: false,
-        destination,
+        destination: Operand::X(2),
     };
-    // `bs_get_position` x0 x1 before the match, and `bs_set_position` x0
-    // x1 at the fail label, as the compiler restores the position.
-    let restore = |rest: Vec<Instruction>| {
-        let mut body = vec![
-            Instruction::Move(Operand::Value(Term::binary(vec![7, 8])), Operand::X(0)),
-            Instruction::BinaryMatchStart {
-                fail_label: 1,
-                source: Operand::X(0),
-                destination: Operand::X(0),
-            },
-            Instruction::BinaryGetPosition {
-                context: Operand::X(0),
-                destination: Operand::X(1),
-            },
-            Instruction::BinaryMatch {
-                fail_label: 3,
-                context: Operand::X(0),
-                commands: vec![
-                    BinaryMatchCommand::EnsureAtLeast { size: 16, unit },
-                    BinaryMatchCommand::Equal { size: 8, value: 1 },
-                ],
-            },
-            Instruction::Move(atom("matched"), Operand::X(0)),
-            Instruction::Return,
-            Instruction::Label(3),
-        ];
-        body.extend(rest);
-        make_program(body, 0)
-            .execute("fixture", "main", &[])
-            .map(|host| host.term)
-            .map_err(|error| error.to_string())
+    let tail = || BinaryMatchCommand::GetTail {
+        destination: Operand::X(3),
     };
-    assert_eq!(
-        restore(vec![
-            Instruction::BinarySetPosition {
-                context: Operand::X(0),
-                position: Operand::X(1),
-            },
-            Instruction::BinaryMatch {
-                fail_label: 1,
-                context: Operand::X(0),
-                commands: vec![byte(Operand::X(0))],
-            },
-            Instruction::Return,
-        ]),
-        Ok(Term::Integer(7))
-    );
-    assert_eq!(
-        restore(vec![Instruction::BinaryMatch {
-            fail_label: 1,
-            context: Operand::X(0),
-            commands: vec![skip],
-        }]),
-        Err(
-            "unsupported read of the match context in X(0) after a failed bs_match =:= command"
-                .into()
+    // Run the commands on `bytes` and return the position at the fail
+    // label.
+    let position = |bytes: &[u8], commands, test_heap| {
+        make_program(
+            vec![
+                Instruction::Move(Operand::Value(Term::binary(bytes.to_vec())), Operand::X(0)),
+                Instruction::BinaryMatchStart {
+                    fail_label: 1,
+                    source: Operand::X(0),
+                    destination: Operand::X(1),
+                },
+                Instruction::BinaryMatch {
+                    fail_label: 3,
+                    context: Operand::X(1),
+                    commands,
+                    test_heap,
+                },
+                Instruction::Move(atom("matched"), Operand::X(0)),
+                Instruction::Return,
+                Instruction::Label(3),
+                Instruction::BinaryGetPosition {
+                    context: Operand::X(1),
+                    destination: Operand::X(0),
+                },
+                Instruction::Return,
+            ],
+            0,
         )
-    );
+        .execute("fixture", "main", &[])
+        .map(|host| host.term)
+        .map_err(|error| error.to_string())
+    };
+    // `get_tail` needs heap, so the integer starts a new read: 8.
     assert_eq!(
-        restore(vec![byte_size(Operand::X(0))]),
-        Err(
-            "unsupported read of the match context in X(0) after a failed bs_match =:= command"
-                .into()
-        )
+        position(
+            &[0, 1, 2],
+            vec![ensure(24), equal(8), byte(), tail()],
+            false
+        ),
+        Ok(Term::Integer(8))
+    );
+    // The integer and the skip join the read of the `=:=`: 24.
+    assert_eq!(
+        position(
+            &[0, 1, 2],
+            vec![ensure(24), equal(8), byte(), skip(8)],
+            false
+        ),
+        Ok(Term::Integer(24))
+    );
+    // A fused `test_heap` starts a new read at the integer: 8.
+    assert_eq!(
+        position(
+            &[0, 1, 2],
+            vec![ensure(24), equal(8), byte(), skip(8)],
+            true
+        ),
+        Ok(Term::Integer(8))
+    );
+    // The `=:=` joins the read of the integer before it: 16.
+    assert_eq!(
+        position(&[1, 0], vec![ensure(16), byte(), equal(8)], true),
+        Ok(Term::Integer(16))
+    );
+    // 32 and 40 bits do not fit in one read of 64 bits: 32.
+    assert_eq!(
+        position(&[0; 9], vec![ensure(72), equal(32), equal(40)], false),
+        Ok(Term::Integer(32))
+    );
+    // A skip with no open read does not read, and a later skip joins the
+    // read of the `=:=`: 24.
+    assert_eq!(
+        position(&[0; 3], vec![ensure(24), skip(8), equal(8), skip(8)], false),
+        Ok(Term::Integer(24))
+    );
+    // A `binary` segment of more than 64 bits closes the read: 8.
+    assert_eq!(
+        position(
+            &[0; 11],
+            vec![
+                ensure(80),
+                equal(8),
+                BinaryMatchCommand::Binary {
+                    size: 72,
+                    destination: Operand::X(2),
+                },
+            ],
+            false
+        ),
+        Ok(Term::Integer(8))
+    );
+    // A skip that does not fit closes the read: 8.
+    assert_eq!(
+        position(&[0; 10], vec![ensure(80), equal(8), skip(72)], false),
+        Ok(Term::Integer(8))
+    );
+    // An ensure command closes the read: 8.
+    assert_eq!(
+        position(
+            &[0; 2],
+            vec![ensure(16), equal(8), ensure(8), skip(8)],
+            false
+        ),
+        Ok(Term::Integer(8))
     );
     // A successful `=:=` moves the position, and an ensure command that
     // fails jumps to the fail label.
     assert_eq!(
-        run_binary_match(
-            &[1, 2],
-            vec![
-                BinaryMatchCommand::Equal { size: 8, value: 1 },
-                byte(Operand::X(0))
-            ],
-            vec![Instruction::Return]
-        ),
-        Ok(Term::Integer(2))
+        position(&[1, 1], vec![ensure(16), equal(8), equal(8)], false),
+        Ok(test_atom("matched"))
     );
     assert_eq!(
-        run_binary_match(
-            &[1],
-            vec![BinaryMatchCommand::EnsureAtLeast { size: 16, unit }],
-            vec![Instruction::Return]
-        ),
-        Ok(test_atom("failed"))
+        position(&[1], vec![ensure(16)], false),
+        Ok(Term::Integer(0))
+    );
+}
+
+/// `swap` copies a match context (beam_validator.erl:2783-2785), and
+/// `bit_size/1` and `byte_size/1` give its size from its position. On the
+/// pinned ERTS, the `.S` function that runs these instructions on
+/// `<<1,2,3>>` gives `{5,20,3}`.
+#[test]
+fn swaps_a_match_context() {
+    let size = |bif, destination| Instruction::Bif {
+        fail_label: 0,
+        bif,
+        arguments: vec![Operand::X(0)],
+        destination,
+    };
+    let result = make_program(
+        vec![
+            Instruction::Move(Operand::Value(Term::binary(vec![1, 2, 3])), Operand::X(0)),
+            Instruction::BinaryMatchStart {
+                fail_label: 1,
+                source: Operand::X(0),
+                destination: Operand::X(1),
+            },
+            Instruction::Move(Operand::Value(Term::Integer(5)), Operand::X(0)),
+            Instruction::Swap(Operand::X(0), Operand::X(1)),
+            Instruction::BinarySkipBits {
+                fail_label: 1,
+                context: Operand::X(0),
+                size: Operand::Value(Term::Integer(4)),
+                unit: 1,
+            },
+            size(BifId::ErlangBitSize1, Operand::X(2)),
+            size(BifId::ErlangByteSize1, Operand::X(3)),
+            Instruction::PutTuple {
+                destination: Operand::X(0),
+                elements: vec![Operand::X(1), Operand::X(2), Operand::X(3)],
+            },
+            Instruction::Return,
+        ],
+        0,
+    )
+    .execute("fixture", "main", &[])
+    .map(|host| host.term);
+    assert_eq!(
+        result.map_err(|error| error.to_string()),
+        Ok(Term::tuple(vec![
+            Term::Integer(5),
+            Term::Integer(20),
+            Term::Integer(3)
+        ]))
     );
 }
 

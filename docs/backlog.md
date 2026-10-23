@@ -147,13 +147,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a measured path depends on the turn in which a timer expires while other processes run.
 - **Source:** #229 (PR #236).
 
-### Run the other binary-match instructions
-
-- PBeam runs `bs_start_match3`, `bs_start_match4`, `bs_get_position`, `bs_set_position`, `bs_get_utf8`, `bs_skip_utf8`, `bs_get_utf16`, `bs_skip_utf16`, `bs_get_utf32`, `bs_skip_utf32`, `bs_get_tail`, `bs_get_binary2` with a size in a register or a literal integer, `bs_get_integer2`, `bs_skip_bits2`, `bs_match_string`, and `bs_match` with each command that the ERTS loader accepts. `move`, `bs_start_match3`, and `bs_start_match4` share a match context that they copy to another register, and `byte_size/1` reads a match context. `swap` and `bit_size/1` of a match context stop the run with `invariant error: the match context in <Operand> reached an instruction that is not a binary match`. After a failed `=:=` command of `bs_match`, PBeam does not know the position, so a read of the match context before `bs_set_position` stops the run with `unsupported read of the match context in <Operand> after a failed bs_match =:= command`. The remaining binary-match instruction, `bs_get_binary2` with the size `all`, stops the run with `unsupported BEAM opcode N`. The "Binary matching" row of `docs/erts-differences.md` records this, and this entry owns it.
-- **Evidence:** The test `gives_a_runtime_error_for_a_read_after_a_failed_equal_command` of `tests/runtime/interpreter.rs` stops at a `skip` command after a failed `=:=`.
-- **Trigger:** a measured path matches a binary with one of these instructions, gives a match context to `swap` or `bit_size/1`, or reads a match context after a failed `=:=` command without `bs_set_position`. Add only the instructions that the path needs.
-- **Source:** #219 (PR #227), #395, #396, #421.
-
 ### Run the unsupported BIFs that OTP code calls
 
 - The "Unimplemented BIFs" row lists the `unsupported` BIF table entries that OTP code often calls. Each returns `unresolved external MFA M:F/A`. The groups:
