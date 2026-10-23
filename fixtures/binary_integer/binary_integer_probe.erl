@@ -57,10 +57,13 @@ referenced() ->
     <<_:8, Rest/binary>> = Big,
     Small = binary:copy(id(<<7>>), 64),
     <<_:8, SmallRest/binary>> = Small,
+    <<_:3, Nine:9/bitstring, _/bitstring>> = Big,
+    One = id(1),
     [try binary:referenced_byte_size(T) catch C:R -> {C, R} end
      || T <- [<<>>, <<1, 2, 3>>, Small, SmallRest, Big, Rest, P, Q, X,
               binary:part(Big, 0, 64), binary:part(Big, 1, 65),
-              binary:copy(binary:part(Big, 0, 65)), abc, [1]]].
+              binary:copy(binary:part(Big, 0, 65)), <<One:9>>, <<One:1>>, Nine,
+              abc, [1]]].
 
 %% The result and the reductions of binary:longest_common_prefix/1 and
 %% binary:longest_common_suffix/1 for two equal binaries of N bytes. Each

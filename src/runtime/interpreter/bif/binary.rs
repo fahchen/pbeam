@@ -1625,15 +1625,27 @@ pub(super) fn referenced_byte_size(subject: &Term) -> BifResult {
 /// `erts/configure.ac:300-322`, default 64).
 const COMMON_STRIDE_BITS: u64 = 512;
 
+/// Return whether `count` binaries are too many for the tuple of
+/// `binary:longest_common_prefix/1`: `MAX_ARITYVAL` (`2^24 - 1`,
+/// `erl_term.h:322`) or more (`erl_bif_binary.c:2212`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(over_arity_limit((1 << 24) - 1));
+/// ```
+fn over_arity_limit(count: usize) -> bool {
+    count >= (1 << 24) - 1
+}
+
 /// Start `binary:longest_common_prefix/1` (`suffix` false) or
 /// `binary:longest_common_suffix/1` (`suffix` true) as
 /// `start_longest_common` does (`erl_bif_binary.c:2182-2239`). Each element
 /// must be a binary of whole bytes, and the list must be proper and not
-/// empty, else the call raises `badarg`. ERTS raises `system_limit` for a
-/// list of `MAX_ARITYVAL` (`2^24 - 1`) or more binaries
-/// (`erl_bif_binary.c:2212-2213`, `erl_term.h:322`), and PBeam does not
-/// (row "Binary longest common limit" of `docs/erts-differences.md`). One
-/// binary, or an empty binary, gives the smallest size with no step.
+/// empty, else the call raises `badarg`. A list of `MAX_ARITYVAL` or more
+/// binaries raises `system_limit` before the tail check
+/// (`erl_bif_binary.c:2212-2216`). One binary, or an empty binary, gives
+/// the smallest size with no step.
 ///
 /// # Examples
 ///
@@ -1652,6 +1664,12 @@ pub(super) fn longest_common(process: &mut ProcessState, list: &Term, suffix: bo
         smallest = smallest.min(bytes.len() as u64 * 8);
         binaries.push(head.clone());
         tail = rest;
+    }
+    if over_arity_limit(binaries.len()) {
+        return BifResult::Raise {
+            class: ExceptionClass::Error,
+            reason: Term::static_atom("system_limit"),
+        };
     }
     if !tail.is_nil() || binaries.is_empty() {
         return BifResult::badarg();

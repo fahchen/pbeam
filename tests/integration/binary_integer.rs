@@ -36,7 +36,8 @@ const COMMON: &str = "[{2,0},{3,3},{0,0},{0,0},{2,0},{150,49},{150,49},{200,200}
 /// sub-binary of more than 64 bytes gives the size of the refc binary
 /// (`erl_bif_binary.c:2508-2534`). A term that is not a bitstring raises
 /// `badarg`.
-const REFERENCED: &str = "[0,3,64,63,200,200,10,200,200,64,200,65,{error,badarg},{error,badarg}]";
+const REFERENCED: &str = "[0,3,64,63,200,200,10,200,200,64,200,65,1,0,1,{error,badarg},\
+                          {error,badarg}]";
 
 /// `binary_integer_probe:costs/1` on the pinned ERTS with `erl +S 1`: the
 /// result and the reductions of `binary:longest_common_prefix/1` and

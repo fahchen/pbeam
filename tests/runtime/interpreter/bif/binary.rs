@@ -141,3 +141,11 @@ fn raises_badarg_for_a_bitstring_subject() {
     assert!(badarg(at(&term, &Term::Integer(0))));
     assert!(badarg(last(&term)));
 }
+
+#[test]
+fn limits_the_common_affix_list_to_the_tuple_arity() {
+    // `MAX_ARITYVAL` (`erl_term.h:322`) binaries or more raise
+    // `system_limit` (`erl_bif_binary.c:2212-2213`).
+    assert!(!over_arity_limit((1 << 24) - 2));
+    assert!(over_arity_limit((1 << 24) - 1));
+}

@@ -240,23 +240,24 @@ impl Binary {
 
     /// Return the result of `binary:referenced_byte_size/1` for this binary
     /// (`binary_referenced_byte_size_1`, `erl_bif_binary.c:2508-2534`). ERTS
-    /// gives the size of the bytes of a heap binary, which holds at most 64
-    /// bytes (`ERL_ONHEAP_BINARY_LIMIT`, `erl_bits.h:166-167`), and the size
+    /// gives the whole bytes of a heap binary, which holds at most 512
+    /// bits (`ERL_ONHEAP_BINARY_LIMIT`, `erl_bits.h:166-167`), and the size
     /// of the whole refc binary that a larger view refers to. PBeam keeps no
-    /// heap binary, so a view of at most 64 bytes gives its own size, and a
+    /// heap binary, so a view of at most 512 bits gives its whole bytes, and a
     /// larger view gives the size of its source array, or of its chunks.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// let bytes = Binary::from(vec![0; 200]);
-    /// assert_eq!(bytes.bits(8, 80).referenced_bytes(), 9);
+    /// assert_eq!(bytes.bits(8, 81).referenced_bytes(), 9);
     /// assert_eq!(bytes.bits(8, 1600).referenced_bytes(), 200);
     /// ```
     pub(crate) fn referenced_bytes(&self) -> usize {
-        let size = self.0.size.div_ceil(BITS_PER_BYTE);
-        if size <= 64 {
-            return size;
+        // `BYTE_SIZE` rounds down (`erl_bits.h:47`), and a heap bitstring
+        // holds at most `ERL_ONHEAP_BITS_LIMIT` bits (`erl_bits.h:168`).
+        if self.0.size <= 64 * BITS_PER_BYTE {
+            return self.0.size / BITS_PER_BYTE;
         }
         match &self.0.chunks {
             Some(chunks) => chunks.iter().map(|chunk| chunk.len()).sum(),
