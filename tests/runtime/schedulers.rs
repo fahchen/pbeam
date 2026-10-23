@@ -54,3 +54,16 @@ fn rejects_a_bad_s_flag_as_pinned_erts() {
         assert_eq!(apply(value), Err(expected.to_owned()), "{value}");
     }
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn counts_the_allowed_processors_online_as_pinned_erts() {
+    let status = "Name:\tbeam\nCpus_allowed_list:\t0-3,6,8-9\n";
+    // The mask counts only the processors online (`sched_getaffinity`).
+    assert_eq!(super::available_of(status, "0-7\n", 1), 5);
+    assert_eq!(super::available_of(status, "0-9", 1), 7);
+    // No processor of the mask online gives the count online
+    // (`erl_misc_utils.c:418-419`).
+    assert_eq!(super::available_of(status, "4-5", 2), 2);
+    assert_eq!(super::available_of("Name:\tbeam\n", "0-9", 3), 3);
+}

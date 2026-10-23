@@ -111,3 +111,23 @@ fn stops_the_run_where_the_per_complete_of_the_pinned_erts_reads_after_its_input
         );
     }
 }
+
+#[test]
+fn stops_get_module_info_nifs_for_the_linked_static_library() {
+    // ERTS gives each function of the NIF library (erl_bif_info.c:
+    // 5769-5805). PBeam links only some functions of a static library, so
+    // the key stops the run (row "Module information" of
+    // docs/erts-differences.md).
+    let program = program();
+    let library = program.host_term(Term::binary(b"asn1rt_nif".to_vec()));
+    let failure = program
+        .execute("asn1rt_nif", "nifs", &[library])
+        .unwrap_err()
+        .to_string();
+    assert!(
+        failure.contains(
+            "erlang:get_module_info/2 key nifs is not implemented for the linked NIF library of asn1rt_nif"
+        ),
+        "{failure}"
+    );
+}
