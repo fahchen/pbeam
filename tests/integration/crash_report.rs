@@ -35,9 +35,9 @@ fn routes_the_error_report_as_the_system_logger_says() {
         .output()
         .unwrap();
     let format = "[69,114,114,111,114,32,105,110,32,112,114,111,99,101,115,115,32,126,112,32,119,105,116,104,32,101,120,105,116,32,118,97,108,117,101,58,126,110,126,112,126,110]";
-    let tail = |old: &str| {
+    let tail = |old: &str, itself: &str| {
         format!(
-            "[{old},{{{format},{{boom,[{{crash_report_probe,'-routes/0-fun-0-',0,[]}}]}},[error_logger,pid,time,gl],#{{emulator => true,tag => error}},true,true}},none,{{logger,{{{{nocatch,ball}},[{{crash_report_probe,'-routes/0-fun-4-',0,[]}}]}}}},{{logger,{{own,[{{crash_report_probe,'-routes/0-fun-5-',0,[]}}]}}}},none]"
+            "[{old},{{{format},{{boom,[{{crash_report_probe,'-routes/0-fun-0-',0,[]}}]}},[error_logger,pid,time,gl],#{{emulator => true,tag => error}},true,true}},none,{{logger,{{{{nocatch,ball}},[{{crash_report_probe,'-routes/0-fun-4-',0,[]}}]}}}},{itself},none]"
         )
     };
     let stdout = String::from_utf8(erts.stdout).unwrap();
@@ -45,7 +45,16 @@ fn routes_the_error_report_as_the_system_logger_says() {
     // `logger_proxy` process. Its number depends on the host: `<0.72.0>` on
     // macOS and `<0.73.0>` on the Linux CI host.
     let (logger, routes) = stdout.split_once('\n').unwrap();
-    assert_eq!(routes, format!("{}\n", tail(logger)));
+    // The sender of the `own` route sets the system logger to itself. When
+    // the dispatcher runs before the sender exits, ERTS queues the report to
+    // the sender (erl_trace.c:2788-2790), and the probe gets `none`.
+    let own = "{logger,{own,[{crash_report_probe,'-routes/0-fun-5-',0,[]}]}}";
+    assert!(
+        [own, "none"]
+            .iter()
+            .any(|itself| routes == format!("{}\n", tail(logger, itself))),
+        "{routes}"
+    );
     let erlang = pinned_beam("erlang");
     let maps = pinned_beam("maps");
     let program = BeamProgram::load(&[&erlang, &maps, CRASH_REPORT_PROBE]).unwrap();
