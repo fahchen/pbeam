@@ -242,6 +242,10 @@ fn stops_the_run_for_each_tcp_inet_part_that_is_not_implemented() {
         ("inet6", "unsupported tcp_inet family 2"),
         ("mptcp", "unsupported tcp_inet protocol 4"),
         ("any", "unsupported tcp_inet bind address family 3"),
+        (
+            "connect_any",
+            "unsupported tcp_inet connect address family 3",
+        ),
         ("dontroute", "unsupported tcp_inet option 2"),
         ("recvttl", "unsupported tcp_inet option recvttl true"),
         // ERTS keeps the time of `{linger, {false, 5}}` (inet_drv.c:7362-7370).
@@ -254,7 +258,6 @@ fn stops_the_run_for_each_tcp_inet_part_that_is_not_implemented() {
             "unsupported tcp_inet option active with a count",
         ),
         ("getopt", "unsupported tcp_inet option 2"),
-        ("connect", "unsupported tcp_inet request 3"),
         // ERTS replies `[]` and sets the exit state of the port
         // (sys_drivers.c:731-756).
         (
@@ -968,5 +971,22 @@ fn stops_the_open_of_an_inet_port_in_a_runtime_process_of_a_boot_run() {
     assert!(
         error.starts_with("unsupported inet driver port in a run with a policy"),
         "{error}"
+    );
+}
+
+#[test]
+fn gives_the_reply_bytes_of_each_connect_check_as_pinned_erts() {
+    // The connect of a listen socket gives the error of the host
+    // (inet_drv.c:12129-12139): `eopnotsupp` on macOS, `eisconn` on Linux.
+    let listen = if cfg!(target_os = "macos") {
+        "[0,101,111,112,110,111,116,115,117,112,112]"
+    } else {
+        "[0,101,105,115,99,111,110,110]"
+    };
+    assert_runs(
+        "connect",
+        &format!(
+            "[[0,101,120,98,97,100,112,111,114,116],[[0,101,105,110,118,97,108],[0,101,105,110,118,97,108],[0,101,97,102,110,111,115,117,112,112,111,114,116],[0,101,105,110,118,97,108]],{listen}]"
+        ),
     );
 }

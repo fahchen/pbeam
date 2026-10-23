@@ -48,6 +48,7 @@
 //! an active socket: the socket is in the idle wait, and a ready socket
 //! stops the run (row "udp_inet ports" of `docs/erts-differences.md`).
 
+mod connect;
 mod datagram;
 mod stream;
 
@@ -94,7 +95,11 @@ enum State {
     /// `INET_STATE_LISTENING` (empty) from `INET_STATE_ACCEPTING` and
     /// `INET_STATE_MULTI_ACCEPTING`.
     Listening,
-    /// The socket of an accepted connection (`INET_STATE_CONNECTED`).
+    /// `CONNECT` waits for the write select of the socket
+    /// (`INET_STATE_CONNECTING`).
+    Connecting,
+    /// The socket of an accepted or a connected connection
+    /// (`INET_STATE_CONNECTED`).
     Connected,
 }
 
@@ -184,6 +189,10 @@ pub(in crate::runtime) enum Control {
     /// milliseconds, `u32::MAX` for `infinity`. The scheduler runs it, as
     /// it makes a port, a monitor, and a timer.
     Accept(u32),
+    /// A `CONNECT` that waits, with this timeout in milliseconds,
+    /// `u32::MAX` for `infinity`. The scheduler starts the timer, and the
+    /// reply is `[1, R1, R0]` of the async reference of the connect.
+    Connect(u32),
     /// A valid `SETOPTS` that made a connected socket active, as
     /// `inet_set_opts` returns 1 or 2 (inet_drv.c:7949-7981): the reply is
     /// `[1]` after the scheduler delivers the data. With `read`, the change
@@ -358,6 +367,7 @@ impl Inet {
             }
             8 => self.get_options(request)?,
             11 => return Ok(self.statistics(request)),
+            3 if self.socket_type == SocketType::Stream => return self.connect(request, caller),
             12 => get_host_name(request),
             24 => return Ok(self.subscribe(request, caller)),
             26 if self.socket_type == SocketType::Stream => return Ok(self.accept(request)),
@@ -494,18 +504,12 @@ impl Inet {
         if self.state != State::Open {
             return Ok(error_reply("exbadport"));
         }
-        let socket = self.socket.as_ref().expect("an open port has a socket");
-        let (&tag, address) = request.split_first().expect("a request of 2 bytes");
-        match tag {
-            AF_INET => {}
-            2..=5 => return Err(self.unsupported("bind address family", tag)),
-            _ => return Ok(error_reply("eafnosupport")),
-        }
-        let &[p1, p0, a, b, c, d, ..] = address else {
-            return Ok(error_reply("einval"));
+        let local = match self.address(request, "bind")? {
+            Ok(local) => local,
+            Err(reply) => return Ok(reply),
         };
-        let port = u16::from_be_bytes([p1, p0]);
-        let local = std::net::SocketAddrV4::new([a, b, c, d].into(), port);
+        let port = local.port();
+        let socket = self.socket.as_ref().expect("an open port has a socket");
         Ok(reply(socket.bind(&local.into()), |()| {
             let port = match port {
                 0 => socket
@@ -517,6 +521,41 @@ impl Inet {
             };
             [&[OK][..], &port.to_be_bytes()].concat()
         }))
+    }
+
+    /// Read the address `[1, P1, P0, A, B, C, D]` of a request of at least 2
+    /// bytes, as `inet_set_faddress` does (inet_drv.c:4795-4880), for the
+    /// request `what`: another family code of `inet_int.hrl` is not
+    /// implemented, an unknown code gives `eafnosupport`, and a short
+    /// address `einval`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let address = port.address(&[1, 0, 80, 127, 0, 0, 1], "bind")?;
+    /// assert_eq!(address, Ok("127.0.0.1:80".parse().unwrap()));
+    /// assert_eq!(port.address(&[9, 0], "bind")?, Err(b"\0eafnosupport".to_vec()));
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The family codes 2 to 5, which PBeam does not run.
+    fn address(
+        &self,
+        request: &[u8],
+        what: &str,
+    ) -> Result<Result<std::net::SocketAddrV4, Vec<u8>>, BeamError> {
+        let (&tag, address) = request.split_first().expect("a request of 2 bytes");
+        match tag {
+            AF_INET => {}
+            2..=5 => return Err(self.unsupported(&format!("{what} address family"), tag)),
+            _ => return Ok(Err(error_reply("eafnosupport"))),
+        }
+        let &[p1, p0, a, b, c, d, ..] = address else {
+            return Ok(Err(error_reply("einval")));
+        };
+        let port = u16::from_be_bytes([p1, p0]);
+        Ok(Ok(std::net::SocketAddrV4::new([a, b, c, d].into(), port)))
     }
 
     /// Run `INET_REQ_SETOPTS` (inet_set_opts, inet_drv.c:6871-7530): set
