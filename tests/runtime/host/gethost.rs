@@ -307,6 +307,10 @@ fn reads_the_arguments_as_main() {
     assert_eq!(options(&["-ng", "4"]), Some((4, 5)));
     // A count below 1 is a fatal `malloc` failure (inet_gethost.c:1049-1060).
     assert_eq!(options(&["-3"]), None);
+    assert_eq!(
+        serve(&[b"-3".to_vec()], std::io::empty(), &mut Vec::new()),
+        1
+    );
     assert_eq!(atoi(b"+12"), 12);
     assert_eq!(atoi(b"4294967297"), 1);
     assert_eq!(atoi(b"99999999999999999999"), -1);

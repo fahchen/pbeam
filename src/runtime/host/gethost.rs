@@ -311,9 +311,9 @@ impl Pool {
                     .extend_from_slice(&u32::try_from(4 + reply.len()).unwrap_or(0).to_be_bytes());
                 packet.extend_from_slice(&job.serial.to_be_bytes());
                 packet.extend_from_slice(&reply);
-                if events.send(Event::Reply(id, packet)).is_err() {
-                    break;
-                }
+                // The thread ends when the pool drops `jobs`, so a reply
+                // after the end of the main loop goes nowhere.
+                let _ = events.send(Event::Reply(id, packet));
             }
         });
         Worker {
