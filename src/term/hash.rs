@@ -136,10 +136,10 @@ fn shape(term: &Term) -> Shape<'_> {
     match term {
         Term::Atom(atom) => Shape::Immediate(atom_word(atom.index())),
         Term::Pid(ProcessId(number)) => {
-            Shape::Immediate((pixdata(*number) << IMMED1_TAG_BITS) | PID_TAG)
+            Shape::Immediate((pixdata(*number, PROCESS_TABLE_BITS) << IMMED1_TAG_BITS) | PID_TAG)
         }
         Term::Port(PortId(number)) => {
-            Shape::Immediate((pixdata(*number) << IMMED1_TAG_BITS) | PORT_TAG)
+            Shape::Immediate((pixdata(*number, PORT_TABLE_BITS) << IMMED1_TAG_BITS) | PORT_TAG)
         }
         Term::Nil => Shape::Immediate(NIL),
         Term::Cons(_) => Shape::List(Cells {
@@ -166,10 +166,15 @@ fn shape(term: &Term) -> Shape<'_> {
     }
 }
 
-/// The index bits of the ERTS process and port tables: `log2` of the
-/// default `process_limit` (`ERTS_DEFAULT_MAX_PROCESSES`,
-/// `erl_process.h:86`) and of the `port_limit` that `erl +Q 1048576` gives.
-const PTAB_BITS: u32 = 20;
+/// The index bits of the ERTS process table: `log2` of the default
+/// `process_limit` (`ERTS_DEFAULT_MAX_PROCESSES`, `erl_process.h:86`).
+const PROCESS_TABLE_BITS: u32 = 20;
+
+/// The index bits of the ERTS port table: `log2` of the default
+/// `port_limit` (`ERTS_DEFAULT_MAX_PORTS`, `erl_port.h:41`). ERTS raises the
+/// limit to the host file limit (`io.c:2997-3006`) or to `+Q`; PBeam keeps
+/// the default.
+const PORT_TABLE_BITS: u32 = 16;
 
 /// Spread a pid or port number over the table index bits, as ERTS
 /// `erts_ptab_data2pixdata` does (`erl_ptab.h:301-317`) with 8 slots per
@@ -179,13 +184,13 @@ const PTAB_BITS: u32 = 20;
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(pixdata(1), 8);
-/// assert_eq!(pixdata(1 << 17), 1);
-/// assert_eq!(pixdata(1 << 20), 1 << 20);
+/// assert_eq!(pixdata(1, 20), 8);
+/// assert_eq!(pixdata(1 << 17, 20), 1);
+/// assert_eq!(pixdata(1 << 20, 20), 1 << 20);
 /// ```
-fn pixdata(number: u64) -> u64 {
-    let cli_shift = PTAB_BITS - 3;
-    (number & !((1 << PTAB_BITS) - 1))
+fn pixdata(number: u64, bits: u32) -> u64 {
+    let cli_shift = bits - 3;
+    (number & !((1 << bits) - 1))
         | ((number & ((1 << cli_shift) - 1)) << 3)
         | ((number >> cli_shift) & 7)
 }

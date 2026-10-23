@@ -135,13 +135,8 @@ fn string(text: &str) -> Term {
 /// Run an expression under the pinned ERTS with the map fixtures in the code
 /// path, and return its stdout.
 fn erl_reference(expression: &str) -> Vec<u8> {
-    // `+Q 1048576` fixes the port table size, which otherwise follows the
-    // host file limit (`io.c:2997-3004`, `erl_init.c:1896-1897`), so the
-    // port index bits match the PBeam hash on each host.
     let reference = Command::new("erl")
         .args([
-            "+Q",
-            "1048576",
             "-noshell",
             "-pa",
             "fixtures/map",
@@ -1570,6 +1565,23 @@ fn runs_map_operations_with_port_keys_as_pinned_erts() {
             ints(&nested_order)
         ])
     );
+    // PBeam spreads a port number over the 16 index bits of the default
+    // ERTS port table (`ERTS_DEFAULT_MAX_PORTS`, `erl_port.h:41`). ERTS
+    // raises the table size to the host file limit (`io.c:2997-3006`), so
+    // the ERTS run checks the order only on a host with `port_limit` 65536,
+    // such as the Linux CI host.
+    let high = "[8206,8195,8219,8221,8207,8222,8202,8227,8217,8198,8194,8218,8203,8200,8190,8216,8208,8225,8229,8197,8199,8223,8220,8191,8192,8201,8210,8196,8205,8213,8214,8204,8226,8215,8228,8211,8193,8209,8224,8212]";
+    let high_order: Vec<i64> = high[1..high.len() - 1]
+        .split(',')
+        .map(|n| n.parse().unwrap())
+        .collect();
+    assert_eq!(run("high"), ints(&high_order));
+    let reference = erl_reference(
+        "io:format(\"~w~n~w~n\", [erlang:system_info(port_limit), port_key_probe:high()])",
+    );
+    if reference.starts_with(b"65536\n") {
+        assert_eq!(reference, format!("65536\n{high}\n").into_bytes());
+    }
     let (yes, no) = (atom("true"), atom("false"));
     assert_eq!(
         run("order"),
