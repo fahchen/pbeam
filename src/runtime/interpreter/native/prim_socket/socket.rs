@@ -650,16 +650,26 @@ pub(super) fn sockname(scheduler: &mut Scheduler, socket: &Term) -> Result<BifRe
 /// caller as the closer and adds the state `closing`. PBeam runs no select,
 /// so `do_stop` schedules no stop and the result is `ok`.
 pub(super) fn close(scheduler: &mut Scheduler, socket: &Term) -> BifResult {
-    let Some((_, socket)) = socket_argument(scheduler, socket) else {
+    let Some((reference, socket)) = socket_argument(scheduler, socket) else {
         return BifResult::badarg();
     };
     let mut socket = lock(&socket);
     if socket.read & (CLOSING | CLOSED) != 0 {
         return closed();
     }
-    socket.closer = Some(scheduler.current_process().id);
+    let caller = scheduler.current_process().id;
+    socket.closer = Some(caller);
     socket.read |= CLOSING;
     socket.write |= CLOSING;
+    // A closer that is not the owner gets a monitor
+    // (`unix_socket_syncio.c:4560-4566`).
+    if socket.owner != Some(caller) {
+        drop(socket);
+        scheduler
+            .send_signal(None, caller, Signal::SocketMonitor { socket: reference })
+            .expect("the caller is alive");
+        return BifResult::Value(Term::static_atom("ok"));
+    }
     BifResult::Value(Term::static_atom("ok"))
 }
 

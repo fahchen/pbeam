@@ -92,13 +92,13 @@ pub(in crate::runtime) enum Flushed {
 }
 
 impl Scheduler {
-    /// Run the monitor of the socket resource `socket` on its owner `owner`
-    /// after the owner exits (see [`Sockets::owner_down`]), and send
+    /// Run the monitor of the socket resource `socket` on its owner or
+    /// closer `owner` after it exits (see [`Sockets::monitor_down`]), and send
     /// `{'$socket', del, Socket}` to the registry as `esock_send_reg_del_msg`
     /// does (`prim_socket_nif.c:7698-7702`). The load callback made both
     /// atoms (`prim_socket_nif.c:18842-18857`), so their `put` finds them.
     pub(in crate::runtime) fn socket_owner_down(&mut self, owner: ProcessId, socket: Reference) {
-        let registry = lock(&self.node().resources.kind::<Sockets>()).owner_down(socket);
+        let registry = lock(&self.node().resources.kind::<Sockets>()).monitor_down(socket, owner);
         if let Some(registry) = registry {
             let tag = Term::Atom(self.atoms.put("$socket").expect("made at load"));
             let del = Term::Atom(self.atoms.put("del").expect("made at load"));
