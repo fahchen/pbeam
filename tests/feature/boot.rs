@@ -292,6 +292,35 @@ fn gives_the_bindir_flag_of_the_root_as_erlexec_does() {
     );
 }
 
+#[test]
+fn gives_the_bindir_flag_when_no_loaded_module_holds_the_atom() {
+    // `erlexec` always gives `-bindir` (erlexec.c:1154-1155). The start set
+    // has only `flags_probe` and `pbeam_boot`, and neither holds the atom
+    // `bindir`, so the `pbeam` binary adds it. The probe displays its flag
+    // list.
+    let output = Command::new(env!("CARGO_BIN_EXE_pbeam"))
+        .args(["flags_probe", "main", "--root"])
+        .arg(otp_root())
+        .args(["--", "fixtures/boot/flags_probe.beam"])
+        .arg(boot_beam())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let expected = format!(
+        "[{{root,[<<\"{}\">>]}},{{bindir,[<<\"{}\">>]}}]\r\n",
+        otp_root().display(),
+        erts_bindir().display()
+    );
+    assert_eq!(
+        (
+            String::from_utf8(output.stdout).unwrap(),
+            output.stderr.as_slice(),
+            output.status.code()
+        ),
+        (expected, &b""[..], Some(0))
+    );
+}
+
 /// Load the pinned boot modules, `probe`, and the boot module.
 fn boot_program(probe: &[u8]) -> BeamProgram {
     assert!(
