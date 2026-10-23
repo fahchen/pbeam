@@ -22,6 +22,78 @@ const ON_LOAD_PROBE: &str = "fixtures/code_server/on_load_server_probe";
 /// function.
 const FUN_ENTRY_PROBE: &str = "fixtures/code_server/fun_entry_probe";
 
+/// The output of `crypto_engine_probe:main/0` on PBeam and on the pinned
+/// macOS ERTS (OpenSSL 3.5.8), which has no engine in its list before
+/// the first engine lookup.
+const ENGINE_RESULTS: &str =
+    "[[engine_method_rsa,engine_method_dsa,engine_method_dh,engine_method_rand,
+  engine_method_ciphers,engine_method_digests,engine_method_pkey_meths,
+  engine_method_pkey_asn1_meths,engine_method_ec],
+ [],
+ {error,badarg},
+ {error,badarg},
+ {error,badarg},
+ {error,badarg},
+ {error,badarg},
+ {error,badarg},
+ {error,badarg},
+ {error,badarg},
+ {error,badarg},
+ {error,badarg},
+ {error,badarg},
+ {error,badarg}]
+";
+
+#[test]
+fn runs_the_engine_functions_as_pinned_erts() {
+    // engine.c:353-1045: PBeam has no engine, so each call that needs no
+    // loaded engine gives the ERTS result. The Linux CI ERTS links another
+    // OpenSSL, whose engine list can differ, so only macOS compares.
+    let pbeam = run(&mut pbeam_probe(
+        CRYPTO_ENGINE_PROBE,
+        "crypto_engine_probe",
+        "main",
+        &[],
+    ));
+    assert_eq!(pbeam, ENGINE_RESULTS);
+    if cfg!(target_os = "macos") {
+        let erts = run(&mut erts_probe(
+            CRYPTO_ENGINE_PROBE,
+            "crypto_engine_probe",
+            "main",
+            &[],
+        ));
+        assert_eq!(erts, ENGINE_RESULTS);
+    }
+}
+
+#[test]
+fn reports_an_engine_load_as_unsupported() {
+    // The safe openssl crate has no engine API (engine.c:375, 477, 959).
+    for (function, expected) in [
+        (
+            "by_id",
+            "crypto:engine_by_id_nif/1 NIF is not supported for an engine lookup",
+        ),
+        (
+            "load",
+            "crypto:engine_load_dynamic_nif/0 NIF is not supported for the engine dynamic",
+        ),
+        (
+            "ensure",
+            "crypto:ensure_engine_loaded_nif/2 NIF is not supported for an engine load",
+        ),
+    ] {
+        let output = pbeam_probe(CRYPTO_ENGINE_PROBE, "crypto_engine_probe", function, &[])
+            .env("TERM", "dumb")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains(expected), "{function}: {stderr}");
+    }
+}
+
 #[test]
 fn computes_mod_pow_and_srp_as_pinned_erts() {
     // mod_exp_nif/4 (bn.c:101-165) and the SRP NIFs (srp.c:26-300): the
@@ -195,6 +267,7 @@ const CRYPTO_SIGN_PROBE: &str = "fixtures/code_server/crypto_sign_probe";
 const CRYPTO_CRYPT_PROBE: &str = "fixtures/code_server/crypto_crypt_probe";
 const CRYPTO_KEYGEN_PROBE: &str = "fixtures/code_server/crypto_keygen_probe";
 const CRYPTO_BN_PROBE: &str = "fixtures/code_server/crypto_bn_probe";
+const CRYPTO_ENGINE_PROBE: &str = "fixtures/code_server/crypto_engine_probe";
 
 /// The probe of the random functions of `crypto` and its `rand` plugins.
 const CRYPTO_RAND_PROBE: &str = "fixtures/code_server/crypto_rand_probe";
@@ -818,8 +891,8 @@ fn stops_with_a_runtime_error_for_a_poly1305_context_after_its_final() {
 
 #[test]
 fn stops_with_a_runtime_error_for_an_unsupported_crypto_nif() {
-    // PBeam does not link `engine_get_first_nif/0`, which
-    // `crypto:engine_list/0` calls.
+    // PBeam does not link `privkey_to_pubkey_nif/2`, which
+    // `crypto:privkey_to_pubkey/2` calls.
     let output = pbeam_probe(CRYPTO_PROBE, "crypto_probe", "unsupported", &[])
         .env("TERM", "dumb")
         .stdin(Stdio::null())
@@ -828,7 +901,7 @@ fn stops_with_a_runtime_error_for_an_unsupported_crypto_nif() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
         !output.status.success()
-            && stderr.contains("crypto:engine_get_first_nif/0 NIF is not supported"),
+            && stderr.contains("crypto:privkey_to_pubkey_nif/2 NIF is not supported"),
         "{stderr}"
     );
 }
