@@ -422,7 +422,7 @@ fn codec(
 ///
 /// A full reference counter gives the error of `Scheduler::make_ref`.
 fn init_compress_nif(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
-    let reference = scheduler.make_ref()?;
+    let reference = scheduler.make_magic_ref()?;
     let (kind, owner) = contexts(scheduler);
     let mut contexts = lock(&kind);
     let handle = Compressor {
@@ -448,7 +448,7 @@ fn init_compress_nif(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> 
 ///
 /// A full reference counter gives the error of `Scheduler::make_ref`.
 fn init_decompress_nif(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
-    let reference = scheduler.make_ref()?;
+    let reference = scheduler.make_magic_ref()?;
     let (kind, owner) = contexts(scheduler);
     let mut contexts = lock(&kind);
     let handle = Decompressor {

@@ -69,7 +69,7 @@ pub(super) fn new(
     }
     // PBeam runs on 64-bit hosts, and the check above keeps the size of the
     // array in `usize`.
-    let id = scheduler.make_ref()?;
+    let id = scheduler.make_magic_ref()?;
     if !scheduler
         .node()
         .atomics

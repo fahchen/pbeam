@@ -1095,7 +1095,7 @@ pub struct PortId(pub(crate) u64);
 /// pid reference marker in its high bit. The order of identifiers is their
 /// creation order; the runtime uses it to visit the monitors of a process in
 /// one fixed order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy)]
 pub struct Reference(pub(crate) u64);
 
 /// The bit of a reference value that marks a pid reference: the reference
@@ -1106,19 +1106,28 @@ pub struct Reference(pub(crate) u64);
 /// in the number `N2` of [`Reference::numbers`].
 const PID_REFERENCE_MARKER: u64 = 1 << 63;
 
-/// The bit of a reference value that marks an ETS table identifier. ERTS
-/// makes the table identifier a magic reference whose binary has the
-/// destructor `db_table_tid_destructor`, and the identifier of a deleted
-/// table keeps it (`tid2tab`, `erl_db.c:280-306`). The reference counter
-/// stays below this bit. The bit shows in the number `N2` of
-/// [`Reference::numbers`], as the pid reference marker does; ERTS keeps
-/// it in `N1` below the counter bits (`ERTS_REF1_MAGIC_MARKER_BIT__`,
-/// `erl_bif_unique.h:102-105`, `181-186`), so the term order compares the
-/// values without the markers (`Ord for Reference`).
-const TABLE_REFERENCE_MARKER: u64 = 1 << 62;
+/// The bit of a reference value that marks a magic reference: a reference
+/// that ERTS makes for a magic binary (`erts_mk_magic_ref`,
+/// `erl_bif_unique.h:217-220`). ETS table identifiers, atomics and counters
+/// arrays, compiled regular expressions, compiled binary patterns, ETS
+/// match programs, prepared code, and NIF resource handles are magic
+/// references. ERTS keeps the mark in `N1` below the counter bits
+/// (`ERTS_REF1_MAGIC_MARKER_BIT__`, `erl_bif_unique.h:102-105`, `181-186`),
+/// so [`Reference::numbers`] moves it there. The reference counter stays
+/// below this bit.
+const MAGIC_REFERENCE_MARKER: u64 = 1 << 62;
+
+/// The bit of a reference value that marks an ETS table identifier, in
+/// addition to [`MAGIC_REFERENCE_MARKER`]. ERTS tells a table identifier
+/// from another magic reference by the destructor of its binary,
+/// `db_table_tid_destructor`, and the identifier of a deleted table keeps
+/// it (`tid2tab`, `erl_db.c:280-306`). The bit does not show in
+/// [`Reference::numbers`].
+const TABLE_REFERENCE_MARKER: u64 = 1 << 61;
 
 /// The marker bits of a reference value.
-const REFERENCE_MARKERS: u64 = PID_REFERENCE_MARKER | TABLE_REFERENCE_MARKER;
+const REFERENCE_MARKERS: u64 =
+    PID_REFERENCE_MARKER | MAGIC_REFERENCE_MARKER | TABLE_REFERENCE_MARKER;
 
 /// The mask of the first reference number (`REF_MASK`, 18 bits).
 const REF_NUMBER_0_MASK: u64 = 0x3_FFFF;
@@ -1132,7 +1141,7 @@ const REF_THREAD: u64 = 1;
 
 impl Reference {
     /// Return the ordinary reference with the counter value `value`, or
-    /// `None` when `value` has the pid reference marker bit.
+    /// `None` when `value` has a reference marker bit.
     ///
     /// # Examples
     ///
@@ -1141,7 +1150,7 @@ impl Reference {
     /// assert_eq!(Reference::ordinary(u64::MAX), None);
     /// ```
     pub(crate) fn ordinary(value: u64) -> Option<Self> {
-        (value & PID_REFERENCE_MARKER == 0).then_some(Reference(value))
+        (value & REFERENCE_MARKERS == 0).then_some(Reference(value))
     }
 
     /// Return the pid reference with the counter value of the ordinary
@@ -1168,8 +1177,20 @@ impl Reference {
         self.0 & PID_REFERENCE_MARKER != 0
     }
 
-    /// Return the table identifier with the counter value of the ordinary
+    /// Return the magic reference with the counter value of the ordinary
     /// reference `self`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Reference(0).magic_reference().numbers(), [0, 0x2_0001, 0]);
+    /// ```
+    pub(crate) const fn magic_reference(self) -> Self {
+        Reference(self.0 | MAGIC_REFERENCE_MARKER)
+    }
+
+    /// Return the table identifier, a magic reference, with the counter
+    /// value of the ordinary reference `self`.
     ///
     /// # Examples
     ///
@@ -1177,7 +1198,7 @@ impl Reference {
     /// assert!(Reference(0).table_reference().is_table_reference());
     /// ```
     pub(crate) const fn table_reference(self) -> Self {
-        Reference(self.0 | TABLE_REFERENCE_MARKER)
+        Reference(self.0 | MAGIC_REFERENCE_MARKER | TABLE_REFERENCE_MARKER)
     }
 
     /// Return true for an ETS table identifier, live or deleted.
@@ -1185,34 +1206,10 @@ impl Reference {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert!(!Reference(0).is_table_reference());
+    /// assert!(!Reference(0).magic_reference().is_table_reference());
     /// ```
     pub(crate) fn is_table_reference(self) -> bool {
         self.0 & TABLE_REFERENCE_MARKER != 0
-    }
-
-    /// Return the reference numbers `[N0, N1, N2]` that ERTS compares: the
-    /// table marker goes from `N2` to the magic marker bit of `N1`, as ERTS
-    /// keeps it (`ERTS_REF1_MAGIC_MARKER_BIT__`, `erl_bif_unique.h:102-105`,
-    /// `181-186`).
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert_eq!(Reference(0).table_reference().order_numbers(), [0, 0x2_0001, 0]);
-    /// ```
-    pub(crate) fn order_numbers(self) -> [u32; 3] {
-        let [n0, n1, _] = self.numbers();
-        let magic = if self.is_table_reference() {
-            1 << 17
-        } else {
-            0
-        };
-        [
-            n0,
-            n1 | magic,
-            ((self.0 & !TABLE_REFERENCE_MARKER) >> 32) as u32,
-        ]
     }
 
     /// Return the three ERTS reference numbers `[N0, N1, N2]` of the
@@ -1220,33 +1217,58 @@ impl Reference {
     /// scheduler (`erts_set_ref_numbers`, `erl_bif_unique.h:117-131`): `N0` is the
     /// low 18 bits, `N1` is the next 14 counter bits with the scheduler
     /// number in its low bits, and `N2` is the high 32 bits. PBeam takes
-    /// its reference value as the counter value of scheduler 1. ERTS prints
-    /// the reference as `#Ref<0.N2.N1.N0>`.
+    /// its reference value as the counter value of scheduler 1, with the
+    /// pid reference marker in `N2` and the magic marker in bit 17 of `N1`.
+    /// ERTS prints the reference as `#Ref<0.N2.N1.N0>`, encodes these
+    /// numbers in `term_to_binary/1`, and compares them in the term order.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// assert_eq!(Reference(0).numbers(), [0, 1, 0]);
     /// assert_eq!(
-    ///     Reference(0xF55F_5681_5BA8_8196).numbers(),
-    ///     [33174, 1537736705, 4116665985]
+    ///     Reference(0x955F_5681_5BA8_8196).numbers(),
+    ///     [33174, 1537736705, 2506053249]
     /// );
     /// ```
     pub(crate) fn numbers(self) -> [u32; 3] {
         let Reference(value) = self;
+        let magic = if value & MAGIC_REFERENCE_MARKER != 0 {
+            1 << 17
+        } else {
+            0
+        };
         [
             (value & REF_NUMBER_0_MASK) as u32,
-            ((value & REF_NUMBER_1_MASK) | REF_THREAD) as u32,
-            (value >> 32) as u32,
+            ((value & REF_NUMBER_1_MASK) | REF_THREAD | magic) as u32,
+            ((value & !(MAGIC_REFERENCE_MARKER | TABLE_REFERENCE_MARKER)) >> 32) as u32,
         ]
     }
 }
 
 impl Ord for Reference {
     /// Compare the counter values, so that the order is the creation order
-    /// also for a pid reference and a table identifier.
+    /// also for a pid reference and a magic reference.
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         (self.0 & !REFERENCE_MARKERS).cmp(&(other.0 & !REFERENCE_MARKERS))
+    }
+}
+
+impl PartialEq for Reference {
+    /// Compare the values without [`TABLE_REFERENCE_MARKER`]: ERTS compares
+    /// the reference numbers, and `binary_to_term/1` gives the live magic
+    /// reference of a table identifier (`external.c:4845-4851`), which PBeam
+    /// rebuilds from the numbers with only [`MAGIC_REFERENCE_MARKER`].
+    fn eq(&self, other: &Self) -> bool {
+        self.0 & !TABLE_REFERENCE_MARKER == other.0 & !TABLE_REFERENCE_MARKER
+    }
+}
+
+impl Eq for Reference {}
+
+impl std::hash::Hash for Reference {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        (self.0 & !TABLE_REFERENCE_MARKER).hash(state);
     }
 }
 

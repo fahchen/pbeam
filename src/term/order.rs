@@ -234,16 +234,14 @@ fn compare_pair<'a>(
                 "unsupported term order of an alias reference (see \"Term order\" in docs/erts-differences.md)",
             ));
         }
-        // ERTS compares `N2`, `N1`, `N0`, with the magic marker of a table
-        // identifier in `N1` (`utils.c:2283-2286`,
-        // `erl_bif_unique.h:102-113`). A tie keeps distinct references
-        // apart.
+        // ERTS compares `N2`, `N1`, `N0`, with the magic marker of a magic
+        // reference in `N1` (`utils.c:2283-2286`,
+        // `erl_bif_unique.h:102-113`).
         (Term::Reference(left), Term::Reference(right)) => left
-            .order_numbers()
+            .numbers()
             .iter()
             .rev()
-            .cmp(right.order_numbers().iter().rev())
-            .then_with(|| left.numbers().cmp(&right.numbers())),
+            .cmp(right.numbers().iter().rev()),
         (Term::Tuple(left), Term::Tuple(right)) if left.len() == right.len() => {
             steps.extend(
                 left.iter()

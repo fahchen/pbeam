@@ -233,7 +233,7 @@ pub(super) fn finish(
         if let Some(program) = program {
             return Ok(program);
         }
-        let program = context.scheduler.make_ref()?;
+        let program = context.scheduler.make_magic_ref()?;
         (context.scheduler.ets.exclusive()).remember_program(id, program, spec.clone());
         Ok::<_, BeamError>(program)
     };
@@ -540,7 +540,7 @@ pub(super) fn delete_finish(
     let program = match program {
         Some(program) => program,
         None => {
-            let program = context.scheduler.make_ref()?;
+            let program = context.scheduler.make_magic_ref()?;
             (context.scheduler.ets.exclusive()).remember_program(id, program, spec.clone());
             program
         }

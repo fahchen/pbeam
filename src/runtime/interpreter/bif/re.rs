@@ -491,7 +491,7 @@ fn compile_result(
         pcre2::NEWLINE_ANY | pcre2::NEWLINE_CRLF | pcre2::NEWLINE_ANYCRLF
     );
     let capture_count = code.capture_count();
-    let reference = context.scheduler.make_ref()?;
+    let reference = context.scheduler.make_magic_ref()?;
     context.scheduler.insert_regex(reference, code);
     Ok(Term::tuple(vec![
         Term::static_atom("re_pattern"),

@@ -616,7 +616,7 @@ pub(super) fn compile_pattern(
         CompiledPattern::Bm(_) => "bm",
         CompiledPattern::Ac(_) => "ac",
     };
-    let id = scheduler.make_ref()?;
+    let id = scheduler.make_magic_ref()?;
     scheduler.insert_binary_pattern(id, compiled);
     Ok(Value(Term::tuple(vec![
         Term::static_atom(tag),

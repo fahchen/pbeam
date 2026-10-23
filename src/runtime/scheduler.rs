@@ -2537,6 +2537,12 @@ impl Scheduler {
             .ok_or_else(|| error("process reference overflow"))
     }
 
+    /// Return a new magic reference, the reference that ERTS makes for a
+    /// magic binary (`erts_mk_magic_ref`, `erl_bif_unique.h:217-220`).
+    pub(super) fn make_magic_ref(&mut self) -> Result<Reference, BeamError> {
+        Ok(self.make_ref()?.magic_reference())
+    }
+
     /// Return the next value of `erlang:unique_integer/0`, as
     /// `unique_integer_bif` and `bld_unique_integer_term`
     /// (`erl_bif_unique.c:475-578`) make it from the thread id and the

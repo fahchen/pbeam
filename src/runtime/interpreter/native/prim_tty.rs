@@ -245,7 +245,7 @@ fn tty_create(scheduler: &mut Scheduler, fd: &Term) -> Result<BifResult, BeamErr
         Some(mode) => (TtyState::Disabled, mode),
         None => (TtyState::Unavailable, terminal::EMPTY_MODE),
     };
-    let reference = scheduler.make_ref()?;
+    let reference = scheduler.make_magic_ref()?;
     scheduler.node().ttys().insert(
         reference,
         TtyResource {

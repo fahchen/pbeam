@@ -66,11 +66,19 @@ fn prints_pids_and_references_as_pinned_erts() {
         b"<0.268435455.0>"
     );
     // ERTS 29.1.1 prints the reference with the counter value
-    // 0xF55F56815BA88196 of scheduler 1 as
-    // #Ref<0.4116665985.1537736705.33174>.
+    // 0x155F56815BA88196 of scheduler 1 as
+    // #Ref<0.358569601.1537736705.33174>, and the magic reference with
+    // that counter value with bit 17 of `N1`.
     assert_eq!(
-        print_term(&Term::Reference(Reference(0xF55F_5681_5BA8_8196)), &atoms),
-        b"#Ref<0.4116665985.1537736705.33174>"
+        print_term(&Term::Reference(Reference(0x155F_5681_5BA8_8196)), &atoms),
+        b"#Ref<0.358569601.1537736705.33174>"
+    );
+    assert_eq!(
+        print_term(
+            &Term::Reference(Reference(0x155F_5681_5BA8_8196).magic_reference()),
+            &atoms
+        ),
+        b"#Ref<0.358569601.1537867777.33174>"
     );
     assert_eq!(
         print_term(&Term::Reference(Reference(0)), &atoms),

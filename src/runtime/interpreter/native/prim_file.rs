@@ -273,7 +273,7 @@ fn open_nif(scheduler: &mut Scheduler, path: &Term, modes: &Term) -> Result<BifR
                 Ok(file) => file,
                 Err(errno) => return error_tuple(&scheduler.atoms, &errno_id(errno)),
             };
-            let reference = scheduler.make_ref()?;
+            let reference = scheduler.make_magic_ref()?;
             let caller = scheduler.current_process_mut().id;
             lock(&scheduler.node().resources.kind::<Files>()).insert(reference, file, caller);
             scheduler
