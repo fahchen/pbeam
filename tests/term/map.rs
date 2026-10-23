@@ -3,7 +3,9 @@ use std::{hint::black_box, rc::Rc, sync::Arc, time::Instant};
 use super::{
     Child, Direction, Drain, HAMT_MAX_LEVEL, Hamt, Insert, Map, Node, Repr, encode_path, map_hash,
 };
-use crate::term::{AtomTable, Reference, Term, internal_hash, test_atom as atom, test_atom_table};
+use crate::term::{
+    AtomTable, PortId, Reference, Term, internal_hash, test_atom as atom, test_atom_table,
+};
 
 fn integers(keys: impl IntoIterator<Item = i64>) -> Map {
     Map::from_pairs(
@@ -29,8 +31,15 @@ fn hashes_small_integers_as_erts() {
     assert_eq!(map_hash(&Term::Integer(-1)), Some(7256831767414464289));
     assert!(map_hash(&Term::Integer((1 << 59) - 1)).is_some());
     assert!(map_hash(&Term::Integer(-(1 << 59))).is_some());
-    assert_eq!(map_hash(&Term::Integer(1 << 59)), None);
-    assert_eq!(map_hash(&Term::Integer(-(1 << 59) - 1)), None);
+    // A bignum key hashes with the bignum path of the internal hash.
+    assert_eq!(
+        map_hash(&Term::Integer(1 << 59)),
+        Some(10054563828903259082)
+    );
+    assert_eq!(
+        map_hash(&Term::Integer(-(1 << 59) - 1)),
+        Some(12317164193119007090)
+    );
 }
 
 #[test]
@@ -106,9 +115,10 @@ fn keeps_flatmap_keys_in_order_and_replaces_values() {
     );
     assert_eq!(map.len(), 4);
     // A key type that the flatmap does not support leaves the map unchanged.
+    let unsupported = Term::tuple(vec![Term::binary(vec![])]);
     assert_eq!(
-        map.insert(Term::Map(Map::new()), atom(&mut table, "v"), &table),
-        Err(Term::Map(Map::new()))
+        map.insert(unsupported.clone(), atom(&mut table, "v"), &table),
+        Err(unsupported)
     );
     assert_eq!(map.len(), 4);
 }
@@ -158,21 +168,30 @@ fn hashes_tuple_keys_with_the_internal_hash() {
 #[test]
 fn rejects_list_and_tuple_keys_with_unsupported_elements() {
     assert_eq!(map_hash(&Term::nil()), Some(internal_hash(&Term::nil())));
-    let empty_map = || Term::Map(Map::new());
+    // A port key alone is not supported.
+    assert_eq!(map_hash(&Term::Port(PortId(0))), None);
+    // A map that holds a binary: #{1 => <<>>}.
+    let binary_map = || {
+        Term::Map(
+            Map::from_pairs(
+                vec![(Term::Integer(1), Term::binary(vec![]))],
+                &test_atom_table(),
+            )
+            .unwrap(),
+        )
+    };
     let unsupported = [
-        Term::list_from(vec![Term::Integer(1), empty_map()]),
-        Term::list_from(vec![Term::list_from(vec![empty_map()])]),
-        Term::list_from(vec![Term::Integer(1 << 59)]),
-        // {<<>>}, {1, #{}}, and {[1 bsl 59]}: a tuple with an element that is not supported.
+        Term::list_from(vec![Term::Integer(1), binary_map()]),
+        Term::list_from(vec![Term::list_from(vec![binary_map()])]),
+        // {<<>>} and {1, #{}}: a tuple with an element that is not supported.
         Term::tuple(vec![Term::binary(vec![])]),
-        Term::tuple(vec![Term::Integer(1), empty_map()]),
-        Term::tuple(vec![Term::list_from(vec![Term::Integer(1 << 59)])]),
+        Term::tuple(vec![Term::Integer(1), binary_map()]),
         // [1|#{}], [1|<<>>], and [[1|#{}]]: an improper list tail that is not supported.
-        Term::list_with_tail(vec![Term::Integer(1)], empty_map()),
+        Term::list_with_tail(vec![Term::Integer(1)], binary_map()),
         Term::list_with_tail(vec![Term::Integer(1)], Term::binary(vec![])),
         Term::list_from(vec![Term::list_with_tail(
             vec![Term::Integer(1)],
-            empty_map(),
+            binary_map(),
         )]),
     ];
     for key in unsupported {
@@ -361,7 +380,7 @@ fn becomes_a_hashmap_with_the_erts_order_above_32_keys() {
 }
 
 #[test]
-fn puts_atom_keys_in_a_hashmap_and_rejects_large_integers() {
+fn puts_atom_and_bignum_keys_in_a_hashmap() {
     let a = atom("a");
     // The 33rd key turns a flatmap with an atom key into a hashmap.
     let mut map = integers(1..=31);
@@ -380,19 +399,22 @@ fn puts_atom_keys_in_a_hashmap_and_rejects_large_integers() {
         .unwrap();
     assert_eq!(map.len(), 34);
     assert_eq!(map.get(&a), Some(&Term::Integer(2)));
-    // A hashmap has no hash for an integer outside the small-integer range yet.
-    assert_eq!(
-        map.insert(Term::Integer(1 << 59), a.clone(), &test_atom_table()),
-        Err(Term::Integer(1 << 59))
-    );
+    // A bignum key goes into a hashmap, in a list or a tuple too.
+    let big = Term::Integer(1 << 59);
+    let nested = Term::tuple(vec![Term::list_from(vec![big.clone()])]);
+    for key in [big.clone(), nested] {
+        map.insert(key.clone(), a.clone(), &test_atom_table())
+            .unwrap();
+        assert_eq!(map.get(&key), Some(&a));
+    }
+    // A flatmap with a bignum key turns into a hashmap.
     let mut map = integers(1..=31);
-    map.insert(Term::Integer(1 << 59), a.clone(), &test_atom_table())
+    map.insert(big.clone(), a.clone(), &test_atom_table())
         .unwrap();
-    assert_eq!(
-        map.insert(Term::Integer(33), a, &test_atom_table()),
-        Err(Term::Integer(1 << 59))
-    );
-    assert_eq!(map.len(), 32);
+    map.insert(Term::Integer(33), a.clone(), &test_atom_table())
+        .unwrap();
+    assert_eq!(map.len(), 33);
+    assert_eq!(map.get(&big), Some(&a));
 }
 
 /// Return the map of a `Map` term.
