@@ -101,6 +101,8 @@ write_concurrency() ->
      reason(fun() -> counters:new((1 bsl 59) + 1, [write_concurrency]) end),
      reason(fun() -> counters:get(Ref, 0) end),
      reason(fun() -> counters:get(Ref, 2) end),
+     reason(fun() -> counters:add(Ref, 2, 1) end),
+     reason(fun() -> counters:put(Ref, 0, 1) end),
      reason(fun() -> counters:put(Ref, 1, 1 bsl 63) end),
      reason(fun() -> counters:put(Ref, 1, 1.0) end),
      reason(fun() -> counters:add(Ref, 1, 1 bsl 64) end),

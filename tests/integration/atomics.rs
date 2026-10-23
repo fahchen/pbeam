@@ -461,7 +461,7 @@ fn runs_the_write_concurrency_counters_as_pinned_erts() {
         ]
         .map(error),
     );
-    cases.extend(std::iter::repeat_n(error("badarg"), 10));
+    cases.extend(std::iter::repeat_n(error("badarg"), 12));
     let actual = program
         .execute("atomics_probe", "write_concurrency", &[])
         .unwrap()
