@@ -39,7 +39,8 @@ pub(super) fn strong_rand_bytes_nif(size: &Term) -> BifResult {
 }
 
 /// Run `crypto:strong_rand_range_nif(Range)` (`rand.c:54-85`). `Range` is a
-/// big-endian unsigned binary (`get_bn_from_bin`), and the result is the
+/// big-endian unsigned binary of at most `INT_MAX` bytes (`get_bn_from_bin`,
+/// `bn.c:53-78`), and the result is the
 /// value of `BN_rand_range` with no leading zero byte (`bin_from_bn`):
 /// `<<>>` is the value 0. A range of 0 fails in `BN_rand_range` and gives
 /// `false`. A term that is not a binary raises `error:badarg`.
@@ -51,7 +52,9 @@ pub(super) fn strong_rand_bytes_nif(size: &Term) -> BifResult {
 /// assert!(matches!(strong_rand_range_nif(&Term::binary(vec![0])), BifResult::Value(Term::Atom(_))));
 /// ```
 pub(super) fn strong_rand_range_nif(range: &Term) -> BifResult {
-    let Some(range) = range.binary_bytes() else {
+    // `get_bn_from_bin` (`bn.c:65-66`) rejects a binary above `INT_MAX` bytes.
+    let range = range.binary_bytes();
+    let Some(range) = range.filter(|range| i32::try_from(range.len()).is_ok()) else {
         return BifResult::badarg();
     };
     let value = BigNum::from_slice(range).and_then(|range| random_below(&range));
@@ -108,7 +111,10 @@ fn rand_uniform(arguments: &[Term]) -> Option<Vec<u8>> {
 /// (`bn.c:26-51`) does: the length in the first 4 bytes, read as a signed
 /// 32-bit integer, must be the number of the bytes that follow.
 fn mpint(term: &Term) -> Option<BigNum> {
-    let bytes = term.binary_bytes()?;
+    // `bn.c:34-35` rejects a binary above `INT_MAX - 4` bytes.
+    let bytes = term
+        .binary_bytes()
+        .filter(|bytes| bytes.len() <= i32::MAX as usize - 4)?;
     let (length, number) = bytes.split_first_chunk::<4>()?;
     let length = usize::try_from(i32::from_be_bytes(*length)).ok()?;
     (length == number.len())
