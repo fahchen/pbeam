@@ -151,3 +151,47 @@ fn reads_bignum_integer_segments_as_pinned_erts() {
     assert_eq!(pbeam, expected);
     assert_eq!(erts, expected);
 }
+
+#[test]
+fn fails_a_read_of_more_than_big_arity_max_digits() {
+    // 2^4194304 - 1 needs 65536 digits, one more than `BIG_ARITY_MAX`:
+    // `bytes_to_big` gives `THE_NON_VALUE` (erl_bits.c:343-353), so
+    // `bs_get_integer2` jumps to its fail label (emu/bs_instrs.tab:942-944).
+    // The signed read is -1. The `bs_match` command stores the non-value
+    // with no check (jit/arm/instr_bs.cpp:3110-3134), which fails an ERTS
+    // assertion; PBeam stops with a runtime error.
+    let program = BeamProgram::load(&[BS_BIGNUM_PROBE]).unwrap();
+    let ones = program.host_term(Term::binary(vec![255; 524_288]));
+    let size = program.host_term(Term::Integer(4_194_304));
+    let nomatch = Term::Atom(program.atom("nomatch").unwrap());
+    let run = |function: &str, arguments: &[_]| {
+        program
+            .execute("bs_bignum_probe", function, arguments)
+            .map(|result| result.term)
+            .map_err(|error| error.to_string())
+    };
+    assert_eq!(run("get_wide_sized", &[ones.clone(), size]), Ok(nomatch));
+    assert_eq!(
+        run("get_wide_signed", &[ones.clone()]),
+        Ok(Term::Integer(1))
+    );
+    assert_eq!(
+        run("get_wide", &[ones]),
+        Err(
+            "bs_match integer segment of 4194304 bits is a bignum above BIG_ARITY_MAX digits"
+                .into()
+        )
+    );
+    let erts = Command::new("erl")
+        .args([
+            "-noshell",
+            "-pa",
+            "fixtures/binary_match",
+            "-eval",
+            "B = <<-1:4194304>>, io:format(\"~w~n\", [[bs_bignum_probe:get_wide_sized(B, \
+             4194304), bs_bignum_probe:get_wide_signed(B)]]), halt().",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8(erts.stdout).unwrap(), "[nomatch,1]\n");
+}

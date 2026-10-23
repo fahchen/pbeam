@@ -20,7 +20,7 @@ use crate::{
     error::{BeamError, error},
     term::{
         Atom, AtomTable, Binary, Fun, HostTerm, Insert, Map, MatchState, Target, Term, debug_term,
-        print_term, segment_equals, segment_integer,
+        fits_big_arity, print_term, segment_equals, segment_integer,
     },
 };
 #[cfg(test)]
@@ -2138,13 +2138,13 @@ impl BeamProgram {
                 } => {
                     let (process, atoms) = scheduler.current_process_and_atoms();
                     let state = match_context(process, context, atoms)?;
-                    let bits = binary_field_size(read_ref(process, size)?, *unit)
-                        .and_then(|bits| state.read_bits(bits).map(|read| (bits as usize, read)));
-                    match bits {
-                        Some((bits, read)) => {
-                            let value = segment_integer(&read, bits, *little, *signed);
-                            write(process, destination, value)?;
-                        }
+                    let value =
+                        binary_field_size(read_ref(process, size)?, *unit).and_then(|bits| {
+                            let read = state.read_bits(bits)?;
+                            bounded_segment_integer(&read, bits as usize, *little, *signed)
+                        });
+                    match value {
+                        Some(value) => write(process, destination, value)?,
                         None => cursor.position = label_position(*fail_label)?,
                     }
                 }
@@ -5489,6 +5489,24 @@ fn equal_read_end(commands: &[BinaryMatchCommand], failed: usize, test_heap: boo
     failed_read.0 + failed_read.1
 }
 
+/// Return the value of an integer segment as `segment_integer` gives it,
+/// or `None` for a bignum of more than `BIG_ARITY_MAX` digits: ERTS
+/// `bytes_to_big` then gives `THE_NON_VALUE` (erl_bits.c:343-353), and the
+/// match fails (emu/bs_instrs.tab:942-944).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(bounded_segment_integer(&[0xFF], 8, false, true), Some(Term::Integer(-1)));
+/// ```
+fn bounded_segment_integer(bits: &[u8], size: usize, little: bool, signed: bool) -> Option<Term> {
+    let value = segment_integer(bits, size, little, signed);
+    match &value {
+        Term::BigInt(big) if !fits_big_arity(big) => None,
+        _ => Some(value),
+    }
+}
+
 /// Run the commands of a `bs_match` instruction in order on the match
 /// context in `context`, as the ERTS JIT does (`gen.bs_match`,
 /// jit/arm/generators.tab:532-604; `emit_i_bs_match_test_heap`,
@@ -5559,7 +5577,17 @@ fn binary_match(
                 destination,
             } => {
                 let bits = state.read_bits(*size).ok_or_else(|| too_few_bits(size))?;
-                let value = segment_integer(&bits, *size as usize, *little, *signed);
+                // The JIT writes the `THE_NON_VALUE` of a bignum above
+                // `BIG_ARITY_MAX` digits to the register with no check
+                // (`GET_INTEGER`, jit/arm/instr_bs.cpp:3110-3134), and the
+                // pinned ERTS then fails the `tag_val_def` assertion.
+                let value = bounded_segment_integer(&bits, *size as usize, *little, *signed)
+                    .ok_or_else(|| {
+                        error(format!(
+                            "bs_match integer segment of {size} bits is a bignum above \
+                             BIG_ARITY_MAX digits"
+                        ))
+                    })?;
                 write(process, destination, value)?;
             }
             BinaryMatchCommand::Binary { size, destination } => {
