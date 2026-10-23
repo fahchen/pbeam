@@ -401,6 +401,14 @@ fn gives_the_errno_of_a_failed_datagram_send_as_pinned_erts() {
 }
 
 #[test]
+fn gives_einval_for_the_count_of_active_at_the_getopts_limit_as_pinned_erts() {
+    // `{active, N}` takes 7 reply bytes (inet_drv.c:9176-9184).
+    let expected = "[[101,105,110,118,97,108],65533]";
+    assert_eq!(erts_text("udp_probe", "active_options"), expected, "ERTS");
+    assert_eq!(pbeam_text("udp_probe", "active_options"), expected, "PBeam");
+}
+
+#[test]
 fn delivers_datagrams_to_the_owner_of_an_active_udp_inet_port_as_pinned_erts() {
     // `packet_inet_input` (inet_drv.c:15361-15588) sends `{udp, S, Address,
     // Port, Data}` for `true`, `once`, and `{active, N}`, which ends with

@@ -770,6 +770,10 @@ impl Inet {
             let value = match option {
                 24 => Some(self.mode),
                 22 if self.active == 3 => {
+                    // The count needs 2 more bytes (inet_drv.c:9179-9183).
+                    if reply.len() + 7 > MAX_OPT_BUFFER {
+                        return Ok(error_reply("einval"));
+                    }
                     reply.push(option);
                     reply.extend(self.active.to_be_bytes());
                     reply.extend(self.active_count.to_be_bytes());

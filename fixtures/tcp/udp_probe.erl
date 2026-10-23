@@ -1,5 +1,5 @@
 -module(udp_probe).
--export([active/0, host_name/0, open/0, passive/0, port_zero/0, truncate/0, unsupported/1]).
+-export([active/0, active_options/0, host_name/0, open/0, passive/0, port_zero/0, truncate/0, unsupported/1]).
 
 %% The requests of the udp_inet driver that inet_config:set_hostname/0
 %% sends through inet_udp:open(0, []), inet:gethostname/1, and
@@ -68,6 +68,18 @@ active() ->
     ok = prim_inet:setopts(S, [{active, true}]),
     Burst = [Next(), Next(), Next(), Next()],
     [True, Once, Two, Negative, Count, Passive, Packets, Burst].
+
+%% The GETOPTS reply of `{active, N}` at the reply limit of 64 KiB: the
+%% count takes 2 more bytes (inet_drv.c:9176-9184), so 13106 options
+%% before it give einval and 13105 options fit. The result gives the
+%% length of a reply that is not an error.
+active_options() ->
+    {ok, S} = udp(),
+    ok = prim_inet:setopts(S, [{active, 1}]),
+    [case control(S, 8, lists:duplicate(N, 24) ++ [22]) of
+         [0 | Error] -> Error;
+         Reply -> length(Reply)
+     end || N <- [13106, 13105]].
 
 %% A message of the socket S with the port P of the sender as `true` and
 %% the socket as the atom socket, because the numbers of ERTS and PBeam
