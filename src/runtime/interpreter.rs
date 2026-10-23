@@ -1,5 +1,5 @@
 use super::{
-    Job,
+    Job, Schedulers,
     capability::{Policy, Restriction},
     dirty::{Output, Work},
     process::{
@@ -191,6 +191,16 @@ pub(super) static FAIL_SCHEDULER_SPAWN: AtomicBool = AtomicBool::new(false);
 /// A one-use gate that releases the scheduler threads after each created
 /// its root. `abort` releases them when a scheduler thread cannot start, so
 /// no thread waits without end on a barrier that will not open.
+/// The root process of one scheduler of a multi-scheduler run.
+#[derive(Clone, Copy)]
+enum MultiRoot<'a> {
+    /// `Module:Function/0`, a root of [`BeamProgram::execute_on_schedulers`].
+    Entry(&'a str, &'a str),
+    /// `erl_init:start/2` with these arguments, the `init` process of
+    /// [`BeamProgram::boot`].
+    Init(&'a [Term]),
+}
+
 struct StartGate {
     state: Mutex<StartState>,
     ready: Condvar,
@@ -671,7 +681,7 @@ impl BeamProgram {
     ///
     /// ```rust,ignore
     /// let program = BeamProgram::load_preloaded(Path::new("/otp/lib/erts-17.1/ebin"))?;
-    /// program.boot(&arguments)?;
+    /// program.boot(&arguments, Schedulers::host())?;
     /// ```
     ///
     /// # Errors
@@ -713,7 +723,7 @@ impl BeamProgram {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let halted = program.boot(&[b"-root", root, b"-bindir", bindir, b"-boot", b"start"]);
+    /// let halted = program.boot(&[b"-root", root, b"-bindir", bindir, b"-boot", b"start"], Schedulers::host());
     /// assert_eq!(halted.unwrap_err(), BeamError::Halt(0));
     /// ```
     ///
@@ -721,22 +731,18 @@ impl BeamProgram {
     ///
     /// The errors of [`BeamProgram::execute`]. A program without the
     /// `erl_init` module gives the error `missing BEAM module erl_init`.
-    pub fn boot(&self, arguments: &[&[u8]]) -> Result<HostTerm, BeamError> {
+    pub fn boot(&self, arguments: &[&[u8]], schedulers: Schedulers) -> Result<HostTerm, BeamError> {
         let arguments = arguments
             .iter()
             .map(|argument| Term::binary(argument.to_vec()));
-        let start = [
-            self.host_term(Term::static_atom("init")),
-            self.host_term(Term::list_from(arguments)),
-        ];
-        self.execute_issued(
-            "erl_init",
-            "start",
-            &start,
-            Issuer::Unchecked,
-            &mut None,
-            true,
-        )
+        let start = [Term::static_atom("init"), Term::list_from(arguments)];
+        let mut roots = vec![None; schedulers.online()];
+        roots[0] = Some(MultiRoot::Init(&start));
+        let (mut results, atoms) = self.run_on_schedulers(&roots, schedulers.total())?;
+        let term = results[0]
+            .take()
+            .expect("a root that did not exit reports its error");
+        Ok(HostTerm { term, atoms })
     }
 
     /// Run one root process on each of `roots.len()` scheduler threads.
@@ -772,8 +778,33 @@ impl BeamProgram {
         if roots.is_empty() {
             return Err(error("a multi-scheduler run needs at least one root"));
         }
+        let roots = roots
+            .iter()
+            .map(|(module, function)| Some(MultiRoot::Entry(module, function)))
+            .collect::<Vec<_>>();
+        let (results, atoms) = self.run_on_schedulers(&roots, roots.len())?;
+        Ok(results
+            .into_iter()
+            .map(|term| HostTerm {
+                term: term.expect("a root that did not exit reports its error"),
+                atoms: Arc::clone(&atoms),
+            })
+            .collect())
+    }
+
+    /// Run the roots `roots` on `roots.len()` scheduler threads, as
+    /// [`BeamProgram::execute_on_schedulers`] describes: one scheduler for
+    /// each slot, which starts the root of the slot, or no root for `None`.
+    /// `erlang:system_info(schedulers)` gives `configured`. Return the
+    /// result of each root in the order of `roots`, `None` for a slot
+    /// without a root, and the atom table of the run.
+    fn run_on_schedulers(
+        &self,
+        roots: &[Option<MultiRoot<'_>>],
+        configured: usize,
+    ) -> Result<(Vec<Option<Term>>, Arc<AtomTable>), BeamError> {
         let initial_mode = InitialMode::read();
-        let (node, readers) = Node::new(roots.len())
+        let (node, readers) = Node::with_configured(roots.len(), configured)
             .map_err(|cause| error(format!("cannot create the scheduler node: {cause}")))?;
         let gate = Arc::new(StartGate::new(roots.len()));
         // The schedulers share one copy of the program table, so an atom
@@ -783,7 +814,7 @@ impl BeamProgram {
         let results = std::thread::scope(|scope| {
             let mut handles = Vec::with_capacity(roots.len());
             let atoms = &atoms;
-            for (index, ((module, function), reader)) in roots.iter().zip(readers).enumerate() {
+            for (index, (root, reader)) in roots.iter().zip(readers).enumerate() {
                 let node = Arc::clone(&node);
                 let thread_gate = Arc::clone(&gate);
                 let body = move || -> Result<_, (BeamError, bool)> {
@@ -796,8 +827,7 @@ impl BeamProgram {
                     scheduler.code = CodeTable::new(self.modules.clone());
                     // The reset of the terminal mode needs the state of
                     // each scheduler after the run.
-                    let run =
-                        self.run_multi_root(&mut scheduler, index, module, function, &mut start);
+                    let run = self.run_multi_root(&mut scheduler, index, *root, &mut start);
                     let selected = scheduler.resources.borrow_mut::<Ttys>().input_selected();
                     match run {
                         Ok(()) => Ok(selected),
@@ -863,16 +893,11 @@ impl BeamProgram {
         for result in results {
             result.map_err(|(cause, _)| cause)?;
         }
-        let mut results_out = Vec::with_capacity(roots.len());
-        for root in roots {
-            let root = root.expect("a root that did not exit reports its error");
-            let term = root.expect("a failed root returns above");
-            results_out.push(HostTerm {
-                term,
-                atoms: Arc::clone(&atoms),
-            });
-        }
-        Ok(results_out)
+        let results = roots
+            .into_iter()
+            .map(|root| root.map(|root| root.expect("a failed root returns above")))
+            .collect();
+        Ok((results, atoms))
     }
 
     /// Return the error of a root process that exited with `reason`.
@@ -903,15 +928,32 @@ impl BeamProgram {
         &self,
         scheduler: &mut Scheduler,
         slot: usize,
-        module: &str,
-        function: &str,
+        root: Option<MultiRoot<'_>>,
         start: &mut StartGuard<'_>,
     ) -> Result<(), BeamError> {
         let node = Arc::clone(scheduler.node());
-        let label = scheduler.code.entry_label(module, function, 0)?;
-        let frame = scheduler.code.frame(module, label, 0)?;
-        let id = scheduler.next_pid()?;
-        scheduler.start_with_id(id, slot, frame.into(), Vec::new(), Vec::new())?;
+        match root {
+            Some(MultiRoot::Entry(module, function)) => {
+                let label = scheduler.code.entry_label(module, function, 0)?;
+                let frame = scheduler.code.frame(module, label, 0)?;
+                let id = scheduler.next_pid()?;
+                scheduler.start_with_id(id, slot, frame.into(), Vec::new(), Vec::new())?;
+            }
+            // The first process of the node is `<0.0.0>` and a system
+            // process (`erl_init.c:2540`, `333-353`). It starts as
+            // `erl_create_process` starts a process, so a module that the
+            // run does not load goes to the error handler
+            // (`erl_process.c:12616`).
+            Some(MultiRoot::Init(arguments)) => {
+                let module = scheduler.atoms.put("erl_init")?;
+                let function = scheduler.atoms.put("start")?;
+                let frame = initial_start(scheduler, &module, &function, arguments.len())?;
+                let id = scheduler.next_pid()?;
+                scheduler.mark_system(id);
+                scheduler.start_with_id(id, slot, frame, arguments.to_vec(), Vec::new())?;
+            }
+            None => {}
+        }
         // Wait until each scheduler created its root, so an idle root cannot
         // decide that its message cannot arrive before another root started.
         let gate = start.0.expect("the start gate is armed");

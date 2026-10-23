@@ -200,8 +200,13 @@ pub(in crate::runtime) struct Node {
     next_unlink_id: AtomicU64,
     /// The roots of the run and their results.
     roots: Mutex<Roots>,
-    /// The number of schedulers of the node.
+    /// The number of schedulers of the node: one thread for each.
     schedulers: usize,
+    /// The number of schedulers that `erlang:system_info(schedulers)`
+    /// gives. It is more than [`Self::schedulers`] when the `+S` option
+    /// sets fewer schedulers online than schedulers (see
+    /// [`crate::Schedulers`]).
+    configured: usize,
     /// The number of schedulers that wait in the idle state (see
     /// [`Self::enter_idle`]).
     idle: Mutex<usize>,
@@ -261,7 +266,17 @@ impl Node {
     /// let (node, readers) = Node::new(2).unwrap();
     /// assert_eq!(readers.len(), 2);
     /// ```
+    #[cfg(test)]
     pub(in crate::runtime) fn new(count: usize) -> io::Result<(Arc<Self>, Vec<UnixStream>)> {
+        Self::with_configured(count, count)
+    }
+
+    /// Return the node of `count` schedulers, as [`Self::new`] does, for
+    /// which `erlang:system_info(schedulers)` gives `configured`.
+    pub(in crate::runtime) fn with_configured(
+        count: usize,
+        configured: usize,
+    ) -> io::Result<(Arc<Self>, Vec<UnixStream>)> {
         let mut inboxes = Vec::with_capacity(count);
         let mut readers = Vec::with_capacity(count);
         for _ in 0..count {
@@ -293,6 +308,7 @@ impl Node {
                 next_unlink_id: AtomicU64::new(1),
                 roots: Roots::new(count),
                 schedulers: count,
+                configured,
                 idle: Mutex::new(0),
                 hungry: (0..count).map(|_| AtomicBool::new(false)).collect(),
                 shutdown: AtomicBool::new(false),
@@ -315,6 +331,12 @@ impl Node {
     /// Return the number of schedulers of the node.
     pub(in crate::runtime) fn scheduler_count(&self) -> usize {
         self.schedulers
+    }
+
+    /// Return the number of schedulers that `erlang:system_info(schedulers)`
+    /// gives (see [`Self::configured`]).
+    pub(in crate::runtime) fn configured_count(&self) -> usize {
+        self.configured
     }
 
     /// Return the dirty pools of the node.
@@ -369,6 +391,7 @@ impl Node {
             next_unlink_id: AtomicU64::new(1),
             roots: Roots::new(1),
             schedulers: 1,
+            configured: 1,
             idle: Mutex::new(0),
             hungry: Vec::new(),
             shutdown: AtomicBool::new(false),

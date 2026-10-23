@@ -7,7 +7,7 @@ use std::{
     process::{Command, Stdio},
 };
 
-use pbeam_runtime::{BeamError, BeamProgram, Term};
+use pbeam_runtime::{BeamError, BeamProgram, Schedulers, Term};
 
 #[path = "../common/mod.rs"]
 mod common;
@@ -170,7 +170,7 @@ fn boot_node(probes: &[&[u8]], flags: &[&[u8]]) -> Result<pbeam_runtime::HostTer
         b"-noshell",
     ];
     arguments.extend(flags);
-    program.boot(&arguments)
+    program.boot(&arguments, Schedulers::host())
 }
 
 /// The environment of the kernel boot: a home directory and a user

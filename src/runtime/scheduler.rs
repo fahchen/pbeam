@@ -2661,7 +2661,9 @@ impl Scheduler {
         self.node.name_keys()
     }
 
-    /// Return the number of schedulers of the node of this run.
+    /// Return the number of schedulers of the node of this run, as
+    /// `erlang:system_info(schedulers)` gives it: also the schedulers that
+    /// the `+S` option sets offline (see `Node::configured_count`).
     ///
     /// # Examples
     ///
@@ -2669,7 +2671,7 @@ impl Scheduler {
     /// assert_eq!(scheduler.scheduler_count(), 1);
     /// ```
     pub(super) fn scheduler_count(&self) -> i64 {
-        self.node.scheduler_count() as i64
+        self.node.configured_count() as i64
     }
 
     /// Return the registered name of the process `id` from the name table of
