@@ -192,7 +192,8 @@ pub(crate) fn local_to_univ(
             }
             clock => Some(clock),
         }
-    }?;
+    };
+    let clock = clock?;
     #[cfg(target_os = "macos")]
     // SAFETY: `time2posix` reads only its argument and the time zone data
     // of the C library.
