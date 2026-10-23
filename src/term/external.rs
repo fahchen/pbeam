@@ -99,6 +99,24 @@ const HCONST: u32 = 0x9e37_79b9;
 /// assert_ne!(block_hash(&[1], 0), block_hash(&[1], 1));
 /// ```
 pub(crate) fn block_hash(bytes: &[u8], seed: u32) -> u32 {
+    iov_block_hash(bytes, bytes.len(), seed)
+}
+
+/// Return the block hash of the bytes of an I/O vector whose last element
+/// holds `last` bytes, as `erts_iov_block_hash` gives it
+/// (erl_term_hashing.c:605-705). When the bytes after the last whole
+/// 12-byte block start in an earlier element, the function adds only the
+/// first bytes of them, as many as the last element gives to them:
+/// `no_final_bytes` takes the size of the last piece and not the count in
+/// `buf` (erl_term_hashing.c:655-673).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(iov_block_hash(&[1, 2], 2, 0), block_hash(&[1, 2], 0));
+/// assert_eq!(iov_block_hash(&[1, 2], 1, 0), iov_block_hash(&[1, 3], 1, 0));
+/// ```
+pub(crate) fn iov_block_hash(bytes: &[u8], last: usize, seed: u32) -> u32 {
     let word = |chunk: &[u8]| {
         chunk.iter().enumerate().fold(0u32, |sum, (index, &byte)| {
             sum.wrapping_add(u32::from(byte) << (8 * index))
@@ -112,6 +130,7 @@ pub(crate) fn block_hash(bytes: &[u8], seed: u32) -> u32 {
         c = c.wrapping_add(word(&block[8..12]));
         (a, b, c) = mix(a, b, c);
     }
+    let rest = &rest[..rest.len().min(last)];
     // The low byte of `c` holds the length (erl_term_hashing.c:484-503).
     c = c.wrapping_add(bytes.len() as u32);
     a = a.wrapping_add(word(&rest[..rest.len().min(4)]));
