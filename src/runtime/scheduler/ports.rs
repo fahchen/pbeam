@@ -12,7 +12,7 @@ use super::{LinkId, Scheduler};
 use crate::{
     error::{BeamError, error},
     runtime::{
-        port::{Driver, Input, Port, PortEvent, Ports, inet},
+        port::{Driver, Input, Port, PortEvent, inet},
         process::MonitorLinkTree,
         signal::Signal,
     },
@@ -76,12 +76,12 @@ impl Scheduler {
             driver,
             monitors: Vec::new(),
             closing: false,
+            scheduler: self.index,
         };
         // The identifiers belong to the node, so a port of one scheduler
         // never compares equal to a port of another.
         let id = self.node.next_port()?;
-        self.resources.borrow_mut::<Ports>().insert_at(id, port);
-        self.node.register_port(id, self.index);
+        self.node.ports().insert_at(id, port);
         self.process_mut(owner)
             .expect("the owner of a port exists")
             .links
@@ -120,32 +120,37 @@ impl Scheduler {
     /// `os:set_signal(sigchld, ignore)`. A ready active `udp_inet` socket
     /// returns a runtime error.
     pub(in crate::runtime) fn port_ready(&mut self, fd: libc::c_int) -> Result<(), BeamError> {
-        let ports = self.resources.borrow_mut::<Ports>();
-        if let Some(listen) = ports.accepting(fd) {
+        let mut ports = self.node.ports();
+        if let Some(listen) = ports.accepting(self.index, fd) {
+            drop(ports);
             return self.tcp_accept_ready(listen);
         }
-        if ports.receiving(fd) {
+        if ports.receiving(self.index, fd) {
             return Err(error(inet::DATAGRAM_RECEIVE));
         }
-        if let Some(port) = ports.stream_receiving(fd) {
+        if let Some(port) = ports.stream_receiving(self.index, fd) {
+            drop(ports);
             return self.tcp_receive_ready(port);
         }
-        let Some((id, event)) = ports.read(fd) else {
+        let Some((id, event)) = ports.read(self.index, fd) else {
             return Ok(());
         };
         let port = ports.get_mut(id).expect("the port of a read is open");
         let owner = port.owner;
+        if let PortEvent::Data(parts) = &event {
+            port.input += parts.iter().map(|bytes| bytes.len() as u64).sum::<u64>();
+        }
+        drop(ports);
         match event {
             PortEvent::Data(parts) => {
-                port.input += parts.iter().map(|bytes| bytes.len() as u64).sum::<u64>();
                 for bytes in parts {
-                    self.deliver(owner, port_message(id, "data", Term::binary(bytes)));
+                    self.port_send(owner, port_message(id, "data", Term::binary(bytes)));
                 }
             }
             PortEvent::EndOfFile => self.port_end_of_file(id),
             PortEvent::ExitStatus(Some(status)) => {
                 let status = Term::Integer(status.into());
-                self.deliver(owner, port_message(id, "exit_status", status));
+                self.port_send(owner, port_message(id, "exit_status", status));
                 self.port_end_of_file(id);
             }
             PortEvent::ExitStatus(None) => {
@@ -163,16 +168,23 @@ impl Scheduler {
     /// owner and stays open, and it reads nothing more. Each other port
     /// closes with the reason `normal`.
     fn port_end_of_file(&mut self, id: PortId) {
-        let port = self.resources.borrow_mut::<Ports>().get_mut(id);
+        let mut ports = self.node.ports();
+        let port = ports.get_mut(id);
         let port = port.expect("the port of an end of file is open");
         let owner = port.owner;
-        match &mut port.driver {
+        let soft = match &mut port.driver {
             Driver::Spawn(spawn) if spawn.soft_eof => {
                 spawn.input = Input::Ended;
-                let eof = Term::tuple(vec![Term::Port(id), Term::static_atom("eof")]);
-                self.deliver(owner, eof);
+                true
             }
-            _ => self.close_port(id, Term::static_atom("normal")),
+            _ => false,
+        };
+        drop(ports);
+        if soft {
+            let eof = Term::tuple(vec![Term::Port(id), Term::static_atom("eof")]);
+            self.port_send(owner, eof);
+        } else {
+            self.close_port(id, Term::static_atom("normal"));
         }
     }
 
@@ -191,7 +203,8 @@ impl Scheduler {
     ///
     /// The error of [`Self::tcp_send_ready`].
     pub(in crate::runtime) fn port_writable(&mut self, fd: libc::c_int) -> Result<(), BeamError> {
-        match self.resources.borrow_mut::<Ports>().sending(fd) {
+        let sending = self.node.ports().sending(self.index, fd);
+        match sending {
             Some(port) => self.tcp_send_ready(port),
             None => Ok(()),
         }
@@ -239,7 +252,7 @@ impl Scheduler {
     /// [`Self::close_port`]), and keep a port that flushes in the `CLOSING`
     /// state only with `flush`.
     fn exit_port(&mut self, id: PortId, reason: Term, flush: bool) {
-        let ports = self.resources.borrow_mut::<Ports>();
+        let mut ports = self.node.ports();
         let port = ports.get_mut(id).expect("the port to close is open");
         // `erts_deliver_port_exit` sets `CLOSING` for each queue that holds
         // bytes before `flush_port` (io.c:3939-3948). With `linger {true,
@@ -253,9 +266,13 @@ impl Scheduler {
         let links = std::mem::take(&mut port.links);
         let monitors = std::mem::take(&mut port.monitors);
         port.closing |= queued;
+        let serving = port.scheduler;
         let port = (!flushes).then(|| ports.remove(id).expect("the port to close is open"));
-        if !flushes {
-            self.node.remove_port(id);
+        drop(ports);
+        // The scheduler that serves the port waits for its fds: wake it, so
+        // that it waits again without the fds of the closed port.
+        if serving != self.index {
+            self.node.wake_scheduler(serving);
         }
         let reason = if reason == Term::static_atom("kill") {
             Term::static_atom("killed")
@@ -295,10 +312,14 @@ impl Scheduler {
     /// scheduler.driver_exit(port, Term::static_atom("normal"));
     /// ```
     pub(super) fn driver_exit(&mut self, id: PortId, reason: Term) {
-        let port = self.resources.borrow_mut::<Ports>().get_mut(id);
-        let port = port.expect("the port of a driver exit is open");
+        let mut ports = self.node.ports();
+        let port = ports
+            .get_mut(id)
+            .expect("the port of a driver exit is open");
         let owner = port.owner;
-        if port.links.remove(&owner).is_some() {
+        let linked = port.links.remove(&owner).is_some();
+        drop(ports);
+        if linked {
             // An owner that does not exist drops the signal.
             let _ = self.send_signal(None, owner, Signal::PortUnlink { port: id });
         }
@@ -318,8 +339,14 @@ impl Scheduler {
     /// ```
     pub(in crate::runtime) fn link_port(&mut self, id: PortId) -> bool {
         let current = self.current_process_mut().id;
-        let ports = self.resources.borrow_mut::<Ports>();
-        let Some(port) = ports.get_mut(id).filter(|port| !port.closing) else {
+        let linked = self
+            .node
+            .ports()
+            .get_mut(id)
+            .filter(|port| !port.closing)
+            .map(|port| port.links.insert(current, ()))
+            .is_some();
+        if !linked {
             if !self.current_process_mut().trap_exit {
                 return false;
             }
@@ -334,8 +361,7 @@ impl Scheduler {
             self.send_signal(None, current, exit)
                 .expect("the current process gets the exit signal");
             return true;
-        };
-        port.links.insert(current, ());
+        }
         self.current_process_mut().links.insert(LinkId::Port(id), 0);
         true
     }
@@ -356,7 +382,7 @@ impl Scheduler {
             return;
         }
         self.current_process_mut().links.remove(&LinkId::Port(id));
-        if let Some(port) = self.resources.borrow_mut::<Ports>().get_mut(id) {
+        if let Some(port) = self.node.ports().get_mut(id) {
             let _ = port.links.remove(&current);
         }
     }
@@ -375,20 +401,27 @@ impl Scheduler {
     /// assert!(scheduler.connect_port(port, handler));
     /// ```
     pub(in crate::runtime) fn connect_port(&mut self, id: PortId, pid: ProcessId) -> bool {
-        let port = self.resources.borrow_mut::<Ports>().get_mut(id);
-        let port = port.expect("the port to connect is open");
-        if port.links.get(&pid).is_none() {
+        let linked = self
+            .node
+            .ports()
+            .get(id)
+            .expect("the port to connect is open")
+            .links
+            .get(&pid)
+            .is_some();
+        if !linked {
             let link = Signal::PortLink { port: id };
             if self.send_signal(None, pid, link).is_err() {
                 return false;
             }
         }
-        let port = self.resources.borrow_mut::<Ports>().get_mut(id);
-        let port = port.expect("the port to connect is open");
+        let mut ports = self.node.ports();
+        let port = ports.get_mut(id).expect("the port to connect is open");
         port.links.insert(pid, ());
         port.owner = pid;
-        // The new owner gets the data of the port, which stays with this
-        // scheduler, so the owner stays too (see `ProcessState::pinned`).
+        drop(ports);
+        // The scheduler that serves the port keeps a new owner of its own:
+        // the owner stays with it (see `ProcessState::pinned`).
         if let Some(process) = self.processes.get_mut(&pid) {
             process.pinned = true;
         }
@@ -420,7 +453,7 @@ impl Scheduler {
         watcher: ProcessId,
         reference: Reference,
     ) -> bool {
-        let ports = self.resources.borrow_mut::<Ports>();
+        let mut ports = self.node.ports();
         ports
             .get_mut(id)
             .filter(|port| !port.closing)
@@ -438,9 +471,11 @@ impl Scheduler {
     /// scheduler.demonitor_port(port, reference);
     /// ```
     pub(super) fn demonitor_port(&mut self, id: PortId, reference: Reference) {
-        let port = self.resources.borrow_mut::<Ports>().get_mut(id);
         // A port that closed has no monitor to remove.
-        port.into_iter()
+        self.node
+            .ports()
+            .get_mut(id)
+            .into_iter()
             .for_each(|port| port.monitors.retain(|&(_, item)| item != reference));
     }
 
@@ -486,10 +521,9 @@ impl Scheduler {
         from: ProcessId,
         reason: &Term,
     ) {
-        let port = self.resources.borrow_mut::<Ports>().get_mut(id);
         // A port that closed sent its link exit signal to `from`, and a port
         // without the link drops the signal (`io.c:2187-2190`).
-        let closes = port.is_some_and(|port| {
+        let closes = self.node.ports().get_mut(id).is_some_and(|port| {
             port.links.remove(&from).is_some()
                 && (*reason != Term::static_atom("normal") || port.owner == from)
         });
@@ -506,6 +540,21 @@ impl Scheduler {
 /// ```rust,ignore
 /// let message = port_message(PortId(0), "exit_status", Term::Integer(0));
 /// ```
+impl Scheduler {
+    /// Send the message `term` of a port to its connected process
+    /// `target`, on this scheduler or on another (`erts_port_output`
+    /// queues the message of the port to the process, `io.c`). A target
+    /// that does not exist drops the message.
+    fn port_send(&mut self, target: ProcessId, term: Term) {
+        match self.remote_owner(target) {
+            Some(index) if !self.processes.contains_key(&target) => {
+                self.node.send_message(index, None, term, target, None);
+            }
+            _ => self.deliver(target, term),
+        }
+    }
+}
+
 fn port_message(id: PortId, tag: &str, value: Term) -> Term {
     Term::tuple(vec![
         Term::Port(id),

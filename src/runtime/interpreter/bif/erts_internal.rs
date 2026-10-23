@@ -13,7 +13,7 @@ use crate::runtime::{
         spawn::{self, SpawnError, Streams},
     },
     port::{
-        Driver, Input, Packets, Port, Ports, Spawn,
+        Driver, Input, Packets, Port, Spawn,
         inet::{Control, Inet, SocketType},
     },
     signal::Signal,
@@ -623,7 +623,7 @@ pub(super) fn open_port_id(
     let Some(id) = found_port_id(scheduler, port)? else {
         return Ok(None);
     };
-    Ok((!scheduler.resources.borrow_mut::<Ports>().closing(id)).then_some(id))
+    Ok((!scheduler.node.ports().closing(id)).then_some(id))
 }
 
 /// Return the port of `port` that is open or in the `CLOSING` state, as
@@ -639,18 +639,10 @@ fn found_port_id(scheduler: &mut Scheduler, port: &Term) -> Result<Option<PortId
     let Term::Port(id) = port else {
         return Ok(None);
     };
-    // The services of a port stay with its scheduler, so a BIF cannot use a
-    // port of another scheduler.
-    if scheduler.remote_port_owner(*id).is_some() {
-        return Err(error(
-            "unsupported: a port of another scheduler in a run of execute_on_schedulers",
-        ));
-    }
-    Ok(scheduler
-        .resources
-        .borrow_mut::<Ports>()
-        .get(*id)
-        .map(|_| *id))
+    // The timers of an inet port stay with the scheduler that serves it.
+    let index = scheduler.index();
+    scheduler.inet_port_served(*id, index)?;
+    Ok(scheduler.node.ports().get(*id).map(|_| *id))
 }
 
 /// Run `erts_internal:port_command(Port, Data, OptionList)`, which
@@ -706,10 +698,11 @@ pub(super) fn port_command(
     scheduler
         .current_process_mut()
         .bump_reductions(PORT_REDUCTIONS);
-    let ports = scheduler.resources.borrow_mut::<Ports>();
+    let mut ports = scheduler.node.ports();
     let port_state = ports.get_mut(id).expect("the port is open");
     let Driver::Spawn(spawn) = &mut port_state.driver else {
         port_state.output += bytes.len() as u64;
+        drop(ports);
         scheduler.tcp_send(id, &bytes)?;
         return Ok(signals_return(scheduler, port, Term::static_atom("true")));
     };
@@ -717,12 +710,14 @@ pub(super) fn port_command(
     // (`sys_drivers.c:1153-1158`).
     let size = bytes.len() as u64;
     let written = spawn.packets.frame(bytes).ok_or(libc::EINVAL);
-    match written.and_then(|framed| spawn.child.write_input(&framed)) {
-        Ok(()) => port_state.output += size,
-        Err(errno) => {
-            let reason = Term::Atom(scheduler.atoms.put(&errno_id(errno))?);
-            scheduler.close_port(id, reason);
-        }
+    let written = written.and_then(|framed| spawn.child.write_input(&framed));
+    if written.is_ok() {
+        port_state.output += size;
+    }
+    drop(ports);
+    if let Err(errno) = written {
+        let reason = Term::Atom(scheduler.atoms.put(&errno_id(errno))?);
+        scheduler.close_port(id, reason);
     }
     Ok(signals_return(scheduler, port, Term::static_atom("true")))
 }
@@ -822,17 +817,18 @@ pub(super) fn port_control(
         return Ok(denied);
     }
     let caller = scheduler.current_process_mut().id;
-    let ports = scheduler.resources.borrow_mut::<Ports>();
+    let mut ports = scheduler.node.ports();
     let reply = match ports.get_mut(id).expect("the port is open").inet_mut() {
-        Some(driver) => driver.control(command, &bytes, caller)?,
+        Some(driver) => driver.control(command, &bytes, caller),
         None if command == SPAWN_CONTROL => {
             return Err(error(
                 "unsupported erlang:port_control/3 command 16#04c76a00 on a spawn port: see \"Ports\" in docs/erts-differences.md",
             ));
         }
-        None => Control::Badarg,
+        None => Ok(Control::Badarg),
     };
-    let reply = match reply {
+    drop(ports);
+    let reply = match reply? {
         Control::Reply(reply) => reply,
         Control::Accept(timeout) => scheduler.tcp_accept(id, timeout)?,
         Control::Receive { timeout, length } => scheduler.tcp_receive(id, timeout, length)?,
@@ -866,8 +862,13 @@ pub(super) fn port_denial(
     id: PortId,
     operation: Operation,
 ) -> Result<Option<BifResult>, BeamError> {
-    let ports = scheduler.resources.borrow_mut::<Ports>();
-    let name = ports.get(id).expect("the port is open").name.clone();
+    let name = scheduler
+        .node
+        .ports()
+        .get(id)
+        .expect("the port is open")
+        .name
+        .clone();
     denial(scheduler, CapabilityKind::Port, operation, Some(&name))
 }
 
@@ -905,7 +906,7 @@ pub(super) fn port_info(context: &mut BifContext<'_>, port: &Term) -> Result<Bif
             scheduler
                 .current_process_mut()
                 .bump_reductions(PORT_REDUCTIONS);
-            let ports = scheduler.resources.borrow_mut::<Ports>();
+            let ports = scheduler.node.ports();
             let port = ports.get(id).expect("the port is open");
             Term::list_from(
                 PORT_INFO_ITEMS
@@ -1033,7 +1034,7 @@ pub(super) fn port_info_item(
             scheduler
                 .current_process_mut()
                 .bump_reductions(PORT_REDUCTIONS);
-            let ports = scheduler.resources.borrow_mut::<Ports>();
+            let ports = scheduler.node.ports();
             let port = ports.get(id).expect("the port is open");
             port_item(id, port, name)?
         }
@@ -1081,12 +1082,10 @@ pub(super) fn port_connect(
             if let Some(denied) = port_denial(scheduler, id, Operation::Command)?.or(boot) {
                 return Ok(denied);
             }
-            // The port keeps the services of its scheduler: the data
-            // messages and the exit of a remote owner do not reach it.
-            if scheduler.remote_owner(pid).is_some() {
-                return Err(error(
-                    "unsupported: erlang:port_connect/2 to a process of another scheduler",
-                ));
+            // The timers of an inet port stay with the scheduler that serves
+            // it, so the exit of an owner on another scheduler cannot stop it.
+            if let Some(index) = scheduler.remote_owner(pid) {
+                scheduler.inet_port_served(id, index)?;
             }
             let connected = scheduler.connect_port(id, pid);
             if connected {

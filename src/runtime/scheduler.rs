@@ -25,7 +25,6 @@ use super::{
     mailbox::Mailbox,
     nif::abi,
     pcre2::{self, Code, Deserialized},
-    port::Ports,
     process::{
         DirtyCall, Flush, Frame, LinkId, Monitor, MonitorLinkTree, Origin, OriginMonitor,
         ProcessState, ReceiveTimer, StackSlot, Start, StartFlags, TargetMonitor, WalkPosition,
@@ -477,7 +476,7 @@ pub(super) struct Scheduler {
     skip_checks: bool,
     /// The node of this scheduler. Every scheduler has one; a run with one
     /// scheduler thread has a node that wakes no thread.
-    node: Arc<Node>,
+    pub(in crate::runtime) node: Arc<Node>,
     /// True when scheduler threads share the node: the inbox of each
     /// scheduler carries the deliveries of other threads and the schedulers
     /// share one atom table.
@@ -503,7 +502,6 @@ impl Scheduler {
     pub(super) fn new(atoms: impl Into<Arc<AtomTable>>) -> Self {
         let mut resources = Resources::default();
         resources.put(Ttys::default());
-        resources.put(Ports::default());
         let menu_pair = std::os::unix::net::UnixStream::pair().expect("a menu socket pair opens");
         let node = Node::single();
         Scheduler {
@@ -1263,8 +1261,8 @@ impl Scheduler {
     pub(super) fn has_external_sources(&mut self) -> bool {
         self.resources.borrow_mut::<Ttys>().input_selected()
             || self.dirty.running()
-            || !self.resources.borrow_mut::<Ports>().wait_fds().is_empty()
-            || !self.resources.borrow_mut::<Ports>().write_fds().is_empty()
+            || !self.node.ports().wait_fds(self.index).is_empty()
+            || !self.node.ports().write_fds(self.index).is_empty()
             // A handled host signal becomes a message to `erl_signal_server`.
             || self.whereis("erl_signal_server").is_some()
     }
@@ -1308,8 +1306,8 @@ impl Scheduler {
     pub(super) fn wait_events(&mut self, timeout: Option<Duration>) -> Result<bool, BeamError> {
         let selected = self.resources.borrow_mut::<Ttys>().input_selected();
         let dirty = self.dirty.running();
-        let ports = self.resources.borrow_mut::<Ports>().wait_fds();
-        let writes = self.resources.borrow_mut::<Ports>().write_fds();
+        let ports = self.node.ports().wait_fds(self.index);
+        let writes = self.node.ports().write_fds(self.index);
         let wake = self.wake.as_ref().map(|wake| wake.as_raw_fd());
         let fds: Vec<_> = [
             selected.then_some(libc::STDIN_FILENO),
@@ -2786,11 +2784,25 @@ impl Scheduler {
         self.index
     }
 
-    /// Return the scheduler of the open port `id` when it is a port of
-    /// another scheduler of the node.
-    pub(super) fn remote_port_owner(&self, id: crate::term::PortId) -> Option<usize> {
-        let owner = self.node.port_owner(id)?;
-        (owner != self.index).then_some(owner)
+    /// Return the unsupported error when the open port `id` is an inet
+    /// port that the scheduler `index` does not serve. The receive and accept timers of
+    /// an inet port stay with the scheduler that serves it until port tasks
+    /// run on any scheduler (row "Ports" of `docs/erts-differences.md`).
+    /// A spawn port, a port of `index`, and a closed port give `Ok`.
+    pub(super) fn inet_port_served(
+        &self,
+        id: crate::term::PortId,
+        index: usize,
+    ) -> Result<(), BeamError> {
+        let remote = self.node.ports().get(id).is_some_and(|port| {
+            port.scheduler != index && matches!(port.driver, crate::runtime::port::Driver::Inet(_))
+        });
+        if remote {
+            return Err(error(
+                "unsupported: an inet port of another scheduler in a run of execute_on_schedulers: see \"Ports\" in docs/erts-differences.md",
+            ));
+        }
+        Ok(())
     }
 
     /// Return the scheduler of the live process `target` when it is another

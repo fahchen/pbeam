@@ -233,26 +233,36 @@ fn uses_a_port_of_another_scheduler_as_a_term() {
     assert_eq!(results[1].term, Term::Atom(ok_atom), "the giver");
 }
 
-/// A use of a port of another scheduler fails with a clear error.
+/// Each port BIF on a spawn port of another scheduler gives the result of
+/// the pinned ERTS on `erl +S 2`: `{true, "/bin/cat", true, <<"hi">>,
+/// badarg, normal, false, undefined}` and `ok`.
 #[test]
-fn rejects_the_use_of_a_port_of_another_scheduler() {
+fn uses_a_port_of_another_scheduler() {
     let erlang = pinned_beam("erlang");
-    let program = BeamProgram::load(&[&erlang, PING_PONG]).expect("the fixture loads");
-    let error = program
+    let lists = pinned_beam("lists");
+    let program = BeamProgram::load(&[&erlang, &lists, PING_PONG]).expect("the fixture loads");
+    let atom = |name| Term::Atom(program.atom(name).expect("the fixture names the atom"));
+    let results = program
         .execute_on_schedulers(&[("ping_pong", "port_use"), ("ping_pong", "port_give")])
-        .expect_err("the port use is unsupported");
-    assert!(
-        error
-            .to_string()
-            .contains("unsupported: a port of another scheduler"),
-        "{error}"
-    );
+        .expect("the two schedulers run");
+    let expected = Term::tuple(vec![
+        atom("true"),
+        Term::list_from(b"/bin/cat".iter().map(|&byte| Term::Integer(byte.into()))),
+        atom("true"),
+        Term::binary(b"hi".to_vec()),
+        atom("badarg"),
+        atom("normal"),
+        atom("false"),
+        atom("undefined"),
+    ]);
+    assert_eq!(results[0].term, expected, "the user");
+    assert_eq!(results[1].term, atom("ok"), "the giver");
 }
 
-/// A transfer of a port to a process of another scheduler fails with a
-/// clear error.
+/// A transfer of a tcp_inet port to a process of another scheduler fails
+/// with a clear error.
 #[test]
-fn rejects_a_port_transfer_across_schedulers() {
+fn rejects_an_inet_port_transfer_across_schedulers() {
     let erlang = pinned_beam("erlang");
     let program = BeamProgram::load(&[&erlang, PING_PONG]).expect("the fixture loads");
     let error = program
@@ -264,21 +274,7 @@ fn rejects_a_port_transfer_across_schedulers() {
     assert!(
         error
             .to_string()
-            .contains("unsupported: erlang:port_connect/2 to a process of another scheduler"),
-        "{error}"
-    );
-}
-
-/// The port list of a run with scheduler threads is not readable yet, and
-/// the run stops with a clear error.
-#[test]
-fn rejects_the_port_list_of_a_scheduler_run() {
-    let program = BeamProgram::load(&[PING_PONG]).expect("the fixture loads");
-    let error = program
-        .execute_on_schedulers(&[("ping_pong", "ports_list"), ("ping_pong", "info_hold")])
-        .expect_err("the port list is unsupported");
-    assert!(
-        error.to_string().contains("unsupported: erlang:ports/0"),
+            .contains("unsupported: an inet port of another scheduler"),
         "{error}"
     );
 }
@@ -616,9 +612,9 @@ fn cancels_a_bif_timer_at_an_exit() {
     assert_eq!(results[1].term, Term::Atom(ok_atom), "the holder");
 }
 
-/// A link to a port of another scheduler fails with a clear error.
+/// A link to a tcp_inet port of another scheduler fails with a clear error.
 #[test]
-fn rejects_a_link_to_a_port_of_another_scheduler() {
+fn rejects_a_link_to_an_inet_port_of_another_scheduler() {
     let erlang = pinned_beam("erlang");
     let program = BeamProgram::load(&[&erlang, PING_PONG]).expect("the fixture loads");
     let error = program
@@ -630,26 +626,7 @@ fn rejects_a_link_to_a_port_of_another_scheduler() {
     assert!(
         error
             .to_string()
-            .contains("unsupported: a port of another scheduler"),
-        "{error}"
-    );
-}
-
-/// A monitor of a port of another scheduler fails with a clear error.
-#[test]
-fn rejects_a_monitor_of_a_port_of_another_scheduler() {
-    let erlang = pinned_beam("erlang");
-    let program = BeamProgram::load(&[&erlang, PING_PONG]).expect("the fixture loads");
-    let error = program
-        .execute_on_schedulers(&[
-            ("ping_pong", "port_monitor_use"),
-            ("ping_pong", "port_monitor_give"),
-        ])
-        .expect_err("the port monitor is unsupported");
-    assert!(
-        error
-            .to_string()
-            .contains("unsupported: a port of another scheduler"),
+            .contains("unsupported: an inet port of another scheduler"),
         "{error}"
     );
 }

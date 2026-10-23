@@ -71,6 +71,10 @@ pub(super) struct Port {
     /// erl_bif_port.c:157-160; `link_opt`, bif.c:192-196). The driver sends
     /// no message (io.c:6212-6227).
     pub(super) closing: bool,
+    /// The scheduler that opened the port and serves its I/O: its poll
+    /// waits for the fds of the port. The port itself is in the node port
+    /// table, so a BIF of any scheduler reads and changes it.
+    pub(super) scheduler: usize,
 }
 
 /// The driver of a port and the data of the driver.
@@ -324,9 +328,15 @@ impl Ports {
     /// ```rust,ignore
     /// assert_eq!(ports.wait_fds(), vec![child.output_fd()]);
     /// ```
-    pub(super) fn wait_fds(&self) -> Vec<c_int> {
+    /// The open ports that the scheduler `index` serves.
+    fn served(&self, index: usize) -> impl Iterator<Item = &Port> {
         self.by_id
             .values()
+            .filter(move |port| port.scheduler == index)
+    }
+
+    pub(super) fn wait_fds(&self, index: usize) -> Vec<c_int> {
+        self.served(index)
             .filter_map(|port| match &port.driver {
                 Driver::Spawn(spawn) => match spawn.input {
                     Input::Open => Some(spawn.child.output_fd()),
@@ -350,9 +360,8 @@ impl Ports {
     /// ```rust,ignore
     /// assert!(ports.write_fds().is_empty());
     /// ```
-    pub(super) fn write_fds(&self) -> Vec<c_int> {
-        self.by_id
-            .values()
+    pub(super) fn write_fds(&self, index: usize) -> Vec<c_int> {
+        self.served(index)
             .filter_map(|port| match &port.driver {
                 Driver::Inet(inet) => inet.send_fd(),
                 Driver::Spawn(_) => None,
@@ -368,8 +377,8 @@ impl Ports {
     /// ```rust,ignore
     /// assert_eq!(ports.stream_receiving(fd), Some(port));
     /// ```
-    pub(super) fn stream_receiving(&self, fd: c_int) -> Option<PortId> {
-        self.inet_port(fd, Inet::stream_receive_fd)
+    pub(super) fn stream_receiving(&self, index: usize, fd: c_int) -> Option<PortId> {
+        self.inet_port(index, fd, Inet::stream_receive_fd)
     }
 
     /// Return the `tcp_inet` port whose socket is `fd` and has queued
@@ -380,14 +389,20 @@ impl Ports {
     /// ```rust,ignore
     /// assert_eq!(ports.sending(fd), Some(port));
     /// ```
-    pub(super) fn sending(&self, fd: c_int) -> Option<PortId> {
-        self.inet_port(fd, Inet::send_fd)
+    pub(super) fn sending(&self, index: usize, fd: c_int) -> Option<PortId> {
+        self.inet_port(index, fd, Inet::send_fd)
     }
 
     /// Return the inet port for which `select` gives `fd`.
-    fn inet_port(&self, fd: c_int, select: impl Fn(&Inet) -> Option<c_int>) -> Option<PortId> {
+    fn inet_port(
+        &self,
+        index: usize,
+        fd: c_int,
+        select: impl Fn(&Inet) -> Option<c_int>,
+    ) -> Option<PortId> {
         self.by_id
             .iter()
+            .filter(|(_, port)| port.scheduler == index)
             .find_map(|(&id, port)| match &port.driver {
                 Driver::Inet(inet) if select(inet) == Some(fd) => Some(id),
                 _ => None,
@@ -402,9 +417,10 @@ impl Ports {
     /// ```rust,ignore
     /// assert_eq!(ports.accepting(fd), Some(PortId(0)));
     /// ```
-    pub(super) fn accepting(&self, fd: c_int) -> Option<PortId> {
+    pub(super) fn accepting(&self, index: usize, fd: c_int) -> Option<PortId> {
         self.by_id
             .iter()
+            .filter(|(_, port)| port.scheduler == index)
             .find_map(|(&id, port)| match &port.driver {
                 Driver::Inet(tcp) if tcp.accept_fd() == Some(fd) => Some(id),
                 _ => None,
@@ -419,9 +435,8 @@ impl Ports {
     /// ```rust,ignore
     /// assert!(ports.receiving(fd));
     /// ```
-    pub(super) fn receiving(&self, fd: c_int) -> bool {
-        self.by_id
-            .values()
+    pub(super) fn receiving(&self, index: usize, fd: c_int) -> bool {
+        self.served(index)
             .any(|port| matches!(&port.driver, Driver::Inet(inet) if inet.receive_fd() == Some(fd)))
     }
 
@@ -440,10 +455,11 @@ impl Ports {
     /// ```rust,ignore
     /// assert_eq!(ports.read(fd), Some((PortId(0), PortEvent::Data(vec![b"hi".to_vec()]))));
     /// ```
-    pub(super) fn read(&mut self, fd: c_int) -> Option<(PortId, PortEvent)> {
+    pub(super) fn read(&mut self, index: usize, fd: c_int) -> Option<(PortId, PortEvent)> {
         let (id, spawn) = self
             .by_id
             .iter_mut()
+            .filter(|(_, port)| port.scheduler == index)
             .find_map(|(&id, port)| match &mut port.driver {
                 Driver::Spawn(spawn)
                     if (spawn.input == Input::Open && spawn.child.output_fd() == fd)

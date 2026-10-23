@@ -8,7 +8,6 @@ use crate::runtime::host;
 use crate::runtime::interpreter::DEFAULT_ERROR_HANDLER;
 use crate::runtime::interpreter::code_table::{CodeTable, Finish};
 use crate::runtime::local_node;
-use crate::runtime::port::Ports;
 use crate::runtime::process::{Flush, Origin, Priority};
 use crate::runtime::process::{InitialCall, OTHER_PROCESS_INFO_ITEMS};
 use crate::runtime::process::{LinkId, ProcessState};
@@ -1018,11 +1017,8 @@ pub(super) fn link(scheduler: &mut Scheduler, target: &Term) -> Result<BifResult
     let target = match *target {
         Term::Pid(pid) => LinkId::Process(pid),
         Term::Port(port) => {
-            if scheduler.remote_port_owner(port).is_some() {
-                return Err(error(
-                    "unsupported: a port of another scheduler in a run of execute_on_schedulers",
-                ));
-            }
+            let index = scheduler.index();
+            scheduler.inet_port_served(port, index)?;
             LinkId::Port(port)
         }
         _ => return Ok(BifResult::badarg()),
@@ -1270,12 +1266,12 @@ pub(super) fn monitor(
     let target = match (context.scheduler.atoms.name_of(kind), target) {
         ("process", Term::Pid(id)) => Some(Ok(MonitorTarget::Process(*id))),
         ("process", target) => local_name(target).map(|name| Ok(MonitorTarget::ProcessName(name))),
-        ("port", Term::Port(port)) if context.scheduler.remote_port_owner(*port).is_some() => {
-            Some(Err(error(
-                "unsupported: a port of another scheduler in a run of execute_on_schedulers",
-            )))
-        }
-        ("port", Term::Port(port)) => Some(Ok(MonitorTarget::Port(*port))),
+        ("port", Term::Port(port)) => Some(
+            context
+                .scheduler
+                .inet_port_served(*port, context.scheduler.index())
+                .map(|()| MonitorTarget::Port(*port)),
+        ),
         ("port", target) => local_name(target).map(|name| Ok(MonitorTarget::PortName(name))),
         ("time_offset", Term::Atom(service)) if service.is_static("clock_service") => {
             // ponytail: no time offset service yet; add it when a measured path monitors it.
@@ -5171,28 +5167,16 @@ pub(super) fn registered(scheduler: &mut Scheduler) -> Result<BifResult, BeamErr
 
 /// Run `erlang:ports/0` as `ports_0` (`bif.c:4125-4128`) does with
 /// `erts_ptab_list` (`erl_ptab.c:738-...`): return each open port. ERTS
-/// walks its port table, so the order is not part of the result. A run
-/// with scheduler threads fails, because each scheduler keeps its own port
-/// table.
+/// walks its port table, so the order is not part of the result. The node
+/// port table holds the ports of each scheduler of the run.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// assert!(matches!(ports(&mut scheduler)?, BifResult::Value(Term::Nil)));
 /// ```
-///
-/// # Errors
-///
-/// The unsupported error of a run with scheduler threads.
 pub(super) fn ports(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
-    // The port table stays with each scheduler, so this run cannot list
-    // the ports of the node yet.
-    if scheduler.is_multi() {
-        return Err(error(
-            "unsupported: erlang:ports/0 in a run of execute_on_schedulers",
-        ));
-    }
-    let ports = scheduler.resources.borrow_mut::<Ports>().ids();
+    let ports = scheduler.node.ports().ids();
     Ok(Value(Term::list_from(ports.into_iter().map(Term::Port))))
 }
 
@@ -6143,7 +6127,7 @@ pub(super) fn port_set_data(
     if let Some(denied) = erts_internal::port_denial(scheduler, id, Operation::Command)? {
         return Ok(denied);
     }
-    let ports = scheduler.resources.borrow_mut::<Ports>();
+    let mut ports = scheduler.node.ports();
     ports.get_mut(id).expect("the port is open").data = data.clone();
     Ok(BifResult::Value(Term::static_atom("true")))
 }
@@ -6175,7 +6159,7 @@ pub(super) fn port_get_data(
     if let Some(denied) = erts_internal::port_denial(scheduler, id, Operation::Inspect)? {
         return Ok(denied);
     }
-    let ports = scheduler.resources.borrow_mut::<Ports>();
+    let ports = scheduler.node.ports();
     let data = ports.get(id).expect("the port is open").data.clone();
     Ok(BifResult::Value(data))
 }

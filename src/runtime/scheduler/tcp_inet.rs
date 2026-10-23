@@ -62,11 +62,13 @@ impl Scheduler {
         timeout: u32,
     ) -> Result<Vec<u8>, BeamError> {
         let caller = self.current_process_mut().id;
-        let tcp = tcp_inet(self.resources.borrow_mut::<Ports>(), listen);
+        let mut ports = self.node.ports();
+        let tcp = tcp_inet(&mut ports, listen);
         if tcp.acceptors.is_empty()
             && let Some(accepted) = tcp.accept_now().transpose()
         {
             let accepted = accepted.map(|socket| (tcp.next_async_id(), tcp.copy(socket)));
+            drop(ports);
             return try_reply(accepted, |(id, accepted)| {
                 let port = self.open_accepted(caller, accepted)?;
                 self.deliver(caller, self.async_message(listen, id, ok_port(port)));
@@ -74,6 +76,7 @@ impl Scheduler {
             });
         }
         let id = tcp.next_async_id();
+        drop(ports);
         let monitor = self.make_ref()?;
         let signal = Signal::PortMonitor {
             port: listen,
@@ -98,8 +101,9 @@ impl Scheduler {
             monitor,
             timer,
         };
-        let tcp = tcp_inet(self.resources.borrow_mut::<Ports>(), listen);
-        tcp.acceptors.push_back(acceptor);
+        tcp_inet(&mut self.node.ports(), listen)
+            .acceptors
+            .push_back(acceptor);
         Ok(async_reply(id))
     }
 
@@ -129,7 +133,8 @@ impl Scheduler {
     /// first caller in the queue. Return `true` when the next caller can
     /// take the next connection.
     fn accept_one(&mut self, listen: PortId) -> Result<bool, BeamError> {
-        let tcp = tcp_inet(self.resources.borrow_mut::<Ports>(), listen);
+        let mut ports = self.node.ports();
+        let tcp = tcp_inet(&mut ports, listen);
         if tcp.acceptors.is_empty() {
             return Ok(false);
         }
@@ -139,6 +144,7 @@ impl Scheduler {
         let acceptor = tcp.acceptors.pop_front().expect("the queue has a caller");
         let failure = accepted.as_ref().err().map(errno_name);
         let accepted = accepted.ok().map(|socket| tcp.copy(socket));
+        drop(ports);
         self.end_accept(listen, acceptor);
         let port = accepted
             .map(|accepted| self.open_accepted(acceptor.caller, accepted))
@@ -230,7 +236,7 @@ impl Scheduler {
     /// port `listen` (`remove_multi_op`, inet_drv.c:2379-2411), or return
     /// `None` when the port closed or the caller is not in the queue.
     fn remove_acceptor(&mut self, listen: PortId, caller: ProcessId) -> Option<Acceptor> {
-        let ports = self.resources.borrow_mut::<Ports>();
+        let mut ports = self.node.ports();
         let tcp = ports.get_mut(listen).and_then(Port::inet_mut)?;
         let position = tcp
             .acceptors

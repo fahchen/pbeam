@@ -1852,7 +1852,7 @@ fn counts_the_terms_of_a_map_drain_that_is_the_only_item() {
 #[test]
 fn removes_the_accept_of_a_process_that_exits_with_its_port_monitor_signal_pending() {
     use crate::runtime::port::{
-        Driver, Ports,
+        Driver,
         inet::{Acceptor, Inet, SocketType},
     };
     // At exit, a monitor signal that the process did not handle runs the
@@ -1890,7 +1890,7 @@ fn removes_the_accept_of_a_process_that_exits_with_its_port_monitor_signal_pendi
     };
     scheduler.send_signal(None, child, signal).unwrap();
     scheduler.finish_current(atom("normal"), None).unwrap();
-    let ports = scheduler.resources.borrow_mut::<Ports>();
+    let mut ports = scheduler.node.ports();
     let port = ports.get_mut(listen).unwrap().inet_mut().unwrap();
     assert!(port.acceptors.is_empty());
 }
@@ -1899,7 +1899,7 @@ fn removes_the_accept_of_a_process_that_exits_with_its_port_monitor_signal_pendi
 fn removes_a_reply_demonitor_port_monitor_from_the_port_at_the_alias_message() {
     use super::{AliasMode, signals::HandlingPoint};
     use crate::runtime::port::{
-        Driver, Ports,
+        Driver,
         inet::{Inet, SocketType},
     };
     // The first message through a `reply_demonitor` alias removes its port
@@ -1928,7 +1928,7 @@ fn removes_a_reply_demonitor_port_monitor_from_the_port_at_the_alias_message() {
         .handle_signals(id, 100, 100, HandlingPoint::ScheduleIn)
         .unwrap();
     assert!(scheduler.processes[&id].monitors.get(&alias).is_none());
-    let ports = scheduler.resources.borrow_mut::<Ports>();
+    let mut ports = scheduler.node.ports();
     assert!(ports.get_mut(port).unwrap().monitors.is_empty());
 }
 
@@ -1936,7 +1936,7 @@ fn removes_a_reply_demonitor_port_monitor_from_the_port_at_the_alias_message() {
 fn sends_the_messages_of_an_active_socket_to_the_owner_and_ends_the_port() {
     use super::signals::HandlingPoint;
     use crate::runtime::port::{
-        Driver, Ports,
+        Driver,
         inet::{Event, Inet, SocketType},
     };
     use socket2::{Domain, Socket, Type};
@@ -1963,13 +1963,7 @@ fn sends_the_messages_of_an_active_socket_to_the_owner_and_ends_the_port() {
     let error = Term::tuple(vec![tcp_error, Term::Port(port), etimedout]);
     let closed = Term::tuple(vec![tcp_closed, Term::Port(port)]);
     assert_eq!(messages(&scheduler, id.0), [error, closed]);
-    assert!(
-        scheduler
-            .resources
-            .borrow_mut::<Ports>()
-            .get(port)
-            .is_none()
-    );
+    assert!(scheduler.node.ports().get(port).is_none());
     scheduler
         .handle_signals(id, 100, 100, HandlingPoint::ScheduleIn)
         .unwrap();
@@ -2021,7 +2015,7 @@ fn unlinks_the_new_owner_after_its_queued_link_signal_at_a_driver_exit() {
 fn drops_the_link_exit_signal_of_a_process_that_the_port_does_not_link() {
     use super::signals::HandlingPoint;
     use crate::runtime::port::{
-        Driver, Ports,
+        Driver,
         inet::{Inet, SocketType},
     };
     use socket2::{Domain, Socket, Type};
@@ -2049,8 +2043,14 @@ fn drops_the_link_exit_signal_of_a_process_that_the_port_does_not_link() {
         .open_port(b"tcp_inet".to_vec(), Driver::Inet(tcp))
         .unwrap();
     assert!(scheduler.connect_port(port, child));
-    let ports = scheduler.resources.borrow_mut::<Ports>();
-    assert!(ports.get_mut(port).unwrap().links.remove(&child).is_some());
+    let removed = scheduler
+        .node
+        .ports()
+        .get_mut(port)
+        .unwrap()
+        .links
+        .remove(&child);
+    assert!(removed.is_some());
     scheduler
         .handle_signals(child, 100, 100, HandlingPoint::ScheduleIn)
         .unwrap();
@@ -2058,8 +2058,7 @@ fn drops_the_link_exit_signal_of_a_process_that_the_port_does_not_link() {
     assert_eq!(links.get(&LinkId::Port(port)), Some(&0));
     let killed = Term::static_atom("killed");
     scheduler.port_link_exit(port, child, &killed);
-    let ports = scheduler.resources.borrow_mut::<Ports>();
-    assert!(ports.get(port).is_some());
+    assert!(scheduler.node.ports().get(port).is_some());
 }
 
 #[test]
@@ -2297,7 +2296,7 @@ fn a_host_signal_notification_reaches_a_remote_signal_server() {
 fn a_flushed_port_leaves_the_shared_port_table() {
     use super::node::Node;
     use crate::runtime::port::{
-        Driver, Ports,
+        Driver,
         inet::{Inet, SocketType},
     };
     let (node, mut readers) = Node::new(1).unwrap();
@@ -2313,22 +2312,11 @@ fn a_flushed_port_leaves_the_shared_port_table() {
     let port = scheduler
         .open_port(b"tcp_inet".to_vec(), Driver::Inet(tcp))
         .unwrap();
-    assert!(node.port_owner(port).is_some());
-    scheduler
-        .resources
-        .borrow_mut::<Ports>()
-        .get_mut(port)
-        .unwrap()
-        .closing = true;
+    assert!(node.ports().get(port).is_some());
+    scheduler.node.ports().get_mut(port).unwrap().closing = true;
     scheduler.tcp_flushed(port);
-    assert!(node.port_owner(port).is_none());
-    assert!(
-        scheduler
-            .resources
-            .borrow_mut::<Ports>()
-            .get(port)
-            .is_none()
-    );
+    assert!(node.ports().get(port).is_none());
+    assert!(scheduler.node.ports().get(port).is_none());
 }
 
 #[test]

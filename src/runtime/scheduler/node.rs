@@ -25,6 +25,7 @@ use std::{
 use super::{Signal, process_table::ProcessTable};
 use crate::runtime::{
     persistent_term::PersistentTermStore,
+    port::Ports,
     process::{MonitorLinkTree, ProcessState, TimerReference},
     resources::NodeResources,
 };
@@ -155,8 +156,10 @@ pub(in crate::runtime) struct Node {
     pub(super) processes: ProcessTable,
     /// The registered names of the node, as the ERTS `process_reg` table.
     names: Mutex<HashMap<String, ProcessId>>,
-    /// The scheduler of each open port.
-    ports: Mutex<HashMap<PortId, usize>>,
+    /// The port table of the node, as the ERTS `erts_port` table (`io.c:76`,
+    /// `erl_ptab.c`): each open port with the scheduler that serves its I/O.
+    /// Any scheduler reads and changes a port through it.
+    ports: Mutex<Ports>,
     /// The persistent terms of the node and their update permission. ERTS
     /// keeps one table for the node, and any scheduler reads it
     /// (`the_hash_table`, `erl_bif_persistent.c:358-398`).
@@ -258,7 +261,7 @@ impl Node {
             Arc::new(Node {
                 processes: ProcessTable::default(),
                 names: Mutex::new(HashMap::new()),
-                ports: Mutex::new(HashMap::new()),
+                ports: Mutex::default(),
                 persistent_terms: Mutex::default(),
                 persistent_progress: AtomicBool::new(false),
                 aliases: Mutex::new(Aliases::default()),
@@ -324,7 +327,7 @@ impl Node {
         Arc::new(Node {
             processes: ProcessTable::default(),
             names: Mutex::new(HashMap::new()),
-            ports: Mutex::new(HashMap::new()),
+            ports: Mutex::default(),
             persistent_terms: Mutex::default(),
             persistent_progress: AtomicBool::new(false),
             aliases: Mutex::new(Aliases::default()),
@@ -734,29 +737,17 @@ impl Node {
         self.unique_monotonic.fetch_add(1, Ordering::Relaxed) + 1
     }
 
-    /// Make the port `id` a port of the scheduler `index`.
-    pub(in crate::runtime) fn register_port(&self, id: PortId, index: usize) {
-        self.ports
-            .lock()
-            .expect("the port table is not poisoned")
-            .insert(id, index);
+    /// Lock the port table of the node.
+    pub(in crate::runtime) fn ports(&self) -> MutexGuard<'_, Ports> {
+        self.ports.lock().expect("the port table is not poisoned")
     }
 
-    /// Remove the port `id` from the node.
-    pub(in crate::runtime) fn remove_port(&self, id: PortId) {
-        self.ports
-            .lock()
-            .expect("the port table is not poisoned")
-            .remove(&id);
-    }
-
-    /// Return the scheduler of the open port `id`.
-    pub(in crate::runtime) fn port_owner(&self, id: PortId) -> Option<usize> {
-        self.ports
-            .lock()
-            .expect("the port table is not poisoned")
-            .get(&id)
-            .copied()
+    /// Wake the scheduler `index` from its wait, so that it waits again for
+    /// the fds of its ports after another scheduler changed them.
+    pub(in crate::runtime) fn wake_scheduler(&self, index: usize) {
+        if let Some(inbox) = self.inboxes.get(index) {
+            wake(&inbox.wake);
+        }
     }
 
     /// Record the process `owner` as the owner of the alias `reference`.
