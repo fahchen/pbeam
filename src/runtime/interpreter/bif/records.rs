@@ -277,16 +277,23 @@ pub(super) fn update(
     pairs.sort_by(|(left, _), (right, _)| {
         flatmap_order(left, right, atoms).unwrap_or(std::cmp::Ordering::Equal)
     });
-    let mut values = record.values().to_vec();
-    for (key, new) in pairs {
-        let index = match &key {
-            Term::Atom(field) => def.index_of(field),
-            _ => None,
-        };
-        match index {
-            Some(index) => values[index] = new,
-            None => return raise(field_reason("badfield", def, key)),
-        }
+    // One merge walk over the sorted keys and the sorted fields
+    // (`erl_record.c:896-916`): a key that is not the next field stays and
+    // becomes the `badfield` key.
+    let mut pairs = pairs.into_iter().peekable();
+    let values = def
+        .keys
+        .iter()
+        .zip(record.values())
+        .map(|(field, old)| {
+            match pairs.next_if(|(key, _)| matches!(key, Term::Atom(key) if key == field)) {
+                Some((_, new)) => new,
+                None => old.clone(),
+            }
+        })
+        .collect();
+    match pairs.next() {
+        Some((key, _)) => raise(field_reason("badfield", def, key)),
+        None => Value(Term::Record(Record::new(Arc::clone(def), values))),
     }
-    Value(Term::Record(Record::new(Arc::clone(def), values)))
 }
