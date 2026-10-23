@@ -1,5 +1,5 @@
 -module(persistent_term_probe).
--export([main/0, put_term/3, table/0, erase/0, erase_table/0]).
+-export([main/0, put_term/3, table/0, erase/0, erase_table/0, put_new/0, info/0]).
 
 main() ->
     Key = {?MODULE, key},
@@ -64,3 +64,34 @@ erase_table() ->
     true = persistent_term:erase(true),
     true = persistent_term:erase(7),
     persistent_term:get().
+
+put_new() ->
+    Key = {?MODULE, put_new},
+    New = persistent_term:put_new(Key, 1),
+    Same = persistent_term:put_new(Key, 1),
+    Other = put_new_error(Key, 2),
+    Float = put_new_error(Key, 1.0),
+    {New, Same, Other, Float, persistent_term:get(Key)}.
+
+put_new_error(Key, Value) ->
+    try persistent_term:put_new(Key, Value)
+    catch error:Reason:Stack ->
+        [{M, F, Args, _} | _] = Stack,
+        {Reason, {M, F, Args}}
+    end.
+
+info() ->
+    Empty = persistent_term:info(),
+    ok = persistent_term:put(a, 1),
+    One = persistent_term:info(),
+    ok = persistent_term:put(a, 1),
+    Same = persistent_term:info(),
+    ok = persistent_term:put(b, {x, [1, 2], <<"abc">>, 1.5}),
+    Nested = persistent_term:info(),
+    ok = persistent_term:put(c, <<"0123456789012345678901234567890123456789012345678901234567890123456789">>),
+    Large = persistent_term:info(),
+    [ok = persistent_term:put({n, N}, N) || N <- [1, 2, 3, 4]],
+    Grown = persistent_term:info(),
+    true = persistent_term:erase(a),
+    Erased = persistent_term:info(),
+    {Empty, One, Same, Nested, Large, Grown, Erased}.
