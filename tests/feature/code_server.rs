@@ -533,23 +533,44 @@ fn gives_the_crypto_algorithm_lists_and_fips_status_as_pinned_erts() {
 }
 
 #[test]
+fn runs_the_crypto_hash_contexts_as_pinned_erts() {
+    // hash_init_nif/1, hash_update_nif/2, hash_final_nif/1, and
+    // hash_final_xof_nif/2 (hash.c:168-273, 561-589): a context stays usable
+    // after an update and after a final call, and crypto:hash/2 sends more
+    // than 20000 bytes through the contexts (crypto.erl:4535-4540).
+    let erts = run(&mut erts_probe(
+        CRYPTO_PROBE,
+        "crypto_probe",
+        "contexts",
+        &[],
+    ));
+    assert!(erts.contains("EVP_DigestFinalXOF failed"), "{erts}");
+    assert_eq!(
+        run(&mut pbeam_probe(
+            CRYPTO_PROBE,
+            "crypto_probe",
+            "contexts",
+            &[]
+        )),
+        erts
+    );
+}
+
+#[test]
 fn stops_with_a_runtime_error_for_an_unsupported_crypto_nif() {
-    // PBeam does not link `hash_init_nif/1`, which `crypto:hash_init/1`
-    // calls (crypto.erl:1160). `crypto:hash/2` sends an input of more than
-    // 20000 bytes through the same NIF (crypto.erl:4535-4540).
-    for function in ["hash_init", "hash_large"] {
-        let output = pbeam_probe(CRYPTO_PROBE, "crypto_probe", function, &[])
-            .env("TERM", "dumb")
-            .stdin(Stdio::null())
-            .output()
-            .unwrap();
-        let stderr = String::from_utf8(output.stderr).unwrap();
-        assert!(
-            !output.status.success()
-                && stderr.contains("crypto:hash_init_nif/1 NIF is not supported"),
-            "{function}: {stderr}"
-        );
-    }
+    // PBeam does not link `engine_get_first_nif/0`, which
+    // `crypto:engine_list/0` calls.
+    let output = pbeam_probe(CRYPTO_PROBE, "crypto_probe", "unsupported", &[])
+        .env("TERM", "dumb")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        !output.status.success()
+            && stderr.contains("crypto:engine_get_first_nif/0 NIF is not supported"),
+        "{stderr}"
+    );
 }
 
 #[test]
@@ -893,6 +914,7 @@ fn erts(flags: &[&str]) -> Command {
 const ONESHOT_HOST: &str = r#"[[{error,notsup},
   {error,{notsup,{"hash.c",115},
                  "Digest type not supported in this cryptolib"}},
+  {error,{notsup,{"hash.c",180},"Unsupported digest type"}},
   {error,{error,{"mac.c",405},"Couldn't get mac"}}],
  [{rc2_cbc,{error,{notsup,{"mac.c",346},"Unsupported cipher algorithm"}}},
   {rc4,{error,{notsup,{"mac.c",346},"Unsupported cipher algorithm"}}},
