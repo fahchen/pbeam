@@ -126,11 +126,14 @@ impl NodePoll {
     }
 
     /// Record that a port or fd 0 has a new fd to wait on, and wake the
-    /// thread when it waits on its old set.
+    /// thread when it waits on its old set. The thread can wait before
+    /// [`NodePoll::start`] stores the write end of its wake socket. A change
+    /// in that time leaves `sleeping` set, so that the call of `changed` at
+    /// the end of `start` wakes the thread; else no call would wake it.
     pub(in crate::runtime) fn changed(&self) {
         self.changed.store(true, Ordering::SeqCst);
-        if self.sleeping.swap(false, Ordering::SeqCst)
-            && let Some(mut wake) = self.wake.get()
+        if let Some(mut wake) = self.wake.get()
+            && self.sleeping.swap(false, Ordering::SeqCst)
         {
             let _ = wake.write(&[1]);
         }

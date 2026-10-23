@@ -45,3 +45,15 @@ fn collects_again_when_an_fd_changed_during_the_collect() {
     }
     assert!(!node.poll.serves(0));
 }
+
+#[test]
+fn keeps_the_thread_sleeping_for_a_change_before_its_wake_socket_exists() {
+    // The thread can wait before `start` stores the write end of its wake
+    // socket. A change in that time cannot wake the thread, so it leaves
+    // `sleeping` set for the call of `changed` at the end of `start`.
+    let poll = NodePoll::new(1);
+    poll.sleeping.store(true, Ordering::SeqCst);
+    poll.changed();
+    assert!(poll.sleeping.load(Ordering::SeqCst));
+    assert!(poll.changed.load(Ordering::SeqCst));
+}
