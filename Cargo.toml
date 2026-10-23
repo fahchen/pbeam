@@ -807,6 +807,10 @@ name = "magic_ref"
 path = "tests/integration/magic_ref.rs"
 
 [[test]]
+name = "native_record"
+path = "tests/integration/native_record.rs"
+
+[[test]]
 name = "chksum"
 path = "tests/integration/chksum.rs"
 

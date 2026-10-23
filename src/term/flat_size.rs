@@ -83,6 +83,13 @@ pub(crate) fn flat_size(term: &Term) -> usize {
                 pending.extend(fun.free());
                 FUN_WORDS + fun.free().len()
             }
+            // The instance words and the definition tuple, which ERTS keeps
+            // as a literal and counts (`erl_record.h:41-77`).
+            Term::Record(record) => {
+                pending.push(&record.def().tuple);
+                pending.extend(record.values());
+                record.values().len() + 2
+            }
             Term::Map(map) => match &**map.arc() {
                 // The header, the size, the key tuple pointer, the values,
                 // and the key tuple (`copy.c:174-191`).

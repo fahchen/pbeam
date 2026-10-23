@@ -207,3 +207,18 @@ fn counts_a_bignum_once_for_its_copies() {
     let shared = Term::tuple(vec![big.clone(), big]);
     assert_eq!(bytes(&shared), 2 * size_of::<Term>() + one);
 }
+
+#[test]
+fn counts_the_thing_of_a_record_once_for_its_copies() {
+    use crate::term::{AtomTable, Record, RecordDef, record::RecordThing};
+    let atoms = AtomTable::new();
+    let z = atoms.put("z").unwrap();
+    let def = RecordDef::new(z.clone(), z.clone(), false, vec![(z, None)], &atoms);
+    let record = Term::Record(Record::new(Arc::new(def), vec![Term::Integer(1)]));
+    let thing = size_of::<RecordThing>() + size_of::<Term>();
+    assert_eq!(bytes(&record), thing);
+    // The two copies share one thing, and the tuple array is one more
+    // allocation.
+    let shared = Term::tuple(vec![record.clone(), record]);
+    assert_eq!(bytes(&shared), thing + 2 * size_of::<Term>());
+}

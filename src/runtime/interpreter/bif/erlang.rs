@@ -3952,11 +3952,11 @@ pub(in crate::runtime::interpreter) fn is_function(term: &Term, arity: &Term) ->
 /// return `true` when `term` is a tuple whose first element is the atom
 /// `name`, and whose size is `size` when `size` is given, as ERTS
 /// `is_record_2` and `is_record_3` (`erl_bif_op.c:293-350`) do. A `name`
-/// that is not an atom raises `badarg`. A `size` that is an atom selects
-/// the native-record test, and a `size` that is not an atom and not an ERTS
-/// small integer (-(2^59) to 2^59 - 1) raises `badarg`. PBeam has no native
-/// record term, so the native-record test gives `false` (row
-/// "Unimplemented instructions" of `docs/erts-differences.md`).
+/// that is not an atom raises `badarg`. With no `size`, a native record
+/// whose name is `name` also gives `true`, whatever its module. A `size`
+/// that is an atom selects the native-record test: `name` is then the
+/// module and `size` the record name. A `size` that is not an atom and not
+/// an ERTS small integer (-(2^59) to 2^59 - 1) raises `badarg`.
 ///
 /// # Examples
 ///
@@ -3970,20 +3970,29 @@ pub(in crate::runtime::interpreter) fn is_record(
     name: &Term,
     size: Option<&Term>,
 ) -> BifResult {
-    if !matches!(name, Term::Atom(_)) {
+    let Term::Atom(name_atom) = name else {
         return BifResult::badarg();
-    }
+    };
     let size = match size {
         None => None,
-        Some(Term::Atom(_)) => return Value(Term::static_atom("false")),
+        Some(Term::Atom(record)) => {
+            let matches = matches!(term, Term::Record(native)
+                if native.def().module == *name_atom && native.def().name == *record);
+            return Value(Term::static_atom(if matches { "true" } else { "false" }));
+        }
         Some(&Term::Integer(size)) if (SMALL_INTEGER_MIN..=SMALL_INTEGER_MAX).contains(&size) => {
             Some(size)
         }
         Some(_) => return BifResult::badarg(),
     };
-    let matches = matches!(term, Term::Tuple(tuple)
-        if tuple.first() == Some(name)
-            && size.is_none_or(|size| i64::try_from(tuple.len()) == Ok(size)));
+    let matches = match term {
+        Term::Tuple(tuple) => {
+            tuple.first() == Some(name)
+                && size.is_none_or(|size| i64::try_from(tuple.len()) == Ok(size))
+        }
+        Term::Record(native) => size.is_none() && native.def().name == *name_atom,
+        _ => false,
+    };
     Value(Term::static_atom(if matches { "true" } else { "false" }))
 }
 

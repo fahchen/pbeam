@@ -15,8 +15,8 @@ fn gives_the_size_of_a_tuple_or_bitstring_like_erts() {
     let int = Term::Integer;
     let badarg = Term::tuple(vec![atom("error"), atom("badarg")]);
     let mut expected = [0, 3, 0, 3, 0, 2, 1, 2, 2].map(int).to_vec();
-    expected.extend(["big", "small", "other", "other"].map(atom));
-    expected.extend(std::iter::repeat_n(badarg, 6));
+    expected.extend(["big", "small", "other", "other", "other"].map(atom));
+    expected.extend(std::iter::repeat_n(badarg, 7));
     assert_eq!(
         program.execute("size_probe", "main", &[]).unwrap().term,
         Term::list_from(expected)
@@ -35,7 +35,7 @@ fn gives_the_size_of_a_tuple_or_bitstring_like_erts() {
     assert!(reference.status.success(), "{reference:?}");
     assert_eq!(
         String::from_utf8(reference.stdout).unwrap(),
-        "[0,3,0,3,0,2,1,2,2,big,small,other,other,{error,badarg},{error,badarg},\
-         {error,badarg},{error,badarg},{error,badarg},{error,badarg}]\n"
+        "[0,3,0,3,0,2,1,2,2,big,small,other,other,other,{error,badarg},{error,badarg},\
+         {error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}]\n"
     );
 }
