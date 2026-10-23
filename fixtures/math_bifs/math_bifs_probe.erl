@@ -24,12 +24,10 @@ args_2() ->
      {a, 1}, {1, a}].
 
 unary() ->
-    [{acos, fun math:acos/1}, {acosh, fun math:acosh/1},
-     {asin, fun math:asin/1}, {asinh, fun math:asinh/1},
-     {atan, fun math:atan/1}, {atanh, fun math:atanh/1},
-     {ceil, fun math:ceil/1}, {cos, fun math:cos/1},
-     {cosh, fun math:cosh/1}, {erf, fun math:erf/1},
-     {erfc, fun math:erfc/1}, {floor, fun math:floor/1},
+    [{acos, fun math:acos/1}, {asin, fun math:asin/1},
+     {atan, fun math:atan/1}, {ceil, fun math:ceil/1},
+     {cos, fun math:cos/1}, {cosh, fun math:cosh/1},
+     {floor, fun math:floor/1},
      {log2, fun math:log2/1}, {sin, fun math:sin/1},
      {sinh, fun math:sinh/1}, {tan, fun math:tan/1},
      {tanh, fun math:tanh/1}].
@@ -60,13 +58,10 @@ show() ->
 %% the BIF. The division drops the reductions of process_info/2 and of the
 %% list.
 show_reductions() ->
-    iolist_to_binary(text([{Name, reductions(fun(X) -> F(X) end, arg(Name))}
+    iolist_to_binary(text([{Name, reductions(fun(X) -> F(X) end, 0.5)}
                            || {Name, F} <- unary()] ++
                           [{Name, reductions(fun(X) -> F(X, X) end, 0.5)}
                            || {Name, F} <- binary()])).
-
-arg(acosh) -> 1.5;
-arg(_) -> 0.5.
 
 reductions(Fun, Arg) ->
     Before = ?REDS,

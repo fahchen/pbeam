@@ -51,14 +51,11 @@ fn finite_float(value: f64) -> BifResult {
 
 /// Run a `math` BIF of one argument through the function of the C library
 /// that ERTS calls (`math_call_1`, `erl_math.c:35-63`). The table gives the
-/// `math` BIFs of `erl_math.c:143-292` to it. `f64::sin`, `cos`, `tan`,
+/// `math` BIFs of `erl_math.c:143-292` that call `sin`, `cos`, `tan`,
 /// `asin`, `acos`, `atan`, `sinh`, `cosh`, `tanh`, `log2`, `ceil`, and
-/// `floor` call the function of the C library of the platform. Rust has no
-/// stable binding of `asinh`, `acosh`, `atanh`, `erf`, and `erfc` to the C
-/// library, so these come from the `libm` crate. Their results can differ
-/// from the C library by up to two units in the last place
-/// (`docs/erts-differences.md`). `math_call_errno_1` of `acos`
-/// and `asin` (`erl_math.c:69-96`) adds no case: a C99 library returns NaN
+/// `floor` to it; the `f64` method of each calls the function of the C
+/// library of the platform. `math_call_errno_1` of `acos` and `asin`
+/// (`erl_math.c:69-96`) adds no case: a C99 library returns NaN
 /// for a domain error, and [`finite_float`] raises `badarith` for it.
 ///
 /// # Examples

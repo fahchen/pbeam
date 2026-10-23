@@ -622,3 +622,10 @@ The owner opened [m13] Foundation seams ([#908](https://github.com/fahchen/pbeam
 - **Open questions:** the identity of pids, references, ports, and timers after a resume; the resources that cannot move (ports, sockets, NIF resources, and ETS tables that the process does not own); a check that the saved code matches; and the capabilities that a saved state carries.
 - **Trigger:** an owner decision after M10, or a consumer such as live migration of a process, debugging, or a test that replays a run.
 - **Source:** owner request in chat, 2026-10-16.
+
+### Run `math:acosh/1`, `asinh/1`, `atanh/1`, `erf/1`, and `erfc/1` bit for bit
+
+- **Reason:** ERTS calls these functions of the C library of the platform (`erl_math.c:180-232`). Safe Rust has no stable binding of them: `f64::erf` and `f64::erfc` are unstable, `f64::atanh` gives a different result for `-0.5`, and an `extern` block needs `unsafe`. The `libm` crate differs by up to one unit in the last place from glibc and by up to two units (`erfc(2)`) from macOS arm64. Task #1052 keeps them `unsupported`.
+- **Evidence:** PR #1080: a comparison of the `libm` crate with glibc (Docker `gcc:14`) and with the pinned ERTS on macOS arm64.
+- **Trigger:** a consumer of one of these BIFs, and an owner decision on an `unsafe` C binding (an ADR) or on a stable `f64::erf`.
+- **Source:** Codex review of PR #1080, 2026-10-23.
