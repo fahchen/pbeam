@@ -48,18 +48,31 @@ impl Sockets {
         self.by_reference.get(&reference).cloned()
     }
 
-    /// Run the monitor of the socket `reference` on its owner after the
-    /// owner exits, as `essio_down` and `esock_close_socket` do
-    /// (`unix_socket_syncio.c:9735-9750`, `10532-10570`,
-    /// `prim_socket_nif.c:7648-7705`): clear the owner, and when the socket
-    /// is still open, close the host socket, add the states `closing` and
-    /// `closed`, and count the socket out. Return the registry to send
-    /// `{'$socket', del, Socket}` to, if the registry knows the socket.
-    pub(super) fn owner_down(&mut self, reference: Reference) -> Option<ProcessId> {
+    /// Run the monitor of the socket `reference` on the process `pid`
+    /// after it exits, as `essio_down` and `esock_close_socket` do
+    /// (`unix_socket_syncio.c:9640-9750`, `10532-10570`,
+    /// `prim_socket_nif.c:7648-7705`). For the closer, clear the closer and
+    /// close the socket (`unix_socket_syncio.c:9696-9723`). For the owner,
+    /// clear the owner, and close the socket when it is still open. A close
+    /// closes the host socket, adds the states `closing` and `closed`, and
+    /// counts the socket out. Return the registry to send
+    /// `{'$socket', del, Socket}` to, if the registry knows the socket and
+    /// the socket closed.
+    pub(super) fn monitor_down(
+        &mut self,
+        reference: Reference,
+        pid: ProcessId,
+    ) -> Option<ProcessId> {
         let socket = self.by_reference.get(&reference)?;
         let mut socket = socket.lock().unwrap_or_else(|poison| poison.into_inner());
-        socket.owner = None;
-        if socket.read & (CLOSING | CLOSED) != 0 {
+        if socket.closer == Some(pid) {
+            socket.closer = None;
+        } else if socket.owner == Some(pid) {
+            socket.owner = None;
+            if socket.read & (CLOSING | CLOSED) != 0 {
+                return None;
+            }
+        } else {
             return None;
         }
         socket.socket = None;
@@ -97,7 +110,8 @@ pub(super) struct Counters {
     pub(super) tcp: u64,
     /// `num_pudp`.
     pub(super) udp: u64,
-    /// `num_psctp`.
+    /// `num_psctp`. The pinned build has no `HAVE_SCTP`, so no socket
+    /// counts in it (`prim_socket_nif.c:17165-17168`).
     pub(super) sctp: u64,
 }
 
@@ -123,7 +137,8 @@ impl Counters {
             libc::IPPROTO_IP => add(&mut self.ip),
             libc::IPPROTO_TCP => add(&mut self.tcp),
             libc::IPPROTO_UDP => add(&mut self.udp),
-            libc::IPPROTO_SCTP => add(&mut self.sctp),
+            #[cfg(target_os = "linux")]
+            libc::IPPROTO_MPTCP => add(&mut self.tcp),
             _ => {}
         }
     }
@@ -152,3 +167,7 @@ pub(super) struct SocketState {
     /// Whether the socket registry knows the socket.
     pub(super) registered: bool,
 }
+
+#[cfg(test)]
+#[path = "../../tests/runtime/sockets.rs"]
+mod tests;
