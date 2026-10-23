@@ -409,7 +409,7 @@ fn boot_erl(arguments: ErlCli) -> Result<(), Exit> {
     }
     boot.push(b"--");
     boot.extend(erl_arguments);
-    run_end(program.boot(&boot, schedulers))
+    run_end(Err(program.boot(&boot, schedulers)))
 }
 
 /// Take the `+S` flags out of the `erl` arguments `arguments` before

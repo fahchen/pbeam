@@ -592,19 +592,6 @@ impl Scheduler {
         self.node.is_system(id)
     }
 
-    /// Mark the root process as a system process, before it starts, as ERTS
-    /// starts its first process `init` (`erl_init.c:355-399`).
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// scheduler.mark_root_system();
-    /// ```
-    pub(super) fn mark_root_system(&mut self) {
-        self.system.insert(ROOT);
-        self.node.mark_system(ROOT);
-    }
-
     /// Return the node of this scheduler.
     pub(super) fn node(&self) -> &Arc<Node> {
         &self.node
