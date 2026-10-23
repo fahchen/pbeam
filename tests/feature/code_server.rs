@@ -24,6 +24,7 @@ const FUN_ENTRY_PROBE: &str = "fixtures/code_server/fun_entry_probe";
 
 /// The probe of `crypto:strong_rand_bytes/1`.
 const CRYPTO_PROBE: &str = "fixtures/code_server/crypto_probe";
+const CRYPTO_SIGN_PROBE: &str = "fixtures/code_server/crypto_sign_probe";
 
 /// The stand-in `crypto` module that loads the `crypto` NIF library.
 const CRYPTO_STAND_IN: &str = "fixtures/crypto/crypto";
@@ -986,6 +987,88 @@ const MAC_CONTEXTS_HOST: &str = "[[{error,{error,{\"mac.c\",840},\"mac update\"}
 /// let output = run(&mut erts_probe(ON_LOAD_PROBE, "on_load_server_probe", "main", &[]));
 /// ```
 /// The output of `crypto_probe:oneshot_host/0` on the pinned macOS ERTS.
+#[test]
+fn signs_and_verifies_as_pinned_erts() {
+    // pkey_sign_nif/5 and pkey_verify_nif/6 (pkey.c:212-1122) with RSA,
+    // DSA, ECDSA, and EdDSA keys, and the error tuple of each failed check.
+    let erts = run(&mut erts_probe(
+        CRYPTO_SIGN_PROBE,
+        "crypto_sign_probe",
+        "main",
+        &[],
+    ));
+    assert!(erts.contains("Only RSA supports Options"), "{erts}");
+    assert_eq!(
+        run(&mut pbeam_probe(
+            CRYPTO_SIGN_PROBE,
+            "crypto_sign_probe",
+            "main",
+            &[]
+        )),
+        erts
+    );
+    // md4 is in the legacy provider of OpenSSL 3, and EVP_DigestFinal_ex
+    // fails for a SHAKE digest from OpenSSL 3.4 (digest.c:186-188,
+    // pkey.c:283-284, 366-367). PBeam links a vendored OpenSSL 3.5.5
+    // without the legacy provider; the literal is the output of the pinned
+    // macOS ERTS (OpenSSL 3.5.8). The Linux CI ERTS links OpenSSL 3.0.x.
+    let host = "[{error,{badarg,{\"pkey.c\",284},\"Digest type not supported\"}},\n \
+                {error,{error,{\"pkey.c\",367},\"Can't create EVP_DigestFinal_ex\"}}]\n";
+    assert_eq!(
+        run(&mut pbeam_probe(
+            CRYPTO_SIGN_PROBE,
+            "crypto_sign_probe",
+            "host",
+            &[]
+        )),
+        host
+    );
+    if cfg!(target_os = "macos") {
+        let erts = run(&mut erts_probe(
+            CRYPTO_SIGN_PROBE,
+            "crypto_sign_probe",
+            "host",
+            &[],
+        ));
+        assert_eq!(erts, host);
+    }
+}
+
+#[test]
+fn stops_with_a_runtime_error_for_each_unsupported_signature() {
+    for (function, expected) in [
+        (
+            "unsupported_sign",
+            "crypto:pkey_sign_nif/5 NIF is not supported for the algorithm mldsa44",
+        ),
+        (
+            "unsupported_heavy",
+            "crypto:pkey_sign_heavy_nif/5 NIF is not supported for the algorithm \
+             slh_dsa_sha2_128s",
+        ),
+        (
+            "unsupported_verify",
+            "crypto:pkey_verify_nif/6 NIF is not supported for the algorithm mldsa44",
+        ),
+        (
+            "unsupported_curve",
+            "crypto:pkey_sign_nif/5 NIF is not supported for an ECDSA curve over a \
+             characteristic-two field",
+        ),
+    ] {
+        let output = pbeam_probe(CRYPTO_SIGN_PROBE, "crypto_sign_probe", function, &[])
+            .env("TERM", "dumb")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            !output.status.success() && stderr.contains(expected),
+            "{function}: {stderr}"
+        );
+    }
+}
+
 const ONESHOT_HOST: &str = r#"[[{error,notsup},
   {error,{notsup,{"hash.c",115},
                  "Digest type not supported in this cryptolib"}},
