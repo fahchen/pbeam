@@ -1184,6 +1184,30 @@ impl Reference {
         self.0 & TABLE_REFERENCE_MARKER != 0
     }
 
+    /// Return the reference numbers `[N0, N1, N2]` that ERTS compares: the
+    /// table marker goes from `N2` to the magic marker bit of `N1`, as ERTS
+    /// keeps it (`ERTS_REF1_MAGIC_MARKER_BIT__`, `erl_bif_unique.h:102-105`,
+    /// `181-186`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Reference(0).table_reference().order_numbers(), [0, 0x2_0001, 0]);
+    /// ```
+    pub(crate) fn order_numbers(self) -> [u32; 3] {
+        let [n0, n1, _] = self.numbers();
+        let magic = if self.is_table_reference() {
+            1 << 17
+        } else {
+            0
+        };
+        [
+            n0,
+            n1 | magic,
+            ((self.0 & !TABLE_REFERENCE_MARKER) >> 32) as u32,
+        ]
+    }
+
     /// Return the three ERTS reference numbers `[N0, N1, N2]` of the
     /// reference. ERTS makes them from a 64-bit counter value of a
     /// scheduler (`erts_set_ref_numbers`, `erl_bif_unique.h:117-131`): `N0` is the

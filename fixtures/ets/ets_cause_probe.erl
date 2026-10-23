@@ -64,7 +64,8 @@ main() ->
          fun() -> ets:select_delete(Protected, []) end,
          fun() -> ets:first(Deleted) end,
          fun() -> ets:delete(Deleted) end,
-         fun() -> ets:insert(Public, {a}) end],
+         fun() -> ets:insert(Public, {a}) end,
+         fun() -> T = ets:new(order, []), R = make_ref(), {T < R, T > R} end],
     Results = [run(Case) || Case <- Cases],
     Owner ! stop,
     Results.
