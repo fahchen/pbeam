@@ -1480,30 +1480,118 @@ fn builds_float_segments_and_raises_their_failures_as_pinned_erts() {
 }
 
 #[test]
-fn stops_at_a_16_bit_float_and_appends_a_bitstring_as_pinned_erts() {
-    // PBeam does not write 16-bit floats, so that run stops with a runtime
-    // error where ERTS gives a binary. `bits/1` appends 4 bits in each step
-    // with a `private_append` segment, and gives the binary of ERTS.
+fn builds_16_bit_float_segments_as_pinned_erts() {
+    // A 16-bit float segment rounds a float, a small integer, or a bignum
+    // once to binary16, ties to even, and keeps the sign of a zero. A value
+    // too large gives an infinity (`f64_to_f16`, erl_bits.c:426-506 and
+    // 1418-1448). `half/1` writes it big and little endian.
     let program = BeamProgram::load(&[BS_CREATE_BIN_WRITABLE_PROBE]).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let huge = Term::BigInt(std::sync::Arc::new(
+        num_bigint::BigInt::from(1u8) << 1100u32,
+    ));
+    let values = [
+        Term::Float(1.5),
+        Term::Float(-0.0),
+        Term::Float(65504.0),
+        Term::Float(65519.99),
+        Term::Float(65520.0),
+        Term::Float(-1.0e10),
+        Term::Float(1.0e-10),
+        Term::Float(3.0e-8),
+        Term::Float(2.0f64.powi(-25)),
+        Term::Float(1.00146484375),
+        Term::Float(1.00048828125),
+        Term::Float(2047.9),
+        Term::Float(1.0e-20),
+        Term::Float(5.0e-324),
+        Term::Float(-3.0e-8),
+        Term::Integer(7),
+        Term::Integer(70000),
+        Term::Integer(-3),
+        Term::BigInt(std::sync::Arc::new(num_bigint::BigInt::from(1u128 << 100))),
+    ];
+    let halves = values
+        .iter()
+        .map(|value| run_writable(&program, "half", std::slice::from_ref(value)))
+        .collect::<Vec<_>>();
+    let pair = |big: [u8; 2]| {
+        Ok(Term::tuple(vec![
+            Term::binary(big.to_vec()),
+            Term::binary(vec![big[1], big[0]]),
+        ]))
+    };
+    let expected = [
+        [62, 0],
+        [128, 0],
+        [123, 255],
+        [123, 255],
+        [124, 0],
+        [252, 0],
+        [0, 0],
+        [0, 1],
+        [0, 0],
+        [60, 2],
+        [60, 0],
+        [104, 0],
+        [0, 0],
+        [0, 0],
+        [128, 1],
+        [71, 0],
+        [124, 0],
+        [194, 0],
+        [124, 0],
+    ]
+    .map(pair);
+    assert_eq!(halves, expected);
+    let cause = |info: &str, value: Term| {
+        Ok(Term::tuple(vec![
+            atom("badarg"),
+            Term::tuple(vec![Term::Integer(1), atom("float"), atom(info), value]),
+        ]))
+    };
+    let causes = [
+        run_writable(
+            &program,
+            "cause",
+            &[atom("half"), Term::list_from(vec![Term::nil()])],
+        ),
+        run_writable(
+            &program,
+            "cause",
+            &[atom("half"), Term::list_from(vec![huge.clone()])],
+        ),
+        run_writable(
+            &program,
+            "float_size",
+            &[Term::Integer(1), Term::Integer(16)],
+        ),
+        run_writable(&program, "bits", &[Term::Integer(2)]),
+    ];
     assert_eq!(
+        causes,
         [
-            run_writable(
-                &program,
-                "float_size",
-                &[Term::Integer(1), Term::Integer(16)]
-            ),
-            run_writable(&program, "bits", &[Term::Integer(2)]),
-        ],
-        [
-            Err("unsupported bs_create_bin float segment of 16 bits".into()),
+            cause("type", Term::nil()),
+            cause("no_float", huge),
+            Ok(Term::binary(vec![60, 0])),
             Ok(Term::binary(vec![33])),
         ]
     );
     assert_eq!(
         reference(
-            "[bs_create_bin_writable_probe:float_size(1, 16), bs_create_bin_writable_probe:bits(2)]"
+            "begin M = bs_create_bin_writable_probe, \
+             [{binary_to_list(A), binary_to_list(B)} || F <- [1.5, -0.0, 65504.0, 65519.99, \
+             65520.0, -1.0e10, 1.0e-10, 3.0e-8, 2.98023223876953125e-8, 1.00146484375, \
+             1.00048828125, 2047.9, 1.0e-20, 5.0e-324, -3.0e-8, 7, 70000, -3, 1 bsl 100], {A, B} <- [M:half(F)]] \
+             ++ [M:cause(half, [[]]), \
+             M:cause(half, [1 bsl 1100]) =:= {badarg, {1, float, no_float, 1 bsl 1100}}, \
+             M:float_size(1, 16), M:bits(2)] end"
         ),
-        "[<<60,0>>,<<33>>]\n"
+        "[{[62,0],[0,62]},{[128,0],[0,128]},{[123,255],[255,123]},{[123,255],[255,123]},\
+         {[124,0],[0,124]},{[252,0],[0,252]},{[0,0],[0,0]},{[0,1],[1,0]},{[0,0],[0,0]},\
+         {[60,2],[2,60]},{[60,0],[0,60]},{[104,0],[0,104]},{[0,0],[0,0]},\
+         {[0,0],[0,0]},{[128,1],[1,128]},{[71,0],[0,71]},{[124,0],[0,124]},{[194,0],[0,194]},\
+         {[124,0],[0,124]},{badarg,{1,float,type,[]}},true,<<60,0>>,<<33>>]\n"
     );
 }
 

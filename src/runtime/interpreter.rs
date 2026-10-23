@@ -5768,23 +5768,17 @@ impl BinaryPart<'_> {
 /// convert fails with `no_float`. A small integer converts with one C cast
 /// to the float of the size, and a bignum converts to a double first. A
 /// value too large for 32 bits gives an infinity, as the C cast does, and
-/// ERTS gives no error. PBeam does not write 16-bit floats yet (row
-/// "Binary construction" of `docs/erts-differences.md`), so a number of
-/// such a segment gives `None`, which the caller changes into a runtime
-/// error.
+/// ERTS gives no error. A 16-bit segment rounds the number to binary16
+/// (`f64_to_f16`).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(float_segment_bits(1, &Term::Float(1.5), 64), Ok(Some(0x3FF8_0000_0000_0000)));
-/// assert_eq!(float_segment_bits(1, &Term::Integer(-3), 32), Ok(Some(0xC040_0000)));
+/// assert_eq!(float_segment_bits(1, &Term::Float(1.5), 64), Ok(0x3FF8_0000_0000_0000));
+/// assert_eq!(float_segment_bits(1, &Term::Integer(-3), 32), Ok(0xC040_0000));
 /// assert!(float_segment_bits(1, &Term::static_atom("a"), 64).is_err());
 /// ```
-fn float_segment_bits(
-    segment: u64,
-    value: &Term,
-    bits: u64,
-) -> Result<Option<i64>, BinarySegmentFailure> {
+fn float_segment_bits(segment: u64, value: &Term, bits: u64) -> Result<i64, BinarySegmentFailure> {
     let fail = |info, term| BinarySegmentFailure::badarg(segment, "float", info, term);
     if !matches!(bits, 16 | 32 | 64) {
         return Err(fail("invalid", Term::Integer(bits as i64)));
@@ -5799,12 +5793,61 @@ fn float_segment_bits(
         _ => return Err(fail("type", value.clone())),
     };
     Ok(match (bits, number) {
-        (64, Ok(small)) => Some((small as f64).to_bits() as i64),
-        (64, Err(float)) => Some(float.to_bits() as i64),
-        (32, Ok(small)) => Some(i64::from((small as f32).to_bits())),
-        (32, Err(float)) => Some(i64::from((float as f32).to_bits())),
-        _ => None,
+        (64, Ok(small)) => (small as f64).to_bits() as i64,
+        (64, Err(float)) => float.to_bits() as i64,
+        (32, Ok(small)) => i64::from((small as f32).to_bits()),
+        (32, Err(float)) => i64::from((float as f32).to_bits()),
+        // `FP16_FROM_FP64` (erl_bits.c:45-53) casts a small integer straight
+        // to `_Float16`. A small integer that a double cannot hold exactly
+        // is far above the largest binary16 value, so the cast through a
+        // double gives the same infinity.
+        (_, Ok(small)) => i64::from(f64_to_f16(small as f64)),
+        (_, Err(float)) => i64::from(f64_to_f16(float)),
     })
+}
+
+/// Return the binary16 bits of a finite double, rounded once to nearest
+/// with ties to even, as the ERTS `f64_to_f16` fallback and the native
+/// `_Float16` cast do (erl_bits.c:426-506). A value too large gives an
+/// infinity of the same sign, and a value too small gives a zero of the
+/// same sign.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(f64_to_f16(1.5), 0x3E00);
+/// assert_eq!(f64_to_f16(-1.0e10), 0xFC00);
+/// ```
+fn f64_to_f16(value: f64) -> u16 {
+    let bits = value.to_bits();
+    let sign = ((bits >> 48) & 0x8000) as u16;
+    let exponent = ((bits >> 52) & 0x7FF) as i32;
+    if exponent == 0 {
+        return sign;
+    }
+    let mut exponent = exponent - 1023;
+    let mantissa = (bits & ((1 << 52) - 1)) | (1 << 52);
+    let round = |keep: u64, shift: u32| {
+        let guard = (mantissa >> (shift - 1)) & 1 == 1;
+        let sticky = mantissa & ((1 << (shift - 1)) - 1) != 0;
+        keep + u64::from(guard && (sticky || keep & 1 == 1))
+    };
+    if exponent >= -14 {
+        let mut keep = round(mantissa >> 42, 42);
+        if keep == 2048 {
+            keep = 1024;
+            exponent += 1;
+        }
+        if exponent > 15 {
+            return sign | 0x7C00;
+        }
+        return sign | (((exponent + 15) as u16) << 10) | (keep & 0x3FF) as u16;
+    }
+    let shift = (28 - exponent) as u32;
+    if shift > 63 {
+        return sign;
+    }
+    sign | round(mantissa >> shift, shift) as u16
 }
 
 /// Return the size in bits of an `integer` segment, or the exception
@@ -6301,8 +6344,7 @@ fn utf_segment_code_point(value: &Term) -> Option<u32> {
 ///
 /// # Errors
 ///
-/// A bignum `integer` part of more than 64 bits or a 16-bit `float` part is
-/// a runtime error.
+/// A bignum `integer` part of more than 64 bits is a runtime error.
 fn write_binary_parts(
     process: &mut ProcessState,
     parts: &[BinaryPart<'_>],
@@ -6396,10 +6438,7 @@ fn write_binary_parts(
                 bits,
                 little,
             } => match float_segment_bits(*segment, value, *bits) {
-                Ok(Some(float)) => writer.push_integer(float, *bits, *little),
-                Ok(None) => {
-                    return Err(error("unsupported bs_create_bin float segment of 16 bits"));
-                }
+                Ok(float) => writer.push_integer(float, *bits, *little),
                 Err(failure) => return Ok(Err(failure)),
             },
         }
