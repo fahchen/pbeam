@@ -1177,6 +1177,29 @@ impl BeamProgram {
             let process = scheduler.current_process_mut();
             return binary::find_trap(process, stored.as_deref(), subject, bytes, state, pattern);
         }
+        // The hidden exports of `binary:longest_common_prefix/1` and
+        // `binary:longest_common_suffix/1` (`erl_bif_binary.c:79-85`,
+        // `2241-2275`).
+        if let (
+            "erlang",
+            "binary_longest_prefix_trap" | "binary_longest_suffix_trap",
+            [
+                Term::Tuple(binaries),
+                Term::Integer(index),
+                Term::Integer(smallest),
+                Term::Integer(position),
+            ],
+        ) = (module, function, arguments.as_slice())
+        {
+            return Ok(binary::longest_common_turn(
+                scheduler.current_process_mut(),
+                binaries,
+                *index as usize,
+                *smallest as u64,
+                *position as u64,
+                function == "binary_longest_suffix_trap",
+            ));
+        }
         if module == "persistent_term"
             && let Some(result) = persistent_term::resume(scheduler, function, &arguments)
         {
