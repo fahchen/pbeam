@@ -810,7 +810,7 @@ fn rejects_system_flag_items_as_pinned_erts() {
     let badarg = Term::tuple(vec![atom("error"), atom("badarg")]);
     let mut expected = vec![badarg.clone(); 3];
     expected.push(atom("true"));
-    expected.extend(vec![badarg; 38]);
+    expected.extend(vec![badarg; 52]);
     assert_eq!(
         program
             .execute("logger_start_probe", "system_flag", &[])
@@ -823,7 +823,7 @@ fn rejects_system_flag_items_as_pinned_erts() {
         format!(
             "[{},true,{}]\n",
             ["{error,badarg}"; 3].join(","),
-            ["{error,badarg}"; 38].join(",")
+            ["{error,badarg}"; 52].join(",")
         )
     );
 }
@@ -882,11 +882,11 @@ fn rejects_process_flags_as_pinned_erts() {
             .execute("logger_start_probe", "process_flag", &[])
             .unwrap()
             .term,
-        Term::list_from(vec![badarg; 20])
+        Term::list_from(vec![badarg; 25])
     );
     assert_eq!(
         String::from_utf8(reference("process_flag")).unwrap(),
-        format!("[{}]\n", ["{error,badarg}"; 20].join(","))
+        format!("[{}]\n", ["{error,badarg}"; 25].join(","))
     );
 }
 
@@ -903,27 +903,53 @@ fn returns_a_runtime_error_for_a_flag_that_needs_a_missing_subsystem() {
         (
             "time_offset",
             "unsupported erlang:system_flag/2 item time_offset",
-            "volatile",
+            Some("volatile"),
         ),
         (
             "trace_control_word",
             "unsupported erlang:system_flag/2 item trace_control_word",
-            "0",
+            Some("0"),
         ),
         (
             "sequential_tracer",
             "unsupported erlang:system_flag/2 item sequential_tracer",
-            "false",
+            Some("false"),
+        ),
+        (
+            "sequential_tracer_port",
+            "unsupported erlang:system_flag/2 item sequential_tracer",
+            Some("false"),
+        ),
+        // The old topology of ERTS depends on the host.
+        (
+            "internal_cpu_topology",
+            "unsupported erlang:system_flag/2 item internal_cpu_topology",
+            None,
+        ),
+        (
+            "erts_alloc_sys",
+            "unsupported erlang:system_flag/2 item erts_alloc",
+            Some("notsup"),
+        ),
+        (
+            "erts_alloc_param",
+            "unsupported erlang:system_flag/2 item erts_alloc",
+            Some("notsup"),
+        ),
+        (
+            "scheduler",
+            "unsupported erlang:process_flag/2 flag scheduler",
+            Some("0"),
         ),
         (
             "reset_seq_trace",
             "unsupported erlang:system_flag/2 item reset_seq_trace",
-            "true",
+            Some("true"),
         ),
         (
             "save_calls",
             "unsupported erlang:process_flag/2 flag save_calls",
-            "0",
+            Some("0"),
         ),
     ] {
         let error = program
@@ -934,10 +960,12 @@ fn returns_a_runtime_error_for_a_flag_that_needs_a_missing_subsystem() {
             )
             .unwrap_err();
         assert!(error.to_string().contains(message), "{error}");
-        assert_eq!(
-            String::from_utf8(reference_call(&format!("unsupported_flag({case})"))).unwrap(),
-            format!("{erts}\n")
-        );
+        if let Some(erts) = erts {
+            assert_eq!(
+                String::from_utf8(reference_call(&format!("unsupported_flag({case})"))).unwrap(),
+                format!("{erts}\n")
+            );
+        }
     }
 }
 
