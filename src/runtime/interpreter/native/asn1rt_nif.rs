@@ -430,9 +430,7 @@ fn per_complete(input: &[u8], truncated: &mut bool) -> Option<Vec<u8>> {
                 if counter < 0 {
                     return None;
                 }
-                buf_space -= i64::from(checked(
-                    per.insert_octets_except_unused(no_bytes, in_unused)?,
-                )?);
+                buf_space -= i64::from(per.insert_octets_except_unused(no_bytes, in_unused)?);
             }
             40..=43 | 45..=47 => {
                 let wide_desired = matches!(opcode, 42 | 43 | 46 | 47);
@@ -715,3 +713,7 @@ fn ber_encode_length(size: usize, bytes: &mut Vec<u8>) {
     bytes.push(0x80 | (significant.len() - start) as u8);
     bytes.extend(&significant[start..]);
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/runtime/interpreter/native/asn1rt_nif.rs"]
+mod tests;
