@@ -21,6 +21,8 @@ use common::pinned_beam_path;
 
 const GEN_TCP_PROBE: &str = "fixtures/gen_tcp/gen_tcp_probe.beam";
 
+const GEN_TCP_CONNECT: &str = "fixtures/gen_tcp/gen_tcp_connect.beam";
+
 #[test]
 fn runs_the_gen_tcp_calls_of_thousand_island_as_pinned_erts() {
     // `gen_tcp_probe:main/0` listens with the options of Thousand Island
@@ -174,4 +176,70 @@ fn exchange(stream: &mut TcpStream, text: &[u8], reply: &[u8]) -> Result<(), Str
         return Err(format!("read {received:?}, not {text:?}"));
     }
     stream.write_all(reply).map_err(|error| error.to_string())
+}
+
+#[test]
+fn connects_to_a_local_listen_socket_as_pinned_erts() {
+    // `gen_tcp:connect/3,4` to a listen port, the names of the connected
+    // socket, a send and a receive on each side, a connect of a connected
+    // socket (`eisconn`) and with a bad timeout (`einval`), a connect in
+    // active mode, and a connect to a closed port (`econnrefused`)
+    // (inet_drv.c:12064-12141, 14242-14288; prim_inet.erl:368-431).
+    assert_connect_runs(
+        "main",
+        "[[{127,0,0,1},true,{127,0,0,1},true],[ok,{ok,<<104,105>>},ok,{ok,<<121,111>>}],\
+         [{error,eisconn},{error,einval}],<<97,99,116>>,\
+         [{error,econnrefused},{error,econnrefused}],[]]\n",
+    );
+}
+
+#[test]
+fn ends_a_connect_at_its_timeout_and_at_a_close_as_pinned_erts() {
+    // A connect to TEST-NET-1 waits until its timer ends it
+    // (inet_drv.c:12569-12580); a second connect gives `einval`, and a
+    // close ends the connect with `closed` (inet_drv.c:11883-11885).
+    assert_connect_runs(
+        "timeout",
+        "[{error,timeout},{error,einval},{error,closed},[{'EXIT',true,normal}]]\n",
+    );
+}
+
+/// Run `gen_tcp_connect:Function()` on the pinned ERTS and on PBeam, as
+/// [`runs_the_gen_tcp_calls_of_thousand_island_as_pinned_erts`] runs its
+/// probe, and check that each run writes `expected`.
+fn assert_connect_runs(function: &str, expected: &str) {
+    let mut erts = Command::new("erl");
+    erts.args([
+        "+S",
+        "1",
+        "-noshell",
+        "-boot",
+        "start_clean",
+        "-pa",
+        "fixtures/gen_tcp",
+        "-eval",
+    ])
+    .arg(format!("gen_tcp_connect:{function}(), halt()."));
+    let mut pbeam = Command::new(env!("CARGO_BIN_EXE_pbeam"));
+    pbeam
+        .args(["pbeam_boot", "start", "gen_tcp_connect", function, "--root"])
+        .arg(otp_root())
+        .args(["--", GEN_TCP_CONNECT])
+        .args(BOOT_MODULES.map(pinned_beam_path))
+        .arg(boot_beam());
+    for (name, command) in [("ERTS", &mut erts), ("PBeam", &mut pbeam)] {
+        let output = command
+            .env("TERM", "dumb")
+            .env("LC_ALL", "C.UTF-8")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            (stdout.as_ref(), stderr.as_ref(), output.status.code()),
+            (expected, "", Some(0)),
+            "{name}"
+        );
+    }
 }

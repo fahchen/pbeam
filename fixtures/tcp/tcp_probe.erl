@@ -1,5 +1,5 @@
 -module(tcp_probe).
--export([control/0, data/0, enabled/0, linger/0, unsupported/1]).
+-export([connect/0, control/0, data/0, enabled/0, linger/0, unsupported/1]).
 
 %% The requests of the tcp_inet driver that prim_inet sends for
 %% gen_tcp:listen/2, inet:sockname/1, inet:getopts/2, and gen_tcp:close/1
@@ -135,13 +135,13 @@ unsupported(list) -> open_port({spawn_driver, "tcp_inet"}, []);
 unsupported(inet6) -> control(open_port({spawn_driver, "tcp_inet"}, [binary]), 1, [2, 1, 1]);
 unsupported(mptcp) -> control(open_port({spawn_driver, "tcp_inet"}, [binary]), 1, [1, 1, 4]);
 unsupported(any) -> control(opened(), 6, [3, 0, 0]);
+unsupported(connect_any) -> control(opened(), 3, [0, 0, 0, 0, 3, 0, 0]);
 unsupported(dontroute) -> control(opened(), 7, [2, 0, 0, 0, 1]);
 unsupported(recvttl) -> control(opened(), 7, [47, 0, 0, 0, 1]);
 unsupported(linger) -> linger();
 unsupported(linger_off) -> control(opened(), 7, [3, 0, 0, 0, 0, 0, 0, 0, 5]);
 unsupported(active_n) -> control(opened(), 7, [22, 0, 0, 0, 3, 0, 1]);
 unsupported(getopt) -> control(opened(), 8, [2]);
-unsupported(connect) -> control(opened(), 3, []);
 unsupported(policy) -> open_port({spawn_driver, "tcp_inet"}, [binary]);
 %% In boot mode, a process that entered the runtime is not a boot process,
 %% so prim_inet:open/3, which gen_udp:open/2 calls through inet_udp, cannot
@@ -157,3 +157,21 @@ opened() ->
     P = open_port({spawn_driver, "tcp_inet"}, [binary]),
     [1] = control(P, 1, [1, 1, 1]),
     P.
+
+%% The error of each state and argument check of INET_REQ_CONNECT
+%% (inet_drv.c:12076-12089; inet_set_faddress, inet_drv.c:4795-4880), and
+%% the error of the host for a connect of a listen socket
+%% (inet_drv.c:12129-12139).
+connect() ->
+    process_flag(trap_exit, true),
+    P = open_port({spawn_driver, "tcp_inet"}, [binary]),
+    Closed = control(P, 3, [0, 0, 0, 0, 1, 0, 80, 127, 0, 0, 1]),
+    Q = opened(),
+    Checks = [control(Q, 3, Bytes) || Bytes <- [[], [0, 0, 0, 0, 1], [0, 0, 0, 0, 9, 0],
+                                                [0, 0, 0, 0, 1, 0]]],
+    L = opened(),
+    [1, P1, P0] = control(L, 6, [1, 0, 0, 127, 0, 0, 1]),
+    [1] = control(L, 27, [0, 5]),
+    Listen = control(L, 3, [0, 0, 0, 0, 1, P1, P0, 127, 0, 0, 1]),
+    [port_close(X) || X <- [P, Q, L]],
+    [Closed, Checks, Listen].
