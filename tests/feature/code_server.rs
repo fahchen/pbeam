@@ -1012,7 +1012,7 @@ fn run(command: &mut Command) -> String {
 
 /// The output of `crypto_probe:ciphers_host/0` on PBeam and on the pinned
 /// macOS ERTS: `notsup` for each legacy cipher (cipher.c:282-283,
-/// api_ng.c:284-287), and the AEAD results of sm4_gcm and sm4_ccm.
+/// api_ng.c:284-287), the AEAD results of sm4_gcm and sm4_ccm, and the type of each cipher.
 const CIPHERS_HOST: &str = r#"[[{error,notsup},
   {error,notsup},
   {error,notsup},
@@ -1053,5 +1053,8 @@ const CIPHERS_HOST: &str = r#"[[{error,notsup},
             <<156,133,7,167,239,92,51,235,150,61,225,73>>},
            {<<81,156,190,144>>,
             <<238,134,79,88,94,103,180,117,75,217,119,49,223,226,20,43>>},
-           [<<"plain text">>,error,error]}]]
+           [<<"plain text">>,error,error]}],
+ [44,61,1134,1133,1137,1135,1139,419,423,427,420,424,428,421,425,429,421,425,
+  429,418,422,426,undefined,undefined,undefined,undefined,undefined,895,898,
+  901,896,899,902]]
 "#;

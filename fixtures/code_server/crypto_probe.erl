@@ -297,17 +297,19 @@ aead(Cipher) ->
 %% Write the results of the ciphers that depend on the libcrypto of the
 %% host. The OpenSSL 3.5.8 of the pinned macOS ERTS cannot fetch rc2, rc4,
 %% des, or blowfish (cipher.c:216-218), so these give notsup. The
-%% libcrypto of the Linux CI host has no sm4_gcm and sm4_ccm.
+%% libcrypto of the Linux CI host has no sm4_gcm and sm4_ccm. Its
+%% des_ede3_cfb has the type 30, where OpenSSL 3.5.8 gives 61.
 ciphers_host() ->
     Legacy = [rc2_cbc, rc4, des_cbc, des_cfb, des_ecb, blowfish_cbc, blowfish_cfb64,
               blowfish_ofb64, blowfish_ecb],
     Infos = [bad_reason(fun() -> crypto:cipher_info(C) end) || C <- Legacy],
     Sm4 = [aead(C) || C <- [sm4_gcm, sm4_ccm]],
+    Types = [maps:get(type, crypto:cipher_info(C)) || C <- run_ciphers()],
     OneTime = [bad_reason(fun() -> crypto:crypto_one_time(C, binary:copy(<<1>>, 16),
                                                           binary:copy(<<2>>, 8),
                                                           <<"text">>, true) end)
                || C <- Legacy],
-    io:format("~p~n", [[Infos, OneTime, Sm4]]).
+    io:format("~p~n", [[Infos, OneTime, Sm4, Types]]).
 
 %% Call crypto:hash_init/1, whose NIF hash_init_nif/1 PBeam does not link.
 hash_init() ->
