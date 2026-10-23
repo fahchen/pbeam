@@ -612,13 +612,17 @@ timer_named() ->
     Reference = erlang:start_timer(60000, unregistered_timer_name, tick),
     is_integer(erlang:cancel_timer(Reference)).
 
-%% The root that reads a timer of the other scheduler.
+%% The root that reads a timer of the other scheduler, also with
+%% erlang:read_timer/2 and {async, true}.
 timer_read() ->
     true = register(timer_read_name, self()),
     receive {timer, Reference, From} ->
         Left = erlang:read_timer(Reference),
+        ok = erlang:read_timer(Reference, [{async, true}]),
+        Async = receive {read_timer, Reference, Value} -> Value end,
         From ! done,
         is_integer(Left) andalso Left > 0 andalso Left =< 60000
+            andalso is_integer(Async) andalso Async =< Left
     end.
 
 %% The root that sends its timer reference to the other scheduler. The read

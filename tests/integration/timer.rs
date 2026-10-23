@@ -315,6 +315,57 @@ fn runs_the_absolute_timer_bifs_and_read_timer_as_pinned_erts() {
     );
 }
 
+#[test]
+fn runs_read_timer_2_as_pinned_erts() {
+    // `read_timer/2` takes only `{async, Bool}` (`erl_hl_timer.c:2666-2676`,
+    // `2352-2398`). `{async, true}` gives `ok` and queues
+    // `{read_timer, TimerRef, Result}` before a later message of the caller
+    // (`erl_hl_timer.c:1992-2034`, `2209-2234`).
+    let erlang = pinned_beam("erlang");
+    let program = BeamProgram::load(&[&erlang, TIMER_PROBE]).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let badarg = || Term::tuple(vec![atom("error"), atom("badarg")]);
+    let result = program.execute("timer_probe", "read_timer_2", &[]).unwrap();
+    let mut expected: Vec<Term> = [
+        "true",
+        "true",
+        "ok",
+        "read_timer",
+        "true",
+        "ok",
+        "ok",
+        "true",
+        "true",
+        "ok",
+        "false",
+        "false",
+        "ok",
+        "false",
+    ]
+    .into_iter()
+    .map(atom)
+    .collect();
+    expected.push(Term::list_from(vec![badarg(); 9]));
+    expected.extend([badarg(), badarg(), atom("none")]);
+    assert_eq!(result.term, Term::list_from(expected));
+
+    let reference = Command::new("erl")
+        .args([
+            "-noshell",
+            "-pa",
+            "fixtures/timer",
+            "-eval",
+            "io:format(\"~w~n\", [timer_probe:read_timer_2()]), halt().",
+        ])
+        .output()
+        .unwrap();
+    assert!(reference.status.success());
+    assert_eq!(
+        reference.stdout,
+        b"[true,true,ok,read_timer,true,ok,ok,true,true,ok,false,false,ok,false,[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}],{error,badarg},{error,badarg},none]\n"
+    );
+}
+
 const CHECK_TIME_PROBE: &[u8] = include_bytes!("../../fixtures/timer/check_time_probe.beam");
 
 #[test]

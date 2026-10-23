@@ -2,7 +2,7 @@
 -export([receive_after/0, timeout_values/0, receive_limits/0, start_timer/0,
          cancel_timer/0, cancel_timer_1/0, receiver_exit/0, order/0, timer_limits/0,
          send_after/3, wait/0, id/1, send_after_timer/0, start_timer_4/0,
-         send_after_4/0, read_timer/0]).
+         send_after_4/0, read_timer/0, read_timer_2/0]).
 
 %% Return the argument. A call through ?MODULE stops the compiler from
 %% folding a constant timeout or argument.
@@ -245,3 +245,37 @@ read_timer() ->
     F = erlang:read_timer(make_ref()),
     G = try erlang:read_timer(foo) catch Class:Reason -> {Class, Reason} end,
     [A, B, C, D, E, F, G, wait(0)].
+
+%% erlang:read_timer/2 with each option list on a live, cancelled, expired,
+%% and unknown timer, and bad options (erl_hl_timer.c:2666-2676). The async
+%% reply comes before a later message of the caller.
+read_timer_2() ->
+    Self = self(),
+    R1 = erlang:start_timer(?MODULE:id(200), Self, x),
+    A = left(erlang:read_timer(R1, [])),
+    B = left(erlang:read_timer(R1, [{async, false}])),
+    C = erlang:read_timer(R1, [{async, true}]),
+    Self ! after_async,
+    {D, E} = receive {Tag, R1, L1} -> {Tag, left(L1)} end,
+    F = receive after_async -> ok end,
+    G = erlang:read_timer(R1, [{async, false}, {async, true}]),
+    H = receive {read_timer, R1, L2} -> left(L2) end,
+    I = left(erlang:read_timer(R1, [{async, true}, {async, false}])),
+    _ = erlang:cancel_timer(R1),
+    J = erlang:read_timer(R1, [{async, true}]),
+    K = receive {read_timer, R1, L3} -> L3 end,
+    R2 = erlang:start_timer(0, Self, y),
+    _ = receive {timeout, R2, y} -> ok end,
+    L = erlang:read_timer(R2, [{async, false}]),
+    Unknown = make_ref(),
+    N = erlang:read_timer(Unknown, [{async, true}]),
+    O = receive {read_timer, Unknown, L4} -> L4 end,
+    Bad = [[{info, true}], [{abs, false}], [{async, 1}], [{async, yes}], [async], {async, true},
+           [{async, true} | x], [{async, true, x}], foo],
+    P = [catch_error(fun() -> erlang:read_timer(R2, Opts) end) || Opts <- Bad],
+    Q = catch_error(fun() -> erlang:read_timer(foo, []) end),
+    R = catch_error(fun() -> erlang:read_timer(foo, [{async, true}]) end),
+    [A, B, C, D, E, F, G, H, I, J, K, L, N, O, P, Q, R, wait(0)].
+
+catch_error(F) ->
+    try F() catch Class:Reason -> {Class, Reason} end.

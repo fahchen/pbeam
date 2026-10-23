@@ -328,6 +328,7 @@ const AMBIENT: [&str; 118] = [
     "erlang:processes/0",
     "erlang:registered/0",
     "erlang:read_timer/1",
+    "erlang:read_timer/2",
     "erlang:register/2",
     "erlang:system_info/1",
     "erlang:system_time/0",

@@ -134,13 +134,7 @@ fn absolute_option(options: &Term) -> Option<bool> {
 }
 
 /// Run `erlang:read_timer(TimerRef)`, as ERTS `read_timer_1`
-/// (`erl_hl_timer.c:2661-2664`) does through `access_bif_timer`
-/// (`erl_hl_timer.c:2237-2340`): a term that is not a reference raises
-/// `badarg`; a reference of an active BIF timer gives the milliseconds left
-/// (`get_time_left`, `erl_hl_timer.c:681-689`); each other reference gives
-/// `false`. A read does not cancel the timer. Each reference of PBeam is a
-/// reference of its scheduler, so the `no_timer_result` path
-/// (`erl_hl_timer.c:2209-2234`) covers a reference that has no timer.
+/// (`erl_hl_timer.c:2661-2664`) does: [`read`] without `async`.
 ///
 /// # Examples
 ///
@@ -151,23 +145,110 @@ fn absolute_option(options: &Term) -> Option<bool> {
 ///
 /// # Errors
 ///
-/// The errors of [`Timers::now`] give no error, and this function adds
-/// none.
+/// This function gives no error.
 pub(super) fn read_timer(
     context: &mut BifContext<'_>,
     reference: &Term,
 ) -> Result<BifResult, BeamError> {
-    let Term::Reference(reference) = reference else {
+    Ok(read(context, reference, false))
+}
+
+/// Run `erlang:read_timer(TimerRef, Options)`, as ERTS `read_timer_2`
+/// (`erl_hl_timer.c:2666-2676`) does: `parse_bif_timer_options`
+/// (`erl_hl_timer.c:2352-2398`) reads a list of `{async, Bool}`, and the
+/// last value wins. Each other element, also `{info, Bool}` and
+/// `{abs, Bool}`, raises `badarg`, because `read_timer_2` passes no pointer
+/// for them. The options are checked before `TimerRef`. Then [`read`] runs
+/// with `async`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = read_timer_2(&mut context, &Term::Reference(reference), &Term::nil())?;
+/// assert!(matches!(result, BifResult::Value(Term::Integer(_))));
+/// ```
+///
+/// # Errors
+///
+/// This function gives no error.
+pub(super) fn read_timer_2(
+    context: &mut BifContext<'_>,
+    reference: &Term,
+    options: &Term,
+) -> Result<BifResult, BeamError> {
+    let Some(asynchronous) = async_option(options) else {
         return Ok(BifResult::badarg());
     };
+    Ok(read(context, reference, asynchronous))
+}
+
+/// Read the options of `read_timer/2` as `parse_bif_timer_options`
+/// (`erl_hl_timer.c:2352-2398`) does with only the `async` option. Return
+/// `None` for a list that is not valid.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(async_option(&Term::nil()), Some(false));
+/// assert_eq!(async_option(&Term::static_atom("async")), None);
+/// ```
+fn async_option(options: &Term) -> Option<bool> {
+    let mut asynchronous = false;
+    for option in options.proper_list()? {
+        let Term::Tuple(fields) = option else {
+            return None;
+        };
+        let [Term::Atom(name), Term::Atom(value)] = fields.as_ref() else {
+            return None;
+        };
+        if !name.is_static("async") {
+            return None;
+        }
+        asynchronous = if value.is_static("true") {
+            true
+        } else if value.is_static("false") {
+            false
+        } else {
+            return None;
+        };
+    }
+    Some(asynchronous)
+}
+
+/// Read a BIF timer as `access_bif_timer` (`erl_hl_timer.c:2237-2340`)
+/// does without a cancel and with `info`: a term that is not a reference
+/// raises `badarg`; a reference of an active BIF timer gives the
+/// milliseconds left (`get_time_left`, `erl_hl_timer.c:681-689`); each
+/// other reference gives `false`. A read does not cancel the timer. With
+/// `async`, the caller gets the message `{read_timer, TimerRef, Result}`
+/// and the call gives `ok` (`send_async_info`, `erl_hl_timer.c:1992-2034`;
+/// `no_timer_result`, `erl_hl_timer.c:2209-2234`).
+///
+/// The node holds the end of each active timer, so a read of a timer of
+/// another scheduler gives its result at once. For such a timer, ERTS
+/// sends the request to the owner scheduler and gives `ok` at once
+/// (`erl_hl_timer.c:2272-2295`); the reply comes later. A read changes no
+/// state, so the message and its value are the same.
+fn read(context: &mut BifContext<'_>, reference: &Term, asynchronous: bool) -> BifResult {
+    let Term::Reference(reference) = reference else {
+        return BifResult::badarg();
+    };
     let scheduler = &mut *context.scheduler;
-    // The node holds the end of each active timer, so a timer of any
-    // scheduler gives the same value as on its own scheduler.
     let result = match scheduler.node().timer_end(*reference) {
         Some(end) => Term::Integer(Timers::time_left(scheduler.timers.now(), end)),
         None => Term::static_atom("false"),
     };
-    Ok(Value(result))
+    if !asynchronous {
+        return Value(result);
+    }
+    let caller = scheduler.current_process_mut().id;
+    let message = Term::tuple(vec![
+        Term::static_atom("read_timer"),
+        Term::Reference(*reference),
+        result,
+    ]);
+    scheduler.deliver(caller, message);
+    Value(Term::static_atom("ok"))
 }
 
 /// Start the BIF timer of [`start_timer_4`] and [`send_after_4`] at the end

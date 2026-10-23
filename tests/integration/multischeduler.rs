@@ -1058,7 +1058,7 @@ fn fires_a_named_timer() {
 }
 
 /// A read of a timer of another scheduler gives the time left and leaves
-/// the timer active, as `erl +S 2` gives `[true, true]`
+/// the timer active, also as an async `read_timer/2` message, as `erl +S 2` gives `[true, true]`
 /// (`erl_hl_timer.c:2236-2339`).
 #[test]
 fn reads_a_timer_of_another_scheduler() {
