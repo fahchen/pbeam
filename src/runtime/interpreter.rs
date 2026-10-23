@@ -1247,15 +1247,14 @@ impl BeamProgram {
                         BifResult::Raise { .. } | BifResult::ErrorWithCause { .. }
                     ) =>
                 {
-                    let arguments = registers.unwrap_or(call.arguments);
-                    bif_error(
-                        scheduler,
-                        &call.module,
-                        &call.name,
+                    let BifCall {
+                        module,
+                        name,
                         arguments,
-                        result,
-                        call.skip,
-                    )?
+                        skip,
+                    } = call;
+                    let arguments = registers.unwrap_or(arguments);
+                    bif_error(scheduler, &module, &name, arguments, result, skip)?
                 }
                 // The BIF traps again and keeps the call.
                 Some(call) if matches!(result, BifResult::TrapBif { .. }) => {
