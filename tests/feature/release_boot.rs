@@ -186,7 +186,7 @@ fn rejects_the_options_and_variables_of_erlexec() {
             &[],
             "the erl option -args_file is not supported",
         ),
-        (&["+S", "1"], &[], "the erl option +S is not supported"),
+        (&["+SP", "50"], &[], "the erl option +SP is not supported"),
         (
             &["-proto_dist", "-extra", "-sname", "node"],
             &[],
@@ -286,5 +286,74 @@ fn halts_with_the_init_crash_text_when_the_eval_fails() {
             ("", stderr, Some(1)),
             "{name}"
         );
+    }
+}
+
+/// The `-eval` expression of the scheduler probes: the total and the
+/// online count of the schedulers.
+const SCHEDULERS_EVAL: &str = "io:format(\"~p ~p~n\", [erlang:system_info(schedulers), \
+     erlang:system_info(schedulers_online)]), halt().";
+
+/// Run the scheduler probe with the `+S` value `value` on `pbeam erl` and
+/// on the pinned `erl`.
+fn schedulers_probe(value: &str) -> (Output, Output) {
+    let arguments = ["+S", value, "-noshell", "-eval", SCHEDULERS_EVAL];
+    let mut reference = Command::new("erl");
+    reference.args(arguments);
+    let reference = isolate(&mut reference).output().unwrap();
+    (pbeam_erl(&arguments, &[]), reference)
+}
+
+#[test]
+fn sets_the_scheduler_counts_of_the_s_flag_as_pinned_erts() {
+    // `+S T:O` sets the total and the online count (erl_init.c:1103-1149).
+    for (value, expected) in [("2", "2 2\n"), ("4:2", "4 2\n")] {
+        let (actual, reference) = schedulers_probe(value);
+        assert_eq!(
+            String::from_utf8_lossy(&reference.stdout),
+            expected,
+            "{reference:?}"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&actual.stdout),
+            expected,
+            "{actual:?}"
+        );
+        assert!(actual.status.success(), "{actual:?}");
+    }
+    // `+S :O` keeps the default total. ERTS takes the configured CPUs and
+    // PBeam takes `available_parallelism`, so the probe checks PBeam
+    // against the host count (row "Scheduling" of docs/erts-differences.md).
+    let host = std::thread::available_parallelism().unwrap().get();
+    let (actual, _) = schedulers_probe(":1");
+    assert_eq!(
+        String::from_utf8_lossy(&actual.stdout),
+        format!("{host} 1\n"),
+        "{actual:?}"
+    );
+}
+
+#[test]
+fn rejects_a_bad_s_flag_as_pinned_erts() {
+    // erl_init.c:1103-1149 writes the error, then the usage text, and
+    // exits with status 1.
+    for (value, expected) in [
+        (
+            "3:5",
+            "bad amount of schedulers online 5 (total amount of schedulers 3)",
+        ),
+        ("x", "bad amount of schedulers x"),
+    ] {
+        let (actual, reference) = schedulers_probe(value);
+        for output in [&actual, &reference] {
+            assert_eq!(output.status.code(), Some(1), "{output:?}");
+            // PBeam writes its `pbeam: ` prefix and no usage text.
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let first = stderr
+                .lines()
+                .next()
+                .map(|line| line.trim_start_matches("pbeam: "));
+            assert_eq!(first, Some(expected), "{output:?}");
+        }
     }
 }
