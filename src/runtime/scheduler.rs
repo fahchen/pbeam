@@ -1310,8 +1310,12 @@ impl Scheduler {
         }
         let dirty = self.dirty.running();
         // The fds that the poll thread found ready go first; the wait would
-        // not see them.
-        self.check_io()?;
+        // not see them. A served fd can send a message and close its port,
+        // so the run loop schedules again before it waits or decides that
+        // no event can arrive.
+        if self.check_io()? {
+            return Ok(true);
+        }
         let wake = self.wake.as_ref().map(|wake| wake.as_raw_fd());
         let own: Vec<_> = [
             dirty.then(|| self.dirty.wake_fd()),
@@ -1393,14 +1397,16 @@ impl Scheduler {
     /// # Errors
     ///
     /// The errors of [`Self::port_ready`] and [`Self::port_writable`].
-    pub(super) fn check_io(&mut self) -> Result<(), BeamError> {
+    ///
+    /// Return true when the check served a ready fd.
+    pub(super) fn check_io(&mut self) -> Result<bool, BeamError> {
         let ready = self.node.poll.take_ready(self.index);
         if ready.is_empty() {
-            return Ok(());
+            return Ok(false);
         }
         let result = self.serve(&ready);
         self.node.poll.rearm(self.index, &ready);
-        result
+        result.map(|()| true)
     }
 
     /// Serve each fd of `ready` (see [`Self::check_io`]).
