@@ -482,7 +482,7 @@ impl Inet {
     }
 
     /// End the send that waits for the queue with `{error, closed}` after
-    /// the drop of the queue (inet_drv.c:12790-12800).
+    /// the drop of the queue (inet_drv.c:12791-12801).
     fn end_busy(&mut self) -> Vec<Event> {
         let Some(sender) = self.stream.busy.take() else {
             return Vec::new();
