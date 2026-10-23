@@ -66,14 +66,6 @@ struct Cli {
     /// `no_or_multiple_root_variables`.
     #[arg(long, value_name = "DIR")]
     root: Option<OsString>,
-    /// The `bin` directory of `erts`, as `erlexec` gives it to `init` with
-    /// `-bindir DIR`. It has no default and needs `--root`. With it, the
-    /// boot flag list has `{bindir, [Dir]}` after `{root, [Root]}`, and
-    /// `inet_gethost_native` starts its port program `inet_gethost` from
-    /// it (inet_gethost_native.erl:412-418). Without it,
-    /// `init:get_argument(bindir)` gives `error`.
-    #[arg(long, value_name = "DIR", requires = "root")]
-    bindir: Option<OsString>,
     /// The code loading mode, as `erl -mode MODE` gives it. Without it, the
     /// mode is `interactive`, as for `erl`. With it, the boot flag list ends
     /// with `{mode, [Mode]}`. It needs `--root`: only `code_server` reads
@@ -318,7 +310,6 @@ fn run(arguments: Cli) -> Result<(), Exit> {
         let flags = boot_flags(
             &program,
             arguments.root.as_ref(),
-            arguments.bindir.as_ref(),
             &arguments.code_path,
             arguments.mode.as_ref(),
         )?;
@@ -425,12 +416,17 @@ fn boot_erl(arguments: ErlCli) -> Result<(), Exit> {
     run_end(program.boot(&boot))
 }
 
-/// Make the boot flag list of the `--root`, `--bindir`, `--pa`, and
-/// `--mode` options: `{root, [Root]}` first, then `{bindir, [Dir]}`, then one `{pa, [Dir]}` tuple for each directory
+/// The version of the pinned `erts` (erts/vsn.mk:23), which the `erl`
+/// script puts in `BINDIR` as `%VSN%` (erl.src.src:52).
+const ERTS_VSN: &str = "17.1";
+
+/// Make the boot flag list of the `--root`, `--pa`, and `--mode` options:
+/// `{root, [Root]}` first, then `{bindir, [Root/erts-Vsn/bin]}`, then one `{pa, [Dir]}` tuple for each directory
 /// in the command line order, then `{mode, [Mode]}`, with each value a
 /// binary of its bytes. ERTS gives the same tuples for `erl -pa D1 -pa D2
-/// -mode embedded`: `erlexec` gives `-root` and `-bindir` before the user
-/// flags (erlexec.c:1152-1155), the
+/// -mode embedded`: the `erl` script sets `BINDIR` to
+/// `$ROOTDIR/erts-%VSN%/bin` (erl.src.src:52), and `erlexec` gives `-root`
+/// and `-bindir` before the user flags (erlexec.c:1152-1155), the
 /// emulator gives each boot argument to `init` as a binary of its bytes
 /// (`erl_init.c:373-384`), and `init:parse_boot_args/1` makes one flag tuple
 /// for each flag (`init.erl:1699-1702`, `1724`). A flag that the command
@@ -439,8 +435,8 @@ fn boot_erl(arguments: ErlCli) -> Result<(), Exit> {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let flags = boot_flags(&program, Some(&OsString::from("/otp")), None, &[OsString::from("d1")], None)?;
-/// // [{root, [<<"/otp">>]}, {pa, [<<"d1">>]}]
+/// let flags = boot_flags(&program, Some(&OsString::from("/otp")), &[OsString::from("d1")], None)?;
+/// // [{root, [<<"/otp">>]}, {bindir, [<<"/otp/erts-17.1/bin">>]}, {pa, [<<"d1">>]}]
 /// ```
 ///
 /// # Errors
@@ -450,14 +446,19 @@ fn boot_erl(arguments: ErlCli) -> Result<(), Exit> {
 fn boot_flags(
     program: &BeamProgram,
     root: Option<&OsString>,
-    bindir: Option<&OsString>,
     code_path: &[OsString],
     mode: Option<&String>,
 ) -> Result<Term, String> {
+    // The `--root` option gives the `bindir` flag too, as the `erl` script
+    // gives both. A start set without the atom `bindir` has no module that
+    // can read the flag, so the flag is left out.
+    let bindir = root
+        .filter(|_| program.atom("bindir").is_some())
+        .map(|root| [root.as_bytes(), b"/erts-", ERTS_VSN.as_bytes(), b"/bin"].concat());
     let flags = root
         .map(|root| ("root", root.as_bytes()))
         .into_iter()
-        .chain(bindir.map(|bindir| ("bindir", bindir.as_bytes())))
+        .chain(bindir.as_deref().map(|bindir| ("bindir", bindir)))
         .chain(
             code_path
                 .iter()

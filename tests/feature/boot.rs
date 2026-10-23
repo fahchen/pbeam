@@ -7,14 +7,11 @@ use std::{
 
 use pbeam_runtime::{BeamError, BeamProgram, Map, Term};
 
-#[path = "../common/bindir.rs"]
-mod bindir;
 #[path = "../common/boot.rs"]
 mod boot;
 #[path = "../common/mod.rs"]
 mod common;
 
-use bindir::otp_bindir;
 use boot::{BOOT_MODULES, boot_beam, otp_root};
 use common::{pinned_beam, pinned_beam_path};
 
@@ -58,8 +55,6 @@ fn boots_the_standard_io_servers_before_the_entry_of_the_pbeam_binary() {
             "main",
             "--root",
             otp_root().to_str().unwrap(),
-            "--bindir",
-            otp_bindir().to_str().unwrap(),
             "--",
             BOOT_PROBE,
         ])
@@ -235,8 +230,9 @@ fn isolated_init_stop() {
 }
 
 /// Return the boot flags `[{root, [Root]}, {bindir, [Bindir]}]` of
-/// `pbeam_boot:start/3`, as the `pbeam` binary gives them for `--root` and
-/// `--bindir` (row "Boot" of `docs/erts-differences.md`).
+/// `pbeam_boot:start/3`, as the `pbeam` binary gives them for `--root`: it
+/// gives `{bindir, [Root/erts-17.1/bin]}` (row "Boot" of
+/// `docs/erts-differences.md`).
 fn root_flags(program: &BeamProgram) -> Term {
     let flag = |name: &str, dir: &Path| {
         Term::tuple(vec![
@@ -244,7 +240,10 @@ fn root_flags(program: &BeamProgram) -> Term {
             Term::list_from(vec![Term::binary(dir.as_os_str().as_bytes().to_vec())]),
         ])
     };
-    Term::list_from(vec![flag("root", otp_root()), flag("bindir", otp_bindir())])
+    Term::list_from(vec![
+        flag("root", otp_root()),
+        flag("bindir", &otp_root().join("erts-17.1/bin")),
+    ])
 }
 
 /// Load the pinned boot modules, `probe`, and the boot module.
@@ -399,8 +398,6 @@ fn starts_the_kernel_application_as_pinned_erts() {
     pbeam
         .args(["pbeam_boot", "start", "kernel_app_probe", "main", "--root"])
         .arg(otp_root())
-        .arg("--bindir")
-        .arg(otp_bindir())
         .args(["--", KERNEL_APP_PROBE])
         .args(BOOT_MODULES.map(pinned_beam_path))
         .arg(boot_beam());
@@ -449,8 +446,6 @@ fn halts_when_a_kernel_process_exits_as_init_does() {
     pbeam
         .args(["pbeam_boot", "start", "kernel_exit_probe", "main", "--root"])
         .arg(otp_root())
-        .arg("--bindir")
-        .arg(otp_bindir())
         .args(["--", KERNEL_EXIT_PROBE])
         .args(BOOT_MODULES.map(pinned_beam_path))
         .arg(boot_beam());

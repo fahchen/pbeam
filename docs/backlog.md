@@ -221,7 +221,7 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### Set the start variables and `init` flags of the `erl` script
 
-- PBeam has no `erl` script and no `erlexec`. Thus `os:getenv/1` gives the host value or `false` for `EMU`, `ROOTDIR`, `BINDIR`, and `PROGNAME`, and `PATH` has no `BINDIR` prefix in the `pbeam_boot` form. The `init` request process of `pbeam_boot` has the flag `noshell`, the `root` flag of `--root`, and the `bindir` flag of `--bindir` (#1083). The `erl` script exports the four variables (`erl.src.src:52-58`), `erlexec` puts `BINDIR` and `ROOTDIR/bin` at the front of `PATH` (`erlexec.c:553-621`), and the flags of `init` also have `progname` and `home`. The "OS environment" and "Boot" rows record this.
+- PBeam has no `erl` script and no `erlexec`. Thus `os:getenv/1` gives the host value or `false` for `EMU`, `ROOTDIR`, `BINDIR`, and `PROGNAME`, and `PATH` has no `BINDIR` prefix in the `pbeam_boot` form. The `init` request process of `pbeam_boot` has the flag `noshell`, and the `root` and `bindir` flags of `--root` (#1083). The `erl` script exports the four variables (`erl.src.src:52-58`), `erlexec` puts `BINDIR` and `ROOTDIR/bin` at the front of `PATH` (`erlexec.c:553-621`), and the flags of `init` also have `progname` and `home`. The "OS environment" and "Boot" rows record this.
 - **Trigger:** a consumer reads one of these variables or flags, for example `init:get_argument(root)`.
 - **Source:** PR #191 (#185).
 

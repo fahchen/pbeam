@@ -1,7 +1,5 @@
 use std::process::{Command, Output, Stdio};
 
-#[path = "../common/bindir.rs"]
-mod bindir;
 #[path = "../common/boot.rs"]
 mod boot;
 #[expect(
@@ -11,7 +9,6 @@ mod boot;
 #[path = "../common/mod.rs"]
 mod common;
 
-use bindir::otp_bindir;
 use boot::{BOOT_MODULES, boot_beam, otp_root};
 use common::pinned_beam_path;
 
@@ -764,8 +761,6 @@ fn pbeam_probe(probe: &str, module: &str, function: &str, flags: &[&str]) -> Com
     command
         .args(["pbeam_boot", "start", module, function, "--root"])
         .arg(otp_root())
-        .arg("--bindir")
-        .arg(otp_bindir())
         .args(["--pa", CODE_PATH])
         .args(flags)
         .arg("--")
