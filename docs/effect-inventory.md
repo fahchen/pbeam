@@ -637,6 +637,8 @@ Each row is a BIF entry of `BIFS` that has a body.
 | `maps:find/2` | `none` | `none` | `pure` | `inline` | Gives `{ok, Value}` or `error`. | `O(n)` | `src/runtime/interpreter/bif/maps.rs` |
 | `maps:from_keys/2` | `process.self` | `none` | `run` | `inline`, `trap` | Makes a map of each key of a list to one value. Uses one reduction of the budget of the caller for each 40 work units of the ERTS YCF code: the walk, the hash, the sort, and the hashmap build. At the end of the budget, it traps to an internal export and continues in the next turn. | `O(n log n)` | `src/runtime/interpreter/bif/maps.rs`, `src/runtime/interpreter/bif/ycf.rs`, `src/term/map/build.rs` |
 | `maps:from_list/1` | `process.self` | `none` | `run` | `inline`, `trap` | Makes a map from a list of pairs. Uses one reduction of the budget of the caller for each 40 work units of the ERTS YCF code: the check, the hash, the sort, and the hashmap build. At the end of the budget, it traps to an internal export and continues in the next turn. | `O(n log n)` | `src/runtime/interpreter/bif/maps.rs`, `src/runtime/interpreter/bif/ycf.rs`, `src/term/map/build.rs` |
+| `maps:get/2` | `none` | `none` | `pure` | `inline` | Gives the value of a map key, or raises. | `O(n)` | `src/runtime/interpreter/bif/maps.rs` |
+| `maps:is_key/2` | `none` | `none` | `pure` | `inline` | Tells whether a map has a key, or raises. | `O(n)` | `src/runtime/interpreter/bif/maps.rs` |
 | `maps:keys/1` | `process.self` | `none` | `run` | `inline`, `trap` | Gives the keys of a map. Uses one reduction of the budget of the caller for each 15 keys of a hashmap. At the end of the budget, it traps to an internal export and continues in the next turn. | `O(n)` | `src/runtime/interpreter/bif/maps.rs`, `src/runtime/interpreter/bif/ycf.rs` |
 | `maps:merge/2` | `process.self` | `none` | `run` | `inline`, `trap` | Merges two maps. Two copies of one map give the first map with no cost. Unless both maps are flatmaps, uses one reduction of the budget of the caller for each 8 steps of the ERTS hashmap merge, in which a HAMT node that both maps share costs no step. At the end of the budget, it traps to an internal export and continues in the next turn. | `O(n)` | `src/runtime/interpreter/bif/maps.rs`, `src/term/map.rs` |
 | `maps:put/3` | `none` | `none` | `pure` | `inline` | Sets a key of a map to a value, or raises. | `O(n)` | `src/runtime/interpreter/bif/maps.rs` |
@@ -707,7 +709,6 @@ Each entry is a BIF entry of `BIFS` with the form `unsupported`. A call gives th
 - `erts_literal_area_collector`: `release_area_switch/0`, `send_copy_request/3`
 - `erts_trace_cleaner`: `check/0`, `send_trace_clean_signal/1`
 - `ets`: `internal_request_all/0`, `is_compiled_ms/1`, `match/1`, `match_object/1`, `match_object/3`, `match_spec_compile/1`, `match_spec_run_r/3`, `rename/2`, `select_count/2`, `select_replace/2`, `slot/2`
-- `maps`: `get/2`, `is_key/2`
 - `math`: `acosh/1`, `asinh/1`, `atanh/1`, `erf/1`, `erfc/1`
 - `prim_file`: `internal_normalize_utf8/1`, `is_translatable/1`
 - `re`: `inspect/2`, `version/0`
