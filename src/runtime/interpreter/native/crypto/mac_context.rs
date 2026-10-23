@@ -323,7 +323,10 @@ pub(super) fn mac_update_nif(
     }
     let data = data.unwrap_or_default();
     let outcome = with_context(scheduler, context, |state| match state {
-        MacContext::Hmac { ended: true, .. } => Outcome::Ended,
+        // `EVP_DigestUpdate` returns 1 for an empty update before its
+        // FINALISED check (OpenSSL 3.x `crypto/evp/digest.c`).
+        MacContext::Hmac { ended: true, .. } if !data.is_empty() => Outcome::Ended,
+        MacContext::Hmac { ended: true, .. } => Outcome::Value(None),
         MacContext::Hmac { context, .. }
         | MacContext::Poly1305 {
             context,

@@ -259,10 +259,11 @@ mac_contexts_host() ->
              || Fun <- [fun() -> crypto:mac_update(H, <<"f">>) end,
                         fun() -> crypto:mac_final(H) end,
                         fun() -> crypto:mac_finalN(H, 3) end]],
+    Empty = H =:= crypto:mac_update(H, <<>>),
     Inits = [bad_reason(fun() -> crypto:mac_init(Type, Sub, binary:copy(<<1>>, Size)) end)
              || {Type, Sub, Size} <- [{hmac, md4, 1}, {cmac, des_cbc, 8},
                                       {cmac, aes_128_ecb, 16}, {cmac, aes_128_gcm, 16}]],
-    io:format("~p~n", [[Ended, Inits]]).
+    io:format("~p~n", [[Ended, Empty, Inits]]).
 
 %% Give the CMAC of the parts, a second final, and the final after one more
 %% update. CMAC_Final pads the last block in place and moves the CBC chain

@@ -970,6 +970,7 @@ fn erts(flags: &[&str]) -> Command {
 const MAC_CONTEXTS_HOST: &str = "[[{error,{error,{\"mac.c\",840},\"mac update\"}},
   {error,{error,{\"mac.c\",879},\"Signing\"}},
   {error,{error,{\"mac.c\",879},\"Signing\"}}],
+ true,
  [{error,{error,{\"mac.c\",750},\"Can't initialize EVP_MAC_CTX\"}},
   {error,{notsup,{\"mac.c\",688},\"Unsupported cipher algorithm\"}},
   {error,{error,{\"mac.c\",750},\"Can't initialize EVP_MAC_CTX\"}},
