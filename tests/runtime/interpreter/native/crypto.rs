@@ -244,27 +244,6 @@ fn raises_the_erts_error_for_a_bad_digest_type_or_data() {
 }
 
 #[test]
-fn stops_for_a_known_digest_that_pbeam_does_not_compute() {
-    let mut scheduler = scheduler();
-    let data = Term::binary(b"abc".to_vec());
-    for name in [
-        "md4",
-        "md5",
-        "ripemd160",
-        "sha3_256",
-        "shake128",
-        "sm3",
-        "blake2b",
-        "blake2s",
-    ] {
-        let digest = atom(&mut scheduler, name);
-        let result = hash_nif(&mut scheduler, &digest, &data);
-        let error = result.unwrap_err();
-        assert!(error.to_string().contains(name), "{error}");
-    }
-}
-
-#[test]
 fn gives_the_pinned_erts_pbkdf2_value_for_each_eligible_digest() {
     let mut scheduler = scheduler();
     let password = Term::binary(b"password".to_vec());

@@ -234,8 +234,8 @@ pub(super) fn getenv(scheduler: &mut Scheduler, name: &Term) -> Result<BifResult
 /// `handle`, and with both operations for `default`. Else the binding
 /// raises `error:capability_denied` and does not change the disposition.
 ///
-/// ERTS gives the `badarg` of a `Mode` that is not valid the `error_info`
-/// cause `badopt`, which PBeam does not model. After `handle`, the
+/// The `badarg` of a `Mode` that is not valid has the `error_info` cause
+/// `badopt` (`erl_bif_os.c:149-150`). After `handle`, the
 /// scheduler sends `{notify, Signal}` to `erl_signal_server` for each
 /// arrival of the signal (see `Scheduler::check_signals`).
 ///
@@ -263,7 +263,7 @@ pub(super) fn set_signal(
             &[Operation::Handle, Operation::Ignore],
         ),
         Term::Atom(mode) if mode.is_static("handle") => (Disposition::Handle, &[Operation::Handle]),
-        _ => return Ok(BifResult::badarg()),
+        _ => return Ok(BifResult::badopt()),
     };
     let Term::Atom(signal) = signal else {
         return Ok(BifResult::badarg());

@@ -1,6 +1,7 @@
 mod atom;
 mod binary;
 pub(crate) mod external;
+mod flat_size;
 pub(crate) mod float_text;
 mod fun;
 mod hash;
@@ -20,6 +21,7 @@ pub(crate) use atom::{MAX_ATOM_CHARACTERS, MAX_ATOM_SZ_LIMIT};
 #[cfg(test)]
 pub(crate) use atom::{test_atom, test_atom_table};
 pub use binary::Binary;
+pub(crate) use flat_size::flat_size;
 pub use fun::Fun;
 pub(crate) use fun::{Lambda, Target, debug_target};
 pub(crate) use hash::{atom_hash, internal_hash, make_hash, make_hash2};

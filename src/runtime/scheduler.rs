@@ -664,11 +664,11 @@ impl Scheduler {
     /// ```
     pub(super) fn start(
         &mut self,
-        frame: Frame,
+        start: impl Into<Start>,
         arguments: Vec<Term>,
         capabilities: Vec<Capability>,
     ) -> Result<(), BeamError> {
-        self.start_with_id(ROOT, 0, frame, arguments, capabilities)
+        self.start_with_id(ROOT, 0, start.into(), arguments, capabilities)
     }
 
     /// Create the root process with the pid `id` and the root slot `slot`
@@ -680,11 +680,11 @@ impl Scheduler {
         &mut self,
         id: ProcessId,
         slot: usize,
-        frame: Frame,
+        start: Start,
         arguments: Vec<Term>,
         capabilities: Vec<Capability>,
     ) -> Result<(), BeamError> {
-        let mut root = ProcessState::new(id, Start::Entry(frame), arguments);
+        let mut root = ProcessState::new(id, start, arguments);
         root.root = Some(slot);
         self.node.add_root(slot);
         let issued = capabilities
@@ -706,8 +706,8 @@ impl Scheduler {
     /// scheduler.start_boot(frame, vec![]);
     /// assert!(scheduler.process(ProcessId(0)).unwrap().security.is_boot());
     /// ```
-    pub(super) fn start_boot(&mut self, frame: Frame, arguments: Vec<Term>) {
-        let mut root = ProcessState::new(ROOT, Start::Entry(frame), arguments);
+    pub(super) fn start_boot(&mut self, start: Start, arguments: Vec<Term>) {
+        let mut root = ProcessState::new(ROOT, start, arguments);
         root.root = Some(0);
         self.node.add_root(0);
         root.security = SecurityContext::boot();
@@ -2980,6 +2980,7 @@ impl Scheduler {
         let mut child = ProcessState::new(self.next_pid()?, start, arguments);
         child.off_heap_message_queue = flags.off_heap_message_queue;
         child.priority = flags.priority;
+        child.heap_flags = self.node.heap_flags();
         child.security = if boot {
             SecurityContext::boot()
         } else {

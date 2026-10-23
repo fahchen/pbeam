@@ -294,7 +294,7 @@ fn gives_fun_information_as_pinned_erts() {
             ]),
         ),
         pair("refc", Term::Integer(1)),
-        pair("uniq", Term::Integer(133_604_777)),
+        pair("uniq", Term::Integer(45_737_141)),
         pair("new_index", Term::Integer(6)),
         pair("type", atom("local")),
         pair("module", atom("fun_probe")),
@@ -302,7 +302,7 @@ fn gives_fun_information_as_pinned_erts() {
         pair("arity", Term::Integer(0)),
         pair("env", Term::nil()),
         pair("refc", Term::Integer(1)),
-        pair("uniq", Term::Integer(133_604_777)),
+        pair("uniq", Term::Integer(45_737_141)),
         pair("new_index", Term::Integer(7)),
         pair("type", atom("external")),
         pair("module", atom("lists")),
@@ -324,9 +324,9 @@ fn gives_fun_information_as_pinned_erts() {
     assert_eq!(
         reference("infos"),
         b"[{type,local},{module,fun_probe},{name,'-infos/0-fun-0-'},\
-          {arity,1},{env,[7,{a,b}]},{refc,1},{uniq,133604777},{new_index,6},\
+          {arity,1},{env,[7,{a,b}]},{refc,1},{uniq,45737141},{new_index,6},\
           {type,local},{module,fun_probe},{name,'-infos/0-fun-1-'},\
-          {arity,0},{env,[]},{refc,1},{uniq,133604777},{new_index,7},\
+          {arity,0},{env,[]},{refc,1},{uniq,45737141},{new_index,7},\
           {type,external},{module,lists},{name,reverse},\
           {arity,1},{env,[]},{refc,undefined},{index,undefined},\
           {new_index,undefined},{uniq,undefined},{new_uniq,undefined},\
@@ -335,27 +335,51 @@ fn gives_fun_information_as_pinned_erts() {
 }
 
 #[test]
-fn rejects_fun_info_items_the_loader_keeps_no_value_for() {
-    // The loader of PBeam keeps no old index of a `FunT` entry, no MD5 of
-    // the module, and no init process ID (`jit/asm_load.c:1218-1223`), so a
-    // local fun stops the run with a clear runtime error at these items.
-    // This is the "Fun information" row in `docs/erts-differences.md`.
+fn gives_the_fun_entry_items_of_a_local_fun_as_pinned_erts() {
+    // `fun_info_2` gives the old index of the fun entry for `index`, the
+    // module MD5 for `new_uniq`, and `erts_init_process_id`, `<0.0.0>`, for
+    // `pid` (`erl_bif_info.c:3943-3967`). The loader keeps the MD5 that
+    // `beamfile_read` computes (`beam_file.c:1751-1830`).
     let program = BeamProgram::load(&[FUN_PROBE]).unwrap();
+    let mut texts = Vec::new();
     for item in ["index", "new_uniq", "pid"] {
-        let message = format!("unsupported erlang:fun_info/2 item {item}");
         let item = Term::Atom(program.atom(item).unwrap());
-        let error = program
+        let result = program
             .execute(
                 "fun_probe",
                 "fun_info_unsupported",
                 &[program.host_term(item)],
             )
-            .unwrap_err();
-        assert!(
-            error.to_string().contains(&message),
-            "expected {message}, got {error}"
-        );
+            .unwrap();
+        let value = result.term.tuple_elements().unwrap()[1].clone();
+        texts.push(match value {
+            Term::Integer(index) => format!("{{index,{index}}}"),
+            Term::Pid(_) => {
+                assert_eq!(format!("{value:?}"), "Pid(ProcessId(0))");
+                "{pid,<0.0.0>}".to_owned()
+            }
+            binary => {
+                let bytes = binary.binary_bytes().unwrap();
+                let bytes = bytes.iter().map(u8::to_string).collect::<Vec<_>>();
+                format!("{{new_uniq,<<{}>>}}", bytes.join(","))
+            }
+        });
     }
+    let reference = Command::new("erl")
+        .args([
+            "-noshell",
+            "-pa",
+            "fixtures/funs",
+            "-eval",
+            "io:format(\"~w~n\", [[fun_probe:fun_info_unsupported(I) || I <- [index, new_uniq, pid]]]), halt().",
+        ])
+        .output()
+        .unwrap();
+    assert!(reference.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&reference.stdout),
+        format!("[{}]\n", texts.join(","))
+    );
 }
 
 #[test]
@@ -384,11 +408,11 @@ fn prints_funs_as_pinned_erts() {
     let mut beams: Vec<&[u8]> = modules.iter().map(Vec::as_slice).collect();
     beams.push(FUN_PROBE);
     let program = BeamProgram::load(&beams).unwrap();
-    let local = "#Fun<fun_probe.10.133604777>";
+    let local = "#Fun<fun_probe.10.45737141>";
     let both = format!("{local} {local}");
     let texts = [
         local,
-        "#Fun<fun_probe.11.133604777>",
+        "#Fun<fun_probe.11.45737141>",
         "fun lists:reverse/1",
         "fun 'A b':'c d'/0",
         "fun no_such_module:f/3",
@@ -444,5 +468,34 @@ fn prints_the_fun_entry_position_as_pinned_erts() {
     assert_eq!(
         String::from_utf8(reference_of("fun_index", "texts")).unwrap(),
         format!("[{}]\n", codes.join(","))
+    );
+}
+
+#[test]
+fn gives_the_mfa_of_funs_as_pinned_erts() {
+    // `fun_info_mfa_1` gives `{Module, Name, Arity}` of a local fun from
+    // the function of its fun entry and of an external fun from its export
+    // entry, also of a module that is not loaded, and raises `badarg` for a
+    // term that is not a fun (`erl_bif_info.c:4011-4047`). The arity of a
+    // local fun leaves out its free variables.
+    let program = BeamProgram::load(&[FUN_PROBE]).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let mfa = |module: &str, name: &str, arity: i64| {
+        Term::tuple(vec![atom(module), atom(name), Term::Integer(arity)])
+    };
+    assert_eq!(
+        program.execute("fun_probe", "info_mfas", &[]).unwrap().term,
+        Term::list_from(vec![
+            mfa("fun_probe", "-info_mfas/0-fun-0-", 2),
+            mfa("fun_probe", "-info_mfas/0-fun-1-", 0),
+            mfa("lists", "reverse", 1),
+            mfa("no_such_module", "f", 3),
+            atom("badarg"),
+        ])
+    );
+    assert_eq!(
+        reference("info_mfas"),
+        b"[{fun_probe,'-info_mfas/0-fun-0-',2},{fun_probe,'-info_mfas/0-fun-1-',0},\
+          {lists,reverse,1},{no_such_module,f,3},badarg]\n"
     );
 }

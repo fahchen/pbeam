@@ -12,6 +12,7 @@ pub(crate) mod clock;
 pub(crate) mod environment;
 pub(crate) mod errno;
 pub(crate) mod file;
+pub(crate) mod gethost;
 pub(crate) mod input;
 pub(crate) mod output;
 pub(crate) mod signal;

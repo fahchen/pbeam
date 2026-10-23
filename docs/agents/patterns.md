@@ -12,3 +12,9 @@ One-line description of when to use this pattern.
 
 **Reference:** `path/to/file:line-line`
 -->
+
+## Run several milestones in parallel
+
+Use when the owner opens several independent milestones at once: one stream and one worktree for each milestone, one task at a time, Codex or Fable review, and one merge queue that the main session orders.
+
+**Reference:** `.claude/skills/parallel-streams/SKILL.md`, `.claude/agents/pbeam-implementer.md`, `.claude/agents/pbeam-erts-skeptic.md`, `.claude/agents/pbeam-merge-prep.md`

@@ -974,7 +974,8 @@ fn ovec_pairs(count: i64) -> u32 {
 /// `re_run` (`erl_bif_re.c:1485-1828`) does:
 ///
 /// 1. Options that `parse_options` rejects, and an option that sets
-///    `PARSE_FLAG_EXPORT`, raise `badarg` (`erl_bif_re.c:1501-1504`).
+///    `PARSE_FLAG_EXPORT`, raise `badarg` with the `error_info` cause
+///    `badopt` (`erl_bif_re.c:1501-1504`).
 /// 2. With `first` false the match sets `PCRE2_NO_UTF_CHECK`, because
 ///    `re:grun/3` ran the subject through `re:run/3` already
 ///    (`erl_bif_re.c:1505-1512`).
@@ -1036,10 +1037,10 @@ pub(super) fn run(
     first: bool,
 ) -> Result<BifResult, BeamError> {
     let Some(mut parsed) = parse_options(&context.scheduler.atoms, options) else {
-        return Ok(BifResult::badarg());
+        return Ok(BifResult::badopt());
     };
     if parsed.flags & FLAG_EXPORT != 0 {
-        return Ok(BifResult::badarg());
+        return Ok(BifResult::badopt());
     }
     if !first {
         parsed.match_options |= pcre2::NO_UTF_CHECK;

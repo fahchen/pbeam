@@ -1162,6 +1162,7 @@ fn decodes_the_binary_match_instructions_of_is_usascii() {
                     fail_label: 16,
                     context: Operand::X(0),
                     commands: at_least,
+                    test_heap: false,
                 },
                 Instruction::BinarySetPosition {
                     context: Operand::X(0),
@@ -1171,6 +1172,7 @@ fn decodes_the_binary_match_instructions_of_is_usascii() {
                     fail_label: 17,
                     context: Operand::X(0),
                     commands: exactly,
+                    test_heap: false,
                 },
                 Instruction::End,
             ] if matches!(
@@ -1238,11 +1240,13 @@ fn decodes_the_bs_match_commands_of_the_bs_match_probe_fixture() {
                     fail_label: 28,
                     context: Operand::X(0),
                     commands: tail,
+                    test_heap: false,
                 },
                 Instruction::BinaryMatch {
                     fail_label: 15,
                     context: Operand::X(0),
                     commands: prefix,
+                    test_heap: false,
                 },
                 Instruction::End,
             ] if matches!(
@@ -1520,11 +1524,38 @@ fn decodes_the_bs_start_match4_bs_get_binary2_and_bs_get_tail_instructions_of_bs
                     source: Operand::X(0),
                     destination: Operand::X(1),
                 },
-                Instruction::Unsupported(119),
+                Instruction::BinaryMatch {
+                    fail_label: 3,
+                    context: Operand::X(0),
+                    commands: all,
+                    test_heap: false,
+                },
                 Instruction::End,
-            ]
+            ] if matches!(
+                all.as_slice(),
+                [
+                    BinaryMatchCommand::EnsureAtLeast { size: 0, unit },
+                    BinaryMatchCommand::GetTail { destination: Operand::X(1) },
+                ] if unit.get() == 8
+            )
         ),
         "{instructions:?}"
+    );
+    // A size `all` with unit 0 has no `ensure_at_least` command.
+    assert_eq!(
+        parse_code(
+            &code(&[&[0x77, 0x35, 0x03, 0x20, 0x42, 0x00, 0x00, 0x13]]),
+            &table,
+            &atoms,
+            &[],
+            &[],
+            &[],
+            &[],
+            &mut LineTable::default()
+        )
+        .unwrap_err()
+        .to_string(),
+        "BEAM bs_get_binary2 has unit 0"
     );
     // The ERTS loader has no form of `bs_start_match4` with another atom
     // (jit/arm/ops.tab:1036-1052).
@@ -2433,11 +2464,11 @@ fn decodes_the_fun_instructions_of_the_fun_probe_fixture() {
     // The first five `FunT` entries of the fixture, with their free
     // variable counts.
     let lambdas = vec![
-        (lambda(0, 127, 1), 1),
-        (lambda(1, 125, 0), 0),
-        (lambda(2, 123, 1), 1),
-        (lambda(3, 121, 0), 0),
-        (lambda(4, 112, 1), 1),
+        (std::sync::Arc::new(lambda(0, 127, 1)), 1),
+        (std::sync::Arc::new(lambda(1, 125, 0)), 0),
+        (std::sync::Arc::new(lambda(2, 123, 1)), 1),
+        (std::sync::Arc::new(lambda(3, 121, 0)), 0),
+        (std::sync::Arc::new(lambda(4, 112, 1)), 1),
     ];
     let parse = |instructions: &[u8]| {
         parse_code(
@@ -2479,9 +2510,9 @@ fn decodes_the_fun_instructions_of_the_fun_probe_fixture() {
             Instruction::CallFun { arity: 1, function: Operand::X(1), tail: false, .. },
             Instruction::CallFun { arity: 0, function: Operand::Y(0), tail: false, .. },
             Instruction::End,
-        ] if **first == lambdas[4].0
+        ] if **first == *lambdas[4].0
             && matches!(free.as_slice(), [Operand::X(0)])
-            && **second == lambdas[1].0
+            && **second == *lambdas[1].0
             && empty.is_empty()
     ));
     let error = |instructions: &[u8]| parse(instructions).unwrap_err().to_string();
@@ -3446,7 +3477,13 @@ fn arm_field_bytes(instruction: &Instruction) -> usize {
             fail_label,
             context,
             commands,
-        } => size_of_val(fail_label) + size_of_val(context) + size_of_val(commands),
+            test_heap,
+        } => {
+            size_of_val(fail_label)
+                + size_of_val(context)
+                + size_of_val(commands)
+                + size_of_val(test_heap)
+        }
         Instruction::BinaryMatchString {
             fail_label,
             context,
@@ -4017,4 +4054,47 @@ fn keeps_a_known_unsupported_opcode_with_its_operands_skipped() {
         ),
         "{instructions:?}"
     );
+}
+
+/// The ERTS loader fuses `bs_match` and the `test_heap` right after it
+/// into `i_bs_match_test_heap` (JIT jit/arm/ops.tab:962-963).
+#[test]
+fn marks_a_bs_match_that_a_test_heap_follows() {
+    // bs_match f16 x0 {list,[ensure_at_least,0,8]}
+    let bs_match: &[u8] = &[0xB6, 0x0D, 0x10, 0x03, 0x17, 0x30, 0x82, 0x00, 0x80];
+    // test_heap 3 2
+    let test_heap: &[u8] = &[0x10, 0x30, 0x20];
+    // bs_set_position x0 x1
+    let set_position: &[u8] = &[0xA8, 0x03, 0x13];
+    // Atom 8 is `ensure_at_least`.
+    let table = AtomTable::new();
+    let atoms: Vec<Atom> = (1..=8)
+        .map(|index| match index {
+            8 => table.put("ensure_at_least").unwrap(),
+            _ => table.put(&format!("atom{index}")).unwrap(),
+        })
+        .collect();
+    let fused = |parts: &[&[u8]]| {
+        let mut code = vec![0, 0, 0, 16];
+        code.extend([0; 16]);
+        code.extend(parts.concat());
+        code.push(0x03);
+        let (instructions, _, _) = parse_code(
+            &code,
+            &table,
+            &atoms,
+            &[],
+            &[],
+            &[],
+            &[],
+            &mut LineTable::default(),
+        )
+        .unwrap();
+        match instructions.first() {
+            Some(Instruction::BinaryMatch { test_heap, .. }) => *test_heap,
+            other => panic!("{other:?}"),
+        }
+    };
+    assert!(fused(&[bs_match, test_heap]));
+    assert!(!fused(&[bs_match, set_position, test_heap]));
 }
