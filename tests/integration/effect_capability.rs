@@ -290,7 +290,7 @@ fn only(names: &[&str]) -> Constraint {
 
 /// Each entry that the column "Capability" of the effect inventory marks
 /// `ambient`. `effect_probe:ambient/0` calls each entry once.
-const AMBIENT: [&str; 112] = [
+const AMBIENT: [&str; 113] = [
     "atomics:add/3",
     "atomics:get/2",
     "atomics:info/1",
@@ -354,6 +354,7 @@ const AMBIENT: [&str; 112] = [
     "ets:delete/2",
     "ets:delete_object/2",
     "ets:give_away/3",
+    "ets:setopts/2",
     "ets:first/1",
     "ets:first_lookup/1",
     "ets:info/1",
