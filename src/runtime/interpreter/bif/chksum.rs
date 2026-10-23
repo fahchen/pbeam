@@ -207,8 +207,10 @@ pub(super) fn combine(kind: Sum, sum1: &Term, sum2: &Term, length: &Term) -> Bif
     let sum = match kind {
         Sum::Adler32 if length == 0 => sum1,
         Sum::Adler32 => adler32_combine(sum1, sum2, length),
-        // zlib `crc32_combine` multiplies `crc1` by x^0 for a length of 0,
-        // so the value is `crc1 ^ crc2`; `crc32fast` gives `crc1`.
+        // zlib 1.2.12 and later `crc32_combine` multiplies `crc1` by x^0 for
+        // a length of 0, so the value is `crc1 ^ crc2` (zlib 1.2.11 and
+        // earlier return `crc1`). ERTS links the host zlib; both pinned
+        // hosts have zlib 1.2.12 or later. `crc32fast` gives `crc1`.
         Sum::Crc32 if length == 0 => sum1 ^ sum2,
         Sum::Crc32 => {
             let mut first = crc32fast::Hasher::new_with_initial(sum1);
