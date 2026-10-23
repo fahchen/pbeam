@@ -1811,7 +1811,9 @@ delete_object() ->
          ets:delete_object(tid(Public), {k, v}), ets:lookup(tid(Public), k),
          delete_object_fixed(bag), delete_object_fixed(duplicate_bag),
          delete_object_fixed(set), delete_object_fixed(ordered_set),
-         delete_object_fixed_copies()],
+         delete_object_fixed_copies(),
+         delete_object_fixed_reinsert(bag),
+         delete_object_fixed_reinsert(duplicate_bag)],
     stop(Protected),
     stop(Public),
     R.
@@ -1832,6 +1834,20 @@ delete_object_fixed(Type) ->
     true = ets:insert(T, {First, 9}),
     {Selected, Deleted, Walk, ets:info(T, size),
      lists:sort(ets:select(T, [{'_', [], ['$_']}])), ets:first(T)}.
+
+%% Free a later live object of a fixed table, delete the last one, and
+%% insert the key again while the table is fixed.
+delete_object_fixed_reinsert(Type) ->
+    T = ets:new(ets_probe, [Type]),
+    true = ets:insert(T, [{k, 1}, {k, 2}, {k, 3}]),
+    true = ets:safe_fixtable(T, true),
+    true = ets:delete_object(T, {k, 3}),
+    true = ets:delete_object(T, {k, 1}),
+    true = ets:delete_object(T, {k, 2}),
+    true = ets:insert(T, {k, 9}),
+    Fixed = ets:lookup(T, k),
+    true = ets:safe_fixtable(T, false),
+    {Fixed, ets:lookup(T, k), ets:info(T, size)}.
 
 delete_object_walk(_T, '$end_of_table', Keys) ->
     lists:reverse(Keys);

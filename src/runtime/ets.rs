@@ -2666,6 +2666,13 @@ impl Table {
         } else {
             self.older[previous] = next;
         }
+        // A fixed table frees a later live object of a key that can have a
+        // retained record; the record must not keep the freed slot.
+        if let Some(records) = self.retained.get_mut(&hash) {
+            for record in records {
+                record.slots.retain(|&kept| kept != slot);
+            }
+        }
         self.objects[slot] = None;
         self.older[slot] = EMPTY;
         self.next[slot] = EMPTY;
