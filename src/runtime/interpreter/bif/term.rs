@@ -623,6 +623,7 @@ pub(super) fn binary_to_term(
         atoms: &context.scheduler.atoms,
         seed,
         code: &context.scheduler.code,
+        ets: &context.scheduler.ets,
     };
     match decoder.decode_input(seed) {
         Ok((term, used_bytes)) if used => Ok(Value(Term::tuple(vec![
@@ -696,6 +697,9 @@ struct Decoder<'a> {
     /// The code table of the run, which holds the fun entries of the loaded
     /// code.
     code: &'a CodeTable,
+    /// The ETS tables of the node, which turn a magic reference back into
+    /// the identifier of its live table.
+    ets: &'a crate::runtime::ets::NodeTables,
 }
 
 /// The container that the decoder walk still fills.
@@ -1114,6 +1118,7 @@ impl Decoder<'_> {
             atoms: self.atoms,
             seed,
             code: self.code,
+            ets: self.ets,
         };
         let term = decoder.term()?;
         // The compressed header counts the bytes of the stream, and the
@@ -1764,7 +1769,7 @@ impl Decoder<'_> {
         Reference::ordinary(value)
             .map(|reference| {
                 Term::Reference(if magic {
-                    reference.magic_reference()
+                    self.live_magic(reference.magic_reference())
                 } else {
                     reference
                 })
@@ -1772,6 +1777,17 @@ impl Decoder<'_> {
             .ok_or(DecodeError::Unsupported(
                 "a reference with the high bit of its third number",
             ))
+    }
+
+    /// Return the identifier of the live table of the magic reference
+    /// `reference`, else `reference`. ERTS gives the live magic reference
+    /// itself (`external.c:4845-4851`), which stays a table identifier after
+    /// the table is deleted (`tid2tab`, `erl_db.c:280-306`).
+    fn live_magic(&self, reference: Reference) -> Reference {
+        self.ets
+            .shared()
+            .id(self.atoms, &Term::Reference(reference))
+            .unwrap_or(reference)
     }
 
     /// Decode an old `REFERENCE_EXT`, as `dec_term`

@@ -144,6 +144,7 @@ fn decode_full(atoms: &AtomTable, bytes: &[u8], safe: bool) -> Result<Term, Deco
         atoms,
         seed: SEED,
         code: &CodeTable::default(),
+        ets: &crate::runtime::ets::NodeTables::default(),
     }
     .decode_input(SEED)
     .map(|(term, _)| term)
@@ -742,6 +743,7 @@ fn decodes_the_unsupported_forms_and_local_terms() {
             atoms: &atoms,
             seed: SEED,
             code: &CodeTable::default(),
+            ets: &crate::runtime::ets::NodeTables::default(),
         }
         .decode_input(SEED)
         .unwrap()
@@ -758,6 +760,7 @@ fn decodes_the_unsupported_forms_and_local_terms() {
             atoms: &atoms,
             seed: SEED,
             code: &CodeTable::default(),
+            ets: &crate::runtime::ets::NodeTables::default(),
         }
         .decode_input(SEED),
         Err(DecodeError::Badarg)
@@ -1054,6 +1057,7 @@ fn keeps_the_decoder_guards_behind_the_validation() {
             atoms: &atoms,
             seed: SEED,
             code: &CodeTable::default(),
+            ets: &crate::runtime::ets::NodeTables::default(),
         }
         .term()
     };

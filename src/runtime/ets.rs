@@ -787,7 +787,11 @@ impl EtsTables {
             Term::Reference(id) => *id,
             _ => return None,
         };
-        self.tables.get(&id).map(|table| (id, table))
+        // The stored key keeps the table marker of the identifier, which a
+        // decoded magic reference does not have (`Reference::eq`).
+        self.tables
+            .get_key_value(&id)
+            .map(|(id, table)| (*id, table))
     }
 
     /// Return the live table `id` with no lock, for the work of the table

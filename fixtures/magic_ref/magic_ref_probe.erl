@@ -33,7 +33,14 @@ round_trip(T, A) ->
     [DT, DA] = [binary_to_term(term_to_binary(X)) || X <- [T, A]],
     LT = binary_to_term(term_to_binary(T, [local])),
     {DT =:= T, ets:lookup(DT, 1), LT =:= T, ets:lookup(LT, 1),
-     DA =:= A, atomics:get(DA, 1)}.
+     DA =:= A, atomics:get(DA, 1), dead(T)}.
+
+%% The decoded identifier of a live table stays a table identifier after
+%% the table is deleted (tid2tab, erl_db.c:280-306).
+dead(T) ->
+    D = binary_to_term(term_to_binary(T)),
+    true = ets:delete(T),
+    {ets:info(D, size), try ets:lookup(D, 1) catch error:badarg:S -> cause(S) end}.
 
 order(X, Y) when X < Y -> lt;
 order(X, Y) when X > Y -> gt;
