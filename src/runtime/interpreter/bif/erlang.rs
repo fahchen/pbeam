@@ -1173,6 +1173,58 @@ pub(super) fn exit(
     id: &Term,
     reason: &Term,
 ) -> Result<BifResult, BeamError> {
+    send_exit(context, id, reason, "erlang:exit/2")
+}
+
+/// Run `erlang:exit(Id, Reason, Options)` as ERTS `exit_3` (`bif.c:1877-1880`)
+/// does: check `Options`, then send the signal as `erlang:exit/2` does.
+///
+/// `Options` is a proper list of the atom `priority`, with repeats. Each
+/// other element, also `{priority, true}`, an improper list, and a term
+/// that is not a list raise `badarg` with the `error_info` cause `badopt`
+/// before `Id` is checked (`bif.c:1727-1744`).
+///
+/// `priority` marks the signal as a priority signal. A receiver handles a
+/// priority exit signal that is not of a link as a priority signal only
+/// through an active priority alias (`erl_proc_sig_queue.c:4642`,
+/// `4659-4672`). PBeam makes no priority alias (`erlang:alias/1` and
+/// `erlang:monitor/3` reject the `priority` option), so the option has no
+/// effect (row "Monitors" of `docs/erts-differences.md`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let options = Term::list_from([Term::static_atom("priority")]);
+/// let result = exit_3(&mut context, &Term::Pid(other), &boom, &options)?;
+/// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.is_static("true"));
+/// ```
+///
+/// # Errors
+///
+/// The errors of `erlang:exit/2`.
+pub(super) fn exit_3(
+    context: &mut BifContext<'_>,
+    id: &Term,
+    reason: &Term,
+    options: &Term,
+) -> Result<BifResult, BeamError> {
+    let valid = options.proper_list().is_some_and(|mut elements| {
+        elements.all(|option| *option == Term::static_atom("priority"))
+    });
+    if !valid {
+        return Ok(BifResult::badopt());
+    }
+    send_exit(context, id, reason, "erlang:exit/3")
+}
+
+/// Send the exit signal of `erlang:exit/2,3`; `name` names the BIF in the
+/// runtime error of a port.
+fn send_exit(
+    context: &mut BifContext<'_>,
+    id: &Term,
+    reason: &Term,
+    name: &str,
+) -> Result<BifResult, BeamError> {
     let scheduler = &mut *context.scheduler;
     let caller = scheduler.current_process_mut();
     let (caller_id, trap_exit) = (caller.id, caller.trap_exit);
@@ -1199,7 +1251,7 @@ pub(super) fn exit(
         }
     }
     let Some(target) = target else {
-        return Err(unsupported_port("erlang:exit/2"));
+        return Err(unsupported_port(name));
     };
     if let Some(denied) = boot_denial(scheduler, target)? {
         return Ok(denied);
@@ -3004,6 +3056,7 @@ const ENDIAN: &str = "little";
 /// `AtomTable::put`.
 pub(super) fn system_info(scheduler: &mut Scheduler, item: &Term) -> Result<BifResult, BeamError> {
     let schedulers = scheduler.scheduler_count();
+    let online = i64::try_from(scheduler.node().scheduler_count()).expect("a scheduler count fits");
     let scheduler_id = i64::try_from(scheduler.index() + 1).expect("a scheduler index fits");
     let atoms = &scheduler.atoms;
     match item {
@@ -3019,10 +3072,11 @@ pub(super) fn system_info(scheduler: &mut Scheduler, item: &Term) -> Result<BifR
         Term::Atom(atom) if atoms.name_of(atom) == "schedulers" => {
             Ok(Value(Term::Integer(schedulers)))
         }
+        // Each scheduler thread of the run is online, and
         // `erlang:system_flag/2` cannot change the count of online
-        // schedulers, so each scheduler of the run is online.
+        // schedulers (`erl_init.c:1104-1141`).
         Term::Atom(atom) if atoms.name_of(atom) == "schedulers_online" => {
-            Ok(Value(Term::Integer(schedulers)))
+            Ok(Value(Term::Integer(online)))
         }
         // The scheduler that runs the caller, numbered from 1 (`esdp->no`,
         // `erl_bif_info.c:2784-2786`). A process that moves to another

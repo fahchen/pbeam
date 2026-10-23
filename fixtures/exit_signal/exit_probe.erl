@@ -1,5 +1,5 @@
 -module(exit_probe).
--export([main/0, self_exit/2, target/1, linked/0]).
+-export([main/0, self_exit/2, target/1, linked/0, exit3/0, self_exit3/3]).
 
 main() ->
     [self_case(false, normal), self_case(false, boom), self_case(false, kill),
@@ -55,3 +55,45 @@ linked() ->
     Pid = spawn_link(?MODULE, target, [false]),
     true = exit(Pid, boom),
     exit(receive {'EXIT', Pid, Why} -> {linked, Why} end).
+
+%% erlang:exit/3 (bif.c:1877-1880): Options is a proper list of the atom
+%% priority. Other options raise badarg with the cause badopt before Id is
+%% checked (bif.c:1727-1744). The signal is the signal of exit/2.
+exit3() ->
+    [self3(false, normal, [priority]), self3(true, normal, [priority]),
+     self3(true, kill, []),
+     other3(true, boom, [priority]), other3(false, normal, [priority, priority]),
+     other3(false, kill, []),
+     exit(dead_pid(), boom, [priority]),
+     cause(self(), [x]), cause(self(), [{priority, true}]), cause(self(), priority),
+     cause(self(), [priority | x]), cause(foo, [bad]), cause(foo, [priority]),
+     apply(erlang, exit, [make_ref(), boom, [priority]])].
+
+self3(Trap, Reason, Options) ->
+    {Pid, Ref} = spawn_monitor(?MODULE, self_exit3, [Trap, Reason, Options]),
+    receive {'DOWN', Ref, process, Pid, Why} -> Why end.
+
+self_exit3(Trap, Reason, Options) ->
+    process_flag(trap_exit, Trap),
+    R = exit(self(), Reason, Options),
+    Msg = receive M -> M after 0 -> none end,
+    exit({returned, R, Msg =:= {'EXIT', self(), Reason}}).
+
+other3(Trap, Reason, Options) ->
+    {Pid, Ref} = spawn_monitor(?MODULE, target, [Trap]),
+    Pid ! {ready, self()}, receive ready -> ok end,
+    true = exit(Pid, Reason, Options),
+    Pid ! report,
+    receive {'DOWN', Ref, process, Pid, Why} -> Why end.
+
+cause(Id, Options) ->
+    try exit(Id, boom, Options)
+    catch error:E:Stack ->
+        [{erlang, exit, [Id, boom, Options], [{error_info, Info}]} | _] = Stack,
+        #{module := erl_erts_errors} = Info,
+        {E, case Info of #{cause := Cause} -> Cause; #{} -> none end}
+    end.
+
+dead_pid() ->
+    {Pid, Ref} = spawn_monitor(fun() -> ok end),
+    receive {'DOWN', Ref, process, Pid, _} -> Pid end.

@@ -120,11 +120,17 @@ fn hashes_each_term_kind_as_pinned_erts() {
         ),
         // <0.10.0> has the pid word 0x503, so its ERTS pid data is 0x50.
         (Term::Pid(ProcessId(0x50)), 8954564308403532307),
-        // #Ref<0.4116665985.1537736705.33174> has the numbers 0x8196, 0x5BA80001, and
-        // 0xF55F5681: the counter value 0xF55F56815BA88196 of scheduler 1.
+        // #Ref<0.358569601.1537736705.33174> has the numbers 0x8196, 0x5BA80001, and
+        // 0x155F5681: the counter value 0x155F56815BA88196 of scheduler 1.
         (
-            Term::Reference(Reference(0xF55F_5681_5BA8_8196)),
-            11474811932501652611,
+            Term::Reference(Reference(0x155F_5681_5BA8_8196)),
+            10526915437407727147,
+        ),
+        // #Ref<0.358569601.1537867777.33174>: the magic reference of that
+        // counter value, with bit 17 of `N1`.
+        (
+            Term::Reference(Reference(0x155F_5681_5BA8_8196).magic_reference()),
+            11598664530364143084,
         ),
         // Bignums of one, two, three, and four 64-bit digits.
         (Term::Integer(1 << 62), 2820654030469875806),

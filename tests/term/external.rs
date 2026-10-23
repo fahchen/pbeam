@@ -28,15 +28,15 @@ fn gives_the_block_hash_of_erts() {
 
 #[test]
 fn encodes_a_local_reference_as_erts() {
-    // `#Ref<0.3420218054.3052142593.51154>` on the pinned ERTS gives these
+    // `#Ref<0.198992582.3052142593.51154>` on the pinned ERTS gives these
     // bytes after its hash.
-    let reference = Reference((3_420_218_054u64 << 32) | (3_052_142_593 & 0xFFFC_0000) | 51154);
+    let reference = Reference((198_992_582u64 << 32) | (3_052_142_593 & 0xFFFC_0000) | 51154);
     let bytes = local_reference(reference, 7);
     assert_eq!(bytes[..2], [131, 121]);
     assert_eq!(
         bytes[6..],
         [
-            90, 0, 3, 106, 0, 0, 0, 0, 0, 0, 199, 210, 181, 236, 0, 1, 203, 220, 98, 198
+            90, 0, 3, 106, 0, 0, 0, 0, 0, 0, 199, 210, 181, 236, 0, 1, 11, 220, 98, 198
         ]
     );
     assert_eq!(bytes[2..6], block_hash(&bytes[6..], 7).to_be_bytes());
@@ -53,4 +53,7 @@ fn decodes_only_its_own_local_reference() {
     let mut other = bytes.clone();
     other[15] ^= 1;
     assert_eq!(decode_local_reference(&other, 3), None);
+    let magic = reference.magic_reference();
+    let bytes = local_reference(magic, 3);
+    assert_eq!(decode_local_reference(&bytes, 3), Some(magic));
 }

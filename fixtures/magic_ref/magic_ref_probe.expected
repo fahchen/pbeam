@@ -1,0 +1,1 @@
+{[{true,0,0},{true,1,1},{true,1,1},{true,1,1},{true,1,1},{true,1,1},{true,1,1},{true,0,0}],[[eq,lt,lt,lt,lt,lt,lt,lt],[gt,eq,lt,lt,lt,lt,lt,gt],[gt,gt,eq,lt,lt,lt,lt,gt],[gt,gt,gt,eq,lt,lt,lt,gt],[gt,gt,gt,gt,eq,lt,lt,gt],[gt,gt,gt,gt,gt,eq,lt,gt],[gt,gt,gt,gt,gt,gt,eq,gt],[gt,lt,lt,lt,lt,lt,lt,eq]],type,{true,[],true,[],true,7,[{true,undefined,id},{true,undefined,id}]}}

@@ -9,6 +9,7 @@ autotests = false
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+crc32fast = "1.5.2"
 flate2 = { version = "1.1.10", features = ["zlib"] }
 libc = "0.2"
 nix = { version = "0.31.3", default-features = false, features = ["fs"] }
@@ -789,3 +790,11 @@ path = "tests/integration/bif_cause.rs"
 [[test]]
 name = "undef_frames"
 path = "tests/integration/undef_frames.rs"
+
+[[test]]
+name = "magic_ref"
+path = "tests/integration/magic_ref.rs"
+
+[[test]]
+name = "chksum"
+path = "tests/integration/chksum.rs"

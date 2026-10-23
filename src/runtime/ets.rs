@@ -5,7 +5,7 @@ pub(super) mod pattern;
 pub(super) mod range;
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::hash::{DefaultHasher, Hasher};
 use std::sync::{Mutex, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
@@ -81,6 +81,13 @@ pub(super) struct EtsTables {
     /// by its name or its reference at that time, but it stays in the owned
     /// list of its owner until each segment is free (`erl_db.c:5405-5426`).
     freeing: HashMap<Reference, Freeing>,
+    /// The identifier of each deleted table. ERTS decodes the identifier of
+    /// a deleted table to the same table identifier while a term still
+    /// holds its magic binary (`erts_magic_ref_lookup_bin`,
+    /// `external.c:4846`), and to an ordinary reference only after the
+    /// garbage collector frees each holder. PBeam has no such collector, so
+    /// it keeps each identifier.
+    deleted: HashSet<Reference>,
     /// The count of the tables that went into an owned list
     /// (`save_owned_table`, `erl_db.c:628-650`), so the next table gets
     /// this position, at the end of the list of its owner.
@@ -218,10 +225,16 @@ pub(super) struct Table {
     /// objects more than the buckets (`GROW_LIMIT`, `erl_db_hash.c:153`,
     /// `1349-1354`, `3648-3740`), and joins buckets when a delete makes the
     /// objects fewer than the shrink limit (`erl_db_hash.c:757-762`,
-    /// `3350-3392`, `3743-3818`). With one scheduler, no table has fine
-    /// locks (`erl_db.c:2656-2657`; `erl_db_util.h:388-389`), so the object
-    /// count of these decisions is exact.
+    /// `3350-3392`, `3743-3818`). The decisions use the exact object count,
+    /// as ERTS does for a table with centralized counters
+    /// (`erl_db_hash.c:106-117`).
     buckets: usize,
+    /// The number of bucket locks (`nlocks`): 1 for a table that is not fine
+    /// locked, else 64 or the count of `debug_hash_fixed_number_of_locks`
+    /// (`erl_db_hash.c:1023-1051`). A traversal visits the buckets of one
+    /// lock before the buckets of the next lock (`next_slot`,
+    /// `erl_db_hash.c:539-555`).
+    locks: usize,
     /// The position of the table in the owned list of its owner, from
     /// `EtsTables::saved`. ERTS appends a table to the list when
     /// `ets:new/2` makes it and when `ets:delete/1` of another process
@@ -776,6 +789,14 @@ impl EtsTables {
         self.lookup(atoms, id).map(|(id, _)| id)
     }
 
+    /// Return the identifier of the live or deleted table of the decoded
+    /// magic reference `reference`, else `reference` (`external.c:4845-4851`).
+    pub(super) fn decoded(&self, atoms: &AtomTable, reference: Reference) -> Reference {
+        self.id(atoms, &Term::Reference(reference))
+            .or_else(|| self.deleted.get(&reference).copied())
+            .unwrap_or(reference)
+    }
+
     /// Return the reference and the lock of the live table that `id`
     /// identifies: an atom finds a named table in the name table, and a
     /// reference finds its table, as `db_get_table_aux`
@@ -787,7 +808,11 @@ impl EtsTables {
             Term::Reference(id) => *id,
             _ => return None,
         };
-        self.tables.get(&id).map(|table| (id, table))
+        // The stored key keeps the table marker of the identifier, which a
+        // decoded magic reference does not have (`Reference::eq`).
+        self.tables
+            .get_key_value(&id)
+            .map(|(id, table)| (*id, table))
     }
 
     /// Return the live table `id` with no lock, for the work of the table
@@ -1105,6 +1130,7 @@ impl EtsTables {
                 continue;
             }
             if let Some(table) = self.tables.remove(&id) {
+                self.deleted.insert(id);
                 let mut table = table.into_inner().unwrap_or_else(PoisonError::into_inner);
                 let fixers = table.fixers();
                 reds -= i32::try_from(fixers.len()).unwrap_or(i32::MAX);
@@ -1189,6 +1215,7 @@ impl EtsTables {
             .expect("a deleted table is live")
             .into_inner()
             .unwrap_or_else(PoisonError::into_inner);
+        self.deleted.insert(id);
         self.names.retain(|_, named| *named != id);
         self.programs.retain(|_, (table, _)| *table != id);
         if table.owner != caller {
@@ -1466,6 +1493,7 @@ impl Table {
             next: Vec::new(),
             writes: 0,
             buckets: FIRST_SEGMENT_SLOTS,
+            locks: 1,
             owned: 0,
             name: String::new(),
             write_concurrency: Term::static_atom("false"),
@@ -1593,6 +1621,30 @@ impl Table {
         self.read_concurrency = read_concurrency;
         self.decentralized_counters = decentralized_counters;
         self.compressed = compressed;
+    }
+
+    /// Set the number of bucket locks of a fine-locked hash table. A table
+    /// with more locks than slots gets segments with active buckets until
+    /// it has a slot for each lock (`erl_db_hash.c:1053-1059`, `alloc_seg`,
+    /// `erl_db_hash.c:3409-3445`).
+    pub(super) fn set_locks(&mut self, locks: usize) {
+        self.locks = locks;
+        while self.segment_slots() < locks {
+            self.buckets += SEGMENT_SLOTS;
+        }
+        self.heads.resize(self.buckets, EMPTY);
+    }
+
+    /// Return the bucket that a traversal visits after the bucket `bucket`,
+    /// or `None` at the end of the table: the next bucket of the same lock,
+    /// else the first bucket of the next lock (`next_slot`,
+    /// `erl_db_hash.c:539-555`).
+    pub(super) fn next_bucket(&self, bucket: usize) -> Option<usize> {
+        let next = bucket + self.locks;
+        if next < self.buckets {
+            return Some(next);
+        }
+        Some((next + 1) & (self.locks - 1)).filter(|&next| next != 0)
     }
 
     /// Return the number of objects.
@@ -1987,10 +2039,7 @@ impl Table {
                 }
                 slot = self.next[slot];
             }
-            bucket += 1;
-            if bucket == self.buckets {
-                return None;
-            }
+            bucket = self.next_bucket(bucket)?;
             slot = self.heads[bucket];
         }
     }
@@ -3843,8 +3892,9 @@ impl Table {
     }
 
     /// Return the object count below which a delete joins buckets: half the
-    /// slots without the top segment, or 0 below 4352 slots
-    /// (`calc_shrink_limit`, `erl_db_hash.c:3350-3407`).
+    /// slots without the top segment, or 0 below 4352 slots or below the
+    /// lock count and one segment (`calc_shrink_limit`,
+    /// `erl_db_hash.c:3350-3407`).
     ///
     /// # Examples
     ///
@@ -3853,7 +3903,7 @@ impl Table {
     /// ```
     fn shrink_limit(&self) -> usize {
         let slots = self.segment_slots();
-        if slots >= SHRINK_SLOTS {
+        if slots >= SHRINK_SLOTS.max(self.locks + SEGMENT_SLOTS) {
             (slots - SEGMENT_SLOTS) / 2
         } else {
             0

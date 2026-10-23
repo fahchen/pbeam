@@ -182,7 +182,7 @@ pub(super) fn mac_init_nif(
     };
     match context {
         Ok(Some(context)) => {
-            let reference = scheduler.make_ref()?;
+            let reference = scheduler.make_magic_ref()?;
             lock(&scheduler.node().resources.kind::<MacContexts>())
                 .by_reference
                 .insert(reference, context);

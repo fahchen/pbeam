@@ -576,10 +576,12 @@ impl Scheduler {
     /// ```
     pub(super) fn mark_system(&mut self, id: ProcessId) {
         self.system.insert(id);
+        self.node.mark_system(id);
     }
 
-    /// Return true when the process `id` is a system process of this
-    /// scheduler (see [`Self::system`]).
+    /// Return true when the process `id` is a system process of the node.
+    /// A system process stays on its scheduler, but a process of any
+    /// scheduler asks for it.
     ///
     /// # Examples
     ///
@@ -587,19 +589,7 @@ impl Scheduler {
     /// assert!(!scheduler.is_system(pid));
     /// ```
     pub(super) fn is_system(&self, id: ProcessId) -> bool {
-        self.system.contains(&id)
-    }
-
-    /// Mark the root process as a system process, before it starts, as ERTS
-    /// starts its first process `init` (`erl_init.c:355-399`).
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// scheduler.mark_root_system();
-    /// ```
-    pub(super) fn mark_root_system(&mut self) {
-        self.system.insert(ROOT);
+        self.node.is_system(id)
     }
 
     /// Return the node of this scheduler.
@@ -2537,6 +2527,12 @@ impl Scheduler {
             .ok_or_else(|| error("process reference overflow"))
     }
 
+    /// Return a new magic reference, the reference that ERTS makes for a
+    /// magic binary (`erts_mk_magic_ref`, `erl_bif_unique.h:217-220`).
+    pub(super) fn make_magic_ref(&mut self) -> Result<Reference, BeamError> {
+        Ok(self.make_ref()?.magic_reference())
+    }
+
     /// Return the next value of `erlang:unique_integer/0`, as
     /// `unique_integer_bif` and `bld_unique_integer_term`
     /// (`erl_bif_unique.c:475-578`) make it from the thread id and the
@@ -2648,7 +2644,9 @@ impl Scheduler {
         self.node.name_keys()
     }
 
-    /// Return the number of schedulers of the node of this run.
+    /// Return the number of schedulers of the node of this run, as
+    /// `erlang:system_info(schedulers)` gives it: also the schedulers that
+    /// the `+S` option sets offline (see `Node::configured_count`).
     ///
     /// # Examples
     ///
@@ -2656,7 +2654,7 @@ impl Scheduler {
     /// assert_eq!(scheduler.scheduler_count(), 1);
     /// ```
     pub(super) fn scheduler_count(&self) -> i64 {
-        self.node.scheduler_count() as i64
+        self.node.configured_count() as i64
     }
 
     /// Return the registered name of the process `id` from the name table of

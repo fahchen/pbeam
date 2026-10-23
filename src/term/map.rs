@@ -1679,7 +1679,8 @@ fn encode_path(elements: Vec<usize>) -> Result<i64, BeamError> {
 /// (`erl_term_hashing.c:2193-2202`). A tuple key hashes with the tuple path
 /// (`erl_term_hashing.c:1878-1893`): its type and arity, then its elements.
 /// A binary key hashes with the binary path of `make_internal_hash`. A pid
-/// key hashes with the pid path of `make_internal_hash`. An ordinary
+/// key hashes with the pid path of `make_internal_hash`, and a port key with
+/// its immediate word (`erl_term_hashing.c:2211-2213`). An ordinary
 /// reference key hashes with the reference path
 /// (`erl_term_hashing.c`); an alias reference has no comparison order, so
 /// it is not a supported key. A map key hashes with the flatmap or
@@ -1702,7 +1703,8 @@ fn encode_path(elements: Vec<usize>) -> Result<i64, BeamError> {
 /// assert_eq!(map_hash(&Term::binary(vec![])), Some(10873612744977862784));
 /// assert!(map_hash(&Term::Float(1.0)).is_some());
 /// assert!(map_hash(&Term::list_from([Term::binary(vec![])])).is_some());
-/// assert_eq!(map_hash(&Term::tuple(vec![Term::Port(PortId(0))])), None);
+/// assert!(map_hash(&Term::tuple(vec![Term::Port(PortId(0))])).is_some());
+/// assert_eq!(map_hash(&Term::Reference(Reference(0).pid_reference())), None);
 /// let improper = |tail| Term::cons(Term::Integer(1), tail);
 /// assert!(map_hash(&improper(Term::Integer(2))).is_some());
 /// assert!(map_hash(&improper(Term::Map(Map::new()))).is_some());
@@ -1712,14 +1714,23 @@ fn map_hash(key: &Term) -> Option<u64> {
     match key {
         // An immediate key or a binary needs no walk, so the check
         // allocates nothing.
-        Term::Atom(_) | Term::Nil | Term::Binary(_) | Term::Float(_) | Term::Pid(_) => {}
+        Term::Atom(_)
+        | Term::Nil
+        | Term::Binary(_)
+        | Term::Float(_)
+        | Term::Pid(_)
+        | Term::Port(_) => {}
         Term::Reference(reference) if !reference.is_pid_reference() => {}
         Term::Cons(_) | Term::Tuple(_) | Term::Map(_) | Term::Fun(_) => {
             let mut pending = vec![key];
             while let Some(term) = pending.pop() {
                 match term {
-                    Term::Atom(_) | Term::Nil | Term::Binary(_) | Term::Float(_) | Term::Pid(_) => {
-                    }
+                    Term::Atom(_)
+                    | Term::Nil
+                    | Term::Binary(_)
+                    | Term::Float(_)
+                    | Term::Pid(_)
+                    | Term::Port(_) => {}
                     Term::Reference(reference) if !reference.is_pid_reference() => {}
                     Term::Cons(cell) => pending.extend([&cell.tail, &cell.head]),
                     Term::Tuple(elements) => pending.extend(elements.iter()),

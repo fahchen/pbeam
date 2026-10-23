@@ -112,7 +112,7 @@ pub(super) fn ng_crypto_init_nif(
             Ok(context) => context,
             Err(failure) => return cipher_result(scheduler, Err(failure)),
         };
-        let reference = scheduler.make_ref()?;
+        let reference = scheduler.make_magic_ref()?;
         let state = CipherContext {
             context,
             padding,
@@ -280,7 +280,7 @@ pub(super) fn aead_cipher_init_nif(
 ) -> Result<BifResult, BeamError> {
     match aead_init(scheduler, arguments) {
         Ok(state) => {
-            let reference = scheduler.make_ref()?;
+            let reference = scheduler.make_magic_ref()?;
             lock(&scheduler.node().resources.kind::<AeadContexts>())
                 .by_reference
                 .insert(reference, state);

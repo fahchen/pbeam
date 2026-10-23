@@ -35,8 +35,9 @@ const INVENTORY: &str = include_str!("../../docs/effect-inventory.md");
 /// Each capability of the column "Capability" of the effect inventory, as
 /// `(entry, kind:operation)`, with the `effect_probe` function that calls
 /// the entry once.
-const PROBES: [(&str, &str, &str); 63] = [
+const PROBES: [(&str, &str, &str); 64] = [
     ("erlang:exit/2", "process:exit_other", "exit_other"),
+    ("erlang:exit/3", "process:exit_other", "exit_other3"),
     ("erlang:delete_module/1", "code:load", "delete_module"),
     ("erlang:link/1", "process:link", "link"),
     ("erlang:monitor/2", "process:monitor", "monitor2"),
@@ -290,7 +291,7 @@ fn only(names: &[&str]) -> Constraint {
 
 /// Each entry that the column "Capability" of the effect inventory marks
 /// `ambient`. `effect_probe:ambient/0` calls each entry once.
-const AMBIENT: [&str; 119] = [
+const AMBIENT: &[&str] = &[
     "atomics:add/3",
     "atomics:get/2",
     "atomics:info/1",
@@ -575,7 +576,10 @@ fn each_effect_entry_with_a_capability_denies_without_its_operation() {
 
 #[test]
 fn calls_each_ambient_and_later_entry_with_no_capability() {
-    assert_eq!(inventory_marked("`ambient`"), BTreeSet::from(AMBIENT));
+    assert_eq!(
+        inventory_marked("`ambient`"),
+        AMBIENT.iter().copied().collect::<BTreeSet<_>>()
+    );
     assert_eq!(inventory_marked("`later`"), BTreeSet::from(LATER));
     // The root process holds no capability, so no policy can permit the
     // calls: each `ambient` and `later` entry has no check.
