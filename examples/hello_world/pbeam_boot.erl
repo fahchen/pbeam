@@ -54,7 +54,23 @@ start(Module, Function, Flags) ->
     ok = pbeam_cap:serve(whereis(user), io),
     ok = pbeam_cap:serve(whereis(standard_error), io),
     ok = pbeam_cap:enter_runtime(Module, Function),
-    Module:Function().
+    Result = Module:Function(),
+    at_exit(),
+    Result.
+
+%% When the elixir application runs, finish as elixir -e does after its
+%% commands: 'Elixir.Kernel.CLI':run/1 runs the at_exit callbacks, calls
+%% Logger.flush() when the module Logger is loaded, and then calls
+%% System.halt(Status) (kernel/cli.ex:58-71, 129-133). Logger.flush()
+%% calls filesync/1 of each handler that exports it, so the queue of the
+%% async default handler is written (logger.ex:785-796). The table
+%% elixir_config holds the callbacks; without the elixir application,
+%% the root process returns as after erl -eval.
+at_exit() ->
+    case ets:whereis(elixir_config) of
+        undefined -> ok;
+        _ -> 'Elixir.Kernel.CLI':run(fun(_Status) -> ok end)
+    end.
 
 %% init.erl:1226-1232.
 get_root(Flags) ->

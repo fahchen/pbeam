@@ -185,12 +185,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a consumer needs a crash dump, which a break command `A` and `erlang:halt/2` with a slogan also request.
 - **Source:** PR for #301.
 
-### Run `at_exit` callbacks and flush the logger before the root exit
-
-- The PBeam boot does not run `at_exit` callbacks and does not flush the logger before the root process returns. Thus a log event that is still in the queue of the async default handler at the root exit is lost. `elixir -e` runs the callbacks, then `Logger.flush()`, and then `System.halt/1` (kernel/cli.ex:58-71). The "Run end" row records this. `fixtures/io_fail` calls `logger_std_h:filesync(default)` so that its report is written before the root exit.
-- **Trigger:** a consumer logs an event just before it returns and needs the event, or a program registers `at_exit` callbacks.
-- **Source:** PR #182 (#169).
-
 ### Compose decomposed UTF-8 native names on macOS
 
 - On macOS, `os:getenv/1` of a value that is valid UTF-8 and has one of the 61 ERTS composition candidates returns the runtime error `unsupported composition of the native name code point N on macOS`. ERTS composes the code points with `compose_tab` (`erl_unicode.c:1418-1428`, `1569-1630`; `erl_unicode_normalize.h:1523-1690`). This composition is not Unicode NFC. The "OS environment" row records this.
