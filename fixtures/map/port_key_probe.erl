@@ -1,5 +1,5 @@
 -module(port_key_probe).
--export([flat/0, hash/0, nested/0, order/0, id/1]).
+-export([flat/0, hash/0, high/0, nested/0, order/0, id/1]).
 
 %% The value of each map operation with a port key. Each port is the local
 %% port of a fixed number, made from its external format, so a run on the
@@ -25,6 +25,12 @@ hash() ->
     [maps:size(M), map_get(port(17), M), is_map_key(port(41), M),
      is_map_key(port(17), M2), [V || {_, V} <- maps:to_list(M)],
      [V || {_, V} <- maps:to_list(M2)]].
+
+%% A hashmap of 40 port keys from 8190: a port number of 8192 or more uses
+%% the high bits of the port table index.
+high() ->
+    M = id(maps:from_list([{port(N), N} || N <- lists:seq(8190, 8229)])),
+    [V || {_, V} <- maps:to_list(M)].
 
 %% A hashmap of port keys inside tuples, lists, and map keys.
 nested() ->
