@@ -269,7 +269,14 @@ fn builds_the_one_file_executable_with_the_mix_task_and_runs_it_clean() {
     let status = stop_with_term(child);
     stdout_reader.join().unwrap();
     stderr_reader.join().unwrap();
-    assert!(status.success(), "the clean run exits 0: {status:?}");
+    let text =
+        |bytes: &Arc<Mutex<Vec<u8>>>| String::from_utf8_lossy(&bytes.lock().unwrap()).into_owned();
+    assert!(
+        status.success(),
+        "the clean run exits 0: {status:?}\nstdout: {}\nstderr: {}",
+        text(&stdout),
+        text(&stderr)
+    );
     let entries: Vec<_> = fs::read_dir(&clean)
         .unwrap()
         .map(|entry| entry.unwrap().file_name())
@@ -284,9 +291,6 @@ fn builds_the_one_file_executable_with_the_mix_task_and_runs_it_clean() {
     let erts = erts_release_response(&release);
     fs::remove_dir_all(&directory).unwrap();
     let response = response.unwrap_or_else(|error| {
-        let text = |bytes: &Arc<Mutex<Vec<u8>>>| {
-            String::from_utf8_lossy(&bytes.lock().unwrap()).into_owned()
-        };
         panic!(
             "the clean run on port {port}: {error}\nstatus: {status:?}\nstdout: {}\nstderr: {}",
             text(&stdout),
@@ -318,7 +322,12 @@ fn erts_release_response(release: &std::path::Path) -> (String, String, String) 
     let status = stop_with_term(child);
     stdout_reader.join().unwrap();
     stderr_reader.join().unwrap();
-    assert!(status.success(), "the ERTS release exits 0: {status:?}");
+    assert!(
+        status.success(),
+        "the ERTS release exits 0: {status:?}\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&stdout.lock().unwrap()),
+        String::from_utf8_lossy(&stderr.lock().unwrap())
+    );
     response.unwrap_or_else(|error| {
         panic!(
             "the ERTS release on port {port}: {error}\nstdout: {}\nstderr: {}",
@@ -396,7 +405,9 @@ fn serve_one_file() -> (String, String, String) {
     // ERTS.
     assert!(
         status.success(),
-        "the one-file run exits 0 after SIGTERM: {status:?}"
+        "the one-file run exits 0 after SIGTERM: {status:?}\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&stdout.lock().unwrap()),
+        String::from_utf8_lossy(&stderr.lock().unwrap())
     );
     let one_file_stdout = String::from_utf8_lossy(&stdout.lock().unwrap()).into_owned();
     let notice = shutdown_notice(&one_file_stdout);
