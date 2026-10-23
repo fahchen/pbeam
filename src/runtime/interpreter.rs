@@ -3219,6 +3219,69 @@ impl BeamProgram {
         ))
     }
 
+    /// Call the fun `fun` of the module `module`, which has no current code,
+    /// with the arguments in `x0` to `x(arity - 1)`. ERTS `call_fun` finds
+    /// `undefined_lambda/3` in the error handler of the process and runs
+    /// it with the module, the fun, and the argument list in `x0` to `x2`
+    /// (`beam_common.c:1708-1728`). That function loads the module and
+    /// applies the fun, or raises `undef` with the frame `{Fun, Args, []}`
+    /// (`error_handler.erl:117-127,162-178`). A handler without that export
+    /// raises `error:undef` with no current function
+    /// (`beam_common.c:1713-1717`). The default handler needs a code server
+    /// or an init process to load a module, as for
+    /// [`Self::undefined_function`]; with neither, the call is a runtime
+    /// error.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// // A decoded fun of `no_such` with x0 = 1 calls the handler with
+    /// // x0 = no_such, x1 = Fun, x2 = [1].
+    /// assert!(program.undefined_lambda(&mut scheduler, "no_such", module, fun, 1, false)?.is_none());
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The default handler in a run with no code server and no init
+    /// process is a runtime error.
+    fn undefined_lambda(
+        &self,
+        scheduler: &mut Scheduler,
+        module: &str,
+        module_atom: Term,
+        fun: Term,
+        arity: u32,
+        tail: bool,
+    ) -> Result<Option<Outcome>, BeamError> {
+        let process = scheduler.current_process_mut();
+        let default_handler = process.error_handler.is_none();
+        let handler = process
+            .error_handler
+            .clone()
+            .unwrap_or_else(|| DEFAULT_ERROR_HANDLER.to_owned());
+        if default_handler && !loads_modules(scheduler) {
+            return Err(error(format!("unresolved fun of the module {module}")));
+        }
+        let process = scheduler.current_process_mut();
+        let arguments = Term::list_from(call_arguments(&process.registers, arity)?);
+        let lookup = scheduler
+            .code
+            .export_frame(&handler, "undefined_lambda", 3)?;
+        let process = scheduler.current_process_mut();
+        let Some(frame) = lookup else {
+            return Ok(raise(
+                process,
+                ExceptionClass::Error,
+                Term::static_atom("undef"),
+            ));
+        };
+        enter_frame(process, frame, tail);
+        write(process, &Operand::X(0), module_atom)?;
+        write(process, &Operand::X(1), fun)?;
+        write(process, &Operand::X(2), arguments)?;
+        Ok(None)
+    }
+
     /// Run `erlang:apply(Module, Function, Arguments)` with the arguments in
     /// `x0` to `x2`, as ERTS `apply` (`beam_common.c:1434-1526`) does for the
     /// `i_apply` instructions. The function and the module must be atoms,
@@ -3456,6 +3519,15 @@ impl BeamProgram {
                 module, function, ..
             } => return self.call_mfa(scheduler, module, function, arity, tail),
         };
+        // A fun of a module with no current code calls
+        // `undefined_lambda/3` of the error handler of the process with
+        // the module, the fun, and the argument list, or raises `undef`
+        // when the handler has no such export (`beam_common.c:1708-1728`).
+        let module = scheduler.atoms.name_of(lambda.module()).to_owned();
+        if scheduler.synced_code().waiting_or_loaded(&module).is_err() {
+            let module_atom = Term::Atom(lambda.module().clone());
+            return self.undefined_lambda(scheduler, &module, module_atom, fun, arity, tail);
+        }
         let total_arity = arity + free.len() as u32;
         {
             let process = scheduler.current_process_mut();
