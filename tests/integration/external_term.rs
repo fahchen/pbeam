@@ -234,14 +234,132 @@ fn raises_badarg_as_pinned_erts() {
         run(&program, "errors"),
         Term::list_from(std::iter::repeat_n(badarg, 19))
     );
+}
 
-    // A term that PBeam cannot hold stops the run with a runtime error.
+const FUN_PROBE: &[u8] = include_bytes!("../../fixtures/external_term/fun_ext_probe.beam");
+
+/// The module MD5 of `fun_ext_probe.beam`, which the pinned ERTS writes in
+/// each `NEW_FUN_EXT` of the module.
+const FUN_PROBE_MD5: [u8; 16] = [
+    77, 47, 206, 122, 4, 233, 94, 226, 67, 58, 214, 118, 101, 166, 226, 53,
+];
+
+/// Return the program of `fun_ext_probe` with the pinned `erlang` module.
+fn load_fun_probe() -> BeamProgram {
+    let erlang = pinned_beam("erlang");
+    BeamProgram::load(&[&erlang, FUN_PROBE]).unwrap()
+}
+
+/// Return the `NEW_FUN_EXT` bytes of the pinned ERTS for a fun of
+/// `fun_ext_probe`: the size, the arity, the index, the free count, the old
+/// index, and the old unique value `[98, 2, 105, 126, 115]`, then `free`.
+fn probe_fun_bytes(size: u8, arity: u8, index: u8, free_count: u8, free: &[u8]) -> Vec<u8> {
+    let mut bytes = vec![131, 112, 0, 0, 0, size, arity];
+    bytes.extend_from_slice(&FUN_PROBE_MD5);
+    bytes.extend_from_slice(&[0, 0, 0, index, 0, 0, 0, free_count, 119, 13]);
+    bytes.extend_from_slice(b"fun_ext_probe");
+    bytes.extend_from_slice(&[97, index, 98, 2, 105, 126, 115, 88, 119, 13]);
+    bytes.extend_from_slice(b"nonode@nohost");
+    bytes.extend_from_slice(&[0; 12]);
+    bytes.extend_from_slice(free);
+    bytes
+}
+
+#[test]
+fn encodes_and_decodes_local_funs_as_pinned_erts() {
+    // `fun_ext_probe:round_trip/0` on the pinned ERTS (OTP 29.1.1): the
+    // bytes of `enc_term` (`external.c:3966-3993`), the external size, the
+    // equality and the fun information of the decoded fun, and a call of
+    // each decoded fun (`dec_term`, `external.c:5102-5176`).
+    let program = load_fun_probe();
+    let atom = |name| atom(&program, name);
+    let tagged = |name, value| Term::tuple(vec![atom(name), value]);
+    let entry = |bytes: Vec<u8>, size, index, arity| {
+        Term::tuple(vec![
+            binary(&bytes),
+            Term::Integer(size),
+            atom("true"),
+            tagged("index", Term::Integer(index)),
+            tagged("new_uniq", binary(&FUN_PROBE_MD5)),
+            tagged("arity", Term::Integer(arity)),
+        ])
+    };
+    let free = [104, 2, 119, 3, b't', b'a', b'g', 109, 0, 0, 0, 2, 1, 2];
+    let tag = Term::tuple(vec![atom("tag"), binary(&[1, 2])]);
+    assert_eq!(
+        program
+            .execute("fun_ext_probe", "round_trip", &[])
+            .unwrap()
+            .term,
+        Term::list_from(vec![
+            entry(probe_fun_bytes(93, 2, 0, 1, &free), 95, 0, 2),
+            entry(probe_fun_bytes(79, 0, 1, 0, &[]), 81, 1, 0),
+            Term::tuple(vec![tag, Term::Integer(1), Term::Integer(2)]),
+            atom("ok"),
+        ])
+    );
+}
+
+#[test]
+fn decodes_a_fun_of_a_module_that_is_not_loaded_as_pinned_erts() {
+    // `fun_ext_probe:unloaded/0` on the pinned ERTS: the decode makes a stub
+    // fun entry with the decoded values (`erl_fun.c:299-309`), and a new
+    // encode writes its size (`external.c:3350-3370`).
+    let program = load_fun_probe();
+    let result = program
+        .execute("fun_ext_probe", "unloaded", &[])
+        .unwrap()
+        .term;
+    let atom = |name| atom(&program, name);
+    let tagged = |name, value| Term::tuple(vec![atom(name), value]);
+    let mut uniq = [0; 16];
+    uniq[15] = 7;
+    let mut bytes = vec![131, 112, 0, 0, 0, 75, 1];
+    bytes.extend_from_slice(&uniq);
+    bytes.extend_from_slice(&[0, 0, 0, 3, 0, 0, 0, 1, 119, 7]);
+    bytes.extend_from_slice(b"no_such");
+    bytes.extend_from_slice(&[97, 2, 98, 255, 255, 255, 255, 88, 119, 13]);
+    bytes.extend_from_slice(b"nonode@nohost");
+    bytes.extend_from_slice(&[0; 12]);
+    bytes.extend_from_slice(&[97, 5]);
+    let info = vec![
+        tagged("index", Term::Integer(2)),
+        tagged("new_index", Term::Integer(3)),
+        tagged("new_uniq", binary(&uniq)),
+        tagged("uniq", Term::Integer(-1)),
+        tagged("arity", Term::Integer(1)),
+        tagged("env", Term::list_from(vec![Term::Integer(5)])),
+        tagged("type", atom("local")),
+    ];
+    assert_eq!(
+        result,
+        Term::tuple(vec![atom("true"), Term::list_from(info), binary(&bytes)])
+    );
+
+    // ERTS calls `error_handler:undefined_lambda/3`, which needs a code
+    // server; PBeam stops the run with a runtime error.
     let error = program
-        .execute("external_term_probe", "decode_fun", &[])
+        .execute("fun_ext_probe", "call_unloaded", &[])
         .unwrap_err()
         .to_string();
-    assert!(
-        error.starts_with("unsupported erlang:binary_to_term/1,2"),
-        "{error}"
+    assert!(error.contains("missing BEAM module no_such"), "{error}");
+}
+
+#[test]
+fn rejects_bad_new_fun_ext_fields_as_pinned_erts() {
+    // `fun_ext_probe:errors/0` on the pinned ERTS: a module that is not an
+    // atom, an old index or an old unique value that is not small, a creator
+    // that is not a pid, and a truncated fun give badarg; a small old index
+    // as a big wraps to a C `int` (`external.c:5130-5167`).
+    let program = load_fun_probe();
+    let badarg = Term::tuple(vec![atom(&program, "error"), atom(&program, "badarg")]);
+    let mut expected = vec![badarg; 5];
+    expected.push(Term::tuple(vec![atom(&program, "index"), Term::Integer(1)]));
+    assert_eq!(
+        program
+            .execute("fun_ext_probe", "errors", &[])
+            .unwrap()
+            .term,
+        Term::list_from(expected)
     );
 }

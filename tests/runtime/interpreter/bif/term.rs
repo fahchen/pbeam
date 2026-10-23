@@ -5,7 +5,7 @@
 //! the runtime. The expected bytes are measured on the pinned ERTS.
 
 use super::*;
-use crate::term::{Binary, Lambda, MatchState, PortId};
+use crate::term::{Binary, MatchState, PortId};
 
 /// Return the local node atom bytes of the pinned ERTS: `SMALL_ATOM_UTF8_EXT`
 /// and `nonode@nohost`.
@@ -143,6 +143,7 @@ fn decode_full(atoms: &AtomTable, bytes: &[u8], safe: bool) -> Result<Term, Deco
         local: false,
         atoms,
         seed: SEED,
+        code: &CodeTable::default(),
     }
     .decode_input(SEED)
     .map(|(term, _)| term)
@@ -594,8 +595,8 @@ fn decodes_the_unsupported_forms_and_local_terms() {
         decode_with(&atoms, &[67, 0, 0, 0, 0, 2], false),
         Err(DecodeError::Badarg)
     ));
-    // A well-formed local fun passes the structure check, and the decoder
-    // gives the documented runtime error.
+    // A well-formed local fun of a module that is not loaded decodes to a
+    // fun with a stub entry (`erl_fun.c:299-309`).
     let mut local_fun = vec![112, 0, 0, 0, 0, 0];
     local_fun.extend([0u8; 16]);
     local_fun.extend([0u8; 8]);
@@ -605,7 +606,7 @@ fn decodes_the_unsupported_forms_and_local_terms() {
     local_fun.extend(with_words(&[], &[5, 0, 0]));
     assert!(matches!(
         decode_with(&atoms, &local_fun, false),
-        Err(DecodeError::Unsupported(_))
+        Ok(Term::Fun(_))
     ));
     // A free-variable count above 255 raises badarg
     // (`MAX_ARG`, `erl_vm.h:54`, `external.c:6392-6394`).
@@ -740,6 +741,7 @@ fn decodes_the_unsupported_forms_and_local_terms() {
             local: false,
             atoms: &atoms,
             seed: SEED,
+            code: &CodeTable::default(),
         }
         .decode_input(SEED)
         .unwrap()
@@ -755,6 +757,7 @@ fn decodes_the_unsupported_forms_and_local_terms() {
             local: false,
             atoms: &atoms,
             seed: SEED,
+            code: &CodeTable::default(),
         }
         .decode_input(SEED),
         Err(DecodeError::Badarg)
@@ -849,9 +852,7 @@ fn encodes_the_large_and_unsupported_forms() {
     let large = Term::BigInt(Arc::new(BigInt::from(1) << (256 * 8)));
     let bytes = encode(&large, &atoms, &options).unwrap();
     assert_eq!(&bytes[..5], [111, 0, 0, 1, 1]);
-    // A local fun, a match context, and a record have no bytes.
-    let fun = Fun::new(Lambda::new(atom, 0, 0, 0, 0, 0), vec![]);
-    assert!(encode(&Term::Fun(fun), &atoms, &options).is_err());
+    // A match context has no bytes.
     let state = MatchState::new(Binary::from(vec![]));
     assert!(encode(&Term::MatchContext(Arc::new(state)), &atoms, &options).is_err());
     // A map above 32 pairs keeps the HAMT order of `Map::iter`.
@@ -979,8 +980,7 @@ fn binary_to_term_checks_the_binary_and_the_options() {
         binary_to_term(&mut context, &bitstring, &Term::nil()).unwrap(),
         BifResult::Raise { .. }
     ));
-    // A truncated local fun raises `badarg`, and a well-formed one gives
-    // the documented runtime error.
+    // A truncated local fun raises `badarg`, and a well-formed one decodes.
     assert!(matches!(
         binary_to_term(&mut context, &Term::binary(vec![131, 112]), &Term::nil()).unwrap(),
         BifResult::Raise { reason, .. } if reason == Term::static_atom("badarg")
@@ -992,13 +992,10 @@ fn binary_to_term_checks_the_binary_and_the_options() {
     local_fun.extend([88]);
     local_fun.extend(node());
     local_fun.extend(with_words(&[], &[5, 0, 0]));
-    let error = binary_to_term(&mut context, &Term::binary(local_fun), &Term::nil())
-        .unwrap_err()
-        .to_string();
-    assert!(
-        error.starts_with("unsupported erlang:binary_to_term/1,2"),
-        "{error}"
-    );
+    assert!(matches!(
+        binary_to_term(&mut context, &Term::binary(local_fun), &Term::nil()).unwrap(),
+        BifResult::Value(Term::Fun(_))
+    ));
 }
 
 #[test]
@@ -1056,6 +1053,7 @@ fn keeps_the_decoder_guards_behind_the_validation() {
             local: false,
             atoms: &atoms,
             seed: SEED,
+            code: &CodeTable::default(),
         }
         .term()
     };
@@ -1067,6 +1065,7 @@ fn keeps_the_decoder_guards_behind_the_validation() {
         &[77, 0, 0, 0, 0, 8],
         &[255],
         &[121, 0, 0, 0, 0, 97, 1],
+        &[112],
     ] {
         assert!(matches!(term(invalid), Err(DecodeError::Badarg)));
     }
@@ -1079,7 +1078,7 @@ fn keeps_the_decoder_guards_behind_the_validation() {
     let mut bad_sysname = vec![88, 97, 1];
     bad_sysname.extend(with_words(&[], &[5, 0, 0]));
     assert!(matches!(term(&bad_sysname), Err(DecodeError::Badarg)));
-    for unsupported in [&[112][..], &[117], &[67]] {
+    for unsupported in [&[117][..], &[67]] {
         assert!(matches!(
             term(unsupported),
             Err(DecodeError::Unsupported(_))

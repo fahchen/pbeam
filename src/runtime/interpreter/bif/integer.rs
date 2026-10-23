@@ -32,8 +32,8 @@ const WORDS_PER_REDUCTION: usize = 16;
 const SMALL_SHIFT_LIMIT: i64 = 59;
 /// The smallest and the largest ERTS small integers, `MIN_SMALL` and
 /// `MAX_SMALL` (`erl_term.h`).
-const MIN_SMALL: i64 = -(1 << 59);
-const MAX_SMALL: i64 = (1 << 59) - 1;
+pub(super) const MIN_SMALL: i64 = -(1 << 59);
+pub(super) const MAX_SMALL: i64 = (1 << 59) - 1;
 /// The bits of one bignum digit, `D_EXP` (`big.h:55`).
 const DIGIT_BITS: i64 = 64;
 

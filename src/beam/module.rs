@@ -1,14 +1,17 @@
 use std::{
     collections::HashMap,
     hash::{BuildHasherDefault, Hasher},
-    sync::atomic::{AtomicU32, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    },
 };
 
 use super::code::{self, Instruction, LineTable, Operand};
 use crate::{
     error::{BeamError, error},
     runtime::BifId,
-    term::{AtomTable, Term},
+    term::{AtomTable, Lambda, Term},
 };
 
 const X0_REGISTER: u32 = 0;
@@ -206,16 +209,17 @@ pub(crate) struct ModuleTables {
     pub(crate) fun_entries: HashMap<i32, FunEntry>,
 }
 
-/// The parts of a `FunT` entry of the loaded code that a call of a local fun
-/// compares with the fun, as the loader keeps them in the `ErlFunEntry` of
-/// the entry (`erl_fun.h:31-59`).
+/// The `FunT` entry of the loaded code that a call of a local fun compares
+/// with the fun, as the loader keeps it in an `ErlFunEntry`
+/// (`erl_fun.h:31-59`). It is the fun entry that the `make_fun3` of the code
+/// holds, so `erlang:binary_to_term/1,2` gives a decoded fun of the code the
+/// same entry (`erts_fun_entry_get_or_make_stub`, `erl_fun.c:299-309`).
 #[derive(Debug)]
 pub(crate) struct FunEntry {
-    /// The old unique value of the entry (`ErlFunEntry.old_uniq`), which the
-    /// compiler takes from the MD5 of the module (`beam_asm.erl:251-262`).
-    pub(crate) old_unique: i32,
-    /// The entry label of the code of the lambda.
-    pub(crate) label: u32,
+    /// The fun entry of the lambda, with its old unique value
+    /// (`ErlFunEntry.old_uniq`), which the compiler takes from the MD5 of
+    /// the module (`beam_asm.erl:251-262`), and the entry label of its code.
+    pub(crate) lambda: Arc<Lambda>,
 }
 
 /// The function that a label starts.
@@ -349,8 +353,7 @@ impl ModuleTables {
                     fun_entries.insert(
                         lambda.index(),
                         FunEntry {
-                            old_unique: lambda.old_unique(),
-                            label: lambda.label(),
+                            lambda: Arc::clone(lambda),
                         },
                     );
                 }
