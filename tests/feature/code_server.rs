@@ -368,6 +368,33 @@ fn runs_the_one_shot_crypto_hashes_and_macs_as_pinned_erts() {
         &[],
     ));
     assert!(erts.contains("Couldn't get mac"), "{erts}");
+    // md4 and cmac with a cipher that is not CBC depend on the libcrypto of
+    // the host. The ERTS of the Linux CI host links a libcrypto with md4,
+    // the legacy ciphers, and cmac for each mode, so only the pinned macOS
+    // ERTS (OpenSSL 3.5.8) is the reference (digest.c:186-188,
+    // mac.c:344-347, 400-405).
+    let pbeam = run(&mut pbeam_probe(
+        CRYPTO_PROBE,
+        "crypto_probe",
+        "oneshot_host",
+        &[],
+    ));
+    if cfg!(target_os = "macos") {
+        let erts = run(&mut erts_probe(
+            CRYPTO_PROBE,
+            "crypto_probe",
+            "oneshot_host",
+            &[],
+        ));
+        assert_eq!(pbeam, erts);
+    }
+    for expected in [
+        "Digest type not supported in this cryptolib",
+        "Unsupported cipher algorithm",
+        "Couldn't get mac",
+    ] {
+        assert!(pbeam.contains(expected), "{pbeam}");
+    }
     assert_eq!(
         run(&mut pbeam_probe(
             CRYPTO_PROBE,

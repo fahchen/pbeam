@@ -1,5 +1,5 @@
 -module(crypto_probe).
--export([main/0, nifs/0, info/0, supports/0, fips/0, oneshot/0, xof_sizes/0, hash_init/0, hash_large/0]).
+-export([main/0, nifs/0, info/0, supports/0, fips/0, oneshot/0, oneshot_host/0, xof_sizes/0, hash_init/0, hash_large/0]).
 
 %% Write the results of crypto:strong_rand_bytes/1, one term on each line.
 %% The first call loads crypto on demand, and its -on_load function loads
@@ -105,7 +105,7 @@ fips() ->
 %% cipher table of cmac is cipher.c:30-173. A failed MAC computation gives
 %% the error of mac.c:405.
 oneshot() ->
-    Digests = [md4, md5, ripemd160, sha, sha224, sha256, sha384, sha512, sha512_224,
+    Digests = [md5, ripemd160, sha, sha224, sha256, sha384, sha512, sha512_224,
                sha512_256, sha3_224, sha3_256, sha3_384, sha3_512, shake128, shake256,
                sm3, blake2b, blake2s],
     %% The size of a SHAKE digest depends on the libcrypto of the host, so
@@ -115,21 +115,10 @@ oneshot() ->
     Hashes = [bad_reason(fun() -> crypto:hash(Type, <<"abc">>) end) || Type <- Digests],
     Hmacs = [bad_reason(fun() -> crypto:mac(hmac, Type, <<"key">>, [<<"te">>, $x, "t"]) end)
              || Type <- Digests ++ [nosuch, 1]],
-    Ciphers = [{rc2_cbc, 16}, {rc4, 16}, {des_cbc, 8}, {des_cfb, 8}, {des_ecb, 8},
-               {des_ede3_cbc, 24}, {des_ede3_cbc, 16}, {des_ede3_cfb, 24},
-               {blowfish_cbc, 16}, {blowfish_cfb64, 16}, {blowfish_ofb64, 16},
-               {blowfish_ecb, 16}, {sm4_cbc, 16}, {sm4_ecb, 16}, {sm4_cfb, 16},
-               {sm4_ofb, 16}, {sm4_ctr, 16}, {sm4_gcm, 16}, {sm4_ccm, 16},
-               {aes_128_cbc, 16}, {aes_192_cbc, 24}, {aes_256_cbc, 32},
-               {aes_128_ofb, 16}, {aes_128_cfb8, 16}, {aes_128_cfb128, 16},
-               {aes_128_ecb, 16}, {aes_128_ctr, 16}, {chacha20, 32},
-               {chacha20_poly1305, 32}, {aes_128_gcm, 16}, {aes_256_ccm, 32},
-               {aes_cbc, 24}, {aes_ecb, 16}, {aes_128_cbc, 8}, {sm4_cbc, 8},
+    Ciphers = [{des_ede3_cbc, 24}, {sm4_cbc, 16}, {aes_128_cbc, 16}, {aes_192_cbc, 24},
+               {aes_256_cbc, 32}, {aes_cbc, 24}, {aes_128_cbc, 8}, {sm4_cbc, 8},
                {nosuch, 16}, {"aes_128_cbc", 16}],
-    Cmacs = [{Cipher, bad_reason(fun() ->
-                                         crypto:mac(cmac, Cipher, binary:copy(<<7>>, Size), <<"text">>)
-                                 end)}
-             || {Cipher, Size} <- Ciphers],
+    Cmacs = cmacs(Ciphers),
     Poly = [bad_reason(fun() -> crypto:mac(poly1305, Key, <<"text">>) end)
             || Key <- [binary:copy(<<3>>, 32), binary:copy(<<3>>, 31), <<>>]],
     MacErrors = [bad_reason(fun() -> crypto:mac(Type, Sub, Key, Text) end)
@@ -143,6 +132,31 @@ oneshot() ->
                             {<<"a">>, <<"ab">>}, {"ab", <<"ab">>}, {<<"ab">>, a},
                             {<<1:7>>, <<1:7>>}]],
     io:format("~p~n", [[Infos, Hashes, Hmacs, Cmacs, Poly, MacErrors, Equals]]).
+
+%% Write the results that depend on the libcrypto of the host: md4, and
+%% cmac with a cipher that is not CBC or that the OpenSSL 3 default
+%% provider does not have. The OpenSSL 3.5.8 of the pinned macOS ERTS has
+%% no md4 (digest.c:186-188), cannot fetch rc2, rc4, des, or blowfish
+%% (mac.c:344-347), and computes cmac only with a CBC cipher (mac.c:400-405).
+oneshot_host() ->
+    Md4 = [bad_reason(Fun) || Fun <- [fun() -> crypto:hash_info(md4) end,
+                                       fun() -> crypto:hash(md4, <<"abc">>) end,
+                                       fun() -> crypto:mac(hmac, md4, <<"key">>, <<"text">>) end]],
+    Ciphers = [{rc2_cbc, 16}, {rc4, 16}, {des_cbc, 8}, {des_cfb, 8}, {des_ecb, 8},
+               {des_ede3_cbc, 16}, {des_ede3_cfb, 24}, {blowfish_cbc, 16},
+               {blowfish_cfb64, 16}, {blowfish_ofb64, 16}, {blowfish_ecb, 16},
+               {sm4_ecb, 16}, {sm4_cfb, 16}, {sm4_ofb, 16}, {sm4_ctr, 16}, {sm4_gcm, 16},
+               {sm4_ccm, 16}, {aes_128_ofb, 16}, {aes_128_cfb8, 16}, {aes_128_cfb128, 16},
+               {aes_128_ecb, 16}, {aes_128_ctr, 16}, {chacha20, 32},
+               {chacha20_poly1305, 32}, {aes_128_gcm, 16}, {aes_256_ccm, 32},
+               {aes_ecb, 16}],
+    io:format("~p~n", [[Md4, cmacs(Ciphers)]]).
+
+cmacs(Ciphers) ->
+    [{Cipher, bad_reason(fun() ->
+                                 crypto:mac(cmac, Cipher, binary:copy(<<7>>, Size), <<"text">>)
+                         end)}
+     || {Cipher, Size} <- Ciphers].
 
 %% Write the sizes of hash_info/1 for the SHAKE digests. A fetched md gives
 %% 0 for an XOF (evp_lib.c:1041); the legacy EVP_shake* gives bitlen/8.
