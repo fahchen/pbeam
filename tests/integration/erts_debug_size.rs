@@ -66,7 +66,7 @@ fn gives_the_size_of_shared_and_unshared_terms_as_pinned_erts() {
     let expected = reference();
     assert_eq!(
         expected,
-        "{[0,0,0,0,2,5,3,6,3,3,8,0,3,6,4,8,2,3,6,12,15,8,11,2,10],[true,true,true,false,true,true,true,true],[fixnum,bignum,bignum,hfloat,atom,nil,list,tuple,flatmap,hashmap,'fun',export,pid,reference],[{},{1,2}],[{error,{badmap,a}},{error,badarg}]}\n"
+        "{[0,0,0,0,2,3,6,3,3,8,0,3,6,4,8,2,3,8,11,2,10],[true,true,true,false,true,true,true,true,true,true],[fixnum,bignum,bignum,hfloat,atom,nil,list,tuple,flatmap,hashmap,'fun',export,pid,reference],[{}],[{error,{badmap,a}},{error,badarg}]}\n"
     );
     // The host print of an exit reason does not quote the atom `fun`.
     assert_eq!(shown(), expected.replace("'fun'", "fun"));
@@ -85,6 +85,32 @@ fn fails_on_a_hashmap_because_pbeam_has_no_hamt_node_term() {
         error.contains("erts_internal:map_hashmap_children/1"),
         "{error}"
     );
+}
+
+#[test]
+fn fails_on_a_flatmap_with_keys_because_pbeam_keeps_no_key_tuple() {
+    // ERTS gives the key tuple that the flatmap holds (`erl_map.c:3318-3321`),
+    // and flatmaps can share it, so `size/1` counts it once. PBeam keeps no
+    // key tuple. On the pinned ERTS, `size_probe:flatmap()` gives 6.
+    let error = program()
+        .execute("size_probe", "flatmap", &[])
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("erts_internal:map_to_tuple_keys/1 cannot give"),
+        "{error}"
+    );
+}
+
+#[test]
+fn fails_on_two_equal_floats_because_pbeam_does_not_box_a_float() {
+    // ERTS compares the term words (`beam_debug.c:65-68`), and a float is
+    // boxed. On the pinned ERTS, `size_probe:float_pair()` gives 5.
+    let error = program()
+        .execute("size_probe", "float_pair", &[])
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("erts_debug:same/2 cannot tell"), "{error}");
 }
 
 #[test]

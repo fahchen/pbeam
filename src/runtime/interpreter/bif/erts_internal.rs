@@ -1929,22 +1929,47 @@ pub(super) fn term_type(atoms: &AtomTable, term: &Term) -> Result<BifResult, Bea
 /// Return the key tuple of a flatmap, as
 /// `erts_internal:map_to_tuple_keys/1` does (`erl_map.c:3318-3328`): a
 /// hashmap raises `error:badarg`, and another term raises
-/// `error:{badmap, Term}`. PBeam keeps no key tuple, so each call makes a
-/// new tuple that no other map shares (`docs/erts-differences.md`).
+/// `error:{badmap, Term}`. The empty map gives the empty tuple. PBeam keeps
+/// no key tuple, and ERTS shares one key tuple between flatmaps, so a new
+/// tuple would give a wrong `erts_debug:size/1`: a flatmap with keys stops
+/// the run with an unsupported error (`docs/erts-differences.md`).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(map_to_tuple_keys(&Term::Map(Map::new())), Value(Term::tuple(vec![])));
+/// assert_eq!(map_to_tuple_keys(&Term::Map(Map::new()))?, Value(Term::tuple(vec![])));
 /// ```
-pub(super) fn map_to_tuple_keys(term: &Term) -> BifResult {
+pub(super) fn map_to_tuple_keys(term: &Term) -> Result<BifResult, BeamError> {
     let Term::Map(map) = term else {
-        return maps::error_with("badmap", term);
+        return Ok(maps::error_with("badmap", term));
     };
     match map.flat_pairs() {
-        Some(pairs) => Value(Term::tuple(
-            pairs.iter().map(|(key, _)| key.clone()).collect(),
+        Some([]) => Ok(Value(Term::tuple(vec![]))),
+        Some(_) => Err(error(
+            "erts_internal:map_to_tuple_keys/1 cannot give the shared key tuple of a flatmap"
+                .to_owned(),
         )),
-        None => BifResult::badarg(),
+        None => Ok(BifResult::badarg()),
+    }
+}
+
+/// Return whether `left` and `right` are one ERTS term word, as
+/// `erts_debug:same/2` does (`beam_debug.c:65-68`). Two equal copies of a
+/// term that ERTS boxes and PBeam does not, such as a float, stop the run
+/// with an unsupported error, because PBeam cannot tell them apart
+/// (`docs/erts-differences.md`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(erts_debug_same(&Term::Nil, &Term::Nil)?, Value(Term::static_atom("true")));
+/// ```
+pub(super) fn erts_debug_same(left: &Term, right: &Term) -> Result<BifResult, BeamError> {
+    match left.same_object(right) {
+        Some(same) => Ok(Value(Term::static_atom(if same { "true" } else { "false" }))),
+        None => Err(error(
+            "erts_debug:same/2 cannot tell two equal copies of a float, a reference, or a 64-bit bignum apart"
+                .to_owned(),
+        )),
     }
 }

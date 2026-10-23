@@ -417,22 +417,22 @@ impl Term {
         }
     }
 
-    /// Return true when `self` and `other` are the same ERTS term word, as
+    /// Return whether `self` and `other` are the same ERTS term word, as
     /// `erts_debug:same/2` tests (`beam_debug.c:65-68`): an equal immediate,
-    /// or one shared container. PBeam does not box a float, a reference,
-    /// or an integer from 2^59 to 2^63 - 1 and from -(2^63) to -(2^59) - 1,
-    /// so two equal copies of one of them are the same here
-    /// (`docs/erts-differences.md`).
+    /// or one shared container. ERTS boxes a float, a reference, and an
+    /// integer from 2^59 to 2^63 - 1 and from -(2^63) to -(2^59) - 1, but
+    /// PBeam does not, so it cannot tell two equal copies of one of them
+    /// apart: return `None` for them (`docs/erts-differences.md`).
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// let list = Term::list_from([Term::Integer(1)]);
-    /// assert!(list.same_object(&list.clone()));
-    /// assert!(!list.same_object(&Term::list_from([Term::Integer(1)])));
+    /// assert_eq!(list.same_object(&list.clone()), Some(true));
+    /// assert_eq!(Term::Float(1.5).same_object(&Term::Float(1.5)), None);
     /// ```
-    pub(crate) fn same_object(&self, other: &Term) -> bool {
-        match (self, other) {
+    pub(crate) fn same_object(&self, other: &Term) -> Option<bool> {
+        Some(match (self, other) {
             (Term::Binary(left), Term::Binary(right)) => left.same_view(right),
             (Term::BigInt(left), Term::BigInt(right)) => Arc::ptr_eq(left, right),
             (Term::Cons(left), Term::Cons(right)) => left.same_cell(right),
@@ -440,8 +440,12 @@ impl Term {
             (Term::Map(left), Term::Map(right)) => left.same_form(right),
             (Term::Record(left), Term::Record(right)) => left.same_thing(right),
             (Term::Fun(left), Term::Fun(right)) => left.same_thing(right),
+            (Term::Float(_) | Term::Reference(_), _) if self == other => return None,
+            (Term::Integer(_), _) if self == other && self.small_integer().is_none() => {
+                return None;
+            }
             _ => self == other,
-        }
+        })
     }
 
     /// Return the value of an integer in the ERTS small-integer range,
