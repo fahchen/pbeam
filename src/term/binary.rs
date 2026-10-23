@@ -20,11 +20,8 @@
 //! that call, and the vector is in one `Arc`, so a copy of such a view is
 //! O(1). The `binary` command of `bs_match` reads a whole number of bytes
 //! at a bit position (`GET_BITSTRING`, jit/arm/instr_bs.cpp:3136-3176), so
-//! the packed view of that command is a supported path. PBeam has no
-//! bitstring term, so a segment whose size is not a whole number of bytes
-//! comes only from a path that PBeam does not run yet, and each such path
-//! stops with a runtime error (row "Bitstring terms" of
-//! `docs/erts-differences.md`).
+//! the packed view of that command is a supported path. A view whose size
+//! is not a whole number of bytes is a bitstring.
 //! [`Binary::to_bytes`] gives an owned vector to the code that changes
 //! bytes, such as a `bs_create_bin` append segment. The bytes of a binary
 //! contain no term, so the drop of a deep term does not walk them, and a
