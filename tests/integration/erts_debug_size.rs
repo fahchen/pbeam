@@ -66,7 +66,7 @@ fn gives_the_size_of_shared_and_unshared_terms_as_pinned_erts() {
     let expected = reference();
     assert_eq!(
         expected,
-        "{[0,0,0,0,2,3,6,3,3,8,0,3,6,4,8,2,3,8,11,2,10],[true,true,true,false,true,true,true,true,true,true],[fixnum,bignum,bignum,hfloat,atom,nil,list,tuple,flatmap,hashmap,'fun',export,pid,reference],[{}],[{error,{badmap,a}},{error,badarg}]}\n"
+        "{[0,0,0,0,2,3,6,3,3,8,0,3,6,4,8,2,3,8,11,2,10,5],[true,true,true,false,true,true,true,true,true,true,true,false,true],[fixnum,bignum,bignum,hfloat,atom,nil,list,tuple,flatmap,hashmap,'fun',export,pid,reference],[{}],[{error,{badmap,a}},{error,badarg}]}\n"
     );
     // The host print of an exit reason does not quote the atom `fun`.
     assert_eq!(shown(), expected.replace("'fun'", "fun"));

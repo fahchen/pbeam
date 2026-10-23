@@ -436,10 +436,21 @@ impl Term {
             (Term::Binary(left), Term::Binary(right)) => left.same_view(right),
             (Term::BigInt(left), Term::BigInt(right)) => Arc::ptr_eq(left, right),
             (Term::Cons(left), Term::Cons(right)) => left.same_cell(right),
-            (Term::Tuple(left), Term::Tuple(right)) => left.same_array(right),
+            // The empty tuple is one global literal (`copy.c:130-140`).
+            (Term::Tuple(left), Term::Tuple(right)) => {
+                left.same_array(right) || (left.is_empty() && right.is_empty())
+            }
             (Term::Map(left), Term::Map(right)) => left.same_form(right),
             (Term::Record(left), Term::Record(right)) => left.same_thing(right),
-            (Term::Fun(left), Term::Fun(right)) => left.same_thing(right),
+            // ERTS keeps one external fun literal in the export entry of a
+            // function, so two external funs of it are one term word
+            // (`export.h:60-62`).
+            (Term::Fun(left), Term::Fun(right)) => match (left.target(), right.target()) {
+                (Target::External { .. }, Target::External { .. }) => {
+                    left.target() == right.target()
+                }
+                _ => left.same_thing(right),
+            },
             (Term::Float(_) | Term::Reference(_), _) if self == other => return None,
             (Term::Integer(_), _) if self == other && self.small_integer().is_none() => {
                 return None;
