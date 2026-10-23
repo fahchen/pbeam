@@ -8,6 +8,8 @@ use crate::term::Reference;
 use num_bigint::BigInt;
 use std::sync::Arc;
 
+mod tree;
+
 /// The fewest and the most locks that the hidden option
 /// `{write_concurrency, {debug_hash_fixed_number_of_locks, N}}` accepts
 /// (`DB_WRITE_CONCURRENCY_MIN_LOCKS` and `DB_WRITE_CONCURRENCY_MAX_LOCKS`,
@@ -1067,30 +1069,6 @@ fn check_keypos(tuples: &[&[Term]], keypos: i32, bif: &str) -> Result<(), BeamEr
     Ok(())
 }
 
-/// Return a runtime error for an operation whose result depends on the key
-/// order of an `ordered_set` table. PBeam keeps the hash structure of the
-/// table, so it cannot give the ERTS key order; see "ETS tables" in
-/// `docs/erts-differences.md`.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// let table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
-/// assert!(reject_ordered_set(&table, "ets:select/2,3").is_ok());
-/// ```
-///
-/// # Errors
-///
-/// Return the runtime error for an `ordered_set` table.
-fn reject_ordered_set(table: &Table, bif: &str) -> Result<(), BeamError> {
-    if table.table_type() == TableType::OrderedSet {
-        return Err(error(format!(
-            "unsupported {bif} on an ordered_set table (see \"ETS tables\" in docs/erts-differences.md)"
-        )));
-    }
-    Ok(())
-}
-
 /// Return the tuples of `objects` when each one has at least `keypos`
 /// elements, as `ets_insert_2_list_check` (`erl_db.c:1812-1827`) checks
 /// them. A C `int` key position compares with the unsigned arity as a
@@ -1685,7 +1663,7 @@ pub(super) fn match_objects(
     pattern: &Term,
     limit: Option<&Term>,
 ) -> Result<BifResult, BeamError> {
-    select_objects(context, table, &match_specification(pattern), limit)
+    select_objects(context, table, &match_specification(pattern), limit, false)
 }
 
 /// Run `ets:match_object(Table, Pattern)`, as `ets_match_object_2`
@@ -1707,7 +1685,13 @@ pub(super) fn match_object(
     table: &Term,
     pattern: &Term,
 ) -> Result<BifResult, BeamError> {
-    select_objects(context, table, &match_object_specification(pattern), None)
+    select_objects(
+        context,
+        table,
+        &match_object_specification(pattern),
+        None,
+        false,
+    )
 }
 
 /// Run `ets:select(Table, MatchSpec)` or, with `Some(Limit)`,
@@ -1732,8 +1716,9 @@ pub(super) fn select(
     table: &Term,
     spec: &Term,
     limit: Option<&Term>,
+    reverse: bool,
 ) -> Result<BifResult, BeamError> {
-    select_objects(context, table, spec, limit)
+    select_objects(context, table, spec, limit, reverse)
 }
 
 /// Run [`select`] over the match specification `spec`.
@@ -1742,6 +1727,7 @@ fn select_objects(
     table: &Term,
     spec: &Term,
     limit: Option<&Term>,
+    reverse: bool,
 ) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
     let chunk = match limit.map(Term::small_integer) {
@@ -1760,6 +1746,7 @@ fn select_objects(
     let Some(id) = ets.id(atoms, table) else {
         return Ok(denied(EtsTables::missing(table)));
     };
+    let name = table;
     let table = match ets.read(atoms, &Term::Reference(id), caller, reds) {
         Ok(table) => table,
         Err(lacking) => {
@@ -1767,10 +1754,16 @@ fn select_objects(
             return Ok(retry(context, lacking, "select_trap", arguments));
         }
     };
-    reject_ordered_set(&table, "ets:select/2,3")?;
     let Some(compiled) = compile_spec(atoms, spec)? else {
         return Ok(BifResult::badarg());
     };
+    if table.table_type() == TableType::OrderedSet {
+        let chunk = chunk as i64;
+        let turn = tree::first_turn(atoms, &table, &compiled, chunk, reverse)?;
+        drop(table);
+        drop(ets);
+        return tree::finish(context, (name, id), &compiled, chunk, reverse, turn);
+    }
     // A key position below 1 compares as a large unsigned number with the
     // arity of the pattern (`db_getkey`, `erl_db_util.c:3940-3960`).
     let keypos = usize::try_from(table.keypos())
@@ -1952,6 +1945,7 @@ pub(super) fn match_trap(
 pub(super) fn select_continue(
     context: &mut BifContext<'_>,
     continuation: &Term,
+    bif: &'static str,
 ) -> Result<BifResult, BeamError> {
     if matches!(continuation, Term::Atom(atom) if atom.is_static("$end_of_table")) {
         return Ok(Value(Term::static_atom("$end_of_table")));
@@ -1959,17 +1953,9 @@ pub(super) fn select_continue(
     let Term::Tuple(elements) = continuation else {
         return Ok(BifResult::badarg());
     };
-    let [table, next, chunk, program, rest, size] = elements.as_ref() else {
+    let Some(table) = elements.first() else {
         return Ok(BifResult::badarg());
     };
-    let (Term::Integer(next), Term::Integer(chunk), Term::Reference(program), Term::Integer(size)) =
-        (next, chunk, program, size)
-    else {
-        return Ok(BifResult::badarg());
-    };
-    if *chunk < 0 || *size < 0 || !(rest.is_nil() || rest.cons_cell().is_some()) {
-        return Ok(BifResult::badarg());
-    }
     let caller = context.scheduler.current_process_mut().id;
     let reds = context
         .scheduler
@@ -1988,14 +1974,34 @@ pub(super) fn select_continue(
     let found = match ets.read(atoms, &Term::Reference(id), caller, reds) {
         Ok(table) => table,
         Err(lacking) => {
-            return Ok(retry(
-                context,
-                lacking,
-                "select",
-                vec![continuation.clone()],
-            ));
+            return Ok(retry(context, lacking, bif, vec![continuation.clone()]));
         }
     };
+    if found.table_type() == TableType::OrderedSet {
+        let Some(state) = tree::Continuation::read(elements) else {
+            return Ok(BifResult::badarg());
+        };
+        let Some(compiled) = ets.program(state.program) else {
+            return Ok(BifResult::badarg());
+        };
+        let compiled = compiled.clone();
+        let (chunk, reverse) = (state.chunk, state.reverse);
+        let turn = tree::next_turn(atoms, &found, &compiled, state)?;
+        drop(found);
+        drop(ets);
+        return tree::finish(context, (table, id), &compiled, chunk, reverse, turn);
+    }
+    let [_, next, chunk, program, rest, size] = elements.as_ref() else {
+        return Ok(BifResult::badarg());
+    };
+    let (Term::Integer(next), Term::Integer(chunk), Term::Reference(program), Term::Integer(size)) =
+        (next, chunk, program, size)
+    else {
+        return Ok(BifResult::badarg());
+    };
+    if *chunk < 0 || *size < 0 || !(rest.is_nil() || rest.cons_cell().is_some()) {
+        return Ok(BifResult::badarg());
+    }
     let writes = found.writes();
     let bucket = found.bucket_count();
     let Some(compiled) = ets.program(*program) else {
@@ -2041,6 +2047,58 @@ pub(super) fn select_continue(
         end.ok_or(bucket),
         iterations,
     )
+}
+
+/// Run the trap export `ets:select_delete_trap/1` of a select delete on an
+/// `ordered_set` table with the continuation
+/// `{Table, LastKey, LeastKey, Program, Count}`, as
+/// `ets_select_delete_trap_1` does (`erl_db.c:3387-3427`): a table that the
+/// caller cannot write any more raises `badarg`.
+///
+/// # Errors
+///
+/// Return the errors of [`tree::select_delete_next`].
+pub(super) fn select_delete_trap(
+    context: &mut BifContext<'_>,
+    arguments: &[Term],
+    (table, last, least, program, count): (&Term, &Term, &Term, Reference, i64),
+) -> Result<BifResult, BeamError> {
+    let caller = context.scheduler.current_process_mut().id;
+    let reds = context
+        .scheduler
+        .current_process_mut()
+        .bif_reductions_signed();
+    let atoms = &context.scheduler.atoms;
+    let store = Arc::clone(&context.scheduler.ets);
+    let ets = store.shared();
+    let mut taken = match ets.write(atoms, table, caller, reds) {
+        Ok(taken) => taken,
+        Err(lacking) => {
+            let arguments = arguments.to_vec();
+            return Ok(retry(context, lacking, "select_delete_trap", arguments));
+        }
+    };
+    let id = ets.id(atoms, table).expect("the table exists");
+    let compiled = ets
+        .program(program)
+        .cloned()
+        .expect("a trapped select delete keeps its program");
+    let (last, least) = (last.clone(), least.clone());
+    let turn = tree::select_delete_next(atoms, &mut taken, &compiled, last, least, count)?;
+    drop(taken);
+    drop(ets);
+    tree::delete_finish(context, (table, id), &compiled, Some(program), turn)
+}
+
+/// Run the trap export `ets:reverse/3` of a select with a limit on an
+/// `ordered_set` table ([`tree::reverse`]).
+pub(super) fn reverse(
+    context: &mut BifContext<'_>,
+    list: &Term,
+    result: &Term,
+    rest: &Term,
+) -> BifResult {
+    tree::reverse(context, list, result, rest)
 }
 
 /// Return the specification term of a compiled match specification. PBeam
@@ -2754,7 +2812,6 @@ pub(super) fn internal_select_delete(
     let Some(found) = ets.find(atoms, table) else {
         return Ok(denied(EtsTables::missing(table)));
     };
-    reject_ordered_set(&found.1, "ets:select_delete/2")?;
     drop(found);
     let mut taken = match ets.write(atoms, table, caller, reds) {
         Ok(taken) => taken,
@@ -2775,6 +2832,13 @@ pub(super) fn internal_select_delete(
         .ok()
         .filter(|&keypos| keypos > 0)
         .unwrap_or(usize::MAX);
+    if taken.table_type() == TableType::OrderedSet {
+        let id = ets.id(atoms, table).expect("the table exists");
+        let turn = tree::select_delete(atoms, &mut taken, &compiled)?;
+        drop(taken);
+        drop(ets);
+        return tree::delete_finish(context, (table, id), &compiled, None, turn);
+    }
     if compiled.matches_nothing(keypos) {
         return Ok(Value(Term::Integer(0)));
     }

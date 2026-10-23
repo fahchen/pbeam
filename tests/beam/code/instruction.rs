@@ -2433,11 +2433,11 @@ fn decodes_the_fun_instructions_of_the_fun_probe_fixture() {
     // The first five `FunT` entries of the fixture, with their free
     // variable counts.
     let lambdas = vec![
-        (lambda(0, 127, 1), 1),
-        (lambda(1, 125, 0), 0),
-        (lambda(2, 123, 1), 1),
-        (lambda(3, 121, 0), 0),
-        (lambda(4, 112, 1), 1),
+        (std::sync::Arc::new(lambda(0, 127, 1)), 1),
+        (std::sync::Arc::new(lambda(1, 125, 0)), 0),
+        (std::sync::Arc::new(lambda(2, 123, 1)), 1),
+        (std::sync::Arc::new(lambda(3, 121, 0)), 0),
+        (std::sync::Arc::new(lambda(4, 112, 1)), 1),
     ];
     let parse = |instructions: &[u8]| {
         parse_code(
@@ -2479,9 +2479,9 @@ fn decodes_the_fun_instructions_of_the_fun_probe_fixture() {
             Instruction::CallFun { arity: 1, function: Operand::X(1), tail: false, .. },
             Instruction::CallFun { arity: 0, function: Operand::Y(0), tail: false, .. },
             Instruction::End,
-        ] if **first == lambdas[4].0
+        ] if **first == *lambdas[4].0
             && matches!(free.as_slice(), [Operand::X(0)])
-            && **second == lambdas[1].0
+            && **second == *lambdas[1].0
             && empty.is_empty()
     ));
     let error = |instructions: &[u8]| parse(instructions).unwrap_err().to_string();
@@ -3002,17 +3002,27 @@ fn reads_bs_create_bin_segments_and_rejects_malformed_lists() {
     ));
     // {atom,binary} of unit 3 and size all; {atom,binary} of unit 8 and
     // size 8.
-    for segment in [
-        [0x22, 0x20, 0x30, 0x02, 0x03, 0x32],
-        [0x22, 0x20, 0x80, 0x02, 0x03, 0x81],
-    ] {
-        let mut bytes = vec![0x17, 0x60];
-        bytes.extend(segment);
-        assert!(matches!(
-            read(&bytes, b"").unwrap().as_slice(),
-            [BinarySegment::Unsupported(kind)] if kind == &atoms[segment[0] as usize / 16 - 1]
-        ));
-    }
+    assert!(matches!(
+        read(&[0x17, 0x60, 0x22, 0x20, 0x30, 0x02, 0x03, 0x32], b"")
+            .unwrap()
+            .as_slice(),
+        [BinarySegment::BinaryAll {
+            segment: 2,
+            unit: 3,
+            source: Operand::X(0)
+        }]
+    ));
+    assert!(matches!(
+        read(&[0x17, 0x60, 0x22, 0x20, 0x80, 0x02, 0x03, 0x81], b"")
+            .unwrap()
+            .as_slice(),
+        [BinarySegment::Binary {
+            segment: 2,
+            unit: 8,
+            source: Operand::X(0),
+            size: Operand::Value(Term::Integer(8)),
+        }]
+    ));
     // {atom,append},1,16,nil,{x,0},{atom,all} as the first segment.
     let segments = read(
         &[

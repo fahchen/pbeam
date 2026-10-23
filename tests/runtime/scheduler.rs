@@ -13,8 +13,8 @@ use crate::term::{AtomTable, test_atom};
 use crate::{
     runtime::ets::{Access, Table, TableType},
     runtime::process::{
-        Monitor, Origin, OriginMonitor, PendingBif, ProcessState, ReceiveTimer, StackSlot, Start,
-        TimerReference,
+        BifCall, Monitor, Origin, OriginMonitor, PendingBif, ProcessState, ReceiveTimer, StackSlot,
+        Start, TimerReference,
         tests::{frame, test_scheduler, test_scheduler_without_checks},
     },
     runtime::signal::Signal,
@@ -508,15 +508,15 @@ fn frees_the_name_of_a_process_when_it_exits() {
         .unwrap();
     let name = Term::Atom(scheduler.atoms.put("pbeam_probe_reg").unwrap());
     assert_eq!(scheduler.whereis("pbeam_probe_reg"), None);
-    assert!(scheduler.register(&name, &Term::Pid(child)));
-    assert!(!scheduler.register(&name, &Term::Pid(ProcessId(0))));
+    assert_eq!(scheduler.register(&name, &Term::Pid(child)), Ok(()));
+    assert!(scheduler.register(&name, &Term::Pid(ProcessId(0))).is_err());
     assert_eq!(scheduler.whereis("pbeam_probe_reg"), Some(child));
     scheduler.park_current();
 
     scheduler.schedule_next().unwrap();
     scheduler.finish_current(atom("normal"), None).unwrap();
     assert_eq!(scheduler.whereis("pbeam_probe_reg"), None);
-    assert!(scheduler.register(&name, &Term::Pid(ProcessId(0))));
+    assert_eq!(scheduler.register(&name, &Term::Pid(ProcessId(0))), Ok(()));
     assert_eq!(scheduler.whereis("pbeam_probe_reg"), Some(ProcessId(0)));
     assert_eq!(
         scheduler.processes[&ProcessId(0)]
@@ -1154,6 +1154,12 @@ fn moves_the_containers_of_an_exiting_process_to_the_release_work_list() {
             function: "length",
             arguments: vec![marker(6)],
             tail: false,
+            origin: Some(BifCall {
+                module: "erlang".to_owned(),
+                name: "length".to_owned(),
+                arguments: vec![marker(6)],
+                skip: 0,
+            }),
         });
         process.length_trap = Some(vec![marker(7)]);
         process.monitors.insert(
@@ -1172,15 +1178,16 @@ fn moves_the_containers_of_an_exiting_process_to_the_release_work_list() {
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
     scheduler.finish_current(atom("normal"), None).unwrap();
     let items: Vec<&Release> = scheduler.release.iter().collect();
-    assert_eq!(items.len(), 8, "the exit moves eight containers");
+    assert_eq!(items.len(), 9, "the exit moves nine containers");
     assert!(matches!(items[0], Release::Terms(_)));
     assert!(matches!(items[1], Release::Terms(_)));
-    assert!(matches!(items[2], Release::Term(reason) if *reason == atom("normal")));
-    assert!(matches!(items[3], Release::Registers(_)));
-    assert!(matches!(items[4], Release::Frames(_)));
-    assert!(matches!(items[5], Release::Mailbox(_)));
-    assert!(matches!(items[6], Release::Dictionary(_)));
-    assert!(matches!(items[7], Release::Monitors(_)));
+    assert!(matches!(items[2], Release::Terms(_)));
+    assert!(matches!(items[3], Release::Term(reason) if *reason == atom("normal")));
+    assert!(matches!(items[4], Release::Registers(_)));
+    assert!(matches!(items[5], Release::Frames(_)));
+    assert!(matches!(items[6], Release::Mailbox(_)));
+    assert!(matches!(items[7], Release::Dictionary(_)));
+    assert!(matches!(items[8], Release::Monitors(_)));
     release_all(&mut scheduler);
     assert!(scheduler.release.is_empty());
 }
@@ -1217,6 +1224,7 @@ fn releases_the_terms_of_every_container_of_an_exiting_process() {
             function: "length",
             arguments: vec![pending.clone()],
             tail: false,
+            origin: None,
         });
         process.length_trap = Some(vec![length_trap.clone()]);
         process.monitors.insert(
@@ -1669,6 +1677,7 @@ fn counts_the_bytes_of_the_release_work_list() {
             function: "length",
             arguments: vec![marker(8)],
             tail: false,
+            origin: None,
         });
         process.length_trap = Some(vec![marker(9)]);
         process.monitors.insert(
@@ -2501,10 +2510,16 @@ fn a_scheduler_registers_a_name_for_a_remote_process() {
         Scheduler::with_shared(Arc::new(atoms), Arc::clone(&node), 0, readers.remove(0));
     let remote = ProcessId(7);
     node.register(remote, 1);
-    assert!(scheduler.register(&Term::Atom(first.clone()), &Term::Pid(remote)));
+    assert_eq!(
+        scheduler.register(&Term::Atom(first.clone()), &Term::Pid(remote)),
+        Ok(())
+    );
     assert_eq!(scheduler.registered_name_of(remote), Some(first.clone()));
     // One process has one name.
-    assert!(!scheduler.register(&Term::Atom(second), &Term::Pid(remote)));
+    assert_eq!(
+        scheduler.register(&Term::Atom(second), &Term::Pid(remote)),
+        Err("registered_name")
+    );
     assert!(scheduler.unregister(&Term::Atom(first)));
     assert_eq!(scheduler.registered_name_of(remote), None);
 }

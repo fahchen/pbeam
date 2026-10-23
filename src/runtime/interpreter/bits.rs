@@ -31,9 +31,14 @@ impl BitWriter {
     /// writer.push_bits(0xA, 4);
     /// writer.push_bits(0xBC, 8);
     /// writer.push_bits(0xD, 4);
-    /// assert_eq!(writer.into_bytes(), Ok(vec![0xAB, 0xCD]));
+    /// assert_eq!(writer.into_bytes(), (vec![0xAB, 0xCD], 16));
     /// ```
     pub(super) fn push_bits(&mut self, chunk: u8, count: u32) {
+        if count == 8 && self.bits.is_multiple_of(8) {
+            self.bytes.push(chunk);
+            self.bits += 8;
+            return;
+        }
         let chunk = chunk & (u8::MAX >> (8 - count));
         let free = (8 - self.bits % 8) as u32 % 8;
         match self.bytes.last_mut() {
@@ -56,7 +61,7 @@ impl BitWriter {
     /// writer.push_bits(0x1, 4);
     /// writer.push_bytes(&[0x23]);
     /// writer.push_bits(0x4, 4);
-    /// assert_eq!(writer.into_bytes(), Ok(vec![0x12, 0x34]));
+    /// assert_eq!(writer.into_bytes(), (vec![0x12, 0x34], 16));
     /// ```
     pub(super) fn push_bytes(&mut self, bytes: &[u8]) {
         if self.bits.is_multiple_of(8) {
@@ -69,22 +74,35 @@ impl BitWriter {
         }
     }
 
-    /// Write the bits of `binary` at the current bit offset: its whole
-    /// bytes, then the last bits of a size that is not a whole number of
-    /// bytes, as `erts_bs_put_binary_all` copies each bit of a bitstring
-    /// (`erl_bits.c:1311-1332`).
+    /// Write the first `size` bits of `binary` at the current bit offset:
+    /// its whole bytes, then the last bits of a size that is not a whole
+    /// number of bytes, as `erts_bs_put_binary_all` and `erts_bs_put_binary`
+    /// copy the bits of a bitstring (`erl_bits.c:1285-1332`). `size` is at
+    /// most the bit size of `binary`.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// let mut writer = BitWriter::default();
-    /// writer.push_binary(&Binary::from(vec![0x10]).bits(0, 4));
-    /// writer.push_binary(&Binary::from(vec![0x20]).bits(0, 4));
-    /// assert_eq!(writer.into_bytes(), Ok(vec![0x12]));
+    /// writer.push_binary(&Binary::from(vec![0x10]).bits(0, 4), 4);
+    /// writer.push_binary(&Binary::from(vec![0x2F]), 4);
+    /// assert_eq!(writer.into_bytes(), (vec![0x12], 8));
     /// ```
-    pub(super) fn push_binary(&mut self, binary: &Binary) {
-        let size = binary.bit_size();
-        let bits = binary.bit_bytes();
+    pub(super) fn push_binary(&mut self, binary: &Binary, size: usize) {
+        self.push_bit_bytes(binary.bit_bytes(), size);
+    }
+
+    /// Write the first `size` bits of the bytes `bits` at the current bit
+    /// offset, from the most significant bit of the first byte.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut writer = BitWriter::default();
+    /// writer.push_bit_bytes(&[0x12, 0x30], 12);
+    /// assert_eq!(writer.into_bytes(), (vec![0x12, 0x30], 12));
+    /// ```
+    pub(super) fn push_bit_bytes(&mut self, bits: &[u8], size: usize) {
         self.push_bytes(&bits[..size / 8]);
         if !size.is_multiple_of(8) {
             self.push_bits(bits[size / 8] >> (8 - size % 8), (size % 8) as u32);
@@ -104,7 +122,7 @@ impl BitWriter {
     /// let mut writer = BitWriter::default();
     /// writer.push_integer(0xABC, 12, true); // <<16#ABC:12/little>>
     /// writer.push_integer(0xD, 4, false);
-    /// assert_eq!(writer.into_bytes(), Ok(vec![0xBC, 0xAD]));
+    /// assert_eq!(writer.into_bytes(), (vec![0xBC, 0xAD], 16));
     /// ```
     pub(super) fn push_integer(&mut self, value: i64, bits: u64, little: bool) {
         let byte_at = |shift: u64| (value >> shift.min(63)) as u8;
@@ -124,23 +142,35 @@ impl BitWriter {
         }
     }
 
-    /// Return the bytes when the number of written bits is a multiple of 8.
-    /// Else return the number of bits: the result is a bitstring that is
-    /// not a binary, which PBeam has no term for.
+    /// Return the written bytes and the number of written bits. The unused
+    /// low bits of the last byte are 0, as in an ERTS bitstring.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// let mut writer = BitWriter::default();
     /// writer.push_bits(1, 4);
-    /// assert_eq!(writer.into_bytes(), Err(4));
+    /// assert_eq!(writer.into_bytes(), (vec![0x10], 4));
     /// ```
-    pub(super) fn into_bytes(self) -> Result<Vec<u8>, u64> {
-        if self.bits.is_multiple_of(8) {
-            Ok(self.bytes)
-        } else {
-            Err(self.bits)
-        }
+    /// Return a writer that holds the first `bits` bits of `bytes`, as
+    /// [`BitWriter::into_bytes`] gave them.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(BitWriter::from_bytes(vec![0x20], 3).bit_size(), 3);
+    /// ```
+    pub(super) fn from_bytes(bytes: Vec<u8>, bits: u64) -> Self {
+        BitWriter { bytes, bits }
+    }
+
+    /// Return the number of written bits.
+    pub(super) fn bit_size(&self) -> u64 {
+        self.bits
+    }
+
+    pub(super) fn into_bytes(self) -> (Vec<u8>, u64) {
+        (self.bytes, self.bits)
     }
 }
 

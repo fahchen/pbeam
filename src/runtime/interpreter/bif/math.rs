@@ -50,14 +50,20 @@ fn finite_float(value: f64) -> BifResult {
 }
 
 /// Run a `math` BIF of one argument through the function of the C library
-/// that ERTS calls (`math_call_1`, `erl_math.c:35-63`).
+/// that ERTS calls (`math_call_1`, `erl_math.c:35-63`). The table gives the
+/// `math` BIFs of `erl_math.c:143-292` that call `sin`, `cos`, `tan`,
+/// `asin`, `acos`, `atan`, `sinh`, `cosh`, `tanh`, `log2`, `ceil`, and
+/// `floor` to it; the `f64` method of each calls the function of the C
+/// library of the platform. `math_call_errno_1` of `acos` and `asin`
+/// (`erl_math.c:69-96`) adds no case: a C99 library returns NaN
+/// for a domain error, and [`finite_float`] raises `badarith` for it.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// assert!(matches!(call_1(f64::exp, &Term::Integer(1)), BifResult::Value(Term::Float(value)) if value == 2.718281828459045));
 /// ```
-fn call_1(function: fn(f64) -> f64, argument: &Term) -> BifResult {
+pub(super) fn call_1(function: fn(f64) -> f64, argument: &Term) -> BifResult {
     match double(argument) {
         Ok(value) => finite_float(function(value)),
         Err(error) => error,
@@ -130,8 +136,37 @@ pub(super) fn sqrt(argument: &Term) -> BifResult {
 /// assert!(matches!(pow(&Term::Integer(1), &Term::nil()), BifResult::Raise { .. }));
 /// ```
 pub(super) fn pow(left: &Term, right: &Term) -> BifResult {
+    call_2(f64::powf, left, right)
+}
+
+/// Run a `math` BIF of two arguments through the function of the C library
+/// that ERTS calls (`math_call_2`, `erl_math.c:98-141`). The first argument
+/// that gives no double gives the error. The table gives `math:atan2/2`
+/// (`erl_math.c:274-277`, `f64::atan2`) and `math:fmod/2`
+/// (`erl_math.c:294-297`, [`fmod`]) to it.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(call_2(f64::atan2, &Term::Integer(0), &Term::Integer(1)), BifResult::Value(Term::Float(value)) if value == 0.0));
+/// ```
+pub(super) fn call_2(function: fn(f64, f64) -> f64, left: &Term, right: &Term) -> BifResult {
     match (double(left), double(right)) {
-        (Ok(left), Ok(right)) => finite_float(left.powf(right)),
+        (Ok(left), Ok(right)) => finite_float(function(left, right)),
         (Err(error), _) | (_, Err(error)) => error,
     }
+}
+
+/// Return the C `fmod` of two doubles. The Rust `%` of `f64` is the exact
+/// remainder with the sign of the dividend, as C `fmod` is, and a zero
+/// divisor gives NaN, so `math:fmod(1, 0)` raises `badarith`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(fmod(-5.0, 3.0), -2.0);
+/// assert!(fmod(1.0, 0.0).is_nan());
+/// ```
+pub(super) fn fmod(left: f64, right: f64) -> f64 {
+    left % right
 }

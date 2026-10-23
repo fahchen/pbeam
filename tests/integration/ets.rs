@@ -474,6 +474,10 @@ fn text(term: &Term, atoms: &pbeam_runtime::AtomTable) -> String {
             format!("[{}]", join(&terms.cloned().collect::<Vec<_>>()))
         }
         Term::Tuple(terms) => format!("{{{}}}", join(terms)),
+        Term::Cons(_) => {
+            let (head, tail) = term.cons_cell().unwrap();
+            format!("[{}|{}]", text(head, atoms), text(tail, atoms))
+        }
         other => panic!("unexpected term {other:?}"),
     }
 }
@@ -543,11 +547,6 @@ fn rejects_tables_that_pbeam_cannot_model() {
         (
             "select_delete_unsupported",
             "match specification function round/1",
-        ),
-        ("ordered_select", "select/2,3 on an ordered_set table"),
-        (
-            "ordered_select_delete",
-            "select_delete/2 on an ordered_set table",
         ),
         ("heir", "new/2 heir ProcessId("),
         ("heir_data", "new/2 heir ProcessId("),
@@ -704,6 +703,9 @@ fn runs_the_select_and_iteration_bifs_as_pinned_erts() {
         "select_reductions",
         "ordered_set",
         "ordered_set_reductions",
+        "ordered_select",
+        "ordered_select_large",
+        "select_reverse",
         "take",
         "first",
         "walk",

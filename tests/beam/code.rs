@@ -495,19 +495,26 @@ fn reads_the_lambda_table_as_parse_lambda_chunk() {
     // slot.
     let entries = [[2, 2, 127, 0, 1, 31_263_486], [0, 0, 51, 1, 0, 7]];
     assert_eq!(
-        parse_lambdas(&lambda_table(2, &entries), &atoms).unwrap(),
+        parse_lambdas(&lambda_table(2, &entries), &atoms, [9; 16]).unwrap(),
         vec![
-            (Lambda::new(module.clone(), 0, 0, 31_263_486, 127, 1), 1),
-            (Lambda::new(module, 1, 1, 7, 51, 0), 0),
+            (
+                std::sync::Arc::new(Lambda::new(module.clone(), 0, 0, 31_263_486, 127, 1)),
+                1
+            ),
+            (std::sync::Arc::new(Lambda::new(module, 1, 1, 7, 51, 0)), 0),
         ]
     );
     assert_eq!(
-        parse_lambdas(&lambda_table(1, &entries), &atoms)
+        parse_lambdas(&lambda_table(1, &entries), &atoms, [9; 16])
             .unwrap()
             .len(),
         1
     );
-    let error = |bytes: Vec<u8>| parse_lambdas(&bytes, &atoms).unwrap_err().to_string();
+    let error = |bytes: Vec<u8>| {
+        parse_lambdas(&bytes, &atoms, [9; 16])
+            .unwrap_err()
+            .to_string()
+    };
     assert_eq!(error(lambda_table(-1, &[])), "negative BEAM lambda count");
     assert_eq!(
         error(lambda_table(2, &entries[..1])),

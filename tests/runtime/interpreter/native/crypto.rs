@@ -244,27 +244,6 @@ fn raises_the_erts_error_for_a_bad_digest_type_or_data() {
 }
 
 #[test]
-fn stops_for_a_known_digest_that_pbeam_does_not_compute() {
-    let mut scheduler = scheduler();
-    let data = Term::binary(b"abc".to_vec());
-    for name in [
-        "md4",
-        "md5",
-        "ripemd160",
-        "sha3_256",
-        "shake128",
-        "sm3",
-        "blake2b",
-        "blake2s",
-    ] {
-        let digest = atom(&mut scheduler, name);
-        let result = hash_nif(&mut scheduler, &digest, &data);
-        let error = result.unwrap_err();
-        assert!(error.to_string().contains(name), "{error}");
-    }
-}
-
-#[test]
 fn gives_the_pinned_erts_pbkdf2_value_for_each_eligible_digest() {
     let mut scheduler = scheduler();
     let password = Term::binary(b"password".to_vec());
@@ -465,6 +444,57 @@ fn truncates_the_pbkdf2_iterations_to_a_c_int_as_erts() {
 }
 
 #[test]
+fn bounds_the_key_length_to_a_c_int() {
+    let mut scheduler = scheduler();
+    let sha = atom(&mut scheduler, "sha256");
+    let password = Term::binary(b"p".to_vec());
+    let salt = Term::binary(b"s".to_vec());
+    // The reservation is virtual: no page of it is written.
+    let negative = pbkdf2_hmac_nif(
+        &mut scheduler,
+        &sha,
+        &password,
+        &salt,
+        &Term::Integer(1),
+        &Term::Integer(1 << 31),
+    )
+    .unwrap();
+    assert_c_error(
+        negative,
+        &scheduler.atoms.clone(),
+        ("error", "pbkdf2_hmac.c", 63, -1, "Low-level call failed"),
+    );
+    let wrapped = pbkdf2_hmac_nif(
+        &mut scheduler,
+        &sha,
+        &password,
+        &salt,
+        &Term::Integer(1),
+        &Term::Integer((1 << 32) + 1),
+    );
+    assert_int_max_error(wrapped);
+    let zero = pbkdf2_hmac_nif(
+        &mut scheduler,
+        &sha,
+        &password,
+        &salt,
+        &Term::Integer(1),
+        &Term::Integer(1 << 32),
+    );
+    assert_int_max_error(zero);
+}
+
+fn assert_int_max_error(result: Result<BifResult, BeamError>) {
+    let Err(error) = result else {
+        panic!("a key length above INT_MAX stops the run");
+    };
+    assert!(
+        format!("{error:?}").contains("longer than INT_MAX bytes"),
+        "{error:?}"
+    );
+}
+
+#[test]
 fn gives_the_allocation_error_of_a_key_length_that_does_not_fit() {
     let mut scheduler = scheduler();
     let sha = atom(&mut scheduler, "sha");
@@ -486,16 +516,16 @@ fn gives_the_allocation_error_of_a_key_length_that_does_not_fit() {
 
 #[test]
 fn hashes_keys_longer_than_the_digest_block() {
-    let mut output = Vec::new();
-    pbkdf2_blocks::<Sha256>(64, &[7; 100], b"salt", 1, 32, &mut output);
-    assert_eq!(output.len(), 32);
-    assert_ne!(output, pbkdf2_blocks_value::<Sha256>(b"salt"));
-}
-
-fn pbkdf2_blocks_value<D: Digest>(salt: &[u8]) -> Vec<u8> {
-    let mut output = Vec::new();
-    pbkdf2_blocks::<D>(64, b"password", salt, 1, 32, &mut output);
-    output
+    let mut long = Vec::new();
+    Hash::Sha256
+        .pbkdf2(&[7; 100], b"salt", 1, 32, &mut long)
+        .unwrap();
+    let mut short = Vec::new();
+    Hash::Sha256
+        .pbkdf2(b"password", b"salt", 1, 32, &mut short)
+        .unwrap();
+    assert_eq!(long.len(), 32);
+    assert_ne!(long, short);
 }
 
 #[test]
@@ -570,23 +600,24 @@ fn gives_the_pinned_erts_info() {
     );
     assert_eq!(
         map_field(&info, "cryptolib_version_compiled", &atoms),
-        Some(&string(OPENSSL_VERSION))
+        Some(&string(openssl_version()))
     );
     assert_eq!(
         map_field(&info, "cryptolib_version_linked", &atoms),
-        Some(&string(OPENSSL_VERSION))
+        Some(&string(openssl_version()))
     );
     assert_eq!(
         map_field(&info, "fips_provider_available", &atoms),
         Some(&Term::static_atom("false"))
     );
+    assert!(openssl_version().starts_with("OpenSSL 3.5.5 "));
     let BifResult::Value(lib) = info_lib() else {
         panic!("info_lib gives a list");
     };
     let expected = Term::list_from([Term::tuple(vec![
         Term::binary(b"OpenSSL".to_vec()),
-        Term::Integer(810549376),
-        Term::binary(OPENSSL_VERSION.as_bytes().to_vec()),
+        Term::Integer(0x3050_0050),
+        Term::binary(openssl_version().as_bytes().to_vec()),
     ])]);
     assert_eq!(lib, expected);
 }

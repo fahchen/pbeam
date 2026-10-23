@@ -335,27 +335,51 @@ fn gives_fun_information_as_pinned_erts() {
 }
 
 #[test]
-fn rejects_fun_info_items_the_loader_keeps_no_value_for() {
-    // The loader of PBeam keeps no old index of a `FunT` entry, no MD5 of
-    // the module, and no init process ID (`jit/asm_load.c:1218-1223`), so a
-    // local fun stops the run with a clear runtime error at these items.
-    // This is the "Fun information" row in `docs/erts-differences.md`.
+fn gives_the_fun_entry_items_of_a_local_fun_as_pinned_erts() {
+    // `fun_info_2` gives the old index of the fun entry for `index`, the
+    // module MD5 for `new_uniq`, and `erts_init_process_id`, `<0.0.0>`, for
+    // `pid` (`erl_bif_info.c:3943-3967`). The loader keeps the MD5 that
+    // `beamfile_read` computes (`beam_file.c:1751-1830`).
     let program = BeamProgram::load(&[FUN_PROBE]).unwrap();
+    let mut texts = Vec::new();
     for item in ["index", "new_uniq", "pid"] {
-        let message = format!("unsupported erlang:fun_info/2 item {item}");
         let item = Term::Atom(program.atom(item).unwrap());
-        let error = program
+        let result = program
             .execute(
                 "fun_probe",
                 "fun_info_unsupported",
                 &[program.host_term(item)],
             )
-            .unwrap_err();
-        assert!(
-            error.to_string().contains(&message),
-            "expected {message}, got {error}"
-        );
+            .unwrap();
+        let value = result.term.tuple_elements().unwrap()[1].clone();
+        texts.push(match value {
+            Term::Integer(index) => format!("{{index,{index}}}"),
+            Term::Pid(_) => {
+                assert_eq!(format!("{value:?}"), "Pid(ProcessId(0))");
+                "{pid,<0.0.0>}".to_owned()
+            }
+            binary => {
+                let bytes = binary.binary_bytes().unwrap();
+                let bytes = bytes.iter().map(u8::to_string).collect::<Vec<_>>();
+                format!("{{new_uniq,<<{}>>}}", bytes.join(","))
+            }
+        });
     }
+    let reference = Command::new("erl")
+        .args([
+            "-noshell",
+            "-pa",
+            "fixtures/funs",
+            "-eval",
+            "io:format(\"~w~n\", [[fun_probe:fun_info_unsupported(I) || I <- [index, new_uniq, pid]]]), halt().",
+        ])
+        .output()
+        .unwrap();
+    assert!(reference.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&reference.stdout),
+        format!("[{}]\n", texts.join(","))
+    );
 }
 
 #[test]

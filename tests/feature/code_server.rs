@@ -357,6 +357,113 @@ fn runs_the_linked_crypto_nifs_as_pinned_erts() {
 }
 
 #[test]
+fn runs_the_one_shot_crypto_hashes_and_macs_as_pinned_erts() {
+    // hash_info/1, hash_nif/2 for each digest, mac_nif/4 for hmac, cmac,
+    // and poly1305, and hash_equals_nif/2 (hash.c:74-164, mac.c:188-505,
+    // hash_equals.c:27-53), with the error tuple of each failed check.
+    let erts = run(&mut erts_probe(
+        CRYPTO_PROBE,
+        "crypto_probe",
+        "oneshot",
+        &[],
+    ));
+    assert!(erts.contains("Couldn't get mac"), "{erts}");
+    // md4 and cmac with a cipher that is not CBC depend on the libcrypto of
+    // the host (digest.c:186-188, mac.c:344-347, 400-405). PBeam links a
+    // vendored OpenSSL 3.5.5 without the legacy provider, so its output does
+    // not depend on the host. The literal is the output of the pinned macOS
+    // ERTS (OpenSSL 3.5.8); the Linux CI ERTS links a libcrypto with md4,
+    // the legacy ciphers, and cmac for each mode.
+    let pbeam = run(&mut pbeam_probe(
+        CRYPTO_PROBE,
+        "crypto_probe",
+        "oneshot_host",
+        &[],
+    ));
+    assert_eq!(pbeam, ONESHOT_HOST);
+    if cfg!(target_os = "macos") {
+        let erts = run(&mut erts_probe(
+            CRYPTO_PROBE,
+            "crypto_probe",
+            "oneshot_host",
+            &[],
+        ));
+        assert_eq!(erts, ONESHOT_HOST);
+    }
+    assert_eq!(
+        run(&mut pbeam_probe(
+            CRYPTO_PROBE,
+            "crypto_probe",
+            "oneshot",
+            &[]
+        )),
+        erts
+    );
+    // A fetched SHAKE md gives 16/32 on OpenSSL 3.0-3.3 and 0 from 3.4
+    // (hash.c:90-94, evp_lib.c:1041 in 3.5.5). The pinned macOS ERTS gives
+    // 0; the Linux CI ERTS links OpenSSL 3.0.x.
+    let erts = run(&mut erts_probe(
+        CRYPTO_PROBE,
+        "crypto_probe",
+        "xof_sizes",
+        &[],
+    ));
+    assert!(matches!(erts.as_str(), "[0,0]\n" | "[16,32]\n"), "{erts}");
+    assert_eq!(
+        run(&mut pbeam_probe(
+            CRYPTO_PROBE,
+            "crypto_probe",
+            "xof_sizes",
+            &[]
+        )),
+        "[0,0]\n"
+    );
+}
+
+#[test]
+fn gives_the_crypto_algorithm_lists_and_fips_status_as_pinned_erts() {
+    // The pinned ERTS lists each algorithm of its OpenSSL: 187 on macOS
+    // and 177 with the libcrypto of the Linux CI host (algorithms.c:86-224,
+    // digest.c:226-242, crypto.erl:843-895). PBeam lists only the 18 digests
+    // and 3 MACs that it computes, in the ERTS order, so the items that
+    // PBeam can run are the same.
+    let erts = run(&mut erts_probe(
+        CRYPTO_PROBE,
+        "crypto_probe",
+        "supports",
+        &[],
+    ));
+    let pbeam = run(&mut pbeam_probe(
+        CRYPTO_PROBE,
+        "crypto_probe",
+        "supports",
+        &[],
+    ));
+    let items = "[{hashs,[blake2s,blake2b,sm3,shake256,shake128,sha3_512,sha3_384,sha3_256,\n          \
+                 sha3_224,sha512_256,sha512_224,sha512,sha384,sha256,sha224,sha,\n          \
+                 ripemd160,md5]},\n  \
+                 {ciphers,[]},\n  \
+                 {kems,[]},\n  \
+                 {public_keys,[]},\n  \
+                 {macs,[cmac,hmac,poly1305]},\n  \
+                 {curves,[]},\n  \
+                 {rsa_opts,[]}]";
+    let rest = format!(",\n {items},\n false,true]\n");
+    let count = erts
+        .strip_suffix(rest.as_str())
+        .and_then(|head| head.strip_prefix('['));
+    assert!(matches!(count, Some("187" | "177")), "{erts}");
+    assert_eq!(pbeam, format!("[21,\n {items},\n true,true]\n"));
+    // A build without FIPS support (fips.c:27-62).
+    let erts = run(&mut erts_probe(CRYPTO_PROBE, "crypto_probe", "fips", &[]));
+    assert_eq!(erts, "[not_supported,false,true,{error,badarg}]\n");
+    assert_eq!(
+        run(&mut pbeam_probe(CRYPTO_PROBE, "crypto_probe", "fips", &[])),
+        erts
+    );
+}
+
+#[test]
 fn stops_with_a_runtime_error_for_an_unsupported_crypto_nif() {
     // PBeam does not link `hash_init_nif/1`, which `crypto:hash_init/1`
     // calls (crypto.erl:1160). `crypto:hash/2` sends an input of more than
@@ -710,6 +817,42 @@ fn erts(flags: &[&str]) -> Command {
 /// ```rust,ignore
 /// let output = run(&mut erts_probe(ON_LOAD_PROBE, "on_load_server_probe", "main", &[]));
 /// ```
+/// The output of `crypto_probe:oneshot_host/0` on the pinned macOS ERTS.
+const ONESHOT_HOST: &str = r#"[[{error,notsup},
+  {error,{notsup,{"hash.c",115},
+                 "Digest type not supported in this cryptolib"}},
+  {error,{error,{"mac.c",405},"Couldn't get mac"}}],
+ [{rc2_cbc,{error,{notsup,{"mac.c",346},"Unsupported cipher algorithm"}}},
+  {rc4,{error,{notsup,{"mac.c",346},"Unsupported cipher algorithm"}}},
+  {des_cbc,{error,{notsup,{"mac.c",346},"Unsupported cipher algorithm"}}},
+  {des_cfb,{error,{notsup,{"mac.c",346},"Unsupported cipher algorithm"}}},
+  {des_ecb,{error,{notsup,{"mac.c",346},"Unsupported cipher algorithm"}}},
+  {des_ede3_cbc,{error,{error,{"mac.c",405},"Couldn't get mac"}}},
+  {des_ede3_cfb,{error,{error,{"mac.c",405},"Couldn't get mac"}}},
+  {blowfish_cbc,{error,{notsup,{"mac.c",346},"Unsupported cipher algorithm"}}},
+  {blowfish_cfb64,{error,{notsup,{"mac.c",346},
+                                 "Unsupported cipher algorithm"}}},
+  {blowfish_ofb64,{error,{notsup,{"mac.c",346},
+                                 "Unsupported cipher algorithm"}}},
+  {blowfish_ecb,{error,{notsup,{"mac.c",346},"Unsupported cipher algorithm"}}},
+  {sm4_ecb,{error,{error,{"mac.c",405},"Couldn't get mac"}}},
+  {sm4_cfb,{error,{error,{"mac.c",405},"Couldn't get mac"}}},
+  {sm4_ofb,{error,{error,{"mac.c",405},"Couldn't get mac"}}},
+  {sm4_ctr,{error,{error,{"mac.c",405},"Couldn't get mac"}}},
+  {sm4_gcm,{error,{error,{"mac.c",405},"Couldn't get mac"}}},
+  {sm4_ccm,{error,{error,{"mac.c",405},"Couldn't get mac"}}},
+  {aes_128_ofb,{error,{error,{"mac.c",405},"Couldn't get mac"}}},
+  {aes_128_cfb8,{error,{error,{"mac.c",405},"Couldn't get mac"}}},
+  {aes_128_cfb128,{error,{error,{"mac.c",405},"Couldn't get mac"}}},
+  {aes_128_ecb,{error,{error,{"mac.c",405},"Couldn't get mac"}}},
+  {aes_128_ctr,{error,{error,{"mac.c",405},"Couldn't get mac"}}},
+  {chacha20,{error,{error,{"mac.c",405},"Couldn't get mac"}}},
+  {chacha20_poly1305,{error,{error,{"mac.c",405},"Couldn't get mac"}}},
+  {aes_128_gcm,{error,{error,{"mac.c",405},"Couldn't get mac"}}},
+  {aes_256_ccm,{error,{error,{"mac.c",405},"Couldn't get mac"}}},
+  {aes_ecb,{error,{error,{"mac.c",405},"Couldn't get mac"}}}]]
+"#;
+
 fn erts_probe(probe: &str, module: &str, function: &str, flags: &[&str]) -> Command {
     let mut command = Command::new("erl");
     command.args([

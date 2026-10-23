@@ -1032,6 +1032,9 @@ impl Scheduler {
         // batches.
         if let Some(bif) = process.pending_bif.take() {
             self.release.push(Release::Terms(bif.arguments));
+            if let Some(origin) = bif.origin {
+                self.release.push(Release::Terms(origin.arguments));
+            }
         }
         if let Some(arguments) = process.length_trap.take() {
             self.release.push(Release::Terms(arguments));
@@ -3045,6 +3048,7 @@ impl Scheduler {
         let mut child = ProcessState::new(self.next_pid()?, start, arguments);
         child.off_heap_message_queue = flags.off_heap_message_queue;
         child.priority = flags.priority;
+        child.heap_flags = self.node.heap_flags();
         child.security = if boot {
             SecurityContext::boot()
         } else {
@@ -3476,39 +3480,40 @@ impl Scheduler {
     }
 
     /// Give the name `name` to the live process `id`, as `erlang:register/2`
-    /// does. Return `false` and change nothing when ERTS
-    /// `erts_register_name` (`register.c`) fails: `name` is not an atom or
-    /// is `undefined`, `id` is not a pid, the process is not alive, the
-    /// process has a name, or another process has the name.
+    /// does. Return the `error_info` cause and change nothing when ERTS
+    /// `erts_register_name` fails (`register.c:183-253`): `none` when `name`
+    /// is not an atom or is `undefined`, when `id` is not a pid, or when
+    /// another process has the name; `notalive` when the process is not
+    /// alive; and `registered_name` when the process has a name.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// let name = Term::Atom(program.atom("pbeam_probe_reg").unwrap());
-    /// assert!(scheduler.register(&name, &Term::Pid(ProcessId(0))));
-    /// assert!(!scheduler.register(&name, &Term::Pid(ProcessId(0))));
+    /// assert_eq!(scheduler.register(&name, &Term::Pid(ProcessId(0))), Ok(()));
+    /// assert_eq!(scheduler.register(&name, &Term::Pid(ProcessId(0))), Err("registered_name"));
     /// ```
-    pub(super) fn register(&mut self, name: &Term, id: &Term) -> bool {
+    pub(super) fn register(&mut self, name: &Term, id: &Term) -> Result<(), &'static str> {
         let (Term::Atom(name), Term::Pid(id)) = (name, id) else {
-            return false;
+            return Err("none");
         };
         if name.is_static("undefined") {
-            return false;
+            return Err("none");
         }
         if self.processes.get(id).is_none() && self.remote_owner(*id).is_none() {
-            return false;
+            return Err("notalive");
         }
         if self.registered_name_of(*id).is_some() {
-            return false;
+            return Err("registered_name");
         }
         let name_text = self.atoms.name_of(name).to_owned();
         if !self.name_insert(&name_text, *id) {
-            return false;
+            return Err("none");
         }
         if let Some(process) = self.processes.get_mut(id) {
             process.registered_name = Some(name.clone());
         }
-        true
+        Ok(())
     }
 
     /// Register `name` for `id` unless another process has it. Return false
@@ -3531,7 +3536,7 @@ impl Scheduler {
     ///
     /// ```rust,ignore
     /// let name = Term::Atom(program.atom("pbeam_probe_reg").unwrap());
-    /// assert!(scheduler.register(&name, &Term::Pid(ProcessId(0))));
+    /// assert!(scheduler.register(&name, &Term::Pid(ProcessId(0))).is_ok());
     /// assert!(scheduler.unregister(&name));
     /// assert!(!scheduler.unregister(&name));
     /// ```
@@ -3559,7 +3564,7 @@ impl Scheduler {
     /// ```rust,ignore
     /// let name = Term::Atom(program.atom("pbeam_probe_reg").unwrap());
     /// assert_eq!(scheduler.whereis("pbeam_probe_reg"), None);
-    /// assert!(scheduler.register(&name, &Term::Pid(ProcessId(0))));
+    /// assert!(scheduler.register(&name, &Term::Pid(ProcessId(0))).is_ok());
     /// assert_eq!(scheduler.whereis("pbeam_probe_reg"), Some(ProcessId(0)));
     /// ```
     pub(super) fn whereis(&self, name: &str) -> Option<ProcessId> {

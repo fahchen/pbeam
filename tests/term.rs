@@ -230,7 +230,7 @@ fn prints_each_free_variable_of_a_fun() {
     assert_eq!(
         format!("{term:?}"),
         "Fun(Local(Lambda { module: Atom { index: 971 }, index: 0, \
-         old_index: 0, old_unique: 7, label: 53, arity: 1 }), [Integer(1), Integer(2)])"
+         old_index: 0, old_unique: 7, uniq: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], label: 53, arity: 1 }), [Integer(1), Integer(2)])"
     );
 }
 
