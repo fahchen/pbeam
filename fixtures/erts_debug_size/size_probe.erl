@@ -1,6 +1,6 @@
 -module(size_probe).
 -export([sizes/0, show/0, hashmap/0, flatmap/0, float_pair/0,
-         binary_type/0, id/1]).
+         binary_type/0, binary_size/0, id/1]).
 
 -record #pt{x = 0}.
 
@@ -17,7 +17,7 @@ sizes() ->
     Bin = id(<<1, 2, 3>>),
     R = #pt{x = id(1)},
     Terms = [1, a, [], self(), F, B, {B, B}, make_ref(),
-             <<1, 2, 3>>, binary:copy(<<"a">>, id(100)), {}, T, {T, T},
+             {}, T, {T, T},
              A, [A, A], [a | b], #{}, Fun, {Fun, Fun}, fun lists:map/2,
              [Fun | A], {fun lists:map/2, erlang:make_fun(lists, map, id(2))}],
     Sizes = [erts_debug:size(Term) || Term <- id(Terms)],
@@ -54,6 +54,10 @@ flatmap() ->
 float_pair() ->
     F = id(1.5),
     erts_debug:size({F, F}).
+
+%% Return erts_debug:size/1 of a binary built by appends.
+binary_size() ->
+    erts_debug:size(<<(id(<<"a">>))/binary, (id(<<"b">>))/binary>>).
 
 %% Return erts_internal:term_type/1 of a binary.
 binary_type() ->

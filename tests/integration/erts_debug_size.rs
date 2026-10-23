@@ -9,16 +9,16 @@ use common::pinned_beam;
 
 const PROBE: &[u8] = include_bytes!("../../fixtures/erts_debug_size/size_probe.beam");
 
-/// Evaluate `size_probe:sizes()` on the pinned ERTS and return its `~w`
-/// output.
-fn reference() -> String {
+/// Evaluate `size_probe:<function>()` on the pinned ERTS and return its
+/// `~w` output.
+fn reference_of(function: &str) -> String {
     let reference = Command::new("erl")
         .args([
             "-noshell",
             "-pa",
             "fixtures/erts_debug_size",
             "-eval",
-            "io:format(\"~w~n\", [size_probe:sizes()]), halt().",
+            &format!("io:format(\"~w~n\", [size_probe:{function}()]), halt()."),
         ])
         .output()
         .unwrap();
@@ -63,12 +63,14 @@ fn gives_the_size_of_shared_and_unshared_terms_as_pinned_erts() {
     // (`beam_debug.c:65-68`), `erts_internal:term_type/1`
     // (`erl_map.c:3336-3417`), and `erts_internal:map_to_tuple_keys/1`
     // (`erl_map.c:3318-3328`).
-    let expected = reference();
+    let expected = reference_of("sizes");
     assert_eq!(
         expected,
-        "{[0,0,0,0,2,3,6,3,3,8,0,3,6,4,8,2,3,8,11,2,10,5],[true,true,true,false,true,true,true,true,true,true,true,false,true],[fixnum,bignum,bignum,hfloat,atom,nil,list,tuple,flatmap,hashmap,'fun',export,pid,reference],[{}],[{error,{badmap,a}},{error,badarg}]}\n"
+        "{[0,0,0,0,2,3,6,3,0,3,6,4,8,2,3,8,11,2,10,5],[true,true,true,false,true,true,true,true,true,true,true,false,true],[fixnum,bignum,bignum,hfloat,atom,nil,list,tuple,flatmap,hashmap,'fun',export,pid,reference],[{}],[{error,{badmap,a}},{error,badarg}]}\n"
     );
-    // The host print of an exit reason does not quote the atom `fun`.
+    // PBeam prints the exit reason as the ERTS C printer does
+    // (`erl_printf_term.c:235-327`, as `erlang:display/1`), which does not
+    // quote a reserved word such as `fun`; `io:format("~w")` quotes it.
     assert_eq!(shown(), expected.replace("'fun'", "fun"));
 }
 
@@ -123,6 +125,21 @@ fn fails_on_the_term_type_of_a_binary() {
         .to_string();
     assert!(
         error.contains("erts_internal:term_type/1 cannot name"),
+        "{error}"
+    );
+}
+
+#[test]
+fn fails_on_the_size_of_a_binary() {
+    // ERTS gives 8 for this binary built by appends, but PBeam does not keep
+    // the ERTS form of a binary, so `erts_debug:size/1` stops the run.
+    assert_eq!(reference_of("binary_size"), "8\n");
+    let error = program()
+        .execute("size_probe", "binary_size", &[])
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("erts_debug:size/1 cannot give the ERTS word count of a binary"),
         "{error}"
     );
 }
