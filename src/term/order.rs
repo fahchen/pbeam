@@ -237,7 +237,10 @@ fn compare_pair<'a>(
         // The values without the markers compare as the ERTS numbers
         // `N2`, `N1`, `N0` do, with the table marker that ERTS keeps below
         // the counter bits of `N1` (`erl_bif_unique.h:102-113`).
-        (Term::Reference(left), Term::Reference(right)) => left.cmp(right),
+        // A tie keeps distinct references apart.
+        (Term::Reference(left), Term::Reference(right)) => left
+            .cmp(right)
+            .then_with(|| left.numbers().cmp(&right.numbers())),
         (Term::Tuple(left), Term::Tuple(right)) if left.len() == right.len() => {
             steps.extend(
                 left.iter()
