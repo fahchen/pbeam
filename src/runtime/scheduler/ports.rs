@@ -148,8 +148,8 @@ impl Scheduler {
         // before the port closes at its end of file.
         let end = match event {
             PortEvent::Data(parts) => {
-                for bytes in parts {
-                    self.port_send(owner, port_message(id, "data", Term::binary(bytes)));
+                for data in parts {
+                    self.port_send(owner, port_message(id, "data", data));
                 }
                 false
             }
@@ -183,17 +183,22 @@ impl Scheduler {
         let cell = self.node.port(id);
         let mut slot = cell.as_ref().map(port::lock);
         let state = slot.as_mut().and_then(|slot| slot.as_mut()).map(|port| {
-            let soft = match &mut port.driver {
-                Driver::Spawn(spawn) if spawn.soft_eof => {
-                    spawn.input = Input::Ended;
-                    true
+            let (soft, lines) = match &mut port.driver {
+                Driver::Spawn(spawn) => {
+                    if spawn.soft_eof {
+                        spawn.input = Input::Ended;
+                    }
+                    (spawn.soft_eof, spawn.flush_lines())
                 }
-                _ => false,
+                _ => (false, Vec::new()),
             };
-            (port.owner, soft)
+            (port.owner, soft, lines)
         });
         // A port that another scheduler closed after the read sends nothing.
-        if let Some((owner, soft)) = state {
+        if let Some((owner, soft, lines)) = state {
+            for data in lines {
+                self.port_send(owner, port_message(id, "data", data));
+            }
             if soft {
                 let eof = Term::tuple(vec![Term::Port(id), Term::static_atom("eof")]);
                 self.port_send(owner, eof);

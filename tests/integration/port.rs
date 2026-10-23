@@ -230,6 +230,23 @@ fn runs_the_command_of_a_spawn_port_as_pinned_erts() {
 }
 
 #[test]
+fn sends_the_line_and_list_data_modes_as_pinned_erts() {
+    // `{line, L}` and `line` (512) take the low 32 bits of a positive small
+    // integer (erl_bif_port.c:862-869, 985-986; io.c:3149-3155), and
+    // `stream` sets no packet header (erl_bif_port.c:979-980). A line with
+    // packet is badopt (erl_bif_port.c:1018-1022). `read_linebuf` sends
+    // `{eol, Line}` at `\n` or `\r\n` and `{noeol, Part}` for each L bytes
+    // (io.c:3246-3301). At the end of file, after the exit status,
+    // `flush_linebuf` sends the rest as `noeol` (io.c:3197-3224, 7204-7205;
+    // sys_drivers.c:1242-1252). Without `binary` the data is a list
+    // (io.c:3399-3427).
+    assert_runs(
+        "lines()",
+        "[[[{data,{noeol,<<97,98,99,100>>}},{data,{eol,<<101,102,103,104>>}},{data,{eol,<<120,121>>}},{data,{noeol,<<97,98,13,99>>}},{data,{eol,<<13>>}},{exit_status,0},{data,{noeol,<<108,97,115,116>>}},normal],[{data,{eol,[97,98,99,100]}},{data,{eol,[97,98,99,100]}},{data,{noeol,[97,98,99,100]}},{data,{eol,[101]}},{exit_status,0},{data,{noeol,[97,98]}},normal],[{data,{noeol,<<97,98,99,100>>}},{exit_status,0},{data,{noeol,<<13,120,121>>}},normal],[{data,[104,105]},{exit_status,0},normal],[{exit_status,0},{data,{noeol,[104,105]}},normal],[{data,{noeol,[97,98,99]}},{data,{eol,[100]}},{exit_status,0},normal]],[{data,{noeol,<<97,98,99,100>>}},{data,{noeol,<<13>>}},eof],[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}],[{'EXIT',port,normal}]]",
+    );
+}
+
+#[test]
 fn gives_the_port_name_before_the_first_byte_0_as_pinned_erts() {
     // ERTS copies a binary name into a C string, and the port name is that
     // C string (erl_unicode.c:2107-2108, io.c:323, 366-367).
@@ -251,9 +268,14 @@ fn monitors_a_port_as_pinned_erts() {
 fn stops_the_run_for_each_port_part_that_is_not_implemented() {
     let program = load();
     for (case, message) in [
-        ("line", "unsupported open_port/2 option line"),
-        ("stream", "unsupported open_port/2 option stream"),
-        ("list", "unsupported open_port/2 without the binary option"),
+        (
+            "line",
+            "unsupported open_port/2 option {line, L} whose low 32 bits are not positive",
+        ),
+        (
+            "empty_line",
+            "unsupported open_port/2 option {line, L} whose low 32 bits are not positive",
+        ),
         ("fd", "unsupported open_port/2 port kind fd"),
         (
             "exec",

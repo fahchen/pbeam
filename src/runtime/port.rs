@@ -116,6 +116,14 @@ pub(super) struct Spawn {
     pub(super) soft_eof: bool,
     /// The packet framing of the `{packet, N}` option.
     pub(super) packets: Packets,
+    /// True with the `binary` option (`ERTS_PORT_SFLG_BINARY_IO`): the data
+    /// of a message is a binary, else a list of bytes
+    /// (`deliver_read_message`, `io.c:3399-3417`).
+    pub(super) binary: bool,
+    /// The line buffer of the `{line, L}` and `line` options
+    /// (`ERTS_PORT_SFLG_LINEBUF_IO`, `erl_bif_port.c:1139-1142`), or `None`
+    /// without them.
+    pub(super) lines: Option<Lines>,
     /// The started program and the parent ends of its pipes. Dropping the
     /// port closes the pipes.
     pub(super) child: Child,
@@ -229,12 +237,179 @@ impl Packets {
     }
 }
 
+impl Spawn {
+    /// Return the data term of a message with the bytes `bytes`: a binary
+    /// with `binary`, else a list of bytes, in `{eol, Data}` or
+    /// `{noeol, Data}` in line mode (`io.c:3399-3427`).
+    fn data(&self, eol: Option<bool>, bytes: Vec<u8>) -> Term {
+        let data = if self.binary {
+            Term::binary(bytes)
+        } else {
+            Term::list_from(bytes.into_iter().map(|byte| Term::Integer(byte.into())))
+        };
+        match eol {
+            Some(eol) => Term::tuple(vec![
+                Term::static_atom(if eol { "eol" } else { "noeol" }),
+                data,
+            ]),
+            None => data,
+        }
+    }
+
+    /// Return the data terms of the messages of the parts `parts`, each in
+    /// lines in line mode, as `driver_output2` delivers each part
+    /// (`io.c:6425-6430`, `3448-3460`).
+    fn messages(&mut self, parts: Vec<Vec<u8>>) -> Vec<Term> {
+        let mut lines = Vec::new();
+        let Some(buffer) = &mut self.lines else {
+            return parts
+                .into_iter()
+                .map(|bytes| self.data(None, bytes))
+                .collect();
+        };
+        for bytes in parts {
+            buffer.read(&bytes, &mut lines);
+        }
+        lines
+            .into_iter()
+            .map(|(eol, bytes)| self.data(Some(eol), bytes))
+            .collect()
+    }
+
+    /// Return the data terms of the lines that the line buffer holds at the
+    /// end of file, as `flush_linebuf_messages` does before the port closes
+    /// or sends `{Port, eof}` (`io.c:3469-3493`, `7204-7205`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// // The child wrote "ab" without a newline.
+    /// assert_eq!(spawn.flush_lines().len(), 1);
+    /// ```
+    pub(super) fn flush_lines(&mut self) -> Vec<Term> {
+        let mut lines = Vec::new();
+        if let Some(buffer) = &mut self.lines {
+            buffer.flush(&mut lines);
+        }
+        lines
+            .into_iter()
+            .map(|(eol, bytes)| self.data(Some(eol), bytes))
+            .collect()
+    }
+}
+
+/// The state of a line buffer (`io.c:3138-3141`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LineState {
+    /// `LINEBUF_MAIN`: the buffer takes bytes.
+    Main,
+    /// `LINEBUF_FULL`: the buffer holds `L` bytes.
+    Full,
+    /// `LINEBUF_CR_INSIDE`: a `\r` came after the bytes of the buffer.
+    CrInside,
+    /// `LINEBUF_CR_AFTER`: a `\r` came after a full buffer.
+    CrAfter,
+}
+
+/// The line buffer of a spawn port in line mode (`LineBuf`, `io.c:3143-3301`).
+#[derive(Debug)]
+pub(super) struct Lines {
+    /// The maximum size of a line, `L` of `{line, L}`.
+    size: usize,
+    /// The state of the buffer.
+    state: LineState,
+    /// The bytes of the line that is not complete.
+    pending: Vec<u8>,
+}
+
+impl Lines {
+    /// Return an empty line buffer for lines of at most `size` bytes
+    /// (`allocate_linebuf`, `io.c:3149-3159`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let lines = Lines::new(512);
+    /// ```
+    pub(super) fn new(size: usize) -> Self {
+        Self {
+            size,
+            state: LineState::Main,
+            pending: Vec::new(),
+        }
+    }
+
+    /// Add to `lines` each line of `bytes` that is complete, with true for
+    /// `eol`, and each part of `L` bytes of a longer line, with false for
+    /// `noeol`, as `read_linebuf` does (`io.c:3246-3301`). A `\n` or a
+    /// `\r\n` ends a line.
+    fn read(&mut self, bytes: &[u8], lines: &mut Vec<(bool, Vec<u8>)>) {
+        let mut rest = bytes;
+        while let Some((&byte, after)) = rest.split_first() {
+            if byte == b'\n' {
+                self.state = LineState::Main;
+                rest = after;
+                lines.push((true, std::mem::take(&mut self.pending)));
+                continue;
+            }
+            match self.state {
+                LineState::Main if self.pending.len() == self.size => self.state = LineState::Full,
+                LineState::Main if byte == b'\r' => {
+                    rest = after;
+                    self.state = LineState::CrInside;
+                }
+                LineState::Main => {
+                    self.pending.push(byte);
+                    rest = after;
+                }
+                LineState::Full if byte == b'\r' => {
+                    rest = after;
+                    self.state = LineState::CrAfter;
+                }
+                LineState::Full => {
+                    lines.push((false, std::mem::take(&mut self.pending)));
+                    self.state = LineState::Main;
+                }
+                LineState::CrInside => {
+                    self.pending.push(b'\r');
+                    self.state = LineState::Main;
+                }
+                LineState::CrAfter => {
+                    lines.push((false, std::mem::take(&mut self.pending)));
+                    self.state = LineState::CrInside;
+                }
+            }
+        }
+    }
+
+    /// Add to `lines` each `noeol` part that the buffer holds, as the
+    /// calls of `flush_linebuf` until `LINEBUF_EMPTY` do (`io.c:3197-3224`,
+    /// `3484`).
+    fn flush(&mut self, lines: &mut Vec<(bool, Vec<u8>)>) {
+        loop {
+            match self.state {
+                LineState::CrInside => {
+                    self.pending.push(b'\r');
+                    self.state = LineState::Main;
+                }
+                LineState::Main | LineState::Full => self.state = LineState::Main,
+                LineState::CrAfter => self.state = LineState::CrInside,
+            }
+            if self.pending.is_empty() {
+                return;
+            }
+            lines.push((false, std::mem::take(&mut self.pending)));
+        }
+    }
+}
+
 /// What the IO poll found on one fd of a port.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum PortEvent {
-    /// The child wrote the data of these messages: one part without a
-    /// packet header, else each complete packet.
-    Data(Vec<Vec<u8>>),
+    /// The child wrote the data terms of these messages: one part without
+    /// a packet header, else each complete packet, each in lines in line
+    /// mode.
+    Data(Vec<Term>),
     /// The output pipe of a port without `exit_status` gave its end of
     /// file. The bytes of a packet that is not complete go.
     EndOfFile,
@@ -524,5 +699,6 @@ fn read_spawn(spawn: &mut Spawn, input: &mut u64) -> Option<PortEvent> {
     }
     let packets = spawn.packets.split(bytes);
     *input += packets.iter().map(|bytes| bytes.len() as u64).sum::<u64>();
-    (!packets.is_empty()).then_some(PortEvent::Data(packets))
+    let messages = spawn.messages(packets);
+    (!messages.is_empty()).then_some(PortEvent::Data(messages))
 }

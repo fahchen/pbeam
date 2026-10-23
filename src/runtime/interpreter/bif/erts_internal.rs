@@ -13,7 +13,7 @@ use crate::runtime::{
         spawn::{self, SpawnError, Streams},
     },
     port::{
-        self, Driver, Input, Packets, Port, PortCell, Spawn,
+        self, Driver, Input, Lines, Packets, Port, PortCell, Spawn,
         inet::{Control, Inet, OK, Output, SocketType},
     },
     signal::Signal,
@@ -200,8 +200,7 @@ const PORT_REDUCTIONS: i32 = 40;
 
 /// The tuple options of `open_port/2` that ERTS accepts and PBeam does not
 /// support (`erl_bif_port.c:849-976`).
-const UNSUPPORTED_TUPLE_OPTIONS: [&str; 7] = [
-    "line",
+const UNSUPPORTED_TUPLE_OPTIONS: [&str; 6] = [
     "env",
     "arg0",
     "cd",
@@ -212,7 +211,7 @@ const UNSUPPORTED_TUPLE_OPTIONS: [&str; 7] = [
 
 /// The atom options of `open_port/2` that ERTS accepts and PBeam does not
 /// support (`erl_bif_port.c:979-1009`).
-const UNSUPPORTED_ATOM_OPTIONS: [&str; 5] = ["stream", "line", "in", "out", "hide"];
+const UNSUPPORTED_ATOM_OPTIONS: [&str; 3] = ["in", "out", "hide"];
 
 /// The options of `open_port/2` that PBeam supports, as the fields of the
 /// ERTS `SysDriverOpts` and the port flags that `open_port` sets
@@ -232,6 +231,10 @@ struct PortSettings {
     /// (`packet_bytes`, `erl_bif_port.c:849-861`). A small integer N whose
     /// low 32 bits are 1, 2, or 4 also sets it.
     packet: usize,
+    /// The low 32 bits of the maximum line size of `{line, L}`, 512 for
+    /// `line` (`erl_bif_port.c:862-869`, `985-986`), or `None` without
+    /// them.
+    line: Option<i32>,
     /// The native bytes of the strings of `{args, Args}`, or `None`
     /// without it.
     args: Option<Vec<Vec<u8>>>,
@@ -276,7 +279,7 @@ struct PortSettings {
 /// # Errors
 ///
 /// An option that ERTS accepts and PBeam does not support, the port kind
-/// `fd`, a port without `binary`, and a failed `posix_spawn`
+/// `fd`, `{line, L}` whose low 32 bits are not positive, and a failed `posix_spawn`
 /// return a runtime error. A new atom in a full atom table gives the error
 /// of `AtomTable::put`.
 pub(super) fn open_port(
@@ -310,11 +313,6 @@ pub(super) fn open_port(
                 (command, Vec::new(), true)
             }
         };
-    if !settings.binary {
-        return Err(error(
-            "unsupported open_port/2 without the binary option: see \"Ports\" in docs/erts-differences.md",
-        ));
-    }
     let scheduler = &mut *context.scheduler;
     // The check uses the port name, which the later port operations check.
     let check = denial(
@@ -326,6 +324,7 @@ pub(super) fn open_port(
     if let Some(denied) = check? {
         return Ok(denied);
     }
+    let lines = settings.line.map(line_size).transpose()?;
     let started = if is_command {
         spawn::spawn_shell(&path, settings.streams)
     } else if is_gethost(&path) {
@@ -349,6 +348,8 @@ pub(super) fn open_port(
         exit_status: settings.exit_status,
         soft_eof: settings.eof,
         packets: Packets::new(settings.packet),
+        binary: settings.binary,
+        lines,
         child,
         input: Input::Open,
     };
@@ -423,6 +424,7 @@ fn open_driver_port(
             exit_status: false,
             eof: false,
             packet: 0,
+            line: None,
             args: None,
         }
     );
@@ -479,6 +481,7 @@ fn port_settings(atoms: &AtomTable, settings: &Term) -> Result<Option<PortSettin
         exit_status: false,
         eof: false,
         packet: 0,
+        line: None,
         args: None,
     };
     for element in elements {
@@ -502,6 +505,16 @@ fn port_settings(atoms: &AtomTable, settings: &Term) -> Result<Option<PortSettin
                         _ => return Ok(None),
                     }
                     continue;
+                } else if option.is_static("line") {
+                    // ERTS checks the small integer as an `Sint` and then
+                    // keeps its low 32 bits in the C `int` `bufsiz`
+                    // (`erl_bif_port.c:862-869`, `1139-1140`;
+                    // `io.c:3149-3155`).
+                    match pair[1].small_integer() {
+                        Some(size) if size > 0 => result.line = Some(size as i32),
+                        _ => return Ok(None),
+                    }
+                    continue;
                 } else if option.is_one_of(&UNSUPPORTED_TUPLE_OPTIONS) {
                     option
                 } else {
@@ -517,6 +530,10 @@ fn port_settings(atoms: &AtomTable, settings: &Term) -> Result<Option<PortSettin
                     result.streams.stderr_to_stdout = true;
                 } else if option.is_static("binary") {
                     result.binary = true;
+                } else if option.is_static("stream") {
+                    result.packet = 0;
+                } else if option.is_static("line") {
+                    result.line = Some(512);
                 } else if option.is_static("exit_status") {
                     result.exit_status = true
                 } else if option.is_static("eof") {
@@ -534,10 +551,31 @@ fn port_settings(atoms: &AtomTable, settings: &Term) -> Result<Option<PortSettin
         };
         return Err(unsupported_option(atoms.name_of(option)));
     }
-    if result.streams.stderr_to_stdout && !result.streams.use_stdio {
+    // Mutually exclusive settings (`erl_bif_port.c:1018-1022`).
+    if (result.streams.stderr_to_stdout && !result.streams.use_stdio)
+        || (result.line.is_some() && result.packet != 0)
+    {
         return Ok(None);
     }
     Ok(Some(result))
+}
+
+/// Return the line buffer of a `{line, L}` whose low 32 bits are `size`.
+///
+/// # Errors
+///
+/// A `size` that is not positive returns a runtime error. ERTS allocates
+/// `sizeof(LineBuf)` plus a negative `int` as a size and fails
+/// (`io.c:3149-3153`). With 0, each byte that is not a newline sends an
+/// empty `noeol` part and stays in the input (`io.c:3260-3283`), so ERTS
+/// sends messages without end.
+fn line_size(size: i32) -> Result<Lines, BeamError> {
+    match usize::try_from(size) {
+        Ok(size) if size > 0 => Ok(Lines::new(size)),
+        _ => Err(error(
+            "unsupported open_port/2 option {line, L} whose low 32 bits are not positive: see \"Ports\" in docs/erts-differences.md",
+        )),
+    }
 }
 
 /// Return the runtime error of an option of `open_port/2` that ERTS accepts
@@ -546,7 +584,7 @@ fn port_settings(atoms: &AtomTable, settings: &Term) -> Result<Option<PortSettin
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(unsupported_option("line").to_string().starts_with("unsupported open_port/2 option line"));
+/// assert!(unsupported_option("hide").to_string().starts_with("unsupported open_port/2 option hide"));
 /// ```
 fn unsupported_option(name: &str) -> BeamError {
     error(format!(
