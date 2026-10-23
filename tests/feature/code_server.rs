@@ -357,6 +357,47 @@ fn runs_the_linked_crypto_nifs_as_pinned_erts() {
 }
 
 #[test]
+fn gives_the_crypto_algorithm_lists_and_fips_status_as_pinned_erts() {
+    // The pinned ERTS lists each algorithm of its OpenSSL: 187 on macOS
+    // and 177 with the libcrypto of the Linux CI host (algorithms.c:86-224,
+    // digest.c:226-242, crypto.erl:843-895). PBeam lists only the 7 digests
+    // that it computes, in the ERTS order, so the items that PBeam can run
+    // are the same.
+    let erts = run(&mut erts_probe(
+        CRYPTO_PROBE,
+        "crypto_probe",
+        "supports",
+        &[],
+    ));
+    let pbeam = run(&mut pbeam_probe(
+        CRYPTO_PROBE,
+        "crypto_probe",
+        "supports",
+        &[],
+    ));
+    let items = "[{hashs,[sha512_256,sha512_224,sha512,sha384,sha256,sha224,sha]},\n  \
+                 {ciphers,[]},\n  \
+                 {kems,[]},\n  \
+                 {public_keys,[]},\n  \
+                 {macs,[]},\n  \
+                 {curves,[]},\n  \
+                 {rsa_opts,[]}]";
+    let rest = format!(",\n {items},\n false,true]\n");
+    let count = erts
+        .strip_suffix(rest.as_str())
+        .and_then(|head| head.strip_prefix('['));
+    assert!(matches!(count, Some("187" | "177")), "{erts}");
+    assert_eq!(pbeam, format!("[7,\n {items},\n true,true]\n"));
+    // A build without FIPS support (fips.c:27-62).
+    let erts = run(&mut erts_probe(CRYPTO_PROBE, "crypto_probe", "fips", &[]));
+    assert_eq!(erts, "[not_supported,false,true,{error,badarg}]\n");
+    assert_eq!(
+        run(&mut pbeam_probe(CRYPTO_PROBE, "crypto_probe", "fips", &[])),
+        erts
+    );
+}
+
+#[test]
 fn stops_with_a_runtime_error_for_an_unsupported_crypto_nif() {
     // PBeam does not link `hash_init_nif/1`, which `crypto:hash_init/1`
     // calls (crypto.erl:1160). `crypto:hash/2` sends an input of more than
