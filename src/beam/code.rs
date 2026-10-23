@@ -216,8 +216,7 @@ const FIRST_LABEL_NUMBER: u32 = 1;
 /// supports uncompressed tables. A literal loads as a value only when every
 /// nested tag is listed, such as a bignum (`SMALL_BIG_EXT`, 110, as
 /// `1 bsl 64` is `[110, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]`, and
-/// `LARGE_BIG_EXT`, 111); another tag, or a map key
-/// that `Map` does not support yet, makes the literal unsupported, and
+/// `LARGE_BIG_EXT`, 111); another tag makes the literal unsupported, and
 /// execution fails only if an instruction uses it. `[a|[b]]` and `[a,b]`
 /// give the same list, a `list_term` whose tail is not a list gives an
 /// improper list such as `[a|b]`, and a `list_term` of length 0 gives its
@@ -1051,9 +1050,8 @@ fn read_external_term(
                     pairs.push((key, term));
                     if remaining == 1 {
                         let count = pairs.len();
-                        let Ok(map) = Map::from_pairs(pairs, atom_table) else {
-                            return Ok(None);
-                        };
+                        let map = Map::from_pairs(pairs, atom_table)
+                            .expect("each literal key is a supported map key");
                         if map.len() < count {
                             return Err(error("duplicate key in BEAM map literal"));
                         }

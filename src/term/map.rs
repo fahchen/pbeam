@@ -9,7 +9,7 @@
 //! Supported keys:
 //!
 //! - hashmap: a binary, an atom, an integer in the ERTS small-integer
-//!   range, `[]`, a list or a tuple whose elements are such keys other than
+//!   range, `[]`, a fun whose free variables are such keys, a list or a tuple whose elements are such keys other than
 //!   binaries, and an improper list whose elements are such elements and
 //!   whose tail is an atom, a small integer, or such a tuple;
 //! - flatmap: each hashmap key, and any integer.
@@ -20,7 +20,7 @@
 //! an atom hashes by its atom word `(index << 6) | 0xB`. Thus the pair order
 //! of a map is the ERTS order, which BEAM code sees through operations such
 //! as `maps:keys/1`. Other key types need the hashmap insertion of bignums,
-//! maps, funs, pids, and references, which PBeam does not have yet. So does
+//! maps, pids, and references, which PBeam does not have yet. So does
 //! a list or a tuple with a binary element, for example `[<<>>]` and
 //! `{<<>>}`.
 
@@ -1684,7 +1684,9 @@ fn encode_path(elements: Vec<usize>) -> Result<i64, BeamError> {
 /// (`erl_term_hashing.c`); an alias reference has no comparison order, so
 /// it is not a supported key. A map key hashes with the flatmap or
 /// hashmap path of `make_internal_hash`, and its keys and values must be
-/// such keys too. A binary in a list, a tuple, or a map key is not
+/// such keys too. A fun key hashes with the fun path of
+/// `make_internal_hash` (`erl_term_hashing.c:1987-2017`), and its free
+/// variables must be such keys too. A binary in a list, a tuple, or a map key is not
 /// supported yet.
 ///
 /// # Examples
@@ -1712,7 +1714,7 @@ fn map_hash(key: &Term) -> Option<u64> {
         // allocates nothing.
         Term::Atom(_) | Term::Nil | Term::Binary(_) | Term::Float(_) | Term::Pid(_) => {}
         Term::Reference(reference) if !reference.is_pid_reference() => {}
-        Term::Cons(_) | Term::Tuple(_) | Term::Map(_) => {
+        Term::Cons(_) | Term::Tuple(_) | Term::Map(_) | Term::Fun(_) => {
             let mut pending = vec![key];
             while let Some(term) = pending.pop() {
                 match term {
@@ -1724,6 +1726,7 @@ fn map_hash(key: &Term) -> Option<u64> {
                     Term::Map(map) => {
                         pending.extend(map.iter().flat_map(|(key, value)| [key, value]));
                     }
+                    Term::Fun(fun) => pending.extend(fun.free()),
                     _ if term.is_integer() => {}
                     _ => return None,
                 }
