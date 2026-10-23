@@ -407,14 +407,22 @@ pub(super) fn process_flag(
                 flag.is_static("max_heap_size") || small.is_some_and(|size| size >= 0)
             };
             if !valid {
-                return Ok(BifResult::badarg());
+                // `process_flag_aux` sets the cause `none` for `save_calls`
+                // (`bif.c:1910-1912`, `2229-2233`).
+                return Ok(if flag.is_static("save_calls") {
+                    BifResult::badarg_with_cause("none")
+                } else {
+                    BifResult::badarg()
+                });
             }
             return Err(error(format!(
                 "unsupported erlang:process_flag/2 flag {}",
                 context.scheduler.atoms.name_of(flag)
             )));
         }
-        _ => BifResult::badarg(),
+        // `process_flag_aux` sets the cause `badopt` for an unknown flag
+        // (`bif.c:1902`, `2229-2233`).
+        _ => BifResult::badopt(),
     })
 }
 
@@ -504,8 +512,13 @@ pub(super) fn system_flag(
     item: &Term,
     value: &Term,
 ) -> Result<BifResult, BeamError> {
+    // `system_flag_2` raises `badarg` with no cause for a bad value of an
+    // item (`bif.c:5302-5303`) and `badopt` for each other call
+    // (`bif.c:5297-5299`). The item `time_offset` takes only `finalize`
+    // in the same test (`bif.c:5203-5204`), so another value gives
+    // `badopt`.
     let Term::Atom(item) = item else {
-        return Ok(BifResult::badarg());
+        return Ok(BifResult::badopt());
     };
     let logger = match value {
         Term::Pid(_) => true,
@@ -517,11 +530,11 @@ pub(super) fn system_flag(
         ("system_logger", _) => logger,
         ("debug_flags", _) => true,
         ("backtrace_depth", _) => value.small_integer().is_some_and(|depth| depth >= 0),
-        ("time_offset", Term::Atom(finalize)) => atoms.name_of(finalize) == "finalize",
+        ("time_offset", Term::Atom(finalize)) if atoms.name_of(finalize) == "finalize" => true,
         (name, _) if UNSUPPORTED_SYSTEM_FLAGS.contains(&name) => {
             unsupported_system_flag_value(name, atoms, value)
         }
-        _ => false,
+        _ => return Ok(BifResult::badopt()),
     };
     if !valid {
         return Ok(BifResult::badarg());
@@ -1255,12 +1268,18 @@ pub(super) fn monitor(
     target: &Term,
     options: &Term,
 ) -> Result<BifResult, BeamError> {
+    // `monitor_3` raises `badopt` for the options before it reads the type
+    // (`bif.c:991-995`), and `monitor` raises `badtype` for a type that is
+    // not `process`, `port`, or `time_offset` (`bif.c:965-967`).
     let Some(options) = monitor_options(options) else {
-        return Ok(BifResult::badarg());
+        return Ok(BifResult::badopt());
     };
     let Term::Atom(kind) = kind else {
-        return Ok(BifResult::badarg());
+        return Ok(BifResult::badarg_with_cause("badtype"));
     };
+    if !kind.is_one_of(&["process", "port", "time_offset"]) {
+        return Ok(BifResult::badarg_with_cause("badtype"));
+    }
     // An `Err` is the runtime error of a valid target that PBeam does not
     // support. It comes after the capability check.
     let target = match (context.scheduler.atoms.name_of(kind), target) {
@@ -3806,15 +3825,17 @@ pub(super) fn send3(
     message: &Term,
     options: &Term,
 ) -> Result<BifResult, BeamError> {
+    // `send_3` raises `badopt` for an unknown option and for an improper
+    // list (`bif.c:2713-2730`).
     let Some(options) = options.proper_list() else {
-        return Ok(BifResult::badarg());
+        return Ok(BifResult::badopt());
     };
     let mut connect = true;
     for option in options {
         match option {
             Term::Atom(option) if option.is_static("noconnect") => connect = false,
             Term::Atom(option) if option.is_one_of(&["nosuspend", "priority"]) => {}
-            _ => return Ok(BifResult::badarg()),
+            _ => return Ok(BifResult::badopt()),
         }
     }
     Ok(
@@ -6037,8 +6058,10 @@ pub(super) fn halt(
     status: &Term,
     options: &Term,
 ) -> Result<BifResult, BeamError> {
+    // `halt_2` raises `badopt` for each option error (`bif.c:4316-4343`,
+    // `4395-4397`).
     let Some(options) = options.proper_list() else {
-        return Ok(BifResult::badarg());
+        return Ok(BifResult::badopt());
     };
     let mut flush = true;
     let mut timeout = None;
@@ -6053,12 +6076,12 @@ pub(super) fn halt(
                 [Term::Atom(name), value] if name.is_static("flush_timeout") => {
                     match value.small_integer() {
                         Some(value @ 0..) => timeout = Some(value & i64::from(u32::MAX)),
-                        _ => return Ok(BifResult::badarg()),
+                        _ => return Ok(BifResult::badopt()),
                     }
                 }
-                _ => return Ok(BifResult::badarg()),
+                _ => return Ok(BifResult::badopt()),
             },
-            _ => return Ok(BifResult::badarg()),
+            _ => return Ok(BifResult::badopt()),
         }
     }
     let stop = match status {

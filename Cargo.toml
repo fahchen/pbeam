@@ -737,3 +737,7 @@ path = "tests/integration/multischeduler_clock.rs"
 [[test]]
 name = "ets_cause"
 path = "tests/integration/ets_cause.rs"
+
+[[test]]
+name = "bif_cause"
+path = "tests/integration/bif_cause.rs"
