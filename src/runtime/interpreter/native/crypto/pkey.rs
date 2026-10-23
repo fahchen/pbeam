@@ -624,7 +624,7 @@ fn public_key(
 /// the private key term, which passes the key tuple checks first
 /// (`pkey.c:544-559`). A name that OpenSSL loads a key type from
 /// (`pkey.c:614`) gives a runtime error: ERTS then reads the key bytes.
-fn octet_string_key(
+pub(super) fn octet_string_key(
     scheduler: &Scheduler,
     algorithm: &str,
     name: &Term,
@@ -705,13 +705,13 @@ fn pkey_type_private_key(
 }
 
 /// Return the bytes of the key binary `term`, as `pkey.c:620-622` does.
-fn octet_string(term: &Term) -> Result<&[u8], Failure> {
+pub(super) fn octet_string(term: &Term) -> Result<&[u8], Failure> {
     term.binary_bytes()
         .ok_or(Failure::Check("error", 621, 1, "Invalid public key"))
 }
 
 /// Return the failure of `EVP_PKEY_fromdata` (`pkey.c:648-650`).
-fn fromdata_failed() -> Failure {
+pub(super) fn fromdata_failed() -> Failure {
     failed(649, "Can't create PKEY fromdata")
 }
 

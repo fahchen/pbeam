@@ -22,11 +22,119 @@ const ON_LOAD_PROBE: &str = "fixtures/code_server/on_load_server_probe";
 /// function.
 const FUN_ENTRY_PROBE: &str = "fixtures/code_server/fun_entry_probe";
 
+#[test]
+fn computes_mod_pow_and_srp_as_pinned_erts() {
+    // mod_exp_nif/4 (bn.c:101-165) and the SRP NIFs (srp.c:26-300): the
+    // bytes of each result with fixed inputs, `badarg`, and `error`.
+    let erts = run(&mut erts_probe(
+        CRYPTO_BN_PROBE,
+        "crypto_bn_probe",
+        "main",
+        &[],
+    ));
+    assert!(erts.contains("badarg"), "{erts}");
+    assert_eq!(
+        run(&mut pbeam_probe(
+            CRYPTO_BN_PROBE,
+            "crypto_bn_probe",
+            "main",
+            &[]
+        )),
+        erts
+    );
+}
+
+/// The output of `crypto_bn_probe:kem_errors/0` on the pinned macOS ERTS
+/// (OpenSSL 3.5.8). The Linux CI ERTS links OpenSSL 3.0.x, which has no
+/// ML-KEM (`evp.c:32`, `73-75`).
+const KEM_ERRORS_HOST: &str = r#"[{error,{error,#{c_function_arg_num => -1,c_file_name => "pkey.c",
+                 c_file_line_num => 649},
+               "Can't create PKEY fromdata"}},
+ {error,{error,#{c_function_arg_num => -1,c_file_name => "pkey.c",
+                 c_file_line_num => 649},
+               "Can't create PKEY fromdata"}},
+ {error,{error,#{c_function_arg_num => 1,c_file_name => "pkey.c",
+                 c_file_line_num => 621},
+               "Invalid public key"}},
+ {error,{error,#{c_function_arg_num => 0,c_file_name => "pkey.c",
+                 c_file_line_num => 612},
+               "Invalid key type"}},
+ {error,{error,#{c_function_arg_num => 0,c_file_name => "pkey.c",
+                 c_file_line_num => 612},
+               "Invalid key type"}},
+ {error,{error,#{c_function_arg_num => -1,c_file_name => "pkey.c",
+                 c_file_line_num => 616},
+               "Can't create PKEY_CTX from name"}},
+ {error,{error,#{c_function_arg_num => 2,c_file_name => "evp.c",
+                 c_file_line_num => 92},
+               "Invalid encapsulated secret"}},
+ {error,{error,#{c_function_arg_num => -1,c_file_name => "pkey.c",
+                 c_file_line_num => 649},
+               "Can't create PKEY fromdata"}},
+ {error,{error,#{c_function_arg_num => -1,c_file_name => "pkey.c",
+                 c_file_line_num => 616},
+               "Can't create PKEY_CTX from name"}}]
+"#;
+
+#[test]
+fn checks_the_kem_arguments_as_pinned_erts() {
+    // encapsulate_key_nif/2 and decapsulate_key_nif/3 (evp.c:30-129,
+    // pkey.c:587-665): the error tuple of each failed check.
+    assert_eq!(
+        run(&mut pbeam_probe(
+            CRYPTO_BN_PROBE,
+            "crypto_bn_probe",
+            "kem_errors",
+            &[]
+        )),
+        KEM_ERRORS_HOST
+    );
+    if cfg!(target_os = "macos") {
+        let erts = run(&mut erts_probe(
+            CRYPTO_BN_PROBE,
+            "crypto_bn_probe",
+            "kem_errors",
+            &[],
+        ));
+        assert_eq!(erts, KEM_ERRORS_HOST);
+    }
+}
+
+#[test]
+fn reports_ml_kem_encapsulation_as_unsupported() {
+    // The safe openssl crate 0.10.75 has no EVP_PKEY_encapsulate and no
+    // EVP_PKEY_decapsulate (evp.c:50-60, 104-113).
+    for (function, expected) in [
+        (
+            "encapsulate",
+            "crypto:encapsulate_key_nif/2 NIF is not supported for an ML-KEM key: the safe \
+             openssl crate has no EVP_PKEY_encapsulate",
+        ),
+        (
+            "decapsulate",
+            "crypto:decapsulate_key_nif/3 NIF is not supported for an ML-KEM key: the safe \
+             openssl crate has no EVP_PKEY_decapsulate",
+        ),
+    ] {
+        let output = pbeam_probe(CRYPTO_BN_PROBE, "crypto_bn_probe", function, &[])
+            .env("TERM", "dumb")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            !output.status.success() && stderr.contains(expected),
+            "{function}: {stderr}"
+        );
+    }
+}
+
 /// The probe of `crypto:strong_rand_bytes/1`.
 const CRYPTO_PROBE: &str = "fixtures/code_server/crypto_probe";
 const CRYPTO_SIGN_PROBE: &str = "fixtures/code_server/crypto_sign_probe";
 const CRYPTO_CRYPT_PROBE: &str = "fixtures/code_server/crypto_crypt_probe";
 const CRYPTO_KEYGEN_PROBE: &str = "fixtures/code_server/crypto_keygen_probe";
+const CRYPTO_BN_PROBE: &str = "fixtures/code_server/crypto_bn_probe";
 
 /// The stand-in `crypto` module that loads the `crypto` NIF library.
 const CRYPTO_STAND_IN: &str = "fixtures/crypto/crypto";

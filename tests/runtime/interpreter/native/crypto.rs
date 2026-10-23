@@ -804,3 +804,18 @@ fn gives_the_argument_number_of_each_aead_context_error() {
         ("badarg", "aead.c", 281, 2, "Bad IV length"),
     );
 }
+
+#[test]
+fn gives_mod_exp_as_an_mpint_with_the_header_4() {
+    // crypto.erl calls mod_exp_nif/4 only with the header 0, so a fixture
+    // cannot reach the mpint of bn.c:133-142.
+    let run = |base: u8, exponent: u8, modulo: u8, header: i64| {
+        let numbers = [base, exponent, modulo].map(|byte| Term::binary(vec![byte]));
+        let [base, exponent, modulo] = numbers;
+        bn::mod_exp_nif(&[base, exponent, modulo, Term::Integer(header)])
+    };
+    assert_eq!(value_bytes(run(200, 1, 255, 4)), [0, 0, 0, 2, 0, 200]);
+    assert_eq!(value_bytes(run(3, 1, 5, 4)), [0, 0, 0, 1, 3]);
+    assert_eq!(value_bytes(run(5, 0, 1, 4)), [0, 0, 0, 0]);
+    assert!(matches!(run(3, 1, 5, 3), BifResult::Raise { .. }));
+}
