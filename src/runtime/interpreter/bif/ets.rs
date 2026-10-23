@@ -281,6 +281,17 @@ pub(super) fn new(
         && !matches!(access, Access::Private)
         && concurrency != Term::static_atom("false");
     let decentralized = fine && decentralized_option.unwrap_or(decentralized);
+    // A fine-locked hash table has 64 locks (`DB_HASH_LOCK_CNT`,
+    // `erl_db_hash.h:51-55`; `LCK_AUTO_DEFAULT_NUMBER_OF_LOCKS`,
+    // `erl_db_hash.c:100-102`), or the rounded count of the debug option
+    // (`erl_db_hash.c:1036-1051`). PBeam does not change the count of an
+    // `auto` table under contention.
+    if fine && table_type != TableType::OrderedSet {
+        made.set_locks(match &concurrency {
+            Term::Tuple(locks) => locks[1].small_integer().unwrap_or(64) as usize,
+            _ => 64,
+        });
+    }
     made.set_options(
         if fine {
             concurrency
@@ -2435,10 +2446,10 @@ fn match_walk(
 ) -> Option<i64> {
     loop {
         state.read(atoms, compiled, table.chain(*bucket), iterations);
-        *bucket += 1;
-        if *bucket == table.bucket_count() {
+        let Some(next) = table.next_bucket(*bucket) else {
             break Some(-1);
-        }
+        };
+        *bucket = next;
         if state.chunk > 0 && state.got >= state.chunk {
             break Some(*bucket as i64);
         }
@@ -3240,7 +3251,6 @@ pub(super) fn internal_select_delete(
     // (`erl_db.c:3443-3458`), so another scheduler cannot clear the table
     // and shrink its buckets before the walk.
     let keypos = taken.keypos();
-    let buckets = taken.bucket_count();
     let Some(compiled) = compile_spec(atoms, spec)? else {
         return Ok(BifResult::badarg());
     };
@@ -3261,13 +3271,15 @@ pub(super) fn internal_select_delete(
     let table = &mut *taken;
     let mut iterations = 0_usize;
     let mut matches = Vec::new();
-    for bucket in 0..buckets {
-        for object in table.chain(bucket) {
+    let mut bucket = Some(0);
+    while let Some(current) = bucket {
+        for object in table.chain(current) {
             if compiled.run(atoms, object) == Some(Term::static_atom("true")) {
                 matches.push(object.to_vec());
             }
             iterations += 1;
         }
+        bucket = table.next_bucket(current);
     }
     let mut removed = 0;
     table.begin_select_delete();

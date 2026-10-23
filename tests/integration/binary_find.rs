@@ -169,3 +169,46 @@ fn matches_compiled_patterns_as_pinned_erts() {
         format!("{COMPILED}\n")
     );
 }
+
+/// `binary_find_probe:scoped/0` on the pinned ERTS: `binary:match/3` and
+/// `binary:matches/3` with each option form, then `binary:first/1`. The
+/// options are a list of `{scope, {Position, Length}}` tuples, and the last
+/// one sets the range; an improper tail is not checked, and a term that is
+/// not a list, an atom option, and a range outside the subject raise
+/// `badarg` (`parse_match_opts_list`, `erl_bif_binary.c:1273-1344`).
+/// `binary:first/1` raises `badarg` for the empty binary, a bitstring, and
+/// a term that is not a bitstring (`erl_bif_binary.c:2287-2309`).
+const SCOPED: &str = "[{2,1},{5,1},{5,1},nomatch,{error,badarg},{error,badarg},{error,badarg},\
+                      {5,1},{error,badarg},nomatch,{error,badarg},{error,badarg},{error,badarg},\
+                      {error,badarg},[{1,1},{2,1},{4,1},{5,1}],[{4,1},{5,1}],[{4,1},{5,1}],[],\
+                      {error,badarg},{error,badarg},{error,badarg},[{4,1},{5,1}],{error,badarg},\
+                      [],{error,badarg},{error,badarg},{error,badarg},{error,badarg},nomatch,\
+                      {error,badarg},{error,badarg},{error,badarg},{error,badarg},7,\
+                      {error,badarg},{error,badarg},{error,badarg}]";
+
+#[test]
+fn matches_scoped_searches_and_first_byte_as_pinned_erts() {
+    let program = BeamProgram::load(&[BINARY_FIND_PROBE]).unwrap();
+    let result = program.execute("binary_find_probe", "scoped", &[]).unwrap();
+    assert_eq!(text(&result.term, result.atoms()), SCOPED);
+
+    let reference = Command::new("erl")
+        .args([
+            "-noshell",
+            "-pa",
+            "fixtures/binary_find",
+            "-eval",
+            &format!("{ERTS_TEXT}, io:format(\"~s~n\", [T(binary_find_probe:scoped())]), halt()."),
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        reference.status.success() && reference.stderr.is_empty(),
+        "{reference:?}"
+    );
+    assert_eq!(
+        String::from_utf8(reference.stdout).unwrap(),
+        format!("{SCOPED}\n")
+    );
+}

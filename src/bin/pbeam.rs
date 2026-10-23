@@ -8,7 +8,8 @@ use std::{
 
 use clap::Parser;
 use pbeam_runtime::{
-    BeamError, BeamProgram, HostTerm, Term, add_erlexec_path, install_start_dispositions,
+    BeamError, BeamProgram, HostTerm, Schedulers, Term, add_erlexec_path,
+    install_start_dispositions,
 };
 
 #[derive(Parser)]
@@ -386,21 +387,7 @@ fn boot_erl(arguments: ErlCli) -> Result<(), Exit> {
         )
         .into());
     }
-    let options = arguments
-        .arguments
-        .iter()
-        .map(|argument| argument.as_bytes());
-    for option in options.take_while(|option| *option != b"-extra") {
-        if option.starts_with(b"+") || ERLEXEC_OPTIONS.iter().any(|name| name.as_bytes() == option)
-        {
-            return Err(format!(
-                "the erl option {} is not supported: see \"Release boot\" in \
-                 docs/erts-differences.md",
-                String::from_utf8_lossy(option)
-            )
-            .into());
-        }
-    }
+    let (schedulers, erl_arguments) = scheduler_flags(&arguments.arguments)?;
     install_start_dispositions();
     // `erlexec` puts `bindir` and `rootdir/bin` first in `PATH` before it
     // starts the emulator (`erlexec.c:556-620`).
@@ -421,13 +408,60 @@ fn boot_erl(arguments: ErlCli) -> Result<(), Exit> {
         boot.extend([&b"-home"[..], home.as_bytes()]);
     }
     boot.push(b"--");
-    boot.extend(
-        arguments
-            .arguments
-            .iter()
-            .map(|argument| argument.as_bytes()),
-    );
-    run_end(program.boot(&boot))
+    boot.extend(erl_arguments);
+    run_end(Err(program.boot(&boot, schedulers)))
+}
+
+/// Take the `+S` flags out of the `erl` arguments `arguments` before
+/// `-extra`, as `erlexec` gives them to the emulator and not to `init`
+/// (`erlexec.c:943-966`, `1097-1100`). Return the scheduler counts that the
+/// emulator sets for them (see [`Schedulers::apply_flag`]) and the other
+/// arguments. The value of a flag is the rest of `+S<Value>`, or the next
+/// argument of `+S`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let (schedulers, rest) = scheduler_flags(&["+S".into(), "4:2".into(), "-noshell".into()])?;
+/// assert_eq!((schedulers.total(), schedulers.online(), rest), (4, 2, vec![&b"-noshell"[..]]));
+/// ```
+///
+/// # Errors
+///
+/// An `erl` option of [`ERLEXEC_OPTIONS`], an emulator flag (an argument
+/// that starts with `+`) other than `+S`, `+S` without a value, and the
+/// errors of [`Schedulers::apply_flag`].
+fn scheduler_flags(arguments: &[OsString]) -> Result<(Schedulers, Vec<&[u8]>), Exit> {
+    let mut schedulers = Schedulers::host();
+    let mut rest = Vec::with_capacity(arguments.len());
+    let mut options = arguments.iter().map(|argument| argument.as_bytes());
+    while let Some(option) = options.next() {
+        if option == b"-extra" {
+            rest.push(option);
+            rest.extend(options);
+            break;
+        }
+        let value = match option.strip_prefix(b"+S") {
+            Some(b"") => options.next().filter(|value| *value != b"--"),
+            Some(value) if !value.starts_with(b"P") && !value.starts_with(b"D") => Some(value),
+            _ => None,
+        };
+        if let Some(value) = value {
+            schedulers.apply_flag(value)?;
+        } else if option.starts_with(b"+")
+            || ERLEXEC_OPTIONS.iter().any(|name| name.as_bytes() == option)
+        {
+            return Err(format!(
+                "the erl option {} is not supported: see \"Release boot\" in \
+                 docs/erts-differences.md",
+                String::from_utf8_lossy(option)
+            )
+            .into());
+        } else {
+            rest.push(option);
+        }
+    }
+    Ok((schedulers, rest))
 }
 
 /// The version of the pinned `erts` (erts/vsn.mk:23), which the `erl`

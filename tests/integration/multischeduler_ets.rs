@@ -65,6 +65,14 @@ fn transfers_tables_to_a_heir_on_the_other_scheduler() {
     run_pair("testator", "heir");
 }
 
+/// A fine-locked hash table walks its buckets in lock-group order in each
+/// traversal, with 64 locks or the count of the debug option, and a table
+/// that is not fine locked walks them in bucket order.
+#[test]
+fn walks_a_fine_locked_table_in_lock_group_order() {
+    run_pair("walker", "walk_peer");
+}
+
 /// Each pair gives `ok` for each root on the pinned ERTS.
 #[test]
 fn the_pinned_erts_gives_the_same_results() {
@@ -87,6 +95,6 @@ fn the_pinned_erts_gives_the_same_results() {
     assert!(output.status.success(), "{output:?}");
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "[{ok,ok},{ok,ok},{ok,ok},{ok,ok}]\n"
+        "[{ok,ok},{ok,ok},{ok,ok},{ok,ok},{ok,ok}]\n"
     );
 }

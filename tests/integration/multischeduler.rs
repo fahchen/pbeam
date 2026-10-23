@@ -1065,6 +1065,13 @@ fn reads_a_timer_of_another_scheduler() {
     timer_pair("timer_read", "timer_give", |a| [a("true"), a("true")]);
 }
 
+/// `erlang:exit/3` sends an exit signal to a process of another scheduler,
+/// as `erl +S 2` gives `[boom, true]` (`bif.c:1750-1772`).
+#[test]
+fn sends_an_exit_3_signal_to_another_scheduler() {
+    timer_pair("exit3_target", "exit3_send", |a| [a("boom"), a("true")]);
+}
+
 /// A cancel of a timer of another scheduler gives the time left, then
 /// `false`, and an async cancel sends its result, as `erl +S 2` gives
 /// `[{true,false,true}, {false,false}]`.

@@ -738,34 +738,73 @@ fn options(options: Option<&Term>, size: u64) -> Option<(u8, u64, u64)> {
             Term::Atom(atom) if atom.is_static("global") => flags |= GLOBAL,
             Term::Atom(atom) if atom.is_static("trim") => flags |= TRIM,
             Term::Atom(atom) if atom.is_static("trim_all") => flags |= TRIM_ALL,
-            Term::Tuple(option) => {
-                let [Term::Atom(scope), Term::Tuple(range)] = option.as_ref() else {
-                    return None;
-                };
-                let [Term::Integer(pos), Term::Integer(len)] = range.as_ref() else {
-                    return None;
-                };
-                if !scope.is_static("scope") || *pos < 0 {
-                    return None;
-                }
-                let (mut pos, mut len) = (*pos as u64, *len as u64);
-                if (len as i64) < 0 {
-                    len = len.wrapping_neg();
-                    if (len as i64) < 0 {
-                        return None;
-                    }
-                    pos = pos.wrapping_sub(len);
-                }
-                let stop = pos.wrapping_add(len);
-                if stop < pos || size < pos || size < stop {
-                    return None;
-                }
-                (start, end) = (pos, stop);
-            }
+            Term::Tuple(option) => (start, end) = scope(option, size)?,
             _ => return None,
         }
     }
     Some((flags, start, end))
+}
+
+/// Read the options of `binary:match/3` or `binary:matches/3`, as
+/// `parse_match_opts_list` does (`erl_bif_binary.c:1273-1344`): each
+/// element is a `{scope, {Position, Length}}` tuple, and the last one sets
+/// the search range. The walk stops at the first tail that is not a cons
+/// cell, so an improper tail is not checked (`erl_bif_binary.c:1294-1335`).
+/// A term that is not a list, an atom option such as `global`, and a scope
+/// that is not valid give `None`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(match_options(&Term::nil(), 3), Some((0, 3)));
+/// assert_eq!(match_options(&Term::static_atom("global"), 3), None);
+/// ```
+fn match_options(options: &Term, size: u64) -> Option<(u64, u64)> {
+    let mut range = (0, size);
+    for cell in options.list_iter()? {
+        let Term::Tuple(option) = cell else {
+            return None;
+        };
+        range = scope(option, size)?;
+    }
+    Some(range)
+}
+
+/// Read a `{scope, {Position, Length}}` option of a subject of `size`
+/// bytes, as `parse_match_opts_list` and `parse_split_opts_list` do
+/// (`erl_bif_binary.c:1303-1333`): give the start and the end of the
+/// range. A negative length takes the bytes before the position. A range
+/// outside the subject gives `None`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let option = [Term::static_atom("scope"), Term::tuple(vec![Term::Integer(3), Term::Integer(-2)])];
+/// assert_eq!(scope(&option, 3), Some((1, 3)));
+/// ```
+fn scope(option: &[Term], size: u64) -> Option<(u64, u64)> {
+    let [Term::Atom(scope), Term::Tuple(range)] = option else {
+        return None;
+    };
+    let [Term::Integer(pos), Term::Integer(len)] = range.as_ref() else {
+        return None;
+    };
+    if !scope.is_static("scope") || *pos < 0 {
+        return None;
+    }
+    let (mut pos, mut len) = (*pos as u64, *len as u64);
+    if (len as i64) < 0 {
+        len = len.wrapping_neg();
+        if (len as i64) < 0 {
+            return None;
+        }
+        pos = pos.wrapping_sub(len);
+    }
+    let stop = pos.wrapping_add(len);
+    if stop < pos || size < pos || size < stop {
+        return None;
+    }
+    Some((pos, stop))
 }
 
 /// Return the result of a search with no match, as
@@ -1093,10 +1132,11 @@ pub(super) fn match_2(
     context: &mut BifContext<'_>,
     subject: &Term,
     pattern: &Term,
+    options: Option<&Term>,
 ) -> Result<BifResult, BeamError> {
     let stored = context.scheduler.binary_pattern(pattern);
     let process = context.scheduler.current_process_mut();
-    find_first_turn(process, stored.as_deref(), subject, pattern, None, MATCH)
+    find_first_turn(process, stored.as_deref(), subject, pattern, options, MATCH)
 }
 
 /// Run `binary:matches/2` as ERTS `binary_matches_2` does
@@ -1122,6 +1162,7 @@ pub(super) fn matches_2(
     context: &mut BifContext<'_>,
     subject: &Term,
     pattern: &Term,
+    options: Option<&Term>,
 ) -> Result<BifResult, BeamError> {
     let stored = context.scheduler.binary_pattern(pattern);
     let process = context.scheduler.current_process_mut();
@@ -1130,7 +1171,7 @@ pub(super) fn matches_2(
         stored.as_deref(),
         subject,
         pattern,
-        None,
+        options,
         GLOBAL | MATCHES,
     )
 }
@@ -1158,9 +1199,15 @@ fn find_first_turn(
     let (Some((flags, start, end)), Some(compiled)) = (
         // A bitstring subject raises `badarg` (`parse_match_opts_list` and
         // `parse_split_opts_list`, `erl_bif_binary.c:1281-1284`, `1354-1356`).
-        bytes
-            .bytes()
-            .and_then(|whole| options(options_term, whole.len() as u64)),
+        bytes.bytes().and_then(|whole| {
+            let size = whole.len() as u64;
+            match options_term {
+                Some(term) if kind != 0 => {
+                    match_options(term, size).map(|(start, end)| (0, start, end))
+                }
+                _ => options(options_term, size),
+            }
+        }),
         compile(pattern, stored),
     ) else {
         return Ok(BifResult::badarg());
@@ -1360,6 +1407,24 @@ pub(super) fn last(subject: &Term) -> BifResult {
         .last_byte()
         .expect("a binary of at least 8 bits has a last byte");
     Value(Term::Integer(i64::from(byte)))
+}
+
+/// Run `binary:first/1` as ERTS `binary_first_1` does
+/// (`erl_bif_binary.c:2287-2309`): return the first byte of the subject as
+/// an integer. A term that is not a binary, the empty binary, and a
+/// bitstring raise `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(first(&Term::binary(vec![7, 8])), BifResult::Value(Term::Integer(7))));
+/// assert!(matches!(first(&Term::binary(vec![])), BifResult::Raise { .. }));
+/// ```
+pub(super) fn first(subject: &Term) -> BifResult {
+    match subject.binary_bytes() {
+        Some([byte, ..]) => Value(Term::Integer(i64::from(*byte))),
+        _ => BifResult::badarg(),
+    }
 }
 
 /// Return the value of a term as an `Uint`, as ERTS `term_to_Uint` gives it
