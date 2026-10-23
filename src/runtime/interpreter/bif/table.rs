@@ -281,7 +281,7 @@ bifs! {
     erlang:put/2 as ErlangPut2 => |cx, [key, value]| Ok(erlang::put(cx, key, value)),
     erlang:raise/3 as ErlangRaise3 => |cx, [class, reason, stacktrace]| Ok(erlang::raise(cx.scheduler.node().backtrace_depth(), class, reason, stacktrace)),
     erlang:read_timer/1 as ErlangReadTimer1 => |cx, [reference]| timer::read_timer(cx, reference),
-    erlang:read_timer/2 => unsupported,
+    erlang:read_timer/2 as ErlangReadTimer2 => |cx, [reference, options]| timer::read_timer_2(cx, reference, options),
     erlang:ref_to_list/1 as ErlangRefToList1 => |cx, [term]| Ok(erlang::ref_to_list(term, &cx.scheduler.atoms)),
     erlang:register/2 as ErlangRegister2 => |cx, [name, id]| match id { Term::Port(_) => Err(unsupported_port("erlang:register/2")), _ => Ok(match cx.scheduler.register(name, id) { Ok(()) => Value(Term::static_atom("true")), Err(cause) => BifResult::badarg_with_cause(cause) }) },
     erlang:registered/0 as ErlangRegistered0 => |cx, []| erlang::registered(cx.scheduler),

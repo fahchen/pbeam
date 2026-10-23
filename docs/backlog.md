@@ -144,7 +144,6 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 ### Run the unsupported BIFs that OTP code calls
 
 - The "Unimplemented BIFs" row lists the `unsupported` BIF table entries that OTP code often calls. Each returns `unresolved external MFA M:F/A`. The groups:
-  - Timers: `erlang:read_timer/2`. The other timer BIFs run, `erlang:read_timer/1` among them (`src/runtime/interpreter/bif/table.rs:284`).
   - Persistent terms: `persistent_term:put_new/2` and `persistent_term:info/0`. `persistent_term:erase/1` runs (`table.rs:545`).
   - Signals: `erlang:exit/3`.
   - Maps: `maps:get/2` and `maps:is_key/2` through a fun call. The compiler changes a direct call to the `map_get` and `is_map_key` BIFs, which PBeam runs.
