@@ -25,24 +25,20 @@ use crate::term::{
     Reference, SMALL_INTEGER_MAX, SMALL_INTEGER_MIN, debug_term, external, print_term,
 };
 
-/// Run `erlang:node/1`: return the node of a pid. A term that is not a pid
-/// gives a runtime error.
+/// Run `erlang:node/1`: return the node of a pid, a port, or a reference,
+/// which is the local node, and raise `badarg` for another term, as ERTS
+/// `node_1` does (`dist.c:6219-6225`).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let atoms = AtomTable::new();
-/// let result = node(&Term::Pid(pid), &atoms)?;
-/// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.is_static("nonode@nohost"));
-/// assert!(node(&Term::Integer(1), &atoms).is_err());
+/// assert!(matches!(node(&Term::Pid(pid)), BifResult::Value(Term::Atom(atom)) if atom.is_static("nonode@nohost")));
+/// assert!(matches!(node(&Term::Integer(1)), BifResult::Raise { .. }));
 /// ```
-pub(super) fn node(term: &Term, atoms: &AtomTable) -> Result<BifResult, BeamError> {
+pub(super) fn node(term: &Term) -> BifResult {
     match term {
-        Term::Pid(_) => Ok(Value(local_node())),
-        _ => Err(error(format!(
-            "unsupported erlang:node/1 argument {}: not a pid",
-            debug_term(term, atoms)
-        ))),
+        Term::Pid(_) | Term::Port(_) | Term::Reference(_) => Value(local_node()),
+        _ => BifResult::badarg(),
     }
 }
 
@@ -2017,9 +2013,9 @@ pub(super) fn binary_to_list_1(
                 "binary_to_list",
                 vec![term.clone()],
                 binary,
-                0,
+                0..size,
                 size,
-                size,
+                Term::nil(),
             )
         }
         _ => Ok(BifResult::badarg()),
@@ -2063,14 +2059,62 @@ pub(super) fn binary_to_list_3(
         "binary_to_list",
         arguments,
         binary,
-        *first as usize - 1,
-        length,
+        *first as usize - 1..*first as usize - 1 + length,
         size as usize,
+        Term::nil(),
     )
 }
 
-/// Start the list of the `length` bytes at `offset` of `binary`, of `size`
-/// bytes, for `erlang:<bif>` with `arguments`, as ERTS `binary_to_list`
+/// Run `erlang:bitstring_to_list/1`, as ERTS `bitstring_to_list_1`
+/// (`binary.c:413-474`): `<<>>` gives `[]`, and a term that is not a
+/// bitstring raises `badarg`. The list has one integer for each whole byte.
+/// A size that is not a whole number of bytes adds the last bits as a
+/// bitstring at the end (`binary.c:452-469`). ERTS decides on one chunk
+/// with one cell for each byte and one cell for the last bits
+/// (`NBYTES(size)`, `binary.c:434-437`), and [`b2l_start`] does the same.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let list = bitstring_to_list(&mut scheduler, &Term::Binary(Binary::from(vec![1, 0x40]).bits(0, 11)))?;
+/// assert!(matches!(list, BifResult::Value(codes) if codes.proper_list().is_some_and(|codes| codes.len() == 2)));
+/// ```
+///
+/// # Errors
+///
+/// Return the invariant error of [`ProcessState::bif_reductions_left`].
+pub(super) fn bitstring_to_list(
+    scheduler: &mut Scheduler,
+    term: &Term,
+) -> Result<BifResult, BeamError> {
+    let Term::Binary(binary) = term else {
+        return Ok(BifResult::badarg());
+    };
+    let size = binary.bit_size();
+    if size == 0 {
+        return Ok(Value(Term::nil()));
+    }
+    let length = size / 8;
+    let (bytes, tail) = if size.is_multiple_of(8) {
+        (binary.clone(), Term::nil())
+    } else {
+        let last = Term::Binary(binary.bits(length * 8, size));
+        (binary.bits(0, length * 8), Term::cons(last, Term::nil()))
+    };
+    b2l_start(
+        scheduler,
+        "bitstring_to_list",
+        vec![term.clone()],
+        &bytes,
+        0..length,
+        size.div_ceil(8),
+        tail,
+    )
+}
+
+/// Start the list of the byte range `bytes` of `binary`, in front
+/// of the list `tail`, for a term of `size` cells, for `erlang:<bif>` with
+/// `arguments`, as ERTS `binary_to_list`
 /// does (`binary.c:258-290`, `329-351`). A binary of fewer than 256 bytes
 /// for each reduction left is one chunk. A binary of fewer than
 /// `B2L_MIN_EXEC_REDS * 256` bytes is also one chunk with a budget of 1000.
@@ -2092,10 +2136,11 @@ fn b2l_start(
     bif: &'static str,
     arguments: Vec<Term>,
     binary: &Binary,
-    offset: usize,
-    length: usize,
+    bytes: std::ops::Range<usize>,
     size: usize,
+    tail: Term,
 ) -> Result<BifResult, BeamError> {
+    let (offset, length) = (bytes.start, bytes.len());
     let process = scheduler.current_process_mut();
     let one_chunk = (size as u64)
         < process
@@ -2105,14 +2150,7 @@ fn b2l_start(
         // Only a budget of 0 or more does not make one chunk.
         let reds_left = process.bif_reductions_left()?;
         if size >= B2L_MIN_EXEC_REDS * B2L_BYTES_PER_REDUCTION {
-            return Ok(b2l_chunk(
-                process,
-                binary,
-                offset,
-                length,
-                Term::nil(),
-                reds_left,
-            ));
+            return Ok(b2l_chunk(process, binary, offset, length, tail, reds_left));
         }
         if reds_left <= B2L_RESCHED_REDS {
             scheduler.vbump_all_reductions();
@@ -2123,13 +2161,14 @@ fn b2l_start(
             });
         }
     }
-    process.bump_reductions(((length - 1) / B2L_BYTES_PER_REDUCTION + 1) as i32);
-    Ok(Value(b2l_cons(
-        binary,
-        offset,
-        offset + length,
-        Term::nil(),
-    )))
+    // ERTS computes `(size - 1) / 256 + 1` as a `Uint` and passes it as an
+    // `int` (`binary.c:265-266`), so 0 bytes wrap to `2^56`, which is 0 as
+    // an `int`: a bitstring of fewer than 8 bits costs no reduction.
+    let cost = length
+        .checked_sub(1)
+        .map_or(0, |last| last / B2L_BYTES_PER_REDUCTION + 1);
+    process.bump_reductions(cost as i32);
+    Ok(Value(b2l_cons(binary, offset, offset + length, tail)))
 }
 
 /// Make the list of the last chunk of the `remaining` bytes at `offset` of

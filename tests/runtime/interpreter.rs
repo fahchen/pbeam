@@ -1930,7 +1930,7 @@ fn runs_maps_keys_as_a_bif_and_reports_unsupported_arguments() {
     );
     assert_eq!(
         keys(atom("ok")).unwrap_err().to_string(),
-        "unsupported maps:keys/1 argument: not a map"
+        "root process exited with {{badmap,ok},[{maps,keys,[ok],[{error_info,#{module=>erl_stdlib_errors}}]},{fixture,main,0,[]}]}"
     );
 }
 
@@ -3546,7 +3546,7 @@ fn returns_the_local_node_for_node_0_and_a_pid() {
         node(BifId::ErlangNode1, vec![atom("foo")])
             .unwrap_err()
             .to_string(),
-        "unsupported erlang:node/1 argument Atom(\"foo\"): not a pid"
+        "root process exited with {badarg,[{erlang,node,[foo],[{error_info,#{module=>erl_erts_errors}}]},{fixture,main,0,[]}]}"
     );
 }
 
@@ -6249,4 +6249,31 @@ fn writes_the_bits_of_a_bitstring_append_prefix() {
         create_binary(&atoms, &mut process, &segments).unwrap(),
         Ok(Term::binary(vec![18]))
     );
+}
+
+#[test]
+fn stops_a_list_to_bitstring_trap_with_a_unit_that_is_not_1_or_8() {
+    // Only `l2b_size` makes the size trap, with the unit 1 or 8
+    // (`erl_iolist.c:864`), so another unit is an invariant error.
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let list = Term::list_from([Term::Integer(1)]);
+    let error = program
+        .bif_trap(
+            &mut scheduler,
+            "erts_internal",
+            "list_to_bitstring_continue",
+            vec![
+                Term::static_atom("size"),
+                list.clone(),
+                list,
+                Term::nil(),
+                Term::Integer(0),
+                Term::Integer(2),
+            ],
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("unit 2"), "{error}");
 }

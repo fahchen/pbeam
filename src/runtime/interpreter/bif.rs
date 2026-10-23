@@ -957,8 +957,9 @@ impl BeamProgram {
     ///   remain stay in the ETS store under the caller. ERTS traps to
     ///   `ets:delete_trap/1` with a bignum that holds the table pointer
     ///   (`erl_db.c:3064-3077`, `5378-5397`).
-    /// - `erts_internal:list_to_bitstring_continue/5`, with the phase and the
-    ///   walk state of `erlang:iolist_to_binary/1` and `erlang:list_to_binary/1`
+    /// - `erts_internal:list_to_bitstring_continue/5,6`, with the phase and the
+    ///   walk state of `erlang:iolist_to_binary/1`, `erlang:list_to_binary/1`,
+    ///   and `erlang:list_to_bitstring/1`
     ///   ([`iolist::l2b_size`], [`iolist::l2b_copy`]). ERTS traps to
     ///   `erts_internal:list_to_bitstring_continue/1` with a magic reference
     ///   to the walk state (`erl_iolist.c:53-55`, `764-835`).
@@ -1124,7 +1125,8 @@ impl BeamProgram {
         ) = (module, function, arguments.as_mut_slice())
             && let Some(stack) = stack.proper_list()
         {
-            let bytes = std::mem::take(bytes).take_bytes();
+            let bits = bytes.bit_size() as u64;
+            let bytes = BitWriter::from_bytes(std::mem::take(bytes).take_bytes(), bits);
             let process = scheduler.current_process_mut();
             let reds_left = process.bif_reductions_left()? as i64;
             return Ok(iolist::l2b_copy(
@@ -1310,10 +1312,23 @@ impl BeamProgram {
             (
                 "erts_internal",
                 "list_to_bitstring_continue",
-                [Term::Atom(phase), arg, term, stack, Term::Integer(size)],
+                [
+                    Term::Atom(phase),
+                    arg,
+                    term,
+                    stack,
+                    Term::Integer(size),
+                    Term::Integer(unit),
+                ],
             ) if phase.is_static("size")
                 && let Some(stack) = stack.proper_list() =>
             {
+                // Only `l2b_size` makes this trap, with the unit 1 or 8.
+                let unit = iolist::Unit::from_bits(*unit).ok_or_else(|| {
+                    error(format!(
+                        "invariant error: the unit {unit} of a list_to_bitstring trap is not 1 or 8"
+                    ))
+                })?;
                 let reds_left = process.bif_reductions_left()? as i64;
                 Ok(iolist::l2b_size(
                     process,
@@ -1322,6 +1337,7 @@ impl BeamProgram {
                     term,
                     &stack.collect::<Vec<_>>(),
                     *size as usize,
+                    unit,
                 ))
             }
             ("erlang", "bif_handle_signals_return", [_, value]) => {
