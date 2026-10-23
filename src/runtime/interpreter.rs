@@ -493,7 +493,10 @@ impl BeamProgram {
     /// whose dirty NIF call completed goes to the run queue (see
     /// `Scheduler::complete_dirty_calls`). The run ends at
     /// the next scheduling step after the root process exits, also when
-    /// another process can run or a timer is active. A process that ends
+    /// another process can run or a timer is active, unless the exit
+    /// reason is `normal`. After a root exit with the reason `normal`, the
+    /// other processes keep running until a halt, and the run ends when no
+    /// process can wake (`init.erl:700-704`). A process that ends
     /// the root process with an exit signal continues until it waits,
     /// exits, or switches out. This is as
     /// `halt()` after `-eval` stops the ERTS node
