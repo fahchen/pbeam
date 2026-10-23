@@ -4,6 +4,7 @@ use super::BifResult::{Raise, Trap, Value};
 use super::*;
 use crate::beam::code::Instruction;
 use crate::runtime::capability;
+use crate::runtime::dirty::DIRTY_IO_THREADS;
 use crate::runtime::heap_flags::{HeapFlags, max_heap_size, max_heap_size_map, next_heap_size};
 use crate::runtime::host;
 use crate::runtime::interpreter::DEFAULT_ERROR_HANDLER;
@@ -14,6 +15,7 @@ use crate::runtime::process::{InitialCall, OTHER_PROCESS_INFO_ITEMS};
 use crate::runtime::process::{LinkId, ProcessState};
 use crate::runtime::scheduler::PTAB_SIZE;
 use crate::runtime::scheduler::{AliasMode, CONTEXT_REDS, Flushed, MonitorOptions, MonitorTarget};
+use crate::runtime::schedulers::{Schedulers, logical_processors_available};
 use crate::runtime::signal::Signal;
 use crate::runtime::time::{self, TimeValue};
 use crate::runtime::timer::Timers;
@@ -3097,6 +3099,54 @@ pub(super) fn system_info(scheduler: &mut Scheduler, item: &Term) -> Result<BifR
         Term::Atom(atom) if atoms.name_of(atom) == "scheduler_id" => {
             Ok(Value(Term::Integer(scheduler_id)))
         }
+        // As many dirty CPU schedulers as schedulers, at most the default
+        // count of the host (`erl_init.c:865-866`, `erl_init.c:1193-1201`,
+        // `erl_bif_info.c:3337-3344`).
+        Term::Atom(atom) if atoms.name_of(atom) == "dirty_cpu_schedulers" => {
+            Ok(Value(Term::Integer(schedulers.min(host_count()))))
+        }
+        Term::Atom(atom) if atoms.name_of(atom) == "dirty_cpu_schedulers_online" => {
+            Ok(Value(Term::Integer(online.min(host_count()))))
+        }
+        // `erl_init.c:867`, `erl_bif_info.c:3345-3348`.
+        Term::Atom(atom) if atoms.name_of(atom) == "dirty_io_schedulers" => Ok(Value(
+            Term::Integer(i64::try_from(DIRTY_IO_THREADS).expect("a thread count fits")),
+        )),
+        // PBeam cannot block multi-scheduling, so no process blocks it
+        // (`erl_bif_info.c:2790-2798`, `erl_bif_info.c:3390-3399`).
+        Term::Atom(atom) if atoms.name_of(atom) == "multi_scheduling" => {
+            Ok(Value(Term::Atom(atoms.put("enabled")?)))
+        }
+        Term::Atom(atom)
+            if atoms.name_of(atom) == "multi_scheduling_blockers"
+                || atoms.name_of(atom) == "normal_multi_scheduling_blockers" =>
+        {
+            Ok(Value(Term::Nil))
+        }
+        // PBeam does not bind a scheduler to a processor: the bind type is
+        // `unbound`, and each scheduler is `unbound`
+        // (`erl_bif_info.c:3251-3254`, `erts_get_schedulers_binds` in
+        // `erl_cpu_topology.c`).
+        Term::Atom(atom) if atoms.name_of(atom) == "scheduler_bind_type" => {
+            Ok(Value(Term::Atom(atoms.put("unbound")?)))
+        }
+        Term::Atom(atom) if atoms.name_of(atom) == "scheduler_bindings" => {
+            let unbound = Term::Atom(atoms.put("unbound")?);
+            let count = usize::try_from(schedulers).expect("a scheduler count fits");
+            Ok(Value(Term::tuple(vec![unbound; count])))
+        }
+        // ERTS reads no processor topology on this host
+        // (`erl_misc_utils.c`), so the item is `undefined`
+        // (`erl_bif_info.c:3111-3113`).
+        #[cfg(not(target_os = "linux"))]
+        Term::Atom(atom) if atoms.name_of(atom) == "cpu_topology" => {
+            Ok(Value(Term::static_atom("undefined")))
+        }
+        // `erl_bif_info.c:3212-3221`. The count is never 0, so the item is
+        // never `unknown`.
+        Term::Atom(atom) if atoms.name_of(atom) == "logical_processors_available" => Ok(Value(
+            Term::Integer(i64::try_from(logical_processors_available()).expect("a count fits")),
+        )),
         // The run has the time correction of the node in the
         // `multi_time_warp` mode, the defaults of the pinned ERTS
         // (`erl_bif_info.c:2854-2868`, `erl_init.c:226`).
@@ -3131,6 +3181,11 @@ pub(super) fn system_info(scheduler: &mut Scheduler, item: &Term) -> Result<BifR
             debug_term(item, atoms)
         ))),
     }
+}
+
+/// Return the default scheduler count of the host (see [`Schedulers::host`]).
+fn host_count() -> i64 {
+    i64::try_from(Schedulers::host().total()).expect("a scheduler count fits")
 }
 
 /// Run a float operation on two numbers, at least one a float, or on the

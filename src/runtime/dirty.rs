@@ -65,7 +65,7 @@ use crate::{
 /// ```rust,ignore
 /// assert_eq!(DIRTY_IO_THREADS, 10);
 /// ```
-const DIRTY_IO_THREADS: usize = 10;
+pub(in crate::runtime) const DIRTY_IO_THREADS: usize = 10;
 
 /// The function of a [`Finish`].
 pub(super) type FinishFn = dyn FnOnce(&mut Scheduler) -> Result<BifResult, BeamError> + Send;
