@@ -450,7 +450,17 @@ fn runs_the_write_concurrency_counters_as_pinned_erts() {
         atom("ok"),
         Term::Integer(i64::MAX),
     ];
-    cases.extend(["badarg", "badarg", "badarg", "system_limit", "system_limit"].map(error));
+    cases.extend(
+        [
+            "badarg",
+            "badarg",
+            "badarg",
+            "system_limit",
+            "system_limit",
+            "system_limit",
+        ]
+        .map(error),
+    );
     cases.extend(std::iter::repeat_n(error("badarg"), 10));
     let actual = program
         .execute("atomics_probe", "write_concurrency", &[])
@@ -461,8 +471,11 @@ fn runs_the_write_concurrency_counters_as_pinned_erts() {
         reference("write_concurrency"),
         include_str!("../../fixtures/atomics/write_concurrency.expected").as_bytes()
     );
-    // ERTS ends the emulator when the allocation of the largest array
-    // fails; PBeam raises `system_limit`, as for the atomic arrays.
+    // `counters:new((1 bsl 59) - 1, [write_concurrency])` passes the size
+    // check of one scheduler (`erl_bif_counters.c:92-93`), and its
+    // allocation fails. ERTS ends the emulator there; PBeam raises
+    // `system_limit`, the departure of "Atomic arrays" in
+    // `docs/erts-differences.md`. Only PBeam runs this case.
     assert_eq!(
         program
             .execute("atomics_probe", "write_concurrency_allocation_failure", &[])

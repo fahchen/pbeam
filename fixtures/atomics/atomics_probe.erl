@@ -97,6 +97,7 @@ write_concurrency() ->
      reason(fun() -> counters:new(-1, [write_concurrency]) end),
      reason(fun() -> counters:new(1.0, [write_concurrency]) end),
      reason(fun() -> counters:new(1 bsl 64, [write_concurrency]) end),
+     reason(fun() -> counters:new(1 bsl 59, [write_concurrency]) end),
      reason(fun() -> counters:new((1 bsl 59) + 1, [write_concurrency]) end),
      reason(fun() -> counters:get(Ref, 0) end),
      reason(fun() -> counters:get(Ref, 2) end),
@@ -109,11 +110,13 @@ write_concurrency() ->
      reason(fun() -> erts_internal:counters_info(5) end),
      reason(fun() -> atomics:get(Raw, 1) end)].
 
-%% A `write_concurrency` array of 2^59 counters, the largest size that one
-%% scheduler takes, which is 4 EiB in PBeam. ERTS ends the emulator when
-%% its allocation fails, so only a PBeam run calls this case.
+%% A `write_concurrency` array of 2^59 - 1 counters, the largest size that
+%% passes the size check of one scheduler (`erl_bif_counters.c:92-93`),
+%% which is 4 EiB in PBeam. ERTS ends the emulator when its allocation
+%% fails ("Atomic arrays" in `docs/erts-differences.md`), so only a PBeam
+%% run calls this case.
 write_concurrency_allocation_failure() ->
-    reason(fun() -> counters:new(1 bsl 59, [write_concurrency]) end).
+    reason(fun() -> counters:new((1 bsl 59) - 1, [write_concurrency]) end).
 
 %% The `atomics` functions that the `counters` module does not call, which
 %% PBeam does not implement. Only a PBeam run calls it.
