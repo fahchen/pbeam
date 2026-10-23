@@ -1259,10 +1259,12 @@ impl Scheduler {
     /// assert!(!scheduler.has_external_sources());
     /// ```
     pub(super) fn has_external_sources(&mut self) -> bool {
+        // The table lock is released before the scans lock each port.
+        let handles = self.node.ports().handles();
         self.resources.borrow_mut::<Ttys>().input_selected()
             || self.dirty.running()
-            || !self.node.ports().wait_fds(self.index).is_empty()
-            || !self.node.ports().write_fds(self.index).is_empty()
+            || !crate::runtime::port::wait_fds(&handles, self.index).is_empty()
+            || !crate::runtime::port::write_fds(&handles, self.index).is_empty()
             // A handled host signal becomes a message to `erl_signal_server`.
             || self.whereis("erl_signal_server").is_some()
     }
@@ -1306,8 +1308,10 @@ impl Scheduler {
     pub(super) fn wait_events(&mut self, timeout: Option<Duration>) -> Result<bool, BeamError> {
         let selected = self.resources.borrow_mut::<Ttys>().input_selected();
         let dirty = self.dirty.running();
-        let ports = self.node.ports().wait_fds(self.index);
-        let writes = self.node.ports().write_fds(self.index);
+        let handles = self.node.ports().handles();
+        let ports = crate::runtime::port::wait_fds(&handles, self.index);
+        let writes = crate::runtime::port::write_fds(&handles, self.index);
+        drop(handles);
         let wake = self.wake.as_ref().map(|wake| wake.as_raw_fd());
         let fds: Vec<_> = [
             selected.then_some(libc::STDIN_FILENO),
@@ -2794,9 +2798,9 @@ impl Scheduler {
         id: crate::term::PortId,
         index: usize,
     ) -> Result<(), BeamError> {
-        let remote = self.node.ports().get(id).is_some_and(|port| {
+        let remote = self.node.with_port(id, |port| {
             port.scheduler != index && matches!(port.driver, crate::runtime::port::Driver::Inet(_))
-        });
+        }) == Some(true);
         if remote {
             return Err(error(
                 "unsupported: an inet port of another scheduler in a run of execute_on_schedulers: see \"Ports\" in docs/erts-differences.md",

@@ -8,11 +8,11 @@
 //! the pipes of the ports only when no process can run (see
 //! [`Scheduler::wait_input`]).
 
-use super::{LinkId, Scheduler};
+use super::{LinkId, Scheduler, node::Node};
 use crate::{
     error::{BeamError, error},
     runtime::{
-        port::{Driver, Input, Port, PortEvent, inet},
+        port::{self, Driver, Input, Port, PortCell, PortEvent, inet, inet::Inet},
         process::MonitorLinkTree,
         signal::Signal,
     },
@@ -120,27 +120,20 @@ impl Scheduler {
     /// `os:set_signal(sigchld, ignore)`. A ready active `udp_inet` socket
     /// returns a runtime error.
     pub(in crate::runtime) fn port_ready(&mut self, fd: libc::c_int) -> Result<(), BeamError> {
-        let mut ports = self.node.ports();
-        if let Some(listen) = ports.accepting(self.index, fd) {
-            drop(ports);
+        let handles = self.node.ports().handles();
+        if let Some(listen) = port::inet_port(&handles, self.index, fd, Inet::accept_fd) {
             return self.tcp_accept_ready(listen);
         }
-        if ports.receiving(self.index, fd) {
+        if port::inet_port(&handles, self.index, fd, Inet::receive_fd).is_some() {
             return Err(error(inet::DATAGRAM_RECEIVE));
         }
-        if let Some(port) = ports.stream_receiving(self.index, fd) {
-            drop(ports);
+        if let Some(port) = port::inet_port(&handles, self.index, fd, Inet::stream_receive_fd) {
             return self.tcp_receive_ready(port);
         }
-        let Some((id, event)) = ports.read(self.index, fd) else {
+        let Some((id, owner, event)) = port::read(&handles, self.index, fd) else {
             return Ok(());
         };
-        let port = ports.get_mut(id).expect("the port of a read is open");
-        let owner = port.owner;
-        if let PortEvent::Data(parts) = &event {
-            port.input += parts.iter().map(|bytes| bytes.len() as u64).sum::<u64>();
-        }
-        drop(ports);
+        drop(handles);
         match event {
             PortEvent::Data(parts) => {
                 for bytes in parts {
@@ -168,23 +161,24 @@ impl Scheduler {
     /// owner and stays open, and it reads nothing more. Each other port
     /// closes with the reason `normal`.
     fn port_end_of_file(&mut self, id: PortId) {
-        let mut ports = self.node.ports();
-        let port = ports.get_mut(id);
-        let port = port.expect("the port of an end of file is open");
-        let owner = port.owner;
-        let soft = match &mut port.driver {
-            Driver::Spawn(spawn) if spawn.soft_eof => {
-                spawn.input = Input::Ended;
-                true
+        let state = self.node.with_port(id, |port| {
+            let soft = match &mut port.driver {
+                Driver::Spawn(spawn) if spawn.soft_eof => {
+                    spawn.input = Input::Ended;
+                    true
+                }
+                _ => false,
+            };
+            (port.owner, soft)
+        });
+        // A port that another scheduler closed after the read sends nothing.
+        if let Some((owner, soft)) = state {
+            if soft {
+                let eof = Term::tuple(vec![Term::Port(id), Term::static_atom("eof")]);
+                self.port_send(owner, eof);
+            } else {
+                self.close_port(id, Term::static_atom("normal"));
             }
-            _ => false,
-        };
-        drop(ports);
-        if soft {
-            let eof = Term::tuple(vec![Term::Port(id), Term::static_atom("eof")]);
-            self.port_send(owner, eof);
-        } else {
-            self.close_port(id, Term::static_atom("normal"));
         }
     }
 
@@ -203,7 +197,8 @@ impl Scheduler {
     ///
     /// The error of [`Self::tcp_send_ready`].
     pub(in crate::runtime) fn port_writable(&mut self, fd: libc::c_int) -> Result<(), BeamError> {
-        let sending = self.node.ports().sending(self.index, fd);
+        let handles = self.node.ports().handles();
+        let sending = port::inet_port(&handles, self.index, fd, Inet::send_fd);
         match sending {
             Some(port) => self.tcp_send_ready(port),
             None => Ok(()),
@@ -252,8 +247,15 @@ impl Scheduler {
     /// [`Self::close_port`]), and keep a port that flushes in the `CLOSING`
     /// state only with `flush`.
     fn exit_port(&mut self, id: PortId, reason: Term, flush: bool) {
-        let mut ports = self.node.ports();
-        let port = ports.get_mut(id).expect("the port to close is open");
+        // The port lock comes first. The table lock is taken only after the
+        // port lock is released, to remove the port.
+        let cell = self.node.port(id);
+        let mut slot = cell.as_ref().map(port::lock);
+        // A port that closed before, also on another scheduler, sends no
+        // second exit.
+        let Some(port) = slot.as_mut().and_then(|slot| slot.as_mut()) else {
+            return;
+        };
         // `erts_deliver_port_exit` sets `CLOSING` for each queue that holds
         // bytes before `flush_port` (io.c:3939-3948). With `linger {true,
         // 0}`, `tcp_inet_flush` drops the queue and the port terminates with
@@ -267,8 +269,14 @@ impl Scheduler {
         let monitors = std::mem::take(&mut port.monitors);
         port.closing |= queued;
         let serving = port.scheduler;
-        let port = (!flushes).then(|| ports.remove(id).expect("the port to close is open"));
-        drop(ports);
+        let port = slot
+            .as_mut()
+            .filter(|_| !flushes)
+            .and_then(|slot| slot.take());
+        drop(slot);
+        if !flushes {
+            self.node.ports().remove(id);
+        }
         // The scheduler that serves the port waits for its fds: wake it, so
         // that it waits again without the fds of the closed port.
         if serving != self.index {
@@ -312,13 +320,12 @@ impl Scheduler {
     /// scheduler.driver_exit(port, Term::static_atom("normal"));
     /// ```
     pub(super) fn driver_exit(&mut self, id: PortId, reason: Term) {
-        let mut ports = self.node.ports();
-        let port = ports
-            .get_mut(id)
-            .expect("the port of a driver exit is open");
-        let owner = port.owner;
-        let linked = port.links.remove(&owner).is_some();
-        drop(ports);
+        let Some((owner, linked)) = self.node.with_port(id, |port| {
+            let owner = port.owner;
+            (owner, port.links.remove(&owner).is_some())
+        }) else {
+            return;
+        };
         if linked {
             // An owner that does not exist drops the signal.
             let _ = self.send_signal(None, owner, Signal::PortUnlink { port: id });
@@ -341,10 +348,10 @@ impl Scheduler {
         let current = self.current_process_mut().id;
         let linked = self
             .node
-            .ports()
-            .get_mut(id)
-            .filter(|port| !port.closing)
-            .map(|port| port.links.insert(current, ()))
+            .with_port(id, |port| {
+                (!port.closing).then(|| port.links.insert(current, ()))
+            })
+            .flatten()
             .is_some();
         if !linked {
             if !self.current_process_mut().trap_exit {
@@ -382,9 +389,7 @@ impl Scheduler {
             return;
         }
         self.current_process_mut().links.remove(&LinkId::Port(id));
-        if let Some(port) = self.node.ports().get_mut(id) {
-            let _ = port.links.remove(&current);
-        }
+        self.node.with_port(id, |port| port.links.remove(&current));
     }
 
     /// Make `pid` the owner of the open port `id`, as the BIF operation of
@@ -404,17 +409,19 @@ impl Scheduler {
         // The port side of the link goes in before the link signal, as
         // `erts_port_connect` does (`io.c:2367-2375`): an exit of the new
         // owner after the signal then finds the link.
-        let mut ports = self.node.ports();
-        let port = ports.get_mut(id).expect("the port to connect is open");
-        let linked = port.links.insert(pid, ()).is_some();
-        let owner = std::mem::replace(&mut port.owner, pid);
-        drop(ports);
+        let Some((linked, owner)) = self.node.with_port(id, |port| {
+            let linked = port.links.insert(pid, ()).is_some();
+            (linked, std::mem::replace(&mut port.owner, pid))
+        }) else {
+            return false;
+        };
         let link = Signal::PortLink { port: id };
         if !linked && self.send_signal(None, pid, link).is_err() {
-            let mut ports = self.node.ports();
-            let port = ports.get_mut(id).expect("the port to connect is open");
-            port.links.remove(&pid);
-            port.owner = owner;
+            // A port that closed in between has no link or owner to undo.
+            self.node.with_port(id, |port| {
+                port.links.remove(&pid);
+                port.owner = owner;
+            });
             return false;
         }
         // The scheduler that serves the port keeps a new owner of its own:
@@ -450,11 +457,11 @@ impl Scheduler {
         watcher: ProcessId,
         reference: Reference,
     ) -> bool {
-        let mut ports = self.node.ports();
-        ports
-            .get_mut(id)
-            .filter(|port| !port.closing)
-            .map(|port| port.monitors.push((watcher, reference)))
+        self.node
+            .with_port(id, |port| {
+                (!port.closing).then(|| port.monitors.push((watcher, reference)))
+            })
+            .flatten()
             .is_some()
     }
 
@@ -469,11 +476,9 @@ impl Scheduler {
     /// ```
     pub(super) fn demonitor_port(&mut self, id: PortId, reference: Reference) {
         // A port that closed has no monitor to remove.
-        self.node
-            .ports()
-            .get_mut(id)
-            .into_iter()
-            .for_each(|port| port.monitors.retain(|&(_, item)| item != reference));
+        self.node.with_port(id, |port| {
+            port.monitors.retain(|&(_, item)| item != reference);
+        });
     }
 
     /// Stop the driver of the port `id` that left the table, after its
@@ -520,10 +525,10 @@ impl Scheduler {
     ) {
         // A port that closed sent its link exit signal to `from`, and a port
         // without the link drops the signal (`io.c:2187-2190`).
-        let closes = self.node.ports().get_mut(id).is_some_and(|port| {
+        let closes = self.node.with_port(id, |port| {
             port.links.remove(&from).is_some()
                 && (*reason != Term::static_atom("normal") || port.owner == from)
-        });
+        }) == Some(true);
         if closes {
             self.close_port(id, reason.clone());
         }
@@ -550,6 +555,13 @@ impl Scheduler {
             _ => self.deliver(target, term),
         }
     }
+}
+
+/// Return the handle of the port `id` of a driver step of the scheduler
+/// that serves it: the step runs only while the port is in the table.
+pub(super) fn port_cell(node: &Node, id: PortId) -> PortCell {
+    node.port(id)
+        .expect("the port of a driver step is in the port table")
 }
 
 fn port_message(id: PortId, tag: &str, value: Term) -> Term {

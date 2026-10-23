@@ -13,13 +13,14 @@ use crate::runtime::{
         spawn::{self, SpawnError, Streams},
     },
     port::{
-        Driver, Input, Packets, Port, Spawn,
+        self, Driver, Input, Packets, Port, PortCell, Spawn,
         inet::{Control, Inet, SocketType},
     },
     signal::Signal,
     unicode::native_filename,
 };
 use crate::term::PortId;
+use std::sync::MutexGuard;
 
 /// Run `erts_internal:group_leader(Leader, Target)`, which
 /// `erlang:group_leader/2` in `erlang.beam` calls, as
@@ -602,47 +603,55 @@ fn native_name(atoms: &AtomTable, name: &Term, allow_empty: bool) -> Option<Vec<
     native_filename(name, filename_encoding())
 }
 
-/// Return the open port of `port`, or `None` for a term that is not a
-/// port of an open port. A port in the `CLOSING` state is not open: the
-/// BIFs that take this port give `badarg` for it, as the operation of
-/// `erlang:port_command/2`, `erlang:port_close/1`, and
-/// `erlang:port_connect/2` on the port does and as `data_lookup_port`
-/// does not find it (erl_bif_port.c:157-160). An atom names no port,
-/// because PBeam registers no port.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// assert_eq!(open_port_id(scheduler, &Term::Port(port)).unwrap(), Some(port));
-/// assert_eq!(open_port_id(scheduler, &Term::static_atom("foo")).unwrap(), None);
-/// ```
-pub(super) fn open_port_id(
-    scheduler: &mut Scheduler,
-    port: &Term,
-) -> Result<Option<PortId>, BeamError> {
-    let Some(id) = found_port_id(scheduler, port)? else {
-        return Ok(None);
-    };
-    Ok((!scheduler.node.ports().closing(id)).then_some(id))
-}
+/// The port table entry of a port term: its identifier and the handle of
+/// its lock.
+pub(super) type Found = Option<(PortId, PortCell)>;
 
-/// Return the port of `port` that is open or in the `CLOSING` state, as
-/// `sig_lookup_port` finds it for `erlang:port_info/1,2` and
-/// `erlang:port_control/3` (`erl_bif_port.c:133-148`), or `None`.
+/// The guard of the lock of a found port.
+pub(super) type Slot<'a> = Option<MutexGuard<'a, Option<Port>>>;
+
+/// Return the port table entry of `port`, as `sig_lookup_port` and
+/// `data_lookup_port` find the port (erl_bif_port.c:133-160), or `None`
+/// for a term that is not a port in the table. An atom names no port,
+/// because PBeam registers no port. The caller locks the port once with
+/// [`lock_found`] and checks its state under that lock, as ERTS checks the
+/// state of a port under the port lock (`erts_port_lookup`, erl_port.h).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(found_port_id(scheduler, &Term::Port(port)).unwrap(), Some(port));
+/// let found = found_port(scheduler, &Term::Port(port))?;
+/// let mut slot = lock_found(&found);
+/// assert!(open(&mut slot).is_some());
 /// ```
-fn found_port_id(scheduler: &mut Scheduler, port: &Term) -> Result<Option<PortId>, BeamError> {
+pub(super) fn found_port(scheduler: &mut Scheduler, port: &Term) -> Result<Found, BeamError> {
     let Term::Port(id) = port else {
         return Ok(None);
     };
     // The timers of an inet port stay with the scheduler that serves it.
     let index = scheduler.index();
     scheduler.inet_port_served(*id, index)?;
-    Ok(scheduler.node.ports().get(*id).map(|_| *id))
+    Ok(scheduler.node.port(*id).map(|cell| (*id, cell)))
+}
+
+/// Lock the port of `found`.
+pub(super) fn lock_found(found: &Found) -> Slot<'_> {
+    found.as_ref().map(|(_, cell)| port::lock(cell))
+}
+
+/// Return the port of `slot` when it is open or in the `CLOSING` state, as
+/// `sig_lookup_port` finds it for `erlang:port_info/1,2` and
+/// `erlang:port_control/3` (`erl_bif_port.c:133-148`), or `None` when it
+/// closed.
+pub(super) fn located<'a>(slot: &'a mut Slot<'_>) -> Option<&'a mut Port> {
+    slot.as_mut().and_then(|slot| slot.as_mut())
+}
+
+/// Return the port of `slot` when it is open. A port in the `CLOSING`
+/// state is not open: the BIFs that take this port give `badarg` for it,
+/// as `data_lookup_port` does (erl_bif_port.c:157-160).
+pub(super) fn open<'a>(slot: &'a mut Slot<'_>) -> Option<&'a mut Port> {
+    located(slot).filter(|port| !port.closing)
 }
 
 /// Run `erts_internal:port_command(Port, Data, OptionList)`, which
@@ -688,21 +697,26 @@ pub(super) fn port_command(
         ));
     }
     let scheduler = &mut *context.scheduler;
-    let (Some(id), Some(bytes)) = (open_port_id(scheduler, port)?, iolist::iodata_bytes(data))
+    // One lock of the port covers the check, the capability, and the
+    // write, as the port lock does in `erts_port_output` (io.c:1715-2088).
+    // The write of a spawn port holds this port lock only.
+    let found = found_port(scheduler, port)?;
+    let mut slot = lock_found(&found);
+    let (Some(port_state), Some(bytes), Some(&(id, _))) =
+        (open(&mut slot), iolist::iodata_bytes(data), found.as_ref())
     else {
+        drop(slot);
         return Ok(signals_return(scheduler, port, Term::static_atom("badarg")));
     };
-    if let Some(denied) = port_denial(scheduler, id, Operation::Command)? {
+    if let Some(denied) = port_denial(scheduler, &port_state.name, Operation::Command)? {
         return Ok(denied);
     }
     scheduler
         .current_process_mut()
         .bump_reductions(PORT_REDUCTIONS);
-    let mut ports = scheduler.node.ports();
-    let port_state = ports.get_mut(id).expect("the port is open");
     let Driver::Spawn(spawn) = &mut port_state.driver else {
         port_state.output += bytes.len() as u64;
-        drop(ports);
+        drop(slot);
         scheduler.tcp_send(id, &bytes)?;
         return Ok(signals_return(scheduler, port, Term::static_atom("true")));
     };
@@ -714,7 +728,7 @@ pub(super) fn port_command(
     if written.is_ok() {
         port_state.output += size;
     }
-    drop(ports);
+    drop(slot);
     if let Err(errno) = written {
         let reason = Term::Atom(scheduler.atoms.put(&errno_id(errno))?);
         scheduler.close_port(id, reason);
@@ -748,15 +762,21 @@ pub(super) fn port_close(
     port: &Term,
 ) -> Result<BifResult, BeamError> {
     let scheduler = &mut *context.scheduler;
-    let Some(id) = open_port_id(scheduler, port)? else {
+    let found = found_port(scheduler, port)?;
+    let mut slot = lock_found(&found);
+    let (Some(port_state), Some(&(id, _))) = (open(&mut slot), found.as_ref()) else {
+        drop(slot);
         return Ok(signals_return(scheduler, port, Term::static_atom("badarg")));
     };
-    if let Some(denied) = port_denial(scheduler, id, Operation::Close)? {
+    if let Some(denied) = port_denial(scheduler, &port_state.name, Operation::Close)? {
         return Ok(denied);
     }
+    drop(slot);
     scheduler
         .current_process_mut()
         .bump_reductions(PORT_REDUCTIONS);
+    // A close of another scheduler in between leaves nothing to close (see
+    // `Scheduler::exit_port`).
     scheduler.close_port(id, Term::static_atom("normal"));
     Ok(signals_return(scheduler, port, Term::static_atom("true")))
 }
@@ -806,19 +826,22 @@ pub(super) fn port_control(
     let command = operation
         .small_integer()
         .and_then(|value| u32::try_from(value).ok());
-    let (Some(id), Some(command), Some(bytes)) = (
-        found_port_id(scheduler, port)?,
+    let found = found_port(scheduler, port)?;
+    let mut slot = lock_found(&found);
+    let (Some(port_state), Some(command), Some(bytes), Some(&(id, _))) = (
+        located(&mut slot),
         command,
         iolist::iodata_bytes(data),
+        found.as_ref(),
     ) else {
+        drop(slot);
         return Ok(signals_return(scheduler, port, Term::static_atom("badarg")));
     };
-    if let Some(denied) = port_denial(scheduler, id, Operation::Command)? {
+    if let Some(denied) = port_denial(scheduler, &port_state.name, Operation::Command)? {
         return Ok(denied);
     }
     let caller = scheduler.current_process_mut().id;
-    let mut ports = scheduler.node.ports();
-    let reply = match ports.get_mut(id).expect("the port is open").inet_mut() {
+    let reply = match port_state.inet_mut() {
         Some(driver) => driver.control(command, &bytes, caller),
         None if command == SPAWN_CONTROL => {
             return Err(error(
@@ -827,7 +850,7 @@ pub(super) fn port_control(
         }
         None => Ok(Control::Badarg),
     };
-    drop(ports);
+    drop(slot);
     let reply = match reply? {
         Control::Reply(reply) => reply,
         Control::Accept(timeout) => scheduler.tcp_accept(id, timeout)?,
@@ -859,17 +882,10 @@ pub(super) fn port_control(
 /// The atom `capability_denied` in a full atom table.
 pub(super) fn port_denial(
     scheduler: &mut Scheduler,
-    id: PortId,
+    name: &[u8],
     operation: Operation,
 ) -> Result<Option<BifResult>, BeamError> {
-    let name = scheduler
-        .node
-        .ports()
-        .get(id)
-        .expect("the port is open")
-        .name
-        .clone();
-    denial(scheduler, CapabilityKind::Port, operation, Some(&name))
+    denial(scheduler, CapabilityKind::Port, operation, Some(name))
 }
 
 /// Run `erts_internal:port_info(Port)`, which `erlang:port_info/1` calls, as
@@ -898,16 +914,17 @@ pub(super) fn port_denial(
 /// The atom `capability_denied` in a full atom table.
 pub(super) fn port_info(context: &mut BifContext<'_>, port: &Term) -> Result<BifResult, BeamError> {
     let scheduler = &mut *context.scheduler;
-    let info = match (port, found_port_id(scheduler, port)?) {
-        (_, Some(id)) => {
-            if let Some(denied) = port_denial(scheduler, id, Operation::Inspect)? {
+    let found = found_port(scheduler, port)?;
+    let mut slot = lock_found(&found);
+    let info = match (port, located(&mut slot)) {
+        (&Term::Port(id), Some(port_state)) => {
+            if let Some(denied) = port_denial(scheduler, &port_state.name, Operation::Inspect)? {
                 return Ok(denied);
             }
             scheduler
                 .current_process_mut()
                 .bump_reductions(PORT_REDUCTIONS);
-            let ports = scheduler.node.ports();
-            let port = ports.get(id).expect("the port is open");
+            let port = &*port_state;
             Term::list_from(
                 PORT_INFO_ITEMS
                     .iter()
@@ -915,9 +932,10 @@ pub(super) fn port_info(context: &mut BifContext<'_>, port: &Term) -> Result<Bif
                     .collect::<Result<Vec<_>, _>>()?,
             )
         }
-        (Term::Port(_) | Term::Atom(_), None) => Term::static_atom("undefined"),
-        (_, None) => Term::static_atom("badarg"),
+        (Term::Port(_) | Term::Atom(_), _) => Term::static_atom("undefined"),
+        _ => Term::static_atom("badarg"),
     };
+    drop(slot);
     Ok(signals_return(scheduler, port, info))
 }
 
@@ -1013,8 +1031,10 @@ pub(super) fn port_info_item(
     item: &Term,
 ) -> Result<BifResult, BeamError> {
     let scheduler = &mut *context.scheduler;
-    let info = match (port, found_port_id(scheduler, port)?) {
-        (_, Some(id)) => {
+    let found = found_port(scheduler, port)?;
+    let mut slot = lock_found(&found);
+    let info = match (port, located(&mut slot)) {
+        (&Term::Port(id), Some(port_state)) => {
             let name = match item {
                 Term::Atom(name) => scheduler.atoms.name_of(name).to_owned(),
                 _ => String::new(),
@@ -1023,7 +1043,7 @@ pub(super) fn port_info_item(
             if !PORT_INFO_ITEMS.contains(&name) && !OTHER_PORT_ITEMS.contains(&name) {
                 return Ok(signals_return(scheduler, port, Term::static_atom("badarg")));
             }
-            if let Some(denied) = port_denial(scheduler, id, Operation::Inspect)? {
+            if let Some(denied) = port_denial(scheduler, &port_state.name, Operation::Inspect)? {
                 return Ok(denied);
             }
             if OTHER_PORT_ITEMS.contains(&name) {
@@ -1034,13 +1054,12 @@ pub(super) fn port_info_item(
             scheduler
                 .current_process_mut()
                 .bump_reductions(PORT_REDUCTIONS);
-            let ports = scheduler.node.ports();
-            let port = ports.get(id).expect("the port is open");
-            port_item(id, port, name)?
+            port_item(id, port_state, name)?
         }
-        (Term::Port(_) | Term::Atom(_), None) => Term::static_atom("undefined"),
-        (_, None) => Term::static_atom("badtype"),
+        (Term::Port(_) | Term::Atom(_), _) => Term::static_atom("undefined"),
+        _ => Term::static_atom("badtype"),
     };
+    drop(slot);
     Ok(signals_return(scheduler, port, info))
 }
 
@@ -1074,12 +1093,17 @@ pub(super) fn port_connect(
     pid: &Term,
 ) -> Result<BifResult, BeamError> {
     let scheduler = &mut *context.scheduler;
-    let result = match (open_port_id(scheduler, port)?, pid) {
-        (Some(id), &Term::Pid(pid)) => {
+    let found = found_port(scheduler, port)?;
+    let mut slot = lock_found(&found);
+    let name = open(&mut slot).map(|port_state| port_state.name.clone());
+    drop(slot);
+    let result = match (found.as_ref().zip(name), pid) {
+        (Some(((id, _), name)), &Term::Pid(pid)) => {
+            let id = *id;
             // The runtime to boot gate denies a boot process as the new
             // owner, as for `link/1` and `send/2` (see [`boot_denial`]).
             let boot = boot_denial(scheduler, pid)?;
-            if let Some(denied) = port_denial(scheduler, id, Operation::Command)?.or(boot) {
+            if let Some(denied) = port_denial(scheduler, &name, Operation::Command)?.or(boot) {
                 return Ok(denied);
             }
             // The timers of an inet port stay with the scheduler that serves

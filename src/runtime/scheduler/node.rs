@@ -25,7 +25,7 @@ use std::{
 use super::{Signal, process_table::ProcessTable};
 use crate::runtime::{
     persistent_term::PersistentTermStore,
-    port::Ports,
+    port::{self, Port, PortCell, Ports},
     process::{MonitorLinkTree, ProcessState, TimerReference},
     resources::NodeResources,
 };
@@ -740,6 +740,25 @@ impl Node {
     /// Lock the port table of the node.
     pub(in crate::runtime) fn ports(&self) -> MutexGuard<'_, Ports> {
         self.ports.lock().expect("the port table is not poisoned")
+    }
+
+    /// Return the handle of the port `id`, or `None` when it is not in the
+    /// port table. The table lock is released on return.
+    pub(in crate::runtime) fn port(&self, id: PortId) -> Option<PortCell> {
+        self.ports().get(id)
+    }
+
+    /// Run `f` on the port `id` under its own lock, and return its value,
+    /// or `None` when the port closed. The table lock is released before
+    /// the port lock is taken.
+    pub(in crate::runtime) fn with_port<R>(
+        &self,
+        id: PortId,
+        f: impl FnOnce(&mut Port) -> R,
+    ) -> Option<R> {
+        let cell = self.port(id)?;
+        let mut slot = port::lock(&cell);
+        slot.as_mut().map(f)
     }
 
     /// Wake the scheduler `index` from its wait, so that it waits again for

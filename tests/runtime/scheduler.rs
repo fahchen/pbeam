@@ -1890,9 +1890,11 @@ fn removes_the_accept_of_a_process_that_exits_with_its_port_monitor_signal_pendi
     };
     scheduler.send_signal(None, child, signal).unwrap();
     scheduler.finish_current(atom("normal"), None).unwrap();
-    let mut ports = scheduler.node.ports();
-    let port = ports.get_mut(listen).unwrap().inet_mut().unwrap();
-    assert!(port.acceptors.is_empty());
+    let acceptors = scheduler
+        .node
+        .with_port(listen, |port| port.inet_mut().unwrap().acceptors.len())
+        .unwrap();
+    assert_eq!(acceptors, 0);
 }
 
 #[test]
@@ -1928,8 +1930,8 @@ fn removes_a_reply_demonitor_port_monitor_from_the_port_at_the_alias_message() {
         .handle_signals(id, 100, 100, HandlingPoint::ScheduleIn)
         .unwrap();
     assert!(scheduler.processes[&id].monitors.get(&alias).is_none());
-    let mut ports = scheduler.node.ports();
-    assert!(ports.get_mut(port).unwrap().monitors.is_empty());
+    let monitors = scheduler.node.with_port(port, |port| port.monitors.len());
+    assert_eq!(monitors, Some(0));
 }
 
 #[test]
@@ -2045,11 +2047,8 @@ fn drops_the_link_exit_signal_of_a_process_that_the_port_does_not_link() {
     assert!(scheduler.connect_port(port, child));
     let removed = scheduler
         .node
-        .ports()
-        .get_mut(port)
-        .unwrap()
-        .links
-        .remove(&child);
+        .with_port(port, |port| port.links.remove(&child))
+        .unwrap();
     assert!(removed.is_some());
     scheduler
         .handle_signals(child, 100, 100, HandlingPoint::ScheduleIn)
@@ -2313,10 +2312,45 @@ fn a_flushed_port_leaves_the_shared_port_table() {
         .open_port(b"tcp_inet".to_vec(), Driver::Inet(tcp))
         .unwrap();
     assert!(node.ports().get(port).is_some());
-    scheduler.node.ports().get_mut(port).unwrap().closing = true;
+    scheduler.node.with_port(port, |port| port.closing = true);
     scheduler.tcp_flushed(port);
     assert!(node.ports().get(port).is_none());
     assert!(scheduler.node.ports().get(port).is_none());
+}
+
+#[test]
+fn changes_nothing_on_a_port_that_closed() {
+    use crate::runtime::port::{
+        Driver,
+        inet::{Inet, SocketType},
+    };
+    let (node, mut readers) = Node::new(1).unwrap();
+    let mut scheduler = Scheduler::with_shared(
+        Arc::new(AtomTable::new()),
+        Arc::clone(&node),
+        0,
+        readers.remove(0),
+    );
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let owner = current(&mut scheduler);
+    let tcp = Inet::new(SocketType::Stream);
+    let port = scheduler
+        .open_port(b"tcp_inet".to_vec(), Driver::Inet(tcp))
+        .unwrap();
+    // A handle that a scheduler took before the close sees the closed port
+    // under the port lock.
+    let cell = node.port(port).unwrap();
+    scheduler.close_port(port, atom("normal"));
+    assert!(crate::runtime::port::lock(&cell).is_none());
+    assert!(node.with_port(port, |_| ()).is_none());
+    // Each operation of a closed port, as after a close of another
+    // scheduler in between, changes nothing and does not panic.
+    scheduler.close_port(port, atom("normal"));
+    scheduler.driver_exit(port, atom("normal"));
+    assert!(!scheduler.connect_port(port, owner));
+    scheduler.tcp_flushed(port);
+    assert!(node.ports().get(port).is_none());
 }
 
 #[test]

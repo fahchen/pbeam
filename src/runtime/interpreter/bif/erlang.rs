@@ -6121,14 +6121,17 @@ pub(super) fn port_set_data(
     port: &Term,
     data: &Term,
 ) -> Result<BifResult, BeamError> {
-    let Some(id) = erts_internal::open_port_id(scheduler, port)? else {
+    let found = erts_internal::found_port(scheduler, port)?;
+    let mut slot = erts_internal::lock_found(&found);
+    let Some(port_state) = erts_internal::open(&mut slot) else {
         return Ok(BifResult::badarg());
     };
-    if let Some(denied) = erts_internal::port_denial(scheduler, id, Operation::Command)? {
+    if let Some(denied) =
+        erts_internal::port_denial(scheduler, &port_state.name, Operation::Command)?
+    {
         return Ok(denied);
     }
-    let mut ports = scheduler.node.ports();
-    ports.get_mut(id).expect("the port is open").data = data.clone();
+    port_state.data = data.clone();
     Ok(BifResult::Value(Term::static_atom("true")))
 }
 
@@ -6153,14 +6156,17 @@ pub(super) fn port_get_data(
     scheduler: &mut Scheduler,
     port: &Term,
 ) -> Result<BifResult, BeamError> {
-    let Some(id) = erts_internal::open_port_id(scheduler, port)? else {
+    let found = erts_internal::found_port(scheduler, port)?;
+    let mut slot = erts_internal::lock_found(&found);
+    let Some(port_state) = erts_internal::open(&mut slot) else {
         return Ok(BifResult::badarg());
     };
-    if let Some(denied) = erts_internal::port_denial(scheduler, id, Operation::Inspect)? {
+    if let Some(denied) =
+        erts_internal::port_denial(scheduler, &port_state.name, Operation::Inspect)?
+    {
         return Ok(denied);
     }
-    let ports = scheduler.node.ports();
-    let data = ports.get(id).expect("the port is open").data.clone();
+    let data = port_state.data.clone();
     Ok(BifResult::Value(data))
 }
 

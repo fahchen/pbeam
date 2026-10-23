@@ -6,7 +6,11 @@
 
 pub(super) mod inet;
 
-use std::{collections::BTreeMap, ffi::c_int};
+use std::{
+    collections::BTreeMap,
+    ffi::c_int,
+    sync::{Arc, Mutex, MutexGuard},
+};
 
 use super::{host::spawn::Child, process::MonitorLinkTree};
 use crate::term::{PortId, ProcessId, Reference, Term};
@@ -18,7 +22,7 @@ use inet::Inet;
 #[derive(Debug, Default)]
 pub(super) struct Ports {
     /// Each open port.
-    by_id: BTreeMap<PortId, Port>,
+    by_id: BTreeMap<PortId, PortCell>,
 }
 
 /// One open port: the ERTS `Port` (`erl_port.h`) with the data of its
@@ -245,6 +249,26 @@ impl Port {
     }
 }
 
+/// The lock of one port, as each ERTS port has its own lock
+/// (`erts_port_lock`, io.c:923-1002). The slot holds `None` once the port
+/// closed: a holder of the handle that locks it after the close sees the
+/// closed port, as `erts_port_lookup` checks the state of the port under
+/// its lock (erl_port.h). Code takes a port lock before the table lock or
+/// after it is released, and never holds two port locks.
+pub(super) type PortCell = Arc<Mutex<Option<Port>>>;
+
+/// Lock the port of `cell`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let slot = lock(&cell);
+/// assert!(slot.is_some());
+/// ```
+pub(super) fn lock(cell: &PortCell) -> MutexGuard<'_, Option<Port>> {
+    cell.lock().expect("a port lock is not poisoned")
+}
+
 impl Ports {
     /// Put `port` under the identifier `id`, which no open port has.
     ///
@@ -254,7 +278,7 @@ impl Ports {
     /// ports.insert_at(PortId(7), port);
     /// ```
     pub(super) fn insert_at(&mut self, id: PortId, port: Port) {
-        self.by_id.insert(id, port);
+        self.by_id.insert(id, Arc::new(Mutex::new(Some(port))));
     }
 
     /// Return the identifiers of the open ports, in no order, as
@@ -270,216 +294,173 @@ impl Ports {
         self.by_id.keys().copied().collect()
     }
 
-    /// Return true when the port `id` is in the `CLOSING` state.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert!(!ports.closing(PortId(0)));
-    /// ```
-    pub(super) fn closing(&self, id: PortId) -> bool {
-        self.by_id.get(&id).is_some_and(|port| port.closing)
-    }
-
-    /// Return the open port `id`, or `None` when it closed.
+    /// Return the handle of the port `id`, or `None` when it is not in the
+    /// table.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// assert!(ports.get(PortId(0)).is_some());
     /// ```
-    pub(super) fn get(&self, id: PortId) -> Option<&Port> {
-        self.by_id.get(&id)
+    pub(super) fn get(&self, id: PortId) -> Option<PortCell> {
+        self.by_id.get(&id).cloned()
     }
 
-    /// Return the open port `id` for a change, or `None` when it closed.
+    /// Remove the port `id` from the table. The port closed before: its
+    /// slot holds `None`.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// ports.get_mut(PortId(0)).unwrap().output += 5;
-    /// ```
-    pub(super) fn get_mut(&mut self, id: PortId) -> Option<&mut Port> {
-        self.by_id.get_mut(&id)
-    }
-
-    /// Remove the port `id` from the table and return it. Dropping the port
-    /// closes its pipes.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert!(ports.remove(PortId(0)).is_some());
+    /// ports.remove(PortId(0));
     /// assert!(ports.get(PortId(0)).is_none());
     /// ```
-    pub(super) fn remove(&mut self, id: PortId) -> Option<Port> {
-        self.by_id.remove(&id)
+    pub(super) fn remove(&mut self, id: PortId) {
+        self.by_id.remove(&id);
     }
 
-    /// Return the fds that the IO poll waits for: the output pipe of each
-    /// spawn port before its end of file, and then its status pipe, and the
-    /// socket of each `tcp_inet` listen port with a caller in its accept
-    /// queue, and the socket of each active `udp_inet` port. A port with
-    /// `exit_status` waits for its status pipe after its end of file. A
-    /// port with `eof` that sent `{Port, eof}` waits for no fd.
+    /// Return the handles of all ports. The caller releases the table lock
+    /// before it locks a port.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(ports.wait_fds(), vec![child.output_fd()]);
+    /// assert_eq!(ports.handles().len(), 1);
     /// ```
-    /// The open ports that the scheduler `index` serves.
-    fn served(&self, index: usize) -> impl Iterator<Item = &Port> {
-        self.by_id
-            .values()
-            .filter(move |port| port.scheduler == index)
-    }
-
-    pub(super) fn wait_fds(&self, index: usize) -> Vec<c_int> {
-        self.served(index)
-            .filter_map(|port| match &port.driver {
-                Driver::Spawn(spawn) => match spawn.input {
-                    Input::Open => Some(spawn.child.output_fd()),
-                    Input::Status => Some(spawn.child.status_fd()),
-                    Input::Ended => None,
-                },
-                Driver::Inet(inet) => inet
-                    .accept_fd()
-                    .or_else(|| inet.receive_fd())
-                    .or_else(|| inet.stream_receive_fd()),
-            })
-            .collect()
-    }
-
-    /// Return the fd of each `tcp_inet` port with queued output, which the
-    /// idle wait selects for write (`sock_select(desc, FD_WRITE, 1)`,
-    /// inet_drv.c:13846).
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert!(ports.write_fds().is_empty());
-    /// ```
-    pub(super) fn write_fds(&self, index: usize) -> Vec<c_int> {
-        self.served(index)
-            .filter_map(|port| match &port.driver {
-                Driver::Inet(inet) => inet.send_fd(),
-                Driver::Spawn(_) => None,
-            })
-            .collect()
-    }
-
-    /// Return the `tcp_inet` port whose socket is `fd` and has a receive
-    /// that waits, or `None`.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert_eq!(ports.stream_receiving(fd), Some(port));
-    /// ```
-    pub(super) fn stream_receiving(&self, index: usize, fd: c_int) -> Option<PortId> {
-        self.inet_port(index, fd, Inet::stream_receive_fd)
-    }
-
-    /// Return the `tcp_inet` port whose socket is `fd` and has queued
-    /// output, or `None`.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert_eq!(ports.sending(fd), Some(port));
-    /// ```
-    pub(super) fn sending(&self, index: usize, fd: c_int) -> Option<PortId> {
-        self.inet_port(index, fd, Inet::send_fd)
-    }
-
-    /// Return the inet port for which `select` gives `fd`.
-    fn inet_port(
-        &self,
-        index: usize,
-        fd: c_int,
-        select: impl Fn(&Inet) -> Option<c_int>,
-    ) -> Option<PortId> {
+    pub(super) fn handles(&self) -> Vec<(PortId, PortCell)> {
         self.by_id
             .iter()
-            .filter(|(_, port)| port.scheduler == index)
-            .find_map(|(&id, port)| match &port.driver {
-                Driver::Inet(inet) if select(inet) == Some(fd) => Some(id),
-                _ => None,
-            })
+            .map(|(&id, cell)| (id, Arc::clone(cell)))
+            .collect()
     }
+}
 
-    /// Return the `tcp_inet` listen port that waits for a connection on the
-    /// fd `fd`, or `None`.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert_eq!(ports.accepting(fd), Some(PortId(0)));
-    /// ```
-    pub(super) fn accepting(&self, index: usize, fd: c_int) -> Option<PortId> {
-        self.by_id
-            .iter()
-            .filter(|(_, port)| port.scheduler == index)
-            .find_map(|(&id, port)| match &port.driver {
-                Driver::Inet(tcp) if tcp.accept_fd() == Some(fd) => Some(id),
-                _ => None,
-            })
-    }
+/// The handles of the open ports that the scheduler `index` serves, from
+/// the handles of the table.
+///
+/// The scans below lock one port at a time, after the table lock is
+/// released.
+fn served<'a>(
+    handles: &'a [(PortId, PortCell)],
+    index: usize,
+) -> impl Iterator<Item = (PortId, MutexGuard<'a, Option<Port>>)> {
+    handles.iter().filter_map(move |(id, cell)| {
+        let slot = lock(cell);
+        slot.as_ref()
+            .is_some_and(|port| port.scheduler == index)
+            .then_some((*id, slot))
+    })
+}
 
-    /// Return whether an active `udp_inet` port waits for a datagram on the
-    /// fd `fd`.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert!(ports.receiving(fd));
-    /// ```
-    pub(super) fn receiving(&self, index: usize, fd: c_int) -> bool {
-        self.served(index)
-            .any(|port| matches!(&port.driver, Driver::Inet(inet) if inet.receive_fd() == Some(fd)))
-    }
+/// Return the fds that the IO poll waits for: the output pipe of each
+/// spawn port before its end of file, and then its status pipe, and the
+/// socket of each `tcp_inet` listen port with a caller in its accept
+/// queue, and the socket of each active `udp_inet` port. A port with
+/// `exit_status` waits for its status pipe after its end of file. A port
+/// with `eof` that sent `{Port, eof}` waits for no fd.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(wait_fds(&handles, 0), vec![child.output_fd()]);
+/// ```
+pub(super) fn wait_fds(handles: &[(PortId, PortCell)], index: usize) -> Vec<c_int> {
+    served(handles, index)
+        .filter_map(|(_, slot)| match &slot.as_ref()?.driver {
+            Driver::Spawn(spawn) => match spawn.input {
+                Input::Open => Some(spawn.child.output_fd()),
+                Input::Status => Some(spawn.child.status_fd()),
+                Input::Ended => None,
+            },
+            Driver::Inet(inet) => inet
+                .accept_fd()
+                .or_else(|| inet.receive_fd())
+                .or_else(|| inet.stream_receive_fd()),
+        })
+        .collect()
+}
 
-    /// Read the fd `fd` that the IO poll found ready, and return its port
-    /// and what the read found, as `ready_input` does
-    /// (`sys_drivers.c:1267-1440`). Return `None` when no port waits for
-    /// the fd, and when the read of the output pipe fails, for example with
-    /// `EINTR`: the port then waits again (`sys_drivers.c:1340-1342`).
-    /// The end of file of a port with `exit_status` also returns `None`:
-    /// the port then waits for the exit status of the child (`dd->alive ==
-    /// 1`, `sys_drivers.c:1232-1240`). A read that completes no packet of a
-    /// port with `{packet, N}` also returns `None`.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert_eq!(ports.read(fd), Some((PortId(0), PortEvent::Data(vec![b"hi".to_vec()]))));
-    /// ```
-    pub(super) fn read(&mut self, index: usize, fd: c_int) -> Option<(PortId, PortEvent)> {
-        let (id, spawn) = self
-            .by_id
-            .iter_mut()
-            .filter(|(_, port)| port.scheduler == index)
-            .find_map(|(&id, port)| match &mut port.driver {
+/// Return the fds that the IO poll waits to write: the socket of each
+/// `tcp_inet` port with queued output.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(write_fds(&handles, 0), vec![]);
+/// ```
+pub(super) fn write_fds(handles: &[(PortId, PortCell)], index: usize) -> Vec<c_int> {
+    served(handles, index)
+        .filter_map(|(_, slot)| match &slot.as_ref()?.driver {
+            Driver::Inet(inet) => inet.send_fd(),
+            Driver::Spawn(_) => None,
+        })
+        .collect()
+}
+
+/// Return the `tcp_inet` port of `index` whose fd for `select` is `fd`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(inet_port(&handles, 0, fd, Inet::send_fd), Some(port));
+/// ```
+pub(super) fn inet_port(
+    handles: &[(PortId, PortCell)],
+    index: usize,
+    fd: c_int,
+    select: impl Fn(&Inet) -> Option<c_int>,
+) -> Option<PortId> {
+    served(handles, index).find_map(|(id, slot)| match &slot.as_ref()?.driver {
+        Driver::Inet(inet) if select(inet) == Some(fd) => Some(id),
+        _ => None,
+    })
+}
+
+/// Read the pipe `fd` of a spawn port of `index`, and return the port
+/// and the event of the read, or `None` when the read gives nothing to
+/// deliver. The read adds the bytes to the input count of the port.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let (id, event) = read(&handles, 0, fd).unwrap();
+/// ```
+pub(super) fn read(
+    handles: &[(PortId, PortCell)],
+    index: usize,
+    fd: c_int,
+) -> Option<(PortId, ProcessId, PortEvent)> {
+    served(handles, index)
+        .find_map(|(id, mut slot)| {
+            let port = slot.as_mut()?;
+            let owner = port.owner;
+            match &mut port.driver {
                 Driver::Spawn(spawn)
                     if (spawn.input == Input::Open && spawn.child.output_fd() == fd)
                         || (spawn.input == Input::Status && spawn.child.status_fd() == fd) =>
                 {
-                    Some((id, spawn))
+                    Some(read_spawn(spawn, &mut port.input).map(|event| (id, owner, event)))
                 }
                 _ => None,
-            })?;
-        if spawn.input == Input::Status {
-            return Some((id, PortEvent::ExitStatus(spawn.child.read_status())));
-        }
-        let bytes = spawn.child.read_output().ok()?;
-        if bytes.is_empty() && spawn.exit_status {
-            spawn.input = Input::Status;
-            return None;
-        } else if bytes.is_empty() {
-            return Some((id, PortEvent::EndOfFile));
-        }
-        let packets = spawn.packets.split(bytes);
-        (!packets.is_empty()).then_some((id, PortEvent::Data(packets)))
+            }
+        })
+        .flatten()
+}
+
+/// Read the pipe of `spawn` that is ready, and add the bytes of the data
+/// to `input`.
+fn read_spawn(spawn: &mut Spawn, input: &mut u64) -> Option<PortEvent> {
+    if spawn.input == Input::Status {
+        return Some(PortEvent::ExitStatus(spawn.child.read_status()));
     }
+    let bytes = spawn.child.read_output().ok()?;
+    if bytes.is_empty() && spawn.exit_status {
+        spawn.input = Input::Status;
+        return None;
+    } else if bytes.is_empty() {
+        return Some(PortEvent::EndOfFile);
+    }
+    let packets = spawn.packets.split(bytes);
+    *input += packets.iter().map(|bytes| bytes.len() as u64).sum::<u64>();
+    (!packets.is_empty()).then_some(PortEvent::Data(packets))
 }

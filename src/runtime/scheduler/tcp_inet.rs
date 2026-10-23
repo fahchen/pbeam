@@ -18,12 +18,12 @@
 //! `docs/erts-differences.md`), so an acceptor that exits leaves the queue
 //! before the next accept.
 
-use super::Scheduler;
+use super::{Scheduler, ports::port_cell};
 use crate::{
     error::BeamError,
     runtime::{
         port::{
-            Driver, Port, Ports,
+            self, Driver, Port,
             inet::{Acceptor, Inet, OK, errno_name, try_reply},
         },
         signal::Signal,
@@ -62,8 +62,9 @@ impl Scheduler {
         timeout: u32,
     ) -> Result<Vec<u8>, BeamError> {
         let caller = self.current_process_mut().id;
-        let mut ports = self.node.ports();
-        let tcp = tcp_inet(&mut ports, listen);
+        let cell = port_cell(&self.node, listen);
+        let mut ports = port::lock(&cell);
+        let tcp = tcp_inet(&mut ports);
         if tcp.acceptors.is_empty()
             && let Some(accepted) = tcp.accept_now().transpose()
         {
@@ -101,7 +102,7 @@ impl Scheduler {
             monitor,
             timer,
         };
-        tcp_inet(&mut self.node.ports(), listen)
+        tcp_inet(&mut port::lock(&port_cell(&self.node, listen)))
             .acceptors
             .push_back(acceptor);
         Ok(async_reply(id))
@@ -133,8 +134,9 @@ impl Scheduler {
     /// first caller in the queue. Return `true` when the next caller can
     /// take the next connection.
     fn accept_one(&mut self, listen: PortId) -> Result<bool, BeamError> {
-        let mut ports = self.node.ports();
-        let tcp = tcp_inet(&mut ports, listen);
+        let cell = port_cell(&self.node, listen);
+        let mut ports = port::lock(&cell);
+        let tcp = tcp_inet(&mut ports);
         if tcp.acceptors.is_empty() {
             return Ok(false);
         }
@@ -236,8 +238,9 @@ impl Scheduler {
     /// port `listen` (`remove_multi_op`, inet_drv.c:2379-2411), or return
     /// `None` when the port closed or the caller is not in the queue.
     fn remove_acceptor(&mut self, listen: PortId, caller: ProcessId) -> Option<Acceptor> {
-        let mut ports = self.node.ports();
-        let tcp = ports.get_mut(listen).and_then(Port::inet_mut)?;
+        let cell = self.node.port(listen)?;
+        let mut ports = port::lock(&cell);
+        let tcp = ports.as_mut().and_then(Port::inet_mut)?;
         let position = tcp
             .acceptors
             .iter()
@@ -290,9 +293,8 @@ impl Scheduler {
 }
 
 /// Return the descriptor of the open `tcp_inet` port `id`.
-fn tcp_inet(ports: &mut Ports, id: PortId) -> &mut Inet {
-    ports
-        .get_mut(id)
+fn tcp_inet(slot: &mut Option<Port>) -> &mut Inet {
+    slot.as_mut()
         .and_then(Port::inet_mut)
         .expect("the port of an accept is an open tcp_inet port")
 }
