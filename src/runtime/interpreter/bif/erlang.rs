@@ -3400,7 +3400,7 @@ pub(super) fn system_info(scheduler: &mut Scheduler, item: &Term) -> Result<BifR
                 .to_vec(),
         ))),
         // `erl_bif_info.c:2855-2856`.
-        Term::Atom(atom) if atom.is_static("start_time") => {
+        Term::Atom(atom) if atoms.name_of(atom) == "start_time" => {
             Ok(Value(Term::Integer(time::MONOTONIC_TIME_START_EXTERNAL)))
         }
         // PBeam does not start distribution, so the node has the creation 0
