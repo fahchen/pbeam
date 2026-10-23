@@ -309,15 +309,6 @@ fn idle_wait(scheduler: &mut Scheduler, node: &Node) -> Result<(), BeamError> {
 }
 
 impl BeamProgram {
-    /// Put the fun entries of the start modules into the fun-entry table of
-    /// the node of `scheduler`, as ERTS loads the preloaded modules before
-    /// the first process starts.
-    fn put_fun_entries(&self, scheduler: &Scheduler) {
-        for module in self.modules.values() {
-            scheduler.node().code.funs.put(module);
-        }
-    }
-
     /// Load BEAM files into one program. Module names must be unique. A
     /// module with the name of a preloaded module of ERTS keeps no line
     /// table, as ERTS strips it from the preloaded modules. The
@@ -772,7 +763,6 @@ impl BeamProgram {
                     let mut scheduler =
                         Scheduler::with_shared(Arc::clone(atoms), Arc::clone(&node), index, reader);
                     scheduler.code = CodeTable::new(self.modules.clone());
-                    self.put_fun_entries(&scheduler);
                     // The reset of the terminal mode needs the state of
                     // each scheduler after the run.
                     let run =
@@ -988,7 +978,6 @@ impl BeamProgram {
             scheduler.mark_root_system();
         }
         scheduler.code = CodeTable::new(self.modules.clone());
-        self.put_fun_entries(&scheduler);
         // Each argument of another table is imported into the table of the
         // run. `run_root` then runs with terms of one table.
         let imported = arguments

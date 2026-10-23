@@ -448,7 +448,6 @@ fn decode(
     let mut module = BeamModule::new(name, exports, imports, instructions)?;
     module.on_load = on_load;
     module.lines = lines;
-    module.lambdas = lambdas.into_iter().map(|(lambda, _)| lambda).collect();
     module.native_declarations = chunks
         .get(b"Attr".as_slice())
         .map(|data| attributes::native_declarations(data))

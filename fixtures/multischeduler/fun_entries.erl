@@ -2,7 +2,7 @@
 -export([single/0, loader/0, maker/0, reference/0]).
 
 %% Local funs of two versions of fun_target, whose fun entries the loader
-%% keeps in the fun-entry table of the node. fun_target.hrl holds the
+%% keeps with the module MD5. fun_target.hrl holds the
 %% stripped code of this module, compiled with -DVERSION=1 and -DVERSION=2:
 %%
 %%   -module(fun_target).

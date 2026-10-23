@@ -235,8 +235,8 @@ impl Eq for Lambda {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Target {
     /// A local fun of a lambda, which `make_fun3` makes. The fun points to
-    /// the shared entry of the fun-entry table of its code (see
-    /// `FunTable`), as an ERTS fun thing points to its `ErlFunEntry`.
+    /// the entry that the `make_fun3` of the code holds, as an ERTS fun
+    /// thing points to its `ErlFunEntry`.
     Local(Arc<Lambda>),
     /// An external fun of `module:function/arity`, which
     /// `erlang:make_fun/3` makes. ERTS does not check that the function

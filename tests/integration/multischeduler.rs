@@ -1150,14 +1150,13 @@ fn first_process(info: &Term) -> Term {
     pid
 }
 
-/// The loader keeps the module MD5 and the old index of each `FunT` entry in
-/// the fun-entry table of the node (`erl_fun.c:62-132`,
-/// `jit/asm_load.c:1208-1244`), so `erlang:fun_info/2` gives `index`,
+/// The loader keeps the module MD5 and the old index of each `FunT` entry
+/// (`jit/asm_load.c:1218-1223`, `beam_file.c:1751-1830`), so `erlang:fun_info/2` gives `index`,
 /// `new_uniq`, and `pid` as `erl +S 2` does, with one scheduler and with two
 /// (`erl_bif_info.c:3943-3967`). A fun of another version is not equal, and
 /// two funs of one entry are (`utils.c:2157-2177`).
 #[test]
-fn keeps_fun_entries_in_the_node_table_as_pinned_erts() {
+fn gives_the_fun_entry_items_of_two_module_versions_as_pinned_erts() {
     let modules = ["erlang", "zlib", "erts_code_purger"].map(pinned_beam);
     let program = BeamProgram::load(&[&modules[0], &modules[1], &modules[2], FUN_ENTRIES])
         .expect("the fixture loads");
