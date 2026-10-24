@@ -4,7 +4,7 @@
 -behaviour(supervisor).
 -export([main/0, main/1, lookup/0, gethost/0, supports/0, socket/0, sockopt/0, socket_select/0, socket_io/0,
          socket_dgram/0,         socket_acceptors/0, socket_connect_invalid/0, socket_recvfrom_flags/0, socket_recvfrom_local_flags/0,
-         socket_recvfrom_errqueue/0, socket_sendv/0, socket_backend_tcp/0, socket_backend_udp/0, sockopt_otp/0, start/2, stop/1, init/1]).
+         socket_recvfrom_errqueue/0, socket_sendv/0, socket_backend_tcp/0, socket_backend_udp/0, sockopt_otp/0, sockopt_host/0, start/2, stop/1, init/1]).
 
 %% `erl -noshell -boot start_clean -pa fixtures/boot -s kernel_boot_probe
 %% main -kernel logger_level warning` runs main/0 in the boot process of init after the boot script
@@ -708,6 +708,48 @@ socket_backend_udp() ->
               gen_udp:send(U2, {127, 0, 0, 1}, P1, [<<"po">>, "ng"]), element(3, element(2, gen_udp:recv(U1, 0, 1000))),
               gen_udp:recv(U1, 0, 0), gen_udp:close(U1), gen_udp:close(U2)],
     erlang:display({socket_backend_udp, Result}),
+    init:stop().
+
+%% `-s kernel_boot_probe sockopt_host` runs socket:setopt/3 and
+%% socket:getopt/2 with the host options of the levels socket, ip, ipv6,
+%% and tcp that have a boolean, an integer, a hop count, an address, or a
+%% membership value: the values, the invalid values, and the options that
+%% the host does not support. PBeam has no handler for {ip, recvttl} on
+%% macOS, so the probe sets it only on Linux.
+sockopt_host() ->
+    process_flag(trap_exit, true),
+    {ok, T} = socket:open(inet, stream, tcp),
+    {ok, U} = socket:open(inet, dgram, udp),
+    {ok, U6} = socket:open(inet6, dgram, udp),
+    Linux = os:type() =:= {unix, linux},
+    Bools = [[socket:setopt(S, O, true), socket:getopt(S, O), socket:setopt(S, O, false),
+              socket:getopt(S, O), socket:setopt(S, O, 1)]
+             || {S, O} <- [{U, {socket, timestamp}}, {U, {ip, multicast_loop}}, {U, {ip, recvtos}},
+                           {U, {ip, pktinfo}}, {U, {ip, recvif}}, {U, {ip, recvdstaddr}},
+                           {U, {ip, hdrincl}}, {U6, {ipv6, recvtclass}}, {U6, {ipv6, multicast_loop}},
+                           {T, {tcp, cork}}, {U, {socket, passcred}}]
+                          ++ [{U, {ip, recvttl}} || Linux]],
+    Ints = [[socket:setopt(S, O, V), socket:getopt(S, O), socket:setopt(S, O, foo),
+             socket:setopt(S, O, -1), socket:getopt(S, O)]
+            || {S, O, V} <- [{U, {ip, multicast_ttl}, 5}, {U6, {ipv6, tclass}, 16},
+                             {U6, {ipv6, multicast_if}, 0}, {T, {tcp, maxseg}, 1200},
+                             {T, {tcp, keepidle}, 30}, {T, {tcp, user_timeout}, 1000}]],
+    Hops = [[socket:setopt(U6, O, 7), socket:getopt(U6, O), socket:setopt(U6, O, default),
+             socket:getopt(U6, O), socket:setopt(U6, O, 256), socket:setopt(U6, O, -1),
+             socket:setopt(U6, O, 1 bsl 40), socket:setopt(U6, O, foo)]
+            || O <- [{ipv6, multicast_hops}, {ipv6, unicast_hops}]],
+    If = {ip, multicast_if},
+    Ifs = [socket:setopt(U, If, {127, 0, 0, 1}), socket:getopt(U, If), socket:setopt(U, If, any),
+           socket:getopt(U, If), socket:setopt(U, If, foo), socket:setopt(U, If, {1, 2, 3})],
+    M = #{multiaddr => {224, 0, 0, 251}, interface => {127, 0, 0, 1}},
+    Add = {ip, add_membership},
+    Drop = {ip, drop_membership},
+    Members = [socket:setopt(U, Add, M), socket:getopt(U, Add), socket:setopt(U, Drop, M),
+               socket:getopt(U, Drop), socket:setopt(U, Add, #{multiaddr => {224, 0, 0, 251}}),
+               socket:setopt(U, Add, M#{interface := foo}), socket:setopt(U, Add, foo),
+               socket:setopt(U, Drop, M#{interface := any})],
+    [ok = socket:close(S) || S <- [T, U, U6]],
+    erlang:display(unmap({sockopt_host, Bools, Ints, Hops, Ifs, Members})),
     init:stop().
 
 %% `-s kernel_boot_probe sockopt_otp` runs socket:setopt/3 and
