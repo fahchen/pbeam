@@ -90,6 +90,13 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ## Runtime
 
+### Free magic-reference resources when the last reference term is dropped
+
+- **Now:** the compiled programs of ETS select continuations, the compiled binary patterns, and the atomics and counters arrays stay until the run ends, where ERTS frees each one with the last reference term (`erl_db_util.h:617-619`). A `Reference` term is a plain `u64`, so PBeam cannot see when the last term goes.
+- **Option:** reference terms that own an `Arc` to the resource, so the drop of the last term frees it. This is an architectural change to `Term`, which must stay 16 bytes.
+- **Trigger:** when a long-running workload shows memory growth from repeated select continuations, pattern compiles, or atomics.
+- **Source:** PR #1245 (#1096) and its Codex P2 finding.
+
 ### Keep the parts of a chunked binary when the md5 walk traps
 
 - **Now:** `erlang:md5/1` reads a binary with `Binary::byte_runs` up to its byte budget, and a walk that does not finish makes the remainder with `Binary::bits`, which joins the parts of a binary that an append built. A large chunked binary therefore costs a copy in the turn that traps. The "md5 binary remainder" row of `docs/erts-differences.md` records this.
@@ -155,9 +162,9 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### Run the other port options and port kinds
 
-- `open_port/2` runs only `{spawn_executable, Name}` with `binary`, `exit_status`, `use_stdio`, `nouse_stdio`, `stderr_to_stdout`, and `{args, Args}` (#302). Each other option, the list data mode, the port kind `spawn_driver`, the port BIFs other than `port_command/2`, `port_close/1`, and `port_info/1`, and a message, link, monitor, exit signal, or name of a port give a runtime error (row "Ports" of `docs/erts-differences.md`).
+- `open_port/2` runs only `{spawn_executable, Name}` with `binary`, `exit_status`, `use_stdio`, `nouse_stdio`, `stderr_to_stdout`, and `{args, Args}` (#302). Each other option (#1202 added `{line, L}`, `line`, `stream`, and the list data mode), the port kind `spawn_driver`, the port BIFs other than `port_command/2`, `port_close/1`, and `port_info/1`, and a message, link, monitor, exit signal, or name of a port give a runtime error (row "Ports" of `docs/erts-differences.md`).
 - `port_command/2` writes with a blocking write; ERTS queues the data that does not fit in the pipe and marks the port busy (sys_drivers.c:1140-1203). A port program keeps each fd of PBeam that is not close-on-exec. After `os:set_signal(sigchld, ignore)`, the host reaps each program, and a port with `exit_status` returns a runtime error; ERTS reaps its programs in `erl_child_setup` (erl_child_setup.c:396-420). For the same reason, the `pbeam` binary keeps `SIG_DFL` for `SIGCHLD` at the start, where ERTS sets `SIG_IGN` (row "OS signals"). A reaper process as `erl_child_setup` would remove both differences.
-- **Trigger:** a consumer uses another option, port kind, or port BIF, for example `{line, L}` or `Port ! {self(), {command, Data}}`, or writes more data than the pipe holds to a program that writes back, or reads the exit status of a port after `os:set_signal(sigchld, ignore)`.
+- **Trigger:** a consumer uses another option, port kind, or port BIF, for example `{env, Env}` or `Port ! {self(), {command, Data}}`, or writes more data than the pipe holds to a program that writes back, or reads the exit status of a port after `os:set_signal(sigchld, ignore)`.
 - **Source:** PR for #302.
 
 ### Run the crash dump of `SIGUSR1`

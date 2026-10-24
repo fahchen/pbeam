@@ -1,6 +1,6 @@
 -module(port_probe).
 -export([exit_status/0, output/0, command/0, close/0, owner_exit/0, epipe/0, errors/0,
-         nul_name/0, spawn/0, sigchld_ignored/0, packet/0, packet_errors/0, eof/0, monitor/0, fd/3, fd_steal/2, unsupported/1, terminal/0, high_fd/0, fd_closed/0, costs/1, measure/2]).
+         nul_name/0, spawn/0, sigchld_ignored/0, packet/0, packet_errors/0, eof/0, lines/0, monitor/0, fd/3, fd_steal/2, unsupported/1, terminal/0, high_fd/0, fd_closed/0, costs/1, measure/2]).
 
 %% Each result replaces a port with the atom port, because the port numbers
 %% of ERTS and PBeam differ.
@@ -332,6 +332,36 @@ eof() ->
     [normal(Messages), Open, Write, Exit, PlainMessages, Quiet, Close, PlainExit,
      GethostMessages, flush()].
 
+%% The line and list data modes: {eol, Line} and {noeol, Part} for a line
+%% longer than L and for the last line at the end of file, \r\n as a newline,
+%% a list of bytes without binary, the low 32 bits of L, the bad values
+%% of L, and line with packet.
+lines() ->
+    process_flag(trap_exit, true),
+    Run = fun(Command, Settings) ->
+                  Port = open_port({spawn, Command}, [exit_status | Settings]),
+                  port_messages(Port)
+          end,
+    Cases = [Run("printf 'abcdefgh\\nxy\\r\\nab\\rc\\r\\r\\nlast'", [{line, 4}, binary]),
+             Run("printf 'abcd\\nabcd\\r\\nabcde\\r\\nab'", [{line, 4}]),
+             Run("printf 'abcd\\rxy'", [{line, 4}, binary]),
+             Run("printf hi", []),
+             Run("printf hi", [{packet, 2}, stream, line]),
+             Run("printf 'abcd\\n'", [{line, 1 bsl 32 + 3}])],
+    Eof = open_port({spawn, "printf 'abcd\\r'"}, [{line, 4}, eof, binary]),
+    EofMessages = [receive {Eof, M} -> M end || _ <- [1, 2, 3]],
+    true = port_close(Eof),
+    Errors = [catch_error(fun() -> open_port({spawn, "true"}, Settings) end)
+              || Settings <- [[{line, 0}], [{line, -1}], [{line, 1 bsl 60}], [{line, a}],
+                              [{packet, 1}, line], [{line, 1 bsl 32}, {packet, 2}]]],
+    [Cases, EofMessages, Errors, flush()].
+
+port_messages(Port) ->
+    receive
+        {Port, M} -> [M | port_messages(Port)];
+        {'EXIT', Port, R} -> [R]
+    end.
+
 %% The spawn port kind: a command runs as `sh -c "exec Command"`, and the
 %% port name is the command, and $0 is sh. {args, Args} gives badarg. A command that
 %% the shell does not find exits with 127. A first word that names a
@@ -437,11 +467,13 @@ fd_closed() ->
 
 %% Each call stops the PBeam run with a runtime error.
 unsupported(line) ->
-    open_port({spawn_executable, sh()}, [binary, {line, 80}]);
-unsupported(stream) ->
-    open_port({spawn_executable, sh()}, [binary, stream]);
-unsupported(list) ->
-    open_port({spawn_executable, sh()}, []);
+    open_port({spawn_executable, sh()}, [binary, {line, 1 bsl 31}]);
+unsupported(env) ->
+    open_port({spawn_executable, sh()}, [binary, {env, []}]);
+unsupported(hide) ->
+    open_port({spawn_executable, sh()}, [binary, hide]);
+unsupported(empty_line) ->
+    open_port({spawn_executable, sh()}, [binary, {line, 1 bsl 32}]);
 unsupported(fd_list) ->
     open_port({fd, 200, 200}, []);
 unsupported(exec) ->
