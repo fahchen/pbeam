@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use super::{
     Access, Busy, EMPTY, EtsTables, FIRST_SEGMENT_SLOTS, Freeing, KeyIndex, Lacking, Retained,
     Table, TableType, key_hash, object_hash, segment, stored_hash,
@@ -151,8 +153,8 @@ fn frees_the_objects_of_an_ordered_set_one_for_each_reduction() {
     // turn with a budget of 2 frees 3 objects. The ERTS tree charges no
     // segment.
     let mut tables = EtsTables::default();
-    let atoms = AtomTable::new();
-    let mut table = Table::new(ProcessId(1), Access::Public, 1, TableType::OrderedSet);
+    let atoms = Arc::new(AtomTable::new());
+    let mut table = Table::ordered(ProcessId(1), Access::Public, 1, Arc::clone(&atoms));
     for key in 0..5 {
         table.insert(&atoms, vec![Term::Integer(key)]);
     }
@@ -172,7 +174,7 @@ fn frees_the_objects_of_an_ordered_set_one_for_each_reduction() {
     // The walk follows the live keys, so a delete of most objects leaves
     // slots that the walk never reads, as the ERTS walk reads only the live
     // nodes of the tree (`erl_db_tree.c:2877-2904`).
-    let mut table = Table::new(ProcessId(1), Access::Public, 1, TableType::OrderedSet);
+    let mut table = Table::ordered(ProcessId(1), Access::Public, 1, Arc::clone(&atoms));
     for key in 0..5 {
         table.insert(&atoms, vec![Term::Integer(key)]);
     }
@@ -187,7 +189,7 @@ fn frees_the_objects_of_an_ordered_set_one_for_each_reduction() {
     // A delete of an `ordered_set` object moves the last object into the
     // freed slot, so the slots stay dense and a deleted table drops no slot
     // of a freed object.
-    let mut table = Table::new(ProcessId(1), Access::Public, 1, TableType::OrderedSet);
+    let mut table = Table::ordered(ProcessId(1), Access::Public, 1, Arc::clone(&atoms));
     for key in 0..5 {
         table.insert(&atoms, vec![Term::Integer(key)]);
     }
@@ -206,7 +208,7 @@ fn frees_the_objects_of_an_ordered_set_one_for_each_reduction() {
     );
     // The moved object can follow another key in its bucket chain: the chain
     // then points to the slot that the object moves into.
-    let probe = Table::new(ProcessId(1), Access::Public, 1, TableType::OrderedSet);
+    let probe = Table::ordered(ProcessId(1), Access::Public, 1, Arc::clone(&atoms));
     let bucket = |key: i64| probe.bucket(stored_hash(&atoms, &Term::Integer(key)));
     let (earlier, later) = (0..256)
         .find_map(|later| {
@@ -218,7 +220,7 @@ fn frees_the_objects_of_an_ordered_set_one_for_each_reduction() {
     let filler = (0..256)
         .find(|&key| bucket(key) != bucket(later) && key != later)
         .expect("a bucket holds one key");
-    let mut table = Table::new(ProcessId(1), Access::Public, 1, TableType::OrderedSet);
+    let mut table = Table::ordered(ProcessId(1), Access::Public, 1, Arc::clone(&atoms));
     for key in [earlier, filler, later] {
         table.insert(&atoms, vec![Term::Integer(key)]);
     }
@@ -873,11 +875,11 @@ fn compares_the_keys_of_an_ordered_set_by_the_arithmetic_order() {
     // and the value of a map key compares by its mode. The ERTS tree frees
     // one node for each reduction (`do_free_tree_continue`,
     // `erl_db_tree.c:2877-2904`).
-    let atoms = AtomTable::new();
+    let atoms = Arc::new(AtomTable::new());
     let atom = |atoms: &AtomTable, name: &str| Term::Atom(atoms.put(name).unwrap());
     let (a, b, c) = (atom(&atoms, "a"), atom(&atoms, "b"), atom(&atoms, "c"));
     let (t, l, v) = (atom(&atoms, "t"), atom(&atoms, "l"), atom(&atoms, "v"));
-    let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::OrderedSet);
+    let mut table = Table::ordered(ProcessId(0), Access::Public, 1, Arc::clone(&atoms));
     let integer = Term::Integer(1);
     let float = Term::Float(1.0);
     table.insert(&atoms, vec![integer.clone(), a.clone()]);
@@ -1774,11 +1776,11 @@ fn keeps_no_result_for_an_insert_of_a_dead_process() {
 fn counts_the_key_order_of_an_ordered_set_in_the_live_bytes() {
     // The sorted keys of an ordered_set count as allocated bytes of the
     // table, and each key counts as a live term.
-    let atoms = AtomTable::new();
-    let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::OrderedSet);
+    let atoms = Arc::new(AtomTable::new());
+    let mut table = Table::ordered(ProcessId(0), Access::Public, 1, Arc::clone(&atoms));
     let before = table.allocated_bytes();
     table.insert(&atoms, vec![Term::tuple(vec![Term::Integer(1)])]);
-    assert_eq!(table.order.len(), 1);
+    assert_eq!(table.key_order().len(), 1);
     assert!(table.allocated_bytes() > before);
     let mut tables = EtsTables::default();
     tables.create(Reference(0), None, table);

@@ -268,7 +268,11 @@ pub(super) fn new(
     }
     let owner = context.scheduler.current_process_mut().id;
     let table = context.scheduler.make_ref()?.table_reference();
-    let mut made = Table::new(owner, access, keypos, table_type);
+    let mut made = if table_type == TableType::OrderedSet {
+        Table::ordered(owner, access, keypos, Arc::clone(&context.scheduler.atoms))
+    } else {
+        Table::new(owner, access, keypos, table_type)
+    };
     made.set_name(context.scheduler.atoms.name_of(name));
     let name = named.then_some(name);
     // A run with one scheduler gives no fine locking (`DB_LOCK_FREE`,
