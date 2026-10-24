@@ -735,6 +735,9 @@ sockopt_otp() ->
               socket:setopt(L, {socket, linger}, #{onoff => true, linger => -1}),
               socket:setopt(L, {socket, linger}, #{onoff => 1, linger => 1}),
               socket:setopt(L, {socket, linger}, #{onoff => true}), socket:setopt(L, {socket, linger}, foo)],
+    %% {socket, priority} is a Linux option; the set of linger keeps it.
+    Priority = [socket:setopt(L, {socket, priority}, 3), socket:setopt(L, {socket, linger}, abort),
+                socket:getopt(L, {socket, priority})],
     Raise = [strip(catch socket:setopt(L, {otp, fd}, 1)), strip(catch socket:setopt(L, {otp, domain}, inet)),
              is_integer(element(2, socket:getopt(L, {otp, fd})))],
     ok = socket:setopt(L, {otp, iow}, true),
@@ -769,7 +772,7 @@ sockopt_otp() ->
         ++ [socket:setopt(L, {otp, O}, V) || {O, V} <- [{iow, true}, {debug, false}, {select_read, false},
                                                         {rcvbuf, 1}, {rcvctrlbuf, 1}, {sndctrlbuf, 1},
                                                         {controlling_process, Self}]],
-    erlang:display(unmap({sockopt_otp, Flags, Sizes, Linger, Raise, Inherit, Recv, Owner, Down, Closed})),
+    erlang:display(unmap({sockopt_otp, Flags, Sizes, Linger, Priority, Raise, Inherit, Recv, Owner, Down, Closed})),
     init:stop().
 
 %% unmap/1 replaces each map with its sorted list of pairs.

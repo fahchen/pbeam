@@ -177,7 +177,7 @@ pub(in crate::runtime::interpreter::native::prim_socket) fn setopt_5(
         .socket
         .as_ref()
         .expect("an open socket has a host socket");
-    let result = set_host(host, name, decoded).map(|()| None);
+    let result = set_host(host, name, opt, decoded).map(|()| None);
     host_result(scheduler, result)
 }
 
@@ -190,9 +190,9 @@ fn set_form(name: (&str, &str)) -> Option<Form> {
         )
         | ("tcp", "nodelay")
         | ("ipv6", "v6only") => Some(Form::Bool),
-        ("socket", "rcvbuf" | "sndbuf") | ("tcp", "keepcnt" | "keepintvl") | ("ip", "ttl") => {
-            Some(Form::Int)
-        }
+        ("socket", "rcvbuf" | "sndbuf" | "priority")
+        | ("tcp", "keepcnt" | "keepintvl")
+        | ("ip", "ttl") => Some(Form::Int),
         ("socket", "linger") => Some(Form::Linger),
         _ => None,
     }
@@ -222,15 +222,16 @@ fn get_form_only(name: (&str, &str)) -> bool {
     name == ("socket", "type")
 }
 
-/// Set the host option `name` of `host` to `value`, as
+/// Set the host option `name` with the host number `opt` of `host` to
+/// `value`, as
 /// `esock_setopt_level_opt` and `socket_setopt` do
 /// (`prim_socket_nif.c:11384-11395`, `11422-11481`). Each option of the
 /// form [`Form::Int`] has an unsigned type in `nix` or `socket2`, and a
 /// negative value reaches the host as the same C `int` as on ERTS.
-fn set_host(host: &Socket, name: (&str, &str), value: Value) -> io::Result<()> {
+fn set_host(host: &Socket, name: (&str, &str), opt: i32, value: Value) -> io::Result<()> {
     let value = match value {
         Value::Linger(linger) => {
-            return keep_tos_and_priority(host, || {
+            return keep_tos_and_priority(host, opt, || {
                 setsockopt(host, sockopt::Linger, &linger).map_err(io::Error::from)
             });
         }
@@ -241,7 +242,7 @@ fn set_host(host: &Socket, name: (&str, &str), value: Value) -> io::Result<()> {
     // casts with `as c_int`, `socket2::set_ttl_v4` casts the `u32`), so the
     // bit-identical casts below give the host the `int` that ERTS gives.
     let count = value as u32;
-    keep_tos_and_priority(host, || {
+    keep_tos_and_priority(host, opt, || {
         let result = match name {
             ("socket", "broadcast") => setsockopt(host, sockopt::Broadcast, &flag),
             ("socket", "keepalive") => setsockopt(host, sockopt::KeepAlive, &flag),
@@ -255,6 +256,8 @@ fn set_host(host: &Socket, name: (&str, &str), value: Value) -> io::Result<()> {
             ("tcp", "keepcnt") => setsockopt(host, sockopt::TcpKeepCount, &count),
             ("tcp", "keepintvl") => setsockopt(host, sockopt::TcpKeepInterval, &count),
             ("ipv6", "v6only") => setsockopt(host, sockopt::Ipv6V6Only, &flag),
+            #[cfg(target_os = "linux")]
+            ("socket", "priority") => setsockopt(host, sockopt::Priority, &value),
             // ("ip", "ttl"), the last option of `set_form`.
             _ => return host.set_ttl_v4(count),
         };
@@ -266,14 +269,24 @@ fn set_host(host: &Socket, name: (&str, &str), value: Value) -> io::Result<()> {
 /// (`prim_socket_nif.c:11428-11472`): read `SO_PRIORITY` and `IP_TOS`
 /// first, and after a successful set, set `IP_TOS` and then `SO_PRIORITY`
 /// back to the values that it could read. A failed reset of `SO_PRIORITY`
-/// with `EPERM` is not an error. PBeam sets neither of these two options
-/// yet, so it always resets both.
+/// with `EPERM` is not an error. ERTS compares only the option number
+/// `opt`, at each level: it resets nothing for the number `SO_PRIORITY`,
+/// and it does not reset `IP_TOS` for the number `IP_TOS`.
 #[cfg(target_os = "linux")]
-fn keep_tos_and_priority(host: &Socket, set: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
+fn keep_tos_and_priority(
+    host: &Socket,
+    opt: i32,
+    set: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
     let priority = getsockopt(host, sockopt::Priority);
     let tos = getsockopt(host, sockopt::Ipv4Tos);
     set()?;
-    tos.map_or(Ok(()), |tos| setsockopt(host, sockopt::Ipv4Tos, &tos))?;
+    if opt == libc::SO_PRIORITY {
+        return Ok(());
+    }
+    if opt != libc::IP_TOS {
+        tos.map_or(Ok(()), |tos| setsockopt(host, sockopt::Ipv4Tos, &tos))?;
+    }
     priority.map_or(Ok(()), |priority| {
         allow_eperm(setsockopt(host, sockopt::Priority, &priority))
     })?;
@@ -294,7 +307,11 @@ fn allow_eperm(result: nix::Result<()>) -> nix::Result<()> {
 /// Run `set` on `host`: macOS has no `SO_PRIORITY`, so `socket_setopt`
 /// only sets the option (`prim_socket_nif.c:11474-11478`).
 #[cfg(not(target_os = "linux"))]
-fn keep_tos_and_priority(_host: &Socket, set: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
+fn keep_tos_and_priority(
+    _host: &Socket,
+    _opt: i32,
+    set: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
     set()
 }
 
@@ -404,6 +421,10 @@ fn get_host(host: &Socket, name: (&str, &str)) -> Option<io::Result<Got>> {
         ("socket", "dontroute") => getsockopt(host, sockopt::DontRoute).map(Got::Bool),
         ("socket", "acceptconn") => getsockopt(host, sockopt::AcceptConn).map(Got::Bool),
         ("socket", "linger") => getsockopt(host, sockopt::Linger).map(Got::Linger),
+        #[cfg(target_os = "linux")]
+        ("socket", "priority") => {
+            getsockopt(host, sockopt::Priority).map(|value| Got::Int(value.into()))
+        }
         ("socket", "rcvbuf") => {
             getsockopt(host, sockopt::RcvBuf).map(|value| Got::Int(value as i64))
         }
