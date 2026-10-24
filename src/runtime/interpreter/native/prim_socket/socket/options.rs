@@ -52,6 +52,19 @@ enum Got {
     /// The address of `esock_getopt_multicast_if`
     /// (`prim_socket_nif.c:12638-12669`).
     Addr(Ipv4Addr),
+    /// The `int` of `esock_getopt_tos` (`prim_socket_nif.c:12679-12697`).
+    Tos(i32),
+    /// The bytes of `esock_getopt_str_opt` (`prim_socket_nif.c:13422-13451`).
+    #[cfg(target_os = "linux")]
+    Bytes(Vec<u8>),
+    /// The domain of `esock_getopt_sock_domain`
+    /// (`prim_socket_nif.c:12456-12476`).
+    #[cfg(target_os = "linux")]
+    Domain(i32),
+    /// The protocol of `esock_getopt_sock_protocol`
+    /// (`prim_socket_nif.c:12569-12600`).
+    #[cfg(target_os = "linux")]
+    Protocol(i32),
 }
 
 /// The value form of a host option that [`set_host`] writes.
@@ -72,6 +85,18 @@ enum Form {
     Addr,
     /// `esock_setopt_in_update_membership` (`prim_socket_nif.c:8788-8834`).
     Membership,
+    /// `esock_setopt_tos` (`prim_socket_nif.c:8757-8775`).
+    Tos,
+    /// `esock_setopt_str_opt` with `IFNAMSIZ` (`prim_socket_nif.c:8538-8545`,
+    /// `11297-11338`).
+    #[cfg(target_os = "linux")]
+    Str,
+    /// `esock_setopt_tcp_congestion` (`prim_socket_nif.c:9018-9027`).
+    #[cfg(target_os = "linux")]
+    Congestion,
+    /// `esock_setopt_in6_update_membership` (`prim_socket_nif.c:8961-9005`).
+    #[cfg(target_os = "linux")]
+    Membership6,
 }
 
 /// A decoded value of a host option that [`set_host`] writes.
@@ -85,6 +110,14 @@ enum Value {
     /// The `struct ip_mreq` of [`Form::Membership`]: the group and the
     /// interface.
     Membership(Ipv4Addr, Ipv4Addr),
+    /// The string of [`Form::Str`] and [`Form::Congestion`], without a NUL
+    /// byte.
+    #[cfg(target_os = "linux")]
+    Bytes(Vec<u8>),
+    /// The `struct ipv6_mreq` of [`Form::Membership6`]: the group and the
+    /// interface index.
+    #[cfg(target_os = "linux")]
+    Membership6(Ipv6Addr, u32),
 }
 
 /// Return `{invalid, {integer_range, Term}}` of
@@ -195,6 +228,13 @@ pub(in crate::runtime::interpreter::native::prim_socket) fn setopt_5(
         Form::Hops => decode_hops(scheduler, value).map(Value::Int),
         Form::Addr => in_addr(scheduler, value).map(Value::Addr),
         Form::Membership => decode_membership(scheduler, value),
+        Form::Tos => decode_tos(scheduler, value).map(Value::Int),
+        #[cfg(target_os = "linux")]
+        Form::Str => decode_str(value, libc::IFNAMSIZ).map(Value::Bytes),
+        #[cfg(target_os = "linux")]
+        Form::Congestion => decode_str(value, CONGESTION_NAME_MAX + 1).map(Value::Bytes),
+        #[cfg(target_os = "linux")]
+        Form::Membership6 => decode_membership6(scheduler, value),
     };
     let Some(decoded) = decoded else {
         return Ok(invalid(atom(scheduler, "value")?));
@@ -224,6 +264,10 @@ fn set_form(name: (&str, &str)) -> Option<Form> {
         ("ip", "recvif" | "recvdstaddr") => Some(Form::Bool),
         #[cfg(target_os = "linux")]
         ("ip", "recvttl") | ("tcp", "cork") | ("socket", "passcred") => Some(Form::Bool),
+        #[cfg(target_os = "linux")]
+        ("socket", "timestampns")
+        | ("ip", "freebind" | "transparent" | "recverr" | "multicast_all" | "recvorigdstaddr")
+        | ("ipv6", "recverr" | "recvhoplimit" | "recvpktinfo") => Some(Form::Bool),
         ("socket", "rcvbuf" | "sndbuf" | "priority")
         | ("tcp", "keepcnt" | "keepintvl" | "maxseg")
         | ("ip", "ttl" | "multicast_ttl")
@@ -236,6 +280,13 @@ fn set_form(name: (&str, &str)) -> Option<Form> {
         ("ip", "multicast_if") => Some(Form::Addr),
         ("ip", "add_membership" | "drop_membership") => Some(Form::Membership),
         ("socket", "linger") => Some(Form::Linger),
+        ("ip", "tos") => Some(Form::Tos),
+        #[cfg(target_os = "linux")]
+        ("socket", "bindtodevice") => Some(Form::Str),
+        #[cfg(target_os = "linux")]
+        ("tcp", "congestion") => Some(Form::Congestion),
+        #[cfg(target_os = "linux")]
+        ("ipv6", "add_membership" | "drop_membership") => Some(Form::Membership6),
         _ => None,
     }
 }
@@ -261,6 +312,20 @@ fn decode_membership(scheduler: &Scheduler, value: &Term) -> Option<Value> {
     ))
 }
 
+/// Return the `struct ipv6_mreq` of `esock_setopt_in6_update_membership`
+/// (`prim_socket_nif.c:8970-8998`): the map `#{multiaddr := Addr,
+/// interface := Index}`, with the address of `esock_decode_in6_addr` and
+/// an `unsigned int` index.
+#[cfg(target_os = "linux")]
+fn decode_membership6(scheduler: &Scheduler, value: &Term) -> Option<Value> {
+    let multiaddr = field(&scheduler.atoms, value, "multiaddr")?;
+    let interface = field(&scheduler.atoms, value, "interface")?;
+    Some(Value::Membership6(
+        in6_addr(scheduler, multiaddr)?,
+        uint(interface)?,
+    ))
+}
+
 /// Return the `struct linger` of `esock_setopt_linger`
 /// (`prim_socket_nif.c:8568-8587`): the map `#{onoff := boolean(), linger
 /// := non_neg_integer()}`, or the atom `abort` for `{1, 0}`.
@@ -279,16 +344,179 @@ fn decode_linger(scheduler: &Scheduler, value: &Term) -> Option<libc::linger> {
     })
 }
 
+/// The number `ESOCK_OPT_TCP_CONGESTION_NAME_MAX`, which is 256
+/// (`prim_socket_nif.c:490-495`): only the kernel header
+/// `linux/tcp.h` defines `TCP_CA_NAME_MAX`, and the NIF includes the
+/// glibc header `netinet/tcp.h`, so a name of 17 bytes reaches the
+/// kernel and gives its `ENOENT` on the pinned ERTS.
+#[cfg(target_os = "linux")]
+const CONGESTION_NAME_MAX: usize = 256;
+
+/// The TOS values of `ESOCK_TOS_*` (`prim_socket_nif.c:470-474`).
+/// `decode_ip_tos` does not accept the first, `default`
+/// (`prim_socket_nif.c:16113-16125`).
+const TOS: [(i32, &str); 5] = [
+    (0, "default"),
+    (8, "lowdelay"),
+    (4, "throughput"),
+    (2, "reliability"),
+    (1, "mincost"),
+];
+
+/// The precedence values of `ESOCK_TOS_PREC_*` (`prim_socket_nif.c:479-486`).
+/// Each value is a DSCP class selector, so only `routine` fits the 3 bits
+/// of the precedence in `decode_iptos_tos_value` and `encode_iptos_tos`
+/// (`prim_socket_nif.c:16340-16341`, `16662-16701`).
+const PRECEDENCES: [(i32, &str); 8] = [
+    (56, "netcontrol"),
+    (48, "internetcontrol"),
+    (40, "critical_ecp"),
+    (32, "flashoverride"),
+    (24, "flash"),
+    (16, "immediate"),
+    (8, "priority"),
+    (0, "routine"),
+];
+
+/// The DSCP values of `ESOCK_DSCP_*` (`prim_socket_nif.c:438-462`).
+const DSCPS: [(i32, &str); 24] = [
+    (0, "cs0"),
+    (8, "cs1"),
+    (16, "cs2"),
+    (24, "cs3"),
+    (32, "cs4"),
+    (40, "cs5"),
+    (48, "cs6"),
+    (56, "cs7"),
+    (10, "af11"),
+    (12, "af12"),
+    (14, "af13"),
+    (18, "af21"),
+    (20, "af22"),
+    (22, "af23"),
+    (26, "af31"),
+    (28, "af32"),
+    (30, "af33"),
+    (34, "af41"),
+    (36, "af42"),
+    (38, "af43"),
+    (46, "ef"),
+    (44, "voice_admit"),
+    (1, "le"),
+    (45, "nqb"),
+];
+
+/// Return the value of the atom `name` in `table`, or `None`.
+fn named_value(table: &[(i32, &str)], name: Option<&str>) -> Option<i32> {
+    let name = name?;
+    table
+        .iter()
+        .find(|(_, entry)| *entry == name)
+        .map(|(value, _)| *value)
+}
+
+/// Return the `int` of `decode_ip_tos` (`prim_socket_nif.c:16087-16219`):
+/// an integer, a TOS atom shifted by 1, a DSCP atom shifted by 2, or the
+/// map of `decode_iptos_tos_value`.
+fn decode_tos(scheduler: &Scheduler, value: &Term) -> Option<i32> {
+    if matches!(value, Term::Integer(_) | Term::BigInt(_) | Term::Float(_)) {
+        return int(value);
+    }
+    let name = atom_name(scheduler, value);
+    if name.is_some() {
+        return named_value(&TOS[1..], name)
+            .map(|tos| tos << 1)
+            .or_else(|| named_value(&DSCPS, name).map(|dscp| dscp << 2));
+    }
+    decode_tos_map(scheduler, value)
+}
+
+/// Return the `int` of `decode_iptos_tos_value`
+/// (`prim_socket_nif.c:16222-16344`): the map `#{precedence := Prec, tos
+/// := Tos}`, where each number is an `unsigned int` that the NIF cuts to
+/// an `unsigned char`.
+fn decode_tos_map(scheduler: &Scheduler, value: &Term) -> Option<i32> {
+    let decode = |term: &Term, table: &[(i32, &str)]| match uint(term) {
+        Some(number) => Some(i32::from(number as u8)),
+        None => named_value(table, atom_name(scheduler, term)),
+    };
+    let precedence = decode(field(&scheduler.atoms, value, "precedence")?, &PRECEDENCES)?;
+    let tos = decode(field(&scheduler.atoms, value, "tos")?, &TOS)?;
+    Some(((precedence << 5) & 0xe0) | ((tos << 1) & 0x1e))
+}
+
+/// Return the map of `encode_ip_tos` (`prim_socket_nif.c:16637-16816`):
+/// `#{native => Value, tos => #{precedence => Prec, tos => Tos}, dscp =>
+/// Dscp}`, with an atom for each known value and an integer for each other
+/// value.
+fn tos_term(scheduler: &mut Scheduler, value: i32) -> Result<Term, BeamError> {
+    let mut name = |table: &[(i32, &str)], native: i32| -> Result<Term, BeamError> {
+        match table.iter().find(|(entry, _)| *entry == native) {
+            Some((_, name)) => atom(scheduler, name),
+            None => Ok(Term::Integer(native.into())),
+        }
+    };
+    let precedence = name(&PRECEDENCES, (value & 0xe0) >> 5)?;
+    let tos = name(&TOS, (value & 0x1e) >> 1)?;
+    let dscp = name(&DSCPS, (value & 0xfc) >> 2)?;
+    let tos = pairs(scheduler, &[("precedence", precedence), ("tos", tos)])?;
+    let tos = map(scheduler, tos);
+    let entries = [
+        ("native", Term::Integer(value.into())),
+        ("tos", tos),
+        ("dscp", dscp),
+    ];
+    let entries = pairs(scheduler, &entries)?;
+    Ok(map(scheduler, entries))
+}
+
+/// Return the bytes of `esock_setopt_str_opt` with the buffer size `max`
+/// (`prim_socket_nif.c:11297-11338`): a Latin-1 string that `GET_STR` puts
+/// with its NUL byte in `max` bytes, or the bytes of a binary before its
+/// first NUL byte, at most `max - 1`.
+#[cfg(target_os = "linux")]
+fn decode_str(value: &Term, max: usize) -> Option<Vec<u8>> {
+    if let Some(elements) = value.proper_list() {
+        let bytes = elements
+            .map(|element| match element {
+                Term::Integer(byte) => u8::try_from(*byte).ok(),
+                _ => None,
+            })
+            .collect::<Option<Vec<u8>>>()?;
+        return (bytes.len() < max).then_some(bytes);
+    }
+    let bytes = value.binary_bytes()?;
+    Some(
+        bytes
+            .iter()
+            .take(max - 1)
+            .take_while(|byte| **byte != 0)
+            .copied()
+            .collect(),
+    )
+}
+
 /// Return whether ERTS has no set handler for the host option `name` that
-/// PBeam gets (`prim_socket_nif.c:3481-3488`, `8512-8514`).
+/// PBeam gets (`prim_socket_nif.c:3272-3274`, `3377-3379`, `3481-3488`,
+/// `3580-3586`, `8512-8514`).
 fn get_form_only(name: (&str, &str)) -> bool {
-    name == ("socket", "type")
+    match name {
+        ("socket", "type") => true,
+        #[cfg(target_os = "linux")]
+        ("ip", "mtu") | ("socket", "domain" | "protocol") => true,
+        _ => false,
+    }
 }
 
 /// Return whether ERTS has no get handler for the host option `name` that
-/// PBeam sets (`prim_socket_nif.c:3496-3532`, `12234-12236`).
+/// PBeam sets (`prim_socket_nif.c:3496-3532`, `3806-3833`, `12234-12236`).
 fn set_form_only(name: (&str, &str)) -> bool {
-    matches!(name, ("ip", "add_membership" | "drop_membership"))
+    match name {
+        ("ip", "add_membership" | "drop_membership") => true,
+        #[cfg(target_os = "linux")]
+        ("ipv6", "add_membership" | "drop_membership") => true,
+        _ => false,
+    }
 }
 
 /// Set the host option `name` with the host number `opt` of `host` to
@@ -311,6 +539,20 @@ fn set_host(host: &Socket, name: (&str, &str), opt: i32, value: Value) -> io::Re
             return keep_tos_and_priority(host, opt, || match name {
                 ("ip", "add_membership") => host.join_multicast_v4(&group, &interface),
                 _ => host.leave_multicast_v4(&group, &interface),
+            });
+        }
+        #[cfg(target_os = "linux")]
+        Value::Bytes(bytes) => {
+            return keep_tos_and_priority(host, opt, || match name {
+                ("tcp", "congestion") => host.set_tcp_congestion(&bytes),
+                _ => host.bind_device(Some(bytes.as_slice())),
+            });
+        }
+        #[cfg(target_os = "linux")]
+        Value::Membership6(group, interface) => {
+            return keep_tos_and_priority(host, opt, || match name {
+                ("ipv6", "add_membership") => host.join_multicast_v6(&group, interface),
+                _ => host.leave_multicast_v6(&group, interface),
             });
         }
         Value::Int(value) => value,
@@ -351,6 +593,22 @@ fn set_host(host: &Socket, name: (&str, &str), opt: i32, value: Value) -> io::Re
             ("tcp", "keepidle") => setsockopt(host, sockopt::TcpKeepIdle, &count),
             #[cfg(target_os = "linux")]
             ("tcp", "user_timeout") => setsockopt(host, sockopt::TcpUserTimeout, &count),
+            #[cfg(target_os = "linux")]
+            ("socket", "timestampns") => setsockopt(host, sockopt::ReceiveTimestampns, &flag),
+            #[cfg(target_os = "linux")]
+            ("ip", "freebind") => setsockopt(host, sockopt::IpFreebind, &flag),
+            #[cfg(target_os = "linux")]
+            ("ip", "transparent") => setsockopt(host, sockopt::IpTransparent, &flag),
+            #[cfg(target_os = "linux")]
+            ("ip", "recverr") => setsockopt(host, sockopt::Ipv4RecvErr, &flag),
+            #[cfg(target_os = "linux")]
+            ("ip", "recvorigdstaddr") => setsockopt(host, sockopt::Ipv4OrigDstAddr, &flag),
+            #[cfg(target_os = "linux")]
+            ("ipv6", "recverr") => setsockopt(host, sockopt::Ipv6RecvErr, &flag),
+            #[cfg(target_os = "linux")]
+            ("ipv6", "recvhoplimit") => setsockopt(host, sockopt::Ipv6RecvHopLimit, &flag),
+            #[cfg(target_os = "linux")]
+            ("ipv6", "recvpktinfo") => setsockopt(host, sockopt::Ipv6RecvPacketInfo, &flag),
             _ => return set_socket2(host, name, value),
         };
         result.map_err(io::Error::from)
@@ -375,8 +633,11 @@ fn set_socket2(host: &Socket, name: (&str, &str), value: i32) -> io::Result<()> 
         ("ipv6", "multicast_hops") => host.set_multicast_hops_v6(count),
         ("ipv6", "unicast_hops") => host.set_unicast_hops_v6(count),
         ("tcp", "maxseg") => host.set_tcp_mss(count),
+        ("ip", "tos") => host.set_tos_v4(count),
         #[cfg(target_os = "linux")]
         ("tcp", "cork") => host.set_tcp_cork(flag),
+        #[cfg(target_os = "linux")]
+        ("ip", "multicast_all") => host.set_multicast_all_v4(flag),
         // ("ip", "ttl"), the last option of the form `Int` of `set_form`.
         _ => host.set_ttl_v4(count),
     }
@@ -528,6 +789,21 @@ fn getopt(
             let octets = address.octets().map(|byte| Term::Integer(byte.into()));
             Ok(Some(Term::tuple(octets.to_vec())))
         }
+        Ok(Got::Tos(value)) => Ok(Some(tos_term(scheduler, value)?)),
+        #[cfg(target_os = "linux")]
+        Ok(Got::Bytes(bytes)) => Ok(Some(Term::list_from(
+            bytes.into_iter().map(|byte| Term::Integer(byte.into())),
+        ))),
+        #[cfg(target_os = "linux")]
+        Ok(Got::Domain(domain)) => Ok(Some(domain_term(scheduler, domain)?)),
+        // `esock_getopt_sock_protocol` gives `default` for the protocol 0
+        // of a local socket (`prim_socket_nif.c:12585-12594`).
+        #[cfg(target_os = "linux")]
+        Ok(Got::Protocol(0)) if socket.domain == libc::AF_UNIX => {
+            Ok(Some(atom(scheduler, "default")?))
+        }
+        #[cfg(target_os = "linux")]
+        Ok(Got::Protocol(protocol)) => Ok(Some(Term::Integer(protocol.into()))),
         Err(failure) => Err(failure),
     };
     host_result(scheduler, value)
@@ -585,6 +861,24 @@ fn get_host(host: &Socket, name: (&str, &str)) -> Option<io::Result<Got>> {
         ("tcp", "user_timeout") => {
             getsockopt(host, sockopt::TcpUserTimeout).map(|value| Got::Int(value.into()))
         }
+        #[cfg(target_os = "linux")]
+        ("socket", "timestampns") => getsockopt(host, sockopt::ReceiveTimestampns).map(Got::Bool),
+        #[cfg(target_os = "linux")]
+        ("ip", "freebind") => getsockopt(host, sockopt::IpFreebind).map(Got::Bool),
+        #[cfg(target_os = "linux")]
+        ("ip", "transparent") => getsockopt(host, sockopt::IpTransparent).map(Got::Bool),
+        #[cfg(target_os = "linux")]
+        ("ip", "recverr") => getsockopt(host, sockopt::Ipv4RecvErr).map(Got::Bool),
+        #[cfg(target_os = "linux")]
+        ("ip", "recvorigdstaddr") => getsockopt(host, sockopt::Ipv4OrigDstAddr).map(Got::Bool),
+        #[cfg(target_os = "linux")]
+        ("ip", "mtu") => getsockopt(host, sockopt::IpMtu).map(|value| Got::Int(value.into())),
+        #[cfg(target_os = "linux")]
+        ("ipv6", "recverr") => getsockopt(host, sockopt::Ipv6RecvErr).map(Got::Bool),
+        #[cfg(target_os = "linux")]
+        ("ipv6", "recvhoplimit") => getsockopt(host, sockopt::Ipv6RecvHopLimit).map(Got::Bool),
+        #[cfg(target_os = "linux")]
+        ("ipv6", "recvpktinfo") => getsockopt(host, sockopt::Ipv6RecvPacketInfo).map(Got::Bool),
         _ => return get_socket2(host, name),
     };
     Some(result.map_err(io::Error::from))
@@ -609,8 +903,33 @@ fn get_socket2(host: &Socket, name: (&str, &str)) -> Option<io::Result<Got>> {
         ("ipv6", "multicast_hops") => int(host.multicast_hops_v6()),
         ("ipv6", "unicast_hops") => int(host.unicast_hops_v6()),
         ("tcp", "maxseg") => int(host.tcp_mss()),
+        ("ip", "tos") => host.tos_v4().map(|value| Got::Tos(value as i32)),
         #[cfg(target_os = "linux")]
         ("tcp", "cork") => host.tcp_cork().map(Got::Bool),
+        #[cfg(target_os = "linux")]
+        ("ip", "multicast_all") => host.multicast_all_v4().map(Got::Bool),
+        // ERTS gives each byte that the host gives, with the NUL byte
+        // (`prim_socket_nif.c:12259-12268`, `13436-13446`); `socket2`
+        // removes the last byte, which is the NUL byte of the name.
+        #[cfg(target_os = "linux")]
+        ("socket", "bindtodevice") => host.device().map(|device| {
+            Got::Bytes(device.map_or_else(Vec::new, |name| [name, vec![0]].concat()))
+        }),
+        // `esock_getopt_str_opt` removes one NUL byte at the end
+        // (`prim_socket_nif.c:12741-12752`, `13442-13446`).
+        #[cfg(target_os = "linux")]
+        ("tcp", "congestion") => host.tcp_congestion().map(|mut name| {
+            if name.last() == Some(&0) {
+                name.pop();
+            }
+            Got::Bytes(name)
+        }),
+        #[cfg(target_os = "linux")]
+        ("socket", "domain") => host.domain().map(|domain| Got::Domain(domain.into())),
+        #[cfg(target_os = "linux")]
+        ("socket", "protocol") => host
+            .protocol()
+            .map(|protocol| Got::Protocol(protocol.map_or(0, i32::from))),
         _ => return None,
     })
 }
