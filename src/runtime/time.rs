@@ -21,7 +21,7 @@ pub(super) const MONOTONIC_BEGIN: i64 = TIME_UNIT;
 /// rounded toward zero to a multiple of one second (`erl_time.h:316-321`).
 /// The value is -576460752000000000, as `erlang:system_info(start_time)` on
 /// the pinned ERTS.
-const MONOTONIC_TIME_START_EXTERNAL: i64 = SMALL_INTEGER_MIN / TIME_UNIT * TIME_UNIT;
+pub(crate) const MONOTONIC_TIME_START_EXTERNAL: i64 = SMALL_INTEGER_MIN / TIME_UNIT * TIME_UNIT;
 
 /// The offset from the internal monotonic time to the Erlang monotonic time
 /// in the native time unit, `ERTS_MONOTONIC_OFFSET_NATIVE`

@@ -366,6 +366,27 @@ fn gives_the_scheduler_items_of_system_info_as_pinned_erts() {
 }
 
 #[test]
+fn gives_the_other_items_of_system_info_and_badarg_as_pinned_erts() {
+    // erl_bif_info.c:2780-2783, 2855-2856, 2899-2904, 3042-3054,
+    // 3179-3190, 3425-3433, 3633; sys/unix/sys.c:838-885.
+    let eval = "io:format(\"~p~n\", [[try erlang:system_info(I) catch C:R -> {C, R} end \
+                || I <- [version, machine, os_version, start_time, creation, break_ignored, \
+                sequential_tracer, delayed_node_table_gc, instruction_counts, \
+                ultrasparc_read_tick1, no_such_item, 42, \"version\", [version], 1.0]]]), halt().";
+    let arguments = ["-noshell", "-eval", eval];
+    let mut reference = Command::new("erl");
+    reference.args(arguments);
+    let reference = isolate(&mut reference).output().unwrap();
+    let actual = pbeam_erl(&arguments, &[]);
+    assert!(reference.status.success(), "{reference:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&actual.stdout),
+        String::from_utf8_lossy(&reference.stdout),
+        "{actual:?}"
+    );
+}
+
+#[test]
 fn rejects_a_bad_s_flag_as_pinned_erts() {
     // erl_init.c:1103-1149 writes the error, then the usage text, and
     // exits with status 1.
